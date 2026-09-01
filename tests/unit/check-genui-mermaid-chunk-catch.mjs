@@ -23,6 +23,16 @@
 //   B:整条 .catch(...) 删掉(回到修复前形态)                       → 红
 //   C:.catch 挪到 .then 之前(先 catch 后 then,接不到 then 里抛的)  → 红
 //   D:删掉内层 `const svg = await m.renderMermaid` / setHtml(焊死降级态) → 红
+//   M10:删掉 <div className={css.mermaidHint}>渲染中…</div>       → 红
+//   M16:给 <pre> 加 className(纯格式化演进)                       → 绿(不许误红)
+//
+// M10 / M16 是盲审揪出的两个不达标点,首版分别是**假锁**和**过死锁**:
+//   假锁:断言在含注释的切片上 includes('渲染中…'),而本文件自己的 CGUI-PATCH 注释里就有
+//        这四个字 —— 真 UI 删光也照绿。修法见下面切片处的剥注释(治的是一整类,不止这条)。
+//   过死:`<pre>\{code\}</pre>` 连属性都不许有,给 <pre> 加个 className 就误红,而且红出来的
+//        文案会让人以为"源码展示被删了"。同批放宽的还有 try/catch(允许 catch (e))、
+//        deps(只认 themeEpoch 在不在,不锁顺序与个数)、if (failed) 的空白。
+//        放宽只针对纯格式化/无害演进,语义断言(置不置 failed、成功路径在不在)一条没松。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -37,7 +47,14 @@ const src = readFileSync(join(root, 'client/src/genui/upstream/blocks/advanced.t
 const iMermaid = src.indexOf('export const MermaidNode');
 assert.notEqual(iMermaid, -1, '找不到 MermaidNode(组件被改名/挪走了?这条锁需要跟着改)');
 const iNext = src.indexOf('\nexport ', iMermaid + 1);
-const mermaid = src.slice(iMermaid, iNext === -1 ? src.length : iNext);
+// 匹配前先把整行 // 注释剥掉。这不是洁癖:本组件的 CGUI-PATCH 注释里就写着 "渲染中…"、
+// <pre>源码</pre>、import('mermaid') 这类和被锁对象一模一样的字样 —— 首版就栽在这:
+// 把 <div className={css.mermaidHint}>渲染中…</div> 整条删掉,断言却被注释里的"渲染中…"
+// 救绿(假锁)。剥一次,下面所有切片(chain/catchBody/thenBody)与锚点(import()/
+// return () =>/.then/.catch)全部继承,同类假绿/锚点被带偏一次性消掉。
+// 只剥整行注释、不动行尾注释与字符串:行尾 // 的通用剥法会误伤 URL 与字符串字面量。
+const mermaid = src.slice(iMermaid, iNext === -1 ? src.length : iNext)
+  .replace(/^\s*\/\/.*$/gm, '');
 
 // effect 里那条 promise 链:从 import() 起,到清理函数 `return () =>` 止。
 const iImport = mermaid.indexOf("import('../mermaid-lazy.ts')");
@@ -69,7 +86,7 @@ assert.ok(/await m\.renderMermaid\(/.test(chain),
   '成功路径必须还在:renderMermaid 仍要被调用');
 assert.ok(/setHtml\(/.test(chain),
   '渲染成功仍要把 svg 交给 setHtml(只留降级分支 = 永远只显示源码,照样全绿)');
-assert.ok(/try \{[\s\S]*?\} catch \{/.test(thenBody),
+assert.ok(/\btry\s*\{[\s\S]*?\}\s*catch\b/.test(thenBody),
   '内层 try/catch 仍在:那层护的是图语法错与引擎 chunk 失败,与胶水 chunk 加载是两回事');
 assert.ok(/setFailed\(\s*true\s*\)/.test(thenBody),
   '内层 catch 仍要置 setFailed(true):语法错这条路径不许被拆掉');
@@ -77,15 +94,19 @@ assert.ok(chain.indexOf('setHtml(') < iCatch,
   '成功路径仍属于 then 内,不该被挪进 catch');
 
 // 主题跟随不许被这次改动碰掉(CGUI-PATCH:epoch 进 deps 才会跟着换主题重画)。
-assert.ok(/\[code, themeEpoch\]/.test(mermaid),
-  'effect deps 仍是 [code, themeEpoch]:themeEpoch 掉了 = 切深色后旧图停在旧主题');
+// 只锁"deps 里点了 themeEpoch",不锁顺序、不锁有没有别的 dep —— 加 dep / 换序是无害演进。
+assert.ok(/\}, \[[^\]]*\bthemeEpoch\b[^\]]*\]\)/.test(mermaid),
+  'effect deps 里必须仍有 themeEpoch:掉了 = 切深色后旧图停在旧主题直到刷新');
 
 // 两个提示都得在:降级态没有对应的 UI,置了也白置。
+// (这两条现在锁的是真 UI —— 上面已把注释剥掉,注释里的同名字样救不了它们。)
 assert.ok(mermaid.includes('渲染中…'), 'loading 提示必须还在');
 assert.ok(mermaid.includes('图语法有误，已降级显示源码'),
   '降级提示必须还在(catch 置的 failed 靠它显示;文案被 r64 验收 harness 逐字锁定,不许改)');
-assert.ok(/if \(failed\)/.test(mermaid), '降级 UI 要由 failed 驱动');
-assert.ok(/<pre>\{code\}<\/pre>/.test(mermaid), '降级时必须仍把原始源码显出来(plain-source fallback 的"source")');
+assert.ok(/if\s*\(\s*failed\s*\)/.test(mermaid), '降级 UI 要由 failed 驱动');
+// <pre> 允许带属性:加个 className / data-* 是无害演进,不该误红成"源码展示被删了"。
+assert.ok(/<pre[^>]*>\{code\}<\/pre>/.test(mermaid),
+  '降级时必须仍把原始源码显出来(plain-source fallback 的"source")');
 
 console.log('✅ check-genui-mermaid-chunk-catch:懒加载 chunk 拉取失败落降级态(.catch 在 .then 之后 + alive 守卫 + 置 failed),'
   + ' 且成功路径 / 内层 try-catch / themeEpoch deps / 渲染中-降级两个提示均未被焊掉');
