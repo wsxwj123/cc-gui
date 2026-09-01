@@ -32,7 +32,8 @@ function iconMark(def) {
 }
 
 // cc-gui 自有标识(双同心开口弧 + 光标点,与顶栏字标同源)。官方端点恒用它,不借用
-// Anthropic 官方 logo —— 那会读成"这是 Anthropic 出的应用"(r13-p2-13 的去商标取舍)。
+// Anthropic 官方 logo —— 那会读成"这是 Anthropic 出的应用"。(这条理由本身成立,但
+// r83 之前它挂着 "r13-p2-13 去商标取舍" 的出处,归档里查不到该记录,故只留理由不留出处。)
 // 图标表里的 anthropic / claude 两枚是给用户挑给自己 provider 用的,与这枚无关。
 const CCGUI_AVATAR = {
   label: 'Anthropic',
@@ -63,6 +64,13 @@ export function providerAvatar() {
 // r78/r83:首字母(默认回落的最后一档)。chip 与内置图标那档完全一致,只是标识换成
 // 一个字符 —— 颜色按名字哈希取一档,同一个 provider 每次渲染同色,不同 provider 大
 // 概率不同色。刻意不给没有干净图标来源的厂商配色块冒充图标:回落就明说是回落。
+// 标识在 chip 里占多大。chip 有底色和描边,内层要留白,所以比 r83 之前的裸标识小。
+const GLYPH_SCALE = 0.68;
+// 官方那枚单独留一个旋钮:r83 之前它走独立分支、裸标识不需要留边距,内层是 0.92×size;
+// 现在与其它形态共用 chip,收到与它们相同的 0.68(约小 26%)。装机后若嫌官方标识变小,
+// 只改这一个数即可(0.92 = 回到 r83 之前的大小),不影响其余 55 枚。
+const OFFICIAL_GLYPH_SCALE = 0.68;
+
 const LETTER_COLORS = ['#64748B', '#0EA5E9', '#0D9488', '#D97706', '#DC2626', '#7C3AED'];
 function letterAvatar(name) {
   const s = String(name || '').trim();
@@ -111,7 +119,9 @@ export function providerAvatarSpec({ row = null, name = '' } = {}) {
  * 底色与描边取主题变量而不写死颜色 —— canvas 是当前主题的基底色,canvas-deep 在浅色
  * 主题里比它深一档、在深色主题里比它浅一档,所以同一对变量在深浅两侧都描得出边,
  * 也不会出现深色下白底刺眼。四种形态(图标 / 图片 / emoji / 首字母)共用同一枚 chip。
- * 圆角方片而不是圆形 —— 用户嫌圆头像别扭(r13-p2-13 的取舍沿用)。
+ * 圆角方片而不是圆形:沿用 r78 就有的既有选择,**没有**用户偏好依据 —— r83 之前这里
+ * 引 r13-p2-13 说"用户嫌圆头像别扭",查原始记录(v0.2.103 第 5 条)说的是"去圆形
+ * **背景**只留 spark",讲的是官方那枚的底,与方圆形状无关。要改成正圆就改 borderRadius。
  *
  * provider-mark 这个类必须挂在每一种形态上:iOS/WKWebView 把只有 viewBox、没有
  * width/height 的内联 svg 渲染成 0×0,靠 .provider-mark svg{width:100%} 撑开
@@ -142,7 +152,7 @@ export function ProviderMark({ row = null, name = '', size = 16, official = fals
         className={`object-cover ${cls}`} style={chip} />
     );
   }
-  const inner = Math.round(size * 0.68);
+  const inner = Math.round(size * (official ? OFFICIAL_GLYPH_SCALE : GLYPH_SCALE));
   return (
     <div className={`flex items-center justify-center ${cls}`}
       style={{ ...chip, color: spec.markColor || 'var(--color-ink)' }} title={spec.label}>
@@ -201,11 +211,16 @@ function getModelStyle(model) {
   };
 }
 
+// r83:用量面板的分组显示名覆盖。图标表里 moonshot/meta 是**厂商名**(Moonshot/Meta),
+// 选择器该显示厂商名;但用量面板沿用用户熟悉的产品叫法 Kimi/Llama。只覆盖显示名 ——
+// 分桶与 React key 都用 key,改这里不产生任何数据迁移。
+const PANEL_LABELS = { moonshot: 'Kimi', meta: 'Llama' };
+
 // Resolve a model id to its provider { key, label } using the same matching
 // as the badge, so the usage panel groups identically to what badges show.
 export function modelProvider(model) {
   const key = getModelStyle(model).provider || 'system';
-  return { key, label: PROVIDER_AVATARS[key]?.label || key };
+  return { key, label: PANEL_LABELS[key] || PROVIDER_AVATARS[key]?.label || key };
 }
 
 export function ModelBadge({ model, compact = false }) {

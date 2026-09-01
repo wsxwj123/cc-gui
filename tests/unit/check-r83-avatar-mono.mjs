@@ -105,7 +105,24 @@ ok(!Object.values(PROVIDER_ICONS).some((d) => /gradient/i.test(String(d.color ??
   eq(badge.match(/export function ProviderMark/g)?.length, 1, '只有一个 ProviderMark 定义');
 }
 
-// ── ④ 选择器搜索 ────────────────────────────────────────────────
+// ── ④ 用量面板的分组显示名 ───────────────────────────────────────
+// 图标表里 moonshot/meta 是厂商名(Moonshot/Meta),选择器该显示厂商名;用量面板则
+// 沿用用户熟悉的产品叫法。r83 把 PROVIDER_AVATARS 改成从图标表生成时,这两个名字
+// 曾被顺带改成厂商名 —— 用户拍板要回 Kimi/Llama,这里钉死,别再被"顺带"改走。
+{
+  const badge = read('client/src/components/ModelBadge.jsx');
+  ok(/const PANEL_LABELS = \{ moonshot: 'Kimi', meta: 'Llama' \};/.test(badge),
+    '用量面板显示名覆盖表在(Kimi / Llama 是用户拍板要保留的熟悉叫法)');
+  ok(/label: PANEL_LABELS\[key\] \|\| PROVIDER_AVATARS\[key\]\?\.label \|\| key/.test(badge),
+    'modelProvider 先取覆盖表,未覆盖的键仍走图标表显示名');
+  // 覆盖的只是显示名:分桶与 React key 都用 key,所以 key 那一半不许跟着改。
+  ok(/const key = getModelStyle\(model\)\.provider \|\| 'system';/.test(badge),
+    '分桶键仍是厂商键,覆盖表不碰它(改它才是数据层的事)');
+}
+eq(PROVIDER_ICONS.moonshot.label, 'Moonshot', '图标表里仍是厂商名(选择器该显示厂商名)');
+eq(PROVIDER_ICONS.meta.label, 'Meta', '同上');
+
+// ── ⑤ 选择器搜索 ────────────────────────────────────────────────
 eq(searchMarks(''), AVATAR_MARKS, '空查询 = 全表');
 eq(searchMarks('   '), AVATAR_MARKS, '纯空白同上');
 eq(searchMarks(null), AVATAR_MARKS, 'null 不炸');
@@ -137,6 +154,8 @@ ok(searchMarks('open').length >= 3 && searchMarks('open').every((k) => AVATAR_MA
 // 哨兵5:cls 里删掉 provider-mark
 //        → ③ 计数与 "每种形态都挂" 两条红(手机上头像整片消失)。
 // 哨兵6:searchMarks 搜不到时 return AVATAR_MARKS(常见的"友好回落"写法)
-//        → ④ "搜不到就是空数组" 红 —— 那种回落会让用户以为搜索坏了。
+//        → ⑤ "搜不到就是空数组" 红 —— 那种回落会让用户以为搜索坏了。
+// 哨兵7:删掉 modelProvider 的 PANEL_LABELS 覆盖表
+//        → ④ Kimi / Llama 两条红(用量面板会变回厂商名 Moonshot / Meta)。
 
 console.log(`✓ check-r83-avatar-mono: ${n} assertions passed`);
