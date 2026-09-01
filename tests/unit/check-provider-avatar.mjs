@@ -48,10 +48,13 @@ eq(sanitizeAvatar('3f2a-9c.png'), '3f2a-9c.png', '服务端生成的文件名原
 eq(sanitizeAvatar('这是一个很长的名字超过八个字'), null, '非法 → null = 不写/清除');
 ok(AVATAR_MARKS.includes('anthropic') && AVATAR_MARKS.length >= 9, '内置图标白名单在单处定义');
 {
-  // 白名单必须与渲染端的 PROVIDER_AVATARS 键集合一致,否则选了图标却渲染不出来。
+  // r83:白名单与渲染端曾是两份手抄的名字表,靠这条断言对账。图标扩到 56 枚后两边都
+  // 改成从 provider-icons.js 那一张表生成 —— 断言随之从"两份对得上"改成"确实只有一份"。
   const badge = read('client/src/components/ModelBadge.jsx');
-  const keys = [...badge.matchAll(/^ {2}(\w+):\s*\{ gradient:/gm)].map((m) => m[1]);
-  eq([...AVATAR_MARKS].sort(), [...keys].sort(), 'AVATAR_MARKS 与 PROVIDER_AVATARS 的键逐个对上');
+  ok(/Object\.entries\(PROVIDER_ICONS\)/.test(badge), '渲染端的 PROVIDER_AVATARS 由 PROVIDER_ICONS 生成,不是手抄');
+  ok(/from '\.\.\/\.\.\/\.\.\/server\/utils\/provider-icons\.js'/.test(badge), '且 import 的就是白名单那张表');
+  const av = read('server/utils/avatar.js');
+  ok(/export const AVATAR_MARKS = PROVIDER_ICON_NAMES;/.test(av), '白名单直接引用同一张表(手抄必漏)');
 }
 
 // ── ② 名字与头像同源(r76 抽层不许改行为) ───────────────────────

@@ -1,6 +1,7 @@
 import React from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { resolveAssistantProvider, parseAvatar } from '../utils/providerList.js';
+import { PROVIDER_ICONS } from '../../../server/utils/provider-icons.js';
 
 const MODEL_STYLES = {
   opus:     { bg: '#EDE9FE', fg: '#6D28D9', border: '#DDD6FE', label: 'Opus',     provider: 'anthropic' },
@@ -18,81 +19,61 @@ const MODEL_STYLES = {
   synthetic:{ bg: '#F3F4F6', fg: '#6B7280', border: '#E5E7EB', label: 'System',   provider: 'system' },
 };
 
-// Inline SVG marks for each provider. The anthropic mark is the OFFICIAL
-// Claude logo path sourced from anthropics/anthropic-sdk-typescript's
-// .github/logo.svg — verbatim, not an approximation.
-const ProviderMarks = {
-  // r13-p2-13:回复头像用 cc-gui 自有标识(双同心开口弧 + 光标点,与顶栏字标同源),
-  // 原第三方官方 logo 已退役(去商标)。currentColor 跟随主题/品牌色。
-  anthropic: (
+// r83:标识全部来自 server/utils/provider-icons.js 的静态 path 表(来源与许可证逐条
+// 记在该文件头)。渲染成 24×24 单色 svg,fill=currentColor —— 颜色由外层 chip 给,
+// 同一枚 path 在浅色/深色主题下只换一个 color 就成立。
+function iconMark(def) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden
+      {...(def.evenodd ? { fillRule: 'evenodd', clipRule: 'evenodd' } : null)}>
+      <path d={def.d} />
+    </svg>
+  );
+}
+
+// cc-gui 自有标识(双同心开口弧 + 光标点,与顶栏字标同源)。官方端点恒用它,不借用
+// Anthropic 官方 logo —— 那会读成"这是 Anthropic 出的应用"(r13-p2-13 的去商标取舍)。
+// 图标表里的 anthropic / claude 两枚是给用户挑给自己 provider 用的,与这枚无关。
+const CCGUI_AVATAR = {
+  label: 'Anthropic',
+  markColor: '#D97757',
+  mark: (
     <svg viewBox="0 0 32 32" fill="none" aria-hidden>
       <path d="M23.2 8.6A10 10 0 1 0 23.2 23.4" stroke="currentColor" strokeWidth="3.1" strokeLinecap="round" />
       <path d="M19.6 12.3A5 5 0 1 0 19.6 19.7" stroke="currentColor" strokeWidth="3.1" strokeLinecap="round" opacity="0.55" />
       <circle cx="26.6" cy="16" r="1.9" fill="currentColor" />
     </svg>
   ),
-  // DeepSeek — stylized D in a rounded square
-  deepseek: (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M6 5h6a7 7 0 0 1 0 14H6V5zm3 3v8h3a4 4 0 0 0 0-8H9z" />
-    </svg>
-  ),
-  // Gemini — 4-petal sparkle
-  gemini: (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M12 2 C12 7 17 12 22 12 C17 12 12 17 12 22 C12 17 7 12 2 12 C7 12 12 7 12 2 Z" />
-    </svg>
-  ),
-  // OpenAI — simplified knot
-  openai: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <circle cx="12" cy="12" r="8" />
-      <path d="M8 12 L16 12 M12 8 L12 16" strokeLinecap="round" />
-    </svg>
-  ),
-  letter: (label) => (
-    <span style={{ fontWeight: 700, letterSpacing: '-0.02em' }}>{label[0]}</span>
-  ),
 };
 
-// Provider visual identity. Each gets a brand gradient + an SVG/text mark.
-const PROVIDER_AVATARS = {
-  // Brand color — #D97757 是 Anthropic 官方 brand color (verbatim from logo.svg).
-  // Background uses a subtle off-white to make the terracotta logo pop, matching
-  // how it's displayed on anthropic.com / claude.ai.
-  anthropic: { gradient: 'linear-gradient(135deg, #FAF7F2 0%, #F0E8DD 100%)', mark: ProviderMarks.anthropic, label: 'Anthropic', markColor: '#D97757' },
-  deepseek:  { gradient: 'linear-gradient(135deg, #4F8EF7 0%, #1E3A8A 100%)', mark: ProviderMarks.deepseek,  label: 'DeepSeek' },
-  mimo:      { gradient: 'linear-gradient(135deg, #FF6B6B 0%, #C92A2A 100%)', mark: ProviderMarks.letter('M'), label: 'MiMo' },
-  gemini:    { gradient: 'linear-gradient(135deg, #4285F4 0%, #9333EA 100%)', mark: ProviderMarks.gemini,    label: 'Gemini' },
-  openai:    { gradient: 'linear-gradient(135deg, #10A37F 0%, #064E3B 100%)', mark: ProviderMarks.openai,    label: 'OpenAI' },
-  qwen:      { gradient: 'linear-gradient(135deg, #A855F7 0%, #6B21A8 100%)', mark: ProviderMarks.letter('Q'), label: 'Qwen' },
-  zhipu:     { gradient: 'linear-gradient(135deg, #F59E0B 0%, #B45309 100%)', mark: ProviderMarks.letter('Z'), label: '智谱' },
-  moonshot:  { gradient: 'linear-gradient(135deg, #6366F1 0%, #312E81 100%)', mark: ProviderMarks.letter('K'), label: 'Kimi' },
-  meta:      { gradient: 'linear-gradient(135deg, #EC4899 0%, #9D174D 100%)', mark: ProviderMarks.letter('L'), label: 'Llama' },
-  system:    { gradient: 'linear-gradient(135deg, #94A3B8 0%, #475569 100%)', mark: ProviderMarks.letter('·'), label: '系统' },
-};
+// Provider 视觉标识:一枚标识 + 品牌色。r83 起没有品牌渐变底 —— 底色与描边一律走
+// 主题变量(见 ProviderMark 的 chip),品牌色只上到标识本身。markColor 为空表示这枚
+// 标识本身是单色的,跟随主题字色。
+const PROVIDER_AVATARS = Object.fromEntries(
+  Object.entries(PROVIDER_ICONS).map(([key, def]) => [
+    key, { mark: iconMark(def), label: def.label, markColor: def.color || null },
+  ]),
+);
 
-// 官方那一枚:cc-gui 自有标识,与顶栏 logo 同源同色。官方端点恒用它(r78 不改)。
+// 官方那一枚:cc-gui 自有标识,与顶栏 logo 同源同色。官方端点恒用它(r78/r83 不改)。
 export function providerAvatar() {
-  return PROVIDER_AVATARS.anthropic;
+  return CCGUI_AVATAR;
 }
 
-// r78:首字母色块(默认回落的最后一档)。渐变按名字哈希取,同一个 provider 每次
-// 渲染同一色,不同 provider 大概率不同色。
-const LETTER_GRADIENTS = [
-  'linear-gradient(135deg, #64748B 0%, #334155 100%)',
-  'linear-gradient(135deg, #0EA5E9 0%, #0C4A6E 100%)',
-  'linear-gradient(135deg, #14B8A6 0%, #115E59 100%)',
-  'linear-gradient(135deg, #F59E0B 0%, #92400E 100%)',
-  'linear-gradient(135deg, #EF4444 0%, #7F1D1D 100%)',
-  'linear-gradient(135deg, #8B5CF6 0%, #4C1D95 100%)',
-];
+// r78/r83:首字母(默认回落的最后一档)。chip 与内置图标那档完全一致,只是标识换成
+// 一个字符 —— 颜色按名字哈希取一档,同一个 provider 每次渲染同色,不同 provider 大
+// 概率不同色。刻意不给没有干净图标来源的厂商配色块冒充图标:回落就明说是回落。
+const LETTER_COLORS = ['#64748B', '#0EA5E9', '#0D9488', '#D97706', '#DC2626', '#7C3AED'];
 function letterAvatar(name) {
   const s = String(name || '').trim();
   const label = ([...s][0] || '?').toUpperCase();
   let h = 0;
   for (const ch of s) h = (h * 31 + ch.codePointAt(0)) % 100003;
-  return { gradient: LETTER_GRADIENTS[h % LETTER_GRADIENTS.length], mark: ProviderMarks.letter(label), label: s || '?' };
+  return {
+    mark: <span style={{ fontWeight: 700, letterSpacing: '-0.02em' }}>{label}</span>,
+    markColor: LETTER_COLORS[h % LETTER_COLORS.length],
+    label: s || '?',
+  };
 }
 
 // 没设 avatar 时按【名字 + 首个模型 id】的关键字命中现成的 PROVIDER_AVATARS
@@ -122,42 +103,50 @@ export function providerAvatarSpec({ row = null, name = '' } = {}) {
 }
 
 /**
- * r78:provider 头像。气泡头、顶栏切换卡片、管理列表、手机 Provider 页共用同一枚。
- * 官方端点走 official 分支(裸标识,与 r77 前完全一致);其余按 providerAvatarSpec。
+ * r78:provider 头像。气泡头、顶栏切换卡片、管理列表、手机 Provider 页共用同一枚,
+ * 四处观感由这一个组件统一决定。官方端点走 official 分支(恒 cc-gui 自有标识),
+ * 其余按 providerAvatarSpec。
+ *
+ * r83 chip:表面色底 + 0.5px 细边框,品牌色只上到标识本身,不再有品牌渐变底。
+ * 底色与描边取主题变量而不写死颜色 —— canvas 是当前主题的基底色,canvas-deep 在浅色
+ * 主题里比它深一档、在深色主题里比它浅一档,所以同一对变量在深浅两侧都描得出边,
+ * 也不会出现深色下白底刺眼。四种形态(图标 / 图片 / emoji / 首字母)共用同一枚 chip。
  * 圆角方片而不是圆形 —— 用户嫌圆头像别扭(r13-p2-13 的取舍沿用)。
+ *
+ * provider-mark 这个类必须挂在每一种形态上:iOS/WKWebView 把只有 viewBox、没有
+ * width/height 的内联 svg 渲染成 0×0,靠 .provider-mark svg{width:100%} 撑开
+ * (index.css:1521)。r83 之前它只挂在 official 分支上,内置图标全改成 svg 之后
+ * 漏挂就是"手机上头像整片消失"。
  */
 export function ProviderMark({ row = null, name = '', size = 16, official = false, className = '', thinking = false }) {
   const spin = thinking ? 'avatar-thinking-spin' : '';
-  if (official) {
-    const av = providerAvatar();
-    return (
-      <div className={`shrink-0 flex items-center justify-center provider-mark ${spin} ${className}`}
-        style={{ width: size, height: size, color: av.markColor || '#D97757' }} title={av.label}>
-        <div style={{ width: Math.round(size * 0.92), height: Math.round(size * 0.92), display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          {av.mark}
-        </div>
-      </div>
-    );
-  }
-  const spec = providerAvatarSpec({ row, name });
-  const box = { width: size, height: size, borderRadius: Math.max(3, Math.round(size * 0.28)) };
+  const chip = {
+    width: size,
+    height: size,
+    borderRadius: Math.max(3, Math.round(size * 0.28)),
+    background: 'var(--color-canvas)',
+    border: '0.5px solid var(--color-canvas-deep)',
+  };
+  const cls = `shrink-0 provider-mark ${spin} ${className}`;
+  const spec = official ? { kind: 'mark', ...CCGUI_AVATAR } : providerAvatarSpec({ row, name });
   if (spec.kind === 'text') {
     // emoji/文字走 React 文本节点(不用 dangerouslySetInnerHTML)。
     return (
-      <span className={`shrink-0 inline-flex items-center justify-center leading-none ${spin} ${className}`}
-        style={{ ...box, fontSize: Math.round(size * 0.86) }} title={spec.label}>{spec.text}</span>
+      <span className={`inline-flex items-center justify-center leading-none ${cls}`}
+        style={{ ...chip, fontSize: Math.round(size * 0.66) }} title={spec.label}>{spec.text}</span>
     );
   }
   if (spec.kind === 'file') {
     return (
       <img src={`/api/provider-avatars/${spec.file}`} alt="" title={spec.label} draggable={false}
-        className={`shrink-0 object-cover ${spin} ${className}`} style={box} />
+        className={`object-cover ${cls}`} style={chip} />
     );
   }
+  const inner = Math.round(size * 0.68);
   return (
-    <div className={`shrink-0 flex items-center justify-center text-white ${spin} ${className}`}
-      style={{ ...box, background: spec.gradient, color: spec.markColor || '#fff' }} title={spec.label}>
-      <div style={{ width: Math.round(size * 0.62), height: Math.round(size * 0.62), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: Math.round(size * 0.56) }}>
+    <div className={`flex items-center justify-center ${cls}`}
+      style={{ ...chip, color: spec.markColor || 'var(--color-ink)' }} title={spec.label}>
+      <div style={{ width: inner, height: inner, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: Math.round(size * 0.62) }}>
         {spec.mark}
       </div>
     </div>
