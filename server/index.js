@@ -38,6 +38,7 @@ import downloadUpdateRoutes from './routes/download-update.js';
 import openUrlRoutes from './routes/open-url.js';
 import skillsRoutes from './routes/skills.js';
 import backgroundsRoutes from './routes/backgrounds.js';
+import avatarsRoutes from './routes/avatars.js';
 import skinsPacksRoutes from './routes/skins-packs.js';
 import screenshotRoutes from './routes/screenshot.js';
 import imageRoutes from './routes/image.js';
@@ -424,6 +425,7 @@ app.use('/api', downloadUpdateRoutes);
 app.use('/api', openUrlRoutes);
 app.use('/api', skillsRoutes);
 app.use('/api', backgroundsRoutes);
+app.use('/api', avatarsRoutes); // r78 provider 头像(上传/抓取落地 + 回源)
 app.use('/api', skinsPacksRoutes); // r11-③ 皮肤包(/api/skins,避开既有 /api/skills)
 app.use('/api', screenshotRoutes);
 app.use('/api', imageRoutes); // r16-3 生图(/api/image-providers、/api/image/*),配置独立不碰 settings.json

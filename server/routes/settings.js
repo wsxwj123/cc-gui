@@ -6,7 +6,8 @@ import { promisify } from 'util';
 import { join, isAbsolute, dirname } from 'path';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
-import { resolveWorkspacePath } from '../utils/safe-path.js';
+import { resolveWorkspacePath, isPathInside } from '../utils/safe-path.js';
+import { parseAvatar, sanitizeAvatar, AVATAR_FILE_RE } from '../utils/avatar.js';
 import { createConnection } from 'node:net';
 import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/openai-proxy.js';
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
@@ -35,6 +36,39 @@ async function backupSettings(ts) {
     }
   } catch {}
 }
+// r78:provider 头像里"上传/抓取落地"那一形态的文件目录。目录常量与删除口放在
+// 本文件 —— provider 记录的生死归这里管(删 provider / 换头像都要顺手清文件);
+// HTTP 路由在 routes/avatars.js 单向 import 本文件,不成环。
+export const AVATAR_DIR = join(homedir(), '.claude-gui', 'avatars');
+/** 文件名 → 绝对路径;名字非白名单或算出的路径不在目录内(防穿越)则 null。 */
+export function avatarFilePath(name) {
+  if (typeof name !== 'string' || !AVATAR_FILE_RE.test(name)) return null;
+  const full = join(AVATAR_DIR, name);
+  return isPathInside(full, AVATAR_DIR) ? full : null;
+}
+/**
+ * 入库前的头像校验:合法返回原值,否则 null(= 不写 / 清除)。
+ * file 形态再核实文件真在库里 —— 否则前端可以把任意串当文件名塞进字段。
+ */
+function acceptAvatar(v) {
+  const av = sanitizeAvatar(v);
+  if (!av) return null;
+  const parsed = parseAvatar(av);
+  if (parsed.kind === 'file') {
+    const full = avatarFilePath(parsed.value);
+    if (!full || !existsSync(full)) return null;
+  }
+  return av;
+}
+
+/** 删掉某个 avatar 值对应的文件(只对 file 形态有意义,best-effort)。 */
+export async function deleteAvatarFile(avatar) {
+  const parsed = parseAvatar(avatar);
+  if (parsed?.kind !== 'file') return;
+  const full = avatarFilePath(parsed.value);
+  if (full) await unlink(full).catch(() => {});
+}
+
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 // Shared prefs (hidden-projects list lives here). Adding a project must un-hide
 // its hash SERVER-SIDE: the lossy CLI hash can collide with a previously-hidden
@@ -870,6 +904,10 @@ router.get('/providers', async (_req, res) => {
       // 下发预填版而非裸值:顺带让存量 provider 在编辑器里看得见目录判定(那行"目录预填,
       // 可修改"的小字此前永远显示不出来)。预填是纯函数、不写盘,用户声明永不被覆盖。
       modelMeta: applyCatalogPrefill(p.models, p.modelMeta || null, p.type),
+      // r78:头像。**必须在这里下发** —— Provider 编辑器预填读的正是本接口,不下发
+      // 就恒空 → 保存时发 avatar:'' → PUT 判成清除 → 用户"改个名字"把头像静默清掉
+      // (contextWindow / modelPrices / modelMeta 三个字段栽过同一个坑,见上方注释)。
+      avatar: p.avatar || '',
       hasKey: !!p.apiKey, hasQuotaKey: !!p.quotaKey, isCustom: true, isCurrent: isCur(p.id, false),
     }));
     // B 方案: claude 只读组的 models[] 从其 snapshot.env 的 _MODEL 值提取(切换/导入路径
@@ -1382,6 +1420,7 @@ router.get('/custom-providers', async (_req, res) => {
       tierModels: p.tierModels || null, hasKey: !!p.apiKey, hasQuotaKey: !!p.quotaKey,
       contextWindow: p.contextWindow || null, modelPrices: p.modelPrices || null,
       modelMeta: p.modelMeta || null, // r10-9:每模型思考能力声明
+      avatar: p.avatar || '', // r78:头像(两个下发口必须齐,漏一个 = 那个消费者看不到头像)
     })),
   });
 });
@@ -1436,6 +1475,11 @@ router.post('/custom-providers', async (req, res) => {
     {
       const mm = applyCatalogPrefill(cleanModels, sanitizeModelMeta(req.body?.modelMeta, cleanModels), type);
       if (mm) entry.modelMeta = mm;
+    }
+    // r78: 头像(可选)。非法/空不写这个键 = 未设置,渲染按名字回落。
+    {
+      const av = acceptAvatar(req.body?.avatar);
+      if (av) entry.avatar = av;
     }
     const list = await readCustomProviders();
     // 幂等查重(用户新机实报:添加成功但后续 switch 失败被误报"保存失败"→重试 N 次
@@ -1535,6 +1579,14 @@ router.put('/custom-providers/:id', async (req, res) => {
       }
       if (!Object.keys(list[idx].modelMeta).length) delete list[idx].modelMeta;
     }
+    // r78:头像。传 null/'' = 清除;传合法值 = 覆盖;**不传 = 保留**(上面 {...prev}
+    // 已带过来)。换头像/清除时把旧的上传文件删掉,否则目录只涨不减。
+    if (req.body?.avatar !== undefined) {
+      const prevAvatar = prev.avatar;
+      const av = acceptAvatar(req.body.avatar);
+      if (av) list[idx].avatar = av; else delete list[idx].avatar;
+      if (prevAvatar && prevAvatar !== list[idx].avatar) await deleteAvatarFile(prevAvatar);
+    }
     // r11-⑩:编辑保存后对未声明模型套目录预填(source:'catalog');source:'user'/
     // 历史无 source 条目永不覆盖。两分支(显式传入/保留旧值)统一走同一预填口。
     {
@@ -1574,6 +1626,8 @@ router.delete('/custom-providers/:id', async (req, res) => {
     const next = list.filter((p) => p.id !== req.params.id);
     if (next.length === list.length) return res.status(404).json({ error: 'not found' });
     await writeCustomProviders(next);
+    // r78:顺手清掉它的头像文件(上传形态才有文件)。删了 provider 还留着图 = 目录只涨不减。
+    await deleteAvatarFile(list.find((p) => p.id === req.params.id)?.avatar);
     if ((await readActiveProviderId()) === req.params.id) await unlink(ACTIVE_PROVIDER_PATH).catch(() => {});
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
