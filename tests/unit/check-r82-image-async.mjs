@@ -475,6 +475,29 @@ try {
     assert.equal(count(runner, /await assertPublicBaseURL\(/g), 1, 't8: 下载链接的 SSRF 复检仍在 runner 内');
     assert.equal(count(runner, /readCapped\(/g), 2, 't8: runner 内仍是两处限量读');
   }
+
+  // ───────────── 9. 前端源码:协议选项与三条"不说就会被误解"的文案 ─────────────
+  {
+    const src = readFileSync(join(REPO, 'client/src/components/ImagePanel.jsx'), 'utf8');
+    const count = (re) => (src.match(re) || []).length;
+    assert.match(src, /\{ id: 'mj', label: '[^']*midjourney\/generations[^']*' \}/, 't9: 协议下拉里有 mj 且标出端点');
+    // 差异必须写出来 —— 不写的话用户会按同步协议的直觉填尺寸/参考图,然后"填了没生效"。
+    assert.match(src, /form\.protocol === 'mj' &&/, 't9: mj 选中时才显示协议说明');
+    assert.match(src, /模型名与尺寸均不发送/, 't9【文案】:说明尺寸不下发');
+    assert.match(src, /当前版本不支持参考图/, 't9【文案】:说明参考图不下发');
+    assert.match(src, /每 5 秒查询一次任务状态/, 't9【文案】:说明轮询节奏');
+    assert.match(src, /超过 15 分钟未出结果记为失败/, 't9【文案】:说明本地上限与平台侧仍在跑');
+    assert.match(src, /selected\?\.protocol === 'mj' && refs\.length > 0/, 't9: 选了参考图又用 mj 时当场提示(不静默丢弃)');
+    // 取消:上游仍在计费这件事必须出现在条目上(网格与列表两处都要)。
+    assert.match(src, /const CANCEL_NOTE = '已停止等待（上游任务可能仍在生成并计费）'/, 't9: 取消说明写成常量');
+    assert.equal(count(/CANCEL_NOTE/g), 3, 't9: 常量 1 处定义 + 网格/列表各 1 处渲染');
+    // 进度与多图张数:两种视图都得有,否则切个视图信息就没了。
+    assert.equal(count(/h\.progress == null \? '' : ` · \$\{h\.progress\}%`/g), 2, 't9: 进度在网格与列表都显示');
+    assert.equal(count(/h\.files\?\.length > 1 \?/g), 2, 't9: 多图张数在网格与列表都显示');
+    // 既有渲染不许被顺手改坏(check-r51 t7 的同款锚,这里再钉一次)。
+    assert.match(src, /生成中 · \$\{elapsedSec\(h\)\}s/, 't9【零回归】:列表仍显示已耗时');
+    assert.match(src, /text-error[^>]*>\{h\.error/, 't9【零回归】:报错文字仍渲染在图块内');
+  }
 } catch (e) {
   failure = e;
 } finally {
