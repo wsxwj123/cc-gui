@@ -68,7 +68,7 @@ export const SOURCE_BADGE = {
 // r78:provider 头像的形态判定。纯函数放在 server/utils/(Tauri 只打包 server 与
 // client/dist,共享核心必须落在会被打包的那棵树上;见 utils/plan.js 的事故注释),
 // 这里再导出,前端一律从 providerList.js 取。
-export { parseAvatar, AVATAR_MARKS, AVATAR_FILE_RE } from '../../../server/utils/avatar.js';
+export { parseAvatar, AVATAR_MARKS, AVATAR_FILE_RE, searchMarks } from '../../../server/utils/avatar.js';
 
 // ── r76:助手气泡头的名字 ─────────────────────────────────────────
 // 官方端点恒显 Claude;走第三方中转时显示【用户在设置里给该 provider 起的名字】
