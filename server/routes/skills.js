@@ -14,6 +14,7 @@ import { homedir } from 'os';
 import { request as httpRequest } from 'http';
 import { request as httpsRequest } from 'https';
 import { gfetch } from '../utils/github-fetch.js'; // r14-1:代理回落层已抽公用
+import { resolveGithubToken, saveGithubToken, clearGithubToken, TOKEN_RE } from '../utils/github-token.js'; // 限流修复:GitHub 请求自动带令牌
 
 // ── 网络封装:直连失败回落本地代理 ────────────────────────────
 // 墙内直连 GitHub 时断时通,用户常开着 Clash 等本地代理却帮不上忙:Node fetch 不读
@@ -233,6 +234,35 @@ router.get('/skills/sources', (req, res) => {
   res.json({ sources: SOURCES.map((s) => ({ id: s.id, name: s.name, url: s.url })) });
 });
 
+// ── GitHub 令牌(限流修复,提配额:匿名 60 次/小时/IP → 带令牌 5000 次/小时)──────────
+// 值永不回显:GET/POST/DELETE 都只回 source('env'|'pat'|'gh'|null)。保存前打 /rate_limit
+// 在线验真(该端点不计 API 配额),401 当场拒 —— 免得存个失效令牌让所有请求变 401
+// (运行时还有一层兜底:gfetch 对带令牌 401 会作废缓存退回匿名)。
+router.get('/skills/github-token', async (req, res) => {
+  res.json({ source: (await resolveGithubToken())?.source || null });
+});
+router.post('/skills/github-token', async (req, res) => {
+  const token = String(req.body?.token || '').trim();
+  // 形状校验必须在在线验真【之前】(判官 M1):含换行的输入拼进 Authorization 会让 fetch 抛
+  // ERR_INVALID_CHAR → 有代理的机器上经 proxyGet 事件回调逃逸 → 响应悬死、保存按钮永久卡住;
+  // 顺带让"格式不对"给准确文案而不是误报"令牌无效 401",也省一次网络请求。
+  if (!TOKEN_RE.test(token)) return res.status(400).json({ error: '令牌格式不对:应为 GitHub 生成的 token(无空格与中文,长度 8-255)' });
+  try {
+    try {
+      const r = await gfetch('https://api.github.com/rate_limit', { headers: { ...GH_HEADERS, Authorization: `Bearer ${token}` } });
+      if (r.status === 401) return res.status(400).json({ error: '令牌无效(GitHub 返回 401):请检查是否复制完整、是否已过期' });
+    } catch { /* 网络不通验不了 ≠ 无效,照存(形状仍会校验) */ }
+    await saveGithubToken(token);
+    res.json({ ok: true, source: (await resolveGithubToken())?.source || null });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+router.delete('/skills/github-token', async (req, res) => {
+  try {
+    await clearGithubToken();
+    res.json({ ok: true, source: (await resolveGithubToken())?.source || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── 源仓库 skill 列表(逐仓库缓存)────────────────────────────────
 const repoCache = new Map(); // repo -> { skills, files, branch, at }
 const TTL = 60 * 60 * 1000;
@@ -245,7 +275,7 @@ const HOSTS = {
     api: (repo) => `https://api.github.com/repos/${repo}`,
     tree: (repo, branch) => `https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
     raw: (repo, branch, path) => `https://raw.githubusercontent.com/${repo}/${branch}/${path}`,
-    rateHint: 'GitHub API 限流(60次/小时/IP),请稍后重试或挂代理',
+    rateHint: 'GitHub API 限流(匿名 60 次/小时,按出口 IP 计):在导入页填入 GitHub 令牌可提升配额,或稍后重试',
   },
   gitee: {
     label: 'Gitee', domain: 'gitee.com',
@@ -485,7 +515,7 @@ router.get('/skills/official', async (req, res) => {
       skills: skills.map((s) => ({ id: s.id, name: s.name, description: s.description, version: s.version || null, installed: installed.has(s.id) })),
     });
   } catch (e) {
-    res.json({ skills: [], error: e.status === 403 ? `${hostOf(host).label} API 限流,请稍后重试或挂代理` : e.message });
+    res.json({ skills: [], error: e.status === 403 ? hostOf(host).rateHint : e.message });
   }
 });
 
@@ -522,7 +552,7 @@ router.post('/skills/import', async (req, res) => {
   try {
     res.json(await doImport(repo, branchParam, ids, overwrite, false, host));
   } catch (e) {
-    res.status(e.status === 403 ? 429 : 500).json({ error: e.status === 403 ? `${hostOf(host).label} API 限流,请稍后重试` : e.message });
+    res.status(e.status === 403 ? 429 : 500).json({ error: e.status === 403 ? hostOf(host).rateHint : e.message });
   }
 });
 
@@ -608,7 +638,7 @@ router.post('/skills/update', async (req, res) => {
     }
     return res.status(500).json({ error: r.failed[0]?.error || '更新失败' });
   } catch (e) {
-    res.status(e.status === 403 ? 429 : 500).json({ error: e.status === 403 ? 'GitHub API 限流,请稍后重试' : e.message });
+    res.status(e.status === 403 ? 429 : 500).json({ error: e.status === 403 ? hostOf(src.host || 'github').rateHint : e.message });
   }
 });
 

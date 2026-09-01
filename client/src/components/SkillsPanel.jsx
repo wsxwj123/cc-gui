@@ -37,6 +37,13 @@ export function SkillsPanel() {
   const [officialMeta, setOfficialMeta] = useState({});
   const [loadingOff, setLoadingOff] = useState(false);
   const [offErr, setOffErr] = useState('');
+  // 限流修复:GitHub 令牌。匿名 API 60 次/小时且按出口 IP 计,共享代理出口配额常年打满 → 列表恒空。
+  // 后端解析顺序 env → 手动填入(pat)→ gh 命令行登录态;这里只展示来源,令牌值永不回传前端。
+  const [ghTokenSource, setGhTokenSource] = useState(null); // 'env' | 'pat' | 'gh' | null(未配置)
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [tokenInput, setTokenInput] = useState('');
+  const [tokenBusy, setTokenBusy] = useState(false);
+  const [tokenMsg, setTokenMsg] = useState('');
   // CQ批次4:粘贴任意 GitHub 仓库导入。customRepo=输入框,activeRepo=已加载的自定义仓库(null=用内置源)。
   const [customRepo, setCustomRepo] = useState('');
   const [activeRepo, setActiveRepo] = useState(null);
@@ -167,6 +174,38 @@ export function SkillsPanel() {
     setLoadingOff(false);
   }, []);
 
+  // 限流修复:GitHub 令牌状态/保存/清除。保存成功后重拉当前列表(限流报错的加载不会进后端缓存,重拉即带令牌生效)。
+  const loadTokenStatus = useCallback(async () => {
+    try { const d = await (await fetch('/api/skills/github-token')).json(); setGhTokenSource(d.source || null); } catch { /* 忽略 */ }
+  }, []);
+  const saveToken = async () => {
+    const t = tokenInput.trim();
+    if (!t || tokenBusy) return;
+    setTokenBusy(true); setTokenMsg('');
+    try {
+      // 30s 超时兜底:后端悬死时按钮不能永久卡"验证中"(AbortSignal.timeout 老 webview 可能没有,可选调用)
+      const r = await fetch('/api/skills/github-token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: t }), signal: AbortSignal.timeout?.(30000) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || '保存失败');
+      setTokenInput(''); setTokenOpen(false);
+      setGhTokenSource(d.source || 'pat');
+      setNotice('GitHub 令牌已保存,仅存本机');
+      if (activeRepo) loadOfficial(null, activeRepo, activeBranch, activeHost); else loadOfficial(source);
+    } catch (e) { setTokenMsg(e.message); }
+    setTokenBusy(false);
+  };
+  const clearToken = async () => {
+    if (tokenBusy) return;
+    setTokenBusy(true); setTokenMsg('');
+    try {
+      const r = await fetch('/api/skills/github-token', { method: 'DELETE' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || '清除失败');
+      setGhTokenSource(d.source || null);
+    } catch (e) { setTokenMsg(e.message); }
+    setTokenBusy(false);
+  };
+
   // 持久化仓库列表:加载、打开、删除。(声明在 loadCustomRepo 之前,避免依赖数组 TDZ)
   const loadSavedRepos = useCallback(async () => {
     try { const d = await (await fetch('/api/skills/repos')).json(); setSavedRepos(d.repos || []); } catch { /* 忽略 */ }
@@ -218,6 +257,7 @@ export function SkillsPanel() {
     loadSavedRepos();
   }, [loadSavedRepos]);
   useEffect(() => { if (tab === 'import' && !activeRepo) loadOfficial(source); }, [tab, source, activeRepo, loadOfficial]);
+  useEffect(() => { if (tab === 'import') loadTokenStatus(); }, [tab, loadTokenStatus]); // 限流修复:进导入页才查令牌状态(后端有 5 分钟缓存)
 
   const runImport = async (ids, overwrite, tag, isUpdate = false) => {
     if (!ids.length) return;
@@ -482,6 +522,40 @@ export function SkillsPanel() {
             </a>
           )}
 
+          {/* 限流修复:GitHub 令牌一行状态 + 按需展开输入。填入后 GitHub 接口配额 60 次/小时/IP → 5000 次/小时/令牌。 */}
+          <div className="text-[10px] text-ink-faint font-body flex items-center gap-1.5 flex-wrap">
+            <span>
+              GitHub 令牌:{ghTokenSource
+                ? ({ env: '已配置(环境变量)', pat: '已配置(手动填入)', gh: '已配置(自动使用 gh 命令行登录态)' }[ghTokenSource] || '已配置')
+                : '未配置(匿名接口限 60 次/小时,按出口 IP 计,共享代理易被打满)'}
+            </span>
+            {ghTokenSource === 'pat' ? (
+              <button onClick={clearToken} disabled={tokenBusy} className="underline hover:text-error disabled:opacity-50">清除</button>
+            ) : (
+              <button onClick={() => { setTokenOpen((v) => !v); setTokenMsg(''); }} className="underline hover:text-accent">
+                {tokenOpen ? '收起' : '填入令牌'}
+              </button>
+            )}
+            {tokenMsg && !tokenOpen && <span className="text-error">{tokenMsg}</span>}
+          </div>
+          {tokenOpen && ghTokenSource !== 'pat' && (
+            <div className="space-y-1">
+              <div className="flex gap-1.5">
+                <input
+                  type="password" value={tokenInput} autoComplete="off"
+                  onChange={(e) => setTokenInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent?.isComposing) { e.preventDefault(); saveToken(); } }}
+                  placeholder="粘贴 GitHub 令牌(仅需 public_repo 读权限)"
+                  className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded-md px-2 py-1 text-[11px] text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-mono" />
+                <button onClick={saveToken} disabled={tokenBusy || !tokenInput.trim()}
+                  className="shrink-0 px-2.5 py-1 rounded-md bg-accent text-on-accent text-[11px] font-body hover:bg-accent-hover disabled:opacity-50">
+                  {tokenBusy ? '验证中…' : '保存'}
+                </button>
+              </div>
+              <div className="text-[10px] text-ink-faint font-body">令牌在 github.com → Settings → Developer settings → Personal access tokens 生成,仅保存在本机配置目录;若本机已安装并登录 gh 命令行工具则无需填写。</div>
+              {tokenMsg && <div className="text-[10px] text-error font-body">{tokenMsg}</div>}
+            </div>
+          )}
           {offErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 break-all">{offErr}</div>}
           {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
           {/* 批量删除该源里已装的技能:未装项不可选(没有可删的东西) */}
