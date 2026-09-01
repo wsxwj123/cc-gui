@@ -17,6 +17,7 @@ import { McpForm } from './McpForm.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { pluginInstallErrorMessage } from '../utils/builtinPlugins.js';
 import { ALL_KINDS, KIND_LABELS, countByKind, filterByKind, appendPage } from '../utils/mcpBrowse.js';
+import { openExternalUrl } from '../utils/openExternal.js';
 
 // 长列表沿用 r71 的零依赖方案:浏览器原生 content-visibility 跳过视口外条目的渲染开销。
 const ROW_CV = { contentVisibility: 'auto', containIntrinsicSize: 'auto 64px' };
@@ -252,7 +253,11 @@ export function MarketPanel() {
                 <div className="text-[10px] text-ink-faint font-mono truncate mt-1">{it.commandLine || it.url}</div>
                 {it.description && <div className="text-[11px] text-ink-muted font-body mt-1 line-clamp-2">{it.description}</div>}
                 {it.repository && (
+                  // 注册表 repository 是第三方外部数据:不裸 href(javascript: 会透出),
+                  // 走 openExternalUrl(/api/open-url 有 http/https 白名单);Tauri WebView
+                  // 本就拦 target=_blank,裸链接在装机版是死链(判官 r73 建议级)。
                   <a href={it.repository} target="_blank" rel="noreferrer"
+                    onClick={(e) => { e.preventDefault(); openExternalUrl(it.repository); }}
                     className="inline-flex items-center gap-1 text-[10px] text-ink-faint hover:text-accent font-mono mt-1">
                     <ExternalLink size={10} />{it.repository}
                   </a>
