@@ -8,7 +8,7 @@
 // 补充钉:error 态补 error 字段;idle 态不出帧(没有结论可补,防误报)。
 // Run: node tests/unit/check-r26-c9-attach-final-frame.mjs
 import assert from 'node:assert/strict';
-import { makeTmpHome, cleanupDirs, listenWithRetry, stopServer } from '../acceptance/r26/lib.mjs';
+import { makeTmpHome, cleanupDirs, stopServer } from '../acceptance/r26/lib.mjs';
 
 const TMP_HOME = makeTmpHome('c9-unit'); // version-check 顶层固化 PREFS_FILE,先隔离 HOME
 
@@ -22,8 +22,8 @@ try {
   const app = express();
   app.use(express.json());
   app.use('/api', vc.default);
-  server = await listenWithRetry(6704, (port) => app.listen(port, '127.0.0.1'));
-  const BASE = 'http://127.0.0.1:6704';
+  server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const BASE = `http://127.0.0.1:${server.address().port}`;
   const attach = async () => {
     const r = await fetch(`${BASE}/api/claude-update/attach`, { method: 'POST' });
     assert.equal(r.status, 200, 'C9: attach 应 200');

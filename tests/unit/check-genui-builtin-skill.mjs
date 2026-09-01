@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // r64 M11 单测:内置技能的三态 + 装/卸端点(INTERFACE §4.2 / §4.3)。
-// HOME 隔离(mkdtemp),**绝不碰真实 ~/.claude**;端口 6704。
+// HOME 隔离(mkdtemp),**绝不碰真实 ~/.claude**;端口取 OS 临时口(listen(0),真实端口从 server.address() 读回)。
 //
 //   t0 临时 HOME 隔离自证(写入真的落在沙箱里,真实 HOME 一个字节没动)
 //   t1 三态现读:未安装 → 安装 → 已安装 → 归档 → 已归档 → 恢复 → 已安装
@@ -42,10 +42,10 @@ const app = express();
 app.use(express.json());
 app.use('/api', skillsRoutes);
 const server = await new Promise((res, rej) => {
-  const s = app.listen(6704, '127.0.0.1', () => res(s));
+  const s = app.listen(0, '127.0.0.1', () => res(s));
   s.once('error', rej);
 });
-const B = 'http://127.0.0.1:6704/api';
+const B = `http://127.0.0.1:${server.address().port}/api`;
 const get = async (p) => { const r = await fetch(B + p); return { status: r.status, body: await r.json().catch(() => ({})) }; };
 const post = async (p, body) => {
   const r = await fetch(B + p, body === undefined

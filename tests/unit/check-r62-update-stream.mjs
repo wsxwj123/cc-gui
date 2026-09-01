@@ -8,11 +8,11 @@
 //   ②前端 catch 先自动改走 attach 续看(有 3 次上限),连不上才认输报错 —— 改回直接
 //     setResult(ok:false) 则红;
 //   ③attach 流没给终态帧(更新已完成退出)→ 走既有 /status 对账链路拿结论。
-// 端口 6703;隔离 HOME;绝不 spawn 任何更新(任务标 running → 两个通道都走纯续看分支)。
+// 端口取 OS 临时口(listen(0),真实端口从 server.address() 读回);隔离 HOME;绝不 spawn 任何更新(任务标 running → 两个通道都走纯续看分支)。
 // Run: node tests/unit/check-r62-update-stream.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { makeTmpHome, cleanupDirs, listenWithRetry, stopServer, sleep } from '../acceptance/r26/lib.mjs';
+import { makeTmpHome, cleanupDirs, stopServer, sleep } from '../acceptance/r26/lib.mjs';
 
 const TMP_HOME = makeTmpHome('r62'); // version-check 顶层固化 PREFS_FILE,先隔离 HOME
 
@@ -27,8 +27,8 @@ try {
   const app = express();
   app.use(express.json());
   app.use('/api', vc.default);
-  server = await listenWithRetry(6703, (port) => app.listen(port, '127.0.0.1'));
-  const BASE = 'http://127.0.0.1:6703';
+  server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const BASE = `http://127.0.0.1:${server.address().port}`;
 
   // 假的「长时间静默的更新进程」:任务标 running + 零日志 —— /stream 与 /attach 都走
   // 纯续看分支(绝不 spawn),挂住连接后一个字节都不写,正是原生安装器下大包时的形态。

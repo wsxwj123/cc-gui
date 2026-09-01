@@ -113,7 +113,7 @@ app.post('/up/v1/images/generations', (req, res) => {
 // 只回 URL 的上游:验第三处外联(图片下载)也过代理。URL 与 baseURL 同源(回环豁免继承)。
 app.post('/url/v1/images/generations', (req, res) => {
   record(req, 'generate-url');
-  res.json({ data: [{ url: `http://127.0.0.1:6703/up/pic.png` }] });
+  res.json({ data: [{ url: `http://127.0.0.1:${server.address().port}/up/pic.png` }] });
 });
 app.get('/up/pic.png', (req, res) => {
   record(req, 'download');
@@ -141,21 +141,8 @@ app.post('/up/v1/images/edits', express.raw({ type: '*/*', limit: '30mb' }), asy
 });
 app.use('/api', imageRouter);
 
-async function listenWithRetry(port, tries = 40, make = (p) => app.listen(p, '127.0.0.1')) {
-  for (let i = 0; i < tries; i++) {
-    const s = make(port);
-    const r = await new Promise((resolve) => {
-      s.once('listening', () => resolve({ ok: true }));
-      s.once('error', (e) => resolve({ ok: false, err: e }));
-    });
-    if (r.ok) return s;
-    if (r.err?.code !== 'EADDRINUSE') throw r.err;
-    await new Promise((done) => setTimeout(done, 500));
-  }
-  throw new Error(`端口 ${port} 持续被占用(隔壁 worktree 的 E2E?),重试 ${tries} 次后放弃`);
-}
-const server = await listenWithRetry(6703);
-const BASE = 'http://127.0.0.1:6703';
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const BASE = `http://127.0.0.1:${server.address().port}`;
 
 // 正向代理:http 上游时客户端发的是【绝对 URI】请求行(GET http://host/path),
 // 这就是"确实走了代理"的铁证 —— 直连绝不会出现这种请求。
@@ -240,7 +227,7 @@ try {
     const done = await settle(r.json.jobId);
     assert.equal(done?.status, 'done', `t2.1: 经代理照样出图(${JSON.stringify(done)})`);
     assert.ok(proxyLog.length >= 1, `t2.1【绕过代理即红】:代理必须收到请求(实际日志 ${JSON.stringify(proxyLog)})`);
-    assert.ok(proxyLog.some((l) => l.includes('POST http://127.0.0.1:6703/up/v1/images/generations')),
+    assert.ok(proxyLog.some((l) => l.includes(`POST http://127.0.0.1:${server.address().port}/up/v1/images/generations`)),
       `t2.1【铁证】:这条 POST 必须是代理亲手转发的(绝对 URI 请求行或 CONNECT 隧道内解析,两种都算;实际 ${JSON.stringify(proxyLog)})`);
     assert.deepEqual(hits.viaProxy, ['generate'], 't2.1: 上游看到的是代理转发来的请求');
     assert.deepEqual(hits.direct, [], 't2.1【直连口零命中】:配了代理就不许有任何直连请求');

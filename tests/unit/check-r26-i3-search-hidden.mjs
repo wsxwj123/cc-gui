@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // r26-I3 单测:/api/search 过滤 hiddenProjects。
 // 哨兵(实际验证过红):删掉 projectDirs 过滤里的 !hidden.has(e.name) → t1 红。
-// 红线:样本 /tmp 自建(tmp HOME),端口只用 6703,跑完杀干净。
+// 红线:样本 /tmp 自建(tmp HOME),端口取 OS 临时口(listen(0),真实端口从 server.address() 读回),跑完杀干净。
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -37,10 +37,10 @@ let server = null;
 let failure = null;
 try {
   server = await new Promise((resolve, reject) => {
-    const s = app.listen(6703, '127.0.0.1', () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
     s.once('error', reject);
   });
-  const get = async () => (await fetch(`http://127.0.0.1:6703/api/search?q=${NEEDLE}`)).json();
+  const get = async () => (await fetch(`http://127.0.0.1:${server.address().port}/api/search?q=${NEEDLE}`)).json();
 
   // t1 过滤哨兵:隐藏项目的命中不进结果,可见项目的在
   const d1 = await get();

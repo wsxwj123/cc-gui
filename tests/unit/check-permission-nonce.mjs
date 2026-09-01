@@ -6,7 +6,7 @@
 // ⑥非 loopback(remoteAddress 伪装成 LAN)GET pending 【换锚 r31】:一律含 nonce 且与
 //   broadcast 逐字一致(旧「非 loopback 不含 nonce」锚已废弃,原因见 ⑥ 注释);
 // ⑦slot 关闭后旧 nonce 不能二次 settle(无第二条 allow 广播)。
-// 端口:6703,跑完关干净。Run: node tests/unit/check-permission-nonce.mjs
+// 端口取 OS 临时口(listen(0),真实端口从 server.address() 读回),跑完关干净。Run: node tests/unit/check-permission-nonce.mjs
 import assert from 'node:assert/strict';
 
 const express = (await import('express')).default;
@@ -36,16 +36,16 @@ app.use(express.json());
 app.use('/api', permRouter);
 
 const server = await new Promise((res, rej) => {
-  const s = app.listen(6703, '127.0.0.1', () => res(s));
+  const s = app.listen(0, '127.0.0.1', () => res(s));
   s.once('error', rej);
 });
 const lanServer = await new Promise((res, rej) => {
-  const s = lanApp.listen(6704, '127.0.0.1', () => res(s));
+  const s = lanApp.listen(0, '127.0.0.1', () => res(s));
   s.once('error', rej);
 });
 
-const BASE = 'http://127.0.0.1:6703';
-const LAN = 'http://127.0.0.1:6704';
+const BASE = `http://127.0.0.1:${server.address().port}`;
+const LAN = `http://127.0.0.1:${lanServer.address().port}`;
 const post = (base, path, body, headers = {}) =>
   fetch(`${base}${path}`, {
     method: 'POST',

@@ -5,15 +5,14 @@
 // 探测语义(规格):按序请求候选,**第一个 HTTP 200 且字段能解析成功**的才采纳;
 // 全失败不抛,回 {ok:false, reason}。解析失败必须静默降级(Kimi/opencode 的端点官方
 // 文档都没收录,不能弹错误、不能打红)。
-// 端到端:隔离 HOME 造 provider fixture,起后端只用 6703(check-permission-hook-bridge
-// 绑死 6702,不去抢它),假上游挂在同一个端口上 —— **绝不打真实第三方 API**。
+// 端到端:隔离 HOME 造 provider fixture,端口取 OS 临时口(listen(0),真实端口从 server.address() 读回),
+// 假上游挂在同一个端口上 —— **绝不打真实第三方 API**。
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { probeQuota } from '../../server/services/provider-quota.js';
 
-const PORT = 6703; // 测试专用端口(6702 被 check-permission-hook-bridge 绑死且无重试,别抢)
 const OK_MOONSHOT = { code: 0, data: { available_balance: 42 } };
 const OK_DEEPSEEK = { balance_infos: [{ currency: 'CNY', total_balance: '7.00' }] };
 
@@ -106,12 +105,41 @@ const OK_DEEPSEEK = { balance_infos: [{ currency: 'CNY', total_balance: '7.00' }
   assert.deepEqual(calls, ['https://b/two', 'https://a/one'], '变异验证:候选顺序调换,调用顺序必须跟着换');
 }
 
-// ── 端到端:隔离 HOME + 真路由 + 本地假上游(同一个 6702 端口) ─────────────
+// ── 端到端:隔离 HOME + 真路由 + 本地假上游(同一个临时口) ─────────────
 const home = await mkdtemp(join(tmpdir(), 'cgui-quota-'));
 process.env.HOME = home;
 process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 const guiDir = join(home, '.claude-gui');
 await mkdir(guiDir, { recursive: true });
+
+const { default: express } = await import('express');
+const { default: quotaRouter, makeFetcher } = await import('../../server/routes/provider-quota.js');
+
+let upstreamHits = 0;
+let sawAuthHeader = false;
+const app = express();
+app.use('/api', quotaRouter);
+// 假上游:One-API 系的两条 dashboard 端点。挂在同一个 app 上,全程只占一个端口。
+app.get('/relay/v1/dashboard/billing/subscription', (req, res) => {
+  upstreamHits++;
+  sawAuthHeader = req.headers.authorization === 'Bearer dummy-not-a-real-key';
+  res.json({ object: 'billing_subscription', hard_limit_usd: 100 });
+});
+app.get('/relay/v1/dashboard/billing/usage', (_req, res) => {
+  upstreamHits++;
+  res.json({ object: 'list', total_usage: 9500 }); // 已用 ×100 → 95 → 余额 5
+});
+// 认证头回显 + 超大响应体,给 makeFetcher 的直测用(智谱的裸 token 与响应上限
+// 在纯函数层测不到,只能打真的 HTTP)。
+let seenAuth = null;
+app.get('/echo-auth', (req, res) => { seenAuth = req.headers.authorization ?? null; res.json({ ok: true }); });
+app.get('/huge', (_req, res) => res.type('application/json').send(`{"pad":"${'x'.repeat(1_200_000)}"}`));
+// 重定向不跟随的探针:302 指回本机另一个端点,跟随了就会拿到 200。
+app.get('/redir', (_req, res) => res.redirect(302, `http://127.0.0.1:${PORT}/echo-auth`));
+// 端口取 OS 临时口:写死会被同跑的用例抢,制造随机假红。
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const PORT = server.address().port;
+// provider fixture 的 baseURL 指回本机假上游,端口得等服务起来才知道 → 此刻才落盘。
 const PROVIDERS = [
   {
     id: 'relay-1', name: '测试中转', type: 'openai',
@@ -128,47 +156,6 @@ const PROVIDERS = [
   },
 ];
 await writeFile(join(guiDir, 'custom-providers.json'), JSON.stringify(PROVIDERS));
-
-const { default: express } = await import('express');
-const { default: quotaRouter, makeFetcher } = await import('../../server/routes/provider-quota.js');
-
-let upstreamHits = 0;
-let sawAuthHeader = false;
-const app = express();
-app.use('/api', quotaRouter);
-// 假上游:One-API 系的两条 dashboard 端点。挂在同一个 app 上,全程只占 6702 一个端口。
-app.get('/relay/v1/dashboard/billing/subscription', (req, res) => {
-  upstreamHits++;
-  sawAuthHeader = req.headers.authorization === 'Bearer dummy-not-a-real-key';
-  res.json({ object: 'billing_subscription', hard_limit_usd: 100 });
-});
-app.get('/relay/v1/dashboard/billing/usage', (_req, res) => {
-  upstreamHits++;
-  res.json({ object: 'list', total_usage: 9500 }); // 已用 ×100 → 95 → 余额 5
-});
-// 端口是几个测试共用的(隔壁跑完可能还没完全放手)
-// → listen 失败就退让重试,不让批量跑批出现假失败。
-const listen = async () => {
-  for (let i = 0; ; i++) {
-    try {
-      return await new Promise((resolve, reject) => {
-        const s = app.listen(PORT, '127.0.0.1', () => resolve(s));
-        s.once('error', reject);
-      });
-    } catch (e) {
-      if (i >= 20 || e.code !== 'EADDRINUSE') throw e;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
-};
-// 认证头回显 + 超大响应体,给 makeFetcher 的直测用(智谱的裸 token 与响应上限
-// 在纯函数层测不到,只能打真的 HTTP)。
-let seenAuth = null;
-app.get('/echo-auth', (req, res) => { seenAuth = req.headers.authorization ?? null; res.json({ ok: true }); });
-app.get('/huge', (_req, res) => res.type('application/json').send(`{"pad":"${'x'.repeat(1_200_000)}"}`));
-// 重定向不跟随的探针:302 指回本机另一个端点,跟随了就会拿到 200。
-app.get('/redir', (_req, res) => res.redirect(302, `http://127.0.0.1:${PORT}/echo-auth`));
-const server = await listen();
 const get = async () => {
   const r = await fetch(`http://127.0.0.1:${PORT}/api/provider-quota`);
   return { status: r.status, body: await r.json() };

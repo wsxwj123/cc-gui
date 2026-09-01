@@ -56,13 +56,13 @@ try {
   // (经路由层再验一次共享队列语义 —— updatePrefs 与 withPrefsQueue 是同一条链)
   const express = (await import('express')).default;
   const prefsRouter = (await import('../../server/routes/prefs.js')).default;
-  const { listenWithRetry, stopServer } = await import('../acceptance/r26/lib.mjs');
+  const { stopServer } = await import('../acceptance/r26/lib.mjs');
   const app = express();
   app.use(express.json());
   app.use('/api', prefsRouter);
-  const server = await listenWithRetry(6704, (port) => app.listen(port, '127.0.0.1'));
+  const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   try {
-    const BASE = 'http://127.0.0.1:6704';
+    const BASE = `http://127.0.0.1:${server.address().port}`;
     await Promise.all([
       updatePrefs((p) => { p.routeRaceKey = 'from-updatePrefs'; }),
       fetch(`${BASE}/api/prefs/hidden-projects`, {

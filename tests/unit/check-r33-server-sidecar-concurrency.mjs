@@ -86,7 +86,11 @@ const parallelStore = createAttachmentSidecarStore({
 const writeA = parallelStore.write('session-a', body('one'));
 await aStarted;
 const writeB = parallelStore.write('session-b', body('two'));
-await new Promise((resolve) => setTimeout(resolve, 0));
+// B 到 writeFile 之前还要走 mkdir + readFile 两次真实 I/O,不是一个 tick 能保证的。
+// 赌 setTimeout(0) 会在机器忙时随机变红;改成带截止时间地等这个条件出现 ——
+// 真有全局锁时 B 永远起不来,照样在截止后红,红的语义一个字不变。
+const bDeadline = Date.now() + 5000;
+while (!bStarted && Date.now() < bDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
 assert.equal(bStarted, true, '不同 session 不共用全局锁');
 releaseA();
 await Promise.all([writeA, writeB]);

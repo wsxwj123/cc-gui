@@ -14,7 +14,7 @@
 //    上游超时抛出的异常与手动 abort 同形态,必须仍落既有的超时 error 文案(不是 cancelled)。
 //
 // 隔离:HOME/USERPROFILE 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);
-// 上游全是本机假服务(6703 / 6704),绝不打真实网络。
+// 上游全是本机假服务(各占一个临时口),绝不打真实网络。
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -156,21 +156,8 @@ app.post('/hang/v1/images/generations', () => { /* 永不响应:等取消或超�
 app.post('/fast/v1/images/generations', (_req, res) => res.json({ data: [{ b64_json: PNG_B64 }] }));
 app.use('/api', imageRouter);
 
-async function listenWithRetry(port, tries = 40, make = (p) => app.listen(p, '127.0.0.1')) {
-  for (let i = 0; i < tries; i++) {
-    const s = make(port);
-    const r = await new Promise((resolve) => {
-      s.once('listening', () => resolve({ ok: true }));
-      s.once('error', (e) => resolve({ ok: false, err: e }));
-    });
-    if (r.ok) return s;
-    if (r.err?.code !== 'EADDRINUSE') throw r.err;
-    await new Promise((done) => setTimeout(done, 500));
-  }
-  throw new Error(`端口 ${port} 持续被占用(隔壁 worktree 的 E2E?),重试 ${tries} 次后放弃`);
-}
-const server = await listenWithRetry(6703);
-const BASE = 'http://127.0.0.1:6703';
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const BASE = `http://127.0.0.1:${server.address().port}`;
 const api = async (method, path, body) => {
   const r = await fetch(`${BASE}${path}`, {
     method,
@@ -483,9 +470,9 @@ try {
     const app2 = express();
     app2.use(express.json());
     app2.use('/api', freshRouter);
-    const s2 = await listenWithRetry(6704, 40, (p) => app2.listen(p, '127.0.0.1'));
+    const s2 = await new Promise((r) => { const s = app2.listen(0, '127.0.0.1', () => r(s)); });
     try {
-      const rr = await fetch('http://127.0.0.1:6704/api/image/history');
+      const rr = await fetch(`http://127.0.0.1:${s2.address().port}/api/image/history`);
       const list = (await rr.json()).history || [];
       assert.equal(list.find((e) => e.id === 'zombie')?.status, 'interrupted', 't7: 遗留 running 仍被清成 interrupted');
       assert.equal(list.find((e) => e.id === 'was-cancelled')?.status, 'cancelled', 't7【不碰终态】:cancelled 条目原样保留');

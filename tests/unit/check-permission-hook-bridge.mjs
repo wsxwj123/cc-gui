@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 批L L1-b:后台代理的权限应答通道(PermissionRequest hook bridge)。
-// 端到端真跑 server/hooks/permission-request-hook.mjs —— 起一个假 bridge(6702),
+// 端到端真跑 server/hooks/permission-request-hook.mjs —— 起一个假 bridge(临时口),
 // 用真 stdin 喂 hook 输入,断言 stdout 的裁决形态。三条出路都要覆盖:
 //   allow / deny / GUI 不可达(必须 fail-safe 拒绝,绝不 fail-open)。
 import assert from 'node:assert/strict';
@@ -12,7 +12,16 @@ import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(root, 'server/hooks/permission-request-hook.mjs');
-const PORT = 6702; // 测试专用端口,绝不碰 6677/6699
+// 端口一律取 OS 临时口:写死会被同跑的用例抢,制造随机假红。
+// 「确定没人听」的死口:起来拿到号立刻关掉。
+async function closedPort() {
+  const s = http.createServer();
+  await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const port = s.address().port;
+  await new Promise((r) => s.close(r));
+  return port;
+}
+const DEAD_PORT = await closedPort();
 
 const HOOK_INPUT = {
   session_id: 'bg-sid-1',
@@ -48,8 +57,8 @@ function startBridge(reply) {
     let body = '';
     req.on('data', (d) => { body += d; });
     req.on('end', () => {
-      // 只记授权端点的请求:6702 上若正好开着 GUI 客户端,它每 1.5s 的轮询会打进来,
-      // 把"hook 发了几次请求"的断言搅成随机值。
+      // 只记授权端点的请求:端口上若正好有别的东西在轮询,会把"hook 发了几次请求"的
+      // 断言搅成随机值。
       if (req.url === '/api/permissions/request') {
         received.push({ url: req.url, body: (() => { try { return JSON.parse(body); } catch { return null; } })() });
       }
@@ -59,11 +68,11 @@ function startBridge(reply) {
     });
   });
   return new Promise((resolve, reject) => {
-    // unref:6702 上若有别的东西在轮询,它挂起的连接会让 server.close() 迟迟不放手、
+    // unref:端口上若有别的东西在轮询,它挂起的连接会让 server.close() 迟迟不放手、
     // 测试进程永不退出。listen 失败必须 reject —— 否则端口被占时这个 Promise 永远不
     // resolve,测试表现为"卡住"而不是"失败",最难查。
     server.once('error', reject);
-    server.listen(PORT, '127.0.0.1', () => { server.unref(); resolve({ server, received }); });
+    server.listen(0, '127.0.0.1', () => { server.unref(); resolve({ server, received, port: server.address().port }); });
   });
 }
 
@@ -82,8 +91,8 @@ const decisionOf = (out) => {
 
 // ── ① allow:用户在界面点了允许 ─────────────────────────────────────────
 {
-  const { server, received } = await startBridge({ json: { decision: 'allow' } });
-  const { out, code } = await runHook(PORT);
+  const { server, received, port } = await startBridge({ json: { decision: 'allow' } });
+  const { out, code } = await runHook(port);
   stopBridge(server);
   assert.equal(code, 0, 'hook 必须以 0 退出(非 0 会被 CLI 当执行失败)');
   assert.deepEqual(decisionOf(out), { behavior: 'allow' });
@@ -103,16 +112,16 @@ const decisionOf = (out) => {
 // ── ② allow + updatedInput:用户改过入参后允许 ───────────────────────────
 {
   const upd = { file_path: '/tmp/proj/a.txt', content: 'edited' };
-  const { server } = await startBridge({ json: { decision: 'allow', updatedInput: upd } });
-  const { out } = await runHook(PORT);
+  const { server, port } = await startBridge({ json: { decision: 'allow', updatedInput: upd } });
+  const { out } = await runHook(port);
   stopBridge(server);
   assert.deepEqual(decisionOf(out), { behavior: 'allow', updatedInput: upd }, '改过的入参要带回 CLI');
 }
 
 // ── ③ deny:用户拒绝,理由要带回去 ───────────────────────────────────────
 {
-  const { server } = await startBridge({ json: { decision: 'deny', reason: '不要动这个文件' } });
-  const { out } = await runHook(PORT);
+  const { server, port } = await startBridge({ json: { decision: 'deny', reason: '不要动这个文件' } });
+  const { out } = await runHook(port);
   stopBridge(server);
   const d = decisionOf(out);
   assert.equal(d.behavior, 'deny');
@@ -121,8 +130,8 @@ const decisionOf = (out) => {
 
 // ── ④ fail-safe:GUI 不可达 → 必须 deny,绝不 fail-open ──────────────────
 {
-  // 没有任何东西监听 6702
-  const { out, code } = await runHook(PORT);
+  // 没有任何东西监听 DEAD_PORT(拿到端口号后立刻关掉)
+  const { out, code } = await runHook(DEAD_PORT);
   assert.equal(code, 0);
   const d = decisionOf(out);
   assert.equal(d.behavior, 'deny', 'GUI 不可达必须拒绝(放行=静默绕过整个权限体系)');
@@ -131,8 +140,8 @@ const decisionOf = (out) => {
 
 // ── ⑤ fail-safe:非 2xx → deny ─────────────────────────────────────────
 {
-  const { server } = await startBridge({ status: 403, json: { error: 'nope' } });
-  const { out } = await runHook(PORT);
+  const { server, port } = await startBridge({ status: 403, json: { error: 'nope' } });
+  const { out } = await runHook(port);
   stopBridge(server);
   const d = decisionOf(out);
   assert.equal(d.behavior, 'deny');
@@ -145,9 +154,9 @@ const decisionOf = (out) => {
     req.resume();
     req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('not json'); });
   });
-  await new Promise((r) => server.listen(PORT, '127.0.0.1', r));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
   server.unref();
-  const { out } = await runHook(PORT);
+  const { out } = await runHook(server.address().port);
   stopBridge(server);
   assert.equal(decisionOf(out).behavior, 'deny', '响应不可解析同样按拒绝处理');
 }
@@ -155,9 +164,9 @@ const decisionOf = (out) => {
 // ── ⑦ fail-safe:一直挂着不回(用户没应答)→ 自己超时后 deny ─────────────
 // 真实配置里 hook timeout=300s、脚本自己 295s 先超时;这里用 CGUI_HOOK_TIMEOUT_MS=3s 压缩。
 {
-  const { server } = await startBridge(null);
+  const { server, port } = await startBridge(null);
   const t0 = Date.now();
-  const { out } = await runHook(PORT, { timeoutMs: 12000 });
+  const { out } = await runHook(port, { timeoutMs: 12000 });
   stopBridge(server);
   const d = decisionOf(out);
   assert.equal(d.behavior, 'deny', '超时必须自己吐 deny —— 被 hook timeout 杀掉就没有任何输出');
@@ -167,8 +176,8 @@ const decisionOf = (out) => {
 
 // ── ⑧ fail-safe:stdin 读不出工具名 → 直接 deny,不弹"unknown"卡 ──────────
 {
-  const { server, received } = await startBridge({ json: { decision: 'allow' } });
-  const p = spawn(process.execPath, [HOOK, String(PORT)], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const { server, received, port } = await startBridge({ json: { decision: 'allow' } });
+  const p = spawn(process.execPath, [HOOK, String(port)], { stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '';
   p.stdout.on('data', (d) => { out += d; });
   p.stdin.end('not json at all');

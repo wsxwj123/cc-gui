@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // r26-H4① 单测:PUT custom-providers 改 baseURL 的同源闸 —— quotaKey 随端点变更清除。
-// 隔离 HOME(mkdtemp),回环 baseURL 过 SSRF 闸且永不真连。端口 6703。
+// 隔离 HOME(mkdtemp),回环 baseURL 过 SSRF 闸且永不真连。端口取 OS 临时口(listen(0),真实端口从 server.address() 读回)。
 // 哨兵:①改 baseURL 未给新 quotaKey → 落盘 quotaKey 消失 + 响应 quotaKeyCleared:true;
 // ②baseURL 不变 → quotaKey 保留且无标记;③改 baseURL 同时显式给新 quotaKey → 新值保留
 // (用户同一次保存里显式重新配对,不算"旧 key 错配端点");④GET 永不回传明文(顺带钉)。
@@ -27,10 +27,10 @@ const app = express();
 app.use(express.json());
 app.use('/api', settingsRoutes);
 const server = await new Promise((res, rej) => {
-  const s = app.listen(6703, '127.0.0.1', () => res(s));
+  const s = app.listen(0, '127.0.0.1', () => res(s));
   s.once('error', rej);
 });
-const BASE = 'http://127.0.0.1:6703/api/custom-providers';
+const BASE = `http://127.0.0.1:${server.address().port}/api/custom-providers`;
 const post = (body) => fetch(BASE, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 const put = (id, body) => fetch(`${BASE}/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 

@@ -15,9 +15,8 @@
 //   ⑥源码守卫(字符串断言):8 分钟那条路径上不得再出现 killUpdateTree();
 //   ⑦判死后必须把代理从子进程 env 里删掉(只"不注入"= {...process.env} 照样带过去);
 //   ⑧spawn 前的取消要有标志兑现;done 帧要带 error;取消按钮要接线。
-// 端口一律取临时口(listen(0) 拿活口;起完立刻关拿死口),写法照 check-r26-c2-proxy-probe.mjs:
-// 6703/6704 被十几个用例硬编码抢(check-permission-nonce、check-r29-crashlog 等还没有
-// 退让重试),再钉死端口就是在制造假红。跑完关干净。
+// 端口一律取临时口(listen(0) 拿活口;起完立刻关拿死口),写法照 check-r26-c2-proxy-probe.mjs。
+// 全套 unit 用例现在都这么写:端口钉死就是在制造假红。跑完关干净。
 // Run: node tests/unit/check-r34-update-no-kill.mjs
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
@@ -134,7 +133,7 @@ try {
       'r34-⑤: 回环代理不可达必须判死(变异哨兵 —— 删掉探活分流这里必红)');
 
     liveServer = createServer();
-    await new Promise((r) => liveServer.listen(0, '127.0.0.1', r)); // 临时口,别抢 6703/6704
+    await new Promise((r) => liveServer.listen(0, '127.0.0.1', r)); // 临时口
     const livePort = liveServer.address().port;
     const liveUrl = `http://127.0.0.1:${livePort}`;
     assert.equal(await liveProxy(liveUrl), liveUrl, 'r34-⑤: 探活通过才注入');

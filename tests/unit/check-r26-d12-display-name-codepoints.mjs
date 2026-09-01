@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeTmpHome, cleanupDirs, listenWithRetry, stopServer } from '../acceptance/r26/lib.mjs';
+import { makeTmpHome, cleanupDirs, stopServer } from '../acceptance/r26/lib.mjs';
 
 const TMP_HOME = makeTmpHome('d12-unit'); // prefs.js 顶层固化 PREFS_PATH,先隔离 HOME
 
@@ -29,8 +29,8 @@ app.use('/api', prefsRouter);
 let server = null;
 let failure = null;
 try {
-  server = await listenWithRetry(6703, (p) => app.listen(p, '127.0.0.1'));
-  const BASE = 'http://127.0.0.1:6703';
+  server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const BASE = `http://127.0.0.1:${server.address().port}`;
   const putName = (displayName) => fetch(`${BASE}/api/prefs/display-name`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ displayName }),

@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeTmpHome, cleanupDirs, listenWithRetry, stopServer } from '../acceptance/r26/lib.mjs';
+import { makeTmpHome, cleanupDirs, stopServer } from '../acceptance/r26/lib.mjs';
 
 const TMP_HOME = makeTmpHome('c5-unit'); // version-check/prefs 顶层固化 prefs 路径,先隔离 HOME
 
@@ -36,13 +36,13 @@ try {
   raw = JSON.parse(readFileSync(join(TMP_HOME, '.claude-gui', 'prefs.json'), 'utf8'));
   assert.ok(!('updateChannel' in raw), 'C5: 非法值不得产生写副作用');
 
-  // ③路由级(6703,跑完关闭)
+  // ③路由级(临时口,跑完关闭)
   const express = (await import('express')).default;
   const app = express();
   app.use(express.json());
   app.use('/api', vc.default);
-  const server = await listenWithRetry(6703, (port) => app.listen(port, '127.0.0.1'));
-  const BASE = 'http://127.0.0.1:6703';
+  const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const BASE = `http://127.0.0.1:${server.address().port}`;
   const put = (body) => fetch(`${BASE}/api/claude-update-channel`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });

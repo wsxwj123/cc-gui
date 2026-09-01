@@ -14,7 +14,7 @@
 //     并能据此 respond 200 settle 成 allow —— 旧实现缺 nonce 恒 403,本断言红;
 //   ② loopback 来源 pending 仍带 nonce(回归:H1 既有通道不回归);
 //   ③ 无 nonce 的 respond 恒 403 防线回归不放松(防剥 nonce 的同时别把 H1 闸门放水)。
-// 端口:6703(loopback)/6704(LAN 伪装),跑完关干净。
+// 端口取 OS 临时口(listen(0),真实端口从 server.address() 读回);loopback 与 LAN 伪装各占一个,跑完关干净。
 // Run: node tests/unit/check-r31-nonce-pending.mjs
 import assert from 'node:assert/strict';
 
@@ -45,16 +45,16 @@ app.use(express.json());
 app.use('/api', permRouter);
 
 const server = await new Promise((res, rej) => {
-  const s = app.listen(6703, '127.0.0.1', () => res(s));
+  const s = app.listen(0, '127.0.0.1', () => res(s));
   s.once('error', rej);
 });
 const lanServer = await new Promise((res, rej) => {
-  const s = lanApp.listen(6704, '127.0.0.1', () => res(s));
+  const s = lanApp.listen(0, '127.0.0.1', () => res(s));
   s.once('error', rej);
 });
 
-const BASE = 'http://127.0.0.1:6703';
-const LAN = 'http://127.0.0.1:6704';
+const BASE = `http://127.0.0.1:${server.address().port}`;
+const LAN = `http://127.0.0.1:${lanServer.address().port}`;
 const post = (base, path, body, headers = {}) =>
   fetch(`${base}${path}`, {
     method: 'POST',

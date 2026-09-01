@@ -10,7 +10,7 @@
 //   ⑤广播失败不影响响应(广播在 try/catch 内,照 pinned 同款 —— 用坏客户端验证不炸)。
 // Run: node tests/unit/check-r26-i2-hidden-projects-broadcast.mjs
 import assert from 'node:assert/strict';
-import { makeTmpHome, cleanupDirs, listenWithRetry, stopServer } from '../acceptance/r26/lib.mjs';
+import { makeTmpHome, cleanupDirs, stopServer } from '../acceptance/r26/lib.mjs';
 
 const TMP_HOME = makeTmpHome('i2-unit'); // prefs.js 顶层固化 PREFS_PATH,先隔离 HOME
 
@@ -32,8 +32,8 @@ app.use('/api', prefsRouter);
 let server = null;
 let failure = null;
 try {
-  server = await listenWithRetry(6704, (p) => app.listen(p, '127.0.0.1'));
-  const BASE = 'http://127.0.0.1:6704';
+  server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const BASE = `http://127.0.0.1:${server.address().port}`;
   clients.add(fakeClient);
 
   // ①②契约哨兵:PUT 成功 → 收到逐字 {type:'hidden-projects', hidden}

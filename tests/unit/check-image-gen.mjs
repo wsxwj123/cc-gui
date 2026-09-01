@@ -3,7 +3,7 @@
 // + apiKey 不外泄 + CRUD/出图/预览的端到端(本地假上游,绝不打真实生图 API)。
 // Run: node tests/unit/check-image-gen.mjs
 //
-// 隔离:HOME 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);端口只用 6702,退出即释放。
+// 隔离:HOME 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);端口取 OS 临时口(listen(0),真实端口从 server.address() 读回),退出即释放。
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, symlinkSync, chmodSync, readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -170,7 +170,7 @@ const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
   assert.equal(redactKey('普通错误', KEY), '普通错误', 't5: 无 key 的文本原样透传');
 }
 
-// ─────────────────── 6. 端到端:本地假上游(6702)+ 隔离 HOME ───────────────────
+// ─────────────────── 6. 端到端:本地假上游 + 隔离 HOME ───────────────────
 const express = (await import('express')).default;
 const imageRouter = (await import('../../server/routes/image.js')).default;
 
@@ -185,7 +185,7 @@ app.post('/fake/v1/models/:model', (req, res) => res.json({
   candidates: [{ content: { parts: [{ text: '给你' }, { inlineData: { mimeType: 'image/png', data: PNG_B64 } }] } }],
 }));
 app.post('/fake/v1/chat/completions', (_req, res) => res.json({
-  choices: [{ message: { content: '好了：![out](http://127.0.0.1:6702/fake/out.png)' } }],
+  choices: [{ message: { content: `好了：![out](http://127.0.0.1:${server.address().port}/fake/out.png)` } }],
 }));
 app.get('/fake/out.png', (_req, res) => { res.setHeader('Content-Type', 'image/png'); res.end(Buffer.from(PNG_B64, 'base64')); });
 app.post('/boom/v1/images/generations', (req, res) => res.status(401).json({
@@ -203,21 +203,21 @@ app.post('/goog/v1/models/:model', (req, res) => {
 });
 // 上游把图片链接指向"内网 + 非图片 Content-Type"(URL 却以 .png 结尾)
 app.post('/badct/v1/chat/completions', (_req, res) => res.json({
-  choices: [{ message: { content: '![x](http://127.0.0.1:6702/internal/creds.png)' } }],
+  choices: [{ message: { content: `![x](http://127.0.0.1:${server.address().port}/internal/creds.png)` } }],
 }));
 app.get('/internal/creds.png', (_req, res) => { res.setHeader('Content-Type', 'text/html'); res.end('<html>INTERNAL-SECRET-BODY</html>'); });
 // 图片链接 302 跳转(跟随即绕过内网检查)
 app.post('/redir/v1/chat/completions', (_req, res) => res.json({
-  choices: [{ message: { content: '![x](http://127.0.0.1:6702/redirect.png)' } }],
+  choices: [{ message: { content: `![x](http://127.0.0.1:${server.address().port}/redirect.png)` } }],
 }));
-app.get('/redirect.png', (_req, res) => res.redirect(302, 'http://127.0.0.1:6702/fake/out.png'));
+app.get('/redirect.png', (_req, res) => res.redirect(302, `http://127.0.0.1:${server.address().port}/fake/out.png`));
 // 图片链接指向云元数据(链路本地地址)
 app.post('/meta/v1/chat/completions', (_req, res) => res.json({
   choices: [{ message: { content: '![x](http://169.254.169.254/latest/meta-data/iam.png)' } }],
 }));
 // content-length 声明 200MB(真身只有几十字节)→ 读 body 前就该早退
 app.post('/huge/v1/chat/completions', (_req, res) => res.json({
-  choices: [{ message: { content: '![x](http://127.0.0.1:6702/huge.png)' } }],
+  choices: [{ message: { content: `![x](http://127.0.0.1:${server.address().port}/huge.png)` } }],
 }));
 app.get('/huge.png', (_req, res) => {
   res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': String(200 * 1024 * 1024) });
@@ -245,11 +245,11 @@ app.post('/chmod/v1/images/generations', (_req, res) => {
 // 【r22-⑤】上游把图片链接指向【本机另一个端口】,且那个端点回真正的 image/png ——
 // 事后的 Content-Type 检查对它完全无效,只有"下载前不豁免跨源回环"这道闸拦得住。
 app.post('/evil/v1/chat/completions', (_req, res) => res.json({
-  choices: [{ message: { content: '![x](http://127.0.0.1:6703/evil.png)' } }],
+  choices: [{ message: { content: `![x](http://127.0.0.1:${evilServer.address().port}/evil.png)` } }],
 }));
 app.use('/api', imageRouter);
 
-// 那个"本机别的端口"的服务(6703)。evilHits 钉死"拒绝必须发生在 fetch 之前"。
+// 那个"本机别的端口"的服务(另起一个临时口)。evilHits 钉死"拒绝必须发生在 fetch 之前"。
 let evilHits = 0;
 const evilServer = createServer((_req, res) => {
   evilHits += 1;
@@ -257,23 +257,9 @@ const evilServer = createServer((_req, res) => {
   res.end(Buffer.from(PNG_B64, 'base64'));
 });
 
-// 端口只许 6702/6703,但隔壁分支的 E2E 也在用 → EADDRINUSE 退让重试,不当假失败。
-async function listenWithRetry(port, tries = 40, make = (p) => app.listen(p, '127.0.0.1')) {
-  for (let i = 0; i < tries; i++) {
-    const s = make(port);
-    const r = await new Promise((resolve) => {
-      s.once('listening', () => resolve({ ok: true }));
-      s.once('error', (e) => resolve({ ok: false, err: e }));
-    });
-    if (r.ok) return s;
-    if (r.err?.code !== 'EADDRINUSE') throw r.err;
-    await new Promise((done) => setTimeout(done, 500));
-  }
-  throw new Error(`端口 ${port} 持续被占用(隔壁 worktree 的 E2E?),重试 ${tries} 次后放弃`);
-}
-const server = await listenWithRetry(6702);
-await listenWithRetry(6703, 40, (p) => evilServer.listen(p, '127.0.0.1'));
-const BASE = 'http://127.0.0.1:6702';
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+await new Promise((r) => { const s = evilServer.listen(0, '127.0.0.1', () => r(s)); });
+const BASE = `http://127.0.0.1:${server.address().port}`;
 const api = async (method, path, body) => {
   const r = await fetch(`${BASE}${path}`, {
     method,
@@ -461,7 +447,7 @@ try {
     assert.ok(existsSync(r5.json.file), 't8: 同源回环正常落盘');
     // localhost 与 127.0.0.1 是同一个服务:用户填 localhost、本机服务回 127.0.0.1 的
     // 链接很常见,按字符串比 origin 会把这种正当用法误杀。
-    const aliasRelay = await mk('本机中转(localhost 别名)', 'chat', 'http://localhost:6702/fake/v1');
+    const aliasRelay = await mk('本机中转(localhost 别名)', 'chat', `http://localhost:${server.address().port}/fake/v1`);
     const r6 = await gen({ providerId: aliasRelay.json.id, prompt: 'x' });
     assert.equal(r6.status, 'done', `t8: localhost ↔ 127.0.0.1 同端口视为同源,不许误杀(${r6.text})`);
     for (const p of [localRelay, aliasRelay]) await api('DELETE', `/api/image-providers/${p.json.id}`);

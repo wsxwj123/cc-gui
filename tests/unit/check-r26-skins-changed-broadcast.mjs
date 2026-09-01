@@ -6,12 +6,12 @@
 //   ③删除不存在的 id → 404 且不广播(误广播哨兵);
 //   ④坏客户端不阻断:广播对 throw 的客户端免疫,响应仍 200(broadcast 既有逐客户端
 //     catch 语义在删除链路上成立)。
-// 隔离口径:makeTmpHome 先于 import 路由;端口只用 6704;真实 ~/.claude-gui 零触碰。
+// 隔离口径:makeTmpHome 先于 import 路由;端口取 OS 临时口(listen(0),真实端口从 server.address() 读回);真实 ~/.claude-gui 零触碰。
 // Run: node tests/unit/check-r26-skins-changed-broadcast.mjs
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeTmpHome, cleanupDirs, listenWithRetry, stopServer } from '../acceptance/r26/lib.mjs';
+import { makeTmpHome, cleanupDirs, stopServer } from '../acceptance/r26/lib.mjs';
 
 const TMP_HOME = makeTmpHome('d7-unit');
 process.on('exit', () => { try { cleanupDirs(TMP_HOME); } catch {} });
@@ -43,8 +43,8 @@ app.use('/api', skinsRouter);
 let server = null;
 let failure = null;
 try {
-  server = await listenWithRetry(6704, (p) => app.listen(p, '127.0.0.1'));
-  const BASE = 'http://127.0.0.1:6704';
+  server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const BASE = `http://127.0.0.1:${server.address().port}`;
   clients.add(badClient);
   clients.add(fakeClient);
 

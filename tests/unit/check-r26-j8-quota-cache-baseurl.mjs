@@ -5,7 +5,7 @@
 // 哨兵:①同 providerId 换 baseURL → 重新探测(串缓存哨兵:hitsB 从 0 涨);
 // ②改回原 baseURL → 命中旧缓存,零新请求(指纹稳定哨兵:hitsA 不涨);
 // ③keyTag 既有语义不回退(换 key 仍失效,回归由 check-provider-quota-probe 覆盖)。
-// 隔离 HOME,假上游全在 6703,绝不打真实第三方。跑完杀干净。
+// 隔离 HOME,假上游全在同一个临时口,绝不打真实第三方。跑完杀干净。
 // Run: node tests/unit/check-r26-j8-quota-cache-baseurl.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -39,7 +39,7 @@ for (const [tag, bump] of [['a', () => hitsA++], ['b', () => hitsB++]]) {
   });
 }
 const server = await new Promise((resolve, reject) => {
-  const s = app.listen(6703, '127.0.0.1', () => resolve(s));
+  const s = app.listen(0, '127.0.0.1', () => resolve(s));
   s.once('error', reject);
 });
 
@@ -50,15 +50,15 @@ const setBaseURL = async (base) => {
   await writeFile(join(GUI, 'active-provider.json'), JSON.stringify({ id: 'p1' }));
 };
 const get = async () => {
-  const r = await fetch('http://127.0.0.1:6703/api/provider-quota');
+  const r = await fetch(`http://127.0.0.1:${server.address().port}/api/provider-quota`);
   return r.json();
 };
 
 let n = 0;
 let failure = null;
 try {
-  const A = 'http://127.0.0.1:6703/relay-a/v1';
-  const B = 'http://127.0.0.1:6703/relay-b/v1';
+  const A = `http://127.0.0.1:${server.address().port}/relay-a/v1`;
+  const B = `http://127.0.0.1:${server.address().port}/relay-b/v1`;
 
   // 端点 A 首查:真探测(两条端点各一次)
   await setBaseURL(A);

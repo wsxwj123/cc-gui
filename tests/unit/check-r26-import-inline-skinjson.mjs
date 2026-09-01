@@ -10,12 +10,12 @@
 //   ⑦tier:2 → 422(空壳 T2 拒;T2 请走 trio 通道);
 //   ⑧format 非 cgui-skin/1 → 400 unsupported_format(全量校验复用哨兵);
 //   ⑨落盘内容与 zip 通道同构(skin.json + meta.json,响应 {id,name,warnings,manifest})。
-// 隔离口径:makeTmpHome 先于 import 路由;端口只用 6703;真实 ~/.claude-gui 零触碰。
+// 隔离口径:makeTmpHome 先于 import 路由;端口取 OS 临时口(listen(0),真实端口从 server.address() 读回);真实 ~/.claude-gui 零触碰。
 // Run: node tests/unit/check-r26-import-inline-skinjson.mjs
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeTmpHome, cleanupDirs, listenWithRetry, stopServer } from '../acceptance/r26/lib.mjs';
+import { makeTmpHome, cleanupDirs, stopServer } from '../acceptance/r26/lib.mjs';
 
 const TMP_HOME = makeTmpHome('d10-unit');
 process.on('exit', () => { try { cleanupDirs(TMP_HOME); } catch {} });
@@ -32,8 +32,8 @@ app.use('/api', skinsRouter);
 let server = null;
 let failure = null;
 try {
-  server = await listenWithRetry(6703, (p) => app.listen(p, '127.0.0.1'));
-  const BASE = 'http://127.0.0.1:6703';
+  server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const BASE = `http://127.0.0.1:${server.address().port}`;
   const post = (body) => fetch(`${BASE}/api/skins/import-inline`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(async (r) => ({ status: r.status, body: await r.json() }));

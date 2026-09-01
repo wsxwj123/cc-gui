@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // r26-H3 单测:custom-providers.json 落盘 0600 + 原子写 + 旧文件启动收回。
-// 隔离 HOME(mkdtemp),绝不碰真实 ~/.claude-gui。端口 6703。
+// 隔离 HOME(mkdtemp),绝不碰真实 ~/.claude-gui。端口取 OS 临时口(listen(0),真实端口从 server.address() 读回)。
 // 哨兵:①POST 创建后 stat mode&0o777 === 0o600;②落盘是原子写(rename 后无 tmp 残留);
 // ③旧 0644 文件经 ensureCustomProvidersMode 收 0600;④文件内容仍是合法 JSON。
 // Run: node tests/unit/check-custom-providers-mode.mjs
@@ -27,14 +27,14 @@ const app = express();
 app.use(express.json());
 app.use('/api', settingsRoutes);
 const server = await new Promise((res, rej) => {
-  const s = app.listen(6703, '127.0.0.1', () => res(s));
+  const s = app.listen(0, '127.0.0.1', () => res(s));
   s.once('error', rej);
 });
 
 let failure = null;
 try {
   // ① 创建 provider → 落盘 0600
-  const r = await fetch('http://127.0.0.1:6703/api/custom-providers', {
+  const r = await fetch(`http://127.0.0.1:${server.address().port}/api/custom-providers`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

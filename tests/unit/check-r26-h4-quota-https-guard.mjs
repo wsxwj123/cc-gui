@@ -6,7 +6,7 @@
 // ②http://127.0.0.1 → 豁免放行,探测真打到本地假上游;
 // ③https 回环(https://127.0.0.1)过了守卫(失败原因只能是 network 而非 blocked,
 //   证明拦截点不在守卫);④quota 路由用的就是 settings.js 同一个导出(源码钉,防各自实现)。
-// 隔离 HOME,假上游在 6703,绝不打真实第三方。跑完杀干净。
+// 隔离 HOME,端口取 OS 临时口(listen(0),真实端口从 server.address() 读回),绝不打真实第三方。跑完杀干净。
 // Run: node tests/unit/check-r26-h4-quota-https-guard.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
@@ -36,7 +36,7 @@ for (const ep of ['subscription', 'usage']) {
   });
 }
 const server = await new Promise((resolve, reject) => {
-  const s = app.listen(6703, '127.0.0.1', () => resolve(s));
+  const s = app.listen(0, '127.0.0.1', () => resolve(s));
   s.once('error', reject);
 });
 
@@ -44,12 +44,12 @@ await writeFile(join(GUI, 'custom-providers.json'), JSON.stringify([
   // http 公网 IP:守卫必须拦(https 强制),IP 字面量不触发真实 DNS
   { id: 'http-pub', name: 'http公网', type: 'openai', baseURL: 'http://8.8.8.8/v1', apiKey: 'dummy-h4', models: ['m'] },
   // http 回环:刻意豁免(本机中转是合法场景)
-  { id: 'http-lo', name: 'http回环', type: 'openai', baseURL: 'http://127.0.0.1:6703/relay/v1', apiKey: 'dummy-h4', models: ['m'] },
-  // https 回环:守卫放行,但 6703 是 http 服务 → 只会倒在网络上
-  { id: 'https-lo', name: 'https回环', type: 'openai', baseURL: 'https://127.0.0.1:6703/relay/v1', apiKey: 'dummy-h4', models: ['m'] },
+  { id: 'http-lo', name: 'http回环', type: 'openai', baseURL: `http://127.0.0.1:${server.address().port}/relay/v1`, apiKey: 'dummy-h4', models: ['m'] },
+  // https 回环:守卫放行,但假上游是 http 服务 → 只会倒在网络上
+  { id: 'https-lo', name: 'https回环', type: 'openai', baseURL: `https://127.0.0.1:${server.address().port}/relay/v1`, apiKey: 'dummy-h4', models: ['m'] },
 ]));
 const activate = (id) => writeFile(join(GUI, 'active-provider.json'), JSON.stringify({ id }));
-const get = async () => (await fetch('http://127.0.0.1:6703/api/provider-quota')).json();
+const get = async () => (await fetch(`http://127.0.0.1:${server.address().port}/api/provider-quota`)).json();
 
 let n = 0;
 let failure = null;
@@ -69,7 +69,7 @@ try {
   assert.ok(upstreamHits >= 2, 'H4②: http 回环豁免,探测正常打本地中转');
   n += 2;
 
-  // ③ https 回环过守卫(失败也只能是 network:6703 说的是 http,TLS 握手必败)
+  // ③ https 回环过守卫(失败也只能是 network:假上游说的是 http,TLS 握手必败)
   await activate('https-lo');
   const r3 = await get();
   assert.equal(r3.ok, false);

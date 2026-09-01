@@ -19,7 +19,7 @@
 //    撞名加序号)、轮询期间写进度、轮询中取消要立刻落地且归还并发名额。
 //
 // 全程不打真实网络:pollTask 的 fetch / sleep / now 全部注入;t10 的上游与图片链接
-// 都指向本机假服务(6703),真实 ~/.claude-gui 与真实网络一个都不碰。
+// 都指向本机假服务(临时口),真实 ~/.claude-gui 与真实网络一个都不碰。
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -618,7 +618,7 @@ try {
     assert.match(src, /text-error[^>]*>\{h\.error/, 't9【零回归】:报错文字仍渲染在图块内');
   }
 
-  // ───── 10. 端到端:本机假上游(6703)跑完 提交→轮询→4 张全落盘,证明接线真的通 ─────
+  // ───── 10. 端到端:本机假上游跑完 提交→轮询→4 张全落盘,证明接线真的通 ─────
   // t8 的源码锁只能证明"写了",这一节证明"跑得起来":多图循环、撞名加序号、files 字段、
   // 进度写盘、取消后名额归还。绝不打真实网络 —— 上游与图片链接都指向这个本机假服务。
   {
@@ -645,7 +645,7 @@ try {
           id: TASK_ID,
           status: 'completed',
           progress: 100,
-          result: { images: [{ url: [0, 1, 2, 3].map((i) => `http://127.0.0.1:6703/img/${i}.png`) }] },
+          result: { images: [{ url: [0, 1, 2, 3].map((i) => `http://127.0.0.1:${server.address().port}/img/${i}.png`) }] },
         },
       });
     });
@@ -655,21 +655,10 @@ try {
     app.get('/img/:n.png', (_req, res) => res.type('image/png').send(PNG));
     app.use('/api', (await import('../../server/routes/image.js')).default);
 
-    // 端口只许 6703/6704:隔壁分支的 E2E 也在用 → EADDRINUSE 退让重试,不当假失败。
-    let server = null;
-    for (let i = 0; i < 40 && !server; i++) {
-      const s = app.listen(6703, '127.0.0.1');
-      const r = await new Promise((resolve) => {
-        s.once('listening', () => resolve({ ok: true }));
-        s.once('error', (e) => resolve({ ok: false, err: e }));
-      });
-      if (r.ok) server = s;
-      else if (r.err?.code !== 'EADDRINUSE') throw r.err;
-      else await new Promise((done) => setTimeout(done, 500));
-    }
-    if (!server) throw new Error('端口 6703 持续被占用,放弃');
+    // 端口取 OS 临时口:写死会被同跑的用例抢,制造随机假红。
+    const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
 
-    const BASE = 'http://127.0.0.1:6703';
+    const BASE = `http://127.0.0.1:${server.address().port}`;
     const api = async (method, path, body) => {
       const r = await fetch(`${BASE}${path}`, {
         method,
