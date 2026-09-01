@@ -552,7 +552,9 @@ export async function saveImage(dir, baseName, buf) {
 // 5s 一档 = 上游文档建议的 3–5s 里最省的一档(查询不计费,但 MJ 实测 60s 才出图,更密无意义)。
 // 15 分钟本地上限:平台侧要 30 分钟才判超时并退款,GUI 挂半小时不合理 —— 到点写成 error
 // 并在文案里说明平台侧任务可能仍在跑。
-const TASK_POLL_INTERVAL_MS = 5_000;
+// 间隔允许被环境变量下调(同 GENERATE_TIMEOUT_MS 的先例):端到端单测要在秒级跑完
+// 提交→轮询→多图落盘这一整条,不设该变量时恒为 5s,产品行为一字不变。
+const TASK_POLL_INTERVAL_MS = Number(process.env.CGUI_IMAGE_TASK_POLL_INTERVAL_MS) || 5_000;
 const TASK_POLL_DEADLINE_MS = 15 * 60 * 1000;
 const TASK_POLL_TIMEOUT_MS = 30_000; // 单次查询的超时:一次查不到不判死,等下一轮
 

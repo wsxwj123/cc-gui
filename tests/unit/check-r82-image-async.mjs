@@ -13,18 +13,24 @@
 //    且它必须定义在 runImageJob 【之前】(check-r51 用 runImageJob→router 的源码切片数
 //    安全锚点,pollTask 落进切片里会把那条锁的语义搞错)。
 //  ⑤ 同步三协议零回归:openai / gemini / chat 的产物逐字不变,extractImage 不认 mj。
+//  ⑥ 源码断言只能证明"写了",t10 端到端证明"跑得起来":提交→轮询→4 张全落盘(含同秒
+//    撞名加序号)、轮询期间写进度、轮询中取消要立刻落地且归还并发名额。
 //
-// 全程不打真实网络:pollTask 的 fetch / sleep / now 全部注入。
+// 全程不打真实网络:pollTask 的 fetch / sleep / now 全部注入;t10 的上游与图片链接
+// 都指向本机假服务(6703),真实 ~/.claude-gui 与真实网络一个都不碰。
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // 必须在 import 路由前改 HOME:真实 ~/.claude-gui 一个字节不碰(红线)。
 const TMP_HOME = mkdtempSync(join(tmpdir(), 'cgui-r82-home-'));
+const SAVE_DIR = mkdtempSync(join(tmpdir(), 'cgui-r82-save-'));
 process.env.HOME = TMP_HOME;
 process.env.USERPROFILE = TMP_HOME;
+// 只为让 t10 的端到端在秒级跑完(产品默认仍是 5s)。必须在 import 路由之前设。
+process.env.CGUI_IMAGE_TASK_POLL_INTERVAL_MS = '30';
 mkdirSync(join(TMP_HOME, '.claude-gui'), { recursive: true });
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -304,7 +310,9 @@ try {
       assert.ok(doFetch.calls[0].opts.signal, 't7: 轮询挂了 signal(可取消/单次超时)');
       // 先等再查:第一次 fetch 之前必须已经等过一轮(提交那一刻不可能出图)。
       assert.equal(sleep.seen.length, 4, 't7: 每轮各等一次');
-      assert.equal(sleep.seen[0].ms, 5000, 't7: 轮询间隔 5s(文档建议 3–5s)');
+      // 本进程把间隔下调到 30ms 只为让 t10 秒级跑完;"默认 5s"这条锁在 t8 的源码断言里。
+      assert.equal(sleep.seen[0].ms, Number(process.env.CGUI_IMAGE_TASK_POLL_INTERVAL_MS),
+        't7: 每轮等的是配置的轮询间隔');
       assert.ok(sleep.seen[0].hasSignal, 't7【可中断等待】:sleep 收到 signal,取消不必等满 5s');
     }
 
@@ -459,7 +467,8 @@ try {
     assert.match(poll, /\.\.\.proxy/, 't8: 轮询走 provider 自己的代理');
     assert.match(poll, /AbortSignal\.any\(\[signal/, 't8: 轮询可被取消,且单次查询有超时');
     assert.match(src, /TASK_POLL_DEADLINE_MS = 15 \* 60 \* 1000/, 't8: 15 分钟本地上限写在常量里');
-    assert.match(src, /TASK_POLL_INTERVAL_MS = 5_000/, 't8: 5s 轮询间隔写在常量里');
+    assert.match(src, /TASK_POLL_INTERVAL_MS = Number\(process\.env\.CGUI_IMAGE_TASK_POLL_INTERVAL_MS\) \|\| 5_000/,
+      't8: 5s 轮询间隔写在常量里(仅允许单测经环境变量下调)');
 
     const runner = src.slice(runnerStart, src.indexOf("router.post('/image/generate'", runnerStart));
     // 顺序契约:先试同步取图,取不到才试任务制 —— 反过来会让同步响应绕道轮询。
@@ -498,10 +507,160 @@ try {
     assert.match(src, /生成中 · \$\{elapsedSec\(h\)\}s/, 't9【零回归】:列表仍显示已耗时');
     assert.match(src, /text-error[^>]*>\{h\.error/, 't9【零回归】:报错文字仍渲染在图块内');
   }
+
+  // ───── 10. 端到端:本机假上游(6703)跑完 提交→轮询→4 张全落盘,证明接线真的通 ─────
+  // t8 的源码锁只能证明"写了",这一节证明"跑得起来":多图循环、撞名加序号、files 字段、
+  // 进度写盘、取消后名额归还。绝不打真实网络 —— 上游与图片链接都指向这个本机假服务。
+  {
+    const express = (await import('express')).default;
+    const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    const app = express();
+    app.use(express.json({ limit: '2mb' }));
+
+    const seenSubmits = [];
+    let pollCount = 0;
+    // 提交:回真机原件的形态(data 是数组、只有 task_id)。
+    app.post('/mj/v1/midjourney/generations', (req, res) => {
+      seenSubmits.push({ body: req.body, auth: req.headers.authorization });
+      res.json(SUBMIT);
+    });
+    // 轮询:前两次 processing(带进度),第三次 completed —— 4 个链接指回本机图片口。
+    app.get('/mj/v1/tasks/:id', (req, res) => {
+      pollCount += 1;
+      if (req.params.id !== TASK_ID) return res.status(404).json({ message: 'task not found' });
+      if (pollCount < 3) return res.json({ code: 200, data: { id: TASK_ID, status: 'processing', progress: pollCount * 30 } });
+      return res.json({
+        code: 200,
+        data: {
+          id: TASK_ID,
+          status: 'completed',
+          progress: 100,
+          result: { images: [{ url: [0, 1, 2, 3].map((i) => `http://127.0.0.1:6703/img/${i}.png`) }] },
+        },
+      });
+    });
+    // 永不完成的任务:用来验"取消不会把并发名额卡死"。
+    app.post('/never/v1/midjourney/generations', (_req, res) => res.json({ code: 200, data: [{ task_id: 'task_never' }] }));
+    app.get('/never/v1/tasks/:id', (_req, res) => res.json({ code: 200, data: { status: 'processing', progress: 1 } }));
+    app.get('/img/:n.png', (_req, res) => res.type('image/png').send(PNG));
+    app.use('/api', (await import('../../server/routes/image.js')).default);
+
+    // 端口只许 6703/6704:隔壁分支的 E2E 也在用 → EADDRINUSE 退让重试,不当假失败。
+    let server = null;
+    for (let i = 0; i < 40 && !server; i++) {
+      const s = app.listen(6703, '127.0.0.1');
+      const r = await new Promise((resolve) => {
+        s.once('listening', () => resolve({ ok: true }));
+        s.once('error', (e) => resolve({ ok: false, err: e }));
+      });
+      if (r.ok) server = s;
+      else if (r.err?.code !== 'EADDRINUSE') throw r.err;
+      else await new Promise((done) => setTimeout(done, 500));
+    }
+    if (!server) throw new Error('端口 6703 持续被占用,放弃');
+
+    const BASE = 'http://127.0.0.1:6703';
+    const api = async (method, path, body) => {
+      const r = await fetch(`${BASE}${path}`, {
+        method,
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const text = await r.text();
+      let json = null; try { json = JSON.parse(text); } catch { /* 非 JSON:留 text 给断言 */ }
+      return { status: r.status, text, json };
+    };
+    const waitFor = async (fn, ms = 15000) => {
+      const deadline = Date.now() + ms;
+      for (;;) {
+        const v = await fn();
+        if (v) return v;
+        if (Date.now() > deadline) return null;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    const entryOf = async (id) => {
+      const h = await api('GET', '/api/image/history');
+      return (h.json?.history || []).find((e) => e.id === id) || null;
+    };
+
+    try {
+      // ① 多图任务:一次落 4 个文件。
+      const mk = await api('POST', '/api/image-providers', {
+        name: 'MJ 假上游', protocol: 'mj', baseURL: `${BASE}/mj/v1`, apiKey: KEY, model: 'midjourney',
+        size: '16:9', savePath: SAVE_DIR,
+      });
+      assert.equal(mk.status, 200, `t10: mj provider 建得起来(${mk.text})`);
+
+      const sub = await api('POST', '/api/image/generate', { providerId: mk.json.id, prompt: '一只猫' });
+      assert.equal(sub.status, 200, `t10: 提交受理(${sub.text})`);
+      assert.ok(sub.json.jobId, 't10: 秒回 jobId(与既有任务化口径一致)');
+
+      // 提交请求形态:只有 prompt,不带 model / size / n。
+      const submitted = await waitFor(async () => (seenSubmits.length ? seenSubmits[0] : null), 5000);
+      assert.ok(submitted, 't10: 上游收到了提交');
+      assert.deepEqual(submitted.body, { prompt: '一只猫' }, 't10【下发内容】:只有 prompt(size 填了也不发)');
+      assert.equal(submitted.auth, `Bearer ${KEY}`, 't10: 提交带鉴权');
+
+      // 轮询期间:进度写进历史条目(状态仍是 running)。
+      const sawProgress = await waitFor(async () => {
+        const e = await entryOf(sub.json.jobId);
+        return e && e.status === 'running' && typeof e.progress === 'number' ? e : null;
+      }, 8000);
+      assert.ok(sawProgress, 't10【进度】:轮询期间把 progress 写进条目');
+      assert.equal(sawProgress.status, 'running', 't10: 写进度不改状态');
+
+      const done = await waitFor(async () => {
+        const e = await entryOf(sub.json.jobId);
+        return e && e.status !== 'running' ? e : null;
+      });
+      assert.ok(done, 't10: 15s 内落终态');
+      assert.equal(done.status, 'done', `t10【端到端】:多图任务必须成功(实际 ${done.status} / ${done.error})`);
+      assert.equal(done.files?.length, 4, `t10【多图】:4 个链接落 4 个文件(实际 ${JSON.stringify(done.files)})`);
+      assert.equal(done.file, done.files[0], 't10: file 仍指第一张(既有 UI 不用改)');
+      assert.match(done.previewUrl, /\/api\/image\/preview\?file=/, 't10: previewUrl 指向第一张');
+      assert.equal(done.bytes, PNG.length * 4, 't10: bytes 是 4 张之和');
+      // 同一秒落 4 张同名图 → saveImage 的 wx + 序号必须让 4 张都活下来。
+      const onDisk = readdirSync(SAVE_DIR).filter((f) => f.endsWith('.png'));
+      assert.equal(onDisk.length, 4, `t10【撞名】:4 张全在磁盘上(实际 ${onDisk.join(',')})`);
+      assert.equal(new Set(done.files).size, 4, 't10: 4 个路径互不相同');
+      for (const f of done.files) assert.ok(existsSync(f), `t10: ${f} 真的在磁盘上`);
+
+      // ② 取消一个永不完成的任务:条目落 cancelled,且并发名额归还(还能再发)。
+      const nv = await api('POST', '/api/image-providers', {
+        name: '永不完成', protocol: 'mj', baseURL: `${BASE}/never/v1`, apiKey: KEY, model: 'midjourney', savePath: SAVE_DIR,
+      });
+      const stuck = await api('POST', '/api/image/generate', { providerId: nv.json.id, prompt: '不会好' });
+      assert.equal(stuck.status, 200, 't10: 卡住的任务也先受理');
+      await waitFor(async () => {
+        const e = await entryOf(stuck.json.jobId);
+        return e && typeof e.progress === 'number' ? e : null;
+      }, 5000);
+      const t0 = Date.now();
+      const cx = await api('POST', `/api/image/jobs/${stuck.json.jobId}/cancel`);
+      assert.equal(cx.json?.ok, true, 't10: 取消端点受理');
+      const cancelled = await waitFor(async () => {
+        const e = await entryOf(stuck.json.jobId);
+        return e?.status === 'cancelled' ? e : null;
+      }, 5000);
+      assert.ok(cancelled, 't10【取消】:轮询中的任务能被取消');
+      assert.ok(Date.now() - t0 < 2000, `t10【可中断等待】:取消要立刻落地,不等满一轮(实际 ${Date.now() - t0}ms)`);
+      assert.ok(!cancelled.error, 't10: 取消不写 error 文案(与 r54 口径一致)');
+
+      // 名额归还:连开 3 个卡住的任务仍能受理(上限 3),说明取消掉的那个没占着不放。
+      const again = await api('POST', '/api/image/generate', { providerId: nv.json.id, prompt: '再来' });
+      assert.equal(again.status, 200, `t10【名额归还】:取消后还能发新任务(实际 ${again.status} ${again.text})`);
+      await api('POST', `/api/image/jobs/${again.json.jobId}/cancel`);
+    } finally {
+      server.closeAllConnections?.();
+      server.close();
+      await new Promise((r) => server.once('close', r));
+    }
+  }
 } catch (e) {
   failure = e;
 } finally {
-  rmSync(TMP_HOME, { recursive: true, force: true });
+  for (const d of [TMP_HOME, SAVE_DIR]) rmSync(d, { recursive: true, force: true });
 }
 if (failure) throw failure;
 
