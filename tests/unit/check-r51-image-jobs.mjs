@@ -239,7 +239,8 @@ if (failure) throw failure;
   const src = readFileSync(join(REPO, 'server/routes/image.js'), 'utf8');
   const count = (s, re) => (s.match(re) || []).length;
   // 全文件基线(r51 之前实测值):安全锚点只许搬位置,不许被删被弱化。
-  assert.equal(count(src, /await assertPublicBaseURL\(/g), 4, 't6: assertPublicBaseURL 调用点数量不变(校验/拉模型/前置/下载复检)');
+  // r84:新增 /image/actions(MJ 二次操作)后多一处前置校验 → 基线 4 → 5。只增不减。
+  assert.equal(count(src, /await assertPublicBaseURL\(/g), 5, 't6: assertPublicBaseURL 调用点数量不变(校验/拉模型/生成前置/动作前置/下载复检)');
   // r82 新增第四处外联(pollTask 查任务状态)→ 两条基线各 +1 / +2:该处同样带
   // redirect:'manual',且错误分支与成功分支各限量读一次。锁的语义仍是"只许加不许减"
   // —— runner 切片内的锚点数(下面 t6)一个没变,证明既有链路原样。

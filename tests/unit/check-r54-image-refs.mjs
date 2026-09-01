@@ -497,7 +497,8 @@ if (failure) throw failure;
   const src = readFileSync(join(REPO, 'server/routes/image.js'), 'utf8');
   const count = (s, re) => (s.match(re) || []).length;
   // r51 基线:安全锚点只许加,不许被删被弱化(参考图与取消都不该动这些)。
-  assert.equal(count(src, /await assertPublicBaseURL\(/g), 4, 't8: assertPublicBaseURL 调用点数量不变');
+  // r84:新增 /image/actions(MJ 二次操作)后多一处前置校验 → 基线 4 → 5。只增不减。
+  assert.equal(count(src, /await assertPublicBaseURL\(/g), 5, 't8: assertPublicBaseURL 调用点数量不变');
   // r82 新增第四处外联(pollTask 查任务状态,带同款 redirect:'manual' + 两处限量读)→
   // 两条基线各 +1 / +2。"只许加不许减"的语义没变;既有链路原样的真牙在
   // check-r51 t6 与 check-r82 t8 的 runner 切片计数(那里一个都没变)。

@@ -300,6 +300,12 @@ function ProviderForm({ initial, onDone, onCancel }) {
             />
             <span className="text-[10px] text-ink-faint font-body">{form.size ? `当前 ${form.size}` : '未指定，由服务端取默认比例'}</span>
           </div>
+          {/* 存量条目可能存着像素值(r82 时该字段不下发,填什么都不影响);现在它会真发出去。 */}
+          {form.size && !/^\d+:\d+$/.test(form.size) && (
+            <span className="text-[10px] text-error font-body leading-snug block">
+              当前值不是宽高比格式，会被上游按宽高比解析。请选择上面的预设或填写两格自定义值。
+            </span>
+          )}
           <span className="text-[10px] text-ink-faint font-body leading-snug block">
             这里填的是比例不是像素。出图像素由服务端按该比例决定，提交时无法指定；需要更大的图，在出图后对单张使用放大。
           </span>
