@@ -15,7 +15,8 @@
 //  ⑤ 清空必须连 localStorage 草稿一起清 —— 只清内存的话刷新就回来了(草稿是刻意持久的)。
 //  ⑥ U/V 动作:端点、body 形态、index 边界都由文档钉死(见 .devflow/RESEARCH-r84-mj-actions.md);
 //    网格位置→index 的映射(左上=1 右上=2 左下=3 右下=4)写死并在此锁住。
-//  ⑦ 前端的版本/速度候选与服务端白名单同源:两处清单不一致时前端能选出后端拒收的值。
+//  ⑦ 前端候选与服务端白名单同源:版本一一对应、速度是子集(默认档在界面上是空串)。
+//    两处清单不一致时前端能选出后端拒收的值。
 //
 // 变异自证(逐条实跑过"改坏就红",不是"写法没变就绿"的文本锁;改动只在源码副本上做、跑完还原):
 //  - pickedIndex 去掉钳位(return n)            → t4【越界】红
@@ -63,6 +64,20 @@ const mj = (over) => buildImageRequest({ protocol: 'mj', ...BASE, ...over }, '�
   // 空 size 不发键(不是发空串)。
   assert.equal('size' in mj({}).body, false, 't1: 未填尺寸时不出现 size 键');
   assert.equal('size' in mj({ size: '' }).body, false, 't1: 空串尺寸不发键');
+
+  // 【升级回归】r82 时 size 不下发,存量 provider 可能存着从别的协议抄来的像素值;
+  // 现在它会被上游当 --ar 解析 → 协议层这个共同经过点只放行 W:H 形态,其余静默不发键
+  // (不报错、不阻断:按默认比例出图比整单失败好)。
+  for (const bad of ['1024x1024', '3840x2160', '1K', 'auto', '16:', ':9', '16x9', '16 : 9', 'abc']) {
+    assert.equal('size' in mj({ size: bad }).body, false, `t1【存量像素值】:${bad} 不当宽高比发出去`);
+  }
+  for (const good of ['16:9', '1:1', '9:16', '21:9', '1024:768']) {
+    assert.equal(mj({ size: good }).body.size, good, `t1: 合法比例 ${good} 照发`);
+  }
+  assert.equal(mj({ size: '  16:9  ' }).body.size, '16:9', 't1: 比例值两端空白去掉再发');
+  // 只作用于 mj:openai 的像素尺寸一如既往照发(别把守卫写到公共路径上)。
+  assert.equal(buildImageRequest({ protocol: 'openai', ...BASE, model: 'gpt-image-2', size: '1024x1024' }, 'p').body.size, '1024x1024',
+    't1【只管 mj】:openai 的像素尺寸不受影响');
 
   // extra 优先:同名键覆盖表单值(与其余三协议的 extra 语义一致)。
   assert.equal(mj({ size: '16:9', extra: { size: '1:1' } }).body.size, '1:1', 't1: extra 覆盖 size');
@@ -202,10 +217,11 @@ const mj = (over) => buildImageRequest({ protocol: 'mj', ...BASE, ...over }, '�
   for (const v of grabbed) assert.ok(MJ_VERSIONS.includes(v), `t7: 前端候选 ${v} 不在服务端白名单里`);
   assert.deepEqual([...grabbed].sort(), [...MJ_VERSIONS].sort(), 't7: 前后端版本清单必须一一对应');
 
+  // 速度是【子集】不是一一对应:界面把默认档写成空串(不下发 speed 键)而非字面量 'relax'。
   const speeds = [...(PANEL.match(/const MJ_SPEEDS = \[[\s\S]*?\];/) || [''])[0].matchAll(/id: '([^']*)'/g)]
-    .map((m) => m[1]).filter(Boolean);
-  assert.ok(speeds.length, 't7: 没能读出前端速度候选');
-  for (const s of speeds) assert.ok(MJ_SPEEDS.includes(s), `t7: 前端速度候选 ${s} 不在服务端白名单里`);
+    .map((m) => m[1]);
+  assert.ok(speeds.includes(''), 't7: 界面必须有"默认"档(空串 = 不下发 speed 键)');
+  for (const s of speeds.filter(Boolean)) assert.ok(MJ_SPEEDS.includes(s), `t7: 前端速度候选 ${s} 不在服务端白名单里`);
 }
 
 // ───────────────── 8. U/V 二次操作:端点 / body / 边界 / 接线 ─────────────────
@@ -264,6 +280,19 @@ const mj = (over) => buildImageRequest({ protocol: 'mj', ...BASE, ...over }, '�
   assert.match(PANEL, /body: JSON\.stringify\(\{ jobId: h\.id, action, index \}\)/, 't8: 提交体形态');
   assert.match(PANEL, /const MJ_ACTION_LABEL = \{ upscale: '放大', variation: '变体' \}/, 't8: 用中文动作名而非 U\/V 编号当主标签');
   assert.match(PANEL, /来自上一任务第 \$\{h\.mjIndex\} 张/, 't8【可追溯】:新条目标出来源');
+
+  // 【付费误触】动作条只给【选中那张】渲染。用 opacity 藏是不够的:computed opacity:0 的
+  // 按钮照样命中 elementFromPoint,而动作条盖住缩略图底部约 1/4 —— 触屏上"点一下选中"的
+  // 第一下就会落在隐藏按钮上,直接提交一个要计费的任务(审查用纯触摸事件实测复现过)。
+  const strip = (PANEL.match(/const imageStrip = \(h\) => \{[\s\S]*?\n  \};/) || [''])[0];
+  assert.ok(strip, 't8: 找得到 imageStrip');
+  assert.match(strip, /\{canAct && i === cur && \(/, 't8【付费误触】:动作条只在选中那张上渲染');
+  const bar = (strip.match(/\{canAct[\s\S]*?\n            \)\}/) || [''])[0];
+  assert.ok(bar.includes('submitAction'), 't8: 切到的是动作条那一段');
+  // 若哪天改回"隐藏但保留在 DOM 里",必须同时挡住点击 —— 否则这条红。
+  assert.equal(/opacity-0|invisible/.test(bar) && !/pointer-events-none/.test(bar), false,
+    't8【付费误触】:隐藏态的动作条必须同时 pointer-events-none(或干脆不渲染)');
+  assert.equal(/group-hover/.test(bar), false, 't8: 动作条不靠 hover 出现(触屏没有 hover)');
 }
 
 

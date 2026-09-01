@@ -69,6 +69,8 @@ export const I2I_MODES = ['edits', 'generations-image'];
 //    mjVersionFields 里拆回两个字段 —— UI 少一个"两个控件必须配对填对"的坑。
 //  - 速度:relax(默认) / fast / turbo。
 // 空串 = 不指定,该键不下发(由上游取默认)。
+// 宽高比形态:两个正整数加冒号(文档示例 16:9 / 1:1 / 9:16)。像素值 1024x1024 不匹配。
+export const MJ_RATIO_RE = /^\d+:\d+$/;
 export const MJ_VERSIONS = ['8.2', '8.1', '7', '6.1', '5.2', '5.1', 'niji7', 'niji6'];
 export const MJ_SPEEDS = ['relax', 'fast', 'turbo'];
 
@@ -224,7 +226,11 @@ export function buildImageRequest(config, prompt, refs) {
     // (与其余三种协议的 extra 语义一致)。空值一律不发该键,别发空串。
     // ⚠️ 本分支【不使用参考图】(list 有值也不发),UI 已就此给出说明。
     const body = { prompt: text };
-    if (cfg.size) body.size = String(cfg.size);
+    // size 在本协议是【宽高比】(--ar):不是 W:H 形态的值一律【不发】而不是原样透传 ——
+    // r82 时该字段不下发,存量 provider 完全可能存着从别的协议抄来的像素值(1024x1024),
+    // 升级后原样发出去就成了 --ar 1024x1024。守卫放在协议层这个共同经过点(表单提示只有
+    // 打开表单才看得到);静默忽略而不是报错:按默认比例出图比整单失败对用户更好。
+    if (MJ_RATIO_RE.test(String(cfg.size || '').trim())) body.size = String(cfg.size).trim();
     Object.assign(body, mjVersionFields(cfg.mjVersion));
     if (cfg.mjSpeed) body.speed = String(cfg.mjSpeed);
     return {

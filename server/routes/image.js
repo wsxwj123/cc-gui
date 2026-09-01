@@ -16,7 +16,7 @@ import {
   IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, I2I_MODES, buildImageRequest, extractImage,
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
   geminiModelsRequest, extractTaskId, buildTaskPollRequest, extractTaskState,
-  MJ_VERSIONS, MJ_SPEEDS, buildMjActionRequest,
+  MJ_VERSIONS, MJ_SPEEDS, MJ_RATIO_RE, buildMjActionRequest,
 } from '../utils/image-protocols.js';
 import { readCapped } from '../utils/read-capped.js';
 // r56 按 provider 生图代理:生图链路的三处外联(生成 POST / 图片下载 / 拉模型)统一
@@ -338,6 +338,12 @@ async function validateBody(body) {
   if (mjVersion && !MJ_VERSIONS.includes(mjVersion)) return { error: `Midjourney 版本必须是 ${MJ_VERSIONS.join(' / ')}` };
   const mjSpeed = body?.mjSpeed === undefined || body?.mjSpeed === null ? '' : String(body.mjSpeed);
   if (mjSpeed && !MJ_SPEEDS.includes(mjSpeed)) return { error: `Midjourney 速度必须是 ${MJ_SPEEDS.join(' / ')}` };
+  // mj 的 size 是宽高比不是像素。新保存的当场拒(填错要即时可见);【存量条目不受这里管】——
+  // 它们不经过保存,由协议层的同款守卫静默忽略掉非比例值(见 buildImageRequest 的 mj 分支)。
+  const sizeStr = typeof size === 'string' ? size.trim() : '';
+  if (protocol === 'mj' && sizeStr && !MJ_RATIO_RE.test(sizeStr)) {
+    return { error: 'Midjourney 的尺寸是宽高比（如 16:9 / 1:1 / 9:16），不是像素尺寸' };
+  }
   return {
     value: {
       i2iMode,

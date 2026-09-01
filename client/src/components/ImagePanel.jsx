@@ -44,7 +44,8 @@ const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: 
 // ─────────────────────── r84 Midjourney 参数的界面取值(与服务端清单同源) ───────────────────────
 // 服务端权威清单在 server/utils/image-protocols.js 的 MJ_VERSIONS / MJ_SPEEDS,那里才是校验闸;
 // 这里是同一份值的界面副本(前端不 import 服务端代码)。tests/unit/check-r84-mj-actions.mjs
-// 会比对两处,改了一边漏改另一边就红。
+// 比对两处:版本【一一对应】,速度是【子集】—— 界面把默认档写成空串(= 不下发 speed 键)
+// 而不是字面量 'relax',所以前端只有 fast / turbo 两个真值。
 // 版本清单出自 apimart 文档 imagine.md 原文「线上已验证可用版本:8.2、8.1、7、6.1、5.2、5.1、
 // niji 7、niji 6」;niji 不是"另一种版本号",是 niji:true + version:"7"/"6" 的搭配,
 // 故界面按【写实 / 动漫】两档分组,存储仍是一个字符串(niji 档在协议层拆回两个字段)。
@@ -763,18 +764,21 @@ export default function ImagePanel() {
     return (
       <div className="grid grid-cols-4 gap-1">
         {list.map((f, i) => (
-          <div key={f} className={`relative group rounded overflow-hidden border ${i === cur ? 'border-accent' : 'border-canvas-deep hover:border-ink-faint'}`}>
+          <div key={f} className={`relative rounded overflow-hidden border ${i === cur ? 'border-accent' : 'border-canvas-deep hover:border-ink-faint'}`}>
             <button
               type="button"
               onClick={() => pickShot(h, i)}
-              title={`第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）：点击选中，大图与单图操作都作用于它`}
+              title={`第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）：点击选中，大图与单图操作都作用于它；选中后这张下方出现放大 / 变体`}
               className="block w-full"
             >
               <img src={entryPreviewUrl(f)} alt={`第 ${i + 1} 张`} className="w-full aspect-square object-cover" />
             </button>
-            {canAct && (
-              // 选中那张常驻显示,其余悬停才出 —— 触屏没有悬停,先点一下选中就能拿到入口。
-              <div className={`absolute inset-x-0 bottom-0 flex gap-px transition-opacity ${i === cur ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+            {canAct && i === cur && (
+              // 【只给选中那张渲染】动作条,不用 opacity 藏 —— computed opacity:0 的按钮仍然
+              // 命中 elementFromPoint,它盖住缩略图底部约 1/4:在没有 hover 的触屏上,
+              // "点一下选中"的第一下就会落在隐藏按钮上直接提交一个【要计费】的任务。
+              // 隐藏态加 pointer-events-none 也能挡,但少一个"两个类必须同时对"的失效面。
+              <div className="absolute inset-x-0 bottom-0 flex gap-px">
                 {['upscale', 'variation'].map((act) => (
                   <button
                     type="button"
