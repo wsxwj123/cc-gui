@@ -1269,4 +1269,56 @@ router.post('/export-session', async (req, res) => {
   }
 });
 
+// 允许落盘的扩展名。**白名单不是装饰**:这个端点写的是任意字节,放开扩展名就等于
+// 允许写 .command/.sh/.js 之类"落盘即可执行"的东西。genui 导出只需要这三种。
+const EXPORT_EXTS = ['png', 'csv', 'json'];
+
+// POST /api/export-file { base64, ext, fileName?, targetPath? } — 把二进制导出物落盘。
+// r69 genui 图表导出用。与上面 /api/export-session **同一条通道、同一套门禁**,区别只在
+// 载荷是 base64 二进制(PNG)而不是 Markdown 文本:Tauri 的 WKWebView 拦 blob URL 的
+// a[download](点了没反应,会话导出当年就是为这个才加的后端落盘),所以 Tauri 环境下
+// 前端拿系统保存对话框选路径 → 这里写盘;浏览器环境前端仍走 blob 下载,不进这里。
+router.post('/export-file', async (req, res) => {
+  const b64 = typeof req.body?.base64 === 'string' ? req.body.base64 : '';
+  const ext = String(req.body?.ext || '').toLowerCase();
+  if (!b64) return res.status(400).json({ error: 'base64 必填' });
+  if (!EXPORT_EXTS.includes(ext)) return res.status(400).json({ error: '不支持的导出类型' });
+  try {
+    let target;
+    const tp = typeof req.body?.targetPath === 'string' ? req.body.targetPath.trim() : '';
+    if (tp) {
+      if (tp.includes('\0')) return res.status(400).json({ error: 'targetPath 非法' });
+      // 门禁与 /api/export-session 逐条相同:本机请求(桌面 app 的原生保存对话框)
+      // 放行任意绝对路径但拒 ../. 段;局域网客户端仍锁在 $HOME 下。
+      if (isLocalReq(req)) {
+        const segs = tp.split(/[\\/]+/);
+        if (!isAbsolute(tp) || segs.some((s) => s === '.' || s === '..')) {
+          return res.status(400).json({ error: 'targetPath 非法' });
+        }
+        target = resolve(tp);
+      } else {
+        try {
+          target = resolveUnderHome(tp, { label: 'targetPath', requireCanonical: true });
+        } catch (e) { return res.status(400).json({ error: e.message }); }
+      }
+      target = target.toLowerCase().endsWith(`.${ext}`) ? target : `${target}.${ext}`;
+      await mkdir(dirname(target), { recursive: true });
+    } else {
+      let fileName = String(req.body?.fileName || `导出.${ext}`)
+        .replace(/[/\\]/g, '_')
+        .replace(/[^\w一-龥.\-\s]/g, '')
+        .trim()
+        .slice(0, 120) || `导出.${ext}`;
+      if (!fileName.toLowerCase().endsWith(`.${ext}`)) fileName += `.${ext}`;
+      const dir = join(homedir(), 'Downloads');
+      await mkdir(dir, { recursive: true });
+      target = join(dir, fileName);
+    }
+    await writeFile(target, Buffer.from(b64, 'base64'));
+    res.json({ ok: true, path: target });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
