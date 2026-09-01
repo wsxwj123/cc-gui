@@ -316,6 +316,13 @@ export const MermaidNode = memo(function MermaidNode({ node }: { node: GenuiMerm
       } catch {
         if (alive) setFailed(true)
       }
+    }).catch(() => {
+      // CGUI-PATCH: 上面那层 try/catch 只护得住 renderMermaid(图语法错,以及它内部
+      // import('mermaid') 拉引擎大 chunk 失败);胶水 import() 自身 reject(离线、旧部署
+      // 的 chunk hash 404)没人接 ⟹ failed 永远停在 false,界面永卡 <pre>源码</pre> +
+      // "渲染中…",外加一条 unhandled rejection。mermaid-lazy.ts 承诺的"chunk 加载失败
+      // 就显示纯源码降级"靠这条兑现。
+      if (alive) setFailed(true)
     })
     return () => { alive = false }
   }, [code, themeEpoch])
