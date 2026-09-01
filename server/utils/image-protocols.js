@@ -61,6 +61,25 @@ export function geminiModelsRequest(baseURL, apiKey) {
 // r54 图生图:参考图形态 { name, mime, base64 }(路由层已完成读盘/解码/校验,本文件仍零 IO)。
 // dataURI 走小写 mime —— 方舟明确要求 `data:image/<小写格式>;base64,<编码>`。
 export const I2I_MODES = ['edits', 'generations-image'];
+// ───────────────────────── r84 Midjourney 结构化参数的取值范围 ─────────────────────────
+// 取值一律来自 apimart 文档 imagine.md「结构化参数」表与其下的版本说明,不是猜的:
+//  - 版本:文档原文「线上已验证可用版本:8.2、8.1、7、6.1、5.2、5.1、niji 7、niji 6」。
+//    主版本走 body 的 version;Niji 走 niji:true + version:"7"/"6"(计费归一化成 niji7/niji6),
+//    即 niji 与 version 【不互斥,是搭配使用】。这里把两者压成一个下拉值,niji 档在
+//    mjVersionFields 里拆回两个字段 —— UI 少一个"两个控件必须配对填对"的坑。
+//  - 速度:relax(默认) / fast / turbo。
+// 空串 = 不指定,该键不下发(由上游取默认)。
+export const MJ_VERSIONS = ['8.2', '8.1', '7', '6.1', '5.2', '5.1', 'niji7', 'niji6'];
+export const MJ_SPEEDS = ['relax', 'fast', 'turbo'];
+
+/** 版本下拉值 → 下发字段。'niji7' → { niji:true, version:'7' };未知/空值 → {}(不发)。 */
+export function mjVersionFields(v) {
+  const val = typeof v === 'string' ? v.trim() : '';
+  if (!MJ_VERSIONS.includes(val)) return {};
+  const niji = val.startsWith('niji');
+  return niji ? { niji: true, version: val.slice(4) } : { version: val };
+}
+
 function refDataUri(ref) {
   return `data:${String(ref.mime || 'image/png').toLowerCase()};base64,${ref.base64}`;
 }
@@ -73,7 +92,7 @@ function normRefs(refs) {
  * { url, headers, body, form, altHeaders }。form 非空 = multipart 形态(此时 body 为 null,
  * 且 headers 不带 Content-Type —— 交给 fetch 自己写 boundary)。
  * altHeaders 仅 gemini 非空(认证头回落),其余为 null。
- * config: { protocol, baseURL, apiKey, model, size, extra, i2iMode }
+ * config: { protocol, baseURL, apiKey, model, size, extra, i2iMode, mjVersion, mjSpeed }
  *
  * 红线:refs 为空时,各协议构造出的请求与加本功能之前逐字一致(纯文生图零回归)。
  */
@@ -163,14 +182,21 @@ export function buildImageRequest(config, prompt, refs) {
   if (protocol === 'mj') {
     // r82 Midjourney(apimart 形态):POST {base}/midjourney/generations —— 异步任务制,
     // 响应只回 task_id,取图靠 routes/image.js 的 pollTask 轮询。
-    // body 只发 prompt:该路由自动注入 model=midjourney(实测不传也过);size 在这里是
-    // 宽高比(--ar)不是像素、参考图字段形态未实测 —— 未经实测的字段一个不猜,要传的
-    // 写进附加参数(extra),与其余三种协议同一个逃生口。
+    // 该路由自动注入 model=midjourney(实测不传也过),故 body 不发 model。
+    // r84:size / version / speed 三个结构化参数改为下发 —— 文档 imagine.md 的请求体样例
+    // 逐字为 {"prompt":"…","size":"16:9","version":"6.1","speed":"fast"},字段语义与取值
+    // 范围都是文档明列的,不再属于"未经实测的字段"。size 在本协议是【宽高比】(--ar)
+    // 不是像素,UI 已就此改口径。extra 仍在最后展开 = 用户写进附加参数的同名键覆盖表单值
+    // (与其余三种协议的 extra 语义一致)。空值一律不发该键,别发空串。
     // ⚠️ 本分支【不使用参考图】(list 有值也不发),UI 已就此给出说明。
+    const body = { prompt: text };
+    if (cfg.size) body.size = String(cfg.size);
+    Object.assign(body, mjVersionFields(cfg.mjVersion));
+    if (cfg.mjSpeed) body.speed = String(cfg.mjSpeed);
     return {
       url: `${base}/midjourney/generations`,
       headers: { ...json, Authorization: `Bearer ${key}` },
-      body: { prompt: text, ...extra },
+      body: { ...body, ...extra },
       form: null,
       altHeaders: null,
     };

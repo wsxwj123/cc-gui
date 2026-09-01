@@ -73,7 +73,10 @@ try {
     assert.equal(mj.url, 'https://api.apimart.ai/v1/midjourney/generations', 't2: mj 专用端点(尾斜杠已归一)');
     assert.equal(mj.headers.Authorization, `Bearer ${KEY}`, 't2: mj 走 Bearer');
     assert.equal(mj.headers['Content-Type'], 'application/json', 't2: mj 是 JSON 请求');
-    assert.deepEqual(mj.body, { prompt: '一只猫' }, 't2【本轮口径】:body 只有 prompt —— 不传 model、不传 size');
+    // r84 口径变更:size 改为下发(文档 imagine.md 的 size 就是宽高比 --ar,不是像素),
+    // 仍然【不传 model】(该路由自动注入)。size / version / speed 的完整断言在
+    // tests/unit/check-r84-mj-actions.mjs,这里只锁"不传 model"这一条 r82 结论。
+    assert.deepEqual(mj.body, { prompt: '一只猫', size: '16:9' }, 't2:body 不含 model(r84 起 size 随请求下发)');
     assert.equal(mj.form, null, 't2: mj 不是 multipart');
     assert.equal(mj.altHeaders, null, 't2: mj 无认证回落');
 
@@ -602,7 +605,8 @@ try {
     assert.match(src, /\{ id: 'mj', label: '[^']*midjourney\/generations[^']*' \}/, 't9: 协议下拉里有 mj 且标出端点');
     // 差异必须写出来 —— 不写的话用户会按同步协议的直觉填尺寸/参考图,然后"填了没生效"。
     assert.match(src, /form\.protocol === 'mj' &&/, 't9: mj 选中时才显示协议说明');
-    assert.match(src, /模型名与尺寸均不发送/, 't9【文案】:说明尺寸不下发');
+    // r84:尺寸改为下发(它是宽高比),文案随之改口径;"模型名不发送"这条结论不变。
+    assert.match(src, /模型名不发送，由该路由自动注入/, 't9【文案】:说明模型名不下发');
     assert.match(src, /当前版本不支持参考图/, 't9【文案】:说明参考图不下发');
     assert.match(src, /每 5 秒查询一次任务状态/, 't9【文案】:说明轮询节奏');
     assert.match(src, /超过 15 分钟未出结果记为失败/, 't9【文案】:说明本地上限与平台侧仍在跑');
@@ -695,10 +699,10 @@ try {
       assert.equal(sub.status, 200, `t10: 提交受理(${sub.text})`);
       assert.ok(sub.json.jobId, 't10: 秒回 jobId(与既有任务化口径一致)');
 
-      // 提交请求形态:只有 prompt,不带 model / size / n。
+      // 提交请求形态:prompt + size(r84 起 size 当宽高比下发),不带 model / n。
       const submitted = await waitFor(async () => (seenSubmits.length ? seenSubmits[0] : null), 5000);
       assert.ok(submitted, 't10: 上游收到了提交');
-      assert.deepEqual(submitted.body, { prompt: '一只猫' }, 't10【下发内容】:只有 prompt(size 填了也不发)');
+      assert.deepEqual(submitted.body, { prompt: '一只猫', size: '16:9' }, 't10【下发内容】:prompt + size,不带 model / n');
       assert.equal(submitted.auth, `Bearer ${KEY}`, 't10: 提交带鉴权');
 
       // 轮询期间:进度写进历史条目(状态仍是 running)。

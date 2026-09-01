@@ -16,6 +16,7 @@ import {
   IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, I2I_MODES, buildImageRequest, extractImage,
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
   geminiModelsRequest, extractTaskId, buildTaskPollRequest, extractTaskState,
+  MJ_VERSIONS, MJ_SPEEDS,
 } from '../utils/image-protocols.js';
 import { readCapped } from '../utils/read-capped.js';
 // r56 按 provider 生图代理:生图链路的三处外联(生成 POST / 图片下载 / 拉模型)统一
@@ -240,6 +241,9 @@ function publicView(p) {
     // r56:本 provider 的正向代理地址。保存时已禁掉内嵌账号密码,故【不是敏感值】,
     // 可以整条回给前端(不回传就没法在编辑表单里显示已配的代理)。
     proxyUrl: typeof p.proxyUrl === 'string' ? p.proxyUrl : '',
+    // r84:Midjourney 的具名结构化参数(仅 mj 协议下发)。空串 = 不指定该键。
+    mjVersion: MJ_VERSIONS.includes(p.mjVersion) ? p.mjVersion : '',
+    mjSpeed: MJ_SPEEDS.includes(p.mjSpeed) ? p.mjSpeed : '',
     extra: p.extra || null, hasKey: !!p.apiKey,
   };
 }
@@ -328,9 +332,17 @@ async function validateBody(body) {
   // r56:代理地址可选。不传 = 不动已存值;空串 = 清除。
   const pv = validateProxyUrl(body?.proxyUrl);
   if (pv.error) return { error: pv.error };
+  // r84:mj 的具名参数。取值必须在文档明列的清单里 —— 这两个值会原样进请求体,
+  // 不做白名单的话就是"表单里能填什么上游就收到什么"。空串/未传 = 不下发该键。
+  const mjVersion = body?.mjVersion === undefined || body?.mjVersion === null ? '' : String(body.mjVersion);
+  if (mjVersion && !MJ_VERSIONS.includes(mjVersion)) return { error: `Midjourney 版本必须是 ${MJ_VERSIONS.join(' / ')}` };
+  const mjSpeed = body?.mjSpeed === undefined || body?.mjSpeed === null ? '' : String(body.mjSpeed);
+  if (mjSpeed && !MJ_SPEEDS.includes(mjSpeed)) return { error: `Midjourney 速度必须是 ${MJ_SPEEDS.join(' / ')}` };
   return {
     value: {
       i2iMode,
+      mjVersion,
+      mjSpeed,
       name: name.trim(),
       protocol,
       baseURL: baseURL.trim().replace(/\/+$/, ''),
