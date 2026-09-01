@@ -342,6 +342,12 @@ export const Scene3DNode = memo(function Scene3DNode({ node }: { node: GenuiScen
       } catch {
         if (alive) setStatus('error')
       }
+    }).catch(() => {
+      // CGUI-PATCH: 上面那层 try/catch 只护得住 mountScene(无 GPU 等运行时失败);import()
+      // 自身 reject(离线、旧部署的 chunk hash 404)没人接 ⟹ status 永远停在 'loading',
+      // 界面一直转圈,外加一条 unhandled rejection。scene3d-lazy.ts 承诺的"chunk 加载失败
+      // 就显示错误提示"靠这条兑现。
+      if (alive) setStatus('error')
     })
     return () => { alive = false; dispose?.() }
   }, [scene])
