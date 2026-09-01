@@ -589,6 +589,17 @@ export default function ImagePanel() {
     });
   };
 
+  // r84「清空」:一键清掉提示词与参考图,准备下一张。刻意【不弹确认】——
+  // 它是随手要用的动作,且提示词经 restorePrompt 写入(走撤销通道,⌘Z 能撤回),
+  // 参考图重新选也就几秒。restorePrompt('') 同时会把 localStorage 草稿写空 ——
+  // 只清内存的话刷新一下提示词又回来了(草稿是刻意持久的)。
+  const clearInputs = () => {
+    setErr('');
+    restorePrompt('');
+    refs.forEach(revokeRefPreview); // objectURL 不撤就一直挂在文档上
+    setRefs([]);
+  };
+
   const generate = async () => {
     if (!canGenerate) return;
     setSubmitting(true); setErr('');
@@ -853,6 +864,13 @@ export default function ImagePanel() {
             {submitting ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
             生成
           </button>
+          <button
+            type="button"
+            onClick={clearInputs}
+            disabled={!prompt && !refs.length}
+            title="清空提示词与参考图；提示词可用撤销（⌘Z / Ctrl+Z）恢复"
+            className="px-3 py-1.5 rounded-md border border-canvas-deep text-[12px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50"
+          >清空</button>
           {refs.length > 0 && (
             <span className="text-[11px] text-ink-faint font-body">图生图（{refs.length} 张参考）</span>
           )}

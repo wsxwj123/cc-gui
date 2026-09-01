@@ -159,6 +159,22 @@ const mj = (over) => buildImageRequest({ protocol: 'mj', ...BASE, ...over }, '�
     't5【映射锁】:四宫格位置顺序 = 上游 index 1-4 的顺序');
 }
 
+// ───────────────── 6. 生成页「清空」 ─────────────────
+{
+  const block = (PANEL.match(/const clearInputs = \(\) => \{[\s\S]*?\n  \};/) || [''])[0];
+  assert.ok(block, 't6: 找得到 clearInputs');
+  // 草稿是刻意持久化的(localStorage),只清内存的话刷新就回来了 —— 必须经 restorePrompt('')
+  // 写空(它会走 onChange → setPromptDraft → localStorage)。
+  assert.match(block, /restorePrompt\(''\)/, 't6【草稿】:清空必须写空 localStorage 草稿');
+  assert.match(block, /setRefs\(\[\]\)/, 't6: 参考图一并清空');
+  assert.match(block, /revokeRefPreview/, 't6: 上传参考图的 objectURL 要撤,别泄漏');
+  assert.equal(/confirmDialog|window\.confirm/.test(block), false, 't6: 清空不弹确认(可撤销的低风险操作)');
+  assert.match(PANEL, /onClick=\{clearInputs\}[\s\S]{0,400}>清空<\/button>/, 't6: 生成按钮旁有「清空」按钮');
+  assert.match(PANEL, /disabled=\{!prompt && !refs\.length\}/, 't6: 没东西可清时禁用');
+  // 草稿键没被改名(改名 = 存量用户的草稿丢失)。
+  assert.match(PANEL, /const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft'/, 't6: 草稿键不变');
+}
+
 // ───────────────── 7. 前端候选与服务端白名单同源 ─────────────────
 {
   const grabbed = [...PANEL.matchAll(/versions:\s*\[([^\]]*)\]/g)]
