@@ -4,7 +4,8 @@
 // 解析顺序:GH_TOKEN/GITHUB_TOKEN 环境变量 → ~/.claude-gui/github-token.json(导入页填的
 // PAT)→ `gh auth token`(装了 gh 且已登录则零配置自动用上)。结果(含"没有")缓存 5 分钟,
 // 避免每个请求 spawn 一次 gh;带令牌收到 401 时由 gfetch 调 invalidate 作废重解析。
-// ⚠️ 令牌是敏感信息:不写日志、任何端点不回显值、文件 0600、不进 settings.json。
+// ⚠️ 令牌是敏感信息:不写日志、任何端点不回显值、文件 0600(仅 POSIX 生效;Windows 上 mode
+// 是空操作,保护靠 %USERPROFILE% 继承的 ACL)、不进 settings.json。
 import { readFile, writeFile, mkdir, rename, rm } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -34,8 +35,10 @@ async function fromFile() {
 async function fromGh() {
   // index.js 启动时已把 /opt/homebrew/bin 等常见安装目录前置进 PATH,mac 打包版 execFile('gh')
   // 能命中;Win 的 GUI 进程持旧 PATH 快照(装完 gh 不重启进程看不到),补安装器默认绝对路径兜底。
+  // MSI/winget 的安装布局带不带 bin 子目录两种都见过,双候选全兜(打不中=ENOENT 落下一个,无害)。
+  const ghDir = join(process.env.ProgramFiles || 'C:\\Program Files', 'GitHub CLI');
   const candidates = process.platform === 'win32'
-    ? ['gh', join(process.env.ProgramFiles || 'C:\\Program Files', 'GitHub CLI', 'gh.exe')]
+    ? ['gh', join(ghDir, 'bin', 'gh.exe'), join(ghDir, 'gh.exe')]
     : ['gh'];
   for (const bin of candidates) {
     try {
