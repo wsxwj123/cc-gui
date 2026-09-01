@@ -29,14 +29,73 @@ export function isCurrentStreamTurn(currentToken, turnToken) {
  * 起流时的历史截断点。
  * @param {boolean} isReattach 本次是 reattach(接管已在跑的进程)还是正常发送
  * @param {number} now 起流时刻(正常发送用它当截断点)
- * @returns {null | { sinceTs: number }} null = 不截断,历史完整显示
+ * @param {null | {sinceTs:number}} seededCutoff r68:命中直播快照时,快照里带的原始口径
+ * @returns {null | { sinceTs: number, keepUser?: boolean }} null = 不截断,历史完整显示
  *
  * 正常发送:本回合所有条目(含用户消息回显)都晚于起流时刻,截掉它们、由流式气泡画。
- * reattach:不截断。在跑的那个 turn 本来就整条留在历史里(见上文 turn 粒度),显式
+ * reattach 无快照:不截断。在跑的那个 turn 本来就整条留在历史里(见上文 turn 粒度),显式
  * 承认这一点,并配合"reattach 不画流式气泡"收敛成单一渲染源。
+ * reattach 有快照(r68 种回):沿用快照里的【原始起流时刻】—— 本回合所有磁盘记录都晚于
+ * 它,历史零渲染、直播气泡独家画,与普通发送逐字同构。绝不改用 afterLastUser:⚡引导
+ * 折叠会往本回合中间插 user 行,那个口径会把已产出的正文切没(App.jsx 记录过的事故)。
  */
-export function resolveStreamHistCutoff(isReattach, now) {
-  return isReattach ? null : { sinceTs: now };
+export function resolveStreamHistCutoff(isReattach, now, seededCutoff = null) {
+  if (!isReattach) return { sinceTs: now };
+  return seededCutoff || null;
+}
+
+// ── r68 直播快照:切走时存,切回时"种回" ──────────────────────────────
+// 修的是「流式中切走再切回,正文整段空窗几十秒(等落盘才一次性画出)」。切走时把本流
+// 已经流出的内容原样存下,切回的 reattach 以它为起点、把服务端重放的后续 delta 续挂
+// 上去 —— 于是切回瞬间正文完整可见且继续增长,与普通发送同构(不新增渲染分支)。
+//
+// 成立前提是服务端的接缝严合:detach 之后的行进 earlyLines、重连原样回放,一行不可能
+// 既投递又缓冲(deliverLine 是 if/else)。实测 32 次采样 31 次严格相邻;0ms 突发流有
+// 毫秒级窗口可能少 1 个 delta(几到几十字符),回合末按 jsonl 刷新自愈。
+//
+// 为什么存模块级 map 而不是组件 state:切会话的 effect 会把 chatMessages 整清,存那儿
+// 等于没存(这正是今天 AbortError 分支明明打包过半截正文却救不回来的原因);分屏各
+// 窗格是 SessionDetail 的独立实例,组件内的 state 也共用不到。
+const streamSnapshots = new Map();
+// 只留最近 N 个会话:快照体积≈正文字节数,长期使用不该无限涨。Map 保插入序 = 天然 LRU。
+const MAX_SNAPSHOTS = 8;
+// 单条上限:MB 级正文留内存不值当,超了就不存 —— 放弃种回、退回今天的行为,不出新错。
+const MAX_SNAPSHOT_CHARS = 1_000_000;
+
+/**
+ * 存一份直播快照。调用方(handleSend 的 finally)负责判"该不该存",这里只管容量。
+ * @returns {boolean} 是否真的存下(超限 = false,调用方无需处理,退化即可)
+ */
+export function putStreamSnapshot(sessionId, snap) {
+  if (!sessionId || !snap) return false;
+  if ((snap.text || '').length + (snap.thinking || '').length > MAX_SNAPSHOT_CHARS) return false;
+  streamSnapshots.delete(sessionId);   // 先删再插,保证插入序 = 最近使用序
+  streamSnapshots.set(sessionId, snap);
+  while (streamSnapshots.size > MAX_SNAPSHOTS) streamSnapshots.delete(streamSnapshots.keys().next().value);
+  return true;
+}
+
+/**
+ * 取出快照并【立即删除】—— 用一次即弃。
+ * 这条语义是分屏同 sid 两窗格互踢时的安全阀:第二个消费者拿不到同一份陈旧快照,
+ * 最坏退回今天的行为(空窗),而不是种回一段中间缺失的正文(悄悄丢字更坏)。
+ */
+export function takeStreamSnapshot(sessionId) {
+  if (!sessionId) return null;
+  const snap = streamSnapshots.get(sessionId) || null;
+  if (snap) streamSnapshots.delete(sessionId);
+  return snap;
+}
+
+/**
+ * 作废快照。两个调用点:
+ *   ① WS 'turn-complete'(服务端 result 时无条件广播,不依赖有没有 SSE 在线)——
+ *      回合真结束 ⇒ 历史已全量,再种回就是双份;
+ *   ② 本流被别的窗格接管(detached/takeover)—— 此后的行归对方消费,我们手里的尾巴
+ *      已经落后,留着会让下一次 attach 种回一段中间缺失的正文。
+ */
+export function dropStreamSnapshot(sessionId) {
+  if (sessionId) streamSnapshots.delete(sessionId);
 }
 
 /**
