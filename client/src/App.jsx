@@ -104,7 +104,7 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
-import { BG_BANNER_DELAY_MS, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, resolveStreamHistCutoff, shouldRefreshHist } from './utils/reattach.js';
+import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
 import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
@@ -3662,7 +3662,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     // 正常发送:jsonl 里本回合所有条目(含用户消息回显)时间戳都晚于客户端发送时刻
     // (同机时钟,CLI 在 POST 之后才写盘)。无时间戳的条目一律保留,绝不误杀。
-    const next = messages.filter((m) => !m?.timestamp || Date.parse(m.timestamp) < cut.sinceTs);
+    // r68 keepUser:种回(切走再切回)时本地的用户气泡早被切会话 effect 清了,历史是它
+    // 唯一的来源 —— 截掉就等于"我发的那句话不见了"。只对种回的快照口径开(普通发送的
+    // cutoff 不带这个标记),所以本地气泡还在的场景不会双显,行为与今天的 reattach 一致。
+    const next = messages.filter((m) => !m?.timestamp || Date.parse(m.timestamp) < cut.sinceTs
+      || (cut.keepUser && m.type === 'user'));
     return next.length === messages.length ? messages : next;
   }, [messages, streamHistCutoff, streamOwnerKey, sessionQueueKey]);
 
@@ -4315,10 +4319,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
     const isCompact = /^\/compact\b/.test(String(prompt || '').trim());
     const isClear = /^\/clear\b/.test(String(prompt || '').trim());
+    // r68 种回:取出切走时存的直播快照(取出即删,见 utils/reattach.js takeStreamSnapshot)。
+    // 无条件取、只在 reattach 时用 —— 普通发送 = 用户开了新回合,上一回合遗留的快照一律
+    // 作废(#26 会话常驻让整个会话共用一个 pid,pid 认不出跨回合的陈旧快照)。
+    const _snap = takeStreamSnapshot(selectedSession?.sessionId);
+    const seed = reattachPid ? _snap : null;
+    // 本回合是否"已种回"。let 而非 const:服务端报 earlyLines 溢出时要就地作废(见流内
+    // early_overflow 分支)。它是本修唯一的语义开关 —— reattachStream 从"是不是 reattach"
+    // 变成"是不是【无快照的】reattach",一处赋值同时翻开三个既有渲染门。
+    let seeded = !!seed;
     // CJ-4:本回合计时起点。r65:reattach 接管的是一个【早已在跑】的回合,无条件重置为
     // now 会让耗时从 0 重新计(用户明明已等了几秒)。改取该会话的 detach 时刻(切走/转后台/
     // 上一段流收尾时记的,恒 ≤ now),使耗时接续、不跳回 0;无记录才回落 now。首发仍取 now。
-    streamStartRef.current = (reattachPid && detachTsBySidRef.current[selectedSession?.sessionId]) || Date.now();
+    // r68:有快照时用快照里的原始起流时刻,耗时严格接续(比 detach 时刻更准)。
+    streamStartRef.current = seed?.streamStart
+      || (reattachPid && detachTsBySidRef.current[selectedSession?.sessionId]) || Date.now();
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
@@ -4330,14 +4345,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 而一条 turn 的时间戳取本回合【第一条】assistant 记录的时间(必早于 detach)⇒ 在跑的整个
     // turn 从来没被截掉,再叠加 earlyLines 重放出的流式气泡 = 同一段内容画成两个气泡。改为
     // 「历史(jsonl)单一来源画、reattach 不画自己的气泡」(下面 setReattachStream + 渲染门)。
-    setReattachStream(!!reattachPid);
-    setStreamHistCutoff(resolveStreamHistCutoff(!!reattachPid, Date.now()));
+    // r68:命中快照 ⇒ 本流按【普通发送】渲染(自己画气泡 + 按 sinceTs 截断历史),
+    // reattachStream 只留给"无快照的 reattach"那条退化路径。
+    setReattachStream(!!reattachPid && !seeded);
+    setStreamHistCutoff(resolveStreamHistCutoff(!!reattachPid, Date.now(), seed?.cutoff));
     setCompacting(isCompact);
-    setStreamingText('');
-    setStreamingThinking('');
-    setStreamingToolCalls([]);
-    setStreamingBlocks([]);
-    setSawModelOutput(false); // r65:本流产出信号复位(reattach 与首发都从"尚未见产出"起算)
+    // 种回:首帧就带上切走前已流出的全部内容,不闪空(缓冲闭包侧的同款恢复见下方 try 内)。
+    setStreamingText(seed?.text || '');
+    setStreamingThinking(seed?.thinking || '');
+    setStreamingToolCalls(seed?.toolCalls || []);
+    setStreamingBlocks(seed?.orderedBlocks || []);
+    // r65:本流产出信号复位(reattach 与首发都从"尚未见产出"起算)。
+    // r68:有快照 = 已有产出,直接置位(防"种回后又被接管/三振退回无快照 reattach"时状态位不一致)。
+    setSawModelOutput(!!seed);
+    // ⚡引导的流式切口(锚点表)也随快照回来:关窗格会卸载组件、锚点丢,不带就只能回落
+    // "切在末尾",引导气泡位置偏(内容不丢)。合并而不是覆盖:别动本会话其他回合的锚点。
+    if (seed?.steerAnchors) steerAnchorRef.current = { ...steerAnchorRef.current, ...seed.steerAnchors };
     setLiveStatus(null);
     // 输入预测(A):新回合开始,上一回合的建议作废(reattach 是同一回合的续播,不清)。
     // 只清本会话的两个 key,别的会话的建议不受影响(store 是全局 map)。
@@ -4468,6 +4491,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let accumulatedThinking = '';
     let currentToolCalls = [];
     let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
+    // r68:快照写在 finally(唯一收口,覆盖切会话/关窗格/WebView 掐断/转后台四种终止),
+    // 而块索引表与收尾三态都声明在 try 内 —— 各镜像一个引用出来供 finally 读,原声明不动。
+    let blocksMirror = null;          // = 下面 try 里的 blocks(SDK content block index → 本地块)
+    let streamEndMirror = null;       // = 'done' | 'takeover' | 'dropped';null = 本端 abort(切走/停止)
     // r65:本流是否见过任何模型产出。本地闩住只翻一次 state,免每片 delta 重复 setState。
     let sawOutput = false;
     const markSawOutput = () => { if (!sawOutput) { sawOutput = true; setSawModelOutput(true); } };
@@ -4663,16 +4690,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // Aggregated per-message turn state (matches what gets pushed to chatMessages on done).
       // 声明已提升到 try 外(见上),这里仅复位。**ORDERED** orderedBlocks 保留 text/
       // thinking/tool_use 内容块的时间顺序,让 UI 按模型输出的真实顺序渲染。
-      accumulatedText = '';
-      accumulatedThinking = '';
-      currentToolCalls = [];
-      orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
+      // r68 种回:有快照就从快照恢复(数组浅拷贝,别把快照里的引用当本流的可变缓冲)。
+      accumulatedText = seed?.text || '';
+      accumulatedThinking = seed?.thinking || '';
+      currentToolCalls = seed?.toolCalls ? [...seed.toolCalls] : [];
+      orderedBlocks = seed?.orderedBlocks ? [...seed.orderedBlocks] : [];
       // Did we already render a visible error turn? Guards the empty-output
       // fallback below so we don't double-report.
       let sawError = false;
       // Per-content-block scratch indexed by Anthropic SDK's block `index` field.
       // Each entry: { type: 'text'|'thinking'|'tool_use', toolId?, name?, jsonBuf?, orderIdx? }
-      const blocks = {};
+      // r68:块索引表【必须】随快照一起种回 —— 重放的首批 content_block_delta 属于 detach
+      // 那一刻正在写的块,它的 content_block_start 早被消费、不在 earlyLines 里。不种回,
+      // 下面 :block 查表落空 → 照旧 `if (!block) continue` 当孤儿丢弃 → 气泡冻在快照那一刻
+      // 不再增长(看起来像修好了,其实是半修)。orderIdx 指向 orderedBlocks,二者同批恢复。
+      const blocks = { ...(seed?.blockIndexMap || {}) };
+      blocksMirror = blocks;
       // Bug #5:CLI 在多 message 场景(调工具→AI 继续生成)下偶尔重复发同一个
       // stream_event(原因未明,可能 CLI 内部 backpressure 或 retry),前端无保护
       // 累加两次导致"先先更新更新"字符级双写。
@@ -4690,7 +4723,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       let lastHistRefreshAt = Date.now();
       let histRefreshInFlight = false; // 上一次还没落地就不再发:慢盘/大会话时避免请求叠罗汉
       // reattach 起流即把「上次更新」的基准设成此刻(状态行从 0 秒开始数)。
-      if (reattachPid) histFreshRef.current = { at: Date.now(), sig: null };
+      // r68:种回后走的是普通发送那条路(自己画气泡、不刷历史、状态行也不渲染),不必设。
+      if (reattachPid && !seeded) histFreshRef.current = { at: Date.now(), sig: null };
       // 刷新落地后记一笔:只有本 pane 的最后一条消息签名【变了】才算"更新"。
       // fetchMessages 内部有乱序守卫(响应落地时 pane 已切走则整条丢弃),数据没被应用时
       // 签名自然不变,所以这里不需要再判一次归属。
@@ -4703,7 +4737,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       };
       const refreshHistIfDue = (force) => {
         if (histRefreshInFlight) return;
-        if (!shouldRefreshHist({ isReattach: !!reattachPid, now: Date.now(), lastAt: lastHistRefreshAt, force })) return;
+        // r68:种回的流由直播气泡实时画,历史被 sinceTs 整段截掉 —— 刷了也不显示,纯白发请求。
+        if (!shouldRefreshHist({ isReattach: !!reattachPid && !seeded, now: Date.now(), lastAt: lastHistRefreshAt, force })) return;
         const _sid = streamSid, _ph = streamOwnerPh;
         if (!_sid || !_ph) return;
         lastHistRefreshAt = Date.now();
@@ -4751,6 +4786,23 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }
           let event;
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+          // r68:服务端明说 earlyLines 缓冲溢出丢过尾部(MAX_EARLY_LINES,离开极久时)⇒
+          // 这次重放不完整。种回的正文会中段缺一块而客户端毫不知情 —— "悄悄丢字"比"空窗"
+          // 更坏,所以整份快照就地作废,退回今天的「历史单一来源」行为。服务端把这行放在
+          // 回放的最前面,所以此刻续挂的内容还没开始累加,清空即回到无快照 reattach 的起点。
+          if (event.type === 'early_overflow') {
+            if (seeded) {
+              seeded = false;
+              accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = []; orderedBlocks = [];
+              for (const k of Object.keys(blocks)) delete blocks[k];
+              setStreamingText(''); setStreamingThinking(''); setStreamingToolCalls([]); setStreamingBlocks([]);
+              setReattachStream(true);
+              setStreamHistCutoff(null);
+              histFreshRef.current = { at: Date.now(), sig: null }; // 状态行的"上次更新"基准
+            }
+            continue;
+          }
 
           // r29:/clear 轮换(CLI 2.1.x):旧会话归档、本流后续 init 属于新会话。
           // 立即清本 pane 的流式本地消息(旧会话残影不属于新会话);窗格换绑在
@@ -5777,6 +5829,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // reattach:每读到一批 SSE 行就考虑刷一次历史(内部节流,非 reattach 直接返回)。
         refreshHistIfDue(false);
       }
+      // r68:收尾三态镜像到 try 外供 finally 的快照写入判定(口径与下方 nextReattachGuard
+      // 逐字相同)。循环因异常退出(本端 abort=切走/停止)时它保持 null,正是"该存快照"那档。
+      streamEndMirror = sawDoneEvent ? 'done' : (sawTakeover ? 'takeover' : 'dropped');
       // 【传输掉线】判定:reader 正常结束、却从未收到 done,也没收到服务端的 detached
       // 告知 —— 那就不是被接管,是这条 SSE 被掐了(WebView 空闲回收 / 网络抖动 / 中间层
       // 超时)。原来这里把这一形态一律当"被接管"猜,猜错一次就把 reattach 闩锁焊死:本
@@ -5818,7 +5873,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // reattach 不 push 本地副本:accumulatedText 只是 detach 之后被重放的那半截,
         // 与历史卡里的完整回合重叠 —— push 了会在 finalize 清本地副本前闪一帧双气泡。
         // producedReply 仍置 true,finalize 的落盘轮询/清理语义原样不变。
-        if (!reattachPid) setChatMessages((prev) => [...prev, {
+        // r68:种回的流不属于此列 —— 它的 accumulatedText 是【整回合】,与普通发送等价,
+        // 该 push;不 push 会在 finalize 轮询落盘前闪一段空。收尾走的就是普通回合那条
+        // finalize(roundLanded → 清本地 → 同帧清 cutoff),没有任何 seeded 专属分支。
+        if (!reattachPid || seeded) setChatMessages((prev) => [...prev, {
           uuid: 'chat-assistant-' + Date.now(), type: 'turn',
           timestamp: new Date().toISOString(), model: streamingModel,
           text: accumulatedText ? [accumulatedText] : [],
@@ -6156,6 +6214,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (streamSid) {
         const prevTs = detachTsBySidRef.current[streamSid] || 0;
         detachTsBySidRef.current[streamSid] = Math.max(prevTs, Date.now());
+      }
+      // r68 直播快照写入(唯一写点):本流在这里终止,把已流出的正文原样留给下一次
+      // reattach 种回。四种终止形态都经过这个 finally(切会话/关窗格 → AbortError、
+      // WebView 掐断 → dropped、转后台 → AbortError),接缝一致,不必分别处理。
+      // 三条不写的判据:
+      //   ① 本流没在画直播气泡(无快照的 reattach):它的缓冲只是重放的那半截、cutoff 是
+      //      null,存下来下次种回会与历史双画;
+      //   ② 回合真结束(done)或用户真停止(killedRef):历史即将/已经是全量,再种就是双份;
+      //   ③ 被别的窗格接管(takeover):此后的行归对方消费,我们手里的尾巴已经落后 ——
+      //      连旧快照一并清掉,让下一次 attach 老老实实退回今天的行为(宁空窗不丢字)。
+      if (streamSid && streamEndMirror !== 'done' && !killedRef.current) {
+        if (streamEndMirror === 'takeover') dropStreamSnapshot(streamSid);
+        else if (!reattachPid || seeded) putStreamSnapshot(streamSid, {
+          text: accumulatedText,
+          thinking: accumulatedThinking,
+          toolCalls: currentToolCalls,
+          orderedBlocks,
+          blockIndexMap: blocksMirror ? { ...blocksMirror } : null,
+          steerAnchors: { ...steerAnchorRef.current },
+          // 本流用的历史截断口径(普通发送=本次起流时刻;种回=一路继承的原始起流时刻)。
+          // 它必须跟着快照走:种回时用 afterLastUser 之类的替代口径会切错位置(⚡引导折叠)。
+          cutoff: seed?.cutoff || { sinceTs: streamStartRef.current, keepUser: true },
+          streamStart: streamStartRef.current,
+        });
       }
       // 复位只归当前 generation 所有:上面的 finalize 轮询含 await(最长 ~2.4s),这期间
       // 新回合会在任何异步准备前同步抢占 token。旧 finally 即使看到新回合尚未拿到 pid，
