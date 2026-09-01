@@ -716,13 +716,21 @@ export function MCPPanel() {
               {/* 折叠式全市场搜索(高级):默认收起,不占密度。展开后从已配置 marketplace
                   动态搜索全部可装插件。精选清单外的插件可能需 key/Docker/LSP,装了未必即用。 */}
               <div className="border-b border-canvas-deep pb-3">
-                <button
-                  onClick={() => setSearchOpen((v) => !v)}
-                  className="w-full flex items-center gap-1.5 text-[12px] font-medium text-ink-faint hover:text-ink transition-colors">
-                  <ChevronRight size={13} className={`transition-transform ${searchOpen ? 'rotate-90' : ''}`} />
-                  <Search size={12} />
-                  从全部 marketplace 搜索(高级)
-                </button>
+                <div className="flex items-center">
+                  <button
+                    onClick={() => setSearchOpen((v) => !v)}
+                    className="flex-1 flex items-center gap-1.5 text-[12px] font-medium text-ink-faint hover:text-ink transition-colors">
+                    <ChevronRight size={13} className={`transition-transform ${searchOpen ? 'rotate-90' : ''}`} />
+                    <Search size={12} />
+                    从全部 marketplace 搜索(高级)
+                  </button>
+                  {/* r74 分工互链:完整浏览(装机量排序 + MCP 注册表可逛)在扩展市场。 */}
+                  <button data-testid="mcp-goto-market"
+                    onClick={() => window.dispatchEvent(new CustomEvent('cgui:open-panel', { detail: { id: 'market' } }))}
+                    className="shrink-0 text-[10px] text-ink-faint hover:text-accent font-body">
+                    完整浏览见「扩展市场」→
+                  </button>
+                </div>
                 {searchOpen && (
                   <div className="mt-3 space-y-2">
                     <div className="relative">
