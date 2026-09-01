@@ -71,7 +71,7 @@ import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
 import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor, HOME_DRAFT_KEY } from './utils/steerQueue.js';
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
@@ -1897,6 +1897,12 @@ function HomeState({ tabIndex = 0 }) {
     // r26-B5:先造 draft 再入队 —— 队列键带 draftId,与同项目其他 draft 窗格隔离。
     const _homeDraft = buildHomeDraft(project, _did);
     if (!_homeDraft) return; // 项目缺 path 造不出 draft(旧代码会入队后清空窗格,键还匹配不上)
+    // r80(A1):把顶栏在 Home 选的模型从「待发」键交接到这条真 draft 键上,后续由既有
+    // init 迁移(:4904 migrateSessionKey(draftKey, 真 sid))落到真 sessionId —— 交接链
+    // 全程复用同一个 store 原语。force=true:用户的显式选择压过 seed 的继承值。
+    // migrateSessionKey 搬完即删源键,所以下一次回到 Home 是干净的全局默认(新会话
+    // 不继承上一次的 Home 选择,与 seedNewSessionDefaults 原意一致)。
+    st.migrateSessionKey(HOME_DRAFT_KEY, queueKeyFor(_homeDraft), true);
     // 首页权限模式选择器(无会话时操作的是全局 mode)落到这条新 draft 的 permKey 上。
     const _homeMode = st.permissionMode || 'default';
     st.setPermissionMode(_homeMode, queueKeyFor(_homeDraft));
@@ -10123,6 +10129,12 @@ export default function App() {
   // 未分屏 = selectedSession;分屏 = 聚焦格。返回既有对象引用,选择器稳定。
   const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || s.selectedSession);
   const headerPermKey = headerPane ? queueKeyFor(headerPane) : null;
+  // r80(A1):模型选择器在 Home(无会话)时改落 HOME_DRAFT_KEY —— null 分支的
+  // setModelFor 只改内存全局、零落盘,重启必回全局默认(BUGREPORT 档 G)。
+  // 只改模型这一颗:力度的 null 分支 setEffortFor(null,e) 本来就落盘(写全局
+  // cgui-effort,新会话经 seedNewSessionDefaults 继承),改成 pin 键反而会把
+  // 「在 Home 设全局默认力度」退化成一次性 pin,故 EffortSelector 维持 headerPermKey。
+  const headerModelKey = headerPane ? headerPermKey : HOME_DRAFT_KEY;
   const [rightPanel, setRightPanelRaw] = useState(null);
   // 修正批#7:原 T5#1 "离开设置面板丢 Provider 表单输入"守卫已删——表单随 Provider tab
   // 迁出设置,脏数据守卫改由 ProviderManagerModal 的关闭路径(Esc/点外/X)承担。
@@ -11120,7 +11132,7 @@ export default function App() {
             [权限模式][附件][旁问]。弹层均走 AnchoredPopover(portal 顶层)向下弹。 */}
         <div className="flex items-center gap-1 flex-wrap justify-end min-w-0 ml-auto">
           <ProviderSwitcher tourAnchor respondOpenProvider />
-          <ModelSelector compact permKey={headerPermKey} tourAnchor />
+          <ModelSelector compact permKey={headerModelKey} tourAnchor />
           <EffortSelector permKey={headerPermKey} tourAnchor />
           <span data-tour="remote-control" className="inline-flex">
             {/* r39:顶栏按钮一律竖排(图标上/文字下),与「主题」「设置」同高 —— 原来是

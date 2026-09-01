@@ -81,14 +81,22 @@ check('T1i 发送链必须同口径:resolveHistModel 调用点要传官方标志
     'App.jsx 的发送侧 resolveHistModel 未传官方标志 → 显示放行、发送仍判死');
 });
 
-// ── T2(A1 接线锁):Home 的 headerPermKey 必须有落盘键 ────────────────
-check('T2a Home 分支不再恒 null', () => {
-  assert.ok(!app.includes('headerPane ? queueKeyFor(headerPane) : null'),
-    '旧形态仍在:Home 时 headerPermKey=null → setModelFor(null,…) 零落盘');
+// ── T2(A1 接线锁):Home 下模型选择器必须有落盘键 ──────────────────────
+// 只改模型这一颗。力度选择器的 null 分支 setEffortFor(null,e) 本来就落盘(写全局
+// cgui-effort),把它也改成 pin 键会把"在 Home 设全局默认力度"变成一次性 pin = 回归。
+check('T2a 模型选择器不再绑 Home 恒 null 的那个键', () => {
+  assert.ok(!/<ModelSelector[^>]*permKey=\{headerPermKey\}/.test(app),
+    'ModelSelector 仍绑 headerPermKey → Home 时 setModelFor(null,…) 零落盘');
 });
-check('T2b Home 分支指向待发草稿键 HOME_DRAFT_KEY', () => {
-  assert.ok(app.includes('headerPane ? queueKeyFor(headerPane) : HOME_DRAFT_KEY'),
-    'headerPermKey 未指向 HOME_DRAFT_KEY');
+check('T2b 模型选择器 Home 分支指向待发草稿键 HOME_DRAFT_KEY', () => {
+  assert.match(app, /headerModelKey\s*=\s*headerPane\s*\?\s*headerPermKey\s*:\s*HOME_DRAFT_KEY/,
+    '缺 headerModelKey:Home 的模型选择没有落盘键');
+  assert.match(app, /<ModelSelector[^>]*permKey=\{headerModelKey\}/,
+    'ModelSelector 未绑 headerModelKey');
+});
+check('T2f 力度选择器仍绑 headerPermKey(Home 力度写全局,不许改成一次性 pin)', () => {
+  assert.match(app, /<EffortSelector[^>]*permKey=\{headerPermKey\}/,
+    'EffortSelector 被改绑 → Home 设的全局默认力度会退化成一次性 pin');
 });
 check('T2c HOME_DRAFT_KEY 由键构造单一来源 steerQueue.js 导出', () => {
   assert.match(steer, /export const HOME_DRAFT_KEY\s*=/,
@@ -99,7 +107,8 @@ check('T2d Home 发首条消息时把 pin 交接给真 draft 键', () => {
     '缺交接:Home 选的模型落在 HOME_DRAFT_KEY 上,发消息后到不了真会话');
 });
 check('T2e UnifiedSidebar 的 setModelFor(draftKey, \'\') 死代码已删', () => {
-  assert.ok(!/setModelFor\(draftKey,\s*''\)/.test(sidebar),
+  // 行首锚定 st. → 只咬可执行语句,注释里提到这行(说明为何删)不算。
+  assert.ok(!/^\s*st\.setModelFor\(draftKey,\s*''\)/m.test(sidebar),
     '该行被 setModelFor 首行 if(!model) return 吞掉,恒 no-op');
 });
 

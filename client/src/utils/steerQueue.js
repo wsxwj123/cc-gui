@@ -11,6 +11,20 @@ export function queueKeyFor(sel) {
   return `draft-${sel?.projectHash || 'none'}-${sel?.draftId || 'none'}`;
 }
 
+// r80(A1):Home(未选任何会话)时顶栏模型选择器的落点键 —— 「还没建出来的那条草稿」。
+// 原来这里是 null,setModelFor(null, m) 走"只改内存 currentModel"分支、零落盘,于是
+// 每次启动(RESTORE_LAST_ON_BOOT 默认 false ⇒ 必落 Home)选的模型刷新即回全局默认。
+//
+// 为什么不是 `draft-<hash>-<draftId>`:Home 的 draftId 要到用户点发送(App.jsx submit)
+// 那一刻才由 newDraftId() 领,项目也可能在选模型之后再改 —— 选模型时这两段都还不存在。
+// 用一个固定的「待发」键接住,再由 submit 把它交接到真 draft 键(migrateSessionKey,
+// 搬完即删源键),交接后的链路与既有 draft 完全一致:
+//     HOME_DRAFT_KEY --submit--> draft-<hash>-<draftId> --init--> 真 sessionId
+// 删源键这一步顺带满足"新会话不继承上一次 Home 的选择":每次 Home 选择恰好被消费一次。
+// 形态保持 `draft-` 前缀:syncableKey 据此不把它推给服务端(与既有 draft 键同语义);
+// 它永远不进 messageQueue,故不参与孤儿队列回收。
+export const HOME_DRAFT_KEY = 'draft-home-pending';
+
 // draft 队列键判定与 projectHash 段解析(孤儿回收按项目过滤用)。
 // draftId 形态恒为 `d<ts>-<seq>`(App.jsx newDraftId),据此从新形态键里剥出 hash;
 // 剥不掉的按旧形态 `draft-<hash>` 整段当 hash(旧键只会进孤儿表,归属不再猜测)。
