@@ -2276,7 +2276,7 @@ function GenuiSection() {
           <div className="min-w-0 flex-1">
             <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">界面输出技能<EffectBadge level="session" /></div>
             <div className="text-[10.5px] text-ink-faint font-body">
-              安装后模型才知道这套围栏语法，才会主动输出界面。未安装时上面的渲染开关仍然有效——它管的是「收到围栏怎么显示」，与「模型会不会写围栏」是两件事。
+              应用已内置基础教学（围栏语法与常用字段速查），未安装此技能时模型也会主动输出界面；关闭上方渲染开关则不再注入这段教学，模型不再输出围栏。此技能是可选的完整字段规范：安装后模型可查阅每个组件的全部字段与取值，复杂组件更少出现「字段不合规被整节点忽略」。
             </div>
             <div data-testid="genui-skill-scope-note" className="mt-1 text-[10.5px] text-ink-muted font-body">
               安装与归档写的是 <span className="font-mono">~/.claude/skills</span> 目录，影响所有 claude CLI 会话（含终端里直接运行的 claude），不限于本应用；改动仅对新会话生效。

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // r66 单测:genui 常驻教学层(注入每次 GUI 会话系统提示的那一小段)。
 //   t1 文本锁 —— 围栏教 cgui-ui;44 类【从真相源 guard.ts 派生】双向比对;
+//               r67 起还有字段速查:签名【从真相源 SKILL.md 派生】做子集比对,
+//               两处字段名漂移就红(t1-f);
 //               未移植能力(panel/append/render_ui/validate_dsh_ui)一律不得出现;
 //               secrets 禁令必须在场;体量不得膨胀。
 //   t2 接线锁 —— 开关开→append 带教学段(且拼在既有 append 之后,不覆盖);关→不带。
@@ -15,6 +17,9 @@
 //   ③ 教学段里补回上游的 panel / "append":true / render_ui 段落 → t1-c 红
 //   ④ guard.ts 的 GENUI_NODE_TYPES 增删一个 type 而教学段不跟 → t1-b 红
 //   ⑤ 把 composeGenuiAppend 也接到第二处(bots 侧)调用 → t4-b 红
+//   ⑥ 速查段把 keyvalue 的 pairs 写回 items → t1-f(a) 红(实测:keyvalue.items)
+//   ⑦ 速查段把 code 的 lang 写成 language → t1-f(a) 红(实测:code.language)
+//   ⑧ 删掉速查段里 quiz 那一行 → t1-f(c) 红(实测:quiz)
 // Run: node tests/unit/check-genui-section-text.mjs
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -101,11 +106,86 @@ const TEXT = GENUI_SECTION_TEXT;
   assert.ok(TEXT.includes('cgui-ui 技能'), 't1-d: 要指向 cgui-ui 技能查字段细节');
 }
 
-// ── t1-e 体量:对齐上游 ~2KB 级。膨胀 = 每回合每会话都在烧 token ──────────
+// ── t1-e 体量:每回合每会话都在烧 token,只许放"不放就出错"的东西 ──────────
+// r67 加了字段速查(~2.4KB):不给字段名模型就猜,猜错 = 整节点被静默丢弃。
+// 速查段单独设上限,防止有人把技能里的取值全集/示例一路抄回常驻段。
 {
   const bytes = Buffer.byteLength(TEXT, 'utf8');
-  assert.ok(bytes < 4000, `t1-e: 教学段 ${bytes} 字节,超了 4000 —— 细节该进技能不该进常驻注入`);
+  assert.ok(bytes < 5600, `t1-e: 教学段 ${bytes} 字节,超了 5600 —— 细节该进技能不该进常驻注入`);
   assert.ok(bytes > 1200, `t1-e: 教学段只有 ${bytes} 字节,大概率被截断/写漏了`);
+  const cheatBytes = Buffer.byteLength(TEXT.slice(TEXT.indexOf('\n字段速查')), 'utf8');
+  assert.ok(cheatBytes < 2600, `t1-e: 字段速查段 ${cheatBytes} 字节,超了 2600 —— 只留必填+易错字段,装饰性可选字段留给技能`);
+}
+
+// ── t1-f 字段速查:签名从 SKILL.md 真相源派生比对,不许写第二份字段定义 ─────
+// r67 根因:r66 只列了 44 个类型名。用户首条真机消息 20 节点里 4 个因字段名猜错
+// 被【整节点丢弃】(3×code 写成 {language,content}、1×keyvalue 写成 {items:[…]})。
+// 字段定义的唯一真相源是内置技能 SKILL.md;这里只钉"速查段写的字段在 SKILL.md
+// 里确实是该类型的字段",两处任何一侧改名都会红。
+{
+  // `"字段名":` —— 签名里的键。枚举值(如 "16:9|4:3")首字符非字母,不会误命中。
+  const fieldsOf = (s) => new Set([...s.matchAll(/"([A-Za-z][A-Za-z0-9]*)"\s*:/g)].map((m) => m[1]));
+
+  // 真相源:SKILL.md 的组件签名块。块头形如 `- keyvalue：` / `- row / col：`,
+  // 续行(缩进)属于同一块,顶格非签名行结束该块。
+  const skill = read('server', 'assets', 'builtin-skills', 'cgui-ui', 'SKILL.md');
+  const truth = new Map();
+  let cur = null;
+  for (const line of skill.split('\n')) {
+    const head = line.match(/^- ([a-z0-9][a-z0-9 /-]*)：/);
+    if (head) {
+      cur = head[1].split('/').map((t) => t.trim()).filter(Boolean);
+      for (const t of cur) if (!truth.has(t)) truth.set(t, new Set());
+    } else if (!/^\s/.test(line)) {
+      cur = null; // 顶格的表格/标题/正文 = 上一个签名块到此为止
+    }
+    if (!cur) continue;
+    for (const f of fieldsOf(line)) for (const t of cur) truth.get(t).add(f);
+  }
+  assert.ok(truth.has('code') && truth.has('keyvalue'),
+    't1-f: 没能从 SKILL.md 解析出组件签名 —— 真相源格式变了,先修本测试的取法再说');
+
+  // 速查段:每行 `- <类型> {签名}`,可用 · / ； 并列多个类型。
+  const cheat = TEXT.slice(TEXT.indexOf('\n字段速查'));
+  const seen = new Map();
+  for (const line of cheat.split('\n')) {
+    if (!line.startsWith('- ')) continue;
+    for (const chunk of line.slice(2).split(/[·；]/)) {
+      const at = chunk.indexOf('{');
+      if (at < 0) continue; // 纯说明(如 divider / spacer 无其余字段)
+      const names = (chunk.slice(0, at).match(/[a-z][a-z0-9-]*/g) || []).filter((w) => truth.has(w));
+      if (!names.length) continue;
+      for (const f of fieldsOf(chunk.slice(at))) {
+        for (const n of names) seen.set(n, (seen.get(n) || new Set()).add(f));
+      }
+    }
+  }
+
+  // (a) 主锁:速查段的每个字段都必须是 SKILL.md 里该类型的字段
+  const drift = [];
+  for (const [type, fields] of seen) {
+    for (const f of fields) if (!truth.get(type).has(f)) drift.push(`${type}.${f}`);
+  }
+  assert.deepEqual(drift, [],
+    `t1-f: 速查段这些字段在 SKILL.md 的对应类型里不存在(教了模型一个会被丢弃的字段名):${drift.join(', ')}`);
+
+  // (b) 本次实锤踩坑的两个签名必须在场,且写的是正确那一版
+  assert.ok(seen.get('code')?.has('lang') && seen.get('code')?.has('code'),
+    't1-f: code 必须给出 lang/code 签名(用户实测 3 个 code 节点因写成 language/content 被丢弃)');
+  assert.ok(seen.get('keyvalue')?.has('pairs'),
+    't1-f: keyvalue 必须给出 pairs 签名(用户实测因写成 items 被丢弃)');
+  assert.ok(!/"language"\s*:/.test(cheat) && !/"content"\s*:\s*""\}\s*（是 lang/.test(cheat),
+    't1-f: 速查段不得把错字段名写成签名形态(模型会照抄)');
+
+  // (c) 覆盖:除了没有字段可写的 divider/spacer,44 类都得有签名。
+  //     新增类型只进类型清单不进速查 = 又回到"模型只能猜字段"的老问题。
+  const guard = read('client', 'src', 'genui', 'upstream', 'guard.ts');
+  const all = [...guard.match(/GENUI_NODE_TYPES[^=]*=\s*new Set\(\[([\s\S]*?)\]\)/)[1]
+    .matchAll(/'([a-z0-9-]+)'/g)].map((m) => m[1]);
+  const NO_FIELDS = new Set(['divider', 'spacer']); // 只有 type,没什么可写错的
+  const uncovered = all.filter((t) => !NO_FIELDS.has(t) && !seen.has(t));
+  assert.deepEqual(uncovered, [],
+    `t1-f: 这些 type 在速查段里没有签名(模型只能猜字段名):${uncovered.join(',')}`);
 }
 
 // ── t2 接线锁:走 chat.js 的真函数(复刻一份等于测一条线上不存在的路径) ────
