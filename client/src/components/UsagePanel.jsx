@@ -325,6 +325,17 @@ export function UsagePanel() {
 
   return (
     <div className="px-4 py-4 space-y-5 overflow-y-auto h-full">
+      {/* 刷新/导出提到顶部:原在最底,每次要滑到底才能点(用户实报)。按钮原样上移,零行为变化。 */}
+      <div className="flex gap-2">
+        <button onClick={fetchStats}
+          className="flex-1 flex items-center justify-center gap-1.5 py-2 text-xs text-ink-muted hover:text-ink font-body transition-colors bg-canvas-warm border border-canvas-deep rounded-lg">
+          <RefreshCw size={12} />刷新
+        </button>
+        <button onClick={() => downloadCSV(stats)}
+          className="flex-1 flex items-center justify-center gap-1.5 py-2 text-xs text-ink-muted hover:text-ink font-body transition-colors bg-canvas-warm border border-canvas-deep rounded-lg">
+          <Download size={12} />导出 CSV
+        </button>
+      </div>
       {/* W7:官方订阅额度(非官方 provider 自动隐藏) */}
       <SubscriptionUsageCard />
       {/* r16-2:第三方 provider 额度/余额(官方 provider 自动隐藏,与上面那张互斥) */}
@@ -470,16 +481,6 @@ export function UsagePanel() {
         </div>
       </div>
 
-      <div className="flex gap-2">
-        <button onClick={fetchStats}
-          className="flex-1 flex items-center justify-center gap-1.5 py-2 text-xs text-ink-muted hover:text-ink font-body transition-colors bg-canvas-warm border border-canvas-deep rounded-lg">
-          <RefreshCw size={12} />刷新
-        </button>
-        <button onClick={() => downloadCSV(stats)}
-          className="flex-1 flex items-center justify-center gap-1.5 py-2 text-xs text-ink-muted hover:text-ink font-body transition-colors bg-canvas-warm border border-canvas-deep rounded-lg">
-          <Download size={12} />导出 CSV
-        </button>
-      </div>
     </div>
   );
 }
