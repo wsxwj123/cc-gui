@@ -1,4 +1,4 @@
-// r67:GitHub API 令牌解析。未鉴权 GitHub API 限 60 次/小时且按出口 IP 计,挂共享代理
+// 限流修复:GitHub API 令牌解析。未鉴权 GitHub API 限 60 次/小时且按出口 IP 计,挂共享代理
 // (Clash 机场等)的用户出口 IP 配额常年被打满 → 技能市场六个源恒空、版本检测限流。
 // 带令牌后 5000 次/小时按令牌计,与出口 IP 无关,根治。
 // 解析顺序:GH_TOKEN/GITHUB_TOKEN 环境变量 → ~/.claude-gui/github-token.json(导入页填的

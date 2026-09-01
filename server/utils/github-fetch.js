@@ -52,7 +52,7 @@ async function localProxy() {
   return _proxyHit.url;
 }
 export async function gfetch(url, opts = {}, _noAuth = false) {
-  // r67:api.github.com 的请求自动带令牌(env → 界面填的 PAT → gh auth token,见 github-token.js)。
+  // 限流修复:api.github.com 的请求自动带令牌(env → 界面填的 PAT → gh auth token,见 github-token.js)。
   // 匿名 60 次/小时按出口 IP 计,共享代理出口配额常年打满=技能市场恒空的根因;带令牌 5000 次/小时
   // 按令牌计。raw/gitee 不注入;代理回落链路同样带(CONNECT 隧道 TLS 端到端,代理看不到请求头)。
   let headers = opts.headers || {};

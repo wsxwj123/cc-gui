@@ -14,7 +14,7 @@ import { homedir } from 'os';
 import { request as httpRequest } from 'http';
 import { request as httpsRequest } from 'https';
 import { gfetch } from '../utils/github-fetch.js'; // r14-1:代理回落层已抽公用
-import { resolveGithubToken, saveGithubToken, clearGithubToken, TOKEN_RE } from '../utils/github-token.js'; // r67:限流根治
+import { resolveGithubToken, saveGithubToken, clearGithubToken, TOKEN_RE } from '../utils/github-token.js'; // 限流修复:GitHub 请求自动带令牌
 
 // ── 网络封装:直连失败回落本地代理 ────────────────────────────
 // 墙内直连 GitHub 时断时通,用户常开着 Clash 等本地代理却帮不上忙:Node fetch 不读
@@ -234,7 +234,7 @@ router.get('/skills/sources', (req, res) => {
   res.json({ sources: SOURCES.map((s) => ({ id: s.id, name: s.name, url: s.url })) });
 });
 
-// ── GitHub 令牌(r67,提配额:匿名 60 次/小时/IP → 带令牌 5000 次/小时)──────────
+// ── GitHub 令牌(限流修复,提配额:匿名 60 次/小时/IP → 带令牌 5000 次/小时)──────────
 // 值永不回显:GET/POST/DELETE 都只回 source('env'|'pat'|'gh'|null)。保存前打 /rate_limit
 // 在线验真(该端点不计 API 配额),401 当场拒 —— 免得存个失效令牌让所有请求变 401
 // (运行时还有一层兜底:gfetch 对带令牌 401 会作废缓存退回匿名)。

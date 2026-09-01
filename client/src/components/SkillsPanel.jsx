@@ -37,7 +37,7 @@ export function SkillsPanel() {
   const [officialMeta, setOfficialMeta] = useState({});
   const [loadingOff, setLoadingOff] = useState(false);
   const [offErr, setOffErr] = useState('');
-  // r67:GitHub 令牌。匿名 API 60 次/小时且按出口 IP 计,共享代理出口配额常年打满 → 列表恒空。
+  // 限流修复:GitHub 令牌。匿名 API 60 次/小时且按出口 IP 计,共享代理出口配额常年打满 → 列表恒空。
   // 后端解析顺序 env → 手动填入(pat)→ gh 命令行登录态;这里只展示来源,令牌值永不回传前端。
   const [ghTokenSource, setGhTokenSource] = useState(null); // 'env' | 'pat' | 'gh' | null(未配置)
   const [tokenOpen, setTokenOpen] = useState(false);
@@ -174,7 +174,7 @@ export function SkillsPanel() {
     setLoadingOff(false);
   }, []);
 
-  // r67:GitHub 令牌状态/保存/清除。保存成功后重拉当前列表(限流报错的加载不会进后端缓存,重拉即带令牌生效)。
+  // 限流修复:GitHub 令牌状态/保存/清除。保存成功后重拉当前列表(限流报错的加载不会进后端缓存,重拉即带令牌生效)。
   const loadTokenStatus = useCallback(async () => {
     try { const d = await (await fetch('/api/skills/github-token')).json(); setGhTokenSource(d.source || null); } catch { /* 忽略 */ }
   }, []);
@@ -257,7 +257,7 @@ export function SkillsPanel() {
     loadSavedRepos();
   }, [loadSavedRepos]);
   useEffect(() => { if (tab === 'import' && !activeRepo) loadOfficial(source); }, [tab, source, activeRepo, loadOfficial]);
-  useEffect(() => { if (tab === 'import') loadTokenStatus(); }, [tab, loadTokenStatus]); // r67:进导入页才查令牌状态(后端有 5 分钟缓存)
+  useEffect(() => { if (tab === 'import') loadTokenStatus(); }, [tab, loadTokenStatus]); // 限流修复:进导入页才查令牌状态(后端有 5 分钟缓存)
 
   const runImport = async (ids, overwrite, tag, isUpdate = false) => {
     if (!ids.length) return;
@@ -522,7 +522,7 @@ export function SkillsPanel() {
             </a>
           )}
 
-          {/* r67:GitHub 令牌一行状态 + 按需展开输入。填入后 GitHub 接口配额 60 次/小时/IP → 5000 次/小时/令牌。 */}
+          {/* 限流修复:GitHub 令牌一行状态 + 按需展开输入。填入后 GitHub 接口配额 60 次/小时/IP → 5000 次/小时/令牌。 */}
           <div className="text-[10px] text-ink-faint font-body flex items-center gap-1.5 flex-wrap">
             <span>
               GitHub 令牌:{ghTokenSource
