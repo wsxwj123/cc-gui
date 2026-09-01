@@ -24,6 +24,8 @@ const PROTOCOLS = [
   { id: 'openai', label: 'OpenAI 系（/images/generations）' },
   { id: 'gemini', label: 'Gemini 系（:generateContent）' },
   { id: 'chat', label: '对话接口出图（/chat/completions）' },
+  // r82:任务制上游 —— 提交只返回任务号，服务端轮询到出图为止（见下方协议说明）。
+  { id: 'mj', label: 'Midjourney（/midjourney/generations，任务制轮询）' },
 ];
 
 // r54:图生图形态,仅 openai 协议有意义(其余协议的参考图形态是唯一的,没得选)。
@@ -41,6 +43,9 @@ const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
 const TASK_VIEW_KEY = 'cgui-image-tasklist-view'; // grid | list,重开面板保留
 const POLL_MS = 1500; // 有任务在跑时的历史轮询间隔
 const STATUS_LABEL = { running: '生成中', done: '已完成', error: '失败', interrupted: '已中断', cancelled: '已取消' };
+// 取消只停止本机这一侧的等待与下载：上游任务（任务制协议尤其如此）仍在生成，费用照算。
+// 不写清楚会被理解成"已经把任务撤掉了"。
+const CANCEL_NOTE = '已停止等待（上游任务可能仍在生成并计费）';
 // r54 参考图:张数与单张体积上限,与服务端 MAX_REFS / MAX_REF_BYTES 同值(前端先拦,
 // 省一次大 body 往返;真正的闸在服务端)。
 const MAX_REFS = 6;
@@ -172,6 +177,13 @@ function ProviderForm({ initial, onDone, onCancel }) {
           </select>
         </label>
       </div>
+      {/* r82:任务制协议与三种同步协议的下发内容不同，选中时把差异写清楚（不写的话
+          用户会按同步协议的直觉去填尺寸与参考图，然后得到一个"填了没生效"的结果）。 */}
+      {form.protocol === 'mj' && (
+        <div className="text-[10px] text-ink-faint font-body leading-snug">
+          请求发往「接口地址」+ /midjourney/generations，请求体只包含提示词与附加参数（extra）：模型名与尺寸均不发送。宽高比等参数需写进提示词（如 --ar 16:9）或填入附加参数。当前版本不支持参考图，已选择的参考图不会随请求发送。提交后服务端每 5 秒查询一次任务状态，单次生成通常需要 1–2 分钟，一次可能返回多张图并分别落盘；超过 15 分钟未出结果记为失败，此时平台侧任务可能仍在继续。
+        </div>
+      )}
       <label className="space-y-1 block"><span className={labelCls}>接口地址（baseURL，不含 /images/generations 等路径后缀）</span>
         <input className={inputCls} value={form.baseURL} onChange={set('baseURL')} placeholder="https://api.example.com/v1" />
       </label>
@@ -640,6 +652,12 @@ export default function ImagePanel() {
               ))}
             </div>
           )}
+          {/* r82:mj 协议当前不下发参考图 —— 选了却静默丢弃比不让选更难排查。 */}
+          {selected?.protocol === 'mj' && refs.length > 0 && (
+            <div className="text-[10px] text-ink-faint font-body leading-snug">
+              当前 provider 使用 Midjourney 协议，参考图不会随请求发送。
+            </div>
+          )}
         </div>
         <textarea
           ref={promptRef}
@@ -753,10 +771,14 @@ export default function ImagePanel() {
                   {h.status === 'running' ? (
                     <>
                       <Loader2 size={16} className="animate-spin text-ink-faint" />
-                      <span className="text-[10px] text-ink-faint font-body">生成中 · {elapsedSec(h)}s</span>
+                      {/* r82:任务制上游会回报进度,有就显示(同步协议没有,保持原样只显示耗时)。 */}
+                      <span className="text-[10px] text-ink-faint font-body">生成中 · {elapsedSec(h)}s{h.progress == null ? '' : ` · ${h.progress}%`}</span>
                     </>
                   ) : (
-                    <span className="text-[10px] text-error font-body break-all line-clamp-5">{h.error || STATUS_LABEL[h.status] || h.status}</span>
+                    <>
+                      <span className="text-[10px] text-error font-body break-all line-clamp-5">{h.error || STATUS_LABEL[h.status] || h.status}</span>
+                      {h.status === 'cancelled' && <span className="text-[9.5px] text-ink-faint font-body leading-snug break-all">{CANCEL_NOTE}</span>}
+                    </>
                   )}
                 </div>
               )}
@@ -775,6 +797,9 @@ export default function ImagePanel() {
                 </div>
                 <div className="text-[9.5px] text-ink-faint font-body truncate">
                   {h.refs?.length ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">图生图</span> : null}
+                  {/* r82:一个任务可能出多张图,预览只显示第一张 —— 张数写出来,否则用户
+                      不知道保存目录里还多了几个文件。 */}
+                  {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{h.files.length} 张</span> : null}
                   {STATUS_LABEL[h.status] || h.status} · {shortTime(h.startedAt)}
                 </div>
                 <div className="flex items-center gap-1">{taskActions(h)}</div>
@@ -809,7 +834,9 @@ export default function ImagePanel() {
                 <div className="text-[11.5px] text-ink font-body truncate" title={h.prompt}>{h.prompt}</div>
                 <div className="text-[10px] text-ink-faint font-body truncate">
                   {h.refs?.length ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">图生图</span> : null}
-                  {h.status === 'running' ? `生成中 · ${elapsedSec(h)}s` : (STATUS_LABEL[h.status] || h.status)}
+                  {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{h.files.length} 张</span> : null}
+                  {h.status === 'running' ? `生成中 · ${elapsedSec(h)}s${h.progress == null ? '' : ` · ${h.progress}%`}` : (STATUS_LABEL[h.status] || h.status)}
+                  {h.status === 'cancelled' ? ` · ${CANCEL_NOTE}` : ''}
                   {h.status !== 'done' && h.error ? ` · ${h.error}` : ''}
                   {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
                 </div>

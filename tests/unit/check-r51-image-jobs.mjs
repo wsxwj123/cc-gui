@@ -254,8 +254,11 @@ if (failure) throw failure;
   const count = (s, re) => (s.match(re) || []).length;
   // 全文件基线(r51 之前实测值):安全锚点只许搬位置,不许被删被弱化。
   assert.equal(count(src, /await assertPublicBaseURL\(/g), 4, 't6: assertPublicBaseURL 调用点数量不变(校验/拉模型/前置/下载复检)');
-  assert.equal(count(src, /redirect: 'manual'/g), 3, "t6: redirect:'manual' 出现次数不变");
-  assert.equal(count(src, /readCapped\(/g), 4, 't6: readCapped 出现次数不变');
+  // r82 新增第四处外联(pollTask 查任务状态)→ 两条基线各 +1 / +2:该处同样带
+  // redirect:'manual',且错误分支与成功分支各限量读一次。锁的语义仍是"只许加不许减"
+  // —— runner 切片内的锚点数(下面 t6)一个没变,证明既有链路原样。
+  assert.equal(count(src, /redirect: 'manual'/g), 4, "t6: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处)");
+  assert.equal(count(src, /readCapped\(/g), 6, 't6: readCapped 出现次数(r51 的 4 处 + r82 轮询 2 处)');
   assert.ok(count(src, /redactKey\(/g) >= 7, 't6: redactKey 不少于原有 7 处(runner 顶层 catch 可再加)');
 
   const start = src.indexOf('async function runImageJob');

@@ -360,7 +360,8 @@ if (failure) throw failure;
   assert.match(src, /new ProxyAgent\(key\)/, 't3: dispatcher 来自 undici 的 ProxyAgent');
   assert.match(src, /function dispatchOpts\(proxyUrl\)[\s\S]{0,220}return agent \? \{ dispatcher: agent \} : \{\}/,
     't3【无代理零改动】:没配代理时不传 dispatcher,请求形态与原先逐字一致');
-  assert.equal(count(src, /\.\.\.proxy,/g), 2, 't3: 生成 POST 与图片下载共用同一个 provider 的 dispatcher');
+  // r82 起 runner 之外还有第四处外联(pollTask 查任务状态),同样走 provider 自己的代理。
+  assert.equal(count(src, /\.\.\.proxy,/g), 3, 't3: 生成 POST / 图片下载 / 任务轮询共用同一个 provider 的 dispatcher');
   assert.match(src, /dispatchOpts\(proxyUrl\)/, 't3: 拉模型分支按传入的代理走');
   assert.match(src, /if \(u\.username \|\| u\.password\) return \{ error: '代理地址不支持内嵌账号密码/,
     't3【禁凭据】:校验在服务端(前端提示只是说明)');
@@ -372,8 +373,10 @@ if (failure) throw failure;
     't3: boundary 跟着序列化结果走(不是自己编一个)');
   // 安全锚:换 fetch 实现不许动它们(r54/r26 系各自还会再验一遍)
   assert.equal(count(src, /await assertPublicBaseURL\(/g), 4, 't3: assertPublicBaseURL 调用点数量不变');
-  assert.equal(count(src, /redirect: 'manual'/g), 3, "t3: redirect:'manual' 出现次数不变");
-  assert.equal(count(src, /readCapped\(/g), 4, 't3: readCapped 出现次数不变');
+  // r82 的第四处外联带同款 redirect:'manual' + 两处限量读 → 两条基线各 +1 / +2
+  // (它的 fetch 默认就是 undiciFetch,单测可注入;"只许加不许减"的语义没变)。
+  assert.equal(count(src, /redirect: 'manual'/g), 4, "t3: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处)");
+  assert.equal(count(src, /readCapped\(/g), 6, 't3: readCapped 出现次数(r51 的 4 处 + r82 轮询 2 处)');
   assert.ok(count(src, /redactKey\(/g) >= 7, 't3: redactKey 不少于原有 7 处');
 }
 

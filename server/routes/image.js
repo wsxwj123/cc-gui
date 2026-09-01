@@ -15,7 +15,7 @@ import { extname } from 'path';
 import {
   IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, I2I_MODES, buildImageRequest, extractImage,
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
-  geminiModelsRequest,
+  geminiModelsRequest, extractTaskId, buildTaskPollRequest, extractTaskState,
 } from '../utils/image-protocols.js';
 import { readCapped } from '../utils/read-capped.js';
 // r56 按 provider 生图代理:生图链路的三处外联(生成 POST / 图片下载 / 拉模型)统一
@@ -547,6 +547,114 @@ export async function saveImage(dir, baseName, buf) {
   throw e;
 }
 
+// ─────────────────── r82 任务制上游(apimart / Midjourney 形态)的轮询 ───────────────────
+// 这类上游提交只回 task_id,图要轮询 {base}/tasks/{id} 到终态才有。
+// 5s 一档 = 上游文档建议的 3–5s 里最省的一档(查询不计费,但 MJ 实测 60s 才出图,更密无意义)。
+// 15 分钟本地上限:平台侧要 30 分钟才判超时并退款,GUI 挂半小时不合理 —— 到点写成 error
+// 并在文案里说明平台侧任务可能仍在跑。
+// 间隔允许被环境变量下调(同 GENERATE_TIMEOUT_MS 的先例):端到端单测要在秒级跑完
+// 提交→轮询→多图落盘这一整条,不设该变量时恒为 5s,产品行为一字不变。
+// 200ms 地板:负数或 0 会让 Number(...)||5000 落回 5s 没错,但 0.1 这类小正数会变成
+// 紧轮询,把用户自己的中转站打成 DDoS 目标。下调口只是给单测用的,不需要更快。
+const TASK_POLL_INTERVAL_MS = Math.max(200, Number(process.env.CGUI_IMAGE_TASK_POLL_INTERVAL_MS) || 5_000);
+const TASK_POLL_DEADLINE_MS = 15 * 60 * 1000;
+const TASK_POLL_TIMEOUT_MS = 30_000; // 单次查询的超时:一次查不到不判死,等下一轮
+
+/**
+ * 可中断的等待。取消要"点了就停" —— 用裸 setTimeout 的话最多要把这一轮 5s 睡完才落地,
+ * 按钮看起来就是坏的。export 仅为单测。
+ */
+export function sleepAbortable(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    let timer;
+    const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); };
+    timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+/**
+ * 轮询一个上游任务到终态。返回 { urls } / { error } / { cancelled:true } ——
+ * 写历史与错误呈现一律交给调用方(与 runImageJob 的 fail() 同一处口径,不在这里分叉)。
+ *
+ * 安全口径与既有两处外联逐条对齐:redirect:'manual'(请求带着密钥,不跟随 3xx)、
+ * readCapped 限量读、走 provider 自己的代理。轮询地址是【已过 assertPublicBaseURL 的
+ * baseURL】+ 编码后的 task id,origin 没变,故不再验一次;真正上游可控的是结果里的图片
+ * 链接,那些回到 runImageJob 的下载分支做 SSRF 复检(那段一行未改)。
+ *
+ * 单次查询失败(网络抖动 / 5xx / 单次超时)不判死:任务在上游照跑,等下一轮;
+ * 确定性错误(4xx、非 JSON、上游报 failed)才判死。总时长由 deadline 兜住。
+ *
+ * io 仅为单测注入(fetch / sleep / now),默认就是真网络与真定时器。signal 必传。
+ */
+export async function pollTask({ taskId, provider, signal, onProgress }, io = {}) {
+  const doFetch = io.fetch || undiciFetch;
+  const sleep = io.sleep || sleepAbortable;
+  const now = io.now || Date.now;
+  let spec;
+  try { spec = buildTaskPollRequest(provider.baseURL, provider.apiKey, taskId); }
+  catch (e) { return { error: `无法构造任务查询请求：${e.message}` }; }
+  const proxy = dispatchOpts(provider.proxyUrl);
+  const deadline = now() + TASK_POLL_DEADLINE_MS;
+  let lastProgress = null;
+  for (;;) {
+    // 先等再查:提交那一刻上游不可能已经出图,立刻查是白打一次。
+    await sleep(TASK_POLL_INTERVAL_MS, signal);
+    if (signal?.aborted) return { cancelled: true }; // 取消是终态,文案由 cancel 端点写
+    if (now() >= deadline) {
+      return { error: `等待上游任务超时（${TASK_POLL_DEADLINE_MS / 60000} 分钟未出结果）。平台侧任务可能仍在生成，请稍后在该服务的控制台查看。` };
+    }
+    let resp;
+    try {
+      resp = await doFetch(spec.url, {
+        headers: spec.headers,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(TASK_POLL_TIMEOUT_MS)]),
+        redirect: 'manual',
+        ...proxy,
+      });
+    } catch {
+      if (signal?.aborted) return { cancelled: true };
+      continue; // 网络抖动 / 单次查询超时:不判死,等下一轮
+    }
+    if (resp.status >= 300 && resp.status < 400) {
+      await resp.body?.cancel?.().catch(() => {});
+      return { error: `查询任务状态时上游返回了重定向（HTTP ${resp.status}），已拒绝跟随（防止密钥被带到未校验的地址）` };
+    }
+    if (!resp.ok) {
+      // 读出来既是为了给人话,也是为了把连接放掉(不等 GC)。
+      const errRaw = await readCapped(resp, MAX_ERROR_BYTES).catch(() => '');
+      if (resp.status >= 500 || resp.status === 429) continue; // 中转站常见抖动:继续轮询
+      const safe = redactKey(errRaw || '', provider.apiKey).replace(/\s+/g, ' ').trim().slice(0, MAX_UPSTREAM_ERR);
+      return { error: `查询任务状态失败：HTTP ${resp.status}${safe ? `：${safe}` : ''}` };
+    }
+    const raw = await readCapped(resp, MAX_RESPONSE_BYTES).catch(() => '');
+    if (raw === null) {
+      return { error: `任务状态响应体积过大（超过 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB 上限，已拒绝读取）` };
+    }
+    let data;
+    try { data = JSON.parse(raw); }
+    catch { return { error: `任务状态响应不是 JSON：${redactKey(raw, provider.apiKey).slice(0, 300) || '(空响应)'}` }; }
+    const st = extractTaskState(data);
+    if (st.progress !== null && st.progress !== lastProgress) {
+      lastProgress = st.progress;
+      onProgress?.(st.progress); // fire-and-forget:写历史不该拖住轮询节奏
+    }
+    if (st.status === 'failed' || st.status === 'cancelled') {
+      // 上游主动取消不是失败(常见于平台侧敏感词拦截后的自动退款),措辞如实区分。
+      const what = st.status === 'cancelled' ? '上游任务已取消' : '上游任务失败';
+      const why = redactKey(st.message, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
+      return { error: `${what}${why ? `：${why}` : '（上游未给出原因）'}` };
+    }
+    if (st.status === 'completed') {
+      if (!st.urls.length) {
+        return { error: `上游任务已完成但没有返回可用的图片链接：${redactKey(raw, provider.apiKey).slice(0, 300)}` };
+      }
+      return { urls: st.urls };
+    }
+  }
+}
+
 /**
  * 出图任务主体。异步跑,不占着 HTTP 连接 —— 安全链路(下载链接的 SSRF 复检、
  * redirect:'manual' 拒 3xx、redactKey、限量读、体积闸)整体自路由搬进来一字未改,
@@ -640,95 +748,123 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     let data;
     try { data = JSON.parse(raw); }
     catch { return fail(`上游响应不是 JSON：${safeRaw || '(空响应)'}`); }
-    const picked = extractImage(provider.protocol, data);
-    if (!picked) return fail(`上游响应里没有找到图片：${safeRaw.slice(0, 300)}`);
-
-    let buf; let mime = picked.mime || '';
-    if (picked.base64) {
-      // 判官必修②:b64 分支同样要挡 —— base64 文本本身已进内存,再解一份 Buffer。
-      if (picked.base64.length > MAX_IMAGE_BYTES * 1.4) {
-        return fail(`图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
-      }
-      buf = Buffer.from(picked.base64, 'base64');
-      // r26-J13:字符串长度闸挡不住"编码前过小、解码后超限"(1.4 是粗估,非精确 4/3)——
-      // 解码后的真实字节数再过一次上限闸(与二进制下载通道同值)。
-      if (buf.length > MAX_IMAGE_BYTES) {
-        return fail(`图片过大（解码后 ${Math.round(buf.length / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
-      }
-    } else {
-      // 判官必修①(SSRF):这个 URL 是【上游回什么就是什么】,攻击者可控性最高的一处 ——
-      // 而 baseURL 在上面刚过了 assertPublicBaseURL,这里原先一次都没过。实测能用
-      // http://127.0.0.1:.../x.png(Content-Type: text/html) 把内网响应落成"图片"。
-      // r22-⑤:光调 assertPublicBaseURL 还不够 —— 它默认【放行回环】(用户接本机
-      // ComfyUI/one-api 是刻意支持的),所以上游回 http://127.0.0.1:<任意端口>/x.png
-      // 时服务端照样会去请求,唯一拦住的只有事后的 Content-Type 检查。链路本地(169.254)
-      // 与 302 跳转那两条是真拦住了,回环这条没有。
-      // 但也不能一刀切禁回环:那会砍掉本机推理服务这个正当用法。区分点是【信任的是谁】——
-      // 回环豁免属于用户自己填的那个 host:port,不属于"本机所有端口"。故同源才继承豁免,
-      // 上游把链接指到本机别的端口 = 拿服务端当跳板探内网,一律拒绝。
-      let sameOrigin = false;
-      try {
-        const u = new URL(picked.url); const b = new URL(provider.baseURL);
-        // localhost 与 127.0.0.1 指的是同一个服务(用户填 localhost、本机服务回
-        // 127.0.0.1 的链接很常见),端口相同即算同源;其余一律按 origin 严格比。
-        const lo = (h) => /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|::1)$/i.test(h);
-        sameOrigin = u.origin === b.origin || (lo(u.hostname) && lo(b.hostname) && u.port === b.port);
-      } catch {}
-      try { await assertPublicBaseURL(picked.url, { allowLoopback: sameOrigin }); }
-      catch (e) { return fail(`拒绝下载该链接：${e.message}`); }
-      let img;
-      try {
-        img = await undiciFetch(picked.url, {
-          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)]),
-          // 判官必修①:默认跟随重定向 = 事后校验白做(302 到内网照样下)。手动挡下 3xx。
-          redirect: 'manual',
-          ...proxy,
+    // 同步协议:图就在这次响应里。取不到再看是不是【任务制】上游(apimart / MJ:提交只回
+    // task_id),是就轮询到终态再取图。判据是【响应形态】而不是协议名 —— 同一个 openai
+    // 协议接到任务制中转站时同样能出图,且同步命中时下面这一整段与 r82 之前逐字等价。
+    const sync = extractImage(provider.protocol, data);
+    let pickedList = sync ? [sync] : null;
+    if (!pickedList) {
+      const taskId = extractTaskId(data);
+      if (taskId) {
+        const polled = await pollTask({
+          taskId,
+          provider,
+          signal: controller.signal,
+          onProgress: (p) => { updateHistoryEntry(jobId, { progress: p }).catch(() => {}); },
         });
-      } catch (e) {
-        // 判官r57建议2:与生成分支同款拼 cause(代理死/DNS 失败时不再只报裸 fetch failed)。
-        const cause = e?.cause?.code || e?.cause?.message || '';
-        return fail(nodeFloorHint(e) || `下载生成的图片失败：${redactKey(e.message, provider.apiKey)}${cause ? `（${cause}）` : ''}`);
-      }
-      if (img.status >= 300 && img.status < 400) {
-        return fail('上游图片链接发生跳转，已拒绝（防止绕过内网地址检查）');
-      }
-      if (!img.ok) return fail(`下载生成的图片失败：HTTP ${img.status}`);
-      const ct = img.headers.get('content-type') || '';
-      // 判官必修①:原先"Content-Type 不是图片但 URL 以 .png 结尾"也放行 —— 后缀是攻击者
-      // 写的,不能当证据。这里只认 Content-Type。
-      if (!/^image\//i.test(ct)) {
-        return fail(`上游返回的链接不是图片（Content-Type: ${ct || '未知'}）`);
-      }
-      // 判官必修②:无上限地 arrayBuffer() 一个坏掉/恶意的上游 = 单进程后端 OOM
-      // (实测 4×12MB 并发 → RSS 446MB,base64+JSON+Buffer 约 10x 放大)。
-      const declared = Number(img.headers.get('content-length') || 0);
-      if (Number.isFinite(declared) && declared > MAX_IMAGE_BYTES) {
-        return fail(`图片过大（${Math.round(declared / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
-      }
-      mime = ct;
-      buf = Buffer.from(await img.arrayBuffer());
-      if (buf.length > MAX_IMAGE_BYTES) {
-        return fail(`图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
+        if (polled.cancelled) return; // 取消是终态,状态已由 cancel 端点写
+        if (polled.error) return fail(polled.error);
+        // 一个任务可能出多张图(MJ 实测 4 张单图):逐张走下面同一条下载链路,落多个文件。
+        pickedList = polled.urls.map((url) => ({ mime: '', url }));
       }
     }
-    if (!buf.length) return fail('上游返回了空图片');
+    if (!pickedList) return fail(`上游响应里没有找到图片：${safeRaw.slice(0, 300)}`);
 
-    let file;
-    try { file = await saveImage(provider.savePath, buildImageFileName(prompt, imageExtFromMime(mime)), buf); }
-    catch (e) {
-      const msg = e?.code === 'ENOSPC' ? '磁盘空间不足，无法保存图片'
-        : e?.code === 'EACCES' || e?.code === 'EPERM' ? '保存目录没有写入权限，请重新选择'
-          : e?.code === 'ENOENT' ? '保存目录不存在，请重新选择'
-            : `保存失败（${e?.code || 'unknown'}）`;
-      return fail(msg);
+    const files = [];
+    let totalBytes = 0;
+    for (const picked of pickedList) {
+      let buf; let mime = picked.mime || '';
+      if (picked.base64) {
+        // 判官必修②:b64 分支同样要挡 —— base64 文本本身已进内存,再解一份 Buffer。
+        if (picked.base64.length > MAX_IMAGE_BYTES * 1.4) {
+          return fail(`图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
+        }
+        buf = Buffer.from(picked.base64, 'base64');
+        // r26-J13:字符串长度闸挡不住"编码前过小、解码后超限"(1.4 是粗估,非精确 4/3)——
+        // 解码后的真实字节数再过一次上限闸(与二进制下载通道同值)。
+        if (buf.length > MAX_IMAGE_BYTES) {
+          return fail(`图片过大（解码后 ${Math.round(buf.length / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
+        }
+      } else {
+        // 判官必修①(SSRF):这个 URL 是【上游回什么就是什么】,攻击者可控性最高的一处 ——
+        // 而 baseURL 在上面刚过了 assertPublicBaseURL,这里原先一次都没过。实测能用
+        // http://127.0.0.1:.../x.png(Content-Type: text/html) 把内网响应落成"图片"。
+        // r22-⑤:光调 assertPublicBaseURL 还不够 —— 它默认【放行回环】(用户接本机
+        // ComfyUI/one-api 是刻意支持的),所以上游回 http://127.0.0.1:<任意端口>/x.png
+        // 时服务端照样会去请求,唯一拦住的只有事后的 Content-Type 检查。链路本地(169.254)
+        // 与 302 跳转那两条是真拦住了,回环这条没有。
+        // 但也不能一刀切禁回环:那会砍掉本机推理服务这个正当用法。区分点是【信任的是谁】——
+        // 回环豁免属于用户自己填的那个 host:port,不属于"本机所有端口"。故同源才继承豁免,
+        // 上游把链接指到本机别的端口 = 拿服务端当跳板探内网,一律拒绝。
+        let sameOrigin = false;
+        try {
+          const u = new URL(picked.url); const b = new URL(provider.baseURL);
+          // localhost 与 127.0.0.1 指的是同一个服务(用户填 localhost、本机服务回
+          // 127.0.0.1 的链接很常见),端口相同即算同源;其余一律按 origin 严格比。
+          const lo = (h) => /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|::1)$/i.test(h);
+          sameOrigin = u.origin === b.origin || (lo(u.hostname) && lo(b.hostname) && u.port === b.port);
+        } catch {}
+        try { await assertPublicBaseURL(picked.url, { allowLoopback: sameOrigin }); }
+        catch (e) { return fail(`拒绝下载该链接：${e.message}`); }
+        let img;
+        try {
+          img = await undiciFetch(picked.url, {
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)]),
+            // 判官必修①:默认跟随重定向 = 事后校验白做(302 到内网照样下)。手动挡下 3xx。
+            redirect: 'manual',
+            ...proxy,
+          });
+        } catch (e) {
+          // 判官r57建议2:与生成分支同款拼 cause(代理死/DNS 失败时不再只报裸 fetch failed)。
+          const cause = e?.cause?.code || e?.cause?.message || '';
+          return fail(nodeFloorHint(e) || `下载生成的图片失败：${redactKey(e.message, provider.apiKey)}${cause ? `（${cause}）` : ''}`);
+        }
+        if (img.status >= 300 && img.status < 400) {
+          return fail('上游图片链接发生跳转，已拒绝（防止绕过内网地址检查）');
+        }
+        if (!img.ok) return fail(`下载生成的图片失败：HTTP ${img.status}`);
+        const ct = img.headers.get('content-type') || '';
+        // 判官必修①:原先"Content-Type 不是图片但 URL 以 .png 结尾"也放行 —— 后缀是攻击者
+        // 写的,不能当证据。这里只认 Content-Type。
+        if (!/^image\//i.test(ct)) {
+          return fail(`上游返回的链接不是图片（Content-Type: ${ct || '未知'}）`);
+        }
+        // 判官必修②:无上限地 arrayBuffer() 一个坏掉/恶意的上游 = 单进程后端 OOM
+        // (实测 4×12MB 并发 → RSS 446MB,base64+JSON+Buffer 约 10x 放大)。
+        const declared = Number(img.headers.get('content-length') || 0);
+        if (Number.isFinite(declared) && declared > MAX_IMAGE_BYTES) {
+          return fail(`图片过大（${Math.round(declared / 1048576)}MB，上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
+        }
+        mime = ct;
+        buf = Buffer.from(await img.arrayBuffer());
+        if (buf.length > MAX_IMAGE_BYTES) {
+          return fail(`图片过大（上限 ${MAX_IMAGE_BYTES / 1048576}MB）`);
+        }
+      }
+      if (!buf.length) return fail('上游返回了空图片');
+
+      let file;
+      try { file = await saveImage(provider.savePath, buildImageFileName(prompt, imageExtFromMime(mime)), buf); }
+      catch (e) {
+        const msg = e?.code === 'ENOSPC' ? '磁盘空间不足，无法保存图片'
+          : e?.code === 'EACCES' || e?.code === 'EPERM' ? '保存目录没有写入权限，请重新选择'
+            : e?.code === 'ENOENT' ? '保存目录不存在，请重新选择'
+              : `保存失败（${e?.code || 'unknown'}）`;
+        return fail(msg);
+      }
+      files.push(file);
+      totalBytes += buf.length;
     }
     // 取消是终态:图恰好在 abort 前拿到也不把条目翻回 done(用户看到的必须是他点的那个结果)。
     if (!cancelledJobs.has(jobId)) {
       await updateHistoryEntry(jobId, {
         status: 'done',
-        file,
-        previewUrl: `/api/image/preview?file=${encodeURIComponent(file)}`,
-        bytes: buf.length,
+        file: files[0],
+        previewUrl: `/api/image/preview?file=${encodeURIComponent(files[0])}`,
+        bytes: totalBytes,
+        // 一图任务(同步三协议)到这里与 r82 之前逐字一致:files 长度为 1 时不写这个字段。
+        // 多图任务(MJ 一次 4 张)才有 files —— file/previewUrl 仍指第一张,既有 UI 不用改。
+        ...(files.length > 1 ? { files } : {}),
         tookMs: Date.now() - started,
       }).catch(() => {});
     }
