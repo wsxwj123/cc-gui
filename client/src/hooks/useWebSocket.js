@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
 import { maybeNotify, permissionNotice } from '../utils/desktopNotify.js';
+import { dropStreamSnapshot } from '../utils/reattach.js';
 import { getSkinState, deactivateSkin } from '../utils/skins.js';
 
 // G3:危险命令启发式 —— 删除类 + 网络/装包 + sudo。命中即强制弹窗,不被任何自动放行豁免。
@@ -338,6 +339,9 @@ export function useWebSocket() {
               const st = useStore.getState();
               const sid = data.sessionId;
               if (!sid) break;
+              // r68:回合真结束 ⇒ 该会话的直播快照作废(历史已全量,再种回就是双份)。
+              // 这条广播是唯一可靠信号:服务端在 result 时无条件发,不依赖本端有没有 SSE 在线。
+              dropStreamSnapshot(sid);
               // CM-3:任何回合完成都刷新侧栏会话列表 —— 新会话的首个回合在此被广播到**所有**
               // 连接的客户端(手机/电脑),于是另一端无需"退出再进项目"就能看到新会话。
               // 原来只靠文件 watcher 轮询(2.5s、大目录易漏/滞后),跨设备常不刷新(用户报告)。

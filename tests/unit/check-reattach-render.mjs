@@ -22,6 +22,13 @@ import {
   const now = 1_700_000_000_000;
   assert.equal(resolveStreamHistCutoff(true, now), null, 'reattach:不截断,历史完整显示在跑的 turn');
   assert.deepEqual(resolveStreamHistCutoff(false, now), { sinceTs: now }, '正常发送:仍按起流时刻截断(行为不变)');
+  // r68 种回:命中快照的 reattach 沿用快照里的【原始起流时刻】,与普通发送同构 ——
+  // 历史被整段截掉、直播气泡独家画。无快照那条退化路径的 null 口径一字不动(上一行)。
+  const seeded = { sinceTs: now - 30_000, keepUser: true };
+  assert.deepEqual(resolveStreamHistCutoff(true, now, seeded), seeded,
+    'reattach 有快照:必须用快照带来的原始口径,不能回落 null(回落=历史与直播气泡双画)');
+  assert.deepEqual(resolveStreamHistCutoff(false, now, seeded), { sinceTs: now },
+    '普通发送不受快照影响:永远按本次起流时刻截断');
 }
 
 // ── ③ 节流:够 1.5s 才刷 ───────────────────────────────────────
@@ -93,8 +100,10 @@ import {
     'finally 不得再用 pid 判断新回合是否开始');
   assert.equal((src.match(/setReattachStream\(false\)/g) || []).length, 1,
     'reattachStream 只应有 finally 那一处复位:多一处裸复位就绕开回合守卫');
-  assert.equal((src.match(/setReattachStream\(/g) || []).length, 2,
-    'setReattachStream 全仓只应有 2 个调用点(起流置位 + finally 复位)');
+  // r68 起 3 个:起流置位 + finally 复位 + early_overflow 就地退回无快照 reattach。
+  // 第三处只把标记置【真】(放弃种回、回到今天的行为),不绕开 finally 的回合守卫。
+  assert.equal((src.match(/setReattachStream\(/g) || []).length, 3,
+    'setReattachStream 只应有 3 个调用点(起流置位 + finally 复位 + 溢出退回)');
   assert.match(src, /if \(histRefreshInFlight\) return;/,
     'reattach 历史刷新必须有 in-flight 去重,慢盘时别把 /messages 请求叠罗汉');
 }
