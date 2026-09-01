@@ -27,6 +27,8 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const {
   buildImageRequest, mjVersionFields, MJ_VERSIONS, MJ_SPEEDS,
 } = await import('../../server/utils/image-protocols.js');
+const { entryFiles, pickedIndex, pickedFile, entryPreviewUrl, pickedPreviewUrl } =
+  await import('../../client/src/utils/imageEntry.js');
 const PANEL = readFileSync(join(REPO, 'client', 'src', 'components', 'ImagePanel.jsx'), 'utf8');
 
 const BASE = { baseURL: 'https://api.example.com/v1', apiKey: 'sk-r84-secret', model: 'midjourney' };
@@ -95,6 +97,66 @@ const mj = (over) => buildImageRequest({ protocol: 'mj', ...BASE, ...over }, '�
     { model: 'gpt-image-2', prompt: '一只猫', n: 1, size: '1024x1024' },
     't3: openai body 字面量',
   );
+}
+
+// ───────────────── 4. 多图条目:统一取图 + 下标边界 + 单图向后兼容 ─────────────────
+{
+  const four = {
+    id: 'j1', status: 'done', file: '/img/a.png', previewUrl: '/api/image/preview?file=%2Fimg%2Fa.png',
+    files: ['/img/a.png', '/img/b.png', '/img/c.png', '/img/d.png'],
+  };
+  const one = { id: 'j2', status: 'done', file: '/img/solo.png', previewUrl: '/api/image/preview?file=%2Fimg%2Fsolo.png' };
+
+  assert.deepEqual(entryFiles(four), four.files, 't4: 多图条目取 files 全量');
+  assert.deepEqual(entryFiles(one), ['/img/solo.png'], 't4【向后兼容】:单图条目(无 files)取 file');
+  for (const [bad, why] of [[null, 'null'], [undefined, 'undefined'], [{}, '空条目'],
+    [{ files: [] }, 'files 空数组'], [{ file: '' }, 'file 空串'], [{ files: [1, null] }, 'files 里不是字符串'],
+    [{ file: 5 }, 'file 不是字符串']]) {
+    assert.deepEqual(entryFiles(bad), [], `t4: ${why} → 空数组`);
+  }
+  // running / error 条目没有图:所有取图口都必须给出"没有"而不是半截值。
+  assert.equal(pickedFile({ id: 'j3', status: 'running' }), '', 't4: 无图条目 pickedFile 为空串');
+  assert.equal(pickedPreviewUrl({ id: 'j3', status: 'running' }), '', 't4: 无图条目预览地址为空串');
+
+  // 下标边界:0 / 末位 / 越界 / 负数 / 非数字。
+  assert.equal(pickedIndex(four, 0), 0, 't4: 下标 0');
+  assert.equal(pickedIndex(four, 3), 3, 't4: 下标末位');
+  assert.equal(pickedIndex(four, 4), 3, 't4【越界】:钳到末位');
+  assert.equal(pickedIndex(four, 99), 3, 't4【越界】:大幅越界也钳到末位');
+  assert.equal(pickedIndex(four, -1), 0, 't4: 负数回落 0');
+  assert.equal(pickedIndex(four, undefined), 0, 't4: 未选过 → 0');
+  assert.equal(pickedIndex(four, '2'), 2, 't4: 数字字符串');
+  assert.equal(pickedIndex(four, 'x'), 0, 't4: 非数字回落 0');
+  assert.equal(pickedIndex(four, 1.9), 1, 't4: 小数向下取整');
+  // 单图条目:任何下标都只能是第 0 张(这是"多图不改单图行为"的核心一条)。
+  for (const idx of [0, 1, 7, -3, undefined, 'x']) {
+    assert.equal(pickedIndex(one, idx), 0, `t4【向后兼容】:单图条目下标恒 0(${idx})`);
+    assert.equal(pickedFile(one, idx), '/img/solo.png', `t4【向后兼容】:单图条目恒取那一张(${idx})`);
+    assert.equal(pickedPreviewUrl(one, idx), one.previewUrl, `t4【向后兼容】:预览地址与服务端写的逐字一致(${idx})`);
+  }
+  assert.equal(pickedFile(four, 2), '/img/c.png', 't4: 选第 3 张就取第 3 张');
+  assert.equal(pickedPreviewUrl(four, 0), four.previewUrl, 't4: 第 1 张的地址与服务端写的 previewUrl 一致');
+  assert.equal(entryPreviewUrl(''), '', 't4: 空路径不拼出 file= 空串的请求');
+  assert.equal(entryPreviewUrl('/a b#c.png'), '/api/image/preview?file=%2Fa%20b%23c.png', 't4: 路径进 query 前编码');
+
+  // 与服务端写进条目的模板同源:改了一边漏改另一边,后几张的预览就 404。
+  const routeSrc = readFileSync(join(REPO, 'server', 'routes', 'image.js'), 'utf8');
+  assert.match(routeSrc, /previewUrl: `\/api\/image\/preview\?file=\$\{encodeURIComponent\(files\[0\]\)\}`/,
+    't4: 服务端仍用同一个 previewUrl 模板');
+}
+
+// ───────────────── 5. 面板消费点:两种视图都消费多图,且不再恒取第一张 ─────────────────
+{
+  const count = (re) => (PANEL.match(re) || []).length;
+  assert.equal(count(/\{imageStrip\(h\)\}/g), 2, 't5: 网格与列表两种视图都渲染缩略条');
+  assert.match(PANEL, /\{imageStrip\(current\)\}/, 't5: 生图页的当前预览也带缩略条');
+  // 单图操作一律走 shotFile / shotUrl:留下任何一处 h.file / h.previewUrl 就是"恒取第一张"。
+  assert.equal(count(/reveal\(h\.file\)/g), 0, 't5: 在文件夹中显示不再恒取第一张');
+  assert.equal(count(/src=\{h\.previewUrl\}/g), 0, 't5: 缩略图不再恒取第一张');
+  assert.equal(count(/path: h\.file/g), 0, 't5: 放大不再恒取第一张');
+  assert.equal(count(/reveal\(current\.file\)|src=\{current\.previewUrl\}/g), 0, 't5: 生图页预览同理');
+  assert.match(PANEL, /const MJ_GRID_POSITIONS = \['左上', '右上', '左下', '右下'\]/,
+    't5【映射锁】:四宫格位置顺序 = 上游 index 1-4 的顺序');
 }
 
 // ───────────────── 7. 前端候选与服务端白名单同源 ─────────────────

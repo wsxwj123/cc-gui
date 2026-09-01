@@ -12,6 +12,8 @@ import { ImageLightbox } from './ImageLightbox.jsx';
 import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickModal.jsx';
 // r56 尺寸候选按模型家族过滤(能力表在 utils/imageSizeCaps.js,未知模型回落全量)。
 import { SIZE_OPTIONS, sizeCapFor, sizeOptionsFor } from '../utils/imageSizeCaps.js';
+// r84 多图条目:一个任务可能出多张图(MJ 一次 4 张),单图操作一律作用于【选中的那张】。
+import { entryFiles, pickedIndex, pickedFile, entryPreviewUrl, pickedPreviewUrl } from '../utils/imageEntry.js';
 // r58 上传参考图的 MIME:File.type 为空(Win 缺注册表映射)时按扩展名认,别一律说成 png。
 import { refMime } from '../utils/refMime.js';
 // r59 程序化写入走撤销通道,否则「恢复」覆盖掉的提示词 ⌘Z 撤不回。
@@ -66,6 +68,10 @@ const MJ_RATIOS = [
 // 手写 JSON 是门槛,给一份能直接复制的样例比列字段名有用。
 const MJ_EXTRA_EXAMPLE = '{"stylize": 250, "chaos": 20, "seed": 12345, "negative_prompt": "blurry, text"}';
 const MJ_EXTRA_FIELDS = 'stylize 风格化 0-1000 · chaos 混乱度 0-100 · weird 怪异度 0-3000 · seed 随机种子 · negative_prompt 负面提示词 · style（如 raw）· quality 0.25/0.5/1/2 · hd 布尔（仅 8.1 / 8.2）';
+
+// r84:MJ 四宫格里"第几张"的人话说法。上游的 index 是 1–4,顺序即返回的 image_urls 顺序,
+// 对应四宫格的【左上=1、右上=2、左下=3、右下=4】—— 这个映射被单测钉住,别改顺序。
+const MJ_GRID_POSITIONS = ['左上', '右上', '左下', '右下'];
 
 // 提示词草稿:出图是后台任务,面板关掉再打开输入框里的内容必须还在。
 const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
@@ -439,6 +445,9 @@ export default function ImagePanel() {
   // r54 参考图(图生图)。刻意【不进 localStorage 草稿】:一张图就能把 5MB 配额撑爆,
   // 重开面板参考图清空可接受(提示词照旧保留)。
   const [refs, setRefs] = useState([]);
+  // r84 多图:条目 id → 选中的第几张。没有记录 = 第 0 张(单图条目永远走这条)。
+  // 刻意不持久化:它是"我现在在看哪张",不是配置。
+  const [picked, setPicked] = useState({});
   // r54 删除:selectMode = 批量选择开关,selectedIds = 勾中的 jobId 集合。
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(() => new Set());
@@ -523,6 +532,11 @@ export default function ImagePanel() {
   const current = history.find((h) => h.id === currentId) || null;
   // 任务列表:running 排最上,其余保持时间倒序(sort 稳定,组内次序不变)。
   const ordered = [...history].sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1));
+  // r84:条目上"当前这张"的三件套。单图条目(无 files)与改动前逐字等价。
+  const shotIdx = (h) => pickedIndex(h, picked[h.id]);
+  const shotFile = (h) => pickedFile(h, picked[h.id]);
+  const shotUrl = (h) => pickedPreviewUrl(h, picked[h.id]) || h.previewUrl || '';
+  const pickShot = (h, i) => { setCurrentId(h.id); setPicked((m) => ({ ...m, [h.id]: i })); };
 
   // 参考图选择:单张与张数都先在前端拦一道(超限直接报错不发),真正的闸在服务端。
   const addRefFiles = async (files) => {
@@ -562,13 +576,16 @@ export default function ImagePanel() {
   };
 
   // 「以此图修改」:引用已生成的图 —— 只传 file 路径,不把图片内容回传一遍。
+  // r84:作用于【当前选中那张】—— 多图任务里恒取第一张的话,后 3 张永远改不了。
   const addHistoryRef = (h) => {
     setErr('');
     setTab('gen');
+    const file = shotFile(h);
+    if (!file) return;
     setRefs((cur) => {
-      if (cur.some((r) => r.kind === 'history' && r.file === h.file)) return cur;
+      if (cur.some((r) => r.kind === 'history' && r.file === file)) return cur;
       if (cur.length >= MAX_REFS) { setErr(`参考图最多 ${MAX_REFS} 张`); return cur; }
-      return [...cur, { kind: 'history', file: h.file, name: h.file.split(/[/\\]/).pop(), preview: h.previewUrl }];
+      return [...cur, { kind: 'history', file, name: file.split(/[/\\]/).pop(), preview: entryPreviewUrl(file) }];
     });
   };
 
@@ -677,6 +694,30 @@ export default function ImagePanel() {
     return next;
   });
 
+  // r84 多图缩略条:一个任务出多张时才出现(单图条目返回 null,渲染与改动前一致)。
+  // 点某张 = 选中它,上面的大图、放大、以此图修改、在文件夹中显示随之切过去 ——
+  // 悬停虽然也能看,但"作用于哪一张"必须由一次明确的点击决定,不能靠鼠标停在哪。
+  const imageStrip = (h) => {
+    const list = entryFiles(h);
+    if (h.status !== 'done' || list.length < 2) return null;
+    const cur = shotIdx(h);
+    return (
+      <div className="grid grid-cols-4 gap-1">
+        {list.map((f, i) => (
+          <button
+            type="button"
+            key={f}
+            onClick={() => pickShot(h, i)}
+            title={`第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）：点击选中，上方大图与单图操作都作用于它`}
+            className={`rounded overflow-hidden border ${i === cur ? 'border-accent' : 'border-canvas-deep hover:border-ink-faint'}`}
+          >
+            <img src={entryPreviewUrl(f)} alt={`第 ${i + 1} 张`} className="w-full aspect-square object-cover" />
+          </button>
+        ))}
+      </div>
+    );
+  };
+
   // 两种视图共用的条目操作,避免两处各写一份走样。
   const taskActions = (h) => (
     <>
@@ -688,7 +729,7 @@ export default function ImagePanel() {
           className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
         ><X size={13} /></button>
       )}
-      {h.status === 'done' && h.file && (
+      {h.status === 'done' && shotFile(h) && (
         <button
           type="button"
           onClick={() => addHistoryRef(h)}
@@ -696,10 +737,10 @@ export default function ImagePanel() {
           className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
         ><Image size={13} /></button>
       )}
-      {h.status === 'done' && h.file && (
+      {h.status === 'done' && shotFile(h) && (
         <button
           type="button"
-          onClick={() => reveal(h.file)}
+          onClick={() => reveal(shotFile(h))}
           title="在文件夹中显示"
           className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
         ><ExternalLink size={13} /></button>
@@ -835,16 +876,17 @@ export default function ImagePanel() {
       {current && current.status === 'done' && (
         <div className={`space-y-1.5 ${tab === 'gen' ? '' : 'hidden'}`}>
           <img
-            src={current.previewUrl}
+            src={shotUrl(current)}
             alt={current.prompt}
-            onClick={() => setZoom({ src: current.previewUrl, name: current.prompt, path: current.file })}
+            onClick={() => setZoom({ src: shotUrl(current), name: current.prompt, path: shotFile(current) })}
             className="w-full rounded-panel border border-canvas-deep cursor-zoom-in"
           />
+          {imageStrip(current)}
           <div className="flex items-center gap-2">
-            <span className="text-[10.5px] text-ink-faint font-mono break-all flex-1">{current.file}</span>
+            <span className="text-[10.5px] text-ink-faint font-mono break-all flex-1">{shotFile(current)}</span>
             <button
               type="button"
-              onClick={() => reveal(current.file)}
+              onClick={() => reveal(shotFile(current))}
               className="shrink-0 px-2 py-1 rounded border border-canvas-deep text-[11px] text-ink-soft font-body hover:bg-canvas-deep/60 flex items-center gap-1"
             ><ExternalLink size={11} />在文件夹中显示</button>
           </div>
@@ -894,11 +936,11 @@ export default function ImagePanel() {
         <div className={taskView === 'grid' ? 'grid grid-cols-2 gap-2' : 'space-y-1.5'}>
           {ordered.map((h) => (taskView === 'grid' ? (
             <div key={h.id} className={`rounded-panel border overflow-hidden ${h.id === currentId ? 'border-accent' : 'border-canvas-deep'}`}>
-              {h.status === 'done' && h.previewUrl ? (
+              {h.status === 'done' && shotUrl(h) ? (
                 <img
-                  src={h.previewUrl}
+                  src={shotUrl(h)}
                   alt={h.prompt}
-                  onClick={() => { setCurrentId(h.id); setZoom({ src: h.previewUrl, name: h.prompt, path: h.file }); }}
+                  onClick={() => { setCurrentId(h.id); setZoom({ src: shotUrl(h), name: h.prompt, path: shotFile(h) }); }}
                   className="w-full aspect-square object-cover cursor-zoom-in"
                 />
               ) : (
@@ -918,6 +960,7 @@ export default function ImagePanel() {
                 </div>
               )}
               <div className="px-1.5 py-1 space-y-1">
+                {imageStrip(h)}
                 <div className="flex items-start gap-1">
                   {selectMode && (
                     <input
@@ -934,7 +977,7 @@ export default function ImagePanel() {
                   {h.refs?.length ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">图生图</span> : null}
                   {/* r82:一个任务可能出多张图,预览只显示第一张 —— 张数写出来,否则用户
                       不知道保存目录里还多了几个文件。 */}
-                  {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{h.files.length} 张</span> : null}
+                  {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">第 {shotIdx(h) + 1}/{h.files.length} 张</span> : null}
                   {STATUS_LABEL[h.status] || h.status} · {shortTime(h.startedAt)}
                 </div>
                 <div className="flex items-center gap-1">{taskActions(h)}</div>
@@ -951,11 +994,11 @@ export default function ImagePanel() {
                   className="shrink-0 accent-red-600"
                 />
               )}
-              {h.status === 'done' && h.previewUrl ? (
+              {h.status === 'done' && shotUrl(h) ? (
                 <img
-                  src={h.previewUrl}
+                  src={shotUrl(h)}
                   alt={h.prompt}
-                  onClick={() => { setCurrentId(h.id); setZoom({ src: h.previewUrl, name: h.prompt, path: h.file }); }}
+                  onClick={() => { setCurrentId(h.id); setZoom({ src: shotUrl(h), name: h.prompt, path: shotFile(h) }); }}
                   className="shrink-0 w-9 h-9 rounded object-cover border border-canvas-deep cursor-zoom-in"
                 />
               ) : (
@@ -969,12 +1012,13 @@ export default function ImagePanel() {
                 <div className="text-[11.5px] text-ink font-body truncate" title={h.prompt}>{h.prompt}</div>
                 <div className="text-[10px] text-ink-faint font-body truncate">
                   {h.refs?.length ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">图生图</span> : null}
-                  {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{h.files.length} 张</span> : null}
+                  {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">第 {shotIdx(h) + 1}/{h.files.length} 张</span> : null}
                   {h.status === 'running' ? `生成中 · ${elapsedSec(h)}s${h.progress == null ? '' : ` · ${h.progress}%`}` : (STATUS_LABEL[h.status] || h.status)}
                   {h.status === 'cancelled' ? ` · ${CANCEL_NOTE}` : ''}
                   {h.status !== 'done' && h.error ? ` · ${h.error}` : ''}
                   {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
                 </div>
+                {imageStrip(h)}
               </div>
               <div className="shrink-0 flex items-center gap-1">{taskActions(h)}</div>
             </div>

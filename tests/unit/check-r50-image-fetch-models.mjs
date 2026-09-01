@@ -49,10 +49,12 @@ const FORM_KEY = 'sk-r50-form-key-998877665544';
     createHash('sha256').update(m[0]).digest('hex'),
     // r54 图生图按规格改了本函数(加 refs 形参与四协议分流),基线随之更新一次。
     // r82 又更新一次:新增 mj 分支(任务制上游的提交端点),三种同步协议的分支一行未动。
+    // r84 第三次更新:mj 分支按文档下发 size(宽高比)/ version / speed,三种同步协议
+    // 的分支仍一行未动(check-r84-mj-actions 的 t3 用 deepEqual 锁住了这一点)。
     // 「纯文生图零回归」的真牙已搬到 check-r54-image-refs.mjs 的 t0:三种协议在【无 refs】
     // 时的 {url, headers, body} 用 deepEqual 逐字钉死 —— 比源码哈希更强(哈希只挡改动,
     // deepEqual 挡的是行为)。改这里前先看那三条锚。
-    '813923eb4ffcdc29538e08ae14067fbe224f90a57473031b29c7c6a8bae6063d',
+    'b96e30e24b20e465592eec66e2db30e1aa6cc84422a6bebe18ff059053af81da',
     't2: buildImageRequest 一字未改(生成链路红线);若确需改动,连同 check-image-gen 与 check-r54-image-refs 的断言一起复核后再更新此基线',
   );
 }

@@ -24,7 +24,9 @@ const FIXED_TEXT = '打开失败：无法在系统文件管理器中显示该文
   ok(!/\.catch\(\(\) => \{\}\)/.test(revealBlock), 'J6: 不得再静默吞 catch');
   ok(/const \[revealErr, setRevealErr\] = useState\(/.test(src), 'J6: revealErr 状态存在');
   ok(/\{revealErr && <div/.test(src), 'J6: 预览区渲染 revealErr 错误节点');
-  ok(/onClick=\{\(\) => reveal\(current\.file\)\}/.test(src), 'J6: 按钮仍挂 reveal(不误改)');
+  // r84:多图任务里"在文件夹中显示"改为作用于【选中那张】(shotFile),不再恒取第一张;
+  // 单图条目 shotFile(current) === current.file,行为不变。
+  ok(/onClick=\{\(\) => reveal\(shotFile\(current\)\)\}/.test(src), 'J6: 按钮仍挂 reveal(不误改)');
 }
 
 // ③④ 行为矩阵(与 reveal 逐字同形的参考实现)

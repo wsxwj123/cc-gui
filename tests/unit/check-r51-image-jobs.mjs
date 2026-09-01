@@ -303,7 +303,8 @@ if (failure) throw failure;
   // 「在文件夹中显示」:平台中性文案 + 复用既有 reveal 端点
   assert.match(src, /在文件夹中显示/, 't7: reveal 按钮用平台中性文案');
   assert.ok(!src.includes('在访达中显示'), 't7: 不写死 macOS 措辞');
-  assert.match(src, /reveal\(h\.file\)/, 't7: 任务条目可在文件夹中显示');
+  // r84:改为作用于选中那张(多图任务),单图条目行为不变。
+  assert.match(src, /reveal\(shotFile\(h\)\)/, 't7: 任务条目可在文件夹中显示');
   assert.match(src, /\/api\/image\/reveal/, 't7: 复用既有 reveal 端点');
   // 网格 / 列表视图切换,选择存 localStorage
   assert.match(src, /cgui-image-tasklist-view/, 't7: 视图选择的 localStorage 键在位');
