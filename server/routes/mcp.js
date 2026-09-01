@@ -9,7 +9,7 @@ import { syncMcpToAgents } from './agents.js';
 import { assertPublicBaseURL } from './settings.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
 import { detectUv, detectLocalProxy, probeTcp, isLoopbackProxyHost } from './version-check.js';
-import { searchRegistry } from '../services/mcp-registry.js';
+import { searchRegistry, browseRegistry } from '../services/mcp-registry.js';
 
 const execFileP = promisify(execFile);
 
@@ -1496,17 +1496,14 @@ export async function installPluginWithRefresh({
 //   数据源:`claude plugin list --available --json`(CLI 已聚合所有已配置 marketplace 的可装项),
 //   壳子原则:不自己爬网页。全量缓存 AVAILABLE_PLUGINS_TTL_MS,q 仅做内存过滤(名称/描述/来源)。
 //   结果限量返回避免前端渲染上百条;total 供前端提示"细化关键词"。
-async function loadAvailablePlugins(force = false) {
-  if (!force && availablePluginsCache && Date.now() - availablePluginsCache.at < AVAILABLE_PLUGINS_TTL_MS) {
-    return availablePluginsCache.items;
-  }
-  const out = await runClaude(['plugin', 'list', '--available', '--json'], { timeout: 60000 });
-  let parsed;
-  try { parsed = JSON.parse(out); } catch { throw new Error('无法解析插件列表输出'); }
+// `claude plugin list --available --json` 的输出 → 前端条目。CLI 输出是外部数据,只取用到的字段。
+// r73:带上 installCount(实测 278/279 条有值,是这批数据里唯一的真实热度信号)并**在服务端**
+// 按它降序排 —— 路由是先过滤再 slice(LIMIT),排序放前端只会排到被截断后的那 60 条。
+export function normalizeAvailablePlugins(parsed) {
   const installedBare = new Set(
-    (parsed.installed || []).map((p) => String(p.id || '').split('@')[0]).filter(Boolean),
+    (parsed?.installed || []).map((p) => String(p?.id || '').split('@')[0]).filter(Boolean),
   );
-  const items = (parsed.available || [])
+  return (parsed?.available || [])
     .filter((a) => a && a.name)
     .map((a) => ({
       pluginId: a.pluginId || `${a.name}@${a.marketplaceName || ''}`,
@@ -1514,7 +1511,20 @@ async function loadAvailablePlugins(force = false) {
       description: a.description || '',
       marketplace: a.marketplaceName || String(a.pluginId || '').split('@')[1] || '',
       installed: installedBare.has(a.name),
-    }));
+      // 缺失/非数字一律 0(排到末尾),不编造也不让 NaN 把排序搅乱
+      installCount: Number.isFinite(a.installCount) ? a.installCount : 0,
+    }))
+    .sort((x, y) => y.installCount - x.installCount || x.name.localeCompare(y.name));
+}
+
+async function loadAvailablePlugins(force = false) {
+  if (!force && availablePluginsCache && Date.now() - availablePluginsCache.at < AVAILABLE_PLUGINS_TTL_MS) {
+    return availablePluginsCache.items;
+  }
+  const out = await runClaude(['plugin', 'list', '--available', '--json'], { timeout: 60000 });
+  let parsed;
+  try { parsed = JSON.parse(out); } catch { throw new Error('无法解析插件列表输出'); }
+  const items = normalizeAvailablePlugins(parsed);
   availablePluginsCache = { at: Date.now(), items };
   return items;
 }
@@ -1651,14 +1661,17 @@ router.post('/mcp/preview-tools', async (req, res) => {
   } catch (e) { return sendPluginPublicError(res, e, { fallback: '预览工具清单失败' }); }
 });
 
-// GET /api/mcp/registry-search?q=<关键词> — 搜索官方 MCP 注册表,返回可预填添加表单的条目。
-// CLI 无对应命令(见 services/mcp-registry.js 头注),直调注册表 HTTP API;15 分钟缓存 keyed by q。
-// 上游失败 502 + 可读 message(前端提示"网络不可达,可重试"),不静默回空列表。
+// GET /api/mcp/registry-search?q=<关键词>&cursor=<游标> — 搜索/浏览官方 MCP 注册表,
+// 返回可预填添加表单的条目。CLI 无对应命令(见 services/mcp-registry.js 头注),直调注册表 HTTP API。
+// r73:空关键词 = **浏览注册表首页**(此前直接回空列表 = 只能搜不能逛),cursor 透传上游浅翻,
+// 响应多带 nextCursor(''=没有下一页)。带词无 cursor 走既有搜索路径,响应形状不变。
+// 上游失败 502 + 可读 message(前端提示"网络不可达,可重试"、保留已加载条目),不静默回空列表。
 router.get('/mcp/registry-search', async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
-    if (!q) return res.json({ items: [] });
-    res.json({ items: await searchRegistry(q) });
+    const cursor = String(req.query.cursor || '').trim();
+    if (q && !cursor) return res.json({ items: await searchRegistry(q) });
+    res.json(await browseRegistry({ q, cursor }));
   } catch (err) {
     res.status(502).json({ error: err.message });
   }

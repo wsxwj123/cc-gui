@@ -8,7 +8,10 @@ const REGISTRY_URL = 'https://registry.modelcontextprotocol.io/v0/servers';
 const CACHE_TTL_MS = 15 * 60_000;
 const CACHE_MAX = 50; // 只判 TTL 不清除会让去抖的中间关键词单调堆积;超上限删最早插入的
 const LIMIT = 20;
-const cache = new Map(); // q(lowercase) -> { at, items }
+// r73 浏览页大小。实测 version=latest 深翻到第 10 页(约 1000 条)上游返回 HTTP 500,
+// 故只做 cursor 浅翻,不镜像全量;页大小取 50(50×10 仍在可翻范围内)。
+const BROWSE_LIMIT = 50;
+const cache = new Map(); // `${q}\0${cursor}` -> { at, data:{ items, nextCursor } }
 
 // 注册表条目 → GUI 添加表单可预填的结构。可预填的三类:
 //   remotes[0].url → http/sse 类型 URL;npm 包 → `npx -y <id>`;pypi 包 → `uvx <id>`。
@@ -73,17 +76,22 @@ export function normalizeRegistryEntry(entry) {
   return null;
 }
 
-// 搜索注册表(带 15 分钟内存缓存 keyed by q)。fetchImpl 可注入供测试。
-// 上游失败抛可读错误(不静默空列表):网络层失败提示"网络不可达,可重试",HTTP 错误透传状态与 body 片段。
-export async function searchRegistry(q, { fetchImpl = fetch, ttlMs = CACHE_TTL_MS } = {}) {
-  const key = String(q || '').trim().toLowerCase();
-  if (!key) return [];
+// r73:拉一页注册表并归一,返回 { items, nextCursor }。q 为空 = **浏览**(不带 search 参数,
+// 即注册表首页);cursor 原样透传给上游做浅翻。15 分钟内存缓存 keyed by (q, cursor)。
+// 上游失败抛可读错误(不静默空列表):网络层失败提示"网络不可达,可重试",HTTP 错误透传状态与 body 片段
+// —— 浏览翻页失败时前端据此保留已加载条目并显示原因,而不是把列表变空。
+export async function browseRegistry({ q = '', cursor = '', fetchImpl = fetch, ttlMs = CACHE_TTL_MS } = {}) {
+  const term = String(q || '').trim();
+  const cur = String(cursor || '');
+  const key = `${term.toLowerCase()}\u0000${cur}`;
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < ttlMs) return hit.items;
-  const url = `${REGISTRY_URL}?search=${encodeURIComponent(key)}&version=latest&limit=${LIMIT}`;
+  if (hit && Date.now() - hit.at < ttlMs) return hit.data;
+  const p = new URLSearchParams({ version: 'latest', limit: String(term ? LIMIT : BROWSE_LIMIT) });
+  if (term) p.set('search', term);
+  if (cur) p.set('cursor', cur);
   let r;
   try {
-    r = await fetchImpl(url, { signal: AbortSignal.timeout(10000) });
+    r = await fetchImpl(`${REGISTRY_URL}?${p}`, { signal: AbortSignal.timeout(10000) });
   } catch (e) {
     const why = e?.name === 'TimeoutError' ? '超时(10s)' : (e?.cause?.code || e?.message || String(e));
     throw new Error(`MCP 注册表网络不可达,可重试。(${why})`);
@@ -93,12 +101,21 @@ export async function searchRegistry(q, { fetchImpl = fetch, ttlMs = CACHE_TTL_M
     try { body = (await r.text()).slice(0, 200); } catch {}
     throw new Error(`MCP 注册表返回 HTTP ${r.status}${body ? `:${body}` : ''},可重试。`);
   }
-  const data = await r.json();
-  const items = (Array.isArray(data?.servers) ? data.servers : [])
-    .map(normalizeRegistryEntry)
-    .filter(Boolean);
-  cache.set(key, { at: Date.now(), items });
+  const raw = await r.json();
+  const data = {
+    items: (Array.isArray(raw?.servers) ? raw.servers : []).map(normalizeRegistryEntry).filter(Boolean),
+    nextCursor: String(raw?.metadata?.nextCursor || ''),
+  };
+  cache.set(key, { at: Date.now(), data });
   // ponytail: FIFO 上限(Map 迭代序即插入序),命中率要求高再换 LRU
   if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
-  return items;
+  return data;
+}
+
+// 搜索注册表(数组形状,McpForm 折叠搜索走这条)。空词返回空列表且不打上游 —— "空词浏览"
+// 是 browseRegistry 的语义,这里保持原样,免得表单的去抖中间态(清空输入)白拉一次首页。
+export async function searchRegistry(q, opts = {}) {
+  const key = String(q || '').trim();
+  if (!key) return [];
+  return (await browseRegistry({ q: key, ...opts })).items;
 }
