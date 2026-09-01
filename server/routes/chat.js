@@ -654,6 +654,9 @@ function deliverLine(slot, line) {
   if (slot.listeners.size) { for (const fn of slot.listeners) { try { fn(line); } catch {} } }
   else {
     if (slot.earlyLines.length < MAX_EARLY_LINES) slot.earlyLines.push(line);
+    // r68:溢出是静默丢尾。今天不画所以无感,但客户端一旦按快照"种回"正文,重放缺一段
+    // 就成了正文中段悄悄少一块 —— 比空窗更坏。置位,attach 回放前明说一声(见 /stream)。
+    else slot.earlyOverflowed = true;
     // 停止链路 #3 兜底:后台化子代理跨回合才完成时,权威终态 task_notification 到达的
     // 时刻往往没有活跃 SSE(per-turn 流已关)——只落 earlyLines 会被下条消息的
     // `s.earlyLines = []` 清掉(或无人再读),前端卡片永远"工作中"。此处额外走全局 WS
@@ -1239,6 +1242,7 @@ router.post('/chat', async (req, res) => {
       // 重置回合级状态(新回合从干净缓冲开始;上一回合内容客户端已消费或以 jsonl 为准)
       s.idle = false;
       s.earlyLines = [];
+      s.earlyOverflowed = false;   // r68:溢出标记随缓冲一起归零,别让上一回合的旧账压死新回合
       s.completeNotified = false;
       s.turnSubagentSeen = false;
       s.revived = false;
@@ -1308,6 +1312,7 @@ router.post('/chat', async (req, res) => {
     input,
     abort,
     earlyLines: [],
+    earlyOverflowed: false, // r68:earlyLines 触顶丢过尾部(回放不完整),attach 时告知客户端
     earlyErrors: [],
     listeners: new Set(), // 活跃 SSE 写函数(attach 加,断连删)
     // 活跃 SSE 连接句柄 { onLine, end }。listeners 只有写函数、没法主动关掉老响应,
@@ -2011,6 +2016,9 @@ router.get('/chat/:pid/stream', (req, res) => {
     }
   };
 
+  // r68:缓冲溢出过 ⇒ 本次回放不完整,回放【之前】先明说一声。客户端据此放弃"种回"
+  // 渲染、退回历史单一来源(宁可空窗,也不把中段缺失的正文当完整的画出来)。
+  if (slot.earlyOverflowed) { slot.earlyOverflowed = false; onLine(JSON.stringify({ type: 'early_overflow' })); }
   // 回放断连/未 attach 期间缓冲的行(可能含已缓冲的 done → onLine 里收尾)。
   for (const l of slot.earlyLines) { if (!closed) onLine(l); }
   for (const e of slot.earlyErrors) safeWrite(`data: ${JSON.stringify({ type: 'error', error: e })}\n\n`);
