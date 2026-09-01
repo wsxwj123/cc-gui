@@ -395,23 +395,29 @@ export function SkillsPanel({ marketOnly = false, marketQuery }) {
     </button>
   );
 
+  // r75:多选+刷新两个头部按钮抽成片段——独立面板渲染在页签行右端(原样);
+  // marketOnly(市场页挂载)时页签被藏,单独一行只剩俩图标很怪,改并入「全部源」筹码行右端。
+  const headerBtns = (
+    <div className="ml-auto flex items-center gap-1">
+      {((tab === 'local' && local.length > 0) || (tab === 'import' && installedIds.length > 0)) &&
+        <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={13} />}
+      <button onClick={tab === 'local' ? loadLocal : tab === 'archived' ? loadArchived : () => (activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
+        className="p-1.5 text-ink-faint hover:text-ink rounded disabled:opacity-40" title="刷新">
+        <RefreshCw size={13} className={(loadingLocal || loadingOff) ? 'animate-spin' : ''} />
+      </button>
+    </div>
+  );
+
   return (
     <div className="px-4 py-4 space-y-4 overflow-y-auto h-full">
-      <div className="flex items-center gap-1.5">
-        {!marketOnly && (<>
+      {!marketOnly && (
+        <div className="flex items-center gap-1.5">
           {tabBtn('local', '本机 Skill', local.length)}
           {tabBtn('import', '导入', null)}
           {tabBtn('archived', '已归档', archived.length)}
-        </>)}
-        <div className="ml-auto flex items-center gap-1">
-          {((tab === 'local' && local.length > 0) || (tab === 'import' && installedIds.length > 0)) &&
-            <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={13} />}
-          <button onClick={tab === 'local' ? loadLocal : tab === 'archived' ? loadArchived : () => (activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source))} disabled={loadingLocal || loadingOff}
-            className="p-1.5 text-ink-faint hover:text-ink rounded disabled:opacity-40" title="刷新">
-            <RefreshCw size={13} className={(loadingLocal || loadingOff) ? 'animate-spin' : ''} />
-          </button>
+          {headerBtns}
         </div>
-      </div>
+      )}
 
       {tab === 'local' ? (
         <>
@@ -541,7 +547,7 @@ export function SkillsPanel({ marketOnly = false, marketQuery }) {
           )}
           {/* 源选择 = r71 的来源分面:「全部源」合并六源,其余按钮点选即窄化到单个源。
               计数只在该源真加载过之后出现(没拉到的源不显示数字,不编造)。 */}
-          <div className="flex flex-wrap gap-1.5" data-testid="market-source-facet">
+          <div className="flex flex-wrap items-center gap-1.5" data-testid="market-source-facet">
             {[{ id: ALL_SOURCES, name: '全部源' }, ...sources].map((s) => {
               const n = s.id === ALL_SOURCES ? (isAllSources ? official.length : undefined) : loadedCounts[s.id];
               return (
@@ -555,6 +561,7 @@ export function SkillsPanel({ marketOnly = false, marketQuery }) {
                 </button>
               );
             })}
+            {marketOnly && headerBtns}
           </div>
           {/* CQ批次4:粘贴任意 GitHub 仓库一键导入其全部 skill */}
           <div className="flex gap-1.5">
