@@ -6,7 +6,7 @@ import { createPortal } from 'react-dom';
 import { ChevronDown, Check, X, Settings, Server, Loader2, Smartphone, Pencil } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { clampPopoverX, popoverMaxWidth } from '../utils/popover.js';
-import { ModelBadge } from './ModelBadge.jsx';
+import { ModelBadge, ProviderMark } from './ModelBadge.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { mergeProviderLists, rowIsCurrent, SOURCE_BADGE } from '../utils/providerList.js';
 import { resolveSelectorModel } from '../utils/routing.js';
@@ -367,6 +367,8 @@ export function ProviderSwitchList({ onSwitched }) {
         <div key={p.id} className={`flex items-center group/prov ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
           <button disabled={switching} onClick={() => switchTo(p.id)}
             className={`flex-1 min-w-0 text-left px-3 py-1.5 flex items-center gap-2 hover:bg-canvas-warm transition-colors ${switching ? 'opacity-50' : ''}`}>
+            {/* r78:每行的 provider 头像(用户设的 emoji / 内置图标 / 上传图;未设按名字回落)。 */}
+            <ProviderMark row={p} name={p.name} official={p.source === 'official'} size={15} />
             <span className={`flex-1 text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
             {p.models?.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
             {p.type && p.source === 'custom' && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>}

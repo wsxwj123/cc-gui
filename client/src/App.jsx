@@ -41,9 +41,9 @@ import { applyProgrammaticText } from './utils/inputUndo.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
-import { ModelBadge, ProviderAvatar } from './components/ModelBadge.jsx';
+import { ModelBadge, ProviderAvatar, ProviderMark } from './components/ModelBadge.jsx';
 import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge, AnchoredPopover } from './components/SessionSelectors.jsx';
-import { mergeProviderLists, rowIsCurrent } from './utils/providerList.js';
+import { mergeProviderLists, rowIsCurrent, parseAvatar, AVATAR_MARKS } from './utils/providerList.js';
 import { UsagePanel } from './components/UsagePanel.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel, ChatBackgroundCard } from './components/SettingsPanel.jsx';
@@ -8091,6 +8091,8 @@ function ProviderManager({ initialEditId = null }) {
                     <button disabled={switching}
                       onClick={() => (ms.selMode && p.source === 'custom' ? ms.toggle(p.id) : switchTo(p.id))}
                       className={`flex-1 min-w-0 text-left flex items-center gap-2 max-md:flex-wrap ${switching ? 'opacity-50' : ''}`}>
+                      {/* r78:provider 头像(未设则按名字/模型关键字回落,官方恒 cc-gui 标识)。 */}
+                      <ProviderMark row={p} name={p.name} official={p.source === 'official'} size={16} />
                       <span title={p.name} className={`flex-1 min-w-0 max-md:!basis-full text-xs font-body truncate ${isCur(p) ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                       {p.models?.length > 0 && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.models.length} 模型</span>}
                       {p.source === 'custom' && p.type && <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>}
@@ -9070,6 +9072,14 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const [modelPrices, setModelPrices] = useState({});
   // r10-9:每模型思考能力声明({[id]:{reasoning?:false,efforts?:[]}};空对象条目=全默认,后端 sanitize 丢弃)。
   const [modelCaps, setModelCaps] = useState({});
+  // r78:该 provider 的头像。一个字符串,三形态(内置图标名 / 上传文件名 / emoji);
+  // 空 = 未设置,渲染按名字关键字回落。avatarInput 是「图片 URL 或 emoji」那一格。
+  const [avatar, setAvatar] = useState('');
+  const [avatarOpen, setAvatarOpen] = useState(false);
+  const [avatarInput, setAvatarInput] = useState('');
+  const [avatarErr, setAvatarErr] = useState('');
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const avatarFileRef = useRef(null);
   const [busy, setBusy] = useState('');
   const isEdit = !!editing;
   // 后端只下发 hasQuotaKey 布尔(明文永不出服务端);点过「清除」后按未配置显示。
@@ -9110,13 +9120,17 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       setCtxWindow(editing.contextWindow ? String(editing.contextWindow) : '');
       setModelPrices(pricesToForm(editing.modelPrices));
       setModelCaps(editing.modelMeta ? { ...editing.modelMeta } : {});
+      // r78:头像预填。**下发→预填→保存回传**这条链缺一环就会"改个名字把头像清掉"
+      // (服务端 GET /api/providers 与 GET /api/custom-providers 都已下发 avatar)。
+      setAvatar(editing.avatar || '');
+      setAvatarOpen(false); setAvatarInput(''); setAvatarErr('');
       setTestResult(null); // 切到另一个 provider 编辑时清掉上一个的测试结果横幅(否则误导)
       setBusy('');
       setOpen(true);
     })();
     return () => { stale = true; };
   }, [editing?.id]);
-  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setQuotaKey(''); setQuotaKeyCleared(false); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setModelCaps({}); setTestResult(null); setOpen(false); };
+  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setQuotaKey(''); setQuotaKeyCleared(false); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setModelCaps({}); setAvatar(''); setAvatarOpen(false); setAvatarInput(''); setAvatarErr(''); setTestResult(null); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   // BZ-2:有未保存内容时上报 dirty,父级据此阻止外部点击/Esc 关闭下拉(避免丢输入)。
@@ -9125,7 +9139,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   // 丢掉同样是丢输入);编辑态本来就因预填的 name/baseURL 恒 dirty,这两项只在新增态起作用。
   const dirty = (open || isEdit) && !!(name.trim() || baseURL.trim() || apiKey.trim() || quotaKey.trim()
     || quotaKeyCleared || modelsText.trim()
-    || ctxWindow.trim() || Object.keys(modelPrices).length || Object.keys(modelCaps).length);
+    || ctxWindow.trim() || Object.keys(modelPrices).length || Object.keys(modelCaps).length || avatar);
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty]);
   useEffect(() => () => onDirtyChange?.(false), []); // 卸载时清掉,避免残留 dirty 卡住关闭
   // BZ-1:测试连接 —— 给默认模型/列表第一个发最小请求,验证鉴权 + 模型可达。
@@ -9188,6 +9202,44 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
     }
     setBusy('');
   };
+  // r78:本地图片上传。原始字节流(同背景图上传口径),服务端生成 uuid 文件名回传。
+  const uploadAvatarFile = async (file) => {
+    if (!file) return;
+    setAvatarBusy(true); setAvatarErr('');
+    try {
+      const r = await fetch('/api/provider-avatar', {
+        method: 'POST',
+        headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Upload-Name': encodeURIComponent(file.name) },
+        body: file,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || '上传失败');
+      setAvatar(d.file);
+    } catch (e) { setAvatarErr(e.message); }
+    setAvatarBusy(false);
+  };
+  // r78:同一格既收图片 URL 也收 emoji —— http(s) 开头交后端抓取一次落地(存的是落地
+  // 后的本地文件名,渲染永不回访原地址),其余按 emoji/短文字直接存。
+  const applyAvatarInput = async () => {
+    const v = avatarInput.trim();
+    if (!v) return;
+    setAvatarErr('');
+    if (/^https?:\/\//i.test(v)) {
+      setAvatarBusy(true);
+      try {
+        const r = await fetch('/api/provider-avatar', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: v }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || '抓取失败');
+        setAvatar(d.file); setAvatarInput('');
+      } catch (e) { setAvatarErr(e.message); }
+      setAvatarBusy(false);
+      return;
+    }
+    if (!parseAvatar(v)) { setAvatarErr('只接受 8 个字符以内的 emoji/文字,或 https 图片地址'); return; }
+    setAvatar(v); setAvatarInput('');
+  };
   const save = async () => {
     if (!name.trim() || !baseURL.trim()) return confirmDialog('名称和 Base URL 必填');
     const parsedModels = parseModels();
@@ -9222,6 +9274,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       body.modelPrices = pricesToWire(modelPrices);
       // r10-9:每模型思考能力,全量覆盖(全默认条目由后端 sanitize 丢弃 = 不落盘)。
       body.modelMeta = modelCaps;
+      // r78:头像。null = 清除(与 defaultModel 同语义);后端再校验一次形态与文件存在性。
+      body.avatar = avatar || null;
       // Edit mode: a blank key means "keep the stored one" (the client never holds
       // the real key), so only send apiKey when the user actually typed a new one.
       if (!isEdit || apiKey.trim()) body.apiKey = apiKey;
@@ -9319,7 +9373,51 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           </select>
         </div>
       )}
-      <input className={inputCls} placeholder="名称(如 我的中转)" value={name} onChange={(e) => setName(e.target.value)} />
+      {/* r78:名称行左侧是头像按钮,点开下面三段(内置图标 / 上传图片 / URL 或 emoji)。
+          用内联展开而不是浮层:表单本身就在滚动容器里,浮层在 WKWebView 里定位与
+          sticky 都踩过坑(见 sticky-fails-under-transform-modal-flex-column)。 */}
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => setAvatarOpen((v) => !v)} title="设置该 Provider 的头像"
+          className={`shrink-0 w-[38px] h-[38px] flex items-center justify-center rounded-lg border bg-canvas-warm ${avatarOpen ? 'border-accent' : 'border-canvas-deep hover:border-accent'}`}>
+          <ProviderMark row={{ avatar }} name={name} size={22} />
+        </button>
+        <input className={inputCls} placeholder="名称(如 我的中转)" value={name} onChange={(e) => setName(e.target.value)} />
+      </div>
+      {avatarOpen && (
+        <div className="p-2.5 rounded-lg border border-canvas-deep bg-canvas-warm space-y-2">
+          <div className="text-[11px] text-ink-faint font-body">内置图标</div>
+          <div className="flex flex-wrap gap-1.5">
+            {AVATAR_MARKS.map((m) => (
+              <button key={m} type="button" title={m} onClick={() => { setAvatar(m); setAvatarErr(''); }}
+                className={`p-1 rounded-md border ${avatar === m ? 'border-accent' : 'border-transparent hover:border-canvas-deep'}`}>
+                <ProviderMark row={{ avatar: m }} name={m} size={22} />
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => avatarFileRef.current?.click()} disabled={avatarBusy}
+              className="px-2 py-1.5 text-[11px] rounded-lg border border-canvas-deep text-ink-muted hover:border-accent disabled:opacity-50">上传图片</button>
+            <input ref={avatarFileRef} type="file" accept="image/png,image/jpeg,image/webp" className="hidden"
+              onChange={(e) => { uploadAvatarFile(e.target.files?.[0]); e.target.value = ''; }} />
+            {avatar && (
+              <button type="button" onClick={() => { setAvatar(''); setAvatarErr(''); }}
+                className="px-2 py-1.5 text-[11px] rounded-lg border border-canvas-deep text-ink-faint hover:text-ink">移除头像</button>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <input className={inputCls} placeholder="图片 URL(https)或 emoji" value={avatarInput}
+              onChange={(e) => setAvatarInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); applyAvatarInput(); } }} />
+            <button type="button" onClick={applyAvatarInput} disabled={avatarBusy || !avatarInput.trim()}
+              className="shrink-0 px-2 py-1.5 text-[11px] rounded-lg border border-canvas-deep text-ink-muted hover:border-accent disabled:opacity-50">
+              {avatarBusy ? '抓取中…' : '使用'}</button>
+          </div>
+          {avatarErr && <p className="text-[11px] text-error font-body leading-relaxed">{avatarErr}</p>}
+          <p className="text-[11px] text-ink-faint font-body leading-relaxed">
+            图片抓取后保存在本机 <code className="font-mono">~/.claude-gui/avatars</code>，显示时不再访问原地址。仅接受 https 地址与 png / jpeg / webp 格式，单张上限 1MB。未设置头像时按 Provider 名称取默认图标。
+          </p>
+        </div>
+      )}
       <input className={`${inputCls} font-mono`} placeholder="Base URL (https://...)" value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
       <input className={`${inputCls} font-mono`} type="password" placeholder={isEdit ? 'API Key(留空 = 不修改)' : 'API Key'} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
       {/* r16-4:额度查询密钥。仅额度查询用,不参与推理请求。已保存时不回显明文(与 API Key
@@ -9529,6 +9627,8 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
                     className="flex-1 min-w-0 flex items-center gap-2 px-4 py-3 text-left">
                     {/* min-w 保证名称永不被 shrink-0 徽章挤到 0 宽(实测 322px 抽屉里
                         徽章簇会吃光 flex-1;模型计数不进行头,展开即见列表)。 */}
+                    {/* r78:同桌面同一枚头像组件。 */}
+                    <ProviderMark row={p} name={p.name} official={p.source === 'official'} size={18} />
                     <span className={`flex-1 min-w-[64px] text-[14px] font-body truncate ${cur ? 'text-accent font-medium' : 'text-ink'}`}>{p.name}</span>
                     {p.source === 'custom' && p.type && (
                       <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono shrink-0">{p.type}</span>
