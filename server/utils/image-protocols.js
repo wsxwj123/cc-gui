@@ -4,13 +4,14 @@
 // 单测直接 import 真函数,不起 server 也不打网络。路由层(routes/image.js)只负责
 // fetch、落盘和错误呈现,协议差异一律收在本文件。
 //
-// 第一版只覆盖三种【同步】形态(openai / gemini / chat),异步任务制(ComfyUI 的
-// /prompt→/history→/view、MJ、Suno、NovelAI 的 zip)是另一套状态机,留到第二版,
-// 硬塞进来会把这三种的抽象拖脏。
+// 第一版只覆盖三种【同步】形态(openai / gemini / chat)。r82 补上任务制形态('mj'):
+// 提交只回 task_id、图要轮询 {base}/tasks/{id} 取。抽象没被拖脏的做法是 —— 本文件仍
+// 只出三个纯函数(extractTaskId / buildTaskPollRequest / extractTaskState),等待与下载
+// 那套状态机留在 routes/image.js 的 pollTask 里。ComfyUI / Suno / NovelAI 的 zip 仍未做。
 import { extname, isAbsolute, resolve } from 'path';
 import { isPathInside } from './safe-path.js';
 
-export const IMAGE_PROTOCOLS = ['openai', 'gemini', 'chat'];
+export const IMAGE_PROTOCOLS = ['openai', 'gemini', 'chat', 'mj'];
 
 // 允许落盘/预览的图片扩展名 → Content-Type。白名单同时是"预览只读图片"的第二道闸:
 // savePath 之下的 .env / .json 之类即便路径合法也不给读。
@@ -159,6 +160,22 @@ export function buildImageRequest(config, prompt, refs) {
     };
   }
 
+  if (protocol === 'mj') {
+    // r82 Midjourney(apimart 形态):POST {base}/midjourney/generations —— 异步任务制,
+    // 响应只回 task_id,取图靠 routes/image.js 的 pollTask 轮询。
+    // body 只发 prompt:该路由自动注入 model=midjourney(实测不传也过);size 在这里是
+    // 宽高比(--ar)不是像素、参考图字段形态未实测 —— 未经实测的字段一个不猜,要传的
+    // 写进附加参数(extra),与其余三种协议同一个逃生口。
+    // ⚠️ 本分支【不使用参考图】(list 有值也不发),UI 已就此给出说明。
+    return {
+      url: `${base}/midjourney/generations`,
+      headers: { ...json, Authorization: `Bearer ${key}` },
+      body: { prompt: text, ...extra },
+      form: null,
+      altHeaders: null,
+    };
+  }
+
   // chat:中转站最常见的"用对话接口出图"。图在回复正文里(markdown / 裸链 / data URL)。
   // 带参考图时 content 换成多模态分片(image_url 是官方语义上的输入),无参考图仍是纯字符串。
   const content = list.length
@@ -232,6 +249,61 @@ export function extractImage(protocol, data) {
   }
 
   return null;
+}
+
+// ───────────────── r82 任务制上游(apimart / Midjourney 形态)的三个纯函数 ─────────────────
+// 形态全部取自真机实测响应(.devflow/mj-submit.json、mj-result.json),不按文档臆造。
+// 这里只做"认形态",fetch / 等待 / 下载在 routes/image.js 的 pollTask 里(本文件零 IO 不变)。
+
+/**
+ * 提交响应里的任务 id:{"code":200,"data":[{"status":"submitted","task_id":"task_…"}]}。
+ * 不是这个形态一律返回 null —— 调用方先试 extractImage(同步出图),取不到才试它。
+ */
+export function extractTaskId(data) {
+  const id = data?.data?.[0]?.task_id;
+  return typeof id === 'string' && id.trim() ? id.trim() : null;
+}
+
+/**
+ * 轮询请求:GET {base}/tasks/{id},鉴权与提交同口径(Bearer)。
+ * taskId 来自上游响应,进 URL path 前必须编码 —— 同 gemini 的 model(r26-J5):
+ * 不编码时 id 里的 '/' 会改变请求的实际路径段。
+ */
+export function buildTaskPollRequest(baseURL, apiKey, taskId) {
+  const base = String(baseURL || '').trim().replace(/\/+$/, '');
+  const key = typeof apiKey === 'string' ? apiKey : '';
+  const id = typeof taskId === 'string' ? taskId.trim() : '';
+  if (!base) throw new Error('baseURL 未配置');
+  if (!id) throw new Error('任务 id 为空');
+  return { url: `${base}/tasks/${encodeURIComponent(id)}`, headers: { Authorization: `Bearer ${key}` } };
+}
+
+/**
+ * 轮询响应 → { status:'processing'|'completed'|'failed', progress, urls, message }。
+ *  - 终态只认 completed / failed / cancelled,【其余一律 processing】(含 pending /
+ *    submitted / 未知值):按白名单枚举非终态的话,上游加一档新状态就会被当失败判死。
+ *  - urls 从 result.images[].url[] 拍平 —— url 是【数组】不是字符串(MJ 实测一次 4 张
+ *    独立单图);只认 http(s):这个值随后要交给下载分支去请求,别的形态一律不接。
+ *  - progress 取不到时为 null 而不是 0(0 会在界面上显示成"已开始但毫无进展")。
+ */
+export function extractTaskState(data) {
+  const d = data?.data;
+  const raw = String(d?.status || '').toLowerCase();
+  const n = Number(d?.progress ?? NaN);
+  const progress = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
+  // 失败原因三种已知落点(文档 error.message / 顶层 error / MJ 的 fail_reason),取第一个非空。
+  const message = [d?.error?.message, data?.error?.message, d?.fail_reason]
+    .find((m) => typeof m === 'string' && m.trim()) || '';
+  if (raw === 'failed' || raw === 'cancelled') return { status: 'failed', progress, urls: [], message };
+  const urls = [];
+  for (const img of Array.isArray(d?.result?.images) ? d.result.images : []) {
+    const one = img?.url;
+    for (const u of Array.isArray(one) ? one : [one]) {
+      if (typeof u === 'string' && /^https?:\/\//i.test(u) && !urls.includes(u)) urls.push(u);
+    }
+  }
+  if (raw === 'completed') return { status: 'completed', progress, urls, message };
+  return { status: 'processing', progress, urls: [], message };
 }
 
 /** 文件名:{时间戳}-{prompt 前 20 字符 slug}.{ext}。重名由调用方加序号。 */
