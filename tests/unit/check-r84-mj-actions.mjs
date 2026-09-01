@@ -17,15 +17,34 @@
 //    网格位置→index 的映射(左上=1 右上=2 左下=3 右下=4)写死并在此锁住。
 //  ⑦ 前端的版本/速度候选与服务端白名单同源:两处清单不一致时前端能选出后端拒收的值。
 //
+// 变异自证(逐条实跑过"改坏就红",不是"写法没变就绿"的文本锁;改动只在源码副本上做、跑完还原):
+//  - pickedIndex 去掉钳位(return n)            → t4【越界】红
+//  - mj 分支删掉 size 下发那行                   → t1 红
+//  - mjVersionFields 的 niji 档只发 version      → t2 红
+//  - 动作 body 并入 extra                        → t8 红
+//  - 面板某处改回 reveal(h.file)                 → t5 红
+//  - 动作路由去掉 !parent.taskId 守卫            → t8【前置校验】红
+//
 // 全程零网络、零真实配置:只 import 纯函数 + 读源码文本做结构断言。
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import express from 'express';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// 必须在 import 路由之前:真实 ~/.claude-gui 一个字节不碰(红线),轮询提速只为 t9 秒级跑完。
+const TMP_HOME = mkdtempSync(join(tmpdir(), 'cgui-r84-home-'));
+const SAVE_DIR = mkdtempSync(join(tmpdir(), 'cgui-r84-save-'));
+process.env.HOME = TMP_HOME;
+process.env.USERPROFILE = TMP_HOME;
+process.env.CGUI_IMAGE_TASK_POLL_INTERVAL_MS = '200';
+mkdirSync(join(TMP_HOME, '.claude-gui'), { recursive: true });
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const {
   buildImageRequest, mjVersionFields, MJ_VERSIONS, MJ_SPEEDS,
+  buildMjActionRequest, MJ_ACTIONS, MJ_ACTION_INDEX_MAX,
 } = await import('../../server/utils/image-protocols.js');
 const { entryFiles, pickedIndex, pickedFile, entryPreviewUrl, pickedPreviewUrl } =
   await import('../../client/src/utils/imageEntry.js');
@@ -189,4 +208,163 @@ const mj = (over) => buildImageRequest({ protocol: 'mj', ...BASE, ...over }, '�
   for (const s of speeds) assert.ok(MJ_SPEEDS.includes(s), `t7: 前端速度候选 ${s} 不在服务端白名单里`);
 }
 
-console.log('✓ check-r84-mj-actions: mj 结构化参数 + 三协议回归锁 + 前后端清单同源 全部通过');
+// ───────────────── 8. U/V 二次操作:端点 / body / 边界 / 接线 ─────────────────
+{
+  const cfg = { protocol: 'mj', ...BASE, mjSpeed: 'fast' };
+  const up = buildMjActionRequest(cfg, 'upscale', 2, 'task_01ABC');
+  assert.equal(up.url, 'https://api.example.com/v1/midjourney/generations/upscale', 't8: upscale 端点');
+  assert.deepEqual(up.body, { task_id: 'task_01ABC', index: 2, speed: 'fast' }, 't8: body = task_id + index + speed');
+  assert.equal(up.headers.Authorization, 'Bearer sk-r84-secret', 't8: 与提交同口径的 Bearer');
+  assert.equal(up.form, null, 't8: 动作不是 multipart');
+  assert.equal(up.altHeaders, null, 't8: 动作无认证回落');
+
+  const va = buildMjActionRequest({ protocol: 'mj', ...BASE }, 'variation', 4, '  task_x  ');
+  assert.equal(va.url, 'https://api.example.com/v1/midjourney/generations/variation', 't8: variation 端点');
+  assert.deepEqual(va.body, { task_id: 'task_x', index: 4 }, 't8: 未设速度时不发 speed 键,任务号去空白');
+
+  // 【不并入 extra】:动作端点不收 imagine 的结构化参数,原样转发只会 400 或被丢弃。
+  assert.deepEqual(
+    buildMjActionRequest({ protocol: 'mj', ...BASE, size: '16:9', mjVersion: 'niji7', extra: { stylize: 250 } }, 'upscale', 1, 't').body,
+    { task_id: 't', index: 1 },
+    't8: 动作 body 不含 size / version / extra',
+  );
+
+  // index 边界:1 与 4 通过,0 / 5 / 小数 / 非数字 / 缺失一律抛人话错误。
+  for (const ok of [1, 2, 3, 4, '3']) {
+    assert.equal(buildMjActionRequest(cfg, 'upscale', ok, 't').body.index, Math.floor(Number(ok)), `t8: index ${ok} 合法`);
+  }
+  for (const bad of [0, -1, 5, 99, NaN, 'x', null, undefined, {}]) {
+    assert.throws(() => buildMjActionRequest(cfg, 'upscale', bad, 't'), /只能对第 1–4 张/, `t8【边界】:index ${JSON.stringify(bad)} 拒绝`);
+  }
+  assert.throws(() => buildMjActionRequest(cfg, 'reroll', 1, 't'), /未知的 Midjourney 操作/, 't8: 未列入的动作拒绝(不拿它拼路径)');
+  assert.throws(() => buildMjActionRequest(cfg, 'upscale', 1, '   '), /缺少上游任务号/, 't8: 空任务号拒绝');
+  assert.throws(() => buildMjActionRequest({ ...cfg, baseURL: '' }, 'upscale', 1, 't'), /baseURL 未配置/, 't8: 空 baseURL 拒绝');
+  assert.deepEqual(MJ_ACTIONS, ['upscale', 'variation'], 't8: 本轮只做文档已核实的两个动作');
+  assert.equal(MJ_ACTION_INDEX_MAX, 4, 't8: 四宫格');
+
+  // 路由接线:提交响应与 imagine 同形 → 复用既有轮询与下载,不另造状态机。
+  const routeSrc = readFileSync(join(REPO, 'server', 'routes', 'image.js'), 'utf8');
+  assert.match(routeSrc, /router\.post\('\/image\/actions'/, 't8: 有动作端点');
+  assert.match(routeSrc, /await updateHistoryEntry\(jobId, \{ taskId \}\)/, 't8: 上游任务号写进条目(动作要拿它当 task_id)');
+  assert.match(routeSrc, /buildMjActionRequest\(provider, action, index, parent\.taskId\)/, 't8: 动作按父任务的上游任务号组装');
+  assert.match(routeSrc, /runImageJob\(\{ jobId, provider, prompt, spec, startedAt \}\)/g, 't8: 复用同一个 runner');
+  assert.equal((routeSrc.match(/function pollTask/g) || []).length, 1, 't8【零重复】:轮询状态机仍然只有一份');
+  for (const [re, why] of [
+    [/parent\.status !== 'done'/, '父任务必须已完成'],
+    [/!parent\.taskId/, '老记录没有上游任务号时明确拒绝'],
+    [/provider\.protocol !== 'mj'/, '非 mj provider 拒绝'],
+    [/activeJobs >= MAX_CONCURRENT_JOBS/, '并发闸'],
+    [/assertPublicBaseURL\(provider\.baseURL\)/, 'SSRF 守卫'],
+  ]) assert.match(routeSrc.slice(routeSrc.indexOf("router.post('/image/actions'")), re, `t8【前置校验】:${why}`);
+
+  // 面板接线:入口在缩略图上,index = 网格位置 + 1,老记录/非 mj 不给入口。
+  assert.match(PANEL, /submitAction\(h, act, i \+ 1\)/, 't8【映射】:第 i 格(0 起)提交 index i+1');
+  assert.match(PANEL, /const canAct = !!h\.taskId && providers\.find\(\(p\) => p\.id === h\.providerId\)\?\.protocol === 'mj'/,
+    't8: 没有上游任务号 / 非 mj provider 时不渲染入口');
+  assert.match(PANEL, /body: JSON\.stringify\(\{ jobId: h\.id, action, index \}\)/, 't8: 提交体形态');
+  assert.match(PANEL, /const MJ_ACTION_LABEL = \{ upscale: '放大', variation: '变体' \}/, 't8: 用中文动作名而非 U\/V 编号当主标签');
+  assert.match(PANEL, /来自上一任务第 \$\{h\.mjIndex\} 张/, 't8【可追溯】:新条目标出来源');
+}
+
+
+// ───────── 9. 端到端:假上游跑完 提交 → 记任务号 → 放大 → 新记录落盘 ─────────
+// 源码断言只能证明"接线写了",这一节证明"跑得起来"。全程指向本机假上游(OS 临时口),
+// 不打真实网络、不花任何钱。
+{
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const app = express();
+  app.use(express.json({ limit: '2mb' }));
+  const seen = { imagine: [], action: [] };
+  let server;
+  const imgs = (n) => ({ url: Array.from({ length: n }, (_, i) => `http://127.0.0.1:${server.address().port}/img/${i}.png`) });
+  app.post('/v1/midjourney/generations', (req, res) => {
+    seen.imagine.push(req.body);
+    res.json({ code: 200, data: [{ status: 'submitted', task_id: 'task_parent' }] });
+  });
+  // 动作端点:回一个【新】任务号 —— 与 imagine 逐字同形,这正是"能复用轮询"的前提。
+  app.post('/v1/midjourney/generations/:action', (req, res) => {
+    seen.action.push({ action: req.params.action, body: req.body, auth: req.headers.authorization });
+    res.json({ code: 200, data: [{ status: 'submitted', task_id: 'task_child' }] });
+  });
+  // 父任务 4 张,放大出来的子任务 1 张(与文档一致:upscale 的 image_urls 只有 1 个元素)。
+  app.get('/v1/tasks/:id', (req, res) => res.json({
+    code: 200,
+    data: { id: req.params.id, status: 'completed', progress: 100, result: { images: [imgs(req.params.id === 'task_child' ? 1 : 4)] } },
+  }));
+  app.get('/img/:n.png', (_req, res) => res.type('image/png').send(PNG));
+  app.use('/api', (await import('../../server/routes/image.js')).default);
+  // 端口取 OS 临时口:写死会被同跑的用例抢,制造随机假红。
+  server = await new Promise((r) => { const sv = app.listen(0, '127.0.0.1', () => r(sv)); });
+  const BASE_URL = `http://127.0.0.1:${server.address().port}`;
+  const api = async (method, path, body) => {
+    const r = await fetch(`${BASE_URL}${path}`, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const text = await r.text();
+    let json = null; try { json = JSON.parse(text); } catch { /* 非 JSON:留 text 给断言 */ }
+    return { status: r.status, text, json };
+  };
+  const entryOf = async (id) => ((await api('GET', '/api/image/history')).json.history || []).find((e) => e.id === id);
+  const waitDone = async (id, ms = 15000) => {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const e = await entryOf(id);
+      if (e && e.status !== 'running') return e;
+      if (Date.now() > deadline) throw new Error(`t9: 等 ${id} 落终态超时(${JSON.stringify(e)})`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+  try {
+    const mk = await api('POST', '/api/image-providers', {
+      name: 'MJ 假上游', protocol: 'mj', baseURL: `${BASE_URL}/v1`, apiKey: 'sk-r84-e2e-secret',
+      model: 'midjourney', size: '16:9', savePath: SAVE_DIR, mjVersion: 'niji7', mjSpeed: 'fast',
+    });
+    assert.equal(mk.status, 200, `t9: provider 建得起来(${mk.text})`);
+
+    const gen = await api('POST', '/api/image/generate', { providerId: mk.json.id, prompt: '一只猫' });
+    assert.equal(gen.status, 200, `t9: 提交受理(${gen.text})`);
+    const parent = await waitDone(gen.json.jobId);
+    assert.equal(parent.status, 'done', `t9: 父任务出图(${parent.error || ''})`);
+    assert.equal(parent.files.length, 4, 't9: 4 张全落盘');
+    assert.equal(parent.taskId, 'task_parent', 't9【本轮新增】:上游任务号记进了条目');
+    assert.deepEqual(seen.imagine[0], { prompt: '一只猫', size: '16:9', niji: true, version: '7', speed: 'fast' },
+      't9: 提交体含比例/版本/速度(niji 已拆成两个字段)');
+
+    // 拒绝路径:点不到的东西一律当场 4xx,不进后台任务。
+    assert.equal((await api('POST', '/api/image/actions', { jobId: 'nope', action: 'upscale', index: 1 })).status, 404, 't9: 不存在的任务 → 404');
+    assert.equal((await api('POST', '/api/image/actions', { action: 'upscale', index: 1 })).status, 400, 't9: 缺 jobId → 400');
+    const badIdx = await api('POST', '/api/image/actions', { jobId: gen.json.jobId, action: 'upscale', index: 9 });
+    assert.equal(badIdx.status, 400, 't9【边界】:index 越界 → 400');
+    assert.match(badIdx.json.error, /只能对第 1–4 张/, 't9: 越界给人话');
+    assert.equal((await api('POST', '/api/image/actions', { jobId: gen.json.jobId, action: 'reroll', index: 1 })).status, 400, 't9: 未列入的动作 → 400');
+
+    // 放大第 2 张(= 四宫格右上)。
+    const act = await api('POST', '/api/image/actions', { jobId: gen.json.jobId, action: 'upscale', index: 2 });
+    assert.equal(act.status, 200, `t9: 动作受理(${act.text})`);
+
+    // 提交是 fire-and-forget(秒回 jobId,上游请求在后台发),所以先等条目落终态再验上游收到什么。
+    const child = await waitDone(act.json.jobId);
+    assert.equal(seen.action.length, 1, 't9: 上游只收到一次动作提交');
+    assert.equal(seen.action[0].action, 'upscale', 't9: 打到 /upscale');
+    assert.deepEqual(seen.action[0].body, { task_id: 'task_parent', index: 2, speed: 'fast' }, 't9: 动作体形态');
+    assert.equal(seen.action[0].auth, 'Bearer sk-r84-e2e-secret', 't9: 动作带存储的密钥');
+    assert.equal(child.status, 'done', `t9: 放大结果落盘(${child.error || ''})`);
+    assert.equal(child.parentId, gen.json.jobId, 't9【可追溯】:记了父任务');
+    assert.equal(child.mjAction, 'upscale', 't9【可追溯】:记了动作');
+    assert.equal(child.mjIndex, 2, 't9【可追溯】:记了第几张');
+    assert.equal(child.prompt, '一只猫', 't9: 沿用父任务的提示词(列表里能认出是哪一条)');
+    assert.ok(child.file && !child.files, 't9: 单图结果不写 files 字段(与同步协议同形)');
+    assert.equal(child.taskId, 'task_child', 't9: 子任务也记了自己的上游任务号(可以继续操作)');
+    assert.equal(readdirSync(SAVE_DIR).length, 5, 't9: 磁盘上 4 + 1 张');
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+    await new Promise((r) => server.once('close', r));
+  }
+}
+
+rmSync(TMP_HOME, { recursive: true, force: true });
+rmSync(SAVE_DIR, { recursive: true, force: true });
+console.log('✓ check-r84-mj-actions: mj 结构化参数 + 多图选中 + 清空 + U/V 动作 + 三协议回归锁 全部通过');

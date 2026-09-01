@@ -80,6 +80,40 @@ export function mjVersionFields(v) {
   return niji ? { niji: true, version: val.slice(4) } : { version: val };
 }
 
+// ───────────────────── r84 Midjourney 二次操作(U1–U4 放大选图 / V1–V4 变体) ─────────────────────
+// 端点与请求体逐字取自 apimart 文档(证据链见 .devflow/RESEARCH-r84-mj-actions.md §1):
+//   POST {base}/midjourney/generations/upscale    {task_id, index, speed?}
+//   POST {base}/midjourney/generations/variation  {task_id, index, speed?}
+// index ∈ 1..4,对应四宫格的【左上=1 右上=2 左下=3 右下=4】(= 返回的 image_urls 顺序)。
+// 提交响应与 imagine 【逐字同形】({code,data:[{status,task_id}]}),所以取图完全复用
+// extractTaskId → pollTask → 下载落盘那条既有链路,不另造状态机。
+// 刻意【不并入 extra】:extra 是为 imagine 的结构化参数准备的(stylize / chaos / seed…),
+// 动作端点不收这些字段,原样转发只会让上游 400 或静默丢弃。
+export const MJ_ACTIONS = ['upscale', 'variation'];
+export const MJ_ACTION_INDEX_MAX = 4; // 文档:index 必须 1–4,越界上游返回 400
+
+export function buildMjActionRequest(config, action, index, taskId) {
+  const cfg = config || {};
+  const base = String(cfg.baseURL || '').trim().replace(/\/+$/, '');
+  const key = typeof cfg.apiKey === 'string' ? cfg.apiKey : '';
+  const id = typeof taskId === 'string' ? taskId.trim() : '';
+  const n = Math.floor(Number(index));
+  if (!MJ_ACTIONS.includes(action)) throw new Error(`未知的 Midjourney 操作:${action}`);
+  if (!base) throw new Error('baseURL 未配置');
+  if (!id) throw new Error('缺少上游任务号,无法发起该操作');
+  if (!Number.isFinite(n) || n < 1 || n > MJ_ACTION_INDEX_MAX) throw new Error(`只能对第 1–${MJ_ACTION_INDEX_MAX} 张发起该操作`);
+  const body = { task_id: id, index: n };
+  if (cfg.mjSpeed) body.speed = String(cfg.mjSpeed);
+  return {
+    // action 已过白名单,不会把路径拼歪(不是拿用户输入直接进 path)。
+    url: `${base}/midjourney/generations/${action}`,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    body,
+    form: null,
+    altHeaders: null,
+  };
+}
+
 function refDataUri(ref) {
   return `data:${String(ref.mime || 'image/png').toLowerCase()};base64,${ref.base64}`;
 }

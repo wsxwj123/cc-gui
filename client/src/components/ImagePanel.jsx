@@ -72,6 +72,10 @@ const MJ_EXTRA_FIELDS = 'stylize 风格化 0-1000 · chaos 混乱度 0-100 · we
 // r84:MJ 四宫格里"第几张"的人话说法。上游的 index 是 1–4,顺序即返回的 image_urls 顺序,
 // 对应四宫格的【左上=1、右上=2、左下=3、右下=4】—— 这个映射被单测钉住,别改顺序。
 const MJ_GRID_POSITIONS = ['左上', '右上', '左下', '右下'];
+// r84 二次操作:放大 = MJ 的 U1–U4(从四宫格里取出那一张单图),变体 = V1–V4(以那张为基础
+// 重抽一组四宫格)。上游把这两件事都做成新任务,结果作为新记录进历史。
+const MJ_ACTION_LABEL = { upscale: '放大', variation: '变体' };
+const MJ_ACTION_TAG = { upscale: 'U', variation: 'V' };
 
 // 提示词草稿:出图是后台任务,面板关掉再打开输入框里的内容必须还在。
 const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
@@ -537,6 +541,13 @@ export default function ImagePanel() {
   const shotFile = (h) => pickedFile(h, picked[h.id]);
   const shotUrl = (h) => pickedPreviewUrl(h, picked[h.id]) || h.previewUrl || '';
   const pickShot = (h, i) => { setCurrentId(h.id); setPicked((m) => ({ ...m, [h.id]: i })); };
+  // r84 可追溯:二次操作产生的条目标出"从哪个任务的第几张来的"。
+  const originNote = (h) => {
+    const tag = `${MJ_ACTION_TAG[h.mjAction] || ''}${h.mjIndex || ''}`;
+    // 父记录还在列表里才说"来自…":被删掉之后再说"来自上一任务"是找不到的指路。
+    const hasParent = history.some((x) => x.id === h.parentId);
+    return `${MJ_ACTION_LABEL[h.mjAction] || h.mjAction} ${tag}${hasParent ? ` · 来自上一任务第 ${h.mjIndex} 张` : ''}`;
+  };
 
   // 参考图选择:单张与张数都先在前端拦一道(超限直接报错不发),真正的闸在服务端。
   const addRefFiles = async (files) => {
@@ -636,6 +647,9 @@ export default function ImagePanel() {
   };
 
   const [revealErr, setRevealErr] = useState('');
+  // r84:二次操作(放大 / 变体)的报错。与 revealErr 分开 —— 两者的成因与处置完全不同。
+  const [actionErr, setActionErr] = useState('');
+  const [actionBusy, setActionBusy] = useState(''); // 提交中的 `${jobId}:${action}:${index}`
 
   // r26-J6:系统打开失败(非 2xx / 网络异常)要内联提示 —— 原先 catch 静默吞掉,
   // 用户点了「在文件夹中显示」毫无反应,分不清是没点上还是失败了。非阻断操作,
@@ -653,6 +667,31 @@ export default function ImagePanel() {
   };
 
   // 取消生成中的任务:只作用于点名的那一个 jobId。不弹确认 —— 取消可重发,不是破坏性操作。
+  /**
+   * r84:对某条已完成的 mj 任务的第 index 张(1-4)发起放大 / 变体。
+   * 服务端复用同一条流水线(提交 → 轮询 → 落盘),这里只管发起与报错。
+   */
+  const submitAction = async (h, action, index) => {
+    const busyKey = `${h.id}:${action}:${index}`;
+    if (actionBusy) return; // 双击防重:提交那一瞬只允许一个
+    setActionErr('');
+    setActionBusy(busyKey);
+    try {
+      const r = await fetch('/api/image/actions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: h.id, action, index }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `提交失败（${r.status}）`);
+      loadHistory();
+    } catch (e) {
+      setActionErr(`${MJ_ACTION_LABEL[action] || action}失败：${e.message}`);
+    } finally {
+      setActionBusy('');
+    }
+  };
+
   const cancelJob = async (id) => {
     setErr('');
     try {
@@ -712,18 +751,39 @@ export default function ImagePanel() {
     const list = entryFiles(h);
     if (h.status !== 'done' || list.length < 2) return null;
     const cur = shotIdx(h);
+    // 二次操作只对 mj 协议、且记了上游任务号的条目开放(r84 之前的老记录没有 taskId,
+    // provider 被删或改了协议时同样不给入口 —— 点了必然失败的按钮不该存在)。
+    const canAct = !!h.taskId && providers.find((p) => p.id === h.providerId)?.protocol === 'mj';
     return (
       <div className="grid grid-cols-4 gap-1">
         {list.map((f, i) => (
-          <button
-            type="button"
-            key={f}
-            onClick={() => pickShot(h, i)}
-            title={`第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）：点击选中，上方大图与单图操作都作用于它`}
-            className={`rounded overflow-hidden border ${i === cur ? 'border-accent' : 'border-canvas-deep hover:border-ink-faint'}`}
-          >
-            <img src={entryPreviewUrl(f)} alt={`第 ${i + 1} 张`} className="w-full aspect-square object-cover" />
-          </button>
+          <div key={f} className={`relative group rounded overflow-hidden border ${i === cur ? 'border-accent' : 'border-canvas-deep hover:border-ink-faint'}`}>
+            <button
+              type="button"
+              onClick={() => pickShot(h, i)}
+              title={`第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）：点击选中，大图与单图操作都作用于它`}
+              className="block w-full"
+            >
+              <img src={entryPreviewUrl(f)} alt={`第 ${i + 1} 张`} className="w-full aspect-square object-cover" />
+            </button>
+            {canAct && (
+              // 选中那张常驻显示,其余悬停才出 —— 触屏没有悬停,先点一下选中就能拿到入口。
+              <div className={`absolute inset-x-0 bottom-0 flex gap-px transition-opacity ${i === cur ? '' : 'opacity-0 group-hover:opacity-100'}`}>
+                {['upscale', 'variation'].map((act) => (
+                  <button
+                    type="button"
+                    key={act}
+                    disabled={!!actionBusy}
+                    onClick={() => submitAction(h, act, i + 1)}
+                    title={act === 'upscale'
+                      ? `放大：取出四宫格里的第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）作为单图，结果记为新任务`
+                      : `变体：以第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）为基础重新生成一组，结果记为新任务`}
+                    className="flex-1 py-0.5 bg-canvas-deep/85 text-[9.5px] text-ink font-body hover:bg-accent hover:text-on-accent disabled:opacity-50"
+                  >{MJ_ACTION_LABEL[act]}</button>
+                ))}
+              </div>
+            )}
+          </div>
         ))}
       </div>
     );
@@ -909,6 +969,7 @@ export default function ImagePanel() {
             ><ExternalLink size={11} />在文件夹中显示</button>
           </div>
           {revealErr && <div className="text-[11px] text-error font-body">{revealErr}</div>}
+          {actionErr && <div className="text-[11px] text-error font-body break-all">{actionErr}</div>}
         </div>
       )}
 
@@ -951,6 +1012,7 @@ export default function ImagePanel() {
         </div>
         {!history.length && <div className="text-[11px] text-ink-faint font-body">还没有生成记录。</div>}
         {revealErr && <div className="text-[11px] text-error font-body">{revealErr}</div>}
+        {actionErr && <div className="text-[11px] text-error font-body break-all">{actionErr}</div>}
         <div className={taskView === 'grid' ? 'grid grid-cols-2 gap-2' : 'space-y-1.5'}>
           {ordered.map((h) => (taskView === 'grid' ? (
             <div key={h.id} className={`rounded-panel border overflow-hidden ${h.id === currentId ? 'border-accent' : 'border-canvas-deep'}`}>
@@ -996,6 +1058,7 @@ export default function ImagePanel() {
                   {/* r82:一个任务可能出多张图,预览只显示第一张 —— 张数写出来,否则用户
                       不知道保存目录里还多了几个文件。 */}
                   {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">第 {shotIdx(h) + 1}/{h.files.length} 张</span> : null}
+                  {h.mjAction ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{originNote(h)}</span> : null}
                   {STATUS_LABEL[h.status] || h.status} · {shortTime(h.startedAt)}
                 </div>
                 <div className="flex items-center gap-1">{taskActions(h)}</div>
@@ -1031,6 +1094,7 @@ export default function ImagePanel() {
                 <div className="text-[10px] text-ink-faint font-body truncate">
                   {h.refs?.length ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">图生图</span> : null}
                   {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">第 {shotIdx(h) + 1}/{h.files.length} 张</span> : null}
+                  {h.mjAction ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{originNote(h)}</span> : null}
                   {h.status === 'running' ? `生成中 · ${elapsedSec(h)}s${h.progress == null ? '' : ` · ${h.progress}%`}` : (STATUS_LABEL[h.status] || h.status)}
                   {h.status === 'cancelled' ? ` · ${CANCEL_NOTE}` : ''}
                   {h.status !== 'done' && h.error ? ` · ${h.error}` : ''}
