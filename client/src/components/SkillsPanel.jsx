@@ -183,7 +183,8 @@ export function SkillsPanel() {
     if (!t || tokenBusy) return;
     setTokenBusy(true); setTokenMsg('');
     try {
-      const r = await fetch('/api/skills/github-token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: t }) });
+      // 30s 超时兜底:后端悬死时按钮不能永久卡"验证中"(AbortSignal.timeout 老 webview 可能没有,可选调用)
+      const r = await fetch('/api/skills/github-token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: t }), signal: AbortSignal.timeout?.(30000) });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || '保存失败');
       setTokenInput(''); setTokenOpen(false);

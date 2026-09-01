@@ -14,7 +14,7 @@ import { homedir } from 'os';
 import { request as httpRequest } from 'http';
 import { request as httpsRequest } from 'https';
 import { gfetch } from '../utils/github-fetch.js'; // r14-1:代理回落层已抽公用
-import { resolveGithubToken, saveGithubToken, clearGithubToken } from '../utils/github-token.js'; // r67:限流根治
+import { resolveGithubToken, saveGithubToken, clearGithubToken, TOKEN_RE } from '../utils/github-token.js'; // r67:限流根治
 
 // ── 网络封装:直连失败回落本地代理 ────────────────────────────
 // 墙内直连 GitHub 时断时通,用户常开着 Clash 等本地代理却帮不上忙:Node fetch 不读
@@ -243,6 +243,10 @@ router.get('/skills/github-token', async (req, res) => {
 });
 router.post('/skills/github-token', async (req, res) => {
   const token = String(req.body?.token || '').trim();
+  // 形状校验必须在在线验真【之前】(判官 M1):含换行的输入拼进 Authorization 会让 fetch 抛
+  // ERR_INVALID_CHAR → 有代理的机器上经 proxyGet 事件回调逃逸 → 响应悬死、保存按钮永久卡住;
+  // 顺带让"格式不对"给准确文案而不是误报"令牌无效 401",也省一次网络请求。
+  if (!TOKEN_RE.test(token)) return res.status(400).json({ error: '令牌格式不对:应为 GitHub 生成的 token(无空格与中文,长度 8-255)' });
   try {
     try {
       const r = await gfetch('https://api.github.com/rate_limit', { headers: { ...GH_HEADERS, Authorization: `Bearer ${token}` } });

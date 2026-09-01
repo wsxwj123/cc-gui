@@ -59,5 +59,18 @@ assert.equal(withGithubAuth('https://api.github.com.evil.com/x', H, 'tok_1234567
 assert.equal(withGithubAuth('https://api.github.com/rate_limit', { Authorization: 'Bearer other' }, 'tok_123456789'), null, '调用方已带 Authorization 不覆盖(保存端点验令牌用)');
 assert.equal(withGithubAuth('https://api.github.com/x', H, null), null, '无令牌不注入');
 
+// ── ⑤ 保存端点必须先形状校验、再在线验真(判官 M1)────────────────────────
+// 含换行的 token 直接拼进 Authorization → fetch 抛 ERR_INVALID_CHAR → 有代理的机器上
+// 经 proxyGet 事件回调逃逸成悬死请求,保存按钮永久卡"验证中"。锁:POST 处理器内
+// TOKEN_RE 预检必须出现在 rate_limit 在线验真之前。
+{
+  const { readFileSync } = await import('node:fs');
+  const sk = readFileSync(new URL('../../server/routes/skills.js', import.meta.url), 'utf8');
+  const post = sk.slice(sk.indexOf("router.post('/skills/github-token'"), sk.indexOf("router.delete('/skills/github-token'"));
+  const shapeAt = post.indexOf('TOKEN_RE.test(');
+  const onlineAt = post.indexOf('rate_limit');
+  assert.ok(shapeAt > -1 && onlineAt > -1 && shapeAt < onlineAt, '⑤ 保存端点:形状校验在在线验真之前(防含换行输入悬死请求)');
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log('check-github-token: all assertions passed');

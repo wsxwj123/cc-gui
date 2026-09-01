@@ -16,7 +16,9 @@ const execFileP = promisify(execFile);
 const TOKEN_FILE = process.env.CGUI_GITHUB_TOKEN_FILE || join(homedir(), '.claude-gui', 'github-token.json');
 // 形状校验:可见 ASCII、无空白,长度 8-255(ghp_/github_pat_/gho_/40 位 hex 全在内)。
 // 故意松:真伪由保存端点在线打 /rate_limit 验,这里只挡明显粘错的(中文/带空格/整段命令)。
-const TOKEN_RE = /^[\x21-\x7e]{8,255}$/;
+// 导出给保存端点在线验真【之前】预检:含换行的输入拼进 header 会让 fetch 抛
+// ERR_INVALID_CHAR,在有代理的机器上经 proxyGet 事件回调逃逸成悬死请求(判官 M1)。
+export const TOKEN_RE = /^[\x21-\x7e]{8,255}$/;
 
 const TTL = 5 * 60 * 1000;
 let cached = null;   // { at, value: { token, source } | null }

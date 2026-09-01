@@ -74,7 +74,8 @@ export async function gfetch(url, opts = {}, _noAuth = false) {
   // 最坏结果=回到没有令牌时的匿名行为,不会比改动前更差。
   if (r.status === 401 && usedToken) { invalidateGithubToken(); return gfetch(url, opts, true); }
   // GitHub 匿名 API 限流(60次/时)按来源 IP 计:直连配额烧光时换代理链路重试,配额独立。
-  if (!viaProxy && r.status === 403 && url.startsWith('https://api.github.com/')) {
+  // 仅匿名请求值得换链路:带令牌后配额按令牌计,换出口 IP 无意义,白耗一次请求(判官 minor-2)。
+  if (!usedToken && !viaProxy && r.status === 403 && url.startsWith('https://api.github.com/')) {
     const proxy = await localProxy();
     if (proxy) { try { const pr = await proxyGet(url, proxy, { headers }); if (pr.ok) return pr; } catch { /* 保留原响应 */ } }
   }
