@@ -474,7 +474,9 @@ function repairNodeInner(value: unknown, ctx: RepairCtx, depth: number): GenuiNo
     }
     case 'list': {
       const items = repairListItems(v.items, GENUI_LIMITS.maxListItems, ctx, depth + 1)
-      if (items === undefined) return null
+      // CGUI-PATCH(r67b 空壳):`items` 修复后为空 ⟹ 整个节点丢弃(理由同 chart)。
+      // 空列表在界面上是一块什么都没有的留白,和"这里本来就没内容"分不清。
+      if (items === undefined || items.length === 0) return null
       return { type: 'list', items }
     }
     case 'table': {
@@ -496,7 +498,11 @@ function repairNodeInner(value: unknown, ctx: RepairCtx, depth: number): GenuiNo
       }
       const columns = repairStrings(rawCols, GENUI_LIMITS.maxTableCols, 128)
       const rows = repairRows(rawRows, GENUI_LIMITS.maxTableRows, GENUI_LIMITS.maxTableCols)
-      if (columns === undefined || rows === undefined) return null
+      // CGUI-PATCH(r67b 空壳):`rows` 修复后为空 ⟹ 整个节点丢弃(理由同 chart)。
+      // 只剩表头的表格是零信息:用户看不到任何一行数据,却以为"查询结果确实为空"。
+      // 原文就写 `rows: []` 与"修复后变空"同样处理 —— spec.ts 的 GenuiTable 没有
+      // 「合法空态」的定义,空即无信息。
+      if (columns === undefined || rows === undefined || rows.length === 0) return null
       return { type: 'table', columns, rows }
     }
     case 'chart': {
@@ -505,7 +511,16 @@ function repairNodeInner(value: unknown, ctx: RepairCtx, depth: number): GenuiNo
       // `data` is required by the type but grouped bars may ship `series`
       // alone; a series-only chart gets an empty data array (the renderer
       // reads `series` in that case).
-      if (data === undefined && series === undefined) return null
+      //
+      // CGUI-PATCH(r67b 空壳):修复后**一个数据点都不剩** ⟹ 整个节点丢弃。§5.2 的
+      // 「不得渲染成空块」在节点级同样成立:模型按 ECharts 习惯写
+      // `categories + series:[{name,data:[数字]}]` 时,未知字段被剥光后只剩
+      // `{type:'chart',data:[],series:[]}`,渲染出来是一张只有网格线、没有柱子的空框
+      // —— 零信息**且误导**(看着像"数据真的全是 0")。判据取总点数而不是两个数组
+      // 是否为空:`series:[{label:'x',data:[]}]` 同样一个柱子都画不出,只是多一条图例。
+      // 丢弃走与未知类型同一条路径,于是计入「已忽略」灰字,用户至少知道这儿少了东西。
+      const points = (data?.length ?? 0) + (series ?? []).reduce((n, s) => n + s.data.length, 0)
+      if (points === 0) return null
       return { type: 'chart', data: data ?? [], ...opt('kind', enu(v.kind, CHART_KINDS)), ...opt('series', series) }
     }
     case 'tabs': {
