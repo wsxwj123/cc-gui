@@ -530,6 +530,15 @@ export function SkillsPanel({ marketOnly = false, marketQuery }) {
         </>
       ) : (
         <>
+          {/* r74 分工互链:独立技能面板的导入页保留原样,加一行指到扩展市场(那里
+              还有插件与 MCP);marketOnly(=被市场页挂载)时不显示,免得自己指自己。 */}
+          {!marketOnly && (
+            <button data-testid="skills-goto-market"
+              onClick={() => window.dispatchEvent(new CustomEvent('cgui:open-panel', { detail: { id: 'market' } }))}
+              className="self-start text-[10px] text-ink-faint hover:text-accent font-body">
+              技能 / 插件 / MCP 一站浏览见「扩展市场」→
+            </button>
+          )}
           {/* 源选择 = r71 的来源分面:「全部源」合并六源,其余按钮点选即窄化到单个源。
               计数只在该源真加载过之后出现(没拉到的源不显示数字,不编造)。 */}
           <div className="flex flex-wrap gap-1.5" data-testid="market-source-facet">

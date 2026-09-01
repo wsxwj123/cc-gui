@@ -145,6 +145,13 @@ export function MarketPanel() {
               <t.icon size={11} />{t.label}
             </button>
           ))}
+          {/* r74 分工互链:市场只管发现,已装的三态/启停/OAuth 在原面板。跳转走既有
+              cgui:open-panel 事件(r16-2),技能→skills 面板,插件/MCP→工具面板。 */}
+          <button data-testid="ext-market-manage-link"
+            onClick={() => window.dispatchEvent(new CustomEvent('cgui:open-panel', { detail: { id: tab === 'skills' ? 'skills' : 'mcp' } }))}
+            className="ml-auto text-[10px] text-ink-faint hover:text-accent font-body shrink-0">
+            管理已装 →
+          </button>
         </div>
         <div className="relative">
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-ghost" />
