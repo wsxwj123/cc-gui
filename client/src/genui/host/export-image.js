@@ -14,8 +14,9 @@
  * 值已经是求值后的具体颜色,不含 var())。mermaid 自己会往 SVG 里插一段 `<style>`,
  * 那段随克隆一起走,不受影响。
  *
- * 导出路径**零外发**:不 import 任何 action/send 面,不发任何网络请求
- * (base64 手工解码,连 `fetch(dataURL)` 都不用 —— 免得看起来像在发请求)。
+ * 导出路径**零外发**:不 import 任何 action/send 面,不发任何网络请求。
+ * base64 手工解码,连"用 fetch 读 data URL"这条捷径都不走 —— 一是没必要,
+ * 二是外发探针盯的就是 fetch 调用面,别让本地解码看起来像在发请求。
  *
  * @module genui/host/export-image
  */
