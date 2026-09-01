@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // r26-G11:openai-proxy 响应方向必须翻译 delta.reasoning_content → anthropic
 // thinking 流(修前无分支,deepseek-reasoner 的思考内容在响应流里被静默丢弃)。
-// 真 HTTP 端到端:本地上游桩(6704,按请求分流 SSE/JSON)→ openai proxy(6703)。
+// 真 HTTP 端到端:本地上游桩(按请求分流 SSE/JSON)→ openai proxy。两者都取 OS 临时口。
 // 哨兵:S1 删掉 reasoning_content 分支 → t1/t2/t3 全红;S2 thinking/text 不互斥
 //       (交错时后到的 thinking 插进已开 text 块或不关旧块)→ t3 顺序断言红。
 import assert from 'node:assert/strict';
@@ -9,24 +9,6 @@ import http from 'node:http';
 import net from 'node:net';
 
 const { startOpenAIProxy, setOpenAIUpstream } = await import('../../server/services/openai-proxy.js');
-
-// 隔壁 worktree 可能也在跑测试:启动前等端口空闲(EADDRINUSE 退让重试,同
-// tests/acceptance/r26/lib.mjs 的 listenWithRetry 口径)。
-const waitPortFree = async (port, tries = 40) => {
-  for (let i = 0; i < tries; i++) {
-    const free = await new Promise((resolve) => {
-      const s = net.createServer();
-      s.once('error', () => resolve(false));
-      s.once('listening', () => s.close(() => resolve(true)));
-      s.listen(port, '127.0.0.1');
-    });
-    if (free) return;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error(`端口 ${port} 持续被占用,重试 ${tries} 次后放弃`);
-};
-await waitPortFree(6704);
-await waitPortFree(6703);
 
 // ── 本地上游桩:stream=true → SSE(reasoning 与 content 交错);否则 → JSON ──
 const SSE_BODY = [
@@ -57,13 +39,13 @@ const upstream = http.createServer((req, res) => {
     res.end(SSE_BODY);
   });
 });
-await new Promise((r) => upstream.listen(6704, '127.0.0.1', r));
+await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
 
-setOpenAIUpstream({ baseURL: 'http://127.0.0.1:6704/v1', apiKey: 'test', model: 'deepseek-reasoner-x' });
-const proxyPort = await startOpenAIProxy(6703);
-assert.equal(proxyPort, 6703, 'proxy 起在 6703');
+setOpenAIUpstream({ baseURL: `http://127.0.0.1:${upstream.address().port}/v1`, apiKey: 'test', model: 'deepseek-reasoner-x' });
+const proxyPort = await startOpenAIProxy(0);
+assert.ok(proxyPort > 0, 'proxy 起得来(端口由 OS 分配)');
 
-const postMessages = (body) => fetch(`http://127.0.0.1:6703/v1/messages`, {
+const postMessages = (body) => fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ model: 'deepseek-reasoner-x', messages: [{ role: 'user', content: 'hi' }], ...body }),
@@ -134,4 +116,4 @@ const parseSSE = (text) => {
 }
 
 console.log('check-r26-g11-reasoning-content: all passed');
-process.exit(0); // proxy/upstream 无 stop 导出,进程退出即释放 6703/6704
+process.exit(0); // proxy/upstream 无 stop 导出,进程退出即释放临时口

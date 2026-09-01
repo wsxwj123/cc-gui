@@ -5,7 +5,7 @@
 // Run: node tests/unit/check-r50-image-fetch-models.mjs
 //
 // 隔离:HOME/USERPROFILE 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);
-// 上游全是本机假服务(6703 假上游 / 6704 假攻击者),绝不打真实网络。
+// 上游全是本机假服务(假上游 / 假攻击者各占一个临时口),绝不打真实网络。
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -57,7 +57,7 @@ const FORM_KEY = 'sk-r50-form-key-998877665544';
   );
 }
 
-// ─────────────────── 3. 端到端:本地假上游(6703)+ 假攻击者(6704) ───────────────────
+// ─────────────────── 3. 端到端:本地假上游 + 假攻击者 ───────────────────
 const express = (await import('express')).default;
 const imageRouter = (await import('../../server/routes/image.js')).default;
 
@@ -92,7 +92,7 @@ app.get('/nolist/v1/models', (_req, res) => res.status(404).json({ error: 'not f
 
 app.use('/api', imageRouter);
 
-// 假攻击者(6704):任何一次请求都算失守 —— 存储 key 绝不许发到请求体指定的地址。
+// 假攻击者(另一个临时口):任何一次请求都算失守 —— 存储 key 绝不许发到请求体指定的地址。
 let evilHits = 0;
 let evilSawKey = false;
 const evilServer = createServer((req, res) => {
@@ -103,24 +103,10 @@ const evilServer = createServer((req, res) => {
   res.end(JSON.stringify({ data: [{ id: 'attacker-model' }] }));
 });
 
-// 端口只许 6703/6704,但隔壁分支的 E2E 也在用 → EADDRINUSE 退让重试,不当假失败。
-async function listenWithRetry(port, tries = 40, make = (p) => app.listen(p, '127.0.0.1')) {
-  for (let i = 0; i < tries; i++) {
-    const s = make(port);
-    const r = await new Promise((resolve) => {
-      s.once('listening', () => resolve({ ok: true }));
-      s.once('error', (e) => resolve({ ok: false, err: e }));
-    });
-    if (r.ok) return s;
-    if (r.err?.code !== 'EADDRINUSE') throw r.err;
-    await new Promise((done) => setTimeout(done, 500));
-  }
-  throw new Error(`端口 ${port} 持续被占用(隔壁 worktree 的 E2E?),重试 ${tries} 次后放弃`);
-}
-const server = await listenWithRetry(6703);
-await listenWithRetry(6704, 40, (p) => evilServer.listen(p, '127.0.0.1'));
-const BASE = 'http://127.0.0.1:6703';
-const EVIL = 'http://127.0.0.1:6704';
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+await new Promise((r) => { const s = evilServer.listen(0, '127.0.0.1', () => r(s)); });
+const BASE = `http://127.0.0.1:${server.address().port}`;
+const EVIL = `http://127.0.0.1:${evilServer.address().port}`;
 const api = async (method, path, body) => {
   const r = await fetch(`${BASE}${path}`, {
     method,

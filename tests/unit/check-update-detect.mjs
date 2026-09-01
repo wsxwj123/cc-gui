@@ -128,32 +128,22 @@ console.log('check-update-detect: all passed (r14-1)');
 
 // t5b(r22-③):真起路由打一次 /attach —— 正则只能证明"写了",证明不了"路由真注册了、
 // 且空闲时立刻收流不起进程"。⚠️ 这里【只打 /attach】,绝不碰 /stream(那个会真的跑
-// npm install -g)。端口只用 6704。
+// npm install -g)。端口取 OS 临时口(listen(0),真实端口从 server.address() 读回)。
 {
   const express = (await import('express')).default;
   const router = (await import('../../server/routes/version-check.js')).default;
   const app = express();
   app.use('/api', router);
-  let server = null;
-  for (let i = 0; i < 3 && !server; i++) {
-    const s = app.listen(6704, '127.0.0.1');
-    const r = await new Promise((done) => {
-      s.once('listening', () => done({ ok: true }));
-      s.once('error', (e) => done({ err: e }));
-    });
-    if (r.ok) server = s;
-    else if (r.err?.code === 'EADDRINUSE') await new Promise((done) => setTimeout(done, 400));
-    else throw r.err;
-  }
-  assert.ok(server, 't5b: 6704 一直被占(隔壁 worktree 的 E2E?)');
+  // 端口取 OS 临时口:写死会被同跑的用例抢,制造随机假红。
+  const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   try {
     const t0 = Date.now();
-    const r = await fetch('http://127.0.0.1:6704/api/claude-update/attach', { method: 'POST' });
+    const r = await fetch(`http://127.0.0.1:${server.address().port}/api/claude-update/attach`, { method: 'POST' });
     const body = await r.text();
     assert.equal(r.status, 200, 't5b: /attach 空闲时也要正常收流');
     assert.equal(body, '', 't5b: 没有任务在跑 → 空流,不许回 start 事件(回了就说明它起了进程)');
     assert.ok(Date.now() - t0 < 5000, 't5b: 空闲时必须立即收流,不许挂着');
-    const status = await (await fetch('http://127.0.0.1:6704/api/claude-update/status')).json();
+    const status = await (await fetch(`http://127.0.0.1:${server.address().port}/api/claude-update/status`)).json();
     assert.notEqual(status.status, 'running', 't5b: 打完 /attach 后任务状态仍是空闲 —— 它一个进程都没起');
   } finally {
     server.closeAllConnections?.();

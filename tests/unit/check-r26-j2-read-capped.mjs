@@ -4,7 +4,7 @@
 // ②谎报 content-length(chunked 无声明)灌超 → 读到上限即停,返回 null(限量截断);
 // ③正常小 body 原样返回;④无 body 返回 '';⑤image.js/provider-quota.js 都改调导出版
 // (源码钉);⑥额度路由 /huge 行为不变(1MB 上限沿用,回归哨兵,复跑既有探针测试覆盖)。
-// 端口 6703,跑完杀干净。
+// 端口取 OS 临时口(listen(0),真实端口从 server.address() 读回),跑完杀干净。
 // Run: node tests/unit/check-r26-j2-read-capped.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -14,7 +14,7 @@ import { readCapped } from '../../server/utils/read-capped.js';
 let n = 0;
 const ok = (v, m) => { assert.ok(v, m); n += 1; };
 
-// 行为夹具:6703 上三种上游
+// 行为夹具:同一个临时口上三种上游
 let bigBytesSent = 0; // 服务端实际写出的字节数,钉"客户端早退"
 const app = createServer((req, res) => {
   if (req.url === '/big-declared') {
@@ -59,10 +59,10 @@ const app = createServer((req, res) => {
 });
 
 const server = await new Promise((resolve, reject) => {
-  const s = app.listen(6703, '127.0.0.1', () => resolve(s));
+  const s = app.listen(0, '127.0.0.1', () => resolve(s));
   s.once('error', reject);
 });
-const BASE = 'http://127.0.0.1:6703';
+const BASE = `http://127.0.0.1:${server.address().port}`;
 
 let failure = null;
 try {

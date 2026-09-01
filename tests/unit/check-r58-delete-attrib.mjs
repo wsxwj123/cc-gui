@@ -14,7 +14,7 @@
 //  ⑤ f.type 为空(Win 注册表缺 MIME 映射)按扩展名认,认不出才回落 image/png。
 //
 // 隔离:HOME/USERPROFILE 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);
-// 上游是本机假服务(6703),绝不打真实网络。
+// 上游是本机假服务(临时口),绝不打真实网络。
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,21 +64,8 @@ app.use(express.json({ limit: '25mb' }));
 app.post('/fast/v1/images/generations', (_req, res) => res.json({ data: [{ b64_json: PNG_B64 }] }));
 app.use('/api', imageRouter);
 
-async function listenWithRetry(port, tries = 40) {
-  for (let i = 0; i < tries; i++) {
-    const s = app.listen(port, '127.0.0.1');
-    const r = await new Promise((resolve) => {
-      s.once('listening', () => resolve({ ok: true }));
-      s.once('error', (e) => resolve({ ok: false, err: e }));
-    });
-    if (r.ok) return s;
-    if (r.err?.code !== 'EADDRINUSE') throw r.err;
-    await new Promise((done) => setTimeout(done, 500));
-  }
-  throw new Error(`端口 ${port} 持续被占用(隔壁 worktree 的 E2E?),重试 ${tries} 次后放弃`);
-}
-const server = await listenWithRetry(6703);
-const BASE = 'http://127.0.0.1:6703';
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const BASE = `http://127.0.0.1:${server.address().port}`;
 const api = async (method, path, body) => {
   const r = await fetch(`${BASE}${path}`, {
     method,

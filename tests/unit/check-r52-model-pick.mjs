@@ -5,7 +5,7 @@
 // 目录噪音 ④生图 provider 的 models 白名单落盘(校验矩阵 + publicView 不漏 key)。
 // Run: node tests/unit/check-r52-model-pick.mjs
 //
-// 隔离:HOME/USERPROFILE 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);端口 6703。
+// 隔离:HOME/USERPROFILE 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);端口取 OS 临时口(listen(0),真实端口从 server.address() 读回)。
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -145,22 +145,8 @@ const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use('/api', imageRouter);
 
-// 端口只许 6703/6704,但隔壁分支的 E2E 也在用 → EADDRINUSE 退让重试,不当假失败。
-async function listenWithRetry(port, tries = 40) {
-  for (let i = 0; i < tries; i++) {
-    const s = app.listen(port, '127.0.0.1');
-    const r = await new Promise((resolve) => {
-      s.once('listening', () => resolve({ ok: true }));
-      s.once('error', (e) => resolve({ ok: false, err: e }));
-    });
-    if (r.ok) return s;
-    if (r.err?.code !== 'EADDRINUSE') throw r.err;
-    await new Promise((done) => setTimeout(done, 500));
-  }
-  throw new Error(`端口 ${port} 持续被占用(隔壁 worktree 的 E2E?),重试 ${tries} 次后放弃`);
-}
-const server = await listenWithRetry(6703);
-const BASE = 'http://127.0.0.1:6703';
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const BASE = `http://127.0.0.1:${server.address().port}`;
 const api = async (method, path, body) => {
   const r = await fetch(`${BASE}${path}`, {
     method,

@@ -2,7 +2,7 @@
 // r26-J1【单测】:生图 POST 不跟随重定向(redirect:'manual' + 3xx 报错)。
 // 哨兵:①上游 302 到内网目标 → 502 且报错点明跳转,目标零命中,无落盘;
 // ②301/307 同拒(不只认 302);③200 正常出图(防误伤);④源码钉住 redirect:'manual'。
-// 隔离 HOME + /tmp 样本;端口 6703/6704,跑完杀干净。
+// 隔离 HOME + /tmp 样本;端口取 OS 临时口(listen(0),真实端口从 server.address() 读回),跑完杀干净。
 // Run: node tests/unit/check-r26-j1-image-post-redirect.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
@@ -23,9 +23,9 @@ const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
-// 假上游:/r302 /r301 /r307 各回一种 3xx 到 6704;/ok 正常出图
+// 假上游:/r302 /r301 /r307 各回一种 3xx 到跳转目标;/ok 正常出图
 for (const code of [302, 301, 307]) {
-  app.post(`/r${code}/v1/images/generations`, (_req, res) => res.redirect(code, 'http://127.0.0.1:6704/final'));
+  app.post(`/r${code}/v1/images/generations`, (_req, res) => res.redirect(code, `http://127.0.0.1:${target.address().port}/final`));
 }
 app.post('/ok/v1/images/generations', (_req, res) => res.json({ data: [{ b64_json: PNG_B64 }] }));
 app.use('/api', imageRouter);
@@ -38,23 +38,9 @@ const target = createServer((_req, res) => {
   res.end(JSON.stringify({ data: [{ b64_json: PNG_B64 }] }));
 });
 
-async function listenWithRetry(server, port, tries = 40) {
-  for (let i = 0; i < tries; i++) {
-    const r = await new Promise((resolve) => {
-      const s = server.listen(port, '127.0.0.1');
-      s.once('listening', () => resolve({ ok: true, s }));
-      s.once('error', (e) => resolve({ ok: false, err: e }));
-    });
-    if (r.ok) return r.s;
-    if (r.err?.code !== 'EADDRINUSE') throw r.err;
-    await new Promise((d) => setTimeout(d, 250));
-  }
-  throw new Error(`端口 ${port} 持续被占用`);
-}
-
-const server = await listenWithRetry(createServer(app), 6703);
-await listenWithRetry(target, 6704);
-const BASE = 'http://127.0.0.1:6703';
+const server = await new Promise((r) => { const s = createServer(app).listen(0, '127.0.0.1', () => r(s)); });
+await new Promise((r) => target.listen(0, '127.0.0.1', r));
+const BASE = `http://127.0.0.1:${server.address().port}`;
 const api = async (method, path, body) => {
   const r = await fetch(`${BASE}${path}`, {
     method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),

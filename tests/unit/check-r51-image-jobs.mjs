@@ -12,7 +12,7 @@
 //    只许整体搬进 runner,锚点数量不许变;失败 job 的 error 必须经 redactKey。
 //
 // 隔离:HOME/USERPROFILE 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);
-// 上游全是本机假服务(6703 / 6704),绝不打真实网络。
+// 上游全是本机假服务(各占一个临时口),绝不打真实网络。
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -51,22 +51,8 @@ app.post('/leak/v1/images/generations', (req, res) => res.status(401)
   .json({ error: { message: `invalid key ${req.headers.authorization}` } }));
 app.use('/api', imageRouter);
 
-// 端口只许 6703/6704,但隔壁分支的 E2E 也在用 → EADDRINUSE 退让重试,不当假失败。
-async function listenWithRetry(port, tries = 40, make = (p) => app.listen(p, '127.0.0.1')) {
-  for (let i = 0; i < tries; i++) {
-    const s = make(port);
-    const r = await new Promise((resolve) => {
-      s.once('listening', () => resolve({ ok: true }));
-      s.once('error', (e) => resolve({ ok: false, err: e }));
-    });
-    if (r.ok) return s;
-    if (r.err?.code !== 'EADDRINUSE') throw r.err;
-    await new Promise((done) => setTimeout(done, 500));
-  }
-  throw new Error(`端口 ${port} 持续被占用(隔壁 worktree 的 E2E?),重试 ${tries} 次后放弃`);
-}
-const server = await listenWithRetry(6703);
-const BASE = 'http://127.0.0.1:6703';
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const BASE = `http://127.0.0.1:${server.address().port}`;
 const api = async (method, path, body, base = BASE) => {
   const r = await fetch(`${base}${path}`, {
     method,
@@ -225,8 +211,8 @@ try {
     const app2 = express();
     app2.use(express.json());
     app2.use('/api', freshRouter);
-    restartServer = await listenWithRetry(6704, 40, (p) => app2.listen(p, '127.0.0.1'));
-    const { list } = await historyOf(null, 'http://127.0.0.1:6704');
+    restartServer = await new Promise((r) => { const s = app2.listen(0, '127.0.0.1', () => r(s)); });
+    const { list } = await historyOf(null, `http://127.0.0.1:${restartServer.address().port}`);
     const zombie = list.find((e) => e.id === 'zombie');
     assert.ok(zombie, 't5: 条目还在');
     assert.equal(zombie.status, 'interrupted', 't5【清障】:重启后遗留 running 必须变 interrupted');

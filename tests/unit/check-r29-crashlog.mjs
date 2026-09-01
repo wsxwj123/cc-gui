@@ -1,7 +1,7 @@
 // r29 取证链路单测:Windows 公开版"用一段时间整个窗口消失"的最小取证。
 // 覆盖:①crash.log 写入形态 ②client-log 路由(限流/截断/落盘) ③日志滚动
 // ④NUL watcher error 监听哨兵 ⑤Rust 监护线程源码哨兵。
-// 纪律:全部样本落 /tmp(mkdtemp),绝不读写真实 ~/.claude-gui;端口只用 6703,跑完关干净。
+// 纪律:全部样本落 /tmp(mkdtemp),绝不读写真实 ~/.claude-gui;端口取 OS 临时口(listen(0),真实端口从 server.address() 读回),跑完关干净。
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,10 +38,10 @@ const tmp = mkdtempSync(join(tmpdir(), 'cgui-r29-'));
   app.use(express.json());
   app.use('/api', createClientLogRouter(tmp));
   const srv = await new Promise((resolve) => {
-    const s = app.listen(6703, '127.0.0.1', () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   try {
-    const post = (body) => fetch('http://127.0.0.1:6703/api/client-log', {
+    const post = (body) => fetch(`http://127.0.0.1:${srv.address().port}/api/client-log`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

@@ -6,7 +6,7 @@
 //   ④slug 撞名("My Skin" vs "my-skin" 归一同 slug)→ 互相覆盖(同名=同皮肤语义钉死);
 //   ⑤CJK 名(slug 为空)→ 不去重,各导各的(无归属语义不做猜测);
 //   ⑥覆盖后被覆盖皮肤目录内容完整可读(皮肤资产路径同 id,激活中覆盖不 404)。
-// 隔离口径:makeTmpHome 先于 import 路由;端口只用 6704(与 d4 的 6703 错开);手工
+// 隔离口径:makeTmpHome 先于 import 路由;端口取 OS 临时口(listen(0),真实端口从 server.address() 读回);手工
 // zip 字节(store 法,同 check-skin-install.mjs)。真实 ~/.claude-gui 零触碰。
 // Run: node tests/unit/check-r26-skin-dedupe.mjs
 import assert from 'node:assert/strict';
@@ -14,7 +14,7 @@ import { mkdtempSync, readdirSync, readFileSync, existsSync, rmSync, writeFileSy
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { crc32 } from 'node:zlib';
-import { makeTmpHome, cleanupDirs, listenWithRetry, stopServer } from '../acceptance/r26/lib.mjs';
+import { makeTmpHome, cleanupDirs, stopServer } from '../acceptance/r26/lib.mjs';
 
 const TMP_HOME = makeTmpHome('d6-unit');
 const scratch = mkdtempSync(join(tmpdir(), 'cgui-r26-d6-'));
@@ -74,8 +74,8 @@ app.use('/api', skinsRouter);
 let server = null;
 let failure = null;
 try {
-  server = await listenWithRetry(6704, (p) => app.listen(p, '127.0.0.1'));
-  const BASE = 'http://127.0.0.1:6704';
+  server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const BASE = `http://127.0.0.1:${server.address().port}`;
   const postInline = (body) => fetch(`${BASE}/api/skins/import-inline`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(async (r) => ({ status: r.status, body: await r.json() }));

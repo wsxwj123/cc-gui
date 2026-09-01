@@ -15,14 +15,13 @@
 //   ③ 存储层与 apiKey 同标准:trim + 长度上限、任何 GET 只下发 hasQuotaKey 布尔、明文永不回传;
 //      PUT 不传 = 保留,显式空串 = 清除
 //   ④ 查额度时上游真正收到的是 quotaKey(没配才是 apiKey)—— 用本地假上游断言 Authorization
-// 端到端只占 6703(check-permission-hook-bridge 绑死 6702,别抢),**绝不打真实第三方 API**。
+// 端口取 OS 临时口(listen(0),真实端口从 server.address() 读回),**绝不打真实第三方 API**。
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pickCandidates, parseQuota } from '../../server/services/provider-quota.js';
 
-const PORT = 6703;
 // 全是假值(仓库里不许出现真密钥);命名带 not-real 以免被误当成凭证。
 const API_KEY = 'dummy-api-key-not-real';
 const QUOTA_KEY = 'dummy-quota-key-not-real';
@@ -96,7 +95,7 @@ const one = (provider) => {
   assert.equal(parse({ data: { total_credits: '25.00', total_usage: '7.35' } }).items[0].value, 17.65);
 }
 
-// ── 端到端:隔离 HOME + 真路由 + 本地假上游(只占 6703) ────────────────────
+// ── 端到端:隔离 HOME + 真路由 + 本地假上游(同一个临时口) ────────────────
 const home = await mkdtemp(join(tmpdir(), 'cgui-quotakey-'));
 process.env.HOME = home; // 必须在 import 路由之前:两个路径常量在模块加载期就绑好了
 process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
@@ -124,21 +123,9 @@ for (const prefix of ['with-quota-key', 'no-quota-key']) {
   app.get(`/${prefix}/v1/dashboard/billing/usage`, (_req, res) => res.json({ object: 'list', total_usage: 2500 }));
 }
 
-// 端口是几个测试共用的(隔壁跑完可能还没完全放手)→ 撞了就退让重试,不制造假失败。
-const listen = async () => {
-  for (let i = 0; ; i++) {
-    try {
-      return await new Promise((resolve, reject) => {
-        const s = app.listen(PORT, '127.0.0.1', () => resolve(s));
-        s.once('error', reject);
-      });
-    } catch (e) {
-      if (i >= 20 || e.code !== 'EADDRINUSE') throw e;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
-};
-const server = await listen();
+// 端口取 OS 临时口:写死会被同跑的用例抢,制造随机假红。
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const PORT = server.address().port;
 
 const api = async (method, path, body) => {
   const r = await fetch(`http://127.0.0.1:${PORT}/api${path}`, {

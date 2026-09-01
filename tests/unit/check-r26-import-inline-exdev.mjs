@@ -6,13 +6,13 @@
 //     stage 目录已清(stage 泄漏哨兵;TMPDIR 隔离到 scratch 精确计数);
 //   ④正常 import-inline 走通(201,落盘在隔离 HOME 的 skins 目录,回归哨兵)。
 // 隔离口径:makeTmpHome 先于 import 路由(SKINS_DIR 模块顶层固化 homedir);
-// 端口只用 6703;真实 ~/.claude-gui 零触碰。
+// 端口取 OS 临时口(listen(0),真实端口从 server.address() 读回);真实 ~/.claude-gui 零触碰。
 // Run: node tests/unit/check-r26-import-inline-exdev.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { makeTmpHome, cleanupDirs, listenWithRetry, stopServer } from '../acceptance/r26/lib.mjs';
+import { makeTmpHome, cleanupDirs, stopServer } from '../acceptance/r26/lib.mjs';
 
 const TMP_HOME = makeTmpHome('d4-unit');
 // stage 目录落在 os.tmpdir()(每次调用现读 TMPDIR)→ 隔离到 scratch 精确计数
@@ -53,15 +53,15 @@ const stageCount = () => readdirSync(SCRATCH_TMP).filter((d) => d.startsWith('cg
   rmSync(stage, { recursive: true, force: true });
 }
 
-// ── ③④ 路由级:真实 HTTP 打 import-inline(隔离 HOME + 6703)──
+// ── ③④ 路由级:真实 HTTP 打 import-inline(隔离 HOME + 临时口)──
 const app = express();
 app.use(express.json());
 app.use('/api', skinsRouter);
 let server = null;
 let failure = null;
 try {
-  server = await listenWithRetry(6703, (p) => app.listen(p, '127.0.0.1'));
-  const BASE = 'http://127.0.0.1:6703';
+  server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const BASE = `http://127.0.0.1:${server.address().port}`;
   const post = (body) => fetch(`${BASE}/api/skins/import-inline`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });

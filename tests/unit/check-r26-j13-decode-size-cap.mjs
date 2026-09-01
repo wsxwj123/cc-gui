@@ -4,7 +4,7 @@
 // "字符串过闸、解码后超 64MB"的窗口(约 89.6MB~94MB 字符串 → 65MB~70MB 字节)。
 // 哨兵:①65MB 二进制(b64 后 ~90.9MB,过字符串闸)→ 解码后超 64MB → 413 体积错误;
 // ②63MB 合法图正常落盘(闸下不误伤);③既有字符串闸(92MB+)仍 502 图片过大(回归)。
-// 夹具:6703 假上游 + 隔离 HOME + /tmp 保存目录,跑完杀干净。
+// 夹具:临时口假上游 + 隔离 HOME + /tmp 保存目录,跑完杀干净。
 // Run: node tests/unit/check-r26-j13-decode-size-cap.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
@@ -41,10 +41,10 @@ app.post('/ok/v1/images/generations', (_req, res) => {
 app.use('/api', imageRouter);
 
 const server = await new Promise((resolve, reject) => {
-  const s = app.listen(6703, '127.0.0.1', () => resolve(s));
+  const s = app.listen(0, '127.0.0.1', () => resolve(s));
   s.once('error', reject);
 });
-const BASE = 'http://127.0.0.1:6703';
+const BASE = `http://127.0.0.1:${server.address().port}`;
 const api = async (method, path, body) => {
   const r = await fetch(`${BASE}${path}`, {
     method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
