@@ -278,12 +278,24 @@ export function buildTaskPollRequest(baseURL, apiKey, taskId) {
   return { url: `${base}/tasks/${encodeURIComponent(id)}`, headers: { Authorization: `Bearer ${key}` } };
 }
 
+// 一个任务最多取几张图。上游返回的张数是【它说几张就是几张】,不设上限有两处后果:
+// ① 去重的 urls.includes 退化成 O(n²) —— 实测 10 万条链接(响应体仅 3.6MB,远在
+//    MAX_RESPONSE_BYTES 之内)让单进程后端同步冻住 30 秒,期间聊天流 / 权限弹窗 / WS 全停,
+//    这发生在任何下载之前,现有的体积闸与下载闸一个都拦不住;
+// ② 拿到后逐张下载,张数与总时长都没有预算(saveImage 的 100 次撞名重试不是上限 ——
+//    文件名带秒级时间戳,跨秒即重置)。
+// 16 = MJ 实测 4 张的四倍余量。上限必须在拍平循环里 break 掉,事后 slice 是没用的
+// (要 slice 的时候 O(n²) 已经跑完了)。
+export const MAX_TASK_IMAGES = 16;
+
 /**
- * 轮询响应 → { status:'processing'|'completed'|'failed', progress, urls, message }。
+ * 轮询响应 → { status:'processing'|'completed'|'failed'|'cancelled', progress, urls, message }。
  *  - 终态只认 completed / failed / cancelled,【其余一律 processing】(含 pending /
  *    submitted / 未知值):按白名单枚举非终态的话,上游加一档新状态就会被当失败判死。
+ *    failed 与 cancelled 分开返回 —— 上游主动取消不是失败,措辞得如实。
  *  - urls 从 result.images[].url[] 拍平 —— url 是【数组】不是字符串(MJ 实测一次 4 张
- *    独立单图);只认 http(s):这个值随后要交给下载分支去请求,别的形态一律不接。
+ *    独立单图);只认 http(s):这个值随后要交给下载分支去请求,别的形态一律不接;
+ *    最多取 MAX_TASK_IMAGES 张(见上面的常量注释)。
  *  - progress 取不到时为 null 而不是 0(0 会在界面上显示成"已开始但毫无进展")。
  */
 export function extractTaskState(data) {
@@ -294,12 +306,16 @@ export function extractTaskState(data) {
   // 失败原因三种已知落点(文档 error.message / 顶层 error / MJ 的 fail_reason),取第一个非空。
   const message = [d?.error?.message, data?.error?.message, d?.fail_reason]
     .find((m) => typeof m === 'string' && m.trim()) || '';
-  if (raw === 'failed' || raw === 'cancelled') return { status: 'failed', progress, urls: [], message };
+  if (raw === 'failed' || raw === 'cancelled') return { status: raw, progress, urls: [], message };
   const urls = [];
+  capped:
   for (const img of Array.isArray(d?.result?.images) ? d.result.images : []) {
     const one = img?.url;
     for (const u of Array.isArray(one) ? one : [one]) {
-      if (typeof u === 'string' && /^https?:\/\//i.test(u) && !urls.includes(u)) urls.push(u);
+      if (typeof u === 'string' && /^https?:\/\//i.test(u) && !urls.includes(u)) {
+        urls.push(u);
+        if (urls.length >= MAX_TASK_IMAGES) break capped; // ← 必须在这里断,不是事后 slice
+      }
     }
   }
   if (raw === 'completed') return { status: 'completed', progress, urls, message };

@@ -554,7 +554,9 @@ export async function saveImage(dir, baseName, buf) {
 // 并在文案里说明平台侧任务可能仍在跑。
 // 间隔允许被环境变量下调(同 GENERATE_TIMEOUT_MS 的先例):端到端单测要在秒级跑完
 // 提交→轮询→多图落盘这一整条,不设该变量时恒为 5s,产品行为一字不变。
-const TASK_POLL_INTERVAL_MS = Number(process.env.CGUI_IMAGE_TASK_POLL_INTERVAL_MS) || 5_000;
+// 200ms 地板:负数或 0 会让 Number(...)||5000 落回 5s 没错,但 0.1 这类小正数会变成
+// 紧轮询,把用户自己的中转站打成 DDoS 目标。下调口只是给单测用的,不需要更快。
+const TASK_POLL_INTERVAL_MS = Math.max(200, Number(process.env.CGUI_IMAGE_TASK_POLL_INTERVAL_MS) || 5_000);
 const TASK_POLL_DEADLINE_MS = 15 * 60 * 1000;
 const TASK_POLL_TIMEOUT_MS = 30_000; // 单次查询的超时:一次查不到不判死,等下一轮
 
@@ -638,9 +640,11 @@ export async function pollTask({ taskId, provider, signal, onProgress }, io = {}
       lastProgress = st.progress;
       onProgress?.(st.progress); // fire-and-forget:写历史不该拖住轮询节奏
     }
-    if (st.status === 'failed') {
+    if (st.status === 'failed' || st.status === 'cancelled') {
+      // 上游主动取消不是失败(常见于平台侧敏感词拦截后的自动退款),措辞如实区分。
+      const what = st.status === 'cancelled' ? '上游任务已取消' : '上游任务失败';
       const why = redactKey(st.message, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
-      return { error: `上游任务失败${why ? `：${why}` : '（上游未给出原因）'}` };
+      return { error: `${what}${why ? `：${why}` : '（上游未给出原因）'}` };
     }
     if (st.status === 'completed') {
       if (!st.urls.length) {

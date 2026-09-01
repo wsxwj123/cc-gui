@@ -13,7 +13,9 @@
 //    且它必须定义在 runImageJob 【之前】(check-r51 用 runImageJob→router 的源码切片数
 //    安全锚点,pollTask 落进切片里会把那条锁的语义搞错)。
 //  ⑤ 同步三协议零回归:openai / gemini / chat 的产物逐字不变,extractImage 不认 mj。
-//  ⑥ 源码断言只能证明"写了",t10 端到端证明"跑得起来":提交→轮询→4 张全落盘(含同秒
+//  ⑥【DoS 上限】上游说几张就是几张:不在拍平循环里 break 掉,去重的 includes 就是 O(n²)——
+//    实测 10 万条链接(响应体仅 3.6MB)把单进程后端同步冻住 30 秒,且发生在任何下载之前。
+//  ⑦ 源码断言只能证明"写了",t10 端到端证明"跑得起来":提交→轮询→4 张全落盘(含同秒
 //    撞名加序号)、轮询期间写进度、轮询中取消要立刻落地且归还并发名额。
 //
 // 全程不打真实网络:pollTask 的 fetch / sleep / now 全部注入;t10 的上游与图片链接
@@ -29,8 +31,9 @@ const TMP_HOME = mkdtempSync(join(tmpdir(), 'cgui-r82-home-'));
 const SAVE_DIR = mkdtempSync(join(tmpdir(), 'cgui-r82-save-'));
 process.env.HOME = TMP_HOME;
 process.env.USERPROFILE = TMP_HOME;
-// 只为让 t10 的端到端在秒级跑完(产品默认仍是 5s)。必须在 import 路由之前设。
-process.env.CGUI_IMAGE_TASK_POLL_INTERVAL_MS = '30';
+// 只为让 t10 的端到端在秒级跑完(产品默认仍是 5s;下调口有 200ms 地板,填更小也是 200)。
+// 必须在 import 路由之前设。
+process.env.CGUI_IMAGE_TASK_POLL_INTERVAL_MS = '200';
 mkdirSync(join(TMP_HOME, '.claude-gui'), { recursive: true });
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -43,7 +46,7 @@ const TASK_ID = 'task_01M1EJFES1WXQMW1Q4T2PDZKXT';
 
 const {
   IMAGE_PROTOCOLS, buildImageRequest, extractImage,
-  extractTaskId, buildTaskPollRequest, extractTaskState,
+  extractTaskId, buildTaskPollRequest, extractTaskState, MAX_TASK_IMAGES,
 } = await import('../../server/utils/image-protocols.js');
 // 路由层的轮询状态机(import 真函数,fetch / sleep / now 全部注入,绝不打真实网络)。
 const { pollTask } = await import('../../server/routes/image.js');
@@ -197,9 +200,12 @@ try {
       '顶层 error', 't5: 顶层 error.message 兜底');
     assert.equal(extractTaskState({ data: { status: 'failed', fail_reason: 'Task timeout' } }).message,
       'Task timeout', 't5: MJ 的 fail_reason 兜底');
-    // cancelled 也是终态,归到 failed(界面上都是"没出图")。
-    assert.equal(extractTaskState({ data: { status: 'cancelled' } }).status, 'failed', 't5: cancelled 归 failed');
+    // cancelled 同样是终态,但【与 failed 分开】—— 上游主动取消不是失败,措辞得如实。
+    assert.equal(extractTaskState({ data: { status: 'cancelled' } }).status, 'cancelled', 't5: cancelled 独立成一档');
+    assert.deepEqual(extractTaskState({ data: { status: 'cancelled', result: { images: [{ url: ['https://a/1.png'] }] } } }).urls,
+      [], 't5: cancelled 是终态,不交出 url');
     assert.equal(extractTaskState({ data: { status: 'FAILED' } }).status, 'failed', 't5: 状态大小写不敏感');
+    assert.equal(extractTaskState({ data: { status: 'CANCELLED' } }).status, 'cancelled', 't5: cancelled 也大小写不敏感');
 
     // ④ 非终态一律 processing(含未知值),且不带出半成品 url。
     for (const s of ['processing', 'pending', 'submitted', 'queued', 'SOMETHING_NEW', '', undefined]) {
@@ -221,7 +227,41 @@ try {
     assert.equal(extractTaskState({ data: { status: 'processing', progress: -5 } }).progress, 0, 't5: 下越界夹到 0');
     assert.equal(extractTaskState({ data: { status: 'processing', progress: 66.6 } }).progress, 67, 't5: 小数取整');
 
-    // ⑥ 非法输入不抛(上游可以回任何东西)。
+    // ⑥【DoS 上限】上游说几张就是几张 —— 不封死的话去重的 includes 退化成 O(n²):
+    // 实测 10 万条链接(响应体仅 3.6MB,远在 MAX_RESPONSE_BYTES 之内)让单进程后端同步
+    // 冻住 30 秒,这发生在任何下载【之前】,现有的体积闸与下载闸一个都拦不住;拿到之后
+    // 还要逐张下载。上限必须在拍平循环里 break —— 事后 slice 时 O(n²) 已经跑完了。
+    {
+      assert.equal(MAX_TASK_IMAGES, 16, 't5: 上限 16(MJ 实测 4 张的四倍余量)');
+      const big = {
+        data: {
+          status: 'completed',
+          progress: 100,
+          result: { images: [{ url: Array.from({ length: 100_000 }, (_, i) => `https://a.example/${i}.png`) }] },
+        },
+      };
+      const t0 = process.hrtime.bigint();
+      const st = extractTaskState(big);
+      const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+      assert.equal(st.urls.length, MAX_TASK_IMAGES, `t5【上限】:10 万条只取 ${MAX_TASK_IMAGES} 条(实际 ${st.urls.length})`);
+      assert.deepEqual(st.urls[0], 'https://a.example/0.png', 't5: 取的是最前面那些');
+      assert.deepEqual(st.urls[15], 'https://a.example/15.png', 't5: 恰好截到上限');
+      // 上界放得很宽(真实修后实测 0.2ms):只要不是 O(n²) 就必然远在 1s 之内,
+      // 卡太紧会在慢机器上 flaky,卡这么松仍能把 30 秒那种退化钉死。
+      assert.ok(ms < 1000, `t5【不许 O(n²)】:10 万条必须毫秒级返回(实际 ${ms.toFixed(1)}ms —— 事后 slice 就会退化成秒级)`);
+      // 跨 images 条目累计也要封死(不是每条各给 16 张)。
+      const spread = extractTaskState({
+        data: {
+          status: 'completed',
+          result: {
+            images: Array.from({ length: 50 }, (_, g) => ({ url: Array.from({ length: 50 }, (_, i) => `https://a.example/${g}-${i}.png`) })),
+          },
+        },
+      });
+      assert.equal(spread.urls.length, MAX_TASK_IMAGES, 't5【上限】:2500 条分散在 50 组里也只取 16 条');
+    }
+
+    // ⑦ 非法输入不抛(上游可以回任何东西)。
     for (const bad of [null, undefined, {}, { data: null }, { data: [] }, 'x', 42, [1, 2]]) {
       const st = extractTaskState(bad);
       assert.equal(st.status, 'processing', `t5: 垃圾输入当非终态(${JSON.stringify(bad)})`);
@@ -336,6 +376,36 @@ try {
         { fetch: scriptedFetch([reply(200, { data: { status: 'failed' } })]), sleep: fakeSleep(), now: () => 0 },
       );
       assert.match(noWhy.error, /上游未给出原因/, 't7: 上游不说原因时也有人话');
+
+      // 上游主动取消也停,但不许说成"失败"(常见于敏感词拦截后的自动退款)。
+      const cx = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
+        {
+          fetch: scriptedFetch([reply(200, { data: { status: 'cancelled', fail_reason: 'Banned prompt detected' } })]),
+          sleep: fakeSleep(),
+          now: () => 0,
+        },
+      );
+      assert.match(cx.error, /上游任务已取消/, 't7【文案】:cancelled 如实说"已取消"');
+      assert.ok(!/失败/.test(cx.error), `t7: 不许把取消说成失败(实际 ${cx.error})`);
+      assert.match(cx.error, /Banned prompt detected/, 't7: 取消原因照样带上');
+    }
+
+    // ⑤ 上游谎报张数:pollTask 交给下载分支的链接数必须已经被封死在上限之内。
+    {
+      const many = {
+        code: 200,
+        data: {
+          status: 'completed',
+          result: { images: [{ url: Array.from({ length: 5000 }, (_, i) => `https://a.example/${i}.png`) }] },
+        },
+      };
+      const out = await pollTask(
+        { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
+        { fetch: scriptedFetch([reply(200, many)]), sleep: fakeSleep(), now: () => 0 },
+      );
+      assert.equal(out.urls.length, MAX_TASK_IMAGES,
+        `t7【上限贯通】:5000 条到 pollTask 出口只剩 ${MAX_TASK_IMAGES} 条(实际 ${out.urls.length})`);
     }
 
     // ③ 超时:到 15 分钟上限判死,文案要说明平台侧可能仍在跑(否则用户以为白花钱)。
@@ -377,7 +447,7 @@ try {
       assert.equal(n, 1, 't7: 不再重试');
     }
 
-    // ⑤ 抖动不判死 / 确定性错误判死。
+    // ⑥ 抖动不判死 / 确定性错误判死。
     {
       // 5xx、429、网络异常各一次后成功 —— 任务在上游照跑,单次查不到不该毙掉整个任务。
       const doFetch = scriptedFetch([
@@ -424,7 +494,7 @@ try {
       assert.match(empty.error, /已完成但没有返回可用的图片链接/, 't7: 完成但无图有专门文案');
     }
 
-    // ⑥ 密钥绝不外泄:上游把 Authorization 回显进错误正文时必须被剥掉。
+    // ⑦ 密钥绝不外泄:上游把 Authorization 回显进错误正文时必须被剥掉。
     {
       const leak = await pollTask(
         { taskId: TASK_ID, provider: PROVIDER, signal: new AbortController().signal },
@@ -438,7 +508,7 @@ try {
       assert.match(leak.error, /\*\*\*/, 't7: 已被 redactKey 打码');
     }
 
-    // ⑦ 入参非法不抛,回可读错误(taskId 空 / baseURL 空)。
+    // ⑧ 入参非法不抛,回可读错误(taskId 空 / baseURL 空)。
     {
       for (const [bad, why] of [[{ baseURL: '', apiKey: KEY }, '空 baseURL'], [null, 'taskId 空']]) {
         const out = await pollTask(
@@ -467,8 +537,10 @@ try {
     assert.match(poll, /\.\.\.proxy/, 't8: 轮询走 provider 自己的代理');
     assert.match(poll, /AbortSignal\.any\(\[signal/, 't8: 轮询可被取消,且单次查询有超时');
     assert.match(src, /TASK_POLL_DEADLINE_MS = 15 \* 60 \* 1000/, 't8: 15 分钟本地上限写在常量里');
-    assert.match(src, /TASK_POLL_INTERVAL_MS = Number\(process\.env\.CGUI_IMAGE_TASK_POLL_INTERVAL_MS\) \|\| 5_000/,
-      't8: 5s 轮询间隔写在常量里(仅允许单测经环境变量下调)');
+    assert.match(src, /TASK_POLL_INTERVAL_MS = Math\.max\(200, Number\(process\.env\.CGUI_IMAGE_TASK_POLL_INTERVAL_MS\) \|\| 5_000\)/,
+      't8: 5s 轮询间隔写在常量里,下调口有 200ms 地板(0.1 这类小正数会变成紧轮询打上游)');
+    assert.match(poll, /st\.status === 'failed' \|\| st\.status === 'cancelled'/, 't8: 两种终态都停,但措辞分开');
+    assert.match(poll, /上游任务已取消/, 't8【文案】:上游主动取消不说成"失败"');
 
     const runner = src.slice(runnerStart, src.indexOf("router.post('/image/generate'", runnerStart));
     // 顺序契约:先试同步取图,取不到才试任务制 —— 反过来会让同步响应绕道轮询。
@@ -483,6 +555,44 @@ try {
     assert.equal(count(runner, /redirect: 'manual'/g), 2, 't8: runner 内仍是两处 redirect(生成 POST + 下载)');
     assert.equal(count(runner, /await assertPublicBaseURL\(/g), 1, 't8: 下载链接的 SSRF 复检仍在 runner 内');
     assert.equal(count(runner, /readCapped\(/g), 2, 't8: runner 内仍是两处限量读');
+
+    // 上限必须是循环里的 break —— 事后 slice 时 O(n²) 的去重已经跑完了(30 秒冻结照旧)。
+    const proto = readFileSync(join(REPO, 'server/utils/image-protocols.js'), 'utf8');
+    assert.match(proto, /export const MAX_TASK_IMAGES = 16;/, 't8: 张数上限写成常量');
+    assert.match(proto, /urls\.push\(u\);\s*\n\s*if \(urls\.length >= MAX_TASK_IMAGES\) break capped;/,
+      't8【必须 break】:超限在拍平循环里断,不许改成事后 slice');
+    assert.ok(!/\.slice\(0, MAX_TASK_IMAGES\)/.test(proto), 't8: 不许出现事后 slice 的写法');
+  }
+
+  // ───── 8b. 轮询间隔地板:环境变量填 0.1 也不许变成紧轮询(子进程实测,不是只看源码) ─────
+  {
+    const { execFileSync } = await import('node:child_process');
+    // 子进程里把 env 设成 0.1,注入 sleep 观察真正等的毫秒数;fetch 一次就回终态,不打网络。
+    const probe = `
+      process.env.HOME = ${JSON.stringify(TMP_HOME)};
+      process.env.USERPROFILE = ${JSON.stringify(TMP_HOME)};
+      const { pollTask } = await import(${JSON.stringify(join(REPO, 'server/routes/image.js'))});
+      let waited = null;
+      await pollTask(
+        { taskId: 't', provider: { baseURL: 'https://a.co/v1', apiKey: 'k', proxyUrl: '' }, signal: new AbortController().signal },
+        {
+          sleep: async (ms) => { waited = ms; },
+          now: () => 0,
+          fetch: async () => ({
+            status: 200, ok: true, headers: new Map(), body: {
+              cancel: async () => {},
+              async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ data: { status: 'failed' } })); },
+            },
+          }),
+        },
+      );
+      console.log(String(waited));
+    `;
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', probe], {
+      env: { ...process.env, CGUI_IMAGE_TASK_POLL_INTERVAL_MS: '0.1' },
+      encoding: 'utf8',
+    }).trim();
+    assert.equal(out, '200', `t8b【地板】:env 填 0.1 时实际仍等 200ms(实际 ${out}ms —— 紧轮询会把用户自己的中转站打崩)`);
   }
 
   // ───────────── 9. 前端源码:协议选项与三条"不说就会被误解"的文案 ─────────────
