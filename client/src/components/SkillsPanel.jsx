@@ -27,8 +27,12 @@ function SkillCopyBtn({ name }) {
   );
 }
 
-export function SkillsPanel() {
-  const [tab, setTab] = useState('local');            // 'local' | 'import' | 'archived'
+// r73 统一「扩展市场」复用本组件的市场页,不复制一份技能列表:
+//   marketOnly=true  → 只留「导入」页(本机/已归档仍由原 Skill 面板管,发现层才合并)
+//   marketQuery      → 由外部统一搜索框驱动市场检索(受控;不传 = 用自带搜索框,行为原样)
+// 两个 prop 都不传时,本组件与 r71 完全一致。
+export function SkillsPanel({ marketOnly = false, marketQuery }) {
+  const [tab, setTab] = useState(marketOnly ? 'import' : 'local'); // 'local' | 'import' | 'archived'
   const ms = useMultiSelect();
   const [local, setLocal] = useState([]);
   const [loadingLocal, setLoadingLocal] = useState(true);
@@ -45,7 +49,8 @@ export function SkillsPanel() {
   const [loadingOff, setLoadingOff] = useState(false);
   const [offErr, setOffErr] = useState('');
   // r71 市场浏览层:搜索 / 安装状态分面 / 排序。都只作用于已加载的列表,不触发网络。
-  const [mq, setMq] = useState('');                   // 市场搜索词(id + 名称 + 描述)
+  const [ownMq, setMq] = useState('');                // 市场搜索词(id + 名称 + 描述)
+  const mq = marketQuery === undefined ? ownMq : marketQuery; // 统一市场里由外部搜索框接管
   const [instFilter, setInstFilter] = useState('all'); // 'all' | 'installed' | 'available'
   const [sortBy, setSortBy] = useState('name');        // 'name' | 'name-desc' | 'source'
   const [srcCounts, setSrcCounts] = useState({});      // { [sourceId]: n } —— 只记真加载到的源,没拉过的不显示计数
@@ -393,9 +398,11 @@ export function SkillsPanel() {
   return (
     <div className="px-4 py-4 space-y-4 overflow-y-auto h-full">
       <div className="flex items-center gap-1.5">
-        {tabBtn('local', '本机 Skill', local.length)}
-        {tabBtn('import', '导入', null)}
-        {tabBtn('archived', '已归档', archived.length)}
+        {!marketOnly && (<>
+          {tabBtn('local', '本机 Skill', local.length)}
+          {tabBtn('import', '导入', null)}
+          {tabBtn('archived', '已归档', archived.length)}
+        </>)}
         <div className="ml-auto flex items-center gap-1">
           {((tab === 'local' && local.length > 0) || (tab === 'import' && installedIds.length > 0)) &&
             <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={13} />}
@@ -624,6 +631,7 @@ export function SkillsPanel() {
 
           {/* r71 浏览控件:搜索 + 安装状态分面 + 排序。三者都只筛已加载的列表,不发请求。
               条目真实字段只有 id/名称/描述/版本/已安装,所以没有分类与热度维度,排序也只有名称与来源。 */}
+          {marketQuery === undefined && (
           <div className="relative">
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-ghost" />
             <input
@@ -631,6 +639,7 @@ export function SkillsPanel() {
               placeholder="搜索市场技能（名称 / 描述，多个词需全部命中）..."
               className="w-full bg-canvas border border-canvas-deep rounded-lg pl-8 pr-3 py-1.5 text-xs text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body" />
           </div>
+          )}
           <div className="flex items-center gap-1.5 flex-wrap text-[11px] font-body">
             {[['all', '全部', marketStats.total], ['available', '未安装', marketStats.available], ['installed', '已安装', marketStats.installed]].map(([v, label, n]) => (
               <button key={v} data-testid="market-installed-filter" data-value={v} onClick={() => setInstFilter(v)}

@@ -49,6 +49,7 @@ import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel, ChatBackgroundCard } from './components/SettingsPanel.jsx';
 import { FileExplorerPanel } from './components/FileExplorerPanel.jsx';
 import { SkillsPanel } from './components/SkillsPanel.jsx';
+import { MarketPanel } from './components/MarketPanel.jsx';
 import { GuideTour } from './components/GuideTour.jsx';
 import { useResizable as useResizableHook, Splitter as SplitterCmp } from './hooks/useResizable.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
@@ -92,7 +93,7 @@ import {
   Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
-  Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star,
+  Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star, Puzzle,
   Image as ImageIcon, Paperclip,
 } from './components/Icon.jsx';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
@@ -873,6 +874,10 @@ const PANEL_MAP = {
   memory: { label: 'CLAUDE.md 指令', icon: BookText, component: MemoryPanel },
   // r16-3 生图:自定义生图 provider(独立配置,不写 ~/.claude/settings.json)
   image: { label: '生图（自定义生图 provider）', icon: ImageIcon, component: ImagePanel },
+  // r73 统一扩展市场:三类扩展的发现层(Skill / 插件 / MCP)。既有三个入口全部保留,
+  // 这里只并"逛与装"这半边。位置排在 settings 之前:Cmd/Ctrl+1..9 按前 9 项取,
+  // 插在此处不改动任何既有快捷键(image 本就在 9 之外,settings 恒为 0)。
+  market: { label: '扩展市场（Skill · 插件 · MCP 浏览与安装）', icon: Puzzle, component: MarketPanel },
   // 文案改名(用户指定,仅显示名,id/组件/事件不动):坞入口叫「设置」,本面板入口叫「通用」。
   settings: { label: '通用', icon: Settings, component: SettingsPanel },
 };
@@ -951,7 +956,7 @@ function PaneCountPicker() {
 // 点 rail 图标后不收起:方便连续切换面板。持久展开也根治了导引 panel 步骤间 rail 被点暗区/外部收起反复开合的闪烁。
 const PANEL_SHORT = {
   files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
-  changes: '审查', mcp: '工具', skills: '技能', memory: '指令', image: '生图', settings: '通用',
+  changes: '审查', mcp: '工具', skills: '技能', memory: '指令', image: '生图', market: '市场', settings: '通用',
 };
 function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate, attentionCount = 0 }) {
   const [railOpen, setRailOpen] = useState(false);
@@ -998,7 +1003,7 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate, atte
       <button
         data-testid="panel-dock-toggle"
         onClick={() => setRailOpen((v) => !v)}
-        title={`设置${activeMeta ? ` — 当前:${activeMeta.label}` : ''}（分屏 + 文件 / 审查 / 监控 / Agent / 用量 / 进程 / 工具 / 技能 / 指令 / 通用。Cmd/Ctrl+1..9、0 直达）`}
+        title={`设置${activeMeta ? ` — 当前:${activeMeta.label}` : ''}（分屏 + 文件 / 审查 / 监控 / Agent / 用量 / 进程 / 工具 / 技能 / 指令 / 生图 / 市场 / 通用。Cmd/Ctrl+1..9、0 直达）`}
         className={`relative px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${
           railOpen || activeMeta ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'
         }`}
