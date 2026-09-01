@@ -6,7 +6,6 @@
 //      · 改动文件名单锁(git diff 白名单),越界即红
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -58,27 +57,8 @@ assert.ok(/disabled=\{loadingOff \|\| busy\.size > 0 \|\| notInstalled\.length =
 // 浏览层不许新增任何"点一下就执行"的通道:市场条目是纯文本清单
 assert.ok(!/dangerouslySetInnerHTML|eval\(|new Function/.test(panel), '市场组件不得引入任何执行通道');
 
-// ── ③ 改动文件名单锁 ──────────────────────────────────────────────────
-// 本轮只允许动这三个文件。git 不可用(打包产物里跑)则跳过,不是失败。
-let changed = null;
-try {
-  const git = (...a) => execFileSync('git', a, { cwd: ROOT, encoding: 'utf-8' }).split('\n').map((s) => s.trim()).filter(Boolean);
-  const base = git('merge-base', 'HEAD', 'master')[0];
-  // 已跟踪的改动 + 未跟踪的新文件(新增的纯函数模块与本测试都属后者,只看 diff 会漏)。
-  // worktree 里的 node_modules 是手工软链、未被 .gitignore 命中,排掉。
-  changed = [...new Set([...git('diff', '--name-only', base), ...git('ls-files', '--others', '--exclude-standard')])]
-    .filter((f) => !f.startsWith('node_modules'));
-} catch { /* 非 git 环境:跳过这一节 */ }
-if (changed) {
-  const ALLOW = new Set([
-    'client/src/components/SkillsPanel.jsx',
-    'client/src/utils/skillMarket.js',
-    'tests/unit/check-r71-market-facets.mjs',
-    'tests/unit/check-r71-market-wiring.mjs',
-  ]);
-  const stray = changed.filter((f) => !ALLOW.has(f));
-  assert.deepEqual(stray, [], `本轮越界改动了不该动的文件(安装/服务端/genui 都在禁区):${stray.join(', ')}`);
-  assert.ok(!changed.includes('server/routes/skills.js'), '服务端安装路由必须零改动');
-}
+// ③(已拆)r71 开发期曾有"改动文件名单锁"(diff 对 merge-base 必须落在 4 文件白名单),
+// 属该轮的一次性审查纪律——合并进 master 后它在任何后续分支/带在制品的工作区必红
+// (r72 首个撞上)。审查价值已随 r71 判官放行兑现,永久单测只留上面的内容锁。
 
-console.log(`r71 市场接线审计通过${changed ? `(改动文件 ${changed.length} 个,均在白名单内)` : '(跳过 git 名单锁)'}`);
+console.log('r71 市场接线审计通过');
