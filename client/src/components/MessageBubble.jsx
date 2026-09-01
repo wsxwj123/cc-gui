@@ -131,7 +131,7 @@ function UserAvatar() {
     </>
   );
 }
-import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
+import { ModelBadge, ProviderAvatar, AssistantName } from './ModelBadge.jsx';
 import { ToolCallCard } from './ToolCallCard.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { thinkingLabel } from '../utils/streamStatus.js';
@@ -465,7 +465,7 @@ export function MessageBubble({ message, onRollback, onFork }) {
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1.5">
-            <span className="text-[13px] font-medium text-ink font-body">Claude</span>
+            <AssistantName model={message.model} />
             {message.model && <ModelBadge model={message.model} compact />}
             <span className="text-[11px] text-ink-faint font-mono">{formatTime(message.timestamp)}</span>
             <div className="flex-1" />

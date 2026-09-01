@@ -4,7 +4,7 @@ import {
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
   Globe, Edit3, Loader2, RotateCcw, Bot, GitBranch
 } from './Icon.jsx';
-import { ModelBadge, ProviderAvatar } from './ModelBadge.jsx';
+import { ModelBadge, ProviderAvatar, AssistantName } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { BashCard } from './tools/BashCard.jsx';
@@ -789,7 +789,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
         <div className="flex-1 min-w-0">
           {/* Header */}
           <div className="flex items-center gap-2 mb-1.5 min-h-[34px]">
-            <span className="text-[13px] font-medium text-ink font-body">Claude</span>
+            <AssistantName model={turn.model} />
             {turn.model && <ModelBadge model={turn.model} compact />}
             <span className="text-[11px] text-ink-faint font-mono">{formatTime(turn.timestamp)}</span>
             <div className="flex-1" />

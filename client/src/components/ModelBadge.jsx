@@ -1,4 +1,6 @@
 import React from 'react';
+import { useStore } from '../stores/sessionStore.js';
+import { resolveAssistantName } from '../utils/providerList.js';
 
 const MODEL_STYLES = {
   opus:     { bg: '#EDE9FE', fg: '#6D28D9', border: '#DDD6FE', label: 'Opus',     provider: 'anthropic' },
@@ -105,6 +107,20 @@ export function ProviderAvatar({ model, size = 28, className = '', thinking = fa
       </div>
     </div>
   );
+}
+
+/**
+ * r76:助手气泡头的名字。官方端点恒「Claude」;走第三方中转时显示用户给该
+ * provider 起的名字。解析链在 utils/providerList.js 的 resolveAssistantName
+ * (纯函数,有单测);这里只负责把 store 里的三样输入喂给它 —— 两个渲染点
+ * (TurnBubble / MessageBubble)共用同一个组件,不会再出现"改一处漏一处"。
+ */
+export function AssistantName({ model }) {
+  const providers = useStore((s) => s.providerRows);
+  const activeName = useStore((s) => s.providerName || '');
+  const activeOfficial = useStore((s) => (s.currentProvider?.providerHint || 'anthropic') === 'anthropic');
+  const name = resolveAssistantName({ model, providers, activeName, activeOfficial });
+  return <span className="text-[13px] font-medium text-ink font-body">{name}</span>;
 }
 
 function getModelStyle(model) {

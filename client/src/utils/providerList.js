@@ -64,3 +64,56 @@ export const SOURCE_BADGE = {
   openai: '导入·代理',
   custom: '自定义',
 };
+
+// ── r76:助手气泡头的名字 ─────────────────────────────────────────
+// 官方端点恒显 Claude;走第三方中转时显示【用户在设置里给该 provider 起的名字】
+// (p.name,不是内部 id / providerHint)。头像不参与:providerAvatar() 恒返回
+// cc-gui 自有标识(与 provider 无关),所以名字只能自己解析。
+export const OFFICIAL_ASSISTANT_NAME = 'Claude';
+
+// 模型 id 归一:去掉 [1m] 之类后缀 + 大小写。清单里存的和 jsonl 里回来的常差这一层。
+const normModel = (m) => String(m || '').replace(/\[.*?\]/g, '').trim().toLowerCase();
+
+// 一行 provider 的显示名;官方行恒 Claude。名字为空 → null(交给下一级回落)。
+function rowDisplayName(p) {
+  if (!p) return null;
+  if (p.source === 'official' || p.category === 'official') return OFFICIAL_ASSISTANT_NAME;
+  const n = String(p.name || '').trim();
+  if (!n) return null;
+  // 用户把中转项就命名成 Anthropic 时不制造两种叫法。
+  return n.toLowerCase() === 'anthropic' ? OFFICIAL_ASSISTANT_NAME : n;
+}
+
+/**
+ * 解析一条助手消息该署谁的名字。纯函数(全部入参为数据),四级优先级:
+ *   ① 官方端点下的 claude-* 模型 → 'Claude'(官方订阅/官方 API 恒 Claude);
+ *   ② model id 在【唯一一个】已配置 provider 的模型清单里命中 → 该 provider 的 name
+ *      (命中 0 个或 ≥2 个都算没确证,继续往下 —— 宁可回落也不标错名);
+ *   ③ 当前激活 provider 的显示名(这条消息正在该 provider 下渲染);
+ *   ④ 'Claude'。
+ * @param {object}   a
+ * @param {string}   a.model          该消息的 model id(jsonl 里的原值,可为空)
+ * @param {Array}    a.providers      已配置 provider 行(mergeProviderLists 的输出)
+ * @param {string}   a.activeName     当前激活 provider 的显示名(/api/model 的 provider)
+ * @param {boolean}  a.activeOfficial 当前是否官方端点(providerHint === 'anthropic')
+ */
+export function resolveAssistantName({ model = '', providers = [], activeName = '', activeOfficial = true } = {}) {
+  const id = normModel(model);
+  // ① 官方端点 + claude 系模型 = 确证官方。必须排在 ② 前面,否则某个中转 provider
+  //    的清单里也写了 claude-opus-5 时会把官方消息标成它的名字。
+  if (activeOfficial && id.startsWith('claude')) return OFFICIAL_ASSISTANT_NAME;
+  // ② 唯一命中某个 provider 的模型清单
+  if (id && Array.isArray(providers)) {
+    const hits = providers.filter((p) => Array.isArray(p?.models) && p.models.some((m) => normModel(m) === id));
+    if (hits.length === 1) {
+      const name = rowDisplayName(hits[0]);
+      if (name) return name;
+    }
+  }
+  // ③ 当前激活 provider
+  if (activeOfficial) return OFFICIAL_ASSISTANT_NAME;
+  const active = String(activeName || '').trim();
+  if (active && active.toLowerCase() !== 'anthropic') return active;
+  // ④ 兜底
+  return OFFICIAL_ASSISTANT_NAME;
+}

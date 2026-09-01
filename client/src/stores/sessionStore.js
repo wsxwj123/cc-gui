@@ -5,6 +5,7 @@ import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
 import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState, queueKeyFor, isDraftQueueKey, draftQueueProjectHash } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList, mergeHiddenOrder } from '../utils/projectPanel.js';
+import { mergeProviderLists } from '../utils/providerList.js';
 import { attachmentSidecarNotice, draftSidecarBindingsForSessions, recoverAttachmentSidecarBindings } from '../utils/attachments.js';
 
 const recoverDraftSidecarsFromSessions = (sessions, projectHash) => (
@@ -433,6 +434,10 @@ export const useStore = create((set, get) => ({
   // CLI's Claude-shaped API calls to deepseek/mimo/etc, this tells us the
   // real upstream so pricing.js can charge correctly. Defaults to anthropic.
   currentProvider: { providerHint: 'anthropic', baseUrl: '', model: null },
+  // r76:已配置 provider 行(mergeProviderLists 的输出,含 name + models[])。
+  // 助手气泡头按消息的 model id 在这里找归属 provider。恒为数组(选择器直取,
+  // 不许写 `|| []` —— 新引用会触发 React #185 白屏)。
+  providerRows: [],
   // CLI session knobs. Persisted to localStorage so they survive reload.
   effort: (() => { try { return (typeof localStorage !== 'undefined' && localStorage.getItem('cgui-effort')) || ''; } catch { return ''; } })(),
   addDirs: readLsArr('cgui-add-dirs'),
@@ -2255,6 +2260,14 @@ export const useStore = create((set, get) => ({
       if (data && data.providerHint) {
         set({ currentProvider: data });
       }
+    } catch {}
+    // r76:顺带把已配置 provider 行(名字 + 模型清单)拉进 store,供助手气泡头解析
+    // 该署哪个名字。搭在 fetchProvider 上是为了不新增调用点 —— 它的四个触发口
+    // (挂载 / cgui:provider-change / ws 重连 / 回前台)正好就是 provider 可能变的全部时机。
+    try {
+      const r = await fetch('/api/providers');
+      const d = await r.json();
+      set({ providerRows: mergeProviderLists(d || {}) });
     } catch {}
   },
 
