@@ -20,6 +20,8 @@
 //   ⑥ 速查段把 keyvalue 的 pairs 写回 items → t1-f(a) 红(实测:keyvalue.items)
 //   ⑦ 速查段把 code 的 lang 写成 language → t1-f(a) 红(实测:code.language)
 //   ⑧ 删掉速查段里 quiz 那一行 → t1-f(c) 红(实测:quiz)
+//   ⑨ 教学段删掉"radio 带 group 进入聚合模式"那句 → t1-g(a) 红(实测:进入聚合模式 等)
+//   ⑩ 保留短语但删掉"须另配 submit 汇总" → t1-g(b) 红
 // Run: node tests/unit/check-genui-section-text.mjs
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -109,9 +111,10 @@ const TEXT = GENUI_SECTION_TEXT;
 // ── t1-e 体量:每回合每会话都在烧 token,只许放"不放就出错"的东西 ──────────
 // r67 加了字段速查(~2.4KB):不给字段名模型就猜,猜错 = 整节点被静默丢弃。
 // 速查段单独设上限,防止有人把技能里的取值全集/示例一路抄回常驻段。
+// r72 又加了交互回传语义(~360B):group/action 的行为不写清楚 = 模型写出死交互。
 {
   const bytes = Buffer.byteLength(TEXT, 'utf8');
-  assert.ok(bytes < 5600, `t1-e: 教学段 ${bytes} 字节,超了 5600 —— 细节该进技能不该进常驻注入`);
+  assert.ok(bytes < 5700, `t1-e: 教学段 ${bytes} 字节,超了 5700 —— 细节该进技能不该进常驻注入`);
   assert.ok(bytes > 1200, `t1-e: 教学段只有 ${bytes} 字节,大概率被截断/写漏了`);
   const cheatBytes = Buffer.byteLength(TEXT.slice(TEXT.indexOf('\n字段速查')), 'utf8');
   assert.ok(cheatBytes < 2600, `t1-e: 字段速查段 ${cheatBytes} 字节,超了 2600 —— 只留必填+易错字段,装饰性可选字段留给技能`);
@@ -186,6 +189,52 @@ const TEXT = GENUI_SECTION_TEXT;
   const uncovered = all.filter((t) => !NO_FIELDS.has(t) && !seen.has(t));
   assert.deepEqual(uncovered, [],
     `t1-f: 这些 type 在速查段里没有签名(模型只能猜字段名):${uncovered.join(',')}`);
+}
+
+// ── t1-g 交互回传语义:签名在场但不说回传规则,模型照样写出死交互 ─────────────
+// r72 根因(用户真机第三案):模型写 {"type":"radio","group":"chartType","options":[…]}
+// 让用户"选择图表类型",无 action、全块无 submit —— 运行时没 bug(forms.tsx:带 group
+// 走聚合模式,选择只本地记录、不往返),但用户点选【永远没反应】。缺口在这一段:
+// r67 把 radio/select 的【字段签名】提上来了,却没把 SKILL.md 里跟着签名的【行为
+// 说明】一起提上来,模型把 group 当普通分组名用 = 死交互。
+// 派生方式同 t1-f:真相源仍是 SKILL.md,这里只钉"它写在 button / radio 签名后面的
+// 行为说明,常驻段必须原样带着"——那两条说明就是回传语义本身(禁用态 / 聚合模式)。
+{
+  const skill = read('server', 'assets', 'builtin-skills', 'cgui-ui', 'SKILL.md');
+  // 签名行形如 `- radio：\`{…}\` — 带 \`group\` 进入聚合模式：…`,「—」后是行为说明。
+  const behaviorOf = (type) => {
+    const line = skill.split('\n').find((l) => l.startsWith(`- ${type}：`));
+    assert.ok(line, `t1-g: SKILL.md 里找不到 ${type} 的签名行 —— 真相源变了,先修本测试的取法`);
+    const m = line.match(/—\s*(.+)$/);
+    assert.ok(m, `t1-g: SKILL.md 的 ${type} 行没有「—」后的行为说明 —— 真相源变了`);
+    return m[1].replace(/\*\*/g, '');
+  };
+  // 只取 button / radio:这两条说明讲的就是"点了会不会回传给你"。select 那条讲的是
+  // 占位符(与回传无关),slider 讲防抖,都不在本锁范围内。
+  const phrases = [];
+  for (const type of ['button', 'radio']) {
+    // 中文短语(≥3 字)作比对单位:标点与反引号天然断句,`group`/`action` 这类
+    // 代码标记不入列(它们由下面 (b) 的结构断言单独管)。
+    for (const m of behaviorOf(type).matchAll(/[一-鿿]{3,}/g)) phrases.push(m[0]);
+  }
+  assert.ok(phrases.length >= 4,
+    `t1-g: 只从 SKILL.md 解析出 ${phrases.length} 条行为说明短语 —— 真相源格式变了,先修取法`);
+
+  // (a) 主锁:SKILL.md 写在签名后的每条行为说明,常驻段必须原样在场
+  const dropped = phrases.filter((p) => !TEXT.includes(p));
+  assert.deepEqual(dropped, [],
+    `t1-g: 这些行为说明只躺在 SKILL.md 里、没进常驻段(模型每回合读到的是常驻段):${dropped.join(' / ')}`);
+
+  // (b) 结构锁:三条规则各自的"必须同句出现"关系,防止有人把 (a) 的短语拆开摆着
+  //     却丢了因果(如把"进入聚合模式"留下、"须配 submit"删掉)。
+  const rule = TEXT.split('\n').find((l) => l.includes('LOCAL-FIRST'));
+  assert.ok(rule, 't1-g: 找不到 LOCAL-FIRST 规则行 —— 回传语义该写在它里面');
+  assert.match(rule, /group[\s\S]*submit/,
+    't1-g: 必须点明带 `group` 要另配 submit 汇总(否则模型写出"选了没反应"的死交互)');
+  assert.match(rule, /卷子/,
+    't1-g: 必须点明 `group` 只用于卷子(用户实测:模型拿 group 当普通分组名)');
+  assert.match(rule, /不带 `action`[\s\S]*select[\s\S]*(本地|不发)/,
+    't1-g: 必须点明无 action 的 select/checkbox/switch 只是本地状态、不回传');
 }
 
 // ── t2 接线锁:走 chat.js 的真函数(复刻一份等于测一条线上不存在的路径) ────
