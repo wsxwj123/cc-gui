@@ -88,7 +88,12 @@ function inlineComputedStyles(live, clone) {
       if ((p === 'display' && v !== 'none') || (p === 'visibility' && v !== 'hidden')) continue;
       decl += `${p}:${v};`;
     }
-    b[i].setAttribute('style', decl + (b[i].getAttribute('style') ?? ''));
+    // 顺序是命门:原有的 inline style 必须排在**前面**,让求值过的 computed 值压住它。
+    // 反过来写会让 `style="stroke: var(--dsw-static-deepseek-400)"` 这种原始声明赢 ——
+    // 在序列化出去的那份文档里根本没有这个自定义属性,`var()` 求值失败 ⟹ 该属性回到
+    // 初始值,而 stroke 的初始值正是 none。真机验证抓到的形态:环形图只剩灰色轨道,
+    // 彩色扇区全部消失(而柱状/折线因为主要吃 CSS 类,看起来"没问题",更难发现)。
+    b[i].setAttribute('style', (b[i].getAttribute('style') ?? '') + decl);
   }
 }
 
@@ -153,9 +158,12 @@ function barsSvg(node, palette, ink) {
   const n = Math.max(cols.length, 1);
   const slot = (BARS_W - 16) / n;
   const parts = [];
+  // 网格线**画在柱子之上**:屏幕上 .gridline 是绝对定位元素、层叠在静态的柱子上面,
+  // 半透明白线横穿柱身。画在下面会让导出图与屏幕对不上(真机逐色对照抓到这一处)。
+  const grid = [];
   for (const p of [0, 25, 50, 75, 100]) {
     const y = BARS_PLOT_H - (p / 100) * (BARS_PLOT_H - 18);
-    parts.push(`<line x1="8" x2="${BARS_W - 8}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${xml(ink.grid)}" stroke-width="1"/>`);
+    grid.push(`<line x1="8" x2="${BARS_W - 8}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${xml(ink.grid)}" stroke-width="1"/>`);
   }
   cols.forEach((bars, i) => {
     const bw = Math.max(3, (slot - 10) / bars.length);
@@ -168,7 +176,7 @@ function barsSvg(node, palette, ink) {
     parts.push(`<text x="${(8 + i * slot + slot / 2).toFixed(1)}" y="${BARS_PLOT_H + 14}" text-anchor="middle" font-size="11" fill="${xml(ink.label)}">${xml(labels[i] ?? '')}</text>`);
   });
   const h = BARS_PLOT_H + BARS_LABEL_H;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${BARS_W}" height="${h}" viewBox="0 0 ${BARS_W} ${h}" font-family="system-ui,-apple-system,'PingFang SC',sans-serif">${parts.join('')}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${BARS_W}" height="${h}" viewBox="0 0 ${BARS_W} ${h}" font-family="system-ui,-apple-system,'PingFang SC',sans-serif">${parts.join('')}${grid.join('')}</svg>`;
 }
 
 /** charts.tsx 的固定色板(逐字对齐 CHART_COLORS —— 那边是 .tsx,裸 import 进不来)。 */
@@ -194,7 +202,11 @@ export async function nodePngBlob(container, node, { scale = 2 } = {}) {
     }
     throw new Error('图表尚未渲染完成');
   }
-  const svg = container.querySelector('svg');
+  // 工具条自己的图标也是 <svg>,而且柱状图那一支**没有**自己的 SVG —— 裸
+  // querySelector('svg') 会抓到那个 14px 的图标,导出一张 82×82 的按钮图(真机验证抓到)。
+  // 按祖先排除工具条,判据跟着 testid 走,不依赖 DOM 顺序。
+  const svg = [...container.querySelectorAll('svg')]
+    .find((s) => s.closest('[data-testid="genui-export-toolbar"]') === null) ?? null;
   if (svg !== null) return svgToPng(svg, bg, scale);
   if (node?.type === 'chart') {
     const palette = PALETTE_TOKENS.map((t) => usedColor(`var(${t})`, '#4f8ef7'));

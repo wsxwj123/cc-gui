@@ -14,14 +14,18 @@
  * @module genui/host/ExportToolbar
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Copy, Download, Image as ImageIcon } from 'lucide-react';
+// 图标必须走仓内间接层 Icon.jsx(全仓 lucide 唯一出口,check-icon-indirection 守着;
+// 皮肤替换机制也挂在那一层,直连 lucide 的图标换不了皮)。
+import { Check, Copy, Download, Image as ImageIcon } from '../../components/Icon.jsx';
 import { copyText } from '../../utils/clipboard.js';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
 import { buildCopyText, buildCsv, exportFileName, exportPlan } from './export-data.js';
 import { saveExport } from './export-save.js';
 
-const BTN = 'flex h-8 w-8 items-center justify-center rounded-lg border border-canvas-deep bg-canvas/90 '
-  + 'text-ink-muted backdrop-blur-sm transition-colors hover:text-ink hover:bg-canvas-warm '
+// 不用 backdrop-blur-*:全局扁平化把裸磨砂工具类列为红线(check-flat-tokens t5),
+// 而这里本来也不需要 —— 画布色不透明就够压住底下的图形。
+const BTN = 'flex h-8 w-8 items-center justify-center rounded-lg border border-canvas-deep bg-canvas '
+  + 'text-ink-muted transition-colors hover:text-ink hover:bg-canvas-warm '
   + 'disabled:opacity-40 disabled:cursor-default';
 
 function ToolButton({ label, testid, busy, done, icon, onClick }) {
