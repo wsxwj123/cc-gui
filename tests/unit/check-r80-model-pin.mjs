@@ -81,6 +81,26 @@ check('T1i 发送链必须同口径:resolveHistModel 调用点要传官方标志
     'App.jsx 的发送侧 resolveHistModel 未传官方标志 → 显示放行、发送仍判死');
 });
 
+// B1 有三处实现,前两处(routing.js 的两个纯函数)由 T1a/T1f 行为咬死,第三处是
+// App.jsx 的 historyModel —— 那条链的手写强化版(历史环扫 messages,routing.js 那份
+// 拿不到 messages)。它正是档 H 症状的直接显示面:**会话内的模型徽章**。把这两处
+// guardOfficial 豁免 revert 掉,其余 335 个测试全绿,就能静默回归成"顶栏 chip 显示
+// sonnet、会话内徽章显示 fable"的分裂。纯函数测不到它,只能钉源码形态。
+check('T1j 徽章 fresh():epoch 门控带官方豁免', () => {
+  assert.match(app, /const fresh = \(m\) => !providerEpoch \|\| guardOfficial \|\|/,
+    'App.jsx historyModel 的 fresh() 丢了 guardOfficial → 官方下老会话徽章又掉回全局默认');
+});
+check('T1k 徽章会话元数据分支:epoch 门控带官方豁免', () => {
+  assert.match(app, /selectedSession\?\.model && \(!providerEpoch \|\| guardOfficial\)/,
+    'messages 未加载时走的是这一支,丢了豁免 → 切入会话瞬间徽章闪回全局默认');
+});
+check('T1l guardOfficial 必须声明在 historyModel 之前(TDZ 红线)', () => {
+  const decl = app.indexOf('const guardOfficial = useStore(');
+  const use = app.indexOf('const historyModel = useMemo(');
+  assert.ok(decl > 0 && use > 0 && decl < use,
+    'guardOfficial 声明被移回 useMemo 之后 = 渲染期 TDZ 整页白屏(本仓烧过四个版本)');
+});
+
 // ── T2(A1 接线锁):Home 下模型选择器必须有落盘键 ──────────────────────
 // 只改模型这一颗。力度选择器的 null 分支 setEffortFor(null,e) 本来就落盘(写全局
 // cgui-effort),把它也改成 pin 键会把"在 Home 设全局默认力度"变成一次性 pin = 回归。
