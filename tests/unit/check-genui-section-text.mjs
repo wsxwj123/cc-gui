@@ -111,10 +111,10 @@ const TEXT = GENUI_SECTION_TEXT;
 // ── t1-e 体量:每回合每会话都在烧 token,只许放"不放就出错"的东西 ──────────
 // r67 加了字段速查(~2.4KB):不给字段名模型就猜,猜错 = 整节点被静默丢弃。
 // 速查段单独设上限,防止有人把技能里的取值全集/示例一路抄回常驻段。
-// r72 又加了交互回传语义(~360B):group/action 的行为不写清楚 = 模型写出死交互。
+// r72 又加了交互回传语义(~400B):group/action 的行为不写清楚 = 模型写出死交互。
 {
   const bytes = Buffer.byteLength(TEXT, 'utf8');
-  assert.ok(bytes < 5700, `t1-e: 教学段 ${bytes} 字节,超了 5700 —— 细节该进技能不该进常驻注入`);
+  assert.ok(bytes < 5800, `t1-e: 教学段 ${bytes} 字节,超了 5800 —— 细节该进技能不该进常驻注入`);
   assert.ok(bytes > 1200, `t1-e: 教学段只有 ${bytes} 字节,大概率被截断/写漏了`);
   const cheatBytes = Buffer.byteLength(TEXT.slice(TEXT.indexOf('\n字段速查')), 'utf8');
   assert.ok(cheatBytes < 2600, `t1-e: 字段速查段 ${cheatBytes} 字节,超了 2600 —— 只留必填+易错字段,装饰性可选字段留给技能`);
