@@ -5,6 +5,12 @@ import { Download, Check, Loader2, RefreshCw, AlertTriangle, CloudDownload, Exte
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './MultiSelect.jsx';
 import { copyText } from '../utils/clipboard.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { ALL_SOURCES, marketKey, filterMarket, sortMarket, countBySource, countInstalled } from '../utils/skillMarket.js';
+
+// r71 长列表:单源就有 864 条(composio),整列表一次性布局+绘制会卡。用浏览器原生的
+// content-visibility 跳过视口外条目的渲染开销,contain-intrinsic-size 给个占位高度让
+// 滚动条长度稳定。不引虚拟列表依赖,也不改 DOM 结构(选中/展开/测试定位都不受影响)。
+const ROW_CV = { contentVisibility: 'auto', containIntrinsicSize: 'auto 64px' };
 
 // CM-1:复制技能调用名。纯图标按钮(斜杠名与条目真名常重复,文本移入 tooltip),点击复制,复制后短暂打勾。
 function SkillCopyBtn({ name }) {
@@ -31,12 +37,19 @@ export function SkillsPanel() {
   const [query, setQuery] = useState('');             // CM-1 本机 skill 搜索(名称+描述)
 
   const [sources, setSources] = useState([]);
+  const sourcesRef = useRef([]);                      // 同上,供 loadOfficial 读取而不进依赖数组
   const [savedRepos, setSavedRepos] = useState([]);   // 用户导入过的自定义仓库(持久化,可点重进/删除)
   const [source, setSource] = useState('anthropic');
   const [official, setOfficial] = useState([]);
   const [officialMeta, setOfficialMeta] = useState({});
   const [loadingOff, setLoadingOff] = useState(false);
   const [offErr, setOffErr] = useState('');
+  // r71 市场浏览层:搜索 / 安装状态分面 / 排序。都只作用于已加载的列表,不触发网络。
+  const [mq, setMq] = useState('');                   // 市场搜索词(id + 名称 + 描述)
+  const [instFilter, setInstFilter] = useState('all'); // 'all' | 'installed' | 'available'
+  const [sortBy, setSortBy] = useState('name');        // 'name' | 'name-desc' | 'source'
+  const [srcCounts, setSrcCounts] = useState({});      // { [sourceId]: n } —— 只记真加载到的源,没拉过的不显示计数
+  const [conflictSrc, setConflictSrc] = useState(null); // 触发重名的那条来自哪个源(全部源模式下覆盖按钮要用)
   // 限流修复:GitHub 令牌。匿名 API 60 次/小时且按出口 IP 计,共享代理出口配额常年打满 → 列表恒空。
   // 后端解析顺序 env → 手动填入(pat)→ gh 命令行登录态;这里只展示来源,令牌值永不回传前端。
   const [ghTokenSource, setGhTokenSource] = useState(null); // 'env' | 'pat' | 'gh' | null(未配置)
@@ -160,14 +173,40 @@ export function SkillsPanel() {
     }
   };
 
+  // r71:每条都打上来源标签(合并视图的分面/列表 key 靠它;跨源 id 会撞,见 skillMarket.js)。
+  const tagSource = (list, src) => (list || []).map((s) => ({ ...s, source: src }));
+
   const loadOfficial = useCallback(async (srcId, repo, branch, host) => {
-    setLoadingOff(true); setOffErr(''); setConflicts(null);
+    setLoadingOff(true); setOffErr(''); setConflicts(null); setConflictSrc(null);
     try {
+      // r71「全部源」:客户端并发拉六个内置源再合并 —— 用的是同一个既有端点,不新增服务端接口。
+      // 单源失败只算它自己(汇总成一行提示),不让一个源限流把整页拖成空。
+      if (!repo && srcId === ALL_SOURCES) {
+        const ids = sourcesRef.current.map((s) => s.id);
+        // 源清单还没到(刚进面板就点了「全部源」):明说而不是给一个空列表让用户以为市场是空的。
+        if (!ids.length) { setOfficial([]); setOfficialMeta({}); setOffErr('源清单尚未加载完,请点右上角刷新重试'); setLoadingOff(false); return; }
+        const results = await Promise.all(ids.map(async (id) => {
+          try {
+            const d = await (await fetch(`/api/skills/official?source=${encodeURIComponent(id)}`)).json();
+            return { id, skills: tagSource(d.skills, id), error: d.error || '' };
+          } catch (e) { return { id, skills: [], error: e.message }; }
+        }));
+        const merged = results.flatMap((r) => r.skills);
+        setOfficial(merged);
+        setSrcCounts(Object.fromEntries(results.map((r) => [r.id, r.skills.length])));
+        setOfficialMeta({ count: merged.length, repo: '', branch: '', truncatedDesc: merged.some((s) => !s.description) });
+        const bad = results.filter((r) => r.error);
+        setOffErr(bad.length ? `${bad.length} 个源加载失败:${bad.map((r) => `${r.id}(${r.error})`).join(';')}` : '');
+        setLoadingOff(false);
+        return;
+      }
       const url = repo
         ? `/api/skills/official?repo=${encodeURIComponent(repo)}${branch ? `&branch=${encodeURIComponent(branch)}` : ''}${host && host !== 'github' ? `&host=${host}` : ''}`
         : `/api/skills/official?source=${encodeURIComponent(srcId)}`;
       const d = await (await fetch(url)).json();
-      setOfficial(d.skills || []);
+      const tag = repo || srcId;
+      setOfficial(tagSource(d.skills, tag));
+      if (!repo) setSrcCounts((p) => ({ ...p, [srcId]: (d.skills || []).length }));
       setOfficialMeta({ count: d.count, repo: d.repo, branch: d.branch, truncatedDesc: d.truncatedDesc });
       if (d.error) setOffErr(d.error);
     } catch (e) { setOffErr(e.message); }
@@ -253,24 +292,29 @@ export function SkillsPanel() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { ms.exit(); }, [tab, source, activeRepo, activeBranch, activeHost]);
   useEffect(() => {
-    fetch('/api/skills/sources').then((r) => r.json()).then((d) => setSources(d.sources || [])).catch(() => {});
+    // sourcesRef 与 state 同步写:loadOfficial 的「全部源」分支要读源清单,但它的依赖数组
+    // 必须保持空(挂到 sources 上会让身份变化再触发一次已加载源的重拉)。
+    fetch('/api/skills/sources').then((r) => r.json()).then((d) => { sourcesRef.current = d.sources || []; setSources(d.sources || []); }).catch(() => {});
     loadSavedRepos();
   }, [loadSavedRepos]);
   useEffect(() => { if (tab === 'import' && !activeRepo) loadOfficial(source); }, [tab, source, activeRepo, loadOfficial]);
   useEffect(() => { if (tab === 'import') loadTokenStatus(); }, [tab, loadTokenStatus]); // 限流修复:进导入页才查令牌状态(后端有 5 分钟缓存)
 
-  const runImport = async (ids, overwrite, tag, isUpdate = false) => {
+  // srcOverride:r71「全部源」合并视图下每条自带来源,必须按条目的源装,否则 source='__all__'
+  // 传到后端会静默回落成 SOURCES[0](装错仓库的同名 skill)。其余路径行为不变。
+  const runImport = async (ids, overwrite, tag, isUpdate = false, srcOverride = null) => {
     if (!ids.length) return;
     busyAdd(tag); setNotice('');
     try {
       const r = await fetch('/api/skills/import', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(activeRepo ? { repo: activeRepo, branch: activeBranch, host: activeHost, ids, overwrite } : { source, ids, overwrite }),
+        body: JSON.stringify(activeRepo ? { repo: activeRepo, branch: activeBranch, host: activeHost, ids, overwrite } : { source: srcOverride || source, ids, overwrite }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '导入失败');
       if (!overwrite && d.conflicts?.length) {
         setConflicts(d.conflicts);
+        setConflictSrc(srcOverride || null); // 覆盖按钮要用同一个源重发,否则合并视图下会装错仓库
         if (d.imported?.length) setNotice(`已导入 ${d.imported.length} 个新 skill`);
       } else {
         const parts = [];
@@ -313,8 +357,20 @@ export function SkillsPanel() {
     busyDel(tag);
   };
 
+  // r71 市场视图:先按搜索/安装状态筛,再排序。全部在客户端,不触发网络。
+  // 「全部源」下来源分面靠 srcCounts + 顶部按钮行(点某个源即窄化到该源,与既有交互同一套)。
+  const isAllSources = !activeRepo && source === ALL_SOURCES;
+  const sourceOrder = useMemo(() => sources.map((s) => s.id), [sources]);
+  const marketView = useMemo(
+    () => sortMarket(filterMarket(official, { q: mq, installed: instFilter }), sortBy, sourceOrder),
+    [official, mq, instFilter, sortBy, sourceOrder],
+  );
+  const marketStats = useMemo(() => countInstalled(official), [official]);
+  const loadedCounts = useMemo(() => (isAllSources ? countBySource(official) : srcCounts), [isAllSources, official, srcCounts]);
+  const srcName = useMemo(() => Object.fromEntries(sources.map((s) => [s.id, s.name])), [sources]);
+
   const notInstalled = official.filter((s) => !s.installed);
-  const installedIds = official.filter((s) => s.installed).map((s) => s.id); // 导入页多选/全选的可选集
+  const installedIds = [...new Set(official.filter((s) => s.installed).map((s) => s.id))]; // 导入页多选/全选的可选集(合并视图下同 id 可能来自两个源,按磁盘 id 去重)
   const hasSources = Object.keys(sourcesMap).length > 0; // 有来源记录 = 能比对更新
   // CM-1:本机 skill 按关键词过滤(名称 + 描述,大小写不敏感)。
   // 检查更新后把"有新版本"的置顶(stable sort,组内保持原序),免得用户逐条翻找。
@@ -467,15 +523,22 @@ export function SkillsPanel() {
         </>
       ) : (
         <>
-          {/* 源选择(内置源点了即清掉自定义仓库,回到内置源模式) */}
-          <div className="flex flex-wrap gap-1.5">
-            {sources.map((s) => (
-              <button key={s.id} onClick={() => { setActiveRepo(null); setActiveBranch(''); setCustomRepo(''); setSource(s.id); }}
-                className={`px-2.5 py-1 text-[11px] font-body rounded-md border transition-colors ${
-                  !activeRepo && source === s.id ? 'border-accent text-accent bg-accent/10' : 'border-canvas-deep text-ink-muted hover:text-ink'}`}>
-                {s.name}
-              </button>
-            ))}
+          {/* 源选择 = r71 的来源分面:「全部源」合并六源,其余按钮点选即窄化到单个源。
+              计数只在该源真加载过之后出现(没拉到的源不显示数字,不编造)。 */}
+          <div className="flex flex-wrap gap-1.5" data-testid="market-source-facet">
+            {[{ id: ALL_SOURCES, name: '全部源' }, ...sources].map((s) => {
+              const n = s.id === ALL_SOURCES ? (isAllSources ? official.length : undefined) : loadedCounts[s.id];
+              return (
+                <button key={s.id} data-testid="market-source-chip" data-source={s.id}
+                  onClick={() => { setActiveRepo(null); setActiveBranch(''); setCustomRepo(''); setSource(s.id); }}
+                  title={s.id === ALL_SOURCES ? '合并六个内置源(各源分别请求,单源失败不影响其它源)' : undefined}
+                  className={`px-2.5 py-1 text-[11px] font-body rounded-md border transition-colors ${
+                    !activeRepo && source === s.id ? 'border-accent text-accent bg-accent/10' : 'border-canvas-deep text-ink-muted hover:text-ink'}`}>
+                  {s.name}
+                  {typeof n === 'number' && <span className="ml-1 font-mono opacity-70" data-testid="market-source-count">{n}</span>}
+                </button>
+              );
+            })}
           </div>
           {/* CQ批次4:粘贴任意 GitHub 仓库一键导入其全部 skill */}
           <div className="flex gap-1.5">
@@ -558,11 +621,47 @@ export function SkillsPanel() {
           )}
           {offErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 break-all">{offErr}</div>}
           {notice && <div className="text-[11px] text-ink-soft bg-canvas-deep/60 border border-canvas-deep rounded px-2 py-1.5">{notice}</div>}
+
+          {/* r71 浏览控件:搜索 + 安装状态分面 + 排序。三者都只筛已加载的列表,不发请求。
+              条目真实字段只有 id/名称/描述/版本/已安装,所以没有分类与热度维度,排序也只有名称与来源。 */}
+          <div className="relative">
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-ghost" />
+            <input
+              type="text" value={mq} onChange={(e) => setMq(e.target.value)} data-testid="market-search"
+              placeholder="搜索市场技能（名称 / 描述，多个词需全部命中）..."
+              className="w-full bg-canvas border border-canvas-deep rounded-lg pl-8 pr-3 py-1.5 text-xs text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body" />
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap text-[11px] font-body">
+            {[['all', '全部', marketStats.total], ['available', '未安装', marketStats.available], ['installed', '已安装', marketStats.installed]].map(([v, label, n]) => (
+              <button key={v} data-testid="market-installed-filter" data-value={v} onClick={() => setInstFilter(v)}
+                className={`px-2 py-0.5 rounded-md border transition-colors ${
+                  instFilter === v ? 'border-accent text-accent bg-accent/10' : 'border-canvas-deep text-ink-muted hover:text-ink'}`}>
+                {label}<span className="ml-1 font-mono opacity-70">{n}</span>
+              </button>
+            ))}
+            <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} data-testid="market-sort"
+              title="排序依据。条目没有更新时间与下载量字段,故只按名称或来源排。"
+              className="ml-auto bg-canvas border border-canvas-deep rounded-md px-1.5 py-0.5 text-[11px] text-ink-muted focus:outline-none focus:border-accent/40">
+              <option value="name">名称 A→Z</option>
+              <option value="name-desc">名称 Z→A</option>
+              <option value="source">按来源</option>
+            </select>
+          </div>
+          {(mq.trim() || instFilter !== 'all') && (
+            <div className="text-[10px] text-ink-faint font-body" data-testid="market-result-count">
+              命中 {marketView.length} / {official.length} 条
+            </div>
+          )}
+
           {/* 批量删除该源里已装的技能:未装项不可选(没有可删的东西) */}
           {ms.selMode && <BatchBar count={ms.count} busy={ms.busy} onDelete={onBatchDeleteImport} onExit={ms.exit} noun="个已装技能"
             allIds={installedIds} onSetAll={ms.setAll} selectedSet={ms.selected} />}
           {officialMeta.truncatedDesc && (
-            <div className="text-[10px] text-ink-faint font-body">该源 skill 较多,仅列名称(不预取描述);导入后可在本机查看。</div>
+            <div className="text-[10px] text-ink-faint font-body">
+              {isAllSources
+                ? '条目较多的源(Composio / Hermes)仅列名称,不预取描述;这些条目按名称检索,导入后可在本机查看完整描述。'
+                : '该源 skill 较多,仅列名称(不预取描述);导入后可在本机查看。'}
+            </div>
           )}
 
           {/* 重名裁决 */}
@@ -574,7 +673,7 @@ export function SkillsPanel() {
               <div className="flex items-center gap-2">
                 <button onClick={() => { setConflicts(null); setNotice('已跳过重名 skill'); }}
                   className="px-2.5 py-1 rounded text-[11px] font-medium border border-canvas-deep text-ink-soft hover:bg-canvas-deep">跳过</button>
-                <button onClick={() => runImport(conflicts, true, 'all')} disabled={busy.has('all')}
+                <button onClick={() => runImport(conflicts, true, 'all', false, conflictSrc)} disabled={busy.has('all')}
                   className="px-2.5 py-1 rounded text-[11px] font-medium text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 flex items-center gap-1">
                   {busy.has('all') && <Loader2 size={11} className="animate-spin" />}覆盖
                 </button>
@@ -582,50 +681,66 @@ export function SkillsPanel() {
             </div>
           )}
 
+          {/* 一键导入全部只在单个源下可用:合并视图里条目分属六个仓库,一次调用只能带一个 source,
+              硬装会把同名 skill 从错误的仓库装进来。选定单个源后按钮恢复。 */}
           <button onClick={() => runImport(notInstalled.map((s) => s.id), false, 'all')}
-            disabled={loadingOff || busy.size > 0 || notInstalled.length === 0 || ms.selMode}
+            disabled={loadingOff || busy.size > 0 || notInstalled.length === 0 || ms.selMode || isAllSources}
+            title={isAllSources ? '合并视图不支持整批导入,请先在上方选定单个来源' : undefined}
             className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-accent text-on-accent text-[12px] font-medium hover:bg-accent/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
             {busy.has('all') ? <Loader2 size={13} className="animate-spin" /> : <CloudDownload size={13} />}
-            {loadingOff ? '加载中…' : notInstalled.length === 0 ? '此源已全部安装' : `一键导入全部(${notInstalled.length})`}
+            {loadingOff ? '加载中…' : isAllSources ? '选定单个来源后可一键导入' : notInstalled.length === 0 ? '此源已全部安装' : `一键导入全部(${notInstalled.length})`}
           </button>
 
           {loadingOff ? (
             <div className="text-xs text-ink-faint font-body py-6 text-center flex items-center justify-center gap-2"><Loader2 size={14} className="animate-spin" />加载…</div>
+          ) : marketView.length === 0 && official.length > 0 ? (
+            <div className="text-xs text-ink-faint font-body py-6 text-center bg-canvas-warm border border-canvas-deep rounded-lg" data-testid="market-empty">
+              没有匹配的技能{mq.trim() ? `（搜索「${mq.trim()}」）` : ''}
+            </div>
           ) : (
-            <div className="space-y-2">
-              {official.map((s) => (
-                <div key={s.id} onClick={() => (ms.selMode ? (s.installed && ms.toggle(s.id)) : setExpanded((p) => p === `off:${s.id}` ? null : `off:${s.id}`))}
+            <div className="space-y-2" data-testid="market-list">
+              {marketView.map((s) => {
+                const k = marketKey(s); // 跨源 id 会撞(实测 19 个),列表 key / 展开态 / 忙碌标记一律用它
+                return (
+                <div key={k} data-testid="market-row" style={ROW_CV}
+                  onClick={() => (ms.selMode ? (s.installed && ms.toggle(s.id)) : setExpanded((p) => p === `off:${k}` ? null : `off:${k}`))}
                   className={`bg-canvas-warm border border-canvas-deep rounded-lg p-3 cursor-pointer ${ms.selMode && !s.installed ? 'opacity-40' : ''}`}
                   title={ms.selMode ? (s.installed ? '点击勾选' : '未安装,无可删除') : '点击展开/收起完整简介'}>
                   <div className="flex items-center gap-2">
                     {ms.selMode && s.installed && <SelCheckbox checked={ms.selected.has(s.id)} onClick={() => ms.toggle(s.id)} />}
                     <span className="text-xs font-medium font-body text-ink truncate flex-1" title={s.id}>{s.name}</span>
+                    {isAllSources && s.source && (
+                      <span className="shrink-0 text-[9px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-body" data-testid="market-row-source">
+                        {srcName[s.source] || s.source}
+                      </span>
+                    )}
                     {s.version && <span className="shrink-0 text-[10px] px-1 py-px bg-canvas-deep text-ink-faint rounded font-mono">v{s.version}</span>}
                     <SkillCopyBtn name={s.id} />
                     {ms.selMode ? null : s.installed ? (
                       <>
-                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, s.id, true); }} disabled={busy.has(s.id) || busy.has('all')}
+                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], true, k, true, s.source); }} disabled={busy.has(k) || busy.has('all')}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded border border-canvas-deep text-ink-faint hover:text-ink hover:bg-canvas-deep flex items-center gap-1 disabled:opacity-50" title="已安装 — 点击用该源最新版本覆盖">
-                        {busy.has(s.id) ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·可更新覆盖
+                        {busy.has(k) ? <Loader2 size={10} className="animate-spin" /> : <Check size={10} className="text-success" />}已装·可更新覆盖
                       </button>
                       <button onClick={async (e) => {
                           e.stopPropagation();
                           if (await manageSkill('delete', s.id)) { activeRepo ? loadOfficial(null, activeRepo, activeBranch, activeHost) : loadOfficial(source); }
-                        }} disabled={!!manageBusy || busy.has(s.id) || busy.has('all')}
+                        }} disabled={!!manageBusy || busy.has(k) || busy.has('all')}
                         className="shrink-0 p-1 rounded text-ink-faint hover:text-error hover:bg-canvas-deep disabled:opacity-50" title="删除本机已装的该技能(永久移除,需重新下载)">
                         {manageBusy === s.id ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
                       </button>
                       </>
                     ) : (
-                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], false, s.id); }} disabled={busy.has(s.id) || busy.has('all')}
+                      <button onClick={(e) => { e.stopPropagation(); runImport([s.id], false, k, false, s.source); }} disabled={busy.has(k) || busy.has('all')}
                         className="shrink-0 text-[10px] px-2 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 flex items-center gap-1 disabled:opacity-50">
-                        {busy.has(s.id) ? <Loader2 size={10} className="animate-spin" /> : <Download size={10} />}导入
+                        {busy.has(k) ? <Loader2 size={10} className="animate-spin" /> : <Download size={10} />}导入
                       </button>
                     )}
                   </div>
-                  {s.description && <div className={`text-[11px] text-ink-muted font-body mt-1 ${expanded === `off:${s.id}` ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}>{s.description}</div>}
+                  {s.description && <div className={`text-[11px] text-ink-muted font-body mt-1 ${expanded === `off:${k}` ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}>{s.description}</div>}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </>
