@@ -24,7 +24,9 @@ const SCOPES = [
 // 口径 —— server 对非法键静默丢弃(仅响应带 warning),这里在提交前即时标红,改任一侧必须同步另一侧。
 const HEADER_KEY_RE = /^[!#$%&'*+.^_`|~A-Za-z0-9-]+$/;
 
-export function McpForm({ editing, onClose, onSaved }) {
+// seed:r73 扩展市场的 MCP 行点「添加」时带进来的注册表条目 —— 挂载即预填表单
+// (与面板内注册表搜索选中同一条路径),用户确认后才走下方「添加」提交,不自动连接/安装。
+export function McpForm({ editing, seed, onClose, onSaved }) {
   const isEdit = !!editing;
   // 不再用全屏 spinner 阻塞:编辑时立即用列表已有的 command/transport 回填,表单秒开可编辑。
   // env/scope/autoApprove/label 这些列表里没有的字段后台拉 /config 补齐(claude mcp get 冷启动 ~3s)。
@@ -115,6 +117,9 @@ export function McpForm({ editing, onClose, onSaved }) {
     dirtyRef.current = true;
     setErr('');
   };
+
+  // 外部带入的注册表条目:仅挂载时预填一次(之后用户的编辑不被覆盖)。
+  useEffect(() => { if (!isEdit && seed) applyRegistryItem(seed); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 选内置模板自动回填字段;需密钥的把 env 占位 key 填好(value 留空,用户补)。
   const applyTemplate = (id) => {
