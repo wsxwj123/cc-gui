@@ -22,6 +22,11 @@ import {
 import { DiagramNode } from './diagram/index.tsx'
 
 import { EChartNode } from '../EChartNode.tsx'
+// CGUI-PATCH(r69):图表导出工具条。上游零导出能力,这是本仓纯增强。
+// 与 ActionFeedback 同一个理由挂在**分发点**:六类可导出节点全从这里过,包一层就全覆盖,
+// 上游组件一个字节不用改。导出是纯本地动作(剪贴板 / 落盘),不碰 action/send。
+import { isExportable } from '../../host/export-data.js'
+import { GenuiExportFrame } from '../../host/ExportToolbar.jsx'
 
 function isListItemNode(item: GenuiList['items'][number]): item is GenuiNode {
   return typeof item === 'object' && item !== null && 'type' in item
@@ -40,7 +45,12 @@ export function renderNode(
   answers?: AnswersState,
   path = '',
 ): ReactNode {
-  const el = renderNodeInner(node, key, onAction, depth, answers, path)
+  const inner = renderNodeInner(node, key, onAction, depth, answers, path)
+  // CGUI-PATCH(r69):可导出类型套一层定位容器承载悬停工具条。**只包这六类**——
+  // 其余类型原样返回,`el === null` 那条既有判据(下面 ActionFeedback 用)语义不变。
+  const el = inner !== null && isExportable(node)
+    ? <GenuiExportFrame key={key} node={node}>{inner}</GenuiExportFrame>
+    : inner
   const action = (node as { action?: unknown }).action
   if (el === null || onAction === undefined || typeof action !== 'string') return el
   return (
