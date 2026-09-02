@@ -15,6 +15,7 @@
 //
 // Run: node tests/unit/check-r90-cache-followups.mjs
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -181,6 +182,27 @@ check('B2-6 后界断言:只有 --system-prompt-snapshot 时不能判成支持 -
   assert.equal(cliSupportsFlag('/probe/snaponly', '--system-prompt', () => '  --system-prompt-snapshot <on|off>'), false);
   assert.equal(cliSupportsSnapshotFlag('/probe/snaponly'), true, '同一份 help 缓存要能给出 snapshot=true');
   _resetSnapFlagCache();
+});
+check('B2-8 短 system 不是抄的 CLI 内部提示(与原生的最长公共子串 < 25 字符)', () => {
+  // fixture 只存原生提示的 25 字符滑窗单向哈希(不存原文:那是 Anthropic 的内部提示)。
+  // 我方提示的任一 25 字符窗口命中该集合 ⇔ 与原生存在 ≥25 字符的逐字重合。
+  const fx = JSON.parse(readFileSync(join(root, 'tests/fixtures/native-title-prompt-shingles.json'), 'utf8'));
+  const K = fx.k, N = fx.hashLen;
+  const native = new Set(fx.shingles);
+  assert.ok(native.size > 2000, 'fixture 指纹数量异常,可能没生成全');
+  const hits = [];
+  for (let i = 0; i + K <= TITLE_SYSTEM_PROMPT.length; i += 1) {
+    const w = TITLE_SYSTEM_PROMPT.slice(i, i + K);
+    if (native.has(createHash('sha1').update(w).digest('hex').slice(0, N))) hits.push(w);
+  }
+  assert.deepEqual(hits, [], `与原生提示逐字重合 ≥${K} 字符的片段:${JSON.stringify(hits.slice(0, 3))}`);
+  // 哨兵:判据本身要能抓到重合,否则空数组是假绿。
+  const probe = 'You are naming a coding session so the user can pick it out of a long list of sessions.';
+  let probeHit = false;
+  for (let i = 0; i + K <= probe.length; i += 1) {
+    if (native.has(createHash('sha1').update(probe.slice(i, i + K)).digest('hex').slice(0, N))) { probeHit = true; break; }
+  }
+  assert.ok(probeHit, '哨兵:原生提示的开头必须被指纹集命中');
 });
 check('B2-7 短 system 遵守 argv 三条 Windows 约束(单行/纯 ASCII/无双引号)', () => {
   assert.ok(!/[\r\n]/.test(TITLE_SYSTEM_PROMPT), '换行会让 cmd.exe 截断整条命令');
