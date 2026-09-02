@@ -552,7 +552,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
                 <span className="space-y-0.5">
                   <span className={`${labelCls} block`}>提交前预审（nsfw_check）</span>
                   <span className="text-[10px] text-ink-faint font-body leading-snug block">
-                    提交前先用 omni-moderation-latest 审核提示词与输入图片，会额外增加成本与延迟。与上面的「审核强度」是两件不同的事：这一项发生在提交前，审核强度作用于出图时。
+                    提交前先用 omni-moderation-latest 审核提示词与输入图片，会额外增加成本与延迟。与「审核强度」是两件不同的事：本项发生在提交前，审核强度作用于出图时的内容过滤。
                   </span>
                 </span>
               </label>
