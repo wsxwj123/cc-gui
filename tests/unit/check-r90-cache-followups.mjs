@@ -38,7 +38,7 @@ const { readSessionTitles } = await import('../../server/services/session-reader
 const { claudeExecSpec } = await import('../../server/utils/claude-resolver.js');
 const {
   buildTitleArgs, parseTitleJson, resolveTitleModel, resolvePromptSuggestions, resolveExcludeDyn,
-  decideTitle, TITLE_SYSTEM_PROMPT,
+  decideTitle, waitForAiTitle, TITLE_SYSTEM_PROMPT,
 } = await import('../../server/routes/chat.js');
 
 const chatSrc = readFileSync(join(root, 'server/routes/chat.js'), 'utf8');
@@ -206,6 +206,28 @@ check('B2-6 后界断言:只有 --system-prompt-snapshot 时不能判成支持 -
   assert.equal(cliSupportsSnapshotFlag('/probe/snaponly'), true, '同一份 help 缓存要能给出 snapshot=true');
   _resetSnapFlagCache();
 });
+check('B2-10 只认选项列:描述正文里提到别的选项名不算支持', () => {
+  // 2.1.257 的真实 help 里就有这两种形态(缩进 6 / 缩进 40 的描述换行)。
+  const helpWithMentions = [
+    '  --autocompact <auto|tokens>           Auto-compact window size',
+    '  --exclude-dynamic-system-prompt-sections',
+    '      Move per-machine sections out of the system prompt. Only applies with',
+    '      the default system prompt (ignored with --system-prompt). (default: false)',
+    '  --resume [sessionId]                  Resume a conversation. Cannot combine',
+    '                                        --system-prompt or --tools with it.',
+  ].join('\n');
+  _resetSnapFlagCache();
+  assert.equal(cliSupportsFlag('/probe/mentions', '--system-prompt', () => helpWithMentions), false,
+    '描述正文里的 --system-prompt 被当成支持 → 老 CLI 会 unknown option 直接退进程');
+  assert.equal(cliSupportsFlag('/probe/mentions', '--tools', () => helpWithMentions), false);
+  assert.equal(cliSupportsFlag('/probe/mentions', '--autocompact', () => helpWithMentions), true, '真正的选项列要认出来');
+  _resetSnapFlagCache();
+  // 短标志别名与长标志别名两种真实选项行形态也要认
+  const aliases = '  -c, --continue                        Continue\n  --allowedTools, --allowed-tools <tools...>';
+  assert.equal(cliSupportsFlag('/probe/alias', '--continue', () => aliases), true);
+  assert.equal(cliSupportsFlag('/probe/alias', '--allowed-tools', () => aliases), true);
+  _resetSnapFlagCache();
+});
 check('B2-8 短 system 不是抄的 CLI 内部提示(与原生的最长公共子串 < 25 字符)', () => {
   // fixture 只存原生提示的 25 字符滑窗单向哈希(不存原文:那是 Anthropic 的内部提示)。
   // 我方提示的任一 25 字符窗口命中该集合 ⇔ 与原生存在 ≥25 字符的逐字重合。
@@ -255,7 +277,11 @@ check('B3-5 非 JSON:原样交回并标 json:false(交给既有清洗与元话�
   assert.deepEqual(parseTitleJson('缓存命中率排查'), { title: '缓存命中率排查', json: false });
   assert.deepEqual(parseTitleJson('  '), { title: '', json: false });
   assert.deepEqual(parseTitleJson(null), { title: '', json: false });
-  assert.deepEqual(parseTitleJson('{"notitle":"x"}'), { title: '{"notitle":"x"}', json: false });
+});
+check('B3-7 看着像 JSON 却取不出 title:按失败处理,不把 JSON 字面量当标题', () => {
+  for (const bad of ['{"notitle":"x"}', '{"title":null}', '{"title":', '{"title":123}']) {
+    assert.deepEqual(parseTitleJson(bad), { title: '', json: false }, `${bad} 不该变成标题`);
+  }
 });
 check('B3-6 端点:先等原生 ai-title、<session> 转写、JSON 命中即跳过元话术', () => {
   const title = chatSrc.slice(chatSrc.indexOf("router.post('/chat/title'"), chatSrc.indexOf('const childEnv = { ...process.env };'));
@@ -278,6 +304,28 @@ check('B4-2 没配(官方渠道)就回退会话模型', () => {
 check('B4-3 小快档值非法时回退会话模型(不把注入串塞进 argv)', () => {
   writeSettings({ ANTHROPIC_DEFAULT_HAIKU_MODEL: 'x&calc' });
   assert.equal(resolveTitleModel('deepseek-chat'), 'deepseek-chat');
+});
+
+// ── ② 标题:先等原生 ai-title 的轮询行为 ────────────────────────────────
+await acheck('B3-8 轮询中途落盘的 ai-title 能捞到', async () => {
+  const sid = '3c1f0000-1111-2222-3333-444444444444';
+  const dir = join(home, '.claude', 'projects', '-tmp-r90');
+  mkdirSync(dir, { recursive: true });
+  const f = join(dir, `${sid}.jsonl`);
+  writeFileSync(f, '{"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1"}\n');
+  // 起跑后再写:模拟原生标题在回合开头异步落盘、兜底先到一步的真实时序。
+  setTimeout(() => {
+    writeFileSync(f, `{"type":"ai-title","aiTitle":"Late landed title","sessionId":"${sid}"}\n`, { flag: 'a' });
+  }, 300);
+  const t0 = Date.now();
+  assert.equal(await waitForAiTitle(sid, 4000, 100), 'Late landed title');
+  assert.ok(Date.now() - t0 < 3000, '拿到就该立刻返回,不该等满预算');
+});
+await acheck('B3-9 始终不写 → 预算内返回空串(不无限等)', async () => {
+  const t0 = Date.now();
+  assert.equal(await waitForAiTitle('00000000-0000-0000-0000-000000000000', 600, 200), '');
+  const dt = Date.now() - t0;
+  assert.ok(dt >= 500 && dt < 4000, `等待时长 ${dt}ms 不在预算附近`);
 });
 
 // ── ② 标题:小快档失败要换会话模型重跑一次 ──────────────────────────────

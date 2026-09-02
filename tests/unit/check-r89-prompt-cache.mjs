@@ -169,7 +169,8 @@ check('A1-8 能力探测:help 含该 flag → true;不含 → false;探测抛错
 check('A1-9 能力探测按二进制路径缓存一次(第二次不再跑探测)', () => {
   _resetSnapFlagCache();
   let calls = 0;
-  const probe = () => { calls += 1; return '--system-prompt-snapshot'; };
+  // r90:判据收紧成"只认 help 的选项列",探测文本要用真实选项行形态(缩进 2)。
+  const probe = () => { calls += 1; return '  --system-prompt-snapshot <on|off>  Record the system prompt once'; };
   assert.equal(cliSupportsSnapshotFlag('/probe/cache', probe), true);
   assert.equal(cliSupportsSnapshotFlag('/probe/cache', probe), true);
   assert.equal(calls, 1, `探测跑了 ${calls} 次,应只跑 1 次`);

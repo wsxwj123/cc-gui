@@ -2355,13 +2355,16 @@ export function parseTitleJson(text) {
       if (typeof t === 'string' && t.trim()) return { title: t.trim(), json: true };
     } catch {}
   }
+  // 看着像 JSON 却取不出 title(`{"title":null}`、被截断的对象……):按失败处理,
+  // 别把一坨 JSON 字面量当成会话标题 —— 交给调用方走"换模型重跑 / 退回首条消息"。
+  if (raw.startsWith('{')) return { title: '', json: false };
   return { title: raw, json: false };
 }
 
 // 先等原生:CLI 在本轮**开头**就异步发了 generate_session_title,正常几秒内把 ai-title
 // 落进 jsonl;回合很短时兜底会抢在它前面 → 白起一个 `claude -p`。轮询到它或超时再决定。
 // 只对新会话调用(标题端点本就每会话最多来一次),文件还很小,整读几遍代价可忽略。
-async function waitForAiTitle(sid, budgetMs = 4000, stepMs = 500) {
+export async function waitForAiTitle(sid, budgetMs = 4000, stepMs = 500) {
   const deadline = Date.now() + budgetMs;
   for (;;) {
     try {

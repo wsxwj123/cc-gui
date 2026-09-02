@@ -102,7 +102,11 @@ function defaultHelpProbe(claudePath) {
 }
 
 // 通用 flag 探测。flag 传全称(含 `--`)。probe 可注入(单测直接喂 help 文本)。
-// 用后界断言收尾,避免 `--system-prompt` 被 `--system-prompt-snapshot` 误判成支持。
+// 判据两道:① 只认**选项列**(commander 把选项排在缩进 2,描述换行排在缩进 6/40)——
+//   2.1.257 的 help 描述里就有 "with --system-prompt)."(缩进 6)和 "--system-prompt or"
+//   (缩进 40)这种提及别的选项名的正文,整份 includes 会把它们当成"支持";
+// ② 后界断言,避免 `--system-prompt` 被 `--system-prompt-snapshot` 误判成支持。
+// 选项行形态:`  --flag`、`  -c, --continue`、`  --allowedTools, --allowed-tools`。
 export function cliSupportsFlag(claudePath, flag, probe = defaultHelpProbe) {
   const key = String(claudePath || '');
   if (!_helpCache.has(key)) {
@@ -112,7 +116,8 @@ export function cliSupportsFlag(claudePath, flag, probe = defaultHelpProbe) {
   }
   const help = _helpCache.get(key);
   if (!help) return false;
-  return new RegExp(`${flag}(?![\\w-])`).test(help);
+  const esc = String(flag).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^ {1,4}(?:[-\\w]+, )*${esc}(?![\\w-])`, 'm').test(help);
 }
 
 export function cliSupportsSnapshotFlag(claudePath, probe = defaultHelpProbe) {

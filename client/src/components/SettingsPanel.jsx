@@ -2133,11 +2133,6 @@ function MaxBudgetInput() {
   );
 }
 
-// 输入预测(SDK promptSuggestions):回合结束后模型追发一条对下一步输入的预测,
-// 输入框上方显示为可点击建议。它是**一次独立的主模型调用**:整段上下文按缓存命中价
-// 重读 + ~450 token 未命中 + 少量输出,官方订阅制下无感,第三方按 token 计费则每回合
-// 都在花钱 —— 故三态默认 'auto' = 官方开、第三方关(server 的 resolvePromptSuggestions
-// 按 settings.json 的 ANTHROPIC_BASE_URL 判)。关闭后回合结束即收流,不再有建议等待窗。
 function WorktreeVisibilityToggle() {
   // 纯前端偏好(localStorage),不进 settings.json。改动广播事件,左侧项目列表(App.jsx)监听同步。
   const [on, setOn] = useState(() => { try { return localStorage.getItem('cgui-show-worktree-projects') === '1'; } catch { return false; } });
@@ -2186,6 +2181,11 @@ function RestoreLastSessionToggle() {
   );
 }
 
+// 输入预测(SDK promptSuggestions):回合结束后模型追发一条对下一步输入的预测,
+// 输入框上方显示为可点击建议。它是**一次独立的主模型调用**:整段上下文按缓存命中价
+// 重读 + ~450 token 未命中 + 少量输出,官方订阅制下无感,第三方按 token 计费则每回合
+// 都在花钱 —— 故三态默认 'auto' = 官方开、第三方关(server 的 resolvePromptSuggestions
+// 按 settings.json 的 provider 类别判(isOfficialAnthropic))。关闭后回合结束即收流,不再有建议等待窗。
 function PromptSuggestionsToggle() {
   const val = useStore((s) => s.promptSuggestions); // 'auto' | true | false
   const setVal = useStore((s) => s.setPromptSuggestions);
