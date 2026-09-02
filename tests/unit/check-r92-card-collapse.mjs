@@ -9,21 +9,25 @@
 //      计划修改意见 / 多题答案 / remember 选择 / 目录永久授权勾选一并丢失
 //      (与 check-r55-perm-sticky 锁的 key={mine[0].id} 是同一条不变量)。
 //      正文必须【保持挂载】,只把高度收到 0。
-//   ③ 默认必须【展开】:这类卡是阻塞回合的闸门,默认折叠 = 默认藏起一件必须做的事。
+//   ③ 默认必须【展开】,且【每张新卡都重新展开】:这类卡是阻塞回合的闸门,继承上一张的
+//      折叠 = 默认藏起一件必须做的事。故折叠态由每张卡自己的 useState(false) 持有,
+//      不落盘、不跨卡共享 —— 渲染点 key={mine[0].id} 让换请求即重挂载,state 随之复位。
 //   ④ 折叠是纯渲染层的事,禁止新增 window 级监听、禁止碰应答链路三禁区
 //      (respondPermission / escAction / App.jsx 的 Esc 让行)。
 // JSX 进不了 node,故按组件切片做结构断言 + 纯函数真跑,不是散装 grep。
 // Run: node tests/unit/check-r92-card-collapse.mjs
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { PERM_COLLAPSED_KEY, readPermCollapsed, writePermCollapsed } from '../../client/src/utils/permCollapse.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const P = join(root, 'client/src/components/PermissionPrompt.jsx');
 const src = readFileSync(P, 'utf8');
+
+const headTailCls = () => (src.slice(src.indexOf('function CardHeadTail('), src.indexOf('// Plan-mode review card.'))
+  .match(/className="(shrink-0[^"]*)"/) || [, ''])[1];
 
 const CARDS = ['ElicitCard', 'RefusalDialogCard', 'PlanReviewCard', 'AskQuestionCard', 'BoundaryCard', 'PermissionCard'];
 const HEAD_ROW = 'px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep'; // 标题行
@@ -67,13 +71,17 @@ for (const name of CARDS) {
   }
 
   // 1d 折叠开关挂在标题行里(在正文之前)
-  const tailAt = card.indexOf('<CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed}');
+  const tailAt = card.indexOf('<CardHeadTail collapsed={collapsed}');
   assert.ok(tailAt > 0 && tailAt < bodyStart,
     `r92-①: ${name} 的标题行必须带 <CardHeadTail>(折叠开关 + 折叠态摘要),且在正文之前`);
 
-  // 1e 组件签名收下折叠两参
-  assert.match(card, new RegExp(`^function ${name}\\(\\{[^}]*collapsed, onToggleCollapsed \\}\\)`),
-    `r92-①: ${name} 必须接收 collapsed / onToggleCollapsed`);
+  // 1e 折叠态由这张卡自己持有,初值 false(展开),且切换的是自己的 state
+  assert.match(card, /const \[collapsed, setCollapsed\] = useState\(false\)/,
+    `r92-①: ${name} 必须自持 useState(false) —— 默认展开,且随 key 重挂载而复位`);
+  assert.ok(!/collapsed[,}]/.test(card.slice(0, card.indexOf(') {') + 3)),
+    `r92-①: ${name} 的签名不许再收折叠 prop(跨卡共享的 state 会让新卡继承上一张的折叠)`);
+  assert.match(card, /onToggle=\{\(\) => setCollapsed\(\(v\) => !v\)\}/,
+    `r92-①: ${name} 的折叠开关切的必须是自己的 state`);
 }
 
 // ── ② 折叠正文是"高度归零",不是卸载 ───────────────────────────────
@@ -89,11 +97,9 @@ assert.match(cardBody, /\{children\}/, 'r92-②: children 无条件渲染');
 // 渲染点六张卡不许被折叠态门控(那就是"折叠=卸载卡片")
 const renderAt = src.indexOf('<div className="px-6 pb-2 space-y-2');
 assert.ok(renderAt > 0, 'r92-②: 找不到渲染点');
-const render = src.slice(renderAt)
-  .split('collapsed={collapsed}').join('')
-  .split('onToggleCollapsed={toggleCollapsed}').join('');
+const render = src.slice(renderAt);
 assert.ok(!render.includes('collapsed'),
-  'r92-②: 渲染点不许出现 collapsed 条件 —— 折叠必须是卡片内部的正文高度变化,卡片本身始终挂载');
+  'r92-②: 渲染点不许出现 collapsed —— 既不许按折叠态换渲染(那是卸载卡片),也不许从上层透传折叠态(那会让新卡继承上一张的折叠)');
 // 与 r55 同源:key 一张不落(折叠改造最容易顺手动到这里)
 for (const name of CARDS) {
   assert.match(src, new RegExp(`<${name}\\s+key=\\{mine\\[0\\]\\.id\\}`), `r92-②: ${name} 渲染点的 key={mine[0].id} 不许动`);
@@ -106,31 +112,28 @@ assert.match(headTail, /aria-expanded=\{!collapsed\}/, 'r92-③: 折叠开关必
 assert.match(headTail, /onClick=\{onToggle\}/, 'r92-③: 折叠开关点了要切换');
 assert.match(headTail, /title=\{collapsed \? '展开正文' : '折叠正文'\}/, 'r92-③: 两态各有客观陈述的提示文案');
 
-// ── ④ 偏好:localStorage 键名 + 默认展开 ───────────────────────────
-assert.equal(PERM_COLLAPSED_KEY, 'cgui-perm-collapsed', 'r92-④: localStorage 键固定为 cgui-perm-collapsed');
-const mem = new Map();
-globalThis.localStorage = {
-  getItem: (k) => (mem.has(k) ? mem.get(k) : null),
-  setItem: (k, v) => { mem.set(k, String(v)); },
-  removeItem: (k) => { mem.delete(k); },
-};
-assert.equal(readPermCollapsed(), false,
-  'r92-④: 无记录 → 默认【展开】。权限卡是阻塞回合的闸门,默认折叠 = 默认藏起一件必须做的事');
-writePermCollapsed(true);
-assert.equal(readPermCollapsed(), true, 'r92-④: 用户折起 → 记 true');
-assert.equal(mem.get(PERM_COLLAPSED_KEY), 'true', 'r92-④: 写入字符串布尔');
-writePermCollapsed(false);
-assert.equal(readPermCollapsed(), false, 'r92-④: 用户展开 → 记 false');
-mem.set(PERM_COLLAPSED_KEY, 'yes');
-assert.equal(readPermCollapsed(), false, 'r92-④: 脏值按展开处理');
-globalThis.localStorage = undefined;
-assert.equal(readPermCollapsed(), false, 'r92-④: 缺 localStorage(隐私模式)→ 回退默认展开,不抛');
-writePermCollapsed(true); // 不得抛
+// ── ④ 不记忆折叠偏好:一行 localStorage 都不许有 ─────────────────
+assert.ok(!src.includes('cgui-perm-collapsed'), 'r92-④: 折叠不落盘,不许出现 cgui-perm-collapsed 这个键');
+assert.ok(!src.includes('permCollapse'), 'r92-④: 折叠偏好持久化模块已删除,不许再 import');
+assert.ok(!existsSync(join(root, 'client/src/utils/permCollapse.js')), 'r92-④: permCollapse.js 应当已删除');
+// 全仓兜底:别在别处偷偷存一份(git grep 无匹配时退出码 1,那正是我们要的)
+let stray = '';
+try {
+  stray = execFileSync('git', ['grep', '-l', '-e', 'cgui-perm-collapsed', '-e', 'permCollapse', '--', 'client', 'server'],
+    { cwd: root, encoding: 'utf8' }).trim();
+} catch (e) { if (e.status !== 1) stray = ''; }
+assert.equal(stray, '', `r92-④: 折叠偏好不许落盘,这些文件还在提它:\n${stray}`);
+// 顶层不许再持有折叠态(那是跨卡共享,新卡会继承上一张的折叠)
+const prompt = src.slice(src.indexOf('export function PermissionPrompt('));
+assert.ok(!prompt.includes('setCollapsed'), 'r92-④: PermissionPrompt 顶层不许持有折叠态,只能由每张卡自持');
 
-// state 在 PermissionPrompt 顶层(一个窗格一个实例 = 分屏天然隔离)
-assert.match(src, /const \[collapsed, setCollapsed\] = useState\(\(\) => readPermCollapsed\(\)\)/,
-  'r92-④: 折叠态初值取自 readPermCollapsed');
-assert.match(src, /writePermCollapsed\(n\)/, 'r92-④: 手动切换写 localStorage');
+// ── ④b 折叠开关的点击命中区 ≥ 24px ───────────────────────────────
+const btnCls = headTailCls();
+const wh = btnCls.match(/\bw-(\d+)\b/) && btnCls.match(/\bh-(\d+)\b/)
+  ? [Number(btnCls.match(/\bw-(\d+)\b/)[1]) * 4, Number(btnCls.match(/\bh-(\d+)\b/)[1]) * 4] : [0, 0];
+assert.ok(wh[0] >= 24 && wh[1] >= 24,
+  `r92-④b: 折叠开关的命中区要 ≥24px(手机上点得中),当前 ${wh[0]}×${wh[1]}px。用 w-7 h-7 -m-1:盒子 28px,负外边距把多出来的 8px 吃回去,占位与视觉不变`);
+assert.match(btnCls, /-m-1/, 'r92-④b: 扩大命中区必须配负外边距,否则标题行排版会被撑开');
 
 // ── ⑤ 不新增 window 级监听 ────────────────────────────────────────
 assert.equal(src.split('window.addEventListener').length - 1, 6,
@@ -158,4 +161,4 @@ try {
   console.log('  (跳过 git diff 文件列表锁:', String(e.message).split('\n')[0], ')');
 }
 
-console.log('✓ check-r92-card-collapse: 六张卡正文受折叠门控 / 标题行+按钮行保留 / 保持挂载 / 默认展开 / 禁区未动');
+console.log('✓ check-r92-card-collapse: 六张卡正文受折叠门控 / 标题行+按钮行保留 / 保持挂载 / 每张新卡默认展开且不落盘 / 命中区 ≥24px / 禁区未动');

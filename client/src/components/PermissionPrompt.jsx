@@ -6,7 +6,6 @@ import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
 import { isEditableTarget } from '../utils/escAction.js';
 import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
-import { readPermCollapsed, writePermCollapsed } from '../utils/permCollapse.js';
 
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
 const PLAN_WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
@@ -93,6 +92,9 @@ const inputSummary = (r) => String(
 // 正文必须【保持挂载】:卸载会把用户填到一半的计划修改意见 / 多题答案 / remember 选择
 // 一并丢掉(与渲染点 key={mine[0].id} 同源的不变量,check-r55-perm-sticky 锁着)。
 // 用 grid 0fr 而非 display:none,是因为 display:none 不可过渡;两者同样保持挂载。
+// 折叠态由【每张卡自己】的 useState(false) 持有:不落盘、不跨卡共享 —— 渲染点的
+// key={mine[0].id} 让换请求即重挂载,于是每张新卡必从展开开始(权限卡是阻塞回合的
+// 闸门,继承上一张的折叠等于默认藏起一件必须做的事);分屏两窗格也各自独立。
 // inert:折叠态里的输入控件不该还能被 Tab 进去(React 19 原生支持该布尔属性)。
 function CardBody({ collapsed, className = '', children }) {
   return (
@@ -122,7 +124,7 @@ function CardHeadTail({ collapsed, onToggle, summary, children }) {
         onClick={onToggle}
         aria-expanded={!collapsed}
         title={collapsed ? '展开正文' : '折叠正文'}
-        className="shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-faint hover:text-ink hover:bg-canvas-deep"
+        className="shrink-0 w-7 h-7 -m-1 rounded flex items-center justify-center text-ink-faint hover:text-ink hover:bg-canvas-deep"
       >
         {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
       </button>
@@ -149,8 +151,9 @@ function CardHeadTail({ collapsed, onToggle, summary, children }) {
 const paneHasKeyboard = (tabIndex) =>
   tabIndex == null || useStore.getState().activeTabIndex === tabIndex;
 
-function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
+function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydrate, tabIndex }) {
   const plan = String(req.toolInput?.plan || '').trim();
+  const [collapsed, setCollapsed] = useState(false);   // r92 折叠态:只属于这张卡,见 CardBody
   // 折叠态摘要:计划标题(首个非空行去掉 markdown 井号),与 TodoPanel 的 PlanBlock 同口径。
   const summary = (plan.split('\n').find((l) => l.trim()) || '').replace(/^#+\s*/, '').trim();
   const [feedback, setFeedback] = useState('');
@@ -188,7 +191,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
         <div className="text-[13px] font-medium text-ink flex-1">
           Claude 完成了计划，请审查
         </div>
-        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+        <CardHeadTail collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} summary={summary}>
           {req.cwd && (
             <div className="text-[10px] text-ink-faint font-mono truncate max-w-[40%]" title={req.cwd}>
               {req.cwd}
@@ -273,8 +276,9 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
 // 盖住 AI 回复正文(用户报告"看不见正文")。
 // 高度:分屏为左右并排(窗格全高),故 vh=窗格高。卡片上限 42vh,加下方输入框≈窗格下半,
 // 正文保留上半(用户要求"只占会话窗口下二分之一",不论是否分屏)。卡片内部超出则自身滚动。
-function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
+function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabIndex }) {
   const questions = Array.isArray(req.toolInput?.questions) ? req.toolInput.questions : [];
+  const [collapsed, setCollapsed] = useState(false);   // r92 折叠态:只属于这张卡,见 CardBody
   const [picks, setPicks] = useState({});    // qi -> string | string[]
   const [customs, setCustoms] = useState({}); // qi -> free text
   const [qi, setQi] = useState(0);           // 当前显示第几题
@@ -368,7 +372,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
           <AlertCircle size={13} className="text-violet-700" />
         </div>
         <div className="text-[13px] font-medium text-ink flex-1">Claude 需要你的选择</div>
-        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+        <CardHeadTail collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} summary={summary}>
           {total > 1 && (
             <div className="flex items-center gap-1" title="已回答的题为实心点">
               {questions.map((_, i) => (
@@ -463,8 +467,9 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
 // 越界访问卡:SDK 沙箱边界(additionalDirectories)外的路径经 canUseTool 第三参
 // blockedPath 透出。仅本次允许=单次放行;授权此目录=addDirectories(默认本会话,
 // 勾选后永久写入 settings.json,与 CLI /add-dir 及 permissions.additionalDirectories 同源)。
-function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
+function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hydrate, tabIndex }) {
   const [permanent, setPermanent] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);   // r92 折叠态:只属于这张卡,见 CardBody
   const summary = String(req.blockedPath || ''); // 折叠态摘要:越界路径就是这张卡要裁决的对象
   useEffect(() => {
     if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
@@ -492,7 +497,7 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
             {req.toolName}
           </span>
         </div>
-        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+        <CardHeadTail collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} summary={summary}>
           {req.cwd && (
             <div className="text-[10px] text-ink-faint font-mono truncate max-w-[40%]" title={req.cwd}>
               {req.cwd}
@@ -549,8 +554,9 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
 // 挂起表,所以停止/切会话/进程退出的清卡逻辑对它一并生效。
 // 前端只发 allow/deny 两种决定,翻译成 MCP 的 accept/decline/cancel 在服务端做:
 // 提交=accept(带 content)、拒绝=decline、被系统清掉=cancel(用户未作答)。
-function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
+function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, tabIndex }) {
   const fields = elicitFields(req.requestedSchema);
+  const [collapsed, setCollapsed] = useState(false);   // r92 折叠态:只属于这张卡,见 CardBody
   const [values, setValues] = useState(() => initialElicitValues(elicitFields(req.requestedSchema)));
   const missing = elicitMissing(fields, values);
   const setVal = (k, v) => setValues((prev) => ({ ...prev, [k]: v }));
@@ -580,7 +586,7 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
         <div className="text-[13px] font-medium text-ink flex-1 min-w-0 truncate">
           {req.title || `${req.displayName || req.serverName} 需要你填写信息`}
         </div>
-        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+        <CardHeadTail collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} summary={summary}>
           <div className="text-[10px] text-ink-faint font-mono truncate max-w-[35%]" title={`MCP 服务器：${req.serverName}`}>
             {req.serverName}
           </div>
@@ -664,8 +670,9 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
 // 拒答重试卡(CLI request_user_dialog 的 refusal_fallback_prompt):当前模型拒绝了本次
 // 请求,CLI 询问宿主是换备用模型重试还是由用户改写提问。两个按钮对应 CLI 的
 // retry_fallback / edit_prompt;Esc 与停止清卡都回 cancelled(CLI 走该对话框的默认行为)。
-function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
+function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydrate, tabIndex }) {
   const p = req.payload || {};
+  const [collapsed, setCollapsed] = useState(false);   // r92 折叠态:只属于这张卡,见 CardBody
   const fallback = p.fallbackModel || '备用模型';
   const retracted = Array.isArray(p.retractedMessageUuids) ? p.retractedMessageUuids.length : 0;
   // 折叠态摘要:CLI 给的说明文字;没有就显示"原模型 → 备用模型"这条决策要点。
@@ -698,7 +705,7 @@ function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydr
             </span>
           )}
         </div>
-        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+        <CardHeadTail collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} summary={summary}>
           {req.cwd && (
             <div className="text-[10px] text-ink-faint font-mono truncate max-w-[35%]" title={req.cwd}>{req.cwd}</div>
           )}
@@ -748,11 +755,12 @@ function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydr
   );
 }
 
-function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, onResolveSame, sameCount, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
+function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, onResolveSame, sameCount, processing, position, hydrate, tabIndex }) {
   // remember:none=仅此次;session=本会话白名单(localStorage,行为同旧版);
   // always=写 settings.json 的 permissions.allow 规则(经服务端 updatedPermissions,
   // CLI 落盘,终端与 GUI 共用)。危险命令不提供 always(服务端同样忽略,保 G3 强拦)。
   const [remember, setRemember] = useState('none');
+  const [collapsed, setCollapsed] = useState(false);   // r92 折叠态:只属于这张卡,见 CardBody
   const summary = inputSummary(req) || String(req.toolName || ''); // 折叠态摘要:与排队 pill 同一取值
   const dangerous = isDangerousCommand(req);
   // 与服务端 noAlways 对齐(chat.js:510):plan 档的写类/Bash 同样不写持久规则——
@@ -813,7 +821,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
             {req.toolName}
           </span>
         </div>
-        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+        <CardHeadTail collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} summary={summary}>
           {req.cwd && (
             <div className="text-[10px] text-ink-faint font-mono truncate max-w-[40%]" title={req.cwd}>
               {req.cwd}
@@ -917,10 +925,6 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
   const removePendingPermission = useStore((s) => s.removePendingPermission);
   const whitelist = useStore((s) => s.whitelistPermissionTool);
   const [busyId, setBusyId] = useState(null);
-  // r92 折叠:每个 PermissionPrompt 实例自持一份(一个窗格一个实例 → 分屏天然隔离,
-  // 不新增任何 window 级 effect、不碰 paneIsActive 那套)。默认展开的理由见 permCollapse.js。
-  const [collapsed, setCollapsed] = useState(() => readPermCollapsed());
-  const toggleCollapsed = () => setCollapsed((v) => { const n = !v; writePermCollapsed(n); return n; });
   // This card belongs to a specific pane's session. Prefer the explicit prop
   // (correct in split mode where each pane has its own session); fall back to
   // the global selection for single-pane callers.
@@ -1140,8 +1144,6 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onSubmit={submitElicit}
           onDecline={(r) => resolve(r, 'deny')}
           processing={busyId === mine[0].id}
-          collapsed={collapsed}
-          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
@@ -1153,8 +1155,6 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onChoose={chooseDialog}
           onCancel={(r) => resolve(r, 'deny')}
           processing={busyId === mine[0].id}
-          collapsed={collapsed}
-          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
@@ -1166,8 +1166,6 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onResolve={resolve}
           onApprove={approvePlan}
           processing={busyId === mine[0].id}
-          collapsed={collapsed}
-          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
@@ -1178,8 +1176,6 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           req={mine[0]}
           onAnswer={answerQuestion}
           processing={busyId === mine[0].id}
-          collapsed={collapsed}
-          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
@@ -1191,8 +1187,6 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onResolve={resolve}
           onAuthorizeDir={authorizeDir}
           processing={busyId === mine[0].id}
-          collapsed={collapsed}
-          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
@@ -1207,8 +1201,6 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onResolveSame={resolveSame}
           sameCount={matchesAcrossPanes(mine[0]).length}
           processing={busyId === mine[0].id}
-          collapsed={collapsed}
-          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
