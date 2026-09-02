@@ -6,6 +6,7 @@ import {
 } from './Icon.jsx';
 import { ModelBadge, ProviderAvatar, AssistantName } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
+import { cacheHitPct, formatHitPct } from '../utils/cacheStats.js';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { BashCard } from './tools/BashCard.jsx';
 import { EditDiffCard } from './tools/EditDiffCard.jsx';
@@ -661,6 +662,13 @@ function UsageDisplay({ usage, model, costUsd }) {
       {(cacheRead > 0 || cacheWrite > 0) && (
         <span title="实际送入模型处理的输入总量 = 输入 + 缓存命中 + 缓存写入(整轮所有 API 调用累计)">
           实际输入 {(input + cacheRead + cacheWrite).toLocaleString()}
+        </span>
+      )}
+      {(cacheRead > 0 || cacheWrite > 0) && (
+        // r98:每轮回复末尾直接给命中率,不用点徽章。口径 = 缓存命中 /(输入 + 缓存命中 + 缓存写入),
+        // 与徽章弹层同一公式;这里的 usage 是整轮所有 API 调用的累计,所以是"这一轮"的加权命中率。
+        <span title="本轮命中率 = 缓存命中 /（输入 + 缓存命中 + 缓存写入），整轮所有 API 调用累计口径；切模型或进程冷启的那一轮偏低属正常">
+          命中率 {formatHitPct(cacheHitPct(cacheRead, cacheWrite, input))}
         </span>
       )}
       {(authoritative || cost) && (
