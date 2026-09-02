@@ -4382,9 +4382,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 输入预测(A):新回合开始,上一回合的建议作废(reattach 是同一回合的续播,不清)。
     // 只清本会话的两个 key,别的会话的建议不受影响(store 是全局 map)。
     if (!reattachPid) useStore.getState().clearPromptSuggestion(sessionQueueKey, selectedSession?.sessionId);
-    // 本回合是否开启输入预测(A):随全局开关。server 在 result 后留 4s 等待窗收建议,
-    // 窗外才到的走 WS 兜底(prompt-suggestion-bg)入位。
-    const suggestOnClient = useStore.getState().promptSuggestions !== false;
+    // 本回合是否开启输入预测(A):三态。原值上送,'auto' 由 server 按 settings.json 的
+    // ANTHROPIC_BASE_URL 定(第三方关、官方开)—— 那份判据客户端够不着。server 在 result
+    // 后留 4s 等待窗收建议,窗外才到的走 WS 兜底(prompt-suggestion-bg)入位。
+    // 本地这份 suggestOnClient 只用来决定要不要显示"正在预测下一步输入…"这行状态,
+    // 用 providerHint 近似同一判据;万一与服务端结论不一致,后果仅是这行文案多显/少显。
+    const _suggestPref = useStore.getState().promptSuggestions;
+    const suggestOnClient = _suggestPref === 'auto'
+      ? (useStore.getState().currentProvider?.providerHint || 'anthropic') === 'anthropic'
+      : _suggestPref === true;
 
     if (!reattachPid && !hiddenUserMessage) {
     // Push the user bubble IMMEDIATELY so multi-turn sends don't appear to
@@ -4637,7 +4643,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // 花费上限(美元):>0 时透传 SDK maxBudgetUsd,进程累计花费达到上限即停。
           maxBudgetUsd: useStore.getState().maxBudgetUsd || undefined,
           // 输入预测(A):server 据此启用 SDK promptSuggestions 并在 result 后留等待窗。
-          promptSuggestions: suggestOnClient,
+          promptSuggestions: _suggestPref,
           // r66:genui 渲染开关同时门控"教不教模型这套围栏语法"。关掉时 server 不把
           // 教学段注入系统提示(开关也计入常驻进程复用键,翻完开关不会复用旧系统提示)。
           genui: useStore.getState().genuiRender !== false,

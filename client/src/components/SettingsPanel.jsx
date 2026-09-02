@@ -48,7 +48,7 @@ const SETTINGS_INDEX = [
   // 默认 tab 里,这条路径才无条件成立。
   { id: 'set-genui', tab: 'general', title: '生成式界面（cgui-ui）', keys: 'genui cgui-ui dsh-ui 生成式 界面 组件 渲染 图表 表单 技能 skill' },
   { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
-  { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入' },
+  { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入 自动 第三方 费用' },
   { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
   { id: 'set-restore-last', tab: 'session', title: '启动时恢复上次会话', keys: '启动 恢复 上次 会话 Home 首页 restore' },
   { id: 'set-max-budget', tab: 'session', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
@@ -2134,8 +2134,10 @@ function MaxBudgetInput() {
 }
 
 // 输入预测(SDK promptSuggestions):回合结束后模型追发一条对下一步输入的预测,
-// 输入框上方显示为可点击建议。生成蹭本回合的前缀缓存,成本极低;若不需要可关闭
-// (关闭后回合结束即收流,不再有建议等待窗)。
+// 输入框上方显示为可点击建议。它是**一次独立的主模型调用**:整段上下文按缓存命中价
+// 重读 + ~450 token 未命中 + 少量输出,官方订阅制下无感,第三方按 token 计费则每回合
+// 都在花钱 —— 故三态默认 'auto' = 官方开、第三方关(server 的 resolvePromptSuggestions
+// 按 settings.json 的 ANTHROPIC_BASE_URL 判)。关闭后回合结束即收流,不再有建议等待窗。
 function WorktreeVisibilityToggle() {
   // 纯前端偏好(localStorage),不进 settings.json。改动广播事件,左侧项目列表(App.jsx)监听同步。
   const [on, setOn] = useState(() => { try { return localStorage.getItem('cgui-show-worktree-projects') === '1'; } catch { return false; } });
@@ -2185,19 +2187,22 @@ function RestoreLastSessionToggle() {
 }
 
 function PromptSuggestionsToggle() {
-  const on = useStore((s) => s.promptSuggestions);
-  const setOn = useStore((s) => s.setPromptSuggestions);
+  const val = useStore((s) => s.promptSuggestions); // 'auto' | true | false
+  const setVal = useStore((s) => s.setPromptSuggestions);
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">输入预测<EffectBadge level="immediate" /></div>
-        <div className="text-[10.5px] text-ink-faint font-body">回合结束后由模型预测下一条可能的输入,在输入框上方显示为建议,点击即发送、也可填入编辑。预测蹭本回合的缓存生成,成本极低;首轮、规划模式、以及本回合出现过 API 错误时不产生建议</div>
+        <div className="text-[10.5px] text-ink-faint font-body">回合结束后由模型预测下一条可能的输入,在输入框上方显示为建议,点击即发送、也可填入编辑。首轮、规划模式、以及本回合出现过 API 错误时不产生建议。代价是每个回合多打一次主模型:整段上下文按缓存命中价重读一遍,加约 450 token 未命中与少量输出。「自动」= 官方渠道开启、第三方 provider 关闭(第三方按 token 计费,长会话下这笔开销可观);手动选过「开」或「关」后一直按所选执行,不再随 provider 变</div>
       </div>
-      <button onClick={() => setOn(!on)}
-        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
-        title={on ? '已开启' : '已关闭'}>
-        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
-      </button>
+      <div className="shrink-0 flex items-center gap-1">
+        {[['auto', '自动'], [true, '开'], [false, '关']].map(([v, label]) => (
+          <button key={String(v)} onClick={() => setVal(v)}
+            className={`px-2 py-1 text-[11px] rounded-md font-body transition-colors ${val === v ? 'bg-accent text-on-accent' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

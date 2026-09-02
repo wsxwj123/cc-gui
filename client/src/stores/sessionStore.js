@@ -723,9 +723,14 @@ export const useStore = create((set, get) => ({
   })(),
 
   // 输入预测:回合结束后 SDK 追发一条 prompt_suggestion(预测的下一条用户输入),
-  // 在输入框上方显示为可点击的建议。默认开;可在设置关闭。
+  // 在输入框上方显示为可点击的建议。三态:'auto'(默认,server 按 provider 定 ——
+  // 第三方关、官方开)| true | false(用户显式设过就一直尊重)。r90 之前只有开/关且
+  // 默认开,老用户存的 '1'/'0' 原样迁移成显式值,没存过的走 'auto'。
   promptSuggestions: (() => {
-    try { return localStorage.getItem('cgui-prompt-suggestions') !== '0'; } catch { return true; }
+    try {
+      const v = localStorage.getItem('cgui-prompt-suggestions');
+      return v === '1' ? true : v === '0' ? false : 'auto';
+    } catch { return 'auto'; }
   })(),
 
   // genui 渲染开关(决策 7:默认开)。**只管本浏览器渲不渲染围栏**,不改模型行为、
@@ -1525,9 +1530,14 @@ export const useStore = create((set, get) => ({
     } catch {}
   },
 
-  setPromptSuggestions: (on) => {
-    set({ promptSuggestions: !!on });
-    try { localStorage.setItem('cgui-prompt-suggestions', on ? '1' : '0'); } catch {}
+  // 三态写入:true/false 落 '1'/'0'(显式,永久尊重),'auto' 删键回到按 provider 决定。
+  setPromptSuggestions: (v) => {
+    const next = v === true ? true : v === false ? false : 'auto';
+    set({ promptSuggestions: next });
+    try {
+      if (next === 'auto') localStorage.removeItem('cgui-prompt-suggestions');
+      else localStorage.setItem('cgui-prompt-suggestions', next ? '1' : '0');
+    } catch {}
   },
 
   setGenuiRender: (on) => {

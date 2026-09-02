@@ -946,6 +946,18 @@ export function resolveExcludeDyn(v) {
   } catch { return false; }
 }
 
+// 输入预测三态解析(r90):true/false=用户显式;'auto'/未传=按 provider 决定 ——
+// 第三方 provider(settings.json env 带 ANTHROPIC_BASE_URL)默认**关**:它每回合额外
+// 打一次主模型(命中价读整段上下文 + ~450 token 未命中 + 输出),官方渠道默认开(与
+// 原行为一致)。判据与 resolveExcludeDyn 同源同一份文件,两个开关不会对同一 provider
+// 给出相反的类别判断。导出仅为可单测。
+export function resolvePromptSuggestions(v) {
+  if (v === true || v === false) return v;
+  try {
+    return !JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env?.ANTHROPIC_BASE_URL;
+  } catch { return true; }
+}
+
 // r89 静态系统提示快照:CLI 侧要两个条件同时成立才生效 ——
 //  ① CLAUDE_CODE_CARVED_SLATE=1 打开灰度开关(settings.json env,由 provider 切换/设置面板写);
 //  ② --system-prompt-snapshot on 绕过"有 --append-system-prompt 就关快照"的门控,
@@ -999,7 +1011,9 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
   return JSON.stringify({
     cwd: workingDir, effort: effort || null,
     append: (typeof appendSystemPrompt === 'string' ? appendSystemPrompt.trim() : ''),
-    suggest: promptSuggestions === true,
+    // 三态解析后的**实际值**进键:'auto' 在第三方/官方下结论不同,存原值会让切 provider
+    // 后复用到一个 promptSuggestions 与本次不符的常驻进程(query 级选项,起时定死)。
+    suggest: resolvePromptSuggestions(promptSuggestions),
     xdyn: excludeDynamicSystemPrompt === true ? 1 : excludeDynamicSystemPrompt === false ? 0 : 'auto',
     gr: globalRead !== false, dirs, settingsMtime, disToolsMtime, projSettingsMtime, mcpStampMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
@@ -1486,9 +1500,10 @@ router.post('/chat', async (req, res) => {
   // 手动禁用的 MCP 工具:模型这一回合看不到它们(解决 paper-search crossref 噪音等)。
   const disallowedMcpTools = buildDisallowedMcpTools();
   if (disallowedMcpTools.length) options.disallowedTools = disallowedMcpTools;
-  // 输入预测:每回合末 SDK 发一条 prompt_suggestion(在 result 之后,蹭父回合缓存
-  // 几乎免费;首轮/plan 模式/API 错误后 SDK 自己不发)。开启时消息泵的关流时序对应放宽。
-  const suggestOn = promptSuggestions === true;
+  // 输入预测:每回合末 SDK 发一条 prompt_suggestion(在 result 之后,蹭父回合缓存;
+  // 首轮/plan 模式/API 错误后 SDK 自己不发)。开启时消息泵的关流时序对应放宽。
+  // 三态:用户显式 true/false 直接用,'auto' 按 provider 类别(第三方关、官方开)。
+  const suggestOn = resolvePromptSuggestions(promptSuggestions);
   if (suggestOn) options.promptSuggestions = true;
   // --agent 仅新会话首轮(会话级设定,resume 时传会被拒)。
   if (typeof agent === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(agent) && !sessionId) options.agent = agent;
