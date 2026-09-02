@@ -180,8 +180,10 @@ check('§2.2 buttons 里 unknown 项不产出', () => {
 check('§2.2 重复 customId 去重,保留首个', () => {
   const dup = [BTN('MJ::JOB::upsample::1::h', 'U1'), BTN('MJ::JOB::upsample::1::h', '第二次')];
   const acts = mjActionsFor({ buttons: dup, protocol: 'mj', imageCount: 4 });
-  assert.equal(acts.length, 1);
-  assert.strictEqual(acts[0].label, 'U1', '保留首个');
+  assert.equal(acts.length, 1, '重复 customId 只保留一项');
+  // label 一律取本地表(M48c),所以"保留首个"只能靠"只剩一项"来判,
+  // 不能拿上游 label 当判据 —— 那与 M48c 的"不透传上游 label"直接打架。
+  assert.strictEqual(acts[0].label, MA?.MJ_ACTION_LABELS?.pick, '保留首个,且 label 取自本地标签表');
 });
 check('§2.2 buttons 超 32 只取前 32', () => {
   const many = Array.from({ length: 40 }, (_, i) => BTN(`MJ::JOB::upsample::1::h${i}`, `U${i}`));
