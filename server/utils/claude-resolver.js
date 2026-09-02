@@ -354,6 +354,20 @@ export function claudeCommand(args = []) {
 }
 
 /**
+ * SDK 能真正驱动的 claude 路径,驱动不了就返回 null(调用方据此让 SDK 回落自带二进制)。
+ * Windows 的 .cmd/.bat/.ps1/无扩展名 shim 不是可执行文件,SDK 的 spawn 起不来 —— 这时
+ * SDK 跑的是 node_modules/@anthropic-ai/claude-agent-sdk 捆绑的那个 CLI(package.json
+ * 的 claudeCodeVersion,当前 2.1.191),**与 PATH 上装的版本无关**。凡"按 CLI 版本决定
+ * 加不加 flag"的地方都必须以这个返回值为准,否则会拿 PATH 上的新版能力去喂自带的旧版。
+ */
+export function resolveSdkClaude() {
+  const hit = resolveClaude();
+  if (!hit) return null;
+  if (process.platform === 'win32' && !/\.exe$/i.test(hit.path)) return null;
+  return hit.path;
+}
+
+/**
  * claudeCommand 的纯函数内核:给定二进制路径直接组装 { file, args },不做解析。
  * 需要探测【某个具体路径】(而不是当前解析结果)的地方用它 —— 例如
  * utils/prompt-cache-env.js 的 `--help` 能力探测:Windows 上 npm 装出来的是

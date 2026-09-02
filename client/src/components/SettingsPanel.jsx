@@ -2342,7 +2342,7 @@ function PromptCacheSnapshotToggle() {
           静态快照是 CLI 的灰度开关,行为可能随 CLI 版本变化,可随时关闭。
           {state ? `　当前:${state.on ? '已开启' : '未开启'}(${state.thirdParty ? '第三方 provider' : '官方渠道'})` : ''}
           {state && state.cliSnapshotSupported === false && (
-            <span className="text-amber-700">　当前 claude 版本不支持系统提示快照(需 2.1.25x 及以上),本项仅关闭 ToolSearch 生效。</span>
+            <span className="text-amber-700">　当前不启用系统提示快照:所装的 claude 版本不支持(需 2.1.25x 及以上),或当前经 SDK 自带的 claude 运行(Windows 上用 npm 安装时会走这条路)。本项仅关闭 ToolSearch 与 MCP 阻塞连接生效。</span>
           )}
         </div>
       </div>

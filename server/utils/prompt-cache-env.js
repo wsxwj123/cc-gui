@@ -124,5 +124,18 @@ export function cliSupportsSnapshotFlag(claudePath, probe = defaultHelpProbe) {
   return cliSupportsFlag(claudePath, '--system-prompt-snapshot', probe);
 }
 
+// 该不该给 SDK 加 --system-prompt-snapshot:三个条件缺一不可。
+//  ① settings.json 的 CARVED_SLATE 开着(resolveSnapshotOn);
+//  ② **claudePath 非空** —— 空 = SDK 回落自带 CLI(claudeCodeVersion 2.1.191,不认这个
+//     flag)。Windows 上 npm 装出来的是 %APPDATA%\npm\claude.cmd,resolveSdkClaude 一律
+//     返 null,而 PATH 上探到的却是新版 —— 拿新版的能力去喂自带的旧版 = 每一轮
+//     `error: unknown option` 直接退进程。**自带二进制本就不支持,不替它猜。**
+//  ③ 该路径的 CLI 确实认这个 flag(--help 探测)。
+// settings.js 的面板显示口径复用同一个函数,保证"显示支持"与"实际会加"永远一致。
+// export 仅为可单测(supports 可注入)。
+export function snapshotFlagOn(claudePath, snapshotEnvOn, supports = cliSupportsSnapshotFlag) {
+  return !!snapshotEnvOn && !!claudePath && supports(claudePath);
+}
+
 // 单测用:清掉探测缓存(生产代码不调用)。
 export function _resetSnapFlagCache() { _helpCache.clear(); }

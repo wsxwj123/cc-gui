@@ -12,14 +12,14 @@ import { findSessionFile, readSessionTitles } from '../services/session-reader.j
 import { dropPendingForSession, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
-import { resolveClaude } from '../utils/claude-resolver.js';
+import { resolveClaude, resolveSdkClaude } from '../utils/claude-resolver.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { contextTimeoutBudget, latestCountTokensOutcome } from '../utils/context-tokens.js';
 import { canonicalCwd } from '../utils/safe-path.js';
 import { GENUI_SECTION_TEXT } from '../utils/genui-section.js';
 import { broadcast, clients } from '../broadcast.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
-import { cliSupportsFlag, cliSupportsSnapshotFlag } from '../utils/prompt-cache-env.js';
+import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn } from '../utils/prompt-cache-env.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
@@ -605,15 +605,8 @@ const LEVEL_GRACE_MS = 1500;
 
 // 动态解析用户已装 claude(路径绝不写死,便于公开版在别人机器上跑)。解析到则让 SDK
 // 指向它(避免其自带 ~237M 二进制);解析不到返回 null,SDK 回落自带二进制。
-// 解析走统一 claude-resolver(PATH → login shell → npm prefix → 固定候选,带缓存
-// 失效),后端启动后才装 claude 也能被发现,无需重启。
-function resolveUserClaude() {
-  const hit = resolveClaude();
-  if (!hit) return null;
-  // SDK 要真正可执行的文件;Windows 的 .cmd/.bat/.ps1 驱动不了,回落自带二进制。
-  if (process.platform === 'win32' && !/\.exe$/i.test(hit.path)) return null;
-  return hit.path;
-}
+// 实现搬到 claude-resolver.js 的 resolveSdkClaude(settings.js 的显示口径要用同一判据)。
+const resolveUserClaude = resolveSdkClaude;
 
 // 可控异步输入流:首条用户消息推进去后保持打开作 control 通道(setPermissionMode /
 // interrupt 仅 streaming-input 模式可用),回合 result 到达再 close,session 干净收尾。
@@ -1019,7 +1012,9 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     // 三态解析后的**实际值**进键:'auto' 在第三方/官方下结论不同,存原值会让切 provider
     // 后复用到一个 promptSuggestions 与本次不符的常驻进程(query 级选项,起时定死)。
     suggest: resolvePromptSuggestions(promptSuggestions),
-    xdyn: excludeDynamicSystemPrompt === true ? 1 : excludeDynamicSystemPrompt === false ? 0 : 'auto',
+    // 与 suggest 同口径:存**解析后的布尔**。存 'auto' 会让切 provider 后复用到一个
+    // excludeDynamicSections 与本次不符的常驻进程(systemPrompt 是 query 级选项,起时定死)。
+    xdyn: resolveExcludeDyn(excludeDynamicSystemPrompt),
     gr: globalRead !== false, dirs, settingsMtime, disToolsMtime, projSettingsMtime, mcpStampMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
     acw: acw ?? null, // 压缩窗口指纹(MCT 数值或 null):异窗模型切换必须冷启重算压缩线
@@ -1520,7 +1515,7 @@ router.post('/chat', async (req, res) => {
   // 退进程(实测 2.1.252),而 settings.json 里的 CARVED_SLATE 对老版本无害,
   // 于是"env 写了但 flag 不能加"是常态,不是异常。extraArgs 用展开合并(上面的 acw
   // settings 键同样是展开写入),两者不互相覆盖。
-  if (resolveSnapshotOn() && cliSupportsSnapshotFlag(claudePath)) {
+  if (snapshotFlagOn(claudePath, resolveSnapshotOn())) {
     options.extraArgs = { ...(options.extraArgs || {}), 'system-prompt-snapshot': 'on' };
   }
 
@@ -2367,7 +2362,7 @@ export function parseTitleJson(text) {
 // 先等原生:CLI 在本轮**开头**就异步发了 generate_session_title,正常几秒内把 ai-title
 // 落进 jsonl;回合很短时兜底会抢在它前面 → 白起一个 `claude -p`。轮询到它或超时再决定。
 // 只对新会话调用(标题端点本就每会话最多来一次),文件还很小,整读几遍代价可忽略。
-export async function waitForAiTitle(sid, budgetMs = 4000, stepMs = 500) {
+export async function waitForAiTitle(sid, budgetMs = TITLE_WAIT_NATIVE_MS, stepMs = 500) {
   const deadline = Date.now() + budgetMs;
   for (;;) {
     try {
@@ -2379,6 +2374,11 @@ export async function waitForAiTitle(sid, budgetMs = 4000, stepMs = 500) {
     await new Promise((r) => setTimeout(r, stepMs));
   }
 }
+
+// 标题端点的时间预算(总和 ≤30s):等原生落盘 + 首次调用 + 换模型重跑。
+export const TITLE_WAIT_NATIVE_MS = 4000;
+export const TITLE_FIRST_TIMEOUT_MS = 18000;
+export const TITLE_RETRY_TIMEOUT_MS = 8000;
 
 // stdout 原文 → { title, ok }。ok=false 表示"这次没拿到可用标题"(空 / 上游错误文本),
 // 调用方据此决定换模型重跑;title 永远是可直接返回的最终值(失败时=fallbackSource 截断)。
@@ -2452,7 +2452,7 @@ router.post('/chat/title', async (req, res) => {
   if (jsonlSid) {
     // 60 而非下面自建标题的 24:24 是按中文标题定的口径,CLI 写的 ai-title 常是英文,
     // 24 会在词中间硬切(实测 "Investigate large Word f")。60 只当兜底防线用。
-    const aiTitle = await waitForAiTitle(jsonlSid);
+    const aiTitle = await waitForAiTitle(jsonlSid, TITLE_WAIT_NATIVE_MS);
     if (aiTitle) return res.json({ title: aiTitle.slice(0, 60), source: 'jsonl' });
   }
 
@@ -2503,7 +2503,7 @@ router.post('/chat/title', async (req, res) => {
   // 落盘/锁文件串扰);用完只删自己建的这个子目录,父目录 cgui-title 保留。
   // 跑一次标题子进程,resolve 成 stdout 原文(spawn 失败 / 超时 / error 一律 resolve,
   // 不 reject —— 调用方按内容决定要不要换模型再跑一次)。
-  const runTitleOnce = (model) => new Promise((resolve) => {
+  const runTitleOnce = (model, timeoutMs) => new Promise((resolve) => {
     const titleCwd = pathJoin(tmpdir(), 'cgui-title', `${process.pid}-${randomBytes(4).toString('hex')}`);
     try { mkdirSync(titleCwd, { recursive: true }); } catch {}
     const cleanupTitleCwd = () => { try { rmSync(titleCwd, { recursive: true, force: true }); } catch {} };
@@ -2543,7 +2543,7 @@ router.post('/chat/title', async (req, res) => {
       cleanupTitleCwd();
       resolve(v);
     };
-    const timer = setTimeout(() => settle(out), 30000);
+    const timer = setTimeout(() => settle(out), timeoutMs);
     proc.stdout.on('data', (c) => { out += c.toString(); });
     proc.on('close', () => settle(out));
     proc.on('error', () => settle(''));
@@ -2551,12 +2551,14 @@ router.post('/chat/title', async (req, res) => {
 
   const decide = (raw) => decideTitle(raw, titleSource);
 
-  let r = decide(await runTitleOnce(fastModel));
+  // 端点总预算 ≤30s:等原生 4s + 首次 18s + 重跑 8s。重跑只在首次"空/报错"后发生,
+  // 而报错是快路径(上游立刻 4xx),8s 足够;把两段都放到 30s 会让端点最坏卡一分钟。
+  let r = decide(await runTitleOnce(fastModel, TITLE_FIRST_TIMEOUT_MS));
   // 小快档兜底:settings.json 的 ANTHROPIC_DEFAULT_HAIKU_MODEL 可能是切 provider 时留下的
   // 残值(历史用户报告:不存在的 mimo-v2.5)→ 上游报错。此时原生同样写不出 ai-title,
   // 不重跑用户就彻底没标题。用会话模型再跑一次;两者相同或会话模型为空则不重跑(天然防循环)。
   if (!r.ok && sessionModel && sessionModel !== fastModel) {
-    r = decide(await runTitleOnce(sessionModel));
+    r = decide(await runTitleOnce(sessionModel, TITLE_RETRY_TIMEOUT_MS));
   }
   res.json({ title: r.title });
 });

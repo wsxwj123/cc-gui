@@ -35,10 +35,12 @@ const {
   cliSupportsFlag, cliSupportsSnapshotFlag, _resetSnapFlagCache,
 } = await import('../../server/utils/prompt-cache-env.js');
 const { readSessionTitles } = await import('../../server/services/session-reader.js');
-const { claudeExecSpec } = await import('../../server/utils/claude-resolver.js');
+const { claudeExecSpec, resolveClaude, resolveSdkClaude } = await import('../../server/utils/claude-resolver.js');
+const { snapshotFlagOn } = await import('../../server/utils/prompt-cache-env.js');
 const {
   buildTitleArgs, parseTitleJson, resolveTitleModel, resolvePromptSuggestions, resolveExcludeDyn,
   decideTitle, waitForAiTitle, TITLE_SYSTEM_PROMPT,
+  TITLE_WAIT_NATIVE_MS, TITLE_FIRST_TIMEOUT_MS, TITLE_RETRY_TIMEOUT_MS,
 } = await import('../../server/routes/chat.js');
 
 const chatSrc = readFileSync(join(root, 'server/routes/chat.js'), 'utf8');
@@ -285,7 +287,7 @@ check('B3-7 看着像 JSON 却取不出 title:按失败处理,不把 JSON 字面
 });
 check('B3-6 端点:先等原生 ai-title、<session> 转写、JSON 命中即跳过元话术', () => {
   const title = chatSrc.slice(chatSrc.indexOf("router.post('/chat/title'"), chatSrc.indexOf('const childEnv = { ...process.env };'));
-  assert.ok(/await waitForAiTitle\(jsonlSid\)/.test(title), '兜底必须先等原生落盘的 ai-title,否则短回合白起一个进程');
+  assert.ok(/await waitForAiTitle\(jsonlSid, TITLE_WAIT_NATIVE_MS\)/.test(title), '兜底必须先等原生落盘的 ai-title,否则短回合白起一个进程');
   assert.ok(/<session>\\n\$\{sessionText\}\\n<\/session>/.test(title), 'user 消息未照抄原生的 <session> 转写');
   assert.ok(/\.slice\(0, 1000\)/.test(title), '会话正文未按原生上限 1000 字符截断');
   assert.ok(/parsed\.json && parsed\.title/.test(chatSrc), 'JSON 解析成功时必须跳过元话术启发式(会误杀长英文标题)');
@@ -348,13 +350,66 @@ check('B7-2 拿到标题就不重跑(含答成散文的情况:换模型多半还
   assert.equal(meta.title, FB.slice(0, 24), '但散文仍要退化成首条消息');
 });
 check('B7-3 端点在小快档失败时用会话模型重跑一次(且只一次)', () => {
-  assert.ok(/let r = decide\(await runTitleOnce\(fastModel\)\);/.test(chatSrc), '第一次必须用小快档模型');
-  assert.ok(/if \(!r\.ok && sessionModel && sessionModel !== fastModel\) \{\s*\n\s*r = decide\(await runTitleOnce\(sessionModel\)\);/.test(chatSrc),
+  assert.ok(/let r = decide\(await runTitleOnce\(fastModel, TITLE_FIRST_TIMEOUT_MS\)\);/.test(chatSrc), '第一次必须用小快档模型');
+  assert.ok(/if \(!r\.ok && sessionModel && sessionModel !== fastModel\) \{\s*\n\s*r = decide\(await runTitleOnce\(sessionModel, TITLE_RETRY_TIMEOUT_MS\)\);/.test(chatSrc),
     '缺「小快档失败 → 换会话模型重跑」:settings 里的 ANTHROPIC_DEFAULT_HAIKU_MODEL 若是残值,'
     + '原生此时同样写不出 ai-title,用户彻底没标题');
   // 防循环:重跑条件里必须有 sessionModel !== fastModel(相同就没有第二个候选可试)
   assert.ok(/sessionModel !== fastModel/.test(chatSrc), '重跑没有防循环条件');
   assert.equal((chatSrc.match(/runTitleOnce\(/g) || []).length, 2, '恰好两处调用(多于两次 = 可能循环重跑)');
+});
+
+// ── r90 复验:快照 flag 的空路径门 / 端点总预算 / 探测同源 ─────────────────
+check('B8-1 claudePath 为空(SDK 回落自带 CLI)一律不加 --system-prompt-snapshot', () => {
+  // 自带 CLI 的版本写死在 SDK 的 package.json(claudeCodeVersion),与 PATH 上装的无关;
+  // 它不认这个 flag,收到就 `error: unknown option` 退进程 = 每一轮对话都失败。
+  // 注入恒 true 的探测:空路径下**仍然**不能加 —— 门必须在探测之前短路。
+  const yes = () => true;
+  assert.equal(snapshotFlagOn(null, true, yes), false, 'claudePath=null 仍加 flag → Windows npm 装 claude 时每轮对话崩');
+  assert.equal(snapshotFlagOn('', true, yes), false);
+  assert.equal(snapshotFlagOn(undefined, true, yes), false);
+  // 另两道门照旧
+  assert.equal(snapshotFlagOn('/usr/bin/claude', false, yes), false, 'env 没开不能加');
+  assert.equal(snapshotFlagOn('/usr/bin/claude', true, () => false), false, 'CLI 不认不能加');
+  assert.equal(snapshotFlagOn('/usr/bin/claude', true, yes), true);
+});
+check('B8-2 SDK 捆绑 CLI 的版本不支持该 flag,且与 PATH 上装的无关(本机取证)', () => {
+  const sdkPkg = JSON.parse(readFileSync(join(root, 'node_modules/@anthropic-ai/claude-agent-sdk/package.json'), 'utf8'));
+  assert.ok(/^2\.1\.(19|1\d|2[0-4])/.test(String(sdkPkg.claudeCodeVersion || '')),
+    `SDK 捆绑 CLI 版本变成 ${sdkPkg.claudeCodeVersion} —— 若已 ≥2.1.25x 可以放宽空路径门,先复核`);
+});
+check('B8-3 面板显示口径 = 执行口径(同一个函数、同一个入参)', () => {
+  assert.ok(/cliSnapshotSupported: snapshotFlagOn\(resolveSdkClaude\(\), true\)/.test(settingsSrc),
+    '面板另算一套判据 → 会出现"显示支持但实际不加"');
+  assert.ok(/if \(snapshotFlagOn\(claudePath, resolveSnapshotOn\(\)\)\) \{/.test(chatSrc), 'spawn 处未走同一个门');
+  assert.ok(/SDK 自带的 claude 运行/.test(panelSrc), '面板未说明「经 SDK 自带 CLI 运行」这一成因');
+});
+check('B8-4 标题端点总预算 ≤30s', () => {
+  assert.ok(TITLE_WAIT_NATIVE_MS + TITLE_FIRST_TIMEOUT_MS + TITLE_RETRY_TIMEOUT_MS <= 30000,
+    `等原生 ${TITLE_WAIT_NATIVE_MS} + 首次 ${TITLE_FIRST_TIMEOUT_MS} + 重跑 ${TITLE_RETRY_TIMEOUT_MS} > 30s`);
+  assert.ok(TITLE_RETRY_TIMEOUT_MS < TITLE_FIRST_TIMEOUT_MS, '重跑该比首次短(重跑只在首次快速报错后发生)');
+  assert.ok(/const timer = setTimeout\(\(\) => settle\(out\), timeoutMs\);/.test(chatSrc), '两次调用没有各自的超时');
+});
+check('B8-5 探测拿到的就是实际要执行的那个二进制(行为断言)', () => {
+  // cliSupportsFlag 必须把 claudePath **原样**交给探测(= 缓存键与被执行的二进制同一个串),
+  // 再由 claudeExecSpec 决定怎么执行它。任一环变形,Windows 上就会探错对象。
+  _resetSnapFlagCache();
+  const seen = [];
+  const wanted = resolveClaude()?.path || '';
+  cliSupportsFlag(wanted, '--tools', (p) => { seen.push(p); return FULL_HELP; });
+  assert.deepEqual(seen, [wanted], '探测收到的路径与传入的不是同一个');
+  assert.equal(claudeExecSpec(seen[0], ['--help']).file, process.platform === 'win32' && !/\.exe$/i.test(seen[0] || 'claude') ? 'cmd.exe' : (seen[0] || 'claude'),
+    '探测命令的可执行文件与 claudeExecSpec 的结论不一致');
+  _resetSnapFlagCache();
+  // 标题 spawn 处传的必须是 resolveClaude()?.path(与 claudeSpawn 同源),不是 resolveSdkClaude
+  // (后者在 Windows 对 .cmd 返 null,而 claudeSpawn 恰恰能经 cmd.exe 跑它)。
+  assert.ok(/buildTitleArgs\(\{ claudePath: resolveClaude\(\)\?\.path \|\| '', model \}\)/.test(chatSrc));
+  assert.notEqual(typeof resolveSdkClaude, 'undefined');
+});
+check('B8-6 compatKey 的 xdyn 与 suggest 同口径(都存解析后的布尔)', () => {
+  assert.ok(/xdyn: resolveExcludeDyn\(excludeDynamicSystemPrompt\),/.test(chatSrc),
+    "xdyn 存 'auto' 原值 → 切 provider 后可能复用到 excludeDynamicSections 与本次不符的常驻进程");
+  assert.ok(/suggest: resolvePromptSuggestions\(promptSuggestions\),/.test(chatSrc));
 });
 
 // ── ②a 原生标题落点判据:fixture 用真实 jsonl 行形态 ─────────────────────

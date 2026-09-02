@@ -17,9 +17,9 @@ import { updatePrefs, loadPrefs } from './prefs.js';
 import {
   SNAPSHOT_ENV_KEY, TOOL_SEARCH_ENV_KEY, PROMPT_CACHE_MODES,
   normalizePromptCacheMode, resolvePromptCacheOn, applyPromptCacheEnv, cliSupportsSnapshotFlag,
-  MCP_NONBLOCKING_ENV_KEY, promptCacheMemoEquals,
+  MCP_NONBLOCKING_ENV_KEY, promptCacheMemoEquals, snapshotFlagOn,
 } from '../utils/prompt-cache-env.js';
-import { resolveClaude } from '../utils/claude-resolver.js';
+import { resolveClaude, resolveSdkClaude } from '../utils/claude-resolver.js';
 
 const execFileP = promisify(execFile);
 const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
@@ -212,8 +212,9 @@ function promptCacheState(env, mode) {
     snapshotEnv: env[SNAPSHOT_ENV_KEY] ?? null,
     toolSearchEnv: env[TOOL_SEARCH_ENV_KEY] ?? null,
     mcpNonblockingEnv: env[MCP_NONBLOCKING_ENV_KEY] ?? null,
-    // 只作面板提示用;真正决定加不加 flag 的是 chat.js spawn 处的同一个探测(同一份缓存)。
-    cliSnapshotSupported: cliSupportsSnapshotFlag(resolveClaude()?.path || ''),
+    // 只作面板提示用;真正决定加不加 flag 的就是这个函数(chat.js spawn 处调的是同一个),
+    // 入参也用同一个 resolveSdkClaude —— 显示"支持"而实际不加(或反过来)是最难查的那类不一致。
+    cliSnapshotSupported: snapshotFlagOn(resolveSdkClaude(), true),
   };
 }
 
