@@ -79,32 +79,40 @@ export function promptCacheMemoEquals(a, b) {
     && (a?.mcpNonblocking ?? null) === (b?.mcpNonblocking ?? null);
 }
 
-// ── CLI 能力探测:--system-prompt-snapshot ────────────────────────────────
-// 该 flag 只有 2.1.25x 起才有。老版本收到会 `error: unknown option` 直接退进程
-// (实测 2.1.252:`claude --system-prompt-snapshot on -p hi` 立刻报错退出),
-// 而 CLAUDE_CODE_CARVED_SLATE 这个 env 键在老版本上无害(2.1.252 带它照常跑)。
-// 所以 env 照写、flag 必须按版本门控,否则老 CLI 用户一切第三方就全线起不来。
+// ── CLI 能力探测 ─────────────────────────────────────────────────────────
+// 老 CLI 收到不认识的 flag 会 `error: unknown option` 直接退进程(实测 2.1.252:
+// `claude --system-prompt-snapshot on -p hi` 立刻报错退出),而对应的 env 键在老版本上
+// 无害。所以 env 照写、flag 必须按版本门控,否则老 CLI 用户一切第三方就全线起不来。
 //
 // 判据用 `--help` 输出里有没有这个 flag(不能拿 `--flag --help` 试:help 会短路在
-// 参数校验之前,老版本照样打出 Usage)。按二进制路径缓存一次;探测失败/超时一律
-// 按「不支持」处理 —— 少一半优化远好过让对话起不来。
+// 参数校验之前,老版本照样打出 Usage)。**按二进制路径缓存整份 help 文本**,同一个
+// 二进制探多少个 flag 都只跑一次子进程;探测失败/超时一律按「不支持」处理 ——
+// 少一半优化远好过让对话起不来。
 // ponytail: 进程生命周期内的 Map 缓存,不做 TTL;换 claude 版本要重启 GUI 才重探,
 //           与仓内 subscription-usage.js 的 userAgent() 同口径。
-const _snapFlagCache = new Map();
+const _helpCache = new Map();
 
 function defaultHelpProbe(claudePath) {
   return String(execFileSync(claudePath || 'claude', ['--help'], { timeout: 5000, encoding: 'utf8' }));
 }
 
-// probe 可注入(单测直接喂 help 文本);返回 true 才允许给 CLI 加该 flag。
-export function cliSupportsSnapshotFlag(claudePath, probe = defaultHelpProbe) {
+// 通用 flag 探测。flag 传全称(含 `--`)。probe 可注入(单测直接喂 help 文本)。
+// 用后界断言收尾,避免 `--system-prompt` 被 `--system-prompt-snapshot` 误判成支持。
+export function cliSupportsFlag(claudePath, flag, probe = defaultHelpProbe) {
   const key = String(claudePath || '');
-  if (_snapFlagCache.has(key)) return _snapFlagCache.get(key);
-  let ok = false;
-  try { ok = /--system-prompt-snapshot/.test(probe(key)); } catch { ok = false; }
-  _snapFlagCache.set(key, ok);
-  return ok;
+  if (!_helpCache.has(key)) {
+    let help = '';
+    try { help = String(probe(key) || ''); } catch { help = ''; }
+    _helpCache.set(key, help);
+  }
+  const help = _helpCache.get(key);
+  if (!help) return false;
+  return new RegExp(`${flag}(?![\\w-])`).test(help);
+}
+
+export function cliSupportsSnapshotFlag(claudePath, probe = defaultHelpProbe) {
+  return cliSupportsFlag(claudePath, '--system-prompt-snapshot', probe);
 }
 
 // 单测用:清掉探测缓存(生产代码不调用)。
-export function _resetSnapFlagCache() { _snapFlagCache.clear(); }
+export function _resetSnapFlagCache() { _helpCache.clear(); }
