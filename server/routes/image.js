@@ -892,7 +892,9 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
           onProgress: (p) => { updateHistoryEntry(jobId, { progress: p }).catch(() => {}); },
         });
         if (polled.cancelled) return; // 取消是终态,状态已由 cancel 端点写
-        if (polled.cost !== null && polled.cost !== undefined) money = { cost: polled.cost, creditsCost: polled.creditsCost };
+        // 两个键【各自】判空:extractTaskState 也是分别取的,而界面优先显示 creditsCost ——
+        // 只按 cost 开门的话,上游只给 credits_cost 时实付就一个字都显示不出来。
+        if (polled.cost != null || polled.creditsCost != null) money = { cost: polled.cost ?? null, creditsCost: polled.creditsCost ?? null };
         if (polled.error) return fail(polled.error, money);
         // 一个任务可能出多张图(MJ 实测 4 张单图):逐张走下面同一条下载链路,落多个文件。
         pickedList = polled.urls.map((url) => ({ mime: '', url }));

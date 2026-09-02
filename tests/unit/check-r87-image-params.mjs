@@ -45,6 +45,9 @@ const TMP_HOME = mkdtempSync(join(tmpdir(), 'cgui-r87-home-'));
 const SAVE_DIR = mkdtempSync(join(tmpdir(), 'cgui-r87-save-'));
 process.env.HOME = TMP_HOME;
 process.env.USERPROFILE = TMP_HOME;
+// 轮询间隔调到 200ms(默认 5s):t8 要跑一个真任务到终态,不改这个每次要多等十几秒。
+// 必须在 import server/routes/image.js 之前设 —— 那个常量是模块加载时读的。
+process.env.CGUI_IMAGE_TASK_POLL_INTERVAL_MS = '200';
 mkdirSync(join(TMP_HOME, '.claude-gui'), { recursive: true });
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -559,6 +562,43 @@ const NEW_PROVIDER = {
   const q4 = await api(`/image/pricing?providerId=${dead.json.id}`);
   assert.equal(q4.status, 200, 't7【上游挂掉】仍是 200');
   assert.equal(q4.json.credits, null, 't7【上游挂掉】静默 null');
+}
+
+// ───────── 8. 实付端到端:上游【只给 credits_cost】时,条目里也得有实付 ─────────
+// extractTaskState 把 cost 与 credits_cost 【分别】判空,而界面优先显示 creditsCost。
+// runImageJob 里那道门若只看 cost,上游只给 credits_cost 就一个字都显示不出来 ——
+// 这条用例是那道门的牙(单测 t4 只到纯函数,门在路由里)。
+{
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const up = `http://127.0.0.1:${PORT}/up`;
+  // 路由在 listen 之后追加(express 支持);路径与 /api 不重叠。
+  app.post('/up/v1/images/generations', (_req, res) => res.json({ code: 200, data: [{ task_id: 'task_r87_credits' }] }));
+  app.get('/up/v1/tasks/:id', (_req, res) => res.json({
+    code: 200,
+    // 【故意只给 credits_cost,不给 cost】—— 这正是那道门会漏掉的形态。
+    data: { status: 'completed', progress: 100, credits_cost: 0.0479, result: { images: [{ url: [`${up}/img.png`] }] } },
+  }));
+  app.get('/up/img.png', (_req, res) => res.type('image/png').send(PNG));
+
+  const mk = await api('/image-providers', {
+    method: 'POST',
+    body: JSON.stringify({ ...NEW_PROVIDER, baseURL: `${up}/v1`, dialect: 'apimart', size: '16:9' }),
+  });
+  assert.equal(mk.status, 200, `t8: 任务制假上游 provider 建得起来(${JSON.stringify(mk.json)})`);
+  const sub = await api('/image/generate', { method: 'POST', body: JSON.stringify({ providerId: mk.json.id, prompt: '一只猫' }) });
+  assert.equal(sub.status, 200, `t8: 提交受理(${JSON.stringify(sub.json)})`);
+
+  let entry = null;
+  for (const deadline = Date.now() + 15_000; Date.now() < deadline;) {
+    const h = await api('/image/history');
+    entry = (h.json?.history || []).find((e) => e.id === sub.json.jobId) || null;
+    if (entry && entry.status !== 'running') break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(entry, 't8: 历史里找得到这条任务');
+  assert.equal(entry.status, 'done', `t8: 任务跑到完成(${entry.error || ''})`);
+  assert.equal(entry.creditsCost, 0.0479, 't8【只给 credits_cost】实付照样落进条目(那道门必须两个键各自判空)');
+  assert.equal(entry.cost, null, 't8: 上游没给 cost 就是 null,不是 0');
 }
 
 await new Promise((r) => srv.close(r));
