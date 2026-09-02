@@ -35,12 +35,14 @@ const {
   cliSupportsFlag, cliSupportsSnapshotFlag, _resetSnapFlagCache,
 } = await import('../../server/utils/prompt-cache-env.js');
 const { readSessionTitles } = await import('../../server/services/session-reader.js');
+const { claudeExecSpec } = await import('../../server/utils/claude-resolver.js');
 const {
   buildTitleArgs, parseTitleJson, resolveTitleModel, resolvePromptSuggestions, resolveExcludeDyn,
   TITLE_SYSTEM_PROMPT,
 } = await import('../../server/routes/chat.js');
 
 const chatSrc = readFileSync(join(root, 'server/routes/chat.js'), 'utf8');
+const pceSrc = readFileSync(join(root, 'server/utils/prompt-cache-env.js'), 'utf8');
 const settingsSrc = readFileSync(join(root, 'server/routes/settings.js'), 'utf8');
 const panelSrc = readFileSync(join(root, 'client/src/components/SettingsPanel.jsx'), 'utf8');
 const storeSrc = readFileSync(join(root, 'client/src/stores/sessionStore.js'), 'utf8');
@@ -142,14 +144,34 @@ check('B2-1 全支持时:零工具 + 空 MCP + 不加载技能 + 自写短 syste
   assert.equal(argPair(args, '--model'), 'deepseek-chat');
   assert.ok(!args.includes('--permission-mode'), '零工具时无权限面,plan 只往 system 多塞一段');
 });
-check('B2-2 老 CLI 不认的 flag 一个都不加(unknown option 会直接退进程)', () => {
+check('B2-2 退化【只】发生在探测真失败时:探测抛错 → 一个 flag 都不加,但仍能起标题', () => {
   _resetSnapFlagCache();
-  const args = buildTitleArgs({ claudePath: '/probe/old', model: 'x' });
-  // 探测走真实 execFileSync 打不到 /probe/old → 抛错 → 一律按不支持
+  // 显式注入抛错的 probe(而不是靠"路径不存在"这种间接条件):模拟老 CLI / 二进制跑不起来。
+  cliSupportsFlag('/probe/throws', '--tools', () => { throw new Error('ENOENT'); });
+  const args = buildTitleArgs({ claudePath: '/probe/throws', model: 'x' });
   for (const f of ['--tools', '--mcp-config', '--strict-mcp-config', '--disable-slash-commands', '--system-prompt']) {
     assert.ok(!args.includes(f), `${f} 未过探测门`);
   }
   assert.deepEqual(args, ['-p', '--no-session-persistence', '--model', 'x'], '探测失败时仍要能起标题(退化,不是失效)');
+  // 反面:同一路径换成能探到的 help,五个 flag 必须全回来 —— 否则"永远退化"也能骗过上面。
+  _resetSnapFlagCache();
+  cliSupportsFlag('/probe/throws', '--tools', () => FULL_HELP);
+  const ok = buildTitleArgs({ claudePath: '/probe/throws', model: 'x' });
+  for (const f of ['--tools', '--mcp-config', '--strict-mcp-config', '--disable-slash-commands', '--system-prompt']) {
+    assert.ok(ok.includes(f), `探测成功时 ${f} 必须加上`);
+  }
+});
+check('B2-9 探测命令经 claudeExecSpec:Windows 的 .cmd 走 cmd.exe /c', () => {
+  assert.deepEqual(claudeExecSpec('C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd', ['--help'], 'win32'),
+    { file: 'cmd.exe', args: ['/c', 'C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd', '--help'] },
+    'npm 装的 claude.cmd 裸 execFile 会 ENOENT → 探测恒失败 → 瘦身在 Windows 空转');
+  assert.deepEqual(claudeExecSpec('C:\\p\\claude.exe', ['--help'], 'win32'), { file: 'C:\\p\\claude.exe', args: ['--help'] });
+  assert.deepEqual(claudeExecSpec('', ['--help'], 'win32'), { file: 'cmd.exe', args: ['/c', 'claude', '--help'] }, '无扩展名 shim / 裸名同样要经 cmd.exe');
+  assert.deepEqual(claudeExecSpec('/usr/local/bin/claude', ['--help'], 'darwin'), { file: '/usr/local/bin/claude', args: ['--help'] });
+  assert.ok(/const spec = claudeExecSpec\(claudePath, \['--help'\]\);/.test(pceSrc),
+    'defaultHelpProbe 必须经 claudeExecSpec,裸 execFile 在 Windows 上探不动');
+  assert.ok(/buildTitleArgs\(\{ claudePath: resolveClaude\(\)\?\.path/.test(chatSrc),
+    '探测目标必须与 claudeSpawn 同源(resolveUserClaude 在 Windows 对 .cmd 返 null)');
 });
 check('B2-3 只支持一部分 flag 时逐个门控', () => {
   _resetSnapFlagCache();
@@ -241,7 +263,7 @@ check('B3-6 端点:先等原生 ai-title、<session> 转写、JSON 命中即跳�
   assert.ok(/<session>\\n\$\{sessionText\}\\n<\/session>/.test(title), 'user 消息未照抄原生的 <session> 转写');
   assert.ok(/\.slice\(0, 1000\)/.test(title), '会话正文未按原生上限 1000 字符截断');
   assert.ok(/parsed\.json && parsed\.title/.test(chatSrc), 'JSON 解析成功时必须跳过元话术启发式(会误杀长英文标题)');
-  assert.ok(/buildTitleArgs\(\{ claudePath: resolveUserClaude\(\)/.test(chatSrc), 'argv 未走 buildTitleArgs,或探测的不是实际 spawn 的二进制');
+  assert.ok(/buildTitleArgs\(\{ claudePath: resolveClaude\(\)\?\.path \|\| '', model \}\)/.test(chatSrc), 'argv 未走 buildTitleArgs,或探测的不是实际 spawn 的二进制');
 });
 
 // ── ② 标题模型:小快档映射优先,读不到回退会话模型 ──────────────────────────

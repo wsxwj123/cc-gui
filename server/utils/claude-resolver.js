@@ -350,11 +350,20 @@ export async function resolveClaudeAsync({ refresh = false } = {}) {
  */
 export function claudeCommand(args = []) {
   const hit = resolveClaude();
-  const bin = hit ? hit.path : 'claude';
-  if (isWin && !/\.exe$/i.test(bin)) {
-    return { file: 'cmd.exe', args: ['/c', bin, ...args] };
-  }
-  return { file: bin, args };
+  return claudeExecSpec(hit ? hit.path : 'claude', args);
+}
+
+/**
+ * claudeCommand 的纯函数内核:给定二进制路径直接组装 { file, args },不做解析。
+ * 需要探测【某个具体路径】(而不是当前解析结果)的地方用它 —— 例如
+ * utils/prompt-cache-env.js 的 `--help` 能力探测:Windows 上 npm 装出来的是
+ * claude.cmd,execFile 直接跑抛 ENOENT/EINVAL → 探测恒失败 → 所有按 flag 门控的
+ * 优化在 Windows 上静默失效。platform 可注入仅为可单测。
+ */
+export function claudeExecSpec(bin, args = [], platform = process.platform) {
+  const b = bin || 'claude';
+  if (platform === 'win32' && !/\.exe$/i.test(b)) return { file: 'cmd.exe', args: ['/c', b, ...args] };
+  return { file: b, args };
 }
 
 // ── R8-1 壳包识别 ─────────────────────────────────────────────

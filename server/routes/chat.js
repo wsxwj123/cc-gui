@@ -2462,7 +2462,9 @@ router.post('/chat/title', async (req, res) => {
     // 会被 prompt 里的换行(cmd 逐行解析截断)、`<session>` 的 <>(重定向符)、双引号 三重
     // cmd 元字符破坏 → prompt 残缺 → 标题在 Windows 恒失败(用户实报,mac 正常)。stdin 不经
     // cmd 参数解析,跨平台稳。实测 `claude -p`(无 prompt 参数)从 stdin 读 prompt 正常。
-    const titleArgs = buildTitleArgs({ claudePath: resolveUserClaude() || '', model });
+    // 探测目标必须与 claudeSpawn 实际执行的二进制同源:resolveUserClaude 在 Windows 上
+    // 对 .cmd/.bat 返回 null(SDK 驱动不了它们),拿它当探测路径会让整个瘦身在 Windows 空转。
+    const titleArgs = buildTitleArgs({ claudePath: resolveClaude()?.path || '', model });
     proc = claudeSpawn(titleArgs, {
       cwd: titleCwd,
       stdio: ['pipe', 'pipe', 'pipe'],

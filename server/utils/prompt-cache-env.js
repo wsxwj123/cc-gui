@@ -22,6 +22,7 @@
 // settings.json 与终端 claude / bot 共用 —— 这三个键在终端里同样生效,不是 GUI 私有开关。
 
 import { execFileSync } from 'node:child_process';
+import { claudeExecSpec } from './claude-resolver.js';
 
 export const SNAPSHOT_ENV_KEY = 'CLAUDE_CODE_CARVED_SLATE';
 export const TOOL_SEARCH_ENV_KEY = 'ENABLE_TOOL_SEARCH';
@@ -92,8 +93,12 @@ export function promptCacheMemoEquals(a, b) {
 //           与仓内 subscription-usage.js 的 userAgent() 同口径。
 const _helpCache = new Map();
 
+// 经 claudeExecSpec 组装:Windows 上 npm 装的 claude.cmd(以及 `where` 给的无扩展名
+// shim)不是 Node 能直接执行的文件,裸 execFile 抛 ENOENT/EINVAL → 探测恒失败 →
+// 所有按 flag 门控的优化在 Windows 上静默失效(标题瘦身、系统提示快照全不生效)。
 function defaultHelpProbe(claudePath) {
-  return String(execFileSync(claudePath || 'claude', ['--help'], { timeout: 5000, encoding: 'utf8' }));
+  const spec = claudeExecSpec(claudePath, ['--help']);
+  return String(execFileSync(spec.file, spec.args, { timeout: 5000, encoding: 'utf8' }));
 }
 
 // 通用 flag 探测。flag 传全称(含 `--`)。probe 可注入(单测直接喂 help 文本)。
