@@ -5,6 +5,7 @@ import { ArtifactPreview } from './ArtifactPreview.jsx';
 import { aggregateCost, formatCost } from '../utils/pricing.js';
 import { quotaItemText, quotaUsedPercent, quotaTone, resetTooltip } from '../utils/quotaFormat.js';
 import { useStore } from '../stores/sessionStore.js';
+import { addCacheUsage, formatHitPct, EMPTY_CACHE_USAGE } from '../utils/cacheStats.js';
 
 // R4-a:面板的费用口径 = 消息气泡的口径,只有 aggregateCost / computeCost 一个出口。
 // 服务端把 byModel 聚合成 { input, output, cacheRead, cacheWrite, calls },aggregateCost
@@ -368,6 +369,30 @@ export function UsagePanel() {
             <div className="text-[10px] text-ink-faint font-body mb-0.5">会话数</div>
             <div className="text-lg font-mono font-medium text-ink">{stats.total.sessionCount}</div>
           </div>
+          {/* r89:累计缓存命中率与累计未命中 token。命中率 = 缓存命中 /(输入+缓存命中+缓存写入);
+              未命中 = 输入 + 缓存写入,即按未命中价计费的那部分提示 token(第三方 provider 上
+              未命中价常是命中价的一二十倍,这个数字直接对应花掉的钱)。 */}
+          {(() => {
+            const c = addCacheUsage(EMPTY_CACHE_USAGE, {
+              input_tokens: stats.total.input,
+              cache_read_input_tokens: stats.total.cacheRead,
+              cache_creation_input_tokens: stats.total.cacheWrite || 0,
+            });
+            return (
+              <>
+                <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3"
+                  title="缓存命中率 = 缓存命中 /（输入 + 缓存命中 + 缓存写入）。统计口径为全部已落盘会话的累计值。">
+                  <div className="text-[10px] text-ink-faint font-body mb-0.5">缓存命中率</div>
+                  <div className="text-lg font-mono font-medium text-ink">{formatHitPct(c.hitPct)}</div>
+                </div>
+                <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3"
+                  title="未命中 = 输入 + 缓存写入，即按未命中价计费的提示 token 累计量。">
+                  <div className="text-[10px] text-ink-faint font-body mb-0.5">未命中 token</div>
+                  <div className="text-lg font-mono font-medium text-ink">{formatNum(c.miss)}</div>
+                </div>
+              </>
+            );
+          })()}
         </div>
       </div>
 
