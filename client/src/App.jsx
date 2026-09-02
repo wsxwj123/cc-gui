@@ -62,6 +62,7 @@ import { ModelPickModal, mergeModelLines, stripJunkModels } from './components/M
 import { SubagentView } from './components/SubagentView.jsx';
 import BtwWindow from './components/BtwWindow.jsx';
 import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyExactResult, relativeAgeLabel } from './utils/contextCache.js';
+import { readCacheUsage, addCacheUsage, formatHitPct, EMPTY_CACHE_USAGE } from './utils/cacheStats.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
@@ -7270,11 +7271,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return acc;
   })();
   // 总 token = 四字段之和;命中率 = 缓存命中 / 提示侧总量(输入+缓存命中+缓存写入)。
+  // r89:命中率/未命中量统一走 utils/cacheStats.js(与徽章本轮、用量面板同一口径)。
   const totalAllTokens = totalTokens.input + totalTokens.output + totalTokens.cacheRead + (totalTokens.cacheCreation || 0);
-  const promptSideTokens = totalTokens.input + totalTokens.cacheRead + (totalTokens.cacheCreation || 0);
-  const cacheHitPct = promptSideTokens > 0 ? (totalTokens.cacheRead / promptSideTokens) * 100 : 0;
+  const sessionCache = addCacheUsage(EMPTY_CACHE_USAGE, {
+    input_tokens: totalTokens.input,
+    cache_read_input_tokens: totalTokens.cacheRead,
+    cache_creation_input_tokens: totalTokens.cacheCreation || 0,
+  });
+  const cacheHitPct = sessionCache.hitPct;
   const usageDetailTitle = `输入 ${totalTokens.input.toLocaleString()} · 输出 ${totalTokens.output.toLocaleString()} · 缓存命中 ${totalTokens.cacheRead.toLocaleString()} · 缓存写入 ${(totalTokens.cacheCreation || 0).toLocaleString()}
-总 token = 四项之和;命中率 = 缓存命中 / (输入 + 缓存命中 + 缓存写入)`;
+总 token = 四项之和;命中率 = 缓存命中 / (输入 + 缓存命中 + 缓存写入)
+未命中(按未命中价计费的提示 token)= 输入 + 缓存写入 = ${sessionCache.miss.toLocaleString()}`;
   // Sum per-message cost. Skipping models we don't have prices for. Uses
   // currentProvider (subscribed above, before early returns) so cc switch
   // redirects (Claude → DeepSeek/MiMo) get the right backend price table.
@@ -7382,10 +7389,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     : resolvedWindow ? `${winLabel}（后端解析:provider 配置 / CLI 自报）`
     : measuredCtx?.windowTokens ? `${winLabel}（/context ${measuredCtx?.estimated ? '估算' : '实测'}缓存）`
     : `${winLabel}（按模型名内置推测）`;
+  // r89 本轮缓存命中率:必须用【单次 API 调用】的 usage(effectiveUsage = ctxUsage/流式 usage,
+  // 与徽章分子同源),不能用整轮累加的 result.usage —— 那会把 cache_read 加 N 遍。
+  const turnCache = readCacheUsage(effectiveUsage);
   const badgeInfo = {
     headerModel, models, toolCallCount,
     providerHintLabel, providerBaseUrl: currentProvider?.baseUrl || '',
     totalAllTokens, totalCostUsd, cacheRead: totalTokens.cacheRead, cacheHitPct, usageDetailTitle,
+    turnCacheHitPct: turnCache.hitPct, turnCacheTotal: turnCache.total, turnCacheRead: turnCache.read,
+    sessionCacheMiss: sessionCache.miss,
     bareAliasWindowUnknown, winSource,
   };
 
@@ -8459,7 +8471,20 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
           {info.cacheRead > 0 && (
             <div className="flex items-center gap-2 text-[11px] font-body" title={info.usageDetailTitle}>
               <span className="text-ink-faint w-14 shrink-0">缓存命中</span>
-              <span className="font-mono text-ink-muted">{info.cacheRead.toLocaleString()} · 命中率 {(info.cacheHitPct || 0).toFixed(1)}%</span>
+              <span className="font-mono text-ink-muted">{info.cacheRead.toLocaleString()} · 命中率 {formatHitPct(info.cacheHitPct || 0)}</span>
+            </div>
+          )}
+          {/* r89:本轮命中率 —— 单次 API 调用口径(与上方"当前占用"同一条 usage),
+              与上一行的会话累计口径并列,便于判断刚改的配置有没有把前缀打穿。 */}
+          {info.turnCacheTotal > 0 && (
+            <div className="flex items-center gap-2 text-[11px] font-body"
+              title={`本轮缓存命中率 = 本次 API 调用的 cache_read /（cache_read + cache_creation + input）
+本次命中 ${(info.turnCacheRead || 0).toLocaleString()} / 提示侧合计 ${(info.turnCacheTotal || 0).toLocaleString()}
+单次调用的 ctxUsage 缺失时回退到整轮累加口径，该轮数值会偏低
+会话累计未命中（按未命中价计费）${(info.sessionCacheMiss || 0).toLocaleString()}`}>
+              <span className="text-ink-faint w-14 shrink-0">本轮命中</span>
+              <span className="font-mono text-ink-muted">{formatHitPct(info.turnCacheHitPct || 0)}</span>
+              <span className="text-ink-ghost">· 累计未命中 {(info.sessionCacheMiss || 0).toLocaleString()}</span>
             </div>
           )}
         </div>
