@@ -56,7 +56,8 @@ check('A2-1 切第三方:写两个键,并把用户原值记进备忘', () => {
   const memo = applyPromptCacheEnv(env, true, null);
   assert.equal(env[SNAPSHOT_ENV_KEY], '1');
   assert.equal(env[TOOL_SEARCH_ENV_KEY], 'false');
-  assert.deepEqual(memo, { toolSearch: 'true' });
+  // r90 起备忘多记一项 MCP_CONNECTION_NONBLOCKING(此处用户没设过 → null)。
+  assert.deepEqual(memo, { toolSearch: 'true', mcpNonblocking: null });
 });
 check('A2-2 切回官方:移除快照键 + 还原用户原值 + 清空备忘', () => {
   const env = { [SNAPSHOT_ENV_KEY]: '1', [TOOL_SEARCH_ENV_KEY]: 'false' };
@@ -68,7 +69,7 @@ check('A2-2 切回官方:移除快照键 + 还原用户原值 + 清空备忘', (
 check('A2-3 用户原本没设过 ENABLE_TOOL_SEARCH:切回官方要把键删掉,不留 false', () => {
   const env = { ANTHROPIC_BASE_URL: 'x' };
   const memo = applyPromptCacheEnv(env, true, null);
-  assert.deepEqual(memo, { toolSearch: null });
+  assert.deepEqual(memo, { toolSearch: null, mcpNonblocking: null });
   assert.equal(env[TOOL_SEARCH_ENV_KEY], 'false');
   applyPromptCacheEnv(env, false, memo);
   assert.equal(TOOL_SEARCH_ENV_KEY in env, false);
@@ -77,7 +78,7 @@ check('A2-4 连续两次切第三方不能把自己写的 false 当成用户原�
   const env = { [TOOL_SEARCH_ENV_KEY]: 'true' };
   const m1 = applyPromptCacheEnv(env, true, null);
   const m2 = applyPromptCacheEnv(env, true, m1);
-  assert.deepEqual(m2, { toolSearch: 'true' });
+  assert.deepEqual(m2, { toolSearch: 'true', mcpNonblocking: null });
 });
 check('A2-5 用户在第三方下手动改回 true:切回官方不拿备忘覆盖', () => {
   const env = { [SNAPSHOT_ENV_KEY]: '1', [TOOL_SEARCH_ENV_KEY]: 'true' };
@@ -168,7 +169,8 @@ check('A1-8 能力探测:help 含该 flag → true;不含 → false;探测抛错
 check('A1-9 能力探测按二进制路径缓存一次(第二次不再跑探测)', () => {
   _resetSnapFlagCache();
   let calls = 0;
-  const probe = () => { calls += 1; return '--system-prompt-snapshot'; };
+  // r90:判据收紧成"只认 help 的选项列",探测文本要用真实选项行形态(缩进 2)。
+  const probe = () => { calls += 1; return '  --system-prompt-snapshot <on|off>  Record the system prompt once'; };
   assert.equal(cliSupportsSnapshotFlag('/probe/cache', probe), true);
   assert.equal(cliSupportsSnapshotFlag('/probe/cache', probe), true);
   assert.equal(calls, 1, `探测跑了 ${calls} 次,应只跑 1 次`);
@@ -178,15 +180,19 @@ check('A1-9 能力探测按二进制路径缓存一次(第二次不再跑探测)
   _resetSnapFlagCache();
 });
 check('A1-10 chat.js 的 extraArgs 必须同时过「env 开」与「CLI 支持」两道门', () => {
-  assert.ok(/if \(resolveSnapshotOn\(\) && cliSupportsSnapshotFlag\(claudePath\)\) \{/.test(chatSrc),
-    'extraArgs 未与 cliSupportsSnapshotFlag 串联(老 CLI 会 unknown option 退进程)');
-  // 门必须在 claudePath 解析之后 —— 否则探测的是空路径,判据与实际 spawn 的二进制不同源
-  assert.ok(chatSrc.indexOf('const claudePath = resolveUserClaude();') < chatSrc.indexOf('cliSupportsSnapshotFlag(claudePath)'));
+  // r90:门收敛进 snapshotFlagOn(env 开 + claudePath 非空 + 该二进制认这个 flag)。
+  assert.ok(/if \(snapshotFlagOn\(claudePath, resolveSnapshotOn\(\)\)\) \{/.test(chatSrc),
+    'extraArgs 未与 snapshotFlagOn 串联(老 CLI / SDK 自带 CLI 会 unknown option 退进程)');
+  // 门必须在 claudePath 解析之后 —— 否则判据与实际 spawn 的二进制不同源
+  assert.ok(chatSrc.indexOf('const claudePath = resolveUserClaude();') < chatSrc.indexOf('snapshotFlagOn(claudePath'));
 });
 check('A1-11 端点把 CLI 支持与否回给面板,面板据此提示', () => {
-  assert.ok(/cliSnapshotSupported: cliSupportsSnapshotFlag\(/.test(settingsSrc), '端点未回 cliSnapshotSupported');
+  // r90:显示口径改用与执行同一个 snapshotFlagOn(入参同为 resolveSdkClaude)。
+  assert.ok(/cliSnapshotSupported: snapshotFlagOn\(resolveSdkClaude\(\), true\)/.test(settingsSrc), '端点未回 cliSnapshotSupported');
   assert.ok(/state\.cliSnapshotSupported === false/.test(panelSrc), '面板未按 CLI 支持与否分支');
-  assert.ok(/不支持系统提示快照/.test(panelSrc), '面板缺不支持时的说明文案');
+  assert.ok(/当前不启用系统提示快照/.test(panelSrc), '面板缺不支持时的说明文案');
+  // r90:两种成因都要说 —— 版本不够 / 经 SDK 自带的 claude 运行(Windows npm 安装即如此)
+  assert.ok(/SDK 自带的 claude 运行/.test(panelSrc), '面板未说明「经 SDK 自带 CLI 运行」这一成因');
 });
 check('A1-7 设置面板有开关 + 搜索索引条目', () => {
   assert.ok(/function PromptCacheSnapshotToggle\(/.test(panelSrc), '缺开关组件定义');

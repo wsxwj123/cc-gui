@@ -48,12 +48,12 @@ const SETTINGS_INDEX = [
   // 默认 tab 里,这条路径才无条件成立。
   { id: 'set-genui', tab: 'general', title: '生成式界面（cgui-ui）', keys: 'genui cgui-ui dsh-ui 生成式 界面 组件 渲染 图表 表单 技能 skill' },
   { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
-  { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入' },
+  { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入 自动 第三方 费用' },
   { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
   { id: 'set-restore-last', tab: 'session', title: '启动时恢复上次会话', keys: '启动 恢复 上次 会话 Home 首页 restore' },
   { id: 'set-max-budget', tab: 'session', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
   { id: 'set-cache-opt', tab: 'session', title: '缓存优化', keys: '缓存 cache 前缀 动态 系统提示' },
-  { id: 'set-prompt-snapshot', tab: 'session', title: '静态系统提示快照', keys: '缓存 cache 前缀 快照 snapshot 系统提示 carved slate toolsearch 工具搜索' },
+  { id: 'set-prompt-snapshot', tab: 'session', title: '静态系统提示快照', keys: '缓存 cache 前缀 快照 snapshot 系统提示 carved slate toolsearch 工具搜索 mcp 阻塞 连接 nonblocking' },
   { id: 'set-auto-compact', tab: 'session', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
   { id: 'set-small-fast-model', tab: 'session', title: '轻量快速模型', keys: '模型 标题 haiku 快速 small fast' },
   // 修正批#7:Provider tab 已删——管理迁独立弹窗(顶栏 Provider 切换卡片底部「管理」
@@ -2133,9 +2133,6 @@ function MaxBudgetInput() {
   );
 }
 
-// 输入预测(SDK promptSuggestions):回合结束后模型追发一条对下一步输入的预测,
-// 输入框上方显示为可点击建议。生成蹭本回合的前缀缓存,成本极低;若不需要可关闭
-// (关闭后回合结束即收流,不再有建议等待窗)。
 function WorktreeVisibilityToggle() {
   // 纯前端偏好(localStorage),不进 settings.json。改动广播事件,左侧项目列表(App.jsx)监听同步。
   const [on, setOn] = useState(() => { try { return localStorage.getItem('cgui-show-worktree-projects') === '1'; } catch { return false; } });
@@ -2184,20 +2181,28 @@ function RestoreLastSessionToggle() {
   );
 }
 
+// 输入预测(SDK promptSuggestions):回合结束后模型追发一条对下一步输入的预测,
+// 输入框上方显示为可点击建议。它是**一次独立的主模型调用**:整段上下文按缓存命中价
+// 重读 + ~450 token 未命中 + 少量输出,官方订阅制下无感,第三方按 token 计费则每回合
+// 都在花钱 —— 故三态默认 'auto' = 官方开、第三方关(server 的 resolvePromptSuggestions
+// 按 settings.json 的 provider 类别判(isOfficialAnthropic))。关闭后回合结束即收流,不再有建议等待窗。
 function PromptSuggestionsToggle() {
-  const on = useStore((s) => s.promptSuggestions);
-  const setOn = useStore((s) => s.setPromptSuggestions);
+  const val = useStore((s) => s.promptSuggestions); // 'auto' | true | false
+  const setVal = useStore((s) => s.setPromptSuggestions);
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">输入预测<EffectBadge level="immediate" /></div>
-        <div className="text-[10.5px] text-ink-faint font-body">回合结束后由模型预测下一条可能的输入,在输入框上方显示为建议,点击即发送、也可填入编辑。预测蹭本回合的缓存生成,成本极低;首轮、规划模式、以及本回合出现过 API 错误时不产生建议</div>
+        <div className="text-[10.5px] text-ink-faint font-body">回合结束后由模型预测下一条可能的输入,在输入框上方显示为建议,点击即发送、也可填入编辑。首轮、规划模式、以及本回合出现过 API 错误时不产生建议。代价是每个回合多打一次主模型:整段上下文按缓存命中价重读一遍,加约 450 token 未命中与少量输出。「自动」= 官方渠道开启、第三方 provider 关闭(第三方按 token 计费,长会话下这笔开销可观);手动选过「开」或「关」后一直按所选执行,不再随 provider 变</div>
       </div>
-      <button onClick={() => setOn(!on)}
-        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
-        title={on ? '已开启' : '已关闭'}>
-        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
-      </button>
+      <div className="shrink-0 flex items-center gap-1">
+        {[['auto', '自动'], [true, '开'], [false, '关']].map(([v, label]) => (
+          <button key={String(v)} onClick={() => setVal(v)}
+            className={`px-2 py-1 text-[11px] rounded-md font-body transition-colors ${val === v ? 'bg-accent text-on-accent' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2330,12 +2335,14 @@ function PromptCacheSnapshotToggle() {
           开启后,系统提示在会话首次建立时记录一次并逐字复用,git 状态等变化改以追加块补在请求末尾,
           进程冷启后前缀不再从头失配(假上游实测共享前缀 12.9% → 99.3%)。同时会写入 ENABLE_TOOL_SEARCH=false:
           ToolSearch 中途加载工具会重排工具列表、打断前缀缓存;关闭它的代价是 MCP 工具全部前置加载,长工具列表占用上下文。
+          还会写入 MCP_CONNECTION_NONBLOCKING=false:未开启时启动慢的 MCP server 会让工具列表在会话开头变动两次、
+          每次进程冷启的前两个请求都无法命中缓存;代价是首条消息会等最慢的 MCP 连上。
           「自动」= 第三方 provider 开启、官方渠道关闭。
-          这两项经环境变量写入 ~/.claude/settings.json,与终端 claude 及 bot 共用;
+          这三项经环境变量写入 ~/.claude/settings.json,与终端 claude 及 bot 共用;
           静态快照是 CLI 的灰度开关,行为可能随 CLI 版本变化,可随时关闭。
           {state ? `　当前:${state.on ? '已开启' : '未开启'}(${state.thirdParty ? '第三方 provider' : '官方渠道'})` : ''}
           {state && state.cliSnapshotSupported === false && (
-            <span className="text-amber-700">　当前 claude 版本不支持系统提示快照(需 2.1.25x 及以上),本项仅关闭 ToolSearch 生效。</span>
+            <span className="text-amber-700">　当前不启用系统提示快照:所装的 claude 版本不支持(需 2.1.25x 及以上),或当前经 SDK 自带的 claude 运行(Windows 上用 npm 安装时会走这条路)。本项仅关闭 ToolSearch 与 MCP 阻塞连接生效。</span>
           )}
         </div>
       </div>
