@@ -13,10 +13,12 @@ import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 import {
-  IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, I2I_MODES, buildImageRequest, extractImage,
+  IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, I2I_MODES, buildImageRequest, extractImages,
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
   geminiModelsRequest, extractTaskId, buildTaskPollRequest, extractTaskState,
   MJ_VERSIONS, MJ_SPEEDS, MJ_RATIO_RE, buildMjActionRequest,
+  IMAGE_DIALECTS, IMAGE_RESOLUTIONS, IMAGE_QUALITIES, IMAGE_OUTPUT_FORMATS,
+  IMAGE_BACKGROUNDS, IMAGE_MODERATIONS, IMAGE_N_MAX, imageDialect, estimateCredits, imageParams,
 } from '../utils/image-protocols.js';
 import { readCapped } from '../utils/read-capped.js';
 // r56 按 provider 生图代理:生图链路的三处外联(生成 POST / 图片下载 / 拉模型)统一
@@ -244,6 +246,16 @@ function publicView(p) {
     // r84:Midjourney 的具名结构化参数(仅 mj 协议下发)。空串 = 不指定该键。
     mjVersion: MJ_VERSIONS.includes(p.mjVersion) ? p.mjVersion : '',
     mjSpeed: MJ_SPEEDS.includes(p.mjSpeed) ? p.mjSpeed : '',
+    // r87:上游方言 + OpenAI 系结构化参数(仅 openai 协议下发)。存量条目无这些字段 →
+    // 方言回落 'openai'(= 升级前语义)、其余回落空(= 不下发该键)。
+    dialect: imageDialect(p),
+    resolution: IMAGE_RESOLUTIONS.includes(p.resolution) ? p.resolution : '',
+    quality: IMAGE_QUALITIES.includes(p.quality) ? p.quality : '',
+    outputFormat: IMAGE_OUTPUT_FORMATS.includes(p.outputFormat) ? p.outputFormat : '',
+    background: IMAGE_BACKGROUNDS.includes(p.background) ? p.background : '',
+    moderation: IMAGE_MODERATIONS.includes(p.moderation) ? p.moderation : '',
+    n: Number.isInteger(p.n) && p.n >= 1 && p.n <= IMAGE_N_MAX ? p.n : '',
+    nsfwCheck: p.nsfwCheck === true,
     extra: p.extra || null, hasKey: !!p.apiKey,
   };
 }
@@ -338,6 +350,35 @@ async function validateBody(body) {
   if (mjVersion && !MJ_VERSIONS.includes(mjVersion)) return { error: `Midjourney 版本必须是 ${MJ_VERSIONS.join(' / ')}` };
   const mjSpeed = body?.mjSpeed === undefined || body?.mjSpeed === null ? '' : String(body.mjSpeed);
   if (mjSpeed && !MJ_SPEEDS.includes(mjSpeed)) return { error: `Midjourney 速度必须是 ${MJ_SPEEDS.join(' / ')}` };
+  // r87:OpenAI 系的结构化参数。这些值会【原样进请求体】,不做白名单就是"表单里能填什么
+  // 上游就收到什么";空串/未传 = 不指定(不下发该键)。取值范围出自两边的官方文档,
+  // 权威清单在 utils/image-protocols.js。
+  const dialect = body?.dialect === undefined || body?.dialect === null || body?.dialect === '' ? 'openai' : body.dialect;
+  if (!IMAGE_DIALECTS.includes(dialect)) return { error: `上游方言必须是 ${IMAGE_DIALECTS.join(' / ')}` };
+  const enums = [
+    ['resolution', IMAGE_RESOLUTIONS, '分辨率档'],
+    ['quality', IMAGE_QUALITIES, '质量'],
+    ['outputFormat', IMAGE_OUTPUT_FORMATS, '输出格式'],
+    ['background', IMAGE_BACKGROUNDS, '背景'],
+    ['moderation', IMAGE_MODERATIONS, '审核强度'],
+  ];
+  const params = {};
+  for (const [key, allowed, label] of enums) {
+    const raw = body?.[key] === undefined || body?.[key] === null ? '' : String(body[key]);
+    if (raw && !allowed.includes(raw)) return { error: `${label}必须是 ${allowed.join(' / ')}` };
+    params[key] = raw;
+  }
+  // 张数:空 = 不指定(按 1 出图);填了就必须是 1..4 的整数。
+  const rawN = body?.n;
+  let n = '';
+  if (rawN !== undefined && rawN !== null && rawN !== '') {
+    n = typeof rawN === 'number' ? rawN : Number(String(rawN).trim());
+    if (!Number.isInteger(n) || n < 1 || n > IMAGE_N_MAX) return { error: `图像数量必须是 1–${IMAGE_N_MAX} 的整数` };
+  }
+  if (body?.nsfwCheck !== undefined && body?.nsfwCheck !== null && typeof body.nsfwCheck !== 'boolean') {
+    return { error: '提交前预审必须是布尔值' };
+  }
+  const nsfwCheck = body?.nsfwCheck === true;
   // mj 的 size 是宽高比不是像素。新保存的当场拒(填错要即时可见);【存量条目不受这里管】——
   // 它们不经过保存,由协议层的同款守卫静默忽略掉非比例值(见 buildImageRequest 的 mj 分支)。
   const sizeStr = typeof size === 'string' ? size.trim() : '';
@@ -349,6 +390,10 @@ async function validateBody(body) {
       i2iMode,
       mjVersion,
       mjSpeed,
+      dialect,
+      ...params,
+      n,
+      nsfwCheck,
       name: name.trim(),
       protocol,
       baseURL: baseURL.trim().replace(/\/+$/, ''),
@@ -565,6 +610,71 @@ export async function saveImage(dir, baseName, buf) {
   throw e;
 }
 
+// ─────────────────── r87 报价代理:出图前的「预估约 X credits」 ───────────────────
+// apimart 的报价接口【免鉴权】(文档原文「本接口无需鉴权,不必传 Authorization」),
+// 但路径在 `/api/` 而不是 `/v1/` —— 要取 provider baseURL 的 origin 再拼,不能直接
+// `${baseURL}/api/pricing/model`。这里做成服务端代理有三个理由:走 provider 自己的代理
+// 链路(浏览器直连会被墙/被 CORS 挡)、不把 provider 配置逻辑搬去前端、能加缓存。
+//
+// 【绝不带 apiKey】:免鉴权接口带上密钥等于把它多送一个地方。
+// 【失败一律静默】:预估价是锦上添花,拿不到就不显示(响应恒 200 + credits:null),
+// 绝不因为报价查不到就把生图面板搞出一个红色错误。
+const PRICING_TTL_MS = 10 * 60 * 1000;
+const PRICING_TIMEOUT_MS = 8_000;
+const MAX_PRICING_BYTES = 1024 * 1024; // 实测单模型响应 ~8KB,1MB 是宽裕的上限
+const MAX_PRICING_CACHE = 32;
+const pricingCache = new Map(); // `${origin}|${model}` → { at, data }
+
+async function fetchPricing(provider) {
+  const model = String(provider.model || '').trim();
+  if (!model) return null;
+  let origin;
+  try { origin = new URL(provider.baseURL).origin; } catch { return null; }
+  const key = `${origin}|${model}`;
+  const hit = pricingCache.get(key);
+  if (hit && Date.now() - hit.at < PRICING_TTL_MS) return hit.data;
+  const url = `${origin}/api/pricing/model?model=${encodeURIComponent(model)}`;
+  // baseURL 在保存时已过 assertPublicBaseURL,这里同 origin 再验一次(便宜,且挡住
+  // "配置文件被手改成内网地址"这条路);回环放行与 baseURL 同口径(本机中转站是正当用法)。
+  try { await assertPublicBaseURL(url); } catch { return null; }
+  let data = null;
+  try {
+    const r = await undiciFetch(url, {
+      headers: { Accept: 'application/json', 'User-Agent': 'claude-gui' },
+      signal: AbortSignal.timeout(PRICING_TIMEOUT_MS),
+      redirect: 'manual',
+      ...dispatchOpts(provider.proxyUrl),
+    });
+    if (!r.ok || r.status >= 300) { await r.body?.cancel?.().catch(() => {}); return null; }
+    const raw = await readCapped(r, MAX_PRICING_BYTES).catch(() => null);
+    data = raw === null ? null : JSON.parse(raw);
+  } catch { return null; } // 网络不通 / 非 JSON / 超时:静默
+  pricingCache.set(key, { at: Date.now(), data });
+  if (pricingCache.size > MAX_PRICING_CACHE) pricingCache.delete(pricingCache.keys().next().value);
+  return data;
+}
+
+/**
+ * GET /api/image/pricing?providerId=… → { credits: number|null, n: number }
+ * 只有 apimart 方言才查(官方 Images API 没有报价接口)。credits 为 null = 不显示预估。
+ *
+ * 单价 × 张数:报价表给的是【一张】的价,n 张就是 n 倍。估价必须和真正会发出去的请求同口径,
+ * 所以 resolution / quality / n 一律取 imageParams 门控后的值 —— 否则模型不支持 quality 时
+ * 界面会按 high 报价、实际按上游默认出图,数字对不上。
+ */
+router.get('/image/pricing', async (req, res) => {
+  try {
+    const provider = (await readImageProviders()).find((p) => p.id === req.query?.providerId);
+    if (!provider || provider.protocol !== 'openai' || imageDialect(provider) !== 'apimart') {
+      return res.json({ credits: null, n: 1 });
+    }
+    const p = imageParams(provider);
+    const pricing = await fetchPricing(provider);
+    const per = estimateCredits(pricing, { size: provider.size, resolution: p.resolution, quality: p.quality });
+    res.json({ credits: per === null ? null : per * p.n, n: p.n });
+  } catch { res.json({ credits: null, n: 1 }); }
+});
+
 // ─────────────────── r82 任务制上游(apimart / Midjourney 形态)的轮询 ───────────────────
 // 这类上游提交只回 task_id,图要轮询 {base}/tasks/{id} 到终态才有。
 // 5s 一档 = 上游文档建议的 3–5s 里最省的一档(查询不计费,但 MJ 实测 60s 才出图,更密无意义)。
@@ -662,13 +772,14 @@ export async function pollTask({ taskId, provider, signal, onProgress }, io = {}
       // 上游主动取消不是失败(常见于平台侧敏感词拦截后的自动退款),措辞如实区分。
       const what = st.status === 'cancelled' ? '上游任务已取消' : '上游任务失败';
       const why = redactKey(st.message, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
-      return { error: `${what}${why ? `：${why}` : '（上游未给出原因）'}` };
+      // r87:失败/取消也把实付带出来 —— 平台侧敏感词拦截之类同样可能已经扣费。
+      return { error: `${what}${why ? `：${why}` : '（上游未给出原因）'}`, cost: st.cost, creditsCost: st.creditsCost };
     }
     if (st.status === 'completed') {
       if (!st.urls.length) {
         return { error: `上游任务已完成但没有返回可用的图片链接：${redactKey(raw, provider.apiKey).slice(0, 300)}` };
       }
-      return { urls: st.urls };
+      return { urls: st.urls, cost: st.cost, creditsCost: st.creditsCost };
     }
   }
 }
@@ -686,9 +797,12 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
   // TimeoutError 一类),靠 e.name 分不出"用户取消"还是"上游超时"。判据只能在 controller
   // 侧:cancelledJobs 里有它 = 是我们主动掐的,状态已由 cancel 端点写成 cancelled,
   // 这里就不再覆写任何错误文案(超时仍走下面的原文案,一字未改)。
-  const fail = (error) => (cancelledJobs.has(jobId) ? Promise.resolve() : updateHistoryEntry(jobId, {
-    status: 'error', error, tookMs: Date.now() - startedAt,
+  const fail = (error, extra) => (cancelledJobs.has(jobId) ? Promise.resolve() : updateHistoryEntry(jobId, {
+    status: 'error', error, tookMs: Date.now() - startedAt, ...(extra || {}),
   }).catch(() => {}));
+  // r87:任务制上游在查询响应里给【实付】(cost 金额 / credits_cost 积分)。取真实值比自己
+  // 估价可靠得多(估价要处理 6 种报价形态且只能说"约"),故落进条目由界面显示。
+  let money = null;
   const started = startedAt;
   try {
     // r56:本 provider 配了代理就整条链路都走它(生成 POST 与下面的图片下载)。
@@ -769,8 +883,11 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     // 同步协议:图就在这次响应里。取不到再看是不是【任务制】上游(apimart / MJ:提交只回
     // task_id),是就轮询到终态再取图。判据是【响应形态】而不是协议名 —— 同一个 openai
     // 协议接到任务制中转站时同样能出图,且同步命中时下面这一整段与 r82 之前逐字等价。
-    const sync = extractImage(provider.protocol, data);
-    let pickedList = sync ? [sync] : null;
+    // r87:取【全部】图而不是首张 —— n 可配之后 openai 同步响应会在 data[] 里回 n 张,
+    // 只取 data[0] 等于后面几张付了钱不落盘。下面那条 for 循环本来就是按多张写的
+    // (r82 给 MJ 一次 4 张用的),直接复用,落盘/撞名/上限/多图角标全部照旧。
+    const sync = extractImages(provider.protocol, data);
+    let pickedList = sync.length ? sync : null;
     if (!pickedList) {
       const taskId = extractTaskId(data);
       if (taskId) {
@@ -784,7 +901,10 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
           onProgress: (p) => { updateHistoryEntry(jobId, { progress: p }).catch(() => {}); },
         });
         if (polled.cancelled) return; // 取消是终态,状态已由 cancel 端点写
-        if (polled.error) return fail(polled.error);
+        // 两个键【各自】判空:extractTaskState 也是分别取的,而界面优先显示 creditsCost ——
+        // 只按 cost 开门的话,上游只给 credits_cost 时实付就一个字都显示不出来。
+        if (polled.cost != null || polled.creditsCost != null) money = { cost: polled.cost ?? null, creditsCost: polled.creditsCost ?? null };
+        if (polled.error) return fail(polled.error, money);
         // 一个任务可能出多张图(MJ 实测 4 张单图):逐张走下面同一条下载链路,落多个文件。
         pickedList = polled.urls.map((url) => ({ mime: '', url }));
       }
@@ -883,6 +1003,7 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
         file: files[0],
         previewUrl: `/api/image/preview?file=${encodeURIComponent(files[0])}`,
         bytes: totalBytes,
+        ...(money || {}), // r87 实付(任务制上游才有;同步协议一个键都不多写)
         // 一图任务(同步三协议)到这里与 r82 之前逐字一致:files 长度为 1 时不写这个字段。
         // 多图任务(MJ 一次 4 张)才有 files —— file/previewUrl 仍指第一张,既有 UI 不用改。
         ...(files.length > 1 ? { files } : {}),

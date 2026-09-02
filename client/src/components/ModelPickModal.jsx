@@ -14,7 +14,10 @@ import { filterModels, selectAllTargets } from '../utils/modelPick.js';
 // 纯逻辑在 utils/modelPick.js(单测直击),此处一并转出,调用方只 import 这一个模块即可。
 export { JUNK_MODEL_RE, filterModels, mergeModelLines, selectAllTargets, stripJunkModels } from '../utils/modelPick.js';
 
-export function ModelPickModal({ candidates = [], existing = [], onConfirm, onClose, title = '选择要添加的模型' }) {
+// r87 单选形态:传 onPick 就变成「点一行即选中并关闭」——「浏览」按钮用它给模型输入框
+// 回填一个值。此时 existing 只做"已在候选列表中"的标注,不再禁用整行(候选本身就是白名单,
+// 全禁用等于一行都点不了),底栏的确认/全选也不出现(单选没有"批量确认"这回事)。
+export function ModelPickModal({ candidates = [], existing = [], onConfirm, onPick, onClose, title = '选择要添加的模型' }) {
   const [query, setQuery] = useState('');
   const [checked, setChecked] = useState(() => new Set());
   const existingSet = useMemo(() => new Set(existing || []), [existing]);
@@ -62,7 +65,7 @@ export function ModelPickModal({ candidates = [], existing = [], onConfirm, onCl
         <div className="shrink-0 px-4 py-3 border-b border-canvas-deep bg-canvas space-y-2">
           <div className="flex items-center gap-2">
             <div className="flex-1 text-[13px] font-medium text-ink font-body">{title}</div>
-            <span className="text-[11px] text-ink-faint font-body">已选中 {checked.size} 个</span>
+            <span className="text-[11px] text-ink-faint font-body">{onPick ? `${filtered.length} 个` : `已选中 ${checked.size} 个`}</span>
             <button type="button" onClick={() => onClose?.()} className="p-1 rounded hover:bg-canvas-warm transition-colors">
               <X size={13} className="text-ink-faint" />
             </button>
@@ -70,7 +73,9 @@ export function ModelPickModal({ candidates = [], existing = [], onConfirm, onCl
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索模型…" autoFocus
             className="w-full bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-[12px] text-ink font-body focus:outline-none focus:border-accent/50" />
           <div className="text-[10px] text-ink-faint font-body leading-snug">
-            已在列表中的模型标为「已添加」，勾选新模型后点「确认」即并入；本弹窗只增不减，删除模型请在模型列表中操作。
+            {onPick
+              ? '点击任一模型即填入「模型」输入框并关闭本窗口。列表为该 provider 已保存的候选模型；要新增候选请用「拉取模型」。'
+              : '已在列表中的模型标为「已添加」，勾选新模型后点「确认」即并入；本弹窗只增不减，删除模型请在模型列表中操作。'}
           </div>
         </div>
         {/* 正文:整行可点(label 包裹 checkbox) */}
@@ -80,6 +85,20 @@ export function ModelPickModal({ candidates = [], existing = [], onConfirm, onCl
           )}
           {filtered.map((id, i) => {
             const added = existingSet.has(id);
+            // 单选形态:整行是一个按钮(键盘 Tab 可达、回车可选),没有勾选框。
+            if (onPick) {
+              return (
+                <button
+                  type="button"
+                  key={id}
+                  onClick={() => onPick(id)}
+                  className={`w-full text-left flex items-center gap-2 px-4 py-2 transition-colors hover:bg-canvas-warm ${i % 2 ? 'bg-canvas-warm/30' : ''}`}
+                >
+                  <span className="flex-1 min-w-0 text-[12px] font-mono text-ink truncate">{id}</span>
+                  {added && <span className="text-[10px] text-ink-faint font-body shrink-0">当前候选</span>}
+                </button>
+              );
+            }
             return (
               <label key={id}
                 className={`flex items-center gap-2 px-4 py-2 cursor-pointer transition-colors hover:bg-canvas-warm ${
@@ -92,20 +111,20 @@ export function ModelPickModal({ candidates = [], existing = [], onConfirm, onCl
             );
           })}
         </div>
-        {/* 底:左确认/取消,右全选/全不选(均只作用于当前筛选结果) */}
+        {/* 底:左确认/取消,右全选/全不选(均只作用于当前筛选结果)。单选形态只留「取消」。 */}
         <div className="shrink-0 px-4 py-3 border-t border-canvas-deep bg-canvas flex items-center gap-2">
-          <button type="button" disabled={checked.size === 0}
+          {!onPick && <button type="button" disabled={checked.size === 0}
             onClick={() => onConfirm?.([...checked])}
             className="px-3 py-1.5 rounded-md bg-accent text-on-accent text-[12px] font-body disabled:bg-canvas-deep disabled:text-ink-ghost transition-colors flex items-center gap-1">
             <Check size={12} />确认
-          </button>
+          </button>}
           <button type="button" onClick={() => onClose?.()}
             className="px-3 py-1.5 rounded-md border border-canvas-deep text-[12px] text-ink-soft font-body">取消</button>
           <div className="flex-1" />
-          <button type="button" onClick={selectAll}
-            className="px-2 py-1 rounded-md text-[11px] text-accent font-body hover:bg-canvas-warm transition-colors">全选</button>
-          <button type="button" onClick={clearAll}
-            className="px-2 py-1 rounded-md text-[11px] text-ink-soft font-body hover:bg-canvas-warm transition-colors">全不选</button>
+          {!onPick && <button type="button" onClick={selectAll}
+            className="px-2 py-1 rounded-md text-[11px] text-accent font-body hover:bg-canvas-warm transition-colors">全选</button>}
+          {!onPick && <button type="button" onClick={clearAll}
+            className="px-2 py-1 rounded-md text-[11px] text-ink-soft font-body hover:bg-canvas-warm transition-colors">全不选</button>}
         </div>
       </div>
     </div>,

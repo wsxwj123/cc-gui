@@ -240,12 +240,15 @@ if (failure) throw failure;
   const count = (s, re) => (s.match(re) || []).length;
   // 全文件基线(r51 之前实测值):安全锚点只许搬位置,不许被删被弱化。
   // r84:新增 /image/actions(MJ 二次操作)后多一处前置校验 → 基线 4 → 5。只增不减。
-  assert.equal(count(src, /await assertPublicBaseURL\(/g), 5, 't6: assertPublicBaseURL 调用点数量不变(校验/拉模型/生成前置/动作前置/下载复检)');
+  // r87:新增第五处外联(GET /api/pricing/model 报价查询,免鉴权)。它同样带 origin 前置校验、
+  // redirect:'manual' 与一处限量读 → 三条基线各 +1。语义仍是「只许加不许减」;既有链路原样
+  // 的真牙在下面的 runner 切片计数(一个都没变)。
+  assert.equal(count(src, /await assertPublicBaseURL\(/g), 6, 't6: assertPublicBaseURL 调用点数量不变(校验/拉模型/生成前置/动作前置/下载复检/报价查询)');
   // r82 新增第四处外联(pollTask 查任务状态)→ 两条基线各 +1 / +2:该处同样带
   // redirect:'manual',且错误分支与成功分支各限量读一次。锁的语义仍是"只许加不许减"
   // —— runner 切片内的锚点数(下面 t6)一个没变,证明既有链路原样。
-  assert.equal(count(src, /redirect: 'manual'/g), 4, "t6: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处)");
-  assert.equal(count(src, /readCapped\(/g), 6, 't6: readCapped 出现次数(r51 的 4 处 + r82 轮询 2 处)');
+  assert.equal(count(src, /redirect: 'manual'/g), 5, "t6: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处 + r87 报价 1 处)");
+  assert.equal(count(src, /readCapped\(/g), 7, 't6: readCapped 出现次数(r51 的 4 处 + r82 轮询 2 处 + r87 报价 1 处)');
   assert.ok(count(src, /redactKey\(/g) >= 7, 't6: redactKey 不少于原有 7 处(runner 顶层 catch 可再加)');
 
   const start = src.indexOf('async function runImageJob');

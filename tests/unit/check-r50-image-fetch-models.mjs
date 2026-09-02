@@ -55,7 +55,15 @@ const FORM_KEY = 'sk-r50-form-key-998877665544';
     // 「纯文生图零回归」的真牙已搬到 check-r54-image-refs.mjs 的 t0:三种协议在【无 refs】
     // 时的 {url, headers, body} 用 deepEqual 逐字钉死 —— 比源码哈希更强(哈希只挡改动,
     // deepEqual 挡的是行为)。改这里前先看那三条锚。
-    '1fe7c04fa0f8b29264e5f9d5316986638c58ba00562842621ced4aea0a44ea2e',
+    // r87 第五次更新:openai 分支按【上游方言】下发结构化参数(size 语义分叉 + resolution /
+    // quality / output_format / background / moderation / n / nsfw_check),gemini / chat / mj
+    // 三条分支与 openai 的 multipart edits 分支一行未动 —— 这一点由 check-r87-image-params
+    // 的 t1b 用【与 master 基线 e6668bc9 逐案 deepEqual 对跑】钉死,比哈希强得多。
+    // r87 审查后再更新一次(M1):这几个结构化参数改由 imageParams 一处门控 —— 除了方言,
+    // 还要按 (方言, 模型) 能力表判,能力表没放开的键一律不发(修"换模型后残值静默上路")。
+    // 覆盖面由 check-r87-image-params 的 t1c 钉死(dall-e-3 / apimart 中转渠道两形态 +
+    // extra 逃生口仍可覆盖),t1b 的基线对跑同样仍然是绿的。
+    '34c08fc954749016ebad50041709a883cfd1436436c8e6a2a4402564fb87479e',
     't2: buildImageRequest 一字未改(生成链路红线);若确需改动,连同 check-image-gen 与 check-r54-image-refs 的断言一起复核后再更新此基线',
   );
 }
@@ -228,10 +236,11 @@ if (failure) throw failure;
   assert.match(src, /鉴权失败/, 't4: auth 文案');
   assert.match(src, /手动填写模型名|手填/, 't4: unsupported 引导手填');
   // ④ 尺寸候选(三类形态并存)+ per-protocol 小字
-  // r56 起全量候选表搬到 client/src/utils/imageSizeCaps.js(能力表按模型过滤要拿它当输入,
-  // 且纯函数模块才能被单测直接 import);面板改成 import 它。断言原样不放松:同一份清单
-  // 逐项还在,只是换了个落点,外加一条"面板确实读的是它"。
-  const sizeSrc = readFileSync(join(REPO, 'client/src/utils/imageSizeCaps.js'), 'utf8');
+  // r56 起全量候选表搬到纯函数模块(能力表按模型过滤要拿它当输入,且纯函数模块才能被单测
+  // 直接 import);面板改成 import 它。r87 审查后再搬一次:能力表还要给协议层门控【下发】
+  // 哪些键,故唯一副本落 server/utils/image-caps.js,client 侧只剩一层再导出。
+  // 断言原样不放松:同一份清单逐项还在,只是换了个落点,外加一条"面板确实读的是它"。
+  const sizeSrc = readFileSync(join(REPO, 'server/utils/image-caps.js'), 'utf8');
   for (const v of ['auto', '1024x1024', '1920x1080', '2048x2048', '3840x2160', '4096x4096', '1K', '2K', '4K', '1:1', '16:9', '9:16', '4:3', '3:4', '21:9']) {
     assert.ok(sizeSrc.includes(`'${v}'`), `t4: 尺寸候选含 ${v}`);
   }

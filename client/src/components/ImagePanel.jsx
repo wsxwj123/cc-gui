@@ -10,8 +10,11 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickModal.jsx';
-// r56 尺寸候选按模型家族过滤(能力表在 utils/imageSizeCaps.js,未知模型回落全量)。
-import { SIZE_OPTIONS, sizeCapFor, sizeOptionsFor } from '../utils/imageSizeCaps.js';
+// r56/r87 生图参数能力表(utils/imageSizeCaps.js)。r87 起判据是 (上游方言, 模型) 二元 ——
+// apimart 的 size 是宽高比、OpenAI 官方的 size 是像素,同名反义,只看模型名判不了。
+import {
+  SIZE_OPTIONS, sizeCapFor, sizeOptionsFor, imageDialect, dialectForBaseURL, APIMART_RATIOS,
+} from '../utils/imageSizeCaps.js';
 // r84 多图条目:一个任务可能出多张图(MJ 一次 4 张),单图操作一律作用于【选中的那张】。
 import { entryFiles, pickedIndex, pickedFile, entryPreviewUrl, pickedPreviewUrl } from '../utils/imageEntry.js';
 // r58 上传参考图的 MIME:File.type 为空(Win 缺注册表映射)时按扩展名认,别一律说成 png。
@@ -39,7 +42,36 @@ const I2I_MODES = [
 // r52:models = 用户勾选的模型白名单(落盘在 provider 上),「模型」输入框的候选列表读它。
 // r56:proxyUrl = 本 provider 的正向代理地址(可选,留空直连)。
 // r84:mjVersion / mjSpeed = Midjourney 的具名结构化参数(仅 mj 协议下发,空 = 不指定)。
-const EMPTY_FORM = { id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', models: [], size: '', savePath: '', extra: '', i2iMode: 'edits', proxyUrl: '', mjVersion: '', mjSpeed: '' };
+// r87:dialect = 上游方言(openai 官方语义 / apimart);其余是 OpenAI 系的结构化参数,
+// 空 = 不下发该键。存量 provider 没有这些字段,服务端回显时补成同样的缺省值。
+const EMPTY_FORM = {
+  id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', models: [], size: '',
+  savePath: '', extra: '', i2iMode: 'edits', proxyUrl: '', mjVersion: '', mjSpeed: '',
+  dialect: 'openai', resolution: '', quality: '', outputFormat: '', background: '', moderation: '',
+  n: '', nsfwCheck: false,
+};
+
+// ─────────────────── r87 OpenAI 系参数的界面文案(取值与服务端白名单同源) ───────────────────
+// 服务端权威清单在 server/utils/image-protocols.js(IMAGE_QUALITIES / IMAGE_OUTPUT_FORMATS /
+// IMAGE_BACKGROUNDS / IMAGE_MODERATIONS / IMAGE_RESOLUTIONS),那里才是校验闸;界面这份只负责
+// 把值翻成人话,可选项本身按 (方言, 模型) 从能力表取,不同模型看到的档位不同。
+// 默认档一律写成空串 = 不下发该键,由上游取默认。
+const IMG_DIALECTS = [
+  { id: 'openai', label: 'OpenAI 官方语义（size 为像素，如 1536x1024）' },
+  { id: 'apimart', label: 'apimart（size 为宽高比，如 16:9；像素档位由分辨率字段控制）' },
+];
+const IMG_QUALITY_LABELS = {
+  low: 'low（速度最快，成本最低）', medium: 'medium', high: 'high（精度最高；4k + high 出图可能超过 120 秒）',
+};
+const IMG_FORMAT_LABELS = { png: 'png（支持透明背景）', jpeg: 'jpeg（不支持透明背景）', webp: 'webp（支持透明背景）' };
+const IMG_BACKGROUNDS = [['opaque', 'opaque（不透明）'], ['transparent', 'transparent（透明）']];
+const IMG_MODERATIONS = [['low', 'low（更宽松的审核强度）']];
+const IMG_COUNTS = [1, 2, 3, 4];
+// 折叠条摘要用:字段名 → 摘要里的短标签,顺序即摘要里的顺序(只列真正渲染出来的那几项)。
+const ADVANCED_FIELD_LABELS = [
+  ['quality', '质量'], ['outputFormat', '输出格式'], ['background', '背景'],
+  ['moderation', '审核强度'], ['nsfwCheck', '提交前预审'],
+];
 
 // ─────────────────────── r84 Midjourney 参数的界面取值(与服务端清单同源) ───────────────────────
 // 服务端权威清单在 server/utils/image-protocols.js 的 MJ_VERSIONS / MJ_SPEEDS,那里才是校验闸;
@@ -101,6 +133,18 @@ function readTaskView() {
   try { return localStorage.getItem(TASK_VIEW_KEY) === 'list' ? 'list' : 'grid'; } catch { return 'grid'; }
 }
 const shortTime = (ms) => (ms ? new Date(ms).toLocaleString() : '');
+// r87 费用:实付取上游任务响应里的 credits_cost / cost(权威值,不是本机估的)。
+// 小额居多(实测 0.0479),固定 4 位小数再去掉尾随 0;拿不到就返回空串,由调用方不显示。
+const fmtAmount = (n) => (typeof n === 'number' && Number.isFinite(n)
+  ? String(Number(n.toFixed(4))) : '');
+// 只在真的扣了钱时显示:上游对失败任务常回 cost 0,写一句「实付 0」既没信息量又占位置。
+const paidNote = (h) => {
+  const positive = (n) => (typeof n === 'number' && Number.isFinite(n) && n > 0 ? fmtAmount(n) : '');
+  const credits = positive(h?.creditsCost);
+  if (credits) return `实付 ${credits} credits`;
+  const usd = positive(h?.cost);
+  return usd ? `实付 ${usd}` : '';
+};
 // 已耗时:轮询每 1.5s 换一次 history 引用 → 重渲染时自然走秒,不额外起计时器。
 const elapsedSec = (h) => Math.max(0, Math.round((Date.now() - (h.startedAt || Date.now())) / 1000));
 
@@ -116,11 +160,26 @@ function ProviderForm({ initial, onDone, onCancel }) {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   const [pickCandidates, setPickCandidates] = useState(null); // r52:非空 = 勾选弹窗打开
+  const [browsing, setBrowsing] = useState(false); // r87:「浏览」打开的单选弹窗
+  // r87:方言按 baseURL 预选,用户手改过之后就不再跟着地址变(否则改个错字就把选择覆盖掉)。
+  const [dialectTouched, setDialectTouched] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelsMsg, setModelsMsg] = useState('');
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-  // r56:命中能力表才有小字说明(未命中 = 走全量候选,不提示)。随「模型」输入实时变。
-  const sizeCap = sizeCapFor(form.model);
+  // r56/r87:命中能力表才有小字说明(未命中 = 走全量候选,不提示)。随「方言 + 模型」实时变。
+  const dialect = imageDialect(form);
+  const sizeCap = sizeCapFor(dialect, form.model);
+  // apimart 方言下 size 是宽高比 → 换成芯片网格(与 r84 的 mj 同款写法);官方方言仍是像素输入框。
+  const ratioMode = form.protocol === 'openai' && dialect === 'apimart';
+  const has = (f) => !!sizeCap?.fields?.includes(f);
+  // 保存时用:能力表没放开的字段一律存空串(= 不下发)。见下面 body 里的注释。
+  const keep = (f, v) => (has(f) && v !== null && v !== undefined ? v : '');
+  // 透明背景与 jpeg 互斥(官方与 apimart 文档都写明);只提示不硬拦 —— 上游枚举将来可能放宽。
+  // 冲突提示只在【两个控件都真的渲染出来】时才有意义:该模型没放开这两个键时,这两个值
+  // 根本不会下发(imageParams 门掉),界面上也没有控件可改 —— 再弹一条红字就是让用户看着
+  // 一个他修不了、也不会发生的错误。存量残值(transparent + jpeg)切到中转渠道就是这形态。
+  const bgConflict = has('background') && has('outputFormat')
+    && form.background === 'transparent' && form.outputFormat === 'jpeg';
   // r84 mj:版本分档由已存的值反推(空 = 写实档的"默认")—— 存的仍是一个字符串,
   // 不引入第二个字段,省掉"两个控件必须配对填对"的一整类 bug。
   const mjGroup = MJ_VERSION_GROUPS.find((g) => g.versions.includes(form.mjVersion)) || MJ_VERSION_GROUPS[0];
@@ -198,6 +257,19 @@ function ProviderForm({ initial, onDone, onCancel }) {
         // r84:仅 mj 协议有意义;换成别的协议时一并清空,避免存量脏值在切回来时突然生效。
         mjVersion: form.protocol === 'mj' ? (form.mjVersion || '') : '',
         mjSpeed: form.protocol === 'mj' ? (form.mjSpeed || '') : '',
+        // r87:方言描述的是【上游本身】不是某个协议的参数,所以换协议不清空(换回来时它仍然
+        // 是对的)。其余结构化参数按【当前 (方言, 模型) 的能力表】过滤后再存:控件是按能力表
+        // 显隐的,换个模型控件就消失但值还在 —— 不清的话下次保存又把它写回去,而界面上根本
+        // 没有控件能清掉它。协议层同样有这道门(imageParams),这里是双保险,顺带让存量残值
+        // 在用户下一次保存时被清掉。要发能力表没列的键,写「附加参数」。
+        dialect: form.dialect || 'openai',
+        resolution: keep('resolution', form.resolution),
+        quality: keep('quality', form.quality),
+        outputFormat: keep('outputFormat', form.outputFormat),
+        background: keep('background', form.background),
+        moderation: keep('moderation', form.moderation),
+        n: keep('n', form.n) === '' ? '' : Number(form.n),
+        nsfwCheck: has('nsfwCheck') && form.nsfwCheck === true,
       };
       // apiKey 留空 = 保留服务端已存的 key(前端从不持有 key,不能被空字段抹掉)。
       if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
@@ -240,7 +312,16 @@ function ProviderForm({ initial, onDone, onCancel }) {
         </div>
       )}
       <label className="space-y-1 block"><span className={labelCls}>接口地址（baseURL，不含 /images/generations 等路径后缀）</span>
-        <input className={inputCls} value={form.baseURL} onChange={set('baseURL')} placeholder="https://api.example.com/v1" />
+        <input
+          className={inputCls}
+          value={form.baseURL}
+          onChange={(e) => {
+            const baseURL = e.target.value;
+            // r87:未手改过方言时按 host 预选(api.apimart.ai → apimart，其余官方语义)。
+            setForm((f) => ({ ...f, baseURL, ...(dialectTouched ? {} : { dialect: dialectForBaseURL(baseURL) }) }));
+          }}
+          placeholder="https://api.example.com/v1"
+        />
       </label>
       <div className="grid grid-cols-2 gap-2">
         <label className="space-y-1"><span className={labelCls}>密钥{form.id ? '（留空保留原密钥）' : ''}</span>
@@ -254,6 +335,13 @@ function ProviderForm({ initial, onDone, onCancel }) {
             </datalist>
             <button
               type="button"
+              onClick={() => setBrowsing(true)}
+              disabled={!(form.models || []).length}
+              title={(form.models || []).length ? '浏览全部候选模型（带搜索）' : '候选列表为空，请先「拉取模型」或直接在左侧输入模型名'}
+              className="shrink-0 px-2 rounded-md border border-canvas-deep text-[11.5px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50"
+            >浏览</button>
+            <button
+              type="button"
               onClick={loadModels}
               disabled={fetchingModels || (!form.id && !form.baseURL.trim())}
               title={!form.id && !form.baseURL.trim() ? '先填写接口地址（baseURL）' : form.id ? '使用已保存的接口地址与密钥拉取（表单中未保存的修改不生效）' : '按接口地址与密钥拉取可用模型'}
@@ -265,9 +353,63 @@ function ProviderForm({ initial, onDone, onCancel }) {
         </div>
       </div>
       {modelsMsg && <div className="text-[10px] text-ink-faint font-body leading-snug whitespace-pre-wrap break-all">{modelsMsg}</div>}
+      {/* r87:同一个 size 键在两边同名反义(官方 = 像素、apimart = 宽高比),同一个模型名
+          在两个上游上语义相反,所以参数面板与请求组装都必须按方言分叉。默认按接口地址预选。 */}
+      {form.protocol === 'openai' && (
+        <label className="space-y-1 block"><span className={labelCls}>上游方言</span>
+          <select
+            className={inputCls}
+            value={form.dialect || 'openai'}
+            onChange={(e) => { setDialectTouched(true); setForm((f) => ({ ...f, dialect: e.target.value })); }}
+          >
+            {IMG_DIALECTS.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+          </select>
+          <span className="text-[10px] text-ink-faint font-body leading-snug block">
+            按接口地址自动预选，可手动改。选错会让尺寸按另一种语义解析：官方语义下填 16:9 不是该上游期望的形态（官方只收像素串）。apimart 以比例为主，同时也接受像素串。
+          </span>
+        </label>
+      )}
       {/* r84:mj 的 size 语义与其余协议不同(宽高比而非像素),故整块换掉 —— 沿用像素输入框
           会让用户按 3840x2160 的直觉去填,上游把它当比例解析。 */}
-      {form.protocol === 'mj' ? (
+      {ratioMode ? (
+        <div className="space-y-1"><span className={labelCls}>宽高比（apimart 的 size 字段）</span>
+          <div className="flex flex-wrap gap-1">
+            {APIMART_RATIOS.filter(([r]) => sizeCap.options.includes(r)).map(([r, use]) => (
+              <button
+                type="button"
+                key={r}
+                onClick={() => setForm((f) => ({ ...f, size: f.size === r ? '' : r }))}
+                className={`px-2 py-1 rounded-md border text-[11px] font-body leading-tight ${form.size === r ? 'border-accent bg-accent/10 text-ink' : 'border-canvas-deep text-ink-soft hover:bg-canvas-deep/60'}`}
+              >
+                <span className="block font-mono">{r}</span>
+                <span className="block text-[9.5px] text-ink-faint">{use}</span>
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-[10.5px] text-ink-faint font-body">自定义</span>
+            <input
+              className={`${inputCls} w-16 text-center`}
+              inputMode="numeric"
+              value={customW}
+              onChange={(e) => setCustomRatio(e.target.value.replace(/\D/g, ''), customH)}
+              placeholder="宽"
+            />
+            <span className="text-[11px] text-ink-faint font-mono">:</span>
+            <input
+              className={`${inputCls} w-16 text-center`}
+              inputMode="numeric"
+              value={customH}
+              onChange={(e) => setCustomRatio(customW, e.target.value.replace(/\D/g, ''))}
+              placeholder="高"
+            />
+            <span className="text-[10px] text-ink-faint font-body">{form.size ? `当前 ${form.size}` : '未指定，由上游取默认比例'}</span>
+          </div>
+          <span className="text-[10px] text-ink-faint font-body leading-snug block">
+            该上游的 size 是比例不是像素{has('resolution') ? '，实际输出像素由比例与「分辨率档」共同决定' : '，该模型没有分辨率档，输出像素由上游按比例决定'}。也可直接填像素串（如 1881x836），该上游同时接受这种形态。候选按 {sizeCap.family} 的文档范围列出，手动输入不受限制。
+          </span>
+        </div>
+      ) : form.protocol === 'mj' ? (
         <div className="space-y-1"><span className={labelCls}>宽高比（对应 Midjourney 的 --ar）</span>
           <div className="flex flex-wrap gap-1">
             {MJ_RATIOS.map(([r, use]) => (
@@ -317,7 +459,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
           {/* r56:候选随「模型」输入实时收窄 —— 命中已知家族用其官方支持范围,未知模型回落全量。
               只影响候选显示,手输的值一律照发(发送逻辑零改动)。 */}
           <datalist id="cgui-image-size-options">
-            {(sizeOptionsFor(form.model) ?? SIZE_OPTIONS).map((s) => <option key={s} value={s} />)}
+            {(sizeOptionsFor(dialect, form.model) ?? SIZE_OPTIONS).map((s) => <option key={s} value={s} />)}
           </datalist>
           <span className="text-[10px] text-ink-faint font-body leading-snug block">
             {form.protocol === 'openai'
@@ -330,6 +472,110 @@ function ProviderForm({ initial, onDone, onCancel }) {
             </span>
           )}
         </label>
+      )}
+      {/* r87 首屏:每次都可能要改的两项(分辨率档 / 张数)。字段按 (方言, 模型) 能力表显隐 ——
+          文档没写该模型收这个键就不显示,别让用户填出一个必然被忽略或 400 的值。 */}
+      {form.protocol === 'openai' && (sizeCap?.resolutions || has('n')) && (
+        <div className="grid grid-cols-2 gap-2">
+          {sizeCap?.resolutions && (
+            <div className="space-y-1"><span className={labelCls}>分辨率档（resolution）</span>
+              <div className="flex items-center gap-0.5 p-0.5 rounded-md bg-canvas-warm text-[11px] font-body w-max">
+                {['', ...sizeCap.resolutions].map((r) => (
+                  <button
+                    type="button"
+                    key={r || 'default'}
+                    onClick={() => setForm((f) => ({ ...f, resolution: r }))}
+                    className={`px-3 py-0.5 rounded transition-colors ${(form.resolution || '') === r ? 'bg-accent text-on-accent' : 'text-ink-muted hover:text-ink'}`}
+                  >{r || '默认'}</button>
+                ))}
+              </div>
+              <span className="text-[10px] text-ink-faint font-body leading-snug block">
+                与宽高比共同决定输出像素。选「默认」不发送该字段，由上游按 1k 出图。
+              </span>
+            </div>
+          )}
+          {has('n') && (
+            <label className="space-y-1"><span className={labelCls}>图像数量（n）</span>
+              <select className={inputCls} value={form.n === '' || form.n === null || form.n === undefined ? '' : String(form.n)} onChange={(e) => setForm((f) => ({ ...f, n: e.target.value === '' ? '' : Number(e.target.value) }))}>
+                <option value="">默认（1 张）</option>
+                {IMG_COUNTS.map((c) => <option key={c} value={c}>{c} 张</option>)}
+              </select>
+              <span className="text-[10px] text-ink-faint font-body leading-snug block">
+                一次任务出几张图，费用随张数变化，以出图后的实付为准。多张图分别落盘到保存目录，条目里可逐张切换。
+              </span>
+            </label>
+          )}
+        </div>
+      )}
+      {/* r87 高级参数:首屏只留必填与常改项,其余折叠(与 r84 的 mj 同款)。 */}
+      {form.protocol === 'openai' && (has('quality') || has('outputFormat') || has('background') || has('moderation') || has('nsfwCheck')) && (
+        <details className="rounded-md border border-canvas-deep px-2 py-1.5">
+          {/* 摘要按【实际渲染出来的字段】拼:能力表按 (方言, 模型) 显隐,写死四项的话
+              apimart 中转渠道(只放开 nsfw_check)的折叠条会承诺三个里面根本没有的控件。 */}
+          <summary className="text-[10.5px] text-ink-soft font-body cursor-pointer select-none">
+            高级参数（{ADVANCED_FIELD_LABELS.filter(([f]) => has(f)).map(([, l]) => l).join(' / ')}）
+          </summary>
+          <div className="pt-2 space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              {has('quality') && (
+                <label className="space-y-1"><span className={labelCls}>质量（quality）</span>
+                  <select className={inputCls} value={form.quality || ''} onChange={set('quality')}>
+                    <option value="">默认（不指定）</option>
+                    {(sizeCap.qualities || []).map((q) => <option key={q} value={q}>{IMG_QUALITY_LABELS[q] || q}</option>)}
+                  </select>
+                </label>
+              )}
+              {has('outputFormat') && (
+                <label className="space-y-1"><span className={labelCls}>输出格式（output_format）</span>
+                  <select className={inputCls} value={form.outputFormat || ''} onChange={set('outputFormat')}>
+                    <option value="">默认（png）</option>
+                    {(sizeCap.formats || []).map((f) => <option key={f} value={f}>{IMG_FORMAT_LABELS[f] || f}</option>)}
+                  </select>
+                </label>
+              )}
+              {has('background') && (
+                <label className="space-y-1"><span className={labelCls}>背景（background）</span>
+                  <select className={inputCls} value={form.background || ''} onChange={set('background')}>
+                    <option value="">默认（不指定）</option>
+                    {IMG_BACKGROUNDS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                </label>
+              )}
+              {has('moderation') && (
+                <label className="space-y-1"><span className={labelCls}>审核强度（moderation）</span>
+                  <select className={inputCls} value={form.moderation || ''} onChange={set('moderation')}>
+                    <option value="">默认（不指定）</option>
+                    {IMG_MODERATIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                  <span className="text-[10px] text-ink-faint font-body leading-snug block">
+                    出图时上游模型的内容过滤松紧{has('nsfwCheck') ? '，与「提交前预审」是两件不同的事' : ''}。
+                  </span>
+                </label>
+              )}
+            </div>
+            {bgConflict && (
+              <span className="text-[10px] text-error font-body leading-snug block">
+                背景选择透明时，输出格式必须是 png 或 webp；当前的 jpeg 不支持透明通道，上游会返回错误。
+              </span>
+            )}
+            {has('nsfwCheck') && (
+              <label className="flex items-start gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.nsfwCheck === true}
+                  onChange={(e) => setForm((f) => ({ ...f, nsfwCheck: e.target.checked }))}
+                  className="mt-0.5 accent-accent shrink-0"
+                />
+                <span className="space-y-0.5">
+                  <span className={`${labelCls} block`}>提交前预审（nsfw_check）</span>
+                  <span className="text-[10px] text-ink-faint font-body leading-snug block">
+                    提交前先用 omni-moderation-latest 审核提示词与输入图片，会额外增加成本与延迟。{has('moderation') ? '与「审核强度」是两件不同的事：本项发生在提交前，审核强度作用于出图时的内容过滤。' : ''}
+                  </span>
+                </span>
+              </label>
+            )}
+          </div>
+        </details>
       )}
       {/* r84:版本 / 速度是文档明列取值的具名参数,做成下拉;冷门参数(stylize / chaos / seed …)
           仍走附加参数 JSON,但给一份可直接复制的样例 —— 用户原话是「不会写」。
@@ -425,6 +671,17 @@ function ProviderForm({ initial, onDone, onCancel }) {
         <button type="button" onClick={onCancel} className="px-3 py-1.5 rounded-md border border-canvas-deep text-[12px] text-ink-soft font-body">取消</button>
       </div>
       {/* r52:拉取结果的勾选弹窗。确认后并进白名单(原有项一律保留),随「保存」落盘。 */}
+      {/* r87:「浏览」= 全量候选 + 搜索,选中回填输入框。刻意用【模态】不用锚定浮层 ——
+          本表单在滚动容器里,浮层在 WKWebView 下的定位与 sticky 都踩过坑(r83 已就此改过)。 */}
+      {browsing && (
+        <ModelPickModal
+          candidates={form.models || []}
+          existing={form.model ? [form.model] : []}
+          title="选择模型"
+          onClose={() => setBrowsing(false)}
+          onPick={(id) => { setForm((f) => ({ ...f, model: id })); setBrowsing(false); }}
+        />
+      )}
       {pickCandidates && (
         <ModelPickModal
           candidates={pickCandidates}
@@ -470,6 +727,11 @@ export default function ImagePanel() {
   useEffect(() => { refsRef.current = refs; }, [refs]);
   useEffect(() => () => { refsRef.current.forEach(revokeRefPreview); }, []);
 
+  // r87 预估价:仅 apimart 方言有(官方 Images API 没有报价接口)。服务端算好直接给数,
+  // 拿不到一律 null → 不显示。刻意不做重试/不报错:预估是锦上添花,不该干扰出图。
+  const [estCredits, setEstCredits] = useState(null);
+  const [estN, setEstN] = useState(1); // 预估对应的张数(服务端按能力表门控后的 n)
+
   const load = useCallback(async (preferId) => {
     try {
       const r = await fetch('/api/image-providers');
@@ -480,6 +742,22 @@ export default function ImagePanel() {
     } catch { /* 面板打开时后端未就绪:留空列表,用户点刷新即可 */ }
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  // 切 provider(或保存后重载配置)时重新问一次预估;组件卸载/再切走时丢弃迟到的响应。
+  useEffect(() => {
+    if (!selId) { setEstCredits(null); return undefined; }
+    let alive = true;
+    setEstCredits(null);
+    fetch(`/api/image/pricing?providerId=${encodeURIComponent(selId)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return;
+        setEstCredits(typeof d?.credits === 'number' ? d.credits : null);
+        setEstN(Number.isInteger(d?.n) && d.n >= 1 ? d.n : 1);
+      })
+      .catch(() => { if (alive) setEstCredits(null); });
+    return () => { alive = false; };
+  }, [selId, providers]);
 
   // 提示词草稿:每次输入即写 localStorage,重开面板/刷新都填回原文(用户要求生成后也不清空)。
   const setPromptDraft = useCallback((v) => {
@@ -944,6 +1222,11 @@ export default function ImagePanel() {
           {refs.length > 0 && (
             <span className="text-[11px] text-ink-faint font-body">图生图（{refs.length} 张参考）</span>
           )}
+          {/* r87:仅 apimart 方言、且报价接口给得出这一档的价格时才显示。展示价按平台的
+              default 分组算，实际扣费可能低于它，故只说"约"；出图后以任务列表里的实付为准。 */}
+          {estCredits !== null && (
+            <span className="text-[11px] text-ink-faint font-body">预估约 {fmtAmount(estCredits)} credits（按 {estN} 张、平台展示价估算，以出图后的实付为准）</span>
+          )}
           {hasRunning && (
             <span className="text-[11px] text-ink-faint font-body">
               {running.length} 个任务在后台运行，可继续发起新任务（同时最多 3 个）；关闭面板不影响，进度在「任务列表」页。
@@ -1070,6 +1353,7 @@ export default function ImagePanel() {
                   {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">第 {shotIdx(h) + 1}/{h.files.length} 张</span> : null}
                   {h.mjAction ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{originNote(h)}</span> : null}
                   {STATUS_LABEL[h.status] || h.status} · {shortTime(h.startedAt)}
+                  {paidNote(h) ? ` · ${paidNote(h)}` : ''}
                 </div>
                 <div className="flex items-center gap-1">{taskActions(h)}</div>
               </div>
@@ -1108,6 +1392,7 @@ export default function ImagePanel() {
                   {h.status === 'running' ? `生成中 · ${elapsedSec(h)}s${h.progress == null ? '' : ` · ${h.progress}%`}` : (STATUS_LABEL[h.status] || h.status)}
                   {h.status === 'cancelled' ? ` · ${CANCEL_NOTE}` : ''}
                   {h.status !== 'done' && h.error ? ` · ${h.error}` : ''}
+                  {paidNote(h) ? ` · ${paidNote(h)}` : ''}
                   {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
                 </div>
                 {imageStrip(h)}
@@ -1146,6 +1431,10 @@ export default function ImagePanel() {
                     extra: p.extra ? JSON.stringify(p.extra, null, 2) : '', i2iMode: p.i2iMode || 'edits',
                     proxyUrl: p.proxyUrl || '',
                     mjVersion: p.mjVersion || '', mjSpeed: p.mjSpeed || '',
+                    // r87:服务端回显已把存量条目补成缺省值(方言 openai / 其余空),原样回填。
+                    dialect: p.dialect || 'openai', resolution: p.resolution || '', quality: p.quality || '',
+                    outputFormat: p.outputFormat || '', background: p.background || '',
+                    moderation: p.moderation || '', n: p.n === 0 || p.n ? p.n : '', nsfwCheck: p.nsfwCheck === true,
                   })}
                   className="shrink-0 p-1 rounded hover:bg-canvas-deep/60 text-ink-soft"
                 ><Pencil size={12} /></button>

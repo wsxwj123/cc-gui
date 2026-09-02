@@ -10,6 +10,11 @@
 // 那套状态机留在 routes/image.js 的 pollTask 里。ComfyUI / Suno / NovelAI 的 zip 仍未做。
 import { extname, isAbsolute, resolve } from 'path';
 import { isPathInside } from './safe-path.js';
+// r87 能力表/取值白名单的唯一副本(纯数据 + 纯函数,前端经再导出共用同一份)。
+import {
+  IMAGE_RESOLUTIONS, IMAGE_QUALITIES, IMAGE_OUTPUT_FORMATS, IMAGE_BACKGROUNDS,
+  IMAGE_MODERATIONS, imageDialect, imageCount, pickEnum, sizeCapFor,
+} from './image-caps.js';
 
 export const IMAGE_PROTOCOLS = ['openai', 'gemini', 'chat', 'mj'];
 
@@ -116,6 +121,94 @@ export function buildMjActionRequest(config, action, index, taskId) {
   };
 }
 
+// ───────────────── r87 OpenAI 系生图参数:上游【方言】与能力表 ─────────────────
+// 为什么要有"方言"这一层:同一个 `size` 键在两个上游上【同名反义】——
+//   · OpenAI 官方:像素串(`1536x1024`),枚举见官方 Images API 的 CreateImageRequest;
+//   · apimart:宽高比串(`16:9`),像素档位另由 `resolution`(1k/2k/4k)控制。
+// 同一个模型名(gpt-image-2)在两边语义相反,所以"这个模型支持哪些值"只看模型名是判不了的,
+// 必须 (方言, 模型) 二元。方言存在 provider 上(缺省 = 'openai'),新建/编辑时按 baseURL
+// host 预选;缺省语义与升级前逐字相同 —— 存量条目零变化。
+// 证据链:.devflow/RESEARCH-r87-image-params.md §A-3(apimart 逐字段表)与 §B(官方对照表)。
+//
+// 能力表与取值白名单的唯一副本在 ./image-caps.js(前端经 client/src/utils/imageSizeCaps.js
+// 再导出同一份)。这里原样转出,既有 import 方(routes/image.js、单测)不用改。
+export {
+  IMAGE_DIALECTS, IMAGE_RESOLUTIONS, IMAGE_QUALITIES, IMAGE_OUTPUT_FORMATS,
+  IMAGE_BACKGROUNDS, IMAGE_MODERATIONS, IMAGE_N_MAX, APIMART_RATIOS, SIZE_OPTIONS,
+  imageDialect, dialectForBaseURL, imageCount, sizeCapFor, sizeOptionsFor,
+} from './image-caps.js';
+
+/**
+ * (方言, 模型) → 本次真正该下发的参数值。**下发的唯一门**:buildImageRequest 与报价预估
+ * 都走这里,别在别处再判一次。
+ *
+ * 为什么必须按能力表门控、而不只是"表单里填了什么就发什么":控件是按能力表显隐的,换个
+ * 模型控件就消失,但【值还留在 provider 上】。r87 首版只按方言门 resolution/nsfw_check,
+ * 于是 gpt-image-2 上设的 quality=low / n=3 在切到 dall-e-3 后照发 —— 官方 dall-e-3 两处
+ * 各自 400,而界面上已经没有控件可以清掉它们。门开在这里,存量残值一律发不出去。
+ *
+ * 逃生口不变:`extra` 仍在 body 之后展开,用户显式写进附加参数的键照发、优先级最高。
+ */
+export function imageParams(cfg) {
+  const dialect = imageDialect(cfg);
+  const cap = sizeCapFor(dialect, cfg?.model);
+  // 能力表没放开的字段一律当没填。官方方言 + 未登记模型时 cap 为 null(候选回落全量),
+  // 此时这几个结构化参数【一个都不发】—— 表单在这种情况下本来就不显示它们,
+  // 有值只可能是换模型后的残值;真要发就写进 extra。
+  const allows = (f) => !!cap?.fields?.includes(f);
+  // resolution 与 nsfw_check 是 apimart 独有键,再加一道方言门:能力表哪天写错了,
+  // 官方 API 也不会收到这两个它根本没有的键(t1【方言门】钉的就是这条)。
+  const apimartOnly = (f) => dialect === 'apimart' && allows(f);
+  return {
+    dialect,
+    cap,
+    allows,
+    n: allows('n') ? imageCount(cfg?.n) : 1,
+    resolution: apimartOnly('resolution') ? pickEnum(cfg?.resolution, IMAGE_RESOLUTIONS) : '',
+    quality: allows('quality') ? pickEnum(cfg?.quality, IMAGE_QUALITIES) : '',
+    outputFormat: allows('outputFormat') ? pickEnum(cfg?.outputFormat, IMAGE_OUTPUT_FORMATS) : '',
+    background: allows('background') ? pickEnum(cfg?.background, IMAGE_BACKGROUNDS) : '',
+    moderation: allows('moderation') ? pickEnum(cfg?.moderation, IMAGE_MODERATIONS) : '',
+    nsfwCheck: apimartOnly('nsfwCheck') && cfg?.nsfwCheck === true,
+  };
+}
+
+// credits / USD 的换算常量。唯一依据是 apimart 官方渠道页成功响应样例里 cost 0.004792 与
+// credits_cost 0.047920000000000004 的比值(恰为 10)——【只有一个样例】,所以它只用于
+// "预估约",真实花费一律以任务响应里的 credits_cost 为准(见 extractTaskState)。
+export const CREDITS_PER_USD = 10;
+
+/**
+ * 预估本次出图的 credits。只按调研已【逐位复算命中】的那条公式算:
+ *   size_quality_prices["<size>@<resolution>"][quality] × pricing.price_factor × 10
+ * (1k 档的键是裸比例、没有 `@1k` 后缀;quality 省略按 auto —— 文档说 auto 通常等同 low,
+ *  且价格表里两者同值)。
+ *
+ * 【宁缺勿错】:任一字段缺失或形态不符一律返回 null,由调用方不显示。别的模型的报价形态
+ * (中转渠道的 `resolution_prices` 大写 K 且无 pricing 块、只有 model_price 的按次计费、
+ * 只有 model_ratio 的无法定价)本轮都不猜 —— 报价页本身也写明"展示价按 default 分组,
+ * 用户真实扣费可能低于展示价",估价天生只能是"约"。
+ *
+ * @param {object} pricing GET /api/pricing/model 的完整响应体
+ * @param {{size?:string, resolution?:string, quality?:string}} cfg
+ * @returns {number|null}
+ */
+export function estimateCredits(pricing, cfg) {
+  const size = typeof cfg?.size === 'string' ? cfg.size.trim() : '';
+  if (!size) return null;
+  const table = pricing?.data?.size_quality_prices;
+  if (!table || typeof table !== 'object' || Array.isArray(table)) return null;
+  const res = pickEnum(cfg?.resolution, IMAGE_RESOLUTIONS);
+  const key = res && res !== '1k' ? `${size}@${res}` : size;
+  const row = table[key];
+  if (!row || typeof row !== 'object') return null;
+  const usd = row[pickEnum(cfg?.quality, IMAGE_QUALITIES) || 'auto'];
+  const factor = pricing?.data?.pricing?.price_factor;
+  if (typeof usd !== 'number' || !Number.isFinite(usd)) return null;
+  if (typeof factor !== 'number' || !Number.isFinite(factor)) return null;
+  return usd * factor * CREDITS_PER_USD;
+}
+
 function refDataUri(ref) {
   return `data:${String(ref.mime || 'image/png').toLowerCase()};base64,${ref.base64}`;
 }
@@ -128,7 +221,8 @@ function normRefs(refs) {
  * { url, headers, body, form, altHeaders }。form 非空 = multipart 形态(此时 body 为 null,
  * 且 headers 不带 Content-Type —— 交给 fetch 自己写 boundary)。
  * altHeaders 仅 gemini 非空(认证头回落),其余为 null。
- * config: { protocol, baseURL, apiKey, model, size, extra, i2iMode, mjVersion, mjSpeed }
+ * config: { protocol, baseURL, apiKey, model, size, extra, i2iMode, mjVersion, mjSpeed,
+ *           dialect, resolution, quality, outputFormat, background, moderation, n, nsfwCheck }
  *
  * 红线:refs 为空时,各协议构造出的请求与加本功能之前逐字一致(纯文生图零回归)。
  */
@@ -176,8 +270,19 @@ export function buildImageRequest(config, prompt, refs) {
     }
     // POST {base}/images/generations。size 只有本协议有原生字段;gpt-image 系恒返 b64
     // 且【不支持 response_format 参数】(传了会 400),所以这里不主动带它,由取图侧兼容两种。
-    const body = { model, prompt: text, n: 1 };
+    // r87:n 从硬编码改为可配(未配置/能力表没放开时 imageParams 给 1 → 与升级前逐字一致);
+    // 其余结构化参数一律【有值才发】,空值 / 白名单外的值 / 【该模型不支持的键】都不发
+    // (发空串 = 显式指定空值)。门在 imageParams 里,见那里的注释。
+    const p = imageParams(cfg);
+    const body = { model, prompt: text, n: p.n };
     if (cfg.size) body.size = String(cfg.size);
+    if (p.resolution) body.resolution = p.resolution;
+    if (p.quality) body.quality = p.quality;
+    if (p.outputFormat) body.output_format = p.outputFormat;
+    if (p.background) body.background = p.background;
+    if (p.moderation) body.moderation = p.moderation;
+    // 提交前预审(omni-moderation-latest):加钱加延迟,不开就【不发键】而不是发 false。
+    if (p.nsfwCheck) body.nsfw_check = true;
     // 方舟形态:image 收 string[](URL 或 dataURI),4.x 最多 14 张。
     if (list.length) body.image = list.map(refDataUri);
     return {
@@ -265,22 +370,52 @@ function contentToText(content) {
   return '';
 }
 
+/** openai 的 data[] 单项 → { mime, base64 } / { mime, url };不是图一律 null。 */
+function openaiItem(item, data) {
+  if (!item) return null;
+  // gpt-image 系恒返 b64_json;dall-e-3 视 response_format 返 b64 或 url → 两种都认。
+  if (typeof item.b64_json === 'string' && item.b64_json) {
+    const fmt = item.output_format || data?.output_format;
+    return { mime: fmt ? `image/${String(fmt).toLowerCase()}` : 'image/png', base64: item.b64_json };
+  }
+  if (typeof item.url === 'string' && /^https?:\/\//i.test(item.url)) return { mime: '', url: item.url };
+  return null;
+}
+
 /**
- * 从上游响应对象取图。纯函数:输入 protocol + 已解析的响应 JSON,
- * 输出 { mime, base64 } 或 { mime, url };取不到返回 null。
+ * 从上游响应对象取【全部】图。纯函数,输出数组(取不到就是空数组)。
+ *
+ * 为什么必须是数组:`n` 可配之后,openai 【同步】响应会在 data[] 里回 n 张
+ * (官方 gpt-image 系 n 最多 10、apimart G2O/G1O 1~4)。r87 之前 n 恒为 1,只取 data[0]
+ * 没暴露;n 一放开,取首张 = 后面几张【付了钱不落盘、界面还不吭声】。任务制那条路
+ * (polled.urls)本来就是多张,不受影响 —— 所以只测 apimart 会漏掉这个。
+ *
+ * 上限同样套 MAX_TASK_IMAGES(16):上游说几张就是几张,不设限的后果与任务制那条一样。
+ * gemini / chat 的响应形态天生只有一张,包成单元素数组,与 openai 走同一条落盘链。
+ */
+export function extractImages(protocol, data) {
+  if (protocol === 'openai') {
+    // 上限在循环里 break,不做事后 slice —— 与 extractTaskState 同款(那边的理由是别把
+    // O(n²) 去重先跑完;这边是别把上游给的两万条先 map 出一整个数组来)。
+    const out = [];
+    for (const item of Array.isArray(data?.data) ? data.data : []) {
+      const one = openaiItem(item, data);
+      if (!one) continue;
+      out.push(one);
+      if (out.length >= MAX_TASK_IMAGES) break;
+    }
+    return out;
+  }
+  const one = extractImage(protocol, data);
+  return one ? [one] : [];
+}
+
+/**
+ * 取首张。`extractImages` 的薄封装 —— 保留它是因为调用方(与几个单测)只关心"有没有图",
+ * 改签名不值当。多张场景一律走 extractImages。
  */
 export function extractImage(protocol, data) {
-  if (protocol === 'openai') {
-    const first = data?.data?.[0];
-    if (!first) return null;
-    // gpt-image 系恒返 b64_json;dall-e-3 视 response_format 返 b64 或 url → 两种都认。
-    if (typeof first.b64_json === 'string' && first.b64_json) {
-      const fmt = first.output_format || data?.output_format;
-      return { mime: fmt ? `image/${String(fmt).toLowerCase()}` : 'image/png', base64: first.b64_json };
-    }
-    if (typeof first.url === 'string' && /^https?:\/\//i.test(first.url)) return { mime: '', url: first.url };
-    return null;
-  }
+  if (protocol === 'openai') return openaiItem(data?.data?.[0], data);
 
   if (protocol === 'gemini') {
     const parts = data?.candidates?.[0]?.content?.parts;
@@ -355,7 +490,8 @@ export function buildTaskPollRequest(baseURL, apiKey, taskId) {
 export const MAX_TASK_IMAGES = 16;
 
 /**
- * 轮询响应 → { status:'processing'|'completed'|'failed'|'cancelled', progress, urls, message }。
+ * 轮询响应 → { status:'processing'|'completed'|'failed'|'cancelled', progress, urls, message,
+ *             cost, creditsCost }。
  *  - 终态只认 completed / failed / cancelled,【其余一律 processing】(含 pending /
  *    submitted / 未知值):按白名单枚举非终态的话,上游加一档新状态就会被当失败判死。
  *    failed 与 cancelled 分开返回 —— 上游主动取消不是失败,措辞得如实。
@@ -363,16 +499,23 @@ export const MAX_TASK_IMAGES = 16;
  *    独立单图);只认 http(s):这个值随后要交给下载分支去请求,别的形态一律不接;
  *    最多取 MAX_TASK_IMAGES 张(见上面的常量注释)。
  *  - progress 取不到时为 null 而不是 0(0 会在界面上显示成"已开始但毫无进展")。
+ *  - r87 cost / creditsCost = 上游【实付】(data.cost 金额 / data.credits_cost 积分,文档
+ *    「查询任务结果」响应字段表)。取不到一律 null 而不是 0 —— 0 会在界面上显示成"这次免费"。
+ *    失败/取消态也带出来:平台侧拦截同样可能已经计费。有实付值就不必自己估价(估价要处理
+ *    6 种报价形态 + price_factor 缺失 + 折扣字段歧义,还只能说"约")。
  */
 export function extractTaskState(data) {
   const d = data?.data;
   const raw = String(d?.status || '').toLowerCase();
   const n = Number(d?.progress ?? NaN);
   const progress = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
+  const money = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const cost = money(d?.cost);
+  const creditsCost = money(d?.credits_cost);
   // 失败原因三种已知落点(文档 error.message / 顶层 error / MJ 的 fail_reason),取第一个非空。
   const message = [d?.error?.message, data?.error?.message, d?.fail_reason]
     .find((m) => typeof m === 'string' && m.trim()) || '';
-  if (raw === 'failed' || raw === 'cancelled') return { status: raw, progress, urls: [], message };
+  if (raw === 'failed' || raw === 'cancelled') return { status: raw, progress, urls: [], message, cost, creditsCost };
   const urls = [];
   capped:
   for (const img of Array.isArray(d?.result?.images) ? d.result.images : []) {
@@ -384,8 +527,8 @@ export function extractTaskState(data) {
       }
     }
   }
-  if (raw === 'completed') return { status: 'completed', progress, urls, message };
-  return { status: 'processing', progress, urls: [], message };
+  if (raw === 'completed') return { status: 'completed', progress, urls, message, cost, creditsCost };
+  return { status: 'processing', progress, urls: [], message, cost, creditsCost };
 }
 
 /** 文件名:{时间戳}-{prompt 前 20 字符 slug}.{ext}。重名由调用方加序号。 */
