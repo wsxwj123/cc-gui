@@ -77,7 +77,12 @@ Without this the GUI opens but cannot send messages.
 The installer bytes ship inside per-platform npm packages, so installing talks to **npm only — never GitHub**. Requires Node.js 20+.
 
 ```bash
+# macOS / Linux
 npx @wsxwj123/cc-gui
+
+# Windows (PowerShell resolves `npx` to npx.ps1, which the default execution
+# policy blocks; both forms work from cmd.exe)
+npx.cmd @wsxwj123/cc-gui
 ```
 
 One command downloads, installs and launches the app. `cc-gui` is an installer, not an everyday command — it only runs to install or upgrade — so npx is the recommended form: no global install, and it is unaffected by npm's global-directory permissions (with node from the official .pkg, `npm i -g` fails with `EACCES`; see the FAQ):
@@ -85,7 +90,7 @@ One command downloads, installs and launches the app. `cc-gui` is an installer, 
 - **macOS (Apple Silicon)**: installs to `~/Applications/CC-GUI.app`. Files unpacked by npm carry no quarantine flag, so **no `xattr` step and no "damaged app" prompt**.
 - **Windows (x64)**: silently runs the bundled official installer (per-user, no admin prompt), with a Start Menu entry and normal uninstall.
 
-**Upgrade**: `npx @wsxwj123/cc-gui@latest` after fully quitting CC-GUI. It only ever moves forward — if the app's own updater already installed a newer build, the command just opens it instead of downgrading.
+**Upgrade**: `npx @wsxwj123/cc-gui@latest` (on Windows, `npx.cmd @wsxwj123/cc-gui@latest`) after fully quitting CC-GUI. It only ever moves forward — if the app's own updater already installed a newer build, the command just opens it instead of downgrading.
 
 **Alternative: global install** (for node installed via Homebrew / nvm, whose global directory is user-owned and has no permission issue):
 
@@ -202,6 +207,7 @@ Output lands in `src-tauri/target/release/bundle/` (`.dmg` on macOS, `.exe` / `.
 | `npm i -g` fails with `EACCES: permission denied` | With node from the official .pkg installer, the global directory `/usr/local/lib/node_modules` is root-owned — every global install fails this way; it is not specific to this project. Either ① use `npx @wsxwj123/cc-gui` (recommended, zero setup), or ② move the npm prefix: `npm config set prefix ~/.npm-global` and add `~/.npm-global/bin` to PATH. Do not use `sudo npm i -g`: it installs, but leaves `~/.npm` cache files owned by root, so later npm commands fail with new permission errors |
 | Install fails with "platform package not found" | Registry mirrors sync on demand, so a fresh release's platform packages may lag or be missing entirely. Install once from the official registry: `npx --registry=https://registry.npmjs.org @wsxwj123/cc-gui@latest`, or use Option B |
 | `cc-gui` collides with another command | Use `npx @wsxwj123/cc-gui` — identical behaviour |
+| PowerShell reports "npx.ps1 / npm.ps1 cannot be loaded because running scripts is disabled" (about_Execution_Policies) | Windows' default execution policy is Restricted, which blocks `.ps1` script files — and npm / npx are `.ps1` shims under PowerShell. Run `npx.cmd @wsxwj123/cc-gui`, or run the original command from cmd.exe. Changing the execution policy is not required |
 
 ---
 
