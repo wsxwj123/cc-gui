@@ -195,6 +195,13 @@ export function anthropicToOpenAIMessages(messages, system, model) {
       if (thinkingParts.length) m.reasoning_content = thinkingParts.join('');
       if (m.content != null || m.tool_calls || m.reasoning_content != null) out.push(m);
     } else {
+      // r96:同一条 CLI 元消息(# Environment、<total_tokens> 提醒)——「本轮活的」带
+      // cache_control 走数组形态、「下一轮变历史」走字符串形态。此前数组分支硬写 'user'、
+      // 字符串快路(上面)保留原 role → 同一段文字每轮翻一次角色,上游前缀在**上一轮请求
+      // 的最末尾**断掉(实测 canonical LCP:首次 resume 78.23%,之后 99.84%)。
+      // 对齐到字符串快路那一侧:system 保留 system(现网历史回放一直这么发,没被拒过);
+      // 其余非 assistant role 仍归 user —— 白名单只放行 system,不把未知 role 透给严格端点。
+      const outRole = role === 'system' ? 'system' : 'user';
       // user (or tool) — emit tool_result FIRST, then text.
       // OpenAI 协议要求 assistant.tool_calls 后必须立即跟 tool messages 配对,
       // 任何中间 user.content 插入都会被严格端点(DeepSeek 等)拒绝:
@@ -205,14 +212,14 @@ export function anthropicToOpenAIMessages(messages, system, model) {
       if (txt || imageParts.length) {
         if (imageParts.length) {
           out.push({
-            role: 'user',
+            role: outRole,
             content: [
               ...(txt ? [{ type: 'text', text: txt }] : []),
               ...imageParts,
             ],
           });
         } else {
-          out.push({ role: 'user', content: txt });
+          out.push({ role: outRole, content: txt });
         }
       }
     }
