@@ -102,11 +102,13 @@ export const BUILTIN_MCP_SERVERS = [
     id: 'paper-search-mcp',
     name: 'Paper Search',
     transport: 'stdio',
-    // 该 PyPI 包不提供同名可执行入口,`uvx paper-search-mcp` 会报 "does not provide any
-    // executables" → 连不上。正确启动方式是跑模块 paper_search_mcp.server。
-    commandLine: 'uvx --from paper-search-mcp python -m paper_search_mcp.server',
+    // `--with mcp<2`:mcp 2.0(2026-07-28)把 FastMCP 改名为 MCPServer,paper-search-mcp
+    // 0.1.4 仍 import mcp.server.fastmcp,uvx 默认解析最新 mcp 会直接 ModuleNotFoundError
+    // 连不上;钉 <2 直到上游迁移(届时去掉此参数)。0.1.4 起已有同名 console 入口,但同样
+    // 受此影响,故保留跑模块的写法(也避开 uvx 包装脚本在 macOS 依赖 realpath 的问题)。
+    commandLine: 'uvx --with mcp<2 --from paper-search-mcp python -m paper_search_mcp.server',
     env: [],
-    note: '检索/下载学术论文(arXiv/PubMed/bioRxiv 等)。Python 版,需先装 uv。核心源免 key;部分源(Unpaywall/IEEE/ACM 等)需各自 PAPER_SEARCH_MCP_* env,见 README。',
+    note: '检索/下载学术论文(arXiv/PubMed/bioRxiv 等)。Python 版,需先装 uv;命令里钉 mcp<2 是因为该包尚未适配 mcp 2.x。核心源免 key;部分源(Unpaywall/IEEE/ACM 等)需各自 PAPER_SEARCH_MCP_* env,见 README。',
     repo: 'openags/paper-search-mcp',
     docs: 'https://github.com/openags/paper-search-mcp',
   },
