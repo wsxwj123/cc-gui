@@ -116,6 +116,96 @@ export function buildMjActionRequest(config, action, index, taskId) {
   };
 }
 
+// ───────────────── r87 OpenAI 系生图参数:上游【方言】与各字段取值范围 ─────────────────
+// 为什么要有"方言"这一层:同一个 `size` 键在两个上游上【同名反义】——
+//   · OpenAI 官方:像素串(`1536x1024`),枚举见官方 Images API 的 CreateImageRequest;
+//   · apimart:宽高比串(`16:9`),像素档位另由 `resolution`(1k/2k/4k)控制。
+// 同一个模型名(gpt-image-2)在两边语义相反,所以"这个模型支持哪些值"只看模型名是判不了的,
+// 必须 (方言, 模型) 二元。方言存在 provider 上(缺省 = 'openai'),新建/编辑时按 baseURL
+// host 预选;缺省语义与升级前逐字相同 —— 存量条目零变化。
+// 证据链:.devflow/RESEARCH-r87-image-params.md §A-3(apimart 逐字段表)与 §B(官方对照表)。
+export const IMAGE_DIALECTS = ['openai', 'apimart'];
+// apimart 的 baseURL host。只认这一个精确 host:子域名(xapi.apimart.ai)与相似域名
+// (api.apimart.ai.evil.com)一律不算,预选错了会把像素值当比例发出去。
+const APIMART_HOST = 'api.apimart.ai';
+
+// 取值范围。全部是【两边并集之外的交集】口径:只收两个上游文档都明列的值,
+// 拿不准的一律不放进白名单(白名单外的值静默不发键,见 buildImageRequest)。
+//  - resolution:apimart 独有,`1k`/`2k`/`4k`(official.md「分辨率档位(新增字段)」)
+//  - quality:两边都有 auto/low/medium/high(官方另有 dall-e-3 的 standard/hd,本轮不做)
+//  - output_format / background / moderation:两边同名同义(报告 §B 对照表「一致」)
+export const IMAGE_RESOLUTIONS = ['1k', '2k', '4k'];
+export const IMAGE_QUALITIES = ['auto', 'low', 'medium', 'high'];
+export const IMAGE_OUTPUT_FORMATS = ['png', 'jpeg', 'webp'];
+export const IMAGE_BACKGROUNDS = ['auto', 'opaque', 'transparent'];
+export const IMAGE_MODERATIONS = ['auto', 'low'];
+// 张数上限取两边的【小值】:apimart G2O/G1O 明列 1~4,官方是 1~10。放到 10 会让 apimart
+// 用户填出必然 400 的值;要更多张就发多次任务(并发闸本来就是 3)。
+export const IMAGE_N_MAX = 4;
+
+/** provider → 上游方言。缺省/未知值一律 'openai'(= 升级前的语义,存量条目零变化)。 */
+export function imageDialect(config) {
+  return config?.dialect === 'apimart' ? 'apimart' : 'openai';
+}
+
+/** baseURL → 预选方言(新建/编辑时的默认值,用户可手改)。认不出 URL 一律 'openai'。 */
+export function dialectForBaseURL(baseURL) {
+  try {
+    return new URL(String(baseURL)).hostname.toLowerCase() === APIMART_HOST ? 'apimart' : 'openai';
+  } catch { return 'openai'; }
+}
+
+/**
+ * 张数:1..IMAGE_N_MAX 的整数才认,其余(空 / 越界 / 小数 / 非数)一律 1。
+ * 越界【回落 1 而不是钳到上限】:把用户填的 9 静默改成 4 是在替他做一个会计费的决定。
+ */
+export function imageCount(n) {
+  const v = typeof n === 'string' ? Number(n.trim()) : Number(n);
+  return Number.isInteger(v) && v >= 1 && v <= IMAGE_N_MAX ? v : 1;
+}
+
+/** 枚举值归一:去空白 + 小写,在白名单里才返回,否则 ''(= 不发该键)。 */
+function pickEnum(v, allowed) {
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  return allowed.includes(s) ? s : '';
+}
+
+// credits / USD 的换算常量。唯一依据是 apimart 官方渠道页成功响应样例里 cost 0.004792 与
+// credits_cost 0.047920000000000004 的比值(恰为 10)——【只有一个样例】,所以它只用于
+// "预估约",真实花费一律以任务响应里的 credits_cost 为准(见 extractTaskState)。
+export const CREDITS_PER_USD = 10;
+
+/**
+ * 预估本次出图的 credits。只按调研已【逐位复算命中】的那条公式算:
+ *   size_quality_prices["<size>@<resolution>"][quality] × pricing.price_factor × 10
+ * (1k 档的键是裸比例、没有 `@1k` 后缀;quality 省略按 auto —— 文档说 auto 通常等同 low,
+ *  且价格表里两者同值)。
+ *
+ * 【宁缺勿错】:任一字段缺失或形态不符一律返回 null,由调用方不显示。别的模型的报价形态
+ * (中转渠道的 `resolution_prices` 大写 K 且无 pricing 块、只有 model_price 的按次计费、
+ * 只有 model_ratio 的无法定价)本轮都不猜 —— 报价页本身也写明"展示价按 default 分组,
+ * 用户真实扣费可能低于展示价",估价天生只能是"约"。
+ *
+ * @param {object} pricing GET /api/pricing/model 的完整响应体
+ * @param {{size?:string, resolution?:string, quality?:string}} cfg
+ * @returns {number|null}
+ */
+export function estimateCredits(pricing, cfg) {
+  const size = typeof cfg?.size === 'string' ? cfg.size.trim() : '';
+  if (!size) return null;
+  const table = pricing?.data?.size_quality_prices;
+  if (!table || typeof table !== 'object' || Array.isArray(table)) return null;
+  const res = pickEnum(cfg?.resolution, IMAGE_RESOLUTIONS);
+  const key = res && res !== '1k' ? `${size}@${res}` : size;
+  const row = table[key];
+  if (!row || typeof row !== 'object') return null;
+  const usd = row[pickEnum(cfg?.quality, IMAGE_QUALITIES) || 'auto'];
+  const factor = pricing?.data?.pricing?.price_factor;
+  if (typeof usd !== 'number' || !Number.isFinite(usd)) return null;
+  if (typeof factor !== 'number' || !Number.isFinite(factor)) return null;
+  return usd * factor * CREDITS_PER_USD;
+}
+
 function refDataUri(ref) {
   return `data:${String(ref.mime || 'image/png').toLowerCase()};base64,${ref.base64}`;
 }
@@ -128,7 +218,8 @@ function normRefs(refs) {
  * { url, headers, body, form, altHeaders }。form 非空 = multipart 形态(此时 body 为 null,
  * 且 headers 不带 Content-Type —— 交给 fetch 自己写 boundary)。
  * altHeaders 仅 gemini 非空(认证头回落),其余为 null。
- * config: { protocol, baseURL, apiKey, model, size, extra, i2iMode, mjVersion, mjSpeed }
+ * config: { protocol, baseURL, apiKey, model, size, extra, i2iMode, mjVersion, mjSpeed,
+ *           dialect, resolution, quality, outputFormat, background, moderation, n, nsfwCheck }
  *
  * 红线:refs 为空时,各协议构造出的请求与加本功能之前逐字一致(纯文生图零回归)。
  */
@@ -176,8 +267,26 @@ export function buildImageRequest(config, prompt, refs) {
     }
     // POST {base}/images/generations。size 只有本协议有原生字段;gpt-image 系恒返 b64
     // 且【不支持 response_format 参数】(传了会 400),所以这里不主动带它,由取图侧兼容两种。
-    const body = { model, prompt: text, n: 1 };
+    // r87:n 从硬编码改为可配(imageCount 对空值返回 1 → 未配置时与升级前逐字一致);
+    // 其余结构化参数一律【有值才发】,空值/白名单外的值不发该键(发空串 = 显式指定空值)。
+    // resolution 与 nsfw_check 是 apimart 独有键,官方方言下不许出现(官方 API 没这两个键)。
+    const dialect = imageDialect(cfg);
+    const body = { model, prompt: text, n: imageCount(cfg.n) };
     if (cfg.size) body.size = String(cfg.size);
+    if (dialect === 'apimart') {
+      const resolution = pickEnum(cfg.resolution, IMAGE_RESOLUTIONS);
+      if (resolution) body.resolution = resolution;
+    }
+    const quality = pickEnum(cfg.quality, IMAGE_QUALITIES);
+    if (quality) body.quality = quality;
+    const outputFormat = pickEnum(cfg.outputFormat, IMAGE_OUTPUT_FORMATS);
+    if (outputFormat) body.output_format = outputFormat;
+    const background = pickEnum(cfg.background, IMAGE_BACKGROUNDS);
+    if (background) body.background = background;
+    const moderation = pickEnum(cfg.moderation, IMAGE_MODERATIONS);
+    if (moderation) body.moderation = moderation;
+    // 提交前预审(omni-moderation-latest):加钱加延迟,不开就【不发键】而不是发 false。
+    if (dialect === 'apimart' && cfg.nsfwCheck === true) body.nsfw_check = true;
     // 方舟形态:image 收 string[](URL 或 dataURI),4.x 最多 14 张。
     if (list.length) body.image = list.map(refDataUri);
     return {
@@ -355,7 +464,8 @@ export function buildTaskPollRequest(baseURL, apiKey, taskId) {
 export const MAX_TASK_IMAGES = 16;
 
 /**
- * 轮询响应 → { status:'processing'|'completed'|'failed'|'cancelled', progress, urls, message }。
+ * 轮询响应 → { status:'processing'|'completed'|'failed'|'cancelled', progress, urls, message,
+ *             cost, creditsCost }。
  *  - 终态只认 completed / failed / cancelled,【其余一律 processing】(含 pending /
  *    submitted / 未知值):按白名单枚举非终态的话,上游加一档新状态就会被当失败判死。
  *    failed 与 cancelled 分开返回 —— 上游主动取消不是失败,措辞得如实。
@@ -363,16 +473,23 @@ export const MAX_TASK_IMAGES = 16;
  *    独立单图);只认 http(s):这个值随后要交给下载分支去请求,别的形态一律不接;
  *    最多取 MAX_TASK_IMAGES 张(见上面的常量注释)。
  *  - progress 取不到时为 null 而不是 0(0 会在界面上显示成"已开始但毫无进展")。
+ *  - r87 cost / creditsCost = 上游【实付】(data.cost 金额 / data.credits_cost 积分,文档
+ *    「查询任务结果」响应字段表)。取不到一律 null 而不是 0 —— 0 会在界面上显示成"这次免费"。
+ *    失败/取消态也带出来:平台侧拦截同样可能已经计费。有实付值就不必自己估价(估价要处理
+ *    6 种报价形态 + price_factor 缺失 + 折扣字段歧义,还只能说"约")。
  */
 export function extractTaskState(data) {
   const d = data?.data;
   const raw = String(d?.status || '').toLowerCase();
   const n = Number(d?.progress ?? NaN);
   const progress = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
+  const money = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const cost = money(d?.cost);
+  const creditsCost = money(d?.credits_cost);
   // 失败原因三种已知落点(文档 error.message / 顶层 error / MJ 的 fail_reason),取第一个非空。
   const message = [d?.error?.message, data?.error?.message, d?.fail_reason]
     .find((m) => typeof m === 'string' && m.trim()) || '';
-  if (raw === 'failed' || raw === 'cancelled') return { status: raw, progress, urls: [], message };
+  if (raw === 'failed' || raw === 'cancelled') return { status: raw, progress, urls: [], message, cost, creditsCost };
   const urls = [];
   capped:
   for (const img of Array.isArray(d?.result?.images) ? d.result.images : []) {
@@ -384,8 +501,8 @@ export function extractTaskState(data) {
       }
     }
   }
-  if (raw === 'completed') return { status: 'completed', progress, urls, message };
-  return { status: 'processing', progress, urls: [], message };
+  if (raw === 'completed') return { status: 'completed', progress, urls, message, cost, creditsCost };
+  return { status: 'processing', progress, urls: [], message, cost, creditsCost };
 }
 
 /** 文件名:{时间戳}-{prompt 前 20 字符 slug}.{ext}。重名由调用方加序号。 */
