@@ -330,33 +330,35 @@ function ProviderForm({ initial, onDone, onCancel }) {
           placeholder="https://api.example.com/v1"
         />
       </label>
-      <div className="grid grid-cols-2 gap-2">
-        <label className="space-y-1"><span className={labelCls}>密钥{form.id ? '（留空保留原密钥）' : ''}</span>
-          <input className={inputCls} type="password" value={form.apiKey} onChange={set('apiKey')} placeholder="sk-…" autoComplete="off" />
-        </label>
-        <div className="space-y-1"><span className={labelCls}>模型</span>
-          <div className="flex gap-1.5">
-            <input className={inputCls} list="cgui-image-model-options" value={form.model} onChange={set('model')} placeholder="gpt-image-2" />
-            <datalist id="cgui-image-model-options">
-              {(form.models || []).map((m) => <option key={m} value={m} />)}
-            </datalist>
-            <button
-              type="button"
-              onClick={() => setBrowsing(true)}
-              disabled={!(form.models || []).length}
-              title={(form.models || []).length ? '浏览全部候选模型（带搜索）' : '候选列表为空，请先「拉取模型」或直接在左侧输入模型名'}
-              className="shrink-0 px-2 rounded-md border border-canvas-deep text-[11.5px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50"
-            >浏览</button>
-            <button
-              type="button"
-              onClick={loadModels}
-              disabled={fetchingModels || (!form.id && !form.baseURL.trim())}
-              title={!form.id && !form.baseURL.trim() ? '先填写接口地址（baseURL）' : form.id ? '使用已保存的接口地址与密钥拉取（表单中未保存的修改不生效）' : '按接口地址与密钥拉取可用模型'}
-              className="shrink-0 px-2 rounded-md border border-canvas-deep text-[11.5px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50 flex items-center gap-1"
-            >
-              {fetchingModels ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}拉取模型
-            </button>
-          </div>
+      <label className="space-y-1 block"><span className={labelCls}>密钥{form.id ? '（留空保留原密钥）' : ''}</span>
+        <input className={inputCls} type="password" value={form.apiKey} onChange={set('apiKey')} placeholder="sk-…" autoComplete="off" />
+      </label>
+      {/* r94:「模型」独占一整行。与密钥挤在两栏里时，右半栏被「浏览」「拉取模型」两枚按钮
+          吃掉，输入框只剩十几像素宽，中转站常见的长模型名（openai/gpt-image-2-vip-…）
+          一个字都看不见。min-w-0 是配套：flex 子项默认 min-width:auto，不给 0 下限时
+          输入框拒绝收缩，两枚按钮反被挤出容器。 */}
+      <div className="space-y-1"><span className={labelCls}>模型</span>
+        <div className="flex gap-1.5">
+          <input className={`${inputCls} min-w-0`} list="cgui-image-model-options" value={form.model} onChange={set('model')} placeholder="gpt-image-2" />
+          <datalist id="cgui-image-model-options">
+            {(form.models || []).map((m) => <option key={m} value={m} />)}
+          </datalist>
+          <button
+            type="button"
+            onClick={() => setBrowsing(true)}
+            disabled={!(form.models || []).length}
+            title={(form.models || []).length ? '浏览全部候选模型（带搜索）' : '候选列表为空，请先「拉取模型」或直接在左侧输入模型名'}
+            className="shrink-0 px-2 rounded-md border border-canvas-deep text-[11.5px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50"
+          >浏览</button>
+          <button
+            type="button"
+            onClick={loadModels}
+            disabled={fetchingModels || (!form.id && !form.baseURL.trim())}
+            title={!form.id && !form.baseURL.trim() ? '先填写接口地址（baseURL）' : form.id ? '使用已保存的接口地址与密钥拉取（表单中未保存的修改不生效）' : '按接口地址与密钥拉取可用模型'}
+            className="shrink-0 px-2 rounded-md border border-canvas-deep text-[11.5px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50 flex items-center gap-1"
+          >
+            {fetchingModels ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}拉取模型
+          </button>
         </div>
       </div>
       {modelsMsg && <div className="text-[10px] text-ink-faint font-body leading-snug whitespace-pre-wrap break-all">{modelsMsg}</div>}
@@ -716,6 +718,12 @@ export default function ImagePanel() {
   // r95:放大层当前这张 = { id, index }(哪条任务的第几张),src/name/path 全部现算。
   // 刻意不存 src 快照:轮询每 1.5s 换一遍 history,快照会过期,也没法在序列里左右移动。
   const [zoom, setZoom] = useState(null);
+  // r94 像素尺寸:图片本身是唯一可靠来源(比例/版本只是请求参数,开 HD 或真放大后实际像素
+  // 与它们对不上)。按图片 URL 记一份 naturalWidth×naturalHeight;预览区与放大层看的永远
+  // 是同一个 URL(方向键切图会把预览区一起带过去),所以只在预览区测一次,两处都有值。
+  const [dims, setDims] = useState({});
+  // r94 1:1 原始像素查看:放大层是哑组件(r95 锁死不许有 state),开关只能放在这里。
+  const [actualSize, setActualSize] = useState(false);
   const [tab, setTab] = useState('gen'); // gen | jobs —— 局部态,切 tab 不重挂面板,轮询照跑
   const [taskView, setTaskView] = useState(readTaskView); // grid | list
   const [form, setForm] = useState(null); // null = 不在表单态
@@ -835,11 +843,25 @@ export default function ImagePanel() {
   const shotFile = (h) => pickedFile(h, picked[h.id]);
   const shotUrl = (h) => pickedPreviewUrl(h, picked[h.id]) || h.previewUrl || '';
   const pickShot = (h, i) => { setCurrentId(h.id); setPicked((m) => ({ ...m, [h.id]: i })); };
+  // r94:图片加载完成时把真实像素记下来(键取 src 属性原文,el.src 会被浏览器补成绝对地址,
+  // 与 shotUrl() 给的相对路径对不上)。同尺寸不写 state,免得每次轮询重渲染都换一个新对象。
+  const measureShot = (e) => {
+    const el = e.currentTarget;
+    const key = el.getAttribute('src') || '';
+    const w = el.naturalWidth;
+    const h = el.naturalHeight;
+    if (!key || !w || !h) return;
+    setDims((m) => (m[key]?.w === w && m[key]?.h === h ? m : { ...m, [key]: { w, h } }));
+  };
+  const dimText = (url) => { const d = dims[url]; return d ? `${d.w}×${d.h}` : ''; };
   // r95 方向键切图:把任务列表拍平成一条可浏览序列 —— 顺序与用户在列表里看到的逐字一致,
   // 所以序列取自 ordered 而不是 history。Lightbox 只管发方向,序列与位置都在这里算。
   const shots = flattenBrowsable(ordered);
   const zoomPos = shotPos(shots, zoom);
   const zoomEntry = zoom ? history.find((h) => h.id === zoom.id) : null;
+  // 放大层这张图的 URL:与预览区 shotUrl(current) 同口径同一个串(切图时 goShot 会把
+  // 预览区一并带到同一张),所以 dims 里查得到它的像素。
+  const zoomSrc = zoomEntry ? (pickedPreviewUrl(zoomEntry, zoom.index) || zoomEntry.previewUrl || '') : '';
   const goShot = (dir) => {
     const next = neighbor(shots, zoom, dir);
     if (!next) return; // 到头停住,不循环
@@ -1276,12 +1298,17 @@ export default function ImagePanel() {
           <img
             src={shotUrl(current)}
             alt={current.prompt}
+            onLoad={measureShot}
             onClick={() => setZoom({ id: current.id, index: shotIdx(current) })}
             className="w-full rounded-panel border border-canvas-deep cursor-zoom-in"
           />
           {imageStrip(current)}
           <div className="flex items-center gap-2">
             <span className="text-[10.5px] text-ink-faint font-mono break-all flex-1">{shotFile(current)}</span>
+            {/* r94:实际像素。上游按比例出图,同一比例在不同版本/HD 档下像素不同,只有图片本身说了算。 */}
+            {dimText(shotUrl(current)) && (
+              <span className="shrink-0 text-[10.5px] text-ink-faint font-mono" title="图片实际像素">{dimText(shotUrl(current))}</span>
+            )}
             <button
               type="button"
               onClick={() => reveal(shotFile(current))}
@@ -1451,13 +1478,16 @@ export default function ImagePanel() {
       {/* r95:src/name/path 现算(与 shotUrl / shotFile 同口径,只是下标取自 zoom);
           到头那侧传 null → 放大层不画那枚按钮。序列只剩 1 张时不显示计数。 */}
       <ImageLightbox
-        src={zoomEntry ? (pickedPreviewUrl(zoomEntry, zoom.index) || zoomEntry.previewUrl || '') : ''}
+        src={zoomSrc}
         name={zoomEntry?.prompt || ''}
         path={zoomEntry ? pickedFile(zoomEntry, zoom.index) : ''}
-        onClose={() => setZoom(null)}
+        onClose={() => { setZoom(null); setActualSize(false); }}
         onPrev={zoomPos > 0 ? () => goShot(-1) : null}
         onNext={zoomPos >= 0 && zoomPos < shots.length - 1 ? () => goShot(1) : null}
         counter={zoomPos >= 0 && shots.length > 1 ? `${zoomPos + 1} / ${shots.length}` : ''}
+        meta={dimText(zoomSrc)}
+        actualSize={actualSize}
+        onToggleActualSize={() => setActualSize((v) => !v)}
       />
 
       {/* 管理态(属「生图」页)。r54:用 hidden 类切换而非条件渲染 —— 条件渲染会在切到
