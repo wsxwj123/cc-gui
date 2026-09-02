@@ -109,8 +109,10 @@ check('A1-6 chat.js:按 CARVED_SLATE 补 extraArgs system-prompt-snapshot,且不
   assert.ok(/options\.extraArgs = \{ \.\.\.\(options\.extraArgs \|\| \{\}\), settings: acwTmpFile \}/.test(chatSrc));
 });
 check('A1-7 设置面板有开关 + 搜索索引条目', () => {
-  assert.ok(/PromptCacheSnapshotToggle/.test(panelSrc));
-  assert.ok(/id: 'set-prompt-snapshot'/.test(panelSrc));
+  assert.ok(/function PromptCacheSnapshotToggle\(/.test(panelSrc), '缺开关组件定义');
+  // 渲染点与索引条目分别断言:只留组件定义不挂进 tab = 用户看不到这个开关。
+  assert.ok(/<div id="set-prompt-snapshot"><PromptCacheSnapshotToggle \/><\/div>/.test(panelSrc), '开关未挂进设置 tab');
+  assert.ok(/\{ id: 'set-prompt-snapshot', tab: 'session'/.test(panelSrc), '缺搜索索引条目');
   assert.ok(/静态系统提示快照/.test(panelSrc));
   // 面板须写清 ToolSearch 的代价
   assert.ok(/ENABLE_TOOL_SEARCH=false/.test(panelSrc) && /前置加载/.test(panelSrc), '未写清关 ToolSearch 的代价');
@@ -182,9 +184,15 @@ check('A4-8 累加器:多轮求和口径一致', () => {
   assert.equal(acc.miss, 110);
 });
 check('A4-9 徽章弹层显示本轮命中率;用量面板显示累计命中率与未命中 token', () => {
-  assert.ok(/turnCacheHitPct|本轮缓存命中率/.test(appSrc), 'App.jsx 未接入本轮命中率');
-  assert.ok(/cacheStats/.test(appSrc), 'App.jsx 未使用共享的 usage 解析纯函数');
-  assert.ok(/缓存命中率/.test(usagePanelSrc) && /未命中/.test(usagePanelSrc), '用量面板缺累计命中率/未命中 token');
+  assert.ok(/from '\.\/utils\/cacheStats\.js'/.test(appSrc), 'App.jsx 未使用共享的 usage 解析纯函数');
+  // 本轮命中率必须【既算出来又渲染】:只留一头等于功能缺失。
+  assert.ok(/const turnCache = readCacheUsage\(effectiveUsage\)/.test(appSrc), '本轮命中率未取单次调用 usage');
+  assert.ok(/turnCacheHitPct: turnCache\.hitPct/.test(appSrc), 'badgeInfo 未带本轮命中率');
+  assert.ok(/formatHitPct\(info\.turnCacheHitPct \|\| 0\)/.test(appSrc), '弹层未渲染本轮命中率');
+  assert.ok(/sessionCacheMiss/.test(appSrc), '未暴露会话累计未命中 token');
+  assert.ok(/from '\.\.\/utils\/cacheStats\.js'/.test(usagePanelSrc), '用量面板未走共享纯函数');
+  assert.ok(/formatHitPct\(c\.hitPct\)/.test(usagePanelSrc), '用量面板未渲染累计命中率');
+  assert.ok(/formatNum\(c\.miss\)/.test(usagePanelSrc), '用量面板未渲染累计未命中 token');
 });
 
 // ── A5 metadata.user_id 归一 ──────────────────────────────────────────────
