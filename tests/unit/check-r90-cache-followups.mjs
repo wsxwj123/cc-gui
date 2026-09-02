@@ -38,7 +38,7 @@ const { readSessionTitles } = await import('../../server/services/session-reader
 const { claudeExecSpec } = await import('../../server/utils/claude-resolver.js');
 const {
   buildTitleArgs, parseTitleJson, resolveTitleModel, resolvePromptSuggestions, resolveExcludeDyn,
-  TITLE_SYSTEM_PROMPT,
+  decideTitle, TITLE_SYSTEM_PROMPT,
 } = await import('../../server/routes/chat.js');
 
 const chatSrc = readFileSync(join(root, 'server/routes/chat.js'), 'utf8');
@@ -278,6 +278,35 @@ check('B4-2 没配(官方渠道)就回退会话模型', () => {
 check('B4-3 小快档值非法时回退会话模型(不把注入串塞进 argv)', () => {
   writeSettings({ ANTHROPIC_DEFAULT_HAIKU_MODEL: 'x&calc' });
   assert.equal(resolveTitleModel('deepseek-chat'), 'deepseek-chat');
+});
+
+// ── ② 标题:小快档失败要换会话模型重跑一次 ──────────────────────────────
+// CLI 2.1.257 对不存在的模型打的是一句**没有 error 字样的人话**(真机抓到的原文):
+const MODEL_GONE_OUT = "There's an issue with the selected model (ghost-model-does-not-exist). "
+  + 'It may not exist or you may not have access to it. Run --model to pick a different model.\n';
+const FB = '第一条消息很长很长很长很长很长很长很长很长';
+check('B7-1 上游/模型报错 → ok=false(可重跑),标题退化成首条消息', () => {
+  assert.equal(decideTitle(MODEL_GONE_OUT, FB).ok, false,
+    '模型不可用这句没有 error 字样,旧正则漏判成「模型答了散文」→ 永远不换模型重跑');
+  assert.equal(decideTitle(MODEL_GONE_OUT, FB).title, FB.slice(0, 24));
+  assert.equal(decideTitle('Not logged in · Please run /login', FB).ok, false);
+  assert.equal(decideTitle('', FB).ok, false, '空输出(spawn 失败/超时)同样要重跑');
+});
+check('B7-2 拿到标题就不重跑(含答成散文的情况:换模型多半还是散文,不值第二次调用)', () => {
+  assert.deepEqual(decideTitle('{"title":"Widget cache prefix"}', FB), { title: 'Widget cache prefix', ok: true });
+  assert.equal(decideTitle('前缀缓存排查', FB).ok, true);
+  const meta = decideTitle('当前会话内容比较简单,请提供更多信息。', FB);
+  assert.equal(meta.ok, true, '散文不算失败(不重跑)');
+  assert.equal(meta.title, FB.slice(0, 24), '但散文仍要退化成首条消息');
+});
+check('B7-3 端点在小快档失败时用会话模型重跑一次(且只一次)', () => {
+  assert.ok(/let r = decide\(await runTitleOnce\(fastModel\)\);/.test(chatSrc), '第一次必须用小快档模型');
+  assert.ok(/if \(!r\.ok && sessionModel && sessionModel !== fastModel\) \{\s*\n\s*r = decide\(await runTitleOnce\(sessionModel\)\);/.test(chatSrc),
+    '缺「小快档失败 → 换会话模型重跑」:settings 里的 ANTHROPIC_DEFAULT_HAIKU_MODEL 若是残值,'
+    + '原生此时同样写不出 ai-title,用户彻底没标题');
+  // 防循环:重跑条件里必须有 sessionModel !== fastModel(相同就没有第二个候选可试)
+  assert.ok(/sessionModel !== fastModel/.test(chatSrc), '重跑没有防循环条件');
+  assert.equal((chatSrc.match(/runTitleOnce\(/g) || []).length, 2, '恰好两处调用(多于两次 = 可能循环重跑)');
 });
 
 // ── ②a 原生标题落点判据:fixture 用真实 jsonl 行形态 ─────────────────────

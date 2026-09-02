@@ -2374,6 +2374,49 @@ async function waitForAiTitle(sid, budgetMs = 4000, stepMs = 500) {
   }
 }
 
+// stdout 原文 → { title, ok }。ok=false 表示"这次没拿到可用标题"(空 / 上游错误文本),
+// 调用方据此决定换模型重跑;title 永远是可直接返回的最终值(失败时=fallbackSource 截断)。
+// export 仅为可单测。
+export function decideTitle(raw, fallbackSource = '') {
+  // 先按原生口径取 JSON 里的 title(容忍 thinking 块与前后杂文);取到就直接用 ——
+  // 下面那套元话术启发式是给"模型回一段散文"准备的,对结构化结果只会误杀长英文标题。
+  const parsed = parseTitleJson(raw);
+  if (parsed.json && parsed.title) return { title: parsed.title.slice(0, 60), ok: true };
+  // 清洗:去引号/换行/常见前缀(先不截断,元话术判定要看原始长度)
+  const clean = String(parsed.title || '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/^["'「『]+|["'」』]+$/g, '')
+    .replace(/^(标题|title)\s*[:：]\s*/i, '')
+    .trim();
+  // 元话术兜底:提示词硬化后模型仍可能输出"当前会话内容比较简单…"这类解释当标题。
+  // 命中特征(超长 / 整句以句号结尾 / 元话术关键词且偏长)一律丢弃,回退用户消息截断。
+  // CLI/provider 调用失败时(未登录、鉴权失败、限流、第三方报错)stdout 可能是一段
+  // 英文错误文本(如 "Not logged in · Please run …")而非标题 → 也要拦截回退,
+  // 否则错误提示被当成会话标题(实测临时环境未登录复现)。
+  // r90 补:模型不可用时 CLI 打的是一句没有 "error" 字样的人话
+  // ("There's an issue with the selected model (X). It may not exist or you may not
+  //  have access to it. Run --model to pick a different model.") —— 旧正则漏判成
+  // "模型答了散文",于是不换模型重跑。这几条锚点足够长,不会误伤真标题。
+  const isErr = /not logged in|please run|invalid|api key|unauthor|rate limit|quota|exceeded|forbidden|error:|failed|usage:/i.test(clean)
+    || /issue with the selected model|may not have access|pick a different model|api error|_error"/i.test(clean);
+  // 自指标题:模型给"起标题"指令本身起了标题(实报"对话标题命名规则说明")。
+  // 正常概括对话几乎不会出现"标题"二字,故"标题"+命名/规则/生成/说明 组合即判为元话术。
+  const isSelfRef = /标题/.test(clean) && /(命名|规则|生成|说明|起名)/.test(clean);
+  const isMeta =
+    clean.length > 30 ||
+    /[。.]\s*$/.test(clean) ||
+    /比较简单|请提供|无法生成|没有(看到|提供)/.test(clean) ||
+    (clean.length > 20 && /会话|对话|内容|无法/.test(clean)) ||
+    isSelfRef ||
+    isErr;
+  const finalTitle = (!clean || isMeta)
+    ? String(fallbackSource || '').replace(/\s+/g, ' ').trim().slice(0, 24)
+    : clean.slice(0, 24);
+  // 只有"空"和"上游错误文本"才值得换模型重跑:模型答了但答成散文(isMeta 非 isErr)
+  // 换个模型多半还是散文,不值第二次调用。
+  return { title: finalTitle, ok: !(!clean || isErr) };
+}
+
 // POST /api/chat/title  { firstUser, firstAssistant?, cwd? }
 // One-shot, isolated `claude -p` call that summarizes the opening exchange into a
 // short session title. Does NOT --resume any session (writes no session jsonl) and
@@ -2384,12 +2427,13 @@ async function waitForAiTitle(sid, budgetMs = 4000, stepMs = 500) {
 router.post('/chat/title', async (req, res) => {
   const firstUser = String(req.body?.firstUser || '').slice(0, 2000).trim();
   const firstAssistant = String(req.body?.firstAssistant || '').slice(0, 1500).trim();
-  // 模型:原生走小快档,所以优先用 settings.json 里当前 provider 的小快档映射
-  // (ANTHROPIC_DEFAULT_HAIKU_MODEL,由 provider 切换写入);没配就退回会话当前模型。
-  // **不能只认 small/fast 默认**:该键曾残留成不存在的模型(如 mimo-v2.5)→ 标题永远
-  // 失败(用户报告),所以会话模型必须留作回退,且下方 isErr 仍拦截错误文本。
-  // 剥掉 [1m] 后缀。
-  const model = resolveTitleModel(String(req.body?.model || '').replace(/\[1m\]/i, '').trim());
+  // 模型:原生走小快档,所以先用 settings.json 里当前 provider 的小快档映射
+  // (ANTHROPIC_DEFAULT_HAIKU_MODEL,由 provider 切换写入);没配就直接用会话当前模型。
+  // **小快档不能是单点**:该键曾残留成不存在的模型(如 mimo-v2.5)→ 上游报错 → 标题
+  // 退化成首条消息,而此时原生同样写不出 ai-title、waitForAiTitle 也捞不到 = 用户彻底
+  // 没标题。故下方失败时用会话模型再跑一次(只重跑一次,两者相同则不重跑)。剥掉 [1m]。
+  const sessionModel = String(req.body?.model || '').replace(/\[1m\]/i, '').trim();
+  const fastModel = resolveTitleModel(sessionModel);
   if (!firstUser) return res.json({ title: '' });
 
   // 短路:CLI 会往会话 jsonl 写一行 ai-title。已经有了就直接用,不必再起一个
@@ -2451,79 +2495,64 @@ router.post('/chat/title', async (req, res) => {
   // 即便上游行为再变,残留也只会出现在无人查看的 tmp hash 下,与用户项目彻底绝缘。
   // 每次请求用唯一子目录:两个标题请求并发时共用同一 cwd 会互相污染(CLI 在该目录的
   // 落盘/锁文件串扰);用完只删自己建的这个子目录,父目录 cgui-title 保留。
-  const titleCwd = pathJoin(tmpdir(), 'cgui-title', `${process.pid}-${randomBytes(4).toString('hex')}`);
-  try { mkdirSync(titleCwd, { recursive: true }); } catch {}
-  const cleanupTitleCwd = () => { try { rmSync(titleCwd, { recursive: true, force: true }); } catch {} };
-  let proc;
-  try {
-    // --no-session-persistence:标题生成是一次性调用,绝不能落盘成会话 jsonl,否则项目
-    // 会话列表里会冒出"给下面这段对话起标题…"的空白会话(刷新后可见,用户报告 #5)。
-    // prompt 走 stdin,不作 -p 的参数 —— Windows 上 `cmd.exe /c claude.cmd -p "<prompt>"`
-    // 会被 prompt 里的换行(cmd 逐行解析截断)、`<session>` 的 <>(重定向符)、双引号 三重
-    // cmd 元字符破坏 → prompt 残缺 → 标题在 Windows 恒失败(用户实报,mac 正常)。stdin 不经
-    // cmd 参数解析,跨平台稳。实测 `claude -p`(无 prompt 参数)从 stdin 读 prompt 正常。
-    // 探测目标必须与 claudeSpawn 实际执行的二进制同源:resolveUserClaude 在 Windows 上
-    // 对 .cmd/.bat 返回 null(SDK 驱动不了它们),拿它当探测路径会让整个瘦身在 Windows 空转。
-    const titleArgs = buildTitleArgs({ claudePath: resolveClaude()?.path || '', model });
-    proc = claudeSpawn(titleArgs, {
-      cwd: titleCwd,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: childEnv,
-    });
-    // prompt 经 stdin 喂入(见上方注释:绕开 Windows cmd 参数解析)。写完即关,让 -p 一次性执行。
-    try { proc.stdin.write(prompt); proc.stdin.end(); } catch {}
-  } catch {
-    cleanupTitleCwd();
-    return res.json({ title: '' });
-  }
-  if (!proc.pid) { cleanupTitleCwd(); return res.json({ title: '' }); }
-  // stderr 设了 pipe 但下面只读 stdout —— 不排空的话 CLI 往 stderr 写超 ~64KB(TCC/MCP 警告等)
-  // 会撑爆管道缓冲区 → 子进程阻塞 → close 永不触发 → 卡到超时。drain 掉即可(标题生成用不到 stderr)。
-  proc.stderr?.resume();
+  // 跑一次标题子进程,resolve 成 stdout 原文(spawn 失败 / 超时 / error 一律 resolve,
+  // 不 reject —— 调用方按内容决定要不要换模型再跑一次)。
+  const runTitleOnce = (model) => new Promise((resolve) => {
+    const titleCwd = pathJoin(tmpdir(), 'cgui-title', `${process.pid}-${randomBytes(4).toString('hex')}`);
+    try { mkdirSync(titleCwd, { recursive: true }); } catch {}
+    const cleanupTitleCwd = () => { try { rmSync(titleCwd, { recursive: true, force: true }); } catch {} };
+    let proc;
+    try {
+      // --no-session-persistence:标题生成是一次性调用,绝不能落盘成会话 jsonl,否则项目
+      // 会话列表里会冒出"给下面这段对话起标题…"的空白会话(刷新后可见,用户报告 #5)。
+      // prompt 走 stdin,不作 -p 的参数 —— Windows 上 `cmd.exe /c claude.cmd -p "<prompt>"`
+      // 会被 prompt 里的换行(cmd 逐行解析截断)、`<session>` 的 <>(重定向符)、双引号 三重
+      // cmd 元字符破坏 → prompt 残缺 → 标题在 Windows 恒失败(用户实报,mac 正常)。stdin 不经
+      // cmd 参数解析,跨平台稳。实测 `claude -p`(无 prompt 参数)从 stdin 读 prompt 正常。
+      // 探测目标必须与 claudeSpawn 实际执行的二进制同源:resolveUserClaude 在 Windows 上
+      // 对 .cmd/.bat 返回 null(SDK 驱动不了它们),拿它当探测路径会让整个瘦身在 Windows 空转。
+      const titleArgs = buildTitleArgs({ claudePath: resolveClaude()?.path || '', model });
+      proc = claudeSpawn(titleArgs, {
+        cwd: titleCwd,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: childEnv,
+      });
+      // prompt 经 stdin 喂入(见上方注释:绕开 Windows cmd 参数解析)。写完即关,让 -p 一次性执行。
+      try { proc.stdin.write(prompt); proc.stdin.end(); } catch {}
+    } catch {
+      cleanupTitleCwd();
+      return resolve('');
+    }
+    if (!proc.pid) { cleanupTitleCwd(); return resolve(''); }
+    // stderr 设了 pipe 但下面只读 stdout —— 不排空的话 CLI 往 stderr 写超 ~64KB(TCC/MCP 警告等)
+    // 会撑爆管道缓冲区 → 子进程阻塞 → close 永不触发 → 卡到超时。drain 掉即可(标题生成用不到 stderr)。
+    proc.stderr?.resume();
+    let out = '';
+    let done = false;
+    const settle = (v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { killProcessTree(proc); } catch {}
+      cleanupTitleCwd();
+      resolve(v);
+    };
+    const timer = setTimeout(() => settle(out), 30000);
+    proc.stdout.on('data', (c) => { out += c.toString(); });
+    proc.on('close', () => settle(out));
+    proc.on('error', () => settle(''));
+  });
 
-  let out = '';
-  let done = false;
-  const finish = (title) => {
-    if (done) return;
-    done = true;
-    clearTimeout(timer);
-    try { killProcessTree(proc); } catch {}
-    cleanupTitleCwd();
-    // 先按原生口径取 JSON 里的 title(容忍 thinking 块与前后杂文);取到就直接用 ——
-    // 下面那套元话术启发式是给"模型回一段散文"准备的,对结构化结果只会误杀长英文标题。
-    const parsed = parseTitleJson(title);
-    if (parsed.json && parsed.title) { res.json({ title: parsed.title.slice(0, 60) }); return; }
-    // 清洗:去引号/换行/常见前缀(先不截断,元话术判定要看原始长度)
-    const clean = String(parsed.title || '')
-      .replace(/[\r\n]+/g, ' ')
-      .replace(/^["'「『]+|["'」』]+$/g, '')
-      .replace(/^(标题|title)\s*[:：]\s*/i, '')
-      .trim();
-    // 元话术兜底:提示词硬化后模型仍可能输出"当前会话内容比较简单…"这类解释当标题。
-    // 命中特征(超长 / 整句以句号结尾 / 元话术关键词且偏长)一律丢弃,回退用户消息截断。
-    // CLI/provider 调用失败时(未登录、鉴权失败、限流、第三方报错)stdout 可能是一段
-    // 英文错误文本(如 "Not logged in · Please run …")而非标题 → 也要拦截回退,
-    // 否则错误提示被当成会话标题(实测临时环境未登录复现)。
-    const isErr = /not logged in|please run|invalid|api key|unauthor|rate limit|quota|exceeded|forbidden|error:|failed|usage:/i.test(clean);
-    // 自指标题:模型给"起标题"指令本身起了标题(实报"对话标题命名规则说明")。
-    // 正常概括对话几乎不会出现"标题"二字,故"标题"+命名/规则/生成/说明 组合即判为元话术。
-    const isSelfRef = /标题/.test(clean) && /(命名|规则|生成|说明|起名)/.test(clean);
-    const isMeta =
-      clean.length > 30 ||
-      /[。.]\s*$/.test(clean) ||
-      /比较简单|请提供|无法生成|没有(看到|提供)/.test(clean) ||
-      (clean.length > 20 && /会话|对话|内容|无法/.test(clean)) ||
-      isSelfRef ||
-      isErr;
-    const finalTitle = (!clean || isMeta)
-      ? titleSource.replace(/\s+/g, ' ').trim().slice(0, 24)
-      : clean.slice(0, 24);
-    res.json({ title: finalTitle });
-  };
-  const timer = setTimeout(() => finish(out), 30000);
-  proc.stdout.on('data', (c) => { out += c.toString(); });
-  proc.on('close', () => finish(out));
-  proc.on('error', () => finish(''));
+  const decide = (raw) => decideTitle(raw, titleSource);
+
+  let r = decide(await runTitleOnce(fastModel));
+  // 小快档兜底:settings.json 的 ANTHROPIC_DEFAULT_HAIKU_MODEL 可能是切 provider 时留下的
+  // 残值(历史用户报告:不存在的 mimo-v2.5)→ 上游报错。此时原生同样写不出 ai-title,
+  // 不重跑用户就彻底没标题。用会话模型再跑一次;两者相同或会话模型为空则不重跑(天然防循环)。
+  if (!r.ok && sessionModel && sessionModel !== fastModel) {
+    r = decide(await runTitleOnce(sessionModel));
+  }
+  res.json({ title: r.title });
 });
 
 // 旁问的 system-reminder,对齐 CLI 原生 /btw(side_question)的语义:独立轻量代理、
