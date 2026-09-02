@@ -19,6 +19,7 @@ import http from 'node:http';
 import { normalizeContextOverflow } from './openai-proxy.js';
 import { isCountTokensRequest, estimateInputTokens, parseUpstreamCountTokens, COUNT_TOKENS_UPSTREAM_TIMEOUT_MS, recordCountTokensOutcome } from '../utils/context-tokens.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
+import { normalizeUserIdInBody } from '../utils/user-id-normalize.js';
 
 // Fixed loopback port (distinct from openai-proxy's 8788) so the URL written into
 // settings.json survives watchdog restarts. Ephemeral fallback if it's taken.
@@ -312,6 +313,10 @@ async function handle(req, clientRes) {
   // 仅对 /v1/messages 做规范化(其他端点不动)
   if (body && req.url && req.url.includes('/v1/messages') && req.method === 'POST') {
     body = normalizeMessagesForCompat(body);
+    // r89-A5:归一 metadata.user_id 里每会话都变的 session_id —— DeepSeek 拿 user_id 整串
+    // 做 KVCache 隔离键,不归一则每个新会话的系统提示+工具前缀都从零缓存(V3 实测)。
+    // 官方上游在函数里被判掉,一字不动。
+    body = normalizeUserIdInBody(body, up.baseURL);
   }
 
   // Build a CLEAN header set. The CLI's incoming Authorization / x-api-key carries
