@@ -342,8 +342,10 @@ router.get('/version-check', async (req, res) => {
     // (npmLagsBehind / npmChannelUnknown 时缺席),"该不该给命令"由后端一处判完,前端只看
     // 字段在不在,不重算。
     viaNpm,
+    // r85:Windows 上 `npx` 被 PowerShell 解析成 npx.ps1,默认执行策略下报「禁止运行
+    // 脚本」;给 npx.cmd(cmd.exe / PowerShell 都能直接跑)。mac/linux 不变。
     ...(viaNpm && !extra.npmLagsBehind && !extra.npmChannelUnknown
-      ? { npmUpgradeCommand: 'npx @wsxwj123/cc-gui@latest' } : {}),
+      ? { npmUpgradeCommand: process.platform === 'win32' ? 'npx.cmd @wsxwj123/cc-gui@latest' : 'npx @wsxwj123/cc-gui@latest' } : {}),
     ...extra,
     // server 端 process.platform 比前端 navigator.userAgent 更可靠 — Tauri
     // WebView2/WKWebView 的 UA 在某些版本被改写过,前端单独靠 UA 选 asset
@@ -613,11 +615,15 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
   // mac/linux 追加 export 行到 ~/.zshrc(darwin)/~/.bashrc。已包含则跳过,不重复写。
   if (method === 'npm') {
     if (process.platform === 'win32') {
-      const psAppend = `$p=(npm config get prefix).Trim(); $u=[Environment]::GetEnvironmentVariable('Path','User'); if(@(($u -split ';') | Where-Object {$_ -eq $p}).Count -eq 0){[Environment]::SetEnvironmentVariable('Path', ($u.TrimEnd(';')+';'+$p), 'User'); Write-Host ('npm bin dir written to user PATH: '+$p)} else {Write-Host 'user PATH already contains npm bin dir'}`;
+      const psAppend = `$p=(npm.cmd config get prefix).Trim(); $u=[Environment]::GetEnvironmentVariable('Path','User'); if(@(($u -split ';') | Where-Object {$_ -eq $p}).Count -eq 0){[Environment]::SetEnvironmentVariable('Path', ($u.TrimEnd(';')+';'+$p), 'User'); Write-Host ('npm bin dir written to user PATH: '+$p)} else {Write-Host 'user PATH already contains npm bin dir'}`;
       // 关键:`call npm`——npm 是 npm.cmd(批处理),在 .bat 里不加 call 直调另一个 .cmd
       // 控制权不返回 → npm 装完后 `&& powershell`(写 PATH)、后续 pause 全被跳过,PATH
       // 写入根本没跑 → "装成功但检测不到"。加 call 让 npm.cmd 返回,链条才完整执行。
-      return `call npm install -g @anthropic-ai/claude-code && powershell -NoProfile -Command "${psAppend}"`;
+      // r85:内联 PowerShell 里必须调 npm.cmd 而非 npm —— PowerShell 会把 `npm` 解析成
+      // npm.ps1(脚本文件),默认 Restricted 执行策略直接拦「无法加载文件 npm.ps1」→ npm
+      // 装完了但 PATH 没写成(用户实机复现)。再补 -ExecutionPolicy Bypass 双保险(只作用
+      // 于本进程,不改用户机器策略),与本函数 native 路径的写法对齐。
+      return `call npm install -g @anthropic-ai/claude-code && powershell -NoProfile -ExecutionPolicy Bypass -Command "${psAppend}"`;
     }
     const rc = process.platform === 'darwin' ? '$HOME/.zshrc' : '$HOME/.bashrc';
     // EACCES 根治(用户实报 permission denied):官方 pkg 装的 node,npm 全局目录

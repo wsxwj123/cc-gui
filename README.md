@@ -125,7 +125,12 @@ GUI 只是 `claude` CLI 的外壳,**唯一硬性前置是装好 Claude Code CLI*
 安装包字节随 npm 平台分包一起下载,**全程只连 npm,不需要访问 GitHub**;国内配好 npm 镜像源即可正常安装。需要本机已有 Node.js 20+。
 
 ```bash
+# macOS / Linux
 npx @wsxwj123/cc-gui
+
+# Windows(PowerShell 把 npx 解析成 npx.ps1,默认执行策略禁止运行脚本,故用 .cmd;
+# 在 cmd.exe 里两种写法都可用)
+npx.cmd @wsxwj123/cc-gui
 ```
 
 一条命令完成下载、安装并打开应用。`cc-gui` 是安装器而非日常命令,只在装应用与升级时运行,故推荐 npx:无需全局安装,也不受 npm 全局目录权限影响(官方 .pkg 装的 node 用 `npm i -g` 会报 `EACCES`,见常见问题):
@@ -133,7 +138,7 @@ npx @wsxwj123/cc-gui
 - **macOS(Apple Silicon)**:应用装到 `~/Applications/CC-GUI.app`。npm 解包不带隔离标记,**无需 `xattr` 放行,也不会弹「已损坏」**。
 - **Windows(x64)**:静默运行包内官方安装器(用户级,无管理员弹窗),带开始菜单项、可正常卸载。
 
-**升级**:`npx @wsxwj123/cc-gui@latest` → 先完全退出 CC-GUI 再执行(只升不降:应用内自动更新已装到更高版本时,该命令只打开不降级)。
+**升级**:`npx @wsxwj123/cc-gui@latest`(Windows 用 `npx.cmd @wsxwj123/cc-gui@latest`)→ 先完全退出 CC-GUI 再执行(只升不降:应用内自动更新已装到更高版本时,该命令只打开不降级)。
 
 **备选:全局安装**(适合用 Homebrew / nvm 装 node 的人 —— 其全局目录归当前用户,无权限问题):
 
@@ -252,6 +257,7 @@ npm run tauri:build
 | `npm i -g` 报 `EACCES: permission denied` | 官方 .pkg 装的 node 全局目录(`/usr/local/lib/node_modules`)属 root,装任何全局包都报此错,与本项目无关。解法二选一:① 用 `npx @wsxwj123/cc-gui`(推荐,无需任何配置);② 改 npm 前缀:`npm config set prefix ~/.npm-global`,再把 `~/.npm-global/bin` 加进 PATH。不要用 `sudo npm i -g`:能装上,但会把 `~/.npm` 缓存目录属主变成 root,之后普通 npm 命令开始报别的权限错,越修越乱 |
 | 安装时报「没找到当前平台的安装包」 | 镜像源按需同步,平台分包可能滞后或暂缺。用官方源装一次:`npx --registry=https://registry.npmjs.org @wsxwj123/cc-gui@latest`,也可直接走方式 B 下载 |
 | `cc-gui` 命令与本机其它工具重名 | 改用 `npx @wsxwj123/cc-gui`,逻辑完全相同 |
+| PowerShell 报「无法加载文件 npx.ps1 / npm.ps1,禁止运行脚本」(about_Execution_Policies) | Windows 默认执行策略为 Restricted,拦的是 `.ps1` 脚本文件,而 npm / npx 在 PowerShell 里正是 `.ps1` 形态。改用 `npx.cmd @wsxwj123/cc-gui`,或在 cmd.exe 里运行原命令。无需修改执行策略 |
 
 ---
 
