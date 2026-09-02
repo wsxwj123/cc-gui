@@ -16,6 +16,7 @@ import { isCountTokensRequest, estimateInputTokens, recordCountTokensOutcome } f
 import { lookupModelCapabilities, EFFORT_IDS } from '../utils/model-capabilities.js';
 import { lookupVisionCapability } from '../utils/vision-capability.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
+import { normalizeOpenAIUsage } from '../utils/openai-usage.js';
 
 // Fixed loopback port so the ANTHROPIC_BASE_URL written into settings.json
 // stays valid across server restarts (watchdog). Falls back to an ephemeral
@@ -322,6 +323,10 @@ function anthropicToolsToOpenAI(tools) {
   }));
 }
 
+// r96 反向约束(别"顺手补齐"):本函数**故意不发** user / user_id,也不读请求体里的
+// metadata。DeepSeek 的 chat/completions 确实有 user_id 参数且用于 KVCache 隔离 —— 正因
+// 如此,补上等于给自己建桶,把跨会话共用的那一个缓存桶切碎,命中率只会掉。Anthropic 口的
+// A5(user_id 归一)是为了把已有的多个桶并成一个,方向相反,不要照搬。
 export function buildOpenAIRequest(body) { // export 仅为可单测(r63 接线哨兵)
   const req = {
     model: body.model,
@@ -472,19 +477,8 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   const handleChunk = (json) => {
     if (json.error) { emitUpstreamError(json.error); return; }
     if (json.usage) {
-      // W8(R4):OpenAI 的 prompt_tokens 是【含缓存】的总输入,其中命中缓存的部分在
-      // prompt_tokens_details.cached_tokens。此前直接整段当 input_tokens → 经本网关
-      // 的 provider 永远不显示缓存命中、且 input 虚高。拆开对齐 Anthropic 语义
-      // (input_tokens = 未命中缓存的新 token)。OpenAI 无 cache write 概念,留空。
-      // BB4:DeepSeek 不返 prompt_tokens_details.cached_tokens,而是顶层
-      // prompt_cache_hit_tokens → 不回退就让 deepseek 缓存命中恒 0、input 虚高。
-      const cached = json.usage.prompt_tokens_details?.cached_tokens
-        ?? json.usage.prompt_cache_hit_tokens ?? 0;
-      usage = {
-        input_tokens: Math.max(0, (json.usage.prompt_tokens || 0) - cached),
-        cache_read_input_tokens: cached,
-        output_tokens: json.usage.completion_tokens || 0,
-      };
+      // W8/BB4/r96:各家缓存字段命名的候选表与换算规则全在 utils/openai-usage.js(与非流式共用)。
+      usage = normalizeOpenAIUsage(json.usage);
     }
     const choice = (json.choices || [])[0];
     if (!choice) return;
@@ -617,17 +611,8 @@ function openAIToAnthropicMessage(json, model) {
     id: json.id || ('msg_' + Math.random().toString(36).slice(2)),
     type: 'message', role: 'assistant', model, content,
     stop_reason: STOP_MAP[choice.finish_reason] || 'end_turn', stop_sequence: null,
-    // W8(R4):同流式路径 —— 拆出 cached_tokens 对齐 Anthropic 缓存语义。
-    usage: (() => {
-      // BB4:DeepSeek 用顶层 prompt_cache_hit_tokens(无 cached_tokens)→ 回退兼容。
-      const cached = json.usage?.prompt_tokens_details?.cached_tokens
-        ?? json.usage?.prompt_cache_hit_tokens ?? 0;
-      return {
-        input_tokens: Math.max(0, (json.usage?.prompt_tokens || 0) - cached),
-        cache_read_input_tokens: cached,
-        output_tokens: json.usage?.completion_tokens || 0,
-      };
-    })(),
+    // W8/BB4/r96:与流式同一份候选表与换算(utils/openai-usage.js),两条路不得再各写一遍。
+    usage: normalizeOpenAIUsage(json.usage),
   };
 }
 
