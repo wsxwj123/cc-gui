@@ -137,7 +137,7 @@ ok(searchMarks('open').length >= 3 && searchMarks('open').every((k) => AVATAR_MA
   const app = read('client/src/App.jsx');
   ok(/searchMarks\(markQ\)/.test(app), '选择器用 searchMarks 过滤');
   ok(/\{markList\.map\(\(m\) =>/.test(app), '渲染过滤后的结果而不是整表');
-  ok(/max-h-\[168px\] overflow-y-auto/.test(app), '列表有高度上限(56 枚会把表单撑爆)');
+  ok(/max-h-\[\d+px\] overflow-y-auto/.test(app), '列表有高度上限(56 枚会把表单撑爆;具体像素值不锁,r86 由 168 加到 320)');
   ok(/setAvatarOpen\(false\); setMarkQ\(''\)/.test(app), 'reset 一并清搜索词');
 }
 
