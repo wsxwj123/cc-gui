@@ -9403,11 +9403,11 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       {avatarOpen && (
         <div className="p-2.5 rounded-lg border border-canvas-deep bg-canvas-warm space-y-2">
           <div className="flex items-center gap-2">
-            <span className="text-[11px] text-ink-faint font-body shrink-0">内置图标</span>
+            <span className="text-[11px] text-ink-faint font-body shrink-0">内置图标 {markList.length} 枚(网格可滚动)</span>
             <input className={`${inputCls} flex-1`} placeholder="搜索图标(名称或厂商别名)" value={markQ}
               onChange={(e) => setMarkQ(e.target.value)} />
           </div>
-          <div className="flex flex-wrap gap-1.5 max-h-[168px] overflow-y-auto">
+          <div className="flex flex-wrap gap-1.5 max-h-[320px] overflow-y-auto">
             {markList.map((m) => (
               <button key={m} type="button" title={m} onClick={() => { setAvatar(m); setAvatarErr(''); }}
                 className={`p-1 rounded-md border ${avatar === m ? 'border-accent' : 'border-transparent hover:border-canvas-deep'}`}>
