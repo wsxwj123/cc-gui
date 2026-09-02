@@ -44,3 +44,36 @@ export function entryPreviewUrl(file) {
 export function pickedPreviewUrl(h, idx) {
   return entryPreviewUrl(pickedFile(h, idx));
 }
+
+// ─────────────────── r95 方向键切图:任务列表 → 一条可浏览序列 ───────────────────
+// 放大层要在"任务列表里的所有图"之间左右切,所以先把二维(第几条 × 条目内第几张)拍平成
+// 一维。位置只能用 (条目 id, 条目内下标) 定 —— 面板每 1.5s 轮询换一遍 history,
+// 存 src 快照会过期,存数组下标则会在新任务插到最前时错位。
+
+/** 把任务列表拍平成可浏览图片序列。条目顺序 = 入参顺序,条目内 = entryFiles 顺序。 */
+export function flattenBrowsable(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const h of list) {
+    // running / error / cancelled 条目没有图,放进序列只会切出一张空白。
+    if (!h || h.status !== 'done') continue;
+    entryFiles(h).forEach((file, index) => out.push({ id: h.id, index, file, prompt: h.prompt || '' }));
+  }
+  return out;
+}
+
+/** 当前这张在序列里的位置;不在序列里(条目被删 / 下标对不上)返回 -1。 */
+export function shotPos(shots, cur) {
+  if (!Array.isArray(shots) || !cur) return -1;
+  return shots.findIndex((s) => s.id === cur.id && s.index === cur.index);
+}
+
+/** 按方向取邻居。到头 / 不在序列里 / dir 非 ±方向一律 null —— 刻意不循环:
+ *  绕回另一端会让人以为列表是无限的,"按不动了"才是到头的可感知信号。 */
+export function neighbor(shots, cur, dir) {
+  const step = Number(dir) < 0 ? -1 : Number(dir) > 0 ? 1 : 0;
+  if (!step) return null;
+  const pos = shotPos(shots, cur);
+  if (pos < 0) return null;
+  return shots[pos + step] || null;
+}
