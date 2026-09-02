@@ -2104,7 +2104,9 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
 });
 
 // 给指定 model 发一个最小请求,验证 provider「鉴权 + 该模型可达」。openai 兼容打
-// /chat/completions、anthropic 兼容打 /v1/messages,max_tokens:1 把成本/耗时压到最低。
+const PROBE_MAX_TOKENS = 8;
+// /chat/completions、anthropic 兼容打 /v1/messages,max_tokens 取一个很小的值把成本/耗时压到最低;
+// 不用 1:部分中转站(apimart 等)校验 max_tokens 必须 >2,报 invalid_request 会被误判成"连接失败"(用户实报)。
 async function testProviderConnection({ type, baseURL, apiKey, model }) {
   // SSRF 守卫根因覆盖:test 端点不经 probeUpstreamModels,单独在此兜一次。
   await assertPublicBaseURL(baseURL);
@@ -2114,11 +2116,11 @@ async function testProviderConnection({ type, baseURL, apiKey, model }) {
   if (type === 'anthropic') {
     url = hasVer ? `${b}/messages` : `${b}/v1/messages`;
     headers = { 'content-type': 'application/json', 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01', 'User-Agent': 'claude-gui' };
-    body = { model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] };
+    body = { model, max_tokens: PROBE_MAX_TOKENS, messages: [{ role: 'user', content: 'ping' }] };
   } else {
     url = hasVer ? `${b}/chat/completions` : `${b}/v1/chat/completions`;
     headers = { 'content-type': 'application/json', Authorization: `Bearer ${apiKey || ''}`, 'User-Agent': 'claude-gui' };
-    body = { model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] };
+    body = { model, max_tokens: PROBE_MAX_TOKENS, messages: [{ role: 'user', content: 'ping' }] };
   }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 20000);
