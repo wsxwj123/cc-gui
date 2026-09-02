@@ -386,7 +386,9 @@ if (failure) throw failure;
   const shimSrc = readFileSync(join(REPO, 'client/src/utils/imageSizeCaps.js'), 'utf8');
   assert.match(shimSrc, /from '\.\.\/\.\.\/\.\.\/server\/utils\/image-caps\.js'/,
     't4: 界面侧只是再导出共享能力表(仿 providerList.js 再导出 avatar.js)');
-  assert.ok(!/^import .*from 'node:|^import .*from 'fs'|^import .*from 'os'/m.test(capsSrc),
+  // 不许带任何 node 内置依赖 —— 带了就进不了浏览器包。原来只挡 node:/fs/os,
+  // path / crypto / child_process / url 同样是内置模块,一并挡住。
+  assert.ok(!/^import .*from '(node:[^']*|fs|fs\/promises|os|path|crypto|child_process|url|util|stream|http|https|net|zlib)'/m.test(capsSrc),
     't4: 共享能力表不许带 node 内置模块依赖(否则进不了浏览器包)');
   // r87-S6:三个名字都要锁 —— 原来只锁了 SIZE_OPTIONS 与 sizeCapFor,把 sizeOptionsFor
   // 从 import 里删掉都不红(它正是 datalist 候选那条线用的)。

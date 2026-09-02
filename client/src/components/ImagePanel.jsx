@@ -175,7 +175,11 @@ function ProviderForm({ initial, onDone, onCancel }) {
   // 保存时用:能力表没放开的字段一律存空串(= 不下发)。见下面 body 里的注释。
   const keep = (f, v) => (has(f) && v !== null && v !== undefined ? v : '');
   // 透明背景与 jpeg 互斥(官方与 apimart 文档都写明);只提示不硬拦 —— 上游枚举将来可能放宽。
-  const bgConflict = form.background === 'transparent' && form.outputFormat === 'jpeg';
+  // 冲突提示只在【两个控件都真的渲染出来】时才有意义:该模型没放开这两个键时,这两个值
+  // 根本不会下发(imageParams 门掉),界面上也没有控件可改 —— 再弹一条红字就是让用户看着
+  // 一个他修不了、也不会发生的错误。存量残值(transparent + jpeg)切到中转渠道就是这形态。
+  const bgConflict = has('background') && has('outputFormat')
+    && form.background === 'transparent' && form.outputFormat === 'jpeg';
   // r84 mj:版本分档由已存的值反推(空 = 写实档的"默认")—— 存的仍是一个字符串,
   // 不引入第二个字段,省掉"两个控件必须配对填对"的一整类 bug。
   const mjGroup = MJ_VERSION_GROUPS.find((g) => g.versions.includes(form.mjVersion)) || MJ_VERSION_GROUPS[0];
@@ -497,7 +501,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
                 {IMG_COUNTS.map((c) => <option key={c} value={c}>{c} 张</option>)}
               </select>
               <span className="text-[10px] text-ink-faint font-body leading-snug block">
-                一次任务出几张图，费用随张数变化，以出图后的实付为准。多张图会分别落盘到保存目录。
+                一次任务出几张图，费用随张数变化，以出图后的实付为准。多张图分别落盘到保存目录，条目里可逐张切换。
               </span>
             </label>
           )}
@@ -565,7 +569,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
                 <span className="space-y-0.5">
                   <span className={`${labelCls} block`}>提交前预审（nsfw_check）</span>
                   <span className="text-[10px] text-ink-faint font-body leading-snug block">
-                    提交前先用 omni-moderation-latest 审核提示词与输入图片，会额外增加成本与延迟。与「审核强度」是两件不同的事：本项发生在提交前，审核强度作用于出图时的内容过滤。
+                    提交前先用 omni-moderation-latest 审核提示词与输入图片，会额外增加成本与延迟。{has('moderation') ? '与「审核强度」是两件不同的事：本项发生在提交前，审核强度作用于出图时的内容过滤。' : ''}
                   </span>
                 </span>
               </label>
