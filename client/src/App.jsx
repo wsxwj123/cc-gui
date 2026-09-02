@@ -7545,10 +7545,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             />
           )}
           <span className="text-ink-faint" title={usageDetailTitle}>{totalAllTokens.toLocaleString()} tok</span>
-          {/* 命中率:行内显示【本次】(最近一次 API 调用,实时),会话累计在弹层里。
-              用户口径:切模型/冷启那一轮把累计拉低是正常的,行内要看的是"现在命不命中"。 */}
-          {(turnCache.total > 0 || totalTokens.cacheRead > 0) && (
-            <span className="text-ink-ghost" title={`本次 API 调用命中率（实时）；会话累计 ${cacheHitPct.toFixed(1)}%，详情见徽章弹层`}>命中率 {formatHitPct(turnCache.total > 0 ? turnCache.hitPct : cacheHitPct)}</span>
+          {totalTokens.cacheRead > 0 && (
+            <span className="text-ink-ghost" title={usageDetailTitle}>命中率 {cacheHitPct.toFixed(1)}%</span>
           )}
           {totalCostUsd > 0 && <span className="text-accent/80">· {formatCost(totalCostUsd)}</span>}
         </div>
