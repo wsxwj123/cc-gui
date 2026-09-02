@@ -172,6 +172,8 @@ function ProviderForm({ initial, onDone, onCancel }) {
   // apimart 方言下 size 是宽高比 → 换成芯片网格(与 r84 的 mj 同款写法);官方方言仍是像素输入框。
   const ratioMode = form.protocol === 'openai' && dialect === 'apimart';
   const has = (f) => !!sizeCap?.fields?.includes(f);
+  // 保存时用:能力表没放开的字段一律存空串(= 不下发)。见下面 body 里的注释。
+  const keep = (f, v) => (has(f) && v !== null && v !== undefined ? v : '');
   // 透明背景与 jpeg 互斥(官方与 apimart 文档都写明);只提示不硬拦 —— 上游枚举将来可能放宽。
   const bgConflict = form.background === 'transparent' && form.outputFormat === 'jpeg';
   // r84 mj:版本分档由已存的值反推(空 = 写实档的"默认")—— 存的仍是一个字符串,
@@ -252,16 +254,18 @@ function ProviderForm({ initial, onDone, onCancel }) {
         mjVersion: form.protocol === 'mj' ? (form.mjVersion || '') : '',
         mjSpeed: form.protocol === 'mj' ? (form.mjSpeed || '') : '',
         // r87:方言描述的是【上游本身】不是某个协议的参数,所以换协议不清空(换回来时它仍然
-        // 是对的);其余参数只有 openai 协议会下发,也原样保留 —— 这些值是用户自己在面板上
-        // 设过的,切一下协议就抹掉等于替他丢配置(与上面 mj 那两个"用户可能没见过"的不同)。
+        // 是对的)。其余结构化参数按【当前 (方言, 模型) 的能力表】过滤后再存:控件是按能力表
+        // 显隐的,换个模型控件就消失但值还在 —— 不清的话下次保存又把它写回去,而界面上根本
+        // 没有控件能清掉它。协议层同样有这道门(imageParams),这里是双保险,顺带让存量残值
+        // 在用户下一次保存时被清掉。要发能力表没列的键,写「附加参数」。
         dialect: form.dialect || 'openai',
-        resolution: form.resolution || '',
-        quality: form.quality || '',
-        outputFormat: form.outputFormat || '',
-        background: form.background || '',
-        moderation: form.moderation || '',
-        n: form.n === '' || form.n === null || form.n === undefined ? '' : Number(form.n),
-        nsfwCheck: form.nsfwCheck === true,
+        resolution: keep('resolution', form.resolution),
+        quality: keep('quality', form.quality),
+        outputFormat: keep('outputFormat', form.outputFormat),
+        background: keep('background', form.background),
+        moderation: keep('moderation', form.moderation),
+        n: keep('n', form.n) === '' ? '' : Number(form.n),
+        nsfwCheck: has('nsfwCheck') && form.nsfwCheck === true,
       };
       // apiKey 留空 = 保留服务端已存的 key(前端从不持有 key,不能被空字段抹掉)。
       if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
@@ -357,7 +361,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
             {IMG_DIALECTS.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
           </select>
           <span className="text-[10px] text-ink-faint font-body leading-snug block">
-            按接口地址自动预选，可手动改。选错会让尺寸按另一种语义解析：官方语义下填 16:9、apimart 语义下填 1024x1024 都不是该上游期望的形态。
+            按接口地址自动预选，可手动改。选错会让尺寸按另一种语义解析：官方语义下填 16:9 不是该上游期望的形态（官方只收像素串）。apimart 以比例为主，同时也接受像素串。
           </span>
         </label>
       )}
@@ -398,7 +402,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
             <span className="text-[10px] text-ink-faint font-body">{form.size ? `当前 ${form.size}` : '未指定，由上游取默认比例'}</span>
           </div>
           <span className="text-[10px] text-ink-faint font-body leading-snug block">
-            该上游的 size 是比例不是像素，实际输出像素由比例与下方「分辨率档」共同决定。也可直接填像素串（如 1881x836），该上游同时接受这种形态。候选按 {sizeCap.family} 的文档范围列出，手动输入不受限制。
+            该上游的 size 是比例不是像素{has('resolution') ? '，实际输出像素由比例与「分辨率档」共同决定' : '，该模型没有分辨率档，输出像素由上游按比例决定'}。也可直接填像素串（如 1881x836），该上游同时接受这种形态。候选按 {sizeCap.family} 的文档范围列出，手动输入不受限制。
           </span>
         </div>
       ) : form.protocol === 'mj' ? (
@@ -493,7 +497,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
                 {IMG_COUNTS.map((c) => <option key={c} value={c}>{c} 张</option>)}
               </select>
               <span className="text-[10px] text-ink-faint font-body leading-snug block">
-                一次任务出几张图，按张计费。多张图会分别落盘到保存目录。
+                一次任务出几张图，费用随张数变化，以出图后的实付为准。多张图会分别落盘到保存目录。
               </span>
             </label>
           )}
@@ -722,6 +726,7 @@ export default function ImagePanel() {
   // r87 预估价:仅 apimart 方言有(官方 Images API 没有报价接口)。服务端算好直接给数,
   // 拿不到一律 null → 不显示。刻意不做重试/不报错:预估是锦上添花,不该干扰出图。
   const [estCredits, setEstCredits] = useState(null);
+  const [estN, setEstN] = useState(1); // 预估对应的张数(服务端按能力表门控后的 n)
 
   const load = useCallback(async (preferId) => {
     try {
@@ -741,7 +746,11 @@ export default function ImagePanel() {
     setEstCredits(null);
     fetch(`/api/image/pricing?providerId=${encodeURIComponent(selId)}`)
       .then((r) => r.json())
-      .then((d) => { if (alive) setEstCredits(typeof d?.credits === 'number' ? d.credits : null); })
+      .then((d) => {
+        if (!alive) return;
+        setEstCredits(typeof d?.credits === 'number' ? d.credits : null);
+        setEstN(Number.isInteger(d?.n) && d.n >= 1 ? d.n : 1);
+      })
       .catch(() => { if (alive) setEstCredits(null); });
     return () => { alive = false; };
   }, [selId, providers]);
@@ -1212,7 +1221,7 @@ export default function ImagePanel() {
           {/* r87:仅 apimart 方言、且报价接口给得出这一档的价格时才显示。展示价按平台的
               default 分组算，实际扣费可能低于它，故只说"约"；出图后以任务列表里的实付为准。 */}
           {estCredits !== null && (
-            <span className="text-[11px] text-ink-faint font-body">预估约 {fmtAmount(estCredits)} credits（按平台展示价估算，实际以出图后的实付为准）</span>
+            <span className="text-[11px] text-ink-faint font-body">预估约 {fmtAmount(estCredits)} credits（按 {estN} 张、平台展示价估算，以出图后的实付为准）</span>
           )}
           {hasRunning && (
             <span className="text-[11px] text-ink-faint font-body">

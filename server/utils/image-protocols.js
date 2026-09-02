@@ -10,6 +10,11 @@
 // 那套状态机留在 routes/image.js 的 pollTask 里。ComfyUI / Suno / NovelAI 的 zip 仍未做。
 import { extname, isAbsolute, resolve } from 'path';
 import { isPathInside } from './safe-path.js';
+// r87 能力表/取值白名单的唯一副本(纯数据 + 纯函数,前端经再导出共用同一份)。
+import {
+  IMAGE_RESOLUTIONS, IMAGE_QUALITIES, IMAGE_OUTPUT_FORMATS, IMAGE_BACKGROUNDS,
+  IMAGE_MODERATIONS, imageDialect, imageCount, pickEnum, sizeCapFor,
+} from './image-caps.js';
 
 export const IMAGE_PROTOCOLS = ['openai', 'gemini', 'chat', 'mj'];
 
@@ -116,7 +121,7 @@ export function buildMjActionRequest(config, action, index, taskId) {
   };
 }
 
-// ───────────────── r87 OpenAI 系生图参数:上游【方言】与各字段取值范围 ─────────────────
+// ───────────────── r87 OpenAI 系生图参数:上游【方言】与能力表 ─────────────────
 // 为什么要有"方言"这一层:同一个 `size` 键在两个上游上【同名反义】——
 //   · OpenAI 官方:像素串(`1536x1024`),枚举见官方 Images API 的 CreateImageRequest;
 //   · apimart:宽高比串(`16:9`),像素档位另由 `resolution`(1k/2k/4k)控制。
@@ -124,50 +129,48 @@ export function buildMjActionRequest(config, action, index, taskId) {
 // 必须 (方言, 模型) 二元。方言存在 provider 上(缺省 = 'openai'),新建/编辑时按 baseURL
 // host 预选;缺省语义与升级前逐字相同 —— 存量条目零变化。
 // 证据链:.devflow/RESEARCH-r87-image-params.md §A-3(apimart 逐字段表)与 §B(官方对照表)。
-export const IMAGE_DIALECTS = ['openai', 'apimart'];
-// apimart 的 baseURL host。只认这一个精确 host:子域名(xapi.apimart.ai)与相似域名
-// (api.apimart.ai.evil.com)一律不算,预选错了会把像素值当比例发出去。
-const APIMART_HOST = 'api.apimart.ai';
-
-// 取值范围。全部是【两边并集之外的交集】口径:只收两个上游文档都明列的值,
-// 拿不准的一律不放进白名单(白名单外的值静默不发键,见 buildImageRequest)。
-//  - resolution:apimart 独有,`1k`/`2k`/`4k`(official.md「分辨率档位(新增字段)」)
-//  - quality:两边都有 auto/low/medium/high(官方另有 dall-e-3 的 standard/hd,本轮不做)
-//  - output_format / background / moderation:两边同名同义(报告 §B 对照表「一致」)
-export const IMAGE_RESOLUTIONS = ['1k', '2k', '4k'];
-export const IMAGE_QUALITIES = ['auto', 'low', 'medium', 'high'];
-export const IMAGE_OUTPUT_FORMATS = ['png', 'jpeg', 'webp'];
-export const IMAGE_BACKGROUNDS = ['auto', 'opaque', 'transparent'];
-export const IMAGE_MODERATIONS = ['auto', 'low'];
-// 张数上限取两边的【小值】:apimart G2O/G1O 明列 1~4,官方是 1~10。放到 10 会让 apimart
-// 用户填出必然 400 的值;要更多张就发多次任务(并发闸本来就是 3)。
-export const IMAGE_N_MAX = 4;
-
-/** provider → 上游方言。缺省/未知值一律 'openai'(= 升级前的语义,存量条目零变化)。 */
-export function imageDialect(config) {
-  return config?.dialect === 'apimart' ? 'apimart' : 'openai';
-}
-
-/** baseURL → 预选方言(新建/编辑时的默认值,用户可手改)。认不出 URL 一律 'openai'。 */
-export function dialectForBaseURL(baseURL) {
-  try {
-    return new URL(String(baseURL)).hostname.toLowerCase() === APIMART_HOST ? 'apimart' : 'openai';
-  } catch { return 'openai'; }
-}
+//
+// 能力表与取值白名单的唯一副本在 ./image-caps.js(前端经 client/src/utils/imageSizeCaps.js
+// 再导出同一份)。这里原样转出,既有 import 方(routes/image.js、单测)不用改。
+export {
+  IMAGE_DIALECTS, IMAGE_RESOLUTIONS, IMAGE_QUALITIES, IMAGE_OUTPUT_FORMATS,
+  IMAGE_BACKGROUNDS, IMAGE_MODERATIONS, IMAGE_N_MAX, APIMART_RATIOS, SIZE_OPTIONS,
+  imageDialect, dialectForBaseURL, imageCount, sizeCapFor, sizeOptionsFor,
+} from './image-caps.js';
 
 /**
- * 张数:1..IMAGE_N_MAX 的整数才认,其余(空 / 越界 / 小数 / 非数)一律 1。
- * 越界【回落 1 而不是钳到上限】:把用户填的 9 静默改成 4 是在替他做一个会计费的决定。
+ * (方言, 模型) → 本次真正该下发的参数值。**下发的唯一门**:buildImageRequest 与报价预估
+ * 都走这里,别在别处再判一次。
+ *
+ * 为什么必须按能力表门控、而不只是"表单里填了什么就发什么":控件是按能力表显隐的,换个
+ * 模型控件就消失,但【值还留在 provider 上】。r87 首版只按方言门 resolution/nsfw_check,
+ * 于是 gpt-image-2 上设的 quality=low / n=3 在切到 dall-e-3 后照发 —— 官方 dall-e-3 两处
+ * 各自 400,而界面上已经没有控件可以清掉它们。门开在这里,存量残值一律发不出去。
+ *
+ * 逃生口不变:`extra` 仍在 body 之后展开,用户显式写进附加参数的键照发、优先级最高。
  */
-export function imageCount(n) {
-  const v = typeof n === 'string' ? Number(n.trim()) : Number(n);
-  return Number.isInteger(v) && v >= 1 && v <= IMAGE_N_MAX ? v : 1;
-}
-
-/** 枚举值归一:去空白 + 小写,在白名单里才返回,否则 ''(= 不发该键)。 */
-function pickEnum(v, allowed) {
-  const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
-  return allowed.includes(s) ? s : '';
+export function imageParams(cfg) {
+  const dialect = imageDialect(cfg);
+  const cap = sizeCapFor(dialect, cfg?.model);
+  // 能力表没放开的字段一律当没填。官方方言 + 未登记模型时 cap 为 null(候选回落全量),
+  // 此时这几个结构化参数【一个都不发】—— 表单在这种情况下本来就不显示它们,
+  // 有值只可能是换模型后的残值;真要发就写进 extra。
+  const allows = (f) => !!cap?.fields?.includes(f);
+  // resolution 与 nsfw_check 是 apimart 独有键,再加一道方言门:能力表哪天写错了,
+  // 官方 API 也不会收到这两个它根本没有的键(t1【方言门】钉的就是这条)。
+  const apimartOnly = (f) => dialect === 'apimart' && allows(f);
+  return {
+    dialect,
+    cap,
+    allows,
+    n: allows('n') ? imageCount(cfg?.n) : 1,
+    resolution: apimartOnly('resolution') ? pickEnum(cfg?.resolution, IMAGE_RESOLUTIONS) : '',
+    quality: allows('quality') ? pickEnum(cfg?.quality, IMAGE_QUALITIES) : '',
+    outputFormat: allows('outputFormat') ? pickEnum(cfg?.outputFormat, IMAGE_OUTPUT_FORMATS) : '',
+    background: allows('background') ? pickEnum(cfg?.background, IMAGE_BACKGROUNDS) : '',
+    moderation: allows('moderation') ? pickEnum(cfg?.moderation, IMAGE_MODERATIONS) : '',
+    nsfwCheck: apimartOnly('nsfwCheck') && cfg?.nsfwCheck === true,
+  };
 }
 
 // credits / USD 的换算常量。唯一依据是 apimart 官方渠道页成功响应样例里 cost 0.004792 与
@@ -267,26 +270,19 @@ export function buildImageRequest(config, prompt, refs) {
     }
     // POST {base}/images/generations。size 只有本协议有原生字段;gpt-image 系恒返 b64
     // 且【不支持 response_format 参数】(传了会 400),所以这里不主动带它,由取图侧兼容两种。
-    // r87:n 从硬编码改为可配(imageCount 对空值返回 1 → 未配置时与升级前逐字一致);
-    // 其余结构化参数一律【有值才发】,空值/白名单外的值不发该键(发空串 = 显式指定空值)。
-    // resolution 与 nsfw_check 是 apimart 独有键,官方方言下不许出现(官方 API 没这两个键)。
-    const dialect = imageDialect(cfg);
-    const body = { model, prompt: text, n: imageCount(cfg.n) };
+    // r87:n 从硬编码改为可配(未配置/能力表没放开时 imageParams 给 1 → 与升级前逐字一致);
+    // 其余结构化参数一律【有值才发】,空值 / 白名单外的值 / 【该模型不支持的键】都不发
+    // (发空串 = 显式指定空值)。门在 imageParams 里,见那里的注释。
+    const p = imageParams(cfg);
+    const body = { model, prompt: text, n: p.n };
     if (cfg.size) body.size = String(cfg.size);
-    if (dialect === 'apimart') {
-      const resolution = pickEnum(cfg.resolution, IMAGE_RESOLUTIONS);
-      if (resolution) body.resolution = resolution;
-    }
-    const quality = pickEnum(cfg.quality, IMAGE_QUALITIES);
-    if (quality) body.quality = quality;
-    const outputFormat = pickEnum(cfg.outputFormat, IMAGE_OUTPUT_FORMATS);
-    if (outputFormat) body.output_format = outputFormat;
-    const background = pickEnum(cfg.background, IMAGE_BACKGROUNDS);
-    if (background) body.background = background;
-    const moderation = pickEnum(cfg.moderation, IMAGE_MODERATIONS);
-    if (moderation) body.moderation = moderation;
+    if (p.resolution) body.resolution = p.resolution;
+    if (p.quality) body.quality = p.quality;
+    if (p.outputFormat) body.output_format = p.outputFormat;
+    if (p.background) body.background = p.background;
+    if (p.moderation) body.moderation = p.moderation;
     // 提交前预审(omni-moderation-latest):加钱加延迟,不开就【不发键】而不是发 false。
-    if (dialect === 'apimart' && cfg.nsfwCheck === true) body.nsfw_check = true;
+    if (p.nsfwCheck) body.nsfw_check = true;
     // 方舟形态:image 收 string[](URL 或 dataURI),4.x 最多 14 张。
     if (list.length) body.image = list.map(refDataUri);
     return {

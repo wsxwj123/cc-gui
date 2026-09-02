@@ -18,7 +18,7 @@ import {
   geminiModelsRequest, extractTaskId, buildTaskPollRequest, extractTaskState,
   MJ_VERSIONS, MJ_SPEEDS, MJ_RATIO_RE, buildMjActionRequest,
   IMAGE_DIALECTS, IMAGE_RESOLUTIONS, IMAGE_QUALITIES, IMAGE_OUTPUT_FORMATS,
-  IMAGE_BACKGROUNDS, IMAGE_MODERATIONS, IMAGE_N_MAX, imageDialect, estimateCredits,
+  IMAGE_BACKGROUNDS, IMAGE_MODERATIONS, IMAGE_N_MAX, imageDialect, estimateCredits, imageParams,
 } from '../utils/image-protocols.js';
 import { readCapped } from '../utils/read-capped.js';
 // r56 按 provider 生图代理:生图链路的三处外联(生成 POST / 图片下载 / 拉模型)统一
@@ -655,18 +655,24 @@ async function fetchPricing(provider) {
 }
 
 /**
- * GET /api/image/pricing?providerId=… → { credits: number|null }
+ * GET /api/image/pricing?providerId=… → { credits: number|null, n: number }
  * 只有 apimart 方言才查(官方 Images API 没有报价接口)。credits 为 null = 不显示预估。
+ *
+ * 单价 × 张数:报价表给的是【一张】的价,n 张就是 n 倍。估价必须和真正会发出去的请求同口径,
+ * 所以 resolution / quality / n 一律取 imageParams 门控后的值 —— 否则模型不支持 quality 时
+ * 界面会按 high 报价、实际按上游默认出图,数字对不上。
  */
 router.get('/image/pricing', async (req, res) => {
   try {
     const provider = (await readImageProviders()).find((p) => p.id === req.query?.providerId);
     if (!provider || provider.protocol !== 'openai' || imageDialect(provider) !== 'apimart') {
-      return res.json({ credits: null });
+      return res.json({ credits: null, n: 1 });
     }
+    const p = imageParams(provider);
     const pricing = await fetchPricing(provider);
-    res.json({ credits: estimateCredits(pricing, provider) });
-  } catch { res.json({ credits: null }); }
+    const per = estimateCredits(pricing, { size: provider.size, resolution: p.resolution, quality: p.quality });
+    res.json({ credits: per === null ? null : per * p.n, n: p.n });
+  } catch { res.json({ credits: null, n: 1 }); }
 });
 
 // ─────────────────── r82 任务制上游(apimart / Midjourney 形态)的轮询 ───────────────────

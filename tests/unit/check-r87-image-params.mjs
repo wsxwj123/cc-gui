@@ -56,7 +56,7 @@ const BASELINE = 'e6668bc9'; // r87 的基线 commit(master),回归锁对着它�
 const proto = await import('../../server/utils/image-protocols.js');
 const {
   buildImageRequest, extractTaskState, imageDialect, dialectForBaseURL, imageCount,
-  estimateCredits, IMAGE_DIALECTS, IMAGE_RESOLUTIONS, IMAGE_QUALITIES,
+  estimateCredits, imageParams, IMAGE_DIALECTS, IMAGE_RESOLUTIONS, IMAGE_QUALITIES,
   IMAGE_OUTPUT_FORMATS, IMAGE_BACKGROUNDS, IMAGE_MODERATIONS, IMAGE_N_MAX, CREDITS_PER_USD,
 } = proto;
 const caps = await import('../../client/src/utils/imageSizeCaps.js');
@@ -122,6 +122,63 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
     assert.equal(imageCount(bad), 1, `t1【n 越界/非法 ${String(bad)}】回落 1`);
   }
   assert.equal(oa({ n: 9 }).body.n, 1, 't1: 越界 n 不发出去,按 1 走');
+}
+
+// ───────── 1c. M1【残值不下发】:能力表既管显隐、也管下发 ─────────
+// 控件按 (方言, 模型) 能力表显隐 → 换个模型控件就消失,但值还留在 provider 上。
+// 若协议层只按方言门 resolution/nsfw_check,这些残值会静默发上去:官方 dall-e-3 收到
+// quality/output_format/background/moderation/n 会 400,而界面上已经没有控件能清掉它们。
+// 门必须开在【下发那一处】(imageParams),表单过滤只是双保险。
+{
+  // 用户在 gpt-image-2 上设过的全套参数,原样留在 provider 上。
+  const RESIDUE = {
+    quality: 'low', outputFormat: 'webp', background: 'transparent',
+    moderation: 'low', n: 3, resolution: '2k', nsfwCheck: true,
+  };
+
+  // ① 官方方言:gpt-image-2 支持这五项 → 照发(这半不能被门误伤)。
+  const g2 = oa({ ...RESIDUE, model: 'gpt-image-2' }).body;
+  assert.deepEqual(g2, {
+    model: 'gpt-image-2', prompt: '一只猫', n: 3, quality: 'low',
+    output_format: 'webp', background: 'transparent', moderation: 'low',
+  }, 't1c【官方/gpt-image-2】能力表放开的键照常下发');
+
+  // ② 换成 dall-e-3(能力表没放开任何结构化参数)→ 残值一个都不许出现,n 回落 1。
+  const d3 = oa({ ...RESIDUE, model: 'dall-e-3' }).body;
+  assert.deepEqual(d3, { model: 'dall-e-3', prompt: '一只猫', n: 1 },
+    't1c【官方/dall-e-3】换模型后的残值一个都不发,n 回落 1');
+  for (const k of ['quality', 'output_format', 'background', 'moderation', 'resolution', 'nsfw_check']) {
+    assert.equal(k in d3, false, `t1c【残值】dall-e-3 不许出现 ${k}`);
+  }
+
+  // ③ apimart 中转渠道 gpt-image-2:能力表只有 size/resolution/nsfwCheck,
+  //    quality/output_format/background/moderation/n 五键必须被门掉。
+  const am = oa({ ...RESIDUE, dialect: 'apimart', model: 'gpt-image-2', size: '16:9' }).body;
+  assert.deepEqual(am, {
+    model: 'gpt-image-2', prompt: '一只猫', n: 1, size: '16:9', resolution: '2k', nsfw_check: true,
+  }, 't1c【apimart/中转渠道】只发能力表放开的三项,其余残值门掉');
+
+  // ④ 官方方言 + 未登记模型(能力表 null):结构化参数一个都不发 —— 表单在这种情况下
+  //    根本不显示它们,有值只可能是换模型后的残值。
+  const unknown = oa({ ...RESIDUE, model: 'my-relay-custom-model' }).body;
+  assert.deepEqual(unknown, { model: 'my-relay-custom-model', prompt: '一只猫', n: 1 },
+    't1c【官方/未登记模型】能力表 null 时结构化参数一个都不发');
+
+  // ⑤ 逃生口:能力表门掉的键,用户显式写进 extra 仍照发(extra 永远最后展开)。
+  const esc = oa({ ...RESIDUE, model: 'dall-e-3', extra: { quality: 'hd', n: 2, style: 'vivid' } }).body;
+  assert.equal(esc.quality, 'hd', 't1c【extra 逃生口】能力表门掉的键,写进 extra 照发');
+  assert.equal(esc.n, 2, 't1c【extra 逃生口】n 同样可被 extra 覆盖');
+  assert.equal(esc.style, 'vivid', 't1c【extra 逃生口】能力表里没有的键也照发');
+
+  // ⑥ imageParams 是那道门本身(协议层与报价预估共用同一个经过点)。
+  const p1 = imageParams({ dialect: 'openai', model: 'dall-e-3', ...RESIDUE });
+  assert.deepEqual(
+    [p1.n, p1.quality, p1.outputFormat, p1.background, p1.moderation, p1.resolution, p1.nsfwCheck],
+    [1, '', '', '', '', '', false], 't1c【imageParams】dall-e-3 上全部门掉');
+  const p2 = imageParams({ dialect: 'apimart', model: 'gpt-image-2-official', ...RESIDUE });
+  assert.deepEqual(
+    [p2.n, p2.quality, p2.outputFormat, p2.background, p2.moderation, p2.resolution, p2.nsfwCheck],
+    [3, 'low', 'webp', 'transparent', 'low', '2k', true], 't1c【imageParams】G2O 上全部放行');
 }
 
 // ───────────── 1b. 回归锁:与 master 基线逐字对跑 ─────────────
@@ -446,6 +503,35 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
   // 能力表接线改成二元。
   assert.match(src, /sizeCapFor\(dialect, form\.model\)/, 't5: 能力表按 (方言, 模型) 二元查');
 
+  // M1 双保险:保存时按能力表过滤,别把换模型后的残值又写回去。
+  assert.match(src, /const keep = \(f, v\) => \(has\(f\)/, 't5【保存过滤】keep() 按能力表决定存不存');
+  for (const f of ['resolution', 'quality', 'outputFormat', 'background', 'moderation']) {
+    assert.match(src, new RegExp(`${f}: keep\\('${f}', form\\.${f}\\)`), `t5【保存过滤】${f} 经 keep()`);
+  }
+  assert.match(src, /n: keep\('n', form\.n\)/, 't5【保存过滤】n 经 keep()');
+  assert.match(src, /nsfwCheck: has\('nsfwCheck'\) && form\.nsfwCheck === true/, 't5【保存过滤】nsfwCheck 经 has()');
+  // 反向:不许再出现"无条件写回"的老形态。
+  for (const f of ['resolution', 'quality', 'outputFormat', 'background', 'moderation']) {
+    assert.ok(!new RegExp(`${f}: form\\.${f} \\|\\| ''`).test(src), `t5【保存过滤】${f} 不许无条件写回`);
+  }
+
+  // S1:比例说明里指向「分辨率档」的措辞要按 has('resolution') 派生 —— (apimart, gpt-image-1
+  // 系/未登记模型) 没有 resolutions,整块分辨率档不渲染,写死就是指向不存在的控件(同类第三处)。
+  assert.match(src, /该上游的 size 是比例不是像素\{has\('resolution'\) \?/, 't5【S1】比例说明按 has(resolution) 派生');
+  assert.ok(!/实际输出像素由比例与下方「分辨率档」共同决定/.test(src), 't5【S1】不许写死"下方「分辨率档」"');
+
+  // S2:方言小字曾说"apimart 下填 1024x1024 不是期望形态",与比例块小字"也可直接填像素串,
+  // 该上游同时接受"自相矛盾。RESEARCH §A-2 原文支持后者(apimart 同时接受像素尺寸)。
+  assert.ok(!/apimart 语义下填 1024x1024 都不是该上游期望的形态/.test(src), 't5【S2】不许再说 apimart 不收像素串');
+  assert.match(src, /apimart 以比例为主，同时也接受像素串/, 't5【S2】方言小字与比例块小字口径一致');
+
+  // S4:"按张计费"是未验证断言(调研未复算过按张计价),弱化成"以实付为准"。
+  assert.ok(!/按张计费/.test(src), 't5【S4】不许断言"按张计费"(未验证)');
+  assert.match(src, /费用随张数变化，以出图后的实付为准/, 't5【S4】改成随张数变化 + 以实付为准');
+
+  // S3:预估要说清是按几张估的。
+  assert.match(src, /预估约 \{fmtAmount\(estCredits\)\} credits（按 \{estN\} 张/, 't5【S3】预估文案带张数');
+
   const modal = readFileSync(join(REPO, 'client/src/components/ModelPickModal.jsx'), 'utf8');
   assert.match(modal, /onPick/, 't5: 弹窗支持单选回填形态');
   assert.match(modal, /flex flex-col/, 't5: 弹窗仍是 flex 列三段(不用 sticky)');
@@ -543,6 +629,7 @@ const NEW_PROVIDER = {
   const q1 = await api(`/image/pricing?providerId=${id}`);
   assert.equal(q1.status, 200, 't7: 报价查询 200');
   assert.equal(Number(q1.json.credits.toFixed(4)), 0.0392, 't7【预估】端到端算出 0.0392');
+  assert.equal(q1.json.n, 1, 't7【预估】未配 n 时按 1 张');
   assert.equal(authSeen, 'none', 't7【免鉴权】绝不把 apiKey 带到报价接口');
   assert.equal(hits, 1, 't7: 打了一次上游');
 
@@ -558,6 +645,38 @@ const NEW_PROVIDER = {
   assert.equal(q3.status, 200, 't7: 官方方言也是 200(不报错)');
   assert.equal(q3.json.credits, null, 't7【官方方言】不给预估');
   assert.equal(hits, 1, 't7【官方方言】一次上游都不打');
+
+  // 单价 × 张数(S3):报价表是一张的价。n=3 → 三倍。
+  payload = {
+    success: true,
+    data: {
+      size_quality_prices: { '16:9@2k': { auto: 0.0049, low: 0.0049, medium: 0.0426, high: 0.1697 } },
+      pricing: { price_factor: 0.8 },
+    },
+  };
+  const nx = await api('/image-providers', {
+    method: 'POST',
+    body: JSON.stringify({
+      ...NEW_PROVIDER, baseURL: upBase, dialect: 'apimart',
+      size: '16:9', resolution: '2k', quality: 'low', n: 3,
+    }),
+  });
+  const q5 = await api(`/image/pricing?providerId=${nx.json.id}`);
+  assert.equal(q5.json.n, 3, 't7【× 张数】n 回传给界面');
+  assert.equal(Number(q5.json.credits.toFixed(4)), Number((0.0392 * 3).toFixed(4)), 't7【× 张数】预估 = 单价 × n');
+
+  // 估价必须按【门控后】的值算,与真正发出去的请求同口径:中转渠道 gpt-image-2 不支持
+  // quality,即使 provider 上存着 quality=high,估价也要按不发 quality(= auto 档)算。
+  const relay = await api('/image-providers', {
+    method: 'POST',
+    body: JSON.stringify({
+      ...NEW_PROVIDER, model: 'gpt-image-2', baseURL: upBase, dialect: 'apimart',
+      size: '16:9', resolution: '2k', quality: 'high',
+    }),
+  });
+  const q6 = await api(`/image/pricing?providerId=${relay.json.id}`);
+  assert.equal(Number(q6.json.credits.toFixed(4)), 0.0392,
+    't7【同口径】模型不支持 quality 时按 auto 档估价(而不是按存着的 high)');
 
   // 未知 provider / 上游挂掉 → 静默 null,不把界面搞崩。
   assert.equal((await api('/image/pricing?providerId=nope')).json.credits, null, 't7【未知 provider】null');

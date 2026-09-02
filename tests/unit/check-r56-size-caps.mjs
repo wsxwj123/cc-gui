@@ -380,9 +380,20 @@ if (failure) throw failure;
 // ───────────── 4. 前端源码:候选接线 / 小字 / 代理输入框 / 连接正常 ─────────────
 {
   const src = readFileSync(join(REPO, 'client/src/components/ImagePanel.jsx'), 'utf8');
-  const capsSrc = readFileSync(join(REPO, 'client/src/utils/imageSizeCaps.js'), 'utf8');
-  assert.match(src, /import \{[^}]*\bSIZE_OPTIONS\b[^}]*\bsizeCapFor\b[^}]*\} from '\.\.\/utils\/imageSizeCaps\.js'/,
-    't4: 面板从能力表模块取候选(全量表已搬去纯函数模块,单测可直接 import)');
+  // r87:能力表唯一副本搬去 server/utils/image-caps.js(前后端共用:协议层要按它门控下发,
+  // 不能只有前端有);client/src/utils/imageSizeCaps.js 只剩一层再导出。
+  const capsSrc = readFileSync(join(REPO, 'server/utils/image-caps.js'), 'utf8');
+  const shimSrc = readFileSync(join(REPO, 'client/src/utils/imageSizeCaps.js'), 'utf8');
+  assert.match(shimSrc, /from '\.\.\/\.\.\/\.\.\/server\/utils\/image-caps\.js'/,
+    't4: 界面侧只是再导出共享能力表(仿 providerList.js 再导出 avatar.js)');
+  assert.ok(!/^import .*from 'node:|^import .*from 'fs'|^import .*from 'os'/m.test(capsSrc),
+    't4: 共享能力表不许带 node 内置模块依赖(否则进不了浏览器包)');
+  // r87-S6:三个名字都要锁 —— 原来只锁了 SIZE_OPTIONS 与 sizeCapFor,把 sizeOptionsFor
+  // 从 import 里删掉都不红(它正是 datalist 候选那条线用的)。
+  for (const name of ['SIZE_OPTIONS', 'sizeCapFor', 'sizeOptionsFor']) {
+    assert.match(src, new RegExp(`import \\{[^}]*\\b${name}\\b[^}]*\\} from '\\.\\./utils/imageSizeCaps\\.js'`),
+      `t4: 面板从能力表模块取 ${name}(全量表在纯函数模块,单测可直接 import)`);
+  }
   // r87:候选按 (方言, 模型) 二元查(官方方言那半的产物与 r56 逐字相同,见 t1)。
   assert.match(src, /\(sizeOptionsFor\(dialect, form\.model\) \?\? SIZE_OPTIONS\)\.map/,
     't4【datalist 接线】:候选随模型实时过滤,未命中回落全量');
