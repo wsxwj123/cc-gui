@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { AlertCircle, Loader2, ClipboardList, ShieldAlert, FormInput, MessageSquareWarning } from './Icon.jsx';
+import { AlertCircle, Loader2, ClipboardList, ShieldAlert, FormInput, MessageSquareWarning, ChevronDown, ChevronRight } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
 import { isEditableTarget } from '../utils/escAction.js';
 import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
+import { readPermCollapsed, writePermCollapsed } from '../utils/permCollapse.js';
 
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
 const PLAN_WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
@@ -79,6 +80,56 @@ function DecisionReason({ reason }) {
   return <div className="text-[11px] text-ink-faint leading-snug mb-2">原因：{text}</div>;
 }
 
+// 排队 pill 与折叠态标题行共用的一句摘要:取该工具最主要的那个参数。
+const inputSummary = (r) => String(
+  r?.toolInput?.command || r?.toolInput?.file_path || r?.toolInput?.url
+  || r?.toolInput?.pattern || r?.toolInput?.query || '',
+);
+
+// ── r92 折叠「折正文留按钮」两件套(六张待应答卡共用) ───────────────────────
+// 折叠只把【可滚动正文】的高度收到 0(grid-template-rows 1fr→0fr 过渡,照 VS Code 的
+// chat-confirmation-widget-collapsible),标题行与操作按钮行原样保留 —— 折叠态下
+// Enter/Esc/允许/拒绝的语义与展开态逐字相同,键盘让行(escAction)一行不用改。
+// 正文必须【保持挂载】:卸载会把用户填到一半的计划修改意见 / 多题答案 / remember 选择
+// 一并丢掉(与渲染点 key={mine[0].id} 同源的不变量,check-r55-perm-sticky 锁着)。
+// 用 grid 0fr 而非 display:none,是因为 display:none 不可过渡;两者同样保持挂载。
+// inert:折叠态里的输入控件不该还能被 Tab 进去(React 19 原生支持该布尔属性)。
+function CardBody({ collapsed, className = '', children }) {
+  return (
+    <div
+      className={`grid flex-1 min-h-0 transition-[grid-template-rows] duration-[180ms] ease-[cubic-bezier(.2,0,0,1)] motion-reduce:transition-none ${collapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'}`}
+      inert={collapsed}
+    >
+      {/* 裁剪层自身不带 padding:0fr 行下 padding 不随高度归零,会在标题行下留一条残边。 */}
+      <div className="min-h-0 overflow-y-auto">
+        <div className={`px-4 py-3 ${className}`}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// 标题行右端:展开态显示各卡原有的 cwd / MCP 服务器名 / 题号点(children),折叠态换成
+// 一句摘要(说清这张卡在等什么决定),末尾是折叠开关 —— 普通 button,可 Tab 到达。
+function CardHeadTail({ collapsed, onToggle, summary, children }) {
+  return (
+    <>
+      {collapsed
+        ? (summary ? <div className="text-[10px] text-ink-faint font-mono truncate max-w-[55%]" title={summary}>{summary}</div> : null)
+        : children}
+      <button
+        type="button"
+        data-testid="perm-collapse"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        title={collapsed ? '展开正文' : '折叠正文'}
+        className="shrink-0 w-5 h-5 rounded flex items-center justify-center text-ink-faint hover:text-ink hover:bg-canvas-deep"
+      >
+        {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+      </button>
+    </>
+  );
+}
+
 // Plan-mode review card. Triggered by ExitPlanMode tool_use which our hook
 // intercepts like any other PreToolUse.
 //
@@ -98,8 +149,10 @@ function DecisionReason({ reason }) {
 const paneHasKeyboard = (tabIndex) =>
   tabIndex == null || useStore.getState().activeTabIndex === tabIndex;
 
-function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydrate, tabIndex }) {
+function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
   const plan = String(req.toolInput?.plan || '').trim();
+  // 折叠态摘要:计划标题(首个非空行去掉 markdown 井号),与 TodoPanel 的 PlanBlock 同口径。
+  const summary = (plan.split('\n').find((l) => l.trim()) || '').replace(/^#+\s*/, '').trim();
   const [feedback, setFeedback] = useState('');
   const [showRefine, setShowRefine] = useState(false);
   useEffect(() => {
@@ -135,19 +188,21 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
         <div className="text-[13px] font-medium text-ink flex-1">
           Claude 完成了计划，请审查
         </div>
-        {req.cwd && (
-          <div className="text-[10px] text-ink-faint font-mono truncate max-w-[40%]" title={req.cwd}>
-            {req.cwd}
-          </div>
-        )}
+        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+          {req.cwd && (
+            <div className="text-[10px] text-ink-faint font-mono truncate max-w-[40%]" title={req.cwd}>
+              {req.cwd}
+            </div>
+          )}
+        </CardHeadTail>
       </div>
-      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto bg-canvas-warm/40">
+      <CardBody collapsed={collapsed} className="bg-canvas-warm/40">
         {/* B4 显式只读退出(PLAN §1.3.2 / INTERFACE §3.4):权限确认弹层是只读面 —— 这里
             渲染的是**待批准的计划正文**,不是用户的操作面。带 action 的控件呈禁用态。 */}
         <GenuiActionProvider value={null}>
           <MarkdownRenderer content={plan || '(空计划)'} />
         </GenuiActionProvider>
-      </div>
+      </CardBody>
       {showRefine && (
         <div className="px-4 py-2.5 border-t border-canvas-deep bg-amber-500/10 space-y-2">
           <textarea
@@ -218,7 +273,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
 // 盖住 AI 回复正文(用户报告"看不见正文")。
 // 高度:分屏为左右并排(窗格全高),故 vh=窗格高。卡片上限 42vh,加下方输入框≈窗格下半,
 // 正文保留上半(用户要求"只占会话窗口下二分之一",不论是否分屏)。卡片内部超出则自身滚动。
-function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabIndex }) {
+function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
   const questions = Array.isArray(req.toolInput?.questions) ? req.toolInput.questions : [];
   const [picks, setPicks] = useState({});    // qi -> string | string[]
   const [customs, setCustoms] = useState({}); // qi -> free text
@@ -303,6 +358,8 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
   const q = questions[qi] || {};
   const multi = !!q.multiSelect;
   const opts = Array.isArray(q.options) ? q.options : [];
+  // 折叠态摘要:选项被藏起来时,标题行至少要说清现在在问第几题、问的是什么。
+  const summary = total ? `第 ${qi + 1}/${total} 题：${q.question || ''}` : '';
 
   return (
     <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
@@ -311,17 +368,19 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
           <AlertCircle size={13} className="text-violet-700" />
         </div>
         <div className="text-[13px] font-medium text-ink flex-1">Claude 需要你的选择</div>
-        {total > 1 && (
-          <div className="flex items-center gap-1" title="已回答的题为实心点">
-            {questions.map((_, i) => (
-              <button key={i} onClick={() => setQi(i)}
-                className={`w-1.5 h-1.5 rounded-full transition-colors ${i === qi ? 'bg-violet-600' : answerOf(i) ? 'bg-violet-300' : 'bg-canvas-deep'}`}
-                aria-label={`第 ${i + 1} 题`} />
-            ))}
-          </div>
-        )}
+        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+          {total > 1 && (
+            <div className="flex items-center gap-1" title="已回答的题为实心点">
+              {questions.map((_, i) => (
+                <button key={i} onClick={() => setQi(i)}
+                  className={`w-1.5 h-1.5 rounded-full transition-colors ${i === qi ? 'bg-violet-600' : answerOf(i) ? 'bg-violet-300' : 'bg-canvas-deep'}`}
+                  aria-label={`第 ${i + 1} 题`} />
+              ))}
+            </div>
+          )}
+        </CardHeadTail>
       </div>
-      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-2">
+      <CardBody collapsed={collapsed} className="space-y-2">
         {q.header && <div className="text-[10.5px] uppercase tracking-wide text-ink-faint">{q.header}</div>}
         <div className="text-[13px] text-ink font-medium">{q.question}{multi && <span className="text-ink-faint font-normal">（可多选）</span>}</div>
         <div className="grid gap-1.5">
@@ -360,7 +419,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
             className="mt-0.5 text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-canvas text-ink"
           />
         </div>
-      </div>
+      </CardBody>
       <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <button
           disabled={processing}
@@ -404,8 +463,9 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
 // 越界访问卡:SDK 沙箱边界(additionalDirectories)外的路径经 canUseTool 第三参
 // blockedPath 透出。仅本次允许=单次放行;授权此目录=addDirectories(默认本会话,
 // 勾选后永久写入 settings.json,与 CLI /add-dir 及 permissions.additionalDirectories 同源)。
-function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hydrate, tabIndex }) {
+function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
   const [permanent, setPermanent] = useState(false);
+  const summary = String(req.blockedPath || ''); // 折叠态摘要:越界路径就是这张卡要裁决的对象
   useEffect(() => {
     if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
     if (position !== 0) return;
@@ -432,20 +492,22 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
             {req.toolName}
           </span>
         </div>
-        {req.cwd && (
-          <div className="text-[10px] text-ink-faint font-mono truncate max-w-[40%]" title={req.cwd}>
-            {req.cwd}
-          </div>
-        )}
+        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+          {req.cwd && (
+            <div className="text-[10px] text-ink-faint font-mono truncate max-w-[40%]" title={req.cwd}>
+              {req.cwd}
+            </div>
+          )}
+        </CardHeadTail>
       </div>
-      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-2">
+      <CardBody collapsed={collapsed} className="space-y-2">
         <DecisionReason reason={req.decisionReason} />
         <div>
           <div className="text-[11px] text-ink-faint">越界路径</div>
           <pre className="font-mono text-[12px] bg-rose-500/10 border border-rose-400/40 rounded px-2.5 py-2 whitespace-pre-wrap break-all text-ink mt-1">{String(req.blockedPath)}</pre>
         </div>
         {renderInput(req.toolName, req.toolInput)}
-      </div>
+      </CardBody>
       <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <label className="flex items-center gap-1.5 text-[11px] text-ink-muted mr-auto cursor-pointer select-none" title="写入 ~/.claude/settings.json 的 permissions.additionalDirectories，终端 CLI 同样生效">
           <input
@@ -487,12 +549,14 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
 // 挂起表,所以停止/切会话/进程退出的清卡逻辑对它一并生效。
 // 前端只发 allow/deny 两种决定,翻译成 MCP 的 accept/decline/cancel 在服务端做:
 // 提交=accept(带 content)、拒绝=decline、被系统清掉=cancel(用户未作答)。
-function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, tabIndex }) {
+function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
   const fields = elicitFields(req.requestedSchema);
   const [values, setValues] = useState(() => initialElicitValues(elicitFields(req.requestedSchema)));
   const missing = elicitMissing(fields, values);
   const setVal = (k, v) => setValues((prev) => ({ ...prev, [k]: v }));
   const submit = () => { if (!missing.length && !processing) onSubmit(req, buildElicitContent(fields, values)); };
+  // 折叠态摘要:MCP 服务器给的提示语;没有就退回描述,再没有就显示服务器名。
+  const summary = String(req.message || req.description || req.serverName || '');
 
   useEffect(() => {
     if (!hydrate) return; // BK-1:键盘只在主实例绑,避免子代理视图重复 respond
@@ -516,11 +580,13 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
         <div className="text-[13px] font-medium text-ink flex-1 min-w-0 truncate">
           {req.title || `${req.displayName || req.serverName} 需要你填写信息`}
         </div>
-        <div className="text-[10px] text-ink-faint font-mono truncate max-w-[35%]" title={`MCP 服务器：${req.serverName}`}>
-          {req.serverName}
-        </div>
+        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+          <div className="text-[10px] text-ink-faint font-mono truncate max-w-[35%]" title={`MCP 服务器：${req.serverName}`}>
+            {req.serverName}
+          </div>
+        </CardHeadTail>
       </div>
-      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-3">
+      <CardBody collapsed={collapsed} className="space-y-3">
         {req.message && <div className="text-[12.5px] text-ink whitespace-pre-wrap break-words">{req.message}</div>}
         {req.description && <div className="text-[11px] text-ink-faint leading-snug">{req.description}</div>}
         {fields.length === 0 && (
@@ -573,7 +639,7 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
             )}
           </div>
         ))}
-      </div>
+      </CardBody>
       <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <button
           disabled={processing}
@@ -598,10 +664,12 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
 // 拒答重试卡(CLI request_user_dialog 的 refusal_fallback_prompt):当前模型拒绝了本次
 // 请求,CLI 询问宿主是换备用模型重试还是由用户改写提问。两个按钮对应 CLI 的
 // retry_fallback / edit_prompt;Esc 与停止清卡都回 cancelled(CLI 走该对话框的默认行为)。
-function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydrate, tabIndex }) {
+function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
   const p = req.payload || {};
   const fallback = p.fallbackModel || '备用模型';
   const retracted = Array.isArray(p.retractedMessageUuids) ? p.retractedMessageUuids.length : 0;
+  // 折叠态摘要:CLI 给的说明文字;没有就显示"原模型 → 备用模型"这条决策要点。
+  const summary = String(p.guidanceText || `${p.originalModel || '当前模型'} → ${fallback}`);
 
   useEffect(() => {
     if (!hydrate) return; // BK-1:键盘只在主实例绑
@@ -630,11 +698,13 @@ function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydr
             </span>
           )}
         </div>
-        {req.cwd && (
-          <div className="text-[10px] text-ink-faint font-mono truncate max-w-[35%]" title={req.cwd}>{req.cwd}</div>
-        )}
+        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+          {req.cwd && (
+            <div className="text-[10px] text-ink-faint font-mono truncate max-w-[35%]" title={req.cwd}>{req.cwd}</div>
+          )}
+        </CardHeadTail>
       </div>
-      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto space-y-2">
+      <CardBody collapsed={collapsed} className="space-y-2">
         <div className="text-[12.5px] text-ink whitespace-pre-wrap break-words">
           {p.guidanceText || '当前模型拒绝了这次请求。可换用备用模型重试，或改写提问后重新发送。'}
         </div>
@@ -650,7 +720,7 @@ function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydr
             作答后本次拒答涉及的 {retracted} 条消息不再计入后续上下文，界面仍保留这些消息。
           </div>
         )}
-      </div>
+      </CardBody>
       <div className="px-4 py-2.5 flex items-center flex-wrap gap-2 bg-canvas-warm/60 border-t border-canvas-deep">
         <button
           disabled={processing}
@@ -678,11 +748,12 @@ function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydr
   );
 }
 
-function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, onResolveSame, sameCount, processing, position, hydrate, tabIndex }) {
+function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, onResolveSame, sameCount, processing, position, hydrate, tabIndex, collapsed, onToggleCollapsed }) {
   // remember:none=仅此次;session=本会话白名单(localStorage,行为同旧版);
   // always=写 settings.json 的 permissions.allow 规则(经服务端 updatedPermissions,
   // CLI 落盘,终端与 GUI 共用)。危险命令不提供 always(服务端同样忽略,保 G3 强拦)。
   const [remember, setRemember] = useState('none');
+  const summary = inputSummary(req) || String(req.toolName || ''); // 折叠态摘要:与排队 pill 同一取值
   const dangerous = isDangerousCommand(req);
   // 与服务端 noAlways 对齐(chat.js:510):plan 档的写类/Bash 同样不写持久规则——
   // 客户端若不藏,用户选了「始终允许」会被服务端静默丢弃(调研附带发现)。
@@ -742,16 +813,18 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
             {req.toolName}
           </span>
         </div>
-        {req.cwd && (
-          <div className="text-[10px] text-ink-faint font-mono truncate max-w-[40%]" title={req.cwd}>
-            {req.cwd}
-          </div>
-        )}
+        <CardHeadTail collapsed={collapsed} onToggle={onToggleCollapsed} summary={summary}>
+          {req.cwd && (
+            <div className="text-[10px] text-ink-faint font-mono truncate max-w-[40%]" title={req.cwd}>
+              {req.cwd}
+            </div>
+          )}
+        </CardHeadTail>
       </div>
-      <div className="px-4 py-3 flex-1 min-h-0 overflow-y-auto">
+      <CardBody collapsed={collapsed}>
         <DecisionReason reason={req.decisionReason} />
         {renderInput(req.toolName, req.toolInput)}
-      </div>
+      </CardBody>
       {sameCount > 0 && (
         <div className="px-4 pb-2 -mt-1">
           <button
@@ -811,7 +884,7 @@ function PendingPill({ req, position }) {
         <span className={`px-1.5 py-0.5 rounded font-mono text-[10px] ${toolBadgeClass(req.toolName)}`}>{label}</span>
       </span>
       <span className="font-mono text-[11px] text-ink-faint truncate flex-1">
-        {req.kind ? String(req.message || req.serverName || '') : String(req.toolInput?.command || req.toolInput?.file_path || req.toolInput?.url || req.toolInput?.pattern || req.toolInput?.query || '')}
+        {req.kind ? String(req.message || req.serverName || '') : inputSummary(req)}
       </span>
     </div>
   );
@@ -844,6 +917,10 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
   const removePendingPermission = useStore((s) => s.removePendingPermission);
   const whitelist = useStore((s) => s.whitelistPermissionTool);
   const [busyId, setBusyId] = useState(null);
+  // r92 折叠:每个 PermissionPrompt 实例自持一份(一个窗格一个实例 → 分屏天然隔离,
+  // 不新增任何 window 级 effect、不碰 paneIsActive 那套)。默认展开的理由见 permCollapse.js。
+  const [collapsed, setCollapsed] = useState(() => readPermCollapsed());
+  const toggleCollapsed = () => setCollapsed((v) => { const n = !v; writePermCollapsed(n); return n; });
   // This card belongs to a specific pane's session. Prefer the explicit prop
   // (correct in split mode where each pane has its own session); fall back to
   // the global selection for single-pane callers.
@@ -1063,6 +1140,8 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onSubmit={submitElicit}
           onDecline={(r) => resolve(r, 'deny')}
           processing={busyId === mine[0].id}
+          collapsed={collapsed}
+          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
@@ -1074,6 +1153,8 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onChoose={chooseDialog}
           onCancel={(r) => resolve(r, 'deny')}
           processing={busyId === mine[0].id}
+          collapsed={collapsed}
+          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
@@ -1085,6 +1166,8 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onResolve={resolve}
           onApprove={approvePlan}
           processing={busyId === mine[0].id}
+          collapsed={collapsed}
+          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
@@ -1095,6 +1178,8 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           req={mine[0]}
           onAnswer={answerQuestion}
           processing={busyId === mine[0].id}
+          collapsed={collapsed}
+          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
@@ -1106,6 +1191,8 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onResolve={resolve}
           onAuthorizeDir={authorizeDir}
           processing={busyId === mine[0].id}
+          collapsed={collapsed}
+          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
@@ -1120,6 +1207,8 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           onResolveSame={resolveSame}
           sameCount={matchesAcrossPanes(mine[0]).length}
           processing={busyId === mine[0].id}
+          collapsed={collapsed}
+          onToggleCollapsed={toggleCollapsed}
           position={0}
           hydrate={hydrate}
           tabIndex={tabIndex}
