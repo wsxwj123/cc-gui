@@ -2334,11 +2334,14 @@ function PromptCacheSnapshotToggle() {
           这两项经环境变量写入 ~/.claude/settings.json,与终端 claude 及 bot 共用;
           静态快照是 CLI 的灰度开关,行为可能随 CLI 版本变化,可随时关闭。
           {state ? `　当前:${state.on ? '已开启' : '未开启'}(${state.thirdParty ? '第三方 provider' : '官方渠道'})` : ''}
+          {state && state.cliSnapshotSupported === false && (
+            <span className="text-amber-700">　当前 claude 版本不支持系统提示快照(需 2.1.25x 及以上),本项仅关闭 ToolSearch 生效。</span>
+          )}
         </div>
       </div>
       <div className="shrink-0 flex items-center gap-1">
         {[['auto', '自动'], ['on', '开'], ['off', '关']].map(([v, label]) => (
-          <button key={v} onClick={() => pick(v)} disabled={busy}
+          <button key={v} onClick={() => pick(v)} disabled={busy || val === v}
             className={`px-2 py-1 text-[11px] rounded-md font-body transition-colors disabled:opacity-50 ${val === v ? 'bg-accent text-on-accent' : 'bg-canvas-warm text-ink-muted hover:text-ink border border-canvas-deep'}`}>
             {label}
           </button>

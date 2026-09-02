@@ -18,7 +18,9 @@ import { dirname, join } from 'node:path';
 import {
   SNAPSHOT_ENV_KEY, TOOL_SEARCH_ENV_KEY,
   normalizePromptCacheMode, resolvePromptCacheOn, applyPromptCacheEnv,
+  cliSupportsSnapshotFlag, _resetSnapFlagCache,
 } from '../../server/utils/prompt-cache-env.js';
+import { isOfficialAnthropic } from '../../server/services/model-resolver.js';
 import { normalizeUserId, normalizeUserIdInBody } from '../../server/utils/user-id-normalize.js';
 import { readCacheUsage, cacheHitPct, addCacheUsage, EMPTY_CACHE_USAGE } from '../../client/src/utils/cacheStats.js';
 
@@ -90,12 +92,56 @@ check('A2-6 关闭时无备忘:只删快照键,不动 ENABLE_TOOL_SEARCH', () =>
 });
 
 // ── A1/A2 接线:每条 provider 切换路径都调到 ──────────────────────────────
-check('A1-4 五条 provider 切换路径全部调用 applyProviderPromptCache', () => {
-  const n = (settingsSrc.match(/await applyProviderPromptCache\(/g) || []).length;
-  assert.ok(n >= 5, `只找到 ${n} 处调用(openai/anthropic/官方/原生 claude/自定义官方直连 各一)`);
-  assert.ok(/applyProviderPromptCache\(env, true\)/.test(settingsSrc), '第三方路径缺 true');
-  assert.ok(/applyProviderPromptCache\(env, false\)/.test(settingsSrc), '官方路径缺 false');
+// 必修③:光按"true/false 各出现过一次"断言,判官把官方分支的 false 翻成 true 会全绿。
+// 改成逐调用点锁极性:每个调用点前 1500 字符里必须出现它所属分支的特征代码(marker),
+// 且实参必须等于该分支应有的值。分支被重排/极性被翻/marker 消失,三种都红。
+check('A1-4 五条 provider 切换路径逐点锁定第三方极性', () => {
+  const CALL = 'await applyProviderPromptCache(';
+  const EXPECT = [
+    { what: 'cc-switch 官方分支', marker: /env\.ANTHROPIC_MODEL = 'claude-sonnet-4-6'/, arg: '(env, false)' },
+    { what: '原生 claude 直写分支', marker: /const env = mergeProviderEnv\(current\.env, snapshot\.env \|\| \{\}\);/, arg: '(env, !!(snapBase && !isOfficialAnthropic(snapBase)))' },
+    { what: 'switchToOpenAIUpstream', marker: /async function switchToOpenAIUpstream/, arg: '(env, true)' },
+    { what: 'switchToAnthropicUpstream', marker: /async function switchToAnthropicUpstream/, arg: '(env, true)' },
+    { what: 'switchToCustomProvider 官方直连', marker: /async function switchToCustomProvider/, arg: '(env, false)' },
+  ];
+  const idxs = [];
+  for (let i = settingsSrc.indexOf(CALL); i >= 0; i = settingsSrc.indexOf(CALL, i + 1)) idxs.push(i);
+  assert.equal(idxs.length, EXPECT.length, `applyProviderPromptCache 调用点 ${idxs.length} 处,应为 ${EXPECT.length} 处`);
+  idxs.forEach((at, k) => {
+    const { what, marker, arg } = EXPECT[k];
+    // 窗口 = 「上一个调用点到本调用点」之间的全部源码:本分支的特征代码必落在这段里。
+    const pre = settingsSrc.slice(k === 0 ? 0 : idxs[k - 1], at);
+    assert.ok(marker.test(pre), `第 ${k + 1} 个调用点不在「${what}」里(特征代码未出现在其上文)`);
+    const actual = settingsSrc.slice(at + CALL.length - 1, at + CALL.length - 1 + arg.length);
+    assert.equal(actual, arg, `「${what}」的第三方实参应为 ${arg},实际 ${actual}`);
+  });
 });
+check('A2-7 端点第三方判据用 isOfficialAnthropic,不是"有没有 BASE_URL"', () => {
+  // baseURL=https://api.anthropic.com 的自定义 provider:切换路径判官方(不写两键),
+  // 端点若按 !!BASE_URL 判第三方,mode=auto 就会把两键写进官方配置并冲掉用户原值。
+  assert.ok(/const base = env\?\.ANTHROPIC_BASE_URL \|\| '';\s*\n\s*return !!base && !isOfficialAnthropic\(base\);/.test(settingsSrc),
+    'isThirdPartyEnv 未用 isOfficialAnthropic');
+  assert.ok(!/const thirdParty = !!env\.ANTHROPIC_BASE_URL;/.test(settingsSrc), '端点仍在用 !!ANTHROPIC_BASE_URL 判第三方');
+  // GET 与 PUT 必须共用同一个判据函数,不许各写一份
+  assert.equal((settingsSrc.match(/isThirdPartyEnv\(/g) || []).length >= 3, true);
+});
+check('A2-8 官方 baseURL 下 auto 档解析为关闭(端点判据的行为等价物)', () => {
+  const isThird = (env) => { const b = env?.ANTHROPIC_BASE_URL || ''; return !!b && !isOfficialAnthropic(b); };
+  assert.equal(resolvePromptCacheOn('auto', isThird({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com' })), false);
+  assert.equal(resolvePromptCacheOn('auto', isThird({})), false);
+  assert.equal(resolvePromptCacheOn('auto', isThird({ ANTHROPIC_BASE_URL: 'http://127.0.0.1:8789' })), true);
+  // 顺手 a:主机名边界(notanthropic.com 不是官方)
+  assert.equal(isOfficialAnthropic('https://notanthropic.com'), false);
+  assert.equal(isOfficialAnthropic('https://api.anthropic.com'), true);
+  assert.equal(isOfficialAnthropic('https://anthropic.com'), true);
+  assert.equal(isOfficialAnthropic(''), true);
+});
+check('A2-9 PUT 直写 settings.json 前先备份(与五条切换路径同口径)', () => {
+  const put = settingsSrc.slice(settingsSrc.indexOf("router.put('/prompt-cache'"), settingsSrc.indexOf("router.put('/prompt-cache'") + 1400);
+  assert.ok(put.indexOf('await backupSettings(') > 0, 'PUT 缺 backupSettings');
+  assert.ok(put.indexOf('await backupSettings(') < put.indexOf('await writeFile(SETTINGS_PATH'), '备份必须在写入之前');
+});
+
 check('A1-5 GET/PUT /prompt-cache 端点存在且校验 mode', () => {
   assert.ok(/router\.get\('\/prompt-cache'/.test(settingsSrc));
   assert.ok(/router\.put\('\/prompt-cache'/.test(settingsSrc));
@@ -103,10 +149,44 @@ check('A1-5 GET/PUT /prompt-cache 端点存在且校验 mode', () => {
 });
 check('A1-6 chat.js:按 CARVED_SLATE 补 extraArgs system-prompt-snapshot,且不覆盖 acw 的 settings', () => {
   assert.ok(/CLAUDE_CODE_CARVED_SLATE === '1'/.test(chatSrc), '缺 resolveSnapshotOn 判据');
-  assert.ok(/resolveSnapshotOn\(\)\) options\.extraArgs = \{ \.\.\.\(options\.extraArgs \|\| \{\}\), 'system-prompt-snapshot': 'on' \}/.test(chatSrc),
+  assert.ok(/options\.extraArgs = \{ \.\.\.\(options\.extraArgs \|\| \{\}\), 'system-prompt-snapshot': 'on' \}/.test(chatSrc),
     'extraArgs 未按展开合并写入');
   // acw 那块也必须是展开合并(否则两者互相顶掉)
   assert.ok(/options\.extraArgs = \{ \.\.\.\(options\.extraArgs \|\| \{\}\), settings: acwTmpFile \}/.test(chatSrc));
+});
+
+// ── 必修①:--system-prompt-snapshot 的 CLI 版本门 ─────────────────────────
+// 该 flag 只有 2.1.25x+ 认;2.1.252 收到直接 `error: unknown option` 退进程,
+// 而 CARVED_SLATE 这个 env 键对老版本无害 → 必须按能力探测门控,否则老 CLI 用户
+// 一切到第三方 provider 就全线起不来。
+check('A1-8 能力探测:help 含该 flag → true;不含 → false;探测抛错 → false', () => {
+  _resetSnapFlagCache();
+  assert.equal(cliSupportsSnapshotFlag('/probe/yes', () => '  --system-prompt-snapshot <on|off>   Record the system prompt once'), true);
+  assert.equal(cliSupportsSnapshotFlag('/probe/no', () => '  --append-system-prompt <prompt>   Append a system prompt'), false);
+  assert.equal(cliSupportsSnapshotFlag('/probe/boom', () => { throw new Error('ENOENT'); }), false, '探测失败必须按不支持处理(失败闭合)');
+});
+check('A1-9 能力探测按二进制路径缓存一次(第二次不再跑探测)', () => {
+  _resetSnapFlagCache();
+  let calls = 0;
+  const probe = () => { calls += 1; return '--system-prompt-snapshot'; };
+  assert.equal(cliSupportsSnapshotFlag('/probe/cache', probe), true);
+  assert.equal(cliSupportsSnapshotFlag('/probe/cache', probe), true);
+  assert.equal(calls, 1, `探测跑了 ${calls} 次,应只跑 1 次`);
+  // 换一个路径要重新探测(切 claude 安装位后判据不能沿用旧的)
+  assert.equal(cliSupportsSnapshotFlag('/probe/other', probe), true);
+  assert.equal(calls, 2);
+  _resetSnapFlagCache();
+});
+check('A1-10 chat.js 的 extraArgs 必须同时过「env 开」与「CLI 支持」两道门', () => {
+  assert.ok(/if \(resolveSnapshotOn\(\) && cliSupportsSnapshotFlag\(claudePath\)\) \{/.test(chatSrc),
+    'extraArgs 未与 cliSupportsSnapshotFlag 串联(老 CLI 会 unknown option 退进程)');
+  // 门必须在 claudePath 解析之后 —— 否则探测的是空路径,判据与实际 spawn 的二进制不同源
+  assert.ok(chatSrc.indexOf('const claudePath = resolveUserClaude();') < chatSrc.indexOf('cliSupportsSnapshotFlag(claudePath)'));
+});
+check('A1-11 端点把 CLI 支持与否回给面板,面板据此提示', () => {
+  assert.ok(/cliSnapshotSupported: cliSupportsSnapshotFlag\(/.test(settingsSrc), '端点未回 cliSnapshotSupported');
+  assert.ok(/state\.cliSnapshotSupported === false/.test(panelSrc), '面板未按 CLI 支持与否分支');
+  assert.ok(/不支持系统提示快照/.test(panelSrc), '面板缺不支持时的说明文案');
 });
 check('A1-7 设置面板有开关 + 搜索索引条目', () => {
   assert.ok(/function PromptCacheSnapshotToggle\(/.test(panelSrc), '缺开关组件定义');

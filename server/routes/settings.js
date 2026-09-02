@@ -16,8 +16,9 @@ import { applyCatalogPrefill, catalogPrefillEntry } from '../utils/model-capabil
 import { updatePrefs, loadPrefs } from './prefs.js';
 import {
   SNAPSHOT_ENV_KEY, TOOL_SEARCH_ENV_KEY, PROMPT_CACHE_MODES,
-  normalizePromptCacheMode, resolvePromptCacheOn, applyPromptCacheEnv,
+  normalizePromptCacheMode, resolvePromptCacheOn, applyPromptCacheEnv, cliSupportsSnapshotFlag,
 } from '../utils/prompt-cache-env.js';
+import { resolveClaude } from '../utils/claude-resolver.js';
 
 const execFileP = promisify(execFile);
 const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
@@ -191,18 +192,34 @@ async function applyProviderPromptCache(env, thirdParty) {
   return env;
 }
 
-// GET /api/prompt-cache → { mode, on, thirdParty, snapshotEnv, toolSearchEnv }
-router.get('/prompt-cache', async (_req, res) => {
-  const cur = await readCurrentSettings();
-  const env = cur.env || {};
-  const thirdParty = !!env.ANTHROPIC_BASE_URL;
-  const { mode } = await readPromptCachePref();
-  res.json({
-    mode, thirdParty,
+// 第三方判据必须与五条切换路径同源:用 isOfficialAnthropic 而不是"有没有 BASE_URL"。
+// 二者在 baseURL=https://api.anthropic.com 的自定义 provider 上会打架 —— 切换时判官方
+// (不写两个键),端点若按"有 BASE_URL"判第三方,mode=auto 就会把 CARVED_SLATE=1 +
+// ENABLE_TOOL_SEARCH=false 写进官方配置,并把用户原来的 ENABLE_TOOL_SEARCH 冲掉。
+function isThirdPartyEnv(env) {
+  const base = env?.ANTHROPIC_BASE_URL || '';
+  return !!base && !isOfficialAnthropic(base);
+}
+
+// GET/PUT 的公共响应体。cliSnapshotSupported=false 时前端要说明"当前 claude 版本不支持
+// 系统提示快照,仅关闭 ToolSearch 生效"(chat.js 同样按这个探测结果决定加不加 flag)。
+function promptCacheState(env, mode) {
+  const thirdParty = isThirdPartyEnv(env);
+  return {
+    mode: normalizePromptCacheMode(mode), thirdParty,
     on: resolvePromptCacheOn(mode, thirdParty),
     snapshotEnv: env[SNAPSHOT_ENV_KEY] ?? null,
     toolSearchEnv: env[TOOL_SEARCH_ENV_KEY] ?? null,
-  });
+    // 只作面板提示用;真正决定加不加 flag 的是 chat.js spawn 处的同一个探测(同一份缓存)。
+    cliSnapshotSupported: cliSupportsSnapshotFlag(resolveClaude()?.path || ''),
+  };
+}
+
+// GET /api/prompt-cache → { mode, on, thirdParty, snapshotEnv, toolSearchEnv, cliSnapshotSupported }
+router.get('/prompt-cache', async (_req, res) => {
+  const cur = await readCurrentSettings();
+  const env = cur.env || {};
+  res.json(promptCacheState(env, (await readPromptCachePref()).mode));
 });
 
 // PUT /api/prompt-cache { mode:'auto'|'on'|'off' } —— 存偏好并立刻按当前 provider 类别
@@ -213,17 +230,13 @@ router.put('/prompt-cache', async (req, res) => {
   if (!PROMPT_CACHE_MODES.includes(mode)) return res.status(400).json({ error: 'mode 必须是 auto/on/off' });
   const cur = await readCurrentSettings();
   const env = { ...(cur.env || {}) };
-  const thirdParty = !!env.ANTHROPIC_BASE_URL;
   const { memo } = await readPromptCachePref();
-  const nextMemo = applyPromptCacheEnv(env, resolvePromptCacheOn(mode, thirdParty), memo);
+  const nextMemo = applyPromptCacheEnv(env, resolvePromptCacheOn(mode, isThirdPartyEnv(env)), memo);
   await updatePrefs((prefs) => { prefs.promptCache = { mode, memo: nextMemo }; });
+  // 与五条 provider 切换路径同口径:直写 settings.json 前先备份(BK-8 的滚动 3 份)。
+  await backupSettings(new Date().toISOString().replace(/[:.]/g, '-'));
   await writeFile(SETTINGS_PATH, JSON.stringify({ ...cur, env }, null, 2));
-  res.json({
-    ok: true, mode, thirdParty,
-    on: resolvePromptCacheOn(mode, thirdParty),
-    snapshotEnv: env[SNAPSHOT_ENV_KEY] ?? null,
-    toolSearchEnv: env[TOOL_SEARCH_ENV_KEY] ?? null,
-  });
+  res.json({ ok: true, ...promptCacheState(env, mode) });
 });
 
 // GUI-managed custom providers (Option A: isolated from cc-switch.db). Each:
