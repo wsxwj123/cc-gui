@@ -411,7 +411,8 @@ export function extractImages(protocol, data) {
 }
 
 /**
- * 取首张。`extractImages` 的薄封装 —— 保留它是因为调用方(与几个单测)只关心"有没有图",
+ * 取首张(直接看 data[0],不经 extractImages;首项为坏项时它返 null 而 extractImages 会跳过取后项,
+ * 这是刻意保留的旧语义)—— 保留它是因为调用方(与几个单测)只关心"有没有图",
  * 改签名不值当。多张场景一律走 extractImages。
  */
 export function extractImage(protocol, data) {
