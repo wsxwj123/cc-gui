@@ -195,8 +195,10 @@ try {
       't5【只认 http(s)】:file/data/ftp/相对路径/非字符串全丢');
 
     // ③ failed:cost 0、无 result.images(真机形态),错误原因三种落点都认。
+    // r87:输出多了 cost / creditsCost(上游实付,取不到为 null)。这条 fixture 的 cost 是 0
+    // (真机 failed 形态),原样带出来 —— "扣了 0" 与 "不知道扣没扣" 是两件事,由界面决定显不显示。
     assert.deepEqual(extractTaskState({ data: { id: 'x', status: 'failed', cost: 0, progress: 0 } }),
-      { status: 'failed', progress: 0, urls: [], message: '' }, 't5: failed 无原因时 message 为空串');
+      { status: 'failed', progress: 0, urls: [], message: '', cost: 0, creditsCost: null }, 't5: failed 无原因时 message 为空串');
     assert.equal(extractTaskState({ data: { status: 'failed', error: { message: 'Banned prompt detected' } } }).message,
       'Banned prompt detected', 't5: 取 data.error.message');
     assert.equal(extractTaskState({ data: { status: 'failed' }, error: { message: '顶层 error' } }).message,

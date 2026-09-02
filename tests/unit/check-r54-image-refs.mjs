@@ -498,12 +498,15 @@ if (failure) throw failure;
   const count = (s, re) => (s.match(re) || []).length;
   // r51 基线:安全锚点只许加,不许被删被弱化(参考图与取消都不该动这些)。
   // r84:新增 /image/actions(MJ 二次操作)后多一处前置校验 → 基线 4 → 5。只增不减。
-  assert.equal(count(src, /await assertPublicBaseURL\(/g), 5, 't8: assertPublicBaseURL 调用点数量不变');
+  // r87:新增第五处外联(GET /api/pricing/model 报价查询,免鉴权)。它同样带 origin 前置校验、
+  // redirect:'manual' 与一处限量读 → 三条基线各 +1。语义仍是「只许加不许减」;既有链路原样
+  // 的真牙在下面的 runner 切片计数(一个都没变)。
+  assert.equal(count(src, /await assertPublicBaseURL\(/g), 6, 't8: assertPublicBaseURL 调用点数量不变');
   // r82 新增第四处外联(pollTask 查任务状态,带同款 redirect:'manual' + 两处限量读)→
   // 两条基线各 +1 / +2。"只许加不许减"的语义没变;既有链路原样的真牙在
   // check-r51 t6 与 check-r82 t8 的 runner 切片计数(那里一个都没变)。
-  assert.equal(count(src, /redirect: 'manual'/g), 4, "t8: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处)");
-  assert.equal(count(src, /readCapped\(/g), 6, 't8: readCapped 出现次数(r51 的 4 处 + r82 轮询 2 处)');
+  assert.equal(count(src, /redirect: 'manual'/g), 5, "t8: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处 + r87 报价 1 处)");
+  assert.equal(count(src, /readCapped\(/g), 7, 't8: readCapped 出现次数(r51 的 4 处 + r82 轮询 2 处 + r87 报价 1 处)');
   assert.ok(count(src, /redactKey\(/g) >= 7, 't8: redactKey 不少于原有 7 处');
   assert.match(src, /finally \{\n\s*activeJobs -= 1;/, 't8: 名额仍在 finally 归还(取消复用同一条路径)');
   // 参考图:两道闸都要用上,且历史只写摘要

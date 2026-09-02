@@ -55,7 +55,11 @@ const FORM_KEY = 'sk-r50-form-key-998877665544';
     // 「纯文生图零回归」的真牙已搬到 check-r54-image-refs.mjs 的 t0:三种协议在【无 refs】
     // 时的 {url, headers, body} 用 deepEqual 逐字钉死 —— 比源码哈希更强(哈希只挡改动,
     // deepEqual 挡的是行为)。改这里前先看那三条锚。
-    '1fe7c04fa0f8b29264e5f9d5316986638c58ba00562842621ced4aea0a44ea2e',
+    // r87 第五次更新:openai 分支按【上游方言】下发结构化参数(size 语义分叉 + resolution /
+    // quality / output_format / background / moderation / n / nsfw_check),gemini / chat / mj
+    // 三条分支与 openai 的 multipart edits 分支一行未动 —— 这一点由 check-r87-image-params
+    // 的 t1b 用【与 master 基线 e6668bc9 逐案 deepEqual 对跑】钉死,比哈希强得多。
+    'fc39a3f2040f4f3b24ee2b7380b1218d1b8f7776231d758d9d60958b769d2cd2',
     't2: buildImageRequest 一字未改(生成链路红线);若确需改动,连同 check-image-gen 与 check-r54-image-refs 的断言一起复核后再更新此基线',
   );
 }
