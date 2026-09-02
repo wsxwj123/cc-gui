@@ -130,7 +130,7 @@ try {
     const title = chat.slice(chat.indexOf("router.post('/chat/title'"), chat.indexOf('const childEnv = { ...process.env };'));
     // r90:短路搬进 waitForAiTitle(先等原生几秒再决定要不要自己起进程),判据不变 ——
     // 端点必须走它、它必须读 jsonl 的 ai-title,拿到就直接返回、不起 -p 子进程。
-    assert.ok(/const aiTitle = await waitForAiTitle\(jsonlSid\)/.test(title) && /if \(aiTitle\) return res\.json/.test(title),
+    assert.ok(/const aiTitle = await waitForAiTitle\(jsonlSid, TITLE_WAIT_NATIVE_MS\)/.test(title) && /if \(aiTitle\) return res\.json/.test(title),
       '标题端点必须先看 jsonl 里 CLI 写好的 ai-title,有就直接返回,不起 -p 子进程');
     assert.ok(/async function waitForAiTitle\([\s\S]*?readSessionTitles\(f\)[\s\S]*?t\?\.aiTitle/.test(chat),
       'waitForAiTitle 必须读 jsonl 的 ai-title 行');
