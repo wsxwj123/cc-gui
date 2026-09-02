@@ -859,7 +859,11 @@ function makeCanUseTool(slot) {
         try { isDir = statSync(boundary).isDirectory(); } catch {}
         updates.push(...buildDirAuthUpdates(boundary, { permanent: r.authorizeDir === 'permanent', isDir }));
       }
-      if (updates.length) out.updatedPermissions = updates;
+      if (updates.length) {
+        out.updatedPermissions = updates;
+        // r96 #8:只有落 userSettings 的更新才会写 ~/.claude/settings.json(session 级不写文件)。
+        if (updates.some((u) => u?.destination === 'userSettings')) noteSelfPermissionWrite();
+      }
       return out;
     };
     if (toolName === 'AskUserQuestion') {
@@ -984,9 +988,45 @@ export function resolveSnapshotOn() {
 // 数值或 null)计入键:官方(恒 null)与第三方同窗模型间照旧热切,异窗切换 key 变 →
 // 走既有 teardown+冷启,压缩线随新 spawn 重算。指纹由调用点用与 spawn 完全相同的
 // resolveCompactWindowSettings(model) 的同一次结果取出,恒一致、不重复 IO。
+// r96 #8:settings.json 的 permissions 由 CLI 在「始终允许」时落盘(GUI 只经 canUseTool 的
+// updatedPermissions 请求写入,见 permission-rules.js)。规则在同一常驻进程内已热生效
+// (r89 实测:第 2/3 回合不再弹卡),为它重建进程 = 纯浪费一次全量前缀失配。
+// 拆法:非 permissions 部分取内容指纹进键(env/hooks/model 等是 spawn 时定死的,必须冷启);
+// permissions 只有【外部】改动才推进代数进键。
+let settingsSplitCache = { mtime: -1, nonPerm: '', perm: '' };
+let lastPermFp = null;      // 上次观测到的 permissions 指纹(null = 尚未建立基线)
+let permEpoch = 0;          // 外部权限改动代数
+let pendingSelfPermWrite = false;
+
+export function noteSelfPermissionWrite() { pendingSelfPermWrite = true; } // export 仅为可单测
+
+function readSettingsSplit() {
+  let mtime = 0;
+  try { mtime = statSync(pathJoin(homedir(), '.claude', 'settings.json')).mtimeMs; } catch {}
+  if (mtime === settingsSplitCache.mtime) return settingsSplitCache;   // 快路:IO 与旧版等价
+  let nonPerm = '', perm = '';
+  try {
+    const s = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8')) || {};
+    perm = JSON.stringify(s.permissions ?? null);
+    delete s.permissions;
+    nonPerm = JSON.stringify(s);
+  } catch { nonPerm = 'unreadable:' + mtime; perm = 'unreadable:' + mtime; }  // 读不出/坏 JSON → 恒变 → 保守冷启
+  settingsSplitCache = { mtime, nonPerm, perm };
+  return settingsSplitCache;
+}
+
 export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd, acw, genui }) { // export 仅为可单测
-  let settingsMtime = 0;
-  try { settingsMtime = statSync(pathJoin(homedir(), '.claude', 'settings.json')).mtimeMs; } catch {}
+  const { nonPerm, perm } = readSettingsSplit();
+  if (lastPermFp === null) lastPermFp = perm;              // 首次调用建基线,不推进代数
+  else if (perm !== lastPermFp) {
+    lastPermFp = perm;
+    // ponytail: 天花板 —— 「点了始终允许」与「下一条消息之前用户在终端手加 deny 规则」
+    // 双重巧合时,这次外部改动会被吞掉一次(只此一次,标记随即清零)。升级路径:把
+    // buildAlwaysAllowUpdates 返回的规则一并记下,要求新旧 permissions 之差恰好等于它。
+    if (pendingSelfPermWrite) pendingSelfPermWrite = false; // GUI 自写 → 代数不动 → 键不变
+    else permEpoch += 1;                                    // 外部改动 → 冷启
+  }
+  const settingsFp = nonPerm;
   // 禁用工具清单变更也不能复用旧进程(disallowedTools 是 query 级选项,起时定死)→ 计入 mtime。
   let disToolsMtime = 0;
   try { disToolsMtime = statSync(pathJoin(homedir(), '.claude', 'gui', 'disabled-mcp-tools.json')).mtimeMs; } catch {}
@@ -1003,6 +1043,10 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
   // localSettings 改写成 userSettings),不是项目 settings.local.json —— 摘掉
   // projSettingsMtime 根本躲不开那次冷启。改用"排除 permissions 的内容指纹"则会让终端
   // 新加的 deny 规则在活着的常驻进程里滞后生效(无上界),判官已判定不做。
+  // r96 #8 修订口径:**projSettingsMtime 仍一字不动**(上面这条结论继续成立);只有用户级
+  // 那一个 settingsMtime 被拆成 settingsFp(排除 permissions 的内容指纹)+ permEpoch。
+  // 不是"摘掉不管":外部权限改动照旧推进 permEpoch → 照旧冷启,滞后只发生在"GUI 自写"
+  // 这一次,且有上界(标记消费即清零),与被否决的那版无上界滞后不是一回事。
   let projSettingsMtime = 0;
   try { projSettingsMtime += statSync(pathJoin(workingDir, '.claude', 'settings.json')).mtimeMs; } catch {}
   try { projSettingsMtime += statSync(pathJoin(workingDir, '.claude', 'settings.local.json')).mtimeMs; } catch {}
@@ -1015,7 +1059,7 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     // 与 suggest 同口径:存**解析后的布尔**。存 'auto' 会让切 provider 后复用到一个
     // excludeDynamicSections 与本次不符的常驻进程(systemPrompt 是 query 级选项,起时定死)。
     xdyn: resolveExcludeDyn(excludeDynamicSystemPrompt),
-    gr: globalRead !== false, dirs, settingsMtime, disToolsMtime, projSettingsMtime, mcpStampMtime,
+    gr: globalRead !== false, dirs, settingsFp, permEpoch, disToolsMtime, projSettingsMtime, mcpStampMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
     acw: acw ?? null, // 压缩窗口指纹(MCT 数值或 null):异窗模型切换必须冷启重算压缩线
     // r66:genui 教学段进没进系统提示。系统提示 spawn 时定死,不计入键则用户翻完
