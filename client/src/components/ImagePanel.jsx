@@ -16,7 +16,11 @@ import {
   SIZE_OPTIONS, sizeCapFor, sizeOptionsFor, imageDialect, dialectForBaseURL, APIMART_RATIOS,
 } from '../utils/imageSizeCaps.js';
 // r84 多图条目:一个任务可能出多张图(MJ 一次 4 张),单图操作一律作用于【选中的那张】。
-import { entryFiles, pickedIndex, pickedFile, entryPreviewUrl, pickedPreviewUrl } from '../utils/imageEntry.js';
+// r95 序列三函数:把任务列表拍平成一条可浏览序列,供放大层左右切图。
+import {
+  entryFiles, pickedIndex, pickedFile, entryPreviewUrl, pickedPreviewUrl,
+  flattenBrowsable, shotPos, neighbor,
+} from '../utils/imageEntry.js';
 // r58 上传参考图的 MIME:File.type 为空(Win 缺注册表映射)时按扩展名认,别一律说成 png。
 import { refMime } from '../utils/refMime.js';
 // r59 程序化写入走撤销通道,否则「恢复」覆盖掉的提示词 ⌘Z 撤不回。
@@ -118,6 +122,9 @@ const STATUS_LABEL = { running: '生成中', done: '已完成', error: '失败',
 // 取消只停止本机这一侧的等待与下载：上游任务（任务制协议尤其如此）仍在生成，费用照算。
 // 不写清楚会被理解成"已经把任务撤掉了"。
 const CANCEL_NOTE = '已停止等待（上游任务可能仍在生成并计费）';
+// 取消提示的行内形态。r95 起预览区也要显示它(新任务被取消时不许回退显示上一轮的图,
+// 只剩这一行状态),列表条目与预览区共用这一处 —— 文案抄成两份早晚会各改各的。
+const cancelNote = (h) => (h.status === 'cancelled' ? ` · ${CANCEL_NOTE}` : '');
 // r54 参考图:张数与单张体积上限,与服务端 MAX_REFS / MAX_REF_BYTES 同值(前端先拦,
 // 省一次大 body 往返;真正的闸在服务端)。
 const MAX_REFS = 6;
@@ -706,6 +713,8 @@ export default function ImagePanel() {
   const [err, setErr] = useState('');
   const [history, setHistory] = useState([]); // 服务端持久化历史(≤100 条,新在前)
   const [currentId, setCurrentId] = useState('');
+  // r95:放大层当前这张 = { id, index }(哪条任务的第几张),src/name/path 全部现算。
+  // 刻意不存 src 快照:轮询每 1.5s 换一遍 history,快照会过期,也没法在序列里左右移动。
   const [zoom, setZoom] = useState(null);
   const [tab, setTab] = useState('gen'); // gen | jobs —— 局部态,切 tab 不重挂面板,轮询照跑
   const [taskView, setTaskView] = useState(readTaskView); // grid | list
@@ -826,6 +835,20 @@ export default function ImagePanel() {
   const shotFile = (h) => pickedFile(h, picked[h.id]);
   const shotUrl = (h) => pickedPreviewUrl(h, picked[h.id]) || h.previewUrl || '';
   const pickShot = (h, i) => { setCurrentId(h.id); setPicked((m) => ({ ...m, [h.id]: i })); };
+  // r95 方向键切图:把任务列表拍平成一条可浏览序列 —— 顺序与用户在列表里看到的逐字一致,
+  // 所以序列取自 ordered 而不是 history。Lightbox 只管发方向,序列与位置都在这里算。
+  const shots = flattenBrowsable(ordered);
+  const zoomPos = shotPos(shots, zoom);
+  const zoomEntry = zoom ? history.find((h) => h.id === zoom.id) : null;
+  const goShot = (dir) => {
+    const next = neighbor(shots, zoom, dir);
+    if (!next) return; // 到头停住,不循环
+    // 只取坐标存进 state:next 还带着 file / prompt,存下来就又成了会过期的快照。
+    const { id, index } = next;
+    setZoom({ id, index });
+    // 选中态跟着走:关掉放大层后预览区与单图操作对着刚看的那张(next 带 id,pickShot 只读 h.id)。
+    pickShot(next, index);
+  };
   // r84 可追溯:二次操作产生的条目标出"从哪个任务的第几张来的"。
   const originNote = (h) => {
     const tag = `${MJ_ACTION_TAG[h.mjAction] || ''}${h.mjIndex || ''}`;
@@ -916,6 +939,9 @@ export default function ImagePanel() {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `生成失败（${r.status}）`);
       if (!d.jobId) throw new Error('服务端未返回任务标识');
+      // r95:受理成功就把预览区指向新任务 —— 否则新任务跑着,预览区还挂着上一轮的图。
+      // 新任务不是 done,下面的预览区 done 门控自然就不渲染旧图了,不必另加"清预览"开关。
+      setCurrentId(d.jobId);
       await loadHistory(); // 拿到 running 条目 → 轮询自动起
     } catch (e) {
       setErr(e.message);
@@ -969,6 +995,7 @@ export default function ImagePanel() {
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `提交失败（${r.status}）`);
+      if (d.jobId) setCurrentId(d.jobId); // r95:与「生成」同口径,预览区跟到新任务上
       loadHistory();
     } catch (e) {
       setActionErr(`${MJ_ACTION_LABEL[action] || action}失败：${e.message}`);
@@ -1249,7 +1276,7 @@ export default function ImagePanel() {
           <img
             src={shotUrl(current)}
             alt={current.prompt}
-            onClick={() => setZoom({ src: shotUrl(current), name: current.prompt, path: shotFile(current) })}
+            onClick={() => setZoom({ id: current.id, index: shotIdx(current) })}
             className="w-full rounded-panel border border-canvas-deep cursor-zoom-in"
           />
           {imageStrip(current)}
@@ -1263,6 +1290,24 @@ export default function ImagePanel() {
           </div>
           {revealErr && <div className="text-[11px] text-error font-body">{revealErr}</div>}
           {actionErr && <div className="text-[11px] text-error font-body break-all">{actionErr}</div>}
+        </div>
+      )}
+
+      {/* r95:受理新任务后 currentId 指向它,上面的 done 门控自然就不渲染上一轮的图了。
+          这里补一行状态 —— 预览区凭空变空会被当成 bug。文案与任务列表逐字同源,
+          秒数靠 1.5s 轮询重渲染自然跳动,不另起计时器。 */}
+      {current && current.status !== 'done' && (
+        <div className={`flex items-center gap-2 rounded-panel border border-canvas-deep px-3 py-4 ${tab === 'gen' ? '' : 'hidden'}`}>
+          {current.status === 'running' ? (
+            <>
+              <Loader2 size={14} className="animate-spin text-ink-faint" />
+              <span className="text-[11px] text-ink-faint font-body">生成中 · {elapsedSec(current)}s{current.progress == null ? '' : ` · ${current.progress}%`}</span>
+            </>
+          ) : (
+            <span className="text-[11px] text-error font-body break-all">
+              {STATUS_LABEL[current.status] || current.status}{current.error ? ` · ${current.error}` : ''}{cancelNote(current)}
+            </span>
+          )}
         </div>
       )}
 
@@ -1313,7 +1358,7 @@ export default function ImagePanel() {
                 <img
                   src={shotUrl(h)}
                   alt={h.prompt}
-                  onClick={() => { setCurrentId(h.id); setZoom({ src: shotUrl(h), name: h.prompt, path: shotFile(h) }); }}
+                  onClick={() => { setCurrentId(h.id); setZoom({ id: h.id, index: shotIdx(h) }); }}
                   className="w-full aspect-square object-cover cursor-zoom-in"
                 />
               ) : (
@@ -1373,7 +1418,7 @@ export default function ImagePanel() {
                 <img
                   src={shotUrl(h)}
                   alt={h.prompt}
-                  onClick={() => { setCurrentId(h.id); setZoom({ src: shotUrl(h), name: h.prompt, path: shotFile(h) }); }}
+                  onClick={() => { setCurrentId(h.id); setZoom({ id: h.id, index: shotIdx(h) }); }}
                   className="shrink-0 w-9 h-9 rounded object-cover border border-canvas-deep cursor-zoom-in"
                 />
               ) : (
@@ -1390,7 +1435,7 @@ export default function ImagePanel() {
                   {h.files?.length > 1 ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">第 {shotIdx(h) + 1}/{h.files.length} 张</span> : null}
                   {h.mjAction ? <span className="mr-1 px-1 rounded bg-canvas-deep/60 text-ink-soft">{originNote(h)}</span> : null}
                   {h.status === 'running' ? `生成中 · ${elapsedSec(h)}s${h.progress == null ? '' : ` · ${h.progress}%`}` : (STATUS_LABEL[h.status] || h.status)}
-                  {h.status === 'cancelled' ? ` · ${CANCEL_NOTE}` : ''}
+                  {cancelNote(h)}
                   {h.status !== 'done' && h.error ? ` · ${h.error}` : ''}
                   {paidNote(h) ? ` · ${paidNote(h)}` : ''}
                   {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
@@ -1403,7 +1448,17 @@ export default function ImagePanel() {
         </div>
       </div>
 
-      <ImageLightbox src={zoom?.src} name={zoom?.name} path={zoom?.path} onClose={() => setZoom(null)} />
+      {/* r95:src/name/path 现算(与 shotUrl / shotFile 同口径,只是下标取自 zoom);
+          到头那侧传 null → 放大层不画那枚按钮。序列只剩 1 张时不显示计数。 */}
+      <ImageLightbox
+        src={zoomEntry ? (pickedPreviewUrl(zoomEntry, zoom.index) || zoomEntry.previewUrl || '') : ''}
+        name={zoomEntry?.prompt || ''}
+        path={zoomEntry ? pickedFile(zoomEntry, zoom.index) : ''}
+        onClose={() => setZoom(null)}
+        onPrev={zoomPos > 0 ? () => goShot(-1) : null}
+        onNext={zoomPos >= 0 && zoomPos < shots.length - 1 ? () => goShot(1) : null}
+        counter={zoomPos >= 0 && shots.length > 1 ? `${zoomPos + 1} / ${shots.length}` : ''}
+      />
 
       {/* 管理态(属「生图」页)。r54:用 hidden 类切换而非条件渲染 —— 条件渲染会在切到
           任务列表时卸载表单,编辑到一半的未保存字段全丢(与上面双 tab 同法)。 */}
