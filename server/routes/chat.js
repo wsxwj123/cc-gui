@@ -2385,12 +2385,12 @@ router.post('/chat/title', async (req, res) => {
   const model = resolveTitleModel(String(req.body?.model || '').replace(/\[1m\]/i, '').trim());
   if (!firstUser) return res.json({ title: '' });
 
-  // 短路:CLI 首轮结束后自己会往会话 jsonl 写一行 ai-title。已经有了就直接用,不必再起
-  // 一个 `claude -p` 子进程算一遍(一次冷启 + 一次模型调用)。下面的自建链路保留:
-  // 第三方 provider 下 CLI 是否写 ai-title 未实测,读不到就照旧自己生成。
-  // 只认 ai-title:手改标题(custom-title)优先级本就高于自动标题,读侧会直接显示它。
-  // 假上游实测(r90):端点回得出 {"title":…} 时(带 thinking 块也照样解析)CLI 就会写
-  // 这一行,且写在回合**开头**;所以先等它几秒再决定要不要自己起进程。
+  // 短路:CLI 会往会话 jsonl 写一行 ai-title。已经有了就直接用,不必再起一个
+  // `claude -p` 子进程算一遍(一次冷启 + 一次模型调用)。只认 ai-title:手改标题
+  // (custom-title)优先级本就高于自动标题,读侧会直接显示它。
+  // 假上游实测(r90):端点回得出 {"title":…} 时(前面带 thinking 块也照样解析)CLI 必写
+  // 这一行,且写在回合**开头**,所以先等它几秒;回非 JSON 则每回合重试一次且永不落盘,
+  // resume / 压缩续接的进程更是一次都不跑 —— 这两种情况下自建链路是唯一的标题来源。
   const jsonlSid = String(req.body?.sessionId || '');
   if (jsonlSid) {
     // 60 而非下面自建标题的 24:24 是按中文标题定的口径,CLI 写的 ai-title 常是英文,
