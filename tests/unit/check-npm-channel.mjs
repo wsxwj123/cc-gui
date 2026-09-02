@@ -405,7 +405,9 @@ t('分支 B:npm 成功时 latestVersion 取 npm snap(源码锚:snap = npmR.value
   assert.match(vcSrc, /snap = npmR\.value/);
 });
 t('npmUpgradeCommand 门控:npmLagsBehind/npmChannelUnknown 任一为真必须缺席(源码锚)', () => {
-  assert.match(vcSrc, /viaNpm && !extra\.npmLagsBehind && !extra\.npmChannelUnknown\s*\?\s*\{ npmUpgradeCommand: 'npx @wsxwj123\/cc-gui@latest' \}/);
+  // r85:命令本身按平台分岔(Win 给 npx.cmd,避开 npx.ps1 被执行策略拦),故此处只锚
+  // 门控条件与 mac/linux 形态;平台分支由 check-update-cmd-npm 的源码锁把守。
+  assert.match(vcSrc, /viaNpm && !extra\.npmLagsBehind && !extra\.npmChannelUnknown\s*\?\s*\{ npmUpgradeCommand: [^}]*'npx @wsxwj123\/cc-gui@latest' \}/);
 });
 t('命名撞车防线:fetchNpmChannelGuiLatest 与 fetchNpmLatest 并存且是两个不同函数', () => {
   assert.match(vcSrc, /async function fetchNpmChannelGuiLatest\(/);

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { updateCmdFor } from '../../server/routes/version-check.js';
+import { installCmdFor, updateCmdFor } from '../../server/routes/version-check.js';
 
 // 在当前平台(darwin/linux)与伪装 win32 下各跑一遍两分支。
 // process.platform 可用 defineProperty 覆写(node 官方允许,测完还原)。
@@ -72,4 +72,66 @@ try {
   assert.ok(/case 'npm'/.test(fn) && /update/.test(fn), 'npm 分支存在且走 update');
 }
 
-console.log('✓ check-update-cmd-npm: mac+win npm 分支走 claude update、native 不动 全过');
+
+// ── r85:Windows 上 npm 安装器撞 PowerShell 执行策略(Restricted 拦 .ps1)────────
+// 真机现象(全新 Win,只装 Node,策略默认 Restricted):GUI 选 npm 安装器装 claude,
+// `npm install -g` 成功,紧接着内联 PowerShell 里的 `npm config get prefix` 被
+// PowerShell 解析成 npm.ps1(脚本文件)→「无法加载文件 npm.ps1,禁止运行脚本」→
+// 用户 PATH 没写成 → 装完检测不到 claude。两道修(同函数 native 路径早已如此):
+//  ① 内联调用改 npm.cmd —— 绕开 .ps1 shim,PowerShell 直接执行批处理;
+//  ② 该 powershell 调用补 -ExecutionPolicy Bypass —— 只作用于本进程,不碰用户机器策略。
+// 变异哨兵:去掉 Bypass → 「必须带 Bypass」红;npm.cmd 改回 npm → 「不许裸 npm config」红。
+const WIN_NATIVE = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ProgressPreference='Continue'; Write-Host 'Installing Claude Code CLI (downloading from claude.ai)...'; irm https://claude.ai/install.ps1 | iex\"";
+const WIN_NATIVE_PROXY = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$p='http://127.0.0.1:7897'; [System.Net.WebRequest]::DefaultWebProxy=New-Object System.Net.WebProxy($p); $env:HTTP_PROXY=$p; $env:HTTPS_PROXY=$p; Write-Host ('(proxy: '+$p+')'); $ProgressPreference='Continue'; Write-Host 'Installing Claude Code CLI (downloading from claude.ai)...'; irm https://claude.ai/install.ps1 | iex\"";
+const NIX_NATIVE = "curl -fsSL https://claude.ai/install.sh | bash";
+const MAC_NPM = "PREFIX=\"$(npm prefix -g)\" && W=\"$PREFIX/lib/node_modules\" && { [ -d \"$W\" ] || W=\"$PREFIX/lib\"; } && { [ -d \"$W\" ] || W=\"$PREFIX\"; } && { [ -w \"$W\" ] || { PREFIX=\"$HOME/.npm-global\"; echo \"npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)\"; }; } && npm install -g --prefix \"$PREFIX\" @anthropic-ai/claude-code && NPMBIN=\"$PREFIX/bin\" && { case \":$PATH:\" in *\":$NPMBIN:\"*) echo \"PATH 已包含 $NPMBIN\";; *) echo \"export PATH=\\\"$NPMBIN:\\$PATH\\\"\" >> $HOME/.zshrc && echo \"已把 $NPMBIN 写入 $HOME/.zshrc(新开终端生效)\";; esac; }";
+const LINUX_NPM = "PREFIX=\"$(npm prefix -g)\" && W=\"$PREFIX/lib/node_modules\" && { [ -d \"$W\" ] || W=\"$PREFIX/lib\"; } && { [ -d \"$W\" ] || W=\"$PREFIX\"; } && { [ -w \"$W\" ] || { PREFIX=\"$HOME/.npm-global\"; echo \"npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)\"; }; } && npm install -g --prefix \"$PREFIX\" @anthropic-ai/claude-code && NPMBIN=\"$PREFIX/bin\" && { case \":$PATH:\" in *\":$NPMBIN:\"*) echo \"PATH 已包含 $NPMBIN\";; *) echo \"export PATH=\\\"$NPMBIN:\\$PATH\\\"\" >> $HOME/.bashrc && echo \"已把 $NPMBIN 写入 $HOME/.bashrc(新开终端生效)\";; esac; }";
+
+try {
+  setPlatform('win32');
+  const winNpm = installCmdFor(null, 'npm');
+  assert.ok(
+    winNpm.startsWith('call npm install -g @anthropic-ai/claude-code && '),
+    `外层仍走 cmd.exe 的 call npm(.bat 里不加 call 控制权不返回的老坑不许回归):${winNpm}`,
+  );
+  assert.ok(
+    winNpm.includes('powershell -NoProfile -ExecutionPolicy Bypass -Command '),
+    `写 PATH 的 powershell 必须带 -ExecutionPolicy Bypass(默认 Restricted 会拦 .ps1):${winNpm}`,
+  );
+  assert.equal((winNpm.match(/powershell/g) || []).length, 1, '写 PATH 只此一处 PowerShell,不新增调用');
+  const ps = winNpm.slice(winNpm.indexOf('-Command "') + '-Command "'.length, winNpm.lastIndexOf('"'));
+  assert.ok(ps.includes('npm.cmd config get prefix'), `内联 PowerShell 必须调 npm.cmd:${ps}`);
+  assert.ok(!/(^|[^.\w])npm config/.test(ps), `内联 PowerShell 里不许出现裸 npm config(会命中 npm.ps1):${ps}`);
+
+  // ── 回归锁:本轮不该动的路径逐字不变(值 = 修前实测输出) ──────────────
+  assert.equal(installCmdFor(null, 'native'), WIN_NATIVE, 'win32 native 路径逐字不变');
+  assert.equal(installCmdFor('http://127.0.0.1:7897', 'native'), WIN_NATIVE_PROXY, 'win32 native(带代理)逐字不变');
+  setPlatform('darwin');
+  assert.equal(installCmdFor(null, 'native'), NIX_NATIVE, 'mac native 路径逐字不变');
+  assert.equal(installCmdFor(null, 'npm'), MAC_NPM, 'mac npm 路径逐字不变');
+  setPlatform('linux');
+  assert.equal(installCmdFor(null, 'native'), NIX_NATIVE, 'linux native 路径逐字不变');
+  assert.equal(installCmdFor(null, 'npm'), LINUX_NPM, 'linux npm 路径逐字不变');
+} finally {
+  setPlatform(realPlatform);
+}
+
+// ── npmUpgradeCommand 按平台(在路由闭包内,不可 import → 源码正则锁) ──────────
+// GUI「有新版」提示里给用户抄的自更新命令。Windows 上 npx 同样带 .ps1 shim,
+// Restricted 策略下照样报「禁止运行脚本」,必须给 npx.cmd;mac/linux 保持 npx。
+{
+  const src = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'server', 'routes', 'version-check.js'),
+    'utf8',
+  );
+  const at = src.indexOf('npmUpgradeCommand:');
+  assert.ok(at > 0, '未找到 npmUpgradeCommand 字面量');
+  const seg = src.slice(at, at + 220);
+  assert.match(
+    seg,
+    /process\.platform === 'win32'\s*\?\s*'npx\.cmd @wsxwj123\/cc-gui@latest'\s*:\s*'npx @wsxwj123\/cc-gui@latest'/,
+    `npmUpgradeCommand 必须按平台给 npx.cmd / npx:${seg}`,
+  );
+}
+
+console.log('✓ check-update-cmd-npm: npm 更新走 claude update + Win npm 安装绕开执行策略 全过');
