@@ -67,6 +67,11 @@ const IMG_FORMAT_LABELS = { png: 'png（支持透明背景）', jpeg: 'jpeg（�
 const IMG_BACKGROUNDS = [['opaque', 'opaque（不透明）'], ['transparent', 'transparent（透明）']];
 const IMG_MODERATIONS = [['low', 'low（更宽松的审核强度）']];
 const IMG_COUNTS = [1, 2, 3, 4];
+// 折叠条摘要用:字段名 → 摘要里的短标签,顺序即摘要里的顺序(只列真正渲染出来的那几项)。
+const ADVANCED_FIELD_LABELS = [
+  ['quality', '质量'], ['outputFormat', '输出格式'], ['background', '背景'],
+  ['moderation', '审核强度'], ['nsfwCheck', '提交前预审'],
+];
 
 // ─────────────────────── r84 Midjourney 参数的界面取值(与服务端清单同源) ───────────────────────
 // 服务端权威清单在 server/utils/image-protocols.js 的 MJ_VERSIONS / MJ_SPEEDS,那里才是校验闸;
@@ -497,7 +502,11 @@ function ProviderForm({ initial, onDone, onCancel }) {
       {/* r87 高级参数:首屏只留必填与常改项,其余折叠(与 r84 的 mj 同款)。 */}
       {form.protocol === 'openai' && (has('quality') || has('outputFormat') || has('background') || has('moderation') || has('nsfwCheck')) && (
         <details className="rounded-md border border-canvas-deep px-2 py-1.5">
-          <summary className="text-[10.5px] text-ink-soft font-body cursor-pointer select-none">高级参数（质量 / 输出格式 / 背景 / 审核）</summary>
+          {/* 摘要按【实际渲染出来的字段】拼:能力表按 (方言, 模型) 显隐,写死四项的话
+              apimart 中转渠道(只放开 nsfw_check)的折叠条会承诺三个里面根本没有的控件。 */}
+          <summary className="text-[10.5px] text-ink-soft font-body cursor-pointer select-none">
+            高级参数（{ADVANCED_FIELD_LABELS.filter(([f]) => has(f)).map(([, l]) => l).join(' / ')}）
+          </summary>
           <div className="pt-2 space-y-2">
             <div className="grid grid-cols-2 gap-2">
               {has('quality') && (
@@ -531,7 +540,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
                     {IMG_MODERATIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                   </select>
                   <span className="text-[10px] text-ink-faint font-body leading-snug block">
-                    出图时上游模型的内容过滤松紧，与下面的「提交前预审」是两件不同的事。
+                    出图时上游模型的内容过滤松紧{has('nsfwCheck') ? '，与「提交前预审」是两件不同的事' : ''}。
                   </span>
                 </label>
               )}

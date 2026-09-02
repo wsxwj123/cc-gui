@@ -418,6 +418,13 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
   // nsfw_check 与 moderation 是两件事,文案必须分清(否则用户当成重复开关)。
   assert.match(src, /审核强度[\s\S]{0,400}出图时/, 't5: moderation 文案说明是出图时的过滤松紧');
   assert.match(src, /提交前预审[\s\S]{0,400}额外/, 't5: nsfw_check 文案说明是提交前的额外审核');
+  // 【文案不许指向没渲染出来的控件】—— 字段按 (方言, 模型) 显隐,写死的交叉引用会撒谎:
+  //  · 官方方言下根本没有 nsfw_check,moderation 的说明却写"与「提交前预审」不同"(真机实测到);
+  //  · apimart 中转渠道只放开 nsfw_check,折叠条却承诺"质量 / 输出格式 / 背景 / 审核"。
+  // 两处都必须由 has() 派生。
+  assert.match(src, /has\('nsfwCheck'\) \?[^\n]*提交前预审/, 't5【文案】moderation 的交叉引用按 nsfwCheck 是否渲染出来才写');
+  assert.ok(!/高级参数（质量 \/ 输出格式 \/ 背景 \/ 审核）/.test(src), 't5【文案】折叠条摘要不许写死四项');
+  assert.match(src, /ADVANCED_FIELD_LABELS\.filter\(\(\[f\]\) => has\(f\)\)/, 't5【文案】折叠条摘要按实际渲染的字段拼');
 
   // 模型「浏览」按钮:开 ModelPickModal,不用浮层(表单在滚动容器里)。
   // 锁按钮【文本 + 接线】两处 —— 只锁"出现过 浏览 两个字"太松:它在 title 里也有,
