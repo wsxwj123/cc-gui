@@ -338,9 +338,11 @@ check('R3/M9/B11 generate 块内含 setCurrentId(d.jobId)', () => {
   assert.ok(m, '切不出 generate 块(签名被改了?)');
   assert.match(m[0], /setCurrentId\(d\.jobId\)/, '受理成功必须把预览区指向新任务,否则仍显示上一轮的图');
 });
-check('B14 submitAction 块内含 setCurrentId(d.jobId)', () => {
-  const m = P.match(/const submitAction = async \(h, action, index\) => \{[\s\S]*?\n  \};/);
-  assert.ok(m, '切不出 submitAction 块(签名被改了?)');
+check('B14/E7 submitAction 按 G4 定死的两参签名切块,块内仍含 setCurrentId(d.jobId)', () => {
+  // 【E7 / r94,G4 已定死签名】const submitAction = async (h, action) => {(条目 + Action 对象);
+  // 块内"受理成功就把预览区指向新任务"这条 r95 结论一个字不变。
+  const m = P.match(/const submitAction = async \(h, action\) => \{[\s\S]*?\n  \};/);
+  assert.ok(m, 'E7:签名必须是 (h, action) 两参,且能切出整块');
   assert.match(m[0], /setCurrentId\(d\.jobId\)/, '放大/变体受理成功同样要指向新任务');
 });
 check('B11/B13 非 done 状态块存在(current.status !== \'done\' + elapsedSec + CANCEL_NOTE)', () => {
@@ -373,8 +375,9 @@ check('3.2 回归锁:{imageStrip(h)} 恰 2 次 且含 {imageStrip(current)}', ()
   assert.strictEqual(count(P, /\{imageStrip\(h\)\}/g), 2);
   assert.ok(P.includes('{imageStrip(current)}'), '预览区缩略条不许丢');
 });
-check('3.2 回归锁:含 submitAction(h, act, i + 1)', () => {
-  assert.ok(P.includes('submitAction(h, act, i + 1)'));
+check('3.2/E8 回归锁:含 submitAction(h, act)(与 r84 的 E5 同步)', () => {
+  // 【E8 / r94,G4 已定死字面】
+  assert.ok(P.includes('submitAction(h, act)'), 'E8:调用形态逐字为 submitAction(h, act)');
 });
 check('3.2 回归锁:含 reveal(shotFile(h))', () => {
   assert.ok(P.includes('reveal(shotFile(h))'));
@@ -399,7 +402,9 @@ for (const f of ['client/src/components/MessageBubble.jsx', 'client/src/componen
 }
 
 console.log('\n[B] 源码锁 3.4 零 diff 文件');
-check('3.4 server/routes/image.js 与 tests/acceptance/** 本轮零改动', () => {
+// 【E9 / r94】本轮 server/routes/image.js 必须改(新增 mj-proxy / upload-ref / buttons 等),
+// 零 diff 锁收窄为只查 tests/acceptance —— 收窄后这条立即绿,是 §9 R10 点名的两条天生绿之一。
+check('3.4/E9 tests/acceptance/** 本轮零改动(server/routes/image.js 已移出该锁)', () => {
   let base = '';
   try {
     base = execFileSync('git', ['merge-base', 'HEAD', 'master'], { cwd: root, encoding: 'utf8' }).trim();
@@ -407,7 +412,7 @@ check('3.4 server/routes/image.js 与 tests/acceptance/** 本轮零改动', () =
     console.log('    (跳过:git 不可用 —', String(e.message).split('\n')[0], ')');
     return;
   }
-  const changed = execFileSync('git', ['diff', '--name-only', base, '--', 'server/routes/image.js', 'tests/acceptance'],
+  const changed = execFileSync('git', ['diff', '--name-only', base, '--', 'tests/acceptance'],
     { cwd: root, encoding: 'utf8' }).trim();
   assert.strictEqual(changed, '', `这些文件本轮一行都不该改:\n      ${changed.split('\n').join('\n      ')}`);
 });

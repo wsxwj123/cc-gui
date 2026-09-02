@@ -134,11 +134,13 @@ if (failure) throw failure;
   // F1:三处外联(生成 POST / 图片下载 / gemini 拉模型)都要过地板判据
   assert.match(src, /e instanceof TypeError[\s\S]{0,80}withResolvers\|not a function/,
     't3: 地板判据(TypeError + withResolvers/not a function)在位');
-  assert.equal(count(src, /nodeFloorHint\(/g), 4, 't3: 判据函数 1 处定义 + 三处外联各 1 处调用');
+  // 【E26 / r94】新增两处外联(upload-ref、buttons GET)的 catch 接同一条地板判据 → 4 → 6。只增不减。
+  assert.equal(count(src, /nodeFloorHint\(/g), 6, 't3【E26】判据函数 1 处定义 + 五处外联各 1 处调用');
 
   // I2:生成分支的 catch 与拉模型分支同款,把 cause 拼进文案
-  assert.equal(count(src, /e\?\.cause\?\.code \|\| e\?\.cause\?\.message/g), 3,
-    't3: 拉模型/生成/下载三处外联的 catch 全取 cause(判官r57建议2补齐下载分支)');
+  // 【E27 / r94】同 E26 口径:两处新外联的 catch 同样把 cause 拼进文案 → 3 → 5。只增不减。
+  assert.equal(count(src, /e\?\.cause\?\.code \|\| e\?\.cause\?\.message/g), 5,
+    't3【E27】拉模型/生成/下载/上传参考图/buttons 拉取五处 catch 全取 cause');
 
   // S1:dispatchOpts 必须在 runner 的 try 内 —— try 之外抛错会绕过 finally 的名额归还
   const start = src.indexOf('async function runImageJob');

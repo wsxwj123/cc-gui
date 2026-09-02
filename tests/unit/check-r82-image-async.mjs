@@ -64,7 +64,8 @@ try {
 
   // ───────────── 2. 协议枚举与 mj 请求组装 ─────────────
   {
-    assert.deepEqual(IMAGE_PROTOCOLS, ['openai', 'gemini', 'chat', 'mj'], 't2: mj 只在尾部追加');
+    // 【E12 / r94】新增第二个 MJ 协议 mj-proxy(midjourney-proxy 系),仍只在尾部追加。
+    assert.deepEqual(IMAGE_PROTOCOLS, ['openai', 'gemini', 'chat', 'mj', 'mj-proxy'], 't2【E12】mj-proxy 只在尾部追加');
 
     const mj = buildImageRequest(
       { protocol: 'mj', baseURL: 'https://api.apimart.ai/v1/', apiKey: KEY, model: 'midjourney', size: '16:9' },
@@ -80,13 +81,17 @@ try {
     assert.equal(mj.form, null, 't2: mj 不是 multipart');
     assert.equal(mj.altHeaders, null, 't2: mj 无认证回落');
 
-    // 参考图当前版本不下发(UI 已就此给出说明):带 refs 与不带 refs 的请求逐字相同。
-    const withRefs = buildImageRequest(
-      { protocol: 'mj', baseURL: 'https://api.apimart.ai/v1', apiKey: KEY, model: 'midjourney' },
-      '一只猫',
-      [{ name: 'a.png', mime: 'image/png', base64: 'AAAA' }],
+    // 【E13 / r94】mj 分支开始支持参考图。默认传法(upload)下,只有 base64 没有 url 的垫图
+    // 【必须当场抛中文错】—— 协议层不静默忽略、也不自行上传(§4.7)。
+    assert.throws(
+      () => buildImageRequest(
+        { protocol: 'mj', baseURL: 'https://api.apimart.ai/v1', apiKey: KEY, model: 'midjourney' },
+        '一只猫',
+        [{ name: 'a.png', mime: 'image/png', base64: 'AAAA' }],
+      ),
+      (e) => /[一-龥]/.test(String(e && e.message)),
+      't2【E13·参考图】upload 传法下拿不到 URL 的垫图必须抛中文错,不许静默丢弃',
     );
-    assert.deepEqual(withRefs.body, { prompt: '一只猫' }, 't2【参考图忽略】:mj 分支不发参考图字段');
 
     // extra 是与其余三协议同一个逃生口:未实测的字段(speed / version / image_urls…)由用户自填。
     const extra = buildImageRequest(
@@ -614,10 +619,14 @@ try {
     assert.match(src, /form\.protocol === 'mj' &&/, 't9: mj 选中时才显示协议说明');
     // r84:尺寸改为下发(它是宽高比),文案随之改口径;"模型名不发送"这条结论不变。
     assert.match(src, /模型名不发送，由该路由自动注入/, 't9【文案】:说明模型名不下发');
-    assert.match(src, /当前版本不支持参考图/, 't9【文案】:说明参考图不下发');
+    // 【E14 / r94,G5 已定死文案】旧串计数必须为 0;新串逐字出现在协议说明块里。
+    assert.equal((src.match(/当前版本不支持参考图/g) || []).length, 0, 't9【E14·文案】旧的"不支持参考图"说明必须删掉(计数 0)');
+    assert.ok(src.includes('参考图按该 provider 的「垫图传法」提交'), 't9【E14·文案】新文案逐字出现在协议说明块里');
     assert.match(src, /每 5 秒查询一次任务状态/, 't9【文案】:说明轮询节奏');
     assert.match(src, /超过 15 分钟未出结果记为失败/, 't9【文案】:说明本地上限与平台侧仍在跑');
-    assert.match(src, /selected\?\.protocol === 'mj' && refs\.length > 0/, 't9: 选了参考图又用 mj 时当场提示(不静默丢弃)');
+    // 【E14 / r94,G5 已定死条件字面】提示只在"传法=upload 且真选了垫图"时给。
+    assert.match(src, /mjRefModeFor\(selected\) === 'upload' && refs\.some/,
+      't9【E14·条件】参考图提示改按垫图传法判定');
     // 取消:上游仍在计费这件事必须出现在条目上(网格与列表两处都要)。
     assert.match(src, /const CANCEL_NOTE = '已停止等待（上游任务可能仍在生成并计费）'/, 't9: 取消说明写成常量');
     assert.equal(count(/CANCEL_NOTE/g), 3, 't9: 常量 1 处定义 + 网格/列表各 1 处渲染');

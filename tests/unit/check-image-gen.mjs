@@ -27,7 +27,9 @@ const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8B
 // ─────────────────── 1. buildImageRequest:三协议请求组装 ───────────────────
 {
   // r82:三种同步协议之后追加任务制的 mj(顺序不变、只在尾部加 —— 前三项的行为红线见下文)。
-  assert.deepEqual(IMAGE_PROTOCOLS, ['openai', 'gemini', 'chat', 'mj'], 't1: 三种同步协议 + r82 的 mj');
+  // 【E15 / r94】追加 mj-proxy(midjourney-proxy 系第二协议),前四项顺序不变。
+  assert.deepEqual(IMAGE_PROTOCOLS, ['openai', 'gemini', 'chat', 'mj', 'mj-proxy'],
+    't1【E15】三种同步协议 + r82 的 mj + r94 的 mj-proxy');
 
   // openai:POST {base}/images/generations,body {model, prompt, n:1, size}
   const oa = buildImageRequest(

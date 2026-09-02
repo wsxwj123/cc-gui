@@ -262,23 +262,36 @@ const mj = (over) => buildImageRequest({ protocol: 'mj', ...BASE, ...over }, '�
   const routeSrc = readFileSync(join(REPO, 'server', 'routes', 'image.js'), 'utf8');
   assert.match(routeSrc, /router\.post\('\/image\/actions'/, 't8: 有动作端点');
   assert.match(routeSrc, /await updateHistoryEntry\(jobId, \{ taskId \}\)/, 't8: 上游任务号写进条目(动作要拿它当 task_id)');
-  assert.match(routeSrc, /buildMjActionRequest\(provider, action, index, parent\.taskId\)/, 't8: 动作按父任务的上游任务号组装');
+  // 【E6 / r94】customId 走第五个可选参数(§4.8);前四个位置与名称不变,下面 t8 的 8 处四参直调(K13)不改。
+  assert.match(routeSrc, /buildMjActionRequest\(provider, action, index, parent\.taskId, [A-Za-z_$][\w$]*\)/,
+    't8【E6】动作按父任务的上游任务号组装,customId 作为第五参数传入');
   assert.match(routeSrc, /runImageJob\(\{ jobId, provider, prompt, spec, startedAt \}\)/g, 't8: 复用同一个 runner');
   assert.equal((routeSrc.match(/function pollTask/g) || []).length, 1, 't8【零重复】:轮询状态机仍然只有一份');
   for (const [re, why] of [
     [/parent\.status !== 'done'/, '父任务必须已完成'],
     [/!parent\.taskId/, '老记录没有上游任务号时明确拒绝'],
-    [/provider\.protocol !== 'mj'/, '非 mj provider 拒绝'],
+    // 【E4 / r94】本轮起 mj 与 mj-proxy 两个协议都受理,门要写成"两者皆非才拒绝"。
+    [/protocol[\s\S]{0,120}mj-proxy/, '协议既非 mj 也非 mj-proxy 时拒绝'],
     [/activeJobs >= MAX_CONCURRENT_JOBS/, '并发闸'],
     [/assertPublicBaseURL\(provider\.baseURL\)/, 'SSRF 守卫'],
   ]) assert.match(routeSrc.slice(routeSrc.indexOf("router.post('/image/actions'")), re, `t8【前置校验】:${why}`);
 
   // 面板接线:入口在缩略图上,index = 网格位置 + 1,老记录/非 mj 不给入口。
-  assert.match(PANEL, /submitAction\(h, act, i \+ 1\)/, 't8【映射】:第 i 格(0 起)提交 index i+1');
-  assert.match(PANEL, /const canAct = !!h\.taskId && providers\.find\(\(p\) => p\.id === h\.providerId\)\?\.protocol === 'mj'/,
-    't8: 没有上游任务号 / 非 mj provider 时不渲染入口');
-  assert.match(PANEL, /body: JSON\.stringify\(\{ jobId: h\.id, action, index \}\)/, 't8: 提交体形态');
-  assert.match(PANEL, /const MJ_ACTION_LABEL = \{ upscale: '放大', variation: '变体' \}/, 't8: 用中文动作名而非 U\/V 编号当主标签');
+  // 【E5 / r94,G4 已定死字面】缩略条改调 submitAction(h, act),act 是 mjActionsFor 产出的 Action 对象;
+  // index 形态的 act.index 必须等于 i + 1 —— 语义仍锁在源码里。
+  assert.match(PANEL, /submitAction\(h, act\)/, 't8【E5·调用】:泛化为 submitAction(h, act)');
+  assert.match(PANEL, /index: i \+ 1/, 't8【E5·映射】:第 i 格(0 起)对应的 Action 仍带 index i+1');
+  // 【E2 / r94】canAct 对 mj 与 mj-proxy 都成立(两个协议共用同一套动作入口)。
+  assert.match(PANEL, /const canAct = [\s\S]{0,200}mj-proxy/,
+    't8【E2】没有上游任务号时不渲染入口;mj 与 mj-proxy 两个协议都给入口');
+  // 【E3 / r94】提交体两形态并存:index 形态(r84 老形态,不变)与新增的 customId 形态。
+  assert.match(PANEL, /body: JSON\.stringify\(\{ jobId: h\.id[\s\S]{0,120}index/, 't8【E3】index 形态提交体仍在');
+  assert.match(PANEL, /body: JSON\.stringify\([\s\S]{0,160}customId/, 't8【E3】新增 customId 形态提交体');
+  // 【E1 / r94】动作标签改由 mj-actions.js 的 MJ_ACTION_LABELS 统一提供;旧的两项表(且把 U 按钮
+  // 叫「放大」)必须消失 —— U 按钮只是从四宫格取出单图,像素不变,叫「放大」是误导。
+  assert.ok(PANEL.includes('MJ_ACTION_LABELS'), 't8【E1】面板取 MJ_ACTION_LABELS 当动作标签');
+  assert.ok(PANEL.includes('取出单图'), 't8【E1】pick 的标签是「取出单图」');
+  assert.equal((PANEL.match(/const MJ_ACTION_LABEL = \{/g) || []).length, 0, 't8【E1】旧的两项标签表不许再出现');
   assert.match(PANEL, /来自上一任务第 \$\{h\.mjIndex\} 张/, 't8【可追溯】:新条目标出来源');
 
   // 【付费误触】动作条只给【选中那张】渲染。用 opacity 藏是不够的:computed opacity:0 的

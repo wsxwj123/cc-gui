@@ -85,9 +85,12 @@ const sizeCapFor = (m) => caps.sizeCapFor('openai', m);
   }
 
   // ── 未知一律不过滤 ──
+  // 【E17 / r94】与 E11 同口径:未登记模型有固定条目(unknown:true),候选仍是全量 SIZE_OPTIONS。
   for (const m of ['flux-pro-1.1', 'flux.1-schnell', 'my-relay-custom-model', 'nano-banana', '', null, undefined, 123]) {
-    assert.equal(sizeOptionsFor(m), null, `t1【未知模型 ${String(m)}】必须回落全量(null),绝不猜着过滤`);
-    assert.equal(sizeCapFor(m), null, `t1【未知模型 ${String(m)}】没有家族标签`);
+    assert.deepEqual(sizeOptionsFor(m), SIZE_OPTIONS, `t1【E17·未登记 ${String(m)}】候选回落全量,绝不猜着过滤`);
+    const cap = sizeCapFor(m);
+    assert.notEqual(cap, null, `t1【E17·未登记 ${String(m)}】必须给得出条目`);
+    assert.equal(cap.unknown, true, `t1【E17·未登记 ${String(m)}】unknown 为 true`);
   }
 
   // ── 家族标签(小字要用) ──
@@ -345,7 +348,9 @@ if (failure) throw failure;
   assert.match(src, /import \{ fetch as undiciFetch, ProxyAgent \} from 'undici'/, 't3: 生图链路用 undici 的 fetch');
   // r87 新增第四处直接调用点(报价查询)。pollTask 那处走 io.fetch || undiciFetch 的注入口,
   // 不在这个正则的射程内 —— 计数只覆盖"直接 undiciFetch(" 的写法。
-  assert.equal(count(src, /undiciFetch\(/g), 4, 't3【外联点】:生成 POST / 图片下载 / gemini 拉模型 / 报价查询都走同一套 fetch');
+  // 【E23 / r94】新增两处外联(upload-ref 上传、apimart buttons GET)走同一套 fetch,不另起网络栈 → 4 → 6。
+  // 规则仍是【只增不减】;新值以实现落地后的实测为准,但不得低于 4。
+  assert.equal(count(src, /undiciFetch\(/g), 6, 't3【E23·外联点】生成 POST / 图片下载 / gemini 拉模型 / 报价 / 上传参考图 / buttons 拉取');
   assert.ok(!/[^i]\bfetch\(spec\.url|[^i]\bfetch\(picked\.url/.test(src), 't3: 不许留下混用全局 fetch 的调用点(同链路两套网络栈)');
   assert.match(src, /const proxyAgents = new Map\(\)/, 't3: 代理池按 url 缓存(同 url 复用连接池)');
   assert.match(src, /MAX_PROXY_AGENTS = 8/, 't3: 缓存上限 8 条');
@@ -354,7 +359,8 @@ if (failure) throw failure;
   assert.match(src, /function dispatchOpts\(proxyUrl\)[\s\S]{0,220}return agent \? \{ dispatcher: agent \} : \{\}/,
     't3【无代理零改动】:没配代理时不传 dispatcher,请求形态与原先逐字一致');
   // r82 起 runner 之外还有第四处外联(pollTask 查任务状态),同样走 provider 自己的代理。
-  assert.equal(count(src, /\.\.\.proxy,/g), 3, 't3: 生成 POST / 图片下载 / 任务轮询共用同一个 provider 的 dispatcher');
+  // 【E24 / r94】两处新外联打的是 provider 上游,按同口径带 dispatcher → 3 → 5(只增不减)。
+  assert.equal(count(src, /\.\.\.proxy,/g), 5, 't3【E24】生成 POST / 图片下载 / 任务轮询 / 上传参考图 / buttons 拉取共用 provider 的 dispatcher');
   assert.match(src, /dispatchOpts\(proxyUrl\)/, 't3: 拉模型分支按传入的代理走');
   assert.match(src, /if \(u\.username \|\| u\.password\) return \{ error: '代理地址不支持内嵌账号密码/,
     't3【禁凭据】:校验在服务端(前端提示只是说明)');
@@ -369,11 +375,14 @@ if (failure) throw failure;
   // r87:新增第五处外联(GET /api/pricing/model 报价查询,免鉴权)。它同样带 origin 前置校验、
   // redirect:'manual' 与一处限量读 → 三条基线各 +1。语义仍是「只许加不许减」;既有链路原样
   // 的真牙在下面的 runner 切片计数(一个都没变)。
-  assert.equal(count(src, /await assertPublicBaseURL\(/g), 6, 't3: assertPublicBaseURL 调用点数量不变');
+  // 【E25 / r94】upload-ref 与 buttons GET 各加一处出站前 SSRF 闸 → 6 → 8(只增不减)。
+  assert.equal(count(src, /await assertPublicBaseURL\(/g), 8, 't3【E25】assertPublicBaseURL 调用点(新增两处外联各 1)');
   // r82 的第四处外联带同款 redirect:'manual' + 两处限量读 → 两条基线各 +1 / +2
   // (它的 fetch 默认就是 undiciFetch,单测可注入;"只许加不许减"的语义没变)。
-  assert.equal(count(src, /redirect: 'manual'/g), 5, "t3: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处 + r87 报价 1 处)");
-  assert.equal(count(src, /readCapped\(/g), 7, 't3: readCapped 出现次数(r51 的 4 处 + r82 轮询 2 处 + r87 报价 1 处)');
+  // 【E18 / r94】两处新外联同样带 redirect:'manual' → 5 → 7(只增不减)。
+  assert.equal(count(src, /redirect: 'manual'/g), 7, "t3【E18】redirect:'manual' 次数(r51 3 + r82 1 + r87 1 + r94 上传 1 + buttons 1)");
+  // 【E18 / r94】两处新外联各至少一处限量读 → 7 → 9(只增不减;实测更多时按实测上调,不得低于 9)。
+  assert.equal(count(src, /readCapped\(/g), 9, 't3【E18】readCapped 次数(r51 4 + r82 2 + r87 1 + r94 上传/buttons 各 1)');
   assert.ok(count(src, /redactKey\(/g) >= 7, 't3: redactKey 不少于原有 7 处');
 }
 

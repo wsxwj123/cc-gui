@@ -501,12 +501,15 @@ if (failure) throw failure;
   // r87:新增第五处外联(GET /api/pricing/model 报价查询,免鉴权)。它同样带 origin 前置校验、
   // redirect:'manual' 与一处限量读 → 三条基线各 +1。语义仍是「只许加不许减」;既有链路原样
   // 的真牙在下面的 runner 切片计数(一个都没变)。
-  assert.equal(count(src, /await assertPublicBaseURL\(/g), 6, 't8: assertPublicBaseURL 调用点数量不变');
+  // 【E20 / r94】新增 upload-ref 与 buttons GET 两处外联,各带出站前 SSRF 闸 → 6 → 8。只增不减。
+  assert.equal(count(src, /await assertPublicBaseURL\(/g), 8, 't8【E20】assertPublicBaseURL 调用点(再加 r94 两处新外联)');
   // r82 新增第四处外联(pollTask 查任务状态,带同款 redirect:'manual' + 两处限量读)→
   // 两条基线各 +1 / +2。"只许加不许减"的语义没变;既有链路原样的真牙在
   // check-r51 t6 与 check-r82 t8 的 runner 切片计数(那里一个都没变)。
-  assert.equal(count(src, /redirect: 'manual'/g), 5, "t8: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处 + r87 报价 1 处)");
-  assert.equal(count(src, /readCapped\(/g), 7, 't8: readCapped 出现次数(r51 的 4 处 + r82 轮询 2 处 + r87 报价 1 处)');
+  // 【E21 / r94】→ 5 → 7(只增不减)。
+  assert.equal(count(src, /redirect: 'manual'/g), 7, "t8【E21】redirect:'manual' 次数(再加 r94 两处新外联)");
+  // 【E22 / r94】→ 7 → 9(只增不减;实测更多按实测上调,不得低于 9)。
+  assert.equal(count(src, /readCapped\(/g), 9, 't8【E22】readCapped 次数(再加 r94 两处新外联)');
   assert.ok(count(src, /redactKey\(/g) >= 7, 't8: redactKey 不少于原有 7 处');
   assert.match(src, /finally \{\n\s*activeJobs -= 1;/, 't8: 名额仍在 finally 归还(取消复用同一条路径)');
   // 参考图:两道闸都要用上,且历史只写摘要
