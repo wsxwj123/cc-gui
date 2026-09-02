@@ -370,22 +370,52 @@ function contentToText(content) {
   return '';
 }
 
+/** openai 的 data[] 单项 → { mime, base64 } / { mime, url };不是图一律 null。 */
+function openaiItem(item, data) {
+  if (!item) return null;
+  // gpt-image 系恒返 b64_json;dall-e-3 视 response_format 返 b64 或 url → 两种都认。
+  if (typeof item.b64_json === 'string' && item.b64_json) {
+    const fmt = item.output_format || data?.output_format;
+    return { mime: fmt ? `image/${String(fmt).toLowerCase()}` : 'image/png', base64: item.b64_json };
+  }
+  if (typeof item.url === 'string' && /^https?:\/\//i.test(item.url)) return { mime: '', url: item.url };
+  return null;
+}
+
 /**
- * 从上游响应对象取图。纯函数:输入 protocol + 已解析的响应 JSON,
- * 输出 { mime, base64 } 或 { mime, url };取不到返回 null。
+ * 从上游响应对象取【全部】图。纯函数,输出数组(取不到就是空数组)。
+ *
+ * 为什么必须是数组:`n` 可配之后,openai 【同步】响应会在 data[] 里回 n 张
+ * (官方 gpt-image 系 n 最多 10、apimart G2O/G1O 1~4)。r87 之前 n 恒为 1,只取 data[0]
+ * 没暴露;n 一放开,取首张 = 后面几张【付了钱不落盘、界面还不吭声】。任务制那条路
+ * (polled.urls)本来就是多张,不受影响 —— 所以只测 apimart 会漏掉这个。
+ *
+ * 上限同样套 MAX_TASK_IMAGES(16):上游说几张就是几张,不设限的后果与任务制那条一样。
+ * gemini / chat 的响应形态天生只有一张,包成单元素数组,与 openai 走同一条落盘链。
+ */
+export function extractImages(protocol, data) {
+  if (protocol === 'openai') {
+    // 上限在循环里 break,不做事后 slice —— 与 extractTaskState 同款(那边的理由是别把
+    // O(n²) 去重先跑完;这边是别把上游给的两万条先 map 出一整个数组来)。
+    const out = [];
+    for (const item of Array.isArray(data?.data) ? data.data : []) {
+      const one = openaiItem(item, data);
+      if (!one) continue;
+      out.push(one);
+      if (out.length >= MAX_TASK_IMAGES) break;
+    }
+    return out;
+  }
+  const one = extractImage(protocol, data);
+  return one ? [one] : [];
+}
+
+/**
+ * 取首张。`extractImages` 的薄封装 —— 保留它是因为调用方(与几个单测)只关心"有没有图",
+ * 改签名不值当。多张场景一律走 extractImages。
  */
 export function extractImage(protocol, data) {
-  if (protocol === 'openai') {
-    const first = data?.data?.[0];
-    if (!first) return null;
-    // gpt-image 系恒返 b64_json;dall-e-3 视 response_format 返 b64 或 url → 两种都认。
-    if (typeof first.b64_json === 'string' && first.b64_json) {
-      const fmt = first.output_format || data?.output_format;
-      return { mime: fmt ? `image/${String(fmt).toLowerCase()}` : 'image/png', base64: first.b64_json };
-    }
-    if (typeof first.url === 'string' && /^https?:\/\//i.test(first.url)) return { mime: '', url: first.url };
-    return null;
-  }
+  if (protocol === 'openai') return openaiItem(data?.data?.[0], data);
 
   if (protocol === 'gemini') {
     const parts = data?.candidates?.[0]?.content?.parts;

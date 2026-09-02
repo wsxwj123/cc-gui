@@ -13,7 +13,7 @@ import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 import {
-  IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, I2I_MODES, buildImageRequest, extractImage,
+  IMAGE_PROTOCOLS, IMAGE_CONTENT_TYPES, I2I_MODES, buildImageRequest, extractImages,
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
   geminiModelsRequest, extractTaskId, buildTaskPollRequest, extractTaskState,
   MJ_VERSIONS, MJ_SPEEDS, MJ_RATIO_RE, buildMjActionRequest,
@@ -883,8 +883,11 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     // 同步协议:图就在这次响应里。取不到再看是不是【任务制】上游(apimart / MJ:提交只回
     // task_id),是就轮询到终态再取图。判据是【响应形态】而不是协议名 —— 同一个 openai
     // 协议接到任务制中转站时同样能出图,且同步命中时下面这一整段与 r82 之前逐字等价。
-    const sync = extractImage(provider.protocol, data);
-    let pickedList = sync ? [sync] : null;
+    // r87:取【全部】图而不是首张 —— n 可配之后 openai 同步响应会在 data[] 里回 n 张,
+    // 只取 data[0] 等于后面几张付了钱不落盘。下面那条 for 循环本来就是按多张写的
+    // (r82 给 MJ 一次 4 张用的),直接复用,落盘/撞名/上限/多图角标全部照旧。
+    const sync = extractImages(provider.protocol, data);
+    let pickedList = sync.length ? sync : null;
     if (!pickedList) {
       const taskId = extractTaskId(data);
       if (taskId) {

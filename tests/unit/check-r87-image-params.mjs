@@ -36,7 +36,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, copyFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,7 +55,7 @@ const BASELINE = 'e6668bc9'; // r87 的基线 commit(master),回归锁对着它�
 
 const proto = await import('../../server/utils/image-protocols.js');
 const {
-  buildImageRequest, extractTaskState, imageDialect, dialectForBaseURL, imageCount,
+  buildImageRequest, extractTaskState, extractImage, extractImages, imageDialect, dialectForBaseURL, imageCount,
   estimateCredits, imageParams, IMAGE_DIALECTS, IMAGE_RESOLUTIONS, IMAGE_QUALITIES,
   IMAGE_OUTPUT_FORMATS, IMAGE_BACKGROUNDS, IMAGE_MODERATIONS, IMAGE_N_MAX, CREDITS_PER_USD,
 } = proto;
@@ -532,6 +532,19 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
   // S3:预估要说清是按几张估的。
   assert.match(src, /预估约 \{fmtAmount\(estCredits\)\} credits（按 \{estN\} 张/, 't5【S3】预估文案带张数');
 
+  // 【文案/提示不许指向未渲染的控件】同类漏网第 4、5 处 —— 前三处已在 4589231d/S1 修过。
+  //  · 「提交前预审」小字无条件提「审核强度」,但 apimart 中转渠道与未登记模型下
+  //    has('moderation') 为假、该控件根本没渲染;
+  //  · bgConflict 红字未经 has() 门控,存量残值(transparent + jpeg)切到中转渠道后会弹一条
+  //    用户【修不了也不会发生】的错误(这两个键那时压根不下发)。
+  assert.match(src, /会额外增加成本与延迟。\{has\('moderation'\) \?/, 't5【必修②】nsfw 小字的交叉引用按 has(moderation) 派生');
+  assert.ok(!/会额外增加成本与延迟。与「审核强度」是两件不同的事/.test(src), 't5【必修②】不许无条件提「审核强度」');
+  assert.match(src, /const bgConflict = has\('background'\) && has\('outputFormat'\)/, 't5【必修②】bgConflict 经 has() 门控');
+  assert.ok(!/const bgConflict = form\.background === 'transparent'/.test(src), 't5【必修②】bgConflict 不许不看能力表');
+
+  // 必修①收尾:n 的小字现在描述的是真实行为(多张确实分别落盘了)。
+  assert.match(src, /多张图分别落盘到保存目录，条目里可逐张切换/, 't5【必修①】n 小字与实际落盘行为一致');
+
   const modal = readFileSync(join(REPO, 'client/src/components/ModelPickModal.jsx'), 'utf8');
   assert.match(modal, /onPick/, 't5: 弹窗支持单选回填形态');
   assert.match(modal, /flex flex-col/, 't5: 弹窗仍是 flex 列三段(不用 sticky)');
@@ -725,6 +738,72 @@ const NEW_PROVIDER = {
   assert.equal(entry.status, 'done', `t8: 任务跑到完成(${entry.error || ''})`);
   assert.equal(entry.creditsCost, 0.0479, 't8【只给 credits_cost】实付照样落进条目(那道门必须两个键各自判空)');
   assert.equal(entry.cost, null, 't8: 上游没给 cost 就是 null,不是 0');
+}
+
+// ───── 9. 必修①【n>1 同步响应要全落盘】:纯函数 + 端到端 ─────
+// 基线 n 硬编码 1,只取 data[0] 没暴露;n 一放开,openai 同步会在 data[] 里回 n 张,
+// 取首张 = 后面几张【付了钱不落盘、界面还不吭声】。任务制那条路(polled.urls)本来就是
+// 多张,所以只测 apimart 会整条漏掉这个。
+{
+  const four = { data: [{ b64_json: 'A' }, { b64_json: 'B' }, { b64_json: 'C' }, { b64_json: 'D' }] };
+  assert.deepEqual(extractImages('openai', four).map((x) => x.base64), ['A', 'B', 'C', 'D'],
+    't9【同步多张】extractImages 取全部,不是首张');
+  assert.equal(extractImage('openai', four).base64, 'A', 't9: extractImage 仍是"首张"薄封装(其它调用方不受影响)');
+
+  // 上限套 MAX_TASK_IMAGES,且必须是循环里 break(不做事后 slice —— check-r82 t8 钉了这条)。
+  assert.equal(extractImages('openai', { data: Array.from({ length: 25 }, (_, i) => ({ b64_json: `x${i}` })) }).length, 16,
+    't9【上限】超过 MAX_TASK_IMAGES 截断');
+
+  // 混进坏项只丢坏的那项,不整批放弃(上游偶发一项无效不该让整单失败)。
+  assert.deepEqual(
+    extractImages('openai', { data: [{ url: 'javascript:alert(1)' }, { b64_json: 'B' }, {}, { url: 'https://a/c.png' }] })
+      .map((x) => x.base64 || x.url),
+    ['B', 'https://a/c.png'], 't9: 非法项过滤掉,合法项照收');
+
+  // gemini / chat 天生单张;mj 归轮询,协议层不掺和。
+  assert.equal(extractImages('gemini', { candidates: [{ content: { parts: [{ inline_data: { data: 'G', mime_type: 'image/webp' } }] } }] }).length, 1, 't9: gemini 单张');
+  assert.equal(extractImages('chat', { choices: [{ message: { content: '![](https://a/b.png)' } }] }).length, 1, 't9: chat 单张');
+  assert.deepEqual(extractImages('mj', {}), [], 't9: mj 不走同步取图');
+  assert.deepEqual(extractImages('openai', { data: [] }), [], 't9: 空 data → 空数组');
+  assert.deepEqual(extractImages('openai', null), [], 't9: 坏响应体 → 空数组(不抛)');
+}
+
+// ───── 9b. 端到端:同步 4 张 → 落 4 个文件 + 条目带 files[] ─────
+{
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const b64 = PNG.toString('base64');
+  // 假上游:同步返回 4 张 b64(= 官方 gpt-image 系 n=4 的形态)。
+  app.post('/sync4/v1/images/generations', (req, res) => {
+    assert.equal(req.body?.n, 4, 't9b: 请求确实带 n=4');
+    res.json({ data: [0, 1, 2, 3].map(() => ({ b64_json: b64 })) });
+  });
+  const dir = mkdtempSync(join(tmpdir(), 'cgui-r87-sync4-'));
+  const mk = await api('/image-providers', {
+    method: 'POST',
+    body: JSON.stringify({
+      ...NEW_PROVIDER, name: 'sync4', model: 'gpt-image-2', baseURL: `http://127.0.0.1:${PORT}/sync4/v1`,
+      savePath: dir, n: 4,
+    }),
+  });
+  assert.equal(mk.status, 200, `t9b: provider 建得起来(${JSON.stringify(mk.json)})`);
+  const sub = await api('/image/generate', { method: 'POST', body: JSON.stringify({ providerId: mk.json.id, prompt: '四只猫' }) });
+  assert.equal(sub.status, 200, `t9b: 提交受理(${JSON.stringify(sub.json)})`);
+
+  let e = null;
+  for (const deadline = Date.now() + 15_000; Date.now() < deadline;) {
+    const h = await api('/image/history');
+    e = (h.json?.history || []).find((x) => x.id === sub.json.jobId) || null;
+    if (e && e.status !== 'running') break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(e, 't9b: 历史里找得到');
+  assert.equal(e.status, 'done', `t9b: 跑完(${e.error || ''})`);
+  assert.equal(e.files?.length, 4, 't9b【4 张全落盘】条目里 files 恰 4 个(修前只有 1 张、其余照付不取)');
+  assert.equal(new Set(e.files).size, 4, 't9b: 四个文件名互不相同(撞名规则照旧)');
+  assert.equal(e.file, e.files[0], 't9b: file 仍指第一张(既有 UI 不用改)');
+  const onDisk = readdirSync(dir);
+  assert.equal(onDisk.length, 4, `t9b【真落盘】保存目录里确实是 4 个文件(实际:${onDisk.join(', ')})`);
+  rmSync(dir, { recursive: true, force: true });
 }
 
 await new Promise((r) => srv.close(r));

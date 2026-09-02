@@ -549,8 +549,13 @@ try {
 
     const runner = src.slice(runnerStart, src.indexOf("router.post('/image/generate'", runnerStart));
     // 顺序契约:先试同步取图,取不到才试任务制 —— 反过来会让同步响应绕道轮询。
-    assert.ok(runner.indexOf('extractImage(provider.protocol, data)') < runner.indexOf('extractTaskId(data)'),
-      't8【顺序】:extractImage 先于 extractTaskId');
+    // r87:同步取图改成 extractImages(取全部,n>1 时 openai 同步会回多张)。
+    // 【先断言两个锚都找得到】—— 原来直接比 indexOf,改了名字就变成 -1 < N 恒真、锁形同虚设。
+    const iSync = runner.indexOf('extractImages(provider.protocol, data)');
+    const iTask = runner.indexOf('extractTaskId(data)');
+    assert.ok(iSync >= 0, 't8【顺序】:同步取图走 extractImages(取全部,不是首张)');
+    assert.ok(iTask >= 0, 't8【顺序】:任务制取 task_id 的锚还在');
+    assert.ok(iSync < iTask, 't8【顺序】:同步取图先于 extractTaskId');
     assert.match(runner, /if \(polled\.cancelled\) return;/, 't8: 轮询期间被取消不覆写状态');
     assert.match(runner, /pickedList = polled\.urls\.map/, 't8: 多张图逐张走既有下载分支');
     assert.match(runner, /for \(const picked of pickedList\)/, 't8: 下载/落盘对多图循环执行');
