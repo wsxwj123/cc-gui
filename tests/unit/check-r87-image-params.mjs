@@ -18,14 +18,18 @@
 //    调研已复算命中的那条公式算(size_quality_prices[key][quality] × price_factor × 10),
 //    任一字段缺失或形态不符一律返回 null 而不是猜一个数出来。
 //
-// 变异自证(逐条实跑过"改坏就红";改动只在源码副本上做,cp 还原):
+// 变异自证(先 commit 再变异,逐条实跑过"改坏就红";还原用 cp 副本):
 //  - openai 分支删掉 resolution 下发那行            → t1 红
 //  - imageDialect 把未知值也当 apimart              → t2 红
-//  - 能力表 apimart 侧删掉 gpt-image-2 条目          → t3 红
+//  - 能力表 apimart 侧的 gpt-image-2 条目改成不匹配   → t3 红
 //  - extractTaskState 不取 credits_cost             → t4 红
 //  - estimateCredits 缺 price_factor 时按 1 兜底     → t4 红
-//  - 面板去掉「浏览」按钮                            → t5 红
-//  - validateBody 不校验 resolution 白名单           → t6 红
+//  - 删掉整个「浏览」按钮                            → t5 红
+//  - 按钮还在但 onClick 改成空函数                   → t5 红
+//  - 弹窗从 onPick 退回勾选形态(onConfirm)          → t5 红
+//  - validateBody 不校验枚举白名单                   → t6 红
+// ⚠️ 头一版 t5 只写 assert.match(src, /浏览/) —— 把按钮整块删掉都不红(那两个字在 title
+//    的说明里也有)。变异跑出来才发现,已收紧成"按钮文本 + onClick 接线"两条。
 //
 // 隔离:HOME/USERPROFILE 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);
 // 上游全是本机假服务,绝不打真实网络、绝不发生图请求。
@@ -413,8 +417,11 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
   assert.match(src, /提交前预审[\s\S]{0,400}额外/, 't5: nsfw_check 文案说明是提交前的额外审核');
 
   // 模型「浏览」按钮:开 ModelPickModal,不用浮层(表单在滚动容器里)。
-  assert.match(src, /浏览/, 't5【浏览按钮】在位');
-  assert.match(src, /onPick=/, 't5【浏览按钮】用 ModelPickModal 的单选形态回填');
+  // 锁按钮【文本 + 接线】两处 —— 只锁"出现过 浏览 两个字"太松:它在 title 里也有,
+  // 把按钮整个删掉都不会红(实测的变异漏网,已就此收紧)。
+  assert.match(src, />浏览<\/button>/, 't5【浏览按钮】在位(按钮文本,不是 title 里的说明)');
+  assert.match(src, /onClick=\{\(\) => setBrowsing\(true\)\}/, 't5【浏览按钮】点了要真的开弹窗');
+  assert.match(src, /onPick=\{\(id\) =>/, 't5【浏览按钮】用 ModelPickModal 的单选形态回填');
   assert.ok(!/AnchoredPopover/.test(src), 't5: 不许引入浮层(WKWebView 下表单内浮层定位/sticky 都踩过坑)');
   // 原生 datalist 过滤保留(键盘直接敲仍能过滤)。
   assert.match(src, /list="cgui-image-model-options"/, 't5: 保留 <input list> 原生过滤');
