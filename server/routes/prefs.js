@@ -16,7 +16,7 @@ import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../sessio
 const router = Router();
 const PREFS_PATH = join(homedir(), '.claude-gui', 'prefs.json');
 
-async function loadPrefs() {
+export async function loadPrefs() {
   try { return JSON.parse(await readFile(PREFS_PATH, 'utf-8')); }
   catch { return {}; }
 }

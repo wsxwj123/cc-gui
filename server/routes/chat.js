@@ -945,6 +945,20 @@ export function resolveExcludeDyn(v) {
   } catch { return false; }
 }
 
+// r89 静态系统提示快照:CLI 侧要两个条件同时成立才生效 ——
+//  ① CLAUDE_CODE_CARVED_SLATE=1 打开灰度开关(settings.json env,由 provider 切换/设置面板写);
+//  ② --system-prompt-snapshot on 绕过"有 --append-system-prompt 就关快照"的门控,
+//     而 GUI 的 composeAppendSystemPrompt 无条件带 append,所以必须显式传。
+// 这里只判 ①(唯一真源就是 settings.json 那个键),判成立就补 ②。SDK 0.3.191 没有顶层
+// systemPromptSnapshot 字段,只能经 extraArgs 透传成 CLI flag(已实测生效)。
+// settings.json 的 mtime 已计入 chatCompatKey → 翻开关会重开常驻进程,新 flag 随即生效。
+// export 仅为可单测。
+export function resolveSnapshotOn() {
+  try {
+    return JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env?.CLAUDE_CODE_CARVED_SLATE === '1';
+  } catch { return false; }
+}
+
 // #26 会话常驻:同会话回合间保活的复用兼容键。**完全一致才复用**,任何差异都关旧开新
 // (回落到与逐回合冷启相同的行为,零语义变化)。settings.json 的 mtime 计入键 ——
 // 切 provider / 改任何全局配置(无论经 GUI 还是终端 cc-switch)都会使旧进程不再被
@@ -1446,6 +1460,9 @@ router.post('/chat', async (req, res) => {
   };
   if (effort && VALID_EFFORTS.has(effort)) options.effort = effort;
   if (budget) options.maxBudgetUsd = budget;
+  // r89:静态系统提示快照的另一半(见 resolveSnapshotOn)。放在 acw 之前,下面那块
+  // 用展开合并 settings 键,两者不互相覆盖。
+  if (resolveSnapshotOn()) options.extraArgs = { ...(options.extraArgs || {}), 'system-prompt-snapshot': 'on' };
   // 自动压缩窗口联动(1M 开关/provider contextWindow):per-spawn --settings 覆盖文件。
   // extraArgs 经 SDK 透传为 CLI --settings <path>;进程随流结束,文件在 finally 清理。
   let acwTmpFile = null;

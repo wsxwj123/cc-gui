@@ -13,6 +13,11 @@ import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/o
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
 import { isOfficialAnthropic, isClaudeModel } from '../services/model-resolver.js';
 import { applyCatalogPrefill, catalogPrefillEntry } from '../utils/model-capabilities.js';
+import { updatePrefs, loadPrefs } from './prefs.js';
+import {
+  SNAPSHOT_ENV_KEY, TOOL_SEARCH_ENV_KEY, PROMPT_CACHE_MODES,
+  normalizePromptCacheMode, resolvePromptCacheOn, applyPromptCacheEnv,
+} from '../utils/prompt-cache-env.js';
 
 const execFileP = promisify(execFile);
 const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
@@ -158,6 +163,68 @@ async function writeActiveProviderId(id) {
     await writeFile(ACTIVE_PROVIDER_PATH, JSON.stringify({ id }));
   } catch {}
 }
+
+// ── r89 前缀缓存 env(静态系统提示快照 + 关 ToolSearch)────────────────────────
+// 语义与改动点见 utils/prompt-cache-env.js。三态偏好与 ENABLE_TOOL_SEARCH 备忘存
+// prefs.json 的 promptCache 字段(服务端持有:provider 切换发生在服务端,localStorage 够不着)。
+// 每条 provider 切换路径在写 settings.json 之前调 applyProviderPromptCache(env, thirdParty),
+// 由它按类别写入/移除两个 env 键 —— 与 CLAUDE_CODE_ATTRIBUTION_HEADER 同一条通道。
+async function readPromptCachePref() {
+  try {
+    const p = (await loadPrefs())?.promptCache;
+    return {
+      mode: normalizePromptCacheMode(p?.mode),
+      memo: (p?.memo && typeof p.memo === 'object') ? p.memo : null,
+    };
+  } catch { return { mode: 'auto', memo: null }; }
+}
+
+async function applyProviderPromptCache(env, thirdParty) {
+  const { mode, memo } = await readPromptCachePref();
+  const nextMemo = applyPromptCacheEnv(env, resolvePromptCacheOn(mode, thirdParty), memo);
+  // 备忘无变化就不写 prefs(provider 切换很频繁,别每次都改 prefs.json)。
+  if ((nextMemo?.toolSearch ?? null) !== (memo?.toolSearch ?? null) || (!nextMemo !== !memo)) {
+    await updatePrefs((prefs) => {
+      prefs.promptCache = { ...(prefs.promptCache || {}), mode, memo: nextMemo };
+    }).catch(() => {});
+  }
+  return env;
+}
+
+// GET /api/prompt-cache → { mode, on, thirdParty, snapshotEnv, toolSearchEnv }
+router.get('/prompt-cache', async (_req, res) => {
+  const cur = await readCurrentSettings();
+  const env = cur.env || {};
+  const thirdParty = !!env.ANTHROPIC_BASE_URL;
+  const { mode } = await readPromptCachePref();
+  res.json({
+    mode, thirdParty,
+    on: resolvePromptCacheOn(mode, thirdParty),
+    snapshotEnv: env[SNAPSHOT_ENV_KEY] ?? null,
+    toolSearchEnv: env[TOOL_SEARCH_ENV_KEY] ?? null,
+  });
+});
+
+// PUT /api/prompt-cache { mode:'auto'|'on'|'off' } —— 存偏好并立刻按当前 provider 类别
+// 应用到 settings.json(不必等下次切 provider)。settings.json mtime 变化会让常驻进程
+// 在下一条消息重开,新 env 随之生效。
+router.put('/prompt-cache', async (req, res) => {
+  const mode = req.body?.mode;
+  if (!PROMPT_CACHE_MODES.includes(mode)) return res.status(400).json({ error: 'mode 必须是 auto/on/off' });
+  const cur = await readCurrentSettings();
+  const env = { ...(cur.env || {}) };
+  const thirdParty = !!env.ANTHROPIC_BASE_URL;
+  const { memo } = await readPromptCachePref();
+  const nextMemo = applyPromptCacheEnv(env, resolvePromptCacheOn(mode, thirdParty), memo);
+  await updatePrefs((prefs) => { prefs.promptCache = { mode, memo: nextMemo }; });
+  await writeFile(SETTINGS_PATH, JSON.stringify({ ...cur, env }, null, 2));
+  res.json({
+    ok: true, mode, thirdParty,
+    on: resolvePromptCacheOn(mode, thirdParty),
+    snapshotEnv: env[SNAPSHOT_ENV_KEY] ?? null,
+    toolSearchEnv: env[TOOL_SEARCH_ENV_KEY] ?? null,
+  });
+});
 
 // GUI-managed custom providers (Option A: isolated from cc-switch.db). Each:
 // { id, name, type:'openai'|'anthropic', baseURL, apiKey, models[] }. apiKey is
@@ -1012,6 +1079,8 @@ router.post('/provider/switch', async (req, res) => {
       } else if (!isClaudeModel(env.ANTHROPIC_MODEL) || /haiku/i.test(env.ANTHROPIC_MODEL || '')) {
         env.ANTHROPIC_MODEL = 'claude-sonnet-4-6';
       }
+      // r89:官方渠道下按类别关掉前缀缓存 env(并把 ENABLE_TOOL_SEARCH 还给用户原值)。
+      await applyProviderPromptCache(env, false);
       const next = { ...current, env };
       // `next.model`(子代理默认档,官方下 cc 用 haiku)保持原样,不影响主 chat。
       const curModel = current.model;
@@ -1055,6 +1124,9 @@ router.post('/provider/switch', async (req, res) => {
 
     const current = await readCurrentSettings();
     const env = mergeProviderEnv(current.env, snapshot.env || {});
+    // r89:这条是"claude 格式 provider 直写"路径(官方端点,或非官方但没带 token)。
+    // 按 baseURL 判类别:非官方端点才算第三方。
+    await applyProviderPromptCache(env, !!(snapBase && !isOfficialAnthropic(snapBase)));
     const next = { ...current, env };
     if (snapshot.model) next.model = snapshot.model;
     await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
@@ -1168,6 +1240,8 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   // api.anthropic.com strips it; relays don't → set =0 to omit it. OpenAI proxy is
   // always a third-party path, so always set it here.
   env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
+  // r89:openai 网关路径恒为第三方 → 按偏好写入静态系统提示快照 + 关 ToolSearch 的 env。
+  await applyProviderPromptCache(env, true);
 
   const next = { ...current, env };
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1249,6 +1323,8 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   // through the loopback passthrough proxy), never api.anthropic.com — so strip the
   // per-request `cch=` nonce that otherwise breaks gateway prompt caching.
   env.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
+  // r89:anthropic 中转路径恒为第三方 → 同上。
+  await applyProviderPromptCache(env, true);
   const next = { ...current, env };
   if (snapshot.model) next.model = snapshot.model;
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1331,6 +1407,8 @@ async function switchToCustomProvider(p, requestedModel, res) {
   // Official-anthropic direct (uses CLI OAuth) → the API strips the nonce itself,
   // so drop any stale attribution-header override left by a prior third-party switch.
   delete env.CLAUDE_CODE_ATTRIBUTION_HEADER;
+  // r89:官方端点直连 → 按类别关掉前缀缓存 env(并还原用户的 ENABLE_TOOL_SEARCH)。
+  await applyProviderPromptCache(env, false);
   const next = { ...current, env };
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   await backupSettings(ts);
