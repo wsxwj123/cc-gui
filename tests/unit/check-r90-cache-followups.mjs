@@ -301,14 +301,24 @@ check('B6-4 compatKey 存解析后的实际值(存 auto 会复用到不符的常
   assert.ok(/const suggestOn = resolvePromptSuggestions\(promptSuggestions\)/.test(chatSrc), 'spawn 处仍按 === true 判');
 });
 check('B6-5 store 三态 + 迁移:1→true / 0→false / 无键→auto,setter auto 删键', () => {
-  assert.ok(/v === '1' \? true : v === '0' \? false : 'auto'/.test(storeSrc), 'store 默认值未做三态迁移');
-  assert.ok(/localStorage\.removeItem\('cgui-prompt-suggestions'\)/.test(storeSrc), "选回「自动」必须删键,否则 auto 无法表达");
+  // 只看 promptSuggestions 这一段:excludeDynamicSystemPrompt 用同一套三态写法,
+  // 不划范围的 grep 会被它顶住(变异自证时实测漏网)。
+  const block = storeSrc.slice(storeSrc.indexOf('promptSuggestions: (() => {'));
+  const decl = block.slice(0, block.indexOf('})(),') + 5);
+  assert.ok(/getItem\('cgui-prompt-suggestions'\)/.test(decl) && /v === '1' \? true : v === '0' \? false : 'auto'/.test(decl),
+    'store 默认值未做三态迁移(老用户的 1/0 要留成显式值,没存过的走 auto)');
+  const setter = storeSrc.slice(storeSrc.indexOf('setPromptSuggestions: ('));
+  assert.ok(/localStorage\.removeItem\('cgui-prompt-suggestions'\)/.test(setter.slice(0, 600)),
+    '选回「自动」必须删键,否则 auto 无法表达');
 });
 check('B6-6 客户端原样上送三态(不在客户端把 auto 提前拍成布尔)', () => {
   assert.ok(/promptSuggestions: _suggestPref,/.test(appSrc), '上送的不是三态原值,server 的 provider 判据就废了');
 });
 check('B6-7 面板三态按钮 + 文案讲清代价', () => {
-  assert.ok(/\['auto', '自动'\], \[true, '开'\], \[false, '关'\]/.test(panelSrc.slice(panelSrc.indexOf('function PromptSuggestionsToggle'))), '输入预测仍是两态开关');
+  // 同样要划到函数末尾:后面的 ExcludeDynamicPromptToggle 也是三态,不划就永远绿。
+  const from = panelSrc.indexOf('function PromptSuggestionsToggle');
+  const toggle = panelSrc.slice(from, panelSrc.indexOf('\nfunction ', from + 1));
+  assert.ok(/\['auto', '自动'\], \[true, '开'\], \[false, '关'\]/.test(toggle), '输入预测仍是两态开关');
   assert.ok(/每个回合多打一次主模型/.test(panelSrc), '面板未写清代价');
   assert.ok(/官方渠道开启、第三方 provider 关闭/.test(panelSrc), '面板未写清「自动」的含义');
 });
