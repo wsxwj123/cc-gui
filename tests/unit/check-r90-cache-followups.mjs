@@ -36,7 +36,8 @@ const {
 } = await import('../../server/utils/prompt-cache-env.js');
 const { readSessionTitles } = await import('../../server/services/session-reader.js');
 const {
-  buildTitleArgs, parseTitleJson, resolveTitleModel, resolvePromptSuggestions, TITLE_SYSTEM_PROMPT,
+  buildTitleArgs, parseTitleJson, resolveTitleModel, resolvePromptSuggestions, resolveExcludeDyn,
+  TITLE_SYSTEM_PROMPT,
 } = await import('../../server/routes/chat.js');
 
 const chatSrc = readFileSync(join(root, 'server/routes/chat.js'), 'utf8');
@@ -319,6 +320,19 @@ check('B6-2 用户显式设过就一直尊重(压过 provider 类别)', () => {
 check('B6-3 settings 读不到时按官方处理(不静默关掉别人的功能)', () => {
   rmSync(join(home, '.claude', 'settings.json'), { force: true });
   assert.equal(resolvePromptSuggestions('auto'), true);
+  assert.equal(resolveExcludeDyn('auto'), false);
+});
+check('B6-8 类别判据用 isOfficialAnthropic,不是「有没有 BASE_URL」', () => {
+  // 官方直连 relay:baseURL 显式写成官方域名的自定义 provider 仍是官方端点。
+  writeSettings({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com' });
+  assert.equal(resolvePromptSuggestions('auto'), true, '官方直连 relay 应判官方 → 输入预测保持开');
+  assert.equal(resolveExcludeDyn('auto'), false, '同一 provider 两个开关必须给出同向结论');
+  writeSettings({ ANTHROPIC_BASE_URL: 'https://gateway.eu.anthropic.com/v1' });
+  assert.equal(resolvePromptSuggestions('auto'), true, '*.anthropic.com 子域同样是官方');
+  // 边界:notanthropic.com 不是官方(isOfficialAnthropic 已点住,这里防判据被换回 endsWith)
+  writeSettings({ ANTHROPIC_BASE_URL: 'https://notanthropic.com/v1' });
+  assert.equal(resolvePromptSuggestions('auto'), false);
+  assert.equal(resolveExcludeDyn('auto'), true);
 });
 check('B6-4 compatKey 存解析后的实际值(存 auto 会复用到不符的常驻进程)', () => {
   assert.ok(/suggest: resolvePromptSuggestions\(promptSuggestions\)/.test(chatSrc), 'compatKey 仍存原值');

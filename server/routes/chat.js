@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { getDefaultModel } from '../services/model-resolver.js';
+import { getDefaultModel, isOfficialAnthropic } from '../services/model-resolver.js';
 import { findSessionFile, readSessionTitles } from '../services/session-reader.js';
 import { dropPendingForSession, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
@@ -936,26 +936,31 @@ function makeCanUseTool(slot) {
   };
 }
 
-// 缓存优化三态解析:true/false=用户显式;'auto'/未传=按 provider 决定——settings.json env
-// 带 ANTHROPIC_BASE_URL 即第三方(默认开,前缀缓存对费用/首字延迟影响巨大),官方 OAuth 关。
-// 导出仅为可单测(HOME 指到假目录直接验)。
+// settings.json 当前 provider 是不是官方端点。判据必须与 settings.js 的五条 provider
+// 切换路径同源 —— 用 isOfficialAnthropic 而不是「有没有 ANTHROPIC_BASE_URL」:
+// baseURL 显式写成 https://api.anthropic.com 的自定义 provider(官方直连 relay)仍是
+// 官方端点,按「有 BASE_URL 就是第三方」判会给出与切换侧相反的类别,进而让下面两个
+// 默认值走反。读不到 settings = 按官方(CLI 默认端点)。导出仅为可单测。
+export function settingsProviderIsOfficial() {
+  try {
+    return isOfficialAnthropic(JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env?.ANTHROPIC_BASE_URL || '');
+  } catch { return true; }
+}
+
+// 缓存优化三态解析:true/false=用户显式;'auto'/未传=按 provider 决定——第三方默认开
+//(前缀缓存对费用/首字延迟影响巨大),官方 OAuth 关。导出仅为可单测(HOME 指到假目录直接验)。
 export function resolveExcludeDyn(v) {
   if (v === true || v === false) return v;
-  try {
-    return !!JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env?.ANTHROPIC_BASE_URL;
-  } catch { return false; }
+  return !settingsProviderIsOfficial();
 }
 
 // 输入预测三态解析(r90):true/false=用户显式;'auto'/未传=按 provider 决定 ——
-// 第三方 provider(settings.json env 带 ANTHROPIC_BASE_URL)默认**关**:它每回合额外
-// 打一次主模型(命中价读整段上下文 + ~450 token 未命中 + 输出),官方渠道默认开(与
-// 原行为一致)。判据与 resolveExcludeDyn 同源同一份文件,两个开关不会对同一 provider
-// 给出相反的类别判断。导出仅为可单测。
+// 第三方默认**关**:它每回合额外打一次主模型(命中价读整段上下文 + ~450 token 未命中
+// + 输出);官方渠道默认开(与原行为一致)。与 resolveExcludeDyn 共用同一条类别判据,
+// 两个开关不会对同一 provider 给出相反的结论。导出仅为可单测。
 export function resolvePromptSuggestions(v) {
   if (v === true || v === false) return v;
-  try {
-    return !JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'))?.env?.ANTHROPIC_BASE_URL;
-  } catch { return true; }
+  return settingsProviderIsOfficial();
 }
 
 // r89 静态系统提示快照:CLI 侧要两个条件同时成立才生效 ——
