@@ -22,9 +22,11 @@ import { tmpdir } from 'node:os';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const REAL_HOME = process.env.HOME;
+const REAL_PROFILE = process.env.USERPROFILE;
 const home = join(tmpdir(), `cgui-r90-${process.pid}`);
 mkdirSync(join(home, '.claude'), { recursive: true });
-process.env.HOME = home;   // os.homedir() 在 POSIX 上优先读 $HOME
+process.env.HOME = home;        // os.homedir() 在 POSIX 上优先读 $HOME
+process.env.USERPROFILE = home; // Windows 上 homedir() 读 %USERPROFILE%,不同设沙箱失效
 
 const {
   SNAPSHOT_ENV_KEY, TOOL_SEARCH_ENV_KEY, MCP_NONBLOCKING_ENV_KEY,
@@ -324,6 +326,7 @@ check('B6-7 面板三态按钮 + 文案讲清代价', () => {
 });
 
 process.env.HOME = REAL_HOME;
+if (REAL_PROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = REAL_PROFILE;
 rmSync(home, { recursive: true, force: true });
 if (failures.length) {
   console.error('FAIL:\n' + failures.map((f) => '  - ' + f).join('\n\n'));
