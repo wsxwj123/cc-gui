@@ -19,6 +19,7 @@ import { canonicalCwd } from '../utils/safe-path.js';
 import { GENUI_SECTION_TEXT } from '../utils/genui-section.js';
 import { broadcast, clients } from '../broadcast.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
+import { cliSupportsSnapshotFlag } from '../utils/prompt-cache-env.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
@@ -985,6 +986,13 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
   try { mcpStampMtime = statSync(pathJoin(homedir(), '.claude', 'gui', 'mcp-config.stamp')).mtimeMs; } catch {}
   // 项目级 settings(.claude/settings{,.local}.json,hook/权限也可写在这)同理:终端改完
   // 项目 hook,若该项目常驻进程还活着会拿旧 hook 继续跑 → mtime 计入键让下一轮换新进程。
+  // r89:**settingsMtime / projSettingsMtime 保留是刻意的,别再摘。**曾按"权限规则经
+  // SDK updatedPermissions 热更新、重建多余"提议摘掉,假上游实测(见 RESEARCH-r89 §3.2
+  // 与 .devflow/test-red-r89.txt 的 A3 段)推翻了前提:①规则确实热生效,但②GUI 的
+  // 「始终允许」写的是 ~/.claude/settings.json(permission-rules.js 把 CLI 建议的
+  // localSettings 改写成 userSettings),不是项目 settings.local.json —— 摘掉
+  // projSettingsMtime 根本躲不开那次冷启。改用"排除 permissions 的内容指纹"则会让终端
+  // 新加的 deny 规则在活着的常驻进程里滞后生效(无上界),判官已判定不做。
   let projSettingsMtime = 0;
   try { projSettingsMtime += statSync(pathJoin(workingDir, '.claude', 'settings.json')).mtimeMs; } catch {}
   try { projSettingsMtime += statSync(pathJoin(workingDir, '.claude', 'settings.local.json')).mtimeMs; } catch {}
@@ -1460,9 +1468,6 @@ router.post('/chat', async (req, res) => {
   };
   if (effort && VALID_EFFORTS.has(effort)) options.effort = effort;
   if (budget) options.maxBudgetUsd = budget;
-  // r89:静态系统提示快照的另一半(见 resolveSnapshotOn)。放在 acw 之前,下面那块
-  // 用展开合并 settings 键,两者不互相覆盖。
-  if (resolveSnapshotOn()) options.extraArgs = { ...(options.extraArgs || {}), 'system-prompt-snapshot': 'on' };
   // 自动压缩窗口联动(1M 开关/provider contextWindow):per-spawn --settings 覆盖文件。
   // extraArgs 经 SDK 透传为 CLI --settings <path>;进程随流结束,文件在 finally 清理。
   let acwTmpFile = null;
@@ -1490,6 +1495,14 @@ router.post('/chat', async (req, res) => {
   if (sessionId) options.resume = sessionId;
   const claudePath = resolveUserClaude();
   if (claudePath) options.pathToClaudeCodeExecutable = claudePath;
+  // r89:静态系统提示快照的另一半(见 resolveSnapshotOn)。**必须过版本门**——
+  // --system-prompt-snapshot 只有 2.1.25x+ 认,老 CLI 收到直接 `error: unknown option`
+  // 退进程(实测 2.1.252),而 settings.json 里的 CARVED_SLATE 对老版本无害,
+  // 于是"env 写了但 flag 不能加"是常态,不是异常。extraArgs 用展开合并(上面的 acw
+  // settings 键同样是展开写入),两者不互相覆盖。
+  if (resolveSnapshotOn() && cliSupportsSnapshotFlag(claudePath)) {
+    options.extraArgs = { ...(options.extraArgs || {}), 'system-prompt-snapshot': 'on' };
+  }
 
   // 每条消息都打完整结构体(含 cwd/提示词片段)——默认噪声且日志转发时算轻微信息泄漏。
   // 仅 DEBUG 下打印。
