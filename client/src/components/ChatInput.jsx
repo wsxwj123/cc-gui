@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Square, Terminal, Puzzle, Wrench, Gauge, ChevronDown, X, FileText, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, AtSign, MessagesSquare, Folder, CornerLeftUp, Sparkles, ArrowDownToLine, Zap, BellOff } from './Icon.jsx';
+import { Send, Loader2, Square, Gauge, ChevronDown, X, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, MessagesSquare, Sparkles, ArrowDownToLine, Zap, BellOff } from './Icon.jsx';
 import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
@@ -14,6 +14,10 @@ import { attachmentBlockReason, buildAttachmentMessage, pendingAttachment, uploa
 import { attachmentNoVision } from '../../../server/utils/vision-capability.js';
 import { PendingAttachmentList } from './PendingAttachmentList.jsx';
 import { listboxKeyAction, listboxOpenIndex } from '../utils/listboxKeyboard.js';
+import { filterSlashCommands, slashBlocked, fetchSlashCommands } from '../utils/slashCommands.js';
+import { SlashCommandMenu } from './SlashCommandMenu.jsx';
+import { useAtRef } from '../hooks/useAtRef.js';
+import { AtRefPanel } from './AtRefPanel.jsx';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -293,20 +297,6 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
   );
 }
 
-const TYPE_ICONS = {
-  builtin: Terminal,
-  skill: Wrench,
-  plugin: Puzzle,
-  project: Folder,
-};
-
-const TYPE_LABELS = {
-  builtin: '内置',
-  skill: '技能',
-  plugin: '插件',
-  project: '项目',
-};
-
 // #12:任务清单转圈的"仍在工作"判定用的终态集(与监控页 AgentMonitorPanel 口径一致)。
 const TODO_AGENT_TERMINAL = ['done', 'error', 'stopped'];
 const TODO_BG_TERMINAL = ['done', 'failed', 'killed', 'stopped', 'error'];
@@ -327,21 +317,28 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   const [attachmentError, setAttachmentError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [zoomImage, setZoomImage] = useState(null); // #7 单击放大的图片附件
-  // @ 引用选择器(Tutti 式上下文引用):光标前出现 `@xxx` 时弹出,文件 tab 插入
-  // `@相对路径`(CLI 原生 @ 语法读文件),会话 tab 把该会话导出为精简 md 后插入 `@绝对路径`。
-  const [atState, setAtState] = useState(null); // null | { query, start } start = '@' 在 text 中的下标
-  const [atTab, setAtTab] = useState('files');  // 'files' | 'sessions'
-  const [atFiles, setAtFiles] = useState([]);   // [{ kind:'up'|'dir'|'file', name, rel }]
-  const [atDir, setAtDir] = useState('');       // 层级浏览中的当前相对目录('' = 项目根)
-  const [atIndex, setAtIndex] = useState(0);
-  const [atBusy, setAtBusy] = useState(false);  // 会话引用生成中
-  const atCtxRef = useRef({ cwd: '', projectHash: '' }); // 打开面板时快照,避免 selector 新引用重渲
   const sessions = useStore((s) => s.sessions);
+  // @ 引用面板的上下文:优先本窗格会话,回落全局选中项目(per-pane 不串扰)。
+  // 两个选择器各自只返回字符串(不返回对象),避免 zustand 新引用重渲。
+  const atCwd = useStore((s) => (((s.paneSessions || []).find((x) => x?.sessionId && x.sessionId === sessionId) || s.selectedSession)?.projectPath || s.selectedProject?.path || ''));
+  const atProjectHash = useStore((s) => (((s.paneSessions || []).find((x) => x?.sessionId && x.sessionId === sessionId) || s.selectedSession)?.projectHash || s.selectedProject?.hash || ''));
   // P2.4:data-tour 锚点只挂在【活跃窗格】—— composer per-pane 渲染后锚点会出现多份,
   // GuideTour querySelector 取首个可能圈错窗格;cgui:open-provider 也按此门控单实例响应。
   const paneIsActive = useStore((s) => (s.paneCount || 1) === 1 || (s.activeTabIndex || 0) === (tabIndex ?? 0));
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
+  // @ 引用选择器(Tutti 式上下文引用):光标前出现 `@xxx` 时弹出,文件 tab 插入
+  // `@相对路径`(CLI 原生 @ 语法读文件),会话 tab 把该会话导出为精简 md 后插入 `@绝对路径`。
+  // 状态机在 hooks/useAtRef.js,与首页输入框共用。
+  const at = useAtRef({
+    cwd: atCwd,
+    projectHash: atProjectHash,
+    sessions,
+    excludeSessionId: sessionId,
+    text,
+    setText,
+    inputRef: textareaRef,
+  });
   const draftBeforeHistoryRef = useRef('');
   const navigatingHistoryRef = useRef(false);
   // 短交互定时器(高亮环褪去/延迟 focus/光标归位)统一登记,卸载 cleanup 全清。
@@ -626,23 +623,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     }
     setText(e.target.value);
     // @ 引用检测:光标前是 `@词`(@ 在行首或空白后)时打开面板;/ 命令面板优先不冲突。
-    const caret = e.target.selectionStart ?? e.target.value.length;
-    const before = e.target.value.slice(0, caret);
-    const m = !e.target.value.startsWith('/') && before.match(/(^|[\s\n])@([^\s@]*)$/);
-    if (m) {
-      if (!atState) {
-        // 打开瞬间快照上下文(cwd/projectHash):优先本窗格会话,回落全局选中项目
-        const st = useStore.getState();
-        const pane = (st.paneSessions || []).find((x) => x?.sessionId && x.sessionId === sessionId);
-        const sess = pane || st.selectedSession;
-        atCtxRef.current = {
-          cwd: sess?.projectPath || st.selectedProject?.path || '',
-          projectHash: sess?.projectHash || st.selectedProject?.hash || '',
-        };
-        setAtTab('files'); setAtIndex(0); setAtDir('');
-      }
-      setAtState({ query: m[2], start: caret - m[2].length - 1 });
-    } else if (atState) setAtState(null);
+    at.onTextChange(e.target.value, e.target.selectionStart);
   };
 
   // Refresh slash commands whenever the model/provider may have changed
@@ -655,13 +636,12 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
       const st = useStore.getState();
       const pane = (st.paneSessions || []).find((x) => x?.sessionId && x.sessionId === sessionId);
       const cwd = (pane || st.selectedSession)?.projectPath || st.selectedProject?.path || '';
-      fetch(`/api/slash-commands${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`)
-        .then(r => r.json())
-        .then(data => {
+      fetchSlashCommands(cwd)
+        .then((d) => {
           if (cancelled) return;
-          setCommands(data.commands || []);
-          setProvider(data.provider || 'Anthropic');
-          setIsAnthropic(data.isAnthropic !== false);
+          setCommands(d.commands);
+          setProvider(d.provider);
+          setIsAnthropic(d.isAnthropic);
         })
         .catch(() => {});
     };
@@ -685,19 +665,8 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     el.style.height = (el.value ? Math.min(el.scrollHeight, 200) : 24) + 'px';
   }, [text]);
 
-  // Case-insensitive prefix match; rank exact-case matches first.
-  const filteredCommands = (() => {
-    if (!text.startsWith('/') || text.length === 0) return [];
-    const q = text.toLowerCase();
-    return commands
-      .filter((c) => c.name.toLowerCase().startsWith(q))
-      .sort((a, b) => {
-        const aBlocked = a.requiresAnthropic === 'full' && !isAnthropic;
-        const bBlocked = b.requiresAnthropic === 'full' && !isAnthropic;
-        if (aBlocked !== bBlocked) return aBlocked ? 1 : -1;
-        return 0;
-      });
-  })();
+  // 大小写不敏感的整串前缀匹配 + 第三方端点下不兼容命令沉底(与首页同一份实现)。
+  const filteredCommands = filterSlashCommands(commands, text, isAnthropic);
 
   useEffect(() => {
     setShowCommands(filteredCommands.length > 0 && text.startsWith('/') && text.length > 0);
@@ -726,7 +695,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     setAttachments([]);
     setAttachmentError('');
     setShowCommands(false);
-    setAtState(null);
+    at.close();
     try { localStorage.removeItem(draftKey); } catch {}
     textareaRef.current?.focus();
   };
@@ -780,7 +749,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   const selectCommand = (cmd) => {
     if (typeof cmd === 'object') {
       // Block selecting a fully-incompatible slash on a third-party endpoint.
-      if (cmd.requiresAnthropic === 'full' && !isAnthropic) return;
+      if (slashBlocked(cmd, isAnthropic)) return;
       setText(cmd.name + ' ');
     } else {
       setText(cmd + ' ');
@@ -793,87 +762,8 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   };
 
   // ── @ 引用选择器 ──────────────────────────────────────────────
-  // 文件 tab 两种模式:
-  //  · 无查询 → 按文件浏览器的层级浏览(/api/files/list 列当前层,目录在前;点目录下钻,
-  //    「..」返回上级)——全部平铺在大项目里太混乱(用户反馈)。
-  //  · 有查询 → 全局模糊搜索(/api/files/search,git ls-files / 递归,后端 15s 缓存)。
-  useEffect(() => {
-    if (!atState || atTab !== 'files') return;
-    const cwd = atCtxRef.current.cwd;
-    if (!cwd) { setAtFiles([]); return; }
-    const q = atState.query;
-    if (!q) {
-      let cancelled = false;
-      const dirAbs = atDir ? `${cwd}/${atDir}` : cwd;
-      fetch(`/api/files/list?path=${encodeURIComponent(dirAbs)}`)
-        .then((r) => r.json())
-        .then((d) => {
-          if (cancelled) return;
-          const items = (d.entries || []).map((e) => ({
-            kind: e.isDir ? 'dir' : 'file',
-            name: e.name,
-            rel: atDir ? `${atDir}/${e.name}` : e.name,
-          }));
-          setAtFiles(atDir ? [{ kind: 'up', name: '..', rel: '' }, ...items] : items);
-        })
-        .catch(() => { if (!cancelled) setAtFiles([]); });
-      return () => { cancelled = true; };
-    }
-    let cancelled = false;
-    const t = setTimeout(() => {
-      fetch(`/api/files/search?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(q)}`)
-        .then((r) => r.json())
-        .then((d) => { if (cancelled) return; setAtFiles((d.files || []).map((f) => ({ kind: 'file', name: f, rel: f }))); })
-        .catch(() => { if (!cancelled) setAtFiles([]); });
-    }, 180);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [atState?.query, atTab, !!atState, atDir]);
-
-  // 会话 tab:store 里当前项目的会话列表,按首条提示词过滤,排除当前会话自己。
-  const atSessions = (() => {
-    if (!atState || atTab !== 'sessions') return [];
-    const q = atState.query.toLowerCase();
-    return sessions
-      .filter((s) => s.sessionId !== sessionId && !s.archived)
-      .filter((s) => !q || (s.firstPrompt || '').toLowerCase().includes(q) || s.sessionId.startsWith(q))
-      .slice(0, 20);
-  })();
-  const atItems = atTab === 'files' ? atFiles : atSessions;
-  useEffect(() => { setAtIndex(0); }, [atTab, atState?.query, atDir]);
-
-  // 选中:目录下钻/「..」返回上级(面板不关);文件插 `@相对路径 `;
-  // 会话先调 /api/session-ref 生成精简 md 再插 `@绝对路径 `。
-  const pickAtItem = async (item) => {
-    let insert = '';
-    if (atTab === 'files') {
-      if (item.kind === 'up') { setAtDir((d) => d.split('/').slice(0, -1).join('/')); return; }
-      if (item.kind === 'dir') { setAtDir(item.rel); return; }
-      insert = item.rel;
-    } else {
-      setAtBusy(true);
-      try {
-        const r = await fetch('/api/session-ref', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId: item.sessionId, projectHash: item.projectHash || atCtxRef.current.projectHash }),
-        });
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.error || '生成会话引用失败');
-        insert = d.path;
-      } catch (e) {
-        setAtBusy(false); setAtState(null);
-        const { confirmDialog } = await import('../utils/confirmDialog.jsx');
-        await confirmDialog('引用会话失败:' + e.message, { confirmText: '知道了' });
-        return;
-      }
-      setAtBusy(false);
-    }
-    const cur = text;
-    const beforeAt = cur.slice(0, atState.start);
-    const afterQuery = cur.slice(atState.start + 1 + atState.query.length);
-    setText(`${beforeAt}@${insert} ${afterQuery}`);
-    setAtState(null);
-    textareaRef.current?.focus();
-  };
+  // 检测/层级浏览/防抖搜索/会话引用生成的整个状态机在 hooks/useAtRef.js(与首页共用),
+  // 这里只留 `at` 的接线:onTextChange / keyDown / close / panelProps。
 
   const handleKeyDown = (e) => {
     // While the IME is composing (typing Chinese/Japanese/Korean via candidates),
@@ -909,14 +799,8 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
       }
     }
 
-    // @ 引用面板:上下选、Enter 选中、Tab 切文件/会话、Esc 关。
-    if (atState) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); setAtIndex((i) => Math.min(i + 1, Math.max(atItems.length - 1, 0))); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setAtIndex((i) => Math.max(i - 1, 0)); return; }
-      if (e.key === 'Tab') { e.preventDefault(); setAtTab((t) => (t === 'files' ? 'sessions' : 'files')); return; }
-      if (e.key === 'Enter' && !e.shiftKey && atItems.length > 0) { e.preventDefault(); if (!atBusy) pickAtItem(atItems[atIndex]); return; }
-      if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); setAtState(null); return; } // 同斜杠菜单:关面板的 Esc 不得穿透到全局停止
-    }
+    // @ 引用面板:上下选、Enter 选中、Tab 切文件/会话、Esc 关(实现在 hooks/useAtRef.js)。
+    if (at.keyDown(e)) return;
 
     // 编辑重发态下按 Esc:取消本次编辑重发,清空输入并通知上层撤销待回滚(历史
     // 尚未被破坏,所以纯属"反悔",不会丢任何消息)。
@@ -1052,127 +936,19 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
       )}
     <div className="chat-input-shell px-4 py-5">
       <div className="max-w-[var(--content-max)] mx-auto relative">
-        {/* Slash command dropdown */}
+        {/* Slash command dropdown(外观在 SlashCommandMenu.jsx,与首页共用) */}
         {showCommands && (
-          <div className="glass-popover absolute bottom-full left-0 right-0 mb-3 max-h-80 overflow-y-auto z-30 animate-glass-rise">
-            <div className="px-3 py-2 text-[10px] text-ink-muted uppercase tracking-wider font-body border-b border-white/20 flex items-center justify-between">
-              <span>Slash 命令</span>
-              <span className="text-ink-ghost">
-                {filteredCommands.length} 个 · {provider}{!isAnthropic && ' (cc switch)'}
-              </span>
-            </div>
-            {filteredCommands.slice(0, 50).map((c, i) => {
-              const Icon = TYPE_ICONS[c.type] || Terminal;
-              const blocked = c.requiresAnthropic === 'full' && !isAnthropic;
-              const partial = c.requiresAnthropic === 'partial' && !isAnthropic;
-              const interactiveOnly = !!c.interactiveOnly;
-              const tipParts = [];
-              if (c.note) tipParts.push(c.note);
-              if (interactiveOnly) tipParts.push('CLI 仅在交互式终端响应此命令；GUI 内会收到 "isn\'t available in this environment"');
-              if (blocked) tipParts.push(`当前端点 ${provider} 不支持此命令`);
-              else if (partial) tipParts.push(`当前端点 ${provider} 下行为可能不准`);
-              const tip = tipParts.join(' · ') || c.desc;
-              return (
-                <button
-                  key={c.name}
-                  onClick={() => selectCommand(c)}
-                  disabled={blocked}
-                  title={tip}
-                  className={`w-full text-left px-3 py-2.5 flex items-center gap-2 transition-colors ${
-                    blocked
-                      ? 'opacity-40 cursor-not-allowed'
-                      : i === selectedIndex ? 'bg-accent/12' : 'hover:bg-black/5'
-                  }`}
-                >
-                  <Icon size={12} className="text-accent shrink-0" />
-                  <span className={`text-xs font-mono shrink-0 ${blocked ? 'line-through text-ink-ghost' : 'text-ink-soft'}`}>
-                    {c.name}
-                  </span>
-                  <span className="text-[11px] text-ink-faint font-body truncate flex-1">{c.desc}</span>
-                  {interactiveOnly && (
-                    <span className="text-[9px] px-1 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono shrink-0" title="仅交互式终端可用">
-                      TUI
-                    </span>
-                  )}
-                  {partial && (
-                    <span className="text-[9px] px-1 py-0.5 bg-warning/10 text-warning rounded font-mono shrink-0">
-                      partial
-                    </span>
-                  )}
-                  {blocked && (
-                    <span className="text-[9px] px-1 py-0.5 bg-error/10 text-error rounded font-mono shrink-0">
-                      仅订阅
-                    </span>
-                  )}
-                  <span className="text-[9px] px-1 py-0.5 bg-canvas-deep text-ink-ghost rounded font-mono shrink-0">
-                    {TYPE_LABELS[c.type] || c.type}
-                  </span>
-                </button>
-              );
-            })}
-            {filteredCommands.length > 50 && (
-              <div className="px-3 py-2 text-[10px] text-ink-faint text-center font-body">
-                还有 {filteredCommands.length - 50} 个命令...
-              </div>
-            )}
-          </div>
+          <SlashCommandMenu
+            commands={filteredCommands}
+            selectedIndex={selectedIndex}
+            provider={provider}
+            isAnthropic={isAnthropic}
+            onPick={selectCommand}
+          />
         )}
 
         {/* @ 引用选择器:文件 / 会话 两个 tab(Tab 键切换),把选中项作为上下文引用插入输入框 */}
-        {atState && (
-          <div className="glass-popover absolute bottom-full left-0 right-0 mb-3 max-h-80 overflow-y-auto z-30 animate-glass-rise">
-            <div className="px-3 py-2 border-b border-white/20 flex items-center gap-2">
-              <AtSign size={11} className="text-accent shrink-0" />
-              <button onClick={() => setAtTab('files')}
-                className={`text-[11px] px-2 py-0.5 rounded font-body ${atTab === 'files' ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink'}`}>
-                文件
-              </button>
-              <button onClick={() => setAtTab('sessions')}
-                className={`text-[11px] px-2 py-0.5 rounded font-body ${atTab === 'sessions' ? 'bg-accent/15 text-accent' : 'text-ink-faint hover:text-ink'}`}>
-                会话
-              </button>
-              <span className="ml-auto text-[10px] text-ink-ghost font-body">Tab 切换 · Enter 选择/进入</span>
-            </div>
-            {/* 层级浏览时显示当前所在目录(面包屑) */}
-            {atTab === 'files' && !atState.query && atDir && (
-              <div className="px-3 py-1 border-b border-white/10 text-[10px] font-mono text-ink-faint truncate">
-                {atDir}/
-              </div>
-            )}
-            {atBusy && (
-              <div className="px-3 py-3 text-[11px] text-ink-faint font-body flex items-center gap-2">
-                <Loader2 size={12} className="animate-spin" />正在生成会话引用...
-              </div>
-            )}
-            {!atBusy && atItems.length === 0 && (
-              <div className="px-3 py-3 text-[11px] text-ink-faint font-body">
-                {atTab === 'files'
-                  ? (atCtxRef.current.cwd ? '没有匹配的文件' : '当前会话无项目目录')
-                  : '本项目没有其它可引用的会话'}
-              </div>
-            )}
-            {!atBusy && atTab === 'files' && atFiles.map((f, i) => (
-              <button key={f.kind === 'up' ? '..' : f.rel} onClick={() => pickAtItem(f)}
-                className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${i === atIndex ? 'bg-accent/12' : 'hover:bg-black/5'}`}>
-                {f.kind === 'up' ? <CornerLeftUp size={12} className="text-ink-faint shrink-0" />
-                  : f.kind === 'dir' ? <Folder size={12} className="text-amber-600 shrink-0" />
-                  : <FileText size={12} className="text-accent shrink-0" />}
-                <span className="text-[11px] font-mono text-ink-soft truncate">
-                  {f.kind === 'up' ? '返回上级' : atState.query ? f.rel : f.name}{f.kind === 'dir' ? '/' : ''}
-                </span>
-              </button>
-            ))}
-            {!atBusy && atTab === 'sessions' && atSessions.map((s, i) => (
-              <button key={s.sessionId} onClick={() => pickAtItem(s)}
-                title="将该会话内容(精简 Markdown)作为上下文引用"
-                className={`w-full text-left px-3 py-2 flex items-center gap-2 transition-colors ${i === atIndex ? 'bg-accent/12' : 'hover:bg-black/5'}`}>
-                <MessagesSquare size={12} className="text-accent shrink-0" />
-                <span className="text-[11px] font-body text-ink-soft truncate flex-1">{s.firstPrompt || s.sessionId}</span>
-                <span className="text-[9px] text-ink-ghost font-mono shrink-0">{(s.lastActivity || '').slice(5, 16).replace('T', ' ')}</span>
-              </button>
-            ))}
-          </div>
-        )}
+        <AtRefPanel {...at.panelProps} />
 
 
         {/* CI-4/r63:无视觉模型下挂了图片 → 提前提示(后端会剥图,不至于 400,但用户该知道) */}
