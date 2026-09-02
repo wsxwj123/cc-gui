@@ -17,6 +17,7 @@ import { updatePrefs, loadPrefs } from './prefs.js';
 import {
   SNAPSHOT_ENV_KEY, TOOL_SEARCH_ENV_KEY, PROMPT_CACHE_MODES,
   normalizePromptCacheMode, resolvePromptCacheOn, applyPromptCacheEnv, cliSupportsSnapshotFlag,
+  MCP_NONBLOCKING_ENV_KEY, promptCacheMemoEquals,
 } from '../utils/prompt-cache-env.js';
 import { resolveClaude } from '../utils/claude-resolver.js';
 
@@ -165,11 +166,11 @@ async function writeActiveProviderId(id) {
   } catch {}
 }
 
-// ── r89 前缀缓存 env(静态系统提示快照 + 关 ToolSearch)────────────────────────
+// ── 前缀缓存 env(r89 静态系统提示快照 + 关 ToolSearch;r90 MCP 阻塞连接)──────
 // 语义与改动点见 utils/prompt-cache-env.js。三态偏好与 ENABLE_TOOL_SEARCH 备忘存
 // prefs.json 的 promptCache 字段(服务端持有:provider 切换发生在服务端,localStorage 够不着)。
 // 每条 provider 切换路径在写 settings.json 之前调 applyProviderPromptCache(env, thirdParty),
-// 由它按类别写入/移除两个 env 键 —— 与 CLAUDE_CODE_ATTRIBUTION_HEADER 同一条通道。
+// 由它按类别写入/移除三个 env 键 —— 与 CLAUDE_CODE_ATTRIBUTION_HEADER 同一条通道。
 async function readPromptCachePref() {
   try {
     const p = (await loadPrefs())?.promptCache;
@@ -184,7 +185,7 @@ async function applyProviderPromptCache(env, thirdParty) {
   const { mode, memo } = await readPromptCachePref();
   const nextMemo = applyPromptCacheEnv(env, resolvePromptCacheOn(mode, thirdParty), memo);
   // 备忘无变化就不写 prefs(provider 切换很频繁,别每次都改 prefs.json)。
-  if ((nextMemo?.toolSearch ?? null) !== (memo?.toolSearch ?? null) || (!nextMemo !== !memo)) {
+  if (!promptCacheMemoEquals(nextMemo, memo)) {
     await updatePrefs((prefs) => {
       prefs.promptCache = { ...(prefs.promptCache || {}), mode, memo: nextMemo };
     }).catch(() => {});
@@ -210,12 +211,14 @@ function promptCacheState(env, mode) {
     on: resolvePromptCacheOn(mode, thirdParty),
     snapshotEnv: env[SNAPSHOT_ENV_KEY] ?? null,
     toolSearchEnv: env[TOOL_SEARCH_ENV_KEY] ?? null,
+    mcpNonblockingEnv: env[MCP_NONBLOCKING_ENV_KEY] ?? null,
     // 只作面板提示用;真正决定加不加 flag 的是 chat.js spawn 处的同一个探测(同一份缓存)。
     cliSnapshotSupported: cliSupportsSnapshotFlag(resolveClaude()?.path || ''),
   };
 }
 
-// GET /api/prompt-cache → { mode, on, thirdParty, snapshotEnv, toolSearchEnv, cliSnapshotSupported }
+// GET /api/prompt-cache → { mode, on, thirdParty, snapshotEnv, toolSearchEnv, mcpNonblockingEnv,
+//                            cliSnapshotSupported }
 router.get('/prompt-cache', async (_req, res) => {
   const cur = await readCurrentSettings();
   const env = cur.env || {};

@@ -53,7 +53,7 @@ const SETTINGS_INDEX = [
   { id: 'set-restore-last', tab: 'session', title: '启动时恢复上次会话', keys: '启动 恢复 上次 会话 Home 首页 restore' },
   { id: 'set-max-budget', tab: 'session', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
   { id: 'set-cache-opt', tab: 'session', title: '缓存优化', keys: '缓存 cache 前缀 动态 系统提示' },
-  { id: 'set-prompt-snapshot', tab: 'session', title: '静态系统提示快照', keys: '缓存 cache 前缀 快照 snapshot 系统提示 carved slate toolsearch 工具搜索' },
+  { id: 'set-prompt-snapshot', tab: 'session', title: '静态系统提示快照', keys: '缓存 cache 前缀 快照 snapshot 系统提示 carved slate toolsearch 工具搜索 mcp 阻塞 连接 nonblocking' },
   { id: 'set-auto-compact', tab: 'session', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
   { id: 'set-small-fast-model', tab: 'session', title: '轻量快速模型', keys: '模型 标题 haiku 快速 small fast' },
   // 修正批#7:Provider tab 已删——管理迁独立弹窗(顶栏 Provider 切换卡片底部「管理」
@@ -2330,8 +2330,10 @@ function PromptCacheSnapshotToggle() {
           开启后,系统提示在会话首次建立时记录一次并逐字复用,git 状态等变化改以追加块补在请求末尾,
           进程冷启后前缀不再从头失配(假上游实测共享前缀 12.9% → 99.3%)。同时会写入 ENABLE_TOOL_SEARCH=false:
           ToolSearch 中途加载工具会重排工具列表、打断前缀缓存;关闭它的代价是 MCP 工具全部前置加载,长工具列表占用上下文。
+          还会写入 MCP_CONNECTION_NONBLOCKING=false:未开启时启动慢的 MCP server 会让工具列表在会话开头变动两次、
+          每次进程冷启的前两个请求都无法命中缓存;代价是首条消息会等最慢的 MCP 连上。
           「自动」= 第三方 provider 开启、官方渠道关闭。
-          这两项经环境变量写入 ~/.claude/settings.json,与终端 claude 及 bot 共用;
+          这三项经环境变量写入 ~/.claude/settings.json,与终端 claude 及 bot 共用;
           静态快照是 CLI 的灰度开关,行为可能随 CLI 版本变化,可随时关闭。
           {state ? `　当前:${state.on ? '已开启' : '未开启'}(${state.thirdParty ? '第三方 provider' : '官方渠道'})` : ''}
           {state && state.cliSnapshotSupported === false && (

@@ -9,16 +9,23 @@
 //  · ENABLE_TOOL_SEARCH=false 关掉工具搜索:开启时 CLI 只前置装载少量工具,ToolSearch 中途
 //    加载会把新工具插进 tools 数组中部并与既有条目换位(不是追加),断点落在 tools 里 →
 //    其后的整段对话历史全部失配(实测 99.87% → 70.2%)。
+//  · MCP_CONNECTION_NONBLOCKING=false 让 CLI 等所有 MCP server 连上再发首个请求(r90)。
+//    默认非阻塞:启动慢的 server(>~2s)未就绪时首请求带占位工具 WaitForMcpServers 且缺
+//    该 server 的工具,连上后占位删除、真工具追加 —— tools 数组在 ~80–85% 处两次变形,
+//    每次冷启前两个请求各失配整段历史,静态快照管不住(实测)。代价:首条消息要等最慢的
+//    MCP server 连上(上限 MCP_CONNECT_TIMEOUT_MS)。
 //
-// 两个键都必须写进 ~/.claude/settings.json 的 env:chat.js 的 stripHostClaudeEnv 会把子进程
-// 继承的 CLAUDE_CODE_* / ENABLE_TOOL_SEARCH 整类删掉,写进程 env 是写了个寂寞。
+// 三个键都必须写进 ~/.claude/settings.json 的 env:chat.js 的 stripHostClaudeEnv 会把子进程
+// 继承的 CLAUDE_CODE_* / ENABLE_TOOL_SEARCH / MCP_CONNECTION_NONBLOCKING 整类删掉,写进程
+// env 是写了个寂寞。
 //
-// settings.json 与终端 claude / bot 共用 —— 这两个键在终端里同样生效,不是 GUI 私有开关。
+// settings.json 与终端 claude / bot 共用 —— 这三个键在终端里同样生效,不是 GUI 私有开关。
 
 import { execFileSync } from 'node:child_process';
 
 export const SNAPSHOT_ENV_KEY = 'CLAUDE_CODE_CARVED_SLATE';
 export const TOOL_SEARCH_ENV_KEY = 'ENABLE_TOOL_SEARCH';
+export const MCP_NONBLOCKING_ENV_KEY = 'MCP_CONNECTION_NONBLOCKING';
 export const PROMPT_CACHE_MODES = ['auto', 'on', 'off'];
 
 export function normalizePromptCacheMode(mode) {
@@ -34,17 +41,21 @@ export function resolvePromptCacheOn(mode, thirdParty) {
   return !!thirdParty;
 }
 
-// 原地改 env,返回新的备忘(memo)。memo 记录用户自己设的 ENABLE_TOOL_SEARCH,
-// 关掉本功能 / 切回官方时按原值还回去,不把用户的选择冲掉。
-//  memo 形态:{ toolSearch: string | null }(null = 该键原本不存在);null/undefined = 无备忘。
+// 原地改 env,返回新的备忘(memo)。memo 记录用户自己设的 ENABLE_TOOL_SEARCH 与
+// MCP_CONNECTION_NONBLOCKING,关掉本功能 / 切回官方时按原值还回去,不把用户的选择冲掉。
+//  memo 形态:{ toolSearch, mcpNonblocking }(值为 string | null,null = 该键原本不存在);
+//  null/undefined = 无备忘。r89 只记 toolSearch 的旧备忘按缺键补记,不推翻已记的那一项。
 // 返回值:新的 memo(on 时首次记账后保持不变;off 时清空为 null)。
 export function applyPromptCacheEnv(env, on, memo) {
   const remembered = (memo && typeof memo === 'object') ? memo : null;
   if (on) {
-    // 已有备忘就不重记:否则第二次切第三方会把我们自己写的 'false' 当成用户原值记下来。
-    const next = remembered || { toolSearch: TOOL_SEARCH_ENV_KEY in env ? env[TOOL_SEARCH_ENV_KEY] : null };
+    // 已记过的键不重记:否则第二次切第三方会把我们自己写的 'false' 当成用户原值记下来。
+    const next = { ...(remembered || {}) };
+    if (!('toolSearch' in next)) next.toolSearch = TOOL_SEARCH_ENV_KEY in env ? env[TOOL_SEARCH_ENV_KEY] : null;
+    if (!('mcpNonblocking' in next)) next.mcpNonblocking = MCP_NONBLOCKING_ENV_KEY in env ? env[MCP_NONBLOCKING_ENV_KEY] : null;
     env[SNAPSHOT_ENV_KEY] = '1';
     env[TOOL_SEARCH_ENV_KEY] = 'false';
+    env[MCP_NONBLOCKING_ENV_KEY] = 'false';
     return next;
   }
   delete env[SNAPSHOT_ENV_KEY];
@@ -54,7 +65,18 @@ export function applyPromptCacheEnv(env, on, memo) {
     if (remembered.toolSearch == null) delete env[TOOL_SEARCH_ENV_KEY];
     else env[TOOL_SEARCH_ENV_KEY] = remembered.toolSearch;
   }
+  if (remembered && env[MCP_NONBLOCKING_ENV_KEY] === 'false') {
+    if (remembered.mcpNonblocking == null) delete env[MCP_NONBLOCKING_ENV_KEY];
+    else env[MCP_NONBLOCKING_ENV_KEY] = remembered.mcpNonblocking;
+  }
   return null;
+}
+
+// 备忘是否有实质变化(决定要不要落 prefs.json)。键少,逐键比;两边都是 null/无 也算相等。
+export function promptCacheMemoEquals(a, b) {
+  if (!a !== !b) return false;
+  return (a?.toolSearch ?? null) === (b?.toolSearch ?? null)
+    && (a?.mcpNonblocking ?? null) === (b?.mcpNonblocking ?? null);
 }
 
 // ── CLI 能力探测:--system-prompt-snapshot ────────────────────────────────

@@ -56,7 +56,8 @@ check('A2-1 切第三方:写两个键,并把用户原值记进备忘', () => {
   const memo = applyPromptCacheEnv(env, true, null);
   assert.equal(env[SNAPSHOT_ENV_KEY], '1');
   assert.equal(env[TOOL_SEARCH_ENV_KEY], 'false');
-  assert.deepEqual(memo, { toolSearch: 'true' });
+  // r90 起备忘多记一项 MCP_CONNECTION_NONBLOCKING(此处用户没设过 → null)。
+  assert.deepEqual(memo, { toolSearch: 'true', mcpNonblocking: null });
 });
 check('A2-2 切回官方:移除快照键 + 还原用户原值 + 清空备忘', () => {
   const env = { [SNAPSHOT_ENV_KEY]: '1', [TOOL_SEARCH_ENV_KEY]: 'false' };
@@ -68,7 +69,7 @@ check('A2-2 切回官方:移除快照键 + 还原用户原值 + 清空备忘', (
 check('A2-3 用户原本没设过 ENABLE_TOOL_SEARCH:切回官方要把键删掉,不留 false', () => {
   const env = { ANTHROPIC_BASE_URL: 'x' };
   const memo = applyPromptCacheEnv(env, true, null);
-  assert.deepEqual(memo, { toolSearch: null });
+  assert.deepEqual(memo, { toolSearch: null, mcpNonblocking: null });
   assert.equal(env[TOOL_SEARCH_ENV_KEY], 'false');
   applyPromptCacheEnv(env, false, memo);
   assert.equal(TOOL_SEARCH_ENV_KEY in env, false);
@@ -77,7 +78,7 @@ check('A2-4 连续两次切第三方不能把自己写的 false 当成用户原�
   const env = { [TOOL_SEARCH_ENV_KEY]: 'true' };
   const m1 = applyPromptCacheEnv(env, true, null);
   const m2 = applyPromptCacheEnv(env, true, m1);
-  assert.deepEqual(m2, { toolSearch: 'true' });
+  assert.deepEqual(m2, { toolSearch: 'true', mcpNonblocking: null });
 });
 check('A2-5 用户在第三方下手动改回 true:切回官方不拿备忘覆盖', () => {
   const env = { [SNAPSHOT_ENV_KEY]: '1', [TOOL_SEARCH_ENV_KEY]: 'true' };
