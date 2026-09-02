@@ -8480,6 +8480,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
             <div className="flex items-center gap-2 text-[11px] font-body"
               title={`本轮缓存命中率 = 本次 API 调用的 cache_read /（cache_read + cache_creation + input）
 本次命中 ${(info.turnCacheRead || 0).toLocaleString()} / 提示侧合计 ${(info.turnCacheTotal || 0).toLocaleString()}
+单次调用的 ctxUsage 缺失时回退到整轮累加口径，该轮数值会偏低
 会话累计未命中（按未命中价计费）${(info.sessionCacheMiss || 0).toLocaleString()}`}>
               <span className="text-ink-faint w-14 shrink-0">本轮命中</span>
               <span className="font-mono text-ink-muted">{formatHitPct(info.turnCacheHitPct || 0)}</span>

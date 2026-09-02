@@ -44,7 +44,12 @@ async function readSettings() {
 // an anthropic.com host). A loopback base means the local proxy = third party.
 export function isOfficialAnthropic(baseURL) {
   if (!baseURL) return true; // empty → CLI default endpoint (api.anthropic.com)
-  try { return new URL(baseURL).hostname.endsWith('anthropic.com'); } catch { return false; }
+  // 边界要点住:endsWith('anthropic.com') 会把 notanthropic.com / evilanthropic.com
+  // 判成官方 —— 那样的 provider 会被当官方直连(不过回环代理)、A5 也不改写 user_id。
+  try {
+    const h = new URL(baseURL).hostname.toLowerCase();
+    return h === 'anthropic.com' || h.endsWith('.anthropic.com');
+  } catch { return false; }
 }
 
 // A claude-family model id (or CLI tier alias). Used to drop FOREIGN model ids
