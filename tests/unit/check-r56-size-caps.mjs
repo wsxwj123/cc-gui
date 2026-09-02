@@ -35,7 +35,11 @@ const PNG_BUF = Buffer.from(PNG_B64, 'base64');
 
 // ───────────── 1. 能力表(纯函数,零 IO) ─────────────
 const caps = await import('../../client/src/utils/imageSizeCaps.js');
-const { SIZE_OPTIONS, sizeOptionsFor, sizeCapFor } = caps;
+const { SIZE_OPTIONS } = caps;
+// r87:能力表判据改成 (上游方言, 模型) 二元(apimart 的 size 是宽高比、官方的 size 是像素,
+// 同名反义)。本节校验的全部是【官方方言】那半 —— 它必须与 r56 逐字不变,故统一补 'openai'。
+const sizeOptionsFor = (m) => caps.sizeOptionsFor('openai', m);
+const sizeCapFor = (m) => caps.sizeCapFor('openai', m);
 {
   assert.ok(Array.isArray(SIZE_OPTIONS) && SIZE_OPTIONS.length > 10, 't1: 全量候选表在位');
   assert.ok(SIZE_OPTIONS.includes('4096x4096') && SIZE_OPTIONS.includes('16:9') && SIZE_OPTIONS.includes('4K'),
@@ -339,7 +343,9 @@ if (failure) throw failure;
   const src = readFileSync(join(REPO, 'server/routes/image.js'), 'utf8');
   const count = (s, re) => (s.match(re) || []).length;
   assert.match(src, /import \{ fetch as undiciFetch, ProxyAgent \} from 'undici'/, 't3: 生图链路用 undici 的 fetch');
-  assert.equal(count(src, /undiciFetch\(/g), 3, 't3【三处外联】:生成 POST / 图片下载 / gemini 拉模型都换成了同一套 fetch');
+  // r87 新增第四处直接调用点(报价查询)。pollTask 那处走 io.fetch || undiciFetch 的注入口,
+  // 不在这个正则的射程内 —— 计数只覆盖"直接 undiciFetch(" 的写法。
+  assert.equal(count(src, /undiciFetch\(/g), 4, 't3【外联点】:生成 POST / 图片下载 / gemini 拉模型 / 报价查询都走同一套 fetch');
   assert.ok(!/[^i]\bfetch\(spec\.url|[^i]\bfetch\(picked\.url/.test(src), 't3: 不许留下混用全局 fetch 的调用点(同链路两套网络栈)');
   assert.match(src, /const proxyAgents = new Map\(\)/, 't3: 代理池按 url 缓存(同 url 复用连接池)');
   assert.match(src, /MAX_PROXY_AGENTS = 8/, 't3: 缓存上限 8 条');
@@ -360,11 +366,14 @@ if (failure) throw failure;
     't3: boundary 跟着序列化结果走(不是自己编一个)');
   // 安全锚:换 fetch 实现不许动它们(r54/r26 系各自还会再验一遍)
   // r84:新增 /image/actions(MJ 二次操作)后多一处前置校验 → 基线 4 → 5。只增不减。
-  assert.equal(count(src, /await assertPublicBaseURL\(/g), 5, 't3: assertPublicBaseURL 调用点数量不变');
+  // r87:新增第五处外联(GET /api/pricing/model 报价查询,免鉴权)。它同样带 origin 前置校验、
+  // redirect:'manual' 与一处限量读 → 三条基线各 +1。语义仍是「只许加不许减」;既有链路原样
+  // 的真牙在下面的 runner 切片计数(一个都没变)。
+  assert.equal(count(src, /await assertPublicBaseURL\(/g), 6, 't3: assertPublicBaseURL 调用点数量不变');
   // r82 的第四处外联带同款 redirect:'manual' + 两处限量读 → 两条基线各 +1 / +2
   // (它的 fetch 默认就是 undiciFetch,单测可注入;"只许加不许减"的语义没变)。
-  assert.equal(count(src, /redirect: 'manual'/g), 4, "t3: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处)");
-  assert.equal(count(src, /readCapped\(/g), 6, 't3: readCapped 出现次数(r51 的 4 处 + r82 轮询 2 处)');
+  assert.equal(count(src, /redirect: 'manual'/g), 5, "t3: redirect:'manual' 出现次数(r51 的 3 处 + r82 轮询 1 处 + r87 报价 1 处)");
+  assert.equal(count(src, /readCapped\(/g), 7, 't3: readCapped 出现次数(r51 的 4 处 + r82 轮询 2 处 + r87 报价 1 处)');
   assert.ok(count(src, /redactKey\(/g) >= 7, 't3: redactKey 不少于原有 7 处');
 }
 
@@ -372,11 +381,12 @@ if (failure) throw failure;
 {
   const src = readFileSync(join(REPO, 'client/src/components/ImagePanel.jsx'), 'utf8');
   const capsSrc = readFileSync(join(REPO, 'client/src/utils/imageSizeCaps.js'), 'utf8');
-  assert.match(src, /import \{ SIZE_OPTIONS, sizeCapFor, sizeOptionsFor \} from '\.\.\/utils\/imageSizeCaps\.js'/,
+  assert.match(src, /import \{[^}]*\bSIZE_OPTIONS\b[^}]*\bsizeCapFor\b[^}]*\} from '\.\.\/utils\/imageSizeCaps\.js'/,
     't4: 面板从能力表模块取候选(全量表已搬去纯函数模块,单测可直接 import)');
-  assert.match(src, /\(sizeOptionsFor\(form\.model\) \?\? SIZE_OPTIONS\)\.map/,
+  // r87:候选按 (方言, 模型) 二元查(官方方言那半的产物与 r56 逐字相同,见 t1)。
+  assert.match(src, /\(sizeOptionsFor\(dialect, form\.model\) \?\? SIZE_OPTIONS\)\.map/,
     't4【datalist 接线】:候选随模型实时过滤,未命中回落全量');
-  assert.match(src, /const sizeCap = sizeCapFor\(form\.model\)/, 't4: 小字读同一份能力表');
+  assert.match(src, /const sizeCap = sizeCapFor\(dialect, form\.model\)/, 't4: 小字读同一份能力表');
   assert.match(src, /\{sizeCap && \([\s\S]{0,220}候选已按 \{sizeCap\.family\} 的官方支持范围过滤；手动输入不受限制。/,
     't4【小字条件渲染】:命中家族才提示,且明说手输不受限');
   const sizeInput = src.split('\n').find((l) => l.includes('list="cgui-image-size-options"')) || '';
@@ -395,7 +405,8 @@ if (failure) throw failure;
   assert.match(src, /连接正常，拉到 \$\{list\.length\} 个模型/, 't4【连接正常】:拉取成功即连通性 OK');
   assert.match(src, /连接正常，但该服务返回了空的模型列表/, 't4: 空列表也是连上了,别让用户以为没通');
   // 能力表注释必须标出处(能力表是"人写的事实",没出处就是猜)
-  for (const k of ['OpenAI 官方 Images API', '火山方舟', 'PROJECT.md']) {
+  // r87 的 apimart 那半同理,出处是 .devflow/RESEARCH-r87-image-params.md(每格都有文档 URL)。
+  for (const k of ['OpenAI 官方 Images API', '火山方舟', 'PROJECT.md', 'RESEARCH-r87-image-params.md']) {
     assert.ok(capsSrc.includes(k), `t4: 能力表注释标注来源 ${k}`);
   }
   assert.ok(capsSrc.includes('宁可保留不过滤'), 't4: 红线写在能力表里(拿不准就别过滤)');
