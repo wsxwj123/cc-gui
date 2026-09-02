@@ -1046,7 +1046,7 @@ export default function ImagePanel() {
             <button
               type="button"
               onClick={() => pickShot(h, i)}
-              title={`第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）：点击选中，大图与单图操作都作用于它；选中后这张下方出现放大 / 变体`}
+              title={canAct ? `第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）：点击选中，大图与单图操作都作用于它；选中后这张下方出现放大 / 变体` : `第 ${i + 1} 张：点击选中，大图与单图操作都作用于它`}
               className="block w-full"
             >
               <img src={entryPreviewUrl(f)} alt={`第 ${i + 1} 张`} className="w-full aspect-square object-cover" />
