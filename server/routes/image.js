@@ -1356,7 +1356,7 @@ router.post('/image/generate', async (req, res) => {
     // 上游 120s —— 慢生成(4K 等)时前端先被掐断报 "Load failed",服务端其实已经出图。
     res.json({ ok: true, jobId });
     // fire-and-forget:任务与这次请求彻底脱钩,面板关掉/刷新都照跑。
-    runImageJob({ jobId, provider: outbound, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
+    runImageJob({ jobId, provider, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
   } catch (err) {
     if (counted) activeJobs -= 1;
     res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });
@@ -1388,8 +1388,13 @@ router.post('/image/actions', async (req, res) => {
     if (!parent.taskId) return res.status(400).json({ error: '该记录没有保存上游任务号（早于本功能的记录），请重新生成一次后再操作' });
 
     const all = await readImageProviders();
-    const provider = all.find((p) => p.id === parent.providerId);
-    if (!provider) return res.status(404).json({ error: '该任务所用的生图 provider 已被删除' });
+    const stored = all.find((p) => p.id === parent.providerId);
+    if (!stored) return res.status(404).json({ error: '该任务所用的生图 provider 已被删除' });
+    // r94:二次操作与 /generate 走同一道速度闸 —— 8.x 上的 turbo 上游照收 2.22 倍的钱却不
+    // 更快,漏在这里等于每点一次真放大 / 变体就多付一倍多。降级只作用于本次下发,
+    // 落盘配置与 GET 回显仍是用户存的原值(publicView 不经过这里)。
+    const eff = mjEffectiveSpeed(stored.mjVersion, stored.mjSpeed);
+    const provider = { ...stored, mjSpeed: eff.speed };
     if (!MJ_PROTOCOLS.includes(provider.protocol)) return res.status(400).json({ error: '该操作仅适用于 Midjourney 协议(mj / mj-proxy)的 provider' });
     apiKeyForRedact = provider.apiKey || '';
     const pathErr = await checkSavePath(provider.savePath);
@@ -1416,15 +1421,11 @@ router.post('/image/actions', async (req, res) => {
     // 真放大与取出单图打的是【同一个】upscale 端点,差别只在 body 是 custom_id 还是 index。
     const action = cid ? (kind === 'variation' ? 'variation' : 'upscale') : rawAction;
 
-    // r94:二次操作与 /generate 走同一道速度闸 —— 8.x 上的 turbo 上游照收 2.22 倍的钱
-    // 却不更快,漏在这里等于每点一次真放大 / 变体就多付一倍多。落盘值仍是用户存的原值。
-    const eff = mjEffectiveSpeed(provider.mjVersion, provider.mjSpeed);
-    const outbound = { ...provider, mjSpeed: eff.speed };
     let spec;
     try {
       spec = provider.protocol === 'mj-proxy'
-        ? buildProxyActionRequest(outbound, { taskId: parent.taskId, customId: cid, kind, index })
-        : buildMjActionRequest(outbound, action, index, parent.taskId, cid);
+        ? buildProxyActionRequest(provider, { taskId: parent.taskId, customId: cid, kind, index })
+        : buildMjActionRequest(provider, action, index, parent.taskId, cid);
     } catch (e) { return res.status(400).json({ error: e.message }); }
     try { await assertPublicBaseURL(provider.baseURL); }
     catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
@@ -1455,7 +1456,7 @@ router.post('/image/actions', async (req, res) => {
       ...(eff.note ? { speedNote: eff.note } : {}),
     });
     res.json({ ok: true, jobId });
-    runImageJob({ jobId, provider: outbound, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
+    runImageJob({ jobId, provider, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
   } catch (err) {
     if (counted) activeJobs -= 1;
     res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });

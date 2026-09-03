@@ -173,8 +173,9 @@ check('⑦ 非 MJ 协议的链接参考图:前端拦 + 服务端 400 文案', ()
 });
 check('⑥ 动作端点过 8.x turbo 降级闸;⑤ proxy 提交失败文案剥 key 并截长', () => {
   const R = read('server/routes/image.js');
-  assert.equal((R.match(/mjEffectiveSpeed\(provider\.mjVersion, provider\.mjSpeed\)/g) || []).length, 2,
-    'generate 与 actions 两处都要过闸');
+  assert.match(R, /mjEffectiveSpeed\(provider\.mjVersion, provider\.mjSpeed\)/, 'generate 过闸');
+  assert.match(R, /const eff = mjEffectiveSpeed\(stored\.mjVersion, stored\.mjSpeed\);\n\s*const provider = \{ \.\.\.stored, mjSpeed: eff\.speed \}/,
+    'actions 端点同样过闸(降级后的配置就叫 provider,E6 锁的调用行字面不变)');
   assert.match(R, /if \(submit && !submit\.taskId\) \{[\s\S]{0,200}redactKey\([\s\S]{0,120}MAX_UPSTREAM_ERR/,
     'proxy 提交失败文案必须剥 key 并截长');
 });
