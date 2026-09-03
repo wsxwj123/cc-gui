@@ -419,7 +419,8 @@ export function logSdkClaudeOnce(claudePath, log = console.log) {
   if (!key) { log('[chat] sdk claude: (SDK 自带 CLI —— 未解析到可直接执行的 claude)'); return; }
   const spec = claudeExecSpec(key, ['--version']);
   safeExecAsync(spec.file, spec.args, 8000)
-    .then((out) => log(`[chat] sdk claude: ${key} → ${String(out).split(/\r?\n/)[0] || '(--version 无输出)'}`));
+    .then((out) => log(`[chat] sdk claude: ${key} → ${String(out).split(/\r?\n/)[0] || '(--version 无输出)'}`))
+    .catch(() => {}); // 纯日志,注入的 log 抛异常也不能变成 unhandled rejection
 }
 
 /**

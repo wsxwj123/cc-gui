@@ -243,8 +243,9 @@ export function McpForm({ editing, seed, onClose, onSaved }) {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '保存失败');
       onSaved?.(name.trim(), !isEdit); // 传回名称 + 是否新增,供面板对新 server 自动探测连通性
-      // 保存成功但 server 丢弃了非法请求头键 → 留在表单里内联展示 warning(自动关掉用户就看不见了)。
-      if (d.warning) { setWarn(d.warning); return; }
+      // 保存成功但 server 丢弃了非法请求头键(warning),或命令不在 PATH 需改绝对路径(hint,Windows 常见)
+      // → 留在表单里内联展示(自动关掉用户就看不见了)。两者可同时出现,换行并列,谁也不顶掉谁。
+      if (d.warning || d.hint) { setWarn([d.warning, d.hint].filter(Boolean).join('\n')); return; }
       onClose?.();
     } catch (e) {
       setErr(e.message);
