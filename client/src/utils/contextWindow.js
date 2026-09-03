@@ -46,6 +46,45 @@ export function pickCliContextWindow(modelUsage, modelId) {
   return null;
 }
 
+// r103:徽章分母的来源优先级(纯函数,单测 check-r103-dev-badge-window.mjs)。
+// 事故(用户实报):第三方 provider 表单手填 1M,第一轮结束后徽章分母变回 200K ——
+// R8-6 拿 result.modelUsage[*].contextWindow 无条件覆盖了手填值,而 CLI 对它不认识的
+// 第三方模型名【恒报 200,000】。同一时刻 GUI 已经用 CLAUDE_CODE_MAX_CONTEXT_TOKENS 把
+// CLI 的真实窗口认知/压缩线抬到 1M(server chat.js resolveCompactWindowSettings),
+// 所以旧口径下【显示的分母与 CLI 实际压缩行为相反】。
+// 正确方向:GUI 侧有窗口来源(压缩联动下发值 / provider 手填 / 实抓 / 规则表)时以它为准,
+// CLI 自报只在 GUI 完全没有来源时(官方模型、或第三方无手填无规则)才当分母 —— 官方模型
+// 上 GUI 恒无来源,行为与改前一致,无回归。
+// 返回 { window, source },source ∈ '1m' | 'linked' | 'provider' | 'cli' | null。
+// null = 无任何来源,调用方自行落 /context 实测缓存 / nativeContextWindow 兜底。
+// 入参非对象(null/undefined/数字/字符串)按"全缺"处理返回 { window: null, source: null },
+// 不抛错 —— 调用点在流事件回调里,抛一次就吞掉整条 result 处理。
+export function resolveBadgeWindow(opts) {
+  const { cliWindow, linkedWindow, linkedSource, providerWindow, model } =
+    (opts && typeof opts === 'object') ? opts : {};
+  const pos = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+  if (/\[1m\]/i.test(model || '')) return { window: 1_000_000, source: '1m' };
+  const linked = pos(linkedWindow);
+  const cli = pos(cliWindow);
+  if (linked) {
+    // linkedSource==='explicit' = 用户在设置页/env 里显式选了自动压缩窗口。此时
+    // 压缩联动【整个让位】(server resolveCompactWindowSettings 返 null),GUI 不再下发
+    // CLAUDE_CODE_MAX_CONTEXT_TOKENS,CLI 仍按它自己认的模型窗口算 →
+    // 有效窗口 = min(显式值, CLI 自认窗口)。官方模型上选 500K 实际只有 200K,分母必须
+    // 显示 200K,否则又是"显示与 CLI 实际压缩行为相反"。
+    // 'linked'(GUI 按 provider 窗口联动)【不走 min】:那个 200K 恰恰是被 GUI 下发的
+    // MAX_CONTEXT_TOKENS 替掉的 CLI 默认值,拿它去钳就把修好的又钳回去了。
+    if (linkedSource === 'explicit') {
+      return { window: cli ? Math.min(linked, cli) : linked, source: 'explicit' };
+    }
+    return { window: linked, source: 'linked' };
+  }
+  const provider = pos(providerWindow);
+  if (provider) return { window: provider, source: 'provider' };
+  if (cli) return { window: cli, source: 'cli' };
+  return { window: null, source: null };
+}
+
 export function nativeContextWindow(model) {
   const id = (model || '').toLowerCase().trim();
   if (/\[1m\]/i.test(id)) return 1_000_000;
