@@ -15,8 +15,21 @@ import {
   IMAGE_RESOLUTIONS, IMAGE_QUALITIES, IMAGE_OUTPUT_FORMATS, IMAGE_BACKGROUNDS,
   IMAGE_MODERATIONS, imageDialect, imageCount, pickEnum, sizeCapFor,
 } from './image-caps.js';
+// r94:参数编译层与 midjourney-proxy 方言层。两者都是零依赖纯函数,这里原样转出,
+// 调用方(routes/image.js、前端 utils)只认 image-protocols 一个入口。
+import { compileMjFlags, mjRefModeFor } from './mj-params.js';
+import { buildProxyImagineRequest } from './mj-proxy.js';
 
-export const IMAGE_PROTOCOLS = ['openai', 'gemini', 'chat', 'mj'];
+export {
+  compileMjFlags, mjCapsFor, mjEffectiveSpeed, mjRefModeFor,
+  MJ_PARAM_FIELDS, MJ_REF_MODES, MJ_REF_MODE_DEFAULT,
+} from './mj-params.js';
+export {
+  buildProxyImagineRequest, extractProxySubmitId, buildProxyPollRequest,
+  extractProxyTaskState, buildProxyActionRequest, normalizeProxyBaseURL, normalizeMjButtons,
+} from './mj-proxy.js';
+
+export const IMAGE_PROTOCOLS = ['openai', 'gemini', 'chat', 'mj', 'mj-proxy'];
 
 // 允许落盘/预览的图片扩展名 → Content-Type。白名单同时是"预览只读图片"的第二道闸:
 // savePath 之下的 .env / .json 之类即便路径合法也不给读。
@@ -97,9 +110,11 @@ export function mjVersionFields(v) {
 // 刻意【不并入 extra】:extra 是为 imagine 的结构化参数准备的(stylize / chaos / seed…),
 // 动作端点不收这些字段,原样转发只会让上游 400 或静默丢弃。
 export const MJ_ACTIONS = ['upscale', 'variation'];
+// 一次提交最多带几张垫图(与路由层的 MAX_REFS 同值;协议层自己也要有界,别指望调用方)。
+const MAX_MJ_REF_IMAGES = 6;
 export const MJ_ACTION_INDEX_MAX = 4; // 文档:index 必须 1–4,越界上游返回 400
 
-export function buildMjActionRequest(config, action, index, taskId) {
+export function buildMjActionRequest(config, action, index, taskId, customId) {
   const cfg = config || {};
   const base = String(cfg.baseURL || '').trim().replace(/\/+$/, '');
   const key = typeof cfg.apiKey === 'string' ? cfg.apiKey : '';
@@ -108,8 +123,16 @@ export function buildMjActionRequest(config, action, index, taskId) {
   if (!MJ_ACTIONS.includes(action)) throw new Error(`未知的 Midjourney 操作:${action}`);
   if (!base) throw new Error('baseURL 未配置');
   if (!id) throw new Error('缺少上游任务号,无法发起该操作');
-  if (!Number.isFinite(n) || n < 1 || n > MJ_ACTION_INDEX_MAX) throw new Error(`只能对第 1–${MJ_ACTION_INDEX_MAX} 张发起该操作`);
-  const body = { task_id: id, index: n };
+  // r94:上游按钮标识(custom_id)走【第五个可选参数】—— 前四个位置参数与下面四条错误
+  // 文案一字不动,r84 的 8 处四参直调零改动。有 custom_id 时上游按它走,index 是噪声,
+  // 故【不再校验也不再下发 index】(真放大按钮的 index 段本来就不是 1–4)。
+  const cid = customId === undefined || customId === null || customId === '' ? '' : customId;
+  if (cid) {
+    if (typeof cid !== 'string' || /[\r\n]/.test(cid)) throw new Error('按钮标识非法(必须是不含换行的字符串)');
+  } else if (!Number.isFinite(n) || n < 1 || n > MJ_ACTION_INDEX_MAX) {
+    throw new Error(`只能对第 1–${MJ_ACTION_INDEX_MAX} 张发起该操作`);
+  }
+  const body = cid ? { task_id: id, custom_id: cid } : { task_id: id, index: n };
   if (cfg.mjSpeed) body.speed = String(cfg.mjSpeed);
   return {
     // action 已过白名单,不会把路径拼歪(不是拿用户输入直接进 path)。
@@ -320,24 +343,50 @@ export function buildImageRequest(config, prompt, refs) {
     };
   }
 
+  if (protocol === 'mj-proxy') {
+    // r94 midjourney-proxy 形态:路径与 body 键名与 apimart 全不一样,方言收在 mj-proxy.js。
+    return buildProxyImagineRequest(cfg, prompt, refs);
+  }
+
   if (protocol === 'mj') {
     // r82 Midjourney(apimart 形态):POST {base}/midjourney/generations —— 异步任务制,
     // 响应只回 task_id,取图靠 routes/image.js 的 pollTask 轮询。
     // 该路由自动注入 model=midjourney(实测不传也过),故 body 不发 model。
-    // r84:size / version / speed 三个结构化参数改为下发 —— 文档 imagine.md 的请求体样例
-    // 逐字为 {"prompt":"…","size":"16:9","version":"6.1","speed":"fast"},字段语义与取值
-    // 范围都是文档明列的,不再属于"未经实测的字段"。size 在本协议是【宽高比】(--ar)
-    // 不是像素,UI 已就此改口径。extra 仍在最后展开 = 用户写进附加参数的同名键覆盖表单值
-    // (与其余三种协议的 extra 语义一致)。空值一律不发该键,别发空串。
-    // ⚠️ 本分支【不使用参考图】(list 有值也不发),UI 已就此给出说明。
-    const body = { prompt: text };
-    // size 在本协议是【宽高比】(--ar):不是 W:H 形态的值一律【不发】而不是原样透传 ——
-    // r82 时该字段不下发,存量 provider 完全可能存着从别的协议抄来的像素值(1024x1024),
-    // 升级后原样发出去就成了 --ar 1024x1024。守卫放在协议层这个共同经过点(表单提示只有
-    // 打开表单才看得到);静默忽略而不是报错:按默认比例出图比整单失败对用户更好。
-    if (MJ_RATIO_RE.test(String(cfg.size || '').trim())) body.size = String(cfg.size).trim();
+    // r84:size / version / speed 三个结构化参数下发,取值范围是文档明列的。size 在本协议
+    // 是【宽高比】(--ar)不是像素。extra 仍在最后展开 = 用户写进附加参数的同名键覆盖表单值。
+    // r94:其余参数一律编译成提示词末尾的 flag(通用层),参考图分两路 ——
+    // 垫图进 body.image_urls,角色/风格参考进 --cref/--oref/--sref。
+    const list = Array.isArray(refs) ? refs.filter(Boolean) : [];
+    const roleOf = (r) => (typeof r.role === 'string' && r.role ? r.role : 'image');
+    const byRole = (role) => list.find((r) => roleOf(r) === role);
+    const urlOf = (role) => { const h = byRole(role); return h && typeof h.url === 'string' ? h.url : ''; };
+    const weightOf = (role) => { const h = byRole(role); return h && h.weight !== undefined && h.weight !== null ? h.weight : ''; };
+    const images = list.filter((r) => roleOf(r) === 'image').slice(0, MAX_MJ_REF_IMAGES);
+    // 垫图传法(provider 级三选一)。upload / url 两档下,协议层拿不到公网 URL 就【当场抛错】:
+    // 静默忽略等于用户以为垫了图其实没垫;自行上传则是背着用户花钱(每张约 $0.05)。
+    const refMode = mjRefModeFor(cfg) || 'upload';
+    const imageUrls = images.map((r) => {
+      if (typeof r.url === 'string' && r.url) return r.url;
+      if (refMode === 'inline' && typeof r.base64 === 'string' && r.base64) return refDataUri(r);
+      throw new Error(refMode === 'url'
+        ? '当前垫图传法只接受公网图片链接,本地图片请先自行上传到图床,或把该 provider 的「垫图传法」改成 upload / inline'
+        : '垫图需要公网图片链接:请先上传该参考图换取链接,或把该 provider 的「垫图传法」改成 inline(base64 直传)');
+    });
+    const compiled = compileMjFlags({
+      ...(cfg.mjParams && typeof cfg.mjParams === 'object' && !Array.isArray(cfg.mjParams) ? cfg.mjParams : {}),
+      ar: cfg.size,
+      iw: images.length ? weightOf('image') : '',
+      cref: urlOf('cref'), cw: weightOf('cref'),
+      oref: urlOf('oref'), ow: weightOf('oref'),
+      sref: urlOf('sref'), sw: weightOf('sref'),
+    }, { version: cfg.mjVersion, speed: cfg.mjSpeed, carrier: 'mj', prompt: text });
+    const body = { prompt: compiled.prompt };
+    // size 只在 ar 真进了 viaBody 时发:提示词里手写过 --ar 就以提示词为准(手写优先),
+    // 存量 provider 存的像素值(1024x1024)不是宽高比,同样不发 —— 两种情况都在编译层判过了。
+    if (compiled.viaBody.some((v) => v.field === 'ar')) body.size = String(cfg.size).trim();
     Object.assign(body, mjVersionFields(cfg.mjVersion));
     if (cfg.mjSpeed) body.speed = String(cfg.mjSpeed);
+    if (imageUrls.length) body.image_urls = imageUrls;
     return {
       url: `${base}/midjourney/generations`,
       headers: { ...json, Authorization: `Bearer ${key}` },
