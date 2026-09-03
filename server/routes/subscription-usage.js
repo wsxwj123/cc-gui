@@ -35,8 +35,8 @@ let uaCached = '';
 async function userAgent() {
   if (uaCached) return uaCached;
   try {
-    const { file, args } = claudeCommand(['--version']);
-    const { stdout } = await execFileP(file, args, { timeout: 5000 });
+    const { file, args, opts: execOpts } = claudeCommand(['--version']);
+    const { stdout } = await execFileP(file, args, { timeout: 5000, ...execOpts });
     const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
     if (m) uaCached = `claude-code/${m[1]}`;
   } catch { /* 探测不到就用常量 */ }

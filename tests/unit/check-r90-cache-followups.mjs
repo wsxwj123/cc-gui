@@ -166,12 +166,13 @@ check('B2-2 退化【只】发生在探测真失败时:探测抛错 → 一个 f
   }
 });
 check('B2-9 探测命令经 claudeExecSpec:Windows 的 .cmd 走 cmd.exe /c', () => {
+  // r110:.cmd 经 cmd.exe 改为 verbatim 引号(/d /s /c + 整行外层引号 + 每 token 引号),多返回 opts。
   assert.deepEqual(claudeExecSpec('C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd', ['--help'], 'win32'),
-    { file: 'cmd.exe', args: ['/c', 'C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd', '--help'] },
+    { file: 'cmd.exe', args: ['/d', '/s', '/c', '""C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd" "--help""'], opts: { windowsVerbatimArguments: true } },
     'npm 装的 claude.cmd 裸 execFile 会 ENOENT → 探测恒失败 → 瘦身在 Windows 空转');
-  assert.deepEqual(claudeExecSpec('C:\\p\\claude.exe', ['--help'], 'win32'), { file: 'C:\\p\\claude.exe', args: ['--help'] });
-  assert.deepEqual(claudeExecSpec('', ['--help'], 'win32'), { file: 'cmd.exe', args: ['/c', 'claude', '--help'] }, '无扩展名 shim / 裸名同样要经 cmd.exe');
-  assert.deepEqual(claudeExecSpec('/usr/local/bin/claude', ['--help'], 'darwin'), { file: '/usr/local/bin/claude', args: ['--help'] });
+  assert.deepEqual(claudeExecSpec('C:\\p\\claude.exe', ['--help'], 'win32'), { file: 'C:\\p\\claude.exe', args: ['--help'], opts: {} });
+  assert.deepEqual(claudeExecSpec('', ['--help'], 'win32'), { file: 'cmd.exe', args: ['/d', '/s', '/c', '""claude" "--help""'], opts: { windowsVerbatimArguments: true } }, '无扩展名 shim / 裸名同样要经 cmd.exe');
+  assert.deepEqual(claudeExecSpec('/usr/local/bin/claude', ['--help'], 'darwin'), { file: '/usr/local/bin/claude', args: ['--help'], opts: {} });
   assert.ok(/const spec = claudeExecSpec\(claudePath, \['--help'\]\);/.test(pceSrc),
     'defaultHelpProbe 必须经 claudeExecSpec,裸 execFile 在 Windows 上探不动');
   assert.ok(/buildTitleArgs\(\{ claudePath: resolveClaude\(\)\?\.path/.test(chatSrc),

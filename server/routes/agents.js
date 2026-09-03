@@ -131,8 +131,8 @@ router.get('/agents', async (req, res) => {
     // elsewhere. If both succeed we merge by name.
     try {
       // 路径解析统一走 claude-resolver(PATH 外安装位也可用;Win .cmd 经 cmd.exe)。
-      const { file, args: fullArgs } = claudeCommand(['agents', 'list']);
-      const out = await execFileP(file, fullArgs, { timeout: 6000 });
+      const { file, args: fullArgs, opts: execOpts } = claudeCommand(['agents', 'list']);
+      const out = await execFileP(file, fullArgs, { timeout: 6000, ...execOpts });
       const lines = out.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
       for (const line of lines) {
         const m = line.match(/^([a-z0-9-]+)\b/);

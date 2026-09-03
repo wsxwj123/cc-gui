@@ -52,9 +52,12 @@ check('W2 非 win32 与 .exe 分支未被波及(仍是直接 spawn)', () => {
   assert.ok(/\n  return spawn\(resolved, args, opts\);/.test(spawnBody), '.exe 分支直通被改动');
 });
 
-check('W3 windowsVerbatimArguments 只由 winCmdSpawnSpec 一处产生', () => {
-  const hits = codeOnly(mcpSrc).match(/windowsVerbatimArguments/g) || [];
-  assert.equal(hits.length, 1, `windowsVerbatimArguments 在代码里出现 ${hits.length} 次,应只在 winCmdSpawnSpec 里`);
+check('W3 windowsVerbatimArguments 只由 winCmdSpawnSpec 一处产生(r110 搬到 utils/win-cmd.js)', () => {
+  const winCmdSrc = read('server/utils/win-cmd.js');
+  const hits = codeOnly(winCmdSrc).match(/windowsVerbatimArguments/g) || [];
+  assert.equal(hits.length, 1, `windowsVerbatimArguments 在 win-cmd.js 代码里出现 ${hits.length} 次,应只在 winCmdSpawnSpec 里`);
+  assert.equal((codeOnly(mcpSrc).match(/windowsVerbatimArguments/g) || []).length, 0, 'mcp.js 代码里不该再自己拼 windowsVerbatimArguments');
+  assert.match(mcpSrc, /winCmdSpawnSpec/, 'mcp.js 应从 win-cmd.js 导入并 re-export winCmdSpawnSpec');
 });
 
 // ── ⑤ resolveMcpCommandWin 缓存 key 拼法 ─────────────────────────────────
@@ -271,7 +274,7 @@ check('W20 logSdkClaudeOnce:路径行同步落,版本行仍异步(不阻塞事�
   const body = resolverSrc.slice(resolverSrc.indexOf('export function logSdkClaudeOnce'), resolverSrc.indexOf('claudeCommand 的纯函数内核'));
   assert.ok(/log = console\.error/.test(body), '默认 logger 不是 console.error');
   assert.ok(body.indexOf('log(`[chat] sdk claude: ${key}`)') < body.indexOf('safeExecAsync'), '路径行没有先于 --version 探测同步落盘');
-  assert.ok(/safeExecAsync\(spec\.file, spec\.args, 8000\)/.test(body), '--version 探测被改成同步了(会阻塞事件循环)');
+  assert.ok(/safeExecAsync\(spec\.file, spec\.args, 8000, spec\.opts\)/.test(body), '--version 探测被改成同步了(会阻塞事件循环)'); // r110:透传 spec.opts
   assert.equal(/execFileSync/.test(body), false, 'logSdkClaudeOnce 里不该出现同步 spawn');
 });
 

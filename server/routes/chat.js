@@ -13,6 +13,7 @@ import { dropPendingForSession, requestElicitation, requestPermission, requestUs
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude, resolveSdkClaude, logSdkClaudeOnce } from '../utils/claude-resolver.js';
+import { winCmdSpawnSpec } from '../utils/win-cmd.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { contextTimeoutBudget, latestCountTokensOutcome } from '../utils/context-tokens.js';
 import { canonicalCwd } from '../utils/safe-path.js';
@@ -281,7 +282,10 @@ export function claudeSpawn(args, opts) {
   if (process.platform === 'win32') {
     if (resolved && /\.(cmd|bat)$/i.test(resolved)) {
       const { args: finalArgs, tempFiles } = jsonArgsToTempFiles(args);
-      const proc = spawn('cmd.exe', ['/c', resolved, ...finalArgs], opts);
+      // r110:引号规则统一走 winCmdSpawnSpec(每 token 独立引号 + verbatim),旧写法会让参数里的
+      // `< > | & ^` 被 cmd 当元字符解释掉。
+      const s = winCmdSpawnSpec(resolved, finalArgs, opts);
+      const proc = spawn(s.file, s.args, s.opts);
       // C5:CLI 启动即读取 --settings 文件,进程退出后删掉,避免每回合一个 cgui-settings-*.json
       // 在 Windows tmp 里持续堆积(用户报告)。
       if (tempFiles.length) proc.on('close', () => {

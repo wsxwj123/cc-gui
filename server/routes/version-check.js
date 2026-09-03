@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
-import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim } from '../utils/claude-resolver.js';
+import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim, claudeExecSpec } from '../utils/claude-resolver.js';
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR, probeNpm } from '../utils/env-scanner.js';
 import { gfetch } from '../utils/github-fetch.js'; // r14-1:GitHub 直连失败/限流自动走本机代理
 import { fileURLToPath } from 'url';
@@ -381,12 +381,9 @@ async function getClaudeVersion(claudePath) {
     // ENOENT),必须经 cmd.exe /c(cmd 会按 PATHEXT 把裸路径解析成 .cmd)。否则版本检测/环境
     // tab 永远 installed:false(用户报告:npm 装好仍扫不到)。与 cli-check.js 同款修法。
     // 超时 15s(原 8s):冷启动实测会偶发擦线,超时值比"回退旧值"更早生效,先给足时间。
-    let stdout;
-    if (process.platform === 'win32') {
-      ({ stdout } = await execFileP('cmd.exe', ['/c', claudePath || 'claude', '--version'], { timeout: 15000 }));
-    } else {
-      ({ stdout } = await execFileP(claudePath || 'claude', ['--version'], { timeout: 15000 }));
-    }
+    // r110:组装统一走 claudeExecSpec(经 cmd.exe 时按 verbatim 引号),opts 并进 execFile 选项。
+    const spec = claudeExecSpec(claudePath, ['--version']);
+    const { stdout } = await execFileP(spec.file, spec.args, { timeout: 15000, ...spec.opts });
     const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
     if (m) { ccVersionByPath.set(cacheKey, m[1]); return m[1]; }
     return ccVersionByPath.get(cacheKey) || null; // 输出没版本号(异常形态)→ 有旧值先顶着

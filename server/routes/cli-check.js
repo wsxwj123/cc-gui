@@ -2,20 +2,19 @@ import { Router } from 'express';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { existsSync } from 'fs';
-import { resolveClaude, getClaudeOverride, getClaudeOverrideRaw } from '../utils/claude-resolver.js';
+import { resolveClaude, getClaudeOverride, getClaudeOverrideRaw, claudeExecSpec } from '../utils/claude-resolver.js';
 
 const execFileP = promisify(execFile);
 const router = Router();
 
 // 执行 claude 取版本。Windows 上 npm 装的是 claude.cmd/.bat/.ps1 —— Node 的 execFile
 // **不能直接执行 .cmd/.bat**(它们不是真正可执行文件,要经 cmd.exe),直接
-// execFileP('xxx.cmd') 会抛 EINVAL/ENOENT。Windows 一律走 cmd.exe /c(.exe 也兼容)。
+// execFileP('xxx.cmd') 会抛 EINVAL/ENOENT。
+// r110:组装统一走 claudeExecSpec(经 cmd.exe 时按 verbatim 引号,路径里带 `&` 等元字符也不会
+// 被 cmd 拆坏),opts 必须并进 execFile 选项。
 async function claudeVersion(p) {
-  if (process.platform === 'win32') {
-    const { stdout } = await execFileP('cmd.exe', ['/c', p, '--version'], { timeout: 5000 });
-    return stdout.trim();
-  }
-  const { stdout } = await execFileP(p, ['--version'], { timeout: 5000 });
+  const spec = claudeExecSpec(p, ['--version']);
+  const { stdout } = await execFileP(spec.file, spec.args, { timeout: 5000, ...spec.opts });
   return stdout.trim();
 }
 
