@@ -1279,7 +1279,9 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
               className={soloPane
                 // 唯一窗格:无分屏头/边框,样式同旧单栏(始终走 SplitMain 以避免 1↔分屏切换
                 // 时整棵会话树 unmount/remount 卡顿)。
-                ? 'flex-1 flex flex-col relative m-3 rounded-panel overflow-hidden min-w-0'
+                // r98:单窗格不再做"内缩圆角卡片"(标题栏看起来像气泡),改成与左侧会话列表同款的
+                // 贴边平面容器;分屏(多窗格)仍保留卡片形态以区分各窗格。
+                ? 'flex-1 flex flex-col relative overflow-hidden min-w-0'
                 : `flex flex-col relative my-3 mx-1.5 rounded-panel overflow-hidden transition-shadow ${
                     focused ? 'ring-2 ring-accent/40 shadow-popover' : 'ring-1 ring-canvas-deep/40'
                   }`}
