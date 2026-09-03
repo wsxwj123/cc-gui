@@ -1279,7 +1279,9 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
               className={soloPane
                 // 唯一窗格:无分屏头/边框,样式同旧单栏(始终走 SplitMain 以避免 1↔分屏切换
                 // 时整棵会话树 unmount/remount 卡顿)。
-                ? 'flex-1 flex flex-col relative m-3 rounded-panel overflow-hidden min-w-0'
+                // r98:单窗格不再做"内缩圆角卡片"(标题栏看起来像气泡),改成与左侧会话列表同款的
+                // 贴边平面容器;分屏(多窗格)仍保留卡片形态以区分各窗格。
+                ? 'flex-1 flex flex-col relative overflow-hidden min-w-0'
                 : `flex flex-col relative my-3 mx-1.5 rounded-panel overflow-hidden transition-shadow ${
                     focused ? 'ring-2 ring-accent/40 shadow-popover' : 'ring-1 ring-canvas-deep/40'
                   }`}
@@ -7461,6 +7463,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 <Hash size={10} />{selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
               <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.filter((m) => m.type !== 'btw').length} 条消息</span>
+              {/* r98:标题行直接给本轮(最近一次 API 调用)命中率;会话累计仍在徽章弹层。 */}
+              {turnCache.total > 0 && (
+                <span className="text-[10px] text-ink-ghost font-mono shrink-0 whitespace-nowrap" title="本轮缓存命中率 = 最近一次 API 调用的 cache_read /（cache_read + cache_creation + input）；会话累计见上下文徽章弹层">本轮命中 {formatHitPct(turnCache.hitPct)}</span>
+              )}
               {/* P1.2 徽章零态壳:有会话即渲染(不再 contextTokens>0 门控);统计/provider
                   hint/曾用模型收进弹层(badgeInfo),行内不再重复。 */}
               <span data-cgui="badge-context" data-tour="ctx-badge" className="inline-flex shrink-0">
@@ -7547,6 +7553,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           <span className="text-ink-faint" title={usageDetailTitle}>{totalAllTokens.toLocaleString()} tok</span>
           {totalTokens.cacheRead > 0 && (
             <span className="text-ink-ghost" title={usageDetailTitle}>命中率 {cacheHitPct.toFixed(1)}%</span>
+          )}
+          {turnCache.total > 0 && (
+            <span className="text-ink-ghost" title="本轮缓存命中率（最近一次 API 调用）；前一项为会话累计">本轮 {formatHitPct(turnCache.hitPct)}</span>
           )}
           {totalCostUsd > 0 && <span className="text-accent/80">· {formatCost(totalCostUsd)}</span>}
         </div>
