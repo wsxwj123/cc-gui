@@ -46,6 +46,29 @@ export function pickCliContextWindow(modelUsage, modelId) {
   return null;
 }
 
+// r103:徽章分母的来源优先级(纯函数,单测 check-r103-dev-badge-window.mjs)。
+// 事故(用户实报):第三方 provider 表单手填 1M,第一轮结束后徽章分母变回 200K ——
+// R8-6 拿 result.modelUsage[*].contextWindow 无条件覆盖了手填值,而 CLI 对它不认识的
+// 第三方模型名【恒报 200,000】。同一时刻 GUI 已经用 CLAUDE_CODE_MAX_CONTEXT_TOKENS 把
+// CLI 的真实窗口认知/压缩线抬到 1M(server chat.js resolveCompactWindowSettings),
+// 所以旧口径下【显示的分母与 CLI 实际压缩行为相反】。
+// 正确方向:GUI 侧有窗口来源(压缩联动下发值 / provider 手填 / 实抓 / 规则表)时以它为准,
+// CLI 自报只在 GUI 完全没有来源时(官方模型、或第三方无手填无规则)才当分母 —— 官方模型
+// 上 GUI 恒无来源,行为与改前一致,无回归。
+// 返回 { window, source },source ∈ '1m' | 'linked' | 'provider' | 'cli' | null。
+// null = 无任何来源,调用方自行落 /context 实测缓存 / nativeContextWindow 兜底。
+export function resolveBadgeWindow({ cliWindow, linkedWindow, providerWindow, model } = {}) {
+  const pos = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+  if (/\[1m\]/i.test(model || '')) return { window: 1_000_000, source: '1m' };
+  const linked = pos(linkedWindow);
+  if (linked) return { window: linked, source: 'linked' };
+  const provider = pos(providerWindow);
+  if (provider) return { window: provider, source: 'provider' };
+  const cli = pos(cliWindow);
+  if (cli) return { window: cli, source: 'cli' };
+  return { window: null, source: null };
+}
+
 export function nativeContextWindow(model) {
   const id = (model || '').toLowerCase().trim();
   if (/\[1m\]/i.test(id)) return 1_000_000;
