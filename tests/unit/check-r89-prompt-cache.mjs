@@ -213,10 +213,20 @@ check('A1-7 设置面板有开关 + 搜索索引条目', () => {
 //     改写成了 userSettings。故去掉 projSettingsMtime 并不能让下一轮复用进程,
 //     真正触发冷启的是 chatCompatKey 的 settingsMtime。前提不成立 → 保留,不硬去。
 // 本用例把这两条钉死,防止后续有人凭 PLAN 的旧假设把 mtime 摘掉。
-check('A3-1 项目 settings mtime 仍计入 chatCompatKey(前提不成立,保留)', () => {
-  const key = chatSrc.slice(chatSrc.indexOf('export function chatCompatKey'), chatSrc.indexOf('export function closePersistentForSession'));
-  assert.ok(/projSettingsMtime/.test(key), 'projSettingsMtime 被移除了,但 A3 前提实测不成立');
-  assert.ok(/settingsMtime/.test(key), 'settingsMtime 被移除了');
+// r96 #8 更新:用户级那一项从「settingsMtime(原始 mtime)」换成「settingsFp(排除
+// permissions 的内容指纹)+ permEpoch(外部权限改动代数)」—— 目的只是让 GUI 自己写
+// 「始终允许」不再冷启;用户级 settings 的**非权限**改动仍必须换键。A3 的结论没变:
+// 两级 settings 都得进键,谁也不许摘。
+check('A3-1 两级 settings 都仍计入 chatCompatKey 的键字段(前提不成立,保留)', () => {
+  const fn = chatSrc.slice(chatSrc.indexOf('export function chatCompatKey'), chatSrc.indexOf('export function closePersistentForSession'));
+  // 只看 `return JSON.stringify` 之后的**键字段**:函数体前半段和上面那大段注释里也会出现
+  // 这些词,对整个函数体做 /xxx/ 匹配是假绿(旧版就栽在这:/settingsMtime/ 命中的是注释)。
+  const ser = fn.slice(fn.indexOf('return JSON.stringify'));
+  assert.ok(ser.length > 0, 'chatCompatKey 里找不到 return JSON.stringify');
+  assert.ok(/projSettingsMtime/.test(ser), 'projSettingsMtime 被移出键了,但 A3 前提实测不成立');
+  assert.ok(/settingsFp/.test(ser), '用户级 settings 指纹(r96 #8 的 settingsFp)被移出键了');
+  assert.ok(/permEpoch/.test(ser), '外部权限改动代数(r96 #8 的 permEpoch)被移出键了');
+  assert.ok(!/\bsettingsMtime\b/.test(ser), '键里还挂着用户级原始 mtime(r96 #8 已换成 settingsFp,原样重写不该换键)');
 });
 check('A3-2 「始终允许」的落点是 userSettings(实测事实,决定 A3 结论)', () => {
   const rules = readFileSync(join(root, 'server/utils/permission-rules.js'), 'utf8');
