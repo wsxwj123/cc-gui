@@ -33,6 +33,15 @@ export function effortCapsFor(modelMeta, modelId) {
   };
 }
 
+// r105:档位来源说明 —— 该 model id 表里没有、靠"去尾段"回退到基名(viaId)命中时,
+// 下拉里如实说明档位取自哪个 id;精确命中/家族正则/无声明一律返回 ''(不显示)。
+export function effortSourceNote(modelMeta, modelId) {
+  const bare = String(modelId || '').replace(/\[1m\]/i, '');
+  const entry = modelMeta && typeof modelMeta === 'object' ? modelMeta[bare] : null;
+  if (entry?.source !== 'table-variant' || !entry?.viaId) return '';
+  return `档位按 ${entry.viaId} 的实测数据取(表内无 ${bare} 的条目)`;
+}
+
 // 某档在该模型下是否可用。''(默认档=不传 --effort)在支持思考时恒可用;
 // reasoning:false 时任何非空档都不可用(锁 off)。
 export function effortAllowed(caps, effortId) {
