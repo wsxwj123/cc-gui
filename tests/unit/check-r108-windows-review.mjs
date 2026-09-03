@@ -372,6 +372,40 @@ await check('B13 不传 enumerate 时在 mac 上默认为 true(既有锁定测�
   assert.equal(dirTouched(readdirCalls, D1), true);
 });
 
+// B14(主会话按判官重要-2 追加):win32 上不传 enumerate 时默认为 false —— 这是必修-2 的开关本身。
+// 子进程里在 import 之前把 process.platform 钉成 win32,再用默认参数调用,断言注入的
+// readdirSync 只被 pyScripts 的两个父目录用到(≤2 次),候选目录一个都不枚举。
+await check('B14 win32 上不传 enumerate 时默认为 false(候选目录不 readdir,只 pyScripts 两父目录)', async () => {
+  const code = `
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const m = await import(${JSON.stringify(urlOf('server/routes/mcp.js'))});
+    if (typeof m.resolveWinCommand !== 'function') { process.stderr.write('NOEXPORT'); process.exit(7); }
+    const env = { USERPROFILE: 'C:\\\\Users\\\\x', APPDATA: 'C:\\\\Users\\\\x\\\\AppData\\\\Roaming', LOCALAPPDATA: 'C:\\\\Users\\\\x\\\\AppData\\\\Local' };
+    const live = ['C:\\\\dirA', 'C:\\\\dirB', 'C:\\\\Windows\\\\System32'];
+    const readdirCalls = [];
+    const readdirSync = (d) => { readdirCalls.push(String(d)); return ['FOO.EXE', 'foo.cmd']; };
+    // ① exists 全落空:一个候选目录都不许枚举
+    const miss = m.resolveWinCommand('foo', { env, liveDirs: live, existsSync: () => false, readdirSync });
+    const missCalls = readdirCalls.filter((d) => live.some((l) => String(d).toLowerCase() === l.toLowerCase()));
+    // ② exists 命中 dirB 的 .exe:返回 win32 拼接路径,同样不枚举
+    readdirCalls.length = 0;
+    const hitPath = 'C:\\\\dirB\\\\foo.exe';
+    const hit = m.resolveWinCommand('foo', { env, liveDirs: live, existsSync: (p) => String(p) === hitPath, readdirSync });
+    const hitCalls = readdirCalls.filter((d) => live.some((l) => String(d).toLowerCase() === l.toLowerCase()));
+    process.stdout.write(JSON.stringify({ miss, missCalls, total: readdirCalls.length, hit, hitCalls }));
+  `;
+  const r = runNode(code, 12000);
+  assert.equal(r.timedOut, false, '子进程超时');
+  assert.equal(String(r.stderr).includes('NOEXPORT'), false, '缺少导出 resolveWinCommand');
+  assert.equal(r.status, 0, `子进程退出码 ${r.status}: ${String(r.stderr).slice(0, 300)}`);
+  const got = JSON.parse(String(r.stdout).trim() || '{}');
+  assert.equal(got.miss, null, 'exists 全落空且默认不枚举 → null(不许靠 readdir 捞到 FOO.EXE)');
+  assert.deepEqual(got.missCalls, [], `win32 默认不该枚举任何候选目录,实际枚举了:${JSON.stringify(got.missCalls)}`);
+  assert.deepEqual(got.hitCalls, [], 'exists 命中后同样不枚举');
+  assert.equal(got.hit && got.hit.file, 'C:\\dirB\\foo.exe', 'win32 上用 win32 口径拼路径');
+  assert.equal(got.hit && got.hit.viaCmd, false);
+});
+
 // ══════════════════════════════════════════════════════════════════════════
 // C. makeTtlCache —— server/routes/mcp.js (INTERFACE §3.2)
 //    真实用户视角:同一台机上反复起同一个 MCP 时,别每次都重跑 where/PowerShell。
