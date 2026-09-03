@@ -160,8 +160,11 @@ router.post('/remote-control', async (req, res) => {
     //    不靠 login shell 补 PATH);.cmd/.bat 经 cmd.exe /c(claudeCommand 已封装)。
     let term;
     if (process.platform === 'win32') {
-      const { file, args } = claudeCommand(['--remote-control', '--resume', sessionId]);
-      term = pty.spawn(file, args, { name: 'xterm-color', cols: 100, rows: 30, cwd: dir, env: rcEnv });
+      const { file, args, opts } = claudeCommand(['--remote-control', '--resume', sessionId]);
+      // r110:verbatim 形态(cmd.exe /d /s /c "整行")下 node-pty 会对 string[] 二次加引号,把 " 变成 \" 让 cmd 认不得;
+      // node-pty 在 Windows 接受 string 作为原样命令行,故整条 join 后传字符串。.exe 形态仍传数组。
+      const ptyArgs = opts?.windowsVerbatimArguments ? args.join(' ') : args;
+      term = pty.spawn(file, ptyArgs, { name: 'xterm-color', cols: 100, rows: 30, cwd: dir, env: rcEnv });
     } else {
       const shell = process.env.SHELL || '/bin/bash';
       // sessionId 已 UUID 校验,插值安全;cwd 走 pty option(不插值)。

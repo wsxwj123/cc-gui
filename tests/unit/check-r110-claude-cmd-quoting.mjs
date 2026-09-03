@@ -162,9 +162,11 @@ check('T11 claudeCommand 的 execFile 类消费者都把 opts 并进了选项', 
     ['server/routes/mcp.js', /const \{ file, args: fullArgs, opts: execOpts \} = claudeCommand\(args\);/],
     ['server/routes/agents.js', /execFileP\(file, fullArgs, \{ timeout: 6000, \.\.\.execOpts \}\)/],
     ['server/routes/subscription-usage.js', /execFileP\(file, args, \{ timeout: 5000, \.\.\.execOpts \}\)/],
-    // 待办(r110b 主会话裁决,本轮不做):remote-control.js 的 pty.spawn 也吃 claudeCommand,
-    // 但 node-pty 会对 string[] 二次加引号(" → \"),verbatim 形态得改传整条命令行字符串,
-    // 属另一条链路的改动,单独一轮做。
+    // r110c:remote-control 走 pty.spawn 而非 execFile —— node-pty 对 string[] 会按 MSVCRT 规则
+    // 二次加引号(" → \"),cmd 认不得,verbatim 形态必须传整条命令行字符串,否则 Windows 上
+    // 手机远程接管直接起不来(比改前更糟)。锁住这条判据,别被"简化"回数组。
+    ['server/routes/remote-control.js', /const ptyArgs = opts\?\.windowsVerbatimArguments \? args\.join\(' '\) : args;/],
+    ['server/routes/remote-control.js', /pty\.spawn\(file, ptyArgs,/],
   ]) assert.ok(needle.test(read(rel)), `${rel} 没把 claudeCommand 的 opts 用起来`);
   // mcp.js 两处 execFileP(runClaude / runMcpAdd)都要带
   const mcpSrc = read('server/routes/mcp.js');
