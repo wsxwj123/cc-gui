@@ -105,7 +105,7 @@ import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLoc
 import { copyText } from './utils/clipboard.js';
 import { OFFICIAL_LOGIN_HINT, matchOfficialLoginError, notifyOauthMissing } from './utils/officialAuth.js';
 import { classifyUpstreamRefusal, lastUserIndex, locateRiskAnchor, RISK_CONTINUE_PROMPT } from './utils/contentRisk.js';
-import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from './utils/effortCaps.js';
+import { effortCapsFor, effortAllowed, effortMemoryKey, effortSourceNote, useEffortFallback } from './utils/effortCaps.js';
 import { ProviderThinkingEditor } from './components/ProviderThinkingEditor.jsx';
 import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
@@ -9163,6 +9163,8 @@ function MobileEffortPage({ permKey }) {
   const caps = effortCapsFor(modelEffortMeta, selModel);
   const locked = caps.reasoning === false;
   const levels = EFFORT_LEVELS.filter((e) => e.id === '' || effortAllowed(caps, e.id));
+  // r105:与桌面 EffortSelector 同一句来源说明(档位来自变体 id 回退时标出基名)。
+  const capsNote = effortSourceNote(modelEffortMeta, selModel);
   // r26-F3②③:手机端补齐桌面那半套 —— ①onClick 写同键同语义的 per-model 记忆
   // (cgui-effort-<provider>-<modelId>,F6 键形);②挂载同一回落钩子(当前档不被
   // 新模型支持时持久化回落,静默不弹 toast —— 桌面那颗在手机上不渲染,没人兜底)。
@@ -9180,6 +9182,9 @@ function MobileEffortPage({ permKey }) {
           ? '当前模型不支持思考,不会下发思考参数'
           : `${openAIProtocol ? '推理力度 (reasoning_effort,不支持的端点自动降级) · ' : ''}作用于当前会话(每个会话独立记忆、互不影响)`}
       </div>
+      {!locked && capsNote && (
+        <div className="px-4 pb-1 text-[11px] text-ink-faint font-body">{capsNote}</div>
+      )}
       {levels.map((e) => {
         const desc = e.id !== '' ? e.desc
           : defaultEffort

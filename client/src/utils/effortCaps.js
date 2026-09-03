@@ -18,6 +18,11 @@ export function effortMemoryKey(providerHint, modelId) {
   return `cgui-effort-${providerHint || 'anthropic'}-${bare}`;
 }
 
+// r105:机器预填的两种 source —— 'catalog'(精确命中/正则)与 'table-variant'(变体 id
+// 回退到基名命中,额外带 viaId)。二者语义相同(可被目录刷新、可被用户声明压过),判
+// "是否用户声明"一律用它,与 server/utils/model-capabilities.js 的同名导出同口径。
+export const isCatalogSource = (s) => s === 'catalog' || s === 'table-variant';
+
 // 当前模型的能力。查询剥 [1m] 后缀(1M 变体与本体同能力)。
 export function effortCapsFor(modelMeta, modelId) {
   const bare = String(modelId || '').replace(/\[1m\]/i, '');
@@ -26,6 +31,16 @@ export function effortCapsFor(modelMeta, modelId) {
     reasoning: entry?.reasoning === false ? false : true,
     efforts: Array.isArray(entry?.efforts) && entry.efforts.length ? entry.efforts : null,
   };
+}
+
+// r105:档位来源说明 —— 该 model id 表里没有、靠"去尾段"回退到基名(viaId)命中时,
+// 下拉里如实说明档位取自哪个 id;精确命中/家族正则/无声明一律返回 ''(不显示)。
+export function effortSourceNote(modelMeta, modelId) {
+  const bare = String(modelId || '').replace(/\[1m\]/i, '');
+  const entry = modelMeta && typeof modelMeta === 'object' ? modelMeta[bare] : null;
+  if (entry?.source !== 'table-variant' || !entry?.viaId) return '';
+  // 文案不提"表":用户面前没有"表"这个指代物,只需知道档位取自哪个 id、以及为什么。
+  return `档位按 ${entry.viaId} 判定(未收录 ${bare} 的实测档位)`;
 }
 
 // 某档在该模型下是否可用。''(默认档=不传 --effort)在支持思考时恒可用;

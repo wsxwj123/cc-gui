@@ -9,7 +9,7 @@ import { ImageLightbox } from './ImageLightbox.jsx';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQueue.js';
 import { resolveSelectorModel } from '../utils/routing.js';
-import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from '../utils/effortCaps.js';
+import { effortCapsFor, effortAllowed, effortMemoryKey, effortSourceNote, useEffortFallback } from '../utils/effortCaps.js';
 import { attachmentBlockReason, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from '../utils/attachments.js';
 import { attachmentNoVision } from '../../../server/utils/vision-capability.js';
 import { PendingAttachmentList } from './PendingAttachmentList.jsx';
@@ -248,6 +248,8 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
   const current = EFFORT_LEVELS.find((e) => e.id === effort) || EFFORT_LEVELS[0];
   const locked = caps.reasoning === false;
   const visibleLevels = EFFORT_LEVELS.filter((e) => e.id === '' || effortAllowed(caps, e.id));
+  // r105:档位来自变体 id 回退时如实标出基名(表里没有这个 id,档位按同族基名取)。
+  const capsNote = effortSourceNote(modelEffortMeta, selModel);
 
   return (
     <div ref={wrapRef} className="relative" data-cgui="effort-selector" data-tour={tourAnchor ? 'effort-selector' : undefined}>
@@ -272,6 +274,9 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
           <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body">
             {openAIProtocol ? '推理力度 (reasoning_effort)' : '推理力度 (--effort)'}
           </div>
+          {!locked && capsNote && (
+            <div className="px-3 pb-1.5 text-[10px] text-ink-faint font-body leading-snug">{capsNote}</div>
+          )}
           {locked ? (
             <div className="px-3 py-2 text-[11px] text-ink-faint font-body">该模型声明不支持思考,本会话不传思考档位。</div>
           ) : visibleLevels.map((e) => {

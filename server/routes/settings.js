@@ -338,7 +338,11 @@ export function normalizeProviderModels(rawModels) {
     // r11-⑩:来源标记透传。'catalog'=目录自动预填(可被新目录/用户编辑覆盖);
     // 'user'=用户显式声明(含"回到全默认"的空声明墓碑条目——它有 source 键故被保留,
     // 用于压住目录预填);历史无 source 条目视同用户声明(它们全是手动配置的)。
-    if (m.source === 'catalog' || m.source === 'user') entry.source = m.source;
+    // r105:'table-variant'=变体 id 回退到基名命中的预填,与 'catalog' 同属机器所有,
+    // 必须一并透传 —— 掉了 source 会让它变成"历史无 source 条目"=用户声明,从此不再刷新。
+    // viaId(命中的基名)只对 table-variant 有意义,用于 UI 说明档位来源。
+    if (m.source === 'catalog' || m.source === 'user' || m.source === 'table-variant') entry.source = m.source;
+    if (entry.source === 'table-variant' && typeof m.viaId === 'string' && m.viaId.trim()) entry.viaId = m.viaId.trim();
     if (Object.keys(entry).length) meta[id] = entry;
   }
   return { ids, meta: Object.keys(meta).length ? meta : null };

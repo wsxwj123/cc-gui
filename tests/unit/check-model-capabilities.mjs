@@ -237,7 +237,7 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
   // type:'openai' = 该 provider 的协议,查表按它取 byProto 分支。
   const models = [
     'deepseek/deepseek-v4-pro',   // byProto:openai=[high,xhigh]、anthropic=[low,medium,high]
-    'deepseek-v4-flash',          // byId 共用:两协议都得 [high,max]
+    'deepseek-v4-flash',          // byId 共用:两协议都得 [low,high,max](r105 官方三档补丁)
     'openai/gpt-4o',              // 剥前缀后 byId 命中 reasoning:false
     'anthropic/claude-opus-5',    // 表内外都无 → 不产条目(维持全档)
     // 用户手动声明:目录/数据表说什么都不许覆盖(这是 r15 敢做读侧兜底的唯一安全依据)
@@ -259,7 +259,7 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
   );
   assert.deepEqual(meta['deepseek/deepseek-v4-pro'], { efforts: ['high', 'xhigh'], source: 'catalog' },
     't8: byProto 按 provider.type=openai 取档');
-  assert.deepEqual(meta['deepseek-v4-flash'], { efforts: ['high', 'max'], source: 'catalog' },
+  assert.deepEqual(meta['deepseek-v4-flash'], { efforts: ['low', 'high', 'max'], source: 'catalog' },
     't8: byId 共用条目(anthropic 协议中转能生效的关键)');
   assert.deepEqual(meta['openai/gpt-4o'], { reasoning: false, source: 'catalog' }, 't8: 剥前缀后查表命中非思考');
   assert.equal(meta['anthropic/claude-opus-5'], undefined, 't8: 表内外都无 → 不产条目(维持全档)');
@@ -308,7 +308,7 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
   assert.deepEqual(lookupModelCapabilities('openai/gpt-5.6-luna', 'anthropic').efforts, ['low', 'medium', 'high', 'xhigh'], 't10: 同 id 的 anthropic 键仍生效');
   // ② 共用兜底:未进 byProto 的模型两协议同结论(用户的 anthropic 协议中转靠这条生效)
   for (const proto of ['openai', 'anthropic']) {
-    assert.deepEqual(lookupModelCapabilities('deepseek-v4-flash', proto).efforts, ['high', 'max'], `t10: byId 共用(${proto})`);
+    assert.deepEqual(lookupModelCapabilities('deepseek-v4-flash', proto).efforts, ['low', 'high', 'max'], `t10: byId 共用(${proto})`);
   }
   // ③ 剥前缀后再查表
   assert.equal(lookupModelCapabilities('openai/gpt-4o', 'openai').reasoning, false, 't10: 剥前缀后 byId 命中 reasoning:false');
@@ -456,13 +456,13 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
 {
   const editor = readFileSync(new URL('../../client/src/components/ProviderThinkingEditor.jsx', import.meta.url), 'utf8');
   // ② 只渲染用户声明的行;catalog 折叠成一行只读摘要
-  assert.match(editor, /Object\.entries\(value \|\| \{\}\)\.filter\(\(\[, e\]\) => e\?\.source !== 'catalog'\)/,
+  assert.match(editor, /filter\(\(\[, e\]\) => !isCatalogSource\(e\?\.source\)\)/,
     't15: rows 只取用户声明条目(catalog 不逐行渲染)');
   assert.doesNotMatch(editor, /const rows = Object\.keys\(value/, 't15: 不再 rows = Object.keys(value)(会把几百条 catalog 全渲染)');
   assert.match(editor, /const catalogCount = /, 't15: 统计 catalog 条目数');
   assert.match(editor, /\{catalogCount > 0 && \(/, 't15: catalog 折叠成摘要行(用户仍能知道目录判了多少个)');
   // ① 移除按钮:catalog 条目写 source:'user' 墓碑,用户自己的行仍直接删
-  assert.match(editor, /if \(value\?\.\[id\]\?\.source === 'catalog'\) \{/, 't15: removeRow 区分 catalog 条目');
+  assert.match(editor, /if \(isCatalogSource\(value\?\.\[id\]\?\.source\)\) \{/, 't15: removeRow 区分机器条目(r105:catalog + table-variant)');
   assert.match(editor, /onChange\(\{ \.\.\.value, \[id\]: \{ source: 'user' \} \}\);\n\s+return;/, 't15: catalog 行写墓碑而非 delete');
   assert.match(editor, /const next = \{ \.\.\.value \};\n\s+delete next\[id\];/, 't15: 用户声明的行仍走 delete');
   // 目录已判定的模型仍在"添加声明"候选里,且添加时以目录判定为初值(不重置成全档)
@@ -526,14 +526,14 @@ const runIsolated = (home) => JSON.parse(execFileSync(process.execPath, ['-e', C
     // GET 侧:用户声明逐字下发(编辑器据此渲染),catalog 判定一并可见
     assert.deepEqual(out.get['openai/gpt-5.6-luna'], { efforts: ['max'], source: 'user' }, 't16: GET 下发用户限档声明');
     assert.deepEqual(out.get['openai/gpt-4o'], { source: 'user' }, 't16: GET 下发用户墓碑(未被目录预填顶掉)');
-    assert.deepEqual(out.get['deepseek-v4-flash'], { efforts: ['high', 'max'], source: 'catalog' }, 't16: GET 下发目录判定');
+    assert.deepEqual(out.get['deepseek-v4-flash'], { efforts: ['low', 'high', 'max'], source: 'catalog' }, 't16: GET 下发目录判定');
     // 落盘侧:一次"什么都没改的保存"之后,用户声明必须逐字不变(P0-b 修的就是这里)
     const disk = JSON.parse(readFileSync(join(guiDir, 'custom-providers.json'), 'utf8'))[0];
     const byId = Object.fromEntries(disk.models.map((m) => (typeof m === 'string' ? [m, {}] : [m.id, m])));
     assert.deepEqual(byId['openai/gpt-5.6-luna'], { id: 'openai/gpt-5.6-luna', efforts: ['max'], source: 'user' },
       't16: 往返后用户限档声明逐字不变');
     assert.deepEqual(byId['openai/gpt-4o'], { id: 'openai/gpt-4o', source: 'user' }, 't16: 往返后用户墓碑仍在(否则目录判定会复活)');
-    assert.deepEqual(byId['deepseek-v4-flash'], { id: 'deepseek-v4-flash', efforts: ['high', 'max'], source: 'catalog' },
+    assert.deepEqual(byId['deepseek-v4-flash'], { id: 'deepseek-v4-flash', efforts: ['low', 'high', 'max'], source: 'catalog' },
       't16: catalog 条目正常落盘(机器所有,下轮可被目录刷新)');
     assert.deepEqual(byId['anthropic/claude-opus-5'], {}, 't16: 无判定的模型仍是裸字符串');
   } finally {
