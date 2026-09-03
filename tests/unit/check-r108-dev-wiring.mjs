@@ -178,10 +178,9 @@ check('W15 同步兜底探测超时是 2000(不是 5000)', () => {
   assert.equal(m[1], '2000', `同步 execFileSync timeout 仍是 ${m[1]}`);
 });
 
-check('W15b 竞态:预热在飞时同步兜底写入的正文,不许被随后 resolve 的空串覆盖', () => {
-  // 真实场景:启动预热对 80MB exe 跑 --help(最长 8s),期间用户打开设置页 →
-  // cliSupportsFlag 同步探到正文 → 预热超时 resolve '' → 若无条件 set 就把正文冲掉,
-  // 本进程内所有按 flag 门控的优化静默失效直到重启。
+check('W15b 竞态正向:同步兜底探到的正文,不许被随后 resolve 的空串覆盖', () => {
+  // 启动预热对 80MB exe 跑 --help(最长 8s),期间用户打开设置页 → cliSupportsFlag 同步
+  // 探到正文 → 预热超时 resolve '' → 若无条件 set 就把正文冲掉,所有 flag 门控静默失效。
   const code = `
     const m = await import(${CACHE_URL});
     const P = 'C:\\\\race\\\\claude.exe';
@@ -200,6 +199,36 @@ check('W15b 竞态:预热在飞时同步兜底写入的正文,不许被随后 re
   assert.equal(got.sync, true, '同步兜底本应探到正文');
   assert.equal(got.after, true, '预热的空串把同步探到的正文覆盖掉了(竞态未修)');
   assert.equal(got.primed, true, '缓存里已有正文时,预热应 resolve true');
+});
+
+check('W15c 竞态反向(INTERFACE §8):同步兜底先写空串,预热拿到的正文必须能覆盖它', () => {
+  // 反向交错:同步兜底 2s 超时先写 '',随后 8s 预热探到真 help 正文。复查若用 has 就会
+  // 把正文丢掉 —— flag 门控照样静默失效到重启。口径是「只保留正文」,不是「先到先得」。
+  const code = `
+    const m = await import(${CACHE_URL});
+    const P = 'C:\\\\race2\\\\claude.exe';
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const priming = m.primeHelpCache(P, () => gate);
+    const sync = m.cliSupportsFlag(P, '--system-prompt-snapshot', () => '');   // 同步探测失败 → 写 ''
+    release('  --system-prompt-snapshot <mode>');                               // 预热随后探到正文
+    const primed = await priming;
+    const after = m.cliSupportsFlag(P, '--system-prompt-snapshot', () => { throw new Error('不该再同步探测'); });
+    process.stdout.write(JSON.stringify({ sync, after, primed }));
+  `;
+  const out = runNode(code);
+  assert.equal(out.status, 0, `退出码 ${out.status}: ${String(out.stderr).slice(0, 300)}`);
+  const got = JSON.parse(String(out.stdout).trim());
+  assert.equal(got.sync, false, '同步探测失败时本应按"不支持"处理');
+  assert.equal(got.after, true, '预热探到的正文被空串挡下丢弃了(复查用了 has 而不是 get)');
+  assert.equal(got.primed, true, '预热成功写入正文应 resolve true');
+});
+
+check('W15d 复查用 get 不用 has', () => {
+  const src = read('server/utils/prompt-cache-env.js');
+  const body = src.slice(src.indexOf('export async function primeHelpCache'));
+  assert.ok(/if \(_helpCache\.get\(key\)\) return true;\s*\n\s*_helpCache\.set\(key, help\);/.test(body),
+    'await 之后的复查不是 `if (_helpCache.get(key)) return true;`(用 has 会丢掉反向交错的正文)');
 });
 
 check('W16 预热与同步探测共用同一张 _helpCache(否则预热白热)', () => {
@@ -227,6 +256,8 @@ check('W18 体积下限:minExeBytes=0 时完全不 stat(注入 fs 的布局根�
   assert.ok(/\} catch \{ return null; \}/.test(resolverSrc), 'statSync 抛错没按不可用处理');
   assert.ok(/console\.error\(`\[claude-resolver\] 包内 claude\.exe 仅 \$\{size\} 字节/.test(resolverSrc),
     '体积不达标回落时没留日志(静默回落最难排查)');
+  assert.ok(/if \(!_smallExeLogged\.has\(binTarget\)\) \{\s*_smallExeLogged\.add\(binTarget\);/.test(resolverSrc),
+    '回落日志没按 binTarget 去重(这函数在每次聊天热路径上,坏安装会每条消息刷一行)');
   assert.equal(/process\.env|ANTHROPIC|TOKEN|KEY/.test(resolverSrc.slice(resolverSrc.indexOf('const size = statFn'), resolverSrc.indexOf('return binTarget;'))), false,
     '回落日志里出现了环境变量/密钥字样');
 });

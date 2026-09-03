@@ -386,6 +386,7 @@ export function resolveSdkClaude() {
  * SDK 完全可以直接 spawn 它。坏壳包(postinstall 没落真二进制、bin 还是 ASCII stub)仍返
  * null —— 宁可回落自带 CLI,也不能把一个跑不起来的文件交给 SDK。
  */
+const _smallExeLogged = new Set(); // 残缺 exe 回落日志去重(按 binTarget)
 export function resolveSdkClaudeFrom(hitPath, {
   platform = process.platform,
   existsSync: exists = existsSync,
@@ -414,7 +415,12 @@ export function resolveSdkClaudeFrom(hitPath, {
       const size = statFn(binTarget).size;
       if (size < minExeBytes) {
         // 这条静默回落最难排查(聊天"能用"但一直是 SDK 自带的旧 CLI),留一行到 server.log。
-        console.error(`[claude-resolver] 包内 claude.exe 仅 ${size} 字节,疑似安装不全,回落 SDK 自带 CLI`);
+        // 按 binTarget 去重(同 logSdkClaudeOnce):这函数在每次聊天的热路径上,坏安装不去重
+        // 就是每发一条消息刷一行。
+        if (!_smallExeLogged.has(binTarget)) {
+          _smallExeLogged.add(binTarget);
+          console.error(`[claude-resolver] 包内 claude.exe 仅 ${size} 字节,疑似安装不全,回落 SDK 自带 CLI`);
+        }
         return null;
       }
     } catch { return null; }
