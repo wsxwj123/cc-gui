@@ -54,6 +54,22 @@ check('②c 非壳包(无 install.cjs)也照样按文件头判:真 PE 认、文�
   assert.equal(resolveSdkClaudeFrom(badPkg.shim, { platform: 'win32' }), null);
 });
 
+check('②d 文件头不是 MZ 一律 null(Mach-O/ELF 在 Windows 上照样起不来)', () => {
+  for (const [name, head] of [
+    ['macho', Buffer.from([0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0, 0, 1])],
+    ['elf', Buffer.from([0x7F, 0x45, 0x4C, 0x46, 0x02, 1, 1, 0])],
+    ['empty', Buffer.alloc(0)],
+    ['one-byte', Buffer.from('M')],
+  ]) {
+    const { shim, exe } = mkNpmPrefix(`head-${name}`, { binKind: null, installCjs: false });
+    writeFileSync(exe, head);
+    assert.equal(resolveSdkClaudeFrom(shim, { platform: 'win32' }), null, `${name} 头被当成可执行`);
+  }
+  // 注入版同样只认 MZ
+  const fake = { platform: 'win32', existsSync: () => true, readFileSync: () => Buffer.from([0x7F, 0x45, 0x4C, 0x46]) };
+  assert.equal(resolveSdkClaudeFrom('C:\\npm\\claude.cmd', fake), null);
+});
+
 check('③ 压根没有 npm 包目录的裸 shim → null(不瞎编路径)', () => {
   const lone = join(root, 'lonely', 'claude.cmd');
   mkdirSync(join(root, 'lonely'), { recursive: true });

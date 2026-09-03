@@ -394,11 +394,18 @@ export function resolveSdkClaudeFrom(hitPath, {
   return binTarget;
 }
 
-// bin\claude.exe 是不是真 PE(而非 ASCII 假启动器)。默认走 sniffBinaryKind ——
-// 只读文件头 8 字节,不整份读入(真二进制 80MB+)。readFileSync 注入仅为单测。
+// bin\claude.exe 是不是真 PE(而非 ASCII 假启动器)。这条路只在 Windows 上走,PE 的 'MZ'
+// 是唯一合法头 —— 不复用 sniffBinaryKind(它把 Mach-O/ELF 也算 binary,那些在 Windows 上
+// 照样起不来)。只读前 2 字节,不整份读入(真二进制 80MB+)。readFileSync 注入仅为单测。
 function isWinPeFile(p, readFn) {
-  if (!readFn) return sniffBinaryKind(p) === 'binary';
-  try { const b = Buffer.from(readFn(p)); return b[0] === 0x4D && b[1] === 0x5A; } catch { return false; }
+  try {
+    if (readFn) { const b = Buffer.from(readFn(p)); return b[0] === 0x4D && b[1] === 0x5A; }
+    const fd = openSync(p, 'r');
+    try {
+      const b = Buffer.alloc(2);
+      return readSync(fd, b, 0, 2, 0) === 2 && b[0] === 0x4D && b[1] === 0x5A;
+    } finally { closeSync(fd); }
+  } catch { return false; }
 }
 
 // r106:一行日志说明 SDK 这次实际驱动的是哪个 claude(Windows npm 装的会被上面推成包内
