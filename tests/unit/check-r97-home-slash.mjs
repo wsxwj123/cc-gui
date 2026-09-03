@@ -1032,13 +1032,10 @@ const hitLines = (re) => {
   }
   return n;
 };
-await check('§6 grep 口径一(ChatInput/App/filteredCommands/…)命中行数仍为 219(排除 check-r97-*.mjs 后)', () => {
-  assert.strictEqual(hitLines(GREP1), 219, '既有测试文件被改动 —— 本轮承诺是一个既有测试都不动(新增 check-r97-* 不计入)');
-});
-await check('§6 grep 口径二(@ 相关符号与三条端点)命中行数仍为 4(排除 check-r97-*.mjs 后,全是 flatSessions 假阳性)', () => {
-  assert.strictEqual(hitLines(GREP2), 4, '既有测试里不该出现 @ 相关符号(新增 check-r97-* 不计入)');
-});
-
+// r97b:原 §6 两条"全 tests/ 目录 grep 命中行数恒为 219 / 4"的金丝雀已删除。它把基线钉在
+// r97 分支点那一刻的整个 tests/ 目录,之后任何轮次合法地改动/新增别的测试文件都会让它红
+// (合并到 master 后立刻误判)。"既有测试未被本轮改动"这条承诺改由判官在验收时用
+// git diff 核对,不再用环境耦合的计数锁表达。
 // ══════════════════════════════════════════════════════════════════════════
 globalThis.fetch = REAL_FETCH;
 console.log(`\n—— check-r97-home-slash: ${PASS} 绿 / ${FAILS} 红(共 ${PASS + FAILS} 条)——`);
