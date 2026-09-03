@@ -120,7 +120,9 @@ assert.ok(/if \(json\.usage\)/.test(OP), '流式 usage 守卫必须保留');
 assert.ok(/usage: \{ input_tokens: 0, output_tokens: 0 \}/.test(OP), 'message_start 恒 0 不得动');
 assert.ok(/usage: usage \|\| \{ output_tokens: 0 \}/.test(OP), 'message_delta 兜底不得动');
 assert.ok(/for \(const tr of toolResults\) out\.push\(tr\);/.test(OP), 'tool_result 先行不得动');
-assert.ok(/=== 'system' \? 'system' : 'user'/.test(OP), 'role 白名单判据');
+// r101:判据改成「非 assistant 一律 user」(中途 system 会让上游作废整个前缀,含 tools)
+assert.ok(/=== 'assistant' \? 'assistant' : 'user'/.test(OP), 'r101 role 判据');
+assert.ok(!/'system' \? 'system'/.test(OP), 'r96 的中途 system 白名单必须已被撤掉');
 assert.ok(/故意不发/.test(OP), 'P2 反向约束注释');
 for (const re of [/prompt_tokens_details/, /prompt_cache_hit_tokens/, /cached_tokens/, /body\.metadata/, /req\.user\s*=/]) {
   assert.ok(!re.test(OP), `openai-proxy.js 不得再出现 ${re}`);

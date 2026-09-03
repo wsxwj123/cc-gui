@@ -164,28 +164,30 @@ const marker = (uf, opt = {}) => `ping #UF=${uf}#FIN=${opt.fin || 'stop'}#TRAIL=
 console.log('\n[P0-2.1] role 翻译规则 anthropicToOpenAIMessages(messages, system, model)');
 
 const T = '同一段元消息文字 X';
+const TOT_LIKE = '<total_tokens>15000000 tokens left</total_tokens>';
 const IMG = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'QUFBQQ==' } };
 const VMODEL = 'gpt-4o';                                   // 有视觉,图片块不会被剥
 
-check('2.1-1 system + 字符串 content → role system(改动前后一致)', () => {
+check('r101/2.1-1 messages[] 里的 system + 字符串(历史元消息)→ role user', () => {
   const out = anthropicToOpenAIMessages([{ role: 'system', content: T }], null);
   assert.equal(out.length, 1, '不该多发消息');
-  assert.equal(out[0].role, 'system');
+  assert.equal(out[0].role, 'user', 'DeepSeek 会把中途 system 并进系统段,内容一变整个前缀连 tools 一起作废');
   assert.equal(out[0].content, T);
 });
 
-check('R1/2.1-2 system + 数组 content(带 cache_control)→ role system(★唯一变化点,修前是 user)', () => {
+check('R1/2.1-2 system + 数组 content(本轮活的元消息)→ role user(★r101 取向反转)', () => {
   const out = anthropicToOpenAIMessages(
     [{ role: 'system', content: [{ type: 'text', text: T, cache_control: { type: 'ephemeral' } }] }], null);
   assert.equal(out.length, 1, '不该多发消息');
-  assert.equal(out[0].role, 'system', `实得 ${out[0].role} —— 数组分支硬写 user 就是本轮 P0 根因`);
+  assert.equal(out[0].role, 'user', `实得 ${out[0].role} —— r96 统一成 system,真机 DeepSeek 实测第 3 轮 hit=0`);
   assert.equal(out[0].content, T);
 });
 
-check('2.1-核心不变式 同一段文字的数组形态与字符串形态必须产出同一个 role', () => {
+check('2.1-核心不变式 同一段文字的数组形态与字符串形态同 role,且都是 user', () => {
   const asArr = anthropicToOpenAIMessages([{ role: 'system', content: [{ type: 'text', text: T }] }], null)[0].role;
   const asStr = anthropicToOpenAIMessages([{ role: 'system', content: T }], null)[0].role;
-  assert.equal(asArr, asStr, `数组形态得 ${asArr}、字符串形态得 ${asStr} —— 角色每轮翻一次 = 前缀每轮打穿`);
+  assert.equal(asArr, asStr, `数组形态得 ${asArr}、字符串形态得 ${asStr} —— 两条分支不同口径 = 角色每轮翻一次`);
+  assert.equal(asArr, 'user', 'r101:两条路径都落 user');
 });
 
 check('2.1-3 user + 字符串 → user(不变)', () => {
@@ -208,11 +210,11 @@ check('2.1-5 user + [text, image] → user + 数组多模态 content(不变)', (
   assert.ok(m.content.some((p) => p?.type === 'image_url'), '图片须以 image_url 到达');
 });
 
-check('M4/2.1-2 system + [text, image] → role 仍是 system(多模态那处 push 不得漏改)', () => {
+check('M4/2.1-2 system + [text, image] → role user(多模态那处 push 与文本那处必须同口径)', () => {
   const out = anthropicToOpenAIMessages([{ role: 'system', content: [{ type: 'text', text: T }, IMG] }], null, VMODEL);
   const m = out.find((x) => Array.isArray(x.content));
   assert.ok(m, '应产出数组形态 content 的多模态消息');
-  assert.equal(m.role, 'system', `实得 ${m.role} —— 只改文本那处 push、多模态那处仍硬写 user 就红在这里`);
+  assert.equal(m.role, 'user', `实得 ${m.role} —— 两处 push 只改一处就红在这里`);
 });
 
 check('M3/2.1-6 assistant + 字符串 → assistant(字符串快路不得被 role 白名单波及)', () => {
@@ -239,9 +241,11 @@ check('M2/2.1-8 未知 role(developer)+ 数组 content → user(白名单只放�
   }
 });
 
-check('M3/2.1-9 developer + 字符串 → developer(快路原样保留)', () => {
+// r101 契约:messages[] 里任何非 assistant 消息一律 user,字符串快路与数组分支同口径。
+// (r96 时这条断言的是 developer 原样保留 —— 那口径已被真机实测推翻。)
+check('r101/2.1-9 developer + 字符串 → role user(快路不许再原样透传未知 role)', () => {
   const out = anthropicToOpenAIMessages([{ role: 'developer', content: T }], null);
-  assert.equal(out[0].role, 'developer');
+  assert.equal(out[0].role, 'user');
 });
 
 check('M13/2.1-10 tool_result 拆成独立 role:tool 且排在同条消息的 text 之前', () => {
@@ -270,6 +274,28 @@ check('2.1-11 system 参数(块数组)→ messages[0] 各块文本按换行 join
   assert.equal(out[0].content, 'A\nB');
 });
 
+// ★r101 核心不变式:顶部 system 字段之外,产出里一个 role:'system' 都不许有。
+// (DeepSeek 的 OpenAI 口会把会话中途的 system 消息并进系统段,内容一变 tools+全部历史随之作废。)
+check("r101/2.1-★ 翻译后 messages[] 中 role:'system' 出现 0 次(顶部 system 除外)", () => {
+  const hist2 = [
+    { role: 'user', content: 'q1' },
+    { role: 'system', content: T },                                       // 历史元消息(字符串形态)
+    { role: 'assistant', content: 'a1' },
+    { role: 'system', content: [{ type: 'text', text: TOT_LIKE, cache_control: { type: 'ephemeral' } }] }, // 本轮活的元消息
+    { role: 'user', content: 'q2' },
+    { role: 'developer', content: [{ type: 'text', text: 'dev' }] },
+  ];
+  // ① 不给顶部 system:产出里 system 必须一个都没有
+  const bare = anthropicToOpenAIMessages(hist2, null);
+  assert.deepEqual(bare.filter((m) => m.role === 'system'), [],
+    `messages[] 里仍有 ${bare.filter((m) => m.role === 'system').length} 条 role:'system'`);
+  // ② 给顶部 system:只有 messages[0] 允许是 system
+  const withSys = anthropicToOpenAIMessages(hist2, 'SYSTEXT');
+  assert.equal(withSys[0].role, 'system', '顶部 system 字段仍落 messages[0]');
+  assert.equal(withSys.slice(1).filter((m) => m.role === 'system').length, 0,
+    "messages[0] 之后不许再出现 role:'system'");
+});
+
 check('2.1 回归:整条历史混合翻译时 role 集合只含 openai 合法值', () => {
   const out = anthropicToOpenAIMessages([
     { role: 'user', content: 'q' },
@@ -287,19 +313,27 @@ check('2.1 回归:整条历史混合翻译时 role 集合只含 openai 合法值
 // ══════════════════════════════════════════════════════════════════════════
 console.log('\n[P0-2.2] 三轮 canonical 前缀 LCP(L1–L7)');
 
-const ENV = '# Environment ' + 'e'.repeat(4000);
-const TOT = '<total_tokens>15000000 tokens left</total_tokens>';
+// r101 fixture:照 BRIEF 的决定性实验形态 —— 元消息位置固定(末位 user 之前),
+// **内容逐轮变**(<total_tokens> 数字 1000→1100→1200)。r96 那版是"内容恒定、位置追加",
+// 测不出"内容一变会不会连累 system+tools"这件事,而那正是真机上 hit=0 的成因。
+// ENV 放大到 3 万字符是刻意的:真机 system 3k + tools 5.5k 相对元消息压倒性大,
+// 断点只落在元消息处时 LCP 才有 ≥99% 的意义(BRIEF 实测 8448/8516 = 99.2%)。
+const ENV = '# Environment ' + 'e'.repeat(30000);
+const TOT = (n) => `<total_tokens>${n} tokens left</total_tokens>`;
 const live = (t) => ({ role: 'system', content: [{ type: 'text', text: t, cache_control: { type: 'ephemeral' } }] });
 const hist = (t) => ({ role: 'system', content: t });
 const SYS = 'You are a test agent. ' + 's'.repeat(200);
 const TOOLS = [{ name: 'Read', description: 'read', input_schema: { type: 'object', properties: { p: { type: 'string' } } } }];
 
-const turn1 = [{ role: 'user', content: '第一问' }, live(ENV), live(TOT)];
-const turn2 = [{ role: 'user', content: '第一问' }, hist(ENV), hist(TOT),
-  { role: 'assistant', content: '第一答' }, { role: 'user', content: '第二问' }, live(TOT)];
-const turn3 = [{ role: 'user', content: '第一问' }, hist(ENV), hist(TOT),
-  { role: 'assistant', content: '第一答' }, { role: 'user', content: '第二问' }, hist(TOT),
-  { role: 'assistant', content: '第二答' }, { role: 'user', content: '第三问' }, live(TOT)];
+const turn1 = [{ role: 'user', content: '第一问' }, hist(ENV),
+  { role: 'assistant', content: '第一答' }, live(TOT(1000)), { role: 'user', content: '第二问' }];
+const turn2 = [{ role: 'user', content: '第一问' }, hist(ENV),
+  { role: 'assistant', content: '第一答' }, live(TOT(1100)), { role: 'user', content: '第二问' },
+  { role: 'assistant', content: '第二答' }, { role: 'user', content: '第三问' }];
+const turn3 = [{ role: 'user', content: '第一问' }, hist(ENV),
+  { role: 'assistant', content: '第一答' }, live(TOT(1200)), { role: 'user', content: '第二问' },
+  { role: 'assistant', content: '第二答' }, { role: 'user', content: '第三问' },
+  { role: 'assistant', content: '第三答' }, { role: 'user', content: '第四问' }];
 
 const segments = (req) => [
   req.messages[0].role === 'system' ? req.messages[0].content : '',
@@ -331,28 +365,32 @@ check('2.2-0 三轮请求都到达假上游(前置)', () => {
   for (const r of [R1, R2, R3]) assert.ok(Array.isArray(r?.messages), '每个请求体都要有 messages 数组');
 });
 
-check('L1 firstDiffSeg(req1, req2) === -1(req1 的段序列是 req2 的严格前缀)', () => {
-  const idx = firstDiffSeg(R1, R2);
-  const where = idx >= 0 ? segments(R1)[idx].slice(0, 60) : '';
-  assert.equal(idx, -1, `第 ${idx} 段就断了,断点内容:${where}… ${idx >= 0 && segments(R1)[idx].includes('# Environment') ? '(= ENV 元消息,正是 role 翻转)' : ''}`);
+// r101:元消息内容逐轮变,段序列不可能再是严格前缀。真正的不变量是
+// **断点只许落在元消息那一段**(它之前的 system/tools/历史必须逐字相同)。
+const assertBreakAtMeta = (a, b, tag) => {
+  const idx = firstDiffSeg(a, b);
+  assert.notEqual(idx, -1, `${tag}: 元消息内容逐轮变,不该完全相同(fixture 写错了)`);
+  const seg = segments(a)[idx];
+  assert.ok(seg.includes('<total_tokens>'),
+    `${tag}: 断点落在第 ${idx} 段「${seg.slice(0, 80)}…」,不是元消息 —— 说明 system/tools/历史也被打穿了`);
+  assert.deepEqual(segments(a).slice(0, idx), segments(b).slice(0, idx), `${tag}: 断点之前必须逐段相同`);
+};
+check('L1 轮1→轮2 的断点只落在元消息段(之前的 system/tools/历史逐段相同)', () => {
+  assertBreakAtMeta(R1, R2, 'L1');
 });
 
-check('L2 firstDiffSeg(req2, req3) === -1', () => {
-  const idx = firstDiffSeg(R2, R3);
-  const where = idx >= 0 ? segments(R2)[idx].slice(0, 80) : '';
-  assert.equal(idx, -1, `第 ${idx} 段就断了,断点内容:${where}… ${idx >= 0 && segments(R2)[idx].includes('<total_tokens>') ? '(= total_tokens 元消息,正是 role 翻转)' : ''}`);
+check('L2 轮2→轮3 的断点只落在元消息段', () => {
+  assertBreakAtMeta(R2, R3, 'L2');
 });
 
-check('R2/L3 lcpPct(canonical(req1), canonical(req2)) === 100(修前 <90)', () => {
+check('R2/L3 lcpPct(canonical(req1), canonical(req2)) >= 99', () => {
   const p = lcpPct(canonical(R1), canonical(R2));
-  assert.ok(p >= 99, `实得 ${p.toFixed(2)}% —— 下限 99,契约要求 100`);
-  assert.equal(p, 100, `实得 ${p.toFixed(2)}%`);
+  assert.ok(p >= 99, `实得 ${p.toFixed(2)}% —— 元消息内容变了只该丢它自己那一小段,不该连累 system+tools`);
 });
 
-check('L4 lcpPct(canonical(req2), canonical(req3)) === 100(修前 <100)', () => {
+check('L4 lcpPct(canonical(req2), canonical(req3)) >= 99', () => {
   const p = lcpPct(canonical(R2), canonical(R3));
-  assert.ok(p >= 99, `实得 ${p.toFixed(2)}% —— 下限 99,契约要求 100`);
-  assert.equal(p, 100, `实得 ${p.toFixed(2)}%`);
+  assert.ok(p >= 99, `实得 ${p.toFixed(2)}%`);
 });
 
 check('R1/L5 角色一致性:三轮所有字符串 content 消息,同一段文字只对应一个 role', () => {
@@ -367,6 +405,15 @@ check('R1/L5 角色一致性:三轮所有字符串 content 消息,同一段文�
   const bad = [...m.entries()].filter(([, s]) => s.size !== 1)
     .map(([k, s]) => `「${k.slice(0, 40)}…」→ {${[...s].join(',')}}`);
   assert.deepEqual(bad, [], `以下文字在不同轮里换了角色(= 每轮打穿前缀):\n      ${bad.join('\n      ')}`);
+});
+
+check("r101/L5b 三轮发给上游的 messages[] 里 role:'system' 只有 messages[0](顶部 system)", () => {
+  for (const [i, r] of [R1, R2, R3].entries()) {
+    assert.equal(r.messages[0].role, 'system', `第 ${i + 1} 轮 messages[0] 应是顶部 system`);
+    const bad = r.messages.slice(1).filter((m) => m.role === 'system');
+    assert.equal(bad.length, 0,
+      `第 ${i + 1} 轮 messages[] 中途仍有 ${bad.length} 条 role:'system',第一条:${String(JSON.stringify(bad[0])).slice(0, 80)}`);
+  }
 });
 
 check('L6 三轮的系统段与工具段逐字相同(不得回归)', () => {
@@ -713,7 +760,6 @@ check('3.1-0 openai-proxy.js 可读', () => assert.ok(OP.length > 0, '文件读�
 
 const mustOP = [
   [/import \{ normalizeOpenAIUsage \} from '\.\.\/utils\/openai-usage\.js'/, '必须 import 共用归一函数'],
-  [/=== 'system' \? 'system' : 'user'/, "role 白名单判据(只放行 system)"],
   [/if \(json\.usage\)/, '流式 usage 仍带守卫'],
   [/usage: \{ input_tokens: 0, output_tokens: 0 \}/, 'message_start 恒 0 不变'],
   [/usage: usage \|\| \{ output_tokens: 0 \}/, 'message_delta 兜底不变'],
@@ -734,8 +780,9 @@ const banOP = [
   [/prompt_tokens_details/g, '候选表必须整体搬进 util,留在这里说明只搬了一半'],
   [/prompt_cache_hit_tokens/g, '同上'],
   [/cached_tokens/g, '同上'],
-  [/out\.push\(\{ role: 'user', content: \[/g, '硬写 user 的多模态那处必须消失'],
-  [/out\.push\(\{ role: 'user', content: txt \}\)/g, '硬写 user 的文本那处必须消失'],
+  // r101:两处 push 硬写 'user' 现在是**正确**的(r96 的白名单口径已被真机推翻),
+  // 原先那两条"硬写 user 必须消失"的锁整条删除;改锁 r96 的白名单字面不许残留。
+  [/=== 'system' \? 'system' : 'user'/g, "r96 的 role 白名单必须删干净(留着就还会把中途元消息发成 system)"],
   [/body\.metadata/g, 'P2 反向约束:不读 metadata'],
   [/req\.user\s*=/g, 'P2 反向约束:不写 user'],
   [/user-id-normalize/g, 'P2 反向约束:不引 user_id 归一'],

@@ -121,8 +121,20 @@ export function anthropicToOpenAIMessages(messages, system, model) {
     const role = msg.role;
     const content = msg.content;
 
+    // r101(真机 DeepSeek OpenAI 口实测,推翻 r96 P0 的取向):会话**中途**的 role:'system'
+    // 消息会被上游并入系统段——它的内容一变,整个前缀(含顶部 system 与 tools)全部作废。
+    // 同一组 system(3k)+tools(5.5k)+[user, assistant, 元消息, user],元消息内容逐轮变
+    // (<total_tokens>1000→1100):元消息 role:'system' 时第 3 轮 hit=0 / miss=8516;
+    // 换成 role:'user' 则 hit 恒 8448,只有元消息之后的部分 miss。
+    // 而 CLI 每轮都带一条内容变化的元消息(<total_tokens> 提醒等)→ 中途 system 必须消失。
+    // 故:顶部 system 字段仍是 messages[0] 的 role:'system'(见上 systemToText),
+    // messages[] 里任何非 assistant 消息(字符串形态的历史、数组形态的本轮元消息)一律 'user',
+    // 与 Anthropic 直连口一致(Anthropic API 没有会话中途 system,元消息本就是 user 内容块)。
+    // 字符串快路与下方数组分支共用这一个判据,两条路径不得再各写一套。
+    const outRole = role === 'assistant' ? 'assistant' : 'user';
+
     if (typeof content === 'string') {
-      out.push({ role, content });
+      out.push({ role: outRole, content });
       continue;
     }
     if (!Array.isArray(content)) continue;
@@ -196,13 +208,9 @@ export function anthropicToOpenAIMessages(messages, system, model) {
       if (thinkingParts.length) m.reasoning_content = thinkingParts.join('');
       if (m.content != null || m.tool_calls || m.reasoning_content != null) out.push(m);
     } else {
-      // r96:同一条 CLI 元消息(# Environment、<total_tokens> 提醒)——「本轮活的」带
-      // cache_control 走数组形态、「下一轮变历史」走字符串形态。此前数组分支硬写 'user'、
-      // 字符串快路(上面)保留原 role → 同一段文字每轮翻一次角色,上游前缀在**上一轮请求
-      // 的最末尾**断掉(实测 canonical LCP:首次 resume 78.23%,之后 99.84%)。
-      // 对齐到字符串快路那一侧:system 保留 system(现网历史回放一直这么发,没被拒过);
-      // 其余非 assistant role 仍归 user —— 白名单只放行 system,不把未知 role 透给严格端点。
-      const outRole = role === 'system' ? 'system' : 'user';
+      // outRole 在循环开头统一算(r101):这里恒为 'user'(assistant 已在上一分支返回),
+      // 与字符串快路同口径 —— 同一条元消息无论数组还是字符串形态都是 user,既不每轮翻转
+      // (r96 修的老 bug),也不把中途 system 送上去作废整个前缀(r96 P0 的错取向)。
       // user (or tool) — emit tool_result FIRST, then text.
       // OpenAI 协议要求 assistant.tool_calls 后必须立即跟 tool messages 配对,
       // 任何中间 user.content 插入都会被严格端点(DeepSeek 等)拒绝:
