@@ -35,6 +35,11 @@ assert.deepEqual(
 assert.deepEqual(resolveBadgeWindow({ model: 'unknown-model' }),
   { window: null, source: null }, '全空 → null');
 assert.deepEqual(resolveBadgeWindow(), { window: null, source: null }, '无参数不炸');
+// 非对象入参一律按全缺处理(回调里抛错会吞掉整条 result 处理)
+for (const bad of [null, undefined, 0, 200000, 'k3', true, []]) {
+  assert.deepEqual(resolveBadgeWindow(bad), { window: null, source: null },
+    `非对象入参 ${JSON.stringify(bad)} → { window: null, source: null }`);
+}
 
 // ── ④ [1m] 后缀最优先(与 CLI 口径一致的 1,000,000 整) ────────────────────
 assert.deepEqual(resolveBadgeWindow({ cliWindow: 200_000, providerWindow: 262_144, model: 'k3[1m]' }),
@@ -61,6 +66,8 @@ for (const bad of [0, -1, NaN, Infinity, '1000000', null, undefined]) {
   // 服务端下发的联动窗口有接线
   assert.ok(/subtype === 'context_window'/.test(app), '客户端消费服务端下发的 context_window 事件');
   assert.ok(/source: 'linked'/.test(app), '下发值写缓存标 source:linked');
+  assert.ok(/event\.linkedContextWindowOrigin \|\| event\.linkedContextWindowSource/.test(app),
+    '读服务端来源字段用 linkedContextWindow* 前缀(不读裸 source/origin)');
   // 分母来源脚注
   assert.ok(/winSourceLabel/.test(app), '徽章弹层分母来源标签函数存在');
 }
@@ -68,7 +75,9 @@ for (const bad of [0, -1, NaN, Infinity, '1000000', null, undefined]) {
   const chat = readFileSync(join(root, 'server', 'routes', 'chat.js'), 'utf8');
   assert.ok(/export function resolveLinkedWindowInfo/.test(chat), '服务端导出 resolveLinkedWindowInfo');
   assert.ok(/subtype: 'context_window'/.test(chat), 'init 后随流下发 context_window');
-  assert.ok(/linkedContextWindow/.test(chat), '下发字段含 linkedContextWindow');
+  assert.ok(/linkedContextWindowSource: linkedWin\.source/.test(chat),
+    '来源字段名带 linkedContextWindow 前缀,避免与 init 其它字段撞名');
+  assert.ok(!/\bsource: linkedWin\.source/.test(chat), '不得再下发裸 source 字段');
   // /api/model-window 带 source
   assert.ok(/resolveDisplayWindowInfo/.test(chat), '/api/model-window 复用带 source 的解析');
 }

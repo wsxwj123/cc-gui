@@ -57,7 +57,10 @@ export function pickCliContextWindow(modelUsage, modelId) {
 // 上 GUI 恒无来源,行为与改前一致,无回归。
 // 返回 { window, source },source ∈ '1m' | 'linked' | 'provider' | 'cli' | null。
 // null = 无任何来源,调用方自行落 /context 实测缓存 / nativeContextWindow 兜底。
-export function resolveBadgeWindow({ cliWindow, linkedWindow, providerWindow, model } = {}) {
+// 入参非对象(null/undefined/数字/字符串)按"全缺"处理返回 { window: null, source: null },
+// 不抛错 —— 调用点在流事件回调里,抛一次就吞掉整条 result 处理。
+export function resolveBadgeWindow(opts) {
+  const { cliWindow, linkedWindow, providerWindow, model } = (opts && typeof opts === 'object') ? opts : {};
   const pos = (v) => (Number.isFinite(v) && v > 0 ? v : null);
   if (/\[1m\]/i.test(model || '')) return { window: 1_000_000, source: '1m' };
   const linked = pos(linkedWindow);

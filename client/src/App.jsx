@@ -5227,7 +5227,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               && Number.isFinite(event.linkedContextWindow) && event.linkedContextWindow > 0) {
             for (const wk of new Set([event.model, turnModel].filter(Boolean))) {
               resolvedWindowCache.set(wk, event.linkedContextWindow);
-              resolvedWindowMeta.set(wk, { source: 'linked', origin: event.origin || event.source || null, at: Date.now() });
+              resolvedWindowMeta.set(wk, { source: 'linked', origin: event.linkedContextWindowOrigin || event.linkedContextWindowSource || null, at: Date.now() });
               try { window.dispatchEvent(new CustomEvent('cgui:model-window-cli', { detail: { model: wk } })); } catch {}
             }
           }

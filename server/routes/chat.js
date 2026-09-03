@@ -1827,7 +1827,10 @@ router.post('/chat', async (req, res) => {
           if (linkedWin.window) {
             deliverLine(slot, JSON.stringify({
               type: 'system', subtype: 'context_window', model,
-              linkedContextWindow: linkedWin.window, source: linkedWin.source, origin: linkedWin.origin,
+              // 字段名带 linkedContextWindow 前缀:init 载荷字段多,裸 source/origin 有撞名风险
+              linkedContextWindow: linkedWin.window,
+              linkedContextWindowSource: linkedWin.source,
+              linkedContextWindowOrigin: linkedWin.origin,
             }));
           }
           const mismatch = permissionModeMismatch(slot.guiMode, m.permissionMode);
