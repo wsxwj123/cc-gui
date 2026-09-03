@@ -148,20 +148,28 @@ const MODEL_WINDOW_RULES = [
 // context overflow,全程不主动压缩(CLI 的被动压缩靠匹配 Anthropic 格式的错误文案,
 // 第三方中转的文案不一定匹配,兜不住)。内置 provider 模板一个都没预填 contextWindow,
 // 所以"没填就走规则表"天然做到了"手填只对不在内置列表里的中转站生效"。
-function resolveModelWindow(model, providerEntry) {
+// r103:同一优先级同时给出【命中的是哪一级】(origin),供 /api/model-window 与徽章弹层
+// 写清"这个分母怎么来的"。origin:'1m'=模型名 [1m] 后缀;'fetched'=获取模型时实抓;
+// 'manual'=Provider 表单手填;'rules'=内置模型规则表;null=无解析(官方/规则表未命中)。
+function resolveModelWindowInfo(model, providerEntry) {
   const m = String(model || '');
   // [1m] = 1,000,000 整,与 CLI 口径一致(2.1.226 二进制:带 [1m] 直接 return 1e6),也与
   // 客户端 contextWindow.js 一致。旧值 1,048,576(2^20)是自造的,让 /api/model-window 下发的
   // 徽章分母比 CLI 自己认的窗口大 4.8 万 —— 下方 autoCompactWindow 有 1e6 钳位看不出来,
   // env.CLAUDE_CODE_MAX_CONTEXT_TOKENS 却是原样下发。规则表里 kimi-k3/gemini/deepseek-v4
   // 等厂商【原生】1,048,576 是各家真实规格,与本行无关,不动。
-  if (/\[1m\]/i.test(m)) return 1_000_000;
+  if (/\[1m\]/i.test(m)) return { window: 1_000_000, origin: '1m' };
   const base = m.replace(/\[1m\]/i, '');
   const mw = providerEntry?.modelWindows;
-  if (mw && Number.isFinite(Number(mw[base]))) return Number(mw[base]);
-  if (providerEntry && Number.isFinite(Number(providerEntry.contextWindow))) return Number(providerEntry.contextWindow);
-  for (const [re, win] of MODEL_WINDOW_RULES) if (re.test(m)) return win;
-  return null;
+  if (mw && Number.isFinite(Number(mw[base]))) return { window: Number(mw[base]), origin: 'fetched' };
+  if (providerEntry && Number.isFinite(Number(providerEntry.contextWindow))) {
+    return { window: Number(providerEntry.contextWindow), origin: 'manual' };
+  }
+  for (const [re, win] of MODEL_WINDOW_RULES) if (re.test(m)) return { window: win, origin: 'rules' };
+  return { window: null, origin: null };
+}
+function resolveModelWindow(model, providerEntry) {
+  return resolveModelWindowInfo(model, providerEntry).window;
 }
 
 // 当前激活 provider 条目(active-provider.json → custom-providers.json)。读不到返 null
@@ -179,12 +187,37 @@ function readActiveProviderEntry() {
 // 供显示层(上下文徽章分母/压缩预警/明细底数)与压缩联动同源取窗口:第三方按
 // resolveModelWindow 解析;官方(无 BASE_URL)返回 null —— 前端本地表对官方是准的,
 // 且避免显示层与 CLI 自身口径打架。
-export function resolveDisplayWindow(model) {
+export function resolveDisplayWindowInfo(model) {
   try {
     const st = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'));
-    if (!st?.env?.ANTHROPIC_BASE_URL) return null;
-    return resolveModelWindow(model, readActiveProviderEntry());
-  } catch { return null; }
+    if (!st?.env?.ANTHROPIC_BASE_URL) return { window: null, origin: null };
+    return resolveModelWindowInfo(model, readActiveProviderEntry());
+  } catch { return { window: null, origin: null }; }
+}
+export function resolveDisplayWindow(model) {
+  return resolveDisplayWindowInfo(model).window;
+}
+
+// r103:本回合【GUI 侧认定的窗口】,随 init 下发给前端当徽章分母。
+// 为什么需要它:CLI 对它不认识的第三方模型名自报窗口恒 200,000
+// (result.modelUsage[*].contextWindow),而 GUI 已经用 CLAUDE_CODE_MAX_CONTEXT_TOKENS
+// 把它的真实窗口认知与压缩线抬到了这里返回的值 —— 分母不跟着这个走,显示就与 CLI 的
+// 实际压缩行为相反(用户实报:手填 1M,第一轮后徽章变回 200k)。
+// source:'explicit'=用户显式设置(联动整个让位,CLI 按显式值走);'linked'=本联动算出的值;
+// null=不干预(官方 OAuth / 无解析)→ 前端落 CLI 自报。让位的三个键与
+// resolveCompactWindowSettings 逐字同源,两处要一起改。
+// 注:显式值 > CLI 自认窗口时有效窗口 = min(两者),此处按显式值上报(用户明示口径),
+// 官方模型上填超过 200K 的显式值会显示得比实际有效窗口大 —— 属用户自设值的已知边界。
+export function resolveLinkedWindowInfo(model) {
+  try {
+    const st = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'));
+    const explicit = [st?.autoCompactWindow, st?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, st?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS]
+      .map((v) => Number(v)).find((v) => Number.isFinite(v) && v > 0);
+    if (explicit) return { window: explicit, source: 'explicit', origin: 'explicit' };
+    if (!st?.env?.ANTHROPIC_BASE_URL) return { window: null, source: null, origin: null };
+    const { window: win, origin } = resolveModelWindowInfo(model, readActiveProviderEntry());
+    return win ? { window: win, source: 'linked', origin } : { window: null, source: null, origin: null };
+  } catch { return { window: null, source: null, origin: null }; }
 }
 
 // 本回合要 per-spawn 合并进 --settings 的压缩相关配置。返回 null = 不干预,交 CLI 默认。
@@ -1261,6 +1294,9 @@ router.post('/chat', async (req, res) => {
   // 压缩联动产物在此算一次:指纹进 compatKey、spawn 块复用同一对象写临时 --settings 文件
   // (同一次计算 = 指纹与实际写入值恒一致,也不为每请求多做一遍文件 IO)。
   const acwSettings = resolveCompactWindowSettings(model);
+  // r103:与压缩联动同一次解析口径的"GUI 侧窗口",随 init 下发给前端当徽章分母
+  // (CLI 自报对第三方恒 200K,会把手填/联动值顶掉)。只读,不参与任何时序。
+  const linkedWin = resolveLinkedWindowInfo(model);
   const reuseKey = chatCompatKey({
     workingDir, effort, appendSystemPrompt, promptSuggestions,
     excludeDynamicSystemPrompt, globalRead, dirs: [...dirSet].sort(),
@@ -1785,6 +1821,15 @@ router.post('/chat', async (req, res) => {
         // 用户以为在跑自动档、实际是逐步确认。只读 + 发一行,不碰任何时序与 slot 生命周期。
         if (m.type === 'system' && m.subtype === 'init') {
           slot.effectiveMode = m.permissionMode;
+          // r103:GUI 侧认定的窗口随 init 下发(徽章分母据此不被 CLI 自报值顶掉)。
+          // 只发一行系统消息,不碰任何时序;无解析(官方 OAuth / 规则未命中)不发,
+          // 前端保持"采 CLI 自报"的旧行为。
+          if (linkedWin.window) {
+            deliverLine(slot, JSON.stringify({
+              type: 'system', subtype: 'context_window', model,
+              linkedContextWindow: linkedWin.window, source: linkedWin.source, origin: linkedWin.origin,
+            }));
+          }
           const mismatch = permissionModeMismatch(slot.guiMode, m.permissionMode);
           if (mismatch) deliverLine(slot, JSON.stringify({ type: 'system', subtype: 'mode_mismatch', ...mismatch }));
         }
@@ -1874,7 +1919,9 @@ router.post('/chat', async (req, res) => {
 // 上下文徽章分母/压缩预警查询:按模型解析真实窗口(与压缩联动同一套 resolveModelWindow,
 // 显示与行为同源)。官方或无解析返回 window:null,前端走本地兜底表。
 router.get('/model-window', (req, res) => {
-  res.json({ window: resolveDisplayWindow(String(req.query.model || '')) });
+  // r103:带上命中的来源级别(1m/fetched/manual/rules|null),徽章弹层据此写清分母出处。
+  const info = resolveDisplayWindowInfo(String(req.query.model || ''));
+  res.json({ window: info.window, source: info.origin });
 });
 
 // r49b①:热切逐 slot 记结果。CLI 2.1.240 的 guardPermissionModeChange 会拒掉一部分切换
