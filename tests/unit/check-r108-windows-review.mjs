@@ -404,6 +404,7 @@ await check('B14 win32 上不传 enumerate 时默认为 false(候选目录不 re
   assert.deepEqual(got.hitCalls, [], 'exists 命中后同样不枚举');
   assert.equal(got.hit && got.hit.file, 'C:\\dirB\\foo.exe', 'win32 上用 win32 口径拼路径');
   assert.equal(got.hit && got.hit.viaCmd, false);
+  assert.ok(Number.isInteger(got.total) && got.total <= 2, `readdir 总次数应 ≤2(只 pyScripts 两父目录),实际 ${got.total}`);
 });
 
 // ══════════════════════════════════════════════════════════════════════════
