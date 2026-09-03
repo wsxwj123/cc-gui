@@ -7093,10 +7093,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     handleRollback(userMsg, { mode: 'both', softFiles: true });
   }, [messages, chatMessages, handleRollback]);
 
-  // opts.contentRisk(r99):同一条链路的第二种用法 —— 不是"重做这个工具",而是
-  // "这个工具的输出被内容审核拒绝,裁掉它并换个方式继续"。停流/裁剪/refetch 那 40 行
-  // 踩过 Bug8 全家坑,复制一份 = 复制一份将来会腐化的坑,所以只在三处分叉。
-  // 不带第三参时(既有「工具重做」两个调用点)行为逐字不变。
+  // opts(r99):同一条链路的第二种用法 —— 不是"重做这个工具",而是"这个工具的输出被
+  // 内容审核拒绝,裁掉它并换个方式继续"。停流/裁剪/refetch 那 40 行踩过 Bug8 全家坑,
+  // 复制一份 = 复制一份将来会腐化的坑,所以只在三处分叉:
+  //   contentRisk    —— 不走乐观截断(那会显示"正在重做此工具",而这条路径恰恰不重做)
+  //   continuePrompt —— 顶掉"再执行一次该工具"的续跑指令,并且不注入 tool="X" 重试哨兵
+  // 两者都不传时(既有「工具重做」两个调用点)行为逐字不变。
   const handleRetryTool = useCallback((turn, toolCall, opts = {}) => {
     if (!turn?.uuid || !toolCall?.id || !toolCall?.name) {
       confirmDialog('找不到该工具调用的 id，无法局部重做');
@@ -7135,7 +7137,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const input = JSON.stringify(toolCall.input || {}, null, 2).slice(0, 4000);
     // r99:内容审核那支绝不能复用下面的原文案 —— 让模型"再执行一次该工具"会立刻再产出
     // 同一段被拒内容 = 死循环;也不回贴原工具输入(那正是污染源)。
-    const appendSystemPrompt = opts.contentRisk ? RISK_CONTINUE_PROMPT : [
+    const appendSystemPrompt = opts.continuePrompt || [
       'GUI 已把会话裁剪到某个工具调用之前。',
       `现在请重新执行 ${toolCall.name} 工具调用，并基于新的工具结果从当前位置继续。`,
       '不要重复已经保留在历史里的正文或更早的工具调用。',
@@ -7147,6 +7149,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     ].join('\n');
     (async () => {
       try {
+        // 顺序红线(r99-③):**先停在飞回合,再改会话文件**。反过来的话,被截断的 jsonl
+        // 会被仍在跑的进程继续追加(它内存里还是旧上下文)—— 刚裁掉的内容原样写回,
+        // 用户点了回退却发现污染还在。停止是 fire-and-forget + 超时兜底(控制类调用
+        // 绝不无限等,memory: 停止链路 await interrupt 会挡住兜底)。
+        killedRef.current = true; // 编辑重发(trim 分支)=停当前回合(POST /stop)→ finally 收后台化子代理
+        if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
+        // Bug8 同批(调研点名:同一个病换个入口):被杀 pid 记账 + 后台态真发 /stop +
+        // 立即清后台标记,三件事与 handleRollback / handleStop 同款。
+        const _rtPid = activeProcRef.current || backgroundPidRef.current;
+        if (_rtPid) stoppedPidsRef.current.add(String(_rtPid));
+        const _rtStops = [];
+        if (activeProcRef.current) {
+          // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。
+          _rtStops.push(fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {}));
+          activeProcRef.current = null;
+        } else if (backgroundPidRef.current) {
+          _rtStops.push(fetch(`/api/chat/${backgroundPidRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {}));
+        }
+        setBackgroundPid(null);
+        backgroundPidRef.current = null;
+        if (_rtStops.length) {
+          await Promise.race([Promise.all(_rtStops), new Promise((r) => setTimeout(r, 2000))]);
+        }
+
         const tr = await fetch(`/api/sessions/${sel.sessionId}/trim-before-tool`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -7155,21 +7181,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const trData = await tr.json().catch(() => ({}));
         if (!tr.ok) throw new Error(trData.error || tr.status);
 
-        killedRef.current = true; // 编辑重发(trim 分支)=停当前回合(POST /stop)→ finally 收后台化子代理
-        if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
-        // Bug8 同批(调研点名:同一个病换个入口):被杀 pid 记账 + 后台态真发 /stop +
-        // 立即清后台标记,三件事与 handleRollback / handleStop 同款。
-        const _rtPid = activeProcRef.current || backgroundPidRef.current;
-        if (_rtPid) stoppedPidsRef.current.add(String(_rtPid));
-        if (activeProcRef.current) {
-          // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。
-          fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
-          activeProcRef.current = null;
-        } else if (backgroundPidRef.current) {
-          fetch(`/api/chat/${backgroundPidRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
-        }
-        setBackgroundPid(null);
-        backgroundPidRef.current = null;
         updateStreaming(false);
         setStreamingText('');
         setStreamingThinking('');
@@ -7179,15 +7190,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
 
         // Bug8:同 handleRollback —— forceSend 绕门 + 发前轮询等停止落地。
-        // r99:锚点之后若还有用户消息,它会被一起裁掉,必须【可见】重发,不能静默吞掉用户打的字。
-        if (opts.contentRisk && opts.carryText) {
-          resendReplacing(opts.carryText, { appendSystemPrompt });
-        } else {
-          resendReplacing(
-            `<cgui-tool-retry tool="${toolCall.name}">继续</cgui-tool-retry>`,
-            { appendSystemPrompt, hiddenUserMessage: true },
-          );
-        }
+        // r99-②:传了 continuePrompt 就【不注入重试哨兵】—— `tool="X"` 那句是明确的
+        // "把这个工具再跑一遍",与"换个方式继续"的续跑指令正面打架。外层标签保留是因为
+        // 隐藏哪些消息由服务端 session-reader 的标签白名单决定(本轮服务端零 diff),
+        // 去掉它这条消息刷新后会变成一个用户看不懂的可见气泡。
+        // ponytail: 标签名沿用既有白名单;要换成语义中立的标签得先改 session-reader。
+        resendReplacing(
+          opts.continuePrompt
+            ? `<cgui-tool-retry>${opts.continuePrompt}</cgui-tool-retry>`
+            : `<cgui-tool-retry tool="${toolCall.name}">继续</cgui-tool-retry>`,
+          { appendSystemPrompt, hiddenUserMessage: true },
+        );
       } catch (err) {
         confirmDialog(opts.contentRisk ? '回退失败：' + err.message : '工具局部重做失败：' + err.message);
         setRetryActiveUuid(null);  // 关指示器,避免失败后一直转
@@ -7206,6 +7219,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   useEffect(() => { handleRetryToolRef.current = handleRetryTool; }, [handleRetryTool]);
   const stableRetryTurn = useCallback((turn) => handleRetryTurnRef.current?.(turn), []);
 
+  // r99-①b:本窗格里已经自动回退过内容审核的会话(按 sessionId 记,分屏与切会话都不串)。
+  // 只为挡住"第二次自动回退覆盖 .bak"这一件事,不落盘 —— 刷新后重来一次是可接受的。
+  const [riskRewoundSids, setRiskRewoundSids] = useState({});
+
   // r99:服务商内容审核拒绝 → 回退到污染源之前并让模型换个方式继续。
   // 锚点 = 最后一个已拿到 result 的 tool_use(见 utils/contentRisk.js);回退复用下方
   // 那条既有链路的纯截断(写 .bak),不压缩 —— 压缩要一两分钟,且会把被拒内容摘要
@@ -7214,30 +7231,42 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const runContentRiskRewind = useCallback(async () => {
     const msgs = getLocalMessages();
     const anchor = locateRiskAnchor(msgs);
-    if (!anchor) {
-      // 退化:没有工具输出可退 → 走既有「重新编辑」(按发送才真裁剪,按 Esc 全身而退)。
-      // 点击这一刻不改任何文件,所以不弹确认框(与今天的「重新编辑」一致)。
+    const sid = getLocalSession()?.sessionId || '';
+    const rewoundOnce = !!sid && !!riskRewoundSids[sid];
+    // 退化三种情形,共用既有「重新编辑」(点击这一刻不改任何文件,按发送才真裁剪、
+    // 按 Esc 全身而退)—— 所以不弹确认框,与今天的「重新编辑」一致:
+    //   ① 没有工具输出可退;
+    //   ② 锚点之后还有用户消息:污染完全可能就在那条消息里,原样自动重发只会再被拒
+    //      (r99-①a);放回输入框让用户改写,由他决定发什么;
+    //   ③ 本会话已经自动回退过一次:服务端截断写的 .bak 是固定路径,再回退一次
+    //      会覆盖第一次的备份 = 原始历史不可恢复(r99-①b)。一次为限,之后只给
+    //      "放回输入框"和"新开会话"。
+    if (!anchor || anchor.carryText || rewoundOnce) {
       const ui = lastUserIndex(msgs);
       if (ui === -1) { confirmDialog('会话里没有可回退的消息，请新开会话。'); return; }
-      setProviderSwitchNotice({ text: '未找到可回退的工具输出。最后一条消息已放回输入框，改写后按发送才会回退会话；按 Esc 取消则会话不变。' });
+      const why = rewoundOnce
+        ? '本会话已自动回退过一次，再次被拒说明触发内容在更早的位置或在你自己的消息里，不再自动回退（继续回退会覆盖上一次的 .bak 备份）。'
+        : anchor
+        ? '报错之后你又发过消息，直接原样重发大概率仍被拒绝。'
+        : '未找到可回退的工具输出。';
+      setProviderSwitchNotice({ text: why + '最后一条消息已放回输入框，改写后按发送才会回退会话；按 Esc 取消则会话不变。' });
       handleRollbackRef.current?.(msgs[ui], { mode: 'edit' });
       return;
     }
     const inputPreview = (() => { try { return JSON.stringify(anchor.toolInput ?? {}).slice(0, 120); } catch { return ''; } })();
     const ok = await confirmDialog(
       `将回退到工具调用 ${anchor.toolName}(${inputPreview})之前：该工具调用、它的输出，以及其后的全部对话都会从会话记录中移除，改写前会写入 .bak 备份。`
-      + (anchor.carryText
-        ? `\n\n你最近的一条消息会在回退后自动重发：\n「${anchor.carryText.slice(0, 120)}」`
-        : '\n\n回退后会让模型换一种方式继续原任务。')
+      + '\n\n回退后会让模型换一种方式继续原任务。本会话只会自动回退这一次（再回退会覆盖备份）。'
       + '\n\n本操作不生成摘要、不压缩。是否继续？',
       { danger: true });
     if (!ok) return;
+    if (sid) setRiskRewoundSids((prev) => ({ ...prev, [sid]: true }));
     handleRetryToolRef.current?.(
       { uuid: anchor.turnUuid },
       { id: anchor.toolUseId, name: anchor.toolName, input: anchor.toolInput },
-      { contentRisk: true, carryText: anchor.carryText },
+      { contentRisk: true, continuePrompt: RISK_CONTINUE_PROMPT },
     );
-  }, [getLocalMessages]);
+  }, [getLocalMessages, getLocalSession, riskRewoundSids]);
 
   // r99:新开会话并把最后一条用户消息预填进输入框。转 draft 那段与 ctxOverflow 横幅同源
   // (转 draft 不改任何会话文件)。composer-fill 按 targetKey 过滤,必须等新 draft key
@@ -7258,7 +7287,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   }, [getLocalMessages, getLocalSession, setSelectedSession, tabIndex]);
 
   // 按钮文案随锚点在不在而变 —— 按钮绝不写"回退工具输出"却去做别的事。
-  const contentRiskAnchor = useMemo(() => locateRiskAnchor(messages), [messages]);
+  // 判据与 runContentRiskRewind 的退化条件逐字对齐:有后续用户消息、或本会话已回退过
+  // 一次,都不再提供自动回退,按钮相应变成「放回输入框」。
+  const contentRiskAnchor = useMemo(() => {
+    const sid = selectedSession?.sessionId || '';
+    if (sid && riskRewoundSids[sid]) return null;
+    const a = locateRiskAnchor(messages);
+    return a && !a.carryText ? a : null;
+  }, [messages, riskRewoundSids, selectedSession?.sessionId]);
 
   // /branch 分叉:从当前会话 fork 出一条新线,打开到本窗格,原会话不动。
   // 传 upToUuid(某条消息的 jsonl uuid)则【精确分叉】——新会话只保留到该消息所在回合
@@ -7822,6 +7858,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                             <div className="text-[12px] text-ink-muted font-body mb-1.5 leading-relaxed">
                               该请求被服务商的内容审核拒绝，不是本机或 CLI 的故障。触发内容通常是最近一条工具输出或消息正文。
                               该内容仍在会话上下文中，不移除则之后每一轮请求都会被同样拒绝。
+                              {selectedSession?.sessionId && riskRewoundSids[selectedSession.sessionId]
+                                && '本会话已自动回退过一次，再次被拒说明触发内容在更早的位置或在你自己的消息里；继续自动回退会覆盖上一次的备份，因此下面只提供改写消息与新开会话。'}
                             </div>
                             <div className="flex flex-wrap gap-2">
                               <button
