@@ -595,6 +595,17 @@ await check('§5.3/M9 检测正则骨架逐字含 (^|[\\s\\n])@', () => {
 await check('§5.3 支持 fetchImpl 注入', () => {
   assert.ok(AU.includes('fetchImpl'));
 });
+await check('§5.3 mapDirEntries( 在 fetchDirEntries 内 ≥1、mapSearchFiles( 在 searchProjectFiles 内 ≥1', () => {
+  const body = (fn) => {
+    const m = AU.match(new RegExp(`export (?:async )?function ${fn}\\(`));
+    assert.ok(m, `AU 里找不到 export function ${fn}(`);
+    const at = AU.indexOf(m[0]);
+    const nxt = AU.indexOf('\nexport ', at + 1);
+    return nxt > at ? AU.slice(at, nxt) : AU.slice(at, at + 1200);
+  };
+  assert.ok(body('fetchDirEntries').includes('mapDirEntries('), 'fetchDirEntries 必须内部调用 mapDirEntries(');
+  assert.ok(body('searchProjectFiles').includes('mapSearchFiles('), 'searchProjectFiles 必须内部调用 mapSearchFiles(');
+});
 await check('§5.3/M39 r.ok 恰 1 处(只在 createSessionRef;两个 GET 不检查)', () => {
   assert.strictEqual(countS(AU, 'r.ok'), 1);
 });
@@ -627,10 +638,15 @@ await check('§5.4/M29/B22 搜索防抖 180ms 且 cleanup 里 clearTimeout', () 
   assert.match(AH, /setTimeout\([\s\S]{0,200}, 180\)/, '缺 180ms 防抖');
   assert.ok(AH.includes('clearTimeout'), 'cleanup 必须 clearTimeout');
 });
-await check('§5.4 九个纯函数调用点各 ≥1 次(逻辑不许在 hook 里重写一遍)', () => {
-  for (const f of ['detectAtQuery(', 'applyAtInsert(', 'parentDir(', 'mapDirEntries(', 'mapSearchFiles(',
-    'filterAtSessions(', 'fetchDirEntries(', 'searchProjectFiles(', 'createSessionRef(']) {
+await check('§5.4 七个纯函数调用点各 ≥1 次(逻辑不许在 hook 里重写一遍)', () => {
+  for (const f of ['detectAtQuery(', 'applyAtInsert(', 'parentDir(', 'filterAtSessions(',
+    'fetchDirEntries(', 'searchProjectFiles(', 'createSessionRef(']) {
     assert.ok(AH.includes(f), `缺对 ${f} 的调用`);
+  }
+});
+await check('§5.4 mapDirEntries( / mapSearchFiles( 在 hook 内 0 次(映射归取数函数,hook 只拿结果)', () => {
+  for (const f of ['mapDirEntries(', 'mapSearchFiles(']) {
+    assert.strictEqual(countS(AH, f), 0, `${f} 不该在 useAtRef 里调用 —— 它属于 atRef.js 的 fetch* 内部`);
   }
 });
 await check('§5.4/B24/B27/B28 键盘:导出 keyDown 且五个键名各 ≥1', () => {
@@ -1003,19 +1019,22 @@ const walk = (dir, out = []) => {
   }
   return out;
 };
+// 排除本轮新增的整组 r97 测试(本文件 + 开发线自测 check-r97-dev-*.mjs):
+// 判据是"既有测试文件未被改动",新增文件不该计入基线。
+const isR97 = (f) => /(^|\/)check-r97-[^/]*\.mjs$/.test(f);
 const hitLines = (re) => {
   let n = 0;
   for (const f of walk(join(root, 'tests'))) {
-    if (f === SELF) continue;
+    if (isR97(f)) continue;
     for (const line of readFileSync(f, 'utf8').split('\n')) if (re.test(line)) n++;
   }
   return n;
 };
-await check('§6 grep 口径一(ChatInput/App/filteredCommands/…)命中行数仍为 219(既有测试零改动)', () => {
-  assert.strictEqual(hitLines(GREP1), 219, '既有测试被改/被加 —— 本轮承诺是不改任何既有测试文件');
+await check('§6 grep 口径一(ChatInput/App/filteredCommands/…)命中行数仍为 219(排除 check-r97-*.mjs 后)', () => {
+  assert.strictEqual(hitLines(GREP1), 219, '既有测试文件被改动 —— 本轮承诺是一个既有测试都不动(新增 check-r97-* 不计入)');
 });
-await check('§6 grep 口径二(@ 相关符号与三条端点)命中行数仍为 4(全是 check-drill-sidebar 的 flatSessions 假阳性)', () => {
-  assert.strictEqual(hitLines(GREP2), 4, '除本文件外不该有测试锁住 @ 相关符号');
+await check('§6 grep 口径二(@ 相关符号与三条端点)命中行数仍为 4(排除 check-r97-*.mjs 后,全是 flatSessions 假阳性)', () => {
+  assert.strictEqual(hitLines(GREP2), 4, '既有测试里不该出现 @ 相关符号(新增 check-r97-* 不计入)');
 });
 
 // ══════════════════════════════════════════════════════════════════════════
