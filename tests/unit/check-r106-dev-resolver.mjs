@@ -5,7 +5,7 @@
 // 系统提示每次冷启重算 → 第三方缓存命中率忽高忽低(本轮根因)。
 // 变异哨兵:把 resolveSdkClaudeFrom 里的 isWinPeFile 判定删掉 → "文本占位 exe 返 null" 必红。
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveSdkClaudeFrom, logSdkClaudeOnce } from '../../server/utils/claude-resolver.js';
@@ -93,6 +93,16 @@ check('⑦ logSdkClaudeOnce:同一路径只打一次;空路径明说走 SDK 自�
   logSdkClaudeOnce('', (s) => lines.push(s));
   assert.equal(lines.length, 1, '同一路径重复打日志(每条消息刷屏)');
   assert.ok(/SDK 自带 CLI/.test(lines[0]), lines[0]);
+});
+
+check('⑧ 面板在 Windows 上多给一句可行动指引(端点回 platform,前端据此显示)', () => {
+  const settingsSrc = readFileSync(new URL('../../server/routes/settings.js', import.meta.url), 'utf8');
+  const panelSrc = readFileSync(new URL('../../client/src/components/SettingsPanel.jsx', import.meta.url), 'utf8');
+  assert.ok(/platform: process\.platform,/.test(settingsSrc), '/api/prompt-cache 未回 platform');
+  assert.ok(/SDK 自带的 claude 运行/.test(panelSrc), '原有成因说明被删');
+  assert.ok(/state\.platform === 'win32'/.test(panelSrc), '指引没按平台门控(mac 用户会看到 Windows 路径)');
+  assert.ok(panelSrc.includes('npm\\\\node_modules\\\\@anthropic-ai\\\\claude-code\\\\bin\\\\claude.exe'), '指引里缺真二进制路径');
+  assert.ok(/npm 安装器重装.*官方原生安装器/.test(panelSrc), '指引没说怎么修');
 });
 
 rmSync(root, { recursive: true, force: true });

@@ -266,6 +266,9 @@ function promptCacheState(env, mode) {
     // 只作面板提示用;真正决定加不加 flag 的就是这个函数(chat.js spawn 处调的是同一个),
     // 入参也用同一个 resolveSdkClaude —— 显示"支持"而实际不加(或反过来)是最难查的那类不一致。
     cliSnapshotSupported: snapshotFlagOn(resolveSdkClaude(), true),
+    // r106:不支持时的可行动指引按平台不同(Windows npm 装的要看包内 claude.exe 在不在),
+    // 前端据此决定多说一句。navigator 在 Tauri WebView 里不可靠,一律用后端 process.platform。
+    platform: process.platform,
   };
 }
 
