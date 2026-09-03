@@ -21,7 +21,7 @@
 //
 // settings.json 与终端 claude / bot 共用 —— 这三个键在终端里同样生效,不是 GUI 私有开关。
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execFile } from 'node:child_process';
 import { claudeExecSpec } from './claude-resolver.js';
 
 export const SNAPSHOT_ENV_KEY = 'CLAUDE_CODE_CARVED_SLATE';
@@ -106,9 +106,43 @@ const _helpCache = new Map();
 // 经 claudeExecSpec 组装:Windows 上 npm 装的 claude.cmd(以及 `where` 给的无扩展名
 // shim)不是 Node 能直接执行的文件,裸 execFile 抛 ENOENT/EINVAL → 探测恒失败 →
 // 所有按 flag 门控的优化在 Windows 上静默失效(标题瘦身、系统提示快照全不生效)。
+// r108-必修1:timeout 5000 → 2000。这条是**同步** execFileSync,冻住整个单线程 Express
+// (设置页打开 / 第三方首条消息两个最敏感时刻各一次)。Windows 上 80MB+ 的 claude.exe 首次
+// 执行要被 Defender 全量扫描,坏情况吃满超时。探不到只是少一个 flag,不值得冻 5 秒。
+// 正常路径已由启动时的 primeHelpCache 异步预热覆盖,这里只是兜底。
 function defaultHelpProbe(claudePath) {
   const spec = claudeExecSpec(claudePath, ['--help']);
-  return String(execFileSync(spec.file, spec.args, { timeout: 5000, encoding: 'utf8' }));
+  return String(execFileSync(spec.file, spec.args, { timeout: 2000, encoding: 'utf8' }));
+}
+
+// primeHelpCache 的默认探测:同一条 `--help`,但走**异步** execFile,不阻塞事件循环,
+// 故超时可以给足 8s(冷启动 + 杀毒扫描)。失败/超时/非零退出一律给空串。
+function defaultHelpProbeAsync(claudePath) {
+  const spec = claudeExecSpec(claudePath, ['--help']);
+  return new Promise((resolve) => {
+    try {
+      execFile(spec.file, spec.args, { timeout: 8000, encoding: 'utf8' },
+        (err, stdout) => resolve(err ? '' : String(stdout || '')));
+    } catch { resolve(''); }
+  });
+}
+
+/**
+ * 启动时异步预热 `_helpCache`(r108-必修1)。预热过之后 cliSupportsFlag 命中缓存,
+ * 不再同步 spawn —— 把"设置页打开就冻 2-5 秒"挪到开机后台。
+ * 与 cliSupportsFlag 共用同一张 Map、同一 key 口径 String(claudePath)。
+ * 返回 true = 缓存里已有该 key(本次探到正文,或之前已探过);false = 没探到/脏入参。
+ * **永不 reject**:纯优化路径,炸了不能变成 unhandled rejection 掀掉启动。
+ */
+export async function primeHelpCache(claudePath, probeAsync = defaultHelpProbeAsync) {
+  if (!claudePath || typeof claudePath !== 'string') return false;
+  const key = String(claudePath);
+  if (_helpCache.has(key)) return true;
+  let help = '';
+  // 失败也写入 '',与同步版"探测失败即按不支持并缓存"一致 —— 否则每次仍会同步重探。
+  try { help = String((await probeAsync(key)) || ''); } catch { help = ''; }
+  _helpCache.set(key, help);
+  return !!help;
 }
 
 // 通用 flag 探测。flag 传全称(含 `--`)。probe 可注入(单测直接喂 help 文本)。
