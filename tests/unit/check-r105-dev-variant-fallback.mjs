@@ -7,7 +7,10 @@
 //  - lookup 把变体回退排到"剥前缀"之后 → d2 红(网关 id 拿到直连口径);
 //  - catalogPrefillEntry 不带 viaId / 仍标 source:'catalog' → d5 红;
 //  - applyCatalogPrefill 的所有权判据退回 `!== 'catalog'` → d5 红(变体条目被当用户声明,不再刷新);
-//  - 生成脚本的合并层删掉 → d7 红(旧表独有 id 丢失 / 上游判死被接受)。
+//  - 生成脚本的合并层删掉 → d7 红(旧表独有 id 丢失 / 上游判死被接受);
+//  - lookup 去掉 `hit?.reasoning === false → break` → d8 红(kimi turbo 跟着基名被判死);
+//  - 家族比对退回 matchCatalog(key)(不剥命名空间)→ d8 红(codex/qwen 网关 id 跨家族回退);
+//  - 提示文案改回带"表内"的写法 → d8 红。
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -161,6 +164,50 @@ import { effortSourceNote } from '../../client/src/utils/effortCaps.js';
   // 手工补丁层仍压在最后一层(重跑生成脚本不丢 DeepSeek 三档)
   assert.deepEqual(t.byId['deepseek-v4-flash'], { efforts: ['low', 'high', 'max'] }, 'd7: 手工补丁不被数据覆盖');
   rmSync(dir, { recursive: true, force: true });
+}
+
+// d8 r105b 三处收口:判死不传播 + 命名空间 id 按裸尾段比家族 + 提示文案不提"表"
+{
+  const table = JSON.parse(await readFile(new URL('../../server/data/thinking-levels.json', import.meta.url), 'utf8'));
+  // 哨兵前提:这几条表数据在,下面的断言才有意义(表变了就该重挑样本,而不是静默变空跑)
+  assert.deepEqual(table.byId['kimi-k2-0905-preview'], { reasoning: false }, 'd8: 前提—基名在表里判死');
+  assert.ok(table.byId['openai/gpt-5.4'], 'd8: 前提—跨家族基名在表里(不然拦不拦都一样)');
+  assert.ok(table.byId['qwen/qwen3-235b-a22b'], 'd8: 前提—跨家族基名在表里');
+  assert.ok(table.byProto['deepseek/deepseek-v4-pro'], 'd8: 前提—同家族基名在表里');
+
+  // ① 判死不经推断传播:候选命中 reasoning:false 即弃,交回家族正则(此处正则也不认 → null=全档)。
+  //    传播的话会得到 {reasoning:false, source:'table-variant'} → UI 锁灰 + 发送静默摘档。
+  const kimi = lookupModelCapabilities('kimi-k2-0905-preview-turbo', 'openai');
+  assert.equal(kimi, null, 'd8: 变体不因基名判死而被判死(维持全档)');
+  assert.equal(lookupModelCapabilities('kimi-k2-0905-preview', 'openai').reasoning, false,
+    'd8: 精确命中的判死照常生效(只拦推断,不拦查表)');
+
+  // ② 命名空间 id 的"不跨家族":比家族用裸尾段,否则 family 恒 null 使拦截对含 '/' 的 id 全失效。
+  const codexNs = lookupModelCapabilities('openai/gpt-5.4-codex-preview', 'openai');
+  assert.equal(codexNs.viaId, undefined, 'd8: 带命名空间的 codex 不回退到 openai/gpt-5.4');
+  assert.equal(codexNs.family, 'gpt-codex', 'd8: 落到 codex 家族正则');
+  // qwen 网关 instruct 变体:裸尾段家族是 qwen-instruct,而 qwen/qwen3-235b-a22b 的裸尾段是
+  // qwen 家族 → 跨家族即停,不该拿它的三档条目。
+  // ⚠️ 收尾的 matchCatalog(id) 会让最终 family='qwen' 而非 'qwen-instruct':`^qwen` 这条正则
+  //   直接命中了命名空间前缀 "qwen" 本身(matchCatalog(id) 非空就不再取 tail)。这是回退功能
+  //   之前就有的既有行为,本轮不动;此处只钉"结论与 r105 之前一致(全档)"。
+  const qwenNs = lookupModelCapabilities('qwen/qwen3-235b-a22b-instruct-2601', 'openai');
+  assert.equal(qwenNs.viaId, undefined, 'd8: 跨家族候选不算命中');
+  assert.equal(qwenNs.efforts, null, 'd8: 恢复改前结论(全档,不是 qwen3-235b-a22b 的三档)');
+  assert.equal(qwenNs.family, 'qwen', 'd8: 落家族正则(命名空间前缀命中 ^qwen,既有行为)');
+  // 同家族的命名空间回退不能被误伤(裸尾段两侧同为 deepseek-v4)
+  const dsNs = lookupModelCapabilities('deepseek/deepseek-v4-pro-turbo', 'openai');
+  assert.equal(dsNs.viaId, 'deepseek/deepseek-v4-pro', 'd8: 同家族仍回退到同命名空间基名');
+  assert.deepEqual(dsNs.efforts, ['high', 'xhigh'], 'd8: 拿网关 openai 口径');
+  assert.deepEqual(lookupModelCapabilities('deepseek/deepseek-v4-pro-turbo', 'anthropic').efforts,
+    ['low', 'medium', 'high'], 'd8: 网关 anthropic 口径');
+
+  // ③ 提示文案:点名基名,且不出现对用户无指代物的"表"
+  const note = effortSourceNote(
+    { 'deepseek-v4-flash-nightly': { source: 'table-variant', viaId: 'deepseek-v4-flash' } },
+    'deepseek-v4-flash-nightly');
+  assert.match(note, /按\s*deepseek-v4-flash(?![\w-])/, 'd8: 仍点名基名');
+  assert.doesNotMatch(note, /表/, 'd8: 文案不提"表"(用户没有这个指代物)');
 }
 
 console.log('check-r105-dev-variant-fallback: all passed');

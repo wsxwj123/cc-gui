@@ -191,15 +191,26 @@ export function lookupModelCapabilities(modelId, protocol) {
     efforts: Array.isArray(hit?.efforts) ? [...hit.efforts] : null,
     ...(viaId ? { source: 'table-variant', viaId } : {}),
   });
+  // 家族比对专用的裸尾段:目录正则一律 ^ 锚定,带命名空间的 id(openai/…、qwen/…)
+  // matchCatalog 恒 null → `null !== null` 恒假 → 跨家族拦截对所有含 '/' 的 id 全放行
+  // (openai/gpt-5.4-codex-preview 会一路回退到 openai/gpt-5.4)。只有比家族这一步剥前缀,
+  // 回退候选本身仍带命名空间(网关口径 ≠ 直连口径,见 variantBaseIds 边界①)。
+  const bare = (s) => (s.includes('/') ? s.split('/').pop() : s);
   for (const key of tail ? [id, tail] : [id]) {
     const exact = tableLookup(key, protocol);
     if (exact !== undefined) return toHit(exact);
     // 变体回退:同家族才算数(纯词法剥不出 gpt-5-codex-x → gpt-5 是跨家族)。
-    const fam = matchCatalog(key)?.family ?? null;
+    const fam = matchCatalog(bare(key))?.family ?? null;
     for (const cand of variantBaseIds(key)) {
-      if ((matchCatalog(cand)?.family ?? null) !== fam) break;
+      if ((matchCatalog(bare(cand))?.family ?? null) !== fam) break;
       const hit = tableLookup(cand, protocol);
-      if (hit !== undefined) return toHit(hit, cand);
+      if (hit === undefined) continue;
+      // 判死不经推断传播:回退是纯词法猜测,猜成 reasoning:false 会锁灰 UI + 发送静默摘档
+      // (可见功能损失),猜错成"全档"只是维持现状 —— 代价不对称,同文件头 9-11 行的原则。
+      // 故候选命中判死即弃,结束回退交回家族正则(kimi-k2-0905-preview-turbo 不因
+      // kimi-k2-0905-preview 判死而跟着锁灰)。null(表说全档)不算判死,照常停下。
+      if (hit?.reasoning === false) break;
+      return toHit(hit, cand);
     }
   }
   return matchCatalog(id) || (tail ? matchCatalog(tail) : null);

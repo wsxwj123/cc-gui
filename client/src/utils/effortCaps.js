@@ -39,7 +39,8 @@ export function effortSourceNote(modelMeta, modelId) {
   const bare = String(modelId || '').replace(/\[1m\]/i, '');
   const entry = modelMeta && typeof modelMeta === 'object' ? modelMeta[bare] : null;
   if (entry?.source !== 'table-variant' || !entry?.viaId) return '';
-  return `档位按 ${entry.viaId} 的实测数据取(表内无 ${bare} 的条目)`;
+  // 文案不提"表":用户面前没有"表"这个指代物,只需知道档位取自哪个 id、以及为什么。
+  return `档位按 ${entry.viaId} 判定(未收录 ${bare} 的实测档位)`;
 }
 
 // 某档在该模型下是否可用。''(默认档=不传 --effort)在支持思考时恒可用;
