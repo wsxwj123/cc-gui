@@ -278,6 +278,27 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.375">v0.2.375</a></b>(2026-09-03)· 修复 1 条 · 优化 1 条</summary>
+
+**修复**
+
+<details><summary>Windows 上添加 paper-search 等命令参数含 `&lt;` 的 MCP 报 "The system cannot find the file specified." 且无任何提示</summary>
+
+用 npm 安装的 claude 是 `claude.cmd` 批处理壳,应用经 `cmd.exe /c` 调用它执行 `claude mcp add` 时,`mcp<2` 这类参数未加引号,`<2` 被 cmd.exe 当成"从文件 2 读取输入",文件不存在即报错,claude 本身没有执行(用官方原生安装器的 claude.exe 不受影响,故表现为"有时会报错")。现在所有经 cmd.exe 调用 claude.cmd 的位置(添加 / 编辑 MCP、标题生成、版本与能力探测)统一改为逐参数加引号的写法,`<`、`>`、`|`、`&`、`^` 等字符原样传给 claude。0.2.374 只修了应用自行探测 MCP 那一条路径。参数以反斜杠结尾(如 `ROOT=D:\data\`、盘根 `D:\`)或反斜杠紧邻引号(如 `{\"k\":\"v\"}`)时按 Windows 命令行规则把这些反斜杠翻倍,后续参数不再被并进同一个字符串。
+
+</details>
+
+**优化**
+
+<details><summary>README 新增「更新记录」</summary>
+
+全部版本默认折叠,点击展开;已公开发布的版本号可点进对应 GitHub Release。发版时 GitHub Release 正文自动带上该版本的更新记录。
+
+</details>
+
+</details>
+
+<details>
 <summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.374">v0.2.374</a></b>(2026-09-03)· 优化 1 条 · 修复 6 条</summary>
 
 **优化**
