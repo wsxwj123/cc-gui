@@ -96,7 +96,7 @@ check('G3/§1.1 无值 flag 的第二元是空串;extraFlags 段是 [空串, 原
   assert.deepEqual(P({ styleRaw: true }).parts, [['--style raw', '']]);
   assert.deepEqual(P({ extraFlags: '--sv 4 --exp 20' }).parts, [['', '--sv 4 --exp 20']]);
 });
-check('G1/§1.1 不变式:parts 拼回来必须逐字等于 flags', () => {
+check('G1/§1.1 不变式:parts 拼回并规范化后等于 flags', () => {
   const probes = [
     { stylize: 250 }, { stylize: 250, chaos: 20, seed: 1 }, { tile: true },
     { tile: true, styleRaw: true, negative: 'ugly, blurry' },
@@ -105,7 +105,10 @@ check('G1/§1.1 不变式:parts 拼回来必须逐字等于 flags', () => {
   for (const params of probes) {
     const r = P(params);
     const joined = r.parts.map(([f, v]) => (v ? `${f} ${v}` : f)).join(' ');
-    assert.strictEqual(joined, r.flags, `parts 拼接与 flags 不一致(${JSON.stringify(params)})`);
+    // 【裁定:flags 规范化优先】extraFlags 段的 parts 被 G3 锁成 ['', 原文],裸拼会多一个前导空格,
+    // 与「flags 无前导/连续空格」那条不变式不可能同时成立 —— 故恒等式取【规范化后相等】。
+    assert.strictEqual(joined.replace(/\s+/g, ' ').trim(), r.flags,
+      `parts 拼接(规范化后)与 flags 不一致(${JSON.stringify(params)});extraFlags 段的 parts 为 ['', 原文],拼接后需规范化`);
   }
 });
 check('§1.1 parts 顺序恒为声明序(--s / --c / --seed),与传入键序无关', () => {
