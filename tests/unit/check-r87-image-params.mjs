@@ -222,7 +222,11 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
   const cases = [];
   for (const protocol of ['gemini', 'chat', 'mj']) {
     for (const size of ['', '16:9', '1024x1024']) {
-      for (const refs of [[], REF]) {
+      // 【E13 / r94】mj + {name,mime,base64} 垫图已不再与基线同形:默认传法(upload)下拿不到
+      // URL 的垫图必须【抛中文 Error】(INTERFACE §4.7 / §8.1 E13),故把该入参移出基线比对集合,
+      // 改在下面单独断言抛错。gemini / chat 两协议的带 refs 分支照旧逐字比对。
+      const refSets = protocol === 'mj' ? [[]] : [[], REF];
+      for (const refs of refSets) {
         cases.push([{ protocol, ...BASE, model: protocol === 'mj' ? 'midjourney' : 'm-1', size, mjVersion: '7', mjSpeed: 'fast', extra: { foo: 1 } }, refs]);
       }
     }
@@ -245,6 +249,12 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
       assert.deepEqual(norm(buildImageRequest(withNew, '猫', refs)), norm(old.buildImageRequest(cfg, '猫', refs)),
         `t1b【新字段零影响】${label}`);
     }
+  }
+  // 【E13 / r94】上面被移出基线集合的那个入参,在这里单独钉住新契约:抛中文 Error,不静默忽略。
+  for (const size of ['', '16:9', '1024x1024']) {
+    const cfg = { protocol: 'mj', ...BASE, model: 'midjourney', size, mjVersion: '7', mjSpeed: 'fast', extra: { foo: 1 } };
+    assert.throws(() => buildImageRequest(cfg, '猫', REF), (e) => /[一-龥]/.test(String(e && e.message)),
+      `t1b【E13】mj + {name,mime,base64} 垫图必须抛中文 Error(size=${size || '空'})`);
   }
   rmSync(dir, { recursive: true, force: true });
 }

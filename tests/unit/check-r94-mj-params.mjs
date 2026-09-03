@@ -323,12 +323,17 @@ check('M4/§1.1 carrier mj 且 prompt 已手写 --ar:ar 进 dropped(already-in-p
   assert.strictEqual((r.dropped || []).find((d) => d.field === 'ar')?.reason, 'already-in-prompt');
   assert.ok(!(r.viaBody || []).some((v) => v.field === 'ar'), 'ar 不许再进 viaBody(会与手写的打架)');
 });
-check('§1.1 carrier mj-proxy:version 走 --v / --niji,ar 走 --ar', () => {
-  assert.ok(flagsOf({}, { version: '7' }).includes('--v 7'), '7 应产出 --v 7');
-  const niji = flagsOf({}, { version: 'niji7' });
-  assert.ok(niji.includes('--niji 7'), 'niji7 应产出 --niji 7');
-  assert.ok(!niji.includes('--v'), 'niji 档不许同时发 --v');
+check('§1.1 carrier mj-proxy:ar 走 --ar;版本 flag 不由本函数产出(裁定:交 buildProxyImagineRequest 拼)', () => {
+  // 【裁定】compileMjFlags 不产出 --v / --niji —— 否则与 §1.1 表里
+  // 「compileMjFlags({}, {version:'7',carrier:'mj-proxy',...}) 五个返回值均空」及十余条
+  // strictEqual(flags, '--s 250') 互斥。版本 flag 由 buildProxyImagineRequest 拼进 prompt,
+  // 正向断言在 check-r94-mj-proxy.mjs 的「§4.1 body.prompt 含编译后的 flags(--ar 与 --v)」。
   assert.ok(flagsOf({ ar: '16:9' }).includes('--ar 16:9'), 'ar 应产出 --ar 16:9');
+  for (const v of ['7', '8.2', 'niji7', 'niji6', '']) {
+    const f = flagsOf({}, { version: v });
+    assert.ok(!f.includes('--v'), `version=${v} 时本函数不许产出 --v(实得 ${JSON.stringify(f)})`);
+    assert.ok(!f.includes('--niji'), `version=${v} 时本函数不许产出 --niji(实得 ${JSON.stringify(f)})`);
+  }
 });
 check('§1.1 carrier mj-proxy + version 空串:不产出 --v 与 --niji', () => {
   const f = flagsOf({}, { version: '' });
