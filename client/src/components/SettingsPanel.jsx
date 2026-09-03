@@ -2310,8 +2310,24 @@ function GenuiSection() {
 // 状态存服务端(prefs.json 的 promptCache),因为真正写入 settings.json 的时机在 provider
 // 切换,那是服务端行为,localStorage 够不着。PUT 后服务端立刻按当前 provider 类别把
 // 两个 env 键写入/移除,再由 settings.json mtime 让常驻进程在下一条消息重开。
+// r100:settings.json 里三个键的实际取值(缺键 = 未设置)。偏好说的是"应该是什么",
+// 这里说的是"现在是什么" —— 升级前就切好第三方的用户,升级后没再切过 provider,
+// 这三项就一直是"未设置",命中率上不去且没有任何提示。
+const PROMPT_CACHE_KEY_ROWS = [
+  ['carvedSlate', 'CLAUDE_CODE_CARVED_SLATE', '1'],
+  ['toolSearch', 'ENABLE_TOOL_SEARCH', 'false'],
+  ['mcpNonblocking', 'MCP_CONNECTION_NONBLOCKING', 'false'],
+];
+// 实际值与偏好是否一致:开启时三键必须都是目标值;关闭时快照键必须不存在。
+function promptCacheMatches(state) {
+  const a = state?.actual;
+  if (!a) return true;
+  if (state.on) return PROMPT_CACHE_KEY_ROWS.every(([f, , want]) => a[f] === want);
+  return a.carvedSlate == null;
+}
+
 function PromptCacheSnapshotToggle() {
-  const [state, setState] = useState(null); // { mode, on, thirdParty, snapshotEnv, toolSearchEnv }
+  const [state, setState] = useState(null); // { mode, on, thirdParty, actual:{...}, cliSnapshotSupported }
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     fetch('/api/prompt-cache').then((r) => r.json()).then(setState).catch(() => {});
@@ -2345,6 +2361,23 @@ function PromptCacheSnapshotToggle() {
             <span className="text-amber-700">　当前不启用系统提示快照:所装的 claude 版本不支持(需 2.1.25x 及以上),或当前经 SDK 自带的 claude 运行(Windows 上用 npm 安装时会走这条路)。本项仅关闭 ToolSearch 与 MCP 阻塞连接生效。</span>
           )}
         </div>
+        {state?.actual && (
+          <div data-testid="prompt-cache-actual" className="mt-1.5 text-[10.5px] text-ink-faint font-body">
+            当前 ~/.claude/settings.json 实际状态:
+            {PROMPT_CACHE_KEY_ROWS.map(([field, key], i) => (
+              <span key={key}>
+                {i > 0 ? '、' : ''}{key}=
+                <span className={state.actual[field] == null ? 'text-ink-muted' : 'text-ink'}>
+                  {state.actual[field] == null ? '未设置' : String(state.actual[field])}
+                </span>
+              </span>
+            ))}
+            ;CLI 系统提示快照支持:{state.cliSnapshotSupported ? '是' : '否'}。
+            {!promptCacheMatches(state) && (
+              <span className="text-amber-700">　实际状态与上述设置不一致,当前未生效。重新选择一次 provider 或重启应用即可应用。</span>
+            )}
+          </div>
+        )}
       </div>
       <div className="shrink-0 flex items-center gap-1">
         {[['auto', '自动'], ['on', '开'], ['off', '关']].map(([v, label]) => (
