@@ -132,6 +132,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      # release job 原本没有 checkout —— 现在正文要带 CHANGELOG 的当轮更新记录,必须有源码。
+      - uses: actions/checkout@v6
+
       - name: Download all installers
         uses: actions/download-artifact@v8
         with:
@@ -140,7 +143,12 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
+          # 正文 = 本 tag 的更新记录(CHANGELOG 切出来,每条默认折叠)+ 原安装说明。
+          # CHANGELOG 里没有这一版的条目时 changes.md 为空,正文与加这一步之前逐字节一致。
+          node scripts/gen-changelog-md.mjs --release "$TAG" > changes.md || : > changes.md
+          [ -s changes.md ] || echo "release notes: no CHANGELOG entry for $TAG"
           cat > notes.md <<'EOF'
           未签名安装包,首次打开需手动放行。当前安装包会调用本机 Node.js 启动内置后端,运行机器需已安装 Node.js 20+ 和 Claude Code CLI。
 
@@ -162,10 +170,13 @@ jobs:
           # *.app.tar.gz / *.sig 是 updater 产物,随常规资产一起上传(latest.json 在下一步拼)。
           mapfile -d '' FILES < <(find dist-artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.msi' -o -name '*.app.tar.gz' -o -name '*.sig' \) -print0)
           printf 'Attaching: %s\n' "${FILES[@]}"
-          gh release create "${{ github.ref_name }}" \
+          : > body.md
+          if [ -s changes.md ]; then cat changes.md >> body.md; echo >> body.md; fi
+          cat notes.md >> body.md
+          gh release create "$TAG" \
             --repo "${{ github.repository }}" \
-            --title "CC-GUI ${{ github.ref_name }}" \
-            --notes-file notes.md \
+            --title "CC-GUI $TAG" \
+            --notes-file body.md \
             "${FILES[@]}"
 
       # 拼 latest.json(Tauri updater 清单)并追传到 release。
