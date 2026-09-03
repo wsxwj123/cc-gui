@@ -7,12 +7,13 @@
 // Run: node tests/unit/check-r109-changelog-md.mjs
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseChangelog } from '../../scripts/gen-release-notes.mjs';
 import {
-  splitItem, renderItem, renderVersion, renderAll, renderRelease, applyReadme, normalizeTagLinks,
+  splitItem, renderItem, renderVersion, renderAll, renderRelease, applyReadme, normalizeTagLinks, gitTags,
   START_MARK, END_MARK, DEFAULT_REPO,
 } from '../../scripts/gen-changelog-md.mjs';
 
@@ -168,8 +169,59 @@ const FIXTURE = `# 更新说明
   ok(linked.includes(`https://github.com/${DEFAULT_REPO}/releases/tag/v0.9.1`),
     't7b: 视为已存在的 tag 会渲染成 release 链接');
   ok(!plain.includes('releases/tag/'), 't7b: 不在 tags 里就没有链接');
-  eq(run(['--check', '--assume-tag', 'v99.99.99']).code, 0,
-    't7b: --check 不受 --assume-tag 影响(多传一个不存在的 tag 也不该红)');
+}
+
+// ── t7c 归一护栏:用仓库 CHANGELOG 里真实存在、但本地还没打 tag 的那一版 ────
+// 拿 99.99.99 这种不在 CHANGELOG 里的版本做样本等于没测 —— 渲染结果压根不变,
+// 把归一逻辑整个删掉断言照样绿。样本必须真的能让生成结果出现/消失一个链接。
+{
+  const changelog = readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8');
+  const tags = gitTags(ROOT);
+  const target = parseChangelog(changelog).map((e) => e.version).find((v) => !tags.includes(`v${v}`));
+  if (!target) {
+    console.log('t7c: skip —— CHANGELOG 里每个版本都已打 tag,取不到"未打 tag"的样本');
+  } else {
+    const tag = `v${target}`;
+    const linked = renderAll(changelog, { tags: [...tags, tag] });
+    ok(!renderAll(changelog, { tags }).includes(`/releases/tag/${tag}"`),
+      `t7c: ${tag} 本地没打过,不假设时该版本无链接(样本有效性前提)`);
+    ok(linked.includes(`/releases/tag/${tag}">${tag}</a>`),
+      `t7c: --assume-tag ${tag} 后该版本渲染成 release 链接`);
+
+    // 临时副本(脚本按自身位置定位 CHANGELOG/README,所以整套拷过去就能换数据)。
+    // mkdtemp 在 macOS 给的是 /var/... 符号链接,而 ESM 的 import.meta.url 是 realpath,
+    // 不 realpath 的话脚本的"我是主模块"判断不成立,CLI 直接静默什么都不做。
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'cgui-r109c-')));
+    mkdirSync(join(dir, 'scripts'));
+    for (const f of ['gen-changelog-md.mjs', 'gen-release-notes.mjs']) {
+      copyFileSync(join(ROOT, 'scripts', f), join(dir, 'scripts', f));
+    }
+    copyFileSync(join(ROOT, 'CHANGELOG.md'), join(dir, 'CHANGELOG.md'));
+    const script = join(dir, 'scripts', 'gen-changelog-md.mjs');
+    // README 里是带链接的那份,临时目录不在任何 git 仓里(git tag 拿不到东西)→ 生成的是
+    // 纯文本版。逐字节比必红,归一后必绿 —— 正是"打完 tag 后再 --check"的处境。
+    writeFileSync(join(dir, 'README.md'), `# T\n\n${START_MARK}\n\n${linked}\n\n${END_MARK}\n`);
+    const runAt = (args) => {
+      try { execFileSync(process.execPath, [script, ...args], { cwd: dir, encoding: 'utf8' }); return 0; } catch (e) { return e.status ?? 1; }
+    };
+    eq(runAt(['--check']), 0, 't7c: README 带链接、本地无该 tag → 归一后仍算同步');
+
+    // 把归一换成恒等,同一副本必须立刻变红 —— 否则上面那条断言是空的。
+    const src = readFileSync(script, 'utf8');
+    const patched = src.replace(
+      /export function normalizeTagLinks\(text\) \{[\s\S]*?\n\}/,
+      "export function normalizeTagLinks(text) {\n  return String(text ?? '');\n}",
+    );
+    ok(patched !== src, 't7c: 归一函数被成功替换成恒等(替换失败则下面那条是空断言)');
+    writeFileSync(script, patched);
+    eq(runAt(['--check']), 1, 't7c: 归一换成恒等 → --check 立刻红(证明这条真的在测归一)');
+  }
+}
+
+// ── t7d --assume-tag 取值守卫:缺值或后接 flag 一律忽略 ────────────────────
+{
+  eq(run(['--check', '--assume-tag']).code, 0, 't7d: 末尾缺值不抛,--check 照常');
+  eq(run(['--check', '--assume-tag', '--readme']).code, 0, 't7d: 后接 flag 时不把 flag 当 tag,也不误触发 --readme 写盘');
 }
 
 // ── t8 README 现状:标记段存在且渲染红线成立 ───────────────────────────────

@@ -124,7 +124,9 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   } else if (args.includes('--check') || args.includes('--readme')) {
     // --assume-tag v0.2.375(可重复):把还没打的 tag 当作已存在,发版脚本在打 tag 之前
     // 跑一次就能让本版带上 release 链接。--check 不看这个参数(链接会被归一掉)。
-    const assumed = args.map((a, i) => (a === '--assume-tag' ? args[i + 1] : null)).filter(Boolean);
+    const assumed = args
+      .map((a, i) => (a === '--assume-tag' ? args[i + 1] : null))
+      .filter((v) => v && !v.startsWith('--')); // 末尾缺值、或后面直接跟另一个 flag → 忽略
     const readme = readFileSync(DEFAULT_README, 'utf8');
     let next;
     try {
