@@ -123,6 +123,51 @@ await check('R100-9 备忘记账:第三方重应用后记下用户原值(否则�
   assert.equal(prefs.promptCache?.memo?.toolSearch, 'true', '未记账 → 切回官方时用户的 true 还不回去');
 });
 
+await check('R100-10 无键时记的原值是"缺失"(null),不是我们自己写的 false', async () => {
+  await rm(PREFS, { force: true });
+  await setMode('auto');
+  await writeSettings(THIRD);
+  await reapplyPromptCacheForActiveProvider({ reason: 'boot' });
+  const memo = JSON.parse(await readFile(PREFS, 'utf-8')).promptCache?.memo;
+  assert.equal(memo?.toolSearch ?? null, null);
+  assert.equal(memo?.mcpNonblocking ?? null, null);
+});
+
+await check('R100-11 再次启动:备忘一字不变', async () => {
+  const before = await readFile(PREFS, 'utf-8');
+  await reapplyPromptCacheForActiveProvider({ reason: 'boot' });
+  assert.equal(await readFile(PREFS, 'utf-8'), before, '每次开机重记一遍 → 备忘迟早被自己的写入污染');
+});
+
+await check('R100-12 备忘丢失 + 键已是目标值:不把自己写的 false 记成用户原值', async () => {
+  // prefs.json 被重置 / 换机拷了别人的 settings.json:三个键在、备忘空。此时若按当前 env
+  // 记账,记下的就是我们自己写的 false —— 用户日后关掉本功能会被"还原"成 false,永久残留。
+  await setMode('auto');
+  await writeSettings({
+    env: {
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:8789',
+      CLAUDE_CODE_CARVED_SLATE: '1', ENABLE_TOOL_SEARCH: 'false', MCP_CONNECTION_NONBLOCKING: 'false',
+    },
+  });
+  const r = await reapplyPromptCacheForActiveProvider({ reason: 'boot' });
+  assert.equal(r.changed, false, '三键已是目标值不该写 settings.json');
+  const memo = JSON.parse(await readFile(PREFS, 'utf-8')).promptCache?.memo;
+  assert.notEqual(memo?.toolSearch, 'false', '把自己写的 false 记成了用户原值');
+  assert.notEqual(memo?.mcpNonblocking, 'false', '把自己写的 false 记成了用户原值');
+  assert.equal(memo?.toolSearch ?? null, null);
+  assert.equal(memo?.mcpNonblocking ?? null, null);
+});
+
+await check('R100-13 上一条之后关闭本功能:三个键干净移除,不留 false 残留', async () => {
+  const { applyPromptCacheEnv } = await import('../../server/utils/prompt-cache-env.js');
+  const memo = JSON.parse(await readFile(PREFS, 'utf-8')).promptCache?.memo ?? null;
+  const env = { CLAUDE_CODE_CARVED_SLATE: '1', ENABLE_TOOL_SEARCH: 'false', MCP_CONNECTION_NONBLOCKING: 'false' };
+  applyPromptCacheEnv(env, false, memo);
+  assert.equal('CLAUDE_CODE_CARVED_SLATE' in env, false);
+  assert.equal(env.ENABLE_TOOL_SEARCH ?? null, null, 'false 被当成用户原值还原回来了');
+  assert.equal(env.MCP_CONNECTION_NONBLOCKING ?? null, null, 'false 被当成用户原值还原回来了');
+});
+
 await rm(home, { recursive: true, force: true });
 if (failures.length) {
   console.error(`check-r100-dev-reapply: ${failures.length} FAILED`);
