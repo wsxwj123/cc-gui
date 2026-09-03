@@ -362,9 +362,65 @@ export function claudeCommand(args = []) {
  */
 export function resolveSdkClaude() {
   const hit = resolveClaude();
-  if (!hit) return null;
-  if (process.platform === 'win32' && !/\.exe$/i.test(hit.path)) return null;
-  return hit.path;
+  return hit ? resolveSdkClaudeFrom(hit.path) : null;
+}
+
+/**
+ * resolveSdkClaude 的纯函数内核(platform/existsSync/readFileSync 可注入,便于在 mac 上
+ * 用临时目录模拟 Windows 布局单测)。
+ *
+ * r106:Windows 上 npm 全局装出来的入口是 `<prefix>\claude.cmd`(批处理 shim,SDK 的
+ * spawn 起不来)→ 旧实现一律返 null → SDK 改用自带的旧 CLI(claudeCodeVersion 2.1.191,
+ * 不认 --system-prompt-snapshot)→ 系统提示每次冷启重算,第三方缓存命中率忽高忽低。
+ * 但真二进制就在同一份 npm 布局里:`<prefix>\node_modules\@anthropic-ai\claude-code\bin\claude.exe`,
+ * SDK 完全可以直接 spawn 它。坏壳包(postinstall 没落真二进制、bin 还是 ASCII stub)仍返
+ * null —— 宁可回落自带 CLI,也不能把一个跑不起来的文件交给 SDK。
+ */
+export function resolveSdkClaudeFrom(hitPath, {
+  platform = process.platform,
+  existsSync: exists = existsSync,
+  readFileSync: readFn = null,
+} = {}) {
+  if (!hitPath) return null;
+  if (platform !== 'win32' || /\.exe$/i.test(hitPath)) return hitPath;
+  const pkgDir = npmPkgDirFor(hitPath, exists);
+  if (!pkgDir) return null;
+  const binTarget = join(pkgDir, 'bin', 'claude.exe');
+  if (!exists(binTarget)) return null;
+  // 两道判定:① 壳包(≥2.1.227,包内有 install.cjs)由 classifyShim 判"装完没";
+  // ② 非壳包 classifyShim 返 null,由文件头判定兜底。任一说不是真 PE 就放弃。
+  if (classifyShim(hitPath, pkgDir)?.broken) return null;
+  if (!isWinPeFile(binTarget, readFn)) return null;
+  return binTarget;
+}
+
+// bin\claude.exe 是不是真 PE(而非 ASCII 假启动器)。这条路只在 Windows 上走,PE 的 'MZ'
+// 是唯一合法头 —— 不复用 sniffBinaryKind(它把 Mach-O/ELF 也算 binary,那些在 Windows 上
+// 照样起不来)。只读前 2 字节,不整份读入(真二进制 80MB+)。readFileSync 注入仅为单测。
+function isWinPeFile(p, readFn) {
+  try {
+    if (readFn) { const b = Buffer.from(readFn(p)); return b[0] === 0x4D && b[1] === 0x5A; }
+    const fd = openSync(p, 'r');
+    try {
+      const b = Buffer.alloc(2);
+      return readSync(fd, b, 0, 2, 0) === 2 && b[0] === 0x4D && b[1] === 0x5A;
+    } finally { closeSync(fd); }
+  } catch { return false; }
+}
+
+// r106:一行日志说明 SDK 这次实际驱动的是哪个 claude(Windows npm 装的会被上面推成包内
+// exe,排查"缓存命中忽高忽低"时第一眼就要看到它)。每个路径只打一次;--version 异步探测,
+// 不阻塞事件循环。只打路径与版本号,不碰环境变量/密钥。
+const _sdkLogged = new Set();
+export function logSdkClaudeOnce(claudePath, log = console.log) {
+  const key = String(claudePath || '');
+  if (_sdkLogged.has(key)) return;
+  _sdkLogged.add(key);
+  if (!key) { log('[chat] sdk claude: (SDK 自带 CLI —— 未解析到可直接执行的 claude)'); return; }
+  const spec = claudeExecSpec(key, ['--version']);
+  safeExecAsync(spec.file, spec.args, 8000)
+    .then((out) => log(`[chat] sdk claude: ${key} → ${String(out).split(/\r?\n/)[0] || '(--version 无输出)'}`))
+    .catch(() => {}); // 纯日志,注入的 log 抛异常也不能变成 unhandled rejection
 }
 
 /**
@@ -408,7 +464,8 @@ export function sniffBinaryKind(p) {
 // ① real 已在包内(mac 的 bin/claude 软链解析后、直扫 pkgBin 命中);
 // ② real 是 shim(Windows 的 <prefix>\claude.cmd 非软链 / 断链 shim),按 npm 布局
 //    从所在目录猜 node_modules 落点(win 平铺 / *nix lib/node_modules 两种)。
-function npmPkgDirFor(real) {
+// exists 可注入(r106:resolveSdkClaudeFrom 要在 mac 上按注入的 fs 模拟 Windows 布局)。
+function npmPkgDirFor(real, exists = existsSync) {
   const norm = String(real).replace(/\\/g, '/');
   const m = norm.match(/^(.*\/node_modules\/@anthropic-ai\/claude-code)\//i);
   if (m) return m[1];
@@ -416,7 +473,7 @@ function npmPkgDirFor(real) {
   for (const c of [
     `${dir}/node_modules/@anthropic-ai/claude-code`,
     `${dir.replace(/\/bin$/, '')}/lib/node_modules/@anthropic-ai/claude-code`,
-  ]) { try { if (existsSync(c)) return c; } catch {} }
+  ]) { try { if (exists(c)) return c; } catch {} }
   return null;
 }
 

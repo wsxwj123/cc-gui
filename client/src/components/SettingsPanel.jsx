@@ -2357,7 +2357,11 @@ function PromptCacheSnapshotToggle() {
           只开本项第 2 轮命中 99.0%,只开旧开关 0.0%,两者同开 99.0%,旧开关无额外收益。
           {state ? `　当前:${state.on ? '已开启' : '未开启'}(${state.thirdParty ? '第三方 provider' : '官方渠道'})` : ''}
           {state && state.cliSnapshotSupported === false && (
-            <span className="text-amber-700">　当前不启用系统提示快照:所装的 claude 版本不支持(需 2.1.25x 及以上),或当前经 SDK 自带的 claude 运行(Windows 上用 npm 安装时会走这条路)。本项仅关闭 ToolSearch 与 MCP 阻塞连接生效。</span>
+            <span className="text-amber-700">　当前不启用系统提示快照:所装的 claude 版本不支持(需 2.1.25x 及以上),或当前经 SDK 自带的 claude 运行(Windows 上用 npm 安装时会走这条路)。本项仅关闭 ToolSearch 与 MCP 阻塞连接生效。
+              {state.platform === 'win32' && (
+                <>{'　npm 安装的真二进制位于 %APPDATA%\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe:若该文件缺失或仍是文本占位(postinstall 未落地),用 GUI 的 npm 安装器重装,或改用官方原生安装器。'}</>
+              )}
+            </span>
           )}
         </div>
         {state?.actual && (

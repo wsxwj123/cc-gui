@@ -12,7 +12,7 @@ import { findSessionFile, readSessionTitles } from '../services/session-reader.j
 import { dropPendingForSession, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
-import { resolveClaude, resolveSdkClaude } from '../utils/claude-resolver.js';
+import { resolveClaude, resolveSdkClaude, logSdkClaudeOnce } from '../utils/claude-resolver.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { contextTimeoutBudget, latestCountTokensOutcome } from '../utils/context-tokens.js';
 import { canonicalCwd } from '../utils/safe-path.js';
@@ -1597,6 +1597,9 @@ router.post('/chat', async (req, res) => {
   if (sessionId) options.resume = sessionId;
   const claudePath = resolveUserClaude();
   if (claudePath) options.pathToClaudeCodeExecutable = claudePath;
+  // r106:一行日志钉死"这次到底由哪个 claude 在跑"(空 = SDK 自带的旧 CLI)。缓存命中率
+  // 忽高忽低、快照 flag 加不加,全取决于它。每个路径只打一次,--version 异步探测。
+  logSdkClaudeOnce(claudePath);
   // r89:静态系统提示快照的另一半(见 resolveSnapshotOn)。**必须过版本门**——
   // --system-prompt-snapshot 只有 2.1.25x+ 认,老 CLI 收到直接 `error: unknown option`
   // 退进程(实测 2.1.252),而 settings.json 里的 CARVED_SLATE 对老版本无害,

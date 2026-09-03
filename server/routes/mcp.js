@@ -1,13 +1,13 @@
 import { Router } from 'express';
 import { readFile, readdir, stat, writeFile, mkdir } from 'fs/promises';
 import { join, sep, dirname } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, readdirSync } from 'fs';
 import { homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { syncMcpToAgents } from './agents.js';
 import { assertPublicBaseURL } from './settings.js';
-import { claudeCommand } from '../utils/claude-resolver.js';
+import { claudeCommand, winLivePathDirsAsync } from '../utils/claude-resolver.js';
 import { detectUv, detectLocalProxy, probeTcp, isLoopbackProxyHost } from './version-check.js';
 import { searchRegistry, browseRegistry } from '../services/mcp-registry.js';
 
@@ -27,17 +27,104 @@ async function readRawMcpConfig(name) {
 // shell 字符串拼接;.exe / 非 Windows 直接 spawn。解析失败原样返回,由 spawn 报 ENOENT。
 async function spawnMcpCommand(command, args, opts) {
   if (process.platform !== 'win32') return spawn(command, args, opts);
-  let resolved = command;
-  if (!/[\\/]/.test(command)) {
-    try {
-      const { stdout } = await execFileP('where', [command], { timeout: 5000 });
-      const hits = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-      // 裸名可能同时命中无扩展名 shim 与 .cmd/.exe:优先可直接执行的扩展名。
-      resolved = hits.find((h) => /\.(exe|cmd|bat)$/i.test(h)) || hits[0] || command;
-    } catch { /* where 失败:原样交给 spawn 报错 */ }
-  }
-  if (/\.(cmd|bat)$/i.test(resolved)) return spawn('cmd.exe', ['/c', resolved, ...args], opts);
+  const hit = await resolveMcpCommandWin(command, opts?.env);
+  // 解析不出就原样交给 spawn:子进程 env 可能自带更全的 PATH(cfg.env 覆盖),
+  // 不能因为本进程找不到就先行拒绝。真失败时 ENOENT 由调用方翻成 missingCommandHint。
+  const resolved = hit?.file || command;
+  const viaCmd = hit ? hit.viaCmd : /\.(cmd|bat)$/i.test(resolved);
+  if (viaCmd) return spawn('cmd.exe', ['/c', resolved, ...args], opts);
   return spawn(resolved, args, opts);
+}
+
+// r106:GUI 后端进程的 PATH 是**启动时快照**,uv 装在 %USERPROFILE%\.local\bin(pipx/scoop/
+// Python Scripts 同理)常不在其中 → `where uvx` 落空 → 原样 spawn('uvx') 报 ENOENT
+// ("The system cannot find the file specified")。where 落空时再按已知安装目录探测。
+// where 优先(那是 CLI 自己起 MCP 时的同源解析),候选只作兜底。
+// 返回 { file, viaCmd, viaCandidates } 或 null(解析不出);viaCandidates=true 表示"只有候选
+// 目录找得到" —— CLI 自己起这个 MCP 时同样会找不到,添加/编辑端点据此提示用户改填绝对路径。
+async function resolveMcpCommandWin(command, env = process.env) {
+  if (process.platform !== 'win32' || !command || /[\\/]/.test(command)) return null;
+  try {
+    const { stdout } = await execFileP('where', [command], { timeout: 5000 });
+    const hits = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    // 裸名可能同时命中无扩展名 shim 与 .cmd/.exe:优先可直接执行的扩展名。
+    const hit = hits.find((h) => /\.(exe|cmd|bat)$/i.test(h)) || hits[0] || '';
+    if (hit) return { file: hit, viaCmd: /\.(cmd|bat)$/i.test(hit), viaCandidates: false };
+  } catch { /* where 失败(不在 PATH):落到候选目录 */ }
+  const cand = resolveWinCommand(command, { env, liveDirs: await winLivePathDirsAsync() });
+  return cand ? { ...cand, viaCandidates: true } : null;
+}
+
+/**
+ * 裸命令名 → Windows 上的真实可执行文件(纯函数:env/existsSync/readdirSync/liveDirs 全可
+ * 注入,便于在 mac 上模拟 Windows 布局单测)。命中返回 { file, viaCmd },找不到返回 null。
+ * viaCmd=true(.cmd/.bat)时调用方必须包 cmd.exe /c —— Node 拒绝直跑批处理。
+ * 候选顺序:注册表实时 PATH(liveDirs,治"装了但当前进程 PATH 是旧快照")→ uv/pipx 的
+ * ~\.local\bin → cargo → npm 全局 → Python Scripts(版本号目录要枚举)→ scoop shims。
+ * 目录顺序优先于扩展名:先按目录排,同一目录内 .exe > .cmd > .bat。
+ * 入参一律容错(liveDirs 非数组/含非字符串、env 缺键、readdirSync 抛错)——这些值来自
+ * 注册表/环境,不是可信输入,不能因为脏数据让整条 MCP 启动链路抛异常。
+ */
+export function resolveWinCommand(command, {
+  env = process.env,
+  existsSync: exists = existsSync,
+  readdirSync: readdir = readdirSync,
+  liveDirs = [],
+} = {}) {
+  const name = String(command || '').trim();
+  if (!name || /[\\/]/.test(name)) return null;
+  const e = env || {};
+  const home = e.USERPROFILE || e.HOME || '';
+  const appData = e.APPDATA || (home ? join(home, 'AppData', 'Roaming') : '');
+  const localApp = e.LOCALAPPDATA || (home ? join(home, 'AppData', 'Local') : '');
+  // Python 装在 Python3XX 这种版本号目录里,只能枚举父目录(没有 glob)。
+  const listDir = (d) => { try { const r = readdir(d); return Array.isArray(r) ? r.map(String) : []; } catch { return []; } };
+  const pyScripts = (base) => (base ? listDir(base).filter((d) => /^Python3/i.test(d)).map((d) => join(base, d, 'Scripts')) : []);
+  const dirs = [
+    ...(Array.isArray(liveDirs) ? liveDirs : []).filter((d) => typeof d === 'string' && d),
+    home && join(home, '.local', 'bin'),      // uv / pipx / 官方原生安装器
+    home && join(home, '.cargo', 'bin'),
+    appData && join(appData, 'npm'),          // npm 全局(npx 等)
+    ...pyScripts(localApp && join(localApp, 'Programs', 'Python')),
+    ...pyScripts(appData && join(appData, 'Python')),
+    home && join(home, 'scoop', 'shims'),
+  ].filter(Boolean);
+  const exts = /\.(exe|cmd|bat)$/i.test(name) ? [''] : ['.exe', '.cmd', '.bat'];
+  const hit = (p) => ({ file: p, viaCmd: /\.(cmd|bat)$/i.test(p) });
+  for (const d of dirs) {
+    // 先枚举目录:盘上可能是 UVX.EXE 这种大小写(Windows 文件系统本身不敏感),按真名匹配
+    // 才能返回可直接 spawn 的真实路径。列不了目录(不存在/无权限/注入的 fs)才回落存在性判断。
+    const entries = listDir(d);
+    for (const ext of exts) {
+      const want = (name + ext).toLowerCase();
+      const found = entries.find((n) => n.toLowerCase() === want);
+      if (found) return hit(join(d, found));
+    }
+    if (entries.length) continue;
+    for (const ext of exts) {
+      try { if (exists(join(d, name + ext))) return hit(join(d, name + ext)); } catch {}
+    }
+  }
+  return null;
+}
+
+// 命令确实找不到时给用户的人话(替代裸 ENOENT / "The system cannot find the file specified")。
+// export 仅为可单测。
+export function missingCommandHint(name, platform = process.platform) {
+  const example = platform === 'win32' ? 'C:\\Users\\<你>\\.local\\bin\\uvx.exe' : '/opt/homebrew/bin/uvx';
+  return `找不到命令 ${name}:请确认已安装该工具且其目录在 PATH 中,或在命令框填写绝对路径(如 ${example})`;
+}
+
+// 添加/编辑 MCP 时的提示:命令是裸名且只有候选目录找得到 → claude 自己起它时同样可能
+// 找不到。只提示,不自动改写配置(自动改写见 rewriteUvCommandLine,那是 uv 垫片的专项修复)。
+async function absCommandHint(commandLine) {
+  if (process.platform !== 'win32') return '';
+  const { command } = parseCommandLine(commandLine);
+  if (!command) return '';
+  const hit = await resolveMcpCommandWin(command);
+  if (!hit?.viaCandidates) return '';
+  return `命令 ${command} 不在 GUI 启动时的 PATH 快照里(已在 ${hit.file} 找到)。`
+    + 'claude 自己启动该 MCP 时可能同样找不到它,建议把命令改成该绝对路径。';
 }
 
 // 直接 spawn stdio MCP 的命令抓早期 stderr —— `claude mcp get` 只报 "Failed to connect",
@@ -72,7 +159,7 @@ async function probeStdioStderr(cfg, timeoutMs = 6000) {
     };
     child.stderr?.on('data', (d) => { stderr += d.toString(); });
     child.on('error', (e) => finish(e.code === 'ENOENT'
-      ? `\n命令未找到: ${cfg.command}(不在 PATH 中 —— 该命令需要的运行时可能没装,或装了但 GUI 启动环境的 PATH 没包含它)`
+      ? `\n${missingCommandHint(cfg.command)}`
       : `\n${e.message}`));
     child.on('exit', (code) => finish(code ? `\n(子进程退出码 ${code})` : ''));
     timer = setTimeout(() => finish(), timeoutMs);
@@ -183,7 +270,7 @@ export async function listToolsFromCfg(cfg, timeoutMs = 15000) {
       try { if (isWin && child?.pid) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); else child?.kill('SIGKILL'); } catch {}
       resolve({ transport: 'stdio', tools, note });
     };
-    child.on('error', (e) => finish(null, `启动失败: ${e.message}`));
+    child.on('error', (e) => finish(null, e.code === 'ENOENT' ? missingCommandHint(cfg.command) : `启动失败: ${e.message}`));
     const send = (o) => { try { child.stdin.write(JSON.stringify(o) + '\n'); } catch {} };
     // 按行解析 JSON-RPC,拿到 id:2(tools/list)的 result 即完成。
     child.stdout.on('data', (d) => {
@@ -917,7 +1004,8 @@ router.post('/mcp', async (req, res) => {
     try { const dis = await readDisabled(); if (dis[b.name]) { delete dis[b.name]; await writeDisabled(dis); } } catch {}
     try { await syncMcpToAgents({ add: [b.name] }); } catch {} // 自动让所有 agent 能用这个 MCP
     invalidateMcpCache();
-    res.json({ ok: true, name: b.name, ...(droppedHeaderKeys.length ? { warning: droppedHeaderWarning(droppedHeaderKeys) } : {}) });
+    const hint = transport === 'stdio' ? await absCommandHint(b.commandLine) : '';
+    res.json({ ok: true, name: b.name, ...(hint ? { hint } : {}), ...(droppedHeaderKeys.length ? { warning: droppedHeaderWarning(droppedHeaderKeys) } : {}) });
   } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
@@ -952,7 +1040,8 @@ router.put('/mcp/:name/config', async (req, res) => {
     // 改名:同步各 agent 的工具引用(旧名移除、新名加入);同名编辑无需动。
     if (newName !== name) { try { await syncMcpToAgents({ add: [newName], remove: [name] }); } catch {} }
     invalidateMcpCache();
-    res.json({ ok: true, name: newName, ...(droppedHeaderKeys.length ? { warning: droppedHeaderWarning(droppedHeaderKeys) } : {}) });
+    const hint = transport === 'stdio' ? await absCommandHint(b.commandLine) : '';
+    res.json({ ok: true, name: newName, ...(hint ? { hint } : {}), ...(droppedHeaderKeys.length ? { warning: droppedHeaderWarning(droppedHeaderKeys) } : {}) });
   } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
