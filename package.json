@@ -12,6 +12,7 @@
     "build": "node scripts/public-build.cjs build",
     "build:local": "node scripts/gen-release-notes.mjs && cd client && npx eslint src && npx vite build",
     "build:tauri": "node scripts/require-public-build.cjs && npm run build:local",
+    "gen:readme-changelog": "node scripts/gen-changelog-md.mjs --readme",
     "audit:public": "node scripts/audit-public.cjs",
     "smoke:http": "node scripts/check-http-smoke.cjs",
     "test:file-changes": "node scripts/check-file-changes.mjs",
