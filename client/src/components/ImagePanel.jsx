@@ -1059,6 +1059,9 @@ export default function ImagePanel() {
   const needRefUpload = mjRefModeFor(selected) === 'upload' && refs.some((r) => refRole(r) === 'image' && isLocalRef(r));
   const refModeUrlOnly = mjRefModeFor(selected) === 'url' && refs.some((r) => refRole(r) === 'image' && isLocalRef(r));
   const localNonImageRef = mjSelected && refs.some((r) => refRole(r) !== 'image' && isLocalRef(r));
+  // 三条同步协议(openai / gemini / chat)发的是图片内容本身,不接受图片链接 —— 服务端会
+  // 当场 400,这里同样先说清楚,别让用户以为链接生效了。
+  const urlRefOnNonMj = !!selected && !mjSelected && refs.some((r) => r.kind === 'url');
   // r94「将要发送」:与服务端【同一个函数】编译,所以这里显示的串就是条目里的 mjPromptSent。
   // 速度先过 mjEffectiveSpeed:8.x 上的 turbo 会按 fast 下发(provider 里存的值不变)。
   const mjSpeedEff = mjEffectiveSpeed(selected?.mjVersion, selected?.mjSpeed);
@@ -1083,6 +1086,10 @@ export default function ImagePanel() {
       ? (mjHasFlag('--niji') ? '' : `--niji ${mjCapsSel.base}`)
       : (mjHasFlag('--v') ? '' : `--v ${mjCapsSel.base}`);
   const mjPromptSent = [mjCompiled.prompt, mjVersionFlag].filter(Boolean).join(' ');
+  // mj-proxy 只在 fast / turbo 时真发 accountFilter.modes(§4.1),relax 什么都不发 ——
+  // 预览再写"由账号筛选发送"就是撒谎:那一档实际由上游账号自己决定。
+  const mjProxyRelax = selected?.protocol === 'mj-proxy' && !['fast', 'turbo'].includes(mjSpeedEff.speed);
+  const mjViaBody = mjCompiled.viaBody.filter((v) => !(mjProxyRelax && v.field === 'speed'));
   // 本次覆盖:空串 = 清掉这次的覆盖(回到 provider 默认值);布尔的 false 要留下 —— 那是
   // "这一单不要这个开关",删掉就变成了"跟随默认"。
   const setMjOverride = (f, val) => setMjOverrides((cur) => {
@@ -1261,6 +1268,10 @@ export default function ImagePanel() {
       setErr('当前 provider 的垫图传法只接受公网图片链接：请把垫图传法改成 upload 或 inline，或先自行把图片传到图床后用「添加图片链接」填进来');
       return;
     }
+    if (urlRefOnNonMj) {
+      setErr('该 provider 的协议不接受图片链接形式的参考图：请改用「添加参考图」选择本地文件，或用任务列表里的「以此图修改」引用已生成的图');
+      return;
+    }
     if (localNonImageRef) {
       setErr('角色 / 风格参考（--cref / --oref / --sref）的值只能是公网图片链接：请对该图先「上传换链接」，或直接用「添加图片链接」填一个链接');
       return;
@@ -1414,16 +1425,24 @@ export default function ImagePanel() {
   // 动作入口随之消失。
   const protocolOf = (h) => providers.find((p) => p.id === h.providerId)?.protocol || '';
   /**
-   * r94 单图条目的动作条。四宫格走缩略条(按第几张),单图任务只能按【上游给的按钮】操作:
-   * 「真放大」(upsample_v*_2x_subtle/creative、upsample_v5_2x/4x)只可能出现在这里 ——
-   * 四宫格父任务的按钮里从来没有它。拿不到按钮时不回落出假按钮,而是如实说明该站没有真放大:
-   * 回落出来的 U/V 打在单图任务上要么无意义要么白花钱。
+   * r94 单文件条目的动作条。四宫格(多文件)走缩略条,这里管两种单文件条目:
+   *  · 上游给了按钮 —— 逐个渲染,「真放大」(upsample_v*)只可能出现在这里,四宫格父任务的
+   *    按钮里从来没有它;
+   *  · midjourney-proxy 原版拿不到按钮 —— 但它的一张图【本身就是四宫格】,退化成按第几张
+   *    操作(action+index 走 /mj/submit/change),否则这条路在界面上根本点不到。
+   * 由 pick / upscale 动作产生的单图条目不给 index 回落:那张图不是四宫格,按第几张操作
+   * 要么无意义要么白花钱。
    */
   const mjSoloBar = (h) => {
     if (h.status !== 'done' || entryFiles(h).length > 1) return null;
     if (!h.taskId || !isMjProtocol(protocolOf(h))) return null;
-    const acts = mjActionsFor({ buttons: h.mjButtons, protocol: protocolOf(h), imageCount: 1 })
+    const fromButtons = mjActionsFor({ buttons: h.mjButtons, protocol: protocolOf(h), imageCount: 1 })
       .filter((a) => a.mode === 'customId' && MJ_RENDERED_KINDS.includes(a.kind));
+    // 一张图就是一整个四宫格 = 该协议的 imagine 结果(动作产物不算)。
+    const isProxyGrid = protocolOf(h) === 'mj-proxy' && !h.mjAction;
+    const acts = fromButtons.length
+      ? fromButtons
+      : (isProxyGrid ? mjActionsFor({ buttons: [], protocol: protocolOf(h), imageCount: MJ_GRID_POSITIONS.length }) : []);
     if (!acts.length) {
       return <div className="text-[9.5px] text-ink-faint font-body leading-snug">{MJ_NO_UPSCALE_NOTE}</div>;
     }
@@ -1436,11 +1455,13 @@ export default function ImagePanel() {
               key={act.id}
               disabled={!!actionBusy}
               onClick={() => submitAction(h, act)}
-              title={act.kind === 'upscale'
-                ? `${act.label}：由上游按原图重绘出更大的图，结果记为新任务（要计费）`
-                : `${act.label}：结果记为新任务（要计费）`}
+              title={act.mode === 'index'
+                ? `${act.label}：作用于四宫格的第 ${act.index} 张（${MJ_GRID_POSITIONS[act.index - 1] || ''}）。${act.kind === 'pick' ? MJ_PICK_NOTE : ''}结果记为新任务（要计费）`
+                : (act.kind === 'upscale'
+                  ? `${act.label}：由上游按原图重绘出更大的图，结果记为新任务（要计费）`
+                  : `${act.label}：结果记为新任务（要计费）`)}
               className="px-1.5 py-0.5 rounded border border-canvas-deep text-[9.5px] text-ink-soft font-body hover:bg-accent hover:text-on-accent disabled:opacity-50"
-            >{act.label}</button>
+            >{act.label}{act.mode === 'index' ? ` ${MJ_ACTION_TAG[act.kind] || ''}${act.index}` : ''}</button>
           ))}
         </div>
         {!acts.some((a) => a.kind === 'upscale') && (
@@ -1609,7 +1630,8 @@ export default function ImagePanel() {
             <button
               type="button"
               onClick={addRefUrl}
-              disabled={!refUrlDraft.trim() || refs.length >= MAX_REFS}
+              disabled={!refUrlDraft.trim() || refs.length >= MAX_REFS || (!!selected && !mjSelected)}
+              title={selected && !mjSelected ? '该协议不接受图片链接形式的参考图，请用「添加参考图」选择本地文件' : '把公网图片链接加为参考图'}
               className="shrink-0 px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50"
             >添加图片链接</button>
           </div>
@@ -1695,6 +1717,11 @@ export default function ImagePanel() {
               角色 / 风格参考（--cref / --oref / --sref）的值只能是公网图片链接：请对该图先「上传换链接」（仅 apimart 形态的 mj 协议提供上传端点），或直接用「添加图片链接」填链接。
             </div>
           )}
+          {urlRefOnNonMj && (
+            <div className="text-[10px] text-error font-body leading-snug">
+              该 provider 的协议（{selected.protocol}）发送的是图片内容本身，不接受图片链接：请移除链接型参考图，改用「添加参考图」选择本地文件。
+            </div>
+          )}
           {selected?.protocol === 'mj-proxy' && refs.length > 0 && (
             <div className="text-[10px] text-ink-faint font-body leading-snug">
               该协议的垫图固定以 base64 随请求提交，本地图片可直接使用；角色 / 风格参考仍只能填公网图片链接。
@@ -1737,9 +1764,14 @@ export default function ImagePanel() {
             </div>
             <div className="text-[10px] text-ink-faint font-body leading-snug">
               比例 {selected.size || '未指定'} · 版本 {selected.mjVersion || '未指定'} · 速度 {mjSpeedEff.speed || '默认（relax）'}
-              {mjCompiled.viaBody.length > 0 && `（${mjCompiled.viaBody.map((v) => MJ_VIA_BODY_LABEL[v.field] || v.field).join(' / ')} 由${selected.protocol === 'mj' ? '结构化字段' : '账号筛选（accountFilter）'}发送，不进提示词）`}
+              {mjViaBody.length > 0 && `（${mjViaBody.map((v) => MJ_VIA_BODY_LABEL[v.field] || v.field).join(' / ')} 由${selected.protocol === 'mj' ? '结构化字段' : '账号筛选（accountFilter）'}发送，不进提示词）`}
               ，三项在 provider 里改。
             </div>
+            {mjProxyRelax && selected.mjSpeed && (
+              <div className="text-[10px] text-ink-faint font-body leading-snug">
+                该协议只在 fast / turbo 时按账号筛选（accountFilter）挑账号，relax 不随请求发送：实际档位由上游账号决定。
+              </div>
+            )}
             {mjSpeedEff.note && (
               <div className="text-[10px] text-ink-faint font-body leading-snug">{mjSpeedEff.note}</div>
             )}
@@ -1905,6 +1937,7 @@ export default function ImagePanel() {
                 </div>
               )}
               <div className="px-1.5 py-1 space-y-1">
+                {h.speedNote ? <div className="text-[9.5px] text-ink-faint font-body leading-snug">{h.speedNote}</div> : null}
                 {imageStrip(h)}
                 {mjSoloBar(h)}
                 <div className="flex items-start gap-1">
@@ -1968,6 +2001,7 @@ export default function ImagePanel() {
                   {paidNote(h) ? ` · ${paidNote(h)}` : ''}
                   {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
                 </div>
+                {h.speedNote ? <div className="text-[9.5px] text-ink-faint font-body leading-snug">{h.speedNote}</div> : null}
                 {imageStrip(h)}
                 {mjSoloBar(h)}
               </div>

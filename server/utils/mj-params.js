@@ -220,7 +220,10 @@ export function compileMjFlags(params, opts) {
   if (speed) viaBody.push({ field: 'speed', bodyKey: carrier === 'mj' ? 'speed' : 'accountFilter.modes' });
 
   // 长度闸只管 flags 段:提示词本体再长也不该挤掉一个 `--s 250`(上游对正文另有自己的限制)。
-  const render = (list) => list.map(([f, v]) => (v ? `${f} ${v}` : f)).join(' ');
+  // 末尾统一规范化(去首尾空白 + 连续空白压成一个空格):extraFlags 那一段没有 flag 名
+  // (parts 里是 ['', 原文]),按上面的公式拼出来会带一个前导空格 —— 拼进提示词就是
+  // `cat  --sv 4` 这种双空格,违反 §1.1 的"不以空白开头、无连续空白"两条不变式。
+  const render = (list) => list.map(([f, v]) => (v ? `${f} ${v}` : f)).join(' ').replace(/\s+/g, ' ').trim();
   while (parts.length && render(parts).length > MAX_FLAGS_LEN) {
     const [flag] = parts.pop();
     const spec = SPEC.find((s) => s.flag === flag) || SPEC[SPEC.length - 1];
