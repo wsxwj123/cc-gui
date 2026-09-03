@@ -52,8 +52,8 @@ function readOverride() {
   return (path && !paused) ? path : '';
 }
 
-function safeExec(file, args, timeout = 5000, extra = {}) {
-  try { return execFileSync(file, args, { timeout, ...extra }).toString().trim(); } catch { return ''; }
+function safeExec(file, args, timeout = 5000) {
+  try { return execFileSync(file, args, { timeout }).toString().trim(); } catch { return ''; }
 }
 
 // 同 safeExec,但**非零退出也救回已捕获的 stdout**。交互登录 shell(`$SHELL -ilc`)常因
@@ -135,14 +135,12 @@ function npmPrefixCandidates(prefix) {
     ? [join(prefix, 'claude.exe'), join(prefix, 'claude.cmd'), pkgBin]
     : [join(prefix, 'bin', 'claude'), pkgBin];
 }
-// r110:Windows 上 npm 是 npm.cmd(无 npm.exe),必须经 cmd.exe;组装统一走 winCmdSpawnSpec,
-// 不再手拼 —— 全 server 只留这一套 cmd 引号规则。
-const NPM_PREFIX_SPEC = isWin ? winCmdSpawnSpec('npm', ['config', 'get', 'prefix'], {})
-                              : { file: 'npm', args: ['prefix', '-g'], opts: {} };
+const NPM_PREFIX_ARGS = isWin ? ['cmd.exe', ['/c', 'npm', 'config', 'get', 'prefix'], 6000]
+                              : ['npm', ['prefix', '-g'], 6000];
 const WIN_LIVE_PATH_PS = "[Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')";
 
 function fromNpmPrefix() {
-  return npmPrefixCandidates(safeExec(NPM_PREFIX_SPEC.file, NPM_PREFIX_SPEC.args, 6000, NPM_PREFIX_SPEC.opts).trim());
+  return npmPrefixCandidates(safeExec(NPM_PREFIX_ARGS[0], NPM_PREFIX_ARGS[1], NPM_PREFIX_ARGS[2]).trim());
 }
 // 异步版策略(仅 listClaudeInstallsAsync 用,不阻塞事件循环)。
 async function fromPathAsync() {
@@ -150,7 +148,7 @@ async function fromPathAsync() {
   return (await safeExecAsync('which', ['claude'])).split(/\r?\n/)[0] || '';
 }
 async function fromNpmPrefixAsync() {
-  return npmPrefixCandidates((await safeExecAsync(NPM_PREFIX_SPEC.file, NPM_PREFIX_SPEC.args, 6000, NPM_PREFIX_SPEC.opts)).trim());
+  return npmPrefixCandidates((await safeExecAsync(NPM_PREFIX_ARGS[0], NPM_PREFIX_ARGS[1], NPM_PREFIX_ARGS[2])).trim());
 }
 async function fromWinLivePathAsync() {
   if (!isWin) return [];

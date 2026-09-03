@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
 import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim, claudeExecSpec } from '../utils/claude-resolver.js';
-import { winCmdSpawnSpec, winStartSpec } from '../utils/win-cmd.js';
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR, probeNpm } from '../utils/env-scanner.js';
 import { gfetch } from '../utils/github-fetch.js'; // r14-1:GitHub 直连失败/限流自动走本机代理
 import { fileURLToPath } from 'url';
@@ -173,12 +172,10 @@ export async function resolveUserNpmRegistry() { // export 仅为可单测
   if (npmRegistryCache && now - npmRegistryCachedAt < CACHE_TTL_MS) return npmRegistryCache;
   let url = '';
   try {
-    // Windows 上 npm 是 npm.cmd,execFile 不能直接执行,须经 cmd.exe(与 getClaudeVersion 同款)。
-    // r110:组装走 winCmdSpawnSpec —— 全 server 只留这一套 cmd 引号规则。
-    const spec = process.platform === 'win32'
-      ? winCmdSpawnSpec('npm', ['config', 'get', 'registry'], {})
-      : { file: 'npm', args: ['config', 'get', 'registry'], opts: {} };
-    const r = await execFileP(spec.file, spec.args, { timeout: 8000, ...spec.opts });
+    // Windows 上 npm 是 npm.cmd,execFile 不能直接执行,经 cmd.exe /c(与 getClaudeVersion 同款)
+    const r = process.platform === 'win32'
+      ? await execFileP('cmd.exe', ['/c', 'npm', 'config', 'get', 'registry'], { timeout: 8000 })
+      : await execFileP('npm', ['config', 'get', 'registry'], { timeout: 8000 });
     url = String(r.stdout || '').trim();
   } catch { url = ''; }
   if (!/^https?:\/\/\S+$/.test(url)) url = 'https://registry.npmmirror.com';
@@ -796,10 +793,8 @@ function launchInTerminal(cmd, title, proxyUrl = null) {
     const file = join(tmpdir(), `${stamp}.bat`);
     const proxyLine = proxyUrl ? `set HTTP_PROXY=${proxyUrl}\r\nset HTTPS_PROXY=${proxyUrl}\r\necho (代理: ${proxyUrl})\r\n` : '';
     writeFileSync(file, `@echo off\r\necho ▶ ${title}\r\n${proxyLine}${cmd}\r\necho.\r\necho ===== 完成,按任意键关闭 =====\r\npause >nul\r\n`);
-    // start "" <file> — 空标题占位,避免把文件路径当成窗口标题(r110:组装走 winStartSpec,
-    // tmpdir 落在带 `&` 的用户名下时不再被 cmd 劈成两条命令)。
-    const openSpec = winStartSpec(file);
-    spawn(openSpec.file, openSpec.args, { detached: true, stdio: 'ignore', windowsHide: false, ...openSpec.opts, env }).unref();
+    // start '' <file> — 空标题占位,避免把文件路径当成窗口标题
+    spawn('cmd', ['/c', 'start', '', file], { detached: true, stdio: 'ignore', windowsHide: false, env }).unref();
   } else {
     const file = join(tmpdir(), `${stamp}.sh`);
     writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\necho\nread -p "完成,回车关闭…"\n`, { mode: 0o755 });

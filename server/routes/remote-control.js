@@ -160,12 +160,8 @@ router.post('/remote-control', async (req, res) => {
     //    不靠 login shell 补 PATH);.cmd/.bat 经 cmd.exe /c(claudeCommand 已封装)。
     let term;
     if (process.platform === 'win32') {
-      const { file, args, opts: execOpts } = claudeCommand(['--remote-control', '--resume', sessionId]);
-      // r110:claudeCommand 在 Windows 给的是 verbatim 形态(cmd.exe /d /s /c "<已排好引号的整条>")。
-      // node-pty 收到 string[] 会按 MSVCRT 规则**再**加一遍引号(把 " 转义成 \"),cmd 认不得 \" →
-      // 整条命令行报废。它同时接受"整条命令行字符串"并原样透传,verbatim 形态必须走这条。
-      const ptyArgs = execOpts?.windowsVerbatimArguments ? args.join(' ') : args;
-      term = pty.spawn(file, ptyArgs, { name: 'xterm-color', cols: 100, rows: 30, cwd: dir, env: rcEnv });
+      const { file, args } = claudeCommand(['--remote-control', '--resume', sessionId]);
+      term = pty.spawn(file, args, { name: 'xterm-color', cols: 100, rows: 30, cwd: dir, env: rcEnv });
     } else {
       const shell = process.env.SHELL || '/bin/bash';
       // sessionId 已 UUID 校验,插值安全;cwd 走 pty option(不插值)。

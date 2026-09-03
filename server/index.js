@@ -7,7 +7,6 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, mkdirSync, watch as fsWatch } from 'fs';
 import { createHash } from 'crypto';
-import { winCmdSpawnSpec, winStartSpec } from './utils/win-cmd.js';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes, { getInitCommands, mergeInitCommands } from './routes/chat.js';
 import processRoutes from './routes/processes.js';
@@ -132,11 +131,9 @@ const IS_LOCAL_BUILD = existsSync(join(__dirname, 'routes', 'bots.local.js'));
       // CI-1 同款坑:现代 Node execFile 直跑 .cmd 抛 EINVAL → 此前 Windows 上这段
       // 静默失败,npm prefix 从未补进 PATH("npm 装完检测不到"的根因之一)。经 cmd.exe /c,
       // 并改用 `npm config get prefix`(`npm prefix -g` 在部分 npm 版本打印的是 cwd)。
-      // r110:cmd.exe 的引号组装统一走 winCmdSpawnSpec(全 server 只留这一套规则)。
-      const spec = process.platform === 'win32'
-        ? winCmdSpawnSpec('npm', ['config', 'get', 'prefix'], {})
-        : { file: 'npm', args: ['prefix', '-g'], opts: {} };
-      const { stdout } = await promisify(execFile)(spec.file, spec.args, { timeout: 8000, ...spec.opts });
+      const { stdout } = process.platform === 'win32'
+        ? await promisify(execFile)('cmd.exe', ['/c', 'npm', 'config', 'get', 'prefix'], { timeout: 8000 })
+        : await promisify(execFile)('npm', ['prefix', '-g'], { timeout: 8000 });
       const prefix = stdout.trim();
       if (!prefix) return;
       const binDir = process.platform === 'win32' ? prefix : join(prefix, 'bin');
@@ -1101,12 +1098,10 @@ server.listen(PORT, HOST, () => {
   // its own window) — so this fires exactly once per manual launch, never twice.
   if (process.env.CGUI_OPEN_BROWSER === '1') {
     const url = `http://localhost:${PORT}`;
-    // r110:Windows 走 winStartSpec(start 内建命令裸着、目标加引号 + verbatim),URL 里的 `&`
-    // 不会把命令劈成两半。
-    const spec = process.platform === 'darwin' ? { file: 'open', args: [url], opts: {} }
-      : process.platform === 'win32' ? winStartSpec(url)
-      : { file: 'xdg-open', args: [url], opts: {} };
-    try { spawn(spec.file, spec.args, { stdio: 'ignore', detached: true, ...spec.opts }).unref(); } catch {}
+    const [cmd, cmdArgs] = process.platform === 'darwin' ? ['open', [url]]
+      : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]]
+      : ['xdg-open', [url]];
+    try { spawn(cmd, cmdArgs, { stdio: 'ignore', detached: true }).unref(); } catch {}
   }
 }).on('error', (err) => {
   if (err.code === 'EADDRINUSE') {

@@ -9,7 +9,7 @@
 // 契约 .devflow/INTERFACE-r110-claude-cmd-quoting.md §6 逐条。
 // Run: node tests/unit/check-r110-claude-cmd-quoting.mjs
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -115,26 +115,41 @@ check('T9 mcp.js 继续 re-export 同名 winCmdSpawnSpec(r108 锁定测试的导
   assert.equal(mcp.winCmdSpawnSpec, winCmdSpawnSpec, 're-export 的应是同一个函数,不是复制一份');
 });
 
-console.log('\n§6-5 反向:server 目录下不再有旧拼法');
+console.log('\n§6-5 反向:claude 执行链路上不再有旧拼法');
 
-check('T10 server/ 里不存在 `spawn(\'cmd.exe\', [\'/c\'` 或 `[\'/c\', `', () => {
+// 主会话裁决(r110b):反向断言收窄到 **claude 执行链路**。npm 探测(参数全是硬编码字面量)
+// 与 `cmd /c start`(start 是 cmd 内建命令,加引号反而起不来)不在本轮范围,不做全目录清空。
+const CLAUDE_CHAIN = [
+  'server/utils/claude-resolver.js', 'server/routes/chat.js', 'server/routes/mcp.js',
+  'server/utils/prompt-cache-env.js', 'server/routes/agents.js',
+  'server/routes/subscription-usage.js', 'server/routes/cli-check.js', 'server/routes/version-check.js',
+];
+
+check('T10 claude 链路八个文件里,凡执行 claude 的地方都不再手拼 cmd.exe /c', () => {
   const hits = [];
-  const walk = (dir) => {
-    for (const name of readdirSync(dir)) {
-      if (name === 'node_modules' || name.startsWith('.')) continue;
-      const full = join(dir, name);
-      if (statSync(full).isDirectory()) { walk(full); continue; }
-      if (!/\.(js|mjs|cjs)$/.test(name)) continue;
-      const src = readFileSync(full, 'utf8');
-      src.split('\n').forEach((l, i) => {
-        if (l.includes("spawn('cmd.exe', ['/c'") || l.includes("['/c', ")) {
-          hits.push(`${full.slice(ROOT.length + 1)}:${i + 1}: ${l.trim()}`);
-        }
-      });
-    }
-  };
-  walk(join(ROOT, 'server'));
-  assert.deepEqual(hits, [], `旧拼法残留(Windows 上这些调用点仍吃 < > | & ^):\n       ${hits.join('\n       ')}`);
+  for (const rel of CLAUDE_CHAIN) {
+    const lines = readFileSync(join(ROOT, rel), 'utf8').split('\n');
+    lines.forEach((l, i) => {
+      if (/^\s*(\/\/|\*|\/\*)/.test(l)) return;                       // 注释里引用旧写法不算
+      if (!/cmd\.exe/.test(l) || !l.includes("'/c'")) return;          // 只看"手拼 cmd.exe + /c"的行
+      // 判据 = 这一行执行的是**谁**:`/c` 后紧跟的若是写死的程序名(如 'npm'),那是别的链路
+      // (npm 探测参数全是硬编码字面量,r110 的元字符 bug 到不了那里),本轮不管;跟的是变量
+      // (claudePath / bin / p 之类)才是 claude 执行链路。
+      const m = l.match(/\['\/c',\s*('([^']*)')?/);
+      if (m && m[2] && m[2] !== 'claude') return;
+      hits.push(`${rel}:${i + 1}: ${l.trim()}`);
+    });
+  }
+  assert.deepEqual(hits, [], `claude 链路仍有手拼 cmd.exe /c(Windows 上这些调用点继续吃 < > | & ^):\n       ${hits.join('\n       ')}`);
+});
+
+check('T10b 正向:这八个文件确实经 claudeExecSpec / winCmdSpawnSpec 组装(不是把调用删了了事)', () => {
+  for (const rel of CLAUDE_CHAIN) {
+    const src = readFileSync(join(ROOT, rel), 'utf8');
+    assert.ok(/claudeExecSpec\(|winCmdSpawnSpec\(|claudeCommand\(/.test(src),
+      `${rel} 里没有任何统一组装口的调用 —— 反向断言会因此空过`);
+    assert.equal(/spawn\('cmd\.exe', \['\/c'/.test(src), false, `${rel} 仍有 spawn('cmd.exe', ['/c' 旧拼法`);
+  }
 });
 
 console.log('\n§2 消费者接线:opts 必须被并进各自的 spawn/execFile 选项');
@@ -142,12 +157,14 @@ console.log('\n§2 消费者接线:opts 必须被并进各自的 spawn/execFile 
 // 漏一处 = Windows 上那条路仍然吃元字符,且只有真机能发现 → 用源码断言逐个钉住。
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
 
-check('T11 claudeCommand 的四个消费者都把 opts 并进了 execFile 选项', () => {
+check('T11 claudeCommand 的 execFile 类消费者都把 opts 并进了选项', () => {
   for (const [rel, needle] of [
     ['server/routes/mcp.js', /const \{ file, args: fullArgs, opts: execOpts \} = claudeCommand\(args\);/],
     ['server/routes/agents.js', /execFileP\(file, fullArgs, \{ timeout: 6000, \.\.\.execOpts \}\)/],
     ['server/routes/subscription-usage.js', /execFileP\(file, args, \{ timeout: 5000, \.\.\.execOpts \}\)/],
-    ['server/routes/remote-control.js', /execOpts\?\.windowsVerbatimArguments \? args\.join\(' '\) : args/],
+    // 待办(r110b 主会话裁决,本轮不做):remote-control.js 的 pty.spawn 也吃 claudeCommand,
+    // 但 node-pty 会对 string[] 二次加引号(" → \"),verbatim 形态得改传整条命令行字符串,
+    // 属另一条链路的改动,单独一轮做。
   ]) assert.ok(needle.test(read(rel)), `${rel} 没把 claudeCommand 的 opts 用起来`);
   // mcp.js 两处 execFileP(runClaude / runMcpAdd)都要带
   const mcpSrc = read('server/routes/mcp.js');

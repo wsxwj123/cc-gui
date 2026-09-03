@@ -12,7 +12,6 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { existsSync, readdirSync, realpathSync } from 'fs';
-import { winCmdSpawnSpec } from './win-cmd.js';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -180,9 +179,9 @@ export function dedupeByReal(cands, { exists, realpath, platform }) {
 
 // ── 执行层(可注入)────────────────────────────────────────────────
 // 非零退出也救回已捕获的输出(老 python 把版本打到 stderr;which -a 未命中非零退出)。
-async function execOutDefault(file, args, timeout = 5000, extra = {}) {
+async function execOutDefault(file, args, timeout = 5000) {
   try {
-    const { stdout, stderr } = await execFileP(file, args, { timeout, ...extra });
+    const { stdout, stderr } = await execFileP(file, args, { timeout });
     return String(stdout || stderr || '').trim();
   } catch (e) {
     const s = String(e?.stdout || '').trim();
@@ -210,13 +209,11 @@ export async function getFixedDrivesWin(execOut = execOutDefault) {
 }
 
 async function runVersion(bin, d) {
-  // Windows 上非 .exe(.cmd/.bat/裸名)不是真可执行文件,须经 cmd.exe(与 cli-check 同款)。
-  // r110:引号组装走 winCmdSpawnSpec —— 安装路径里带 `&`(用户名 `A&B`)时旧拼法会被 cmd 拆成
-  // 两条命令,整条 --version 探测失败 → 该安装被当"跑不出版本"过滤掉。
-  const spec = (d.platform === 'win32' && !/\.exe$/i.test(bin))
-    ? winCmdSpawnSpec(bin, ['--version'], {})
-    : { file: bin, args: ['--version'], opts: {} };
-  return parseVersionOutput(await d.execOut(spec.file, spec.args, 5000, spec.opts));
+  // Windows 上非 .exe(.cmd/.bat/裸名)不是真可执行文件,须经 cmd.exe /c(与 cli-check 同款)。
+  const out = (d.platform === 'win32' && !/\.exe$/i.test(bin))
+    ? await d.execOut('cmd.exe', ['/c', bin, '--version'])
+    : await d.execOut(bin, ['--version']);
+  return parseVersionOutput(out);
 }
 
 const defaultDeps = {
@@ -295,10 +292,9 @@ export async function scanAllTools({ refresh = false, deps } = {}) {
 export async function probeNpm(deps = {}) {
   const d = { ...defaultDeps, ...deps };
   const run = async (args) => {
-    const spec = d.platform === 'win32'
-      ? winCmdSpawnSpec('npm', args, {})            // r110:cmd 引号规则全 server 统一到这一处
-      : { file: 'npm', args, opts: {} };
-    const out = await d.execOut(spec.file, spec.args, 5000, spec.opts);
+    const out = d.platform === 'win32'
+      ? await d.execOut('cmd.exe', ['/c', 'npm', ...args])
+      : await d.execOut('npm', args);
     return String(out || '').trim();
   };
   try {

@@ -23,15 +23,3 @@ export function winCmdSpawnSpec(resolved, args = [], opts = {}) {
   };
 }
 
-// 「用默认程序打开 URL / 文件」= cmd 的**内建命令** `start`,不能复用上面那套 —— 内建命令
-// 一旦被加上引号,cmd 会当成文件路径去找,报"不是内部或外部命令"。所以 start 本身裸着,
-// 只给目标加引号(内部引号翻倍):URL 里的 `&`(`?a=1&b=2` 太常见)、路径里的 `&`(用户名
-// `A&B`)才不会把命令劈成两半、只打开半截。第二个空引号是 start 的"窗口标题"占位,少了它
-// start 会把带引号的目标当标题、什么也不开。opts 固定带 verbatim(Node 不要再插手拼接)。
-export function winStartSpec(target) {
-  return {
-    file: 'cmd.exe',
-    args: ['/d', '/s', '/c', `start "" "${String(target).replace(/"/g, '""')}"`],
-    opts: { windowsVerbatimArguments: true },
-  };
-}

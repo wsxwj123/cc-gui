@@ -266,7 +266,9 @@ async function runClaude(args, {
     maxBuffer: 8 * 1024 * 1024,
     // 插件 CLI 可能再拉起 git/包装器；独立进程组才能在 120 秒边界清掉整棵树。
     detached: killTreeOnTimeout && !isWin,
-    ...execOpts, // r110:Windows 经 cmd.exe 时必须带 windowsVerbatimArguments,否则 `mcp<2` 被当重定向
+    // r110:Windows 经 cmd.exe 起 claude.cmd 时,claudeCommand 给的 spawn 选项必须并进来,
+    // 否则参数里的 `mcp<2` 会被 cmd 当成 stdin 重定向(paper-search 添加失败的根因)。
+    ...execOpts,
   });
   let timedOut = false, timer = null;
   if ((isWin || killTreeOnTimeout) && timeout > 0) {
