@@ -437,7 +437,7 @@ claude code 把权限规则写进用户级 settings.json 后,应用此前按文�
 
 <details><summary>生图 provider 编辑页「模型」输入框被「浏览」按钮挤扁</summary>
 
-,模型名看不见。
+模型名看不见。
 
 </details>
 
