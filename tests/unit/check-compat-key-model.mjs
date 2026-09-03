@@ -26,7 +26,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 
 const base = {
   workingDir: '/tmp/proj', effort: 'high', appendSystemPrompt: '', promptSuggestions: false,
-  excludeDynamicSystemPrompt: 'auto', globalRead: true, dirs: ['/'], maxBudgetUsd: null,
+  globalRead: true, dirs: ['/'], maxBudgetUsd: null,
 };
 
 try {

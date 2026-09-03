@@ -480,7 +480,9 @@ await check('D3 面板给出补救动作:重新选择一次 provider 或重启�
 });
 
 await check('D4 回归锁:r89 既有文案不许被本轮改掉', () => {
-  assert.ok(/静态系统提示快照/.test(PANEL), 'r89 的开关标题丢了');
+  // r104:条目改名「缓存优化」(面板上只剩这一个缓存条目),id 与组件不变。
+  assert.ok(/\{ id: 'set-prompt-snapshot', tab: 'session', title: '缓存优化'/.test(PANEL),
+    'r89 的开关条目丢了(r104 起标题为「缓存优化」)');
   assert.ok(/ENABLE_TOOL_SEARCH=false/.test(PANEL), 'r89"关 ToolSearch 的代价"说明丢了');
   assert.ok(/当前不启用系统提示快照/.test(PANEL), 'r89 的 CLI 不支持分支文案丢了');
 });

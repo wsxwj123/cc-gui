@@ -4731,8 +4731,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           permissionMode: permissionMode || 'default',
           globalRead: globalRead !== false,
           agent: activeAgent || undefined,
-          // 三态原样传:true/false=用户显式;'auto'=server 按 provider 决定(第三方开/官方关)
-          excludeDynamicSystemPrompt: useStore.getState().excludeDynamicSystemPrompt,
           // #26 会话常驻:false 时 server 回合结束即关进程(逐回合冷启,旧行为)
           keepAlive: useStore.getState().persistentChat !== false,
           // 花费上限(美元):>0 时透传 SDK maxBudgetUsd,进程累计花费达到上限即停。

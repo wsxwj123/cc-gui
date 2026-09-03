@@ -695,16 +695,8 @@ export const useStore = create((set, get) => ({
     return 100;
   })(),
 
-  // 缓存优化(CLI --exclude-dynamic-system-prompt-sections / SDK systemPrompt.excludeDynamicSections):
-  // 把每轮变化的动态段(工作目录 / auto-memory / git 状态)移出系统提示、改注入首条用户消息,
-  // 使系统提示保持静态、提升第三方 provider 的前缀缓存命中。三态:'auto'(默认,server 按
-  // provider 定——第三方开/官方关)| true | false(用户显式)。旧值 '1'/'0' 原样迁移。
-  excludeDynamicSystemPrompt: (() => {
-    try {
-      const v = localStorage.getItem('cgui-exclude-dynamic-prompt');
-      return v === '1' ? true : v === '0' ? false : 'auto';
-    } catch { return 'auto'; }
-  })(),
+  // r104:原「缓存优化」三态字段已移除(真机 A/B 证实单独开对缓存命中无效,能力并入
+  // 静态系统提示快照)。旧的 localStorage 键 cgui-exclude-dynamic-prompt 不再读取,残留无害。
 
   // 会话常驻进程(#26):回合结束后 CLI 进程保活,同会话下一条消息复用 —— 免掉每回合
   // 冷启动(二进制+settings+全部 MCP server,实测 ~5s)。默认开;出问题可在设置关掉
@@ -1566,16 +1558,6 @@ export const useStore = create((set, get) => ({
     set({ promptSuggestionBySid: next });
   },
 
-
-  setExcludeDynamicSystemPrompt: (v) => {
-    // v: 'auto' | true | false('auto' = server 按 provider 决定:第三方开/官方关)
-    set({ excludeDynamicSystemPrompt: v === true ? true : v === false ? false : 'auto' });
-    try {
-      if (v === true) localStorage.setItem('cgui-exclude-dynamic-prompt', '1');
-      else if (v === false) localStorage.setItem('cgui-exclude-dynamic-prompt', '0');
-      else localStorage.removeItem('cgui-exclude-dynamic-prompt');
-    } catch {}
-  },
 
   setChatMode: (on) => {
     set({ chatMode: !!on });

@@ -276,7 +276,7 @@ const TEXT = GENUI_SECTION_TEXT;
   const { chatCompatKey } = await import('../../server/routes/chat.js');
   const base = {
     workingDir: '/tmp/proj', effort: null, appendSystemPrompt: '', promptSuggestions: false,
-    excludeDynamicSystemPrompt: 'auto', globalRead: true, dirs: ['/'], maxBudgetUsd: null,
+    globalRead: true, dirs: ['/'], maxBudgetUsd: null,
   };
   assert.notEqual(chatCompatKey({ ...base, genui: true }), chatCompatKey({ ...base, genui: false }),
     't3: 开/关必须是不同 key(变异哨兵②:删 key 里的 genui 字段这里红)');

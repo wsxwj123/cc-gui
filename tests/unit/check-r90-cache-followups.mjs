@@ -38,7 +38,9 @@ const { readSessionTitles } = await import('../../server/services/session-reader
 const { claudeExecSpec, resolveClaude, resolveSdkClaude } = await import('../../server/utils/claude-resolver.js');
 const { snapshotFlagOn } = await import('../../server/utils/prompt-cache-env.js');
 const {
-  buildTitleArgs, parseTitleJson, resolveTitleModel, resolvePromptSuggestions, resolveExcludeDyn,
+  // r104:resolveExcludeDyn 随「缓存优化」(--exclude-dynamic-system-prompt-sections)
+  // 整套接线移除,这里不再 import(见 check-r104-remove-cache-opt.mjs 的 A8/B3)。
+  buildTitleArgs, parseTitleJson, resolveTitleModel, resolvePromptSuggestions,
   decideTitle, waitForAiTitle, TITLE_SYSTEM_PROMPT,
   TITLE_WAIT_NATIVE_MS, TITLE_FIRST_TIMEOUT_MS, TITLE_RETRY_TIMEOUT_MS,
 } = await import('../../server/routes/chat.js');
@@ -406,10 +408,12 @@ check('B8-5 探测拿到的就是实际要执行的那个二进制(行为断言)
   assert.ok(/buildTitleArgs\(\{ claudePath: resolveClaude\(\)\?\.path \|\| '', model \}\)/.test(chatSrc));
   assert.notEqual(typeof resolveSdkClaude, 'undefined');
 });
-check('B8-6 compatKey 的 xdyn 与 suggest 同口径(都存解析后的布尔)', () => {
-  assert.ok(/xdyn: resolveExcludeDyn\(excludeDynamicSystemPrompt\),/.test(chatSrc),
-    "xdyn 存 'auto' 原值 → 切 provider 后可能复用到 excludeDynamicSections 与本次不符的常驻进程");
-  assert.ok(/suggest: resolvePromptSuggestions\(promptSuggestions\),/.test(chatSrc));
+check('B8-6 compatKey 的 suggest 存解析后的布尔(不是 auto 原值)', () => {
+  // r104:同口径的另一半 xdyn 已随「缓存优化」整套移除。原断言的语义(复用键必须存
+  // 解析后的实际值,存 'auto' 会复用到与本次不符的常驻进程)只剩 suggest 这一处。
+  // "xdyn 不许回来"由 check-r104-remove-cache-opt.mjs 的 A1/A5/B4 负责。
+  assert.ok(/suggest: resolvePromptSuggestions\(promptSuggestions\),/.test(chatSrc),
+    "suggest 存 'auto' 原值 → 切 provider 后可能复用到与本次不符的常驻进程");
 });
 
 // ── ②a 原生标题落点判据:fixture 用真实 jsonl 行形态 ─────────────────────
@@ -474,27 +478,26 @@ check('B6-2 用户显式设过就一直尊重(压过 provider 类别)', () => {
 check('B6-3 settings 读不到时按官方处理(不静默关掉别人的功能)', () => {
   rmSync(join(home, '.claude', 'settings.json'), { force: true });
   assert.equal(resolvePromptSuggestions('auto'), true);
-  assert.equal(resolveExcludeDyn('auto'), false);
 });
 check('B6-8 类别判据用 isOfficialAnthropic,不是「有没有 BASE_URL」', () => {
   // 官方直连 relay:baseURL 显式写成官方域名的自定义 provider 仍是官方端点。
   writeSettings({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com' });
   assert.equal(resolvePromptSuggestions('auto'), true, '官方直连 relay 应判官方 → 输入预测保持开');
-  assert.equal(resolveExcludeDyn('auto'), false, '同一 provider 两个开关必须给出同向结论');
+  // r104:原来这里还比一次 resolveExcludeDyn('auto')(要求两个开关同向),该开关已整套移除。
   writeSettings({ ANTHROPIC_BASE_URL: 'https://gateway.eu.anthropic.com/v1' });
   assert.equal(resolvePromptSuggestions('auto'), true, '*.anthropic.com 子域同样是官方');
   // 边界:notanthropic.com 不是官方(isOfficialAnthropic 已点住,这里防判据被换回 endsWith)
   writeSettings({ ANTHROPIC_BASE_URL: 'https://notanthropic.com/v1' });
   assert.equal(resolvePromptSuggestions('auto'), false);
-  assert.equal(resolveExcludeDyn('auto'), true);
 });
 check('B6-4 compatKey 存解析后的实际值(存 auto 会复用到不符的常驻进程)', () => {
   assert.ok(/suggest: resolvePromptSuggestions\(promptSuggestions\)/.test(chatSrc), 'compatKey 仍存原值');
   assert.ok(/const suggestOn = resolvePromptSuggestions\(promptSuggestions\)/.test(chatSrc), 'spawn 处仍按 === true 判');
 });
 check('B6-5 store 三态 + 迁移:1→true / 0→false / 无键→auto,setter auto 删键', () => {
-  // 只看 promptSuggestions 这一段:excludeDynamicSystemPrompt 用同一套三态写法,
-  // 不划范围的 grep 会被它顶住(变异自证时实测漏网)。
+  // 只看 promptSuggestions 这一段。(r104 之前 excludeDynamicSystemPrompt 也用同一套
+  // 三态写法,不划范围的 grep 会被它顶住;那个字段已移除,划范围仍保留 —— 将来若再加
+  // 第三个三态字段,这里照样会被顶住。)
   const block = storeSrc.slice(storeSrc.indexOf('promptSuggestions: (() => {'));
   const decl = block.slice(0, block.indexOf('})(),') + 5);
   assert.ok(/getItem\('cgui-prompt-suggestions'\)/.test(decl) && /v === '1' \? true : v === '0' \? false : 'auto'/.test(decl),

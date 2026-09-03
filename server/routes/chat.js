@@ -944,17 +944,10 @@ export function settingsProviderIsOfficial() {
   } catch { return true; }
 }
 
-// 缓存优化三态解析:true/false=用户显式;'auto'/未传=按 provider 决定——第三方默认开
-//(前缀缓存对费用/首字延迟影响巨大),官方 OAuth 关。导出仅为可单测(HOME 指到假目录直接验)。
-export function resolveExcludeDyn(v) {
-  if (v === true || v === false) return v;
-  return !settingsProviderIsOfficial();
-}
-
 // 输入预测三态解析(r90):true/false=用户显式;'auto'/未传=按 provider 决定 ——
 // 第三方默认**关**:它每回合额外打一次主模型(命中价读整段上下文 + ~450 token 未命中
-// + 输出);官方渠道默认开(与原行为一致)。与 resolveExcludeDyn 共用同一条类别判据,
-// 两个开关不会对同一 provider 给出相反的结论。导出仅为可单测。
+// + 输出);官方渠道默认开(与原行为一致)。类别判据用 settingsProviderIsOfficial(与
+// provider 切换侧同源)。导出仅为可单测。
 export function resolvePromptSuggestions(v) {
   if (v === true || v === false) return v;
   return settingsProviderIsOfficial();
@@ -1018,7 +1011,7 @@ function readSettingsSplit() {
   return settingsSplitCache;
 }
 
-export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, excludeDynamicSystemPrompt, globalRead, dirs, maxBudgetUsd, acw, genui }) { // export 仅为可单测
+export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, globalRead, dirs, maxBudgetUsd, acw, genui }) { // export 仅为可单测
   const { nonPerm, perm } = readSettingsSplit();
   if (lastPermFp === null) lastPermFp = perm;              // 首次调用建基线,不推进代数
   else if (perm !== lastPermFp) {
@@ -1059,9 +1052,6 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     // 三态解析后的**实际值**进键:'auto' 在第三方/官方下结论不同,存原值会让切 provider
     // 后复用到一个 promptSuggestions 与本次不符的常驻进程(query 级选项,起时定死)。
     suggest: resolvePromptSuggestions(promptSuggestions),
-    // 与 suggest 同口径:存**解析后的布尔**。存 'auto' 会让切 provider 后复用到一个
-    // excludeDynamicSections 与本次不符的常驻进程(systemPrompt 是 query 级选项,起时定死)。
-    xdyn: resolveExcludeDyn(excludeDynamicSystemPrompt),
     gr: globalRead !== false, dirs, settingsFp, permEpoch, disToolsMtime, projSettingsMtime, mcpStampMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
     acw: acw ?? null, // 压缩窗口指纹(MCT 数值或 null):异窗模型切换必须冷启重算压缩线
@@ -1186,7 +1176,6 @@ router.post('/chat', async (req, res) => {
     appendSystemPrompt,
     agent,
     promptSuggestions,
-    excludeDynamicSystemPrompt,
     keepAlive,
     maxBudgetUsd,
     genui,
@@ -1263,7 +1252,7 @@ router.post('/chat', async (req, res) => {
   const acwSettings = resolveCompactWindowSettings(model);
   const reuseKey = chatCompatKey({
     workingDir, effort, appendSystemPrompt, promptSuggestions,
-    excludeDynamicSystemPrompt, globalRead, dirs: [...dirSet].sort(),
+    globalRead, dirs: [...dirSet].sort(),
     maxBudgetUsd: budget,
     acw: acwSettings?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? null,
     genui,
@@ -1466,10 +1455,9 @@ router.post('/chat', async (req, res) => {
   const systemPrompt = fullAppend
     ? { type: 'preset', preset: 'claude_code', append: fullAppend }
     : { type: 'preset', preset: 'claude_code' };
-  // 缓存优化(对应 CLI --exclude-dynamic-system-prompt-sections):把工作目录 / auto-memory /
-  // git 状态等每轮变化的动态段移出系统提示、由 SDK 改注入首条用户消息,使系统提示静态可缓存,
-  // 提升第三方 provider 前缀缓存命中。仅加系统提示选项,不影响消息泵/关流时序。
-  if (resolveExcludeDyn(excludeDynamicSystemPrompt) === true) systemPrompt.excludeDynamicSections = true;
+  // r104:原「缓存优化」开关(把动态段移出系统提示的那个 CLI flag)已移除 —— 真机 A/B
+  // (DeepSeek,冷启动 + git 状态变化)测得单独开第 2 轮命中 0.0%,与静态系统提示快照
+  // 同开也不加分,能力并入快照。老客户端仍可能带对应请求字段,静默忽略。
 
   const options = {
     model,
