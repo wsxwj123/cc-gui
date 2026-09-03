@@ -2619,8 +2619,12 @@ router.post('/chat/title', async (req, res) => {
       // 会被 prompt 里的换行(cmd 逐行解析截断)、`<session>` 的 <>(重定向符)、双引号 三重
       // cmd 元字符破坏 → prompt 残缺 → 标题在 Windows 恒失败(用户实报,mac 正常)。stdin 不经
       // cmd 参数解析,跨平台稳。实测 `claude -p`(无 prompt 参数)从 stdin 读 prompt 正常。
-      // 探测目标必须与 claudeSpawn 实际执行的二进制同源:resolveUserClaude 在 Windows 上
-      // 对 .cmd/.bat 返回 null(SDK 驱动不了它们),拿它当探测路径会让整个瘦身在 Windows 空转。
+      // 探测目标必须与 claudeSpawn 实际执行的二进制同源,所以这里刻意用 resolveClaude()?.path
+      // 而不是 resolveSdkClaude():claudeSpawn 起的就是解析到的入口(Windows 上可能是
+      // claude.cmd,由 claudeExecSpec 包 cmd.exe /c),而 resolveSdkClaude 在 r106 后会把 npm
+      // 布局推成包内 bin\claude.exe —— 那是 SDK 走的另一条路,拿它探能力对不上这里的进程。
+      // 副作用(r108-建5):Windows 上因此有两条 --help 缓存键(.cmd 与包内 .exe),启动预热
+      // (index.js 的 primeHelpCache)对两条各热一次。
       const titleArgs = buildTitleArgs({ claudePath: resolveClaude()?.path || '', model });
       proc = claudeSpawn(titleArgs, {
         cwd: titleCwd,
