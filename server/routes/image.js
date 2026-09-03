@@ -1042,7 +1042,12 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
       // 它的 code 还会区分"敏感词/队列满"等可读原因,取不到 id 时直接把原因报给用户。
       const isProxy = provider.protocol === 'mj-proxy';
       const submit = isProxy ? extractProxySubmitId(data) : null;
-      if (submit && !submit.taskId) return fail(submit.error);
+      // 安全:上游回的 description 可能带回我们发过去的 key、也可能是一大段 HTML ——
+      // 与其它上游错误同口径剥 key、压空白、截到上限,再落历史 / 回前端。
+      if (submit && !submit.taskId) {
+        return fail(redactKey(String(submit.error || ''), provider.apiKey).replace(/\s+/g, ' ').trim()
+          .slice(0, MAX_UPSTREAM_ERR));
+      }
       const taskId = isProxy ? submit.taskId : extractTaskId(data);
       if (taskId) {
         // r84:上游任务号写进条目 —— 二次操作(U/V)要拿它当 task_id 提交,不存就没得引用。
@@ -1219,6 +1224,12 @@ async function resolveRefs(input, saveDirs, ctx = {}) {
       roleSeen.add(role);
     }
     if (r.kind === 'url') {
+      // 只有两个 MJ 协议把参考图【当链接】转给上游;openai / gemini / chat 三条同步协议
+      // 发的是图片内容本身(multipart / dataURI / inline_data),链接进去只会变成一个空的
+      // base64 —— 上游照常出图、照常计费,用户却以为参考图生效了。故提交前当场拒。
+      if (!MJ_PROTOCOLS.includes(protocol)) {
+        return { error: '该协议的参考图必须是图片文件本身,不接受图片链接:请改用「添加参考图」选择本地文件,或用「以此图修改」引用已生成的图' };
+      }
       const url = typeof r.url === 'string' ? r.url.trim() : '';
       try { await assertPublicRefUrl(url); } catch (e) { return { error: e.message }; }
       // GUI 自己【不下载】这个链接,只把它转给上游。
@@ -1405,11 +1416,15 @@ router.post('/image/actions', async (req, res) => {
     // 真放大与取出单图打的是【同一个】upscale 端点,差别只在 body 是 custom_id 还是 index。
     const action = cid ? (kind === 'variation' ? 'variation' : 'upscale') : rawAction;
 
+    // r94:二次操作与 /generate 走同一道速度闸 —— 8.x 上的 turbo 上游照收 2.22 倍的钱
+    // 却不更快,漏在这里等于每点一次真放大 / 变体就多付一倍多。落盘值仍是用户存的原值。
+    const eff = mjEffectiveSpeed(provider.mjVersion, provider.mjSpeed);
+    const outbound = { ...provider, mjSpeed: eff.speed };
     let spec;
     try {
       spec = provider.protocol === 'mj-proxy'
-        ? buildProxyActionRequest(provider, { taskId: parent.taskId, customId: cid, kind, index })
-        : buildMjActionRequest(provider, action, index, parent.taskId, cid);
+        ? buildProxyActionRequest(outbound, { taskId: parent.taskId, customId: cid, kind, index })
+        : buildMjActionRequest(outbound, action, index, parent.taskId, cid);
     } catch (e) { return res.status(400).json({ error: e.message }); }
     try { await assertPublicBaseURL(provider.baseURL); }
     catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
@@ -1437,9 +1452,10 @@ router.post('/image/actions', async (req, res) => {
       // 记的是【动作语义】(pick/variation/upscale)而不是端点名 —— 界面要照它显示动作名。
       mjAction: kind,
       ...(cid ? { mjCustomId: cid } : { mjIndex: spec.body.index }),
+      ...(eff.note ? { speedNote: eff.note } : {}),
     });
     res.json({ ok: true, jobId });
-    runImageJob({ jobId, provider, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
+    runImageJob({ jobId, provider: outbound, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
   } catch (err) {
     if (counted) activeJobs -= 1;
     res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });

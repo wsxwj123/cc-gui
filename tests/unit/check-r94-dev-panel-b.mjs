@@ -140,6 +140,45 @@ check('8.x + turbo:预览按 fast 显示并带说明,表单里仍是用户存的
   assert.match(P, /mjSpeed: p\.mjSpeed \|\| ''/, '回填的是存的原值');
 });
 
+console.log('\n[6] 判官/审计修复');
+check('B13:mj-proxy 原版的单文件条目退化成按第几张操作(change 路径可点)', () => {
+  const b = block(/const mjSoloBar = \(h\) => \{[\s\S]*?\n  \};/, 'mjSoloBar');
+  assert.match(b, /protocolOf\(h\) === 'mj-proxy' && !h\.mjAction/, '只有 imagine 出的那张才是四宫格');
+  assert.match(b, /imageCount: MJ_GRID_POSITIONS\.length/, '退化按四宫格给 index');
+  // 该形态真的产得出 8 项(U×4 + V×4),否则原版站上一个按钮都没有。
+  const acts = M.mjActionsFor({ buttons: [], protocol: 'mj-proxy', imageCount: 4 });
+  assert.equal(acts.length, 8);
+  assert.ok(acts.every((a) => a.mode === 'index'), '回落形态必须走 action+index');
+});
+check('B28:条目里显示 speedNote(网格与列表各一处)', () => {
+  assert.equal((P.match(/h\.speedNote \?/g) || []).length, 2, '两种视图都要显示降级说明');
+});
+check('④ mj-proxy relax 不写成"由账号筛选发送"', () => {
+  assert.match(P, /const mjProxyRelax = /, '预览要区分 relax 与 fast/turbo');
+  assert.match(P, /mjViaBody = mjCompiled\.viaBody\.filter/, 'relax 时把速度从承载方式里去掉');
+});
+check('③ flags 规范化:extraFlags 不再产生前导/连续空格', () => {
+  const r = M.compileMjFlags({ stylize: 250, extraFlags: '--sv 4' }, { version: '7', carrier: 'mj-proxy', prompt: 'cat' });
+  assert.equal(r.flags, '--s 250 --sv 4');
+  assert.equal(M.compileMjFlags({ extraFlags: '--exp 20' }, { version: '7', carrier: 'mj-proxy', prompt: 'cat' }).flags, '--exp 20');
+  assert.ok(!/\s\s|^\s|\s$/.test(r.prompt), `prompt 不许有连续/首尾空白(实得 ${JSON.stringify(r.prompt)})`);
+});
+check('⑦ 非 MJ 协议的链接参考图:前端拦 + 服务端 400 文案', () => {
+  assert.match(P, /const urlRefOnNonMj = /, '前端要有这道判据');
+  const g = block(/const generate = async \(\) => \{[\s\S]*?\n  \};/, 'generate');
+  assert.ok(g.indexOf('urlRefOnNonMj') < g.indexOf('/api/image/generate'), '要在发请求之前拦');
+  const R = read('server/routes/image.js');
+  assert.match(R, /if \(!MJ_PROTOCOLS\.includes\(protocol\)\) \{\n\s*return \{ error: '该协议的参考图必须是图片文件本身/,
+    '服务端同样当场 400,不静默丢弃(丢弃 = 白付一单钱)');
+});
+check('⑥ 动作端点过 8.x turbo 降级闸;⑤ proxy 提交失败文案剥 key 并截长', () => {
+  const R = read('server/routes/image.js');
+  assert.equal((R.match(/mjEffectiveSpeed\(provider\.mjVersion, provider\.mjSpeed\)/g) || []).length, 2,
+    'generate 与 actions 两处都要过闸');
+  assert.match(R, /if \(submit && !submit\.taskId\) \{[\s\S]{0,200}redactKey\([\s\S]{0,120}MAX_UPSTREAM_ERR/,
+    'proxy 提交失败文案必须剥 key 并截长');
+});
+
 console.log(`\n—— check-r94-dev-panel-b: ${PASS} 绿 / ${failed.length} 红 ——`);
 if (failed.length) { for (const n of failed) console.log(`  ✗ ${n}`); process.exit(1); }
 console.log('✓ check-r94-dev-panel-b: 控件清单/动作两形态/参考图闸/预览同源 全绿');
