@@ -377,6 +377,33 @@ check('E3 换版才需要并集合并:未换版则抽样值逐字不变;换版�
   }
 });
 
+console.log('\n—— G r105b 收口(判官 R1/R2/S2,主会话搬自 dev 测试 d8)——');
+
+check('G1 判死不经推断传播:变体不因基名 reasoning:false 被判死(维持全档)', () => {
+  assert.deepEqual(table().byId?.['kimi-k2-0905-preview'], { reasoning: false }, '前提:基名在表里判死');
+  assert.equal(L('kimi-k2-0905-preview-turbo', 'openai'), null, '推断不许往判死方向走');
+  assert.equal(L('kimi-k2-0905-preview', 'openai')?.reasoning, false, '精确命中的判死照常生效');
+});
+
+check('G2 命名空间 id 不跨家族:比家族用裸尾段', () => {
+  assert.ok(table().byId?.['openai/gpt-5.4'], '前提:跨家族基名在表里');
+  assert.equal(L('openai/gpt-5.4-codex-preview', 'openai')?.viaId, undefined,
+    '带命名空间的 codex 不许回退到 openai/gpt-5.4');
+  const q = L('qwen/qwen3-235b-a22b-instruct-2601', 'openai');
+  assert.equal(q?.viaId, undefined, 'instruct 变体不许回退到思考基座 qwen/qwen3-235b-a22b');
+  assert.equal(q?.efforts ?? null, null, '维持 r105 之前的结论(全档)');
+  assert.equal(L('deepseek/deepseek-v4-pro-turbo', 'openai')?.viaId, 'deepseek/deepseek-v4-pro',
+    '同家族同命名空间仍回退');
+});
+
+check('G3 回退提示文案不提"表"(用户没有这个指代物)', () => {
+  const note = pick(EC, 'effortSourceNote', 'effortCaps.js');
+  const id = 'deepseek-v4-flash-vision';
+  const s = String(note({ [id]: prefill(id, 'openai') }, id) || '');
+  assert.match(s, /按\s*deepseek-v4-flash(?![\w-])/, '仍点名基名');
+  assert.doesNotMatch(s, /表/, `文案不提"表",当前:${JSON.stringify(s)}`);
+});
+
 console.log('\n—— F 既有契约不回归 ——');
 
 check('F1 既有 check-model-capabilities.mjs 仍全绿(退出码 0)', () => {
