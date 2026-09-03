@@ -19,7 +19,6 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -776,21 +775,28 @@ if (!UF) {
   });
 }
 
-console.log('\n[P2-3.3] 零 diff 文件(本轮不得出现改动)');
-check('3.3 anthropic-proxy / chat / user-id-normalize / cacheStats / App.jsx / tests-acceptance 零改动', () => {
-  const files = ['server/services/anthropic-proxy.js', 'server/services/chat.js',
-    'server/utils/user-id-normalize.js', 'client/src/utils/cacheStats.js',
-    'client/src/App.jsx', 'tests/acceptance'];
-  let base = '';
-  try {
-    base = execFileSync('git', ['merge-base', 'HEAD', 'master'], { cwd: root, encoding: 'utf8' }).trim();
-  } catch (e) {
-    console.log('    (跳过 git 比对:', String(e.message).split('\n')[0], ')');
-    return;
-  }
-  const changed = execFileSync('git', ['diff', '--name-only', base, '--', ...files], { cwd: root, encoding: 'utf8' }).trim();
-  assert.strictEqual(changed, '', `这些文件本轮一行都不该改:\n      ${changed.split('\n').join('\n      ')}`);
+// INTERFACE 3.3 写的是"这些文件本轮零 diff"。**这里不做 git diff 分支范围锁** ——
+// 那锁的是"本轮的开发边界",不是产品不变量:一旦进了共享单测,此后任何动这些文件的
+// 分支都会被它判红,与该分支自身对错无关(r92 就栽过,本轮刚把那颗地雷拆掉)。
+// 改成锁 INTERFACE 真正在意的结构:usage 归一只许落在 openai 通道,不许扩散。
+console.log('\n[P2-3.3] 改动不得越界(内容锁,不锁"文件零改动")');
+// 注:INTERFACE 3.3 写的 `server/services/chat.js` **不存在**(真身是 server/routes/chat.js);
+// 旧的 git diff 锁对不存在的路径恒返回空字符串 → 那一项一直是假绿。这里换成真实路径。
+// routes/chat.js 本轮确实要改(#8),所以锁的不是"没改",而是"没把 usage 归一扩散过来"。
+for (const f of ['server/services/anthropic-proxy.js', 'server/routes/chat.js']) {
+  check(`3.3 ${f.split('/').pop()} 不碰 openai usage 归一(该通道是字节透传/与 usage 换算无关)`, () => {
+    const src = read(f);
+    assert.ok(!/openai-usage/.test(src), '不该 import openai-usage.js');
+    assert.ok(!/normalizeOpenAIUsage/.test(src), '不该调用 normalizeOpenAIUsage');
+    assert.ok(!/prompt_cache_hit_tokens|prompt_tokens_details/.test(src), '候选表字面不该出现在这里');
+  });
+}
+check('3.3 cacheStats.js 的 readCacheUsage 仍在(前端徽章口径本轮不动,check-r89 A4 依赖)', () => {
+  assert.match(read('client/src/utils/cacheStats.js'), /export function readCacheUsage/);
 });
+// 其余三项(user-id-normalize.js / App.jsx / tests/acceptance)不设锁:
+//  - user-id-normalize:已由 3.1 的"openai-proxy 不许出现 user-id-normalize"从消费侧钉死;
+//  - App.jsx / tests/acceptance:本轮契约里没有可锁的具体字面或结构,只能靠 code review。
 
 // ══════════════════════════════════════════════════════════════════════════
 // #8 / INTERFACE 第 6 节 —— GUI 自写权限规则不触发 chatCompatKey 冷启
@@ -1005,13 +1011,12 @@ check('6.3 chatCompatKey 函数体内不得出现 Date.now()(不许用时间窗)
 check('6.3 chatCompatKey 函数体内不得出现 pendingSelfPermWrite = true(只允许 note 置位)', () => {
   assert.ok(!/pendingSelfPermWrite\s*=\s*true/.test(KEYFN), '只有 noteSelfPermissionWrite 可以置位');
 });
-check('6.3 server/utils/permission-rules.js 本轮零改动', () => {
-  let baseRef = '';
-  try { baseRef = execFileSync('git', ['merge-base', 'HEAD', 'master'], { cwd: root, encoding: 'utf8' }).trim(); }
-  catch (e) { console.log('    (跳过 git 比对:', String(e.message).split('\n')[0], ')'); return; }
-  const changed = execFileSync('git', ['diff', '--name-only', baseRef, '--', 'server/utils/permission-rules.js'],
-    { cwd: root, encoding: 'utf8' }).trim();
-  assert.strictEqual(changed, '', 'permission-rules.js 本轮不得改');
+// 同上:不做 git 分支范围锁。permission-rules.js 对 #8 唯一承重的事实是"「始终允许」
+// 落 userSettings" —— 它若改成写别的 destination,上面那条 makeCanUseTool 源码锁虽然
+// 还绿,标记却永远不会被触发。锁这条事实,不锁"文件没改"。
+check('6.3 permission-rules.js 仍把「始终允许」写向 userSettings(#8 标记的触发前提)', () => {
+  assert.match(read('server/utils/permission-rules.js'), /destination: 'userSettings'/,
+    'buildAlwaysAllowUpdates 不再写 userSettings 的话,noteSelfPermissionWrite 永不触发(check-r89 A3-2 同源)');
 });
 
 // 收尾:还原 HOME,清临时目录
