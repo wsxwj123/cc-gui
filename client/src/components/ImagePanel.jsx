@@ -931,6 +931,9 @@ export default function ImagePanel() {
   // r95:放大层当前这张 = { id, index }(哪条任务的第几张),src/name/path 全部现算。
   // 刻意不存 src 快照:轮询每 1.5s 换一遍 history,快照会过期,也没法在序列里左右移动。
   const [zoom, setZoom] = useState(null);
+  // r102:「清空」后隐藏上一轮的预览,直到受理新任务或用户在任务列表重新选一张。
+  // 不动 currentId(loadHistory 的回落规则被 r95 锁死),只用一个显示开关。
+  const [previewHidden, setPreviewHidden] = useState(false);
   // r94 像素尺寸:图片本身是唯一可靠来源(比例/版本只是请求参数,开 HD 或真放大后实际像素
   // 与它们对不上)。按图片 URL 记一份 naturalWidth×naturalHeight;预览区与放大层看的永远
   // 是同一个 URL(方向键切图会把预览区一起带过去),所以只在预览区测一次,两处都有值。
@@ -1108,7 +1111,7 @@ export default function ImagePanel() {
   const shotIdx = (h) => pickedIndex(h, picked[h.id]);
   const shotFile = (h) => pickedFile(h, picked[h.id]);
   const shotUrl = (h) => pickedPreviewUrl(h, picked[h.id]) || h.previewUrl || '';
-  const pickShot = (h, i) => { setCurrentId(h.id); setPicked((m) => ({ ...m, [h.id]: i })); };
+  const pickShot = (h, i) => { setCurrentId(h.id); setPicked((m) => ({ ...m, [h.id]: i })); setPreviewHidden(false); };
   // r94:图片加载完成时把真实像素记下来(键取 src 属性原文,el.src 会被浏览器补成绝对地址,
   // 与 shotUrl() 给的相对路径对不上)。同尺寸不写 state,免得每次轮询重渲染都换一个新对象。
   const measureShot = (e) => {
@@ -1250,6 +1253,7 @@ export default function ImagePanel() {
   // 参考图重新选也就几秒。restorePrompt('') 同时会把 localStorage 草稿写空 ——
   // 只清内存的话刷新一下提示词又回来了(草稿是刻意持久的)。
   const clearInputs = () => {
+    setPreviewHidden(true); // r102:清空也收起上一轮的图片预览
     setErr('');
     restorePrompt('');
     refs.forEach(revokeRefPreview); // objectURL 不撤就一直挂在文档上
@@ -1304,6 +1308,7 @@ export default function ImagePanel() {
       // r95:受理成功就把预览区指向新任务 —— 否则新任务跑着,预览区还挂着上一轮的图。
       // 新任务不是 done,下面的预览区 done 门控自然就不渲染旧图了,不必另加"清预览"开关。
       setCurrentId(d.jobId);
+      setPreviewHidden(false); // r102:新任务受理 → 预览区重新可见
       await loadHistory(); // 拿到 running 条目 → 轮询自动起
     } catch (e) {
       setErr(e.message);
@@ -1361,6 +1366,7 @@ export default function ImagePanel() {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `提交失败（${r.status}）`);
       if (d.jobId) setCurrentId(d.jobId); // r95:与「生成」同口径,预览区跟到新任务上
+      if (d.jobId) setPreviewHidden(false); // r102
       loadHistory();
     } catch (e) {
       setActionErr(`${action.label || action.kind}失败：${e.message}`);
@@ -1795,8 +1801,8 @@ export default function ImagePanel() {
           <button
             type="button"
             onClick={clearInputs}
-            disabled={!prompt && !refs.length}
-            title="清空提示词与参考图；提示词可用撤销（⌘Z / Ctrl+Z）恢复"
+            disabled={!prompt && !refs.length && !(current && current.status === 'done' && !previewHidden)}
+            title="清空提示词、参考图与预览图；提示词可用撤销（⌘Z / Ctrl+Z）恢复"
             className="px-3 py-1.5 rounded-md border border-canvas-deep text-[12px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50"
           >清空</button>
           {refs.length > 0 && (
@@ -1824,7 +1830,7 @@ export default function ImagePanel() {
 
       {/* 预览区(当前已完成的那张)。不显示提示词全文:长提示词会把面板顶爆,
           识别靠任务列表里的截断显示,全文在 Lightbox 标题或「恢复」回输入框看。 */}
-      {current && current.status === 'done' && (
+      {current && current.status === 'done' && !previewHidden && (
         <div className={`space-y-1.5 ${tab === 'gen' ? '' : 'hidden'}`}>
           <img
             src={shotUrl(current)}

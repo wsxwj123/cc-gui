@@ -204,7 +204,7 @@ const mj = (over) => buildImageRequest({ protocol: 'mj', ...BASE, ...over }, '�
   assert.match(block, /revokeRefPreview/, 't6: 上传参考图的 objectURL 要撤,别泄漏');
   assert.equal(/confirmDialog|window\.confirm/.test(block), false, 't6: 清空不弹确认(可撤销的低风险操作)');
   assert.match(PANEL, /onClick=\{clearInputs\}[\s\S]{0,400}>清空<\/button>/, 't6: 生成按钮旁有「清空」按钮');
-  assert.match(PANEL, /disabled=\{!prompt && !refs\.length\}/, 't6: 没东西可清时禁用');
+  assert.match(PANEL, /disabled=\{!prompt && !refs\.length && !\(current && current\.status === 'done' && !previewHidden\)\}/, 't6: 没东西可清时禁用');
   // 草稿键没被改名(改名 = 存量用户的草稿丢失)。
   assert.match(PANEL, /const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft'/, 't6: 草稿键不变');
 }
