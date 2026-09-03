@@ -9,7 +9,12 @@
 //     "<dsh 安装目录>/node_modules/@earendil-works/pi-ai/dist" \
 //     server/data/thinking-levels.json
 //
-// 用法: node gen-thinking-levels.mjs <pi-ai/dist 目录> <输出文件>
+// 用法: node gen-thinking-levels.mjs <pi-ai/dist 目录> <输出文件> [旧表(默认=输出文件)]
+//
+// r105:升级 pi-ai 不是纯增量 —— 0.82.1→0.84.4 有 73 个 id 消失(含在用的 mimo-v2-*)、
+// 11 条降级(1 条判死)。故写盘前必须与旧表**并集合并**:旧表独有的 id 保留、同 id 取档位
+// 并集、上游把有档模型改判 reasoning:false 一律拒绝。判死会让 UI 锁灰 + 发送静默摘档
+// (可见功能损失),判宽只是维持全档(无害)—— 与 model-capabilities.js 的不对称原则同向。
 //
 // 键 = (协议, model id)。协议取 CC-GUI 的 provider.type 口径:pi-ai 的 4 种 OpenAI 系
 // 端点归 openai、anthropic-messages 归 anthropic(其余协议 CC-GUI 不支持,忽略)。
@@ -20,7 +25,7 @@
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
-const DIST = process.argv[2], OUT = process.argv[3];
+const DIST = process.argv[2], OUT = process.argv[3], PREV = process.argv[4] || OUT;
 // Windows:动态 import 只认 URL,绝对路径 C:\... 会 ERR_UNSUPPORTED_ESM_URL_SCHEME。
 const { getSupportedThinkingLevels } = await import(pathToFileURL(path.join(DIST, 'models.js')).href);
 const D = path.join(DIST, 'providers/data/');
@@ -89,6 +94,38 @@ for (const f of fs.readdirSync(D).filter((x) => x.endsWith('.json') && !x.starts
     for (const [id, m] of Object.entries(models)) mergeInto(raw[proto], id, toEntry(m));
   }
 }
+// ── r105:与旧表并集合并(只增不删 + 拒绝判死降级)───────────────────────────
+// 旧表展开成 {proto:{id:entry}}:byId 两协议共用;byProto 缺协议键 = 该协议全档。
+const expand = (t) => {
+  const out = { openai: {}, anthropic: {} };
+  for (const [id, e] of Object.entries(t?.byId || {})) { out.openai[id] = e; out.anthropic[id] = e; }
+  for (const [id, pr] of Object.entries(t?.byProto || {})) {
+    for (const proto of ['openai', 'anthropic']) {
+      out[proto][id] = (pr && typeof pr === 'object' && proto in pr) ? pr[proto] : { efforts: [...CGUI_EFFORTS] };
+    }
+  }
+  return out;
+};
+let prevTable = null;
+try { prevTable = JSON.parse(fs.readFileSync(PREV, 'utf8')); } catch { /* 首次生成:无旧表 */ }
+const prev = expand(prevTable);
+const idsOf = (bag) => new Set([...Object.keys(bag.openai), ...Object.keys(bag.anthropic)]);
+const prevIds = idsOf(prev), freshIds = idsOf(raw);
+let refused = 0;
+for (const proto of ['openai', 'anthropic']) {
+  for (const [id, old] of Object.entries(prev[proto])) {
+    const cur = raw[proto][id];
+    if (cur === undefined) { raw[proto][id] = old; continue; } // 上游删了 → 保留旧值
+    if (!old || !cur) continue;
+    if (old.efforts && !cur.efforts) { raw[proto][id] = old; refused++; continue; } // 拒绝判死
+    if (!old.efforts || !cur.efforts) continue; // 旧判死、新有档 → 接受放宽
+    const u = new Set([...old.efforts, ...cur.efforts]);
+    raw[proto][id] = { efforts: CGUI_EFFORTS.filter((e) => u.has(e)) }; // 减档 → 取并集
+  }
+}
+const addedIds = [...freshIds].filter((id) => !prevIds.has(id)).length;
+const keptIds = [...prevIds].filter((id) => !freshIds.has(id)).length;
+
 // 默认共用一张 byId 表:pi-ai 里"某模型没有 anthropic 条目"只说明它没收录那个端点,
 // 不代表该模型经 anthropic 协议就没有思考档(用户的 DeepSeek/MiMo/Kimi Code 都是
 // anthropic 协议中转,而 pi-ai 只有它们的 openai 端点数据——严格分表会全部落空)。
@@ -105,6 +142,9 @@ for (const id of ids) {
 }
 // r15-4:byProto 两侧一律写实条目(不再用缺键表达全档);读侧 tableLookup 的缺键分支保留作防御。
 for (const [id, e] of Object.entries(MANUAL_OVERRIDES)) { byId[id] = e; delete byProto[id]; }
-fs.writeFileSync(OUT, JSON.stringify({ source: '@earendil-works/pi-ai@0.82.1 (MIT) + 官方文档手工补丁', byId, byProto }));
+let ver = '';
+try { ver = '@' + JSON.parse(fs.readFileSync(path.join(DIST, '../package.json'), 'utf8')).version; } catch {}
+fs.writeFileSync(OUT, JSON.stringify({ source: `@earendil-works/pi-ai${ver} (MIT) + 旧表并集 + 官方文档手工补丁`, byId, byProto }));
 console.log('byId:', Object.keys(byId).length, '条 | byProto(协议相关):', Object.keys(byProto).length,
   '条 | 体积:', (fs.statSync(OUT).size / 1024).toFixed(1), 'KB');
+console.log('合并:上游新增', addedIds, '个 id | 上游删除但保留', keptIds, '个 | 拒绝的判死降级', refused, '条');
