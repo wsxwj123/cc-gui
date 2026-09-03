@@ -107,13 +107,17 @@ const ALL_FIELDS = ['size', 'resolution', 'n', 'quality', 'outputFormat', 'backg
 // 每条二选一:pick = 在全量候选上做排除式过滤;options = 封闭清单(值可以不在全量表里)。
 // 官方的 output_format / background / moderation 【只有 GPT image 系支持】(官方文档原文),
 // 故 DALL·E 两条不放开任何新参数 —— 它们的行为与 r87 之前一字不变。
+// r94 匹配口径:由 `/^X/` 改为【前缀分隔符容忍】—— 中转站的模型名常带前后缀
+// (`openai/gpt-image-2`、`xxx-gpt-image-2-vip`),锚定 `^` 会让它们整块落成"未登记模型",
+// 与本文件"拿不准宁可保留"的红线自相矛盾。【不是任意子串】:前面必须是串首或一个非
+// 字母数字的分隔符,所以 `gpt5image2` / `imagegpt-image` 仍然不命中。
 const OPENAI_FAMILIES = [
   {
     // OpenAI gpt-image-2:size 收任意 WxH(官方约束:宽高被 16 整除、比例 1:3~3:1、
     // 不超过 3840x2160,>2560x1440 标注为实验性),【无比例参数、无 K 档位】。
     // 出处:OpenAI 官方 Images API 的 CreateImageRequest(gpt-image-2 size 约束)。
     // 故排除三类:4096x4096(总像素 16.7M,超其 8,294,400 上限)、1K/2K/4K、全部比例 token。
-    re: /^gpt-image-2/,
+    re: /(^|[^a-z0-9])gpt-image-2/,
     family: 'gpt-image-2',
     pick: (s) => s === 'auto' || (isWxH(s) && s !== '4096x4096'),
     fields: ['size', 'n', 'quality', 'outputFormat', 'background', 'moderation'],
@@ -124,7 +128,7 @@ const OPENAI_FAMILIES = [
     // gpt-image-1 / 1.5 / mini 与 ChatGPT 同源型号:size 是【枚举】,只认
     // auto / 1024x1024 / 1536x1024(横)/ 1024x1536(竖)。
     // 出处:OpenAI 官方 Images API 文档的 size 参数枚举。
-    re: /^(gpt-image-1(\.5|-mini)?|chatgpt-image)/,
+    re: /(^|[^a-z0-9])(gpt-image-1(\.5|-mini)?|chatgpt-image)/,
     family: 'gpt-image-1 系',
     options: ['auto', '1024x1024', '1536x1024', '1024x1536'],
     fields: ['size', 'n', 'quality', 'outputFormat', 'background', 'moderation'],
@@ -134,7 +138,7 @@ const OPENAI_FAMILIES = [
   {
     // DALL·E 3:size 仅 1024x1024 / 1792x1024 / 1024x1792(无 auto)。
     // 出处:OpenAI 官方 Images API 文档(dall-e-3 size 枚举)。
-    re: /^dall-e-3/,
+    re: /(^|[^a-z0-9])dall-e-3/,
     family: 'DALL·E 3',
     options: ['1024x1024', '1792x1024', '1024x1792'],
   },
@@ -142,7 +146,7 @@ const OPENAI_FAMILIES = [
     // DALL·E 2:size 仅 256x256 / 512x512 / 1024x1024。这两个小尺寸只有本家族用得上,
     // 故只登记在这里,不进全量候选表(其它模型看不到它们)。
     // 出处:OpenAI 官方 Images API 文档(dall-e-2 size 枚举)。
-    re: /^dall-e-2/,
+    re: /(^|[^a-z0-9])dall-e-2/,
     family: 'DALL·E 2',
     options: ['256x256', '512x512', '1024x1024'],
   },
@@ -150,7 +154,7 @@ const OPENAI_FAMILIES = [
     // 火山方舟 Seedream 系:size 收 WxH 与 1K/2K/4K 档位,【不认 16:9 这类比例 token】
     // (要控比例得直接给 WxH)。出处:火山方舟 图片生成 API 的 size 参数说明。
     // 只排除比例 token —— 其余(含 4096x4096,本就是 Seedream 系的值)全部保留。
-    re: /seedream/,
+    re: /(^|[^a-z0-9])seedream/,
     family: 'Seedream',
     pick: (s) => !isRatio(s),
   },
@@ -162,7 +166,7 @@ const OPENAI_FAMILIES = [
 const APIMART_FAMILIES = [
   {
     // gpt-image-2 官方渠道:字段最全(截图里那 8 个控件就是它)。
-    re: /^gpt-image-2-official/,
+    re: /(^|[^a-z0-9])gpt-image-2-official/,
     family: 'gpt-image-2 官方渠道',
     options: APIMART_RATIO_VALUES,
     resolutions: IMAGE_RESOLUTIONS,
@@ -176,7 +180,7 @@ const APIMART_FAMILIES = [
     // moderation / output_format,这里就不放开(放开 = 让用户填出必然被忽略或 400 的值)。
     // n 在这一渠道文档自相矛盾(Body 定义写「取值:1」,同页示例却给 n:2)→ 一并不放开,
     // 等真机验证过再说。
-    re: /^gpt-image-2/,
+    re: /(^|[^a-z0-9])gpt-image-2/,
     family: 'gpt-image-2 中转渠道',
     options: APIMART_RATIO_VALUES,
     resolutions: IMAGE_RESOLUTIONS,
@@ -184,7 +188,7 @@ const APIMART_FAMILIES = [
   },
   {
     // gpt-image-1 / 1.5 官方渠道:比例只有三种、【无 resolution 档】、output_format 无 webp。
-    re: /^gpt-image-1(\.5)?(-official)?/,
+    re: /(^|[^a-z0-9])gpt-image-1(\.5)?(-official)?/,
     family: 'gpt-image-1 系官方渠道',
     options: ['auto', '1:1', '3:2', '2:3'],
     fields: ['size', 'n', 'quality', 'outputFormat', 'background', 'moderation', 'nsfwCheck'],
@@ -202,6 +206,20 @@ const APIMART_UNKNOWN = {
   fields: ['size', 'n', 'nsfwCheck'],
 };
 
+// r94 官方方言 + 未登记模型:从"回落 null(什么都不发)"改为【放开常用六字段、候选给全量】。
+// 理由是本文件开头那条红线的另一半:静默不发 = 用户在界面上填了值、上游却收不到,
+// 是个没有任何反馈的黑洞;放开的代价只是上游一句 400(可见、可自纠)。
+// unknown:true 是给面板的判据 —— 据它决定不显示「候选已按 X 的官方支持范围过滤」小字。
+// 【只作用于未命中家族的分支】:已登记家族的门一字不动。
+const OPENAI_UNKNOWN = {
+  family: '未登记模型',
+  options: SIZE_OPTIONS,
+  fields: ['size', 'n', 'quality', 'outputFormat', 'background', 'moderation'],
+  qualities: IMAGE_QUALITIES,
+  formats: IMAGE_OUTPUT_FORMATS,
+  unknown: true,
+};
+
 function entry(f, sizeMode) {
   const options = f.options || SIZE_OPTIONS.filter(f.pick);
   // 过滤把候选清空(能力表写错/全量表改动过头)时按"不确定就不过滤"回落,
@@ -215,6 +233,7 @@ function entry(f, sizeMode) {
     qualities: f.qualities || null,
     formats: f.formats || null,
     fields: f.fields || [],
+    ...(f.unknown ? { unknown: true } : {}),
   };
 }
 
@@ -235,12 +254,13 @@ export function sizeCapFor(dialect, model) {
     }
     return entry(APIMART_UNKNOWN, 'ratio');
   }
-  if (!id) return null;
-  for (const f of OPENAI_FAMILIES) {
-    if (!f.re.test(id)) continue;
-    return entry(f, 'pixel');
+  if (id) {
+    for (const f of OPENAI_FAMILIES) {
+      if (!f.re.test(id)) continue;
+      return entry(f, 'pixel');
+    }
   }
-  return null;
+  return entry(OPENAI_UNKNOWN, 'pixel');
 }
 
 /** 适用候选数组;官方方言下未匹配任何家族 → null(调用方回落全量 SIZE_OPTIONS)。 */

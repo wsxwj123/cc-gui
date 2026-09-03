@@ -160,9 +160,23 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
 
   // ④ 官方方言 + 未登记模型(能力表 null):结构化参数一个都不发 —— 表单在这种情况下
   //    根本不显示它们,有值只可能是换模型后的残值。
+  // 【E10 / r94】口径反转:未登记模型不再回落"什么都不发"。中转站的模型名千奇百怪,
+  // 拿不准时保留控件并照发 —— 上游 400 是可见兜底,静默不发才是"填了没生效"的黑洞。
   const unknown = oa({ ...RESIDUE, model: 'my-relay-custom-model' }).body;
-  assert.deepEqual(unknown, { model: 'my-relay-custom-model', prompt: '一只猫', n: 1 },
-    't1c【官方/未登记模型】能力表 null 时结构化参数一个都不发');
+  assert.equal(unknown.n, RESIDUE.n, 't1c【E10·未登记模型】n 照发');
+  assert.equal(unknown.quality, RESIDUE.quality, 't1c【E10·未登记模型】quality 照发');
+  assert.equal(unknown.output_format, RESIDUE.outputFormat, 't1c【E10·未登记模型】output_format 照发');
+  assert.equal(unknown.background, RESIDUE.background, 't1c【E10·未登记模型】background 照发');
+  assert.equal(unknown.moderation, RESIDUE.moderation, 't1c【E10·未登记模型】moderation 照发');
+  assert.equal('resolution' in unknown, false, 't1c【E10·未登记模型】apimart 专属键仍不发');
+  assert.equal('nsfw_check' in unknown, false, 't1c【E10·未登记模型】apimart 专属键仍不发');
+  // 放开只作用于"未命中家族"的分支:已登记家族的门一字不动(K8 的同款结论,这里再钉一次)。
+  const de3 = oa({ ...RESIDUE, model: 'dall-e-3' }).body;
+  assert.equal(de3.n, 1, 't1c【E10·回归】dall-e-3 的 n 仍被门到 1');
+  for (const k of ['quality', 'output_format', 'background', 'moderation']) {
+    assert.equal(k in de3 && de3[k] !== '' && de3[k] !== undefined, false,
+      `t1c【E10·回归】dall-e-3 仍一个都不发(${k})`);
+  }
 
   // ⑤ 逃生口:能力表门掉的键,用户显式写进 extra 仍照发(extra 永远最后展开)。
   const esc = oa({ ...RESIDUE, model: 'dall-e-3', extra: { quality: 'hd', n: 2, style: 'vivid' } }).body;
@@ -208,7 +222,11 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
   const cases = [];
   for (const protocol of ['gemini', 'chat', 'mj']) {
     for (const size of ['', '16:9', '1024x1024']) {
-      for (const refs of [[], REF]) {
+      // 【E13 / r94】mj + {name,mime,base64} 垫图已不再与基线同形:默认传法(upload)下拿不到
+      // URL 的垫图必须【抛中文 Error】(INTERFACE §4.7 / §8.1 E13),故把该入参移出基线比对集合,
+      // 改在下面单独断言抛错。gemini / chat 两协议的带 refs 分支照旧逐字比对。
+      const refSets = protocol === 'mj' ? [[]] : [[], REF];
+      for (const refs of refSets) {
         cases.push([{ protocol, ...BASE, model: protocol === 'mj' ? 'midjourney' : 'm-1', size, mjVersion: '7', mjSpeed: 'fast', extra: { foo: 1 } }, refs]);
       }
     }
@@ -231,6 +249,12 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
       assert.deepEqual(norm(buildImageRequest(withNew, '猫', refs)), norm(old.buildImageRequest(cfg, '猫', refs)),
         `t1b【新字段零影响】${label}`);
     }
+  }
+  // 【E13 / r94】上面被移出基线集合的那个入参,在这里单独钉住新契约:抛中文 Error,不静默忽略。
+  for (const size of ['', '16:9', '1024x1024']) {
+    const cfg = { protocol: 'mj', ...BASE, model: 'midjourney', size, mjVersion: '7', mjSpeed: 'fast', extra: { foo: 1 } };
+    assert.throws(() => buildImageRequest(cfg, '猫', REF), (e) => /[一-龥]/.test(String(e && e.message)),
+      `t1b【E13】mj + {name,mime,base64} 垫图必须抛中文 Error(size=${size || '空'})`);
   }
   rmSync(dir, { recursive: true, force: true });
 }
@@ -295,9 +319,13 @@ const oa = (over) => buildImageRequest({ protocol: 'openai', ...BASE, ...over },
   assert.deepEqual(sizeOptionsFor('openai', 'dall-e-3'), ['1024x1024', '1792x1024', '1024x1792'], 't3: dall-e-3 恰 3 项');
   assert.deepEqual(sizeOptionsFor('openai', 'dall-e-2'), ['256x256', '512x512', '1024x1024'], 't3: dall-e-2 恰 3 项');
   assert.ok(sizeOptionsFor('openai', 'doubao-seedream-4-5').includes('4K'), 't3: seedream 保留 K 档');
+  // 【E11 / r94】未登记模型改成有一条固定条目(family「未登记模型」+ unknown:true),
+  // 尺寸候选仍是全量 —— 但不再用 null 表达"全量",面板据 cap.unknown 决定不显示过滤小字。
   for (const m of ['flux-pro-1.1', 'my-relay-custom-model', '', null, undefined, 123]) {
-    assert.equal(sizeOptionsFor('openai', m), null, `t3【官方/未知模型 ${String(m)}】回落全量(null)`);
-    assert.equal(sizeCapFor('openai', m), null, `t3【官方/未知模型 ${String(m)}】没有条目`);
+    assert.deepEqual(sizeOptionsFor('openai', m), SIZE_OPTIONS, `t3【E11·未登记 ${String(m)}】候选是全量`);
+    const cap = sizeCapFor('openai', m);
+    assert.notEqual(cap, null, `t3【E11·未登记 ${String(m)}】必须给得出条目,不许回落 null`);
+    assert.equal(cap.unknown, true, `t3【E11·未登记 ${String(m)}】unknown 为 true`);
   }
 
   // ── apimart 的分家族能力(报告 §A-3 的支持模型矩阵) ──

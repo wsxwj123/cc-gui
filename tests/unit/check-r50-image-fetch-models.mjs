@@ -63,8 +63,15 @@ const FORM_KEY = 'sk-r50-form-key-998877665544';
     // 还要按 (方言, 模型) 能力表判,能力表没放开的键一律不发(修"换模型后残值静默上路")。
     // 覆盖面由 check-r87-image-params 的 t1c 钉死(dall-e-3 / apimart 中转渠道两形态 +
     // extra 逃生口仍可覆盖),t1b 的基线对跑同样仍然是绿的。
-    '34c08fc954749016ebad50041709a883cfd1436436c8e6a2a4402564fb87479e',
-    't2: buildImageRequest 一字未改(生成链路红线);若确需改动,连同 check-image-gen 与 check-r54-image-refs 的断言一起复核后再更新此基线',
+    // 【E16 / r94,G6 已定死流程】本函数本轮必改(新增 mj-proxy 分支 + mj 的参考图/参数编译),
+    // 基线必须更新。测试设计阶段填占位串保证修前必红;**A 线实现落地后由开发线用实测哈希替换**,
+    // 替换的同一个 commit 里必须附上"已复核 check-image-gen(E15)与 check-r54(E20–E22)"的说明,
+    // 判官核对该说明存在与否。
+    // 【E16 已按 G6 协议替换为实测哈希】r94 A 线实现落地:mj-proxy 分支 + mj 分支接参数编译
+    // 与参考图。替换前已复核 check-image-gen(E15,IMAGE_PROTOCOLS 五元)与
+    // check-r54-image-refs(E20–E22,三条安全锚计数)—— 两个文件当时均已跑绿。
+    '118da35c09e7518f955881c93ecb73f7bf908926536632b1a092eecc401ede13',
+    't2【E16】buildImageRequest 源码基线(r94 必改:mj-proxy 分支 + mj 参考图/参数编译);更新前先复核 check-image-gen 与 check-r54-image-refs',
   );
 }
 

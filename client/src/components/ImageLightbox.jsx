@@ -9,7 +9,11 @@ import { X, ExternalLink, ChevronLeft, ChevronRight } from './Icon.jsx';
 // r95 左右切图:onPrev / onNext / counter 三个可选 prop。本组件仍是哑的 —— 序列由调用方
 // 算好,这里只管"发方向"和"到头那侧不画按钮"。三个 prop 都不传 = 与 r95 之前逐字同行为
 // (方向键完全不拦截),会话消息与输入框附件的放大层就走这条路。
-export function ImageLightbox({ src, name, path, onClose, onPrev, onNext, counter }) {
+//
+// r94 像素尺寸与 1:1:meta(像素文本,如 1456×816)/ actualSize(是否按原始像素显示)/
+// onToggleActualSize(切换)同样是可选 prop,同样不传就完全不渲染 —— 组件保持无 state,
+// 尺寸由调用方测、开关由调用方持有。
+export function ImageLightbox({ src, name, path, onClose, onPrev, onNext, counter, meta, actualSize, onToggleActualSize }) {
   const open = !!src;
   const nav = !!(onPrev || onNext); // 这个调用方接了导航吗 —— 方向键是否归本模态所有的唯一判据
 
@@ -42,9 +46,31 @@ export function ImageLightbox({ src, name, path, onClose, onPrev, onNext, counte
   if (!src) return null;
   const navBtnCls = 'absolute top-1/2 -translate-y-1/2 w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors';
   return createPortal(
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 p-6" onClick={onClose}>
-      {counter && (
-        <div className="absolute top-4 left-4 px-2.5 py-1.5 rounded-lg bg-white/10 text-white text-[12px] font-body">{counter}</div>
+    <div
+      className={`fixed inset-0 z-[200] flex bg-black/80 p-6 ${actualSize ? 'overflow-auto' : 'items-center justify-center'}`}
+      onClick={onClose}
+    >
+      {(counter || meta || onToggleActualSize) && (
+        /* fixed 而非 absolute:1:1 档下遮罩自己是滚动容器，absolute 的工具条会跟着内容
+           滚出视口，"自适应"就再也点不回来了（它没有键盘替代，Esc 只关不还原）。
+           portal 到 body、无 transform 祖先，fixed 的落点与原来的 absolute 逐像素相同。 */
+        <div className="fixed top-4 left-4 z-10 flex items-center gap-2">
+          {counter && (
+            <div className="px-2.5 py-1.5 rounded-lg bg-white/10 text-white text-[12px] font-body">{counter}</div>
+          )}
+          {meta && (
+            <div className="px-2.5 py-1.5 rounded-lg bg-white/10 text-white text-[12px] font-mono" title="图片实际像素">{meta}</div>
+          )}
+          {onToggleActualSize && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onToggleActualSize(); }}
+              className={`px-2.5 py-1.5 rounded-lg text-[12px] font-body transition-colors ${actualSize ? 'bg-white/30 text-white' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+              title={actualSize ? '恢复自适应缩放' : '按原始像素显示（超出部分可滚动）'}
+            >
+              {actualSize ? '自适应' : '1:1'}
+            </button>
+          )}
+        </div>
       )}
       {path && (
         <button
@@ -85,12 +111,17 @@ export function ImageLightbox({ src, name, path, onClose, onPrev, onNext, counte
           <ChevronRight size={18} />
         </button>
       )}
-      {/* 点图片本身不关闭;点背景才关 */}
+      {/* 点图片本身不关闭;点背景才关。
+          1:1 档:去掉全部尺寸上限按原始像素铺开,超出部分靠遮罩的 overflow-auto 滚动;
+          m-auto 让小于视口的图仍居中 —— 用 justify-center 居中的话,溢出的左/上半边会被
+          裁掉且滚不回来(flex 溢出的老坑),auto margin 在溢出时自动归零没有这个问题。 */}
       <img
         src={src}
         alt={name || ''}
         onClick={(e) => e.stopPropagation()}
-        className="max-w-[min(92vw,calc(var(--app-w,100vw)-1rem))] max-h-[min(92vh,calc(var(--app-h,100dvh)-1rem))] object-contain rounded-lg shadow-popover"
+        className={actualSize
+          ? 'shrink-0 max-w-none max-h-none m-auto rounded-lg shadow-popover'
+          : 'max-w-[min(92vw,calc(var(--app-w,100vw)-1rem))] max-h-[min(92vh,calc(var(--app-h,100dvh)-1rem))] object-contain rounded-lg shadow-popover'}
       />
     </div>,
     document.body,
