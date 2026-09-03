@@ -1041,6 +1041,27 @@ server.listen(PORT, HOST, () => {
   console.log(`  Bound to                   ${HOST}${exposure}`);
   console.log(`  Started at                 ${new Date().toLocaleString()}`);
   console.log('═'.repeat(60));
+  // r108-必修1:后台异步预热 CLI 的 `--help` 能力缓存。不预热的话第一次打开设置页
+  // (GET /api/prompt-cache)或第三方首条消息会同步 spawn `claude --help`,单线程 Express
+  // 整个冻住(Windows 上 80MB+ exe 首次执行被 Defender 全量扫描,最长吃满 2s)。
+  // Windows 上 resolveSdkClaude()(包内 .exe)与 resolveClaude()(.cmd shim)是两个缓存 key,
+  // 各预热一次;非 Win 两者相同,去重后只跑一次。不 await、异常全吞:纯优化,炸了不能挡启动。
+  (async () => {
+    const [{ primeHelpCache }, resolver] = await Promise.all([
+      import('./utils/prompt-cache-env.js'),
+      import('./utils/claude-resolver.js'),
+    ]);
+    // 先用异步版把解析结果热进 _cache(两版共用同一张):Windows 上首次解析要串行跑
+    // where + `npm config get prefix` + PowerShell 冷启动,同步版会把这几秒直接压在事件
+    // 循环上(正是"到处 connecting"那类症状)。热完之后下面两个同步调用只是读缓存。
+    await resolver.resolveClaudeAsync().catch(() => null);
+    const paths = [...new Set([resolver.resolveSdkClaude(), resolver.resolveClaude()?.path].filter(Boolean))];
+    await Promise.all(paths.map(async (p) => {
+      const ok = await primeHelpCache(p).catch(() => false);
+      console.error(`[prompt-cache] help cache primed: ${p} → ${ok ? 'ok' : 'miss'}`);
+    }));
+  })().catch((e) => console.error('[prompt-cache] help prime failed:', e?.message || e));
+
   // r13-p2-6:后台预热会话列表缓存 —— 首屏展开项目不再等 1-2 秒解析。
   // 并发 4 路限流预热(不是串行 —— 早先注释写错了),失败静默;缓存本身按 mtime 判定,
   // 预热只是把冷启动前置。

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readFile, readdir, stat, writeFile, mkdir } from 'fs/promises';
-import { join, sep, dirname } from 'path';
+import { join, sep, dirname, win32 as winPath } from 'path';
 import { existsSync, readdirSync } from 'fs';
 import { homedir } from 'os';
 import { execFile, spawn } from 'child_process';
@@ -32,8 +32,65 @@ async function spawnMcpCommand(command, args, opts) {
   // 不能因为本进程找不到就先行拒绝。真失败时 ENOENT 由调用方翻成 missingCommandHint。
   const resolved = hit?.file || command;
   const viaCmd = hit ? hit.viaCmd : /\.(cmd|bat)$/i.test(resolved);
-  if (viaCmd) return spawn('cmd.exe', ['/c', resolved, ...args], opts);
+  if (viaCmd) {
+    const s = winCmdSpawnSpec(resolved, args, opts);
+    return spawn(s.file, s.args, s.opts);
+  }
   return spawn(resolved, args, opts);
+}
+
+/**
+ * r108-必修3:`.cmd/.bat` 经 cmd.exe 起时的引号规则(execa/npm 的标准做法)。
+ * 旧写法 `spawn('cmd.exe', ['/c', resolved, ...args])`:Node 的非 shell spawn 会给**带空格的
+ * 参数**自己加引号,命令路径带空格(`C:\Program Files\nodejs\npx.cmd`)+ 任一参数带空格
+ * (`C:\Users\John Smith\Documents`)时命令行出现 4 个引号 → 不满足 cmd 的"恰好两个引号"
+ * 保留规则 → cmd 删掉首尾引号 → 只看到 `C:\Program` → "不是内部或外部命令"。
+ * 修法:每个 token 各自加引号(内部引号翻倍),整条再套一层外层引号让 cmd 的"删首尾引号"
+ * 只吃掉它;`windowsVerbatimArguments:true` 声明 Node 不要再插手参数拼接。
+ * 每 token 独立引号后 `&`/`|`/`^`/`>` 落在引号内不被 cmd 解释,注入面不比旧写法大。
+ * 纯函数(export 仅为可单测);不改写调用方的 opts 对象。
+ */
+export function winCmdSpawnSpec(resolved, args = [], opts = {}) {
+  const q = (a) => `"${String(a).replace(/"/g, '""')}"`;
+  const line = [resolved, ...(Array.isArray(args) ? args : [])].map(q).join(' ');
+  return {
+    file: 'cmd.exe',
+    args: ['/d', '/s', '/c', `"${line}"`],
+    opts: { ...(opts || {}), windowsVerbatimArguments: true },
+  };
+}
+
+/**
+ * 进程内 TTL 缓存工厂(纯函数,now 可注入以测过期)。`null` 是合法可缓存值 ——
+ * "这个命令确实找不到"正是最贵的那条路径(where 5s + PowerShell 1-3s + 候选扫描),
+ * 必须缓存。未命中/已过期一律返回 undefined,与"缓存过的 null"区分开。
+ */
+export function makeTtlCache(ttlMs, now = Date.now) {
+  const store = new Map();
+  return {
+    get(key) {
+      const e = store.get(key);
+      if (!e) return undefined;
+      if (now() - e.at >= ttlMs) { store.delete(key); return undefined; }
+      return e.value;
+    },
+    set(key, value) { store.set(key, { at: now(), value }); },
+    clear() { store.clear(); },
+  };
+}
+
+/**
+ * 超时兜底:ms 内 promise 完成就给原值(falsy 值也照给),超时或 reject 给 fallback。
+ * 永不 reject。promise 先完成时**清掉定时器** —— 否则一个 1.5s 的悬挂 timer 会把
+ * 进程的事件循环拖住,单测里表现为子进程退不出。非 Promise 入参原样返回。
+ */
+export function withTimeout(promise, ms, fallback) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
+    const timer = setTimeout(() => { if (!settled) { settled = true; resolve(fallback); } }, ms);
+    Promise.resolve(promise).then(done, () => done(fallback));
+  });
 }
 
 // r106:GUI 后端进程的 PATH 是**启动时快照**,uv 装在 %USERPROFILE%\.local\bin(pipx/scoop/
@@ -42,17 +99,31 @@ async function spawnMcpCommand(command, args, opts) {
 // where 优先(那是 CLI 自己起 MCP 时的同源解析),候选只作兜底。
 // 返回 { file, viaCmd, viaCandidates } 或 null(解析不出);viaCandidates=true 表示"只有候选
 // 目录找得到" —— CLI 自己起这个 MCP 时同样会找不到,添加/编辑端点据此提示用户改填绝对路径。
+// r108-必修2:结果 30s 进程内缓存。落空那条路最贵(where 5s + PowerShell 取 live PATH 1-3s
+// + 候选目录扫描),而 listToolsFromCfg / probeStdioStderr / absCommandHint 会对每个 MCP
+// server 各调一次 —— 面板刷新一次就是 N 倍。key 计入 PATH:cfg.env 覆盖了 PATH 的 server
+// 解析结果可能不同,不能与默认 env 共用一条缓存。
+const _winCmdCache = makeTtlCache(30_000);
+
 async function resolveMcpCommandWin(command, env = process.env) {
   if (process.platform !== 'win32' || !command || /[\\/]/.test(command)) return null;
+  const key = `${command}\0${String(env?.PATH ?? env?.Path ?? '')}`;
+  const cached = _winCmdCache.get(key);
+  if (cached !== undefined) return cached; // null 是合法缓存值("确实找不到"),与未缓存区分
+  let out = null;
   try {
     const { stdout } = await execFileP('where', [command], { timeout: 5000 });
     const hits = String(stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     // 裸名可能同时命中无扩展名 shim 与 .cmd/.exe:优先可直接执行的扩展名。
     const hit = hits.find((h) => /\.(exe|cmd|bat)$/i.test(h)) || hits[0] || '';
-    if (hit) return { file: hit, viaCmd: /\.(cmd|bat)$/i.test(hit), viaCandidates: false };
+    if (hit) out = { file: hit, viaCmd: /\.(cmd|bat)$/i.test(hit), viaCandidates: false };
   } catch { /* where 失败(不在 PATH):落到候选目录 */ }
-  const cand = resolveWinCommand(command, { env, liveDirs: await winLivePathDirsAsync() });
-  return cand ? { ...cand, viaCandidates: true } : null;
+  if (!out) {
+    const cand = resolveWinCommand(command, { env, liveDirs: await winLivePathDirsAsync() });
+    out = cand ? { ...cand, viaCandidates: true } : null;
+  }
+  _winCmdCache.set(key, out);
+  return out;
 }
 
 /**
@@ -64,45 +135,57 @@ async function resolveMcpCommandWin(command, env = process.env) {
  * 目录顺序优先于扩展名:先按目录排,同一目录内 .exe > .cmd > .bat。
  * 入参一律容错(liveDirs 非数组/含非字符串、env 缺键、readdirSync 抛错)——这些值来自
  * 注册表/环境,不是可信输入,不能因为脏数据让整条 MCP 启动链路抛异常。
+ * r108-必修2:enumerate 默认按平台关掉(真 Windows 上 NTFS 大小写不敏感,existsSync 已够)。
  */
 export function resolveWinCommand(command, {
   env = process.env,
   existsSync: exists = existsSync,
   readdirSync: readdir = readdirSync,
   liveDirs = [],
+  // 枚举兜底开关。真 Windows 默认关:注册表 PATH 有 20-40 个目录(必含 System32 约 5000 项),
+  // 逐个同步 readdirSync 是 0.3-2s 阻塞;PATH 里有断掉的映射网络盘/UNC 时更会阻塞到 SMB
+  // 超时(几十秒)后端全无响应。NTFS 不区分大小写,existsSync('uvx.exe') 对 UVX.EXE 同样 true,
+  // 枚举在真机上本就多余 —— 只在 mac 上用注入 fs 模拟"盘上是大写"时才需要它。
+  enumerate = process.platform !== 'win32',
+  // 注入 platform 时按该平台的规则拼路径(与 claude-resolver 的 resolveSdkClaudeFrom 同款):
+  // mac 上 posix 的 path.join 会把 `C:\dirA` + `foo.exe` 拼成 `C:\dirA/foo.exe` 这种混合
+  // 分隔符,模拟出来的 Windows 布局根本对不上。真 Windows 上 join 本就是 win32 版,生产无变化。
+  platform = process.platform,
 } = {}) {
+  const pj = platform === 'win32' ? winPath.join : join;
   const name = String(command || '').trim();
   if (!name || /[\\/]/.test(name)) return null;
   const e = env || {};
   const home = e.USERPROFILE || e.HOME || '';
-  const appData = e.APPDATA || (home ? join(home, 'AppData', 'Roaming') : '');
-  const localApp = e.LOCALAPPDATA || (home ? join(home, 'AppData', 'Local') : '');
+  const appData = e.APPDATA || (home ? pj(home, 'AppData', 'Roaming') : '');
+  const localApp = e.LOCALAPPDATA || (home ? pj(home, 'AppData', 'Local') : '');
   // Python 装在 Python3XX 这种版本号目录里,只能枚举父目录(没有 glob)。
   const listDir = (d) => { try { const r = readdir(d); return Array.isArray(r) ? r.map(String) : []; } catch { return []; } };
-  const pyScripts = (base) => (base ? listDir(base).filter((d) => /^Python3/i.test(d)).map((d) => join(base, d, 'Scripts')) : []);
+  const pyScripts = (base) => (base ? listDir(base).filter((d) => /^Python3/i.test(d)).map((d) => pj(base, d, 'Scripts')) : []);
   const dirs = [
     ...(Array.isArray(liveDirs) ? liveDirs : []).filter((d) => typeof d === 'string' && d),
-    home && join(home, '.local', 'bin'),      // uv / pipx / 官方原生安装器
-    home && join(home, '.cargo', 'bin'),
-    appData && join(appData, 'npm'),          // npm 全局(npx 等)
-    ...pyScripts(localApp && join(localApp, 'Programs', 'Python')),
-    ...pyScripts(appData && join(appData, 'Python')),
-    home && join(home, 'scoop', 'shims'),
+    home && pj(home, '.local', 'bin'),      // uv / pipx / 官方原生安装器
+    home && pj(home, '.cargo', 'bin'),
+    appData && pj(appData, 'npm'),          // npm 全局(npx 等)
+    ...pyScripts(localApp && pj(localApp, 'Programs', 'Python')),
+    ...pyScripts(appData && pj(appData, 'Python')),
+    home && pj(home, 'scoop', 'shims'),
   ].filter(Boolean);
   const exts = /\.(exe|cmd|bat)$/i.test(name) ? [''] : ['.exe', '.cmd', '.bat'];
   const hit = (p) => ({ file: p, viaCmd: /\.(cmd|bat)$/i.test(p) });
   for (const d of dirs) {
-    // 先枚举目录:盘上可能是 UVX.EXE 这种大小写(Windows 文件系统本身不敏感),按真名匹配
-    // 才能返回可直接 spawn 的真实路径。列不了目录(不存在/无权限/注入的 fs)才回落存在性判断。
+    // 先按扩展名优先级做存在性判断(便宜、不列目录)。
+    for (const ext of exts) {
+      try { if (exists(pj(d, name + ext))) return hit(pj(d, name + ext)); } catch {}
+    }
+    if (!enumerate) continue;
+    // 兜底枚举:盘上可能是 UVX.EXE 这种大小写而 exists 又区分大小写(注入的 fs / 大小写敏感
+    // 文件系统),按真名匹配才能返回可直接 spawn 的真实路径。
     const entries = listDir(d);
     for (const ext of exts) {
       const want = (name + ext).toLowerCase();
       const found = entries.find((n) => n.toLowerCase() === want);
-      if (found) return hit(join(d, found));
-    }
-    if (entries.length) continue;
-    for (const ext of exts) {
-      try { if (exists(join(d, name + ext))) return hit(join(d, name + ext)); } catch {}
+      if (found) return hit(pj(d, found));
     }
   }
   return null;
@@ -111,6 +194,9 @@ export function resolveWinCommand(command, {
 // 命令确实找不到时给用户的人话(替代裸 ENOENT / "The system cannot find the file specified")。
 // export 仅为可单测。
 export function missingCommandHint(name, platform = process.platform) {
+  // r108-建6:用户已经填了路径(带 / 或 \)还劝他"填写绝对路径"是答非所问 —— 那条路径
+  // 本身不存在或不可执行,这才是他要看到的信息。
+  if (/[\\/]/.test(String(name ?? ''))) return `找不到 ${name}:该路径不存在或不可执行`;
   const example = platform === 'win32' ? 'C:\\Users\\<你>\\.local\\bin\\uvx.exe' : '/opt/homebrew/bin/uvx';
   return `找不到命令 ${name}:请确认已安装该工具且其目录在 PATH 中,或在命令框填写绝对路径(如 ${example})`;
 }
@@ -121,7 +207,10 @@ async function absCommandHint(commandLine) {
   if (process.platform !== 'win32') return '';
   const { command } = parseCommandLine(commandLine);
   if (!command) return '';
-  const hit = await resolveMcpCommandWin(command);
+  // r108-必修2:这条挂在 POST/PUT 的响应路径上(添加/编辑 MCP 的"保存"按钮),而解析最坏
+  // 要串行叠 where(≤5s)+ 首次 PowerShell 取 live PATH(1-3s)。1.5s 拿不到就不给 hint ——
+  // hint 只是锦上添花,不值得让保存按钮转好几秒。
+  const hit = await withTimeout(resolveMcpCommandWin(command), 1500, '');
   if (!hit?.viaCandidates) return '';
   return `命令 ${command} 不在 GUI 启动时的 PATH 快照里(已在 ${hit.file} 找到)。`
     + 'claude 自己启动该 MCP 时可能同样找不到它,建议把命令改成该绝对路径。';
