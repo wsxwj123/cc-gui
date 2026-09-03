@@ -410,7 +410,14 @@ export function resolveSdkClaudeFrom(hitPath, {
   // 旧行为(回落 SDK 自带 CLI)至少能用,所以体积不达标宁可回落。statSync 抛错(被杀毒隔离/
   // 无权限)同样按不可用处理。
   if (minExeBytes > 0) {
-    try { if (statFn(binTarget).size < minExeBytes) return null; } catch { return null; }
+    try {
+      const size = statFn(binTarget).size;
+      if (size < minExeBytes) {
+        // 这条静默回落最难排查(聊天"能用"但一直是 SDK 自带的旧 CLI),留一行到 server.log。
+        console.error(`[claude-resolver] 包内 claude.exe 仅 ${size} 字节,疑似安装不全,回落 SDK 自带 CLI`);
+        return null;
+      }
+    } catch { return null; }
   }
   return binTarget;
 }

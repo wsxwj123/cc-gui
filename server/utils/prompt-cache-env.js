@@ -141,6 +141,10 @@ export async function primeHelpCache(claudePath, probeAsync = defaultHelpProbeAs
   let help = '';
   // 失败也写入 '',与同步版"探测失败即按不支持并缓存"一致 —— 否则每次仍会同步重探。
   try { help = String((await probeAsync(key)) || ''); } catch { help = ''; }
+  // 竞态复查(必修):异步探测最长 8s,这期间用户开设置页会走 cliSupportsFlag 的同步兜底
+  // 并把**正文**写进同一张 Map。此处若无条件 set,预热超时 resolve '' 就会把已有正文覆盖成
+  // 空串 —— 本进程内所有按 flag 门控的优化从此静默失效,直到重启 GUI。先到先得,不覆盖。
+  if (_helpCache.has(key)) return true;
   _helpCache.set(key, help);
   return !!help;
 }

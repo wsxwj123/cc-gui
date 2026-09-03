@@ -114,7 +114,7 @@ const primeBlock = listenBody.slice(listenBody.indexOf('primeHelpCache') - 800, 
 
 check('W10 挂点在 listen 回调内,且对两条路径去重后各预热一次', () => {
   assert.ok(listenBody.includes('primeHelpCache'), 'primeHelpCache 不在 listen 回调里');
-  assert.ok(/new Set\(\[resolveSdkClaude\(\), resolveClaude\(\)\?\.path\]\.filter\(Boolean\)\)/.test(primeBlock),
+  assert.ok(/new Set\(\[resolver\.resolveSdkClaude\(\), resolver\.resolveClaude\(\)\?\.path\]\.filter\(Boolean\)\)/.test(primeBlock),
     '没有对 resolveSdkClaude() 与 resolveClaude()?.path 去重 + 过滤空值');
 });
 
@@ -122,6 +122,17 @@ check('W11 不阻塞启动:整块是不被 await 的 IIFE,且带 .catch 吞异�
   assert.ok(/\)\(\)\.catch\(\(e\) => console\.error/.test(primeBlock), 'IIFE 尾部没有 .catch 兜底');
   assert.equal(/^\s*await \(async \(\)/m.test(primeBlock), false, '启动挂点不能被 await(会阻塞 listen 回调)');
   assert.ok(/await primeHelpCache\(p\)\.catch\(\(\) => false\)/.test(primeBlock), '单条预热没有各自吞异常');
+});
+
+check('W11b 先 await 异步解析再取同步结果(Windows 首解析不压在事件循环上)', () => {
+  assert.ok(/await resolver\.resolveClaudeAsync\(\)\.catch/.test(primeBlock), '没有先走 resolveClaudeAsync 热缓存');
+  assert.ok(primeBlock.indexOf('resolveClaudeAsync') < primeBlock.indexOf('resolver.resolveSdkClaude()'),
+    'resolveClaudeAsync 必须排在同步 resolveSdkClaude/resolveClaude 之前,否则热缓存无意义');
+});
+
+check('W11c 两条路径并行预热(不是串行 await)', () => {
+  assert.ok(/await Promise\.all\(paths\.map\(async \(p\) =>/.test(primeBlock), '两条路径没并行预热');
+  assert.equal(/for \(const p of paths\)/.test(primeBlock), false, '还在串行 for-await');
 });
 
 check('W12 只打一行结果到 stderr,不打 env/密钥', () => {
@@ -167,6 +178,30 @@ check('W15 同步兜底探测超时是 2000(不是 5000)', () => {
   assert.equal(m[1], '2000', `同步 execFileSync timeout 仍是 ${m[1]}`);
 });
 
+check('W15b 竞态:预热在飞时同步兜底写入的正文,不许被随后 resolve 的空串覆盖', () => {
+  // 真实场景:启动预热对 80MB exe 跑 --help(最长 8s),期间用户打开设置页 →
+  // cliSupportsFlag 同步探到正文 → 预热超时 resolve '' → 若无条件 set 就把正文冲掉,
+  // 本进程内所有按 flag 门控的优化静默失效直到重启。
+  const code = `
+    const m = await import(${CACHE_URL});
+    const P = 'C:\\\\race\\\\claude.exe';
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const priming = m.primeHelpCache(P, () => gate);          // 预热挂起中
+    const sync = m.cliSupportsFlag(P, '--system-prompt-snapshot', () => '  --system-prompt-snapshot <mode>');
+    release('');                                              // 预热随后超时,拿到空串
+    const primed = await priming;
+    const after = m.cliSupportsFlag(P, '--system-prompt-snapshot', () => { throw new Error('不该再同步探测'); });
+    process.stdout.write(JSON.stringify({ sync, after, primed }));
+  `;
+  const out = runNode(code);
+  assert.equal(out.status, 0, `退出码 ${out.status}: ${String(out.stderr).slice(0, 300)}`);
+  const got = JSON.parse(String(out.stdout).trim());
+  assert.equal(got.sync, true, '同步兜底本应探到正文');
+  assert.equal(got.after, true, '预热的空串把同步探到的正文覆盖掉了(竞态未修)');
+  assert.equal(got.primed, true, '缓存里已有正文时,预热应 resolve true');
+});
+
 check('W16 预热与同步探测共用同一张 _helpCache(否则预热白热)', () => {
   const src = read('server/utils/prompt-cache-env.js');
   const maps = src.match(/new Map\(\)/g) || [];
@@ -187,8 +222,13 @@ check('W17 splitWinPathList 被 sync/async 两处 live PATH 解析共用', () =>
 
 check('W18 体积下限:minExeBytes=0 时完全不 stat(注入 fs 的布局根本没落盘)', () => {
   assert.ok(/minExeBytes = readFn \? 0 : 5_000_000/.test(resolverSrc), '默认下限不是「注入 readFileSync 则 0,否则 5MB」');
-  assert.ok(/if \(minExeBytes > 0\) \{\s*try \{ if \(statFn\(binTarget\)\.size < minExeBytes\) return null; \} catch \{ return null; \}\s*\}/.test(resolverSrc),
-    'stat 没被 minExeBytes>0 门控,或抛错没按不可用处理');
+  assert.ok(/if \(minExeBytes > 0\) \{\s*try \{/.test(resolverSrc), 'stat 没被 minExeBytes>0 门控');
+  assert.ok(/const size = statFn\(binTarget\)\.size;/.test(resolverSrc), '没有取 statFn(binTarget).size');
+  assert.ok(/\} catch \{ return null; \}/.test(resolverSrc), 'statSync 抛错没按不可用处理');
+  assert.ok(/console\.error\(`\[claude-resolver\] 包内 claude\.exe 仅 \$\{size\} 字节/.test(resolverSrc),
+    '体积不达标回落时没留日志(静默回落最难排查)');
+  assert.equal(/process\.env|ANTHROPIC|TOKEN|KEY/.test(resolverSrc.slice(resolverSrc.indexOf('const size = statFn'), resolverSrc.indexOf('return binTarget;'))), false,
+    '回落日志里出现了环境变量/密钥字样');
 });
 
 check('W19 体积判定排在 PE 头判定之后(体积不能绕过 MZ 判定)', () => {
