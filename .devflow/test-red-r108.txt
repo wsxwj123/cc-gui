@@ -1,0 +1,302 @@
+
+A. primeHelpCache 异步预热 help 缓存
+  ✗ A1 预热成功后 cliSupportsFlag 命中缓存,返回 true 且不再同步 probe
+      缺少导出 primeHelpCache(当前 typeof=undefined)
+  ✓ A2 未预热的另一个路径,同步 probe 仍会被调用(既有行为不变)
+  ✗ A3 预热正文里没有该 flag → cliSupportsFlag 为 false 且不同步 probe
+      缺少导出 primeHelpCache(当前 typeof=undefined)
+  ✗ A4 claudePath 为空串 → resolve false 且不 spawn
+      缺少导出 primeHelpCache(当前 typeof=undefined)
+  ✗ A5 claudePath 为 null/undefined/数字 → resolve false 且不 spawn,不抛
+      缺少导出 primeHelpCache(当前 typeof=undefined)
+  ✗ A6 同一路径重复预热 → 第二次直接 true 且不重复 spawn
+      缺少导出 primeHelpCache(当前 typeof=undefined)
+  ✗ A7 probe 返回空串 → resolve false;且空串也进缓存,再预热不重复 spawn
+      缺少导出 primeHelpCache(当前 typeof=undefined)
+  ✗ A8 probe 抛错 → 不 reject,resolve false,且把失败当"不支持"缓存
+      缺少导出 primeHelpCache(当前 typeof=undefined)
+  ✗ A9 probe 同步抛错(非 async 函数直接 throw)→ 仍不 reject
+      缺少导出 primeHelpCache(当前 typeof=undefined)
+  ✗ A10 probe 返回非字符串/非 Promise → 不 reject,返回布尔
+      缺少导出 primeHelpCache(当前 typeof=undefined)
+  ✗ A11 不传 probeAsync 时不抛(走默认 execFile,路径不存在则 false)
+      缺少导出 primeHelpCache(当前 typeof=undefined)
+
+B. resolveWinCommand 枚举兜底 + 平台门控
+  ✗ B1 enumerate=false + 命令不存在 → 返回 null,候选目录一次都没被 readdir
+      C:\dirA 不该被 readdir
+      
+      true !== false
+      
+  ✗ B2 enumerate=false + 12 个 PATH 目录 → readdirSync 总调用数 ≤2(仅留 pyScripts 例外)
+      readdirSync 被调用 12 次:C:\p0, C:\p1, C:\p2, C:\p3, C:\p4, C:\p5
+  ✗ B3 enumerate=false + exists 命中 → 仍按 .exe > .cmd > .bat 取 .exe
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + 'C:\\dirA/foo.exe'
+  ✗ B4 enumerate=false + 只有 .cmd 和 .bat → 取 .cmd
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + 'C:\\dirA/foo.cmd'
+  ✗ B5 enumerate=false + 只有 .bat → 取 .bat 且 viaCmd 为真
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + 'C:\\dirA/foo.bat'
+  ✓ B6 .exe 命中时 viaCmd 为假(不绕 cmd.exe)
+  ✗ B7 目录顺序优先于扩展名:dirA 的 .bat 胜过 dirB 的 .exe
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + 'C:\\dirA/foo.bat'
+  ✗ B8 enumerate=true + exists 全落空 → 枚举并大小写不敏感命中 FOO.CMD
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + 'C:\\dirA/FOO.CMD'
+  ✗ B9 enumerate=true 但 exists 已命中 → 不枚举该目录(枚举只是兜底)
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + 'C:\\dirA/foo.exe'
+  ✓ B10 反向:name 含 / 或 \ 直接返回 null,且完全不碰 fs
+  ✓ B11 边界:空串/null/undefined/数字入参不抛
+  ✓ B12 边界:opts 全省略不抛(默认 enumerate 按平台推导)
+  ✗ B13 不传 enumerate 时在 mac 上默认为 true(既有锁定测试赖此行为)
+      mac 默认应枚举兜底,否则既有 59 条锁定测试会红
+      + actual - expected
+      
+      + 'C:\\dirA/FOO.CMD'
+
+C. makeTtlCache 30s 结果缓存工厂
+  ✗ C1 set 后 get 拿回原值
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C2 null 是合法可缓存值:get 返回 null 而不是 undefined
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C3 不存在的 key → undefined
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C4 注入 now:超过 ttl 后 get 返回 undefined
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C5 注入 now:ttl 内(差 1ms)仍命中
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C6 过期的 null 也返回 undefined(不把过期误当"缓存过的找不到")
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C7 clear() 后全部失效
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C8 同 key 重复 set 覆盖旧值并刷新时间
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C9 不传 now 时用真实时钟,刚写入立即命中
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C10 两个实例互不共享数据
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C11 边界:ttl=0 时写入即过期
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+  ✗ C12 边界:key 为空串/undefined value 不抛
+      缺少导出 makeTtlCache(当前 typeof=undefined)
+
+D. withTimeout 超时兜底
+  ✗ D1 promise 先完成 → 返回原值
+      缺少导出 withTimeout(当前 typeof=undefined)
+  ✗ D2 超时 → 返回 fallback
+      缺少导出 withTimeout(当前 typeof=undefined)
+  ✗ D3 promise reject → 也返回 fallback(不抛出)
+      缺少导出 withTimeout(当前 typeof=undefined)
+  ✗ D4 值是 falsy(0/空串/null)时返回原值而非 fallback
+      缺少导出 withTimeout(当前 typeof=undefined)
+  ✗ D5 fallback 省略时超时 resolve 为 undefined,不抛
+      缺少导出 withTimeout(当前 typeof=undefined)
+  ✗ D6 传入非 Promise(裸值)不抛,直接给回该值
+      缺少导出 withTimeout(当前 typeof=undefined)
+  ✓ D7 基线:只 import mcp.js 的子进程能自然退出(D8 的前提)
+  ✗ D8 先完成时超时 timer 被清掉:调过 withTimeout(…, 60s) 的进程仍能自然退出
+      缺少导出 withTimeout
+      
+      true !== false
+      
+
+E. winCmdSpawnSpec 经 cmd.exe 的引号规则
+  ✗ E1 file 恒为 cmd.exe
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E2 args 恒为 4 项且前三项是 /d /s /c
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E3 INTERFACE §3.4 逐字例子:带空格路径 + 带空格参数
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E4 参数内部的双引号翻倍
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E5 & | ^ > 落在自己的引号内、原样保留不转义不删
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E6 args 为空数组 → line 只有命令本身
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E7 opts 其余字段原样保留,并加上 windowsVerbatimArguments:true
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E8 反向:不改写调用方传入的 opts 对象
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E9 非字符串参数按 String() 转换
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E10 opts 省略时不抛,仍带 windowsVerbatimArguments:true
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E11 边界:args 省略/为 null 时不抛,等价于空参数
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+  ✗ E12 反向:参数里不出现"未配对的裸引号"(每个 token 引号成对)
+      缺少导出 winCmdSpawnSpec(当前 typeof=undefined)
+
+F. missingCommandHint 绝对路径分支
+  ✗ F1 反斜杠绝对路径 → 精确文案
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + '找不到命令 C:\\tools\\mcp\\server.exe:请确认已安装该工具且其目录在 PATH 中,或在命令框填写绝对路径(如 C:\\Users\\<你>\\.local\\bin\\uvx.exe)'
+  ✗ F2 正斜杠路径 → 同一文案
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + '找不到命令 /usr/local/bin/uvx:请确认已安装该工具且其目录在 PATH 中,或在命令框填写绝对路径(如 /opt/homebrew/bin/uvx)'
+  ✗ F3 相对路径(含分隔符)也走绝对路径分支
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + '找不到命令 ./bin/foo:请确认已安装该工具且其目录在 PATH 中,或在命令框填写绝对路径(如 /opt/homebrew/bin/uvx)'
+  ✓ F4 反向:裸名分支文案不变,不含"该路径不存在或不可执行"
+  ✓ F5 边界:空串/null/undefined/数字不抛,返回字符串
+  ✗ F6 边界:platform 省略时绝对路径分支文案不变
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + '找不到命令 C:\\a\\b.exe:请确认已安装该工具且其目录在 PATH 中,或在命令框填写绝对路径(如 /opt/homebrew/bin/uvx)'
+
+G. resolveSdkClaudeFrom 截断 exe 体积下限
+  ✓ G1 前置:能从公开接口探出包内 exe 路径
+  ✗ G2 真实 MZ 头但只有 1KB + 默认下限(未注入 readFileSync)→ null(回落 SDK 自带)
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + '/var/folders/zx/7q01m54d2cj8qdv6kpd698080000gn/T/cgui-r108-zJm25E/inst-2/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe'
+  ✓ G3 同一个 1KB 文件 + 注入 readFileSync → 默认下限为 0,放行
+  ✓ G4 1KB 文件 + 显式 minExeBytes=512(达标)→ 放行
+  ✗ G5 1KB 文件 + 显式 minExeBytes=10000(不达标)→ null
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + '/var/folders/zx/7q01m54d2cj8qdv6kpd698080000gn/T/cgui-r108-zJm25E/inst-5/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe'
+  ✓ G6 真实 6MB 完整 exe + 默认下限 → 放行(正常安装不受影响)
+  ✓ G7 边界:size 恰好等于 minExeBytes → 放行(>= 而非 >)
+  ✗ G8 边界:size 比 minExeBytes 少 1 字节 → null
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + '/var/folders/zx/7q01m54d2cj8qdv6kpd698080000gn/T/cgui-r108-zJm25E/inst-8/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe'
+  ✗ G9 statSync 抛错(文件被杀毒隔离/权限不足)→ null,不抛
+      Expected values to be strictly equal:
+      + actual - expected
+      
+      + '/var/folders/zx/7q01m54d2cj8qdv6kpd698080000gn/T/cgui-r108-zJm25E/inst-9/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe'
+  ✓ G10 反向:体积达标也不能绕过 PE 头判定(内容不是 exe → null)
+  ✓ G11 反向:非 win32 平台原样返回 hitPath(不做任何 exe 改写)
+  ✓ G12 边界:hitPath 为空串/null/undefined → null,不抛
+  ✓ G13 反向:包内 exe 根本不存在时仍返回 null
+
+H. splitWinPathList 注册表 PATH 去引号
+  ✗ H1 按分号切分
+      缺少导出 splitWinPathList(当前 typeof=undefined)
+  ✗ H2 去掉成对首尾引号
+      缺少导出 splitWinPathList(当前 typeof=undefined)
+  ✗ H3 去掉单侧引号
+      缺少导出 splitWinPathList(当前 typeof=undefined)
+  ✗ H4 空条目被过滤(连续分号、结尾分号)
+      缺少导出 splitWinPathList(当前 typeof=undefined)
+  ✗ H5 只有引号的条目去引号后为空 → 被过滤
+      缺少导出 splitWinPathList(当前 typeof=undefined)
+  ✗ H6 先 trim 再去引号,混合形态都规整
+      缺少导出 splitWinPathList(当前 typeof=undefined)
+  ✗ H7 反向:路径中间的引号不动(只去首尾)
+      缺少导出 splitWinPathList(当前 typeof=undefined)
+  ✗ H8 边界:空串 → 空数组
+      缺少导出 splitWinPathList(当前 typeof=undefined)
+  ✗ H9 边界:null/undefined/数字/对象 → 空数组或不抛
+      缺少导出 splitWinPathList(当前 typeof=undefined)
+
+I. logSdkClaudeOnce 默认 logger
+  ✗ I1 不传 log 时默认用 console.error(不是 console.log)
+      默认 logger 应打到 console.error,实际 err=0 out=0
+      
+      false !== true
+      
+  ✗ I2 显式传入 log 时用传入的,不碰 console.error
+      应调用传入的 log
+      
+      false !== true
+      
+
+17 绿 / 69 红
+红:
+  - A1 预热成功后 cliSupportsFlag 命中缓存,返回 true 且不再同步 probe
+  - A3 预热正文里没有该 flag → cliSupportsFlag 为 false 且不同步 probe
+  - A4 claudePath 为空串 → resolve false 且不 spawn
+  - A5 claudePath 为 null/undefined/数字 → resolve false 且不 spawn,不抛
+  - A6 同一路径重复预热 → 第二次直接 true 且不重复 spawn
+  - A7 probe 返回空串 → resolve false;且空串也进缓存,再预热不重复 spawn
+  - A8 probe 抛错 → 不 reject,resolve false,且把失败当"不支持"缓存
+  - A9 probe 同步抛错(非 async 函数直接 throw)→ 仍不 reject
+  - A10 probe 返回非字符串/非 Promise → 不 reject,返回布尔
+  - A11 不传 probeAsync 时不抛(走默认 execFile,路径不存在则 false)
+  - B1 enumerate=false + 命令不存在 → 返回 null,候选目录一次都没被 readdir
+  - B2 enumerate=false + 12 个 PATH 目录 → readdirSync 总调用数 ≤2(仅留 pyScripts 例外)
+  - B3 enumerate=false + exists 命中 → 仍按 .exe > .cmd > .bat 取 .exe
+  - B4 enumerate=false + 只有 .cmd 和 .bat → 取 .cmd
+  - B5 enumerate=false + 只有 .bat → 取 .bat 且 viaCmd 为真
+  - B7 目录顺序优先于扩展名:dirA 的 .bat 胜过 dirB 的 .exe
+  - B8 enumerate=true + exists 全落空 → 枚举并大小写不敏感命中 FOO.CMD
+  - B9 enumerate=true 但 exists 已命中 → 不枚举该目录(枚举只是兜底)
+  - B13 不传 enumerate 时在 mac 上默认为 true(既有锁定测试赖此行为)
+  - C1 set 后 get 拿回原值
+  - C2 null 是合法可缓存值:get 返回 null 而不是 undefined
+  - C3 不存在的 key → undefined
+  - C4 注入 now:超过 ttl 后 get 返回 undefined
+  - C5 注入 now:ttl 内(差 1ms)仍命中
+  - C6 过期的 null 也返回 undefined(不把过期误当"缓存过的找不到")
+  - C7 clear() 后全部失效
+  - C8 同 key 重复 set 覆盖旧值并刷新时间
+  - C9 不传 now 时用真实时钟,刚写入立即命中
+  - C10 两个实例互不共享数据
+  - C11 边界:ttl=0 时写入即过期
+  - C12 边界:key 为空串/undefined value 不抛
+  - D1 promise 先完成 → 返回原值
+  - D2 超时 → 返回 fallback
+  - D3 promise reject → 也返回 fallback(不抛出)
+  - D4 值是 falsy(0/空串/null)时返回原值而非 fallback
+  - D5 fallback 省略时超时 resolve 为 undefined,不抛
+  - D6 传入非 Promise(裸值)不抛,直接给回该值
+  - D8 先完成时超时 timer 被清掉:调过 withTimeout(…, 60s) 的进程仍能自然退出
+  - E1 file 恒为 cmd.exe
+  - E2 args 恒为 4 项且前三项是 /d /s /c
+  - E3 INTERFACE §3.4 逐字例子:带空格路径 + 带空格参数
+  - E4 参数内部的双引号翻倍
+  - E5 & | ^ > 落在自己的引号内、原样保留不转义不删
+  - E6 args 为空数组 → line 只有命令本身
+  - E7 opts 其余字段原样保留,并加上 windowsVerbatimArguments:true
+  - E8 反向:不改写调用方传入的 opts 对象
+  - E9 非字符串参数按 String() 转换
+  - E10 opts 省略时不抛,仍带 windowsVerbatimArguments:true
+  - E11 边界:args 省略/为 null 时不抛,等价于空参数
+  - E12 反向:参数里不出现"未配对的裸引号"(每个 token 引号成对)
+  - F1 反斜杠绝对路径 → 精确文案
+  - F2 正斜杠路径 → 同一文案
+  - F3 相对路径(含分隔符)也走绝对路径分支
+  - F6 边界:platform 省略时绝对路径分支文案不变
+  - G2 真实 MZ 头但只有 1KB + 默认下限(未注入 readFileSync)→ null(回落 SDK 自带)
+  - G5 1KB 文件 + 显式 minExeBytes=10000(不达标)→ null
+  - G8 边界:size 比 minExeBytes 少 1 字节 → null
+  - G9 statSync 抛错(文件被杀毒隔离/权限不足)→ null,不抛
+  - H1 按分号切分
+  - H2 去掉成对首尾引号
+  - H3 去掉单侧引号
+  - H4 空条目被过滤(连续分号、结尾分号)
+  - H5 只有引号的条目去引号后为空 → 被过滤
+  - H6 先 trim 再去引号,混合形态都规整
+  - H7 反向:路径中间的引号不动(只去首尾)
+  - H8 边界:空串 → 空数组
+  - H9 边界:null/undefined/数字/对象 → 空数组或不抛
+  - I1 不传 log 时默认用 console.error(不是 console.log)
+  - I2 显式传入 log 时用传入的,不碰 console.error
