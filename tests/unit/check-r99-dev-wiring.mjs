@@ -74,7 +74,11 @@ t('①b 同会话只自动回退一次,标记 keyed by sessionId(分屏不串)',
   const okIdx = REWIND.indexOf('if (!ok) return;');
   const markIdx = REWIND.indexOf('setRiskRewoundSids(');
   assert.ok(okIdx > 0 && markIdx > okIdx, '标记必须写在确认框通过之后');
-  assert.ok(markIdx < REWIND.indexOf('handleRetryToolRef.current?.('), '标记必须先于回退执行');
+  // r99b(Windows 审查中-1):标记改为在截断【成功】后经 onTrimmed 回调写入 —— 写在
+  // handleRetryToolRef.current?.( 的 opts 里,而不是调用之前(截断 EPERM 失败时不烧掉唯一一次机会)。
+  assert.ok(markIdx > REWIND.indexOf('handleRetryToolRef.current?.('), '标记必须在回退调用的 opts 里(截断成功后回调)');
+  assert.match(REWIND, /onTrimmed: \(\) => \{ if \(sid\) setRiskRewoundSids\(/, 'onTrimmed 回调里置位');
+  assert.match(A, /if \(!tr\.ok\) throw new Error\(trData\.error \|\| tr\.status\);\n[^\n]*\n[^\n]*\n\s*opts\.onTrimmed\?\.\(\);/, 'onTrimmed 必须在 trim 成功判定之后调用');
 });
 t('①b 按钮判据与退化条件对齐:有后续用户消息 / 已回退过 → 不给自动回退', () => {
   const memo = A.slice(A.indexOf('const contentRiskAnchor = useMemo'), A.indexOf('// /branch 分叉'));

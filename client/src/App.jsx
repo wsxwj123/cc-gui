@@ -7274,6 +7274,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         });
         const trData = await tr.json().catch(() => ({}));
         if (!tr.ok) throw new Error(trData.error || tr.status);
+        // r99b(Windows 审查中-1):截断真正成功后才通知调用方 —— Windows 上 rename 覆盖被
+        // 占用的文件会 EPERM,失败时不该把"本会话唯一一次自动回退"的机会烧掉。
+        opts.onTrimmed?.();
 
         updateStreaming(false);
         setStreamingText('');
@@ -7354,11 +7357,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       + '\n\n本操作不生成摘要、不压缩。是否继续？',
       { danger: true });
     if (!ok) return;
-    if (sid) setRiskRewoundSids((prev) => ({ ...prev, [sid]: true }));
     handleRetryToolRef.current?.(
       { uuid: anchor.turnUuid },
       { id: anchor.toolUseId, name: anchor.toolName, input: anchor.toolInput },
-      { contentRisk: true, continuePrompt: RISK_CONTINUE_PROMPT },
+      {
+        contentRisk: true,
+        continuePrompt: RISK_CONTINUE_PROMPT,
+        // r99b:只在截断成功后才记"已回退过一次"(截断失败时保留重试机会)。
+        onTrimmed: () => { if (sid) setRiskRewoundSids((prev) => ({ ...prev, [sid]: true })); },
+      },
     );
   }, [getLocalMessages, getLocalSession, riskRewoundSids]);
 
