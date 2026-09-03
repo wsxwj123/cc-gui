@@ -50,10 +50,20 @@ export function resolvePromptCacheOn(mode, thirdParty) {
 export function applyPromptCacheEnv(env, on, memo) {
   const remembered = (memo && typeof memo === 'object') ? memo : null;
   if (on) {
-    // 已记过的键不重记:否则第二次切第三方会把我们自己写的 'false' 当成用户原值记下来。
+    // 记账两道门,缺一不可:
+    //  ① 已记过的键不重记:否则第二次切第三方会把我们自己写的 'false' 当成用户原值记下来。
+    //  ② 键已经等于目标值就不记(r100):备忘丢了(prefs.json 被重置/换机拷了 settings.json)
+    //     而键还在时,①拦不住 —— 启动重应用每次开机都跑,会把我们自己写的 'false' 记成
+    //     "用户原值",用户日后在面板关掉本功能,"还原"出来的就是 false,永久残留。
+    //     只在**真要改写这个键**时才记它的改写前值;两道门都不记 = 关闭时按"无原值"处理
+    //     (删键、回 CLI 默认),不会把 false 焊死在 settings.json 里。
     const next = { ...(remembered || {}) };
-    if (!('toolSearch' in next)) next.toolSearch = TOOL_SEARCH_ENV_KEY in env ? env[TOOL_SEARCH_ENV_KEY] : null;
-    if (!('mcpNonblocking' in next)) next.mcpNonblocking = MCP_NONBLOCKING_ENV_KEY in env ? env[MCP_NONBLOCKING_ENV_KEY] : null;
+    if (!('toolSearch' in next) && env[TOOL_SEARCH_ENV_KEY] !== 'false') {
+      next.toolSearch = TOOL_SEARCH_ENV_KEY in env ? env[TOOL_SEARCH_ENV_KEY] : null;
+    }
+    if (!('mcpNonblocking' in next) && env[MCP_NONBLOCKING_ENV_KEY] !== 'false') {
+      next.mcpNonblocking = MCP_NONBLOCKING_ENV_KEY in env ? env[MCP_NONBLOCKING_ENV_KEY] : null;
+    }
     env[SNAPSHOT_ENV_KEY] = '1';
     env[TOOL_SEARCH_ENV_KEY] = 'false';
     env[MCP_NONBLOCKING_ENV_KEY] = 'false';
