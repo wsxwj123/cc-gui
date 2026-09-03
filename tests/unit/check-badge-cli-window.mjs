@@ -82,8 +82,10 @@ assert.equal(pickCliContextWindow({ a: entry(NaN), b: entry(200000) }, 'a'), nul
       providerWindow: prev?.source === 'provider' ? gui : null,
       model: m,
     });
-    if (picked.source !== 'cli') return;
-    cache.set(m, picked.window); meta.set(m, { source: 'cli', origin: 'cli', at: Date.now() });
+    cache.set(m, picked.window);
+    meta.set(m, picked.source === 'cli'
+      ? { source: 'cli', origin: 'cli', at: Date.now() }
+      : { source: picked.source, origin: prev?.origin || picked.source, at: Date.now() });
   };
   const writeProvider = (m, v) => {   // 照抄 useResolvedWindow 的 fetch 回写
     const prev = meta.get(m);
@@ -121,9 +123,11 @@ assert.equal(pickCliContextWindow({ a: entry(NaN), b: entry(200000) }, 'a'), nul
   assert.ok(/pickCliContextWindow\(event\.modelUsage, turnModel\)/.test(app),
     'result 分支必须经 pickCliContextWindow(turnModel exact 匹配)');
   assert.ok(/source: 'cli', origin: 'cli'/.test(app), '写入必须标 source:cli');
-  // r103 覆盖方向翻转:GUI 侧来源胜出时 R8-6 不写缓存
-  assert.ok(/picked\.source !== 'cli'\) continue;/.test(app),
-    'R8-6 必须在 GUI 侧来源胜出时跳过写入(cli 不再无条件覆盖)');
+  // r103 覆盖方向翻转:R8-6 写入的是仲裁结果 picked.window,绝不原样写 CLI 自报值
+  assert.ok(/resolvedWindowCache\.set\(wk, picked\.window\)/.test(app),
+    'R8-6 写入仲裁结果(cli 不再无条件覆盖)');
+  assert.ok(!/resolvedWindowCache\.set\(wk, cliWin\.window\)/.test(app),
+    'R8-6 不得把 CLI 自报值原样写进分母缓存');
   assert.ok(/resolveBadgeWindow\(/.test(app), '覆盖方向判定收在纯函数 resolveBadgeWindow');
   // 红线(历史事故 context-badge-usage-source):分子仍只来自 message_start/message_delta。
   // R8-6 的 result.modelUsage 块内绝不许出现 setLiveContextUsage / *Tokens 累积字段。

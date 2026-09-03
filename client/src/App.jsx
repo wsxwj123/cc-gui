@@ -704,6 +704,7 @@ function winSourceLabel(meta) {
     explicit: '设置页显式窗口', manual: 'Provider 手填', fetched: '获取模型时实抓',
     rules: '内置模型规则表', '1m': '[1m] 后缀',
   }[meta.origin];
+  if (meta.source === 'explicit') return '设置页显式窗口·按 CLI 实际窗口取小';
   if (meta.source === 'linked') return `${byOrigin || '模型窗口'}·压缩联动同源`;
   return byOrigin || '后端解析';
 }
@@ -745,6 +746,7 @@ function useResolvedWindow(model) {
         const picked = resolveBadgeWindow({
           cliWindow: prevMeta?.source === 'cli' ? resolvedWindowCache.get(model) : null,
           linkedWindow: prevMeta?.source === 'linked' ? resolvedWindowCache.get(model) : null,
+          linkedSource: prevMeta?.origin,
           providerWindow: v,
           model,
         });
@@ -5958,12 +5960,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 const picked = resolveBadgeWindow({
                   cliWindow: cliWin.window,
                   linkedWindow: prevMeta?.source === 'linked' ? guiWin : null,
+                  // origin==='explicit'(用户显式选了压缩窗口)→ 纯函数按 min(显式值, CLI 自报)
+                  // 钳位:该场景下联动整个让位,CLI 仍按自己认的窗口算,显式值大于它是无效的。
+                  linkedSource: prevMeta?.origin,
                   providerWindow: prevMeta?.source === 'provider' ? guiWin : null,
                   model: wk,
                 });
-                if (picked.source !== 'cli') continue;   // GUI 侧来源胜出 → 缓存原样不动
+                // 写入仲裁结果(不是 cliWin.window):GUI 侧来源胜出时它就是原值,写回等价于
+                // 不动;explicit 钳位时新值必须真正落缓存,否则徽章还显示未钳的显式值。
                 resolvedWindowCache.set(wk, picked.window);
-                resolvedWindowMeta.set(wk, { source: 'cli', origin: 'cli', at: Date.now() });
+                resolvedWindowMeta.set(wk, picked.source === 'cli'
+                  ? { source: 'cli', origin: 'cli', at: Date.now() }
+                  : { source: picked.source, origin: prevMeta?.origin || picked.source, at: Date.now() });
                 try { window.dispatchEvent(new CustomEvent('cgui:model-window-cli', { detail: { model: wk } })); } catch {}
               }
             }

@@ -204,16 +204,20 @@ export function resolveDisplayWindow(model) {
 // 把它的真实窗口认知与压缩线抬到了这里返回的值 —— 分母不跟着这个走,显示就与 CLI 的
 // 实际压缩行为相反(用户实报:手填 1M,第一轮后徽章变回 200k)。
 // source:'explicit'=用户显式设置(联动整个让位,CLI 按显式值走);'linked'=本联动算出的值;
-// null=不干预(官方 OAuth / 无解析)→ 前端落 CLI 自报。让位的三个键与
-// resolveCompactWindowSettings 逐字同源,两处要一起改。
-// 注:显式值 > CLI 自认窗口时有效窗口 = min(两者),此处按显式值上报(用户明示口径),
-// 官方模型上填超过 200K 的显式值会显示得比实际有效窗口大 —— 属用户自设值的已知边界。
+// null=不干预(官方 OAuth / 无解析)→ 前端落 CLI 自报。让位判据与
+// resolveCompactWindowSettings 共用 explicitCompactWindow,不是各写一份。
+// 注:显式值这里【原样上报】,min(显式值, CLI 自认窗口) 的钳位在客户端
+// resolveBadgeWindow 做 —— 服务端拿不到 CLI 自报的窗口,只有前端两个值都齐。
 export function resolveLinkedWindowInfo(model) {
   try {
     const st = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'));
-    const explicit = [st?.autoCompactWindow, st?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, st?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS]
-      .map((v) => Number(v)).find((v) => Number.isFinite(v) && v > 0);
-    if (explicit) return { window: explicit, source: 'explicit', origin: 'explicit' };
+    const explicit = explicitCompactWindow(st);
+    if (explicit !== undefined) {
+      // 设了但解析不出正数(如 autoCompactWindow:0 / env 写了非数字)→ 联动仍让位,但也没有
+      // 可上报的分母,回落 CLI 自报。
+      return explicit ? { window: explicit, source: 'explicit', origin: 'explicit' }
+        : { window: null, source: null, origin: null };
+    }
     if (!st?.env?.ANTHROPIC_BASE_URL) return { window: null, source: null, origin: null };
     const { window: win, origin } = resolveModelWindowInfo(model, readActiveProviderEntry());
     return win ? { window: win, source: 'linked', origin } : { window: null, source: null, origin: null };
@@ -222,14 +226,26 @@ export function resolveLinkedWindowInfo(model) {
 
 // 本回合要 per-spawn 合并进 --settings 的压缩相关配置。返回 null = 不干预,交 CLI 默认。
 // 返回值就是写进临时 settings 文件的整个对象(见下方 spawn 处),两个键的分工见上方注释。
+// 「用户显式设置了压缩窗口吗」的唯一判据 —— 压缩联动让位(resolveCompactWindowSettings)
+// 与徽章分母标 'explicit'(resolveLinkedWindowInfo)两处共用,避免两份判据漂移。
+// 三个键都算显式:设置页写的顶层 autoCompactWindow、env 的 CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+// 以及 CLAUDE_CODE_MAX_CONTEXT_TOKENS(改用两键联动后真正决定窗口的就是它;GUI 没有对应
+// UI,用户手写在 settings.json 里就是刻意的,而 --settings 临时文件按键覆盖同名键会赢,
+// 必须一并让位)。
+// 返回 undefined = 用户没设;否则返回该显式窗口值,设了但解析不出正数则返回 null。
+function explicitCompactWindow(st) {
+  const raw = typeof st?.autoCompactWindow === 'number'
+    ? st.autoCompactWindow
+    : (st?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW || st?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS);
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 export function resolveCompactWindowSettings(model) {
   try {
     const st = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8'));
-    if (typeof st?.autoCompactWindow === 'number') return null;      // 用户显式设置,尊重
-    if (st?.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW) return null;       // env 显式设置,尊重
-    // 改用两键联动后,真正决定窗口的是 MAX_CONTEXT_TOKENS。GUI 没有对应 UI,用户手写在
-    // settings.json 里就是刻意的;--settings 临时文件按键覆盖同名键(会赢),必须一并让位。
-    if (st?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS) return null;
+    if (explicitCompactWindow(st) !== undefined) return null;        // 用户显式设置,尊重
     if (!st?.env?.ANTHROPIC_BASE_URL) return null;                   // 官方,CLI 自动已准确
     const win = resolveModelWindow(model, readActiveProviderEntry());
     if (!win) return null;

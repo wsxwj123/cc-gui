@@ -60,14 +60,27 @@ export function pickCliContextWindow(modelUsage, modelId) {
 // 入参非对象(null/undefined/数字/字符串)按"全缺"处理返回 { window: null, source: null },
 // 不抛错 —— 调用点在流事件回调里,抛一次就吞掉整条 result 处理。
 export function resolveBadgeWindow(opts) {
-  const { cliWindow, linkedWindow, providerWindow, model } = (opts && typeof opts === 'object') ? opts : {};
+  const { cliWindow, linkedWindow, linkedSource, providerWindow, model } =
+    (opts && typeof opts === 'object') ? opts : {};
   const pos = (v) => (Number.isFinite(v) && v > 0 ? v : null);
   if (/\[1m\]/i.test(model || '')) return { window: 1_000_000, source: '1m' };
   const linked = pos(linkedWindow);
-  if (linked) return { window: linked, source: 'linked' };
+  const cli = pos(cliWindow);
+  if (linked) {
+    // linkedSource==='explicit' = 用户在设置页/env 里显式选了自动压缩窗口。此时
+    // 压缩联动【整个让位】(server resolveCompactWindowSettings 返 null),GUI 不再下发
+    // CLAUDE_CODE_MAX_CONTEXT_TOKENS,CLI 仍按它自己认的模型窗口算 →
+    // 有效窗口 = min(显式值, CLI 自认窗口)。官方模型上选 500K 实际只有 200K,分母必须
+    // 显示 200K,否则又是"显示与 CLI 实际压缩行为相反"。
+    // 'linked'(GUI 按 provider 窗口联动)【不走 min】:那个 200K 恰恰是被 GUI 下发的
+    // MAX_CONTEXT_TOKENS 替掉的 CLI 默认值,拿它去钳就把修好的又钳回去了。
+    if (linkedSource === 'explicit') {
+      return { window: cli ? Math.min(linked, cli) : linked, source: 'explicit' };
+    }
+    return { window: linked, source: 'linked' };
+  }
   const provider = pos(providerWindow);
   if (provider) return { window: provider, source: 'provider' };
-  const cli = pos(cliWindow);
   if (cli) return { window: cli, source: 'cli' };
   return { window: null, source: null };
 }
