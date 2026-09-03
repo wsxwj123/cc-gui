@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  splitItem, renderItem, renderVersion, renderAll, renderRelease, applyReadme,
+  splitItem, renderItem, renderVersion, renderAll, renderRelease, applyReadme, normalizeTagLinks,
   START_MARK, END_MARK, DEFAULT_REPO,
 } from '../../scripts/gen-changelog-md.mjs';
 
@@ -150,6 +150,26 @@ const FIXTURE = `# 更新说明
   ok(!rel.out.includes(`<b>v${pkgVersion}</b>`), 't7: --release 不含最外层版本 summary');
   eq(run(['--release', '99.99.99']).out, '', 't7: 不存在的版本 → 空输出,退出码 0');
   eq(run(['--release', '99.99.99']).code, 0, 't7: 不存在的版本不让 CI 红');
+}
+
+// ── t7b 链接归一:tag 有无不影响 --check ──────────────────────────────────
+// 发版顺序是"生成 README → commit → 打 tag"。tag 一落地本地就多一个 tag,若 --check
+// 逐字节比就立刻红,而被 tag 的那棵树里本版又永远拿不到链接 —— 死结,故比对前归一。
+{
+  const linked = renderAll(FIXTURE, { tags: ['v0.9.1'] });
+  const plain = renderAll(FIXTURE, { tags: [] });
+  ok(linked !== plain, 't7b: 有无 tag 的生成结果本来就不同(前提成立,归一才有意义)');
+  eq(normalizeTagLinks(linked), plain, 't7b: 归一后两者完全相同 → --check 不受 tag 影响');
+  eq(normalizeTagLinks(plain), plain, 't7b: 归一是幂等的,纯文本版本号不动');
+  ok(normalizeTagLinks('<a href="https://github.com/x/y/releases/latest">最新版</a>').includes('<a href'),
+    't7b: 只归一 /releases/tag/ 链接,README 里其它链接不动');
+
+  // --assume-tag:tag 还没打时也让本版带链接(渲染层就是"这个 tag 存在")
+  ok(linked.includes(`https://github.com/${DEFAULT_REPO}/releases/tag/v0.9.1`),
+    't7b: 视为已存在的 tag 会渲染成 release 链接');
+  ok(!plain.includes('releases/tag/'), 't7b: 不在 tags 里就没有链接');
+  eq(run(['--check', '--assume-tag', 'v99.99.99']).code, 0,
+    't7b: --check 不受 --assume-tag 影响(多传一个不存在的 tag 也不该红)');
 }
 
 // ── t8 README 现状:标记段存在且渲染红线成立 ───────────────────────────────

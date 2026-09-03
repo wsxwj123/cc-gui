@@ -10,6 +10,7 @@
 //
 // 用法:
 //   node scripts/gen-changelog-md.mjs --readme            按 CHANGELOG 重写 README 标记段
+//   node scripts/gen-changelog-md.mjs --readme --assume-tag v0.2.375   本版 tag 还没打时也带链接
 //   node scripts/gen-changelog-md.mjs --release 0.2.374   打印单版正文(CI 拼 release body)
 //   node scripts/gen-changelog-md.mjs --check             README 标记段与生成结果是否一致
 import { execFileSync } from 'node:child_process';
@@ -100,9 +101,16 @@ export function applyReadme(readmeText, generated) {
 // 已发布的 tag 决定版本号是否做成链接。拿不到 git(打包产物、浅 clone)就都不加链接。
 export function gitTags(cwd = ROOT) {
   try {
-    return execFileSync('git', ['tag', '-l', 'v*'], { cwd, encoding: 'utf8' })
+    return execFileSync('git', ['tag', '-l', 'v*'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
       .split('\n').map((s) => s.trim()).filter(Boolean);
   } catch { return []; }
+}
+
+// 把版本号的 release 链接还原成纯文本。
+// --check 必须无视链接:发版顺序是"生成 README → commit → 打 tag",tag 一落地本地就
+// 多一个 tag,不归一的话 --check 立刻红,而被 tag 的那棵树里本版又永远拿不到链接。
+export function normalizeTagLinks(text) {
+  return String(text ?? '').replace(/<a href="https:\/\/github\.com\/[^"]*\/releases\/tag\/[^"]*">([^<]*)<\/a>/g, '$1');
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
@@ -114,10 +122,19 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     const out = renderRelease(changelog, args[args.indexOf('--release') + 1] || '');
     if (out) process.stdout.write(`${out}\n`);
   } else if (args.includes('--check') || args.includes('--readme')) {
+    // --assume-tag v0.2.375(可重复):把还没打的 tag 当作已存在,发版脚本在打 tag 之前
+    // 跑一次就能让本版带上 release 链接。--check 不看这个参数(链接会被归一掉)。
+    const assumed = args.map((a, i) => (a === '--assume-tag' ? args[i + 1] : null)).filter(Boolean);
     const readme = readFileSync(DEFAULT_README, 'utf8');
-    const next = applyReadme(readme, renderAll(changelog, { tags: gitTags() }));
+    let next;
+    try {
+      next = applyReadme(readme, renderAll(changelog, { tags: [...new Set([...gitTags(), ...assumed])] }));
+    } catch (e) {
+      console.log(`${e.message} —— 在 README.md 里补上 ${START_MARK} 与 ${END_MARK} 两行`);
+      process.exit(1);
+    }
     if (args.includes('--check')) {
-      if (next !== readme) {
+      if (normalizeTagLinks(next) !== normalizeTagLinks(readme)) {
         console.log('README 更新记录过期,运行 npm run gen:readme-changelog');
         process.exit(1);
       }
@@ -128,6 +145,6 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
       console.log(`README 更新记录:已更新 ${parseChangelog(changelog).length} 个版本`);
     }
   } else {
-    console.log('用法: node scripts/gen-changelog-md.mjs --readme | --release <version> | --check');
+    console.log('用法: node scripts/gen-changelog-md.mjs --readme [--assume-tag <tag>] | --release <version> | --check');
   }
 }
