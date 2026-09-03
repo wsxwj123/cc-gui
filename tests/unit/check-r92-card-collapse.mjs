@@ -149,16 +149,23 @@ const esc = readFileSync(join(root, 'client/src/utils/escAction.js'), 'utf8');
 assert.match(esc, /export function escYieldCardId\(\{ targetTag = null, pendingList = \[\], psid = null, yieldedForId = null \}\)/,
   'r92-⑥: escYieldCardId 签名不许动(折叠态不许把渲染层状态漏进这只纯函数)');
 
-// diff 文件列表锁:本轮只许动前端卡片相关文件。git 不可用时跳过(上面的内容哨兵仍然生效)。
-const FORBIDDEN = ['client/src/hooks/useWebSocket.js', 'client/src/utils/escAction.js', 'client/src/App.jsx',
-  'server/routes/permissions.js', 'server/routes/chat.js', 'client/src/stores/sessionStore.js'];
-try {
-  const base = execFileSync('git', ['merge-base', 'HEAD', 'master'], { cwd: root, encoding: 'utf8' }).trim();
-  const changed = execFileSync('git', ['diff', '--name-only', base, '--', ...FORBIDDEN], { cwd: root, encoding: 'utf8' }).trim();
-  assert.equal(changed, '', `r92-⑥: 这些文件本轮一行都不该改:\n${changed}`);
-} catch (e) {
-  if (e instanceof assert.AssertionError) throw e;
-  console.log('  (跳过 git diff 文件列表锁:', String(e.message).split('\n')[0], ')');
+// r96 改:原先这里有一条 `git diff --name-only $(merge-base HEAD master)` 的**分支范围锁**,
+// 把 chat.js / permissions.js / App.jsx / sessionStore.js 一并钉成"本轮零改动"。那是 r92
+// 那一轮的开发边界,不是 r92 的产品不变量 —— 放在共享单测里,此后**任何**动这些文件的分支
+// (r96 #8 就要改 chat.js)都会被它判红,与该分支自身对错无关。
+// 换成不依赖 git 的等价内容锁:r92 真正要守的是"折叠是渲染层的事,应答链路与待办卡状态机
+// 一行不碰"。chat.js 那条**整条删除**(chat.js 与折叠/应答链路无关,当初只是分支范围的一员)。
+{
+  const perm = readFileSync(join(root, 'server/routes/permissions.js'), 'utf8');
+  assert.match(perm, /function settle\(slot, payload\) \{[\s\S]{0,120}if \(slot\.settled\) return false;/,
+    'r92-⑥: 服务端 settle 幂等守卫不许动(第二次应答必须 noop,否则卡片会闪"已超时"再被 allow 覆盖)');
+  assert.match(perm, /type: 'permission:resolved'/, 'r92-⑥: resolved 广播不许改名(前端靠它清卡)');
+
+  const store = readFileSync(join(root, 'client/src/stores/sessionStore.js'), 'utf8');
+  assert.match(store, /if \(s\.pendingPermissions\.some\(\(p\) => p\.id === req\.id\)\) return s;/,
+    'r92-⑥: 待办卡按 id 去重不许动(重复 WS 事件不能变成两张卡)');
+  assert.match(store, /pendingPermissions: s\.pendingPermissions\.filter\(\(p\) => p\.id !== id\)/,
+    'r92-⑥: 按 id 移除待办卡不许动');
 }
 
 console.log('✓ check-r92-card-collapse: 六张卡正文受折叠门控 / 标题行+按钮行保留 / 保持挂载 / 每张新卡默认展开且不落盘 / 命中区 ≥24px / 禁区未动');
