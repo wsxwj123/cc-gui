@@ -250,6 +250,55 @@ check('M27 null / 非对象入参(0 / \'x\' / [] / true)一律 { window:null, so
   }
 });
 
+// ── 【契约补充】explicit 来源要钳位 ────────────────────────────────────
+// 语义依据:settings.autoCompactWindow 是"用户显式设置",CLI 侧有效窗口 = min(CLI 自认的
+// 模型窗口, 该值)(check-compact-window-linkage 实测结论)。所以显式值大于 CLI 自报时,
+// CLI 实际按小的那个走,分母必须跟着钳,否则徽章又谎报一次。
+// 'linked' 与 [1m] 不钳:联动会同时写 CLAUDE_CODE_MAX_CONTEXT_TOKENS 抬高 CLI 的窗口认知。
+//
+// 【命名】主会话未指定来源入参名,本文件定为 linkedSource(与 linkedWindow 对称)。
+// EX() 同时塞三种可能的别名,保证钳位矩阵不因命名分歧整片红;命名本身由 E0 单独钉住。
+const EX = (linkedWindow, cliWindow, model) => W({
+  linkedWindow, cliWindow, model,
+  linkedSource: 'explicit', linkedWindowSource: 'explicit', linkedContextWindowSource: 'explicit',
+});
+
+check("E0 来源入参名定为 linkedSource(只给这一个别名也必须生效)", () => {
+  assert.strictEqual(
+    W({ linkedWindow: 500_000, linkedSource: 'explicit', cliWindow: K200, model: 'claude-sonnet-4-6' }),
+    K200, '若实现用了别的入参名,请主会话裁定统一');
+});
+check('E1 官方模型 + 显式 500K + CLI 自报 200K → 200,000(取小)', () => {
+  assert.strictEqual(EX(500_000, K200, 'claude-sonnet-4-6'), K200);
+});
+check('E2 第三方 + 联动 1M(source linked)+ CLI 200K → 1,000,000(不钳)', () => {
+  assert.strictEqual(
+    W({ linkedWindow: M1, linkedSource: 'linked', cliWindow: K200, model: 'gpt-4o-relay' }), M1);
+});
+check('E3 显式 100K + CLI 200K → 100,000(显式值更小时取显式值)', () => {
+  assert.strictEqual(EX(100_000, K200, 'claude-sonnet-4-6'), 100_000);
+});
+check('E4 显式 500K 但 CLI 自报缺失/非法 → 500,000(没得钳就不钳)', () => {
+  for (const cli of [undefined, null, 0, NaN, '200000']) {
+    assert.strictEqual(EX(500_000, cli, 'claude-sonnet-4-6'), 500_000, `cliWindow=${String(cli)}`);
+  }
+});
+check('E5 [1m] 压过钳位:显式 500K + CLI 200K + 模型带 [1m] → 1,000,000', () => {
+  assert.strictEqual(EX(500_000, K200, 'claude-sonnet-4-6[1m]'), M1);
+});
+check("E6 来源缺省(没标 explicit)→ 不钳:联动 300K + CLI 200K → 300,000", () => {
+  assert.strictEqual(W({ linkedWindow: 300_000, cliWindow: K200 }), 300_000);
+});
+check('E7 钳位只作用于 explicit:providerWindow 500K + CLI 200K 照旧不钳', () => {
+  assert.strictEqual(
+    W({ providerWindow: 500_000, linkedSource: 'explicit', cliWindow: K200 }), 500_000);
+});
+check('E8 钳位后仍是 GUI 侧来源(source 非空,不得退化成 cli/null)', () => {
+  const r = rbw({ linkedWindow: 500_000, linkedSource: 'explicit', cliWindow: K200 });
+  assert.equal(typeof r.source, 'string');
+  assert.ok(r.source.length > 0);
+});
+
 console.log(`\n  —— A 段小计:${PASS} 绿 / ${FAILS} 红 ——`);
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -320,11 +369,12 @@ try {
       W({ linkedWindow: linkedOf('claude-sonnet-4-6'), cliWindow: K200, model: 'claude-sonnet-4-6' }), K200);
   });
 
-  check("B4 用户显式 autoCompactWindow=300000(source:'explicit')→ 分母按 300000,不被 CLI 顶掉", () => {
+  check("B4 用户显式 autoCompactWindow=300000(explicit)+ CLI 自报 200K → 分母 200,000(钳位)", () => {
     setup({ settings: { autoCompactWindow: 300_000, ...RELAY } });
     assert.strictEqual(rcws('k3'), null, '显式设置时联动整个让位(既有行为,不该被本轮改动)');
-    // 'explicit' 来源的窗口由服务端另行回传(契约②),纯函数侧同样走 linkedWindow 位。
-    assert.strictEqual(W({ linkedWindow: 300_000, cliWindow: K200, model: 'k3' }), 300_000);
+    // CLI 有效窗口 = min(模型窗口, autoCompactWindow),显式值抬不动 CLI 的窗口认知 → 分母跟着钳。
+    assert.strictEqual(
+      W({ linkedWindow: 300_000, linkedSource: 'explicit', cliWindow: K200, model: 'k3' }), K200);
   });
 
   check('B5 provider 未填窗口且规则表未命中 → 无联动值 → 采 CLI 自报(BRIEF 验收第 3 条)', () => {
