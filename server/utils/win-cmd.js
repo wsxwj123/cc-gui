@@ -12,9 +12,19 @@
 // 参数拼接。每 token 独立引号后 `&`/`|`/`^`/`>`/`<` 全落在引号内不被 cmd 解释,注入面不比
 // 旧写法大。
 //
+// 引号挡不住的两条(调用方必须自己守住):
+//   · `%VAR%`:cmd 的变量展开在引号内照常发生,引号只挡元字符不挡展开。含 `%` 的用户文本
+//     当 argv 传下去,会被替换成环境变量值(或原样留下,取决于变量存不存在)。
+//   · 换行:cmd 在换行处截断整条命令行,后面的内容变成"下一条命令"。多行文本不得当 argv 传
+//     (chat.js:2683 对 BTW_SYSTEM_REMINDER 已焊死成单行)。
+//
 // 纯函数(export 仅为可单测);不改写调用方的 opts 对象。
 export function winCmdSpawnSpec(resolved, args = [], opts = {}) {
-  const q = (a) => `"${String(a).replace(/"/g, '""')}"`;
+  // 结尾的连续反斜杠要翻倍:反斜杠只在**紧邻引号**时才有转义含义,token 末尾的 `\` 会和收尾
+  // 引号连成 `\"`,被 node.exe 的 CRT / CommandLineToArgvW 当成"一个字面引号"→ 引号不闭合,
+  // 后续参数被并进同一个字符串(`-e ROOT=D:\data\ -- npx server` 会整段变成第 5 个参数)。
+  // 只动结尾,中间的反斜杠(`C:\a\b`)保持原样;cmd 层看到的引号总数仍是偶数,奇偶规则不变。
+  const q = (a) => `"${String(a).replace(/"/g, '""').replace(/(\\+)$/, '$1$1')}"`;
   const line = [resolved, ...(Array.isArray(args) ? args : [])].map(q).join(' ');
   return {
     file: 'cmd.exe',
