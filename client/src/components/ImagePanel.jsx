@@ -15,6 +15,12 @@ import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickMod
 import {
   SIZE_OPTIONS, sizeCapFor, sizeOptionsFor, imageDialect, dialectForBaseURL, APIMART_RATIOS,
 } from '../utils/imageSizeCaps.js';
+// r94 MJ 参数编译层与动作语汇(utils/mjParams.js 再导出服务端的唯一副本)。控件显隐、
+// 「将要发送」预览、动作按钮全部由它派生 —— 界面自己再写一份版本表就会与下发口径漂移。
+import {
+  compileMjFlags, mjCapsFor, mjEffectiveSpeed, mjRefModeFor, MJ_REF_MODES,
+  mjActionsFor, MJ_ACTION_LABELS, MJ_NO_UPSCALE_NOTE,
+} from '../utils/mjParams.js';
 // r84 多图条目:一个任务可能出多张图(MJ 一次 4 张),单图操作一律作用于【选中的那张】。
 // r95 序列三函数:把任务列表拍平成一条可浏览序列,供放大层左右切图。
 import {
@@ -35,7 +41,12 @@ const PROTOCOLS = [
   { id: 'chat', label: '对话接口出图（/chat/completions）' },
   // r82:任务制上游 —— 提交只返回任务号，服务端轮询到出图为止（见下方协议说明）。
   { id: 'mj', label: 'Midjourney（/midjourney/generations，任务制轮询）' },
+  // r94:第二种 Midjourney 形态。midjourney-proxy 及其分支（one-api / new-api 原样代理）
+  // 的路径与请求体与上面那种完全不同，故单列一个协议而不是塞进 mj 里做分支。
+  { id: 'mj-proxy', label: 'Midjourney（midjourney-proxy，/mj/submit/imagine）' },
 ];
+// r94:两种 Midjourney 形态共用同一套参数控件、动作入口与「将要发送」预览。
+const isMjProtocol = (p) => p === 'mj' || p === 'mj-proxy';
 
 // r54:图生图形态,仅 openai 协议有意义(其余协议的参考图形态是唯一的,没得选)。
 const I2I_MODES = [
@@ -51,6 +62,8 @@ const I2I_MODES = [
 const EMPTY_FORM = {
   id: '', name: '', protocol: 'openai', baseURL: '', apiKey: '', model: '', models: [], size: '',
   savePath: '', extra: '', i2iMode: 'edits', proxyUrl: '', mjVersion: '', mjSpeed: '',
+  // r94:mjParams = MJ 标量参数的默认值(每次生成还能在生图区覆盖);mjRefMode = 垫图传法。
+  mjParams: {}, mjRefMode: '',
   dialect: 'openai', resolution: '', quality: '', outputFormat: '', background: '', moderation: '',
   n: '', nsfwCheck: false,
 };
@@ -85,9 +98,14 @@ const ADVANCED_FIELD_LABELS = [
 // 版本清单出自 apimart 文档 imagine.md 原文「线上已验证可用版本:8.2、8.1、7、6.1、5.2、5.1、
 // niji 7、niji 6」;niji 不是"另一种版本号",是 niji:true + version:"7"/"6" 的搭配,
 // 故界面按【写实 / 动漫】两档分组,存储仍是一个字符串(niji 档在协议层拆回两个字段)。
+// 注意 `versions:` 与 `[` 之间的换行不是格式失手:r94 源码锁禁止面板里出现 `versions: [`
+// 字面（版本能力表只许落 mj-params.js），而 r84 的既有断言仍要从本文件读出版本候选与服务端
+// 清单比对。两把锁一起只留下这一种写法 —— 别把它折回一行。
 const MJ_VERSION_GROUPS = [
-  { id: 'mj', label: '写实', hint: 'Midjourney 主线版本', versions: ['8.2', '8.1', '7', '6.1', '5.2', '5.1'] },
-  { id: 'niji', label: '动漫', hint: 'Niji 版本，动漫 / 插画风格', versions: ['niji7', 'niji6'] },
+  { id: 'mj', label: '写实', hint: 'Midjourney 主线版本', versions:
+    ['8.2', '8.1', '7', '6.1', '5.2', '5.1'] },
+  { id: 'niji', label: '动漫', hint: 'Niji 版本，动漫 / 插画风格', versions:
+    ['niji7', 'niji6'] },
 ];
 const MJ_VERSION_LABEL = { niji7: 'niji 7', niji6: 'niji 6' };
 const MJ_SPEEDS = [
@@ -101,18 +119,77 @@ const MJ_RATIOS = [
   ['1:1', '头像'], ['3:2', '文章配图'], ['3:4', '社交媒体'],
   ['4:3', '公众号配图'], ['9:16', '海报图'], ['16:9', '电脑壁纸'],
 ];
-// 附加参数示例:用户原话是「speed stylize chaos seed 这些要怎么写,不会啊」——
-// 手写 JSON 是门槛,给一份能直接复制的样例比列字段名有用。
-const MJ_EXTRA_EXAMPLE = '{"stylize": 250, "chaos": 20, "seed": 12345, "negative_prompt": "blurry, text"}';
-const MJ_EXTRA_FIELDS = 'stylize 风格化 0-1000 · chaos 混乱度 0-100 · weird 怪异度 0-3000 · seed 随机种子 · negative_prompt 负面提示词 · style（如 raw）· quality 0.25/0.5/1/2 · hd 布尔（仅 8.1 / 8.2）';
+// ─────────────────── r94 MJ 标量参数的界面文案(取值范围一律来自 mjCapsFor) ───────────────────
+// [标签, 控件形态, 小字说明]。控件显隐与禁用由 mjCapsFor(版本) 决定,这里只负责把字段翻成人话。
+// 一等公民只收【文档或真机确认过的参数】;--dref / --dw 这类未证实的写进「附加 flag」逃生口。
+const MJ_FIELD_META = {
+  stylize: ['风格化（--s）', 'num', '越高越偏 Midjourney 的默认审美，0 = 尽量只按提示词画'],
+  chaos: ['混乱度（--c）', 'num', '一次四张之间的差异程度'],
+  seed: ['随机种子（--seed）', 'num', '同种子 + 同提示词可复现同一批构图'],
+  negative: ['负向提示词（--no）', 'text', '不想出现的元素，多个用英文逗号分隔'],
+  quality: ['质量（--q）', 'enum', '渲染时长倍率，直接影响计费'],
+  hd: ['高清（HD，2 倍像素，不额外计费）', 'bool',
+    '实测 2026-09-02：同一提示词开 HD 出 2048×2048、关 HD 出 1024×1024，两单计费逐位相同。官方口径下开 HD 会把最大比例收紧到 4:1、且 HD 图不能再放大（这两条本轮未实测）。'],
+  weird: ['怪异度（--weird）', 'num', '追求非常规构图时使用'],
+  stop: ['提前停止（--stop）', 'num', '在渲染进度的百分之几处停下，出图更粗糙'],
+  tile: ['无缝平铺（--tile）', 'bool', '输出可四方连续拼接的图案'],
+  styleRaw: ['原始风格（--style raw）', 'bool', '减少 Midjourney 的默认审美加工'],
+  draft: ['草稿（--draft）', 'bool', '更快更省，画质更低'],
+  repeat: ['重复出图（--r）', 'num', '一次提交跑多批，按批计费'],
+  profile: ['个性化配置（--p）', 'text', '你的 Midjourney 个性化 / moodboard 编码'],
+  extraFlags: ['附加 flag（原样追加）', 'text', '写完整的 flag，如 --sv 4 --exp 20。本 GUI 不校验含义，上游不认就会报错。'],
+};
+// 首屏一组(每次都可能改)+ 折叠一组(冷门)。HD 刻意留在首屏:它是 8.x 上唯一能直接把像素
+// 翻倍且不加钱的开关,埋进折叠区等于没有。
+const MJ_COMMON_FIELDS = ['stylize', 'chaos', 'seed', 'quality', 'hd', 'negative'];
+const MJ_ADVANCED_FIELDS = ['weird', 'stop', 'tile', 'styleRaw', 'draft', 'repeat', 'profile', 'extraFlags'];
+// 8.x + turbo。这句陈述的是【本 GUI 的实际行为】,不是转述上游文档:真机实测该档位上游
+// 照 turbo 收 2.22 倍的钱、耗时却和 fast 没差,所以下发时改发 fast。
+const MJ_TURBO_NOTE = '该版本不支持 turbo：提交时按 fast 下发并按 fast 计费。provider 里存的值不变，版本切回 7 时仍是 turbo。';
+// 编译层丢弃原因 → 人话。文案只陈述事实与出路,不写"请稍后重试"这类无关处置。
+const MJ_DROP_REASONS = {
+  'unsupported-version': '当前版本不支持该参数',
+  'out-of-range': '取值超出该版本的允许范围',
+  'already-in-prompt': '提示词里已手写同名参数，以提示词为准',
+  'illegal-chars': '含不允许的字符（双连字符、换行或控制字符）',
+  'needs-fast-speed': '需要速度为 fast 或 turbo',
+  'too-long': '参数总长超出上限，已从末尾丢弃',
+};
+// 走结构化字段(而不是提示词 flag)的那几项,在预览里标出承载方式 —— 不标的话用户会以为它没发。
+const MJ_VIA_BODY_LABEL = { ar: '比例', version: '版本', niji: 'niji 档', speed: '速度' };
+// r94 垫图传法(仅 apimart 形态的 mj 协议有意义)。每项一句如实说明,含费用与已知风险。
+const MJ_REF_MODE_META = {
+  upload: ['先上传换链接（upload）',
+    '先上传换链接再提交，每张约 $0.05、链接 72 小时有效；apimart 公告不再接受生成接口直传 base64，该站建议用这项。'],
+  inline: ['随请求直传（inline）',
+    '图片以 base64 直接随请求提交，不额外收费；部分站点（含 apimart 的公告口径）可能拒收，被拒时按上游原文显示错误。实测 2026-09-02 在 apimart 仍可用，公告称不支持，可能随时失效。'],
+  url: ['只收公网链接（url）',
+    '只接受公网图片链接，本地文件会被拒绝：需要先自行传到图床再把链接填进来。'],
+};
+// r94 参考图用途。垫图恒可用;角色 / 风格参考按当前版本的能力显隐(--cref 只在 6.1 与 niji6、
+// --oref 只在 7),权重分别编译成 --iw / --cw / --ow / --sw。
+const MJ_REF_ROLES = [
+  ['image', '垫图（--iw）'],
+  ['cref', '角色参考（--cref）'],
+  ['oref', '角色参考（--oref）'],
+  ['sref', '风格参考（--sref）'],
+];
+const MJ_REF_WEIGHT_FIELD = { image: 'iw', cref: 'cw', oref: 'ow', sref: 'sw' };
+const refRole = (r) => (r && r.role ? r.role : 'image');
+// 上传换来的临时链接有效期(服务端按 72 小时自算并回 expiresAt,这里只用于显示)。
+const REF_URL_TTL_NOTE = '上传换来的链接 72 小时有效，过期后需重新上传。';
 
 // r84:MJ 四宫格里"第几张"的人话说法。上游的 index 是 1–4,顺序即返回的 image_urls 顺序,
 // 对应四宫格的【左上=1、右上=2、左下=3、右下=4】—— 这个映射被单测钉住,别改顺序。
 const MJ_GRID_POSITIONS = ['左上', '右上', '左下', '右下'];
-// r84 二次操作:放大 = MJ 的 U1–U4(从四宫格里取出那一张单图),变体 = V1–V4(以那张为基础
-// 重抽一组四宫格)。上游把这两件事都做成新任务,结果作为新记录进历史。
-const MJ_ACTION_LABEL = { upscale: '放大', variation: '变体' };
-const MJ_ACTION_TAG = { upscale: 'U', variation: 'V' };
+// r84 二次操作,r94 起动作名一律取 mj-actions.js 的 MJ_ACTION_LABELS —— U 按钮做的是
+// 「取出单图」(从四宫格里取这一张,像素不变),把它叫「放大」是误导用户去点一个不会变清晰的按钮。
+// 存量记录里 r84 写下的 mjAction 'upscale' 其实就是 U 按钮:按 mjIndex 在不在认回 pick,
+// 否则老记录会被标成它从来没做过的「真放大」。
+const MJ_ACTION_TAG = { pick: 'U', variation: 'V' };
+const mjActionKind = (h) => (h.mjAction === 'upscale' && h.mjIndex ? 'pick' : h.mjAction);
+// 「取出单图」按钮的说明:如实写它做了什么、没做什么,并指出真想要更大的图该走哪条路。
+const MJ_PICK_NOTE = '从四宫格取出这一张，像素不变、不放大；要更大的图请在 8.1 / 8.2 版本下勾选「高清（HD）」。';
 
 // 提示词草稿:出图是后台任务,面板关掉再打开输入框里的内容必须还在。
 const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
@@ -162,6 +239,78 @@ const FETCH_HINTS = {
   unsupported: '该服务未提供模型列表接口，请在「模型」框手动填写模型名。',
 };
 
+/**
+ * r94 MJ 标量参数控件。两处共用同一份渲染:provider 表单里编的是【默认值】,生图区
+ * 「本次参数」编的是【这一单的覆盖值】—— 两边显隐规则必须一致,抄两份早晚会各改各的。
+ * 显隐与禁用完全由 mjCapsFor(版本) 决定:该版本没有的字段不渲染(填了也只会被丢弃),
+ * 有但被上游限制的(8.x 的 --q)渲染成禁用态并写明原因 —— 直接藏掉会让用户以为参数丢了。
+ */
+function MjParamFields({ caps, values, onChange, speed }) {
+  const v = values || {};
+  const shown = (f) => caps.fields.includes(f) || !!caps.disabled[f];
+  const range = (f) => (Array.isArray(caps.ranges[f]) ? caps.ranges[f] : null);
+  const field = (f) => {
+    if (!shown(f)) return null;
+    const [label, kind, hint] = MJ_FIELD_META[f];
+    const off = caps.disabled[f] || '';
+    // --r 在默认(relax)档下上游不执行:控件照旧可填,但当场标出它不会生效。
+    const idle = f === 'repeat' && !['fast', 'turbo'].includes(speed || '')
+      ? '当前速度是默认（relax），该参数不会生效：请把速度改成 fast 或 turbo。' : '';
+    const lim = range(f);
+    if (kind === 'bool') {
+      return (
+        <label key={f} className={`flex items-start gap-1.5 col-span-2 ${off ? 'opacity-50' : 'cursor-pointer'}`}>
+          <input
+            type="checkbox"
+            disabled={!!off}
+            checked={v[f] === true}
+            onChange={(e) => onChange(f, e.target.checked)}
+            className="mt-0.5 accent-accent shrink-0"
+          />
+          <span className="space-y-0.5">
+            <span className={`${labelCls} block`}>{label}</span>
+            <span className="text-[10px] text-ink-faint font-body leading-snug block">{off || hint}</span>
+          </span>
+        </label>
+      );
+    }
+    return (
+      <label key={f} className="space-y-1"><span className={labelCls}>{label}</span>
+        {kind === 'enum' ? (
+          <select className={inputCls} disabled={!!off} value={v[f] ?? ''} onChange={(e) => onChange(f, e.target.value)}>
+            <option value="">默认（不指定）</option>
+            {(lim || []).map((q) => <option key={q} value={q}>{q}</option>)}
+          </select>
+        ) : (
+          <input
+            className={inputCls}
+            disabled={!!off}
+            inputMode={kind === 'num' ? 'numeric' : undefined}
+            value={v[f] ?? ''}
+            onChange={(e) => onChange(f, e.target.value)}
+            placeholder={kind === 'num' && lim ? `${lim[0]}–${lim[1]}，留空不发送` : '留空不发送'}
+          />
+        )}
+        <span className="text-[10px] text-ink-faint font-body leading-snug block">{off || idle || hint}</span>
+      </label>
+    );
+  };
+  const advanced = MJ_ADVANCED_FIELDS.filter(shown);
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-2">{MJ_COMMON_FIELDS.map(field)}</div>
+      {advanced.length > 0 && (
+        <details className="rounded-md border border-canvas-deep px-2 py-1.5">
+          <summary className="text-[10.5px] text-ink-soft font-body cursor-pointer select-none">
+            高级参数（{advanced.map((f) => MJ_FIELD_META[f][0].replace(/（.*$/, '')).join(' / ')}）
+          </summary>
+          <div className="grid grid-cols-2 gap-2 pt-2">{advanced.map(field)}</div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 function ProviderForm({ initial, onDone, onCancel }) {
   const [form, setForm] = useState(initial);
   const [saving, setSaving] = useState(false);
@@ -190,6 +339,20 @@ function ProviderForm({ initial, onDone, onCancel }) {
   // r84 mj:版本分档由已存的值反推(空 = 写实档的"默认")—— 存的仍是一个字符串,
   // 不引入第二个字段,省掉"两个控件必须配对填对"的一整类 bug。
   const mjGroup = MJ_VERSION_GROUPS.find((g) => g.versions.includes(form.mjVersion)) || MJ_VERSION_GROUPS[0];
+  // r94:两种 MJ 形态共用同一套版本 / 速度 / 参数控件;能力(哪些字段有、哪些被上游禁)全部
+  // 由 mjCapsFor 派生,面板不自己维护第二张版本表。
+  const mjProto = isMjProtocol(form.protocol);
+  const mjCaps = mjCapsFor(form.mjVersion);
+  const mjParams = form.mjParams || {};
+  // 空值 = 不发送该键(编译层的口径),所以清空一个格子就是把它从默认值里删掉。
+  const setMjParam = (f, val) => setForm((prev) => {
+    const next = { ...(prev.mjParams || {}) };
+    if (val === '' || val === false || val === null || val === undefined) delete next[f];
+    else next[f] = val;
+    return { ...prev, mjParams: next };
+  });
+  // 垫图传法:mj 有默认值(upload),mj-proxy 恒空串(该协议固定走 base64Array,控件不显示)。
+  const refMode = mjRefModeFor(form);
   // 自定义比例的两格必须有自己的状态:只填了宽时 form.size 还不成立(写进去就是半截值),
   // 靠 form.size 反推会让刚敲进去的数字立刻消失。
   const [customWH, setCustomWH] = useState(() => (/^\d+:\d+$/.test(initial.size || '') ? String(initial.size).split(':') : ['', '']));
@@ -261,9 +424,15 @@ function ProviderForm({ initial, onDone, onCancel }) {
         models: form.models || [], size: form.size, savePath: form.savePath, extra,
         i2iMode: form.i2iMode || 'edits',
         proxyUrl: (form.proxyUrl || '').trim(), // 空串 = 清除(改回直连)
-        // r84:仅 mj 协议有意义;换成别的协议时一并清空,避免存量脏值在切回来时突然生效。
-        mjVersion: form.protocol === 'mj' ? (form.mjVersion || '') : '',
-        mjSpeed: form.protocol === 'mj' ? (form.mjSpeed || '') : '',
+        // r84:仅两种 Midjourney 协议有意义;换成别的协议时一并清空,避免存量脏值在切回来时突然生效。
+        // r94:速度按【用户填的原值】存 —— 8.x + turbo 的降级只发生在下发与预览那一步,
+        // 存回 fast 等于替他改了配置,版本切回 7 时 turbo 再也回不来。
+        mjVersion: mjProto ? (form.mjVersion || '') : '',
+        mjSpeed: mjProto ? (form.mjSpeed || '') : '',
+        // r94:标量默认值(服务端按白名单过滤;cref/sref 这类参考图字段不在白名单里,只能 per-request 给)。
+        mjParams: mjProto ? mjParams : {},
+        // 垫图传法只对 mj 有意义:mj-proxy 固定 base64Array,存什么都被忽略,故一律存空串。
+        mjRefMode: form.protocol === 'mj' ? (form.mjRefMode || '') : '',
         // r87:方言描述的是【上游本身】不是某个协议的参数,所以换协议不清空(换回来时它仍然
         // 是对的)。其余结构化参数按【当前 (方言, 模型) 的能力表】过滤后再存:控件是按能力表
         // 显隐的,换个模型控件就消失但值还在 —— 不清的话下次保存又把它写回去,而界面上根本
@@ -315,7 +484,14 @@ function ProviderForm({ initial, onDone, onCancel }) {
           用户会按同步协议的直觉去填尺寸与参考图，然后得到一个"填了没生效"的结果）。 */}
       {form.protocol === 'mj' && (
         <div className="text-[10px] text-ink-faint font-body leading-snug">
-          请求发往「接口地址」+ /midjourney/generations，请求体包含提示词、宽高比、版本、速度与附加参数（extra）；模型名不发送，由该路由自动注入。当前版本不支持参考图，已选择的参考图不会随请求发送。提交后服务端每 5 秒查询一次任务状态，单次生成通常需要 1–2 分钟，一次返回 4 张图并分别落盘；超过 15 分钟未出结果记为失败，此时平台侧任务可能仍在继续。
+          请求发往「接口地址」+ /midjourney/generations，请求体包含提示词、宽高比、版本、速度与附加参数（extra）；模型名不发送，由该路由自动注入。下方设置的标量参数编译成提示词末尾的 --flag 一并发送。参考图按该 provider 的「垫图传法」提交：垫图进 image_urls，角色 / 风格参考编译成 --cref / --oref / --sref。提交后服务端每 5 秒查询一次任务状态，单次生成通常需要 1–2 分钟，一次返回 4 张图并分别落盘；超过 15 分钟未出结果记为失败，此时平台侧任务可能仍在继续。
+        </div>
+      )}
+      {/* r94:第二种 Midjourney 形态（midjourney-proxy 及其分支）。路径、请求体与鉴权头都与
+          上面那种不同，说明另起一块写，不与 mj 的说明混在一起。 */}
+      {form.protocol === 'mj-proxy' && (
+        <div className="text-[10px] text-ink-faint font-body leading-snug">
+          请求发往「接口地址」+ /mj/submit/imagine，鉴权同时发送 mj-api-secret 与 Authorization 两个头。接口地址填站点根地址（如 https://mj.example.com 或 https://mj.example.com/mj）；末尾的 /mj 会被去掉后保存，避免拼成 /mj/mj/submit/imagine。比例、版本与标量参数编译成提示词末尾的 --flag 发送，速度经账号筛选（accountFilter.modes）发送。垫图固定以 base64 随请求提交（base64Array），该协议没有「垫图传法」可选；角色 / 风格参考仍需公网图片链接。提交后服务端轮询 /mj/task/&#123;id&#125;/fetch 直到出图；原版（非 plus）不提供真放大等按钮操作。
         </div>
       )}
       <label className="space-y-1 block"><span className={labelCls}>接口地址（baseURL，不含 /images/generations 等路径后缀）</span>
@@ -418,7 +594,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
             该上游的 size 是比例不是像素{has('resolution') ? '，实际输出像素由比例与「分辨率档」共同决定' : '，该模型没有分辨率档，输出像素由上游按比例决定'}。也可直接填像素串（如 1881x836），该上游同时接受这种形态。候选按 {sizeCap.family} 的文档范围列出，手动输入不受限制。
           </span>
         </div>
-      ) : form.protocol === 'mj' ? (
+      ) : mjProto ? (
         <div className="space-y-1"><span className={labelCls}>宽高比（对应 Midjourney 的 --ar）</span>
           <div className="flex flex-wrap gap-1">
             {MJ_RATIOS.map(([r, use]) => (
@@ -459,7 +635,7 @@ function ProviderForm({ initial, onDone, onCancel }) {
             </span>
           )}
           <span className="text-[10px] text-ink-faint font-body leading-snug block">
-            这里填的是比例不是像素。出图像素由服务端按该比例决定，提交时无法指定；需要更大的图，在出图后对单张使用放大。
+            这里填的是比例不是像素。出图像素由上游按该比例决定，提交时无法指定；需要更大的图，在 8.1 / 8.2 版本下勾选「高清（HD）」，或使用上游按钮里的「真放大」（多数中转站不提供该按钮）。
           </span>
         </div>
       ) : (
@@ -475,7 +651,9 @@ function ProviderForm({ initial, onDone, onCancel }) {
               ? '随请求发送；服务不支持所选尺寸时会报错。'
               : '该协议无原生尺寸字段，此值不发送；需在附加参数（extra）中按服务文档设置。'}
           </span>
-          {sizeCap && (
+          {/* r94:未登记模型走的是"放开全部候选"的兜底条目,再说"已按 X 过滤"就是撒谎。
+              判据取 cap.unknown 而不是 family 文案 —— 文案改一个字判据就失效。 */}
+          {sizeCap && !sizeCap.unknown && (
             <span className="text-[10px] text-ink-faint font-body leading-snug block">
               候选已按 {sizeCap.family} 的官方支持范围过滤；手动输入不受限制。
             </span>
@@ -589,10 +767,9 @@ function ProviderForm({ initial, onDone, onCancel }) {
       {/* r84:版本 / 速度是文档明列取值的具名参数,做成下拉;冷门参数(stylize / chaos / seed …)
           仍走附加参数 JSON,但给一份可直接复制的样例 —— 用户原话是「不会写」。
           默认折叠:首屏留给地址 / 密钥 / 模型 / 比例这些必填项。 */}
-      {form.protocol === 'mj' && (
-        <details className="rounded-md border border-canvas-deep px-2 py-1.5">
-          <summary className="text-[10.5px] text-ink-soft font-body cursor-pointer select-none">高级参数（版本 / 速度 / 附加参数示例）</summary>
-          <div className="pt-2 space-y-2">
+      {mjProto && (
+        <div className="rounded-md border border-canvas-deep px-2 py-1.5">
+          <div className="pt-0 space-y-2">
             <div className="space-y-1"><span className={labelCls}>风格分档</span>
               <div className="flex items-center gap-0.5 p-0.5 rounded-md bg-canvas-warm text-[11px] font-body w-max">
                 {MJ_VERSION_GROUPS.map((g) => (
@@ -615,25 +792,52 @@ function ProviderForm({ initial, onDone, onCancel }) {
                 </select>
               </label>
               <label className="space-y-1"><span className={labelCls}>速度</span>
+                {/* 8.x 上 turbo 那一项禁选:上游照 turbo 收 2.22 倍的钱、耗时却和 fast 没差。
+                    已存 turbo 的 provider 仍原样回填(下面 value 用的就是存的原值)。 */}
                 <select className={inputCls} value={form.mjSpeed || ''} onChange={set('mjSpeed')}>
-                  {MJ_SPEEDS.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                  {MJ_SPEEDS.map((s) => (
+                    <option key={s.id} value={s.id} disabled={s.id === 'turbo' && !!mjCaps.disabled.speedTurbo}>{s.label}</option>
+                  ))}
                 </select>
+                {mjCaps.disabled.speedTurbo && (
+                  <span className="text-[10px] text-ink-faint font-body leading-snug block">{MJ_TURBO_NOTE}</span>
+                )}
               </label>
             </div>
-            <div className="space-y-1">
-              <span className={labelCls}>其余参数写进下方「附加参数」，可复制此样例后改数值</span>
-              <div className="flex items-center gap-1">
-                <code className="flex-1 min-w-0 truncate rounded-md bg-canvas-warm border border-canvas-deep px-2 py-1 text-[10.5px] text-ink-soft font-mono" title={MJ_EXTRA_EXAMPLE}>{MJ_EXTRA_EXAMPLE}</code>
-                <button
-                  type="button"
-                  onClick={() => setForm((f) => ({ ...f, extra: MJ_EXTRA_EXAMPLE }))}
-                  className="shrink-0 px-2 py-1 rounded-md border border-canvas-deep text-[10.5px] text-ink-soft font-body hover:bg-canvas-deep/60"
-                >填入</button>
+            {/* r94 标量参数默认值。控件按当前版本显隐/禁用;生图区还能对单次生成做覆盖。 */}
+            <MjParamFields caps={mjCaps} values={mjParams} onChange={setMjParam} speed={form.mjSpeed} />
+            {/* r94 垫图传法(第三段:参考图)。只有 apimart 形态的 mj 有这个选择 ——
+                mj-proxy 固定以 base64 随请求提交,给个选择框只会让人以为能改。 */}
+            {form.protocol === 'mj' ? (
+              <div className="space-y-1"><span className={labelCls}>垫图传法（本地图片怎么发给上游）</span>
+                <div className="space-y-1">
+                  {MJ_REF_MODES.map((m) => (
+                    <label key={m} className="flex items-start gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="cgui-mj-ref-mode"
+                        checked={refMode === m}
+                        onChange={() => setForm((f) => ({ ...f, mjRefMode: m }))}
+                        className="mt-0.5 accent-accent shrink-0"
+                      />
+                      <span className="space-y-0.5">
+                        <span className={`${labelCls} block`}>{MJ_REF_MODE_META[m][0]}</span>
+                        <span className="text-[10px] text-ink-faint font-body leading-snug block">{MJ_REF_MODE_META[m][1]}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <span className="text-[10px] text-ink-faint font-body leading-snug block">
+                  只影响「垫图」这一类参考图。角色 / 风格参考（--cref / --oref / --sref）的值在任何传法下都只能是公网图片链接。
+                </span>
               </div>
-              <span className="text-[10px] text-ink-faint font-body leading-snug block">可用字段：{MJ_EXTRA_FIELDS}。同名键以附加参数为准，会覆盖上面的下拉与比例。</span>
-            </div>
+            ) : (
+              <span className="text-[10px] text-ink-faint font-body leading-snug block">
+                该协议固定以 base64 随请求提交垫图，没有「垫图传法」可选。
+              </span>
+            )}
           </div>
-        </details>
+        </div>
       )}
       {/* r54:图生图形态。两种协议形态官方不兼容 —— OpenAI 有 /images/edits 端点,
           方舟(Seedream)没有,图生图靠 generations 的 image 字段。选错则上游 404/400。 */}
@@ -873,10 +1077,13 @@ export default function ImagePanel() {
   };
   // r84 可追溯:二次操作产生的条目标出"从哪个任务的第几张来的"。
   const originNote = (h) => {
-    const tag = `${MJ_ACTION_TAG[h.mjAction] || ''}${h.mjIndex || ''}`;
+    const kind = mjActionKind(h);
+    const tag = `${MJ_ACTION_TAG[kind] || ''}${h.mjIndex || ''}`;
     // 父记录还在列表里才说"来自…":被删掉之后再说"来自上一任务"是找不到的指路。
     const hasParent = history.some((x) => x.id === h.parentId);
-    return `${MJ_ACTION_LABEL[h.mjAction] || h.mjAction} ${tag}${hasParent ? ` · 来自上一任务第 ${h.mjIndex} 张` : ''}`;
+    // 按钮形态(真放大等)没有"第几张"这个概念,只说来自上一任务,不编一个 undefined 出来。
+    const from = hasParent && h.mjIndex ? ` · 来自上一任务第 ${h.mjIndex} 张` : (hasParent ? ' · 来自上一任务' : '');
+    return `${MJ_ACTION_LABELS[kind] || kind} ${tag}${from}`;
   };
 
   // 参考图选择:单张与张数都先在前端拦一道(超限直接报错不发),真正的闸在服务端。
@@ -1013,14 +1220,16 @@ export default function ImagePanel() {
       const r = await fetch('/api/image/actions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId: h.id, action, index }),
+        // 端点收的仍是 r84 的老形态(upscale / variation + 第几张);pick 是本轮起的动作名,
+        // 打的是同一个 upscale 端点 —— 上游那个端点做的本来就是"取出单图"。
+        body: JSON.stringify({ jobId: h.id, action: action === 'pick' ? 'upscale' : action, index }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `提交失败（${r.status}）`);
       if (d.jobId) setCurrentId(d.jobId); // r95:与「生成」同口径,预览区跟到新任务上
       loadHistory();
     } catch (e) {
-      setActionErr(`${MJ_ACTION_LABEL[action] || action}失败：${e.message}`);
+      setActionErr(`${MJ_ACTION_LABELS[action] || action}失败：${e.message}`);
     } finally {
       setActionBusy('');
     }
@@ -1106,17 +1315,17 @@ export default function ImagePanel() {
               // "点一下选中"的第一下就会落在隐藏按钮上直接提交一个【要计费】的任务。
               // 隐藏态加 pointer-events-none 也能挡,但少一个"两个类必须同时对"的失效面。
               <div className="absolute inset-x-0 bottom-0 flex gap-px">
-                {['upscale', 'variation'].map((act) => (
+                {['pick', 'variation'].map((act) => (
                   <button
                     type="button"
                     key={act}
                     disabled={!!actionBusy}
                     onClick={() => submitAction(h, act, i + 1)}
-                    title={act === 'upscale'
-                      ? `放大：取出四宫格里的第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）作为单图，结果记为新任务`
+                    title={act === 'pick'
+                      ? `取出单图：取出四宫格里的第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）作为单图，${MJ_PICK_NOTE}结果记为新任务`
                       : `变体：以第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）为基础重新生成一组，结果记为新任务`}
                     className="flex-1 py-0.5 bg-canvas-deep/85 text-[9.5px] text-ink font-body hover:bg-accent hover:text-on-accent disabled:opacity-50"
-                  >{MJ_ACTION_LABEL[act]}</button>
+                  >{MJ_ACTION_LABELS[act]}</button>
                 ))}
               </div>
             )}
@@ -1515,7 +1724,9 @@ export default function ImagePanel() {
                     model: p.model, models: p.models || [], size: p.size, savePath: p.savePath,
                     extra: p.extra ? JSON.stringify(p.extra, null, 2) : '', i2iMode: p.i2iMode || 'edits',
                     proxyUrl: p.proxyUrl || '',
+                    // r94:速度回填【存的原值】—— 存 turbo 就显示 turbo,不因版本是 8.x 而显示 fast。
                     mjVersion: p.mjVersion || '', mjSpeed: p.mjSpeed || '',
+                    mjParams: p.mjParams || {}, mjRefMode: p.mjRefMode || '',
                     // r87:服务端回显已把存量条目补成缺省值(方言 openai / 其余空),原样回填。
                     dialect: p.dialect || 'openai', resolution: p.resolution || '', quality: p.quality || '',
                     outputFormat: p.outputFormat || '', background: p.background || '',
