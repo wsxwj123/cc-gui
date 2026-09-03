@@ -19,7 +19,7 @@ import {
 // 「将要发送」预览、动作按钮全部由它派生 —— 界面自己再写一份版本表就会与下发口径漂移。
 import {
   compileMjFlags, mjCapsFor, mjEffectiveSpeed, mjRefModeFor, MJ_REF_MODES,
-  mjActionsFor, MJ_ACTION_LABELS, MJ_NO_UPSCALE_NOTE,
+  mjActionsFor, MJ_ACTION_LABELS, MJ_NO_UPSCALE_NOTE, MJ_RENDERED_KINDS,
 } from '../utils/mjParams.js';
 // r84 多图条目:一个任务可能出多张图(MJ 一次 4 张),单图操作一律作用于【选中的那张】。
 // r95 序列三函数:把任务列表拍平成一条可浏览序列,供放大层左右切图。
@@ -98,9 +98,9 @@ const ADVANCED_FIELD_LABELS = [
 // 版本清单出自 apimart 文档 imagine.md 原文「线上已验证可用版本:8.2、8.1、7、6.1、5.2、5.1、
 // niji 7、niji 6」;niji 不是"另一种版本号",是 niji:true + version:"7"/"6" 的搭配,
 // 故界面按【写实 / 动漫】两档分组,存储仍是一个字符串(niji 档在协议层拆回两个字段)。
-// 注意 `versions:` 与 `[` 之间的换行不是格式失手:r94 源码锁禁止面板里出现 `versions: [`
-// 字面（版本能力表只许落 mj-params.js），而 r84 的既有断言仍要从本文件读出版本候选与服务端
-// 清单比对。两把锁一起只留下这一种写法 —— 别把它折回一行。
+// 注意键名与方括号之间的换行不是格式失手:r94 源码锁禁止面板里出现"键名后面直接跟一个空格
+// 再跟方括号"的那种版本表写法(版本能力表只许落 mj-params.js),而 r84 的既有断言仍要从本
+// 文件读出版本候选与服务端清单比对。两把锁一起只留下这一种写法 —— 别把它折回一行。
 const MJ_VERSION_GROUPS = [
   { id: 'mj', label: '写实', hint: 'Midjourney 主线版本', versions:
     ['8.2', '8.1', '7', '6.1', '5.2', '5.1'] },
@@ -188,6 +188,9 @@ const MJ_GRID_POSITIONS = ['左上', '右上', '左下', '右下'];
 // 否则老记录会被标成它从来没做过的「真放大」。
 const MJ_ACTION_TAG = { pick: 'U', variation: 'V' };
 const mjActionKind = (h) => (h.mjAction === 'upscale' && h.mjIndex ? 'pick' : h.mjAction);
+// 动作端点仍是 r84 的那两个:取出单图与真放大打的都是 upscale(上游那个端点本来做的就是
+// "从四宫格取出这一张";按钮形态另由服务端按 customId 分类),变体打 variation。
+const legacyMjAction = (kind) => (kind === 'variation' ? 'variation' : 'upscale');
 // 「取出单图」按钮的说明:如实写它做了什么、没做什么,并指出真想要更大的图该走哪条路。
 const MJ_PICK_NOTE = '从四宫格取出这一张，像素不变、不放大；要更大的图请在 8.1 / 8.2 版本下勾选「高清（HD）」。';
 
@@ -1208,11 +1211,14 @@ export default function ImagePanel() {
 
   // 取消生成中的任务:只作用于点名的那一个 jobId。不弹确认 —— 取消可重发,不是破坏性操作。
   /**
-   * r84:对某条已完成的 mj 任务的第 index 张(1-4)发起放大 / 变体。
+   * r84/r94:对某条已完成的 Midjourney 任务发起二次操作。
+   * action 是 mjActionsFor 产出的 Action 对象,两种形态并存:
+   *  · customId 形态 —— 上游按钮原样带回(绝不自己拼 hash,拼的上游必拒且可能计费);
+   *  · index 形态 —— 四宫格的第 1–4 张,请求体与 r84 逐字相同。
    * 服务端复用同一条流水线(提交 → 轮询 → 落盘),这里只管发起与报错。
    */
-  const submitAction = async (h, action, index) => {
-    const busyKey = `${h.id}:${action}:${index}`;
+  const submitAction = async (h, action) => {
+    const busyKey = `${h.id}:${action.id}`;
     if (actionBusy) return; // 双击防重:提交那一瞬只允许一个
     setActionErr('');
     setActionBusy(busyKey);
@@ -1220,16 +1226,14 @@ export default function ImagePanel() {
       const r = await fetch('/api/image/actions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // 端点收的仍是 r84 的老形态(upscale / variation + 第几张);pick 是本轮起的动作名,
-        // 打的是同一个 upscale 端点 —— 上游那个端点做的本来就是"取出单图"。
-        body: JSON.stringify({ jobId: h.id, action: action === 'pick' ? 'upscale' : action, index }),
+        body: JSON.stringify({ jobId: h.id, ...(action.customId ? { customId: action.customId } : { action: legacyMjAction(action.kind), index: action.index }) }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `提交失败（${r.status}）`);
       if (d.jobId) setCurrentId(d.jobId); // r95:与「生成」同口径,预览区跟到新任务上
       loadHistory();
     } catch (e) {
-      setActionErr(`${MJ_ACTION_LABELS[action] || action}失败：${e.message}`);
+      setActionErr(`${action.label || action.kind}失败：${e.message}`);
     } finally {
       setActionBusy('');
     }
@@ -1287,6 +1291,46 @@ export default function ImagePanel() {
     return next;
   });
 
+  // r94:条目上不存协议,只能按 providerId 反查 —— provider 被删或改了协议时返回空串,
+  // 动作入口随之消失。
+  const protocolOf = (h) => providers.find((p) => p.id === h.providerId)?.protocol || '';
+  /**
+   * r94 单图条目的动作条。四宫格走缩略条(按第几张),单图任务只能按【上游给的按钮】操作:
+   * 「真放大」(upsample_v*_2x_subtle/creative、upsample_v5_2x/4x)只可能出现在这里 ——
+   * 四宫格父任务的按钮里从来没有它。拿不到按钮时不回落出假按钮,而是如实说明该站没有真放大:
+   * 回落出来的 U/V 打在单图任务上要么无意义要么白花钱。
+   */
+  const mjSoloBar = (h) => {
+    if (h.status !== 'done' || entryFiles(h).length > 1) return null;
+    if (!h.taskId || !isMjProtocol(protocolOf(h))) return null;
+    const acts = mjActionsFor({ buttons: h.mjButtons, protocol: protocolOf(h), imageCount: 1 })
+      .filter((a) => a.mode === 'customId' && MJ_RENDERED_KINDS.includes(a.kind));
+    if (!acts.length) {
+      return <div className="text-[9.5px] text-ink-faint font-body leading-snug">{MJ_NO_UPSCALE_NOTE}</div>;
+    }
+    return (
+      <div className="space-y-1">
+        <div className="flex flex-wrap gap-1">
+          {acts.map((act) => (
+            <button
+              type="button"
+              key={act.id}
+              disabled={!!actionBusy}
+              onClick={() => submitAction(h, act)}
+              title={act.kind === 'upscale'
+                ? `${act.label}：由上游按原图重绘出更大的图，结果记为新任务（要计费）`
+                : `${act.label}：结果记为新任务（要计费）`}
+              className="px-1.5 py-0.5 rounded border border-canvas-deep text-[9.5px] text-ink-soft font-body hover:bg-accent hover:text-on-accent disabled:opacity-50"
+            >{act.label}</button>
+          ))}
+        </div>
+        {!acts.some((a) => a.kind === 'upscale') && (
+          <div className="text-[9.5px] text-ink-faint font-body leading-snug">{MJ_NO_UPSCALE_NOTE}</div>
+        )}
+      </div>
+    );
+  };
+
   // r84 多图缩略条:一个任务出多张时才出现(单图条目返回 null,渲染与改动前一致)。
   // 点某张 = 选中它,上面的大图、放大、以此图修改、在文件夹中显示随之切过去 ——
   // 悬停虽然也能看,但"作用于哪一张"必须由一次明确的点击决定,不能靠鼠标停在哪。
@@ -1294,9 +1338,14 @@ export default function ImagePanel() {
     const list = entryFiles(h);
     if (h.status !== 'done' || list.length < 2) return null;
     const cur = shotIdx(h);
-    // 二次操作只对 mj 协议、且记了上游任务号的条目开放(r84 之前的老记录没有 taskId,
-    // provider 被删或改了协议时同样不给入口 —— 点了必然失败的按钮不该存在)。
-    const canAct = !!h.taskId && providers.find((p) => p.id === h.providerId)?.protocol === 'mj';
+    // 二次操作只对两种 Midjourney 协议、且记了上游任务号的条目开放(r84 之前的老记录没有
+    // taskId,provider 被删或改了协议时同样不给入口 —— 点了必然失败的按钮不该存在)。
+    const canAct = !!h.taskId && ['mj', 'mj-proxy'].includes(providers.find((p) => p.id === h.providerId)?.protocol);
+    // 缩略条是按"第几张"操作的:上游按钮里的 U/V 也是每张一个,但序号藏在 customId 的 hash
+    // 段里、动作层刻意不解析(拆错就会把两段式按钮读成命令),所以这里恒用 index 形态 ——
+    // 真机实测 index 与 custom_id 取出的单图逐字节相同。第 i 格(0 起)对应的 Action 是
+    // index: i + 1(上游序号 1 起)。
+    const acts = mjActionsFor({ buttons: [], protocol: protocolOf(h), imageCount: list.length });
     return (
       <div className="grid grid-cols-4 gap-1">
         {list.map((f, i) => (
@@ -1304,7 +1353,7 @@ export default function ImagePanel() {
             <button
               type="button"
               onClick={() => pickShot(h, i)}
-              title={canAct ? `第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）：点击选中，大图与单图操作都作用于它；选中后这张下方出现放大 / 变体` : `第 ${i + 1} 张：点击选中，大图与单图操作都作用于它`}
+              title={canAct ? `第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）：点击选中，大图与单图操作都作用于它；选中后这张下方出现取出单图 / 变体` : `第 ${i + 1} 张：点击选中，大图与单图操作都作用于它`}
               className="block w-full"
             >
               <img src={entryPreviewUrl(f)} alt={`第 ${i + 1} 张`} className="w-full aspect-square object-cover" />
@@ -1315,17 +1364,17 @@ export default function ImagePanel() {
               // "点一下选中"的第一下就会落在隐藏按钮上直接提交一个【要计费】的任务。
               // 隐藏态加 pointer-events-none 也能挡,但少一个"两个类必须同时对"的失效面。
               <div className="absolute inset-x-0 bottom-0 flex gap-px">
-                {['pick', 'variation'].map((act) => (
+                {acts.filter((a) => a.index === i + 1).map((act) => (
                   <button
                     type="button"
-                    key={act}
+                    key={act.id}
                     disabled={!!actionBusy}
-                    onClick={() => submitAction(h, act, i + 1)}
-                    title={act === 'pick'
-                      ? `取出单图：取出四宫格里的第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）作为单图，${MJ_PICK_NOTE}结果记为新任务`
-                      : `变体：以第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）为基础重新生成一组，结果记为新任务`}
+                    onClick={() => submitAction(h, act)}
+                    title={act.kind === 'pick'
+                      ? `${act.label}：取出四宫格里的第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）。${MJ_PICK_NOTE}结果记为新任务`
+                      : `${act.label}：以第 ${i + 1} 张（${MJ_GRID_POSITIONS[i] || ''}）为基础重新生成一组，结果记为新任务`}
                     className="flex-1 py-0.5 bg-canvas-deep/85 text-[9.5px] text-ink font-body hover:bg-accent hover:text-on-accent disabled:opacity-50"
-                  >{MJ_ACTION_LABELS[act]}</button>
+                  >{act.label}</button>
                 ))}
               </div>
             )}
@@ -1512,6 +1561,7 @@ export default function ImagePanel() {
             className="w-full rounded-panel border border-canvas-deep cursor-zoom-in"
           />
           {imageStrip(current)}
+          {mjSoloBar(current)}
           <div className="flex items-center gap-2">
             <span className="text-[10.5px] text-ink-faint font-mono break-all flex-1">{shotFile(current)}</span>
             {/* r94:实际像素。上游按比例出图,同一比例在不同版本/HD 档下像素不同,只有图片本身说了算。 */}
@@ -1615,6 +1665,7 @@ export default function ImagePanel() {
               )}
               <div className="px-1.5 py-1 space-y-1">
                 {imageStrip(h)}
+                {mjSoloBar(h)}
                 <div className="flex items-start gap-1">
                   {selectMode && (
                     <input
@@ -1677,6 +1728,7 @@ export default function ImagePanel() {
                   {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
                 </div>
                 {imageStrip(h)}
+                {mjSoloBar(h)}
               </div>
               <div className="shrink-0 flex items-center gap-1">{taskActions(h)}</div>
             </div>
