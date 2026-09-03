@@ -34,7 +34,7 @@ const check = (name, fn) => {
 
 check('① .cmd shim + 包内真 PE → 返回包内 claude.exe(SDK 能直接 spawn)', () => {
   const { shim, exe } = mkNpmPrefix('good', { binKind: 'binary' });
-  assert.equal(resolveSdkClaudeFrom(shim, { platform: 'win32' }), exe);
+  assert.equal(resolveSdkClaudeFrom(shim, { platform: 'win32', minExeBytes: 0 }), exe); // r108:fixture 66 字节,显式关体积下限
 });
 
 check('②a 包内 exe 是文本占位(postinstall 没落真二进制)→ null,保持 SDK 回落', () => {
@@ -49,7 +49,7 @@ check('②b 包目录在但 bin\\claude.exe 缺失 → null', () => {
 
 check('②c 非壳包(无 install.cjs)也照样按文件头判:真 PE 认、文本不认', () => {
   const okPkg = mkNpmPrefix('old-good', { binKind: 'binary', installCjs: false });
-  assert.equal(resolveSdkClaudeFrom(okPkg.shim, { platform: 'win32' }), okPkg.exe);
+  assert.equal(resolveSdkClaudeFrom(okPkg.shim, { platform: 'win32', minExeBytes: 0 }), okPkg.exe); // r108:同上
   const badPkg = mkNpmPrefix('old-bad', { binKind: 'text', installCjs: false });
   assert.equal(resolveSdkClaudeFrom(badPkg.shim, { platform: 'win32' }), null);
 });

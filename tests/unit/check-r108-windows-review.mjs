@@ -574,7 +574,7 @@ await check('E3 INTERFACE §3.4 逐字例子:带空格路径 + 带空格参数',
 await check('E4 参数内部的双引号翻倍', async () => {
   const fn = need(mcp, 'winCmdSpawnSpec');
   const s = fn('C:\\a\\foo.cmd', ['say "hi"'], {});
-  assert.equal(s.args[3], '""C:\\a\\foo.cmd" "say ""hi"""');
+  assert.equal(s.args[3], '""C:\\a\\foo.cmd" "say ""hi""""'); // 主会话修正:原期望漏写外层收尾引号(契约 §3.4 首尾各一个外层引号,与 E12 偶数引号一致)
 });
 
 await check('E5 & | ^ > 落在自己的引号内、原样保留不转义不删', async () => {

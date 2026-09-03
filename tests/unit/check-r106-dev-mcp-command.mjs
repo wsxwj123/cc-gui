@@ -67,7 +67,7 @@ check('⑤ .cmd/.bat 经 cmd.exe /c 起(Node 拒绝直跑批处理)', () => {
   const d = join(root, 'cmdonly');
   const cmd = touch(d, 'npx.cmd');
   assert.deepEqual(resolveWinCommand('npx', { env, liveDirs: [d] }), { file: cmd, viaCmd: true });
-  assert.ok(/const viaCmd = hit \? hit\.viaCmd : /.test(src) && /if \(viaCmd\) return spawn\('cmd\.exe', \['\/c', resolved/.test(src),
+  assert.ok(/const viaCmd = hit \? hit\.viaCmd : /.test(src) && /if \(viaCmd\)[\s\S]{0,200}winCmdSpawnSpec\(resolved, args, opts\)/.test(src), // r108:viaCmd 分支改经 winCmdSpawnSpec(cmd.exe /d /s /c + verbatim)
     'spawnMcpCommand 没按 viaCmd 包 cmd.exe /c');
 });
 
@@ -120,10 +120,11 @@ check('⑪ 脏入参不抛:liveDirs 非数组/含非字符串、env 缺键、rea
 check('⑫ 扩展名大小写不敏感(盘上是 UVX.EXE 也认)', () => {
   const d = join(root, 'upper');
   const exe = touch(d, 'UPTOOL.EXE');
-  assert.deepEqual(resolveWinCommand('uptool', { env, liveDirs: [d] }), { file: exe, viaCmd: false });
+  { const r12 = resolveWinCommand('uptool', { env, liveDirs: [d] }); // r108:exists 优先后 mac(APFS 不敏感)先命中小写候选,真名大小写不再保证
+    assert.equal(String(r12?.file || '').toLowerCase(), exe.toLowerCase()); assert.equal(r12?.viaCmd, false); }
   const d2 = join(root, 'upper2');
   const bat = touch(d2, 'BTOOL.CMD');
-  assert.deepEqual(resolveWinCommand('btool', { env, liveDirs: [d2] }), { file: bat, viaCmd: true }, '大写 .CMD 也要标 viaCmd');
+  { const rB = resolveWinCommand('btool', { env, liveDirs: [d2] }); assert.equal(String(rB?.file || '').toLowerCase(), bat.toLowerCase()); assert.equal(rB?.viaCmd, true, '大写 .CMD 也要标 viaCmd'); } // r108:同上,大小写不敏感比较
 });
 
 check('⑩ Windows 三坑:不用 wmic;探测参数不含内嵌双引号', () => {
