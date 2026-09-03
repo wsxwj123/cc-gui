@@ -49,12 +49,27 @@ function toEntry(model) {
 //   qwen3.8-max —— QwenCloud OpenAI Chat API:"Qwen3.8-Max and Qwen3.8-Max-Preview:
 //                  Options: low, medium, xhigh. Default: xhigh"
 //                  https://docs.qwencloud.com/api-reference/chat/openai-chat
+//   deepseek v4 —— DeepSeek Thinking Mode(核对日期 2026-09-03):OpenAI 口
+//                  {"reasoning_effort":"low/high/max"}、Anthropic 口
+//                  {"output_config":{"effort":"low/high/max"}},**两口共用同一张折算表**
+//                  (medium→high、xhigh→high),故只进 byId、不建 byProto;原文
+//                  "(identical for deepseek-v4-flash and deepseek-v4-pro)",且 2026-08-13
+//                  changelog:"V4-Pro and V4-Flash now support three thinking effort levels:
+//                  low / high / max"。pi-ai 快照对 pro 仍写 [high,max](上游滞后),以官方为准。
+//                  vision-exp 官方未单独点名档位,按同族推断(pi-ai 0.84.4 的 thinkingLevelMap
+//                  与 flash 相同)。带 `deepseek/` 命名空间的是 OpenRouter 网关口径
+//                  (max 被网关重命名成 xhigh),不在此覆盖。
+//                  https://api-docs.deepseek.com/guides/thinking_mode
+//                  https://api-docs.deepseek.com/guides/anthropic_api
 const MANUAL_OVERRIDES = {
   'glm-5.3': { efforts: ['low', 'high', 'max'] },
   'z-ai/glm-5.3': { efforts: ['low', 'high', 'max'] },
   'qwen3.8-max': { efforts: ['low', 'medium', 'xhigh'] },
   'qwen3.8-max-preview': { efforts: ['low', 'medium', 'xhigh'] },
   'qwen/qwen3.8-max': { efforts: ['low', 'medium', 'xhigh'] },
+  'deepseek-v4-flash': { efforts: ['low', 'high', 'max'] },
+  'deepseek-v4-pro': { efforts: ['low', 'high', 'max'] },
+  'deepseek-v4-flash-vision-exp': { efforts: ['low', 'high', 'max'] },
 };
 
 const raw = { openai: {}, anthropic: {} };
