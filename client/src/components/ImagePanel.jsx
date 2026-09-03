@@ -662,11 +662,11 @@ function ProviderForm({ initial, onDone, onCancel }) {
           </span>
           {/* r94:未登记模型走的是"放开全部候选"的兜底条目,再说"已按 X 过滤"就是撒谎。
               判据取 cap.unknown 而不是 family 文案 —— 文案改一个字判据就失效。 */}
-          {sizeCap && !sizeCap.unknown && (
+          {sizeCap && (sizeCap.unknown ? null : (
             <span className="text-[10px] text-ink-faint font-body leading-snug block">
               候选已按 {sizeCap.family} 的官方支持范围过滤；手动输入不受限制。
             </span>
-          )}
+          ))}
         </label>
       )}
       {/* r87 首屏:每次都可能要改的两项(分辨率档 / 张数)。字段按 (方言, 模型) 能力表显隐 ——
