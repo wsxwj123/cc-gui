@@ -979,15 +979,18 @@ function UpdateChecker() {
 
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-[10px] text-ink-faint font-body uppercase tracking-wider">当前版本</div>
+      {/* r112:行允许换行、左列给最小宽度。此前左列 min-w-0 + 右侧按钮 shrink-0,面板窄
+          (Windows 上默认宽度更小 / 字体放大)时左列被挤到零宽:「当前版本」逐字竖排、按钮
+          盖在版本号上。现在放不下时按钮组整体换到下一行,左列文字不再逐字折行。 */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-[140px]">
+          <div className="text-[10px] text-ink-faint font-body uppercase tracking-wider whitespace-nowrap">当前版本</div>
           <div className="text-[14px] font-mono text-ink mt-0.5">
             {state.currentVersion ? `v${state.currentVersion}` : '加载中…'}
           </div>
           {/* Q1: 界面 bundle 版本(构建时烤入)。与服务端不一致 = 当前页面是旧前端,标红示警 */}
           {typeof __BUILD_VERSION__ !== 'undefined' && (
-            <div className={`text-[11px] font-mono mt-0.5 ${state.currentVersion && state.currentVersion !== __BUILD_VERSION__ ? 'text-error font-bold' : 'text-ink-faint'}`}>
+            <div className={`text-[11px] font-mono mt-0.5 whitespace-nowrap ${state.currentVersion && state.currentVersion !== __BUILD_VERSION__ ? 'text-error font-bold' : 'text-ink-faint'}`}>
               界面 v{__BUILD_VERSION__}
               {state.currentVersion && state.currentVersion !== __BUILD_VERSION__ && ' ⚠️ 与服务端不一致'}
             </div>
