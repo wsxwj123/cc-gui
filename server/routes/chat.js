@@ -79,9 +79,9 @@ function jsonArgsToTempFiles(args) {
   return { args: next, tempFiles };
 }
 // 模型名白名单:一次性 spawn(title/context/compact)把 model 当 `--model <v>` 参数传,
-// Windows 走 cmd.exe /c,libuv 不给不含空格的参数加引号 → `x&calc` 里的 `&` 被 cmd 当命令
-// 分隔符执行,绕过整个权限体系(局域网模式=密码后 RCE)。合法模型名只含 [\w.:\-\[\]/],
-// 不匹配就不传该参数(回落默认模型)—— 拒绝注入而非放行。主 /chat 走 SDK 不经 cmd,无此面。
+// Windows 走 cmd.exe /c。r110 后每个 token 各自带引号(winCmdSpawnSpec),`x&calc` 里的 `&`
+// 已落在引号内不被 cmd 解释,本白名单降级为纵深防御:合法模型名只含 [\w.:\-\[\]/],不匹配
+// 就不传该参数(回落默认模型)—— 拒绝注入而非放行。主 /chat 走 SDK 不经 cmd,无此面。
 export const MODEL_ARG_RE = /^[\w.:\-\[\]/]{1,128}$/;
 export function safeModelArg(m) {
   const s = String(m || '').trim();

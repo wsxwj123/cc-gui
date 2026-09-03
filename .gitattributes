@@ -1,0 +1,3 @@
+# Markdown 一律以 LF 检出:CHANGELOG.md / README.md 由 scripts/gen-changelog-md.mjs 生成并
+# 逐字比对,Windows 开发机 core.autocrlf=true 时检出成 CRLF 会让 `--check` 恒红。
+*.md text eol=lf

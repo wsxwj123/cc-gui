@@ -12,6 +12,7 @@
 // 命中即缓存(按 mtime + 存在性失效);未命中短 TTL 负缓存,装好后无需重启即可生效。
 import { execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
+import { winCmdSpawnSpec } from './win-cmd.js';
 const execFileP = promisify(execFile);
 // 同 safeExec 但**异步**(不阻塞事件循环)。非零退出也救回已捕获的 stdout(同 safeExecStdout)。
 // 仅用于 listClaudeInstallsAsync ——那是唯一"每次全量扫所有策略"的重活,同步版会在 Windows
@@ -22,7 +23,6 @@ async function safeExecAsync(file, args, timeout = 5000, extra = {}) {
   try { const { stdout } = await execFileP(file, args, { timeout, ...extra }); return String(stdout).trim(); }
   catch (e) { return e?.stdout ? String(e.stdout).trim() : ''; }
 }
-import { winCmdSpawnSpec } from './win-cmd.js';
 import { existsSync, statSync, readdirSync, readFileSync, writeFileSync, mkdirSync, realpathSync, openSync, readSync, closeSync } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';

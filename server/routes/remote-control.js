@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { realpath } from 'fs/promises';
-import { resolve } from 'path';
+import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { isPathInside, isKnownClaudeWorkspace } from '../utils/safe-path.js';
 import { claudeCommand } from '../utils/claude-resolver.js';
@@ -164,7 +164,10 @@ router.post('/remote-control', async (req, res) => {
       // r110:verbatim 形态(cmd.exe /d /s /c "整行")下 node-pty 会对 string[] 二次加引号,把 " 变成 \" 让 cmd 认不得;
       // node-pty 在 Windows 接受 string 作为原样命令行,故整条 join 后传字符串。.exe 形态仍传数组。
       const ptyArgs = opts?.windowsVerbatimArguments ? args.join(' ') : args;
-      term = pty.spawn(file, ptyArgs, { name: 'xterm-color', cols: 100, rows: 30, cwd: dir, env: rcEnv });
+      // node-pty 的 winpty 回退路径(Win10 build < 18309,无 ConPTY)把 file 当 lpApplicationName
+      // 用,不搜 PATH → 裸 `cmd.exe` 起不来。给绝对路径(ConPTY 路径下同样正常)。
+      const ptyFile = file === 'cmd.exe' ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe') : file;
+      term = pty.spawn(ptyFile, ptyArgs, { name: 'xterm-color', cols: 100, rows: 30, cwd: dir, env: rcEnv });
     } else {
       const shell = process.env.SHELL || '/bin/bash';
       // sessionId 已 UUID 校验,插值安全;cwd 走 pty option(不插值)。
