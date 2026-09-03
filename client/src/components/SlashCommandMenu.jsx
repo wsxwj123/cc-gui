@@ -16,17 +16,15 @@ const TYPE_LABELS = {
   project: '项目',
 };
 
-// 会话内输入框的弹出方向(向上)。首页 composer 垂直居中,向上会被顶栏切掉列表顶部
-// (默认选中项就在那里),所以首页传向下弹的那串。
-const DEFAULT_CLASS = 'glass-popover absolute bottom-full left-0 right-0 mb-3 max-h-80 overflow-y-auto z-30 animate-glass-rise';
-
+// className 默认值 = 会话内输入框的弹出方向(向上)。首页 composer 垂直居中,向上会被
+// 顶栏切掉列表顶部(默认选中项就在那里),所以首页传向下弹的那串。
 export function SlashCommandMenu({
   commands,
   selectedIndex = 0,
   provider = 'Anthropic',
   isAnthropic = true,
   onPick,
-  className = DEFAULT_CLASS,
+  className = 'glass-popover absolute bottom-full left-0 right-0 mb-3 max-h-80 overflow-y-auto z-30 animate-glass-rise',
 }) {
   return (
     <div className={className}>

@@ -1,11 +1,9 @@
 import React from 'react';
 import { AtSign, CornerLeftUp, Folder, FileText, MessagesSquare, Loader2 } from './Icon.jsx';
 
-// 会话内输入框的弹出方向(向上);首页 composer 垂直居中,传向下弹的那串。
-const DEFAULT_CLASS = 'glass-popover absolute bottom-full left-0 right-0 mb-3 max-h-80 overflow-y-auto z-30 animate-glass-rise';
-
 // `@` 引用选择器:文件 / 会话 两个 tab(Tab 键切换),把选中项作为上下文引用插入输入框。
 // 纯展示,状态机在 hooks/useAtRef.js。
+// className 默认值 = 会话内输入框的弹出方向(向上);首页传向下弹的那串。
 export function AtRefPanel({
   open,
   tab,
@@ -19,7 +17,7 @@ export function AtRefPanel({
   index = 0,
   cwd = '',
   onPick,
-  className = DEFAULT_CLASS,
+  className = 'glass-popover absolute bottom-full left-0 right-0 mb-3 max-h-80 overflow-y-auto z-30 animate-glass-rise',
 }) {
   if (!open) return null;
   return (

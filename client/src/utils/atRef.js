@@ -15,7 +15,8 @@ export function detectAtQuery(value, caret) {
 
 /** 把 `@query` 区间替换成 `@insert `(保留前后文;插入自带一个尾空格)。 */
 export function applyAtInsert(text, at, insert) {
-  const cur = String(text ?? '');
+  if (text === null || text === undefined) return '';
+  const cur = String(text);
   if (!at || !Number.isInteger(at.start)) return cur;
   const beforeAt = cur.slice(0, at.start);
   const afterQuery = cur.slice(at.start + 1 + String(at.query || '').length);
