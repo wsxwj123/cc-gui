@@ -191,12 +191,22 @@ function nvmWinCandidates(appData) {
 // 读【注册表实时 PATH】(User+Machine)返回目录列表;仅 Win,非 Win 返回 []。导出复用:
 // claude 用它找 claude.exe,env-check 用它找 python/git/uv(同一"进程持旧 PATH 快照、装了
 // 检测不到、要重启才行"的根因 —— 直接问注册表拿最新,无需重启)。
+// r108-建4:注册表 PATH 条目可能自带双引号(`"C:\Program Files\Foo\bin"`,系统设置里手输
+// 带空格路径的人常这么写)。只 trim 不去引号的话,join 出来的候选路径必然落空。
+// 纯函数,export 仅为可单测。
+export function splitWinPathList(str) {
+  return String(str ?? '')
+    .split(';')
+    .map((s) => s.trim().replace(/^"|"$/g, '').trim())
+    .filter(Boolean);
+}
+
 export function winLivePathDirs() {
   if (!isWin) return [];
   const ps = "[Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')";
   const out = safeExec('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], 8000);
   if (!out) return [];
-  return out.split(';').map((s) => s.trim()).filter(Boolean);
+  return splitWinPathList(out);
 }
 // 异步版(opus 审计:env-check 的 py/git/uv 检测原用同步版,PATH 未命中的 Windows 机器上
 // 每次 env-check 同步 spawn PowerShell 1-3s 阻塞事件循环)。带 30s 短缓存:一次 env-check
@@ -206,7 +216,7 @@ export async function winLivePathDirsAsync() {
   if (!isWin) return [];
   if (_liveDirsCache && Date.now() - _liveDirsCache.at < 30_000) return _liveDirsCache.dirs;
   const out = await safeExecAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', WIN_LIVE_PATH_PS], 8000);
-  const dirs = out ? out.split(';').map((s) => s.trim()).filter(Boolean) : [];
+  const dirs = splitWinPathList(out);
   _liveDirsCache = { at: Date.now(), dirs };
   return dirs;
 }
@@ -380,6 +390,10 @@ export function resolveSdkClaudeFrom(hitPath, {
   platform = process.platform,
   existsSync: exists = existsSync,
   readFileSync: readFn = null,
+  statSync: statFn = statSync,
+  // r108-建2:体积下限。注入了 readFileSync = 单测在用假文件头模拟布局,此时不看体积
+  // (也不 stat —— 那些路径根本没落盘);真实路径下要求 ≥5MB。
+  minExeBytes = readFn ? 0 : 5_000_000,
 } = {}) {
   if (!hitPath) return null;
   if (platform !== 'win32' || /\.exe$/i.test(hitPath)) return hitPath;
@@ -391,6 +405,13 @@ export function resolveSdkClaudeFrom(hitPath, {
   // ② 非壳包 classifyShim 返 null,由文件头判定兜底。任一说不是真 PE 就放弃。
   if (classifyShim(hitPath, pkgDir)?.broken) return null;
   if (!isWinPeFile(binTarget, readFn)) return null;
+  // r108-建2:isWinPeFile 只验前 2 字节,被截断的平台包(npmmirror 对 81MB 包 16-20KB/s +
+  // 超时中断留下的僵尸安装)照样带 'MZ' 头 → 交给 SDK 直接 spawn 失败 → Windows 聊天起不来。
+  // 旧行为(回落 SDK 自带 CLI)至少能用,所以体积不达标宁可回落。statSync 抛错(被杀毒隔离/
+  // 无权限)同样按不可用处理。
+  if (minExeBytes > 0) {
+    try { if (statFn(binTarget).size < minExeBytes) return null; } catch { return null; }
+  }
   return binTarget;
 }
 
@@ -411,12 +432,17 @@ function isWinPeFile(p, readFn) {
 // r106:一行日志说明 SDK 这次实际驱动的是哪个 claude(Windows npm 装的会被上面推成包内
 // exe,排查"缓存命中忽高忽低"时第一眼就要看到它)。每个路径只打一次;--version 异步探测,
 // 不阻塞事件循环。只打路径与版本号,不碰环境变量/密钥。
+// r108-建1:默认 logger 是 console.error 不是 console.log —— 装机版(src-tauri/src/lib.rs)
+// 把后端 stdout 丢 null,只有 stderr 落 ~/.claude-gui/server.log,打 stdout 等于没打。
 const _sdkLogged = new Set();
-export function logSdkClaudeOnce(claudePath, log = console.log) {
+export function logSdkClaudeOnce(claudePath, log = console.error) {
   const key = String(claudePath || '');
   if (_sdkLogged.has(key)) return;
   _sdkLogged.add(key);
   if (!key) { log('[chat] sdk claude: (SDK 自带 CLI —— 未解析到可直接执行的 claude)'); return; }
+  // 路径先同步落一行:--version 探测要 spawn(Windows 上首次执行 80MB+ exe 会被 Defender
+  // 全量扫描,最坏 8s 超时),挂住/被杀毒隔离时至少 server.log 里已经有"SDK 在用哪个二进制"。
+  log(`[chat] sdk claude: ${key}`);
   const spec = claudeExecSpec(key, ['--version']);
   safeExecAsync(spec.file, spec.args, 8000)
     .then((out) => log(`[chat] sdk claude: ${key} → ${String(out).split(/\r?\n/)[0] || '(--version 无输出)'}`))
