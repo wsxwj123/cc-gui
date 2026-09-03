@@ -157,6 +157,12 @@ const MJ_DROP_REASONS = {
 };
 // 走结构化字段(而不是提示词 flag)的那几项,在预览里标出承载方式 —— 不标的话用户会以为它没发。
 const MJ_VIA_BODY_LABEL = { ar: '比例', version: '版本', niji: 'niji 档', speed: '速度' };
+// 参考图与比例这些不在 MJ_FIELD_META 里的字段,被丢弃时也要说得出是哪一项。
+const MJ_REF_FIELD_LABEL = {
+  ar: '比例（--ar）', iw: '垫图权重（--iw）', cref: '角色参考（--cref）', cw: '角色权重（--cw）',
+  oref: '角色参考（--oref）', ow: '角色权重（--ow）', sref: '风格参考（--sref）', sw: '风格权重（--sw）',
+};
+const mjFieldLabel = (f) => (MJ_FIELD_META[f] ? MJ_FIELD_META[f][0] : (MJ_REF_FIELD_LABEL[f] || f));
 // r94 垫图传法(仅 apimart 形态的 mj 协议有意义)。每项一句如实说明,含费用与已知风险。
 const MJ_REF_MODE_META = {
   upload: ['先上传换链接（upload）',
@@ -940,6 +946,8 @@ export default function ImagePanel() {
   // r94:参考图链接输入框(Tauri 下没有 window.prompt 可用)与"正在上传第几条"。
   const [refUrlDraft, setRefUrlDraft] = useState('');
   const [uploadingRef, setUploadingRef] = useState(-1);
+  // r94「本次参数」:只覆盖这一单,不写回 provider(换个 stylize 试一版不该去改配置)。
+  const [mjOverrides, setMjOverrides] = useState({});
   // r84 多图:条目 id → 选中的第几张。没有记录 = 第 0 张(单图条目永远走这条)。
   // 刻意不持久化:它是"我现在在看哪张",不是配置。
   const [picked, setPicked] = useState({});
@@ -1051,6 +1059,38 @@ export default function ImagePanel() {
   const needRefUpload = mjRefModeFor(selected) === 'upload' && refs.some((r) => refRole(r) === 'image' && isLocalRef(r));
   const refModeUrlOnly = mjRefModeFor(selected) === 'url' && refs.some((r) => refRole(r) === 'image' && isLocalRef(r));
   const localNonImageRef = mjSelected && refs.some((r) => refRole(r) !== 'image' && isLocalRef(r));
+  // r94「将要发送」:与服务端【同一个函数】编译,所以这里显示的串就是条目里的 mjPromptSent。
+  // 速度先过 mjEffectiveSpeed:8.x 上的 turbo 会按 fast 下发(provider 里存的值不变)。
+  const mjSpeedEff = mjEffectiveSpeed(selected?.mjVersion, selected?.mjSpeed);
+  const mjRefOf = (role) => refs.find((r) => refRole(r) === role) || null;
+  const mjRefUrl = (role) => mjRefOf(role)?.url || '';
+  const mjRefWeight = (role) => { const hit = mjRefOf(role); return hit && hit.weight !== undefined ? hit.weight : ''; };
+  const mjCompiled = compileMjFlags({
+    ...(selected?.mjParams || {}), ...mjOverrides,
+    ar: selected?.size || '',
+    iw: mjRefOf('image') ? mjRefWeight('image') : '',
+    cref: mjRefUrl('cref'), cw: mjRefWeight('cref'),
+    oref: mjRefUrl('oref'), ow: mjRefWeight('oref'),
+    sref: mjRefUrl('sref'), sw: mjRefWeight('sref'),
+  }, {
+    version: selected?.mjVersion, speed: mjSpeedEff.speed, carrier: selected?.protocol, prompt: prompt.trim(),
+  });
+  // mj-proxy 的版本 flag 由方言层拼在提示词末尾(apimart 走结构化字段),预览按同一口径补上;
+  // 提示词里已手写 --v / --niji 时不再补第二个。
+  const mjHasFlag = (flag) => new RegExp(`(^|\\s)${flag}(\\s|$)`).test(mjCompiled.prompt);
+  const mjVersionFlag = selected?.protocol !== 'mj-proxy' || !selected?.mjVersion ? ''
+    : mjCapsSel.niji
+      ? (mjHasFlag('--niji') ? '' : `--niji ${mjCapsSel.base}`)
+      : (mjHasFlag('--v') ? '' : `--v ${mjCapsSel.base}`);
+  const mjPromptSent = [mjCompiled.prompt, mjVersionFlag].filter(Boolean).join(' ');
+  // 本次覆盖:空串 = 清掉这次的覆盖(回到 provider 默认值);布尔的 false 要留下 —— 那是
+  // "这一单不要这个开关",删掉就变成了"跟随默认"。
+  const setMjOverride = (f, val) => setMjOverrides((cur) => {
+    const next = { ...cur };
+    if (val === '' || val === null || val === undefined) delete next[f];
+    else next[f] = val;
+    return next;
+  });
   // 有任务在跑【不】禁用生成:服务端支持并发(上限 3),点一次就多一个任务。
   // submitting 只挡请求发出的那一瞬(防双击重复提交)。
   const canGenerate = !!selected && !!selected.savePath && !!prompt.trim() && !submitting;
@@ -1228,6 +1268,8 @@ export default function ImagePanel() {
     setSubmitting(true); setErr('');
     try {
       const payload = { providerId: selId, prompt };
+      // r94:本次参数与 provider 默认值在服务端浅合并(本次值优先);没覆盖就不发这个键。
+      if (mjSelected && Object.keys(mjOverrides).length) payload.mjParams = mjOverrides;
       if (refs.length) {
         // r94:role 决定这张图是垫图还是某个 flag 的值,weight 编译成 --iw / --cw / --ow / --sw。
         // 两者都是 per-request 的 —— 换张参考图不该去改 provider 配置。
@@ -1667,6 +1709,47 @@ export default function ImagePanel() {
           onChange={(e) => setPromptDraft(e.target.value)}
           placeholder="描述你想要的画面…"
         />
+        {/* r94:本次参数 +「将要发送」。比例 / 版本 / 速度是 provider 级的,这里只读展示;
+            标量参数可对这一单覆盖。预览与真正发上游的提示词是同一个函数编出来的。 */}
+        {mjSelected && (
+          <div className="space-y-1">
+            <details className="rounded-md border border-canvas-deep px-2 py-1.5">
+              <summary className="text-[10.5px] text-ink-soft font-body cursor-pointer select-none">
+                本次参数（默认值来自 provider，改动只作用于这一次生成{Object.keys(mjOverrides).length ? ` · 已覆盖 ${Object.keys(mjOverrides).length} 项` : ''}）
+              </summary>
+              <div className="pt-2 space-y-2">
+                <MjParamFields
+                  caps={mjCapsSel}
+                  values={{ ...(selected?.mjParams || {}), ...mjOverrides }}
+                  onChange={setMjOverride}
+                  speed={mjSpeedEff.speed}
+                />
+                <button
+                  type="button"
+                  onClick={() => setMjOverrides({})}
+                  disabled={!Object.keys(mjOverrides).length}
+                  className="px-2 py-0.5 rounded-md border border-canvas-deep text-[10.5px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50"
+                >还原为 provider 默认值</button>
+              </div>
+            </details>
+            <div className="text-[10px] text-ink-faint font-body leading-snug break-all">
+              将要发送：<span className="font-mono text-ink-soft">{mjPromptSent || '（先填提示词）'}</span>
+            </div>
+            <div className="text-[10px] text-ink-faint font-body leading-snug">
+              比例 {selected.size || '未指定'} · 版本 {selected.mjVersion || '未指定'} · 速度 {mjSpeedEff.speed || '默认（relax）'}
+              {mjCompiled.viaBody.length > 0 && `（${mjCompiled.viaBody.map((v) => MJ_VIA_BODY_LABEL[v.field] || v.field).join(' / ')} 由${selected.protocol === 'mj' ? '结构化字段' : '账号筛选（accountFilter）'}发送，不进提示词）`}
+              ，三项在 provider 里改。
+            </div>
+            {mjSpeedEff.note && (
+              <div className="text-[10px] text-ink-faint font-body leading-snug">{mjSpeedEff.note}</div>
+            )}
+            {mjCompiled.dropped.length > 0 && (
+              <div className="text-[10px] text-ink-faint font-body leading-snug">
+                未发送：{mjCompiled.dropped.map((d) => `${mjFieldLabel(d.field)}（${MJ_DROP_REASONS[d.reason] || d.reason}）`).join('；')}
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <button
             type="button"
