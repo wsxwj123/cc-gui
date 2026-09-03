@@ -520,14 +520,8 @@ const changedIn = (...paths) => execFileSync('git', ['diff', '--name-only', BASE
 
 // r100:原 M19/§2「server/** 与 tests/acceptance/** 自 merge-base 零改动」是分支范围的 git 锁,后续分支改 server/ 必误红;
 // 改由判官 git diff 核对。§5「既有单测零改动」同理只保留在本轮分支上有意义,合并后恒绿,不另处理。
-check('§5 既有单测零改动:tests/unit 下只有新增、没有修改/删除', () => {
-  if (!BASE) { console.log('    (跳过:git merge-base 不可用)'); return; }
-  // 新增测试文件(作者自己的白盒测试、本文件)允许;既有文件被改/被删一律判回归风险。
-  const rows = execFileSync('git', ['diff', '--name-status', BASE, '--', 'tests/unit'],
-    { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
-  const touched = rows.filter((r) => !r.startsWith('A'));
-  assert.deepEqual(touched, [], `既有单测不许改动/删除:\n      ${touched.join('\n      ')}`);
-});
+// r100:原 §5「tests/unit 自 merge-base 只有新增」同为分支范围 git 锁(别的分支合法改任何既有测试即误红),
+// 改由判官核对,不再断言。
 // §5 点名的三个 + 本轮改动 token 命中的四个(真实爆炸半径)
 for (const t of ['check-official-auth', 'check-session-repair', 'check-esc-action',
   'check-rollback-requeue', 'check-r31-seed-new-session-key',
