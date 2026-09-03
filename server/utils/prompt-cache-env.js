@@ -112,7 +112,7 @@ const _helpCache = new Map();
 // 正常路径已由启动时的 primeHelpCache 异步预热覆盖,这里只是兜底。
 function defaultHelpProbe(claudePath) {
   const spec = claudeExecSpec(claudePath, ['--help']);
-  return String(execFileSync(spec.file, spec.args, { timeout: 2000, encoding: 'utf8' }));
+  return String(execFileSync(spec.file, spec.args, { timeout: 2000, encoding: 'utf8', ...spec.opts }));
 }
 
 // primeHelpCache 的默认探测:同一条 `--help`,但走**异步** execFile,不阻塞事件循环,
@@ -121,7 +121,7 @@ function defaultHelpProbeAsync(claudePath) {
   const spec = claudeExecSpec(claudePath, ['--help']);
   return new Promise((resolve) => {
     try {
-      execFile(spec.file, spec.args, { timeout: 8000, encoding: 'utf8' },
+      execFile(spec.file, spec.args, { timeout: 8000, encoding: 'utf8', ...spec.opts },
         (err, stdout) => resolve(err ? '' : String(stdout || '')));
     } catch { resolve(''); }
   });

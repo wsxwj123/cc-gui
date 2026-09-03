@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
-import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim } from '../utils/claude-resolver.js';
+import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim, claudeExecSpec } from '../utils/claude-resolver.js';
+import { winCmdSpawnSpec, winStartSpec } from '../utils/win-cmd.js';
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR, probeNpm } from '../utils/env-scanner.js';
 import { gfetch } from '../utils/github-fetch.js'; // r14-1:GitHub 直连失败/限流自动走本机代理
 import { fileURLToPath } from 'url';
@@ -172,10 +173,12 @@ export async function resolveUserNpmRegistry() { // export 仅为可单测
   if (npmRegistryCache && now - npmRegistryCachedAt < CACHE_TTL_MS) return npmRegistryCache;
   let url = '';
   try {
-    // Windows 上 npm 是 npm.cmd,execFile 不能直接执行,经 cmd.exe /c(与 getClaudeVersion 同款)
-    const r = process.platform === 'win32'
-      ? await execFileP('cmd.exe', ['/c', 'npm', 'config', 'get', 'registry'], { timeout: 8000 })
-      : await execFileP('npm', ['config', 'get', 'registry'], { timeout: 8000 });
+    // Windows 上 npm 是 npm.cmd,execFile 不能直接执行,须经 cmd.exe(与 getClaudeVersion 同款)。
+    // r110:组装走 winCmdSpawnSpec —— 全 server 只留这一套 cmd 引号规则。
+    const spec = process.platform === 'win32'
+      ? winCmdSpawnSpec('npm', ['config', 'get', 'registry'], {})
+      : { file: 'npm', args: ['config', 'get', 'registry'], opts: {} };
+    const r = await execFileP(spec.file, spec.args, { timeout: 8000, ...spec.opts });
     url = String(r.stdout || '').trim();
   } catch { url = ''; }
   if (!/^https?:\/\/\S+$/.test(url)) url = 'https://registry.npmmirror.com';
@@ -381,12 +384,9 @@ async function getClaudeVersion(claudePath) {
     // ENOENT),必须经 cmd.exe /c(cmd 会按 PATHEXT 把裸路径解析成 .cmd)。否则版本检测/环境
     // tab 永远 installed:false(用户报告:npm 装好仍扫不到)。与 cli-check.js 同款修法。
     // 超时 15s(原 8s):冷启动实测会偶发擦线,超时值比"回退旧值"更早生效,先给足时间。
-    let stdout;
-    if (process.platform === 'win32') {
-      ({ stdout } = await execFileP('cmd.exe', ['/c', claudePath || 'claude', '--version'], { timeout: 15000 }));
-    } else {
-      ({ stdout } = await execFileP(claudePath || 'claude', ['--version'], { timeout: 15000 }));
-    }
+    // r110:组装统一走 claudeExecSpec(经 cmd.exe 时按 verbatim 引号),opts 并进 execFile 选项。
+    const spec = claudeExecSpec(claudePath, ['--version']);
+    const { stdout } = await execFileP(spec.file, spec.args, { timeout: 15000, ...spec.opts });
     const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
     if (m) { ccVersionByPath.set(cacheKey, m[1]); return m[1]; }
     return ccVersionByPath.get(cacheKey) || null; // 输出没版本号(异常形态)→ 有旧值先顶着
@@ -796,8 +796,10 @@ function launchInTerminal(cmd, title, proxyUrl = null) {
     const file = join(tmpdir(), `${stamp}.bat`);
     const proxyLine = proxyUrl ? `set HTTP_PROXY=${proxyUrl}\r\nset HTTPS_PROXY=${proxyUrl}\r\necho (代理: ${proxyUrl})\r\n` : '';
     writeFileSync(file, `@echo off\r\necho ▶ ${title}\r\n${proxyLine}${cmd}\r\necho.\r\necho ===== 完成,按任意键关闭 =====\r\npause >nul\r\n`);
-    // start '' <file> — 空标题占位,避免把文件路径当成窗口标题
-    spawn('cmd', ['/c', 'start', '', file], { detached: true, stdio: 'ignore', windowsHide: false, env }).unref();
+    // start "" <file> — 空标题占位,避免把文件路径当成窗口标题(r110:组装走 winStartSpec,
+    // tmpdir 落在带 `&` 的用户名下时不再被 cmd 劈成两条命令)。
+    const openSpec = winStartSpec(file);
+    spawn(openSpec.file, openSpec.args, { detached: true, stdio: 'ignore', windowsHide: false, ...openSpec.opts, env }).unref();
   } else {
     const file = join(tmpdir(), `${stamp}.sh`);
     writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\necho\nread -p "完成,回车关闭…"\n`, { mode: 0o755 });

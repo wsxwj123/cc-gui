@@ -6,6 +6,7 @@ import { join, resolve, relative, extname, isAbsolute } from 'path';
 import { homedir, platform } from 'os';
 import { execFile } from 'child_process';
 import { isPathInside, isKnownClaudeWorkspace } from '../utils/safe-path.js';
+import { winStartSpec } from '../utils/win-cmd.js';
 
 const router = Router();
 
@@ -238,15 +239,18 @@ router.post('/files/open', async (req, res) => {
   try {
     const real = await safePath(req.body?.path);
     const os = platform();
-    let cmd, args;
+    let cmd, args, opts = {};
     // `--` 分隔符:文件名以 `-` 开头(如 -foo.txt)时 open/xdg-open 会把它当选项解析,加 -- 强制当路径。
     if (os === 'darwin') { cmd = 'open'; args = ['--', real]; }
     else if (os === 'win32') {
+      // 元字符路径仍然直接 400 拒绝(信任边界,不因为下面加了引号就放宽);r110 只是把组装
+      // 换成 winStartSpec,与全 server 同一套 cmd 引号规则。
       if (/[&|<>^"]/.test(real)) { const e = new Error('unsafe path for Windows open'); e.status = 400; throw e; }
-      cmd = 'cmd'; args = ['/c', 'start', '', real];
+      const spec = winStartSpec(real);
+      cmd = spec.file; args = spec.args; opts = spec.opts;
     }
     else { cmd = 'xdg-open'; args = ['--', real]; }
-    execFile(cmd, args, (err) => {
+    execFile(cmd, args, opts, (err) => {
       // execFile already returned to the event loop; the response was sent
       // optimistically below. Log failures only.
       if (err) console.error('[files/open]', err.message);

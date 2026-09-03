@@ -16,10 +16,13 @@ const execFileP = promisify(execFile);
 // 同 safeExec 但**异步**(不阻塞事件循环)。非零退出也救回已捕获的 stdout(同 safeExecStdout)。
 // 仅用于 listClaudeInstallsAsync ——那是唯一"每次全量扫所有策略"的重活,同步版会在 Windows
 // 上以 cmd/PowerShell 冷启动几秒卡死整个单线程 Express(chat/provider 全冻,用户报"到处 connecting")。
-async function safeExecAsync(file, args, timeout = 5000) {
-  try { const { stdout } = await execFileP(file, args, { timeout }); return String(stdout).trim(); }
+// r110:extra 用来透传 claudeExecSpec/winCmdSpawnSpec 给出的 spawn 选项(Windows 的
+// windowsVerbatimArguments)。默认空对象,既有三参调用行为不变。
+async function safeExecAsync(file, args, timeout = 5000, extra = {}) {
+  try { const { stdout } = await execFileP(file, args, { timeout, ...extra }); return String(stdout).trim(); }
   catch (e) { return e?.stdout ? String(e.stdout).trim() : ''; }
 }
+import { winCmdSpawnSpec } from './win-cmd.js';
 import { existsSync, statSync, readdirSync, readFileSync, writeFileSync, mkdirSync, realpathSync, openSync, readSync, closeSync } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
@@ -49,8 +52,8 @@ function readOverride() {
   return (path && !paused) ? path : '';
 }
 
-function safeExec(file, args, timeout = 5000) {
-  try { return execFileSync(file, args, { timeout }).toString().trim(); } catch { return ''; }
+function safeExec(file, args, timeout = 5000, extra = {}) {
+  try { return execFileSync(file, args, { timeout, ...extra }).toString().trim(); } catch { return ''; }
 }
 
 // 同 safeExec,但**非零退出也救回已捕获的 stdout**。交互登录 shell(`$SHELL -ilc`)常因
@@ -132,12 +135,14 @@ function npmPrefixCandidates(prefix) {
     ? [join(prefix, 'claude.exe'), join(prefix, 'claude.cmd'), pkgBin]
     : [join(prefix, 'bin', 'claude'), pkgBin];
 }
-const NPM_PREFIX_ARGS = isWin ? ['cmd.exe', ['/c', 'npm', 'config', 'get', 'prefix'], 6000]
-                              : ['npm', ['prefix', '-g'], 6000];
+// r110:Windows 上 npm 是 npm.cmd(无 npm.exe),必须经 cmd.exe;组装统一走 winCmdSpawnSpec,
+// 不再手拼 —— 全 server 只留这一套 cmd 引号规则。
+const NPM_PREFIX_SPEC = isWin ? winCmdSpawnSpec('npm', ['config', 'get', 'prefix'], {})
+                              : { file: 'npm', args: ['prefix', '-g'], opts: {} };
 const WIN_LIVE_PATH_PS = "[Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')";
 
 function fromNpmPrefix() {
-  return npmPrefixCandidates(safeExec(NPM_PREFIX_ARGS[0], NPM_PREFIX_ARGS[1], NPM_PREFIX_ARGS[2]).trim());
+  return npmPrefixCandidates(safeExec(NPM_PREFIX_SPEC.file, NPM_PREFIX_SPEC.args, 6000, NPM_PREFIX_SPEC.opts).trim());
 }
 // 异步版策略(仅 listClaudeInstallsAsync 用,不阻塞事件循环)。
 async function fromPathAsync() {
@@ -145,7 +150,7 @@ async function fromPathAsync() {
   return (await safeExecAsync('which', ['claude'])).split(/\r?\n/)[0] || '';
 }
 async function fromNpmPrefixAsync() {
-  return npmPrefixCandidates((await safeExecAsync(NPM_PREFIX_ARGS[0], NPM_PREFIX_ARGS[1], NPM_PREFIX_ARGS[2])).trim());
+  return npmPrefixCandidates((await safeExecAsync(NPM_PREFIX_SPEC.file, NPM_PREFIX_SPEC.args, 6000, NPM_PREFIX_SPEC.opts)).trim());
 }
 async function fromWinLivePathAsync() {
   if (!isWin) return [];
@@ -457,7 +462,7 @@ export function logSdkClaudeOnce(claudePath, log = console.error) {
   // 全量扫描,最坏 8s 超时),挂住/被杀毒隔离时至少 server.log 里已经有"SDK 在用哪个二进制"。
   log(`[chat] sdk claude: ${key}`);
   const spec = claudeExecSpec(key, ['--version']);
-  safeExecAsync(spec.file, spec.args, 8000)
+  safeExecAsync(spec.file, spec.args, 8000, spec.opts)
     .then((out) => log(`[chat] sdk claude: ${key} → ${String(out).split(/\r?\n/)[0] || '(--version 无输出)'}`))
     .catch(() => {}); // 纯日志,注入的 log 抛异常也不能变成 unhandled rejection
 }
@@ -471,8 +476,12 @@ export function logSdkClaudeOnce(claudePath, log = console.error) {
  */
 export function claudeExecSpec(bin, args = [], platform = process.platform) {
   const b = bin || 'claude';
-  if (platform === 'win32' && !/\.exe$/i.test(b)) return { file: 'cmd.exe', args: ['/c', b, ...args] };
-  return { file: b, args };
+  // r110:经 cmd.exe 时用 winCmdSpawnSpec 的 verbatim 引号。旧写法把参数原样拼进 cmd 命令行,
+  // `mcp<2`(paper-search 预设)里的 `<2` 被 cmd 当成 stdin 重定向 → 报"找不到指定的文件",
+  // claude 根本没被执行。opts 必须由调用方并进自己的 spawn/execFile 选项,漏一处那条路照旧吃
+  // `< > | & ^`。
+  if (platform === 'win32' && !/\.exe$/i.test(b)) return winCmdSpawnSpec(b, args, {});
+  return { file: b, args, opts: {} };
 }
 
 // ── R8-1 壳包识别 ─────────────────────────────────────────────

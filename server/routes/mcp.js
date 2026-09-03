@@ -8,6 +8,7 @@ import { promisify } from 'util';
 import { syncMcpToAgents } from './agents.js';
 import { assertPublicBaseURL } from './settings.js';
 import { claudeCommand, winLivePathDirsAsync } from '../utils/claude-resolver.js';
+import { winCmdSpawnSpec } from '../utils/win-cmd.js';
 import { detectUv, detectLocalProxy, probeTcp, isLoopbackProxyHost } from './version-check.js';
 import { searchRegistry, browseRegistry } from '../services/mcp-registry.js';
 
@@ -39,26 +40,10 @@ async function spawnMcpCommand(command, args, opts) {
   return spawn(resolved, args, opts);
 }
 
-/**
- * r108-必修3:`.cmd/.bat` 经 cmd.exe 起时的引号规则(execa/npm 的标准做法)。
- * 旧写法 `spawn('cmd.exe', ['/c', resolved, ...args])`:Node 的非 shell spawn 会给**带空格的
- * 参数**自己加引号,命令路径带空格(`C:\Program Files\nodejs\npx.cmd`)+ 任一参数带空格
- * (`C:\Users\John Smith\Documents`)时命令行出现 4 个引号 → 不满足 cmd 的"恰好两个引号"
- * 保留规则 → cmd 删掉首尾引号 → 只看到 `C:\Program` → "不是内部或外部命令"。
- * 修法:每个 token 各自加引号(内部引号翻倍),整条再套一层外层引号让 cmd 的"删首尾引号"
- * 只吃掉它;`windowsVerbatimArguments:true` 声明 Node 不要再插手参数拼接。
- * 每 token 独立引号后 `&`/`|`/`^`/`>` 落在引号内不被 cmd 解释,注入面不比旧写法大。
- * 纯函数(export 仅为可单测);不改写调用方的 opts 对象。
- */
-export function winCmdSpawnSpec(resolved, args = [], opts = {}) {
-  const q = (a) => `"${String(a).replace(/"/g, '""')}"`;
-  const line = [resolved, ...(Array.isArray(args) ? args : [])].map(q).join(' ');
-  return {
-    file: 'cmd.exe',
-    args: ['/d', '/s', '/c', `"${line}"`],
-    opts: { ...(opts || {}), windowsVerbatimArguments: true },
-  };
-}
+// r110:winCmdSpawnSpec 搬到 server/utils/win-cmd.js —— claude 自己那条路(claude.cmd)也要用
+// 同一套引号规则,而 utils 不能反向 import routes。这里继续 re-export 同名函数,调用方与既有
+// 锁定测试的导入口径不变。语义见 win-cmd.js 顶部注释。
+export { winCmdSpawnSpec };
 
 /**
  * 进程内 TTL 缓存工厂(纯函数,now 可注入以测过期)。`null` 是合法可缓存值 ——
@@ -268,7 +253,7 @@ async function runClaude(args, {
 } = {}) {
   // 路径解析统一走 claude-resolver(与检测面板/聊天链路同源,PATH 外安装位也可用);
   // Windows 的 .cmd/.bat 不是真正可执行文件,claudeCommand 已包好 cmd.exe /c。
-  const { file, args: fullArgs } = claudeCommand(args);
+  const { file, args: fullArgs, opts: execOpts } = claudeCommand(args);
   const isWin = process.platform === 'win32';
   // Windows:直接子进程是 cmd.exe,execFile 内建超时只 TerminateProcess 掉 cmd.exe,真正的
   // claude(mcp login 时内含 OAuth 回调 HTTP server)成孤儿占死端口 → 重试登录一直失败。
@@ -281,6 +266,7 @@ async function runClaude(args, {
     maxBuffer: 8 * 1024 * 1024,
     // 插件 CLI 可能再拉起 git/包装器；独立进程组才能在 120 秒边界清掉整棵树。
     detached: killTreeOnTimeout && !isWin,
+    ...execOpts, // r110:Windows 经 cmd.exe 时必须带 windowsVerbatimArguments,否则 `mcp<2` 被当重定向
   });
   let timedOut = false, timer = null;
   if ((isWin || killTreeOnTimeout) && timeout > 0) {
@@ -1063,8 +1049,10 @@ async function runMcpAdd(args, name) {
   };
   let res;
   try {
-    const { file, args: fullArgs } = claudeCommand(args);
-    res = await execFileP(file, fullArgs, { encoding: 'utf-8', timeout: 20000, env: { ...process.env }, maxBuffer: 8 * 1024 * 1024 });
+    // r110:opts 必须并进来 —— Windows 上 claude 是 claude.cmd,经 cmd.exe 起时参数里的
+    // `mcp<2`(paper-search 预设的合法参数)会被 cmd 当成 stdin 重定向,报"找不到指定的文件"。
+    const { file, args: fullArgs, opts: execOpts } = claudeCommand(args);
+    res = await execFileP(file, fullArgs, { encoding: 'utf-8', timeout: 20000, env: { ...process.env }, maxBuffer: 8 * 1024 * 1024, ...execOpts });
   } catch (e) {
     // 同名已存在时 claude mcp add **退出码非零** 且把 "already exists" 打到 stderr → 走这里。
     const stderr = (e.stderr?.toString() || e.message || '').trim();
