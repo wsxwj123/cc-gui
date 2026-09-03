@@ -20,11 +20,14 @@
 //
 // 纯函数(export 仅为可单测);不改写调用方的 opts 对象。
 export function winCmdSpawnSpec(resolved, args = [], opts = {}) {
-  // 结尾的连续反斜杠要翻倍:反斜杠只在**紧邻引号**时才有转义含义,token 末尾的 `\` 会和收尾
-  // 引号连成 `\"`,被 node.exe 的 CRT / CommandLineToArgvW 当成"一个字面引号"→ 引号不闭合,
-  // 后续参数被并进同一个字符串(`-e ROOT=D:\data\ -- npx server` 会整段变成第 5 个参数)。
-  // 只动结尾,中间的反斜杠(`C:\a\b`)保持原样;cmd 层看到的引号总数仍是偶数,奇偶规则不变。
-  const q = (a) => `"${String(a).replace(/"/g, '""').replace(/(\\+)$/, '$1$1')}"`;
+  // 反斜杠只在**紧邻引号**时才有转义含义(CRT / CommandLineToArgvW:2N 个 `\` + `"` = N 个 `\`
+  // 加引号开关,2N+1 个 `\` + `"` = N 个 `\` 加一个字面引号)。所以要翻倍的反斜杠有两处:
+  //   · 紧邻**内嵌引号**前面的:`a\"b` 里的 `\` 会把我们用来转义的 `""` 吃掉半个 → 引号状态
+  //     错位,后续参数被吞(MCP args 常见的 `--config "{\"k\":\"v\"}"` 正是这形态);
+  //   · token **结尾**的:末尾的 `\` 会和收尾引号连成 `\"` 被当成字面引号 → 引号不闭合,
+  //     后续参数被并进同一个字符串(`-e ROOT=D:\data\ -- npx server` 会整段变成第 5 个参数)。
+  // 其余位置的反斜杠(`C:\a\b` 中间那些)保持原样;cmd 层看到的引号总数仍是偶数,奇偶规则不变。
+  const q = (a) => `"${String(a).replace(/(\\*)"/g, '$1$1""').replace(/(\\+)$/, '$1$1')}"`;
   const line = [resolved, ...(Array.isArray(args) ? args : [])].map(q).join(' ');
   return {
     file: 'cmd.exe',

@@ -57,7 +57,7 @@ check('A4 中间的反斜杠不动(C:\\a\\b 原样)', () => {
 
 check('A5 不含反斜杠的 token 与 r110 逐字相同(元字符/空格/内嵌引号)', () => {
   const args = ['mcp<2', 'a&b', 'c|d', 'e^f', 'g>h', 'has space', 'say "hi"'];
-  assert.equal(winCmdSpawnSpec(BIN, args, 'win32' && {}).args[3],
+  assert.equal(winCmdSpawnSpec(BIN, args, {}).args[3],
     `""${BIN}" "mcp<2" "a&b" "c|d" "e^f" "g>h" "has space" "say ""hi""""`);
 });
 
@@ -72,6 +72,76 @@ check('A7 文件头注释写明引号挡不住的两条(%VAR% 展开 / 换行截
   const src = read('server/utils/win-cmd.js');
   assert.match(src, /%VAR%/, '注释没提 %VAR% 在引号内照常展开');
   assert.match(src, /换行/, '注释没提换行处 cmd 截断整条命令');
+});
+
+// CRT 规则的另一半:紧邻**内嵌引号**前的反斜杠同样要翻倍。`a\"b` 里那个 `\` 会把我们用来
+// 转义的 `""` 吃掉半个(2N+1 个 `\` + `"` = 字面引号,不切换引号状态)→ 引号状态错位,
+// 后续参数被吞。MCP args 里 `--config "{\"k\":\"v\"}"` 就是这形态。
+check('A8 反斜杠紧邻内嵌引号 → 一并翻倍(a\\"b → "a\\\\""b")', () => {
+  assert.equal(tokenOf('a\\"b'), '"a\\\\""b"');
+});
+
+check('A9 两个反斜杠+内嵌引号(a\\\\"b → "a\\\\\\\\""b")', () => {
+  assert.equal(tokenOf('a\\\\"b'), '"a\\\\\\\\""b"');
+});
+
+check('A10 token 以 `\\"` 结尾(最险:两条规则叠在一起)', () => {
+  assert.equal(tokenOf('x\\"'), '"x\\\\"""');
+});
+
+check('A11 引号后跟反斜杠 a"\\ → "a""\\\\"(两条规则各管一段)', () => {
+  assert.equal(tokenOf('a"\\'), '"a""\\\\"');
+});
+
+// 端到端复核:cmd 剥掉外层引号后,node.exe 的 CRT 必须把命令行还原成原始 argv。
+// crtParse 是 UCRT parse_command_line 的复刻(2N \ + " → N \ 且切换引号态;2N+1 → N \ + 字面 ";
+// 引号内 "" → 字面 " 且留在引号内)。
+function crtParse(cmdline) {
+  const out = []; let i = 0, inQ = false, cur = '', started = false;
+  while (i < cmdline.length) {
+    const c = cmdline[i];
+    if (!inQ && (c === ' ' || c === '\t')) { if (started) { out.push(cur); cur = ''; started = false; } i++; continue; }
+    started = true;
+    let bs = 0; while (cmdline[i] === '\\') { i++; bs++; }
+    if (cmdline[i] === '"') {
+      let copy = true;
+      if (bs % 2 === 0) {
+        if (inQ && cmdline[i + 1] === '"') { i++; }
+        else { copy = false; inQ = !inQ; }
+      }
+      bs = Math.floor(bs / 2);
+      cur += '\\'.repeat(bs);
+      if (copy) cur += '"';
+      i++;
+    } else { cur += '\\'.repeat(bs); if (i < cmdline.length) { cur += cmdline[i]; i++; } }
+  }
+  if (started) out.push(cur);
+  return out;
+}
+
+check('A12 往返:cmd 剥外层引号后 CRT 还原出的 argv 与原始逐字相同', () => {
+  const cases = [
+    ['ROOT=D:\\data\\', '--', 'npx'],
+    ['project', 'purge', '-y', 'D:\\'],
+    ['D:\\a\\\\', 'next'],
+    ['D:\\a\\\\\\', 'next'],
+    ['\\', 'next'],
+    ['C:\\a\\b', 'next'],
+    ['', 'next'],
+    ['mcp<2', 'a&b', 'has space', 'say "hi"', 'next'],
+    ['"', 'next'],
+    ['a\\"b', 'next'],
+    ['a\\\\"b', 'next'],
+    ['x\\"', 'next'],
+    ['a"\\', 'next'],
+    ['--config', '{\\"k\\":\\"v\\"}', 'next'],
+  ];
+  for (const args of cases) {
+    const line = winCmdSpawnSpec(BIN, args, {}).args[3];
+    // cmd.exe /s 只剥掉整条命令行的首尾引号,中间原样(cmd 不认反斜杠转义)。
+    assert.ok(line.startsWith('"') && line.endsWith('"'), `外层引号没了:${line}`);
+    assert.deepEqual(crtParse(line.slice(1, -1)), [BIN, ...args], `往返不一致:${JSON.stringify(args)} → ${line}`);
+  }
 });
 
 console.log('\n§2 remote-control:winpty 回退路径给 cmd.exe 绝对路径');
