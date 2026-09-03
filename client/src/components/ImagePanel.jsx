@@ -937,6 +937,9 @@ export default function ImagePanel() {
   // r54 参考图(图生图)。刻意【不进 localStorage 草稿】:一张图就能把 5MB 配额撑爆,
   // 重开面板参考图清空可接受(提示词照旧保留)。
   const [refs, setRefs] = useState([]);
+  // r94:参考图链接输入框(Tauri 下没有 window.prompt 可用)与"正在上传第几条"。
+  const [refUrlDraft, setRefUrlDraft] = useState('');
+  const [uploadingRef, setUploadingRef] = useState(-1);
   // r84 多图:条目 id → 选中的第几张。没有记录 = 第 0 张(单图条目永远走这条)。
   // 刻意不持久化:它是"我现在在看哪张",不是配置。
   const [picked, setPicked] = useState({});
@@ -1039,6 +1042,15 @@ export default function ImagePanel() {
   }, [hasRunning, loadHistory]);
 
   const selected = providers.find((p) => p.id === selId) || null;
+  // r94 Midjourney 派生态:能力按版本(哪些参考图用途可用)、垫图传法,以及三条
+  // 「点了要么花钱、要么必然被上游拒」的判据 —— 三条都在 generate 之前当场拦下。
+  const mjSelected = isMjProtocol(selected?.protocol);
+  const mjCapsSel = mjCapsFor(selected?.mjVersion);
+  const mjRefRoles = MJ_REF_ROLES.filter(([id]) => id === 'image' || mjCapsSel.fields.includes(id));
+  const isLocalRef = (r) => r.kind !== 'url';
+  const needRefUpload = mjRefModeFor(selected) === 'upload' && refs.some((r) => refRole(r) === 'image' && isLocalRef(r));
+  const refModeUrlOnly = mjRefModeFor(selected) === 'url' && refs.some((r) => refRole(r) === 'image' && isLocalRef(r));
+  const localNonImageRef = mjSelected && refs.some((r) => refRole(r) !== 'image' && isLocalRef(r));
   // 有任务在跑【不】禁用生成:服务端支持并发(上限 3),点一次就多一个任务。
   // submitting 只挡请求发出的那一瞬(防双击重复提交)。
   const canGenerate = !!selected && !!selected.savePath && !!prompt.trim() && !submitting;
@@ -1126,6 +1138,52 @@ export default function ImagePanel() {
     setRefs((cur) => [...cur, ...next].slice(0, MAX_REFS));
   };
 
+  // r94 参考图链接:URL 型参考图不下载、不预览缩略图 —— 面板一旦渲染 <img> 就等于替用户
+  // 向那个第三方地址发了一次请求。链接原样转给上游,是否可达由上游说了算。
+  const addRefUrl = () => {
+    const url = refUrlDraft.trim();
+    setErr('');
+    if (!url) return;
+    if (!/^https:\/\/\S+$/i.test(url)) {
+      setErr('参考图链接必须是 https 公网图片地址（不接受 http 与含空格的链接）');
+      return;
+    }
+    if (refs.length >= MAX_REFS) { setErr(`参考图最多 ${MAX_REFS} 张`); return; }
+    setRefs((cur) => [...cur, { kind: 'url', url, name: url.split('/').pop() || url, role: 'image' }]);
+    setRefUrlDraft('');
+  };
+  const setRefField = (i, patch) => setRefs((cur) => cur.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  /**
+   * r94:把一张本地参考图上传到上游换公网链接(唯一会产生上传费用的动作,每张约 $0.05)。
+   * 必须是【用户显式点】的 —— 生成链路在任何垫图传法下都不隐式走这里。
+   */
+  const uploadRef = async (i) => {
+    const r = refs[i];
+    if (!r || r.kind === 'url' || !selected) return;
+    setErr('');
+    setUploadingRef(i);
+    try {
+      const ref = r.kind === 'history'
+        ? { kind: 'history', file: r.file }
+        : { kind: 'upload', name: r.name, mime: r.mime, dataB64: r.dataB64 };
+      const res = await fetch('/api/image/upload-ref', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerId: selId, ref }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok || !d.url) throw new Error(d.error || `上传失败（${res.status}）`);
+      revokeRefPreview(r); // 换成链接之后那张 objectURL 再没人用
+      setRefField(i, {
+        kind: 'url', url: d.url, preview: '', file: undefined, dataB64: undefined, expiresAt: d.expiresAt,
+      });
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setUploadingRef(-1);
+    }
+  };
+
   // 「以此图修改」:引用已生成的图 —— 只传 file 路径,不把图片内容回传一遍。
   // r84:作用于【当前选中那张】—— 多图任务里恒取第一张的话,后 3 张永远改不了。
   const addHistoryRef = (h) => {
@@ -1153,13 +1211,32 @@ export default function ImagePanel() {
 
   const generate = async () => {
     if (!canGenerate) return;
+    // r94:三条【要么花钱、要么必然被上游拒】的情况在这里当场拦下,不发请求。
+    // 尤其是 upload 档:generate 永不隐式上传,否则点一次生成就背着用户产生上传费用。
+    if (needRefUpload) {
+      setErr('当前 provider 的垫图传法是「先上传换链接」：请先点该参考图上的「上传换链接」（每张约 $0.05，链接 72 小时有效），或把垫图传法改成 inline（base64 直传）');
+      return;
+    }
+    if (refModeUrlOnly) {
+      setErr('当前 provider 的垫图传法只接受公网图片链接：请把垫图传法改成 upload 或 inline，或先自行把图片传到图床后用「添加图片链接」填进来');
+      return;
+    }
+    if (localNonImageRef) {
+      setErr('角色 / 风格参考（--cref / --oref / --sref）的值只能是公网图片链接：请对该图先「上传换链接」，或直接用「添加图片链接」填一个链接');
+      return;
+    }
     setSubmitting(true); setErr('');
     try {
       const payload = { providerId: selId, prompt };
       if (refs.length) {
-        payload.refs = refs.map((r) => (r.kind === 'history'
-          ? { kind: 'history', file: r.file }
-          : { kind: 'upload', name: r.name, mime: r.mime, dataB64: r.dataB64 }));
+        // r94:role 决定这张图是垫图还是某个 flag 的值,weight 编译成 --iw / --cw / --ow / --sw。
+        // 两者都是 per-request 的 —— 换张参考图不该去改 provider 配置。
+        payload.refs = refs.map((r) => {
+          const w = r.weight === '' || r.weight === undefined || r.weight === null ? {} : { weight: Number(r.weight) };
+          if (r.kind === 'history') return { kind: 'history', file: r.file, role: refRole(r), ...w };
+          if (r.kind === 'url') return { kind: 'url', url: r.url, role: refRole(r), ...w };
+          return { kind: 'upload', name: r.name, mime: r.mime, dataB64: r.dataB64, role: refRole(r), ...w };
+        });
       }
       const r = await fetch('/api/image/generate', {
         method: 'POST',
@@ -1478,12 +1555,69 @@ export default function ImagePanel() {
               onChange={(e) => { addRefFiles(e.target.files); e.target.value = ''; }}
             />
           </div>
+          {/* r94:参考图的第二种来源 —— 公网图片链接。角色 / 风格参考(--cref / --oref /
+              --sref)的值只能是链接,垫图在 url 传法下也只收链接,所以这个入口一直可用。 */}
+          <div className="flex items-center gap-1">
+            <input
+              className={`${inputCls} flex-1 min-w-0 py-0.5`}
+              value={refUrlDraft}
+              onChange={(e) => setRefUrlDraft(e.target.value)}
+              placeholder="https://…/ref.png（公网图片链接）"
+            />
+            <button
+              type="button"
+              onClick={addRefUrl}
+              disabled={!refUrlDraft.trim() || refs.length >= MAX_REFS}
+              className="shrink-0 px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50"
+            >添加图片链接</button>
+          </div>
           {refs.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className={mjSelected ? 'space-y-1' : 'flex flex-wrap items-center gap-1.5'}>
               {refs.map((r, i) => (
-                <span key={`${r.kind}-${r.file || r.name}-${i}`} className="flex items-center gap-1 pl-1 pr-1.5 py-0.5 rounded-md border border-canvas-deep bg-canvas-warm/60">
-                  <img src={r.preview} alt={r.name} className="w-6 h-6 rounded object-cover" />
-                  <span className="text-[10px] text-ink-soft font-body max-w-[110px] truncate" title={r.name}>{r.name}</span>
+                <span
+                  key={`${r.kind}-${r.file || r.url || r.name}-${i}`}
+                  className={`flex items-center gap-1 pl-1 pr-1.5 py-0.5 rounded-md border border-canvas-deep bg-canvas-warm/60 ${mjSelected ? '' : ''}`}
+                >
+                  {/* URL 型参考图不画缩略图:渲染 <img> 等于替用户向那个第三方地址发一次请求。 */}
+                  {r.kind === 'url'
+                    ? <ExternalLink size={11} className="shrink-0 text-ink-faint" />
+                    : <img src={r.preview} alt={r.name} className="w-6 h-6 rounded object-cover" />}
+                  <span className={`text-[10px] text-ink-soft font-body truncate ${mjSelected ? 'flex-1 min-w-0' : 'max-w-[110px]'}`} title={r.url || r.name}>{r.url || r.name}</span>
+                  {/* r94 参考图三类:垫图 / 角色参考 / 风格参考,类型与权重都是【这一单】的,
+                      不写回 provider —— 换张参考图不该去改配置。类型按当前版本的能力显隐。 */}
+                  {mjSelected && (
+                    <>
+                      <select
+                        className={`${inputCls} w-[104px] shrink-0 py-0.5`}
+                        value={refRole(r)}
+                        onChange={(e) => setRefField(i, { role: e.target.value })}
+                        title="这张图的用途：垫图随请求发送，角色 / 风格参考编译成 --cref / --oref / --sref"
+                      >
+                        {mjRefRoles.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                      </select>
+                      <input
+                        className={`${inputCls} w-16 shrink-0 py-0.5 text-center`}
+                        inputMode="numeric"
+                        value={r.weight ?? ''}
+                        onChange={(e) => setRefField(i, { weight: e.target.value })}
+                        placeholder="权重"
+                        title={`权重（--${MJ_REF_WEIGHT_FIELD[refRole(r)]}），留空不发送；当前版本允许 ${(mjCapsSel.ranges[MJ_REF_WEIGHT_FIELD[refRole(r)]] || []).join('–')}`}
+                      />
+                      {r.kind !== 'url' && (
+                        <button
+                          type="button"
+                          onClick={() => uploadRef(i)}
+                          disabled={uploadingRef >= 0 || selected?.protocol !== 'mj'}
+                          title={selected?.protocol === 'mj'
+                            ? '上传换链接：把这张图上传到上游换一个公网链接（每张约 $0.05，链接 72 小时有效）'
+                            : '该协议没有上传端点：请用下方「添加图片链接」直接填一个公网图片链接'}
+                          className="shrink-0 px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50 flex items-center gap-1"
+                        >
+                          {uploadingRef === i ? <Loader2 size={10} className="animate-spin" /> : null}上传换链接
+                        </button>
+                      )}
+                    </>
+                  )}
                   <button
                     type="button"
                     onClick={() => { revokeRefPreview(r); setRefs((cur) => cur.filter((_, j) => j !== i)); }}
@@ -1494,10 +1628,34 @@ export default function ImagePanel() {
               ))}
             </div>
           )}
-          {/* r82:mj 协议当前不下发参考图 —— 选了却静默丢弃比不让选更难排查。 */}
-          {selected?.protocol === 'mj' && refs.length > 0 && (
+          {/* r94:上传换来的链接是【有期限】的,过期后上游取不到图,任务会失败在一个看不懂的地方。 */}
+          {refs.some((r) => r.expiresAt) && (
             <div className="text-[10px] text-ink-faint font-body leading-snug">
-              当前 provider 使用 Midjourney 协议，参考图不会随请求发送。
+              {refs.some((r) => r.expiresAt && r.expiresAt <= Date.now())
+                ? '有参考图链接已过期，请对该图重新「上传换链接」。'
+                : `${REF_URL_TTL_NOTE}最早一条到期时间：${shortTime(Math.min(...refs.filter((r) => r.expiresAt).map((r) => r.expiresAt)))}`}
+            </div>
+          )}
+          {/* r94 E14:参考图按该 provider 的「垫图传法」提交 —— upload 档下本地图片必须先显式
+              换成链接,generate 绝不隐式上传(那是背着用户花钱)。 */}
+          {mjRefModeFor(selected) === 'upload' && refs.some((r) => refRole(r) === 'image' && isLocalRef(r)) && (
+            <div className="text-[10px] text-ink-faint font-body leading-snug">
+              当前 provider 的垫图传法是「先上传换链接」：请先对每张垫图点「上传换链接」（每张约 $0.05，链接 72 小时有效），或在 provider 里把垫图传法改成 inline（base64 直传）。
+            </div>
+          )}
+          {refModeUrlOnly && (
+            <div className="text-[10px] text-error font-body leading-snug">
+              当前 provider 的垫图传法只接受公网图片链接：本地图片会被拒绝。请把垫图传法改成 upload 或 inline，或先自行把图片传到图床后用「添加图片链接」填进来。
+            </div>
+          )}
+          {localNonImageRef && (
+            <div className="text-[10px] text-error font-body leading-snug">
+              角色 / 风格参考（--cref / --oref / --sref）的值只能是公网图片链接：请对该图先「上传换链接」（仅 apimart 形态的 mj 协议提供上传端点），或直接用「添加图片链接」填链接。
+            </div>
+          )}
+          {selected?.protocol === 'mj-proxy' && refs.length > 0 && (
+            <div className="text-[10px] text-ink-faint font-body leading-snug">
+              该协议的垫图固定以 base64 随请求提交，本地图片可直接使用；角色 / 风格参考仍只能填公网图片链接。
             </div>
           )}
         </div>
