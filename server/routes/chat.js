@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel, isOfficialAnthropic } from '../services/model-resolver.js';
 import { findSessionFile, readSessionTitles } from '../services/session-reader.js';
@@ -1009,7 +1009,10 @@ function readSettingsSplit() {
     const s = JSON.parse(readFileSync(pathJoin(homedir(), '.claude', 'settings.json'), 'utf8')) || {};
     perm = JSON.stringify(s.permissions ?? null);
     delete s.permissions;
-    nonPerm = JSON.stringify(s);
+    // 取 sha1 摘要而不是原文:这一串会进常驻进程复用键(chatCompatKey 的返回值会被日志/
+    // 诊断输出携带),settings.json 的 env 里有明文 API key,原文进键 = 凭证外泄面。
+    // 摘要满足键的全部需求(同内容同值、任何改动即变),不需要可逆。
+    nonPerm = createHash('sha1').update(JSON.stringify(s)).digest('hex');
   } catch { nonPerm = 'unreadable:' + mtime; perm = 'unreadable:' + mtime; }  // 读不出/坏 JSON → 恒变 → 保守冷启
   settingsSplitCache = { mtime, nonPerm, perm };
   return settingsSplitCache;

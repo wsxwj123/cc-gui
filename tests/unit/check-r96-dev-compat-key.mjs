@@ -64,6 +64,14 @@ try {
   const K7 = chatCompatKey(base);
   assert.notEqual(K7, K6, 'K7 删掉 settings.json 必须换键且不抛错');
 
+  // ── 判官修:settingsFp 是摘要,原文(含明文 API key)不得进键 ──────────────
+  settings(['Bash(ls)'], { ANTHROPIC_BASE_URL: 'https://a/v1', ANTHROPIC_AUTH_TOKEN: 'sk-LEAK-CANARY-123' });
+  const kSecret = chatCompatKey(base);
+  assert.ok(!kSecret.includes('sk-LEAK-CANARY-123'), 'settingsFp 不得把明文凭证塞进复用键');
+  assert.ok(!kSecret.includes('ANTHROPIC_AUTH_TOKEN'), 'settingsFp 不得把 settings.json 原文塞进复用键');
+  settings(['Bash(ls)'], { ANTHROPIC_BASE_URL: 'https://a/v1', ANTHROPIC_AUTH_TOKEN: 'sk-OTHER-456' });
+  assert.notEqual(chatCompatKey(base), kSecret, '摘要仍须随内容改变(否则换 key 失效)');
+
   // ── C1 其余字段照旧生效 ──────────────────────────────────────────────────
   settings(['Bash(ls)']);
   chatCompatKey(base);                                  // 吸收这次外部改动,后面只比同一状态
