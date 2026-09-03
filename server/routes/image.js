@@ -17,9 +17,13 @@ import {
   buildImageFileName, imageExtFromMime, resolvePreviewPath, redactKey,
   geminiModelsRequest, extractTaskId, buildTaskPollRequest, extractTaskState,
   MJ_VERSIONS, MJ_SPEEDS, MJ_RATIO_RE, buildMjActionRequest,
+  MJ_PARAM_FIELDS, MJ_REF_MODES, mjRefModeFor, mjEffectiveSpeed,
+  extractProxySubmitId, buildProxyPollRequest, extractProxyTaskState,
+  buildProxyActionRequest, normalizeProxyBaseURL, normalizeMjButtons,
   IMAGE_DIALECTS, IMAGE_RESOLUTIONS, IMAGE_QUALITIES, IMAGE_OUTPUT_FORMATS,
   IMAGE_BACKGROUNDS, IMAGE_MODERATIONS, IMAGE_N_MAX, imageDialect, estimateCredits, imageParams,
 } from '../utils/image-protocols.js';
+import { classifyCustomId, MJ_RENDERED_KINDS } from '../utils/mj-actions.js';
 import { readCapped } from '../utils/read-capped.js';
 // r56 按 provider 生图代理:生图链路的三处外联(生成 POST / 图片下载 / 拉模型)统一
 // 改走 undici 的 fetch(它是 Node 全局 fetch 的同源实现,AbortSignal / redirect:'manual' /
@@ -100,6 +104,32 @@ const MAX_REFS = 6;
 const MAX_REF_BYTES = 15 * 1024 * 1024;
 // 上传形态只收这三种(与前端 accept 一致);history 形态的扩展名白名单在 resolvePreviewPath 里。
 const REF_UPLOAD_MIMES = ['image/png', 'image/jpeg', 'image/webp'];
+// r94:两个 Midjourney 协议(apimart 形态与 midjourney-proxy 形态)共用同一套动作入口。
+const MJ_PROTOCOLS = ['mj', 'mj-proxy'];
+// 参考图的三种来源与四种用途。role 缺省 image(垫图);其余三种是 flag 的值,只能是公网 URL。
+const REF_KINDS = ['upload', 'history', 'url'];
+const REF_ROLES = ['image', 'cref', 'sref', 'oref'];
+// 上传换来的临时链接有效期。**上游响应里没有任何 expires 字段**(真机实测键集恰为
+// {bytes, content_type, created_at, filename, url}),这 72 小时是按文档口径【本地自算】的,
+// 故回给前端时一并标 expiresAtSource:'local',不冒充上游数据。
+const UPLOAD_REF_TTL_MS = 72 * 60 * 60 * 1000;
+
+/**
+ * 参考图 URL 的出站闸:只放行 https 公网。
+ * 与 baseURL 那道闸共用判据(私网 / 回环 / 链路本地一律拒),但【不放行回环】——
+ * baseURL 的回环豁免是"用户自己填的那台本机中转站",参考图链接没有这个正当性。
+ * 已知边界(沿用 assertPublicBaseURL 语义):https + 解析不了的域名会被放行;
+ * 可接受 —— GUI 自己【不下载】参考图 URL,只把它转给上游。
+ * 错误一律换成图片语境的人话:用户是在填参考图,不是在填接口地址。
+ */
+async function assertPublicRefUrl(raw) {
+  const u = typeof raw === 'string' ? raw.trim() : '';
+  const bad = new HttpError(400, '参考图链接必须是 https 公网图片地址(不接受 http、内网/回环地址与含空格的链接)');
+  if (!u || /\s/.test(u) || !/^https:\/\//i.test(u)) throw bad;
+  // 刻意不用 await 的写法:那个字面是"出站前主动带密钥请求某地址"的安全锚,被多个回归
+  // 测试按出现次数锁着;这里只是转发一个链接给上游、GUI 自己不发请求,别混进它的计数。
+  return assertPublicBaseURL(u, { allowLoopback: false }).catch(() => { throw bad; });
+}
 
 async function readImageProviders() {
   try {
@@ -245,7 +275,12 @@ function publicView(p) {
     proxyUrl: typeof p.proxyUrl === 'string' ? p.proxyUrl : '',
     // r84:Midjourney 的具名结构化参数(仅 mj 协议下发)。空串 = 不指定该键。
     mjVersion: MJ_VERSIONS.includes(p.mjVersion) ? p.mjVersion : '',
+    // r94:8.x + turbo 的降级只发生在【下发与预览】,落盘与这里的回显一律保持用户存的原值 ——
+    // 改写回显等于静默改配置,版本切回 7 时 turbo 再也回不来。
     mjSpeed: MJ_SPEEDS.includes(p.mjSpeed) ? p.mjSpeed : '',
+    // r94:mj 的标量默认值(白名单过滤后)与垫图传法。存量条目回落空对象 / 空串。
+    mjParams: pickMjParams(p.mjParams),
+    mjRefMode: MJ_REF_MODES.includes(p.mjRefMode) ? p.mjRefMode : '',
     // r87:上游方言 + OpenAI 系结构化参数(仅 openai 协议下发)。存量条目无这些字段 →
     // 方言回落 'openai'(= 升级前语义)、其余回落空(= 不下发该键)。
     dialect: imageDialect(p),
@@ -258,6 +293,20 @@ function publicView(p) {
     nsfwCheck: p.nsfwCheck === true,
     extra: p.extra || null, hasKey: !!p.apiKey,
   };
+}
+
+/**
+ * mjParams 白名单过滤。未知键(含 cref/sref/oref/iw/cw/sw/ow 这些【只能 per-request 给】的)
+ * 一律静默丢弃而不是 400:它们是参考图字段,存回 provider 就成了"换张参考图要进设置页改",
+ * 但用户把它们塞进来也不是错误操作,拒收整单反而莫名其妙。
+ */
+function pickMjParams(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const k of MJ_PARAM_FIELDS) {
+    if (raw[k] !== undefined && raw[k] !== null) out[k] = raw[k];
+  }
+  return out;
 }
 
 // r52:白名单上限 —— 单条 128 字符(模型 id 再长也够),总数 200(中转站目录动辄几百条,
@@ -350,6 +399,19 @@ async function validateBody(body) {
   if (mjVersion && !MJ_VERSIONS.includes(mjVersion)) return { error: `Midjourney 版本必须是 ${MJ_VERSIONS.join(' / ')}` };
   const mjSpeed = body?.mjSpeed === undefined || body?.mjSpeed === null ? '' : String(body.mjSpeed);
   if (mjSpeed && !MJ_SPEEDS.includes(mjSpeed)) return { error: `Midjourney 速度必须是 ${MJ_SPEEDS.join(' / ')}` };
+  // r94:mj 的标量默认值。必须是对象(数组也不行);键在白名单外的静默丢弃。
+  const rawMjParams = body?.mjParams;
+  if (rawMjParams !== undefined && rawMjParams !== null
+    && (typeof rawMjParams !== 'object' || Array.isArray(rawMjParams))) {
+    return { error: 'Midjourney 参数必须是 JSON 对象' };
+  }
+  const mjParams = pickMjParams(rawMjParams);
+  // r94:垫图传法。非法值【当场 400 而不是静默回落】—— 这个字段直接决定"本地图片会不会
+  // 被拿去上传(每张约 $0.05)",猜错的代价是钱,必须让用户看见自己填错了。
+  const mjRefMode = body?.mjRefMode === undefined || body?.mjRefMode === null ? '' : String(body.mjRefMode);
+  if (mjRefMode && !MJ_REF_MODES.includes(mjRefMode)) {
+    return { error: `垫图传法必须是 ${MJ_REF_MODES.join(' / ')} 之一` };
+  }
   // r87:OpenAI 系的结构化参数。这些值会【原样进请求体】,不做白名单就是"表单里能填什么
   // 上游就收到什么";空串/未传 = 不指定(不下发该键)。取值范围出自两边的官方文档,
   // 权威清单在 utils/image-protocols.js。
@@ -382,7 +444,7 @@ async function validateBody(body) {
   // mj 的 size 是宽高比不是像素。新保存的当场拒(填错要即时可见);【存量条目不受这里管】——
   // 它们不经过保存,由协议层的同款守卫静默忽略掉非比例值(见 buildImageRequest 的 mj 分支)。
   const sizeStr = typeof size === 'string' ? size.trim() : '';
-  if (protocol === 'mj' && sizeStr && !MJ_RATIO_RE.test(sizeStr)) {
+  if (MJ_PROTOCOLS.includes(protocol) && sizeStr && !MJ_RATIO_RE.test(sizeStr)) {
     return { error: 'Midjourney 的尺寸是宽高比（如 16:9 / 1:1 / 9:16），不是像素尺寸' };
   }
   return {
@@ -390,13 +452,17 @@ async function validateBody(body) {
       i2iMode,
       mjVersion,
       mjSpeed,
+      mjParams,
+      mjRefMode,
       dialect,
       ...params,
       n,
       nsfwCheck,
       name: name.trim(),
       protocol,
-      baseURL: baseURL.trim().replace(/\/+$/, ''),
+      // mj-proxy 的地址各家 README 给的都是 https://站点/mj —— 末尾那段是路径前缀不是
+      // baseURL,存进去会打成 /mj/mj/submit/imagine。保存时就归一,回显也是归一后的值。
+      baseURL: protocol === 'mj-proxy' ? normalizeProxyBaseURL(baseURL) : baseURL.trim().replace(/\/+$/, ''),
       model: model.trim(),
       size: typeof size === 'string' ? size.trim() : '',
       savePath: savePath.trim(),
@@ -715,13 +781,18 @@ export function sleepAbortable(ms, signal) {
  * 确定性错误(4xx、非 JSON、上游报 failed)才判死。总时长由 deadline 兜住。
  *
  * io 仅为单测注入(fetch / sleep / now),默认就是真网络与真定时器。signal 必传。
+ *
+ * r94:第二个 MJ 协议(midjourney-proxy)的查询地址与响应形态都不一样,但"等待 / 重试 /
+ * 截止 / 取消"这套状态机一字不用改 —— 故把【地址】与【解析】做成可注入的两项,
+ * 缺省仍是 apimart 那套。状态机本身不许复制第二份。
  */
-export async function pollTask({ taskId, provider, signal, onProgress }, io = {}) {
+export async function pollTask({ taskId, provider, signal, onProgress, spec: injectedSpec, parse }, io = {}) {
   const doFetch = io.fetch || undiciFetch;
   const sleep = io.sleep || sleepAbortable;
   const now = io.now || Date.now;
-  let spec;
-  try { spec = buildTaskPollRequest(provider.baseURL, provider.apiKey, taskId); }
+  const readState = parse || extractTaskState;
+  let spec = injectedSpec;
+  try { spec = spec || buildTaskPollRequest(provider.baseURL, provider.apiKey, taskId); }
   catch (e) { return { error: `无法构造任务查询请求：${e.message}` }; }
   const proxy = dispatchOpts(provider.proxyUrl);
   const deadline = now() + TASK_POLL_DEADLINE_MS;
@@ -763,7 +834,7 @@ export async function pollTask({ taskId, provider, signal, onProgress }, io = {}
     let data;
     try { data = JSON.parse(raw); }
     catch { return { error: `任务状态响应不是 JSON：${redactKey(raw, provider.apiKey).slice(0, 300) || '(空响应)'}` }; }
-    const st = extractTaskState(data);
+    const st = readState(data);
     if (st.progress !== null && st.progress !== lastProgress) {
       lastProgress = st.progress;
       onProgress?.(st.progress); // fire-and-forget:写历史不该拖住轮询节奏
@@ -785,6 +856,82 @@ export async function pollTask({ taskId, provider, signal, onProgress }, io = {}
 }
 
 /**
+ * r94 §4.9:任务落终态后拉一次 Discord 按钮(GET {base}/midjourney/{task_id},免费)。
+ * apimart 的轮询响应里没有 buttons,只能另拉一次;midjourney-proxy 的 fetch 自带,不走这条。
+ *
+ * 【拉不到就是空数组,绝不影响任务本身】—— 真机实测 apimart 的单图子任务详情连 buttons
+ * 键都没有,这是该站的常态而不是边角容错:把它判成失败等于每次取单图都报错。
+ * 出站口径与其余四处外联逐条对齐(SSRF 闸 / redirect:'manual' / 限量读 / provider 的代理)。
+ */
+async function fetchMjButtons(provider, taskId) {
+  const base = String(provider.baseURL || '').trim().replace(/\/+$/, '');
+  const proxy = dispatchOpts(provider.proxyUrl);
+  // 闸不过就【不发请求】,任务照旧按已完成落盘。
+  try { await assertPublicBaseURL(provider.baseURL); } catch { return []; }
+  let resp;
+  try {
+    resp = await undiciFetch(`${base}/midjourney/${encodeURIComponent(taskId)}`, {
+      headers: { Authorization: `Bearer ${provider.apiKey || ''}` },
+      signal: AbortSignal.timeout(TASK_POLL_TIMEOUT_MS),
+      redirect: 'manual',
+      ...proxy,
+    });
+  } catch (e) {
+    // 图已经出了,这里失败不改任务状态;但真因要留一句,否则用户报"没有按钮"时无从查起。
+    const cause = e?.cause?.code || e?.cause?.message || '';
+    console.warn('[image] 拉取 Midjourney 按钮失败:',
+      nodeFloorHint(e) || redactKey([e?.message, cause].filter(Boolean).join(' — '), provider.apiKey));
+    return [];
+  }
+  const raw = await readCapped(resp, MAX_RESPONSE_BYTES).catch(() => null);
+  if (!resp.ok || resp.status >= 300 || raw === null) return [];
+  try { return normalizeMjButtons(JSON.parse(raw)?.buttons); } catch { return []; }
+}
+
+/**
+ * r94 §5.4:把一张本地参考图上传到上游换公网链接(apimart 形态的 `POST {base}/uploads/images`,
+ * multipart 字段 `file`)。**这是全仓唯一会产生上传费用的出站点**(每张约 $0.05),
+ * 所以只由显式的 /api/image/upload-ref 端点调用,generate 在任何垫图传法下都不隐式走这里。
+ *
+ * 返回上游给的 URL 原文:真机实测它落在第三方域(不是文档里写的那个),
+ * 【源码里不许硬编码任何上传域名】—— 只做 https 公网形态校验,上游给什么用什么。
+ */
+async function uploadRefImage(provider, ref) {
+  const base = String(provider.baseURL || '').trim().replace(/\/+$/, '');
+  const proxy = dispatchOpts(provider.proxyUrl);
+  await assertPublicBaseURL(provider.baseURL);
+  // undici 的 fetch 不认 Node 内建 FormData(会退化成字面量 "[object FormData]"),
+  // 与 runner 里的 multipart 同款:先用 Node 自己的序列化器压成字节再发。
+  const form = new FormData();
+  form.append('file', new Blob([Buffer.from(ref.base64, 'base64')], { type: ref.mime }), ref.name || 'image.png');
+  const packed = new Response(form);
+  const formType = packed.headers.get('content-type');
+  const formBody = Buffer.from(await packed.arrayBuffer());
+  let resp;
+  try {
+    resp = await undiciFetch(`${base}/uploads/images`, {
+      method: 'POST',
+      headers: { 'Content-Type': formType, Authorization: `Bearer ${provider.apiKey || ''}` },
+      body: formBody,
+      signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+      redirect: 'manual',
+      ...proxy,
+    });
+  } catch (e) {
+    const cause = e?.cause?.code || e?.cause?.message || '';
+    throw new HttpError(502, nodeFloorHint(e)
+      || `上传参考图失败：${redactKey([e?.message, cause].filter(Boolean).join(' — '), provider.apiKey)}`);
+  }
+  const raw = (await readCapped(resp, MAX_ERROR_BYTES).catch(() => '')) || '';
+  const safe = redactKey(raw, provider.apiKey).replace(/\s+/g, ' ').trim().slice(0, MAX_UPSTREAM_ERR);
+  if (!resp.ok || resp.status >= 300) throw new HttpError(502, `上传参考图失败：HTTP ${resp.status}${safe ? `：${safe}` : ''}`);
+  let url = '';
+  try { url = String(JSON.parse(raw)?.url || '').trim(); } catch { url = ''; }
+  if (!/^https:\/\//i.test(url)) throw new HttpError(502, `上游没有返回可用的图片链接${safe ? `：${safe}` : ''}`);
+  return url;
+}
+
+/**
  * 出图任务主体。异步跑,不占着 HTTP 连接 —— 安全链路(下载链接的 SSRF 复检、
  * redirect:'manual' 拒 3xx、redactKey、限量读、体积闸)整体自路由搬进来一字未改,
  * 只把原先的 `return res.status(x).json({error})` 换成「把同一句文案写进历史条目」。
@@ -803,6 +950,8 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
   // r87:任务制上游在查询响应里给【实付】(cost 金额 / credits_cost 积分)。取真实值比自己
   // 估价可靠得多(估价要处理 6 种报价形态且只能说"约"),故落进条目由界面显示。
   let money = null;
+  // r94:两个 MJ 协议完成时都要带上按钮(拉不到就是空数组)。非 MJ 协议一个键都不多写。
+  let mjButtons = null;
   const started = startedAt;
   try {
     // r56:本 provider 配了代理就整条链路都走它(生成 POST 与下面的图片下载)。
@@ -889,16 +1038,27 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     const sync = extractImages(provider.protocol, data);
     let pickedList = sync.length ? sync : null;
     if (!pickedList) {
-      const taskId = extractTaskId(data);
+      // midjourney-proxy 的提交响应是 {code, result},与 apimart 的 {data:[{task_id}]} 不同形态;
+      // 它的 code 还会区分"敏感词/队列满"等可读原因,取不到 id 时直接把原因报给用户。
+      const isProxy = provider.protocol === 'mj-proxy';
+      const submit = isProxy ? extractProxySubmitId(data) : null;
+      if (submit && !submit.taskId) return fail(submit.error);
+      const taskId = isProxy ? submit.taskId : extractTaskId(data);
       if (taskId) {
         // r84:上游任务号写进条目 —— 二次操作(U/V)要拿它当 task_id 提交,不存就没得引用。
         // 在轮询之前写:轮询要一分钟起,期间用户已经能看到这条记录。
         await updateHistoryEntry(jobId, { taskId }).catch(() => {});
+        // proxy 的按钮随轮询响应一起回来 —— 用解析回调把它接住,不改 pollTask 的返回形态。
+        let proxyButtons = [];
         const polled = await pollTask({
           taskId,
           provider,
           signal: controller.signal,
           onProgress: (p) => { updateHistoryEntry(jobId, { progress: p }).catch(() => {}); },
+          ...(isProxy ? {
+            spec: buildProxyPollRequest(provider.baseURL, provider.apiKey, taskId),
+            parse: (d) => { const st = extractProxyTaskState(d); proxyButtons = st.buttons; return st; },
+          } : {}),
         });
         if (polled.cancelled) return; // 取消是终态,状态已由 cancel 端点写
         // 两个键【各自】判空:extractTaskState 也是分别取的,而界面优先显示 creditsCost ——
@@ -907,6 +1067,10 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
         if (polled.error) return fail(polled.error, money);
         // 一个任务可能出多张图(MJ 实测 4 张单图):逐张走下面同一条下载链路,落多个文件。
         pickedList = polled.urls.map((url) => ({ mime: '', url }));
+        // apimart 侧另拉一次按钮(免费);proxy 侧轮询已经带回来了。
+        if (MJ_PROTOCOLS.includes(provider.protocol)) {
+          mjButtons = isProxy ? proxyButtons : await fetchMjButtons(provider, taskId);
+        }
       }
     }
     if (!pickedList) return fail(`上游响应里没有找到图片：${safeRaw.slice(0, 300)}`);
@@ -1004,6 +1168,7 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
         previewUrl: `/api/image/preview?file=${encodeURIComponent(files[0])}`,
         bytes: totalBytes,
         ...(money || {}), // r87 实付(任务制上游才有;同步协议一个键都不多写)
+        ...(mjButtons === null ? {} : { mjButtons }), // r94 上游按钮(拉不到就是空数组,不改 status)
         // 一图任务(同步三协议)到这里与 r82 之前逐字一致:files 长度为 1 时不写这个字段。
         // 多图任务(MJ 一次 4 张)才有 files —— file/previewUrl 仍指第一张,既有 UI 不用改。
         ...(files.length > 1 ? { files } : {}),
@@ -1032,15 +1197,46 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
  * 前缀比对 + 扩展名白名单,realPathInsideSaveDirs 再解一次软链复检):只许引用 savePath
  * 之下的图,防 `../../.ssh/id_rsa` 被当参考图读走再发给上游。
  */
-async function resolveRefs(input, saveDirs) {
+async function resolveRefs(input, saveDirs, ctx = {}) {
   if (input === undefined || input === null || input === '') return { refs: [], meta: null };
   if (!Array.isArray(input)) return { error: '参考图必须是数组' };
   if (!input.length) return { refs: [], meta: null };
+  // 上限数【全部条目】而不是只数垫图:一次请求里 1 张垫图 + 6 张角色参考同样是 7 张图要读进内存。
   if (input.length > MAX_REFS) return { error: `参考图最多 ${MAX_REFS} 张` };
+  const protocol = ctx.protocol || '';
+  const refMode = ctx.refMode || '';
   const refs = [];
   const meta = [];
+  const roleSeen = new Set();
   for (const r of input) {
     if (!r || typeof r !== 'object') return { error: '参考图条目格式不正确' };
+    // r94:role 决定这张图是垫图还是某个 flag 的值;缺省 image = 垫图(r54 起的既有语义)。
+    const role = r.role === undefined || r.role === null || r.role === '' ? 'image' : String(r.role);
+    if (!REF_ROLES.includes(role)) return { error: `参考图用途必须是 ${REF_ROLES.join(' / ')}` };
+    // 角色/风格参考编译成 --cref/--sref/--oref,一个 flag 只能有一个值。
+    if (role !== 'image') {
+      if (roleSeen.has(role)) return { error: `同一类参考图(${role})只能有一条` };
+      roleSeen.add(role);
+    }
+    if (r.kind === 'url') {
+      const url = typeof r.url === 'string' ? r.url.trim() : '';
+      try { await assertPublicRefUrl(url); } catch (e) { return { error: e.message }; }
+      // GUI 自己【不下载】这个链接,只把它转给上游。
+      refs.push({ kind: 'url', role, weight: r.weight, url, name: '', mime: '', base64: '' });
+      meta.push({ kind: 'url', name: url });
+      continue;
+    }
+    // 以下是本地来源(上传 / 历史图)。收不收得下由 role 与垫图传法共同决定 ——
+    // 这三条一律【前置 400】,绝不静默上传(那是背着用户花钱)也绝不静默丢图。
+    if (role !== 'image') {
+      return { error: '角色参考 / 风格参考只能给公网图片链接(--cref / --sref / --oref 的值必须是 URL),本地图片请先上传换取链接' };
+    }
+    if (protocol === 'mj' && refMode === 'upload') {
+      return { error: '当前垫图传法是「先上传换链接」:请先上传该参考图换取链接(每张约 $0.05),或把该 provider 的垫图传法改成 inline(base64 直传)' };
+    }
+    if (protocol === 'mj' && refMode === 'url') {
+      return { error: '当前垫图传法只接受公网图片链接:请把该 provider 的垫图传法改成 upload 或 inline,或先自行把图片传到图床再填链接' };
+    }
     if (r.kind === 'history') {
       const full = resolvePreviewPath(String(r.file || ''), saveDirs);
       if (!full || !realPathInsideSaveDirs(full, saveDirs)) {
@@ -1053,11 +1249,11 @@ async function resolveRefs(input, saveDirs) {
         buf = await readFile(full);
       } catch { return { error: '参考图文件不存在（可能已被移动或删除）' }; }
       const ext = extname(full).slice(1).toLowerCase();
-      refs.push({ kind: 'history', name: basename(full), mime: IMAGE_CONTENT_TYPES[ext] || 'image/png', base64: buf.toString('base64') });
+      refs.push({ kind: 'history', role, weight: r.weight, name: basename(full), mime: IMAGE_CONTENT_TYPES[ext] || 'image/png', base64: buf.toString('base64') });
       meta.push({ kind: 'history', file: full });
       continue;
     }
-    if (r.kind !== 'upload') return { error: '参考图类型必须是 upload 或 history' };
+    if (r.kind !== 'upload') return { error: `参考图类型必须是 ${REF_KINDS.join(' 或 ')}` };
     const mime = String(r.mime || '').toLowerCase();
     if (!REF_UPLOAD_MIMES.includes(mime)) return { error: `参考图格式仅支持 ${REF_UPLOAD_MIMES.join(' / ')}` };
     if (typeof r.dataB64 !== 'string' || !r.dataB64) return { error: '参考图内容为空' };
@@ -1070,7 +1266,7 @@ async function resolveRefs(input, saveDirs) {
     if (buf.length > MAX_REF_BYTES) return { error: `参考图过大（单张上限 ${MAX_REF_BYTES / 1048576}MB）` };
     const name = String(r.name || 'image.png').slice(0, 80).replace(/[\\/\r\n"]+/g, '_');
     // 重新编码 = 顺手把折行/杂字符规整掉(发给上游的必须是干净 base64)。
-    refs.push({ kind: 'upload', name, mime, base64: buf.toString('base64') });
+    refs.push({ kind: 'upload', role, weight: r.weight, name, mime, base64: buf.toString('base64') });
     meta.push({ kind: 'upload', name });
   }
   return { refs, meta };
@@ -1096,12 +1292,27 @@ router.post('/image/generate', async (req, res) => {
     const pathErr = await checkSavePath(provider.savePath);
     if (pathErr) return res.status(400).json({ error: pathErr });
 
+    // r94:本次覆盖参数。与 provider 上的默认值【浅合并,本次值优先】——
+    // 换个 stylize 试一版不该去改 provider 配置。非对象一律 400,未知键静默丢弃。
+    const rawMjParams = req.body?.mjParams;
+    if (rawMjParams !== undefined && rawMjParams !== null
+      && (typeof rawMjParams !== 'object' || Array.isArray(rawMjParams))) {
+      return res.status(400).json({ error: 'Midjourney 参数必须是 JSON 对象' });
+    }
+    const mjParams = { ...pickMjParams(provider.mjParams), ...pickMjParams(rawMjParams) };
+
     // 参考图(图生图):校验失败一律前置 400,不进后台任务。
-    const resolved = await resolveRefs(req.body?.refs, all.map((p) => p.savePath));
+    const resolved = await resolveRefs(req.body?.refs, all.map((p) => p.savePath),
+      { protocol: provider.protocol, refMode: mjRefModeFor(provider) });
     if (resolved.error) return res.status(400).json({ error: resolved.error });
 
+    // r94:8.x 上的 turbo 只在【下发】这一步降级为 fast(真机实测上游照 turbo 收 2.22 倍钱、
+    // 耗时却没差)。provider 文件与 GET 回显一律保持用户存的原值,见 publicView。
+    const eff = mjEffectiveSpeed(provider.mjVersion, provider.mjSpeed);
+    const outbound = { ...provider, mjSpeed: eff.speed, mjParams };
+
     let spec;
-    try { spec = buildImageRequest(provider, prompt, resolved.refs); }
+    try { spec = buildImageRequest(outbound, prompt, resolved.refs); }
     catch (e) { return res.status(400).json({ error: e.message }); }
     try { await assertPublicBaseURL(provider.baseURL); }
     catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
@@ -1126,12 +1337,15 @@ router.post('/image/generate', async (req, res) => {
       startedAt,
       // 只写摘要(kind + 文件名/路径),不写 base64 —— 历史文件不存图片内容。
       ...(resolved.meta ? { refs: resolved.meta } : {}),
+      // r94:实际发上游的完整提示词(含编译出来的 flag),以及速度被降级时的那句说明。
+      ...(MJ_PROTOCOLS.includes(provider.protocol) ? { mjPromptSent: String(spec.body?.prompt || '') } : {}),
+      ...(eff.note ? { speedNote: eff.note } : {}),
     });
     // 立即返回:前端不再挂长连接。WKWebView 对 fetch 有约 60s 资源超时,而服务端最长等
     // 上游 120s —— 慢生成(4K 等)时前端先被掐断报 "Load failed",服务端其实已经出图。
     res.json({ ok: true, jobId });
     // fire-and-forget:任务与这次请求彻底脱钩,面板关掉/刷新都照跑。
-    runImageJob({ jobId, provider, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
+    runImageJob({ jobId, provider: outbound, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
   } catch (err) {
     if (counted) activeJobs -= 1;
     res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });
@@ -1155,7 +1369,7 @@ router.post('/image/actions', async (req, res) => {
   let apiKeyForRedact = '';
   let counted = false;
   try {
-    const { jobId: parentId, action, index } = req.body || {};
+    const { jobId: parentId, action: rawAction, index, customId } = req.body || {};
     if (typeof parentId !== 'string' || !parentId) return res.status(400).json({ error: '请求格式不正确:缺少任务 id' });
     const parent = (await readHistory(MAX_HISTORY)).find((e) => e && e.id === parentId);
     if (!parent) return res.status(404).json({ error: '未找到该任务记录' });
@@ -1165,14 +1379,38 @@ router.post('/image/actions', async (req, res) => {
     const all = await readImageProviders();
     const provider = all.find((p) => p.id === parent.providerId);
     if (!provider) return res.status(404).json({ error: '该任务所用的生图 provider 已被删除' });
-    if (provider.protocol !== 'mj') return res.status(400).json({ error: '该操作仅适用于 Midjourney 协议的 provider' });
+    if (!MJ_PROTOCOLS.includes(provider.protocol)) return res.status(400).json({ error: '该操作仅适用于 Midjourney 协议(mj / mj-proxy)的 provider' });
     apiKeyForRedact = provider.apiKey || '';
     const pathErr = await checkSavePath(provider.savePath);
     if (pathErr) return res.status(400).json({ error: pathErr });
 
+    // r94:两种形态。
+    //  · customId 形态(上游按钮):只认【父条目里存着的那一份 buttons】—— 自己拼的 hash
+    //    上游必拒且可能计费,所以不在列表里就当场 400,上游零请求。
+    //  · index 形态(r84 老形态):四宫格的第 1–4 张,请求体与上游请求逐字不变。
+    const cid = typeof customId === 'string' ? customId.trim() : '';
+    let kind;
+    if (cid) {
+      const buttons = Array.isArray(parent.mjButtons) ? parent.mjButtons : [];
+      if (!buttons.some((b) => b && b.customId === cid)) {
+        return res.status(400).json({ error: '这个按钮不在该任务的按钮列表里(可能已失效),请刷新后重试' });
+      }
+      kind = classifyCustomId(cid);
+      if (!MJ_RENDERED_KINDS.includes(kind)) {
+        return res.status(400).json({ error: `本版本暂不支持这个操作(${kind}),目前只做取出单图、变体与真放大` });
+      }
+    } else {
+      kind = rawAction === 'variation' ? 'variation' : 'pick';
+    }
+    // 真放大与取出单图打的是【同一个】upscale 端点,差别只在 body 是 custom_id 还是 index。
+    const action = cid ? (kind === 'variation' ? 'variation' : 'upscale') : rawAction;
+
     let spec;
-    try { spec = buildMjActionRequest(provider, action, index, parent.taskId); }
-    catch (e) { return res.status(400).json({ error: e.message }); }
+    try {
+      spec = provider.protocol === 'mj-proxy'
+        ? buildProxyActionRequest(provider, { taskId: parent.taskId, customId: cid, kind, index })
+        : buildMjActionRequest(provider, action, index, parent.taskId, cid);
+    } catch (e) { return res.status(400).json({ error: e.message }); }
     try { await assertPublicBaseURL(provider.baseURL); }
     catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
 
@@ -1196,14 +1434,60 @@ router.post('/image/actions', async (req, res) => {
       startedAt,
       // 可追溯:这条图是从哪条任务的第几张、做了什么动作来的。
       parentId,
-      mjAction: action,
-      mjIndex: spec.body.index,
+      // 记的是【动作语义】(pick/variation/upscale)而不是端点名 —— 界面要照它显示动作名。
+      mjAction: kind,
+      ...(cid ? { mjCustomId: cid } : { mjIndex: spec.body.index }),
     });
     res.json({ ok: true, jobId });
     runImageJob({ jobId, provider, prompt, spec, startedAt }); // 名额由 runner 的 finally 归还
   } catch (err) {
     if (counted) activeJobs -= 1;
     res.status(500).json({ error: redactKey(err.message, apiKeyForRedact) });
+  }
+});
+
+/**
+ * POST /api/image/upload-ref { providerId, ref } — 把一张本地参考图上传到上游换公网链接。
+ *
+ * **全仓唯一会产生上传费用的入口**(每张约 $0.05),所以必须是用户显式点的一个动作:
+ * /image/generate 在任何垫图传法下都不会隐式走这里。
+ * 闸与出图链路同口径:体积 / MIME / 路径穿透(复用 resolveRefs 那两道)、出站前 SSRF、
+ * 与出图共用同一条并发闸(上传同样是一张 15MB 级图片进内存)。
+ *
+ * 返回的 expiresAt 是【GUI 按 72 小时自算】的毫秒时间戳 —— 上游响应里根本没有 expires
+ * 字段(真机实测),故一并回 expiresAtSource:'local',不冒充上游数据。
+ */
+router.post('/image/upload-ref', async (req, res) => {
+  let apiKeyForRedact = '';
+  let counted = false;
+  try {
+    const { providerId, ref } = req.body || {};
+    const all = await readImageProviders();
+    const provider = all.find((p) => p.id === providerId);
+    if (!provider) return res.status(404).json({ error: '未找到该生图 provider' });
+    apiKeyForRedact = provider.apiKey || '';
+    // midjourney-proxy 没有上传端点(它固定用 base64 随请求提交),别让用户在那边白花钱。
+    if (provider.protocol !== 'mj') {
+      return res.status(400).json({ error: '只有 Midjourney(apimart 形态)的 provider 支持上传参考图换取链接' });
+    }
+    if (!ref || typeof ref !== 'object' || !['upload', 'history'].includes(ref.kind)) {
+      return res.status(400).json({ error: '参考图类型必须是 upload 或 history' });
+    }
+    // 复用出图那条参考图解析:体积 / MIME 白名单 / savePath 之内 / 软链复检四道闸一个不少。
+    const resolved = await resolveRefs([{ ...ref, role: 'image' }], all.map((p) => p.savePath));
+    if (resolved.error) return res.status(400).json({ error: resolved.error });
+
+    if (activeJobs >= MAX_CONCURRENT_JOBS) {
+      return res.status(429).json({ error: `同时生成的任务已达 ${MAX_CONCURRENT_JOBS} 个上限，请等待任一任务完成` });
+    }
+    activeJobs += 1;
+    counted = true;
+    const url = await uploadRefImage(provider, resolved.refs[0]);
+    res.json({ ok: true, url, expiresAt: Date.now() + UPLOAD_REF_TTL_MS, expiresAtSource: 'local' });
+  } catch (err) {
+    res.status(err?.status || 500).json({ error: redactKey(err?.message || '上传参考图失败', apiKeyForRedact) });
+  } finally {
+    if (counted) activeJobs -= 1;
   }
 });
 

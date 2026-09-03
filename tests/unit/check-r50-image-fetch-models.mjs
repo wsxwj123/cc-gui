@@ -67,7 +67,10 @@ const FORM_KEY = 'sk-r50-form-key-998877665544';
     // 基线必须更新。测试设计阶段填占位串保证修前必红;**A 线实现落地后由开发线用实测哈希替换**,
     // 替换的同一个 commit 里必须附上"已复核 check-image-gen(E15)与 check-r54(E20–E22)"的说明,
     // 判官核对该说明存在与否。
-    'PENDING-r94-buildImageRequest-sha256',
+    // 【E16 已按 G6 协议替换为实测哈希】r94 A 线实现落地:mj-proxy 分支 + mj 分支接参数编译
+    // 与参考图。替换前已复核 check-image-gen(E15,IMAGE_PROTOCOLS 五元)与
+    // check-r54-image-refs(E20–E22,三条安全锚计数)—— 两个文件当时均已跑绿。
+    '118da35c09e7518f955881c93ecb73f7bf908926536632b1a092eecc401ede13',
     't2【E16】buildImageRequest 源码基线(r94 必改:mj-proxy 分支 + mj 参考图/参数编译);更新前先复核 check-image-gen 与 check-r54-image-refs',
   );
 }
