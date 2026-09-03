@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Trash2 } from './Icon.jsx';
-import { EFFORT_ORDER } from '../utils/effortCaps.js';
+import { EFFORT_ORDER, isCatalogSource } from '../utils/effortCaps.js';
 
 // r10-9:Provider 表单里的「思考能力」编辑器 —— 为每个模型声明是否支持思考、支持哪些档。
 // 存进 provider 条目的 modelMeta;强度选择器按当前模型自适应(锁灰/只列支持档/回落)。
@@ -17,7 +17,8 @@ export function ProviderThinkingEditor({ value, onChange, models, inputCls }) {
   // 按目录判定的 catalog 条目(OpenRouter 这类 364 模型的 provider 能有几百条)——全渲染
   // 就是几百行 × 5 个复选框,把表单彻底淹掉,与本组件"只渲染已声明的"设计相悖。
   // catalog 条目折叠成一行只读摘要,用户仍可从下方下拉给它添加声明(即转成 user 条目)。
-  const declared = Object.entries(value || {}).filter(([, e]) => e?.source !== 'catalog');
+  // r105:'table-variant'(变体 id 回退到基名命中)与 'catalog' 同属机器预填,一并折叠。
+  const declared = Object.entries(value || {}).filter(([, e]) => !isCatalogSource(e?.source));
   const rows = declared.map(([id]) => id);
   const catalogCount = Object.keys(value || {}).length - rows.length;
   const undeclared = (models || []).filter((m) => !rows.includes(m));
@@ -36,7 +37,7 @@ export function ProviderThinkingEditor({ value, onChange, models, inputCls }) {
     // catalog 条目 delete 不掉:保存后服务端 applyCatalogPrefill 立刻把它补回来
     // (点了删除、保存、它又回来,且无任何反馈)。写 source:'user' 墓碑才压得住目录,
     // 语义正是按钮说的"回到全默认"。用户自己声明的行仍直接删。
-    if (value?.[id]?.source === 'catalog') {
+    if (isCatalogSource(value?.[id]?.source)) {
       onChange({ ...value, [id]: { source: 'user' } });
       return;
     }

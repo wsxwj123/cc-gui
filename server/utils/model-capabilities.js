@@ -108,6 +108,34 @@ function tableLookup(id, protocol) {
   return (id in THINKING_TABLE.byId) ? THINKING_TABLE.byId[id] : undefined;
 }
 
+// ── r105:变体 id 的逐级回退候选(纯函数,导出仅为可单测)──────────────────────
+// `deepseek-v4-flash-vision-exp` → ['deepseek-v4-flash-vision','deepseek-v4-flash','deepseek-v4']。
+// 表是快照,厂商发新变体(-vision-exp / -0731 / -preview)比表快,精确 miss 就落家族正则
+// = 全五档,正是用户报的"DeepSeek 仍然有五档"。
+// 三条边界:
+//  ① 命名空间前缀(`deepseek/…`)原样保留,只在最后一段上剥 —— 网关口径与直连口径不同
+//     (OpenRouter 把 DeepSeek 的 max 重命名成 xhigh 且不透传 low),跨命名空间回退会把
+//     网关模型污染成直连档位;
+//  ② 至多 3 级(再往上剥只剩泛化的家族名,命中的已不是"同一个模型的变体");
+//  ③ 剥到只剩首段(gpt / deepseek)即停 —— 单段名太宽泛,不作为候选。
+// 跨家族的拦截不在这里(纯词法看不出 gpt-5-codex 与 gpt-5 是两个家族),在调用点按
+// matchCatalog 的 family 比对。
+export function variantBaseIds(modelId, maxLevels = 3) {
+  const id = typeof modelId === 'string' ? modelId.trim() : '';
+  if (!id) return [];
+  const ns = id.slice(0, id.lastIndexOf('/') + 1); // 无 '/' 时 lastIndexOf=-1 → ''
+  let base = id.slice(ns.length);
+  const out = [];
+  while (out.length < maxLevels) {
+    const cut = base.lastIndexOf('-');
+    if (cut <= 0) break;
+    base = base.slice(0, cut);
+    if (!base.includes('-')) break; // 只剩首段
+    out.push(ns + base);
+  }
+  return out;
+}
+
 function matchCatalog(id) {
   for (const row of MODEL_CAPABILITY_CATALOG) {
     if (row.re.test(id)) {
@@ -136,8 +164,9 @@ function matchCatalog(id) {
  *        **不传 = 跳过数据表、只走家族正则**(向后兼容旧调用点与纯正则单测)。
  *
  * 匹配顺序(逐条):
- *  1. byProto[id][protocol] —— 协议相关的少数模型;
- *  2. byId[id] —— 精确 id(聚合商的带前缀 id 与直连裸 id 天然是不同字符串,同表可区分);
+ *  1. byProto[id][protocol] / byId[id] —— 精确 id(聚合商的带前缀 id 与直连裸 id 天然是
+ *     不同字符串,同表可区分);
+ *  2. r105:id 的**变体回退**(去尾段,≤3 级,不跨命名空间/家族)—— 命中标 table-variant;
  *  3. id 含 '/' → 取**最后一段**,重复 1、2;
  *  4. 家族正则(先全 id、再最后一段)—— 表外新模型的兜底;
  *  5. 都不中 → null(全档,维持现状)。
@@ -146,40 +175,63 @@ function matchCatalog(id) {
  * 命名空间前缀,不剥前缀直查 364 个模型命中 0 = 整套自适应对这些 provider 等于关着。
  * 只取最后一段:a/b/gpt-5 命中 gpt-5;openai/gpt-5/deprecated 的最后一段是 deprecated,
  * 不命中(不做逐段扫描——那会让任意中间段污染判定)。
+ *
+ * r105 的变体回退排在"剥前缀"之前(第 2 步先于第 3 步),否则
+ * `deepseek/deepseek-v4-flash-vision-exp` 会经剥前缀落到**直连**的
+ * `deepseek-v4-flash-vision-exp` 上,拿到直连档位([low,high,max])——而网关口径是
+ * [high,xhigh];先走带命名空间的回退才能落到同命名空间的 `deepseek/deepseek-v4-flash`。
  */
 export function lookupModelCapabilities(modelId, protocol) {
   if (typeof modelId !== 'string' || !modelId.trim()) return null;
   const id = modelId.trim();
   const tail = id.includes('/') ? id.split('/').pop() : '';
+  const toHit = (hit, viaId) => ({
+    family: 'table',
+    reasoning: hit?.reasoning !== false,
+    efforts: Array.isArray(hit?.efforts) ? [...hit.efforts] : null,
+    ...(viaId ? { source: 'table-variant', viaId } : {}),
+  });
   for (const key of tail ? [id, tail] : [id]) {
-    const hit = tableLookup(key, protocol);
-    if (hit === undefined) continue;
-    return {
-      family: 'table',
-      reasoning: hit?.reasoning !== false,
-      efforts: Array.isArray(hit?.efforts) ? [...hit.efforts] : null,
-    };
+    const exact = tableLookup(key, protocol);
+    if (exact !== undefined) return toHit(exact);
+    // 变体回退:同家族才算数(纯词法剥不出 gpt-5-codex-x → gpt-5 是跨家族)。
+    const fam = matchCatalog(key)?.family ?? null;
+    for (const cand of variantBaseIds(key)) {
+      if ((matchCatalog(cand)?.family ?? null) !== fam) break;
+      const hit = tableLookup(cand, protocol);
+      if (hit !== undefined) return toHit(hit, cand);
+    }
   }
   return matchCatalog(id) || (tail ? matchCatalog(tail) : null);
 }
 
+// r105:机器所有的两种 source —— 'catalog'(精确命中/正则)与 'table-variant'(变体回退)。
+// 二者语义相同(可被新目录覆盖、可被用户声明压过),只是后者多带 viaId 供 UI 说明来源。
+// 判"是否用户声明"的地方一律用它,别再写 `source !== 'catalog'`(会把变体条目当成用户声明,
+// 从此再不刷新)。
+export const CATALOG_SOURCES = ['catalog', 'table-variant'];
+export const isCatalogSource = (s) => s === 'catalog' || s === 'table-variant';
+
 /**
- * 目录命中 → modelMeta 预填条目(与 settings.js 存储形态同构,带 source:'catalog');
+ * 目录命中 → modelMeta 预填条目(与 settings.js 存储形态同构,带 source:'catalog';
+ * 变体回退命中则为 source:'table-variant' + viaId=实际命中的基名);
  * 查不到或命中但全默认(思考+全档)→ null(不产生条目,维持"未声明=全档")。
  */
 export function catalogPrefillEntry(modelId, protocol) {
   const hit = lookupModelCapabilities(modelId, protocol);
   if (!hit) return null;
-  if (!hit.reasoning) return { reasoning: false, source: 'catalog' };
+  const via = hit.source === 'table-variant' && hit.viaId
+    ? { source: 'table-variant', viaId: hit.viaId } : { source: 'catalog' };
+  if (!hit.reasoning) return { reasoning: false, ...via };
   const eff = (hit.efforts || []).filter((e) => EFFORT_IDS.includes(e));
-  if (eff.length && eff.length < EFFORT_IDS.length) return { efforts: eff, source: 'catalog' };
+  if (eff.length && eff.length < EFFORT_IDS.length) return { efforts: eff, ...via };
   return null; // 全默认,无需条目
 }
 
 /**
  * 保存/拉取路径的预填合并(纯函数):
  *  - 用户声明(source==='user' 或历史无 source 的存量条目)逐字保留,永不覆盖;
- *  - 无声明或 source==='catalog' 的模型 → 以目录最新预填为准(目录不再命中/命中
+ *  - 无声明或机器所有(source==='catalog'/'table-variant')的模型 → 以目录最新预填为准(目录不再命中/命中
  *    但全默认时,撤掉旧的 catalog 条目——catalog 条目归机器所有);
  *  - 返回合并后的 meta;一条不剩返回 null(与 sanitizeModelMeta 空态口径一致)。
  *
@@ -196,14 +248,14 @@ export function applyCatalogPrefill(models, meta, protocol) {
   }
   for (const id of ids) {
     const cur = out[id];
-    if (cur && cur.source !== 'catalog') continue; // 用户声明优先,永不覆盖
+    if (cur && !isCatalogSource(cur.source)) continue; // 用户声明优先,永不覆盖
     const pre = catalogPrefillEntry(id, protocol);
     if (pre) out[id] = pre;
-    else if (cur && cur.source === 'catalog') delete out[id];
+    else if (cur && isCatalogSource(cur.source)) delete out[id];
   }
   // 防悬空:catalog 条目只为 models 内的模型存在(用户条目的悬空清理归调用方既有逻辑)。
   for (const id of Object.keys(out)) {
-    if (out[id]?.source === 'catalog' && !idSet.has(id)) delete out[id];
+    if (isCatalogSource(out[id]?.source) && !idSet.has(id)) delete out[id];
   }
   return Object.keys(out).length ? out : null;
 }

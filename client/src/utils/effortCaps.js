@@ -18,6 +18,11 @@ export function effortMemoryKey(providerHint, modelId) {
   return `cgui-effort-${providerHint || 'anthropic'}-${bare}`;
 }
 
+// r105:机器预填的两种 source —— 'catalog'(精确命中/正则)与 'table-variant'(变体 id
+// 回退到基名命中,额外带 viaId)。二者语义相同(可被目录刷新、可被用户声明压过),判
+// "是否用户声明"一律用它,与 server/utils/model-capabilities.js 的同名导出同口径。
+export const isCatalogSource = (s) => s === 'catalog' || s === 'table-variant';
+
 // 当前模型的能力。查询剥 [1m] 后缀(1M 变体与本体同能力)。
 export function effortCapsFor(modelMeta, modelId) {
   const bare = String(modelId || '').replace(/\[1m\]/i, '');
