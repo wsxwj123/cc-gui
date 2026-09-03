@@ -41,6 +41,10 @@ import { applyProgrammaticText } from './utils/inputUndo.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
+import { filterSlashCommands, slashBlocked, fetchSlashCommands } from './utils/slashCommands.js';
+import { SlashCommandMenu } from './components/SlashCommandMenu.jsx';
+import { useAtRef } from './hooks/useAtRef.js';
+import { AtRefPanel } from './components/AtRefPanel.jsx';
 import { ModelBadge, ProviderAvatar, ProviderMark } from './components/ModelBadge.jsx';
 import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge, AnchoredPopover } from './components/SessionSelectors.jsx';
 import { mergeProviderLists, rowIsCurrent, parseAvatar, searchMarks } from './utils/providerList.js';
@@ -1775,6 +1779,11 @@ function HomeState({ tabIndex = 0 }) {
   const [attachmentError, setAttachmentError] = useState('');
   const [restoredOrphan, setRestoredOrphan] = useState(null);
   const homeFileInputRef = useRef(null);
+  const homeInputRef = useRef(null);
+  // 斜杠命令(与会话内同一套:utils/slashCommands.js + SlashCommandMenu.jsx)
+  const [slash, setSlash] = useState({ commands: [], provider: 'Anthropic', isAnthropic: true });
+  const [showCmds, setShowCmds] = useState(false);
+  const [cmdIndex, setCmdIndex] = useState(0);
   // r26-D13:问候时段词随时间刷新 —— Home 挂着过夜,原来只在渲染时取小时,
   // 早上还显示「晚上好」。低频定时器(每分钟 tick,跨时段才引起文案变化)。
   const [hour, setHour] = useState(() => new Date().getHours());
@@ -1812,6 +1821,44 @@ function HomeState({ tabIndex = 0 }) {
     [projects, hiddenHashes, focusedProjectHash]);
   // selectedProject 仍按原样传:用户显式打开的隐藏项目(侧栏窗格豁免同理)不该被踢掉。
   const project = pickHomeProject({ chosenHash, focusedProjectHash, projects: visibleProjects, selectedProject });
+  // ── 斜杠命令(与会话内同一套) ──────────────────────────────
+  // cwd = 所选项目路径(它就是新会话的 cwd),项目级命令随项目切换重取;
+  // focus 重取:切走再切回 / 终端 cc switch 换了 provider 后,列表与置灰状态跟着变。
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetchSlashCommands(project?.path || '')
+        .then((d) => { if (!cancelled) setSlash(d); })
+        .catch(() => {});
+    };
+    load();
+    const onFocus = () => load();
+    window.addEventListener('focus', onFocus);
+    return () => { cancelled = true; window.removeEventListener('focus', onFocus); };
+  }, [project?.path]);
+  const filteredCmds = filterSlashCommands(slash.commands, text, slash.isAnthropic);
+  useEffect(() => {
+    setShowCmds(filteredCmds.length > 0 && text.startsWith('/'));
+    setCmdIndex(0);
+    // 含 length:命令异步到达时 text 没变,只靠 [text] 会让"先打了 / 再拿到列表"永远不弹。
+  }, [text, filteredCmds.length]);
+
+  // ── @ 引用(状态机在 hooks/useAtRef.js,与会话内同一份) ─────
+  // 会话候选必须按【首页选中的项目】取:首页项目选择器只改 chosenHash,不会动 store.sessions
+  // (那是侧栏选中项目的列表)→ 用旧槽会把 A 项目的会话引用进 B 项目的新会话。
+  const homeSessions = useStore((s) => (project?.hash ? s.sessionsByProject[project.hash] : null)) || EMPTY_ARRAY;
+  const at = useAtRef({
+    cwd: project?.path || '',
+    projectHash: project?.hash || '',
+    sessions: homeSessions,
+    excludeSessionId: null,
+    text,
+    setText,
+    inputRef: homeInputRef,
+  });
+  useEffect(() => {
+    if (at.open && at.tab === 'sessions' && project?.hash) useStore.getState().fetchSessionsForPanel(project.hash);
+  }, [at.open, at.tab, project?.hash]);
   // r26-B1:孤儿 draft 排队消息回收横幅。只展示【当前选中项目】的孤儿(按条目
   // projectHash 过滤 —— 别的项目的孤儿不渲染也不可操作,防把 A 项目的排队消息
   // 填进 B 项目会话)。切换项目时过滤条件变,横幅内容自动跟随。
@@ -1888,6 +1935,35 @@ function HomeState({ tabIndex = 0 }) {
   const removeHomeAttachment = (attachment) => {
     setAttachments((prev) => prev.filter((item) => item !== attachment));
     setAttachmentError('');
+  };
+  const pickCommand = (cmd) => {
+    if (!cmd || slashBlocked(cmd, slash.isAnthropic)) return;
+    setText(cmd.name + ' ');
+    setShowCmds(false);
+    homeInputRef.current?.focus();
+  };
+  const onHomeTextChange = (e) => {
+    setText(e.target.value);
+    at.onTextChange(e.target.value, e.target.selectionStart);
+  };
+  // 键盘优先级与会话内逐字同序:IME → 斜杠菜单 → @ 面板 → 发送。
+  // IME 合成期整体让给输入法(中文候选回车不发送、方向键归候选列表),必须是首行早退:
+  // 只写在 Enter 分支里挡不住方向键被菜单抢走。
+  const onHomeKeyDown = (e) => {
+    if (e.nativeEvent?.isComposing || e.key === 'Process' || e.keyCode === 229) return;
+    if (showCmds) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setCmdIndex((i) => Math.min(i + 1, filteredCmds.length - 1)); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setCmdIndex((i) => Math.max(i - 1, 0)); return; }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && filteredCmds.length > 0)) {
+        e.preventDefault();
+        pickCommand(filteredCmds[cmdIndex]);
+        return;
+      }
+      // 关菜单的 Esc 不得穿透到 window 上的全局监听(与会话内同一手法)。
+      if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); setShowCmds(false); return; }
+    }
+    if (at.keyDown(e)) return;
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
   };
   const submit = () => {
     const built = buildAttachmentMessage(text, attachments);
@@ -1999,7 +2075,7 @@ function HomeState({ tabIndex = 0 }) {
             {attachmentError}
           </div>
         )}
-        <div className="w-full rounded-lg border border-canvas-deep/70 bg-canvas-warm/60">
+        <div className="w-full relative rounded-lg border border-canvas-deep/70 bg-canvas-warm/60">
           <input
             ref={homeFileInputRef}
             type="file"
@@ -2011,12 +2087,11 @@ function HomeState({ tabIndex = 0 }) {
             }}
           />
           <textarea
+            ref={homeInputRef}
             data-cgui="home-input"
             value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
-            }}
+            onChange={onHomeTextChange}
+            onKeyDown={onHomeKeyDown}
             // 与聊天输入框逻辑一致(ChatInput handlePaste 同款):粘贴/拖放文件直接成附件,
             // 不再退化成路径文本;普通文本粘贴不受影响。
             onPaste={(e) => {
@@ -2108,6 +2183,23 @@ function HomeState({ tabIndex = 0 }) {
               发送
             </button>
           </div>
+          {/* r97:与会话内同一套斜杠命令 / @ 引用。首页 composer 垂直居中,向上弹会被顶栏
+              切掉列表顶部(默认选中项就在那里),所以两个面板在首页都向下弹。
+              位置固定在工具行之后:插到 textarea 之前会顶掉附件粘贴/拖放的既有保护窗口。 */}
+          {showCmds && (
+            <SlashCommandMenu
+              commands={filteredCmds}
+              selectedIndex={cmdIndex}
+              provider={slash.provider}
+              isAnthropic={slash.isAnthropic}
+              onPick={pickCommand}
+              className="glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"
+            />
+          )}
+          <AtRefPanel
+            {...at.panelProps}
+            className="glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"
+          />
         </div>
         <div className="mt-3 text-[11.5px] text-ink-faint font-body">发送后在所选项目里创建新会话；历史会话在左侧列表。</div>
       </div>
