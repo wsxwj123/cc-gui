@@ -183,7 +183,15 @@ async function readPromptCachePref() {
 
 async function applyProviderPromptCache(env, thirdParty) {
   const { mode, memo } = await readPromptCachePref();
-  const nextMemo = applyPromptCacheEnv(env, resolvePromptCacheOn(mode, thirdParty), memo);
+  return applyPromptCacheWithMemo(env, resolvePromptCacheOn(mode, thirdParty), mode, memo);
+}
+
+// 「按开关改 env + 记账用户原值」的共用体。五条 provider 切换路径经
+// applyProviderPromptCache 调它,r100 的启动重应用直接调它 —— 两条路径逐字同一段逻辑,
+// 备忘记账不能省:漏记则用户原来的 ENABLE_TOOL_SEARCH / MCP_CONNECTION_NONBLOCKING
+// 在切回官方时还不回去(applyPromptCacheEnv 的还原分支要求有备忘)。
+async function applyPromptCacheWithMemo(env, on, mode, memo) {
+  const nextMemo = applyPromptCacheEnv(env, on, memo);
   // 备忘无变化就不写 prefs(provider 切换很频繁,别每次都改 prefs.json)。
   if (!promptCacheMemoEquals(nextMemo, memo)) {
     await updatePrefs((prefs) => {
@@ -193,6 +201,16 @@ async function applyProviderPromptCache(env, thirdParty) {
   return env;
 }
 
+// settings.json 里三个键的实际取值(缺键 = null)。面板显示与 r100 的幂等比较共用。
+function promptCacheKeys(env) {
+  return {
+    carvedSlate: env?.[SNAPSHOT_ENV_KEY] ?? null,
+    toolSearch: env?.[TOOL_SEARCH_ENV_KEY] ?? null,
+    mcpNonblocking: env?.[MCP_NONBLOCKING_ENV_KEY] ?? null,
+  };
+}
+const PROMPT_CACHE_KEY_FIELDS = ['carvedSlate', 'toolSearch', 'mcpNonblocking'];
+
 // 第三方判据必须与五条切换路径同源:用 isOfficialAnthropic 而不是"有没有 BASE_URL"。
 // 二者在 baseURL=https://api.anthropic.com 的自定义 provider 上会打架 —— 切换时判官方
 // (不写两个键),端点若按"有 BASE_URL"判第三方,mode=auto 就会把 CARVED_SLATE=1 +
@@ -200,6 +218,36 @@ async function applyProviderPromptCache(env, thirdParty) {
 function isThirdPartyEnv(env) {
   const base = env?.ANTHROPIC_BASE_URL || '';
   return !!base && !isOfficialAnthropic(base);
+}
+
+// r100:对**当前已激活**的 provider 重新应用一次缓存 env(服务启动时调一次)。
+// r89 只在 provider 切换路径写这三个键 —— 升级前就切好第三方的用户升级后不会再切一次,
+// settings.json 里始终没有这三个键,前缀每轮在系统提示动态段处断开(实测命中率停在 20–30%)。
+// 幂等是硬要求:三个键已是目标值就不写文件、不备份 —— settings.json 的 mtime 进
+// chatCompatKey,每次启动改 mtime = 每次启动强制冷启常驻进程。
+// 只在「该开」时动手(第三方 + 偏好 auto/on):官方渠道或偏好 off 一律不写,启动重应用
+// 是补写遗漏,不是清理用户配置。
+export async function reapplyPromptCacheForActiveProvider({ reason = 'boot' } = {}) {
+  let cur;
+  try { cur = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); }
+  catch (e) { return { changed: false, reason: e?.code === 'ENOENT' ? 'no-settings' : 'unreadable' }; }
+  if (!cur || typeof cur !== 'object' || Array.isArray(cur)) return { changed: false, reason: 'unreadable' };
+  const env = { ...(cur.env || {}) };
+  const thirdParty = isThirdPartyEnv(env);
+  const before = promptCacheKeys(env);
+  const { mode, memo } = await readPromptCachePref();
+  if (!resolvePromptCacheOn(mode, thirdParty)) {
+    return { changed: false, thirdParty, keys: before, reason: 'not-applicable' };
+  }
+  await applyPromptCacheWithMemo(env, true, mode, memo);
+  const keys = promptCacheKeys(env);
+  if (PROMPT_CACHE_KEY_FIELDS.every((k) => before[k] === keys[k])) {
+    return { changed: false, thirdParty, keys, reason: 'already-applied' };
+  }
+  // 与五条切换路径、PUT 同口径:直写 settings.json 前先备份(BK-8 的滚动 3 份)。
+  await backupSettings(new Date().toISOString().replace(/[:.]/g, '-'));
+  await writeFile(SETTINGS_PATH, JSON.stringify({ ...cur, env }, null, 2));
+  return { changed: true, thirdParty, keys, reason };
 }
 
 // GET/PUT 的公共响应体。cliSnapshotSupported=false 时前端要说明"当前 claude 版本不支持
@@ -212,6 +260,9 @@ function promptCacheState(env, mode) {
     snapshotEnv: env[SNAPSHOT_ENV_KEY] ?? null,
     toolSearchEnv: env[TOOL_SEARCH_ENV_KEY] ?? null,
     mcpNonblockingEnv: env[MCP_NONBLOCKING_ENV_KEY] ?? null,
+    // r100:面板直接显示 settings.json 的实际取值 —— 偏好(mode/on)是"应该是什么",
+    // actual 是"现在是什么"。二者不符 = 这台机器上还没写进去(升级后没再切过 provider)。
+    actual: promptCacheKeys(env),
     // 只作面板提示用;真正决定加不加 flag 的就是这个函数(chat.js spawn 处调的是同一个),
     // 入参也用同一个 resolveSdkClaude —— 显示"支持"而实际不加(或反过来)是最难查的那类不一致。
     cliSnapshotSupported: snapshotFlagOn(resolveSdkClaude(), true),

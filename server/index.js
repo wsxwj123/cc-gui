@@ -10,7 +10,7 @@ import { createHash } from 'crypto';
 import sessionRoutes from './routes/sessions.js';
 import chatRoutes, { getInitCommands, mergeInitCommands } from './routes/chat.js';
 import processRoutes from './routes/processes.js';
-import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider, activeProviderModelMeta, ensureCustomProvidersMode } from './routes/settings.js';
+import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider, activeProviderModelMeta, ensureCustomProvidersMode, reapplyPromptCacheForActiveProvider } from './routes/settings.js';
 import usageRoutes from './routes/usage.js';
 import subscriptionUsageRoutes from './routes/subscription-usage.js';
 import providerQuotaRoutes from './routes/provider-quota.js';
@@ -64,6 +64,20 @@ import { stripInheritedProviderEnv } from './utils/provider-env.js';
 // 消费这些键的点(子 CLI 的 env 由 cleanChildEnv 单独构造),boot 时删干净即一处堵死。
 // 上面所有 import 只在函数体内读这些键,故此处清理先于任何读点生效。
 stripInheritedProviderEnv();
+
+// r100:对当前已激活的 provider 重新应用一次前缀缓存 env(第三方 + 偏好 auto/on 时才写)。
+// r89 只在 provider 切换时写这三个键 —— 升级前就切好第三方的用户升级后不会再切一次,
+// 缓存修复对他们等于没上。函数自身幂等(已是目标值不写文件、不改 mtime),失败只记日志:
+// 缓存优化不该挡住服务端启动。放在 stripInheritedProviderEnv 之后:第三方判据读的是
+// settings.json 的 ANTHROPIC_BASE_URL,与宿主继承的 env 无关,顺序上也不能早于隔离。
+(async () => {
+  try {
+    const r = await reapplyPromptCacheForActiveProvider({ reason: 'boot' });
+    console.log(`[prompt-cache] boot reapply: changed=${!!r.changed} thirdParty=${!!r.thirdParty} reason=${r.reason || 'applied'}`);
+  } catch (e) {
+    console.warn('[prompt-cache] boot reapply failed:', e?.message || e);
+  }
+})();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // 本地 bot 版判据:gitignored 的 bots.local.js 只在本机构建里存在,CI checkout(公开版)没有。
