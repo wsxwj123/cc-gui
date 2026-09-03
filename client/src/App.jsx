@@ -100,6 +100,7 @@ import {
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
 import { OFFICIAL_LOGIN_HINT, matchOfficialLoginError, notifyOauthMissing } from './utils/officialAuth.js';
+import { classifyUpstreamRefusal, lastUserIndex, locateRiskAnchor, RISK_CONTINUE_PROMPT } from './utils/contentRisk.js';
 import { effortCapsFor, effortAllowed, effortMemoryKey, useEffortFallback } from './utils/effortCaps.js';
 import { ProviderThinkingEditor } from './components/ProviderThinkingEditor.jsx';
 import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
@@ -5760,6 +5761,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // r10-12:官方拒收历史空内容块(旧第三方会话切官方 400)→ 挂一键清理行动卡。
             // 与服务端 matchOfficialEmptyBlockError 同判据;统计数字由 repair-hint 事件补充。
             const isOfficialEmptyBlock = /text content blocks must be non-empty|must be non-empty/i.test(msg);
+            // r99:服务商内容审核拒绝(DeepSeek「400 Content Exists Risk」)。污染内容留在
+            // 上下文里则之后每一轮都被同样拒绝 → 给气泡挂"回退到污染源之前"的动作。
+            // 只喂已提取的错误文案 msg,不喂用户消息/模型正文。
+            const risk = classifyUpstreamRefusal(msg);
             // 低危#4:1M 推断被拒的显式提示。6bfc207 对「单次 ctxUsage 超名义窗口」的
             // 会话推断补 [1m] 发送;账户 1M 资格不足时该请求被 API 拒,落到这里显示裸
             // 报错。上方 5127 已自动切回捕获两种已知文案;其余含 1M/长上下文关键词的
@@ -5782,7 +5787,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               toolCalls: [],
               blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}${loginHint}` }],
               usage: null,
-              ...(isAuthError ? { errorAction: 'provider' }
+              // r99:内容审核那支放最前 —— 短语最特异,且与另两支判据在真实输入上互斥
+              // ("Content Exists Risk" 不含 api key / 空内容块字样)。
+              ...(risk ? { errorAction: 'content-risk' }
+                : isAuthError ? { errorAction: 'provider' }
                 : isOfficialEmptyBlock ? { errorAction: 'repair-official' } : {}),
             }]);
             sawError = true;
@@ -7085,7 +7093,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     handleRollback(userMsg, { mode: 'both', softFiles: true });
   }, [messages, chatMessages, handleRollback]);
 
-  const handleRetryTool = useCallback((turn, toolCall) => {
+  // opts.contentRisk(r99):同一条链路的第二种用法 —— 不是"重做这个工具",而是
+  // "这个工具的输出被内容审核拒绝,裁掉它并换个方式继续"。停流/裁剪/refetch 那 40 行
+  // 踩过 Bug8 全家坑,复制一份 = 复制一份将来会腐化的坑,所以只在三处分叉。
+  // 不带第三参时(既有「工具重做」两个调用点)行为逐字不变。
+  const handleRetryTool = useCallback((turn, toolCall, opts = {}) => {
     if (!turn?.uuid || !toolCall?.id || !toolCall?.name) {
       confirmDialog('找不到该工具调用的 id，无法局部重做');
       return;
@@ -7101,7 +7113,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 工具调用之前,并给该 turn 打 _retryTrimToolId 标记,让 TurnBubble 在该工具处
     // 截断渲染 + 显示"正在重做此工具…"。随后服务端 trim + refetch 用真实裁剪结果
     // 覆盖,重跑以流式气泡出现在同一位置 → 读起来是"该工具在原位重跑",而非新发消息。
-    {
+    // r99:内容审核回退不走乐观截断 —— `_retryTrimToolId` 会让 TurnBubble 显示
+    // "正在重做此工具…",而这条路径恰恰是"不重做"。改用一条横幅说明正在做什么。
+    if (opts.contentRisk) {
+      setProviderSwitchNotice({ text: '正在回退会话到该工具调用之前…' });
+    } else {
       const curMsgs = getLocalMessages();
       const mi = curMsgs.findIndex((m) => m.uuid === turn.uuid);
       if (mi >= 0) {
@@ -7117,7 +7133,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
 
     const input = JSON.stringify(toolCall.input || {}, null, 2).slice(0, 4000);
-    const appendSystemPrompt = [
+    // r99:内容审核那支绝不能复用下面的原文案 —— 让模型"再执行一次该工具"会立刻再产出
+    // 同一段被拒内容 = 死循环;也不回贴原工具输入(那正是污染源)。
+    const appendSystemPrompt = opts.contentRisk ? RISK_CONTINUE_PROMPT : [
       'GUI 已把会话裁剪到某个工具调用之前。',
       `现在请重新执行 ${toolCall.name} 工具调用，并基于新的工具结果从当前位置继续。`,
       '不要重复已经保留在历史里的正文或更早的工具调用。',
@@ -7161,12 +7179,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
 
         // Bug8:同 handleRollback —— forceSend 绕门 + 发前轮询等停止落地。
-        resendReplacing(
-          `<cgui-tool-retry tool="${toolCall.name}">继续</cgui-tool-retry>`,
-          { appendSystemPrompt, hiddenUserMessage: true },
-        );
+        // r99:锚点之后若还有用户消息,它会被一起裁掉,必须【可见】重发,不能静默吞掉用户打的字。
+        if (opts.contentRisk && opts.carryText) {
+          resendReplacing(opts.carryText, { appendSystemPrompt });
+        } else {
+          resendReplacing(
+            `<cgui-tool-retry tool="${toolCall.name}">继续</cgui-tool-retry>`,
+            { appendSystemPrompt, hiddenUserMessage: true },
+          );
+        }
       } catch (err) {
-        confirmDialog('工具局部重做失败：' + err.message);
+        confirmDialog(opts.contentRisk ? '回退失败：' + err.message : '工具局部重做失败：' + err.message);
         setRetryActiveUuid(null);  // 关指示器,避免失败后一直转
         // 乐观截断已改了显示;失败则刷新回真实状态,避免停在半截视图。
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
@@ -7182,6 +7205,60 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const handleRetryToolRef = useRef(null);
   useEffect(() => { handleRetryToolRef.current = handleRetryTool; }, [handleRetryTool]);
   const stableRetryTurn = useCallback((turn) => handleRetryTurnRef.current?.(turn), []);
+
+  // r99:服务商内容审核拒绝 → 回退到污染源之前并让模型换个方式继续。
+  // 锚点 = 最后一个已拿到 result 的 tool_use(见 utils/contentRisk.js);回退复用下方
+  // 那条既有链路的纯截断(写 .bak),不压缩 —— 压缩要一两分钟,且会把被拒内容摘要
+  // 进上下文 = 没解决问题。锚点是启发式,可能猜错,所以确认框里把工具名 + 入参亮出来。
+  // deps 只留 getLocalMessages:直接依赖那个回调会让流式期每 token 换身份。
+  const runContentRiskRewind = useCallback(async () => {
+    const msgs = getLocalMessages();
+    const anchor = locateRiskAnchor(msgs);
+    if (!anchor) {
+      // 退化:没有工具输出可退 → 走既有「重新编辑」(按发送才真裁剪,按 Esc 全身而退)。
+      // 点击这一刻不改任何文件,所以不弹确认框(与今天的「重新编辑」一致)。
+      const ui = lastUserIndex(msgs);
+      if (ui === -1) { confirmDialog('会话里没有可回退的消息，请新开会话。'); return; }
+      setProviderSwitchNotice({ text: '未找到可回退的工具输出。最后一条消息已放回输入框，改写后按发送才会回退会话；按 Esc 取消则会话不变。' });
+      handleRollbackRef.current?.(msgs[ui], { mode: 'edit' });
+      return;
+    }
+    const inputPreview = (() => { try { return JSON.stringify(anchor.toolInput ?? {}).slice(0, 120); } catch { return ''; } })();
+    const ok = await confirmDialog(
+      `将回退到工具调用 ${anchor.toolName}(${inputPreview})之前：该工具调用、它的输出，以及其后的全部对话都会从会话记录中移除，改写前会写入 .bak 备份。`
+      + (anchor.carryText
+        ? `\n\n你最近的一条消息会在回退后自动重发：\n「${anchor.carryText.slice(0, 120)}」`
+        : '\n\n回退后会让模型换一种方式继续原任务。')
+      + '\n\n本操作不生成摘要、不压缩。是否继续？',
+      { danger: true });
+    if (!ok) return;
+    handleRetryToolRef.current?.(
+      { uuid: anchor.turnUuid },
+      { id: anchor.toolUseId, name: anchor.toolName, input: anchor.toolInput },
+      { contentRisk: true, carryText: anchor.carryText },
+    );
+  }, [getLocalMessages]);
+
+  // r99:新开会话并把最后一条用户消息预填进输入框。转 draft 那段与 ctxOverflow 横幅同源
+  // (转 draft 不改任何会话文件)。composer-fill 按 targetKey 过滤,必须等新 draft key
+  // 渲染落地后再发,否则预填落进旧窗格(同 cgui:add-project 的 60ms)。
+  const newSessionWithLastUser = useCallback(() => {
+    const msgs = getLocalMessages();
+    const ui = lastUserIndex(msgs);
+    const carry = ui === -1 ? '' : msgs[ui].text;
+    const _s = getLocalSession();
+    if (!_s) return;
+    const _nd = newDraftId();
+    const targetKey = queueKeyFor({ projectHash: _s.projectHash, draftId: _nd });
+    useStore.getState().migrateSessionKey?.(_s.sessionId || '', targetKey);
+    setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: _nd });
+    setChatMessages([]);
+    useStore.getState().setPaneMessages(tabIndex, []);  // 转 draft 必清 pane 历史归属
+    if (carry) setTimeout(() => window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: carry, targetKey } })), 60);
+  }, [getLocalMessages, getLocalSession, setSelectedSession, tabIndex]);
+
+  // 按钮文案随锚点在不在而变 —— 按钮绝不写"回退工具输出"却去做别的事。
+  const contentRiskAnchor = useMemo(() => locateRiskAnchor(messages), [messages]);
 
   // /branch 分叉:从当前会话 fork 出一条新线,打开到本窗格,原会话不动。
   // 传 upToUuid(某条消息的 jsonl uuid)则【精确分叉】——新会话只保留到该消息所在回合
@@ -7735,6 +7812,29 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                               className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-accent font-body hover:border-accent/40 transition-colors">
                               体检与清理(自动备份原文件)…
                             </button>
+                          </div>
+                        )}
+                        {/* r99:服务商内容审核拒绝(DeepSeek 400 Content Exists Risk)。被拒内容
+                            留在上下文里,之后每一轮都会被同样拒绝 → 必须把它从会话里移除。
+                            不加 mobileChrome 门控:手机同样需要这两个动作,且不依赖顶栏弹层。 */}
+                        {msg.errorAction === 'content-risk' && (
+                          <div className="px-4 pb-2 -mt-1">
+                            <div className="text-[12px] text-ink-muted font-body mb-1.5 leading-relaxed">
+                              该请求被服务商的内容审核拒绝，不是本机或 CLI 的故障。触发内容通常是最近一条工具输出或消息正文。
+                              该内容仍在会话上下文中，不移除则之后每一轮请求都会被同样拒绝。
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                onClick={runContentRiskRewind}
+                                className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-accent font-body hover:border-accent/40 transition-colors">
+                                {contentRiskAnchor ? '回退到上一条工具输出之前并重发' : '回退到上一条消息之前并重新编辑'}
+                              </button>
+                              <button
+                                onClick={newSessionWithLastUser}
+                                className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-ink-muted font-body hover:border-accent/40 transition-colors">
+                                新开会话(带上最后一条消息)
+                              </button>
+                            </div>
                           </div>
                         )}
                       </>
