@@ -7738,7 +7738,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.filter((m) => m.type !== 'btw').length} 条消息</span>
               {/* r98:标题行直接给本轮(最近一次 API 调用)命中率;会话累计仍在徽章弹层。 */}
               {turnCache.total > 0 && (
-                <span className="text-[10px] text-ink-ghost font-mono shrink-0 whitespace-nowrap" title="本轮缓存命中率 = 最近一次 API 调用的 cache_read /（cache_read + cache_creation + input）；会话累计见上下文徽章弹层">本轮命中 {formatHitPct(turnCache.hitPct)}</span>
+                <span className="text-[10px] text-ink font-mono shrink-0 whitespace-nowrap" title="本轮缓存命中率 = 最近一次 API 调用的 cache_read /（cache_read + cache_creation + input）；会话累计见上下文徽章弹层">本轮命中 {formatHitPct(turnCache.hitPct)}</span>
               )}
               {/* P1.2 徽章零态壳:有会话即渲染(不再 contextTokens>0 门控);统计/provider
                   hint/曾用模型收进弹层(badgeInfo),行内不再重复。 */}
@@ -7825,10 +7825,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           )}
           <span className="text-ink-faint" title={usageDetailTitle}>{totalAllTokens.toLocaleString()} tok</span>
           {totalTokens.cacheRead > 0 && (
-            <span className="text-ink-ghost" title={usageDetailTitle}>命中率 {cacheHitPct.toFixed(1)}%</span>
+            <span className="text-ink-ghost" title={usageDetailTitle}>平均命中率 {cacheHitPct.toFixed(1)}%</span>
           )}
           {turnCache.total > 0 && (
-            <span className="text-ink-ghost" title="本轮缓存命中率（最近一次 API 调用）；前一项为会话累计">本轮 {formatHitPct(turnCache.hitPct)}</span>
+            <span className="text-ink" title="本轮缓存命中率（最近一次 API 调用）；前一项为会话累计">本轮命中 {formatHitPct(turnCache.hitPct)}</span>
           )}
           {totalCostUsd > 0 && <span className="text-accent/80">· {formatCost(totalCostUsd)}</span>}
         </div>
@@ -8784,7 +8784,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
           {info.cacheRead > 0 && (
             <div className="flex items-center gap-2 text-[11px] font-body" title={info.usageDetailTitle}>
               <span className="text-ink-faint w-14 shrink-0">缓存命中</span>
-              <span className="font-mono text-ink-muted">{info.cacheRead.toLocaleString()} · 命中率 {formatHitPct(info.cacheHitPct || 0)}</span>
+              <span className="font-mono text-ink-muted">{info.cacheRead.toLocaleString()} · 平均命中率 {formatHitPct(info.cacheHitPct || 0)}</span>
             </div>
           )}
           {/* r89:本轮命中率 —— 单次 API 调用口径(与上方"当前占用"同一条 usage),

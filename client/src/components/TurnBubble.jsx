@@ -668,7 +668,7 @@ function UsageDisplay({ usage, model, costUsd }) {
         // r98:每轮回复末尾直接给命中率,不用点徽章。口径 = 缓存命中 /(输入 + 缓存命中 + 缓存写入),
         // 与徽章弹层同一公式;这里的 usage 是整轮所有 API 调用的累计,所以是"这一轮"的加权命中率。
         <span title="本轮命中率 = 缓存命中 /（输入 + 缓存命中 + 缓存写入），整轮所有 API 调用累计口径；切模型或进程冷启的那一轮偏低属正常">
-          命中率 {formatHitPct(cacheHitPct(cacheRead, cacheWrite, input))}
+          本轮命中率 {formatHitPct(cacheHitPct(cacheRead, cacheWrite, input))}
         </span>
       )}
       {(authoritative || cost) && (
