@@ -401,7 +401,9 @@ const mj = (over) => buildImageRequest({ protocol: 'mj', ...BASE, ...over }, '�
     assert.equal(seen.action[0].auth, 'Bearer sk-r84-e2e-secret', 't9: 动作带存储的密钥');
     assert.equal(child.status, 'done', `t9: 放大结果落盘(${child.error || ''})`);
     assert.equal(child.parentId, gen.json.jobId, 't9【可追溯】:记了父任务');
-    assert.equal(child.mjAction, 'upscale', 't9【可追溯】:记了动作');
+    // 【E-r94 §5.3】动作 kind 改名:U 按钮只是从四宫格取出单图(像素不变),kind 是 'pick' 不是 'upscale';
+    // 'upscale' 现在专指 buttons 里的真放大命令。端点与 body 形态不变(K13/M31)。
+    assert.equal(child.mjAction, 'pick', 't9【可追溯 / E-r94 §5.3】记了动作 kind(取出单图 = pick)');
     assert.equal(child.mjIndex, 2, 't9【可追溯】:记了第几张');
     assert.equal(child.prompt, '一只猫', 't9: 沿用父任务的提示词(列表里能认出是哪一条)');
     assert.ok(child.file && !child.files, 't9: 单图结果不写 files 字段(与同步协议同形)');
