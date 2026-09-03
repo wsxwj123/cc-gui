@@ -115,8 +115,12 @@ export function normalizeTagLinks(text) {
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const args = process.argv.slice(2);
+  // 换行归一:Windows 开发机 core.autocrlf=true 时 CHANGELOG/README 检出成 CRLF,不归一的话
+  // 生成结果(LF)和文件内容(CRLF)逐字比必不等 → --check 恒红、--readme 每次都改写。解析与
+  // 比较一律在 LF 口径下做,写回时再按原文件的主导换行还原。
+  const toLf = (s) => String(s ?? '').replace(/\r\n/g, '\n');
   let changelog = '';
-  try { changelog = readFileSync(DEFAULT_CHANGELOG, 'utf8'); } catch { changelog = ''; }
+  try { changelog = toLf(readFileSync(DEFAULT_CHANGELOG, 'utf8')); } catch { changelog = ''; }
 
   if (args.includes('--release')) {
     const out = renderRelease(changelog, args[args.indexOf('--release') + 1] || '');
@@ -127,7 +131,11 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     const assumed = args
       .map((a, i) => (a === '--assume-tag' ? args[i + 1] : null))
       .filter((v) => v && !v.startsWith('--')); // 末尾缺值、或后面直接跟另一个 flag → 忽略
-    const readme = readFileSync(DEFAULT_README, 'utf8');
+    const readmeRaw = readFileSync(DEFAULT_README, 'utf8');
+    const readme = toLf(readmeRaw);
+    // 主导换行 = 第一处换行的形态;CRLF 文件按 CRLF 写回,免得生成一份混合换行的 README。
+    const nl = readmeRaw.indexOf('\n');
+    const readmeCrlf = nl > 0 && readmeRaw[nl - 1] === '\r';
     let next;
     try {
       next = applyReadme(readme, renderAll(changelog, { tags: [...new Set([...gitTags(), ...assumed])] }));
@@ -143,7 +151,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
     } else if (next === readme) {
       console.log('README 更新记录:未变');
     } else {
-      writeFileSync(DEFAULT_README, next);
+      writeFileSync(DEFAULT_README, readmeCrlf ? next.replace(/\n/g, '\r\n') : next);
       console.log(`README 更新记录:已更新 ${parseChangelog(changelog).length} 个版本`);
     }
   } else {

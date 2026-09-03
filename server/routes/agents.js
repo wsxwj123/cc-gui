@@ -525,11 +525,16 @@ const BG_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan']);
 router.post('/agents/background/dispatch', async (req, res) => {
   const { cwd, prompt, model, permissionMode } = req.body || {};
   if (typeof prompt !== 'string' || !prompt.trim()) return res.status(400).json({ error: 'prompt 必填' });
-  // Windows cmd 注入守卫:--bg 要求 prompt 走位置参数(无法改 stdin),Windows 上经 cmd.exe /c;
-  // libuv 只给含空格的参数加引号,故【无空格且含 cmd 元字符】的 prompt(如 "x&calc")会被 cmd
-  // 重解析执行 = 绕权限 RCE。真实任务描述都有空格(会被引用→安全),单 token 带元字符=攻击形态,拒。
+  // Windows cmd 注入守卫:r110 后 argv 每 token 各自带引号(winCmdSpawnSpec),元字符已不被 cmd
+  // 解释,本守卫的原始依据(libuv 只给含空格的参数加引号)不再成立。作为纵深防御保留:引号层
+  // 若被改坏,它仍能挡住无空格的注入形态;代价是无空格 prompt 含 `&|<>^` 会被拒。
   if (process.platform === 'win32' && !/\s/.test(prompt.trim()) && /[&|<>^]/.test(prompt)) {
     return res.status(400).json({ error: 'prompt 含不安全字符(单个词里的 & | < > ^);请用正常任务描述' });
+  }
+  // Windows 命令行总长上限 8191 字符;--bg 的 prompt 走位置参数(无法改 stdin),加上 claude 路径、
+  // 引号与其余参数后余量有限,超长会被静默截断。留足余量,超限直接拒并说明改用会话内发送。
+  if (process.platform === 'win32' && prompt.length > 7000) {
+    return res.status(400).json({ error: `Windows 上后台代理的提示词经命令行传递,长度上限 7000 字符,当前 ${prompt.length} 字符;请缩短或改用会话内发送` });
   }
   let dir;
   // 工作区例外版(fable 审计):后台代理语义=在该项目目录跑 claude --bg,Windows
