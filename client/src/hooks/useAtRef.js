@@ -10,8 +10,8 @@ import {
 } from '../utils/atRef.js';
 
 // `@` 引用选择器的状态机(会话内输入框与首页输入框共用同一份实现)。
-// 取数与条目形态都在 utils/atRef.js:层级浏览走 fetchDirEntries(内部 mapDirEntries(),
-// 子目录首行补「返回上级」),模糊搜索走 searchProjectFiles(内部 mapSearchFiles())。
+// 取数与条目形态都在 utils/atRef.js:层级浏览走 fetchDirEntries(子目录首行补「返回上级」),
+// 模糊搜索走 searchProjectFiles —— 两者返回的已经是面板条目,这里不再做映射。
 // 会话列表由调用方作为入参给(两边不同源:会话内是全局槽,首页是所选项目的槽)。
 //
 // 入参:cwd / projectHash(打开面板瞬间快照,避免浏览中途换根)、sessions、
