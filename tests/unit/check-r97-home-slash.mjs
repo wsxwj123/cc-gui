@@ -1021,7 +1021,9 @@ const walk = (dir, out = []) => {
 };
 // 排除本轮新增的整组 r97 测试(本文件 + 开发线自测 check-r97-dev-*.mjs):
 // 判据是"既有测试文件未被改动",新增文件不该计入基线。
-const isR97 = (f) => /(^|\/)check-r97-[^/]*\.mjs$/.test(f);
+// r97b:同样排除 r97 之后各轮新增的测试(check-r98+ / check-r1xx+),否则合并到 master 后
+// 别的轮次的测试文件一进 tests/ 就会改变全目录 grep 计数,把"既有测试未改动"误判成红。
+const isR97 = (f) => /(^|\/)check-r(9[7-9]|[1-9]\d{2,})-[^/]*\.mjs$/.test(f);
 const hitLines = (re) => {
   let n = 0;
   for (const f of walk(join(root, 'tests'))) {
