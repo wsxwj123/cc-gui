@@ -80,7 +80,7 @@ import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, que
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
-import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow } from './utils/contextWindow.js';
+import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow, resolveBadgeWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
@@ -686,10 +686,27 @@ export function formatPathShort(path) {
 // 在不同 provider 窗口可能不同)。值:number=解析到;null=后端明确无解析(官方/未知,
 // 前端走 nativeContextWindow 兜底);无 key=未查过。
 const resolvedWindowCache = new Map();
-// R8-6:缓存值来源标注(model → { source:'cli'|'provider', at })。'cli' = result.modelUsage
-// 自报窗口(会话内压缩执行口径,最权威);'provider' = /api/model-window(手配/规则表)。
-// 覆盖方向单行道:cli 覆盖 provider,provider 不覆盖 cli(fetch 回写前查这里)。
+// 缓存值来源标注(model → { source, origin, at })。
+// source:'linked' = 服务端随 init 下发的压缩联动窗口(GUI 真下发给 CLI 的那个值,最权威);
+//        'provider' = /api/model-window(手填/实抓/规则表);'cli' = result.modelUsage 自报。
+// origin:细分出处('explicit'|'manual'|'fetched'|'rules'|'1m'),只用于徽章弹层文案。
+// 【r103 覆盖方向翻转】旧口径是"cli 覆盖 provider"——但 CLI 对它不认识的第三方模型名
+// 自报窗口恒 200,000,而同一时刻 GUI 已用 CLAUDE_CODE_MAX_CONTEXT_TOKENS 把 CLI 的真实
+// 窗口认知/压缩线抬到手填值,于是分母显示与 CLI 实际压缩行为相反(用户实报:手填 1M,
+// 第一轮结束后徽章变回 200k)。现改为 GUI 侧来源优先,CLI 自报只在 GUI 无任何来源时
+// (官方模型恒如此)当分母 —— 优先级判定收在纯函数 resolveBadgeWindow。
 const resolvedWindowMeta = new Map();
+// 分母出处 → 弹层文案。与 resolveBadgeWindow / 服务端 resolveModelWindowInfo 同一套口径。
+function winSourceLabel(meta) {
+  if (!meta) return '后端解析';
+  if (meta.source === 'cli') return 'CLI 自报';
+  const byOrigin = {
+    explicit: '设置页显式窗口', manual: 'Provider 手填', fetched: '获取模型时实抓',
+    rules: '内置模型规则表', '1m': '[1m] 后缀',
+  }[meta.origin];
+  if (meta.source === 'linked') return `${byOrigin || '模型窗口'}·压缩联动同源`;
+  return byOrigin || '后端解析';
+}
 if (typeof window !== 'undefined') {
   window.addEventListener('cgui:provider-change', () => { resolvedWindowCache.clear(); resolvedWindowMeta.clear(); });
 }
@@ -721,11 +738,23 @@ function useResolvedWindow(model) {
       .then((r) => r.json())
       .then((d) => {
         const v = Number.isFinite(d?.window) ? d.window : null;
-        // R8-6 覆盖方向单行道:fetch 在飞期间 result.modelUsage 已写入 cli 值时,
-        // provider-config 不得覆盖(cli 是会话内压缩执行口径,最权威;反向 cli 直接覆盖)。
-        if (resolvedWindowMeta.get(model)?.source !== 'cli') {
-          resolvedWindowCache.set(model, v);
-          resolvedWindowMeta.set(model, { source: 'provider', at: Date.now() });
+        // r103:provider 解析值优先于 CLI 自报(CLI 对第三方恒 200K,见 resolvedWindowMeta
+        // 上方注释),但【解析为 null 时不清掉已有的 cli/linked 值】—— 官方模型后端恒返 null,
+        // 清掉就把准确的 CLI 自报值抹了。已有更高优先级来源(linked)也保持不动。
+        const prevMeta = resolvedWindowMeta.get(model);
+        const picked = resolveBadgeWindow({
+          cliWindow: prevMeta?.source === 'cli' ? resolvedWindowCache.get(model) : null,
+          linkedWindow: prevMeta?.source === 'linked' ? resolvedWindowCache.get(model) : null,
+          providerWindow: v,
+          model,
+        });
+        if (!prevMeta || picked.source === 'provider' || picked.source === '1m') {
+          resolvedWindowCache.set(model, picked.window);
+          resolvedWindowMeta.set(model, {
+            source: picked.source,
+            origin: picked.source === 'provider' ? (d?.source || null) : picked.source,
+            at: Date.now(),
+          });
         }
         if (!dead) setWin(resolvedWindowCache.get(model));
       })
@@ -5189,6 +5218,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // r49b②:CLI init 回报的生效档位与请求档不一致(guard 拒了 auto/plan)——
           // 服务端对账后发这条系统行。按「请求档+实际档」去重(同一组合只留一行),
           // ownerKey 走流归属,和自动拒绝提示同一套门控。
+          // r103:服务端随 init 下发的【GUI 侧认定窗口】(压缩联动值,或用户显式设置值)。
+          // CLI 对它不认识的第三方模型自报窗口恒 200K,但 GUI 已把 CLI 的真实窗口/压缩线
+          // 抬到这个值 —— 徽章分母必须跟它走,否则显示与实际压缩行为相反。写进与
+          // /api/model-window 同一个缓存(source:'linked' 压过 provider/cli),并广播刷新
+          // 正在显示的分母(与 R8-6 同一事件,缓存命中路径不会 refetch)。
+          if (event.type === 'system' && event.subtype === 'context_window'
+              && Number.isFinite(event.linkedContextWindow) && event.linkedContextWindow > 0) {
+            for (const wk of new Set([event.model, turnModel].filter(Boolean))) {
+              resolvedWindowCache.set(wk, event.linkedContextWindow);
+              resolvedWindowMeta.set(wk, { source: 'linked', origin: event.origin || event.source || null, at: Date.now() });
+              try { window.dispatchEvent(new CustomEvent('cgui:model-window-cli', { detail: { model: wk } })); } catch {}
+            }
+          }
           if (event.type === 'system' && event.subtype === 'mode_mismatch') {
             const mUuid = `mode-mismatch-${event.requested}-${event.effective}`;
             setChatMessages((prev) => (prev.some((m) => m.uuid === mUuid) ? prev : [...prev, {
@@ -5899,18 +5941,29 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             resultUsage = event.usage;
           }
           // R8-6:CLI 自报窗口(result.modelUsage[*].contextWindow,静态字段)→ 徽章分母。
-          // 会话内 CLI 自报是压缩执行口径 = 最权威;2.1.223 起 CLI 对 unknown model 也按
-          // 假定窗口强制压缩,分母按它显示才与真实行为一致。写入 resolvedWindow 缓存标
-          // source:'cli'(覆盖 provider-config,反向不覆盖);matchedModel 与 turnModel
-          // 两个 key 都写(第三方中转两者可能有别名差,徽章按 GUI 侧模型名查缓存)。
+          // matchedModel 与 turnModel 两个 key 都写(第三方中转两者可能有别名差,徽章按
+          // GUI 侧模型名查缓存)。
+          // 【r103】不再无条件覆盖:CLI 对它不认识的第三方模型名自报恒 200,000,而 GUI 已用
+          // CLAUDE_CODE_MAX_CONTEXT_TOKENS 把它的真实窗口/压缩线抬到手填/联动值 —— 覆盖掉
+          // 就等于显示一个与 CLI 实际压缩行为相反的分母(用户实报:手填 1M,一轮后变 200k)。
+          // 仅当 GUI 侧无任何窗口来源时(官方模型恒如此,行为与改前一致)才采 CLI 自报。
           // ⚠️ 红线:只读 contextWindow;modelUsage 的 *Tokens 与 result.usage 都是整轮
           // 累积口径,绝不写入"当前占用"(分子仍只来自 message_start/message_delta)。
           if (event.type === 'result' && event.modelUsage) {
             const cliWin = pickCliContextWindow(event.modelUsage, turnModel);
             if (cliWin) {
               for (const wk of new Set([cliWin.matchedModel, turnModel].filter(Boolean))) {
-                resolvedWindowCache.set(wk, cliWin.window);
-                resolvedWindowMeta.set(wk, { source: 'cli', at: Date.now() });
+                const prevMeta = resolvedWindowMeta.get(wk);
+                const guiWin = prevMeta && prevMeta.source !== 'cli' ? resolvedWindowCache.get(wk) : null;
+                const picked = resolveBadgeWindow({
+                  cliWindow: cliWin.window,
+                  linkedWindow: prevMeta?.source === 'linked' ? guiWin : null,
+                  providerWindow: prevMeta?.source === 'provider' ? guiWin : null,
+                  model: wk,
+                });
+                if (picked.source !== 'cli') continue;   // GUI 侧来源胜出 → 缓存原样不动
+                resolvedWindowCache.set(wk, picked.window);
+                resolvedWindowMeta.set(wk, { source: 'cli', origin: 'cli', at: Date.now() });
                 try { window.dispatchEvent(new CustomEvent('cgui:model-window-cli', { detail: { model: wk } })); } catch {}
               }
             }
@@ -7605,8 +7658,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const bareAliasWindowUnknown = _isThirdParty && isBareClaudeAlias(currentModel);
   // r11-⑨:分母来源(回退链命中的哪一级)→ 弹层口径脚注,与上面 contextWindow 的
   // 取值优先级逐字同链([1m] > resolvedWindow > /context 实测 > 按名推测)。
+  // r103:后端解析那级不再笼统写"provider 配置 / CLI 自报",按缓存里记的实际来源
+  // (手填 / 实抓 / 规则表 / 压缩联动 / CLI 自报)据实标注。
   const winSource = /\[1m\]/i.test(currentModel || '') ? `${winLabel}（[1m] 显式开关）`
-    : resolvedWindow ? `${winLabel}（后端解析:provider 配置 / CLI 自报）`
+    : resolvedWindow ? `${winLabel}（${winSourceLabel(currentModel ? resolvedWindowMeta.get(currentModel) : null)}）`
     : measuredCtx?.windowTokens ? `${winLabel}（/context ${measuredCtx?.estimated ? '估算' : '实测'}缓存）`
     : `${winLabel}（按模型名内置推测）`;
   // r89 本轮缓存命中率:必须用【单次 API 调用】的 usage(effectiveUsage = ctxUsage/流式 usage,

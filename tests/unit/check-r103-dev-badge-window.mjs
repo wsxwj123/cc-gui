@@ -54,7 +54,7 @@ for (const bad of [0, -1, NaN, Infinity, '1000000', null, undefined]) {
   assert.ok(blkStart > -1, 'R8-6 分支存在');
   const blk = app.slice(blkStart, blkStart + 1800);
   assert.ok(/resolveBadgeWindow\(/.test(blk), 'R8-6 必须经 resolveBadgeWindow 定优先级');
-  assert.ok(/picked\.source === 'cli'/.test(blk), "R8-6 仅在 cli 胜出时写缓存(不再无条件覆盖)");
+  assert.ok(/picked\.source !== 'cli'\) continue;/.test(blk), 'R8-6 仅在 cli 胜出时写缓存(不再无条件覆盖)');
   // 红线:分子口径不动
   assert.ok(!/setLiveContextUsage/.test(blk), 'R8-6 块绝不写徽章分子');
   assert.ok(!/inputTokens|cacheReadInputTokens/.test(blk), 'R8-6 块只读 contextWindow');

@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { pickCliContextWindow } from '../../client/src/utils/contextWindow.js';
+import { pickCliContextWindow, resolveBadgeWindow } from '../../client/src/utils/contextWindow.js';
 
 // fixture:spike-a 真实 entry 形态
 const entry = (contextWindow, extra = {}) => ({
@@ -66,19 +66,51 @@ assert.equal(pickCliContextWindow({ m: entry(Infinity) }, 'm'), null, 'Infinity 
 assert.equal(pickCliContextWindow({ a: entry(NaN), b: entry(200000) }, 'a'), null,
   'exact 值非法时不偷取其他 entry');
 
-// ── ⑤ 缓存覆盖方向(与 App.jsx 接线同构):cli 覆盖 provider,provider 不覆盖 cli ──
+// ── ⑤ 缓存覆盖方向【r103 翻转】:GUI 侧来源(provider/linked)优先,cli 只在无来源时写 ──
+// 翻转理由:CLI 对它不认识的第三方模型名自报窗口恒 200,000,而 GUI 已用
+// CLAUDE_CODE_MAX_CONTEXT_TOKENS 把 CLI 的真实窗口/压缩线抬到手填值 —— 旧的"cli 覆盖
+// provider"让分母显示与 CLI 实际压缩行为相反(用户实报:手填 1M,一轮后徽章变回 200k)。
 {
   const cache = new Map(); const meta = new Map();
-  const writeCli = (m, w) => { cache.set(m, w); meta.set(m, { source: 'cli', at: Date.now() }); };
-  const writeProvider = (m, w) => {   // 照抄 useResolvedWindow 的 fetch 回写守卫
-    if (meta.get(m)?.source !== 'cli') { cache.set(m, w); meta.set(m, { source: 'provider', at: Date.now() }); }
+  // 照抄 App.jsx R8-6 的写入守卫
+  const writeCli = (m, w) => {
+    const prev = meta.get(m);
+    const gui = prev && prev.source !== 'cli' ? cache.get(m) : null;
+    const picked = resolveBadgeWindow({
+      cliWindow: w,
+      linkedWindow: prev?.source === 'linked' ? gui : null,
+      providerWindow: prev?.source === 'provider' ? gui : null,
+      model: m,
+    });
+    if (picked.source !== 'cli') return;
+    cache.set(m, picked.window); meta.set(m, { source: 'cli', origin: 'cli', at: Date.now() });
   };
-  writeProvider('claude-sonnet-4-6', 262144);     // provider 手配先到
-  writeCli('claude-sonnet-4-6', 200000);          // CLI 自报覆盖它
-  assert.equal(cache.get('claude-sonnet-4-6'), 200000, 'cli 覆盖 provider');
-  writeProvider('claude-sonnet-4-6', 262144);     // fetch 在飞晚归
-  assert.equal(cache.get('claude-sonnet-4-6'), 200000, 'provider 不得覆盖 cli(单行道)');
-  assert.equal(meta.get('claude-sonnet-4-6').source, 'cli', '来源标注保持 cli');
+  const writeProvider = (m, v) => {   // 照抄 useResolvedWindow 的 fetch 回写
+    const prev = meta.get(m);
+    const picked = resolveBadgeWindow({
+      cliWindow: prev?.source === 'cli' ? cache.get(m) : null,
+      linkedWindow: prev?.source === 'linked' ? cache.get(m) : null,
+      providerWindow: v,
+      model: m,
+    });
+    if (!prev || picked.source === 'provider' || picked.source === '1m') {
+      cache.set(m, picked.window); meta.set(m, { source: picked.source, at: Date.now() });
+    }
+  };
+  writeProvider('k3', 1000000);                 // provider 手填先到
+  writeCli('k3', 200000);                       // CLI 自报到达
+  assert.equal(cache.get('k3'), 1000000, 'cli 不得覆盖 provider 手填(r103 用户实报场景)');
+  assert.equal(meta.get('k3').source, 'provider', '来源标注保持 provider');
+  writeProvider('k3', 1000000);                 // fetch 在飞晚归,幂等
+  assert.equal(cache.get('k3'), 1000000, '重复回写幂等');
+
+  // 官方模型:后端解析恒 null → 仍采 CLI 自报(无回归)
+  writeProvider('claude-sonnet-4-6', null);
+  writeCli('claude-sonnet-4-6', 200000);
+  assert.equal(cache.get('claude-sonnet-4-6'), 200000, 'GUI 无来源 → 采 CLI 自报');
+  assert.equal(meta.get('claude-sonnet-4-6').source, 'cli', '来源标注 cli');
+  writeProvider('claude-sonnet-4-6', null);     // 解析为 null 不得清掉已有 cli 值
+  assert.equal(cache.get('claude-sonnet-4-6'), 200000, 'null 解析不清空 cli 值');
 }
 
 // ── ⑥ 源码守卫:App.jsx 接线 + 分子红线 ─────────────────────────────────
@@ -88,10 +120,11 @@ assert.equal(pickCliContextWindow({ a: entry(NaN), b: entry(200000) }, 'a'), nul
   // 接线:result 分支消费 modelUsage 走纯函数,写缓存标 cli
   assert.ok(/pickCliContextWindow\(event\.modelUsage, turnModel\)/.test(app),
     'result 分支必须经 pickCliContextWindow(turnModel exact 匹配)');
-  assert.ok(/source: 'cli'/.test(app), '写入必须标 source:cli');
-  // fetch 回写守卫:provider 不覆盖 cli
-  assert.ok(/resolvedWindowMeta\.get\(model\)\?\.source !== 'cli'/.test(app),
-    'useResolvedWindow 回写前必须查 cli 标注(provider 不覆盖 cli)');
+  assert.ok(/source: 'cli', origin: 'cli'/.test(app), '写入必须标 source:cli');
+  // r103 覆盖方向翻转:GUI 侧来源胜出时 R8-6 不写缓存
+  assert.ok(/picked\.source !== 'cli'\) continue;/.test(app),
+    'R8-6 必须在 GUI 侧来源胜出时跳过写入(cli 不再无条件覆盖)');
+  assert.ok(/resolveBadgeWindow\(/.test(app), '覆盖方向判定收在纯函数 resolveBadgeWindow');
   // 红线(历史事故 context-badge-usage-source):分子仍只来自 message_start/message_delta。
   // R8-6 的 result.modelUsage 块内绝不许出现 setLiveContextUsage / *Tokens 累积字段。
   const blkStart = app.indexOf("event.type === 'result' && event.modelUsage");
@@ -107,4 +140,4 @@ assert.equal(pickCliContextWindow({ a: entry(NaN), b: entry(200000) }, 'a'), nul
     '分母优先级链结构原样(cli 值经 resolvedWindow 缓存参战,不改链)');
 }
 
-console.log('✓ check-badge-cli-window: 匹配四策略 + 非法值 + 覆盖单行道 + 分子红线守卫 全过');
+console.log('✓ check-badge-cli-window: 匹配四策略 + 非法值 + 覆盖方向(r103 翻转)+ 分子红线守卫 全过');
