@@ -21,7 +21,7 @@ const { chatCompatKey, noteSelfPermissionWrite } = await import('../../server/ro
 
 const base = {
   workingDir: proj, effort: 'high', appendSystemPrompt: '', promptSuggestions: false,
-  excludeDynamicSystemPrompt: 'auto', globalRead: true, dirs: ['/'], maxBudgetUsd: null,
+  globalRead: true, dirs: ['/'], maxBudgetUsd: null,
 };
 // mtime 必须显式推进:同毫秒内连写两次会被 readSettingsSplit 的 mtime 快路吃掉(既有天花板)。
 let clock = Math.floor(Date.now() / 1000) - 1000;

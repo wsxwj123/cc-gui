@@ -199,7 +199,10 @@ check('A1-7 设置面板有开关 + 搜索索引条目', () => {
   // 渲染点与索引条目分别断言:只留组件定义不挂进 tab = 用户看不到这个开关。
   assert.ok(/<div id="set-prompt-snapshot"><PromptCacheSnapshotToggle \/><\/div>/.test(panelSrc), '开关未挂进设置 tab');
   assert.ok(/\{ id: 'set-prompt-snapshot', tab: 'session'/.test(panelSrc), '缺搜索索引条目');
-  assert.ok(/静态系统提示快照/.test(panelSrc));
+  // r104 起该条目改名「缓存优化」(原 exclude-dynamic 那个同名开关已移除,面板上只剩这一个
+  // 缓存条目)。id 不变,只有标题变;标题唯一性与"旧名不许残留"由 check-r104 的 C4–C9 锁。
+  assert.ok(/\{ id: 'set-prompt-snapshot', tab: 'session', title: '缓存优化'/.test(panelSrc),
+    '条目标题必须是「缓存优化」(r104 合并后的唯一缓存条目)');
   // 面板须写清 ToolSearch 的代价
   assert.ok(/ENABLE_TOOL_SEARCH=false/.test(panelSrc) && /前置加载/.test(panelSrc), '未写清关 ToolSearch 的代价');
   assert.ok(/settings\.json/.test(panelSrc) && /bot/.test(panelSrc), '未告知 settings.json 与终端/bot 共用');

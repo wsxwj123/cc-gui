@@ -891,7 +891,7 @@ const c8 = (name, fn) => (HAVE_CK ? check(name, fn) : skip(name, 'chatCompatKey 
 const settingsPath = join(home, '.claude', 'settings.json');
 const base = {
   workingDir: projDir, effort: 'high', appendSystemPrompt: '', promptSuggestions: false,
-  excludeDynamicSystemPrompt: 'auto', globalRead: true, dirs: ['/'], maxBudgetUsd: null,
+  globalRead: true, dirs: ['/'], maxBudgetUsd: null,
 };
 let tick = Math.floor(Date.now() / 1000) - 100000;
 const bump = (p) => { tick += 7; utimesSync(p, tick, tick); };
