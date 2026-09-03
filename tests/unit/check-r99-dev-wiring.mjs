@@ -56,6 +56,54 @@ t('4.2 主动作复用既有链路,不自写 fetch', () => {
   assert.match(blk, /contentRisk: true/);
   assert.equal(count(blk, /fetch\(/g), 0, '新回调里不许自写 fetch');
 });
+
+// ---- 判官 ①:不收敛 + .bak 覆盖 ----
+const REWIND = A.slice(A.indexOf('const runContentRiskRewind = useCallback'), A.indexOf('const newSessionWithLastUser = useCallback'));
+t('①a 锚点之后还有用户消息时不自动重发,改走退化路径', () => {
+  assert.match(REWIND, /if \(!anchor \|\| anchor\.carryText \|\| rewoundOnce\)/);
+  // carryText 绝不再作为自动重发的载荷送进 handleRetryTool
+  assert.equal(count(A, /carryText: anchor\.carryText/g), 0);
+  assert.equal(count(A, /resendReplacing\(opts\.carryText/g), 0);
+});
+t('①b 同会话只自动回退一次,标记 keyed by sessionId(分屏不串)', () => {
+  assert.match(A, /const \[riskRewoundSids, setRiskRewoundSids\] = useState\(\{\}\)/);
+  // 表示法不许用 `useState(() => new Set())`:check-r26 的 HomeState 哨兵按整段源码扫这个字面量
+  assert.equal((A.match(/useState\(\(\) => new Set\(\)\)/g) || []).length, 0);
+  assert.match(REWIND, /const rewoundOnce = !!sid && !!riskRewoundSids\[sid\]/);
+  // 标记必须在确认之后、真正执行回退时写入(取消不该消耗额度)
+  const okIdx = REWIND.indexOf('if (!ok) return;');
+  const markIdx = REWIND.indexOf('setRiskRewoundSids(');
+  assert.ok(okIdx > 0 && markIdx > okIdx, '标记必须写在确认框通过之后');
+  assert.ok(markIdx < REWIND.indexOf('handleRetryToolRef.current?.('), '标记必须先于回退执行');
+});
+t('①b 按钮判据与退化条件对齐:有后续用户消息 / 已回退过 → 不给自动回退', () => {
+  const memo = A.slice(A.indexOf('const contentRiskAnchor = useMemo'), A.indexOf('// /branch 分叉'));
+  assert.match(memo, /riskRewoundSids\[sid\]\) return null/);
+  assert.match(memo, /return a && !a\.carryText \? a : null/);
+});
+t('①b 提示里说明"已回退过一次"', () => {
+  assert.match(A, /本会话已自动回退过一次/);
+});
+
+// ---- 判官 ②:不注入重试哨兵 ----
+t('② continuePrompt 顶掉续跑指令且不注入 tool= 哨兵', () => {
+  assert.match(A, /const appendSystemPrompt = opts\.continuePrompt \|\| \[/);
+  assert.match(A, /opts\.continuePrompt\s*\n\s*\? `<cgui-tool-retry>\$\{opts\.continuePrompt\}<\/cgui-tool-retry>`/);
+  assert.match(A, /continuePrompt: RISK_CONTINUE_PROMPT/);
+  // 带 tool= 属性的哨兵只剩既有「工具重做」那一处
+  assert.equal(count(A, /<cgui-tool-retry tool="/g), 1);
+});
+
+// ---- 判官 ③:先停后 trim ----
+t('③ 停止在飞回合早于截断会话文件,且停止有超时兜底', () => {
+  const body = A.slice(A.indexOf('const handleRetryTool = useCallback'), A.indexOf('const handleRetryTurnRef = useRef'));
+  const stopIdx = body.indexOf('/stop`');
+  const trimIdx = body.indexOf('trim-before-tool');
+  assert.ok(stopIdx > 0 && trimIdx > 0, '两处调用都要在');
+  assert.ok(stopIdx < trimIdx, `stop@${stopIdx} 必须早于 trim@${trimIdx}`);
+  assert.match(body, /await Promise\.race\(\[Promise\.all\(_rtStops\), new Promise\(\(r\) => setTimeout\(r, \d+\)\)\]\)/);
+  assert.ok(body.indexOf('_rtStops') < trimIdx, '等待停止落地必须发生在截断之前');
+});
 t('4.2 退化路径复用既有「重新编辑」', () => {
   assert.match(A, /handleRollbackRef\.current\?\.\([^)]*\{ mode: 'edit' \}/);
 });
