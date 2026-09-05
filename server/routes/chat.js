@@ -20,7 +20,7 @@ import { canonicalCwd } from '../utils/safe-path.js';
 import { GENUI_SECTION_TEXT } from '../utils/genui-section.js';
 import { broadcast, clients } from '../broadcast.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
-import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn } from '../utils/prompt-cache-env.js';
+import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCache } from '../utils/prompt-cache-env.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
@@ -1612,6 +1612,11 @@ router.post('/chat', async (req, res) => {
   if (snapshotFlagOn(claudePath, resolveSnapshotOn())) {
     options.extraArgs = { ...(options.extraArgs || {}), 'system-prompt-snapshot': 'on' };
   }
+  // r113 恢复通道:上面这一问若因冷启动争抢探测失败过(Windows 上 Defender 首扫 +
+  // resolveClaudeAsync 并发的数秒窗口),失败结论在 HELP_MISS_TTL_MS 后可重探。
+  // fire-and-forget:有正文时立即返回零开销,过期时在后台重探,**下一条**消息就能拿到
+  // 正确结论,期间不冻 UI。绝不 await —— 它只是优化,不该挡住发送。
+  try { primeHelpCache(claudePath).catch(() => {}); } catch {}
 
   // 每条消息都打完整结构体(含 cwd/提示词片段)——默认噪声且日志转发时算轻微信息泄漏。
   // 仅 DEBUG 下打印。
