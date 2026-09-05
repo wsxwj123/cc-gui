@@ -39,7 +39,9 @@ export function winCmdSpawnSpec(resolved, args = [], opts = {}) {
 // 「本次起进程是否真的经 cmd.exe」的唯一判据 —— 与 chat.js claudeSpawn 的分支逐字同口径。
 // 注意**不等价**于 claude-resolver 的 claudeExecSpec(`win32 && !/\.exe$/i`):那边要把裸名/
 // 无扩展名 shim 也交给 cmd 按 PATHEXT 解析(r106),这里问的是"claudeSpawn 会不会走 cmd 分支"。
-// 两者故意不同,禁止统一。
+// 两者故意不同,禁止统一 —— 但这不等于"无扩展名 shim 已被覆盖":claudeSpawn 对它走直执行,
+// Windows 的 CreateProcess 不做 PATHEXT 解析,会 ENOENT。已知缺口,只有 claudeExecSpec 那条
+// 路(--help / 版本探测)能跑通无扩展名 shim。判据保持不同是为了不破坏 r106 的探测链路。
 export function spawnViaCmdExe(binPath, platform = process.platform) {
   return platform === 'win32' && typeof binPath === 'string' && /\.(cmd|bat)$/i.test(binPath);
 }
@@ -53,13 +55,19 @@ export const WIN_CMD_LINE_MAX = 8191;
 // 结果算,不能拿原始参数长度猜 —— 每个内嵌引号在引用时会翻倍,6999 个引号的 prompt
 // 展开后是 14105 字符。不经 cmd.exe 时恒不判超(那条路的上限是另一套且会显式报错)。
 // 已知盲区:cmd 的 `%VAR%` 展开发生在引号内,展开后可能更长,无法在此建模(见文件头)。
+// 同时量出 `newline`:文件头第二条(cmd 在换行处截断整条命令行,后半段可能被当第二条命令
+// 执行)是引号挡不住的,与长度并列 —— 短参数也能因此不可派发,调用方按这一位拒掉即可。
 export function winCmdLineBudget(binPath, args, opts) {
   // opts 显式传 null 时解构默认值不生效(默认值只认 undefined),故在函数体里归一。
   const { platform = process.platform, max = WIN_CMD_LINE_MAX } = (opts && typeof opts === 'object') ? opts : {};
   const limit = max;
-  if (!spawnViaCmdExe(binPath, platform)) return { viaCmd: false, length: 0, limit, over: false };
-  const s = winCmdSpawnSpec(binPath, args);
+  if (!spawnViaCmdExe(binPath, platform)) return { viaCmd: false, length: 0, limit, over: false, newline: false };
+  const list = Array.isArray(args) ? args : [];
+  const s = winCmdSpawnSpec(binPath, list);
   const length = [s.file, ...s.args].join(' ').length;
-  return { viaCmd: true, length, limit, over: length > limit };
+  return {
+    viaCmd: true, length, limit, over: length > limit,
+    newline: list.some((a) => /[\r\n]/.test(String(a))),
+  };
 }
 
