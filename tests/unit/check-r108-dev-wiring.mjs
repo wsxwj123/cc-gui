@@ -234,10 +234,37 @@ check('W15d 复查用 get 不用 has', () => {
     'await 之后的复查不是 `if (_helpCache.get(key)) return true;`(用 has 会丢掉反向交错的正文)');
 });
 
-check('W16 预热与同步探测共用同一张 _helpCache(否则预热白热)', () => {
+check('W16 预热与同步探测共用同一张正文表 _helpCache(否则预热白热)', () => {
   const src = read('server/utils/prompt-cache-env.js');
-  const maps = src.match(/new Map\(\)/g) || [];
-  assert.equal(maps.length, 1, `prompt-cache-env.js 里有 ${maps.length} 张 Map,预热与同步探测必须共用一张`);
+  // r113 契约 v2:失败记录与在飞标记是独立容器,文件里的 Map/Set 不再只有一张 ——
+  // 原来的「new Map() 恰好 1 张」计数锁已失效。改锁语义:正文表只声明一处,
+  // 且 cliSupportsFlag 与 primeHelpCache 两个函数体都直接读写它。
+  const decls = src.match(/(?:const|let|var)\s+_helpCache\s*=/g) || [];
+  assert.equal(decls.length, 1, `_helpCache 被声明了 ${decls.length} 处,正文表必须只有一张`);
+  const bodyOf = (name) => {
+    const m = new RegExp(`(?:export\\s+)?(?:async\\s+)?function\\s+${name}\\b`).exec(src);
+    if (!m) return '';
+    let i = src.indexOf('(', m.index);
+    if (i < 0) return '';
+    let d = 0;
+    for (; i < src.length; i++) {
+      if (src[i] === '(') d++;
+      else if (src[i] === ')') { d--; if (d === 0) { i++; break; } }
+    }
+    const open = src.indexOf('{', i);
+    if (open < 0) return '';
+    d = 0;
+    for (let j = open; j < src.length; j++) {
+      if (src[j] === '{') d++;
+      else if (src[j] === '}') { d--; if (d === 0) return src.slice(open, j + 1); }
+    }
+    return '';
+  };
+  for (const n of ['cliSupportsFlag', 'primeHelpCache']) {
+    const body = bodyOf(n);
+    assert.ok(body.length > 0, `切不出 ${n} 的函数体(不是 function 声明?)`);
+    assert.ok(/_helpCache\./.test(body), `${n} 没有直接读写 _helpCache —— 两者必须共用同一张正文表`);
+  }
   assert.ok(/export async function primeHelpCache[\s\S]*?_helpCache\.set\(key, help\);/.test(src), 'primeHelpCache 没写进 _helpCache');
 });
 

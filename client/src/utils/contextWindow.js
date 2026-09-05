@@ -85,6 +85,51 @@ export function resolveBadgeWindow(opts) {
   return { window: null, source: null };
 }
 
+// r113:徽章分母三个写入点(/api/model-window 回写、init 的 system/context_window、
+// result 的 modelUsage)的**唯一**仲裁入口。包在 resolveBadgeWindow 外面,不另写优先级。
+//
+// 为什么要包一层:旧接线里三处各自拼装 meta,init 那处甚至完全绕过纯函数直写显式窗口
+// (官方 200K 模型在设置页选 1M → 整回合显示 xx/1M,压缩横幅与 ≥80% 红线一并被压住,
+// 回合末有 modelUsage 才钳回去 → 每轮"开头掉到 1/5、结尾跳回",没有 modelUsage 时不自愈);
+// 且 meta 只存**仲裁结果**不存**原始输入**,后到的事件无法重算、只能靠 prevMeta.source 反推,
+// 反推口径一漏就是"显式值小于 CLI 自报时方向反了"。
+//
+// 修法:meta 存**原始输入槽位**(linked/linkedSource/linkedOrigin/provider/providerOrigin/cli),
+// 每个写入点只发自己知道的那一槽,合并后整体重算 ⇒ 顺序任意、重复送达结果一致(幂等)。
+//   patch 缺键或值 undefined = 该槽保持原值;值 null = 显式清空该槽。
+// 钳位上界:cli 槽有值用它;没有则在 linkedSource==='explicit' 时注入"CLI 自认"估计 ——
+//   Anthropic 家族用 nativeContextWindow(model),其他模型名恒 200K(CLI 对不认识的名字
+//   自报恒 200K,r103 实测)。只在 explicit 分支注入,linked/provider/[1m]/纯 CLI 四条路
+//   逐字不变。兜底方向是取小:估不准时分母偏小 = 百分比偏大 = 告警更早,绝不压住红线。
+// 永不抛(调用点在流事件回调里,抛一次就吞掉整条 result 处理)。
+export function reconcileBadgeWindow(prevMeta, patch, model) {
+  const prev = (prevMeta && typeof prevMeta === 'object' && !Array.isArray(prevMeta)) ? prevMeta : {};
+  const p = (patch && typeof patch === 'object' && !Array.isArray(patch)) ? patch : {};
+  const id = typeof model === 'string' ? model : '';
+  const pos = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+  const str = (v) => (typeof v === 'string' && v ? v : null);
+  // undefined/缺键 = 不动该槽;null = 清空。归一在合并之后做(脏值一律归 null,不是保留原值)。
+  const slot = (name, norm) => norm(p[name] === undefined ? prev[name] : p[name]);
+  const linked = slot('linked', pos);
+  const linkedSource = slot('linkedSource', str);
+  const linkedOrigin = slot('linkedOrigin', str);
+  const provider = slot('provider', pos);
+  const providerOrigin = slot('providerOrigin', str);
+  const cli = slot('cli', pos);
+  const cliBelief = /claude|anthropic|opus|sonnet|haiku/i.test(id) ? nativeContextWindow(id) : 200_000;
+  // linked 也要非空:脏值被归 null 而 linkedSource 仍留 'explicit' 时,若只看 source
+  // 就会把估计值当成"CLI 自报"写进结果。现有三个写入点触不到这个组合,纯防御。
+  const clampBase = cli ?? ((linked && linkedSource === 'explicit') ? cliBelief : null);
+  const { window, source } = resolveBadgeWindow({
+    cliWindow: clampBase, linkedWindow: linked, linkedSource, providerWindow: provider, model: id,
+  });
+  let origin = null;
+  if (source === '1m' || source === 'cli') origin = source;
+  else if (source === 'provider') origin = providerOrigin ?? 'provider';
+  else if (source === 'explicit' || source === 'linked') origin = linkedOrigin ?? source;
+  return { window, source, origin, linked, linkedSource, linkedOrigin, provider, providerOrigin, cli, at: Date.now() };
+}
+
 export function nativeContextWindow(model) {
   const id = (model || '').toLowerCase().trim();
   if (/\[1m\]/i.test(id)) return 1_000_000;

@@ -13,14 +13,14 @@ import { dropPendingForSession, requestElicitation, requestPermission, requestUs
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude, resolveSdkClaude, logSdkClaudeOnce } from '../utils/claude-resolver.js';
-import { winCmdSpawnSpec } from '../utils/win-cmd.js';
+import { winCmdSpawnSpec, spawnViaCmdExe } from '../utils/win-cmd.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { contextTimeoutBudget, latestCountTokensOutcome } from '../utils/context-tokens.js';
 import { canonicalCwd } from '../utils/safe-path.js';
 import { GENUI_SECTION_TEXT } from '../utils/genui-section.js';
 import { broadcast, clients } from '../broadcast.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
-import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn } from '../utils/prompt-cache-env.js';
+import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCache } from '../utils/prompt-cache-env.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
@@ -280,7 +280,7 @@ export function resolveCompactWindowSettings(model) {
 export function claudeSpawn(args, opts) {
   const resolved = resolveClaude()?.path || null;
   if (process.platform === 'win32') {
-    if (resolved && /\.(cmd|bat)$/i.test(resolved)) {
+    if (spawnViaCmdExe(resolved)) {
       const { args: finalArgs, tempFiles } = jsonArgsToTempFiles(args);
       // r110:引号规则统一走 winCmdSpawnSpec(每 token 独立引号 + verbatim),旧写法会让参数里的
       // `< > | & ^` 被 cmd 当元字符解释掉。
@@ -1612,6 +1612,11 @@ router.post('/chat', async (req, res) => {
   if (snapshotFlagOn(claudePath, resolveSnapshotOn())) {
     options.extraArgs = { ...(options.extraArgs || {}), 'system-prompt-snapshot': 'on' };
   }
+  // r113 恢复通道:上面这一问若因冷启动争抢探测失败过(Windows 上 Defender 首扫 +
+  // resolveClaudeAsync 并发的数秒窗口),失败结论在 HELP_MISS_TTL_MS 后可重探。
+  // fire-and-forget:有正文时立即返回零开销,过期时在后台重探,**下一条**消息就能拿到
+  // 正确结论,期间不冻 UI。绝不 await —— 它只是优化,不该挡住发送。
+  try { primeHelpCache(claudePath).catch(() => {}); } catch {}
 
   // 每条消息都打完整结构体(含 cwd/提示词片段)——默认噪声且日志转发时算轻微信息泄漏。
   // 仅 DEBUG 下打印。
@@ -2629,6 +2634,9 @@ router.post('/chat/title', async (req, res) => {
       // 布局推成包内 bin\claude.exe —— 那是 SDK 走的另一条路,拿它探能力对不上这里的进程。
       // 副作用(r108-建5):Windows 上因此有两条 --help 缓存键(.cmd 与包内 .exe),启动预热
       // (index.js 的 primeHelpCache)对两条各热一次。
+      // 与 1619 行同形态的恢复触发点:Windows 上这条 .cmd 键与 SDK 的包内 .exe 键是两条
+      // 独立缓存,只有前者原先有重探入口。fire-and-forget,绝不 await(标题生成不该被挡)。
+      try { primeHelpCache(resolveClaude()?.path || '').catch(() => {}); } catch {}
       const titleArgs = buildTitleArgs({ claudePath: resolveClaude()?.path || '', model });
       proc = claudeSpawn(titleArgs, {
         cwd: titleCwd,

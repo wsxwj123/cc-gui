@@ -220,10 +220,19 @@ check('D1 notes.md 不再写"`.msi` 均可"', () => {
 
 console.log('\n§5 agents.js:--bg prompt 长度上限 + 守卫注释');
 
-check('E1 Windows 分支有 7000 字符上限,文案含当前长度', () => {
+// r113 §5.2 修订:判据从"平台 + 原始 prompt.length"换成"本次是否真经 cmd.exe + 展开后的
+// 命令行长度"(winCmdLineBudget)。旧判据两头都错:.exe 装法(不经 cmd)7001 字符被错拒,
+// .cmd 装法里 6999 个引号展开成 14105 字符却被放行。
+check('E1 守卫判据是 winCmdLineBudget,不再有 7000 字面量与自带平台正则', () => {
   const src = read('server/routes/agents.js');
-  assert.match(src, /process\.platform === 'win32' && prompt\.length > 7000/);
-  assert.match(src, /长度上限 7000 字符,当前 \$\{prompt\.length\} 字符/);
+  assert.match(src, /winCmdLineBudget\(/, '守卫没走 winCmdLineBudget(展开后长度)');
+  assert.equal(/prompt\.length\s*>/.test(src), false, '仍按原始 prompt.length 判长度');
+  assert.equal(/\b7000\b/.test(src), false, 'agents.js 仍有 7000 字面量');
+  assert.equal(/\.\(cmd\|bat\)/.test(src), false, '平台判定必须收在 spawnViaCmdExe,agents.js 不得自带正则');
+  const line = src.split('\n').find((l) => l.includes('改用会话内发送')) || '';
+  assert.ok(line.length > 0, '文案必须保留"改用会话内发送"建议(r111 §5 口径)');
+  assert.match(line, /\$\{/, '文案里的实际长度必须是算出来的展开长度');
+  assert.equal(/prompt\.length/.test(line), false, '文案仍在报 prompt.length,不是展开后的命令行长度');
 });
 
 check('E2 原注入守卫逻辑一字未动,注释改成"纵深防御"', () => {

@@ -12,7 +12,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { pickCliContextWindow, resolveBadgeWindow } from '../../client/src/utils/contextWindow.js';
+// 命名空间导入:reconcileBadgeWindow 还不存在时,失败落在 ⑤ 段那条断言上,
+// 而不是 ESM 链接阶段整文件炸掉(那样 ①–④ 一条都跑不到,看不出有没有连带回归)。
+import * as CW from '../../client/src/utils/contextWindow.js';
+const { pickCliContextWindow } = CW;
 
 // fixture:spike-a 真实 entry 形态
 const entry = (contextWindow, extra = {}) => ({
@@ -72,33 +75,17 @@ assert.equal(pickCliContextWindow({ a: entry(NaN), b: entry(200000) }, 'a'), nul
 // provider"让分母显示与 CLI 实际压缩行为相反(用户实报:手填 1M,一轮后徽章变回 200k)。
 {
   const cache = new Map(); const meta = new Map();
-  // 照抄 App.jsx R8-6 的写入守卫
-  const writeCli = (m, w) => {
-    const prev = meta.get(m);
-    const gui = prev && prev.source !== 'cli' ? cache.get(m) : null;
-    const picked = resolveBadgeWindow({
-      cliWindow: w,
-      linkedWindow: prev?.source === 'linked' ? gui : null,
-      providerWindow: prev?.source === 'provider' ? gui : null,
-      model: m,
-    });
-    cache.set(m, picked.window);
-    meta.set(m, picked.source === 'cli'
-      ? { source: 'cli', origin: 'cli', at: Date.now() }
-      : { source: picked.source, origin: prev?.origin || picked.source, at: Date.now() });
+  // r113 §5.4:三个写入点不再各自拼装 meta,一律 prevMeta + patch 过同一个仲裁入口。
+  assert.equal(typeof CW.reconcileBadgeWindow, 'function',
+    'r113 §6.1 要求 contextWindow.js 导出 reconcileBadgeWindow(三个写入点共用的仲裁入口)');
+  const write = (m, patch) => {
+    const picked = CW.reconcileBadgeWindow(meta.get(m) || null, patch, m);
+    cache.set(m, picked.window); meta.set(m, picked);
   };
-  const writeProvider = (m, v) => {   // 照抄 useResolvedWindow 的 fetch 回写
-    const prev = meta.get(m);
-    const picked = resolveBadgeWindow({
-      cliWindow: prev?.source === 'cli' ? cache.get(m) : null,
-      linkedWindow: prev?.source === 'linked' ? cache.get(m) : null,
-      providerWindow: v,
-      model: m,
-    });
-    if (!prev || picked.source === 'provider' || picked.source === '1m') {
-      cache.set(m, picked.window); meta.set(m, { source: picked.source, at: Date.now() });
-    }
-  };
+  const writeCli = (m, w) => write(m, { cli: w });                       // 照抄 App.jsx R8-6 的写入
+  const writeProvider = (m, v) => write(m, {                             // 照抄 useResolvedWindow 的 fetch 回写
+    provider: Number.isFinite(v) ? v : null, providerOrigin: null,
+  });
   writeProvider('k3', 1000000);                 // provider 手填先到
   writeCli('k3', 200000);                       // CLI 自报到达
   assert.equal(cache.get('k3'), 1000000, 'cli 不得覆盖 provider 手填(r103 用户实报场景)');
@@ -122,13 +109,17 @@ assert.equal(pickCliContextWindow({ a: entry(NaN), b: entry(200000) }, 'a'), nul
   // 接线:result 分支消费 modelUsage 走纯函数,写缓存标 cli
   assert.ok(/pickCliContextWindow\(event\.modelUsage, turnModel\)/.test(app),
     'result 分支必须经 pickCliContextWindow(turnModel exact 匹配)');
-  assert.ok(/source: 'cli', origin: 'cli'/.test(app), '写入必须标 source:cli');
+  // r113 §6.2:result 消费点只送 { cli: cliWin.window },meta 由仲裁函数算(不再手写 source/origin)
+  assert.ok(/\{ cli: cliWin\.window \}/.test(app), 'result 消费点必须把 CLI 自报值作为 cli 槽送进仲裁');
   // r103 覆盖方向翻转:R8-6 写入的是仲裁结果 picked.window,绝不原样写 CLI 自报值
   assert.ok(/resolvedWindowCache\.set\(wk, picked\.window\)/.test(app),
     'R8-6 写入仲裁结果(cli 不再无条件覆盖)');
   assert.ok(!/resolvedWindowCache\.set\(wk, cliWin\.window\)/.test(app),
     'R8-6 不得把 CLI 自报值原样写进分母缓存');
-  assert.ok(/resolveBadgeWindow\(/.test(app), '覆盖方向判定收在纯函数 resolveBadgeWindow');
+  // r113 §7:仲裁入口唯一 —— 三个写入点都经 reconcileBadgeWindow,谁都不许直接调 resolveBadgeWindow
+  assert.equal((app.match(/reconcileBadgeWindow\(/g) || []).length, 3,
+    '三个写入点(fetch 回写 / init 消费 / result 消费)必须都经 reconcileBadgeWindow');
+  assert.ok(!/resolveBadgeWindow\(/.test(app), 'App.jsx 不得直接调用 resolveBadgeWindow(必须经 reconcileBadgeWindow 包装)');
   // 红线(历史事故 context-badge-usage-source):分子仍只来自 message_start/message_delta。
   // R8-6 的 result.modelUsage 块内绝不许出现 setLiveContextUsage / *Tokens 累积字段。
   const blkStart = app.indexOf("event.type === 'result' && event.modelUsage");

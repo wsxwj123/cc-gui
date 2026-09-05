@@ -80,7 +80,7 @@ import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, que
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
-import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow, resolveBadgeWindow } from './utils/contextWindow.js';
+import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow, reconcileBadgeWindow } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
@@ -686,7 +686,10 @@ export function formatPathShort(path) {
 // 在不同 provider 窗口可能不同)。值:number=解析到;null=后端明确无解析(官方/未知,
 // 前端走 nativeContextWindow 兜底);无 key=未查过。
 const resolvedWindowCache = new Map();
-// 缓存值来源标注(model → { source, origin, at })。
+// 缓存值仲裁槽(model → 六个**原始输入槽** { linked, linkedSource, linkedOrigin, provider,
+// providerOrigin, cli } + 派生的 { window, source, origin, at })。三个写入点各只发自己知道
+// 的那一槽,由 reconcileBadgeWindow 合并后**整体重算** ⇒ 顺序任意、重复送达结果一致;
+// 不再靠 prevMeta.source 反推(r113:反推口径一漏就是"显式值小于 CLI 自报时方向反了")。
 // source:'linked' = 服务端随 init 下发的压缩联动窗口(GUI 真下发给 CLI 的那个值,最权威);
 //        'provider' = /api/model-window(手填/实抓/规则表);'cli' = result.modelUsage 自报。
 // origin:细分出处('explicit'|'manual'|'fetched'|'rules'|'1m'),只用于徽章弹层文案。
@@ -738,26 +741,17 @@ function useResolvedWindow(model) {
     fetch(`/api/model-window?model=${encodeURIComponent(model)}`)
       .then((r) => r.json())
       .then((d) => {
-        const v = Number.isFinite(d?.window) ? d.window : null;
         // r103:provider 解析值优先于 CLI 自报(CLI 对第三方恒 200K,见 resolvedWindowMeta
         // 上方注释),但【解析为 null 时不清掉已有的 cli/linked 值】—— 官方模型后端恒返 null,
         // 清掉就把准确的 CLI 自报值抹了。已有更高优先级来源(linked)也保持不动。
+        // r113:只送自己知道的那两槽,优先级与钳位整体由 reconcileBadgeWindow 重算。
         const prevMeta = resolvedWindowMeta.get(model);
-        const picked = resolveBadgeWindow({
-          cliWindow: prevMeta?.source === 'cli' ? resolvedWindowCache.get(model) : null,
-          linkedWindow: prevMeta?.source === 'linked' ? resolvedWindowCache.get(model) : null,
-          linkedSource: prevMeta?.origin,
-          providerWindow: v,
-          model,
-        });
-        if (!prevMeta || picked.source === 'provider' || picked.source === '1m') {
-          resolvedWindowCache.set(model, picked.window);
-          resolvedWindowMeta.set(model, {
-            source: picked.source,
-            origin: picked.source === 'provider' ? (d?.source || null) : picked.source,
-            at: Date.now(),
-          });
-        }
+        const picked = reconcileBadgeWindow(prevMeta, {
+          provider: Number.isFinite(d?.window) ? d.window : null,
+          providerOrigin: d?.source ?? null,
+        }, model);
+        resolvedWindowCache.set(model, picked.window);
+        resolvedWindowMeta.set(model, picked);
         if (!dead) setWin(resolvedWindowCache.get(model));
       })
       .catch(() => { if (!dead) setWin(undefined); });
@@ -5226,8 +5220,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'system' && event.subtype === 'context_window'
               && Number.isFinite(event.linkedContextWindow) && event.linkedContextWindow > 0) {
             for (const wk of new Set([event.model, turnModel].filter(Boolean))) {
-              resolvedWindowCache.set(wk, event.linkedContextWindow);
-              resolvedWindowMeta.set(wk, { source: 'linked', origin: event.linkedContextWindowOrigin || event.linkedContextWindowSource || null, at: Date.now() });
+              // r113:显式设置的窗口必须经仲裁钳位(官方 200K 模型选 1M 时,直写会让整回合
+              // 显示 xx/1M,压缩横幅与 ≥80% 红线一并被压住)。只送 linked 三槽,重算交给纯函数。
+              const picked = reconcileBadgeWindow(resolvedWindowMeta.get(wk), {
+                linked: event.linkedContextWindow,
+                linkedSource: event.linkedContextWindowSource ?? null,
+                linkedOrigin: event.linkedContextWindowOrigin ?? null,
+              }, wk);
+              resolvedWindowCache.set(wk, picked.window);
+              resolvedWindowMeta.set(wk, picked);
               try { window.dispatchEvent(new CustomEvent('cgui:model-window-cli', { detail: { model: wk } })); } catch {}
             }
           }
@@ -5953,23 +5954,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             const cliWin = pickCliContextWindow(event.modelUsage, turnModel);
             if (cliWin) {
               for (const wk of new Set([cliWin.matchedModel, turnModel].filter(Boolean))) {
-                const prevMeta = resolvedWindowMeta.get(wk);
-                const guiWin = prevMeta && prevMeta.source !== 'cli' ? resolvedWindowCache.get(wk) : null;
-                const picked = resolveBadgeWindow({
-                  cliWindow: cliWin.window,
-                  linkedWindow: prevMeta?.source === 'linked' ? guiWin : null,
-                  // origin==='explicit'(用户显式选了压缩窗口)→ 纯函数按 min(显式值, CLI 自报)
-                  // 钳位:该场景下联动整个让位,CLI 仍按自己认的窗口算,显式值大于它是无效的。
-                  linkedSource: prevMeta?.origin,
-                  providerWindow: prevMeta?.source === 'provider' ? guiWin : null,
-                  model: wk,
-                });
+                // r113:只送 cli 一槽,其余槽从 prevMeta 继承后整体重算 —— 顺序任意、重复
+                // 送达结果一致。linkedSource==='explicit' 时纯函数按 min(显式值, CLI 自报)
+                // 钳位:该场景下联动整个让位,CLI 仍按自己认的窗口算,显式值大于它是无效的。
+                const picked = reconcileBadgeWindow(resolvedWindowMeta.get(wk), { cli: cliWin.window }, wk);
                 // 写入仲裁结果(不是 cliWin.window):GUI 侧来源胜出时它就是原值,写回等价于
                 // 不动;explicit 钳位时新值必须真正落缓存,否则徽章还显示未钳的显式值。
                 resolvedWindowCache.set(wk, picked.window);
-                resolvedWindowMeta.set(wk, picked.source === 'cli'
-                  ? { source: 'cli', origin: 'cli', at: Date.now() }
-                  : { source: picked.source, origin: prevMeta?.origin || picked.source, at: Date.now() });
+                resolvedWindowMeta.set(wk, picked);
                 try { window.dispatchEvent(new CustomEvent('cgui:model-window-cli', { detail: { model: wk } })); } catch {}
               }
             }

@@ -1,0 +1,105 @@
+===== check-r113-server =====
+  ✗ [修前应红] G1 §4.1 判定走 winCmdLineBudget,且喂的是 resolveClaude 解析出的路径
+  ✗ [修前应红] G2 §4.1 文案含展开后的实际长度(插值,不是写死的 7000)
+  ✗ [修前应红] G4 §4.1 顺序:长度判定发生在 writeBgHookSettings 之前(拒时不留孤儿文件)
+  ✗ [修前应红] G5 §7 不得出现:agents.js 里没有字面量 7000
+  ✗ [修前应红] G7 §7 不得出现:agents.js 没有 prompt.length > 形态的长度守卫
+  ✗ [修前应红] L1 §7 必须出现:win-cmd.js 导出 spawnViaCmdExe / winCmdLineBudget / WIN_CMD_LINE_MAX
+  ✗ [修前应红] L2 §7 必须出现:chat.js claudeSpawn 体内调 spawnViaCmdExe(
+  ✗ [修前应红] L4 §7 不得出现:claudeSpawn 体内不再有裸的 /\.(cmd|bat)$/i 正则
+  ✗ [修前应红] L5 §7 必须出现:prompt-cache-env.js 导出 HELP_MISS_TTL_MS
+  ✗ [修前应红] L6 §7 必须出现:chat.js 有不 await 的 primeHelpCache( 恢复触发点
+  ✗ [修前应红] L7 §1.7 恢复触发点与 snapshotFlagOn 在同一处(±1500 字符内)
+  ✗ [修前应红] L10 §7 不得出现:primeHelpCache 入口的 _helpCache.has(
+exit=1
+
+===== check-r113-client =====
+  ✗ [修前应红] R20 原始输入存进 meta 供后续重算(六个槽按 patch 原值落位)
+  ✗ [修前应红] R21 origin 规则:source='1m'→'1m';'cli'→'cli';provider 缺 providerOrigin → 'provider'
+  ✗ [修前应红] C1 §7 必须出现:contextWindow.js 导出 reconcileBadgeWindow
+  ✗ [修前应红] C2 §7 必须出现:reconcileBadgeWindow 体内复用 resolveBadgeWindow( 与 nativeContextWindow(
+  ✗ [修前应红] C3 §7 必须出现:App.jsx 里 reconcileBadgeWindow( 恰好出现 3 次(三个写入点)
+  ✗ [修前应红] C4 §7 必须出现:resolvedWindowMeta.set( 的次数 == reconcileBadgeWindow( 的次数
+  ✗ [修前应红] C5 §7 不得出现:init 直写 resolvedWindowCache.set(…, event.linkedContextWindow)(本轮 bug 本体)
+  ✗ [修前应红] C7 §7 不得出现:App.jsx 直接调用 resolveBadgeWindow((必须经 reconcileBadgeWindow 包装)
+  ✗ [修前应红] C8 §7 三处写入点统一:每个 resolvedWindowCache.set( 写的都是 picked.window
+  ✗ [修前应红] C9 §6.2 init 写入点入参:linked/linkedSource/linkedOrigin 三键取自 event.linkedContextWindow*
+  ✗ [修前应红] C10 §6.2 result 写入点入参:patch 只送 { cli: cliWin.window }
+  ✗ [修前应红] C11 §6.2 fetch 回写入参:provider 槽 + providerOrigin 槽
+exit=1
+
+===== check-r108-windows-review =====
+  ✓ H6 先 trim 再去引号,混合形态都规整
+  ✓ H7 反向:路径中间的引号不动(只去首尾)
+  ✓ H8 边界:空串 → 空数组
+  ✓ H9 边界:null/undefined/数字/对象 → 空数组或不抛
+
+I. logSdkClaudeOnce 默认 logger
+  ✓ I1 不传 log 时默认用 console.error(不是 console.log)
+  ✓ I2 显式传入 log 时用传入的,不碰 console.error
+
+86 绿 / 1 红
+红:
+  - A7 probe 返回空串 → resolve false;TTL 内不重探,TTL 到点重探并返回 true
+exit=1
+
+===== check-r111-win-review-375 =====
+§5 agents.js:--bg prompt 长度上限 + 守卫注释
+  FAIL E1 守卫判据是 winCmdLineBudget,不再有 7000 字面量与自带平台正则
+       守卫没走 winCmdLineBudget(展开后长度)
+  ok  E2 原注入守卫逻辑一字未动,注释改成"纵深防御"
+  ok  E3 chat.js MODEL_ARG_RE 注释同源更新(白名单降级为纵深防御)
+
+§6 claude-resolver:import 回到顶部 import 块
+  ok  F1 winCmdSpawnSpec 的 import 在第一个函数声明之前
+
+22 通过 / 1 失败
+失败:
+  - E1 守卫判据是 winCmdLineBudget,不再有 7000 字面量与自带平台正则
+exit=1
+
+===== check-badge-cli-window =====
+    at ModuleJob.run (node:internal/modules/esm/module_job:437:25)
+    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:639:26)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: 'undefined',
+  expected: 'function',
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+Node.js v25.9.0
+exit=1
+
+===== check-r103-dev-badge-window =====
+    at ModuleJob.run (node:internal/modules/esm/module_job:437:25)
+    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:639:26)
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5) {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: '==',
+  diff: 'simple'
+}
+
+Node.js v25.9.0
+exit=1
+
+===== check-r103-window-denominator =====
+  ✓ C11 弹层可达文本里五种分母来源字样齐全(手填/实抓/规则表/CLI 自报/[1m],BRIEF 需求 2)
+  ✓ C12 来源文案由数据算出、不是写死一句话(label helper 必须收参)
+  ✓ C13 弹层仍渲染 winSource(说明位没被删)
+
+[D] 既有导出回归
+  ✓ D1 contextWindow.js 既有导出仍在(nativeContextWindow / pickCliContextWindow / isBareClaudeAlias)
+  ✓ D2 nativeContextWindow 兜底表口径未被顺手改动(抽样 4 条)
+  ✓ D3 pickCliContextWindow 非法值纪律未变(0 / 字符串 / NaN 一律 null)
+
+—— check-r103-window-denominator: 64 绿 / 1 红(共 65 条)——
+红的条目:
+  ✗ C7 R8-6 块经 reconcileBadgeWindow 仲裁,CLI 自报值只作为 cli 槽送入
+exit=1
+

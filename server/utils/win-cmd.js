@@ -36,3 +36,30 @@ export function winCmdSpawnSpec(resolved, args = [], opts = {}) {
   };
 }
 
+// 「本次起进程是否真的经 cmd.exe」的唯一判据 —— 与 chat.js claudeSpawn 的分支逐字同口径。
+// 注意**不等价**于 claude-resolver 的 claudeExecSpec(`win32 && !/\.exe$/i`):那边要把裸名/
+// 无扩展名 shim 也交给 cmd 按 PATHEXT 解析(r106),这里问的是"claudeSpawn 会不会走 cmd 分支"。
+// 两者故意不同,禁止统一。
+export function spawnViaCmdExe(binPath, platform = process.platform) {
+  return platform === 'win32' && typeof binPath === 'string' && /\.(cmd|bat)$/i.test(binPath);
+}
+
+// cmd.exe 单条命令行的字符上限。超过会被静默截断(不报错)(r111 沿用口径,未在 Windows
+// 真机复验),故凡经 cmd 传用户文本的调用方必须先量长度。直执行(CreateProcess)的上限是
+// 32767 且超限会显式报错,不在此列。
+export const WIN_CMD_LINE_MAX = 8191;
+
+// 量「这次真正交给 CreateProcess 的那条命令行」有多长:必须用 winCmdSpawnSpec 组装后的
+// 结果算,不能拿原始参数长度猜 —— 每个内嵌引号在引用时会翻倍,6999 个引号的 prompt
+// 展开后是 14105 字符。不经 cmd.exe 时恒不判超(那条路的上限是另一套且会显式报错)。
+// 已知盲区:cmd 的 `%VAR%` 展开发生在引号内,展开后可能更长,无法在此建模(见文件头)。
+export function winCmdLineBudget(binPath, args, opts) {
+  // opts 显式传 null 时解构默认值不生效(默认值只认 undefined),故在函数体里归一。
+  const { platform = process.platform, max = WIN_CMD_LINE_MAX } = (opts && typeof opts === 'object') ? opts : {};
+  const limit = max;
+  if (!spawnViaCmdExe(binPath, platform)) return { viaCmd: false, length: 0, limit, over: false };
+  const s = winCmdSpawnSpec(binPath, args);
+  const length = [s.file, ...s.args].join(' ').length;
+  return { viaCmd: true, length, limit, over: length > limit };
+}
+

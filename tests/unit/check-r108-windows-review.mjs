@@ -149,15 +149,22 @@ await check('A6 同一路径重复预热 → 第二次直接 true 且不重复 s
   assert.equal(calls, 1, '第二次不该再 spawn');
 });
 
-await check('A7 probe 返回空串 → resolve false;且空串也进缓存,再预热不重复 spawn', async () => {
+// r113 §5.1 修订:空串写的是【失败表】(时间戳),不是"缓存里已有该 key" —— 失败结论
+// 只在 HELP_MISS_TTL_MS 内短路,到点必须重探,否则一次 2s 超时就把快照参数关一整个进程。
+await check('A7 probe 返回空串 → resolve false;TTL 内不重探,TTL 到点重探并返回 true', async () => {
   const prime = need(cacheEnv, 'primeHelpCache');
   const p = freshPath('a7');
   let calls = 0;
   const first = await prime(p, async () => { calls++; return ''; });
   assert.equal(first, false);
   const second = await prime(p, async () => { calls++; return HELP_TEXT; });
-  assert.equal(second, true, '空串也是"缓存里已有该 key"');
-  assert.equal(calls, 1, '空串结果已缓存,不该重探');
+  assert.equal(second, false, '失败记录在 TTL 内 → resolve false(r113 §1.4-2)');
+  assert.equal(calls, 1, 'TTL 内不该重探');
+  const ttl = cacheEnv?.HELP_MISS_TTL_MS;
+  assert.equal(typeof ttl, 'number', '缺少导出 HELP_MISS_TTL_MS(r113 §1.2)');
+  const third = await prime(p, async () => { calls++; return HELP_TEXT; }, () => Date.now() + ttl);
+  assert.equal(third, true, 'TTL 到点重探拿到正文 → true(r113 §1.4-3)');
+  assert.equal(calls, 2, 'TTL 到点必须真的重探一次');
 });
 
 await check('A8 probe 抛错 → 不 reject,resolve false,且把失败当"不支持"缓存', async () => {

@@ -442,29 +442,25 @@ check('C5 App.jsx 消费 linkedContextWindow(链路两端都接上,不是只发�
 const R86_MARK = "event.type === 'result' && event.modelUsage";
 const r86At = APPC.indexOf(R86_MARK);
 const r86Blk = r86At > -1 ? braceBlock(APPC, r86At + R86_MARK.length) : '';
-// 实现方可能改用别的守卫名,这里给一组等价可接受的写法,不钉死单一命名。
-const GUI_SRC = /linked|guiWin|hasGui|resolveBadgeWindow|providerWin|winSrc|\.source/i;
-
 check('C6 R8-6 块仍存在(定位锚点没被改没)', () => {
   assert.ok(r86At > -1, `App.jsx 找不到锚点:${R86_MARK}`);
   assert.ok(r86Blk.length > 0, '花括号配对失败,切不出 R8-6 块');
 });
-check('C7 R8-6 块引用 GUI 侧窗口来源(去注释后)—— 有联动窗口时必须让位', () => {
-  assert.match(r86Blk, GUI_SRC,
-    'R8-6 块里没有任何 GUI 侧来源判定:CLI 自报仍会无条件顶掉手填的 1M');
+// r113 §7 重写:"引用了 GUI 侧来源"这种模糊判据换成硬锁 —— R8-6 只把 CLI 自报值当
+// 一个槽送进统一仲裁入口 reconcileBadgeWindow,让位与否由纯函数一处决定。
+check('C7 R8-6 块经 reconcileBadgeWindow 仲裁,CLI 自报值只作为 cli 槽送入', () => {
+  assert.match(r86Blk, /reconcileBadgeWindow\(/,
+    'R8-6 块没走统一仲裁入口:CLI 自报仍可能无条件顶掉手填的 1M');
+  assert.match(r86Blk, /\{ cli: cliWin\.window \}/,
+    'CLI 自报值必须作为 cli 槽送进仲裁(不是自己拼 meta)');
 });
-check('C8 R8-6 不得把 CLI 自报值原样写进分母缓存(契约③源码锁)', () => {
-  const direct = /resolvedWindowCache\.set\([^)]*cliWin\.window/.test(r86Blk);
-  if (!direct) {
-    // 已改走仲裁(把 cliWin.window 当候选之一喂给优先级函数),语义由 C7 守住。
-    console.log('    (提示:块内已无 set(..., cliWin.window) 直写形态 —— 走仲裁,语义由 C7 守)');
-    return;
-  }
-  const setAt = APPC.indexOf('resolvedWindowCache.set(', r86At);
-  const pre = APPC.slice(r86At, setAt);
-  assert.match(pre, /if\s*\(/, 'CLI 自报值直写分母缓存,前面连个 if 守卫都没有');
-  assert.match(pre, GUI_SRC,
-    '守卫只判了 cliWin 有没有值,没判 GUI 侧是否已有窗口来源 —— 这正是本轮 bug 本体');
+// r113 §7 重写:原来的"有直写就退而求其次查 if 守卫"分支去掉 —— 直写形态一律判红,
+// 且必须写仲裁结果 picked.window(钳位后的新值要落缓存,否则徽章还是旧分母)。
+check('C8 R8-6 写入的是仲裁结果 picked.window,绝不直写 CLI 自报值', () => {
+  assert.equal(/resolvedWindowCache\.set\([^)]*cliWin\.window/.test(r86Blk), false,
+    'CLI 自报值被原样写进分母缓存 —— 这正是本轮 bug 本体');
+  assert.match(r86Blk, /resolvedWindowCache\.set\(wk, picked\.window\)/,
+    'R8-6 必须把仲裁结果写回缓存(explicit 钳位后的新值要落缓存)');
 });
 check('C9 红线回归:R8-6 块只碰分母,绝不写分子(setLiveContextUsage / *Tokens)', () => {
   assert.ok(!/setLiveContextUsage/.test(r86Blk), 'R8-6 块写了徽章分子(usage 累积口径历史事故)');
