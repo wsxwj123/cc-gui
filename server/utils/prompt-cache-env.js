@@ -99,16 +99,23 @@ export function promptCacheMemoEquals(a, b) {
 // 参数校验之前,老版本照样打出 Usage)。**按二进制路径缓存整份 help 文本**,同一个
 // 二进制探多少个 flag 都只跑一次子进程;探测失败/超时一律按「不支持」处理 ——
 // 少一半优化远好过让对话起不来。
-// 两张表,语义严格区分 —— 用同一个空串同时表示「探到了正文、但里面没这个 flag」与
+// 三类记录,语义严格区分 —— 用同一个空串同时表示「探到了正文、但里面没这个 flag」与
 // 「根本没探到(超时/ENOENT/非零退出)」是 r113 Bug 1 的根:Windows 冷启动窗口内一次
 // 2s 同步探测超时,就把「不支持」写死成整个进程的永久结论,随后到达的预热正文再也
 // 覆盖不进去,--system-prompt-snapshot 本进程恒不加、缓存命中率悄悄塌回 8%。
-//   · _helpCache:只存**非空** help 正文(探测成功)。空串永不入表。
-//   · _helpMiss :失败/在飞台账,值 = 时间戳。失败结论带时效,预热到点会重探。
+//   · _helpCache   :只存**非空** help 正文(探测成功)。空串永不入表。
+//   · _helpMiss    :失败记录 { at, from: 'sync' | 'prime' }。记最近一次探测失败及其来源。
+//   · _helpInflight:在飞标记,只在一次预热从开始到结束期间存在。不是失败、不带时效。
+// 三者必须分开(r113 契约 v2):v1 拿一张 _helpMiss 同时当在飞占位和失败台账,于是
+// ① 在飞的预热会把同步兜底也一并挡掉(同步侧拿不到正文,该轮 flag 白丢);
+// ② 同步兜底的失败结论带上 TTL 反过来挡住预热,预热的正文覆盖不进来 —— 正是本 bug。
+// 现在:同步失败只挡同步侧(每条路径整个进程最多一次 2s 阻塞),预热自己失败才按 TTL
+// 挡后续预热,并发预热由在飞标记单独挡。
 // ponytail: 正文一旦探到就不再过期(换 claude 版本仍需重启 GUI 才重探),与仓内
-//           subscription-usage.js 的 userAgent() 同口径;带时效的只有失败。
+//           subscription-usage.js 的 userAgent() 同口径;带时效的只有预热失败。
 const _helpCache = new Map();
 const _helpMiss = new Map();
+const _helpInflight = new Set();
 
 // 失败结论的有效期。失败的现实成因是冷启动争抢(Defender 首扫 + resolveClaudeAsync 并发),
 // 几十秒后自愈:60s 足够短,用户装好/排除杀毒后一分钟内自动生效、不用重启 GUI;又足够长,
@@ -153,16 +160,26 @@ export async function primeHelpCache(claudePath, probeAsync = defaultHelpProbeAs
   // ① 已有正文 → 不 spawn。判据是"有没有正文"而不是"写过没"(r113:后者会让同步兜底
   //    失败写下的空串把预热永久挡在门外,正文再也覆盖不进去)。
   if (_helpCache.get(key)) return true;
-  // ② 失败/在飞记录还在 TTL 内 → 直接 false,不 spawn。过期则往下走 = 恢复通道。
-  const at = _helpMiss.get(key);
-  const t = Number(now()) || 0;
-  if (typeof at === 'number' && t - at < HELP_MISS_TTL_MS) return false;
-  // ③ 探测**开始前**先占位:一举拿到并发预热不双 spawn、"预热最多探一次"、失败自带时效。
-  _helpMiss.set(key, t);
+  // ② 另一次预热在飞 → 不 spawn、**不写任何记录**(在飞不是失败:写成失败会连同步兜底
+  //    一起挡掉)。返回 false 是因为"返回时正文表里还没有正文"。
+  if (_helpInflight.has(key)) return false;
+  // ③ 只有**预热自己**失败过、且还在 TTL 内才不重探。同步兜底失败(from 'sync')不挡预热
+  //    —— 那正是要靠预热恢复的场景。
+  const miss = _helpMiss.get(key);
+  if (miss && miss.from === 'prime' && (Number(now()) || 0) - miss.at < HELP_MISS_TTL_MS) return false;
+  // ④ 探测**开始前**先打在飞标记:并发预热不双 spawn。
+  _helpInflight.add(key);
   let help = '';
-  try { const r = await probeAsync(key); help = typeof r === 'string' ? r : ''; } catch { help = ''; }
-  if (!help) return false;              // 失败:③ 写的时间戳留着,TTL 到点后可重探
-  // ④ 竞态复查:异步探测最长 8s,这期间 cliSupportsFlag 的同步兜底可能已写过正文 → 不覆盖。
+  try { const r = await probeAsync(key); help = typeof r === 'string' ? r : ''; }
+  catch { help = ''; }
+  finally { _helpInflight.delete(key); }
+  if (!help) {
+    // 失败:同步兜底若已在这 8s 里探到正文,就不该被记成失败(结论已经是"支持")。
+    if (_helpCache.get(key)) return true;
+    _helpMiss.set(key, { at: Number(now()) || 0, from: 'prime' });
+    return false;
+  }
+  // ⑤ 竞态复查:异步探测最长 8s,这期间 cliSupportsFlag 的同步兜底可能已写过正文 → 不覆盖。
   // 判"有没有正文"用 get 不用 has(has 会把反向交错拿到的正文丢掉)。
   if (_helpCache.get(key)) return true;
   _helpCache.set(key, help);
@@ -176,8 +193,10 @@ export async function primeHelpCache(claudePath, probeAsync = defaultHelpProbeAs
 //   (缩进 40)这种提及别的选项名的正文,整份 includes 会把它们当成"支持";
 // ② 后界断言,避免 `--system-prompt` 被 `--system-prompt-snapshot` 误判成支持。
 // 选项行形态:`  --flag`、`  -c, --continue`、`  --allowedTools, --allowed-tools`。
-// 判定顺序即优先级:正文 > 失败记录 > 探一次。失败记录**无论是否过期**都直接返 false,
-// 于是每条 claude 路径在整个进程里最多一次 2s 同步阻塞;重试只走异步预热通道。
+// 判定顺序即优先级:正文 > 失败记录 > 探一次。失败记录**无论来源、无论是否过期**都直接
+// 返 false,于是每条 claude 路径在整个进程里最多一次 2s 同步阻塞;重试只走异步预热通道。
+// 预热**在飞**不算失败,不挡这里的同步探测(r108 W15b:预热还在跑时打开设置页,同步
+// 兜底照样探到正文,别让用户白等一轮)。
 export function cliSupportsFlag(claudePath, flag, probe = defaultHelpProbe, now = Date.now) {
   const key = String(claudePath || '');
   let help = _helpCache.get(key);
@@ -186,7 +205,7 @@ export function cliSupportsFlag(claudePath, flag, probe = defaultHelpProbe, now 
     let probed = '';
     try { const r = probe(key); probed = typeof r === 'string' ? r : ''; } catch { probed = ''; }
     if (probed) { _helpCache.set(key, probed); _helpMiss.delete(key); }
-    else { _helpMiss.set(key, Number(now()) || 0); return false; }
+    else { _helpMiss.set(key, { at: Number(now()) || 0, from: 'sync' }); return false; }
     help = probed;
   }
   if (!help) return false;
@@ -211,5 +230,5 @@ export function snapshotFlagOn(claudePath, snapshotEnvOn, supports = cliSupports
   return !!snapshotEnvOn && !!claudePath && supports(claudePath);
 }
 
-// 单测用:清掉探测缓存(生产代码不调用)。正文表与失败表必须一起清。
-export function _resetSnapFlagCache() { _helpCache.clear(); _helpMiss.clear(); }
+// 单测用:清掉探测缓存(生产代码不调用)。正文表、失败记录、在飞标记必须一起清。
+export function _resetSnapFlagCache() { _helpCache.clear(); _helpMiss.clear(); _helpInflight.clear(); }
