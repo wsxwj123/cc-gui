@@ -545,28 +545,28 @@ router.post('/agents/background/dispatch', async (req, res) => {
   // 挂上会改变它的既有行为(GUI 没开时,原本"卡着等、可事后在终端 attach 应答"的请求
   // 会变成立即拒绝)。注:acceptEdits 档下的非编辑类请求(Bash 等)照旧可能永久等待,
   // 那是本批之外的老问题,现在至少能在监控面板看见"等待授权"。
-  const needsHook = mode !== 'acceptEdits';
   // model 过白名单:Windows cmd.exe /c 下无空格+含 & 的 model 会被当命令分隔执行(RCE 绕权限)。
   // 注:--bg 要求 prompt 走位置参数无法改 stdin,现实 prompt 多含空格会被 libuv 引用;model 是干净活口。
   const safeModel = safeModelArg(model);
-  // 先把完整 argv 拼齐再量长度:hook 档的 --settings 路径是模块常量,可以先入 argv、
-  // 通过长度门之后再落文件(被拒时不留孤儿 settings 文件)。
   const args = ['--bg', prompt.trim(), '--permission-mode', mode];
-  if (needsHook) args.push('--settings', BG_HOOK_SETTINGS);
-  if (safeModel) args.push('--model', safeModel);
+  const modelArgs = safeModel ? ['--model', safeModel] : [];
   // 长度门只对"这次真的经 cmd.exe 起进程"的装法生效(.cmd/.bat),判据与量法都收在
   // winCmdLineBudget 里:量的是引号展开后交给 CreateProcess 的那条命令行,不是 prompt 原长。
   // 直执行的 .exe / 无扩展名 shim 走 CreateProcess(上限 32767 且超限显式报错),不设门。
-  const budget = winCmdLineBudget(resolveClaude()?.path || '', args);
+  // 量的是**最终**那条 argv:hook 档的 --settings 路径是模块常量(writeBgHookSettings 写的
+  // 就是它),可以先入账再落文件 —— 被拒时不留孤儿 settings 文件。
+  const hookArgs = mode !== 'acceptEdits' ? ['--settings', BG_HOOK_SETTINGS] : [];
+  const budget = winCmdLineBudget(resolveClaude()?.path || '', [...args, ...hookArgs, ...modelArgs]);
   if (budget.over) {
     return res.status(400).json({ error: `Windows 上后台代理的提示词经 cmd.exe 传递,展开后的命令行 ${budget.length} 字符,超过上限 ${budget.limit};请缩短提示词或改用会话内发送` });
   }
-  if (needsHook) {
+  if (mode !== 'acceptEdits') {
     // 挂不上 hook 就不派:这两档没有应答通道 = 代理必然卡在授权等待永不返回,
     // 那正是本通道要消灭的静默失败,不能"降级"成它。
-    try { await writeBgHookSettings(req.socket?.localPort); }
+    try { args.push('--settings', await writeBgHookSettings(req.socket?.localPort)); }
     catch (e) { return res.status(500).json({ error: `无法写入授权 hook 配置(${e.message});已取消派发` }); }
   }
+  args.push(...modelArgs);
   const dispatchedAt = Date.now();
   try {
     const proc = claudeSpawn(args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });
