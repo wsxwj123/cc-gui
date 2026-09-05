@@ -117,7 +117,9 @@ export function reconcileBadgeWindow(prevMeta, patch, model) {
   const providerOrigin = slot('providerOrigin', str);
   const cli = slot('cli', pos);
   const cliBelief = /claude|anthropic|opus|sonnet|haiku/i.test(id) ? nativeContextWindow(id) : 200_000;
-  const clampBase = cli ?? (linkedSource === 'explicit' ? cliBelief : null);
+  // linked 也要非空:脏值被归 null 而 linkedSource 仍留 'explicit' 时,若只看 source
+  // 就会把估计值当成"CLI 自报"写进结果。现有三个写入点触不到这个组合,纯防御。
+  const clampBase = cli ?? ((linked && linkedSource === 'explicit') ? cliBelief : null);
   const { window, source } = resolveBadgeWindow({
     cliWindow: clampBase, linkedWindow: linked, linkedSource, providerWindow: provider, model: id,
   });

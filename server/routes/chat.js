@@ -2634,6 +2634,9 @@ router.post('/chat/title', async (req, res) => {
       // 布局推成包内 bin\claude.exe —— 那是 SDK 走的另一条路,拿它探能力对不上这里的进程。
       // 副作用(r108-建5):Windows 上因此有两条 --help 缓存键(.cmd 与包内 .exe),启动预热
       // (index.js 的 primeHelpCache)对两条各热一次。
+      // 与 1619 行同形态的恢复触发点:Windows 上这条 .cmd 键与 SDK 的包内 .exe 键是两条
+      // 独立缓存,只有前者原先有重探入口。fire-and-forget,绝不 await(标题生成不该被挡)。
+      try { primeHelpCache(resolveClaude()?.path || '').catch(() => {}); } catch {}
       const titleArgs = buildTitleArgs({ claudePath: resolveClaude()?.path || '', model });
       proc = claudeSpawn(titleArgs, {
         cwd: titleCwd,

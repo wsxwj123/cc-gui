@@ -44,8 +44,9 @@ export function spawnViaCmdExe(binPath, platform = process.platform) {
   return platform === 'win32' && typeof binPath === 'string' && /\.(cmd|bat)$/i.test(binPath);
 }
 
-// cmd.exe 单条命令行的字符上限。超过会被静默截断(不报错),故凡经 cmd 传用户文本的
-// 调用方必须先量长度。直执行(CreateProcess)的上限是 32767 且超限会显式报错,不在此列。
+// cmd.exe 单条命令行的字符上限。超过会被静默截断(不报错)(r111 沿用口径,未在 Windows
+// 真机复验),故凡经 cmd 传用户文本的调用方必须先量长度。直执行(CreateProcess)的上限是
+// 32767 且超限会显式报错,不在此列。
 export const WIN_CMD_LINE_MAX = 8191;
 
 // 量「这次真正交给 CreateProcess 的那条命令行」有多长:必须用 winCmdSpawnSpec 组装后的

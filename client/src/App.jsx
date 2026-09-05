@@ -686,7 +686,10 @@ export function formatPathShort(path) {
 // 在不同 provider 窗口可能不同)。值:number=解析到;null=后端明确无解析(官方/未知,
 // 前端走 nativeContextWindow 兜底);无 key=未查过。
 const resolvedWindowCache = new Map();
-// 缓存值来源标注(model → { source, origin, at })。
+// 缓存值仲裁槽(model → 六个**原始输入槽** { linked, linkedSource, linkedOrigin, provider,
+// providerOrigin, cli } + 派生的 { window, source, origin, at })。三个写入点各只发自己知道
+// 的那一槽,由 reconcileBadgeWindow 合并后**整体重算** ⇒ 顺序任意、重复送达结果一致;
+// 不再靠 prevMeta.source 反推(r113:反推口径一漏就是"显式值小于 CLI 自报时方向反了")。
 // source:'linked' = 服务端随 init 下发的压缩联动窗口(GUI 真下发给 CLI 的那个值,最权威);
 //        'provider' = /api/model-window(手填/实抓/规则表);'cli' = result.modelUsage 自报。
 // origin:细分出处('explicit'|'manual'|'fetched'|'rules'|'1m'),只用于徽章弹层文案。

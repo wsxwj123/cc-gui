@@ -208,7 +208,6 @@ export function cliSupportsFlag(claudePath, flag, probe = defaultHelpProbe, now 
     else { _helpMiss.set(key, { at: Number(now()) || 0, from: 'sync' }); return false; }
     help = probed;
   }
-  if (!help) return false;
   const esc = String(flag).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`^ {1,4}(?:[-\\w]+, )*${esc}(?![\\w-])`, 'm').test(help);
 }

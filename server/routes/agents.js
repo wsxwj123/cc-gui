@@ -552,7 +552,8 @@ router.post('/agents/background/dispatch', async (req, res) => {
   const modelArgs = safeModel ? ['--model', safeModel] : [];
   // 长度门只对"这次真的经 cmd.exe 起进程"的装法生效(.cmd/.bat),判据与量法都收在
   // winCmdLineBudget 里:量的是引号展开后交给 CreateProcess 的那条命令行,不是 prompt 原长。
-  // 直执行的 .exe / 无扩展名 shim 走 CreateProcess(上限 32767 且超限显式报错),不设门。
+  // 直执行的 .exe / 无扩展名 shim 走 CreateProcess(上限 32767 且超限显式报错)(r111 沿用
+  // 口径,未在 Windows 真机复验),不设门。
   // 量的是**最终**那条 argv:hook 档的 --settings 路径是模块常量(writeBgHookSettings 写的
   // 就是它),可以先入账再落文件 —— 被拒时不留孤儿 settings 文件。
   const hookArgs = mode !== 'acceptEdits' ? ['--settings', BG_HOOK_SETTINGS] : [];
