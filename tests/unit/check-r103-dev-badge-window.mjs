@@ -85,19 +85,27 @@ for (const bad of [0, -1, NaN, Infinity, '1000000', null, undefined]) {
   const blkStart = app.indexOf("event.type === 'result' && event.modelUsage");
   assert.ok(blkStart > -1, 'R8-6 分支存在');
   const blk = app.slice(blkStart, blkStart + 2600);
-  assert.ok(/resolveBadgeWindow\(/.test(blk), 'R8-6 必须经 resolveBadgeWindow 定优先级');
+  // r113 §7:三个写入点统一经 reconcileBadgeWindow(它内部再调 resolveBadgeWindow),
+  // App.jsx 里不许再有第二套优先级拼装 —— init 那处绕过纯函数正是 r113 Bug 3 的本体。
+  assert.ok(/reconcileBadgeWindow\(/.test(blk), 'R8-6 必须经 reconcileBadgeWindow 定优先级');
+  assert.ok(!/resolveBadgeWindow\(/.test(app), 'App.jsx 不得直接调用 resolveBadgeWindow');
     // 红线:分子口径不动
   assert.ok(!/setLiveContextUsage/.test(blk), 'R8-6 块绝不写徽章分子');
   assert.ok(!/inputTokens|cacheReadInputTokens/.test(blk), 'R8-6 块只读 contextWindow');
   // 服务端下发的联动窗口有接线
   assert.ok(/subtype === 'context_window'/.test(app), '客户端消费服务端下发的 context_window 事件');
-  assert.ok(/source: 'linked'/.test(app), '下发值写缓存标 source:linked');
-  assert.ok(/event\.linkedContextWindowOrigin \|\| event\.linkedContextWindowSource/.test(app),
+  assert.ok(/linkedSource: event\.linkedContextWindowSource/.test(app),
+    'init 消费点必须把服务端来源原样作为 linkedSource 槽送进仲裁(explicit 钳位靠它)');
+  assert.ok(/linked: event\.linkedContextWindow\b/.test(app), 'init 消费点必须把显式窗口原值存进 linked 槽');
+  assert.ok(/linkedOrigin: event\.linkedContextWindowOrigin/.test(app),
     '读服务端来源字段用 linkedContextWindow* 前缀(不读裸 source/origin)');
   // 分母来源脚注
   assert.ok(/winSourceLabel/.test(app), '徽章弹层分母来源标签函数存在');
-  assert.ok(/linkedSource: prevMeta\?\.origin/.test(app),
-    'R8-6 与 fetch 回写都要把 origin 作为 linkedSource 传进纯函数(explicit 钳位靠它)');
+  assert.equal((app.match(/reconcileBadgeWindow\(/g) || []).length, 3,
+    '三个写入点(fetch 回写 / init 消费 / result 消费)都要经同一仲裁入口');
+  assert.equal((app.match(/resolvedWindowMeta\.set\(/g) || []).length,
+    (app.match(/reconcileBadgeWindow\(/g) || []).length,
+    '有写 meta 却没经仲裁的路径(或反之)');
   assert.ok(/resolvedWindowCache\.set\(wk, picked\.window\)/.test(blk),
     'R8-6 写入仲裁结果 picked.window(explicit 钳位后的新值必须落缓存)');
   assert.ok(!/resolvedWindowCache\.set\(wk, cliWin\.window\)/.test(blk),
