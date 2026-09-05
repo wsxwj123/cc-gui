@@ -15,7 +15,7 @@
 > 单看某个文件的逐条明细:`node tests/unit/check-r113-server.mjs`(每条自带 ✓/✗ 与标签)。
 >
 > 测试文件:
-> - `tests/unit/check-r113-server.mjs` —— Bug 1(help 缓存)+ Bug 2(--bg 长度守卫),67 条
+> - `tests/unit/check-r113-server.mjs` —— Bug 1(help 缓存)+ Bug 2(--bg 长度/换行守卫),77 条(其中 r113b 换行守卫 8 条:W22–W26、G11–G13)
 > - `tests/unit/check-r113-client.mjs` —— Bug 3(徽章分母钳位),45 条
 > - 另按 INTERFACE §5.4 改写了 5 个既有测试里点名的断言(见本文件第 5 节)
 
@@ -59,9 +59,16 @@
 | W16 | 脏入参 | args 传 null / 字符串 / 数字 / 对象;三个参数全传 null | 当成空数组,永不抛 |
 | W17 | 长度口径 | 与 `winCmdSpawnSpec` 拼出的整条命令行比对 | 逐字符相等(即 CreateProcess 真正收到的那条) |
 | W18 | 两个"要不要走 cmd"的判据故意不同,不许统一 | `claudeExecSpec('C:\npm\claude',…,'win32')` 与 `spawnViaCmdExe` 同一路径 | 前者仍返回 `cmd.exe`,后者返回 false,两者同时成立 |
+| W22 | **r113b 新增**:npm 装法(`.cmd`),prompt 里带换行 | `.cmd` 路径 + args 含 `\n` / `\r` / `\r\n` | `newline:true`;这条 prompt 很短所以 `over:false`(换行和长度是并列的两个维度) |
+| W23 | 不经 cmd.exe 的装法带换行不受影响 | `.exe` / 无扩展名 shim / 路径没解析到 / mac / linux,prompt 里带换行 | 一律 `newline:false`,多行任务照常派发 |
+| W24 | 正常单行任务不被误伤 | 空 prompt / 带空格 / 带引号和反斜杠 / 9000 个 a | 一律 `newline:false`;9000 个 a 仍 `over:true`(两个维度互不干扰) |
+| W25 | 换行落在哪一格都算 | 换行分别放在第一个参数、最后一个参数、prompt 行首 / 行尾 / 中间多处 | 一律 `newline:true` |
+| W26 | 脏入参 | args 传 null / 字符串 / 数字 / 对象;数组里混 null、数字、对象、布尔 | 不抛,`newline` 一定是布尔(不能是 undefined) |
 | G1 | 守卫按真实 claude 路径判,不是按平台 | 读 dispatch 路由源码 | 调用 `winCmdLineBudget`,附近能看到 `resolveClaude` |
 | G2 | 报错文案说的是"展开后多长" | 找含「改用会话内发送」的那行 | 有插值(算出来的长度),**不再**出现 `prompt.length` |
 | G4 | 被拒时不留垃圾文件 | 比较守卫与 `writeBgHookSettings` 的先后 | 长度判定在写 hook 设置文件**之前** |
+| G11 | **r113b 新增**:换行守卫接线 + 顺序 | 读 dispatch 路由源码 | 里面读了预算结果的 `.newline`,且这条判定排在 `writeBgHookSettings` **之前**(被拒时不留孤儿文件) |
+| G12 | 被拒时用户得看懂为什么 | 找那条 400 文案 | 同一行里既有「换行」也有「会话内发送」,且是 `status(400).json({ error … })` |
 
 ### Bug 3:官方账号 + 自动压缩窗口选 1M,整回合徽章分母被抬到 1M
 
@@ -125,6 +132,7 @@
 | W21 | 引号规则两条(r110/r111 的命根子) | `D:\` 与 `a\"b` 两个 token | 尾部反斜杠翻倍、内嵌引号前的反斜杠也翻倍 |
 | G3 | 超长时仍是 400 + JSON `error` 字段 + 含「上限」(前端只读 error) | 读文案附近源码 | `status(400).json({ error …})`,文案含「上限」「改用会话内发送」 |
 | G6 | agents.js 不自带 cmd/bat 正则 | grep | 找不到 |
+| G13 | 守卫不自己写换行判据(必须用 `winCmdLineBudget` 量出来的 `newline`) | grep 守卫区(dispatch 起点 → `writeBgHookSettings` 之间) | 找不到 `[\r\n]` 字符类、`'\n'` 字面量、`/…\n…/.test(` 形态 |
 | G8 | prompt 空/非字符串仍 400「prompt 必填」 | grep | 判据与文案都在 |
 | G9 | 单词里含 `& \| < > ^` 的注入守卫**逐字**未改 | grep 文案与判据 | 一字不差 |
 | G10 | 派发的仍是 `prompt.trim()`,白名单/模型参数仍在 | grep | 三项都在 |
@@ -189,6 +197,8 @@
 | M2 | **`.cmd` 装法的引号炸弹被拦** | Windows + npm 装法(`claude.cmd`),派发一个含约 7000 个英文双引号的 prompt | 400 报错,文案里的长度是**展开后的**(约 14105),不是 6999;且没有留下孤儿 hook 设置文件 |
 | M3 | **Windows 冷启动首条消息之后,快照参数真的加上了** | 冷启动 GUI(claude 未预热,`resolveClaudeAsync` 要数秒),立刻发第一条消息;等约 1 分钟后再发一条 | 第二条消息起,发给 CLI 的参数里带上 `--system-prompt-snapshot`;第三方缓存命中率从个位数回到九成 |
 | M4 | 超长命令行到底是截断还是报错 | INTERFACE §9 未验证假设 1:cmd.exe 超 8191 的真实行为 | 本轮不阻塞发版;只影响"为什么给 cmd 加门不给 CreateProcess 加门"的论证强度 |
+| M5 | **换行 prompt 必须被拒**(r113b 新增) | Windows + npm 装法(`claude.cmd`),直接打 `POST /api/agents/background/dispatch`,prompt 传两行文本(中间一个真换行) | 400,文案明说「不能含换行,请改成单行或改用会话内发送」;用户原文**没有被改写成单行**;没留下孤儿 hook 设置文件 |
+| M5b | 同一条两行 prompt 在别的装法上照常跑 | 同机换官方安装器(`claude.exe`)派发同一条;mac 上也派发同一条 | 两边都正常派发,不弹换行报错 |
 
 ### 明确**没有**覆盖的(别以为测过了)
 
@@ -198,6 +208,7 @@
 4. **并发/时序的真实性**:P9/P9b 用的是同一 tick 内的并发,不是真实的"启动预热 vs 用户发消息"跨事件循环竞争。
 5. **`isBareClaudeAlias`**:只锁了"导出还在",没锁行为(本轮 INTERFACE 未给出它的行为契约,由 `check-context-window` 覆盖)。
 6. **Windows 真机的路径解析**:`resolveClaude()` 在真 Windows 上解析出什么路径没有覆盖,测试里是直接喂的路径字符串。
+7. **cmd.exe 遇到换行到底怎么表现**(截断?后半行当第二条命令执行?):测试只验证「守卫把换行量出来并拒掉」,没验证不拒会发生什么 —— 那是 M5 之外的一个未验证假设,不阻塞发版。
 
 ---
 
@@ -218,3 +229,17 @@
 以及 `node ~/.claude/skills/platform-compat-review/scripts/crt-roundtrip.mjs server/utils/win-cmd.js` 必须 15/15。
 
 > 2026-09-05 契约 v2 修订(§1 同步失败不挡预热;预热自身失败才按 TTL 挡;并发预热用在飞标记):P10 改写为「T0 同步失败 → T0+TTL-1 预热探 1 次返回 true」,新增 P9c(在飞期间同步探测照常可探、第二次预热不 spawn)、P10b(sync 记录不挡预热 / prime 记录挡 TTL 两方向);check-r108-dev-wiring W16 由「恰好一张 Map」改为「正文表共用」语义锁。
+
+> 2026-09-06 契约 v3 修订(`winCmdLineBudget` 返回值新增 `newline`;经 cmd.exe 的装法上,
+> 含换行的 prompt 一律 400 拒绝、不得静默改写用户文本):新增 W22–W26(换行量得准不准)、
+> G11/G12(接线、顺序、文案)、G13(守卫不许自己写换行正则)。修前实跑:新增 8 条里 7 红
+> (W22–W26、G11、G12)、1 绿(G13),原有 69 条全绿。
+>
+> **⚠ 已知冲突,合入 v3 实现前必须先处理**:`check-r113-server.mjs` 里 W7(行 420)、
+> W8(行 427)、W17(行 497)三处把 `winCmdLineBudget` 的返回值**锁成 4 个键**
+> (`assert.deepEqual(…, { viaCmd, length, limit, over })` ×2 与
+> `assert.deepEqual(Object.keys(r).sort(), ['length','limit','over','viaCmd'])`)。
+> v3 加上 `newline` 键之后,这三条必然变红(已用「给真实返回值补一个 newline 键」的方式实测确认)。
+> 最小改法:两处期望对象各补 `newline: false`,W17 的键表改成
+> `['length','limit','newline','over','viaCmd']`(标题「返回四个键齐全」改成五个)。
+> 本轮测试设计代理按"只追加、不动既有 69 条"的指示**没有改**,留给主会话拍板。
