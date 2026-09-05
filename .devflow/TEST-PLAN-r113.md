@@ -216,3 +216,5 @@
 `check-compact-window-linkage`、`check-context-session`、`check-compat-key-model`、
 `check-r89-prompt-cache`、`tests/acceptance/**`;
 以及 `node ~/.claude/skills/platform-compat-review/scripts/crt-roundtrip.mjs server/utils/win-cmd.js` 必须 15/15。
+
+> 2026-09-05 契约 v2 修订(§1 同步失败不挡预热;预热自身失败才按 TTL 挡;并发预热用在飞标记):P10 改写为「T0 同步失败 → T0+TTL-1 预热探 1 次返回 true」,新增 P9c(在飞期间同步探测照常可探、第二次预热不 spawn)、P10b(sync 记录不挡预热 / prime 记录挡 TTL 两方向);check-r108-dev-wiring W16 由「恰好一张 Map」改为「正文表共用」语义锁。

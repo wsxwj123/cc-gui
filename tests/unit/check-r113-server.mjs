@@ -185,17 +185,17 @@ await green('P8 §1.4-1:已有非空正文的路径,预热不再 spawn', async (
   assert.equal(calls, 1);
 });
 
-await red('P9 §1.4-3 占位:并发两次预热同一路径,只探一次', async () => {
+await red('P9 §1.4-2 在飞标记:并发两次预热同一路径,只探一次', async () => {
   const prime = need(cacheEnv, 'primeHelpCache');
   const p = freshPath('p9');
   let calls = 0;
   const slow = () => { calls++; return new Promise((r) => setTimeout(() => r(HELP), 20)); };
   const [a] = await Promise.all([prime(p, slow, () => T0), prime(p, slow, () => T0)]);
-  assert.equal(calls, 1, '第二次重入必须被刚写的失败表占位短路');
+  assert.equal(calls, 1, '第二次重入必须被在飞标记短路(§1.4-2:不 spawn、不写记录)');
   assert.equal(a, true, '第一次拿到正文应 true');
 });
 
-await red('P9b §1.4-3 占位:并发的第二次预热按"失败表在 TTL 内"返回 false', async () => {
+await red('P9b §1.4-2 在飞标记:并发的第二次预热返回 false(返回时正文表还没正文)', async () => {
   const prime = need(cacheEnv, 'primeHelpCache');
   const p = freshPath('p9b');
   const slow = () => new Promise((r) => setTimeout(() => r(HELP), 20));
@@ -203,20 +203,56 @@ await red('P9b §1.4-3 占位:并发的第二次预热按"失败表在 TTL 内"�
   assert.equal(b, false, '返回时正文表里还没有正文 → 按 §1.4「true ⟺ 返回时有正文」应为 false');
 });
 
-await red('P10 §1.3-2 跨函数:同步探测失败后,TTL 内的预热不重探、TTL 到点重探', async () => {
+await red('P9c §1.4-2/§1.3-3:在飞标记不是失败记录 —— 被短路的第二次预热不写记录,同步探测照常', async () => {
+  const prime = need(cacheEnv, 'primeHelpCache');
+  const supports = need(cacheEnv, 'cliSupportsFlag');
+  const p = freshPath('p9c');
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const first = prime(p, () => gate, () => T0);                 // 预热挂起中 = 在飞
+  const second = await prime(p, async () => HELP, () => T0);
+  assert.equal(second, false, '在飞期间的第二次预热应直接 false 且不 spawn');
+  let syncCalls = 0;
+  const sync = supports(p, SNAP, () => { syncCalls++; return HELP; }, () => T0);
+  assert.equal(syncCalls, 1,
+    '在飞标记若被写成失败记录,同步侧会被 §1.3-2 短路 —— §1.4-2 要求"不写任何记录",§1.3-3 要求在飞不挡同步探测');
+  assert.equal(sync, true, '同步探到正文应返回 true');
+  release(HELP);
+  await first;
+});
+
+await red('P10 §1.4-3 跨来源:同步失败(sync 记录)不挡预热 —— TTL 内的预热照样探 1 次并成功', async () => {
   const supports = need(cacheEnv, 'cliSupportsFlag');
   const prime = need(cacheEnv, 'primeHelpCache');
   const ttl = cacheEnv?.HELP_MISS_TTL_MS;
   assert.equal(typeof ttl, 'number', '缺少导出 HELP_MISS_TTL_MS');
   const p = freshPath('p10');
-  assert.equal(supports(p, SNAP, () => { throw new Error('timeout'); }, () => T0), false);
+  assert.equal(supports(p, SNAP, () => { throw new Error('timeout'); }, () => T0), false, '同步探测失败应 false');
   let calls = 0;
   const inTtl = await prime(p, async () => { calls++; return HELP; }, () => T0 + ttl - 1);
-  assert.equal(calls, 0, '同步失败写的时间戳应让 TTL 内的预热直接短路');
-  assert.equal(inTtl, false);
-  const after = await prime(p, async () => { calls++; return HELP; }, () => T0 + ttl);
-  assert.equal(calls, 1, 'TTL 到点必须重探');
-  assert.equal(after, true);
+  assert.equal(calls, 1, 'sync 来源的失败记录不得挡住预热(v2:同步失败只挡同步侧)');
+  assert.equal(inTtl, true, '预热探到正文应 resolve true');
+});
+
+await red('P10b §1.4 跨来源两方向:sync 记录不挡预热;prime 记录在 TTL 内挡预热', async () => {
+  const supports = need(cacheEnv, 'cliSupportsFlag');
+  const prime = need(cacheEnv, 'primeHelpCache');
+  const ttl = cacheEnv?.HELP_MISS_TTL_MS;
+  assert.equal(typeof ttl, 'number', '缺少导出 HELP_MISS_TTL_MS');
+  // 方向一:同步失败写 sync 记录 → 紧接着(T0+1)的预热必须真的探
+  const a = freshPath('p10b-sync');
+  assert.equal(supports(a, '--x', () => { throw new Error('timeout'); }, () => T0), false);
+  let aCalls = 0;
+  assert.equal(await prime(a, async () => { aCalls++; return HELP; }, () => T0 + 1), true,
+    'sync 记录不挡预热');
+  assert.equal(aCalls, 1, 'sync 记录不挡预热:必须真的探一次');
+  // 方向二:预热自己失败写 prime 记录 → TTL 内的预热必须被挡
+  const b = freshPath('p10b-prime');
+  let bCalls = 0;
+  assert.equal(await prime(b, async () => { bCalls++; return ''; }, () => T0), false);
+  assert.equal(await prime(b, async () => { bCalls++; return HELP; }, () => T0 + ttl - 1), false,
+    'prime 记录在 TTL 内必须挡住预热');
+  assert.equal(bCalls, 1, 'prime 记录在 TTL 内不该重探');
 });
 
 await green('P11 §1.3-1:正文表命中 → 不调用 probe(哨兵)', async () => {
