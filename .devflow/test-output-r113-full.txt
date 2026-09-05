@@ -1,0 +1,704 @@
+# r113 验收全量测试完整输出(worktree HEAD cb324d08,锁定 f8a21797);逐文件 node <file>,完整 stdout+stderr,末尾 exit=<code>
+# 生成:2026-09-05 21:51:46
+
+===== check-agents-waiting-fields =====
+✓ check-agents-waiting-fields: 等待字段透传 + 只读后台条目 + 面板分桶全过
+exit=0
+
+===== check-badge-cli-window =====
+✓ check-badge-cli-window: 匹配四策略 + 非法值 + 覆盖方向(r103 翻转)+ 分子红线守卫 全过
+exit=0
+
+===== check-compact-window-linkage =====
+check-compact-window-linkage: all assertions passed
+exit=0
+
+===== check-compat-key-model =====
+✓ check-compat-key-model: key 去 model + 对账五态(同/换/错/超时/epoch) + 源码守卫 全过
+exit=0
+
+===== check-context-session =====
+PASS check-context-session
+exit=0
+
+===== check-context-window =====
+check-context-window: all assertions passed
+exit=0
+
+===== check-monitor-buckets =====
+✓ check-monitor-buckets: 监控面板 alive 语义 + workflow 截断全过
+exit=0
+
+===== check-override-dead =====
+✓ check-override-dead: 死判定/静默回落/清除幂等/活不误标/端点与前端守卫 全过
+exit=0
+
+===== check-override-pause =====
+check-override-pause: all passed
+exit=0
+
+===== check-permission-hook-bridge =====
+✓ check-permission-hook-bridge: allow/deny/不可达/非2xx/坏响应/超时/无工具名 七态 + 派发接线 + 卡片行为全过
+exit=0
+
+===== check-r100-dev-reapply =====
+check-r100-dev-reapply: OK
+exit=0
+
+===== check-r103-dev-badge-window =====
+✓ check-r103-dev-badge-window: 优先级四档 + 非法值 + 源码锁 全过
+exit=0
+
+===== check-r103-window-denominator =====
+
+[A] 纯函数 resolveBadgeWindow 优先级矩阵
+  ✓ A0 contextWindow.js 可被 node 直接 import(零依赖纯函数模块)
+  ✓ A1 resolveBadgeWindow 已导出且是函数
+  ✓ M1 第三方手填1M + CLI自报200k + 模型无[1m] → 分母 1M(联动值口径)
+  ✓ M2 第三方手填1M只到达 providerWindow(服务端未回传联动值)+ CLI 200k → 1M
+  ✓ M3 官方 claude + CLI自报200k + 无任何GUI侧窗口 → 200000(CLI 自报仍生效)
+  ✓ M4 模型名带[1m] → 1M,压过 linked/provider/cli 三者
+  ✓ M5 模型名带[1m] 且其他全缺 → 1M
+  ✓ M6 四项全缺 → null(不猜,不返回 0/undefined)
+  ✓ M7 linkedWindow 压过 providerWindow 与 cliWindow
+  ✓ M8 providerWindow 压过 cliWindow
+  ✓ M9 linkedWindow 比 cliWindow 小时【仍然】优先(不是取最大值)
+  ✓ M10 providerWindow 比 cliWindow 小时【仍然】优先(不是取最大值)
+  ✓ M11 反向用例:cliWindow 在任何情况下都不得覆盖已有的 GUI 侧来源
+  ✓ M12 linkedWindow 非法 → 降到 providerWindow
+  ✓ M13 linked + provider 都非法 → 降到 cliWindow
+  ✓ M14 三级全非法 → null
+  ✓ M15 linkedWindow 位上 14 种非法值全部被跳过(由 providerWindow 兜住)
+  ✓ M16 providerWindow 位上 14 种非法值全部被跳过(由 cliWindow 兜住)
+  ✓ M17 cliWindow 位上 14 种非法值全部被跳过 → null
+  ✓ M18 字符串数字 '1000000' 不被当合法窗口(必须真 number,与 pickCliContextWindow 同纪律)
+  ✓ M19 model 为 null/undefined/数字/对象/数组:不抛错,按"无 [1m]"处理
+  ✓ M20 model 首尾空白不影响 [1m] 命中
+  ✓ M21 [1m] 出现在模型名中间也命中
+  ✓ M22 [1m] 近似串一律不命中([1k] / 1m] / [1 m] / -1mm / -1m / [2m] / -2m)
+  ✓ M22b [1m] 大小写不敏感:[1M] / [1M] 混写同样命中 1M
+  ✓ M23a 【G1 已裁定】返回 { window, source } 两字段:命中 window 是 number、source 是非空字符串
+  ✓ M23b 形态无关:未命中时取出的窗口严格是 null(不是 undefined/0/false)
+  ✓ M23c source 必须区分四级来源(契约④弹层文案的数据源)
+  ✓ M24 纯函数:同参数连调两次结果一致,且不改写入参对象
+  ✓ M25 多余字段不影响结果(实现不许对未知字段挑刺)
+  ✓ M26 无参调用 resolveBadgeWindow() → { window:null, source:null }
+  ✓ M27 null / 非对象入参(0 / 'x' / [] / true)一律 { window:null, source:null },不抛错
+  ✓ E0 来源入参名定为 linkedSource(只给这一个别名也必须生效)
+  ✓ E1 官方模型 + 显式 500K + CLI 自报 200K → 200,000(取小)
+  ✓ E2 第三方 + 联动 1M(source linked)+ CLI 200K → 1,000,000(不钳)
+  ✓ E3 显式 100K + CLI 200K → 100,000(显式值更小时取显式值)
+  ✓ E4 显式 500K 但 CLI 自报缺失/非法 → 500,000(没得钳就不钳)
+  ✓ E5 [1m] 压过钳位:显式 500K + CLI 200K + 模型带 [1m] → 1,000,000
+  ✓ E6 来源缺省(没标 explicit)→ 不钳:联动 300K + CLI 200K → 300,000
+  ✓ E7 钳位只作用于 explicit:providerWindow 500K + CLI 200K 照旧不钳
+  ✓ E8 钳位后仍是 GUI 侧来源(source 非空,不得退化成 cli/null)
+
+  —— A 段小计:41 绿 / 0 红 ——
+
+[B] 联动窗口 → 徽章分母 接缝(沙箱 HOME,不碰真实 ~/.claude)
+  ✓ B0 server/routes/chat.js 可 import 且仍导出 resolveCompactWindowSettings
+  ✓ B1 用户原始场景:第三方中转 + provider 手填 1M + 未知模型 → 联动值 1000000
+  ✓ B2 端到端:该联动值 + CLI 自报 200k → 徽章分母仍是 1M(本轮要修的那一条)
+  ✓ B3 官方 OAuth(无 ANTHROPIC_BASE_URL)→ 无联动值 → 徽章分母采 CLI 自报 200k
+  ✓ B4 用户显式 autoCompactWindow=300000(explicit)+ CLI 自报 200K → 分母 200,000(钳位)
+  ✓ B5 provider 未填窗口且规则表未命中 → 无联动值 → 采 CLI 自报(BRIEF 验收第 3 条)
+  ✓ B6 小窗保护:provider 手填 64000 + CLI 自报 200k → 分母 64000(不许被放大)
+
+[C] 源码锁
+  ✓ C0 App.jsx / server/routes/chat.js 均可读
+  ✓ C1 chat.js 回传字段 linkedContextWindow(契约②)
+  ✓ C2 chat.js 回传字段 linkedContextWindowSource(契约②)
+  ✓ C3 chat.js 出现来源取值 'explicit' 与 'linked'(契约②枚举)
+  ✓ C4 linkedContextWindow 的回传点挨着 init(不是塞在别处的死代码)
+  ✓ C5 App.jsx 消费 linkedContextWindow(链路两端都接上,不是只发不收)
+  ✓ C6 R8-6 块仍存在(定位锚点没被改没)
+  ✓ C7 R8-6 块经 reconcileBadgeWindow 仲裁,CLI 自报值只作为 cli 槽送入
+  ✓ C8 R8-6 写入的是仲裁结果 picked.window,绝不直写 CLI 自报值
+  ✓ C9 红线回归:R8-6 块只碰分母,绝不写分子(setLiveContextUsage / *Tokens)
+  ✓ C10 winSource 定义仍在(弹层分母说明的数据源)
+  ✓ C11 弹层可达文本里五种分母来源字样齐全(手填/实抓/规则表/CLI 自报/[1m],BRIEF 需求 2)
+  ✓ C12 来源文案由数据算出、不是写死一句话(label helper 必须收参)
+  ✓ C13 弹层仍渲染 winSource(说明位没被删)
+
+[D] 既有导出回归
+  ✓ D1 contextWindow.js 既有导出仍在(nativeContextWindow / pickCliContextWindow / isBareClaudeAlias)
+  ✓ D2 nativeContextWindow 兜底表口径未被顺手改动(抽样 4 条)
+  ✓ D3 pickCliContextWindow 非法值纪律未变(0 / 字符串 / NaN 一律 null)
+
+—— check-r103-window-denominator: 65 绿 / 0 红(共 65 条)——
+✓ check-r103-window-denominator: 分母优先级矩阵 + 联动接缝 + R8-6 让位锁 + 来源说明 全绿
+exit=0
+
+===== check-r104-remove-cache-opt =====
+
+[A] chatCompatKey 契约 server/routes/chat.js
+  ✓ A0 server/routes/chat.js 可 import 且导出 chatCompatKey
+  ✓ A1 键集合恰为 14 个既有键,且 xdyn 不在其中
+  ✓ A2 键顺序与契约一致(只改顺序也会让所有温进程冷启一次)
+  ✓ A3 老客户端传 excludeDynamicSystemPrompt(true/false/auto/undefined)→ 同一 key
+  ✓ A4 传老字段不抛错(老客户端/旧 prefs 静默忽略,不是报错)
+  ✓ A5 key 字符串里不出现 xdyn / excludeDynamic 字样(防换个名字接着藏)
+  ✓ A6 反向用例:其余键照旧生效(effort/cwd/budget/genui/suggest 变化仍换 key)
+  ✓ A7 同一入参重复调用恒等(移除字段不得引入不稳定值)
+  ✓ A8 chat.js 不再导出 resolveExcludeDyn(既有测试的 import 会因此改写)
+  ✓ A9 反向用例:同批既有导出不许被连坐删
+
+[B] 源码锁 server/(被移除的字面各 0 次)
+  ✓ B0 server/ 扫到的文件数 > 20(扫不到文件会让下面几条假绿)
+  ✓ B1 server/ 无 excludeDynamicSystemPrompt(请求字段已拆)
+  ✓ B2 server/ 无 excludeDynamicSections(不再向 SDK 传该选项)
+  ✓ B3 server/ 无 resolveExcludeDyn(解析函数已删)
+  ✓ B4 server/ 无 xdyn(复用键字段已删)
+  ✓ B5 server/ 不再传 CLI 的 --exclude-dynamic-system-prompt-sections
+
+[C] 源码锁 client/src(设置项移除 + 条目合并)
+  ✓ C0 client/src 扫到的文件数 > 20 且三个关键文件可读
+  ✓ C1 client/src 无 excludeDynamicSystemPrompt(store 字段 / 请求体接线已拆)
+  ✓ C2 client/src 无 ExcludeDynamicPromptToggle(开关组件已删)
+  ✓ C3 SettingsPanel 无 set-cache-opt(旧条目 id 已删)
+  ✓ C4 SettingsPanel 里「静态系统提示快照」不再作为标题出现(条目已改名)
+  ✓ C5 搜索索引里 title 为「缓存优化」的条目恰 1 条
+  ✓ C6 该条目就是原 set-prompt-snapshot 条目
+  ✓ C7 面板标题渲染点恰 1 处「缓存优化」
+  ✓ C8 渲染挂载点仍是 set-prompt-snapshot + PromptCacheSnapshotToggle
+  ✓ C9 搜索索引里"缓存"相关条目只剩 1 条,关键词含 缓存/cache/前缀/快照
+  ✓ C10 说明文案用人话解释,含「系统提示」「工具列表」「前缀缓存」三词
+  ✓ C11 说明文案引用真机数字 99.0% / 0.0%(BRIEF 需求 2)
+  ✓ C12 sessionStore 不再持有该三态字段与 setter
+  ✓ C13 App.jsx 不再往 /api/chat 请求体塞该字段
+
+[D] 反向用例:保留项不许被连坐删
+  ✓ D1 三个 env 键常量不变(CARVED_SLATE / ENABLE_TOOL_SEARCH / MCP_CONNECTION_NONBLOCKING)
+  ✓ D2 prefs 键名不变:prefs.promptCache { mode, memo }
+  ✓ D3 端点不变:GET / PUT /prompt-cache 都还在
+  ✓ D4 面板仍走 /api/prompt-cache 读写(GET + PUT 两处)
+  ✓ D5 r100 实际值显示与 CLI 支持提示保留
+  ✓ D6 r89 既有文案保留:ToolSearch 代价 + settings.json 与终端/bot 共用
+  ✓ D7 三态开关组件定义仍在(auto / on / off)
+
+[E] CHANGELOG
+  ✓ E0 CHANGELOG.md 可读
+  ✓ E1 CHANGELOG 写清移除原因与真机数据(99.0% / 0.0%)
+
+—— check-r104-remove-cache-opt: 39 绿 / 0 红(共 39 条)——
+✓ check-r104-remove-cache-opt: 复用键去 xdyn + 接线全拆 + 条目合并 + 保留项无连坐 全绿
+exit=0
+
+===== check-r106-dev-mcp-command =====
+  ok  ① PATH 里没有、%USERPROFILE%\.local\bin\uvx.exe 有 → 命中它(uv 的默认落点)
+  ok  ② 全都没有 → 返回 null(不瞎猜),文案是人话不是 ENOENT
+  ok  ③ 注册表实时 PATH(liveDirs)优先于固定候选
+  ok  ④ 目录顺序优先于扩展名;同一目录内 .exe > .cmd > .bat
+  ok  ⑤ .cmd/.bat 经 cmd.exe /c 起(Node 拒绝直跑批处理)
+  ok  ⑥ Python Scripts 的版本号目录靠枚举命中(%LOCALAPPDATA% 与 %APPDATA% 两处)
+  ok  ⑦ 其余候选:%APPDATA%\npm、~\scoop\shims、~\.cargo\bin
+  ok  ⑧ 已是路径的命令原样放行(不当裸名再解析一遍)
+  ok  ⑨ existsSync/readdirSync 全注入也成立(不落地真文件)
+  ok  ⑪ 脏入参不抛:liveDirs 非数组/含非字符串、env 缺键、readdirSync 抛错
+  ok  ⑫ 扩展名大小写不敏感(盘上是 UVX.EXE 也认)
+  ok  ⑩ Windows 三坑:不用 wmic;探测参数不含内嵌双引号
+
+✅ r106 MCP 命令解析自测全绿
+exit=0
+
+===== check-r106-dev-resolver =====
+  ok  ① .cmd shim + 包内真 PE → 返回包内 claude.exe(SDK 能直接 spawn)
+  ok  ②a 包内 exe 是文本占位(postinstall 没落真二进制)→ null,保持 SDK 回落
+  ok  ②b 包目录在但 bin\claude.exe 缺失 → null
+  ok  ②c 非壳包(无 install.cjs)也照样按文件头判:真 PE 认、文本不认
+  ok  ②d 文件头不是 MZ 一律 null(Mach-O/ELF 在 Windows 上照样起不来)
+  ok  ③ 压根没有 npm 包目录的裸 shim → null(不瞎编路径)
+  ok  ④ mac/linux 行为不变:原样返回,不去碰 npm 布局
+  ok  ⑤ Windows 上本来就是 .exe(原生安装器)→ 原样返回,不改道
+  ok  ⑥ existsSync/readFileSync 全注入(不落地任何真文件)也成立
+  ok  ⑦ logSdkClaudeOnce:同一路径只打一次;空路径明说走 SDK 自带 CLI
+  ok  ⑧ 面板在 Windows 上多给一句可行动指引(端点回 platform,前端据此显示)
+
+✅ r106 resolver 自测全绿
+exit=0
+
+===== check-r106-windows-npm-sdk-exe =====
+
+[A] resolveSdkClaudeFrom(hitPath, { platform, existsSync, readFileSync })
+  ✓ A0 claude-resolver.js 可 import
+  ✓ A0 resolveSdkClaudeFrom 已导出且是函数
+  ✓ A1 win32 + npm\claude.cmd + 真 PE → 返回包内 bin\claude.exe(正斜杠寻址)
+  ✓ A2 同一布局用反斜杠寻址 → 同一个 exe(实现必须按注入 platform 拆路径,不许用 posix path)
+  ✓ A3 注入的 existsSync/readFileSync 真的被调用(不许绕过注入直接用真实 fs)
+  ✓ A4 无扩展名 shim(npm\claude)同样推出 bin\claude.exe
+  ✓ A5 bin\claude.exe 是文本占位(坏壳包)→ null(保持 SDK 回落,不能交个跑不起来的壳)
+  ✓ A6 bin\claude.exe 缺失(postinstall 没跑)→ null
+  ✓ A7 bin\claude.exe 是 0 字节(下载中断)→ null
+  ✓ A8 win32 但路径里没有 npm 布局(原生安装的 claude.cmd)→ null
+  ✓ A9 win32 且命中项已是 .exe → 原样返回(=== 入参,不改写不推导)
+  ✓ A10 win32 且命中项已是 .exe(哪怕内容是文本)→ 仍原样返回(契约:已是 .exe 就不体检)
+  ✓ A11 darwin → 原样返回入参(即使同目录下真有 npm 布局的 claude.exe 也绝不改写)
+  ✓ A12 linux → 原样返回入参
+  ✓ A13 falsy 入参('' / null / undefined)→ 不抛错,且不得凭空造出路径
+  ✓ A14 命中项是大写 .EXE → 不抛错且不返回 null(大小写不敏感的 Windows 上不能判成"没装")
+  ✓ A15 shim 路径本身不存在(SDK 给了个陈旧命中)→ 不抛错
+  ✓ A16 opts 缺省 / 只给 platform → 不抛错(注入项可选,回落真实 fs)
+
+[A] 接线与回归锁 server/utils/claude-resolver.js
+  ✓ A17 resolveSdkClaude() 是 resolveSdkClaudeFrom 的包装(源码里出现 ≥2 次:定义 + 被调用)
+  ✓ A18 既有导出未被本轮挪走(resolveSdkClaude/classifyShim/sniffBinaryKind/winLivePathDirs/resolveClaude)
+  ✓ A19 回归锁:chat.js 仍用 resolveSdkClaude 喂 pathToClaudeCodeExecutable
+
+[B] resolveWinCommand(command, { env, existsSync, readdirSync, liveDirs })
+  ✓ B0 resolveWinCommand 已导出且是函数
+  ✓ B-S1 形态:命中返回 { file: string, viaCmd: boolean }(契约 ②)
+  ✓ B-S2 形态:未命中返回 null(不是 '' / undefined / false)
+  ✓ B-S3 形态:command 非法时同样返回 null
+  ✓ B1 liveDirs 里有 uvx.exe → 命中该目录下的 uvx.exe
+  ✓ B2 liveDirs 内按给定顺序取第一个命中(PATH 顺序即优先级)
+  ✓ B3 liveDirs(实时 PATH)优先于补充候选目录
+  ✓ B4 PATH 里没有但 %USERPROFILE%\.local\bin\uvx.exe 存在 → 命中它(BRIEF 点名的验收场景)
+  ✓ B5 %USERPROFILE%\.cargo\bin 在候选目录里
+  ✓ B6 %APPDATA%\npm 在候选目录里(npm 全局装的 .cmd)
+  ✓ B7 %USERPROFILE%\scoop\shims 在候选目录里
+  ✓ B8 %LOCALAPPDATA%\Programs\Python\Python3*\Scripts 按 glob 展开命中
+  ✓ B9 %APPDATA%\Python\Python3*\Scripts 按 glob 展开命中(pip --user 装的)
+  ✓ B10 同一目录内扩展名优先级 .exe > .cmd > .bat
+  ✓ B11 viaCmd:.exe → false(直接 spawn)
+  ✓ B12 viaCmd:.cmd / .bat → true(必须经 cmd.exe /c,直接 spawn 在 Windows 上起不来)
+  ✓ B13 不变式:viaCmd === (命中文件不是 .exe)
+  ✓ B14 命中的 file 必须是注入 existsSync 认可的完整路径(不许返回没验证过的拼接结果)
+  ✓ B15 所有候选目录都没有 → 找不到
+  ✓ B16 反向用例:同名但扩展名不在清单内(.ps1 / 无扩展 / .txt)→ 不命中
+  ✓ B17 候选目录不存在(注入 readdirSync 抛 ENOENT)→ 吞掉,不外抛
+  ✓ B18 env 为空对象(拿不到 USERPROFILE/APPDATA)→ 不抛错,liveDirs 仍能命中
+  ✓ B19 env 为空且 liveDirs 为空 → 找不到(不许拼出 undefined\.local\bin 之类的路径)
+  ✓ B20 liveDirs 非法(undefined / null / 字符串 / 含 null 与数字的数组)→ 不抛错,补充目录照常生效
+  ✓ B21 不许偷用真实 fs/PATH:命令名 node 在空虚拟 fs 里必须找不到
+  ✓ B22 opts 缺省 → 不抛错(纯函数被 spawnMcpCommand 用默认实参调用时不能崩)
+
+[B] 接线与文案锁 server/routes/mcp.js
+  ✓ B23 spawnMcpCommand 真的用上了 resolveWinCommand(源码出现 ≥2 次:定义 + 被调用)
+  ✓ B24 错误文案人话:含"找不到命令"与"绝对路径",且在同一段文案里(≤400 字符窗口)
+  ✓ B25 既有导出未被本轮挪走(buildAddArgs/parseHeadersFromDetails/HEADER_KEY_RE/listMcpTools)
+  ✓ B26 Windows 三坑:mcp.js 不出现 wmic(Win11 24H2 已移除)
+  ✓ B27 Windows 三坑:.cmd/.bat 有经 cmd.exe 的通道(cmd.exe 或 shell:true 任一即可)
+  ✓ B28 Windows 三坑:execFile 类参数不带内嵌双引号(引号交给 spawn 转义)
+
+[C] 快照面板文案(Windows + cliSnapshotSupported=false 时的可行动指引)
+  ✓ C0 能定位到写"系统提示快照"文案的源文件
+  ✓ C1 该文案所在文件含 bin\claude.exe 路径指引 + "重装"或"原生安装器"
+  ✓ C2 指引与 cliSnapshotSupported 在同一文件(说明是挂在"不支持"分支上,不是随手写的注释)
+  ✓ C3 指引受 Windows 门控(claude.exe 附近 ±800 字符出现 win32/isWin/Windows 标记)
+  ✓ C4 指引给出完整 npm 包路径(同文件出现 @anthropic-ai)
+  ✓ C5 文案里不出现 window.confirm / alert(Tauri webview 里这俩是哑的)
+
+—— check-r106-windows-npm-sdk-exe: 59 绿 / 0 红(共 59 条)——
+✓ check-r106: SDK 真 exe 解析 + MCP 命令候选目录解析 + 面板指引文案 全绿
+exit=0
+
+===== check-r108-dev-wiring =====
+
+[§3.4] spawnMcpCommand 接线
+  ok  W1 viaCmd 分支走 winCmdSpawnSpec,不再手拼 cmd.exe /c
+  ok  W2 非 win32 与 .exe 分支未被波及(仍是直接 spawn)
+  ok  W3 windowsVerbatimArguments 只由 winCmdSpawnSpec 一处产生(r110 搬到 utils/win-cmd.js)
+
+[§3.2] resolveMcpCommandWin 30s 缓存
+  ok  W4 key 同时计入 command 与 env 的 PATH/Path
+  ok  W5 key 语义:换命令/换 PATH 都必须错开,PATH 缺失回落 Path
+  ok  W6 miss 后每条出口都写缓存(null 也缓存,那是最贵的路径)
+  ok  W7 命中判据是 !== undefined(不能用 truthy,否则缓存的 null 每次都当没缓存)
+  ok  W8 TTL 是 30s,且用的是 makeTtlCache
+  ok  W9 absCommandHint 的探测套了 1.5s 超时兜底
+
+[§2] server/index.js 启动预热挂点
+  ok  W10 挂点在 listen 回调内,且对两条路径去重后各预热一次
+  ok  W11 不阻塞启动:整块是不被 await 的 IIFE,且带 .catch 吞异常
+  ok  W11b 先 await 异步解析再取同步结果(Windows 首解析不压在事件循环上)
+  ok  W11c 两条路径并行预热(不是串行 await)
+  ok  W12 只打一行结果到 stderr,不打 env/密钥
+  ok  W13 去重语义:同一路径只预热一次,空值全跳过
+
+[§1.2] primeHelpCache 子进程行为
+  ok  W14 默认探测打不到的路径:不 reject、不挂住进程(启动挂点靠这个才敢 fire-and-forget)
+  ok  W15 同步兜底探测超时是 2000(不是 5000)
+  ok  W15b 竞态正向:同步兜底探到的正文,不许被随后 resolve 的空串覆盖
+  ok  W15c 竞态反向(INTERFACE §8):同步兜底先写空串,预热拿到的正文必须能覆盖它
+  ok  W15d 复查用 get 不用 has
+  ok  W16 预热与同步探测共用同一张正文表 _helpCache(否则预热白热)
+
+[§4] claude-resolver 接线
+  ok  W17 splitWinPathList 被 sync/async 两处 live PATH 解析共用
+  ok  W18 体积下限:minExeBytes=0 时完全不 stat(注入 fs 的布局根本没落盘)
+  ok  W19 体积判定排在 PE 头判定之后(体积不能绕过 MZ 判定)
+  ok  W20 logSdkClaudeOnce:路径行同步落,版本行仍异步(不阻塞事件循环)
+
+25 通过 / 0 失败
+✅ r108 开发自测全过
+exit=0
+
+===== check-r108-windows-review =====
+
+A. primeHelpCache 异步预热 help 缓存
+  ✓ A1 预热成功后 cliSupportsFlag 命中缓存,返回 true 且不再同步 probe
+  ✓ A2 未预热的另一个路径,同步 probe 仍会被调用(既有行为不变)
+  ✓ A3 预热正文里没有该 flag → cliSupportsFlag 为 false 且不同步 probe
+  ✓ A4 claudePath 为空串 → resolve false 且不 spawn
+  ✓ A5 claudePath 为 null/undefined/数字 → resolve false 且不 spawn,不抛
+  ✓ A6 同一路径重复预热 → 第二次直接 true 且不重复 spawn
+  ✓ A7 probe 返回空串 → resolve false;TTL 内不重探,TTL 到点重探并返回 true
+  ✓ A8 probe 抛错 → 不 reject,resolve false,且把失败当"不支持"缓存
+  ✓ A9 probe 同步抛错(非 async 函数直接 throw)→ 仍不 reject
+  ✓ A10 probe 返回非字符串/非 Promise → 不 reject,返回布尔
+  ✓ A11 不传 probeAsync 时不抛(走默认 execFile,路径不存在则 false)
+
+B. resolveWinCommand 枚举兜底 + 平台门控
+  ✓ B1 enumerate=false + 命令不存在 → 返回 null,候选目录一次都没被 readdir
+  ✓ B2 enumerate=false + 12 个 PATH 目录 → readdirSync 总调用数 ≤2(仅留 pyScripts 例外)
+  ✓ B3 enumerate=false + exists 命中 → 仍按 .exe > .cmd > .bat 取 .exe
+  ✓ B4 enumerate=false + 只有 .cmd 和 .bat → 取 .cmd
+  ✓ B5 enumerate=false + 只有 .bat → 取 .bat 且 viaCmd 为真
+  ✓ B6 .exe 命中时 viaCmd 为假(不绕 cmd.exe)
+  ✓ B7 目录顺序优先于扩展名:dirA 的 .bat 胜过 dirB 的 .exe
+  ✓ B8 enumerate=true + exists 全落空 → 枚举并大小写不敏感命中 FOO.CMD
+  ✓ B9 enumerate=true 但 exists 已命中 → 不枚举该目录(枚举只是兜底)
+  ✓ B10 反向:name 含 / 或 \ 直接返回 null,且完全不碰 fs
+  ✓ B11 边界:空串/null/undefined/数字入参不抛
+  ✓ B12 边界:opts 全省略不抛(默认 enumerate 按平台推导)
+  ✓ B13 不传 enumerate 时在 mac 上默认为 true(既有锁定测试赖此行为)
+  ✓ B14 win32 上不传 enumerate 时默认为 false(候选目录不 readdir,只 pyScripts 两父目录)
+
+C. makeTtlCache 30s 结果缓存工厂
+  ✓ C1 set 后 get 拿回原值
+  ✓ C2 null 是合法可缓存值:get 返回 null 而不是 undefined
+  ✓ C3 不存在的 key → undefined
+  ✓ C4 注入 now:超过 ttl 后 get 返回 undefined
+  ✓ C5 注入 now:ttl 内(差 1ms)仍命中
+  ✓ C6 过期的 null 也返回 undefined(不把过期误当"缓存过的找不到")
+  ✓ C7 clear() 后全部失效
+  ✓ C8 同 key 重复 set 覆盖旧值并刷新时间
+  ✓ C9 不传 now 时用真实时钟,刚写入立即命中
+  ✓ C10 两个实例互不共享数据
+  ✓ C11 边界:ttl=0 时写入即过期
+  ✓ C12 边界:key 为空串/undefined value 不抛
+
+D. withTimeout 超时兜底
+  ✓ D1 promise 先完成 → 返回原值
+  ✓ D2 超时 → 返回 fallback
+  ✓ D3 promise reject → 也返回 fallback(不抛出)
+  ✓ D4 值是 falsy(0/空串/null)时返回原值而非 fallback
+  ✓ D5 fallback 省略时超时 resolve 为 undefined,不抛
+  ✓ D6 传入非 Promise(裸值)不抛,直接给回该值
+  ✓ D7 基线:只 import mcp.js 的子进程能自然退出(D8 的前提)
+  ✓ D8 先完成时超时 timer 被清掉:调过 withTimeout(…, 60s) 的进程仍能自然退出
+
+E. winCmdSpawnSpec 经 cmd.exe 的引号规则
+  ✓ E1 file 恒为 cmd.exe
+  ✓ E2 args 恒为 4 项且前三项是 /d /s /c
+  ✓ E3 INTERFACE §3.4 逐字例子:带空格路径 + 带空格参数
+  ✓ E4 参数内部的双引号翻倍
+  ✓ E5 & | ^ > 落在自己的引号内、原样保留不转义不删
+  ✓ E6 args 为空数组 → line 只有命令本身
+  ✓ E7 opts 其余字段原样保留,并加上 windowsVerbatimArguments:true
+  ✓ E8 反向:不改写调用方传入的 opts 对象
+  ✓ E9 非字符串参数按 String() 转换
+  ✓ E10 opts 省略时不抛,仍带 windowsVerbatimArguments:true
+  ✓ E11 边界:args 省略/为 null 时不抛,等价于空参数
+  ✓ E12 反向:参数里不出现"未配对的裸引号"(每个 token 引号成对)
+
+F. missingCommandHint 绝对路径分支
+  ✓ F1 反斜杠绝对路径 → 精确文案
+  ✓ F2 正斜杠路径 → 同一文案
+  ✓ F3 相对路径(含分隔符)也走绝对路径分支
+  ✓ F4 反向:裸名分支文案不变,不含"该路径不存在或不可执行"
+  ✓ F5 边界:空串/null/undefined/数字不抛,返回字符串
+  ✓ F6 边界:platform 省略时绝对路径分支文案不变
+
+G. resolveSdkClaudeFrom 截断 exe 体积下限
+  ✓ G1 前置:能从公开接口探出包内 exe 路径
+[claude-resolver] 包内 claude.exe 仅 1024 字节,疑似安装不全,回落 SDK 自带 CLI
+  ✓ G2 真实 MZ 头但只有 1KB + 默认下限(未注入 readFileSync)→ null(回落 SDK 自带)
+  ✓ G3 同一个 1KB 文件 + 注入 readFileSync → 默认下限为 0,放行
+  ✓ G4 1KB 文件 + 显式 minExeBytes=512(达标)→ 放行
+[claude-resolver] 包内 claude.exe 仅 1024 字节,疑似安装不全,回落 SDK 自带 CLI
+  ✓ G5 1KB 文件 + 显式 minExeBytes=10000(不达标)→ null
+  ✓ G6 真实 6MB 完整 exe + 默认下限 → 放行(正常安装不受影响)
+  ✓ G7 边界:size 恰好等于 minExeBytes → 放行(>= 而非 >)
+[claude-resolver] 包内 claude.exe 仅 4095 字节,疑似安装不全,回落 SDK 自带 CLI
+  ✓ G8 边界:size 比 minExeBytes 少 1 字节 → null
+  ✓ G9 statSync 抛错(文件被杀毒隔离/权限不足)→ null,不抛
+  ✓ G10 反向:体积达标也不能绕过 PE 头判定(内容不是 exe → null)
+  ✓ G11 反向:非 win32 平台原样返回 hitPath(不做任何 exe 改写)
+  ✓ G12 边界:hitPath 为空串/null/undefined → null,不抛
+  ✓ G13 反向:包内 exe 根本不存在时仍返回 null
+
+H. splitWinPathList 注册表 PATH 去引号
+  ✓ H1 按分号切分
+  ✓ H2 去掉成对首尾引号
+  ✓ H3 去掉单侧引号
+  ✓ H4 空条目被过滤(连续分号、结尾分号)
+  ✓ H5 只有引号的条目去引号后为空 → 被过滤
+  ✓ H6 先 trim 再去引号,混合形态都规整
+  ✓ H7 反向:路径中间的引号不动(只去首尾)
+  ✓ H8 边界:空串 → 空数组
+  ✓ H9 边界:null/undefined/数字/对象 → 空数组或不抛
+
+I. logSdkClaudeOnce 默认 logger
+  ✓ I1 不传 log 时默认用 console.error(不是 console.log)
+  ✓ I2 显式传入 log 时用传入的,不碰 console.error
+
+87 绿 / 0 红
+exit=0
+
+===== check-r110-claude-cmd-quoting =====
+
+§6-1 claude.cmd:经 cmd.exe 且 mcp<2 落在自己的引号内
+  ok  T1 file=cmd.exe / 前三项 /d /s /c / opts 带 windowsVerbatimArguments
+  ok  T2 `mcp<2` 带引号出现,且整条首尾各一个外层引号
+  ok  T3 反向:`<2` 不会以裸形态出现在命令行里(那正是 cmd 的重定向)
+
+§6-2 .exe 与非 Windows 分支不受影响
+  ok  T4 .exe → 直接执行该 exe、args 原样、opts 不含 windowsVerbatimArguments
+  ok  T5 darwin → file 即 bin、args 原样、opts 不含 windowsVerbatimArguments
+  ok  T5b 空 bin 回落 claude:win32 仍经 cmd.exe,darwin 直跑 claude
+
+§6-3 claudeCommand 带 opts
+  ok  T6 claudeCommand(["--version"]) 返回 { file, args, opts } 三件套
+
+§6-4 元字符逐个:全部落在自己的引号内、内嵌引号翻倍
+  ok  T7 & | ^ > < 空格 内嵌" 各一例
+  ok  T8 claudeExecSpec 与 winCmdSpawnSpec 同源(不是两套引号规则)
+  ok  T9 mcp.js 继续 re-export 同名 winCmdSpawnSpec(r108 锁定测试的导入口径)
+
+§6-5 反向:claude 执行链路上不再有旧拼法
+  ok  T10 claude 链路八个文件里,凡执行 claude 的地方都不再手拼 cmd.exe /c
+  ok  T10b 正向:这八个文件确实经 claudeExecSpec / winCmdSpawnSpec 组装(不是把调用删了了事)
+
+§2 消费者接线:opts 必须被并进各自的 spawn/execFile 选项
+  ok  T11 claudeCommand 的 execFile 类消费者都把 opts 并进了选项
+  ok  T12 探测链路(prompt-cache-env 同步+异步、logSdkClaudeOnce)都透传 spec.opts
+  ok  T13 claudeSpawn 的 .cmd 分支经 winCmdSpawnSpec(聊天这条路同样吃元字符)
+
+15 通过 / 0 失败
+✅ r110 契约测试全过
+exit=0
+
+===== check-r111-win-review-375 =====
+
+§1 win-cmd:token 结尾的连续反斜杠翻倍
+  ok  A1 结尾 1 个 `\` → 2 个(契约逐字:"ROOT=D:\data\\")
+  ok  A2 盘根 `D:\` → `"D:\\"`
+  ok  A3 结尾 2 个 `\` → 4 个
+  ok  A4 中间的反斜杠不动(C:\a\b 原样)
+  ok  A5 不含反斜杠的 token 与 r110 逐字相同(元字符/空格/内嵌引号)
+  ok  A6 引号总数仍是偶数(cmd 的"删首尾引号"规则)
+  ok  A7 文件头注释写明引号挡不住的两条(%VAR% 展开 / 换行截断)
+  ok  A8 反斜杠紧邻内嵌引号 → 一并翻倍(a\"b → "a\\""b")
+  ok  A9 两个反斜杠+内嵌引号(a\\"b → "a\\\\""b")
+  ok  A10 token 以 `\"` 结尾(最险:两条规则叠在一起)
+  ok  A11 引号后跟反斜杠 a"\ → "a""\\"(两条规则各管一段)
+  ok  A12 往返:cmd 剥外层引号后 CRT 还原出的 argv 与原始逐字相同
+
+§2 remote-control:winpty 回退路径给 cmd.exe 绝对路径
+  ok  B1 Windows 分支拼 %SystemRoot%\System32\cmd.exe(不靠 PATH)
+
+§3 gen-changelog-md:CRLF 检出的仓库(Windows autocrlf)
+  ok  C1 CRLF 版 README/CHANGELOG:--check 退出码 0
+  ok  C2 反向:同一 CRLF 副本里 README 过期 → --check 退出码 1(证明 C1 不是空过)
+  ok  C3 --readme 写回保持 CRLF(不产生混合换行)
+  ok  C4 LF 仓库写回仍是 LF(不给 mac/CI 引入 CRLF)
+  ok  C5 .gitattributes 把 *.md 钉成 LF 检出
+
+§4 CI release notes:Windows 只有 NSIS .exe
+  ok  D1 notes.md 不再写"`.msi` 均可"
+
+§5 agents.js:--bg prompt 长度上限 + 守卫注释
+  ok  E1 守卫判据是 winCmdLineBudget,不再有 7000 字面量与自带平台正则
+  ok  E2 原注入守卫逻辑一字未动,注释改成"纵深防御"
+  ok  E3 chat.js MODEL_ARG_RE 注释同源更新(白名单降级为纵深防御)
+
+§6 claude-resolver:import 回到顶部 import 块
+  ok  F1 winCmdSpawnSpec 的 import 在第一个函数声明之前
+
+23 通过 / 0 失败
+✅ r111 契约测试全过
+exit=0
+
+===== check-r113-client =====
+
+R. reconcileBadgeWindow 仲裁(§6.1)
+  ✓ [修前应红] R1 官方 200K 模型 + init 下发显式 1M + 尚无 CLI 自报 → 分母钳到 200K
+  ✓ [修前应红] R2 R1 之后 result 到达(CLI 自报 200K)→ 仍 200K/explicit,不退回 cli
+  ✓ [修前应红] R3 幂等:R2 之后再来一次同样的 init → 逐字段与 R2 相同
+  ✓ [修前应红] R4 顺序颠倒:先 result 后 init → 与 R2 结果相同
+  ✓ [修前应红] R5 必修-1b:显式值(100K)小于 CLI 自报(200K)→ 取 100K,方向不能反
+  ✓ [修前应红] R6 显式值等于 CLI 自报 → 该值
+  ✓ [修前应红] R7 linkedSource='linked'(GUI 联动第三方)不钳位(r103 既有语义)
+  ✓ [修前应红] R8 provider(手填/实抓)不钳位,origin 取 providerOrigin
+  ✓ [修前应红] R9 纯 CLI 来源(官方,GUI 无来源)→ 200K/cli/cli
+  ✓ [修前应红] R10 provider:null(后端解析不出)不得清掉已有的 cli 值
+  ✓ [修前应红] R11 [1m] 模型压过一切(含 explicit 钳位)
+  ✓ [修前应红] R12 显式 1M + 无 cli + 非 Anthropic 模型 → 按 CLI 自认恒 200K 钳
+  ✓ [修前应红] R13 显式 500K + 无 cli + 未知模型名 → min(500K,200K)=200K
+  ✓ [修前应红] R13b 显式 100K + 无 cli + 未知模型名 → 100K(小的那个赢)
+  ✓ [修前应红] R13c 显式 500K + 无 cli + Anthropic 原生 1M 模型 → 500K(用 nativeContextWindow 兜底)
+  ✓ [修前应红] R14 全空 → window/source/origin 三者皆 null
+  ✓ [修前应红] R15 脏入参(prevMeta/patch/model 任意组合)永不抛,返回合法 meta 且 window=null
+  ✓ [修前应红] R16 非法槽值一律归 null(字符串数字 / 0 / NaN 不进槽)
+  ✓ [修前应红] R17 patch 里的 undefined 不清槽(缺键同义)
+  ✓ [修前应红] R18 patch 里的 null 显式清槽:清掉 cli 后回落原生 200K 兜底
+  ✓ [修前应红] R19 返回形态:十个键齐全,at 是数字(其值不参与判定)
+  ✓ [修前应红] R20 原始输入存进 meta 供后续重算(六个槽按 patch 原值落位)
+  ✓ [修前应红] R21 origin 规则:source='1m'→'1m';'cli'→'cli';provider 缺 providerOrigin → 'provider'
+
+N. 既有行为不变(§6.3)
+  ✓ [修前应绿] N1 四个既有导出仍在
+  ✓ [修前应绿] N2 resolveBadgeWindow 行为不变:explicit 取小 / linked 不钳 / [1m] 压过一切 / 非对象入参
+  ✓ [修前应绿] N3 nativeContextWindow 兜底表未被顺手改动(抽样 4 条)
+  ✓ [修前应绿] N4 pickCliContextWindow 非法值纪律未变
+
+C. 接线与源码锁(§6.2 / §7)
+  ✓ [修前应绿] C0 App.jsx / contextWindow.js / chat.js 都读得到(源码锁的前提)
+  ✓ [修前应红] C1 §7 必须出现:contextWindow.js 导出 reconcileBadgeWindow
+  ✓ [修前应红] C2 §7 必须出现:reconcileBadgeWindow 体内复用 resolveBadgeWindow( 与 nativeContextWindow(
+  ✓ [修前应红] C3 §7 必须出现:App.jsx 里 reconcileBadgeWindow( 恰好出现 3 次(三个写入点)
+  ✓ [修前应红] C4 §7 必须出现:resolvedWindowMeta.set( 的次数 == reconcileBadgeWindow( 的次数
+  ✓ [修前应红] C5 §7 不得出现:init 直写 resolvedWindowCache.set(…, event.linkedContextWindow)(本轮 bug 本体)
+  ✓ [修前应绿] C6 §7 不得出现:resolvedWindowCache.set(wk, cliWin.window)(R8-6 直写 CLI 自报)
+  ✓ [修前应红] C7 §7 不得出现:App.jsx 直接调用 resolveBadgeWindow((必须经 reconcileBadgeWindow 包装)
+  ✓ [修前应红] C8 §7 三处写入点统一:每个 resolvedWindowCache.set( 写的都是 picked.window
+  ✓ [修前应红] C9 §6.2 init 写入点入参:linked/linkedSource/linkedOrigin 三键取自 event.linkedContextWindow*
+  ✓ [修前应红] C10 §6.2 result 写入点入参:patch 只送 { cli: cliWin.window }
+  ✓ [修前应红] C11 §6.2 fetch 回写入参:provider 槽 + providerOrigin 槽
+  ✓ [修前应绿] C12 §6.2 不变:init 侧 Number.isFinite(event.linkedContextWindow) 前置门保留
+  ✓ [修前应绿] C13 §6.2 不变:cgui:model-window-cli 广播仍在
+  ✓ [修前应绿] C14 §6.3 不变:两张缓存仍是模块级 Map,provider 切换仍清空
+  ✓ [修前应绿] C15 §6.3 不变:分母优先级链一字不改
+  ✓ [修前应绿] C16 §6.3 不变:winSourceLabel 的 explicit / linked 两条文案逐字保留
+  ✓ [修前应绿] C17 §6.3 不变:服务端零改动(三字段名 + 下发时机)
+
+—— check-r113-client: 45 绿 / 0 红(共 45 条)——
+   [修前应红] 33 条(现在绿 33 / 红 0)
+   [修前应绿] 12 条(现在绿 12 / 红 0)
+exit=0
+
+===== check-r113-server =====
+
+P. help 缓存:同步失败的空串必须能被预热正文覆盖(§1)
+  ✓ [修前应红] P1 导出 HELP_MISS_TTL_MS,取值是正整数
+  ✓ [修前应红] P2 交接三步(§1.5):同步探测抛错 → 预热正文覆盖 → supports 恢复 true 且不再同步探
+  ✓ [修前应绿] P3 反向用例:预热拿到空串 → prime 返回 false(index.js 该打 miss 不打 ok)
+  ✓ [修前应绿] P4 §1.4 表①:首次预热探到空串 → false,探测 1 次
+  ✓ [修前应红] P5 §1.4 表②:失败后 TTL-1 毫秒再预热 → false 且不重探
+  ✓ [修前应红] P6 §1.4 表③:失败后正好到 TTL → 重探并写正文,返回 true(失败结论不永久化)
+  ✓ [修前应红] P7 §1.4 表④:已有正文后再预热 → true 且不再探测
+  ✓ [修前应绿] P8 §1.4-1:已有非空正文的路径,预热不再 spawn
+  ✓ [修前应红] P9 §1.4-2 在飞标记:并发两次预热同一路径,只探一次
+  ✓ [修前应红] P9b §1.4-2 在飞标记:并发的第二次预热返回 false(返回时正文表还没正文)
+  ✓ [修前应红] P9c §1.4-2/§1.3-3:在飞标记不是失败记录 —— 被短路的第二次预热不写记录,同步探测照常
+  ✓ [修前应红] P10 §1.4-3 跨来源:同步失败(sync 记录)不挡预热 —— TTL 内的预热照样探 1 次并成功
+  ✓ [修前应红] P10b §1.4 跨来源两方向:sync 记录不挡预热;prime 记录在 TTL 内挡预热
+  ✓ [修前应绿] P11 §1.3-1:正文表命中 → 不调用 probe(哨兵)
+  ✓ [修前应绿] P12 §1.3-2:失败表有记录(哪怕注入的 now 已远超 TTL)→ false 且不 probe
+  ✓ [修前应绿] P13 §1.3-3:probe 返回空串/非字符串 → false 且不抛
+  ✓ [修前应绿] P14 §1.3:脏 claudePath(null/undefined/数字/数组/对象/字符串数字)不抛,返回布尔
+  ✓ [修前应绿] P15 §1.4:脏 claudePath → resolve false 且 probeAsync 零调用
+  ✓ [修前应绿] P16 §1.4:probeAsync 同步抛/异步抛 → 永不 reject,resolve false
+  ✓ [修前应红] P16b §1.4-3:probeAsync 返回非字符串(undefined/null/数字)→ false,不当正文入表
+  ✓ [修前应绿] P17 §1.1:_resetSnapFlagCache 同时清空正文表与失败表
+  ✓ [修前应绿] P18 §1.6 正则不变:`--system-prompt` 不被 `--system-prompt-snapshot` 前缀命中
+  ✓ [修前应绿] P19 §1.6 正则不变:描述正文里的 `--system-prompt or` 不算支持
+  ✓ [修前应绿] P20 §1.6 正则不变:`  -c, --continue` 里探 --continue 仍 true(别名前缀)
+  ✓ [修前应绿] P21 §1.6 不变:snapshotFlagOn('', true) 恒 false(空路径不支持)
+  ✓ [修前应绿] P22 §1.6 不变:六个既有导出签名仍在
+  ✓ [修前应绿] P23 §1.6 不变:同步探测 execFileSync + timeout 2000,异步 execFile + timeout 8000
+
+W. --bg 长度守卫按"是否真经 cmd.exe + 展开后长度"判(§2/§3)
+  ✓ [修前应红] W1 spawnViaCmdExe:win32 + .cmd/.BAT → true(大小写不敏感)
+  ✓ [修前应红] W2 spawnViaCmdExe:win32 + .exe/无扩展名/裸名 → false(不经 cmd.exe)
+  ✓ [修前应红] W3 spawnViaCmdExe:非 win32 一律 false
+  ✓ [修前应红] W4 spawnViaCmdExe:脏 binPath(null/undefined/空串/数字/对象/数组)→ false 且不抛
+  ✓ [修前应红] W5 spawnViaCmdExe:platform 缺省时取 process.platform
+  ✓ [修前应红] W6 WIN_CMD_LINE_MAX === 8191(cmd.exe 命令行上限)
+  ✓ [修前应红] W7 winCmdLineBudget:非 win32 → {viaCmd:false,length:0,over:false},超长也不判超
+  ✓ [修前应红] W8 winCmdLineBudget:win32 + .exe → 恒 over:false(Bug 2 回归本体)
+  ✓ [修前应红] W9 winCmdLineBudget:win32 + 无扩展名 shim / 未解析到路径 → 恒 over:false
+  ✓ [修前应红] W10 winCmdLineBudget §2.3 表:空 prompt → length 107,不超
+  ✓ [修前应红] W11 winCmdLineBudget §2.3 表:7000 个 a → length 7107,不超(旧守卫在这错拒)
+  ✓ [修前应红] W12 winCmdLineBudget §2.3 表:7001 个 a → length 7108,不超(回归本体)
+  ✓ [修前应红] W13 winCmdLineBudget §2.3 表:6999 个引号 → 展开 14105,判超(旧守卫在这错放)
+  ✓ [修前应红] W14 winCmdLineBudget §2.3 边界:8085 个 a → 8192 判超;8084 个 → 8191 不超
+  ✓ [修前应红] W15 winCmdLineBudget:limit 可注入,over 按注入的 max 判
+  ✓ [修前应红] W16 winCmdLineBudget:args 非数组当 [];脏入参永不抛
+  ✓ [修前应红] W17 winCmdLineBudget:返回四个键齐全,length 是 CreateProcess 收到的整条命令行长度
+  ✓ [修前应红] W18 §3 反向用例:claudeExecSpec 与 spawnViaCmdExe 口径故意不同(无扩展名 shim)
+  ✓ [修前应绿] W19 §2.4 不变:winCmdSpawnSpec 形态(cmd.exe /d /s /c + verbatim)未被改动
+  ✓ [修前应绿] W20 §2.4 不变:winCmdSpawnSpec 不改写调用方 opts 对象
+  ✓ [修前应绿] W21 §5.2 不变:引号规则两条(尾部反斜杠翻倍 + 内嵌引号前反斜杠翻倍)
+
+G. --bg 守卫接线 + 文案(§4)
+  ✓ [修前应绿] G0 四个源码文件都读得到(源码锁的前提)
+  ✓ [修前应红] G1 §4.1 判定走 winCmdLineBudget,且喂的是 resolveClaude 解析出的路径
+  ✓ [修前应红] G2 §4.1 文案含展开后的实际长度(插值,不是写死的 7000)
+  ✓ [修前应绿] G3 §4.1 文案含上限数字与"上限"字样,且是 400 JSON error 字段
+  ✓ [修前应红] G4 §4.1 顺序:长度判定发生在 writeBgHookSettings 之前(拒时不留孤儿文件)
+  ✓ [修前应红] G5 §7 不得出现:agents.js 里没有字面量 7000
+  ✓ [修前应绿] G6 §7 不得出现:agents.js 不自带 .(cmd|bat) 正则
+  ✓ [修前应红] G7 §7 不得出现:agents.js 没有 prompt.length > 形态的长度守卫
+  ✓ [修前应绿] G8 §4.2 不变:prompt 非字符串/空 → 400「prompt 必填」
+  ✓ [修前应绿] G9 §4.2 不变:单词含 &|<>^ 的守卫文案逐字未改
+  ✓ [修前应绿] G10 §4.2 不变:派发的是 prompt.trim(),白名单/模型参数仍在
+
+L. §7 源码锁
+  ✓ [修前应红] L1 §7 必须出现:win-cmd.js 导出 spawnViaCmdExe / winCmdLineBudget / WIN_CMD_LINE_MAX
+  ✓ [修前应红] L2 §7 必须出现:chat.js claudeSpawn 体内调 spawnViaCmdExe(
+  ✓ [修前应绿] L3 §7 必须出现:claudeSpawn 的 .cmd 分支体一字不改(winCmdSpawnSpec + spawn 三件套)
+  ✓ [修前应红] L4 §7 不得出现:claudeSpawn 体内不再有裸的 /\.(cmd|bat)$/i 正则
+  ✓ [修前应红] L5 §7 必须出现:prompt-cache-env.js 导出 HELP_MISS_TTL_MS
+  ✓ [修前应红] L6 §7 必须出现:chat.js 有不 await 的 primeHelpCache( 恢复触发点
+  ✓ [修前应红] L7 §1.7 恢复触发点与 snapshotFlagOn 在同一处(±1500 字符内)
+  ✓ [修前应绿] L8 §7 不得出现:claude-resolver.js 的 claudeExecSpec 内不得引入 spawnViaCmdExe
+  ✓ [修前应绿] L9 §7 不得出现:prompt-cache-env.js 里没有把空串写进正文表的形态
+  ✓ [修前应红] L10 §7 不得出现:primeHelpCache 入口的 _helpCache.has(
+
+—— check-r113-server: 69 绿 / 0 红(共 69 条)——
+   [修前应红] 41 条(现在绿 41 / 红 0)
+   [修前应绿] 28 条(现在绿 28 / 红 0)
+exit=0
+
+===== check-r89-prompt-cache =====
+check-r89-prompt-cache: OK
+exit=0
+
+===== check-r90-cache-followups =====
+check-r90-cache-followups: OK
+exit=0
+
+===== check-rename-session =====
+✓ check-rename-session: 标题追加语义 / 两字段独立 / 优先级链 / draft 降级 全部通过
+exit=0
+
+===== check-shim-detect =====
+✓ check-shim-detect: 魔数 8 形态 + 壳包三态 + 双布局 + 禁选接线守卫 全过
+exit=0
+
+===== crt-roundtrip (server/utils/win-cmd.js) =====
+✅ 尾 1 个 \                      
+✅ 盘根 D:\                       
+✅ 尾 2 个 \                      
+✅ 尾 3 个 \                      
+✅ 纯反斜杠 token                   
+✅ 中间反斜杠                        
+✅ 空串 token                     
+✅ 元字符/空格/内嵌引号                  
+✅ 路径带空格                        
+✅ 单个引号 token                   
+✅ 反斜杠紧邻内嵌引号 a\"b               
+✅ 两反斜杠+引号 a\\"b                
+✅ token 以 \" 结尾                
+✅ 引号后跟反斜杠 a"\                  
+✅ JSON 参数                      
+
+15/15 往返全部还原。
+exit=0
+
+===== tests/acceptance 零 diff 核查(相对锁定 f8a21797) =====
+[空=零改动];说明:tests/acceptance/ 下为往轮(tunnel/plugin-install/r26/r33/r63/r64/stop-task)的场景套件,需要真实 GUI 宿主、网络隧道与 claude 进程,本轮契约要求的是零改动而非运行,未运行。
+exit=0
