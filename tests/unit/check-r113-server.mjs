@@ -417,14 +417,14 @@ await red('W7 winCmdLineBudget:非 win32 → {viaCmd:false,length:0,over:false},
   const fn = need(winCmd, 'winCmdLineBudget');
   const max = winCmd?.WIN_CMD_LINE_MAX;
   assert.deepEqual(fn('/usr/local/bin/claude', BG_ARGS('a'.repeat(50_000)), { platform: 'darwin' }),
-    { viaCmd: false, length: 0, limit: max, over: false });
+    { viaCmd: false, length: 0, limit: max, over: false, newline: false });
 });
 
 await red('W8 winCmdLineBudget:win32 + .exe → 恒 over:false(Bug 2 回归本体)', async () => {
   const fn = need(winCmd, 'winCmdLineBudget');
   const max = winCmd?.WIN_CMD_LINE_MAX;
   assert.deepEqual(fn(EXE_BIN, BG_ARGS('a'.repeat(7001)), { platform: 'win32' }),
-    { viaCmd: false, length: 0, limit: max, over: false }, '.exe 不经 cmd.exe,7001 字符必须能派发');
+    { viaCmd: false, length: 0, limit: max, over: false, newline: false }, '.exe 不经 cmd.exe,7001 字符必须能派发');
   assert.equal(fn(EXE_BIN, BG_ARGS('a'.repeat(30_000)), { platform: 'win32' }).over, false);
 });
 
@@ -488,13 +488,13 @@ await red('W16 winCmdLineBudget:args 非数组当 [];脏入参永不抛', async 
   assert.equal(fn(undefined, undefined, undefined).over, false);
 });
 
-await red('W17 winCmdLineBudget:返回四个键齐全,length 是 CreateProcess 收到的整条命令行长度', async () => {
+await red('W17 winCmdLineBudget:返回五个键齐全(v3 含 newline),length 是 CreateProcess 收到的整条命令行长度', async () => {
   const fn = need(winCmd, 'winCmdLineBudget');
   const spec = need(winCmd, 'winCmdSpawnSpec');
   const args = BG_ARGS('say "hi" D:\\');
   const r = fn(CMD_BIN, args, { platform: 'win32' });
   const s = spec(CMD_BIN, args, {});
-  assert.deepEqual(Object.keys(r).sort(), ['length', 'limit', 'over', 'viaCmd']);
+  assert.deepEqual(Object.keys(r).sort(), ['length', 'limit', 'newline', 'over', 'viaCmd']);
   assert.equal(r.length, [s.file, ...s.args].join(' ').length, 'length 必须等于 [file,...args].join(" ") 的长度');
 });
 
@@ -528,6 +528,62 @@ await green('W21 §5.2 不变:引号规则两条(尾部反斜杠翻倍 + 内嵌�
   const tokenOf = (a) => spec(CMD_BIN, [a], {}).args[3].slice(1, -1).split(' ').slice(1).join(' ');
   assert.equal(tokenOf('D:\\'), '"D:\\\\"', '结尾反斜杠没翻倍');
   assert.equal(tokenOf('a\\"b'), '"a\\\\""b"', '内嵌引号前的反斜杠没翻倍');
+});
+
+// ── §2.3 v3(2026-09-06 契约修订):cmd.exe 在换行处把整条命令行截断,轻则丢掉后面的
+//    参数,重则后半行被当成第二条命令执行;引号挡不住,只能在派发前量出来并拒掉。
+//    newline 与 over 是并列的两个维度:短 prompt 也能因换行被拒,超长 prompt 也可能没换行。
+
+await red('W22 winCmdLineBudget §2.3v3:win32 + .cmd,args 含 \\n / \\r / \\r\\n → newline:true(与长度无关)', async () => {
+  const fn = need(winCmd, 'winCmdLineBudget');
+  const lf = fn(CMD_BIN, BG_ARGS('a\nb'), { platform: 'win32' });
+  assert.equal(lf.newline, true, 'LF 换行没被量出来 —— cmd.exe 会在这里截断整条命令行');
+  assert.equal(lf.over, false, '这条 prompt 很短,不该判超 —— newline 是与长度并列的第二个维度');
+  assert.equal(lf.length > 0, true, '有换行时 length 仍按整条命令行照常算');
+  assert.equal(fn(CMD_BIN, BG_ARGS('a\rb'), { platform: 'win32' }).newline, true, 'CR 换行没被量出来');
+  assert.equal(fn(CMD_BIN, BG_ARGS('a\r\nb'), { platform: 'win32' }).newline, true, 'CRLF 换行没被量出来');
+});
+
+await red('W23 winCmdLineBudget §2.3v3 反向:不经 cmd.exe 的装法(.exe / 无扩展名 / 非 win32)带换行 → newline 恒 false', async () => {
+  const fn = need(winCmd, 'winCmdLineBudget');
+  assert.equal(fn(EXE_BIN, BG_ARGS('a\nb'), { platform: 'win32' }).newline, false,
+    '.exe 直执行不经 cmd.exe,多行 prompt 必须照常派发');
+  assert.equal(fn('C:\\npm\\claude', BG_ARGS('a\nb'), { platform: 'win32' }).newline, false, '无扩展名 shim 直执行');
+  assert.equal(fn('', BG_ARGS('a\nb'), { platform: 'win32' }).newline, false, '路径没解析出来时不按换行拒');
+  assert.equal(fn(CMD_BIN, BG_ARGS('a\nb'), { platform: 'darwin' }).newline, false, 'mac 上换行完全不受限');
+  assert.equal(fn('/usr/local/bin/claude', BG_ARGS('第一行\n第二行'), { platform: 'linux' }).newline, false);
+});
+
+await red('W24 winCmdLineBudget §2.3v3:没有换行的 prompt(空/空格/引号/反斜杠/超长)→ newline:false', async () => {
+  const fn = need(winCmd, 'winCmdLineBudget');
+  assert.equal(fn(CMD_BIN, BG_ARGS(''), { platform: 'win32' }).newline, false, '空 prompt');
+  assert.equal(fn(CMD_BIN, BG_ARGS('a b'), { platform: 'win32' }).newline, false, '普通带空格的单行任务');
+  assert.equal(fn(CMD_BIN, BG_ARGS('say "hi" D:\\'), { platform: 'win32' }).newline, false, '引号与反斜杠不是换行');
+  assert.equal(fn(CMD_BIN, [], { platform: 'win32' }).newline, false, '空 args');
+  const long = fn(CMD_BIN, BG_ARGS('a'.repeat(9000)), { platform: 'win32' });
+  assert.equal(long.over, true, '9000 个 a 展开后必须判超');
+  assert.equal(long.newline, false, '判超与换行互不干扰:超长但无换行时 newline 仍是 false');
+});
+
+await red('W25 winCmdLineBudget §2.3v3:换行落在任意元素、任意位置都算(不只看 prompt 那一格)', async () => {
+  const fn = need(winCmd, 'winCmdLineBudget');
+  const nl = (args) => fn(CMD_BIN, args, { platform: 'win32' }).newline;
+  assert.equal(nl(['--bg\n', 'task', '--permission-mode', 'acceptEdits']), true, '换行在第一个元素');
+  assert.equal(nl(['--bg', 'task', '--permission-mode', 'acceptEdits\n']), true, '换行在最后一个元素');
+  assert.equal(nl(BG_ARGS('\n开头就是换行')), true, '行首换行');
+  assert.equal(nl(BG_ARGS('结尾换行\n')), true, '行尾换行');
+  assert.equal(nl(BG_ARGS('第一行\n第二行\n第三行')), true, '多处换行');
+});
+
+await red('W26 winCmdLineBudget §2.3v3:脏 args(非数组 / 含非字符串元素)不抛,newline 仍是布尔', async () => {
+  const fn = need(winCmd, 'winCmdLineBudget');
+  for (const bad of [null, undefined, 'a string', 42, {}, true]) {
+    assert.equal(typeof fn(CMD_BIN, bad, { platform: 'win32' }).newline, 'boolean', `args=${JSON.stringify(bad)}`);
+  }
+  const mixed = fn(CMD_BIN, ['--bg', null, 42, undefined, {}, [], true], { platform: 'win32' });
+  assert.equal(typeof mixed.newline, 'boolean', '含非字符串元素时 newline 仍必须是布尔');
+  assert.equal(mixed.newline, false, '这些元素转成字符串后都不含换行');
+  assert.equal(typeof fn(null, null, null).newline, 'boolean', 'binPath/args/opts 全 null 也不抛');
 });
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -616,6 +672,47 @@ await green('G10 §4.2 不变:派发的是 prompt.trim(),白名单/模型参数�
   assert.match(AG, /prompt\.trim\(\)/);
   assert.match(AG, /BG_PERMISSION_MODES/);
   assert.match(AG, /safeModelArg/);
+});
+
+// ── §4.1 v3 / §7-3 v3(2026-09-06):换行守卫。经 cmd.exe 的装法上,含换行的 prompt
+//    会被 cmd 截断,后半段还可能被当第二条命令执行 —— 必须在 writeBgHookSettings 之前
+//    拒掉(400),而不是偷偷把换行替换成空格(那是改写用户文本)。
+
+await red('G11 §4.1v3/§7-3:dispatch 读了预算结果的 .newline,且换行判定在 writeBgHookSettings 之前', async () => {
+  assert.ok(AGD.length > 0, 'agents.js 找不到 background/dispatch 路由');
+  assert.match(AGD, /\.newline\b/,
+    'dispatch 路由里没有读 winCmdLineBudget 结果的 .newline —— 换行这条根本没被量出来');
+  const nlAt = AGD.indexOf('.newline');
+  const hookAt = AGD.indexOf('writeBgHookSettings(');
+  assert.ok(hookAt > -1, 'dispatch 路由里找不到 writeBgHookSettings(');
+  assert.ok(nlAt < hookAt,
+    `换行判定(${nlAt})排在 writeBgHookSettings(${hookAt})之后 —— 被拒时会留下孤儿 hook 设置文件`);
+});
+
+await red('G12 §4.1v3 文案:含「换行」与「会话内发送」,且是 400 + JSON error 字段', async () => {
+  const line = (AG.split('\n').find((l) => l.includes('换行') && l.includes('会话内发送')) || '');
+  assert.ok(line.length > 0, '找不到同时含「换行」与「会话内发送」的 400 文案(用户看不懂为什么被拒)');
+  const at = AG.indexOf(line);
+  const near = AG.slice(Math.max(0, at - 600), at + 300);
+  assert.match(near, /status\(400\)[\s\S]{0,120}json\(\{\s*error/,
+    '换行被拒必须是 400 + JSON error 字段(前端 AgentMonitorPanel 只读 error)');
+});
+
+// G13 的作用域说明:整文件锁「不得出现 [\r\n]」不可用 —— agents.js 别处早就有与本守卫
+// 无关的 [\r\n] 用法(2026-09-06 实测 3 处,HEAD 上就有,那时还没有换行守卫),整文件锁
+// 会逼开发去动无关代码。所以拆成两把:字符类锁只管【守卫区】(dispatch 路由起点 →
+// writeBgHookSettings 之间,换行判定必须落在这里),谓词形态锁管全文件。
+await green('G13 §7-3v3 不得出现:守卫区不自带换行正则/换行字面量(判据必须收在 winCmdLineBudget)', async () => {
+  assert.ok(AGD.length > 0, 'agents.js 找不到 background/dispatch 路由');
+  const hookAt = AGD.indexOf('writeBgHookSettings(');
+  assert.ok(hookAt > -1, 'dispatch 路由里找不到 writeBgHookSettings(');
+  const guard = AGD.slice(0, hookAt);        // 换行判定按 §4.1v3 必须落在这一段里
+  assert.equal(/\[(?!\^)[^\]\n]*\\[rn][^\]\n]*\]/.test(guard), false,
+    '守卫区出现了 [\\r\\n] 这类换行字符类 —— 判据必须来自 winCmdLineBudget 的 newline 字段');
+  assert.equal(/['"`]\\[rn]['"`]/.test(guard), false,
+    "守卫区出现了 '\\n' 字面量(自己 includes/split 找换行)—— 判据必须收在 winCmdLineBudget");
+  assert.equal(/\/[^/\n]*\\[rn][^/\n]*\/[gimsuy]*\s*\.test\(/.test(AG), false,
+    'agents.js 里出现了 /…\\n…/.test( 形态的换行判定 —— 又是一处平台判据分叉');
 });
 
 console.log('\nL. §7 源码锁');

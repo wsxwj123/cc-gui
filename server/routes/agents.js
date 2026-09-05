@@ -559,7 +559,13 @@ router.post('/agents/background/dispatch', async (req, res) => {
   const hookArgs = mode !== 'acceptEdits' ? ['--settings', BG_HOOK_SETTINGS] : [];
   const budget = winCmdLineBudget(resolveClaude()?.path || '', [...args, ...hookArgs, ...modelArgs]);
   if (budget.over) {
-    return res.status(400).json({ error: `Windows 上后台代理的提示词经 cmd.exe 传递,展开后的命令行 ${budget.length} 字符,超过上限 ${budget.limit};请缩短提示词或改用会话内发送` });
+    return res.status(400).json({ error: `Windows 上后台代理的提示词经 cmd.exe 传递,展开后的命令行 ${budget.length} 字符(原文 ${prompt.trim().length} 字符),超过上限 ${budget.limit};请缩短提示词或改用会话内发送` });
+  }
+  // 同一条命令行的第二个维度(与长度并列,判据同样收在 winCmdLineBudget):经 cmd.exe 的
+  // 装法上,多行文本会被 cmd 在第一处断行截断,后半段还可能被当成另一条命令执行。这里
+  // 只拒不改 —— 把用户文本里的断行替换掉是静默改写别人的提示词,比拒绝更坏。
+  if (budget.newline) {
+    return res.status(400).json({ error: 'Windows 上经 cmd.exe 传递的提示词不能含换行(cmd.exe 会在换行处截断整条命令行);请改成单行,或改用会话内发送' });
   }
   if (mode !== 'acceptEdits') {
     // 挂不上 hook 就不派:这两档没有应答通道 = 代理必然卡在授权等待永不返回,
