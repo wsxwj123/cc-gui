@@ -7,7 +7,8 @@ import { fileURLToPath } from 'url';
 import { homedir } from 'os';
 import { getActiveChatProcesses, claudeSpawn, cleanChildEnv, safeModelArg } from './chat.js';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
-import { claudeCommand } from '../utils/claude-resolver.js';
+import { claudeCommand, resolveClaude } from '../utils/claude-resolver.js';
+import { winCmdLineBudget } from '../utils/win-cmd.js';
 import { dropPendingForSession } from './permissions.js';
 
 const execFileP = promisify(execFile);
@@ -531,11 +532,6 @@ router.post('/agents/background/dispatch', async (req, res) => {
   if (process.platform === 'win32' && !/\s/.test(prompt.trim()) && /[&|<>^]/.test(prompt)) {
     return res.status(400).json({ error: 'prompt 含不安全字符(单个词里的 & | < > ^);请用正常任务描述' });
   }
-  // Windows 命令行总长上限 8191 字符;--bg 的 prompt 走位置参数(无法改 stdin),加上 claude 路径、
-  // 引号与其余参数后余量有限,超长会被静默截断。留足余量,超限直接拒并说明改用会话内发送。
-  if (process.platform === 'win32' && prompt.length > 7000) {
-    return res.status(400).json({ error: `Windows 上后台代理的提示词经命令行传递,长度上限 7000 字符,当前 ${prompt.length} 字符;请缩短或改用会话内发送` });
-  }
   let dir;
   // 工作区例外版(fable 审计):后台代理语义=在该项目目录跑 claude --bg,Windows
   // 其他盘项目走严格 $HOME 门禁必 400(与 purge 同类)。spawn cwd 用归一化形态无害
@@ -545,21 +541,32 @@ router.post('/agents/background/dispatch', async (req, res) => {
   // 实测:--bg 与 -p 冲突(-p 不起 interactive 会话,agents 无法 attach)——prompt 必须
   // 走位置参数:`claude --bg '<task>'`。
   const mode = BG_PERMISSION_MODES.has(permissionMode) ? permissionMode : 'acceptEdits';
-  const args = ['--bg', prompt.trim(), '--permission-mode', mode];
   // 只给用户主动选的 default / plan 挂 hook。acceptEdits 一个字不动 —— 它是既有默认档,
   // 挂上会改变它的既有行为(GUI 没开时,原本"卡着等、可事后在终端 attach 应答"的请求
   // 会变成立即拒绝)。注:acceptEdits 档下的非编辑类请求(Bash 等)照旧可能永久等待,
   // 那是本批之外的老问题,现在至少能在监控面板看见"等待授权"。
-  if (mode !== 'acceptEdits') {
-    // 挂不上 hook 就不派:这两档没有应答通道 = 代理必然卡在授权等待永不返回,
-    // 那正是本通道要消灭的静默失败,不能"降级"成它。
-    try { args.push('--settings', await writeBgHookSettings(req.socket?.localPort)); }
-    catch (e) { return res.status(500).json({ error: `无法写入授权 hook 配置(${e.message});已取消派发` }); }
-  }
+  const needsHook = mode !== 'acceptEdits';
   // model 过白名单:Windows cmd.exe /c 下无空格+含 & 的 model 会被当命令分隔执行(RCE 绕权限)。
   // 注:--bg 要求 prompt 走位置参数无法改 stdin,现实 prompt 多含空格会被 libuv 引用;model 是干净活口。
   const safeModel = safeModelArg(model);
+  // 先把完整 argv 拼齐再量长度:hook 档的 --settings 路径是模块常量,可以先入 argv、
+  // 通过长度门之后再落文件(被拒时不留孤儿 settings 文件)。
+  const args = ['--bg', prompt.trim(), '--permission-mode', mode];
+  if (needsHook) args.push('--settings', BG_HOOK_SETTINGS);
   if (safeModel) args.push('--model', safeModel);
+  // 长度门只对"这次真的经 cmd.exe 起进程"的装法生效(.cmd/.bat),判据与量法都收在
+  // winCmdLineBudget 里:量的是引号展开后交给 CreateProcess 的那条命令行,不是 prompt 原长。
+  // 直执行的 .exe / 无扩展名 shim 走 CreateProcess(上限 32767 且超限显式报错),不设门。
+  const budget = winCmdLineBudget(resolveClaude()?.path || '', args);
+  if (budget.over) {
+    return res.status(400).json({ error: `Windows 上后台代理的提示词经 cmd.exe 传递,展开后的命令行 ${budget.length} 字符,超过上限 ${budget.limit};请缩短提示词或改用会话内发送` });
+  }
+  if (needsHook) {
+    // 挂不上 hook 就不派:这两档没有应答通道 = 代理必然卡在授权等待永不返回,
+    // 那正是本通道要消灭的静默失败,不能"降级"成它。
+    try { await writeBgHookSettings(req.socket?.localPort); }
+    catch (e) { return res.status(500).json({ error: `无法写入授权 hook 配置(${e.message});已取消派发` }); }
+  }
   const dispatchedAt = Date.now();
   try {
     const proc = claudeSpawn(args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: cleanChildEnv() });

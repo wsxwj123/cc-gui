@@ -13,7 +13,7 @@ import { dropPendingForSession, requestElicitation, requestPermission, requestUs
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude, resolveSdkClaude, logSdkClaudeOnce } from '../utils/claude-resolver.js';
-import { winCmdSpawnSpec } from '../utils/win-cmd.js';
+import { winCmdSpawnSpec, spawnViaCmdExe } from '../utils/win-cmd.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { contextTimeoutBudget, latestCountTokensOutcome } from '../utils/context-tokens.js';
 import { canonicalCwd } from '../utils/safe-path.js';
@@ -280,7 +280,7 @@ export function resolveCompactWindowSettings(model) {
 export function claudeSpawn(args, opts) {
   const resolved = resolveClaude()?.path || null;
   if (process.platform === 'win32') {
-    if (resolved && /\.(cmd|bat)$/i.test(resolved)) {
+    if (spawnViaCmdExe(resolved)) {
       const { args: finalArgs, tempFiles } = jsonArgsToTempFiles(args);
       // r110:引号规则统一走 winCmdSpawnSpec(每 token 独立引号 + verbatim),旧写法会让参数里的
       // `< > | & ^` 被 cmd 当元字符解释掉。
