@@ -5,7 +5,7 @@ import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { loadVersionNotes, releaseNotesIndex } from '../utils/releaseNotes.js';
 
 // 「更新说明」弹窗:装完新版打开 GUI 时自动弹一次(同版本只弹一次),也可从
-// 设置 → 通用 → GUI 版本与更新 里的「查看更新说明」手动打开、翻看历史版本。
+// 设置 → 通用 → GUI 版本与更新 里的「更新说明」手动打开、翻看历史版本。
 //
 // 内容来自 bundle 里的 generated/release-notes/*.json(构建期从 CHANGELOG.md 切的),
 // 不联网。正文用项目自带的 MarkdownRenderer 渲染,不引新库。

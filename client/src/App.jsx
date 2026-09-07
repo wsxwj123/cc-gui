@@ -10957,7 +10957,7 @@ export default function App() {
       if (fallbackTimer) clearTimeout(fallbackTimer);
     };
   }, []);
-  // 手动入口:设置 → 通用 → GUI 版本与更新 的「查看更新说明」。不受"同版本只弹一次"限制。
+  // 手动入口:设置 → 通用 → GUI 版本与更新 的「更新说明」。不受"同版本只弹一次"限制。
   useEffect(() => {
     const onOpen = () => setReleaseNotesOpen(true);
     window.addEventListener('cgui:open-release-notes', onOpen);

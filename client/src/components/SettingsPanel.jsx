@@ -1002,7 +1002,7 @@ function UpdateChecker() {
             onClick={() => window.dispatchEvent(new CustomEvent('cgui:open-release-notes'))}
             className="px-2.5 py-1.5 text-[12px] text-ink-muted hover:text-ink border border-canvas-deep rounded-md hover:bg-canvas-warm"
           >
-            查看更新说明
+            更新说明
           </button>
           <button
             onClick={check}
