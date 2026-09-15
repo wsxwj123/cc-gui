@@ -31,6 +31,7 @@ import {
   stripSummary, isFoldableSegment, getSkillDocReadName,
 } from '../utils/streamStatus.js';
 import { Linkify } from '../utils/linkify.jsx';
+import { ImageLightbox } from './ImageLightbox.jsx';
 
 // Tools that get their own bespoke inline card (rendered in chronological order
 // inside the turn). Anything not in this set falls through to ToolCallsGroup,
@@ -128,8 +129,12 @@ function InterruptedToolCard({ toolCall }) {
 // 图像块来源见 utils/toolResult.js 的 extractToolResultImages(computer-use 截图主用例)。
 function McpToolCard({ toolCall }) {
   const [expanded, setExpanded] = useState(true);
+  // r116:点卡片截图放大 = 应用共享灯箱(与聊天图片同一组件)。灯箱的 Esc 挂 window 捕获相位并
+  // stopImmediatePropagation,先于 App.jsx 会话级「Esc 停止」(window 冒泡)→ 关大图不会停掉回复。
+  const [zoomIndex, setZoomIndex] = useState(null);
   const result = toolCall.result;
   const images = Array.isArray(result?.images) ? result.images : [];
+  const zoomImage = zoomIndex != null ? images[zoomIndex] : null;
   const nameParts = (toolCall.name || '').split('__');
   const shortName = nameParts.pop() || toolCall.name;
   const serverName = nameParts[1] || '';
@@ -167,13 +172,19 @@ function McpToolCard({ toolCall }) {
                   src={`data:${img.mime};base64,${img.data}`}
                   alt={`${shortName} 结果 ${i + 1}`}
                   loading="lazy"
-                  className="max-w-full h-auto rounded border border-canvas-deep"
+                  onClick={(e) => { e.stopPropagation(); setZoomIndex(i); }}
+                  className="max-w-full h-auto rounded border border-canvas-deep cursor-zoom-in"
                 />
               ))}
             </div>
           )}
         </div>
       )}
+      <ImageLightbox
+        src={zoomImage ? `data:${zoomImage.mime};base64,${zoomImage.data}` : null}
+        name={zoomImage ? `${shortName} 结果 ${zoomIndex + 1}` : undefined}
+        onClose={() => setZoomIndex(null)}
+      />
     </div>
   );
 }
