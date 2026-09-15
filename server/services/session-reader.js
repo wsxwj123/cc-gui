@@ -50,6 +50,25 @@ function workflowRunOf(toolUseResult, content) {
   };
 }
 
+// r116:tool_result 的内容块数组拆成「可读文字 + 图片列表」,与前端 client/src/utils/toolResult.js
+// 的 extractToolResultText / extractToolResultImages 逐条同口径(流式与读历史同形)。此前数组一律
+// JSON.stringify:图片进不了卡片,几十万字符的 base64 当正文塞进 <pre><Linkify> → 界面卡死。
+// 字符串原样;数组/字符串以外的形态保持原逻辑(JSON.stringify,缺 content 仍是 undefined)。
+// 不含图片不加 images 键(其余 tool_result 形状一字不变)。
+function toolResultBody(content) {
+  if (typeof content === 'string') return { content };
+  if (!Array.isArray(content)) return { content: JSON.stringify(content) };
+  const text = content
+    .filter((b) => b && (b.type === 'text' || typeof b.text === 'string'))
+    .map((b) => b.text || '')
+    .join('\n');
+  const images = content
+    .filter((b) => b && (b.type === 'image' || typeof b.data === 'string'))
+    .map((b) => ({ mime: b.source?.media_type || b.mimeType || 'image/png', data: b.source?.data || b.data || '' }))
+    .filter((b) => b.data);
+  return images.length ? { content: text, images } : { content: text };
+}
+
 // L4: 附件元数据 sidecar。cc CLI 的 jsonl 由 CLI 写,GUI 无法注入 attachments 字段,
 // 改用旁路文件按 textHash 索引,session-reader 读历史消息时 merge 回来。
 const ATTACHMENTS_DIR = join(homedir(), '.claude-gui', 'attachments');
@@ -1602,7 +1621,7 @@ export async function getSessionMessages(sessionId, projectHash) {
         if (item.type === 'tool_result') {
           const entry = {
             toolUseId: item.tool_use_id,
-            content: typeof item.content === 'string' ? item.content : JSON.stringify(item.content),
+            ...toolResultBody(item.content),
             isError: item.is_error || false,
           };
           // 工作流的结果才附 workflowRun;其余 tool_result 一个键都不多出来。
