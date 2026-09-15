@@ -180,7 +180,18 @@ const markdownComponents = {
 // isStreaming:本条消息是否还在流式产出。genui 围栏据此决定要不要做结构补全、要不要
 // 报解析失败(PLAN §1.4)。只有会渲染流式正文的调用点需要传(TurnBubble 三处),其余
 // 一律不传 = 已定稿。**不查 DOM**:DOM 探测在 React 19 并发渲染下时序不可靠。
-export function MarkdownRenderer({ content, basePath, dockKeyPrefix, isStreaming = false }) {
+//
+// r119【记忆化,流式卡顿的根因之一】:props 全是标量(content/basePath/dockKeyPrefix/
+// isStreaming),浅比较就够 —— 内容没变就整棵子树跳过,不重解析。
+// 为什么必须有:流式正文是**按块**渲染的(CoworkBlocks 里每个 text 块一个 MarkdownRenderer),
+// 一轮跑几百块时,每个 delta 触发的重渲会让**所有已完成块**各自重跑一遍 remark/rehype 解析
+// —— 每次提交的代价 = 全部历史块的解析之和(12KB 块 ≈ 3ms,250 块 ≈ 750ms,每帧一次)。
+// 实测:重负载下主线程被这种"整份重解析"占满,点「停止」/按 Esc 的输入事件要排 6~11 秒
+// 才被受理。记忆化之后,一次提交只重解析**正在长的那一块**(几毫秒),其余块元素身份不变、
+// 直接跳过(React 对 memo 命中的子树不会进入)。
+// 注意:isStreaming 由 true 变 false 时会各重解析一次(定稿格式与流式格式不同),这是有意的。
+// 写法用 React.memo(<具名函数表达式>):组件名仍是 MarkdownRenderer(调试/单测的源码守卫都认它)。
+export const MarkdownRenderer = React.memo(function MarkdownRenderer({ content, basePath, dockKeyPrefix, isStreaming = false }) {
   // basePath/dockKeyPrefix 变化时才重建 components,避免每次渲染都生成新组件。
   // dockKeyPrefix 在流式全程稳定(turn.uuid 恒为 'streaming' 哨兵 + 块序号),故不会抖动。
   const components = useMemo(() => ({
@@ -234,4 +245,4 @@ export function MarkdownRenderer({ content, basePath, dockKeyPrefix, isStreaming
       </ReactMarkdown>
     </div>
   );
-}
+});

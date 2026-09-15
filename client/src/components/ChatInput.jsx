@@ -330,7 +330,7 @@ function steerBlockTitle(canSteer, queueItems) {
   }
 }
 
-export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, paneId = null, claimDraft = null, onRefreshQueueEvidence, todos = null, plan = '', plans = null, goal = null, permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
+export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, stopping = false, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, paneId = null, claimDraft = null, onRefreshQueueEvidence, todos = null, plan = '', plans = null, goal = null, permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -1155,11 +1155,14 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
               <button
                 data-cgui="stop-btn"
                 onClick={onStop}
-                className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-md bg-ink/90 hover:bg-ink text-canvas flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium"
-                title="停止生成"
+                disabled={stopping}
+                className="shrink-0 h-8 px-3 max-md:px-2.5 rounded-md bg-ink/90 hover:bg-ink text-canvas flex items-center justify-center gap-1.5 max-md:gap-0 transition-colors text-[11px] font-medium disabled:opacity-60 disabled:cursor-default"
+                title={stopping ? '正在停止' : '停止生成'}
               >
-                <Square size={11} className="fill-current" />
-                <span className="max-md:hidden">停止</span>
+                {stopping
+                  ? <Loader2 size={11} className="animate-spin" />
+                  : <Square size={11} className="fill-current" />}
+                <span className="max-md:hidden">{stopping ? '停止中' : '停止'}</span>
               </button>
             ) : (
               <button

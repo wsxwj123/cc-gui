@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo, useSyncExternalStore } from 'react';
+import React, { startTransition, useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 
 // Stable empty array reference for zustand selectors — prevents React error
@@ -155,6 +155,7 @@ import { classifyStopTargets } from './utils/stopTargets.js';
 import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
+import { createStreamCommit } from './utils/streamCommit.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
@@ -2491,12 +2492,16 @@ function LastUpdateAgo({ getAt }) {
   return <span className="text-[12px] text-ink-faint shrink-0 tabular-nums">· 上次更新 {txt}</span>;
 }
 
-function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true }) {
+function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true, stopping = false }) {
   const verb = useCyclingVerb();
   let label = null;
   // Latest unresolved tool call (no result yet) → "Bash(ls)"
   const pendingTool = [...toolCalls].reverse().find((tc) => !tc.result);
-  if (pendingTool) {
+  if (stopping) {
+    // r119:用户已请求停止、本轮还没结束 —— 如实显示"停止中",不再继续报"正在产出什么"
+    // (内容其实已经冻结了;继续显示 Writing/工具名就是用户说的"已经停了还显示运行中")。
+    label = '停止中';
+  } else if (pendingTool) {
     const preview =
       pendingTool.input?.command ||
       pendingTool.input?.file_path?.split(/[/\\]+/).pop() ||
@@ -2524,7 +2529,7 @@ function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdat
   // ✻ 头像位(TurnBubble 的 ProviderAvatar thinking 态),状态行只保留纯文字,
   // 缩进 50px(34px 头像 + 16px gap)与气泡正文列对齐,渲染在气泡下方。
   return (
-    <div className="px-6 -mt-2 pb-3 animate-fade-in">
+    <div className="px-6 -mt-2 pb-3 animate-fade-in" {...(stopping ? { role: 'status' } : {})}>
       <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2 pl-[50px] text-[13px] text-ink-soft font-body" style={{ color: '#D97757' }}>
         {/* 状态行指示器用主题选的加载动画(与下方 Connecting 行一致);LoadingMark 继承
             currentColor,外层 style 已置橙 #D97757 —— cli 默认帧与其它 30 种样式同色。 */}
@@ -3755,6 +3760,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   //   'takeover'    服务端回 detached(同一运行已在别处被接管)→「此运行已在另一处查看」
   // 该提示只陈述事实,不做任何自动夺回/自动重发。
   const [streamConnNotice, setStreamConnNotice] = useState(null);
+  // r119:「已请求停止、本轮尚未结束」。**只描述用户的请求与本端回合是否还在**,不描述服务端
+  // 收尾(那是既有 finalize 的事,口径不变)。点「停止」/按 Esc 的当场就置 true —— 不再等
+  // POST /stop 回话(重负载下那个响应实测要 7.4 秒才回,界面那 7 秒里一直显示"运行中",就是
+  // 用户说的"点了没反应/已经停了还显示运行中")。清掉它只有两处:本轮收尾 finally(前台流),
+  // 或后台进程那条分支的停止请求回话(无本地流可等)。
+  const [stopping, setStopping] = useState(false);
   const [streamingToolCalls, setStreamingToolCalls] = useState([]);
   // 直播补齐(2026-09-13):子代理完成时服务端随事件推来的金额条目(SSE 的 subagent_usage
   // 分支与 WS 兜底各自 push 进 store)。拼成本回合的 subUsage 形状喂给直播回合字面量 —— 直播
@@ -3847,6 +3858,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 并把它加进该 effect 的 deps。
   const [attachRetryNonce, setAttachRetryNonce] = useState(0);
   const abortRef = useRef(null);
+  // r119 流式提交合并器的两个句柄(由 handleSend 的流闭包填,见 utils/streamCommit.js):
+  //   flush  —— 点「停止」那一刻立刻把累积正文提交一次(否则"停止中"要和一帧渲染抢时序)
+  //   cancel —— 卸载/切会话时丢掉挂起的那一帧,避免对已卸载组件 setState,也避免陈旧提交
+  //             把收尾时刚清空的流式内容又写回界面。
+  const streamCommitFlushRef = useRef(null);
+  const streamCommitCancelRef = useRef(null);
   // 只做「断开本端 SSE」这一件事:abort 客户端 fetch → 服务端 req.on('close') → slot.attached=false,
   // 后续行落 earlyLines 等重连回放(detach-don't-abort,进程不死、jsonl 继续落盘)。
   // 切会话与关窗格共用,避免两条路径漂移 —— 关窗格漏 abort 正是「关掉分屏再打开该会话,
@@ -3856,6 +3873,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (abortRef.current) { try { abortRef.current.abort(); } catch {} abortRef.current = null; }
     if (attachRetryTimerRef.current) { clearTimeout(attachRetryTimerRef.current); attachRetryTimerRef.current = null; }
     activeProcRef.current = null;
+    // r119:丢掉挂起的流式提交(卸载/切会话)。收尾路径(broken 流的 finally)也会再 cancel
+    // 一次,幂等;此处保证"组件已经拆了"这一刻不再有任何排队中的帧回调。
+    streamCommitCancelRef.current?.();
   }, []);
   // 卸载即 detach。关窗格(closePane splice paneIds)只让本 pane 的 SessionDetail 卸载,
   // 兄弟窗格 key 稳定不受影响;abortRef 为 null 时是纯 no-op,故 StrictMode 的
@@ -4911,6 +4931,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 新回合开始必清上一次 /stop 的响应 ref:上轮 finally 若因异常没读到就清,陈旧 promise
     // 会被本回合 finally 当成"本次停止的保留项",按上一轮的 keptToolUseIds 排除收尾。
     stopKeptRef.current = null;
+    setStopping(false); // r119:新回合开始,上一轮的「停止中」作废(连点停止后马上再发也不残留)
     // BF-1:记录历史截断点 —— 流式期间任何历史重拉都会拉到本回合半成品,渲染层据此丢弃。
     // reattach 改为不截断(resolveStreamHistCutoff):{ sinceTs: detachTs } 是按 turn 粒度过滤的,
     // 而一条 turn 的时间戳取本回合【第一条】assistant 记录的时间(必早于 detach)⇒ 在跑的整个
@@ -5054,6 +5075,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // empty/errored turn — which never gets a jsonl twin — neither waits on one
     // nor has its local ⚠️/❌ notice cleared.
     let producedReply = false;
+    // r119:历史(jsonl)接管、本地副本已被清掉。收尾那条"推一条本地副本"的气泡进了
+    // transition(低优先级):万一落盘轮询(await 之后)先把本地副本清了,延迟提交的那次
+    // 追加会被 React 重放到清空之后 → 同一条回复画两遍(本地副本 + jsonl 孪生)。据此加闩:
+    // 清过之后不再补。清之前提交的照旧由那次清理掉,行为不变。
+    let localCopiesCleared = false;
     // Count of assistant turns already in the persisted jsonl BEFORE this round.
     // The finally uses this (not a text match on the prompt) to detect when THIS
     // round's reply has landed: a repeated prompt (e.g. "继续") would make a
@@ -5078,6 +5104,27 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r65:本流是否见过任何模型产出。本地闩住只翻一次 state,免每片 delta 重复 setState。
     let sawOutput = false;
     const markSawOutput = () => { if (!sawOutput) { sawOutput = true; setSawModelOutput(true); } };
+    // ── 流式提交合并(r119)────────────────────────────────────────────────────
+    // 原来每个 delta/快照消息都直接 setStreamingText/setStreamingBlocks(= 每来一块就一次
+    // 整份累积正文的重渲染 + markdown 重解析,O(n²)),主线程被长任务占满 → 点「停止」/按 Esc
+    // 的输入事件只能排队(实测量到 6~11 秒)。现在事件只改上面这些闭包累积值,提交交给合并器:
+    // 每个动画帧最多一次,提交读的仍是累积值 ⇒ 中间态不画,内容一个字不丢。
+    // 终止路径必须 flush(见 handleStop/循环里的 result·done/收尾 catch);收尾清空流式
+    // state 前必须 reset,否则挂起的那一帧会把刚清空的内容又写回界面(残影气泡)。
+    const SC_TEXT = 1; const SC_THINKING = 2; const SC_TOOLS = 4; const SC_BLOCKS = 8;
+    let scDirty = 0;
+    const commitStream = createStreamCommit(() => {
+      const d = scDirty; scDirty = 0;
+      if (d & SC_TEXT) setStreamingText(accumulatedText);
+      if (d & SC_THINKING) setStreamingThinking(accumulatedThinking);
+      if (d & SC_TOOLS) setStreamingToolCalls([...currentToolCalls]);
+      if (d & SC_BLOCKS) setStreamingBlocks([...orderedBlocks]);
+    });
+    const scheduleStreamCommit = (flags) => { scDirty |= flags; commitStream.schedule(); };
+    const resetStreamCommit = () => { scDirty = 0; commitStream.cancel(); };
+    // 供 handleStop(点击即时反馈)与 detachStream(卸载/切会话)按 ref 调用(不进闭包依赖)。
+    streamCommitFlushRef.current = () => commitStream.flush();
+    streamCommitCancelRef.current = resetStreamCommit;
     let streamClosedNoticed = false; // CG-2:子代理打穿 canUseTool 通道的兜底提示,每轮只提示一次
     const taskIdToToolUse = {};  // task_started 建立 task_id→tool_use_id 映射,供只带 task_id 的 task_updated 用
     let turnAborted = false;     // 用户主动停止(catch 到 AbortError)才 true;供 finally 区分"正常完成"(不收后台化子代理)与"停止"(收 stopped)
@@ -5415,6 +5462,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = []; orderedBlocks = [];
               for (const k of Object.keys(blocks)) delete blocks[k];
               setStreamingText(''); setStreamingThinking(''); setStreamingToolCalls([]); setStreamingBlocks([]);
+              resetStreamCommit(); // 挂起的那一帧作废:别把刚清掉的内容又提交回去
               setReattachStream(true);
               setStreamHistCutoff(null);
               histFreshRef.current = { at: Date.now(), sig: null }; // 状态行的"上次更新"基准
@@ -5943,20 +5991,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 const orderIdx = orderedBlocks.length;
                 orderedBlocks.push({ type: 'text', content: '' });
                 blocks[ev.index] = { type: 'text', orderIdx };
-                setStreamingBlocks([...orderedBlocks]);
+                scheduleStreamCommit(SC_BLOCKS);
               } else if (cb.type === 'thinking') {
                 const orderIdx = orderedBlocks.length;
                 orderedBlocks.push({ type: 'thinking', content: '' });
                 blocks[ev.index] = { type: 'thinking', orderIdx };
-                setStreamingBlocks([...orderedBlocks]);
+                scheduleStreamCommit(SC_BLOCKS);
               } else if (cb.type === 'tool_use') {
                 const orderIdx = orderedBlocks.length;
                 const newTc = { id: cb.id, name: cb.name, input: {}, result: null };
                 orderedBlocks.push({ type: 'tool_use', toolCall: newTc });
                 blocks[ev.index] = { type: 'tool_use', toolId: cb.id, name: cb.name, jsonBuf: '', orderIdx };
                 currentToolCalls.push(newTc);
-                setStreamingToolCalls([...currentToolCalls]);
-                setStreamingBlocks([...orderedBlocks]);
+                scheduleStreamCommit(SC_TOOLS);
+                scheduleStreamCommit(SC_BLOCKS);
                 if (cb.name === 'Task' || cb.name === 'Agent') {
                   store.upsertAgent(cb.id, {
                     name: cb.name,
@@ -5982,9 +6030,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     ...orderedBlocks[block.orderIdx],
                     content: orderedBlocks[block.orderIdx].content + (delta.text || ''),
                   };
-                  setStreamingBlocks([...orderedBlocks]);
+                  scheduleStreamCommit(SC_BLOCKS);
                 }
-                setStreamingText(accumulatedText);
+                scheduleStreamCommit(SC_TEXT);
               } else if (delta.type === 'thinking_delta' && block.type === 'thinking') {
                 accumulatedThinking += delta.thinking || '';
                 if (block.orderIdx != null && orderedBlocks[block.orderIdx]) {
@@ -5992,9 +6040,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     ...orderedBlocks[block.orderIdx],
                     content: orderedBlocks[block.orderIdx].content + (delta.thinking || ''),
                   };
-                  setStreamingBlocks([...orderedBlocks]);
+                  scheduleStreamCommit(SC_BLOCKS);
                 }
-                setStreamingThinking(accumulatedThinking);
+                scheduleStreamCommit(SC_THINKING);
               } else if (delta.type === 'input_json_delta' && block.type === 'tool_use') {
                 block.jsonBuf += delta.partial_json || '';
                 try {
@@ -6002,14 +6050,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   const idx = currentToolCalls.findIndex((tc) => tc.id === block.toolId);
                   if (idx !== -1) {
                     currentToolCalls[idx] = { ...currentToolCalls[idx], input: parsed };
-                    setStreamingToolCalls([...currentToolCalls]);
+                    scheduleStreamCommit(SC_TOOLS);
                   }
                   if (block.orderIdx != null && orderedBlocks[block.orderIdx]) {
                     orderedBlocks[block.orderIdx] = {
                       ...orderedBlocks[block.orderIdx],
                       toolCall: { ...orderedBlocks[block.orderIdx].toolCall, input: parsed },
                     };
-                    setStreamingBlocks([...orderedBlocks]);
+                    scheduleStreamCommit(SC_BLOCKS);
                   }
                   if ((block.name === 'Task' || block.name === 'Agent') && parsed) {
                     store.upsertAgent(block.toolId, {
@@ -6077,14 +6125,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 // Only replace if we haven't been streaming this block already.
                 if (!accumulatedText || snapshotBuildsBlocks) {
                   accumulatedText = accumulatedText ? `${accumulatedText}\n${block.text}` : block.text;
-                  setStreamingText(accumulatedText);
+                  scheduleStreamCommit(SC_TEXT);
                 }
                 if (snapshotBuildsBlocks && block.text) snapshotBlocks.push({ type: 'text', content: block.text });
               }
               if (block.type === 'thinking') {
                 if (!accumulatedThinking || snapshotBuildsBlocks) {
                   accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n${block.thinking || ''}` : (block.thinking || '');
-                  setStreamingThinking(accumulatedThinking);
+                  scheduleStreamCommit(SC_THINKING);
                 }
                 if (snapshotBuildsBlocks && block.thinking) snapshotBlocks.push({ type: 'thinking', content: block.thinking });
               }
@@ -6103,7 +6151,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     if (oi !== -1) orderedBlocks[oi] = { ...orderedBlocks[oi], toolCall: { ...orderedBlocks[oi].toolCall, input: block.input } };
                   }
                 }
-                setStreamingToolCalls([...currentToolCalls]);
+                scheduleStreamCommit(SC_TOOLS);
                 // 子代理捕获(关键修复):有些 provider(mimo 等)不发 partial stream_event,
                 // Task 工具只以整条 assistant 消息到达,于是 stream_event 路径里的 upsertAgent
                 // 永不触发 → activeAgents 为空 → 监控里"看不见子代理活动"。这里在整条消息
@@ -6136,7 +6184,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             }
             if (snapshotBlocks.length) {
               orderedBlocks = orderedBlocks.concat(snapshotBlocks);
-              setStreamingBlocks([...orderedBlocks]);
+              scheduleStreamCommit(SC_BLOCKS);
             }
             if (event.message.model) setStreamingModel(event.message.model);
           }
@@ -6245,7 +6293,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     ? { ...b, toolCall: { ...b.toolCall, result: resultPayload } }
                     : b
                 );
-                setStreamingBlocks([...orderedBlocks]);
+                scheduleStreamCommit(SC_BLOCKS);
                 const idx = currentToolCalls.findIndex((tc) => tc.id === block.tool_use_id);
                 if (idx !== -1) {
                   currentToolCalls[idx] = { ...currentToolCalls[idx], result: {
@@ -6254,7 +6302,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     images: extractToolResultImages(block.content),
                     isError: block.is_error || false,
                   }};
-                  setStreamingToolCalls([...currentToolCalls]);
+                  scheduleStreamCommit(SC_TOOLS);
                 }
               }
             }
@@ -6547,6 +6595,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = []; orderedBlocks = [];
             for (const k of Object.keys(blocks)) delete blocks[k];
             setStreamingText(''); setStreamingThinking(''); setStreamingToolCalls([]); setStreamingBlocks([]);
+            resetStreamCommit();       // 同上:截断后不允许挂起帧把旧内容提交回来
             setReattachStream(true);   // 直播气泡退役:内容一律由历史(唯一来源)画
             setStreamHistCutoff(null); // 截断口径作废:历史是唯一展示来源
             histFreshRef.current = { at: Date.now(), sig: null };
@@ -6704,7 +6753,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // tool_use 进 orderedBlocks → TurnBubble 有 blocks 时只渲染 blocks,只 finalize
           // toolCalls 的话主路径卡片仍拿 result:null 永久转圈。
           const finalizedCalls = finalizePendingToolCalls(currentToolCalls, turnAborted);
-          setChatMessages((prev) => [...prev, {
+          // r119:这条推送会挂载一整套定稿 markdown(实测 1.5MB 正文 ≈ 1.3 秒),进 transition
+          // 让"停止中"的反馈先画出来(见 finally 里的长注释)。闩:历史已接管过本地副本就不再补。
+          startTransition(() => setChatMessages((prev) => (localCopiesCleared ? prev : [...prev, {
             uuid: 'chat-stopped-' + Date.now(), type: 'turn',
             ownerKey: streamSid || sessionQueueKey,
             timestamp: new Date().toISOString(), model: streamingModel,
@@ -6714,7 +6765,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             blocks: applyFinalizedToBlocks(orderedBlocks, finalizedCalls),
             usage: null,
             interrupted: true,
-          }]);
+          }])));
         }
       } else if (!isNetworkDrop) {
         // P2.2 auto 档 spawn 失败回退:旧 SDK/CLI 不接受 permissionMode:'auto' 时
@@ -6794,18 +6845,43 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 归属守卫(附带发现2,与紧邻的 :6472/:6592 同款):这三行只归【当前 generation】所有。
       // connecting 窗口下被打断的旧流,其 finally 会晚于新回合落地 —— 无守卫地清 activeProcRef/
       // abortRef 就等于把【新回合】的停止句柄抹成 null,新回合从此停不掉(停止键/Esc 全哑);
-      // updateStreaming(false) 同理会让 UI 谎称空闲而进程还在跑。只加守卫,三行本身一字不动。
-      // 流式缓冲(下面四个 set)保持无条件清:它们本就由新回合在起流时重置。
+      // updateStreaming(false) 同理会让 UI 谎称空闲而进程还在跑。
+      // r119:原注释末句「流式缓冲(下面四个 set)保持无条件清」已随本轮改动失效 —— 它们现在
+      // 也带 teardownMine() 守卫(理由见下),起流时重置的语义不变。
+      // r119【为什么整组进 transition】:这组更新会把界面从"直播气泡"切到"定稿气泡" ——
+      // React 要卸载整棵流式 markdown 树、再挂载一条内容相同的定稿树(实测 1.5MB 正文:
+      // 解析几百块 + 建几万个节点 ≈ 1.3 秒)。若按默认优先级渲染,这条长任务会贴在本回合终止
+      // 的同一批里一起提交,用户点「停止」后那段"停止中"要在它跑完之后才画得出来(实测反馈
+      // 延迟 1.3~9 秒,INTERFACE B1 的 1 秒线就是这么破的)。放进 transition(低优先级、可中断)
+      // 后:紧急更新(按钮/状态行"停止中")先提交并绘制,这条长任务随后在后台跑完 ——
+      // 渲染结果一字不差,只是晚一帧左右。三处更新(隐藏直播气泡 / 清流式缓冲 / 挂载定稿气泡)
+      // 必须同批,否则中间会出现"内容整段消失"的一帧。
+      // ⚠ 延迟提交意味着"落盘轮询(await 期间开了新回合)"可能先发生 → 用 teardownMine()
+      // 把每一次写入都做成"还属于本回合本流才动"的守卫更新(与既有的 isCurrentTurn 同口径)。
+      const teardownMine = () => isCurrentTurn() && !streamingRef.current;
       if (isCurrentTurn()) {
-        updateStreaming(false);
+        // r119 回合终止的强制 flush:合并器可能还挂着一帧(最后一批累积正文没进 state)。
+        // 这里【同步、高优先级】提交 —— 此刻内容仍归本回合(下面的守卫更新才是可推迟的那组)。
+        commitStream.flush();
         activeProcRef.current = null;
         abortRef.current = null;
         setLiveChatPid(null);
+        // 状态推迟,但 ref 必须【同步】翻:队列排空、后续判据读的都是 ref。
+        streamingRef.current = false;
       }
-      setStreamingText('');
-      setStreamingThinking('');
-      setStreamingToolCalls([]);
-      setStreamingBlocks([]);
+      // 每个更新都写成"还属于本回合本流才动"的守卫形式(updater 形式才在重放/重算时再判一次):
+      // 低优先级提交可能被"落盘轮询期间开了新回合"越过,直接写死值会把新回合的直播状态抹掉。
+      startTransition(() => {
+        setIsStreaming((prev) => (teardownMine() ? false : prev));
+        setStopping((prev) => (teardownMine() ? false : prev)); // 本轮真的结束了 → 退出「停止中」
+        setStreamingText((prev) => (teardownMine() ? '' : prev));
+        setStreamingThinking((prev) => (teardownMine() ? '' : prev));
+        setStreamingToolCalls((prev) => (teardownMine() ? [] : prev));
+        setStreamingBlocks((prev) => (teardownMine() ? [] : prev));
+      });
+      // r119:流式状态已清空 → 丢掉挂起的那一帧,否则它会把刚清掉的内容(或旧回合的残影)
+      // 再写回界面,留下一个"停了还在"的流式气泡。用闭包自己的句柄,不动 ref(那是给新回合的)。
+      resetStreamCommit();
       // 重做工具的转圈指示器兜底:重跑流结束(成功/报错/零内容)一律关掉,
       // 避免重跑没产出内容时 effect 不触发 → 指示器一直转。
       setRetryActiveUuid(null);
@@ -6912,6 +6988,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
             const known = makePersistedIndex(getLocalMessages());
             if (isCurrentTurn()) reconcileSteeredQueue(getLocalMessages()); // 已注入条目的落地判定
+            localCopiesCleared = true; // r119:见声明处 —— 之后不许再补本地副本
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
               return prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(m)) : prev;
@@ -6927,6 +7004,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 凭空消失(拒绝原因只闪现几秒);保留,切会话/刷新时自然清掉。
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
             if (isCurrentTurn()) reconcileSteeredQueue(getLocalMessages()); // 已注入条目的落地判定
+            localCopiesCleared = true; // r119:见声明处 —— 之后不许再补本地副本
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
               const localOnly = (m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch';
@@ -7176,6 +7254,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const pid = activeProcRef.current || backgroundPid;
     if (pid) stoppedPidsRef.current.add(String(pid));
     killedRef.current = true; // 真杀进程 → finally 收后台化子代理为 stopped
+    // r119 点击即时反馈(不依赖服务端回话,INTERFACE R1):①把可能挂着的流式提交先 flush 掉
+    // —— 停止状态和新正文同帧出现,不会出现"按钮变了但正文还停在上上帧"的错位;②立刻进入
+    // 「停止中」。清掉它只有两处:本轮收尾(见 handleSend 的 finally)与后台分支的停止请求
+    // 回话(那条没有本地流、没有 finally 可等)。前台分支【不】在回话时就清,理由见下面注释。
+    streamCommitFlushRef.current?.();
+    if (pid) setStopping(true);
     abortRef.current?.abort();
     // R13:停止请求带上期望身份(owner)。只发【能证明属于这个 pid 的 owner】:本端起流时
     // 记下的(sid 或原始 draftId),或后台 pid 那条路径按本 pane 当前会话的 sid(pid 由
@@ -7212,8 +7296,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 响应存 ref 供 finally 排除服务端保留的跨回合后台子代理(见 stopKeptRef 注释)。
       // 超时兜底:服务端挂死时 fetch 永不 settle → 挂在它上面的收尾永不跑,会话卡在"工作中"。
       // 超时走 catch → null → 回落全量收尾(原行为)。
-      stopKeptRef.current = fetch(`/api/chat/${activeProcRef.current}/stop`, stopInit())
+      const _stopP = fetch(`/api/chat/${activeProcRef.current}/stop`, stopInit())
         .then((r) => r.json()).catch(() => null);
+      stopKeptRef.current = _stopP;
+      // 注意(实测踩过):**不**在这里清「停止中」。服务端回话只说明"停止请求受理了",
+      // 本轮定稿气泡还在后台挂载(实测 1.5MB 正文 ≈1.6 秒),此刻把按钮翻回"停止"会让
+      // 用户看到"点了停止 → 闪一下又变回停止",而且这一闪常常短于一帧、压根画不出来
+      // (B1 第 3 轮实测就是这样丢的:反馈延迟算到 1879ms)。本轮真正结束由收尾 finally 负责。
     } else if (backgroundPid) {
       // 停止链路 #2:转后台后无本地流,finally 的 killedRef 收尾路径不存在 → 杀点
       // 就地按 sessionId 收尾本会话 taskManaged 等非终态子代理(进程死了不会再有信号)。
@@ -7222,9 +7311,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 收尾挂到 /stop 响应上(晚几毫秒):选择性停止会保留跨回合后台子代理,它们没被停、
       // 进程还活着,标 stopped 就是假终态。请求失败/无字段 → 回落全量收尾(原行为)。
       const _bsid = selectedSession?.sessionId || (selectedSession?.projectHash ? queueKeyFor(selectedSession) : null);
-      fetch(`/api/chat/${backgroundPid}/stop`, stopInit())
-        .then((r) => r.json()).catch(() => null)
-        .then((d) => finalizeSessionAgents(_bsid, 'stopped', d?.keptToolUseIds));
+      const _stopP = fetch(`/api/chat/${backgroundPid}/stop`, stopInit())
+        .then((r) => r.json()).catch(() => null);
+      _stopP.then((d) => finalizeSessionAgents(_bsid, 'stopped', d?.keptToolUseIds));
+      // r119:同前台分支 —— 停止请求回话即清「停止中」(幂等,与 finally 互为兜底)。
+      _stopP.then(() => setStopping(false));
     }
     // 两种情况都立即清掉本地「后台运行中」标记,不等下一轮 poll(那一轮还会误报)。
     setBackgroundPid(null);
@@ -8128,6 +8219,53 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const stableRetryTool = useCallback((turn, toolCall) => handleRetryToolRef.current?.(turn, toolCall), []);
   const stableRollback = useCallback((msg, opts) => handleRollbackRef.current?.(msg, opts), []);
 
+  // r119 流式气泡元素记忆化。**必须挂在 hook 区**(下面有早 return,放后面会被判"条件调用 hook")。
+  // 理由:停止反馈之类的状态变化与正文无关,若每次都重建 <TurnBubble> 元素,React 会把整份
+  // 累积正文重新渲染一遍(整份 markdown 重解析 = 实测 1.4MB 约 320ms 解析 + 等量 React 协调),
+  // 停止按钮的变化排在这条长任务后面才画出来 —— 就是用户说的"点了没反应"。依赖里放的都是
+  // "正文/段结构变了才会换身份"的值(streamingBlocks 恒为新数组 ⇒ 正文变就重算);
+  // steer 气泡用 ref 取最新渲染函数,避免闭包过期。
+  const renderSteerBubbleRef = useRef(renderSteerBubble);
+  renderSteerBubbleRef.current = renderSteerBubble;
+  const liveStreamBubble = useMemo(
+    () => (liveSteerSegments || [{ blocks: streamingBlocks, steer: null }]).map((seg, si, segs) => {
+      const first = si === 0;
+      // 空段不画空壳气泡(点 ⚡ 时若一个块都还没产出,切口就在 0)
+      const hasContent = seg.blocks.length > 0
+        || (first && !!(streamingText || streamingThinking || streamingToolCalls.length > 0));
+      return (
+        <React.Fragment key={seg.steer?.steerId || `seg-${si}`}>
+          {hasContent && (
+            <StripRoundContext.Provider value={liveSteerSegments
+              // 首段之外的段不渲染摘要行(headless),整轮恒 1 条头行;
+              // forceOpen:非末段的哨兵是 'streaming-<i>',isLiveStream 为假,
+              // 不强制展开就会在切口在途时画成收起(口径 3 要求整轮展开)。
+              ? { forceOpen: true, headless: si > 0, summary: liveSteerSummary }
+              : { forceOpen: false, headless: false, summary: null }}>
+              <TurnBubble turn={{
+                // 'streaming' 是 TurnBubble 的"这条还在产出"哨兵(头像转、入场动画、
+                // isLive)。新内容只会追加到【最后一段】,所以哨兵给它;切口之前的
+                // 段已经定型,拿到 streaming-<i> 就不再转圈。
+                uuid: si === segs.length - 1 ? 'streaming' : `streaming-${si}`, type: 'turn', timestamp: new Date().toISOString(), model: streamingModel,
+                // legacy 三件套只属于第一段:不发 partial stream_event 的 provider
+                // 没有 blocks 可切,内容全在这里,复制到每段就是重复渲染。
+                text: first && streamingText ? [streamingText] : [],
+                thinking: first && streamingThinking ? [streamingThinking] : [],
+                toolCalls: first ? streamingToolCalls.map((tc) => ({ ...tc, category: 'call' })) : [],
+                blocks: seg.blocks,
+                usage: null,
+                // 已完成的子代理各自那条金额(键 = toolUseId,见 liveSubUsageTurn)。
+                subUsage: liveSubUsageTurn,
+              }} />
+            </StripRoundContext.Provider>
+          )}
+          {seg.steer && renderSteerBubbleRef.current(seg.steer)}
+        </React.Fragment>
+      );
+    }),
+    [streamingBlocks, streamingText, streamingThinking, streamingToolCalls, liveSteerSegments, streamingModel, liveSubUsageTurn],
+  );
+
   // In split mode, tab 0's `loading` would otherwise blank out tab 1 too.
   // We only let the loading screen short-circuit the primary tab — tab 1
   // fetches with silent:true so it never sets the global flag, and tab 0
@@ -8777,47 +8915,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   {/* 动效统一:气泡在前(头像 ✻ 呼吸),状态文字行随内容之后,
                       不再让独立的 LoadingMark 与完成后的静态头像形成两套视觉物 */}
                   {/* 引导消息切流(设计丙):有并入条目时按切口把流式块切成几段,气泡落在切口,
-                      其后的块开进新的回合容器;没有则是原来的单气泡(同一个表达式,零结构变化)。 */}
-                  {(liveSteerSegments || [{ blocks: streamingBlocks, steer: null }]).map((seg, si, segs) => {
-                    const first = si === 0;
-                    // 空段不画空壳气泡(点 ⚡ 时若一个块都还没产出,切口就在 0)
-                    const hasContent = seg.blocks.length > 0
-                      || (first && !!(streamingText || streamingThinking || streamingToolCalls.length > 0));
-                    return (
-                      <React.Fragment key={seg.steer?.steerId || `seg-${si}`}>
-                        {hasContent && (
-                          <StripRoundContext.Provider value={liveSteerSegments
-                            // 首段之外的段不渲染摘要行(headless),整轮恒 1 条头行;
-                            // forceOpen:非末段的哨兵是 'streaming-<i>',isLiveStream 为假,
-                            // 不强制展开就会在切口在途时画成收起(口径 3 要求整轮展开)。
-                            ? { forceOpen: true, headless: si > 0, summary: liveSteerSummary }
-                            : { forceOpen: false, headless: false, summary: null }}>
-                          <TurnBubble turn={{
-                            // 'streaming' 是 TurnBubble 的"这条还在产出"哨兵(头像转、入场动画、
-                            // isLive)。新内容只会追加到【最后一段】,所以哨兵给它;切口之前的
-                            // 段已经定型,拿到 streaming-<i> 就不再转圈。
-                            uuid: si === segs.length - 1 ? 'streaming' : `streaming-${si}`, type: 'turn', timestamp: new Date().toISOString(), model: streamingModel,
-                            // legacy 三件套只属于第一段:不发 partial stream_event 的 provider
-                            // 没有 blocks 可切,内容全在这里,复制到每段就是重复渲染。
-                            text: first && streamingText ? [streamingText] : [],
-                            thinking: first && streamingThinking ? [streamingThinking] : [],
-                            toolCalls: first ? streamingToolCalls.map((tc) => ({ ...tc, category: 'call' })) : [],
-                            blocks: seg.blocks,
-                            usage: null,
-                            // 已完成的子代理各自那条金额(键 = toolUseId,见 liveSubUsageTurn)。
-                            subUsage: liveSubUsageTurn,
-                          }} />
-                          </StripRoundContext.Provider>
-                        )}
-                        {seg.steer && renderSteerBubble(seg.steer)}
-                      </React.Fragment>
-                    );
-                  })}
+                      其后的块开进新的回合容器;没有则是原来的单气泡。r119 起整块由 liveStreamBubble
+                      记忆化(见组件顶层 useMemo 注释);下面的状态行必须留在外面 —— 它要跟着
+                      isStreaming/stopping 变,不能被正文记忆化拖住。 */}
+                  {liveStreamBubble}
                   <StreamingStatusLine
                     thinking={streamingThinking}
                     text={streamingText}
                     toolCalls={streamingToolCalls}
                     streamStart={streamStartRef.current}
+                    stopping={stopping}
                   />
                 </>
               )}
@@ -8867,6 +8974,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   streamStart={streamStartRef.current}
                   lastUpdateAt={getHistFreshAt}
                   sawModelOutput={sawModelOutput}
+                  stopping={stopping}
                 />
               )}
               {/* 等待状态行(G):压缩中/API 重试/限流等待的明确说明。与 StreamingStatusLine
@@ -8928,6 +9036,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       <ChatInput
         onSend={handleSend}
         onStop={handleStop}
+        // r119:停止请求已发出、本轮还没结束 → 停止键进入「停止中」(禁用 + 文案变化)。
+        // 就地反馈,不等任何网络回话 —— 这就是"点了没反应"那一半的修法。
+        stopping={stopping}
         onStopBackground={stopSessionBackground}
         onAccelerate={messageQueue.length > 0 ? handleAccelerate : undefined}
         // ⚡「并入」只在服务端确实有本会话活 slot 时可点:前台流拿到 pid(liveChatPid)或
