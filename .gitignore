@@ -27,3 +27,6 @@ PROJECT.md
 
 # python 字节码(computer-use helper)
 __pycache__/
+
+# 其他工具的笔记目录(非本项目产物;防发版脚本 git add -A 误带)
+.workbuddy/
