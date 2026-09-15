@@ -24,7 +24,7 @@ const sidOf = (n) => `a118${String(n).padStart(4, '0')}-0000-4000-8000-00000000$
 export const NAV = { sid: sidOf(99), mark: 'R118NAVMARK' };
 export const B = { sid: 'a1180004-0000-4000-8000-0000000000b4', mark: 'R118BMARK' };
 export const MARK = { b: B.mark };
-export const POOL = Array.from({ length: 18 }, (_, i) => ({ sid: sidOf(i + 1), mark: `R118S${String(i + 1).padStart(2, '0')}MARK` }));
+export const POOL = Array.from({ length: 24 }, (_, i) => ({ sid: sidOf(i + 1), mark: `R118S${String(i + 1).padStart(2, '0')}MARK` }));
 /** 第 n 个用例专用的一组会话(n 从 0 起;每个用例拿 3 条,互不相同的轮)。 */
 export const batch = (n) => POOL.slice(n * 3, n * 3 + 3);
 

@@ -118,5 +118,8 @@ export function releaseAllRuns(ctl) {
     fs.writeFileSync(path.join(ctl, `${m[1]}.done`), 'x');
   }
 }
+/** 让下一次交互式回合"慢启动":收到请求后先静默这么久(毫秒)再吐第一条事件。 */
+export const setSlowStart = (ctl, ms) => fs.writeFileSync(path.join(ctl, 'slow-ms'), String(ms));
+export const clearSlowStart = (ctl) => { try { fs.unlinkSync(path.join(ctl, 'slow-ms')); } catch { /* 本来就没有 */ } };
 export const releaseChunk2 = (ctl, sid) => fs.writeFileSync(rel(ctl, sid, '.chunk'), String(Date.now()));
 export const releaseTurnEnd = (ctl, sid) => fs.writeFileSync(rel(ctl, sid, '.done'), String(Date.now()));

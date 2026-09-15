@@ -8,8 +8,8 @@
 import { test, expect } from '@playwright/test';
 import { B, NAV, batch, live } from './helpers/fixtures.mjs';
 import {
-  boot, composer, messageVisible, openSessionBySearch, releaseAllRuns, releaseChunk2, releaseTurnEnd,
-  sampleWindow, sendPrompt, sessionRow, switchTo, waitTurnRunning,
+  boot, clearSlowStart, composer, messageVisible, openSessionBySearch, readState, releaseAllRuns,
+  releaseChunk2, releaseTurnEnd, sampleWindow, sendPrompt, sessionRow, setSlowStart, switchTo, waitTurnRunning,
 } from './helpers/ui.mjs';
 
 const CTL = process.env.R118_CTL;
@@ -17,7 +17,10 @@ const DWELL_MS = [400, 2_000, 6_000];       // 在 B 停留多久,逐轮变长
 const ROUNDS = 3;
 const WINDOW_MS = 6_000;                    // 切回后的观察窗(INTERFACE §B1 要求 ≥6 秒)
 // 每个用例自己的一组会话(3 条 = 3 轮);B4/B3/B5 各用一条。
-const GROUP = { B1: batch(0), MSG: batch(1), STOP: batch(2), B2: batch(3), R4: batch(4), TWO: batch(5) };
+const GROUP = { B1: batch(0), MSG: batch(1), STOP: batch(2), B2: batch(3), R4: batch(4), TWO: batch(5), SLOW: batch(6), SLOW2: batch(7) };
+// 用户机器上挂了很多 MCP,会话进程要十几秒才吐第一条事件(界面一直"连接中…")。桩是秒开的,这里用
+// slow-ms 控制文件把那段"请求已发出、界面上什么都还没吐"的窗口造出来。
+const SLOW_MS = 20_000;
 
 const promptOf = (tag, i) => `R118 ${tag} 第${i + 1}轮`;
 
@@ -64,6 +67,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test.afterEach(async () => {
+  clearSlowStart(CTL);
   releaseAllRuns(CTL);   // 放行本用例里所有还停着的回合(含运行时新建的会话)
 });
 
@@ -222,6 +226,69 @@ test('B1-新建会话 [R1/R3] 在刚新建的会话里发第一条,回合中切�
   expect(bad.length, `切回新建会话后 ${samples.length} 次采样里有 ${bad.length} 次出现接管提示或后台横幅`).toBe(0);
   expect(samples.every((s) => s.stops > 0), '切回后界面应仍认为这一轮在跑(停止按钮消失)').toBe(true);
   expect(await messageVisible(page, prompt), '切回后刚发出的第一条消息应还在正文里').toBe(true);
+});
+
+test('R3-慢启动 [R3/R1/R2] 进程还没吐第一条事件的窗口里切走再切回(3 轮)', async ({ page }) => {
+  const results = await eachRound(page, GROUP.SLOW, 'SLOW', async (i, { sid, mark }, prompt) => {
+    setSlowStart(CTL, SLOW_MS);
+    await switchTo(page, mark);
+    await sendPrompt(page, prompt);
+    await page.waitForTimeout(1_000);
+    expect(await messageVisible(page, prompt), '切走之前,刚发出的消息应先在界面上').toBe(true);
+
+    await leaveToB(page);                       // 这一步发生在桩还没有任何输出的窗口里
+    await page.waitForTimeout(3_000);
+    await switchTo(page, mark);
+
+    const deadline = Date.now() + WINDOW_MS;
+    const samples = [];
+    do {
+      samples.push({ ...(await readState(page)), msg: await messageVisible(page, prompt) });
+      if (Date.now() < deadline) await page.waitForTimeout(500);
+    } while (Date.now() < deadline);
+
+    clearSlowStart(CTL);                        // 桩现在开始吐字
+    await expect(page.getByText(live.chunk1(sid, prompt), { exact: false }).first(),
+      '桩吐出第一条事件后,这一轮的内容应照常显示').toBeVisible({ timeout: 30_000 });
+    releaseChunk2(CTL, sid);
+    await expect(page.getByText(live.chunk2(sid), { exact: false }).first(),
+      '后续内容应照常继续追加').toBeVisible({ timeout: 20_000 });
+
+    const missing = samples.filter((s) => !s.msg).length;
+    const takeover = samples.filter((s) => s.takeover).length;
+    const noStop = samples.filter((s) => !s.stops || !s.stopEnabled).length;
+    const failed = [];
+    if (missing) failed.push(`R3=✗(${missing}/${samples.length} 次采样里看不到刚发出的那条消息)`);
+    if (takeover) failed.push(`R1=✗(${takeover}/${samples.length} 次采样出现"已在另一处查看")`);
+    if (noStop) failed.push(`R1=✗(${noStop}/${samples.length} 次采样停止按钮不可用)`);
+    if (failed.length) throw new Error(`${failed.join(' ')};其余检查通过`);
+  });
+  expectNoRed(results, 'R3-慢启动(进程静默窗口里切走再切回)');
+});
+
+test('B5-慢启动 [R3/B5] 静默窗口里切走、不回切,等它跑完再切回:历史完整', async ({ page }) => {
+  const { sid, mark } = GROUP.SLOW2[0];
+  const prompt = promptOf('B5SLOW', 0);
+  setSlowStart(CTL, SLOW_MS);
+  await switchTo(page, mark);
+  await sendPrompt(page, prompt);
+  await page.waitForTimeout(1_000);
+  expect(await messageVisible(page, prompt), '切走之前,刚发出的消息应先在界面上').toBe(true);
+
+  await leaveToB(page);                          // 切走就不回来了,这一轮在别处跑完
+  await page.waitForTimeout(22_000);
+  clearSlowStart(CTL);
+  releaseChunk2(CTL, sid);
+  releaseTurnEnd(CTL, sid);
+  await expect.poll(() => page.getByText('运行中').count(), {
+    message: '这一轮应在后台跑完(侧栏"运行中"标记消失)', timeout: 60_000, intervals: [1_000],
+  }).toBe(0);
+
+  await openSessionBySearch(page, prompt);       // 按消息内容找回这条会话(回合跑完后标题会变)
+  const samples = await sampleWindow(page, { ms: 3_000, every: 1_000 });
+  expect(samples.filter((s) => s.takeover).length, '切回后不该出现"已在另一处查看"').toBe(0);
+  expect(await messageVisible(page, prompt), '切回来后用户那条消息应在历史里').toBe(true);
+  expect(await messageVisible(page, live.final(sid)), '切回来后助手这条回复应在历史里').toBe(true);
 });
 
 test('B5 [回归] 回合结束后切走再切回:历史完整,且不出现接管提示', async ({ page }) => {

@@ -36,6 +36,10 @@ const stamp = () => new Date().toISOString();
 const base = () => ({ isSidechain: false, userType: 'external', entrypoint: 'cli', cwd, sessionId: sid, version: '2.1.267', gitBranch: '', timestamp: stamp() });
 const append = (line) => { try { fs.mkdirSync(PROJ, { recursive: true }); fs.appendFileSync(TRANSCRIPT, `${JSON.stringify(line)}\n`); } catch { /* 忽略 */ } };
 const phaseFile = (suffix) => path.join(CTL, `${sid}.${suffix}`);
+// 慢启动开关:控制文件 <CTL>/slow-ms 里写着毫秒数(测试在发消息前放/删)。
+// 真实用户机器上挂了很多 MCP,会话进程要十几秒才吐第一条事件 —— 这段"已收到请求但界面上什么都还没吐"
+// 的窗口在秒开的桩上不存在,靠这个开关造出来。只作用于交互式回合(不含标题生成那类 -p 调用)。
+const slowMs = () => { try { return Number(fs.readFileSync(path.join(CTL, 'slow-ms'), 'utf8').trim()) || 0; } catch { return 0; } };
 const writePhase = (suffix, value) => { try { fs.mkdirSync(CTL, { recursive: true }); fs.writeFileSync(phaseFile(suffix), value || String(Date.now())); } catch { /* 忽略 */ } };
 const waitFor = async (suffix) => { while (!fs.existsSync(phaseFile(suffix))) await sleep(60); };
 try {
@@ -72,7 +76,7 @@ if (printArg && !argv.includes('--input-format')) { await round(printArg); proce
 // stdin 不能挡在回合里(控制请求要随时能答),用"回调 + 队列"
 const queue = [];
 let running = false;
-const pump = async () => { if (running) return; running = true; while (queue.length) await round(queue.shift()); running = false; };
+const pump = async () => { if (running) return; running = true; while (queue.length) { const wait = slowMs(); if (wait > 0) await sleep(wait); await round(queue.shift()); } running = false; };
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
   let msg; try { msg = JSON.parse(line); } catch { return; }
