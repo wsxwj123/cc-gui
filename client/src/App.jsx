@@ -148,6 +148,7 @@ import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './uti
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
+import { dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
@@ -4056,6 +4057,32 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     });
   }, [messages, sessionQueueKey]);
 
+  // r118:切回本会话后,把切走时暂存的用户气泡补回来;历史里已经有的,撤掉本地副本(不画两遍)。
+  // 依赖 messages ⇒ 三条"历史变了"的路径都覆盖:切回重新拉历史、reattach 期间的历史刷新、回合结束刷新。
+  // 与上面那条 reconcile 的区别:那条在"本会话正在流式"时整体跳过(怕清掉在途内容),而这里补/撤的
+  // 只是【用户自己那条消息】—— 它有两个可渲染来源(本地气泡 / 历史回显),必须有且只有一个在画。
+  // 撤除是安全的:本地气泡一走,visibleMessages 的既有判据(本地已无同文本气泡 → 历史必须接棒)
+  // 就把历史那条放出来了,不会两个来源同时缺席(R68/R37 同一条口径)。
+  useEffect(() => {
+    if (!sessionQueueKey) return;
+    const { pending, persisted } = takePendingUserBubbles(sessionQueueKey, makePersistedIndex(messages));
+    if (!pending.length && !persisted.length) return;
+    setChatMessages((prev) => {
+      let next = prev;
+      if (persisted.length) {
+        const gone = new Set(persisted.map((m) => m.uuid));
+        const kept = prev.filter((m) => !gone.has(m.uuid));
+        if (kept.length !== prev.length) next = kept;
+      }
+      const have = new Set(next.map((m) => m.uuid));
+      // ownerKey 钉成本会话键:渲染层既有门控(localEntryVisible)保证它永不出现在别的会话,
+      // 且不依赖 streamOwnerKey(补回那一刻可能还没 reattach,不钉就白补)。
+      const add = pending.filter((m) => !have.has(m.uuid)).map((m) => ({ ...m, ownerKey: sessionQueueKey }));
+      if (!add.length) return next;
+      return [...next, ...add];
+    });
+  }, [messages, sessionQueueKey]);
+
   // BF-1:渲染用的历史列表。活跃流归属本会话且截断点存在时,过滤掉本回合的半成品条目;
   // 其余情况原样返回 messages(同一引用,不打穿 MessageList 的 memo)。useMemo 依赖里
   // 没有每 token 变化的值,流式期间只有 messages 真被重拉时才重算。
@@ -5402,6 +5429,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'conversation_reset') {
             conversationResetFrom = event.session_id || streamSid || null;
             setChatMessages([]);
+            dropUserStash(conversationResetFrom); // r118:旧会话归档,它的暂存气泡别在切回时被补回来
             continue;
           }
 
@@ -5500,6 +5528,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // draftKey 变更 effect 会读新键(必空)把正在打的下一条消息清掉,先把旧值复制过去。
               {
                 const _dk0 = _draftOwnerKey;
+                migrateUserStash(_dk0, event.session_id); // r118:draft 键下的用户气泡暂存随同改键
                 setChatMessages((prev) => (prev.some((m) => m.ownerKey === _dk0)
                   ? prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))
                   : prev));
@@ -7475,6 +7504,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // because I clicked elsewhere."
         // Do NOT POST /api/chat/:pid/stop here — that would kill the proc.
         // Just forget the ref so we don't accidentally stop it later.
+        const leavingOwnerKey = streamOwnerKeyRef.current; // r118:下面的用户气泡暂存要用(detach 不碰这个 ref)
         detachStream();
         // #4:记录本会话 detach 时刻(按 sessionId 键,不跨会话共享)。切回后 reattach 用它做
         // sinceTs 截断,只藏"detach 之后落盘、且会被 earlyLines 重放"的内容;detach 之前已产出
@@ -7484,6 +7514,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 保留旁问气泡(本地注记,ownerKey 门控):切会话不清 btw,使浮窗线程"切走隐藏、切回还在"。
         // 非 btw(turn/error/interrupted 半截回复)照旧清空——它们无 ownerKey 隔离,留着会串进新会话。
         // btw 由 visibleChat 的 ownerKey===sessionQueueKey 过滤,永不在别的会话渲染,留着安全。
+        // r118:但**用户自己刚发出的乐观气泡**不能跟着丢 —— 会话进程还没开始处理时它还没写进
+        // jsonl(用户机器 MCP 多,这个窗口十几秒),丢了就是"切走再切回,刚发的消息消失十几秒"
+        // (用户实报)。按切走那个会话的键暂存(不渲染、跨会话不可见),切回时对账历史再补回。
+        const leavingKey = queueKeyFor(prev);
+        const leavingBubbles = pickStashableUserBubbles(chatMessagesRef.current, {
+          ownerKey: leavingKey, streamOwnerKey: leavingOwnerKey,
+        });
+        if (leavingBubbles.length) stashUserBubbles(leavingKey, leavingBubbles);
         setChatMessages((prev) => prev.filter((m) => m.type === 'btw'));
         setStreamingText('');
         setStreamingThinking('');
@@ -7549,6 +7587,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     };
 
     const truncateUi = () => {
+      // r118:回滚把尾部从 jsonl 裁掉了 —— 暂存里的副本已不代表现实,留着会在切回时被补回来。
+      dropUserStash(queueKeyFor(sel));
       if (idxInStore !== -1) {
         setLocalMessages(messages.slice(0, idxInStore));
         setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 保留旁问气泡(本地注记)
