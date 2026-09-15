@@ -78,6 +78,10 @@ async function round(userText) {
   const deadline = Date.now() + MAX_MS;
   let n = 0;
   while (!interrupted && Date.now() < deadline) {
+    // 控制文件 <CTL>/max-chunks(>0)= 吐满这么多块就**正常收尾**(走下面那条 say/result 的收尾路径)。
+    // 不写这个文件时行为与以前逐字一致(一直吐到 MAX_MS / 被打断)——既有用例不受影响。
+    const cap = ctlNum('max-chunks', 0);
+    if (cap > 0 && n >= cap) break;
     n += 1;
     const chars = ctlNum('chunk-chars', CHUNK_CHARS);
     const head = `R119STREAM ${sid.slice(0, 8)} #${String(n).padStart(5, '0')}\n`;
