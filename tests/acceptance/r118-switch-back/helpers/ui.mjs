@@ -102,6 +102,26 @@ export async function sampleWindow(page, { ms = 6_000, every = 500 } = {}) {
   }
 }
 
+/**
+ * 一条用户消息在正文里被画成了几个气泡(text 为 null 时数会话里的全部用户消息)。
+ * 用它数"这句话画了几遍"——不能拿整页文字数,因为助手回复里可能引用到同一段文字。
+ */
+export const userBubbleCount = (page, text) => {
+  const all = page.locator('.chat-user-bubble');
+  return (text == null ? all : all.filter({ hasText: text })).count();
+};
+/** 助手的一段话被画成了几个块(一段话只该出现一次)。 */
+export const assistantBlockCount = (page, text) =>
+  page.locator('.markdown-content').filter({ hasText: text }).count();
+
+/** 在"别的会话"的页面上找某段文字的痕迹:整页文字 / 用户气泡 / 任何叶子文字。 */
+export const scanForText = (page, text) => page.evaluate((t) => ({
+  body: (document.body.innerText || '').includes(t),
+  bubbles: [...document.querySelectorAll('.chat-user-bubble')].filter((el) => (el.textContent || '').includes(t)).length,
+  leaves: [...document.querySelectorAll('body *')]
+    .filter((el) => !el.children.length && (el.textContent || '').includes(t)).length,
+}), text);
+
 export const rel = (ctl, sid, suffix) => path.join(ctl, `${sid}${suffix}`);
 
 /**

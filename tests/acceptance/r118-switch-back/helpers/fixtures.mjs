@@ -28,6 +28,10 @@ export const POOL = Array.from({ length: 24 }, (_, i) => ({ sid: sidOf(i + 1), m
 /** 第 n 个用例专用的一组会话(n 从 0 起;每个用例拿 3 条,互不相同的轮)。 */
 export const batch = (n) => POOL.slice(n * 3, n * 3 + 3);
 
+// r118b 追加的用例专用池:单独一段,不参与上面的 POOL/batch(动 POOL 会改变既有用例拿到的会话)。
+export const EXTRA = Array.from({ length: 15 }, (_, i) => ({ sid: sidOf(200 + i), mark: `R118X${String(i + 1).padStart(2, '0')}MARK` }));
+export const extraBatch = (n) => EXTRA.slice(n * 3, n * 3 + 3);
+
 export const TEXT = { bReply: 'R118B 这是别的会话里的旧回复。' };
 // 假 CLI 在一个回合里吐的三段文字。测试和假 CLI 共用同一组构造器(不会各写一份对不上)。
 export const live = {
@@ -68,7 +72,7 @@ export function buildFixtures() {
   fs.writeFileSync(path.join(home, '.claude-gui', 'permission-guide-shown.flag'), '2026-09-15T00:00:00.000Z');
   fs.writeFileSync(path.join(home, '.claude-gui', 'network.json'), JSON.stringify({ host: '127.0.0.1' }));
 
-  for (const { sid, mark } of [NAV, B, ...POOL]) {
+  for (const { sid, mark } of [NAV, B, ...POOL, ...EXTRA]) {
     fs.writeFileSync(path.join(proj, `${sid}.jsonl`),
       sessionLines(sid, cwd, `${mark} 先来一句话`, `${mark} 收到,这是这条会话里已有的旧回复。`));
   }

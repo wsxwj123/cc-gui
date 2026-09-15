@@ -6,10 +6,11 @@
 // 逐轮变长(0.4s / 2s / 6s);每轮失败都被收集,最后一次性报出"3 轮里红几轮"。
 // 每条夹具会话只在一个用例的一轮里用一次:回合跑完后应用会改会话标题,行文字会变,用完就不找它了。
 import { test, expect } from '@playwright/test';
-import { B, NAV, batch, live } from './helpers/fixtures.mjs';
+import { B, NAV, batch, extraBatch, live } from './helpers/fixtures.mjs';
 import {
-  boot, clearSlowStart, composer, messageVisible, openSessionBySearch, readState, releaseAllRuns,
-  releaseChunk2, releaseTurnEnd, sampleWindow, sendPrompt, sessionRow, setSlowStart, switchTo, waitTurnRunning,
+  assistantBlockCount, boot, clearSlowStart, composer, messageVisible, openSessionBySearch, readState,
+  releaseAllRuns, releaseChunk2, releaseTurnEnd, sampleWindow, scanForText, sendPrompt, sessionRow,
+  setSlowStart, switchTo, userBubbleCount, waitTurnRunning,
 } from './helpers/ui.mjs';
 
 const CTL = process.env.R118_CTL;
@@ -18,6 +19,13 @@ const ROUNDS = 3;
 const WINDOW_MS = 6_000;                    // 切回后的观察窗(INTERFACE §B1 要求 ≥6 秒)
 // 每个用例自己的一组会话(3 条 = 3 轮);B4/B3/B5 各用一条。
 const GROUP = { B1: batch(0), MSG: batch(1), STOP: batch(2), B2: batch(3), R4: batch(4), TWO: batch(5), SLOW: batch(6), SLOW2: batch(7) };
+// r118b 追加用例的会话池(单独一段,不动上面已有的分配)
+const GROUP_X = { G1: extraBatch(0), G2: extraBatch(1), G3: extraBatch(2) };
+// 追加用例的消息原文:比会话标题的截断长度(40 字)长,这样侧栏标题里不会出现完整原文,
+// "别的会话页面上有没有这段话"就能用整页文字检索来判。
+const longPrompt = (tag, i) => `R118 ${tag} 第${i + 1}轮:这条消息只属于这条会话,不该出现在别的会话的页面上。`;
+// 夹具会话 B 正文里那句既有的助手回复(阳性对照用它确认"确实在看 B 的内容")。
+const B_OWN_REPLY = '这是这条会话里已有的旧回复';
 // 用户机器上挂了很多 MCP,会话进程要十几秒才吐第一条事件(界面一直"连接中…")。桩是秒开的,这里用
 // slow-ms 控制文件把那段"请求已发出、界面上什么都还没吐"的窗口造出来。
 const SLOW_MS = 20_000;
@@ -289,6 +297,119 @@ test('B5-慢启动 [R3/B5] 静默窗口里切走、不回切,等它跑完再切�
   expect(samples.filter((s) => s.takeover).length, '切回后不该出现"已在另一处查看"').toBe(0);
   expect(await messageVisible(page, prompt), '切回来后用户那条消息应在历史里').toBe(true);
   expect(await messageVisible(page, live.final(sid)), '切回来后助手这条回复应在历史里').toBe(true);
+});
+
+// ===================== r118b 追加:跑完整轮之后的"计数"与"串会话" =====================
+// 已有用例只覆盖到"切回来那一刻"(消息还在、停止按钮还在);下面三条问的是**整轮跑完之后**:
+// 这条消息被画了几遍、别的会话页面上会不会瞄到它。
+
+/**
+ * 静默窗口的固定起手:慢启动 → 在 A 发一条消息 → 确认它先出现在界面上。
+ * 返回后停在这句消息刚发出、会话进程还没吐任何事件的时刻。
+ */
+async function sendInSilentWindow(page, mark, prompt) {
+  setSlowStart(CTL, SLOW_MS);
+  await switchTo(page, mark);
+  await sendPrompt(page, prompt);
+  await page.waitForTimeout(1_000);
+  const shown = await userBubbleCount(page, prompt);
+  expect(shown, '切走之前,刚发出的消息应先在界面上(恰好一条)').toBe(1);
+}
+
+/** 放行整轮:等第一块 → 放行第二块 → 等第二块 → 收尾 → 等收尾。 */
+async function runTurnToEnd(page, sid, prompt) {
+  clearSlowStart(CTL);                 // 桩现在开始吐字
+  await expect(page.locator('.markdown-content').filter({ hasText: live.chunk1(sid, prompt) }).first(),
+    '桩吐出第一条事件后,这一轮的内容应照常显示').toBeVisible({ timeout: 40_000 });
+  releaseChunk2(CTL, sid);
+  await expect(page.locator('.markdown-content').filter({ hasText: live.chunk2(sid) }).first(),
+    '后续内容应照常继续追加').toBeVisible({ timeout: 20_000 });
+  releaseTurnEnd(CTL, sid);
+  await expect(page.locator('.markdown-content').filter({ hasText: live.final(sid) }).first(),
+    '这一轮应正常收尾').toBeVisible({ timeout: 25_000 });
+  await page.waitForTimeout(1_500);    // 让收尾渲染落定
+}
+
+test('G1 静默窗口里切走再切回,整轮跑完后:这条消息恰好画一遍、助手三段各一遍(3 轮)', async ({ page }) => {
+  const results = await eachRound(page, GROUP_X.G1, 'G1', async (i, { sid, mark }, _default) => {
+    const prompt = longPrompt('G1', i);
+    await sendInSilentWindow(page, mark, prompt);
+    await leaveToB(page);
+    await page.waitForTimeout(DWELL_MS[i]);
+    await switchTo(page, mark);
+    await runTurnToEnd(page, sid, prompt);
+
+    // 同一句话只能画一遍:过一会儿再数第二次,防止"延迟又冒出来一块"
+    for (const [n, extraWait] of [[1, 0], [2, 1_500]]) {
+      if (extraWait) await page.waitForTimeout(extraWait);
+      const n1 = await userBubbleCount(page, prompt);
+      expect(n1, `整轮跑完后第 ${n} 次计数:这条用户消息被画了 ${n1} 遍(应当恰好 1 遍,0 遍 = 消息没了,2 遍 = 重复了)`).toBe(1);
+      const total = await userBubbleCount(page, null);
+      expect(total, `整轮跑完后第 ${n} 次计数:会话里共有 ${total} 条用户消息(应当是历史里那 1 条 + 本轮这 1 条)`).toBe(2);
+      for (const [label, t] of [['第一块', live.chunk1(sid, prompt)], ['第二块', live.chunk2(sid)], ['收尾', live.final(sid)]]) {
+        const c = await assistantBlockCount(page, t);
+        expect(c, `整轮跑完后第 ${n} 次计数:助手${label}被画了 ${c} 遍(应当恰好 1 遍)`).toBe(1);
+      }
+    }
+  });
+  expectNoRed(results, 'G1(同一句话只画一遍)');
+});
+
+test('G2 静默窗口里切到另一个会话:那个会话页面上不该出现这条消息(3 轮)', async ({ page }) => {
+  const results = await eachRound(page, GROUP_X.G2, 'G2', async (i, { sid, mark }, _default) => {
+    const prompt = longPrompt('G2', i);
+    await sendInSilentWindow(page, mark, prompt);
+
+    await leaveToB(page);                       // 静默窗口里切到 B,并且停在 B
+    // 阳性对照:先确认这一步确实在看 B 的页面内容(否则"看不到 A 的消息"可能只是因为页面是空的)
+    await expect.poll(async () => (await scanForText(page, B_OWN_REPLY)).body, {
+      message: 'B 的页面上应能看到它自己的旧回复(阳性对照:确认扫描确实在看 B 的内容)',
+      timeout: 10_000, intervals: [500],
+    }).toBe(true);
+
+    const hits = [];
+    for (let n = 0; n < 6; n += 1) {            // B 页面上反复看 3 秒
+      const s = await scanForText(page, prompt);
+      if (s.body || s.bubbles || s.leaves) hits.push({ 第几次采样: n + 1, ...s });
+      await page.waitForTimeout(500);
+    }
+    expect(hits.length, `切到另一个会话后,6 次采样里有 ${hits.length} 次在它的页面上看到了 A 那条消息:${JSON.stringify(hits)}`).toBe(0);
+
+    await switchTo(page, mark);                 // 再切回 A
+    const back = await userBubbleCount(page, prompt);
+    expect(back, `切回 A 后这条消息应还在且恰好一条(实际 ${back})`).toBe(1);
+
+    await runTurnToEnd(page, sid, prompt);      // 把这一轮跑完,别把桩晾在那儿
+    const after = await userBubbleCount(page, prompt);
+    expect(after, `整轮跑完后,这条消息仍应恰好一条(实际 ${after})`).toBe(1);
+  });
+  expectNoRed(results, 'G2(消息不串会话)');
+});
+
+test('G3 静默窗口里切走再切回后点停止:不出现重复、不出现来源不明的第二条(3 轮)', async ({ page }) => {
+  const results = await eachRound(page, GROUP_X.G3, 'G3', async (i, { sid, mark }, _default) => {
+    const prompt = longPrompt('G3', i);
+    await sendInSilentWindow(page, mark, prompt);
+    await leaveToB(page);
+    await page.waitForTimeout(DWELL_MS[i]);
+    await switchTo(page, mark);
+
+    const stop = page.getByRole('button', { name: /^停止/ });
+    await expect(stop.first(), '切回后停止按钮应可用').toBeEnabled({ timeout: 15_000 });
+    await stop.first().click();
+    await page.waitForTimeout(2_000);
+
+    // 停止之后放行桩:会话进程并不知道自己被停了,它可能继续往外吐 —— 界面不许因此多画一条用户消息
+    clearSlowStart(CTL);
+    releaseAllRuns(CTL);
+    await page.waitForTimeout(10_000);
+
+    const n1 = await userBubbleCount(page, prompt);
+    expect(n1, `点停止并等这一轮收尾后,这条用户消息被画了 ${n1} 遍(应当恰好 1 遍)`).toBe(1);
+    const total = await userBubbleCount(page, null);
+    expect(total, `点停止并等这一轮收尾后,会话里共有 ${total} 条用户消息(应当是历史 1 条 + 本轮 1 条,没有来源不明的第二条)`).toBe(2);
+  });
+  expectNoRed(results, 'G3(静默窗口内点停止后不重复)');
 });
 
 test('B5 [回归] 回合结束后切走再切回:历史完整,且不出现接管提示', async ({ page }) => {
