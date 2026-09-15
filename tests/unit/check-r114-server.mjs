@@ -325,7 +325,7 @@ await red('A1.4-5 夹具:script / logs / scriptPath / defaultModel 一个都不�
     assert.equal(k in out, false, `${k} 被透传了 —— 脚本正文/绝对路径不该出现在响应里`);
   }
   const text = JSON.stringify(out);
-  assert.equal(text.includes('/Users/wsxwj/.claude/projects'), false, '响应里不得出现本机绝对路径');
+  assert.equal(text.includes('/Users/dev/.claude/projects'), false, '响应里不得出现夹具里的绝对路径');
 });
 
 await red('A1.4-6 夹具:error 是异常堆栈,原样保留(未超 2000 不加省略号)', async () => {
@@ -393,7 +393,7 @@ const REAL_DIR = fixture('spike-wf-toolresult.json').tool_use_result.transcriptD
 await red('A1.5-1 真实 transcriptDir → 三元组逐字对', async () => {
   const f = need(WP, 'parseWorkflowTranscriptDir');
   assert.deepEqual(f(REAL_DIR), {
-    projectHash: '-private-tmp-claude-501--Users-wsxwj-Desktop-claude-claude-gui-8ffbf5a0-56b4-4b4d-bc31-c7909ba3cfdc-scratchpad-spike-wf-cwd',
+    projectHash: '-private-tmp-claude-501--Users-dev-Desktop-claude-claude-gui-8ffbf5a0-56b4-4b4d-bc31-c7909ba3cfdc-scratchpad-spike-wf-cwd',
     sid: 'c9d4926e-db12-4b39-ab8a-a123d972d341',
     runId: 'wf_631a4c46-1d3',
   });
@@ -768,7 +768,7 @@ if (!booted.ok) {
       taskId: 'w1zi6gd0p',
       runId: 'wf_631a4c46-1d3',
       workflowName: 'spike-stop-wf',
-      projectHash: '-private-tmp-claude-501--Users-wsxwj-Desktop-claude-claude-gui-8ffbf5a0-56b4-4b4d-bc31-c7909ba3cfdc-scratchpad-spike-wf-cwd',
+      projectHash: '-private-tmp-claude-501--Users-dev-Desktop-claude-claude-gui-8ffbf5a0-56b4-4b4d-bc31-c7909ba3cfdc-scratchpad-spike-wf-cwd',
       sid: 'c9d4926e-db12-4b39-ab8a-a123d972d341',
     }, 'workflowRun 的五个字段是前端拉快照的唯一依据');
   });

@@ -14,19 +14,24 @@ const read = (p) => readFileSync(join(root, p), 'utf8');
 const block = read('client/src/components/CodeBlock.jsx');
 const md = read('client/src/components/MarkdownRenderer.jsx');
 
-// ── 1. CodeBlock.jsx:导出 + 抽出前的原样式(逐字锁,改一个 class 就红)──────────
+// ── 1. CodeBlock.jsx:导出 + 样式(逐字锁,改一个 class 就红)──────────
+// R06/句柄批:工具条(语言条/运行/复制)从 pre 的兄弟节点改成传给 CollapsibleCode 的
+// header,落在**同一个 <pre>** 里 —— 黑盒合同里「代码块」就是 pre 元素,「运行」「复制」
+// 都从 pre 子树找。类名随之按新结构锁。
 assert.ok(/export function CodeBlock\(\{ lang, code \}\)/.test(block),
   'CodeBlock 必须具名导出且签名不变(上游 advanced.tsx / fence-render.tsx 按 {code,lang} 调它)');
 for (const frag of [
   'className="relative group my-3"',
-  'className="flex items-center justify-between px-3.5 py-1.5 bg-[#2b2722] rounded-t-lg border border-[#3a342b] border-b-0"',
+  'className="flex items-center justify-between gap-2 shrink-0 px-3.5 py-1.5 bg-[#2b2722] border-b border-[#3a342b] whitespace-normal"',
   'className="text-[11px] font-mono text-[#9a8e78]"',
   '{lang || \'code\'}',
   '<CopyButton text={code} />',
-  'className="bg-[#211e19] border border-[#3a342b] border-t-0 p-4 overflow-x-auto text-[13px] leading-relaxed font-mono text-[#e8e2d6]"',
+  'className="bg-[#211e19] border border-[#3a342b] text-[13px] leading-relaxed font-mono text-[#e8e2d6]"',
 ]) {
-  assert.ok(block.includes(frag), `CodeBlock 渲染必须与抽出前逐字一致,缺: ${frag}`);
+  assert.ok(block.includes(frag), `CodeBlock 渲染必须与新结构逐字一致,缺: ${frag}`);
 }
+assert.ok(/<CollapsibleCode\b[\s\S]{0,300}?header=\{header\}/.test(block),
+  '工具条必须以 header 传进 CollapsibleCode(否则又跑到 pre 外面,运行/复制句柄失效)');
 assert.ok(/<CollapsibleCode\b/.test(block), '长代码折叠仍走 ArtifactPreview 的 CollapsibleCode(防两处漂移)');
 assert.ok(/from '\.\/ArtifactPreview\.jsx'/.test(block),
   '复制按钮与折叠件复用 ArtifactPreview 已导出的共用件,不再在本文件里重造一份');

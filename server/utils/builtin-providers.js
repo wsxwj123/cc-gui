@@ -1,0 +1,411 @@
+// 内置 provider 模板库 —— 产品唯一 preset registry。选模板自动填好 name/type/baseURL,
+// 用户只需填 API key,再点「获取模型」拉取该 provider 当前的模型列表(或手填)。
+//
+// 为什么住在 server/ 而不是 client/src:安装包只带 server + client/dist(见
+// src-tauri/tauri.conf.json 的 bundle.resources),server/services/pricing-* 要按本表
+// 枚举预设全集 —— 反向 import client/src 会让打包版后端启动即 ERR_MODULE_NOT_FOUND。
+// 前端经 client/src/utils/builtinProviders.js 转发引用,同一份数据,不许各留一份。
+//
+// 不再内置 models 清单:provider 的模型会随时更新,写死的模型名很快过期、还会误导
+// (如 deepseek 的 anthropic 端点实际按 claude-* 名映射,但具体可用 id 由上游决定)。
+// 模型一律由「获取模型」实时拉取或用户手填。价格表见 client/src/utils/pricing.js。
+
+// 上下文窗口与自动压缩联动:不再在模板里写死窗口值(死数据必然过时,如 deepseek v4
+// 发布后 128K 旧值立刻错)。窗口解析全部在 server/routes/chat.js 的 resolveModelWindow:
+// [1m] 后缀 > 获取模型时实抓的 per-模型窗口(kimi/openrouter 等 API 返回)> Provider
+// 表单手填 contextWindow > 按模型名的内置规则表(deepseek-v4→1M 等,新模型加一行)。
+// 手填排在规则表之前:规则表是"按模型名猜这就是官方那个模型",中转站用官方模型名
+// 转售却给更小的窗口时这个赌注不成立,必须让用户明示的值赢(否则规则表报大 → 永不
+// 主动压缩 → 直接撞上游 context overflow)。
+// 模板【不填】contextWindow:内置 provider 的窗口由规则表负责,模板一旦预填死数据,
+// 用户没主动填过也会被当成"用户明示"而压掉规则表。此优先级还记在
+// server/routes/chat.js resolveModelWindow 与 SettingsPanel 的说明文案里,改一处要三处同步。
+export const BUILTIN_PROVIDERS = [
+  // ─── OpenAI 兼容(走内置 openai-proxy 转 anthropic 协议给 claude CLI) ───
+  {
+    id: 'deepseek-official',
+    name: 'DeepSeek 官方',
+    type: 'openai',
+    baseURL: 'https://api.deepseek.com',
+    note: 'OpenAI 兼容 API。模型用「获取模型」拉取。',
+    docs: 'https://api-docs.deepseek.com/quick_start/pricing',
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI 官方',
+    type: 'openai',
+    baseURL: 'https://api.openai.com/v1',
+    note: '官方 API。需 OpenAI API key(sk- 开头)。',
+    docs: 'https://platform.openai.com/docs/pricing',
+  },
+  {
+    id: 'gemini',
+    name: 'Google Gemini',
+    type: 'openai',
+    baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    note: 'Google AI Studio API key。OpenAI 兼容 endpoint。',
+    docs: 'https://ai.google.dev/gemini-api/docs/pricing',
+  },
+  {
+    id: 'moonshot',
+    name: 'Moonshot Kimi',
+    type: 'openai',
+    baseURL: 'https://api.moonshot.cn/v1',
+    note: 'Moonshot 开放平台 API key。OpenAI 兼容。',
+    docs: 'https://platform.moonshot.cn/docs/pricing/chat',
+  },
+  {
+    id: 'xai-grok',
+    name: 'xAI Grok',
+    type: 'openai',
+    baseURL: 'https://api.x.ai/v1',
+    note: 'OpenAI 兼容。',
+    docs: 'https://docs.x.ai/docs/models',
+  },
+  {
+    id: 'zhipu-glm',
+    name: '智谱 GLM',
+    type: 'openai',
+    baseURL: 'https://open.bigmodel.cn/api/paas/v4',
+    note: 'OpenAI 兼容。',
+    docs: 'https://open.bigmodel.cn/pricing',
+  },
+  {
+    id: 'minimax',
+    name: 'MiniMax',
+    type: 'openai',
+    baseURL: 'https://api.minimaxi.com/v1',
+    note: '国内开放平台 OpenAI 兼容端点(官方文档已不再使用旧域名 api.minimax.chat)。国际站为 https://api.minimax.io/v1,key 与国内不通用。模型如 MiniMax-M3/M2.7。Anthropic 端点见下。',
+    docs: 'https://platform.minimaxi.com/docs/api-reference/text-openai-api',
+  },
+  {
+    id: 'qwen-dashscope',
+    name: '通义千问 Qwen(百炼)',
+    type: 'openai',
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    note: '阿里云百炼 DashScope，OpenAI 兼容。模型如 qwen-max/qwen-plus/qwen-turbo，用「获取模型」拉取。',
+    docs: 'https://bailian.console.aliyun.com/',
+  },
+  {
+    id: 'doubao-volc',
+    name: '豆包 Doubao(火山方舟)',
+    type: 'openai',
+    baseURL: 'https://ark.cn-beijing.volces.com/api/v3',
+    note: 'OpenAI 兼容。注意：模型 id 需带版本后缀(如 doubao-seed-2-0-pro-260215)，或在火山控制台创建 Endpoint(ep-xxx)后用 ep-id 调用。',
+    docs: 'https://console.volcengine.com',
+  },
+  {
+    id: 'ernie-qianfan',
+    name: '百度文心 ERNIE(千帆)',
+    type: 'openai',
+    baseURL: 'https://qianfan.baidubce.com/v2',
+    note: '百度智能云千帆 ModelBuilder V2，OpenAI 兼容。模型如 ernie-4.0-turbo-8k。',
+    docs: 'https://console.bce.baidu.com/iam/#/iam/apikey/list',
+  },
+  {
+    id: 'hunyuan',
+    name: '腾讯混元 Hunyuan',
+    type: 'openai',
+    baseURL: 'https://api.hunyuan.cloud.tencent.com/v1',
+    note: 'OpenAI 兼容。模型如 hunyuan-turbos-latest/hunyuan-t1-latest。',
+    docs: 'https://console.cloud.tencent.com/hunyuan',
+  },
+  {
+    id: 'stepfun',
+    name: '阶跃 StepFun',
+    type: 'openai',
+    baseURL: 'https://api.stepfun.com/v1',
+    note: 'OpenAI 兼容。模型如 step-3.5-flash/step-3.7-flash。该厂也有 Anthropic 端点(见下)。',
+    docs: 'https://platform.stepfun.com/interface-key',
+  },
+  {
+    id: 'mimo-tokenplan',
+    name: '小米 MiMo(Token Plan 套餐)',
+    type: 'openai',
+    baseURL: 'https://token-plan-cn.xiaomimimo.com/v1',
+    note: '套餐制专用端点(与按量付费 api.xiaomimimo.com 不同 host)。需 Token Plan 专用 key(tp- 开头)。模型如 mimo-v2.5-pro/mimo-v2.5(1M 上下文)。',
+    docs: 'https://mimo.mi.com/docs/zh-CN/quick-start/summary/first-api-call',
+  },
+  {
+    id: 'kimi-code',
+    name: 'Kimi Code(会员套餐)',
+    type: 'openai',
+    baseURL: 'https://api.kimi.com/coding/v1',
+    note: 'Kimi 会员 Kimi Code 权益端点(与按量付费开放平台 api.moonshot.cn 不同 host,后者见「Moonshot Kimi」)。key 在 Kimi Code 控制台创建。模型按档位开放:Andante→kimi-for-coding;Moderato→k3(262k 上下文);k3[1m](1M 上下文)与 kimi-for-coding-highspeed 需 Allegretto 及以上。官方文档主推 Anthropic 端点(见下),此为同 host 的 OpenAI 兼容路径。',
+    docs: 'https://www.kimi.com/code/docs/third-party-tools/other-coding-agents.html',
+  },
+  {
+    id: 'siliconflow',
+    name: '硅基流动 SiliconFlow(聚合)',
+    type: 'openai',
+    baseURL: 'https://api.siliconflow.cn/v1',
+    note: 'OpenAI 兼容聚合平台。模型 id 带组织前缀，如 deepseek-ai/DeepSeek-V3.2、zai-org/GLM-4.6、Qwen/Qwen3.5-397B-A17B;高配档再加 Pro/ 前缀(如 Pro/zai-org/GLM-5、Pro/zai-org/GLM-4.7)。',
+    docs: 'https://cloud.siliconflow.cn/',
+  },
+  {
+    id: 'groq',
+    name: 'Groq',
+    type: 'openai',
+    baseURL: 'https://api.groq.com/openai/v1',
+    note: 'Groq LPU 高速推理平台,OpenAI 兼容。托管 Llama/Qwen/Kimi 等开源模型。',
+    docs: 'https://console.groq.com/docs/openai',
+  },
+  {
+    id: 'mistral',
+    name: 'Mistral',
+    type: 'openai',
+    baseURL: 'https://api.mistral.ai/v1',
+    note: 'Mistral La Plateforme,chat completions 为 OpenAI 兼容格式。模型如 mistral-large/codestral。',
+    docs: 'https://docs.mistral.ai/api/',
+  },
+  {
+    id: 'perplexity',
+    name: 'Perplexity',
+    type: 'openai',
+    baseURL: 'https://api.perplexity.ai',
+    note: '联网搜索问答模型(sonar 系列),chat/completions 为 OpenAI 兼容。官方现主推 Agent API,此兼容端点已标记为旧接口。',
+    docs: 'https://docs.perplexity.ai/',
+  },
+  {
+    id: 'together',
+    name: 'Together AI',
+    type: 'openai',
+    baseURL: 'https://api.together.ai/v1',
+    note: '开源模型托管平台,OpenAI 兼容。旧域名 api.together.xyz 仍可用。',
+    docs: 'https://docs.together.ai/docs/openai-api-compatibility',
+  },
+  {
+    id: 'fireworks',
+    name: 'Fireworks AI',
+    type: 'openai',
+    baseURL: 'https://api.fireworks.ai/inference/v1',
+    note: '开源模型托管平台,OpenAI 兼容。模型 id 带账户前缀,如 accounts/fireworks/models/deepseek-v3p2。该厂也有 Anthropic 端点(见下)。',
+    docs: 'https://docs.fireworks.ai/tools-sdks/openai-compatibility',
+  },
+  {
+    id: 'cerebras',
+    name: 'Cerebras',
+    type: 'openai',
+    baseURL: 'https://api.cerebras.ai/v1',
+    note: 'Cerebras 晶圆级芯片高速推理,OpenAI 兼容。托管 Llama/Qwen/gpt-oss 等开源模型。',
+    docs: 'https://inference-docs.cerebras.ai/introduction',
+  },
+  {
+    id: 'hyperbolic',
+    name: 'Hyperbolic',
+    type: 'openai',
+    baseURL: 'https://api.hyperbolic.xyz/v1',
+    note: '开源模型推理平台,OpenAI 兼容。',
+    docs: 'https://docs.hyperbolic.xyz/docs/inference-api',
+  },
+  {
+    id: 'zai-intl',
+    name: 'Z.ai 智谱国际站',
+    type: 'openai',
+    baseURL: 'https://api.z.ai/api/paas/v4',
+    note: '智谱国际站按量付费端点(账号/key 与国内 open.bigmodel.cn 不通用,USD 计价)。模型如 glm-5.2。Coding Plan 套餐端点见「Z.ai Coding Plan」。',
+    docs: 'https://docs.z.ai/guides/overview/pricing',
+  },
+  {
+    id: 'zai-coding',
+    name: 'Z.ai Coding Plan(套餐)',
+    type: 'openai',
+    baseURL: 'https://api.z.ai/api/coding/paas/v4',
+    note: '智谱国际站 GLM Coding Plan 套餐专用 OpenAI 兼容端点,需套餐 key,仅限 Coding 场景。Anthropic 端点见下。',
+    docs: 'https://docs.z.ai/devpack/quick-start',
+  },
+  {
+    id: 'glm-coding',
+    name: '智谱 GLM Coding Plan(套餐)',
+    type: 'openai',
+    baseURL: 'https://open.bigmodel.cn/api/coding/paas/v4',
+    note: '国内 GLM Coding Plan 套餐专用 OpenAI 兼容端点,需套餐 key,仅限 Coding 场景(与通用按量端点 /api/paas/v4 不通用)。Anthropic 端点即「智谱 GLM(Anthropic 协议)」条目。',
+    docs: 'https://docs.bigmodel.cn/cn/coding-plan/quick-start',
+  },
+  {
+    id: 'poe',
+    name: 'Poe(订阅积分)',
+    type: 'openai',
+    baseURL: 'https://api.poe.com/v1',
+    note: 'Poe 的 OpenAI 兼容端点,用订阅积分计费,可调用平台上各家模型。key 在 poe.com/api/keys 创建。',
+    docs: 'https://creator.poe.com/docs/external-applications/openai-compatible-api',
+  },
+  {
+    id: '302ai',
+    name: '302.AI(聚合)',
+    type: 'openai',
+    baseURL: 'https://api.302.ai/v1',
+    note: '按量付费聚合平台,OpenAI 兼容。该平台也有 Anthropic 端点(见下)。',
+    docs: 'https://doc.302.ai/',
+  },
+  {
+    id: 'aihubmix',
+    name: 'AiHubMix(聚合)',
+    type: 'openai',
+    baseURL: 'https://aihubmix.com/v1',
+    note: 'OpenAI 兼容聚合平台。该平台也有 Anthropic 端点(见下)。',
+    docs: 'https://docs.aihubmix.com/',
+  },
+  {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    type: 'openai',
+    baseURL: 'https://openrouter.ai/api/v1',
+    note: 'OpenRouter 聚合平台的 OpenAI 兼容端点。模型 ID 需带 provider 前缀(anthropic/、google/ 等)。Anthropic 协议条目见下。',
+    docs: 'https://openrouter.ai/docs/quickstart',
+  },
+
+  // ─── Anthropic 协议(直接发 anthropic 格式给端点) ───
+  {
+    id: 'anthropic-official',
+    name: 'Anthropic Claude 官方',
+    type: 'anthropic',
+    baseURL: 'https://api.anthropic.com',
+    note: '原生 Anthropic API。若用订阅 OAuth 登录(claude /login),无需在此填 key。',
+    docs: 'https://docs.anthropic.com/en/docs/about-claude/pricing',
+  },
+  {
+    id: 'deepseek-anthropic',
+    name: 'DeepSeek(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.deepseek.com/anthropic',
+    note: 'DeepSeek 的 Anthropic 兼容端点。可填 deepseek 模型 id,也可填 claude-* 名(上游会映射:claude-opus→deepseek-v4-pro,claude-sonnet/haiku→deepseek-v4-flash)。',
+    docs: 'https://api-docs.deepseek.com/guides/anthropic_api',
+  },
+  {
+    id: 'openrouter-anthropic',
+    name: 'OpenRouter(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://openrouter.ai/api/v1',
+    note: 'OpenRouter 聚合平台的 Anthropic 兼容端点。模型 ID 需带 provider 前缀(anthropic/、google/ 等)。',
+    docs: 'https://openrouter.ai/docs',
+  },
+  {
+    id: 'glm-anthropic',
+    name: '智谱 GLM(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://open.bigmodel.cn/api/anthropic',
+    note: '智谱的 Anthropic 兼容端点(官方文档已标注)。模型如 glm-5.2,旧款 glm-4.7 仍兼容。',
+    docs: 'https://docs.bigmodel.cn/',
+  },
+  {
+    id: 'mimo-tokenplan-anthropic',
+    name: '小米 MiMo(Token Plan,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+    note: '套餐制的 Anthropic 兼容端点(与按量付费 api.xiaomimimo.com/anthropic 不同 host)。需 Token Plan 专用 key(tp- 开头)。模型如 mimo-v2.5-pro/mimo-v2.5,pro 支持 1M 上下文([1m] 后缀)。',
+    docs: 'https://mimo.mi.com/docs/zh-CN/quick-start/summary/first-api-call',
+  },
+  {
+    id: 'kimi-code-anthropic',
+    name: 'Kimi Code(会员套餐,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.kimi.com/coding',
+    note: '官方文档给 Claude Code 的端点(ANTHROPIC_BASE_URL=https://api.kimi.com/coding/)。key 在 Kimi Code 控制台创建。模型按档位开放:Andante→kimi-for-coding;Moderato→k3(262k 上下文);k3[1m](1M 上下文)与 kimi-for-coding-highspeed 需 Allegretto 及以上。kimi-for-coding 需开 Thinking 否则被路由到 K2.6。',
+    docs: 'https://www.kimi.com/code/docs/third-party-tools/other-coding-agents.html',
+  },
+  {
+    id: 'stepfun-anthropic',
+    name: '阶跃 StepFun(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.stepfun.com',
+    note: '阶跃的 Anthropic 兼容端点(CLI 会拼 /v1/messages)。支持 step-3.5-flash/step-3.7-flash。',
+    docs: 'https://platform.stepfun.com/interface-key',
+  },
+  {
+    id: 'fireworks-anthropic',
+    name: 'Fireworks AI(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.fireworks.ai/inference',
+    note: 'Fireworks 的 Anthropic 兼容端点(支持 /v1/messages 含流式)。model 需填 Fireworks id,如 accounts/fireworks/models/deepseek-v3p2。',
+    docs: 'https://docs.fireworks.ai/tools-sdks/anthropic-compatibility',
+  },
+  {
+    id: 'minimax-anthropic',
+    name: 'MiniMax(Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.minimaxi.com/anthropic',
+    note: 'MiniMax 国内开放平台 Anthropic 兼容端点(官方标注推荐)。国际站为 https://api.minimax.io/anthropic,key 与国内不通用。模型 MiniMax-M3(1M 上下文)/M2.x 系列。',
+    docs: 'https://platform.minimaxi.com/docs/api-reference/text-anthropic-api',
+  },
+  {
+    id: 'zai-coding-anthropic',
+    name: 'Z.ai Coding Plan(套餐,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.z.ai/api/anthropic',
+    note: '智谱国际站 Coding Plan 官方给 Claude Code 的端点,需套餐 key。国内套餐对应端点见「智谱 GLM(Anthropic 协议)」。',
+    docs: 'https://docs.z.ai/devpack/quick-start',
+  },
+  {
+    id: 'qwen-dashscope-anthropic',
+    name: '通义千问 Qwen(百炼,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://dashscope.aliyuncs.com/apps/anthropic',
+    note: '阿里云百炼按量付费的 Anthropic 兼容端点(官方给 Claude Code 的北京地域地址;新加坡为 https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/apps/anthropic)。用百炼 API Key。模型如 qwen3.7-max/qwen3.6-flash。该端点仅提供 /v1/messages,无模型列表端点,「获取模型」不可用需手填。',
+    docs: 'https://help.aliyun.com/zh/model-studio/claude-code',
+  },
+  {
+    id: 'qwen-coding-anthropic',
+    name: '通义 Qwen Coding Plan(套餐,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
+    note: '阿里百炼 Coding Plan 套餐官方给 Claude Code 的端点,需套餐专用 key(与按量付费不通用;按量付费的 Anthropic 端点见「通义千问 Qwen(百炼,Anthropic 协议)」条目)。模型如 qwen3.7-max/qwen3-coder-next。官方未提供 Coding Plan 的 OpenAI 兼容端点。',
+    docs: 'https://help.aliyun.com/zh/model-studio/claude-code',
+  },
+  {
+    id: '302ai-anthropic',
+    name: '302.AI(聚合,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://api.302.ai',
+    note: '302.AI 的 Anthropic 兼容端点(CLI 会拼 /v1/messages),官方给 Claude Code 的 ANTHROPIC_BASE_URL 即此地址。',
+    docs: 'https://doc.302.ai/',
+  },
+  {
+    id: 'aihubmix-anthropic',
+    name: 'AiHubMix(聚合,Anthropic 协议)',
+    type: 'anthropic',
+    baseURL: 'https://aihubmix.com',
+    note: 'AiHubMix 的 Anthropic 兼容端点(/v1/messages,官方标注 Beta),可用 Anthropic 协议调用平台全部模型。',
+    docs: 'https://docs.aihubmix.com/cn/api/Anthropic-Compatible',
+  },
+];
+
+export function findBuiltin(id) {
+  return BUILTIN_PROVIDERS.find((p) => p.id === id) || null;
+}
+
+// baseURL → host(小写、去末尾点)。URL 自己会折叠大小写、丢掉默认端口,末尾点它不管
+// (`open.bigmodel.cn.` 的 hostname 就带点)→ 归一后不比出两个身份。无 host(非法 URL /
+// file: / 空串)返回 null,调用方据此判"未命中"。
+function hostOf(url) {
+  if (typeof url !== 'string' || !url.trim()) return null;
+  try {
+    const h = new URL(url.trim()).hostname.toLowerCase().replace(/\.$/, '');
+    return h || null;
+  } catch { return null; }
+}
+
+/**
+ * 把用户填的 baseURL 对到内置预设上 —— **全产品唯一一份"这是不是某家官方入口"的口径**
+ * (D 项:额度候选按预设身份挂;E 项:保存时提示跳转。两处共用,不许各写一份 host 判据)。
+ *
+ * 比对 = host **逐字相等**:同一家的任意协议入口是同 host 的不同 path,天然都命中
+ * (open.bigmodel.cn 的 /api/paas/v4 与 /api/anthropic 都算智谱)。**不做子域近似** ——
+ * coding.dashscope.aliyuncs.com 与 dashscope.aliyuncs.com 是两个 host;提示是"建议"
+ * 不是"判定",漏报只维持现状,误报才伤用户。
+ *
+ * @param {unknown} baseURL 用户填的 Base URL
+ * @param {{type?: 'openai'|'anthropic'|null}} [opts] 表单当前协议(多命中时用于挑建议目标)
+ * @returns {{matched:false} | {matched:true, host:string, preset:object, candidates:object[]}}
+ *   非法输入一律 {matched:false},**不抛**;preset = 建议目标(同 type 优先,否则预设表
+ *   声明顺序第一条);candidates = 全部同 host 预设(**声明顺序**,含 preset 自己)。
+ */
+export function matchPresetByBaseURL(baseURL, opts) {
+  const host = hostOf(baseURL);
+  if (!host) return { matched: false };
+  const candidates = BUILTIN_PROVIDERS.filter((p) => hostOf(p.baseURL) === host);
+  if (!candidates.length) return { matched: false };
+  const type = opts?.type;
+  const preset = (type && candidates.find((p) => p.type === type)) || candidates[0];
+  return { matched: true, host, preset, candidates };
+}

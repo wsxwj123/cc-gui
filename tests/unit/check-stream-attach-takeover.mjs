@@ -189,7 +189,14 @@ const mkConn = (name, log) => {
   assert.ok(!/Stream already attached/.test(src), '409 拒绝分支必须删除(改为接管)');
   const i = src.indexOf("router.get('/chat/:pid/stream'");
   assert.ok(i > 0, '找不到 SSE attach 路由');
-  const seg = src.slice(i, i + 2600);
+  // 段边界按【锚点】取:从本路由起,到下一个顶层 `router.` 声明为止 —— 路由体加长(如
+  // R13 补游标/身份行)不该让断言红。原来的固定 2600 字符窗口是当时源码长度的代理,
+  // 撑破之后目标行掉出窗外,红的是"窗口太小"而不是"接线断了"。
+  const nextRoute = src.indexOf('\nrouter.', i + 10);
+  assert.ok(nextRoute > i, '找不到本路由的结束锚点(下一个 router. 声明)');
+  const seg = src.slice(i, nextRoute);
+  assert.ok(seg.includes('releaseAttach') && seg.length < 20000,
+    `段切片疑似切歪了(长度 ${seg.length},末尾:${JSON.stringify(seg.slice(-40))})`);
   assert.ok(/const myToken = \+\+attachSeq;/.test(seg), 'attach 必须自增取 token');
   assert.ok(/claimAttach\(slot, myToken\)/.test(seg), 'attach 必须走 claimAttach');
   assert.ok(/releaseAttach\(slot, myToken, onLine\)/.test(seg), 'close 必须走 releaseAttach');

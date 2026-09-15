@@ -77,6 +77,23 @@ export function firstSteerableIndex(list) {
   return head?.text && !head.hidden && !isSteerBarrier(head) ? i : -1;
 }
 
+// r116:「⚡ 并入」为灰的原因码 —— 判据与 firstSteerableIndex 同源(能并入即返回 null,
+// 不能并入时队首卡在哪一态就报哪一态),只给 UI 说人话用,不改任何状态。
+// 为什么要有它:accepted(已送进回合、等 CLI 落盘)的条目原来在队列条里不显示,队首被它
+// 挡住时用户只看到"按钮是灰的",hover 却还写着"把队列里的下一条消息并入当前回合"——
+// 按钮与文案互相打脸(用户实报"并入按钮有时候点不了")。
+export function steerBlockReason(list) {
+  if (firstSteerableIndex(list) >= 0) return null;
+  const i = firstNonKeptIndex(list);
+  const head = i >= 0 ? list[i] : null;
+  if (head?.steerState === 'accepted') return 'accepted';
+  if (head?.steerState === 'claiming') return 'claiming';
+  if (head?.steerState === 'unknown') return 'unknown';
+  if (head?.steerState === 'needs-review' || head?.attemptWasAmbiguous) return 'review';
+  if (head?.hidden) return 'hidden';
+  return 'none';
+}
+
 // 两种已验证落盘形态：真 user.uuid，或 reader 合成 queued_command.source_uuid 后的 steerUuid。
 export function persistedSteerKeys(persisted) {
   const out = new Set();
@@ -101,7 +118,23 @@ export function steerLanded(item, _unusedSigs, steerKeys) {
 // acceptedAt ?? queuedAt:旧数据无 acceptedAt,而其 queuedAt 必然老旧 → 立即翻,
 // 向后兼容;reattach 期间被 stripSteerState 之外路径重建的条目也有新鲜 queuedAt 兜底。
 export const RECONCILE_GRACE_MS = 20000;
-export function reconcileSteered(list, _unusedSigs, steerKeys) {
+
+// R46:「还在途」的唯一判据 —— 已被 server 接纳、UUID 还没进 jsonl、且没超出兜底宽限。
+// 横幅(App.jsx finalize)与对账翻案共用它:横幅原来只看「有没有 steerId、UUID 在不在」,
+// 于是 accepted(还在等落盘)的条目也被算成"无法确认"→ 成功的并入照样弹失败横幅。
+export function steerStillInFlight(item, now = Date.now()) {
+  if (item?.steerState !== 'accepted') return false;
+  const anchor = item.acceptedAt ?? item.queuedAt;
+  return Number.isFinite(anchor) && now - anchor < RECONCILE_GRACE_MS;
+}
+
+// R46 治本:turnActive = 「这个回合还活着吗」。
+//   落盘的时点由 CLI 的下一个 tool_result 边界决定,不是"我点了多久"—— 隔离实例实测
+//   3.3 / 6.0 / 9.6 / 11.5 / **148** 秒。所以回合没结束就没有"终局缺席"这回事:
+//     true  → 一律先保留 accepted(不管多久,记 missCount 供观测);
+//     false → 这是一次终局对账(回合已结束),缺席即翻 → 真失败不漏判;
+//     未传  → 客户端状态不明,吃 RECONCILE_GRACE_MS 兜底宽限(旧调用点口径不变)。
+export function reconcileSteered(list, _unusedSigs, steerKeys, { turnActive } = {}) {
   if (!Array.isArray(list) || !list.length) return list;
   if (!list.some((item) => isSteerBarrier(item) || item?.steerId)) return list;
   let changed = false;
@@ -114,9 +147,11 @@ export function reconcileSteered(list, _unusedSigs, steerKeys) {
     if (item.steerState === 'kept') { out.push(item); continue; }
     if (item.steerState === 'needs-review') { out.push(item); continue; }
     // r26-B3:accepted 且仍在落盘宽限期内 → 本轮未命中不翻(下一次刷新仍缺席才翻)。
+    // R46:回合还活着(turnActive === true)→ 一直等,与宽限无关;回合已结束
+    // (=== false)→ 终局对账,连宽限也不等(再挂 20s 只会让它卡在不可见的 accepted 态,
+    // isSteered 的条目在队列栏里是不显示的,用户既看不到也拿不回)。
     if (item.steerState === 'accepted') {
-      const anchor = item.acceptedAt ?? item.queuedAt;
-      if (Number.isFinite(anchor) && Date.now() - anchor < RECONCILE_GRACE_MS) {
+      if (turnActive === true || (turnActive !== false && steerStillInFlight(item))) {
         changed = true;
         out.push({ ...item, missCount: (item.missCount || 0) + 1 });
         continue;
@@ -183,6 +218,11 @@ export function stripSteerState(queueMap) {
       if (!isSteerBarrier(item) && !item?.steerId) return item;
       // ①"保留不发"是用户决定，跨重启保持，不翻回 needs-review。
       if (item?.steerState === 'kept') return item;
+      // R46 ③:accepted 是「已送达、只等 UUID 落盘」的在途态，不是未决残留 —— 页面重载
+      // 不改变它。原来无条件翻 needs-review 等于每次重载都把在途并入判死（落盘要等下一个
+      // tool_result 边界，重载几乎必然落在窗口内 = 用户命中的入口 1）。原样保留
+      // steerId/acceptedAt，交给宽限/回合存活判据；真失败仍会被终局对账翻掉。
+      if (item?.steerState === 'accepted') return item;
       const { claimId, targetPaneId, claimDraft, ...rest } = item;
       void claimId; void targetPaneId; void claimDraft;
       return { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };

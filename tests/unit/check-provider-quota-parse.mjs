@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import {
   pickCandidates, authHeaders, parseQuota, computeLow, normalizeThresholds,
-  DEFAULT_THRESHOLDS, reasonNote, num, toMs, windowLabel,
+  DEFAULT_THRESHOLDS, reasonNote, noEndpointNote, num, toMs, windowLabel,
 } from '../../server/services/provider-quota.js';
 import {
   quotaItemText, quotaUsedPercent, quotaTone, directionWord, currencySymbol,
@@ -23,6 +23,14 @@ import {
 const one = (provider) => {
   const c = pickCandidates(provider);
   assert.equal(c.length, 1, `期望恰好一个候选:${provider.baseURL}`);
+  return c[0];
+};
+// D-1:智谱 CN 身份现在是**两个独立候选**(quota/limit + 账户余额),`one()` 的"恰好一个"
+// 对它不成立。凡按"第一条候选"取值的用例改走 first();候选条数另由
+// check-provider-quota-preset.mjs 钉死,这里只关心第一条还是不是原来那一条。
+const first = (provider) => {
+  const c = pickCandidates(provider);
+  assert.ok(c.length >= 1, `期望至少一个候选:${provider.baseURL}`);
   return c[0];
 };
 const parse1 = (provider, body) => parseQuota(one(provider), [body]);
@@ -47,9 +55,10 @@ const parse1 = (provider, body) => parseQuota(one(provider), [body]);
   assert.deepEqual(one({ baseURL: 'https://api.deepseek.com/anthropic', type: 'anthropic' }).urls,
     ['https://api.deepseek.com/user/balance'], 'DeepSeek 余额是顶级路径,要剥掉 /anthropic');
 
-  const zp = one({ baseURL: 'https://open.bigmodel.cn/api/anthropic', type: 'anthropic' });
+  const zp = first({ baseURL: 'https://open.bigmodel.cn/api/anthropic', type: 'anthropic' });
   assert.deepEqual(zp.urls, ['https://open.bigmodel.cn/api/monitor/usage/quota/limit']);
   assert.equal(zp.auth, 'raw', '智谱是裸 token,不加 Bearer');
+  // Z.ai 仍恰好一个候选(它**不**含余额端点):这条仍是 one(),守住"不跨域族发 key"。
   assert.equal(one({ baseURL: 'https://api.z.ai/api/anthropic', type: 'anthropic' }).vendor, 'zhipu');
 
   assert.deepEqual(one({ baseURL: 'https://api.minimaxi.com/anthropic', type: 'anthropic' }).urls,
@@ -143,7 +152,7 @@ const parse1 = (provider, body) => parseQuota(one(provider), [body]);
 // ── 智谱:已用%,窗口靠 unit+number(坑⑥),HTTP 200 但 body 报错(坑③) ────
 {
   const p = { baseURL: 'https://open.bigmodel.cn/api/anthropic', type: 'anthropic' };
-  const ok = parse1(p, {
+  const ok = parseQuota(first(p), [{
     code: 200,
     msg: 'success',
     data: {
@@ -153,16 +162,49 @@ const parse1 = (provider, body) => parseQuota(one(provider), [body]);
         { type: 'TIME_LIMIT', percentage: 3 },
       ],
     },
-  });
+  }]);
   assert.equal(ok.kind, 'percent');
   assert.deepEqual(ok.items.map((i) => i.label), ['5 小时', '周', '月'],
     '两条 TOKENS_LIMIT 必须按 unit+number 分成 5 小时 / 周(官方脚本把两条都叫 5 小时,不能抄)');
   assert.ok(ok.items.every((i) => i.direction === 'used'), '智谱回的是已用%');
   assert.equal(ok.items[0].percent, 44.4);
   // 坑③:HTTP 200 但 body 里 code 非 200/0
-  assert.equal(parse1(p, { code: 401, msg: 'token 无效', data: { limits: [{ unit: 3, number: 5, percentage: 0 }] } }), null,
+  assert.equal(parseQuota(first(p), [{ code: 401, msg: 'token 无效', data: { limits: [{ unit: 3, number: 5, percentage: 0 }] } }]), null,
     'body 里 code 报错 → 解析失败(不能只看 HTTP 状态码)');
-  assert.equal(parse1(p, { data: { limits: [] } }), null, '空 limits → null');
+  assert.equal(parseQuota(first(p), [{ data: { limits: [] } }]), null, '空 limits → null');
+}
+
+// ── D-2 智谱 CN 账户余额:第二条独立候选(字段照实测登记,取可用余额) ────────
+{
+  const bal = pickCandidates({ baseURL: 'https://open.bigmodel.cn/api/anthropic', type: 'anthropic' })[1];
+  assert.equal(bal.vendor, 'zhipu-cn-balance');
+  const ok = parseQuota(bal, [{
+    success: true,
+    data: { balance: 42.5, rechargeAmount: 100, giveAmount: 10, totalSpendAmount: 67.5, frozenBalance: 0, availableBalance: 42.5 },
+  }]);
+  assert.equal(ok.kind, 'amount');
+  assert.equal(ok.currency, 'CNY', '余额是人民币,必须带币种(否则界面不显示 ¥)');
+  assert.deepEqual(ok.items[0], { label: '余额', direction: 'left', value: 42.5, resetAt: null, unlimited: false });
+  assert.equal(quotaItemText(ok.items[0], ok.currency), '余额 ¥42.50');
+
+  // **缺必需字段 → 整条降级**:不写 0、不回部分字段、不拿 balance 顶替 availableBalance
+  assert.equal(parseQuota(bal, [{ success: true, data: { balance: 42.5 } }]), null,
+    '只有 balance 没有 availableBalance → null(两个是不同口径,顶替就是显示错的数字)');
+  assert.equal(parseQuota(bal, [{ data: { availableBalance: null } }]), null, 'null 不是 0');
+  assert.equal(parseQuota(bal, [{ data: { availableBalance: '' } }]), null, '空串不是 0(Number("")===0 会把缺字段伪装成余额 0)');
+  assert.equal(parseQuota(bal, [{ data: { availableBalance: 'abc' } }]), null);
+  assert.equal(parseQuota(bal, [{ data: {} }]), null, '空 data → null');
+  assert.equal(parseQuota(bal, [{}]), null, '压根没有 data → null');
+  assert.equal(parseQuota(bal, [null]), null, '非对象 → null 不抛');
+  assert.equal(parseQuota(bal, [{ data: { availableBalance: 0 } }]).items[0].value, 0,
+    '真的读到 0 才显示 0(与"读不到"必须分开)');
+  // 字符串数值(与 DeepSeek/SiliconFlow 同一套收口)
+  assert.equal(parseQuota(bal, [{ data: { availableBalance: ' 12.30 ' } }]).items[0].value, 12.3);
+  // 业务码报错(HTTP 仍 200,与套餐端点同一个坑③)
+  assert.equal(parseQuota(bal, [{ code: 401, msg: 'Credential expired or incorrect', data: { availableBalance: 42.5 } }]), null,
+    'body 里 code 非 200/0 → 整条降级,不能只看 HTTP 状态码');
+  assert.equal(parseQuota(bal, [{ code: 1001, data: { availableBalance: 42.5 } }]), null,
+    '智谱对未认证/任意路径回 code:1001 → 也是失败');
 }
 
 // ── MiniMax:剩余%,双 0 不许反算(坑④),base_resp 报错(坑③) ──────────────
@@ -330,7 +372,26 @@ const parse1 = (provider, body) => parseQuota(one(provider), [body]);
   assert.equal(windowLabel(86400), '日');
   assert.equal(windowLabel('5h'), '5 小时');
   assert.equal(windowLabel('weird-window'), 'weird-window', '认不出就原样回显,不猜成"本月"');
-  assert.equal(reasonNote('no-endpoint'), '该 provider 不提供额度接口');
+  // D-4:`reasonNote('no-endpoint')` 的返回值 = **第③类「未登记」**串(兜底语义)。
+  // 旧串「该 provider 不提供额度接口」把"名单内本期未接入"与"压根没登记"混成一句,
+  // 用户分不出是自己填错了还是我们没做 —— 故拆成两档(第②类串见 noEndpointNote)。
+  assert.equal(reasonNote('no-endpoint'), '该 provider 未登记额度接口，请去官网查看');
+  // 第②类:识别名单内的 host(有接口、本期未接入)说另一串 —— 同一句 reason 两档文案,
+  // 靠 provider 身份分。名单 = 探针实证过的 8 家 host + anthropic.com(官方额度已另有通道)。
+  assert.equal(noEndpointNote({ baseURL: 'https://api.anthropic.com' }),
+    '该 provider 有额度接口，本期尚未接入，请去官网查看');
+  assert.equal(noEndpointNote({ baseURL: 'https://token-plan-cn.xiaomimimo.com/v1' }),
+    '该 provider 有额度接口，本期尚未接入，请去官网查看');
+  assert.equal(noEndpointNote({ baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1' }),
+    '该 provider 有额度接口，本期尚未接入，请去官网查看');
+  // 未登记的自填第三方 → 第③类
+  assert.equal(noEndpointNote({ baseURL: 'https://my-relay.example.com/v1' }),
+    '该 provider 未登记额度接口，请去官网查看');
+  // 脏 baseURL 不抛,落第③类兜底
+  assert.equal(noEndpointNote({ baseURL: 'not a url' }), '该 provider 未登记额度接口，请去官网查看');
+  assert.equal(noEndpointNote(null), '该 provider 未登记额度接口，请去官网查看');
+  assert.equal(noEndpointNote({ baseURL: 'https://api.openai.com/v1' }),
+    '该 provider 未登记额度接口，请去官网查看', 'OpenAI 已从第②类名单移除(改走 codex 通道)');
   assert.match(reasonNote('auth'), /密钥/);
   assert.match(reasonNote('network'), /网络/);
 }
@@ -342,7 +403,7 @@ const parse1 = (provider, body) => parseQuota(one(provider), [body]);
   const unl = parseQuota(c, [{ hard_limit_usd: 1e8 }, { total_usage: 0 }]);
   assert.notEqual(unl.items[0].value, 1e8, '变异验证:去掉 UNLIMITED 分支这里会拿到 1e8');
   // 若智谱 unit/number 判被换成"都叫 5 小时",这条会挂
-  const zp = parseQuota(one({ baseURL: 'https://open.bigmodel.cn/api/anthropic', type: 'anthropic' }),
+  const zp = parseQuota(first({ baseURL: 'https://open.bigmodel.cn/api/anthropic', type: 'anthropic' }),
     [{ code: 200, data: { limits: [{ unit: 6, number: 1, percentage: 9 }] } }]);
   assert.equal(zp.items[0].label, '周', '变异验证:窗口判据写死成 5 小时时这里会挂');
 }

@@ -5,6 +5,54 @@
 import assert from 'node:assert/strict';
 import { pruneByLiveSet, LEVEL_PRUNE_MIN_AGE_MS } from '../../client/src/utils/levelPrune.js';
 
+// ── 源码守卫用的小工具(不是被测逻辑)────────────────────────────────────
+// 去注释:等长替换(换行保留)→ 报错行号与原文件一致。注释里写的 `// f(...)` 既不能
+// 充数骗绿,也不能冤枉变红。字符串/模板串里的 `//` 不算注释。
+// ponytail: 轻量状态机,不解析正则/JSX 文本 —— 极少数段落会被它误判成"串里",漏剥几行注释。
+// 若将来冒出指不到真实代码的建卡点,先查这里(当前 6 个建卡点都在剥干净的区域,已逐个核对)。
+function stripComments(src) {
+  let out = '', i = 0, quote = null;
+  while (i < src.length) {
+    const c = src[i];
+    if (quote) {
+      out += c;
+      if (c === '\\') { out += src[i + 1] ?? ''; i += 2; continue; }
+      if (c === quote) quote = null;
+      i += 1; continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { quote = c; out += c; i += 1; continue; }
+    if (c === '/' && src[i + 1] === '/') { while (i < src.length && src[i] !== '\n') { out += ' '; i += 1; } continue; }
+    if (c === '/' && src[i + 1] === '*') {
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) { out += src[i] === '\n' ? '\n' : ' '; i += 1; }
+      out += '  '; i += 2; continue;
+    }
+    out += c; i += 1;
+  }
+  return out;
+}
+
+// 抠出所有 `name(...)` 调用的实参文本(括号配平,串/模板里的括号不计)。
+// 跳过 `function name(` 声明 —— 那是定义不是调用点。
+function callArgsOf(src, name) {
+  const out = [];
+  const re = new RegExp(`\\b${name}\\s*\\(`, 'g');
+  for (let m; (m = re.exec(src));) {
+    if (/function\s*$/.test(src.slice(Math.max(0, m.index - 16), m.index))) continue;
+    const open = m.index + m[0].length - 1;
+    let depth = 0, j = open, quote = null;
+    for (; j < src.length; j++) {
+      const c = src[j];
+      if (quote) { if (c === '\\') j++; else if (c === quote) quote = null; continue; }
+      if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) break; }
+    }
+    out.push({ line: src.slice(0, m.index).split('\n').length, args: src.slice(open + 1, j) });
+    re.lastIndex = j + 1;
+  }
+  return out;
+}
+
 const SID = 'sess-A';
 const ts = 1_000_000_000;
 const started = ts - LEVEL_PRUNE_MIN_AGE_MS - 1; // 够老
@@ -70,6 +118,24 @@ const payload = (patch) => ({ sessionId: SID, taskIds: [], toolUseIds: [], settl
   assert.deepEqual(pruneByLiveSet(agents, payload({ toolUseIds: ['f'] })), ['a', 'b'], '混合场景只剪该剪的');
 }
 
+// ── 行为侧:建出来的条目必须能被 task_id 反查命中 ─────────────────────────
+// 下面那条源码锁守的是"每个建卡点都把 task_id 传下去了";这里守"传下去之后它真的能当钥匙用"。
+// 反查体是 App.jsx 的 findAgentIdByTaskId(线性扫 activeAgents 找 a.taskId === task_id —— 见
+// 其源码守卫)。task_updated 事件只带 task_id、不带 tool_use_id,反查落空 = 那张卡片跨回合 /
+// 重连后永远收不了尾。所以"建卡点漏传 task_id"不是少个字段,是功能坏掉。
+{
+  const { rebuildWorkflowEntry } = await import('../../client/src/utils/workflowEntry.js');
+  const byTaskId = (agents, taskId) => Object.entries(agents).find(([, a]) => a?.taskId === taskId)?.[0] ?? null;
+  const ev = { tool_use_id: 'toolu_wf', task_id: 'T1' };
+
+  const fresh = rebuildWorkflowEntry({ toolUseId: ev.tool_use_id, taskId: ev.task_id, sessionId: SID });
+  assert.equal(byTaskId({ [ev.tool_use_id]: fresh }, ev.task_id), ev.tool_use_id,
+    '带 task_id 补出来的条目:task_id 反查必须命中(否则只有 tool_use_id 的更新能碰到它)');
+  const lost = rebuildWorkflowEntry({ toolUseId: ev.tool_use_id, taskId: null, sessionId: SID });
+  assert.equal(byTaskId({ [ev.tool_use_id]: lost }, ev.task_id), null,
+    '反面:建卡点没把 task_id 递进去 → 反查落空 —— 这正是下面源码锁要挡的那种回归');
+}
+
 // ── 源码守卫:接线点 ────────────────────────────────────────────────
 {
   const { readFileSync } = await import('node:fs');
@@ -82,9 +148,55 @@ const payload = (patch) => ({ sessionId: SID, taskIds: [], toolUseIds: [], settl
   // A5:task_started 存在性分支必须同时补 taskManaged / taskId / sessionId,且 sessionId 保留既有值
   assert.ok(/_s0\.upsertAgent\(event\.tool_use_id, \{\s*taskManaged: true,\s*taskId: event\.task_id,\s*sessionId: _s0\.activeAgents\[event\.tool_use_id\]\.sessionId \|\| streamOwnerSid\(\),/.test(app),
     'task_started 存在性分支必须补 taskManaged + taskId + sessionId(已有 sessionId 不覆盖)');
-  // 三处建条目的路径都要钉 taskId(local_agent / local_workflow / 存在性分支)
-  assert.equal((app.match(/taskId: event\.task_id,/g) || []).length, 3,
-    'task_started 的三处 upsertAgent 都必须钉 taskId(跨回合反查的唯一钥匙)');
+  // ── 建卡点必须【逐个】钉 taskId ──────────────────────────────────────
+  // 旧写法数的是 `taskId: event.task_id,` 的字面量出现次数(==3)。上一轮新增"刷新后缺条目
+  // 补建"那条建卡路(rebuildWorkflowEntry)时,新点写成 `taskId: event.task_id || null` ——
+  // 语义等价,计数照旧是 3、这条锁照旧绿,但那个点根本没被罩住:改成 event.id、把整行删掉,
+  // 同样测不出来。字面量计数锁的是"某段拼写出现过几次",不是"每个建卡点都钉了 taskId"。
+  // 现在改成:先枚举 App.jsx 里的建卡点,再逐点断言(不数次数)。
+  //   A. task_started 处理区块里,凡写 taskManaged / status:'working' 的 upsertAgent 调用
+  //      —— 三处:存在性补钉、local_agent 建条目、local_workflow 建条目;
+  //   B. 全文件所有 rebuildWorkflowEntry(...) 调用 —— 刷新后缺条目按最小形态补一条
+  //      (SSE 直连与 WS 兜底两条路共用这个判据);
+  //   C. 全文件所有 applyWorkflowProgress(...) 调用 —— WS 那条路把广播里的 task_id 递进
+  //      补建点的唯一通道(形参带 `= null` 默认值,漏传是静默的,更要钉)。
+  // 逐点断言两件事:① 键在(丢了 → 红);② 值取自 task_id(改成别的字段 / 写死 → 红)。
+  // 值为什么也要钉:task_updated 只带 task_id、不带 tool_use_id,findAgentIdByTaskId 只能靠
+  // 条目上的 taskId 反查;哪个建卡点少钉一个,它建出来的卡片跨回合 / 重连后就永远收不了尾。
+  {
+    const code = stripComments(app);
+    assert.equal(code.split('\n').length, app.split('\n').length,
+      '去注释自检:行数必须不变(否则下面报的行号会指错地方)');
+
+    const zoneStart = code.indexOf("subtype === 'task_started'");
+    const zoneEnd = code.indexOf("subtype === 'task_notification'", zoneStart);
+    assert.ok(zoneStart > 0 && zoneEnd > zoneStart, 'task_started 事件区块必须还在(枚举建卡点的前提)');
+    const zone = code.slice(zoneStart, zoneEnd);
+    const zoneStartLine = code.slice(0, zoneStart).split('\n').length;
+
+    const sites = [];
+    for (const c of callArgsOf(zone, 'upsertAgent')) {
+      if (/taskManaged|status:\s*['"]working['"]/.test(c.args)) {
+        sites.push({ kind: 'task_started 建条目', line: zoneStartLine + c.line - 1, args: c.args });
+      }
+    }
+    for (const c of callArgsOf(code, 'rebuildWorkflowEntry')) sites.push({ ...c, kind: '缺条目补建' });
+    for (const c of callArgsOf(code, 'applyWorkflowProgress')) sites.push({ ...c, kind: 'WS 兜底递 task_id' });
+
+    for (const kind of ['task_started 建条目', '缺条目补建', 'WS 兜底递 task_id']) {
+      assert.ok(sites.some((s) => s.kind === kind),
+        `检测器一个「${kind}」建卡点都没识别到 —— 建卡形态变了,这条锁必须跟着改(不许让它空转成假绿)`);
+    }
+
+    for (const s of sites) {
+      const at = `App.jsx:${s.line} 的「${s.kind}」建卡点`;
+      const key = /(?:^|[{,]\s*)taskId\s*([:,}])/.exec(s.args);
+      assert.ok(key, `${at} 没有钉 taskId —— 丢了它,task_updated(只带 task_id)跨回合反查不到这条,卡片永远不收尾`);
+      if (key[1] !== ':') continue;   // 简写 `taskId,`:值来自上一层形参(现只有 WS 补建那一处),由上面 C 类那条锁管
+      const val = s.args.slice(key.index + key[0].length).split(/[,}\n]/)[0];
+      assert.ok(/\.task_id\b/.test(val), `${at} 的 taskId 不取自 task_id(值 = ${val.trim()})—— 钉别的字段 / 写死等于没钉`);
+    }
+  }
 
   // A4:双键反查
   assert.ok(/function findAgentIdByTaskId\(st, taskId\)/.test(app), 'findAgentIdByTaskId 必须存在');
@@ -152,4 +264,4 @@ const payload = (patch) => ({ sessionId: SID, taskIds: [], toolUseIds: [], settl
   }
 }
 
-console.log('✓ check-level-prune: 剪枝 6 组 + 混合场景 + 接线源码守卫 全过');
+console.log('✓ check-level-prune: 剪枝 6 组 + 混合场景 + task_id 反查行为 + 接线源码守卫(建卡点逐个钉 taskId)全过');

@@ -14,6 +14,12 @@ import { join } from 'node:path';
 import { probeQuota } from '../../server/services/provider-quota.js';
 
 const OK_MOONSHOT = { code: 0, data: { available_balance: 42 } };
+// D-2 夹具:两条真实形态(套餐 quota/limit 与账户余额),字段名照实测登记。
+const OK_ZHIPU = { code: 200, data: { limits: [{ unit: 3, number: 5, percentage: 44.4 }] } };
+const OK_ZHIPU_BALANCE = {
+  success: true,
+  data: { balance: 42.5, rechargeAmount: 100, giveAmount: 10, totalSpendAmount: 67.5, frozenBalance: 0, availableBalance: 42.5 },
+};
 const OK_DEEPSEEK = { balance_infos: [{ currency: 'CNY', total_balance: '7.00' }] };
 
 // ── 探测顺序:第一条 404 → 落第二条 ───────────────────────────────────────
@@ -43,6 +49,42 @@ const OK_DEEPSEEK = { balance_infos: [{ currency: 'CNY', total_balance: '7.00' }
   assert.deepEqual(calls, ['https://a/one'], '命中即停,不多打一次');
   assert.equal(r.endpoint, 'moonshot');
   assert.equal(r.currency, 'CNY');
+}
+
+// ── D-2:声明 accumulate 的候选允许被后面的候选**追加**(智谱 CN 的套餐+余额两条端点) ──
+{
+  const calls = [];
+  const r = await probeQuota([
+    { vendor: 'zhipu', auth: 'raw', urls: ['https://cn/quota'], accumulate: true },
+    { vendor: 'zhipu-cn-balance', auth: 'raw', urls: ['https://cn/balance'], currency: 'CNY' },
+  ], async (url) => {
+    calls.push(url);
+    return url.endsWith('/quota') ? { status: 200, body: OK_ZHIPU } : { status: 200, body: OK_ZHIPU_BALANCE };
+  });
+  assert.deepEqual(calls, ['https://cn/quota', 'https://cn/balance'], 'accumulate 的候选不许命中即停,两条端点都要发');
+  assert.equal(r.ok, true);
+  assert.equal(r.endpoint, 'zhipu', 'endpoint 仍是第一条命中的');
+  assert.equal(r.items.length, 2, '套餐额度 + 账户余额各自一行,都在同一条 payload 里');
+  assert.equal(r.items[0].percent, 44.4);
+  assert.equal(r.items[1].value, 42.5);
+  assert.equal(r.currency, 'CNY', '原本未知(null)的币种由追加候选补上,余额才带得出 ¥');
+
+  // 余额那条挂了 → **只**少一行余额,上面的套餐额度照常出(两条端点独立计成败)
+  const only = await probeQuota([
+    { vendor: 'zhipu', auth: 'raw', urls: ['https://cn/quota'], accumulate: true },
+    { vendor: 'zhipu-cn-balance', auth: 'raw', urls: ['https://cn/balance'], currency: 'CNY' },
+  ], async (url) => (url.endsWith('/quota')
+    ? { status: 200, body: OK_ZHIPU } : { status: 500, body: null }));
+  assert.equal(only.ok, true, '余额失败不得把套餐额度一起拖失败');
+  assert.equal(only.items.length, 1);
+  assert.equal(only.currency, null, '没追加成功就不该凭空标币种');
+
+  // 幂等护栏:命中过的候选后面若还跟着一条**不**声明 accumulate 的,别把它也并进来
+  const two = await probeQuota([
+    { vendor: 'moonshot', auth: 'bearer', urls: ['https://a/one'], currency: 'CNY' },
+    { vendor: 'deepseek', auth: 'bearer', urls: ['https://b/two'] },
+  ], async () => ({ status: 200, body: OK_MOONSHOT }));
+  assert.equal(two.items.length, 1, '没有 accumulate 的候选仍然命中即停(不动既有语义)');
 }
 
 // ── HTTP 200 但字段解析不出 → 继续下一条(判据是"200 且能解析") ────────────
@@ -171,7 +213,11 @@ try {
   const none = await get();
   assert.equal(none.body.ok, false);
   assert.equal(none.body.reason, 'no-endpoint');
-  assert.equal(none.body.note, '该 provider 不提供额度接口', '不留空白,明写原因');
+  // D-4 文案分档:MiMo 的 host 命中**第②类识别名单**(有额度接口、本期未接入),所以这里
+  // 期望的是第②类串,不是第③类「未登记」串 —— 名单内 vs 未登记必须分开说,一律说成
+  // "未登记"会让用户以为自己的 provider 填错了。第③类串由 check-codex-quota /
+  // check-provider-quota-parse 的 reasonNote 断言与验收 PA-601 钉住。
+  assert.equal(none.body.note, '该 provider 有额度接口，本期尚未接入，请去官网查看', '不留空白,明写原因');
   assert.equal(upstreamHits, 0, '无候选时零请求');
 
   // ③ 紧接着切到中转 provider:失败冷却是按 provider id 记的,**不能**把 mimo 的失败

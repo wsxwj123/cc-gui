@@ -319,6 +319,12 @@ export function useWebSocket() {
               // 终态守卫防重;SSE 在线时通知走原 SSE 路径,server 不广播此类型)。
               window.dispatchEvent(new CustomEvent('cgui:task-notification-bg', { detail: data }));
               break;
+            case 'subagent-usage-bg':
+              // 直播补齐(2026-09-13):子代理完成时服务端定向读来的金额条目,在【无活跃
+              // SSE】时经此类型兜底(跨回合跑完的后台子代理正走这条)。与同批的终态通知
+              // 分开:那个事件在客户端会调 finalizeAgent,这里只写金额不动状态。
+              window.dispatchEvent(new CustomEvent('cgui:subagent-usage-bg', { detail: data }));
+              break;
             case 'prompt-suggestion-bg':
               // 输入预测兜底(批K K2):建议在 result 后由 SDK 另起一次调用生成,慢于关流
               // 等待窗时 SSE 已关,服务端改走全局 WS 送来。落点与 SSE 路径同一个 store map,
@@ -328,7 +334,8 @@ export function useWebSocket() {
             case 'workflow-progress-bg':
               // r114:工作流跨回合在后台跑时(回合的 SSE 已关),CLI 仍每 ~10s 往父流推
               // 一份全量阶段/助手表。服务端只在【无 SSE 监听】时经此类型兜底广播,
-              // App.jsx 顶层监听按 tool_use_id 落到已存在的条目上(不建新条目)。
+              // App.jsx 顶层监听按 tool_use_id 落条目(缺条目时按广播的会话归属补建一条
+              // 最小形态的 —— 刷新/重开后条目随内存丢了,见 utils/workflowEntry.js)。
               window.dispatchEvent(new CustomEvent('cgui:workflow-progress-bg', { detail: data }));
               break;
             case 'background-tasks':
@@ -337,6 +344,11 @@ export function useWebSocket() {
               // 不驱动任何停止动作。卡片可能属于已切走/已关的窗格,那些窗格没有 SSE 通道,
               // 所以必须走全局 WS 而不是流内事件。
               window.dispatchEvent(new CustomEvent('cgui:background-tasks', { detail: data }));
+              break;
+            case 'usage-updated':
+              // 用量统计的后台重算落地了(磁盘回放期间的旧值已被换掉)。UsagePanel
+              // 监听此事件静默重取,不必等"最多 30 秒"那一轮轮询才收敛。
+              window.dispatchEvent(new CustomEvent('cgui:usage-updated'));
               break;
             case 'turn-complete': {
               // T2: 非聚焦会话回合完成 → 顶部悬浮提醒(标题+摘要,5s,点击跳转)。

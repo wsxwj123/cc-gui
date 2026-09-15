@@ -8,7 +8,7 @@ import { homedir, tmpdir } from 'node:os';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel, isOfficialAnthropic } from '../services/model-resolver.js';
-import { findSessionFile, readSessionTitles } from '../services/session-reader.js';
+import { findSessionFile, readSessionTitles, findAgentRunEvidence, isSessionIdShape, AGENT_TERMINAL_STATUSES, readSubagentUsageForToolUse } from '../services/session-reader.js';
 import { dropPendingForSession, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
@@ -20,6 +20,8 @@ import { canonicalCwd } from '../utils/safe-path.js';
 import { GENUI_SECTION_TEXT } from '../utils/genui-section.js';
 import { projectWorkflowProgress } from '../utils/workflow-progress.js';
 import { broadcast, clients } from '../broadcast.js';
+import { isLocalReq } from '../services/auth.js';
+import { SERVER_EPOCH } from '../utils/server-epoch.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
 import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCache } from '../utils/prompt-cache-env.js';
 
@@ -463,6 +465,18 @@ export function taskUpdatedTerminal(liveTasks, msg) {
   };
 }
 
+// R12:记下已收尾任务的真实终态(task_notification / task_updated 终态两条边沿事件都走它)。
+// 只写这个旁路 Map,不改 liveTasks 的删改时序。上限 64 条,满了丢最旧的 —— 它服务的是
+// "刚结束的子代理再被点一次停止"这种近时查询,不是历史归档。
+export const FINISHED_TASKS_MAX = 64;
+export function rememberFinishedTask(slot, toolUseId, status) {
+  if (!slot?.finishedTasks || typeof toolUseId !== 'string' || !toolUseId) return;
+  slot.finishedTasks.set(toolUseId, AGENT_TERMINAL_STATUSES.includes(status) ? status : null);
+  while (slot.finishedTasks.size > FINISHED_TASKS_MAX) {
+    slot.finishedTasks.delete(slot.finishedTasks.keys().next().value);
+  }
+}
+
 // 静默看门狗的"还有非 shell 任务在跑"判据。纯函数,单测同上。
 // 原判据是 `t.epoch === turnEpoch || 年龄 < freshMs`,epoch 支【没有年龄上限】——本回合
 // 派出的子代理只要丢一条终态通知,liveTasks 就永久留一条本 epoch 活条目 → 恒 true →
@@ -541,6 +555,10 @@ export function getActiveChatProcesses() {
       exitCode: slot.exitCode,
       attached: slot.attached,
       idle: !!slot.idle, // #26:回合间保活(非"正在跑"),agents/active 据此报 status idle
+      // R25:本 slot 绑定的 canonical turn(clientTurnId 起的那一回合)是否仍在跑。
+      // idle 只说明"回合间保活",说明不了"这一 slot 现在没在干活"—— 冷启动/上游重试期间
+      // slot 会长时间停在非 idle 上;而"回合"在合同里的身份是 canonical turn。
+      turnRunning: !!(slot.turnRecord && !slot.turnRecord.settledAt),
       // F2:本会话建过 cron,进程正被豁免于 15 分钟闲置回收 —— 让"这个进程为什么不退"可见。
       cronHold: slot.cronHoldUntil > Date.now(),
     });
@@ -709,19 +727,94 @@ export function projectWorkflowProgressMessage(m) {
   return progress ? { ...m, workflow_progress: progress } : null;
 }
 
+// R13:给一条待投递的事件盖 runId + 单调 seq,并按需进"最近 5000 个事件"的环形窗。
+// 盖章用尾部注入(不重新 JSON 序列化):行首前缀判据(如 `{"type":"done"`)不受影响。
+// 非 JSON 行原样透传但仍占一个 seq —— 序号只许单调,不许因某类行跳号。
+export function stampRunEvent(slot, line, keep) {
+  const seq = (slot.seq | 0) + 1;
+  slot.seq = seq;
+  const out = (line.startsWith('{') && line.endsWith('}'))
+    ? `${line.slice(0, -1)},"runId":${JSON.stringify(slot.runId || null)},"seq":${seq}}`
+    : line;
+  if (keep) {
+    if (!Array.isArray(slot.eventLog)) slot.eventLog = [];
+    slot.eventLog.push({ seq, line: out });
+    if (slot.eventLog.length > EVENT_LOG_MAX) slot.eventLog.shift();
+  }
+  return out;
+}
+
 // 把一行消息送给 SSE:有活跃监听(已 attach)→ 实时写;否则回落 earlyLines 缓冲,
 // 供下次 /stream 重连回放(detach-don't-abort)。
 function deliverLine(slot, line) {
   // r114:工作流进度行(system/task_progress 带 workflow_progress)在【投递前】整表投影,
   // 砍掉 promptPreview(写给助手的整段提示词原文)等白名单外的键。放在这里而不是调用处:
   // 所有投递路径都从这一个口子出去,写在口子上才没有漏网的分支。只换 workflow_progress
-  // 一个键,其余字段原样;`line` 本身一个字不动(调用方的落盘/回放/detach 全走原文)。
+  // 一个键,其余字段原样;调用方传来的 `line` 本身一个字不动(落盘/回放/detach 全走原文)。
   let wfProgressMsg = null;
   if (line.includes('workflow_progress')) {
     try { wfProgressMsg = projectWorkflowProgressMessage(JSON.parse(line)); } catch {}
   }
-  const outLine = wfProgressMsg ? JSON.stringify(wfProgressMsg) : line;
-  if (slot.listeners.size) { for (const fn of slot.listeners) { try { fn(outLine); } catch {} } }
+  // R13:同一口子再统一盖章 runId + 单调 seq(见 stampRunEvent)。盖章后的行交给下面真正
+  // 的投递:实时写出、earlyLines 缓冲、环形窗三处拿到的是同一条已编号的行,重连回放不会
+  // 掉出裸事件。进度行不进环形窗(只盖章),与它不进 earlyLines 同一口径。
+  const out = writeStampedLine(
+    slot,
+    stampRunEvent(slot, wfProgressMsg ? JSON.stringify(wfProgressMsg) : line, !wfProgressMsg),
+    wfProgressMsg,
+  );
+  // 直播补齐(2026-09-13):子代理完成即补发一条伴随事件,把【它那一条】转写的金额带给
+  // 客户端(直播回合是本地副本,'subUsage' 只有读 jsonl 历史时才产出 → 此前卡片上一个
+  // 元素都不画,要等回合结束刷新才有金额:用户实报"子代理不显示花费")。
+  // 【不改这条通知本身】:完成通知先原样发出去,金额另发一条 —— 消息泵那段是 r114 源码锁
+  // 锁死的逐字节区间(check-r114-locks E1-5/E1-8),且投递口本就是全仓唯一的出口。
+  // 异步副作用,读盘失败/读不到用量就什么都不发(宁缺勿假),不影响这条通知的时序。
+  if (line.includes('task_notification')) queueLiveSubagentUsage(slot, line);
+  return out;
+}
+
+// 直播补齐(2026-09-13):子代理完成事件的随行金额。按事件自带的 tool_use_id / task_id
+// 定向读它那一条转写(见 session-reader.readSubagentUsageForToolUse),读不到返回 null ——
+// 就不发这条伴随事件(宁缺勿假:绝不发一条 0 元让它显示 $0.00)。
+async function liveSubagentUsage(slot, m) {
+  try {
+    if (!slot.sessionId || !slot.cwd) return null;
+    if (!m.tool_use_id && !m.task_id) return null;
+    // projectHash 口径与 getSessionMessages 的入参一致(canonicalCwd 编码,r26-B4)。
+    const projectHash = canonicalCwd(slot.cwd).replace(/[^A-Za-z0-9]/g, '-');
+    return await readSubagentUsageForToolUse(projectHash, slot.sessionId, {
+      toolUseId: m.tool_use_id || null,
+      taskId: m.task_id || null,
+    });
+  } catch { return null; } // 读失败只是不发这条,绝不牵连完成通知本身
+}
+
+/** 完成通知 → (异步)一条只带金额的伴随事件。定向读一条转写,实测 ≤19 ms;失败静默。 */
+function queueLiveSubagentUsage(slot, line) {
+  let ev = null;
+  try { ev = JSON.parse(line); } catch { return; }
+  if (ev?.type !== 'system' || ev.subtype !== 'task_notification') return;
+  const toolUseId = ev.tool_use_id || null;
+  const taskId = ev.task_id || null;
+  if (!toolUseId && !taskId) return;
+  Promise.resolve()
+    .then(() => liveSubagentUsage(slot, { tool_use_id: toolUseId, task_id: taskId }))
+    .then((su) => {
+      if (!su) return;
+      // 走同一个投递口 = 同一套盖章(seq)/缓冲/WS 兜底,不新开通道。
+      deliverLine(slot, JSON.stringify({
+        type: 'subagent_usage',
+        sessionId: slot.sessionId || null,
+        tool_use_id: toolUseId || su.toolUseId || null,
+        subagentUsage: su,
+      }));
+    })
+    .catch(() => {});
+}
+
+// 实际投递(投影已在 deliverLine 做完,这里的 line 就是最终要发出去的那条已盖章行)。
+function writeStampedLine(slot, line, wfProgressMsg) {
+  if (slot.listeners.size) { for (const fn of slot.listeners) { try { fn(line); } catch {} } }
   else {
     // 工作流进度行是每 ~10s 一份的全量快照(73 助手档 45–125KB/条)。重放旧快照没有价值
     // (下一份马上就到),却能把 5000 行的 earlyLines 撑到几百 MB 常驻 —— 故这类行
@@ -751,6 +844,24 @@ function deliverLine(slot, line) {
         }
       } catch {}
     }
+    // 直播补齐(2026-09-13):子代理金额伴随事件(type:'subagent_usage',见
+    // queueLiveSubagentUsage)。与下面那条同款兜底 —— 跨回合跑完的后台子代理往往早已
+    // 关流,只落 earlyLines 会被下条消息清掉 → 顺带走一次全局 WS,监控面板才有金额。
+    // 单开一个 WS 类型(不复用 task-notification-bg):后者在客户端会调 finalizeAgent,
+    // 迟到的"已完成"会把用户刚按出来的"已停止"覆盖掉。
+    if (line.includes('subagent_usage')) {
+      try {
+        const ev = JSON.parse(line);
+        if (ev?.type === 'subagent_usage' && ev.subagentUsage) {
+          broadcast({
+            type: 'subagent-usage-bg',
+            sessionId: ev.sessionId || slot.sessionId || null,
+            tool_use_id: ev.tool_use_id || null,
+            subagentUsage: ev.subagentUsage,
+          });
+        }
+      } catch {}
+    }
     // 输入预测同款兜底(批K K2):建议在 result 之后由 SDK 另起一次模型调用生成,
     // 慢于关流等待窗时(第三方中转/大上下文)SSE 早已 res.end() —— 只落 earlyLines
     // 会被下条消息的 `s.earlyLines = []` 清掉,用户看到的就是"输入预测时有时无"。
@@ -775,7 +886,8 @@ function deliverLine(slot, line) {
     // r114 同款兜底:工作流跨回合在后台跑时(用户已发下一条/关了流),per-turn SSE 早已
     // 关闭,进度只能经全局 WS 送达 —— 否则回合一结束界面就再也不更新(实证:主回合
     // result 之后 task_progress 仍持续到达父流)。SSE 在线时走上面的 if 分支不进这里,
-    // 不会双发;客户端只按 tool_use_id 命中已存在条目更新,不建新条目 → 不会串会话。
+    // 不会双发;客户端按 tool_use_id 命中条目,缺条目时按本广播自带的 sessionId 补建一条
+    // (刷新/重开后内存条目没了)并写自己的归属会话 → 不会串会话。
     if (wfProgressMsg) {
       try {
         broadcast({
@@ -844,6 +956,10 @@ function finishSlot(slot, procId) {
   slot.idle = false;
   if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
   if (slot.stopTimer) { clearTimeout(slot.stopTimer); slot.stopTimer = null; }
+  // R13:进程收尾 = 初始化窗口也结束了。还没开口就死掉的进程,让等着的 POST 立刻拿到
+  // 504(而不是干等满 15 秒);已开口的回合不受影响。
+  if (slot.startupTimer) { clearTimeout(slot.startupTimer); slot.startupTimer = null; }
+  if (!slot.turnSawLine) wakeTurnStarters(slot, false);
   if (slot.exitCode === null) slot.exitCode = 0;
   slot.finishedAt = Date.now();
   try { slot.nulWatcher?.close(); } catch {}
@@ -857,6 +973,9 @@ function finishSlot(slot, procId) {
   }
   // done:client 据此结束 SSE 读取。attach 中直接发;否则缓冲,等 attach 回放后收尾。
   deliverLine(slot, JSON.stringify({ type: 'done', exitCode: slot.exitCode }));
+  // R13:进程收尾 = 这一回合彻底结束(不等 60s 删除窗口)。finalize 通常已结算;这里兜
+  // 异常路径(直接 abort / 进程崩),让等停的调用方拿到终态而不是等到 15s 超时。
+  settleSlotTurn(slot, slot.lastResultError ? 'failed' : 'completed');
   setTimeout(() => activeProcesses.delete(procId), 60_000).unref();
 }
 
@@ -1263,7 +1382,336 @@ export function composeGenuiAppend(appendText, genui) { // export 仅为可单�
   return base ? `${base}\n\n${GENUI_SECTION_TEXT}` : GENUI_SECTION_TEXT;
 }
 
+// ── R13 turn 身份、幂等与运行账本(INTERFACE「会话流与子代理」)────────────────────
+// canonical turn = (鉴权主体, serverEpoch, clientTurnId)。本服务只有两档主体:本机
+// (回环免密)与持令牌的外部客户端 —— 没有多账号体系,主体键就取这两档。
+// 记录只在内存:serverEpoch 随进程重启变化,新实例对旧 epoch 一律 409 TURN_SERVER_CHANGED,
+// 不存在"跨重启继承记录"的语义(界面先恢复历史再让用户决定新发送)。
+const CLIENT_TURN_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const CHAT_CREATED_AT_WINDOW_MS = 24 * 60 * 60 * 1000; // createdAt 必须落在当前 24h 窗口内
+const TURN_RECORD_TTL_MS = 24 * 60 * 60 * 1000;        // 已结束 turn 的记录保留 24h
+const TURN_RECORD_MAX = 512;                           // 总记录上限(绝不驱逐活跃 turn)
+const TURN_SETTLE_WAIT_MS = 15000;                     // 等停止落地的上限(超时 504)
+const CHAT_START_TIMEOUT_MS = 15000;                   // 等 CLI 初始化的上限(超时 504 CHAT_START_TIMEOUT)
+const EVENT_LOG_MAX = MAX_EARLY_LINES;                 // 事件环形窗,与既有缓冲同口径(5000)
+const TURN_TERMINAL = new Set(['completed', 'failed', 'stopped']);
+
+// 鉴权主体键:同 id 的幂等域按它隔离(别的主体撞不进我的回合)。
+export function turnPrincipal(req) { return isLocalReq(req) ? 'local' : 'token'; }
+
+const turnRecords = new Map(); // `${principal}\0${clientTurnId}` → record
+const turnByPid = new Map();   // pid → 该 pid 上最近一回合的 record(停止按 pid 定位)
+const turnLocks = new Map();   // 同 key → { tail, depth }:同 id 并发请求串行化
+
+// 输入闸门(纯函数:只判定,零副作用)。任一不通过都不许启动 CLI、不许回 pid。
+// code 取 INTERFACE 的稳定短码;error 是可读短句、≤300 字符、不含堆栈与请求正文。
+export function validateChatTurnInput(body) {
+  const b = (body && typeof body === 'object' && !Array.isArray(body)) ? body : {};
+  if (typeof b.prompt !== 'string' || !b.prompt.trim()) {
+    return { ok: false, status: 400, code: 'CHAT_INVALID_INPUT', error: 'prompt 必须是非空字符串' };
+  }
+  if (b.clientTurnId !== undefined && b.clientTurnId !== null && !CLIENT_TURN_RE.test(String(b.clientTurnId))) {
+    return { ok: false, status: 400, code: 'CHAT_INVALID_INPUT', error: 'clientTurnId 必须是 1–64 位字母/数字/_/-' };
+  }
+  if (typeof b.cwd !== 'string' || !b.cwd) {
+    return { ok: false, status: 400, code: 'CHAT_INVALID_CWD', error: 'cwd 缺失或不是字符串' };
+  }
+  if (b.serverEpoch !== undefined && b.serverEpoch !== null && b.serverEpoch !== SERVER_EPOCH) {
+    return { ok: false, status: 409, code: 'TURN_SERVER_CHANGED', error: '该请求属于上一个服务实例，未自动重发' };
+  }
+  if (b.createdAt !== undefined && b.createdAt !== null) {
+    const t = typeof b.createdAt === 'number' ? b.createdAt : Date.parse(String(b.createdAt));
+    if (!Number.isFinite(t)) {
+      return { ok: false, status: 400, code: 'CHAT_INVALID_INPUT', error: 'createdAt 不是可解析的时刻' };
+    }
+    if (t > Date.now()) {
+      return { ok: false, status: 400, code: 'CHAT_INVALID_INPUT', error: 'createdAt 是未来时刻' };
+    }
+    if (Date.now() - t > CHAT_CREATED_AT_WINDOW_MS) {
+      return { ok: false, status: 409, code: 'TURN_EXPIRED', error: '该回合已超出 24 小时有效期，未当作新回合发送' };
+    }
+  }
+  return { ok: true };
+}
+
+// 规范化载荷指纹:有效 prompt/cwd/model 及全部发送设置。刻意【不含】sessionId/draftId ——
+// draft 绑定真实 sid 前后是同一个 canonical turn(INTERFACE 明写),把迁移算进指纹会把
+// 正常绑定判成 TURN_CONFLICT。键值先归一(undefined/null 折成 null、addDirs 排序),
+// 否则同一组设置换个写法就被当成异参。
+export function chatTurnFingerprint(body, { prompt, cwd, model }) {
+  const b = body || {};
+  const dirs = Array.isArray(b.addDirs)
+    ? b.addDirs.filter((d) => typeof d === 'string' && isAbsolute(d)).sort()
+    : [];
+  const budget = Number(b.maxBudgetUsd);
+  return JSON.stringify([
+    prompt, cwd, model,
+    b.effort ?? null,
+    dirs,
+    (b.permissionMode && VALID_PERMISSION_MODES.has(b.permissionMode)) ? b.permissionMode : 'default',
+    !!b.globalRead,
+    b.appendSystemPrompt ?? null,
+    b.agent ?? null,
+    b.promptSuggestions ?? null,
+    b.keepAlive !== false,
+    Number.isFinite(budget) && budget > 0 ? budget : null,
+    b.genui ?? null,
+  ]);
+}
+
+export function pruneTurnRecords(now = Date.now()) {
+  for (const [key, rec] of turnRecords) {
+    if (rec.settledAt && now - rec.settledAt > TURN_RECORD_TTL_MS) {
+      turnRecords.delete(key);
+      if (rec.pid && turnByPid.get(rec.pid) === rec) turnByPid.delete(rec.pid);
+    }
+  }
+}
+
+// 满额:先驱逐结束最早的已结束记录 —— 它们只为幂等重放保留,驱逐代价是极端情况下同 id 重发会
+// 重跑一次;不驱逐就是 24h 内发满 512 条后每次发送都 503,锁死到最老记录满 24h。
+// 活跃记录一条都不驱逐(驱逐活跃 = 幂等失效 + 停止找不到身份)。仍是存活进程【当前回合】的已结束
+// 记录也按活跃算:主 agent 续跑时 reviveSlotTurn 会把它翻回 running,带身份的停止要靠 turnByPid 找到它。
+// ponytail: 满额时 O(512) 线性扫;全部记录都活跃(含 512 个存活进程各占一条)才拒绝。
+function evictOldestSettledTurn() {
+  let victim = null;
+  for (const rec of turnRecords.values()) {
+    if (!rec.settledAt) continue;
+    if (rec.pid && turnByPid.get(rec.pid) === rec && activeProcesses.has(rec.pid)) continue;
+    if (!victim || rec.settledAt < victim.settledAt) victim = rec;
+  }
+  if (!victim) return false;
+  turnRecords.delete(victim.key);
+  if (victim.pid && turnByPid.get(victim.pid) === victim) turnByPid.delete(victim.pid);
+  return true;
+}
+
+export function openTurnRecord({ key, principal, clientTurnId, fingerprint }) {
+  pruneTurnRecords();
+  if (turnRecords.size >= TURN_RECORD_MAX && !evictOldestSettledTurn()) return null;
+  const record = {
+    key, principal, clientTurnId, fingerprint,
+    serverEpoch: SERVER_EPOCH,
+    createdAt: Date.now(),
+    pid: null, runId: null, model: null,
+    owner: null, sessionId: null, draftId: null, turnEpoch: null,
+    status: 'pending', stopRequested: false, settledAt: null, waiters: [],
+  };
+  turnRecords.set(key, record);
+  return record;
+}
+
+export function findTurnRecord(principal, clientTurnId) {
+  if (!clientTurnId) return null;
+  return turnRecords.get(`${principal}|${clientTurnId}`) || null;
+}
+
+// 起 run 失败(进程没起来):把记录整个撤掉 —— 该 turn 从未送达,允许同 id 重试重新开始。
+function dropTurnRecord(record) {
+  if (!record) return;
+  turnRecords.delete(record.key);
+  if (record.pid && turnByPid.get(record.pid) === record) turnByPid.delete(record.pid);
+  record.pid = null;
+  settleTurnRecord(record, 'failed');
+}
+
+// 记录与 slot 绑定:自此 record 就是"这个 pid 上这一回合"的权威身份。
+function bindTurnRecord(record, pid, slot) {
+  record.pid = pid;
+  record.runId = pid;
+  record.model = slot.model;
+  record.turnEpoch = slot.turnEpoch | 0;
+  record.status = 'running';
+  record.owner = slot.sessionId || slot.draftId || null;
+  record.sessionId = slot.sessionId || null;
+  record.draftId = slot.draftId || null;
+  slot.turnRecord = record;
+  turnByPid.set(pid, record);
+}
+
+// draft 起头、init 才拿到真实 sid:同一 canonical turn 只是换了 owner 写法,幂等域不动
+// (record.key 只看 clientTurnId),但此后带真实 sid 的停止要能对上号。
+function adoptTurnSession(slot, sessionId) {
+  const rec = slot?.turnRecord;
+  if (!rec || rec.sessionId || !sessionId) return;
+  rec.sessionId = sessionId;
+  rec.owner = sessionId;
+}
+
+// 终态只写一次;唤醒所有等停的调用方(等停 = 停止入口在等运行落地后报真实终态)。
+export function settleTurnRecord(record, status) {
+  if (!record || record.settledAt) return record;
+  record.status = TURN_TERMINAL.has(status) ? status : 'completed';
+  record.settledAt = Date.now();
+  for (const w of record.waiters.splice(0)) { try { w(); } catch {} }
+  return record;
+}
+
+// 回合收尾/进程收尾的统一入口:只对"本 slot 当前那一回合"生效。已请求停止的回合,无论
+// 因 interrupt 结束还是自然结束,对调用方的语义都是"被停掉的"。
+function settleSlotTurn(slot, fallback = 'completed') {
+  const rec = slot?.turnRecord;
+  if (!rec || rec.settledAt) return;
+  settleTurnRecord(rec, rec.stopRequested ? 'stopped' : fallback);
+}
+
+// 主 agent 续跑(4s 去抖把回合提前转 idle,随后又被复活)期间回合没结束:把已结算的记录
+// 翻回活跃,否则停止入口会拿"completed"打发掉一个正在跑的回合。
+function reviveSlotTurn(slot) {
+  const rec = slot?.turnRecord;
+  if (!rec || !rec.settledAt || rec.stopRequested) return;
+  rec.settledAt = null;
+  rec.status = 'running';
+}
+
+// 对外可见的运行状态:已结算 = 真实终态;否则看这一回合是否还是该 slot 的当前回合
+// (pid 被下一回合复用 = 这一回合已经过去了)。
+export function turnLiveStatus(record, slot) {
+  if (!record) return null;
+  if (record.settledAt) return record.status;
+  if (!slot || (slot.turnEpoch | 0) !== (record.turnEpoch | 0)) return record.status;
+  return record.stopRequested ? 'stopping' : 'running';
+}
+
+// ── R13:POST /api/chat 的初始化超时(合同「初始化15秒超时504 CHAT_START_TIMEOUT」)──────
+// 落点判断:合同把这一条写成 POST 的响应(504 + "响应包含 runId/是否已送达状态"),而本服务
+// 是"先回 pid 再走 SSE"的形态 —— SSE 没有 HTTP 状态可回,所以在【回响应之前】等进程开口
+// (第一条事件,通常就是 system/init),而不是把判据搬到流上:
+//   · 等到了 = 正常 200(delivered:true);
+//   · 15 秒没等到 = 504 + delivered:'unknown' + pid/runId。进程未必死,客户端据此【查询/稍后
+//     重连】,不许据超时重发(同 clientTurnId 重发会命中同一条 canonical turn)。
+// 同一判据对 SSE 观察者同样可见:到点给在线客户发一条带 code 的错误事件(走 deliverLine,
+// 因此同样盖章、同样进缓冲/环形窗,重连也看得到),但【不关流】—— 进程可能随后才活过来,
+// 后续正文照常到达,不假称已结束。
+// 复用已有进程的回合不走这套:那个进程早就初始化过,消息是推进活进程的。
+export function armTurnStartup(slot, timeoutMs = CHAT_START_TIMEOUT_MS) {
+  if (slot.startupTimer) { clearTimeout(slot.startupTimer); slot.startupTimer = null; }
+  slot.turnSawLine = false;
+  slot.startTimedOut = false;
+  slot.startupTimer = setTimeout(() => {
+    slot.startupTimer = null;
+    if (slot.turnSawLine) return; // 已经开口:迟到的定时器 no-op
+    slot.startTimedOut = true;
+    if (slot.turnRecord) slot.turnRecord.startTimedOut = true;
+    deliverLine(slot, JSON.stringify({
+      type: 'error', code: 'CHAT_START_TIMEOUT', delivered: 'unknown',
+      error: '会话进程 15 秒内未完成初始化；内容可能稍后到达，请勿据此重发',
+    }));
+    wakeTurnStarters(slot, false);
+  }, timeoutMs);
+  slot.startupTimer.unref?.();
+}
+
+// 进程开口(本回合第一条事件)= 初始化完成:撤掉超时表并放行等着的 POST。
+export function noteTurnFirstLine(slot) {
+  if (slot.turnSawLine) return;
+  slot.turnSawLine = true;
+  if (slot.startupTimer) { clearTimeout(slot.startupTimer); slot.startupTimer = null; }
+  wakeTurnStarters(slot, true);
+}
+
+function wakeTurnStarters(slot, ok) {
+  for (const w of (slot.startWaiters || []).splice(0)) { try { w(ok); } catch {} }
+}
+
+// POST 侧等初始化:已开口 → true;已超时 → false;否则挂起(由上面两条路径唤醒)。多挂一个
+// 兜底定时器:万一超时表没被武装(调用点改动),也不让响应永远悬着。
+export function waitTurnStartup(slot, timeoutMs = CHAT_START_TIMEOUT_MS) {
+  if (slot.turnSawLine) return Promise.resolve(true);
+  if (slot.startTimedOut) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const waiter = (ok) => { clearTimeout(timer); resolve(ok !== false); };
+    const timer = setTimeout(() => {
+      const i = slot.startWaiters.indexOf(waiter);
+      if (i >= 0) slot.startWaiters.splice(i, 1);
+      resolve(false);
+    }, timeoutMs + 1000);
+    slot.startWaiters.push(waiter);
+  });
+}
+
+// 批次8-项13:进程在首条事件前就退出时的真实原因 = 泵 catch 投递的 error 行(SDK 报的退出码)
+// + 最后几行 stderr。取 earlyLines:POST 回响应前客户端还拿不到 pid、无人 attach,这些行都在缓冲里;
+// 若已有观察者 attach,它在流上已看到原文,这里退回通用说明。
+function startFailureReason(slot) {
+  const errors = [];
+  const stderr = [];
+  for (const line of slot.earlyLines || []) {
+    if (!line.includes('"type":"error"') && !line.includes('"type":"stderr"')) continue;
+    try {
+      const ev = JSON.parse(line);
+      if (ev.type === 'error' && ev.error) errors.push(String(ev.error));
+      else if (ev.type === 'stderr' && ev.text) stderr.push(String(ev.text));
+    } catch { /* 非 JSON 行不算 */ }
+  }
+  const err = errors.slice(-1);
+  // SDK 的退出报错常已内嵌 stderr 原文("… stderr: <原文>"),同一段别再拼一遍
+  const parts = [...err, ...stderr.slice(-3).filter((t) => !err.some((e) => e.includes(t)))];
+  return parts.length ? parts.join(' | ').slice(0, 400) : '进程在初始化完成前已退出(没有留下错误输出)';
+}
+
+// 命中既有 canonical turn 的回执:同一个 pid、不重复投递,附送达状态供响应丢失后对账。
+function turnHitResponse(record) {
+  const slot = record.pid ? activeProcesses.get(record.pid) : null;
+  return {
+    ok: true,
+    pid: record.pid,
+    runId: record.runId || record.pid,
+    model: record.model,
+    clientTurnId: record.clientTurnId,
+    duplicated: true,
+    // 首次已把 prompt 交给该运行;但若那次初始化超时过(504),送达仍是未确认的,照实回。
+    delivered: record.startTimedOut ? 'unknown' : true,
+    status: turnLiveStatus(record, slot),
+  };
+}
+
+// 等该回合落地(停止入口用):settled 立即返回 true,超时返回 false(调用方据此报
+// stopping + 504,而不是假称已停)。
+function waitTurnSettled(record, timeoutMs) {
+  if (!record || record.settledAt) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const waiter = () => { clearTimeout(timer); resolve(true); };
+    const timer = setTimeout(() => {
+      const i = record.waiters.indexOf(waiter);
+      if (i >= 0) record.waiters.splice(i, 1);
+      resolve(false);
+    }, timeoutMs);
+    record.waiters.push(waiter);
+  });
+}
+
+// 同 (主体, clientTurnId) 的并发请求串行化:两根同参请求必须落成同一个 run(合并),
+// 不能各自跑一遍复用/冷启扫描、各起一个进程。
+export async function withTurnLock(key, fn) {
+  const entry = turnLocks.get(key) || { tail: Promise.resolve(), depth: 0 };
+  entry.depth += 1;
+  turnLocks.set(key, entry);
+  const prev = entry.tail;
+  let release = null;
+  entry.tail = prev.then(() => new Promise((r) => { release = r; }));
+  await prev.catch(() => {});
+  try { return await fn(); } finally {
+    if (release) release();
+    entry.depth -= 1;
+    if (entry.depth <= 0 && turnLocks.get(key) === entry) turnLocks.delete(key);
+  }
+}
+
 router.post('/chat', async (req, res) => {
+  // 带 clientTurnId 的请求先过锁再进主流程(见 withTurnLock);不带 clientTurnId 的老请求
+  // (GUI 现状 / bot)直接进,不吃任何新语义。
+  const turnId = typeof req.body?.clientTurnId === 'string' && CLIENT_TURN_RE.test(req.body.clientTurnId)
+    ? req.body.clientTurnId : null;
+  if (!turnId) return handleChatPost(req, res);
+  return withTurnLock(`${turnPrincipal(req)}|${turnId}`, () => handleChatPost(req, res));
+});
+
+// POST /api/chat 主流程(原 handler 原样下移;所有锁定行为的时序不变)。
+async function handleChatPost(req, res) {
+  // R13 输入闸门:非法输入一律 {ok:false,code,error} 且【不起任何 CLI、不回 pid】。
+  const gate = validateChatTurnInput(req.body);
+  if (!gate.ok) return res.status(gate.status).json({ ok: false, code: gate.code, error: gate.error });
   const {
     prompt, sessionId, cwd,
     model: requestedModel,
@@ -1277,7 +1725,6 @@ router.post('/chat', async (req, res) => {
     maxBudgetUsd,
     genui,
   } = req.body;
-  if (!prompt) return res.status(400).json({ error: 'prompt is required' });
   // 花费上限(美元):>0 才生效。SDK 透传 CLI --max-budget-usd,进程累计花费达到
   // 上限时本轮停止并返回 result subtype=error_max_budget_usd(前端有专门提示)。
   const budgetUsd = Number(maxBudgetUsd);
@@ -1291,18 +1738,44 @@ router.post('/chat', async (req, res) => {
   // CLI computes a different hash and resume fails with "No conversation
   // found with session ID". The client sends the cwd that matches each
   // session's original storage; we trust it as-is for CLI spawn.
-  const workingDir = cwd || homedir(); // CO-1:Windows 上 process.env.HOME 为空,用 homedir()
+  // R13:cwd 由上面的闸门保证是非空字符串;缺 cwd 一律 400,不再默默回落到家目录
+  // (服务器进程的 homedir() 会把会话写进一个用户没选过的项目)。
+  const workingDir = cwd;
 
   // Validate the working dir exists and is a directory. A session whose project
   // folder was deleted or moved (e.g. a stale cwd like /Desktop/gui) otherwise
   // makes the CLI sit ~3min in an invalid dir before exiting 1 — surfacing in
   // the UI as a stuck "connecting" with no reply. Fail fast with a clear message.
+  // 错误体按 R13 统一信封回,error 不夹带请求里的路径(≤300 字符、无主机路径细节)。
   try {
     if (!statSync(workingDir).isDirectory()) throw new Error('not a directory');
   } catch {
     return res.status(400).json({
-      error: `工作目录不存在或无法访问：${workingDir}\n该项目可能已被删除或移动，请在左侧选择一个有效的项目后重试。`,
+      ok: false,
+      code: 'CHAT_INVALID_CWD',
+      error: '工作目录不存在或无法访问，请在左侧选择一个有效的项目后重试。',
     });
+  }
+
+  // ── R13 canonical turn:同 (鉴权主体, serverEpoch, clientTurnId) 只准有一个 run ──
+  // 命中 → 回同一个 pid(不重复送 prompt、不新起 run);异参 → 409;并发同参由上面的
+  // withTurnLock 串行化,后者在这里命中前者刚登记的记录。
+  const principal = turnPrincipal(req);
+  const clientTurnId = typeof req.body?.clientTurnId === 'string' ? req.body.clientTurnId : null;
+  let turnRecord = null;
+  if (clientTurnId) {
+    const fingerprint = chatTurnFingerprint(req.body, { prompt: String(prompt), cwd: workingDir, model });
+    turnRecord = findTurnRecord(principal, clientTurnId);
+    if (turnRecord && turnRecord.fingerprint !== fingerprint) {
+      return res.status(409).json({
+        ok: false, code: 'TURN_CONFLICT', error: '同一 clientTurnId 的参数与本回合首次请求不一致',
+      });
+    }
+    if (turnRecord) return res.json(turnHitResponse(turnRecord));
+    turnRecord = openTurnRecord({ key: `${principal}|${clientTurnId}`, principal, clientTurnId, fingerprint });
+    if (!turnRecord) {
+      return res.status(503).json({ ok: false, code: 'TURN_CAPACITY', error: '服务端回合记录已满，请稍后重试' });
+    }
   }
 
   const chosenMode = (permissionMode && VALID_PERMISSION_MODES.has(permissionMode))
@@ -1414,6 +1887,10 @@ router.post('/chat', async (req, res) => {
       // 重置回合级状态(新回合从干净缓冲开始;上一回合内容客户端已消费或以 jsonl 为准)
       s.idle = false;
       s.earlyLines = [];
+      // R13:事件环形窗随回合清空(seq 计数不重置) —— 同一个 pid 复用开新回合时,旧回合的
+      // 事件(含它的终态)对这次运行已经作废:留着会让带游标的重连重放上一回合的 done,
+      // 连接立刻被自己的旧终态关掉,新回合的正文再也进不来。seq 继续单调,老游标不会跳号。
+      s.eventLog = [];
       s.earlyOverflowed = false;   // r68:溢出标记随缓冲一起归零,别让上一回合的旧账压死新回合
       s.completeNotified = false;
       s.turnSubagentSeen = false;
@@ -1426,11 +1903,20 @@ router.post('/chat', async (req, res) => {
       // 子代理也在其中——若按"非 shell 即陈旧"清掉,本回合选择性 /stop 与 stop-task 就停不到
       // 上个回合遗留的活任务(调研 R2)。漏网条目(通知丢失)留着无害:stopTask 幂等 no-op。
       s.lastResultAt = null;
+      s.lastResultError = false; // R13:同上,上一回合的终态标记不能毒化本回合的结算
+      // R13:复用已有进程 = 它早就初始化过(消息是推进活进程),不算"等初始化";顺手回收
+      // 上一回合可能还挂着的超时表,别让它迟到时把新回合误判成超时。
+      if (s.startupTimer) { clearTimeout(s.startupTimer); s.startupTimer = null; }
+      s.turnSawLine = true;
+      s.startTimedOut = false;
       s.promptPreview = String(prompt).slice(0, 80);
       s.guiMode = chosenMode;
       s.permissionMode = chosenMode;
       s.input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
-      return res.json({ pid: alivePid, model: s.model, reused: true });
+      // R13:复用同一进程开新回合 —— 记录绑到本回合的 turnEpoch 上(旧回合的记录早已
+      // 在它自己的收尾点结算,pid→record 的映射换成这一回合,停止才不会停错回合)。
+      if (turnRecord) bindTurnRecord(turnRecord, alivePid, s);
+      return res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running' });
     }
   }
 
@@ -1500,6 +1986,20 @@ router.post('/chat', async (req, res) => {
     draftId: (!sessionId && typeof req.body?.draftId === 'string' && req.body.draftId) ? req.body.draftId : null,
     cwd: workingDir,
     model,
+    // R13:运行身份与事件序号。runId 恒等于 pid(本服务的"运行实例"就是它);seq 在该 pid
+    // 的整个生命期内单调递增(跨回合不重置,客户端游标因此不会倒退);eventLog 是最近
+    // EVENT_LOG_MAX 个已盖章事件的环形窗,带游标的重连按 seq 从这里重放。
+    runId: procId,
+    seq: 0,
+    eventLog: [],
+    turnRecord: null,   // 本 slot 当前那一回合的 R13 记录(bindTurnRecord 写入)
+    lastResultError: false, // 本回合最后一个 result 是不是错误终态(结算 completed/failed 用)
+    // R13 初始化超时(冷启路径):turnSawLine=本回合进程开口过;startupTimer=15s 超时表;
+    // startWaiters=等在 POST 响应上的唤醒器(见 armTurnStartup/waitTurnStartup)。
+    turnSawLine: false,
+    startTimedOut: false,
+    startupTimer: null,
+    startWaiters: [],
     // R8-4:进程内当前生效模型(spawn 时=options.model 实际值;复用路径 setModel 成功后
     // 更新)。compatKey 已不含 model,复用对账全靠它。
     currentModel: model,
@@ -1527,6 +2027,10 @@ router.post('/chat', async (req, res) => {
     // stop 时按 kind 决定 stopTask 目标与 abort 抑制;空→行为与改动前逐字节一致(零回归底座)。
     // 跨回合存活,不随回合级状态重置。
     liveTasks: new Map(),
+    // R12:本运行内已收尾任务的终态簿记 { tool_use_id → 'completed'|'failed'|'stopped' }。
+    // liveTasks 只在任务在飞时记得住它,task_notification 一到就删 —— 用户按下"停止"时若任务
+    // 恰好刚收尾,就没有任何地方能回答"它到底怎么结束的"。纯查询旁路,绝不参与停止时序。
+    finishedTasks: new Map(),
     // Bash run_in_background 的 tool_use_id 集合:task_started 的 task_type==='local_bash' 是
     // shell 直接判据,此集合是双保险(第三方/旧版 CLI 缺 task_type 时按 tool_use_id 反查)。
     bgBashToolIds: new Set(),
@@ -1546,6 +2050,8 @@ router.post('/chat', async (req, res) => {
   };
   activeProcesses.set(procId, slot);
   slot.nulWatcher = startWinNulWatcher(workingDir);
+  if (turnRecord) bindTurnRecord(turnRecord, procId, slot); // R13:本回合的权威身份就此落位
+  armTurnStartup(slot); // R13:冷启路径才等初始化(复用路径上面已置 turnSawLine=true)
 
   // 首条用户消息(streaming-input);保持 input 打开作 control 通道。
   input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
@@ -1684,8 +2190,14 @@ router.post('/chat', async (req, res) => {
     slot.query = q;
   } catch (err) {
     activeProcesses.delete(procId);
+    if (slot.startupTimer) { clearTimeout(slot.startupTimer); slot.startupTimer = null; } // R13:泵没起,超时表也不留
+    dropTurnRecord(turnRecord); // R13:进程没起来 = 该 turn 从未送达,撤记录让同 id 重试能重新开始
     if (acwTmpFile) { try { unlinkSync(acwTmpFile); } catch {} } // 泵未启动,finally 不会跑,就地清理(判官建议)
-    return res.status(500).json({ error: 'query() failed: ' + err.message });
+    return res.status(500).json({
+      ok: false,
+      code: 'CHAT_START_FAILED',
+      error: `会话进程启动失败：${String(err?.message || '').slice(0, 200)}`,
+    });
   }
 
   // 消息泵:迭代 SDK 生成器,逐条转 stream-json 行喂 SSE。
@@ -1705,6 +2217,9 @@ router.post('/chat', async (req, res) => {
   const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
   const finalize = () => {
     cancelClose();
+    // R13:本回合到此结束 —— 让等待该回合落地的停止入口拿到真实终态(被停 → stopped,
+    // 正常收尾 → completed/failed)。主 agent 随后续跑会经 reviveSlotTurn 翻回活跃。
+    settleSlotTurn(slot, slot.lastResultError ? 'failed' : 'completed');
     // 回合优雅收尾:上一个 stop 武装的 abort 兜底不再需要,清掉防其误伤后续复用回合。
     if (slot.stopTimer) { clearTimeout(slot.stopTimer); slot.stopTimer = null; }
     if (lastResultLine) { maybeBroadcastTurnComplete(slot, lastResultLine); lastResultLine = null; } // 回合完成 WS 只在最终 result 播
@@ -1794,9 +2309,11 @@ router.post('/chat', async (req, res) => {
       armStall();
       for await (const m of q) {
         armStall(); // 任何入站消息=上游还活着,重置静默计时
+        noteTurnFirstLine(slot); // R13:进程开口了 = 初始化完成,撤掉 15s 超时表(每回合只认第一条)
         const line = JSON.stringify(m);
         if (!slot.sessionId && m.type === 'system' && m.subtype === 'init' && m.session_id) {
           slot.sessionId = m.session_id;
+          adoptTurnSession(slot, m.session_id); // R13:draft 回合的 owner 换成真实 sid(同一回合)
           // draftId 由发起客户端生成，session_id 由 CLI init 权威给出。在 init 透传给
           // 客户端之前持久记录映射；这样 pane 已切走或整个 App 重启后，已有 sessions
           // 列表仍能把本地未绑定附件 outbox 迁到真实会话，不依赖 server slot 内存寿命。
@@ -1852,9 +2369,13 @@ router.post('/chat', async (req, res) => {
             // createdAt:看门狗 busyNonShell 与 idleReclaim 的"新鲜度"判据(见 LIVE_TASK_FRESH_MS)。
             slot.liveTasks.set(m.task_id, { toolUseId: m.tool_use_id || null, kind, epoch: slot.turnEpoch | 0, createdAt: Date.now() });
           }
-          else if (m.subtype === 'task_notification') slot.liveTasks.delete(m.task_id);
+          else if (m.subtype === 'task_notification') {
+            rememberFinishedTask(slot, m.tool_use_id, m.status);
+            slot.liveTasks.delete(m.task_id);
+          }
           else if (m.subtype === 'task_updated') {
             const { deleted, notify } = taskUpdatedTerminal(slot.liveTasks, m);
+            if (notify) rememberFinishedTask(slot, notify.tool_use_id, notify.status);
             // 无条件广播(不像 deliverLine 只在无监听时兜底):本 bug 的核心正是"SSE 在线
             // 但客户端解不出 tool_use_id"。安全性靠客户端 finalizeAgent 的终态幂等守卫,
             // 与 SSE 路径重复到达无害;tool_use_id 全局唯一,串不到别的会话。
@@ -1923,6 +2444,7 @@ router.post('/chat', async (req, res) => {
             && m.type !== 'result' && m.type !== 'system' && m.type !== 'rate_limit_event' && m.type !== 'prompt_suggestion') {
           slot.idle = false;
           slot.revived = true; // 看门狗判据(无子代理续跑也纳入 5 分钟静默兜底)
+          reviveSlotTurn(slot); // R13:回合还在跑,别让停止入口拿早前那次 finalize 的"completed"打发
           if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
           // 复活=主 agent 续跑,则之前被 4s 去抖过早缓冲进 earlyLines 的 done 是错的:若 SSE 在
           // finalize 前已断(WebView 空闲掐断/切窗格),done 落 earlyLines,reattach 回放到它会
@@ -1937,6 +2459,7 @@ router.post('/chat', async (req, res) => {
         if (m.type === 'result') {
           lastResultLine = line;
           slot.lastResultAt = Date.now(); // stop 端点优雅窗判据(见 /stop 注释)
+          slot.lastResultError = !!m.is_error; // R13:本回合真实终态用(completed / failed)
           // r10-12 仪表化:官方拒收空内容块的 400(文案在 result,cli-stream-json-error-shape)
           // → 旁路 fire-and-forget 跑 jsonl 只读体检并发 repair-hint,不碰收尾时序。
           if (m.is_error && matchOfficialEmptyBlockError(m.result)) void emitRepairHint(slot, m);
@@ -1988,8 +2511,36 @@ router.post('/chat', async (req, res) => {
     }
   })();
 
-  res.json({ pid: procId, model });
-});
+  // R13:等本回合的进程开口(见 armTurnStartup),再决定报"已送达"还是"未知"。等到了就立刻
+  // 回,不必等满窗口(正常冷启 ~1-5s);15 秒没等到 → 504 CHAT_START_TIMEOUT。这条是合同
+  // 「初始化15秒超时504」在本服务的落点:SSE 侧没有 HTTP 状态可回,判据只能落在 POST 响应上;
+  // 同一判决另经 SSE 的 error 事件对观察者可见(见 armTurnStartup 注释)。
+  if (!(await waitTurnStartup(slot))) {
+    // 批次8-项13:唤醒时泵已收尾(finishSlot 先置 pumpEnded 再唤醒;15 秒超时表不置它)= 进程在吐出
+    // 首条事件前就退出了。这是"启动失败"不是"还在初始化",两者对用户的正确动作相反(前者要看错误、
+    // 修配置后重发,后者别重发),所以不能共用 504。回 CHAT_START_FAILED + 真实原因,并照 query()
+    // 抛错那条同码路径撤掉 turn 记录(该 turn 从未送达,同 id 重试可重新开始;不撤的话记录已被
+    // finishSlot 结成 completed,同 id 重试会拿到一张"已完成"的假回执)。带身份停止过的回合保留记录。
+    if (slot.pumpEnded) {
+      if (!turnRecord?.stopRequested) dropTurnRecord(turnRecord);
+      return res.status(500).json({
+        ok: false,
+        code: 'CHAT_START_FAILED',
+        error: `会话进程启动失败：${startFailureReason(slot)}`,
+        pid: procId, runId: procId, model, delivered: false, status: 'failed',
+      });
+    }
+    return res.status(504).json({
+      ok: false,
+      code: 'CHAT_START_TIMEOUT',
+      error: '会话进程 15 秒内未完成初始化；内容可能稍后到达，请勿据此重发',
+      pid: procId, runId: procId, model, delivered: 'unknown', status: 'running',
+    });
+  }
+  // R13:连同运行身份与送达状态一起回 —— 客户端据此对账"这次 prompt 到底送出去了没有",
+  // 响应丢失时用同一 clientTurnId 重发即可拿回同一个 pid(命中分支),不必新造 id 再发。
+  res.json({ ok: true, pid: procId, model, runId: procId, delivered: true, status: 'running' });
+}
 
 
 // 回合进行中切权限模式 —— SDK setPermissionMode(streaming-input 模式即时生效)。
@@ -2196,11 +2747,93 @@ export function releaseAttach(slot, token, onLine) {
   return slot;
 }
 
+// R13 游标闸门(纯判定 + 直接写 JSON 错误体):afterSeq 必须是非负安全整数,runId 若给出
+// 必须就是本运行的 —— 任一不通过都【不建立事件流】(不写 text/event-stream 头)。
+const AFTER_SEQ_RE = /^\d+$/;
+const RUN_NOT_FOUND_BODY = { ok: false, code: 'RUN_NOT_FOUND', error: '运行不存在或已超出保留期' };
+
+export function parseAfterSeq(raw) {
+  if (raw === undefined || raw === null) return { ok: true, afterSeq: null };
+  const s = String(raw);
+  if (!AFTER_SEQ_RE.test(s)) return { ok: false };            // 非数字/负数/小数/含空白
+  const n = Number(s);
+  if (!Number.isSafeInteger(n) || n < 0) return { ok: false }; // 超安全整数
+  return { ok: true, afterSeq: n };
+}
+
+// R13 带游标重连的重放:只回 seq > 游标的事件(同一 seq 可重放,客户端按 seq 去重只计一次)。
+// 重放自环形窗即已覆盖 earlyLines 的全部内容(两者同源),故顺手清空缓冲 —— 不清会和下面的
+// 无游标分支重复投递同一批事件。
+export function replayEventLog(slot, afterSeq, onLine) {
+  for (const ev of (slot.eventLog || [])) if (ev.seq > afterSeq) onLine(ev.line);
+  slot.earlyLines.length = 0;
+}
+
+// 盖章行的尾部形状(stampRunEvent 注入的那两个键),识别与取值共用一份。
+const STAMP_TAIL_RE = /,"runId":("[^"]*"),"seq":(\d+)\}$/;
+
+// R13:流级通知帧(early_overflow / 缓冲里的 error / 泵收尾补发的 done / stream_gap)不是经
+// deliverLine 出去的,写出前在这里补同一套盖章 —— 合同要求"流事件包含 runId 及单调 seq",
+// 这条对退化路径同样成立。这类帧只回当前连接,不进环形窗(keep=false):它们是"相对这次连接"
+// 的通知,重放给下一个连接没有意义。已盖章的行原样返回,不重复吃号。
+export function stampStreamNotice(slot, line) {
+  if (STAMP_TAIL_RE.test(line)) return line;
+  return stampRunEvent(slot, line, false);
+}
+
+// 泵已收尾但那次 done 没进缓冲(竞态窗口):补一条终态;盖章同样交给 onLine 的唯一写出口。
+function emitPumpEndedDone(slot, onLine) {
+  onLine(JSON.stringify({ type: 'done', exitCode: slot.exitCode ?? 0 }));
+}
+
+// R13:一个 SSE 帧 = id 行(runId:seq)+ data 行。id 直接取自已盖章行尾部,不重新解析整行。
+export function sseFrame(line) {
+  const m = STAMP_TAIL_RE.exec(line);
+  return (m ? `id: ${JSON.parse(m[1])}:${m[2]}\n` : '') + 'data: ' + line + '\n\n';
+}
+
+// 返回值:通过 = {afterSeq};不通过 = null,且响应已经写好 —— 游标/身份问题写 JSON 信封,
+// 游标过旧写一条 stream_gap 事件流后关流(该退化只用于超保留窗口)。
+export function streamCursorGate(req, res, slot) {
+  if (!slot) { res.status(404).json(RUN_NOT_FOUND_BODY); return null; } // 不存在的 pid:JSON 错误体
+  const cur = parseAfterSeq(req.query?.afterSeq);
+  if (!cur.ok) {
+    res.status(400).json({ ok: false, code: 'STREAM_INVALID_CURSOR', error: 'afterSeq 必须是非负安全整数' });
+    return null;
+  }
+  const wantRunId = typeof req.query?.runId === 'string' && req.query.runId ? req.query.runId : null;
+  if (wantRunId && wantRunId !== slot.runId) {
+    res.status(409).json({ ok: false, code: 'RUN_STALE', error: '该游标属于另一个运行' });
+    return null;
+  }
+  const lastSeq = slot.seq | 0;
+  if (cur.afterSeq !== null && cur.afterSeq > lastSeq) {
+    res.status(409).json({ ok: false, code: 'STREAM_CURSOR_AHEAD', error: '游标超出最后一个事件序号' });
+    return null;
+  }
+  const log = Array.isArray(slot.eventLog) ? slot.eventLog : [];
+  const firstSeq = log.length ? log[0].seq : null; // 窗内无事件 = 什么都没丢,不报 gap
+  // 游标早于保留窗 = 缺了一段(客户端要的是 seq>游标,而最老的只剩 firstSeq)。明说缺的是
+  // 哪一段再关流:客户端据此清掉未核对的临时文本、转历史恢复,不把拼接的正文当完整内容。
+  if (cur.afterSeq !== null && firstSeq !== null && cur.afterSeq < firstSeq - 1) {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+    // R13:这条也不裸写 —— 与其余事件同一套盖章(runId+单调 seq)与同一套 id 行;runId 由
+    // 盖章补上,载荷只带合同要求的 firstSeq/lastSeq(这条只回当前连接,不进环形窗)。
+    res.write(sseFrame(stampStreamNotice(slot, JSON.stringify({ type: 'stream_gap', firstSeq, lastSeq }))));
+    try { res.end(); } catch {}
+    return null;
+  }
+  return { afterSeq: cur.afterSeq };
+}
+
 // SSE attach。SDK 引擎下消息由 slot.listeners 实时推送(deliverLine),不再监听 proc.stdout。
 // 断连不杀 query(detach-don't-abort):移除监听后续消息回落 earlyLines,重连回放。
 router.get('/chat/:pid/stream', (req, res) => {
   const slot = activeProcesses.get(req.params.pid);
-  if (!slot) return res.status(404).json({ error: 'Process not found' });
+  // 不能写 `slot && streamCursorGate(...)`:pid 不存在时短路会让 gate 里那条 404 分支永远不执行,
+  // 请求挂到客户端超时(SB-T15 实测)。gate 自己会处理 !slot 并写好 404,这里必须无条件调用。
+  const cur = streamCursorGate(req, res, slot);
+  if (!cur) return; // 槽位不存在或游标不合法:gate 已写好响应
   const myToken = ++attachSeq;
   claimAttach(slot, myToken);
 
@@ -2227,24 +2860,27 @@ router.get('/chat/:pid/stream', (req, res) => {
 
   // 每一行消息:写给 client;若是 done 事件则收尾 SSE。
   const onLine = (line) => {
-    if (!safeWrite('data: ' + line + '\n\n')) return;
+    // R13:唯一写出口 —— 已盖章行原样发,流级通知在这里补章(见 stampStreamNotice)
+    if (!safeWrite(sseFrame(stampStreamNotice(slot, line)))) return;
     // 行首前缀匹配(判官 S):子串匹配会把正文里讨论 {"type":"done"} 的消息行误当控制行收尾。
     if (line.startsWith('{"type":"done"')) {
       try { if (JSON.parse(line).type === 'done') safeEnd(); } catch {}
     }
   };
 
-  // r68:缓冲溢出过 ⇒ 本次回放不完整,回放【之前】先明说一声。客户端据此放弃"种回"
-  // 渲染、退回历史单一来源(宁可空窗,也不把中段缺失的正文当完整的画出来)。
-  if (slot.earlyOverflowed) { slot.earlyOverflowed = false; onLine(JSON.stringify({ type: 'early_overflow' })); }
-  // 回放断连/未 attach 期间缓冲的行(可能含已缓冲的 done → onLine 里收尾)。
-  for (const l of slot.earlyLines) { if (!closed) onLine(l); }
-  for (const e of slot.earlyErrors) safeWrite(`data: ${JSON.stringify({ type: 'error', error: e })}\n\n`);
+  if (cur.afterSeq !== null) replayEventLog(slot, cur.afterSeq, onLine); else {
+    // r68:缓冲溢出过 ⇒ 本次回放不完整,回放【之前】先明说一声。客户端据此放弃"种回"
+    // 渲染、退回历史单一来源(宁可空窗,也不把中段缺失的正文当完整的画出来)。
+    if (slot.earlyOverflowed) { slot.earlyOverflowed = false; onLine(JSON.stringify({ type: 'early_overflow' })); }
+    // 回放断连/未 attach 期间缓冲的行(可能含已缓冲的 done → onLine 里收尾)。
+    for (const l of slot.earlyLines) { if (!closed) onLine(l); }
+  }
+  for (const e of slot.earlyErrors) onLine(JSON.stringify({ type: 'error', error: e }));
   slot.earlyLines.length = 0;
   slot.earlyErrors.length = 0;
 
   // 泵已结束但 done 没缓冲到(竞态兜底):补发一个。
-  if (!closed && slot.pumpEnded) onLine(JSON.stringify({ type: 'done', exitCode: slot.exitCode ?? 0 }));
+  if (!closed && slot.pumpEnded) emitPumpEndedDone(slot, onLine);
 
   if (!closed) {
     // SSE 心跳:大会话首 token 前可能 20s+,空闲连接会被网络/WebView 掐断造成假"无返回"。
@@ -2274,9 +2910,87 @@ router.get('/chat/:pid/stream', (req, res) => {
 //   编辑重发两处、AgentMonitorPanel stop(进程管理)。
 //   closePersistentForSession / closeAllPersistentProcesses 不走本路由,直接 closing+abort,
 //   天然 hard(见各自注释)。
+// R13:带期望身份(owner/clientTurnId)的停止 = 新合同入口;老调用方(GUI/bot)两个字段都
+// 不带,行为与改动前一致(逻辑整段搬进 applyStop,只把 res.json 换成 return)。
 router.post('/chat/:pid/stop', async (req, res) => {
-  const slot = activeProcesses.get(req.params.pid);
-  if (!slot) return res.status(404).json({ error: 'Process not found' });
+  const pid = req.params.pid;
+  const slot = activeProcesses.get(pid) || null;
+  const record = turnByPid.get(pid) || null;
+  // 从未存在或保留期后:没有可停的对象。有记录但进程已退净的,pin 到记录上走终态回执。
+  if (!slot && !record) return res.status(404).json(RUN_NOT_FOUND_BODY);
+  // express.json 全局挂载:无 body → {} → 全默认(选择性),老调用方向后兼容。
+  // 两个开关都只认显式 true —— 缺省 = 只停本回合、保留跨回合后台子代理。
+  const hard = req.body?.hard === true;
+  const allTasks = req.body?.allTasks === true;
+  const identity = stopIdentity(req.body);
+  if (identity) {
+    const out = await stopWithIdentity(pid, slot, record, identity, { hard, allTasks });
+    return res.status(out.status).json(out.body);
+  }
+  if (!slot) return res.status(404).json(RUN_NOT_FOUND_BODY);
+  return res.json(applyStop(slot, pid, { hard, allTasks }));
+});
+
+// R13:停止请求里的期望身份(两者都不给 = 老调用方,走原路径)。owner 只接受字符串 ——
+// 身份就是"会话 id 或 draft 身份"这一个字符串,不多形态解析。
+export function stopIdentity(body) {
+  const owner = typeof body?.owner === 'string' && body.owner ? body.owner : null;
+  const clientTurnId = typeof body?.clientTurnId === 'string' && body.clientTurnId ? body.clientTurnId : null;
+  return (owner || clientTurnId) ? { owner, clientTurnId } : null;
+}
+
+// 身份不符 = 409 RUN_STALE(不声称停过任何东西)。有记录时以记录为权威(它绑定了发起该
+// turn 的 owner/clientTurnId);没有记录的老运行只认 sessionId/draftId,且不接受
+// clientTurnId —— 无从核对就不许停。
+export function stopIdentityMismatch(record, slot, { owner, clientTurnId }) {
+  if (record) {
+    if (clientTurnId && record.clientTurnId !== clientTurnId) return true;
+    if (owner && ![record.owner, record.sessionId, record.draftId].includes(owner)) return true;
+    return false;
+  }
+  if (clientTurnId) return true;
+  return !!owner && slot?.sessionId !== owner && slot?.draftId !== owner;
+}
+
+// 带身份的停止:先核对身份,再停,然后【等运行落地】报真实终态(15 秒未确认退出回 504
+// status=stopping,不假称已停)。已结束的运行只报终态,绝不再停别的进程。
+async function stopWithIdentity(pid, slot, record, identity, flags) {
+  if (stopIdentityMismatch(record, slot, identity)) {
+    return { status: 409, body: { ok: false, code: 'RUN_STALE', error: '停止请求的身份与该运行不符' } };
+  }
+  const ownerOf = () => (record && (record.owner || record.sessionId || record.draftId))
+    || identity.owner || slot?.sessionId || slot?.draftId || null;
+  // 重复停止:返回现有终态(不再动任何进程)。
+  if (record?.settledAt) {
+    return { status: 200, body: { ok: true, pid, owner: ownerOf(), status: record.status, stopped: false } };
+  }
+  if (record?.stopRequested) {
+    // 已有一次停止在飞:等它落地,报真实终态,不声称又停了一次。
+    if (!(await waitTurnSettled(record, TURN_SETTLE_WAIT_MS))) return stopTimeoutResult(pid, ownerOf());
+    return { status: 200, body: { ok: true, pid, owner: ownerOf(), status: record.status, stopped: false } };
+  }
+  if (record) { record.stopRequested = true; record.status = 'stopping'; }
+  if (slot) applyStop(slot, pid, flags);
+  else settleTurnRecord(record, 'stopped'); // 进程已不在:没有可停的,直接按终态结账
+  if (!record) return { status: 200, body: { ok: true, pid, owner: ownerOf(), status: 'stopped', stopped: true } };
+  if (!(await waitTurnSettled(record, TURN_SETTLE_WAIT_MS))) return stopTimeoutResult(pid, ownerOf());
+  return { status: 200, body: { ok: true, pid, owner: ownerOf(), status: record.status, stopped: true } };
+}
+
+// 15 秒没等到运行落地:如实回 stopping/504,同身份重试继续等而不是发新任务。
+function stopTimeoutResult(pid, owner) {
+  return {
+    status: 504,
+    body: {
+      ok: false, code: 'RUN_STOP_TIMEOUT', error: '停止未在 15 秒内确认，该运行仍在收尾',
+      pid, owner, status: 'stopping', stopped: false,
+    },
+  };
+}
+
+// 停止的实际动作(硬/选择性两条路径的时序与改动前逐字节一致)。flags = {hard, allTasks},
+// 只认显式 true(路由层已归一)。返回值 = 该请求的 JSON 响应体。
+function applyStop(slot, pid, flags) {
   // SDK:interrupt 让当前回合优雅停;abort 兜底强停;close input 让 generator 收尾。
   // **不能 await interrupt**(用户实报"按停止后子代理继续跑到完"的根因):回合正在跑
   // 子代理时,CLI 对 interrupt 控制请求的响应可能等到子代理收尾才回,await 会把下面的
@@ -2285,10 +2999,10 @@ router.post('/chat/:pid/stop', async (req, res) => {
   // 进程(子代理是 CLI 进程内循环,进程死即全停)。input.close 同步延后——它与 interrupt
   // 共用 stdin 通道,立即关会把刚发的 interrupt 请求截断。
   // express.json 全局挂载:无 body → {} → hard=false,老调用方向后兼容(选择性)。
-  const hard = req.body?.hard === true;
+  const hard = flags.hard === true;
   // A1:allTasks=true 只由「停止后台 N」总闸传(用户显式"停掉所有后台"),保持全量语义;
   // 主停止键 / Esc 不传 → 只停本回合派出的任务,跨回合后台子代理保留。
-  const allTasks = req.body?.allTasks === true;
+  const allTasks = flags.allTasks === true;
   const stopAt = Date.now();
   // 按 kind 分组:shell(Bash run_in_background,选择性停止时保留)/ 其余可停
   // (subagent + unknown——unknown 也停,防第三方 provider 缺字段时停止失效)。
@@ -2322,7 +3036,7 @@ router.post('/chat/:pid/stop', async (req, res) => {
     // CLI 为在飞任务保活不退(Stop hook background_tasks 证据),须走下方 stopTask+窗口+abort。
     if (slot.idle && !hadTasks) {
       try { slot.input?.close(); } catch {}
-      return res.json({ ok: true });
+      return { ok: true };
     }
     try { slot.query?.interrupt?.()?.catch?.(() => {}); } catch {}
     const hardEpoch = slot.turnEpoch | 0;
@@ -2345,7 +3059,7 @@ router.post('/chat/:pid/stop', async (req, res) => {
       try { slot.abort?.abort(); } catch {}
       try { slot.input?.close(); } catch {}
     }, hadTasks ? 3000 : 2000);
-    return res.json({ ok: true });
+    return { ok: true };
   }
 
   // ===== 选择性路径(默认):停当前回合 + 全部子代理,保留 shell 长任务。 =====
@@ -2362,16 +3076,16 @@ router.post('/chat/:pid/stop', async (req, res) => {
     if (!hadTasks) {
       // idle 无任务:直接关流即退(closing 已置,=hard 同分支=改动前行为)。
       try { slot.input?.close(); } catch {}
-      return res.json({ ok: true });
+      return { ok: true };
     }
     if (!stoppableTasks.length) {
       // idle 仅 shell / 仅跨回合后台任务:没有可停对象,no-op 保活(不 closing、不 interrupt、不 abort)。
-      return res.json({ ok: true, kept: keptCount, keptToolUseIds: keptTasks });
+      return { ok: true, kept: keptCount, keptToolUseIds: keptTasks };
     }
     if (keptCount) {
       // idle 混合:stopTask 已发(子代理经 stopped notification 收尾),不 closing、
       // 不 interrupt、不 abort,进程为 shell / 跨回合后台任务保活。
-      return res.json({ ok: true, kept: keptCount, keptToolUseIds: keptTasks });
+      return { ok: true, kept: keptCount, keptToolUseIds: keptTasks };
     }
     // idle 仅 stoppable(无 shell):closing 已置、stopTask 已发,落到下方 interrupt+窗+abort(=hard)。
   }
@@ -2403,7 +3117,7 @@ router.post('/chat/:pid/stop', async (req, res) => {
     if (shouldSuppressAbort({ liveShell, liveCrossEpoch, allTasks })) {
       // 存在活 shell / 跨回合后台子代理 → 永不 abort(abort 杀整个 CLI 进程,它们连坐、
       // 不可恢复)。本回合子代理若没停净,接受"不优雅"代价;要全杀走 hard(进程管理区)。
-      console.warn(`[chat] stop(${req.params.pid}): ${liveStoppable} stoppable task(s) unsettled but ${liveShell} live shell / ${liveCrossEpoch} cross-turn task(s) present — abort suppressed`);
+      console.warn(`[chat] stop(${pid}): ${liveStoppable} stoppable task(s) unsettled but ${liveShell} live shell / ${liveCrossEpoch} cross-turn task(s) present — abort suppressed`);
       return;
     }
     try { slot.abort?.abort(); } catch {}
@@ -2412,40 +3126,105 @@ router.post('/chat/:pid/stop', async (req, res) => {
   // keptToolUseIds:被保留的跨回合后台子代理 id,回给客户端 —— 前端停止收尾会把该会话全部
   // 非终态子代理乐观标 stopped,不排除这些就会"进程还活着却显示已停止"(与「停止后台 N」
   // 徽章读的服务端真值互相矛盾)。仅数据,不影响本路由任何时序。
-  res.json(keptCount ? { ok: true, kept: keptCount, keptToolUseIds: keptTasks } : { ok: true });
-});
+  return keptCount ? { ok: true, kept: keptCount, keptToolUseIds: keptTasks } : { ok: true };
+}
+
+// ── 停止链路 #1(部件①)的四档判定(R12)────────────────────────────────────────
+// 纯函数(单测 tests/unit/check-r12-agent-stop.mjs 直接 import):输入都是已解析好的事实,
+// 不碰注册表/文件系统。输入:
+//   slotKnown       路径里的 pid 是否仍在本实例的运行登记里
+//   slotSessionId   登记里该运行的母会话(null = 草稿尚未落定,无从核对 → 不判错归属)
+//   parentSessionId 请求声明的母会话
+//   liveKind        该 toolUseId 在本运行里的活任务 kind(null = 无活任务)
+//   hasEvidence     历史/终态簿记里能否找到该身份(它确实在本实例或母会话历史里跑过)
+// 判据与理由:
+//   ① 登记在、母会话对不上 → 409 AGENT_OWNER_MISMATCH(先于一切身份查找:错的归属不能靠
+//      "这个 toolUseId 在历史里存在"洗白);
+//   ② 还有活任务 → 200 stopped:true(交给下面真正的停止;shell 任务刻意保留,不算停成功);
+//   ③ 登记已不在(运行实例早已回收)且历史里有它 → 409 AGENT_NOT_RUNNING(只有历史);
+//   ④ 哪里都找不到这个身份 → 404(从未找到);登记在但查无此身份也归此档 —— 不拿
+//      "stopped:false" 冒充一个我们从未见过的身份。
+export function agentStopVerdict({ slotKnown, slotSessionId, parentSessionId, liveKind, hasEvidence }) {
+  if (slotKnown && slotSessionId && slotSessionId !== parentSessionId) {
+    return { http: 409, code: 'AGENT_OWNER_MISMATCH' };
+  }
+  if (liveKind) return { http: 200, stopped: liveKind !== 'shell' };
+  if (!hasEvidence) return { http: 404, code: 'AGENT_NOT_FOUND' };
+  if (!slotKnown) return { http: 409, code: 'AGENT_NOT_RUNNING' };
+  return { http: 200, stopped: false };
+}
+
+// 停止确认窗口:发出 stopTask 后等它真的从 liveTasks 消失(CLI 会发 task_notification
+// status:'stopped')。超时 504 —— 不能宣称一个没确认过的"已停"。
+export const AGENT_STOP_TIMEOUT_MS = 15_000;
+async function waitTaskSettled(slot, taskId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!slot.liveTasks?.has(taskId)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return !slot.liveTasks?.has(taskId);
+}
 
 // 停止链路 #1(部件①):按单个 task 精确停止 —— 净新增独立路由,与上面 1195-1321 的
 // /stop 停止链路零交叉(那是历史烧过六版的逐字节敏感区)。只对该 slot 内 toolUseId 对应的
-// 在飞 task 调 stopTask(fire-and-forget),【绝不 await、绝不 interrupt/abort、不碰优雅窗/
-// closing/turnEpoch/杀进程】——stopTask 自己发 task_notification(status:'stopped') 收尾,
-// 进程为其它任务/会话保活。幂等:重复调用安全。
-router.post('/chat/:pid/stop-task', (req, res) => {
+// 在飞 task 调 stopTask,【绝不 interrupt/abort、不碰优雅窗/closing/turnEpoch/杀进程】——
+// stopTask 自己发 task_notification(status:'stopped') 收尾,进程为其它任务/会话保活。
+// 幂等:重复调用安全(已终态/重复停止 → stopped:false + 真实终态)。
+// R12:请求必须带母身份 —— parentSessionId(兼容现有 GUI 的 sessionId 拼写)+ toolUseId,
+// 路径里的 pid 就是母运行实例。失败一律 {ok:false,code,error} 信封。
+router.post('/chat/:pid/stop-task', async (req, res) => {
   const slot = activeProcesses.get(req.params.pid);
-  if (!slot) return res.status(404).json({ error: 'Process not found' });
-  const toolUseId = req.body?.toolUseId;
-  if (typeof toolUseId !== 'string' || !toolUseId) return res.status(400).json({ error: 'toolUseId required' });
-  // 会话归属守卫(防御纵深):前端把同一请求扇出到该会话的多个 pid;传了 sessionId 且与本
-  // slot 不匹配 → no-op stopped:false,停不到别的会话/窗格的 slot(即便前端 pid 扇出算错)。
-  const sessionId = req.body?.sessionId;
-  if (typeof sessionId === 'string' && sessionId && slot.sessionId !== sessionId) {
-    return res.json({ ok: true, stopped: false });
-  }
+  const toolUseId = typeof req.body?.toolUseId === 'string' ? req.body.toolUseId.trim() : '';
+  // 两种拼写都收:新契约 parentSessionId;现有 GUI 发的是 sessionId(同一个东西)。
+  const declared = req.body?.parentSessionId ?? req.body?.sessionId;
+  const parentSessionId = typeof declared === 'string' ? declared.trim() : '';
+  if (!toolUseId) return res.status(400).json({ ok: false, code: 'AGENT_INVALID_INPUT', error: 'toolUseId required' });
+  if (!parentSessionId) return res.status(400).json({ ok: false, code: 'AGENT_INVALID_INPUT', error: 'parentSessionId required' });
   // 反查 liveTasks(value = {toolUseId, kind},task_started 时建于本文件上方)找 task_id。
   let taskId = null;
   let taskKind = null;
-  for (const [tid, t] of (slot.liveTasks || new Map())) {
+  for (const [tid, t] of (slot?.liveTasks || new Map())) {
     if (t && t.toolUseId === toolUseId) { taskId = tid; taskKind = t.kind; break; }
   }
-  // 查无 task(已终态/已被移出 liveTasks/发到了非属主 pid)或 query 句柄不可用(已 close):
-  // 都不是错误,stopped:false(前端扇出到多 pid,只属主且会话匹配的 slot stopped:true)。
-  if (taskId == null) return res.json({ ok: true, stopped: false });
-  // shell 长任务(run_in_background 训练等)不可经此端点停:选择性 /stop 刻意保留它们
-  // (误杀不可恢复),单停语义同样只覆盖子代理/teammate;停 shell 走进程管理区。
-  if (taskKind === 'shell') return res.json({ ok: true, stopped: false });
-  if (typeof slot.query?.stopTask !== 'function') return res.json({ ok: true, stopped: false });
+  // 终态簿记(本 slot 记着这个 toolUseId 已收尾)优先;没有才读盘找历史证据。
+  const ledgerHas = !!slot?.finishedTasks?.has(toolUseId);
+  const ledgerStatus = slot?.finishedTasks?.get(toolUseId) || null;
+  // 读盘这一步会把 parentSessionId 带进文件路径,而它直接来自请求体:真正的形状白名单在
+  // 拼路径那一层(services/session-reader.js 的 SESSION_ID_SHAPE,非 36 位 uuid 连 fs 都不碰),
+  // 这里再显式短路一次 —— 冗余防线,顺带让非 uuid 的声明值(如错归属场景传的普通文本)
+  // 不来白扫一遍项目目录。非 uuid 不是非法输入(错归属必须照常判 409),所以只跳过查找。
+  let evidence = null;
+  if (taskId == null && !ledgerStatus && isSessionIdShape(parentSessionId)) {
+    try { evidence = await findAgentRunEvidence(parentSessionId, toolUseId); } catch { evidence = null; }
+  }
+  const status = ledgerStatus || evidence?.status || null;
+  const verdict = agentStopVerdict({
+    slotKnown: !!slot,
+    slotSessionId: slot?.sessionId || null,
+    parentSessionId,
+    liveKind: taskKind,
+    hasEvidence: ledgerHas || !!evidence,
+  });
+  if (verdict.http === 409) {
+    const error = verdict.code === 'AGENT_OWNER_MISMATCH'
+      ? '该运行不属于这个母会话'
+      : '该子代理只有历史,服务端没有它的运行实例';
+    return res.status(409).json({ ok: false, code: verdict.code, error });
+  }
+  if (verdict.http === 404) {
+    return res.status(404).json({ ok: false, code: verdict.code, error: '没有这个子代理身份' });
+  }
+  // 无活任务(已终态 / 重复停止 / shell 刻意保留 / query 句柄不可用):都不是错误,回真实终态。
+  if (!verdict.stopped || typeof slot?.query?.stopTask !== 'function') {
+    return res.json({ ok: true, stopped: false, status, parentSessionId, toolUseId });
+  }
   try { slot.query.stopTask(taskId)?.catch?.(() => {}); } catch {}
-  return res.json({ ok: true, stopped: true });
+  const settled = await waitTaskSettled(slot, taskId, AGENT_STOP_TIMEOUT_MS);
+  if (!settled) {
+    return res.status(504).json({ ok: false, code: 'AGENT_STOP_TIMEOUT', error: '停止确认超时,未能确认该子代理已停' });
+  }
+  return res.json({ ok: true, stopped: true, parentSessionId, toolUseId });
 });
 
 // ── 会话标题:与 CLI 原生 generate_session_title 同形态的兜底调用 ──────────────

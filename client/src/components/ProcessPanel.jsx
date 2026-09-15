@@ -2,7 +2,10 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Activity, Cpu, MapPin, RefreshCw, Zap, Square, Loader2 } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 
-export function ProcessPanel() {
+// embedded:同一组件内嵌进设置页(R44 入口搬家)时用 —— 去掉自己的 px-4/py-4 与
+// 滚动容器(padding 会被宿主设置页的行内距双写;h-full 在自动高度父级下本就不起作用),
+// 布局由宿主承担。面板坞里照旧不传 → 默认 false,行为一字不变。
+export function ProcessPanel({ embedded = false }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [killing, setKilling] = useState(null);
@@ -59,7 +62,7 @@ export function ProcessPanel() {
   const claudeProcs = data?.claudeProcesses || [];
 
   return (
-    <div className="px-4 py-4 space-y-5 overflow-y-auto h-full">
+    <div className={embedded ? 'space-y-5' : 'px-4 py-4 space-y-5 overflow-y-auto h-full'}>
       {/* Session processes */}
       <div>
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">

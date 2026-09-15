@@ -7,7 +7,8 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { GoalBar } from './GoalBar.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { AnchoredPopover } from './SessionSelectors.jsx';
-import { isSteered, firstSteerableIndex, isSteerBarrier } from '../utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, steerBlockReason } from '../utils/steerQueue.js';
+import { ElapsedTime } from './LoadingBits.jsx';
 import { resolveSelectorModel } from '../utils/routing.js';
 import { effortCapsFor, effortAllowed, effortMemoryKey, effortSourceNote, useEffortFallback } from '../utils/effortCaps.js';
 import { attachmentBlockReason, buildAttachmentMessage, pendingAttachment, uploadAttachmentFile } from '../utils/attachments.js';
@@ -305,6 +306,29 @@ export function EffortSelector({ permKey = null, hideLabel = false, tourAnchor =
 // #12:任务清单转圈的"仍在工作"判定用的终态集(与监控页 AgentMonitorPanel 口径一致)。
 const TODO_AGENT_TERMINAL = ['done', 'error', 'stopped'];
 const TODO_BG_TERMINAL = ['done', 'failed', 'killed', 'stopped', 'error'];
+
+// r116:accepted(已送进当前回合、等 CLI 写进会话记录)条目的统一说法 —— 队列条上的状态行
+// 与「⚡ 并入」的 hover 共用。落盘时点由模型的下一个工具调用决定,不是"点了多久"(实测
+// 3.3~148 秒),所以只能如实说"等它读到",不能承诺秒数。
+const STEER_WAIT_NOTE = '已送进当前回合，模型在下一个工具调用处读到它（通常几秒，也可能几分钟）。回合结束仍没读到时会转为待处理，可以取回或删除。';
+
+// r116:「⚡ 并入」为灰时 hover 必须说清是【哪一条】把它挡住了。原来只按 canSteer 分句:
+// 队首被 accepted/needs-review 条目挡住时按钮是灰的,文案却写着"把队列里的下一条消息
+// 并入当前回合"——按钮和文案互相打脸(用户实报"并入按钮有时候点不了"就得自己猜)。
+function steerBlockTitle(canSteer, queueItems) {
+  if (!canSteer) return '当前没有可并入的回合（回合正在建立或已结束）。消息留在队列中，回合结束后自动发出。';
+  const reason = steerBlockReason(queueItems);
+  // 能点:原来说明照旧(只是"下一个工具结果处"改口径为"下一个工具调用处",与队列条状态行同词)。
+  if (!reason) return '把队列里的下一条消息并入当前回合：不打断生成，模型在下一个工具调用处读到它并调整后续动作。并入后不可撤回。';
+  switch (reason) {
+    case 'accepted': return `队列最前面的消息${STEER_WAIT_NOTE}`;
+    case 'review': return '队列最前面有一条并入结果无法确认的消息：先「取回为新消息」「保留不发」或删除它，后面的消息才能并入。';
+    case 'claiming': return '队列最前面有一条消息正在安全取回，完成后才能并入下一条。';
+    case 'unknown': return '队列最前面有一条消息的并入结果正在确认中，确认完成后才能并入下一条。';
+    case 'hidden': return '队列最前面还有一条系统消息（如计划续跑）尚未处理，处理完成后才能并入。';
+    default: return '队列最前面没有可并入的消息。消息留在队列中，回合结束后自动发出。';
+  }
+}
 
 export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, paneId = null, claimDraft = null, onRefreshQueueEvidence, todos = null, plan = '', plans = null, goal = null, permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
   const [text, setText] = useState('');
@@ -1170,9 +1194,10 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
         {/* Queue indicator + per-item preview + edit/delete + accelerate.
             Q5: 计数排除 hidden 项(计划执行等系统续跑消息)——全是 hidden 时整个指示器不渲染,
             体验对齐 Claude Desktop(批准计划后看不到任何"排队提示")。
-            R7-3: 已并入(isSteered)的条目也不在这里显示 —— 它已经送达 CLI、模型已经读到,
-            属于对话而不属于"待发队列",改由对话流里的用户气泡呈现(Desktop 形态)。
-            没落地时回合收尾的 reconcile 会把它翻回普通排队态,那时它自动回到这里可编辑。 */}
+            R7-3: 已经落盘(进了对话流)的并入条目也不在这里显示 —— 它已经是对话的一部分,
+            改由对话流里的用户气泡呈现(Desktop 形态)。
+            r116: 但"已送进回合、还没被模型读到(accepted)"的条目必须显示 —— 它是队首时
+            「⚡ 并入」恒为灰,原来它在这里零痕迹,用户只看到按钮点不动(详见行内状态行)。 */}
         {queueItems.filter((q) => !q.hidden && !isSteered(q)).length > 0 && (
           <div data-testid="queue-bar" className="mt-2 rounded-lg bg-accent/8 border border-accent/20 text-[11px] font-body overflow-hidden">
             <div className="px-3 py-1.5 flex items-center gap-2 border-b border-accent/15">
@@ -1187,9 +1212,7 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
                   onClick={onAccelerate}
                   disabled={!canSteer || firstSteerableIndex(queueItems) < 0}
                   className="px-2 py-0.5 rounded bg-accent text-on-accent text-[10px] font-medium hover:bg-accent-hover disabled:opacity-40 disabled:hover:bg-accent"
-                  title={canSteer
-                    ? '把队列里的下一条消息并入当前回合：不打断生成，模型在下一个工具结果处读到它并调整后续动作。并入后不可撤回。'
-                    : '当前没有可并入的回合（回合正在建立或已结束）。消息留在队列中，回合结束后自动发出。'}
+                  title={steerBlockTitle(canSteer, queueItems)}
                 >
                   ⚡ 并入
                 </button>
@@ -1197,14 +1220,29 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
             </div>
             <ul className="divide-y divide-accent/10">
               {queueItems.map((q, i) => (
-                // 隐藏续跑消息(如计划执行)不在队列里显示(#5);已并入的条目改在对话流里
-                // 画成用户气泡(R7-3)。两者都返回 null 而不是过滤数组 —— 编辑/删除回调按
-                // 下标操作 store,索引必须与 store 对齐。
-                q.hidden || isSteered(q) ? null :
+                // 隐藏续跑消息(如计划执行)不在队列里显示(#5)。返回 null 而不是过滤数组 ——
+                // 编辑/删除回调按下标操作 store,索引必须与 store 对齐。
+                // R7-3 起已并入(isSteered)的条目也不显示,但 R46 之后 accepted 要等模型读到
+                // 才落盘(实测几秒~几分钟),队首卡在它身上时「⚡ 并入」一直是灰的 ——
+                // r116 起如实画出来(状态行写清它在等什么),不再让按钮灰得没头没脑。
+                q.hidden ? null :
                 <li key={q.queueId || `${q.queuedAt}-${i}`} data-testid="queue-item" className="px-3 py-1.5 flex items-start gap-2 group hover:bg-accent/5">
                   <span className="text-[10px] text-ink-faint font-mono shrink-0 mt-0.5">#{i + 1}</span>
                   <div className="flex-1 min-w-0">
-                    <span className="text-ink-soft block line-clamp-2 leading-snug" title={q.text}>{q.text}</span>
+                    {/* 排队条目永远只占一行(r106):`block` 与 `line-clamp-2` 都写
+                        display,产物 CSS 里 .block 在后、同权重把它覆盖掉,line-clamp 完全
+                        空转 —— 60 行的消息会把排队条撑到 650px。truncate = nowrap + 省略号,
+                        一行高度与消息长短无关;全文仍走 title 悬停。 */}
+                    <span className={`block truncate leading-snug ${isSteered(q) ? 'text-ink-faint' : 'text-ink-soft'}`} title={q.text}>{q.text}</span>
+                    {/* r116:在途并入的可见形态 —— 它在等模型读到它(落盘要等下一个工具调用),
+                        秒表如实告诉用户"等了多久"(没有秒表就看不出是卡住还是在等)。
+                        它没有按钮:结果未定,不给撤回/删除(那会与对账竞态)。 */}
+                    {isSteered(q) && (
+                      <span className="text-[10px] text-ink-faint inline-flex items-baseline gap-1" title={STEER_WAIT_NOTE}>
+                        已并入当前回合，等待模型读到它
+                        <ElapsedTime startedAt={q.acceptedAt ?? q.queuedAt} />
+                      </span>
+                    )}
                     {q.steerState === 'unknown' && <span className="text-[10px] text-amber-700">正在确认并入结果…</span>}
                     {q.steerState === 'claiming' && <span className="text-[10px] text-amber-700">正在安全取回…</span>}
                     {q.steerState === 'kept' && <span className="text-[10px] text-ink-faint">已保留，不会自动发送</span>}

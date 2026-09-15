@@ -4,6 +4,7 @@ import { Server, Package, FolderOpen, RefreshCw, Plug, Activity, Check, X, Plus,
 import { BUILTIN_PLUGINS, pluginInstallErrorMessage } from '../utils/builtinPlugins.js';
 import { findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { McpForm } from './McpForm.jsx';
+import { CuGrants } from './CuGrants.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { TOOL_TABS, readToolTab, writeToolTab } from '../utils/toolTabs.js';
 
@@ -14,6 +15,97 @@ function formatPingDetail(d) {
   return d.status === 'ok'
     ? head
     : `${head}${d.stderr ? '\n\n' + d.stderr : '\n(未捕获到子进程报错;可能是命令静默挂起或网络超时)'}`;
+}
+
+// ── 桌面操控(computer use)一键安装卡 ─────────────────────────────────
+// 自带 MCP server(零依赖 Node 脚本 + Python 执行层,见 server/computer-use/)。
+// 注册走通用 POST/DELETE /api/mcp(缓存失效/换代戳/agents 同步全在那一侧),
+// 这里只负责:拿脚本绝对路径拼命令行、装/卸、跑 doctor 给权限状态。
+function ComputerUseCard({ onChanged }) {
+  const [st, setSt] = useState(null); // /api/computer-use/status
+  const [busy, setBusy] = useState('');
+  const [doctor, setDoctor] = useState(null);
+  const [err, setErr] = useState('');
+
+  const load = () => {
+    fetch('/api/computer-use/status').then((r) => r.json()).then(setSt).catch(() => {});
+  };
+  useEffect(load, []);
+
+  if (!st || !st.supported) return null; // 非 macOS 隐藏(v1 仅 mac)
+
+  const install = async () => {
+    setBusy('install'); setErr('');
+    try {
+      const commandLine = `"${st.nodePath}" "${st.mcpPath}"`;
+      const r = await fetch('/api/mcp', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'ccgui-computer-use', transport: 'stdio', commandLine, scope: 'user', label: '桌面操控', autoApprove: false }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '安装失败');
+      load(); onChanged?.();
+    } catch (e) { setErr(e.message); } finally { setBusy(''); }
+  };
+  const uninstall = async () => {
+    const ok = await confirmDialog('卸载桌面操控(computer-use)?\n\n将从 Claude Code 的 MCP 配置移除;Python 运行时(~/.claude-gui/cu-runtime)保留。', { danger: true, confirmText: '卸载' });
+    if (!ok) return;
+    setBusy('uninstall'); setErr('');
+    try {
+      const r = await fetch('/api/mcp/ccgui-computer-use', { method: 'DELETE' });
+      if (!r.ok) throw new Error((await r.json()).error || '卸载失败');
+      setDoctor(null); load(); onChanged?.();
+    } catch (e) { setErr(e.message); } finally { setBusy(''); }
+  };
+  const runDoctor = async () => {
+    setBusy('doctor'); setErr(''); setDoctor(null);
+    try {
+      const r = await fetch('/api/computer-use/doctor', { method: 'POST' });
+      setDoctor(await r.json());
+    } catch (e) { setErr(e.message); } finally { setBusy(''); }
+  };
+
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 mb-2">
+      <div className="flex items-center justify-between">
+        <div className="min-w-0">
+          <div className="text-[12px] text-ink font-body font-medium flex items-center gap-1.5">
+            桌面操控(computer use)
+            {st.registered && <span className="text-[10px] text-green-600">● 已注册</span>}
+          </div>
+          <div className="text-[10.5px] text-ink-faint font-body leading-snug mt-0.5">
+            让会话能截图、点鼠标、敲键盘、读窗口。模型可见的工具注册为「computer-use」;截图/窗口查询完全被动,点击优先后台投递不抢你的前台。
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0 ml-2">
+          {st.registered ? (
+            <>
+              <button onClick={runDoctor} disabled={!!busy}
+                className="px-2 py-1 rounded-md text-[10px] text-ink-muted hover:bg-canvas border border-canvas-deep font-body transition-colors disabled:opacity-50">
+                {busy === 'doctor' ? '检测中…' : '环境自检'}
+              </button>
+              <button onClick={uninstall} disabled={!!busy}
+                className="px-2 py-1 rounded-md text-[10px] text-error hover:bg-error/10 font-body transition-colors disabled:opacity-50">
+                卸载
+              </button>
+            </>
+          ) : (
+            <button onClick={install} disabled={!!busy}
+              className="px-2.5 py-1 rounded-md bg-accent text-on-accent text-[10px] font-medium hover:bg-accent/90 transition-colors disabled:opacity-50">
+              {busy === 'install' ? '安装中…' : '安装'}
+            </button>
+          )}
+        </div>
+      </div>
+      {st.registered && <CuGrants runtimeReady={st.runtimeReady} />}
+      {err && <div className="mt-2 text-[10.5px] text-error font-body">{err}</div>}
+      {doctor && (
+        <pre className="mt-2 text-[10px] font-mono whitespace-pre-wrap break-all leading-snug max-h-40 overflow-auto text-ink-soft border border-canvas-deep rounded p-2">
+          {JSON.stringify(doctor, null, 1)}
+        </pre>
+      )}
+    </div>
+  );
 }
 
 function PingButton({ name }) {
@@ -441,6 +533,7 @@ export function MCPPanel() {
             <Plus size={11} />添加
           </button>
         </h3>
+        <ComputerUseCard onChanged={fetchData} />
         {servers.length > 0 ? (
           <div className="space-y-2">
             {sortedServers.map((srv) => {

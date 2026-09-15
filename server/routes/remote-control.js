@@ -13,7 +13,9 @@ import { getAvailableModels } from '../services/model-resolver.js';
 // 「另一台 Windows 上后端起不来 / did not accept connections」的根因。改惰性加载:首次用到
 // 才 import,失败只让本功能返回错误,server 照常启动。
 let _ptyPromise;
-function loadPty() {
+// export:内置终端(server/routes/terminal.js)与远程控制共用同一个惰性加载器 ——
+// 模块级单例,失败不缓存可重试;两处各起一份会出现"一边能用一边报错"的分裂。
+export function loadPty() {
   if (!_ptyPromise) {
     _ptyPromise = import('node-pty').then((m) => m.default?.spawn ? m.default : m).catch((e) => {
       _ptyPromise = undefined; // 不缓存失败,允许后续重试

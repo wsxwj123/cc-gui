@@ -138,7 +138,9 @@ const rejects = (files, code, label, opts = {}) =>
   assert.match(routes, /return await installUnpacked\(tmp, fileEntries/,
     'd8: zip 通道也走共享管线(两条通道不会各自漂移)');
   const index = readFileSync(new URL('../../server/index.js', import.meta.url), 'utf8');
-  assert.match(index, /express\.json\(\{ limit: '25mb' \}\)/, 'd8: 全局 body 限额未改');
+  // 语义引脚(不钉行形态):取全局解析器实参里的 limit 值。R07 给该调用加了 verify 之后
+  // 单行字面量正则过期过一次 —— 换行/加选项/改键序/插注释都不该让引脚红,改值必须红。
+  assert.equal(expressJsonLimit(index, 'jsonParser'), '25mb', 'd8: 全局 body 限额未改');
   assert.match(index, /req\.path === '\/api\/skins\/import-dir' \? next\(\)/, 'd8: 全局解析器对该路由让路');
 }
 
@@ -172,6 +174,33 @@ const rejects = (files, code, label, opts = {}) =>
   assert.equal(SKINS_DIR, realDir, 'z1: 生产常量口径');
   const ids = existsSync(realDir) ? readdirSync(realDir) : [];
   assert.ok(!ids.some((d) => d.startsWith('r43-dir-skin')), 'z1: 真实皮肤目录无本测试产物');
+}
+
+// ── d8 语义引脚:从 `const NAME = express.json(…)` 的实参块里取 limit 字面量 ──────
+// 括号配对扫描并跳过字符串/注释,所以格式(单行/多行)、键序、多出来的选项都不影响;
+// 找不到定义、实参里没有 limit、或值被改成别的 → 断言红。
+function expressJsonLimit(src, binding) {
+  const call = new RegExp(`const\\s+${binding}\\s*=\\s*express\\.json\\(`).exec(src);
+  assert.ok(call, `d8: 找得到 const ${binding} = express.json(…) 定义`);
+  let i = call.index + call[0].length;
+  let depth = 1; // express.json( 的左括号已消费
+  let args = '';
+  while (i < src.length && depth > 0) {
+    const c = src[i], n = src[i + 1];
+    if (c === "'" || c === '"' || c === '`') { // 字面量整体抄进去(limit 的值要从里面读)
+      let j = i + 1;
+      while (j < src.length && src[j] !== c) j += src[j] === '\\' ? 2 : 1;
+      args += src.slice(i, j + 1); i = j + 1; continue;
+    }
+    if (c === '/' && n === '/') { const j = src.indexOf('\n', i); i = j < 0 ? src.length : j; continue; }
+    if (c === '/' && n === '*') { const j = src.indexOf('*/', i + 2); i = j < 0 ? src.length : j + 2; continue; }
+    if (c === '(' || c === '{' || c === '[') depth++;
+    if (c === ')' || c === '}' || c === ']') { depth--; if (!depth) break; }
+    args += c; i++;
+  }
+  const limit = args.match(/limit\s*:\s*['"]([^'"]+)['"]/);
+  assert.ok(limit, `d8: const ${binding} 的实参里有 limit 字面量`);
+  return limit[1];
 }
 
 // ── 手工 zip(store 法,普通文件即可;穿越/符号链接矢量在 check-skin-install)──

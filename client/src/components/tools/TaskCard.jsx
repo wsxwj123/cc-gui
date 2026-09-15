@@ -4,7 +4,9 @@ import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
 import { resolveOwnedAgent } from '../../utils/agentOwner.js';
+import { fetchAgentHistory, historyLegacyArrays, shouldApplyHistory, splitHistoryBlocks } from '../../utils/agentView.js';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
+import { SubagentCostContext, SubagentCostTag } from './SubagentCost.jsx';
 
 // 卡片归属:这张 Task 卡渲染在【哪个会话】里(历史 turn 的 record.sessionId,
 // 由 TurnBubble 供给)。activeAgents 是按 tool_use.id 的全局表,而分支(fork)复制出的
@@ -33,6 +35,14 @@ export function stopNoOwnerNotice(procAlive) {
 // in store.activeAgents.
 export function TaskCard({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
+  // A 项:该子代理自己的费用(数值来自本回合 subUsage.agents[] 里 toolUseId 同名的那条)。
+  // 说清口径:轮末那个数字只算主循环,子代理的花费不并进去(用户问"是不是漏算了")。
+  const subagentCost = useContext(SubagentCostContext);
+  // A 项(用户需求,契约 §10.3):后台子代理(run_in_background)的金额只在监控面板显示,
+  // 对话流这张卡片不显示(前台子代理才是"卡片 + 面板都显示")。判定依据就是这次工具调用
+  // 自己的 input.run_in_background —— jsonl 的 tool_use.input 原样透传(history 走
+  // session-reader 的 input:c.input、流式块也带 input),不去猜 tool_result 的 isAsync。
+  const isBackgroundSubagent = toolCall.input?.run_in_background === true;
   // 归属校验:store 里同 id 的条目若属于别的会话(分支复制出的卡片撞源会话的
   // tool_use.id),当它不存在 —— 自然落进下面的 isInterrupted 残骸分支。
   const ownerSid = useContext(TaskOwnerContext);
@@ -95,6 +105,7 @@ export function TaskCard({ toolCall }) {
   const stopThisAgent = async () => {
     const r = await useStore.getState().stopSingleTask(ownerSid || agent?.sessionId || paneSession?.sessionId || null, toolCall.id);
     if (r?.noOwner) confirmDialog(stopNoOwnerNotice(r.procAlive), { confirmText: '知道了' });
+    else if (r?.error) confirmDialog(r.error, { confirmText: '知道了' });   // R12:错归属/超时未确认都要看得见
   };
 
   // P2: 历史会话重载后 activeAgents(内存态)是空的,点放大查不到数据 → 之前没反应。
@@ -121,29 +132,31 @@ export function TaskCard({ toolCall }) {
         startedAt: Date.now(),
         // 归属优先取卡片自己的会话:补写的条目与卡片同源,下一帧才过得了归属校验。
         sessionId: ownerSid || st.paneSessions[st.activeTabIndex]?.sessionId || st.selectedSession?.sessionId || null,
+        // R12:没有自己的转写(分支复制品)= 本实例没有它的运行证据,停止按钮不给。
+        hasTranscript: !!metaAgent?.sessionId,
         result: resContent != null ? extractToolResultText(resContent) : null,
       });
-      // 水合完整转写:历史子代理的思考/工具/正文躺在 subagents/agent-*.jsonl,
-      // 此前没人读 → 放大只有 prompt+最终结果("过程假丢失")。metaAgent 带子代理
-      // sessionId,消息端点已支持回退扫 subagents 目录,异步读回填充。
+      // R12 水合完整转写:历史子代理的 prompt/思考/工具/正文躺在 subagents/agent-*.jsonl,
+      // 此前没人读 → 放大只有 prompt+最终结果("过程假丢失")。按原顺序读回 view.blocks
+      // (服务端已保序),不再自己把三个数组拍平再拼 —— 那正是时序丢失的来源。
       const agentSid = metaAgent?.sessionId;
       const hash = metaAgent?.projectHash || paneSession?.projectHash;
       if (agentSid && hash) {
-        fetch(`/api/sessions/${encodeURIComponent(agentSid)}/messages?projectHash=${encodeURIComponent(hash)}`)
-          .then((r) => (r.ok ? r.json() : null))
-          .then((d) => {
-            const msgs = Array.isArray(d) ? d : (d?.messages || []);
-            if (!msgs.length) return;
-            const text = [], thinking = [], toolCalls = [];
-            for (const m of msgs) {
-              if (m.type !== 'turn') continue;
-              if (Array.isArray(m.thinking)) thinking.push(...m.thinking);
-              if (Array.isArray(m.text)) text.push(...m.text);
-              if (Array.isArray(m.toolCalls)) toolCalls.push(...m.toolCalls);
-            }
-            if (text.length || thinking.length || toolCalls.length) {
-              useStore.getState().upsertAgent(toolCall.id, { text, thinking, toolCalls });
-            }
+        const cardOwner = ownerSid || st.paneSessions[st.activeTabIndex]?.sessionId || st.selectedSession?.sessionId || null;
+        fetchAgentHistory({ agentSessionId: agentSid, projectHash: hash })
+          .then((res) => {
+            if (!res.ok) return;   // 读不回来就保留已水合的 prompt/结果,不装假内容
+            // 迟到响应丢弃:目标已变(条目被换掉/归属变了/已不是我们水合的那条)就不写。
+            if (!shouldApplyHistory(useStore.getState().activeAgents[toolCall.id], cardOwner)) return;
+            const { prompt: histPrompt, blocks } = splitHistoryBlocks(res.blocks);
+            useStore.getState().upsertAgent(toolCall.id, {
+              blocks,
+              // 卡片内联展开读的是这三个平铺数组(视图走 blocks):两边都填,改读法不丢内容。
+              ...historyLegacyArrays(blocks),
+              agentSessionId: agentSid,
+              agentProjectHash: hash,
+              ...(histPrompt ? { prompt: histPrompt } : null),
+            });
           })
           .catch(() => {});
       }
@@ -190,6 +203,14 @@ export function TaskCard({ toolCall }) {
               <span className="text-[9px] font-mono text-ink-faint truncate" title="该子代理实际使用的模型">
                 {agentModel}
               </span>
+            )}
+            {/* 后台子代理不画金额(金额只在监控面板),连「未能计价」小标也不画 —— 契约 §10.3 */}
+            {!isBackgroundSubagent && (
+              <SubagentCostTag
+                entry={subagentCost?.index?.byToolUseId?.get(toolCall.id)}
+                showMissing={subagentCost?.history === true}
+                title="该子代理自己的费用（按它自己的模型与调用时刻计价；不含在主回合金额里）"
+              />
             )}
           </div>
           {description && (

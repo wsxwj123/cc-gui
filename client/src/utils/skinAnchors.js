@@ -42,6 +42,16 @@ export const SKIN_ANCHORS = [
   { id: 'message-list', desc: '消息滚动列表' },
   { id: 'message-user', desc: '用户消息气泡' },
   { id: 'message-assistant', desc: 'AI 回复气泡容器' },
+  // R10:CLI 后台任务通知(harness 喂给模型的 <task-notification> 信封)在转写里的两种落盘
+  // 形态被投影成同一行系统提示 —— 与 message-user/message-assistant 同级的消息行类型,
+  // 永久留在历史里(不是转瞬即逝的提示)。通知行不存在时选择器落空不炸。
+  { id: 'task-notice', desc: '后台任务通知行(CLI task-notification 信封投影成的系统提示行)' },
+  // R42:轮末/消息用量行里的金额元素(两处渲染点 TurnBubble/MessageBubble 各一个),
+  // 价格来源词挂在它的 title 上(窄面板下不再用行内文字占宽)。
+  { id: 'usage-amount', desc: '用量行金额(悬停 title 首行 = 价格来源)' },
+  // R43:轮末/消息用量行的行容器(两处渲染点各一个),token 明细(缓存命中/缓存写入/
+  // 本轮累计读取/整轮命中率)收在它的 title 上 —— 行内只留 输入/输出/金额。
+  { id: 'usage-line', desc: '用量行行容器(悬停 title = token 明细:缓存命中/缓存写入/本轮累计读取/整轮命中率)' },
   { id: 'turn-scrubber', desc: '右缘回合刻度条' },
   { id: 'chat-search', desc: '会话内搜索条' },
   { id: 'todo-panel', desc: '待办清单面板' },
@@ -49,6 +59,9 @@ export const SKIN_ANCHORS = [
   { id: 'goal-edit', desc: 'goal 常驻条「编辑」按钮' },
   { id: 'goal-clear', desc: 'goal 常驻条「清除」按钮' },
   { id: 'agent-monitor', desc: '子代理监控面板' },
+  // R11/R12:子代理会话视图(在母会话之上展开的只读面)根容器 —— 同一个容器上还挂着
+  // 合同身份 data-parent-session-id / data-tool-use-id。
+  { id: 'subagent-view', desc: '子代理会话视图根(覆盖在母会话之上的只读面)' },
   { id: 'permission-card', desc: '权限确认卡片' },
   // r64:模型生成界面(genui 围栏)。挂在渲染成功的块根上,与 data-testid="genui-block"
   // 同一个元素(INTERFACE r64 §9.0);围栏退回代码块时整个块不存在,选择器落空不炸。

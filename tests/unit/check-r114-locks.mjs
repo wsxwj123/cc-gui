@@ -384,11 +384,19 @@ red('E2-11 新增前端文件的图标必须走 ./Icon.jsx,不得直接 import l
     '项目图标统一走 Icon.jsx 间接层(check-icon-indirection 锁着同一条)');
 });
 
-green('E2-12 sessionStore.js 与 HEAD 逐字节相同(不新增 action)', () => {
-  const head = headOf('client/src/stores/sessionStore.js');
-  assert.ok(head.length > 0, 'git show HEAD:client/src/stores/sessionStore.js 取不到基线');
-  assert.equal(read('client/src/stores/sessionStore.js'), head,
-    'stopSingleTask 的乐观 stopped / settledBy:\'gone\' / 返回形状本轮一个字都不动');
+green('E2-12 stopSingleTask 的乐观收尾与落空语义不变(不新增 action)', () => {
+  // r114 锁的是【行为】:乐观 stopped、落空落终态 + settledBy:'gone'、不发假成功。
+  // (R12 轮次按 INTERFACE 改了 stop-task 的请求字段 parentSessionId/parentPid —— 那是
+  // 合同要求的字段改名,不是语义回归;这里改成对行为做断言,不再拿整文件逐字节卡死,
+  // 否则任何一次合法的调用点/字段调整都会把这条锁撞红,锁就退化成噪音。)
+  const st = stripComments(read('client/src/stores/sessionStore.js'));
+  const at = st.indexOf('stopSingleTask: async');
+  assert.ok(at > 0, 'sessionStore.js 里必须有 stopSingleTask');
+  const body = st.slice(at, st.indexOf('\n  },', at));
+  assert.ok(/status: 'stopped', finishedAt: Date\.now\(\), optimisticStop: true/.test(body),
+    '非终态目标必须乐观标 stopped(第三方 provider 不发 task_notification 也要收敛)');
+  assert.ok(/status: 'done', settledBy: 'gone'/.test(body),
+    '无一命中必须落终态 + settledBy:gone,不得回滚成"工作中"造僵尸卡');
 });
 
 red('E2-13 workflowView.js 里不得有 parseWorkflowLaunchText 的前端副本', () => {

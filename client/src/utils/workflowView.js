@@ -174,28 +174,43 @@ export function phaseRowQuota(phaseCount, max = 200) {
   return Math.max(5, Math.floor(max / Math.max(1, phaseCount)));
 }
 
-const snapshotCache = new Map();   // runId → Promise<object|null>
+// 缓存上限:值是解出来的快照对象(一份可达数百 KB,1000 助手档更大),模块级 Map 要在
+// 常驻进程里活一整天 —— 只增不减迟早是泄漏。32 = 一屏卡片量级,淘汰代价只是重拉一次。
+export const SNAPSHOT_CACHE_MAX = 32;
+const snapshotCache = new Map();   // `${runId} ${taskId}` → Promise<object|null>
 
 function defaultFetcher(ref) {
   const q = `projectHash=${encodeURIComponent(ref.projectHash)}&sid=${encodeURIComponent(ref.sid)}&runId=${encodeURIComponent(ref.runId)}`;
   return fetch(`/api/workflow-run?${q}`).then((r) => (r.ok ? r.json() : null));
 }
 
-// 快照取一次,按 runId 全局去重。分屏两个窗格 + 监控面板可能同时渲染同一张终态卡片,
-// 各自 useRef 去重会把同一份(最大 800KB)快照拉三遍,且组件卸载即丢、切回来重拉。
+// 快照取一次,按【runId + taskId】全局去重。分屏两个窗格 + 监控面板可能同时渲染同一张
+// 终态卡片,各自 useRef 去重会把同一份快照拉三遍,且组件卸载即丢、切回来重拉。
 // 模块级缓存跨卸载存活;失败不写缓存(下次挂载可重试),但本函数自己不重试。
-export function getWorkflowSnapshot(ref, { fetcher = defaultFetcher } = {}) {
+//
+// 键里必须带 taskId:同一个脚本续跑(resumeFromRunId)会整体覆写【同名】快照文件,只按 runId
+// 分键会把第一轮那份当成"已经取过"永久发下去 —— 新卡片拿到旧数据,连 selectWorkflowSource
+// 里"已被续跑覆盖"的提示都会写反。taskId 每次启动都是新的,它正是"同一次运行"的判据
+// (selectWorkflowSource 判同一次运行用的也是它)。拿不到 taskId 的调用点退化成 runId 单键:
+// 并发去重与"已解析后再调 0 次"的语义一字不变(契约 C2.6-1/2/3)。
+export function getWorkflowSnapshot(ref, { fetcher = defaultFetcher, taskId = null } = {}) {
   const runId = ref?.runId;
   if (!runId || !ref.projectHash || !ref.sid) return Promise.resolve(null);
-  const hit = snapshotCache.get(runId);
-  if (hit) return hit;
+  const key = runId + ' ' + (typeof taskId === 'string' && taskId ? taskId : '');
+  const hit = snapshotCache.get(key);
+  if (hit) {
+    // LRU:命中移到队尾,淘汰时丢的是最久没用过的那份(重拉一次即可,不影响正确性)。
+    snapshotCache.delete(key); snapshotCache.set(key, hit);
+    return hit;
+  }
   const p = Promise.resolve()
     .then(() => fetcher(ref))
     .catch(() => null)                       // 网络错/非 200/JSON 坏 → null,永不 reject
     .then((snap) => {
-      if (!snap || typeof snap !== 'object') { snapshotCache.delete(runId); return null; }
+      if (!snap || typeof snap !== 'object') { snapshotCache.delete(key); return null; }
       return snap;
     });
-  snapshotCache.set(runId, p);
+  snapshotCache.set(key, p);
+  while (snapshotCache.size > SNAPSHOT_CACHE_MAX) snapshotCache.delete(snapshotCache.keys().next().value);
   return p;
 }

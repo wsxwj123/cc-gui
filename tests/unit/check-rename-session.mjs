@@ -121,10 +121,14 @@ try {
     assert.ok(/prefs\.customTitles = m/.test(put), 'prefs 仍要写(跨端广播/搜索/draft 会话都靠它当缓存)');
 
     const reader = readFileSync(join(root, 'server/services/session-reader.js'), 'utf8');
-    assert.ok(/customTitle: titles\.customTitle,\s*\n\s*aiTitle: titles\.aiTitle,/.test(reader),
-      'listSessions 必须把两个标题分开暴露给前端');
+    // 只钉形状不钉变量名:取值来源从 titles 换成画像对象(prof)不是语义变化,要守的是
+    // "两个字段各自直取、不合并" —— 写成 customTitle: x.customTitle || x.aiTitle 之类
+    // 的合并式(ai-title 塞进 customTitle = 自动标题顶掉用户手改)就匹配不上。
+    // 读侧的不合并防线另有行为级用例兜底(上面 ①/②/③ + 吞并防线那段)。
+    assert.ok(/customTitle: \w+\.customTitle,\s*\n\s*aiTitle: \w+\.aiTitle,/.test(reader),
+      'listSessions 必须把两个标题分开暴露给前端(各自直取,不许合并)');
     assert.ok(/takeTitleLine\(raw, tt\);/.test(reader),
-      '标题行走 readJsonlEdges 已有的整文件回调收集(零额外 I/O),不要另开一遍读盘');
+      '标题行在整文件回调里顺路收集(零额外 I/O),不要另开一遍读盘');
 
     const chat = readFileSync(join(root, 'server/routes/chat.js'), 'utf8');
     const title = chat.slice(chat.indexOf("router.post('/chat/title'"), chat.indexOf('const childEnv = { ...process.env };'));

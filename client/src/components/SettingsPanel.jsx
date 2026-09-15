@@ -7,6 +7,8 @@ import { desktopNotifyEnabled, NOTIFY_PREF_KEY } from '../utils/desktopNotify.js
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import EnvCheckPanel from './EnvCheckPanel.jsx';
+// R44:进程管理入口自坞 rail 收进本面板(高级 tab 内嵌),复用同一组件、不复制。
+import { ProcessPanel } from './ProcessPanel.jsx';
 
 const HOOK_EVENTS = [
   'UserPromptSubmit', 'SessionStart', 'SessionEnd', 'PreToolUse', 'PostToolUse',
@@ -63,6 +65,8 @@ const SETTINGS_INDEX = [
   { id: 'set-hooks', tab: 'hooks', title: 'Hooks 钩子脚本', keys: 'hooks 钩子 脚本 事件' },
   { id: 'set-json', tab: 'advanced', title: '原始配置 settings.json', keys: 'json 原始 配置 settings' },
   { id: 'set-storage', tab: 'advanced', title: '.bak 备份清理', keys: '存储 备份 bak 清理 磁盘 空间' },
+  // R44:进程管理收进设置(坞 rail 里不再有它那枚按钮)。进索引 → 搜索框输入「进程」可直达。
+  { id: 'set-processes', tab: 'advanced', title: '进程管理 / 停止', keys: '进程 process 停止 kill pid cpu 内存 命令行 后台 claude' },
   { id: 'set-network', tab: 'network', title: '局域网访问与端口', keys: '网络 局域网 lan 密码 端口 手机 tailscale 远程' },
 ];
 // 文案改名(用户指定):general tab 显示名「通用」→「更新」;id/tabOf 兼容映射不动
@@ -288,6 +292,13 @@ export function SettingsPanel() {
           <div id="set-storage" className="border-t border-canvas-deep pt-4">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-2">存储清理</div>
             <StorageTab />
+          </div>
+          {/* R44:进程管理自坞 rail 迁入(能力原样保留,只挪入口):直接内嵌同一个
+              ProcessPanel 组件(不复制)。embedded 去掉它自带的 padding/滚动容器,
+              由本 tab 的滚动条承担。Cmd/Ctrl+7 仍可单独把面板开到右侧。 */}
+          <div id="set-processes" className="border-t border-canvas-deep pt-4">
+            <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-2">进程管理 / 停止</div>
+            <ProcessPanel embedded />
           </div>
         </div>
       )}

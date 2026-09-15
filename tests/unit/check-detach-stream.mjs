@@ -190,14 +190,22 @@ assert.ok(/if \(!providerSwitchNotice \|\| providerSwitchNotice\.sticky\) return
   assert.ok(/type: 'detached', reason: 'takeover'/.test(server),
     '服务端必须在 end 掉被接管的旧连接之前发 detached 事件');
   // 静默掉线(非接管、非报错、非本端 abort)= 传输断了,走三振重连;误判成"被接管"就是原 bug。
-  assert.ok(/!sawDoneEvent && !sawTakeover && !sawError\s*\n?\s*&& !controller\.signal\.aborted && !killedRef\.current && !backgroundedRef\.current/.test(src),
-    '静默掉线判据 = 没 done + 没被接管 + 本流没报错 + 不是本端 abort/停止/转后台');
+  // R13 起多一个排除项 !sawGap:gap 只在 stream_gap 分支置真,而那条分支是【服务端明说】
+  // "实时记录已截断、随后主动关流",不是传输掉线 —— 它的恢复路径是历史(唯一来源),
+  // 由 gap 分支自己 force 刷一次 + 收尾轮询补齐;此刻再排一次三振重连只会把"保留窗回放"
+  // 叠在刚恢复的历史上。判据的其余四项一字未动,普通断线(reader 无 done 结束、没收到
+  // detached、不是本端 abort/停止/转后台)照旧触发重连。
+  assert.ok(/!sawDoneEvent && !sawTakeover && !sawError && !sawGap\s*\n?\s*&& !controller\.signal\.aborted && !killedRef\.current && !backgroundedRef\.current/.test(src),
+    '静默掉线判据 = 没 done + 没被接管 + 本流没报错 + 不是 gap + 不是本端 abort/停止/转后台');
   // 7 个错误分支都是 `sawError = true; break`,同样"无 done 结束"。少了 !sawError,
   // 一次上游报错就会触发一轮没意义的重连。
   assert.ok(src.split('sawError = true;').length - 1 >= 7,
     '错误分支应仍以 sawError=true 收尾(判据依赖它)');
-  assert.ok(/if \(event\.type === 'done'\) \{ sawDoneEvent = true; break; \}/.test(src),
-    'done 事件必须记账,否则"没收到 done"判据恒真、正常收尾也会被当成掉线去重连');
+  // done 分支:先记账再 break。R13 在同一分支尾多了一句清掉连接状态提示(setStreamConnNotice),
+  // 记账语句与 break 的相对次序不变(仍要求 `{ sawDoneEvent = true;` 紧跟分支开头、
+  // `break;` 收尾、中间不得出现嵌套块)。记账一丢,"没收到 done"判据就恒真。
+  assert.ok(/if \(event\.type === 'done'\) \{ sawDoneEvent = true;[^}]*break; \}/.test(src),
+    'done 事件必须先记 sawDoneEvent=true 再 break,否则"没收到 done"判据恒真、正常收尾也会被当成掉线去重连');
 }
 // 双保险:流式期间的 backgroundPid=null 不是"进程没了",不许当重置信号。
 // 判据已抽到 utils/reattach.js 的 nextReattachGuard(见 check-reattach-guard.mjs),

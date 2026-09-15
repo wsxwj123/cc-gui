@@ -5,7 +5,9 @@ import { createRoot } from 'react-dom/client';
 // 点了没反应(confirm 同步返回 false → 直接 return)。这是之前删除会话按钮失效的根因。
 // 用一个 promise-based、自挂载的 React modal 替代:任何地方 `await confirmDialog(msg)`
 // 即可,返回 true/false。Esc/点击遮罩=取消,Enter/确定按钮=确认。
-function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, onResolve }) {
+// testId(可选,INTERFACE §10.11⑥):给验收用例一个稳定的定位钩子 —— 根节点 + 两键。
+// 不传 = DOM 与今天逐字相同(现有调用方零影响);传了只多三个 data-testid 属性,不改行为。
+function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, testId, onResolve }) {
   const [checked, setChecked] = useState(false);
   // 有 checkbox 时把勾选状态一并回传 → { confirmed, checked };否则保持布尔(向后兼容)。
   const resolve = (confirmed) => onResolve(checkbox ? { confirmed, checked } : confirmed);
@@ -27,10 +29,15 @@ function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, onRe
       onClick={() => resolve(false)}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        data-testid={testId || undefined}
         className="w-[min(420px,calc(var(--app-w,100vw)-2rem))] rounded-panel bg-canvas border border-canvas-deep shadow-popover p-5 animate-glass-rise"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="text-[13px] text-ink font-body whitespace-pre-wrap leading-relaxed mb-4">
+        {/* 正文可长(如代码块「运行」要把完整命令摊开给用户核对):给上限高度自己滚,
+            不撑破弹窗、也不截断内容。 */}
+        <div className="text-[13px] text-ink font-body whitespace-pre-wrap leading-relaxed mb-4 max-h-[40vh] overflow-y-auto">
           {message}
         </div>
         {checkbox && (
@@ -49,6 +56,7 @@ function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, onRe
               按 Enter 关闭后下一个 danger 删除弹窗立即挂载并聚焦红键,Enter 连击/长按会未经阅读误删。 */}
           <button
             autoFocus={danger}
+            data-testid={testId ? `${testId}-cancel` : undefined}
             onClick={() => resolve(false)}
             className="px-3 py-1.5 rounded-md text-[12px] text-ink-muted hover:bg-canvas-warm font-body transition-colors"
           >
@@ -56,6 +64,7 @@ function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, onRe
           </button>
           <button
             autoFocus={!danger}
+            data-testid={testId ? `${testId}-confirm` : undefined}
             onClick={() => resolve(true)}
             className={`px-3 py-1.5 rounded-md text-[12px] font-body transition-colors ${danger ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-accent hover:bg-accent/90 text-on-accent'}`}
           >
@@ -77,7 +86,7 @@ export function confirmDialog(message, opts) {
   return p;
 }
 
-function showConfirmDialog(message, { danger = false, confirmText = '确定', cancelText = '取消', checkbox = null } = {}) {
+function showConfirmDialog(message, { danger = false, confirmText = '确定', cancelText = '取消', checkbox = null, testId = null } = {}) {
   return new Promise((resolve) => {
     const host = document.createElement('div');
     // 标记供别处避让:确认框的 Esc 监听在 document 冒泡阶段,更早相位的监听(如面板页
@@ -100,6 +109,7 @@ function showConfirmDialog(message, { danger = false, confirmText = '确定', ca
         confirmText={confirmText}
         cancelText={cancelText}
         checkbox={checkbox}
+        testId={testId}
         onResolve={finish}
       />
     );

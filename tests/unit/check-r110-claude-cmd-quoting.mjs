@@ -122,10 +122,13 @@ console.log('\n§6-5 反向:claude 执行链路上不再有旧拼法');
 const CLAUDE_CHAIN = [
   'server/utils/claude-resolver.js', 'server/routes/chat.js', 'server/routes/mcp.js',
   'server/utils/prompt-cache-env.js', 'server/routes/agents.js',
-  'server/routes/subscription-usage.js', 'server/routes/cli-check.js', 'server/routes/version-check.js',
+  'server/routes/cli-check.js', 'server/routes/version-check.js',
 ];
+// subscription-usage.js 不再自己起 claude(R28 合同删掉了它自读订阅 token + curl 冒充 CLI
+// User-Agent 的那条路,额度/目录改走 SDK 控制通道),所以不在上面的"起 CLI 的文件"清单里;
+// 它的新形态由下面的 T10c 单独钉。
 
-check('T10 claude 链路八个文件里,凡执行 claude 的地方都不再手拼 cmd.exe /c', () => {
+check('T10 claude 链路各文件里,凡执行 claude 的地方都不再手拼 cmd.exe /c', () => {
   const hits = [];
   for (const rel of CLAUDE_CHAIN) {
     const lines = readFileSync(join(ROOT, rel), 'utf8').split('\n');
@@ -143,13 +146,34 @@ check('T10 claude 链路八个文件里,凡执行 claude 的地方都不再手�
   assert.deepEqual(hits, [], `claude 链路仍有手拼 cmd.exe /c(Windows 上这些调用点继续吃 < > | & ^):\n       ${hits.join('\n       ')}`);
 });
 
-check('T10b 正向:这八个文件确实经 claudeExecSpec / winCmdSpawnSpec 组装(不是把调用删了了事)', () => {
+check('T10b 正向:这些文件确实经 claudeExecSpec / winCmdSpawnSpec 组装(不是把调用删了了事)', () => {
   for (const rel of CLAUDE_CHAIN) {
     const src = readFileSync(join(ROOT, rel), 'utf8');
     assert.ok(/claudeExecSpec\(|winCmdSpawnSpec\(|claudeCommand\(/.test(src),
       `${rel} 里没有任何统一组装口的调用 —— 反向断言会因此空过`);
     assert.equal(/spawn\('cmd\.exe', \['\/c'/.test(src), false, `${rel} 仍有 spawn('cmd.exe', ['/c' 旧拼法`);
   }
+});
+
+// R28:额度/目录端点的 CLI 形态变了(合同禁止 GUI 自读订阅 token / 自拼 OAuth 请求 / 冒充 CLI
+// User-Agent,旧实现靠 curl + claudeCommand(['--version']) 探测 UA 一并删除)。新形态:SDK 控制通道,
+// 可执行文件由 resolveSdkClaude() 解析 —— Windows 上它只给**已验证的真 exe**(.cmd/.ps1/无扩展名
+// shim、残缺壳包、体积不足的僵尸安装一律返 null,让 SDK 回落自带原生二进制),SDK 直接 spawn 该
+// 可执行文件,不经过 cmd.exe,因此 r110 的"元字符被 cmd 重定向"风险在这条路上不存在。
+// 反向钉住:这两个文件不得再出现自起 CLI 的组装形态。
+check('T10c 额度/目录端点不自起 CLI:经 SDK 控制通道且不得回到 cmd.exe 拼法', () => {
+  const sub = readFileSync(join(ROOT, 'server/routes/subscription-usage.js'), 'utf8');
+  assert.equal(/claudeCommand\(|claudeExecSpec\(|winCmdSpawnSpec\(|cmd\.exe|execFile/.test(sub), false,
+    'subscription-usage 又出现自起 CLI / cmd.exe 拼法 —— 若确有需要,按 r110 §2 把 claudeCommand 的 opts 并进选项后,再把它加回 CLAUDE_CHAIN');
+  assert.ok(/readOfficialUsage\(/.test(sub) && /readOfficialModels\(/.test(readFileSync(join(ROOT, 'server/routes/settings.js'), 'utf8')),
+    '额度/目录必须经 cli-official 的 SDK 控制通道(合同:官方侧能力只走 CLI 自己的通道)');
+
+  const off = readFileSync(join(ROOT, 'server/utils/cli-official.js'), 'utf8');
+  assert.ok(/resolveSdkClaude\(/.test(off) && /pathToClaudeCodeExecutable/.test(off),
+    'cli-official 必须把 resolveSdkClaude() 的结果交给 SDK(否则 Windows 上会拿到 .cmd shim)');
+  // 自己 spawn/execFile 才会重新引入行为差异;SDK 负责 spawn,这里一个都不该有。
+  assert.equal(/execFile|spawn\(|cmd\.exe/.test(off), false,
+    'cli-official 不得自己起进程或拼命令行(SDK 控制通道负责 spawn)');
 });
 
 console.log('\n§2 消费者接线:opts 必须被并进各自的 spawn/execFile 选项');
@@ -161,7 +185,9 @@ check('T11 claudeCommand 的 execFile 类消费者都把 opts 并进了选项', 
   for (const [rel, needle] of [
     ['server/routes/mcp.js', /const \{ file, args: fullArgs, opts: execOpts \} = claudeCommand\(args\);/],
     ['server/routes/agents.js', /execFileP\(file, fullArgs, \{ timeout: 6000, \.\.\.execOpts \}\)/],
-    ['server/routes/subscription-usage.js', /execFileP\(file, args, \{ timeout: 5000, \.\.\.execOpts \}\)/],
+    // (subscription-usage.js 已不是 claudeCommand 消费者 —— 它自起 CLI 的旧路径被 R28 合同删除,
+    //  新形态见 T10c。若将来它重新自起 CLI,须按本检查的现成形态把 opts 并进 execFile/spawn 选项,
+    //  并在这里补回 needle。)
     // r110c:remote-control 走 pty.spawn 而非 execFile —— node-pty 对 string[] 会按 MSVCRT 规则
     // 二次加引号(" → \"),cmd 认不得,verbatim 形态必须传整条命令行字符串,否则 Windows 上
     // 手机远程接管直接起不来(比改前更糟)。锁住这条判据,别被"简化"回数组。

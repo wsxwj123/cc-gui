@@ -56,7 +56,7 @@ assert.strictEqual(computeCost('claude-opus-5', IO, SUB), null, '订阅态 Claud
 // 订阅态:按量付费的第三方照常算钱,且数值与非订阅态逐位相同
 // (k3 / kimi-for-coding* 不在此列 —— 它们是 Kimi Code 套餐档,见下方三档断言)
 for (const [m, want] of [['deepseek-v4-flash', 0.14 + 0.28], ['deepseek-v4-pro', 0.435 + 0.87],
-  ['gpt-5.6-sol', 5 + 30], ['mimo-v2.5-pro', (3 + 6) / CNY], ['kimi-k3', (20 + 100) / CNY]]) {
+  ['gpt-5.6-sol', 4 + 20], ['mimo-v2.5-pro', (3 + 6) / CNY], ['kimi-k3', (20 + 100) / CNY]]) {
   const c = computeCost(m, IO, SUB);
   assert.ok(c, `订阅态下 ${m} 的费用被藏了(P0 回归)`);
   assert.ok(Math.abs(c.totalUsd - want) < 1e-9, `订阅态 ${m} ${c.totalUsd} != ${want}`);

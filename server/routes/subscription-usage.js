@@ -1,54 +1,51 @@
 import { Router } from 'express';
-import { readFileSync } from 'fs';
 import { readFile } from 'fs/promises';
+import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
-import { spawn, execFile } from 'child_process';
-import { promisify } from 'util';
 import { claudeSpawn, cleanChildEnv } from './chat.js';
-import { readClaudeOAuthToken } from './settings.js';
-import { claudeCommand } from '../utils/claude-resolver.js';
+import { readOfficialUsage, simpleHash } from '../utils/cli-official.js';
 
-const execFileP = promisify(execFile);
 const router = Router();
 
-// W7:官方订阅额度。数据来自 GET https://api.anthropic.com/api/oauth/usage —— 官方
-// 自己算好的三档百分比(5h 窗口 / 周·全模型 / 周·当前限额模型),Pro/Max 通用,不写死套餐档位。
-// 原实现 spawn `claude -p /usage` 抠文本:CLI 2.1+ 既慢(~14s 扫本地 session)又不再输出
-// 百分比 → 已删除,不留 fallback(旧路径同样拿不到数字)。
-// 非官方 provider 直接返回 official:false,前端整卡隐藏。
-let cache = null; // { at, data } —— 最后一次成功的数据,401/429 降级时回放
+// ── 官方订阅额度(W7 → R28 重写)────────────────────────────────────────────
+// 数据来自 CLI 自己的 /usage 控制通道(见 utils/cli-official.js):GUI 不读订阅 token、
+// 不拼 OAuth HTTP、不冒充 CLI User-Agent。CLI 说"plan 限额不适用"(API key / Bedrock /
+// Vertex / 第三方中转)就如实报 not-subscribed,绝不拿 0 充数。
+//
+// 60 秒正/负缓存:成功与失败都缓存。命中同一「查询模式+provider 范围」键的并发请求合并成
+// 一次(chat-done 与 120s 轮询会同时打进来);失败也冷却,否则限流期会被自己的轮询加长。
 const CACHE_MS = 60_000;
-// 负缓存:任何非 200(429/401/5xx)都进 CACHE_MS 冷却。没有它时首次就失败(cache 为空)
-// 的账号会在每次 chat-done + 120s 轮询上真打一次 API —— 正被限流时等于自己加长限流。
-// 冷却期内:有旧数据回旧数据(标 degraded),没有就回上次的错误文案。
-let cooldownUntil = 0;
-let lastError = '';
-const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const cache = new Map();   // key -> { at, data }
+const lastGood = new Map(); // key -> 上一次成功的数据(stale 降级用)
+const inflight = new Map(); // key -> Promise(同键并发合并)
 
-// 缺 `User-Agent: claude-code/<ver>` 会落入激进限流桶 → 持续 429。**前缀 claude-code/ 是关键**,
-// 版本号只需大致跟上本机 CLI;探测失败时用这个常量兜底(定期更新)。
-const UA_FALLBACK = 'claude-code/2.1.179';
-let uaCached = '';
-// ponytail:一次 `claude --version` 探测,进程生命周期内缓存(失败不缓存,下次再试)。
-// 不 import version-check.js(另一批在改),也不值得为一个 UA 建第二套版本缓存。
-async function userAgent() {
-  if (uaCached) return uaCached;
-  try {
-    const { file, args, opts: execOpts } = claudeCommand(['--version']);
-    const { stdout } = await execFileP(file, args, { timeout: 5000, ...execOpts });
-    const m = String(stdout).match(/(\d+\.\d+\.\d+)/);
-    if (m) uaCached = `claude-code/${m[1]}`;
-  } catch { /* 探测不到就用常量 */ }
-  return uaCached || UA_FALLBACK;
-}
+export const SOURCE = 'official-sdk-experimental';
 
-function isOfficial() {
+// 当前 provider 说"我是官方"吗。判据与旧实现一致:settings.json 的 ANTHROPIC_BASE_URL
+// 没设或指向 api.anthropic.com。这个门只决定「不 probe 的自动查询要不要真去问 CLI」。
+export function isOfficial() {
   try {
     const s = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8'));
     const base = String(s?.env?.ANTHROPIC_BASE_URL || '');
     return !base || /api\.anthropic\.com/.test(base);
   } catch { return true; }
+}
+
+// 「认证来源/提供方」范围键:切 provider 或改 base URL 立即换键 = 不吃上一个来源的数据。
+// 残余边界:换的只是 Claude 账户(provider/env 都不动)时,只能等下一次真查询(≤60s)
+// 由 CLI 报回的新 accountScope 体现 —— 更早发现就得去读本地凭证,而合同禁止。
+function providerKey() {
+  let base = '';
+  try {
+    const s = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8'));
+    base = String(s?.env?.ANTHROPIC_BASE_URL || '');
+  } catch { /* 读不到按空处理 */ }
+  let id = '';
+  try {
+    id = String(JSON.parse(readFileSync(join(homedir(), '.claude-gui', 'active-provider.json'), 'utf8'))?.id || '');
+  } catch { /* 老装机没有这个文件 */ }
+  return `${simpleHash(base)}:${id}`;
 }
 
 // ISO8601 → "M月d日 HH:mm"(server 本地时区,前端直显不再二次格式化)。
@@ -61,111 +58,200 @@ function formatReset(iso) {
 }
 
 function roundPercent(v) {
-  if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v);
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.min(100, Math.max(0, Math.round(v)));
   return null;
 }
 
-/**
- * /api/oauth/usage 响应 → { session, weekAll, weekScoped }(纯函数,tests/unit 直接 import)。
- * 三段任一都解析不出返回 null(调用方据此报"无法解析")。
- * weekScoped 走 limits[kind==='weekly_scoped'],模型名取 scope.model.display_name ——
- * **不读 seven_day_sonnet 等固定字段**:服务端会随主力模型变更(现为 Fable,sonnet 字段恒 null)。
- */
-export function parseOAuthUsage(raw) {
-  let j;
-  try { j = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { return null; }
-  if (!j || typeof j !== 'object') return null;
-  const seg = (percent, iso, label) => (percent === null
-    ? null
-    : { percent, resetText: formatReset(iso), ...(label ? { label } : {}) });
-  const scoped = Array.isArray(j.limits)
-    ? j.limits.find((l) => l && l.kind === 'weekly_scoped')
-    : null;
-  const out = {
-    session: seg(roundPercent(j.five_hour?.utilization), j.five_hour?.resets_at),
-    weekAll: seg(roundPercent(j.seven_day?.utilization), j.seven_day?.resets_at),
-    weekScoped: scoped
-      ? seg(roundPercent(scoped.percent), scoped.resets_at,
-        typeof scoped.scope?.model?.display_name === 'string' ? scoped.scope.model.display_name : '')
-      : null,
-  };
-  return (out.session || out.weekAll || out.weekScoped) ? out : null;
+function validTime(iso) {
+  if (typeof iso !== 'string' || !iso) return null;
+  return Number.isNaN(Date.parse(iso)) ? null : iso;
 }
 
-// 走 curl 而非 fetch:继承 server 的 https_proxy(api.anthropic.com 常只能经代理可达),
-// 与 settings.js probeOfficialModels 同款。token 经 curl 的 `--config -` 从 stdin 传入,
-// **绝不进 argv / 进程表**。返回 { status, body }。
-function fetchUsage(token, ua) {
-  return new Promise((resolve, reject) => {
-    const ch = spawn('curl',
-      ['-sS', '--max-time', '15', '-w', '\n%{http_code}', '--config', '-', USAGE_URL]);
-    let out = '', err = '';
-    ch.stdout.on('data', (d) => { out += d; });
-    ch.stderr.on('data', (d) => { err += d; });
-    ch.on('error', reject);
-    ch.stdin.on('error', () => {}); // curl 早退 → EPIPE,不该炸进程
-    ch.on('close', (code) => {
-      if (code !== 0) return reject(new Error(err.trim() || `curl 退出码 ${code}`));
-      const i = out.lastIndexOf('\n');
-      resolve({ status: parseInt(out.slice(i + 1), 10) || 0, body: i < 0 ? '' : out.slice(0, i) });
+// 一段额度窗口 → 合同的三段形态。percent 缺失(utilization 为 null)整段记 null,
+// 不写 0 —— 0 是"已用 0%",与"不知道"是两件事。
+function segment(window) {
+  if (!window || typeof window !== 'object') return null;
+  const percent = roundPercent(window.utilization);
+  if (percent === null) return null;
+  return { percent, resetAt: validTime(window.resets_at), resetText: formatReset(window.resets_at) };
+}
+
+/**
+ * CLI 控制响应的 rate_limits → { session, weekAll, weekScoped, modelScoped }(纯函数,单测直 import)。
+ * weekScoped 取服务端 limits[] 来的 model_scoped 首项(名字跟服务端走),没有就退到
+ * seven_day_sonnet / seven_day_opus —— 不写死具体模型名。
+ */
+export function parseCliUsageWindows(rateLimits) {
+  const empty = { session: null, weekAll: null, weekScoped: null, modelScoped: [] };
+  if (!rateLimits || typeof rateLimits !== 'object') return empty;
+  const scoped = Array.isArray(rateLimits.model_scoped) ? rateLimits.model_scoped.filter((s) => s && typeof s === 'object') : [];
+  const modelScoped = scoped.map((s) => {
+    const seg = segment(s);
+    if (!seg) return null;
+    return { ...seg, label: typeof s.display_name === 'string' ? s.display_name : '' };
+  }).filter(Boolean);
+  let weekScoped = modelScoped[0] || null;
+  if (!weekScoped) {
+    const fallback = ['seven_day_sonnet', 'seven_day_opus']
+      .map((key) => (segment(rateLimits[key]) ? { ...segment(rateLimits[key]), label: key === 'seven_day_sonnet' ? 'Sonnet' : 'Opus' } : null))
+      .find(Boolean);
+    weekScoped = fallback || null;
+  }
+  return {
+    session: segment(rateLimits.five_hour),
+    weekAll: segment(rateLimits.seven_day),
+    weekScoped,
+    modelScoped,
+  };
+}
+
+const UNIDENTIFIED_SCOPE = { kind: 'official-cli', scopeId: 'unidentified', authKind: 'unknown', subscription: null };
+
+/**
+ * 非官方 provider 且不 probe 的答案:不查、不猜。字段齐全(合同要求),三段额度一律 null,
+ * official:false —— 不拿第三方额度冒官方,也不用 0 冒充"没查到"。
+ * fetchedAt = 本次判定时间(该答案也在 60s 缓存里,同窗口内两次读数不许抖)。
+ */
+function notApplicablePayload(fetchedAt) {
+  return {
+    official: false,
+    status: 'unavailable',
+    source: SOURCE,
+    fetchedAt,
+    accountScope: UNIDENTIFIED_SCOPE,
+    session: null,
+    weekAll: null,
+    weekScoped: null,
+    code: 'NOT_OFFICIAL_PROVIDER',
+    error: '当前 provider 不是官方订阅（未查询官方额度）；如需探测官方 CLI 是否有订阅，用 ?probe=1',
+  };
+}
+
+/** 用一次 CLI 查询结果 + 同键旧值,组装合同响应。 */
+export function buildQuotaPayload({ result, previous, fetchedAt }) {
+  const base = {
+    official: false,
+    source: SOURCE,
+    fetchedAt,
+    accountScope: previous?.accountScope || UNIDENTIFIED_SCOPE,
+    session: null,
+    weekAll: null,
+    weekScoped: null,
+  };
+  if (result.ok) {
+    const value = result.value;
+    const scope = value.scope || UNIDENTIFIED_SCOPE;
+    if (!value.rateLimitsAvailable) {
+      // CLI 明说 plan 限额不适用(API key / Bedrock / Vertex / 第三方中转)= 没有官方订阅额度。
+      return {
+        ...base,
+        status: 'not-subscribed',
+        accountScope: scope,
+        code: 'NOT_SUBSCRIBED',
+        error: '该账户/会话没有可用的官方订阅额度（CLI 报告 plan 限额不适用）',
+      };
+    }
+    const windows = parseCliUsageWindows(value.rateLimits);
+    if (!windows.session && !windows.weekAll && !windows.weekScoped) {
+      // 说"限额适用"却给不出任何一段:CLI 响应形态变了,如实报字段变动,不显示 0。
+      return {
+        ...base,
+        status: 'unavailable',
+        accountScope: scope,
+        code: 'CLI_RESPONSE_INVALID',
+        error: 'CLI 用量响应里没有可解析的额度窗口',
+      };
+    }
+    return {
+      ...base,
+      official: true,
+      status: 'available',
+      accountScope: scope,
+      ...windows,
+    };
+  }
+  // 失败路径:有同账户旧值 → stale(旧值 + 上次成功时间 + 原因),无旧值 → unavailable。
+  const code = result.code || 'CLI_UNAVAILABLE';
+  const reason = `${code}: ${result.message || '官方 CLI 查询失败'}`;
+  if (previous) {
+    return {
+      ...previous,
+      status: 'stale',
+      degraded: true,
+      fetchedAt: previous.fetchedAt, // 旧值的时间:陈旧就明说陈旧
+      reason,
+      code,
+      error: `显示上次数据（${reason}）`,
+    };
+  }
+  // 没查到任何官方数据:official 只能是 false —— 不能因为当前 provider 是官方就假装有额度。
+  return {
+    ...base,
+    official: false,
+    status: 'unavailable',
+    code,
+    error: reason,
+  };
+}
+
+async function quotaFor(probe) {
+  const key = `${probe ? 'probe' : 'auto'}:${providerKey()}`;
+  const now = Date.now();
+  const hit = cache.get(key);
+  if (hit && now - hit.at < CACHE_MS) return hit.data;
+  if (inflight.has(key)) return inflight.get(key);
+  const pending = (async () => {
+    const result = await readOfficialUsage();
+    const data = buildQuotaPayload({
+      result, previous: lastGood.get(key), fetchedAt: new Date().toISOString(),
     });
-    ch.stdin.write(`header = "authorization: Bearer ${token}"\n`
-      + 'header = "anthropic-beta: oauth-2025-04-20"\n'
-      + 'header = "anthropic-version: 2023-06-01"\n'
-      + `header = "User-Agent: ${ua}"\n`);
-    ch.stdin.end();
-  });
+    cache.set(key, { at: Date.now(), data });
+    if (data.status === 'available') lastGood.set(key, data);
+    return data;
+  })();
+  inflight.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    inflight.delete(key);
+  }
+}
+
+async function notApplicable() {
+  const key = `auto:${providerKey()}`;
+  const now = Date.now();
+  const hit = cache.get(key);
+  if (hit && now - hit.at < CACHE_MS) return hit.data;
+  const data = notApplicablePayload(new Date().toISOString());
+  cache.set(key, { at: Date.now(), data });
+  return data;
 }
 
 router.get('/subscription-usage', async (req, res) => {
-  // 额度卡问的是"当前 provider 的额度",非官方时整卡隐藏 → isOfficial() 门。
-  // R5-b:计价层的 ?probe=1 问的是另一件事 ——"这台机器是否存在官方订阅"(OAuth 凭证是
-  // 机器级的,与当前挂着哪个 provider 无关),那道门对它是误伤:挂着第三方 provider 时
-  // 恒返回 official:false,探测永远拿不到答案,而这正是它要覆盖的场景。
-  if (!req.query.probe && !isOfficial()) return res.json({ official: false });
-  const now = Date.now();
-  // 冷却期内一律不打真 API:有旧数据就回放(标 degraded,不把陈旧数据伪装成新鲜),
-  // 没有就回上次的错误文案。
-  if (now < cooldownUntil) {
-    if (cache) return res.json({ ...cache.data, degraded: true, error: lastError });
-    return res.json({ official: true, error: lastError || '用量接口暂不可用（稍后自动恢复）' });
-  }
-  if (cache && now - cache.at < CACHE_MS) return res.json(cache.data);
-  const token = await readClaudeOAuthToken();
-  if (!token) return res.json({ official: true, error: '未找到 Claude 登录凭证（请在 Claude Code 中登录）' });
-  // curl config 的引号语法:含 " / 反斜杠 / 换行的 token 会破坏 header 行(引号串里 curl 会
-  // 还原 \n \t \" 等转义序列,故反斜杠同样要拦)。理论上不会出现,信任边界仍拦一道。
-  if (/["\\\r\n]/.test(token)) return res.json({ official: true, error: '登录凭证格式异常' });
-
-  let r;
-  try {
-    r = await fetchUsage(token, await userAgent());
-  } catch (e) {
-    lastError = '用量接口请求失败：' + e.message;
-    cooldownUntil = Date.now() + CACHE_MS;
-    return res.json({ official: true, error: lastError });
-  }
-  if (r.status !== 200) {
-    // 401 = OAuth accessToken 的刷新窗口(CLI 一跑就刷新自愈)。**绝不自己刷 token** ——
-    // 会轮转 refreshToken 把 CLI 的登录弄挂。429 = 限流。两者都拿上次数据温和降级。
-    const soft = r.status === 401 || r.status === 429;
-    const msg = r.status === 401 ? '凭证刷新中，显示上次数据（Claude Code 运行后自动恢复）'
-      : r.status === 429 ? '接口限流中，显示上次数据（稍后自动恢复）'
-        : `用量接口 HTTP ${r.status}`;
-    // 负缓存:任何非 200 都冷却 CACHE_MS。429 时再按 60s 节奏打真 API 只会延长限流;首次就
-    // 失败(cache 为空)时更关键 —— 没有它,每次 chat-done + 120s 轮询都会真打一次。
-    lastError = msg;
-    cooldownUntil = Date.now() + CACHE_MS;
-    if (soft && cache) return res.json({ ...cache.data, degraded: true, error: msg });
-    return res.json({ official: true, error: msg });
-  }
-  const parsed = parseOAuthUsage(r.body);
-  if (!parsed) return res.json({ official: true, error: '无法解析用量数据' });
-  const data = { official: true, ...parsed, fetchedAt: Date.now() };
-  cache = { at: Date.now(), data };
-  cooldownUntil = 0; lastError = ''; // 成功即解冷却
+  // probe=1 问的是"这台机器是否存在官方订阅"(OAuth 凭证是机器级的,与当前挂着哪个
+  // provider 无关)→ 那道门只对不 probe 的自动查询生效;带 probe 必须真去问 CLI。
+  const probe = Boolean(req.query.probe);
+  const officialCurrent = isOfficial();
+  if (!probe && !officialCurrent) return res.json(await notApplicable());
+  const data = await quotaFor(probe);
   res.json(data);
 });
+
+// 从 CLI stdout 里抓 file:///…​.html 换成候选本地路径(按顺序试读,先能读到的算数)。
+// 抓不到就只给稳定回落路径 —— 单个候选读不到时不再直接 500,继续试下一个。
+//
+// Windows 上 CLI 打印的是 file:///C:/Users/…/report.html:捕获组拿到的是 /C:/Users/…
+// (带一个前导斜杠),那不是盘符路径,readFile 必失败;所以命中盘符形态时剥掉前导斜杠。
+// mac 上捕获的 /Users/… 就是本地路径,原样返回(既有行为不动)。
+export function insightsReportCandidates(out, home = homedir()) {
+  const fallback = join(home, '.claude', 'usage-data', 'report.html');
+  const m = String(out || '').match(/file:\/\/(\/[^\s"'`]+\.html)/i);
+  if (!m) return [fallback];
+  let captured = m[1];
+  try { captured = decodeURIComponent(captured); } catch { /* 非法百分号编码:按原文试读 */ }
+  if (/^\/[A-Za-z]:[\\/]/.test(captured)) captured = captured.slice(1); // /C:/x → C:/x
+  return captured === fallback ? [fallback] : [captured, fallback];
+}
 
 // 使用报告(/insights)。CLI 内置 slash 命令 /insights 在 -p 模式下可直接执行:
 // 它先把一份 HTML 报告写到 ~/.claude/usage-data/report-<时间戳>.html(同时刷新
@@ -196,14 +282,16 @@ router.post('/insights-report', async (_req, res) => {
   proc.on('close', async () => {
     if (done) return;
     // 从输出里抓 file:///…report…​.html。抓不到则回退到稳定路径 report.html。
-    const m = out.match(/file:\/\/(\/[^\s"'`]+\.html)/i);
-    const htmlPath = m ? decodeURIComponent(m[1]) : join(homedir(), '.claude', 'usage-data', 'report.html');
-    try {
-      const html = await readFile(htmlPath, 'utf8');
-      finish(200, { html, path: htmlPath });
-    } catch (e) {
-      finish(500, { error: '未找到生成的报告文件：' + e.message });
+    // 逐个候选试读:抓到的路径读不到时,继续回落稳定路径 report.html(命中正则就不再回落
+    // 是 Windows 上 500 的成因之一);全读不到才报错,错误文案保持原样。
+    let lastErr = null;
+    for (const htmlPath of insightsReportCandidates(out)) {
+      try {
+        const html = await readFile(htmlPath, 'utf8');
+        return finish(200, { html, path: htmlPath });
+      } catch (e) { lastErr = e; }
     }
+    finish(500, { error: '未找到生成的报告文件：' + lastErr.message });
   });
   proc.on('error', (e) => finish(500, { error: e.message }));
 });

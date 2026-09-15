@@ -33,13 +33,17 @@ const { useStore } = await import('../../client/src/stores/sessionStore.js');
 }
 
 // t2 源码钉:handlePickHit 的落会话分支与 handleSelect 同口径(splitMode → setActiveTabSession)
+// R13 起该函数不再 async(命中行自带 sessionId/projectHash,先当场切、列表回来再补标题,
+// 不再 await fetchSessions)—— 聚焦窗格口径不变;局部变量名随重构改过,钉子只钉口径,
+// 不再把当时的临时变量名(st2/target)当契约。
 {
   const sb = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx', import.meta.url), 'utf8');
-  const pick = sb.match(/const handlePickHit = async \(hit\) => \{[\s\S]*?\n  \};/);
+  const pick = sb.match(/const handlePickHit = \(hit\) => \{[\s\S]*?\n  \};/);
   assert.ok(pick, 't2: handlePickHit 应存在');
-  assert.match(pick[0], /st2\.splitMode/, 't2: pickHit 分 splitMode');
-  assert.match(pick[0], /st2\.setActiveTabSession\(target\)/, 't2: split 下写聚焦窗格');
-  assert.match(pick[0], /fetchMessages\(target\.sessionId, target\.projectHash, \{ tab: st2\.activeTabIndex \}\)/, 't2: 消息也拉到聚焦窗格');
+  assert.match(pick[0], /\.splitMode/, 't2: pickHit 分 splitMode');
+  assert.match(pick[0], /setActiveTabSession\(/, 't2: split 下写聚焦窗格');
+  assert.match(pick[0], /fetchMessages\([^)]*tab: [A-Za-z0-9_.]*activeTabIndex/, 't2: 消息也拉到聚焦窗格');
+  assert.match(pick[0], /setSelectedSession\(/, 't2: 非 split 仍走选中槽');
   assert.ok(!pick[0].match(/setPaneSession\(0,/), 't2: 不许再恒写 pane 0');
 }
 

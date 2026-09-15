@@ -128,7 +128,10 @@ const snap = (over = {}) => ({
 
   // 哨兵 8:用户自己那句话的唯一来源。切会话 effect 把本地 chatMessages 清了,种回时
   // 若把历史里的 user 行也按 sinceTs 截掉,界面上"我发的消息"凭空消失。
-  assert.match(app, /\|\| \(cut\.keepUser && m\.type === 'user'\)\);/,
+  // R37 起这条判据与「本地已无同文本气泡」合并成同一条(见 App.jsx 模块级 makePersistedIndex
+  // 与 visibleMessages):本地孪生在场 → 历史让位(不双显),本地没了 → 历史接棒(不空窗)。
+  // 种回(本地早被清)与真断线后对账(本地被清)是同一场景,故不再单独判 keepUser 标记。
+  assert.match(app, /m\.type === 'user' && !localUserTexts\.has\(msgTextOf\(m\)\)/,
     '种回口径必须保留历史里的 user 行(本地副本已被切会话清掉,历史是它唯一来源)');
 
   // 口径红线:afterLastUser 是记录在案的事故口径(⚡引导折叠会插 user 行 → 切错位置),

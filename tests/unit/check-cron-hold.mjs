@@ -6,7 +6,7 @@
 // 直接 import chat.js 的真函数(非复刻):豁免被删掉时下面的断言必须失败。
 //
 // fixture 来自真实会话 jsonl(不自己编字段名):
-//   ~/.claude/projects/-Users-wsxwj-Desktop-claude-sillytarvern-replica-worktrees-Sillytarvern-k3/
+//   ~/.claude/projects/-Users-dev-Desktop-claude-sillytarvern-replica-worktrees-Sillytarvern-k3/
 //   95a66306-7826-4afd-b3a6-1ae3dd1ba252.jsonl  第 3997/3998 行(CLI 2.1.220,`/loop 1m …`)
 // 要点:成功的 tool_result 【没有】 is_error 字段;tool_use.id 形如 call_… / tool_… 都出现过。
 import assert from 'node:assert/strict';

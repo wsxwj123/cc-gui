@@ -14,7 +14,10 @@ const sessionsRoutes = (await import(`../../server/routes/sessions.js?r33-sideca
 const { attachmentTextHash } = await import('../../server/services/session-reader.js');
 
 const attachment = (name) => ({ kind: 'text', name, path: `/tmp/${name}`, bytes: name.length, preview: null });
-const body = (text, name = `${text}.txt`) => ({ text, displayText: text, attachments: [attachment(name)] });
+// R07 起附件元数据按 sessionId+messageId 写入(messageId 必填)。
+const body = (text, name = `${text}.txt`, messageId = `msg-${text}`) => ({
+  messageId, text, displayText: text, attachments: [attachment(name)],
+});
 
 // 两个独立 HTTP 客户端并发写同 session：响应均成功，最终文件保留两个 textHash。
 const app = express();
@@ -37,17 +40,21 @@ try {
   assert.equal(second.status, 200);
   const file = join(home, '.claude-gui', 'attachments', `${sid}.json`);
   const saved = JSON.parse(await readFile(file, 'utf8'));
-  assert.deepEqual(new Set(Object.keys(saved)), new Set([attachmentTextHash('alpha'), attachmentTextHash('beta')]),
+  assert.deepEqual(new Set(Object.keys(saved).filter((key) => key !== 'messages')),
+    new Set([attachmentTextHash('alpha'), attachmentTextHash('beta')]),
     '并发 HTTP read-merge-write 不丢任一 textHash');
   assert.equal(saved[attachmentTextHash('alpha')].displayText, 'alpha');
   assert.equal(saved[attachmentTextHash('beta')].displayText, 'beta');
+  assert.deepEqual(new Set(Object.keys(saved.messages)), new Set(['msg-alpha', 'msg-beta']),
+    'R07 身份索引同时落下两条 messageId');
 
-  // 同 textHash 重试是覆盖同键而非追加重复项。
-  const retry = await post(body('alpha', 'alpha-retry.txt'));
+  // 同 textHash 重试是覆盖同键而非追加重复项(身份索引里是另一条 messageId,各存一份)。
+  const retry = await post(body('alpha', 'alpha-retry.txt', 'msg-alpha-retry'));
   assert.equal(retry.status, 200);
   const retried = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(Object.keys(retried).length, 2);
+  assert.equal(Object.keys(retried).filter((key) => key !== 'messages').length, 2);
   assert.equal(retried[attachmentTextHash('alpha')].attachments[0].name, 'alpha-retry.txt');
+  assert.equal(Object.keys(retried.messages).length, 3);
   assert.equal((await readdir(join(home, '.claude-gui', 'attachments'))).some((name) => name.includes('.tmp-')), false,
     '原子替换不留临时文件');
 } catch (error) {

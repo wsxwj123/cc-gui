@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { readdir, stat, readFile, writeFile, rename, open, mkdir, unlink } from 'fs/promises';
 import { join, dirname, basename, isAbsolute, resolve } from 'path';
 import { isLocalReq } from '../services/auth.js';
-import { homedir, tmpdir } from 'os';
+import { homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { closePersistentForSession } from './chat.js';
 import { isRealUserQuestion } from './fork.js';
@@ -14,7 +14,7 @@ import { removeSessionFromPrefs } from './prefs.js';
 // like `../../foo` would escape ~/.claude/projects. Real projectHash is a
 // dash-encoded path (no `/`, no `..`); real sessionId is a UUID. Reject
 // anything else.
-function safeId(s) {
+export function safeId(s) {
   if (typeof s !== 'string' || !s) return false;
   if (s.includes('/') || s.includes('\\') || s.includes('..') || s.includes('\0')) return false;
   return true;
@@ -26,11 +26,9 @@ import {
   getSessionMeta,
   getActiveSessions,
   attachmentTextHash,
-  findSessionFile,
 } from '../services/session-reader.js';
-import { claudeSpawn, cleanChildEnv, safeModelArg, getActiveChatProcesses } from './chat.js';
+import { claudeSpawn, cleanChildEnv, getActiveChatProcesses } from './chat.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
-import { mkdirSync, rmSync } from 'fs';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 import { broadcast } from '../broadcast.js';
 import { mergeDraftBindingsBestEffort } from '../services/draft-session-bindings.js';
@@ -45,7 +43,7 @@ const attachmentSidecarStore = createAttachmentSidecarStore({
 
 const router = Router();
 
-function sessionFile(projectHash, sessionId) {
+export function sessionFile(projectHash, sessionId) {
   return join(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`);
 }
 
@@ -62,7 +60,7 @@ export function broadcastSessionFileChange(file, eventType = 'change') {
   } catch {}
 }
 
-function hasRealConversationLine(lines) {
+export function hasRealConversationLine(lines) {
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
@@ -77,7 +75,7 @@ function hasRealConversationLine(lines) {
 // = 会话历史损坏。模块级 per-file Promise 链,新写挂到该文件队尾,finally 清 Map 项。
 // 临时名再带 uuid 双保险(崩溃残留/未来漏走队列的调用点也不会互踩)。
 const _jsonlWriteQueues = new Map(); // filePath -> 队尾 Promise
-async function writeJsonlAtomic(file, text) {
+export async function writeJsonlAtomic(file, text) {
   const prev = _jsonlWriteQueues.get(file) || Promise.resolve();
   const run = prev.catch(() => {}).then(async () => {
     const finalText = text.length && !text.endsWith('\n') ? text + '\n' : text;
@@ -443,22 +441,40 @@ router.get('/sessions/:sessionId', async (req, res) => {
 });
 
 // GET /api/sessions/:sessionId/messages — full message history
+// R12:响应唯一根 schema = { messages, usageTotals, owner, view }。messages/usageTotals 是既有
+// 字段(GUI、TaskCard、WorkflowCard 都在读,一字不能少);owner 明确母归属(读子代理转写时
+// 带真实 parentSessionId+toolUseId,普通会话两者为 null);view.kind 区分会话/子代理,子代理
+// 的有序展示块在 view.blocks。子代理身份与请求的 projectHash 对不上 = 409(归属不可靠),
+// 身份哪里都找不到 = 404,读超时 = 504(照旧不写任何东西)。
+const HISTORY_READ_TIMEOUT_MS = 15_000;
 router.get('/sessions/:sessionId/messages', async (req, res) => {
+  let timer;
   try {
     const { projectHash } = req.query;
     if (!projectHash) {
-      return res.status(400).json({ error: 'projectHash query param required' });
+      return res.status(400).json({ ok: false, code: 'HISTORY_INVALID_INPUT', error: 'projectHash query param required' });
     }
     if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
-      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
+      return res.status(400).json({ ok: false, code: 'HISTORY_INVALID_INPUT', error: 'invalid projectHash or sessionId' });
     }
-    // 响应形态 { messages, usageTotals }:usageTotals 是服务端解析 jsonl 时顺带算好的
-    // 整会话用量聚合(按 message.id 去重逐条求和),前端直接取用,免去几千条消息的
-    // 每帧全量 reduce。客户端(sessionStore.fetchMessages / App.jsx peek)已兼容两种形态。
-    const { messages, usageTotals } = await getSessionMessages(req.params.sessionId, projectHash);
-    res.json({ messages, usageTotals });
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ timedOut: true }), HISTORY_READ_TIMEOUT_MS); });
+    const result = await Promise.race([getSessionMessages(req.params.sessionId, projectHash), timeout]);
+    if (result?.timedOut) {
+      return res.status(504).json({ ok: false, code: 'HISTORY_READ_TIMEOUT', error: '读取会话历史超时' });
+    }
+    if (result?.notFound) {
+      return res.status(404).json({ ok: false, code: 'SESSION_NOT_FOUND', error: '会话不存在' });
+    }
+    if (result?.conflict) {
+      // 子代理转写确实存在,但不在请求给的项目下 —— 归属不可靠,不能拿它当"这个项目的历史"渲染。
+      return res.status(409).json({ ok: false, code: 'AGENT_OWNER_UNRESOLVED', error: '子代理归属与请求的项目不一致' });
+    }
+    res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    // 失败信封只给稳定 code 与短句:ENOENT 这类异常曾把服务器绝对路径回给调用方。
+    res.status(500).json({ ok: false, code: 'HISTORY_READ_FAILED', error: '读取会话历史失败' });
+  } finally {
+    clearTimeout(timer);
   }
 });
 
@@ -516,338 +532,46 @@ router.get('/recent-session', async (req, res) => {
  *
  * Writes a backup copy at `<sid>.jsonl.bak` before rewriting (best-effort).
  */
-// L4: POST /sessions/:sessionId/attachments { text, attachments, displayText }
-// 把附件卡片元数据写入 sidecar(按 textHash 索引,session-reader 重读消息时 merge)。
+// L4/R07: POST /sessions/:sessionId/attachments { messageId, text, attachments, displayText? }
+// 把附件卡片元数据写入 sidecar。messageId 必须是该人工提交的 uuid/steerUuid：元数据按
+// sessionId+messageId 一次写入且不可变——同载荷重试/并发 200 created:false，异载荷 409。
+// 旧 textHash 条目仍写一份(客户端普通发送时还不知道 CLI 落盘的 uuid，见 session-reader)。
+const ATTACHMENT_MESSAGE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const ATTACHMENT_METADATA_MAX_BYTES = 1024 * 1024;
+const ATTACHMENT_WRITE_TIMEOUT_MS = 15_000;
+
+function attachmentError(res, status, code, error) {
+  return res.status(status).json({ ok: false, code, error });
+}
+
 router.post('/sessions/:sessionId/attachments', async (req, res) => {
   try {
     const sid = req.params.sessionId;
-    if (!safeId(sid)) return res.status(400).json({ error: 'bad sessionId' });
-    const { text, attachments, displayText } = req.body || {};
-    if (typeof text !== 'string' || !Array.isArray(attachments)) {
-      return res.status(400).json({ error: 'text + attachments[] required' });
+    const { messageId, text, attachments, displayText } = req.body || {};
+    if (!safeId(sid)
+      || typeof messageId !== 'string' || !ATTACHMENT_MESSAGE_ID_RE.test(messageId)
+      || typeof text !== 'string'
+      || !Array.isArray(attachments)
+      || (displayText !== undefined && displayText !== null && typeof displayText !== 'string')) {
+      return attachmentError(res, 400, 'ATTACHMENT_INVALID',
+        'messageId(1-128位字母/数字/_/-)、text(字符串)、attachments(数组) 必填;displayText 只能是字符串或 null');
+    }
+    // 1MiB 按请求体 UTF-8 字节算(index.js 的 json verify 记录原始字节数)。
+    if (Number(req.jsonBodyBytes) > ATTACHMENT_METADATA_MAX_BYTES) {
+      return attachmentError(res, 413, 'ATTACHMENT_TOO_LARGE', '附件元数据超过 1MiB');
     }
     // 同 session 的独立 HTTP 请求共用一条服务端 Promise 队列：锁内重读最新文件、
-    // 合并 textHash 后写唯一临时文件并 rename。不同 session 使用不同队列，可并行。
-    await attachmentSidecarStore.write(sid, { text, attachments, displayText });
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-router.post('/sessions/:sessionId/trim', async (req, res) => {
-  try {
-    const { projectHash, uuid, fromTimestamp } = req.body || {};
-    if (!projectHash || (!uuid && !fromTimestamp)) {
-      return res.status(400).json({ error: 'projectHash + (uuid or fromTimestamp) required' });
-    }
-    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
-      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
-    }
-    // #26:改写历史前关掉常驻进程 —— 它的内存上下文与截断后的 jsonl 已分叉,复用会答非所问。
-    // await 等进程真退出再读 jsonl,否则可能读到进程退出前的旧写入。
-    await closePersistentForSession(req.params.sessionId);
-    const file = sessionFile(projectHash, req.params.sessionId);
-    let raw;
-    try { raw = await readFile(file, 'utf-8'); }
-    catch { return res.status(404).json({ error: 'session jsonl not found' }); }
-    const lines = raw.split('\n');
-    const cutoffMs = fromTimestamp ? Date.parse(fromTimestamp) : null;
-    let cutIdx = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (!line.trim()) continue;
-      try {
-        const obj = JSON.parse(line);
-        if (uuid && obj.uuid === uuid) { cutIdx = i; break; }
-        if (cutoffMs && obj.timestamp) {
-          const tMs = Date.parse(obj.timestamp);
-          if (!Number.isNaN(tMs) && tMs >= cutoffMs) { cutIdx = i; break; }
-        }
-      } catch {}
-    }
-    if (cutIdx === -1) {
-      return res.status(404).json({ error: 'match not found in session' });
-    }
-    try { await writeFile(file + '.bak', raw, 'utf-8'); } catch {}
-
-    // Check the kept-lines: does it still contain at least one real user or
-    // assistant message? If not, the CLI will refuse to --resume this sid
-    // ("No conversation found with session ID") — the user-visible symptom
-    // is "send/rollback/re-edit silently does nothing". In that case wipe
-    // the jsonl entirely and tell the client to forget the sessionId so
-    // the next send spawns a fresh session.
-    const keptLines = lines.slice(0, cutIdx);
-    if (!hasRealConversationLine(keptLines)) {
-      // 不再物理删 jsonl。回退一条消息却把整个会话文件删掉(且 .bak 也常丢)是
-      // "回退后所有消息消失、会话变僵尸"的根因:删后前端若没干净转 draft,下次仍
-      // 拿旧 sessionId --resume → CLI 报 "No conversation found"。改为保留裁剪后
-      // 的内容(可能只剩 meta),前端收到 sessionReset 转 draft、下次发消息新建会话。
-      // 数据不丢、可在文件树找回,旧会话仍可手动删。
-      await writeJsonlAtomic(file, keptLines.join('\n'));
-      broadcastSessionFileChange(file);
-      return res.json({
-        trimmed: true,
-        sessionReset: true,
-        reason: 'no user/assistant lines would remain — kept meta, client starts fresh',
-        removedFromLine: cutIdx,
-        totalLines: lines.length,
-      });
-    }
-
-    // Atomic write (#12): a plain writeFile truncates-then-writes, so the
-    // polling file-watcher can read a half-written/empty jsonl mid-trim and
-    // momentarily blank the conversation until the next stream. Write to a
-    // same-dir temp and rename (POSIX-atomic on one filesystem) so no reader
-    // ever sees a truncated file.
-    await writeJsonlAtomic(file, keptLines.join('\n'));
-    broadcastSessionFileChange(file);
-    res.json({ trimmed: true, removedFromLine: cutIdx, totalLines: lines.length });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * POST /api/sessions/:sessionId/compact-segment  { projectHash, uuid, direction, model? }
- * 定向压缩(见 compactSegmentJsonl 顶部调研注释)。流程:
- *   1. 读 jsonl,定位锚点,把待压缩段渲染成转写文本;
- *   2. 一次性 claude -p 生成该段摘要(隔离 cwd、不落盘,复用标题生成的 spawn 形态);
- *   3. 关常驻进程 → 重读 jsonl(摘要期间可能有变)→ .bak 备份 → 原子改写。
- */
-router.post('/sessions/:sessionId/compact-segment', async (req, res) => {
-  try {
-    const { projectHash, uuid, direction } = req.body || {};
-    if (!projectHash || !uuid || (direction !== 'before' && direction !== 'after')) {
-      return res.status(400).json({ error: 'projectHash + uuid + direction(before|after) required' });
-    }
-    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
-      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
-    }
-    const file = sessionFile(projectHash, req.params.sessionId);
-    let raw;
-    try { raw = await readFile(file, 'utf-8'); }
-    catch { return res.status(404).json({ error: 'session jsonl not found' }); }
-
-    // 定位锚点 + 组段。先干跑一次 compactSegmentJsonl 校验锚点合法(不是用户消息 /
-    // 跨锚点工具配对等),避免白跑一次昂贵的摘要生成。
-    const dry = compactSegmentJsonl(raw, uuid, direction, '(dry-run)');
-    if (!dry.ok) return res.status(400).json({ error: dry.error });
-
-    const lines = raw.split('\n');
-    const parsed = lines.map((l) => { if (!l.trim()) return null; try { return JSON.parse(l); } catch { return null; } });
-    const anchorIdx = parsed.findIndex((o) => o?.uuid === uuid);
-    const segment = direction === 'before' ? parsed.slice(0, anchorIdx) : parsed.slice(anchorIdx);
-    const transcript = renderSegmentTranscript(segment);
-    if (!transcript.trim()) return res.status(400).json({ error: '待压缩段没有可总结的内容' });
-
-    // 摘要生成:与 /chat/title 同形态(stdin 喂 prompt 绕开 Windows cmd 元字符;
-    // plan 模式只读;--no-session-persistence 不落盘;隔离 tmp cwd 不污染项目)。
-    const model = safeModelArg(String(req.body?.model || '').replace(/\[1m\]/i, ''));
-    const prompt = `请把下面 <对话></对话> 标签内的一段开发对话压缩成一份信息保全的中文摘要。要求:\n- 保留:任务目标、关键决策与理由、涉及的文件路径与函数名、已完成/未完成事项、重要结论与数据、用户明确的要求与偏好。\n- 省略:寒暄、重复内容、工具调用的过程细节。\n- 用条目式陈述,直接输出摘要本身,不加任何前言或解释。\n\n<对话>\n${transcript}\n</对话>`;
-    const summaryText = await new Promise((resolve) => {
-      let proc;
-      // 每次请求用唯一子目录(同 /chat/title):并发的两个压缩请求共用固定 cwd 会互相
-      // 污染;用完只删自己建的这个子目录,父目录 cgui-compact 保留。
-      const compactCwd = join(tmpdir(), 'cgui-compact', `${process.pid}-${randomUUID()}`);
-      const cleanupCompactCwd = () => { try { rmSync(compactCwd, { recursive: true, force: true }); } catch {} };
-      try {
-        const args = ['-p', '--permission-mode', 'plan', '--no-session-persistence'];
-        if (model) args.push('--model', model);
-        // 必须同步建目录:异步 mkdir 未 await 就 spawn(cwd:compactCwd),首次目录不存在
-        // → spawn cwd 无效直接失败,用户首次用定向压缩必得 502(第二次才成)。同 title 用 mkdirSync。
-        try { mkdirSync(compactCwd, { recursive: true }); } catch {}
-        proc = claudeSpawn(args, { cwd: compactCwd, stdio: ['pipe', 'pipe', 'pipe'], env: cleanChildEnv() });
-        proc.stdin.write(prompt); proc.stdin.end();
-      } catch { cleanupCompactCwd(); return resolve(''); }
-      if (!proc.pid) { cleanupCompactCwd(); return resolve(''); }
-      proc.stderr?.resume(); // 不排空 stderr 超 64KB 会把子进程写死(同 /chat/title)
-      let out = '';
-      let done = false;
-      const finish = () => {
-        if (done) return; done = true;
-        clearTimeout(timer);
-        try { proc.kill('SIGKILL'); } catch {}
-        cleanupCompactCwd();
-        resolve(out.trim());
-      };
-      const timer = setTimeout(finish, 180000);
-      proc.stdout.on('data', (c) => { out += c.toString(); });
-      proc.on('close', finish);
-      proc.on('error', () => { if (!done) { done = true; clearTimeout(timer); cleanupCompactCwd(); resolve(''); } });
+    // 合并后写唯一临时文件并 rename(不同 session 可并行)。
+    const result = await attachmentSidecarStore.write(sid, {
+      messageId, text, attachments, displayText, timeoutMs: ATTACHMENT_WRITE_TIMEOUT_MS,
     });
-    // 失败/错误文本兜底:未登录、限流等 CLI 会把英文错误吐到 stdout,不能当摘要写进会话。
-    if (!summaryText || summaryText.length < 20
-      || /not logged in|please run|api key|unauthor|rate limit|error:|usage:/i.test(summaryText.slice(0, 200))) {
-      return res.status(502).json({ error: '摘要生成失败(模型无输出或返回错误),会话未改动' });
-    }
-
-    const summaryContent = direction === 'before'
-      ? `此前的对话内容已被压缩为以下摘要(原始记录保留在会话文件中,不再计入上下文):\n\n${summaryText}`
-      : `以下是本会话中已被回退移除的一段后续对话的摘要,供参考:\n\n${summaryText}`;
-
-    // 改写前关常驻进程(内存上下文与改写后的 jsonl 分叉,复用会答非所问,同 trim)。
-    // await 等进程真退出再重读 jsonl(同 trim)。
-    await closePersistentForSession(req.params.sessionId);
-    // 摘要生成耗时分钟级,期间会话可能有新回合落盘 → 重读最新内容再改写。
-    let freshRaw;
-    try { freshRaw = await readFile(file, 'utf-8'); }
-    catch { return res.status(404).json({ error: 'session jsonl not found' }); }
-    const result = compactSegmentJsonl(freshRaw, uuid, direction, summaryContent);
-    if (!result.ok) return res.status(409).json({ error: result.error });
-
-    try { await writeFile(file + '.bak', freshRaw, 'utf-8'); } catch {}
-    await writeJsonlAtomic(file, result.lines.join('\n'));
-    broadcastSessionFileChange(file);
-    res.json({ ok: true, direction, summaryChars: summaryText.length });
+    res.json({ ok: true, messageId, created: result.created === true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * POST /api/sessions/:sessionId/trim-before-tool  { projectHash, toolUseId }
- * Tool retry support: keep the conversation exactly up to the content block
- * before the selected assistant tool_use, then remove that tool call, its
- * tool_result, and everything after it. The next hidden continuation prompt
- * resumes from that partial assistant turn, so earlier text / earlier tools in
- * the same reply stay visible instead of replaying the whole turn.
- */
-router.post('/sessions/:sessionId/trim-before-tool', async (req, res) => {
-  try {
-    const { projectHash, toolUseId } = req.body || {};
-    if (!projectHash || !toolUseId) {
-      return res.status(400).json({ error: 'projectHash + toolUseId required' });
+    if (err?.code === 'ATTACHMENT_CONFLICT' || err?.code === 'ATTACHMENT_TIMEOUT') {
+      return attachmentError(res, err.status, err.code, err.message);
     }
-    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
-      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
-    }
-    await closePersistentForSession(req.params.sessionId); // #26:改写历史前关常驻进程(同 trim);await 等进程真退出再读 jsonl
-
-    const file = sessionFile(projectHash, req.params.sessionId);
-    let raw;
-    try { raw = await readFile(file, 'utf-8'); }
-    catch { return res.status(404).json({ error: 'session jsonl not found' }); }
-
-    const { found, keptLines, removedFromLine, totalLines, keptAssistantBlocks } = trimJsonlBeforeTool(raw, toolUseId);
-    if (!found) return res.status(404).json({ error: 'tool_use not found in session' });
-    try { await writeFile(file + '.bak', raw, 'utf-8'); } catch {}
-
-    if (!hasRealConversationLine(keptLines)) {
-      // 和 /trim 一致:不再物理删 jsonl(删后若前端没干净转 draft,下次仍 --resume
-      // 旧 sessionId → "No conversation found" 僵尸会话)。保留裁剪后的内容,回
-      // sessionReset 让前端转 draft、下次发消息新建会话。
-      await writeJsonlAtomic(file, keptLines.join('\n'));
-      broadcastSessionFileChange(file);
-      return res.json({
-        trimmed: true,
-        sessionReset: true,
-        reason: 'no user/assistant lines would remain — kept meta, client starts fresh',
-        removedFromLine,
-        totalLines,
-      });
-    }
-
-    await writeJsonlAtomic(file, keptLines.join('\n'));
-    broadcastSessionFileChange(file);
-    res.json({
-      trimmed: true,
-      toolUseId,
-      removedFromLine,
-      totalLines,
-      keptAssistantBlocks,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * POST /api/sessions/:sessionId/strip-thinking  { projectHash }
- * Remove all `thinking` content blocks from assistant lines in the jsonl.
- * Reason: cc switch routes Claude → DeepSeek/MiMo etc. The previous turns'
- * thinking blocks carry Anthropic-issued signatures that the new backend
- * rejects with `400 messages.X.content.0: Invalid signature in thinking
- * block`. Stripping them before `--resume` keeps the conversation flowing
- * across provider switches. Backup is written to `<sid>.jsonl.bak` first.
- */
-router.post('/sessions/:sessionId/strip-thinking', async (req, res) => {
-  try {
-    const { projectHash } = req.body || {};
-    if (!projectHash) return res.status(400).json({ error: 'projectHash required' });
-    if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
-      return res.status(400).json({ error: 'invalid projectHash or sessionId' });
-    }
-    await closePersistentForSession(req.params.sessionId); // #26:改写历史前关常驻进程(同 trim);await 等进程真退出再读 jsonl
-    const file = join(homedir(), '.claude', 'projects', projectHash, `${req.params.sessionId}.jsonl`);
-    let raw;
-    try { raw = await readFile(file, 'utf-8'); }
-    catch { return res.status(404).json({ error: 'session jsonl not found' }); }
-    // Best-effort .bak before rewrite.
-    try { await writeFile(file + '.bak', raw, 'utf-8'); } catch {}
-
-    const lines = raw.split('\n');
-    let strippedBlocks = 0;
-    let touchedLines = 0;
-    const out = lines.map((line) => {
-      if (!line.trim()) return line;
-      try {
-        const obj = JSON.parse(line);
-        if (obj.type === 'assistant' && obj.message && Array.isArray(obj.message.content)) {
-          const before = obj.message.content.length;
-          const filtered = obj.message.content.filter((c) => c?.type !== 'thinking');
-          // 纯 thinking 轮次:剥离后 content 变 [],Anthropic API 拒绝空 content 的
-          // assistant 记录(400)导致 resume 失败。这种行保留原样不剥离。
-          // (实测:独立的 thinking-only 行不会被上游做签名校验——只有与 tool_use/text
-          //  同处一条 message 的 thinking 才校验,那种情况 filter 后仍非空、正常剥离。)
-          if (filtered.length === 0) return line;
-          obj.message.content = filtered;
-          const removed = before - filtered.length;
-          if (removed > 0) {
-            strippedBlocks += removed;
-            touchedLines += 1;
-            return JSON.stringify(obj);
-          }
-        }
-      } catch {}
-      return line;
-    });
-    // 原子写(tmp+rename),和 trim 一致 —— 避免裸 writeFile 截断后、写完前被文件
-    // 监听器读到空内容,导致前端会话瞬间清空。
-    await writeJsonlAtomic(file, out.join('\n'));
-    broadcastSessionFileChange(file);
-    res.json({ strippedBlocks, touchedLines });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * POST /api/sessions/:sessionId/repair-official-compat
- * r10-12:旧会话(第三方历史)切官方 400 "text content blocks must be non-empty"。
- * 定位复用 findSessionFile(逐项目目录探 sid.jsonl,无需 projectHash)→ 备份
- * `<file>.bak-<ts>` → repairOfficialCompat(只删空块/空行,parentUuid 链接骨)→
- * 原子写 → 返回 report → 广播 file-change(前端转 cgui:sessions-changed)。
- * 会话有在跑进程 → 409(先停再修,防修完被旧进程写回分叉);idle 常驻保活按
- * trim/strip-thinking 先例 closePersistentForSession 自动关闭再修。
- * r26-G1:写盘走 repairSessionFileGuarded 的 TOCTOU 双闸(写前复查在跑进程 +
- * mtime/size 双判),窗口期内有新活动 → 409 请用户重试,原文件不动。
- */
-/**
- * GET /api/sessions/:sessionId/repair-official-compat — r11-⑤ 只读体检(dry-run)。
- * 复用 repairOfficialCompat 纯函数但不落地:不备份、不写盘、不关常驻进程,
- * 运行中也允许查(只读)。常驻入口「官方兼容体检与清理」随时可查靠它。
- */
-router.get('/sessions/:sessionId/repair-official-compat', async (req, res) => {
-  try {
-    const sid = req.params.sessionId;
-    if (!safeId(sid)) return res.status(400).json({ error: 'invalid sessionId' });
-    const file = await findSessionFile(sid);
-    if (!file) return res.status(404).json({ error: 'session jsonl not found' });
-    const raw = await readFile(file, 'utf-8');
-    const { report } = repairOfficialCompat(raw.split('\n'));
-    const wouldChange = !!(report.emptyText || report.emptyThinking || report.droppedLines || report.relinked);
-    res.json({ report, wouldChange });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    // 500 不回显内部堆栈/路径细节。
+    attachmentError(res, 500, 'ATTACHMENT_WRITE_FAILED', '附件元数据写入失败');
   }
 });
 
@@ -906,33 +630,6 @@ export async function repairSessionFileGuarded(file, checkRunning) {
   await gcRepairBackups(file); // r26-G10:修复成功后收敛历史 .bak-<ts>
   return { status: 'ok', report, changed: true };
 }
-
-router.post('/sessions/:sessionId/repair-official-compat', async (req, res) => {
-  try {
-    const sid = req.params.sessionId;
-    if (!safeId(sid)) return res.status(400).json({ error: 'invalid sessionId' });
-    const isRunning = () => getActiveChatProcesses().some(
-      (p) => p.sessionId === sid && p.exitCode === null && !p.idle,
-    );
-    if (isRunning()) return res.status(409).json({ error: '会话正在运行,请先停止再清理' });
-    await closePersistentForSession(sid); // idle 常驻:关掉再改写(同 trim/strip-thinking)
-    const file = await findSessionFile(sid);
-    if (!file) return res.status(404).json({ error: 'session jsonl not found' });
-    const outcome = await repairSessionFileGuarded(file, isRunning);
-    if (outcome.status === 'running') {
-      // 闸一:窗口期内进程起来了(用户重新发了消息)——与入口 409 同文案。
-      return res.status(409).json({ error: '会话正在运行,请先停止再清理' });
-    }
-    if (outcome.status === 'stale') {
-      // 闸二:窗口期内文件被写过(CLI 落盘延迟)——409 让用户重试,原文件没动。
-      return res.status(409).json({ code: 'repair-stale', error: '会话刚有新活动，请重试' });
-    }
-    if (outcome.changed) broadcastSessionFileChange(file);
-    res.json({ report: outcome.report, changed: outcome.changed });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 /**
  * DELETE /api/sessions/:sessionId?projectHash=...

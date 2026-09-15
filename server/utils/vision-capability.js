@@ -18,6 +18,13 @@ const VISION_CAPABILITY_CATALOG = [
   // `deepseek/deepseek-…-vision`(org 恰为 deepseek)在【全 id】阶段就会首命中下面的
   // 一刀切并返回,永远轮不到剥尾段重试 —— 例外行必须自己吃下这种全 id(判官 r37 实测)。
   { re: /^deepseek[\w./-]*vision/i, vision: true },
+  // r116:V4.1-Flash 起视觉并进 Flash 系,名称不再带 "vision"(官方文档:`deepseek-flash`
+  // = DeepSeek-V4.1-Flash 支持图像理解;旧名 `deepseek-v4-flash` / `-vision-exp` 仍可调用
+  // 但对应模型已下线,请求由 V4.1-Flash 承接 → 旧名同样放行)。`deepseek-v4-pro` 官方
+  // 明写不支持 → 不进本行,仍走下方一刀切。字符类含 `/` 的理由同上条(例外行必须自己
+  // 吃下 `deepseek/deepseek-…` 全 id 形态,剥尾段重试轮不到)。
+  // 这是"按名字模式猜能力"的替换点:厂商改名即静默过期,再改名/换承接模型时本行要复查。
+  { re: /^deepseek[\w./-]*flash/i, vision: true },
   // DeepSeek 其余模型无图像输入(CI-4 实证:image_url 报 400 unknown variant)。
   { re: /^deepseek/i, vision: false },
   // 以下为多模态公开事实明确的家族(判错成 false 只是多剥一次图,有占位文本兜底)。

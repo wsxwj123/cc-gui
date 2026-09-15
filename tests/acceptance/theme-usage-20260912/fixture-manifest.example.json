@@ -1,0 +1,13 @@
+{
+  "dataRoot": "/Users/<you>/…/.claude/worktrees/batch/tests/acceptance/theme-usage-20260912/.artifacts/runtime-data",
+  "buildLabel": "worktree codex/fix-batch-first-20260910（本套件自造夹具，无外部输入）",
+  "platform": "chromium",
+  "observedAt": "2026-09-12T00:00:00Z",
+  "session": {
+    "projectName": "fixture-workspace",
+    "projectHash": "cwd 里非字母数字换成 `-` 后的目录名（= ~/.claude/projects/<这个>）",
+    "sessionId": "b7000001-0000-4000-8000-0000000000a1",
+    "searchMarker": "TU_FIXTURE_SESSION_20260912",
+    "workspace": "<dataRoot>/fixture-workspace"
+  }
+}

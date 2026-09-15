@@ -93,7 +93,15 @@ ok('MessageBubble:三个锚都在,且 body 由 open 门控(收起态不渲染)',
   assert.match(bubble, /\{open && \(\s*<div data-testid="genui-action-message-body"/);
   // 折叠入口挂在用户消息分支里,且走识别函数而不是就地写死前缀
   assert.match(bubble, /if \(message\.genuiAction \|\| isActionMessage\(message\.text\)\)/);
-  assert.ok(bubble.includes('<GenuiActionFold text={message.text} />'));
+  // R07(2026-09-10):折叠卡同样承载消息身份 —— data-message-id 是全产品统一的消息身份属性
+  // (INTERFACE「公共规则、身份与错误」),所以调用点多了 messageId。text 仍逐字是整条外发
+  // 原文(审计要求"展开后一个字不省"),两条一起锁:少传 text 或身份接不上都当场转红。
+  assert.match(bubble, /<GenuiActionFold text=\{message\.text\} messageId=\{message\.uuid\} \/>/,
+    '折叠调用点必须仍传整条 message.text,并按 R07 带上 messageId={message.uuid}');
+  assert.match(bubble, /function GenuiActionFold\(\{ text, messageId[^}]*\}\)/,
+    'GenuiActionFold 必须接收 messageId');
+  assert.match(bubble, /data-testid="message-card" data-message-id=\{messageId \|\| undefined\}/,
+    '折叠卡要把身份落到 data-message-id 上(缺 uuid 时不渲染该属性,而不是渲染空值)');
 });
 
 // ── 6. 服务端历史标记:只加标记不加过滤,且前缀与前端逐字一致 ─────────────────

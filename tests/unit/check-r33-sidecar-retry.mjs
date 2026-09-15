@@ -40,7 +40,10 @@ class GrowthQuotaStorage extends MemoryStorage {
 const image = (name, preview = null) => ({
   kind: 'image', name, path: `/tmp/${name}`, bytes: 4 * 1024 * 1024, preview,
 });
+// R07 起客户端每次入队都带 messageId（服务端按它做身份索引）；这里跟齐真实载荷形态。
+// "升级前、payload 里没有 messageId 的存量条目"另由 check-r07-attachment-outbox 覆盖。
 const payload = (name, preview = null) => ({
+  messageId: `msg-r33-${name}`,
   text: `请查看附件\n\n附件:\n@/tmp/${name}`,
   displayText: `查看 ${name}`,
   attachments: [image(name, preview)],

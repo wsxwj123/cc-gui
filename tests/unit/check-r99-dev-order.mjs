@@ -27,6 +27,11 @@ const PARAMS = [
   'setBackgroundPid', 'updateStreaming', 'setStreamingText', 'setStreamingThinking',
   'setStreamingToolCalls', 'setStreamingBlocks', 'setStreamHistCutoff',
   'fetchMessagesForTab', 'resendReplacing', 'confirmDialog', 'setRetryActiveUuid',
+  // R25:裁剪改走统一入口(App.jsx 顶部 import 的 utils/historyOps.js → runHistoryOp,
+  // 内部"预览 → 提交"两步)。注入它不等于放松:替身只记录 op 名、返回成功信封,
+  // 下面所有顺序断言一字未动(不注入 = 真实源码必抛 "runHistoryOp is not defined",
+  // 三条用例会以"环境不成立"而不是"顺序错了"收场)。
+  'runHistoryOp',
 ];
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const run = new AsyncFunction(...PARAMS, BODY);
@@ -61,6 +66,12 @@ function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = 
     resendReplacing: (text, o) => { calls.push('resend'); sent.push({ text, o }); },
     confirmDialog: (m) => { calls.push('confirmDialog:' + m); },
     setRetryActiveUuid: noop,
+    // R25 的统一入口替身:记 `runHistoryOp:<op>`(下面的 idx 用 includes 找 'trim-before-tool',
+    // 同时证明这次裁剪确实经统一入口,不是又冒出一条自拼 fetch 的旁路)。
+    runHistoryOp: async (sessionId, op, params = {}) => {
+      calls.push(`runHistoryOp:${op}${params.toolUseId ? ':' + params.toolUseId : ''}`);
+      return { ok: true, status: 200, data: {} };
+    },
   };
   return { calls, sent, ctx, go: () => run(...PARAMS.map((p) => ctx[p])) };
 }

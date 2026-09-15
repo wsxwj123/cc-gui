@@ -78,7 +78,22 @@ t('①b 同会话只自动回退一次,标记 keyed by sessionId(分屏不串)',
   // handleRetryToolRef.current?.( 的 opts 里,而不是调用之前(截断 EPERM 失败时不烧掉唯一一次机会)。
   assert.ok(markIdx > REWIND.indexOf('handleRetryToolRef.current?.('), '标记必须在回退调用的 opts 里(截断成功后回调)');
   assert.match(REWIND, /onTrimmed: \(\) => \{ if \(sid\) setRiskRewoundSids\(/, 'onTrimmed 回调里置位');
-  assert.match(A, /if \(!tr\.ok\) throw new Error\(trData\.error \|\| tr\.status\);\n[^\n]*\n[^\n]*\n\s*opts\.onTrimmed\?\.\(\);/, 'onTrimmed 必须在 trim 成功判定之后调用');
+  // R25 重构后收尾判据从"裸 fetch 的 trData.status"换成统一入口的信封 {ok,error,status}:
+  // 断言语义不变 —— onTrimmed 必须在【截断成功判定之后】调用,且全文件只有这一处调用点。
+  const body = A.slice(A.indexOf('const handleRetryTool = useCallback'), A.indexOf('const handleRetryToolRef = useRef'));
+  const failIdx = body.indexOf('if (!tr.ok) throw new Error(');
+  const callIdx = body.indexOf('opts.onTrimmed?.();');
+  assert.ok(failIdx > 0, '裁剪失败判定必须还在(失败即抛,继续走到提示)');
+  assert.ok(callIdx > failIdx, `onTrimmed 必须在裁剪成功判定之后调用(失败判定@${failIdx},通知@${callIdx})`);
+  assert.equal((body.match(/opts\.onTrimmed\?\.\(\)/g) || []).length, 1,
+    'onTrimmed 只许一处调用点(多一处就可能绕开成功判定)');
+});
+t('①b 裁剪走统一入口(R25 接线契约:客户端只走"预览→提交"两步,不自拼端点)', () => {
+  const body = A.slice(A.indexOf('const handleRetryTool = useCallback'), A.indexOf('const handleRetryToolRef = useRef'));
+  assert.match(body, /const tr = await runHistoryOp\(sel\.sessionId, 'trim-before-tool', \{/,
+    '裁剪必须经 utils/historyOps.js 的统一入口');
+  assert.equal(count(body, /fetch\(`\/api\/sessions\//g), 0, '不许自拼历史端点(会跳过预览令牌/备份)');
+  assert.match(A, /import \{ runHistoryOp \} from '\.\/utils\/historyOps\.js'/);
 });
 t('①b 按钮判据与退化条件对齐:有后续用户消息 / 已回退过 → 不给自动回退', () => {
   const memo = A.slice(A.indexOf('const contentRiskAnchor = useMemo'), A.indexOf('// /branch 分叉'));
@@ -143,9 +158,11 @@ for (const [tok, want] of COUNTS) {
     assert.equal(n, want);
   });
 }
-t('4.3 confirmDialog 60~61', () => {
+// E 项(Pricing §10.8)在 CustomProviderForm.save() 新增 1 个确认框调用点(baseURL 撞预设
+// 时问「切到该预设 / 保持不变」)→ 上限 61→62,下界不动。
+t('4.3 confirmDialog 60~62', () => {
   const n = A.split('confirmDialog').length - 1;
-  assert.ok(n >= 60 && n <= 61, `实际 ${n}`);
+  assert.ok(n >= 60 && n <= 62, `实际 ${n}`);
 });
 // 注:INTERFACE §4.2 写「window.confirm 0 次」,但改前基线就有 1 次(2973 行的注释
 // "不用 window.confirm")。这里锁「调用点 0 次 + 注释仍在」,口径比字面锁更准。

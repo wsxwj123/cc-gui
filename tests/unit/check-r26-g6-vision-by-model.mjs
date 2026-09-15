@@ -3,7 +3,8 @@
 // (model-capabilities.js 新增 lookupVisionCapability),baseURL 正则降为
 // 「模型名查无记录」时的兜底;判定按 `${baseURL}|${model}` 缓存。
 // 哨兵:S1 删掉模型名主判据(回到纯 baseURL 正则)→ t1/t2 红;
-//       S2 删掉兜底分支 → t3 红;S3 视觉表判反 → t1/t2 红。
+//       S2 删掉兜底分支 → t3 红;S3 视觉表判反 → t1/t2 红;S4 删掉 r116 的 Flash 系
+//       例外行 → t7 红。
 import assert from 'node:assert/strict';
 import { setOpenAIUpstream, upstreamNoVision } from '../../server/services/openai-proxy.js';
 // r63:lookupVisionCapability 抽到独立纯模块(前端复用),import 路径随迁
@@ -20,7 +21,9 @@ assert.equal(judge('https://deepseek-gateway.internal.example/v1', 'claude-sonne
 // t2(漏判哨兵,修前必红):已知无视觉模型 + 官方/陌生 URL → 剥图
 assert.equal(judge('https://api.openai.com/v1', 'deepseek-chat'), true,
   't2: deepseek-chat 无视觉,即使走官方 URL 也剥图(修前 baseURL 不含 deepseek → 漏判)');
-assert.equal(judge('https://aggregator.example/v1', 'deepseek-v4-flash'), true,
+// r116 起该哨兵用 deepseek-v4-pro(官方明写不支持视觉 —— 原用 deepseek-v4-flash,
+// 该名已由 V4.1-Flash 承接且有视觉,见 t7):断言意图不变 = 模型名主判据判无视觉仍剥图。
+assert.equal(judge('https://aggregator.example/v1', 'deepseek-v4-pro'), true,
   't2: 聚合站 URL 不含 deepseek 字样,模型名判无视觉仍剥图');
 
 // t3(兜底哨兵):查无记录模型 → 回落旧 baseURL 正则,行为不变
@@ -55,8 +58,27 @@ assert.equal(judge('https://api.deepseek.com/v1', 'deepseek-v4-flash-vision-exp'
   't6: deepseek 识图模型即使走官方 deepseek URL 也不剥图(修前被一刀切剥掉)');
 assert.equal(judge('http://127.0.0.1:8798/opencode', 'deepseek-v4-flash-vision-exp'), false,
   't6: opencode 聚合下的 deepseek 识图模型不剥图(修前 baseURL 兜底也会剥)');
-assert.equal(lookupVisionCapability('deepseek-v4-flash'), false,
-  't6: 非识图的 deepseek 模型仍判无视觉(例外不扩大)');
+assert.equal(lookupVisionCapability('deepseek-v4-pro'), false,
+  't6: 非识图的 deepseek 模型仍判无视觉(例外不扩大;r116 起换用官方明写无视觉的 v4-pro)');
+
+// t7(r116,修前必红):厂商把视觉并进 Flash 系后名称不再带 "vision",旧名由新模型承接 ——
+// 事实来自官方文档(deepseek-flash = DeepSeek-V4.1-Flash 支持图像理解;deepseek-v4-flash /
+// deepseek-v4-flash-vision-exp 已下线但请求由 V4.1-Flash 承接),不是放宽阈值。
+// 变异:删掉 r116 的 flash 例外行 → 下面逐条落回一刀切 false,全部红。
+for (const id of [
+  'deepseek-flash',
+  'deepseek-v4.1-flash',
+  'deepseek-v4-flash',                     // 旧名,请求由 V4.1-Flash 承接
+  'deepseek-v4.1-flash[1m]',               // GUI 配置里的 1M 后缀形态
+  'openrouter/deepseek-v4.1-flash',        // 命名空间前缀剥尾段
+  'deepseek/deepseek-v4.1-flash',          // org 恰为 deepseek 的聚合商全 id
+]) {
+  assert.equal(lookupVisionCapability(id), true, `t7: ${id} 判有视觉`);
+}
+assert.equal(judge('https://api.deepseek.com/v1', 'deepseek-v4.1-flash'), false,
+  't7: 官方 deepseek URL 下的新版 Flash 不剥图');
+assert.equal(lookupVisionCapability('deepseek-v4-pro'), false,
+  't7: v4-pro 官方明写不支持图像 → 必须仍判无视觉(例外只扩 Flash 系)');
 
 // t5 缓存:同 key 不重算(换 upstream 后 key 失效重算 —— 由 t1↔t2 交叉驱动已隐含验证,
 // 这里钉「同 key 第二次调用结果一致且不受中间状态污染」)

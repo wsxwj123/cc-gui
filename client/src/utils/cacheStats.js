@@ -58,3 +58,9 @@ export function formatHitPct(pct) {
   const p = Number.isFinite(pct) ? pct : 0;
   return p >= 99.95 && p < 100 ? `${p.toFixed(2)}%` : `${p.toFixed(1)}%`;
 }
+
+// 分母为 0(一次缓存都没参与)时显示「—」,不显示 0.0% —— 0% 会被读成"缓存完全没命中",
+// 而事实是"没有可统计的输入"。调用方把分母(总提示侧 token)一起传进来。
+export function formatHitPctOrDash(pct, denominator) {
+  return denominator > 0 ? formatHitPct(pct) : '—';
+}

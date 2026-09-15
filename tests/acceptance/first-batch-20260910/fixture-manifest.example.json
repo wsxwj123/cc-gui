@@ -1,0 +1,44 @@
+{
+  "dataRoot": "/Users/<you>/…/.claude/worktrees/batch/tests/acceptance/first-batch-20260910/.artifacts/runtime-data",
+  "buildLabel": "worktree build identifier supplied by the operator",
+  "platform": "chromium|tauri-macos|windows",
+  "observedAt": "2026-09-10T00:00:00Z",
+  "markdown": {
+    "projectName": "operator-prepared fixture project name shown in the sidebar (prepared and verified visible via the public UI)",
+    "sessionSearchMarker": "FB_UI_FIXTURE_SESSION_20260910",
+    "fileName": "fb-r05-r06-fixture.md",
+    "fenceMarker": "FB_FENCE_20260910",
+    "inlineMarker": "FB_INLINE_20260910",
+    "unfinishedFenceMarker": "FB_UNFINISHED_FENCE_20260910",
+    "pathFalsePositiveMarker": "FB_PATH_FALSE_POSITIVE_20260910",
+    "windowsImageAlt": "fb windows path image.png",
+    "percentImageAlt": "fb percent%25 image.png",
+    "expectedFenceCopy": "operator supplies the exact fenced source text",
+    "runnableMarker": "FB_RUN_CALC",
+    "runnableCommand": "printf 'FB_RUN_RESULT=%s\\n' \"$(( 41 * 43 ))\"",
+    "expectedRunOutput": "FB_RUN_RESULT=1763",
+    "streamingSessionSearchMarker": "FB_STREAM_FIXTURE_20260910"
+  },
+  "attachments": {
+    "projectName": "operator-prepared fixture project name shown in the sidebar (prepared and verified visible via the public UI)",
+    "sessionSearchMarker": "FB_ATTACH_HISTORY_20260910",
+    "mergeSessionSearchMarker": "FB_MERGE_RUN_20260910",
+    "sessionId": "isolated-test-session-id",
+    "canonicalAttachments": [],
+    "normalExplanation": "FB_NORMAL_ATTACH_20260910",
+    "mergedExplanation": "FB_MERGED_ATTACH_20260910",
+    "historyMessageId": "isolated_history_message_id",
+    "missingFileName": "fb-missing-image.png",
+    "previewlessImageAlt": "fb-previewless-image.png",
+    "firstImageAlt": "fb-first-image.png"
+  },
+  "notifications": {
+    "projectName": "operator-prepared fixture project name shown in the sidebar (prepared and verified visible via the public UI)",
+    "sessionSearchMarker": "FB_NOTIFICATION_FIXTURE_20260910",
+    "ordinaryRawMarker": "FB_TASK_NOTIFICATION_USER_20260910",
+    "queuedRawMarker": "FB_TASK_NOTIFICATION_QUEUED_20260910",
+    "manualXmlMarker": "FB_MANUAL_XML_20260910",
+    "terminalStatusMarker": "FB_TASK_COMPLETED_20260910",
+    "modelNotificationMarker": "FB_MODEL_NOTIFICATION_20260910"
+  }
+}

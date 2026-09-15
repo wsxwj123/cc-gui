@@ -53,6 +53,13 @@ const clientPlan = await readFile(new URL('client/src/utils/plan.js', root), 'ut
 assert.match(clientPlan, /from\s+'\.\.\/\.\.\/\.\.\/server\/utils\/plan\.js'/,
   'client wrapper 必须复用 server/utils/plan.js,不得各造一份规则');
 
+// 同一先例的第二份:产品唯一 preset registry 也住在 server 侧(pricing-* 要按它枚举全集),
+// client 只许转发 —— 复制回一份"平行清单"就是两个会各自漂移的真相源。
+const clientProviders = await readFile(new URL('client/src/utils/builtinProviders.js', root), 'utf8');
+assert.match(clientProviders, /from\s+'\.\.\/\.\.\/\.\.\/server\/utils\/builtin-providers\.js'/,
+  'client wrapper 必须复用 server/utils/builtin-providers.js,不得各造一份 preset 清单');
+assert.ok(/BUILTIN_PROVIDERS/.test(clientProviders), 'client wrapper 必须转发 BUILTIN_PROVIDERS');
+
 // ── 2. vite dev 必须放行 root('.') + 被跨根 import 的那个目录;且只放行这两个 ──────
 // 显式 fs.allow 会【替换】Vite 默认的 root 放行:漏 '.' 连 index.html 都 403 = dev 整体
 // 不可用(判官实测);放 '..'(整个仓库根)则 dev 下 /@fs 可读 CLAUDE.local.md /

@@ -561,6 +561,11 @@ export function UnifiedSidebar() {
       if (!r.ok) { const e = await r.json().catch(() => ({})); confirmDialog('删除失败：' + (e.error || r.status)); return; }
       useStore.getState().clearSessionStopped?.(session.sessionId);
       useStore.getState().clearQueue?.(session.sessionId);
+      // 条带折叠:该会话的异常标记(roundStrip)一起清 —— 与上面两条同款"会话没了不留
+      // per-session 态"。放在 DELETE 成功之后(而不是 handleDelete 当下):撤销窗口里会话
+      // 还活着,提前清会把它那轮的撑开态抹掉。撤回/重做等路径**不清**(INTERFACE §B.2:
+      // 判据是时间窗,旧轮时间戳永远早于 since,不需要清理)。
+      useStore.getState().clearRoundAbnormal?.(session.sessionId);
       refreshProjectSessions(session.projectHash);
     } catch (err) {
       confirmDialog('删除失败：' + err.message);
@@ -830,27 +835,43 @@ export function UnifiedSidebar() {
   }, []);
 
   // ── 全局搜索命中跳转(原 ProjectList handlePickHit,选中链路走旧槽)────────────
-  const handlePickHit = async (hit) => {
+  // 命中行自带 sessionId/projectHash —— 能切就【当场】切,不再等 fetchSessions 那一轮
+  // 往返(原实现 await 之后才写会话:用户点一下要等一个网络回来才有反应,自动化也会
+  // 读到"上一屏"的窗格身份)。列表对象优先(标题/路径/计数都全);列表里还没有这条会话
+  // 时先用命中行 + 项目路径造最小对象顶上,列表回来后再用完整对象补齐 —— 只在窗格仍停
+  // 在这条会话时补,绝不抢用户后来的选择。
+  const handlePickHit = (hit) => {
     const project = projects.find((p) => p.hash === hit.projectHash);
     if (project) {
       const st = useStore.getState();
-      st.setSelectedProject(project);
-      await st.fetchSessions(project.hash);
-      st.ensureProjectExpanded(project.hash);
-      st.fetchSessionsForPanel(project.hash);
-      const list = useStore.getState().sessions;
-      const target = list.find((s) => s.sessionId === hit.sessionId);
-      if (target) {
+      const sid = hit.sessionId;
+      const hash = hit.projectHash;
+      const apply = (obj, refetch = true) => {
+        const cur = useStore.getState();
         // r26-I6:多窗格下不许恒抢 pane 0 —— 与 handleSelect 同款写聚焦窗格。
-        const st2 = useStore.getState();
-        if (st2.splitMode) {
-          st2.setActiveTabSession(target);
-          st2.fetchMessages(target.sessionId, target.projectHash, { tab: st2.activeTabIndex });
+        if (cur.splitMode) {
+          cur.setActiveTabSession(obj);
+          if (refetch) cur.fetchMessages(sid, hash, { tab: cur.activeTabIndex });
         } else {
-          st2.setSelectedSession(target);
-          st2.fetchMessages(target.sessionId, target.projectHash);
+          cur.setSelectedSession(obj);
+          if (refetch) cur.fetchMessages(sid, hash);
         }
+      };
+      st.setSelectedProject(project);
+      const known = (st.sessions || []).find((s) => s.sessionId === sid)
+        || ((st.sessionsByProject || {})[hash] || []).find((s) => s.sessionId === sid);
+      apply(known || { sessionId: sid, projectHash: hash, projectPath: project.path, firstPrompt: '' });
+      if (!known) {
+        void st.fetchSessions(hash).then(() => {
+          const full = (useStore.getState().sessions || []).find((s) => s.sessionId === sid);
+          if (!full) return;
+          const cur = useStore.getState();
+          if (cur.paneSessions?.[cur.activeTabIndex]?.sessionId !== sid) return; // 已切走 → 不补
+          apply(full, false);                    // 只补对象(标题/路径/计数),消息已经在拉了
+        }).catch(() => {});
       }
+      st.ensureProjectExpanded(hash);
+      st.fetchSessionsForPanel(hash);
     }
     setSearchQuery('');
   };

@@ -1,7 +1,11 @@
-import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors, ChevronRight } from './Icon.jsx';
-import { computeCost, formatCost, costTitle } from '../utils/pricing.js';
+import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors, ChevronRight, AlertTriangle } from './Icon.jsx';
+import {
+  computeCostForMessage, costUnavailableReason, costSourceLabel, costUnknownNote, COST_REASON_TEXT,
+  formatCost, displayUsd, costTitle,
+} from '../utils/pricing.js';
+import { formatHitPctOrDash } from '../utils/cacheStats.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import { isActionMessage, parseActionMessage } from '../genui/host/action-fold.js';
@@ -9,6 +13,9 @@ import { isActionMessage, parseActionMessage } from '../genui/host/action-fold.j
 // User messages can be huge (pasted logs, long prompts). Collapse to ~10 lines
 // by default with a fade + "展开全部" toggle so the chat stays scannable.
 const COLLAPSED_MAX_PX = 240; // ≈ 10 lines at 15px / leading-relaxed
+import { Linkify } from '../utils/linkify.jsx';
+import { imageAttachmentSrc, imageAttachmentSequence, loadAttachmentImageBytes } from '../utils/attachments.js';
+
 function CollapsibleUserText({ text }) {
   const ref = useRef(null);
   const [expanded, setExpanded] = useState(false);
@@ -33,7 +40,7 @@ function CollapsibleUserText({ text }) {
             maskImage: 'linear-gradient(to bottom, #000 calc(100% - 40px), transparent 100%)',
           } : undefined}
         >
-          {text}
+          <Linkify text={text} />
         </div>
       </div>
       {overflowing && (
@@ -58,11 +65,11 @@ function CollapsibleUserText({ text }) {
 // 收起时 body **不渲染**(不是 CSS 隐藏)——契约要求它不得存在于 DOM,否则"默认折叠"无法证伪。
 // **不带入场动画**(判官裁定):标记一出现用例就点 toggle,0.25s 的 animate-fade-up
 // 与"toHaveCount(1) 后立即点击"存在竞态 —— 间歇 flake 比没动画伤害大。别加回来。
-function GenuiActionFold({ text }) {
+function GenuiActionFold({ text, messageId = null }) {
   const [open, setOpen] = useState(false);
   const { action, type } = parseActionMessage(text) || {};
   return (
-    <div data-cgui="message-user" data-testid="message-card" className="group px-6 py-1">
+    <div data-cgui="message-user" data-testid="message-card" data-message-id={messageId || undefined} className="group px-6 py-1">
       <div className="max-w-[var(--content-max)] mx-auto flex flex-col items-end">
         <div data-testid="genui-action-message" className="max-w-[85%] flex flex-col items-end">
           <button
@@ -79,7 +86,7 @@ function GenuiActionFold({ text }) {
           {open && (
             <div data-testid="genui-action-message-body"
               className="mt-1 p-3 rounded-lg bg-canvas-warm border border-canvas-deep text-[11px] text-ink-muted whitespace-pre-wrap break-all max-h-64 overflow-y-auto font-mono leading-relaxed text-left">
-              {text}
+              <Linkify text={text} />
             </div>
           )}
         </div>
@@ -336,6 +343,98 @@ function CopyButton({ text }) {
   );
 }
 
+// R08:raw 原图入口的并发是进程级全局配额(4 个,超出 429 FILE_READ_BUSY),与文件树预览/
+// 正文 markdown 图共用;而图片失败是一次性闩死、不自动重试 → 一条消息里第 5 张及以后的图
+// 永久"图片不可用"(文件其实在)。只有经 fetch 拿字节才看得见 429,所以 raw 来源统一走
+// loadAttachmentImageBytes(有界退避重试,见 utils/attachments.js),preview(data URL)直接用。
+// 同一份 blob URL 交给灯箱复用 —— 点开不再重打一次原图请求(既省配额也避免灯箱里 429)。
+function useAttachmentImageSrc(src) {
+  const remote = typeof src === 'string' && src.startsWith('/api/files/read');
+  const [state, setState] = useState(() => ({ src: remote ? null : src || null, failed: false }));
+  useEffect(() => {
+    if (!remote) { setState({ src: src || null, failed: false }); return undefined; }
+    let cancelled = false;
+    let objectUrl = null;
+    setState({ src: null, failed: false });
+    loadAttachmentImageBytes(src).then((blob) => {
+      if (cancelled) return;
+      objectUrl = URL.createObjectURL(blob);
+      setState({ src: objectUrl, failed: false });
+    }).catch(() => { if (!cancelled) setState({ src: null, failed: true }); });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [src, remote]);
+  return state;
+}
+
+// R08:图片附件的显示来源见 utils/attachments.js 的 imageAttachmentSrc(preview 优先,
+// 没有 preview 时退回受权原图字节入口)。加载失败(文件不存在/越界/读取失败/解码失败)必须
+// 明确说"图片不可用"并保留文件名,不画裂图、不造假缩略图;失败的状态要上报给消息体,灯箱
+// 序列据此把这张图排除(否则计数与卡片矛盾、还能翻到破图上)。
+function UserAttachmentCard({ attachment, onOpenImage, onImageState }) {
+  const isImage = attachment?.kind === 'image';
+  const src = isImage ? imageAttachmentSrc(attachment) : null;
+  const { src: displaySrc, failed: loadFailed } = useAttachmentImageSrc(src);
+  const [decodeFailed, setDecodeFailed] = useState(false);
+  const failed = loadFailed || decodeFailed;
+
+  useEffect(() => {
+    if (!isImage || !onImageState) return;
+    onImageState(attachment, failed ? 'failed' : (displaySrc ? 'ok' : 'loading'), displaySrc || null);
+  }, [isImage, attachment, failed, displaySrc, onImageState]);
+
+  if (isImage && (!src || failed)) {
+    return (
+      // 刻意不挂 data-cgui:锚点层承诺的是"跨版本稳定的 chrome 区域",这里是图片附件的
+      // 失败回退态(可观测口径是文案「图片不可用」本身,证据脚本也按文案找),正常态卡片
+      // 也没有锚点 —— 不该让失败分支单独占用锚点表。
+      <div title={attachment?.path || ''}
+        className="flex items-center gap-2 px-2 py-1 bg-canvas border border-canvas-deep rounded-lg max-w-[260px]">
+        <div className="w-10 h-10 rounded bg-canvas-deep flex items-center justify-center shrink-0">
+          <AlertTriangle size={15} className="text-ink-faint" />
+        </div>
+        <div className="min-w-0">
+          <div className="text-[12px] text-ink font-body truncate">{attachment?.name}</div>
+          <div className="text-[10px] text-ink-faint font-body">图片不可用</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      // #7 决策:图片卡去双击(单击图片放大);非图片文件卡保持双击打开默认 App。
+      onDoubleClick={isImage ? undefined : () => { fetch('/api/files/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: attachment.path }) }).catch(() => {}); }}
+      className={`flex items-center gap-2 px-2 py-1 bg-canvas border border-canvas-deep rounded-lg max-w-[260px] hover:border-accent/40 transition-colors ${isImage ? '' : 'cursor-pointer'}`}
+      title={isImage ? attachment.path : `双击用默认应用打开\n${attachment.path}`}>
+      {isImage ? (
+        displaySrc ? (
+          <img src={displaySrc} alt={attachment.name}
+            // 200 空体/字节不完整等解码失败:与取字节失败同口径,明确"图片不可用"。
+            onError={() => setDecodeFailed(true)}
+            onClick={(e) => { e.stopPropagation(); onOpenImage({ src: displaySrc, name: attachment.name, path: attachment.path }); }}
+            className="w-10 h-10 rounded object-cover shrink-0 cursor-zoom-in" />
+        ) : (
+          // 取字节中(含 429 退避重试窗口):占位不画裂图,更不提前判"不可用"。
+          // 刻意不挂 data-cgui:这是加载中/退避重试窗口里的临时占位(随状态出现又消失),
+          // 不是跨版本稳定的 chrome 区域。
+          <div className="w-10 h-10 rounded bg-canvas-deep shrink-0 animate-pulse" />
+        )
+      ) : (
+        <div className="w-10 h-10 rounded bg-accent/10 flex items-center justify-center shrink-0">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        </div>
+      )}
+      <div className="min-w-0">
+        <div className="text-[12px] text-ink font-body truncate">{attachment.name}</div>
+        {attachment.bytes ? <div className="text-[10px] text-ink-faint font-mono">{(attachment.bytes/1024).toFixed(1)} KB</div> : null}
+      </div>
+    </div>
+  );
+}
+
 function formatTime(ts) {
   if (!ts) return '';
   try {
@@ -346,29 +445,72 @@ function formatTime(ts) {
   }
 }
 
-function UsageDisplay({ usage, model }) {
+function UsageDisplay({ message }) {
   // hook 必须无条件调用:移到 early return 之前(原在 if(!usage)return 之后=条件调用 hook,
   // usage 有无切换时 hooks 数量变→React 崩;ESLint rules-of-hooks 抓出的真隐患)。
   const provider = useStore((s) => s.currentProvider);
+  const usage = message?.usage;
   if (!usage) return null;
+  const model = message.model;
   const input = usage.input_tokens || 0;
   const output = usage.output_tokens || 0;
   const cacheRead = usage.cache_read_input_tokens || 0;
   const cacheWrite = usage.cache_creation_input_tokens || 0;
-  const cost = computeCost(model, usage, provider);
+  // 计费唯一入口:带 message 是为了 usageCalls(逐次 API 调用各自的时刻)—— 分时段价的
+  // 模型必须按每次调用自己的时间戳判档,汇总后的 usage 拆不回"哪一段在什么时刻"。
+  const cost = computeCostForMessage(message, provider);
+  // 费用未知时不再一律说「未定价」:按契约给具体原因(时段未知/条件歧义/阈值未知…)。
+  const unavailable = cost ? null : costUnavailableReason(model, usage, provider, { at: message.timestamp });
+  // R24 轮末徽章:一条 assistant 消息的 usage 是【整轮累加】口径(消耗口径),不是单次调用 ——
+  // 所以这里叫「整轮命中率」,顶部那条单次调用口径叫「最近API命中率」,会话累计在用量面板。
+  const turnDenominator = input + cacheRead + cacheWrite;
+  const turnHitPct = turnDenominator > 0 ? (cacheRead / turnDenominator) * 100 : 0;
+  // 上游把自相矛盾/无效的用量透传过来时(proxy 盖的 ccgui_usage),这里如实标出来,
+  // 不静默改写数字、不按脏数据算钱。
+  const usageCodes = Array.isArray(usage.ccgui_usage?.codes) ? usage.ccgui_usage.codes : [];
+  // R43:与轮末回合气泡(TurnBubble.jsx)同形 —— 行内只留 输入 / 输出 / 金额,明细
+  // (缓存命中 / 缓存写入 / 本轮累计读取 / 整轮命中率)收进本行容器的悬停提示,否则同一条
+  // 用量行在两种卡片上长相不同。悬停挂在行容器上(不是金额上):金额的直接父容器仍是
+  // 那一组带 ml-auto 的 span,位置判据不动。数值口径一字未改(整轮命中率仍是
+  // formatHitPctOrDash(加权累计, 分母),分母 0 显示 —)。
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50">
+    <div
+      data-cgui="usage-line"
+      data-usage-scope="message"
+      title={`缓存命中 ${cacheRead.toLocaleString()} · 缓存写入 ${cacheWrite.toLocaleString()}\n本轮累计读取 ${(input + cacheRead + cacheWrite).toLocaleString()}（= 输入 ${input.toLocaleString()} + 缓存命中 ${cacheRead.toLocaleString()} + 缓存写入 ${cacheWrite.toLocaleString()}；一轮里模型每次调用 API 都要重读整段上下文，累计读取量会大于单次上下文大小）\n整轮命中率 ${formatHitPctOrDash(turnHitPct, turnDenominator)}（= 整轮 cache_read /（普通 input + cache_read + cache_creation），整轮所有 API 调用累计加权；切模型或进程冷启的那一轮偏低属正常。分母 0 显示 —）`}
+      className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50"
+    >
       <span>输入 {input.toLocaleString()}</span>
       <span>输出 {output.toLocaleString()}</span>
-      {cacheRead > 0 && <span title="cache_read_input_tokens">缓存命中 {cacheRead.toLocaleString()}</span>}
-      {cacheWrite > 0 && <span title="cache_creation_input_tokens">缓存写入 {cacheWrite.toLocaleString()}</span>}
+      {usageCodes.length > 0 && (
+        <span className="text-error" title="上游回报的用量字段无效或自相矛盾，数字原样保留、费用按未知处理">
+          {usageCodes.join(' / ')}
+        </span>
+      )}
       {/* R3:说明文案(含"按你填写的单价"/"按官网价估算"的口径切换)由 pricing.js 统一给,
           三个费用显示点共用同一份,不各自维护。
           注释写在属性外只是风格统一 —— 原先写在 title 属性上方的 // 行注释在本项目的
           esbuild 下实测行为正确(属性完好),不是在修 bug。 */}
-      {cost && (
-        <span className="ml-auto text-accent/80 font-mono" title={costTitle(cost)}>
-          {formatCost(cost.totalUsd)}
+      {/* R24 展示口径:每条费用都带来源标注 —— 用户手填单价 / 按官方价估算 / 查无单价(未定价)。
+          「未知新型号」不会套用旧型号价:lookupPrice 查不到就是查不到,这里如实写未定价。
+          R42:来源词不再占行内版面(窄面板下它把这条行撑换行),改为金额 title 的**首行**(悬停可见),
+          与轮末回合气泡(TurnBubble.jsx)同形;「已知小计」说明仍留在行内(钱没算全的声明)。 */}
+      {cost && !usageCodes.length && (
+        <span className="ml-auto flex items-center gap-1.5">
+          <span
+            data-cgui="usage-amount"
+            className="text-accent/80 font-mono"
+            // R42:title 首行 = 来源词,第二行起为 pricing.js 统一给的说明文案。
+            title={`${costSourceLabel(cost)}\n${costTitle(cost)}`}
+          >{formatCost(displayUsd(cost.totalUsd, cost.currency))}</span>
+          {costUnknownNote(cost) && (
+            <span className="text-[9px] text-ink-ghost" title="金额是已知小计，不含被判定为未知的那部分费用">{costUnknownNote(cost)}</span>
+          )}
+        </span>
+      )}
+      {!cost && !usageCodes.length && unavailable && (
+        <span className="ml-auto text-ink-ghost" title={`${unavailable.detail}（费用未知，不显示 0）`}>
+          {COST_REASON_TEXT[unavailable.reason] || COST_REASON_TEXT.NO_PRICE}
         </span>
       )}
     </div>
@@ -378,7 +520,34 @@ function UsageDisplay({ usage, model }) {
 export function MessageBubble({ message, onRollback, onFork }) {
   const isUser = message.role === 'user';
   const [showThinking, setShowThinking] = useState(false);
-  const [zoomImage, setZoomImage] = useState(null); // #7 单击放大的图片附件
+  // R09:灯箱持有的是【本消息图片附件里的序号】,不是单张 src —— 计数 "N / M"、左右切图、
+  // 首尾边界都由这一个 state 算出来。序列口径与普通/并入消息一致(两者同一渲染点),
+  // 只数能显示出来的图片(非图片附件与「图片不可用」的跳过),顺序就是附件原顺序。
+  const [zoomIndex, setZoomIndex] = useState(null);
+  // 每张图片的加载结局(卡片上报):failed 的必须退出灯箱序列 —— 元数据说有来源、实际
+  // 403/404/解码失败的图如果留在序列里,计数就与卡片矛盾(卡上 2 张、灯箱写 1/3),还能
+  // 翻到破图上。同时把解析好的 src(blob URL)留给灯箱复用,点开不再重打一次原图请求。
+  const [imageStates, setImageStates] = useState(() => new Map());
+  const reportImageState = useCallback((attachment, state, src) => {
+    setImageStates((prev) => {
+      const cur = prev.get(attachment);
+      if (cur && cur.state === state && cur.src === src) return prev;
+      const next = new Map(prev);
+      next.set(attachment, { state, src });
+      return next;
+    });
+  }, []);
+  const messageImages = (isUser ? imageAttachmentSequence(message.attachments) : [])
+    .filter((attachment) => imageStates.get(attachment)?.state !== 'failed');
+  const zoomImage = zoomIndex === null || !messageImages[zoomIndex]
+    ? null
+    : {
+      // 加载失败后不重试(与卡片同口径):能进序列的都已经成功取到字节,这里必命中;
+      // 兜底回元数据来源,防上报与渲染之间那一帧。
+      src: imageStates.get(messageImages[zoomIndex])?.src || imageAttachmentSrc(messageImages[zoomIndex]),
+      name: messageImages[zoomIndex].name,
+      path: messageImages[zoomIndex].path,
+    };
 
   if (isUser) {
     // genui action 消息折叠(M7)。用户消息只有 MessageBubble 一个渲染点(历史卡、
@@ -386,10 +555,13 @@ export function MessageBubble({ message, onRollback, onFork }) {
     // 两个判据同一条前缀规则:`genuiAction` 是 session-reader 读 jsonl 时打的标记
     // (历史回读走它),前缀识别兜住实时发送与引导气泡这些没经过 session-reader 的路径。
     if (message.genuiAction || isActionMessage(message.text)) {
-      return <GenuiActionFold text={message.text} />;
+      return <GenuiActionFold text={message.text} messageId={message.uuid} />;
     }
     return (
-      <div data-cgui="message-user" data-testid="message-card" className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
+      // data-message-id:本产品唯一的非秘密消息身份(INTERFACE「可观察身份」)。历史卡、
+      // 实时气泡、并入气泡都走这里,所以一处就全覆盖;带图消息的图片/灯箱也在同一个
+      // 容器里,黑盒可用它按消息圈定图片序列。
+      <div data-cgui="message-user" data-testid="message-card" data-message-id={message.uuid || undefined} className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
         <div className="max-w-[var(--content-max)] mx-auto flex flex-row-reverse gap-3">
           <div className="shrink-0 mt-0.5">
             <UserAvatar />
@@ -398,8 +570,9 @@ export function MessageBubble({ message, onRollback, onFork }) {
             <div className="flex items-center gap-2 mb-1.5">
               {/* 「⚡ 并入」进上一个回合的消息:它不是新回合的开头,而是插进了正在跑的回合。
                   标出来,否则用户看到一条用户气泡夹在 AI 回复中间会以为是自己漏发了。
-                  这类消息没有回滚/分叉入口 —— 它在 jsonl 里的锚点是 attachment 行,
-                  按它裁剪的行为未验证,不开这个口子(调用方传不传 onRollback 决定)。 */}
+                  R36:回滚入口与普通人工消息相同(折叠形态在磁盘上是一条 attachment 记录,
+                  trim 按它自己的 uuid 定位;实时气泡由调用方先解析落盘锚点再回退)。
+                  分叉仍旧不开:它按"真·用户提问"找回合边界,attachment 行不是提问。 */}
               {message.steered && (
                 <span className="px-1.5 py-0.5 rounded bg-accent/12 text-accent text-[10px] font-body"
                   title="这条消息是在上一个回复进行中并入的，模型在同一回合里读到了它">
@@ -421,44 +594,41 @@ export function MessageBubble({ message, onRollback, onFork }) {
               {/* L3: 附件在文本上方,符合"附件→说明"的自然阅读顺序;CLI 仍收带 @path 的完整 outbound */}
               {Array.isArray(message.attachments) && message.attachments.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
-                  {message.attachments.map((a, i) => {
-                    const isImg = a.kind === 'image' && a.preview;
-                    return (
-                    <div key={i}
-                      // #7 决策:图片卡去双击(单击图片放大);非图片文件卡保持双击打开默认 App。
-                      onDoubleClick={isImg ? undefined : () => { fetch('/api/files/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: a.path }) }).catch(() => {}); }}
-                      className={`flex items-center gap-2 px-2 py-1 bg-canvas border border-canvas-deep rounded-lg max-w-[260px] hover:border-accent/40 transition-colors ${isImg ? '' : 'cursor-pointer'}`}
-                      title={isImg ? a.path : `双击用默认应用打开\n${a.path}`}>
-                      {isImg ? (
-                        <img src={a.preview} alt={a.name}
-                          onClick={(e) => { e.stopPropagation(); setZoomImage({ src: a.preview, name: a.name, path: a.path }); }}
-                          className="w-10 h-10 rounded object-cover shrink-0 cursor-zoom-in" />
-                      ) : (
-                        <div className="w-10 h-10 rounded bg-accent/10 flex items-center justify-center shrink-0">
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                        </div>
-                      )}
-                      <div className="min-w-0">
-                        <div className="text-[12px] text-ink font-body truncate">{a.name}</div>
-                        {a.bytes ? <div className="text-[10px] text-ink-faint font-mono">{(a.bytes/1024).toFixed(1)} KB</div> : null}
-                      </div>
-                    </div>
-                  );
-                  })}
+                  {message.attachments.map((a, i) => (
+                    <UserAttachmentCard key={i} attachment={a}
+                      onImageState={reportImageState}
+                      // 打开灯箱时按本消息图片序列定位(不可用/非图片/加载失败的都不在序列里 →
+                      // 不打开)。
+                      onOpenImage={() => {
+                        const index = messageImages.indexOf(a);
+                        if (index >= 0) setZoomIndex(index);
+                      }} />
+                  ))}
                 </div>
               )}
               <CollapsibleUserText text={(message.attachments?.length && message.displayText !== undefined) ? message.displayText : message.text} />
             </div>
           </div>
         </div>
-        {/* #7 已发送图片单击放大;lightbox 内含"用默认 App 打开" */}
-        <ImageLightbox src={zoomImage?.src} name={zoomImage?.name} path={zoomImage?.path} onClose={() => setZoomImage(null)} />
+        {/* #7/R09 已发送图片单击放大;灯箱内含"用默认 App 打开"。
+            序列只限【本消息】的图片附件、按附件原顺序;首尾不循环 —— 到头那一侧不传
+            回调(共享灯箱的既有约定:null 回调 = 该方向没有可按的按钮,见 ImageLightbox 注释),
+            单图时两侧都没有回调 = 1/1 且不拦方向键。 */}
+        <ImageLightbox
+          src={zoomImage?.src}
+          name={zoomImage?.name}
+          path={zoomImage?.path}
+          counter={zoomImage ? `${zoomIndex + 1} / ${messageImages.length}` : ''}
+          onPrev={zoomImage && zoomIndex > 0 ? () => setZoomIndex(zoomIndex - 1) : null}
+          onNext={zoomImage && zoomIndex < messageImages.length - 1 ? () => setZoomIndex(zoomIndex + 1) : null}
+          onClose={() => setZoomIndex(null)}
+        />
       </div>
     );
   }
 
   return (
-    <div data-cgui="message-assistant" data-testid="message-card" className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
+    <div data-cgui="message-assistant" data-testid="message-card" data-message-id={message.uuid || undefined} className="group px-6 py-4 animate-fade-up" style={{ animationDuration: '0.25s' }}>
       <div className="max-w-[var(--content-max)] mx-auto flex gap-3">
         <div className="mt-0.5">
           <ProviderAvatar model={message.model} size={34} />
@@ -500,7 +670,7 @@ export function MessageBubble({ message, onRollback, onFork }) {
             </div>
           )}
 
-          <UsageDisplay usage={message.usage} model={message.model} />
+          <UsageDisplay message={message} />
         </div>
       </div>
     </div>

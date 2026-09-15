@@ -920,6 +920,14 @@ function ProviderForm({ initial, onDone, onCancel }) {
   );
 }
 
+// r102 的「清空收起预览」原本是一个组件内布尔,而切面板会整块卸载重挂这个组件(r106 复现:
+// 布尔回到 false,loadHistory 又把 currentId 落到最近一张完成图 → 预览又冒出来)。
+// 改成记「被清掉的那条任务 id」:渲染判据变成 id 对不上才显示,语义天然自洽 —— 用户重新
+// 选一张(pickShot)或受理新任务时 currentId 本来就变了,不必在各处手动清标志。
+// 必须放模块级才活过面板卸载(单窗口内同一时刻只有一个生图面板,面板无 per-pane 语义);
+// 刻意不落盘:刷新后重新显示最近一张完成图是既有行为,本批不改。
+let dismissedPreviewId = '';
+
 export default function ImagePanel() {
   const [providers, setProviders] = useState([]);
   const [selId, setSelId] = useState('');
@@ -932,8 +940,10 @@ export default function ImagePanel() {
   // 刻意不存 src 快照:轮询每 1.5s 换一遍 history,快照会过期,也没法在序列里左右移动。
   const [zoom, setZoom] = useState(null);
   // r102:「清空」后隐藏上一轮的预览,直到受理新任务或用户在任务列表重新选一张。
-  // 不动 currentId(loadHistory 的回落规则被 r95 锁死),只用一个显示开关。
-  const [previewHidden, setPreviewHidden] = useState(false);
+  // 不动 currentId(loadHistory 的回落规则被 r95 锁死),只记「哪条被清掉了」(见模块级
+  // dismissedPreviewId 的说明)。state 只是给本组件一次重渲染,模块变量才是跨挂载的记忆。
+  const [dismissedId, setDismissedId] = useState(dismissedPreviewId);
+  const dismissPreview = (id) => { dismissedPreviewId = id; setDismissedId(id); };
   // r94 像素尺寸:图片本身是唯一可靠来源(比例/版本只是请求参数,开 HD 或真放大后实际像素
   // 与它们对不上)。按图片 URL 记一份 naturalWidth×naturalHeight;预览区与放大层看的永远
   // 是同一个 URL(方向键切图会把预览区一起带过去),所以只在预览区测一次,两处都有值。
@@ -1105,13 +1115,18 @@ export default function ImagePanel() {
   // submitting 只挡请求发出的那一瞬(防双击重复提交)。
   const canGenerate = !!selected && !!selected.savePath && !!prompt.trim() && !submitting;
   const current = history.find((h) => h.id === currentId) || null;
+  // 「清空」收起预览的判据（r106：判据是"当前这张就是被清掉的那张"，不再是"用户清空过"这个
+  // 状态位 —— 后者存在组件里，面板切走重挂就丢了，预览会复现）。派生成一个名字，渲染门与
+  // 「清空」按钮的禁用条件同口径，免得两处各写一遍比较。
+  const previewHidden = !!current && current.id === dismissedId;
   // 任务列表:running 排最上,其余保持时间倒序(sort 稳定,组内次序不变)。
   const ordered = [...history].sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1));
   // r84:条目上"当前这张"的三件套。单图条目(无 files)与改动前逐字等价。
   const shotIdx = (h) => pickedIndex(h, picked[h.id]);
   const shotFile = (h) => pickedFile(h, picked[h.id]);
   const shotUrl = (h) => pickedPreviewUrl(h, picked[h.id]) || h.previewUrl || '';
-  const pickShot = (h, i) => { setCurrentId(h.id); setPicked((m) => ({ ...m, [h.id]: i })); setPreviewHidden(false); };
+  // 重新选一张(可能就是被清掉的那条,currentId 不变)→ 显式撤回清空标记。
+  const pickShot = (h, i) => { setCurrentId(h.id); setPicked((m) => ({ ...m, [h.id]: i })); dismissPreview(''); };
   // r94:图片加载完成时把真实像素记下来(键取 src 属性原文,el.src 会被浏览器补成绝对地址,
   // 与 shotUrl() 给的相对路径对不上)。同尺寸不写 state,免得每次轮询重渲染都换一个新对象。
   const measureShot = (e) => {
@@ -1253,7 +1268,9 @@ export default function ImagePanel() {
   // 参考图重新选也就几秒。restorePrompt('') 同时会把 localStorage 草稿写空 ——
   // 只清内存的话刷新一下提示词又回来了(草稿是刻意持久的)。
   const clearInputs = () => {
-    setPreviewHidden(true); // r102:清空也收起上一轮的图片预览
+    // r102:清空也收起上一轮的图片预览(r106:记的是「哪条被清掉」,所以面板切走再挂回来
+    // 预览仍不复现)。此刻没显示任何图时记空串 = 无可收起。
+    dismissPreview(current?.id || '');
     setErr('');
     restorePrompt('');
     refs.forEach(revokeRefPreview); // objectURL 不撤就一直挂在文档上
@@ -1308,7 +1325,7 @@ export default function ImagePanel() {
       // r95:受理成功就把预览区指向新任务 —— 否则新任务跑着,预览区还挂着上一轮的图。
       // 新任务不是 done,下面的预览区 done 门控自然就不渲染旧图了,不必另加"清预览"开关。
       setCurrentId(d.jobId);
-      setPreviewHidden(false); // r102:新任务受理 → 预览区重新可见
+      dismissPreview(''); // r102:新任务受理 → 预览区重新可见(撤回清空标记)
       await loadHistory(); // 拿到 running 条目 → 轮询自动起
     } catch (e) {
       setErr(e.message);
@@ -1366,7 +1383,7 @@ export default function ImagePanel() {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `提交失败（${r.status}）`);
       if (d.jobId) setCurrentId(d.jobId); // r95:与「生成」同口径,预览区跟到新任务上
-      if (d.jobId) setPreviewHidden(false); // r102
+      if (d.jobId) dismissPreview(''); // r102:与「生成」同口径
       loadHistory();
     } catch (e) {
       setActionErr(`${action.label || action.kind}失败：${e.message}`);

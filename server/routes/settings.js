@@ -20,6 +20,8 @@ import {
   MCP_NONBLOCKING_ENV_KEY, promptCacheMemoEquals, snapshotFlagOn,
 } from '../utils/prompt-cache-env.js';
 import { resolveClaude, resolveSdkClaude } from '../utils/claude-resolver.js';
+import { readOfficialModels } from '../utils/cli-official.js';
+import { checkQuotaConfig, sameHostURL } from '../services/provider-quota.js';
 
 const execFileP = promisify(execFile);
 const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
@@ -1050,6 +1052,10 @@ router.get('/providers', async (_req, res) => {
       // 就恒空 → 保存时发 avatar:'' → PUT 判成清除 → 用户"改个名字"把头像静默清掉
       // (contextWindow / modelPrices / modelMeta 三个字段栽过同一个坑,见上方注释)。
       avatar: p.avatar || '',
+      // 自定义额度端点四键(表单回填;Provider 编辑器读的正是本接口)。不下发就恒空 →
+      // 保存时发空串 → PUT 判成清除 → 用户"改个名字"把额度接口静默清掉
+      // (contextWindow / modelPrices / modelMeta / avatar 四个字段栽过同一个坑)。
+      ...quotaFieldsOut(p),
       hasKey: !!p.apiKey, hasQuotaKey: !!p.quotaKey, isCustom: true, isCurrent: isCur(p.id, false),
     }));
     // B 方案: claude 只读组的 models[] 从其 snapshot.env 的 _MODEL 值提取(切换/导入路径
@@ -1563,6 +1569,45 @@ router.post('/providers/import-from-ccswitch', async (_req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── 自定义额度查询端点(INTERFACE-20260913-quota-endpoint §B) ────────────────────
+// 四个键是**非敏感**的(不含密钥)→ GET 直接下发,表单持有全值。语义与 quotaKey
+// **刻意不对称**(§B.4,最容易抄错的一处):quotaKey 是"缺失=保留 / 空串=清除"
+// (前端从不持有明文);这四键是**整体覆盖** —— undefined = 保留(兼容旧前端),
+// '' / null = 四键**一起**从落盘条目删掉(清 quotaURL 必须连带删另三个,否则留下
+// 孤儿路径),非空 = 四键一起写入。
+const QUOTA_FIELD_KEYS = ['quotaURL', 'quotaPath', 'quotaAuth', 'quotaCurrency'];
+
+/** 下发形态(表单回填用)。未配置的条目四键给空值,前端据此判"未配置",不显示幻觉值。 */
+function quotaFieldsOut(p) {
+  return {
+    quotaURL: p.quotaURL || '', quotaPath: p.quotaPath || '',
+    quotaAuth: p.quotaAuth || 'bearer', quotaCurrency: p.quotaCurrency || '',
+  };
+}
+
+/**
+ * 写入四键。undefined = 不动;'' / null = 四键全删;非空 = 校验(§B.3 文案)→ SSRF
+ * 守卫 → 整体写入。quotaAuth/quotaCurrency 取缺省值时**不落盘该键**(保持文件干净,
+ * 与 modelPrices/modelMeta 的既有做法一致)。
+ * 抛 { status, message }:调用点照既有 `{ error: '<人话>' }` 形态回,不新造错误形状。
+ */
+async function applyQuotaFields(entry, body) {
+  const raw = body?.quotaURL;
+  if (raw === undefined) return; // 旧前端:保留原值,不动
+  if (raw === null || (typeof raw === 'string' && !raw.trim())) {
+    for (const k of QUOTA_FIELD_KEYS) delete entry[k];
+    return;
+  }
+  const cfg = checkQuotaConfig(body);
+  if (cfg.error) { const e = new Error(cfg.error); e.status = 400; throw e; }
+  // SSRF 守卫(与探测路径同一道):存下来的地址 server 会带着 key 去打,写入端必须挡内网。
+  await assertQuotaPublicURL(cfg.url);
+  entry.quotaURL = cfg.url;
+  entry.quotaPath = cfg.path;
+  if (cfg.auth !== 'bearer') entry.quotaAuth = cfg.auth; else delete entry.quotaAuth;
+  if (cfg.currency) entry.quotaCurrency = cfg.currency; else delete entry.quotaCurrency;
+}
+
 // GET /api/custom-providers — list custom providers (never returns apiKey).
 router.get('/custom-providers', async (_req, res) => {
   const list = await readCustomProviders();
@@ -1574,6 +1619,7 @@ router.get('/custom-providers', async (_req, res) => {
       contextWindow: p.contextWindow || null, modelPrices: p.modelPrices || null,
       modelMeta: p.modelMeta || null, // r10-9:每模型思考能力声明
       avatar: p.avatar || '', // r78:头像(两个下发口必须齐,漏一个 = 那个消费者看不到头像)
+      ...quotaFieldsOut(p), // 自定义额度端点四键(同上:两个下发口必须齐)
     })),
   });
 });
@@ -1602,6 +1648,9 @@ router.post('/custom-providers', async (req, res) => {
     const qkNew = cleanKey(quotaKey);
     if (qkNew === null) return res.status(400).json({ error: `额度查询密钥过长（上限 ${MAX_KEY_LEN} 字符）` });
     if (qkNew) entry.quotaKey = qkNew;
+    // 自定义额度端点四键(可选)。未填 quotaURL → 四键都不写 = 未配置,走自动识别通道。
+    try { await applyQuotaFields(entry, req.body); }
+    catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
     // AZ8: 可选的 per-provider 默认模型。只接受属于该 provider models[] 的 id;非法/不在
     // 列表内则不写(向后兼容:无此字段时切换/解析回退 models[0])。
     if (typeof defaultModel === 'string' && cleanModels.includes(defaultModel.trim())) {
@@ -1698,6 +1747,19 @@ router.put('/custom-providers/:id', async (req, res) => {
       if (qk === null) return res.status(400).json({ error: `额度查询密钥过长（上限 ${MAX_KEY_LEN} 字符）` });
       if (qk) list[idx].quotaKey = qk; else delete list[idx].quotaKey;
     } else if (baseChanged && list[idx].quotaKey) {
+      delete list[idx].quotaKey;
+      quotaKeyCleared = true;
+    }
+    // 自定义额度端点四键:undefined = 保留 / '' = 四键全删 / 非空 = 整体写入。
+    try { await applyQuotaFields(list[idx], req.body); }
+    catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+    // 同源闸②(与上面那道 baseURL 闸同一根因,只是**持久化**版本 —— 一次污染长期静默
+    // 外发):新额度地址的 host 既不是旧额度地址的 host、也不是 baseURL 的 host 时,已存
+    // quotaKey 与新地址不再同源,留着它等于把这个密钥存到"往后每次探测都会发去"的地址上。
+    // 本次保存显式给了新 quotaKey 的 = 用户重新配对,不清(与上面那道闸同语义)。
+    if (quotaKey === undefined && list[idx].quotaKey && list[idx].quotaURL
+      && !sameHostURL(list[idx].quotaURL, prev.quotaURL)
+      && !sameHostURL(list[idx].quotaURL, list[idx].baseURL)) {
       delete list[idx].quotaKey;
       quotaKeyCleared = true;
     }
@@ -1898,16 +1960,21 @@ router.put('/provider-overrides/:id', async (req, res) => {
 // Anthropic header style first (x-api-key) then OpenAI (Bearer) — some relays
 // accept only one. Returns deduped model ids. Single-user local tool, so an
 // arbitrary baseURL is the user's own choice (no SSRF guard).
-// 对单个 models URL 发请求,轮询两组 header(anthropic x-api-key / openai Bearer)。
+// 对单个 models URL 发请求,按协议轮询 header。
+// R28:anthropic 专用头(x-api-key / anthropic-version)只发给 **Claude 协议**的上游。
+// 旧实现无条件先发一组 anthropic 头,再把 Bearer 兜底 —— 对 openai 形态的第三方 provider
+// 等于每次拉目录都注入一次 Claude 专用参数(实测协议桩能收到 anthropic-version);
+// 而这类 provider 可能对未知头直接报错,也违背"非官方分支不注入 Claude 专用参数"。
 // 返回 { ids } (200,可能空数组) 或 { status, body }(非 200);超时抛错。
-async function tryFetchModels(url, apiKey) {
+async function tryFetchModels(url, apiKey, { protocol = 'anthropic' } = {}) {
   // Always send a real User-Agent + Accept: Node fetch's default UA is "node",
   // which some relays behind a WAF (e.g. Cloudflare) answer with a 403 challenge.
   const common = { 'User-Agent': 'claude-gui', Accept: 'application/json' };
-  const headerSets = [
-    { ...common, 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01' },
-    { ...common, Authorization: `Bearer ${apiKey || ''}` },
-  ];
+  const anthropicSet = { ...common, 'x-api-key': apiKey || '', 'anthropic-version': '2023-06-01' };
+  const openaiSet = { ...common, Authorization: `Bearer ${apiKey || ''}` };
+  // 协议说了算:openai 只发 Bearer(不注 anthropic 头);anthropic 先发自己的头再兜底 Bearer
+  // (很多中转只实现一种鉴权,兜底保住旧行为)。
+  const headerSets = protocol === 'openai' ? [openaiSet] : [anthropicSet, openaiSet];
   let lastStatus = 0, lastBody = '', lastErr = '';
   for (const headers of headerSets) {
     const ctrl = new AbortController();
@@ -2013,9 +2080,31 @@ export async function assertPublicBaseURL(baseURL, { allowLoopback = true } = {}
   }
 }
 
+// INTERFACE-quota-endpoint §B.3:自定义额度接口的 SSRF 守卫 = **同一道 assertPublicBaseURL**
+// (环回放行 / 私网拒 / https 解析失败放行、http 公网拒 —— 口径一个字不改),只把它那两条
+// 通用文案换成额度接口专用文案(用户看到的得是"额度查询接口",不是"baseURL")。
+// 薄包装而非改函数本身:assertPublicBaseURL 有 6 处既有调用点。
+export async function assertQuotaPublicURL(quotaURL) {
+  try {
+    await assertPublicBaseURL(quotaURL);
+  } catch (e) {
+    const msg = String(e?.message || '');
+    const https = msg.includes('必须使用 https');
+    const blocked = msg.includes('指向内网');
+    const err = new Error(
+      https ? '额度查询接口：公网地址必须使用 https（http 仅允许本机回环地址，防明文密钥外泄）'
+        : blocked ? '额度查询接口指向内网/环回地址，已拒绝（SSRF 防护）'
+          : '额度查询接口必须是 http(s) 地址',
+    );
+    err.status = e?.status || 400;
+    err.kind = https ? 'https' : blocked ? 'blocked' : 'shape'; // 调用方可按档换文案(如 quota-test)
+    throw err;
+  }
+}
+
 // export 仅为复用:生图 provider(routes/image.js)的 openai/chat 协议与文本 provider
 // 的 baseURL 语义相同,拉模型走同一条探测链路。函数本体一个字不改。
-export async function probeUpstreamModels(baseURL, apiKey) {
+export async function probeUpstreamModels(baseURL, apiKey, { protocol = 'anthropic' } = {}) {
   // SSRF 守卫放在这里 = 所有调用点(fetch-models 请求值 / provider/fetch-models 存储
   // baseURL / active provider settings.json baseURL)一次全覆盖,不漏 sibling caller。
   await assertPublicBaseURL(baseURL);
@@ -2034,7 +2123,7 @@ export async function probeUpstreamModels(baseURL, apiKey) {
 
   let lastStatus = 0, lastBody = '', lastUrl = '', lastErr = '';
   for (const url of [...new Set(candidates)]) {
-    const res = await tryFetchModels(url, apiKey); // 超时直接向上抛
+    const res = await tryFetchModels(url, apiKey, { protocol }); // 超时直接向上抛
     if (res.ids) return res;                       // {ids, windows} 200(空数组也算成功,由前端提示手填)
     lastStatus = res.status; lastBody = res.body; lastUrl = url; lastErr = res.err || lastErr;
   }
@@ -2103,31 +2192,6 @@ export async function readClaudeOAuthToken() {
   } catch { return ''; }
 }
 
-// Fetch the official Anthropic catalogue (api.anthropic.com/v1/models) with the
-// subscription OAuth token — the SAME source the CLI's /model picker uses, so
-// the GUI lists exactly what `claude` knows (incl. the latest Opus). Runs via
-// curl so it inherits the server's https_proxy (api.anthropic.com is often only
-// reachable through one); the token is piped through curl's stdin `--config` so
-// it never lands in argv / the process list.
-function probeOfficialModels(token) {
-  return new Promise((resolve, reject) => {
-    const ch = spawn('curl',
-      ['-sS', '--max-time', '15', '--config', '-', 'https://api.anthropic.com/v1/models']);
-    let out = '', err = '';
-    ch.stdout.on('data', (d) => { out += d; });
-    ch.stderr.on('data', (d) => { err += d; });
-    ch.on('error', reject);
-    ch.on('close', (code) => {
-      if (code !== 0) return reject(new Error(err.trim() || `curl 退出码 ${code}`));
-      let data; try { data = JSON.parse(out); } catch { return reject(new Error('解析模型目录失败')); }
-      const arr = Array.isArray(data?.data) ? data.data : [];
-      resolve([...new Set(arr.map((m) => (typeof m === 'string' ? m : m?.id)).filter(Boolean))]);
-    });
-    ch.stdin.write(`header = "Authorization: Bearer ${token}"\nheader = "anthropic-version: 2023-06-01"\n`);
-    ch.stdin.end();
-  });
-}
-
 // POST /api/custom-providers/fetch-models { type, baseURL, apiKey, id? } — used by the
 // add-provider form (client supplies the key being entered).
 // 带 id(编辑态)时 apiKey 空则读存储 key 兜底 —— 编辑表单的 key 框留空=「不修改」(GET 从不回传
@@ -2150,7 +2214,7 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
     let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(base.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
     // SSRF 守卫已在 probeUpstreamModels 内(覆盖全部调用点),此处不再重复。
-    const probed = await probeUpstreamModels(baseURL, apiKey);
+    const probed = await probeUpstreamModels(baseURL, apiKey, { protocol: type === 'openai' ? 'openai' : 'anthropic' });
     // 实抓到窗口且是已存 provider → 持久化 modelWindows(自动压缩联动的最权威数据源)。
     if (req.body?.id && probed.windows) persistModelWindows(req.body.id, probed.windows);
     // r11-⑩:附目录预填(表单拉到列表即见预填,保存路径再兜一遍;用户声明由前端合并时优先)。
@@ -2227,48 +2291,158 @@ router.post('/custom-providers/test', async (req, res) => {
   }
 });
 
-// POST /api/provider/fetch-models { id? } — live-fetch a provider's /v1/models.
-// With `id`: fetch that OpenAI provider's REAL upstream (key read server-side).
-// Without `id`: fetch the CURRENTLY active provider from settings.json. Official
-// direct (no base) and the loopback proxy can't be probed.
+// ── R28 目录端点 ────────────────────────────────────────────────────────────
+// POST /api/provider/fetch-models { id? } — 目录查询的合同形态:
+//   * 省略 id = 请求开始时的当前 provider;给 id = 那个明确 provider。
+//   * 成功/失败都带 source/status/fetchedAt/accountScope;拉不到目录是**可观察状态**,
+//     一律 HTTP 200 + 稳定 code/note(只有"非法 id"400、"provider 不存在"404 用错误信封)。
+//   * 官方分支走 CLI 自己的支持目录(见 utils/cli-official.js),不再由 GUI 拿 OAuth token
+//     直打 api.anthropic.com;非官方分支沿用实际上游读取,**且按协议只注入对应头**
+//     (openai 形态不注 anthropic-version,见 tryFetchModels)。
+export const MODELS_SOURCE_UPSTREAM = 'provider-upstream';
+
+function modelsEnvelope({ models = [], status, source, code, note, accountScope }) {
+  return {
+    ok: status === 'available',
+    models,
+    windows: undefined,
+    source,
+    status,
+    fetchedAt: new Date().toISOString(),
+    accountScope: accountScope || { kind: 'provider', scopeId: 'unidentified' },
+    ...(code ? { code } : {}),
+    ...(note ? { note } : {}),
+  };
+}
+
+/** 官方分支:CLI 支持目录。拿不到就如实报 code/note,绝不当成"目录本来就空"。 */
+async function officialCatalogEnvelope() {
+  const r = await readOfficialModels();
+  if (!r.ok) {
+    return modelsEnvelope({
+      status: 'unavailable',
+      source: 'official-cli',
+      code: r.code,
+      note: `官方目录不可用(${r.code}):${r.message || 'CLI 未返回目录'};可手输具体 id 如 claude-opus-4-8`,
+    });
+  }
+  const rows = r.value.models;
+  const ids = rows.map((m) => m.value);
+  if (!ids.length) {
+    return modelsEnvelope({
+      models: [], status: 'unavailable', source: 'official-cli', accountScope: r.value.scope,
+      code: 'CLI_RESPONSE_INVALID', note: 'CLI 返回了空目录(不是"官网目录确实为空"的证明)',
+    });
+  }
+  // 全是别名行 = CLI 只给 tier 别名(其 resolvedModel 指向当前 provider 的模型),
+  // 不是新鲜完整的官网目录 → status 不冒称 available(合同:不伪称固定 aliases 为完整目录)。
+  const allAliased = rows.every((m) => m.aliased);
+  return modelsEnvelope({
+    models: ids,
+    status: allAliased ? 'stale' : 'available',
+    source: 'official-cli',
+    accountScope: r.value.scope,
+    note: allAliased
+      ? `CLI 返回的是别名目录(${ids.join(' / ')}),解析结果见 resolvedModel;完整官网目录需在官方 provider 下查询`
+      : `来自 CLI 支持目录(${ids.length} 项)`,
+  });
+}
+
+/** 按 id 找 provider 的读取目标:官方 / 某协议的上游 / 找不到。 */
+async function resolveModelCatalogTarget(id) {
+  const imported = await isCCSwitchImported();
+  const rows = withBuiltinOfficial(imported ? [] : await ccSwitchQuery(
+    "SELECT id, name, category, settings_config FROM providers WHERE app_type='claude' ORDER BY sort_index"
+  ));
+  const hit = rows.find((r) => r.id === id);
+  if (hit) {
+    if (hit.id === BUILTIN_OFFICIAL_ID || hit.category === 'official') return { kind: 'official' };
+    try {
+      const env = JSON.parse(hit.settings_config)?.env || {};
+      const baseURL = env.ANTHROPIC_BASE_URL || '';
+      const apiKey = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '';
+      // 直连官方的配置(category 不是 official 但 base 指官方)也走官方分支。
+      if (!baseURL || /api\.anthropic\.com/.test(baseURL)) return { kind: 'official' };
+      if (/127\.0\.0\.1|localhost/.test(baseURL)) return { kind: 'proxy' };
+      return { kind: 'upstream', protocol: 'anthropic', baseURL, apiKey };
+    } catch { return { kind: 'proxy' }; }
+  }
+  const custom = (await readCustomProviders()).find((p) => p.id === id);
+  if (custom) {
+    return {
+      kind: 'upstream',
+      protocol: custom.type === 'openai' ? 'openai' : 'anthropic',
+      baseURL: custom.baseURL,
+      apiKey: custom.apiKey || '',
+    };
+  }
+  const up = await resolveOpenAIUpstreamById(id); // cc-switch codex/opencode
+  if (up) return { kind: 'upstream', protocol: 'openai', baseURL: up.baseURL, apiKey: up.apiKey };
+  return null;
+}
+
 router.post('/provider/fetch-models', async (req, res) => {
   try {
-    const { id } = req.body || {};
-    if (id) {
-      const up = await resolveOpenAIUpstreamById(id);
-      if (!up) return res.status(404).json({ error: 'provider 不存在或非 OpenAI 格式' });
-      const probed = await probeUpstreamModels(up.baseURL, up.apiKey);
-      if (probed.windows) persistModelWindows(id, probed.windows);
-      return res.json({ models: probed.ids, windows: probed.windows || undefined });
+    const body = req.body || {};
+    if (body.id !== undefined && typeof body.id !== 'string') {
+      return res.status(400).json({ ok: false, code: 'MODELS_INVALID_INPUT', error: 'id 必须是 provider 标识字符串' });
     }
+    const id = typeof body.id === 'string' ? body.id.trim() : '';
+    if (typeof body.id === 'string' && !id) {
+      return res.status(400).json({ ok: false, code: 'MODELS_INVALID_INPUT', error: 'id 不能为空字符串' });
+    }
+
+    let target = null;
     let env = {};
-    try { env = (JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')).env) || {}; } catch {}
-    const base = env.ANTHROPIC_BASE_URL || '';
-    const token = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '';
-    // Official mode (no base URL): pull the real catalogue from api.anthropic.com
-    // with the subscription OAuth token — same list the CLI's /model picker shows,
-    // including the latest Opus. Falls back to the tier aliases if not logged in.
-    if (!base) {
-      const oauth = await readClaudeOAuthToken();
-      if (!oauth) return res.json({ models: [], note: '官方模式:未检测到订阅登录,请先在终端 claude login;别名 opus/sonnet/haiku 即最新 tier' });
-      try {
-        return res.json({ models: await probeOfficialModels(oauth) });
-      } catch (e) {
-        return res.json({ models: [], note: `官方目录拉取失败:${e.message};可手输具体 id 如 claude-opus-4-8` });
+    if (id) {
+      target = await resolveModelCatalogTarget(id);
+      if (!target) return res.status(404).json({ ok: false, code: 'MODELS_PROVIDER_NOT_FOUND', error: 'provider 不存在' });
+    } else {
+      try { env = (JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')).env) || {}; } catch {}
+      const base = env.ANTHROPIC_BASE_URL || '';
+      if (!base) target = { kind: 'official' };
+      else if (base.includes('127.0.0.1')) target = { kind: 'proxy' };
+      else target = { kind: 'upstream', protocol: 'anthropic', baseURL: base, apiKey: env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '' };
+    }
+
+    if (target.kind === 'official') return res.json(await officialCatalogEnvelope());
+    if (target.kind === 'proxy') {
+      // 回环代理是 GUI 自己的中转:它的上游模型属于 provider 配置,不在这里二次探测。
+      return res.json(modelsEnvelope({
+        models: [], status: 'unavailable', source: MODELS_SOURCE_UPSTREAM,
+        code: 'MODELS_PROXY_UNSUPPORTED', note: '该 provider 经本机回环代理,模型以 provider 配置为准',
+      }));
+    }
+
+    let probed;
+    try {
+      probed = await probeUpstreamModels(target.baseURL, target.apiKey, { protocol: target.protocol });
+    } catch (e) {
+      const status = e?.status === 400 ? 400 : 200;
+      if (status === 400) return res.status(400).json({ ok: false, code: 'MODELS_INVALID_INPUT', error: e.message });
+      // 网络层/渠道失败:200 + 稳定 code(可重试的读取,不冒充"目录为空")。
+      const code = /超时|timeout/i.test(e.message) ? 'MODELS_TIMEOUT' : 'MODELS_UNAVAILABLE';
+      return res.json(modelsEnvelope({
+        models: [], status: 'unavailable', source: MODELS_SOURCE_UPSTREAM,
+        code, note: `目录读取失败(${code}):${e.message}`,
+      }));
+    }
+    if (probed.windows) {
+      if (id) persistModelWindows(id, probed.windows);
+      else {
+        // 当前激活 provider(env base 直连)也持久化窗口:id 从 active-provider.json 反查。
+        try {
+          const activeId = JSON.parse(await readFile(join(homedir(), '.claude-gui', 'active-provider.json'), 'utf-8'))?.id;
+          if (activeId) persistModelWindows(activeId, probed.windows);
+        } catch {}
       }
     }
-    if (base.includes('127.0.0.1')) return res.json({ models: [], note: 'OpenAI 代理 provider,模型见 provider 配置' });
-    const probed = await probeUpstreamModels(base, token);
-    // 当前激活 provider(env base 直连)也持久化窗口:id 从 active-provider.json 反查。
-    if (probed.windows) {
-      try {
-        const activeId = JSON.parse(await readFile(join(homedir(), '.claude-gui', 'active-provider.json'), 'utf-8'))?.id;
-        if (activeId) persistModelWindows(activeId, probed.windows);
-      } catch {}
-    }
-    res.json({ models: probed.ids, windows: probed.windows || undefined });
+    res.json(modelsEnvelope({
+      models: probed.ids, status: 'available', source: MODELS_SOURCE_UPSTREAM,
+      note: probed.ids.length ? `上游共 ${probed.ids.length} 个模型` : '上游返回了空目录',
+    }));
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(500).json({ ok: false, code: 'MODELS_QUERY_FAILED', error: err.message });
   }
 });
 

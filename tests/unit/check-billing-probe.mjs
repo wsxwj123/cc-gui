@@ -138,10 +138,16 @@ delete store['cgui-official-billing'];
 {
   const { readFile } = await import('node:fs/promises');
   const src = await readFile(new URL('../../server/routes/subscription-usage.js', import.meta.url), 'utf8');
-  const gate = src.match(/if \(([^\n]*?)\) return res\.json\(\{ official: false \}\);/);
+  // R28:非官方分支不再回 `{official:false}` 两字段了 —— 合同要求 200 必须给全
+  // status/source/fetchedAt/accountScope/三段额度(一律 null,不用 0 冒充)。门本身
+  // (probe 放行不 probe 拦)一字未改,载荷改由 notApplicable() 组装。
+  const gate = src.match(/if \(([^\n]*?)\) return res\.json\(await notApplicable\(\)\);/);
   assert.ok(gate, '没找到 subscription-usage 的 official 门(改写法了就同步这条断言)');
-  assert.equal(gate[1].trim(), '!req.query.probe && !isOfficial()',
+  assert.equal(gate[1].trim(), '!probe && !officialCurrent',
     `门的放行条件被改动,探测将拿不到答案:${gate[1]}`);
+  const payload = src.match(/function notApplicablePayload\(fetchedAt\) \{[\s\S]*?\n\}/)?.[0] || '';
+  assert.match(payload, /official: false/, '非官方分支必须 official:false');
+  assert.match(payload, /session: null,[\s\S]*?weekAll: null,[\s\S]*?weekScoped: null/, '非官方分支三段额度必须是 null(不冒 0)');
 }
 
 console.log('check-billing-probe OK');

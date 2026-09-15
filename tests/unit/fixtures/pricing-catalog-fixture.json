@@ -1,0 +1,541 @@
+{
+ "source": "official-sources",
+ "fetchedAt": "2026-09-11T08:15:56.307Z",
+ "prices": {},
+ "schemaVersion": 2,
+ "providers": [],
+ "quotes": [
+  {
+   "quoteId": "63910ad85daaa5fd",
+   "provider": "deepseek-official",
+   "presetIds": [
+    "deepseek-official",
+    "deepseek-anthropic"
+   ],
+   "modelId": null,
+   "displayName": "deepseek-flash",
+   "protocol": null,
+   "market": "cn",
+   "currency": "CNY",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 1,
+    "output": 4,
+    "cacheRead": 0.02,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": {
+    "period": "off-peak",
+    "periodLabel": "空闲时段",
+    "timezone": "Asia/Shanghai"
+   },
+   "validFrom": "2026-08-17T00:00:00+08:00",
+   "validTo": null,
+   "sourceUrl": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T16:39:04.415Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "fd1b1188a5d59146",
+   "provider": "deepseek-official",
+   "presetIds": [
+    "deepseek-official",
+    "deepseek-anthropic"
+   ],
+   "modelId": null,
+   "displayName": "deepseek-flash",
+   "protocol": null,
+   "market": "cn",
+   "currency": "CNY",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 2,
+    "output": 8,
+    "cacheRead": 0.04,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": {
+    "period": "peak",
+    "periodLabel": "高峰时段",
+    "timezone": "Asia/Shanghai"
+   },
+   "validFrom": "2026-08-17T00:00:00+08:00",
+   "validTo": null,
+   "sourceUrl": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T16:39:04.415Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "5c428b40402cca89",
+   "provider": "deepseek-official",
+   "presetIds": [
+    "deepseek-official",
+    "deepseek-anthropic"
+   ],
+   "modelId": null,
+   "displayName": "deepseek-v4-pro",
+   "protocol": null,
+   "market": "cn",
+   "currency": "CNY",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 4.5,
+    "output": 13.5,
+    "cacheRead": 0.15,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": {
+    "period": "off-peak",
+    "periodLabel": "空闲时段",
+    "timezone": "Asia/Shanghai"
+   },
+   "validFrom": "2026-08-17T00:00:00+08:00",
+   "validTo": null,
+   "sourceUrl": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T16:39:04.415Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "9878ba47abbbca82",
+   "provider": "deepseek-official",
+   "presetIds": [
+    "deepseek-official",
+    "deepseek-anthropic"
+   ],
+   "modelId": null,
+   "displayName": "deepseek-v4-pro",
+   "protocol": null,
+   "market": "cn",
+   "currency": "CNY",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 9,
+    "output": 27,
+    "cacheRead": 0.3,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": {
+    "period": "peak",
+    "periodLabel": "高峰时段",
+    "timezone": "Asia/Shanghai"
+   },
+   "validFrom": "2026-08-17T00:00:00+08:00",
+   "validTo": null,
+   "sourceUrl": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T16:39:04.415Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "b915293b20bab091",
+   "provider": "openai",
+   "presetIds": [
+    "openai"
+   ],
+   "modelId": null,
+   "displayName": "gpt-5.6-sol (short context)",
+   "protocol": "openai",
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 4,
+    "output": 20,
+    "cacheRead": 0.4,
+    "cacheWrite5m": 5,
+    "cacheWrite1h": null
+   },
+   "conditions": {
+    "context": "short context"
+   },
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://developers.openai.com/api/docs/pricing",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:27.559Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "fff08a935d4f7b0f",
+   "provider": "openai",
+   "presetIds": [
+    "openai"
+   ],
+   "modelId": null,
+   "displayName": "gpt-5.6-sol (long context)",
+   "protocol": "openai",
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 8,
+    "output": 30,
+    "cacheRead": 0.8,
+    "cacheWrite5m": 10,
+    "cacheWrite1h": null
+   },
+   "conditions": {
+    "context": "long context"
+   },
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://developers.openai.com/api/docs/pricing",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:27.559Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "25402b0b831ea009",
+   "provider": "zhipu-glm",
+   "presetIds": [
+    "zhipu-glm"
+   ],
+   "modelId": null,
+   "displayName": "GLM-5.3-Flash",
+   "protocol": "openai",
+   "market": "cn",
+   "currency": "CNY",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 0.8,
+    "output": 2.8,
+    "cacheRead": 0.23,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://docs.bigmodel.cn/cn/guide/start/pricing",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:28.242Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "c73d2bbbc2327e1c",
+   "provider": "doubao-volc",
+   "presetIds": [
+    "doubao-volc"
+   ],
+   "modelId": null,
+   "displayName": "glm-5.3-flash",
+   "protocol": "openai",
+   "market": "cn",
+   "currency": "CNY",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 0.8,
+    "output": 2.8,
+    "cacheRead": 0.23,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://docs.volcengine.com/api/doc/getDocDetail?LibraryID=82379&DocumentID=1544106&lang=zh",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:28.864Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "2ed9472431f76c80",
+   "provider": "together",
+   "presetIds": [
+    "together"
+   ],
+   "modelId": null,
+   "displayName": "GLM-5.3-Flash",
+   "protocol": "openai",
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 0.15,
+    "output": 0.5,
+    "cacheRead": 0.03,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://www.together.ai/pricing",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:29.799Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "6f27354fa35d7272",
+   "provider": "groq",
+   "presetIds": [
+    "groq"
+   ],
+   "modelId": "openai/gpt-oss-120b",
+   "displayName": "GPT OSS 120B",
+   "protocol": "openai",
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 0.15,
+    "output": 0.6,
+    "cacheRead": null,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://console.groq.com/docs/models",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:29.452Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "170b782f49a48489",
+   "provider": "cerebras",
+   "presetIds": [
+    "cerebras"
+   ],
+   "modelId": "gpt-oss-120b",
+   "displayName": "OpenAI GPT OSS",
+   "protocol": "openai",
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 0.35,
+    "output": 0.75,
+    "cacheRead": null,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://api.cerebras.ai/public/v1/models",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:30.699Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "492b2a6b0bcf9fee",
+   "provider": "zai-intl",
+   "presetIds": [
+    "zai-intl"
+   ],
+   "modelId": null,
+   "displayName": "GLM-5.3-Flash",
+   "protocol": "openai",
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 0.15,
+    "output": 0.5,
+    "cacheRead": 0.03,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://docs.z.ai/guides/overview/pricing",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:31.033Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "fe000bf37ac9fca6",
+   "provider": "openrouter",
+   "presetIds": [
+    "openrouter",
+    "openrouter-anthropic"
+   ],
+   "modelId": "anthropic/claude-opus-5",
+   "displayName": "Claude Opus 5",
+   "protocol": null,
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 5,
+    "output": 25,
+    "cacheRead": 0.5,
+    "cacheWrite5m": 6.25,
+    "cacheWrite1h": null
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://openrouter.ai/api/v1/models",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:32.167Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "66dc3a44b3efed16",
+   "provider": "openrouter",
+   "presetIds": [
+    "openrouter",
+    "openrouter-anthropic"
+   ],
+   "modelId": "anthropic/claude-opus-5:batch",
+   "displayName": "Claude Opus 5 (batch)",
+   "protocol": null,
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 2.5,
+    "output": 12.5,
+    "cacheRead": 0.25,
+    "cacheWrite5m": 3.125,
+    "cacheWrite1h": null
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://openrouter.ai/api/v1/models",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:32.167Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "e6cacae22447ea60",
+   "provider": "openrouter",
+   "presetIds": [
+    "openrouter",
+    "openrouter-anthropic"
+   ],
+   "modelId": "openai/gpt-oss-120b",
+   "displayName": "OpenAI: gpt-oss-120b",
+   "protocol": null,
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 0.037,
+    "output": 0.16999999999999998,
+    "cacheRead": null,
+    "cacheWrite5m": null,
+    "cacheWrite1h": null
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://openrouter.ai/api/v1/models",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:32.167Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "74422e9a107282e6",
+   "provider": "anthropic-official",
+   "presetIds": [
+    "anthropic-official"
+   ],
+   "modelId": null,
+   "displayName": "Claude Fable 5.1",
+   "protocol": "anthropic",
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 10,
+    "output": 50,
+    "cacheRead": 0.25,
+    "cacheWrite5m": 12.5,
+    "cacheWrite1h": 20
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:31.650Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "c53f7cb1bea1cad7",
+   "provider": "anthropic-official",
+   "presetIds": [
+    "anthropic-official"
+   ],
+   "modelId": null,
+   "displayName": "Claude Fable 5",
+   "protocol": "anthropic",
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 10,
+    "output": 50,
+    "cacheRead": 1,
+    "cacheWrite5m": 12.5,
+    "cacheWrite1h": 20
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:31.650Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  },
+  {
+   "quoteId": "a8d09d31c4f0fc69",
+   "provider": "anthropic-official",
+   "presetIds": [
+    "anthropic-official"
+   ],
+   "modelId": null,
+   "displayName": "Claude Opus 5",
+   "protocol": "anthropic",
+   "market": "global",
+   "currency": "USD",
+   "unit": "per 1M tokens",
+   "prices": {
+    "input": 5,
+    "output": 25,
+    "cacheRead": 0.5,
+    "cacheWrite5m": 6.25,
+    "cacheWrite1h": 10
+   },
+   "conditions": null,
+   "validFrom": null,
+   "validTo": null,
+   "sourceUrl": "https://platform.claude.com/docs/en/about-claude/pricing",
+   "sourceKind": "official",
+   "fetchedAt": "2026-09-11T15:26:31.650Z",
+   "parserVersion": "pr5-1",
+   "status": "fresh"
+  }
+ ],
+ "refresh": null
+}

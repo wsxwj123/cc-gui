@@ -14,6 +14,20 @@ export function extractToolResultText(content) {
   return content == null ? '' : String(content);
 }
 
+// 抽出 tool_result 里的图像块(两种形态都收:Anthropic 的 source:{type:'base64',
+// media_type,data} 与 MCP 直传的 {mimeType,data})。computer-use 截图等工具的
+// 返回靠它进 UI;没有则返回 []。
+export function extractToolResultImages(content) {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((b) => b && (b.type === 'image' || typeof b.data === 'string'))
+    .map((b) => ({
+      mime: b.source?.media_type || b.mimeType || 'image/png',
+      data: b.source?.data || b.data || '',
+    }))
+    .filter((b) => b.data);
+}
+
 // 停止(真杀进程,turnAborted=killedRef)时给未回执的普通工具补一个合成终态,
 // 否则 tool_result 永不到达 → 卡片(SkillCard/ToolCallRow 只看 result)永久转圈。
 // gate 必须是 turnAborted:detach/后台化(killedRef=false)进程还在跑、tool_result 会迟到,

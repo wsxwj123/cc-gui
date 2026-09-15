@@ -18,7 +18,9 @@ class MemoryStorage {
   removeItem(key) { this.values.delete(key); }
 }
 
+// R07 起客户端每次入队都带 messageId（服务端按它做身份索引）；这里跟齐真实载荷形态。
 const payload = {
+  messageId: 'msg-r33-draft-binding',
   text: '带附件的首条消息\n\n附件:\n@/tmp/a.png',
   displayText: '带附件的首条消息',
   attachments: [{ kind: 'image', name: 'a.png', path: '/tmp/a.png', bytes: 9, preview: null }],

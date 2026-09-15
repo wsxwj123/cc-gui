@@ -35,6 +35,90 @@ export async function uploadAttachmentFile(file, { fetchImpl = fetch, previewRea
   };
 }
 
+// R08:图片附件的显示来源。preview(持久化预算内的 data URL)优先;没有 preview 时退回受权的
+// 原图字节入口 —— "图片大/刷新后 preview 为空就整张不显示"是用户实报缺陷。持久化预算不变,
+// 这里不重新存整图。都没有 → null(调用方按"图片不可用"占位处理)。
+export function imageAttachmentSrc(attachment) {
+  if (typeof attachment?.preview === 'string' && attachment.preview) return attachment.preview;
+  if (typeof attachment?.path === 'string' && attachment.path) {
+    return `/api/files/read?path=${encodeURIComponent(attachment.path)}&raw=1`;
+  }
+  return null;
+}
+
+// R09:一条消息的图片序列(灯箱只在这条序列里导航)。只数"能显示出来的图片"——
+// 非图片附件跳过、既无 preview 又无 path 的跳过;顺序就是附件原顺序。调用方还要剔除
+// 【加载失败】的(元数据说有来源、实际 403/404/解码失败),见 MessageBubble 的
+// imageStates —— 否则计数与卡片矛盾、还能翻到破图上。
+export function imageAttachmentSequence(attachments) {
+  if (!Array.isArray(attachments)) return [];
+  return attachments.filter((attachment) => attachment?.kind === 'image' && imageAttachmentSrc(attachment));
+}
+
+// R08(阶段05 抽查第 4 条):raw 原图入口的并发是【进程级全局配额】—— INTERFACE 明文
+// "最多 4 个并行 raw 读,超出 429 FILE_READ_BUSY",它与文件树预览、正文 markdown 图共用;
+// 而前端图片一次 onError 就闩死"图片不可用"、明确不重试 → 一条消息里第 5 张及以后的图
+// 永久显示不出来(文件其实存在)。修法:只对 429(并发配额)做【有界】退避重试,其余
+// 4xx/5xx 与网络错误立刻判失败 —— 不做"失败无限自动重试"(合同明文禁止)。
+export const IMAGE_READ_BUSY_RETRY_DELAYS_MS = [250, 700, 1500];
+// 光退避重试不够:一条消息 6 张图时,6 个请求同一时刻重试又会一起撞 4 个上限,最后总有
+// 若干张把重试次数耗光(实测 4/6,余下永久不可用)。客户端自己也守这条线:附件原图请求走
+// 4 槽 FIFO 闸门,服务端配额就不会被自己人打满;429 退避作为兜底(文件树预览/正文 markdown
+// 图没走闸门,仍可能占住配额)。
+export const IMAGE_READ_MAX_PARALLEL = 4;
+let activeImageReads = 0;
+const imageReadWaiters = [];
+
+function acquireImageReadSlot() {
+  if (activeImageReads < IMAGE_READ_MAX_PARALLEL) {
+    activeImageReads += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => { imageReadWaiters.push(resolve); });
+}
+
+function releaseImageReadSlot() {
+  const next = imageReadWaiters.shift();
+  if (next) { next(); return; } // 槽位直接转交给队首,activeImageReads 不变
+  activeImageReads = Math.max(0, activeImageReads - 1);
+}
+
+/**
+ * 取原图字节(经 fetch 才能看见 429)。返回 Blob;失败抛 Error,HTTP 状态挂在 error.status。
+ * @param {string} src /api/files/read?…&raw=1
+ */
+export async function loadAttachmentImageBytes(src, {
+  fetchImpl = (...args) => fetch(...args),
+  delays = IMAGE_READ_BUSY_RETRY_DELAYS_MS,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  acquire = acquireImageReadSlot,
+  release = releaseImageReadSlot,
+} = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    await acquire();
+    let blob = null;
+    let failure = null;
+    try {
+      const response = await fetchImpl(src);
+      if (response.ok) blob = await response.blob();
+      else {
+        failure = new Error(`HTTP ${response.status}`);
+        failure.status = response.status;
+      }
+    } catch (error) {
+      failure = error;
+    } finally {
+      release(); // 字节读完才放槽(服务端也是读到 end 才释放它的配额)
+    }
+    if (blob) return blob;
+    if (failure?.status === 429 && attempt < delays.length) {
+      await sleep(delays[attempt]);
+      continue;
+    }
+    throw failure;
+  }
+}
+
 export function attachmentBlockReason(attachments) {
   const items = Array.isArray(attachments) ? attachments : [];
   if (items.some((item) => item?.status === 'uploading')) return 'uploading';
@@ -101,6 +185,12 @@ export const ATTACHMENT_SIDECAR_OUTBOX_KEY = 'cgui-attachment-sidecar-outbox:v1'
 // 两侧口径不一致等)条目永远清不掉,localStorage 被撑满后连主题/字号这些偏好都写不进去。
 // 64 条 FIFO 封顶:附件卡片是可重发的旁路数据,丢最旧的一条远好过写死整个 localStorage。
 export const ATTACHMENT_SIDECAR_OUTBOX_MAX = 64;
+// 服务端对这几种状态是"确定性拒绝"(载荷非法/同 messageId 异载荷/超限/鉴权失败),重试
+// 没有意义 —— 条目要丢出队列,否则它会永久堵住同会话后面所有条目(见 postEntry)。
+// 408/429 是明文的暂时性(超时/限流),5xx 与网络错误同理,一律保留重试。
+export function isPermanentAttachmentRejection(status) {
+  return typeof status === 'number' && status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
 // 同一页面可有多个 outbox manager（测试注入、热重载、未来多挂载点）。以 storage
 // 对象为键共享 RMW 队尾，避免各 manager 拿独立旧快照后互相覆盖。
 const attachmentStorageMutationTails = new WeakMap();
@@ -133,11 +223,28 @@ export function createAttachmentSidecarOutbox({
     storage ? (attachmentStorageMutationTails.get(storage) || Promise.resolve()) : Promise.resolve()
   );
 
+  // 阶段05 抽查第 3 条:升级前写入 outbox 的存量条目 payload 只有 {text,attachments,
+  // displayText} —— 服务端新契约要求 messageId 必填,这些条目每条都 400 ATTACHMENT_INVALID,
+  // 且 flushSession 遇到队首失败就 return,于是该会话此后每条新附件消息的 sidecar 都被堵死
+  // (刷新后图片/说明全丢)。迁移:按条目 id 补一个【稳定】的合法 messageId(同一条目每次读到
+  // 都一样 → 服务端幂等,重放 200 created:false,不会写重复)。补出来的 id 只承担"让写入通过"
+  // 的职责:旧条目的回读本来就靠服务端一并写入的 textHash 条目,该行为未变。
+  const legacyMessageId = (entry) => {
+    const raw = String(entry?.id || `legacy-${entry?.createdAt || 0}`);
+    return raw.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 128) || 'legacy-attachment-entry';
+  };
+  const withMessageId = (entry) => {
+    const payload = entry?.payload;
+    if (!payload || typeof payload !== 'object') return entry;
+    if (typeof payload.messageId === 'string' && payload.messageId) return entry;
+    return { ...entry, payload: { ...payload, messageId: legacyMessageId(entry) } };
+  };
+
   const read = () => {
     if (!storage) return [];
     try {
       const parsed = JSON.parse(storage.getItem(ATTACHMENT_SIDECAR_OUTBOX_KEY) || '[]');
-      return Array.isArray(parsed) ? parsed : [];
+      return Array.isArray(parsed) ? parsed.map(withMessageId) : [];
     } catch { return []; }
   };
 
@@ -213,7 +320,21 @@ export function createAttachmentSidecarOutbox({
       return { ok: false, retained: true, error: 'network', cause };
     }
     if (!response?.ok) {
-      return { ok: false, retained: true, error: 'http', status: response?.status };
+      const status = response?.status;
+      // 抽查第 3 条(堵死):服务端对这条载荷的拒绝是【确定性】的(400 载荷非法 / 409 同
+      // messageId 异载荷 / 413 超限),重试一万次还是同一个结果;当"可重试"保留只会让
+      // flushSession 永远卡在队首 —— 该会话后续消息的附件卡片再也发不出去。这类条目必须
+      // 丢出队列让后面的走,并把丢弃数如实报给调用方(attachmentSidecarNotice)。
+      // 5xx/408/429/网络错误仍是暂时性的,保留重试。
+      if (isPermanentAttachmentRejection(status)) {
+        const dropped = await mutate((current) => ({
+          next: current.filter((item) => item?.id !== entry.id),
+        }));
+        // 清账失败就别报成功:条目还在,下一次仍会重放,不会无限循环(flushSession 见 !ok 即返回)。
+        if (!dropped.ok) return { ...dropped, retained: true, error: dropped.error || 'persist-failed' };
+        return { ok: true, retained: false, dropped: 1 };
+      }
+      return { ok: false, retained: true, error: 'http', status };
     }
     const removed = await mutate((current) => ({
       next: current.filter((item) => item?.id !== entry.id),
@@ -226,12 +347,14 @@ export function createAttachmentSidecarOutbox({
   };
 
   const flushSession = (sessionId) => withSessionLock(sessionId, async () => {
+    let dropped = 0;
     for (;;) {
       await currentMutationTail();
       const entry = read().find((item) => item?.sessionId === sessionId);
-      if (!entry) return { ok: true, retained: false };
+      if (!entry) return { ok: true, retained: false, dropped };
       const posted = await postEntry(entry, sessionId);
       if (!posted.ok) return posted;
+      dropped += posted.dropped || 0;
     }
   });
 
@@ -244,15 +367,17 @@ export function createAttachmentSidecarOutbox({
     }
     return withSessionLock(sessionId, async () => {
       let matched = 0;
+      let dropped = 0;
       for (;;) {
         await currentMutationTail();
         const entry = read().find((item) => (
           item?.ownerKey === ownerKey && (!item?.sessionId || item.sessionId === sessionId)
         ));
-        if (!entry) return { ok: true, retained: false, matched };
+        if (!entry) return { ok: true, retained: false, matched, dropped };
         matched += 1;
         const posted = await postEntry(entry, sessionId);
         if (!posted.ok) return { ...posted, matched };
+        dropped += posted.dropped || 0;
       }
     });
   };
@@ -261,7 +386,8 @@ export function createAttachmentSidecarOutbox({
     await currentMutationTail();
     const sessionIds = [...new Set(read().map((entry) => entry?.sessionId).filter(Boolean))];
     const results = await Promise.all(sessionIds.map((sessionId) => flushSession(sessionId)));
-    return results.find((result) => !result.ok) || { ok: true, retained: false };
+    return results.find((result) => !result.ok)
+      || { ok: true, retained: false, dropped: results.reduce((n, result) => n + (result.dropped || 0), 0) };
   };
 
   const stageAndFlush = async (entry) => {
@@ -331,7 +457,11 @@ export function bindDraftAttachmentSidecarsOnInit(startedSession, sessionId, { b
 }
 
 export function attachmentSidecarNotice(result) {
-  if (!result || result.ok) return null;
+  if (!result) return null;
+  // 确定性拒绝的条目已被丢出队列(不再永久堵住后面的消息),如实说一声 —— 消息本身照常发出,
+  // 丢的只是"刷新后恢复附件卡片"的旁路数据。
+  if (result.dropped) return `${result.dropped} 条附件卡片被服务端拒绝（不会重试）；消息已发出，但刷新后这些卡片无法恢复。`;
+  if (result.ok) return null;
   if (result.retained) return '附件卡片暂未同步，已保存在本机恢复队列；将在挂载或下次发送时自动重试。';
   return '附件卡片未能写入本地恢复队列（本地存储空间不足或不可用）；消息仍会发送，但刷新后卡片可能无法恢复。';
 }

@@ -17,6 +17,30 @@ import { lookupModelCapabilities, EFFORT_IDS } from '../utils/model-capabilities
 import { lookupVisionCapability } from '../utils/vision-capability.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 import { normalizeOpenAIUsage } from '../utils/openai-usage.js';
+import { recordUsageIssue } from './usage-issue-log.js';
+
+// R22/R24:上游 usage 无效/自相矛盾时,把结论(含原始数字)记进服务端自有存储。
+// CLI 落盘只留官方字段,自定义键会被丢掉,所以不能让说明只挂在 usage 上;这里用
+// 【返回给 CLI 的 message.id】当键 —— 那个 id 会被 CLI 逐字写进转写的 message.id,
+// session-reader 读会话时按它回读(见 usage-issue-log.js)。
+function noteUsageIssues(messageId, model, usage) {
+  const codes = Array.isArray(usage?.ccgui_usage?.codes) ? usage.ccgui_usage.codes : [];
+  if (!messageId || !codes.length) return;
+  try {
+    recordUsageIssue({
+      messageId,
+      model: model || null,
+      codes,
+      raw: usage.ccgui_usage?.raw || null,
+      sent: {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens,
+      },
+    });
+  } catch { /* 记录失败不影响转发本身 */ }
+}
 
 // Fixed loopback port so the ANTHROPIC_BASE_URL written into settings.json
 // stays valid across server restarts (watchdog). Falls back to an ephemeral
@@ -578,6 +602,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
       }
       sse(clientRes, 'content_block_stop', { type: 'content_block_stop', index: entry.anthropicIndex });
     }
+    noteUsageIssues(msgId, model, usage);
     sse(clientRes, 'message_delta', { type: 'message_delta',
       delta: { stop_reason: STOP_MAP[finishReason] || 'end_turn', stop_sequence: null },
       usage: usage || { output_tokens: 0 } });
@@ -615,12 +640,15 @@ function openAIToAnthropicMessage(json, model) {
     const name = tc.function?.name;
     content.push({ type: 'tool_use', id: tc.id, name, input: sanitizeToolInput(name, input) });
   }
+  const usage = normalizeOpenAIUsage(json.usage);
+  const id = json.id || ('msg_' + Math.random().toString(36).slice(2));
+  noteUsageIssues(id, model, usage);
   return {
-    id: json.id || ('msg_' + Math.random().toString(36).slice(2)),
+    id,
     type: 'message', role: 'assistant', model, content,
     stop_reason: STOP_MAP[choice.finish_reason] || 'end_turn', stop_sequence: null,
     // W8/BB4/r96:与流式同一份候选表与换算(utils/openai-usage.js),两条路不得再各写一遍。
-    usage: normalizeOpenAIUsage(json.usage),
+    usage,
   };
 }
 

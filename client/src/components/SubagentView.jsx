@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, ChevronDown, GitBranch, Loader2, Square, User } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
@@ -8,6 +8,7 @@ import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { LoadingMark, useCyclingVerb, ElapsedTime } from './LoadingBits.jsx';
 import { stopNoOwnerNotice } from './tools/TaskCard.jsx';
 import { resolveOwnedAgent } from '../utils/agentOwner.js';
+import { AGENT_TERMINAL_STATUSES, agentSourceState, taskRunEvidence } from '../utils/agentView.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, shouldPauseAutoScroll } from '../utils/scroll.js';
 
@@ -20,7 +21,7 @@ function fmtTok(n) {
 // #9/O4 子代理会话窗口:样式对齐正常会话(用户气泡在右、回复在左、思考/工具折叠),
 // 标题处「母会话标题 / 子代理名」层级面包屑,点母会话标题返回。
 // 数据来自 store.activeAgents[agentId](流式累积的 text/thinking/toolCalls)。
-export function SubagentView({ agentId, paneId, active = false, parentTitle, parentSessionId = null, onBack }) {
+export function SubagentView({ agentId, paneId, tabIndex = 0, active = false, parentTitle, parentSessionId = null, onBack }) {
   // 与 TaskCard 同一归属判定:activeAgents 按 tool_use.id 全局唯一,分支(fork)会话
   // 复制出的卡片撞源会话的 id —— 不校验就会在分支窗格里渲染【源会话正在流的实时内容】,
   // 停止键也会停到源会话。归属不符时按"数据不可用"处理(走下面的 !agent 早退)。
@@ -53,8 +54,19 @@ export function SubagentView({ agentId, paneId, active = false, parentTitle, par
   const prompt = agent?.prompt || '';
   const blocks = agent?.blocks || [];
   const status = agent?.status || 'working';
-  const working = status === 'working' || status === 'starting';
-  const nonTerminal = !['done', 'error', 'stopped'].includes(status);
+  const nonTerminal = !AGENT_TERMINAL_STATUSES.has(status);
+  // R12 来源:实时 = 源还在跑,历史 = 只剩历史。证据优先取母会话消息里这条 Task 调用的
+  // 状态(没回结果 / 后台启动且无终态通知 = 在跑);拿不到证据时才沿用条目自己的非终态判定。
+  // 刻意不用"有没有历史响应"当判据 —— 迟到的历史响应不得把在跑的源说成已完成。
+  const parentMessages = useStore((s) => (
+    parentSessionId && s.paneMessagesSid?.[tabIndex] === parentSessionId ? s.paneMessages?.[tabIndex] : null
+  ));
+  const evidence = useMemo(() => taskRunEvidence(parentMessages, agentId), [parentMessages, agentId]);
+  // 判据集中在 utils/agentView.js(视图与监控列表同一套)。停止按钮 = 有运行证据:
+  // 证据说结束(含分支复制品里复制的源代理终态通知)就摘掉,不拿可能过期的索引去否证。
+  const { running, label: sourceLabel } = agentSourceState({ evidence, nonTerminal });
+  const canStop = running;
+  const working = running;
 
   const scrollOwnerKey = `${paneId}:${parentSessionId}:${agentId}`;
   useEffect(() => {
@@ -141,14 +153,21 @@ export function SubagentView({ agentId, paneId, active = false, parentTitle, par
     done:     { label: '已完成', cls: 'text-green-600' },
     error:    { label: '错误', cls: 'text-red-600' },
     stopped:  { label: '已停止', cls: 'text-ink-muted' },
-  }[status] || { label: status, cls: 'text-ink-muted' };
+  }[running ? 'working' : status] || { label: running ? '工作中' : status, cls: 'text-ink-muted' };
 
   return (
     // B4 显式只读退出(PLAN §1.3.2 / INTERFACE §3.4):子代理结果是只读面 —— 这里的内容
     // 是子代理的产出回显,不是用户的操作面。整棵子树退出,包括它内嵌的工具卡与权限卡。
     <GenuiActionProvider value={null}>
     {/* bg-canvas 不透明 — 杜绝下层母会话内容透视(玻璃效果导致"下方显示母会话信息") */}
-    <div className="flex-1 flex flex-col min-h-0 bg-canvas">
+    {/* 身份只发布在这一个容器上:data-parent-session-id + data-tool-use-id(= 身份本身,
+        不看窗格位置/模型名)。多一层/少一层都会让"这个视图属于谁"变得可争议。 */}
+    <div
+      data-cgui="subagent-view"
+      data-parent-session-id={parentSessionId || undefined}
+      data-tool-use-id={agentId || undefined}
+      className="flex-1 flex flex-col min-h-0 bg-canvas"
+    >
       {/* 标题栏 — 与正常会话 header 同样式,层级:母会话 / 子代理 */}
       <div className="glass-bar shrink-0 px-6 py-3 border-b border-canvas-deep">
         <div className="max-w-[var(--content-max)] mx-auto min-w-0">
@@ -189,6 +208,18 @@ export function SubagentView({ agentId, paneId, active = false, parentTitle, par
               {working && <Loader2 size={10} className="animate-spin" />}
               {statusMeta.label}
             </span>
+            {/* R12 来源:实时 = 源还在跑;历史 = 只剩磁盘上的转写(本次没在跑)。 */}
+            <span
+              className={`px-1.5 py-px rounded font-body ${running ? 'bg-blue-50 text-blue-700' : 'bg-canvas-deep text-ink-muted'}`}
+              title={running ? '源子代理仍在运行' : '本次没有运行实例,内容来自已落盘的历史转写'}
+            >
+              {sourceLabel}
+            </span>
+            {agent?.hasTranscript === false && (
+              <span className="px-1.5 py-px rounded bg-canvas-deep text-ink-muted font-body" title="该母会话是复制出来的,只有复制时的历史,没有自己的子代理转写">
+                复制品
+              </span>
+            )}
             {/* 部件①单卡停止:非终态时显示。停止链路走 store action(反查 pid + stop-task 端点 +
                 乐观收尾)。sessionId 以【本视图所属母会话】为准,agent 捕获值垫底 ——
                 agent.sessionId 是发起时钉的会话,分支场景下它指向源会话(Bug5 现象②)。 */}
@@ -198,13 +229,15 @@ export function SubagentView({ agentId, paneId, active = false, parentTitle, par
             {agent?.wfInner && (
               <span className="text-ink-faint font-body">工作流内的单个助手无法单独停止;可停止整个工作流。</span>
             )}
-            {nonTerminal && !agent?.wfInner && (
+            {canStop && !agent?.wfInner && (
               <button
                 onClick={async () => {
                   // D5:同 TaskCard —— 没有 slot 认领(provider 不发 task 事件)时给一次提示,
-                  // 否则卡片闪一下转回运行中、零解释。
+                  // 否则卡片闪一下转回运行中、零解释。R12:stop-task 的四档结果(错归属/
+                  // 只有历史/超时未确认)都有各自的人话,不再静默失败。
                   const r = await useStore.getState().stopSingleTask(parentSessionId || agent.sessionId, agentId);
                   if (r?.noOwner) confirmDialog(stopNoOwnerNotice(r.procAlive), { confirmText: '知道了' });
+                  else if (r?.error) confirmDialog(r.error, { confirmText: '知道了' });
                 }}
                 className="px-1.5 py-px rounded bg-canvas-deep text-ink-muted hover:text-error hover:bg-error/10 flex items-center gap-1 transition-colors font-body"
                 title="停止该子代理/teammate"

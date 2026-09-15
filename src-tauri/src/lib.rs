@@ -748,6 +748,38 @@ fn backend_version_matches(port: u16) -> bool {
     http_get_contains(port, "/api/health", &want)
 }
 
+// L2:6677 上那个后端是不是"我们自己这个 app 的"。
+// 两台/两份不同版本的 claude-gui 同时装(例如正式版 + 另一份并存构建)时,后启动的一方会把
+// 6677 上对方的后端当成"旧版本 stale"杀掉 —— 对方界面随即整屏"连接失败"(实报)。
+// 判据:该端口 LISTEN 进程的命令行里必须出现本 app 自己的 server 入口路径;别人的就不动,
+// 交给下面的 spawn 循环换到 6678…(循环本来就会跳过被占端口)。
+#[cfg(not(target_os = "windows"))]
+fn stale_backend_owned_by_us(app: &tauri::AppHandle, port: u16) -> bool {
+    let Some(entry) = resolve_server_entry(app) else { return false };
+    let want = strip_verbatim_prefix(entry).to_string_lossy().to_string();
+    let Ok(out) = Command::new("sh")
+        .arg("-c")
+        .arg(format!("lsof -ti tcp:{port} -sTCP:LISTEN"))
+        .output()
+    else {
+        return false;
+    };
+    let pids = String::from_utf8_lossy(&out.stdout).to_string();
+    for pid in pids.split_whitespace() {
+        let Ok(ps) = Command::new("ps").args(["-o", "command=", "-p", pid]).output() else { continue };
+        if String::from_utf8_lossy(&ps.stdout).contains(&want) {
+            return true;
+        }
+    }
+    false
+}
+// Windows:netstat 只给 PID,拿命令行要 wmic(新版已移除)/PowerShell,代价大于收益 ——
+// 保守保留旧行为(仍按端口杀),两份并存构建在 Windows 上不保证互不干扰。
+#[cfg(target_os = "windows")]
+fn stale_backend_owned_by_us(_app: &tauri::AppHandle, _port: u16) -> bool {
+    true
+}
+
 // 杀掉占用指定端口的进程(尽力而为)。只在已确认该端口是 claude-gui server(backend_healthy)
 // 但版本不符时调用,所以杀的就是那个 stale server,不会误伤别的程序。失败则降级:下面的
 // spawn 循环会跳过仍被占的 6677,改用 6678…(功能正常,只是端口变)。
@@ -760,12 +792,16 @@ fn kill_stale_backend(port: u16) {
         .arg(format!("lsof -ti tcp:{port} -sTCP:LISTEN | xargs kill -TERM"))
         .status();
     #[cfg(target_os = "windows")]
-    let result = Command::new("cmd")
-        .args([
+    let result = {
+        use std::os::windows::process::CommandExt;
+        let mut c = Command::new("cmd");
+        c.args([
             "/C",
             &format!("for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :{port}') do taskkill /F /PID %a"),
-        ])
-        .status();
+        ]);
+        c.creation_flags(0x08000000); // CREATE_NO_WINDOW:GUI 进程下替换旧后端时不闪 cmd 窗(同 kill_port_tree)
+        c.status()
+    };
     if let Err(e) = result {
         log_startup(&format!("[tauri] kill_stale_backend({port}) failed: {e}"));
     }
@@ -1111,7 +1147,16 @@ pub fn run() {
                 // 6677 上是"旧版本(stale)"或"缺 local routes"的 server,不能复用。stale 是
                 // cli-check 等旧代码误判(装了 claude 仍提示未装)的根因:杀掉它、等端口释放,
                 // 下面的循环重新 spawn 当前版本到 6677。
-                if (healthy && !version_ok) || (healthy && !local_ok) {
+                if ((healthy && !version_ok) || (healthy && !local_ok))
+                    && !stale_backend_owned_by_us(&handle, DEFAULT_BACKEND_PORT)
+                {
+                    // L2:6677 上那个后端是**另一个 app**(如并存的另一份构建)的 → 不许杀,
+                    // 否则对方界面立刻"连接失败"。这里什么都不做,下面的 spawn 循环会发现
+                    // 6677 被占、自动改用 6678…;退出时也只按自己选中的端口收尾。
+                    log_startup(
+                        "[tauri] 6677 backend belongs to another app — leaving it alone; will use the next free port",
+                    );
+                } else if (healthy && !version_ok) || (healthy && !local_ok) {
                     log_startup(if !version_ok {
                         "[tauri] stale backend on 6677 (version mismatch) — killing it to respawn current version"
                     } else {

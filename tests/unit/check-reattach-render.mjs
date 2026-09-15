@@ -100,10 +100,15 @@ import {
     'finally 不得再用 pid 判断新回合是否开始');
   assert.equal((src.match(/setReattachStream\(false\)/g) || []).length, 1,
     'reattachStream 只应有 finally 那一处复位:多一处裸复位就绕开回合守卫');
-  // r68 起 3 个:起流置位 + finally 复位 + early_overflow 就地退回无快照 reattach。
-  // 第三处只把标记置【真】(放弃种回、回到今天的行为),不绕开 finally 的回合守卫。
-  assert.equal((src.match(/setReattachStream\(/g) || []).length, 3,
-    'setReattachStream 只应有 3 个调用点(起流置位 + finally 复位 + 溢出退回)');
+  // r68 起 3 个,R13 起 4 个:起流置位 + finally 复位 + early_overflow 就地退回无快照
+  // reattach + stream_gap 就地退回历史单一来源。
+  // 第 3、4 处都只把标记置【真】(放弃种回/放弃直播气泡,回到"历史画、流只当刷新触发器"
+  // 的行为),不绕开 finally 的回合守卫;唯一的复位点仍是上面那条 finally(数量恒为 1,
+  // 由本块第一条断言钉住)。置真方向只会少画气泡,不会多画——安全方向。
+  // 判据:stream_gap 是服务端明说的"本流实时记录已截断、随后关流",此刻再画自己那份
+  // 累积文本就等于把截断前后的两段拼在一起显示,故就地退役直播气泡,改由历史恢复。
+  assert.equal((src.match(/setReattachStream\(/g) || []).length, 4,
+    'setReattachStream 只应有 4 个调用点(起流置位 + finally 复位 + 溢出退回 + gap 退回)');
   assert.match(src, /if \(histRefreshInFlight\) return;/,
     'reattach 历史刷新必须有 in-flight 去重,慢盘时别把 /messages 请求叠罗汉');
 }
@@ -142,9 +147,11 @@ import {
   // reattach 闩锁焊死(本回合内永不重连)。
   assert.doesNotMatch(src, /if \(!sawDoneEvent && !sawError && !controller\.signal\.aborted/,
     '"无 done 静默结束 = 被接管"的猜测判定必须删除,改由服务端 detached 明说');
-  // 其余静默掉线一律走三振重试路径。
-  assert.match(src, /if \(!sawDoneEvent && !sawTakeover && !sawError[\s\S]{0,160}recoverAttach\(\);/,
-    '静默掉线(非接管、非报错、非本端 abort)必须走 recoverAttach 重连');
+  // 其余静默掉线一律走三振重试路径。R13 起判据里多一个排除项 !sawGap(gap 是服务端
+  // 明说的"记录已截断后主动关流",恢复走历史,不排重连)—— 谓词逐字钉死,不再用
+  // 任意字符窗口跨过它;recoverAttach 必须仍在该 if 块内被调用(块内 ≤120 字符)。
+  assert.match(src, /if \(!sawDoneEvent && !sawTakeover && !sawError && !sawGap\s*\n?\s*&& !controller\.signal\.aborted && !killedRef\.current && !backgroundedRef\.current\) \{[\s\S]{0,120}recoverAttach\(\);/,
+    '静默掉线(非接管、非报错、非 gap、非本端 abort/停止/转后台)必须走 recoverAttach 重连');
   assert.equal((src.match(/recoverAttach\(\);/g) || []).length, 2,
     'recoverAttach 应有且只有两个调用点:attach 非 2xx + 流被静默掐断');
   // 三振计数的复位判据:必须是"本流真的跑完(done)",不能是"attach 拿到 2xx"——

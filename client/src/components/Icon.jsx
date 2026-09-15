@@ -23,7 +23,7 @@ import {
   Loader2 as L_Loader2, Lock as L_Lock, LogIn as L_LogIn, LogOut as L_LogOut, MapPin as L_MapPin, Maximize2 as L_Maximize2,
   Menu as L_Menu, MessageSquare as L_MessageSquare, MessageSquareWarning as L_MessageSquareWarning, MessagesSquare as L_MessagesSquare, Minus as L_Minus, Monitor as L_Monitor,
   Moon as L_Moon, MoreHorizontal as L_MoreHorizontal, MoreVertical as L_MoreVertical, Package as L_Package, Palette as L_Palette, PanelRight as L_PanelRight,
-  Paperclip as L_Paperclip, Pencil as L_Pencil, Pin as L_Pin, PlayCircle as L_PlayCircle, Plug as L_Plug, Plus as L_Plus,
+  Paperclip as L_Paperclip, Pencil as L_Pencil, Pin as L_Pin, Play as L_Play, PlayCircle as L_PlayCircle, Plug as L_Plug, Plus as L_Plus,
   Puzzle as L_Puzzle, Redo2 as L_Redo2, RefreshCw as L_RefreshCw, RotateCcw as L_RotateCcw, RotateCw as L_RotateCw, Save as L_Save, Scissors as L_Scissors,
   Search as L_Search, Send as L_Send, Server as L_Server, Settings as L_Settings, Shield as L_Shield, ShieldAlert as L_ShieldAlert,
   ShieldCheck as L_ShieldCheck, ShieldOff as L_ShieldOff, Smartphone as L_Smartphone, Sparkles as L_Sparkles, Square as L_Square, SquarePen as L_SquarePen,
@@ -147,6 +147,7 @@ export const PanelRight = wrap(null, L_PanelRight);
 export const Paperclip = wrap(null, L_Paperclip);
 export const Pencil = wrap("edit", L_Pencil);
 export const Pin = wrap("pin", L_Pin);
+export const Play = wrap(null, L_Play);
 export const PlayCircle = wrap(null, L_PlayCircle);
 export const Plug = wrap(null, L_Plug);
 export const Plus = wrap("plus", L_Plus);

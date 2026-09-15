@@ -6,14 +6,48 @@
 // 第一个 HTTP 200 且字段能解析成功的即采纳。依据:智谱/MiniMax 的按量线与套餐线
 // 同 host、同一把 key,baseURL 判不出;而失败信号干净(Kimi 套餐 key 打按量余额端点
 // 返回 404 而不是返回 0),能区分"路由不存在"与"数据就是 0"。
+//
+// 仍守住"零 IO":唯一带"算身份"味道的是 pickCandidates 里那次 **纯字符串比对**
+// (matchPresetByBaseURL 只做 new URL + 表内查找,不发请求、不读文件)。
+import { matchPresetByBaseURL } from '../utils/builtin-providers.js';
+
+// 身份分派表(INTERFACE §10.4 定死):分派键 = matchPresetByBaseURL 命中的**预设 id**,
+// 不是 host 字面量 —— 同一家的 openai / anthropic 兼容入口同属一条身份。
+// 为什么要有这三张表:预设表本身只有 id/name/type/baseURL/note/docs,不为本项加字段。
+const ZHIPU_CN_PRESETS = ['zhipu-glm', 'glm-coding', 'glm-anthropic']; // host = open.bigmodel.cn
+const ZAI_PRESETS = ['zai-intl', 'zai-coding', 'zai-coding-anthropic']; // host = api.z.ai
+// 智谱 CN 账户余额。**只发智谱 CN 域族**:余额端点在 www.bigmodel.cn,而判据是 provider
+// 的 baseURL —— 两者是两件事(判据看预设身份,请求地址是这一条固定 URL)。
+// 路径来自用户实测(不是探测出来的:智谱对**任意路径**都回 200 + code:1001,探测无区分力)。
+const ZHIPU_BALANCE_URL = 'https://www.bigmodel.cn/api/biz/account/query-customer-account-report';
 
 // One-API 系"无限额度"的哨兵值。见 parseOneAPI。
 const UNLIMITED = 1e8;
 
 // 明确没有额度接口的 host(探针实证:MiMo 四域名 × 七种路径全 404,而 /v1/models 401
 // 证明 host 正常;四家云厂商的计费 API 要 AK/SK 签名,GUI 只有一把推理 key 拿不到)。
-// 命中即不发任何请求,直接告诉用户"该 provider 不提供额度接口"。
+// 命中即不发任何请求,直接按 D-4 的第②类文案说明(这批 host 有额度接口,只是本期未接入)。
 const NO_QUOTA_HOSTS = ['xiaomimimo', 'aliyuncs', 'dashscope', 'volces', 'tencentcloud', 'hunyuan', 'baidubce', 'qianfan'];
+
+// D-4 第②类识别名单(INTERFACE §10.4)= 上面这批 host + anthropic.com。这两批是**同一个
+// 集合的两半**:NO_QUOTA_HOSTS 是"探针实证过没有可用额度端点"的(它们有额度**网页**,
+// 只是要浏览器 Cookie,本期不接);anthropic.com 是"官方额度已另有通道"(CLI 控制通道的
+// 5h/7d 窗口,不在此接第三方端点)。
+// 名单内 vs 未登记要分开说:前者是"我们还没做",后者是"这家没登记过" —— 一律说成后者
+// 会让用户以为自己的 provider 填错了。
+export const NO_ENDPOINT_KNOWN_HOSTS = ['anthropic.com', ...NO_QUOTA_HOSTS];
+export const NO_ENDPOINT_KNOWN_NOTE = '该 provider 有额度接口，本期尚未接入，请去官网查看';
+
+/**
+ * 候选为空时该说哪一档(第②类 / 第③类)。判据 = provider 的 host 是否命中识别名单。
+ * 兜底是 reasonNote('no-endpoint')(第③类串)。
+ */
+export function noEndpointNote(provider) {
+  const host = safeURL(provider?.baseURL)?.hostname.toLowerCase() || '';
+  return NO_ENDPOINT_KNOWN_HOSTS.some((h) => host.includes(h))
+    ? NO_ENDPOINT_KNOWN_NOTE
+    : reasonNote('no-endpoint');
+}
 
 // 字符串数字(DeepSeek 的 total_balance / SiliconFlow 的 balance 都是字符串)统一收口:
 // 先 Number() 再 Number.isFinite。空串/布尔/null 一律判不可用 —— Number('') === 0 会把
@@ -69,6 +103,175 @@ function safeURL(baseURL) {
   } catch { return null; }
 }
 
+// 同源判定(密钥边界用,零 IO)。两条规则与 POST /api/custom-providers/test 的
+// 「用存储 key 时 baseURL 取存储值」同一语义,只是额度端点有两个地址要判。
+// 判定方向要保守:解析不了的 URL 一律当"不同源/不相等",宁可多要用户填一次密钥。
+/** 两个 URL 规范化后是否相等(host 大小写、默认端口、相对路径归一)。解析不了 → trim 后逐字比。 */
+export function sameQuotaURL(a, b) {
+  const norm = (s) => {
+    const t = String(s ?? '').trim();
+    try { return new URL(t).href; } catch { return t; }
+  };
+  return norm(a) === norm(b);
+}
+
+/** 两个 URL 是否同 host(含端口)。任一侧解析不了 → false(按"跨源"处理)。 */
+export function sameHostURL(a, b) {
+  const host = (s) => { try { return new URL(String(s ?? '').trim()).host; } catch { return null; } };
+  const ha = host(a);
+  return !!ha && ha === host(b);
+}
+
+// ── 自定义额度端点(手填通道,INTERFACE-quota-endpoint §B/§C) ────────────────────
+// 用户自己登记"额度接口地址 + 取值路径"。**只做纯属性查找**(点号分层 + [n] 下标),
+// 无 eval / 无 Function / 不支持表达式 —— 用户填的字符串永远不参与求值。
+export const QUOTA_URL_MAX = 2048;
+export const QUOTA_PATH_MAX = 200;
+const QUOTA_URL_ERR = '额度查询接口必须是 http(s) 地址';
+const QUOTA_PATH_ERR = `取值路径非法（上限 ${QUOTA_PATH_MAX} 字符，不含 __proto__ / constructor / prototype）`;
+// 原型链三类键名:它们能把纯属性查找变成"取到 Object.prototype 上的东西"。
+const FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** 单个路径段:`name[0][1]` / `[0]` 合法,空段与含非法键名的不合法。 */
+function validPathSegment(seg) {
+  const m = /^([^[\]]*)((?:\[\d+\])*)$/.exec(seg);
+  if (!m) return false;
+  const name = m[1];
+  if (!name && !m[2]) return false; // 空段("a..b" / 结尾的点)
+  return !FORBIDDEN_SEGMENTS.has(name);
+}
+
+/** 取值路径的合法性(§B.2/B.3)。返回人话错误串或 null(= 合法)。 */
+export function quotaPathError(path) {
+  if (path.length > QUOTA_PATH_MAX) return QUOTA_PATH_ERR;
+  if (path && !path.split('.').every(validPathSegment)) return QUOTA_PATH_ERR;
+  return null;
+}
+
+/**
+ * §B.2/B.3 的同步校验(写入端与 quota-test 共用)。返回 { url, path, auth, currency }
+ * 或 { error }。**不做 SSRF 判定** —— 那是异步 DNS,由调用点跑 assertQuotaPublicURL。
+ * auth/currency 非法值静默回落(不报错,§B.2 的"静默回落"列)。
+ */
+export function checkQuotaConfig(raw) {
+  const urlIn = typeof raw?.quotaURL === 'string' ? raw.quotaURL.trim() : '';
+  if (!urlIn) return { error: QUOTA_URL_ERR };
+  if (urlIn.length > QUOTA_URL_MAX) return { error: `额度查询接口地址过长（上限 ${QUOTA_URL_MAX} 字符）` };
+  let u;
+  try { u = new URL(urlIn); } catch { return { error: QUOTA_URL_ERR }; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return { error: QUOTA_URL_ERR };
+  const path = typeof raw?.quotaPath === 'string' ? raw.quotaPath.trim() : '';
+  const pErr = quotaPathError(path);
+  if (pErr) return { error: pErr };
+  return {
+    url: urlIn,
+    path,
+    auth: raw?.quotaAuth === 'raw' || raw?.quotaAuth === 'none' ? raw.quotaAuth : 'bearer',
+    currency: raw?.quotaCurrency === 'CNY' || raw?.quotaCurrency === 'USD' ? raw.quotaCurrency : null,
+  };
+}
+
+/**
+ * 按取值路径取数。语法:点号分层 + `[n]` 下标(`balance_infos[0].total_balance`)。
+ * 纯属性查找(own property,不穿原型链),取不到一律 undefined —— 不抛、不猜。
+ * 空 path → 返回 obj 本身(= 把整个响应体当一个值)。见 INTERFACE §D.1。
+ */
+export function readByPath(obj, path) {
+  const p = typeof path === 'string' ? path.trim() : '';
+  if (!p) return obj;
+  let cur = obj;
+  for (const seg of p.split('.')) {
+    const m = /^([^[\]]*)((?:\[\d+\])*)$/.exec(seg);
+    if (!m) return undefined;
+    const name = m[1];
+    if (name) {
+      if (FORBIDDEN_SEGMENTS.has(name)) return undefined;
+      if (cur === null || typeof cur !== 'object' || !Object.prototype.hasOwnProperty.call(cur, name)) return undefined;
+      cur = cur[name];
+    }
+    for (const idx of m[2].matchAll(/\[(\d+)\]/g)) {
+      if (!Array.isArray(cur)) return undefined;
+      cur = cur[Number(idx[1])];
+    }
+  }
+  return cur;
+}
+
+/**
+ * 自定义端点 host(卡片/测试文案只回 host,**绝不回完整 URL** —— 用户可能把 token
+ * 写在 path 或 query 里,回显整条就等于把它带进前端/截图/粘贴,INTERFACE §E.5)。
+ */
+export function customHost(candidate) {
+  try { return new URL(arr(candidate?.urls)[0]).host; } catch { return ''; }
+}
+
+/**
+ * §E.5:手填通道失败时的人话文案。**必须点名"自定义额度接口"** —— 落进既有的
+ * 「该 provider 未登记额度接口」会让用户以为配置没生效(他明明登记了)。
+ */
+export function customNote(reason, candidate) {
+  const host = customHost(candidate);
+  if (reason === 'auth') return `自定义额度接口拒绝了当前密钥（HTTP 401/403）：${host}`;
+  if (reason === 'network') return `自定义额度接口请求失败（网络不可达或超时）：${host}`;
+  if (reason === 'blocked') return `自定义额度接口指向内网地址，已拒绝查询（SSRF 防护）：${host}`;
+  const path = candidate?.path || '';
+  return `自定义额度接口未返回可读的余额：${host}`
+    + (path ? `（请求失败，或响应中没有「${path}」）` : '（请求失败，或响应不是可读的数字）');
+}
+
+/**
+ * 响应键名骨架(可裁剪项 T7):上游 200 但路径取不到时,给用户一张"这响应里有哪些键"
+ * 的地图 —— 路径写对是唯一的上手门槛。
+ * **只有键名,绝不含任何值**;深度 ≤3、最多 60 条、单条 ≤80 字符、跳过 >40 字符的键名
+ * (防把 token 当键名回显)与原型链三类(INTERFACE §C.3)。
+ */
+export function pathHintsFor(body, { depth = 3, max = 60 } = {}) {
+  const out = [];
+  const walk = (node, prefix, d) => {
+    if (out.length >= max || d > depth || node === null || typeof node !== 'object') return;
+    for (const [k, v] of Object.entries(node)) {
+      if (out.length >= max) return;
+      if (!k || k.length > 40 || FORBIDDEN_SEGMENTS.has(k)) continue;
+      const p = prefix ? `${prefix}.${k}` : k;
+      if (p.length > 80) continue;
+      out.push(p);
+      if (v !== null && typeof v === 'object') walk(v, p, d + 1);
+    }
+  };
+  walk(body, '', 1);
+  return out;
+}
+
+/**
+ * provider 配置 → 手填候选;未配置(或 URL 非法,只有手改文件能做到)返回 null
+ * = 视同未配置,回落自动识别通道。见 INTERFACE §D.1。
+ */
+export function customCandidateOf(provider) {
+  const url = typeof provider?.quotaURL === 'string' ? provider.quotaURL.trim() : '';
+  if (!url) return null;
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  return {
+    vendor: 'custom',
+    auth: provider?.quotaAuth === 'raw' || provider?.quotaAuth === 'none' ? provider.quotaAuth : 'bearer',
+    urls: [url],
+    path: typeof provider?.quotaPath === 'string' ? provider.quotaPath.trim() : '',
+    currency: provider?.quotaCurrency === 'CNY' || provider?.quotaCurrency === 'USD' ? provider.quotaCurrency : null,
+  };
+}
+
+/**
+ * 自定义端点响应 → { kind, currency, items } 或 null。
+ * 取数后**必须**过 num():空串/布尔/null 一律判不可用(Number('') === 0 会把"字段缺失"
+ * 伪装成"余额 0",I1 不许)。
+ */
+function parseCustomQuota(body, candidate) {
+  const v = num(readByPath(body, candidate?.path));
+  if (v === null) return null;
+  return { kind: 'amount', currency: candidate?.currency ?? null, items: [item({ label: '余额', direction: 'left', value: v })] };
+}
+
 /**
  * provider 配置 → 候选端点列表(按探测顺序)。**只认调研实证过的端点,不凭记忆补充**。
  * 每个候选:{ vendor, auth:'bearer'|'raw', urls:[...], currency? };urls 多于一条时
@@ -76,11 +279,18 @@ function safeURL(baseURL) {
  * 返回空数组 = 该 provider 没有可查的额度接口(UI 明写原因,不留空白)。
  */
 export function pickCandidates(provider) {
+  // 手填通道**独占**:用户显式登记了额度接口就不再按 host/预设猜(§4.4 的决策 ——
+  // "手填优先、失败回落"会让用户看到不是他配的那条产生的数字,静默分叉)。
+  const custom = customCandidateOf(provider);
+  if (custom) return [custom];
   const u = safeURL(provider?.baseURL);
   if (!u) return [];
   const host = u.hostname.toLowerCase();
   const base = provider.baseURL.trim().replace(/\/+$/, '');
   const origin = u.origin;
+  // 身份判定统一走预设表(见文件头的三张表);未命中任何预设(null)= 自填第三方,走原逻辑。
+  const matched = matchPresetByBaseURL(provider?.baseURL, { type: provider?.type });
+  const presetId = matched.matched ? matched.preset.id : null;
 
   // Kimi Code(套餐):/v1/usages —— **复数**,官方文档未收录(证据是第三方插件实现)。
   if (host === 'api.kimi.com' && u.pathname.includes('/coding')) {
@@ -98,10 +308,24 @@ export function pickCandidates(provider) {
   if (host === 'api.deepseek.com') {
     return [{ vendor: 'deepseek', auth: 'bearer', urls: ['https://api.deepseek.com/user/balance'] }];
   }
-  // 智谱:**裸 token,不加 Bearer**(加了就 401)。
-  if (host === 'open.bigmodel.cn' || host === 'api.z.ai') {
+  // 智谱:**裸 token,不加 Bearer**(加了就 401)。判据 = **预设身份**(matchPresetByBaseURL),
+  // 不按 host 字面量 —— 用户口径是"看是不是走官方的哪个预设接口",同一家的任意协议入口
+  // (openai 兼容 / anthropic 兼容)都算同一条身份。分派键 = 命中的预设 id。
+  if (presetId && ZHIPU_CN_PRESETS.includes(presetId)) {
+    // CN 域族:quota/limit 与**账户余额**两个独立候选**都发**。余额必须独立成候选 ——
+    // 一条候选多条 urls 的语义是"两条都要",并进去会让余额失败把套餐额度一起拖垮。
+    return [
+      { vendor: 'zhipu', auth: 'raw', urls: [`${origin}/api/monitor/usage/quota/limit`], accumulate: true },
+      { vendor: 'zhipu-cn-balance', auth: 'raw', urls: [ZHIPU_BALANCE_URL], currency: 'CNY' },
+    ];
+  }
+  // Z.ai 全球站:只走 quota/limit,**不发余额端点** —— 余额端点在 www.bigmodel.cn,
+  // 拿 Z.ai 的 key 跨域族发过去是凭证面红线(反之亦然)。
+  if (presetId && ZAI_PRESETS.includes(presetId)) {
     return [{ vendor: 'zhipu', auth: 'raw', urls: [`${origin}/api/monitor/usage/quota/limit`] }];
   }
+  // OpenAI 官方:走本机 codex 通道(candidate 只作分派标记,urls 为空 = 不发任何带 key 的 HTTP)。
+  if (presetId === 'openai') return [{ vendor: 'codex', auth: 'none', urls: [] }];
   if (host.includes('minimaxi.com') || host.includes('minimax.io')) {
     return [{ vendor: 'minimax', auth: 'bearer', urls: [`${origin}/v1/token_plan/remains`] }];
   }
@@ -134,8 +358,15 @@ export function pickCandidates(provider) {
 }
 
 // 认证头。智谱是唯一的裸 token(不加 Bearer)—— 这一位写错就是 401,单测钉死。
+// 'none' = 不带认证头(自定义额度端点专用:有些面板站按内网/白名单放行,发个空的
+// `Authorization: Bearer ` 反而会被中间件判成"带了无效凭证")。
 export function authHeaders(auth, apiKey) {
-  return { Authorization: auth === 'raw' ? String(apiKey || '') : `Bearer ${apiKey || ''}` };
+  if (auth === 'none') return {};
+  // 没有密钥就**不发**认证头:`Authorization: Bearer `(空值)不是"没有凭证",不少上游
+  // 把它当坏请求回 4xx —— 用户看到"地址或路径有问题",而真实原因是这里没 key 可发
+  // (跨 host 的自定义额度端点不给 apiKey 时就是这种情况)。
+  if (!apiKey) return {};
+  return { Authorization: auth === 'raw' ? String(apiKey) : `Bearer ${apiKey}` };
 }
 
 const item = (o) => {
@@ -211,6 +442,26 @@ function parseZhipu(j) {
     items.push(item({ label: zhipuLabel(l), direction: 'used', percent: p, resetAt: toMs(l?.reset_time ?? l?.resetTime) }));
   }
   return items.length ? { kind: 'percent', currency: null, items } : null;
+}
+
+// 智谱 CN 账户余额(与上面的套餐 quota/limit **两条端点、各自独立**)。响应形态来自
+// 真实客户端的实测登记:`{success, data:{balance, rechargeAmount, giveAmount,
+// totalSpendAmount, frozenBalance, availableBalance}}`,一律包在 data 下。
+// 取 `availableBalance`(可用余额)而不是 `balance`(账户余额):冻结/在途的钱花不出去,
+// 用户要判断"还能不能继续用"看的是可用余额。
+// **缺必需字段 → 整条降级**:余额显示错的数字比"查不到"坏得多(用户会据此判断要不要充值),
+// 所以这里不写 0、不回部分字段、不拿 balance 顶替 availableBalance(那是另一个口径)。
+function parseZhipuCnBalance(j, currency) {
+  const code = num(j?.code);
+  if (code !== null && code !== 200 && code !== 0) return null;
+  const d = j?.data;
+  if (!d || typeof d !== 'object') return null;
+  const available = num(d.availableBalance);
+  if (available === null) return null;
+  return {
+    kind: 'amount', currency: currency || 'CNY',
+    items: [item({ label: '余额', direction: 'left', value: available })],
+  };
 }
 
 // MiniMax:出错同样 HTTP 200,错误在 base_resp.status_code(成功为 0)。
@@ -313,14 +564,85 @@ export function parseQuota(candidate, bodies) {
     case 'moonshot': return parseMoonshot(b[0], candidate.currency);
     case 'deepseek': return parseDeepseek(b[0]);
     case 'zhipu': return parseZhipu(b[0]);
+    case 'zhipu-cn-balance': return parseZhipuCnBalance(b[0], candidate.currency);
     case 'minimax': return parseMinimax(b[0]);
     case 'opencode': return parseOpencode(b[0]);
     case 'siliconflow': return parseSiliconflow(b[0]);
     case 'openrouter': return parseOpenrouter(b[0], candidate.currency || 'USD');
     case 'openrouter-credits': return parseOpenrouterCredits(b[0], candidate.currency || 'USD');
     case 'oneapi': return parseOneAPI(b);
+    case 'custom': return parseCustomQuota(b[0], candidate);
     default: return null;
   }
+}
+
+// ── OpenAI 的本地 codex 通道(④ 类;协议与实测记录见 services/codex-quota.js) ──────
+// 卡片必带的标注(逐字):这是**本机 codex 登录的那个账户**的额度,与当前 provider 的
+// API key 没有任何绑定 —— 两者不是同一账号时,这里的数字跟 API 账单对不上。
+export const CODEX_ANNOTATION = '本机 codex 登录的 ChatGPT/Codex 账户额度，与当前 API key 无绑定';
+
+// ④ 类文案(逐字,INTERFACE §10.4)。② 类与 ④a 的串**由路由层在判据命中时显式给出**
+// (见 routes/provider-quota.js 的 noEndpointNote),不走 reasonNote 的兜底。
+export const CODEX_NOTES = {
+  'no-binary': '本机未找到 codex（ChatGPT 应用），无法读取 OpenAI 额度，请去官网查看',
+  'not-logged-in': '本机 codex 未登录 ChatGPT 账户，无法读取额度，请去官网查看',
+  failed: 'codex 额度查询失败（超时或返回异常），请稍后重试',
+};
+
+/**
+ * codex 的 account/rateLimits/read 应答 → 现有 items[] 形状(**不新造形状**)。
+ * 键名照 V-D4 实测(camelCase:`usedPercent` / `windowDurationMins` / `resetsAt`),
+ * 不是二进制里的 snake_case 结构体名。
+ *
+ * 桶的取法:`rateLimitsByLimitId` 有内容就用它(它是多桶视图,除默认的 `codex` 外还有
+ * 按模型的限额桶,如 `codex_bengalfox`);否则回落到**兼容单桶视图** `rateLimits`。
+ * 一个桶的 primary/secondary = 两个窗口(如 5 小时 + 周),各出一行。
+ * 一行都出不来 → null(整条降级 ④c,不编造)。
+ */
+export function projectCodexRateLimits(result) {
+  const multi = result?.rateLimitsByLimitId;
+  const buckets = (multi && typeof multi === 'object' && Object.keys(multi).length)
+    ? Object.values(multi)
+    : (result?.rateLimits && typeof result.rateLimits === 'object' ? [result.rateLimits] : []);
+  const items = [];
+  for (const b of buckets) {
+    if (!b || typeof b !== 'object') continue;
+    const name = typeof b.limitName === 'string' ? b.limitName.trim() : '';
+    for (const w of [b.primary, b.secondary]) {
+      const used = num(w?.usedPercent);
+      if (used === null) continue;
+      const mins = num(w?.windowDurationMins);
+      // windowDurationMins 是**分钟**,windowLabel 吃的是秒。读不到窗口长度就标「额度」,
+      // 绝不猜成"本月"(标错周期比不标更坏)。
+      const win = mins !== null && mins > 0 ? windowLabel(mins * 60, '额度') : '额度';
+      items.push(item({
+        label: name ? `${win} · ${name}` : win,
+        direction: 'used', percent: used, resetAt: toMs(w?.resetsAt),
+      }));
+    }
+  }
+  return items.length ? { kind: 'percent', currency: null, items } : null;
+}
+
+/**
+ * OpenAI 预设的探测入口(与 probeQuota 同形,便于路由走同一条缓存/冷却/在飞合并路径)。
+ * `read` / `locate` 注入:本文件不 import fs / child_process,IO 全在 codex-quota.js。
+ *
+ * 三档降级(逐字文案见 CODEX_NOTES):找不到可执行文件 → ④a(连进程都不起);
+ * RPC 回鉴权类错误 → ④b;spawn 失败 / RPC 报错 / 超时 / 解析不出 → ④c。
+ */
+export async function probeCodexQuota(read, locate) {
+  const bin = locate();
+  if (!bin) return { ok: false, reason: 'no-endpoint', note: CODEX_NOTES['no-binary'] };
+  let r = null;
+  try { r = await read(bin); } catch { r = null; } // read 自己也不抛;这里再兜一层
+  if (!r?.ok) {
+    const code = r?.code === 'not-logged-in' ? 'not-logged-in' : 'failed';
+    return { ok: false, reason: code === 'not-logged-in' ? 'auth' : 'network', note: CODEX_NOTES[code] };
+  }
+  const parsed = projectCodexRateLimits(r.result);
+  if (!parsed) return { ok: false, reason: 'network', note: CODEX_NOTES.failed };
+  return { ok: true, endpoint: 'codex', annotation: CODEX_ANNOTATION, ...parsed };
 }
 
 const REASON_RANK = { 'no-endpoint': 0, network: 1, auth: 2 };
@@ -333,6 +655,7 @@ const REASON_RANK = { 'no-endpoint': 0, network: 1, auth: 2 };
 export async function probeQuota(candidates, fetcher) {
   const list = arr(candidates);
   let reason = 'no-endpoint';
+  let winner = null;
   const note = (r) => { if (REASON_RANK[r] > REASON_RANK[reason]) reason = r; };
   for (const c of list) {
     const bodies = [];
@@ -346,9 +669,23 @@ export async function probeQuota(candidates, fetcher) {
     }
     if (failed) continue;
     const parsed = parseQuota(c, bodies);
-    if (parsed) return { ok: true, endpoint: c.vendor, ...parsed };
+    if (!parsed) continue;
+    if (winner) {
+      // 命中过一条后又拿到一条:只有声明 accumulate 的候选才有资格被后面的候选追加。
+      // 智谱 CN 就是这一类 —— 套餐额度与账户余额是**两条独立端点**,两条都要发、各自
+      // 独立计成败:余额挂了不影响上面的套餐额度,余额好了就在同一条 payload 里多一行。
+      winner.items.push(...parsed.items);
+      // 单位只在原本未知时补:两条候选币种不同时保留先到的那条,不覆盖已知口径。
+      if (winner.currency == null) winner.currency = parsed.currency ?? null;
+      continue;
+    }
+    // kind 取**第一条命中**的(合并进来的追加条目不改它):kind 只描述"这批条目以什么为主",
+    // 每项的 direction/percent/value 自带渲染口径,前端逐项读,不看 kind。
+    winner = { ok: true, endpoint: c.vendor, kind: parsed.kind, currency: parsed.currency, items: parsed.items };
+    // 命中即停 —— 不再白打后面的候选(除非本条声明 accumulate)。
+    if (!c.accumulate) break;
   }
-  return { ok: false, reason };
+  return winner || { ok: false, reason };
 }
 
 // 低额度阈值。钱类默认 ¥10 / $2,百分比类默认「已用 ≥90% 或剩余 ≤10%」。
@@ -417,9 +754,12 @@ export function computeAlert(payload, thresholds = DEFAULT_THRESHOLDS, prevOn = 
 }
 
 // ok:false 时给人话原因(留空白用户会以为查询坏了)。
+// 兜底那串 = 第③类「未登记」:它同时是"候选为空但不在识别名单里"与"非空候选全失败还
+// 落回 no-endpoint"两条路的兜底语义(INTERFACE §10.4)。第②类与 ④a 的串另有出处
+// (noEndpointNote / CODEX_NOTES),不从这里出。
 export function reasonNote(reason) {
   if (reason === 'auth') return '额度接口拒绝了当前密钥（可能未开通该接口或权限不足）';
   if (reason === 'network') return '额度接口请求失败（网络不可达或超时）';
   if (reason === 'blocked') return '该 provider 的地址指向内网，已拒绝查询额度（SSRF 防护）';
-  return '该 provider 不提供额度接口';
+  return '该 provider 未登记额度接口，请去官网查看';
 }

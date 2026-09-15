@@ -1,8 +1,14 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useContext, useEffect, useMemo, useState, useRef } from 'react';
 import { Bot, Loader2, Square, Clock, RefreshCw, Terminal, ChevronDown, ChevronRight, Maximize2, PlayCircle } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { WorkflowCard } from './tools/WorkflowCard.jsx';
+import { SubagentCostContext, SubagentCostTag } from './tools/SubagentCost.jsx';
+import { buildSubagentCostIndex } from '../utils/subagentCost.js';
+import {
+  AGENT_TERMINAL_STATUSES, agentHydrationStatus, agentOpenFailureAction, buildAgentRows, fetchAgentHistory,
+  locateParentPane, shouldApplyHistory, splitHistoryBlocks,
+} from '../utils/agentView.js';
 
 function fmtElapsed(ms) {
   if (!ms || ms < 0) return '—';
@@ -349,8 +355,12 @@ function RemoteBucket({ id, title, titleColor, defaultOpen, agents, stoppingPid,
 
 // Collapsible bucket — group header click toggles open, click on each
 // agent card expands its details inline.
-function AgentBucket({ id, title, titleColor, defaultOpen, agents }) {
+function AgentBucket({ id, title, titleColor, defaultOpen, agents, readyFor = null }) {
   const [open, setOpen] = useState(() => readFold()[id] ?? defaultOpen);
+  // A 项:桶内卡片自己取金额(索引在手,经 context 供给 —— WorkflowCard 与对话流同一份读法)。
+  const costIndex = useContext(SubagentCostContext)?.index;
+  const ctxReady = useMemo(() => ({ index: costIndex, history: true }), [costIndex]);
+  const ctxPending = useMemo(() => ({ index: costIndex, history: false }), [costIndex]);
   return (
     <div>
       <button
@@ -365,8 +375,16 @@ function AgentBucket({ id, title, titleColor, defaultOpen, agents }) {
         <div className="space-y-2 mt-1.5">
           {/* 工作流条目走整张阶段卡(与聊天内联同一个组件),普通子代理走 AgentCard。
               面板里不给 onOpenAgent:这里拿不到 projectHash(只有服务端随工具结果下发的
-              运行引用才有),点开只会是一个没有转写的空视图。点内层助手请到聊天里那张卡。 */}
-          {agents.map((a) => (a.workflow ? <WorkflowCard key={a.id} toolUseId={a.id} ownerSessionId={a.sessionId || null} compact /> : <AgentCard key={a.id} agent={a} />))}
+              运行引用才有),点开只会是一个没有转写的空视图。点内层助手请到聊天里那张卡。
+              A 项:每条按"它归属的会话有没有加载好"给金额/小标(没加载 = 连小标都不画)。 */}
+          {agents.map((a) => {
+            const ready = typeof readyFor === 'function' ? readyFor(a) : true;
+            return (
+              <SubagentCostContext.Provider key={a.id} value={ready ? ctxReady : ctxPending}>
+                {a.workflow ? <WorkflowCard toolUseId={a.id} ownerSessionId={a.sessionId || null} compact /> : <AgentCard agent={a} />}
+              </SubagentCostContext.Provider>
+            );
+          })}
         </div>
       )}
     </div>
@@ -406,6 +424,10 @@ function AgentCard({ agent }) {
   // 兜底的 agentType。缺这条时会话里显示 xiaoming、监控面板却显示 GENERAL-PURPOSE。
   const displayName = agent.teammateName || agent.name || metaAgent?.agentType || '子代理';
   const displayModel = agent.model || metaAgent?.model || null;
+  // A 项:该子代理自己的费用(来自已打开窗格消息里的 subUsage.agents[])。桶内条目都是
+  // 本机正在跑的/刚水合的,还没配对到金额是常态(跑动中的子代理本来就没有)—— 故只在
+  // 拿到金额时画金额,不画「未能计价」(那份数据要等这一轮落盘 + 历史刷新才有)。
+  const costEntry = useContext(SubagentCostContext)?.index?.byToolUseId?.get(agent.id);
   const text = agent.text ? agent.text.join('') : '';
   const thinking = agent.thinking ? agent.thinking.join('') : '';
   const tools = agent.toolCalls || [];
@@ -429,6 +451,7 @@ function AgentCard({ agent }) {
               {displayModel}
             </span>
           )}
+          <SubagentCostTag entry={costEntry} title="该子代理自己的费用（按它自己的模型与调用时刻计价；不含在主回合金额里）" />
           <div className="ml-auto flex items-center gap-1.5">
             {!inOpenPane && (
               <span className="text-[9px] px-1 py-px bg-canvas-deep text-ink-muted rounded font-body shrink-0" title="该子代理归属的会话未打开在任何窗格,点放大自动跳转">
@@ -711,11 +734,53 @@ export function AgentMonitorPanel() {
   const [loading, setLoading] = useState(true);
   const [stoppingPid, setStoppingPid] = useState(null);
   const [wfAgents, setWfAgents] = useState([]); // workflow 内层 agent(磁盘轮询第四源)
+  const [openError, setOpenError] = useState('');   // R11「查看」失败的第一行反馈(保留当前视图)
+  const [openingKey, setOpeningKey] = useState(null); // 正在按身份读转写的条目
+  // R11:按身份读转写的取消柄。合同:取消/切换目标只取消这次读取 —— 换目标时中止上一次,
+  // 面板关闭时中止当前(中止不产生任何可见文案)。
+  const readAbortRef = useRef(null);
   const localAgents = useStore((s) => s.activeAgents);
   const bgTasks = useStore((s) => s.bgTasks);
   const paneSessions = useStore((s) => s.paneSessions);
   const paneCount = useStore((s) => s.paneCount); // 打开会话集合按实际窗格数收窄(见 openSessionIds)
   const stoppedSessions = useStore((s) => s.stoppedSessions); // 已停会话表:wf 内层 agent 覆盖显示"已停止"
+  // R11:子代理条目(含只存在于历史里的)。口径见 utils/agentView.js buildAgentRows。
+  const sessionsByProject = useStore((s) => s.sessionsByProject);
+  const projects = useStore((s) => s.projects);
+  const paneMessages = useStore((s) => s.paneMessages);
+  const paneMessagesSid = useStore((s) => s.paneMessagesSid);
+  const provider = useStore((s) => s.currentProvider);
+  const liveSubUsage = useStore((s) => s.liveSubUsage); // 直播补齐:完成即推来的子代理金额条目
+
+  // A 项:子代理花费索引。源 = 已打开窗格消息里的 subUsage.agents[](服务端按归属挂好的),
+  // 与 buildAgentRows 同一条归属守卫(只认 paneMessagesSid 对得上的那批),避免把上一个
+  // 会话的金额算到这个会话的子代理头上。没加载好的母会话一条都没有 → 那几行连小标都不画
+  // (那是"没数据",不是"没算出来";契约 §10.3 的最后一档)。
+  const costForPanes = useMemo(() => {
+    const agents = [];
+    const loaded = new Set();
+    // 直播补齐(2026-09-13):子代理【完成那一刻】服务端随事件推来的条目(见 App.jsx 的
+    // task_notification 两条分支)。后台子代理往往在回合结束之后才跑完,只靠 paneMessages
+    // 要等下一次刷新面板才有金额 —— 这里并进同一份索引(同一把 toolUseId/agentSessionId 键,
+    // 与 buildAgentRows 的归属守卫不冲突:取不到行的条目根本没人查)。
+    for (const a of Object.values(liveSubUsage || {})) agents.push(a);
+    for (let i = 0; i < paneCount; i++) {
+      const session = paneSessions?.[i];
+      const sid = session?.sessionId;
+      if (!sid || paneMessagesSid?.[i] !== sid) continue;
+      loaded.add(sid);
+      const messages = paneMessages?.[i];
+      if (!Array.isArray(messages)) continue;
+      for (const message of messages) {
+        if (message?.type === 'turn' && Array.isArray(message.subUsage?.agents)) agents.push(...message.subUsage.agents);
+      }
+    }
+    return { index: buildSubagentCostIndex(agents, provider), loaded };
+  }, [paneMessages, paneMessagesSid, paneSessions, paneCount, provider, liveSubUsage]);
+  const costCtxReady = useMemo(() => ({ index: costForPanes.index, history: true }), [costForPanes]);
+  const costCtxPending = useMemo(() => ({ index: costForPanes.index, history: false }), [costForPanes]);
+  // 该条目归属的会话加载好了没有(没加载 = 不画金额也不画小标)。
+  const costReadyFor = (sessionId) => !sessionId || costForPanes.loaded.has(sessionId);
 
   const mountedRef = useRef(true);
   const fetchActive = async (silent = false) => {
@@ -756,8 +821,151 @@ export function AgentMonitorPanel() {
     mountedRef.current = true;
     fetchActive();
     const id = setInterval(() => fetchActive(true), 1500);
-    return () => { mountedRef.current = false; clearInterval(id); };
+    return () => {
+      mountedRef.current = false;
+      clearInterval(id);
+      readAbortRef.current?.abort();   // 关面板 = 取消这次读取(不产生可见错误)
+    };
   }, []);
+
+  // 让"跨项目 / 后台没打开过的母会话"也能进列表:已知项目的会话列表各拉一次
+  // (store.sessionsByProject 与侧栏同一份缓存,拉过就复用)。只补缺的项目,不刷已有的 ——
+  // 全刷会随 projects 引用变化反复发请求;要刷新走面板顶部的刷新钮。
+  useEffect(() => {
+    const st = useStore.getState();
+    for (const p of (st.projects || [])) {
+      if (p?.hash && !st.sessionsByProject[p.hash]) st.fetchSessionsForPanel(p.hash);
+    }
+  }, [projects]);
+
+  const refreshAll = () => {
+    fetchActive();
+    const st = useStore.getState();
+    for (const p of (st.projects || [])) if (p?.hash) st.fetchSessionsForPanel(p.hash);
+  };
+
+  const subRows = useMemo(() => buildAgentRows({
+    sessionsByProject,
+    // 只喂归属守卫认可的窗格消息(paneMessagesSid 对得上),否则会把上一个会话的历史
+    // 当成这个会话的证据(fork/串扰同源)。
+    panes: (paneSessions || []).slice(0, paneCount).map((session, i) => ({
+      session,
+      messages: (session?.sessionId && paneMessagesSid?.[i] === session.sessionId) ? paneMessages?.[i] : null,
+    })),
+    liveAgents: localAgents,
+    openSessionIds: (paneSessions || []).slice(0, paneCount).map((s) => s?.sessionId).filter(Boolean),
+  }), [sessionsByProject, paneSessions, paneCount, paneMessages, paneMessagesSid, localAgents]);
+
+  /**
+   * R11「查看」:按 (parentSessionId, projectHash) 准确定位母会话 —— 已开窗格复用、跨项目切项目、
+   * 后台没打开就打开。失败时保留当前视图,按合同给四种人话之一,绝不先在错误的母会话上显示"数据不可用"。
+   */
+  const openAgentRow = async (row) => {
+    if (openingKey) return;
+    setOpenError('');
+    // ① 身份不全(缺母会话/缺工具身份)= 定位不了,如实说,别去猜(当前视图原样保留)。
+    if (!row?.parentSessionId || !row?.toolUseId) { setOpenError('无法确定母会话'); return; }
+    const st = useStore.getState();
+    // ② 定位母会话:已在某窗格打开 → 复用那个窗格(不新开);否则开在当前焦点窗格,
+    //    跨项目先把项目切过去(侧栏跟着走,标题/面包屑才对得上)。
+    const openTab = locateParentPane(st.paneSessions, st.paneCount, row.parentSessionId);
+    const targetTab = openTab >= 0 ? openTab : st.activeTabIndex;
+    const prev = openTab >= 0 ? null : { session: st.paneSessions[targetTab] || null, project: st.selectedProject || null };
+    if (openTab < 0) {
+      if (row.parentProjectHash && st.selectedProject?.hash !== row.parentProjectHash) {
+        st.setSelectedProject((st.projects || []).find((p) => p.hash === row.parentProjectHash) || { hash: row.parentProjectHash });
+      }
+      st.setPaneSession(targetTab, { sessionId: row.parentSessionId, projectHash: row.parentProjectHash || null, draft: false });
+      // silent:窗格 0 的非 silent 拉取会先把整格换成"加载中"早退,子代理视图(同一次点击
+      // 的另一个效果)要等它回来才出现 —— 用户点了查看却先看到一屏转圈。这里静默替换:
+      // 母会话内容回来之前,视图已经按身份挂在这一格上。
+      st.fetchMessages(row.parentSessionId, row.parentProjectHash, { tab: targetTab, silent: true });
+    }
+    // ③ 装视图:状态按证据(在跑 = working;历史条目按证据落终态;没证据不降级)。
+    //    活流条目(非 hydrated)只补身份字段,绝不覆盖它自己的 blocks/status —— 迟到的
+    //    历史响应不得把在跑的源说成已完成。
+    //    这一段必须与点击同一个 tick 完成:切窗格与开视图是"用户点了查看"的效果本身;
+    //    按身份读转写是慢活,放到后面补内容(读失败再按分档回滚/提示)。
+    const cur = st.activeAgents[row.toolUseId];
+    // 全局表按 tool_use.id 唯一,而分支复制品与源代理共用同一个 id:条目记的是哪个母会话,
+    // 就只能在哪个母会话的视图里显示。活流条目(非水合)绝不能覆盖 —— 那是源会话正在跑的
+    // agent;我们自己水合的历史条目可以改绑(用户此刻要看的是另一个母会话下的同名任务)。
+    const sameOwner = !cur || !cur.sessionId || cur.sessionId === row.parentSessionId || !!cur.hydrated;
+    if (!row.live && sameOwner) {
+      const running = row.running === true;
+      const patch = {
+        sessionId: row.parentSessionId,
+        agentSessionId: row.agentSessionId || null,
+        agentProjectHash: row.agentProjectHash || null,
+        hasTranscript: row.hasTranscript === true,
+        runEvidence: running ? 'running' : null,
+      };
+      if (!cur || cur.hydrated) {
+        patch.hydrated = true;
+        patch.name = row.agentType || cur?.name || '子代理';
+        patch.description = row.description || cur?.description || '';
+        patch.model = row.model || cur?.model || null;
+        if (row.prompt && !cur?.prompt) patch.prompt = row.prompt;
+        if (row.result && !cur?.result) patch.result = row.result;
+        const keepStatus = cur?.hydrated && !AGENT_TERMINAL_STATUSES.has(cur.status || '');
+        if (running) patch.status = 'working';
+        else if (!keepStatus) patch.status = agentHydrationStatus({ running, hasTranscript: row.hasTranscript, result: row.result });
+      }
+      st.upsertAgent(row.toolUseId, patch);
+    }
+    st.setActiveTabIndex(targetTab);
+    st.setViewingAgent(targetTab, row.toolUseId);
+
+    // ④ 按身份把转写读回来(顺带核对 owner)。读失败分两档处理:
+    //    硬失败(不存在/无权限/归属不可靠)= 这个母会话根本打不开 → 回滚刚才的切换,
+    //    保留用户原来的视图,并说明卡在哪一步;临时失败 → 视图留着(身份是对的),
+    //    提示可重试。任何一档都不会在错误的母会话上显示"数据不可用"。
+    if (!(row.agentSessionId && row.agentProjectHash)) return;
+    const rollback = () => {
+      const s = useStore.getState();
+      s.setViewingAgent(targetTab, null);
+      if (prev) {
+        s.setPaneSession(targetTab, prev.session);
+        if (prev.project) s.setSelectedProject(prev.project);
+        s.setActiveTabIndex(targetTab);
+      }
+    };
+    readAbortRef.current?.abort();          // 换了目标:上一次读取只取消,不报错
+    const ac = new AbortController();
+    readAbortRef.current = ac;
+    setOpeningKey(row.key);
+    try {
+      const res = await fetchAgentHistory({ agentSessionId: row.agentSessionId, projectHash: row.agentProjectHash, signal: ac.signal });
+      if (!res.ok) {
+        // 取消 → 不出文案;硬失败(不存在/无权限/归属不可靠)→ 回滚切换;
+        // 超时等临时失败 → 视图与停止目标原样留着,只提示可重试(判据见 agentOpenFailureAction)。
+        const action = agentOpenFailureAction(res);
+        if (action === 'ignore') return;
+        if (action === 'rollback') rollback();
+        setOpenError(res.message);
+        return;
+      }
+      const owner = res.owner;
+      if (!owner || owner.parentSessionId !== row.parentSessionId || (owner.toolUseId || null) !== row.toolUseId) {
+        rollback();                       // 归属对不上:宁可说定位不到,也不留在错的母会话上
+        setOpenError('无法确定母会话');
+        return;
+      }
+      // 迟到响应丢弃:目标已变(条目被换掉/归属变了/被活流接管)就不写。
+      const now = useStore.getState();
+      if (!shouldApplyHistory(now.activeAgents[row.toolUseId], row.parentSessionId)) return;
+      const parts = splitHistoryBlocks(res.blocks);
+      now.upsertAgent(row.toolUseId, {
+        blocks: parts.blocks,
+        agentSessionId: row.agentSessionId,
+        agentProjectHash: row.agentProjectHash,
+        hasTranscript: true,
+        ...(parts.prompt ? { prompt: parts.prompt } : null),
+      });
+    } finally {
+      setOpeningKey(null);
+    }
+  };
 
   // Stop a child process. Two endpoints exist:
   //   /api/chat/:pid/stop      — only knows our own chat-process spawns
@@ -878,13 +1086,14 @@ export function AgentMonitorPanel() {
   };
 
   return (
+    <SubagentCostContext.Provider value={costCtxReady}>
     <div data-cgui="agent-monitor" className="h-full flex flex-col">
       <div className="px-4 py-3 border-b border-canvas-deep shrink-0">
         <div className="flex items-center justify-between">
           <span className="text-[10px] uppercase tracking-widest text-ink-faint font-body flex items-center gap-1.5">
             <Bot size={11} />Subagent 监控
           </span>
-          <button onClick={() => fetchActive()} className="p-1 text-ink-faint hover:text-ink-muted" title="刷新">
+          <button onClick={refreshAll} className="p-1 text-ink-faint hover:text-ink-muted" title="刷新">
             <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
           </button>
         </div>
@@ -892,6 +1101,15 @@ export function AgentMonitorPanel() {
           实时显示当前活跃的 subagent 与本地 Claude 子进程。
           数据源：本地 chat <b>{remote.sources.chatProcesses}</b> · CLI session <b>{remote.sources.cliSessions}</b>
         </p>
+        {/* 「查看」失败的第一行反馈:说清卡在哪一步,当前视图原样保留 */}
+        {openError && (
+          // 刻意不挂 data-cgui:锚点层是"跨版本稳定的 chrome 区域",这条是随时可变的
+          // 临时提示行(可观测口径是它的文案本身,锁定用例也按文案找)。
+          <div className="mt-1.5 text-[11px] text-amber-700 font-body leading-snug flex items-start gap-1.5">
+            <span className="flex-1 min-w-0">{openError}</span>
+            <button onClick={() => setOpenError('')} className="shrink-0 text-ink-faint hover:text-ink-muted underline">知道了</button>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-3">
@@ -911,9 +1129,63 @@ export function AgentMonitorPanel() {
                     // 的主因之一,这里全部展开,确保捕获到的子代理都直接可见。
                     defaultOpen
                     agents={agents}
+                    readyFor={(a) => costReadyFor(a.sessionId)}
                   />
                 );
               })}
+            </div>
+          </FoldableSection>
+        )}
+
+        {/* 子代理(含已结束、只剩历史的)—— 身份 = 母 sessionId + toolUseId。「查看」按身份
+            定位母会话:已开窗格复用/跨项目/后台没打开都能开。行内的 toolUseId 是这条身份的
+            唯一文本凭据(观测用),同名复制品(fork)与源代理按各自的母会话分开列。 */}
+        {subRows.length > 0 && (
+          <FoldableSection id="subagent-index" icon={<Bot size={10} />} title={`子代理 (${subRows.length})`}>
+            <div className="space-y-1.5">
+              {subRows.map((row) => (
+                <div key={row.key} className="bg-canvas-warm border border-canvas-deep rounded-lg px-2.5 py-1.5">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <Bot size={11} className={`shrink-0 ${row.running ? 'text-violet-600' : 'text-ink-faint'}`} />
+                    <span className="text-[11px] font-mono text-ink truncate min-w-0 flex-1" title={row.agentType || '子代理'}>
+                      {row.agentType || '子代理'}
+                    </span>
+                    {row.model && (
+                      <span className="text-[9px] px-1 py-px bg-violet-100 text-violet-700 rounded font-mono shrink-0">{row.model}</span>
+                    )}
+                    {/* A 项:该子代理自己的费用。母会话没打开 = 根本没加载过它的消息 →
+                        连小标都不画(costReadyFor 判的就是这个)。 */}
+                    <SubagentCostTag
+                      entry={costForPanes.index.byToolUseId.get(row.toolUseId)}
+                      showMissing={costReadyFor(row.parentSessionId)}
+                      title="该子代理自己的费用（按它自己的模型与调用时刻计价；不含在主回合金额里）"
+                    />
+                    <span className={`text-[9px] px-1 py-px rounded font-body shrink-0 ${
+                      row.running ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-canvas-deep text-ink-muted'
+                    }`}>{row.running ? '实时' : '历史'}</span>
+                  </div>
+                  {(row.description || row.prompt) && (
+                    <div className="text-[10.5px] text-ink-muted font-body truncate mt-0.5 pl-4" title={row.description || row.prompt}>
+                      {row.description || row.prompt}
+                    </div>
+                  )}
+                  {/* 身份行:工具身份 + 「查看」在同一格 —— 观测脚本按这段文本找行再点查看,
+                      身份与动作必须落在同一个最小容器里。 */}
+                  <div className="flex items-center gap-1.5 mt-0.5 pl-4 min-w-0">
+                    <span className="text-[9.5px] text-ink-faint font-mono truncate min-w-0 flex-1" title={row.toolUseId || row.agentSessionId || ''}>
+                      {row.toolUseId || `${row.agentSessionId || '未知身份'}（无工具身份）`}
+                    </span>
+                    <button
+                      onClick={() => openAgentRow(row)}
+                      disabled={openingKey === row.key}
+                      className="shrink-0 flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-canvas hover:bg-canvas-deep text-ink-soft border border-canvas-deep transition-colors disabled:opacity-50"
+                      title="在母会话窗口里打开这个子代理"
+                    >
+                      {openingKey === row.key ? <Loader2 size={10} className="animate-spin" /> : <Maximize2 size={10} />}查看
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           </FoldableSection>
         )}
@@ -946,6 +1218,12 @@ export function AgentMonitorPanel() {
                   <span className="text-[11px] font-mono text-ink truncate flex-1" title={`${a.workflowId} · ${a.id}`}>
                     {a.agentType || 'agent'} <span className="text-ink-faint">#{String(a.id).slice(-4)}</span>
                   </span>
+                  {/* A 项:该内层 agent 自己的费用(匹配口径 = agentSessionId 去 'agent-' 前缀 === 行 id) */}
+                  <SubagentCostTag
+                    entry={costForPanes.index.byAgentId.get(String(a.id))}
+                    showMissing={costReadyFor(a.sessionId)}
+                    title="该助手自己的费用（按它自己的模型与调用时刻计价；不含在主回合金额里）"
+                  />
                   <StatusBadge status={forceStopped ? 'stopped' : (a.status === 'idle' ? 'idle' : a.status)} />
                 </div>
                 );
@@ -996,5 +1274,6 @@ export function AgentMonitorPanel() {
         </FoldableSection>
       </div>
     </div>
+    </SubagentCostContext.Provider>
   );
 }

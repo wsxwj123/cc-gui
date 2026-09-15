@@ -5,6 +5,9 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css'; // CJ-3:KaTeX 样式(katex 本体经 mermaid 已在依赖里)
 import { openExternalUrl } from '../utils/openExternal.js';
+import {
+  resolveImageSrc, preprocessImages, oversizedImageDataNote,
+} from '../utils/markdownImages.js';
 import { ArtifactPreview, isPreviewable } from './ArtifactPreview.jsx';
 import { CodeBlock } from './CodeBlock.jsx';
 import { isGenuiLang } from './GenuiFence.jsx';
@@ -173,48 +176,6 @@ const markdownComponents = {
   ),
 };
 
-// 把 markdown 图片 src 解析成 webview 能加载的地址。相对/绝对文件系统路径
-// 改写到 raw 文件端点(相对 md 文件自身目录解析);http(s)/data/blob 原样保留。
-// 没有 basePath(如聊天气泡)则不改写,保持原行为。
-function resolveImageSrc(src, basePath) {
-  if (!src) return src;
-  const s = String(src).trim();
-  if (/^(https?:|data:|blob:)/i.test(s)) return s;
-  if (!basePath) return s;
-  const baseDir = String(basePath).replace(/\\/g, '/').replace(/\/[^/]*$/, '');
-  let rel = s.replace(/\\/g, '/');
-  // react-markdown 会把 URL 里的空格等编码成 %20。先解码回字面路径,末尾再 encodeURIComponent
-  // 单次编码,否则 `%20` 会被二次编码成 `%2520` → 文件名对不上 → 404。
-  try { rel = decodeURIComponent(rel); } catch {}
-  // AI 常把绝对路径误拼成 ./ ../ // 开头的畸形相对路径(如 `..//Users/...`)。
-  // 剥掉开头的 ./ ../ / 后若紧跟一个绝对路径(/Users、/home 或盘符 C:/),按绝对处理。
-  const embedded = rel.match(/^[./]*((?:\/(?:Users|home)\/|[A-Za-z]:\/).*)$/);
-  if (embedded) rel = embedded[1];
-  const isAbs = rel.startsWith('/') || /^[A-Za-z]:\//.test(rel);
-  const joined = isAbs ? rel : `${baseDir}/${rel}`;
-  // 折叠 ./ 与 ../,保留路径前缀(POSIX 的 `/` 或 Windows 的 `C:/`)
-  const m = joined.match(/^([A-Za-z]:\/|\/)/);
-  const prefix = m ? m[0] : '/';
-  const out = [];
-  for (const seg of joined.slice(prefix.length).split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') out.pop();
-    else out.push(seg);
-  }
-  return `/api/files/read?path=${encodeURIComponent(prefix + out.join('/'))}&raw=1`;
-}
-
-// AI 生成的 ![alt](路径含空格) 不符合 CommonMark:URL 含空格必须用 <> 包裹或编码,
-// 否则解析器在第一个空格处断开 → 整条不被识别为图片,渲染成纯文本(用户截图就是这样)。
-// 给"含空格、未包裹、非外链、无标题"的图片 URL 套上 <>,让它能被解析成 <img>。
-function wrapSpacedImageUrls(md) {
-  if (!md) return md;
-  return md.replace(/(!\[[^\]]*\]\()([^)]+)(\))/g, (full, pre, url, post) => {
-    const u = url.trim();
-    if (u.startsWith('<') || u.includes('"') || /^(https?:|data:|blob:)/i.test(u) || !u.includes(' ')) return full;
-    return `${pre}<${u}>${post}`;
-  });
-}
 
 // isStreaming:本条消息是否还在流式产出。genui 围栏据此决定要不要做结构补全、要不要
 // 报解析失败(PLAN §1.4)。只有会渲染流式正文的调用点需要传(TurnBubble 三处),其余
@@ -226,25 +187,40 @@ export function MarkdownRenderer({ content, basePath, dockKeyPrefix, isStreaming
     ...markdownComponents,
     // #3 注入 dockKeyPrefix,让可预览代码块拿到稳定停靠身份。
     code: (props) => renderCode({ ...props, dockKeyPrefix, isStreaming }),
-    img: ({ src, alt, title }) => (
-      <img
-        src={resolveImageSrc(src, basePath)}
-        alt={alt || ''}
-        title={title}
-        loading="lazy"
-        className="max-w-full h-auto my-3 rounded border border-canvas-deep"
-      />
-    ),
+    img: ({ src, alt, title }) => {
+      const resolved = resolveImageSrc(src, basePath);
+      const oversized = oversizedImageDataNote(resolved);
+      // 超限 data 图片只给占位:整个 base64 字符串不进 DOM(几 MB 的 src 属性同样拖垮渲染)。
+      if (oversized) {
+        return (
+          <div className="my-3 rounded border border-canvas-deep bg-canvas-warm px-3 py-2 text-[13px] text-ink-muted">
+            🖼 {alt || '图片'} — {oversized}
+          </div>
+        );
+      }
+      return (
+        <img
+          src={resolved}
+          alt={alt || ''}
+          title={title}
+          loading="lazy"
+          className="max-w-full h-auto my-3 rounded border border-canvas-deep"
+        />
+      );
+    },
   }), [basePath, dockKeyPrefix, isStreaming]);
-  // 仅文件预览(有 basePath)才预处理空格图片 URL,聊天气泡保持原文不动。
-  const text = useMemo(() => (basePath ? wrapSpacedImageUrls(content) : content), [content, basePath]);
+  // 聊天气泡与文件预览统一做图片正文预处理(修复前聊天气泡保持原文,用户只看到路径)。
+  // isStreaming 透传:流式中末行不转换,防半截 base64 的 img src 逐 chunk 增长反复重解码。
+  const text = useMemo(() => preprocessImages(content, isStreaming), [content, isStreaming]);
   return (
     <div className="markdown-content text-[15px] font-reading leading-relaxed">
       {/* remarkGfm: GitHub-flavored markdown — tables, strikethrough, task
           lists, autolinks. Without it Claude's `| col | col |` tables come
           out as a single run-on text line (which is what was happening). */}
-      {/* urlTransform 恒等(仅文件预览):默认会把 Windows 绝对路径 C:\ 当协议删掉,
-          这里关掉过滤让本地路径原样进 img 组件;链接安全由 a 组件的 href 白名单兜底。 */}
+      {/* urlTransform 恒等:react-markdown 默认会把 `C:\`、`data:` 等非 http 协议的
+          src 删成空(聊天气泡 data: 图片"明明写了却不显示"的根因之一)。关掉过滤让
+          本地路径/data URL 原样进 img 组件;安全兜底:a 组件 href 白名单照旧生效,
+          img 的 src 在浏览器里不执行脚本,data:/blob: 均为惰性资源。 */}
       {/* CJ-3:remarkMath 解析 $...$ / $$...$$,rehypeKatex 渲染成公式。rehype-katex 默认
           throwOnError:false → 错误公式标红不崩。注:不处理 \(..\) / \[..\](Claude 多用 $),
           如需可后续加预处理转换。 */}
@@ -252,7 +228,7 @@ export function MarkdownRenderer({ content, basePath, dockKeyPrefix, isStreaming
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={components}
-        urlTransform={basePath ? ((u) => u) : undefined}
+        urlTransform={(u) => u}
       >
         {text}
       </ReactMarkdown>

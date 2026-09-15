@@ -7,6 +7,8 @@ import {
   planSignature,
   planTextOfToolCall,
 } from '../../../server/utils/plan.js';
+// 迁移按会话键存的可见性时一并搬"任务清单隐藏开关"(r34)——键构造只在 todoCollapse.js 一处。
+import { TODO_HIDDEN_PREFIX, todoHiddenKey } from './todoCollapse.js';
 
 export {
   isApprovedPlanToolCall,
@@ -99,7 +101,7 @@ export function pruneHiddenPlanIdentities(storage, ownerKey, keepKey = '', limit
 // 单测可使用真实行为的内存实现；任一写失败都保留旧键，不做破坏性清理。
 export function migrateSessionVisibilityOwner(storage, fromOwnerKey, toOwnerKey) {
   if (!storage || !fromOwnerKey || !toOwnerKey || fromOwnerKey === toOwnerKey) return false;
-  const exactKeys = [`cgui-goal-hidden:${fromOwnerKey}`];
+  const exactKeys = [`cgui-goal-hidden:${fromOwnerKey}`, todoHiddenKey(fromOwnerKey)];
   const planPrefix = `cgui-plan-hidden:${fromOwnerKey}:`;
   for (let index = 0; index < storage.length; index += 1) {
     const key = storage.key(index);
@@ -109,10 +111,15 @@ export function migrateSessionVisibilityOwner(storage, fromOwnerKey, toOwnerKey)
   for (const fromKey of exactKeys) {
     const value = storage.getItem(fromKey);
     if (value == null) continue;
-    const suffix = fromKey.slice(fromKey.indexOf(':', 'cgui-plan-hidden:'.length) + 1);
-    const toKey = fromKey.startsWith('cgui-plan-hidden:')
-      ? `cgui-plan-hidden:${toOwnerKey}:${suffix}`
-      : `cgui-goal-hidden:${toOwnerKey}`;
+    let toKey;
+    if (fromKey.startsWith(planPrefix)) {
+      toKey = `cgui-plan-hidden:${toOwnerKey}:${fromKey.slice(planPrefix.length)}`;
+    } else if (fromKey.startsWith(TODO_HIDDEN_PREFIX)) {
+      // 任务清单隐藏开关(r34):同会话键,内容只是一个布尔,整键搬到新 owner。
+      toKey = todoHiddenKey(toOwnerKey);
+    } else {
+      toKey = `cgui-goal-hidden:${toOwnerKey}`;
+    }
     try {
       storage.setItem(toKey, value);
       if (storage.getItem(toKey) !== value) continue;

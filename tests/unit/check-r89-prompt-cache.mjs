@@ -287,10 +287,18 @@ check('A4-9 徽章弹层显示本轮命中率;用量面板显示累计命中率�
   // 本轮命中率必须【既算出来又渲染】:只留一头等于功能缺失。
   assert.ok(/const turnCache = readCacheUsage\(effectiveUsage\)/.test(appSrc), '本轮命中率未取单次调用 usage');
   assert.ok(/turnCacheHitPct: turnCache\.hitPct/.test(appSrc), 'badgeInfo 未带本轮命中率');
-  assert.ok(/formatHitPct\(info\.turnCacheHitPct \|\| 0\)/.test(appSrc), '弹层未渲染本轮命中率');
+  // R24 起分母为 0 显示「—」,两处渲染都改用 formatHitPctOrDash(pct, 分母):比旧的
+  // formatHitPct(pct) 更强 —— 旧形态在分母 0(本轮没有任何提示侧 token,如纯工具回合)
+  // 时显示 0.0%,会被读成"缓存完全没命中",而事实是"没有可统计的输入"。分母必须来自
+  // 同一条 usage 的 total:漏传分母(function 第二参 undefined)会让每个数字都变「—」,
+  // 属于比原来更坏的功能缺失,所以这里连分母的取数一起钉住。
+  assert.ok(/formatHitPctOrDash\(info\.turnCacheHitPct \|\| 0, info\.turnCacheTotal \|\| 0\)/.test(appSrc),
+    '弹层未渲染本轮命中率(或没把本轮分母一起传给 formatHitPctOrDash)');
+  assert.ok(/turnCacheTotal: turnCache\.total/.test(appSrc), 'badgeInfo 未带本轮分母(命中率会被判成 —)');
   assert.ok(/sessionCacheMiss/.test(appSrc), '未暴露会话累计未命中 token');
   assert.ok(/from '\.\.\/utils\/cacheStats\.js'/.test(usagePanelSrc), '用量面板未走共享纯函数');
-  assert.ok(/formatHitPct\(c\.hitPct\)/.test(usagePanelSrc), '用量面板未渲染累计命中率');
+  assert.ok(/formatHitPctOrDash\(c\.hitPct, c\.total\)/.test(usagePanelSrc),
+    '用量面板未渲染累计命中率(或没把累计分母一起传给 formatHitPctOrDash)');
   assert.ok(/formatNum\(c\.miss\)/.test(usagePanelSrc), '用量面板未渲染累计未命中 token');
 });
 

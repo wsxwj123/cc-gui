@@ -22,7 +22,7 @@ import { turnWaveWidth, layoutCompactPositions, distortPositions, buildTurnIndex
 const SHOW_DELAY = 220;
 const HIDE_DELAY = 120;
 const FISHEYE = { factor: 3 }; // sigma 缺省 = 3×平均间距(distortPositions 内部)
-export default function TurnScrubber({ containerRef, turns, onNavigate }) {
+export default function TurnScrubber({ containerRef, turns, onNavigate, onJumpToTurn }) {
   const rootRef = useRef(null);                // 本组件根,取其 offsetParent 作定位基准
   const [box, setBox] = useState(null);        // { top, height } 相对根
   const [pointerY, setPointerY] = useState(null);
@@ -110,6 +110,19 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     requestAnimationFrame(step);
   };
 
+  // 跳远:渐进挂载下很旧的轮**不在 DOM 里**(被裁掉了),既有 querySelector 会静默落空。
+  // 先请宿主把挂载集合扩到目标行(onJumpToTurn 返回 true = 宿主接手),补齐要等下一帧才提交,
+  // 所以轮询几帧再走上面的 DOM 滚动;宿主不接手(裁剪未启用 / 目标不在定稿列表里)则原样走。
+  const jumpToTurn = (uuid) => {
+    if (!onJumpToTurn || !onJumpToTurn(uuid)) return scrollToTurn(uuid);
+    let tries = 0;
+    const tryScroll = () => {
+      if (containerRef.current?.querySelector(`[data-turn-uuid="${uuid}"]`)) return scrollToTurn(uuid);
+      if (tries++ < 12) requestAnimationFrame(tryScroll);
+    };
+    requestAnimationFrame(tryScroll);
+  };
+
   // 索引变化 → 武装 tooltip(首次入场延迟 SHOW_DELAY;tooltip 已可见则即时跟随)。
   const armTip = (i) => {
     clearTimeout(hideTimer.current);
@@ -158,7 +171,7 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     const anchor = committedPointerY.current ?? y;
     const idx = nearestTurnIndex(buildTurnIndex(distortPositions(base, anchor, FISHEYE)), y);
     const t = turns[idx];
-    if (idx >= 0 && t) scrollToTurn(t.uuid);
+    if (idx >= 0 && t) jumpToTurn(t.uuid);
   };
   // 键盘步进(role=slider):上下键逐回合移动并滚动到该回合。
   const keyBar = (e) => {
@@ -173,7 +186,7 @@ export default function TurnScrubber({ containerRef, turns, onNavigate }) {
     setActiveIdx(idx);
     setTipIdx(idx);
     const t = turns[idx];
-    if (t) scrollToTurn(t.uuid);
+    if (t) jumpToTurn(t.uuid);
   };
 
   if (!box || turns.length < 2) return null;

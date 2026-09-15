@@ -3,7 +3,7 @@ import { readdir, stat, lstat, readFile, realpath, writeFile, rm, unlink } from 
 import { createReadStream, watch as fsWatch } from 'fs';
 import { broadcast } from '../broadcast.js';
 import { join, resolve, relative, extname, isAbsolute } from 'path';
-import { homedir, platform } from 'os';
+import { homedir, platform, tmpdir } from 'os';
 import { execFile } from 'child_process';
 import { isPathInside, isKnownClaudeWorkspace } from '../utils/safe-path.js';
 
@@ -27,6 +27,21 @@ const PROTECTED_WRITE_RELPATHS = new Set([
 ]);
 const MAX_PREVIEW_BYTES = 256 * 1024; // 256KB cap for the read endpoint
 
+// raw 字节入口的并发/时长边界(合同:最多 4 个并行 raw 读,超出 429 FILE_READ_BUSY;
+// 15 秒无读/写进展中止)。activeRawReads 只记在飞行中的流,响应结束/客户端取消即释放。
+const MAX_PARALLEL_RAW_READS = 4;
+const RAW_READ_IDLE_MS = 15_000;
+const activeRawReads = new Set();
+
+// files/read 的 JSON 失败统一 {ok:false,code,error}(stable code,error 不含凭证/路径细节之外的信息)。
+function fileReadErrorCode(status) {
+  if (status === 400) return 'FILE_READ_INVALID_PATH';
+  if (status === 403) return 'FILE_READ_FORBIDDEN';
+  if (status === 404) return 'FILE_READ_NOT_FOUND';
+  if (status === 504) return 'FILE_READ_TIMEOUT';
+  return 'FILE_READ_FAILED';
+}
+
 // Extension → MIME for the raw byte endpoint (image/video/audio/pdf preview).
 const MIME = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
@@ -40,10 +55,24 @@ const MIME = {
 const SKIP_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build', '.cache', '__pycache__', '.venv', 'venv', '.idea', '.vscode']);
 const SKIP_EXACT = new Set(['.DS_Store']);
 
+// R08 修复(抽查第 1 条):上传附件落在 os.tmpdir()/cgui-attachments(与 upload.js/
+// screenshot.js 同一个目录),而它在 $HOME 之外 —— 上传的大图 preview 被 96KiB 预算裁空后
+// 只能回退到 raw 原图入口,于是真实拖进来的图刷新后永久「图片不可用」(只剩 name/path)。
+// 这里只放行【这一个本服务自己写的目录】,不是整个 tmpdir;/tmp/cgui-r08-outside-* 之类
+// 仍然 403。匹配用 realpath 后的 real(见下),目录里预埋的 symlink 指向外面照样被拒。
+const UPLOAD_DIR = join(tmpdir(), 'cgui-attachments');
+// 懒解析 + 不复用失败:macOS /var 是 /private/var 的符号链接,两种形态都要认。
+let uploadDirReal = null;
+async function isInsideUploadDir(real) {
+  if (isPathInside(real, UPLOAD_DIR)) return true;
+  if (!uploadDirReal) uploadDirReal = await realpath(UPLOAD_DIR).catch(() => null);
+  return !!uploadDirReal && isPathInside(real, uploadDirReal);
+}
+
 /**
  * Resolve+validate a user-provided path. Must be ABSOLUTE and resolve
- * (after realpath) under HOME — anything else is rejected. Returns the
- * realpath on success, throws on rejection.
+ * (after realpath) under HOME(或本服务的上传目录 / 已知 claude 工作区)
+ * — anything else is rejected. Returns the realpath on success, throws on rejection.
  */
 export async function safePath(p) {
   // isAbsolute is platform-aware (accepts /unix and C:\windows).
@@ -58,7 +87,7 @@ export async function safePath(p) {
   // 例外:claude 用过的工作区(~/.claude/projects 有 hash 目录)及其子路径放行 ——
   // Windows 项目常在 $HOME 之外(D:\ 等其他盘),纯 $HOME 门禁把合法项目整片 403
   // (用户实报)。realpath 前后两种形态都试,防 junction/OneDrive 改写路径致 hash 对不上。
-  if (!isPathInside(real, HOME)) {
+  if (!isPathInside(real, HOME) && !(await isInsideUploadDir(real))) {
     const lexical = resolve(p);
     // 工作区例外(任一形态命中即候选放行)。
     if (!isKnownClaudeWorkspace(real, lexical)) {
@@ -175,22 +204,56 @@ router.get('/files/read', async (req, res) => {
     // 之前没有 → authed 客户端/文件树预览能读出 .credentials.json(OAuth token)、network.json
     // (passwordHash)、custom-providers.json(明文 apiKey)。这些各有专用端点,通用读一律 403。
     if (PROTECTED_WRITE_RELPATHS.has(relative(HOME, real))) {
-      return res.status(403).json({ error: '该文件含敏感凭据,不提供预览' });
+      return res.status(403).json({ ok: false, code: 'FILE_READ_FORBIDDEN', error: '该文件含敏感凭据,不提供预览' });
     }
     const st = await stat(real);
-    if (st.isDirectory()) return res.status(400).json({ error: 'not a file' });
+    if (st.isDirectory()) return res.status(400).json({ ok: false, code: 'FILE_READ_INVALID_PATH', error: 'not a file' });
 
     // raw=1 → stream the actual bytes (images/video/audio/pdf preview), not JSON.
+    // 合同(INTERFACE「Markdown、附件和通知」)：流式传输、不整文件读入内存；最多 4 个并行
+    // raw 读，超出 429 FILE_READ_BUSY；15 秒无进展中止(响应头已发则断连)。
     if (req.query.raw === '1') {
+      if (activeRawReads.size >= MAX_PARALLEL_RAW_READS) {
+        return res.status(429).json({ ok: false, code: 'FILE_READ_BUSY', error: '并发图片读取已达上限，请稍后重试' });
+      }
       const e = extname(real).slice(1).toLowerCase();
-      res.setHeader('Content-Type', MIME[e] || 'application/octet-stream');
-      res.setHeader('Content-Length', st.size);
-      res.setHeader('Cache-Control', 'no-cache');
       const stream = createReadStream(real);
-      // Content-Length/200 are already flushed, so we can't switch to 500 mid-
-      // stream. Destroy the socket instead — the client sees a truncated body +
-      // aborted connection rather than a silently-incomplete 200.
-      stream.on('error', () => { res.headersSent ? res.destroy() : res.status(500).end(); });
+      const ticket = Symbol('raw-read');
+      activeRawReads.add(ticket);
+      let idleTimer = null;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        clearTimeout(idleTimer);
+        activeRawReads.delete(ticket);
+      };
+      const onIdle = () => {
+        // 头还没发出去 → 明确的 504；已经发了 → 断连(客户端据截断的响应判加载失败)。
+        if (res.headersSent) res.destroy();
+        else res.status(504).json({ ok: false, code: 'FILE_READ_TIMEOUT', error: '读取超时' });
+        stream.destroy();
+        release();
+      };
+      idleTimer = setTimeout(onIdle, RAW_READ_IDLE_MS);
+      // 客户端取消/断开立即释放流与配额(否则 4 个上限会被僵尸读占满)。
+      res.on('close', () => { stream.destroy(); release(); });
+      stream.on('data', () => { if (idleTimer) idleTimer.refresh(); });
+      // 读打开成功才发响应头：打不开时还能回 500 JSON，而不是 200 空壳。
+      stream.on('open', () => {
+        if (res.headersSent || res.writableEnded) return;
+        res.setHeader('Content-Type', MIME[e] || 'application/octet-stream');
+        res.setHeader('Content-Length', st.size);
+        res.setHeader('Cache-Control', 'no-cache');
+      });
+      // Content-Length/200 一旦 flush 就不能改回 500：销毁连接，让客户端看到截断的
+      // body + 中止的连接，而不是"静默不完整的 200"。
+      stream.on('error', () => {
+        if (res.headersSent) res.destroy();
+        else res.status(500).json({ ok: false, code: 'FILE_READ_FAILED', error: '读取失败' });
+        release();
+      });
+      stream.on('end', release);
       return stream.pipe(res);
     }
 
@@ -222,7 +285,8 @@ router.get('/files/read', async (req, res) => {
       binary: false,
     });
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
+    const status = err.status || 500;
+    res.status(status).json({ ok: false, code: fileReadErrorCode(status), error: err.message });
   }
 });
 

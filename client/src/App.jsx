@@ -19,17 +19,46 @@ const mcpNoticeSeenPids = new Set();
 // 会话A(用户实报串扰)。每个 draft 发一个 nonce,init 绑定前比对"发起流的 draft"===当前。
 let _draftSeq = 0;
 export const newDraftId = () => `d${Date.now()}-${++_draftSeq}`;
+// 条带折叠:CLI 会话 id 恒是 uuid —— draft 身份是 `d<ts>-<n>`(App.jsx 的 draftId 生成器)、
+// 队列键是 `draft-<hash>-<draftId>`,两者都不是 uuid。异常收尾窗口记录必须挂在真 sessionId 上(渲染侧 turn.sessionId
+// 就是它),挂 draft 身份必然对不上:本轮永远收不回来。
+const isSessionUuid = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(v);
+
+// 渐进挂载:默认挂最近多少条消息行(向上滚一批批补)。K=30 时长会话常驻 ≈2.9k 节点
+// (实测成本 ≈9µs/节点 → 26ms/格,门槛 150ms),留足余量。
+const MOUNT_WINDOW_K = 30;
 // CQ-15:被用户停止的 chat 进程 pid,跨所有 SessionDetail 实例(分屏多 pane)共享。
 // 原来是每个 pane 私有的 useRef(new Set()),pane A 停的 pid,pane B 的 backgroundPid 轮询
 // 感知不到 → 可能把 B 自己仍在跑的进程当成「需要 reattach」,reattach 的 finally 又清空 B
 // 的流式状态,外观上像「停一个把两个都停了」。改成模块级共享集合即可让停止全局可见。
 const stoppedChatPids = new Set();
+// R13 回合身份:每条用户发送一个 clientTurnId(1–64 位 [A-Za-z0-9_-])。响应丢失/超时时
+// 沿用同一个 id 重发才能拿回同一个 canonical turn —— 绝不换新 id 再发(INTERFACE
+// 「响应丢失不自动生成另一个 clientTurnId 再发」)。自动重试(signature/fresh/oneM/auto)
+// 是"上一回合已明确失败后的新尝试",它们各自调用 handleSend 会拿到新 id,这正是要的语义。
+let _clientTurnSeq = 0;
+const newClientTurnId = () => makeClientTurnId(Date.now(), ++_clientTurnSeq);
+// R13:serverEpoch = 本服务实例身份(GET /api/health)。缓存一份,进程重启(WS 必断)或服务端
+// 回 TURN_SERVER_CHANGED 时重取。取不到就不带该字段(老路径兼容),绝不拿它阻塞发送。
+let serverEpochCache = null;
+let serverEpochInFlight = null;
+function fetchServerEpoch() {
+  if (serverEpochInFlight) return serverEpochInFlight;
+  serverEpochInFlight = fetch('/api/health')
+    .then((r) => r.json())
+    .then((d) => { if (typeof d?.serverEpoch === 'string' && d.serverEpoch) serverEpochCache = d.serverEpoch; })
+    .catch(() => {})
+    .then(() => { serverEpochInFlight = null; return serverEpochCache; });
+  return serverEpochInFlight;
+}
 import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { GenuiActionProvider, useGenuiActionCapability } from './genui/host/action-context.jsx';
-import { TurnBubble } from './components/TurnBubble.jsx';
+import { TurnBubble, StripRoundContext } from './components/TurnBubble.jsx';
+import { stripSummary } from './utils/streamStatus.js';
+import { initialSpan, extendUp, needsExtend, sliceRows } from './utils/mountWindow.js';
 import { ReleaseNotesModal } from './components/ReleaseNotesModal.jsx';
 import { shouldShow as shouldShowReleaseNotes, hasReleaseNotes, loadVersionNotes, fetchLastSeen, markSeen } from './utils/releaseNotes.js';
 import TurnScrubber from './components/TurnScrubber.jsx';
@@ -40,6 +69,8 @@ import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import { applyProgrammaticText } from './utils/inputUndo.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
+import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
+import { runHistoryOp } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
 import { filterSlashCommands, slashBlocked, fetchSlashCommands } from './utils/slashCommands.js';
 import { SlashCommandMenu } from './components/SlashCommandMenu.jsx';
@@ -57,6 +88,7 @@ import { MarketPanel } from './components/MarketPanel.jsx';
 import { GuideTour } from './components/GuideTour.jsx';
 import { useResizable as useResizableHook, Splitter as SplitterCmp } from './hooks/useResizable.jsx';
 import { MCPPanel } from './components/MCPPanel.jsx';
+import { TerminalPanel } from './components/TerminalPanel.jsx';
 import { FileReviewPanel } from './components/FileChangesPanel.jsx';
 import { MemoryPanel } from './components/MemoryPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
@@ -66,21 +98,25 @@ import { ModelPickModal, mergeModelLines, stripJunkModels } from './components/M
 import { SubagentView } from './components/SubagentView.jsx';
 import BtwWindow from './components/BtwWindow.jsx';
 import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyExactResult, relativeAgeLabel } from './utils/contextCache.js';
-import { readCacheUsage, addCacheUsage, formatHitPct, EMPTY_CACHE_USAGE } from './utils/cacheStats.js';
+import { readCacheUsage, addCacheUsage, formatHitPct, formatHitPctOrDash, EMPTY_CACHE_USAGE } from './utils/cacheStats.js';
+import { publishTurnCache, subscribeTurnCache, readTurnCache } from './utils/turnCacheBus.js';
+import { loadPricingCatalog } from './utils/pricingCatalog.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
 import { SkinSection } from './components/SkinPanel.jsx';
 import { ProviderPriceEditor } from './components/ProviderPriceEditor.jsx';
-import { BUILTIN_PROVIDERS, findBuiltin } from './utils/builtinProviders.js';
-import { computeCost, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
-import { extractToolResultText, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
+import { BUILTIN_PROVIDERS, findBuiltin, presetSuggestion } from './utils/builtinProviders.js';
+import { quotaValueText } from './utils/quotaFormat.js';
+import { computeCostForMessage, displayUsd, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
+import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, queueKeyFor, HOME_DRAFT_KEY } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY } from './utils/steerQueue.js';
+import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
-import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow, reconcileBadgeWindow } from './utils/contextWindow.js';
+import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow, reconcileBadgeWindow, resolveTurnUsage } from './utils/contextWindow.js';
 import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
@@ -95,7 +131,7 @@ import {
   FolderOpen, MessageSquare, ChevronLeft, ChevronRight, ChevronDown,
   Search, Hash, Layers, BarChart3, ArrowLeft, Plus,
   RefreshCw, Activity, Settings, Server, GitBranch, GitMerge, FileDiff, Check, Wrench, X,
-  Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree,
+  Sun, Moon, Monitor, Bot, Camera, History, Loader2, Shield, FolderTree, Terminal,
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
   Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star, Puzzle,
@@ -113,8 +149,9 @@ import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
+import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
-import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
+import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 
@@ -226,13 +263,10 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
       let trimOk = false;
       if (projectHash && ts) {
         try {
-          const tr = await fetch(`/api/sessions/${sessionId}/trim`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ projectHash, fromTimestamp: new Date(ts).toISOString() }),
-          });
-          const trData = await tr.json().catch(() => ({}));
+          // R25:裁剪必须走两步流(预览 → 带令牌提交);结果会话要新建时 sessionReset=true。
+          const tr = await runHistoryOp(sessionId, 'trim', { projectHash, fromTimestamp: new Date(ts).toISOString() });
           trimOk = tr.ok;
-          if (trData?.sessionReset) {
+          if (tr.sessionReset) {
             // 扫全部 pane(不只 selectedSession=pane0 镜像):检查点按钮可能开在 1-5 号
             // pane,或同会话开多 pane。漏扫 → 那些 pane 留僵尸 sessionId,下次发送 CLI
             // 报 "No conversation found"(本项目"按 sessionId 清理必扫全 paneSessions"惯性坑)。
@@ -259,7 +293,23 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
   // positioning, so a narrow split pane's overflow:hidden can't clip it and it
   // never spills past the pane boundary (#10). Position is clamped to viewport.
   const btnRef = useRef(null);
+  const popRef = useRef(null);
   const [pos, setPos] = useState(null);
+  // 点外部关闭。**原来是一层 `fixed inset-0` 隐形遮罩**:它会把点击吞掉(下面的按钮/会话行
+  // 点不到,实测让"切窗格会话"这类操作第一次点击落空),而用户只想关掉这个浮层。
+  // 改成 document mousedown(与坞里 PaneCountPicker 同一套)——判断点击落在浮层和触发按钮
+  // 之外才关;点在触发按钮上不关(那一击由按钮自己的 onClick 接管 toggle,否则"关→又被
+  // toggle 打开"永远关不掉)。
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (btnRef.current?.contains(e.target)) return;
+      if (popRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
   const toggle = () => {
     if (open) { setOpen(false); return; }
     const r = btnRef.current?.getBoundingClientRect();
@@ -298,8 +348,7 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
       </button>
       {open && pos && createPortal(
         <>
-          <div className="fixed inset-0 z-[55]" onClick={() => setOpen(false)} />
-          <div className="glass-popover fixed w-72 max-w-[calc(var(--app-w,100vw)-1rem)] z-[56] py-1 animate-glass-rise"
+          <div ref={popRef} className="glass-popover fixed w-72 max-w-[calc(var(--app-w,100vw)-1rem)] z-[56] py-1 animate-glass-rise"
             style={{ top: pos.top, left: pos.left }}>
             <div className="px-3 py-2 flex items-center justify-between border-b border-white/10">
               <span className="text-[10px] uppercase tracking-wider text-ink-muted font-body">Checkpoints</span>
@@ -801,12 +850,20 @@ function findAgentIdByTaskId(st, taskId) {
 //   乐观 stopped(optimisticStop)例外 —— 它随时可能被权威 completed 推翻,那时若表还
 //   停在停止前那份,最后几个助手会永远显示"未知"。
 // SSE 那条路按 §E2-3 的源码锁把同一判据写在 task_progress 分支内(锁要求判据可见),
-// 本函数是 WS 兜底那条路的写入点,两处判据必须一致。
-function applyWorkflowProgress(st, toolUseId, table) {
+// 本函数是 WS 兜底那条路的写入点,两处判据必须一致(含"缺条目时补建"这一步)。
+function applyWorkflowProgress(st, toolUseId, table, { taskId = null, sessionId = null } = {}) {
   if (!Array.isArray(table) || !toolUseId) return;
-  const a = st.activeAgents[toolUseId];
-  // 只更新已存在的条目,不建新条目 → 跨会话/跨窗格的广播天然不会串出一张新卡片。
-  if (!a) return;
+  let a = st.activeAgents[toolUseId];
+  // 刷新/重开页面后条目随内存一起没了(它只由 live 的 task_started 建),这段空窗里的
+  // 进度广播原来整批丢掉 → 卡片停在"状态未知"。缺条目时按最小形态补一条(判据见
+  // utils/workflowEntry.js)。这里是【全局】广播,所以补建必须带广播自带的会话归属:
+  // 拿不到归属就不建,免得别的会话的工作流在本客户端长出一张卡。
+  if (!a) {
+    const fresh = rebuildWorkflowEntry({ toolUseId, taskId, sessionId });
+    if (!fresh) return;
+    st.upsertAgent(toolUseId, fresh);
+    a = st.activeAgents[toolUseId];
+  }
   if (['done', 'error', 'stopped'].includes(a.status) && !a.optimisticStop) return;
   st.upsertAgent(toolUseId, { wfProgress: table, wfProgressAt: Date.now() });
 }
@@ -905,6 +962,16 @@ export function finalizeSessionAgents(sessionId, tnStatus = 'stopped', excludeId
   }
 }
 
+// 直播补齐(2026-09-13):store 里"子代理完成即推来"的金额条目 → 回合 subUsage 的形状
+// (与历史那份逐字段同形,渲染层因此一行不用改)。键是 toolUseId,卡片按自己的 id 取,
+// 取不到就没有 —— 所以这里给全量条目是安全的,不必按窗格/会话再切一刀。
+// 空表返回 undefined(与历史"没有 subUsage 键"同形,避免多一个恒等 false 的空对象)。
+export function liveSubUsageAgents(map) {
+  if (!map) return undefined;
+  const agents = Object.values(map);
+  return agents.length ? { agents } : undefined;
+}
+
 // 修正批#7:SettingsPanelHost 已删——ProviderManager 迁出设置(providerSlot 注入不再
 // 需要),PANEL_MAP 直用 SettingsPanel。
 
@@ -912,6 +979,9 @@ export function finalizeSessionAgents(sessionId, tnStatus = 'stopped', excludeId
 // and its RightPanel body. Adding a key here is all the wiring needed.
 const PANEL_MAP = {
   files: { label: '文件浏览器', icon: FolderTree, component: FileExplorerPanel },
+  // 内置终端(node-pty ↔ xterm.js,见 server/routes/terminal.js);代码块 ▶ 运行也经
+  // cgui-run-in-terminal 事件落到这个面板。
+  term: { label: '终端', icon: Terminal, component: TerminalPanel },
   changes: { label: '文件审查', icon: FileDiff, component: FileReviewPanel },
   monitor: { label: 'Subagent 监控', icon: Bot, component: AgentMonitorPanel },
   agents: { label: '自定义 Agent（写入 ~/.claude/agents）', icon: SquarePen, component: AgentsPanel },
@@ -1003,7 +1073,7 @@ function PaneCountPicker() {
 // 更新提醒并入坞:入口红点常驻 + rail 内条件「更新」按钮(跳设置更新区)。
 // 点 rail 图标后不收起:方便连续切换面板。持久展开也根治了导引 panel 步骤间 rail 被点暗区/外部收起反复开合的闪烁。
 const PANEL_SHORT = {
-  files: '文件', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
+  files: '文件', term: '终端', monitor: '监控', agents: 'Agent', usage: '用量', processes: '进程',
   changes: '审查', mcp: '工具', skills: '技能', memory: '指令', image: '生图', market: '市场', settings: '通用',
 };
 function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate, attentionCount = 0 }) {
@@ -1019,16 +1089,38 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate, atte
     window.addEventListener('cgui:dock-rail-close', onClose);
     return () => { window.removeEventListener('cgui:dock-rail-open', onOpen); window.removeEventListener('cgui:dock-rail-close', onClose); };
   }, []);
-  const activeMeta = rightPanel ? PANEL_MAP[rightPanel] : null;
+  // r106:终端是顶栏的独立常驻开关,不在坞的面板条里(见下面 rail 的 filter),坞按钮代表的是
+  // 「当前开着哪个坞面板」。所以终端开着时坞按钮身份统一回落为「设置」(图标/提示/点亮/文字
+  // 四处都认这个派生值),不能借终端的 meta 把自己变成第二个终端按钮。只改读取侧,不动状态机。
+  const activeMeta = rightPanel && rightPanel !== 'term' ? PANEL_MAP[rightPanel] : null;
   const DockIcon = activeMeta ? activeMeta.icon : LayoutGrid;
   return (
     <span data-cgui="panel-dock" data-tour="panel-dock" className="inline-flex items-center gap-1">
+      {/* R01:顶栏常驻「终端」开关(显示/收起面板,不再收进 rail —— 终端是高频入口,
+          且黑盒合同以可访问名「终端」点名该控件)。rail 里不再重复渲染终端按钮,
+          避免同名按钮双匹配。 */}
+      {(() => {
+        const TermIcon = PANEL_MAP.term.icon;
+        return (
+          <button
+            data-tour="panel-term"
+            onClick={() => setRightPanel(rightPanel === 'term' ? null : 'term')}
+            className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${rightPanel === 'term' ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'}`}
+            title="终端"
+          >
+            <TermIcon size={15} />
+            <span className="text-[9px] leading-none font-body">终端</span>
+          </button>
+        );
+      })()}
       {railOpen && (
         <span className="cgui-dock-rail inline-flex items-center gap-1 rounded-panel bg-black/5 px-1 py-0.5">
           {/* P2.3:分屏迁入坞 rail 首位(窗口级操作,与面板同属"工作区"语义)。 */}
           <span data-tour="dock-pane" className="inline-flex"><PaneCountPicker /></span>
           <span className="w-px h-4 bg-ink-ghost/30 mx-0.5" />
-          {Object.entries(PANEL_MAP).map(([id, { icon: Icon, label }]) => (
+          {/* R44:「进程」不再进 rail(入口移到「设置 → 高级 → 进程管理 / 停止」,同一组件内嵌)。
+              PANEL_MAP 条目保留 → Cmd/Ctrl+7 直达、手机菜单、面板本体身份全不变,只是坞里少一枚按钮。 */}
+          {Object.entries(PANEL_MAP).filter(([id]) => id !== 'term' && id !== 'processes').map(([id, { icon: Icon, label }]) => (
             <button key={id} data-cgui={id === 'settings' ? 'settings-btn' : undefined} data-tour={`panel-${id}`} onClick={() => setRightPanel(rightPanel === id ? null : id)}
               className={`px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${rightPanel === id ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'}`}
               title={label}>
@@ -1051,12 +1143,13 @@ function PanelDock({ rightPanel, setRightPanel, updateNotice, jumpToUpdate, atte
       <button
         data-testid="panel-dock-toggle"
         onClick={() => setRailOpen((v) => !v)}
-        title={`设置${activeMeta ? ` — 当前:${activeMeta.label}` : ''}（分屏 + 文件 / 审查 / 监控 / Agent / 用量 / 进程 / 工具 / 技能 / 指令 / 生图 / 市场 / 通用。Cmd/Ctrl+1..9、0 直达）`}
+        title={`设置${activeMeta ? ` — 当前:${activeMeta.label}` : ''}（分屏 + 文件 / 审查 / 监控 / Agent / 用量 / 工具 / 技能 / 指令 / 生图 / 市场 / 通用。Cmd/Ctrl+1..9、0 直达；进程管理在 设置 → 高级）`}
         className={`relative px-1.5 py-1 rounded-lg transition-all flex flex-col items-center gap-0.5 ${
           railOpen || activeMeta ? 'bg-accent-subtle text-accent' : 'text-ink-muted hover:text-ink hover:bg-black/5'
         }`}
       >
         <DockIcon size={15} />
+        {/* 终端面板打开时也不显示「终端」字样(顶栏已有常驻终端按钮,避免同名双匹配),回落显示「设置」 */}
         <span className="text-[9px] leading-none font-body">{activeMeta ? PANEL_SHORT[rightPanel] : '设置'}</span>
         {updateNotice && (
           <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" title="有可用更新" />
@@ -1204,7 +1297,9 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
 // keydown(Delete)与 UI 关闭按钮两处共用,避免逻辑漂移。
 async function closePaneGuarded(i) {
   const st = useStore.getState();
-  if ((st.paneCount || 1) <= 1) return;
+  // 单窗格也允许"关闭此窗格" = 把本格清空回到新建会话态(closePane 的单窗格分支),
+  // 所以这里不再早退;只是关掉后不会剩下别的窗格而已。
+  const solo = (st.paneCount || 1) <= 1;
   const sess = st.paneSessions?.[i];
   const busy = sess && ((sess.projectPath && st.runningCwds?.has(sess.projectPath))
     || st.pendingPermissions.some((p) => p.sessionId === sess.sessionId));
@@ -1216,13 +1311,14 @@ async function closePaneGuarded(i) {
   // 确认期间别处可能关了窗格使 index 左移 → 按稳定 paneId 重新定位再关,避免关错窗格(判官指双击竞态)。
   const st2 = useStore.getState();
   const idx = paneId != null ? (st2.paneIds || []).indexOf(paneId) : i;
-  if (idx >= 0 && (st2.paneCount || 1) > 1) st2.closePane(idx);
+  if (idx >= 0 && (solo || (st2.paneCount || 1) > 1)) st2.closePane(idx);
 }
 
 function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   const paneCount = useStore((s) => s.paneCount);
   const paneSessions = useStore((s) => s.paneSessions);
   const paneIds = useStore((s) => s.paneIds);
+  const paneGenerations = useStore((s) => s.paneGenerations);
   const artifactDock = useStore((s) => s.artifactDock);
   const rowRef = useRef(null);
   const MIN_PANE_PX = 280;
@@ -1310,10 +1406,19 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
         // draft→real sessionId transition (unlike keying by sessionId), so a
         // brand-new session's in-progress stream isn't remounted away.
         const paneKey = (paneIds && paneIds[i]) ?? `pane-${i}`;
+        // R13 窗格身份(公开、非秘密,供黑盒/辅助功能观测):
+        //   data-pane-id   稳定窗格标识(关窗格时随 paneSessions 同步 splice,不错位)
+        //   data-owner-key draft 身份(queueKeyFor:draft-<hash>-<draftId>)或母 sessionId
+        //   data-generation 该 owner 的本轮绑定代际(draft→真 sid 升级保持不变)
+        const paneOwnerKey = paneSession ? queueKeyFor(paneSession) : null;
+        const paneGeneration = (paneGenerations && paneGenerations[i]) || null;
         return (
           <React.Fragment key={paneKey}>
             <div
               data-testid="pane"
+              data-pane-id={paneKey}
+              data-owner-key={paneOwnerKey || undefined}
+              data-generation={paneGeneration || undefined}
               onMouseDown={!soloPane ? () => setActiveTabIndex(i) : undefined}
               style={soloPane
                 // 唯一窗格:填满,无需固定宽
@@ -2132,6 +2237,7 @@ function HomeState({ tabIndex = 0 }) {
           <textarea
             ref={homeInputRef}
             data-cgui="home-input"
+            data-testid="home-input"
             value={text}
             onChange={onHomeTextChange}
             onKeyDown={onHomeKeyDown}
@@ -2157,6 +2263,10 @@ function HomeState({ tabIndex = 0 }) {
             rows={3}
             autoFocus
             placeholder={project ? '输入消息，开始一个新会话…' : '先选择一个项目'}
+            // 可访问名显式写全:Home 的输入框和会话内输入框是同一套能力(斜杠命令、
+            // @文件、附件、Enter 发送),只说 "/ 打开命令" 这句提示——读屏/自动化按名字
+            // 定位输入框时(与会话内同款名字)才找得到它。可见 placeholder 不动。
+            aria-label={project ? '输入消息，开始一个新会话… (/ 打开命令)' : '先选择一个项目'}
             className="w-full bg-transparent px-3.5 pt-3 pb-1 text-[14px] text-ink font-body resize-none focus:outline-none placeholder-ink-ghost"
           />
           <div className="flex items-center gap-2 px-2 pb-2">
@@ -2840,6 +2950,53 @@ function DenialNotice({ denial }) {
   );
 }
 
+// R10:CLI 的后台任务通知(harness 喂给模型的 <task-notification> 信封,task-id/status/
+// summary)。它在转写里有两种落盘形态(普通 user 记录 / attachment queued_command),两种都
+// **不是用户说的话** —— 旧行为一条被整条吞掉、另一条冒充"你 / 已并入"的气泡。这里统一渲染成
+// 一行系统提示、给 data-message-id 便于对账,但不给回滚/分叉入口(它不是对话的一轮)。来源
+// 不可确认时(见 session-reader 的 classifyTaskNotification)明确标出来,而不是把用户内容静默丢掉。
+// R45:呈现改成与 skill 调用横幅(SkillCard)**同构**的两侧分隔线 + 居中标题,并**默认收起**
+// —— 每来一条通知就铺一整块信封原文太占版面。收起态保留两行:标题(身份)+ 状态摘要(死活)。
+// 点击展开看信封原文,一个字不删。折叠态用本地 useState,与 SkillCard 行为一致:切走会话再
+// 回来是重新挂载 → 回到收起(不做持久化记忆)。
+function TaskNoticeRow({ notice }) {
+  const [expanded, setExpanded] = useState(false);
+  // 收起态的一行摘要:取信封自报的 <summary>(真机形态见 tests/unit/check-reader-task-notification.mjs
+  // 的夹具),压成单行;缺失就只留状态,不编造文案。
+  const summary = (notice.text || '').match(/<summary>\s*([\s\S]*?)\s*<\/summary>/)?.[1].replace(/\s+/g, ' ').trim() || '';
+  const statusText = [notice.status, summary].filter(Boolean).join(' · ');
+  return (
+    <div data-cgui="task-notice" data-testid="task-notice" data-message-id={notice.uuid || undefined}
+      className="max-w-[var(--content-max)] mx-auto px-4 py-1.5">
+      {/* 居中横幅:两侧分隔线 + 标题 + 状态小字,与 SkillCard 同款结构。点击切换展开 */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-3 py-1.5 text-left cursor-pointer"
+        title={expanded ? '收起后台任务通知详情' : '展开后台任务通知详情'}
+      >
+        <span className="flex-1 h-px bg-canvas-deep/70" />
+        <span className="flex flex-col items-center min-w-0 max-w-[70%] px-1">
+          <span className="text-[12px] font-semibold font-body leading-tight truncate max-w-full text-ink-muted flex items-center gap-1.5">
+            <Shield size={11} className="shrink-0 text-ink-faint" />
+            后台任务通知
+            {notice.confirmed === false && <span className="text-amber-600">来源未确认</span>}
+          </span>
+          <span className="text-[10.5px] text-ink-faint font-body mt-0.5 flex items-center gap-1.5 min-w-0 max-w-full">
+            {expanded ? <ChevronDown size={10} className="shrink-0" /> : <ChevronRight size={10} className="shrink-0" />}
+            <span className="truncate">{statusText || '查看详情'}</span>
+          </span>
+        </span>
+        <span className="flex-1 h-px bg-canvas-deep/70" />
+      </button>
+      {expanded && (
+        <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-in">
+          <pre className="px-3 py-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-ink-muted bg-canvas-warm/40">{notice.text}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // r49b②:CLI init 自报的生效档位与本会话请求档不一致时的提示行(服务端对账后经
 // { type:'system', subtype:'mode_mismatch' } 送来)。客观陈述两侧档位,并给一键改用——
 // 不猜"哪些模型支持自动档"(名单会变),CLI 回报什么就说什么。
@@ -2893,12 +3050,18 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
         ? <CompactDivider />
         : msg.type === 'goal'
         ? null
+        : msg.type === 'task-notice'
+        ? <TaskNoticeRow notice={msg} />
         : msg.type === 'denial'
         ? <DenialNotice denial={msg} />
         : msg.type === 'turn'
         ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} onFork={onFork} retryActive={retryActiveUuid === msg.uuid} />
         : <MessageBubble message={{ ...msg, role: msg.type }}
-            onRollback={msg.type === 'user' && !msg.steered ? onRollback : undefined}
+            // R36:并入消息也能回退 —— 折叠形态在磁盘上是一条 attachment{queued_command}
+            // 记录,它自带 uuid,trim 按任意记录 uuid 定位(真机核对:preview 报
+            // compatible、切点就是这条记录本身),效果与普通人工消息逐字一致。
+            // 分叉仍旧不开(它按"真·用户提问"找回合边界,attachment 不是提问)。
+            onRollback={msg.type === 'user' ? onRollback : undefined}
             onFork={msg.type === 'user' && !msg.steered ? onFork : undefined} />}
     </div>
   ));
@@ -3124,7 +3287,7 @@ function RepairCompatModal({ sessionId, projectHash, onClose, onHint, onCleaned,
     let dead = false;
     (async () => {
       try {
-        const r = await fetch(`/api/sessions/${sessionId}/repair-official-compat`);
+        const r = await fetch(`/api/sessions/${sessionId}/repair-official-compat${projectHash ? `?projectHash=${encodeURIComponent(projectHash)}` : ''}`);
         const d = await r.json().catch(() => ({}));
         if (dead) return;
         const out = classifyCheckOutcome(r.status, d);
@@ -3141,9 +3304,11 @@ function RepairCompatModal({ sessionId, projectHash, onClose, onHint, onCleaned,
     setRepair({ phase: 'running' });
     let out;
     try {
-      const r = await fetch(`/api/sessions/${sessionId}/repair-official-compat`, { method: 'POST' });
-      const d = await r.json().catch(() => ({}));
-      out = classifyRepairOutcome(r.status, d);
+      // R25:清理同样走两步流(预览算具体兼容变换,提交才落盘)。
+      const res = await runHistoryOp(sessionId, 'repair-official-compat', { projectHash: projectHash || '' });
+      out = res.ok
+        ? classifyRepairOutcome(200, res.data)
+        : classifyRepairOutcome(res.status, { error: res.error, code: res.code });
     } catch (e) {
       out = { kind: 'error', text: `清理失败：${e.message}` };
     }
@@ -3221,6 +3386,64 @@ function RepairCompatModal({ sessionId, projectHash, onClose, onHint, onCleaned,
 // 分屏数变化等)导致父组件重渲染时,同 props 直接跳过,不再 reconcile 这棵巨大的消息树
 // (重会话可达 2 万+ DOM 节点)——这是"点功能按钮卡、分屏更卡"的根因。组件内部 useStore
 // 订阅的数据变化仍会正常重渲染,不影响功能。
+// R24:把当前窗格「最近一次 API 调用」的缓存口径上报给全局顶栏(空渲染,只负责 publish)。
+// 做成独立子组件的原因:SessionDetail 在早返回之后不能再加 hook(会 "Rendered fewer hooks")。
+function TurnCachePublisher({ sessionId, cache }) {
+  const { hitPct, total, read, creation, input } = cache || {};
+  useEffect(() => {
+    publishTurnCache(sessionId ? { sessionId, hitPct, total, read, creation, input } : null);
+  }, [sessionId, hitPct, total, read, creation, input]);
+  return null;
+}
+
+// 顶栏上的「最近API命中率」:只在快照确实属于当前焦点会话时显示,切窗格不串数。
+function TopbarHitRate({ sessionId }) {
+  const [snap, setSnap] = useState(readTurnCache());
+  useEffect(() => subscribeTurnCache(() => setSnap(readTurnCache())), []);
+  if (!sessionId || !snap || snap.sessionId !== sessionId) return null;
+  return (
+    <span className="text-[10px] text-ink-muted font-mono shrink-0 whitespace-nowrap"
+      title="最近API命中率 = 最近一次 API 调用的 cache_read /（cache_read + cache_creation + input）；整轮口径见每条回复末尾，会话累计见用量面板">
+      最近API命中率 {formatHitPctOrDash(snap.hitPct, snap.total)}
+    </span>
+  );
+}
+
+// ── 本地副本「已被落盘接管」判据 ──────────────────────────────────────────
+// 对账(把已在 jsonl 里的条目对应的本地副本清掉,防同一回合画两遍)原来用
+// 【类型 + 前 80 字符】当身份。同一段前缀的旧消息会把刚发出的用户气泡误判成"已落盘"
+// 整条清掉,而历史那份此刻还被流式截断挡着 —— 卡片凭空消失。真机实测(0.2.378,隔离
+// 实例,本地 TCP 代理真断流):同一模板提示词连发两轮,断线恢复后气泡缺席 17.6s,直到
+// 回合结束才以真实 uuid 回来;把标记挪到提示词开头(前 80 字符全局唯一)则全程可见。
+// 用户消息因此改用强口径:类型 +【全文】+【落盘时间不早于本地发送时刻】。
+//   · 全文:本地气泡的 text 就是发出去的 prompt,落盘记录逐字相同;
+//   · 时间:同机时钟,CLI 在 POST 之后才写盘,本回合那条的 timestamp 必然 ≥ 本地发送时刻;
+//          再发一条一模一样的短消息(连发两条"继续")时,旧副本的时间早于新气泡 → 不误判。
+// 其余类型沿用弱口径:回合正文是流式累积文本,与最终 jsonl 常有细微差异,只有弱口径能命中
+// (命中后由调用点的 lastUser 闸门兜底防双渲染)。
+const msgTextOf = (m) => (Array.isArray(m?.text) ? m.text.join('') : (m?.text || ''));
+function makePersistedIndex(persisted) {
+  const weak = new Set();
+  const userLatest = new Map();
+  for (const m of persisted || []) {
+    const text = msgTextOf(m);
+    weak.add(`${m?.type}|${text.slice(0, 80)}`);
+    if (m?.type === 'user') {
+      const ts = Date.parse(m?.timestamp);
+      if (Number.isFinite(ts) && !(userLatest.get(text) >= ts)) userLatest.set(text, ts);
+    }
+  }
+  return {
+    has(m) {
+      const text = msgTextOf(m);
+      if (m?.type !== 'user') return weak.has(`${m?.type}|${text.slice(0, 80)}`);
+      const latest = userLatest.get(text);
+      const ts = Date.parse(m?.timestamp);
+      return latest !== undefined && Number.isFinite(ts) && latest >= ts;
+    },
+  };
+}
+
 const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // Split-mode tab routing: when tabIndex===1 we render the SECOND pane and
   // read from secondary{Session,Messages} + write back via setSecondarySession
@@ -3238,6 +3461,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const paneMessagesSid = useStore((s) => s.paneMessagesSid);
   const selectedSession = (paneSessions && paneSessions[tabIndex]) || null;
   const paneId = useStore((s) => s.paneIds?.[tabIndex] || `pane-${tabIndex}`);
+  // R13:本窗格当前 owner 绑定代际 —— 与窗格根上的 data-generation 同源,发布在流动内容
+  // 容器上(合同:窗格给 pane-id/owner-key,流动内容容器给 generation/run-id)。
+  const paneGeneration = useStore((s) => s.paneGenerations?.[tabIndex] || null);
   // 空窗格时 paneMessages[tabIndex] 为 undefined,`|| []` 每次渲染造新数组 → 进下方多个
   // useMemo/useEffect deps 致每帧重跑。复用模块级冻结空数组保持引用稳定。
   // 串扰窗口1守卫(主诉根因):切会话只换 paneSessions,paneMessages 要等 fetch 异步
@@ -3320,6 +3546,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const onKey = (e) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
         e.preventDefault();
+        // 搜索期暂停挂载裁剪 = 全量挂载(视口上方会补回一大批行)→ 先记下变化前的高度。
+        captureMountBeforeRef.current?.();
         setSearchOpen(true);
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey && !e.altKey) {
         // 分屏下选中窗格按 Delete/Backspace = 从分屏移除该窗格(closePane 只隐藏窗格,绝不删会话/
@@ -3338,7 +3566,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     };
     // 审计批C1:手机无 Cmd+F,MobileMenu「会话内检索」行派发此事件;仅活动窗格响应
     // (与 Cmd+F 同门控),桌面不受影响。
-    const onOpenSearch = () => setSearchOpen(true);
+    const onOpenSearch = () => { captureMountBeforeRef.current?.(); setSearchOpen(true); };
     window.addEventListener('keydown', onKey);
     window.addEventListener('cgui:open-search', onOpenSearch);
     return () => {
@@ -3473,6 +3701,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   }, [selectedSession?.sessionId, messages, pinnedModel, context1mFlag, resolvedModelBase, currentProvider]);
   const modelBySession = useStore((s) => s.modelBySession);
   const containerRef = useRef(null);
+  // 渐进挂载:挂载集合变化(向上补齐 / 搜索期开关 / 跳转)**之前**读一次 scrollHeight。
+  // ref 化是为了让更早注册的 effect(会话内检索的 Cmd+F / cgui:open-search 监听)也能调用它。
+  const mountCompRef = useRef(null);
+  const captureMountBeforeRef = useRef(() => {});
   const [autoScroll, setAutoScroll] = useState(true);
   // AZ3:用户是否主动滚离底部(自动吸底的权威闸门)。原本吸底只看几何阈值 → 流式
   // 内容增长 + setAutoScroll 异步,导致"刚上滚就被弹回 + 边界抖动闪烁"。改用 ref
@@ -3513,7 +3745,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const [streamingText, setStreamingText] = useState('');
   const [streamingThinking, setStreamingThinking] = useState('');
   const [streamingModel, setStreamingModel] = useState(null);
+  // R13:本窗格正在消费的服务端运行身份(每帧都带 runId;SSE id 行是 `runId:seq`)。
+  // 发布在流动内容容器的 data-run-id 上,切走/收尾即清 —— 只描述"这一格现在看的是哪次运行"。
+  const [streamRunId, setStreamRunId] = useState(null);
+  // R13 连接状态提示(只描述本窗格这条流的链路,不是错误):
+  //   'interrupted' 传输掉线(无 detached 通知的掐断)→「连接中断，正在恢复」
+  //   'gap'         服务端明确回 stream_gap(超出保留窗)→「实时记录已截断，正在恢复历史」
+  //   'takeover'    服务端回 detached(同一运行已在别处被接管)→「此运行已在另一处查看」
+  // 该提示只陈述事实,不做任何自动夺回/自动重发。
+  const [streamConnNotice, setStreamConnNotice] = useState(null);
   const [streamingToolCalls, setStreamingToolCalls] = useState([]);
+  // 直播补齐(2026-09-13):子代理完成时服务端随事件推来的金额条目(SSE 的 subagent_usage
+  // 分支与 WS 兜底各自 push 进 store)。拼成本回合的 subUsage 形状喂给直播回合字面量 —— 直播
+  // 回合是本地副本,'uuid' 以 streaming/chat- 开头,历史上永远拿不到 subUsage,于是卡片
+  // 上一个元素都不画,要等回合结束的历史刷新才有金额(用户实报)。渲染层一个字不用改。
+  // 必须 memo:每次渲染新对象会打穿 TurnBubble 的 useMemo(流式期间每个 token 重算一遍
+  // 子代理计价索引 = 历史上卡顿的老路)。store 引用只在"有子代理完成"时变。
+  const liveSubUsageMap = useStore((s) => s.liveSubUsage);
+  const liveSubUsageTurn = useMemo(() => liveSubUsageAgents(liveSubUsageMap), [liveSubUsageMap]);
   // Ordered blocks for in-order rendering (text → tool → text → tool → write).
   const [streamingBlocks, setStreamingBlocks] = useState([]);
   // CJ-4:本回合发起时间戳,驱动流式/connecting 的实时耗时计数(ElapsedTime)。
@@ -3545,8 +3794,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // BF-1:流式期间的历史截断点。CLI 边流边写 jsonl,流式中途任何历史重拉(侧栏 handleSelect
   // 切走切回 / 刷新后 rehydrate+reattach / 搜索跳转)都会把本回合的【半成品】拉进 messages,
   // 与流式气泡同屏 → 同一回合渲染两遍(用户截图:上块 jsonl 半成品带 usage,下块 Writing… 流式)。
-  // 现有 tkey 去重只清 chatMessages,管不到 messages 侧。据此在渲染层把历史截断到本回合起点之前:
-  //   { sinceTs }        正常发送:丢弃 timestamp ≥ 流起点的历史条目(本地已有用户气泡副本)
+  // 既有的本地副本去重只清 chatMessages,管不到 messages 侧。据此在渲染层把历史截断到本回合起点之前:
+  //   { sinceTs }        正常发送:丢弃 timestamp ≥ 流起点的历史条目(本地已有用户气泡副本;
+  //                      用户消息那一类按 makePersistedIndex 的孪生判据单独放行,见 visibleMessages)
   //   { afterLastUser }  仅剩历史分支保留(reattach 已改为 null,见 resolveStreamHistCutoff)。
   // finalize 提交整轮落盘 + 清空本地副本时同步清空,历史交还 jsonl。
   const [streamHistCutoff, setStreamHistCutoff] = useState(null);
@@ -3568,6 +3818,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const setPendingEditRollback = useCallback((v) => { pendingEditRef.current = v; setPendingEditRollbackState(v); }, []);
   const handleRollbackRef = useRef(null);
   const activeProcRef = useRef(null);
+  // R13:本 pane 最近一次认领的 pid 及其期望 owner(sid,或 draft 期的原始 draftId ——
+  // 服务端 slot.draftId 就是它,不是 draft-<hash>-<id> 那种客户端队列键)。停止时只在
+  // pid 仍对得上时把它当身份发给 /stop,见 handleStop。
+  const activeProcOwnerRef = useRef(null);
   // 每次真正进入发送/reattach 起流前同步递增。旧 finally 的异步轮询只认自己的 token，
   // 不再等 /api/chat 返回 pid 才判断新回合是否已经开始。
   const streamTurnTokenRef = useRef(0);
@@ -3649,9 +3903,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // v0.2.192 泛化:凡带 ownerKey 的本地条目(btw 旁问、AbortError 半截回复、error turn)
   // 一律按归属门控——属于当前会话就显示、不属于就藏,与 liveVisible(流归属)解耦。
   // 无 ownerKey 的条目(流式 turn/user 回显/compact)维持 liveVisible 门控。
+  // 判定在 utils/sessionFlowIdentity.js(纯函数,单测锁"迟到事件不得命中别的会话")。
   const visibleChat = useMemo(() => chatMessages.filter(
-    (m) => (m.ownerKey ? m.ownerKey === sessionQueueKey : liveVisible)
-  ), [chatMessages, sessionQueueKey, liveVisible]);
+    (m) => localEntryVisible({ ownerKey: m.ownerKey, streamOwnerKey, sessionQueueKey })
+  ), [chatMessages, sessionQueueKey, streamOwnerKey]);
 
   // Latest TodoWrite snapshot for the composer's checklist panel. TodoWrite
   // calls REPLACE the full list each time, so the newest call wins. Search
@@ -3753,12 +4008,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       setChatMessages((prev) => {
         if (!prev.length) return prev;
         const persisted = getLocalMessages();
-        // text may be a string (user msg) or array of strings (assistant turn).
-        const tkey = (m) => {
-          const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
-          return `${m.type}|${(t || '').slice(0, 80)}`;
-        };
-        const known = new Set(persisted.map(tkey));
+        // 身份判据见模块级 makePersistedIndex(用户消息走全文+落盘时间强口径)。
+        const known = makePersistedIndex(persisted);
         // If this round's user prompt is already persisted, the whole round
         // landed in jsonl — drop ALL local copies even when the assistant text
         // didn't byte-match (streaming-accumulated vs final jsonl can differ).
@@ -3767,9 +4018,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 保留旁问气泡(btw 无 jsonl 孪生)、自动拒绝提示(denial 同样只活在本地,见
         // 下方 localOnly)与未落盘的停止半截回复(interrupted:停止场景
         // "末条用户消息已落盘"≠"整轮落盘",半截 assistant 可能没写进 jsonl,整清=丢内容;
-        // 已落盘的(tkey 命中)照清防双渲染)。审计#7。
-        if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || (m.interrupted && !known.has(tkey(m))));
-        return prev.filter((m) => !known.has(tkey(m)));
+        // 已落盘的(命中)照清防双渲染)。审计#7。
+        if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || (m.interrupted && !known.has(m)));
+        return prev.filter((m) => !known.has(m));
       });
     };
     // WS 重连成功 → 断线期间本会话的 file-change 可能已丢,合成一个命中自己 sid 的
@@ -3790,20 +4041,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // break(getLocalSession 不再等于 finalizeSid),setChatMessages([]) 被跳过 → messages 与
   // chatMessages 同时含该回合 → 渲染两遍。上面那条 reconcile 只在"文件事件命中当前会话"时触发,
   // 切走切回会漏;这条以 messages 为依赖,覆盖所有提交路径。流式中(本会话)跳过——此时流式
-  // 缓冲才是真相源。判定复用同一套 tkey:整轮(末条用户消息)已落盘 → 清空全部本地副本。
+  // 缓冲才是真相源。判定复用同一套身份口径(makePersistedIndex):整轮(末条用户消息)已落盘 → 清空全部本地副本。
   useEffect(() => {
     if (streamingRef.current && streamOwnerKeyRef.current === sessionQueueKey) return;
     setChatMessages((prev) => {
       if (!prev.length) return prev;
-      const tkey = (m) => {
-        const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
-        return `${m.type}|${(t || '').slice(0, 80)}`;
-      };
-      const known = new Set(messages.map(tkey));
+      // 身份判据见模块级 makePersistedIndex(用户消息走全文+落盘时间强口径)。
+      const known = makePersistedIndex(messages);
       const lastUser = [...prev].reverse().find((m) => m.type === 'user');
       // 保留 btw / denial 与未落盘的停止半截回复(同上面 reconcile,审计#7)。
-      if (lastUser && known.has(tkey(lastUser))) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || (m.interrupted && !known.has(tkey(m))));
-      const next = prev.filter((m) => !known.has(tkey(m)));
+      if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || (m.interrupted && !known.has(m)));
+      const next = prev.filter((m) => !known.has(m));
       return next.length === prev.length ? prev : next;
     });
   }, [messages, sessionQueueKey]);
@@ -3825,13 +4073,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     // 正常发送:jsonl 里本回合所有条目(含用户消息回显)时间戳都晚于客户端发送时刻
     // (同机时钟,CLI 在 POST 之后才写盘)。无时间戳的条目一律保留,绝不误杀。
-    // r68 keepUser:种回(切走再切回)时本地的用户气泡早被切会话 effect 清了,历史是它
-    // 唯一的来源 —— 截掉就等于"我发的那句话不见了"。只对种回的快照口径开(普通发送的
-    // cutoff 不带这个标记),所以本地气泡还在的场景不会双显,行为与今天的 reattach 一致。
+    // 用户消息例外(合二为一的判据):它有两个可渲染来源 —— 本地乐观气泡与历史回显,
+    // 截断的用意只是"本地那份已经在画了,历史别再画一遍"。所以【本地已无同文本气泡】时
+    // 历史必须接棒,否则两个来源同时缺席,卡片就凭空消失。两条路径共用这一条:
+    //   · r68 种回(切走再切回):本地的用户气泡早被切会话 effect 清了 —— 历史是唯一来源,
+    //     截掉就等于"我发的那句话不见了"(原 keepUser 的来由);
+    //   · R37 真断线:对账把本地气泡清掉(它已被历史接管),此后历史必须顶上 —— 原来的
+    //     无条件截断让它跟着一起消失(实测缺席 17.6s,直到回合结束才以真实 uuid 回来)。
+    // 有本地孪生就维持隐藏,不双显(否则种回时本地气泡+历史回显画成两条)。
+    // 只对 type==='user' 开:turn 的流式正文根本不是本地气泡画的(streamingBlocks 独立渲染),
+    // 放开会把 jsonl 里的半成品 turn 放出来和流式气泡双画(BF-1 修的正是这个)。
+    const localUserTexts = new Set(visibleChat.filter((m) => m?.type === 'user').map(msgTextOf));
     const next = messages.filter((m) => !m?.timestamp || Date.parse(m.timestamp) < cut.sinceTs
-      || (cut.keepUser && m.type === 'user'));
+      || (m.type === 'user' && !localUserTexts.has(msgTextOf(m))));
     return next.length === messages.length ? messages : next;
-  }, [messages, streamHistCutoff, streamOwnerKey, sessionQueueKey]);
+  }, [messages, streamHistCutoff, streamOwnerKey, sessionQueueKey, visibleChat]);
 
   // Detect "this session has a background CLI proc still running" — happens
   // when the user navigated away while it was streaming. We poll the active-
@@ -4072,6 +4328,116 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (hasContent) setRetryActiveUuid(null);
   }, [retryActiveUuid, streamingText, streamingThinking, streamingToolCalls, streamingBlocks]);
 
+  // ── 渐进挂载(W-C):默认只挂最近 K 行,向上滚到顶再补一批 ──────────────────────
+  // 未挂载的行**不进 DOM、也不进几何**(没有占位高度、没有估算)—— 已挂部分 100% 真实,
+  // 所以吸底/回到底部/away 判据/宽度比例搬迁/进度条刻度那几处读 scrollHeight/offsetTop 的
+  // 机制语义不变(见 utils/mountWindow.js 抬头与 INTERFACE §H.5)。
+  const [mountFrom, setMountFrom] = useState(null);   // null = 跟随默认窗(最近 K 行)
+  // 搜索打开时暂停裁剪(用户已拍板):全历史可搜,语义与今天一致;关闭即恢复。
+  const mountWindowEnabled = !searchOpen;
+  const mountBaseFrom = useMemo(
+    () => initialSpan(finalizedMessages.length, MOUNT_WINDOW_K).from,
+    [finalizedMessages.length],
+  );
+  const mountFromResolved = mountWindowEnabled
+    ? (mountFrom == null ? mountBaseFrom : Math.max(0, Math.min(mountFrom, mountBaseFrom)))
+    : 0;
+  // 会话切换/换绑定 → 回到默认窗(与"恢复滚动位置"同一个 key:都是 per 会话的状态)。
+  useEffect(() => { setMountFrom(null); }, [scrollOwnerKey]);
+  // 被裁的是**定稿消息**这一块(①);visibleChat 的本地条目与流式气泡永不裁 ——
+  // 它们个数很少且是"当前正在发生的事"(INTERFACE §H.3)。
+  const mountedMessages = useMemo(() => {
+    if (mountFromResolved <= 0) return finalizedMessages;   // 不裁时返回原引用(不打穿 MessageList 的 memo)
+    return sliceRows(finalizedMessages, { from: mountFromResolved, to: finalizedMessages.length });
+  }, [finalizedMessages, mountFromResolved]);
+  // 挂载集合变化(补齐 / 搜索开关 / 跳转)会整批挂上或卸掉视口**上方**的行 —— 文档总高变了
+  // 而 scrollTop 不变,视野就被顶走。变化前记下"视口最上方那一行 + 行内偏移",变化后在同一
+  // 次 layout 提交里搬回原位:比按比例准,且不用任何高度估算。
+  const captureMountBefore = useCallback(() => {
+    const el = containerRef.current;
+    if (el) mountCompRef.current = { h: el.scrollHeight, top: el.scrollTop };
+  }, []);
+  captureMountBeforeRef.current = captureMountBefore;
+  // 窗口上沿因**消息增长**而右移时,被卸掉的那几行同样落在视口**上方** —— 与"补齐 / 搜索开关 /
+  // 跳远"是同一类几何变化,必须走同一套"变化前记几何、同一个 layout 提交里把位置搬回去"的补偿。
+  // 这条路径此前没有任何调用点:用户在读历史(userScrolledAwayRef)期间回合收官触发历史刷新、
+  // 新行落地 → `from`(= 总数 − K)跟着往前挪、顶上几行被静默卸载,而 scrollTop 既不钳也不补偿
+  // → 眼前那段内容整体跳上来(2026-09-13 修)。
+  // 判据写死两条:总行数长了 **且** 上沿往前挪了。`mountFrom === null` 时上沿就是 总数 − K,
+  // 每长一行就挪一行 —— 正是这条路径;补齐/跳远把 mountFrom 钉住时不适用(它们本来就有自己的
+  // capture)。读取放在 render:此刻 DOM 还没提交,读到的正是"变化前"几何。
+  // 补偿量**不能**沿用下面的 scrollHeight 差值:同一提交里下沿还会落地新行,那些行在视口
+  // **下方**、不影响眼前位置,差值口径会把它们一起算进去(实测:卸掉 4 行 ≈600px、同时底部
+  // 新增 ≈566px,差值只剩 −34px)。也**不预测**被卸掉那几行的总高 —— 实测那样仍有几十 px
+  // 残差(行距/占位/重叠都进了假设)。改成**锚定**:挑一行"变化后新首行"(第 k 行,一定还在
+  // DOM 里),记下它此刻的位置;提交后量它的实际位移,把视口搬回同样多。这是浏览器
+  // overflow-anchor 的做法,不依赖任何高度假设。原生锚定是**随引擎版本变化**的能力(2026-09-13
+  // 实测:Safari 26 代 WebKit 的 `CSS.supports('overflow-anchor','auto')` 已为 true,且卸载视口上方
+  // 内容时它自己会改 scrollTop;较老的 WKWebView 为 false),所以这条**不依赖任何"引擎认不认
+  // overflow-anchor"的前提** —— 它算的是绝对目标值,引擎已补好时目标就等于当前位置(下面的 <1px
+  // 早退直接返回),没补时才由我们写回。
+  const mountLenRef = useRef(finalizedMessages.length);
+  const mountFromRef = useRef(mountFromResolved);
+  const mountOwnerRef = useRef(scrollOwnerKey);
+  if (mountOwnerRef.current === scrollOwnerKey      // 切会话那一帧不许把上个会话的几何套过来
+    && userScrolledAwayRef.current
+    && finalizedMessages.length > mountLenRef.current
+    && mountFromResolved > mountFromRef.current
+    && !mountCompRef.current) {
+    const el = containerRef.current;
+    const k = mountFromResolved - mountFromRef.current;   // 顶上要被卸掉的行数
+    const anchor = el ? el.querySelectorAll('[data-turn-uuid]')[k] : null;
+    if (el && anchor) {
+      // 位置一律取**布局单位**(offsetTop):窗格可能带缩放(rect 是缩放后的视觉值),
+      // 而 scrollTop/scrollHeight 是布局单位 —— 混用会按缩放比把补偿写歪。
+      mountCompRef.current = { h: el.scrollHeight, top: el.scrollTop, node: anchor, nodeTop: anchor.offsetTop };
+    } else {
+      captureMountBefore();   // 拿不到锚(整窗被换掉等)→ 回落既有差值口径
+    }
+  }
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    const prev = mountCompRef.current;
+    mountCompRef.current = null;
+    if (!el || !prev) return;
+    // 挂载集合变化把内容整批加/销在视口**上方** → 同一个 layout 提交里把 scrollTop 推回同样的
+    // 差值,否则用户眼睛盯着的那一段被顶走(§H.5 / J13)。
+    // ⚠️ 目标必须用**变化前**的 scrollTop 算:DOM 一提交,浏览器就把它钳到新的 max 上了
+    // (整块卸载时那个值等于新底部),拿钳过的值再加负差值会算出 0 —— 整段跳到顶。
+    // 锚点分支(消息增长路径,见上方判据):锚行被内容位移带走多少,就按同量把 scrollTop 搬回来。
+    // 基准取**变化前**快照(prev.top,与下面那条差值口径同一个约定),**不取**提交后的 el.scrollTop:
+    // Chromium/WebView2 默认开着原生 scroll anchoring,它已在这次布局里按被卸高度把 scrollTop 改好,
+    // 再拿那个值当基准加一遍位移量 = 叠加,朝反方向多滚一整个被卸行高(Playwright 双引擎实测 300px)。
+    // 绝对口径的好处是**自我收敛**:原生锚定已补好时算出的目标正好等于当前位置 → 下面的 <1px 早退
+    // 直接返回(不写);WKWebView 没有原生锚定、scrollTop 原地不动时,算出的就是要写回去的位置。
+    // 同一个目标值两种引擎各自落到正确结果,所以这里不需要任何"引擎认不认 overflow-anchor"的能力
+    // 探测 —— 能力探测只说明引擎认识这个属性,不说明这个容器此刻锚定生效(同文件宽度补偿那条就是
+    // 靠探测的,别把两种判据混在一起)。
+    if (prev.node) {
+      if (!prev.node.isConnected) return;
+      const shift = prev.node.offsetTop - prev.nodeTop;      // 布局单位,与 scrollTop 同口径
+      if (Math.abs(shift) < 1) return;
+      const target = clampScrollTop({
+        scrollTop: prev.top + shift, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight,
+      });
+      if (Math.abs(target - el.scrollTop) >= 1) writeProgrammaticScroll(el, target, 'restore');
+      return;
+    }
+    const delta = el.scrollHeight - prev.h;
+    if (Math.abs(delta) < 1) return;
+    const target = clampScrollTop({
+      scrollTop: prev.top + delta, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight,
+    });
+    if (Math.abs(target - el.scrollTop) >= 1) writeProgrammaticScroll(el, target, 'restore');
+  }, [mountFromResolved, writeProgrammaticScroll]);
+  // 每次提交后记下 (会话, 总行数, 上沿),供下一次 render 判断"这次上沿为什么挪了"(见上方判据)。
+  // 无依赖数组 = 每次提交都跑,只写三个 ref,不读 DOM。
+  useLayoutEffect(() => {
+    mountOwnerRef.current = scrollOwnerKey;
+    mountLenRef.current = finalizedMessages.length;
+    mountFromRef.current = mountFromResolved;
+  });
+
   // Persist scroll position per session so refresh keeps the user where they
   // were (not at top, not at bottom — wherever they were reading).
   const scrollPersistKey = scrollOwnerKey ? `cgui-scroll-${scrollOwnerKey}` : null;
@@ -4079,6 +4445,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const handleScroll = () => {
     if (!containerRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+    // 渐进挂载:滚到顶(留一屏余量)就补齐一批更早的行。判据不依赖滚动事件去抖 ——
+    // 补齐是幂等的,重复触发只会把批次合并。放在最前面:后面的程序滚动早退分支会吞掉事件。
+    if (mountWindowEnabled && mountFromResolved > 0
+      && needsExtend({ scrollTop, padPx: clientHeight })) {
+      captureMountBefore();
+      setMountFrom(extendUp(mountFromResolved, MOUNT_WINDOW_K, finalizedMessages.length));
+    }
     const movedUp = shouldPauseAutoScroll({ previousTop: lastScrollTopRef.current, currentTop: scrollTop });
     const previousTop = lastScrollTopRef.current;
     const dynamicTarget = scrollTransactionRef.current?.kind === 'follow'
@@ -4149,9 +4522,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // #4 关右侧面板(监控/文件/…)后会话区空白、往上滑才找得回内容。
   // 关面板 = 本容器变宽 → 每条消息重新折行变矮 → 全文总高缩短。Blink/Gecko 有 scroll
   // anchoring 会自动补偿 scrollTop(实测 Chrome 开面板 3248→3549、关回来 3549→3248),
-  // 但 WKWebView(Tauri 的 webview)不实现 overflow-anchor —— scrollTop 原地不动、内容
-  // 整体位移几百像素,视口就可能正好停在两条消息之间的空白段,于是"看起来一片空白,
-  // 上滑就恢复"。这里自己补一次锚定:只在【宽度】变化时按比例把位置搬过去。
+  // 但这条路**不能按引擎名写死**:overflow-anchor 是随引擎版本变化的能力 —— 较老的
+  // WKWebView(Tauri 的 webview)不实现它,scrollTop 原地不动、内容整体位移几百像素,视口就
+  // 可能正好停在两条消息之间的空白段,于是"看起来一片空白,上滑就恢复";而 2026-09-13 实测
+  // Safari 26 代 WebKit 已经实现(探测为 true,且卸载视口上方内容时它自己会改 scrollTop)。
+  // 所以这条按**探测结果**走(见下方 nativeAnchor),不按"哪个引擎"猜。
+  // 这里自己补一次锚定:只在【宽度】变化时按比例把位置搬过去。
   // 高度变化(输入框长高/任务清单展开)一律不管 —— 那是既有吸底 effect 的职责,插手会打架。
   //
   // 必须走 callback ref 而不是 useEffect([]):SessionDetail 有 EmptyState / loading 两条
@@ -4162,8 +4538,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     containerRef.current = node;
     if (scrollRoRef.current) { scrollRoRef.current.disconnect(); scrollRoRef.current = null; }
     if (!node || typeof ResizeObserver === 'undefined') return;
-    // 有原生 scroll anchoring 的引擎(Blink / WebView2)已经把 scrollTop 精确补偿好了,
-    // 用我们的等比近似值去覆写只会更差。只有不支持 overflow-anchor 的 WKWebView 需要出手。
+    // 探测为真的引擎(Blink / WebView2,以及 2026-09-13 实测的 Safari 26 代 WebKit)已经把
+    // scrollTop 精确补偿好了,用我们的等比近似值去覆写只会更差;探测为假(返回 false/undefined
+    // 的老 WebKit)才由我们自己出手 —— 这能力随版本变,**别把"哪个引擎"写死成前提**。
+    // 另外:探测只说明引擎认识这个属性,不保证这个容器此刻锚定一定生效(上面挂载锚点补偿那条
+    // 正是为此不依赖探测,改走绝对基准 + 自我收敛);两种判据别混在一起。
     const nativeAnchor = typeof CSS !== 'undefined' && !!CSS.supports?.('overflow-anchor', 'auto');
     let lastWidth = node.clientWidth;
     const ro = new ResizeObserver(() => {
@@ -4306,9 +4685,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const response = await r.json().catch(() => null);
       if (r.ok && response?.ok === true && response?.accepted === true) {
         if (meta?.attachments?.length > 0) {
+          // R07:sidecar 按 messageId 索引 —— 并入提交的 uuid 就是 steerId(落盘后成为
+          // queued_command.source_uuid),历史回读按它精确对账。
           void persistAttachmentSidecar({
             sessionId,
-            payload: { text: body, attachments: meta.attachments, displayText: meta.displayText || '' },
+            payload: { messageId: steerId, text: body, attachments: meta.attachments, displayText: meta.displayText || '' },
           }).then(reportAttachmentSidecarResult);
         }
         return { outcome: 'accepted', pid: response.pid, duplicate: response.duplicate === true };
@@ -4557,7 +4938,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // L4:所有附件 sidecar 先进入持久 outbox，再尝试 POST。draft 先以会话 ownerKey
     // 记账，init 拿到真实 sid 后统一绑定；真实 session 发送也走同一条可靠链。
     if (meta?.attachments?.length > 0) {
-      const payload = { text: prompt, attachments: meta.attachments, displayText: meta.displayText || '' };
+      // R07:messageId 用本条人工消息的身份(此时是本地 uuid;CLI 落盘的 uuid 不同,
+      // 读回由旧 textHash 条目兜底)。并入路径的 uuid 与落盘一致,走身份索引。
+      const payload = { messageId: userMsgUuid, text: prompt, attachments: meta.attachments, displayText: meta.displayText || '' };
       const sid = selectedSession?.sessionId;
       void persistAttachmentSidecar({
         ownerKey: sid ? null : sessionQueueKey,
@@ -4618,22 +5001,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const currProv = useStore.getState().currentProvider?.providerHint || 'anthropic';
         if (hasAnyThinking && histProv && histProv !== currProv) {
           try {
-            const r = await fetch(`/api/sessions/${sid0}/strip-thinking`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ projectHash: selectedSession.projectHash }),
-            });
-            if (r.ok) {
-              const d = await r.json().catch(() => ({}));
+            const res = await runHistoryOp(sid0, 'strip-thinking', { projectHash: selectedSession.projectHash });
+            if (res.ok) {
               await fetchMessagesForTab(
                 sid0, selectedSession.projectHash, { silent: true },
               );
               // Only surface the banner when we actually stripped something —
               // otherwise the user sees "已剥离 0 条" which is misleading
               // (the call was an idempotent no-op against an already-clean file).
-              if (d.strippedBlocks > 0) {
+              const stripped = res.data?.report?.strippedBlocks || 0;
+              if (stripped > 0) {
                 setProviderSwitchNotice({
-                  text: `切换到 ${currProv}：已剥离 ${d.strippedBlocks} 条历史思考块（${histProv} 签名，新后端不认）。备份在 ${sid0.slice(0, 8)}…jsonl.bak`,
+                  text: `切换到 ${currProv}：已剥离 ${stripped} 条历史思考块（${histProv} 签名，新后端不认）。备份入口见右下角提示（在文件管理器中显示）`,
                 });
               }
             }
@@ -4660,6 +5039,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let accumulatedThinking = '';
     let currentToolCalls = [];
     let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
+    // 本回合是否已由 stream_event partial 路径填过 orderedBlocks。整条消息型 provider
+    // (不发 partial)要靠 assistant 快照按顺序补进 orderedBlocks —— 否则流式气泡只能走
+    // legacy 三件套(块序丢失),条带会在收官那一刻凭空出现并整块重排(口径 3 落空)。
+    // partial 模式下恒为真 ⇒ 快照一个块都不补,与改动前逐字一致。
+    let partialBlocksSeen = false;
     // r68:快照写在 finally(唯一收口,覆盖切会话/关窗格/WebView 掐断/转后台四种终止),
     // 而块索引表与收尾三态都声明在 try 内 —— 各镜像一个引用出来供 finally 读,原声明不动。
     let blocksMirror = null;          // = 下面 try 里的 blocks(SDK content block index → 本地块)
@@ -4670,7 +5054,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let streamClosedNoticed = false; // CG-2:子代理打穿 canUseTool 通道的兜底提示,每轮只提示一次
     const taskIdToToolUse = {};  // task_started 建立 task_id→tool_use_id 映射,供只带 task_id 的 task_updated 用
     let turnAborted = false;     // 用户主动停止(catch 到 AbortError)才 true;供 finally 区分"正常完成"(不收后台化子代理)与"停止"(收 stopped)
-    let resultUsage = null;      // result 事件携带的本轮 usage(CLI 聚合口径)
+    let resultUsage = null;      // result 事件解析出的本轮 usage(R33:整轮累计口径,modelUsage 优先)
     let resultCostUsd = null;    // result 事件携带的 total_cost_usd(CLI 权威成本)
     // R8-6:本回合 message_start 携带的实际模型 id(API 回包口径,与 modelUsage 的 key
     // 同源)。streamingModel 是 React state,本闭包里读到的是发起时的陈旧值,不能用。
@@ -4701,7 +5085,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // live tokens flow as if they never left.
         pid = reattachPid;
         activeProcRef.current = pid;
+        // R13:reattach 的 owner = 本 pane 当前会话(sid 优先;draft 期给原始 draftId)。
+        activeProcOwnerRef.current = { pid: String(pid), owner: selectedSession?.sessionId || selectedSession?.draftId || null };
         setLiveChatPid(String(pid)); // ⚡ 可用性:reattach 上的是既有活进程,可注入
+
       } else {
       if (!reattachPid) {
         try { await checkpointPromise; } catch {}
@@ -4761,11 +5148,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const chatCwd = (sid && selectedSession?.projectPath)
         ? selectedSession.projectPath
         : (selectedSession?.projectPath || selectedProject?.path);
+      // R13 回合身份:clientTurnId 在本次发送内恒定(不重试不换 id);serverEpoch 取缓存,
+      // 缓存空(首次发送 / 刚被判 TURN_SERVER_CHANGED)才现取一次。
+      const clientTurnId = opts.clientTurnId || newClientTurnId();
+      const turnEpoch = serverEpochCache || await fetchServerEpoch();
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt,
+          clientTurnId,
+          serverEpoch: turnEpoch || undefined,
           // Omit sessionId for a draft so the CLI creates a fresh session.
           sessionId: sid || undefined,
           // draft 流带 draftId(存进 server slot):init 前切走再切回时轮询按它找回
@@ -4794,12 +5187,29 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }),
       });
       const respJson = await res.json();
+      // R13 身份冲突(409):本条请求不属于当前服务实例/与既有回合参数不符/已过期 ——
+      // 一律【不自动重发】。先恢复该会话历史让用户看到真实状态,再让用户自己决定重发。
+      if (res.status === 409 && (respJson.code === 'TURN_CONFLICT' || respJson.code === 'TURN_SERVER_CHANGED' || respJson.code === 'TURN_EXPIRED')) {
+        if (respJson.code === 'TURN_SERVER_CHANGED') serverEpochCache = null; // 下次发送重取新实例身份
+        if (sid && selectedSession?.projectHash) {
+          try { await fetchMessagesForTab(sid, selectedSession.projectHash, { silent: true }); } catch {}
+        }
+        const hint = respJson.code === 'TURN_CONFLICT'
+          ? '这条发送与同一回合的既有请求不一致，未重发。'
+          : respJson.code === 'TURN_SERVER_CHANGED'
+            ? '服务已重启，这条发送属于上一个服务实例，未自动重发。'
+            : '这条发送已超过有效期，未当作新回合发送。';
+        throw new Error(`${hint}已恢复该会话历史，请确认后重新发送。`);
+      }
       // Surface server rejections (e.g. invalid project dir → 400) instead of
       // streaming a non-existent pid — that would hang forever as a stuck
       // "connecting" with no reply (the catch below renders the message).
       if (!res.ok || !respJson.pid) throw new Error(respJson.error || `发送失败 (${res.status})`);
       pid = respJson.pid;
       activeProcRef.current = pid;
+      // R13:本 pid 的期望身份 = 发起这条流的会话(sid 优先;draft 期是原始 draftId,
+      // 与服务端 slot.draftId 同口径)。停止时用它核对归属。
+      activeProcOwnerRef.current = { pid: String(pid), owner: sid || selectedSession?.draftId || null };
       setLiveChatPid(String(pid)); // ⚡ 可用性:slot 已建立,connecting 窗口到此结束
       setStreamingModel(respJson.model);
       }
@@ -4854,6 +5264,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 一直挂着,恢复之后还在报错。函数式更新避开闭包陈旧值。
       // 注意这里【不】清失败计数:计数在收到 done(本流真的跑完)时才清,见循环之后。
       setProviderSwitchNotice((n) => (n?.sticky ? null : n));
+      // R13:链路已接上,「连接中断/正在恢复」过时;takeover 是被明说的状态,不在这里清
+      // (它由下一次发送或切走复位)。
+      setStreamConnNotice((n) => (n === 'takeover' ? n : null));
       const reader = streamRes.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -4937,6 +5350,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 本流是否被服务端明确告知「已被新连接接管」(detached 事件)。以前靠"无 done 却
       // 正常结束"猜,而掐断 SSE 是同一形态 —— 猜错就把 reattach 闩死。现在只认服务端明说。
       let sawTakeover = false;
+      // R13:服务端明确回过 stream_gap(游标超出保留窗)= 实时记录已截断,不走普通
+      // 「空产出/掉线重连」判定,内容转历史恢复。
+      let sawGap = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -4956,6 +5372,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }
           let event;
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+          // R13:每帧都带本运行的 runId(SSE id 行是 `runId:seq`)。记下来发布到流动内容
+          // 容器的 data-run-id —— "这一格现在看的是哪次运行"。同值 setState 会被 React
+          // 短路,不产生每帧重渲。
+          if (typeof event.runId === 'string' && event.runId) setStreamRunId(event.runId);
 
           // r68:服务端明说 earlyLines 缓冲溢出丢过尾部(MAX_EARLY_LINES,离开极久时)⇒
           // 这次重放不完整。种回的正文会中段缺一块而客户端毫不知情 —— "悄悄丢字"比"空窗"
@@ -5354,12 +5775,29 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             if (Array.isArray(event.workflow_progress) && _wfa
                 && (!['done', 'error', 'stopped'].includes(_wfa.status) || _wfa.optimisticStop)) {
               _st.upsertAgent(event.tool_use_id, { wfProgress: event.workflow_progress, wfProgressAt: Date.now() });
+            } else if (Array.isArray(event.workflow_progress) && !_wfa) {
+              // 刷新/重开后正在跑的工作流:条目随内存没了(它只由 live 的 task_started 建),
+              // 这段空窗里的进度事件原来整批丢掉 → 卡片停在"状态未知"。带表的事件就是
+              // "工作流在跑"的证据(缺表的心跳分不清工作流/普通子代理,一律不建),
+              // 缺条目时补一条最小的(判据与 WS 那条路共用 utils/workflowEntry.js)。
+              const _fresh = rebuildWorkflowEntry({ toolUseId: event.tool_use_id, taskId: event.task_id || null, sessionId: streamOwnerSid() });
+              if (_fresh) _st.upsertAgent(event.tool_use_id, { ..._fresh, wfProgress: event.workflow_progress, wfProgressAt: Date.now() });
             }
           }
           if (event.type === 'system' && event.subtype === 'task_notification') {
             const tuid = event.tool_use_id || (event.task_id ? taskIdToToolUse[event.task_id] : null);
             // authoritative=true:权威终态,允许覆盖 taskManaged 的猜测性 stopped(停止链路 #1 UI 侧)。
             if (tuid) { const _st = useStore.getState(); if (_st.activeAgents[tuid]) finalizeAgent(_st, tuid, event.status, undefined, true); }
+          }
+          // 直播补齐(2026-09-13):子代理完成通知之后紧跟的一条伴随事件(见 chat.js 的
+          // queueLiveSubagentUsage)—— 服务端在完成那一刻定向读了它那一条转写,把金额
+          // 条目带过来。存进 store 后,还在进行中的直播回合的卡片立刻有金额,不必等回合
+          // 结束的历史刷新(用户需求原话:子代理的花费在其完成后自动显示)。
+          if (event.type === 'subagent_usage' && event.subagentUsage) {
+            useStore.getState().pushLiveSubUsage({
+              ...event.subagentUsage,
+              toolUseId: event.subagentUsage.toolUseId || event.tool_use_id || null,
+            });
           }
           if (event.type === 'system' && event.subtype === 'task_updated'
               && ['completed', 'failed', 'killed'].includes(event.patch?.status)) {
@@ -5470,6 +5908,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               setLiveContextUsage({ ...ev.usage, _ts: Date.now() });
             } else if (ev.type === 'content_block_start') {
               markSawOutput(); // r65:主回合有块开始(text/thinking/tool_use)= 已有产出,离开 Connecting
+              partialBlocksSeen = true; // 主回合的块已由 partial 路径接管(见 partialBlocksSeen 声明处)
               const cb = ev.content_block || {};
               if (cb.type === 'text') {
                 const orderIdx = orderedBlocks.length;
@@ -5598,27 +6037,42 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             }
             // r65:非 partial 的第三方(mimo 等)不发 delta,整条 assistant 快照即其全部产出;据此置位。
             markSawOutput();
+            // 整条消息型 provider:把这一条快照**按到达顺序**也写进 orderedBlocks,让流式气泡
+            // 与收官后那条持久化轮结构一致(条带一开始就在、段序/工具卡不搬家 —— 口径 3 的
+            // "不重排")。partial 模式下 partialBlocksSeen 为真 ⇒ 一个块都不补(快照退化为
+            // 原来的 backfill 角色,行为与改动前一致)。
+            const snapshotBuildsBlocks = !partialBlocksSeen;
+            const snapshotBlocks = [];
             for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
               if (block.type === 'text') {
                 // Only replace if we haven't been streaming this block already.
-                if (!accumulatedText) {
-                  accumulatedText = block.text;
+                if (!accumulatedText || snapshotBuildsBlocks) {
+                  accumulatedText = accumulatedText ? `${accumulatedText}\n${block.text}` : block.text;
                   setStreamingText(accumulatedText);
                 }
+                if (snapshotBuildsBlocks && block.text) snapshotBlocks.push({ type: 'text', content: block.text });
               }
               if (block.type === 'thinking') {
-                if (!accumulatedThinking) {
-                  accumulatedThinking = block.thinking || '';
+                if (!accumulatedThinking || snapshotBuildsBlocks) {
+                  accumulatedThinking = accumulatedThinking ? `${accumulatedThinking}\n${block.thinking || ''}` : (block.thinking || '');
                   setStreamingThinking(accumulatedThinking);
                 }
+                if (snapshotBuildsBlocks && block.thinking) snapshotBlocks.push({ type: 'thinking', content: block.thinking });
               }
               if (block.type === 'tool_use') {
                 const idx = currentToolCalls.findIndex((tc) => tc.id === block.id);
                 if (idx === -1) {
-                  currentToolCalls.push({ id: block.id, name: block.name, input: block.input, result: null });
+                  const newTc = { id: block.id, name: block.name, input: block.input, result: null };
+                  currentToolCalls.push(newTc);
+                  if (snapshotBuildsBlocks) snapshotBlocks.push({ type: 'tool_use', toolCall: newTc });
                 } else {
                   // Reconcile final tool input from the snapshot.
                   currentToolCalls[idx] = { ...currentToolCalls[idx], input: block.input };
+                  // 同一 id 的快照重发只回填入参(与 partial 路径同款),不再往 orderedBlocks 里追加一份。
+                  if (snapshotBuildsBlocks) {
+                    const oi = orderedBlocks.findIndex((b) => b.type === 'tool_use' && b.toolCall?.id === block.id);
+                    if (oi !== -1) orderedBlocks[oi] = { ...orderedBlocks[oi], toolCall: { ...orderedBlocks[oi].toolCall, input: block.input } };
+                  }
                 }
                 setStreamingToolCalls([...currentToolCalls]);
                 // 子代理捕获(关键修复):有些 provider(mimo 等)不发 partial stream_event,
@@ -5650,6 +6104,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   });
                 }
               }
+            }
+            if (snapshotBlocks.length) {
+              orderedBlocks = orderedBlocks.concat(snapshotBlocks);
+              setStreamingBlocks([...orderedBlocks]);
             }
             if (event.message.model) setStreamingModel(event.message.model);
           }
@@ -5749,7 +6207,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 // Also patch the ordered blocks list so the in-place card shows result.
                 const resultPayload = {
                   toolUseId: block.tool_use_id,
-                  content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+                  content: extractToolResultText(block.content),
+                  images: extractToolResultImages(block.content),
                   isError: block.is_error || false,
                 };
                 orderedBlocks = orderedBlocks.map((b) =>
@@ -5762,7 +6221,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 if (idx !== -1) {
                   currentToolCalls[idx] = { ...currentToolCalls[idx], result: {
                     toolUseId: block.tool_use_id,
-                    content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+                    content: extractToolResultText(block.content),
+                    images: extractToolResultImages(block.content),
                     isError: block.is_error || false,
                   }};
                   setStreamingToolCalls([...currentToolCalls]);
@@ -5856,11 +6316,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               const _s = getLocalSession();
               if (_s?.sessionId && _s?.projectHash) {
                 try {
-                  await fetch(`/api/sessions/${_s.sessionId}/strip-thinking`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ projectHash: _s.projectHash }),
-                  });
+                  await runHistoryOp(_s.sessionId, 'strip-thinking', { projectHash: _s.projectHash });
                   await fetchMessagesForTab(_s.sessionId, _s.projectHash, { silent: true });
                 } catch {}
                 setProviderSwitchNotice({ text: '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。' });
@@ -5964,16 +6420,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 : isAuthError ? { errorAction: 'provider' }
                 : isOfficialEmptyBlock ? { errorAction: 'repair-official' } : {}),
             }]);
+            // 条带折叠:报错的轮也要落一条窗口记录(与中断那条同款)。**不加"本轮没在跑就丢弃"
+            // 的守卫** —— 7 个错误分支都是 `sawError = true; break`,循环退出后进不来,守卫是
+            // 死代码;写坏一处还会吃掉 reattach 第二次 attach 的合法报错。这里只写不改别的。
+            {
+              const _errSid = [streamSid, selectedSession?.sessionId].find(isSessionUuid) || null;
+              if (_errSid) {
+                useStore.getState().markRoundAbnormal(_errSid, {
+                  end: 'error', since: streamStartRef.current || Date.now(), until: Date.now(),
+                });
+              }
+            }
             sawError = true;
             break;
           }
-          // 成本/落库用本轮 result.usage,但**不写徽章 live usage**:result.usage 是
-          // CLI「整轮 N 次底层 API 调用」的累加口径(cache_read 被加 N 遍),写进徽章会让
+          // R33:回合口径(气泡的输入/输出/缓存/成本与「整轮命中率」)=【整轮累计】。
+          // 用户实测:一轮 2 次底层 API 调用时 result.usage 只有【最后一次调用】的数,
+          // result.modelUsage[模型] 才是整轮累计 → 优先取后者,挑不中/缺失时回落
+          // result.usage(旧行为)。挑选策略与徽章分母同源(见 contextWindow.js)。
+          // ⚠️ 此值仍**不写徽章 live usage**:整轮累计(cache_read 被加 N 遍)写进徽章会让
           // 占用瞬间虚高爆表(实测第三方可冲到 500k/200k)→ 误触发 auto-compact。徽章的
-          // 「当前上下文占用」应取单次调用口径,已由 message_start/message_delta(2962-2975)
+          // 「当前上下文占用」只取单次调用口径,已由 message_start/message_delta
           // 实时提供(末次调用 = 当前真实上下文)。compact 回合的 usage 也是旧大上下文,同样不取。
-          if (event.type === 'result' && !isCompact && event.usage) {
-            resultUsage = event.usage;
+          if (event.type === 'result' && !isCompact && (event.usage || event.modelUsage)) {
+            resultUsage = resolveTurnUsage(event.usage, event.modelUsage, turnModel);
           }
           // R8-6:CLI 自报窗口(result.modelUsage[*].contextWindow,静态字段)→ 徽章分母。
           // matchedModel 与 turnModel 两个 key 都写(第三方中转两者可能有别名差,徽章按
@@ -5982,8 +6452,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // CLAUDE_CODE_MAX_CONTEXT_TOKENS 把它的真实窗口/压缩线抬到手填/联动值 —— 覆盖掉
           // 就等于显示一个与 CLI 实际压缩行为相反的分母(用户实报:手填 1M,一轮后变 200k)。
           // 仅当 GUI 侧无任何窗口来源时(官方模型恒如此,行为与改前一致)才采 CLI 自报。
-          // ⚠️ 红线:只读 contextWindow;modelUsage 的 *Tokens 与 result.usage 都是整轮
-          // 累积口径,绝不写入"当前占用"(分子仍只来自 message_start/message_delta)。
+          // ⚠️ 红线:只读 contextWindow;modelUsage 里的聚合用量(整轮累计口径)与
+          // result.usage 都不准当"当前占用",绝不写入徽章分子(分子仍只来自
+          // message_start/message_delta)。
           if (event.type === 'result' && event.modelUsage) {
             const cliWin = pickCliContextWindow(event.modelUsage, turnModel);
             if (cliWin) {
@@ -6035,9 +6506,25 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'detached') {
             sawTakeover = true;
             reattachedPidRef.current = String(pid);
+            // R13:明确告知用户"这一格不再持有该运行",且本端不反复夺回(guard 已上闩)。
+            setStreamConnNotice('takeover');
             break;
           }
-          if (event.type === 'done') { sawDoneEvent = true; break; }
+          // R13:游标过旧 —— 服务端明说本次实时记录已截断(不再回放缺失事件),随后关流。
+          // 处置:丢掉未核对的临时文本(绝不拼接猜缺失的 delta),转历史恢复并标记。
+          if (event.type === 'stream_gap') {
+            sawGap = true;
+            setStreamConnNotice('gap');
+            accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = []; orderedBlocks = [];
+            for (const k of Object.keys(blocks)) delete blocks[k];
+            setStreamingText(''); setStreamingThinking(''); setStreamingToolCalls([]); setStreamingBlocks([]);
+            setReattachStream(true);   // 直播气泡退役:内容一律由历史(唯一来源)画
+            setStreamHistCutoff(null); // 截断口径作废:历史是唯一展示来源
+            histFreshRef.current = { at: Date.now(), sig: null };
+            refreshHistIfDue(true);    // 立刻按完整历史恢复
+            continue;
+          }
+          if (event.type === 'done') { sawDoneEvent = true; setStreamConnNotice(null); break; }
         }
         // reattach:每读到一批 SSE 行就考虑刷一次历史(内部节流,非 reattach 直接返回)。
         refreshHistIfDue(false);
@@ -6053,8 +6540,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 排除项:①sawError —— 7 个错误分支都是 `sawError = true; break`,是本流自己报错
       // 退出,重连没有意义;②本端主动断开(停止/加速/转后台/切会话走 abort → catch,
       // 本来就到不了这里,留作显式守卫)。
-      if (!sawDoneEvent && !sawTakeover && !sawError
+      // gap 时也不重连:实时记录已被服务端判定截断,内容改由历史(唯一来源)恢复,重连
+      // 只会把两段拼在一起再显示一遍。
+      if (!sawDoneEvent && !sawTakeover && !sawError && !sawGap
         && !controller.signal.aborted && !killedRef.current && !backgroundedRef.current) {
+        setStreamConnNotice('interrupted'); // 无通知的传输掉线:先让用户看见"在恢复"
         recoverAttach();
       }
       // reattach 流的闩锁复位:以 done 正常收尾 = 这一次复活接完了,清闩让【下一次】复活
@@ -6099,6 +6589,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           blocks: orderedBlocks,
           usage: resultUsage,
           costUsd: resultCostUsd,
+          // 直播补齐:冻结副本到历史接管之间这段窗口也要看得见子代理金额,否则回合结束
+          // 那一刻金额会先消失、等历史刷新回来才重现。取当时的快照(不是渲染时那份 memo)。
+          subUsage: liveSubUsageAgents(useStore.getState().liveSubUsage),
         }]);
         // M3(Q9)→T2 重构:完成悬浮提醒改由服务端 WS 'turn-complete' 广播驱动
         // (见 useWebSocket)。这里的流闭包在用户切走会话时会被切会话 effect
@@ -6121,7 +6614,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           blocks: [{ type: 'text', content: okText }],
           usage: null,
         }]);
-      } else if (!sawError && !reattachPid) {
+      } else if (!sawError && !sawGap && !reattachPid) {
         // Stream ended with NOTHING — no text, no tools, no error envelope.
         // Long first-token latency on big sessions is handled by the server's SSE
         // heartbeat (keeps the connection alive), so reaching here means the turn
@@ -6162,6 +6655,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 抑制 push 修 fable ② 是方向错了:切走场景不 push=半截回复(思考/工具调用,未落盘)
       // 永久丢失,切回 A 只剩 connecting 等新 delta(用户实报);且草稿豁免仍让 A 的孤儿在
       // 新建草稿 C 里串显。归属标记既保数据又断串扰,与 btw 的 ownerKey 同一机制。
+      // R13:无通知的网络断开(传输掉线)至少要让用户看见"在恢复",而不是静默无声。
+      // 真错误(sawError 分支之外的非网络错)另有错误 turn,不在这里重复提示。
+      if (isNetworkDrop) setStreamConnNotice('interrupted');
       if (err.name === 'AbortError') {
         // 仅【真杀进程】(POST /stop:停止/加速/编辑重发)才让 finally 收后台化子代理为 stopped;
         // 后台化(backgroundify)与切会话(detach)只 abort 客户端流、进程继续跑 → killedRef=false →
@@ -6313,10 +6809,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 同会话 stop→resend 守卫:本 finally 属于 turn-1,轮询期间(~2.4s)用户可能已对
         // 同一会话发出 turn-2。只认 handleSend 入口同步抢占的 generation；不能再看 pid，
         // 因为 turn-2 会先起流、写用户消息，再等 checkpoint/provider 和 /api/chat 返回 pid。
-        const tkey = (m) => {
-          const t = Array.isArray(m.text) ? m.text.join('') : (m.text || '');
-          return `${m.type}|${(t || '').slice(0, 80)}`;
-        };
         // 并入收尾只接受两种 JSONL UUID 正向证明；未命中不能证明未消费，转 needs-review
         // 队首 barrier，绝不自动回 queued 或向新的当前 slot 重试。
         const reconcileSteeredQueue = (persisted) => {
@@ -6324,9 +6816,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           const list = st.messageQueue[finalizeSid];
           if (!list?.length || !list.some((item) => isSteerBarrier(item) || item?.steerId)) return;
           const keys = persistedSteerKeys(persisted);
+          // R46:只统计【确实超宽限仍未落盘】的条目。原来不看状态、不看宽限 —— 在途的
+          // 并入(accepted、UUID 还没进 jsonl)也被算进去,于是成功的并入照样弹失败横幅。
+          // 判据与对账翻案共用 steerStillInFlight,口径不允许再裂。
           const reviewCount = list.filter((item) => item?.steerId
-            && !keys.has(String(item.steerId).toLowerCase())).length;
-          st.reconcileSteerQueue(finalizeSid, keys);
+            && !keys.has(String(item.steerId).toLowerCase())
+            && !steerStillInFlight(item)).length;
+          // R46:这里是【终局对账】—— 本流的 finally,回合确实结束了(updateStreaming(false)
+          // 在上面已执行)。回合已结束还缺席就是真失败,缺席即翻,不再等 20s 宽限。
+          st.reconcileSteerQueue(finalizeSid, keys, { turnActive: false });
           if (reviewCount > 0) {
             setProviderSwitchNotice({ text: '并入结果无法确认，已暂停后续队列。' });
           }
@@ -6379,12 +6877,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // Empty/errored turn — no jsonl twin to wait for. Commit persisted and
             // drop matched NON-turn locals (the user prompt); keep the local ⚠️/❌
             // turn visible.
+            // 身份判据见模块级 makePersistedIndex(用户消息走全文+落盘时间强口径):
+            // 弱口径会把同前缀的旧消息当成"这条已落盘",把刚发出的气泡整条清掉,而历史
+            // 那份可能还没进本地 store 或正被截断挡着 → 卡片凭空消失(R37)。
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
-            const known = new Set(getLocalMessages().map(tkey));
+            const known = makePersistedIndex(getLocalMessages());
             if (isCurrentTurn()) reconcileSteeredQueue(getLocalMessages()); // 已注入条目的落地判定
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
-              return prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(tkey(m))) : prev;
+              return prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(m)) : prev;
             });
             break;
           }
@@ -6557,6 +7058,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       } finally {
         // C1:收尾结束(含中途抛错)一律解锁;归零后 poll 的排队排空恢复接管。
         finalizeInFlightRef.current = Math.max(0, finalizeInFlightRef.current - 1);
+        // R13:本端已不再消费任何运行 —— data-run-id 收回(迟到的本流事件不会再写它:
+        // 循环已退出)。
+        if (isCurrentTurn()) setStreamRunId(null);
       }
     }
   }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw, reportAttachmentSidecarResult]);
@@ -6644,11 +7148,42 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (pid) stoppedPidsRef.current.add(String(pid));
     killedRef.current = true; // 真杀进程 → finally 收后台化子代理为 stopped
     abortRef.current?.abort();
+    // R13:停止请求带上期望身份(owner)。只发【能证明属于这个 pid 的 owner】:本端起流时
+    // 记下的(sid 或原始 draftId),或后台 pid 那条路径按本 pane 当前会话的 sid(pid 由
+    // poll 按 sessionId 匹配出来的)。宁可退老路径(不带字段)也绝不发可能不符的身份 ——
+    // 不符 = 409,停止会静默失效。
+    const stopOwner = resolveStopOwner({
+      pid,
+      recordedPid: activeProcOwnerRef.current?.pid,
+      recordedOwner: activeProcOwnerRef.current?.owner,
+      backgroundPid,
+      currentSessionId: selectedSession?.sessionId,
+    });
+    const stopInit = () => ({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(stopOwner ? { owner: stopOwner } : {}),
+      signal: AbortSignal.timeout(8000),
+    });
+    // 条带折叠:由**中断动作自己**落一条"这一轮没正常收尾"的时间窗记录(坑 4 —— 判据不能挂在
+    // 会被后续流式事件抹掉的瞬时态上,所以不问 isStreaming/streamingRef,就地写下这一笔)。
+    // 不读消息列表:直播回合期间它是陈旧的(整轮不刷历史),"取最后一条 turn"会取到上一轮。
+    // 窗口只用两个现成时刻:本轮流开始时刻 → 此刻;上一轮的首条记录必然早于 since,不会误撑开。
+    {
+      // ⚠️ 停止那一刻 owner 往往还是 draftId(`d<ts>-<n>`,不是 uuid)—— draft 期发的这条流
+      // 直到 init 才拿到真 sid,而 init 不回头改 owner。所以按"长得像 uuid"挑,挑不到就不写。
+      const _sid = [stopOwner, selectedSession?.sessionId].find(isSessionUuid) || null;
+      if (_sid) {
+        useStore.getState().markRoundAbnormal(_sid, {
+          end: 'aborted', since: streamStartRef.current || Date.now(), until: Date.now(),
+        });
+      }
+    }
     if (activeProcRef.current) {
       // 响应存 ref 供 finally 排除服务端保留的跨回合后台子代理(见 stopKeptRef 注释)。
       // 超时兜底:服务端挂死时 fetch 永不 settle → 挂在它上面的收尾永不跑,会话卡在"工作中"。
       // 超时走 catch → null → 回落全量收尾(原行为)。
-      stopKeptRef.current = fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', signal: AbortSignal.timeout(8000) })
+      stopKeptRef.current = fetch(`/api/chat/${activeProcRef.current}/stop`, stopInit())
         .then((r) => r.json()).catch(() => null);
     } else if (backgroundPid) {
       // 停止链路 #2:转后台后无本地流,finally 的 killedRef 收尾路径不存在 → 杀点
@@ -6658,7 +7193,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 收尾挂到 /stop 响应上(晚几毫秒):选择性停止会保留跨回合后台子代理,它们没被停、
       // 进程还活着,标 stopped 就是假终态。请求失败/无字段 → 回落全量收尾(原行为)。
       const _bsid = selectedSession?.sessionId || (selectedSession?.projectHash ? queueKeyFor(selectedSession) : null);
-      fetch(`/api/chat/${backgroundPid}/stop`, { method: 'POST', signal: AbortSignal.timeout(8000) })
+      fetch(`/api/chat/${backgroundPid}/stop`, stopInit())
         .then((r) => r.json()).catch(() => null)
         .then((d) => finalizeSessionAgents(_bsid, 'stopped', d?.keptToolUseIds));
     }
@@ -6818,8 +7353,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 出队与历史刷新是同一次回合收尾,以 persisted 为准才能无缝交接、不闪双。
   const persistedSteerIds = useMemo(() => persistedSteerKeys(finalizedMessages), [finalizedMessages]);
   useEffect(() => {
-    useStore.getState().reconcileSteerQueue(sessionQueueKey, persistedSteerIds);
-  }, [sessionQueueKey, persistedSteerIds]);
+    // R46:这条是被动对账(reattach 期间每 1.5s 拉一次历史就会触发一次),不是终局对账 ——
+    // 它没有"回合刚结束"这个正向信号,所以只在**确实没有在跑的回合**时才判定失败:
+    //   · 本地在流 / 有后台进程 → 回合活着,一直在途,一律不翻;
+    //   · 历史还没拉回来(证据集为空)→ 空证据不等于"没落盘",这一刻下结论正是 R46 的
+    //     误判本身(页面重载后首个 effect 就在这个窗口里)→ 也按在途处理。
+    const turnActive = streamingRef.current || !!backgroundPidRef.current || !finalizedMessages.length;
+    useStore.getState().reconcileSteerQueue(sessionQueueKey, persistedSteerIds, { turnActive });
+  }, [sessionQueueKey, persistedSteerIds, finalizedMessages.length]);
   const refreshQueueEvidence = useCallback(async (queueId) => {
     const before = getLocalSession();
     if (!before?.sessionId || !before?.projectHash) return { matched: false, current: false, refreshed: false };
@@ -6856,17 +7397,51 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     segs.push({ blocks: streamingBlocks.slice(from), steer: null });
     return segs;
   }, [liveSteerItems, streamingBlocks]);
+  // 条带:⚡并入切段时整轮被渲成 N 个 TurnBubble,头行只画在首段 —— 而摘要的 M/尾句
+  // 若只按首段自己的 blocks 算,切口在途时这张摘要是残的(少算后面几段的过程块)。
+  // 所以按**整轮**算好,经 StripRoundContext 注入首段(见下面 .map 里的 Provider)。
+  const liveSteerSummary = useMemo(
+    () => (liveSteerSegments ? stripSummary(liveSteerSegments.flatMap((s) => s.blocks), null) : null),
+    [liveSteerSegments]);
   // 流式回复气泡这一刻在不在画(判据与原来 JSX 内联的那串逐字相同,只是提出来复用):
   // 它为真才有块可切;为假(后台态/切回重放/首字未到)时引导气泡走流末兜底,不能凭空消失。
   const liveTurnVisible = liveVisible && isStreaming && !reattachStream
     && !!(streamingText || streamingThinking || streamingToolCalls.length > 0
       || streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall));
-  // 引导气泡的统一渲染:无回滚/分叉入口(已送达,撤不回来),带"已并入"小标。
+  // R36:并入消息的回退。落盘前它只有 steerId(提交时的 uuid),磁盘上那条记录的
+  // uuid 是 CLI 自己的、steerId 只出现在 attachment{queued_command}.source_uuid ——
+  // 直接把它交给 handleRollback 会两处列表都查不到而静默 return(点了没反应)。
+  // 所以先按 steerId 拉一次历史找落盘孪生(形态 A 按 steerUuid 命中;形态 B 是真
+  // user 行、uuid 就是 steerId),再走与普通人工消息完全同一条回退链路;CLI 还没
+  // 写出记录时如实告知,不画一个点了什么都不发生的入口。
+  const resolveSteerAnchor = useCallback(async (steerId) => {
+    const sel = getLocalSession();
+    if (!sel?.sessionId || !sel?.projectHash || !steerId) return null;
+    try { await fetchMessagesForTab(sel.sessionId, sel.projectHash, { silent: true }); } catch { return null; }
+    const want = String(steerId).toLowerCase();
+    return getLocalMessages().find((m) => m?.type === 'user'
+      && (String(m.uuid || '').toLowerCase() === want || String(m.steerUuid || '').toLowerCase() === want)) || null;
+  }, [fetchMessagesForTab, getLocalMessages, getLocalSession]);
+
+  const handleSteerRollback = useCallback(async (msg, opts) => {
+    const anchor = await resolveSteerAnchor(msg?.uuid);
+    if (!anchor) {
+      setProviderSwitchNotice({ text: '这条并入消息还没有写入会话记录，暂时无法回退；稍后可再试。' });
+      return;
+    }
+    handleRollbackRef.current?.(anchor, opts);
+  }, [resolveSteerAnchor, setProviderSwitchNotice]);
+
+  // 引导气泡的统一渲染:带"已并入"小标;回退先解析落盘锚点(见 handleSteerRollback),分叉不开。
   const renderSteerBubble = (item) => (
     <MessageBubble key={item.steerId} message={{
       role: 'user', type: 'user', uuid: item.steerId, text: item.text, steered: true,
       timestamp: item.steeredAt ? new Date(item.steeredAt).toISOString() : undefined,
-    }} />
+      // R07:并入气泡必须与普通发送完全同形 —— meta(附件+displayText)在入队时就存在
+      // 队列条目的 opts 里,漏传就是"并入带图消息时图片/说明当场不显示"(用户实报)。
+      attachments: item.opts?.meta?.attachments,
+      displayText: item.opts?.meta?.displayText,
+    }} onRollback={handleSteerRollback} />
   );
 
   // Reset per-session UI state when the selectedSession object changes.
@@ -6914,6 +7489,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setStreamingThinking('');
         setStreamingToolCalls([]);
         setStreamingBlocks([]);
+        // R13:上一条流的连接状态/运行身份都属于刚切走的那个 owner,不能挂在新会话上。
+        setStreamConnNotice(null);
+        setStreamRunId(null);
         // Clear reattach guard so navigating back to a session with the same
         // backgroundPid triggers a fresh reattach attempt.
         reattachedPidRef.current = null;
@@ -6997,13 +7575,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const compactModel = String(useStore.getState().modelBySession[sel.sessionId] || useStore.getState().currentModel || '');
       setProviderSwitchNotice({ text: '正在生成摘要并压缩会话,请勿在此期间发送消息…' });
       try {
-        const r = await fetch(`/api/sessions/${sel.sessionId}/compact-segment`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectHash, uuid: msg.uuid, direction, model: compactModel }),
-        });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) { setProviderSwitchNotice({ text: '压缩失败:' + (d.error || r.status) + '(会话未改动)' }); return; }
+        // R25:摘要由服务端在预览阶段生成并绑定进预览令牌,提交只送令牌 —— 客户端不替换摘要。
+        const r = await runHistoryOp(sel.sessionId, 'compact-segment', { projectHash, uuid: msg.uuid, direction, model: compactModel });
+        if (!r.ok) { setProviderSwitchNotice({ text: '压缩失败:' + (r.error || r.status) + '(会话未改动)' }); return; }
         if (direction === 'after') setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 尾段已被移除,清掉本地未落盘气泡(旁问除外)
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
         setProviderSwitchNotice({ text: direction === 'before' ? '已把此前对话压缩为摘要,上下文占用已降低。' : '已回退并把后续对话保留为摘要。' });
@@ -7115,18 +7689,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         ? { projectHash, uuid: msg.uuid }
         : { projectHash, fromTimestamp: msg.timestamp };
       try {
-        const tr = await fetch(`/api/sessions/${sel.sessionId}/trim`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        const trData = await tr.json().catch(() => ({}));
+        const tr = await runHistoryOp(sel.sessionId, 'trim', body);
         if (!tr.ok) trimFailed = true;
         // If trim wiped the session (no real messages would remain), we must
         // drop the sessionId locally — otherwise the next /api/chat would
         // try --resume on a deleted jsonl and CLI silently exits with
         // "No conversation found".
-        if (trData?.sessionReset) {
+        if (tr.sessionReset) {
           sessionWasReset = true;
           // sessionId 失效 → 切到 draft 态。但 permissionMode / model 的 per-session
           // pin 还在 modelBySession[oldSid] / permissionModeBySession[oldSid] 下,
@@ -7235,7 +7804,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 且 init/message_start 常在同一批 setState 里到达 —— 无守卫会把新会话首轮刚写入
     // 的 usage 又清掉(新会话徽章不显示的根因)。流归属仍是本会话时不清。
     if (streamOwnerKeyRef.current !== sessionQueueKey) setLiveContextUsage(null);
-    useStore.getState().setViewingAgent(tabIndex, null);  // AZ6:只清本 tab,不动其它 pane
+    // AZ6:只清本 tab,不动其它 pane。R11:切到【本视图所属母会话】时不清 —— 监控「查看」
+    // 是先切母会话再装视图,一刀切会把刚装上的视图立刻收掉(等于没打开)。切到无关会话
+    // 照旧清掉(另有 resolveOwnedAgent 兜底,归属不符的条目渲染不出来)。
+    const st = useStore.getState();
+    const vid = st.viewingAgentByTab[tabIndex];
+    const ownedByNewSession = !!vid && !!selectedSession?.sessionId && st.activeAgents[vid]?.sessionId === selectedSession.sessionId;
+    if (!ownedByNewSession) st.setViewingAgent(tabIndex, null);
   }, [selectedSession?.sessionId, setPendingEditRollback, tabIndex]);
 
   // 编辑重发取消(#4):ChatInput 里按 Esc → 撤销待回滚(历史本就没动,纯清状态)。
@@ -7352,13 +7927,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           await Promise.race([Promise.all(_rtStops), new Promise((r) => setTimeout(r, 2000))]);
         }
 
-        const tr = await fetch(`/api/sessions/${sel.sessionId}/trim-before-tool`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectHash, toolUseId: toolCall.id }),
-        });
-        const trData = await tr.json().catch(() => ({}));
-        if (!tr.ok) throw new Error(trData.error || tr.status);
+        const tr = await runHistoryOp(sel.sessionId, 'trim-before-tool', { projectHash, toolUseId: toolCall.id });
+        if (!tr.ok) throw new Error(tr.error || tr.status);
         // r99b(Windows 审查中-1):截断真正成功后才通知调用方 —— Windows 上 rename 覆盖被
         // 占用的文件会 EPERM,失败时不该把"本会话唯一一次自动回退"的机会烧掉。
         opts.onTrimmed?.();
@@ -7552,6 +8122,23 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const userTurns = allMessages
     .filter((m) => m.type === 'user' && m.uuid)
     .map((m) => ({ uuid: m.uuid, text: m.displayText || m.text || '', ts: m.timestamp }));
+  // 渐进挂载:进度条跳远。被裁掉的行**没有 DOM 节点**,既有 scrollToTurn 的
+  // querySelector+offsetTop 会静默落空(点了没反应)—— 所以先补齐到目标行再滚。
+  // 下标必须在 userTurns 上算(与进度条同源);目标在定稿列表里找不到(本地/流式气泡)
+  // 就返回 false,交给 TurnScrubber 走既有 DOM 路径(半回退兜底)。
+  const jumpToTurn = (userMessageUuid) => {
+    if (!userMessageUuid || !mountWindowEnabled) return false;
+    if (!userTurns.some((t) => t.uuid === userMessageUuid)) return false;
+    const rowIdx = finalizedMessages.findIndex((m) => m.uuid === userMessageUuid);
+    if (rowIdx < 0) return false;
+    // 跳转自己会把视野带走,不需要"补齐补偿"在中间插一脚。
+    mountCompRef.current = null;
+    setMountFrom((cur) => {
+      const base = cur == null ? initialSpan(finalizedMessages.length, MOUNT_WINDOW_K).from : cur;
+      return Math.min(base, rowIdx);
+    });
+    return true;
+  };
   // 用量汇总:优先取服务端聚合(usageTotals,jsonl 全文件按 message.id 去重逐条求和的
   // 地面真值口径),前端只叠加尚未落盘的流式回合(chatMessages,条数很小)——避免几千条
   // 历史消息每帧全量 reduce。无服务端聚合时(端点旧形态/加载失败)回退全量 reduce。
@@ -7590,10 +8177,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // Sum per-message cost. Skipping models we don't have prices for. Uses
   // currentProvider (subscribed above, before early returns) so cc switch
   // redirects (Claude → DeepSeek/MiMo) get the right backend price table.
+  // 逐条走 computeCostForMessage(带 usageCalls → 分时段模型按每次调用自己的时刻判档);
+  // 金额先归一到展示口径再相加 —— 官方 CNY 报价是原币种数字,不同币种的数字不能直接相加。
   const totalCostUsd = allMessages.reduce((acc, m) => {
     if (m.usage && (m.model || currentProvider?.model)) {
-      const c = computeCost(m.model, m.usage, currentProvider);
-      if (c) acc += c.totalUsd;
+      const c = computeCostForMessage(m, currentProvider);
+      if (c) acc += displayUsd(c.totalUsd, c.currency);
     }
     return acc;
   }, 0);
@@ -7704,12 +8293,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     providerHintLabel, providerBaseUrl: currentProvider?.baseUrl || '',
     totalAllTokens, totalCostUsd, cacheRead: totalTokens.cacheRead, cacheHitPct, usageDetailTitle,
     turnCacheHitPct: turnCache.hitPct, turnCacheTotal: turnCache.total, turnCacheRead: turnCache.read,
-    sessionCacheMiss: sessionCache.miss,
+    sessionCacheMiss: sessionCache.miss, sessionCacheTotal: sessionCache.total,
     bareAliasWindowUnknown, winSource,
   };
 
   return (
     <div className="flex-1 flex flex-col min-h-0 glass-base relative">
+      {/* R24:最近一次 API 调用的缓存口径上报给全局顶栏(顶栏要显示「最近API命中率」)。 */}
+      <TurnCachePublisher sessionId={selectedSession?.sessionId || null}
+        cache={{ hitPct: turnCache.hitPct, total: turnCache.total, read: turnCache.read, creation: turnCache.creation, input: turnCache.input }} />
       {/* ③ 背景层已升级为全局(见 App 根节点的 GlobalBackgroundLayer),此处不再各 pane
           单独渲染;pane 的 glass-base 半透明即透出全局背景。 */}
       {/* #9 子代理对话视图:覆盖在本 pane 之上,顶部面包屑可返回母会话。 */}
@@ -7718,6 +8310,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           <SubagentView
             agentId={viewingAgentId}
             paneId={paneId}
+            tabIndex={tabIndex}
             active={paneIsActive}
             parentSessionId={selectedSession?.sessionId || null}
             parentTitle={resolveSessionTitle(
@@ -7731,10 +8324,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       )}
       {/* 窗内检索浮层(Cmd/Ctrl+F)+ 右侧回合进度条(子代理视图打开时不显示)。 */}
       {!showAgentView && searchOpen && (
-        <ChatSearch containerRef={containerRef} onClose={() => setSearchOpen(false)} />
+        <ChatSearch containerRef={containerRef} onClose={() => {
+          // 关检索 = 裁剪恢复(视口上方整批卸载)→ 先记下变化前的高度,靠差值把位置搬回去。
+          captureMountBeforeRef.current?.();
+          setSearchOpen(false);
+        }} />
       )}
       {!showAgentView && (
-        <TurnScrubber containerRef={containerRef} turns={userTurns} onNavigate={markScrollReading} />
+        <TurnScrubber containerRef={containerRef} turns={userTurns} onNavigate={markScrollReading} onJumpToTurn={jumpToTurn} />
       )}
       {/* 旁问浮窗:右下角浮动小窗,把本会话 /btw 线程聚合成连续对话。z-46 高于子代理面板
           (z-40)故与之共存;suppressed=hasPendingInteraction 时让路授权/问题卡(收成浮标)。 */}
@@ -7763,8 +8360,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               </span>
               <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.filter((m) => m.type !== 'btw').length} 条消息</span>
               {/* r98:标题行直接给本轮(最近一次 API 调用)命中率;会话累计仍在徽章弹层。 */}
-              {turnCache.total > 0 && (
-                <span className="text-[10px] text-ink font-mono shrink-0 whitespace-nowrap" title="本轮缓存命中率 = 最近一次 API 调用的 cache_read /（cache_read + cache_creation + input）；会话累计见上下文徽章弹层">本轮命中 {formatHitPct(turnCache.hitPct)}</span>
+              {/* R24 口径名:顶部 = 最近一次 API 调用的「最近API命中率」;整轮口径见轮末徽章,
+                  会话累计见用量面板与上下文徽章弹层。三处名字不得混用。 */}
+              <span className="text-[10px] text-ink font-mono shrink-0 whitespace-nowrap" title="最近API命中率 = 最近一次 API 调用的 cache_read /（cache_read + cache_creation + input）；整轮见轮末徽章，会话累计见用量面板">最近API命中率 {formatHitPctOrDash(turnCache.hitPct, turnCache.total)}</span>
+              {serverUsageTotals?.codes?.length > 0 && (
+                <span className="text-[10px] text-error font-body shrink-0 whitespace-nowrap"
+                  title={`服务端读到的用量字段有问题：${serverUsageTotals.codes.join(' / ')}。原始数字保留在接口响应里，费用一律按未知处理，不按脏数据算钱。`}>
+                  用量字段异常 {serverUsageTotals.codes.join(' / ')}
+                </span>
               )}
               {/* P1.2 徽章零态壳:有会话即渲染(不再 contextTokens>0 门控);统计/provider
                   hint/曾用模型收进弹层(badgeInfo),行内不再重复。 */}
@@ -7794,6 +8397,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             </div>
           </div>
           <div className="flex items-center gap-2 min-w-0 flex-wrap justify-end">
+            {/* R13 关窗格:单窗格没有分屏头(那条 ✕ 只在多窗格时渲染),于是"关闭此窗格"
+                无处可点。语义与分屏头那只完全一致:只移出本窗格的显示,不结束会话、不杀进程
+                (后台照跑,回复照落历史,可随时从左侧列表再打开)。多窗格时由分屏头负责,
+                这里不重复渲染。 */}
+            {paneCount <= 1 && (
+              <button
+                data-testid="pane-close"
+                onClick={() => { closePaneGuarded(tabIndex); }}
+                title="关闭此窗格（不结束会话 / 不杀进程）"
+                className="p-1.5 rounded-lg transition-colors text-ink-muted hover:text-ink hover:bg-canvas-warm"
+              >
+                <X size={14} />
+              </button>
+            )}
             {/* P1.2:导出 / Checkpoint 收进 ⋮(点击展开,组件原样复用)。 */}
             <SessionHeaderMore forceOpenSignal={rewindSignal}>
               <ExportSessionButton
@@ -7850,12 +8467,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             />
           )}
           <span className="text-ink-faint" title={usageDetailTitle}>{totalAllTokens.toLocaleString()} tok</span>
-          {totalTokens.cacheRead > 0 && (
-            <span className="text-ink-ghost" title={usageDetailTitle}>平均命中率 {cacheHitPct.toFixed(1)}%</span>
-          )}
-          {turnCache.total > 0 && (
-            <span className="text-ink" title="本轮缓存命中率（最近一次 API 调用）；前一项为会话累计">本轮命中 {formatHitPct(turnCache.hitPct)}</span>
-          )}
+          {/* R24:三处口径名固定 —— 手机条上「会话累计命中率」+「最近API命中率」。 */}
+          <span className="text-ink-ghost" title={usageDetailTitle}>会话累计命中率 {formatHitPctOrDash(cacheHitPct, sessionCache.total)}</span>
+          <span className="text-ink" title="最近API命中率（最近一次 API 调用）；前一项为会话累计">最近API命中率 {formatHitPctOrDash(turnCache.hitPct, turnCache.total)}</span>
           {totalCostUsd > 0 && <span className="text-accent/80">· {formatCost(totalCostUsd)}</span>}
         </div>
       )}
@@ -7873,6 +8487,31 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       {/* git-init 提示只在「项目头部」(侧栏)渲染一处(见 GitInitBanner @ 项目面板),
           这里不再重复挂载——两处同时显示同一提示且状态不同步(忽略/init 后只更新
           自己那份),造成重复+脱节。项目头部那处触发更早(选中项目即检测,空状态也覆盖)。 */}
+
+      {/* R13 流连接状态(见 streamConnNotice 定义)。只陈述本窗格这条链路的事实:
+          掉线→正在恢复 / 记录被截断→正在恢复历史 / 被别处接管→不夺回。
+          它不是错误横幅:自动重连仍由既有三振路径驱动,这里只把过程说清楚。 */}
+      {streamConnNotice && (
+        <div data-testid="stream-conn-notice"
+          className={`shrink-0 mx-6 mt-2 px-3 py-2 rounded-md border flex items-start gap-2 animate-fade-up ${
+            streamConnNotice === 'takeover'
+              ? 'bg-sky-50 border-sky-200'
+              : 'bg-amber-50 border-amber-200'
+          }`}>
+          <span className={`text-[12px] font-body leading-snug flex-1 ${streamConnNotice === 'takeover' ? 'text-sky-700' : 'text-amber-700'}`}>
+            {streamConnNotice === 'takeover'
+              ? '↪ 此运行已在另一处查看'
+              : streamConnNotice === 'gap'
+                ? '⏳ 实时记录已截断，正在恢复历史'
+                : '⏳ 连接中断，正在恢复'}
+          </span>
+          <button
+            onClick={() => setStreamConnNotice(null)}
+            className={`${streamConnNotice === 'takeover' ? 'text-sky-600 hover:text-sky-800' : 'text-amber-600 hover:text-amber-800'} text-[14px] leading-none px-1`}
+            title="关闭"
+          >×</button>
+        </div>
+      )}
 
       {/* Provider-switch notice — fades after 5s. Tells the user we just
           stripped thinking blocks from on-disk jsonl so cc switch's new
@@ -7984,6 +8623,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         onPointerDown={handleScrollPointer}
         data-cgui="message-list"
         data-chat-scroll
+        data-generation={paneGeneration || undefined}
+        data-run-id={streamRunId || undefined}
         className="h-full overflow-y-auto relative z-10"
       >
           {visibleMessages.length === 0 && visibleChat.filter((m) => m.type !== 'btw').length === 0 ? (
@@ -7992,8 +8633,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             </div>
           ) : (
             <>
+              {/* 渐进挂载:被裁掉的行在这里留**一行提示**(不带 data-turn-uuid —— 它不是一轮,
+                  也不冒充高度占位)。它同时是"该补齐了"的可视提示:内容加在视口上方时,
+                  锚定 effect 会把用户眼睛盯着的那一行搬回原位(§H.5)。 */}
+              {mountFromResolved > 0 && (
+                <div
+                  data-turn-placeholder
+                  className="px-6 py-2 text-center text-[11px] text-ink-faint font-body select-none"
+                >
+                  更早的 {mountFromResolved} 条消息尚未加载，向上滚动继续加载
+                </div>
+              )}
               <MessageList
-                messages={finalizedMessages}
+                messages={mountedMessages}
                 onRetryTurn={stableRetryTurn}
                 onRetryTool={stableRetryTool}
                 onRollback={stableRollback}
@@ -8007,6 +8659,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     ? <CompactDivider />
                     : msg.type === 'goal'
                     ? null
+                    : msg.type === 'task-notice'
+                    ? <TaskNoticeRow notice={msg} />
                     : msg.type === 'denial'
                     ? <DenialNotice denial={msg} />
                     : msg.type === 'mode-mismatch'
@@ -8072,7 +8726,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                         )}
                       </>
                     : <MessageBubble message={{ ...msg, role: msg.type }}
-                        onRollback={msg.type === 'user' && !msg.steered ? handleRollback : undefined} />}
+                        onRollback={msg.type === 'user' ? handleRollback : undefined} />}
                 </div>
               ))}
               {/* reattach(切走再切回)不画流式气泡:同一段内容已经完整留在上面的历史卡里,
@@ -8092,6 +8746,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     return (
                       <React.Fragment key={seg.steer?.steerId || `seg-${si}`}>
                         {hasContent && (
+                          <StripRoundContext.Provider value={liveSteerSegments
+                            // 首段之外的段不渲染摘要行(headless),整轮恒 1 条头行;
+                            // forceOpen:非末段的哨兵是 'streaming-<i>',isLiveStream 为假,
+                            // 不强制展开就会在切口在途时画成收起(口径 3 要求整轮展开)。
+                            ? { forceOpen: true, headless: si > 0, summary: liveSteerSummary }
+                            : { forceOpen: false, headless: false, summary: null }}>
                           <TurnBubble turn={{
                             // 'streaming' 是 TurnBubble 的"这条还在产出"哨兵(头像转、入场动画、
                             // isLive)。新内容只会追加到【最后一段】,所以哨兵给它;切口之前的
@@ -8104,7 +8764,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                             toolCalls: first ? streamingToolCalls.map((tc) => ({ ...tc, category: 'call' })) : [],
                             blocks: seg.blocks,
                             usage: null,
+                            // 已完成的子代理各自那条金额(键 = toolUseId,见 liveSubUsageTurn)。
+                            subUsage: liveSubUsageTurn,
                           }} />
+                          </StripRoundContext.Provider>
                         )}
                         {seg.steer && renderSteerBubble(seg.steer)}
                       </React.Fragment>
@@ -8398,7 +9061,7 @@ function ProviderManager({ initialEditId = null }) {
   };
 
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden">
+    <div data-testid="provider-manager" className="border border-canvas-deep rounded-lg overflow-hidden">
           <div className="px-3 py-2 bg-canvas-warm border-b border-canvas-deep">
             <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body">Provider 管理 · 当前:{cur?.name || capHint(currentProvider?.providerHint) || '—'}</div>
             <p className="text-[10px] text-ink-faint font-body mt-1 leading-snug">
@@ -8532,6 +9195,8 @@ function ProviderManagerModal({ open, onClose, editId = null }) {
       // r52:模型勾选弹窗开着时这一击归它(同为 window 捕获,注册更早的本监听会抢跑 →
       // 不让行就是跳过弹窗直接关掉整个管理弹窗,勾选与未保存表单一起丢)。同 data-cgui-confirm 手法。
       if (document.querySelector('[data-cgui-modelpick]')) return;
+      // E 项(§10.8):确认框开着时这一击归它(不让行本监听会吃掉 Esc → 像"没反应")。
+      if (document.querySelector('[data-cgui-confirm]')) return;
       e.stopPropagation();
       tryClose();
     };
@@ -8810,7 +9475,7 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
           {info.cacheRead > 0 && (
             <div className="flex items-center gap-2 text-[11px] font-body" title={info.usageDetailTitle}>
               <span className="text-ink-faint w-14 shrink-0">缓存命中</span>
-              <span className="font-mono text-ink-muted">{info.cacheRead.toLocaleString()} · 平均命中率 {formatHitPct(info.cacheHitPct || 0)}</span>
+              <span className="font-mono text-ink-muted">{info.cacheRead.toLocaleString()} · 会话累计命中率 {formatHitPctOrDash(info.cacheHitPct || 0, info.sessionCacheTotal || 0)}</span>
             </div>
           )}
           {/* r89:本轮命中率 —— 单次 API 调用口径(与上方"当前占用"同一条 usage),
@@ -8821,8 +9486,8 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
 本次命中 ${(info.turnCacheRead || 0).toLocaleString()} / 提示侧合计 ${(info.turnCacheTotal || 0).toLocaleString()}
 单次调用的 ctxUsage 缺失时回退到整轮累加口径，该轮数值会偏低
 会话累计未命中（按未命中价计费）${(info.sessionCacheMiss || 0).toLocaleString()}`}>
-              <span className="text-ink-faint w-14 shrink-0">本轮命中</span>
-              <span className="font-mono text-ink-muted">{formatHitPct(info.turnCacheHitPct || 0)}</span>
+              <span className="text-ink-faint w-14 shrink-0">最近API命中率</span>
+              <span className="font-mono text-ink-muted">{formatHitPctOrDash(info.turnCacheHitPct || 0, info.turnCacheTotal || 0)}</span>
               <span className="text-ink-ghost">· 累计未命中 {(info.sessionCacheMiss || 0).toLocaleString()}</span>
             </div>
           )}
@@ -9421,6 +10086,18 @@ const pricesToWire = (form) => {
   return out;
 };
 
+// E 项(INTERFACE §10.8):手填的 Base URL 撞上内置预设入口时的弹窗正文。
+// 单命中用模板;多命中在末尾补一行"同一家的其它入口"(建议目标之外的全部)。
+function presetSuggestionText({ preset, candidates }) {
+  const others = (candidates || []).filter((c) => c.id !== preset.id)
+    .map((c) => `${c.name}（${c.id} · ${c.type}）`).join('、');
+  return `该 Base URL 是「${preset.name}」的官方入口（预设：${preset.id}）。\n`
+    + '用这个预设新建 provider 才能拿到它带的计价规则与额度接口。\n\n'
+    + '· 切到该预设：名称 / 协议 / Base URL 改为该预设的值，其余字段（API Key、模型、单价、额度密钥等）一律不动\n'
+    + '· 保持不变：按你填的内容原样保存，行为与今天一致'
+    + (others ? `\n\n同一家的其它入口：${others}` : '');
+}
+
 // Shared add-custom-provider form. Both protocols; can live-fetch the upstream's
 // model catalogue via /v1/models. onSaved() refreshes the parent's list.
 // customCount = 保存前父级自定义 provider 数:仅添加**第一个**自定义 provider 时
@@ -9436,6 +10113,16 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   // 要删掉已存的密钥只能靠这个显式标记(它让保存时发出空串 = 清除)。
   const [quotaKey, setQuotaKey] = useState('');
   const [quotaKeyCleared, setQuotaKeyCleared] = useState(false);
+  // 自定义额度查询端点(可选)。与 quotaKey 同族但**语义相反**:这四格是非敏感的配置值,
+  // 表单持有全值 → 地址清空即"清除"(保存时发空串,四键一起删);quotaKey 是密钥,留空=
+  // 保留,要删得靠显式「清除」。
+  const [quotaURL, setQuotaURL] = useState('');
+  const [quotaPath, setQuotaPath] = useState('');
+  const [quotaAuth, setQuotaAuth] = useState('bearer');
+  const [quotaCurrency, setQuotaCurrency] = useState('');
+  // 额度接口测试横幅:{ ok, text } | null。可见且不自动消失(与 testResult 同行为),
+  // 下一次测试或切换编辑对象时清空。
+  const [quotaTestResult, setQuotaTestResult] = useState(null);
   const [modelsText, setModelsText] = useState('');
   // r59:模型框 DOM 引用 —— 勾选确认的合并结果经 applyProgrammaticText 写入,否则纯
   // setState 不产生 input 事件,合并进来的几十行 ⌘Z 撤不回(用户实报)。
@@ -9467,6 +10154,12 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const markList = searchMarks(markQ);
   const avatarFileRef = useRef(null);
   const [busy, setBusy] = useState('');
+  // E 项(INTERFACE §10.8):保存时若 Base URL 撞上内置预设入口,弹窗问一句要不要切过去
+  // (自建 provider 拿不到预设带的计价规则与额度接口)。两条抑制条件的数据源:
+  //   ① 打开表单时的初值(编辑态没动 URL 就不必再问);
+  //   ② 最近一次经「内置模板」下拉填充的那条预设(刚选完模板,提示没有新信息)。
+  const initialBaseURLRef = useRef('');
+  const templateRef = useRef(null);
   const isEdit = !!editing;
   // 后端只下发 hasQuotaKey 布尔(明文永不出服务端);点过「清除」后按未配置显示。
   const savedQuotaKey = isEdit && !!editing?.hasQuotaKey && !quotaKeyCleared;
@@ -9498,8 +10191,14 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       setName(editing.name || '');
       setType(editing.type || 'openai');
       setBaseURL(editing.baseURL || '');
+      initialBaseURLRef.current = editing.baseURL || '';  // E 项抑制①
+      templateRef.current = null;                          // E 项抑制②
       setApiKey('');
       setQuotaKey(''); setQuotaKeyCleared(false);
+      // 自定义额度端点四格:缺省分别落 '' / '' / 'bearer' / ''(E.6)。
+      setQuotaURL(editing.quotaURL || ''); setQuotaPath(editing.quotaPath || '');
+      setQuotaAuth(editing.quotaAuth || 'bearer'); setQuotaCurrency(editing.quotaCurrency || '');
+      setQuotaTestResult(null);
       setModelsText((editing.models || []).join('\n'));
       setDefaultModel(editing.defaultModel || '');
       setTierModels({ haiku: editing.tierModels?.haiku || '', sonnet: editing.tierModels?.sonnet || '', opus: editing.tierModels?.opus || '', fable: editing.tierModels?.fable || '' });
@@ -9516,7 +10215,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
     })();
     return () => { stale = true; };
   }, [editing?.id]);
-  const reset = () => { setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setQuotaKey(''); setQuotaKeyCleared(false); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setModelCaps({}); setAvatar(''); setAvatarOpen(false); setMarkQ(''); setAvatarInput(''); setAvatarErr(''); setTestResult(null); setOpen(false); };
+  const reset = () => { initialBaseURLRef.current = ''; templateRef.current = null; setName(''); setType('openai'); setBaseURL(''); setApiKey(''); setQuotaKey(''); setQuotaKeyCleared(false); setQuotaURL(''); setQuotaPath(''); setQuotaAuth('bearer'); setQuotaCurrency(''); setQuotaTestResult(null); setModelsText(''); setDefaultModel(''); setTierModels({ haiku: '', sonnet: '', opus: '', fable: '' }); setCtxWindow(''); setModelPrices({}); setModelCaps({}); setAvatar(''); setAvatarOpen(false); setMarkQ(''); setAvatarInput(''); setAvatarErr(''); setTestResult(null); setOpen(false); };
   const close = () => { reset(); onCancel?.(); };
   const parseModels = () => modelsText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
   // BZ-2:有未保存内容时上报 dirty,父级据此阻止外部点击/Esc 关闭下拉(避免丢输入)。
@@ -9525,7 +10224,10 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   // 丢掉同样是丢输入);编辑态本来就因预填的 name/baseURL 恒 dirty,这两项只在新增态起作用。
   const dirty = (open || isEdit) && !!(name.trim() || baseURL.trim() || apiKey.trim() || quotaKey.trim()
     || quotaKeyCleared || modelsText.trim()
-    || ctxWindow.trim() || Object.keys(modelPrices).length || Object.keys(modelCaps).length || avatar);
+    || ctxWindow.trim() || Object.keys(modelPrices).length || Object.keys(modelCaps).length || avatar
+    // 自定义额度端点四格:只改了额度接口地址就点关闭会静默丢输入 —— ctxWindow/modelPrices
+    // 栽过同一个坑,新字段一律计入(三个下拉判"非缺省"即可,缺省态等价于没改)。
+    || quotaURL.trim() || quotaPath.trim() || quotaCurrency || quotaAuth !== 'bearer');
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty]);
   useEffect(() => () => onDirtyChange?.(false), []); // 卸载时清掉,避免残留 dirty 卡住关闭
   // BZ-1:测试连接 —— 给默认模型/列表第一个发最小请求,验证鉴权 + 模型可达。
@@ -9542,6 +10244,32 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       const d = await r.json();
       setTestResult(d.ok ? { ok: true, model } : { ok: false, error: d.error || `HTTP ${d.status || '错误'}` });
     } catch (e) { setTestResult({ ok: false, error: e.message }); }
+    setBusy('');
+  };
+  // 自定义额度接口的「测试」按钮:验证地址 + 路径填对没有(**不必切到该 provider**)。
+  // key 优先用本次输入的额度密钥;编辑态没填则回落存储值(带 id,后端按 quotaKey → apiKey
+  // 兜底)。新增态且一个 key 都没有时不拦 —— 让上游回 401,用户看到真实原因。
+  const testQuotaEndpoint = async () => {
+    if (!quotaURL.trim()) return setQuotaTestResult({ ok: false, text: '先填额度查询接口地址' });
+    setBusy('quotaTest'); setQuotaTestResult(null);
+    try {
+      const r = await fetch('/api/custom-providers/quota-test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          quotaURL, quotaPath, quotaAuth, quotaCurrency,
+          ...(quotaKey.trim() ? { quotaKey } : {}),
+          ...(editing?.id ? { id: editing.id } : {}),
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) setQuotaTestResult({ ok: false, text: d.error || `HTTP ${r.status}` });
+      else if (d.ok) setQuotaTestResult({ ok: true, text: `读到余额 ${quotaValueText(d.value, d.currency)}${d.path ? `（取值路径 ${d.path}）` : ''}` });
+      else setQuotaTestResult({
+        ok: false,
+        // 路径取不到时把"响应里有哪些键"接在后面(V4):路径写对是唯一的上手门槛。
+        text: `${d.error || '请求失败'}` + (Array.isArray(d.pathHints) && d.pathHints.length ? `响应中的字段：${d.pathHints.join('、')}。` : ''),
+      });
+    } catch { setQuotaTestResult({ ok: false, text: '请求失败（网络不可达或超时）。' }); }
     setBusy('');
   };
   const fetchModels = async () => {
@@ -9628,8 +10356,27 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   };
   const save = async () => {
     if (!name.trim() || !baseURL.trim()) return confirmDialog('名称和 Base URL 必填');
+    // E 项(INTERFACE §10.8):填的这个 Base URL 若是某家官方预设的入口,保存前问一句。
+    // 只在用户点「切到该预设」后覆盖 名称/协议/Base URL 三项,其余字段一律不动;点
+    // 「保持不变」(Esc/点遮罩同此)则原值提交 —— 服务端不参与本项,没有静默改写路径。
+    let eff = { name, type, baseURL };
+    const hit = presetSuggestion(baseURL, {
+      type,
+      initialBaseURL: initialBaseURLRef.current,
+      template: templateRef.current,
+    });
+    if (hit) {
+      const ok = await confirmDialog(presetSuggestionText(hit), {
+        confirmText: '切到该预设', cancelText: '保持不变', testId: 'preset-suggest',
+      });
+      if (ok) {
+        eff = { name: hit.preset.name, type: hit.preset.type, baseURL: hit.preset.baseURL };
+        initialBaseURLRef.current = eff.baseURL; // 重新提交时不再为同一个决定问第二遍
+        setName(eff.name); setType(eff.type); setBaseURL(eff.baseURL);
+      }
+    }
     const parsedModels = parseModels();
-    if (type === 'openai' && parsedModels.length === 0) {
+    if (eff.type === 'openai' && parsedModels.length === 0) {
       return confirmDialog('OpenAI 兼容 Provider 至少需要一个模型 ID。可以先点「拉取模型」,或在「模型」框每行填一个。');
     }
     // 提醒设默认模型:不设的话新会话/未指定模型的调用回退到列表第一个。多模型时才提醒。
@@ -9644,7 +10391,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
     try {
       // Store in the GUI's own custom-providers.json (no cc-switch.db dependency —
       // works on a fresh machine without CC Switch installed).
-      const body = { name, type, baseURL, models: parsedModels };
+      const body = { name: eff.name, type: eff.type, baseURL: eff.baseURL, models: parsedModels };
       // AZ8:默认模型(后端校验须在 models 内,否则忽略)。空 = 不指定,回退列表第一个。
       body.defaultModel = defaultModel && parsedModels.includes(defaultModel) ? defaultModel : null;
       // BB6:档位映射。只收在 parsedModels 内的;后端再校验一遍。空档省略 = 回退选中模型。
@@ -9669,6 +10416,12 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       // 缺失即不动),点过「清除」则显式发空串 = 删除已存值。填了新值时以新值为准。
       if (quotaKey.trim()) body.quotaKey = quotaKey;
       else if (isEdit && quotaKeyCleared) body.quotaKey = '';
+      // 自定义额度端点四键:表单持有全值 → 永远发全量(整体覆盖)。地址清空 = 发空串
+      // = 后端把四键一起删掉(与 quotaKey 的"留空=保留"**相反**,别照抄)。
+      body.quotaURL = quotaURL.trim();
+      body.quotaPath = quotaPath.trim();
+      body.quotaAuth = quotaAuth;
+      body.quotaCurrency = quotaCurrency || null;
       const r = await fetch(isEdit ? `/api/custom-providers/${editing.id}` : '/api/custom-providers', {
         method: isEdit ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -9708,14 +10461,15 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
   const inputCls = 'w-full bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] text-ink focus:outline-none focus:border-accent';
   if (!open && !isEdit) {
     return (
-      <button onClick={() => setOpen(true)}
+      <button onClick={() => { initialBaseURLRef.current = ''; templateRef.current = null; setOpen(true); }}
+        data-testid="provider-add"
         className="w-full flex items-center gap-2 px-4 py-3 text-left text-accent hover:bg-canvas-warm transition-colors border-b border-canvas-deep/40 mb-1">
         <Plus size={16} /><span className="text-[14px] font-body">添加 Provider</span>
       </button>
     );
   }
   return (
-    <div ref={formRef} className="px-4 py-3 border-b border-canvas-deep/40 mb-1 space-y-2.5 scroll-mt-60">
+    <div ref={formRef} data-testid="provider-form" className="px-4 py-3 border-b border-canvas-deep/40 mb-1 space-y-2.5 scroll-mt-60">
       <div className="flex items-center gap-2">
         <button onClick={close} className="p-1 -ml-1 text-ink-faint hover:text-ink" title="返回"><ArrowLeft size={16} /></button>
         <span className="flex-1 text-[13px] font-display font-semibold text-ink">{isEdit ? '编辑 Provider' : '新增 Provider'}<span className="text-[10px] font-body font-normal text-ink-faint ml-1">保存到本机</span></span>
@@ -9735,6 +10489,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
             onChange={(e) => {
               const tpl = findBuiltin(e.target.value);
               if (!tpl) return;
+              templateRef.current = tpl; // E 项抑制②:刚选完模板,保存时不再提示切到它自己
               setName(tpl.name);
               setType(tpl.type);
               setBaseURL(tpl.baseURL);
@@ -9811,7 +10566,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           </p>
         </div>
       )}
-      <input className={`${inputCls} font-mono`} placeholder="Base URL (https://...)" value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
+      <input data-testid="provider-baseurl" className={`${inputCls} font-mono`} placeholder="Base URL (https://...)" value={baseURL} onChange={(e) => setBaseURL(e.target.value)} />
       <input className={`${inputCls} font-mono`} type="password" placeholder={isEdit ? 'API Key(留空 = 不修改)' : 'API Key'} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
       {/* r16-4:额度查询密钥。仅额度查询用,不参与推理请求。已保存时不回显明文(与 API Key
           同口径),留空即保留;要删除已存的密钥须点「清除」发出显式空串。 */}
@@ -9830,6 +10585,50 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           {quotaKeyCleared && !quotaKey.trim() ? '保存后清除已存密钥。' : ''}
           留空时使用上方的 API 密钥查询额度。OpenRouter 需填写 management key 才能读取账户余额，否则仅能读取该密钥的花费上限；MiniMax 的套餐额度接口可能要求订阅密钥。其余 provider 无需填写。
         </p>
+      </div>
+      {/* 自定义额度查询端点:地址一填就接管按 host 猜的那条通道(独占用,失败也不回落 ——
+          否则用户会看到不是他配的那条产生的数字)。三格渐进披露:只有地址非空才出现。 */}
+      <div className="space-y-1.5">
+        <input data-testid="provider-quota-url" className={`${inputCls} font-mono`} type="text"
+          placeholder="额度查询接口地址（可选，如 https://relay.example.com/api/user/balance）"
+          value={quotaURL}
+          onChange={(e) => { setQuotaURL(e.target.value); setQuotaTestResult(null); }} />
+        {quotaURL.trim() && (
+          <div className="space-y-1.5 pl-2 border-l border-canvas-deep/60">
+            <input data-testid="provider-quota-path" className={`${inputCls} font-mono`} type="text"
+              placeholder="取值路径，如 data.balance"
+              value={quotaPath} onChange={(e) => setQuotaPath(e.target.value)} />
+            <div className="flex items-center gap-2">
+              <select data-testid="provider-quota-auth" className={`${inputCls} flex-1 cursor-pointer`}
+                value={quotaAuth} onChange={(e) => setQuotaAuth(e.target.value)}>
+                <option value="bearer">Bearer 认证（默认）</option>
+                <option value="raw">不加 Bearer（裸密钥）</option>
+                <option value="none">不带认证头</option>
+              </select>
+              <select data-testid="provider-quota-currency" className={`${inputCls} flex-1 cursor-pointer`}
+                value={quotaCurrency} onChange={(e) => setQuotaCurrency(e.target.value)}>
+                <option value="">不指定币种</option>
+                <option value="CNY">人民币 CNY</option>
+                <option value="USD">美元 USD</option>
+              </select>
+            </div>
+            <button type="button" data-testid="provider-quota-test" onClick={testQuotaEndpoint} disabled={!!busy}
+              className="px-3 py-2 text-[12px] border border-canvas-deep text-ink-muted hover:text-ink rounded-lg disabled:opacity-50">
+              {busy === 'quotaTest' ? '测试中…' : '测试额度接口'}
+            </button>
+            {quotaTestResult && (
+              <div data-testid="provider-quota-test-result" data-state={quotaTestResult.ok ? 'ok' : 'fail'}
+                className={`text-[11px] font-body rounded-lg px-3 py-2 border break-all whitespace-pre-wrap ${quotaTestResult.ok
+                  ? 'text-success border-success/30 bg-success/10'
+                  : 'text-error border-error/30 bg-error/10'}`}>
+                {quotaTestResult.text}
+              </div>
+            )}
+            <p className="text-[11px] text-ink-faint font-body leading-relaxed">
+              填写后额度查询改打这个地址，不再按 provider 地址自动识别。取值路径按点号分层、数组下标写作 [0]，例如 data.balance、balance_infos[0].total_balance。该地址会收到你的额度查询密钥（未填写时用上方 API 密钥）。
+            </p>
+          </div>
+        )}
       </div>
       <div className="flex items-center gap-2">
         <textarea ref={modelsRef} className={`${inputCls} font-mono min-h-[60px]`} placeholder="模型(每行一个,或逗号分隔)" value={modelsText} onChange={(e) => setModelsText(e.target.value)} />
@@ -9886,7 +10685,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           className="flex-1 px-3 py-2 text-[12px] border border-canvas-deep text-ink-muted hover:text-ink rounded-lg disabled:opacity-50">
           {busy === 'test' ? '测试中…' : '测试连接'}
         </button>
-        <button onClick={save} disabled={!!busy}
+        <button onClick={save} disabled={!!busy} data-testid="provider-save"
           className="flex-1 px-3 py-2 text-[12px] bg-accent text-on-accent rounded-lg disabled:opacity-50">
           {busy === 'save' ? '保存中…' : (isEdit ? '更新' : '保存')}
         </button>
@@ -10467,6 +11266,8 @@ export default function App() {
   // 应用重启后恢复所有已绑定真实 session 的附件 sidecar。失败项仍在持久 outbox，
   // SessionDetail 挂载和后续发送还会按 session 重试。
   useEffect(() => { void retryAttachmentSidecars(); }, []);
+  // R20:官方价目在应用起来后先取一次(失败不影响任何功能),用量面板的价格区打开即有。
+  useEffect(() => { loadPricingCatalog().catch(() => {}); }, []);
   // R4-b:记下"官方 provider 当前是怎么计费的"(OAuth 订阅 / API key 按量)。历史消息里
   // 没有当时的鉴权方式,拿此刻的顶替会让切一次 provider 就把订阅期的 Claude 消息按 API
   // 单价重算(判官实测 ¥4,690 → ¥498,876)。这里是全局唯一观察点,跟随 store 的刷新节奏。
@@ -10524,6 +11325,7 @@ export default function App() {
     setRightPanelRaw(target);
   }, []);
   const [tourOpen, setTourOpen] = useState(false); // CK-3 使用指引浮层
+  const [tourModal, setTourModal] = useState(true); // 自动弹出=非模态(不拦截顶栏),手动打开=模态
   // r10-10:切官方但未检测到订阅登录 → 顶栏下横幅(可关)。由切换调用点的
   // notifyOauthMissing 派发 cgui:oauth-missing 驱动;再次切换命中会重新弹出。
   const [oauthMissing, setOauthMissing] = useState(false);
@@ -10532,6 +11334,13 @@ export default function App() {
     window.addEventListener('cgui:oauth-missing', on);
     return () => window.removeEventListener('cgui:oauth-missing', on);
   }, []);
+  // 代码块 ▶ 运行:终端面板未开时先开它(命令本体经 terminalBus 待执行队列,
+  // TerminalPanel 挂载连上后自取,这里只负责把面板拉起来)
+  useEffect(() => {
+    const on = () => setRightPanel((cur) => (cur === 'term' ? cur : 'term'));
+    window.addEventListener('cgui-run-in-terminal', on);
+    return () => window.removeEventListener('cgui-run-in-terminal', on);
+  }, [setRightPanel]);
   // Auth gate: external clients with a password set must log in first. Loopback
   // (Mac) always reports authed, so this is a no-op locally.
   const [authLocked, setAuthLocked] = useState(false);
@@ -10869,6 +11678,10 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
+        // FDA 引导只对 Tauri 打包 app 有意义(文案即"给 /Applications/cc-gui.app 授权",
+        // TCC 按 bundle ID);浏览器访问 node server 的场景弹它纯属误弹,还会用全屏遮罩
+        // 挡住顶栏入口 —— 只在 Tauri 环境检测/弹出。
+        if (!isTauri()) return;
         const [s, d] = await Promise.all([
           fetch('/api/system/permission-status').then((r) => r.json()),
           fetch('/api/system/permission-guide-dismissed').then((r) => r.json()),
@@ -11019,6 +11832,15 @@ export default function App() {
     return () => window.removeEventListener('cgui:ws-reconnected', hydrate);
   }, []);
 
+  // R13:serverEpoch 是"当前服务实例"的身份,进程重启必变,而重启必然断开 WS —— 重连即重取,
+  // 免得重启后的下一次发送被 409 TURN_SERVER_CHANGED 打回(启动那一份在这里顺带取)。
+  useEffect(() => {
+    fetchServerEpoch();
+    const onReconn = () => { serverEpochCache = null; fetchServerEpoch(); };
+    window.addEventListener('cgui:ws-reconnected', onReconn);
+    return () => window.removeEventListener('cgui:ws-reconnected', onReconn);
+  }, []);
+
   // r11-③:皮肤启动对账(main.jsx 已同步重放缓存防 FOUC;此处拉 GET /api/skins 校对:
   // id 失效静默清、manifest 有变以服务端为准)+ 明暗切换重跑应用循环的观察器。
   useEffect(() => {
@@ -11038,6 +11860,18 @@ export default function App() {
       const id = (tool_use_id && st.activeAgents[tool_use_id]) ? tool_use_id : findAgentIdByTaskId(st, task_id);
       // authoritative=true:真 task_notification 允许覆盖 taskManaged 的猜测性 stopped(#1 UI 侧)。
       if (id) finalizeAgent(st, id, status, undefined, true);
+    };
+    // 直播补齐(2026-09-13):子代理【完成那一刻】服务端定向读它那一条转写,把金额条目
+    // 经全局 WS 兜底送来(跨回合跑完的后台子代理只走这条路,那时它的 SSE 早已关)。
+    // 单开一个事件类型、不并进上面那条终态通知:那条在客户端会调 finalizeAgent,
+    // 迟到的"已完成"会把用户刚按出来的"已停止"覆盖掉。这里只写金额,不动任何状态。
+    const onSubagentUsage = (e) => {
+      const { subagentUsage, tool_use_id } = e.detail || {};
+      if (!subagentUsage) return;
+      useStore.getState().pushLiveSubUsage({
+        ...subagentUsage,
+        toolUseId: subagentUsage.toolUseId || tool_use_id || null,
+      });
     };
     // 批A A4:服务端按 CLI 的 background_tasks_changed 对完账后广播的【存活集】。
     // 只做两件事:① settled 里的条目直接收尾;② 本会话 taskManaged 且不在集内的僵尸卡剪掉。
@@ -11068,14 +11902,18 @@ export default function App() {
     // 这是"回合结束后界面还能继续看到工作流进度"的唯一通路。
     const onWorkflowProgressBg = (e) => {
       const d = e.detail || {};
-      applyWorkflowProgress(useStore.getState(), d.tool_use_id, d.workflow_progress);
+      // sessionId / task_id 一并递下去:缺条目时要按它们补建(见 applyWorkflowProgress)。
+      applyWorkflowProgress(useStore.getState(), d.tool_use_id, d.workflow_progress,
+        { taskId: d.task_id || null, sessionId: d.sessionId || null });
     };
     window.addEventListener('cgui:task-notification-bg', onBgTaskNotification);
+    window.addEventListener('cgui:subagent-usage-bg', onSubagentUsage);
     window.addEventListener('cgui:background-tasks', onBackgroundTasks);
     window.addEventListener('cgui:session-procs-killed', onSessionProcsKilled);
     window.addEventListener('cgui:workflow-progress-bg', onWorkflowProgressBg);
     return () => {
       window.removeEventListener('cgui:task-notification-bg', onBgTaskNotification);
+      window.removeEventListener('cgui:subagent-usage-bg', onSubagentUsage);
       window.removeEventListener('cgui:background-tasks', onBackgroundTasks);
       window.removeEventListener('cgui:session-procs-killed', onSessionProcsKilled);
       window.removeEventListener('cgui:workflow-progress-bg', onWorkflowProgressBg);
@@ -11202,12 +12040,13 @@ export default function App() {
     const envBlocking = !cliInstalled && !cliCheckDismissed;      // 环境检查大弹窗在显示
     const updateBlocking = !!updateNotice && !updateModalDismissed; // 更新大弹窗在显示
     if (envBlocking || updateBlocking || releaseNotesOpen) return; // 让路,等其关闭后重跑
-    const t = setTimeout(() => setTourOpen(true), 600);
+    const t = setTimeout(() => { setTourModal(false); setTourOpen(true); }, 600);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMobile, tourOpen, cliInstalled, cliCheckDismissed, updateNotice, updateModalDismissed, releaseNotesOpen]);
   const closeTour = useCallback(() => {
     setTourOpen(false);
+    setTourModal(true);
     try { localStorage.setItem('cgui-tour-seen', '1'); } catch {}
   }, []);
 
@@ -11504,6 +12343,8 @@ export default function App() {
           )}
           {/* 标题跟随焦点 pane(headerPane,判官盲审#2):全局 selectedSession 只是
               pane 0 镜像,分屏焦点在别的 pane 时标题不跟随。同 headerPermKey 口径。 */}
+          {/* R24:命中率三处口径名之一必须出现在顶栏 —— 这里是单次调用口径「最近API命中率」。 */}
+          {headerPane?.sessionId && <TopbarHitRate sessionId={headerPane.sessionId} />}
           {headerPane && (
             <>
               <span className="text-ink-ghost shrink-0">/</span>
@@ -11529,7 +12370,7 @@ export default function App() {
           <ThemeToggle />
           {/* 面板坞:分屏 + 10 个面板 + 更新提醒收纳于此(点击展开 rail)。 */}
           <PanelDock rightPanel={rightPanel} setRightPanel={setRightPanel} updateNotice={updateNotice} jumpToUpdate={jumpToUpdate} attentionCount={attentionCount} />
-          <button data-tour="help" onClick={() => setTourOpen(true)} title="使用指引 — 逐个介绍界面功能"
+          <button data-tour="help" onClick={() => { setTourModal(true); setTourOpen(true); }} title="使用指引 — 逐个介绍界面功能"
             className="flex items-center justify-center p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 transition-colors">
             <HelpCircle size={15} />
           </button>
@@ -11545,7 +12386,7 @@ export default function App() {
         isMobile={isMobile}
       />
       {LocalWidgets()}
-      <GuideTour open={tourOpen} onClose={closeTour} hasProject={!!selectedProject} />
+      <GuideTour open={tourOpen} onClose={closeTour} hasProject={!!selectedProject} modal={tourModal} />
       <ShortcutsPanel open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {/* 修正批#7:Provider 管理独立弹窗(桌面;手机走合并入口页内的导航流全屏页) */}
       <ProviderManagerModal open={providerMgrOpen} editId={providerMgrEditId} onClose={() => { setProviderMgrOpen(false); setProviderMgrEditId(null); }} />
@@ -11589,6 +12430,7 @@ export default function App() {
           真崩了也只该崩这一个弹窗,不该把整个 App 打成错误页。配合 modal 内的
           (g.items || []).map,把爆炸半径收进弹窗自己。 */}
       <ErrorBoundary label="更新说明">
+        <HistoryBackupNotice />
         <ReleaseNotesModal
           open={releaseNotesOpen}
           initialVersion={typeof __BUILD_VERSION__ === 'string' ? __BUILD_VERSION__ : undefined}
@@ -11597,8 +12439,10 @@ export default function App() {
         />
       </ErrorBoundary>
       {updateNotice && !updateModalDismissed && !releaseNotesOpen && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in" onClick={() => setUpdateModalDismissed(true)}>
-          <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-panel shadow-popover animate-glass-rise overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        // 更新提示是低优先级通知,不做全屏模态(遮罩会锁死顶栏/会话交互,与导览
+        // 看门狗同款教训):浮层无遮罩,页面保持可点,顶栏「更新」按钮持续提醒。
+        <div className="fixed inset-0 z-[200] flex items-start justify-center pt-[8vh] pointer-events-none">
+          <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-panel shadow-popover animate-glass-rise overflow-hidden pointer-events-auto">
             <div className="px-5 py-4 flex items-start gap-3">
               <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center shrink-0 text-[18px]">🎉</div>
               <div className="flex-1 min-w-0">

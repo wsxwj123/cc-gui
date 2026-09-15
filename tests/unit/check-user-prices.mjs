@@ -4,7 +4,9 @@
 //   ① 中转站:同一个 gpt-5.6-sol 走中转是服务商自定价(通常低于官网),jsonl 里没有
 //      baseURL/provider 字段,事后无法反推 → 只能由用户填;
 //   ② 套餐包月:付的是月费不是 token 费,按单价算出的金额没有意义 → 只显示用量。
-// 单位一律【人民币元 / 每百万 token】,内部按 1 USD = 7.2 CNY 折成 USD 存。
+// 单位一律【人民币元 / 每百万 token】。2026-09-11 起(契约 §10.12③)手填价**不再折算**:
+// prices 里就是用户填的数字(原币种 CNY),未填的维度 = null(未知)—— 不回落内置表、
+// 不用 in×0.1 / in×1.25 补。展示层按 currency 决定要不要 ×7.2。
 import assert from 'node:assert/strict';
 
 const CNY = 7.2;
@@ -25,34 +27,37 @@ const IO1M = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
 const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-9, `${msg}: ${a} != ${b}`);
 const P = (modelPrices, isCurrent = false) => ({ modelPrices, isCurrent });
 
-// ① 用户价赢过 REMOTE(LiteLLM 下发表)。REMOTE 给 999,用户填 ¥18/¥108。
+// ① 用户价赢过 REMOTE(LiteLLM 下发表)。REMOTE 给 999,用户填 ¥18/¥108(原值照抄)。
 setUserPrices([P({ 'gpt-5.6-sol': { in: 18, out: 108 } })]);
 const relay = computeCost('gpt-5.6-sol', IO1M);
-near(relay.totalUsd, (18 + 108) / CNY, '用户价没赢过 REMOTE');
+near(relay.totalUsd, 18 + 108, '用户价没赢过 REMOTE');
 assert.equal(relay.source, 'user', 'computeCost 应标注 source=user 供显示口径切换');
 
 // ② 用户价赢过内置手抄表 PRICES(claude-opus-5 内置 $5/$25)。
 setUserPrices([P({ 'claude-opus-5': { in: 7.2, out: 14.4 } })]);
-near(computeCost('claude-opus-5', IO1M).totalUsd, 1 + 2, '用户价没赢过内置表');
+near(computeCost('claude-opus-5', IO1M).totalUsd, 7.2 + 14.4, '用户价没赢过内置表');
 
-// ③ 缓存价留空 → 按默认倍率 cacheRead=0.1×in、cacheWrite=1.25×in(与 cny()/usd() 同口径)。
+// ③ 缓存价留空 → **未知**(不计费、进 unknownDimensions),不按默认倍率补。
 setUserPrices([P({ 'my-model': { in: 72, out: 144 } })]);
 const dflt = computeCost('my-model', {
   input_tokens: 1_000_000, output_tokens: 1_000_000,
   cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000,
 });
-near(dflt.totalUsd, 10 + 20 + 1 + 12.5, '缓存价缺省倍率不对(应 0.1×in / 1.25×in)');
+near(dflt.totalUsd, 72 + 144, '未填的缓存读写必须按未知处理,只算已知维度');
+assert.ok(dflt.unknownDimensions.includes('cacheRead') && dflt.unknownDimensions.includes('cacheWrite'), '未知维度要点名');
 
 // ④ 缓存价显式填了就用填的,不套倍率。
 setUserPrices([P({ 'my-model': { in: 72, out: 144, cacheRead: 7.2, cacheWrite: 36 } })]);
 const explicit = computeCost('my-model', {
   input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000,
 });
-near(explicit.totalUsd, 10 + 1 + 5, '显式缓存价没生效');
+near(explicit.totalUsd, 72 + 7.2 + 36, '显式缓存价没生效(读 7.2、写按单档 36)');
 
-// ⑤ 只填了一项 → 未填项回落内置表同项(不是 0)。claude-opus-5 内置 $5/$25。
+// ⑤ 只填了一项 → 未填项 = 未知(不回落内置表,也不按 0 算)。
 setUserPrices([P({ 'claude-opus-5': { in: 7.2 } })]);
-near(computeCost('claude-opus-5', IO1M).totalUsd, 1 + 25, '未填的 output 应回落内置表 $25');
+const onlyIn = computeCost('claude-opus-5', IO1M);
+near(onlyIn.totalUsd, 7.2, '未填的 output 不得回落内置表');
+assert.ok(onlyIn.unknownDimensions.includes('output'), '未填的 output 要点名');
 
 // ⑥ plan: true(套餐包月)→ computeCost 返回 null(只显示用量),isPlanBilling 为真。
 setUserPrices([P({ 'my-plan-model': { plan: true } })]);
@@ -62,7 +67,7 @@ assert.equal(isPlanBilling(null, 'my-plan-model'), true, '用户标记的套餐�
 // ⑦ 用户标记优先于内置 Kimi 套餐白名单:k3 按量付费时填了价 → 必须显示金额。
 setUserPrices([P({ k3: { in: 20, out: 100 } })]);
 assert.equal(isPlanBilling(null, 'k3'), false, '用户为 k3 填了单价,不该再被白名单藏成套餐');
-near(computeCost('k3', IO1M).totalUsd, (20 + 100) / CNY, 'k3 用户价没生效');
+near(computeCost('k3', IO1M).totalUsd, 20 + 100, 'k3 用户价没生效');
 // 反向:没填 k3 时白名单照旧生效(零回归)。
 setUserPrices([]);
 assert.equal(isPlanBilling(null, 'k3'), true, '无用户价时 Kimi 套餐白名单不该失效');
@@ -71,19 +76,19 @@ assert.equal(isPlanBilling(null, 'k3'), true, '无用户价时 Kimi 套餐白名
 const SUB = { providerHint: 'anthropic', baseUrl: '', hasAuthKey: false };
 setUserPrices([P({ 'claude-opus-5': { in: 7.2, out: 14.4 } })]);
 assert.equal(isPlanBilling(SUB, 'claude-opus-5'), false, '用户显式填价应赢过订阅判据');
-near(computeCost('claude-opus-5', IO1M, SUB).totalUsd, 1 + 2, '订阅态下用户价没生效');
+near(computeCost('claude-opus-5', IO1M, SUB).totalUsd, 7.2 + 14.4, '订阅态下用户价没生效');
 
 // ⑨ 同一 model id 两个 provider 填了不同价 → 当前激活的赢;没有激活的取第一个匹配。
 setUserPrices([
   P({ 'shared-id': { in: 72, out: 0 } }),                 // 非激活,列表第一个
   P({ 'shared-id': { in: 7.2, out: 0 } }, true),          // 激活
 ]);
-near(computeCost('shared-id', IN1M).totalUsd, 1, '同 id 冲突时应取当前激活 provider 的价');
+near(computeCost('shared-id', IN1M).totalUsd, 7.2, '同 id 冲突时应取当前激活 provider 的价');
 setUserPrices([
   P({ 'shared-id': { in: 72, out: 0 } }),
   P({ 'shared-id': { in: 7.2, out: 0 } }),
 ]);
-near(computeCost('shared-id', IN1M).totalUsd, 10, '都不激活时应取第一个匹配');
+near(computeCost('shared-id', IN1M).totalUsd, 72, '都不激活时应取第一个匹配');
 
 // ⑩ 精确匹配 model id,不做前缀/去后缀兜底(免得填 gpt-5.6 把 gpt-5.6-luna 一起计价)。
 setUserPrices([P({ 'gpt-5.6': { in: 720, out: 720 } })]);
@@ -114,21 +119,21 @@ assert.equal(costTitle(null), '', '无 cost 时不产生文案');
 // 'openai/gpt-5.6-sol' 29 条、'kimi-k3' + 'moonshotai/kimi-k3' 63 条。填了单价后带前缀的
 // 那部分**静默**按官网价算,用户看不出来。
 setUserPrices([P({ 'gpt-5.6-sol': { in: 18, out: 108 } })]);
-near(computeCost('openai/gpt-5.6-sol', IO1M).totalUsd, (18 + 108) / CNY, '带命名空间的 id 没命中用户价');
+near(computeCost('openai/gpt-5.6-sol', IO1M).totalUsd, 18 + 108, '带命名空间的 id 没命中用户价');
 // 反向:表单里填的带前缀,历史里是裸 id。
 setUserPrices([P({ 'moonshotai/kimi-k3': { in: 7.2, out: 7.2 } })]);
-near(computeCost('kimi-k3', IO1M).totalUsd, 2, '表单填带前缀 id 时,裸 id 没命中');
+near(computeCost('kimi-k3', IO1M).totalUsd, 7.2 + 7.2, '表单填带前缀 id 时,裸 id 没命中');
 // [1m] 是 CLI 通用的 1M 上下文后缀(同一个模型)。内置 Kimi 套餐白名单特意留了 (\[1m\])?,
 // 用户价原先不认 → "给 k3 填按量单价盖过套餐白名单"在 1M 会话里失效。
 setUserPrices([P({ k3: { in: 20, out: 100 } })]);
 assert.equal(isPlanBilling(null, 'k3[1m]'), false, 'k3[1m] 没命中用户价,仍被套餐白名单藏掉');
-near(computeCost('k3[1m]', IO1M).totalUsd, (20 + 100) / CNY, 'k3[1m] 的用户价没生效');
+near(computeCost('k3[1m]', IO1M).totalUsd, 20 + 100, 'k3[1m] 的用户价没生效');
 // 无用户价时,[1m] 仍走内置白名单(零回归)。
 setUserPrices([]);
 assert.equal(isPlanBilling(null, 'k3[1m]'), true, '无用户价时 k3[1m] 应仍是套餐档');
 // 空白与大小写。
 setUserPrices([P({ '  Claude-Opus-5 ': { in: 7.2, out: 14.4 } })]);
-near(computeCost('claude-opus-5', IO1M).totalUsd, 1 + 2, 'trim / 小写归一没生效');
+near(computeCost('claude-opus-5', IO1M).totalUsd, 7.2 + 14.4, 'trim / 小写归一没生效');
 // 归一化后为空的键直接丢弃,不能变成"匹配一切"。
 setUserPrices([P({ '/': { in: 720, out: 720 } })]);
 assert.equal(userModelPrice('claude-opus-5'), null, '空键不该匹配任何 model');
@@ -148,8 +153,9 @@ near(computeCost('claude-sonnet-4-5-20250929', IO1M).totalUsd, 3 + 15, '去日�
 // 同一份 PRICES 里就是两个价不同的模型。无条件剥前缀会让用户填的 Cerebras 价被 Groq 的
 // 顶掉,差 23 倍且完全静默(而且口径标签还写着"按你填写的单价",比少算成官网价更隐蔽)。
 // 装填两遍(精确键先全部落位)+ 查询按 精确 → 归一,两者缺一这组就红。
-const GROQ = { 'openai/gpt-oss-120b': { in: 1.08, out: 4.32 } };   // ¥1.08/¥4.32 = $0.15/$0.60
-const CEREBRAS = { 'gpt-oss-120b': { in: 25.2, out: 54.0 } };      // ¥25.2/¥54.0 = $3.50/$7.50
+// (手填价不再折算成 USD,这里直接填"看起来像美元"的原值数字,断言也按原值。)
+const GROQ = { 'openai/gpt-oss-120b': { in: 0.15, out: 0.60 } };
+const CEREBRAS = { 'gpt-oss-120b': { in: 3.50, out: 7.50 } };
 for (const order of [[GROQ, CEREBRAS], [CEREBRAS, GROQ]]) {  // 结果不许依赖 provider 列表顺序
   setUserPrices(order.map((mp) => P(mp)));
   near(computeCost('openai/gpt-oss-120b', IO1M).totalUsd, 0.15 + 0.60, 'Groq 那行被串了');
@@ -157,8 +163,8 @@ for (const order of [[GROQ, CEREBRAS], [CEREBRAS, GROQ]]) {  // 结果不许依�
 }
 // 命名空间不同、基名相同的一般情形同样各归各。
 setUserPrices([P({ 'groq/foo': { in: 7.2, out: 0 } }), P({ 'cerebras/foo': { in: 72, out: 0 } })]);
-near(computeCost('groq/foo', IN1M).totalUsd, 1, 'groq/foo 被串');
-near(computeCost('cerebras/foo', IN1M).totalUsd, 10, 'cerebras/foo 被 groq/foo 顶掉');
+near(computeCost('groq/foo', IN1M).totalUsd, 7.2, 'groq/foo 被串');
+near(computeCost('cerebras/foo', IN1M).totalUsd, 72, 'cerebras/foo 被 groq/foo 顶掉');
 // 精确整体优先于"当前激活":激活的是 Groq,但消息的 model 精确等于 Cerebras 那个 id。
 // 精确讲的是模型身份,isCurrent 只是同一身份撞车时的裁决规则。
 setUserPrices([P(CEREBRAS), P(GROQ, true)]);

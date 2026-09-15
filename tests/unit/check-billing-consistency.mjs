@@ -137,7 +137,10 @@ for (const m of ['k30', 'k3-turbo', 'k3.5', 'k3-pro', 'kimi-for-coding-x', 'kimi
 {
   const { readFile } = await import('node:fs/promises');
   const src = await readFile(new URL('../../client/src/components/UsagePanel.jsx', import.meta.url), 'utf8');
-  assert.match(src, /if \(c\.usd != null\) \{ g\.usd \+= c\.usd; g\.priced = true; \}/,
+  // 58d47520 起累加前多一道 displayUsd(c.usd, c.currency) 归一:官方 CNY 报价的 c.usd 是
+  // **原币种**数字,与 USD 来源的数字不能直接相加(GUI 显示口径 = USD 计,formatCost 再 ×7.2)。
+  // 判据仍是 `c.usd != null`(与行里的判据同源),补的是单位换算 —— 断言随之更新,不是放宽。
+  assert.match(src, /if \(c\.usd != null\) \{ g\.usd \+= displayUsd\(c\.usd, c\.currency\); g\.priced = true; \}/,
     '组的 priced 累加判据不再是 c.usd != null,与行的判据脱钩了');
   assert.doesNotMatch(src, /g\.usd > 0/,
     '还有显示点在用旧判据 g.usd > 0(组头与柱状图都应走 g.priced)');

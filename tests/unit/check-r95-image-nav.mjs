@@ -383,9 +383,13 @@ check('3.2 回归锁:含 reveal(shotFile(h))', () => {
   assert.ok(P.includes('reveal(shotFile(h))'));
 });
 
-console.log('\n[B] 源码锁 3.3 未接导航的两个调用点');
+console.log('\n[B] 源码锁 3.3 未接导航的调用点');
+// 【R09 修订 2026-09-10】会话消息的图片灯箱【必须】接导航:用户实报"用户消息灯箱无左右
+// 导航",本次首批锁定验收 FB-T29 直接要求计数 1/2 与左右键切图(按本条消息的图片序列)。
+// r95 当时刻意把会话消息排除在导航外,已由新契约反向;输入框附件(ChatInput)保持不接。
 const CALL = "<ImageLightbox src={zoomImage?.src} name={zoomImage?.name} path={zoomImage?.path} onClose={() => setZoomImage(null)} />";
-for (const f of ['client/src/components/MessageBubble.jsx', 'client/src/components/ChatInput.jsx']) {
+{
+  const f = 'client/src/components/ChatInput.jsx';
   const short = f.split('/').pop();
   let S = '';
   try { S = read(f); } catch (e) { S = ''; }
@@ -396,8 +400,18 @@ for (const f of ['client/src/components/MessageBubble.jsx', 'client/src/componen
   check(`B9 ${short} 不出现 onPrev / onNext / counter`, () => {
     // 用词边界:ChatInput 里本来就有 onPreview 之类的标识符,裸 includes 会误报。
     for (const p of ['onPrev', 'onNext', 'counter']) {
-      assert.ok(!new RegExp(`\\b${p}\\b`).test(S), `发现 ${p} —— 会话消息/输入框附件的放大层不该有方向键导航`);
+      assert.ok(!new RegExp(`\\b${p}\\b`).test(S), `发现 ${p} —— 输入框附件的放大层不该有方向键导航`);
     }
+  });
+}
+{
+  const S = read('client/src/components/MessageBubble.jsx');
+  check('B9/R09 MessageBubble.jsx 接上导航(计数 / 左右键 / 首尾边界)', () => {
+    assert.ok(S.length > 0, '文件读不到');
+    for (const p of ['onPrev', 'onNext', 'counter']) {
+      assert.ok(new RegExp(`\\b${p}\\b`).test(S), `R09:会话消息灯箱必须传 ${p}`);
+    }
+    assert.ok(/imageAttachmentSequence\(message\.attachments\)/.test(S), 'R09:序列必须取自本条消息的图片附件');
   });
 }
 
@@ -412,9 +426,21 @@ check('3.4/E9 tests/acceptance/** 本轮零改动(server/routes/image.js 已移�
     console.log('    (跳过:git 不可用 —', String(e.message).split('\n')[0], ')');
     return;
   }
-  const changed = execFileSync('git', ['diff', '--name-only', base, '--', 'tests/acceptance'],
-    { cwd: root, encoding: 'utf8' }).trim();
-  assert.strictEqual(changed, '', `这些文件本轮一行都不该改:\n      ${changed.split('\n').join('\n      ')}`);
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  // 【2026-09-10 首批开发修订】与 check-r94-panel §7.9 同款收窄:本批新增了整套锁定验收套件
+  // tests/acceptance/first-batch-20260910/(基线提交上还不存在),那是合法产物。零 diff 锁的
+  // 本意"既有锁定验收一行都不许动"不变 —— 修改/删除照旧零容忍,只有全新条目可以新增。
+  const modified = git('diff', '--name-only', '--diff-filter=MD', base, '--', 'tests/acceptance');
+  assert.strictEqual(modified, '', `这些既有文件本轮一行都不该改/删:\n      ${modified.split('\n').join('\n      ')}`);
+  const existingTopLevel = new Set(git('ls-tree', '--name-only', `${base}:tests/acceptance`).split('\n').filter(Boolean));
+  const added = [
+    git('diff', '--name-only', '--diff-filter=A', base, '--', 'tests/acceptance'), // 已入库的新增
+    git('ls-files', '--others', '--exclude-standard', '--', 'tests/acceptance'),    // 尚未入库的新增
+  ].join('\n');
+  for (const file of added.split('\n').filter(Boolean)) {
+    assert.ok(!existingTopLevel.has(file.split('/')[2]),
+      `不许往既有锁定套件里新增文件(只有全新条目可以):${file}`);
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════

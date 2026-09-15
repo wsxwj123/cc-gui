@@ -46,6 +46,43 @@ export function pickCliContextWindow(modelUsage, modelId) {
   return null;
 }
 
+// R33:从 result.modelUsage 提取【整轮累计】的回合用量(消耗口径)—— 轮末气泡的
+// 输入/输出/缓存/成本与「整轮命中率」按它显示。挑选 entry 的策略与
+// pickCliContextWindow 同源(exact > 单 entry > 不取),直接复用它,不重复实现。
+// 语义依据(R33 用户实测,CLI 2.1.227):一轮 2 次底层 API 调用时,顶层 result.usage
+// 只是【最后一次调用】(实测 input 2771/cache_read 56704/output 99),modelUsage 里
+// 按模型聚合的才是整轮(inputTokens 3018/cacheReadInputTokens 57216/outputTokens 339)
+// —— 拿 result.usage 当回合口径 = 用户实报「花费/命中率只算到最后一次调用」。
+// entry 字段是 CLI 的 camelCase,归一成 usage 的 snake_case(展示/计价消费方口径)。
+// 防错:至少一个 token 字段为有限正数才采;全缺/全 0/非数 → null,调用方回落旧值。
+// ⚠️ 红线(memory context-badge-usage-source):整轮累计口径只准进【回合展示/成本】,
+// 绝不能写进上下文徽章的「当前占用」(分子只来自 message_start/message_delta)。
+export function pickCliTurnUsage(modelUsage, modelId) {
+  const hit = pickCliContextWindow(modelUsage, modelId);
+  if (!hit) return null;
+  const e = modelUsage[hit.matchedModel];
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+  const usage = {
+    input_tokens: num(e.inputTokens),
+    output_tokens: num(e.outputTokens),
+    cache_read_input_tokens: num(e.cacheReadInputTokens),
+    cache_creation_input_tokens: num(e.cacheCreationInputTokens),
+  };
+  const total = usage.input_tokens + usage.output_tokens
+    + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+  if (total <= 0) return null;
+  return { usage, matchedModel: hit.matchedModel };
+}
+
+// R33:result 事件 → 回合 usage(整轮累计口径)的最终裁决。modelUsage 挑得中就用四个
+// token 字段覆盖 event.usage(其余字段如 ccgui_usage 原样保留);挑不中/缺失回落
+// event.usage(旧行为)。两者都没有 → null(回合无用量,调用方按现状处理)。
+export function resolveTurnUsage(eventUsage, modelUsage, modelId) {
+  const picked = pickCliTurnUsage(modelUsage, modelId);
+  if (!picked) return eventUsage || null;
+  return { ...eventUsage, ...picked.usage };
+}
+
 // r103:徽章分母的来源优先级(纯函数,单测 check-r103-dev-badge-window.mjs)。
 // 事故(用户实报):第三方 provider 表单手填 1M,第一轮结束后徽章分母变回 200K ——
 // R8-6 拿 result.modelUsage[*].contextWindow 无条件覆盖了手填值,而 CLI 对它不认识的

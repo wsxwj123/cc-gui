@@ -9,7 +9,9 @@
 //       S2 判定忽略请求 model 参数(回读 upstream.model)→ t4/t5/t6/t9 红;
 //       S3 noVision 时 tool_result 内图片不剥(原样转发)→ t4 红;
 //       S4 前端黄条判据 revert 回 /deepseek/i.test(providerHint||baseUrl) 或删
-//          openai 协议门控/绕开 attachmentNoVision 内联重写 → t10 红(实测过红)。
+//          openai 协议门控/绕开 attachmentNoVision 内联重写 → t10 红(实测过红);
+//       S5(r116) 删掉 vision-capability.js 的 Flash 系例外行 → t10 的 v4.1-flash
+//          断言红(黄条会把有视觉的新版 Flash 误报成不支持)。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 // 命名空间 import:buildOpenAIRequest 的导出(仅为可单测)缺失时在 t9 给行为级报错,
@@ -63,11 +65,15 @@ setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key',
   assert.equal(out.length, 3, 't3: 不多发消息(user/assistant/tool 各一)');
 }
 
+// r116:本文件的「无视觉 deepseek」样本从 deepseek-v4-flash 换成 deepseek-v4-pro ——
+// 前者已被 DeepSeek-V4.1-Flash 承接(官方文档:支持图像理解,vision-capability.js
+// 的 r116 例外行已放行),再拿它当无视觉样本会与新事实矛盾;v4-pro 官方明写不支持图像。
+// 断言意图逐条不变(仍是"无视觉样本 → 剥图/不提示"的方向性验证)。
 // ── t4(剥图方向,杀 S2/S3):请求模型无视觉 → 即使 upstream.model 是识图模型也剥 ──
 {
   // upstream.model 停在识图模型(如用户先选 vision-exp 完成过一次切换),会话实际用非识图模型
   setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key', model: 'deepseek-v4-flash-vision-exp' });
-  const out = anthropicToOpenAIMessages(readTurn([IMG]), null, 'deepseek-v4-flash');
+  const out = anthropicToOpenAIMessages(readTurn([IMG]), null, 'deepseek-v4-pro');
   assert.equal(imgParts(out).length, 0, 't4: 无视觉模型不得转发 image_url(上游会 400)');
   const tool = out.find((m) => m.role === 'tool');
   assert.ok(tool.content.includes('[图片已忽略'), 't4: 剥除后保留占位文本(与顶层分支同一句)');
@@ -76,14 +82,14 @@ setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key',
 // ── t5(放行方向,修前必红,杀 S2):upstream.model 停在 models[0](非识图),
 //    会话实际选了识图模型 → 按请求 model 放行 ──
 {
-  setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key', model: 'deepseek-v4-flash' });
+  setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key', model: 'deepseek-v4-pro' });
   const out = anthropicToOpenAIMessages(readTurn([IMG]), null, 'deepseek-v4-flash-vision-exp');
   assert.equal(imgParts(out).length, 1, 't5: 判定须按本次请求的 model,不受切换时刻 models[0] 影响');
 }
 
 // ── t6:upstreamNoVision 请求模型优先、缺失回落 upstream.model(旧调用零参不变) ──
 {
-  setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key', model: 'deepseek-v4-flash' });
+  setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key', model: 'deepseek-v4-pro' });
   assert.equal(upstreamNoVision(), true, 't6: 零参调用回落 upstream.model(旧行为不变)');
   assert.equal(upstreamNoVision('deepseek-v4-flash-vision-exp'), false, 't6: 请求模型优先于 upstream.model');
   assert.equal(upstreamNoVision(''), true, 't6: 空串视为缺失,回落 upstream.model');
@@ -106,7 +112,7 @@ setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key',
   setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key', model: 'deepseek-v4-flash-vision-exp' });
   const ok = anthropicToOpenAIMessages(shapeB, null);
   assert.equal(imgParts(ok).length, 1, 't8: 视觉模型下顶层 image 照常转 image_url');
-  const strip = anthropicToOpenAIMessages(shapeB, null, 'deepseek-v4-flash');
+  const strip = anthropicToOpenAIMessages(shapeB, null, 'deepseek-v4-pro');
   assert.equal(imgParts(strip).length, 0, 't8: 无视觉模型下顶层 image 照常剥除');
   assert.ok(JSON.stringify(strip).includes('[图片已忽略'), 't8: 顶层剥除占位文本不变');
 }
@@ -116,10 +122,10 @@ setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key',
   assert.equal(typeof proxy.buildOpenAIRequest, 'function',
     't9: buildOpenAIRequest 需导出(仅为可单测),现有导出:' + Object.keys(proxy).join(', '));
   const { buildOpenAIRequest } = proxy;
-  setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key', model: 'deepseek-v4-flash' });
+  setOpenAIUpstream({ baseURL: 'https://relay.example.com/v1', apiKey: 'test-key', model: 'deepseek-v4-pro' });
   const req = buildOpenAIRequest({ model: 'deepseek-v4-flash-vision-exp', messages: readTurn([IMG]), stream: false, max_tokens: 100 });
   assert.equal(imgParts(req.messages).length, 1, 't9: 经完整请求构造,body.model 生效放行图片');
-  const req2 = buildOpenAIRequest({ model: 'deepseek-v4-flash', messages: readTurn([IMG]), stream: false, max_tokens: 100 });
+  const req2 = buildOpenAIRequest({ model: 'deepseek-v4-pro', messages: readTurn([IMG]), stream: false, max_tokens: 100 });
   assert.equal(imgParts(req2.messages).length, 0, 't9: body.model 无视觉 → 剥除');
 }
 
@@ -132,15 +138,19 @@ setOpenAIUpstream(null); // 收尾:不污染同进程后续测试
 // 内联重写/整体 revert"(源级断言先例:check-1m-toggle.mjs)。
 {
   const { attachmentNoVision } = await import('../../server/utils/vision-capability.js');
-  assert.equal(attachmentNoVision('openai', 'deepseek-v4-flash'), true,
+  assert.equal(attachmentNoVision('openai', 'deepseek-v4-pro'), true,
     't10: openai 协议 + 表判无视觉 → 提示(旧判据 baseUrl=回环恒不命中,此方向漏报)');
-  assert.equal(attachmentNoVision('anthropic', 'deepseek-v4-flash'), false,
+  assert.equal(attachmentNoVision('anthropic', 'deepseek-v4-pro'), false,
     't10: anthropic 协议透传不剥图 → 不提示(旧判据对 api.deepseek.com 误报)');
   assert.equal(attachmentNoVision('openai', 'deepseek-v4-flash-vision-exp'), false,
     't10: openai 协议 + 识图模型 → 不提示');
+  // r116:厂商改名后视觉并进 Flash 系(名称不带 "vision")—— 前端黄条必须跟着放行。
+  // 变异:删掉 vision-capability.js 的 r116 例外行 → 落回一刀切 false → 本条红。
+  assert.equal(attachmentNoVision('openai', 'deepseek-v4.1-flash'), false,
+    't10: 新版 Flash 系有视觉(r116 改名形态)→ 不提示黄条');
   assert.equal(attachmentNoVision('openai', 'totally-unknown-9'), false,
     't10: 查无记录(null)不误报');
-  assert.equal(attachmentNoVision(undefined, 'deepseek-v4-flash'), false,
+  assert.equal(attachmentNoVision(undefined, 'deepseek-v4-pro'), false,
     't10: protocol 缺失(provider 未加载)不提示');
 
   const src = readFileSync(new URL('../../client/src/components/ChatInput.jsx', import.meta.url), 'utf8');

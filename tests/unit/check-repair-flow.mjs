@@ -82,7 +82,9 @@ import {
 
 // t6 仪表化判据:服务端 GET dry-run 路由存在且只读(无写盘/备份);前端常驻入口 + 模态 + 持久化接线
 {
-  const sessions = readFileSync(new URL('../../server/routes/sessions.js', import.meta.url), 'utf8');
+  // R25:历史操作(含 GET 体检)统一搬到 server/routes/session-history.js —— 断言口径不变:
+  // 路由存在,且只读(不许出现写盘/备份调用)。
+  const sessions = readFileSync(new URL('../../server/routes/session-history.js', import.meta.url), 'utf8');
   const getRoute = /router\.get\('\/sessions\/:sessionId\/repair-official-compat'[\s\S]*?\n\}\);/.exec(sessions)?.[0];
   assert.ok(getRoute, 't6: GET dry-run 路由存在');
   assert.doesNotMatch(getRoute, /writeJsonlAtomic|writeFile|\.bak/, 't6: dry-run 必须只读');

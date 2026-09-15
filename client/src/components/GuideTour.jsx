@@ -12,20 +12,21 @@ import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { X, ArrowRight, ArrowLeft } from './Icon.jsx';
 
 // 面板 ×10 平铺(文案沿用),每步 enter=展开 rail(锚点 panel-<id> 仅 rail 展开时在 DOM)。
+// R44「进程」那枚按钮已从 rail 移除(入口迁到 设置 → 高级,同一组件内嵌),所以不单列步骤:
+// 锚点 panel-processes 已不在 DOM,留着只会每次都静默顺延;位置说明并进「通用设置」一步。
 const PANEL_STEPS = [
   ['panel-files', '文件浏览器', '项目文件树:查看 / 编辑 / 预览文件,右键可把文件添加到对话上下文。', 'cgui:dock-rail-open'],
   ['panel-changes', '文件审查', '按回合查看 AI 改了哪些文件(diff 对比),不满意可一键回滚。', 'cgui:dock-rail-open'],
   ['panel-monitor', 'Subagent 监控', '子代理与后台代理的实时状态,可逐个停止。', 'cgui:dock-rail-open'],
   ['panel-agents', 'Agent 管理', '管理自定义子代理(写入 ~/.claude/agents)。\n· 内置 orchestrator / explorer / oracle / designer / fixer 等预设首次启动已自动安装,在此可查看 / 编辑 / 重装', 'cgui:dock-rail-open'],
   ['panel-usage', '用量统计', 'token / 费用统计,/insights 报告,可导出 CSV。', 'cgui:dock-rail-open'],
-  ['panel-processes', '进程管理', '查看并停止正在运行的 claude 子进程。', 'cgui:dock-rail-open'],
   ['panel-mcp', '工具(MCP)', 'MCP 服务器与插件的增删 / 测试 / 安装。', 'cgui:dock-rail-open'],
   ['panel-skills', 'Skill 市场', 'skill 市场导入与本机技能管理。', 'cgui:dock-rail-open'],
   ['panel-memory', 'CLAUDE.md 指令', 'CLAUDE.md 四级指令 / 自动记忆 / 提示词库。', 'cgui:dock-rail-open'],
   // r61:生图工作台(0.2.343-0.2.349 全量能力)
   ['panel-image', '生图', 'AI 生图工作台:配置自定义生图 provider(OpenAI 系 / Gemini 系 / 对话接口),文生图与图生图。\n· 「拉取模型」弹窗勾选可用模型;尺寸候选按模型自动过滤(gpt-image-2 的 4K 选 3840x2160);直连失败可给该 provider 单独填「代理地址」\n· 图生图:提示词框上方「添加参考图」上传,或在任务列表对已生成图点「以此图修改」\n· 生成在后台运行(关面板不中断,最多 3 张并行);「任务列表」选项卡看进度:可取消 / 批量删除 / 恢复提示词 / 放大预览 / 在文件夹中显示', 'cgui:dock-rail-open'],
   // 修正批#7:Provider tab 已删(管理迁顶栏 Provider 卡片底部「管理」弹窗),7 个标签页。
-  ['panel-settings', '通用设置', '更新 / 会话 / 环境 / 权限 / Hooks / 网络 / 高级 共 7 个标签页;顶部可搜索设置项。', 'cgui:dock-rail-open'],
+  ['panel-settings', '通用设置', '更新 / 会话 / 环境 / 权限 / Hooks / 网络 / 高级 共 7 个标签页;顶部可搜索设置项。\n· 进程管理(查看并停止正在运行的 claude 子进程)在「高级」标签页底部,顶部搜索框输入「进程」可直达,也可按 Cmd/Ctrl+7 单独把它开到右侧', 'cgui:dock-rail-open'],
 ];
 
 function buildSteps(hasProject) {
@@ -85,7 +86,10 @@ const fireEnter = (step) => {
   return true;
 };
 
-export function GuideTour({ open, onClose, hasProject }) {
+// modal=false:非模态引导(自动弹出的首启导览用)—— 不渲染全屏暗区拦截层,
+// 顶栏等控件保持可点(黑盒合同:顶栏「终端」等入口必须始终可操作);
+// 说明卡/高亮框照常展示。modal=true(默认):手动打开,点暗区跳过,模态教学。
+export function GuideTour({ open, onClose, hasProject, modal = true }) {
   const steps = useMemo(() => buildSteps(hasProject), [hasProject]);
   const [i, setI] = useState(0);
   const [rect, setRect] = useState(null);
@@ -198,8 +202,8 @@ export function GuideTour({ open, onClose, hasProject }) {
       {/* 高亮框 + 四周压暗(box-shadow 撑满屏) */}
       <div style={{ position: 'fixed', ...spot, borderRadius: 10, boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)', transition: 'top .15s, left .15s, width .15s, height .15s' }}
         className="ring-2 ring-accent pointer-events-none" />
-      {/* 点暗区跳过 —— 只在说明卡真实可见时才拦截整页点击 */}
-      {pos && <div className="absolute inset-0 pointer-events-auto" onClick={onClose} />}
+      {/* 点暗区跳过 —— 只在说明卡真实可见时才拦截整页点击;非模态(auto)不拦截 */}
+      {modal && pos && <div className="absolute inset-0 pointer-events-auto" onClick={onClose} />}
       {/* 说明卡 */}
       <div ref={tipRef} style={{ position: 'fixed', width: TIP_W, top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? 'visible' : 'hidden', zIndex: 5 }}
         className="bg-canvas border border-canvas-deep rounded-panel shadow-popover p-4 animate-glass-rise pointer-events-auto">

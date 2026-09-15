@@ -56,14 +56,13 @@ export function ReleaseNotesModal({ open, initialVersion, initialNotes = null, o
   const groups = Array.isArray(notes?.groups) ? notes.groups : [];
   return (
     // B4 显式只读退出(PLAN §1.3.2 / INTERFACE §3.4):发行说明是只读面。
+    // 非模态浮层(无遮罩):更新说明是低优先级通知,不锁页面交互(顶栏/会话保持可点)。
     <GenuiActionProvider value={null}>
     <div
-      className="fixed inset-0 z-[220] flex items-center justify-center bg-black/40 backdrop-blur-soft animate-fade-in"
-      onClick={close}
+      className="fixed inset-0 z-[220] flex items-center justify-center pointer-events-none"
     >
       <div
-        className="glass-popover w-[520px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(80vh,calc(var(--app-h,100dvh)-3rem))] rounded-panel shadow-popover animate-glass-rise overflow-hidden flex flex-col"
-        onClick={(e) => e.stopPropagation()}
+        className="glass-popover w-[520px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(80vh,calc(var(--app-h,100dvh)-3rem))] rounded-panel shadow-popover animate-glass-rise overflow-hidden flex flex-col pointer-events-auto"
       >
         {/* 头 */}
         <div className="shrink-0 flex items-start gap-3 px-5 py-4 border-b border-canvas-deep">

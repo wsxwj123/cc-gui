@@ -338,12 +338,22 @@ check('§7.7 图标仍来自 ./Icon.jsx', () => {
   assert.match(LB, /from '\.\/Icon\.jsx'/);
 });
 const R95_CALL = "<ImageLightbox src={zoomImage?.src} name={zoomImage?.name} path={zoomImage?.path} onClose={() => setZoomImage(null)} />";
+// 【R09 修订 2026-09-10】会话消息灯箱改接导航(计数/左右键,新锁定验收 FB-T29),调用行不再是
+// r95 形态;输入框附件(ChatInput)仍是逐字 r95 形态。两条各自的"不接新能力(缺省视口/1:1/
+// meta)"约束不变。
 for (const f of ['client/src/components/MessageBubble.jsx', 'client/src/components/ChatInput.jsx']) {
   const short = f.split('/').pop();
   const S = read(f);
-  check(`B18/§7.8 ${short} 的调用行仍逐字是 r95 形态`, () => {
+  const isMessageBubble = short === 'MessageBubble.jsx';
+  check(`B18/§7.8 ${short} ${isMessageBubble ? '按 R09 接导航(不再逐字 r95 形态)' : '的调用行仍逐字是 r95 形态'}`, () => {
     assert.ok(S.length > 0, '文件读不到');
-    assert.ok(S.includes(R95_CALL), `调用行必须逐字仍是:\n      ${R95_CALL}`);
+    if (isMessageBubble) {
+      for (const p of ['onPrev', 'onNext', 'counter']) {
+        assert.ok(new RegExp(`\\b${p}\\b`).test(S), `R09:会话消息灯箱必须传 ${p}`);
+      }
+    } else {
+      assert.ok(S.includes(R95_CALL), `调用行必须逐字仍是:\n      ${R95_CALL}`);
+    }
   });
   check(`B18/§7.8 ${short} 不出现 actualSize / onToggleActualSize,放大层挂载点也不传 meta`, () => {
     // actualSize / onToggleActualSize 是本轮新造的标识符,全文件级断言不会误伤;
@@ -369,9 +379,25 @@ check('§7.9 tests/acceptance/** 、PROJECT.md、client/src/utils/imageEntry.js 
     console.log('    (跳过:git 不可用 —', String(e.message).split('\n')[0], ')');
     return;
   }
-  const changed = execFileSync('git', ['diff', '--name-only', base, '--',
-    'tests/acceptance', 'PROJECT.md', 'client/src/utils/imageEntry.js'], { cwd: root, encoding: 'utf8' }).trim();
-  assert.strictEqual(changed, '', `这些文件本轮一行都不该改:\n      ${changed.split('\n').join('\n      ')}`);
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  // 【2026-09-10 首批开发修订】基线仍是 merge-base master,但本批【新增了整套锁定验收套件】
+  // tests/acceptance/first-batch-20260910/ —— 它在基线提交上还不存在,是合法产物,不是
+  // "改了锁定验收"。零 diff 锁的本意是【既有的锁定验收一行都不许动】,故按改动类型收窄:
+  //   ① 修改/删除:照旧零容忍(既有锁定验收改一个字都红);
+  //   ② 新增:只允许基线提交上不存在的全新条目(新套件目录),不许往既有套件里塞文件。
+  // 断言没有削弱:锁定验收的既有内容仍然是"只读",只是不再把"新增一套新验收"当成违规。
+  const modified = git('diff', '--name-only', '--diff-filter=MD', base, '--',
+    'tests/acceptance', 'PROJECT.md', 'client/src/utils/imageEntry.js');
+  assert.strictEqual(modified, '', `这些既有文件本轮一行都不该改/删:\n      ${modified.split('\n').join('\n      ')}`);
+  const existingTopLevel = new Set(git('ls-tree', '--name-only', `${base}:tests/acceptance`).split('\n').filter(Boolean));
+  const added = [
+    git('diff', '--name-only', '--diff-filter=A', base, '--', 'tests/acceptance'), // 已入库的新增
+    git('ls-files', '--others', '--exclude-standard', '--', 'tests/acceptance'),    // 尚未入库的新增
+  ].join('\n');
+  for (const file of added.split('\n').filter(Boolean)) {
+    assert.ok(!existingTopLevel.has(file.split('/')[2]),
+      `不许往既有锁定套件里新增文件(只有全新条目可以):${file}`);
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════

@@ -18,6 +18,15 @@ function fmtNum(n) {
   return Number.isInteger(n) ? n.toLocaleString('en-US') : n.toFixed(2);
 }
 
+/**
+ * 单个数值的展示文案(带币种符号,无标签):`¥42.50` / `7`。
+ * 「测试额度接口」成功横幅的 `{值}` 用它 —— 横幅自带"读到余额"四个字,再叠一个标签
+ * 会变成"读到余额 余额 ¥42.50"。
+ */
+export function quotaValueText(value, currency = null) {
+  return `${currencySymbol(currency)}${fmtNum(value)}`;
+}
+
 /** 一项的展示文案:`5 小时 · 已用 44%` / `周 · 剩余 13%` / `余额 ¥110.00` / `额度 · 剩余 123 / 500`。 */
 export function quotaItemText(item, currency = null) {
   if (!item) return '';

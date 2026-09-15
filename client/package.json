@@ -15,6 +15,8 @@
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-process": "^2",
     "@tauri-apps/plugin-updater": "^2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "echarts": "^5.6.0",
     "lucide-react": "^0.511.0",
     "mermaid": "^11.15.0",

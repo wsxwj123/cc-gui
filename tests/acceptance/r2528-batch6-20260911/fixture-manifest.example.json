@@ -1,0 +1,38 @@
+{
+  "dataRoot": "/abs/path/to/<worktree>/tests/acceptance/<suite>/.artifacts/runtime-data",
+  "buildLabel": "worktree build identifier supplied by the operator",
+  "platform": "chromium|tauri-macos|windows",
+  "observedAt": "2026-09-11T00:00:00Z",
+  "historyWorkspace": {
+    "path": "/abs/path/to/<worktree>/tests/acceptance/r2528-batch6-20260911/.artifacts/runtime-data/fixture-workspace-r2528",
+    "note": "cwd used when this suite creates its own fixture sessions through POST /api/chat"
+  },
+  "historySession": {
+    "sessionId": "sessionId of a session with >=2 stored user messages (prepared through the public composer)",
+    "projectHash": "projectHash of that session's project",
+    "sessionSearchMarker": "a marker that appears inside one of its stored user messages (sidebar search text)",
+    "projectName": "the project folder name shown in the app banner (fixture-workspace-r2528 by default)"
+  },
+  "runningSession": {
+    "sessionId": "sessionId of a session whose turn is still running when this case executes",
+    "projectHash": "its projectHash",
+    "howToPrepare": "point one instance provider at an endpoint that accepts TCP and never answers, start a turn, then run this case while it hangs"
+  },
+  "historyUi": {
+    "opEntryName": "visible label of the UI entry that starts a history operation (contract fixes only the result entry 查看备份, not this one)",
+    "backupEntryText": "查看备份"
+  },
+  "stubProvider": {
+    "providerId": "id of the instance's non-official provider used for the upstream-catalog case",
+    "baseURL": "http://127.0.0.1:57881",
+    "model": "model id the stub directory will advertise"
+  },
+  "workerEntry": {
+    "scriptPath": "/Users/<user>/.claude/dispatcher/spawn-worker.sh",
+    "note": "R26 external entry; read-only inspection only, this suite never starts a worker"
+  },
+  "bridge": {
+    "baseURL": "http://127.0.0.1:<port of the HDSI/nainai-brain-bridge service>",
+    "healthShapeFile": "/abs/path/to/operator-recorded baseline json (optional)"
+  }
+}

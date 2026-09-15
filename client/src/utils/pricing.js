@@ -9,20 +9,37 @@
 // / cacheWrite(缓存写)。usd()/cny() 未显式给缓存价时按 Anthropic 通用规则默认
 // cacheRead=0.1×input、cacheWrite=1.25×input(5min TTL)。
 
+import {
+  getPricingCatalogCached, officialQuotesByModelId, officialQuotesByDisplayKey, officialNameKey,
+} from './pricingCatalog.js';
+import {
+  periodFor, LONG_CONTEXT_THRESHOLDS, OFFICIAL_MODEL_ALIASES, AGGREGATE_PERIOD_AT,
+} from '../../../server/utils/pricing-rules.js';
+
 const CNY_TO_USD = 1 / 7.2;
 
 // Helper: build a CNY model entry, auto-convert to USD.
-const cny = (input, output, cacheRead = input * 0.1, cacheWrite = input * 1.25) => ({
+// 【currency 的语义】这个字段说的是**这几个数字的单位**,不是「原价来自哪个币种」——
+// 本表的 CNY 行已经按 7.2 折算成 USD,所以标 'USD'(展示层才不会再折一次)。
+// 官方报价层(quotes)不折算、原样保留来源币种(那里 currency:'CNY' 表示数字就是人民币),
+// 展示层按 currency 决定要不要 ×7.2 —— 两种来源因此各自显示成官方原值。
+const cny = (input, output, cacheRead = input * 0.1, cacheWrite = input * 1.25, extra) => ({
   input: input * CNY_TO_USD,
   output: output * CNY_TO_USD,
   cacheRead: cacheRead * CNY_TO_USD,
   cacheWrite: cacheWrite * CNY_TO_USD,
-  currency: 'CNY',  // displayed prices are USD-converted; original was CNY
+  currency: 'USD',
+  ...extra,
 });
 
-const usd = (input, output, cacheRead = input * 0.1, cacheWrite = input * 1.25) => ({
+const usd = (input, output, cacheRead = input * 0.1, cacheWrite = input * 1.25, extra) => ({
   input, output, cacheRead, cacheWrite, currency: 'USD',
+  ...extra,
 });
+
+// O-2 拍板:官方已下架的旧模型保留历史价 + 标注「已下架」。不上调成未定价 ——
+// 那会让回看旧会话成片空白;标注与 tooltip 说明由 resolvePrice 透出(retired/note)。
+const RETIRED_V4 = { retired: true, note: '官方已下架(2026-08-27),此为历史价' };
 
 // Anthropic (https://docs.anthropic.com/en/docs/about-claude/models) — USD/MTok
 // cache_write here is the 5-min TTL variant (1.25× input). 1-hr write is 2× input.
@@ -33,6 +50,10 @@ const PRICES = {
   // Fable 5 / Mythos 5(限量): $10/$50,cw $12.50,cr $1(用新 tokenizer,token 量 ~+30%)。
   'claude-fable-5':              usd(10, 50, 1, 12.5),
   'claude-mythos-5':             usd(10, 50, 1, 12.5),
+  // Fable 5.1 / Mythos 5.1:官方页 $10/$50、**命中价 $0.25**(0.025×,与 5 代的 0.1× 不同)。
+  // 不补这两行时,'claude-fable-5-1' 靠最长前缀命中 'claude-fable-5' → 命中价被算成 $1(4× 高估)。
+  'claude-fable-5-1':            usd(10, 50, 0.25, 12.5),
+  'claude-mythos-5-1':           usd(10, 50, 0.25, 12.5),
   // Sonnet 5: 引导价 $2/$10(至 2026-08-31),之后 $3/$15。此处按引导价(cw $2.50/cr $0.20)。
   'claude-sonnet-5':             usd(2, 10, 0.2, 2.5),
   // Opus 5: 官方页 $5/$25、5m 写 $6.25、命中 $0.50(= usd() 默认倍率)。历史里 4.2 万条
@@ -54,19 +75,20 @@ const PRICES = {
   // DeepSeek — USD/MTok, 官方页直核 2026-08-04(与 2026-07-16 一致未变)
   // api-docs.deepseek.com/quick_start/pricing。cacheWrite=input:DeepSeek 不收 cache 写入费,
   // cache miss 即标准 input 价(实测 400 条 deepseek 记录 cache_creation 恒为 0,该列不参与计算)。
-  // 【峰谷计价——已核实但刻意不实现】官方页公告原文:"DeepSeek API 服务即将采用峰谷定价
-  // 策略,高峰时段价格为平时价格 2 倍,适用所有计费项,具体时间以正式通知为准。【高峰时段
-  // 定义:北京时间每日 9:00~12:00 和 14:00~18:00】"。关键词是"即将采用"+"以正式通知为准":
-  // 政策尚未生效、也没有生效日期。下表就是现行实际计费的"平时价格"。现在加 2× 时段维度,
-  // 等于把今天所有历史消息按一个还没生效的规则算错一倍;等正式通知后再按消息 timestamp
-  // 补 peak/offPeak 两组价(jsonl timestamp 是 UTC ISO8601,北京时间恒 UTC+8 无夏令时,
-  // 换算本身可靠,唯一缺的就是生效日期)。
+  // 【峰谷计价——2026-09-11 起已实现】官方公告:高峰时段价格为平时价格 2 倍,高峰 = 北京时间
+  // 周一至周五 9:00–12:00、14:00–18:00,自 2026-08-17 00:00(+08:00) 起生效。现行实现走
+  // **官方报价层**(/api/pricing 的 quotes,CNY 原值,按时段两条)按每条消息自身时间戳判档;
+  // 下表是离线兜底,只保留已下架的 v4 旧价(见各行的 retired 标注)。
+  // 未在表里给 deepseek-flash / deepseek-v4-pro 现价:它们的官方价是分时段的,离线表存不下
+  // 「哪个时刻用哪条」,存一个均价反而把用户看得到的数字算错 —— 宁可「未定价」并说明原因。
   // deepseek-chat/reasoner 是 v4-flash 的 non-thinking/thinking 别名(2026-07-24 弃用);
-  // 官方现行价目页已不再列出这两个 id,保留作兜底(运行时 LiteLLM 远端表优先,那边仍给
-  // 旧价 $0.28/$0.42)。本机历史零调用,不动。
+  // 官方现行价目页已不再列出这两个 id,保留作兜底。本机历史零调用,不动。
   'deepseek-chat':               usd(0.14, 0.28, 0.0028, 0.14),    // v4-flash non-thinking
   'deepseek-reasoner':           usd(0.14, 0.28, 0.0028, 0.14),    // v4-flash thinking
-  'deepseek-v4-flash':           usd(0.14, 0.28, 0.0028, 0.14),
+  'deepseek-v4-flash':           usd(0.14, 0.28, 0.0028, 0.14, RETIRED_V4),
+  // vision-exp 与 v4-flash 同价:补一行让它**精确**命中(原先靠最长前缀命中 v4-flash),
+  // 于是「已下架」标注也能落到它身上,而不是静默借用别的行。
+  'deepseek-v4-flash-vision-exp': usd(0.14, 0.28, 0.0028, 0.14, RETIRED_V4),
   'deepseek-v4-pro':             usd(0.435, 0.87, 0.003625, 0.435),
   'deepseek-v3.1':               usd(0.14, 0.28, 0.0028, 0.14),    // 旧版,官方现表无单列→按 v4-flash 兜底
   'deepseek-v3.2-exp':           usd(0.14, 0.28, 0.0028, 0.14),    // 同上
@@ -84,7 +106,9 @@ const PRICES = {
   // cacheWrite 列本轮统一成 input,与 LiteLLM(按 1.25×input 生成)不同,见下)。
   // OpenAI 只有"缓存命中"折扣、不收缓存写入费 → cacheWrite=input(实测 3313 条 gpt 记录
   // cache_creation 恒为 0,这一列不参与计算,改的是口径不是数字)。
-  'gpt-5.6-sol':                 usd(5, 30, 0.50, 5),
+  // 2026-09-11 按官方页重核:5.6 系三档已调价(sol $4/$20、terra $2/$12、luna 不变),
+  // 长上下文档(>272K 输入)由报价层携带,本表只有短档;写价 = input(不收写入费)。
+  'gpt-5.6-sol':                 usd(4, 20, 0.40, 4),
   'gpt-5.6-terra':               usd(2, 12, 0.20, 2),
   'gpt-5.6-luna':                usd(0.20, 1.20, 0.02, 0.20),
   'gpt-5.5':                     usd(5, 30, 0.50, 5),
@@ -206,6 +230,9 @@ const PRICES = {
   // glm-5.2/5.1 $1.4/$4.4、glm-5-turbo $1.2/$4.0、glm-5 $1/$3.2、glm-4.7 $0.6/$2.2。
   // 国内为按输入长度阶梯计价,取 [32K+) 高档(本 GUI 会话上下文普遍超 32K);
   // 缓存:缓存命中单列,缓存存储"限时免费"→cacheWrite=input。
+  // GLM-5.3-Flash:官方国内站 ¥0.8/¥2.8/命中 ¥0.23(1M 单档,2026-09-11 直核 docs.bigmodel.cn)。
+  // 不补这行时 'glm-5.3-flash' 靠最长前缀命中 'glm-5' → 被按 ¥6/¥22/¥1.5 计(输入高 7.5×)。
+  'glm-5.3-flash':               cny(0.8, 2.8, 0.23, 0.8),
   'glm-5.2':                     cny(8, 28, 2, 8),      // 单档(1M ctx)
   'glm-5.1':                     cny(8, 28, 2, 8),      // 低档 [0,32K) 为 ¥6/¥24,命中 ¥1.3
   'glm-5-turbo':                 cny(7, 26, 1.8, 7),    // 低档 [0,32K) 为 ¥5/¥22,命中 ¥1.2
@@ -231,6 +258,15 @@ const PRICES = {
   //   302.AI / AiHubMix / OpenRouter:聚合平台按上游模型计价,LiteLLM 已覆盖上游 id→不加本地键。
 };
 
+// Claude 家族的缓存写有两档 TTL:5m = 1.25×input(usd() 的默认倍率),1h = **2×input**
+// (官方页逐模型一致)。补齐 1h 档后,带 TTL 分配的写量才能按档精算;缺 TTL 分配而两档价
+// 不同时按「写费未知」处理(不拿任一档价猜)—— 与官方报价层的规则完全同一条。
+for (const [id, entry] of Object.entries(PRICES)) {
+  if (/^claude-/.test(id) && typeof entry.input === 'number' && entry.cacheWrite1h === undefined) {
+    entry.cacheWrite1h = entry.input * 2;
+  }
+}
+
 // ── Z2: LiteLLM 远端单价表 ──────────────────────────────────────
 // server /api/pricing 下发(USD/1M,已含 cacheRead/cacheWrite),比上面的手抄表
 // 新且权威,查价时优先。localStorage 缓存使后续加载同步可用;启动后异步刷新。
@@ -249,19 +285,42 @@ async function hydrateRemotePrices() {
 }
 if (typeof window !== 'undefined') setTimeout(hydrateRemotePrices, 3000);
 
+// 兼容视图 prices 的来源 = GET /api/pricing 的 `prices`(现行三键视图)。运行时有两条路把
+// 它装进来:①客户端 catalog 缓存(setPricingCatalog/loadPricingCatalog,与 quotes 同一份响应);
+// ②模块顶部的 localStorage 兜底(下次加载首帧就能用)。前者更新,优先用它。
+function compatPrices() {
+  const cached = getPricingCatalogCached?.();
+  const prices = cached && typeof cached.prices === 'object' ? cached.prices : null;
+  return prices && Object.keys(prices).length ? prices : REMOTE;
+}
+
 function remoteLookup(model) {
-  if (!model || !REMOTE) return null;
-  let e = REMOTE[model];
-  if (!e) e = REMOTE[model.replace(/-\d{8}$/, '')];
+  const table = compatPrices();
+  if (!model || !table) return null;
+  let e = table[model];
+  if (!e) e = table[model.replace(/-\d{8}$/, '')];
   if (!e) {
-    // 前缀兜底取**最长**匹配(与下方内置表 lookupPrice 同口径):键序不确定时
+    // 前缀兜底取**最长**匹配(与下方内置表 lookupByModel 同口径):键序不确定时
     // 短键(claude-3-5)不许抢走长键(claude-3-5-haiku)。
-    const k = Object.keys(REMOTE)
+    const k = Object.keys(table)
       .filter((k) => model.startsWith(k))
       .sort((a, b) => b.length - a.length)[0];
-    e = k ? REMOTE[k] : null;
+    e = k ? table[k] : null;
   }
   return e ? { ...e, currency: 'USD' } : null;
+}
+
+/** 同上,但带上「是不是逐字命中」—— 去日期后缀与最长前缀都是靠规则猜的(matchedExactly=false)。 */
+function remoteLookupDetailed(model) {
+  const table = compatPrices();
+  if (!model || !table) return null;
+  if (table[model]) return { entry: { ...table[model], currency: 'USD' }, matchedExactly: true };
+  const stripped = model.replace(/-\d{8}$/, '');
+  if (stripped !== model && table[stripped]) return { entry: { ...table[stripped], currency: 'USD' }, matchedExactly: false };
+  const k = Object.keys(table)
+    .filter((key) => model.startsWith(key))
+    .sort((a, b) => b.length - a.length)[0];
+  return k ? { entry: { ...table[k], currency: 'USD' }, matchedExactly: false } : null;
 }
 
 // ── R3: 用户自填单价(最高优先级,赢过 REMOTE / PRICES / ALIASES)──────────
@@ -374,25 +433,6 @@ export function userModelPrice(model) {
     || USER_ACTIVE.get(norm) || USER_ANY.get(norm) || null;
 }
 
-// 用户条目 → 与 PRICES 同形状的四价条目(USD/1M)。plan 档不产生价格(走 isPlanBilling)。
-function userPriceEntry(model) {
-  const u = userModelPrice(model);
-  if (!u || u.plan) return null;
-  const base = lookupByModel(model);  // 未填项的回落源,可能为 null
-  const input  = u.in  != null ? u.in  * CNY_TO_USD : (base ? base.input : 0);
-  const output = u.out != null ? u.out * CNY_TO_USD : (base ? base.output : 0);
-  const fallbackRead  = u.in != null ? input * 0.1  : (base ? base.cacheRead : 0);
-  const fallbackWrite = u.in != null ? input * 1.25 : (base ? base.cacheWrite : 0);
-  return {
-    input,
-    output,
-    cacheRead:  u.cacheRead  != null ? u.cacheRead  * CNY_TO_USD : fallbackRead,
-    cacheWrite: u.cacheWrite != null ? u.cacheWrite * CNY_TO_USD : fallbackWrite,
-    currency: 'CNY',
-    source: 'user',
-  };
-}
-
 async function hydrateUserPrices() {
   try {
     const r = await fetch('/api/providers');
@@ -421,28 +461,31 @@ const ALIASES = {
   'fable':  'claude-fable-5',
 };
 
-// 按 model id 查价(与 provider 无关的纯解析):LiteLLM 远端表优先(覆盖广、随上游
-// 更新),内置手抄表兜底;再依次试别名、去日期后缀、最长前缀、去命名空间前缀。
+// 按 model id 查内置离线表(纯解析,不碰 provider):精确 → 别名 → 去日期后缀 → 最长前缀
+// → 去命名空间前缀。返回 { entry, matchedExactly }:后三种都是「靠规则猜到」的命中
+// (matchedExactly=false),展示层据此加「·疑似」后缀,不再静默顶替。
 function lookupByModel(model) {
-  const remote = remoteLookup(model) || (ALIASES[model] && remoteLookup(ALIASES[model]));
-  if (remote) return remote;
-  if (PRICES[model]) return PRICES[model];
-  if (ALIASES[model] && PRICES[ALIASES[model]]) return PRICES[ALIASES[model]];
+  const table = (entry) => ({ entry, matchedExactly: true });
+  if (model && PRICES[model]) return table(PRICES[model]);
+  if (ALIASES[model] && PRICES[ALIASES[model]]) return table(PRICES[ALIASES[model]]);
+  const guessed = (entry) => ({ entry, matchedExactly: false });
   const stripped = model && model.replace(/-\d{8}$/, '');
-  if (stripped && PRICES[stripped]) return PRICES[stripped];
+  if (stripped && stripped !== model && PRICES[stripped]) return guessed(PRICES[stripped]);
   // 前缀兜底取**最长**匹配:'step-3.7-flash-xxx' 该命中 'step-3.7-flash' 而非先遇到的 'step-3'
   const key = model && Object.keys(PRICES)
     .filter((k) => model.startsWith(k))
     .sort((a, b) => b.length - a.length)[0];
-  if (key) return PRICES[key];
+  if (key) return guessed(PRICES[key]);
   // 聚合平台/网关下发带命名空间的 id(moonshotai/kimi-k3、openai/gpt-5.6-sol):它们按
   // 上游模型计价,去掉命名空间再查一次,总好过整条消息无价可显。精确键在前面已匹配,
   // 故 Groq 的 'openai/gpt-oss-120b'(与 Cerebras 裸名不同价)仍走自己的键,不受影响。
-  return model && model.includes('/') ? lookupByModel(model.slice(model.lastIndexOf('/') + 1)) : null;
+  if (!model || !model.includes('/')) return null;
+  const inner = lookupByModel(model.slice(model.lastIndexOf('/') + 1));
+  // 剥命名空间本身也是「靠规则猜」(§10.11③):命中记 matchedExactly=false,与内层怎么命中的无关。
+  return inner ? { entry: inner.entry, matchedExactly: false } : null;
 }
 
-// 按 model + provider 查一条单价。
-//   任何 hint  → 用户自填单价永远最优先(R3)
+// 内置离线表的入口(含 deepseek/mimo 的 env 档位回落,口径与旧 lookupPrice 逐字一致)。
 //   anthropic / bedrock / vertex / unknown → 直接按这条消息的 model 查
 //   deepseek / mimo → 同样先按这条消息的 model 查,**查不到才**回落 env 档位
 // 【R4-c2 纠正旧注释】原注释写着"cc switch 路由时 stream-json 的 model 字段仍是
@@ -450,38 +493,326 @@ function lookupByModel(model) {
 // model id 全是真实上游名(deepseek-v4-flash 14,239 条、k3 14,229 条、mimo-v2.5-pro
 // 3,121 条),没有伪装成 claude-* 的。所以 env 档位(provider.model)只是**消息没带
 // model 时**的兜底,不是主依据。别照着旧注释把这两个分支"修回"按 env 计价。
-function lookupPrice(model, provider) {
+function offlineLookup(model, provider) {
   if (!model && !(provider && provider.model)) return null;
-  // R3:用户自填单价最高优先级 —— 赢过 REMOTE / 内置表,也赢过下面 deepseek/mimo 的
-  // env 档位回落(用户填的是他这条消息实付的钱,任何推断都不该盖过它)。
-  const user = userPriceEntry(model);
-  if (user) return user;
   const hint = (provider && provider.providerHint) || 'anthropic';
-
   // Q-a:计价的第一依据永远是【这条消息实际用的模型】,不是 provider.model(= 当前
   // env 档位)。这两个分支原先完全忽略传入的 model,后果:①换档后回看旧会话全按新档
   // 计价(deepseek v4-flash↔v4-pro 差 3×);②当前切到 deepseek/mimo 时打开任何历史
   // Claude/Kimi 会话,整条会话按 deepseek/mimo 单价算(差一个数量级)。
   // 回落路径原样保留:消息无 model(老 jsonl / 流式首帧)时仍按 env 档位。
   if (hint === 'deepseek') {
-    const byMsg = lookupByModel(model) || (model && PRICES['deepseek-' + model]);
+    const byMsg = lookupByModel(model) || (model && PRICES['deepseek-' + model] && { entry: PRICES['deepseek-' + model], matchedExactly: false });
     if (byMsg) return byMsg;
     // Prefer env-set upstream model name; fall back to deepseek-chat default.
     const remote = remoteLookup(provider.model);
-    if (remote) return remote;
+    if (remote) return { entry: remote, matchedExactly: false };   // env 档位 = 猜的
     const target = (provider.model && PRICES[provider.model])
       ? provider.model
       : (PRICES['deepseek-' + (provider.model || '')] ? 'deepseek-' + provider.model : 'deepseek-chat');
-    return PRICES[target] || PRICES['deepseek-chat'];
+    return { entry: PRICES[target] || PRICES['deepseek-chat'], matchedExactly: false };
   }
   if (hint === 'mimo') {
     // 项目实际部署 mimo-v2.5-pro;provider.model 精确匹配次之,兜底 pro(原硬返回非-pro 偏低 3×)
     return lookupByModel(model)
-      || (provider && provider.model && PRICES[provider.model])
-      || PRICES['mimo-v2.5-pro'] || PRICES['mimo-v2.5'] || null;
+      || (provider && provider.model && PRICES[provider.model] && { entry: PRICES[provider.model], matchedExactly: false })
+      || (PRICES['mimo-v2.5-pro'] && { entry: PRICES['mimo-v2.5-pro'], matchedExactly: false })
+      || (PRICES['mimo-v2.5'] && { entry: PRICES['mimo-v2.5'], matchedExactly: false })
+      || null;
   }
   // anthropic / bedrock / vertex / unknown → use claude name as displayed
   return lookupByModel(model);
+}
+
+// ── 统一取价出口 resolvePrice(2026-09-11 计价修正)────────────────────────
+// 优先级:手填单价 → 官方 quotes → 官方 compat prices → community(当前无来源)→ 内置表。
+// 每一层都给出**来源原币种**的数字(官方 CNY 报价就是人民币数,不折算),展示层按 currency
+// 决定要不要按 7.2 换算 —— 两种来源才能各自显示成官方原值。
+
+const UNIT = 'per 1M tokens';
+
+/** 失败原因闭集(契约 §0.1,8 值;resolvePrice 只产其中 6 个价格类)。 */
+export const COST_UNAVAILABLE_REASONS = [
+  'PLAN_BILLING', 'USAGE_EMPTY', 'USAGE_INVALID', 'NO_PRICE',
+  'PERIOD_UNRESOLVED', 'PERIOD_NOT_EFFECTIVE', 'CONDITIONS_AMBIGUOUS', 'THRESHOLD_UNKNOWN',
+];
+
+/** 逐字表(契约 §10.11⑦):detail 不是自由文本,测试按这张表断言。 */
+const REASON_DETAIL = {
+  PLAN_BILLING: '当前是按套餐计费，不显示金额',
+  USAGE_EMPTY: '这条记录没有用量数据',
+  USAGE_INVALID: '用量字段无法解析',
+  NO_PRICE: '没有该模型的可用价格',
+  PERIOD_UNRESOLVED: '该模型按时段计价，但这条记录的时间未知或无法解析',
+  PERIOD_NOT_EFFECTIVE: '该模型的时段价在本次调用时间尚未生效',
+  CONDITIONS_AMBIGUOUS: '该模型有多条适用条件不同的报价，无法确定用哪一条',
+  THRESHOLD_UNKNOWN: '该模型的上下文阈值未登记，无法判断走哪一档',
+};
+
+// 条件词表的闭集(契约 §5.1.1):表外的条件一律「不解释 → 该 quote 不适用」。
+// periodLabel / timezone 是**标注**不是判定条件(采集器给时段报价附的中文原文与时区),
+// 不认识它们就会把每一条分时段报价都判掉;真正的判定键只有 period/schedule/context/
+// minPromptTokens/tier 五个。
+const KNOWN_CONDITION_KEYS = new Set(['period', 'periodLabel', 'timezone', 'schedule', 'context', 'minPromptTokens', 'tier']);
+const DECORATIVE_CONDITION_KEYS = new Set(['periodLabel', 'timezone']);
+const DEFAULT_SCHEDULE_KEY = 'deepseek-cn-peak';
+
+const strip1m = (model) => String(model || '').replace(/\[1m\]$/, '');
+
+/** 时间戳(ISO 串 / epoch 毫秒)→ 毫秒数;不可解析一律 null(不读「现在」)。 */
+function parseTimestamp(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * 一条报价的条件是否适用。返回:
+ *   { ok:true, applied:[...] }        条件成立(无条件时 applied 为空数组)
+ *   { ok:false, needsTime:true }      时段条件成立与否取决于时刻,而时刻未知 → 不能落下一层
+ *   { ok:false }                      不适用(不认识的条件 / 档位不对 / 长度档不匹配)
+ */
+function evaluateConditions(conditions, ctx) {
+  if (conditions == null) return { ok: true, applied: [] };
+  if (typeof conditions !== 'object') return { ok: false };
+  const keys = Object.keys(conditions);
+  if (!keys.length) return { ok: true, applied: [] };
+  for (const key of keys) if (!KNOWN_CONDITION_KEYS.has(key)) return { ok: false };
+  // schedule 只接受唯一那份时段表;别的值 → 宁缺勿猜。
+  if (conditions.schedule != null && conditions.schedule !== DEFAULT_SCHEDULE_KEY) return { ok: false };
+  if (conditions.tier != null && conditions.tier !== 'standard') return { ok: false };
+  const applied = [];
+  if (conditions.period != null) {
+    // 只认规范化后的 'peak'/'off-peak';中文旧标签等不认识的值 → 不适用(不会退化成"无条件")。
+    if (conditions.period !== 'peak' && conditions.period !== 'off-peak') return { ok: false };
+    if (ctx.ts == null) return { ok: false, needsTime: true };
+    const period = periodFor(ctx.ts);
+    if (period.key !== conditions.period) return { ok: false };
+    applied.push({ period: conditions.period, localISO: period.localISO });
+  }
+  if (conditions.context != null) {
+    const threshold = LONG_CONTEXT_THRESHOLDS[ctx.model];
+    if (conditions.context === 'long context') {
+      // 阈值未登记 → 判不出是不是长档:**不套长档**(宁缺勿猜),只存在长档报价时由上层给
+      // THRESHOLD_UNKNOWN 说明原因。
+      if (typeof threshold !== 'number') return { ok: false, thresholdMissing: true };
+      if (ctx.promptTokens == null || !(ctx.promptTokens > threshold)) return { ok: false };
+      applied.push({ context: 'long context', promptTokens: ctx.promptTokens, threshold });
+    } else if (conditions.context === 'short context') {
+      // 阈值未登记时短档仍是**安全档**(它不额外加价,也是今天看得见的数字):照常适用。
+      if (typeof threshold !== 'number') return { ok: true, applied: [] };
+      if (ctx.promptTokens == null || ctx.promptTokens > threshold) return { ok: false };
+    } else return { ok: false };
+  }
+  if (conditions.minPromptTokens != null) {
+    if (ctx.promptTokens == null || !(ctx.promptTokens > conditions.minPromptTokens)) return { ok: false };
+    applied.push({ minPromptTokens: conditions.minPromptTokens });
+  }
+  return { ok: true, applied };
+}
+
+/** 官方的「同一份价」比较键:币种 + 四维(1h 写价不参与 —— 不同来源给不给 1h 列不该算成两份价)。 */
+function priceSignature(quote) {
+  const p = quote.prices || {};
+  return JSON.stringify([quote.currency ?? null, p.input ?? null, p.output ?? null, p.cacheRead ?? null, p.cacheWrite5m ?? null]);
+}
+
+function quoteIdentity(quote) {
+  return quote.quoteId || JSON.stringify([
+    quote.provider, quote.modelId, quote.displayName, quote.conditions ?? null, quote.currency,
+    quote.prices?.input, quote.prices?.output, quote.prices?.cacheRead, quote.prices?.cacheWrite5m, quote.prices?.cacheWrite1h,
+  ]);
+}
+
+/**
+ * 官方报价层的候选(契约 §10.11③ 三条并列):
+ *   ① modelId 与剥掉 [1m] 的 model 逐字相等(大小写敏感);
+ *   ② officialKey(displayName) 相等(大小写不敏感);
+ *   ③ OFFICIAL_MODEL_ALIASES 给出的目标键,再按 ①② 匹配。
+ * **不剥 vendor/ 命名空间**(那是靠规则猜,属下一层的事)。
+ */
+function officialCandidates(model) {
+  const stripped = strip1m(model);
+  const out = [];
+  const seen = new Set();
+  const collect = (list) => {
+    for (const quote of list) {
+      const id = quoteIdentity(quote);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(quote);
+    }
+  };
+  collect(officialQuotesByModelId(stripped));
+  collect(officialQuotesByDisplayKey(officialNameKey(stripped)));
+  const alias = OFFICIAL_MODEL_ALIASES[stripped];
+  if (alias) {
+    collect(officialQuotesByModelId(alias));
+    collect(officialQuotesByDisplayKey(officialNameKey(alias)));
+  }
+  return out;
+}
+
+const fail = (reason, extra = {}) => ({ ok: false, reason, detail: REASON_DETAIL[reason], ...extra });
+
+/**
+ * 取价(纯函数,无副作用,不发网络请求 —— 只读已缓存的 catalog)。
+ * 返回 {ok:true, tier, matchedExactly, currency, unit, prices:{input,output,cacheRead,cacheWrite5m,cacheWrite1h},
+ *      quoteId, sourceUrl, fetchedAt, appliedConditions, skipped, note, retired}
+ * 或 {ok:false, reason, detail, skipped}。
+ */
+export function resolvePrice(model, opts = {}) {
+  const provider = opts.provider || null;
+  const promptTokens = typeof opts.promptTokens === 'number' && Number.isFinite(opts.promptTokens) ? opts.promptTokens : null;
+  const ts = parseTimestamp(opts.at);
+  const skipped = [];
+
+  // ① 手填单价(最高优先,命中即返回):逐维度照抄用户填的值,未填的维度 = null(未知)——
+  // 不回落内置表、也不用默认倍率补(§10.12③;跨层拼维度会让金额变成两个来源拼出来的数)。
+  const user = userModelPrice(model);
+  if (user?.plan) return fail('PLAN_BILLING');
+  if (user) {
+    return {
+      ok: true, tier: 'manual', matchedExactly: true, currency: 'CNY', unit: UNIT,
+      prices: {
+        input: user.in ?? null, output: user.out ?? null,
+        cacheRead: user.cacheRead ?? null, cacheWrite5m: user.cacheWrite ?? null, cacheWrite1h: null,
+      },
+      quoteId: null, sourceUrl: null, fetchedAt: null,
+      appliedConditions: [], skipped: [], note: null, retired: false,
+    };
+  }
+
+  // ② 官方报价层
+  const candidates = officialCandidates(model);
+  if (candidates.length) {
+    const ctx = { ts, promptTokens, model: strip1m(model) };
+    const applicable = [];
+    let needsTime = 0;
+    let unsupported = 0;
+    let excludedByValidity = 0;
+    let thresholdMissing = 0;
+    for (const quote of candidates) {
+      if (typeof quote?.currency !== 'string' || quote.status !== 'fresh') continue;   // 币种未补证/非 fresh 不得计价
+      const prices = quote.prices || {};
+      if (typeof prices.input !== 'number' || typeof prices.output !== 'number') continue;
+      const from = parseTimestamp(quote.validFrom);
+      const to = parseTimestamp(quote.validTo);
+      if (ts != null && ((from != null && from > ts) || (to != null && to <= ts))) { excludedByValidity += 1; continue; }
+      const verdict = evaluateConditions(quote.conditions, ctx);
+      if (verdict.needsTime) { needsTime += 1; continue; }
+      if (!verdict.ok) {
+        if (verdict.thresholdMissing) thresholdMissing += 1; else unsupported += 1;
+        skipped.push({ tier: 'official-quote', reason: 'CONDITIONS_UNSUPPORTED' });
+        continue;
+      }
+      applicable.push({ quote, applied: verdict.applied });
+    }
+    if (!applicable.length) {
+      // 候选全带时段条件而时刻未知 → **不落下一层**(下层的价必然是错的时段价)。
+      if (needsTime > 0 && unsupported === 0 && thresholdMissing === 0 && excludedByValidity === 0) return fail('PERIOD_UNRESOLVED', { skipped });
+      // 只存在长上下文档而阈值未登记 → 说明为什么给不出一档(比 NO_PRICE 具体)。
+      if (thresholdMissing > 0 && needsTime === 0 && unsupported === 0 && excludedByValidity === 0) return fail('THRESHOLD_UNKNOWN', { skipped });
+      if (needsTime === 0 && excludedByValidity > 0) {
+        // 有报价因 validFrom/validTo 被排除:该层跳过,落到下一层取「当时价」;
+        // 若五层都没命中,最终用 PERIOD_NOT_EFFECTIVE 解释(比 NO_PRICE 更具体)。
+        skipped.push({ tier: 'official-quote', reason: 'PERIOD_NOT_EFFECTIVE' });
+      }
+    } else {
+      // 多命中:取值与币种全一致 → 取 quoteId 字典序最小;不一致 → 见下。
+      let group = applicable;
+      const groups = new Map();
+      for (const item of group) {
+        const sig = priceSignature(item.quote);
+        if (!groups.has(sig)) groups.set(sig, []);
+        groups.get(sig).push(item);
+      }
+      if (groups.size > 1) {
+        // 同一模型国内外双价(GLM-5.3-Flash:国内站 CNY 0.8 vs 国际站 USD 0.15)会让
+        // "取值不一致"永远成立。本 GUI 的主受众是国内(内置表同样取国内人民币价),
+        // 故先按市场收敛到 cn 组;cn 组内部还不一致才算歧义。
+        const all = [...groups.values()];
+        const cn = all.filter((list) => list.every((item) => item.quote.market === 'cn'));
+        if (cn.length === 1) group = cn[0];
+      }
+      const signatures = new Set(group.map((item) => priceSignature(item.quote)));
+      if (signatures.size > 1) {
+        skipped.push({ tier: 'official-quote', reason: 'CONDITIONS_AMBIGUOUS' });
+        return fail('CONDITIONS_AMBIGUOUS', { skipped });
+      }
+      const chosen = [...group].sort((a, b) => String(a.quote.quoteId).localeCompare(String(b.quote.quoteId)))[0];
+      const q = chosen.quote;
+      const p = q.prices || {};
+      return {
+        ok: true, tier: 'official-quote', matchedExactly: true,
+        currency: q.currency, unit: UNIT,
+        prices: {
+          input: p.input ?? null, output: p.output ?? null, cacheRead: p.cacheRead ?? null,
+          cacheWrite5m: p.cacheWrite5m ?? null, cacheWrite1h: p.cacheWrite1h ?? null,
+        },
+        quoteId: q.quoteId ?? null, sourceUrl: q.sourceUrl ?? null, fetchedAt: q.fetchedAt ?? null,
+        appliedConditions: group.flatMap((item) => item.applied), skipped: [], note: null, retired: false,
+      };
+    }
+  }
+
+  // ③ 官方兼容视图 prices(现行精确 → 去日期后缀 → 最长前缀,本次不改回退链)
+  const compat = remoteLookupDetailed(model);
+  if (compat) {
+    const e = compat.entry;
+    return {
+      ok: true, tier: 'official-compat', matchedExactly: compat.matchedExactly, currency: 'USD', unit: UNIT,
+      prices: { input: e.input ?? null, output: e.output ?? null, cacheRead: e.cacheRead ?? null, cacheWrite5m: e.cacheWrite ?? null, cacheWrite1h: e.cacheWrite1h ?? null },
+      quoteId: null, sourceUrl: null, fetchedAt: null, appliedConditions: [], skipped, note: null, retired: false,
+    };
+  }
+
+  // ④ community 兜底层:当前无来源(实现延后),恒跳过 —— 命中不了就不是错误。
+
+  // ⑤ 内置离线表(现行回退链,不改)
+  const offline = offlineLookup(model, provider);
+  if (offline) {
+    const e = offline.entry;
+    return {
+      ok: true, tier: 'offline', matchedExactly: offline.matchedExactly, currency: e.currency || 'USD', unit: UNIT,
+      prices: { input: e.input ?? null, output: e.output ?? null, cacheRead: e.cacheRead ?? null, cacheWrite5m: e.cacheWrite ?? null, cacheWrite1h: e.cacheWrite1h ?? null },
+      quoteId: null, sourceUrl: null, fetchedAt: null, appliedConditions: [], skipped,
+      note: e.note || null, retired: !!e.retired,
+    };
+  }
+
+  if (skipped.some((item) => item.reason === 'PERIOD_NOT_EFFECTIVE')) return fail('PERIOD_NOT_EFFECTIVE', { skipped });
+  return fail('NO_PRICE', { skipped });
+}
+
+/** 用量本身的问题(与价格无关的那两类原因):'USAGE_EMPTY' | 'USAGE_INVALID' | null。 */
+function usageProblem(usage) {
+  if (!usage || typeof usage !== 'object') return 'USAGE_EMPTY';
+  const fields = ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'];
+  let seen = false;
+  for (const field of fields) {
+    const value = usage[field];
+    if (value == null) continue;
+    if (typeof value !== 'number') continue;      // 非数字(老数据里的怪异值)按今天的口径当 0
+    seen = true;
+    if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) return 'USAGE_INVALID';
+  }
+  return seen ? null : 'USAGE_EMPTY';
+}
+
+/**
+ * `computeCost` 返回 null 时,UI 用它把「未定价 · 费用未知」换成具体原因(契约 §5.5 文案表)。
+ * 返回 { reason, detail } 或 null(表示"有金额",调用方不该走到这里)。
+ */
+export function costUnavailableReason(model, usage, provider, opts) {
+  const problem = usageProblem(usage);
+  if (problem) return { reason: problem, detail: REASON_DETAIL[problem] };
+  if (isPlanBilling(provider, model)) return { reason: 'PLAN_BILLING', detail: REASON_DETAIL.PLAN_BILLING };
+  const input = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
+  const price = resolvePrice(model, { at: opts?.at, provider, promptTokens: input });
+  if (price.ok) return null;
+  return { reason: price.reason, detail: price.detail };
 }
 
 /**
@@ -632,26 +963,199 @@ export function isPlanBilling(provider, model) {
  * 条件渲染因此自动只剩用量,不用在每个显示点各加一遍判断。判据带 model,
  * 所以订阅态下同一条会话里按量付费模型的花费照常显示、Claude 的不显示。
  */
-export function computeCost(model, usage, provider) {
-  if (!usage) return null;
+export function computeCost(model, usage, provider, opts) {
+  if (usageProblem(usage)) return null;
   if (isPlanBilling(provider, model)) return null;
-  const p = lookupPrice(model, provider);
-  if (!p) return null;
-  const input = usage.input_tokens || 0;
-  const output = usage.output_tokens || 0;
-  const cacheRead = usage.cache_read_input_tokens || 0;
-  const cacheWrite = usage.cache_creation_input_tokens || 0;
+  const input = num(usage.input_tokens);
+  const output = num(usage.output_tokens);
+  const cacheRead = num(usage.cache_read_input_tokens);
+  const cacheWrite = num(usage.cache_creation_input_tokens);
+  // 长上下文判据 = **单次调用 API 字段 input_tokens 的原值**(它已含缓存读写的总量),
+  // 不得再加 cache_read/cache_creation —— 见 server/utils/pricing-rules.js 的阈值表注释。
+  const price = resolvePrice(model, { at: opts?.at, provider, promptTokens: input });
+  if (!price.ok) return null;
+  const p = price.prices;
   const M = 1_000_000;
-  const breakdown = {
-    input:      (input * p.input) / M,
-    output:     (output * p.output) / M,
-    cacheRead:  (cacheRead * p.cacheRead) / M,
-    cacheWrite: (cacheWrite * p.cacheWrite) / M,
-  };
+  const unknown = [];
+  const breakdown = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite5m: null, cacheWrite1h: null };
+  if (p.input != null) breakdown.input = (input * p.input) / M; else if (input > 0) unknown.push('input');
+  if (p.output != null) breakdown.output = (output * p.output) / M; else if (output > 0) unknown.push('output');
+  if (cacheRead > 0) {
+    if (p.cacheRead != null) breakdown.cacheRead = (cacheRead * p.cacheRead) / M;
+    else unknown.push('cacheRead');   // 该维度未知:不计费、点名(不拿别的维度/倍率凑一个数)
+  }
+  // 缓存写(RULINGS #6 硬约定:**顶层量与分项不得相加**):
+  //   w5/w1 = 两档 TTL 分项,wt = 顶层写量。
+  //   有分配且 w5+w1 === wt → 按档精算;分配之和 ≠ 顶层 → 数据自相矛盾,写费未知;
+  //   无分配(两档都是 0)而 wt>0 → 两档价相同可按该单一价计,不同/缺档 → 写费未知。
+  const w5 = num(usage.cache_creation?.ephemeral_5m_input_tokens);
+  const w1 = num(usage.cache_creation?.ephemeral_1h_input_tokens);
+  const hasSplit = w5 + w1 > 0;
+  if (hasSplit && w5 + w1 === cacheWrite) {
+    breakdown.cacheWrite5m = w5 > 0 ? (p.cacheWrite5m != null ? (w5 * p.cacheWrite5m) / M : null) : 0;
+    breakdown.cacheWrite1h = w1 > 0 ? (p.cacheWrite1h != null ? (w1 * p.cacheWrite1h) / M : null) : 0;
+    if (breakdown.cacheWrite5m == null) unknown.push('cacheWrite', 'cacheWrite5m');
+    if (breakdown.cacheWrite1h == null) unknown.push('cacheWrite', 'cacheWrite1h');
+    breakdown.cacheWrite = (breakdown.cacheWrite5m || 0) + (breakdown.cacheWrite1h || 0);
+  } else if (hasSplit) {
+    unknown.push('cacheWrite');      // 自相矛盾:不猜
+  } else if (cacheWrite > 0) {
+    if (p.cacheWrite5m != null && (p.cacheWrite1h == null || p.cacheWrite1h === p.cacheWrite5m)) {
+      // 单档价:只有 5m 价(OpenAI/内置表口径),或两档恰好同价 —— 都不需要 TTL 分配。
+      breakdown.cacheWrite = (cacheWrite * p.cacheWrite5m) / M;
+    } else {
+      unknown.push('cacheWrite');    // 只有 1h 价 / 两档不同价 / 两档都缺 → 写费未知(不猜)
+    }
+  }
   const totalUsd = breakdown.input + breakdown.output + breakdown.cacheRead + breakdown.cacheWrite;
+  const writeUnknown = unknown.includes('cacheWrite');
   // source='user' = 这条按用户自填单价算的 → 显示口径改成"按你填写的单价计算",
   // 不再说"按官网价估算"(TurnBubble / MessageBubble / UsagePanel 三处同一判据)。
-  return { totalUsd, breakdown, currency: p.currency, source: p.source || 'table' };
+  return {
+    totalUsd, breakdown, currency: price.currency, source: price.tier === 'manual' ? 'user' : 'table',
+    tier: price.tier, matchedExactly: price.matchedExactly,
+    quoteId: price.quoteId, appliedConditions: price.appliedConditions, skipped: price.skipped,
+    note: price.note, retired: price.retired,
+    ...(unknown.length ? { unknownDimensions: unknown, partial: true } : {}),
+    ...(writeUnknown ? { writeUnknown: true } : {}),
+  };
+}
+
+/**
+ * UI 的**唯一**计费入口(§5.3):决策"这一轮要不要逐调用算"。
+ *   usageCalls 存在且至少一项 at 可解析、且该模型的官方报价含时段条件 → 逐调用各算一次
+ *   (每次用该项自己的 at),金额与 breakdown 相加;部分项不可解析 → 该项按「时段未知」
+ *   处理(不计入金额 + partial + unknownDimensions 含 'period')。
+ *   否则 → 单次 computeCost(时间取 message.timestamp)。
+ * 为什么不无条件逐调用:非分时段模型的金额与调用次数无关(单价×token 是线性的),
+ * 逐调用只会把一个 at 缺失的项算成"未知"。
+ */
+export function computeCostForMessage(message, provider) {
+  if (!message || typeof message !== 'object') return null;
+  const model = message.model;
+  const calls = Array.isArray(message.usageCalls) ? message.usageCalls : null;
+  if (calls && calls.length && hasPeriodQuote(model)) {
+    const parts = [];
+    let partial = false;
+    let missingTime = 0;
+    for (const call of calls) {
+      const at = call?.at;
+      if (parseTimestamp(at) == null) { missingTime += 1; continue; }
+      const cost = computeCost(model, call?.usage, provider, { at });
+      if (!cost) { missingTime += 1; continue; }
+      parts.push(cost);
+    }
+    if (!parts.length) return computeCost(model, message.usage, provider, { at: message.timestamp });
+    const total = { totalUsd: 0, breakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite5m: 0, cacheWrite1h: 0 } };
+    const unknown = [];
+    const applied = [];
+    let sawSplit = false;
+    for (const cost of parts) {
+      total.totalUsd += cost.totalUsd;
+      total.breakdown.input += cost.breakdown.input;
+      total.breakdown.output += cost.breakdown.output;
+      total.breakdown.cacheRead += cost.breakdown.cacheRead;
+      total.breakdown.cacheWrite += cost.breakdown.cacheWrite;
+      if (cost.breakdown.cacheWrite5m != null || cost.breakdown.cacheWrite1h != null) sawSplit = true;
+      total.breakdown.cacheWrite5m = (total.breakdown.cacheWrite5m || 0) + (cost.breakdown.cacheWrite5m || 0);
+      total.breakdown.cacheWrite1h = (total.breakdown.cacheWrite1h || 0) + (cost.breakdown.cacheWrite1h || 0);
+      for (const dim of cost.unknownDimensions || []) if (!unknown.includes(dim)) unknown.push(dim);
+      applied.push(...(cost.appliedConditions || []));
+      if (cost.partial) partial = true;
+    }
+    if (!sawSplit) { total.breakdown.cacheWrite5m = null; total.breakdown.cacheWrite1h = null; }
+    if (missingTime > 0) {
+      partial = true;
+      if (!unknown.includes('period')) unknown.push('period');
+      applied.push({ period: 'unknown' });
+    }
+    const head = parts[0];
+    return {
+      totalUsd: total.totalUsd, breakdown: total.breakdown, currency: head.currency, source: head.source,
+      tier: head.tier, matchedExactly: head.matchedExactly, quoteId: head.quoteId, skipped: head.skipped,
+      note: head.note, retired: head.retired, appliedConditions: applied,
+      ...(partial ? { partial: true } : {}),
+      ...(unknown.length ? { unknownDimensions: unknown } : {}),
+      ...(unknown.includes('cacheWrite') ? { writeUnknown: true } : {}),
+    };
+  }
+  return computeCost(model, message.usage, provider, { at: message.timestamp });
+}
+
+/**
+ * A 项:子代理逐条计价(契约 §10.3)。每个 agent 用【自身】model + 自身 usage/usageCalls +
+ * 自身 timestamp 走 computeCostForMessage —— 子代理常是 sonnet 而主回合是 opus,沿用主回合
+ * 模型会整条算错;走同一个入口的收益是分时段 / TTL 两档 / 长上下文档 / ·疑似 / ·已下架
+ * 自动生效,不新开计价路径。
+ *   代价 = costUsd 是【原币种】金额(与 turn 的 cost 同口径),故每条 agent 带 currency,
+ *   展示层按 displayUsd 折算 —— 与 turn 全相同款做法,不是第二套口径。
+ *   失败(算不出来)记 costUsd: null(不是 0)、partial: true、reason 进 unknownDimensions,
+ *   绝不按 0 相加;单个 agent 的畸形输入不外溢成整体异常。
+ * 纯函数、无网络、无副作用:不改传入数组,同输入同输出。
+ */
+export function computeCostForAgents(agents, provider) {
+  const empty = { totalUsd: 0, count: 0, agents: [], partial: false };
+  if (!Array.isArray(agents) || agents.length === 0) return empty;
+  const breakdown = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const unknownDimensions = [];
+  const currencies = new Set();
+  const priced = [];
+  let totalUsd = 0;
+  let partial = false;
+  for (const item of agents) {
+    const agent = item && typeof item === 'object' ? item : {};
+    const model = typeof agent.model === 'string' && agent.model ? agent.model : null;
+    const metadata = {
+      agentSessionId: typeof agent.agentSessionId === 'string' ? agent.agentSessionId : null,
+      toolUseId: typeof agent.toolUseId === 'string' ? agent.toolUseId : null,
+      agentType: typeof agent.agentType === 'string' ? agent.agentType : null,
+      model: agent.model ?? null,
+    };
+    const cost = computeCostForMessage(
+      { model, usage: agent.usage, timestamp: agent.timestamp, usageCalls: agent.usageCalls }, provider,
+    );
+    if (!cost) {
+      partial = true;
+      const reason = costUnavailableReason(model, agent.usage, provider, { at: agent.timestamp })?.reason;
+      if (reason && !unknownDimensions.includes(reason)) unknownDimensions.push(reason);
+      priced.push({ ...metadata, costUsd: null, tier: null, matchedExactly: null, retired: false, currency: null });
+      continue;
+    }
+    totalUsd += cost.totalUsd;
+    breakdown.input += cost.breakdown.input;
+    breakdown.output += cost.breakdown.output;
+    breakdown.cacheRead += cost.breakdown.cacheRead;
+    breakdown.cacheWrite += cost.breakdown.cacheWrite;
+    for (const dim of cost.unknownDimensions || []) if (!unknownDimensions.includes(dim)) unknownDimensions.push(dim);
+    if (cost.currency) currencies.add(cost.currency);
+    priced.push({
+      ...metadata, costUsd: cost.totalUsd, tier: cost.tier ?? null,
+      matchedExactly: cost.matchedExactly ?? null, retired: cost.retired === true,
+      currency: cost.currency ?? null,
+    });
+  }
+  return {
+    totalUsd, breakdown, count: agents.length, agents: priced, partial, unknownDimensions,
+    // 展示层要按币种折算(displayUsd);多币种混在一张卡上时给不出一个数,故缺席即按 USD 处理。
+    ...(currencies.size === 1 ? { currency: [...currencies][0] } : {}),
+  };
+}
+
+/**
+ * 该 model 的官方报价里有没有分时段条件(决定要不要逐调用各算一次)。
+ * 用量面板也用这个判据决定「要不要显示当前时段那一行」—— 计价与展示共用一处,
+ * 否则会出现"面板认了某个模型有峰谷价、计价却不认"这类两套口径。
+ */
+export function hasPeriodQuote(model) {
+  for (const quote of officialCandidates(model)) {
+    if (quote?.conditions && typeof quote.conditions === 'object' && quote.conditions.period != null) return true;
+  }
+  return false;
+}
+
+/** usage 字段 → 数字(非数字/缺失一律 0,与今天的口径逐字一致)。 */
+function num(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 /**
@@ -666,13 +1170,44 @@ export function computeCost(model, usage, provider) {
  * 判官实测同一份真实历史:面板 ¥211.70 vs 气泡 ¥4,689.56,差 22 倍。口径必须只有一个出口。
  */
 export function aggregateCost(model, tokens, provider) {
-  const c = computeCost(model, {
-    input_tokens: tokens.input, output_tokens: tokens.output,
-    cache_read_input_tokens: tokens.cacheRead, cache_creation_input_tokens: tokens.cacheWrite || 0,
-  }, provider);
-  if (c) return { usd: c.totalUsd };
+  const asUsage = (bucket) => ({
+    input_tokens: bucket.input, output_tokens: bucket.output,
+    cache_read_input_tokens: bucket.cacheRead, cache_creation_input_tokens: bucket.cacheWrite || 0,
+  });
+  // 分时段模型:面板拿到的是按模型汇总的 token(没有时间)。按桶各算一次,时点用规则模块里
+  // 写死的代表时刻(不读「现在」,否则同一份数据每次打开金额都变)。
+  const byPeriod = tokens.byPeriod;
+  if (byPeriod && hasPeriodQuote(model)) {
+    const buckets = ['peak', 'offPeak'];
+    let usd = 0;
+    const unknown = [];
+    let partial = false;
+    let any = false;
+    for (const bucket of buckets) {
+      const row = byPeriod[bucket];
+      if (!row) continue;
+      const c = computeCost(model, asUsage(row), provider, { at: AGGREGATE_PERIOD_AT[bucket] });
+      if (!c) continue;
+      any = true;
+      usd += c.totalUsd;
+      for (const dim of c.unknownDimensions || []) if (!unknown.includes(dim)) unknown.push(dim);
+      if (c.partial) partial = true;
+    }
+    const unknownRow = byPeriod.unknown;
+    if (unknownRow && (unknownRow.calls || 0) > 0) { partial = true; if (!unknown.includes('period')) unknown.push('period'); }
+    if (any) return { usd, currency: firstCurrency(model, provider), ...(partial ? { partial: true, unknownDimensions: unknown } : {}) };
+    return isPlanBilling(provider, model) ? { subscription: true } : { unknown: true };
+  }
+  const c = computeCost(model, asUsage(tokens), provider);
+  if (c) return { usd: c.totalUsd, currency: c.currency, ...(c.partial ? { partial: true, unknownDimensions: c.unknownDimensions } : {}) };
   // computeCost 返回 null 有两种原因,面板要分开显示:套餐/订阅档 vs 查无单价。
   return isPlanBilling(provider, model) ? { subscription: true } : { unknown: true };
+}
+
+/** 分时段行的展示币种:取其一时段解析出来的 currency(同一条报价,两个时段必然同币种)。 */
+function firstCurrency(model, provider) {
+  const price = resolvePrice(model, { at: AGGREGATE_PERIOD_AT.peak, provider, promptTokens: null });
+  return price.ok ? price.currency : null;
 }
 
 /**
@@ -682,14 +1217,86 @@ export function aggregateCost(model, tokens, provider) {
 export function costTitle(cost) {
   if (!cost) return '';
   const head = cost.source === 'user'
-    ? '本条按你为该模型填写的单价计算（人民币 / 每百万 token）。\n单价在 provider 编辑表单的「计价」中设置，留空的项按内置官网价回落。\n'
+    ? '本条按你为该模型填写的单价计算（人民币 / 每百万 token）。\n单价在 provider 编辑表单的「计价」中设置；未填的维度按未知处理，不计入金额。\n'
     : '本条估算（人民币；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）\n'
       + '单价取各模型官网价目。若该模型经中转站接入或按套餐计费，则在 provider 编辑表单的「计价」中填写实付单价。\n';
-  return head
-    + `input ${formatCost(cost.breakdown.input)}\n`
-    + `output ${formatCost(cost.breakdown.output)}\n`
-    + `cache read ${formatCost(cost.breakdown.cacheRead)}\n`
-    + `cache write ${formatCost(cost.breakdown.cacheWrite)}`;
+  const lines = [
+    `input ${formatCost(cost.breakdown.input)}`,
+    `output ${formatCost(cost.breakdown.output)}`,
+    `cache read ${formatCost(cost.breakdown.cacheRead)}`,
+    `cache write ${formatCost(cost.breakdown.cacheWrite)}`,
+  ];
+  if (cost.breakdown.cacheWrite5m != null || cost.breakdown.cacheWrite1h != null) {
+    lines.push(`cache write 5m ${formatCost(cost.breakdown.cacheWrite5m || 0)}`);
+    lines.push(`cache write 1h ${formatCost(cost.breakdown.cacheWrite1h || 0)}`);
+  }
+  if (cost.sourceUrl) {
+    lines.push(`来源 ${cost.sourceUrl}${cost.fetchedAt ? `（抓取于 ${cost.fetchedAt}）` : ''}`);
+  }
+  const conditions = (cost.appliedConditions || []).map(conditionText).filter(Boolean);
+  if (conditions.length) lines.push(`适用条件 ${conditions.join('、')}`);
+  for (const item of cost.skipped || []) {
+    if (item?.tier) lines.push(`未采用 ${item.tier}${item.reason ? `：${item.reason}` : ''}`);
+  }
+  if (cost.note) lines.push(cost.note);
+  return head + lines.join('\n');
+}
+
+/** 适用条件的可读串(进 tooltip)。 */
+function conditionText(condition) {
+  if (!condition || typeof condition !== 'object') return '';
+  if (condition.context === 'long context') {
+    return `长上下文（输入 ${condition.promptTokens} > ${condition.threshold}）`;
+  }
+  if (condition.period === 'peak') return `高峰时段${condition.localISO ? `（${condition.localISO}）` : ''}`;
+  if (condition.period === 'off-peak') return `空闲时段${condition.localISO ? `（${condition.localISO}）` : ''}`;
+  if (condition.period === 'unknown') return '部分调用时段未知';
+  if (condition.minPromptTokens != null) return `输入量 > ${condition.minPromptTokens}`;
+  return '';
+}
+
+/** 费用徽章左侧的来源标注(契约 §5.5 的六个词 + 「·疑似」/「·已下架」两个后缀)。 */
+export function costSourceLabel(cost) {
+  if (!cost) return '';
+  let word;
+  if (cost.tier === 'manual' || cost.source === 'user') word = '手填单价';
+  else if (cost.tier === 'community') word = '社区表（估算）';
+  else if (cost.tier === 'offline') word = '离线旧价（估算）';
+  else if ((cost.appliedConditions || []).some((item) => item?.context === 'long context')) word = '官方价·长上下文';
+  else if ((cost.appliedConditions || []).some((item) => item?.period)) word = '官方价·分时段';
+  else word = '按官网价估算';
+  if (cost.matchedExactly === false) word += '·疑似';
+  if (cost.retired) word += '·已下架';
+  return word;
+}
+
+/** 「费用未知」时三处费用位显示的词(契约 §5.5,逐字;NO_PRICE 沿用现行文案)。 */
+export const COST_REASON_TEXT = {
+  NO_PRICE: '未定价 · 费用未知',
+  USAGE_INVALID: '用量异常 · 费用未知',
+  PERIOD_UNRESOLVED: '时段未知 · 费用未知',
+  PERIOD_NOT_EFFECTIVE: '时段价未生效 · 费用未知',
+  CONDITIONS_AMBIGUOUS: '条件歧义 · 费用未知',
+  THRESHOLD_UNKNOWN: '阈值未知 · 费用未知',
+};
+
+/** 「有金额但有未知维度」时的补充说明(契约 §5.5 的三句)。 */
+export function costUnknownNote(cost) {
+  const dims = cost?.unknownDimensions || [];
+  if (dims.includes('period')) return '部分调用时段未知 · 费用为已知小计';
+  if (dims.includes('cacheWrite5m') || dims.includes('cacheWrite1h')) return '写费未知（该档无价）';
+  if (dims.includes('cacheWrite')) return '写费未知（缺 TTL 分配）';
+  return '';
+}
+
+/**
+ * 金额 → 展示用美元口径:官方 CNY 报价是**原币种数字**(人民币/百万),内置/远端表是美元数字。
+ * 展示层按 7.2 回算人民币,所以只有美元数字能直接喂 formatCost —— 人民币数字要先折过去,
+ * 否则会被再乘一次 7.2(用户看到的钱多 6.2 倍)。
+ */
+export function displayUsd(amount, currency) {
+  if (typeof amount !== 'number' || !Number.isFinite(amount)) return amount;
+  return currency === 'CNY' ? amount * CNY_TO_USD : amount;
 }
 
 /**

@@ -47,6 +47,11 @@ export function ImageLightbox({ src, name, path, onClose, onPrev, onNext, counte
   const navBtnCls = 'absolute top-1/2 -translate-y-1/2 w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors';
   return createPortal(
     <div
+      // 合同(INTERFACE「Markdown、附件和通知」):灯箱是模态对话框 —— role=dialog + aria-modal
+      // 是黑盒可观察的身份,也是屏幕阅读器把它当对话框而不是普通图层的唯一依据。
+      role="dialog"
+      aria-modal="true"
+      aria-label={name ? `图片预览 ${name}` : '图片预览'}
       className={`fixed inset-0 z-[200] flex bg-black/80 p-6 ${actualSize ? 'overflow-auto' : 'items-center justify-center'}`}
       onClick={onClose}
     >

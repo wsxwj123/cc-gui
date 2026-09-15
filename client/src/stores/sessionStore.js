@@ -7,10 +7,36 @@ import { isValidContextResponse, shouldReplaceContextCache } from '../utils/cont
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList, mergeHiddenOrder } from '../utils/projectPanel.js';
 import { mergeProviderLists } from '../utils/providerList.js';
 import { attachmentSidecarNotice, draftSidecarBindingsForSessions, recoverAttachmentSidecarBindings } from '../utils/attachments.js';
+import { rotatedPaneGenerations } from '../utils/sessionFlowIdentity.js';
 
 const recoverDraftSidecarsFromSessions = (sessions, projectHash) => (
   recoverAttachmentSidecarBindings(draftSidecarBindingsForSessions(sessions, projectHash))
 );
+
+// ── 启动期请求去重(只合并「同一时刻的同一读请求」,不是结果缓存)──────────────
+// 启动时 /api/projects 被两个调用点各拉一次(UnifiedSidebar 与 App),同一 hash 的
+// sessions 也有两个并发调用点(fetchSessions / fetchSessionsForPanel)—— 服务端要为此
+// 白扫两遍磁盘。这里让同刻重复的调用共享同一次网络往返:
+//   · 结束即清(无论成败),**不跨时间**:写操作后该刷新的照旧刷新,watcher 600 ms 兜底。
+//   · 只共享往返,不共享写回:两个 sessions 消费者拿同一份响应体走各自的分支
+//     (silent 语义、403 分支、错误态按 hash 隔离、mergeSessionList 身份复用全部不变)。
+const inflightReqs = new Map();
+function dedupeRequest(key, run) {
+  const inflight = inflightReqs.get(key);
+  if (inflight) return inflight;
+  const p = (async () => {
+    try { return await run(); } finally { inflightReqs.delete(key); }
+  })();
+  inflightReqs.set(key, p);
+  return p;
+}
+/** /api/projects/:hash/sessions 的网络往返(同 hash 并发共享);调用方各自处理响应。 */
+function fetchSessionsResponse(projectHash) {
+  return dedupeRequest(`sessions:${projectHash}`, async () => {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectHash)}/sessions`);
+    return { res, data: await res.json() };
+  });
+}
 
 // Re-exported so existing importers (App.jsx) keep working; the list and its
 // css-resolution logic now live in utils/systemFonts.js alongside the enumeration.
@@ -69,6 +95,8 @@ const putCustomTitle = (sessionId, title) => {
 // 同键两连改时第一个 PUT 的 finally 不再误摘第二个在途的保护标签):广播/水合期间
 // 不覆盖正在提交中的键,防「刚点的选择被旧广播闪回」。
 const syncInFlight = createInFlightCounter(); // tag = `${kind}:${sessionId}`
+// 直播子代理金额条目的上限(见 liveSubUsage)。一个子代理一条,完成才入表,正常规模是几十条。
+const LIVE_SUB_USAGE_MAX = 500;
 // 返回 Promise<boolean>(PUT 是否成功);现有 setter 调用点忽略返回值仍是
 // fire-and-forget,首次迁移回推靠此判据门控 marker(低危#1)。
 const putSessionSync = (kind, sessionId, value, { untracked = false } = {}) => {
@@ -348,6 +376,18 @@ export function applyReadingFont(id) {
 // Monotonic counter for fresh stable pane identity tokens (see paneIds).
 let nextPaneId = 6;
 const freshPaneId = () => `p${nextPaneId++}`;
+// R13:窗格的 owner 绑定代际(每个会话窗格发布 data-generation)。换 owner(切到别的会话 /
+// 换一个 draft)才轮换一次;同一 owner 换对象引用、以及 draft 首发绑定真实 sid(init)都
+// 算【同一轮】—— INTERFACE「原 clientTurnId/generation 及当前消息仍属于同轮」。
+let nextPaneGeneration = 1;
+const freshGeneration = () => `g${nextPaneGeneration++}`;
+// 判定与轮换规则在 utils/sessionFlowIdentity.js(纯函数,单测直调)。
+// prev 可显式给(调用点手里已经有旧值),不给就从 state 现取。
+function rotatedGenerations(state, idx, next, prev = (state.paneSessions || [])[idx]) {
+  return rotatedPaneGenerations({
+    generations: state.paneGenerations, idx, prev, next, fresh: freshGeneration,
+  });
+}
 
 // 子代理有序 blocks:末块同类型(text/thinking)则并入 content,否则新起一块。
 // 因 append 按时序调用,可据此还原"思考→工具→思考"的先后(供 CoworkBlocks 渲染)。
@@ -421,6 +461,17 @@ const persistQueueSnapshot = (messageQueue, verify = false) => {
   } catch { return false; }
 };
 persistQueueSnapshot(recoveredQueueMap);
+
+// 条带折叠 · 异常轮判据(纯函数,零 React/零 DOM,单测 check-strip-abnormal)。
+// 入参 rec 是**已经按 turn.sessionId 取出来的那一条**(查表在调用处:选择器只订阅本会话的
+// 记录,别的会话写入不会打穿这一行的重渲染)。判据落在 turn 自己的现成字段上:
+// since ≤ 该轮首条记录的落盘时刻 ≤ until。窗外(上一轮/更早的轮/下一轮)→ 不撑开。
+export function roundStripEnd(rec, sessionId, timestamp) {
+  if (!rec || !sessionId) return null;
+  const ts = Date.parse(timestamp || '');
+  if (!Number.isFinite(ts)) return null;
+  return ts >= rec.since && ts <= rec.until ? rec.end : null;
+}
 
 export const useStore = create((set, get) => ({
   // Data
@@ -551,6 +602,9 @@ export const useStore = create((set, get) => ({
   // React instance — and its live streaming state — paired with its session.
   // In-memory only; layout positions are restored from paneSessions on reload.
   paneIds: ['p0', 'p1', 'p2', 'p3', 'p4', 'p5'],
+  // R13:每个窗格当前 owner 绑定轮次的代际(发布为该 pane 与其流动内容容器的
+  // data-generation)。与 paneIds 同生命周期:splice/清空时同步轮换。
+  paneGenerations: Array.from({ length: 6 }, freshGeneration),
   activeTabIndex: INITIAL_ACTIVE_TAB, // 已夹到 [0, paneCount-1](见 INITIAL_ACTIVE_TAB)
   // Background-process pids per session, surfaced for sidebar dots + top
   // badge. Populated by SessionDetail's backgroundPid poll. Shape:
@@ -585,6 +639,21 @@ export const useStore = create((set, get) => ({
   // App.jsx reader populates this; AgentMonitorPanel + TaskCard render it.
   activeAgents: {},
   viewingAgentByTab: {},  // #9/AZ6:per-tab 在主区打开的子代理 id(分屏隔离,原全局单值会让 A 的子代理占用 B 窗格)
+
+  // 直播补齐(2026-09-13):子代理【完成那一刻】服务端随事件推来的金额条目,键 = toolUseId
+  // (与卡片、与历史 subUsage.agents[] 同一把键)。条目形状与历史那条逐字段相同,故消费端
+  // (TurnBubble 的索引 / 监控面板)一个字不用改。历史接管后是整体替换,不叠加 —— 只有
+  // uuid 以 streaming/chat- 开头的本地副本才读它(那时历史那份还没到)。
+  // 不随流结束清:后台子代理跨回合完成,面板要一直看得见;上限只为防长会话无限累积。
+  liveSubUsage: {},
+  pushLiveSubUsage: (entry) => set((s) => {
+    const id = entry?.toolUseId;
+    if (!id) return {};
+    const next = { ...s.liveSubUsage, [id]: entry };
+    const keys = Object.keys(next);
+    if (keys.length > LIVE_SUB_USAGE_MAX) delete next[keys[0]]; // 插入序 = 最老的在最前
+    return { liveSubUsage: next };
+  }),
 
   // 侧栏状态符号数据源:有活跃 chat-process 的 sessionId(转圈)+ 它们的 cwd(让
   // ProjectList 在任一会话运行时给项目转圈)。App 每 1.5s 轮询 /agents/active 写入;
@@ -744,6 +813,16 @@ export const useStore = create((set, get) => ({
   chatMode: (() => {
     try { return localStorage.getItem('cgui-chat-mode') === '1'; } catch { return false; }
   })(),
+
+  // 条带折叠 · 异常收尾记录(每会话恒 1 条时间窗,**不落盘**、不进 localStorage):
+  //   roundStrip: { [sessionId]: { end: 'aborted'|'error', since: ms, until: ms } }
+  // 只记"没正常收尾"的两态 —— 正常完成什么都不写(默认收起就是正常完成的表达)。
+  // 判据落在 turn 自己的现成字段上:turn.sessionId 命中 + since ≤ Date.parse(turn.timestamp) ≤ until。
+  // 为什么不是按 uuid 的扁平 map:直播回合期间 paneMessages 是陈旧的(整轮不刷历史),
+  // "取最后一条 turn"会取到上一轮;而本地停止/报错副本的 uuid 是 chat-* 哨兵,按 uuid 查必然落空。
+  // 时间窗只用"本轮流开始时刻 + 写记录那一刻",两个值在动作里现成可得,完全不读消息列表;
+  // 单调性给出比 uuid 更强的保证:上一轮的首条记录必然早于 since,不可能被误撑开。
+  roundStrip: {},
 
   // Theme as a (family, tone) pair. `cguiTheme` is the derived data-cgui-theme
   // variant id ('' = default Apple-system palette). themeTone drives data-theme.
@@ -1166,9 +1245,15 @@ export const useStore = create((set, get) => ({
   },
   setSelectedSession: (session) => {
     // Setting selectedSession also writes pane 0, keeping the mirror in sync.
-    const panes = [...(get().paneSessions || [])];
+    // 侧栏点会话走的是这里(不经 setPaneSession),所以 R13 的代际轮换也要在这一点执行,
+    // 否则"切到别的会话"代际不变 = 该身份失去意义。
+    const cur = get();
+    const panes = [...(cur.paneSessions || [])];
     panes[0] = session;
-    set({ selectedSession: session, paneSessions: panes });
+    const patch = { selectedSession: session, paneSessions: panes };
+    const gens = rotatedGenerations(cur, 0, session);
+    if (gens) patch.paneGenerations = gens;
+    set(patch);
     writeLs('cgui-selected-session', session);
     writeLs('cgui-pane-sessions', panes);
   },
@@ -1366,7 +1451,9 @@ export const useStore = create((set, get) => ({
       // Fresh id so the now-empty pane's SessionDetail unmounts cleanly.
       const ids = [...cur.paneIds];
       ids[0] = freshPaneId();
-      set({ paneSessions: next, paneMessages: nextMsgs, paneMessagesSid: nextSids, paneIds: ids, selectedSession: null, messages: [] });
+      const gens = [...(cur.paneGenerations || [])];
+      gens[0] = freshGeneration(); // 空窗格 = 新一轮绑定
+      set({ paneSessions: next, paneMessages: nextMsgs, paneMessagesSid: nextSids, paneIds: ids, paneGenerations: gens, selectedSession: null, messages: [] });
       writeLs('cgui-selected-session', null);
       writeLs('cgui-pane-sessions', next);
       get().reclaimOrphanClaimDrafts(); // ②旧 pane id 已被换掉,回收指向它的 claim 槽
@@ -1376,13 +1463,16 @@ export const useStore = create((set, get) => ({
     const msgs = [...cur.paneMessages];
     const sids = [...cur.paneMessagesSid];
     const ids = [...cur.paneIds];
+    const gens = [...(cur.paneGenerations || [])];
     // Splice (i) out then pad back to length 6 so index math stays stable.
     // paneIds splices in lockstep so surviving panes keep their React instance.
     // paneMessagesSid 同步 splice —— 错位会让幸存窗格的历史被归属守卫误藏/误显。
+    // paneGenerations 同样 splice:幸存窗格的代际必须原样跟着自己的 owner 走。
     sessions.splice(i, 1); sessions.push(null);
     msgs.splice(i, 1); msgs.push([]);
     sids.splice(i, 1); sids.push(null);
     ids.splice(i, 1); ids.push(freshPaneId());
+    gens.splice(i, 1); gens.push(freshGeneration());
     const newCount = cur.paneCount - 1;
     const newActive = cur.activeTabIndex >= newCount
       ? Math.max(0, newCount - 1)
@@ -1400,6 +1490,7 @@ export const useStore = create((set, get) => ({
       paneMessages: msgs,
       paneMessagesSid: sids,
       paneIds: ids,
+      paneGenerations: gens,
       activeTabIndex: newActive,
       // pane 0 changed if we removed pane 0 — keep legacy mirrors current.
       selectedSession: sessions[0],
@@ -1418,10 +1509,15 @@ export const useStore = create((set, get) => ({
   // selectedSession mirror so reads outside SessionDetail keep working.
   setPaneSession: (i, session) => {
     const idx = Math.max(0, Math.min(5, i | 0));
-    const sessions = [...get().paneSessions];
+    const cur = get();
+    const sessions = [...cur.paneSessions];
+    const prev = sessions[idx];
     sessions[idx] = session;
     writeLs('cgui-pane-sessions', sessions);
     const patch = { paneSessions: sessions };
+    // R13:只有换 owner 才算新一轮(draft→真 sid 升级保持同一代际)。
+    const gens = rotatedGenerations(cur, idx, session, prev);
+    if (gens) patch.paneGenerations = gens;
     if (idx === 0) {
       patch.selectedSession = session;
       writeLs('cgui-selected-session', session);
@@ -1716,10 +1812,12 @@ export const useStore = create((set, get) => ({
     try {
       const d = await fetch('/api/agents/active').then((r) => r.json());
       const procs = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.sessionId === sessionId && a.stoppable === true);
+      // R12 合同:请求带母 pid 与 toolUseId,母归属字段用 parentSessionId(sessionId 是旧拼写,
+      // 服务端两条都认)。response.ok 不判定成败 —— 四档结果都可能是 409/200,判据在 body.code/stopped。
       const results = await Promise.allSettled(procs.map((a) => fetch(`/api/chat/${a.pid}/stop-task`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ toolUseId, sessionId }),
-      }).then((r) => r.json())));
+        body: JSON.stringify({ parentSessionId: sessionId, parentPid: String(a.pid), toolUseId }),
+      }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }))));
       // S1:无一命中(所有属主 pid 都 stopped:false)= 该 task 已不在任何 slot 的 liveTasks。
       // 【落终态,不回滚成"工作中"】(批A A6):原来回滚成 prevStatus(working)。可落空恰恰
       // 说明服务端任务表里已经没有它了 —— 既不会再有权威 task_notification 来纠正,回滚就
@@ -1727,12 +1825,38 @@ export const useStore = create((set, get) => ({
       // 而非绿勾"完成";真权威终态若还是到了,finalizeAgent 的 canOverride 会覆盖并清标记。
       // 仍只动我们乐观写的那条 stopped:其间到达的权威终态(finalizeAgent 已清 optimisticStop)
       // 即便 status 同为 stopped 也够不着。
-      const anyStopped = results.some((r) => r.status === 'fulfilled' && r.value?.stopped === true);
+      const bodies = results.filter((r) => r.status === 'fulfilled').map((r) => r.value || {});
+      const anyStopped = bodies.some((b) => b.body?.ok === true && b.body.stopped === true);
+      // 服务端四档 → 人话。stopped:false 带真实终态 = 它早已结束(诚实落终态,不冒充刚停);
+      // AGENT_NOT_RUNNING = 只有历史、没有运行实例;AGENT_OWNER_MISMATCH = 归属不符(不动状态);
+      // AGENT_STOP_TIMEOUT = 15 秒没确认退出,不能宣称已停(回滚乐观态,提示可重试)。
+      const fail = bodies.find((b) => b.body?.ok === false) || {};
+      const failCode = fail.body?.code || null;
+      const endStatus = bodies.map((b) => b.body?.status).find((s) => s && s !== 'running' && s !== 'stopping') || null;
       if (didOptimistic && !anyStopped) {
         const cur = get().activeAgents[toolUseId];
         if (cur && cur.status === 'stopped' && cur.optimisticStop) {
-          get().upsertAgent(toolUseId, { status: 'done', settledBy: 'gone', finishedAt: Date.now(), optimisticStop: false });
+          if (failCode === 'AGENT_STOP_TIMEOUT' || failCode === 'AGENT_OWNER_MISMATCH') {
+            // 还在跑(或根本没停):把乐观的 stopped 撤回,免得卡片谎称已停止。
+            get().upsertAgent(toolUseId, { status: prevStatus || 'working', finishedAt: null, optimisticStop: false });
+          } else {
+            get().upsertAgent(toolUseId, { status: 'done', settledBy: 'gone', finishedAt: Date.now(), optimisticStop: false });
+          }
         }
+      }
+      if (failCode === 'AGENT_STOP_TIMEOUT') {
+        return { stopped: false, noOwner: false, procAlive: procs.length > 0, code: failCode, error: '停止未被确认(15 秒内没有看到它退出)。它可能仍在运行,可稍后重试。' };
+      }
+      if (failCode === 'AGENT_OWNER_MISMATCH') {
+        return { stopped: false, noOwner: false, procAlive: procs.length > 0, code: failCode, error: '这个子代理不属于当前母会话,没有发出停止。请在它所属的会话里停止。' };
+      }
+      // 只有历史、没有运行实例:它就是已经结束了,走既有"落终态 + 提示"那一路(不是失败)。
+      if (failCode === 'AGENT_NOT_RUNNING') {
+        return { stopped: false, noOwner: didOptimistic, procAlive: procs.length > 0, code: failCode };
+      }
+      // 400/404/5xx 等其他失败:如实说,不假成功。
+      if (!anyStopped && !endStatus && procs.length > 0 && fail.body) {
+        return { stopped: false, noOwner: false, procAlive: true, code: failCode, error: fail.body.error || '停止失败。' };
       }
       // D5:回滚是静默的 —— 不发 task 事件的 provider 下没有任何 slot 认领,卡片"闪一下又
       // 转回去了",用户以为按钮坏了。把结果回给调用方(两处单卡停止按钮)提示一次;store 里
@@ -1748,6 +1872,33 @@ export const useStore = create((set, get) => ({
   setViewingAgent: (tab, id) => set((s) => ({
     viewingAgentByTab: { ...s.viewingAgentByTab, [tab]: id || null },
   })),
+
+  // ── 条带折叠 · 异常收尾记录(写点多在 App.jsx 的中断/报错动作里,读点在 TurnBubble)──
+  // 单槽后写覆盖:同一会话恒 1 条,不需要淘汰/上限。形状见 state 声明处。
+  markRoundAbnormal: (sessionId, { end, since, until }) => set((s) => {
+    if (!sessionId || (end !== 'aborted' && end !== 'error')) return s;
+    // since 是判据**下界**:漏传/不可解析一律**拒写**,绝不兜底成 0 —— `[0, until]` 会把
+    // 该会话全部历史轮撑开(公共 action 里埋"灾难默认值"迟早被漏传的写点踩中)。宁可这
+    // 一轮不显示异常态,也不翻旧账;留一条痕让漏传在开发期可见(与上面两条静默守卫不同:
+    // 那两条是"调用方本意如此",这条是"调用方写错了")。
+    const sinceMs = Number(since);
+    if (!Number.isFinite(sinceMs)) {
+      console.error('[roundStrip] markRoundAbnormal 没有可解析的 since,已拒绝写入', { sessionId, end, since });
+      return s;
+    }
+    // until 缺失兜底成此刻:方向安全(只把窗口收窄到"本轮流开始 → 现在",不越界)。
+    const untilMs = Number.isFinite(Number(until)) ? Number(until) : Date.now();
+    const rec = { end, since: sinceMs, until: untilMs };
+    const prev = s.roundStrip[sessionId];
+    if (prev && prev.end === rec.end && prev.since === rec.since && prev.until === rec.until) return s;
+    return { roundStrip: { ...s.roundStrip, [sessionId]: rec } };
+  }),
+  clearRoundAbnormal: (sessionId) => set((s) => {
+    if (!sessionId || !s.roundStrip[sessionId]) return s;
+    const next = { ...s.roundStrip };
+    delete next[sessionId];
+    return { roundStrip: next };
+  }),
 
   // ── Message queue helpers (#3) ──────────────────────────────
   enqueueMessage: (sessionKey, msg) => {
@@ -1805,9 +1956,10 @@ export const useStore = create((set, get) => ({
     if (!persistQueueSnapshot(nextQueue, true)) return s;
     return { messageQueue: nextQueue };
   }),
-  reconcileSteerQueue: (sessionKey, steerKeys) => set((s) => {
+  // R46:opts.turnActive 透传给对账(回合还活着就一直等;回合结束了才允许判失败)。
+  reconcileSteerQueue: (sessionKey, steerKeys, opts) => set((s) => {
     const list = s.messageQueue[sessionKey] || [];
-    const nextList = reconcileSteered(list, null, steerKeys);
+    const nextList = reconcileSteered(list, null, steerKeys, opts);
     if (nextList === list) return s;
     const nextQueue = { ...s.messageQueue, [sessionKey]: nextList };
     if (!persistQueueSnapshot(nextQueue, true)) return s;
@@ -2004,8 +2156,11 @@ export const useStore = create((set, get) => ({
   fetchProjects: async () => {
     set({ listLoading: true, error: null });
     try {
-      const res = await fetch('/api/projects');
-      const data = await res.json();
+      // 启动时侧栏与 App 各拉一次 → 同刻共享同一次往返(服务端因此只走一遍 walk)。
+      const { res, data } = await dedupeRequest('projects', async () => {
+        const r = await fetch('/api/projects');
+        return { res: r, data: await r.json() };
+      });
       // r26-E3(契约 C-E3):顶层 projects 目录被系统拒访 → 403 + no-disk-access。
       // 与单项目会话列表(E2)同契约,但 projects 是顶层单列表,按 hash 存无意义
       // → 单值 projectsAccessError。侧栏项目空态(PKG-11)只读本字段渲染提示。
@@ -2062,8 +2217,8 @@ export const useStore = create((set, get) => ({
   fetchSessionsForPanel: async (projectHash) => {
     if (!projectHash) return;
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectHash)}/sessions`);
-      const data = await res.json();
+      // 同 hash 同刻的另一个消费者只共用这次往返(见 fetchSessionsResponse)
+      const { res, data } = await fetchSessionsResponse(projectHash);
       // r17-4:磁盘访问被系统拒绝时,后端回 403 + code:'no-disk-access'。这里必须把它
       // 与"真的没有会话"分开 —— 静默的空列表会让用户以为数据被删了(实测的真实反应)。
       if (res.status === 403 && data?.code === 'no-disk-access') {
@@ -2144,8 +2299,8 @@ export const useStore = create((set, get) => ({
     const silent = !!opts.silent;
     if (!silent) set({ listLoading: true, error: null });
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectHash)}/sessions`);
-      const data = await res.json();
+      // 同 hash 同刻的另一个消费者只共用这次往返(见 fetchSessionsResponse)
+      const { res, data } = await fetchSessionsResponse(projectHash);
       // r22-①:同一个后端契约(403 + code:'no-disk-access')的第二个消费者。原来这里
       // 静默吞成 [] —— 与 fetchSessionsForPanel 口径不一致,权限被拒时旧槽照样显示成
       // "没有会话"。两个消费者必须同口径:置错误态 + 空列表。

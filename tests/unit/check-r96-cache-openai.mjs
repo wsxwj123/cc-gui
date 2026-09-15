@@ -52,6 +52,10 @@ let U = null; let U_ERR = '';
 try { U = await import('../../server/utils/openai-usage.js'); }
 catch (e) { U_ERR = String((e && e.message) || e); }
 const normalizeOpenAIUsage = U?.normalizeOpenAIUsage;
+// 归一词表那侧的越界阈值(1.1 末条用来钉「两边同一个语言常量」,不各漂各的)。
+let UN_MAX_SAFE = null;
+try { UN_MAX_SAFE = (await import('../../server/utils/usage-normalize.js')).MAX_SAFE; }
+catch { /* 模块缺失时下面对它的断言自会红 */ }
 
 if (!PROXY) {
   console.log(`\n✗ 致命:server/services/openai-proxy.js 导入失败 —— ${PROXY_ERR}`);
@@ -607,12 +611,49 @@ const WEIRD = [null, undefined, 'x', 0, [], {}, NaN, Infinity, -1, true, () => {
   { prompt_tokens: 1000, cached_tokens: null }];
 
 // ── 1.1 签名与不变式 ──────────────────────────────────────────────────
-p1('1.1 返回对象恒含且仅含 4 个键(对 1.3 表 + 全部畸形输入)', () => {
+// R22/R23 起返回对象多一个【条件键】ccgui_usage(只在归一发现上游数字无效/自相矛盾时出现),
+// 原来那条"恒含且仅含 4 个键"因此过期。新不变量(比旧条目更严,正反两向都钉):
+//   · 4 个 token 键恒在且取值范围不变 —— 代理转换、徽章、费用链路按名字读它们,取值口径没动;
+//   · ccgui_usage 只在带码时出现,不出现时对象必须还是恰好 4 键;出现时键集合、码词表、
+//     码序、形状(raw 为对象)全部固定 —— 不是"多什么都行"。
+// 为什么多这一个条件键仍然安全:没有任何消费方按 Object.keys(usage) 枚举字段
+// (代理/统计/归一/展示都按字段名读),且该键是既有的诊断通道(openai-proxy.js 与
+// utils/usage-normalize.js 都按名字读它)。
+const KEYS_WITH_CODES = [...KEYS, 'ccgui_usage'].sort();
+const USAGE_CODES = ['USAGE_INVALID', 'USAGE_INCONSISTENT'];
+p1('1.1 4 个 token 键恒在;ccgui_usage 仅在带码时出现且形状固定(正反两向)', () => {
   const bag = [...Object.values(FIXTURES), ...WEIRD];
   for (const u of bag) {
     const got = normalizeOpenAIUsage(u);
-    assert.deepEqual(Object.keys(got).sort(), KEYS, `入参 ${String(JSON.stringify(u) ?? u)} 的键集合不符`);
+    const label = `入参 ${String(JSON.stringify(u) ?? u)}`;
+    if (!('ccgui_usage' in got)) {
+      assert.deepEqual(Object.keys(got).sort(), KEYS, `${label} 没告警却多出第 5 个键`);
+      continue;
+    }
+    assert.deepEqual(Object.keys(got).sort(), KEYS_WITH_CODES, `${label} 有告警时键集合不符`);
+    const { codes, raw } = got.ccgui_usage;
+    assert.ok(Array.isArray(codes) && codes.length > 0, `${label} ccgui_usage.codes 必须是非空数组`);
+    for (const c of codes) assert.ok(USAGE_CODES.includes(c), `${label} 出现码表外的码 ${c}`);
+    assert.equal(new Set(codes).size, codes.length, `${label} codes 不得重复`);
+    assert.equal(typeof raw, 'object', `${label} ccgui_usage.raw 必须是对象`);
   }
+  // 正反两面各钉一个固定用例(不指望 WEIRD 里恰好有哪一类畸形输入):
+  assert.ok(!('ccgui_usage' in normalizeOpenAIUsage({ prompt_tokens: 1000, prompt_tokens_details: { cached_tokens: 896 }, completion_tokens: 20 })),
+    '全部合法的入参不得凭空带 ccgui_usage');
+  assert.deepEqual(normalizeOpenAIUsage({ prompt_tokens: -5 }).ccgui_usage.codes, ['USAGE_INVALID'], '负数总量 → USAGE_INVALID');
+  assert.deepEqual(normalizeOpenAIUsage({ prompt_tokens: 100, prompt_cache_hit_tokens: 900 }).ccgui_usage.codes, ['USAGE_INCONSISTENT'], '读写超总量 → USAGE_INCONSISTENT');
+  assert.deepEqual(
+    normalizeOpenAIUsage({ prompt_tokens: 1000, completion_tokens: -1, cached_tokens: 900, cache_creation_input_tokens: 200 }).ccgui_usage.codes,
+    ['USAGE_INVALID', 'USAGE_INCONSISTENT'], '两种都命中时码序固定(INVALID 在前)');
+});
+
+// 越界阈值:本模块零依赖(3.2 焊死)内联了 Number.MAX_SAFE_INTEGER,usage-normalize 导出
+// 的 MAX_SAFE 也必须是同一个语言常量 —— 两边若各写各的,同一份 usage 会在两处得到不同的码。
+p1('1.1 越界阈值 = Number.MAX_SAFE_INTEGER,且与 usage-normalize 的 MAX_SAFE 是同一常量', () => {
+  assert.equal(UN_MAX_SAFE, Number.MAX_SAFE_INTEGER, 'utils/usage-normalize.js 的 MAX_SAFE 不再是语言常量');
+  assert.ok(!('ccgui_usage' in normalizeOpenAIUsage({ prompt_tokens: Number.MAX_SAFE_INTEGER })), '恰好等于 MAX_SAFE 不算越界');
+  assert.deepEqual(normalizeOpenAIUsage({ prompt_tokens: Number.MAX_SAFE_INTEGER + 1 }).ccgui_usage.codes,
+    ['USAGE_INVALID'], '超 MAX_SAFE 必须标 USAGE_INVALID');
 });
 
 p1('1.1 4 个值恒为有限非负数(无 undefined/null/NaN/负数/字符串)', () => {

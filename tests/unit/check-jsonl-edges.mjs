@@ -8,13 +8,15 @@
 //      非空行含坏行)与老实现逐字一致 —— messageCount 和"< 3 行不列出"都靠它;
 //   ③ 回调是 onLine(原始字符串) 而非解析后的对象,调用方自己廉价预筛再 parse。
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, linkSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { parseJsonl, readJsonlEdges } from '../../server/utils/jsonl-parser.js';
+// 只调 listProjects(显式传临时目录)—— 不碰真实 ~/.claude/projects。
+import { listProjects } from '../../server/services/session-reader.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'cgui-edges-'));
 const w = (name, text) => { const p = join(dir, name); writeFileSync(p, text); return p; };
@@ -121,29 +123,95 @@ try {
     await assert.rejects(() => readJsonlEdges(join(dir, 'nope.jsonl'), 3), /ENOENT/);
   }
 
-  // ── 5. 源码守卫:调用点形态别退回去 ────────────────────────────────
+  // ── 5. 行为:listProjects 冷读只读头部,不整文件扫 ──────────────────────
+  // B1 之前这里数的是「源码里 parseJsonl(…,{limit:10}) 出现 2 次」—— 数的是拼写,
+  // 实现换写法就误报,而且"数够 2 处"并不等于"真的没整文件扫"。改成量行为:
+  // 10 个项目各挂一份 38MB jsonl(hardlink 同一 inode,不额外占盘),只读头是毫秒级,
+  // 整文件扫是几百毫秒级(本机实测:头读 ~1ms / 10×38MB 全读 ~360ms)。
+  {
+    const cwdDir = join(dir, 'cwd-probe'); // cwd 必须真实存在(isNonProjectPath 会丢掉不存在的路径)
+    mkdirSync(cwdDir, { recursive: true });
+    const parts = [line({ type: 'user', cwd: cwdDir })];
+    for (let i = 0; i < 200_000; i++) parts.push(line({ i, pad: 'p'.repeat(180) }));
+    const bigSource = join(dir, 'big-proj.jsonl');
+    writeFileSync(bigSource, parts.join('\n'));
+
+    const projRoot = join(dir, 'projects');
+    const hashes = Array.from({ length: 10 }, (_, n) => `-tmp-cgui-edges-probe-${n}`);
+    for (const h of hashes) {
+      mkdirSync(join(projRoot, h), { recursive: true });
+      linkSync(bigSource, join(projRoot, h, 'sess.jsonl'));
+    }
+
+    const t0 = Date.now();
+    const projects = await listProjects(projRoot);
+    const ms = Date.now() - t0;
+    assert.equal(projects.length, hashes.length, '10 个项目文件夹都要列出来');
+    for (const p of projects) {
+      assert.equal(p.path, cwdDir, 'listProjects 判 cwd 只用 jsonl 头部(头 10 条可解析记录)');
+    }
+    assert.ok(ms < 150, `listProjects 冷读 10 个 38MB 文件必须只读头部,实测 ${ms}ms(整文件扫是几百毫秒级)`);
+  }
+
+  // ── 6. 源码守卫:调用点形态别退回去 ────────────────────────────────
   {
     const here = fileURLToPath(new URL('.', import.meta.url));
     const src = await readFile(join(here, '../../server/services/session-reader.js'), 'utf-8');
-    // listProjects 的两处 head-only 读:必须走 parseJsonl(limit),不许回到 readJsonlEdges
-    const headOnly = src.match(/parseJsonl\(join\(projectPath, \w+\), \{ limit: 10 \}\)/g) || [];
-    assert.equal(headOnly.length, 2,
-      'listProjects 的两处 head-only 读必须是 parseJsonl(…,{limit:10});换回 readJsonlEdges 就等于整文件扫');
+    // listProjects 的两处 head 读(解析 cwd / sidecar 计数)都必须走 head10 级画像 ——
+    // 该等级 = 读满 10 条可解析记录即收工(scanProfile 的 need:'head10')。改成 full 级,
+    // 或出现任何整文件读(readJsonlEdges / 无 limit 的 parseJsonl / streamJsonl)= 整文件扫。
+    const lpStart = src.indexOf('export async function listProjects(');
+    // 先剥注释再查:正文注释里会出现 parseJsonl / head10 这些词(讲"与旧实现等价"),
+    // 拿注释当代码判会误报。
+    const lpBody = src.slice(lpStart, src.indexOf('\nexport ', lpStart))
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    assert.equal((lpBody.match(/'head10'/g) || []).length, 2,
+      'listProjects 的两处 head-only 读都必须走 head10 画像(cwd 解析 + sidecar 计数各一处)');
+    assert.ok(!/readJsonlEdges\(|streamJsonl\(|parseJsonl\(/.test(lpBody),
+      'listProjects 里不许出现整文件读(readJsonlEdges / 无 limit 的 parseJsonl / streamJsonl)');
     // listSessions 的中部收集(boundary + 标题行)必须先做子串预筛再 parse。
     // 批O 在同一个回调里加了 takeTitleLine(custom-title / ai-title),它自己第一句就是
     // includes 预筛;boundary 那半的预筛必须仍在 parse 之前。
-    // r13-p2-6:整文件回调挪进 readEdgesCached(mtime 缓存层),形参名 (raw, bUuids, tt);
+    // B1:整文件回调挪进画像扫描层(scanProfile 逐行喂给 onRawLine),形参名 (raw, bUuids, tt);
     // 语义不变 —— 仍是原始行字符串 + includes 预筛在 parse 之前。
     assert.ok(/\(raw, bUuids, tt\) => \{\s*takeTitleLine\(raw, tt\);\s*if \(!raw\.includes\('"compact_boundary"'\)\) return;/.test(src),
       'boundary 回调必须先 raw.includes 预筛再 JSON.parse(收到的是原始行字符串)');
-    assert.ok(/const hit = EDGES_CACHE\.get\(key\);[\s\S]{0,200}mtimeMs === st\.mtimeMs && hit\.size === st\.size/.test(src),
-      'r13-p2-6:整文件读必须走 mtime+size 缓存(展开项目 1.8s→20ms 的根治点)');
+    // 整文件读必须走失效判据缓存(展开项目 1.8s→20ms 的根治点)。判据 = (v, ino, mtimeMs,
+    // size) 四元组,唯一实现处 session-profile.js 的 isProfileValid。旧版钉的是 EDGES_CACHE
+    // 那两行源码文本;这里直接喂四元组看结果 —— 任一分量变了都必须判 miss(= 全量重扫),
+    // 比"文本存在"严:源码里留着判据但用错(或删掉某个分量)照样红。
+    const { isProfileValid, PROFILE_VERSION } = await import('../../server/services/session-profile.js');
+    const st = { ino: 42, size: 1000, mtimeMs: 1_700_000_000_000 };
+    const prof = { v: PROFILE_VERSION, level: 'full', ino: 42, size: 1000, mtimeMs: 1_700_000_000_000 };
+    assert.equal(isProfileValid(prof, st), true, '四元组一致 → 命中缓存(命中 = 不重扫)');
+    assert.equal(isProfileValid({ ...prof, mtimeMs: st.mtimeMs + 1 }, st), false, 'mtimeMs 变 → miss');
+    assert.equal(isProfileValid({ ...prof, size: st.size + 1 }, st), false, 'size 变 → miss');
+    assert.equal(isProfileValid({ ...prof, ino: st.ino + 1 }, st), false, 'ino 变(同名换文件)→ miss,不许吃旧画像');
+    assert.equal(isProfileValid({ ...prof, v: PROFILE_VERSION + 1 }, st), false, '画像版本变 → miss');
+    assert.equal(isProfileValid(null, st), false, '没有画像 = miss');
+    const stNoIno = { ...st, ino: 0 }; // Windows 形态:st.ino 取不到
+    assert.equal(isProfileValid({ ...prof, size: st.size + 1 }, stNoIno), false,
+      'ino 不可用时退回 (mtimeMs,size),判据不更松');
+    assert.equal(isProfileValid({ ...prof, ino: undefined }, stNoIno), true, 'ino 不可用时只看 (mtimeMs,size)');
+    // 判据要真被查:loadProfile 必须"先查缓存命中、后扫描",顺序反了 = 每次请求都白扫。
+    const loadStart = src.indexOf('async function loadProfile(');
+    const loadBody = src.slice(loadStart, src.indexOf('\nexport ', loadStart));
+    assert.ok(loadBody.indexOf('getEntry(') >= 0 && loadBody.indexOf('getEntry(') < loadBody.indexOf('scanProfile('),
+      'loadProfile 必须先 getEntry 判命中再 scanProfile 扫描');
     assert.ok(/function takeTitleLine\(raw, acc\) \{\s*if \(!raw\.includes\('"custom-title"'\) && !raw\.includes\('"ai-title"'\)\) return;/.test(src),
       '标题行收集同样必须先子串预筛(每条会话记录都会过这个回调,无脑 parse = 整文件解析)');
     // totalLines 有真实消费者(messageCount / "<3 行不列出"),不许被当死字段删掉
     assert.ok(src.includes('if (totalLines < 3) continue;'), 'totalLines 仍被空会话过滤消费');
-    assert.equal((src.match(/messageCount: (totalLines|agentEdges\.totalLines)/g) || []).length, 3,
-      'messageCount 三处都来自 totalLines,readJsonlEdges 不得停止返回它');
+    // messageCount 的口径 = totalLines(非空行数,含坏行)。旧版钉"恰好 3 处 + 变量名
+    // agentEdges"(都是当时源码的拼写:重构把 agentEdges 换成画像后计数就误报,而"3"本身
+    // 不承载语义 —— 三个消费点各自的字段存在与否由 check-session-profile 行为级兜着)。
+    // 这里钉口径本身:每一处 messageCount 都必须直接取自 *totalLines 计数器,换成别的
+    // 度量(head.length / 解析成功条数 / 独立再数一遍)就红。
+    const mcSources = [...src.matchAll(/messageCount:\s*([^,\n]+),/g)].map((m) => m[1].trim());
+    assert.ok(mcSources.length > 0, '源码里找不到 messageCount 赋值 —— 断言前提被破坏(正则空转会静默放过)');
+    for (const expr of mcSources) {
+      assert.ok(/(^|\.)totalLines$/.test(expr), `messageCount 必须取自 totalLines 口径,实测: ${expr}`);
+    }
     // 这个文件曾经带一个字面 NUL 字节,被 grep/file 当二进制整文件跳过
     // JS \u0000 escape in source = 6 chars, so this file itself never trips it
     assert.ok(!src.includes('\u0000'), 'session-reader.js 不得再出现字面 NUL(会让 grep 静默跳过整个文件)');

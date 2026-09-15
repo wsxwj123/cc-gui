@@ -1,0 +1,23 @@
+{
+  "dataRoot": "/abs/path/worktree/tests/acceptance/<suite-dir>/.artifacts/runtime-data",
+  "sessionFlow": {
+    "projectName": "fixture-workspace",
+    "sessionSearchMarker": "PR5_FIXTURE_1",
+    "sessionId": "<uuid of an existing session that has one finished real run>",
+    "projectHash": "<projectHash reported by the app's own messages request>"
+  },
+  "stubProvider": {
+    "displayName": "<custom provider row, type=openai, baseURL=http://127.0.0.1:57881>",
+    "modelId": "pr5-stub-model",
+    "protocol": "openai",
+    "baseURL": "http://127.0.0.1:57881",
+    "cliBaseURL": "<loopback address the CLI must reach for this section: the instance's own openai proxy port, see README>"
+  },
+  "stubProviderClaude": {
+    "displayName": "<custom provider row, type=anthropic, baseURL=http://127.0.0.1:57881>",
+    "modelId": "pr5-stub-model",
+    "protocol": "anthropic",
+    "baseURL": "http://127.0.0.1:57881",
+    "cliBaseURL": "http://127.0.0.1:57881"
+  }
+}

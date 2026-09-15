@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Check, Circle, ClipboardList, Loader2, ChevronDown, ChevronRight, EyeOff } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
-import { readTodoCollapsed, writeTodoCollapsed } from '../utils/todoCollapse.js';
+import {
+  readTodoCollapsed, writeTodoCollapsed, readTodoHidden, writeTodoHidden, shouldAutoCollapse,
+} from '../utils/todoCollapse.js';
 import { normalizePlanText, planIdentityKey, pruneHiddenPlanIdentities, visiblePlanItems } from '../utils/plan.js';
 
 /**
@@ -10,8 +12,8 @@ import { normalizePlanText, planIdentityKey, pruneHiddenPlanIdentities, visibleP
  * 悬浮面板)。每次 TaskCreate/TaskUpdate 重建完整清单,最新一份为准 —— 见 currentTodos。
  * todos 为空则整块不渲染。
  *
- * 两个按钮:折叠(只留"任务清单"标题行 + "下一条")/ 隐藏(整块消失,直到下次任务清单
- * 更新)。任务全部完成时自动折叠。
+ * 两个按钮:折叠(只留"任务清单"标题行 + "下一条")/ 隐藏(整块消失,只留一条"显示任务
+ * 清单"小条,清单再更新也不自动再现;隐藏按会话记)。任务全部完成时自动折叠。
  */
 export function TodoPanel({ todos, plan = '', plans = null, isStreaming = false, planKey = 'global' }) {
   const hasTodos = Array.isArray(todos) && todos.length > 0;
@@ -30,7 +32,7 @@ export function TodoPanel({ todos, plan = '', plans = null, isStreaming = false,
           planKey={planKey}
         />
       ))}
-      {hasTodos && <TodoChecklist todos={todos} isStreaming={isStreaming} />}
+      {hasTodos && <TodoChecklist todos={todos} isStreaming={isStreaming} planKey={planKey} />}
     </>
   );
 }
@@ -48,13 +50,18 @@ function ShowBar({ label, onClick }) {
   );
 }
 
-function TodoChecklist({ todos, isStreaming = false }) {
+function TodoChecklist({ todos, isStreaming = false, planKey = 'global' }) {
   // r30:默认折叠(用户从未碰过 = 折叠);手动切换的选择记本设备(cgui-todo-collapsed)。
   const [collapsed, setCollapsed] = useState(() => readTodoCollapsed());
-  // 隐藏态记录隐藏那一刻的"完整状态签名"(含 status):任务清单一旦有任何更新(内容或勾选
-  // 变化)签名即变 → 自动重新显示 = "完全隐藏直到下次任务清单更新"。
+  // r34:隐藏是【按会话的开关】而非清单签名 —— 点了隐藏,清单再更新(内容/勾选)也不弹回来,
+  // 只有用户自己点"显示任务清单"才恢复。旧实现记的是隐藏那一刻的签名,活跃回合里清单一动
+  // 卡片就自己冒出来(用户实报)。
+  const [hidden, setHidden] = useState(() => readTodoHidden(planKey));
+  // 切会话(planKey 变)重新读该会话的隐藏开关,绝不继承上一个会话的隐藏态。
+  useEffect(() => { setHidden(readTodoHidden(planKey)); }, [planKey]);
+  // 清单签名(内容+状态拼接)只服务于下面"全部完成自动折叠一次"的去重,与隐藏无关 ——
+  // 隐藏若也拿它当判据,清单一更新卡片就会自己弹回来(r34 用户实报)。
   const sig = todos.map((t) => `${t.content || ''}${t.status || ''}`).join('');
-  const [hiddenSig, setHiddenSig] = useState(null);
   const done = todos.filter((t) => t.status === 'completed').length;
   const total = todos.length;
   const pct = total === 0 ? 0 : Math.round((done / total) * 100);
@@ -68,15 +75,20 @@ function TodoChecklist({ todos, isStreaming = false }) {
   // 换成内容不同的新清单完成时(签名不同)才再自动折叠。挂载时若已全完成也折叠一次。
   const collapsedForSigRef = useRef(null);
   useEffect(() => {
-    if (allComplete && collapsedForSigRef.current !== sig) {
+    if (shouldAutoCollapse(allComplete, sig, collapsedForSigRef.current)) {
       collapsedForSigRef.current = sig;
       setCollapsed(true);
     }
   }, [allComplete, sig]);
 
-  // 已隐藏:只留一条可点"显示"小条(不占输入框空间),点它恢复;sig 变化(下次任务清单
-  // 更新)仍自动恢复完整卡。
-  if (hiddenSig === sig) return <ShowBar label="显示任务清单" onClick={() => setHiddenSig(null)} />;
+  // 已隐藏:只留一条可点"显示"小条(不占输入框空间),点它恢复。清单更新不再有任何影响 ——
+  // 恢复显示的入口只有这一条小条(以及换会话:隐藏态按会话存,别的会话照常显示)。
+  if (hidden) return (
+    <ShowBar
+      label="显示任务清单"
+      onClick={() => { setHidden(false); writeTodoHidden(planKey, false); }}
+    />
+  );
 
   return (
     <div data-cgui="todo-panel" className="mb-2 rounded-panel border border-canvas-deep bg-canvas-warm/60 backdrop-blur-soft overflow-hidden">
@@ -97,8 +109,8 @@ function TodoChecklist({ todos, isStreaming = false }) {
           <span className="text-[10px] font-mono text-ink-faint shrink-0">{pct}%</span>
         </button>
         <button
-          onClick={() => setHiddenSig(sig)}
-          title="隐藏任务清单(整块收起,下次任务清单更新时自动再现)"
+          onClick={() => { setHidden(true); writeTodoHidden(planKey, true); }}
+          title="隐藏任务清单(整块收起,清单更新不再自动出现;点「显示任务清单」恢复)"
           className="shrink-0 p-1 rounded hover:bg-canvas-deep/40 text-ink-faint hover:text-ink-muted transition-colors"
         >
           <EyeOff size={13} />
@@ -121,7 +133,8 @@ function TodoChecklist({ todos, isStreaming = false }) {
 /**
  * 已批准计划的常驻块:默认折叠成一行标题(不挤输入区),展开后 markdown 渲染全文
  * (上限 40vh 滚动)。隐藏按钮按"计划全文"记忆——同一份计划隐藏后不再出现,
- * 下次批准新计划(文本不同)自动恢复,与 TodoChecklist 的 hiddenSig 同一套语义。
+ * 下次批准新计划(文本不同)自动恢复。注意与任务清单不同:计划卡隐藏按【计划全文】记
+ * (同一份计划一直隐藏、换新计划恢复),任务清单隐藏按【会话】记一个开关(r34)。
  * markdown 只在展开时渲染,避免长计划在折叠态也参与输入区的高频重渲。
  */
 function PlanBlock({ plan, signature = normalizePlanText(plan), approved = true, planKey = 'global' }) {

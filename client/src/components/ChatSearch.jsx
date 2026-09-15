@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { ChevronUp, ChevronDown, X } from './Icon.jsx';
+import { searchScrollDelta } from '../utils/searchScroll.js';
 
 // 窗内检索浮层(Cmd/Ctrl+F)。高亮用 CSS Custom Highlight API(CSS.highlights +
 // Range),**完全不改 DOM** —— 否则边流式 re-render 边包 <mark> 会触发 React
@@ -55,23 +56,60 @@ export default function ChatSearch({ containerRef, onClose }) {
     return ranges;
   }, [containerRef]);
 
-  // 高亮当前激活项 + 滚动到视图
-  const paintActive = useCallback((ranges, activeIdx) => {
+  // 把命中项滚进视野(**绝不盲跳**)。两种模式的判据都在 utils/searchScroll.js(纯函数,
+  // 有单测):输入触发只保"不盲跳",用户导航恢复"居中"。
+  //
+  // 条带折叠的连带修法:可折段带 `hidden` 之后,`Range.getBoundingClientRect()` 落在该子树里
+  // 恒为 0×0(实测),旧写法 `scrollTop += rect.top - cr.top - cr.height/3` 在 0 尺寸下恒等于
+  // "无故上跳 cr.top 像素",而且永远到不了那一条。三步兜到底:
+  //   ① 退化矩形(0×0)绝不拿来算滚动偏移;
+  //   ② 回落到"哪一轮"(`[data-turn-uuid]` 祖先)的矩形 —— 跳到那一轮,而不是跳一个幻影偏移;
+  //   ③ 输入触发时目标只要与可视带相交就一个像素都不动(每敲字符视图就跳的根治)。
+  const scrollRangeIntoView = useCallback((range, { center = false } = {}) => {
+    const el = containerRef.current;
+    if (!el) return;
+    try {
+      const cr = el.getBoundingClientRect();
+      let rect = range.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        const row = range.startContainer?.parentElement?.closest?.('[data-turn-uuid]');
+        if (!row) return;                       // ② 连轮都找不到 → 不动,绝不跳到幻影位置
+        rect = row.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return;
+      }
+      // 口径:`cr`/`rect` 是 zoom 之后的**视觉 px**,scrollTop 是**布局 px** —— 把 UI 缩放
+      // (字号「大/超大」)喂给决策函数折算一次,否则位移按 zoom 倍过冲(实测 1.45 时冲过头)。
+      // 与 App.jsx 挂载锚点补偿改取 offsetTop 是同一条判据;读法与仓内其它几处一致。
+      const z = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom')) || 1;
+      const d = searchScrollDelta(rect, cr, { center, zoom: z });
+      if (d != null) el.scrollTop += d;
+    } catch { /* 量不到就不动 */ }
+  }, [containerRef]);
+
+  // 高亮当前激活项 + 滚动到视图。center=true 只由用户导航(go)传 —— 输入触发走默认的
+  // "不盲跳",用户按了上一条/下一条才恢复既有的居中归位。
+  const paintActiveRef = useRef(null);   // 展开后要隔一帧再跑一次自己,走 ref 避免自引用 TDZ
+  const paintActive = useCallback((ranges, activeIdx, { allowExpand = true, center = false } = {}) => {
     if (!supportsHighlight || ranges.length === 0) return;
     CSS.highlights.set(HL, new Highlight(...ranges));
     const a = ranges[activeIdx - 1];
-    if (a) {
-      CSS.highlights.set(HL_ACTIVE, new Highlight(a));
-      try {
-        const rect = a.getBoundingClientRect();
-        const el = containerRef.current;
-        const cr = el.getBoundingClientRect();
-        if (rect.top < cr.top + 40 || rect.bottom > cr.bottom - 40) {
-          el.scrollTop += rect.top - cr.top - cr.height / 3;
-        }
-      } catch {}
+    if (!a) return;
+    CSS.highlights.set(HL_ACTIVE, new Highlight(a));
+    // 命中落在被折起来的段里(条带收起态):点一下这条带的头行把它展开,下一帧再量一次。
+    // 不展开的话,这些 DOM 对用户就是"算进命中数但永远看不见"的死命中 —— 口径 1 保留
+    // `hidden` 子树的唯一兑现方式就是这个(INTERFACE §G / PLAN §5.1.2 第 3 步)。
+    // 只对**当前激活的那一条**动手,开合态仍由条带自己管(用户手动开过就以用户为准)。
+    if (allowExpand) {
+      const folded = a.startContainer?.parentElement?.closest?.('[data-strip-item][hidden]');
+      if (folded) {
+        folded.closest('[data-strip-root]')?.querySelector('[data-strip="head"]')?.click();
+        requestAnimationFrame(() => paintActiveRef.current?.(ranges, activeIdx, { allowExpand: false, center }));
+        return;
+      }
     }
-  }, [containerRef]);
+    scrollRangeIntoView(a, { center });
+  }, [scrollRangeIntoView]);
+  paintActiveRef.current = paintActive;
 
   // query 变化 → 重算
   useEffect(() => {
@@ -93,7 +131,8 @@ export default function ChatSearch({ containerRef, onClose }) {
     const next = ((activeRef.current - 1 + dir + n) % n) + 1;
     activeRef.current = next;
     setActive(next);
-    paintActive(rangesRef.current, next);
+    // 用户主动导航:请求居中(命中只露一角也归位)。输入触发的 paintActive 不传 center。
+    paintActive(rangesRef.current, next, { center: true });
   }, [paintActive]);
 
   useEffect(() => {

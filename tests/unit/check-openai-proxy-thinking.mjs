@@ -203,7 +203,9 @@ const scopes = [
   {
     name: 'f2 opencode 上游 + deepseek 系模型 → 无 vision(true,★修复目标,修前=false)',
     baseURL: 'http://127.0.0.1:8798/opencode',
-    model: 'deepseek-v4-flash',
+    // r116:样本名原为 deepseek-v4-flash,该名已由 DeepSeek-V4.1-Flash 承接且有视觉
+    // (vision-capability.js 例外行),换官方明写无视觉的 v4-pro;用例意图不变。
+    model: 'deepseek-v4-pro',
     expect: true,
   },
   {

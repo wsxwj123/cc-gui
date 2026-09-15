@@ -1,0 +1,21 @@
+{
+  "dataRoot": "/abs/path/to/worktree/tests/acceptance/pricing-accuracy-20260911/.artifacts/runtime-data",
+  "transcripts": {
+    "projectHash": "<由 helpers/pa-fixtures.mjs 从数据根里扫出来的 projectHash>",
+    "sessionId": "<一个只有 1 条 assistant 记录、带 usage 的会话>",
+    "firstInput": 10,
+    "ttl": { "sessionId": "<带 ephemeral_5m/1h 分档的会话>", "ttlSplit": 1 },
+    "bigInput": { "sessionId": "<input_tokens > 200000 的会话>", "bigInput": 1 },
+    "fragmented": {
+      "sessionId": "a1b2c3d4-0000-4000-8000-000000000001",
+      "projectHash": "<同 transcripts.projectHash>",
+      "sourceSessionId": "<派生源会话>",
+      "firstInput": 10,
+      "firstAt": "2026-09-11T00:00:00.000Z",
+      "laterInput": 111121,
+      "laterAt": "2026-09-11T00:01:00.000Z",
+      "messageId": "msg_xxx",
+      "copiedLineIndex": 3
+    }
+  }
+}

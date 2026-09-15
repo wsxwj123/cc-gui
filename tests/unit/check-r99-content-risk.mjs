@@ -436,6 +436,8 @@ check('§4.4 新回调必须定义在 handleRollbackRef 赋值 effect 之后(否
 
 console.log('\n[B] 计数锁 §4.3(口径 = grep -o <literal> | wc -l)');
 const S = read('server/routes/sessions.js');
+const HO = read('client/src/utils/historyOps.js');
+const HH = read('server/routes/session-history.js');
 check('R6 App.jsx errorAction 恰 6 次(改前 4:只加"打标"与"渲染"各一处)', () => {
   assert.strictEqual(countF(A, 'errorAction'), 6);
 });
@@ -445,9 +447,11 @@ check('M12 App.jsx trim-before-tool 恰 1 次(复用既有唯一调用点,不新
 check('M11 App.jsx compact-segment 恰 2 次(本轮一次都不调用压缩端点)', () => {
   assert.strictEqual(countF(A, 'compact-segment'), 2);
 });
-check('§4.3 App.jsx confirmDialog 在 60~61 次之间(改前 59:新增 1~2 处)', () => {
+// E 项(Pricing §10.8)在 CustomProviderForm.save() 新增 1 个确认框调用点(baseURL 撞预设
+// 时问「切到该预设 / 保持不变」)→ 上限 61→62,下界不动。
+check('§4.3 App.jsx confirmDialog 在 60~62 次之间(改前 59:新增 1~3 处)', () => {
   const n = countF(A, 'confirmDialog');
-  assert.ok(n >= 60 && n <= 61, `实得 ${n} 次,应在 [60, 61]`);
+  assert.ok(n >= 60 && n <= 62, `实得 ${n} 次,应在 [60, 62]`);
 });
 check('§4.3 App.jsx cgui:composer-fill 恰 5 次(改前 4:新开会话预填 +1)', () => {
   assert.strictEqual(countF(A, 'cgui:composer-fill'), 5);
@@ -458,15 +462,56 @@ check('§4.3 App.jsx newDraftId() 恰 9 次(改前 8:新开会话转 draft +1)',
 check('§4.3 App.jsx handleRetryTool 恰 8 次(改前 7:新增一次 Ref 调用)', () => {
   assert.strictEqual(countF(A, 'handleRetryTool'), 8);
 });
-check('§4.3 App.jsx /api/sessions/ 恰 9 次(不变:不新增任何会话端点调用)', () => {
-  assert.strictEqual(countF(A, '/api/sessions/'), 9);
+// ── r99 当轮的口径是"服务端零 diff / 不新增会话端点调用"。R25 把历史变换收敛到
+// server/routes/session-history.js 一台引擎 + client/src/utils/historyOps.js 一个入口
+// (App.jsx 里的端点数从 9 掉到既有 2),R13/R36 又改过这几段 —— 计数锁失去意义。
+// 这三条改钉【意图】:裁剪/压缩等改写只能走统一入口,引擎之外不得存在旁路改写,
+// 且提交前必写备份。口径不变(仍是"r99 回退链路不得自己拼会话端点"),不再钉当时的
+// 出现次数与所在文件 —— 计数器只对"当时那一瞬间的源码形状"成立,重构一次即假红。
+check('§4.3 App.jsx 不裸 fetch 历史改写端点:一律经统一入口 utils/historyOps.js(R25 接线契约)', () => {
+  assert.match(A, /import \{ runHistoryOp \} from '\.\/utils\/historyOps\.js'/,
+    'App.jsx 必须从统一入口调历史操作');
+  assert.strictEqual(
+    count(A, /fetch\(`\/api\/sessions\/\$\{[^}]*\}\/(?:trim|compact-segment|trim-before-tool|strip-thinking)/g), 0,
+    '裁剪/压缩/剥离思考块不得绕过统一入口自拼端点(那会跳过预览→提交两步与备份)');
 });
-check('M19 server/routes/sessions.js .bak 恰 28 次(服务端零 diff)', () => {
+check('§4.3 统一入口自身走"预览 → 提交"两步(dryRun:true 拿令牌,再带 baseVersion+previewToken 提交)', () => {
+  assert.ok(HO.length > 0, '读不到 client/src/utils/historyOps.js');
+  assert.match(HO, /dryRun: true/, '第一步必须是预览(零改写)');
+  assert.match(HO, /dryRun: false,[\s\S]{0,200}?baseVersion: preview\.body\.baseVersion,[\s\S]{0,120}?previewToken: preview\.body\.previewToken,/,
+    '第二步必须回传预览令牌与基准版本(缺一服务端 400 —— 字段缺失绝不等于"直接执行")');
+});
+check('M19 历史改写只剩统一引擎:五个 op 都在,且客户端调用的每个 op 服务端都有同名实现', () => {
+  assert.ok(HH.length > 0, '读不到 server/routes/session-history.js');
+  for (const op of ['trim', 'strip-thinking', 'trim-before-tool', 'compact-segment', 'repair-official-compat']) {
+    assert.match(HH, new RegExp(`'?${op}'?:\\s*\\{`), `引擎缺 op:${op}`);
+  }
+  // 端到端契约:App.jsx 里出现的每个 op 名,服务端必须有同名实现(改名只改一边 = 调用必 404)
+  const used = new Set([...A.matchAll(/runHistoryOp\(\s*[^,]+,\s*'([a-z-]+)'/g)].map((m) => m[1]));
+  assert.ok(used.size >= 3, `App.jsx 里只找到 ${used.size} 个 runHistoryOp 调用点,可疑`);
+  for (const op of used) {
+    assert.match(HH, new RegExp(`'?${op}'?:\\s*\\{`), `App.jsx 调用 ${op},服务端引擎没有同名 op`);
+  }
+});
+check('§2 裁剪没有旁路实现:sessions.js 里不得再留历史改写端点', () => {
   assert.ok(S.length > 0, '读不到 server/routes/sessions.js');
-  assert.strictEqual(countF(S, '.bak'), 28);
+  assert.doesNotMatch(S, /router\.post\('\/sessions\/:sessionId\/(?:trim|strip-thinking|trim-before-tool|compact-segment)/,
+    'sessions.js 里出现历史改写端点 = 统一引擎之外的第二套实现(必与备份/双闸/预览语义分叉)');
 });
-check('§2 trim-before-tool 端点仍在服务端(原样复用,不新增不修改)', () => {
-  assert.match(S, /router\.post\('\/sessions\/:sessionId\/trim-before-tool'/);
+check('§2 trim-before-tool 端点仍在,且由统一引擎注册(路径逐字不变、走 sessions.js 的纯函数)', () => {
+  assert.match(HH, /'trim-before-tool': \{/, '引擎里必须有 trim-before-tool 的 op 定义');
+  assert.match(HH, /router\.post\(`\/sessions\/:sessionId\/\$\{opName\}`/,
+    '端点必须由统一注册生成,路径仍是 /sessions/:sessionId/<op>');
+  assert.match(HH, /trimJsonlBeforeTool\(raw, params\.toolUseId\)/,
+    '裁剪必须走 sessions.js 的纯函数,不许另写一套改写');
+});
+check('§2 提交前必写备份、失败即拒(备份是回退重发唯一的保险绳)', () => {
+  const iBackup = HH.indexOf('await writeHistoryBackup(file, raw,');   // 提交路径的调用点
+  const iWrite = HH.indexOf('await writeJsonlAtomic(file, applied.newContent)');
+  assert.ok(iBackup > 0, '提交路径必须写备份');
+  assert.ok(iWrite > iBackup, '必须【先备份、后原子替换】');
+  assert.match(HH.slice(iBackup, iBackup + 400), /SESSION_BACKUP_FAILED/,
+    '备份失败必须直接拒绝提交,绝不继续改写');
 });
 
 console.log('\n[B] 既有行为回归锁 §4.4(改动前后都必须成立)');
@@ -538,4 +583,4 @@ if (FAILS) {
   for (const n of failed) console.log(`  ✗ ${n}`);
   process.exit(1);
 }
-console.log('✓ check-r99-content-risk: 内容审核拒绝识别/回退锚点定位 + 提示与两个按钮源码锁 + 不压缩/不改服务端 全绿');
+console.log('✓ check-r99-content-risk: 内容审核拒绝识别/回退锚点定位 + 提示与两个按钮源码锁 + 裁剪只经统一引擎(无旁路) 全绿');

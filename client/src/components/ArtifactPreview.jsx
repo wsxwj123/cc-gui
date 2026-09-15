@@ -214,7 +214,7 @@ export function MermaidView({ code }) {
 // 长代码折叠:首 N 行 + "展开剩余/收起"(与 MarkdownRenderer 的 CodeBlock 同一套逻辑,
 // 抽此共用组件避免两处漂移)。className 传 <pre> 的完整样式(含深色底/边框);末行圆角由
 // collapsible 决定:可折叠时底部平接 toggle 按钮,不可折叠时收 rounded-b-lg。
-export function CollapsibleCode({ code, className = '', collapseAt = 5 }) {
+export function CollapsibleCode({ code, className = '', collapseAt = 5, header = null }) {
   const lines = code.split('\n');
   const collapsible = lines.length > collapseAt;
   const [expanded, setExpanded] = useState(false);
@@ -235,8 +235,13 @@ export function CollapsibleCode({ code, className = '', collapseAt = 5 }) {
             收起 ▴
           </button>
         )}
-        <pre className={`${className} ${collapsible ? '' : 'rounded-b-lg'}`}>
-          <code>{shown}</code>
+        {/* header 有值时「代码块」是同一个 <pre>:工具条(语言条/运行/复制)落在 pre 内部。
+            黑盒契约里代码块就是 pre 元素,「运行」「复制」都从 pre 子树找;工具条用 span/button
+            这类 phrasing 元素,放进 <pre> 仍是合法 HTML。代码另起一层带 overflow-x-auto 的
+            <code>,保证横向滚动只滚代码、工具条不动。 */}
+        <pre className={`${className} ${header ? 'flex flex-col overflow-hidden' : ''} ${collapsible ? '' : 'rounded-b-lg'}`}>
+          {header}
+          <code className={header ? 'block p-4 overflow-x-auto' : undefined}>{shown}</code>
         </pre>
       </div>
       {collapsible && (

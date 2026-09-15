@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Terminal, ChevronDown, ChevronRight, Loader2 } from '../Icon.jsx';
+import { Linkify } from '../../utils/linkify.jsx';
 
 const PREVIEW_LINES = 8;
 
@@ -44,7 +45,7 @@ export function BashCard({ toolCall }) {
         <pre className={`px-3 py-2 text-[11px] font-mono overflow-auto whitespace-pre-wrap leading-relaxed max-h-[600px] ${
           isError ? 'bg-red-50 text-red-700' : 'bg-canvas-warm text-ink-muted'
         }`}>
-          {output}
+          <Linkify text={output} />
         </pre>
       )}
     </div>

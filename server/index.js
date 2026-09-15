@@ -8,16 +8,19 @@ import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, mkdirSync, watch as fsWatch } from 'fs';
 import { createHash } from 'crypto';
 import sessionRoutes from './routes/sessions.js';
+import sessionHistoryRoutes from './routes/session-history.js';
 import chatRoutes, { getInitCommands, mergeInitCommands } from './routes/chat.js';
 import processRoutes from './routes/processes.js';
 import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider, activeProviderModelMeta, ensureCustomProvidersMode, reapplyPromptCacheForActiveProvider } from './routes/settings.js';
 import usageRoutes from './routes/usage.js';
 import subscriptionUsageRoutes from './routes/subscription-usage.js';
 import providerQuotaRoutes from './routes/provider-quota.js';
-import pricingRoutes from './routes/pricing.js';
+import pricingRoutes, { bootPricingCatalog } from './routes/pricing.js';
 import memoryRoutes from './routes/memory.js';
 import promptTemplateRoutes from './routes/prompt-templates.js';
 import mcpRoutes from './routes/mcp.js';
+import terminalRoutes, { handleTerminalMessage, handleTerminalClose, handleTerminalInvalidJson } from './routes/terminal.js';
+import computerUseRoutes from './routes/computer-use.js';
 import forkRoutes from './routes/fork.js';
 import fileChangesRoutes from './routes/file-changes.js';
 import searchRoutes from './routes/search.js';
@@ -49,12 +52,14 @@ import {
   requestHostname, getTunnelHostname,
 } from './services/auth.js';
 import { setupFileWatcher } from './services/file-watcher.js';
+import { readStats as readSessionIndexStats } from './services/session-index.js';
 import { resolveWorkspacePath } from './utils/safe-path.js';
 import { clients, broadcast } from './broadcast.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
 import { readdir, readFile } from 'fs/promises';
 import { homedir, networkInterfaces } from 'os';
 import { stripInheritedProviderEnv } from './utils/provider-env.js';
+import { SERVER_EPOCH } from './utils/server-epoch.js';
 
 // 宿主 env 隔离(必须是模块体的第一条语句):Claude Desktop / 一个 claude 会话起的 server
 // 会继承宿主的 ANTHROPIC_BASE_URL/_MODEL/_TOKEN。settings.json 切到官方后这些键在
@@ -283,8 +288,25 @@ app.use(cors((req, cb) => cb(null, {
 // Bumped from default 100kb to 25mb so dragged-in screenshots fit in the JSON body.
 // r43:皮肤文件夹导入把 30MB 目录 base64 进 JSON(≈40MB),必须让路给该路由自己挂的
 // 45mb 解析器(routes/skins-packs.js);全局限额对其余所有路径原样不动。
-const jsonParser = express.json({ limit: '25mb' });
-app.use((req, res, next) => (req.path === '/api/skins/import-dir' ? next() : jsonParser(req, res, next)));
+// R07:附件元数据端点要按「请求体 UTF-8 字节数」判 1MiB 上限,parse 后拿不到原始字节 →
+// verify 里记一次长度(只是读 buf.length,不额外拷贝),路由读 req.jsonBodyBytes。
+const jsonParser = express.json({
+  limit: '25mb',
+  verify: (req, _res, buf) => { req.jsonBodyBytes = buf.length; },
+});
+// R13:聊天正文另设上限。25mb 是给拖入截图/皮肤导入留的全局额度,不是消息正文的边界 ——
+// 实测基线里一条 16MiB 的 prompt 会被原样接受(200 + 起 CLI),把整段送进模型。按 INTERFACE
+// 「超出正文上限 → 413 且不启动 CLI」在【解析层】就拒掉:16MiB 的坏包不读进内存、不进路由。
+// 8MiB 远高于任何真实文本 prompt(GUI 只发文本;图片/文件走 /api/upload 与本地路径引用)。
+const CHAT_BODY_LIMIT = '8mb';
+const chatJsonParser = express.json({
+  limit: CHAT_BODY_LIMIT,
+  verify: (req, _res, buf) => { req.jsonBodyBytes = buf.length; },
+});
+app.use((req, res, next) => {
+  if (req.method === 'POST' && req.path === '/api/chat') return chatJsonParser(req, res, next);
+  return req.path === '/api/skins/import-dir' ? next() : jsonParser(req, res, next);
+});
 
 // Password gate for external clients (no-op for 127.0.0.1 / no-password). Must
 // sit before the API routes so an unauthorized phone gets 401 on every call
@@ -297,7 +319,9 @@ const APP_VERSION = (() => {
   catch { return null; }
 })();
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, app: 'claude-gui', port: PORT, version: APP_VERSION, localBuild: IS_LOCAL_BUILD });
+  // serverEpoch:本次服务实例的标识(进程启动时生成一次,重启必变)。R13 的 turn 幂等域
+  // 以它为服务身份 —— 客户端拿旧实例的 epoch 重发会得到 409 TURN_SERVER_CHANGED。
+  res.json({ ok: true, app: 'claude-gui', port: PORT, version: APP_VERSION, localBuild: IS_LOCAL_BUILD, serverEpoch: SERVER_EPOCH });
 });
 app.use('/api', authMiddleware);
 
@@ -379,6 +403,14 @@ app.get('/api/auth-status', (req, res) => {
   });
 });
 
+// GET /api/session-index/stats — 只读的会话画像索引快照(计数器 + 每项目等级/体积)。
+// 放在 authMiddleware 之后,与其它 /api 同权限。**不泄漏任何绝对路径**(键只有 projectHash),
+// 也不触碰磁盘 —— 纯粹读内存里已有的一份统计。存在的理由:让「缓存到底命中没命中」这类
+// 判据可以用断言而不是耗时来测。契约见 .devflow/INTERFACE-20260912-slowload.md §D.3。
+app.get('/api/session-index/stats', (req, res) => {
+  res.json(readSessionIndexStats());
+});
+
 // POST /api/restart — clean-exit so the gui.command watchdog relaunches with the
 // new config (e.g. after toggling LAN mode). Refuses when NOT under the watchdog
 // so a bare `node server/index.js` isn't silently killed (which would strand a
@@ -408,6 +440,8 @@ app.post('/api/restart', (req, res) => {
 });
 
 // API routes
+// R25 历史变换(dry-run 预览 → 提交)必须先于 sessions 路由:同一批路径由它作答。
+app.use('/api', sessionHistoryRoutes);
 app.use('/api', sessionRoutes);
 app.use('/api', chatRoutes);
 app.use('/api', processRoutes);
@@ -419,6 +453,8 @@ app.use('/api', pricingRoutes);
 app.use('/api', memoryRoutes);
 app.use('/api', promptTemplateRoutes);
 app.use('/api', mcpRoutes);
+app.use('/api', terminalRoutes);
+app.use('/api', computerUseRoutes);
 app.use('/api', forkRoutes);
 app.use('/api', fileChangesRoutes);
 app.use('/api', searchRoutes);
@@ -811,6 +847,16 @@ app.use('/api', (err, req, res, next) => {
       return res.status(400).json({ ok: false, code: 'malformed-json', error: '请求 JSON 格式错误' });
     }
   }
+  // R13:POST /api/chat 的正文超限/畸形 JSON 也必须回同一套 {ok:false,code,error} 信封
+  // (不能落到下面通用的 {error} 兜底)。超限即拒,不启动 CLI。
+  if (/^\/api\/chat(\?|$)/.test(req.originalUrl || '')) {
+    if (err?.type === 'entity.too.large' || err?.status === 413) {
+      return res.status(413).json({ ok: false, code: 'CHAT_TOO_LARGE', error: `消息内容过大（上限 ${CHAT_BODY_LIMIT}）` });
+    }
+    if (err?.type === 'entity.parse.failed' || (err instanceof SyntaxError && err?.status === 400)) {
+      return res.status(400).json({ ok: false, code: 'CHAT_INVALID_INPUT', error: '请求 JSON 格式错误' });
+    }
+  }
   const status = err?.status || 500;
   res.status(status).json({ error: err?.message || 'internal error' });
 });
@@ -888,11 +934,28 @@ wss.on('connection', (ws) => {
   // 客户端应用层心跳:回 pong 供对端确认链路存活。Tailscale/手机网络的"半死连接"
   // 不触发 close 事件,客户端靠"发 ping 后收不到任何消息"判死并重连(useWebSocket)。
   ws.on('message', (buf) => {
-    // 短路超大帧:ping 帧极小,>256B 不解析(避免对任意入站大 payload 做 JSON.parse)。
-    if (!buf || buf.length > 256) return;
-    try {
-      if (JSON.parse(buf)?.type === 'ping' && ws.readyState === 1) ws.send('{"type":"pong"}');
-    } catch { /* 非 JSON 或非 ping,忽略 */ }
+    // 上限放宽到 1MB:ping 帧极小,但内置终端的粘贴帧(term-in)可达几十 KB,
+    // 沿用 256B 会静默丢粘贴。>1MB 仍不解析(避免对任意入站大 payload 做 JSON.parse)。
+    if (!buf || buf.length > 1_000_000) return;
+    // 畸形 JSON 单独捕获:解析失败才回 TERM_INVALID_MESSAGE;分发阶段的异常不该
+    // 被伪装成"畸形帧"(会把 handler 的 bug 变成客户端的错误码)
+    let msg;
+    try { msg = JSON.parse(buf); } catch {
+      // 畸形 JSON:按终端合同回 term-error TERM_INVALID_MESSAGE,不执行任何动作
+      handleTerminalInvalidJson(ws);
+      return;
+    }
+    // 内置终端帧按类型分流到 terminal 桥(routes/terminal.js)
+    if (typeof msg?.type === 'string' && msg.type.startsWith('term-')) {
+      handleTerminalMessage(ws, msg);
+      return;
+    }
+    if (msg?.type === 'ping' && ws.readyState === 1) ws.send('{"type":"pong"}');
+  });
+  ws.on('close', () => {
+    // 面板关闭/页面刷新 = 终端转分离态:shell 与输出缓冲保留,新连接凭 resumeToken
+    // 接管(R01 合同);只有显式 term-close/6h 超龄/server 退出才结束进程。
+    handleTerminalClose(ws);
   });
 
   getDefaultModel()
@@ -1030,6 +1093,8 @@ async function relisten(newHost) {
 })();
 
 server.listen(PORT, HOST, () => {
+  // R20:官方价目目录装载磁盘缓存并在过期/首次时后台预热一次(应用关闭时不承诺定时更新)。
+  try { bootPricingCatalog(); } catch (e) { console.error('[pricing] boot warmup failed:', e?.message || e); }
   const exposure = HOST === '127.0.0.1'
     ? ' (loopback only)'
     : hasPassword()
@@ -1062,28 +1127,10 @@ server.listen(PORT, HOST, () => {
     }));
   })().catch((e) => console.error('[prompt-cache] help prime failed:', e?.message || e));
 
-  // r13-p2-6:后台预热会话列表缓存 —— 首屏展开项目不再等 1-2 秒解析。
-  // 并发 4 路限流预热(不是串行 —— 早先注释写错了),失败静默;缓存本身按 mtime 判定,
-  // 预热只是把冷启动前置。
-  // r21:预热集减去 hiddenProjects 并封 cap —— 原来热的 16 个里 14 个是侧栏根本不显示
-  // 的项目,而并发 4 恰好占满 libuv 默认线程池,把用户正在等的请求堵在后面。
-  // R3:prefs 读必须留在这层 try 之内(readHiddenProjects 自身也不抛),别提到外面 ——
-  // 它抛了会掀掉服务端启动。
-  (async () => {
-    try {
-      const { listProjects, listSessions } = await import('./services/session-reader.js');
-      const { pickWarmupTargets, readHiddenProjects } = await import('./services/warmup.js');
-      const projects = await listProjects(); // 已按最近活动排序:先热最可能点开的
-      const queue = pickWarmupTargets(projects, await readHiddenProjects(), 8);
-      const worker = async () => {
-        while (queue.length) {
-          const p = queue.shift();
-          if (p?.hash) await listSessions(p.hash).catch(() => {});
-        }
-      };
-      await Promise.all([worker(), worker(), worker(), worker()]); // 并发 4,别抢满 I/O
-    } catch {}
-  })();
+  // (2026-09-12 批次)T4:原 r13-p2-6 的「后台预热会话列表缓存」整块删除 —— 它的唯一产物是**进程内缓存**,
+  // 而 Tauri 退出是 kill -9(缓存随进程死)+ 预热 8 个项目 1323 个 jsonl 远超旧缓存
+  // cap 800,把最常点开的项目 FIFO 顶掉 —— 实测负收益。会话画像改为**按项目落盘**
+  // (~/.claude-gui/session-index/),重启后不再从零扫,预热彻底没有存在理由,整块删除。
   // r26-H3:旧版落盘的 custom-providers.json 可能是 0644,启动时 best-effort 收 0600。
   ensureCustomProvidersMode().catch(() => {});
   // Re-arm the OpenAI translation proxy if a codex/opencode provider was active

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useContext } from 'react';
+import React, { useState, useRef, useEffect, useContext, useMemo } from 'react';
 import {
   Brain, Copy, Check, ChevronDown, ChevronRight,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
@@ -12,16 +12,25 @@ import { BashCard } from './tools/BashCard.jsx';
 import { EditDiffCard } from './tools/EditDiffCard.jsx';
 import { ReadCard } from './tools/ReadCard.jsx';
 import { TaskCard, TaskOwnerContext } from './tools/TaskCard.jsx';
+import { SubagentCostContext } from './tools/SubagentCost.jsx';
+import { buildSubagentCostIndex } from '../utils/subagentCost.js';
 import { WorkflowCard } from './tools/WorkflowCard.jsx';
 import { GrepGlobCard } from './tools/GrepGlobCard.jsx';
 import { WebCard } from './tools/WebCard.jsx';
 import { SkillCard } from './tools/SkillCard.jsx';
-import { computeCost, formatCost, isPlanBilling, costTitle } from '../utils/pricing.js';
+import {
+  computeCostForMessage, costUnavailableReason, costSourceLabel, costUnknownNote, COST_REASON_TEXT,
+  formatCost, displayUsd, isPlanBilling, costTitle,
+} from '../utils/pricing.js';
 import { copyText } from '../utils/clipboard.js';
 import { shouldShowBottomCopy } from '../utils/scroll.js';
-import { useStore } from '../stores/sessionStore.js';
+import { useStore, roundStripEnd } from '../stores/sessionStore.js';
 import { TASK_TOOL_NAMES, rebuildTodosFromTaskCalls } from '../utils/todos.js';
-import { formatInputPreview, thinkingLabel, groupCoworkBlocks, activeGroupKey } from '../utils/streamStatus.js';
+import {
+  formatInputPreview, thinkingLabel, groupCoworkBlocks, activeGroupKey,
+  stripSummary, isFoldableSegment, getSkillDocReadName,
+} from '../utils/streamStatus.js';
+import { Linkify } from '../utils/linkify.jsx';
 
 // Tools that get their own bespoke inline card (rendered in chronological order
 // inside the turn). Anything not in this set falls through to ToolCallsGroup,
@@ -36,23 +45,9 @@ const INLINE_TOOL_NAMES = new Set([
 // 也不随聊天模式的"执行了 N 步操作"折起 —— 它是这条消息的主体,一次能跑几十分钟。
 const WORKFLOW_TOOL = 'Workflow';
 
-// AI 有时不走 Skill 工具,而是直接用读取类工具读 <skill>/SKILL.md 加载技能 —
-// 这种调用也按 skill 横幅渲染(否则用户只看到一行普通 Read,不知道技能被加载)。
-// 只认读取类工具(Read / mcp 各家 read_file);Edit/Write 碰 SKILL.md 是在开发
-// 技能,不算加载。路径须含 skills/<name>/SKILL.md(兼容 Windows 反斜杠),
-// skill 名取 SKILL.md 的上一级目录名;命中返回名字,否则 null。
-const SKILL_DOC_PATH_RE = /[/\\]skills[/\\]([^/\\]+)[/\\]SKILL\.md$/i;
-function getSkillDocReadName(toolCall) {
-  const name = toolCall?.name || '';
-  // Read 原生工具,或 mcp 工具名末段形如 read_file / readfile(desktop-commander 等)
-  const tail = name.split('__').pop() || '';
-  const isReader = name === 'Read' || /^read_?file$/i.test(tail);
-  if (!isReader) return null;
-  const p = toolCall.input?.file_path || toolCall.input?.path;
-  if (typeof p !== 'string') return null;
-  const m = SKILL_DOC_PATH_RE.exec(p);
-  return m ? m[1] : null;
-}
+// skilldoc 识别(读 skills/<name>/SKILL.md 当技能横幅)在 utils/streamStatus.js —
+// 下方 skilldoc 渲染分支与摘要(stripSummary)的分组共用那一份唯一实现,
+// 不在这里另留一份(两份实现会慢慢跑偏:摘要多算一步、渲染一个段都没有)。
 
 // hoverOnly:Skill 横幅 / 子代理卡片直接铺在回复流里,重做按钮常显会破坏版面 —
 // 悬停(移动端弱化常显)才浮现,功能与折叠组内一致。
@@ -128,6 +123,61 @@ function InterruptedToolCard({ toolCall }) {
   );
 }
 
+
+// MCP 工具通用卡:输入参数(折叠) + 文本输出(Linkify,裸 URL 可点) + 图像块 <img>。
+// 图像块来源见 utils/toolResult.js 的 extractToolResultImages(computer-use 截图主用例)。
+function McpToolCard({ toolCall }) {
+  const [expanded, setExpanded] = useState(true);
+  const result = toolCall.result;
+  const images = Array.isArray(result?.images) ? result.images : [];
+  const nameParts = (toolCall.name || '').split('__');
+  const shortName = nameParts.pop() || toolCall.name;
+  const serverName = nameParts[1] || '';
+  const running = !result;
+  const inputStr = toolCall.input && Object.keys(toolCall.input).length
+    ? JSON.stringify(toolCall.input, null, 2) : '';
+  return (
+    <div className="border border-canvas-deep rounded-lg overflow-hidden animate-fade-up">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full px-3 py-2 bg-canvas-warm flex items-center gap-2 hover:bg-canvas-deep/20 transition-colors text-left"
+      >
+        <Wrench size={12} className="text-ink-muted shrink-0" />
+        <span className="font-mono text-[11px] text-ink-muted truncate flex-1">{shortName}</span>
+        {serverName && <span className="text-[10px] text-ink-faint shrink-0">{serverName}</span>}
+        {running
+          ? <Loader2 size={11} className="text-ink-faint animate-spin shrink-0" />
+          : result?.isError
+            ? <span className="text-red-400 text-[10px] shrink-0">错误</span>
+            : <Check size={11} className="text-green-400 shrink-0" />}
+      </button>
+      {expanded && (
+        <div className="border-t border-canvas-sunken p-2.5 space-y-2">
+          {inputStr && (
+            <pre className="text-[10px] bg-canvas-warm rounded p-2 overflow-x-auto max-h-32 font-mono text-ink-faint">{inputStr}</pre>
+          )}
+          {result?.content && (
+            <pre className="text-[11px] whitespace-pre-wrap break-all max-h-64 overflow-auto font-mono text-ink-muted"><Linkify text={result.content} /></pre>
+          )}
+          {images.length > 0 && (
+            <div className="space-y-2">
+              {images.map((img, i) => (
+                <img
+                  key={i}
+                  src={`data:${img.mime};base64,${img.data}`}
+                  alt={`${shortName} 结果 ${i + 1}`}
+                  loading="lazy"
+                  className="max-w-full h-auto rounded border border-canvas-deep"
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Returns the rich card React element for a tool, or null when no
 // specialty renderer exists for that tool name.
 function renderRichToolCard(toolCall) {
@@ -137,6 +187,10 @@ function renderRichToolCard(toolCall) {
   if (toolCall.result?.interrupted && toolCall.name !== 'Skill') {
     return <InterruptedToolCard toolCall={toolCall} />;
   }
+  // MCP 工具(mcp__server__tool):此前落 ToolCallsGroup 通用折叠,computer-use 截图
+  // 等带图像块的结果在界面上完全不可见(用户反馈"工具调用时并没有显示图片")。
+  // 通用卡:文本输出 + 图像块就地渲染。有专用卡的名称仍走下方 switch。
+  if (toolCall.name.startsWith('mcp__')) return <McpToolCard toolCall={toolCall} />;
   switch (toolCall.name) {
     case 'Bash': return <BashCard toolCall={toolCall} />;
     case 'Edit':
@@ -517,6 +571,17 @@ function ThinkingFold({ content }) {
   );
 }
 
+// ─── 条带折叠(2026-09-13)──────────────────────────────────────
+// 一轮问答 = 一条条带:可折段(kind==='group')收起时只留一行摘要,正文段与
+// task/workflow/skill/skilldoc 段恒显不折(R114:工作流/子代理跑到哪一步必须看得见)。
+// 用 context 而不是新 prop —— 红线 I2「既有导出签名零改动」:CoworkBlocks 的 props 是它
+// 对外签名的一部分,加参数即改签名;context 是既有代码里反复使用的旁路(TaskOwnerContext…)。
+export const StripRoundContext = React.createContext({ forceOpen: false, headless: false, summary: null });
+export const StripAutoContext = React.createContext(false);      // true = 本轮异常收尾/整轮展开
+export const StripHeadlessContext = React.createContext(false);  // true = 不渲染摘要行(⚡并入的非首段)
+export const StripSummaryContext = React.createContext(null);    // 整轮摘要覆盖(⚡在途,首段用)
+export const StripUsageCallsContext = React.createContext(null); // 本轮 usageCalls(直播期恒 null)
+
 // ─── CoworkBlocks:母会话 + 子代理共用的有序 blocks 渲染(单一渲染路径)──
 // 非聊天模式 → cowork 分组折叠(WorkGroup);聊天模式 → 维持现状(思考小折叠 +
 // 工具折成"执行了 N 步操作"一行)。Task/Skill/技能文档独立成段(折叠外醒目渲染)。
@@ -527,8 +592,16 @@ export function CoworkBlocks({
   chatMode = false, chatExpanded = false, chatFoldBar = null, chatUnfoldBar = null,
 }) {
   const [override, setOverride] = useState(() => new Map());       // group key → 用户设定展开态
+  // 条带整体开合态(null = 跟随自动态)。组件局部、不持久、不上提:口径 6「不记忆」——
+  // 换会话/重开面板/换 worktree 绑定都会卸载本组件,自然回到默认态。
+  const [stripOpen, setStripOpen] = useState(null);
   // 工作流卡片的归属会话(与 TaskCard 同一把:fork 复制出的卡片共享 tool_use.id)。
   const ownerSid = useContext(TaskOwnerContext);
+  // 条带的三项输入(全是旁路 context,不改 props):
+  const stripAutoCtx = useContext(StripAutoContext);
+  const stripHeadless = useContext(StripHeadlessContext);
+  const injectedSummary = useContext(StripSummaryContext);
+  const usageCalls = useContext(StripUsageCallsContext);
   // 点开工作流内层助手:卡片只负责水合并回调,落到哪个窗格由这里定(与 TaskCard 的
   // openAgentView 同款,取渲染所在/焦点 pane)——卡片自己读 activeTabIndex 会分屏串扰。
   const openWfAgent = (key) => { const st = useStore.getState(); st.setViewingAgent(st.activeTabIndex, key); };
@@ -597,72 +670,128 @@ export function CoworkBlocks({
     flushBucket('end');
     if (!chatExpanded && hiddenTools > 0 && chatFoldBar) out.push(chatFoldBar(`执行了 ${hiddenTools} 步操作`));
     if (chatExpanded && chatUnfoldBar && list.some((b) => b.type === 'tool_use' && b.toolCall && !TASK_TOOL_NAMES.has(b.toolCall.name))) out.push(chatUnfoldBar);
-    return <div className="space-y-2">{out}{trailing}</div>;
+    // 聊天模式不做条带(那条路径自己就把整轮过程折成一行「执行了 N 步操作」),
+    // 根上仍带 data-strip-root + state=off —— 便于区分"这条路径不走条带"与"渲染坏了"。
+    return <div data-strip-root data-strip-state="off" className="space-y-2">{out}{trailing}</div>;
   }
 
   // 非聊天模式:cowork 分组折叠。每段正文前连续的思考+通用工具打包成一个 WorkGroup。
-  const segments = groupCoworkBlocks(list, { getSkillDocReadName });
+  const segments = groupCoworkBlocks(list);
   const activeKey = activeGroupKey(segments, isLive);
+  // 条带(§3.1/D.1):原 div.space-y-2 变成条带根,第一个子元素是摘要行,之后每个段包一层
+  // 带 data-strip-item 的 div(唯一新增的包装层,所有段都包,便于测试数数目)。
+  // 收起 = **只给可折段(group)带 hidden**(保留 DOM,只不参与布局);正文段与
+  // task/workflow/skill/skilldoc 段任何状态下都不带。段序 = groupCoworkBlocks 的输出序,一个不重排。
+  // 摘要优先用上层注入的**整轮**数值(⚡并入切段时头行只画在首段,账要按整轮算)。
+  const summary = injectedSummary || stripSummary(list, usageCalls);
+  const hasFold = summary.steps > 0;
+  const open = stripOpen === null ? stripAutoCtx || isLive : stripOpen;
+  const headText = [
+    '思考与工具调用',
+    summary.rounds == null ? `${summary.steps} 步` : `${summary.rounds} 轮 ${summary.steps} 步`,
+    ...(summary.tail ? [summary.tail] : []),
+  ].join(' · ');
   const out = segments.map((seg) => {
-    switch (seg.kind) {
-      case 'text':
-        return <MarkdownRenderer key={`t-${seg.key}`} content={seg.content} dockKeyPrefix={`${dockKeyPrefix}:${seg.index}`} isStreaming={isLive} />;
-      case 'task':
-        return (
-          <ToolCallWithRetry key={`k-${seg.key}`} toolCall={seg.toolCall} onRetryTool={onRetryTool} hoverOnly>
-            <TaskCard toolCall={seg.toolCall} />
-          </ToolCallWithRetry>
-        );
-      case 'workflow':
-        return (
-          <WorkflowCard key={`k-${seg.key}`} toolUseId={seg.toolCall.id} ownerSessionId={ownerSid}
-            toolCall={seg.toolCall} onOpenAgent={openWfAgent} />
-        );
-      case 'skill': {
-        const latest = seg.calls[seg.calls.length - 1];
-        return (
-          <ToolCallWithRetry key={`k-${seg.key}`} toolCall={latest} onRetryTool={onRetryTool} hoverOnly>
-            <SkillCard toolCall={latest} calls={seg.calls} />
-          </ToolCallWithRetry>
-        );
+    const foldable = isFoldableSegment(seg);
+    const body = (() => {
+      switch (seg.kind) {
+        case 'text':
+          return <MarkdownRenderer content={seg.content} dockKeyPrefix={`${dockKeyPrefix}:${seg.index}`} isStreaming={isLive} />;
+        case 'task':
+          return (
+            <ToolCallWithRetry toolCall={seg.toolCall} onRetryTool={onRetryTool} hoverOnly>
+              <TaskCard toolCall={seg.toolCall} />
+            </ToolCallWithRetry>
+          );
+        case 'workflow':
+          return (
+            <WorkflowCard toolUseId={seg.toolCall.id} ownerSessionId={ownerSid}
+              toolCall={seg.toolCall} onOpenAgent={openWfAgent} />
+          );
+        case 'skill': {
+          const latest = seg.calls[seg.calls.length - 1];
+          return (
+            <ToolCallWithRetry toolCall={latest} onRetryTool={onRetryTool} hoverOnly>
+              <SkillCard toolCall={latest} calls={seg.calls} />
+            </ToolCallWithRetry>
+          );
+        }
+        case 'skilldoc':
+          return (
+            <ToolCallWithRetry toolCall={seg.toolCall} onRetryTool={onRetryTool} hoverOnly>
+              <SkillCard toolCall={seg.toolCall} nameOverride={seg.name} subLabel="读取技能文档" />
+            </ToolCallWithRetry>
+          );
+        case 'group': {
+          const expanded = override.has(seg.key) ? override.get(seg.key) : (seg.key === activeKey);
+          return (
+            <WorkGroup
+              items={seg.items}
+              expanded={expanded}
+              onToggle={() => setOverride((p) => { const n = new Map(p); n.set(seg.key, !expanded); return n; })}
+              onRetryTool={onRetryTool}
+            />
+          );
+        }
+        default:
+          return null;
       }
-      case 'skilldoc':
-        return (
-          <ToolCallWithRetry key={`k-${seg.key}`} toolCall={seg.toolCall} onRetryTool={onRetryTool} hoverOnly>
-            <SkillCard toolCall={seg.toolCall} nameOverride={seg.name} subLabel="读取技能文档" />
-          </ToolCallWithRetry>
-        );
-      case 'group': {
-        const expanded = override.has(seg.key) ? override.get(seg.key) : (seg.key === activeKey);
-        return (
-          <WorkGroup
-            key={`wg-${seg.key}`}
-            items={seg.items}
-            expanded={expanded}
-            onToggle={() => setOverride((p) => { const n = new Map(p); n.set(seg.key, !expanded); return n; })}
-            onRetryTool={onRetryTool}
-          />
-        );
-      }
-      default:
-        return null;
-    }
+    })();
+    return (
+      <div key={`seg-${seg.key}`} data-strip-item={seg.kind} hidden={(foldable && !open) || undefined}>
+        {body}
+      </div>
+    );
   });
 
-  return <div className="space-y-2">{out}{trailing}</div>;
+  return (
+    <div
+      data-strip-root
+      data-strip-state={hasFold ? (open ? 'open' : 'closed') : 'none'}
+      // 无 usageCalls 时写空串(而不是不写属性):"有属性但为空"与"没这功能"要能区分。
+      data-strip-rounds={summary.rounds == null ? '' : String(summary.rounds)}
+      data-strip-steps={String(summary.steps)}
+      className="space-y-2"
+    >
+      {/* 摘要行恒为内容区第一个子元素(不搬家:流式期与收官后都在这个位置)。 */}
+      {hasFold && !stripHeadless && (
+        <button
+          type="button"
+          data-strip="head"
+          aria-expanded={open ? 'true' : 'false'}
+          title="展开/收起这一轮的过程"
+          onClick={() => setStripOpen(!open)}
+          className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 border-l-2 border-canvas-deep/40 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left"
+        >
+          {open
+            ? <ChevronDown size={13} className="text-ink-faint shrink-0" />
+            : <ChevronRight size={13} className="text-ink-faint shrink-0" />}
+          <Wrench size={13} className="text-ink-muted shrink-0" />
+          <span className="text-xs text-ink-soft font-body truncate min-w-0">{headText}</span>
+        </button>
+      )}
+      {out}{trailing}
+    </div>
+  );
 }
 
 // ─── Usage Display ─────────────────────────────────────────────
-function UsageDisplay({ usage, model, costUsd }) {
+function UsageDisplay({ message }) {
   // hook 必须无条件调用:移到 early return 之前(原在 if(!usage)return 之后=条件调用 hook,
   // usage 有无切换时 hooks 数量变→React 崩;ESLint rules-of-hooks 抓出的真隐患)。
   const provider = useStore((s) => s.currentProvider);
+  const usage = message?.usage;
   if (!usage) return null;
+  const model = message.model;
+  const costUsd = message.costUsd;
   const input = usage.input_tokens || 0;
   const output = usage.output_tokens || 0;
   const cacheRead = usage.cache_read_input_tokens || 0;
   const cacheWrite = usage.cache_creation_input_tokens || 0;
-  const cost = computeCost(model, usage, provider);
+  // 计费唯一入口:带 message 是为了 usageCalls(逐次 API 调用各自的时刻)—— 分时段价的
+  // 模型必须按每次调用自己的时间戳判档,汇总后的 usage 拆不回"哪一段在什么时刻"。
+  const cost = computeCostForMessage(message, provider);
+  const unavailable = cost ? null : costUnavailableReason(model, usage, provider, { at: message.timestamp });
   // Z1:CLI result 事件的 total_cost_usd 是官方计费口径的权威成本,优先于单价表
   // 估算。第三方 provider 下 CLI 仍按 Claude 价目计算(模型名是伪装的),不可信。
   const official = !provider || (provider.providerHint || 'anthropic') === 'anthropic';
@@ -674,37 +803,66 @@ function UsageDisplay({ usage, model, costUsd }) {
   const authoritative = official && !isPlanBilling(provider, model)
     && cost?.source !== 'user'
     && typeof costUsd === 'number' && costUsd > 0;
+  // R43(用户实报「token 明细过于技术化」):行内只留 输入 / 输出 / 金额,四项明细
+  // (缓存命中 / 缓存写入 / 本轮累计读取 / 整轮命中率)收进本行容器的悬停提示。
+  // 悬停必须挂在本行容器上(即金额的直接父容器):计价套件按「金额的直接父容器」定位轮末
+  // 费用位,多包一层容器、或把 title 挂到更外层,都会让它失准。
+  // 「本轮累计读取」(旧名会让人误以为"我的上下文有 6 万 token")= 输入 + 缓存命中 + 缓存写入,
+  // 是这一轮所有底层 API 调用提示侧 token 之和 —— 一轮里模型每调一次 API 都要重读整段上下文,
+  // 累加自然大于单次窗口。数值口径与旧名时期一字未改,只是不再占据行内版面。
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50">
+    <div
+      data-cgui="usage-line"
+      data-usage-scope="turn"
+      title={`缓存命中 ${cacheRead.toLocaleString()} · 缓存写入 ${cacheWrite.toLocaleString()}\n本轮累计读取 ${(input + cacheRead + cacheWrite).toLocaleString()}（= 输入 ${input.toLocaleString()} + 缓存命中 ${cacheRead.toLocaleString()} + 缓存写入 ${cacheWrite.toLocaleString()}；一轮里模型每次调用 API 都要重读整段上下文，累计读取量会大于单次上下文大小）\n整轮命中率 ${cacheRead + cacheWrite + input > 0 ? formatHitPct(cacheHitPct(cacheRead, cacheWrite, input)) : '—'}（= 整轮 cache_read /（普通 input + cache_read + cache_creation），整轮所有 API 调用累计加权；切模型或进程冷启的那一轮偏低属正常。分母 0 显示 —）`}
+      className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-ink-faint mt-2 pt-2 border-t border-canvas-deep/50"
+    >
       <span title="input_tokens — 仅指未命中缓存的新 token(Anthropic 计费口径),不是全部输入">输入 {input.toLocaleString()}</span>
       <span>输出 {output.toLocaleString()}</span>
-      {cacheRead > 0 && <span title="cache_read_input_tokens">缓存命中 {cacheRead.toLocaleString()}</span>}
-      {cacheWrite > 0 && <span title="cache_creation_input_tokens">缓存写入 {cacheWrite.toLocaleString()}</span>}
-      {(cacheRead > 0 || cacheWrite > 0) && (
-        <span title="实际送入模型处理的输入总量 = 输入 + 缓存命中 + 缓存写入(整轮所有 API 调用累计)">
-          实际输入 {(input + cacheRead + cacheWrite).toLocaleString()}
+      {/* R24 轮末徽章:这里是【整轮】口径(整轮所有 API 调用累计),名字必须叫「整轮命中率」;
+          顶部标题行那条单次调用口径叫「最近API命中率」,会话累计在用量面板 —— 三处不得混用。
+          R43:整段(名字 + 加权累计公式 + 分母守卫 + 0 分母回退)原样搬进行容器悬停,一字未改;
+          分母(普通 input + read + creation)为 0 时仍显示「—」,不显示 0.0%。 */}
+      {Array.isArray(usage.ccgui_usage?.codes) && usage.ccgui_usage.codes.length > 0 && (
+        <span className="text-error" title="上游回报的用量字段无效或自相矛盾，数字原样保留、费用按未知处理">
+          {usage.ccgui_usage.codes.join(' / ')}
         </span>
       )}
-      {(cacheRead > 0 || cacheWrite > 0) && (
-        // r98:每轮回复末尾直接给命中率,不用点徽章。口径 = 缓存命中 /(输入 + 缓存命中 + 缓存写入),
-        // 与徽章弹层同一公式;这里的 usage 是整轮所有 API 调用的累计,所以是"这一轮"的加权命中率。
-        <span title="本轮命中率 = 缓存命中 /（输入 + 缓存命中 + 缓存写入），整轮所有 API 调用累计口径；切模型或进程冷启的那一轮偏低属正常">
-          本轮命中率 {formatHitPct(cacheHitPct(cacheRead, cacheWrite, input))}
-        </span>
-      )}
-      {(authoritative || cost) && (
-        <span
-          className="ml-auto text-accent/80 font-mono"
-          // R3:非 authoritative 分支的说明文案由 pricing.js 统一给(三个费用显示点共用),
-          // 用户填过单价时如实说明是按他填写的单价算,不再说"按官网价估算"。
-          title={
-            authoritative
-              ? 'CLI 上报的本轮实际成本（total_cost_usd，官方计费口径；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）'
-              : costTitle(cost)
-          }
-        >
-          {formatCost(authoritative ? costUsd : cost.totalUsd)}
-        </span>
+      {/* R24 费用展示:来源(用户手填单价 / 按官网价估算 / 官方计费口径)与费用必居其一,拿不到价
+          (官方价目里查不到该型号,也不做最长前缀近似)时如实写「未定价」,不显示 0 总价。
+          R42:来源词不再占行内版面(窄面板下它把这条行撑换行),改为金额 title 的**首行**(悬停可见)。
+          「已知小计」说明仍留在行内 —— 它是"钱没算全"的声明,收起来等于把部分金额当成完整金额。 */}
+      {(authoritative || cost) ? (
+        <>
+          {/* R42:ml-auto 原挂在被删的来源 span 上 —— 迁到金额自己身上(不再包一层容器:
+              包了会让金额的父元素从行容器变成容器,"轮末费用位"这类按父元素文本定位的
+              既有探针会失准,且金额与「已知小计」说明本来就该贴着)。 */}
+          <span
+            data-cgui="usage-amount"
+            className="ml-auto text-accent/80 font-mono"
+            // R3:非 authoritative 分支的说明文案由 pricing.js 统一给(三个费用显示点共用),
+            // 用户填过单价时如实说明是按他填写的单价算,不再说"按官网价估算"。
+            // R42:title 首行 = 来源词(官方计费口径 或 costSourceLabel),第二行起为原有说明。
+            title={
+              authoritative
+                ? `官方计费口径\nCLI 上报的本轮实际成本（total_cost_usd，官方计费口径；美元计价模型按 1 USD ≈ 7.2 CNY 换算，人民币计价模型为原生定价）`
+                : `${costSourceLabel(cost)}\n${costTitle(cost)}`
+            }
+          >
+            {formatCost(authoritative ? costUsd : displayUsd(cost.totalUsd, cost.currency))}
+          </span>
+          {cost && costUnknownNote(cost) && (
+            <span className="text-[9px] text-ink-ghost" title="上面金额是已知小计，不含被判定为未知的那部分费用">
+              {costUnknownNote(cost)}
+            </span>
+          )}
+        </>
+      ) : (
+        !usage.ccgui_usage?.codes?.length && unavailable && (
+          <span className="ml-auto text-[9px] text-ink-ghost" title={`${unavailable.detail}（费用未知，不显示 0）`}>
+            {COST_REASON_TEXT[unavailable.reason] || COST_REASON_TEXT.NO_PRICE}
+          </span>
+        )
       )}
     </div>
   );
@@ -721,6 +879,12 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
   const [showThinking, setShowThinking] = useState(false);
   const chatMode = useStore((s) => s.chatMode);
   const [chatExpanded, setChatExpanded] = useState(false);
+  // A 项:子代理逐条计价的 provider —— 与 UsageDisplay 取的是同一个 store 字段。
+  const provider = useStore((s) => s.currentProvider);
+  // 条带:本会话的异常收尾记录(按 sessionId 取,不按 uuid)。选择器返回**记录的引用**,
+  // 没写过时引用不变 → 同会话其它轮写入那一次之外不触发本行重渲染。
+  const roundStripRec = useStore((s) => (turn.sessionId ? s.roundStrip?.[turn.sessionId] : null));
+  const round = useContext(StripRoundContext);
 
   // 长回复(气泡高过所在窗格可视区)在气泡末尾补一个复制按钮 —— 看到末尾时顶部那个
   // 已经滚出视野。判据只比高度不追滚动位置(shouldShowBottomCopy 单测)。
@@ -796,6 +960,30 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
   // turn.uuid === 'streaming' is App.jsx's signal that this turn is still being
   // produced — spin the avatar mark to mirror the CLI's rotating progress glyph.
   const isLiveStream = turn.uuid === 'streaming';
+  // 条带默认态(真值表见 INTERFACE §E):四项输入缺一不可 —— 流式中 / 本地停止副本
+  // (`chat-stopped-*` 的 interrupted,哨兵 uuid 不查表,靠数据里现成字段兜)/
+  // 本地报错副本的 errorAction / 落盘后的异常窗口记录。**没有**"空闲态"这类触发点:
+  // 收起是默认值,不是事件(坑 2)。
+  const stripAuto = !!round.forceOpen || isLiveStream || !!turn.interrupted
+    || roundStripEnd(roundStripRec, turn.sessionId, turn.timestamp) != null
+    || !!turn.errorAction;
+  // A 项:本回合子代理金额的两个索引(toolUseId / agentId),供卡片各自取自己那份。
+  // 数据来源两份,同一形状(都是 subUsage.agents[]):①读 jsonl 历史时服务端挂的;
+  // ②本地副本('streaming*' / 'chat-*',App.jsx 拼的)由"子代理完成即推"的条目现拼
+  // (liveSubUsage,2026-09-13 补齐)。history=false 只压"未能计价"小标 —— 那个占位
+  // 对还在跑的子代理是误导文案;有金额的(priced>0)照样画。
+  const subagentCost = useMemo(
+    () => buildSubagentCostIndex(turn.subUsage?.agents, provider),
+    [turn.subUsage, provider],
+  );
+  const subagentCostHistory = !/^(streaming|chat-)/.test(turn.uuid || '');
+  // provider 引用变化(切 provider)会重算索引,故把 context 值也钉成稳定身份:
+  // 上下文一变,树内所有卡片(含 React.memo 的 WorkflowCard)都会跟着重渲,
+  // 流式期间每来一个 token 重渲一遍整批卡片正是历史上卡顿的老路。
+  const subagentCostValue = useMemo(
+    () => ({ index: subagentCost, history: subagentCostHistory }),
+    [subagentCost, subagentCostHistory],
+  );
 
   return (
     // 本回合的会话归属(session-reader 给每条历史 turn 打的 record.sessionId)供给
@@ -803,6 +991,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
     // 就会取到源会话正在跑的 agent(显示运行中 + 停错会话)。流式的本地 turn 没有
     // sessionId 字段 → null → 完全走原逻辑。
     <TaskOwnerContext.Provider value={turn.sessionId || null}>
+    <SubagentCostContext.Provider value={subagentCostValue}>
     {/* 入场动画只给"正在流式"的临时 turn 播放。回复完成后这条会从 streaming(key=
         'streaming') 切到 chatMessages(key='chat-assistant-…') 再切到 jsonl(真 uuid),
         三次换 key → React 反复卸载重挂 TurnBubble。若固化后的 turn 仍带 animate-fade-up,
@@ -874,6 +1063,10 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
               </div>
             ) : null;
             return (
+              <StripAutoContext.Provider value={stripAuto}>
+              <StripHeadlessContext.Provider value={!!round.headless}>
+              <StripSummaryContext.Provider value={round.summary || null}>
+              <StripUsageCallsContext.Provider value={Array.isArray(turn.usageCalls) ? turn.usageCalls : null}>
               <CoworkBlocks
                 blocks={renderBlocks}
                 isLive={isLiveStream}
@@ -885,6 +1078,10 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                 chatFoldBar={chatFoldBar}
                 chatUnfoldBar={chatUnfoldBar}
               />
+              </StripUsageCallsContext.Provider>
+              </StripSummaryContext.Provider>
+              </StripHeadlessContext.Provider>
+              </StripAutoContext.Provider>
             );
           })() : (
             <>
@@ -945,7 +1142,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
               claude-code 原生 tool 名/动词 + 前置 spinner),避免同屏两行语义重复。 */}
 
           {/* Usage */}
-          <UsageDisplay usage={turn.usage} model={turn.model} costUsd={turn.costUsd} />
+          <UsageDisplay message={turn} />
           {/* 末尾右下操作行:长回复补的复制按钮(与顶部同一个 CopyButton)+ 重做这条回复。
               两者共用一行,免得各占一行叠在正文下面。 */}
           {(showBottomCopy || (onRetry && !isLiveStream && turn.uuid !== 'streaming')) && (
@@ -966,6 +1163,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
         </div>
       </div>
     </div>
+    </SubagentCostContext.Provider>
     </TaskOwnerContext.Provider>
   );
 }

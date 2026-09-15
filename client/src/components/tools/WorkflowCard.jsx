@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, Layers, Loader2, Square } from '../Icon.jsx';
 import { useStore } from '../../stores/sessionStore.js';
 import { resolveOwnedAgent } from '../../utils/agentOwner.js';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
 import { ElapsedTime } from '../LoadingBits.jsx';
 import { stopNoOwnerNotice } from './TaskCard.jsx';
+import { SubagentCostContext, SubagentCostTag } from './SubagentCost.jsx';
 import {
   agentDisplayState, effectiveRunStatus, getWorkflowSnapshot, groupWorkflowPhases,
   phaseRowQuota, resolveRunRef, runDisplayStatus, selectWorkflowSource,
@@ -141,7 +142,8 @@ function WorkflowCardImpl({ toolUseId, ownerSessionId = null, toolCall = null, f
     if (askedRef.current || !ref || runStatus === 'running') return;
     askedRef.current = true;
     let alive = true;
-    getWorkflowSnapshot(ref).then((s) => {
+    // taskId 一起给:同一个脚本续跑会覆写同名快照文件,缓存只按 runId 分键就会拿到上一轮那份。
+    getWorkflowSnapshot(ref, { taskId }).then((s) => {
       if (!s) { askedRef.current = false; return; }
       if (alive) setSnapshot(s);
     });
@@ -176,6 +178,10 @@ function WorkflowCardImpl({ toolUseId, ownerSessionId = null, toolCall = null, f
   }, [groups]);
 
   const name = clip(agent?.name || snapshot?.workflowName || toolCall?.input?.name || 'workflow', 80);
+  // A 项:这张卡片的金额 = 它名下【全部内层 agent】的合计(普通 Task 卡片同一条规则,
+  // 只是那边名下只有 1 个)。数据来自本回合 subUsage.agents[] 按 toolUseId 归组。
+  const subagentCost = useContext(SubagentCostContext);
+  const costEntry = subagentCost?.index?.byToolUseId?.get(toolUseId);
   const meta = [
     groups.length > 0 ? `${groups.length} 阶段` : null,
     totals.agents > 0 ? `${totals.agents} 助手` : null,
@@ -281,7 +287,16 @@ function WorkflowCardImpl({ toolUseId, ownerSessionId = null, toolCall = null, f
             <Badge state={effStatus} label={RUN_LABEL[effStatus]} />
             {runActive && Number.isFinite(agent?.startedAt) && <ElapsedTime startedAt={agent.startedAt} />}
           </div>
-          {meta && <div className="mt-0.5 truncate text-[10px] text-ink-faint font-body" title={meta}>{meta}</div>}
+          {(meta || subagentCost) && (
+            <div className="mt-0.5 flex items-center gap-2 min-w-0 text-[10px] text-ink-faint font-body">
+              {meta && <span className="truncate" title={meta}>{meta}</span>}
+              <SubagentCostTag
+                entry={costEntry}
+                showMissing={subagentCost?.history === true}
+                title="该工作流内部全部子代理的合计费用（各按自己的模型与调用时刻计价；不含在主回合金额里）"
+              />
+            </div>
+          )}
         </div>
         {canStop && (
           <button

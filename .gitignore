@@ -24,3 +24,6 @@ LEARNINGS.md
 PROJECT.md
 *.local.md
 .devflow/
+
+# python 字节码(computer-use helper)
+__pycache__/

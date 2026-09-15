@@ -1,0 +1,85 @@
+{
+  "dataRoot": "/Users/<you>/…/.claude/worktrees/batch/tests/acceptance/second-batch-20260911/.artifacts/runtime-data",
+  "buildLabel": "worktree build identifier supplied by the operator",
+  "platform": "chromium|tauri-macos|windows",
+  "observedAt": "2026-09-11T00:00:00Z",
+  "sessionFlow": {
+    "projectName": "fixture project name shown in the sidebar (prepared and verified through the public UI)",
+    "sessionASearchMarker": "SB_FLOW_SESSION_A_20260911",
+    "sessionBSearchMarker": "SB_FLOW_SESSION_B_20260911",
+    "sessionASid": "sessionId of session A (from the app's own messages request)",
+    "sessionBSid": "sessionId of session B",
+    "sessionAProjectHash": "projectHash of the fixture project (from the app's own messages request)"
+  },
+  "sessionFlowThird": {
+    "projectName": "third fixture project name for the three-pane case",
+    "sessionCSearchMarker": "SB_FLOW_SESSION_C_20260911"
+  },
+  "agent": {
+    "sessionSearchMarker": "SB_AGENT_PARENT_20260911",
+    "projectName": "fixture project that owns the agent parent session",
+    "parentSessionId": "sessionId of the parent session",
+    "parentTitle": "visible title of the parent session (first message text)",
+    "toolUseId": "toolu id of the Task/subagent call whose view this suite opens",
+    "agentSessionId": "the subagent's own session id",
+    "parentProjectHash": "projectHash of the agent parent project",
+    "expectedBlockTypes": ["operator-observed block types in original order, e.g. prompt, thinking, tool_use, text"],
+    "stopTaskPathTemplate": "/api/.../{pid}/... (route the app itself uses to stop an agent; copied from the app's own request)"
+  },
+  "agentCrossProject": {
+    "sessionSearchMarker": "SB_AGENT_CROSS_PROJECT_20260911",
+    "projectName": "a different fixture project than the currently open session",
+    "parentSessionId": "sessionId of that cross-project parent",
+    "parentTitle": "visible title of that cross-project parent session",
+    "toolUseId": "toolu id of the subagent inside that cross-project parent"
+  },
+  "agentBackground": {
+    "sessionSearchMarker": "SB_AGENT_BACKGROUND_20260911",
+    "projectName": "fixture project of a parent session that is not open in any pane",
+    "parentSessionId": "sessionId of that parent",
+    "parentTitle": "visible title of that parent session",
+    "toolUseId": "toolu id of the subagent inside that parent"
+  },
+  "agentRunning": {
+    "sessionSearchMarker": "SB_AGENT_RUNNING_20260911",
+    "projectName": "fixture project of the still-running parent",
+    "parentSessionId": "sessionId of the running parent",
+    "parentTitle": "visible title of the running parent session",
+    "toolUseId": "toolu id of the still-running subagent",
+    "parentPid": "service pid of the running parent turn (from the app's own POST /api/chat response)"
+  },
+  "agentHistoryOnly": {
+    "sessionSearchMarker": "SB_AGENT_HISTORY_ONLY_20260911",
+    "projectName": "fixture project holding a finished subagent with nothing running",
+    "parentSessionId": "sessionId of its parent",
+    "parentTitle": "visible title of its parent session",
+    "toolUseId": "toolu id of the finished subagent",
+    "parentPid": "pid of the parent turn that produced it (kept for the stop entry, which must answer AGENT_NOT_RUNNING)"
+  },
+  "agentEnded": {
+    "parentPid": "pid of a parent turn whose subagent has already finished",
+    "parentSessionId": "sessionId of that parent",
+    "toolUseId": "toolu id of that finished subagent"
+  },
+  "agentFork": {
+    "projectName": "fixture project that owns both forked parents",
+    "parentASearchMarker": "SB_FORK_PARENT_A_20260911",
+    "parentAId": "sessionId of fork parent A",
+    "parentBSearchMarker": "SB_FORK_PARENT_B_20260911",
+    "parentBId": "sessionId of fork parent B",
+    "toolUseId": "the same toolu id present in both forked parents",
+    "forkAgentSessionId": "the agent session id carried by the fork (used to show it has no run evidence)"
+  },
+  "agentOrphan": {
+    "monitorEntryMarker": "marker of a monitor entry whose parent session no longer exists (for 母会话不存在)"
+  },
+  "agentUnresolvedEntry": {
+    "monitorEntryMarker": "marker of a monitor entry without a usable parent identity (for 无法确定母会话)"
+  },
+  "agentNoPermission": {
+    "monitorEntryMarker": "marker of a monitor entry whose parent needs permission this host does not have (for 无权查看此会话)"
+  },
+  "agentLoadFailure": {
+    "monitorEntryMarker": "marker of a monitor entry whose history read fails on demand (for 加载失败，可重试)"
+  }
+}
