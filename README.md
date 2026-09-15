@@ -278,6 +278,25 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.390</b>(2026-09-15)· 修复 2 条</summary>
+
+**修复**
+
+<details><summary>电脑操控的截图可以点开放大</summary>
+
+回复进行中和回复完成后,工具卡片里的截图都能点击放大查看,按 Esc 关闭,不会停止正在进行的回复。
+
+</details>
+
+<details><summary>回复完成后截图不再变成一大段编码文字</summary>
+
+以前重新读取会话时,截图被当成文字显示,出现几十万字符的编码并导致界面卡顿;现在显示为图片。只有文字的工具结果也显示为可读文字,不再是 JSON 原文。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.389</b>(2026-09-15)· 修复 12 条</summary>
 
 **修复**
