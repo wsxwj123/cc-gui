@@ -606,6 +606,109 @@ function StorageTab() {
   );
 }
 
+// 回滚点(检查点)占用:影子 git 会把整个工作目录收一份,只增不减时能吃掉几十 G。
+// 这里给出总量 + 每会话明细 + 一键清理(危险确认);清理后空间立刻下降。
+function CheckpointsTab() {
+  const [data, setData] = useState({ totalBytes: 0, sessions: [] });
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const fmtBytes = (n) => {
+    if (!n) return '0 B';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(2)} MB`;
+    return `${(n / 1024 ** 3).toFixed(2)} GB`;
+  };
+
+  const fetchStats = async () => {
+    setLoading(true);
+    try {
+      const r = await fetch('/api/checkpoints-stats');
+      const d = await r.json();
+      // 形状防御:端点异常时直收会让下方 .length 抛错 → 设置面板白屏(无错误边界)。
+      if (!r.ok || !Array.isArray(d?.sessions)) { setData({ totalBytes: 0, sessions: [] }); return; }
+      setData(d);
+    } catch {}
+    finally { setLoading(false); }
+  };
+  useEffect(() => { fetchStats(); }, []);
+
+  const deleteOne = async (s) => {
+    if (!(await confirmDialog(`删除该会话的全部回滚点(${s.count} 个快照,${fmtBytes(s.bytes)})？\n删除后这些回滚点无法再用来还原文件,不影响当前对话。`, { danger: true }))) return;
+    setBusy(true);
+    try { await fetch(`/api/checkpoints/${s.sessionId}`, { method: 'DELETE' }); await fetchStats(); } catch {}
+    setBusy(false);
+  };
+
+  const deleteAll = async () => {
+    if (!(await confirmDialog(`确定清理全部 ${data.sessions.length} 个会话的回滚点？将释放 ${fmtBytes(data.totalBytes)}。\n删除后这些回滚点无法再用来还原文件,不影响当前对话。`, { danger: true }))) return;
+    setBusy(true);
+    try {
+      for (const s of data.sessions) {
+        try { await fetch(`/api/checkpoints/${s.sessionId}`, { method: 'DELETE' }); } catch {}
+      }
+      await fetchStats();
+    } catch {}
+    setBusy(false);
+  };
+
+  if (loading) {
+    return <div className="flex items-center justify-center py-8"><RefreshCw size={16} className="text-ink-faint animate-spin" /></div>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="text-[11px] text-ink-faint font-body leading-relaxed bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
+        <b>这是什么：</b>每次发消息前，系统会把当前工作目录快照一份存到本机（<code className="font-mono">~/.claude/gui/checkpoints</code>），用于「回到此处」回滚文件。
+        <br /><b>为什么要清理：</b>快照是整目录副本，工作目录很大时（比如几十 G 的数据目录且没有 <code className="font-mono">.gitignore</code>）会占掉大量磁盘。系统已自动保留每个会话最近 20 条 / 30 天，目录过大时不再创建新快照。
+        <br /><b>删了有什么影响：</b>只是没法再回到那些时刻，<b>不影响当前对话和已有文件</b>。
+      </div>
+
+      <div className="flex items-center justify-between">
+        <div className="text-xs text-ink-muted font-body">
+          共 <span className="font-mono text-ink">{data.sessions.length}</span> 个会话 · 占用 <span className="font-mono text-ink">{fmtBytes(data.totalBytes)}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={fetchStats} disabled={busy}
+            className="text-[11px] px-2 py-1 rounded text-ink-muted hover:text-ink hover:bg-canvas-warm font-body inline-flex items-center gap-1">
+            <RefreshCw size={11} /> 刷新
+          </button>
+          <button onClick={deleteAll} disabled={busy || data.sessions.length === 0}
+            className="text-[11px] px-2.5 py-1 rounded bg-error/10 text-error hover:bg-error/15 font-body inline-flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
+            <Trash2 size={11} /> 一键清理
+          </button>
+        </div>
+      </div>
+
+      {data.sessions.length === 0 ? (
+        <p className="text-xs text-ink-faint font-body py-6 text-center">没有回滚点占用</p>
+      ) : (
+        <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
+          {data.sessions.map((s) => (
+            <div key={s.sessionId} className="flex items-center gap-3 px-3 py-2.5">
+              <div className="flex-1 min-w-0">
+                <div className="text-[12px] text-ink font-body truncate">{s.title || s.sessionId}</div>
+                <div className="text-[10px] text-ink-faint font-mono mt-0.5 truncate">
+                  {s.title ? s.sessionId : `${s.count} 个快照`}
+                </div>
+              </div>
+              <div className="text-[11px] text-ink-muted font-mono shrink-0">
+                {s.title ? `${s.count} 条 · ` : ''}{fmtBytes(s.bytes)}
+              </div>
+              <button onClick={() => deleteOne(s)} disabled={busy}
+                className="p-1 rounded hover:bg-error/10 text-ink-faint hover:text-error shrink-0"
+                title="删除该会话的全部回滚点">
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // 自动选当前平台对应的安装包资产。
 // 优先用 serverPlatform(后端 process.platform)— Tauri WebView2/WKWebView 的
 // navigator.userAgent 在某些版本被改写过,光靠前端 UA 容易 miss。serverPlatform
@@ -2614,6 +2717,12 @@ function GeneralTab({ settings }) {
       <div id="set-desktop-notify"><DesktopNotifyToggle /></div>
       <div id="set-screenshot-hotkey"><ScreenshotHotkeyPicker /></div>
       <div id="set-genui"><GenuiSection /></div>
+      {/* 回滚点占用落在默认 tab(不是「高级 → 存储清理」):它是会吃几十 G 的空间问题,
+          用户找它时不该先猜在哪个 tab;与 .bak 清理同形(见 StorageTab)。 */}
+      <div id="set-checkpoints" className="border-t border-canvas-deep pt-4">
+        <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-2">回滚点占用</div>
+        <CheckpointsTab />
+      </div>
       {rows.length > 0 && (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
           {rows.map(([k, v]) => (

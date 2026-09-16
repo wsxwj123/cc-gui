@@ -5,6 +5,8 @@ import { join, resolve as resolvePath, sep, basename, dirname } from 'path';
 import { stat, mkdir, readFile, writeFile, rm, access, readdir } from 'fs/promises';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
 import { CHECKPOINTS_ROOT } from '../utils/checkpoint-paths.js';
+import { findSessionFile, readSessionTitles } from '../services/session-reader.js';
+import { readJsonlEdges } from '../utils/jsonl-parser.js';
 import { broadcastSessionFileChange } from './sessions.js';
 
 const execFileP = promisify(execFile);
@@ -354,8 +356,14 @@ router.post('/checkpoints', async (req, res) => {
     // .gitignore)每拍一次就是一份全量副本(git 对大二进制不做增量)。先估算,超阈值
     // 就不拍——但**照常回 200 + skipped**,让调用方(界面)能如实告诉用户。
     const maxBytes = MAX_SNAPSHOT_BYTES();
+    const hadRepo = await pathExists(join(CHECKPOINTS_ROOT, String(sessionId)));
     const est = await estimateWorkTreeBytes(sessionId, workTree);
     if (est.truncated || est.bytes > maxBytes) {
+      // 估算本身会建影子仓(git ls-files 要一个 git-dir)。这次什么都没拍,把刚建的
+      // 空仓收掉——否则每被跳过一次就白留一份 ~25 KB 的裸仓(174 个会话就是这么堆起来的)。
+      if (!hadRepo) {
+        try { await rm(join(CHECKPOINTS_ROOT, String(sessionId)), { recursive: true, force: true }); } catch {}
+      }
       return res.json({
         ok: true,
         skipped: true,
@@ -613,7 +621,31 @@ router.delete('/checkpoints/:sessionId/:sha', async (req, res) => {
       if (!SESSION_RE.test(id)) continue;
       const bytes = await dirBytes(join(CHECKPOINTS_ROOT, id));
       const count = (await listShas(id)).length;
-      sessions.push({ sessionId: id, count, bytes });
+      if (count === 0) continue;                   // 没快照的空仓不占用户空间认知,不列
+      // 会话标题:光给 UUID 用户认不出是哪个会话。优先 custom/ai title(改名落盘),
+      // 没有就取首条用户消息做前 80 字(大多数会话没改名)。
+      let title = '';
+      try {
+        const f = await findSessionFile(id);
+        if (f) {
+          const t = await readSessionTitles(f);
+          title = (t.customTitle || t.aiTitle || '').trim();
+          if (!title) {
+            await readJsonlEdges(f, 0, (raw) => {
+              if (title || !raw.includes('"user"')) return;
+              try {
+                const r = JSON.parse(raw);
+                if (r?.type !== 'user' || r?.isSidechain) return;
+                const c = r?.message?.content;
+                const text = typeof c === 'string' ? c : (Array.isArray(c) ? c.find((b) => b?.type === 'text')?.text : '');
+                if (!text || /^<(command-name|local-command)/.test(String(text).trim())) return;
+                title = String(text).replace(/\s+/g, ' ').trim().slice(0, 80);
+              } catch { /* 坏行跳过 */ }
+            });
+          }
+        }
+      } catch { /* 找不到就只显示 id */ }
+      sessions.push({ sessionId: id, count, bytes, title });
       totalBytes += bytes;
     }
     sessions.sort((a, b) => b.bytes - a.bytes);

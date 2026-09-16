@@ -217,6 +217,8 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState([]);
   const [busy, setBusy] = useState(false);
+  // R1:被体积安全阀跳过时如实告诉用户(否则"拍了个寂寞"看起来就是没反应)。
+  const [skipReason, setSkipReason] = useState('');
 
   const load = async () => {
     if (!sessionId) return;
@@ -231,13 +233,36 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
   const snapshot = async () => {
     if (!sessionId || !cwd) return;
     setBusy(true);
+    setSkipReason('');
     try {
-      await fetch('/api/checkpoints', {
+      const r = await fetch('/api/checkpoints', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId, cwd, label: `checkpoint ${new Date().toLocaleTimeString()}` }),
       });
+      const d = await r.json().catch(() => ({}));
+      if (d?.skipped) setSkipReason(d.reason || '工作目录过大,本次未创建回滚点');
       await load();
     } catch (err) { confirmDialog('快照失败：' + err.message); }
+    setBusy(false);
+  };
+
+  const deleteEntry = async (entry) => {
+    if (!(await confirmDialog(`删除这一条回滚点？\n${entry.sha.slice(0, 7)}\n· 该条无法再用来还原文件\n· 其余回滚点不受影响`, { danger: true }))) return;
+    setBusy(true);
+    try {
+      await fetch(`/api/checkpoints/${sessionId}/${entry.sha}`, { method: 'DELETE' });
+      await load();
+    } catch {}
+    setBusy(false);
+  };
+
+  const deleteSession = async () => {
+    if (!(await confirmDialog(`删除本会话的全部 ${entries.length} 条回滚点？\n· 全部无法再用来还原文件\n· 不影响当前对话和已有文件`, { danger: true }))) return;
+    setBusy(true);
+    try {
+      await fetch(`/api/checkpoints/${sessionId}`, { method: 'DELETE' });
+      await load();
+    } catch {}
     setBusy(false);
   };
 
@@ -354,21 +379,39 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
             style={{ top: pos.top, left: pos.left }}>
             <div className="px-3 py-2 flex items-center justify-between border-b border-white/10">
               <span className="text-[10px] uppercase tracking-wider text-ink-muted font-body">Checkpoints</span>
-              <button onClick={snapshot} disabled={busy} className="btn-accent flex items-center gap-1 text-[10px] px-2 py-0.5">
-                <Camera size={10} />{busy ? '快照中…' : '新快照'}
-              </button>
+              <div className="flex items-center gap-1">
+                {entries.length > 0 && (
+                  <button onClick={deleteSession} disabled={busy} title="删除本会话的全部回滚点"
+                    className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded text-error hover:bg-error/10 font-body">
+                    <Trash2 size={10} />清理全部
+                  </button>
+                )}
+                <button onClick={snapshot} disabled={busy} className="btn-accent flex items-center gap-1 text-[10px] px-2 py-0.5">
+                  <Camera size={10} />{busy ? '快照中…' : '新快照'}
+                </button>
+              </div>
             </div>
+            {skipReason && (
+              <p className="px-3 py-2 text-[10.5px] text-warning bg-warning/10 border-b border-white/10 font-body leading-relaxed">
+                本次未创建回滚点：{skipReason}
+              </p>
+            )}
             <div className="max-h-72 overflow-y-auto">
               {entries.length === 0 ? (
                 <p className="px-3 py-4 text-[11px] text-ink-faint text-center font-body">还没有 checkpoint</p>
               ) : entries.map((e) => (
-                <button key={e.sha} onClick={() => restore(e)}
-                  className="w-full text-left px-3 py-2 hover:bg-black/5 border-b border-white/5">
-                  <div className="text-[11px] font-mono text-ink-soft truncate">{e.label}</div>
-                  <div className="text-[9px] text-ink-faint font-mono mt-0.5">
-                    {e.sha.slice(0, 7)} · {new Date(e.ts).toLocaleString('zh-CN')}
-                  </div>
-                </button>
+                <div key={e.sha} className="group/cp flex items-center border-b border-white/5 hover:bg-black/5">
+                  <button onClick={() => restore(e)} className="flex-1 min-w-0 text-left px-3 py-2">
+                    <div className="text-[11px] font-mono text-ink-soft truncate">{e.label}</div>
+                    <div className="text-[9px] text-ink-faint font-mono mt-0.5">
+                      {e.sha.slice(0, 7)} · {new Date(e.ts).toLocaleString('zh-CN')}
+                    </div>
+                  </button>
+                  <button onClick={() => deleteEntry(e)} disabled={busy} title="删除这一条回滚点"
+                    className="shrink-0 mr-2 p-1 rounded text-ink-faint hover:text-error hover:bg-error/10 opacity-0 group-hover/cp:opacity-100 transition-opacity">
+                    <Trash2 size={11} />
+                  </button>
+                </div>
               ))}
             </div>
           </div>
