@@ -95,22 +95,89 @@ export async function scanAllPanels(page) {
   return { text: chunks.join('\n'), panels: seenPanels, total: labels.length };
 }
 
-/** 在所有面板里找第一个"名字匹配 re 且可见可点"的按钮;返回 {panel,locator,text} 或 null。
+/** 在所有面板里找第一个"可见可点、且名字(可见文字 **或** title/aria-label)匹配 re"的按钮;
+ *  返回 {panel,locator,text,role,by} 或 null。
+ *  为什么要带 title/aria-label:这个产品里大量入口是**纯图标按钮**,名字只落在 title 属性上
+ *  (例如「删除这一条回滚点」),只按可见文字找会漏掉、把"入口不存在"误判出来。
  *  只认真正的表单按钮/链接,不碰带 role="tab" 之类内部管控件的容器 —— 否则一个面板标签
  *  就能把"这个入口根本不存在"伪造成"找到了"。 */
 export async function findButtonAcrossPanels(page, re) {
   const labels = (await panelLabels(page)).filter((l) => l !== '设置');
   for (const label of labels) {
     await openPanel(page, label);
-    for (const role of ['button', 'link']) {
-      const btn = page.getByRole(role).filter({ hasText: re }).first();
-      if ((await btn.count()) && await btn.isVisible().catch(() => false)) {
-        const text = (await btn.innerText().catch(() => '')) || '';
-        return { panel: label, locator: btn, text: text.trim(), role };
+    // 一次拿全:每个候选的可见性 + 三种"名字"(可见文字 / title / aria-label),再在 JS 侧匹配。
+    // 这样纯图标按钮(title 里有名字、可见文字为空)也能被找到,不必为它单开一条查找路径。
+    const hits = await page.evaluate((src) => {
+      const out = [];
+      const els = [...document.querySelectorAll('button, a[href], [role="button"], [role="link"]')];
+      for (let i = 0; i < els.length; i += 1) {
+        const el = els[i];
+        if (!el.getClientRects().length) continue;
+        const name = `${el.innerText || ''} ${el.getAttribute('title') || ''} ${el.getAttribute('aria-label') || ''}`.trim();
+        if (new RegExp(src).test(name)) out.push({ i, name: name.slice(0, 80), hasText: !!(el.innerText || '').trim() });
       }
+      return out;
+    }, re.source + (re.flags.includes('i') ? '' : '')).catch(() => []);
+    if (hits.length) {
+      const h = hits[0];
+      const locator = page.locator('button, a[href], [role="button"], [role="link"]').nth(h.i);
+      return { panel: label, locator, text: h.name, role: 'button', by: h.hasText ? 'text' : 'title' };
     }
   }
   return null;
+}
+
+/** 侧栏里打开带 mark 的夹具会话(项目第一次必须走搜索,打开一次之后才作为侧栏行出现)。 */
+export async function openSessionBySearch(page, mark) {
+  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索项目/ });
+  await expect(async () => {
+    await search.click();
+    await search.fill(mark);
+    await expect(search).toHaveValue(mark, { timeout: 2_000 });
+    await expect(page.getByRole('button', { name: new RegExp(mark) }).first()).toBeVisible({ timeout: 8_000 });
+  }).toPass({ timeout: 90_000 });
+  await page.getByRole('button', { name: new RegExp(mark) }).first().click();
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(800);
+}
+
+/** 当前会话头部「更多会话操作」→「检查点」:打开 Checkpoint 时间线(单条明细在这里)。
+ *  返回 true 表示时间线已打开(里面能看到会话头部那颗「清理全部」)。 */
+export async function openCheckpointTimeline(page) {
+  const more = page.getByTitle(/更多会话操作/).first();
+  await more.waitFor({ state: 'visible', timeout: 30_000 });
+  await more.click({ force: true });
+  const item = page.getByRole('button', { name: /^检查点$/ }).first();
+  try { await item.waitFor({ state: 'visible', timeout: 8_000 }); } catch { return false; }
+  await item.click({ force: true });
+  await page.waitForTimeout(1_200);
+  // 时间线开着的标志:里面能看到「删本会话全部回滚点」那颗(标题是"删除本会话的全部回滚点")。
+  return (await page.getByTitle(/删除.*回滚点/).count()) > 0;
+}
+
+/** 检查点时间线是否已打开(判据同 openCheckpointTimeline 的返回值)。 */
+export const timelineOpen = async (page) => (await page.getByTitle(/删除.*回滚点/).count()) > 0;
+
+/** 时间线里每条回滚点右侧的删除图标(名字只在 title 上,没有可见文字)。
+ *  只认"删一条"的那类;删整个会话的「清理全部」是另一颗,别混。 */
+export const singleSnapshotDeleteButtons = (page) => page.getByTitle(/删除(这一条|该条|单条)/);
+
+/** 某一行(含给定按钮的那一行)显示的快照短 sha;读不到返回 null。 */
+export async function rowShortSha(btn) {
+  const row = btn.locator('xpath=ancestor::div[1]');
+  const txt = await row.innerText().catch(() => '');
+  const m = txt.match(/\b([0-9a-f]{7,40})\b/);
+  return m ? m[1] : null;
+}
+
+/** 超大目录弹窗(首次遇到超阈值时出现的那个「要不要保存快照」询问)。
+ *  按"能看出是问要不要为大目录保存快照"来认,不写死组件结构。 */
+export const snapshotPrompt = (page) => page.locator('[role="dialog"],[role="alertdialog"]')
+  .filter({ hasText: /是否为这个会话保存快照|保存快照/ }).last();
+
+/** 解开对 checkpoints DELETE 的挂起,放真请求过去(用完 blockDeleteRequests 之后要调)。 */
+export async function unblockDeleteRequests(page) {
+  await page.unroute('**/api/checkpoints**');
 }
 
 /** 挂起所有发往 checkpoints 的 DELETE:请求发出去但服务端永不回 —— 用来判定"确认前有没有真删"。
