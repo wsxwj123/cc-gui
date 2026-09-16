@@ -8,6 +8,7 @@ import { closePersistentForSession } from './chat.js';
 import { isRealUserQuestion } from './fork.js';
 import { accessDeniedHint, canOpenAccessSettings, isAccessDenied } from '../utils/access-hint.js';
 import { removeSessionFromPrefs } from './prefs.js';
+import { dropSessionCheckpoints } from '../utils/checkpoint-paths.js';
 
 // Guard against path traversal: projectHash / sessionId arrive from request
 // bodies and queries, then get concatenated into fs paths. A crafted value
@@ -663,6 +664,9 @@ router.delete('/sessions/:sessionId', async (req, res) => {
     try { await unlink(join(homedir(), '.claude', 'sessions', `${req.params.sessionId}.json`)); } catch {}
     // Best-effort prefs GC(1M 标记/双份标题/置顶),失败不阻断删除响应。
     try { await removeSessionFromPrefs(req.params.sessionId); } catch {}
+    // R4:回滚检查点连带清理 —— 会话没了,它的快照目录(可能几十 G)必须一并清掉,
+    // 否则空间永远只涨不跌。best-effort:清理失败只记日志,绝不阻断会话删除。
+    await dropSessionCheckpoints(req.params.sessionId);
     broadcastSessionFileChange(file, 'unlink'); // 文件已删,path 仍发原 jsonl 路径(客户端判据纯字符串)
     res.json({ deleted: deletedJsonl });
   } catch (err) {
