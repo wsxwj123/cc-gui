@@ -6,6 +6,7 @@ import { stat, mkdir, readFile, writeFile, rm, access, readdir } from 'fs/promis
 import { resolveWorkspacePath } from '../utils/safe-path.js';
 import { CHECKPOINTS_ROOT } from '../utils/checkpoint-paths.js';
 import { findSessionFile, readSessionTitles } from '../services/session-reader.js';
+import { isLocalReq } from '../services/auth.js';
 import { readJsonlEdges } from '../utils/jsonl-parser.js';
 import { broadcastSessionFileChange } from './sessions.js';
 
@@ -357,10 +358,18 @@ router.post('/checkpoints', async (req, res) => {
     // 就不拍——但**照常回 200 + skipped**,让调用方(界面)能如实告诉用户。
     // R7/D7 例外:调用方带上 allowOversize:true = 用户已在弹窗里选过"保存"这个大目录,
     // 照常拍。不带标记时的语义与 R1 一字不变(既有验收/既有调用方零影响)。
+    //
+    // 安全:这个上限护的是【主机磁盘】,标记本身是调用方自报,不能谁带谁过关 ——
+    // 公开版默认开局域网 + 随机密码,已授权但不可信的远端(手机/别的机器)甚至被注入的
+    // 页面都能一个请求让服务端把几十 G 目录整份复制进 ~/.claude/gui/ 打满盘。所以只认
+    // 【本机(回环)请求】的标记;远端即使带了也照旧"跳过 + 原因"。判据复用服务端既有的
+    // isLocalReq(回环 socket ∧ 无 CF 隧道标记 ∧ Host 是本机集,拿不准一律判外部),
+    // "用户确实点了保存"这件事只有本机界面证明得了。
+    const allowOversizeTrusted = allowOversize === true && isLocalReq(req);
     const maxBytes = MAX_SNAPSHOT_BYTES();
     const hadRepo = await pathExists(join(CHECKPOINTS_ROOT, String(sessionId)));
     const est = await estimateWorkTreeBytes(sessionId, workTree);
-    if (allowOversize !== true && (est.truncated || est.bytes > maxBytes)) {
+    if (!allowOversizeTrusted && (est.truncated || est.bytes > maxBytes)) {
       // 估算本身会建影子仓(git ls-files 要一个 git-dir)。这次什么都没拍,把刚建的
       // 空仓收掉——否则每被跳过一次就白留一份 ~25 KB 的裸仓(174 个会话就是这么堆起来的)。
       if (!hadRepo) {

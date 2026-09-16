@@ -230,6 +230,59 @@ await step('标记必须是明确的 true:false/缺省都仍按跳过处理(不�
   assert.equal(realShas(S_BIG).length, 1, '这两次都不该新增快照');
 });
 
+// ── ④ 安全门禁:allowOversize 只认本机(回环)请求 ─────────────────────────
+// 体积上限护的是主机磁盘,标记不能谁带谁过关:公开版默认开局域网,远端(手机/别的
+// 机器)也是"已授权客户端",一个请求就能让服务端把几十 G 目录整份复制进 ~/.claude/gui/。
+// 用注入假 req 的方式直接调路由处理器(不起真实网络请求)。HOME/阈值已在上面设好。
+console.log('\nR7 安全门禁(标记只信本机请求)');
+const { default: cpRouter } = await import('../../server/routes/checkpoints.js');
+const cpLayer = cpRouter.stack.find((l) => l.route?.path === '/checkpoints' && l.route.methods?.post);
+const cpHandler = cpLayer?.route?.stack?.[0]?.handle;
+const S_GATE = 'r7gate00-0000-4000-8000-000000000003';
+
+/** 假 req/res:只为驱动路由处理器,不碰真实 socket。 */
+async function callPost({ remoteAddress, headers, body }) {
+  const out = { status: 0, json: undefined };
+  const res = {
+    status(c) { out.status = c; return this; },
+    json(payload) { out.json = payload; return this; },
+  };
+  await cpHandler({ body, socket: { remoteAddress }, headers }, res);
+  return out;
+}
+
+await step('非本机(局域网直连)带 allowOversize → 仍按超阈值跳过,磁盘上不出现快照', async () => {
+  const r = await callPost({
+    remoteAddress: '192.168.1.9',
+    headers: { host: '192.168.1.9:6677' },
+    body: { sessionId: S_GATE, cwd: BIG, allowOversize: true },
+  });
+  assert.equal(r.json?.skipped, true, `远端不得靠自报标记关掉体积上限,实际:${JSON.stringify(r.json)}`);
+  assert.ok(r.json?.reason, '仍要给得出原因');
+  assert.equal(realShas(S_GATE).length, 0, '远端带标记时磁盘上不该出现快照');
+});
+
+await step('经隧道进来的本机 socket(CF 标记头)带 allowOversize → 同样跳过', async () => {
+  const r = await callPost({
+    remoteAddress: '::ffff:127.0.0.1',                 // cloudflared 在本机,回流也是回环
+    headers: { host: 'localhost:6677', 'cf-connecting-ip': '203.0.113.7' },
+    body: { sessionId: S_GATE, cwd: BIG, allowOversize: true },
+  });
+  assert.equal(r.json?.skipped, true, '隧道流量只是 socket 回环,不得被当成"本机用户点了保存"');
+  assert.equal(realShas(S_GATE).length, 0, '隧道流量不得创建快照');
+});
+
+await step('反向守卫:本机回环请求带 allowOversize → 照常创建(门禁不许把桌面端也挡了)', async () => {
+  const r = await callPost({
+    remoteAddress: '127.0.0.1',
+    headers: { host: '127.0.0.1:6677' },
+    body: { sessionId: S_GATE, cwd: BIG, allowOversize: true },
+  });
+  assert.equal(r.status || 200, 200, `本机带标记应照常创建,实际 ${JSON.stringify(r.json)}`);
+  assert.ok(r.json?.sha, `本机已确认保存时必须拍到,实际:${JSON.stringify(r.json)}`);
+  assert.ok(realShas(S_GATE).includes(r.json.sha), '本机拍到的 sha 要在磁盘仓里找得到');
+});
+
 // ── 收尾 ────────────────────────────────────────────────────────────────
 if (child) { try { process.kill(child.pid, 'SIGKILL'); } catch { /* 已退 */ } child = null; }
 try { rmSync(TMP, { recursive: true, force: true }); } catch { /* 忽略 */ }
