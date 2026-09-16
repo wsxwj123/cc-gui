@@ -349,16 +349,18 @@ async function fileExists(file) {
 /** POST /api/checkpoints  { sessionId, cwd, label } */
 router.post('/checkpoints', async (req, res) => {
   try {
-    const { sessionId, cwd, label, clientMessageId, messageTimestamp, promptPreview } = req.body || {};
+    const { sessionId, cwd, label, clientMessageId, messageTimestamp, promptPreview, allowOversize } = req.body || {};
     assertSession(sessionId);
     const workTree = safe(cwd);
     // R1 体积安全阀:`add -A` 是无条件全量收进影子库,大目录(几十 G 数据目录、无
     // .gitignore)每拍一次就是一份全量副本(git 对大二进制不做增量)。先估算,超阈值
     // 就不拍——但**照常回 200 + skipped**,让调用方(界面)能如实告诉用户。
+    // R7/D7 例外:调用方带上 allowOversize:true = 用户已在弹窗里选过"保存"这个大目录,
+    // 照常拍。不带标记时的语义与 R1 一字不变(既有验收/既有调用方零影响)。
     const maxBytes = MAX_SNAPSHOT_BYTES();
     const hadRepo = await pathExists(join(CHECKPOINTS_ROOT, String(sessionId)));
     const est = await estimateWorkTreeBytes(sessionId, workTree);
-    if (est.truncated || est.bytes > maxBytes) {
+    if (allowOversize !== true && (est.truncated || est.bytes > maxBytes)) {
       // 估算本身会建影子仓(git ls-files 要一个 git-dir)。这次什么都没拍,把刚建的
       // 空仓收掉——否则每被跳过一次就白留一份 ~25 KB 的裸仓(174 个会话就是这么堆起来的)。
       if (!hadRepo) {
@@ -372,6 +374,7 @@ router.post('/checkpoints', async (req, res) => {
           : `工作目录约 ${Math.round(est.bytes / 1024 / 1024)} MB,超过回滚点体积上限 ${Math.round(maxBytes / 1024 / 1024)} MB,未创建回滚点`,
         estimatedBytes: est.bytes,
         limitBytes: maxBytes,
+        truncated: est.truncated,      // 界面据此把"约 X"改成"至少 X"(估算被截断时只是下界)
       });
     }
     await gitShadow(['add', '-A'], sessionId, workTree);

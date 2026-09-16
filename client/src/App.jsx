@@ -156,8 +156,36 @@ import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRe
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
+import { claimLargeSnapshotAsk, largeSnapshotQuestion, oversizeAllowedFor, rememberLargeSnapshot } from './utils/largeSnapshot.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
+/**
+ * R7 大目录首次拍快照的询问:自动快照被体积安全阀跳过时(每个会话第一次),
+ * 弹出来让用户选"保存/不保存";选保存就带 allowOversize 标记重发接口,照常拍到。
+ *
+ * 调用点必须仍在 fire-and-forget 链内 —— 弹窗只推迟快照,绝不挡发消息(D5:
+ * 消息先发出去,这个询问是事后的确认)。
+ * 返回新快照 sha(用户没选保存/拍失败 → null)。
+ */
+async function askSaveLargeSnapshot(payload, data) {
+  try {
+    if (data?.skipped !== true || data?.sha) return null;
+    if (!claimLargeSnapshotAsk(payload?.sessionId)) return null;      // 本会话问过一次就不再问
+    const save = await confirmDialog(largeSnapshotQuestion(data), {
+      confirmText: '保存快照', cancelText: '不保存', testId: 'large-snapshot-prompt',
+    });
+    rememberLargeSnapshot(payload.sessionId, save);
+    if (!save) return null;
+    const r = await fetch('/api/checkpoints', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, allowOversize: true }),
+    });
+    if (!r.ok) return null;
+    const d = await r.json().catch(() => ({}));
+    return d?.sha || null;
+  } catch { return null; }
+}
+
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
 // Esc cancels). Empty value reverts to the auto firstPrompt. Drafts (no stable
 // sessionId yet) can't be renamed — the pencil is hidden until the first send.
@@ -235,12 +263,18 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
     setBusy(true);
     setSkipReason('');
     try {
+      const payload = {
+        sessionId, cwd, label: `checkpoint ${new Date().toLocaleTimeString()}`,
+        allowOversize: oversizeAllowedFor(sessionId) || undefined,   // 本会话已确认过"照存大目录"
+      };
       const r = await fetch('/api/checkpoints', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, cwd, label: `checkpoint ${new Date().toLocaleTimeString()}` }),
+        body: JSON.stringify(payload),
       });
       const d = await r.json().catch(() => ({}));
-      if (d?.skipped) setSkipReason(d.reason || '工作目录过大,本次未创建回滚点');
+      // R7:手动拍被安全阀挡住时也一样给一次询问(本会话问过就不再问,只留下面的原因提示)
+      const sha = d?.sha || (await askSaveLargeSnapshot(payload, d));
+      if (!sha && d?.skipped) setSkipReason(d.reason || '工作目录过大,本次未创建回滚点');
       await load();
     } catch (err) { confirmDialog('快照失败：' + err.message); }
     setBusy(false);
@@ -5047,26 +5081,40 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       try {
         const sel = selectedSession;
         if (!sel?.sessionId || !cwd) return;
+        const payload = {
+          sessionId: sel.sessionId,
+          cwd,
+          label: `before: ${prompt.slice(0, 60)}`,
+          clientMessageId: userMsgUuid,
+          messageTimestamp: userMsgTimestamp,
+          promptPreview: prompt,
+          allowOversize: oversizeAllowedFor(sel.sessionId) || undefined,   // 本会话已确认过"照存大目录"
+        };
         const cr = await fetch('/api/checkpoints', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sessionId: sel.sessionId,
-            cwd,
-            label: `before: ${prompt.slice(0, 60)}`,
-            clientMessageId: userMsgUuid,
-            messageTimestamp: userMsgTimestamp,
-            promptPreview: prompt,
-          }),
+          body: JSON.stringify(payload),
         });
         if (!cr.ok) return;
         const data = await cr.json().catch(() => ({}));
         const sha = data.sha || null;
-        if (!sha) return;
-        setChatMessages((prev) =>
-          prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: sha } : m))
-        );
-        return sha;
+        if (sha) {
+          setChatMessages((prev) =>
+            prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: sha } : m))
+          );
+          return sha;
+        }
+        // R7:大目录被安全阀跳过 → 事后弹窗问一次。**故意不 await**:这条链在
+        // POST /api/chat 之前被 await(见 handleSend 里 `await checkpointPromise`),
+        // 把弹窗 await 进去等于用户不点按钮消息就发不出去 —— D5 要求先发消息、再问。
+        if (data?.skipped) {
+          void askSaveLargeSnapshot(payload, data).then((laterSha) => {
+            if (!laterSha) return;
+            setChatMessages((prev) =>
+              prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: laterSha } : m))
+            );
+          });
+        }
       } catch {}
     })();
 
@@ -5700,21 +5748,27 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 错选之后的快照)。此处 sid 刚诞生,数据全取发起时闭包(cwd/prompt/
               // userMsgUuid),归属安全。快照内容=AI 动手前的工作区(AI 还没开始改)。
               if (cwd && userMsgUuid) {
+                const payload = {
+                  sessionId: event.session_id,
+                  cwd,
+                  label: `before: ${prompt.slice(0, 60)}`,
+                  clientMessageId: userMsgUuid,
+                  messageTimestamp: userMsgTimestamp,
+                  promptPreview: prompt,
+                  allowOversize: oversizeAllowedFor(event.session_id) || undefined,  // 本会话已确认过"照存大目录"
+                };
+                const lateSha = (sha) => {
+                  if (!sha) return;
+                  setChatMessages((prev) =>
+                    prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: sha } : m)));
+                };
                 fetch('/api/checkpoints', {
                   method: 'POST', headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    sessionId: event.session_id,
-                    cwd,
-                    label: `before: ${prompt.slice(0, 60)}`,
-                    clientMessageId: userMsgUuid,
-                    messageTimestamp: userMsgTimestamp,
-                    promptPreview: prompt,
-                  }),
-                }).then((r) => (r.ok ? r.json() : null)).then((d) => {
-                  if (d?.sha) {
-                    setChatMessages((prev) =>
-                      prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: d.sha } : m)));
-                  }
+                  body: JSON.stringify(payload),
+                }).then((r) => (r.ok ? r.json() : null)).then(async (d) => {
+                  // R7:大目录被安全阀跳过 → 事后问一次(这个 then 链本来就不挡发送)
+                  if (d?.sha) lateSha(d.sha);
+                  else lateSha(await askSaveLargeSnapshot(payload, d));
                 }).catch(() => {});
               }
             }
