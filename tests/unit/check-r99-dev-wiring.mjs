@@ -158,11 +158,13 @@ for (const [tok, want] of COUNTS) {
     assert.equal(n, want);
   });
 }
-// E 项(Pricing §10.8)在 CustomProviderForm.save() 新增 1 个确认框调用点(baseURL 撞预设
-// 时问「切到该预设 / 保持不变」)→ 上限 61→62,下界不动。
-t('4.3 confirmDialog 60~62', () => {
+// r120(2026-09-16)对齐真实值:此前的 60~62 是更早轮次人为调高的,与代码实际数量脱节,
+// 长期停在红的基线里(0.2.393 上就是红的),等于这条守卫失效。改为按实测锁定:
+// 0.2.393 = 63;r120 新增 2 处(大目录拍快照询问、清理回滚点的确认) = 65。
+// 以后再加弹窗会红,是设计意图——请复核该弹窗确有必要后同步本数字。
+t('4.3 confirmDialog 65(新增弹窗须复核并同步此数)', () => {
   const n = A.split('confirmDialog').length - 1;
-  assert.ok(n >= 60 && n <= 62, `实际 ${n}`);
+  assert.equal(n, 65, `实际 ${n}`);
 });
 // 注:INTERFACE §4.2 写「window.confirm 0 次」,但改前基线就有 1 次(2973 行的注释
 // "不用 window.confirm")。这里锁「调用点 0 次 + 注释仍在」,口径比字面锁更准。
