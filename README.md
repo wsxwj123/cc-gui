@@ -278,7 +278,26 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.393</b>(2026-09-16)· 优化 1 条</summary>
+<summary><b>v0.2.394</b>(2026-09-16)· 修复 2 条</summary>
+
+**修复**
+
+<details><summary>回滚点(检查点)不再悄悄吃掉几十 G 磁盘</summary>
+
+以前每轮对话都会把**整个工作目录**复制一份存起来,目录大就是几十 G 一份;现在:
+
+</details>
+
+<details><summary>只有本机才能放行"超大目录也照存"</summary>
+
+局域网/手机端即使拿到密码也不能把主机磁盘打满。
+
+</details>
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.393">v0.2.393</a></b>(2026-09-16)· 优化 1 条</summary>
 
 **优化**
 
