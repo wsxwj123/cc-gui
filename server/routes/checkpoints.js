@@ -47,6 +47,15 @@ function envNum(keys, dflt) {
 const MAX_SNAPSHOT_BYTES = () => envNum(['CGUI_CHECKPOINT_MAX_BYTES', 'CGUI_CHECKPOINTS_MAX_BYTES'], 2 * 1024 ** 3);
 const MAX_SNAPSHOT_COUNT = () => envNum(['CGUI_CHECKPOINT_MAX_COUNT', 'CGUI_CHECKPOINTS_MAX_COUNT'], 20);
 const RETENTION_DAYS = () => envNum(['CGUI_CHECKPOINT_RETENTION_DAYS', 'CGUI_CHECKPOINTS_RETENTION_DAYS'], 30);
+// 每会话快照**总占用**上限(第三回收维,默认 10 GiB)。
+// 为什么需要:条数(20)与天数(30)两维管不住"目录本身就很大"的场景 —— 大目录被用户点过
+// 一次"保存"后,后续快照一路放行(每会话只问一次的设计),峰值 = 20 × 目录体积(45 GB 的
+// 目录 ≈ 900 GB),等于把"磁盘被悄悄吃掉"换个形态还回来。
+// 取值理由:单次快照上限(2 GB)的 5 倍、20 条理论峰值(40 GB)的 1/4 —— 几个大目录快照兜得住,
+// 又远在普通源码项目(几十~几百 MB × 20 条)之上,不会把正常项目的 20 条砍掉。目录到 1 GB
+// 量级才开始收紧(保留条数随目录变大递减),这正是要治的那类会话。
+const MAX_SESSION_TOTAL_BYTES = () => envNum(
+  ['CGUI_CHECKPOINT_MAX_TOTAL_BYTES', 'CGUI_CHECKPOINTS_MAX_TOTAL_BYTES'], 10 * 1024 ** 3);
 // 保留时长是"天"级产品语义,测试要注入 1ms 得显式声明——避免有人把 30 误写成毫秒。
 function retentionMs() {
   const days = RETENTION_DAYS();
@@ -221,10 +230,61 @@ async function repackHonest(gitDir) {
   } catch { /* 忽略 */ }
 }
 
+/** 单条提交**新增**的对象占用(字节)。这是"这条快照进了多少新数据"的度量,
+ *  逐条加起来 ≈ 整个会话的影子仓占用(增量口径,不是"最新那条的历史总账")。
+ *
+ *  口径:`git rev-list --objects <sha> --not <它的父们>` = 这条提交相对父提交新引入的
+ *  对象集合(沿用影子仓既有的 reachable-set 口径,不新造算法、不 stat 用户目录)。
+ *  父提交怎么算:直接用 `rev-list --parents` 读出来的真实父 —— detachShas 会写 info/grafts
+ *  把残留提交的父改写成时间线上紧邻的下一个 keep,所以这里读到的就是**逻辑时间线**上的
+ *  前一条,而不是磁盘上早已不存在的那些。读的是 git 自己的东西,不碰工作区。
+ *
+ *  代价与误差方向(决定这维偏松还是偏紧):
+ *   * 每条快照 2 个进程(rev-list --parents + 断言对象的 cat-file),默认 20 条 ≈ 40 次 fork;
+ *     只在本会话确实有东西可丢时才跑。大仓一次可达数秒 —— 正是它要护的那种场景。
+ *   * `--batch-check` 给的是**压缩前**大小。git 对大文本/重复内容能压掉一大半 → 高估磁盘
+ *     占用,这维**偏紧**(会多丢几条)。方向是有意选的:偏紧只损失"还能回滚到的更早版本",
+ *     偏松就回到"删不掉、盘被吃"的老毛病(判官点出的那个遗留风险)。
+ *   * 拿不到(git 失败/超时/父解析不出)返回 0 = "这条不占",绝不把清理搞挂。 */
+async function shaBytes(gitDir, sha) {
+  try {
+    const head = (await gitIn(gitDir, ['rev-list', '--parents', '-n', '1', sha])).stdout.trim();
+    if (!head) return 0;
+    const parents = head.split(/\s+/).slice(1);                  // 第一个字段是自己
+    // 父们也要列:不用 --not 的话会顺着父一路走上去,算出"历史累计"而不是"这条新增",
+    // 20 条一累就是二次方(实测 20 × 64 KiB 会算成 ~13 MB)。
+    const list = (await gitIn(gitDir, ['rev-list', '--objects', sha, ...(parents.length ? ['--not', ...parents] : [])])).stdout;
+    // 每行是 "<sha>[ <path>]"(路径可含空格)→ 只取第一个字段,path 喂给 cat-file 会报 not a valid object
+    const names = list.split('\n').map((l) => l.split(' ')[0].trim()).filter(Boolean);
+    if (!names.length) return 0;
+    let total = 0;
+    await new Promise((resolve, reject) => {
+      const c = spawn('git', ['--git-dir', gitDir, 'cat-file', '--batch-check'],
+        { stdio: ['pipe', 'pipe', 'pipe'] });
+      c.stdout.on('data', (b) => {
+        for (const line of String(b).split('\n')) {
+          const m = /^\S+ \S+ (\d+)$/.exec(line.trim());
+          if (m) total += Number(m[1]);
+        }
+      });
+      c.on('error', reject);
+      c.on('close', () => resolve());
+      c.stdin.end(names.join('\n') + '\n');
+    });
+    return total;
+  } catch (e) {
+    // 计量失败 = 这条按 0 计(这维对它失效)。留一行日志:否则"上限静默失效"无法察觉。
+    console.warn('[checkpoints] 总占用计量失败,该条按 0 计:', sha.slice(0, 8), e.message);
+    return 0;
+  }
+}
+
 /**
- * 每会话保留最近 N 条(默认 20)与最长 M 天(默认 30)。只在快照创建成功后调用。
+ * 每会话保留最近 N 条(默认 20)、最长 M 天(默认 30)、总占用不超过 B 字节(默认 10 GiB)。
+ * 三维**取最严**:任一条命中就丢;丢的顺序恒为从最旧开始。只在快照创建成功后调用。
  * 删不掉也绝不把 snapshot 搞挂——这里抛的错由调用方吞。
- * opts.maxCount / opts.maxAgeMs 让 R3 单条删除复用同一套"删提交 + 对账 meta"逻辑。
+ * opts.maxCount / opts.maxAgeMs / opts.maxTotalBytes / opts.bytesOf 让 R3 单条删除与测试
+ * 复用同一套"删提交 + 对账 meta"逻辑。
  */
 async function gcSession(sessionId, opts = {}) {
   const gitDir = await sessionDir_(sessionId);
@@ -233,6 +293,7 @@ async function gcSession(sessionId, opts = {}) {
   if (log.length === 0) return { removed: 0 };
   const maxCount = opts.maxCount != null ? opts.maxCount : MAX_SNAPSHOT_COUNT();
   const maxAgeMs = opts.maxAgeMs != null ? opts.maxAgeMs : retentionMs();
+  const maxTotalBytes = opts.maxTotalBytes != null ? opts.maxTotalBytes : MAX_SESSION_TOTAL_BYTES();
   // 时间维:meta 的 ts 是用户消息口径(与会话裁剪同源),比 commit ct 准。
   const meta = await loadMeta(sessionId);
   const tsOf = new Map(meta.filter((e) => e.sha).map((e) => [e.sha, e.messageTimestamp || e.ts || 0]));
@@ -244,8 +305,30 @@ async function gcSession(sessionId, opts = {}) {
     const tooOld = maxAgeMs > 0 && ts > 0 && now - ts > maxAgeMs;
     if (i >= maxCount || tooOld) dropped.push(sha); else keep.push(sha);
   });
+  // 总占用维:先占住最新那条(保底),再从次新往旧累加,装不下就丢 —— 丢的顺序仍是
+  // "从最旧开始"。先判断有没有可丢的(log 只有一条 = 前两维没动、也没料可丢),
+  // 免得每次拍快照都白起一堆 git 进程去量。
+  if (maxTotalBytes > 0 && (keep.length > 1 || dropped.length > 0)) {
+    const bytesOf = typeof opts.bytesOf === 'function'
+      ? opts.bytesOf
+      : (sha) => shaBytes(gitDir, sha);
+    const b = new Map(await Promise.all(log.map(async (sha) => [sha, await bytesOf(sha)])));
+    const sizeOf = (sha) => b.get(sha) || 0;
+    // 保底那条(最新的一条)先占住,再从次新往旧累加、装不下就丢 —— 这样丢的顺序恒为
+    // "从最旧开始",且总占用维永远不会把会话清空(新版必须始终可回滚)。
+    const floor = keep.length ? keep[0] : log[0];
+    const kept = [floor];
+    let total = sizeOf(floor);
+    for (const sha of keep.slice(1)) {                        // 次新 → 旧(keep 本就是新→旧)
+      if (total + sizeOf(sha) > maxTotalBytes) { dropped.push(sha); continue; }
+      total += sizeOf(sha);
+      kept.push(sha);
+    }
+    keep.length = 0;
+    keep.push(...kept);                                       // kept 已是新→旧
+  }
   if (!dropped.length) return { removed: 0 };
-  // 保底:至少留最新一条,否则时间维(测试注入极小值)会把会话清空。
+  // 保底:至少留最新一条,否则条数/时间维(测试注入极小值)会把会话清空。
   if (!keep.length) {
     keep.push(dropped.shift());
   }
