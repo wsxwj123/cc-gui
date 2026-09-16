@@ -278,7 +278,20 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.392</b>(2026-09-15)· 修复 3 条</summary>
+<summary><b>v0.2.393</b>(2026-09-16)· 优化 1 条</summary>
+
+**优化**
+
+<details><summary>内置的 Claude Code 组件升到 0.3.273</summary>
+
+(同步官方 CLI 2.1.273):其中与本应用直接相关的修复包括——子代理被转到后台后,不再丢失它剩余的消息与最终报告;最终回复缺少用量数据时,子代理不再被误报为失败;长会话里 hook 进度与子代理活动的刷新不再重算整段对话。本版没有其他改动。
+
+</details>
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.392">v0.2.392</a></b>(2026-09-15)· 修复 3 条</summary>
 
 **修复**
 
