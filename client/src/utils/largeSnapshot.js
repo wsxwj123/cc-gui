@@ -19,6 +19,17 @@ export function claimLargeSnapshotAsk(sessionId) {
 /** 本会话是否已就"大目录要不要存快照"做过选择。 */
 export const largeSnapshotDecided = (sessionId) => choices.has(keyOf(sessionId));
 
+/**
+ * 纯查询(不认领):本会话下次被安全阀挡住时,还会不会弹窗等用户回答。
+ * 发送方据此决定"这条消息的气泡能不能现在就画"——会问的会话必须等回答之后再画
+ * (D 修订:回答之前不进正文),否则与改动前一样立即画。
+ * 判据保守:无 sessionId(draft 首发)、已问过、正问着的会话都返回 false(不入列推迟)。
+ */
+export const willAskLargeSnapshot = (sessionId) => {
+  const k = keyOf(sessionId);
+  return !!k && !choices.has(k) && !asking.has(k);
+};
+
 /** 用户选过"保存"→ 后续自动快照直接带 allowOversize 标记(不再问、也不再被静默跳过)。 */
 export const oversizeAllowedFor = (sessionId) => choices.get(keyOf(sessionId)) === true;
 

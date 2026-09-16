@@ -156,7 +156,7 @@ import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRe
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
-import { askSaveLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot } from './utils/largeSnapshot.js';
+import { askSaveLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot, willAskLargeSnapshot } from './utils/largeSnapshot.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // R7 询问编排的纯逻辑 + 弹窗文案在 utils/largeSnapshot.js(白盒单测直接 import 断言
@@ -5034,9 +5034,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // "swallow" the user's message while waiting on git checkpoint I/O. The
     // checkpoint runs in parallel and back-fills `checkpointSha` on the same
     // chatMessages entry when ready (rollback menu reads it from there).
+    // R7(D 修订:阻塞式)的**唯一例外**:本会话下次被体积安全阀挡住时还会弹窗等用户
+    // 回答 —— 那种情况下这条消息在回答之前【一个字都不许进正文】(BRIEF R7-6 改写 /
+    // INTERFACE §D5 改写),气泡推迟到回答之后(见下面 checkpointPromise 的 pushBubble)。
+    // 判据是纯查询(willAskLargeSnapshot,不认领):小目录/已问过的会话/无 sessionId 的
+    // draft 一律 false —— 那条路径逐字不变,仍立即画。
+    const deferBubbleForAsk = willAskLargeSnapshot(selectedSession?.sessionId);
     userMsgUuid = 'chat-user-' + Date.now();
     userMsgTimestamp = new Date().toISOString();
-    setChatMessages((prev) => [...prev, {
+    const pushBubble = () => setChatMessages((prev) => [...prev, {
       uuid: userMsgUuid, type: 'user',
       timestamp: userMsgTimestamp, text: prompt,
       checkpointSha: null,
@@ -5045,6 +5051,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       attachments: meta?.attachments,
       displayText: meta?.displayText,
     }]);
+    if (!deferBubbleForAsk) pushBubble();
     // L4:所有附件 sidecar 先进入持久 outbox，再尝试 POST。draft 先以会话 ownerKey
     // 记账，init 拿到真实 sid 后统一绑定；真实 session 发送也走同一条可靠链。
     if (meta?.attachments?.length > 0) {
@@ -5064,9 +5071,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // disabled for this message. 本回合正文已上屏后才 await(下面 `await
     // checkpointPromise`),所以拍快照这段 I/O 不会让用户的消息晚出现。
     checkpointPromise = (async () => {
+      // 气泡推迟了的会话,本函数就是那条消息的"放行开关":正常一律从下面的 finally 放行,
+      // 只有"真弹了窗、用户还没回答就被打断"(异常/卸载)不回滚——那种情况宁可留着
+      // "没有气泡但有请求在飞"的旧语义,也不能把已经放出去的消息画两遍。
+      let pushBubbleIfDeferred = deferBubbleForAsk;
       try {
         const sel = selectedSession;
-        if (!sel?.sessionId || !cwd) return;
+        // 无 sessionId 的 draft 真去拍也拍不成(服务端 assertSession 会 400),此处与
+        // 原代码同样早退 —— 但要先把推迟的气泡放行,不能让 draft 首发的消息消失
+        // (draft 永不弹窗,defer 在这里恒为 false;这条是防误伤的兜底)。
+        if (!sel?.sessionId || !cwd) { pushBubbleIfDeferred = false; return; }
         // R7(D 修订:阻塞式):大目录首次询问必须先于 POST /api/chat 问掉,否则拍到的
         // 快照是 AI 已经动手改过文件之后的。等待只发生在"超阈值的首次"那一条分支里
         // (见 preflightLargeSnapshot)—— 小目录、已问过的会话直接返回,不多等一毫秒。
@@ -5079,12 +5093,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           promptPreview: prompt,
           allowOversize: oversizeAllowedFor(sel.sessionId) || undefined,   // 本会话已确认过"照存大目录"
         }, snapshotDeps);
+        // 用户答完了(或压根没被问):这条消息现在才可以进正文。没推迟过的会话气泡
+        // 早在上面就画过了,这里不许再画一遍(重复气泡)。
+        if (pushBubbleIfDeferred) { pushBubbleIfDeferred = false; pushBubble(); }
         if (!sha) return;
         setChatMessages((prev) =>
           prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: sha } : m))
         );
         return sha;
-      } catch {}
+      } catch {
+      } finally {
+        if (pushBubbleIfDeferred) pushBubble();
+      }
     })();
 
     // Provider-switch guard: when cc switch routes the backend to a different
