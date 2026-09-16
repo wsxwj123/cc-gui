@@ -96,7 +96,8 @@ async function gitShadow(args, sessionId, workTree, opts = {}) {
   // core.quotepath=off:否则 ls-tree --name-only 把中文/非 ASCII 名输出成 "\346\226..."
   // 转义带引号形态 → restore-file 的 targetFiles.includes(rel)(rel 是真 UTF-8)恒 false
   // → 中文名文件一律"不在快照中"404;差集删除也因 garbled 路径不存在而静默 no-op(残留)。
-  return execFileP('git', ['--git-dir', gitDir, '--work-tree', workTree, '-c', 'core.quotepath=off', ...args],
+  return execFileP('git', ['--git-dir', gitDir, '--work-tree', workTree, '-c', 'core.quotepath=off',
+    '-c', 'advice.graftFileDeprecated=false', ...args],
     { timeout: 60000, cwd: workTree, maxBuffer: 32 * 1024 * 1024, ...opts,
       env: { ...process.env, LC_ALL: 'C', ...(opts.env || {}) } });
 }
@@ -144,7 +145,7 @@ async function listTreeFiles(sessionId, workTree, sha) {
 
 // ── 影子库直呼(不带 work-tree;清理/删除只跟仓打交道)────────────────────
 async function gitIn(gitDir, args, opts = {}) {
-  return execFileP('git', ['--git-dir', gitDir, ...args],
+  return execFileP('git', ['--git-dir', gitDir, '-c', 'advice.graftFileDeprecated=false', ...args],
     { timeout: 20000, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' }, ...opts });
 }
 
@@ -264,20 +265,29 @@ async function gcCheckpoints(sessionId) {
  * 做法:先把 HEAD 指到 keep 里最新的一条(它就是"当前状态"),再用 graft 把每个
  * keep 提交的父改成时间线上紧邻的另一个 keep 提交(最后一条 graft 成 root)。
  * 删掉的提交随之变成不可达,由 repackHonest 真正回收。
+ *
+ * graft 写 info/grafts 文件,不写 `git replace --graft` —— 后者会为每个被 graft 的
+ * 提交额外造一个"改过父"的提交对象,并挂在 refs/replace/<原 sha> 下。那个对象
+ * **本身是个提交**,于是 `rev-list --all` 把它也数进去:"磁盘上真实存在的提交条数"
+ * 比列表多一条(每条被 graft 的 keep 各多一条),看着就是空间没回收干净。改用文件
+ * graft 后:git log 照常按 keep 链显示、checkout 照常可用,但可达集里不再多出
+ * 幽灵提交,rev-list 与列表严格对齐。
+ * (info/grafts 已被 git 标记"过时"但仍完全支持,rev-list/repack 也认它,见
+ *  repackHonest 注释;写各处的 -c advice.graftFileDeprecated=false 与它配套,别删。)
  */
 async function detachShas(gitDir, dropped, keep) {
   if (!keep.length) return;
   try { await gitIn(gitDir, ['update-ref', 'HEAD', keep[0]]); } catch { /* 忽略 */ }
-  for (let i = 0; i < keep.length; i += 1) {
-    const parent = keep[i + 1];
-    try {
-      await gitIn(gitDir, parent
-        ? ['replace', '--graft', keep[i], parent]
-        : ['replace', '--graft', keep[i]]);
-    } catch { /* 相邻已是该父(空 graft)→ git 报"新提交和旧的一样",无害 */ }
-  }
-  // 被删提交的 replace 引用也要收掉,否则它自己成了根。
-  for (const sha of dropped) {
+  // 每个 keep 提交父 → 时间线上紧邻的下一个 keep(最后一条无父 = root)。不建 graft 的话
+  // 每个 keep 的真实父正被删掉,`git log` 会立刻 "Failed to traverse parents" 报错。
+  try {
+    await mkdir(join(gitDir, 'info'), { recursive: true });
+    await writeFile(join(gitDir, 'info', 'grafts'),
+      keep.map((sha, i) => `${sha}${keep[i + 1] ? ` ${keep[i + 1]}` : ''}`).join('\n') + '\n');
+  } catch { /* 写不了 = 保持原样,log 仍按真实历史走,不炸 */ }
+  // replace 引用一律清掉:本函数已不再新建,但旧版本对 keep 提交建的 refs/replace/*
+  // 会一直在——每个都挂着一个幽灵提交,不清就永远 rev-list 数多一条。
+  for (const sha of [...keep, ...dropped]) {
     try { await gitIn(gitDir, ['replace', '-d', sha]); } catch { /* 没有就算了 */ }
   }
   try { await gitIn(gitDir, ['reflog', 'expire', '--expire=now', '--expire-unreachable=now', '--all']); } catch {}
@@ -435,8 +445,7 @@ router.get('/checkpoints/:sessionId', async (req, res) => {
     const gitDir = await sessionDir_(req.params.sessionId);
     if (!gitDir) return res.json({ entries: [] });
     try {
-      const out = await execFileP('git', ['--git-dir', gitDir, 'log', '--format=%H%x09%ct%x09%s'],
-        { timeout: 10000 });
+      const out = await gitIn(gitDir, ['log', '--format=%H%x09%ct%x09%s'], { timeout: 10000 });
       const entries = out.stdout.trim().split('\n').filter(Boolean).map((line) => {
         const [sha, ts, ...rest] = line.split('\t');
         return { sha, ts: Number(ts) * 1000, label: rest.join('\t') };
@@ -475,8 +484,7 @@ router.get('/checkpoints/:sessionId/resolve', async (req, res) => {
     }
 
     const gitDir = await shadowDir(req.params.sessionId);
-    const out = await execFileP('git', ['--git-dir', gitDir, 'log', '--format=%H%x09%ct%x09%s'],
-      { timeout: 10000 });
+    const out = await gitIn(gitDir, ['log', '--format=%H%x09%ct%x09%s'], { timeout: 10000 });
     const fallback = out.stdout.trim().split('\n').filter(Boolean)
       .map((line) => {
         const [sha, ts, ...rest] = line.split('\t');
