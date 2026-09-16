@@ -156,35 +156,20 @@ import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRe
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
-import { claimLargeSnapshotAsk, largeSnapshotQuestion, oversizeAllowedFor, rememberLargeSnapshot } from './utils/largeSnapshot.js';
+import { askSaveLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot } from './utils/largeSnapshot.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
-/**
- * R7 大目录首次拍快照的询问:自动快照被体积安全阀跳过时(每个会话第一次),
- * 弹出来让用户选"保存/不保存";选保存就带 allowOversize 标记重发接口,照常拍到。
- *
- * 调用点必须仍在 fire-and-forget 链内 —— 弹窗只推迟快照,绝不挡发消息(D5:
- * 消息先发出去,这个询问是事后的确认)。
- * 返回新快照 sha(用户没选保存/拍失败 → null)。
- */
-async function askSaveLargeSnapshot(payload, data) {
-  try {
-    if (data?.skipped !== true || data?.sha) return null;
-    if (!claimLargeSnapshotAsk(payload?.sessionId)) return null;      // 本会话问过一次就不再问
-    const save = await confirmDialog(largeSnapshotQuestion(data), {
-      confirmText: '保存快照', cancelText: '不保存', testId: 'large-snapshot-prompt',
+// R7 询问编排的纯逻辑 + 弹窗文案在 utils/largeSnapshot.js(白盒单测直接 import 断言
+// 顺序:未回答不发消息 / 保存先于消息);这里只注入真实的网络与弹窗。
+const snapshotDeps = {
+  request: async (url, body) => {
+    const r = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    rememberLargeSnapshot(payload.sessionId, save);
-    if (!save) return null;
-    const r = await fetch('/api/checkpoints', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...payload, allowOversize: true }),
-    });
-    if (!r.ok) return null;
-    const d = await r.json().catch(() => ({}));
-    return d?.sha || null;
-  } catch { return null; }
-}
+    return { ok: r.ok, data: await r.json().catch(() => ({})) };
+  },
+  confirm: confirmDialog,
+};
 
 // Session title with inline rename (click pencil → edit → Enter/blur saves,
 // Esc cancels). Empty value reverts to the auto firstPrompt. Drafts (no stable
@@ -273,7 +258,7 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
       });
       const d = await r.json().catch(() => ({}));
       // R7:手动拍被安全阀挡住时也一样给一次询问(本会话问过就不再问,只留下面的原因提示)
-      const sha = d?.sha || (await askSaveLargeSnapshot(payload, d));
+      const sha = d?.sha || (await askSaveLargeSnapshot(payload, d, snapshotDeps));
       if (!sha && d?.skipped) setSkipReason(d.reason || '工作目录过大,本次未创建回滚点');
       await load();
     } catch (err) { confirmDialog('快照失败：' + err.message); }
@@ -5074,14 +5059,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       }).then(reportAttachmentSidecarResult);
     }
 
-    // Fire-and-forget git checkpoint. Failures (not a git repo etc.) are
-    // silent — no checkpointSha just means the rollback menu's "files only"
-    // option will be disabled for this message.
+    // Git checkpoint. Failures (not a git repo etc.) are silent — no
+    // checkpointSha just means the rollback menu's "files only" option will be
+    // disabled for this message. 本回合正文已上屏后才 await(下面 `await
+    // checkpointPromise`),所以拍快照这段 I/O 不会让用户的消息晚出现。
     checkpointPromise = (async () => {
       try {
         const sel = selectedSession;
         if (!sel?.sessionId || !cwd) return;
-        const payload = {
+        // R7(D 修订:阻塞式):大目录首次询问必须先于 POST /api/chat 问掉,否则拍到的
+        // 快照是 AI 已经动手改过文件之后的。等待只发生在"超阈值的首次"那一条分支里
+        // (见 preflightLargeSnapshot)—— 小目录、已问过的会话直接返回,不多等一毫秒。
+        const sha = await preflightLargeSnapshot({
           sessionId: sel.sessionId,
           cwd,
           label: `before: ${prompt.slice(0, 60)}`,
@@ -5089,32 +5078,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           messageTimestamp: userMsgTimestamp,
           promptPreview: prompt,
           allowOversize: oversizeAllowedFor(sel.sessionId) || undefined,   // 本会话已确认过"照存大目录"
-        };
-        const cr = await fetch('/api/checkpoints', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (!cr.ok) return;
-        const data = await cr.json().catch(() => ({}));
-        const sha = data.sha || null;
-        if (sha) {
-          setChatMessages((prev) =>
-            prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: sha } : m))
-          );
-          return sha;
-        }
-        // R7:大目录被安全阀跳过 → 事后弹窗问一次。**故意不 await**:这条链在
-        // POST /api/chat 之前被 await(见 handleSend 里 `await checkpointPromise`),
-        // 把弹窗 await 进去等于用户不点按钮消息就发不出去 —— D5 要求先发消息、再问。
-        if (data?.skipped) {
-          void askSaveLargeSnapshot(payload, data).then((laterSha) => {
-            if (!laterSha) return;
-            setChatMessages((prev) =>
-              prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: laterSha } : m))
-            );
-          });
-        }
+        }, snapshotDeps);
+        if (!sha) return;
+        setChatMessages((prev) =>
+          prev.map((m) => (m.uuid === userMsgUuid ? { ...m, checkpointSha: sha } : m))
+        );
+        return sha;
       } catch {}
     })();
 
@@ -5766,9 +5735,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   method: 'POST', headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify(payload),
                 }).then((r) => (r.ok ? r.json() : null)).then(async (d) => {
-                  // R7:大目录被安全阀跳过 → 事后问一次(这个 then 链本来就不挡发送)
+                  // R7:大目录被安全阀挡住 → 问一次。这条只在【draft 首发】走到 —— 发送
+                  // 时还没有 sessionId,发之前无从探测(D 修订的阻塞式走 preflightLargeSnapshot)。
                   if (d?.sha) lateSha(d.sha);
-                  else lateSha(await askSaveLargeSnapshot(payload, d));
+                  else lateSha(await askSaveLargeSnapshot(payload, d, snapshotDeps));
                 }).catch(() => {});
               }
             }

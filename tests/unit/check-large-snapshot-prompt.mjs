@@ -14,7 +14,7 @@ import path, { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   claimLargeSnapshotAsk, largeSnapshotDecided, largeSnapshotQuestion,
-  oversizeAllowedFor, rememberLargeSnapshot, resetLargeSnapshotState, humanBytes,
+  oversizeAllowedFor, preflightLargeSnapshot, rememberLargeSnapshot, resetLargeSnapshotState, humanBytes,
 } from '../../client/src/utils/largeSnapshot.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -281,6 +281,133 @@ await step('反向守卫:本机回环请求带 allowOversize → 照常创建(�
   assert.equal(r.status || 200, 200, `本机带标记应照常创建,实际 ${JSON.stringify(r.json)}`);
   assert.ok(r.json?.sha, `本机已确认保存时必须拍到,实际:${JSON.stringify(r.json)}`);
   assert.ok(realShas(S_GATE).includes(r.json.sha), '本机拍到的 sha 要在磁盘仓里找得到');
+});
+
+// ── ⑤ 阻塞式(D 修订):顺序断言 —— 谁先谁后由事件序列钉死 ────────────────
+// 直接驱动 utils/largeSnapshot.js 的 preflightLargeSnapshot(注入桩 fetch/弹窗),
+// 调用方就是"发消息的人":先 await preflight,再 send。故序列里 send 必在最后。
+console.log('\nR7 阻塞式(D 修订:未回答不发消息;保存先于消息)');
+
+/** 造一套桩:events 记录每一步;confirm 可控手动 resolve。 */
+function harness({ probe, onSave }) {
+  const events = [];
+  let releaseConfirm;
+  const deps = {
+    request: async (url, body) => {
+      events.push({ ev: 'checkpoint', allowOversize: body?.allowOversize === true, url });
+      const r = body?.allowOversize === true ? onSave : probe;
+      return { ok: r?.ok !== false, data: r?.data || {} };
+    },
+    confirm: (message, opts) => {
+      events.push({ ev: 'ask', message, opts });
+      return new Promise((res) => { releaseConfirm = res; });
+    },
+  };
+  return {
+    events,
+    deps,
+    answer: (v) => releaseConfirm(v),
+    /** 模拟真实调用方:preflight 返回后才发消息。 */
+    async run(payload) {
+      const sha = await preflightLargeSnapshot(payload, deps);
+      events.push({ ev: 'send-message', sha: sha || null });
+      return sha;
+    },
+  };
+}
+const SKIPPED = { ok: true, data: { skipped: true, estimatedBytes: 40 * 1024 ** 3, limitBytes: 2 * 1024 ** 3 } };
+const SMALL_OK = { ok: true, data: { sha: 'small-sha' } };
+const SAVED = { ok: true, data: { sha: 'big-sha' } };
+const P = { sessionId: 's-block', cwd: '/tmp/w', label: 'before: hi' };
+
+await step('D5 修订:用户没回答之前,消息不发(序列里 send 尚不存在)', async () => {
+  resetLargeSnapshotState();
+  const h = harness({ probe: SKIPPED, onSave: SAVED });
+  const done = h.run(P);
+  await new Promise((r) => setTimeout(r, 20));                     // 让探测请求跑完、弹窗挂上
+  const kinds = h.events.map((e) => e.ev);
+  assert.deepEqual(kinds, ['checkpoint', 'ask'], `未回答时只能走到弹窗,实际序列:${JSON.stringify(kinds)}`);
+  assert.equal(h.events[0].allowOversize, false, '第一次只是探测,不许一上来就带照存标记');
+  h.answer(true);
+  await done;
+  assert.deepEqual(h.events.map((e) => e.ev).slice(-2), ['checkpoint', 'send-message'], '选保存后才轮到重拍与发送');
+});
+
+await step('D3 补强:选"保存"→ 快照先于消息(第二次 checkpoint 排在 send 之前,且带照存标记)', async () => {
+  resetLargeSnapshotState();
+  const h = harness({ probe: SKIPPED, onSave: SAVED });
+  const sha = await (async () => {
+    const p = h.run(P);
+    await new Promise((r) => setTimeout(r, 20));
+    h.answer(true);
+    return p;
+  })();
+  assert.deepEqual(h.events.map((e) => e.ev), ['checkpoint', 'ask', 'checkpoint', 'send-message'],
+    `顺序必须是 探测→问→重拍→发送,实际:${JSON.stringify(h.events.map((e) => e.ev))}`);
+  assert.deepEqual(h.events.map((e) => e.ev).indexOf('send-message'), 3, '发送必须在最后一步');
+  assert.equal(h.events[2].allowOversize, true, '重拍必须带"用户已确认照存"标记');
+  assert.equal(sha, 'big-sha', '推送出去的锚点就是刚拍的快照');
+  assert.equal(h.events[3].sha, 'big-sha', '消息带的就是这张快照的 sha');
+});
+
+await step('D4 选"不保存"→ 不重拍(只有一次 checkpoint),直接放行消息', async () => {
+  resetLargeSnapshotState();
+  const h = harness({ probe: SKIPPED, onSave: SAVED });
+  const sha = await (async () => {
+    const p = h.run(P);
+    await new Promise((r) => setTimeout(r, 20));
+    h.answer(false);
+    return p;
+  })();
+  assert.deepEqual(h.events.map((e) => e.ev), ['checkpoint', 'ask', 'send-message'],
+    `不保存不得重拍,实际:${JSON.stringify(h.events.map((e) => e.ev))}`);
+  assert.equal(sha, null, '不保存没有快照锚点');
+  assert.equal(h.events[2].sha, null, '消息照常发出,只是没有回滚锚点');
+});
+
+await step('D6 小目录不打扰:压根不弹窗,一拍就走', async () => {
+  resetLargeSnapshotState();
+  const h = harness({ probe: SMALL_OK, onSave: SAVED });
+  const sha = await h.run(P);
+  assert.deepEqual(h.events.map((e) => e.ev), ['checkpoint', 'send-message'], '小目录不得出现任何询问');
+  assert.equal(sha, 'small-sha');
+});
+
+await step('R7-5 问过一次就不再等:同会话第二次直接放行,不弹窗、不多等', async () => {
+  resetLargeSnapshotState();
+  const h1 = harness({ probe: SKIPPED, onSave: SAVED });
+  const p1 = h1.run(P);
+  await new Promise((r) => setTimeout(r, 20));
+  h1.answer(false);                                                 // 本会话定调:不保存
+  await p1;
+  const h2 = harness({ probe: SKIPPED, onSave: SAVED });
+  const sha2 = await h2.run(P);
+  assert.deepEqual(h2.events.map((e) => e.ev), ['checkpoint', 'send-message'],
+    `已问过的会话不得再弹窗,实际:${JSON.stringify(h2.events.map((e) => e.ev))}`);
+  assert.equal(sha2, null, '记住的选择是不保存');
+});
+
+await step('D8 弹窗有两个明确可点的选项(确认=保存 / 取消=不保存)', async () => {
+  resetLargeSnapshotState();
+  const h = harness({ probe: SKIPPED, onSave: SAVED });
+  const p = h.run(P);
+  await new Promise((r) => setTimeout(r, 20));
+  const ask = h.events.find((e) => e.ev === 'ask');
+  assert.ok(ask, '该弹出询问');
+  assert.ok(ask.opts?.confirmText, '必须给「保存」这个明确选项,不能只有关闭');
+  assert.ok(ask.opts?.cancelText, '必须给「不保存」这个明确选项,不能只有关闭');
+  assert.match(ask.message, /是否/, '正文要说清在问什么');
+  h.answer(false);
+  await p;
+});
+
+await step('反向守卫:超阈值但接口报错(非 ok)→ 不弹窗、不重拍,消息照发', async () => {
+  resetLargeSnapshotState();
+  const h = harness({ probe: { ok: false }, onSave: SAVED });
+  const sha = await h.run(P);
+  assert.deepEqual(h.events.map((e) => e.ev), ['checkpoint', 'send-message'],
+    `接口报错不得卡住发送,实际:${JSON.stringify(h.events.map((e) => e.ev))}`);
+  assert.equal(sha, null);
 });
 
 // ── 收尾 ────────────────────────────────────────────────────────────────
