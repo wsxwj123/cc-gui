@@ -419,13 +419,35 @@ function contentToText(content) {
   return '';
 }
 
+/**
+ * r123 R4-1:chat 协议 message.images[] → 首个能用的 { mime, base64 } / { mime, url };没有一律 null。
+ * 单项形态 {type:'image_url', image_url:{url}}(官方)或 {url}(个别中转站)。data URL 走 base64
+ * 落盘链(与正文里的 data URL 同款剥空白);http(s) 交给下载分支(那里有 SSRF 复检);其余不接。
+ */
+function chatImagesItem(images) {
+  if (!Array.isArray(images)) return null;
+  for (const it of images) {
+    const raw = typeof it?.image_url?.url === 'string' ? it.image_url.url : (typeof it?.url === 'string' ? it.url : '');
+    const u = raw.trim();
+    if (!u) continue;
+    const dataUrl = u.match(/^data:image\/([a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i);
+    if (dataUrl) return { mime: `image/${dataUrl[1].toLowerCase()}`, base64: dataUrl[2].replace(/\s+/g, '') };
+    if (/^https?:\/\//i.test(u)) return { mime: '', url: u };
+  }
+  return null;
+}
+
 /** openai 的 data[] 单项 → { mime, base64 } / { mime, url };不是图一律 null。 */
 function openaiItem(item, data) {
   if (!item) return null;
   // gpt-image 系恒返 b64_json;dall-e-3 视 response_format 返 b64 或 url → 两种都认。
   if (typeof item.b64_json === 'string' && item.b64_json) {
+    // r123 R4-2:OpenRouter 形态的 data[].b64_json 配 media_type(如 image/webp)→ 按它定扩展名;
+    // 没有 media_type 才回落 output_format / png(与升级前逐字一致)。只认 image/* 形态。
+    const media = typeof item.media_type === 'string' && /^image\/[a-z0-9.+-]+$/i.test(item.media_type.trim())
+      ? item.media_type.trim().toLowerCase() : '';
     const fmt = item.output_format || data?.output_format;
-    return { mime: fmt ? `image/${String(fmt).toLowerCase()}` : 'image/png', base64: item.b64_json };
+    return { mime: media || (fmt ? `image/${String(fmt).toLowerCase()}` : 'image/png'), base64: item.b64_json };
   }
   if (typeof item.url === 'string' && /^https?:\/\//i.test(item.url)) return { mime: '', url: item.url };
   return null;
@@ -482,7 +504,12 @@ export function extractImage(protocol, data) {
   }
 
   if (protocol === 'chat') {
-    const text = contentToText(data?.choices?.[0]?.message?.content);
+    const msg = data?.choices?.[0]?.message;
+    // r123 R4-1:多模态出图形态(OpenRouter 与部分中转站,请求带 modalities 时):图不在正文里,
+    // 在 message.images[].image_url.url(data URL 或 http 链接)。先看它,再落到下面的正文规则。
+    const fromImages = chatImagesItem(msg?.images);
+    if (fromImages) return fromImages;
+    const text = contentToText(msg?.content);
     if (!text) return null;
     // data URL 先判:下面两条规则只认 http(s),`![](data:image/...;base64,…)` 这种
     // 只能靠这一条兜住;放最前面也顺带挡住"将来把 markdown 规则放宽成任意 URL"的回归。
