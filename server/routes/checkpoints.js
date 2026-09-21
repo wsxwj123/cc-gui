@@ -338,9 +338,153 @@ async function gcSession(sessionId, opts = {}) {
   return { removed: dropped.length };
 }
 
-/** 会话目录内的清理入口。log 是元数据级操作,真正贵的重打包只在确有东西要丢时发生。 */
+// ── r122 R5:会话级互斥 ────────────────────────────────────────────────────
+// 同一会话的影子仓同一时刻只许一路在改(POST 后的 gcCheckpoints / DELETE / 启动清扫):
+// 两路 detachShas + repackHonest 撞在一起会互删对方刚打好的 pack。"先占再放":清理类
+// 路径占不到就跳过本次(下次拍快照再收);删除类路径等一小会儿(用户的删除不该因为
+// 后台清扫正好扫到它而失败)。
+const gcInFlight = new Set();
+function tryAcquireGc(sessionId) {
+  if (gcInFlight.has(sessionId)) return false;
+  gcInFlight.add(sessionId);
+  return true;
+}
+function releaseGc(sessionId) { gcInFlight.delete(sessionId); }
+/** 等锁(上限 waitMs);等不到也放行 —— 删除路径的 rm 是 force 的,真撞上也只是多一次 no-op。 */
+async function waitGc(sessionId, waitMs = 15_000) {
+  const deadline = Date.now() + waitMs;
+  while (!tryAcquireGc(sessionId)) {
+    if (Date.now() > deadline) { gcInFlight.add(sessionId); return; }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+/** 会话目录内的清理入口(POST 拍快照成功后)。占不到锁 = 启动清扫正在收这个会话,本次跳过。 */
 async function gcCheckpoints(sessionId) {
-  return gcSession(sessionId);
+  if (!tryAcquireGc(sessionId)) return { removed: 0, skipped: 'busy' };
+  try { return await gcSession(sessionId); } finally { releaseGc(sessionId); }
+}
+
+// ── r122 R5:启动后后台清扫一遍 ──────────────────────────────────────────
+// 背景:r120 的自动回收只在"该会话下次拍快照"时触发,升级前就已超限、之后不再使用的旧会话
+// 永远收不掉(实测一个会话留了 286 条 / 815 MB)。服务起来后延迟一段时间,逐个会话按既有规则
+// (条数 / 天数 / 总占用,从最旧开始、保底最新一条)回收一遍,不需要该会话再拍快照。
+//   CGUI_CHECKPOINT_SWEEP=0            关闭(默认开)
+//   CGUI_CHECKPOINT_SWEEP_DELAY_MS     启动后多久开始(默认 60000)
+//   CGUI_CHECKPOINT_SWEEP_IDLE_MS      "最近有活动"的窗口(默认 600000),活动 = meta.json 的修改时间
+const SWEEP_IDLE_MS = () => envNum(['CGUI_CHECKPOINT_SWEEP_IDLE_MS'], 600_000);
+
+/** 排程判定(纯函数,给 index.js 与单测):enabled=false 就不排 setTimeout;delayMs 非法/缺省 = 60 秒。 */
+export function checkpointSweepPlan(env = process.env) {
+  const enabled = String(env.CGUI_CHECKPOINT_SWEEP ?? '') !== '0';
+  const raw = env.CGUI_CHECKPOINT_SWEEP_DELAY_MS;
+  const n = raw == null || raw === '' ? NaN : Number(raw);
+  return { enabled, delayMs: Number.isFinite(n) && n >= 0 ? n : 60_000 };
+}
+
+/**
+ * 便宜粗筛(R5-7):没超限的会话只做 stat / 读 meta 级别的检查,不为它们起一堆 git 进程。
+ *   ① 条数:meta 条数已超 → 直接判超(零 git);否则至多一次 `rev-list --count HEAD`
+ *      (影子仓里还有 restore 前自动拍的 pre-restore 提交,它们没有 meta 条目,gcSession 按
+ *      git log 数,这里也得按 git 数才不会漏掉);
+ *   ② 时间:meta 最旧的 messageTimestamp||ts 早于保留期(与 gcSession 同口径,没有 ts 的不算旧);
+ *   ③ 总占用:dirBytes(纯 stat,checkpoints-stats 就是它)对比上限。dirBytes 是磁盘上压缩后的
+ *      数字,比 gcSession 精确计量用的"压缩前对象大小之和"偏小 → 这维偏松:只有磁盘上确实
+ *      超了才去精确算;用户在意的正是磁盘。
+ * 任一超 → 交给 gcSession(它内部精确计量并回收);三维都没超 → 不碰。
+ */
+async function coarseOverLimit(dir, { now, maxCount, maxAgeMs, maxTotalBytes }, io = {}) {
+  let entries = [];
+  try {
+    const parsed = JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8'));
+    entries = Array.isArray(parsed.entries) ? parsed.entries.filter((e) => e && e.sha) : [];
+  } catch { /* 没有 meta:靠 git 数 */ }
+  let count = entries.length;
+  if (maxCount > 0 && count > maxCount) return { over: true, reason: 'count', count };
+  const countOf = io.gitCount || (async (d) => {
+    if (!(await pathExists(join(d, 'HEAD')))) return 0;
+    try { return Number((await gitIn(d, ['rev-list', '--count', 'HEAD'])).stdout.trim()) || 0; } catch { return 0; }
+  });
+  count = Math.max(count, await countOf(dir));
+  if (!count) return { over: false, reason: 'empty', count };
+  if (maxCount > 0 && count > maxCount) return { over: true, reason: 'count', count };
+  if (maxAgeMs > 0) {
+    let oldest = 0;
+    for (const e of entries) {
+      const ts = Number(e.messageTimestamp || e.ts || 0);
+      if (ts > 0 && (oldest === 0 || ts < oldest)) oldest = ts;
+    }
+    if (oldest > 0 && now - oldest > maxAgeMs) return { over: true, reason: 'age', count };
+  }
+  if (maxTotalBytes > 0 && count > 1) {
+    const bytes = await (io.dirBytes || dirBytes)(dir);
+    if (bytes > maxTotalBytes) return { over: true, reason: 'bytes', count, bytes };
+  }
+  return { over: false, count };
+}
+
+/**
+ * 扫一遍所有会话的回滚点(可注入,便于单测;生产由 runStartupSweep 调)。串行、每个会话之间
+ * 歇 pauseMs,任何单会话失败只计数不抛。返回汇总 { scanned, reclaimed, gcCalls, skippedActive,
+ * skippedInvalid, skippedBusy, failed, ms }。
+ *   opts.root / now / idleMs / maxCount / maxAgeMs / maxTotalBytes / gc(sessionId) / pauseMs / log / io
+ */
+export async function sweepAllSessions(opts = {}) {
+  const root = opts.root || CHECKPOINTS_ROOT;
+  const now = opts.now ?? Date.now();
+  const idleMs = opts.idleMs ?? SWEEP_IDLE_MS();
+  const limits = {
+    now,
+    maxCount: opts.maxCount ?? MAX_SNAPSHOT_COUNT(),
+    maxAgeMs: opts.maxAgeMs ?? retentionMs(),
+    maxTotalBytes: opts.maxTotalBytes ?? MAX_SESSION_TOTAL_BYTES(),
+  };
+  const gc = opts.gc || ((sid) => gcSession(sid, {
+    maxCount: limits.maxCount, maxAgeMs: limits.maxAgeMs, maxTotalBytes: limits.maxTotalBytes,
+  }));
+  const pauseMs = opts.pauseMs ?? 150;
+  const log = opts.log || ((line) => console.log(line));
+  const startedAt = Date.now();
+  const sum = { scanned: 0, reclaimed: 0, gcCalls: 0, skippedActive: 0, skippedInvalid: 0, skippedBusy: 0, failed: 0, ms: 0 };
+  let dirs = [];
+  try { dirs = await readdir(root, { withFileTypes: true }); } catch { dirs = []; }   // 根目录还不存在 = 没什么可扫
+  for (const ent of dirs) {
+    if (!ent.isDirectory()) continue;
+    const id = ent.name;
+    if (!SESSION_RE.test(id)) { sum.skippedInvalid += 1; continue; }     // 白名单外的目录名一律不碰
+    sum.scanned += 1;
+    try {
+      const dir = join(root, id);
+      // ② 最近有活动(meta.json 刚被写过)→ 留给它自己的拍快照路径处理,别和正在进行的快照打架。
+      let metaMtime = 0;
+      try { metaMtime = (await stat(join(dir, 'meta.json'))).mtimeMs; } catch { /* 没有 meta = 不算活跃 */ }
+      if (idleMs > 0 && metaMtime > 0 && now - metaMtime < idleMs) { sum.skippedActive += 1; continue; }
+      const verdict = await coarseOverLimit(dir, limits, opts.io || {});
+      if (!verdict.over) continue;
+      if (!tryAcquireGc(id)) { sum.skippedBusy += 1; continue; }        // 正被 POST/DELETE 占着:下次
+      let r;
+      try { r = await gc(id); } finally { releaseGc(id); }
+      sum.gcCalls += 1;
+      sum.reclaimed += Number(r?.removed) || 0;
+    } catch (e) {
+      sum.failed += 1;
+      console.warn('[checkpoints] sweep 单个会话失败(继续下一个):', id, e?.message || e);
+    }
+    if (pauseMs > 0) await new Promise((r) => setTimeout(r, pauseMs));
+  }
+  sum.ms = Date.now() - startedAt;
+  log(`[checkpoints] sweep 完成: 扫描 ${sum.scanned} 个会话, 回收 ${sum.reclaimed} 条, 活跃跳过 ${sum.skippedActive}, 耗时 ${sum.ms} ms`
+    + (sum.failed || sum.skippedBusy || sum.skippedInvalid ? `（失败 ${sum.failed}, 占用跳过 ${sum.skippedBusy}, 非法目录名 ${sum.skippedInvalid}）` : ''));
+  return sum;
+}
+
+/** 一次进程只跑一遍;整个 run 包 try/catch,任何异常只打日志、不影响服务。 */
+let sweepStarted = false;
+export async function runStartupSweep(opts = {}) {
+  if (sweepStarted) return null;
+  sweepStarted = true;
+  try { return await sweepAllSessions(opts); }
+  catch (e) { console.warn('[checkpoints] sweep 失败(已忽略,不影响服务):', e?.message || e); return null; }
 }
 
 /**
@@ -671,21 +815,28 @@ router.post('/checkpoints/:sessionId/restore-file', async (req, res) => {
 
 /** DELETE /api/checkpoints/:sessionId —— 删掉该会话的全部快照 */
 router.delete('/checkpoints/:sessionId', async (req, res) => {
+  let locked = null;
   try {
     const dir = sessionDir(req.params.sessionId);
     if (!(await pathExists(dir))) {
       return res.status(404).json({ error: 'checkpoint session not found', code: 'CHECKPOINT_NOT_FOUND' });
     }
+    // r122:启动清扫可能正在收这个会话 —— 等它放手再删,免得 rm 与 repack 互踩(gcSession 对
+    // 目录消失本就返回 removed:0,这里只是不让两路同时改)。
+    await waitGc(req.params.sessionId); locked = req.params.sessionId;
     await rm(dir, { recursive: true, force: true });
     // 目录整个没了,meta 也随之消失,列表自然为空。
     res.json({ ok: true, deleted: true });
   } catch (err) {
     res.status(400).json({ error: err.message, code: 'CHECKPOINT_NOT_FOUND' });
+  } finally {
+    if (locked) releaseGc(locked);
   }
 });
 
 /** DELETE /api/checkpoints/:sessionId/:sha —— 只删一条 */
 router.delete('/checkpoints/:sessionId/:sha', async (req, res) => {
+  let locked = null;
   try {
     const { sessionId, sha } = req.params;
     assertSession(sessionId);
@@ -696,6 +847,7 @@ router.delete('/checkpoints/:sessionId/:sha', async (req, res) => {
     if (!dir) {
       return res.status(404).json({ error: 'checkpoint not found', code: 'CHECKPOINT_NOT_FOUND' });
     }
+    await waitGc(sessionId); locked = sessionId;          // r122:与启动清扫互斥(同一仓不许两路同时改)
     const all = await listShas(sessionId);
     const target = all.find((s) => s === sha || s.startsWith(sha));
     if (!target) {
@@ -708,6 +860,8 @@ router.delete('/checkpoints/:sessionId/:sha', async (req, res) => {
     res.json({ ok: true, deleted: true, sha: target });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  } finally {
+    if (locked) releaseGc(locked);
   }
 });
 

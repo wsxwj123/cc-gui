@@ -24,7 +24,7 @@ import computerUseRoutes from './routes/computer-use.js';
 import forkRoutes from './routes/fork.js';
 import fileChangesRoutes from './routes/file-changes.js';
 import searchRoutes from './routes/search.js';
-import checkpointsRoutes from './routes/checkpoints.js';
+import checkpointsRoutes, { checkpointSweepPlan, runStartupSweep } from './routes/checkpoints.js';
 import agentsRoutes from './routes/agents.js';
 import worktreeRoutes from './routes/worktree.js';
 import gitRoutes from './routes/git.js';
@@ -1095,6 +1095,13 @@ async function relisten(newHost) {
 server.listen(PORT, HOST, () => {
   // R20:官方价目目录装载磁盘缓存并在过期/首次时后台预热一次(应用关闭时不承诺定时更新)。
   try { bootPricingCatalog(); } catch (e) { console.error('[pricing] boot warmup failed:', e?.message || e); }
+  // r122 R5:回滚点启动清扫 —— 延迟(默认 60s)后在后台逐会话回收超限的旧回滚点,一次进程只跑一遍。
+  // unref:这个定时器不许拖住进程退出;CGUI_CHECKPOINT_SWEEP=0 直接不排程。整个 run 在
+  // runStartupSweep 里包了 try/catch,任何失败只打日志、不影响服务。
+  try {
+    const sweep = checkpointSweepPlan(process.env);
+    if (sweep.enabled) setTimeout(() => { runStartupSweep(); }, sweep.delayMs).unref();
+  } catch (e) { console.error('[checkpoints] sweep 排程失败(已忽略):', e?.message || e); }
   const exposure = HOST === '127.0.0.1'
     ? ' (loopback only)'
     : hasPassword()
