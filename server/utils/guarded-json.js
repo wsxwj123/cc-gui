@@ -4,7 +4,7 @@
 // 新增 / 编辑都把"空 + 新项"写回去,原有条目连同密钥永久丢失。这里统一收口:
 //  - readJsonGuarded(file) → { file, value, missing, corrupt, unreadable, backup, error }
 //      · 文件不存在(ENOENT)= missing:正常的空,可写,不备份(首次使用 / 用户删掉让程序重建)。
-//      · 解析失败 = corrupt:原文件一个字节不动,按字节复制一份到同目录 `<原名>.corrupt-<数字时间戳>`;
+//      · 解析失败 = corrupt:原文件一个字节不动,把原始字节落成同目录 `<原名>.corrupt-<数字时间戳>`(写临时文件 + rename);
 //        同一份损坏内容(按 sha256 判,不看 mtime)只备份一次 —— 进程内记模块级状态,跨重启靠扫同目录已有
 //        备份比对字节;并发首读串行化,不会重复建。
 //      · 其它读取错误(EACCES / EISDIR …)= unreadable:读不出同样不许写(rename 覆盖仍可能成功,一样丢数据)。
@@ -17,8 +17,8 @@
 // 备份文件本身含明文密钥(与原文件同级),固定 0600;文案只含路径,绝不含文件内容。
 // 0 字节 / 只有空白的文件按 missing 处理:没有任何数据可保护,锁住只会把用户挡在外面
 // (provider-models.json / active-provider.json 是非原子 writeFile,进程被杀可能留下空文件)。
-import { readFile, writeFile, readdir, stat } from 'fs/promises';
-import { createHash } from 'crypto';
+import { readFile, writeFile, readdir, stat, rename, unlink } from 'fs/promises';
+import { createHash, randomUUID } from 'crypto';
 import { basename, dirname, join } from 'path';
 
 const corruptState = new Map();   // file → { hash, backup }
@@ -98,15 +98,22 @@ async function findSameContentBackup(file, raw) {
   return null;
 }
 
+// 写临时文件 + rename(项目统一的原子落盘口径,Q8 守卫):备份永远不会以半截形态出现在 `<原名>.corrupt-<数字>`
+// 这个名字上;tmp 名带 .tmp-<uuid> 后缀,不匹配备份名规则,进程中途被杀留下的残留不会被当成备份。
+// 同名冲突(同一毫秒再备份)靠先查存在再顺延时间戳;同一文件的备份动作已在 ensureBackup 里串行化。
 async function createBackup(file, raw) {
   const ts = Date.now();
   for (let i = 0; i < 1000; i += 1) {
     const candidate = `${file}.corrupt-${ts + i}`;
+    if (await exists(candidate)) continue;
+    const tmp = `${candidate}.tmp-${randomUUID()}`;
     try {
-      await writeFile(candidate, raw, { flag: 'wx', mode: 0o600 });
+      await writeFile(tmp, raw, { mode: 0o600 });
+      await rename(tmp, candidate);
       return candidate;
     } catch (err) {
-      if (err?.code !== 'EEXIST') throw err;
+      try { await unlink(tmp); } catch { /* 可能没写成 */ }
+      throw err;
     }
   }
   throw new Error('备份文件名连续冲突');
