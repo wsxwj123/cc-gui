@@ -22,6 +22,7 @@ import {
   buildProxyActionRequest, normalizeProxyBaseURL, normalizeMjButtons,
   IMAGE_DIALECTS, IMAGE_RESOLUTIONS, IMAGE_QUALITIES, IMAGE_OUTPUT_FORMATS,
   IMAGE_BACKGROUNDS, IMAGE_MODERATIONS, IMAGE_N_MAX, imageDialect, estimateCredits, imageParams,
+  classifyImageError, looksLikeHtml, normalizeImageBaseURL, detectTaskShape, extractGenericTaskState,
 } from '../utils/image-protocols.js';
 import { classifyCustomId, MJ_RENDERED_KINDS } from '../utils/mj-actions.js';
 import { readCapped } from '../utils/read-capped.js';
@@ -462,7 +463,10 @@ async function validateBody(body) {
       protocol,
       // mj-proxy 的地址各家 README 给的都是 https://站点/mj —— 末尾那段是路径前缀不是
       // baseURL,存进去会打成 /mj/mj/submit/imagine。保存时就归一,回显也是归一后的值。
-      baseURL: protocol === 'mj-proxy' ? normalizeProxyBaseURL(baseURL) : baseURL.trim().replace(/\/+$/, ''),
+      // r123 R2-3:其余协议同样归一 —— 去首尾空白与末尾斜杠之外,用户把完整接口地址
+      // (…/images/generations、…/images/edits、…/chat/completions)当基址贴进来时剥掉尾段;
+      // 【不自动补 /v1】(静默改写等于替用户改配置,表单里另给预览与一键按钮)。
+      baseURL: protocol === 'mj-proxy' ? normalizeProxyBaseURL(baseURL) : normalizeImageBaseURL(baseURL),
       model: model.trim(),
       size: typeof size === 'string' ? size.trim() : '',
       savePath: savePath.trim(),
@@ -792,8 +796,10 @@ export async function pollTask({ taskId, provider, signal, onProgress, spec: inj
   const now = io.now || Date.now;
   const readState = parse || extractTaskState;
   let spec = injectedSpec;
+  // r123 R3:每条 { error } 都附上出错步骤(phase)/ HTTP 状态 / content-type / 正文前段 / 地址,
+  // 调用方据此分类;既有的 error 文案一字不改(r82 的单测锁着它们)。
   try { spec = spec || buildTaskPollRequest(provider.baseURL, provider.apiKey, taskId); }
-  catch (e) { return { error: `无法构造任务查询请求：${e.message}` }; }
+  catch (e) { return { error: `无法构造任务查询请求：${e.message}`, phase: 'other' }; }
   const proxy = dispatchOpts(provider.proxyUrl);
   const deadline = now() + TASK_POLL_DEADLINE_MS;
   let lastProgress = null;
@@ -802,7 +808,7 @@ export async function pollTask({ taskId, provider, signal, onProgress, spec: inj
     await sleep(TASK_POLL_INTERVAL_MS, signal);
     if (signal?.aborted) return { cancelled: true }; // 取消是终态,文案由 cancel 端点写
     if (now() >= deadline) {
-      return { error: `等待上游任务超时（${TASK_POLL_DEADLINE_MS / 60000} 分钟未出结果）。平台侧任务可能仍在生成，请稍后在该服务的控制台查看。` };
+      return { error: `等待上游任务超时（${TASK_POLL_DEADLINE_MS / 60000} 分钟未出结果）。平台侧任务可能仍在生成，请稍后在该服务的控制台查看。`, phase: 'timeout', url: spec.url };
     }
     let resp;
     try {
@@ -816,24 +822,25 @@ export async function pollTask({ taskId, provider, signal, onProgress, spec: inj
       if (signal?.aborted) return { cancelled: true };
       continue; // 网络抖动 / 单次查询超时:不判死,等下一轮
     }
+    const contentType = resp.headers?.get?.('content-type') || '';
     if (resp.status >= 300 && resp.status < 400) {
       await resp.body?.cancel?.().catch(() => {});
-      return { error: `查询任务状态时上游返回了重定向（HTTP ${resp.status}），已拒绝跟随（防止密钥被带到未校验的地址）` };
+      return { error: `查询任务状态时上游返回了重定向（HTTP ${resp.status}），已拒绝跟随（防止密钥被带到未校验的地址）`, phase: 'other', status: resp.status, url: spec.url };
     }
     if (!resp.ok) {
       // 读出来既是为了给人话,也是为了把连接放掉(不等 GC)。
       const errRaw = await readCapped(resp, MAX_ERROR_BYTES).catch(() => '');
       if (resp.status >= 500 || resp.status === 429) continue; // 中转站常见抖动:继续轮询
       const safe = redactKey(errRaw || '', provider.apiKey).replace(/\s+/g, ' ').trim().slice(0, MAX_UPSTREAM_ERR);
-      return { error: `查询任务状态失败：HTTP ${resp.status}${safe ? `：${safe}` : ''}` };
+      return { error: `查询任务状态失败：HTTP ${resp.status}${safe ? `：${safe}` : ''}`, phase: 'http', status: resp.status, contentType, bodyHead: errRaw || '', url: spec.url };
     }
     const raw = await readCapped(resp, MAX_RESPONSE_BYTES).catch(() => '');
     if (raw === null) {
-      return { error: `任务状态响应体积过大（超过 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB 上限，已拒绝读取）` };
+      return { error: `任务状态响应体积过大（超过 ${Math.round(MAX_RESPONSE_BYTES / 1048576)}MB 上限，已拒绝读取）`, phase: 'other', status: resp.status, url: spec.url };
     }
     let data;
     try { data = JSON.parse(raw); }
-    catch { return { error: `任务状态响应不是 JSON：${redactKey(raw, provider.apiKey).slice(0, 300) || '(空响应)'}` }; }
+    catch { return { error: `任务状态响应不是 JSON：${redactKey(raw, provider.apiKey).slice(0, 300) || '(空响应)'}`, phase: 'not-json', status: resp.status, contentType, bodyHead: raw, url: spec.url }; }
     const st = readState(data);
     if (st.progress !== null && st.progress !== lastProgress) {
       lastProgress = st.progress;
@@ -844,13 +851,18 @@ export async function pollTask({ taskId, provider, signal, onProgress, spec: inj
       const what = st.status === 'cancelled' ? '上游任务已取消' : '上游任务失败';
       const why = redactKey(st.message, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
       // r87:失败/取消也把实付带出来 —— 平台侧敏感词拦截之类同样可能已经扣费。
-      return { error: `${what}${why ? `：${why}` : '（上游未给出原因）'}`, cost: st.cost, creditsCost: st.creditsCost };
+      return {
+        error: `${what}${why ? `：${why}` : '（上游未给出原因）'}`, cost: st.cost, creditsCost: st.creditsCost,
+        phase: st.status === 'cancelled' ? 'task-cancelled' : 'task-failed', status: resp.status, contentType, bodyHead: raw, url: spec.url,
+      };
     }
     if (st.status === 'completed') {
-      if (!st.urls.length) {
-        return { error: `上游任务已完成但没有返回可用的图片链接：${redactKey(raw, provider.apiKey).slice(0, 300)}` };
+      // r123:通用形态可能直接回 b64_json(result.data[].b64_json),与 url 一样算"有图"。
+      const b64 = Array.isArray(st.b64) ? st.b64 : [];
+      if (!st.urls.length && !b64.length) {
+        return { error: `上游任务已完成但没有返回可用的图片链接：${redactKey(raw, provider.apiKey).slice(0, 300)}`, phase: 'no-image', status: resp.status, contentType, bodyHead: raw, url: spec.url };
       }
-      return { urls: st.urls, cost: st.cost, creditsCost: st.creditsCost };
+      return { urls: st.urls, b64, cost: st.cost, creditsCost: st.creditsCost };
     }
   }
 }
@@ -944,9 +956,35 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
   // TimeoutError 一类),靠 e.name 分不出"用户取消"还是"上游超时"。判据只能在 controller
   // 侧:cancelledJobs 里有它 = 是我们主动掐的,状态已由 cancel 端点写成 cancelled,
   // 这里就不再覆写任何错误文案(超时仍走下面的原文案,一字未改)。
-  const fail = (error, extra) => (cancelledJobs.has(jobId) ? Promise.resolve() : updateHistoryEntry(jobId, {
-    status: 'error', error, tookMs: Date.now() - startedAt, ...(extra || {}),
-  }).catch(() => {}));
+  // r123 R3:失败一律带结构化 errorInfo = { kind, summary, action, detail:{ url, status, contentType, bodyHead, taskId } },
+  // error 字符串 = summary(+「。」+ action),老条目没有 errorInfo 时前端按旧样式显示。
+  // 脱敏:所有字段过 redactKey;bodyHead 先整体剥 key、截 300 字、再剥一次(截断可能把 Bearer 形态切成半截)。
+  const errorPatch = (info, extra) => {
+    const key = provider.apiKey || '';
+    const redact = (v) => redactKey(String(v ?? ''), key);
+    const bodyHead = redact(redact(info.bodyHead).slice(0, 300));
+    const url = redact(info.url || spec.url || '');
+    const status = Number.isFinite(Number(info.status)) && info.status !== null && info.status !== undefined ? Number(info.status) : null;
+    const c = classifyImageError({
+      status, contentType: info.contentType || '', bodyHead, phase: info.phase || 'other',
+      message: redact(info.message), url, baseURL: provider.baseURL, taskId: info.taskId || '',
+    });
+    const summary = redact(c.summary);
+    const action = redact(c.action);
+    return {
+      status: 'error',
+      error: action ? `${summary}。${action}` : summary,
+      errorInfo: {
+        kind: c.kind, summary, action,
+        detail: { url, status, contentType: redact(info.contentType), bodyHead, ...(info.taskId ? { taskId: redact(info.taskId) } : {}) },
+      },
+      tookMs: Date.now() - startedAt, ...(extra || {}),
+    };
+  };
+  const failWith = (info, extra) => (cancelledJobs.has(jobId) ? Promise.resolve()
+    : updateHistoryEntry(jobId, errorPatch(info, extra)).catch(() => {}));
+  // 没有更具体步骤信息的失败(体积闸 / 落盘 / 兜底 catch 等):按「其它」分类,summary 就是这句文案。
+  const fail = (error, extra, info) => failWith({ phase: 'other', message: error, ...(info || {}) }, extra);
   // r87:任务制上游在查询响应里给【实付】(cost 金额 / credits_cost 积分)。取真实值比自己
   // 估价可靠得多(估价要处理 6 种报价形态且只能说"约"),故落进条目由界面显示。
   let money = null;
@@ -989,10 +1027,13 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
       // r57:代理没起/配错时 undici 只给一句 "fetch failed",真因(ECONNREFUSED 等)在
       // e.cause 里 —— 与拉模型分支(fetchGeminiModels)同口径拼进去,别让用户对着它猜。
       const cause = e?.cause?.code || e?.cause?.message || '';
-      return fail(
-        timedOut ? `生成超时（${GENERATE_TIMEOUT_MS / 1000} 秒），上游没有返回`
-          : nodeFloorHint(e) || `连接上游失败：${redactKey([e?.message, cause].filter(Boolean).join(' — '), provider.apiKey)}`,
-      );
+      const floor = nodeFloorHint(e);
+      return failWith({
+        phase: timedOut ? 'timeout' : (floor ? 'other' : 'network'),
+        status: null,
+        message: timedOut ? `生成超时（${GENERATE_TIMEOUT_MS / 1000} 秒），上游没有返回`
+          : floor || `连接上游失败：${redactKey([e?.message, cause].filter(Boolean).join(' — '), provider.apiKey)}`,
+      });
     }
     // gemini 认证头按端点形态选(官方 x-goog-api-key / 中转站 Bearer),选错就 401/403
     // → 用另一种原样重试一次,而不是一刀切押一种。
@@ -1003,14 +1044,21 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     // 鉴权跳转/网关劫持,跟随必错且会脱离刚验过的 origin)。
     if (r.status >= 300 && r.status < 400) {
       await r.body?.cancel?.().catch(() => {});
-      return fail(`上游返回了重定向（HTTP ${r.status}），已拒绝跟随（防止密钥被带到未校验的地址）`);
+      return fail(`上游返回了重定向（HTTP ${r.status}），已拒绝跟随（防止密钥被带到未校验的地址）`, null, { status: r.status });
     }
+    const respType = r.headers.get('content-type') || '';
     // r26-J2:错误分支限量读 256KB(超限带截断标记);上游回一坨大错误体不能 OOM 后端。
     if (!r.ok) {
       const errRaw = await readCapped(r, MAX_ERROR_BYTES).catch(() => '');
       const truncated = errRaw === null;
-      const safeErr = redactKey(truncated ? '' : errRaw, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
-      return fail(`上游返回 ${r.status}：${safeErr || '(空响应)'}${truncated ? '（错误内容过大，已截断）' : ''}`);
+      const body = truncated ? '' : errRaw;
+      const safeErr = redactKey(body, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
+      // r123 R2/R3:状态码 + 正文交给分类器(网页 / /v1 写重 / 鉴权 / 余额 / 限流 / 审核 / 其它),
+      // 这句「上游返回 N：…」只在分类器认不出更具体原因时当 summary。
+      return failWith({
+        phase: looksLikeHtml(respType, body) ? 'html' : 'http', status: r.status, contentType: respType, bodyHead: body,
+        message: `上游返回 ${r.status}：${safeErr || '(空响应)'}${truncated ? '（错误内容过大，已截断）' : ''}`,
+      });
     }
     // r26-J2:成功分支 content-length 预检 + 限量读 —— 上限外一律按体积报错,
     // 而不是把整坨读进内存后再按「不是 JSON」报(读完 = 内存已经吃了)。
@@ -1026,9 +1074,14 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
     const raw = capped;
     const safeRaw = redactKey(raw, provider.apiKey).slice(0, MAX_UPSTREAM_ERR);
 
+    // r123 R2-1:先认网页 —— new-api / one-api 对不以 /v1 开头的未知路径回 200 + 网站首页,
+    // 按「不是 JSON」报只会让用户去查上游,而真因是基址少了 /v1。判据是 content-type 或正文首字符。
+    if (looksLikeHtml(respType, raw)) {
+      return failWith({ phase: 'html', status: r.status, contentType: respType, bodyHead: raw });
+    }
     let data;
     try { data = JSON.parse(raw); }
-    catch { return fail(`上游响应不是 JSON：${safeRaw || '(空响应)'}`); }
+    catch { return failWith({ phase: 'not-json', status: r.status, contentType: respType, bodyHead: raw, message: `上游响应不是 JSON：${safeRaw || '(空响应)'}` }); }
     // 同步协议:图就在这次响应里。取不到再看是不是【任务制】上游(apimart / MJ:提交只回
     // task_id),是就轮询到终态再取图。判据是【响应形态】而不是协议名 —— 同一个 openai
     // 协议接到任务制中转站时同样能出图,且同步命中时下面这一整段与 r82 之前逐字等价。
@@ -1048,7 +1101,15 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
         return fail(redactKey(String(submit.error || ''), provider.apiKey).replace(/\s+/g, ' ').trim()
           .slice(0, MAX_UPSTREAM_ERR));
       }
-      const taskId = isProxy ? submit.taskId : extractTaskId(data);
+      // r123 R1:apimart 形态(data[0].task_id)仍由 extractTaskId 先认(既有链路一行不改);认不出再按
+      // 形态表试 polling_url / 顶层 task_id / 视频式任务对象三种 —— 轮询地址与解析按形态注入 pollTask,
+      // 状态机不复制第二份。polling_url 与基址不同源时【不发请求】直接判死(轮询带着 Bearer key)。
+      const apimartId = isProxy ? null : extractTaskId(data);
+      const generic = isProxy || apimartId ? null : detectTaskShape(data, { submitUrl: spec.url, baseURL: provider.baseURL });
+      if (generic?.error) {
+        return failWith({ phase: 'polling-url-cross-origin', status: null, url: generic.pollUrl || spec.url, message: generic.error, taskId: generic.taskId || '' });
+      }
+      const taskId = isProxy ? submit.taskId : (apimartId || generic?.taskId || null);
       if (taskId) {
         // r84:上游任务号写进条目 —— 二次操作(U/V)要拿它当 task_id 提交,不存就没得引用。
         // 在轮询之前写:轮询要一分钟起,期间用户已经能看到这条记录。
@@ -1063,22 +1124,34 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
           ...(isProxy ? {
             spec: buildProxyPollRequest(provider.baseURL, provider.apiKey, taskId),
             parse: (d) => { const st = extractProxyTaskState(d); proxyButtons = st.buttons; return st; },
+          } : generic ? {
+            spec: { url: generic.pollUrl, headers: { Authorization: `Bearer ${provider.apiKey || ''}` } },
+            parse: extractGenericTaskState,
           } : {}),
         });
         if (polled.cancelled) return; // 取消是终态,状态已由 cancel 端点写
         // 两个键【各自】判空:extractTaskState 也是分别取的,而界面优先显示 creditsCost ——
         // 只按 cost 开门的话,上游只给 credits_cost 时实付就一个字都显示不出来。
         if (polled.cost != null || polled.creditsCost != null) money = { cost: polled.cost ?? null, creditsCost: polled.creditsCost ?? null };
-        if (polled.error) return fail(polled.error, money);
+        if (polled.error) {
+          return failWith({
+            phase: polled.phase || 'other', status: polled.status ?? null, contentType: polled.contentType || '',
+            bodyHead: polled.bodyHead || '', message: polled.error, url: polled.url || '', taskId,
+          }, money);
+        }
         // 一个任务可能出多张图(MJ 实测 4 张单图):逐张走下面同一条下载链路,落多个文件。
         pickedList = polled.urls.map((url) => ({ mime: '', url }));
-        // apimart 侧另拉一次按钮(免费);proxy 侧轮询已经带回来了。
+        // r123:通用形态可能直接回图片数据(result.data[].b64_json),追加后走下面同一条 base64 落盘链。
+        if (Array.isArray(polled.b64) && polled.b64.length) pickedList.push(...polled.b64);
+        // apimart 侧另拉一次按钮(免费);proxy 侧轮询已经带回来了;通用形态没有这个接口,不拉。
         if (MJ_PROTOCOLS.includes(provider.protocol)) {
-          mjButtons = isProxy ? proxyButtons : await fetchMjButtons(provider, taskId);
+          mjButtons = isProxy ? proxyButtons : (generic ? [] : await fetchMjButtons(provider, taskId));
         }
       }
     }
-    if (!pickedList) return fail(`上游响应里没有找到图片：${safeRaw.slice(0, 300)}`);
+    if (!pickedList) {
+      return failWith({ phase: 'no-image', status: r.status, contentType: respType, bodyHead: raw, message: '上游响应里没有找到图片' });
+    }
 
     const files = [];
     let totalBytes = 0;
@@ -1115,7 +1188,16 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
           sameOrigin = u.origin === b.origin || (lo(u.hostname) && lo(b.hostname) && u.port === b.port);
         } catch {}
         try { await assertPublicBaseURL(picked.url, { allowLoopback: sameOrigin }); }
-        catch (e) { return fail(`拒绝下载该链接：${e.message}`); }
+        catch (e) {
+          // r123 R6:http 链接被拒时说真实规则 —— 回环地址也必须与提供方基址同源(同主机同端口),
+          // 而不是闸门自己那句「http 仅允许本机回环地址」(对"回环但不同端口"这一常见情形是错的)。
+          return failWith({
+            phase: 'image-url-rejected', url: picked.url, status: null,
+            message: /^http:\/\//i.test(picked.url)
+              ? 'http 图片链接只接受与提供方基址同源（同主机同端口）的回环地址，其它情况请使用 https 公网链接'
+              : e.message,
+          });
+        }
         let img;
         try {
           img = await undiciFetch(picked.url, {
@@ -1127,17 +1209,21 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
         } catch (e) {
           // 判官r57建议2:与生成分支同款拼 cause(代理死/DNS 失败时不再只报裸 fetch failed)。
           const cause = e?.cause?.code || e?.cause?.message || '';
-          return fail(nodeFloorHint(e) || `下载生成的图片失败：${redactKey(e.message, provider.apiKey)}${cause ? `（${cause}）` : ''}`);
+          const floor = nodeFloorHint(e);
+          return failWith({
+            phase: floor ? 'other' : 'download', url: picked.url, status: null,
+            message: floor || `下载生成的图片失败：${redactKey(e.message, provider.apiKey)}${cause ? `（${cause}）` : ''}`,
+          });
         }
         if (img.status >= 300 && img.status < 400) {
-          return fail('上游图片链接发生跳转，已拒绝（防止绕过内网地址检查）');
+          return fail('上游图片链接发生跳转，已拒绝（防止绕过内网地址检查）', null, { url: picked.url, status: img.status });
         }
-        if (!img.ok) return fail(`下载生成的图片失败：HTTP ${img.status}`);
+        if (!img.ok) return failWith({ phase: 'download', url: picked.url, status: img.status, message: `下载生成的图片失败：HTTP ${img.status}` });
         const ct = img.headers.get('content-type') || '';
         // 判官必修①:原先"Content-Type 不是图片但 URL 以 .png 结尾"也放行 —— 后缀是攻击者
         // 写的,不能当证据。这里只认 Content-Type。
         if (!/^image\//i.test(ct)) {
-          return fail(`上游返回的链接不是图片（Content-Type: ${ct || '未知'}）`);
+          return failWith({ phase: 'download', url: picked.url, status: img.status, contentType: ct, message: `上游返回的链接不是图片（Content-Type: ${ct || '未知'}）` });
         }
         // 判官必修②:无上限地 arrayBuffer() 一个坏掉/恶意的上游 = 单进程后端 OOM
         // (实测 4×12MB 并发 → RSS 446MB,base64+JSON+Buffer 约 10x 放大)。

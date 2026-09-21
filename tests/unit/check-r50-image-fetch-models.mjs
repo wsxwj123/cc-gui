@@ -70,7 +70,11 @@ const FORM_KEY = 'sk-r50-form-key-998877665544';
     // 【E16 已按 G6 协议替换为实测哈希】r94 A 线实现落地:mj-proxy 分支 + mj 分支接参数编译
     // 与参考图。替换前已复核 check-image-gen(E15,IMAGE_PROTOCOLS 五元)与
     // check-r54-image-refs(E20–E22,三条安全锚计数)—— 两个文件当时均已跑绿。
-    '118da35c09e7518f955881c93ecb73f7bf908926536632b1a092eecc401ede13',
+    // 2026-09-21 r123(生图接任意中转站)更新:openai / gemini / chat / mj 四处 URL 字面改经
+    // imageRequestURL(server/utils/image-url.js)—— 表单里的「最终请求地址」预览与真正打出去的请求
+    // 必须是同一份规则(BRIEF R2-4);产出的 URL 逐字不变(check-r26-j5 / check-r54 t0 的 deepEqual
+    // 仍绿),函数其余部分一行未动。替换前已复核 check-image-gen 与 check-r54-image-refs 跑绿。
+    'bed7657b1dbc73550c6f4f94d124ccb0458aa2daec94bf4b5cee5f655dae9255',
     't2【E16】buildImageRequest 源码基线(r94 必改:mj-proxy 分支 + mj 参考图/参数编译);更新前先复核 check-image-gen 与 check-r54-image-refs',
   );
 }

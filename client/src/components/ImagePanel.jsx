@@ -5,7 +5,7 @@
 // 浏览器访问时退化成手输绝对路径。
 // 模态红线:删除走 confirmDialog(Tauri 禁原生 confirm)。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLink, X, Check, RefreshCw, RotateCcw } from './Icon.jsx';
+import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLink, X, Check, RefreshCw, RotateCcw, Maximize2 } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { ImageLightbox } from './ImageLightbox.jsx';
@@ -15,6 +15,9 @@ import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickMod
 import {
   SIZE_OPTIONS, sizeCapFor, sizeOptionsFor, imageDialect, dialectForBaseURL, APIMART_RATIOS,
 } from '../utils/imageSizeCaps.js';
+// r123:最终请求地址预览 / 「/v数字」段判定 —— 与服务端 buildImageRequest 同一份规则(server/utils/image-url.js)。
+import { previewImageRequestURL, hasVersionSegment, stripBaseURL } from '../utils/imageRequestUrl.js';
+import { copyText } from '../utils/clipboard.js';
 // r94 MJ 参数编译层与动作语汇(utils/mjParams.js 再导出服务端的唯一副本)。控件显隐、
 // 「将要发送」预览、动作按钮全部由它派生 —— 界面自己再写一份版本表就会与下发口径漂移。
 import {
@@ -205,6 +208,11 @@ const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
 const TASK_VIEW_KEY = 'cgui-image-tasklist-view'; // grid | list,重开面板保留
 const POLL_MS = 1500; // 有任务在跑时的历史轮询间隔
 const STATUS_LABEL = { running: '生成中', done: '已完成', error: '失败', interrupted: '已中断', cancelled: '已取消' };
+// r123 R3:失败分类(服务端 errorInfo.kind 十类)的中文名,只在诊断详情的折叠标题里用。
+const ERROR_KIND_LABEL = {
+  'base-url': '基址或路径', auth: '鉴权', balance: '余额', 'rate-limit': '限流', moderation: '内容审核',
+  'task-failed': '任务失败', timeout: '超时', 'no-image': '没有图片', network: '网络', other: '其它',
+};
 // 取消只停止本机这一侧的等待与下载：上游任务（任务制协议尤其如此）仍在生成，费用照算。
 // 不写清楚会被理解成"已经把任务撤掉了"。
 const CANCEL_NOTE = '已停止等待（上游任务可能仍在生成并计费）';
@@ -515,6 +523,30 @@ function ProviderForm({ initial, onDone, onCancel }) {
           placeholder="https://api.example.com/v1"
         />
       </label>
+      {/* r123 R2-4:实时显示这份配置真正会打到的地址(随协议 / 基址 / 模型变化),规则与服务端同源。
+          new-api 系中转站对不带 /v1 的路径回 200 + 网站首页,用户在这里就能看出基址少了一层;
+          openai / chat 且基址里没有任何 /v数字 段时给一键补 /v1 的按钮 —— 只改表单值,不静默改写。 */}
+      {form.baseURL.trim() && (
+        <div className="text-[10px] text-ink-faint font-body leading-snug flex flex-wrap items-center gap-x-1.5 gap-y-1">
+          <span className="shrink-0">最终请求地址：</span>
+          {form.protocol === 'gemini' && !form.model.trim() ? (
+            <span>填写模型后显示</span>
+          ) : (
+            <span data-testid="image-final-url" className="font-mono break-all text-ink-soft">
+              {previewImageRequestURL(form.protocol, form.baseURL, form.model)}
+            </span>
+          )}
+          {(form.protocol === 'openai' || form.protocol === 'chat') && !hasVersionSegment(form.baseURL) && (
+            <button
+              type="button"
+              data-testid="image-add-v1"
+              onClick={() => setForm((f) => ({ ...f, baseURL: `${stripBaseURL(f.baseURL)}/v1` }))}
+              title="在接口地址末尾补上 /v1（OpenAI 兼容中转站的接口通常在 /v1 之下；不带 /v1 时多半会打到网站页面）"
+              className="shrink-0 px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60"
+            >补 /v1</button>
+          )}
+        </div>
+      )}
       <label className="space-y-1 block"><span className={labelCls}>密钥{form.id ? '（留空保留原密钥）' : ''}</span>
         <input className={inputCls} type="password" value={form.apiKey} onChange={set('apiKey')} placeholder="sk-…" autoComplete="off" />
       </label>
@@ -924,9 +956,20 @@ function ProviderForm({ initial, onDone, onCancel }) {
 // 布尔回到 false,loadHistory 又把 currentId 落到最近一张完成图 → 预览又冒出来)。
 // 改成记「被清掉的那条任务 id」:渲染判据变成 id 对不上才显示,语义天然自洽 —— 用户重新
 // 选一张(pickShot)或受理新任务时 currentId 本来就变了,不必在各处手动清标志。
-// 必须放模块级才活过面板卸载(单窗口内同一时刻只有一个生图面板,面板无 per-pane 语义);
-// 刻意不落盘:刷新后重新显示最近一张完成图是既有行为,本批不改。
-let dismissedPreviewId = '';
+// 模块级变量活过面板卸载(单窗口内同一时刻只有一个生图面板,面板无 per-pane 语义)。
+// r123 R5(用户 2026-09-21:「每次清空预览后,下次打开仍然显示」):r102/r106 刻意不落盘,刷新页面或重开
+// 应用后记号丢失,历史加载又把最近一张完成图当当前图显示出来 —— 本轮改为落 localStorage
+// (键 cgui-image-dismissed-preview,值 = 被清掉的任务 id;空串或无键 = 没收起)。撤回点不变:受理新任务、
+// 用户重新选一张时写空;被清掉的那条记录已被删除时(loadHistory 里发现它不在历史里)也清掉,不留脏记号。
+// 读写包 try/catch(隐私模式 / 配额满时退化成只在内存里记,与 PROMPT_DRAFT_KEY 同款)。
+const DISMISSED_PREVIEW_KEY = 'cgui-image-dismissed-preview';
+function readDismissedPreview() {
+  try { return localStorage.getItem(DISMISSED_PREVIEW_KEY) || ''; } catch { return ''; }
+}
+function writeDismissedPreview(id) {
+  try { if (id) localStorage.setItem(DISMISSED_PREVIEW_KEY, id); else localStorage.removeItem(DISMISSED_PREVIEW_KEY); } catch { /* 记不住就只在内存里记 */ }
+}
+let dismissedPreviewId = readDismissedPreview();
 
 export default function ImagePanel() {
   const [providers, setProviders] = useState([]);
@@ -943,7 +986,7 @@ export default function ImagePanel() {
   // 不动 currentId(loadHistory 的回落规则被 r95 锁死),只记「哪条被清掉了」(见模块级
   // dismissedPreviewId 的说明)。state 只是给本组件一次重渲染,模块变量才是跨挂载的记忆。
   const [dismissedId, setDismissedId] = useState(dismissedPreviewId);
-  const dismissPreview = (id) => { dismissedPreviewId = id; setDismissedId(id); };
+  const dismissPreview = (id) => { dismissedPreviewId = id; writeDismissedPreview(id); setDismissedId(id); };
   // r94 像素尺寸:图片本身是唯一可靠来源(比例/版本只是请求参数,开 HD 或真放大后实际像素
   // 与它们对不上)。按图片 URL 记一份 naturalWidth×naturalHeight;预览区与放大层看的永远
   // 是同一个 URL(方向键切图会把预览区一起带过去),所以只在预览区测一次,两处都有值。
@@ -1046,6 +1089,10 @@ export default function ImagePanel() {
       const d = await r.json();
       const list = Array.isArray(d.history) ? d.history : [];
       setHistory(list);
+      // r123 R5-3:被清掉的那条已不在历史里(被删除)→ 记号作废,免得 localStorage 里留一个指向不存在记录的脏值。
+      if (dismissedPreviewId && !list.some((h) => h.id === dismissedPreviewId)) {
+        dismissedPreviewId = ''; writeDismissedPreview(''); setDismissedId('');
+      }
       // 面板重开时的当前预览:优先保持已选中那条,否则取最近一条已完成的。
       setCurrentId((cur) => (list.some((h) => h.id === cur) ? cur : (list.find((h) => h.status === 'done')?.id || '')));
     } catch { /* 后端未就绪:下次轮询/重开面板再拉 */ }
@@ -1548,6 +1595,46 @@ export default function ImagePanel() {
   };
 
   // 两种视图共用的条目操作,避免两处各写一份走样。
+  // r123 R3-3:失败条目的诊断详情(默认收起,<details> 不写 open)。人话原因与建议动作已在 h.error 里
+  // (服务端 error = summary + 「。」+ action),这里只放展开才需要看的:最终请求地址 / HTTP 状态 /
+  // content-type / 上游正文前 300 字 / 任务号(可复制)。老条目没有 errorInfo → 不渲染,保持旧样式。
+  const errorDetail = (h) => {
+    const info = h?.errorInfo;
+    if (!info || h.status === 'done') return null;
+    const d = info.detail || {};
+    return (
+      <details data-testid="image-error-detail" className="rounded-md border border-canvas-deep px-2 py-1 text-[10px] font-body">
+        <summary className="text-ink-soft cursor-pointer select-none">诊断详情（{ERROR_KIND_LABEL[info.kind] || info.kind}）</summary>
+        <div className="pt-1 space-y-0.5">
+          {d.url ? <div><span className="text-ink-faint">请求地址 </span><span className="font-mono break-all text-ink-soft">{d.url}</span></div> : null}
+          <div>
+            <span className="text-ink-faint">HTTP 状态 </span>
+            <span className="font-mono text-ink-soft">{d.status == null ? '无（请求未到达上游）' : d.status}</span>
+            {d.contentType ? <span className="text-ink-faint"> · {d.contentType}</span> : null}
+          </div>
+          {d.taskId ? (
+            <div className="flex items-center gap-1">
+              <span className="text-ink-faint">任务号 </span>
+              <span className="font-mono break-all text-ink-soft">{d.taskId}</span>
+              <button
+                type="button"
+                onClick={() => copyText(d.taskId)}
+                title="复制任务号（到该服务的控制台按它查任务）"
+                className="shrink-0 px-1.5 py-0.5 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60"
+              >复制</button>
+            </div>
+          ) : null}
+          {d.bodyHead ? (
+            <div>
+              <span className="text-ink-faint">上游正文（前 300 字）</span>
+              <pre className="whitespace-pre-wrap break-all font-mono text-ink-soft max-h-32 overflow-auto">{d.bodyHead}</pre>
+            </div>
+          ) : null}
+        </div>
+      </details>
+    );
+  };
+
   const taskActions = (h) => (
     <>
       {h.status === 'running' && (
@@ -1557,6 +1644,16 @@ export default function ImagePanel() {
           title="取消：停止该生成任务"
           className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
         ><X size={13} /></button>
+      )}
+      {/* r123 R5:任务列表里点缩略图改为「选中」(被清空收起的预览由此恢复,见 pickShot);放大层从这里进。
+          放大同时选中这张 —— 与放大层里方向键切图(goShot → pickShot)同口径。 */}
+      {h.status === 'done' && shotUrl(h) && (
+        <button
+          type="button"
+          onClick={() => { pickShot(h, shotIdx(h)); setZoom({ id: h.id, index: shotIdx(h) }); }}
+          title="放大：在放大层查看这张图（← → 可切换到其它任务的图）"
+          className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
+        ><Maximize2 size={13} /></button>
       )}
       {h.status === 'done' && shotFile(h) && (
         <button
@@ -1850,6 +1947,7 @@ export default function ImagePanel() {
       {current && current.status === 'done' && !previewHidden && (
         <div className={`space-y-1.5 ${tab === 'gen' ? '' : 'hidden'}`}>
           <img
+            data-testid="image-preview-shot"
             src={shotUrl(current)}
             alt={current.prompt}
             onLoad={measureShot}
@@ -1886,9 +1984,12 @@ export default function ImagePanel() {
               <span className="text-[11px] text-ink-faint font-body">生成中 · {elapsedSec(current)}s{current.progress == null ? '' : ` · ${current.progress}%`}</span>
             </>
           ) : (
-            <span className="text-[11px] text-error font-body break-all">
-              {STATUS_LABEL[current.status] || current.status}{current.error ? ` · ${current.error}` : ''}{cancelNote(current)}
-            </span>
+            <div className="min-w-0 flex-1 space-y-1">
+              <span className="text-[11px] text-error font-body break-all">
+                {STATUS_LABEL[current.status] || current.status}{current.error ? ` · ${current.error}` : ''}{cancelNote(current)}
+              </span>
+              {errorDetail(current)}
+            </div>
           )}
         </div>
       )}
@@ -1940,8 +2041,9 @@ export default function ImagePanel() {
                 <img
                   src={shotUrl(h)}
                   alt={h.prompt}
-                  onClick={() => { setCurrentId(h.id); setZoom({ id: h.id, index: shotIdx(h) }); }}
-                  className="w-full aspect-square object-cover cursor-zoom-in"
+                  onClick={() => pickShot(h, shotIdx(h))}
+                  title="点击选中：生图页的预览与单图操作作用于它（被「清空」收起的预览随之恢复）；放大看图用下方的「放大」按钮"
+                  className="w-full aspect-square object-cover cursor-pointer"
                 />
               ) : (
                 <div className="w-full aspect-square bg-canvas-warm flex flex-col items-center justify-center gap-1 px-2 text-center">
@@ -1986,6 +2088,7 @@ export default function ImagePanel() {
                 </div>
                 <div className="flex items-center gap-1">{taskActions(h)}</div>
               </div>
+              {h.status !== 'done' && h.errorInfo ? <div className="px-1.5 pb-1.5">{errorDetail(h)}</div> : null}
             </div>
           ) : (
             <div key={h.id} className={`flex items-center gap-2 rounded-md border px-2 py-1.5 ${h.id === currentId ? 'border-accent' : 'border-canvas-deep'}`}>
@@ -2002,8 +2105,9 @@ export default function ImagePanel() {
                 <img
                   src={shotUrl(h)}
                   alt={h.prompt}
-                  onClick={() => { setCurrentId(h.id); setZoom({ id: h.id, index: shotIdx(h) }); }}
-                  className="shrink-0 w-9 h-9 rounded object-cover border border-canvas-deep cursor-zoom-in"
+                  onClick={() => pickShot(h, shotIdx(h))}
+                  title="点击选中：生图页的预览与单图操作作用于它（被「清空」收起的预览随之恢复）；放大看图用右侧的「放大」按钮"
+                  className="shrink-0 w-9 h-9 rounded object-cover border border-canvas-deep cursor-pointer"
                 />
               ) : (
                 <div className="shrink-0 w-9 h-9 rounded border border-canvas-deep flex items-center justify-center">
@@ -2024,6 +2128,7 @@ export default function ImagePanel() {
                   {paidNote(h) ? ` · ${paidNote(h)}` : ''}
                   {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
                 </div>
+                {errorDetail(h)}
                 {h.speedNote ? <div className="text-[9.5px] text-ink-faint font-body leading-snug">{h.speedNote}</div> : null}
                 {imageStrip(h)}
                 {mjSoloBar(h)}

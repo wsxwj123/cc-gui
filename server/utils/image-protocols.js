@@ -19,6 +19,15 @@ import {
 // 调用方(routes/image.js、前端 utils)只认 image-protocols 一个入口。
 import { compileMjFlags, mjRefModeFor } from './mj-params.js';
 import { buildProxyImagineRequest } from './mj-proxy.js';
+// r123:各协议的最终请求地址 / 基址规范化 / 「/v数字」段判定的唯一副本(零依赖,前端预览共用),
+// 以及报错分层的分类器。同样原样转出,调用方仍只认 image-protocols 一个入口。
+import { imageRequestURL } from './image-url.js';
+
+export {
+  imageRequestURL, previewImageRequestURL, normalizeImageBaseURL, stripBaseURL,
+  hasVersionSegment, suggestBaseURL, collapseDoubleV1,
+} from './image-url.js';
+export { classifyImageError, looksLikeHtml, looksLikeDoubleV1, IMAGE_ERROR_KINDS } from './image-errors.js';
 
 export {
   compileMjFlags, mjCapsFor, mjEffectiveSpeed, mjRefModeFor,
@@ -284,7 +293,7 @@ export function buildImageRequest(config, prompt, refs) {
         form.append(k, v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v));
       }
       return {
-        url: `${base}/images/edits`,
+        url: imageRequestURL('openai', base, model, { edits: true }),
         headers: { Authorization: `Bearer ${key}` }, // ← 不带 Content-Type:boundary 由 fetch 写
         body: null,
         form,
@@ -309,7 +318,7 @@ export function buildImageRequest(config, prompt, refs) {
     // 方舟形态:image 收 string[](URL 或 dataURI),4.x 最多 14 张。
     if (list.length) body.image = list.map(refDataUri);
     return {
-      url: `${base}/images/generations`,
+      url: imageRequestURL('openai', base, model),
       headers: { ...json, Authorization: `Bearer ${key}` },
       body: { ...body, ...extra },
       form: null,
@@ -320,8 +329,8 @@ export function buildImageRequest(config, prompt, refs) {
   if (protocol === 'gemini') {
     // POST {base}/models/{model}:generateContent。用户可能连 "models/" 前缀一起粘过来。
     // r26-J5:model 进 URL path 必须编码 —— 含空格/斜杠的型号名不编码会把 URL 拼歪
-    // (路径注入:model 里的 '/' 会改变请求的实际路径段)。
-    const bare = model.replace(/^models\//, '');
+    // (路径注入:model 里的 '/' 会改变请求的实际路径段)。r123:剥前缀 + 编码收进 imageRequestURL,
+    // 表单里的地址预览与这里同一份规则。
     const { generationConfig: extraGen, ...restExtra } = extra;
     // 官方示例顺序:文本 part 在前、inline_data 图 part 在后。
     const parts = [{ text }, ...list.map((r) => ({ inline_data: { mime_type: r.mime || 'image/png', data: r.base64 } }))];
@@ -335,7 +344,7 @@ export function buildImageRequest(config, prompt, refs) {
     const goog = { ...json, 'x-goog-api-key': key };
     const bearer = { ...json, Authorization: `Bearer ${key}` };
     return {
-      url: `${base}/models/${encodeURIComponent(bare)}:generateContent`,
+      url: imageRequestURL('gemini', base, model),
       headers: official ? goog : bearer,
       body,
       form: null,
@@ -388,7 +397,7 @@ export function buildImageRequest(config, prompt, refs) {
     if (cfg.mjSpeed) body.speed = String(cfg.mjSpeed);
     if (imageUrls.length) body.image_urls = imageUrls;
     return {
-      url: `${base}/midjourney/generations`,
+      url: imageRequestURL('mj', base, model),
       headers: { ...json, Authorization: `Bearer ${key}` },
       body: { ...body, ...extra },
       form: null,
@@ -402,7 +411,7 @@ export function buildImageRequest(config, prompt, refs) {
     ? [{ type: 'text', text }, ...list.map((r) => ({ type: 'image_url', image_url: { url: refDataUri(r) } }))]
     : text;
   return {
-    url: `${base}/chat/completions`,
+    url: imageRequestURL('chat', base, model),
     headers: { ...json, Authorization: `Bearer ${key}` },
     body: { model, messages: [{ role: 'user', content }], ...extra },
     form: null,
@@ -419,13 +428,35 @@ function contentToText(content) {
   return '';
 }
 
+/**
+ * r123 R4-1:chat 协议 message.images[] → 首个能用的 { mime, base64 } / { mime, url };没有一律 null。
+ * 单项形态 {type:'image_url', image_url:{url}}(官方)或 {url}(个别中转站)。data URL 走 base64
+ * 落盘链(与正文里的 data URL 同款剥空白);http(s) 交给下载分支(那里有 SSRF 复检);其余不接。
+ */
+function chatImagesItem(images) {
+  if (!Array.isArray(images)) return null;
+  for (const it of images) {
+    const raw = typeof it?.image_url?.url === 'string' ? it.image_url.url : (typeof it?.url === 'string' ? it.url : '');
+    const u = raw.trim();
+    if (!u) continue;
+    const dataUrl = u.match(/^data:image\/([a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i);
+    if (dataUrl) return { mime: `image/${dataUrl[1].toLowerCase()}`, base64: dataUrl[2].replace(/\s+/g, '') };
+    if (/^https?:\/\//i.test(u)) return { mime: '', url: u };
+  }
+  return null;
+}
+
 /** openai 的 data[] 单项 → { mime, base64 } / { mime, url };不是图一律 null。 */
 function openaiItem(item, data) {
   if (!item) return null;
   // gpt-image 系恒返 b64_json;dall-e-3 视 response_format 返 b64 或 url → 两种都认。
   if (typeof item.b64_json === 'string' && item.b64_json) {
+    // r123 R4-2:OpenRouter 形态的 data[].b64_json 配 media_type(如 image/webp)→ 按它定扩展名;
+    // 没有 media_type 才回落 output_format / png(与升级前逐字一致)。只认 image/* 形态。
+    const media = typeof item.media_type === 'string' && /^image\/[a-z0-9.+-]+$/i.test(item.media_type.trim())
+      ? item.media_type.trim().toLowerCase() : '';
     const fmt = item.output_format || data?.output_format;
-    return { mime: fmt ? `image/${String(fmt).toLowerCase()}` : 'image/png', base64: item.b64_json };
+    return { mime: media || (fmt ? `image/${String(fmt).toLowerCase()}` : 'image/png'), base64: item.b64_json };
   }
   if (typeof item.url === 'string' && /^https?:\/\//i.test(item.url)) return { mime: '', url: item.url };
   return null;
@@ -482,7 +513,12 @@ export function extractImage(protocol, data) {
   }
 
   if (protocol === 'chat') {
-    const text = contentToText(data?.choices?.[0]?.message?.content);
+    const msg = data?.choices?.[0]?.message;
+    // r123 R4-1:多模态出图形态(OpenRouter 与部分中转站,请求带 modalities 时):图不在正文里,
+    // 在 message.images[].image_url.url(data URL 或 http 链接)。先看它,再落到下面的正文规则。
+    const fromImages = chatImagesItem(msg?.images);
+    if (fromImages) return fromImages;
+    const text = contentToText(msg?.content);
     if (!text) return null;
     // data URL 先判:下面两条规则只认 http(s),`![](data:image/...;base64,…)` 这种
     // 只能靠这一条兜住;放最前面也顺带挡住"将来把 markdown 规则放宽成任意 URL"的回归。
@@ -579,6 +615,148 @@ export function extractTaskState(data) {
   }
   if (raw === 'completed') return { status: 'completed', progress, urls, message, cost, creditsCost };
   return { status: 'processing', progress, urls: [], message, cost, creditsCost };
+}
+
+// ───────────── r123 R1 任务形态表:apimart 之外的三种任务制形态(纯函数,零 IO) ─────────────
+// 调研(.devflow/RESEARCH-imagegen.md §C/§D)查实:ToAPIs 对标准 POST …/images/generations 回的是
+// 「OpenAI 视频式」任务对象({id, object:"generation.task", status}),要 GET 提交地址 + /{id} 轮询,
+// 图在 result.data[].url;new-api 系另有顶层 task_id 形态;BFL 一类响应自带 polling_url。
+// 我方原先只认 apimart 一种(data[0].task_id + {base}/tasks/{id}),换一家就报「没有找到图片」。
+// 这里把"认形态"做成一张小表,等待 / 重试 / 截止 / 取消那套状态机仍只在 routes/image.js 的 pollTask 里。
+
+// 提交响应里出现这些 status 词才把「顶层 id」当任务(与 object 含 task 二选一)—— 防误判:
+// 同步响应里也常有 id,不能见 id 就轮询(见 detectTaskShape)。轮询阶段的"进行中"则不按白名单,
+// 凡不是成功/失败/取消词一律继续等(normalizeTaskStatus)。
+export const TASK_PROGRESS_WORDS = [
+  'pending', 'queued', 'in_progress', 'in-progress', 'processing', 'submitted', 'running',
+  'waiting', 'created', 'starting', 'accepted', 'in_queue', 'not_start', 'generating',
+];
+export const TASK_SUCCESS_WORDS = ['completed', 'succeeded', 'success', 'ready', 'done', 'finished'];
+export const TASK_FAILED_WORDS = ['failed', 'failure', 'error'];
+export const TASK_CANCELLED_WORDS = ['cancelled', 'canceled'];
+
+/** 上游状态词 → completed / failed / cancelled / processing(大小写不敏感;未知值一律 processing)。 */
+export function normalizeTaskStatus(raw) {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (TASK_SUCCESS_WORDS.includes(v)) return 'completed';
+  if (TASK_FAILED_WORDS.includes(v)) return 'failed';
+  if (TASK_CANCELLED_WORDS.includes(v)) return 'cancelled';
+  return 'processing';
+}
+
+/** 协议 + 主机 + 端口全等才算同源(URL.origin);任一方解析不了一律 false。 */
+export function isSameOrigin(a, b) {
+  try { return new URL(String(a)).origin === new URL(String(b)).origin; } catch { return false; }
+}
+const originOf = (u) => { try { return new URL(String(u)).origin; } catch { return ''; } };
+const strOrNum = (v) => (typeof v === 'string' && v.trim() ? v.trim() : (typeof v === 'number' && Number.isFinite(v) ? String(v) : ''));
+const plainObj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
+
+/**
+ * 提交响应 → 任务形态。返回 null = 不是任务(调用方报「没有找到图片」,**不轮询**)。
+ * 优先级:apimart(既有判据 extractTaskId)→ polling_url → 顶层 / data.task_id → 视频式(id + object 含 task
+ * 或 status 属进行中词表)。
+ *   { shape:'apimart'|'polling-url'|'task-id'|'openai-video', taskId, pollUrl }
+ *   polling_url 与基址不同源时返回 { shape:'polling-url', taskId, pollUrl, error } —— 调用方必须按 error 判死
+ *   且【不发请求】(轮询带着 Bearer key,跨源 = 把密钥送到别的主机)。
+ * ctx.submitUrl = 这次提交打的地址(视频式 / task_id 形态的轮询地址 = 它 + /{id});ctx.baseURL = 提供方基址。
+ */
+export function detectTaskShape(data, ctx = {}) {
+  const root = plainObj(data);
+  if (!root) return null;
+  const submit = String(ctx.submitUrl || '').trim().replace(/\/+$/, '');
+  const base = String(ctx.baseURL || '').trim().replace(/\/+$/, '');
+  const inner = plainObj(root.data);
+  // ① apimart:{code, data:[{task_id}]},轮询 {base}/tasks/{id}(既有链路)。
+  const apimartId = extractTaskId(root);
+  if (apimartId) return { shape: 'apimart', taskId: apimartId, pollUrl: base ? `${base}/tasks/${encodeURIComponent(apimartId)}` : '' };
+  // ② 响应自带轮询地址:必须与基址同源。
+  const pollingUrl = strOrNum(root.polling_url) || strOrNum(inner?.polling_url);
+  const anyId = strOrNum(root.id) || strOrNum(root.task_id) || strOrNum(inner?.task_id) || strOrNum(inner?.id) || strOrNum(root.request_id);
+  if (pollingUrl) {
+    if (!/^https?:\/\//i.test(pollingUrl) || !isSameOrigin(pollingUrl, base)) {
+      return {
+        shape: 'polling-url', taskId: anyId, pollUrl: pollingUrl,
+        error: `上游给出的轮询地址与提供方基址不同源（${originOf(pollingUrl) || pollingUrl} ≠ ${originOf(base) || base}），已拒绝请求（防止密钥被带到别的主机）`,
+      };
+    }
+    return { shape: 'polling-url', taskId: anyId || pollingUrl, pollUrl: pollingUrl };
+  }
+  // ③ 顶层 task_id(new-api 系)/ data.task_id / output.task_id(DashScope):轮询 提交地址 + /{id}。
+  const taskId = strOrNum(root.task_id) || strOrNum(inner?.task_id) || strOrNum(plainObj(root.output)?.task_id);
+  if (taskId) return submit ? { shape: 'task-id', taskId, pollUrl: `${submit}/${encodeURIComponent(taskId)}` } : null;
+  // ④ OpenAI 视频式任务对象:顶层 id,且 object 含 task 或 status 属进行中词表(双条件防误判)。
+  const vid = strOrNum(root.id);
+  if (vid) {
+    const object = String(root.object || '').toLowerCase();
+    const status = String(root.status || '').trim().toLowerCase();
+    if (object.includes('task') || TASK_PROGRESS_WORDS.includes(status)) {
+      return submit ? { shape: 'openai-video', taskId: vid, pollUrl: `${submit}/${encodeURIComponent(vid)}` } : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * 通用轮询响应 → { status, progress, urls, b64, message, cost, creditsCost }(与 extractTaskState 同形,多一个 b64:
+ * result.data[].b64_json 这类直接给图片数据的,走既有 base64 落盘链)。apimart 形态仍由 extractTaskState 解析。
+ *  - status 按词表归一(normalizeTaskStatus),未知值当进行中;
+ *  - 取图候选(BRIEF R1-3):result.data[].url|b64_json、result.images[].url、data.result.images[].url[]、
+ *    output.results[].url、result.sample、result.url、顶层 url、data.url、data[] / images[] 同步形态;
+ *    URL 只认 http(s),去重,总数上限 MAX_TASK_IMAGES(在循环里就停,不事后截);
+ *  - 实付兼容字符串数字(ToAPIs 的 billing.cost_usd:"0.04"、billing.credits:"4");取不到一律 null。
+ */
+export function extractGenericTaskState(data) {
+  const root = plainObj(data) || {};
+  const inner = plainObj(root.data);
+  const output = plainObj(root.output);
+  const rawStatus = [root.status, inner?.status, plainObj(root.task)?.status, output?.task_status, root.state]
+    .find((v) => typeof v === 'string' && v.trim());
+  const status = normalizeTaskStatus(rawStatus);
+  const pn = Number(root.progress ?? inner?.progress ?? output?.progress ?? NaN);
+  const progress = Number.isFinite(pn) ? Math.max(0, Math.min(100, Math.round(pn))) : null;
+  const money = (v) => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() && Number.isFinite(Number(v))) return Number(v);
+    return null;
+  };
+  const billing = plainObj(root.billing);
+  const cost = money(billing?.cost_usd) ?? money(root.cost) ?? money(inner?.cost) ?? money(billing?.cost);
+  const creditsCost = money(root.credits_cost) ?? money(inner?.credits_cost) ?? money(billing?.credits);
+  const message = [
+    plainObj(root.error)?.message, typeof root.error === 'string' ? root.error : '', plainObj(inner?.error)?.message,
+    root.fail_reason, inner?.fail_reason, output?.message, status === 'failed' ? root.message : '',
+  ].find((m) => typeof m === 'string' && m.trim()) || '';
+  if (status !== 'completed') return { status, progress, urls: [], b64: [], message, cost, creditsCost };
+  const urls = []; const b64 = [];
+  let full = false;
+  const take = (one) => {
+    if (full || !one) return;
+    if (one.url) { if (urls.includes(one.url)) return; urls.push(one.url); }
+    else if (one.base64) b64.push(one);
+    else return;
+    if (urls.length + b64.length >= MAX_TASK_IMAGES) full = true; // ← 循环里就停,不事后截
+  };
+  const asUrl = (u) => (typeof u === 'string' && /^https?:\/\//i.test(u) ? { mime: '', url: u } : null);
+  const takeItems = (arr) => { for (const it of Array.isArray(arr) ? arr : []) { if (full) return; take(typeof it === 'string' ? asUrl(it) : openaiItem(it, root)); } };
+  const takeImageList = (arr) => {
+    for (const img of Array.isArray(arr) ? arr : []) {
+      const one = img?.url ?? img;
+      for (const u of Array.isArray(one) ? one : [one]) { if (full) return; take(asUrl(u)); }
+    }
+  };
+  const result = plainObj(root.result);
+  takeItems(result?.data);
+  takeImageList(result?.images);
+  takeImageList(plainObj(inner?.result)?.images);
+  takeItems(output?.results);
+  take(asUrl(result?.sample));
+  take(asUrl(result?.url));
+  take(asUrl(root.url));
+  take(asUrl(inner?.url));
+  takeItems(Array.isArray(root.data) ? root.data : null);
+  takeItems(root.images);
+  return { status, progress, urls, b64, message, cost, creditsCost };
 }
 
 /** 文件名:{时间戳}-{prompt 前 20 字符 slug}.{ext}。重名由调用方加序号。 */

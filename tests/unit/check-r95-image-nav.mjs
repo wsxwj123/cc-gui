@@ -324,8 +324,10 @@ check('B2/B3 存在 const goShot = (dir) 且调用 neighbor(', () => {
   assert.match(P, /const goShot = \(dir\)/);
   assert.match(P, /neighbor\(/);
 });
-check('R4/M10 setZoom 全部改用条目坐标:setZoom({ id: 恰好 3 处', () => {
-  assert.strictEqual(count(P, /setZoom\(\{ id:/g), 3, '预览区大图 / 网格视图 / 列表视图 三处调用点');
+// 2026-09-21 r123 R5:网格 / 列表视图的缩略图点击改为「选中」(pickShot),放大层入口合并成 taskActions 里
+// 共用的一枚「放大」按钮 → 调用点 = 预览区大图 + 动作按钮 两处;仍全部用条目坐标 { id, index },不许有 { src }。
+check('R4/M10 setZoom 全部改用条目坐标:setZoom({ id: 恰好 2 处', () => {
+  assert.strictEqual(count(P, /setZoom\(\{ id:/g), 2, '预览区大图 / 任务列表「放大」按钮 两处调用点');
 });
 check('R4 setZoom( 调用点 ≥ 4 处(3 处开 + 关闭时置空)', () => {
   assert.ok(count(P, /setZoom\(/g) >= 4, `实得 ${count(P, /setZoom\(/g)} 处`);

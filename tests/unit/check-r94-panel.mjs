@@ -248,8 +248,11 @@ check('§7.6 回归(字面):r95 与 r84 的既有锚点一个不少', () => {
     assert.ok(P.includes(lit), `缺回归锚点:${lit}`);
   }
 });
-check('§7.6 回归(精确计数):setZoom({ id: 恰 3 次', () => {
-  assert.equal(count(P, /setZoom\(\{ id:/g), 3, `实得 ${count(P, /setZoom\(\{ id:/g)} 次`);
+// 2026-09-21 r123 R5:任务列表里点缩略图改为「选中」(pickShot,恢复被清空收起的预览),放大层改由网格 /
+// 列表共用的一枚「放大」动作按钮进入 —— 网格 / 列表两处 setZoom({ id: 合并成 taskActions 里的 1 处,
+// 加上预览区大图那处,精确计数 3 → 2。锁的语义不变:所有 setZoom 仍只用条目坐标 { id, index }。
+check('§7.6 回归(精确计数):setZoom({ id: 恰 2 次', () => {
+  assert.equal(count(P, /setZoom\(\{ id:/g), 2, `实得 ${count(P, /setZoom\(\{ id:/g)} 次`);
 });
 check('§7.6 回归(精确计数):{imageStrip(h)} 恰 2 次', () => {
   assert.equal(count(P, /\{imageStrip\(h\)\}/g), 2, `实得 ${count(P, /\{imageStrip\(h\)\}/g)} 次`);
