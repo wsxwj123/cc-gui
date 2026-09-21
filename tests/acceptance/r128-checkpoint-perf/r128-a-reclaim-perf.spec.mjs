@@ -1,10 +1,12 @@
 // r128 · A 组:回滚点回收不许拖慢每条消息(INTERFACE §A A1–A6;BRIEF N1)。
 // 依据只有 .devflow/BRIEF-r128.md 与 .devflow/INTERFACE-r128.md;没看实现代码。
 // 每条用例自己起隔离实例(全新 HOME),夹具是几十字节的小文件;pack / 对象存在性直接看隔离 HOME 里的影子仓。
-// 「修前」预期:A1 的耗时比在小夹具上可能也过(它是上界守卫,不是复现);A2 看 pack 名集合;A3/A5/A6 是既有语义的反向守卫,应绿。
+// 「修前」预期:A1 的耗时比在小夹具上可能也过(它是上界守卫,不是复现);A2/A4 按**对象可达性**判(契约修订版:当前拍快照路径不生成 .pack,
+//   pack 文件名不是可用观察口)—— A2 判"响应路径不做昂贵回收"(返回后被摘掉的旧 sha 对象仍在),A4 判"后台节流回收最终释放且不伤保留项";
+//   A3/A5/A6 是既有语义的反向守卫,应绿。
 import { test, expect } from '@playwright/test';
 import { caseRoot, touchNote, writeRandomBlob, sid } from './helpers/fixtures.mjs';
-import { startInstance, stopAll, snap, listOf, delOne, seed, LENIENT, sleep } from './helpers/instance.mjs';
+import { startInstance, stopAll, snap, listOf, delOne, seed, restore, LENIENT, sleep } from './helpers/instance.mjs';
 import { packNames, objectExists, looseCount } from './helpers/git.mjs';
 
 const LIMIT = 20;
@@ -44,24 +46,31 @@ test('A1 耗时不随条数增长:同一实例、同一夹具目录,25 条的会
   expect((await listOf(strict.base, S25)).length, '拍过之后 S25 应回到上限 20(既有语义)').toBe(LIMIT);
 });
 
-// ───────────────────────── A2 每条消息不整仓重打包 ─────────────────────────
-test('A2 每条消息不整仓重打包:会话在上限 20 时连拍 10 次,过程中出现过的不同 .pack 文件名总数 ≤ 2', async () => {
-  const cr = caseRoot('a', 'a2-pack-names');
+// ───────────────────────── A2 同步不做昂贵回收 ─────────────────────────
+// 每次 POST 之前记下列表里最旧的那条(条数上限语义下,它就是本次会被摘掉的);POST 返回后**立即**(不等)看它:
+//   列表已经 20 条且它不在列表里(摘掉了,与 A3 同源),但影子仓里它的对象**还在**(cat-file -e 退出码 0)。
+// 判的是"响应路径只写 grafts 与 meta,不做对象回收"。实现若选择同步回收,这条红。
+test('A2 同步不做昂贵回收:上限 20 的会话连拍 10 次,每次返回后立即看——被摘掉的那条旧 sha 对象仍在影子仓里,且列表立刻是 20 条', async () => {
+  const cr = caseRoot('a', 'a2-no-sync-reclaim');
   const S = sid('a128', 2);
   const h = await startInstance(cr, STRICT20, { label: 'strict' });
   await seed(h.base, cr.ws, S, LIMIT, 'a2');
-  const seen = new Set(packNames(cr.home, S));
-  const trace = [`初始 packs=${JSON.stringify([...seen])} loose=${looseCount(cr.home, S)}`];
+  const rows = [];
   for (let i = 0; i < 10; i += 1) {
+    const before = await listOf(h.base, S);
+    expect(before?.length, `第 ${i + 1} 次之前列表应是 ${LIMIT} 条`).toBe(LIMIT);
+    const victim = before[before.length - 1].sha;                   // 最旧的一条 = 本次会被摘掉的
     touchNote(cr.ws, `a2 #${i}`);
     const r = await snap(h.base, S, cr.ws);
     expect(r.status, `第 ${i + 1} 次拍快照应 200:${r.text.slice(0, 160)}`).toBe(200);
-    const now = packNames(cr.home, S);
-    now.forEach((n) => seen.add(n));
-    trace.push(`#${i + 1} ${r.ms}ms packs=${JSON.stringify(now.map((n) => n.slice(0, 12)))} loose=${looseCount(cr.home, S)}`);
+    const after = await listOf(h.base, S);                          // 紧接着读,不等
+    const stillOnDisk = objectExists(cr.home, S, victim);           // 紧接着查,不等
+    rows.push({ i: i + 1, ms: r.ms, victim: short(victim), listLen: after?.length, victimListed: (after || []).some((e) => e.sha === victim), stillOnDisk });
+    expect.soft(after?.length, `第 ${i + 1} 次 POST 之后列表应立即是 ${LIMIT} 条,实际 ${after?.length}`).toBe(LIMIT);
+    expect.soft((after || []).some((e) => e.sha === victim), `第 ${i + 1} 次之后被摘掉的 ${short(victim)} 不该还在列表里(前提:确实是它被摘掉)`).toBe(false);
+    expect.soft(stillOnDisk, `第 ${i + 1} 次 POST 返回后,被摘掉的 ${short(victim)} 的对象应**仍在**影子仓里(响应路径不该同步回收)`).toBe(true);
   }
-  console.log(`[r128] A2 过程记录:\n  ${trace.join('\n  ')}\n  出现过的不同 pack 名:${seen.size} 个 ${JSON.stringify([...seen])}`);
-  expect(seen.size, `整个过程中出现过的不同 .pack 文件名应 ≤ 2(初始 1 个 + 至多 1 次重打包),实际 ${seen.size} 个:${JSON.stringify([...seen])}`).toBeLessThanOrEqual(2);
+  console.log(`[r128] A2 逐次记录(stillOnDisk=返回后对象是否仍在):\n  ${rows.map((x) => JSON.stringify(x)).join('\n  ')}`);
 });
 
 // ───────────────────────── A3 条数语义不变 ─────────────────────────
@@ -80,29 +89,41 @@ test('A3 条数语义不变:上限 20 的会话每次 POST 返回后立即 GET,e
   }
 });
 
-// ───────────────────────── A4 空间最终释放 ─────────────────────────
-test('A4 空间最终释放:CGUI_CHECKPOINT_REPACK_DEBOUNCE_MS=300,上限 20 连拍 10 次后 ≤5 秒内 objects/pack/ 只剩 1 个 pack,被摘掉的旧 sha 不再 cat-file 得到', async () => {
+// ───────────────────────── A4 后台最终释放 ─────────────────────────
+// 承接 A2 的现场,CGUI_CHECKPOINT_REPACK_DEBOUNCE_MS=300:10 次 POST 之后轮询等待 ≤5 秒,反复对那批被摘掉的 sha 跑 cat-file -e,
+// 最终应**全部不存在**;此时列表仍是 20 条、最新一条仍能 restore 成功、列表里每条的对象都还在。
+// 判的是"后台节流回收真的跑了、且没伤到保留的快照"。pack 数 / 松散对象数只记录不断言。
+test('A4 后台最终释放:REPACK_DEBOUNCE_MS=300,上限 20 连拍 10 次后 ≤5 秒内被摘掉的 10 条 sha 全部 cat-file 不到;列表仍 20 条,最新一条 restore 成功', async () => {
   const cr = caseRoot('a', 'a4-eventual-release');
   const S = sid('a128', 4);
   const h = await startInstance(cr, { ...STRICT20, CGUI_CHECKPOINT_REPACK_DEBOUNCE_MS: '300' }, { label: 'strict' });
   const seeded = await seed(h.base, cr.ws, S, LIMIT, 'a4');
-  const victims = seeded.slice(0, 10);                     // 再拍 10 次后,最旧的这 10 条该被摘掉
+  const victims = [];
   for (let i = 0; i < 10; i += 1) {
+    const before = await listOf(h.base, S);
+    victims.push(before[before.length - 1].sha);                    // 本次会被摘掉的最旧一条
     touchNote(cr.ws, `a4 #${i}`);
     const r = await snap(h.base, S, cr.ws);
     expect(r.status, `第 ${i + 1} 次拍快照应 200:${r.text.slice(0, 160)}`).toBe(200);
   }
+  expect(victims, '前提:被摘掉的正是最早造的 10 条').toEqual(seeded.slice(0, 10));
   const doneAt = Date.now();
-  let packs = packNames(cr.home, S); let alive = victims.filter((v) => objectExists(cr.home, S, v));
-  while (Date.now() - doneAt < 5_000 && !(packs.length === 1 && alive.length === 0)) {
+  let alive = victims.filter((v) => objectExists(cr.home, S, v));
+  const aliveRightAfter = alive.length;
+  while (Date.now() - doneAt < 5_000 && alive.length > 0) {
     await sleep(200);
-    packs = packNames(cr.home, S); alive = victims.filter((v) => objectExists(cr.home, S, v));
+    alive = victims.filter((v) => objectExists(cr.home, S, v));
   }
-  console.log(`[r128] A4 等待 ${Date.now() - doneAt}ms 后:packs=${JSON.stringify(packs)} loose=${looseCount(cr.home, S)} 旧 sha 仍可达 ${alive.length}/10`);
-  expect.soft(packs.length, `节流窗口过后 objects/pack/ 应只剩 1 个 pack,实际 ${packs.length} 个:${JSON.stringify(packs)}`).toBe(1);
-  expect.soft(alive, `被摘掉的 10 条旧 sha 应都 cat-file 不到了,仍可达:${JSON.stringify(alive.map(short))}`).toEqual([]);
-  const kept = seeded.slice(10);
-  expect(kept.filter((k) => !objectExists(cr.home, S, k)), '仍在列表里的 10 条老快照对象必须还在(反向:不许多删)').toEqual([]);
+  const waited = Date.now() - doneAt;
+  const list = await listOf(h.base, S);
+  const missingKept = (list || []).filter((e) => !objectExists(cr.home, S, e.sha)).map((e) => short(e.sha));
+  const rs = list?.[0]?.sha ? await restore(h.base, S, list[0].sha, cr.ws) : { status: 0, text: '列表为空' };
+  console.log(`[r128] A4 连拍结束时旧 sha 仍可达 ${aliveRightAfter}/10;等待 ${waited}ms 后仍可达 ${alive.length}/10 ${JSON.stringify(alive.map(short))};`
+    + `列表 ${list?.length} 条;保留项对象缺失 ${JSON.stringify(missingKept)};最新一条 restore ${rs.status};观察:packs=${JSON.stringify(packNames(cr.home, S))} loose=${looseCount(cr.home, S)}`);
+  expect.soft(alive, `≤5 秒内被摘掉的 10 条 sha 应全部 cat-file 不到,仍可达:${JSON.stringify(alive.map(short))}`).toEqual([]);
+  expect.soft(list?.length, `后台回收之后列表仍应是 ${LIMIT} 条,实际 ${list?.length}`).toBe(LIMIT);
+  expect.soft(rs.status, `最新一条 ${short(list?.[0]?.sha)} 应仍能 restore(200),实际 ${rs.status} ${String(rs.text).slice(0, 120)}`).toBe(200);
+  expect.soft(missingKept, `列表里每条的对象都应还在(不许伤到保留的快照),缺失:${JSON.stringify(missingKept)}`).toEqual([]);
 });
 
 // ───────────────────────── A5 删除仍立即释放 ─────────────────────────
