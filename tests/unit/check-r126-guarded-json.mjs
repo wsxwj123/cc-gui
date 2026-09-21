@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// r126 单测:server/utils/guarded-json.js —— 配置 json 守卫读取(BRIEF-r126 Q1 / Q2 / Q4 / Q5)。
+// r126 单测:server/utils/guarded-json.js —— 配置 json 守卫读取(BRIEF-r126 Q1 / Q2 / Q4 / Q5)+ 客户端警告筛选 / 文案。
 //  ① 文件不存在 = missing、可写、不备份;0 字节 / 只有空白 同样按 missing(没有数据可保护);
 //  ② 文件正常 = 解析值原样、不留任何 *.corrupt-*、可写;
 //  ③ 损坏(半截 / 含非 UTF-8 字节的乱码)= corrupt + 同目录 `<原名>.corrupt-<数字>` 备份逐字节相同 + 原文件不动 + 0600;
 //  ④ 同内容去重:再读 N 次 / 原字节重写(mtime 变)/ 并发 10 路首读 / 清状态模拟重启 → 仍只 1 份;换内容 → 第 2 份且旧的不被改写;
 //  ⑤ assertWritable:损坏 → 抛 ConfigGuardError { status 409, code CONFIG_CORRUPT, file, backup },文案不含文件内容;
 //     修好 / 删掉后不重启即可写;读不出(EACCES)→ CONFIG_UNREADABLE 同样拒写;
-//  ⑥ corruptWarning / sendConfigGuardError 的形状(INTERFACE-r126 §B1 / §C1)。
+//  ⑥ corruptWarning / sendConfigGuardError 的形状(INTERFACE-r126 §B1 / §C1);
+//  ⑦ 客户端 visibleProviderWarnings(只放 config-corrupt / ccswitch-error)与 providerWarningText(含文件名 / 备份 / 处理办法)。
 // 隔离:全部在 mktemp 目录里,真实 ~/.claude-gui 一个字节不碰。
 // Run: node tests/unit/check-r126-guarded-json.mjs
 import assert from 'node:assert/strict';
@@ -181,6 +182,24 @@ try {
     const o = await readJsonGuarded(OTHER);
     ok(/^provider-models\.json\.corrupt-\d+$/.test(basename(o.backup)), 't6: 其它文件按各自文件名备份');
     eq(backups(OTHER).length, 1, 't6: 其它文件恰好 1 份');
+  }
+
+  // ─── ⑦ 客户端:visibleProviderWarnings 只放 config-corrupt / ccswitch-error;providerWarningText 文案 ───
+  {
+    const { visibleProviderWarnings, providerWarningText } = await import('../../client/src/utils/providerListFetch.js');
+    const corrupt = { kind: 'config-corrupt', file: '/x/.claude-gui/custom-providers.json', message: 'srv', backup: '/x/.claude-gui/custom-providers.json.corrupt-1700000000000' };
+    const ccErr = { kind: 'ccswitch-error', file: '/x/.cc-switch/cc-switch.db', message: 'cc-switch 导入项未读到：数据库文件损坏', backup: null };
+    const ccMissing = { kind: 'ccswitch-missing', file: '/x/.cc-switch/cc-switch.db', message: '未找到', backup: null };
+    eq(visibleProviderWarnings({ warnings: [ccMissing, corrupt, null, 'junk', ccErr, { kind: 'other' }] }), [corrupt, ccErr], 't7: 只留 config-corrupt / ccswitch-error,忽略 missing / 非对象 / 未知 kind');
+    eq(visibleProviderWarnings({}), [], 't7: 没有 warnings 字段 → []');
+    eq(visibleProviderWarnings({ warnings: null }), [], 't7: warnings 非数组 → []');
+    const t = providerWarningText(corrupt);
+    ok(t.includes('custom-providers.json') && t.includes('备份') && t.includes(corrupt.backup), 't7: 损坏文案含文件名、「备份」与备份路径');
+    ok(/修复|删除/.test(t) && !t.includes('srv'), 't7: 损坏文案给处理办法,且不照抄服务端 message(客户端按结构化字段拼)');
+    ok(providerWarningText({ ...corrupt, file: 'C:\\Users\\u\\.claude-gui\\image-providers.json' }).startsWith('image-providers.json '), 't7: Windows 反斜杠路径也只取文件名');
+    ok(providerWarningText({ ...corrupt, backup: null }).includes('备份失败'), 't7: 没有备份路径时说明备份失败');
+    eq(providerWarningText(ccErr), ccErr.message, 't7: cc-switch 出错直接用服务端说明');
+    eq(providerWarningText(null), '', 't7: 空入参不炸');
   }
 } catch (e) {
   failure = e;
