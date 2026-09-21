@@ -278,6 +278,21 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.396</b>(2026-09-21)· 修复 2 条</summary>
+
+**修复**
+
+- **生图:接中转站不再"换一家就报错"**
+
+<details><summary>技能仓库</summary>
+
+根目录放 SKILL.md 的仓库能被识别与导入(技能名取仓库名);仓库里没有技能时明说"没有找到技能",不再误报"此源已全部安装"。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.395</b>(2026-09-21)· 新增 3 条 · 修复 2 条</summary>
 
 **新增**
