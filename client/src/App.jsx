@@ -94,7 +94,7 @@ import { MemoryPanel } from './components/MemoryPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import ImagePanel from './components/ImagePanel.jsx';
-import { ModelPickModal, mergeModelLines, stripJunkModels } from './components/ModelPickModal.jsx';
+import { ModelPickModal, replaceModelLines, stripJunkModels } from './components/ModelPickModal.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
 import BtwWindow from './components/BtwWindow.jsx';
 import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyExactResult, relativeAgeLabel } from './utils/contextCache.js';
@@ -10938,14 +10938,15 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
             : <span className="break-all whitespace-pre-wrap">✗ 连接失败:{testResult.error}</span>}
         </div>
       )}
-      {/* r52:拉取结果的勾选弹窗。确认后 merge 进模型框(原有行一律保留),弹窗只是文本域的编辑器。 */}
+      {/* r52:拉取结果的勾选弹窗,弹窗只是文本域的编辑器。r125:确认后以勾选为准写回模型框
+          (勾掉的候选移除、新勾的加入;不在本次目录里的既有行原样保留)。 */}
       {pickCandidates && (
         <ModelPickModal
           candidates={pickCandidates}
           existing={parseModels()}
           onClose={() => setPickCandidates(null)}
           onConfirm={(ids) => {
-            const merged = mergeModelLines(parseModels(), ids).join('\n');
+            const merged = replaceModelLines(parseModels(), pickCandidates, ids).join('\n');
             // r59:经撤销通道写入(旧值先入栈 + 派发 input 带动 onChange),合并结果可 ⌘Z 撤回。
             if (modelsRef.current) applyProgrammaticText(modelsRef.current, merged);
             else setModelsText(merged); // 框未挂载(理论上不可能)时不丢用户的勾选

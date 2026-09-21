@@ -12,7 +12,7 @@ import { mergeProviderLists, rowIsCurrent, SOURCE_BADGE } from '../utils/provide
 import { resolveSelectorModel } from '../utils/routing.js';
 import { nativeContextWindow } from '../utils/contextWindow.js';
 import { notifyOauthMissing } from '../utils/officialAuth.js';
-import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickModal.jsx';
+import { ModelPickModal, replaceModelLines, stripJunkModels } from './ModelPickModal.jsx';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -483,13 +483,15 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
     } catch (e) { setFetchNote('拉取失败：' + e.message); }
     setFetching(false);
   };
-  // 勾选确认:merge 进该 provider 的 models 并 PUT 持久化(只增不减)。PUT 会同步激活
-  // provider 的模型快照,故 provider-change 事件后本组件重读 /api/model 即见新模型。
+  // 勾选确认(r125 以勾选为准):该 provider 的 models = 弹窗最终勾选集(勾掉的移除、新勾的
+  // 加入;不在本次目录里的既有 id 原样保留,见 replaceModelLines),PUT 持久化。PUT 会同步
+  // 激活 provider 的模型快照,故 provider-change 事件后本组件重读 /api/model 即见新列表。
   const applyPick = async (ids) => {
     const prov = customProv;
+    const candidates = pickCandidates || [];
     setPickCandidates(null);
     if (!prov || !ids.length) return;
-    const nextModels = mergeModelLines(prov.models || [], ids);
+    const nextModels = replaceModelLines(prov.models || [], candidates, ids);
     try {
       const r = await fetch(`/api/custom-providers/${prov.id}`, {
         method: 'PUT',
@@ -499,7 +501,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || '保存失败');
       setCustomProv({ ...prov, models: nextModels });
-      setFetchNote(`已添加 ${nextModels.length - (prov.models || []).length} 个模型`);
+      setFetchNote(`已更新模型列表：${nextModels.length} 个`);
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
     } catch (e) { setFetchNote('保存失败：' + e.message); }
   };
@@ -770,7 +772,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
         <ModelPickModal
           candidates={pickCandidates}
           existing={customProv?.models || EMPTY_ARRAY}
-          title={`选择要添加的模型（${customProv?.name || provider}）`}
+          title={`选择模型（${customProv?.name || provider}）`}
           onClose={() => setPickCandidates(null)}
           onConfirm={applyPick}
         />
