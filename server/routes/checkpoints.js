@@ -56,6 +56,16 @@ const RETENTION_DAYS = () => envNum(['CGUI_CHECKPOINT_RETENTION_DAYS', 'CGUI_CHE
 // 量级才开始收紧(保留条数随目录变大递减),这正是要治的那类会话。
 const MAX_SESSION_TOTAL_BYTES = () => envNum(
   ['CGUI_CHECKPOINT_MAX_TOTAL_BYTES', 'CGUI_CHECKPOINTS_MAX_TOTAL_BYTES'], 10 * 1024 ** 3);
+// r128:空间回收(重打包 / 删不可达对象)不再跑在拍快照的响应路径上,而是按会话节流到后台
+// (再次触发只重置定时器;公开契约 CGUI_CHECKPOINT_REPACK_DEBOUNCE_MS,默认 30 秒)。
+const REPACK_DEBOUNCE_MS = () => envNum(['CGUI_CHECKPOINT_REPACK_DEBOUNCE_MS'], 30_000);
+// 松散对象的删除宽限:不可达但 2 分钟内刚写入的不删(锁之外的第二道保险;git 自己的 prune 也按 mtime 留宽限)。
+const LOOSE_OBJECT_GRACE_MS = 120_000;
+// 总占用维的粗筛结果(dirBytes 是整仓 stat 遍历,大仓 20 万对象要几百毫秒到数秒)按会话缓存这么久,
+// 拍快照不必每条消息都重新遍历;回收完成时失效。
+const COARSE_BYTES_TTL_MS = 30_000;
+// 影子仓里的"待回收"标记:摘掉但还没真正回收的提交 sha 列表。进程退出前后台任务没跑到,下次启动清扫据此补收。
+const PENDING_FILE = 'reclaim-pending.json';
 // 保留时长是"天"级产品语义,测试要注入 1ms 得显式声明——避免有人把 30 误写成毫秒。
 function retentionMs() {
   const days = RETENTION_DAYS();
@@ -181,7 +191,9 @@ async function sessionDir_(sessionId) {
 // 所以这里自己做诚实的可达集重打包:rev-list --objects --all(认 replace、认 graft)
 // → pack-objects → 丢掉旧 pack → 扫掉不在可达集里的松散对象。改完 git log 与磁盘
 // 严格一致,列出来的 sha 一定打得开。
-async function repackHonest(gitDir) {
+// r128:松散对象分两档 —— exempt(本轮明确摘掉的提交独占的对象)立即删;其余不可达的看 mtime,
+// graceMs 内刚写入的不删(若有别的进程正在 add/commit,它刚写的 blob/tree 还没被任何 ref 引用)。
+async function repackHonest(gitDir, { exempt = new Set(), graceMs = LOOSE_OBJECT_GRACE_MS } = {}) {
   let revs;
   try {
     revs = (await gitIn(gitDir, ['rev-list', '--objects', '--all'])).stdout;
@@ -217,15 +229,21 @@ async function repackHonest(gitDir) {
       }
     } catch { /* 目录不存在 */ }
   }
-  // 松散对象:不在诚实可达集里的一律删(prune 在这套引用布局下不管用)。
+  // 松散对象:不在诚实可达集里的删(prune 在这套引用布局下不管用);非 exempt 的留 graceMs 宽限。
+  const cutoff = Date.now() - graceMs;
   try {
     for (const d2 of await readdir(join(gitDir, 'objects'))) {
       if (!/^[0-9a-f]{2}$/.test(d2)) continue;
       const sub = join(gitDir, 'objects', d2);
       for (const f of await readdir(sub)) {
         if (!/^[0-9a-f]{38}$/.test(f)) continue;
-        if (keep.has(d2 + f)) continue;
-        try { await rm(join(sub, f), { force: true }); } catch { /* 忽略 */ }
+        const sha = d2 + f;
+        if (keep.has(sha)) continue;
+        const p = join(sub, f);
+        if (!exempt.has(sha)) {
+          try { if ((await stat(p)).mtimeMs > cutoff) continue; } catch { continue; }   // 刚写的 / 已消失的都不动
+        }
+        try { await rm(p, { force: true }); } catch { /* 忽略 */ }
       }
     }
   } catch { /* 忽略 */ }
@@ -248,6 +266,7 @@ async function repackHonest(gitDir) {
  *     偏松就回到"删不掉、盘被吃"的老毛病(判官点出的那个遗留风险)。
  *   * 拿不到(git 失败/超时/父解析不出)返回 0 = "这条不占",绝不把清理搞挂。 */
 async function shaBytes(gitDir, sha) {
+  gcStats.shaBytesCalls += 1;
   try {
     const head = (await gitIn(gitDir, ['rev-list', '--parents', '-n', '1', sha])).stdout.trim();
     if (!head) return 0;
@@ -287,6 +306,12 @@ async function shaBytes(gitDir, sha) {
  * 删不掉也绝不把 snapshot 搞挂——这里抛的错由调用方吞。
  * opts.maxCount / opts.maxAgeMs / opts.maxTotalBytes / opts.bytesOf 让 R3 单条删除与测试
  * 复用同一套"删提交 + 对账 meta"逻辑。
+ *
+ * r128 拆成"便宜同步 + 昂贵后台":同步只做 条数/天数判定 → 写 info/grafts 摘除 → saveMeta 对账
+ * (毫秒级,列表条数因此**立即**正确);对象/pack 的真正回收交给 scheduleRepack 节流到后台。
+ *   opts.reclaim === 'now'  → 回收也同步做(启动清扫、单测用;DELETE 路由直接调 reclaimSpace)
+ *   opts.bytesOf 存在       → 总占用维强制精算(不走粗筛;单测注入)
+ *   opts.dirBytes           → 粗筛的目录计量可注入(单测)
  */
 async function gcSession(sessionId, opts = {}) {
   const gitDir = await sessionDir_(sessionId);
@@ -310,10 +335,14 @@ async function gcSession(sessionId, opts = {}) {
   // 总占用维:先占住最新那条(保底),再从次新往旧累加,装不下就丢 —— 丢的顺序仍是
   // "从最旧开始"。先判断有没有可丢的(log 只有一条 = 前两维没动、也没料可丢),
   // 免得每次拍快照都白起一堆 git 进程去量。
-  if (maxTotalBytes > 0 && (keep.length > 1 || dropped.length > 0)) {
-    const bytesOf = typeof opts.bytesOf === 'function'
-      ? opts.bytesOf
-      : (sha) => shaBytes(gitDir, sha);
+  // r128 粗筛:逐条精确计量(每条 3 个 git 进程)只在 dirBytes(纯 stat,按会话缓存 30 秒)说
+  // "磁盘上确实超了"之后才跑;注入 bytesOf 视为强制精算(锁定单测靠它断言三维取最严)。
+  // dirBytes 是压缩后 + 含待回收垃圾的数字:偏松时(垃圾撑大)多跑一次精算无害,偏紧不可能。
+  const forcePrecise = typeof opts.bytesOf === 'function';
+  if (maxTotalBytes > 0 && (keep.length > 1 || dropped.length > 0)
+      && (forcePrecise || await coarseSessionBytes(sessionId, gitDir, opts.dirBytes) > maxTotalBytes)) {
+    gcStats.preciseRuns += 1;
+    const bytesOf = forcePrecise ? opts.bytesOf : (sha) => shaBytes(gitDir, sha);
     const b = new Map(await Promise.all(log.map(async (sha) => [sha, await bytesOf(sha)])));
     const sizeOf = (sha) => b.get(sha) || 0;
     // 保底那条(最新的一条)先占住,再从次新往旧累加、装不下就丢 —— 这样丢的顺序恒为
@@ -329,15 +358,84 @@ async function gcSession(sessionId, opts = {}) {
     keep.length = 0;
     keep.push(...kept);                                       // kept 已是新→旧
   }
-  if (!dropped.length) return { removed: 0 };
+  if (!dropped.length) {
+    // 没什么可摘,但上一个进程留下的"待回收"没人接手(定时器随进程死了)→ 重新排一次后台回收。
+    if (opts.reclaim !== 'now' && !repackTimers.has(sessionId) && await pathExists(join(gitDir, PENDING_FILE))) scheduleRepack(sessionId);
+    return { removed: 0 };
+  }
   // 保底:至少留最新一条,否则条数/时间维(测试注入极小值)会把会话清空。
   if (!keep.length) {
     keep.push(dropped.shift());
   }
-  await detachShas(gitDir, dropped, keep);
+  await detachShas(gitDir, keep);
   const removed = new Set(dropped);
   await saveMeta(sessionId, meta.filter((e) => !removed.has(e.sha)));
+  if (opts.reclaim === 'now') {
+    await reclaimSpace(gitDir, { dropped });
+  } else {
+    // 先落盘再排定时器:进程在定时器到点前退出,下次启动清扫据标记补收(N1-3)。
+    await markPending(gitDir, dropped);
+    scheduleRepack(sessionId);
+  }
   return { removed: dropped.length };
+}
+
+/** 总占用维的粗筛读数:dirBytes 按会话缓存 COARSE_BYTES_TTL_MS;回收完成 / 删除时失效(见 forgetCoarse)。 */
+const coarseBytesCache = new Map();   // sessionId → { bytes, at }
+async function coarseSessionBytes(sessionId, gitDir, measure) {
+  const hit = coarseBytesCache.get(sessionId);
+  if (hit && Date.now() - hit.at < COARSE_BYTES_TTL_MS) return hit.bytes;
+  gcStats.coarseMeasures += 1;
+  const bytes = await (typeof measure === 'function' ? measure : dirBytes)(gitDir);
+  coarseBytesCache.set(sessionId, { bytes, at: Date.now() });
+  return bytes;
+}
+function forgetCoarse(sessionId) { coarseBytesCache.delete(sessionId); }
+
+/** 待回收标记:读出上次摘掉但还没回收的 sha(没有 / 坏了 = 空)。 */
+async function readPending(gitDir) {
+  try {
+    const parsed = JSON.parse(await readFile(join(gitDir, PENDING_FILE), 'utf8'));
+    return Array.isArray(parsed.dropped) ? parsed.dropped.filter((s) => /^[0-9a-f]{40}$/.test(String(s))) : [];
+  } catch { return []; }
+}
+async function markPending(gitDir, dropped) {
+  const all = [...new Set([...(await readPending(gitDir)), ...dropped])].slice(-5000);
+  try { await writeFile(join(gitDir, PENDING_FILE), JSON.stringify({ dropped: all })); }
+  catch (e) { console.warn('[checkpoints] 写待回收标记失败(只影响进程退出后的补收):', e?.message || e); }
+}
+
+// ── r128 N1:后台节流回收 ──────────────────────────────────────────────────
+// 同一会话反复拍快照只重置定时器;到点在会话锁内跑 reclaimSpace。定时器 unref:不拖住进程退出,
+// 没跑到的由下次启动清扫按 PENDING_FILE 补(sweepAllSessions)。
+const repackTimers = new Map();       // sessionId → Timeout
+const gcStats = { shaBytesCalls: 0, preciseRuns: 0, coarseMeasures: 0, repackScheduled: 0, repackFired: 0, repackRuns: 0 };
+function scheduleRepack(sessionId, delayMs = REPACK_DEBOUNCE_MS()) {
+  const prev = repackTimers.get(sessionId);
+  if (prev) clearTimeout(prev);
+  const t = setTimeout(() => {
+    repackTimers.delete(sessionId);
+    gcStats.repackFired += 1;
+    runBackgroundReclaim(sessionId).catch((e) => console.warn('[checkpoints] 后台回收失败(下次再收):', sessionId, e?.message || e));
+  }, delayMs);
+  t.unref();
+  repackTimers.set(sessionId, t);
+  gcStats.repackScheduled += 1;
+}
+function cancelRepack(sessionId) {
+  const t = repackTimers.get(sessionId);
+  if (t) { clearTimeout(t); repackTimers.delete(sessionId); }
+}
+async function runBackgroundReclaim(sessionId) {
+  const gitDir = await sessionDir_(sessionId);
+  if (!gitDir) return;                                   // 会话已被删
+  await acquireGc(sessionId);                            // 与拍快照 / 删除 / 清扫互斥;拿不到就等
+  try {
+    if (!(await sessionDir_(sessionId))) return;
+    await reclaimSpace(gitDir);
+    forgetCoarse(sessionId);                             // 目录刚瘦身,粗筛读数作废
+    gcStats.repackRuns += 1;
+  } finally { releaseGc(sessionId); }
 }
 
 // ── r122 R5:会话级互斥 ────────────────────────────────────────────────────
@@ -354,6 +452,11 @@ function tryAcquireGc(sessionId) {
   return true;
 }
 function releaseGc(sessionId) { gcInFlight.delete(sessionId); }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** 等到拿到为止(每 50ms 轮询,不超时、不强占):拍快照与后台回收用 —— 拍快照不能因为锁忙而失败。 */
+async function acquireGc(sessionId) {
+  while (!tryAcquireGc(sessionId)) await sleep(50);
+}
 /** 等锁(上限 waitMs);等不到也放行 —— 删除路径的 rm 是 force 的,真撞上也只是多一次 no-op。 */
 async function waitGc(sessionId, waitMs = 15_000) {
   const deadline = Date.now() + waitMs;
@@ -443,13 +546,14 @@ export async function sweepAllSessions(opts = {}) {
     maxAgeMs: opts.maxAgeMs ?? retentionMs(),
     maxTotalBytes: opts.maxTotalBytes ?? MAX_SESSION_TOTAL_BYTES(),
   };
+  // 清扫本身就在后台:回收同步做完(reclaim:'now'),不再另排定时器。
   const gc = opts.gc || ((sid) => gcSession(sid, {
-    maxCount: limits.maxCount, maxAgeMs: limits.maxAgeMs, maxTotalBytes: limits.maxTotalBytes,
+    maxCount: limits.maxCount, maxAgeMs: limits.maxAgeMs, maxTotalBytes: limits.maxTotalBytes, reclaim: 'now',
   }));
   const pauseMs = opts.pauseMs ?? 150;
   const log = opts.log || ((line) => console.log(line));
   const startedAt = Date.now();
-  const sum = { scanned: 0, reclaimed: 0, gcCalls: 0, skippedActive: 0, skippedInvalid: 0, skippedBusy: 0, failed: 0, ms: 0 };
+  const sum = { scanned: 0, reclaimed: 0, gcCalls: 0, repacked: 0, skippedActive: 0, skippedInvalid: 0, skippedBusy: 0, failed: 0, ms: 0 };
   let dirs = [];
   try { dirs = await readdir(root, { withFileTypes: true }); } catch { dirs = []; }   // 根目录还不存在 = 没什么可扫
   for (const ent of dirs) {
@@ -464,12 +568,20 @@ export async function sweepAllSessions(opts = {}) {
       try { metaMtime = (await stat(join(dir, 'meta.json'))).mtimeMs; } catch { /* 没有 meta = 不算活跃 */ }
       if (idleMs > 0 && metaMtime > 0 && now - metaMtime < idleMs) { sum.skippedActive += 1; continue; }
       const verdict = await coarseOverLimit(dir, limits, opts.io || {});
-      if (!verdict.over) continue;
+      // r128:没超限但上个进程留下"待回收"标记(后台定时器没跑到就退出了)→ 只补回收,不重新判定。
+      const pendingOnly = !verdict.over && await pathExists(join(dir, PENDING_FILE));
+      if (!verdict.over && !pendingOnly) continue;
       if (!tryAcquireGc(id)) { sum.skippedBusy += 1; continue; }        // 正被 POST/DELETE 占着:下次
-      let r;
-      try { r = await gc(id); } finally { releaseGc(id); }
-      sum.gcCalls += 1;
-      sum.reclaimed += Number(r?.removed) || 0;
+      try {
+        if (pendingOnly) {
+          await reclaimSpace(dir);
+          sum.repacked += 1;
+        } else {
+          const r = await gc(id);
+          sum.gcCalls += 1;
+          sum.reclaimed += Number(r?.removed) || 0;
+        }
+      } finally { releaseGc(id); }
     } catch (e) {
       sum.failed += 1;
       console.warn('[checkpoints] sweep 单个会话失败(继续下一个):', id, e?.message || e);
@@ -506,7 +618,7 @@ export async function runStartupSweep(opts = {}) {
  * (info/grafts 已被 git 标记"过时"但仍完全支持,rev-list/repack 也认它,见
  *  repackHonest 注释;写各处的 -c advice.graftFileDeprecated=false 与它配套,别删。)
  */
-async function detachShas(gitDir, dropped, keep) {
+async function detachShas(gitDir, keep) {
   if (!keep.length) return;
   try { await gitIn(gitDir, ['update-ref', 'HEAD', keep[0]]); } catch { /* 忽略 */ }
   // 每个 keep 提交父 → 时间线上紧邻的下一个 keep(最后一条无父 = root)。不建 graft 的话
@@ -516,14 +628,38 @@ async function detachShas(gitDir, dropped, keep) {
     await writeFile(join(gitDir, 'info', 'grafts'),
       keep.map((sha, i) => `${sha}${keep[i + 1] ? ` ${keep[i + 1]}` : ''}`).join('\n') + '\n');
   } catch { /* 写不了 = 保持原样,log 仍按真实历史走,不炸 */ }
-  // replace 引用一律清掉:本函数已不再新建,但旧版本对 keep 提交建的 refs/replace/*
-  // 会一直在——每个都挂着一个幽灵提交,不清就永远 rev-list 数多一条。
-  for (const sha of [...keep, ...dropped]) {
-    try { await gitIn(gitDir, ['replace', '-d', sha]); } catch { /* 没有就算了 */ }
-  }
+}
+
+/**
+ * 真正的空间回收(贵的那半,r128 从 detachShas 拆出来;必须在会话锁内调):
+ *   ① 旧版本留下的 refs/replace/*:先一次 for-each-ref 探测,有才逐条删(默认没有 → 零进程;
+ *      以前对 keep+dropped 每条起一个 `replace -d`,20 多个串行进程白跑);
+ *   ② reflog 过期 + 删 logs/(裸仓默认不写 reflog,几乎总是 no-op);
+ *   ③ 本轮明确摘掉的提交(参数 dropped + 磁盘上的待回收标记)独占的对象 = 立即可删的那部分
+ *      (`rev-list --objects <dropped> --not --all`,一个进程);其余不可达的松散对象按宽限删;
+ *   ④ repackHonest;⑤ 清掉待回收标记。
+ */
+async function reclaimSpace(gitDir, { dropped = [] } = {}) {
+  try {
+    const refs = (await gitIn(gitDir, ['for-each-ref', '--format=%(refname)', 'refs/replace/'])).stdout
+      .split('\n').map((l) => l.trim()).filter((l) => l.startsWith('refs/replace/'));
+    for (const ref of refs) {
+      try { await gitIn(gitDir, ['update-ref', '-d', ref]); } catch { /* 没有就算了 */ }
+    }
+  } catch { /* 探测失败 = 当没有 */ }
   try { await gitIn(gitDir, ['reflog', 'expire', '--expire=now', '--expire-unreachable=now', '--all']); } catch {}
   try { await rm(join(gitDir, 'logs'), { recursive: true, force: true }); } catch {}
-  await repackHonest(gitDir);
+  const known = [...new Set([...dropped, ...(await readPending(gitDir))])].filter((s) => /^[0-9a-f]{40}$/.test(String(s)));
+  let exempt = new Set();
+  if (known.length) {
+    try {
+      // --ignore-missing:重复回收时有的提交对象已不在,不能让整条命令失败。
+      const out = (await gitIn(gitDir, ['rev-list', '--objects', '--ignore-missing', ...known, '--not', '--all'])).stdout;
+      exempt = new Set(out.split('\n').map((l) => l.slice(0, 40)).filter((s) => /^[0-9a-f]{40}$/.test(s)));
+    } catch { /* 算不出 = 全按宽限口径,不会删错,只会晚删 */ }
+  }
+  await repackHonest(gitDir, { exempt });
+  try { await rm(join(gitDir, PENDING_FILE), { force: true }); } catch {}
 }
 
 // ── 体积估算(安全阀用)───────────────────────────────────────────────────
@@ -828,6 +964,7 @@ router.delete('/checkpoints/:sessionId', async (req, res) => {
     // r122:启动清扫可能正在收这个会话 —— 等它放手再删,免得 rm 与 repack 互踩(gcSession 对
     // 目录消失本就返回 removed:0,这里只是不让两路同时改)。
     await waitGc(req.params.sessionId); locked = req.params.sessionId;
+    cancelRepack(req.params.sessionId); forgetCoarse(req.params.sessionId);   // 目录都没了,后台回收 / 粗筛缓存一并作废
     await rm(dir, { recursive: true, force: true });
     // 目录整个没了,meta 也随之消失,列表自然为空。
     res.json({ ok: true, deleted: true });
@@ -858,9 +995,12 @@ router.delete('/checkpoints/:sessionId/:sha', async (req, res) => {
       return res.status(404).json({ error: 'checkpoint not found', code: 'CHECKPOINT_NOT_FOUND' });
     }
     // 删一条不存在的 sha 绝不能把整会话目录连带删掉(见验收 R3-5):这里只摘这一条。
-    await detachShas(dir, [target], all.filter((s) => s !== target));
+    // 用户主动删:摘除 + 回收都同步做完再回(r120 验收断言删后空间真释放),不走后台节流。
+    await detachShas(dir, all.filter((s) => s !== target));
     const meta = await loadMeta(sessionId);
     await saveMeta(sessionId, meta.filter((e) => e.sha !== target));
+    await reclaimSpace(dir, { dropped: [target] });
+    forgetCoarse(sessionId);
     res.json({ ok: true, deleted: true, sha: target });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -940,3 +1080,8 @@ async function dirBytes(root) {
 }
 
 export default router;
+/** 只给单测(tests/unit/check-r128-*.mjs):内部函数与计数器,不是公开接口。 */
+export const _internalsForTests = {
+  gcStats, gcSession, scheduleRepack, cancelRepack, repackTimers, reclaimSpace, repackHonest, detachShas,
+  tryAcquireGc, acquireGc, waitGc, releaseGc, readPending, markPending, forgetCoarse, PENDING_FILE,
+};
