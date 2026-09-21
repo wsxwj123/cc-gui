@@ -154,3 +154,103 @@ test('探路 P6 聊天模式开关的 DOM + 打开后条带状态', async ({ pag
   console.log('[P6] up1 =', info.up1);
   console.log('[P6] up2 =', info.up2);
 });
+
+test('探路 P7 用量面板「价格与来源」今天长什么样 + 两个价目接口的真实返回形状', async ({ page }) => {
+  test.setTimeout(120_000);
+  const { openUsagePanel, api, pricingBlock, outsideFoldText } = await import('./helpers/ui.mjs');
+  await boot(page, { fold: null });
+  await openSessionBySearch(page, FOLD.mark);
+  await openUsagePanel(page);
+  const block = await pricingBlock(page);
+  console.log('[P7] outside-fold text =', await outsideFoldText(block));
+  const details = await block.locator('details').evaluateAll((els) => els.map((d) => ({ open: d.open, summary: (d.querySelector('summary')?.textContent || '').trim(), body: (d.textContent || '').replace(/\s+/g, ' ').slice(0, 260) })));
+  console.log('[P7] details =', JSON.stringify(details, null, 1));
+  const html = await block.evaluate((el) => el.outerHTML.replace(/<svg[\s\S]*?<\/svg>/g, '<svg/>').replace(/\s+/g, ' ').slice(0, 7000));
+  console.log('[P7] html =', html);
+  const pricing = await api('GET', '/api/pricing');
+  const cur = await api('GET', '/api/pricing/current');
+  const p = pricing.json || {};
+  console.log('[P7] /api/pricing keys =', Object.keys(p), 'providers.len =', (p.providers || []).length, 'quotes.len =', (p.quotes || []).length, 'fetchedAt =', p.fetchedAt, 'refresh =', JSON.stringify(p.refresh).slice(0, 400));
+  console.log('[P7] providers[0..3] =', JSON.stringify((p.providers || []).slice(0, 3)));
+  console.log('[P7] quotes[0..2] =', JSON.stringify((p.quotes || []).slice(0, 2)).slice(0, 900));
+  console.log('[P7] other top-level =', JSON.stringify(Object.fromEntries(Object.entries(p).filter(([k]) => !['providers', 'quotes', 'prices'].includes(k)))).slice(0, 600));
+  console.log('[P7] /api/pricing/current =', cur.status, cur.text.slice(0, 600));
+  console.log('[P7] presetIds =', JSON.stringify((p.providers || []).map((x) => x.presetId)));
+});
+
+test('探路 P8 打桩之后:B5(判不出身份)与 B6(点刷新价格的结果提示)今天长什么样', async ({ page }) => {
+  test.setTimeout(120_000);
+  const { openUsagePanel, pricingBlock, outsideFoldText, routeJson } = await import('./helpers/ui.mjs');
+  const P = await import('./helpers/payloads.mjs');
+  // ① 判不出身份
+  await routeJson(page, '/api/pricing', P.pricingPayload());
+  await routeJson(page, '/api/pricing/current', P.currentUnresolved());
+  await boot(page, { fold: null });
+  await openSessionBySearch(page, FOLD.mark);
+  await openUsagePanel(page);
+  let block = await pricingBlock(page);
+  console.log('[P8-B5] outside text =', await outsideFoldText(block));
+  console.log('[P8-B5] 刷新价格 disabled =', await block.getByRole('button', { name: '刷新价格', exact: true }).isDisabled());
+  console.log('[P8-B5] buttons =', JSON.stringify(await block.locator('button').evaluateAll((els) => els.map((b) => ({ text: (b.textContent || '').trim(), disabled: b.disabled, inDetails: !!b.closest('details') })))));
+  // ② 判得出身份 + 点刷新价格
+  await page.unroute('/api/pricing/current').catch(() => {});
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+  let polls = 0; const posts = [];
+  await page.route((url) => url.pathname === '/api/pricing', (route) => {
+    const u = new URL(route.request().url());
+    if (u.searchParams.get('refreshId')) { polls += 1; }
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(P.pricingPayload({ refreshId: u.searchParams.get('refreshId') || 'r122-refresh-0', refreshStatus: polls && polls < 2 ? 'running' : 'completed' })) });
+  });
+  await routeJson(page, '/api/pricing/current', P.currentResolved());
+  await page.route((url) => url.pathname === '/api/pricing/refresh', (route) => { posts.push(route.request().postData()); route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify({ ok: true, refreshId: 'r122-refresh-1', status: 'running' }) }); });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.locator('[data-cgui="panel-dock"]').waitFor({ timeout: 40_000 });
+  await openSessionBySearch(page, FOLD.mark);
+  await openUsagePanel(page);
+  block = await pricingBlock(page);
+  const before = await outsideFoldText(block);
+  console.log('[P8-B6] before click outside text =', before);
+  await block.getByRole('button', { name: '刷新价格', exact: true }).click();
+  for (let i = 0; i < 12; i += 1) { await page.waitForTimeout(1000); console.log(`[P8-B6] t+${i + 1}s outside text =`, await outsideFoldText(block)); if (polls >= 3) break; }
+  console.log('[P8-B6] posts =', JSON.stringify(posts), 'polls =', polls);
+  console.log('[P8-B6] details =', JSON.stringify(await block.locator('details').evaluateAll((els) => els.map((d) => (d.querySelector('summary')?.textContent || '').trim()))));
+});
+
+test('探路 P9 订阅额度卡:各状态今天的文字(供 C4"与今天一致"冻结用)', async ({ page }) => {
+  test.setTimeout(180_000);
+  const { openUsagePanel, routeJson } = await import('./helpers/ui.mjs');
+  const P = await import('./helpers/payloads.mjs');
+  const cases = {
+    available: P.subscriptionPayload({ status: 'available', segments: true }),
+    stale: P.subscriptionPayload({ status: 'stale', segments: true }),
+    'not-subscribed': P.subscriptionNotSubscribed(),
+    'not-logged-in': P.subscriptionNotLoggedIn(),
+    NOT_OFFICIAL_PROVIDER: P.subscriptionPayload({ status: 'unavailable', code: 'NOT_OFFICIAL_PROVIDER', official: false, error: '当前 provider 不是官方(R122STUB)' }),
+    CLI_TIMEOUT: P.subscriptionPayload({ status: 'unavailable', code: 'CLI_TIMEOUT', official: true, error: 'CLI 超时(R122STUB)' }),
+    CLI_UNAVAILABLE: P.subscriptionPayload({ status: 'unavailable', code: 'CLI_UNAVAILABLE', official: true, error: 'CLI 不可用(R122STUB)' }),
+  };
+  let current = cases.available;
+  await routeJson(page, '/api/provider', P.providerOfficialSubscription());
+  await routeJson(page, '/api/subscription-usage', () => current);
+  await routeJson(page, '/api/pricing', P.pricingPayload());
+  await routeJson(page, '/api/pricing/current', P.currentResolved());
+  await boot(page, { fold: null });
+  for (const [name, payload] of Object.entries(cases)) {
+    current = payload;
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.locator('[data-cgui="panel-dock"]').waitFor({ timeout: 40_000 });
+    await openSessionBySearch(page, FOLD.mark);
+    await openUsagePanel(page);
+    await page.waitForTimeout(800);
+    const card = await page.evaluate(() => {
+      const t = [...document.querySelectorAll('*')].filter((el) => (el.textContent || '').trim() === '订阅额度（官方）' && el.getClientRects().length).sort((a, b) => (a.contains(b) ? 1 : -1))[0];
+      if (!t) return { present: false, pageHas: /订阅额度/.test(document.body.innerText) };
+      let host = t;
+      const hasEntry = (n) => [...n.querySelectorAll('button')].some((b) => /\/usage/.test(b.textContent || ''));
+      while (host && !hasEntry(host)) host = host.parentElement;
+      return { present: true, text: ((host || t).innerText || '').replace(/\s+/g, ' ').trim(), html: (host || t).outerHTML.replace(/<svg[\s\S]*?<\/svg>/g, '<svg/>').replace(/\s+/g, ' ').slice(0, 1800) };
+    });
+    console.log(`[P9] ${name} → ${JSON.stringify(card.text ?? card)}`);
+    if (name === 'not-subscribed' || name === 'not-logged-in') console.log(`[P9] ${name} html = ${card.html}`);
+  }
+});

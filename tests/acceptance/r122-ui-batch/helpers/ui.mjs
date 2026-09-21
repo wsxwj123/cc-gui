@@ -251,3 +251,46 @@ export async function enableChatMode(page) {
   await page.keyboard.press('Escape');
   await page.waitForTimeout(300);
 }
+
+// ---------------------------------------------------------------------------
+// 用量面板(INTERFACE B / C):顶栏「设置」坞 →「用量」
+// ---------------------------------------------------------------------------
+
+export async function openDockPanel(page, name) {
+  const btn = page.getByRole('button', { name, exact: true }).first();
+  if (!(await btn.isVisible().catch(() => false))) {
+    await page.locator('[data-testid="panel-dock-toggle"]').first().click({ timeout: 8_000 });
+    await page.waitForTimeout(400);
+  }
+  await expect(btn, `顶栏面板坞里应当有「${name}」`).toBeVisible({ timeout: 10_000 });
+  await btn.click({ timeout: 8_000 });
+}
+
+/** 打开「用量」面板;等到慢段(「导出 CSV」所在那一段,订阅卡也在那一段)挂载完才返回。 */
+export async function openUsagePanel(page) {
+  await openDockPanel(page, '用量');
+  await expect(page.getByText('价格与来源').first(), '用量面板里应有「价格与来源」版块').toBeVisible({ timeout: 20_000 });
+  await expect(page.getByRole('button', { name: '导出 CSV' }).first(), '用量面板的慢段应已挂载').toBeVisible({ timeout: 30_000 });
+}
+
+/**
+ * 「价格与来源」版块 = 同时罩住标题文字「价格与来源」与按钮「刷新价格」的最小容器(INTERFACE B1)。
+ * 用定位器表达(不落属性):面板刷新期间每秒重渲染,落在节点上的标记会丢。
+ */
+export const pricingBlock = (page) => page.locator('div:has(button:text-is("刷新价格")):has(:text-is("价格与来源"))').last();
+
+/** 版块内、折叠项(<details>)之外的全部文字(空白折叠成单个空格)。 */
+export const outsideFoldText = (block) => block.evaluate((el) => {
+  const clone = el.cloneNode(true);
+  for (const d of clone.querySelectorAll('details')) d.remove();
+  return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+});
+/** 版块的全部文字(含折叠项里收着的内容;<details> 收起时内容仍在 DOM 里)。 */
+export const wholeBlockText = (block) => block.evaluate((el) => (el.textContent || '').replace(/\s+/g, ' ').trim());
+
+/** 版块里以某标题开头的原生 <details>。 */
+export const detailsTitled = (block, prefix) => block.locator('details').filter({ has: block.page().locator('summary').filter({ hasText: prefix }) }).first();
+
+/** 「订阅额度（官方）」卡 = 同时罩住标题与「在官方CLI查看 /usage」入口的最小容器。 */
+export const subscriptionCard = (page) => page.locator('div:has(:text-is("订阅额度（官方）")):has(button:has-text("/usage"))').last();
+export const cardText = (card) => card.evaluate((el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim());
