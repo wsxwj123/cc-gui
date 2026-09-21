@@ -6,6 +6,7 @@
 //
 // 通用 SKILL.md 定位:任意仓库里 `<id>/SKILL.md`、`skills/<id>/SKILL.md`、
 // `my-skills/<id>/SKILL.md` 都算一个 skill(id = SKILL.md 的父目录),兼容四个源。
+// r124:仓库根目录直接放 `SKILL.md` 的单技能仓库也算一个 skill(id = 仓库名,整个仓库是技能目录)。
 import { Router } from 'express';
 import { readdir, readFile, mkdir, writeFile, stat, rm, rename } from 'fs/promises';
 import { join, dirname } from 'path';
@@ -315,11 +316,16 @@ async function ghDefaultBranch(repo, host = 'github') {
 // 匹配任意深度(原来只认根层/skills 单层,吃不到 hermes 的 optional-skills/分类/<id>/
 // 与 buildwithclaude 的 plugins/*/skills/<id>/ 这类嵌套布局);id = 父目录名,同名冲突
 // 先见先得(浅层路径在 git tree 里先出现,官方 skills/ 优先于深层同名)。
-function locateSkills(tree) {
+// r124:仓库根目录直接放 SKILL.md(单技能仓库,如 yjz211/vivid-figures-skill)也算一个技能:
+// id = 仓库名(repoName,由调用方从 owner/repo 取 repo 部分并去掉 .git),root = ''(整个仓库就是技能目录)。
+// 放在最后加:与某个子目录技能同 id 时子目录优先,不动既有的先见先得顺序。
+function locateSkills(tree, repoName = '') {
   const seen = new Set();
   const out = [];
+  let rootMd = false;
   for (const t of tree) {
     if (t.type !== 'blob') continue;
+    if (/^SKILL\.md$/i.test(t.path)) { rootMd = true; continue; }
     const m = t.path.match(/^(?:(.*)\/)?([^/]+)\/SKILL\.md$/i);
     if (!m) continue;
     // node_modules / 隐藏目录(.agents 等站点自用)不算市场内容
@@ -329,8 +335,16 @@ function locateSkills(tree) {
     seen.add(id);
     out.push({ id, root: t.path.replace(/\/SKILL\.md$/i, '') });
   }
+  if (rootMd && repoName && ID_RE.test(repoName) && !seen.has(repoName)) out.push({ id: repoName, root: '' });
   return out;
 }
+// r124 root 为空串 = 技能就是整个仓库:`${root}/SKILL.md`、startsWith(`${root}/`)、slice(root.length + 1)
+// 三种拼法对空串都会错(拼出 "/SKILL.md"、什么都匹配不上、吃掉首字符),一律走这三个小函数。
+const mdPath = (root) => (root ? `${root}/SKILL.md` : 'SKILL.md');            // 该技能的 SKILL.md 仓库内路径
+const inRoot = (root, path) => (root ? path.startsWith(`${root}/`) : true);  // 文件是否属于该技能目录
+const relTo = (root, path) => (root ? path.slice(root.length + 1) : path);   // 文件相对技能目录的路径
+// 仓库名(owner/repo 的 repo 部分,去掉 .git 后缀)—— 根目录技能的 id。
+const repoNameOf = (repo) => String(repo || '').split('/').pop().replace(/\.git$/i, '');
 
 async function loadRepo(repo, branchArg, force = false, host = 'github') {
   // branchArg 指定分支(用户在导入页给了 owner/repo/tree/<branch> 或 owner/repo@branch);
@@ -343,8 +357,9 @@ async function loadRepo(repo, branchArg, force = false, host = 'github') {
   // force 时绕过缓存:更新按钮必须拿最新 tree,否则 1 小时缓存窗口内清单是旧快照——上游新增的文件
   // 不在清单里(装出残缺技能),上游已删的文件 raw 404(整个更新失败)。清单与 raw 内容必须同快照。
   if (!force && c && now - c.at < TTL) return c;
-  const tree = (await ghJson(h.tree(repo, branch), h.label)).tree || [];
-  const located = locateSkills(tree);
+  const treeRes = await ghJson(h.tree(repo, branch), h.label);
+  const tree = treeRes.tree || [];
+  const located = locateSkills(tree, repoNameOf(repo));
   located.sort((a, b) => a.id.localeCompare(b.id));
   // 仅小仓库逐个抓描述,大仓只列名
   let skills;
@@ -352,7 +367,7 @@ async function loadRepo(repo, branchArg, force = false, host = 'github') {
     skills = await Promise.all(located.map(async (s) => {
       let name = s.id, description = '', version = null;
       try {
-        const raw = await gfetch(h.raw(repo, branch, `${s.root}/SKILL.md`));
+        const raw = await gfetch(h.raw(repo, branch, mdPath(s.root)));
         if (raw.ok) { const fm = parseFrontmatter(await raw.text()); name = fm.name || s.id; description = fm.description || ''; version = fm.version || null; }
       } catch { /* 留空 */ }
       return { id: s.id, name, description, version, root: s.root };
@@ -364,6 +379,8 @@ async function loadRepo(repo, branchArg, force = false, host = 'github') {
   // 导入时记进来源,检查更新按 sha 精确比对——作者不维护 frontmatter version 也能测出更新。
   const dirShas = {};
   for (const t of tree) if (t.type === 'tree') dirShas[t.path] = t.sha;
+  // r124 根目录技能的 root 是 '':tree 条目里没有根这一项,它的 sha 是树接口响应顶层的 sha。
+  if (typeof treeRes.sha === 'string') dirShas[''] = treeRes.sha;
   const entry = { skills, files: tree.filter((t) => t.type === 'blob'), dirShas, branch, at: now, repo, host };
   repoCache.set(cacheKey, entry);
   return entry;
@@ -447,7 +464,7 @@ async function doImport(repo, branchArg, ids, overwrite, force = false, host = '
     let exists = false;
     try { exists = (await stat(dest)).isDirectory(); } catch { /* 无 */ }
     if (exists && !overwrite) { conflicts.push(id); continue; }
-    const blobs = files.filter((f) => f.path === `${meta.root}/SKILL.md` || f.path.startsWith(`${meta.root}/`));
+    const blobs = files.filter((f) => inRoot(meta.root, f.path)); // root 为 '' 时整个仓库树都属于它(r124)
     if (!blobs.length) { failed.push({ id, error: '无文件' }); continue; }
     // 下载到临时目录 → 成功后原子替换。解决两问题:①更新时上游已删的文件不再残留(纯 fetch 只做
     // 增/改、漏"删",git pull 的唯一优势点,靠整目录替换补上);②下载中途失败只丢临时目录、旧 skill
@@ -464,7 +481,7 @@ async function doImport(repo, branchArg, ids, overwrite, force = false, host = '
       await Promise.all(Array.from({ length: Math.min(5, blobs.length) }, async () => {
         while (idx < blobs.length) {
           const f = blobs[idx++];
-          const rel = f.path.slice(meta.root.length + 1); // 相对 skill 根
+          const rel = relTo(meta.root, f.path); // 相对 skill 根
           const target = join(tmp, rel);
           await mkdir(join(target, '..'), { recursive: true });
           const raw = await gfetch(h.raw(repo, branch, f.path));
@@ -585,7 +602,7 @@ router.post('/skills/check-updates', async (req, res) => {
   const updates = {};
   const groups = new Map(); // `${host}:${repo}@${branch}` -> [[id, src], ...]
   for (const [id, src] of Object.entries(sources)) {
-    if (!src?.repo || !src?.root) continue;
+    if (!src?.repo || typeof src?.root !== 'string') continue; // r124:root 为空串是根目录技能,不是"没有来源"
     const key = `${src.host || 'github'}:${src.repo}@${src.branch || ''}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push([id, src]);
@@ -597,9 +614,10 @@ router.post('/skills/check-updates', async (req, res) => {
     if (entries.some(([, s]) => s.sha)) { // 组里有 sha 记录才值得花一次 tree API
       try {
         const branch = src0.branch || await ghDefaultBranch(src0.repo, src0.host || 'github');
-        const tree = (await ghJson(h.tree(src0.repo, branch), h.label)).tree || [];
+        const treeRes = await ghJson(h.tree(src0.repo, branch), h.label);
         dirShas = {};
-        for (const t of tree) if (t.type === 'tree') dirShas[t.path] = t.sha;
+        for (const t of treeRes.tree || []) if (t.type === 'tree') dirShas[t.path] = t.sha;
+        if (typeof treeRes.sha === 'string') dirShas[''] = treeRes.sha; // r124 根目录技能按顶层 sha 比对
       } catch { dirShas = null; /* 限流/私有仓 → 逐技能回落 raw 比对 */ }
     }
     await Promise.all(entries.map(async ([id, src]) => {
@@ -611,7 +629,7 @@ router.post('/skills/check-updates', async (req, res) => {
         return;
       }
       try {
-        const r = await gfetch(h.raw(src.repo, src.branch, `${src.root}/SKILL.md`), { signal: AbortSignal.timeout(15000) });
+        const r = await gfetch(h.raw(src.repo, src.branch, mdPath(src.root)), { signal: AbortSignal.timeout(15000) });
         if (!r.ok) return;
         const remoteText = await r.text();
         const remote = parseFrontmatter(remoteText).version;
@@ -647,4 +665,6 @@ router.post('/skills/update', async (req, res) => {
   }
 });
 
+// r124 单测用出口:都是纯函数,不碰网络与磁盘。
+export { locateSkills, mdPath, inRoot, relTo, repoNameOf, ghApiBase, ghRawBase };
 export default router;
