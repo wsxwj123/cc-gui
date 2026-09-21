@@ -52,9 +52,16 @@ export async function openDockPanel(page, name) {
 export const panelHeader = (page) => page.getByText('生图（自定义生图 provider）').first();
 
 export async function openImagePanel(page) {
-  await openDockPanel(page, '生图');
+  if (!(await panelHeader(page).isVisible().catch(() => false))) await openDockPanel(page, '生图');   // 已开着就别再点(会切走)
   await expect(panelHeader(page), '应打开生图面板').toBeVisible({ timeout: 15_000 });
   await page.waitForTimeout(300);
+}
+
+/** 刷新页面并等应用重新挂好(不等的话紧跟着的点击会丢)。 */
+export async function reloadApp(page) {
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.locator('[data-cgui="panel-dock"]')).toBeVisible({ timeout: 40_000 });
+  await dismissOverlays(page);
 }
 
 /** 生图面板容器 = 罩住面板头的最近的 [data-cgui-panel] 元素。 */
@@ -81,3 +88,20 @@ export async function openTaskList(page) {
 }
 
 export const textOf = (loc) => loc.evaluate((el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim());
+
+// ---------------------------------------------------------------------------
+// 生图页(INTERFACE E):预览区锚点 / 「清空」/ 提交新任务 / localStorage 契约
+// ---------------------------------------------------------------------------
+export const DISMISS_KEY = 'cgui-image-dismissed-preview';
+export const previewShot = (page) => imagePanel(page).locator('[data-testid="image-preview-shot"]');
+export const clearButton = (page) => imagePanel(page).getByRole('button', { name: /清空/ }).first();
+export const imageTab = (page) => imagePanel(page).getByRole('button', { name: '生图', exact: true }).first();
+export const promptBox = (page) => imagePanel(page).getByPlaceholder('描述你想要的画面…').first();
+export const generateButton = (page) => imagePanel(page).getByRole('button', { name: '生成', exact: true }).first();
+/** 生图页的提供方下拉 = 含某个提供方 id 选项的那个 select。 */
+export const providerSelect = (page, providerId) => imagePanel(page).locator('select').filter({ has: page.locator(`option[value="${providerId}"]`) }).first();
+export const readDismissKey = (page) => page.evaluate((k) => localStorage.getItem(k), DISMISS_KEY);
+/** 导航前预置该键(null = 删掉这个键)。注意会在每次导航(含刷新)前重放。 */
+export async function presetDismissKey(page, value) {
+  await page.addInitScript(([k, v]) => { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* 忽略 */ } }, [DISMISS_KEY, value]);
+}

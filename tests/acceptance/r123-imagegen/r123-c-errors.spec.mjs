@@ -123,6 +123,18 @@ test('C4-2 上游把 key 回显在网页正文里:条目所有字段都不出现
   expect(containsText(await history(), FAKE_KEY), '整份历史里不得出现 key').toBe(false);
 });
 
+// ───────────────────────── F1 图片链接被拒的文案 ─────────────────────────
+test('F1 图片链接是回环地址但端口与提供方基址不同:error 含「同源」,kind ∈ base-url|network,detail.url 是那条被拒的图片链接', async () => {
+  const other = createFakeUpstream(); await other.listen();   // 另一个端口上的图片口:若被错误地下载会成功,便于快速暴露
+  try {
+    const link = other.img('f1');
+    const e = await failWith(onGenerate('/f1/v1', { body: { created: 1, data: [{ url: link }] } }));
+    expect(e.error || '', show(e)).toContain('同源');
+    expect(['base-url', 'network'], `kind=${e.errorInfo?.kind}`).toContain(e.errorInfo?.kind);
+    expect(e.errorInfo?.detail?.url, show(e.errorInfo)).toBe(link);
+  } finally { await other.close(); }
+});
+
 // ───────────────────────── C3 界面 ─────────────────────────
 test.describe('C3 界面上的失败条目', () => {
   test.skip(!process.env.R123_UI_BASE, '没有 dev server(R123_API_ONLY=1)');

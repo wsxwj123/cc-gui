@@ -3,6 +3,7 @@
 import { test } from '@playwright/test';
 import { req, createProvider, generate, waitTerminal, newSaveDir, history } from './helpers/api.mjs';
 import { createFakeUpstream } from './helpers/fake-upstream.mjs';
+import { boot, openImagePanel, openTaskList, imagePanel } from './helpers/ui.mjs';
 import { PNG_B64 } from './helpers/images.mjs';
 
 test.skip(process.env.R123_PROBE !== '1', '探路脚本只在 R123_PROBE=1 时跑');
@@ -94,4 +95,46 @@ test('探路 P2 界面:面板坞按钮 / 生图面板里的表单长什么样', 
     console.log('[P2] 面板坞里没找到生图入口');
     await page.screenshot({ path: 'tests/acceptance/r123-imagegen/.artifacts/probe-p2-nopanel.png' });
   }
+});
+
+test('探路 P4 生图页预览区 / 清空 / 任务列表条目 / history delete 接口形态', async ({ page }) => {
+  test.skip(!process.env.R123_UI_BASE, '没有 dev server');
+  const up = createFakeUpstream(); await up.listen();
+  try {
+    const base = up.scenario('/p4/v1', ({ method, path }) => (method === 'POST' && path === '/images/generations' ? { body: { created: 1, data: [{ b64_json: PNG_B64 }] } } : null));
+    const p = await createProvider({ name: 'P4 提供方', baseURL: base, savePath: newSaveDir('p4') });
+    const jobId = await generate(p.id, 'R123P4-mark');
+    console.log('[P4] job →', JSON.stringify(await waitTerminal(jobId, 20_000)));
+    await boot(page); await openImagePanel(page);
+    const snap = (label) => page.evaluate((label) => {
+      const vis = (el) => el.getClientRects().length > 0;
+      const panel = [...document.querySelectorAll('[data-cgui-panel]')].find((el) => /生图（自定义生图 provider）/.test(el.innerText || ''));
+      if (!panel) return { label, panel: null };
+      const imgs = [...panel.querySelectorAll('img')].map((el) => ({ src: (el.getAttribute('src') || '').slice(0, 140), testid: el.getAttribute('data-testid'), alt: el.alt, visible: vis(el), w: Math.round(el.getBoundingClientRect().width) }));
+      const selects = [...panel.querySelectorAll('select')].filter(vis).map((el) => ({ value: el.value, options: [...el.options].map((o) => ({ v: o.value.slice(0, 40), t: o.textContent.trim().slice(0, 30) })) }));
+      const buttons = [...panel.querySelectorAll('button')].filter(vis).map((el) => ({ text: (el.innerText || '').trim().slice(0, 16), title: el.getAttribute('title'), testid: el.getAttribute('data-testid') })).filter((b) => b.text || b.title);
+      const ls = Object.fromEntries(Object.keys(localStorage).filter((k) => /image|preview|dismiss|生图/i.test(k)).map((k) => [k, String(localStorage.getItem(k)).slice(0, 80)]));
+      const textareaVisible = !!panel.querySelector('textarea') && vis(panel.querySelector('textarea'));
+      return { label, imgs, selects, buttons, ls, textareaVisible };
+    }, label);
+    console.log('[P4] 生图页 =', JSON.stringify(await snap('初始'), null, 1));
+    await imagePanel(page).getByRole('button', { name: /清空/ }).first().click();
+    await page.waitForTimeout(500);
+    console.log('[P4] 清空后 =', JSON.stringify(await snap('清空后'), null, 1));
+    await openTaskList(page);
+    const listHtml = await page.evaluate((mark) => {
+      const panel = [...document.querySelectorAll('[data-cgui-panel]')].find((el) => /生图（自定义生图 provider）/.test(el.innerText || ''));
+      const leaf = [...panel.querySelectorAll('*')].find((el) => !el.children.length && (el.textContent || '').includes(mark));
+      let host = leaf; for (let i = 0; i < 5 && host?.parentElement && host.parentElement !== panel; i += 1) host = host.parentElement;
+      return host ? host.outerHTML.replace(/\s+/g, ' ').replace(/class="[^"]*"/g, '').slice(0, 3500) : '(没找到)';
+    }, 'R123P4-mark');
+    console.log('[P4] 任务列表条目 html =', listHtml);
+    await imagePanel(page).getByText('R123P4-mark').first().click();
+    await page.waitForTimeout(700);
+    console.log('[P4] 点条目后 =', JSON.stringify(await snap('点条目后'), null, 1));
+    for (const body of [{ id: 'nope' }, { ids: ['nope'] }]) {
+      const r = await req('POST', '/api/image/history/delete', body);
+      console.log('[P4] delete', JSON.stringify(body), '→', r.status, r.text.slice(0, 200));
+    }
+  } finally { await up.close(); }
 });
