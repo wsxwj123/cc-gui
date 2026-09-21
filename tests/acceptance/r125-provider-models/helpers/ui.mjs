@@ -121,17 +121,17 @@ export const textOf = (loc) => loc.evaluate((el) => (el.innerText || el.textCont
 export const providerButton = (page) => page.locator('button[title^="Provider:"]').first();
 export const modelButton = (page) => page.locator('button[title^="模型:"]').first();
 export const fetchLatestButton = (page) => page.getByRole('button', { name: '拉取最新', exact: true }).first();
-/** 模型页浮层根(INTERFACE 没给锚点)= 同时罩住「拉取最新」按钮与「搜索模型…」输入框的最深容器。 */
+/** 模型页浮层根(INTERFACE 没给锚点)= 同时罩住「拉取最新」按钮(在头部工具行)与「1M 上下文」区块的最深容器(探路 P11 实测结构)。 */
 export const modelPage = (page) => page.locator('div')
   .filter({ has: page.getByRole('button', { name: '拉取最新', exact: true }) })
-  .filter({ has: page.locator('input[placeholder="搜索模型…"]') }).last();
+  .filter({ hasText: '1M 上下文' }).last();
 export async function openModelPage(page) {
   if (!(await fetchLatestButton(page).isVisible().catch(() => false))) await modelButton(page).click({ force: true });
   await expect(fetchLatestButton(page), '模型页应打开(能看到「拉取最新」)').toBeVisible({ timeout: 10_000 });
   await page.waitForTimeout(250);
 }
-/** 模型页列表里"文字逐字等于 id"的元素(有 = 该模型在下拉列表里显示)。 */
-export const modelRowShown = (page, id) => modelPage(page).getByText(id, { exact: true });
+/** 模型页列表里"文字逐字等于 id"的元素(有 = 该模型在下拉列表里显示;一行里 id 与名字两个节点同文本,取第一个)。 */
+export const modelRowShown = (page, id) => modelPage(page).getByText(id, { exact: true }).first();
 
 // ---------------------------------------------------------------------------
 // 勾选弹窗:INTERFACE §B 锚点优先;当前代码没有这些锚点 → 兜底为探路实测的既有形态
