@@ -666,5 +666,5 @@ router.post('/skills/update', async (req, res) => {
 });
 
 // r124 单测用出口:都是纯函数,不碰网络与磁盘。
-export { locateSkills, mdPath, inRoot, relTo, repoNameOf, ghApiBase, ghRawBase };
+export { locateSkills, mdPath, inRoot, relTo, repoNameOf, ghApiBase, ghRawBase, hostOf };
 export default router;
