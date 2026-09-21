@@ -369,19 +369,48 @@ export function sanitizeModelMeta(input, models) {
   return meta;
 }
 
-export async function readCustomProviders() {
+// r125:带原因的读取。文件不存在 = 正常的空(warning 为 null);读不到 / 不是合法 JSON(半写、损坏)/
+// 顶层不是数组 → 仍回空列表让调用方继续,但把原因交出去 —— 此前这些情况静默当成 [],自定义 provider
+// 会从列表里"消失"而官方还在,用户看不出是文件坏了(TEST-PLAN P3-4 旁证)。原因文本不含文件内容。
+export async function readCustomProvidersDetailed() {
+  let raw;
   try {
-    const d = JSON.parse(await readFile(CUSTOM_PROVIDERS_PATH, 'utf-8'));
-    if (!Array.isArray(d)) return [];
-    // r10-9:读侧统一 normalize —— 下游一律拿到 string[] 的 models + 可选 modelMeta。
-    return d.map((p) => {
-      if (!p || !Array.isArray(p.models)) return p;
-      const { ids, meta } = normalizeProviderModels(p.models);
-      const next = { ...p, models: ids };
-      if (meta) next.modelMeta = meta; else delete next.modelMeta;
-      return next;
-    });
-  } catch { return []; }
+    raw = await readFile(CUSTOM_PROVIDERS_PATH, 'utf-8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { list: [], warning: null };
+    return { list: [], warning: `custom-providers.json 读取失败：${err?.code || err?.message || '未知错误'}` };
+  }
+  let d;
+  try {
+    d = JSON.parse(raw);
+  } catch {
+    return { list: [], warning: `custom-providers.json 不是合法 JSON（可能写到一半或已损坏），自定义 provider 暂时读不到（${CUSTOM_PROVIDERS_PATH}）` };
+  }
+  if (!Array.isArray(d)) return { list: [], warning: `custom-providers.json 顶层不是数组，自定义 provider 暂时读不到（${CUSTOM_PROVIDERS_PATH}）` };
+  // r10-9:读侧统一 normalize —— 下游一律拿到 string[] 的 models + 可选 modelMeta。
+  const list = d.map((p) => {
+    if (!p || !Array.isArray(p.models)) return p;
+    const { ids, meta } = normalizeProviderModels(p.models);
+    const next = { ...p, models: ids };
+    if (meta) next.modelMeta = meta; else delete next.modelMeta;
+    return next;
+  });
+  return { list, warning: null };
+}
+
+// 既有调用方的形态不变(失败 = []),只是不再静默:同一原因只记一行日志,恢复后复位。
+let lastCustomProvidersWarning = '';
+export async function readCustomProviders() {
+  const { list, warning } = await readCustomProvidersDetailed();
+  if (warning) {
+    if (warning !== lastCustomProvidersWarning) {
+      lastCustomProvidersWarning = warning;
+      console.warn(`[providers] ${warning}`);
+    }
+  } else {
+    lastCustomProvidersWarning = '';
+  }
+  return list;
 }
 
 // 原子写 + 串行队列:并发 create/edit/delete 各自读-改-写,半截 writeFile 或互相
@@ -1011,18 +1040,35 @@ router.get('/provider', async (_req, res) => {
 // phone gets a one-tap switch. The CLI reads settings.json on its next spawn.
 
 // Read-only query through the system `sqlite3` CLI (no new npm dependency, and
-// -readonly guarantees we can't mutate the user's CC Switch db). Returns parsed
-// rows, or [] if the db / CLI is unavailable.
-async function ccSwitchQuery(sql) {
+// -readonly guarantees we can't mutate the user's CC Switch db).
+// r125:带原因的形态 —— GET /providers 要把"cc-switch 库为什么没读到"写进 warning(P3-3),
+// 其余调用方仍用下面只回 rows 的 ccSwitchQuery(失败 = [],行为不变)。
+// 库文件不存在时直接短路:不必起 sqlite3 子进程(每次 GET /providers 都要跑一遍)。原因文本只含
+// 库路径与 sqlite 的错误短语,不含任何配置内容。
+function describeCcSwitchError(err) {
+  if (err?.code === 'ENOENT') return 'sqlite3 命令不可用';
+  const text = String(err?.stderr || err?.message || err || '').split('\n').find((l) => l.trim()) || '未知错误';
+  if (/not a database/i.test(text)) return `cc-switch 数据库文件损坏或不是 SQLite 文件（${CC_SWITCH_DB}）`;
+  if (/unable to open database/i.test(text)) return `cc-switch 数据库无法打开（${CC_SWITCH_DB}）`;
+  if (/locked|busy/i.test(text)) return `cc-switch 数据库被占用（${CC_SWITCH_DB}）`;
+  if (/no such table/i.test(text)) return `cc-switch 数据库里没有 providers 表（${CC_SWITCH_DB}）`;
+  if (err?.killed || /ETIMEDOUT|timed out/i.test(text)) return `读取 cc-switch 数据库超时（${CC_SWITCH_DB}）`;
+  return `读取 cc-switch 数据库失败：${text.replace(/^Error:\s*/i, '').slice(0, 160)}`;
+}
+async function ccSwitchQueryDetailed(sql) {
+  if (!existsSync(CC_SWITCH_DB)) return { rows: [], error: `未找到 cc-switch 数据库（${CC_SWITCH_DB}）` };
   try {
     const { stdout } = await execFileP('sqlite3', ['-json', '-readonly', CC_SWITCH_DB, sql], {
       timeout: 5000, maxBuffer: 16 * 1024 * 1024,
     });
     const t = stdout.trim();
-    return t ? JSON.parse(t) : [];
-  } catch {
-    return [];
+    return { rows: t ? JSON.parse(t) : [], error: null };
+  } catch (err) {
+    return { rows: [], error: describeCcSwitchError(err) };
   }
+}
+async function ccSwitchQuery(sql) {
+  return (await ccSwitchQueryDetailed(sql)).rows;
 }
 
 // Parse an OpenAI-format (app_type=codex/opencode) provider's settings_config.
@@ -1043,31 +1089,59 @@ function parseOpenAIProvider(settingsConfig) {
 // app_type) are OpenAI-compatible and routed through the embedded translation
 // proxy on switch. NEVER returns settings_config / API keys.
 router.get('/providers', async (_req, res) => {
-  // 兜底:本 handler 里任一读盘/解析(cc-switch.db、custom-providers.json、思考能力数据表)
-  // 抛出都会被 express 5 转成 500 —— 那是整个 provider 列表打不开(设置面板首屏空白)。
-  // 给出可读的 JSON 错误,前端至少能显示原因而不是解析失败。
+  // r125(P3-3):逐段兜底,局部失败降级而不是整体 500 —— cc-switch 库读不到 / 某份 json 半写或损坏时,
+  // 仍返回内置官方 + 读得到的部分,并在 warning 里说明哪部分没读到(前端只记日志,不当成加载失败)。
+  // 只有内置官方行都拼不出来(下面 try 里真正抛出)才 500;500 体里也带上已收集的 warning。
+  const warnings = [];
+  const guard = async (label, fn, fallback) => {
+    try { return await fn(); } catch (err) { warnings.push(`${label}：${err?.message || err}`); return fallback; }
+  };
   try {
     // K4: 一次性导入后停止读 cc-switch.db,GUI 自己管 customProviders 即可。
-    const imported = await isCCSwitchImported();
-    const rows = withBuiltinOfficial(imported ? [] : await ccSwitchQuery(
-      "SELECT id, name, category, is_current, settings_config FROM providers WHERE app_type='claude' ORDER BY sort_index"
-    ));
-    const oaRows = imported ? [] : await ccSwitchQuery(
-      "SELECT id, name, app_type, settings_config FROM providers WHERE app_type IN ('codex','opencode') ORDER BY sort_index"
-    );
+    const imported = await guard('导入标记读取失败', () => isCCSwitchImported(), false);
+    let dbRows = [];
+    let oaRows = [];
+    if (!imported) {
+      const q1 = await ccSwitchQueryDetailed(
+        "SELECT id, name, category, is_current, settings_config FROM providers WHERE app_type='claude' ORDER BY sort_index"
+      );
+      dbRows = q1.rows;
+      if (q1.error) {
+        warnings.push(`cc-switch 导入项未读到：${q1.error}`);
+      } else {
+        // 同一个库:第一条查询失败就不再查第二条(免得同一原因重复报、重复等超时)。
+        const q2 = await ccSwitchQueryDetailed(
+          "SELECT id, name, app_type, settings_config FROM providers WHERE app_type IN ('codex','opencode') ORDER BY sort_index"
+        );
+        oaRows = q2.rows;
+        if (q2.error) warnings.push(`cc-switch 的 OpenAI 格式导入项未读到：${q2.error}`);
+      }
+    }
+    const rows = withBuiltinOfficial(dbRows);
     // A GUI switch is authoritative over the db's stale is_current; fall back to
     // the db flag only when the GUI hasn't switched anything yet.
-    const activeId = await readActiveProviderId();
+    const activeId = await guard('当前 provider 标记读取失败', () => readActiveProviderId(), null);
     const isCur = (id, dbCurrent) => (activeId != null ? id === activeId : dbCurrent);
     // User's multi-select overrides the cc-switch static models list (when set).
-    const sel = await readProviderModels();
+    const sel = await guard('模型选择存储读取失败', () => readProviderModels(), {});
     const openai = [];
     for (const r of oaRows) {
       const p = parseOpenAIProvider(r.settings_config);
       if (p) openai.push({ id: r.id, name: r.name, appType: r.app_type, format: 'openai', models: sel[r.id]?.length ? sel[r.id] : p.models, isCurrent: isCur(r.id, false) });
     }
     // GUI custom providers (never expose apiKey — only whether one is stored).
-    const customProviders = (await readCustomProviders()).map((p) => ({
+    // 半写 / 损坏的 custom-providers.json:自定义项这一段为空,原因进 warning(不再静默)。
+    const customRead = await readCustomProvidersDetailed();
+    if (customRead.warning) warnings.push(customRead.warning);
+    // 思考能力预填(applyCatalogPrefill)按条兜底:单条数据坏了只丢它的 modelMeta,不拖垮整张列表。
+    let prefillWarned = false;
+    const safePrefill = (p) => {
+      try { return applyCatalogPrefill(p.models, p.modelMeta || null, p.type); } catch (err) {
+        if (!prefillWarned) { prefillWarned = true; warnings.push(`思考能力预填失败（${p.name || p.id}）：${err?.message || err}`); }
+        return p.modelMeta || null;
+      }
+    };
+    const customProviders = customRead.list.filter((p) => p && typeof p === 'object').map((p) => ({
       id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
       models: p.models || [], defaultModel: p.defaultModel || '', tierModels: p.tierModels || null,
       // R3: 计价层(pricing.js setUserPrices)与编辑表单预填都读这里。apiKey 永不下发,
@@ -1082,7 +1156,7 @@ router.get('/providers', async (_req, res) => {
       // (catalog 条目随后被预填补回,source:'user'/历史无 source 的用户声明永久丢失)。
       // 下发预填版而非裸值:顺带让存量 provider 在编辑器里看得见目录判定(那行"目录预填,
       // 可修改"的小字此前永远显示不出来)。预填是纯函数、不写盘,用户声明永不被覆盖。
-      modelMeta: applyCatalogPrefill(p.models, p.modelMeta || null, p.type),
+      modelMeta: safePrefill(p),
       // r78:头像。**必须在这里下发** —— Provider 编辑器预填读的正是本接口,不下发
       // 就恒空 → 保存时发 avatar:'' → PUT 判成清除 → 用户"改个名字"把头像静默清掉
       // (contextWindow / modelPrices / modelMeta 三个字段栽过同一个坑,见上方注释)。
@@ -1111,16 +1185,22 @@ router.get('/providers', async (_req, res) => {
         isCurrent: isCur(r.id, r.is_current === 1),
       };
     });
-    res.json({
+    const overrides = await guard('override 存储读取失败', () => readProviderOverrides(), {});
+    const payload = {
       // rows 含合成的内置官方行 → available 恒 true(官方订阅任何时候都可切回),口径与列表一致。
       available: rows.length > 0 || openai.length > 0 || customProviders.length > 0,
       providers: claudeProviders,
       openaiProviders: openai,
       customProviders,
       // 回显所有 override(前端编辑器初始化用);无文件 = {}。
-      overrides: await readProviderOverrides(),
-    });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+      overrides,
+    };
+    // 有任一来源没读到才带 warning(字符串,多条用「；」连接);全部正常不带该字段,响应形状与此前一致。
+    if (warnings.length) payload.warning = warnings.join('；');
+    res.json(payload);
+  } catch (err) {
+    res.status(500).json({ error: err.message, ...(warnings.length ? { warning: warnings.join('；') } : {}) });
+  }
 });
 
 // POST /api/provider/switch { id } — overwrite ~/.claude/settings.json with the

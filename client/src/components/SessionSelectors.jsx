@@ -13,6 +13,7 @@ import { resolveSelectorModel } from '../utils/routing.js';
 import { nativeContextWindow } from '../utils/contextWindow.js';
 import { notifyOauthMissing } from '../utils/officialAuth.js';
 import { ModelPickModal, replaceModelLines, stripJunkModels } from './ModelPickModal.jsx';
+import { fetchProviderList, getCachedProviderList } from '../utils/providerListFetch.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -307,9 +308,13 @@ function QuotaLowDot({ className = '', onJump }) {
 // 选择器):官方置顶、其余按名称序,来源用小徽章标注,不再按来源分组。
 // 点行即切,当前项打勾;增删改/测试/隐藏/导入在 设置→Provider(底部直达链)。
 export function ProviderSwitchList({ onSwitched }) {
-  const [providers, setProviders] = useState([]);
-  const [openaiProviders, setOpenaiProviders] = useState([]);
-  const [customProviders, setCustomProviders] = useState([]);
+  // r125:首帧用最近一次成功的列表(模块级缓存),本组件每次展开都重新挂载,不能每次都从空列表起;
+  // 加载失败(服务端报错 / 形状不对 / 超时)不动列表,只显示错误行 + 「重试」(P3-1)。
+  const cached = getCachedProviderList();
+  const [providers, setProviders] = useState(() => (Array.isArray(cached?.providers) ? cached.providers : []));
+  const [openaiProviders, setOpenaiProviders] = useState(() => (Array.isArray(cached?.openaiProviders) ? cached.openaiProviders : []));
+  const [customProviders, setCustomProviders] = useState(() => (Array.isArray(cached?.customProviders) ? cached.customProviders : []));
+  const [listError, setListError] = useState('');
   const [hiddenProviders, setHiddenProviders] = useState(new Set());
   const [switching, setSwitching] = useState(false);
   const quotaLow = useProviderQuotaLow();
@@ -317,11 +322,13 @@ export function ProviderSwitchList({ onSwitched }) {
   const [activeId, setActiveId] = useState(null);
 
   const load = () => {
-    fetch('/api/providers').then((r) => r.json()).then((d) => {
-      setProviders(Array.isArray(d.providers) ? d.providers : []);
+    // 同一时刻只有一个 /api/providers 在飞(fetchProviderList 在途复用,P3-2)。
+    fetchProviderList().then((d) => {
+      setProviders(d.providers);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
-    }).catch(() => {});
+      setListError('');
+    }).catch((e) => setListError(e?.message || '加载失败'));
     fetch('/api/prefs/hidden-providers').then((r) => r.json())
       .then((d) => setHiddenProviders(new Set(Array.isArray(d.hidden) ? d.hidden : [])))
       .catch(() => {});
@@ -383,7 +390,8 @@ export function ProviderSwitchList({ onSwitched }) {
       </p>
       {rows.map((p) => (
         <div key={p.id} className={`flex items-center group/prov ${isCur(p) ? 'bg-accent-subtle' : ''}`}>
-          <button disabled={switching} onClick={() => switchTo(p.id)}
+          {/* data-provider-id:INTERFACE-r125 §D 行锚点(挂在可点的切换按钮上,即"行"本身)。 */}
+          <button disabled={switching} onClick={() => switchTo(p.id)} data-provider-id={p.id}
             className={`flex-1 min-w-0 text-left px-3 py-1.5 flex items-center gap-2 hover:bg-canvas-warm transition-colors ${switching ? 'opacity-50' : ''}`}>
             {/* r78:每行的 provider 头像(用户设的 emoji / 内置图标 / 上传图;未设按名字回落)。 */}
             <ProviderMark row={p} name={p.name} official={p.source === 'official'} size={15} />
@@ -402,6 +410,17 @@ export function ProviderSwitchList({ onSwitched }) {
           )}
         </div>
       ))}
+      {/* r125:加载失败只加一行说明 + 「重试」,上面的列表保持上一次成功的结果(P3-1)。 */}
+      {listError && (
+        <div data-testid="provider-list-error"
+          className="mx-3 my-1 px-2 py-1.5 rounded border border-warning/30 bg-warning/10 text-[10px] text-warning font-body flex items-center gap-2">
+          <span className="flex-1 min-w-0 truncate" title={listError}>
+            Provider 列表加载失败：{listError}{rows.length ? '。当前显示的是上一次加载的结果。' : ''}
+          </span>
+          <button type="button" onClick={load}
+            className="shrink-0 px-1.5 py-0.5 rounded border border-warning/40 hover:bg-warning/15 transition-colors">重试</button>
+        </div>
+      )}
       <button onClick={openManager}
         className="w-full text-left px-3 py-2 mt-1 text-[11px] text-accent hover:bg-canvas-warm border-t border-canvas-deep font-body flex items-center gap-1.5">
         <Settings size={12} /> 管理 Provider（增删改 · 测试 · 隐藏 · 导入）→
@@ -443,10 +462,14 @@ export function ProviderSwitcher({ hideLabel = false, tourAnchor = false, respon
       {quotaLow && <QuotaLowDot className="absolute -top-0.5 -right-0.5" />}
       <AnchoredPopover anchorRef={wrapRef} open={open} onRequestClose={() => setOpen(false)} drop={drop}
         className="w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-[min(60vh,calc(var(--app-h,100dvh)-6rem))] overflow-y-auto">
-        <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
-          Provider · 当前 <b className="normal-case">{label}</b>
+        {/* data-testid="provider-switch-list":INTERFACE-r125 §D 切换列表根(头 + 列表一起,即浮层里
+            "同时罩住当前 provider 标题与「管理 Provider」的最深容器")。 */}
+        <div data-testid="provider-switch-list">
+          <div className="px-3 py-1.5 text-[10px] text-ink-faint uppercase tracking-wider font-body border-b border-canvas-deep">
+            Provider · 当前 <b className="normal-case">{label}</b>
+          </div>
+          <ProviderSwitchList onSwitched={() => setOpen(false)} />
         </div>
-        <ProviderSwitchList onSwitched={() => setOpen(false)} />
       </AnchoredPopover>
     </div>
   );
@@ -597,7 +620,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
       // r125:当前 provider 是哪一类(自定义 / 官方 / 导入)+ 它在模型选择存储里有没有选择。
       // 自定义 → 列表只显白名单;官方 / 导入 → 有选择只显选择,没有则并入实时目录(与今天一致)。
       Promise.all([
-        fetch('/api/providers').then((r) => r.json()).catch(() => ({})),
+        fetchProviderList().catch(() => ({})),
         fetch('/api/provider-models').then((r) => r.json()).catch(() => ({})),
       ]).then(([d, pm]) => {
         if (cancelled) return;

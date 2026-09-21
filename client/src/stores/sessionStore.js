@@ -6,6 +6,7 @@ import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, r
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList, mergeHiddenOrder } from '../utils/projectPanel.js';
 import { mergeProviderLists } from '../utils/providerList.js';
+import { fetchProviderList } from '../utils/providerListFetch.js';
 import { attachmentSidecarNotice, draftSidecarBindingsForSessions, recoverAttachmentSidecarBindings } from '../utils/attachments.js';
 import { rotatedPaneGenerations } from '../utils/sessionFlowIdentity.js';
 
@@ -2411,9 +2412,9 @@ export const useStore = create((set, get) => ({
     // r76:顺带把已配置 provider 行(名字 + 模型清单)拉进 store,供助手气泡头解析
     // 该署哪个名字。搭在 fetchProvider 上是为了不新增调用点 —— 它的四个触发口
     // (挂载 / cgui:provider-change / ws 重连 / 回前台)正好就是 provider 可能变的全部时机。
+    // r125:经 fetchProviderList 走(在途复用 + 最近一次成功结果缓存),与三处列表加载同一入口。
     try {
-      const r = await fetch('/api/providers');
-      const d = await r.json();
+      const d = await fetchProviderList();
       set({ providerRows: mergeProviderLists(d || {}) });
     } catch {}
   },
