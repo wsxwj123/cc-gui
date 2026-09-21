@@ -801,6 +801,13 @@ export const useStore = create((set, get) => ({
     try { return localStorage.getItem('cgui-genui') !== '0'; } catch { return true; }
   })(),
 
+  // r122 过程块自动折叠开关(用户 2026-09-21:默认**不**折叠)。**只管本浏览器**一轮回答结束后
+  // 要不要把思考与工具调用自动收成一行摘要;键 cgui-auto-fold-process,'1' = 开,'0' / 没有键 = 关。
+  // 正在生成的回合与异常收尾的回合(StripAutoContext)始终展开,不受此项影响;聊天模式另一条路径,也不受影响。
+  autoFoldProcess: (() => {
+    try { return localStorage.getItem('cgui-auto-fold-process') === '1'; } catch { return false; }
+  })(),
+
   // 收到的建议本身:{ [sessionId]: '建议文本' }。放 store 而非 SessionDetail 的 useState
   // ——建议在回合末到达,此时用户常已切走窗格/关掉分屏,组件 state 随卸载消失,切回来
   // 建议就没了;而 SSE 与 WS 兜底两条送达路径也需要同一个落点。按 sessionId(draft 期是
@@ -1631,6 +1638,11 @@ export const useStore = create((set, get) => ({
   setGenuiRender: (on) => {
     set({ genuiRender: !!on });
     try { localStorage.setItem('cgui-genui', on ? '1' : '0'); } catch {}
+  },
+
+  setAutoFoldProcess: (on) => {
+    set({ autoFoldProcess: !!on });
+    try { localStorage.setItem('cgui-auto-fold-process', on ? '1' : '0'); } catch {}
   },
 
   // 建议入位。SSE(流内)与 WS 兜底(prompt-suggestion-bg)都调这里:同一条建议两条

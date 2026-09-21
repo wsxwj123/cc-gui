@@ -49,6 +49,8 @@ const SETTINGS_INDEX = [
   // 要点一下才跳 tab,而"只加锚不改既有控件行为"是硬规矩(§9.3),所以让区块本来就在
   // 默认 tab 里,这条路径才无条件成立。
   { id: 'set-genui', tab: 'general', title: '生成式界面（cgui-ui）', keys: 'genui cgui-ui dsh-ui 生成式 界面 组件 渲染 图表 表单 技能 skill' },
+  // r122:过程块自动折叠开关,同样落 general(设置面板打开时的默认 tab),搜索「折叠」可直达。
+  { id: 'set-auto-fold', tab: 'general', title: '过程块自动折叠', keys: '折叠 过程 思考 工具 展开 收起 条带 fold' },
   { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
   { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入 自动 第三方 费用' },
   { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
@@ -2700,6 +2702,33 @@ export function ChatBackgroundCard() {
   );
 }
 
+// r122(用户 2026-09-21):过程块自动折叠做成可选,默认关闭。开关只改本设备的显示方式
+// (store autoFoldProcess ↔ localStorage cgui-auto-fold-process),不碰 ~/.claude、不改模型输出。
+// 控件写法照上面 GenuiSection:role=switch 的 button(input[type=checkbox] 会被面板的 Esc 逻辑截住)。
+function AutoFoldSection() {
+  const on = useStore((s) => s.autoFoldProcess);
+  const setOn = useStore((s) => s.setAutoFoldProcess);
+  return (
+    <div data-testid="auto-fold-settings-section" className="bg-canvas-warm border border-canvas-deep rounded-lg">
+      <div className="px-3 py-2.5 flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">过程块自动折叠<EffectBadge level="immediate" /></div>
+          <div className="text-[10.5px] text-ink-faint font-body">
+            开启后，一轮回答结束时把这一轮的思考与工具调用收成一行摘要；关闭时保持展开，每段过程留在原来的位置。
+            正在生成的一轮、被中断或报错收尾的一轮始终展开。任何时候都可以点某一轮的摘要行手动展开或收起，只影响那一轮。
+            此项只改变本设备的显示方式；聊天模式不受影响。
+          </div>
+        </div>
+        <button data-testid="auto-fold-toggle" role="switch" aria-checked={on} onClick={() => setOn(!on)}
+          className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
+          title={on ? '已开启' : '已关闭'}>
+          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // P1.4:原 OverviewTab(14 组过载)拆散为 通用 / 会话 / 外观 / Provider 四个 tab。
 // 各设置组组件与 id 原样不动,只是换了落点(SETTINGS_INDEX 同步,搜索/跳转照常)。
 function GeneralTab({ settings }) {
@@ -2717,6 +2746,7 @@ function GeneralTab({ settings }) {
       <div id="set-desktop-notify"><DesktopNotifyToggle /></div>
       <div id="set-screenshot-hotkey"><ScreenshotHotkeyPicker /></div>
       <div id="set-genui"><GenuiSection /></div>
+      <div id="set-auto-fold"><AutoFoldSection /></div>
       {/* 回滚点占用落在默认 tab(不是「高级 → 存储清理」):它是会吃几十 G 的空间问题,
           用户找它时不该先猜在哪个 tab;与 .bak 清理同形(见 StorageTab)。 */}
       <div id="set-checkpoints" className="border-t border-canvas-deep pt-4">

@@ -582,9 +582,11 @@ function ThinkingFold({ content }) {
   );
 }
 
-// ─── 条带折叠(2026-09-13)──────────────────────────────────────
+// ─── 条带折叠(2026-09-13;r122 2026-09-21 起自动折叠改为可选、默认关)──────────
 // 一轮问答 = 一条条带:可折段(kind==='group')收起时只留一行摘要,正文段与
 // task/workflow/skill/skilldoc 段恒显不折(R114:工作流/子代理跑到哪一步必须看得见)。
+// 回合结束后要不要自动收起由设置「过程块自动折叠」(store autoFoldProcess)决定,默认不收;
+// 开关开启时行为与 2026-09-13 的原版一致。
 // 用 context 而不是新 prop —— 红线 I2「既有导出签名零改动」:CoworkBlocks 的 props 是它
 // 对外签名的一部分,加参数即改签名;context 是既有代码里反复使用的旁路(TaskOwnerContext…)。
 export const StripRoundContext = React.createContext({ forceOpen: false, headless: false, summary: null });
@@ -606,6 +608,10 @@ export function CoworkBlocks({
   // 条带整体开合态(null = 跟随自动态)。组件局部、不持久、不上提:口径 6「不记忆」——
   // 换会话/重开面板/换 worktree 绑定都会卸载本组件,自然回到默认态。
   const [stripOpen, setStripOpen] = useState(null);
+  // r122:过程块自动折叠开关(设置 → 通用;默认关 = 不自动折叠)。订阅 store 的布尔值,不在渲染里读
+  // localStorage —— 拨动开关后已挂载的回合(未被手动点过的)立刻按新设置显示。hook 无条件调用,
+  // 聊天模式分支不用它(那条路径自己折成「执行了 N 步操作」,不受此开关影响)。
+  const autoFold = useStore((s) => s.autoFoldProcess);
   // 工作流卡片的归属会话(与 TaskCard 同一把:fork 复制出的卡片共享 tool_use.id)。
   const ownerSid = useContext(TaskOwnerContext);
   // 条带的三项输入(全是旁路 context,不改 props):
@@ -696,7 +702,9 @@ export function CoworkBlocks({
   // 摘要优先用上层注入的**整轮**数值(⚡并入切段时头行只画在首段,账要按整轮算)。
   const summary = injectedSummary || stripSummary(list, usageCalls);
   const hasFold = summary.steps > 0;
-  const open = stripOpen === null ? stripAutoCtx || isLive : stripOpen;
+  // 自动态 = 异常收尾整轮展开 ∨ 正在生成 ∨ 开关关闭(r122 起默认关 → 已结束的回合也保持展开);
+  // 用户手动点过摘要行(stripOpen 非 null)则以手动为准,只影响本轮。
+  const open = stripOpen === null ? (stripAutoCtx || isLive || !autoFold) : stripOpen;
   const headText = [
     '思考与工具调用',
     summary.rounds == null ? `${summary.steps} 步` : `${summary.rounds} 轮 ${summary.steps} 步`,
