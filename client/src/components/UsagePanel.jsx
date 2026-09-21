@@ -512,20 +512,24 @@ function PricingCard() {
       </h3>
       <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 space-y-2.5">
         <div className="flex items-center gap-2">
-          {/* 主按钮名「刷新价格」是合同锁定的字面量,不改。默认范围 = 当前 provider(见下方范围行);
-              当前 provider 判不出价目身份(自建/中转地址不在预设表里)时禁用并写明原因 ——
-              这种情况按家刷新无从谈起,悄悄回落全预设等于把请求面又拉回 43 家。 */}
+          {/* 主按钮名「刷新价格」是合同锁定的字面量,不改。默认范围 = 当前 provider(范围说明收在
+              「逐家来源与状态」折叠里);当前 provider 判不出价目身份(自建/中转地址不在预设表里)时
+              禁用并在下一行写明原因 —— 这种情况按家刷新无从谈起,悄悄回落全预设等于把请求面又拉回 45 家。 */}
           <button onClick={() => refresh(scoped ? 'current' : 'all')} disabled={busy || (current && !scoped)}
             title={current && !scoped ? current.reason : undefined}
             className="flex-1 flex items-center justify-center gap-1.5 py-2 text-xs text-ink-muted hover:text-ink font-body transition-colors bg-canvas border border-canvas-deep rounded-lg disabled:opacity-50">
             <RefreshCw size={12} className={busy ? 'animate-spin' : ''} />{busy ? '刷新中…' : '刷新价格'}
           </button>
         </div>
-        {current && (
+        {/* r122(用户 2026-09-21):按钮与折叠项之间原有四行说明(范围 / 价目抓取时间 / 各状态计数 /
+            原币种条数)不再直接显示,收进对应折叠项(前三行 → 「逐家来源与状态」顶部;原币种那行 →
+            「原币种报价」顶部)。此前"状态与币种的概览不藏在折叠里,过期/未映射一眼可见"的决定由用户
+            推翻:常态下只留标题、按钮、三个折叠项。
+            唯一例外:主按钮因判不出价目身份而禁用时,原因与「刷新全部」出路必须留在折叠外 —— 否则用户
+            面对一个点不了的按钮无从下手。 */}
+        {current && !scoped && (
           <div className="text-[10px] text-ink-faint font-body">
-            {scoped
-              ? `范围：当前 provider${current.label ? `（${current.label}）` : ''}`
-              : current.reason}
+            {current.reason}
             {' · '}
             <button onClick={() => refresh('all')} disabled={busy}
               className="underline decoration-dotted hover:text-ink-muted disabled:opacity-50">
@@ -533,26 +537,8 @@ function PricingCard() {
             </button>
           </div>
         )}
-        <div className="text-[10px] text-ink-faint font-body">
-          价目抓取时间 {shortTime(data.fetchedAt)} · 官方来源 {providers.filter((p) => p.status === 'fresh').length}/{providers.length} 家已更新
-          {refreshEntries.length ? ` · 本次刷新 ${refreshEntries.length} 家（其余为上次结果）` : ''}
-          {attn.length ? ` · 其余 ${attn.length} 家见下方逐家状态` : ''}
-        </div>
-        {/* 状态与币种的概览不藏在折叠里:过期/未映射(计价未知)/缺项一眼可见。 */}
-        <div className="text-[10px] text-ink-faint font-body">
-          {['fresh', 'partial', 'stale', 'source-unavailable', 'not-token-priced', 'unmapped'].map((key) => {
-            const count = providers.filter((p) => p.status === key).length;
-            if (!count) return null;
-            const label = { fresh: '已更新', partial: '部分取得', stale: '已过期（stale）', 'source-unavailable': '来源不可用', 'not-token-priced': '套餐计价', unmapped: '未映射（计价未知）' }[key];
-            return <span key={key} className="mr-2">{label} {count}</span>;
-          })}
-        </div>
-        <div className="text-[10px] text-ink-faint font-body">
-          原币种 {[...byCurrency.entries()].map(([currency, list]) => `${currency} ${list.length} 条`).join(' · ') || '暂无'}
-          <span className="text-ink-ghost">（分别标价，不折算成单一币种；未知维度按 null 留空，不写 0）</span>
-        </div>
         {refreshNote && <div className="text-[10px] text-ink-faint font-body">{refreshNote}</div>}
-        {/* R40:原先这里是默认展开的普通 <div> —— 刷新一次 43 家逐条铺开,太长。改为与同卡片
+        {/* R40:原先这里是默认展开的普通 <div> —— 刷新一次 45 家逐条铺开,太长。改为与同卡片
             另两个折叠块同款的原生 <details>(默认折叠、用户需要时再展开)。
             计数取 refreshEntries.length(= 本次刷新条目数),不是 providers.length(全部预设,语义不同)。
             开合态依附 DOM 节点:这里不给 key、不用受控 open、块本身的 `N > 0` 条件也不随刷新状态切换
@@ -571,9 +557,36 @@ function PricingCard() {
             </div>
           </details>
         )}
+        {/* 下面两个 <details> 同样不给 key、不受控 open:r122 把说明行挪进来后,它们的子内容随刷新
+            每秒变,但 <details> 节点本身位置与条件都不变,展开态照旧保留。 */}
         <details>
           <summary className="text-[10px] text-ink-faint font-body cursor-pointer">逐家来源与状态（{providers.length} 家）</summary>
           <div className="mt-1.5 space-y-1">
+            {/* r122:范围行(含「刷新全部」入口)。身份还没取到(旧服务端没有这个端点)时按原行为不显示范围行,
+                主按钮本身就是全预设刷新;判不出身份的情况在折叠外(见上)。 */}
+            {current && scoped && (
+              <div className="text-[10px] text-ink-faint font-body">
+                {`范围：当前 provider${current.label ? `（${current.label}）` : ''}`}
+                {' · '}
+                <button onClick={() => refresh('all')} disabled={busy}
+                  className="underline decoration-dotted hover:text-ink-muted disabled:opacity-50">
+                  刷新全部 {providers.length} 家
+                </button>
+              </div>
+            )}
+            <div className="text-[10px] text-ink-faint font-body">
+              价目抓取时间 {shortTime(data.fetchedAt)} · 官方来源 {providers.filter((p) => p.status === 'fresh').length}/{providers.length} 家已更新
+              {refreshEntries.length ? ` · 本次刷新 ${refreshEntries.length} 家（其余为上次结果）` : ''}
+              {attn.length ? ` · 其余 ${attn.length} 家见下方逐家状态` : ''}
+            </div>
+            <div className="text-[10px] text-ink-faint font-body">
+              {['fresh', 'partial', 'stale', 'source-unavailable', 'not-token-priced', 'unmapped'].map((key) => {
+                const count = providers.filter((p) => p.status === key).length;
+                if (!count) return null;
+                const label = { fresh: '已更新', partial: '部分取得', stale: '已过期（stale）', 'source-unavailable': '来源不可用', 'not-token-priced': '套餐计价', unmapped: '未映射（计价未知）' }[key];
+                return <span key={key} className="mr-2">{label} {count}</span>;
+              })}
+            </div>
             {providers.map((p) => (
               <div key={p.presetId} className="text-[10px] font-body leading-snug">
                 <span className="text-ink-muted">{p.presetId}</span>
@@ -594,6 +607,11 @@ function PricingCard() {
             原币种报价（{byCurrency.size} 种币种 / {priced.length} 条）
           </summary>
           <div className="mt-1.5 space-y-2">
+            {/* r122:各币种条数那句说明从折叠外挪到这里(信息不丢)。 */}
+            <div className="text-[10px] text-ink-faint font-body">
+              原币种 {[...byCurrency.entries()].map(([currency, list]) => `${currency} ${list.length} 条`).join(' · ') || '暂无'}
+              <span className="text-ink-ghost">（分别标价，不折算成单一币种；未知维度按 null 留空，不写 0）</span>
+            </div>
             {[...byCurrency.entries()].map(([currency, list]) => (
               <div key={currency}>
                 <div className="text-[10px] text-ink-muted font-body">{currency} · {list.length} 条（单位：每百万 token，不折算成单一币种）</div>
