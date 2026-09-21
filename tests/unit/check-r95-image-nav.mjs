@@ -430,8 +430,34 @@ check('3.4/E9 tests/acceptance/** 本轮零改动(server/routes/image.js 已移�
   // 【2026-09-10 首批开发修订】与 check-r94-panel §7.9 同款收窄:本批新增了整套锁定验收套件
   // tests/acceptance/first-batch-20260910/(基线提交上还不存在),那是合法产物。零 diff 锁的
   // 本意"既有锁定验收一行都不许动"不变 —— 修改/删除照旧零容忍,只有全新条目可以新增。
-  const modified = git('diff', '--name-only', '--diff-filter=MD', base, '--', 'tests/acceptance');
-  assert.strictEqual(modified, '', `这些既有文件本轮一行都不该改/删:\n      ${modified.split('\n').join('\n      ')}`);
+  //
+  // 【2026-09-21 r122 裁定:测试设计代理在锁定前合法对齐旧套件,锁改为按提交判"不混改"】
+  // 与 check-r94-panel §7.9 同一条规则(两处必须同步改):
+  //   规则 A(逐提交):merge-base..HEAD 里每一个提交,若它改/删了基线上已存在的 tests/acceptance/**
+  //     文件,就不得同时改动 server/** 或 client/src/** 下任何文件;违反即红,并打出提交 hash 与文件。
+  //   规则 B(工作区):tests/acceptance/** 不得有未提交的修改/删除(git status --porcelain 里的 M/D)。
+  // "只有全新条目可以新增"照旧。
+  const baselineAcceptance = new Set(git('ls-tree', '-r', '--name-only', base, '--', 'tests/acceptance').split('\n').filter(Boolean));
+  const isProduct = (f) => /^(server|client\/src)\//.test(f);
+  const mixed = [];
+  for (const sha of git('rev-list', '--reverse', `${base}..HEAD`).split('\n').filter(Boolean)) {
+    const touchedLocked = [];
+    const touchedProduct = [];
+    // 与第一父比(合并提交也按第一父);--name-status 一行 = 状态 \t 路径[\t 新路径](R/C 带两个路径)
+    for (const line of git('diff', '--name-status', `${sha}^`, sha).split('\n').filter(Boolean)) {
+      const [status, ...paths] = line.split('\t');
+      const kind = status[0];
+      if (/^[MDRT]$/.test(kind) && baselineAcceptance.has(paths[0])) touchedLocked.push(paths[0]);
+      for (const p of paths) if (isProduct(p)) touchedProduct.push(p);
+    }
+    if (touchedLocked.length && touchedProduct.length) {
+      mixed.push(`${sha.slice(0, 8)} 既改既有验收 [${touchedLocked.join(', ')}] 又改产品代码 [${touchedProduct.join(', ')}]`);
+    }
+  }
+  assert.strictEqual(mixed.length, 0, `这些提交把"改既有验收测试"和"改产品代码"混在了一起(规则 A):\n      ${mixed.join('\n      ')}`);
+  // 规则 B(重命名 R 也是对既有文件的改动,一并算)
+  const dirty = git('status', '--porcelain', '--', 'tests/acceptance').split('\n').filter((l) => l && /[MDR]/.test(l.slice(0, 2)));
+  assert.strictEqual(dirty.length, 0, `tests/acceptance/** 有未提交的修改/删除(规则 B):\n      ${dirty.join('\n      ')}`);
   const existingTopLevel = new Set(git('ls-tree', '--name-only', `${base}:tests/acceptance`).split('\n').filter(Boolean));
   const added = [
     git('diff', '--name-only', '--diff-filter=A', base, '--', 'tests/acceptance'), // 已入库的新增
