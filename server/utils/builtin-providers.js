@@ -246,6 +246,23 @@ export const BUILTIN_PROVIDERS = [
     note: 'OpenAI 兼容聚合平台。该平台也有 Anthropic 端点(见下)。',
     docs: 'https://docs.aihubmix.com/',
   },
+  // r122(用户 2026-09-21 要求补 Gemini 相关中转站):两家第三方中转,非官方,key 自备。
+  {
+    id: 'dmxapi',
+    name: 'DMXAPI(中转)',
+    type: 'openai',
+    baseURL: 'https://www.dmxapi.cn/v1',
+    note: '第三方中转站,非官方,需自备该平台的 API key,OpenAI 兼容。国际站为 https://www.dmxapi.com/v1(key 与国内站不通用);其文档提醒部分客户端只填域名不带 /v1。模型用「获取模型」拉取。',
+    docs: 'https://doc.dmxapi.cn/',
+  },
+  {
+    id: 'yunwu',
+    name: '云雾(中转)',
+    type: 'openai',
+    baseURL: 'https://yunwu.ai/v1',
+    note: '第三方中转站,非官方,需自备该平台的 API key,OpenAI 兼容。模型用「获取模型」拉取。',
+    docs: 'https://yunwu.ai/',
+  },
   {
     id: 'openrouter',
     name: 'OpenRouter',

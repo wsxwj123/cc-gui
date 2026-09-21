@@ -36,7 +36,7 @@ function hostOf(url) {
 export function presetIdsForBaseURL(baseURL) {
   const hit = matchPresetByBaseURL(baseURL);
   // 同 host 的多条预设共用一条采集器(deepseek-official / deepseek-anthropic 同一次抓取):
-  // 一起传,只刷当前 provider 时也把它两个协议入口都算上。host 不在 43 家预设里 → 无从判身份。
+  // 一起传,只刷当前 provider 时也把它两个协议入口都算上。host 不在 45 家预设里(r122 起,含 dmxapi/yunwu)→ 无从判身份。
   return hit.matched ? hit.candidates.map((p) => p.id) : null;
 }
 
@@ -130,8 +130,8 @@ router.post('/pricing/refresh', async (req, res) => {
     }
   }
   // scope:'current' = 只刷当前 provider;显式 presetIds 优先(不把两套范围混着算)。
-  // 身份判不出来(自建/中转地址不在 43 家预设里)时明确回 400,而不是悄悄回落全预设 ——
-  // 回落就等于违背「只刷当前」这件事本身,用户拿到的会是 43 家的请求面。
+  // 身份判不出来(自建/中转地址不在 45 家预设里)时明确回 400,而不是悄悄回落全预设 ——
+  // 回落就等于违背「只刷当前」这件事本身,用户拿到的会是 45 家的请求面。
   let ids = Array.isArray(raw) ? raw : null;
   if (!ids && body.scope === 'current') {
     const current = await resolveCurrentPriceScope();

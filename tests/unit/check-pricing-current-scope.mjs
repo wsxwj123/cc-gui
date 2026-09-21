@@ -103,7 +103,8 @@ await writeJson(join(GUI, 'active-provider.json'), { id: 'p-x' });
 await writeJson(SETTINGS, { env: {} });
 scope = await resolveCurrentPriceScope();
 ok(!scope.resolved, '不在预设表里的中转地址判不出价目身份');
-ok(scope.reason.includes('ai.snaptokenflow.com') && scope.reason.includes('43'), `原因里要有 host 与预设家数: ${scope.reason}`);
+// 2026-09-21 r122 补两家中转站预设(dmxapi、yunwu):预设家数 43 → 45(reason 里的家数取自 registry 长度)。
+ok(scope.reason.includes('ai.snaptokenflow.com') && scope.reason.includes('45'), `原因里要有 host 与预设家数: ${scope.reason}`);
 assert.deepEqual(scope.presetIds, [], '判不出身份时不编造范围');
 
 // ── ⑥ 端点:scope:'current' 的范围与错误码 ───────────────────────────────

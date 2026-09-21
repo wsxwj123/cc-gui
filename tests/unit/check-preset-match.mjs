@@ -84,7 +84,8 @@ import { presetSuggestion } from '../../client/src/utils/builtinProviders.js';
   // 返回的是预设表里的那条对象(建议目标),不是用户输入的回声 —— 调用方据此填三个字段
   assert.equal(r.preset, BUILTIN_PROVIDERS.find((p) => p.id === 'glm-anthropic'),
     '建议目标是预设表里原样的一条(取它的 name/type/baseURL)');
-  assert.equal(BUILTIN_PROVIDERS.length, 43, '预设表仍是 43 条(E 与 D 共用同一份)');
+  // 2026-09-21 r122 补两家中转站预设(dmxapi、yunwu):43 → 45。
+  assert.equal(BUILTIN_PROVIDERS.length, 45, '预设表仍是 45 条(E 与 D 共用同一份)');
   // 返回值里没有"已经替你改好了"这类字段:切不切由用户点,判据只给建议
   assert.deepEqual(Object.keys(r).sort(), ['candidates', 'host', 'matched', 'preset']);
 }
