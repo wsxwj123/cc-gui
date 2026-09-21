@@ -375,6 +375,10 @@ export function SkillsPanel({ marketOnly = false, marketQuery }) {
   const srcName = useMemo(() => Object.fromEntries(sources.map((s) => [s.id, s.name])), [sources]);
 
   const notInstalled = official.filter((s) => !s.installed);
+  // r124:已完成过一次加载(成功或失败)。首帧还没发请求时 officialMeta 是 {} 且没有报错,不算"0 条"。
+  const offSettled = !!offErr || officialMeta.count !== undefined;
+  // 一个技能都没扫到(0 条)≠ 全部已装:只在单个源下、加载完成、列表为空时成立。
+  const marketNoneFound = !loadingOff && offSettled && !isAllSources && official.length === 0;
   const installedIds = [...new Set(official.filter((s) => s.installed).map((s) => s.id))]; // 导入页多选/全选的可选集(合并视图下同 id 可能来自两个源,按磁盘 id 去重)
   const hasSources = Object.keys(sourcesMap).length > 0; // 有来源记录 = 能比对更新
   // CM-1:本机 skill 按关键词过滤(名称 + 描述,大小写不敏感)。
@@ -708,6 +712,16 @@ export function SkillsPanel({ marketOnly = false, marketQuery }) {
 
           {/* 一键导入全部只在单个源下可用:合并视图里条目分属六个仓库,一次调用只能带一个 source,
               硬装会把同名 skill 从错误的仓库装进来。选定单个源后按钮恢复。 */}
+          {/* r124:按钮文字原按"未装数为 0"写「此源已全部安装」,仓库里一个技能都没扫到(0 条)也被这么说,
+              根目录放 SKILL.md 的仓库正是这样被误报成已导入。0 条时不渲染这颗按钮,改成说明;
+              加载失败同样是 0 条,但原因已在上方红框里,这里只说列表为空。 */}
+          {marketNoneFound ? (
+            <div className="text-[11px] text-ink-muted font-body bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2" data-testid="market-none-found">
+              {offErr
+                ? '技能列表为空:本次加载失败,原因见上方提示;处理后可点右上角刷新重试。'
+                : '这个仓库里没有找到技能(SKILL.md):技能仓库需在根目录或某个子目录下包含 SKILL.md 文件。'}
+            </div>
+          ) : (
           <button onClick={() => runImport(notInstalled.map((s) => s.id), false, 'all')}
             disabled={loadingOff || busy.size > 0 || notInstalled.length === 0 || ms.selMode || isAllSources}
             title={isAllSources ? '合并视图不支持整批导入,请先在上方选定单个来源' : undefined}
@@ -715,6 +729,7 @@ export function SkillsPanel({ marketOnly = false, marketQuery }) {
             {busy.has('all') ? <Loader2 size={13} className="animate-spin" /> : <CloudDownload size={13} />}
             {loadingOff ? '加载中…' : isAllSources ? '选定单个来源后可一键导入' : notInstalled.length === 0 ? '此源已全部安装' : `一键导入全部(${notInstalled.length})`}
           </button>
+          )}
 
           {loadingOff ? (
             <div className="text-xs text-ink-faint font-body py-6 text-center flex items-center justify-center gap-2"><Loader2 size={14} className="animate-spin" />加载…</div>
