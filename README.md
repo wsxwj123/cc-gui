@@ -278,6 +278,31 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.398</b>(2026-09-21)· 修复 3 条</summary>
+
+**修复**
+
+<details><summary>配置文件损坏时不再被覆盖</summary>
+
+custom-providers.json、provider-models.json、active-provider.json、image-providers.json 任一读不出时,先把原文件备份为「原名.corrupt-时间戳」,所有写操作拒绝并说明原因,不再用空列表覆盖原文件(此前会把自定义 provider 连同密钥静默清空);修好或删掉该文件后无需重启即恢复读写。
+
+</details>
+
+<details><summary>Provider 列表里能看到配置警告</summary>
+
+配置文件读不出、或 cc-switch 数据库读取出错时,切换浮层、管理页、手机页显示一行警告(哪个文件、备份在哪、怎么处理);写操作被拒时把原因显示出来,不再静默吞掉。
+
+</details>
+
+<details><summary>删除自定义 provider 前先确认</summary>
+
+避免误点即删。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.397</b>(2026-09-21)· 修复 4 条</summary>
 
 **修复**
