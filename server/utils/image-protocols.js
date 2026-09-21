@@ -19,6 +19,15 @@ import {
 // 调用方(routes/image.js、前端 utils)只认 image-protocols 一个入口。
 import { compileMjFlags, mjRefModeFor } from './mj-params.js';
 import { buildProxyImagineRequest } from './mj-proxy.js';
+// r123:各协议的最终请求地址 / 基址规范化 / 「/v数字」段判定的唯一副本(零依赖,前端预览共用),
+// 以及报错分层的分类器。同样原样转出,调用方仍只认 image-protocols 一个入口。
+import { imageRequestURL } from './image-url.js';
+
+export {
+  imageRequestURL, previewImageRequestURL, normalizeImageBaseURL, stripBaseURL,
+  hasVersionSegment, suggestBaseURL, collapseDoubleV1,
+} from './image-url.js';
+export { classifyImageError, looksLikeHtml, looksLikeDoubleV1, IMAGE_ERROR_KINDS } from './image-errors.js';
 
 export {
   compileMjFlags, mjCapsFor, mjEffectiveSpeed, mjRefModeFor,
@@ -284,7 +293,7 @@ export function buildImageRequest(config, prompt, refs) {
         form.append(k, v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v));
       }
       return {
-        url: `${base}/images/edits`,
+        url: imageRequestURL('openai', base, model, { edits: true }),
         headers: { Authorization: `Bearer ${key}` }, // ← 不带 Content-Type:boundary 由 fetch 写
         body: null,
         form,
@@ -309,7 +318,7 @@ export function buildImageRequest(config, prompt, refs) {
     // 方舟形态:image 收 string[](URL 或 dataURI),4.x 最多 14 张。
     if (list.length) body.image = list.map(refDataUri);
     return {
-      url: `${base}/images/generations`,
+      url: imageRequestURL('openai', base, model),
       headers: { ...json, Authorization: `Bearer ${key}` },
       body: { ...body, ...extra },
       form: null,
@@ -320,8 +329,8 @@ export function buildImageRequest(config, prompt, refs) {
   if (protocol === 'gemini') {
     // POST {base}/models/{model}:generateContent。用户可能连 "models/" 前缀一起粘过来。
     // r26-J5:model 进 URL path 必须编码 —— 含空格/斜杠的型号名不编码会把 URL 拼歪
-    // (路径注入:model 里的 '/' 会改变请求的实际路径段)。
-    const bare = model.replace(/^models\//, '');
+    // (路径注入:model 里的 '/' 会改变请求的实际路径段)。r123:剥前缀 + 编码收进 imageRequestURL,
+    // 表单里的地址预览与这里同一份规则。
     const { generationConfig: extraGen, ...restExtra } = extra;
     // 官方示例顺序:文本 part 在前、inline_data 图 part 在后。
     const parts = [{ text }, ...list.map((r) => ({ inline_data: { mime_type: r.mime || 'image/png', data: r.base64 } }))];
@@ -335,7 +344,7 @@ export function buildImageRequest(config, prompt, refs) {
     const goog = { ...json, 'x-goog-api-key': key };
     const bearer = { ...json, Authorization: `Bearer ${key}` };
     return {
-      url: `${base}/models/${encodeURIComponent(bare)}:generateContent`,
+      url: imageRequestURL('gemini', base, model),
       headers: official ? goog : bearer,
       body,
       form: null,
@@ -388,7 +397,7 @@ export function buildImageRequest(config, prompt, refs) {
     if (cfg.mjSpeed) body.speed = String(cfg.mjSpeed);
     if (imageUrls.length) body.image_urls = imageUrls;
     return {
-      url: `${base}/midjourney/generations`,
+      url: imageRequestURL('mj', base, model),
       headers: { ...json, Authorization: `Bearer ${key}` },
       body: { ...body, ...extra },
       form: null,
@@ -402,7 +411,7 @@ export function buildImageRequest(config, prompt, refs) {
     ? [{ type: 'text', text }, ...list.map((r) => ({ type: 'image_url', image_url: { url: refDataUri(r) } }))]
     : text;
   return {
-    url: `${base}/chat/completions`,
+    url: imageRequestURL('chat', base, model),
     headers: { ...json, Authorization: `Bearer ${key}` },
     body: { model, messages: [{ role: 'user', content }], ...extra },
     form: null,
