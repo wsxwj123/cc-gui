@@ -169,6 +169,8 @@ function SubscriptionUsageCard() {
   const unavailableText = (() => {
     if (!data) return '额度查询中…';
     if (data.status === 'available' || data.status === 'stale') return data.error || '';
+    // r122:CLI 未登录 ≠ 账户没订阅 —— 明说未登录并给办法(文案由界面给,不依赖服务端 error 的措辞)。
+    if (data.status === 'not-logged-in') return '额度暂不可用：官方命令行工具未登录任何账户；在终端运行 claude auth login 登录后再试';
     if (data.status === 'not-subscribed') return '额度暂不可用：该账户没有官方订阅额度（CLI 报告 plan 限额不适用）';
     if (data.code === 'NOT_OFFICIAL_PROVIDER') return '额度暂不可用：当前 provider 不是官方订阅，未查询官方额度';
     return `额度暂不可用：${data.error || data.code || '官方 CLI 未返回额度'}`;

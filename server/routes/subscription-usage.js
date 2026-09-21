@@ -11,7 +11,8 @@ const router = Router();
 // ── 官方订阅额度(W7 → R28 重写)────────────────────────────────────────────
 // 数据来自 CLI 自己的 /usage 控制通道(见 utils/cli-official.js):GUI 不读订阅 token、
 // 不拼 OAuth HTTP、不冒充 CLI User-Agent。CLI 说"plan 限额不适用"(API key / Bedrock /
-// Vertex / 第三方中转)就如实报 not-subscribed,绝不拿 0 充数。
+// Vertex / 第三方中转)就如实报 not-subscribed,绝不拿 0 充数;r122 起若它同时报回的账户
+// 信息是"未识别 + oauth-or-none"则报 not-logged-in(CLI 没登录,不是账户没订阅)。
 //
 // 60 秒正/负缓存:成功与失败都缓存。命中同一「查询模式+provider 范围」键的并发请求合并成
 // 一次(chat-done 与 120s 轮询会同时打进来);失败也冷却,否则限流期会被自己的轮询加长。
@@ -108,6 +109,17 @@ export function parseCliUsageWindows(rateLimits) {
 const UNIDENTIFIED_SCOPE = { kind: 'official-cli', scopeId: 'unidentified', authKind: 'unknown', subscription: null };
 
 /**
+ * r122(用户 2026-09-21):CLI 说"plan 限额不适用"时,再看它自己报回的账户信息 —— 没有账户身份、
+ * 没有订阅类型、认证类别是 oauth-or-none(SDK tokenSource 为 'none')= 这台机器的 CLI 根本没登录,
+ * 而不是"该账户没有订阅"。判据**只用 CLI 报回的 accountScope**,不读本机凭据(本路由既有约定)。
+ * scope 缺失(UNIDENTIFIED_SCOPE 的 authKind 是 'unknown')不算未登录:拿不到账户信息时维持原判。
+ */
+export function isCliNotLoggedIn(scope) {
+  if (!scope || typeof scope !== 'object') return false;
+  return scope.scopeId === 'unidentified' && scope.authKind === 'oauth-or-none' && !scope.subscription;
+}
+
+/**
  * 非官方 provider 且不 probe 的答案:不查、不猜。字段齐全(合同要求),三段额度一律 null,
  * official:false —— 不拿第三方额度冒官方,也不用 0 冒充"没查到"。
  * fetchedAt = 本次判定时间(该答案也在 60s 缓存里,同窗口内两次读数不许抖)。
@@ -142,6 +154,17 @@ export function buildQuotaPayload({ result, previous, fetchedAt }) {
     const value = result.value;
     const scope = value.scope || UNIDENTIFIED_SCOPE;
     if (!value.rateLimitsAvailable) {
+      if (isCliNotLoggedIn(scope)) {
+        // r122:CLI 未登录任何官方账户 —— 把它说成"该账户没有订阅额度"会误导走订阅的用户
+        // (Claude 桌面应用里的登录 CLI 看不到)。明说未登录 + 给办法。
+        return {
+          ...base,
+          status: 'not-logged-in',
+          accountScope: scope,
+          code: 'NOT_LOGGED_IN',
+          error: '官方 CLI 未登录任何账户（CLI 报告 plan 限额不适用且账户未识别）；在终端运行 claude auth login 后重试',
+        };
+      }
       // CLI 明说 plan 限额不适用(API key / Bedrock / Vertex / 第三方中转)= 没有官方订阅额度。
       return {
         ...base,

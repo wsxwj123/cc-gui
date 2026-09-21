@@ -25,6 +25,7 @@ export const CLI_TIMEOUT_MS = 15_000;
 export const CLI_CODES = [
   'CLI_UNAVAILABLE', 'CLI_CAPABILITY_UNAVAILABLE', 'CLI_RESPONSE_INVALID',
   'CLI_RATE_LIMITED', 'NOT_SUBSCRIBED', 'CLI_TIMEOUT',
+  'NOT_LOGGED_IN', // r122:CLI 未登录(与 NOT_SUBSCRIBED 区分,见 routes/subscription-usage.js)
 ];
 
 function cliError(code, message) {
