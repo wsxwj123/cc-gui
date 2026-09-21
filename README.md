@@ -278,24 +278,74 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.397</b>(2026-09-21)· 修复 1 条</summary>
+<summary><b>v0.2.397</b>(2026-09-21)· 修复 4 条</summary>
 
 **修复**
 
-- **Provider 与模型列表**
+<details><summary>模型勾选弹窗:已选的可以取消</summary>
+
+已在列表里的模型显示为"已勾选、可点击取消",不再灰置;确认后以弹窗里的勾选结果为准,勾掉的从列表移除,手填的模型 id 保留;一个都不勾时不能确认。
+
+</details>
+
+<details><summary>模型页「拉取最新」对所有 provider 都弹勾选窗</summary>
+
+官方、导入、自定义三类都弹出勾选窗;勾选后下拉只显示勾选的模型,从未选择过的 provider 仍显示全部;拉取失败或目录为空时不弹窗、给出原因。
+
+</details>
+
+<details><summary>Provider 列表不再"全部消失"</summary>
+
+加载失败时保留上一次的列表并显示错误与「重试」;连续点击不再堆积请求;服务端局部读不到(如 cc-switch 数据库)时降级返回而不是整体报错。
+
+</details>
+
+<details><summary>生图 provider 下拉旁新增「编辑」</summary>
+
+直接编辑当前选中的提供方,不再需要去列表里找。
+
+</details>
 
 </details>
 
 <details>
-<summary><b>v0.2.396</b>(2026-09-21)· 修复 2 条</summary>
+<summary><b>v0.2.396</b>(2026-09-21)· 修复 6 条</summary>
 
 **修复**
 
-- **生图:接中转站不再"换一家就报错"**
+<details><summary>生图:识别更多任务制中转站</summary>
 
-<details><summary>技能仓库</summary>
+除 APImart 形态外,还认 OpenAI 视频式任务对象、顶层 task_id、自带轮询地址三种返回,自动轮询取图;轮询地址必须与提供方基址同源,否则拒绝并说明,密钥不会发往别的主机。
 
-根目录放 SKILL.md 的仓库能被识别与导入(技能名取仓库名);仓库里没有技能时明说"没有找到技能",不再误报"此源已全部安装"。
+</details>
+
+<details><summary>生图:基址填错时说人话</summary>
+
+请求打到网站页面(多半缺 /v1)、/v1 写重了,都给出当前请求地址与建议基址;保存提供方时自动去掉误贴的接口尾段;表单里实时显示最终请求地址,并提供一键补 /v1。
+
+</details>
+
+<details><summary>生图:失败记录分层显示</summary>
+
+一句原因 + 建议动作 + 可展开的诊断详情(请求地址、HTTP 状态、上游正文片段、任务号可复制);密钥不会出现在任何字段。
+
+</details>
+
+<details><summary>生图:两处补读</summary>
+
+聊天协议能从 message.images 取图;按 media_type 决定落盘扩展名。
+
+</details>
+
+<details><summary>生图:「清空」收起的预览不再冒回来</summary>
+
+刷新或重开应用后仍保持收起;受理新任务或重新选一张时恢复显示。任务列表缩略图单击改为"选中并恢复预览",放大改用条目上的「放大」按钮。
+
+</details>
+
+<details><summary>技能仓库:根目录放 SKILL.md 的仓库能导入</summary>
+
+技能名取仓库名;仓库里没有技能时明说"没有找到技能",不再误报"此源已全部安装"。
 
 </details>
 
