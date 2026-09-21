@@ -617,6 +617,148 @@ export function extractTaskState(data) {
   return { status: 'processing', progress, urls: [], message, cost, creditsCost };
 }
 
+// ───────────── r123 R1 任务形态表:apimart 之外的三种任务制形态(纯函数,零 IO) ─────────────
+// 调研(.devflow/RESEARCH-imagegen.md §C/§D)查实:ToAPIs 对标准 POST …/images/generations 回的是
+// 「OpenAI 视频式」任务对象({id, object:"generation.task", status}),要 GET 提交地址 + /{id} 轮询,
+// 图在 result.data[].url;new-api 系另有顶层 task_id 形态;BFL 一类响应自带 polling_url。
+// 我方原先只认 apimart 一种(data[0].task_id + {base}/tasks/{id}),换一家就报「没有找到图片」。
+// 这里把"认形态"做成一张小表,等待 / 重试 / 截止 / 取消那套状态机仍只在 routes/image.js 的 pollTask 里。
+
+// 提交响应里出现这些 status 词才把「顶层 id」当任务(与 object 含 task 二选一)—— 防误判:
+// 同步响应里也常有 id,不能见 id 就轮询(见 detectTaskShape)。轮询阶段的"进行中"则不按白名单,
+// 凡不是成功/失败/取消词一律继续等(normalizeTaskStatus)。
+export const TASK_PROGRESS_WORDS = [
+  'pending', 'queued', 'in_progress', 'in-progress', 'processing', 'submitted', 'running',
+  'waiting', 'created', 'starting', 'accepted', 'in_queue', 'not_start', 'generating',
+];
+export const TASK_SUCCESS_WORDS = ['completed', 'succeeded', 'success', 'ready', 'done', 'finished'];
+export const TASK_FAILED_WORDS = ['failed', 'failure', 'error'];
+export const TASK_CANCELLED_WORDS = ['cancelled', 'canceled'];
+
+/** 上游状态词 → completed / failed / cancelled / processing(大小写不敏感;未知值一律 processing)。 */
+export function normalizeTaskStatus(raw) {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (TASK_SUCCESS_WORDS.includes(v)) return 'completed';
+  if (TASK_FAILED_WORDS.includes(v)) return 'failed';
+  if (TASK_CANCELLED_WORDS.includes(v)) return 'cancelled';
+  return 'processing';
+}
+
+/** 协议 + 主机 + 端口全等才算同源(URL.origin);任一方解析不了一律 false。 */
+export function isSameOrigin(a, b) {
+  try { return new URL(String(a)).origin === new URL(String(b)).origin; } catch { return false; }
+}
+const originOf = (u) => { try { return new URL(String(u)).origin; } catch { return ''; } };
+const strOrNum = (v) => (typeof v === 'string' && v.trim() ? v.trim() : (typeof v === 'number' && Number.isFinite(v) ? String(v) : ''));
+const plainObj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
+
+/**
+ * 提交响应 → 任务形态。返回 null = 不是任务(调用方报「没有找到图片」,**不轮询**)。
+ * 优先级:apimart(既有判据 extractTaskId)→ polling_url → 顶层 / data.task_id → 视频式(id + object 含 task
+ * 或 status 属进行中词表)。
+ *   { shape:'apimart'|'polling-url'|'task-id'|'openai-video', taskId, pollUrl }
+ *   polling_url 与基址不同源时返回 { shape:'polling-url', taskId, pollUrl, error } —— 调用方必须按 error 判死
+ *   且【不发请求】(轮询带着 Bearer key,跨源 = 把密钥送到别的主机)。
+ * ctx.submitUrl = 这次提交打的地址(视频式 / task_id 形态的轮询地址 = 它 + /{id});ctx.baseURL = 提供方基址。
+ */
+export function detectTaskShape(data, ctx = {}) {
+  const root = plainObj(data);
+  if (!root) return null;
+  const submit = String(ctx.submitUrl || '').trim().replace(/\/+$/, '');
+  const base = String(ctx.baseURL || '').trim().replace(/\/+$/, '');
+  const inner = plainObj(root.data);
+  // ① apimart:{code, data:[{task_id}]},轮询 {base}/tasks/{id}(既有链路)。
+  const apimartId = extractTaskId(root);
+  if (apimartId) return { shape: 'apimart', taskId: apimartId, pollUrl: base ? `${base}/tasks/${encodeURIComponent(apimartId)}` : '' };
+  // ② 响应自带轮询地址:必须与基址同源。
+  const pollingUrl = strOrNum(root.polling_url) || strOrNum(inner?.polling_url);
+  const anyId = strOrNum(root.id) || strOrNum(root.task_id) || strOrNum(inner?.task_id) || strOrNum(inner?.id) || strOrNum(root.request_id);
+  if (pollingUrl) {
+    if (!/^https?:\/\//i.test(pollingUrl) || !isSameOrigin(pollingUrl, base)) {
+      return {
+        shape: 'polling-url', taskId: anyId, pollUrl: pollingUrl,
+        error: `上游给出的轮询地址与提供方基址不同源（${originOf(pollingUrl) || pollingUrl} ≠ ${originOf(base) || base}），已拒绝请求（防止密钥被带到别的主机）`,
+      };
+    }
+    return { shape: 'polling-url', taskId: anyId || pollingUrl, pollUrl: pollingUrl };
+  }
+  // ③ 顶层 task_id(new-api 系)/ data.task_id / output.task_id(DashScope):轮询 提交地址 + /{id}。
+  const taskId = strOrNum(root.task_id) || strOrNum(inner?.task_id) || strOrNum(plainObj(root.output)?.task_id);
+  if (taskId) return submit ? { shape: 'task-id', taskId, pollUrl: `${submit}/${encodeURIComponent(taskId)}` } : null;
+  // ④ OpenAI 视频式任务对象:顶层 id,且 object 含 task 或 status 属进行中词表(双条件防误判)。
+  const vid = strOrNum(root.id);
+  if (vid) {
+    const object = String(root.object || '').toLowerCase();
+    const status = String(root.status || '').trim().toLowerCase();
+    if (object.includes('task') || TASK_PROGRESS_WORDS.includes(status)) {
+      return submit ? { shape: 'openai-video', taskId: vid, pollUrl: `${submit}/${encodeURIComponent(vid)}` } : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * 通用轮询响应 → { status, progress, urls, b64, message, cost, creditsCost }(与 extractTaskState 同形,多一个 b64:
+ * result.data[].b64_json 这类直接给图片数据的,走既有 base64 落盘链)。apimart 形态仍由 extractTaskState 解析。
+ *  - status 按词表归一(normalizeTaskStatus),未知值当进行中;
+ *  - 取图候选(BRIEF R1-3):result.data[].url|b64_json、result.images[].url、data.result.images[].url[]、
+ *    output.results[].url、result.sample、result.url、顶层 url、data.url、data[] / images[] 同步形态;
+ *    URL 只认 http(s),去重,总数上限 MAX_TASK_IMAGES(在循环里就停,不事后截);
+ *  - 实付兼容字符串数字(ToAPIs 的 billing.cost_usd:"0.04"、billing.credits:"4");取不到一律 null。
+ */
+export function extractGenericTaskState(data) {
+  const root = plainObj(data) || {};
+  const inner = plainObj(root.data);
+  const output = plainObj(root.output);
+  const rawStatus = [root.status, inner?.status, plainObj(root.task)?.status, output?.task_status, root.state]
+    .find((v) => typeof v === 'string' && v.trim());
+  const status = normalizeTaskStatus(rawStatus);
+  const pn = Number(root.progress ?? inner?.progress ?? output?.progress ?? NaN);
+  const progress = Number.isFinite(pn) ? Math.max(0, Math.min(100, Math.round(pn))) : null;
+  const money = (v) => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() && Number.isFinite(Number(v))) return Number(v);
+    return null;
+  };
+  const billing = plainObj(root.billing);
+  const cost = money(billing?.cost_usd) ?? money(root.cost) ?? money(inner?.cost) ?? money(billing?.cost);
+  const creditsCost = money(root.credits_cost) ?? money(inner?.credits_cost) ?? money(billing?.credits);
+  const message = [
+    plainObj(root.error)?.message, typeof root.error === 'string' ? root.error : '', plainObj(inner?.error)?.message,
+    root.fail_reason, inner?.fail_reason, output?.message, status === 'failed' ? root.message : '',
+  ].find((m) => typeof m === 'string' && m.trim()) || '';
+  if (status !== 'completed') return { status, progress, urls: [], b64: [], message, cost, creditsCost };
+  const urls = []; const b64 = [];
+  let full = false;
+  const take = (one) => {
+    if (full || !one) return;
+    if (one.url) { if (urls.includes(one.url)) return; urls.push(one.url); }
+    else if (one.base64) b64.push(one);
+    else return;
+    if (urls.length + b64.length >= MAX_TASK_IMAGES) full = true; // ← 循环里就停,不事后截
+  };
+  const asUrl = (u) => (typeof u === 'string' && /^https?:\/\//i.test(u) ? { mime: '', url: u } : null);
+  const takeItems = (arr) => { for (const it of Array.isArray(arr) ? arr : []) { if (full) return; take(typeof it === 'string' ? asUrl(it) : openaiItem(it, root)); } };
+  const takeImageList = (arr) => {
+    for (const img of Array.isArray(arr) ? arr : []) {
+      const one = img?.url ?? img;
+      for (const u of Array.isArray(one) ? one : [one]) { if (full) return; take(asUrl(u)); }
+    }
+  };
+  const result = plainObj(root.result);
+  takeItems(result?.data);
+  takeImageList(result?.images);
+  takeImageList(plainObj(inner?.result)?.images);
+  takeItems(output?.results);
+  take(asUrl(result?.sample));
+  take(asUrl(result?.url));
+  take(asUrl(root.url));
+  take(asUrl(inner?.url));
+  takeItems(Array.isArray(root.data) ? root.data : null);
+  takeItems(root.images);
+  return { status, progress, urls, b64, message, cost, creditsCost };
+}
+
 /** 文件名:{时间戳}-{prompt 前 20 字符 slug}.{ext}。重名由调用方加序号。 */
 export function buildImageFileName(prompt, ext, now = new Date()) {
   const p = (n) => String(n).padStart(2, '0');

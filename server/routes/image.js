@@ -22,7 +22,7 @@ import {
   buildProxyActionRequest, normalizeProxyBaseURL, normalizeMjButtons,
   IMAGE_DIALECTS, IMAGE_RESOLUTIONS, IMAGE_QUALITIES, IMAGE_OUTPUT_FORMATS,
   IMAGE_BACKGROUNDS, IMAGE_MODERATIONS, IMAGE_N_MAX, imageDialect, estimateCredits, imageParams,
-  classifyImageError, looksLikeHtml, normalizeImageBaseURL,
+  classifyImageError, looksLikeHtml, normalizeImageBaseURL, detectTaskShape, extractGenericTaskState,
 } from '../utils/image-protocols.js';
 import { classifyCustomId, MJ_RENDERED_KINDS } from '../utils/mj-actions.js';
 import { readCapped } from '../utils/read-capped.js';
@@ -1101,7 +1101,15 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
         return fail(redactKey(String(submit.error || ''), provider.apiKey).replace(/\s+/g, ' ').trim()
           .slice(0, MAX_UPSTREAM_ERR));
       }
-      const taskId = isProxy ? submit.taskId : extractTaskId(data);
+      // r123 R1:apimart 形态(data[0].task_id)仍由 extractTaskId 先认(既有链路一行不改);认不出再按
+      // 形态表试 polling_url / 顶层 task_id / 视频式任务对象三种 —— 轮询地址与解析按形态注入 pollTask,
+      // 状态机不复制第二份。polling_url 与基址不同源时【不发请求】直接判死(轮询带着 Bearer key)。
+      const apimartId = isProxy ? null : extractTaskId(data);
+      const generic = isProxy || apimartId ? null : detectTaskShape(data, { submitUrl: spec.url, baseURL: provider.baseURL });
+      if (generic?.error) {
+        return failWith({ phase: 'polling-url-cross-origin', status: null, url: generic.pollUrl || spec.url, message: generic.error, taskId: generic.taskId || '' });
+      }
+      const taskId = isProxy ? submit.taskId : (apimartId || generic?.taskId || null);
       if (taskId) {
         // r84:上游任务号写进条目 —— 二次操作(U/V)要拿它当 task_id 提交,不存就没得引用。
         // 在轮询之前写:轮询要一分钟起,期间用户已经能看到这条记录。
@@ -1116,6 +1124,9 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
           ...(isProxy ? {
             spec: buildProxyPollRequest(provider.baseURL, provider.apiKey, taskId),
             parse: (d) => { const st = extractProxyTaskState(d); proxyButtons = st.buttons; return st; },
+          } : generic ? {
+            spec: { url: generic.pollUrl, headers: { Authorization: `Bearer ${provider.apiKey || ''}` } },
+            parse: extractGenericTaskState,
           } : {}),
         });
         if (polled.cancelled) return; // 取消是终态,状态已由 cancel 端点写
@@ -1130,9 +1141,11 @@ async function runImageJob({ jobId, provider, prompt, spec, startedAt }) {
         }
         // 一个任务可能出多张图(MJ 实测 4 张单图):逐张走下面同一条下载链路,落多个文件。
         pickedList = polled.urls.map((url) => ({ mime: '', url }));
-        // apimart 侧另拉一次按钮(免费);proxy 侧轮询已经带回来了。
+        // r123:通用形态可能直接回图片数据(result.data[].b64_json),追加后走下面同一条 base64 落盘链。
+        if (Array.isArray(polled.b64) && polled.b64.length) pickedList.push(...polled.b64);
+        // apimart 侧另拉一次按钮(免费);proxy 侧轮询已经带回来了;通用形态没有这个接口,不拉。
         if (MJ_PROTOCOLS.includes(provider.protocol)) {
-          mjButtons = isProxy ? proxyButtons : await fetchMjButtons(provider, taskId);
+          mjButtons = isProxy ? proxyButtons : (generic ? [] : await fetchMjButtons(provider, taskId));
         }
       }
     }
