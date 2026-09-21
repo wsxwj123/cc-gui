@@ -22,9 +22,13 @@ import {
 import { resolveClaude, resolveSdkClaude } from '../utils/claude-resolver.js';
 import { readOfficialModels } from '../utils/cli-official.js';
 import { checkQuotaConfig, sameHostURL } from '../services/provider-quota.js';
+// r126:GUI 配置 json 的守卫读写 —— 读不出(半写 / 损坏)就不许写、首读先备份、修好即恢复(BRIEF-r126)。
+import { readJsonGuarded, assertWritable, corruptWarning, isConfigGuardError, sendConfigGuardError } from '../utils/guarded-json.js';
 
 const execFileP = promisify(execFile);
 const CC_SWITCH_DB = join(homedir(), '.cc-switch', 'cc-switch.db');
+// r126:写路由 catch 的统一出口 —— 配置守卫错误回 409 { error, code:'CONFIG_CORRUPT', file, backup },其余照旧 500。
+const sendRouteError = (res, err) => (isConfigGuardError(err) ? sendConfigGuardError(res, err) : res.status(500).json({ error: err.message }));
 
 const router = Router();
 const SETTINGS_PATH = join(homedir(), '.claude', 'settings.json');
@@ -154,14 +158,20 @@ async function ensureOnboardingFlag() {
 // otherwise the picker reverts to the stale db value every time it remounts.
 const ACTIVE_PROVIDER_PATH = join(homedir(), '.claude-gui', 'active-provider.json');
 
+// r126:带原因的读取。文件损坏时 id 为 null(与此前一致),另给 warning(结构化,GET /providers 的 warnings[] 用);
+// 首读即在同目录留一份 .corrupt-<时间戳> 备份(guarded-json 按内容只备份一次)。
+export async function readActiveProviderIdDetailed() {
+  const r = await readJsonGuarded(ACTIVE_PROVIDER_PATH);
+  const id = typeof r.value?.id === 'string' ? r.value.id : null;
+  return { id, warning: corruptWarning(r) };
+}
 export async function readActiveProviderId() {
-  try {
-    const d = JSON.parse(await readFile(ACTIVE_PROVIDER_PATH, 'utf-8'));
-    return typeof d?.id === 'string' ? d.id : null;
-  } catch { return null; }
+  try { return (await readActiveProviderIdDetailed()).id; } catch { return null; }
 }
 
+// r126:文件损坏 / 读不出时拒绝覆盖(抛 ConfigGuardError → 路由回 409);其余写失败仍如前静默。
 async function writeActiveProviderId(id) {
+  await assertWritable(ACTIVE_PROVIDER_PATH);
   try {
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
     await writeFile(ACTIVE_PROVIDER_PATH, JSON.stringify({ id }));
@@ -372,21 +382,19 @@ export function sanitizeModelMeta(input, models) {
 // r125:带原因的读取。文件不存在 = 正常的空(warning 为 null);读不到 / 不是合法 JSON(半写、损坏)/
 // 顶层不是数组 → 仍回空列表让调用方继续,但把原因交出去 —— 此前这些情况静默当成 [],自定义 provider
 // 会从列表里"消失"而官方还在,用户看不出是文件坏了(TEST-PLAN P3-4 旁证)。原因文本不含文件内容。
+// r126:改走 guarded-json —— 损坏时首读即备份(<原名>.corrupt-<时间戳>,同内容只一份)、原文件不动,并多给一个
+// 结构化的 corruptWarning({ kind:'config-corrupt', file, message, backup })供 GET /providers 的 warnings[];
+// warning 字符串(r125 契约)保留:损坏时为 corruptWarning.message(点名文件与备份路径)。
 export async function readCustomProvidersDetailed() {
-  let raw;
-  try {
-    raw = await readFile(CUSTOM_PROVIDERS_PATH, 'utf-8');
-  } catch (err) {
-    if (err?.code === 'ENOENT') return { list: [], warning: null };
-    return { list: [], warning: `custom-providers.json 读取失败：${err?.code || err?.message || '未知错误'}` };
+  const r = await readJsonGuarded(CUSTOM_PROVIDERS_PATH);
+  if (r.missing) return { list: [], warning: null, corruptWarning: null };
+  if (r.unreadable) return { list: [], warning: `custom-providers.json 读取失败：${r.error || '未知错误'}`, corruptWarning: null };
+  if (r.corrupt) {
+    const cw = corruptWarning(r);
+    return { list: [], warning: cw.message, corruptWarning: cw };
   }
-  let d;
-  try {
-    d = JSON.parse(raw);
-  } catch {
-    return { list: [], warning: `custom-providers.json 不是合法 JSON（可能写到一半或已损坏），自定义 provider 暂时读不到（${CUSTOM_PROVIDERS_PATH}）` };
-  }
-  if (!Array.isArray(d)) return { list: [], warning: `custom-providers.json 顶层不是数组，自定义 provider 暂时读不到（${CUSTOM_PROVIDERS_PATH}）` };
+  const d = r.value;
+  if (!Array.isArray(d)) return { list: [], warning: `custom-providers.json 顶层不是数组，自定义 provider 暂时读不到（${CUSTOM_PROVIDERS_PATH}）`, corruptWarning: null };
   // r10-9:读侧统一 normalize —— 下游一律拿到 string[] 的 models + 可选 modelMeta。
   const list = d.map((p) => {
     if (!p || !Array.isArray(p.models)) return p;
@@ -395,7 +403,7 @@ export async function readCustomProvidersDetailed() {
     if (meta) next.modelMeta = meta; else delete next.modelMeta;
     return next;
   });
-  return { list, warning: null };
+  return { list, warning: null, corruptWarning: null };
 }
 
 // 既有调用方的形态不变(失败 = []),只是不再静默:同一原因只记一行日志,恢复后复位。
@@ -427,6 +435,9 @@ async function writeCustomProviders(list) {
     return { ...rest, models: denormalizeProviderModels(p.models, modelMeta) };
   });
   const run = _customProvidersQueue.catch(() => {}).then(async () => {
+    // r126:落盘前最后一道闸 —— 文件此刻损坏 / 读不出就拒绝(抛 ConfigGuardError → 409),绝不用内存里的
+    // 空列表覆盖它。放在队列里紧贴 rename,前面的读-改与这里之间文件被改坏也拦得住。
+    await assertWritable(CUSTOM_PROVIDERS_PATH);
     await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
     const tmp = `${CUSTOM_PROVIDERS_PATH}.tmp-${randomUUID()}`;
     try {
@@ -542,14 +553,19 @@ export function findClaudeProviderRow(rows, id) {
 // provider's auto-fetched catalogue). Shape: { [providerId]: [modelId, ...] }.
 const PROVIDER_MODELS_PATH = join(homedir(), '.claude-gui', 'provider-models.json');
 
+// r126:带原因的读取(损坏 → {} + 结构化 warning + 首读备份);既有调用方仍用只回 map 的 readProviderModels。
+async function readProviderModelsDetailed() {
+  const r = await readJsonGuarded(PROVIDER_MODELS_PATH);
+  const d = r.value;
+  return { map: d && typeof d === 'object' && !Array.isArray(d) ? d : {}, warning: corruptWarning(r) };
+}
 async function readProviderModels() {
-  try {
-    const d = JSON.parse(await readFile(PROVIDER_MODELS_PATH, 'utf-8'));
-    return d && typeof d === 'object' && !Array.isArray(d) ? d : {};
-  } catch { return {}; }
+  try { return (await readProviderModelsDetailed()).map; } catch { return {}; }
 }
 
+// r126:文件损坏 / 读不出时拒绝覆盖(抛 ConfigGuardError → 路由回 409)。
 async function writeProviderModels(map) {
+  await assertWritable(PROVIDER_MODELS_PATH);
   await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
   await writeFile(PROVIDER_MODELS_PATH, JSON.stringify(map, null, 2));
 }
@@ -1056,7 +1072,8 @@ function describeCcSwitchError(err) {
   return `读取 cc-switch 数据库失败：${text.replace(/^Error:\s*/i, '').slice(0, 160)}`;
 }
 async function ccSwitchQueryDetailed(sql) {
-  if (!existsSync(CC_SWITCH_DB)) return { rows: [], error: `未找到 cc-switch 数据库（${CC_SWITCH_DB}）` };
+  // r126:missing 标记区分"未安装"(不算用户可见警告)与"读取出错 / 损坏"(要显示)。
+  if (!existsSync(CC_SWITCH_DB)) return { rows: [], error: `未找到 cc-switch 数据库（${CC_SWITCH_DB}）`, missing: true };
   try {
     const { stdout } = await execFileP('sqlite3', ['-json', '-readonly', CC_SWITCH_DB, sql], {
       timeout: 5000, maxBuffer: 16 * 1024 * 1024,
@@ -1093,9 +1110,14 @@ router.get('/providers', async (_req, res) => {
   // 仍返回内置官方 + 读得到的部分,并在 warning 里说明哪部分没读到(前端只记日志,不当成加载失败)。
   // 只有内置官方行都拼不出来(下面 try 里真正抛出)才 500;500 体里也带上已收集的 warning。
   const warnings = [];
+  // r126:结构化警告 warnings[](INTERFACE-r126 §B1):{ kind, file, message, backup },kind ∈
+  // config-corrupt(某份 GUI 配置 json 损坏,首读已备份)| ccswitch-error(cc-switch 库读取出错 / 损坏)|
+  // ccswitch-missing(未安装,不算用户可见警告)。上面的 warning 字符串(r125 契约)原样保留、二者并存。
+  const warningItems = [];
   const guard = async (label, fn, fallback) => {
     try { return await fn(); } catch (err) { warnings.push(`${label}：${err?.message || err}`); return fallback; }
   };
+  const ccSwitchWarning = (q, message) => ({ kind: q.missing ? 'ccswitch-missing' : 'ccswitch-error', file: CC_SWITCH_DB, message, backup: null });
   try {
     // K4: 一次性导入后停止读 cc-switch.db,GUI 自己管 customProviders 即可。
     const imported = await guard('导入标记读取失败', () => isCCSwitchImported(), false);
@@ -1108,22 +1130,31 @@ router.get('/providers', async (_req, res) => {
       dbRows = q1.rows;
       if (q1.error) {
         warnings.push(`cc-switch 导入项未读到：${q1.error}`);
+        warningItems.push(ccSwitchWarning(q1, `cc-switch 导入项未读到：${q1.error}`));
       } else {
         // 同一个库:第一条查询失败就不再查第二条(免得同一原因重复报、重复等超时)。
         const q2 = await ccSwitchQueryDetailed(
           "SELECT id, name, app_type, settings_config FROM providers WHERE app_type IN ('codex','opencode') ORDER BY sort_index"
         );
         oaRows = q2.rows;
-        if (q2.error) warnings.push(`cc-switch 的 OpenAI 格式导入项未读到：${q2.error}`);
+        if (q2.error) {
+          warnings.push(`cc-switch 的 OpenAI 格式导入项未读到：${q2.error}`);
+          warningItems.push(ccSwitchWarning(q2, `cc-switch 的 OpenAI 格式导入项未读到：${q2.error}`));
+        }
       }
     }
     const rows = withBuiltinOfficial(dbRows);
     // A GUI switch is authoritative over the db's stale is_current; fall back to
     // the db flag only when the GUI hasn't switched anything yet.
-    const activeId = await guard('当前 provider 标记读取失败', () => readActiveProviderId(), null);
+    // r126:active-provider.json / provider-models.json 损坏 → 该段按空处理照旧,但原因进 warning 与 warnings[]。
+    const activeRead = await guard('当前 provider 标记读取失败', () => readActiveProviderIdDetailed(), { id: null, warning: null });
+    if (activeRead.warning) { warnings.push(activeRead.warning.message); warningItems.push(activeRead.warning); }
+    const activeId = activeRead.id;
     const isCur = (id, dbCurrent) => (activeId != null ? id === activeId : dbCurrent);
     // User's multi-select overrides the cc-switch static models list (when set).
-    const sel = await guard('模型选择存储读取失败', () => readProviderModels(), {});
+    const selRead = await guard('模型选择存储读取失败', () => readProviderModelsDetailed(), { map: {}, warning: null });
+    if (selRead.warning) { warnings.push(selRead.warning.message); warningItems.push(selRead.warning); }
+    const sel = selRead.map;
     const openai = [];
     for (const r of oaRows) {
       const p = parseOpenAIProvider(r.settings_config);
@@ -1133,6 +1164,7 @@ router.get('/providers', async (_req, res) => {
     // 半写 / 损坏的 custom-providers.json:自定义项这一段为空,原因进 warning(不再静默)。
     const customRead = await readCustomProvidersDetailed();
     if (customRead.warning) warnings.push(customRead.warning);
+    if (customRead.corruptWarning) warningItems.push(customRead.corruptWarning);
     const customProviders = customRead.list.filter((p) => p && typeof p === 'object').map((p) => ({
       id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
       models: p.models || [], defaultModel: p.defaultModel || '', tierModels: p.tierModels || null,
@@ -1186,12 +1218,14 @@ router.get('/providers', async (_req, res) => {
       customProviders,
       // 回显所有 override(前端编辑器初始化用);无文件 = {}。
       overrides,
+      // r126:结构化警告,恒为数组(全部正常时为 [])。
+      warnings: warningItems,
     };
     // 有任一来源没读到才带 warning(字符串,多条用「；」连接);全部正常不带该字段,响应形状与此前一致。
     if (warnings.length) payload.warning = warnings.join('；');
     res.json(payload);
   } catch (err) {
-    res.status(500).json({ error: err.message, ...(warnings.length ? { warning: warnings.join('；') } : {}) });
+    res.status(500).json({ error: err.message, warnings: warningItems, ...(warnings.length ? { warning: warnings.join('；') } : {}) });
   }
 });
 
@@ -1203,6 +1237,9 @@ router.post('/provider/switch', async (req, res) => {
   try {
     const { id, model } = req.body || {};
     if (!id || typeof id !== 'string') return res.status(400).json({ error: 'id required' });
+    // r126:active-provider.json 损坏时在**任何副作用之前**拒绝(409):切换路径先改写 settings.json 再写
+    // 这个标记,若到最后一步才拦,CLI 已切走而 GUI 标记没跟上。writeActiveProviderId 里还有同一道闸兜底。
+    await assertWritable(ACTIVE_PROVIDER_PATH);
 
     // Read ALL claude providers and match in JS — user input never touches SQL.
     // withBuiltinOfficial:db 无官方行时补合成行,使其 id 命中下面【现成的】official 分支。
@@ -1328,7 +1365,7 @@ router.post('/provider/switch', async (req, res) => {
     await unlink(OPENAI_ACTIVE_PATH).catch(() => {});
     res.json({ ok: true, name: hit.name });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendRouteError(res, err);
   }
 });
 
@@ -1673,7 +1710,7 @@ router.post('/providers/import-from-ccswitch', async (_req, res) => {
     await writeCustomProviders(list);
     await markCCSwitchImported();
     res.json({ ok: true, added, skippedInvalid, total: list.length });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { sendRouteError(res, err); }
 });
 
 // ── 自定义额度查询端点(INTERFACE-20260913-quota-endpoint §B) ────────────────────
@@ -1790,6 +1827,8 @@ router.post('/custom-providers', async (req, res) => {
       const av = acceptAvatar(req.body?.avatar);
       if (av) entry.avatar = av;
     }
+    // r126:文件损坏时先拒(409),不让"空列表 + 新项"走到落盘(writeCustomProviders 里还有一道同样的闸)。
+    await assertWritable(CUSTOM_PROVIDERS_PATH);
     const list = await readCustomProviders();
     // 幂等查重(用户新机实报:添加成功但后续 switch 失败被误报"保存失败"→重试 N 次
     // = N 条重复条目)。同 type+name+baseURL 视为同一 provider,返回已存在的 id 而非
@@ -1799,7 +1838,7 @@ router.post('/custom-providers', async (req, res) => {
     list.push(entry);
     await writeCustomProviders(list);
     res.json({ ok: true, id: entry.id });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { sendRouteError(res, err); }
 });
 
 // PUT /api/custom-providers/:id { name, type, baseURL, apiKey?, models } — edit one.
@@ -1808,6 +1847,8 @@ router.post('/custom-providers', async (req, res) => {
 // never receives the key, so a blank field must not wipe it.
 router.put('/custom-providers/:id', async (req, res) => {
   try {
+    // r126:文件损坏时先拒(409)—— 放在 404 判定之前:损坏读成 [] 会把"文件坏了"误报成"not found"。
+    await assertWritable(CUSTOM_PROVIDERS_PATH);
     const list = await readCustomProviders();
     const idx = list.findIndex((p) => p.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'not found' });
@@ -1938,12 +1979,14 @@ router.put('/custom-providers/:id', async (req, res) => {
     // 少了这一步,用户在编辑表单里改默认模型/档位映射保存后毫无反应(#13)。
     const reapplied = await reapplyIfActive(prev.id);
     res.json({ ok: true, id: prev.id, reapplied, ...(quotaKeyCleared ? { quotaKeyCleared: true } : {}) });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { sendRouteError(res, err); }
 });
 
 // DELETE /api/custom-providers/:id — remove one.
 router.delete('/custom-providers/:id', async (req, res) => {
   try {
+    // r126:同 PUT —— 损坏先拒 409,不误报 404。
+    await assertWritable(CUSTOM_PROVIDERS_PATH);
     const list = await readCustomProviders();
     const next = list.filter((p) => p.id !== req.params.id);
     if (next.length === list.length) return res.status(404).json({ error: 'not found' });
@@ -1952,7 +1995,7 @@ router.delete('/custom-providers/:id', async (req, res) => {
     await deleteAvatarFile(list.find((p) => p.id === req.params.id)?.avatar);
     if ((await readActiveProviderId()) === req.params.id) await unlink(ACTIVE_PROVIDER_PATH).catch(() => {});
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { sendRouteError(res, err); }
 });
 
 // B 方案: 按 provider id 解析其 models[](与 GET /providers 同口径),供
@@ -2539,7 +2582,7 @@ router.post('/provider/fetch-models', async (req, res) => {
       else {
         // 当前激活 provider(env base 直连)也持久化窗口:id 从 active-provider.json 反查。
         try {
-          const activeId = JSON.parse(await readFile(join(homedir(), '.claude-gui', 'active-provider.json'), 'utf-8'))?.id;
+          const activeId = await readActiveProviderId(); // r126:走守卫读取(损坏 → null,不再各处裸 JSON.parse)
           if (activeId) persistModelWindows(activeId, probed.windows);
         } catch {}
       }
@@ -2628,7 +2671,7 @@ router.put('/provider-models/:id', async (req, res) => {
     // Multi-select is for OpenAI-format providers (cc-switch codex/opencode).
     await syncActiveProviderSnapshot(OPENAI_ACTIVE_PATH, req.params.id, map[req.params.id] || []);
     res.json({ ok: true, models: map[req.params.id] || [] });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { sendRouteError(res, err); }
 });
 
 // Called once on server boot: if an OpenAI-format provider was active before a

@@ -96,6 +96,7 @@ import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import ImagePanel from './components/ImagePanel.jsx';
 import { ModelPickModal, replaceModelLines, stripJunkModels } from './components/ModelPickModal.jsx';
 import { fetchProviderList, getCachedProviderList } from './utils/providerListFetch.js';
+import ProviderListWarning from './components/ProviderListWarning.jsx';
 import { SubagentView } from './components/SubagentView.jsx';
 import BtwWindow from './components/BtwWindow.jsx';
 import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyExactResult, relativeAgeLabel } from './utils/contextCache.js';
@@ -9201,12 +9202,15 @@ function ProviderManager({ initialEditId = null }) {
   // r125:加载失败(服务端报错 / 形状不对 / 超时)不清空列表,只显示错误行 + 「重试」(P3-1);
   // /api/providers 经 fetchProviderList 在途复用(P3-2)。
   const [listError, setListError] = useState('');
+  // r126:服务端的结构化警告(某份配置 json 损坏 / cc-switch 库出错),列表每次重拉都刷新,修好即消失。
+  const [listWarnings, setListWarnings] = useState(() => (Array.isArray(getCachedProviderList()?.warnings) ? getCachedProviderList().warnings : []));
   const load = () => {
     fetchProviderList().then((d) => {
       setProviders(d.providers);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
       setOverrides(d.overrides && typeof d.overrides === 'object' ? d.overrides : {});
+      setListWarnings(Array.isArray(d.warnings) ? d.warnings : []);
       setListError('');
       // R3:顺手把用户自填单价装进计价层。pricing.js 自己也会 hydrate + 监听
       // cgui:provider-change,这里只是省掉一次往返,不是唯一入口。
@@ -9247,7 +9251,11 @@ function ProviderManager({ initialEditId = null }) {
     // If this provider is open in the edit form, close it first — otherwise the
     // form lingers on a now-deleted target ("更新" would 404).
     setEditingProvider((cur) => (cur?.id === id ? null : cur));
-    await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).catch(() => {});
+    // r126:删除被拒(如 custom-providers.json 损坏 → 409 CONFIG_CORRUPT)要让用户看到原因,不再吞掉。
+    try {
+      const r = await fetch(`/api/custom-providers/${id}`, { method: 'DELETE' });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `删除失败（${r.status}）`); }
+    } catch (e) { confirmDialog(`删除失败：${e.message}`); }
     load();
   };
   const [editingProvider, setEditingProvider] = useState(null);
@@ -9338,6 +9346,8 @@ function ProviderManager({ initialEditId = null }) {
                 </div>
                 {hasCustom && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={12} />}
               </div>
+              {/* r126:配置文件损坏 / cc-switch 库出错的警告行(哪个文件、备份在哪、怎么处理;锚点 provider-list-warning)。 */}
+              <ProviderListWarning warnings={listWarnings} className="mx-3 my-1" />
               {/* r125:加载失败只加一行说明 + 「重试」,列表保持上一次成功的结果。 */}
               {listError && (
                 <div data-testid="provider-list-error"
@@ -9354,7 +9364,8 @@ function ProviderManager({ initialEditId = null }) {
                   allIds={customProviders.map((p) => p.id)} onSetAll={ms.setAll} selectedSet={ms.selected}
                   onDelete={async () => {
                     const res = await ms.runDelete(
-                      (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then((r) => { if (!r.ok) throw new Error('删除失败'); }),
+                      // r126:带回服务端原因(如 409 CONFIG_CORRUPT 的说明),runDelete 会逐条列出失败原因。
+                      (id) => fetch(`/api/custom-providers/${id}`, { method: 'DELETE' }).then(async (r) => { if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || '删除失败'); } }),
                       { noun: '个 Provider', nameOf: (id) => customProviders.find((p) => p.id === id)?.name || id });
                     if (res) load();
                   }} />
@@ -10272,17 +10283,19 @@ function OpenAIModelManager({ provider, onSaved }) {
   const save = async () => {
     setBusy('save');
     try {
-      await fetch(`/api/provider-models/${provider.id}`, {
+      const r = await fetch(`/api/provider-models/${provider.id}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ models: [...checked] }),
       });
+      // r126:被拒(如 provider-models.json 损坏 → 409 CONFIG_CORRUPT)要显示原因,不再静默当成功关掉。
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `保存失败（${r.status}）`); }
       // Refresh the model picker NOW: the backend just synced this provider's
       // openai-active.json snapshot (if it's the active one), so re-read /api/model
       // and notify listeners — otherwise the dropdown only updates after a re-switch.
       useStore.getState().fetchModel?.();
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
       setOpen(false); onSaved?.();
-    } catch {}
+    } catch (e) { setNote('保存失败：' + e.message); }
     setBusy('');
   };
   // Union of fetched models and any already-selected ones not in the fetch.
@@ -11000,12 +11013,15 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
   const [hiddenProviders, setHiddenProviders] = useState(new Set());
   // r125:加载失败不清空列表,只显示错误行 + 「重试」;/api/providers 经 fetchProviderList 在途复用。
   const [listError, setListError] = useState('');
+  // r126:服务端的结构化警告(某份配置 json 损坏 / cc-switch 库出错),进本页即重拉,修好即消失。
+  const [listWarnings, setListWarnings] = useState(() => (Array.isArray(getCachedProviderList()?.warnings) ? getCachedProviderList().warnings : []));
   const load = () => {
     fetchProviderList().then((d) => {
       setProviders(d.providers);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
       setOverrides(d.overrides && typeof d.overrides === 'object' ? d.overrides : {});
+      setListWarnings(Array.isArray(d.warnings) ? d.warnings : []);
       setListError('');
     }).catch((e) => setListError(e?.message || '加载失败'));
     fetch('/api/prefs/hidden-providers').then((r) => r.json())
@@ -11066,6 +11082,8 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
           <div className="px-4 pt-3 pb-1 border-t border-canvas-deep/40 mt-1">
             <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body">全部 Provider · 点行展开模型,选模型即切换</div>
           </div>
+          {/* r126:配置文件损坏 / cc-switch 库出错的警告行(锚点 provider-list-warning,与桌面同一组件)。 */}
+          <ProviderListWarning warnings={listWarnings} className="mx-4 my-1" textClass="text-[11px]" />
           {/* r125:加载失败只加一行说明 + 「重试」,列表保持上一次成功的结果。 */}
           {listError && (
             <div data-testid="provider-list-error"

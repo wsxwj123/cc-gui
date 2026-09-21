@@ -26,6 +26,8 @@ import {
 } from '../utils/image-protocols.js';
 import { classifyCustomId, MJ_RENDERED_KINDS } from '../utils/mj-actions.js';
 import { readCapped } from '../utils/read-capped.js';
+// r126:image-providers.json 的守卫读写 —— 损坏(半写 / 被外部改坏)时首读备份、写入一律 409 拒绝,不用空列表覆盖。
+import { readJsonGuarded, assertWritable, corruptWarning, isConfigGuardError, sendConfigGuardError } from '../utils/guarded-json.js';
 // r56 按 provider 生图代理:生图链路的三处外联(生成 POST / 图片下载 / 拉模型)统一
 // 改走 undici 的 fetch(它是 Node 全局 fetch 的同源实现,AbortSignal / redirect:'manual' /
 // 读流语义相同),不传 dispatcher 就是直连,传了才走代理。刻意【不】按"有无代理二选一"
@@ -132,12 +134,17 @@ async function assertPublicRefUrl(raw) {
   return assertPublicBaseURL(u, { allowLoopback: false }).catch(() => { throw bad; });
 }
 
-async function readImageProviders() {
-  try {
-    const d = JSON.parse(await readFile(imageProvidersPath(), 'utf-8'));
-    return Array.isArray(d) ? d : [];
-  } catch { return []; }
+// r126:带原因的读取(损坏 → [] + 结构化 warning + 首读备份 <原名>.corrupt-<时间戳>);既有调用方仍用只回 list 的
+// readImageProviders(损坏 / 不存在 = [],行为不变)。
+async function readImageProvidersDetailed() {
+  const r = await readJsonGuarded(imageProvidersPath());
+  return { list: Array.isArray(r.value) ? r.value : [], warning: corruptWarning(r) };
 }
+async function readImageProviders() {
+  try { return (await readImageProvidersDetailed()).list; } catch { return []; }
+}
+// r126:写路由 catch 的统一出口 —— 配置守卫错误回 409 { error, code:'CONFIG_CORRUPT', file, backup },其余照旧。
+const sendRouteError = (res, err) => (isConfigGuardError(err) ? sendConfigGuardError(res, err) : res.status(err?.status || 500).json({ error: err.message }));
 
 // 原子写:tmp 名带 uuid + rename 落地(半截 writeFile 不会留下坏文件)。
 // mode 0600:providers 文件里有明文 apiKey,默认 0644 等于同机其他用户可读
@@ -164,7 +171,10 @@ async function atomicWriteProviders(list) {
 let _imageProvidersQueue = Promise.resolve();
 function mutateImageProviders(mutator) {
   const run = _imageProvidersQueue.catch(() => {}).then(async () => {
-    const list = await readImageProviders();
+    // r126:损坏 / 读不出 → 在 mutator 之前就拒(抛 ConfigGuardError → 409):损坏读成 [] 会让 PUT / DELETE
+    // 先撞 404、POST 把"空列表 + 新项"写回去。assertWritable 回的就是这次读取结果,不再读第二遍。
+    const r = await assertWritable(imageProvidersPath());
+    const list = Array.isArray(r.value) ? r.value : [];
     const out = await mutator(list);
     await atomicWriteProviders(out.list);
     return out.result;
@@ -175,7 +185,10 @@ function mutateImageProviders(mutator) {
 
 // 保留直写口(测试与迁移用);常规 CRUD 一律走 mutateImageProviders。
 function writeImageProviders(list) {
-  const run = _imageProvidersQueue.catch(() => {}).then(() => atomicWriteProviders(list));
+  const run = _imageProvidersQueue.catch(() => {}).then(async () => {
+    await assertWritable(imageProvidersPath()); // r126:损坏时同样不许覆盖
+    await atomicWriteProviders(list);
+  });
   _imageProvidersQueue = run;
   return run;
 }
@@ -497,7 +510,7 @@ router.post('/image-providers', async (req, res) => {
       return { list, result: entry.id };
     });
     res.json({ ok: true, id });
-  } catch (err) { res.status(err?.status || 500).json({ error: err.message }); }
+  } catch (err) { sendRouteError(res, err); }
 });
 
 /** PUT /api/image-providers/:id — 编辑。apiKey 留空 = 保留原 key(前端从不持有 key)。 */
@@ -518,7 +531,7 @@ router.put('/image-providers/:id', async (req, res) => {
       return { list, result: list[idx].id };
     });
     res.json({ ok: true, id });
-  } catch (err) { res.status(err?.status || 500).json({ error: err.message }); }
+  } catch (err) { sendRouteError(res, err); }
 });
 
 /** DELETE /api/image-providers/:id — 删除(只删配置,不动已出的图)。 */
@@ -530,7 +543,7 @@ router.delete('/image-providers/:id', async (req, res) => {
       return { list: next, result: true };
     });
     res.json({ ok: true });
-  } catch (err) { res.status(err?.status || 500).json({ error: err.message }); }
+  } catch (err) { sendRouteError(res, err); }
 });
 
 const FETCH_MODELS_TIMEOUT_MS = 10_000; // 与文本 provider 的拉取口径一致

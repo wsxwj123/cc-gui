@@ -25,6 +25,30 @@ export function invalidateProviderList() {
   inflight = null;
 }
 
+// r126:服务端 warnings[] 里要让用户看见的两类 —— config-corrupt(某份 GUI 配置 json 损坏,首读已备份、写入已锁)
+// 与 ccswitch-error(cc-switch 库读取出错 / 损坏);ccswitch-missing(未安装)不算警告,不显示(BRIEF-r126 Q3)。
+const VISIBLE_WARNING_KINDS = new Set(['config-corrupt', 'ccswitch-error']);
+export function visibleProviderWarnings(d) {
+  const arr = Array.isArray(d?.warnings) ? d.warnings : [];
+  return arr.filter((w) => w && typeof w === 'object' && VISIBLE_WARNING_KINDS.has(w.kind));
+}
+
+// 路径按 / 与 \ 两种分隔符切(Windows 路径)。
+const fileNameOf = (p) => String(p || '').split(/[/\\]/).pop() || '配置文件';
+
+/** 警告行文案(客观陈述:哪个文件、备份在哪、怎么处理;只含路径,不含文件内容)。 */
+export function providerWarningText(w) {
+  if (!w) return '';
+  if (w.kind === 'config-corrupt') {
+    const backup = w.backup
+      ? `原文件未改动，备份在 ${w.backup}。`
+      : '原文件未改动（自动备份失败，请先手动复制一份）。';
+    return `${fileNameOf(w.file)} 不是合法 JSON（可能写到一半或被外部改坏），其中的配置暂时读不到，写入已锁定以免覆盖。${backup}修复该文件或删除它（程序会重建）后重新打开本列表即可恢复。`;
+  }
+  if (w.kind === 'ccswitch-error') return w.message || 'cc-switch 数据库读取出错，导入的 provider 暂时读不到。';
+  return w.message || '';
+}
+
 /** 只给单测:清空缓存与在途状态。 */
 export function _resetProviderListForTests() {
   inflight = null;

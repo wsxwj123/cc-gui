@@ -14,6 +14,7 @@ import { nativeContextWindow } from '../utils/contextWindow.js';
 import { notifyOauthMissing } from '../utils/officialAuth.js';
 import { ModelPickModal, replaceModelLines, stripJunkModels } from './ModelPickModal.jsx';
 import { fetchProviderList, getCachedProviderList } from '../utils/providerListFetch.js';
+import ProviderListWarning from './ProviderListWarning.jsx';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -315,6 +316,8 @@ export function ProviderSwitchList({ onSwitched }) {
   const [openaiProviders, setOpenaiProviders] = useState(() => (Array.isArray(cached?.openaiProviders) ? cached.openaiProviders : []));
   const [customProviders, setCustomProviders] = useState(() => (Array.isArray(cached?.customProviders) ? cached.customProviders : []));
   const [listError, setListError] = useState('');
+  // r126:服务端的结构化警告(某份配置 json 损坏 / cc-switch 库出错),每次重新打开本列表都重拉,修好即消失。
+  const [listWarnings, setListWarnings] = useState(() => (Array.isArray(cached?.warnings) ? cached.warnings : []));
   const [hiddenProviders, setHiddenProviders] = useState(new Set());
   const [switching, setSwitching] = useState(false);
   const quotaLow = useProviderQuotaLow();
@@ -327,6 +330,7 @@ export function ProviderSwitchList({ onSwitched }) {
       setProviders(d.providers);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
+      setListWarnings(Array.isArray(d.warnings) ? d.warnings : []);
       setListError('');
     }).catch((e) => setListError(e?.message || '加载失败'));
     fetch('/api/prefs/hidden-providers').then((r) => r.json())
@@ -410,6 +414,8 @@ export function ProviderSwitchList({ onSwitched }) {
           )}
         </div>
       ))}
+      {/* r126:配置文件损坏 / cc-switch 库出错的警告行(哪个文件、备份在哪、怎么处理;锚点 provider-list-warning)。 */}
+      <ProviderListWarning warnings={listWarnings} className="mx-3 my-1" />
       {/* r125:加载失败只加一行说明 + 「重试」,上面的列表保持上一次成功的结果(P3-1)。 */}
       {listError && (
         <div data-testid="provider-list-error"

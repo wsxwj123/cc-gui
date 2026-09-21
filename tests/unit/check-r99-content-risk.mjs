@@ -449,9 +449,11 @@ check('M11 App.jsx compact-segment 恰 2 次(本轮一次都不调用压缩端�
 });
 // E 项(Pricing §10.8)在 CustomProviderForm.save() 新增 1 个确认框调用点(baseURL 撞预设
 // 时问「切到该预设 / 保持不变」)→ 上限 61→62,下界不动。
-check('§4.3 App.jsx confirmDialog 计数锁定为 65(r120 对齐真实值;新增弹窗须复核并同步)', () => {
+// 2026-09-21 r126:ProviderManager.removeCustom 新增 1 个确认框 —— 删除自定义 provider 被服务端拒绝(如配置文件损坏
+// → 409 CONFIG_CORRUPT)时把原因显示给用户,此前 .catch(() => {}) 静默吞掉 → 65→66。判据仍是恰等。
+check('§4.3 App.jsx confirmDialog 计数锁定为 66(r120 对齐真实值 65;2026-09-21 r126 +1;新增弹窗须复核并同步)', () => {
   const n = countF(A, 'confirmDialog');
-  assert.equal(n, 65, `实得 ${n} 次,应恰为 65`);
+  assert.equal(n, 66, `实得 ${n} 次,应恰为 66`);
 });
 check('§4.3 App.jsx cgui:composer-fill 恰 5 次(改前 4:新开会话预填 +1)', () => {
   assert.strictEqual(countF(A, 'cgui:composer-fill'), 5);

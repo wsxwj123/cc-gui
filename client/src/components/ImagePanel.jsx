@@ -1402,7 +1402,11 @@ export default function ImagePanel() {
   const remove = async (p) => {
     const ok = await confirmDialog(`删除生图 provider「${p.name}」？只删配置，已生成的图片不动。`, { danger: true, confirmText: '删除' });
     if (!ok) return;
-    await fetch(`/api/image-providers/${p.id}`, { method: 'DELETE' }).catch(() => {});
+    // r126:删除被拒(如 image-providers.json 损坏 → 409 CONFIG_CORRUPT)要让用户看到原因,不再吞掉。
+    try {
+      const r = await fetch(`/api/image-providers/${p.id}`, { method: 'DELETE' });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || `删除失败（${r.status}）`); }
+    } catch (e) { confirmDialog(`删除失败：${e.message}`); }
     load();
   };
 
