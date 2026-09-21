@@ -17,7 +17,7 @@
 // 备份文件本身含明文密钥(与原文件同级),固定 0600;文案只含路径,绝不含文件内容。
 // 0 字节 / 只有空白的文件按 missing 处理:没有任何数据可保护,锁住只会把用户挡在外面
 // (provider-models.json / active-provider.json 是非原子 writeFile,进程被杀可能留下空文件)。
-import { readFile, writeFile, readdir, stat, rename, unlink } from 'fs/promises';
+import { readFile, writeFile, readdir, stat, rename, unlink, link } from 'fs/promises';
 import { createHash, randomUUID } from 'crypto';
 import { basename, dirname, join } from 'path';
 
@@ -100,7 +100,7 @@ async function findSameContentBackup(file, raw) {
 
 // 写临时文件 + rename(项目统一的原子落盘口径,Q8 守卫):备份永远不会以半截形态出现在 `<原名>.corrupt-<数字>`
 // 这个名字上;tmp 名带 .tmp-<uuid> 后缀,不匹配备份名规则,进程中途被杀留下的残留不会被当成备份。
-// 同名冲突(同一毫秒再备份)靠先查存在再顺延时间戳;同一文件的备份动作已在 ensureBackup 里串行化。
+// 同名冲突(同一毫秒再备份):先查存在再顺延时间戳只是省一次系统调用,真正的独占靠 link 的 EEXIST(见下);同一文件的备份动作已在 ensureBackup 里串行化。
 async function createBackup(file, raw) {
   const ts = Date.now();
   for (let i = 0; i < 1000; i += 1) {
@@ -109,7 +109,16 @@ async function createBackup(file, raw) {
     const tmp = `${candidate}.tmp-${randomUUID()}`;
     try {
       await writeFile(tmp, raw, { mode: 0o600 });
-      await rename(tmp, candidate);
+      // 独占落名:link 在目标已存在时抛 EEXIST(rename 会静默覆盖同名备份 —— 跨进程同毫秒撞名的竞态口子,
+      // 2026-09-21 安全审查点名 toctou-race-backup-overwrite);不支持硬链接的文件系统回落 rename。
+      try {
+        await link(tmp, candidate);
+      } catch (e) {
+        if (e && e.code === 'EEXIST') { await unlink(tmp).catch(() => {}); continue; }
+        if (e && ['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV'].includes(e.code)) { await rename(tmp, candidate); return candidate; }
+        throw e;
+      }
+      await unlink(tmp).catch(() => {});
       return candidate;
     } catch (err) {
       try { await unlink(tmp); } catch { /* 可能没写成 */ }
