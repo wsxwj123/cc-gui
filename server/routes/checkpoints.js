@@ -367,7 +367,8 @@ async function gcSession(sessionId, opts = {}) {
   if (!keep.length) {
     keep.push(dropped.shift());
   }
-  await detachShas(gitDir, keep);
+  // 摘掉的提交(含上一轮还没回收的)一律 graft 成 root,见 writeGrafts。
+  await detachShas(gitDir, keep, [...(await readPending(gitDir)), ...dropped]);
   const removed = new Set(dropped);
   await saveMeta(sessionId, meta.filter((e) => !removed.has(e.sha)));
   if (opts.reclaim === 'now') {
@@ -439,7 +440,7 @@ async function runBackgroundReclaim(sessionId) {
 }
 
 // ── r122 R5:会话级互斥 ────────────────────────────────────────────────────
-// 同一会话的影子仓同一时刻只许一路在改(POST 后的 gcCheckpoints / DELETE / 启动清扫):
+// 同一会话的影子仓同一时刻只许一路在改(r128 起:POST 全程 / restore / DELETE / 启动清扫 / 后台回收):
 // 两路 detachShas + repackHonest 撞在一起会互删对方刚打好的 pack。"先占再放":清理类
 // 路径占不到就跳过本次(下次拍快照再收);删除类路径等一小会儿(用户的删除不该因为
 // 后台清扫正好扫到它而失败)。
@@ -457,19 +458,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function acquireGc(sessionId) {
   while (!tryAcquireGc(sessionId)) await sleep(50);
 }
-/** 等锁(上限 waitMs);等不到也放行 —— 删除路径的 rm 是 force 的,真撞上也只是多一次 no-op。 */
+/**
+ * 等锁至多 waitMs(DELETE 专用):拿到返回 true;超时返回 false 并照常放行 —— 删除路径的 rm 是 force 的,
+ * 真撞上也只是多一次 no-op。r128:超时放行的那次**没有占到锁**,调用方只在 true 时记 locked、finally 才释放,
+ * 不许把别人(清扫 / 后台回收 / 正在拍的快照)正占着的锁放掉(审查建议 4)。
+ */
 async function waitGc(sessionId, waitMs = 15_000) {
   const deadline = Date.now() + waitMs;
   while (!tryAcquireGc(sessionId)) {
-    if (Date.now() > deadline) { gcInFlight.add(sessionId); return; }
-    await new Promise((r) => setTimeout(r, 50));
+    if (Date.now() > deadline) return false;
+    await sleep(50);
   }
-}
-
-/** 会话目录内的清理入口(POST 拍快照成功后)。占不到锁 = 启动清扫正在收这个会话,本次跳过。 */
-async function gcCheckpoints(sessionId) {
-  if (!tryAcquireGc(sessionId)) return { removed: 0, skipped: 'busy' };
-  try { return await gcSession(sessionId); } finally { releaseGc(sessionId); }
+  return true;
 }
 
 // ── r122 R5:启动后后台清扫一遍 ──────────────────────────────────────────
@@ -589,7 +589,8 @@ export async function sweepAllSessions(opts = {}) {
     if (pauseMs > 0) await new Promise((r) => setTimeout(r, pauseMs));
   }
   sum.ms = Date.now() - startedAt;
-  log(`[checkpoints] sweep 完成: 扫描 ${sum.scanned} 个会话, 回收 ${sum.reclaimed} 条, 活跃跳过 ${sum.skippedActive}, 耗时 ${sum.ms} ms`
+  // 「占锁跳过」r128 起常驻(互斥看得见,B3);括号里的「占用跳过」是同一计数的既有写法,r122 单测锁着,保留。
+  log(`[checkpoints] sweep 完成: 扫描 ${sum.scanned} 个会话, 回收 ${sum.reclaimed} 条, 活跃跳过 ${sum.skippedActive}, 占锁跳过 ${sum.skippedBusy}, 补回收 ${sum.repacked}, 耗时 ${sum.ms} ms`
     + (sum.failed || sum.skippedBusy || sum.skippedInvalid ? `（失败 ${sum.failed}, 占用跳过 ${sum.skippedBusy}, 非法目录名 ${sum.skippedInvalid}）` : ''));
   return sum;
 }
@@ -618,15 +619,29 @@ export async function runStartupSweep(opts = {}) {
  * (info/grafts 已被 git 标记"过时"但仍完全支持,rev-list/repack 也认它,见
  *  repackHonest 注释;写各处的 -c advice.graftFileDeprecated=false 与它配套,别删。)
  */
-async function detachShas(gitDir, keep) {
+async function detachShas(gitDir, keep, pendingRoots = []) {
   if (!keep.length) return;
   try { await gitIn(gitDir, ['update-ref', 'HEAD', keep[0]]); } catch { /* 忽略 */ }
-  // 每个 keep 提交父 → 时间线上紧邻的下一个 keep(最后一条无父 = root)。不建 graft 的话
-  // 每个 keep 的真实父正被删掉,`git log` 会立刻 "Failed to traverse parents" 报错。
+  await writeGrafts(gitDir, keep, pendingRoots);
+}
+
+/**
+ * 写 info/grafts:
+ *  · 每个 keep 提交父 → 时间线上紧邻的下一个 keep(最后一条无父 = root)。不建 graft 的话
+ *    每个 keep 的真实父正被删掉,`git log` 会立刻 "Failed to traverse parents" 报错。
+ *  · r128:已摘掉但还没回收的提交(pendingRoots)各写一行"无父"graft。回收是后台节流的,这些提交
+ *    会在盘上多待一会儿;它们的真实父往往早被上一轮回收掉了,不 graft 成 root 的话 `git fsck` 会报
+ *    "broken link"(不可达对象的连通性 fsck 照查),`rev-list --objects <它>` 也会因父缺失整条失败
+ *    (exempt 集算不出来 → 只能等宽限)。graft 成 root 后两者都只看它自己。回收完成时 reclaimSpace
+ *    把已删提交的行再清掉;残留一两行指向不存在对象的 graft 对 git 无害(实测:不报错、不影响 log)。
+ */
+async function writeGrafts(gitDir, keep, pendingRoots = []) {
+  const keepSet = new Set(keep);
+  const lines = keep.map((sha, i) => `${sha}${keep[i + 1] ? ` ${keep[i + 1]}` : ''}`);
+  for (const sha of new Set(pendingRoots)) if (!keepSet.has(sha)) lines.push(sha);
   try {
     await mkdir(join(gitDir, 'info'), { recursive: true });
-    await writeFile(join(gitDir, 'info', 'grafts'),
-      keep.map((sha, i) => `${sha}${keep[i + 1] ? ` ${keep[i + 1]}` : ''}`).join('\n') + '\n');
+    await writeFile(join(gitDir, 'info', 'grafts'), lines.join('\n') + '\n');
   } catch { /* 写不了 = 保持原样,log 仍按真实历史走,不炸 */ }
 }
 
@@ -659,7 +674,36 @@ async function reclaimSpace(gitDir, { dropped = [] } = {}) {
     } catch { /* 算不出 = 全按宽限口径,不会删错,只会晚删 */ }
   }
   await repackHonest(gitDir, { exempt });
-  try { await rm(join(gitDir, PENDING_FILE), { force: true }); } catch {}
+  // ⑤ 对账:哪些摘掉的提交真的没了(一次 cat-file --batch-check)→ 从待回收标记与 grafts 的 root 行里清掉;
+  //    还在的(宽限口径下没到时间 / 删失败)留着,下次再收。
+  let remaining = [];
+  if (known.length) {
+    try {
+      const out = await new Promise((resolve, reject) => {
+        const c = spawn('git', ['--git-dir', gitDir, 'cat-file', '--batch-check'], { stdio: ['pipe', 'pipe', 'pipe'] });
+        let so = '';
+        c.stdout.on('data', (b) => { so += b; });
+        c.on('error', reject);
+        c.on('close', () => resolve(so));
+        c.stdin.on('error', () => {});
+        c.stdin.end(known.join('\n') + '\n');
+      });
+      const gone = new Set(out.split('\n').filter((l) => / missing$/.test(l.trim())).map((l) => l.trim().split(' ')[0]));
+      remaining = known.filter((s) => !gone.has(s));
+    } catch { remaining = known; }                     // 查不出就当都还在:下次再清,不会误清
+  }
+  try {
+    if (remaining.length) await writeFile(join(gitDir, PENDING_FILE), JSON.stringify({ dropped: remaining }));
+    else await rm(join(gitDir, PENDING_FILE), { force: true });
+  } catch {}
+  if (known.length !== remaining.length) {
+    const stillPending = new Set(remaining);
+    try {
+      const lines = (await readFile(join(gitDir, 'info', 'grafts'), 'utf8')).split('\n').filter(Boolean)
+        .filter((l) => { const sha = l.split(' ')[0]; return !known.includes(sha) || stillPending.has(sha); });
+      await writeFile(join(gitDir, 'info', 'grafts'), lines.length ? lines.join('\n') + '\n' : '');
+    } catch { /* 没有 grafts 文件 = 没什么可清 */ }
+  }
 }
 
 // ── 体积估算(安全阀用)───────────────────────────────────────────────────
@@ -726,10 +770,15 @@ async function fileExists(file) {
 
 /** POST /api/checkpoints  { sessionId, cwd, label } */
 router.post('/checkpoints', async (req, res) => {
+  let locked = null;
   try {
     const { sessionId, cwd, label, clientMessageId, messageTimestamp, promptPreview, allowOversize } = req.body || {};
     assertSession(sessionId);
     const workTree = safe(cwd);
+    // r128 N2:从估算 / add -A 起到便宜回收结束全程持会话锁 —— 启动清扫、后台重打包、单条删除、删会话
+    // 都与之互斥(以前只有最后的回收占锁,清扫恰好扫到正在拍的会话会把刚 add 的对象当垃圾删掉)。
+    // 拿不到就等,不超时、不失败:拍快照失败等于这条消息没有回滚点。
+    await acquireGc(sessionId); locked = sessionId;
     // R1 体积安全阀:`add -A` 是无条件全量收进影子库,大目录(几十 G 数据目录、无
     // .gitignore)每拍一次就是一份全量副本(git 对大二进制不做增量)。先估算,超阈值
     // 就不拍——但**照常回 200 + skipped**,让调用方(界面)能如实告诉用户。
@@ -783,14 +832,17 @@ router.post('/checkpoints', async (req, res) => {
         promptPreview: textPrefix(promptPreview || label || ''),
       });
       await saveMeta(sessionId, entries);
-      // R2 自动清理:只在拍成功后跑一次(不在每个请求上跑全量扫描)。
-      try { await gcCheckpoints(sessionId); } catch { /* 清理失败不影响本次快照 */ }
+      // R2 自动清理:只在拍成功后跑一次(不在每个请求上跑全量扫描)。r128 起这里只剩毫秒级的
+      // 摘除 + 对账(锁已在上面拿着),贵的回收由 gcSession 内部排到后台。
+      try { await gcSession(sessionId); } catch { /* 清理失败不影响本次快照 */ }
       res.json({ ok: true, sha });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   } catch (err) {
     res.status(400).json({ error: err.message });
+  } finally {
+    if (locked) releaseGc(locked);
   }
 });
 
@@ -878,11 +930,14 @@ router.get('/checkpoints/:sessionId/resolve', async (req, res) => {
 
 /** POST /api/checkpoints/:sessionId/restore  { sha, cwd } */
 router.post('/checkpoints/:sessionId/restore', async (req, res) => {
+  let locked = null;
   try {
     assertSession(req.params.sessionId);
     const { sha, cwd } = req.body || {};
     if (!/^[a-f0-9]{7,40}$/.test(String(sha || ''))) throw new Error('invalid sha');
     const workTree = safe(cwd);
+    // r128 N2:回滚也写影子仓(pre-restore 提交)并读对象做 checkout,与后台回收 / 删除 / 拍快照同锁。
+    await acquireGc(req.params.sessionId); locked = req.params.sessionId;
     // pre-restore 快照:shadow HEAD 停留在"发消息前"的 checkpoint,AI 之后新建的
     // 文件从未进过 shadow → 不在 headFiles 差集里,回滚后会残留。先把当前真实状态
     // commit 进 shadow(顺带留下一份可 redo 的快照),再算差集。失败不阻断主流程。
@@ -922,6 +977,8 @@ router.post('/checkpoints/:sessionId/restore', async (req, res) => {
     if (/pathspec .* did not match/.test(msg)) code = 'empty_checkpoint';
     else if (/bad object|not a valid object|Not a valid object name/i.test(msg)) code = 'missing_snapshot';
     res.status(400).json({ error: msg, code });
+  } finally {
+    if (locked) releaseGc(locked);
   }
 });
 
@@ -963,7 +1020,7 @@ router.delete('/checkpoints/:sessionId', async (req, res) => {
     }
     // r122:启动清扫可能正在收这个会话 —— 等它放手再删,免得 rm 与 repack 互踩(gcSession 对
     // 目录消失本就返回 removed:0,这里只是不让两路同时改)。
-    await waitGc(req.params.sessionId); locked = req.params.sessionId;
+    if (await waitGc(req.params.sessionId)) locked = req.params.sessionId;
     cancelRepack(req.params.sessionId); forgetCoarse(req.params.sessionId);   // 目录都没了,后台回收 / 粗筛缓存一并作废
     await rm(dir, { recursive: true, force: true });
     // 目录整个没了,meta 也随之消失,列表自然为空。
@@ -988,7 +1045,7 @@ router.delete('/checkpoints/:sessionId/:sha', async (req, res) => {
     if (!dir) {
       return res.status(404).json({ error: 'checkpoint not found', code: 'CHECKPOINT_NOT_FOUND' });
     }
-    await waitGc(sessionId); locked = sessionId;          // r122:与启动清扫互斥(同一仓不许两路同时改)
+    if (await waitGc(sessionId)) locked = sessionId;      // r122:与启动清扫 / 拍快照 / 后台回收互斥(同一仓不许两路同时改)
     const all = await listShas(sessionId);
     const target = all.find((s) => s === sha || s.startsWith(sha));
     if (!target) {
@@ -996,7 +1053,7 @@ router.delete('/checkpoints/:sessionId/:sha', async (req, res) => {
     }
     // 删一条不存在的 sha 绝不能把整会话目录连带删掉(见验收 R3-5):这里只摘这一条。
     // 用户主动删:摘除 + 回收都同步做完再回(r120 验收断言删后空间真释放),不走后台节流。
-    await detachShas(dir, all.filter((s) => s !== target));
+    await detachShas(dir, all.filter((s) => s !== target), [...(await readPending(dir)), target]);
     const meta = await loadMeta(sessionId);
     await saveMeta(sessionId, meta.filter((e) => e.sha !== target));
     await reclaimSpace(dir, { dropped: [target] });
