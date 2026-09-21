@@ -37,7 +37,8 @@ export function upstreamExcerpt(body) {
     const j = JSON.parse(b);
     m = j?.error?.message || j?.message || (typeof j?.error === 'string' ? j.error : '') || j?.msg || j?.detail || '';
   } catch {
-    const mm = b.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    // 不要求闭合引号:bodyHead 截到 300 字时字符串常被切成半截。
+    const mm = b.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)/);
     m = mm ? mm[1] : (/^[[{]/.test(b) ? '' : b);
   }
   return String(m || '').replace(/\s+/g, ' ').trim().slice(0, 160);
