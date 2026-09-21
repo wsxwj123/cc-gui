@@ -1133,14 +1133,6 @@ router.get('/providers', async (_req, res) => {
     // 半写 / 损坏的 custom-providers.json:自定义项这一段为空,原因进 warning(不再静默)。
     const customRead = await readCustomProvidersDetailed();
     if (customRead.warning) warnings.push(customRead.warning);
-    // 思考能力预填(applyCatalogPrefill)按条兜底:单条数据坏了只丢它的 modelMeta,不拖垮整张列表。
-    let prefillWarned = false;
-    const safePrefill = (p) => {
-      try { return applyCatalogPrefill(p.models, p.modelMeta || null, p.type); } catch (err) {
-        if (!prefillWarned) { prefillWarned = true; warnings.push(`思考能力预填失败（${p.name || p.id}）：${err?.message || err}`); }
-        return p.modelMeta || null;
-      }
-    };
     const customProviders = customRead.list.filter((p) => p && typeof p === 'object').map((p) => ({
       id: p.id, name: p.name, type: p.type, baseURL: p.baseURL,
       models: p.models || [], defaultModel: p.defaultModel || '', tierModels: p.tierModels || null,
@@ -1156,7 +1148,7 @@ router.get('/providers', async (_req, res) => {
       // (catalog 条目随后被预填补回,source:'user'/历史无 source 的用户声明永久丢失)。
       // 下发预填版而非裸值:顺带让存量 provider 在编辑器里看得见目录判定(那行"目录预填,
       // 可修改"的小字此前永远显示不出来)。预填是纯函数、不写盘,用户声明永不被覆盖。
-      modelMeta: safePrefill(p),
+      modelMeta: applyCatalogPrefill(p.models, p.modelMeta || null, p.type),
       // r78:头像。**必须在这里下发** —— Provider 编辑器预填读的正是本接口,不下发
       // 就恒空 → 保存时发 avatar:'' → PUT 判成清除 → 用户"改个名字"把头像静默清掉
       // (contextWindow / modelPrices / modelMeta 三个字段栽过同一个坑,见上方注释)。
