@@ -17,6 +17,7 @@ import {
 } from '../utils/imageSizeCaps.js';
 // r123:最终请求地址预览 / 「/v数字」段判定 —— 与服务端 buildImageRequest 同一份规则(server/utils/image-url.js)。
 import { previewImageRequestURL, hasVersionSegment, stripBaseURL } from '../utils/imageRequestUrl.js';
+import { copyText } from '../utils/clipboard.js';
 // r94 MJ 参数编译层与动作语汇(utils/mjParams.js 再导出服务端的唯一副本)。控件显隐、
 // 「将要发送」预览、动作按钮全部由它派生 —— 界面自己再写一份版本表就会与下发口径漂移。
 import {
@@ -207,6 +208,11 @@ const PROMPT_DRAFT_KEY = 'cgui-image-prompt-draft';
 const TASK_VIEW_KEY = 'cgui-image-tasklist-view'; // grid | list,重开面板保留
 const POLL_MS = 1500; // 有任务在跑时的历史轮询间隔
 const STATUS_LABEL = { running: '生成中', done: '已完成', error: '失败', interrupted: '已中断', cancelled: '已取消' };
+// r123 R3:失败分类(服务端 errorInfo.kind 十类)的中文名,只在诊断详情的折叠标题里用。
+const ERROR_KIND_LABEL = {
+  'base-url': '基址或路径', auth: '鉴权', balance: '余额', 'rate-limit': '限流', moderation: '内容审核',
+  'task-failed': '任务失败', timeout: '超时', 'no-image': '没有图片', network: '网络', other: '其它',
+};
 // 取消只停止本机这一侧的等待与下载：上游任务（任务制协议尤其如此）仍在生成，费用照算。
 // 不写清楚会被理解成"已经把任务撤掉了"。
 const CANCEL_NOTE = '已停止等待（上游任务可能仍在生成并计费）';
@@ -1574,6 +1580,46 @@ export default function ImagePanel() {
   };
 
   // 两种视图共用的条目操作,避免两处各写一份走样。
+  // r123 R3-3:失败条目的诊断详情(默认收起,<details> 不写 open)。人话原因与建议动作已在 h.error 里
+  // (服务端 error = summary + 「。」+ action),这里只放展开才需要看的:最终请求地址 / HTTP 状态 /
+  // content-type / 上游正文前 300 字 / 任务号(可复制)。老条目没有 errorInfo → 不渲染,保持旧样式。
+  const errorDetail = (h) => {
+    const info = h?.errorInfo;
+    if (!info || h.status === 'done') return null;
+    const d = info.detail || {};
+    return (
+      <details data-testid="image-error-detail" className="rounded-md border border-canvas-deep px-2 py-1 text-[10px] font-body">
+        <summary className="text-ink-soft cursor-pointer select-none">诊断详情（{ERROR_KIND_LABEL[info.kind] || info.kind}）</summary>
+        <div className="pt-1 space-y-0.5">
+          {d.url ? <div><span className="text-ink-faint">请求地址 </span><span className="font-mono break-all text-ink-soft">{d.url}</span></div> : null}
+          <div>
+            <span className="text-ink-faint">HTTP 状态 </span>
+            <span className="font-mono text-ink-soft">{d.status == null ? '无（请求未到达上游）' : d.status}</span>
+            {d.contentType ? <span className="text-ink-faint"> · {d.contentType}</span> : null}
+          </div>
+          {d.taskId ? (
+            <div className="flex items-center gap-1">
+              <span className="text-ink-faint">任务号 </span>
+              <span className="font-mono break-all text-ink-soft">{d.taskId}</span>
+              <button
+                type="button"
+                onClick={() => copyText(d.taskId)}
+                title="复制任务号（到该服务的控制台按它查任务）"
+                className="shrink-0 px-1.5 py-0.5 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60"
+              >复制</button>
+            </div>
+          ) : null}
+          {d.bodyHead ? (
+            <div>
+              <span className="text-ink-faint">上游正文（前 300 字）</span>
+              <pre className="whitespace-pre-wrap break-all font-mono text-ink-soft max-h-32 overflow-auto">{d.bodyHead}</pre>
+            </div>
+          ) : null}
+        </div>
+      </details>
+    );
+  };
+
   const taskActions = (h) => (
     <>
       {h.status === 'running' && (
@@ -1912,9 +1958,12 @@ export default function ImagePanel() {
               <span className="text-[11px] text-ink-faint font-body">生成中 · {elapsedSec(current)}s{current.progress == null ? '' : ` · ${current.progress}%`}</span>
             </>
           ) : (
-            <span className="text-[11px] text-error font-body break-all">
-              {STATUS_LABEL[current.status] || current.status}{current.error ? ` · ${current.error}` : ''}{cancelNote(current)}
-            </span>
+            <div className="min-w-0 flex-1 space-y-1">
+              <span className="text-[11px] text-error font-body break-all">
+                {STATUS_LABEL[current.status] || current.status}{current.error ? ` · ${current.error}` : ''}{cancelNote(current)}
+              </span>
+              {errorDetail(current)}
+            </div>
           )}
         </div>
       )}
@@ -2012,6 +2061,7 @@ export default function ImagePanel() {
                 </div>
                 <div className="flex items-center gap-1">{taskActions(h)}</div>
               </div>
+              {h.status !== 'done' && h.errorInfo ? <div className="px-1.5 pb-1.5">{errorDetail(h)}</div> : null}
             </div>
           ) : (
             <div key={h.id} className={`flex items-center gap-2 rounded-md border px-2 py-1.5 ${h.id === currentId ? 'border-accent' : 'border-canvas-deep'}`}>
@@ -2050,6 +2100,7 @@ export default function ImagePanel() {
                   {paidNote(h) ? ` · ${paidNote(h)}` : ''}
                   {h.startedAt ? ` · ${shortTime(h.startedAt)}` : ''}
                 </div>
+                {errorDetail(h)}
                 {h.speedNote ? <div className="text-[9.5px] text-ink-faint font-body leading-snug">{h.speedNote}</div> : null}
                 {imageStrip(h)}
                 {mjSoloBar(h)}
