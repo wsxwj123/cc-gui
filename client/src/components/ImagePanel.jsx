@@ -15,6 +15,8 @@ import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickMod
 import {
   SIZE_OPTIONS, sizeCapFor, sizeOptionsFor, imageDialect, dialectForBaseURL, APIMART_RATIOS,
 } from '../utils/imageSizeCaps.js';
+// r123:最终请求地址预览 / 「/v数字」段判定 —— 与服务端 buildImageRequest 同一份规则(server/utils/image-url.js)。
+import { previewImageRequestURL, hasVersionSegment, stripBaseURL } from '../utils/imageRequestUrl.js';
 // r94 MJ 参数编译层与动作语汇(utils/mjParams.js 再导出服务端的唯一副本)。控件显隐、
 // 「将要发送」预览、动作按钮全部由它派生 —— 界面自己再写一份版本表就会与下发口径漂移。
 import {
@@ -515,6 +517,30 @@ function ProviderForm({ initial, onDone, onCancel }) {
           placeholder="https://api.example.com/v1"
         />
       </label>
+      {/* r123 R2-4:实时显示这份配置真正会打到的地址(随协议 / 基址 / 模型变化),规则与服务端同源。
+          new-api 系中转站对不带 /v1 的路径回 200 + 网站首页,用户在这里就能看出基址少了一层;
+          openai / chat 且基址里没有任何 /v数字 段时给一键补 /v1 的按钮 —— 只改表单值,不静默改写。 */}
+      {form.baseURL.trim() && (
+        <div className="text-[10px] text-ink-faint font-body leading-snug flex flex-wrap items-center gap-x-1.5 gap-y-1">
+          <span className="shrink-0">最终请求地址：</span>
+          {form.protocol === 'gemini' && !form.model.trim() ? (
+            <span>填写模型后显示</span>
+          ) : (
+            <span data-testid="image-final-url" className="font-mono break-all text-ink-soft">
+              {previewImageRequestURL(form.protocol, form.baseURL, form.model)}
+            </span>
+          )}
+          {(form.protocol === 'openai' || form.protocol === 'chat') && !hasVersionSegment(form.baseURL) && (
+            <button
+              type="button"
+              data-testid="image-add-v1"
+              onClick={() => setForm((f) => ({ ...f, baseURL: `${stripBaseURL(f.baseURL)}/v1` }))}
+              title="在接口地址末尾补上 /v1（OpenAI 兼容中转站的接口通常在 /v1 之下；不带 /v1 时多半会打到网站页面）"
+              className="shrink-0 px-1.5 py-0.5 rounded border border-canvas-deep text-[10px] text-ink-soft font-body hover:bg-canvas-deep/60"
+            >补 /v1</button>
+          )}
+        </div>
+      )}
       <label className="space-y-1 block"><span className={labelCls}>密钥{form.id ? '（留空保留原密钥）' : ''}</span>
         <input className={inputCls} type="password" value={form.apiKey} onChange={set('apiKey')} placeholder="sk-…" autoComplete="off" />
       </label>
