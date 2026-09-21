@@ -5,7 +5,7 @@
 // 浏览器访问时退化成手输绝对路径。
 // 模态红线:删除走 confirmDialog(Tauri 禁原生 confirm)。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLink, X, Check, RefreshCw, RotateCcw } from './Icon.jsx';
+import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLink, X, Check, RefreshCw, RotateCcw, Maximize2 } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { ImageLightbox } from './ImageLightbox.jsx';
@@ -956,9 +956,20 @@ function ProviderForm({ initial, onDone, onCancel }) {
 // 布尔回到 false,loadHistory 又把 currentId 落到最近一张完成图 → 预览又冒出来)。
 // 改成记「被清掉的那条任务 id」:渲染判据变成 id 对不上才显示,语义天然自洽 —— 用户重新
 // 选一张(pickShot)或受理新任务时 currentId 本来就变了,不必在各处手动清标志。
-// 必须放模块级才活过面板卸载(单窗口内同一时刻只有一个生图面板,面板无 per-pane 语义);
-// 刻意不落盘:刷新后重新显示最近一张完成图是既有行为,本批不改。
-let dismissedPreviewId = '';
+// 模块级变量活过面板卸载(单窗口内同一时刻只有一个生图面板,面板无 per-pane 语义)。
+// r123 R5(用户 2026-09-21:「每次清空预览后,下次打开仍然显示」):r102/r106 刻意不落盘,刷新页面或重开
+// 应用后记号丢失,历史加载又把最近一张完成图当当前图显示出来 —— 本轮改为落 localStorage
+// (键 cgui-image-dismissed-preview,值 = 被清掉的任务 id;空串或无键 = 没收起)。撤回点不变:受理新任务、
+// 用户重新选一张时写空;被清掉的那条记录已被删除时(loadHistory 里发现它不在历史里)也清掉,不留脏记号。
+// 读写包 try/catch(隐私模式 / 配额满时退化成只在内存里记,与 PROMPT_DRAFT_KEY 同款)。
+const DISMISSED_PREVIEW_KEY = 'cgui-image-dismissed-preview';
+function readDismissedPreview() {
+  try { return localStorage.getItem(DISMISSED_PREVIEW_KEY) || ''; } catch { return ''; }
+}
+function writeDismissedPreview(id) {
+  try { if (id) localStorage.setItem(DISMISSED_PREVIEW_KEY, id); else localStorage.removeItem(DISMISSED_PREVIEW_KEY); } catch { /* 记不住就只在内存里记 */ }
+}
+let dismissedPreviewId = readDismissedPreview();
 
 export default function ImagePanel() {
   const [providers, setProviders] = useState([]);
@@ -975,7 +986,7 @@ export default function ImagePanel() {
   // 不动 currentId(loadHistory 的回落规则被 r95 锁死),只记「哪条被清掉了」(见模块级
   // dismissedPreviewId 的说明)。state 只是给本组件一次重渲染,模块变量才是跨挂载的记忆。
   const [dismissedId, setDismissedId] = useState(dismissedPreviewId);
-  const dismissPreview = (id) => { dismissedPreviewId = id; setDismissedId(id); };
+  const dismissPreview = (id) => { dismissedPreviewId = id; writeDismissedPreview(id); setDismissedId(id); };
   // r94 像素尺寸:图片本身是唯一可靠来源(比例/版本只是请求参数,开 HD 或真放大后实际像素
   // 与它们对不上)。按图片 URL 记一份 naturalWidth×naturalHeight;预览区与放大层看的永远
   // 是同一个 URL(方向键切图会把预览区一起带过去),所以只在预览区测一次,两处都有值。
@@ -1078,6 +1089,10 @@ export default function ImagePanel() {
       const d = await r.json();
       const list = Array.isArray(d.history) ? d.history : [];
       setHistory(list);
+      // r123 R5-3:被清掉的那条已不在历史里(被删除)→ 记号作废,免得 localStorage 里留一个指向不存在记录的脏值。
+      if (dismissedPreviewId && !list.some((h) => h.id === dismissedPreviewId)) {
+        dismissedPreviewId = ''; writeDismissedPreview(''); setDismissedId('');
+      }
       // 面板重开时的当前预览:优先保持已选中那条,否则取最近一条已完成的。
       setCurrentId((cur) => (list.some((h) => h.id === cur) ? cur : (list.find((h) => h.status === 'done')?.id || '')));
     } catch { /* 后端未就绪:下次轮询/重开面板再拉 */ }
@@ -1630,6 +1645,16 @@ export default function ImagePanel() {
           className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
         ><X size={13} /></button>
       )}
+      {/* r123 R5:任务列表里点缩略图改为「选中」(被清空收起的预览由此恢复,见 pickShot);放大层从这里进。
+          放大同时选中这张 —— 与放大层里方向键切图(goShot → pickShot)同口径。 */}
+      {h.status === 'done' && shotUrl(h) && (
+        <button
+          type="button"
+          onClick={() => { pickShot(h, shotIdx(h)); setZoom({ id: h.id, index: shotIdx(h) }); }}
+          title="放大：在放大层查看这张图（← → 可切换到其它任务的图）"
+          className="px-1.5 py-1 rounded border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 flex items-center"
+        ><Maximize2 size={13} /></button>
+      )}
       {h.status === 'done' && shotFile(h) && (
         <button
           type="button"
@@ -1922,6 +1947,7 @@ export default function ImagePanel() {
       {current && current.status === 'done' && !previewHidden && (
         <div className={`space-y-1.5 ${tab === 'gen' ? '' : 'hidden'}`}>
           <img
+            data-testid="image-preview-shot"
             src={shotUrl(current)}
             alt={current.prompt}
             onLoad={measureShot}
@@ -2015,8 +2041,9 @@ export default function ImagePanel() {
                 <img
                   src={shotUrl(h)}
                   alt={h.prompt}
-                  onClick={() => { setCurrentId(h.id); setZoom({ id: h.id, index: shotIdx(h) }); }}
-                  className="w-full aspect-square object-cover cursor-zoom-in"
+                  onClick={() => pickShot(h, shotIdx(h))}
+                  title="点击选中：生图页的预览与单图操作作用于它（被「清空」收起的预览随之恢复）；放大看图用下方的「放大」按钮"
+                  className="w-full aspect-square object-cover cursor-pointer"
                 />
               ) : (
                 <div className="w-full aspect-square bg-canvas-warm flex flex-col items-center justify-center gap-1 px-2 text-center">
@@ -2078,8 +2105,9 @@ export default function ImagePanel() {
                 <img
                   src={shotUrl(h)}
                   alt={h.prompt}
-                  onClick={() => { setCurrentId(h.id); setZoom({ id: h.id, index: shotIdx(h) }); }}
-                  className="shrink-0 w-9 h-9 rounded object-cover border border-canvas-deep cursor-zoom-in"
+                  onClick={() => pickShot(h, shotIdx(h))}
+                  title="点击选中：生图页的预览与单图操作作用于它（被「清空」收起的预览随之恢复）；放大看图用右侧的「放大」按钮"
+                  className="shrink-0 w-9 h-9 rounded object-cover border border-canvas-deep cursor-pointer"
                 />
               ) : (
                 <div className="shrink-0 w-9 h-9 rounded border border-canvas-deep flex items-center justify-center">
