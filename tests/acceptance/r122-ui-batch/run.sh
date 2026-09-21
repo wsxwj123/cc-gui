@@ -45,6 +45,15 @@ cleanup() {
   [ -n "$VITE_PID" ] && kill "$VITE_PID" 2>/dev/null || true
   [ -n "$VITE_WRAPPER_PID" ] && kill "$VITE_WRAPPER_PID" 2>/dev/null || true
   kill "$API_PID" 2>/dev/null || true
+  # F 组用例自己起的隔离实例:按它们落下的 pid 文件收(只杀命令行确实是本 worktree server/index.js 的)
+  for f in "$ROOT"/f/*/instance-*.pid; do
+    [ -e "$f" ] || continue
+    pid="$(cat "$f" 2>/dev/null || true)"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ps -p "$pid" -o command= 2>/dev/null | grep -q "$WORKTREE/server/index.js"; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
   # 桩进程:只按桩自己写下的 pid 文件收(不按进程名/端口批量杀)
   for f in "$CTL"/*.pid; do
     [ -e "$f" ] || continue
