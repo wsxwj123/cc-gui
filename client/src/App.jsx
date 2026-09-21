@@ -94,7 +94,8 @@ import { MemoryPanel } from './components/MemoryPanel.jsx';
 import { AgentsPanel } from './components/AgentsPanel.jsx';
 import { AgentMonitorPanel } from './components/AgentMonitorPanel.jsx';
 import ImagePanel from './components/ImagePanel.jsx';
-import { ModelPickModal, mergeModelLines, stripJunkModels } from './components/ModelPickModal.jsx';
+import { ModelPickModal, replaceModelLines, stripJunkModels } from './components/ModelPickModal.jsx';
+import { fetchProviderList, getCachedProviderList } from './utils/providerListFetch.js';
 import { SubagentView } from './components/SubagentView.jsx';
 import BtwWindow from './components/BtwWindow.jsx';
 import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyExactResult, relativeAgeLabel } from './utils/contextCache.js';
@@ -9177,11 +9178,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 // (server backs it up first); the file-watcher then broadcasts provider-change.
 function ProviderManager({ initialEditId = null }) {
   const ms = useMultiSelect();
-  const [providers, setProviders] = useState([]);
+  // r125:首帧用最近一次成功的列表(模块级缓存),加载失败时保留它(P3-1)。
+  const [providers, setProviders] = useState(() => (Array.isArray(getCachedProviderList()?.providers) ? getCachedProviderList().providers : []));
   // OpenAI-format providers (codex/opencode) — routed through the embedded
   // Anthropic↔OpenAI proxy on switch so the claude CLI can use them.
-  const [openaiProviders, setOpenaiProviders] = useState([]);
-  const [customProviders, setCustomProviders] = useState([]);
+  const [openaiProviders, setOpenaiProviders] = useState(() => (Array.isArray(getCachedProviderList()?.openaiProviders) ? getCachedProviderList().openaiProviders : []));
+  const [customProviders, setCustomProviders] = useState(() => (Array.isArray(getCachedProviderList()?.customProviders) ? getCachedProviderList().customProviders : []));
   const [overrides, setOverrides] = useState({});
   const [switching, setSwitching] = useState(false);
   // Optimistic current id: the CC Switch db's is_current isn't updated by us
@@ -9196,16 +9198,20 @@ function ProviderManager({ initialEditId = null }) {
 
   const [importStatus, setImportStatus] = useState({ imported: true, ccSwitchAvailable: false, ccSwitchCount: 0 });
   const [importing, setImporting] = useState(false);
+  // r125:加载失败(服务端报错 / 形状不对 / 超时)不清空列表,只显示错误行 + 「重试」(P3-1);
+  // /api/providers 经 fetchProviderList 在途复用(P3-2)。
+  const [listError, setListError] = useState('');
   const load = () => {
-    fetch('/api/providers').then((r) => r.json()).then((d) => {
-      setProviders(Array.isArray(d.providers) ? d.providers : []);
+    fetchProviderList().then((d) => {
+      setProviders(d.providers);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
       setOverrides(d.overrides && typeof d.overrides === 'object' ? d.overrides : {});
+      setListError('');
       // R3:顺手把用户自填单价装进计价层。pricing.js 自己也会 hydrate + 监听
       // cgui:provider-change,这里只是省掉一次往返,不是唯一入口。
       setUserPrices(Array.isArray(d.customProviders) ? d.customProviders : []);
-    }).catch(() => {});
+    }).catch((e) => setListError(e?.message || '加载失败'));
     fetch('/api/providers/import-status').then((r) => r.json())
       .then((d) => setImportStatus(d || {})).catch(() => {});
     fetch('/api/prefs/hidden-providers').then((r) => r.json())
@@ -9332,6 +9338,17 @@ function ProviderManager({ initialEditId = null }) {
                 </div>
                 {hasCustom && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={12} />}
               </div>
+              {/* r125:加载失败只加一行说明 + 「重试」,列表保持上一次成功的结果。 */}
+              {listError && (
+                <div data-testid="provider-list-error"
+                  className="mx-3 my-1 px-2 py-1.5 rounded border border-warning/30 bg-warning/10 text-[10px] text-warning font-body flex items-center gap-2">
+                  <span className="flex-1 min-w-0 truncate" title={listError}>
+                    Provider 列表加载失败：{listError}{rows.length ? '。当前显示的是上一次加载的结果。' : ''}
+                  </span>
+                  <button type="button" onClick={load}
+                    className="shrink-0 px-1.5 py-0.5 rounded border border-warning/40 hover:bg-warning/15 transition-colors">重试</button>
+                </div>
+              )}
               {ms.selMode && hasCustom && (
                 <BatchBar count={ms.count} busy={ms.busy} noun="个 Provider" onExit={ms.exit}
                   allIds={customProviders.map((p) => p.id)} onSetAll={ms.setAll} selectedSet={ms.selected}
@@ -10938,14 +10955,15 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
             : <span className="break-all whitespace-pre-wrap">✗ 连接失败:{testResult.error}</span>}
         </div>
       )}
-      {/* r52:拉取结果的勾选弹窗。确认后 merge 进模型框(原有行一律保留),弹窗只是文本域的编辑器。 */}
+      {/* r52:拉取结果的勾选弹窗,弹窗只是文本域的编辑器。r125:确认后以勾选为准写回模型框
+          (勾掉的候选移除、新勾的加入;不在本次目录里的既有行原样保留)。 */}
       {pickCandidates && (
         <ModelPickModal
           candidates={pickCandidates}
           existing={parseModels()}
           onClose={() => setPickCandidates(null)}
           onConfirm={(ids) => {
-            const merged = mergeModelLines(parseModels(), ids).join('\n');
+            const merged = replaceModelLines(parseModels(), pickCandidates, ids).join('\n');
             // r59:经撤销通道写入(旧值先入栈 + 派发 input 带动 onChange),合并结果可 ⌘Z 撤回。
             if (modelsRef.current) applyProgrammaticText(modelsRef.current, merged);
             else setModelsText(merged); // 框未挂载(理论上不可能)时不丢用户的勾选
@@ -10970,22 +10988,26 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
 // 修正批#7:本页只留 切换/选模型;增删改/导入/隐藏/批量删除收进页顶「管理 Provider」
 // 入口(onManage → 同一导航流全屏页,渲染与桌面弹窗同一个 ProviderManager 组件)。
 function MobileProviderPage({ permKey, onPicked, onManage }) {
-  const [providers, setProviders] = useState([]);
-  const [openaiProviders, setOpenaiProviders] = useState([]);
-  const [customProviders, setCustomProviders] = useState([]);
+  // r125:首帧用最近一次成功的列表(模块级缓存),加载失败时保留它(P3-1)。
+  const [providers, setProviders] = useState(() => (Array.isArray(getCachedProviderList()?.providers) ? getCachedProviderList().providers : []));
+  const [openaiProviders, setOpenaiProviders] = useState(() => (Array.isArray(getCachedProviderList()?.openaiProviders) ? getCachedProviderList().openaiProviders : []));
+  const [customProviders, setCustomProviders] = useState(() => (Array.isArray(getCachedProviderList()?.customProviders) ? getCachedProviderList().customProviders : []));
   const [overrides, setOverrides] = useState({});
   const [switching, setSwitching] = useState(false);
   const [activeId, setActiveId] = useState(null);
   const [expandedId, setExpandedId] = useState(null); // 默认全折叠;一次只展开一个
   // 审计批C5:已隐藏的导入项手机页也过滤(桌面切换卡片/管理页早有此行为,手机漏了)。
   const [hiddenProviders, setHiddenProviders] = useState(new Set());
+  // r125:加载失败不清空列表,只显示错误行 + 「重试」;/api/providers 经 fetchProviderList 在途复用。
+  const [listError, setListError] = useState('');
   const load = () => {
-    fetch('/api/providers').then((r) => r.json()).then((d) => {
-      setProviders(Array.isArray(d.providers) ? d.providers : []);
+    fetchProviderList().then((d) => {
+      setProviders(d.providers);
       setOpenaiProviders(Array.isArray(d.openaiProviders) ? d.openaiProviders : []);
       setCustomProviders(Array.isArray(d.customProviders) ? d.customProviders : []);
       setOverrides(d.overrides && typeof d.overrides === 'object' ? d.overrides : {});
-    }).catch(() => {});
+      setListError('');
+    }).catch((e) => setListError(e?.message || '加载失败'));
     fetch('/api/prefs/hidden-providers').then((r) => r.json())
       .then((d) => setHiddenProviders(new Set(Array.isArray(d.hidden) ? d.hidden : [])))
       .catch(() => {});
@@ -11044,6 +11066,17 @@ function MobileProviderPage({ permKey, onPicked, onManage }) {
           <div className="px-4 pt-3 pb-1 border-t border-canvas-deep/40 mt-1">
             <div className="text-[11px] text-ink-faint uppercase tracking-wider font-body">全部 Provider · 点行展开模型,选模型即切换</div>
           </div>
+          {/* r125:加载失败只加一行说明 + 「重试」,列表保持上一次成功的结果。 */}
+          {listError && (
+            <div data-testid="provider-list-error"
+              className="mx-4 my-1 px-2 py-1.5 rounded border border-warning/30 bg-warning/10 text-[11px] text-warning font-body flex items-center gap-2">
+              <span className="flex-1 min-w-0 truncate" title={listError}>
+                Provider 列表加载失败：{listError}{rows.length ? '。当前显示的是上一次加载的结果。' : ''}
+              </span>
+              <button type="button" onClick={load}
+                className="shrink-0 px-1.5 py-0.5 rounded border border-warning/40 hover:bg-warning/15 transition-colors">重试</button>
+            </div>
+          )}
           {rows.map((p) => {
             const cur = isCur(p);
             const expanded = expandedId === p.id;

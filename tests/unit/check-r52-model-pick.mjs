@@ -253,9 +253,18 @@ const read = (p) => readFileSync(join(REPO, p), 'utf8');
 // 3.1 弹窗组件:文案 / portal / flex 列三段 / 禁 sticky 与原生 confirm
 {
   const src = read('client/src/components/ModelPickModal.jsx');
-  for (const copy of ['选择要添加的模型', '已添加', '已选中', '全选', '全不选', '确认', '取消']) {
+  // 2026-09-21 r125 契约变化(BRIEF P1-1 / INTERFACE B1):已在列表里的模型显示为"已勾选、可取消",
+  // 不再禁用、不再打「已添加」;默认标题从「选择要添加的模型」改为「选择模型」(弹窗既能加也能减)。
+  for (const copy of ['选择模型', '已选中', '全选', '全不选', '确认', '取消']) {
     assert.ok(src.includes(copy), `t3.1: 弹窗文案含「${copy}」`);
   }
+  assert.ok(!/disabled=\{added\}/.test(src), 't3.1【r125】已在列表里的行不再 disabled(要能弃选)');
+  assert.ok(!/>已添加</.test(src), 't3.1【r125】不再渲染「已添加」标签');
+  assert.match(src, /useState\(\(\) => new Set\(\(existing \|\| \[\]\)/, 't3.1【r125】初始勾选集 = existing(已选的预先勾上)');
+  for (const tid of ['model-pick-modal', 'model-pick-row', 'model-pick-confirm', 'model-pick-search']) {
+    assert.ok(src.includes(`data-testid="${tid}"`), `t3.1【r125】INTERFACE B 锚点 data-testid="${tid}" 在位`);
+  }
+  assert.match(src, /data-model-id=\{id\}/, 't3.1【r125】每行带 data-model-id');
   assert.match(src, /createPortal/, 't3.1: portal 到 body(弹层祖先带 transform 会困住 fixed 遮罩)');
   assert.match(src, /flex flex-col/, 't3.1: flex 列三段结构');
   assert.ok(
@@ -308,16 +317,20 @@ const read = (p) => readFileSync(join(REPO, p), 'utf8');
     't3.2: fetchModels 不再把全量目录直灌进模型文本域(改走勾选弹窗)',
   );
   assert.match(src, /ModelPickModal/, 't3.2: 表单挂了勾选弹窗');
-  assert.match(src, /mergeModelLines\(/, 't3.2: 确认后走 mergeModelLines 写回(只增不减)');
+  // 2026-09-21 r125 契约变化(BRIEF P1-2):确认后以勾选为准写回(replaceModelLines),不再 merge 只增不减。
+  assert.match(src, /replaceModelLines\(parseModels\(\), pickCandidates, ids\)/, 't3.2【r125】确认后走 replaceModelLines 写回(以勾选为准,目录外既有行保留)');
+  assert.ok(!/mergeModelLines\(/.test(src), 't3.2【r125】App.jsx 不再用 mergeModelLines 写回');
   assert.match(src, /stripJunkModels\(/, 't3.2: 候选先过滤噪音');
 }
 
 // 3.3 聊天模型弹窗:自定义 provider 不并入实时目录,官方分支照旧并入(反向钉,防一刀切)
 {
   const src = read('client/src/components/SessionSelectors.jsx');
+  // 2026-09-21 r125 契约变化(BRIEF P2-2 / P2-3):官方 / 导入项在模型选择存储里有选择时也不并入实时目录
+  // (只显示勾选的);没有选择才照旧并入 —— 仍是同一行钉死两个方向,只是门多了 hasSelection。
   assert.match(
-    src, /const fetchedRows = \(isCustomProvider \? EMPTY_ARRAY : fetched\)/,
-    't3.3: 自定义 provider 列表不并 fetchedByProvider;非自定义(官方)仍并入 —— 同一行钉死两个方向',
+    src, /const fetchedRows = \(\(isCustomProvider \|\| hasSelection\) \? EMPTY_ARRAY : fetched\)/,
+    't3.3【r125】自定义 / 有选择的官方与导入项不并 fetchedByProvider;无选择的官方与导入项仍并入 —— 同一行钉死两个方向',
   );
   assert.match(src, /ModelPickModal/, 't3.3: 「拉取最新」开同一个勾选弹窗');
   assert.match(
@@ -325,7 +338,9 @@ const read = (p) => readFileSync(join(REPO, p), 'utf8');
     't3.3: 勾选结果持久化进该 provider(调既有 custom-providers 更新端点)',
   );
   assert.match(src, /method: 'PUT'/, 't3.3: 用 PUT 更新');
-  assert.match(src, /mergeModelLines\(/, 't3.3: merge 语义(重新拉取不重置已选)');
+  // 2026-09-21 r125 契约变化(BRIEF P1-2):写回 = 弹窗最终勾选集(replaceModelLines),不再 merge。
+  assert.match(src, /replaceModelLines\(prov\.models \|\| \[\], candidates, ids\)/, 't3.3【r125】以勾选为准写回(目录外既有 id 保留)');
+  assert.ok(!/mergeModelLines\(/.test(src), 't3.3【r125】SessionSelectors 不再用 mergeModelLines 写回');
 }
 
 // 3.4 生图 provider:datalist 数据源 = provider.models(持久化白名单),不再是会话级拉取结果
@@ -338,8 +353,10 @@ const read = (p) => readFileSync(join(REPO, p), 'utf8');
     src, /stripJunkModels\([^)]*,\s*'image'\)/,
     "t3.4【生图口径】过滤走 'image' 场景(否则 FLUX 全家被误杀,还谎报「服务返回了空的模型列表」)",
   );
-  assert.match(src, /mergeModelLines\(/, 't3.4: 勾选结果 merge 进 form.models');
+  // 2026-09-21 r125 契约变化(BRIEF P1-2 / INTERFACE B2):勾选结果以勾选为准写进 form.models(replaceModelLines)。
+  assert.match(src, /replaceModelLines\(f\.models \|\| \[\], catalog, ids\)/, 't3.4【r125】勾选结果以勾选为准写进 form.models');
+  assert.ok(!/mergeModelLines\(/.test(src), 't3.4【r125】ImagePanel 不再用 mergeModelLines 写回');
   assert.match(src, /models: form\.models/, 't3.4: 保存时把白名单写进 provider');
 }
 
-console.log('✓ check-r52-model-pick: 纯函数(只增不减/全选跳过已加/大小写/噪音过滤)+ 生图 models 白名单落盘 + 三处接线 全部通过');
+console.log('✓ check-r52-model-pick: 纯函数(mergeModelLines 只增不减/全选跳过已加/大小写/噪音过滤)+ 生图 models 白名单落盘 + 三处接线(r125 起写回走 replaceModelLines)全部通过');

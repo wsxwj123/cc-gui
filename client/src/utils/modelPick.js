@@ -30,8 +30,31 @@ export function selectAllTargets(filtered, existing) {
   return (Array.isArray(filtered) ? filtered : []).filter((id) => !set.has(id));
 }
 
-// 合并:保留原行序 → 追加新勾选的 → 去重。**绝不删除**已有项:重新拉取只增不减,
-// 删除权只在用户手上(手动改文本域/编辑 provider)。入参数组不就地修改。
+// r125 以勾选为准的写回集合(替代 mergeModelLines 作为弹窗确认后的写回语义):
+//  - 候选目录内的已有 id:弹窗里仍勾着 → 保留;被弃选 → 移除;
+//  - 候选目录外的已有 id(用户手填、本次目录没列出的):原样保留 —— 弹窗里根本没有它的行,
+//    用户无从表态,不能因为"重新拉取"就把手填的模型悄悄删掉;
+//  - 新勾选的追加在后;全程去重、trim,保留原行序;入参数组不就地修改。
+export function replaceModelLines(existingLines, candidates, checkedIds) {
+  const clean = (arr) => (Array.isArray(arr) ? arr : [])
+    .map((raw) => (typeof raw === 'string' ? raw.trim() : ''))
+    .filter(Boolean);
+  const candidateSet = new Set(clean(candidates));
+  const checked = clean(checkedIds);
+  const checkedSet = new Set(checked);
+  const out = [];
+  const seen = new Set();
+  const push = (id) => { if (!seen.has(id)) { seen.add(id); out.push(id); } };
+  for (const id of clean(existingLines)) {
+    if (!candidateSet.has(id) || checkedSet.has(id)) push(id);
+  }
+  for (const id of checked) push(id);
+  return out;
+}
+
+// 合并:保留原行序 → 追加新勾选的 → 去重。**绝不删除**已有项。
+// r125 起弹窗确认的写回改走 replaceModelLines(以勾选为准);本函数保留给仍需"只增不减"
+// 语义的调用方与单测。入参数组不就地修改。
 export function mergeModelLines(existingLines, checkedIds) {
   const out = [];
   const seen = new Set();

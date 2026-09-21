@@ -174,7 +174,9 @@ assert.match(undoSrc, /el\.__undoApplying = true;/, 't4: apply() 的防环标志
   assert.match(app, /<textarea ref=\{modelsRef\}[^>]*value=\{modelsText\}/, 't5: 模型框挂 modelsRef(没 ref 就拿不到 DOM,写入只能走 setState)');
   const onConfirm = app.match(/onConfirm=\{\(ids\) => \{[\s\S]*?\n\s*\}\}/);
   assert.ok(onConfirm, 't5: 找得到勾选弹窗 onConfirm');
-  assert.match(onConfirm[0], /mergeModelLines\(parseModels\(\), ids\)\.join\('\\n'\)/, 't5: 合并语义不变(原有行一律保留)');
+  // 2026-09-21 r125 契约变化(BRIEF P1-2):写回改为"以勾选为准"(replaceModelLines:勾掉的候选移除、
+  // 新勾的加入、不在本次目录里的既有行保留);撤销通道写入这条红线不变。
+  assert.match(onConfirm[0], /replaceModelLines\(parseModels\(\), pickCandidates, ids\)\.join\('\\n'\)/, 't5【r125】写回走 replaceModelLines(以勾选为准,目录外既有行保留)');
   assert.match(onConfirm[0], /applyProgrammaticText\(modelsRef\.current, merged\)/, 't5: 确认必须经撤销通道写入,否则合并进来的模型行 ⌘Z 撤不回(用户实报)');
   assert.match(onConfirm[0], /setPickCandidates\(null\)/, 't5: 确认后关弹窗');
 }

@@ -9,7 +9,7 @@ import { Image, Plus, Trash2, Pencil, FolderOpen, Loader2, Sparkles, ExternalLin
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { ImageLightbox } from './ImageLightbox.jsx';
-import { ModelPickModal, mergeModelLines, stripJunkModels } from './ModelPickModal.jsx';
+import { ModelPickModal, replaceModelLines, stripJunkModels } from './ModelPickModal.jsx';
 // r56/r87 生图参数能力表(utils/imageSizeCaps.js)。r87 起判据是 (上游方言, 模型) 二元 ——
 // apimart 的 size 是宽高比、OpenAI 官方的 size 是像素,同名反义,只看模型名判不了。
 import {
@@ -70,6 +70,22 @@ const EMPTY_FORM = {
   dialect: 'openai', resolution: '', quality: '', outputFormat: '', background: '', moderation: '',
   n: '', nsfwCheck: false,
 };
+
+// 已有 provider → 编辑表单初值。r125 抽成一处:下拉旁的「编辑」(编辑当前选中的 provider)与配置
+// 列表每行的「编辑」共用,回填口径不许漂(此前只有列表行一个入口,内联写在按钮上)。
+const editFormOf = (p) => ({
+  ...EMPTY_FORM, id: p.id, name: p.name, protocol: p.protocol, baseURL: p.baseURL,
+  model: p.model, models: p.models || [], size: p.size, savePath: p.savePath,
+  extra: p.extra ? JSON.stringify(p.extra, null, 2) : '', i2iMode: p.i2iMode || 'edits',
+  proxyUrl: p.proxyUrl || '',
+  // r94:速度回填【存的原值】—— 存 turbo 就显示 turbo,不因版本是 8.x 而显示 fast。
+  mjVersion: p.mjVersion || '', mjSpeed: p.mjSpeed || '',
+  mjParams: p.mjParams || {}, mjRefMode: p.mjRefMode || '',
+  // r87:服务端回显已把存量条目补成缺省值(方言 openai / 其余空),原样回填。
+  dialect: p.dialect || 'openai', resolution: p.resolution || '', quality: p.quality || '',
+  outputFormat: p.outputFormat || '', background: p.background || '',
+  moderation: p.moderation || '', n: p.n === 0 || p.n ? p.n : '', nsfwCheck: p.nsfwCheck === true,
+});
 
 // ─────────────────── r87 OpenAI 系参数的界面文案(取值与服务端白名单同源) ───────────────────
 // 服务端权威清单在 server/utils/image-protocols.js(IMAGE_QUALITIES / IMAGE_OUTPUT_FORMATS /
@@ -942,9 +958,11 @@ function ProviderForm({ initial, onDone, onCancel }) {
           existing={form.models || []}
           onClose={() => setPickCandidates(null)}
           onConfirm={(ids) => {
-            setForm((f) => ({ ...f, models: mergeModelLines(f.models || [], ids) }));
+            // r125:以勾选为准 —— 勾掉的候选移除、新勾的加入;不在本次目录里的既有候选原样保留。
+            const catalog = pickCandidates || [];
+            setForm((f) => ({ ...f, models: replaceModelLines(f.models || [], catalog, ids) }));
             setPickCandidates(null);
-            setModelsMsg('已加入候选列表，点击「模型」输入框即可选择；点「保存」后持久生效。');
+            setModelsMsg('已按勾选更新候选列表，点击「模型」输入框即可选择；点「保存」后持久生效。');
           }}
         />
       )}
@@ -1712,6 +1730,15 @@ export default function ImagePanel() {
             {!providers.length && <option value="">还没有生图 provider</option>}
             {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
+          {/* r125:编辑【当前选中】的 provider。此前只能去下方配置列表逐行找铅笔 —— 条目一多,
+              "选中的是哪一条 / 编辑的是哪一条"两处对不上(列表按存储序,与下拉选中无关)。 */}
+          <button
+            type="button"
+            onClick={() => { const p = providers.find((x) => x.id === selId); if (p) setForm(editFormOf(p)); }}
+            disabled={!selId || !providers.some((x) => x.id === selId)}
+            title="编辑"
+            className="shrink-0 p-1.5 rounded-md border border-canvas-deep text-ink-soft hover:bg-canvas-deep/60 disabled:opacity-40"
+          ><Pencil size={13} /></button>
           <button
             type="button"
             onClick={() => setForm({ ...EMPTY_FORM })}
@@ -2174,19 +2201,7 @@ export default function ImagePanel() {
                 <button
                   type="button"
                   title="编辑"
-                  onClick={() => setForm({
-                    ...EMPTY_FORM, id: p.id, name: p.name, protocol: p.protocol, baseURL: p.baseURL,
-                    model: p.model, models: p.models || [], size: p.size, savePath: p.savePath,
-                    extra: p.extra ? JSON.stringify(p.extra, null, 2) : '', i2iMode: p.i2iMode || 'edits',
-                    proxyUrl: p.proxyUrl || '',
-                    // r94:速度回填【存的原值】—— 存 turbo 就显示 turbo,不因版本是 8.x 而显示 fast。
-                    mjVersion: p.mjVersion || '', mjSpeed: p.mjSpeed || '',
-                    mjParams: p.mjParams || {}, mjRefMode: p.mjRefMode || '',
-                    // r87:服务端回显已把存量条目补成缺省值(方言 openai / 其余空),原样回填。
-                    dialect: p.dialect || 'openai', resolution: p.resolution || '', quality: p.quality || '',
-                    outputFormat: p.outputFormat || '', background: p.background || '',
-                    moderation: p.moderation || '', n: p.n === 0 || p.n ? p.n : '', nsfwCheck: p.nsfwCheck === true,
-                  })}
+                  onClick={() => setForm(editFormOf(p))}
                   className="shrink-0 p-1 rounded hover:bg-canvas-deep/60 text-ink-soft"
                 ><Pencil size={12} /></button>
                 <button
