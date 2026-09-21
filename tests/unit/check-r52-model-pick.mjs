@@ -326,9 +326,11 @@ const read = (p) => readFileSync(join(REPO, p), 'utf8');
 // 3.3 聊天模型弹窗:自定义 provider 不并入实时目录,官方分支照旧并入(反向钉,防一刀切)
 {
   const src = read('client/src/components/SessionSelectors.jsx');
+  // 2026-09-21 r125 契约变化(BRIEF P2-2 / P2-3):官方 / 导入项在模型选择存储里有选择时也不并入实时目录
+  // (只显示勾选的);没有选择才照旧并入 —— 仍是同一行钉死两个方向,只是门多了 hasSelection。
   assert.match(
-    src, /const fetchedRows = \(isCustomProvider \? EMPTY_ARRAY : fetched\)/,
-    't3.3: 自定义 provider 列表不并 fetchedByProvider;非自定义(官方)仍并入 —— 同一行钉死两个方向',
+    src, /const fetchedRows = \(\(isCustomProvider \|\| hasSelection\) \? EMPTY_ARRAY : fetched\)/,
+    't3.3【r125】自定义 / 有选择的官方与导入项不并 fetchedByProvider;无选择的官方与导入项仍并入 —— 同一行钉死两个方向',
   );
   assert.match(src, /ModelPickModal/, 't3.3: 「拉取最新」开同一个勾选弹窗');
   assert.match(

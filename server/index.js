@@ -11,7 +11,7 @@ import sessionRoutes from './routes/sessions.js';
 import sessionHistoryRoutes from './routes/session-history.js';
 import chatRoutes, { getInitCommands, mergeInitCommands } from './routes/chat.js';
 import processRoutes from './routes/processes.js';
-import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider, activeProviderModelMeta, ensureCustomProvidersMode, reapplyPromptCacheForActiveProvider } from './routes/settings.js';
+import settingsRoutes, { restoreOpenAIProvider, restoreAnthropicProvider, activeProviderModelMeta, ensureCustomProvidersMode, reapplyPromptCacheForActiveProvider, applyProviderModelSelection } from './routes/settings.js';
 import usageRoutes from './routes/usage.js';
 import subscriptionUsageRoutes from './routes/subscription-usage.js';
 import providerQuotaRoutes from './routes/provider-quota.js';
@@ -586,7 +586,9 @@ app.post('/api/network/password', (req, res) => {
 // GET /api/model — current default model + available models
 app.get('/api/model', async (req, res) => {
   try {
-    const data = await getAvailableModels();
+    // r125:官方 / 导入 provider 若在 provider-models.json 里做过"要显示哪些模型"的选择,
+    // available 只显示选择(+ 当前模型 + CLI 别名);没有选择 → getAvailableModels 原样。
+    const data = await applyProviderModelSelection(await getAvailableModels());
     // settings.json 的默认思考强度(env.CLAUDE_CODE_EFFORT_LEVEL)。前端 effort 选择器
     // 原本只读 localStorage,会出现"settings 设了 high 却显示默认"(实际 CLI 不传
     // --effort 时读 settings 用 high,只是显示没反映)。返回它供前端在 localStorage 为空

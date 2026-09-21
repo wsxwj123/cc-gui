@@ -16,6 +16,24 @@ import { ModelPickModal, replaceModelLines, stripJunkModels } from './ModelPickM
 
 const EMPTY_ARRAY = Object.freeze([]);
 
+// r125:从 GET /api/providers 的三张表里认出"当前激活的是哪一条、属于哪一类、勾选结果写回哪个键"。
+// 自定义优先(可编辑项吞并同名导入项时,激活的是自定义那条);官方行(category official)的选择键
+// 恒为 builtin-official(列表在已导入机器上给的就是这个合成 id,真 cc-switch 官方行 id 也归到它);
+// 其余 claude / openai 导入行以自己的 id 为键。三张表都没有 isCurrent 时返回 null(由调用方兜底)。
+export const BUILTIN_OFFICIAL_ID = 'builtin-official';
+export function resolveCurrentProvider(d) {
+  const custom = (Array.isArray(d?.customProviders) ? d.customProviders : []).find((p) => p?.isCurrent);
+  if (custom) return { kind: 'custom', id: custom.id, name: custom.name, type: custom.type, baseURL: custom.baseURL, models: custom.models || [], selectionKey: null };
+  const claude = (Array.isArray(d?.providers) ? d.providers : []).find((p) => p?.isCurrent);
+  if (claude) {
+    const official = claude.category === 'official' || claude.id === BUILTIN_OFFICIAL_ID;
+    return { kind: official ? 'official' : 'claude', id: claude.id, name: claude.name, models: claude.models || [], selectionKey: official ? BUILTIN_OFFICIAL_ID : claude.id };
+  }
+  const openai = (Array.isArray(d?.openaiProviders) ? d.openaiProviders : []).find((p) => p?.isCurrent);
+  if (openai) return { kind: 'openai', id: openai.id, name: openai.name, models: openai.models || [], selectionKey: openai.id };
+  return null;
+}
+
 // 修正批#6:来源徽章(切换卡片/管理页/手机页共用)。官方不打徽章(它是基准项,
 // 恒置顶);合并了同名 cc-switch 导入项的自定义条目加提示。
 export function ProviderSourceBadge({ p }) {
@@ -456,29 +474,47 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
   // survives closing/reopening the picker — instead of vanishing with this
   // component's local state every time it unmounts.
   const fetched = useStore((s) => s.fetchedByProvider[provider]) || EMPTY_ARRAY;
-  // r52:当前激活的**自定义** provider(custom-providers.json 里的那条,含 id/models)。
-  // null = 官方或 cc-switch 导入项 —— 那两类没有可写回的白名单,行为一字不动。
-  const [customProv, setCustomProv] = useState(null);
+  // r125:当前激活的 provider 是哪一类、勾选结果写回哪里。
+  //  kind='custom'  → custom-providers.json 里的那条(含 id/models 白名单),写回 PUT /api/custom-providers/:id;
+  //  kind='official' → 内置官方,写回 PUT /api/provider-models/builtin-official;
+  //  kind='claude'|'openai' → cc-switch 导入项,写回 PUT /api/provider-models/<其 id>。
+  // selectionKey = provider-models.json 里的键(自定义为 null);hasSelection = 该键下有选择
+  // (有 → 下拉只显示选择,不再并入实时目录;没有 → 与今天一致,全部显示)。
+  const [curProv, setCurProv] = useState(null);
+  const [hasSelection, setHasSelection] = useState(false);
   const [pickCandidates, setPickCandidates] = useState(null);
-  const isCustomProvider = !!customProv;
+  // 打开弹窗时的初始勾选集(自定义 = 白名单全部含手填;官方 / 导入 = 打开前下拉正在显示的 ∩ 目录)。
+  const [pickExisting, setPickExisting] = useState(EMPTY_ARRAY);
+  const isCustomProvider = curProv?.kind === 'custom';
+  const customProv = isCustomProvider ? curProv : null;
   const doFetch = async () => {
     setFetching(true); setFetchNote('');
+    // 预勾集必须在写入实时目录之前取:官方 / 导入项没有选择时,下拉里并入的就是上一次的实时目录,
+    // 拉完再算会把本次目录里的新模型也当成"正在显示"全部预勾。
+    const shownBefore = isCustomProvider
+      ? (curProv.models || [])
+      : [...availableModels.map((m) => m.id), ...(hasSelection ? [] : fetched), ...customModels];
     try {
       const r = await fetch('/api/provider/fetch-models', { method: 'POST' });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || '拉取失败');
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       const models = Array.isArray(d.models) ? d.models : [];
-      useStore.getState().setFetchedModels(provider, models);
-      // 自定义 provider:目录只作候选 —— 显示的永远是用户勾选过的白名单,故拉完开勾选弹窗,
-      // 确认的才写回该 provider 的 models(持久化,重开弹层仍在)。
-      if (isCustomProvider) {
-        const candidates = stripJunkModels(models);
+      // 实时目录进 store(官方 / 导入项无选择时下拉照旧并入全部);失败 / 空目录不覆盖上一次的目录。
+      if (models.length) useStore.getState().setFetchedModels(provider, models);
+      // r125:三类 provider 都走勾选弹窗(P2-1)——目录只作候选,确认的才写回。
+      const candidates = stripJunkModels(models);
+      if (!candidates.length) {
+        // P2-4 / C4:失败或空目录不弹窗,给一句含「失败」或「未返回」的原因(上游 note 原样附后)。
+        setFetchNote(d.ok === false
+          ? `拉取失败：${d.note || d.error || '上游未返回模型目录'}`
+          : `未返回可用模型${d.note ? `：${d.note}` : ''}`);
+      } else {
+        const candidateSet = new Set(candidates);
+        const existing = isCustomProvider ? shownBefore : [...new Set(shownBefore.filter((id) => candidateSet.has(id)))];
+        setPickExisting(existing);
         // 先关掉下层弹层再开勾选弹窗:AnchoredPopover 的内联 zIndex:9999 会压盖勾选弹窗,
         // 且它的 window 捕获 Esc 注册更早会抢跑(第一击关错层)。关掉它两个问题一起消失。
-        if (candidates.length) { setOpen(false); setPickCandidates(candidates); setFetchNote(''); }
-        else setFetchNote(d.note || '未返回可用模型');
-      } else {
-        setFetchNote(d.note || (models.length ? `已拉取 ${models.length} 个` : '未返回模型'));
+        setOpen(false); setPickCandidates(candidates); setFetchNote('');
       }
     } catch (e) { setFetchNote('拉取失败：' + e.message); }
     setFetching(false);
@@ -486,22 +522,42 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
   // 勾选确认(r125 以勾选为准):该 provider 的 models = 弹窗最终勾选集(勾掉的移除、新勾的
   // 加入;不在本次目录里的既有 id 原样保留,见 replaceModelLines),PUT 持久化。PUT 会同步
   // 激活 provider 的模型快照,故 provider-change 事件后本组件重读 /api/model 即见新列表。
+  // 官方 / 导入项(P2-2):选择 = 弹窗最终勾选 ∩ 本次目录,写进每 provider 模型选择存储
+  // (PUT /api/provider-models/<键>);服务端 /api/model 随即只给选择 + 当前模型 + 别名。
   const applyPick = async (ids) => {
-    const prov = customProv;
+    const prov = curProv;
     const candidates = pickCandidates || [];
     setPickCandidates(null);
     if (!prov || !ids.length) return;
-    const nextModels = replaceModelLines(prov.models || [], candidates, ids);
+    if (prov.kind === 'custom') {
+      const nextModels = replaceModelLines(prov.models || [], candidates, ids);
+      try {
+        const r = await fetch(`/api/custom-providers/${prov.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: prov.name, type: prov.type, baseURL: prov.baseURL, models: nextModels }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || '保存失败');
+        setCurProv({ ...prov, models: nextModels });
+        setFetchNote(`已更新模型列表：${nextModels.length} 个`);
+        window.dispatchEvent(new CustomEvent('cgui:provider-change'));
+      } catch (e) { setFetchNote('保存失败：' + e.message); }
+      return;
+    }
+    const candidateSet = new Set(candidates);
+    const selection = ids.filter((id) => candidateSet.has(id));
+    if (!selection.length) { setFetchNote('未勾选任何模型，未做修改'); return; }
     try {
-      const r = await fetch(`/api/custom-providers/${prov.id}`, {
+      const r = await fetch(`/api/provider-models/${encodeURIComponent(prov.selectionKey)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: prov.name, type: prov.type, baseURL: prov.baseURL, models: nextModels }),
+        body: JSON.stringify({ models: selection }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || '保存失败');
-      setCustomProv({ ...prov, models: nextModels });
-      setFetchNote(`已更新模型列表：${nextModels.length} 个`);
+      setHasSelection(true);
+      setFetchNote(`已更新模型列表：${selection.length} 个`);
       window.dispatchEvent(new CustomEvent('cgui:provider-change'));
     } catch (e) { setFetchNote('保存失败：' + e.message); }
   };
@@ -538,11 +594,17 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
             .catch(() => {});
         }
       }).catch(() => {});
-      // r52:当前 provider 是不是"自定义"(GUI 自建、models 白名单可写回)。是 → 列表只显
-      // 白名单、「拉取最新」走勾选弹窗;不是(官方/导入) → 一切照旧。
-      fetch('/api/providers').then((r) => r.json()).then((d) => {
+      // r125:当前 provider 是哪一类(自定义 / 官方 / 导入)+ 它在模型选择存储里有没有选择。
+      // 自定义 → 列表只显白名单;官方 / 导入 → 有选择只显选择,没有则并入实时目录(与今天一致)。
+      Promise.all([
+        fetch('/api/providers').then((r) => r.json()).catch(() => ({})),
+        fetch('/api/provider-models').then((r) => r.json()).catch(() => ({})),
+      ]).then(([d, pm]) => {
         if (cancelled) return;
-        setCustomProv((d.customProviders || []).find((p) => p.isCurrent) || null);
+        const cur = resolveCurrentProvider(d || {});
+        const selections = (pm && typeof pm.selections === 'object' && pm.selections) || {};
+        setCurProv(cur);
+        setHasSelection(!!(cur?.selectionKey && Array.isArray(selections[cur.selectionKey]) && selections[cur.selectionKey].length));
       }).catch(() => {});
     };
     load();
@@ -566,9 +628,10 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
     .filter((id) => !availableModels.some((m) => m.id === id))
     .map((id) => ({ id, name: id.replace(/\[1m\]/i, ''), tier: '自定义', source: 'custom', context1m: /\[1m\]/i.test(id) }));
   // r52:自定义 provider 下**不并入**实时目录 —— 显示的就是用户勾选进白名单的那些
-  // (勾选才显示是本轮的核心诉求;并入全量目录等于把白名单顶掉)。官方 Anthropic 与
-  // cc-switch 导入项照旧并入(它们没有可勾选的白名单,内置清单又可能落后于最新发布)。
-  const fetchedRows = (isCustomProvider ? EMPTY_ARRAY : fetched)
+  // (勾选才显示是本轮的核心诉求;并入全量目录等于把白名单顶掉)。
+  // r125:官方 / 导入项在模型选择存储里有选择时同样不并入(只显示勾选的,P2-2);没有选择
+  // 才照旧并入实时目录(内置清单可能落后于最新发布,P2-3)。
+  const fetchedRows = ((isCustomProvider || hasSelection) ? EMPTY_ARRAY : fetched)
     .filter((id) => !availableModels.some((m) => m.id === id) && !customModels.includes(id))
     .filter((id) => match(id, id))
     .map((id) => ({ id, name: id }));
@@ -767,12 +830,12 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
           {/* 修正批#5:原底部「自定义模型 ID」块已上移到固定头(用户在长列表下找不到)。 */}
           </div>
       </AnchoredPopover>
-      {/* r52:自定义 provider 的「拉取最新」勾选弹窗(portal 到 body,不受弹层夹紧影响)。 */}
+      {/* r52/r125:「拉取最新」的勾选弹窗(三类 provider 都弹;portal 到 body,不受弹层夹紧影响)。 */}
       {pickCandidates && (
         <ModelPickModal
           candidates={pickCandidates}
-          existing={customProv?.models || EMPTY_ARRAY}
-          title={`选择模型（${customProv?.name || provider}）`}
+          existing={pickExisting}
+          title={`选择模型（${curProv?.name || provider}）`}
           onClose={() => setPickCandidates(null)}
           onConfirm={applyPick}
         />

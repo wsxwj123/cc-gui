@@ -525,6 +525,41 @@ async function writeProviderModels(map) {
   await writeFile(PROVIDER_MODELS_PATH, JSON.stringify(map, null, 2));
 }
 
+// r125:把"每 provider 的模型选择"(provider-models.json)套到 GET /api/model 的 available 上。
+// 口径与 GET /providers 里 openaiProviders 的 models(有选择 → 选择,没有 → 全部)一致,并扩到官方
+// (键 builtin-official)与导入的 claude 格式行(键 = 其 id):
+//  - 该 provider 有选择 → available 只留选择里的模型 + 当前默认模型(正在用的不能被挤掉,否则触发
+//    "模型不可用"回落)+ CLI 别名行(sonnet/opus/haiku/fable 由 CLI 解析,不是目录条目);选择里
+//    env 没枚举到的 id 补成行(source:'provider-selection'),否则前端下拉看不到刚勾的新模型;
+//  - 没有任何选择 → 原样返回,逐字不变(P2-3);
+//  - 自定义 provider 不套:它的 models 白名单本身就是 available(PUT custom-providers 已同步快照)。
+// 任何读盘/解析失败都回落为原样返回 —— 这条路径只做"收窄",绝不能让 /api/model 整体失败。
+export async function applyProviderModelSelection(data) {
+  try {
+    if (!data || !Array.isArray(data.models)) return data;
+    const sel = await readProviderModels();
+    if (!Object.keys(sel).length) return data;
+    const activeId = await readActiveProviderId();
+    if (activeId && (await readCustomProviders()).some((p) => p.id === activeId)) return data;
+    let key = null;
+    if (activeId && activeId !== BUILTIN_OFFICIAL_ID && Array.isArray(sel[activeId]) && sel[activeId].length) key = activeId;
+    else if (data.provider === 'Anthropic') key = BUILTIN_OFFICIAL_ID;
+    const chosen = key ? sel[key] : null;
+    if (!Array.isArray(chosen) || !chosen.length) return data;
+    const bare = (m) => String(m || '').replace(/\[1m\]/i, '');
+    const keep = new Set(chosen.map(bare));
+    const models = data.models.filter((m) => keep.has(bare(m.id))
+      || m.source === 'cli-alias'
+      || (data.current && m.id === data.current));
+    for (const id of chosen) {
+      if (!models.some((m) => bare(m.id) === bare(id))) {
+        models.push({ id, name: id.replace(/\[1m\]/i, ''), tier: '', context1m: /\[1m\]/i.test(id), source: 'provider-selection' });
+      }
+    }
+    return { ...data, models, selectionKey: key };
+  } catch { return data; }
+}
+
 // B 方案: per-provider「默认模型 + 档位映射」覆盖层,对【所有】provider 生效
 // (含 cc-switch 只读组 / openai marker 组),它们不在 custom-providers.json 里够不着
 // CustomProviderForm。Shape: { [providerId]: { defaultModel?, tierModels?{haiku,sonnet,opus,fable} } }。
