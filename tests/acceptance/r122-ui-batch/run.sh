@@ -3,6 +3,8 @@
 #   tests/acceptance/r122-ui-batch/run.sh                 # 全量
 #   tests/acceptance/r122-ui-batch/run.sh -g 'A4'         # 额外参数原样转给 playwright
 #   R122_PROBE=1 tests/acceptance/r122-ui-batch/run.sh -g '探路'   # 只跑探路脚本(平时跳过)
+#   R122_PW_CONFIG=tests/acceptance/<旧套件>/playwright.config.mjs tests/acceptance/r122-ui-batch/run.sh -g 'PR-25'
+#        # 用本套件的隔离实例 + dev server 跑别的套件(同时导出 BASE_URL / WORKTREE);旧套件对齐验证用
 # 自己做:建夹具(隔离 HOME + 夹具会话)→ 起隔离实例(HOME=本套件 .artifacts,PATH 上挂假 claude)
 #        → 起 dev server(源码直出,/api、/ws 代理到隔离实例)→ 跑用例 → 按记录的 pid 收掉这两类进程和所有桩进程。
 # 端口只在 6700–6999 里挑空闲的,硬拒 6677 / 6689 / 6710。不读写真实的 ~/.claude、~/.claude-gui。
@@ -82,9 +84,12 @@ fi
 echo "[r122] dev server 就绪:http://127.0.0.1:$UI_PORT(pid $VITE_PID;/api、/ws 代理到 $API_PORT)"
 
 cd "$WORKTREE"
+CONFIG="${R122_PW_CONFIG:-$SUITE/playwright.config.mjs}"
+case "$CONFIG" in /*) ;; *) CONFIG="$WORKTREE/$CONFIG" ;; esac
 set +e
 R122_UI_BASE="http://127.0.0.1:$UI_PORT" R122_API_BASE="http://127.0.0.1:$API_PORT" R122_CTL="$CTL" \
-  npx playwright test -c "$SUITE/playwright.config.mjs" "$@"
+  BASE_URL="http://127.0.0.1:$UI_PORT" WORKTREE="$WORKTREE" \
+  npx playwright test -c "$CONFIG" "$@"
 CODE=$?
 set -e
 echo "[r122] playwright 退出码 $CODE(实例 pid $API_PID / dev server pid $VITE_PID)"

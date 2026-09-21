@@ -61,10 +61,18 @@ export async function dismissOverlays(page) {
   }
 }
 
-/** 每次导航前预置"使用指引已看过"（一层与被测行为无关的整屏遮罩）。 */
+/**
+ * 每次导航前预置"使用指引已看过"（一层与被测行为无关的整屏遮罩）。
+ * 〈2026-09-21 r122〉同时预置「过程块自动折叠」开关为**开启**（localStorage `cgui-auto-fold-process`='1'，
+ * INTERFACE-r122 A1 的公开契约）：r122 把默认改成"不自动折叠"，本套件验证的是折叠逻辑本身，
+ * 所以在开关开启的前提下继续跑，用例与断言一字不动。
+ */
 export async function primeOverlays(page) {
   await page.addInitScript(() => {
-    try { localStorage.setItem('cgui-tour-seen', '1'); } catch { /* 忽略 */ }
+    try {
+      localStorage.setItem('cgui-tour-seen', '1');
+      localStorage.setItem('cgui-auto-fold-process', '1');
+    } catch { /* 忽略 */ }
   });
 }
 

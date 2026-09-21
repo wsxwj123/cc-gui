@@ -10,11 +10,13 @@ import { test, expect } from '@playwright/test';
 import * as rt from './helpers/r2528-runtime.mjs';
 import { startModelsStub, stubBusyHint } from './helpers/models-stub.mjs';
 
-const STATUS_ENUM = ['available', 'stale', 'unavailable', 'not-subscribed'];
+// 〈2026-09-21 r122〉INTERFACE-r122 C1 新增一种状态：命令行工具未登录 → status 'not-logged-in' / code 'NOT_LOGGED_IN'。
+// 枚举照契约补上这一项（这台机器的 CLI 正是未登录，不补则 R28-03/06 会把契约内的新状态判成越界）；其余判据不变。
+const STATUS_ENUM = ['available', 'stale', 'unavailable', 'not-subscribed', 'not-logged-in'];
 const SOURCE_ENUM = ['official-cli', 'official-sdk-experimental'];
 const CODE_ENUM = [
   'CLI_UNAVAILABLE', 'CLI_CAPABILITY_UNAVAILABLE', 'CLI_RESPONSE_INVALID',
-  'CLI_RATE_LIMITED', 'NOT_SUBSCRIBED', 'CLI_TIMEOUT',
+  'CLI_RATE_LIMITED', 'NOT_SUBSCRIBED', 'CLI_TIMEOUT', 'NOT_LOGGED_IN',
 ];
 
 function subscriptionUsage(baseURL, { probe = false } = {}) {

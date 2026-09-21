@@ -67,6 +67,10 @@ test('PR-24 [R21/R24] 不同原币种分开显示，不折算成单一币种总�
     throw new EnvironmentBlocked('当前没有任何有价报价，无法验证币种展示（不得静默跳过；先让实例能取到官方价目）');
   }
   await openUsagePanel(page);
+  // 〈2026-09-21 r122〉R2 把"原币种 CNY N 条 · USD N 条"那句从折叠外收进了「原币种报价」折叠项
+  // （INTERFACE-r122 B2/B4），可见文本里要看到分币种信息得先展开它。断言本身一字不动。
+  const quotesBlock = page.locator('details', { has: page.locator('summary', { hasText: /原币种报价/ }) }).first();
+  if (await quotesBlock.count()) await quotesBlock.locator('summary').first().click({ timeout: 5_000 }).catch(() => {});
   const text = await allText(page);
   if (currencies.has('CNY') && currencies.has('USD')) {
     expect(text, 'CNY 价目应以 ¥/CNY 展现').toMatch(/(¥|￥|CNY)/);
@@ -96,6 +100,10 @@ test('PR-25 [R20] 「刷新价格」逐家列出成功/partial/失败，不给�
   await expect(page.getByRole('button', { name: '刷新价格', exact: true }).first(), '用量/价格区必须有刷新入口（按钮名是合同锁定字面量）').toBeVisible();
   // 主按钮默认只刷当前 provider（1 家）→ 逐家判据走范围行的全量入口。它对任何 provider 都保留
   // （身份判不出来时主按钮是禁用的，这个入口就是唯一出路）。
+  // 〈2026-09-21 r122〉R2 起，身份判得出时范围行连同「刷新全部 N 家」收进「逐家来源与状态」折叠项
+  // （INTERFACE-r122 B4）；只有身份判不出来时它才留在折叠外（B5）。先展开该折叠项再找入口，判据不变。
+  const sourcesBlock = page.locator('details', { has: page.locator('summary', { hasText: /逐家来源与状态/ }) }).first();
+  if (await sourcesBlock.count()) await sourcesBlock.locator('summary').first().click({ timeout: 5_000 }).catch(() => {});
   const allEntry = page.getByRole('button', { name: /刷新全部\s*\d+\s*家/ }).first();
   await expect(allEntry, '范围行必须保留「刷新全部 N 家」入口（逐家结果的唯一全量入口）').toBeVisible();
   const declaredTotal = Number(/刷新全部\s*(\d+)\s*家/.exec((await allEntry.innerText()).trim())?.[1] ?? NaN);
