@@ -278,6 +278,15 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.397</b>(2026-09-21)· 修复 1 条</summary>
+
+**修复**
+
+- **Provider 与模型列表**
+
+</details>
+
+<details>
 <summary><b>v0.2.396</b>(2026-09-21)· 修复 2 条</summary>
 
 **修复**
