@@ -38,6 +38,11 @@ rm(IMPORT_TMP_DIR, { recursive: true, force: true }).catch(() => {});
 // 排除纯点名(`.`/`..`):否则 join(SKILLS_DIR, '..') = ~/.claude,delete/archive 端点会 rm 掉整个配置目录。
 const ID_RE = /^(?!\.+$)[a-zA-Z0-9._-]+$/;
 const GH_HEADERS = { 'User-Agent': 'claude-gui-skills', 'Accept': 'application/vnd.github+json' };
+// r124 上游替身(仅供测试/排障,生产不设):CGUI_GITHUB_API_BASE / CGUI_GITHUB_RAW_BASE 把本文件里
+// 技能仓库相关的 GitHub 请求(仓库信息、树、原始文件、令牌验真)指到别的地址,如本地假 GitHub;
+// 不设即官方地址。只影响技能仓库功能,Gitee 不受影响;每次调用时读,改了环境立即生效。
+const ghApiBase = () => (process.env.CGUI_GITHUB_API_BASE || 'https://api.github.com').replace(/\/+$/, '');
+const ghRawBase = () => (process.env.CGUI_GITHUB_RAW_BASE || 'https://raw.githubusercontent.com').replace(/\/+$/, '');
 const DESC_CAP = 30; // skill 数 ≤ 此值才逐个抓描述(大仓如 Composio 只列名,免打爆网络)
 
 const SOURCES = [
@@ -249,7 +254,7 @@ router.post('/skills/github-token', async (req, res) => {
   if (!TOKEN_RE.test(token)) return res.status(400).json({ error: '令牌格式不对:应为 GitHub 生成的 token(无空格与中文,长度 8-255)' });
   try {
     try {
-      const r = await gfetch('https://api.github.com/rate_limit', { headers: { ...GH_HEADERS, Authorization: `Bearer ${token}` } });
+      const r = await gfetch(`${ghApiBase()}/rate_limit`, { headers: { ...GH_HEADERS, Authorization: `Bearer ${token}` } });
       if (r.status === 401) return res.status(400).json({ error: '令牌无效(GitHub 返回 401):请检查是否复制完整、是否已过期' });
     } catch { /* 网络不通验不了 ≠ 无效,照存(形状仍会校验) */ }
     await saveGithubToken(token);
@@ -272,9 +277,9 @@ const TTL = 60 * 60 * 1000;
 const HOSTS = {
   github: {
     label: 'GitHub', domain: 'github.com',
-    api: (repo) => `https://api.github.com/repos/${repo}`,
-    tree: (repo, branch) => `https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-    raw: (repo, branch, path) => `https://raw.githubusercontent.com/${repo}/${branch}/${path}`,
+    api: (repo) => `${ghApiBase()}/repos/${repo}`,
+    tree: (repo, branch) => `${ghApiBase()}/repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+    raw: (repo, branch, path) => `${ghRawBase()}/${repo}/${branch}/${path}`,
     rateHint: 'GitHub API 限流(匿名 60 次/小时,按出口 IP 计):在导入页填入 GitHub 令牌可提升配额,或稍后重试',
   },
   gitee: {
