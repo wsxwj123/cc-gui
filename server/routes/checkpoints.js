@@ -343,6 +343,8 @@ async function gcSession(sessionId, opts = {}) {
 // 两路 detachShas + repackHonest 撞在一起会互删对方刚打好的 pack。"先占再放":清理类
 // 路径占不到就跳过本次(下次拍快照再收);删除类路径等一小会儿(用户的删除不该因为
 // 后台清扫正好扫到它而失败)。
+// 取舍(2026-09-21 裁定):两个 DELETE 路由**等锁至多 15 秒**而不是跳过 —— 跳过等于让用户的
+// 删除无故失败;POST 后的回收与启动清扫本身占不到锁就跳过本次,它们下次还有机会。
 const gcInFlight = new Set();
 function tryAcquireGc(sessionId) {
   if (gcInFlight.has(sessionId)) return false;
