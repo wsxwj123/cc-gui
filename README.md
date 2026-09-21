@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.399">v0.2.399</a></b>(2026-09-21)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>配置备份文件名独占落盘</summary>
+
+损坏配置的备份改用硬链接独占命名,同名时顺延而不是覆盖,堵住跨进程同一毫秒撞名时静默覆盖上一份备份的口子;不支持硬链接的文件系统回落原逻辑。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.398</b>(2026-09-21)· 修复 3 条</summary>
 
 **修复**
