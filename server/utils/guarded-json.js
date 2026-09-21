@@ -14,7 +14,10 @@
 //    每次都重新读盘判定(不信任上一次读的缓存):写路径的"读-改-写"之间文件可能被修好或改坏。
 //  - corruptWarning(r):给 GET /providers 的 warnings[] 用的结构化警告 { kind:'config-corrupt', file, message, backup }。
 //
-// 备份文件本身含明文密钥(与原文件同级),固定 0600;文案只含路径,绝不含文件内容。
+// 备份文件本身含明文密钥(与原文件同级),以 mode 0600 创建(POSIX 上即仅本人可读写;Windows 上 mode 只映射
+// 只读位,实际读权限由目录 ACL 决定);文案只含路径,绝不含文件内容。
+// r128:开头的 UTF-8 BOM(U+FEFF)在解析前剥掉 —— Windows 记事本 / PowerShell 5 的 Out-File 默认写 BOM,
+// 内容完全合法的文件不能被判"损坏"(更不能按文案引导用户删掉它);写回路径本就不写 BOM。
 // 0 字节 / 只有空白的文件按 missing 处理:没有任何数据可保护,锁住只会把用户挡在外面
 // (provider-models.json / active-provider.json 是非原子 writeFile,进程被杀可能留下空文件)。
 import { readFile, writeFile, readdir, stat, rename, unlink, link } from 'fs/promises';
@@ -59,7 +62,7 @@ export function corruptWarning(r) {
     kind: 'config-corrupt',
     file: r.file,
     backup: r.backup ?? null,
-    message: `${name} 不是合法 JSON（可能写到一半或被外部改坏），其中的配置暂时读不到，写入已锁定以免覆盖。${backupClause(r.backup)}；修复该文件或删除它（程序会重建）后重试。`,
+    message: `${name} 不是合法 JSON（可能写到一半或被外部改坏，也可能开头有 BOM 或不可见字符），其中的配置暂时读不到，写入已锁定以免覆盖。${backupClause(r.backup)}；用能显示 BOM 的编辑器检查并修复该文件，或删除它（程序会重建）后重试。`,
   };
 }
 
@@ -70,7 +73,7 @@ export function guardError(r) {
   if (r.corrupt) {
     return new ConfigGuardError({
       code: 'CONFIG_CORRUPT', file: r.file, backup: r.backup,
-      message: `${name} 不是合法 JSON（可能写到一半或被外部改坏），为避免覆盖原有内容已拒绝写入。${backupClause(r.backup)}；修复该文件或删除它（程序会重建）后重试。`,
+      message: `${name} 不是合法 JSON（可能写到一半或被外部改坏，也可能开头有 BOM 或不可见字符），为避免覆盖原有内容已拒绝写入。${backupClause(r.backup)}；用能显示 BOM 的编辑器检查并修复该文件，或删除它（程序会重建）后重试。`,
     });
   }
   if (r.unreadable) {
@@ -115,7 +118,9 @@ async function createBackup(file, raw) {
         await link(tmp, candidate);
       } catch (e) {
         if (e && e.code === 'EEXIST') { await unlink(tmp).catch(() => {}); continue; }
-        if (e && ['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV'].includes(e.code)) { await rename(tmp, candidate); return candidate; }
+        // EISDIR / EINVAL:libuv 在 Windows 上把 ERROR_INVALID_FUNCTION / ERROR_INVALID_PARAMETER(FAT32、
+        // 部分 SMB、云同步过滤驱动对"不支持硬链接"的回答)映射成这两个码 —— 同样回落 rename。
+        if (e && ['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV', 'EISDIR', 'EINVAL'].includes(e.code)) { await rename(tmp, candidate); return candidate; }
         throw e;
       }
       await unlink(tmp).catch(() => {});
@@ -154,7 +159,7 @@ export async function readJsonGuarded(file) {
     }
     return { file, value: undefined, missing: false, corrupt: false, unreadable: true, backup: null, error: err?.code || err?.message || String(err) };
   }
-  const text = raw.toString('utf-8');
+  const text = raw.toString('utf-8').replace(/^﻿/, '');   // 剥 UTF-8 BOM(见文件头 r128 说明)
   if (!text.trim()) {
     corruptState.delete(file);
     return { file, value: undefined, missing: true, corrupt: false, unreadable: false, backup: null, error: null };

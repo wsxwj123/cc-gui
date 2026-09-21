@@ -43,7 +43,7 @@ export function providerWarningText(w) {
     const backup = w.backup
       ? `原文件未改动，备份在 ${w.backup}。`
       : '原文件未改动（自动备份失败，请先手动复制一份）。';
-    return `${fileNameOf(w.file)} 不是合法 JSON（可能写到一半或被外部改坏），其中的配置暂时读不到，写入已锁定以免覆盖。${backup}修复该文件或删除它（程序会重建）后重新打开本列表即可恢复。`;
+    return `${fileNameOf(w.file)} 不是合法 JSON（可能写到一半或被外部改坏，也可能开头有 BOM 或不可见字符），其中的配置暂时读不到，写入已锁定以免覆盖。${backup}用能显示 BOM 的编辑器检查并修复该文件，或删除它（程序会重建）后重新打开本列表即可恢复。`;
   }
   if (w.kind === 'ccswitch-error') return w.message || 'cc-switch 数据库读取出错，导入的 provider 暂时读不到。';
   return w.message || '';

@@ -204,6 +204,7 @@ async function repackHonest(gitDir) {
         p.stderr.on('data', (b) => { se += b; });
         p.on('error', reject);
         p.on('close', (code) => (code === 0 ? resolve(so) : reject(new Error(se || `pack-objects ${code}`))));
+        p.stdin.on('error', () => {});   // git 早退时 stdin 写入 EPIPE:结果以 close 为准,别走 uncaughtException
         p.stdin.end(revs);
       });
       newPack = String(out).trim().split('\n').pop().trim();
@@ -269,6 +270,7 @@ async function shaBytes(gitDir, sha) {
       });
       c.on('error', reject);
       c.on('close', () => resolve());
+      c.stdin.on('error', () => {});   // 同 pack-objects:EPIPE 不外泄
       c.stdin.end(names.join('\n') + '\n');
     });
     return total;

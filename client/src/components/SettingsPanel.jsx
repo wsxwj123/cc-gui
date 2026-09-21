@@ -662,7 +662,7 @@ function CheckpointsTab() {
   return (
     <div className="space-y-3">
       <div className="text-[11px] text-ink-faint font-body leading-relaxed bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
-        <b>这是什么：</b>每次发消息前，系统会把当前工作目录快照一份存到本机（<code className="font-mono">~/.claude/gui/checkpoints</code>），用于「回到此处」回滚文件。
+        <b>这是什么：</b>每次发消息前，系统会把当前工作目录快照一份存到本机的回滚点目录（macOS / Linux 在 <code className="font-mono">~/.claude/gui/checkpoints</code>，Windows 在 <code className="font-mono">%USERPROFILE%\.claude\gui\checkpoints</code>），用于「回到此处」回滚文件。
         <br /><b>为什么要清理：</b>快照是整目录副本，工作目录很大时（比如几十 G 的数据目录且没有 <code className="font-mono">.gitignore</code>）会占掉大量磁盘。系统已自动保留每个会话最近 20 条 / 30 天，目录过大时不再创建新快照。
         <br /><b>删了有什么影响：</b>只是没法再回到那些时刻，<b>不影响当前对话和已有文件</b>。
       </div>
