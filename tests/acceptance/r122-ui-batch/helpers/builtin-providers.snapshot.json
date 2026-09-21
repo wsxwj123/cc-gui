@@ -1,0 +1,222 @@
+{
+  "takenAt": "2026-09-21",
+  "version": "0.2.394",
+  "note": "修前 BUILTIN_PROVIDERS 的 id/baseURL/type 快照(INTERFACE D2:既有预设一个不变)",
+  "providers": [
+    {
+      "id": "deepseek-official",
+      "baseURL": "https://api.deepseek.com",
+      "type": "openai"
+    },
+    {
+      "id": "openai",
+      "baseURL": "https://api.openai.com/v1",
+      "type": "openai"
+    },
+    {
+      "id": "gemini",
+      "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "type": "openai"
+    },
+    {
+      "id": "moonshot",
+      "baseURL": "https://api.moonshot.cn/v1",
+      "type": "openai"
+    },
+    {
+      "id": "xai-grok",
+      "baseURL": "https://api.x.ai/v1",
+      "type": "openai"
+    },
+    {
+      "id": "zhipu-glm",
+      "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+      "type": "openai"
+    },
+    {
+      "id": "minimax",
+      "baseURL": "https://api.minimaxi.com/v1",
+      "type": "openai"
+    },
+    {
+      "id": "qwen-dashscope",
+      "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "type": "openai"
+    },
+    {
+      "id": "doubao-volc",
+      "baseURL": "https://ark.cn-beijing.volces.com/api/v3",
+      "type": "openai"
+    },
+    {
+      "id": "ernie-qianfan",
+      "baseURL": "https://qianfan.baidubce.com/v2",
+      "type": "openai"
+    },
+    {
+      "id": "hunyuan",
+      "baseURL": "https://api.hunyuan.cloud.tencent.com/v1",
+      "type": "openai"
+    },
+    {
+      "id": "stepfun",
+      "baseURL": "https://api.stepfun.com/v1",
+      "type": "openai"
+    },
+    {
+      "id": "mimo-tokenplan",
+      "baseURL": "https://token-plan-cn.xiaomimimo.com/v1",
+      "type": "openai"
+    },
+    {
+      "id": "kimi-code",
+      "baseURL": "https://api.kimi.com/coding/v1",
+      "type": "openai"
+    },
+    {
+      "id": "siliconflow",
+      "baseURL": "https://api.siliconflow.cn/v1",
+      "type": "openai"
+    },
+    {
+      "id": "groq",
+      "baseURL": "https://api.groq.com/openai/v1",
+      "type": "openai"
+    },
+    {
+      "id": "mistral",
+      "baseURL": "https://api.mistral.ai/v1",
+      "type": "openai"
+    },
+    {
+      "id": "perplexity",
+      "baseURL": "https://api.perplexity.ai",
+      "type": "openai"
+    },
+    {
+      "id": "together",
+      "baseURL": "https://api.together.ai/v1",
+      "type": "openai"
+    },
+    {
+      "id": "fireworks",
+      "baseURL": "https://api.fireworks.ai/inference/v1",
+      "type": "openai"
+    },
+    {
+      "id": "cerebras",
+      "baseURL": "https://api.cerebras.ai/v1",
+      "type": "openai"
+    },
+    {
+      "id": "hyperbolic",
+      "baseURL": "https://api.hyperbolic.xyz/v1",
+      "type": "openai"
+    },
+    {
+      "id": "zai-intl",
+      "baseURL": "https://api.z.ai/api/paas/v4",
+      "type": "openai"
+    },
+    {
+      "id": "zai-coding",
+      "baseURL": "https://api.z.ai/api/coding/paas/v4",
+      "type": "openai"
+    },
+    {
+      "id": "glm-coding",
+      "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "type": "openai"
+    },
+    {
+      "id": "poe",
+      "baseURL": "https://api.poe.com/v1",
+      "type": "openai"
+    },
+    {
+      "id": "302ai",
+      "baseURL": "https://api.302.ai/v1",
+      "type": "openai"
+    },
+    {
+      "id": "aihubmix",
+      "baseURL": "https://aihubmix.com/v1",
+      "type": "openai"
+    },
+    {
+      "id": "openrouter",
+      "baseURL": "https://openrouter.ai/api/v1",
+      "type": "openai"
+    },
+    {
+      "id": "anthropic-official",
+      "baseURL": "https://api.anthropic.com",
+      "type": "anthropic"
+    },
+    {
+      "id": "deepseek-anthropic",
+      "baseURL": "https://api.deepseek.com/anthropic",
+      "type": "anthropic"
+    },
+    {
+      "id": "openrouter-anthropic",
+      "baseURL": "https://openrouter.ai/api/v1",
+      "type": "anthropic"
+    },
+    {
+      "id": "glm-anthropic",
+      "baseURL": "https://open.bigmodel.cn/api/anthropic",
+      "type": "anthropic"
+    },
+    {
+      "id": "mimo-tokenplan-anthropic",
+      "baseURL": "https://token-plan-cn.xiaomimimo.com/anthropic",
+      "type": "anthropic"
+    },
+    {
+      "id": "kimi-code-anthropic",
+      "baseURL": "https://api.kimi.com/coding",
+      "type": "anthropic"
+    },
+    {
+      "id": "stepfun-anthropic",
+      "baseURL": "https://api.stepfun.com",
+      "type": "anthropic"
+    },
+    {
+      "id": "fireworks-anthropic",
+      "baseURL": "https://api.fireworks.ai/inference",
+      "type": "anthropic"
+    },
+    {
+      "id": "minimax-anthropic",
+      "baseURL": "https://api.minimaxi.com/anthropic",
+      "type": "anthropic"
+    },
+    {
+      "id": "zai-coding-anthropic",
+      "baseURL": "https://api.z.ai/api/anthropic",
+      "type": "anthropic"
+    },
+    {
+      "id": "qwen-dashscope-anthropic",
+      "baseURL": "https://dashscope.aliyuncs.com/apps/anthropic",
+      "type": "anthropic"
+    },
+    {
+      "id": "qwen-coding-anthropic",
+      "baseURL": "https://coding.dashscope.aliyuncs.com/apps/anthropic",
+      "type": "anthropic"
+    },
+    {
+      "id": "302ai-anthropic",
+      "baseURL": "https://api.302.ai",
+      "type": "anthropic"
+    },
+    {
+      "id": "aihubmix-anthropic",
+      "baseURL": "https://aihubmix.com",
+      "type": "anthropic"
+    }
+  ]
+}
