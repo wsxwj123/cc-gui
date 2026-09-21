@@ -206,7 +206,7 @@ export const imageModelInput = (page) => imagePanel(page).getByPlaceholder('gpt-
 // ---------------------------------------------------------------------------
 export const legacySwitchList = (page) => page.locator('div')
   .filter({ has: page.getByRole('button', { name: /管理 Provider/ }) })
-  .filter({ hasText: /PROVIDER · 当前/ }).last();
+  .filter({ hasText: /provider\s*[·•・]\s*当前/i }).last();   // 头部文字屏显为大写 PROVIDER(CSS),DOM 里大小写不定 → 忽略大小写
 export const switchListAny = (page) => switchList(page).or(legacySwitchList(page));
 export const switchRowsAny = (page) => switchRows(page).or(legacySwitchList(page).locator('button:has(div[title])'));
 export async function openProviderList(page) {
