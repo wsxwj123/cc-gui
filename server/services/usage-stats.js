@@ -229,9 +229,13 @@ function scheduleCooldownRevalidate(wait) {
 }
 
 async function recompute(jsonlFiles, sig) {
-  const byModel = {};
-  const byProject = {};
-  const byDay = {};
+  // 键是外部字符串(model 来自第三方响应、项目名来自用户目录、day 来自时间戳):普通对象上
+  // bucket['__proto__'] / ['constructor'] 会命中原型链(真值 → 跳过初始化 → += 写到 Object.prototype /
+  // Object 上,整个进程的对象都多出 NaN 属性直到重启)。null 原型对象没有这条链,'__proto__' 只是普通键;
+  // 下面只用 Object.keys / entries 与 bucket[key],不依赖原型方法(2026-09-29 安全审计重要 1)。
+  const byModel = Object.create(null);
+  const byProject = Object.create(null);
+  const byDay = Object.create(null);
   let totalInput = 0;
   let totalOutput = 0;
   let totalCacheRead = 0;
