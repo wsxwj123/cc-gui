@@ -119,9 +119,17 @@ test('C3h 卡片值元素带 truncate 且 title = 完整显示文本(messages �
   expect(v.title).toBe('1,234');
   expect(v.truncate).toBe(true);
 });
-test('C3i peak-hour 为 0 时按契约"值为 0 → —"显示「—」', async ({ page }) => {
+test('C3i peak-hour 是"0 → —"的唯一例外:peakHour=0(凌晨 0 时)显示「0 时」且 data-value="0"(INTERFACE 2026-09-28 修订)', async ({ page }) => {
   await bootWith(page, payload({ overview: { peakHour: 0 }, byDay: [dayEntry(dayAgo(1), 500)] }));
-  expect((await cardValue(page, 'peak-hour')).text).toBe('—');
+  const v = await cardValue(page, 'peak-hour');
+  expect(v.text).toBe('0 时');
+  expect(v.dataValue).toBe('0');
+});
+test('C3i2 peak-hour 为 null → 「—」且 data-value 空串(C3d 也覆盖,这里单独定位)', async ({ page }) => {
+  await bootWith(page, payload({ overview: { peakHour: null }, byDay: [dayEntry(dayAgo(1), 500)] }));
+  const v = await cardValue(page, 'peak-hour');
+  expect(v.text).toBe('—');
+  expect(v.dataValue).toBe('');
 });
 
 // ───────────── 热力图 ─────────────
