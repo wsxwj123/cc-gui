@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# r130 「首页用量总览 + 日历热力图」验收,一条命令:
+#   tests/acceptance/r130-home-usage/run.sh                 # 全量(A 接口 / B 缓存 / C 界面 / D 不变项)
+#   tests/acceptance/r130-home-usage/run.sh -g 'A1'         # 额外参数原样转给 playwright
+#   tests/acceptance/r130-home-usage/run.sh --project=api   # 只跑不起浏览器的那部分
+# 自己做:建界面组夹具(隔离 HOME + 一个项目两条会话)→ 起隔离实例(TZ=Asia/Shanghai,PATH 上挂 r122 的假 claude)
+#        → 起 dev server(源码直出,/api、/ws 代理到隔离实例)→ 跑用例 → 按记录的 pid 收掉这两类进程和 A/B 组用例自起的实例。
+# 端口只在 6700–6999 里挑空闲的,硬拒 6677 / 6689 / 6710。不读写真实的 ~/.claude、~/.claude-gui。
+set -euo pipefail
+
+SUITE="$(cd "$(dirname "$0")" && pwd)"
+WORKTREE="$(cd "$SUITE/../../.." && pwd)"
+ROOT="$SUITE/.artifacts/runs/$(date +%Y%m%d-%H%M%S)-$$"
+LOGS="$ROOT/logs"
+mkdir -p "$LOGS"
+export R130_DATA_ROOT="$ROOT"
+export TZ=Asia/Shanghai
+
+pick_port() {
+  local exclude=" $* " port
+  for port in $(seq 6700 6999); do
+    case "$port" in 6677|6689|6710) continue ;; esac
+    case "$exclude" in *" $port "*) continue ;; esac
+    if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then echo "$port"; return 0; fi
+  done
+  echo "6700-6999 没有空闲端口" >&2; return 1
+}
+API_PORT="$(pick_port)"
+UI_PORT="$(pick_port "$API_PORT")"
+
+node "$SUITE/helpers/ui-fixtures.mjs"
+HOME_DIR="$ROOT/ui/home"
+CTL="$HOME_DIR/fake-claude"
+
+cd "$ROOT"
+env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN \
+  -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+  HOME="$HOME_DIR" USERPROFILE="$HOME_DIR" PORT="$API_PORT" TZ=Asia/Shanghai \
+  PATH="$SUITE/.artifacts/fakebin:$PATH" CGUI_FAKE_CLAUDE_DIR="$CTL" CGUI_DISABLE_FILE_WATCHER=1 \
+  nohup node "$WORKTREE/server/index.js" > "$LOGS/server.log" 2>&1 &
+API_PID=$!
+VITE_WRAPPER_PID=""
+VITE_PID=""
+cleanup() {
+  [ -n "$VITE_PID" ] && kill "$VITE_PID" 2>/dev/null || true
+  [ -n "$VITE_WRAPPER_PID" ] && kill "$VITE_WRAPPER_PID" 2>/dev/null || true
+  kill "$API_PID" 2>/dev/null || true
+  # A/B/D 组用例自己起的隔离实例:按它们落下的 pid 文件收(只杀命令行确实是本 worktree server/index.js 的)
+  for f in "$ROOT"/*/*/instance-*.pid; do
+    [ -e "$f" ] || continue
+    pid="$(cat "$f" 2>/dev/null || true)"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ps -p "$pid" -o command= 2>/dev/null | grep -q "$WORKTREE/server/index.js"; then kill "$pid" 2>/dev/null || true; fi
+  done
+  for f in "$CTL"/*.pid; do
+    [ -e "$f" ] || continue
+    pid="$(cat "$f" 2>/dev/null || true)"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if ps -p "$pid" -o command= 2>/dev/null | grep -q "r122-ui-batch/helpers/fake-claude.mjs"; then kill -9 "$pid" 2>/dev/null || true; fi
+  done
+}
+trap cleanup EXIT
+
+for _ in $(seq 1 60); do
+  curl -sf -m 2 "http://127.0.0.1:$API_PORT/api/health" >/dev/null && break
+  perl -e 'select(undef,undef,undef,0.5)'
+done
+kill -0 "$API_PID" 2>/dev/null || { echo "实例进程已退出:看 $LOGS/server.log" >&2; exit 1; }
+lsof -nP -iTCP:"$API_PORT" -sTCP:LISTEN -t 2>/dev/null | grep -qx "$API_PID" \
+  || { echo "端口 $API_PORT 上的监听者不是本实例(pid $API_PID)" >&2; exit 1; }
+# 先让界面组共用的实例把冷扫做完并落盘(之后 sig 不变 → 不会在用例跑到一半时广播 usage-updated,C 组"不轮询"计数才干净)
+for _ in $(seq 1 40); do
+  if curl -sf -m 30 "http://127.0.0.1:$API_PORT/api/usage" | grep -q '"stale":false'; then break; fi
+  perl -e 'select(undef,undef,undef,0.5)'
+done
+echo "[r130] 隔离实例就绪:http://127.0.0.1:$API_PORT(pid $API_PID,HOME=$HOME_DIR)"
+
+( cd "$WORKTREE/client" && R130_API_PORT="$API_PORT" R130_UI_PORT="$UI_PORT" \
+    nohup node "$WORKTREE/client/node_modules/vite/bin/vite.js" --config "$SUITE/vite.dev.config.mjs" \
+    > "$LOGS/vite.log" 2>&1 & echo $! > "$LOGS/vite.pid" )
+VITE_WRAPPER_PID="$(cat "$LOGS/vite.pid")"
+for _ in $(seq 1 80); do
+  curl -sf -m 2 "http://127.0.0.1:$UI_PORT/" >/dev/null && break
+  perl -e 'select(undef,undef,undef,0.5)'
+done
+LISTENER="$(lsof -nP -iTCP:"$UI_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
+if [ -n "$LISTENER" ] && ps -p "$LISTENER" -o command= | grep -q "r130-home-usage"; then
+  VITE_PID="$LISTENER"
+else
+  echo "dev server 没起来或端口 $UI_PORT 上不是本套件的进程:看 $LOGS/vite.log" >&2; exit 1
+fi
+echo "[r130] dev server 就绪:http://127.0.0.1:$UI_PORT(pid $VITE_PID;/api、/ws 代理到 $API_PORT)"
+
+cd "$WORKTREE"
+set +e
+R130_UI_BASE="http://127.0.0.1:$UI_PORT" R130_API_BASE="http://127.0.0.1:$API_PORT" R130_UI_HOME="$HOME_DIR" \
+  npx playwright test -c "$SUITE/playwright.config.mjs" "$@"
+CODE=$?
+set -e
+echo "[r130] playwright 退出码 $CODE(实例 pid $API_PID / dev server pid $VITE_PID / 产物 $ROOT)"
+exit $CODE
