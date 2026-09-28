@@ -66,3 +66,46 @@ test('探路 用量面板里与"时段/北京时间/UTC"有关的文案与 title
   });
   console.log('[probe:usage-panel]', JSON.stringify(facts2));
 });
+
+// ── C13 探路(2026-09-28 补):单屏新布局下,输入「/」「@」后新挂载的浮层子树根是什么、祖先链里谁在裁剪、裁掉多少 ──
+const snapshotAll = (page) => page.evaluate(() => { window.__r130Before = new Set(document.querySelectorAll('*')); });
+const describe = (el) => {
+  const cs = getComputedStyle(el); const r = el.getBoundingClientRect();
+  return { tag: el.tagName.toLowerCase(), testid: el.getAttribute('data-testid'), cgui: el.getAttribute('data-cgui'), role: el.getAttribute('role'), cls: (el.className && typeof el.className === 'string' ? el.className : '').slice(0, 140),
+    pos: cs.position, ox: cs.overflowX, oy: cs.overflowY, z: cs.zIndex, radius: cs.borderTopLeftRadius, rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)], hasInput: Boolean(el.querySelector('[data-testid="home-input"]')) };
+};
+const newSubtrees = (page) => page.evaluate((describeSrc) => {
+  const describe = new Function(`return (${describeSrc})`)();
+  const before = window.__r130Before; const all = [...document.querySelectorAll('*')];
+  const added = all.filter((e) => !before.has(e)); const roots = added.filter((e) => !added.includes(e.parentElement));
+  const visible = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+  return roots.filter(visible).map((root) => {
+    const chain = []; let p = root.parentElement; while (p && p !== document.documentElement) { chain.push(describe(p)); p = p.parentElement; }
+    return { root: describe(root), text: (root.innerText || '').replace(/\s+/g, ' ').slice(0, 160), chain, vp: [innerWidth, innerHeight] };
+  });
+}, describe.toString());
+for (const [w, h] of [[1440, 900], [375, 812]]) {
+  test(`探路 C13 ${w}×${h}:输入「/」「@」后的浮层根与祖先链`, async ({ page }) => {
+    const { stubUsage, payload, dayEntry, dayAgo, measureBox, describeMeasure } = await import('./helpers/ui.mjs');
+    await page.setViewportSize({ width: w, height: h });
+    await stubUsage(page, payload({ byDay: [1, 2, 3, 5, 8, 13, 21, 34].map((n, i) => dayEntry(dayAgo(n), (i + 1) * 1000 + i)) }));
+    await gotoHome(page);
+    await page.waitForTimeout(1500);
+    // 判据健全性:对两个肯定完整可见的元素(八卡容器、输入框)跑同一套量法,三项都该"无超出 / 四角命中"——否则是量法自己有问题
+    for (const id of ['home-usage-cards', 'home-input']) {
+      const eh = await page.getByTestId(id).elementHandle();
+      if (eh) console.log(`[probe:c13:sanity:${w}x${h}:${id}]`, describeMeasure(await measureBox(eh)));
+    }
+    for (const ch of ['/', '@']) {
+      await homeInput(page).click();
+      await homeInput(page).fill('');
+      await page.waitForTimeout(300);
+      await snapshotAll(page);
+      await page.keyboard.type(ch);
+      await page.waitForTimeout(1000);
+      console.log(`[probe:c13:${w}x${h}:${ch}]`, JSON.stringify(await newSubtrees(page)));
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(300);
+    }
+  });
+}

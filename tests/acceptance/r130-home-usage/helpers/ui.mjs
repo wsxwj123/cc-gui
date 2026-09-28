@@ -152,3 +152,54 @@ export async function openUsagePanel(page) {
 }
 /** 本地日期加减 n 天。 */
 export const dayShift = (day, n) => { const d = new Date(`${day}T12:00:00+08:00`); d.setDate(d.getDate() + n); return localDayOf(d); };
+
+// ── C13:输入「/」「@」后弹出的浮层怎么找、"完整可见"怎么量(INTERFACE §D 2026-09-28 补) ──
+// 浮层没有 testid:输入前记下"当时可见的元素",输入后取"新变得可见的最外层元素"(position absolute/fixed、不含 home-input)当浮层容器。
+// 量法全部用 getBoundingClientRect 的视口坐标(页面带界面缩放 zoom 时 clientWidth/offsetTop 不在同一坐标系,不能混用)。
+const PROBE_SRC = `(() => {
+  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+  const desc = (e) => e.tagName.toLowerCase() + (e.getAttribute('data-testid') ? '[data-testid=' + e.getAttribute('data-testid') + ']' : '') + (e.getAttribute('data-cgui') ? '[data-cgui=' + e.getAttribute('data-cgui') + ']' : '') + (typeof e.className === 'string' && e.className ? '.' + e.className.trim().split(/\\s+/).slice(0, 6).join('.') : '');
+  return { vis, desc };
+})()`;
+export const snapshotVisible = (page) => page.evaluate((src) => { const { vis } = eval(src); window.__r130VisBefore = new Set([...document.querySelectorAll('*')].filter(vis)); }, PROBE_SRC);
+/** 输入后新变得可见的最外层浮层;hint 给了就还要求 innerText 含它;多个候选取面积最大的;没有 → JSHandle(null)。 */
+export const findPopup = (page, hint) => page.evaluateHandle(([src, h]) => {
+  const { vis } = eval(src);
+  const before = window.__r130VisBefore || new Set();
+  const changed = new Set([...document.querySelectorAll('*')].filter((e) => vis(e) && !before.has(e)));
+  const roots = [...changed].filter((e) => !changed.has(e.parentElement));
+  const cands = roots.filter((e) => ['absolute', 'fixed'].includes(getComputedStyle(e).position) && !e.querySelector('[data-testid="home-input"]') && (!h || (e.innerText || '').includes(h)));
+  cands.sort((a, b) => { const ra = a.getBoundingClientRect(); const rb = b.getBoundingClientRect(); return rb.width * rb.height - ra.width * ra.height; });
+  return cands[0] || null;
+}, [PROBE_SRC, hint || '']);
+/**
+ * 量"完整可见"三项判据(INTERFACE §D):① 矩形 ⊆ 视口;② 矩形 ⊆ 最近有 overflow 裁剪的祖先(html/body 除外:它们的 overflow 归视口,由 ① 覆盖)
+ * 的可视区(border box 去掉边框;边框按 rect/offsetWidth 的比例换算,兼容 zoom);③ 四角 elementFromPoint 命中自身或后代(四角按圆角半径向内收一点)。
+ * 返回纯数据:{ vp, self, text, rect, overViewport, clipInfo|null, corners[4] };over* 的四个值 = 超出的像素数(0 = 没超)。
+ */
+export const measureBox = (handle) => handle.evaluate((root, src) => {
+  const { desc } = eval(src);
+  const vp = { w: innerWidth, h: innerHeight };
+  const r = root.getBoundingClientRect();
+  const rect = { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+  const over = (box) => ({ left: Math.max(0, box.left - rect.left), top: Math.max(0, box.top - rect.top), right: Math.max(0, rect.right - box.right), bottom: Math.max(0, rect.bottom - box.bottom) });
+  const overViewport = over({ left: 0, top: 0, right: vp.w, bottom: vp.h });
+  let clip = null; let p = root.parentElement;
+  while (p && p !== document.body && p !== document.documentElement) { const s = getComputedStyle(p); if (s.overflowX !== 'visible' || s.overflowY !== 'visible') { clip = p; break; } p = p.parentElement; }
+  let clipInfo = null;
+  if (clip) {
+    const c = clip.getBoundingClientRect(); const s = getComputedStyle(clip); const k = clip.offsetWidth ? c.width / clip.offsetWidth : 1; const bw = (v) => (parseFloat(v) || 0) * k;
+    const visible = { left: c.left + bw(s.borderLeftWidth), top: c.top + bw(s.borderTopWidth), right: c.right - bw(s.borderRightWidth), bottom: c.bottom - bw(s.borderBottomWidth) };
+    clipInfo = { desc: desc(clip), overflow: `${s.overflowX}/${s.overflowY}`, visible, over: over(visible) };
+  }
+  const cs = getComputedStyle(root); const inset = (v) => Math.ceil((parseFloat(v) || 0) * 0.3) + 1;
+  const pts = [['左上', rect.left + inset(cs.borderTopLeftRadius), rect.top + inset(cs.borderTopLeftRadius)], ['右上', rect.right - inset(cs.borderTopRightRadius), rect.top + inset(cs.borderTopRightRadius)],
+    ['左下', rect.left + inset(cs.borderBottomLeftRadius), rect.bottom - inset(cs.borderBottomLeftRadius)], ['右下', rect.right - inset(cs.borderBottomRightRadius), rect.bottom - inset(cs.borderBottomRightRadius)]];
+  const corners = pts.map(([name, x, y]) => { const inViewport = x >= 0 && y >= 0 && x < vp.w && y < vp.h; const hit = inViewport ? document.elementFromPoint(x, y) : null; return { name, x: Math.round(x), y: Math.round(y), inViewport, ok: Boolean(hit && (hit === root || root.contains(hit))), hit: hit ? desc(hit) : null }; });
+  const rnd = (o) => Object.fromEntries(Object.entries(o).map(([a, v]) => [a, Math.round(v * 10) / 10]));
+  return { vp, self: desc(root), text: (root.innerText || '').replace(/\s+/g, ' ').slice(0, 60), rect: rnd(rect), overViewport: rnd(overViewport), clipInfo: clipInfo && { ...clipInfo, visible: rnd(clipInfo.visible), over: rnd(clipInfo.over) }, corners };
+}, PROBE_SRC);
+export const fmtBox = (b) => `[x ${Math.round(b.left)}–${Math.round(b.right)}, y ${Math.round(b.top)}–${Math.round(b.bottom)}]`;
+export const fmtOver = (o) => Object.entries(o).filter(([, v]) => v > 0.5).map(([k, v]) => `${{ left: '左', top: '上', right: '右', bottom: '下' }[k]}超出 ${Math.round(v)}px`).join('、') || '无超出';
+/** 一行人话:矩形、视口超出、裁剪祖先超出、四角命中情况。 */
+export const describeMeasure = (m) => `${m.self} 矩形 ${fmtBox(m.rect)}(${m.rect.width}×${m.rect.height}),视口 ${m.vp.w}×${m.vp.h} → ${fmtOver(m.overViewport)};${m.clipInfo ? `最近裁剪祖先 ${m.clipInfo.desc}(overflow ${m.clipInfo.overflow})可视区 ${fmtBox(m.clipInfo.visible)} → ${fmtOver(m.clipInfo.over)}` : '祖先链(html/body 除外)没有 overflow 裁剪'};四角 ${m.corners.map((c) => `${c.name}(${c.x},${c.y})${c.ok ? '命中' : c.inViewport ? `落到 ${c.hit}` : '在视口外'}`).join(' ')}`;

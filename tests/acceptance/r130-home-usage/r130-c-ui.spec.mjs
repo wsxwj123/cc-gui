@@ -2,7 +2,8 @@
 // 只有 C12 用隔离实例的真数据。依据只有 BRIEF/INTERFACE-r130;没看实现代码。「修前」= 首页没有 home-usage → 本组全红。
 import { test, expect } from '@playwright/test';
 import { gotoHome, stubUsage, payload, dayEntry, sum4, fmtTokens, fmtInt, levelFn, CARD_KEYS, TEXT, home, greeting, homeInput, usage, cards, card, cardValue,
-  heatmap, cells, futureCells, cellOf, tip, state, cellGeometry, setPaneCount, readUiExpected, today, dayAgo, mondayIndex, dayShift, UI_BASE } from './helpers/ui.mjs';
+  heatmap, cells, futureCells, cellOf, tip, state, cellGeometry, setPaneCount, readUiExpected, today, dayAgo, mondayIndex, dayShift, UI_BASE,
+  snapshotVisible, findPopup, measureBox, fmtBox, fmtOver, describeMeasure } from './helpers/ui.mjs';
 
 /** 典型载荷:最近 7 周内 8 个活跃天(tokens 两两不同),另有一天 tokens=0 但有消息。 */
 const ACTIVE = [1, 2, 3, 5, 8, 13, 21, 34].map((n, i) => [dayAgo(n), (i + 1) * 1000 + i]);
@@ -412,3 +413,48 @@ test('C12 真数据:sessions=2、messages=4、tokens=11.0K、active-days=1、cur
   await expect(cellOf(page, e.day)).toHaveAttribute('data-tokens', String(e.tokens));
   await expect(cellOf(page, e.day)).toHaveAttribute('data-today', '1');
 });
+
+// ───────────── C13 输入「/」「@」弹出的浮层必须完整可见(INTERFACE §D 2026-09-28 补的盲区) ─────────────
+// 浮层定位不靠 testid(INTERFACE 没给):在 home-input 里输入前先记下"当时可见的元素",输入后取"新变得可见的最外层元素"
+// (position 为 absolute/fixed、不包含 home-input)当作浮层容器;「/」再要求它含「SLASH 命令」(与 D5c 一致),「@」INTERFACE 没给文案,不限。
+// 三项判据各自 soft 断言,一次跑能同时看到三项结果与超出的像素数:
+//   ① 浮层矩形 ⊆ 视口;② 浮层矩形 ⊆ 最近有 overflow 裁剪的祖先(html/body 除外:它们的 overflow 归视口,由 ① 覆盖)的可视矩形;
+//   ③ 四角 elementFromPoint 命中浮层自身或其后代(四角按圆角半径向内收一点,免得取到圆角外的像素)。弹出方向不限。
+/** 打开浮层(照 D5c:点 home-input 输入字符),等它出现并等动画走完,返回测量结果。 */
+async function openPopupAndMeasure(page, ch, hint) {
+  await homeInput(page).click();
+  await homeInput(page).fill('');
+  await page.waitForTimeout(300);
+  await snapshotVisible(page);
+  await page.keyboard.type(ch);
+  if (hint) await expect(page.getByText(hint).first(), `输入「${ch}」后应出现「${hint}」`).toBeVisible({ timeout: 5000 });
+  let handle = null;
+  await expect.poll(async () => { handle = await findPopup(page, hint); return await handle.evaluate((el) => Boolean(el)); }, { timeout: 5000, message: `输入「${ch}」后应有一个新出现的可见浮层(absolute/fixed、不含 home-input${hint ? `、含「${hint}」` : ''})` }).toBe(true);
+  await handle.evaluate(async (el) => { try { await Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)); } catch { /* 不支持就靠下面的等待 */ } });
+  await page.waitForTimeout(300);
+  return measureBox(handle);
+}
+function assertPopupFullyVisible(m, label) {
+  console.log(`[C13] ${label}:浮层 ${describeMeasure(m)}`);
+  expect.soft(Math.max(...Object.values(m.overViewport)), `① ${label}:浮层矩形 ${fmtBox(m.rect)} 应完全落在 ${m.vp.w}×${m.vp.h} 视口内,实际${fmtOver(m.overViewport)}`).toBeLessThanOrEqual(0.5);
+  if (m.clipInfo) expect.soft(Math.max(...Object.values(m.clipInfo.over)), `② ${label}:浮层矩形 ${fmtBox(m.rect)} 应落在最近裁剪祖先 ${m.clipInfo.desc}(overflow ${m.clipInfo.overflow})的可视区 ${fmtBox(m.clipInfo.visible)} 内,实际${fmtOver(m.clipInfo.over)}`).toBeLessThanOrEqual(0.5);
+  const misses = m.corners.filter((c) => !c.ok).map((c) => `${c.name}(${c.x},${c.y})${c.inViewport ? ` 命中的是 ${c.hit}` : ' 在视口外'}`);
+  expect.soft(misses, `③ ${label}:浮层四角 elementFromPoint 都应命中浮层自身或后代,未命中:${misses.join(';')}`).toEqual([]);
+}
+for (const [w, h] of [[1440, 900], [375, 812]]) {
+  test(`C13a ${w}×${h} 单屏首页输入「/」弹出的斜杠命令菜单完整可见:矩形 ⊆ 视口、⊆ 最近裁剪祖先可视区、四角 elementFromPoint 命中菜单`, async ({ page }) => {
+    await page.setViewportSize({ width: w, height: h });
+    await bootWith(page, typical());
+    await expect(cards(page), '前提:首页处于正常态(八卡可见)').toBeVisible();
+    const m = await openPopupAndMeasure(page, '/', 'SLASH 命令');
+    assertPopupFullyVisible(m, `${w}×${h} 斜杠命令菜单`);
+  });
+  test(`C13b ${w}×${h} 单屏首页输入「@」弹出的引用面板完整可见:矩形 ⊆ 视口、⊆ 最近裁剪祖先可视区、四角 elementFromPoint 命中面板`, async ({ page }) => {
+    await page.setViewportSize({ width: w, height: h });
+    await bootWith(page, typical());
+    await expect(cards(page), '前提:首页处于正常态(八卡可见)').toBeVisible();
+    const m = await openPopupAndMeasure(page, '@', '');
+    expect(m.text.length, `输入「@」后弹出的面板应有内容(实际文本:${JSON.stringify(m.text)})`).toBeGreaterThan(0);
+    assertPopupFullyVisible(m, `${w}×${h} 引用面板`);
+  });
+}
