@@ -2428,9 +2428,12 @@ function HomeState({ tabIndex = 0 }) {
               <Send size={14} className="text-white -mr-0.5" />
             </button>
           </div>
-          {/* r97:与会话内同一套斜杠命令 / @ 引用。首页 composer 垂直居中,向上弹会被顶栏
-              切掉列表顶部(默认选中项就在那里),所以两个面板在首页都向下弹。
-              位置固定在工具行之后:插到 textarea 之前会顶掉附件粘贴/拖放的既有保护窗口。 */}
+          {/* r97:与会话内同一套斜杠命令 / @ 引用。位置固定在工具行之后:插到 textarea 之前会顶掉
+              附件粘贴/拖放的既有保护窗口。
+              r130 弹出方向按布局分:分屏首页 composer 仍垂直居中(上方紧贴顶栏、下方有空),保留 r97 的
+              向下弹字面量;单屏首页 composer 已贴底,向下弹会被窗格 overflow-hidden 裁掉(实测 1440×900
+              「/」菜单超出 338 px),所以不传 className、走组件默认(与会话内 ChatInput 一致,向上弹,上方
+              是整块用量图区,放得下)。锁:tests/unit/check-r97-dev-pure.mjs t10;验收 r130 C13。 */}
           {showCmds && (
             <SlashCommandMenu
               commands={filteredCmds}
@@ -2438,12 +2441,12 @@ function HomeState({ tabIndex = 0 }) {
               provider={slash.provider}
               isAnthropic={slash.isAnthropic}
               onPick={pickCommand}
-              className="glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"
+              className={showUsage ? undefined : "glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"}
             />
           )}
           <AtRefPanel
             {...at.panelProps}
-            className="glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"
+            className={showUsage ? undefined : "glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"}
           />
         </div>
         <div className="mt-3 text-[11.5px] text-ink-faint font-body">发送后在所选项目里创建新会话；历史会话在左侧列表。</div>
