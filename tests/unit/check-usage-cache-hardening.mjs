@@ -74,7 +74,7 @@ try {
   assert.equal(cold.total.input, 100, '冷扫基准:夹具就一条记录');
   assert.equal(cold.meta.stale, false, '现算的数 stale 必须是 false');
   const cache = JSON.parse(readFileSync(cachePathOf(withData), 'utf8'));
-  assert.equal(cache.version, 1);
+  assert.equal(cache.version, 2);   // r130:CACHE_VERSION 1 → 2(切日改本地时区 + overview);本意"落盘带版本号",随常量走
   assert.equal(cache.data.total.input, 100, '落盘内容 = 刚算出来的那份');
   assert.ok(typeof cache.sig === 'string' && cache.sig !== 'none', '真实目录的 sig 不是 none');
   assert.deepEqual(tmpLeftovers(withData), [], 'rename 成功后临时文件应当已经不在');

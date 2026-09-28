@@ -4,6 +4,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { streamJsonl } from '../utils/jsonl-parser.js';
 import { periodFor } from '../utils/pricing-rules.js';
+import { localDayKey, localHour, dayKeyOf, computeStreaks } from '../utils/usage-calendar.js';
+import { isUserMessage } from '../utils/usage-record.js';
 import { broadcast } from '../broadcast.js';
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
@@ -17,8 +19,26 @@ const CACHE_PATH = join(CACHE_DIR, 'usage-stats-cache.json');
 // ⚠️ **改聚合口径必须 bump 本版本号**。它守的不只是磁盘缓存的形状:形状没变而口径变了
 // (去重规则、meta 语义之类),旧算法落盘的数会被 loadCache 当"形状合法"整份读回,且 sig
 // 一致时被判"就是当前数据"标成 stale=false 展示;不 bump 还等不到重算 —— 只有某个 jsonl
-// 的 mtime 变了才会触发。bump 一次 = 旧缓存整份作废,退回冷路径重扫。
-const CACHE_VERSION = 1;
+// 的 mtime 变了才会触发。bump 一次 = 旧缓存整份作废 —— r130 起不再退回冷路径:上一版(1)的
+// 文件形状仍合法,loadCache 先回放它秒回旧值、标 needsRecompute,后台核对时必重算升级(见下)。
+// 版本史:1 = 2026-09-14 初版;2 = r130(切日改为进程本地时区、byDay 加 sessions/messages、
+// 新增 overview、窗口 30 → 400 天、缓存头加 tz)。
+const CACHE_VERSION = 2;
+// 缓存头里记写入进程的时区:切日按进程本地时区,换了时区旧值就是错的 —— 同 sig 也要重算。
+const PROCESS_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+// byDay 保留窗口(天):53 周热力图 + 余量;overview 在截断前的全量表上算,不受它影响。
+const BYDAY_WINDOW = 400;
+// 后台重算冷却(INTERFACE-r130 §B-6):由后台核对触发的重算,距上一次这类重算完成不足此值
+// 就不立即重算,记 dirty 并安排一份定时器到冷却结束再核对(期间多次签名变化合并成一次)。
+// 冷路径首扫与启动后第一次核对不受限。env 只在模块加载时读一次(与 REVALIDATE_TIMEOUT_MS 同处);
+// 0 = 关闭;非法值(非数字、负数、空串)按默认 30 s。首页 + 面板 + chat-done 三个触发源背靠背
+// 时,没有它就是每条消息一次 40 s 全量扫描。
+const RECOMPUTE_COOLDOWN_MS = (() => {
+  const raw = process.env.CGUI_USAGE_RECOMPUTE_COOLDOWN_MS;
+  if (raw == null || String(raw).trim() === '') return 30_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 30_000;
+})();
 
 // 全盘 parse 很慢。stale-while-revalidate:有缓存就立即返回(秒回),后台用 mtime
 // 签名(文件数+mtimeMs 之和)判断是否有新写入,有才重 parse 刷新。注意:**纯 sig
@@ -27,26 +47,45 @@ const CACHE_VERSION = 1;
 // 刷新周期(几秒)完全可接受。
 // meta.stale:这份 data 是磁盘回放的旧值、后台还没确认它是不是最新 → true;现算的
 // 或者后台已复核过 sig 的 → false(前端据此如实说明,不把旧数当新数)。
-let _cache = { sig: null, scannedAt: null, data: null };
+// needsRecompute:磁盘回放的这份为什么必须重算(不看 sig)——'version' = 旧版文件缺新字段、
+// 'tz' = 写入时的时区与现在不同;null = 只按 sig 判。显式枚举而不是 sig=null 哨兵:一眼看出
+// 原因,以后再加失效原因只加一个值。重算落地即清。
+let _cache = { sig: null, scannedAt: null, needsRecompute: null, data: null };
 let _refreshing = false;
 let _pending = null;   // 冷路径合流:并发调用共享的同一个 Promise
+// 冷却记账:只记【由 revalidate 触发】的重算完成时刻(冷路径首扫不记,故启动后第一次核对
+// 永远不受限);定时器在飞 = dirty(签名已变、等冷却结束再核对),同一时刻只有一份。
+let _lastBgRecomputeAt = 0;
+let _cooldownTimer = null;
 // 后台核对的超时兜底。listJsonl / recompute 永不 settle 时(网络挂载、IO 卡死),_refreshing
 // 会永久停在 true —— 这是唯一能让 meta.stale 永远挂着、且之后再也没人核对的路径。一次正常
 // 的核对(全盘 stat + 至多一次全量 parse,本机冷扫实测 41.8s)远在 5 分钟以内,到点必是卡死;
 // 宁可到点后重新发起一次核对(最多多跑一遍),也不能永远不核对。
 const REVALIDATE_TIMEOUT_MS = 5 * 60_000;
 
-// 启动即读回填。磁盘回放的数据在后台确认 sig 之前一律标 stale=true。
+// 启动即读回填。磁盘回放的数据在后台确认 sig 之前一律标 stale=true。三分支(INTERFACE-r130 §B-1~4):
+//   ① version 2 + tz 等于本进程 + 形状合法(含 overview 对象)→ 正常回放,只按 sig 核对;
+//   ② version 2 + tz 不等 → 回放 + needsRecompute:'tz'(旧值是别的时区切的日,先秒回再必重算);
+//   ③ version 1 + 形状合法(不要求 overview)→ 回放 + needsRecompute:'version'(升级路径:界面对
+//     缺失字段显示占位,后台重算落地经广播补全;不退回冷路径 = 升级后首屏不用等 40 s);
+//   其余(version 0 / 999 / 缺、半截 JSON、缺 data、v2 缺 overview)一律不信 → 冷路径,那份结果
+//   随后把坏文件覆盖成合法内容。
 function loadCache() {
   try {
     const parsed = JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
-    // 版本号不同 = 形状可能已变,一律不信;半截 JSON / 空文件 / 缺字段的坏文件同样
-    // 走不到这里 —— 都退回冷路径重扫,那份结果随后会把坏文件覆盖成合法内容。
-    if (parsed?.version !== CACHE_VERSION) return;
-    if (typeof parsed.sig !== 'string' || typeof parsed.scannedAt !== 'number') return;
+    if (typeof parsed?.sig !== 'string' || typeof parsed.scannedAt !== 'number') return;
     const d = parsed.data;
     if (!d?.total || !Array.isArray(d.byModel) || !Array.isArray(d.byProject) || !Array.isArray(d.byDay)) return;
-    _cache = { sig: parsed.sig, scannedAt: parsed.scannedAt, data: { ...d, meta: { scannedAt: parsed.scannedAt, stale: true } } };
+    let needsRecompute = null;
+    if (parsed.version === CACHE_VERSION) {
+      if (!d.overview || typeof d.overview !== 'object' || Array.isArray(d.overview)) return;
+      if (parsed.tz !== PROCESS_TZ) needsRecompute = 'tz';
+    } else if (parsed.version === 1) {
+      needsRecompute = 'version';
+    } else {
+      return;
+    }
+    _cache = { sig: parsed.sig, scannedAt: parsed.scannedAt, needsRecompute, data: { ...d, meta: { scannedAt: parsed.scannedAt, stale: true } } };
   } catch { /* 首次运行无缓存文件 / 文件坏或不可读:冷路径起点 */ }
 }
 
@@ -57,7 +96,7 @@ function saveCache(sig, scannedAt, data) {
     // 原子替换(写法同 computer-use/cu-common.js 的授权文件):直接 writeFileSync 会先把文件
     // 截到 0,进程若在写完前被杀,下次启动读到半截 JSON —— 守卫能兜住,代价是又付一次 40 秒
     // 冷扫。写临时文件再 rename,任何时刻被杀都只会看到完整旧值或完整新值。
-    writeFileSync(tmp, JSON.stringify({ version: CACHE_VERSION, sig, scannedAt, data }));
+    writeFileSync(tmp, JSON.stringify({ version: CACHE_VERSION, tz: PROCESS_TZ, sig, scannedAt, data }));
     renameSync(tmp, CACHE_PATH);
   } catch {
     // 目录不可写/路径被占(例如缓存路径本身是个目录):内存态照常服务,落盘失败不许冒到
@@ -74,24 +113,34 @@ loadCache();
 // 还要再深一层 `subagents/workflows/wf_*/`)。
 // **只读顶层一层等于一条子代理记录都读不到**:本机实测顶层 1441 个文件里含 sidechain
 // 的是 0,深层 2150 个文件全是 —— 子代理那部分花费会整个从统计里消失。
-async function walkJsonl(dir, projectName, depth, out) {
+// r130 顺手给每个文件两项【按路径推导】的归属(不读记录里的 sessionId 字段,与 sessionCount 同源):
+//   sessionKey:项目目录直属文件 = 文件名去 .jsonl;深层文件 = 项目目录下第一段目录名(子代理与
+//              workflow 都归母会话);inSubagentPath:文件在某个 subagents/ 目录之下(任意深度)。
+async function walkJsonl(dir, projectName, depth, out, sessionKey = null, inSubagentPath = false) {
   let entries;
   try { entries = await readdir(dir, { withFileTypes: true }); }
   catch { return; }
   for (const e of entries) {
     const p = join(dir, e.name);
-    if (e.isDirectory()) { await walkJsonl(p, projectName, depth + 1, out); continue; }
+    if (e.isDirectory()) {
+      await walkJsonl(p, projectName, depth + 1, out, depth === 0 ? e.name : sessionKey, inSubagentPath || e.name === 'subagents');
+      continue;
+    }
     if (!e.name.endsWith('.jsonl')) continue;
     try {
       const st = await stat(p);
       // depth 0 = 项目目录直属 = 一个会话;更深的是该会话的子代理 transcript,
       // 花的钱要算,但不能让 sessionCount 跟着虚高。
-      out.push({ path: p, projectName, mtimeMs: st.mtimeMs, isSession: depth === 0 });
+      out.push({
+        path: p, projectName, mtimeMs: st.mtimeMs, isSession: depth === 0,
+        sessionKey: depth === 0 ? e.name.slice(0, -'.jsonl'.length) : sessionKey,
+        inSubagentPath,
+      });
     } catch {}
   }
 }
 
-// 快速遍历:只 stat 不读内容,返回 [{ path, projectName, mtimeMs, isSession }] + 签名。
+// 快速遍历:只 stat 不读内容,返回 [{ path, projectName, mtimeMs, isSession, sessionKey, inSubagentPath }] + 签名。
 async function listJsonl() {
   let projectDirs;
   try { projectDirs = await readdir(PROJECTS_DIR, { withFileTypes: true }); }
@@ -143,13 +192,40 @@ function revalidate() {
       // sig==='none' = listJsonl 这次读不到 projects 目录(权限/IO/挂载掉了),不是"数据变了"。
       // 照常比对就会走 recompute([], 'none'):空账被标 stale=false 并写进磁盘,用户看到的是
       // "0 花费且很新"。跳过本轮;目录恢复后下一发请求自然重新核对,不需要重试机制。
+      // (v1 / 异时区的回放同样等目录恢复才升级:目录读不到 ≠ 可以拿空账升级。)
       if (sig === 'none') return undefined;
-      if (sig !== _cache.sig) return recompute(files, sig);
-      if (_cache.data) _cache.data.meta.stale = false;
-      return undefined;
+      if (!_cache.needsRecompute && sig === _cache.sig) {
+        if (_cache.data) _cache.data.meta.stale = false;
+        return undefined;
+      }
+      // 需要重算(签名变了 / 回放的值本身就得重算)。冷却:距上一次由本函数触发的重算完成不足
+      // RECOMPUTE_COOLDOWN_MS 就先不算 —— 如实标 stale(手上这份已知不是最新),安排到冷却结束再
+      // 核对一次。_lastBgRecomputeAt 为 0 = 本进程还没做过后台重算(启动后第一次核对),不受限。
+      if (RECOMPUTE_COOLDOWN_MS > 0 && _lastBgRecomputeAt > 0) {
+        const wait = _lastBgRecomputeAt + RECOMPUTE_COOLDOWN_MS - Date.now();
+        if (wait > 0) {
+          if (_cache.data) _cache.data.meta.stale = true;
+          scheduleCooldownRevalidate(wait);
+          return undefined;
+        }
+      }
+      return recompute(files, sig).then(() => { _lastBgRecomputeAt = Date.now(); });
     })
     .catch(() => {})   // 后台失败不碰已返回的响应,下个请求自然再试
     .finally(() => { clearTimeout(watchdog); _refreshing = false; });
+}
+
+// 冷却结束后补一次核对。同一时刻只挂一份(期间再多的签名变化都并进这一次);到点时若恰有别的
+// 核对在飞,推后 200 ms 再试而不是丢掉 —— 丢掉 = 这批变化要等下一次请求才有人管。
+function scheduleCooldownRevalidate(wait) {
+  if (_cooldownTimer) return;
+  const tick = () => {
+    if (_refreshing) { _cooldownTimer = setTimeout(tick, 200); _cooldownTimer.unref?.(); return; }
+    _cooldownTimer = null;
+    revalidate();
+  };
+  _cooldownTimer = setTimeout(tick, wait);
+  _cooldownTimer.unref?.();   // 不因它拖住进程退出
 }
 
 async function recompute(jsonlFiles, sig) {
@@ -161,6 +237,20 @@ async function recompute(jsonlFiles, sig) {
   let totalCacheRead = 0;
   let totalCacheWrite = 0;
   let sessionCount = 0;
+  // r130 新桶,**独立于 bump 与三个既有桶**(byModel / byProject 的形状一个字节不动):
+  //   dayExtra:day → { users(当天用户消息数), sessions(当天涉及的 sessionKey 集合) };
+  //   hourCounts[h]:去重后 assistant 记录本地小时为 h 的条数;userUuids:user 记录按 uuid 跨文件
+  //   去重(续接/分叉会话把历史整段抄进新文件,同 assistant 一样会重复);userMessages:全历史条数。
+  const dayExtra = new Map();
+  const extraOf = (day) => { let x = dayExtra.get(day); if (!x) { x = { users: 0, sessions: new Set() }; dayExtra.set(day, x); } return x; };
+  const hourCounts = new Array(24).fill(0);
+  const userUuids = new Set();
+  let userMessages = 0;
+  // 一条(去重后的)assistant 记录落账时顺带记小时与会话归属;与 bump 分开写,不碰它的签名。
+  const noteAssistant = (day, hour, sessionKey) => {
+    if (hour != null) hourCounts[hour]++;
+    extraOf(day).sessions.add(sessionKey);
+  };
 
   // 一次 API 调用在 jsonl 里按 content block 拆成多条 assistant 记录,共用同一个
   // message.id。**它们的 usage 不是相同的**:中间那些 stop_reason 为 null 的记录带的是
@@ -222,6 +312,21 @@ async function recompute(jsonlFiles, sig) {
         // 【主回合占用了多少窗口】,子代理另有自己的上下文;此处算的是【一共花了多少钱】。
         // 同一个 isSidechain 标记,两个问题两个答案。
         await streamJsonl(fileInfo.path, (record) => {
+          // r130:user 记录只数条数、归天、归会话(判定规则在 utils/usage-record.js;不保留正文)。
+          // 用户侧【排除】子代理(isSidechain 或路径含 subagents/):那是主回合派生的,不是用户说的。
+          if (record.type === 'user') {
+            if (!isUserMessage(record, { inSubagentPath: fileInfo.inSubagentPath })) return;
+            const uuid = record.uuid;
+            if (uuid) {
+              if (userUuids.has(uuid)) return;
+              userUuids.add(uuid);
+            }
+            userMessages++;
+            const x = extraOf(localDayKey(record.timestamp) ?? 'unknown');
+            x.users++;
+            x.sessions.add(fileInfo.sessionKey);
+            return;
+          }
           if (record.type !== 'assistant') return;
           const usage = record.message?.usage;
           if (!usage) return;
@@ -233,19 +338,23 @@ async function recompute(jsonlFiles, sig) {
             cacheWrite: usage.cache_creation_input_tokens || 0,
           };
           const model = record.message?.model || 'unknown';
-          const day = record.timestamp ? record.timestamp.slice(0, 10) : 'unknown';
+          // r130:切日按**进程本地时区**(旧版取 ISO 串前 10 位 = UTC 日,+08:00 早 8 点前的用量记到
+          // 前一天,与用户读"今天"的口径不符);无 / 非法时间戳 → 'unknown'。
+          const day = localDayKey(record.timestamp) ?? 'unknown';
+          const hour = localHour(record.timestamp);
           // 时段按**该条记录自身的时间戳**判(与逐条消息计价同一个判定函数、同一个时区);
-          // 没有可解析时间戳 → unknown 桶(不拿"现在"顶替)。
+          // 没有可解析时间戳 → unknown 桶(不拿"现在"顶替)。它固定 +08:00(DeepSeek 分时计价契约,
+          // pricing-rules.js),与上面按进程时区的 day / hour 是两个口径,在 +08:00 机器上数值一致。
           const period = periodFor(record.timestamp).key;
           const mid = record.message?.id;
           // 没有 message.id 就无从去重(本机 30 万条里只有 1 条),直接计入,
           // 不能拿空串当键 —— 那会把它们全并成一条。
-          if (!mid) return bump(model, fileInfo.projectName, day, u, period);
+          if (!mid) { bump(model, fileInfo.projectName, day, u, period); noteAssistant(day, hour, fileInfo.sessionKey); return; }
 
           const total = u.input + u.output + u.cacheRead + u.cacheWrite;
           const prev = bestById.get(mid);
           if (!prev || total > prev.total) {
-            bestById.set(mid, { model, project: fileInfo.projectName, day, total, u, period });
+            bestById.set(mid, { model, project: fileInfo.projectName, day, total, u, period, hour, sessionKey: fileInfo.sessionKey });
           }
         });
         // 只有项目目录直属的 jsonl 才是一个会话;它的子代理 transcript 花费要算,
@@ -257,27 +366,65 @@ async function recompute(jsonlFiles, sig) {
     }
   }
   // 全部文件读完才结算:一次调用的最优记录可能出现在任意一个文件的任意一行。
-  for (const b of bestById.values()) bump(b.model, b.project, b.day, b.u, b.period);
+  // 去重后的 assistant 记录取胜出那条所在文件的 sessionKey(INTERFACE §A)。
+  for (const b of bestById.values()) { bump(b.model, b.project, b.day, b.u, b.period); noteAssistant(b.day, b.hour, b.sessionKey); }
+
+  // byDay 全量表:既有六键(只有 user 记录的天 token 四项与 calls 为 0)+ r130 的 sessions / messages
+  // (messages = 当天用户消息 + 当天 calls)。'unknown' 行照旧成行、降序排最前。
+  const byDayAll = [...new Set([...Object.keys(byDay), ...dayExtra.keys()])]
+    .map((day) => {
+      const stats = byDay[day] || emptyTotals();
+      const extra = dayExtra.get(day);
+      return { day, ...stats, sessions: extra ? extra.sessions.size : 0, messages: (extra ? extra.users : 0) + stats.calls };
+    })
+    .sort((a, b) => b.day.localeCompare(a.day));
+  const byModelRows = Object.entries(byModel)
+    .map(([model, stats]) => ({ model, ...stats }))
+    .sort((a, b) => (b.input + b.output) - (a.input + a.output));
+  // overview 在 400 天窗口**截断前**的全量表上算(INTERFACE §A):活跃日 = 去掉 'unknown' 与未来日
+  // (day > 今天;时钟拨错 / 时区切换会造出来,不能让它把"当前连续"顶成假的)后 messages>0 的天。
+  const todayKey = dayKeyOf(new Date());
+  const activeDaysDesc = byDayAll.filter((r) => r.day !== 'unknown' && r.day <= todayKey && r.messages > 0).map((r) => r.day);
+  const { currentStreak, longestStreak } = computeStreaks(activeDaysDesc, todayKey);
+  let peakHour = null;
+  let peakN = 0;
+  hourCounts.forEach((n, h) => { if (n > peakN) { peakN = n; peakHour = h; } });   // 严格大于 = 并列取最小小时
+  // 常用模型 = 四项 token 合计最高者(排除无 model 的 'unknown' 与错误/合成消息的 '<synthetic>'),
+  // 并列取 id 字符串较小者;都没有 → null。
+  let favoriteModel = null;
+  let favoriteTotal = -1;
+  for (const m of byModelRows) {
+    if (m.model === 'unknown' || m.model === '<synthetic>') continue;
+    const t = m.input + m.output + m.cacheRead + m.cacheWrite;
+    if (t > favoriteTotal || (t === favoriteTotal && m.model < favoriteModel)) { favoriteTotal = t; favoriteModel = m.model; }
+  }
+  const overview = {
+    messages: userMessages + byModelRows.reduce((s, m) => s + m.calls, 0),
+    activeDays: activeDaysDesc.length,
+    firstDay: activeDaysDesc.length ? activeDaysDesc[activeDaysDesc.length - 1] : null,
+    lastActiveDay: activeDaysDesc.length ? activeDaysDesc[0] : null,
+    currentStreak,
+    longestStreak,
+    hourCounts,
+    peakHour,
+    favoriteModel,
+  };
 
   const result = {
     total: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite, sessionCount },
-    byModel: Object.entries(byModel)
-      .map(([model, stats]) => ({ model, ...stats }))
-      .sort((a, b) => (b.input + b.output) - (a.input + a.output)),
+    byModel: byModelRows,
     byProject: Object.entries(byProject)
       .map(([hash, stats]) => ({ hash, ...stats }))
       .sort((a, b) => (b.input + b.output) - (a.input + a.output))
       .slice(0, 20),
-    byDay: Object.entries(byDay)
-      .map(([day, stats]) => ({ day, ...stats }))
-      .sort((a, b) => b.day.localeCompare(a.day))
-      .slice(0, 30),
+    byDay: byDayAll.slice(0, BYDAY_WINDOW),
+    overview,
   };
   const scannedAt = Date.now();
   // scannedAt 语义 = **产生这份 data 的这次 recompute 完成的时刻**:磁盘回放期间保持
   // 原值不变,只有重算落地才前进(测试拿它当"到底重算没重算"的客观信号)。
   // 每次重算都产一个新对象 —— 合流返回的是同一个引用,这里换了就是换了。
-  _cache = { sig, scannedAt, data: { ...result, meta: { scannedAt, stale: false } } };
+  _cache = { sig, scannedAt, needsRecompute: null, data: { ...result, meta: { scannedAt, stale: false } } };
   saveCache(sig, scannedAt, result);
   // 重算落地即广播:前端收到后静默重取,不必等"最多 30 秒"那一轮轮询(磁盘回放期间
   // 看到的是旧值,没有这条广播就只能靠轮询才收敛)。
