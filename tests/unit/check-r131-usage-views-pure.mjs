@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import {
   RANGE_KEYS, RANGE_DAYS, LEGEND_DEFAULT_ROWS, rangeStartKey, inRange, rangeFacts, rangeOverview,
   cardValuesFor, legendItems, stackedByDay, yTicks, xTickDays, xTicks, xTickIndexes, chartTip,
-  shadeClass, MODEL_SHADES, tokensOf, inputOutputOf, favoriteOf,
+  shadeClass, MODEL_SHADES, tokensOf, inputOutputOf, favoriteOf, LEGACY_TOTAL_MODEL, LEGACY_TOTAL_LABEL,
 } from '../../client/src/utils/homeUsage.js';
 
 let n = 0;
@@ -201,11 +201,16 @@ const STATS = {
   eq(s2.days[1].segments.map((x) => x.model), ['big', 'small'], '每柱段序 = 序列序(同色同序)');
   // 柱高 = 当天各模型「输入 + 输出」;注意它**不等于** byDay 行的 input(那是四项汇总的另一套口径)
   eq(s2.days.map((d) => d.total), [14, 202], '柱高 = 当天各模型输入+输出之和(9-28: 5+5+2+2=14;9-29: 100+100+1+1=202)');
-  // 缺 byDayModel 的旧响应:退回单序列(柱高仍看得到)
+  // 缺 byDayModel 的旧响应:退回单序列(当天合计的形状还在),但**不许**冒充某个模型
+  // (跨平台审查 0.2.401 建议-2:以前挂的是全量第一名的名字,浮层会把"当天全量"读成那个模型的数)
   const legacy = stackedByDay({ byDay: STATS.byDay, byModel: STATS.byModel });
   eq(legacy.series.length, 1, '缺 byDayModel → 单序列兜底');
-  eq(legacy.series[0].model, 'claude-opus-4-1-20250805', '兜底序列用 byModel 第一名');
+  eq(legacy.series[0].model, LEGACY_TOTAL_MODEL, '兜底序列用"合计"占位名,不许拿 byModel 第一名冒充');
+  eq(legacy.series[0].name, LEGACY_TOTAL_LABEL, '兜底序列的显示名要自带"没有模型明细"');
+  ok(!STATS.byModel.some((m) => m.model === legacy.series[0].model), '占位名不得等于任何真实模型 id');
   eq(legacy.days.map((d) => d.total), [60, 3600, 25, 1200], '兜底柱高口径与正式路径一致');
+  eq(chartTip(legacy.days[0]).rows[0].model, LEGACY_TOTAL_MODEL, '浮层行的 model 字段也是占位名');
+  eq(chartTip(legacy.days[0]).rows[0].name, LEGACY_TOTAL_LABEL, '浮层第一行也要说明"没有模型明细"');
   // maxBar:只保留最近 N 天(375px 下 400 根柱子挤成一片)
   const cut = stackedByDay(STATS, { maxBar: 2 });
   eq(cut.days.map((d) => d.day), ['2026-09-28', '2026-09-29'], 'maxBar 只裁显示天数(仍是最新的那几天)');

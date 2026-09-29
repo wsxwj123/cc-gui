@@ -152,6 +152,11 @@ export const LEGEND_DEFAULT_ROWS = 6;
 /** 无日期的时间桶键(与后端 byDay / byDayModel 的 'unknown' 一致)。 */
 export const UNKNOWN_DAY = 'unknown';
 
+/** 旧响应(缺 byDayModel)下柱子系列的占位名 —— 不是一个模型 id,故用双下划线包起来。 */
+export const LEGACY_TOTAL_MODEL = '__day_total__';
+/** 它显示给人看的名字:必须自带"没有模型明细"这层意思(见 stackedByDay 那段注释)。 */
+export const LEGACY_TOTAL_LABEL = '合计(无模型明细)';
+
 const num = (v) => (Number.isFinite(v) ? v : 0);
 
 /** 范围窗口的起始日(含今天在内的 N 天):'7d' → 今天 − 6 天。'all' → null。 */
@@ -365,20 +370,24 @@ export function stackedByDay(stats, { maxBar = 0 } = {}) {
       }
     }
   } else {
-    const name = stats?.byModel?.[0]?.model ?? UNKNOWN_DAY;
+    // 旧响应(缺 byDayModel):byDay 行里**没有模型维度**,所以柱子只能表示"当天合计"。
+    // 这里以前拿 `stats.byModel[0].model`(全量第一名)当序列名,于是浮层会把"当天全量"
+    // 标成那个模型的数据 —— 编造归属,与同文件 R2 的既定口径矛盾(跨平台审查 0.2.401 建议-2)。
+    // 现在挂在一个明确的"合计(无模型明细)"占位上:柱子形状(每日总量)还在,但界面/浮层都看得出
+    // 它不是某个模型;真正的分组要等后台重算把 byDayModel 发过来。
     for (const r of stats?.byDay || []) {
       const bucket = daysOut[index.get(r.day)];
       if (!bucket) continue;
       const t = inputOutputOf(r);
       if (!t) continue;
-      bucket.values[name] = t;
+      bucket.values[LEGACY_TOTAL_MODEL] = t;
       bucket.total += t;
-      modelTotals.set(name, (modelTotals.get(name) || 0) + t);
+      modelTotals.set(LEGACY_TOTAL_MODEL, (modelTotals.get(LEGACY_TOTAL_MODEL) || 0) + t);
     }
   }
   const series = [...modelTotals.entries()]
     .sort((a, b) => b[1] - a[1])
-    .map(([model], i) => ({ model, name: shortModelName(model), shade: shadeClass(i), fill: modelFill(i), opacity: modelOpacity(i), rank: i, block: String(Math.min(i, MODEL_OPACITY.length - 1)) }));
+    .map(([model], i) => ({ model, name: model === LEGACY_TOTAL_MODEL ? LEGACY_TOTAL_LABEL : shortModelName(model), shade: shadeClass(i), fill: modelFill(i), opacity: modelOpacity(i), rank: i, block: String(Math.min(i, MODEL_OPACITY.length - 1)) }));
   for (const d of daysOut) d.segments = series.filter((s) => num(d.values[s.model]) > 0);
   const max = daysOut.reduce((m, d) => Math.max(m, d.total), 0);
   return { series, days: daysOut, max };
