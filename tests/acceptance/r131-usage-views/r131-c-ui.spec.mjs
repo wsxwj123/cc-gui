@@ -749,6 +749,9 @@ test('C10d 浮层水平定位:能居中的柱必须居中(≤2px);贴边的柱�
   // 判据来自 `.devflow/WINDOWS-REVIEW-0.2.401.md` 必修-2(界面缩放 ≠1 时视觉像素与布局像素混用 →
   // 浮层与指针错位;默认缩放就是 1.2,不是边缘情况)。三档缩放 × 最左/中/最右柱。
   //
+  // 另有一条测试自身的坑(2026-09-30 踩到并修):缩放档位不能靠写 `html.style.zoom` 来造 ——
+  // App 挂载后会按档位重放 apply(),采样窗口里会半路被打回 1.2;见下面循环里的注释。
+  //
   // 有一条几何事实必须先说清(实测数据):浮层宽 ≈180 布局像素,容器宽 600、柱心最右 540 ——
   // **最右柱在几何上不可能既居中又不溢出**(居中要让浮层伸到容器外 ~30px,而容器外一圈是
   // `overflow:auto` 的 `home-usage-slot`:被裁或长横滚条,两条都比"偏心"更糟)。所以判据分两种:
@@ -762,8 +765,18 @@ test('C10d 浮层水平定位:能居中的柱必须居中(≤2px);贴边的柱�
   const days = body.byDay.map((r) => r.day).reverse();
   const pick = [days[0], days[Math.floor(days.length / 2)], days[days.length - 1]];
   for (const scale of [1.0, 1.2, 0.8]) {
-    await page.evaluate((v) => { document.documentElement.style.zoom = String(v); }, scale);
-    await page.waitForTimeout(250);
+    // 界面缩放必须走**应用自己的档位**(localStorage `cgui-ui-font-scale` + 重载),不能直接写
+    // `html.style.zoom`:App 的 effect 会在挂载后 60/200/500/1000ms 各重放一次 apply(),把 zoom 打回
+    // 档位值 —— 实测直接写 1.0、等 250ms 后量到的仍是 1.2(判据里的"三档缩放"名不副实),而且那几次
+    // 重放会落在采样窗口里半路换档:浮层按旧档量到的布局宽度失效 → 偏心 2.6px 的假红(2026-09-30 定位)。
+    // 写档位 + 重载后 effect 重挂,档位值本身就是它要 apply 的值,三档才真是三档。
+    await page.evaluate((v) => { localStorage.setItem('cgui-ui-font-scale', String(v)); }, scale);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await gotoHome(page);
+    await pickTab(page, 'models');
+    await expect.poll(async () => Number(await page.evaluate(() => getComputedStyle(document.documentElement).zoom)),
+      { message: `界面缩放应切到 ${scale}`, timeout: 15_000 }).toBeCloseTo(scale, 3);
+    await page.waitForTimeout(150);
     for (const day of pick) {
       await page.locator(`[data-testid="home-usage-chart-bar"][data-day="${day}"]`).hover();
       await expect(page.getByTestId('home-usage-chart-tip')).toBeVisible();
@@ -805,7 +818,7 @@ test('C10d 浮层水平定位:能居中的柱必须居中(≤2px);贴边的柱�
       expect(best.overR, `zoom=${scale} ${day}: 浮层不该溢出容器右侧(${best.overR.toFixed(1)}px)`).toBeLessThanOrEqual(1);
     }
   }
-  await page.evaluate(() => { document.documentElement.style.zoom = ''; });
+  await page.evaluate(() => { localStorage.setItem('cgui-ui-font-scale', '1.2'); });   // 收尾回默认档
 });
 
 test('C10c 375×812(含界面缩放余量)用量块顶行不横滚', async ({ browser }) => {
