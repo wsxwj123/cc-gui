@@ -84,9 +84,10 @@ try {
   assert.equal(ov.peakHour, 10);
   assert.equal(ov.favoriteModel, 'claude-a', "按四项合计:claude-a 1840 > claude-b 210;'<synthetic>' 9999 排除");
   assert.deepEqual(Object.keys(ov).sort(), Object.keys(EMPTY_OVERVIEW).sort(), 'overview 九键齐全');
-  assert.deepEqual(Object.keys(s).sort(), ['byDay', 'byModel', 'byProject', 'meta', 'overview', 'total'], '根键只多 overview');
+  // r131:根键在 overview 之外又多了 byDayModel 与 ranges(契约 .devflow/INTERFACE-r131.md §A)
+  assert.deepEqual(Object.keys(s).sort(), ['byDay', 'byDayModel', 'byModel', 'byProject', 'meta', 'overview', 'ranges', 'total'], '根键 = 既有五个 + overview + byDayModel + ranges');
   const file = await waitFor(() => { try { return readCache(homes[0]); } catch { return null; } });
-  assert.deepEqual([file.version, file.tz, typeof file.data.overview], [2, 'Asia/Shanghai', 'object'], '落盘头 {version:2, tz} 且 data 带 overview');
+  assert.deepEqual([file.version, file.tz, typeof file.data.overview], [3, 'Asia/Shanghai', 'object'], '落盘头 {version:3, tz} 且 data 带 overview(r131:CACHE_VERSION 2 → 3)');
 
   // ── ② 未来时间戳:行留在 byDay,不计活跃 / 连续 ─────────────────────────────────────
   const fut = await (await statsFor(makeHome({ 'demo/s1.jsonl': [usr({ ts: isoAt(dayAgo(-5), 9) }), usr({ ts: isoAt(dayAgo(-4), 9) }), usr({ ts: isoAt(dayAgo(1), 9) })] }), 'future'))();
@@ -110,7 +111,7 @@ try {
   assert.ok(upgraded, "jsonl 一字未动,3 秒内也必须重算补全(needsRecompute:'version')");
   assert.deepEqual(upgraded.overview, cold.overview);
   assert.ok(upgraded.meta.scannedAt > first.meta.scannedAt, 'scannedAt 前进 = 真重算了');
-  assert.deepEqual([readCache(upHome).version, readCache(upHome).tz], [2, 'Asia/Shanghai'], '文件重写为 v2 带 tz');
+  assert.deepEqual([readCache(upHome).version, readCache(upHome).tz], [3, 'Asia/Shanghai'], '文件重写为当前版本(r131 起是 v3)带 tz');
 
   // ── ④ tz 不等:v2 文件 tz:'UTC' → 回放(overview 在)+ 必重算,以当前 tz 落盘 ──────────
   writeFileSync(cachePathOf(upHome), JSON.stringify({ ...readCache(upHome), tz: 'UTC' }));
@@ -137,7 +138,7 @@ try {
   await bStats();
   const bUp = await waitFor(async () => { const r = await bStats(); return (r.meta.stale === false && r.overview) ? r : null; });
   assert.ok(bUp, '目录恢复后下一次 GET 触发核对并升级');
-  assert.equal(readCache(bHome).version, 2);
+  assert.equal(readCache(bHome).version, 3);   // r131:CACHE_VERSION 2 → 3,升级目标是当前版本
 
   // ── ⑥ 冷却合并(env=2000):冷扫与启动后第一次后台重算不受限;之后 500 ms 内两次追加只重算一次 ──
   const cdHome = makeHome({ 'demo/s1.jsonl': [asst({ ts: isoAt(D1, 10), model: 'r0' })] });

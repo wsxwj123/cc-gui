@@ -41,16 +41,20 @@ function rewriteCache(file, fn) {
 
 // ───────────── B0 / B1 正常回放 ─────────────
 
-test('B0 冷扫落盘的文件是新形状:{version:2, tz:"Asia/Shanghai", sig, scannedAt, data} 且 data.overview 为对象', async () => {
+test('B0 冷扫落盘的文件是新形状:{version:3, tz:"Asia/Shanghai", sig, scannedAt, data};data 里带 overview / byDayModel / ranges', async () => {
   const ctx = await prime('b0-file-shape');
   const c = readCacheFile(ctx.file).json;
-  expect(c.version).toBe(2);
+  // r131:CACHE_VERSION 2 → 3。本组用例守的仍是"落盘文件形状合法",只是版本号随常量前进。
+  expect(c.version).toBe(3);
   expect(c.tz).toBe(TZ);
   expect(typeof c.sig).toBe('string');
   expect(typeof c.scannedAt).toBe('number');
   expect(c.data && typeof c.data.overview).toBe('object');
   expect(Array.isArray(c.data.byDay) && c.data.byDay.length > 0).toBe(true);
   expect(Object.keys(c.data.byDay[0])).toEqual(expect.arrayContaining(['sessions', 'messages']));
+  // r131 新增的两个根键
+  expect(c.data.byDayModel && typeof c.data.byDayModel === 'object').toBe(true);
+  expect(Object.keys(c.data.ranges || {})).toEqual(expect.arrayContaining(['7d', '30d']));
 });
 
 test('B1a 合法 v2 回放且 sig 相同:首请求旧值 stale=true → 随后 stale=false、不重算(scannedAt 不动、文件不动、不广播)', async () => {
@@ -83,7 +87,7 @@ test('B1b 合法 v2 回放但 sig 不同:首请求旧值 stale=true → 重算�
   expect(settled, '5 秒内应重算并含 r130-R1、stale=false').toBeTruthy();
   expect(settled.meta.scannedAt).toBeGreaterThan(ctx.cold.meta.scannedAt);
   const c = readCacheFile(ctx.file).json;
-  expect(c.version).toBe(2);
+  expect(c.version).toBe(3);
   expect(c.scannedAt).toBe(settled.meta.scannedAt);
   await sleep(1500);
   expect(cap.ofType('usage-updated').length, '重算落地广播恰好一次').toBe(1);
@@ -92,6 +96,13 @@ test('B1b 合法 v2 回放但 sig 不同:首请求旧值 stale=true → 重算�
 
 // ───────────── B2 / B3 旧版与时区 ─────────────
 
+/** 把落盘文件降级成 r131 之前的形状(去掉 byDayModel / ranges;用于验 v2 → v3 升级路径)。 */
+function downgradeToV2(file) {
+  rewriteCache(file, (j) => {
+    const { byDayModel, ranges, ...data } = j.data;
+    return { ...j, version: 2, data };
+  });
+}
 /** 把落盘文件降级成 version 1(保留真实 sig / scannedAt;去掉 overview 与 byDay 的 sessions/messages)。 */
 function downgradeToV1(file) {
   rewriteCache(file, (j) => {
@@ -103,7 +114,7 @@ function downgradeToV1(file) {
   });
 }
 
-test('B2 version 1 回放:首请求旧 data 原样(stale=true、无 overview、byDay 无 sessions/messages)→ 3 秒内自动升级为 v2 并广播一次', async () => {
+test('B2 version 1 回放:首请求旧 data 原样(stale=true、无 overview、byDay 无 sessions/messages)→ 自动升级为 v3 并广播一次', async () => {
   const ctx = await prime('b2-v1-upgrade');
   downgradeToV1(ctx.file);
   const two = await boot(ctx);
@@ -115,21 +126,25 @@ test('B2 version 1 回放:首请求旧 data 原样(stale=true、无 overview、b
   expect('sessions' in first.json.byDay[0]).toBe(false);
   expect(first.json.total).toEqual(ctx.cold.total);
   const t0 = Date.now();
-  const settled = await waitFor(async () => { const r = await getUsage(two.base); return (r.json?.meta?.stale === false && r.json.overview) ? r.json : null; }, { timeoutMs: 3000 });
-  expect(settled, '不改任何 jsonl,3 秒内也必须重算补全 overview 并 stale=false').toBeTruthy();
+  // r131:落盘版本已经是 3 —— v1 回放要一路升到 v3(中间不再有 v2 的中间态)
+  const settled = await waitFor(async () => {
+    const r = await getUsage(two.base);
+    return (r.json?.meta?.stale === false && r.json.overview && r.json.ranges) ? r.json : null;
+  }, { timeoutMs: 8000 });
+  expect(settled, '不改任何 jsonl,8 秒内也必须重算补全 overview / byDayModel / ranges 并 stale=false').toBeTruthy();
   expect(settled.meta.scannedAt).toBeGreaterThan(first.json.meta.scannedAt);
   expect(settled.overview).toEqual(ctx.cold.overview);
   const c = readCacheFile(ctx.file).json;
-  expect(c.version).toBe(2);
+  expect(c.version).toBe(3);
   expect(c.tz).toBe(TZ);
   await sleep(Math.max(0, 1500 - (Date.now() - t0)) + 1500);
   expect(cap.ofType('usage-updated').length).toBe(1);
   cap.close();
 });
 
-test('B3 时区变更:v2 文件 tz=UTC 而进程 tz=Asia/Shanghai → 首请求旧值 stale=true(overview 仍在)→ 必重算并以新 tz 落盘', async () => {
+test('B3 时区变更:同版本文件 tz=UTC 而进程 tz=Asia/Shanghai → 首请求旧值 stale=true(overview 仍在)→ 必重算并以新 tz 落盘', async () => {
   const ctx = await prime('b3-tz-change');
-  rewriteCache(ctx.file, (j) => ({ ...j, version: 2, tz: 'UTC', data: { ...j.data, overview: j.data.overview ?? { ...EMPTY_OVERVIEW, messages: 12345 } } }));
+  rewriteCache(ctx.file, (j) => ({ ...j, version: 3, tz: 'UTC', data: { ...j.data, overview: j.data.overview ?? { ...EMPTY_OVERVIEW, messages: 12345 } } }));
   const two = await boot(ctx);
   const first = await getUsage(two.base);
   expect(first.json.meta?.stale).toBe(true);
@@ -140,7 +155,7 @@ test('B3 时区变更:v2 文件 tz=UTC 而进程 tz=Asia/Shanghai → 首请求�
   expect(settled.overview).toEqual(ctx.cold.overview);
   const c = readCacheFile(ctx.file).json;
   expect(c.tz).toBe(TZ);
-  expect(c.version).toBe(2);
+  expect(c.version).toBe(3);
 });
 
 // ───────────── B4 不信任的文件 → 冷路径 ─────────────
@@ -151,7 +166,10 @@ const UNTRUSTED = [
   ['缺 version', (j) => { const { version, ...rest } = j; return rest; }],
   ['半截 JSON', (j, raw) => raw.slice(0, Math.floor(raw.length / 2))],
   ['缺 data', (j) => { const { data, ...rest } = j; return rest; }],
-  ['version 2 但缺 overview', (j) => { const data = { ...j.data }; delete data.overview; return { ...j, version: 2, tz: TZ, data }; }],
+  ['version 3 但缺 overview', (j) => { const data = { ...j.data }; delete data.overview; return { ...j, version: 3, tz: TZ, data }; }],
+  // r131:byDayModel / ranges 缺一不可(它们就是"v3 形状"的标志,缺了也得当坏文件)
+  ['version 3 但缺 byDayModel', (j) => { const data = { ...j.data }; delete data.byDayModel; return { ...j, version: 3, tz: TZ, data }; }],
+  ['version 3 但缺 ranges', (j) => { const data = { ...j.data }; delete data.ranges; return { ...j, version: 3, tz: TZ, data }; }],
 ];
 for (const [name, mutate] of UNTRUSTED) {
   test(`B4 不信任的缓存文件(${name})→ 冷路径:首请求 200 完整新形状 stale=false,文件被覆盖成合法 v2`, async () => {
@@ -164,10 +182,12 @@ for (const [name, mutate] of UNTRUSTED) {
     expect(r.json.meta?.stale, '不信任的文件不算回放,必须现算').toBe(false);
     expect(r.json.overview).toEqual(ctx.cold.overview);
     expect(r.json.total).toEqual(ctx.cold.total);
-    const c = await waitFor(() => { const x = readCacheFile(ctx.file); return (x && x.raw !== poisoned && x.json?.version === 2) ? x.json : null; }, { timeoutMs: 8000 });
-    expect(c, '文件应被覆盖成 version 2').toBeTruthy();
+    const c = await waitFor(() => { const x = readCacheFile(ctx.file); return (x && x.raw !== poisoned && x.json?.version === 3) ? x.json : null; }, { timeoutMs: 8000 });
+    expect(c, '文件应被覆盖成 version 3').toBeTruthy();
     expect(c.tz).toBe(TZ);
     expect(typeof c.data?.overview).toBe('object');
+    expect(c.data?.byDayModel && typeof c.data.byDayModel === 'object').toBe(true);
+    expect(Object.keys(c.data?.ranges || {})).toEqual(expect.arrayContaining(['7d', '30d']));
   });
 }
 
@@ -186,10 +206,10 @@ test('B5a projects 目录缺失且无缓存 → 冷路径 200 空账(total 全 0
   expect(r.json.overview).toEqual(EMPTY_OVERVIEW);
   expect(r.json.meta?.stale).toBe(false);
   const c = await waitFor(() => readCacheFile(cachePath(home))?.json ?? null, { timeoutMs: 8000 });
-  expect(c?.version, '空账也落盘(既有行为)').toBe(2);
+  expect(c?.version, '空账也落盘(既有行为)').toBe(3);
 });
 
-test('B5b projects 目录缺失但有 v2 缓存 → 一直回放 stale=true、不重算不落盘不广播;目录恢复后下一次 GET 才核对并转 stale=false', async () => {
+test('B5b projects 目录缺失但有当前版本缓存 → 一直回放 stale=true、不重算不落盘不广播;目录恢复后下一次 GET 才核对并转 stale=false', async () => {
   const ctx = await prime('b5b-no-projects-with-cache');
   const away = path.join(ctx.root, 'projects-away');
   fs.renameSync(projectsDir(ctx.home), away);
@@ -211,7 +231,7 @@ test('B5b projects 目录缺失但有 v2 缓存 → 一直回放 stale=true、�
   cap.close();
 });
 
-test('B5c projects 目录缺失 + v1 缓存 → 目录缺失期间不升级(文件仍 v1);目录恢复后才重算升级为 v2', async () => {
+test('B5c projects 目录缺失 + v1 缓存 → 目录缺失期间不升级(文件仍 v1);目录恢复后才重算升级为 v3', async () => {
   const ctx = await prime('b5c-no-projects-v1');
   downgradeToV1(ctx.file);
   const v1raw = fs.readFileSync(ctx.file, 'utf8');
@@ -226,8 +246,8 @@ test('B5c projects 目录缺失 + v1 缓存 → 目录缺失期间不升级(文�
   expect(fs.readFileSync(ctx.file, 'utf8'), '目录缺失期间文件必须原样(仍是 v1)').toBe(v1raw);
   fs.renameSync(away, projectsDir(ctx.home));
   const settled = await waitFor(async () => { const r = await getUsage(two.base); return (r.json?.meta?.stale === false && r.json.overview) ? r.json : null; }, { timeoutMs: 5000 });
-  expect(settled, '目录恢复后 5 秒内应升级(含 overview、stale=false)').toBeTruthy();
-  expect(readCacheFile(ctx.file).json.version).toBe(2);
+  expect(settled, '目录恢复后 5 秒内应升级(含 overview / ranges、stale=false)').toBeTruthy();
+  expect(readCacheFile(ctx.file).json.version).toBe(3);
 });
 
 // ───────────── B6 重算冷却 ─────────────

@@ -13,7 +13,7 @@ import { mainHome, scratchHome, rmHome, startInstance, stopInstance, getUsage, g
 
 const PROBE_MODEL = 'claude-opus-9-fixture-probe';   // 造 sig 不一致用的独有模型名
 const PROBE_INPUT = 7_000_000;
-const ROOT_KEYS_OK = new Set(['total', 'byModel', 'byProject', 'byDay', 'meta', 'overview']);   // r130 INTERFACE §D:根键只多 overview 一个
+const ROOT_KEYS_OK = new Set(['total', 'byModel', 'byProject', 'byDay', 'meta', 'overview', 'byDayModel', 'ranges']);   // r130 §D 只多 overview;r131 §A 再 + byDayModel / ranges
 const BOOT_QUIET_MS = 13_000;   // 实例启动后到"CPU 噪声带过去"的等待;窗口不许落在前 10 秒里(见 U3a)
 const WINDOW_MS = 3000;         // U3a 的观测窗口长度(基线窗口同长)
 

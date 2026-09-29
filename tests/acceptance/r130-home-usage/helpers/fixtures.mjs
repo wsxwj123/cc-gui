@@ -128,7 +128,9 @@ export const dayDiff = (a, b) => Math.round((Date.parse(`${a}T12:00:00+08:00`) -
 
 /** 空账 overview(INTERFACE §B-5a 逐字)。 */
 export const EMPTY_OVERVIEW = { messages: 0, activeDays: 0, firstDay: null, lastActiveDay: null, currentStreak: 0, longestStreak: 0, hourCounts: Array(24).fill(0), peakHour: null, favoriteModel: null };
-export const ROOT_KEYS = ['total', 'byModel', 'byProject', 'byDay', 'meta', 'overview'];
+// r131:根键新增 byDayModel(day → model → 五项)与 ranges(7d/30d 窗口聚合)。
+// 本组用例守的是"根上不许多出约定之外的键",新键进了 r131 的接口契约就该加进白名单。
+export const ROOT_KEYS = ['total', 'byModel', 'byProject', 'byDay', 'meta', 'overview', 'byDayModel', 'ranges'];
 export const TOTAL_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite', 'sessionCount'];
 export const BYDAY_OLD_KEYS = ['day', 'input', 'output', 'cacheRead', 'cacheWrite', 'calls'];
 export const BYDAY_KEYS = [...BYDAY_OLD_KEYS, 'sessions', 'messages'];
