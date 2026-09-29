@@ -1,0 +1,160 @@
+{
+  "generatedAt": "2026-09-28T12:25:41.346Z",
+  "note": "r131 套件用的副本:夹具项目目录名随套件改名(r130 → r131),数值与 r130-home-usage/helpers/d-baseline.json 逐字节相同",
+  "legacy": {
+    "total": {
+      "input": 2757,
+      "output": 203,
+      "cacheRead": 600,
+      "cacheWrite": 80,
+      "sessionCount": 3
+    },
+    "byModel": [
+      {
+        "model": "claude-opus-4-1-20250805",
+        "input": 2500,
+        "output": 150,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "calls": 2,
+        "byPeriod": {
+          "peak": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "calls": 0
+          },
+          "offPeak": {
+            "input": 2500,
+            "output": 150,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "calls": 2
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "calls": 0
+          }
+        }
+      },
+      {
+        "model": "claude-sonnet-4-6",
+        "input": 200,
+        "output": 40,
+        "cacheRead": 600,
+        "cacheWrite": 80,
+        "calls": 2,
+        "byPeriod": {
+          "peak": {
+            "input": 100,
+            "output": 20,
+            "cacheRead": 300,
+            "cacheWrite": 40,
+            "calls": 1
+          },
+          "offPeak": {
+            "input": 100,
+            "output": 20,
+            "cacheRead": 300,
+            "cacheWrite": 40,
+            "calls": 1
+          },
+          "unknown": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "calls": 0
+          }
+        }
+      },
+      {
+        "model": "deepseek-v3.2",
+        "input": 57,
+        "output": 13,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "calls": 2,
+        "byPeriod": {
+          "peak": {
+            "input": 50,
+            "output": 10,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "calls": 1
+          },
+          "offPeak": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "calls": 0
+          },
+          "unknown": {
+            "input": 7,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "calls": 1
+          }
+        }
+      }
+    ],
+    "byProject": [
+      {
+        "hash": "-Users-r131-d-projA",
+        "input": 2700,
+        "output": 190,
+        "cacheRead": 600,
+        "cacheWrite": 80,
+        "calls": 4
+      },
+      {
+        "hash": "-Users-r131-d-projB",
+        "input": 57,
+        "output": 13,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "calls": 2
+      }
+    ],
+    "byDay": [
+      {
+        "day": "unknown",
+        "input": 7,
+        "output": 3,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "calls": 1
+      },
+      {
+        "day": "2026-09-15",
+        "input": 50,
+        "output": 10,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "calls": 1
+      },
+      {
+        "day": "2026-09-12",
+        "input": 2500,
+        "output": 150,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "calls": 2
+      },
+      {
+        "day": "2026-09-10",
+        "input": 200,
+        "output": 40,
+        "cacheRead": 600,
+        "cacheWrite": 80,
+        "calls": 2
+      }
+    ]
+  }
+}

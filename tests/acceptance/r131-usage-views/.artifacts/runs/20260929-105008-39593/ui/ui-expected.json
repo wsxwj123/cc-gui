@@ -1,0 +1,14 @@
+{
+  "day": "2026-09-29",
+  "sessions": 2,
+  "calls": 2,
+  "messages": 4,
+  "tokens": 11000,
+  "model": "claude-sonnet-4-6",
+  "hour": 9,
+  "cwd": "/Users/wsxwj/Desktop/claude/claude gui/.claude/worktrees/r131/tests/acceptance/r131-usage-views/.artifacts/runs/20260929-105008-39593/ui/fixture-workspace",
+  "proj": "-Users-wsxwj-Desktop-claude-claude-gui--claude-worktrees-r131-tests-acceptance-r131-usage-views--artifacts-runs-20260929-105008-39593-ui-fixture-workspace",
+  "byDayModelTokens": 11000,
+  "inTokens": 2000,
+  "outTokens": 500
+}

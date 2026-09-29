@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "/opt/homebrew/Cellar/node/25.9.0_1/bin/node" "/Users/wsxwj/Desktop/claude/claude gui/.claude/worktrees/r131/tests/acceptance/r122-ui-batch/helpers/fake-claude.mjs" "$@"
