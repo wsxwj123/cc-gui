@@ -278,7 +278,34 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.400</b>(2026-09-29)· 新增 1 条 · 优化 3 条 · 修复 1 条</summary>
+<summary><b>v0.2.401</b>(2026-09-29)· 新增 2 条 · 优化 1 条</summary>
+
+**新增**
+
+<details><summary>首页用量总览加了「总览 | 模型」分页</summary>
+
+「模型」分页是一张按天的堆叠柱状图(每天一柱、按模型堆叠,同一色相深浅区分),下面列出每个模型的输入 / 输出 token、占比与金额;鼠标停在柱子上看当天各模型的用量明细(手机上点一下)。
+
+</details>
+
+<details><summary>首页用量总览加了「全部 / 30 天 / 7 天」范围切换</summary>
+
+换范围会重算用量数字与模型列表里的 in / out / 占比,按天的热力图与模型柱状图的跨度不变(与命令行工具 `/stats` 面板的行为一致);选中的分页与范围会记住,下次打开还是那一个。
+
+</details>
+
+**优化**
+
+<details><summary>招呼语挪到用量数字上方</summary>
+
+新建会话首页的问候语以前顶在页面上沿、中间空一大块,现在和用量块连成一个整体垂直居中,输入框仍贴底。
+
+</details>
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.400">v0.2.400</a></b>(2026-09-29)· 新增 1 条 · 优化 3 条 · 修复 1 条</summary>
 
 **新增**
 
