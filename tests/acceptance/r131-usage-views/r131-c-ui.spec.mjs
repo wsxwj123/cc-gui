@@ -731,17 +731,81 @@ test('C10b 逐柱悬停:浮层给的是这一根柱子那天、且落在图表�
     expect(geo.overRight, `${day}: 浮层右边不该溢出图表容器(${geo.overRight.toFixed(1)}px)`).toBeLessThanOrEqual(1);
   }
 
-  // ⚠️ **本用例不覆盖"浮层是否精确居中在柱子上"** —— 这是一条**已知缺陷**,如实登记在这里:
-  //    · 跨平台审查(0.2.401 必修-2)指出:浮层定位早期混用了视觉像素与布局像素,界面默认 1.2 倍缩放下会偏;
-  //    · 我按"由第几天 × 每柱宽算出柱心"重写了定位(与滚动/缩放无关的来源),随后**用同一份夹具测得偏心 6–9px**;
-  //    · 补测后按审查报告的判据(缩放 1.0/1.2/0.8 × 最左/中/最右柱,偏差 ≤2px)实测:
-  //      最左 5.8/5.8/3.2px、中柱 5.3/5.3/3.7px、最右柱 −176.4/−176.4/−119.8px;
-  //      最右柱那个大数字是**设计分支**(柱子右缘离容器右缘仅 10.7px,216px 宽的浮层放不下 → 按规则翻到左侧),
-  //      不是坐标错;左/中柱的 3–6px 残差根因未定位。二项都登记为**发版阻断项**(见 WINDOWS-REVIEW-0.2.401 附);
-  //    · 早先另有一组数字 176.4px(连续 4 次)、179.4px(2 次),
-  //      我无法在合理轮次内定位(排查过:滚动、入场动画、vite 缓存、坐标系换算、offsetParent);
-  //    · 因此**不写**这条断言(写进去只会随机红),把它交给真机/后续轮次定位。
-  //    复现与判据见 `.devflow/WINDOWS-REVIEW-0.2.401.md`(缩放 1.0 / 1.2 / 0.8 × 最左 / 中 / 最右柱)。
+  // 说明:本用例**只**钉两件事 —— 浮层属于哪一根柱、浮层不许溢出图表容器;"有没有精确居中"由 C10d 单独钉。
+  // 定位实现返工过三轮(跨平台审查 0.2.401 必修-2 的追记):
+  //   · 第一轮:混用视觉像素(rect)与布局像素(offset/client)→ 界面默认 1.2 倍缩放下整块偏移;
+  //   · 第二轮:改成"由第几天 × 每柱宽算柱心"(不测量、与滚动无关),仍有 3–6px 残差,
+  //     且最右柱因"右侧放不下就翻到柱子左侧"偏出 100+px;当时的实测表与"未达标、发版阻断"的判定
+  //     见 `.devflow/WINDOWS-REVIEW-0.2.401.md` 附录(最左 5.8/5.8/3.2px、中 5.3/5.3/3.7px、最右 −176.4/−176.4/−119.8px);
+  //   · 第三轮(= 本提交):柱心与浮层尺寸都取自 rect(同一坐标系),再用**容器自身的视觉/布局比**一次换算;
+  //     居中优先、贴边兜底。同一份夹具实测(缩放 1.0 / 1.2 / 0.8 × 最左 / 中 / 最右柱):
+  //     居得下的柱偏差 ≤0.5px;最右柱几何上居不下(浮层 ≈180 布局px、柱心离容器右缘 60px,
+  //     居中要伸到容器外 ~30px,而容器外一圈是 `overflow:auto` 的 `home-usage-slot` → 会被裁或出横滚条),
+  //     按"偏心优于溢出"贴边,浮层完整落在容器内(实测右溢 ≤0.3px、偏差 −36.0/−36.0/−25.4px)。
+  //     取舍写进 C10d 与 `.devflow/INTERFACE-r131.md` 的契约条目。
+});
+
+test('C10d 浮层水平定位:能居中的柱必须居中(≤2px);贴边的柱按"偏心优于溢出"贴边且不溢出', async ({ page }) => {
+  // 判据来自 `.devflow/WINDOWS-REVIEW-0.2.401.md` 必修-2(界面缩放 ≠1 时视觉像素与布局像素混用 →
+  // 浮层与指针错位;默认缩放就是 1.2,不是边缘情况)。三档缩放 × 最左/中/最右柱。
+  //
+  // 有一条几何事实必须先说清(实测数据):浮层宽 ≈180 布局像素,容器宽 600、柱心最右 540 ——
+  // **最右柱在几何上不可能既居中又不溢出**(居中要让浮层伸到容器外 ~30px,而容器外一圈是
+  // `overflow:auto` 的 `home-usage-slot`:被裁或长横滚条,两条都比"偏心"更糟)。所以判据分两种:
+  //   · 居得下(柱心 ≥ 浮层宽/2 且 ≤ 容器宽 − 浮层宽/2)→ 偏差必须 ≤ 2px,且不溢出;
+  //   · 居不下(贴边的柱)→ 允许偏心,但必须不溢出容器(取舍:偏心优于溢出,溢出会被裁、还会盖住邻柱)。
+  // 实测参照(同一判据,2026-09-30):居得下的柱 0.36/0.48/0.05/0.48/−0.27/−0.23px;最右柱 −36.0/−36.0/−25.4px 且不溢出。
+  const body = typical();
+  await stubUsage(page, body);
+  await gotoHome(page);
+  await pickTab(page, 'models');
+  const days = body.byDay.map((r) => r.day).reverse();
+  const pick = [days[0], days[Math.floor(days.length / 2)], days[days.length - 1]];
+  for (const scale of [1.0, 1.2, 0.8]) {
+    await page.evaluate((v) => { document.documentElement.style.zoom = String(v); }, scale);
+    await page.waitForTimeout(250);
+    for (const day of pick) {
+      await page.locator(`[data-testid="home-usage-chart-bar"][data-day="${day}"]`).hover();
+      await expect(page.getByTestId('home-usage-chart-tip')).toBeVisible();
+      // 入场动画带 transform:多采样取最小偏差(动画只会从偏收敛到准)
+      let best = null;
+      for (let i = 0; i < 24; i += 1) {
+        const g = await page.evaluate((d) => {
+          const hit = document.querySelector(`[data-testid="home-usage-chart-bar"][data-day="${d}"] [data-hit]`);
+          const tip = document.querySelector('[data-testid="home-usage-chart-tip"]');
+          if (!hit || !tip) return null;
+          const box = tip.parentElement;
+          const br = box.getBoundingClientRect();
+          const ar = hit.getBoundingClientRect();
+          const tr = tip.getBoundingClientRect();
+          const k = br.width && box.offsetWidth ? br.width / box.offsetWidth : 1;
+          const vw = tr.width / k;                       // 浮层宽(布局像素)
+          const cx = (ar.left + ar.width / 2 - br.left) / k;   // 柱心(布局像素,相对容器)
+          return {
+            dev: Math.abs(tr.left + tr.width / 2 - (ar.left + ar.width / 2)),
+            vw, cx, boxW: box.offsetWidth,
+            overL: br.left - tr.left, overR: tr.right - br.right,
+          };
+        }, day);
+        if (!g) continue;
+        if (!best || g.dev < best.dev) best = g;
+        if (best.dev <= 0.5) break;
+        await page.waitForTimeout(40);
+      }
+      expect(best, `zoom=${scale} ${day}: 应能量到柱与浮层`).toBeTruthy();
+      const centerable = best.cx >= best.vw / 2 && best.cx <= best.boxW - best.vw / 2;
+      if (centerable) {
+        expect(best.dev, `zoom=${scale} ${day}: 居得下 → 偏差 ${best.dev.toFixed(1)}px 应 ≤ 2px`).toBeLessThanOrEqual(2);
+      } else {
+        // 贴边的柱:不要求居中,但必须落在容器内(否则会被裁)
+        expect(best.overL, `zoom=${scale} ${day}: 贴边柱也不许溢出左边(${best.overL.toFixed(1)}px)`).toBeLessThanOrEqual(1);
+        expect(best.overR, `zoom=${scale} ${day}: 贴边柱也不许溢出右边(${best.overR.toFixed(1)}px)`).toBeLessThanOrEqual(1);
+      }
+      expect(best.overL, `zoom=${scale} ${day}: 浮层不该溢出容器左侧(${best.overL.toFixed(1)}px)`).toBeLessThanOrEqual(1);
+      expect(best.overR, `zoom=${scale} ${day}: 浮层不该溢出容器右侧(${best.overR.toFixed(1)}px)`).toBeLessThanOrEqual(1);
+    }
+  }
+  await page.evaluate(() => { document.documentElement.style.zoom = ''; });
 });
 
 test('C10c 375×812(含界面缩放余量)用量块顶行不横滚', async ({ browser }) => {
