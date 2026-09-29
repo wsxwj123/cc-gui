@@ -114,6 +114,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
   const [range, setRange] = useState(() => readPref(RANGE_KEY, RANGE_KEYS, 'all'));
   const [ctip, setCtip] = useState(null);             // { day, pinned } —— 柱状图
   const [ctipPos, setCtipPos] = useState(null);
+  const [ctipRev, setCtipRev] = useState(0);          // 浮层/容器尺寸变化 → +1,让定位 effect 重算
   const [legendOpen, setLegendOpen] = useState(false);
   const mountedRef = useRef(false);
   const bootedRef = useRef(false);
@@ -304,7 +305,22 @@ export const HomeUsage = React.memo(function HomeUsage() {
     let top = barTop - vh - 6;
     if (top < 0) top = barTop + barH + 6;
     setCtipPos({ left: Math.round(left), top: Math.round(top) });
-  }, [ctipDay, chartH]);
+  }, [ctipDay, chartH, ctipRev]);
+
+  // 尺寸一变就重定位一次。为什么需要:上面那条 effect 只在 ctipDay / 图表高度变化时算一次,
+  // 而**浮层自己的布局宽度会随界面缩放档位变**(实测同一内容:1.0 档 185 布局px、1.2 档 180 布局px,
+  // WebKit 对 zoom 下的文本取整所致),容器宽度也会随窗口拖动而变 —— 定位时量到的宽度/柱心一旦过期,
+  // 浮层就会偏心几个像素,直到用户移开再悬停才自愈(C10d 在"半路换缩放档"的场景抓到过 2.6px)。
+  // 这里只做一件事:尺寸变化时把 counter +1 去触发上面那条 effect 重算;判据与算法仍只有一份。
+  useEffect(() => {
+    const el = ctipRef.current;
+    const box = el?.parentElement;
+    if (!ctipDay || !el || !box || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(() => setCtipRev((n) => n + 1));
+    ro.observe(el);
+    ro.observe(box);
+    return () => ro.disconnect();
+  }, [ctipDay]);
 
   // 格子数组只随 grid 变(回调都是稳定引用):hover 的 setTip 只重渲浮层节点,不重建几百个格子。
   const cellNodes = useMemo(() => (grid ? grid.cells.map((cell) => (cell.future
