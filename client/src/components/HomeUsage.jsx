@@ -91,7 +91,8 @@ function Bar({ day, colorOf, onEnter, onLeave, onClick, leftPct, widthPct, plotH
           data-segment-model={s.model}
           data-value={s.value}
           fill="currentColor"
-          className={`pointer-events-none ${colorOf(s.model)}`}
+          fillOpacity={colorOf(s.model).opacity}
+          className={`pointer-events-none ${colorOf(s.model).fill}`}
           x={`${leftPct}%`}
           y={PAD_TOP + s.y}
           width={`${widthPct}%`}
@@ -261,22 +262,34 @@ export const HomeUsage = React.memo(function HomeUsage() {
     setTipPos({ left, top });
   }, [tipCell]);
 
-  // 柱状图浮层定位:一律用 getBoundingClientRect(视口坐标)—— 页面带界面缩放时 clientWidth/offsetTop
-  // 不在同一坐标系,与热力图浮层同一套判法(热力图那份用 offset 是因为它的根就是 offsetParent)。
+  // 柱状图浮层定位。三条硬约束(每条都是我踩过之后写下的):
+  //   ① 参考系必须与浮层的绝对定位父级一致 —— 浮层挂在**图表容器**(chartWrapRef 里那层 relative)上,
+  //      不是外层 wrap(它有内边距,拿它当参考系等于把内边距算两遍);
+  //   ② 长度一律用 getBoundingClientRect(querySelector 拿到的是 SVG 元素:`offsetLeft` / `offsetParent`
+  //      对 SVG 没有意义,恒为 0 —— 那会让浮层永远贴在左上角);
+  //   ③ 一律取 rect(视口坐标)并在**同一次布局读取**里换算成相对量,这样界面缩放(默认 1.2 倍)与
+  //      页面横向滚动都不影响结果(不能混用 clientWidth / offsetTop 这类布局像素)。
+  // 水平方向优先贴柱心(判断"这是哪一天"靠它),右侧放不下翻到柱子左侧,两侧都放不下才夹回容器内。
   useLayoutEffect(() => {
     const wrap = chartWrapRef.current;
     const el = ctipRef.current;
     if (!ctipDay || !wrap || !el) { setCtipPos(null); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ctipDay.day))) { setCtipPos(null); return; }
     const barEl = wrap.querySelector(`[data-testid="home-usage-chart-bar"][data-day="${ctipDay.day}"] [data-hit]`);
-    if (!barEl) { setCtipPos(null); return; }
-    const wrapRect = wrap.getBoundingClientRect();
+    const boxEl = el.parentElement;
+    if (!barEl || !boxEl) { setCtipPos(null); return; }
+    const boxRect = boxEl.getBoundingClientRect();
     const barRect = barEl.getBoundingClientRect();
-    const cx = barRect.left + barRect.width / 2 - wrapRect.left;
-    const left = Math.max(0, Math.min(Math.round(cx - el.offsetWidth / 2), (wrap.clientWidth || 0) - el.offsetWidth));
-    let top = barRect.top - wrapRect.top - el.offsetHeight - 6;
-    if (top < 0) top = barRect.bottom - wrapRect.top + 6;
-    setCtipPos({ left, top });
+    const elRect = el.getBoundingClientRect();
+    const cx = barRect.left + barRect.width / 2 - boxRect.left;
+    const barW = barRect.width;
+    let left = cx - elRect.width / 2;
+    if (left + elRect.width > boxRect.width) left = cx - barW / 2 - elRect.width - 6;
+    if (left < 0) left = cx + barW / 2 + 6;
+    left = Math.max(0, Math.min(left, Math.max(0, boxRect.width - elRect.width)));
+    let top = barRect.top - boxRect.top - elRect.height - 6;
+    if (top < 0) top = barRect.bottom - boxRect.top + 6;
+    setCtipPos({ left: Math.round(left), top: Math.round(top) });
   }, [ctipDay]);
 
   // 格子数组只随 grid 变(回调都是稳定引用):hover 的 setTip 只重渲浮层节点,不重建几百个格子。
@@ -307,8 +320,8 @@ export const HomeUsage = React.memo(function HomeUsage() {
   const barGap = barW >= 4 ? 1 : 0;
   // 柱子的颜色按序列(占比排名)取:同一模型在所有柱里颜色一致,与图例色块同源。
   const colorOf = useMemo(() => {
-    const map = new Map(chartData.series.map((s) => [s.model, s.fill]));
-    return (model) => map.get(model) || 'text-accent/25';
+    const map = new Map(chartData.series.map((s) => [s.model, { fill: s.fill, opacity: s.opacity }]));
+    return (model) => map.get(model) || { fill: 'text-accent', opacity: 0.25 };
   }, [chartData.series]);
   // 柱子节点 memo 掉(同 cellNodes 的手法):悬停柱子会 setCtip 重渲,不 memo 的话每动一下鼠标
   // 都要重建最多 400 根柱子 × 每柱模型数个 <rect>(代码审查 R3;安全审计也点了"DOM 无界放大")。
@@ -338,7 +351,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
   const pickRange = (k) => { setRange(k); writePref(RANGE_KEY, k); };
   return (
     <div ref={rootRef} data-testid="home-usage" className="w-full min-w-0">
-      <div className="flex items-center gap-2 mb-2 min-w-0">
+      <div className="flex flex-wrap items-center gap-2 mb-2 min-w-0">
         {/* r130 的「用量总览」标题保留在最左(它也是 r131 C9a 的"用量块顶部行"锚点)。 */}
         <span data-testid="home-usage-title" className="text-[11px] text-ink-muted font-body shrink-0">用量总览</span>
         {/* 左:分页;右:范围。375px 下两者都要放得下 → 分组控件本身不换行,由父级的 min-w-0 收窄。 */}
@@ -477,7 +490,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
                   <div key={m.model} data-testid="home-usage-legend-row" data-model={m.model} data-share={m.share.toFixed(2)} data-block={m.block}
                     className="flex items-center justify-between gap-1 py-1 min-w-0"
                     title={`${m.model} · ${abbrevTokens(m.input)} in · ${abbrevTokens(m.output)} out · ${m.share.toFixed(1)}% · ${cost.subscription ? '订阅内' : cost.usd != null ? formatCost(displayUsd(cost.usd, cost.currency)) + (cost.partial ? ' *' : '') : '无定价数据'}`}>
-                    <span className={`inline-block w-2.5 h-2.5 rounded-[2px] shrink-0 ${m.shade}`} aria-hidden="true" />
+                    <span className={`inline-block w-2.5 h-2.5 rounded-[2px] shrink-0 ${m.shade}`} style={{ opacity: m.opacity }} aria-hidden="true" />
                     <span data-testid="home-usage-legend-name" title={m.model}
                       className="flex-1 min-w-0 truncate text-[11px] font-body text-ink">{m.name}</span>
                     <span className="shrink-0 text-[10px] font-mono text-ink-faint whitespace-nowrap">

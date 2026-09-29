@@ -295,12 +295,18 @@ export function modelsInRange(stats, range, todayKey) {
  * Tailwind 的 `bg-*` 只写 background-color,SVG 图形**不认**(rect 得用 fill)。
  * 所以 SVG 那边用 `fill="currentColor"` + 同色系的 `text-*`,不复制第二套色值。
  */
-export const MODEL_SHADES = [
-  'bg-accent', 'bg-accent/80', 'bg-accent/64', 'bg-accent/50', 'bg-accent/38', 'bg-accent/28', 'bg-accent/20',
-];
-/** SVG 段用的颜色 class(text-* 只改 fill;rect 上用 fill="currentColor" 吃它)。 */
-export const modelFill = (rank) => MODEL_SHADES[Math.min(Math.max(rank, 0), MODEL_SHADES.length - 1)].replace(/^bg-/, 'text-');
-export const shadeClass = (rank) => MODEL_SHADES[Math.min(Math.max(rank, 0), MODEL_SHADES.length - 1)];
+// 深浅用**内联 opacity**(不是 `bg-accent/64` 这类 Tailwind 任意透明度类):
+// 实测构建产物里只生成了代码里**逐字出现**的那几个档(bg-accent/20、/28、/38、/45、/80 …),
+// 我这份色带里的 /64、/50 在 CSS 里根本不存在 —— 段与色块会静默回落,图例和柱子对不上颜色
+// (platform-compat-review 0.2.401 必修-1,用 Tailwind 真实 compile 抓到)。内联 opacity 不依赖
+// 扫描器是否收录该类,深浅一定生效;基色仍取主题 token(accent),主题切换照旧。
+export const MODEL_OPACITY = [1, 0.8, 0.64, 0.5, 0.38, 0.28, 0.2];
+export const modelOpacity = (rank) => MODEL_OPACITY[Math.min(Math.max(rank, 0), MODEL_OPACITY.length - 1)];
+/** 色块 / 柱段的基色 class(深浅由 modelOpacity 决定的 opacity 叠上去)。 */
+export const MODEL_SHADES = MODEL_OPACITY.map(() => 'bg-accent');
+export const shadeClass = () => 'bg-accent';
+/** SVG 段:基色走 text-accent + fill="currentColor",深浅走内联 opacity。 */
+export const modelFill = () => 'text-accent';
 
 /**
  * 模型图例:按四项合计降序 → [{ model, name(短名), input, output, total(四项合计), share(占全部模型四项
@@ -320,7 +326,8 @@ export function legendItems(stats, range, todayKey) {
     name: shortModelName(m.model),
     share: grand > 0 ? (m.total / grand) * 100 : 0,
     shade: shadeClass(rank),
-    block: String(Math.min(rank, MODEL_SHADES.length - 1)),
+    opacity: modelOpacity(rank),
+    block: String(Math.min(rank, MODEL_OPACITY.length - 1)),
     rank,
   }));
 }
@@ -371,7 +378,7 @@ export function stackedByDay(stats, { maxBar = 0 } = {}) {
   }
   const series = [...modelTotals.entries()]
     .sort((a, b) => b[1] - a[1])
-    .map(([model], i) => ({ model, name: shortModelName(model), shade: shadeClass(i), fill: modelFill(i), rank: i, block: String(Math.min(i, MODEL_SHADES.length - 1)) }));
+    .map(([model], i) => ({ model, name: shortModelName(model), shade: shadeClass(i), fill: modelFill(i), opacity: modelOpacity(i), rank: i, block: String(Math.min(i, MODEL_OPACITY.length - 1)) }));
   for (const d of daysOut) d.segments = series.filter((s) => num(d.values[s.model]) > 0);
   const max = daysOut.reduce((m, d) => Math.max(m, d.total), 0);
   return { series, days: daysOut, max };
