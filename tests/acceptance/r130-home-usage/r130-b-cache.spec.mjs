@@ -1,6 +1,8 @@
 // r130 · B 组:磁盘缓存路径与错误契约(INTERFACE §B 九条逐条)。每条用例自己造隔离 HOME、自己起/停实例;不起浏览器。
 // 手法:先用一台实例冷扫把缓存"造"出来(prime)→ 停掉 → 改缓存文件 / 改夹具 / 挪目录 → 再起一台观察首请求与收敛。
 // 「修前」= 当前缓存是 version 1、无 tz、无 overview、无冷却 → v2 形状/升级/tz/冷却相关全红;既有行为(回放秒回、坏文件冷路径、写失败仍 200、并发合流)绿。
+// ⚠️ r131 起:prime() 落盘的是**当前版本**(v3),所以 B1a / B1b 验的是"当前版本回放"——sig 相同不重算正由
+// B1a 守着;而"更老的版本必须升级"由 B2(v1)、r131 B2(v2) 守。三条各管一段,不冲突。
 import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -57,7 +59,7 @@ test('B0 冷扫落盘的文件是新形状:{version:3, tz:"Asia/Shanghai", sig, 
   expect(Object.keys(c.data.ranges || {})).toEqual(expect.arrayContaining(['7d', '30d']));
 });
 
-test('B1a 合法 v2 回放且 sig 相同:首请求旧值 stale=true → 随后 stale=false、不重算(scannedAt 不动、文件不动、不广播)', async () => {
+test('B1a 合法**当前版本**回放且 sig 相同:首请求旧值 stale=true → 随后 stale=false、不重算(scannedAt 不动、文件不动、不广播)', async () => {
   const ctx = await prime('b1a-replay-same-sig');
   const two = await boot(ctx);
   const cap = await wsCapture(two.port);
@@ -75,7 +77,7 @@ test('B1a 合法 v2 回放且 sig 相同:首请求旧值 stale=true → 随后 s
   cap.close();
 });
 
-test('B1b 合法 v2 回放但 sig 不同:首请求旧值 stale=true → 重算落盘、新记录出现、广播 usage-updated 恰好一次', async () => {
+test('B1b 合法**当前版本**回放但 sig 不同:首请求旧值 stale=true → 重算落盘、新记录出现、广播 usage-updated 恰好一次', async () => {
   const ctx = await prime('b1b-replay-diff-sig');
   appendModel(ctx.home, 'r130-R1');
   const two = await boot(ctx);
@@ -172,7 +174,7 @@ const UNTRUSTED = [
   ['version 3 但缺 ranges', (j) => { const data = { ...j.data }; delete data.ranges; return { ...j, version: 3, tz: TZ, data }; }],
 ];
 for (const [name, mutate] of UNTRUSTED) {
-  test(`B4 不信任的缓存文件(${name})→ 冷路径:首请求 200 完整新形状 stale=false,文件被覆盖成合法 v2`, async () => {
+  test(`B4 不信任的缓存文件(${name})→ 冷路径:首请求 200 完整新形状 stale=false,文件被覆盖成合法**当前版本**`, async () => {
     const ctx = await prime(`b4-${name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`);
     rewriteCache(ctx.file, mutate);
     const poisoned = fs.readFileSync(ctx.file, 'utf8');

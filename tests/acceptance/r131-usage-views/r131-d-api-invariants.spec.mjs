@@ -88,8 +88,12 @@ test('D1h 新根键形状:byDayModel 是 day → model → 五项的对象(键�
   for (const day of days) {
     expect(typeof body.byDayModel[day], `byDayModel[${day}]`).toBe('object');
     for (const [model, row] of Object.entries(body.byDayModel[day])) {
-      expect(sorted(Object.keys(row)), `byDayModel[${day}][${model}] 五项`).toEqual(sorted(['input', 'output', 'cacheRead', 'cacheWrite', 'calls']));
-      for (const v of Object.values(row)) expect(Number.isInteger(v) && v >= 0, `byDayModel[${day}][${model}] 应是非负整数`).toBe(true);
+      expect(sorted(Object.keys(row)), `byDayModel[${day}][${model}] = 五项 + byPeriod`).toEqual(sorted(['input', 'output', 'cacheRead', 'cacheWrite', 'calls', 'byPeriod']));
+      for (const [f, v] of Object.entries(row)) {
+        if (f === 'byPeriod') continue;
+        expect(Number.isInteger(v) && v >= 0, `byDayModel[${day}][${model}].${f} 应是非负整数`).toBe(true);
+      }
+      expect(sorted(Object.keys(row.byPeriod)), `byDayModel[${day}][${model}].byPeriod 三桶`).toEqual(['offPeak', 'peak', 'unknown']);
     }
   }
   // byDayModel 的每日合计必须与 byDay 对得上(byDayModel 只覆盖 byDay 窗口内的天)
@@ -112,8 +116,11 @@ test('D1h 新根键形状:byDayModel 是 day → model → 五项的对象(键�
     expect(range.peakHour === null || (Number.isInteger(range.peakHour) && range.peakHour >= 0 && range.peakHour <= 23)).toBe(true);
     expect(range.favoriteModel === null || typeof range.favoriteModel === 'string').toBe(true);
     for (const m of range.byModel) {
-      expect(sorted(Object.keys(m)), `ranges.${k}.byModel 行`).toEqual(sorted(['model', 'input', 'output', 'cacheRead', 'cacheWrite', 'calls']));
+      expect(sorted(Object.keys(m)), `ranges.${k}.byModel 行 = 五项 + model + byPeriod`).toEqual(sorted(['model', 'input', 'output', 'cacheRead', 'cacheWrite', 'calls', 'byPeriod']));
       for (const f of ['input', 'output', 'cacheRead', 'cacheWrite', 'calls']) expect(Number.isInteger(m[f]) && m[f] >= 0).toBe(true);
+      for (const f of ['input', 'output', 'cacheRead', 'cacheWrite', 'calls']) {
+        expect(m.byPeriod.peak[f] + m.byPeriod.offPeak[f] + m.byPeriod.unknown[f], `ranges.${k}.byModel ${m.model}.${f} 三桶之和`).toBe(m[f]);
+      }
     }
     // 7d ⊆ 30d:窗口嵌套 → 每个模型的四项与 calls 都不更大
     for (const m of range.byModel) {

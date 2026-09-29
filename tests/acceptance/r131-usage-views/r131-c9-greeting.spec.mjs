@@ -36,7 +36,7 @@ test('C9b 招呼 + 用量块作为一整组垂直居中(上方留白与下方留
   expect(gapTop, `上方留白 ${Math.round(gapTop)}px / 下方 ${Math.round(gapBottom)}px`).toBeGreaterThan(gapBottom * 0.1);
 });
 
-test('C9c 布局锁:DOM 顺序不过关 + 输入框仍贴底 + 分屏分支逐字不变', async ({ page }) => {
+test('C9c 布局锁:DOM 顺序 招呼→用量→输入框 + 输入框仍贴底 + 分屏分支逐字不变', async ({ page }) => {
   await stub(page);
   await gotoHome(page);
   const order = await page.evaluate(() => {

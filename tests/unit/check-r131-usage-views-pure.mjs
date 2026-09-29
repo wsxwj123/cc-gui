@@ -290,7 +290,12 @@ const STATS = {
   const o = rangeOverview(edge, '7d', T);
   eq(o.input, 1, '兜底窗口 = [今天 − 6, 今天],起点当天的算、前一天的不算');
   ok(!('2026-09-22' in (o.byDay || {})), '窗口外的天不参与');
-  eq(o.byModel.length, 1, '没有 byDayModel 时按 byDay 归到 byModel 第一名');
+  // 没有 byDayModel 时**不编造**模型分组:byDay 行里根本没有模型维度,凭全量第一名冒充会让
+  // 图例显示"一个模型、占比 100%"(代码审查 R2)。byModel 留空,由界面说明"没有模型明细"。
+  eq(o.byModel, [], '缺 byDayModel 的兜底:byModel 为空,不编造分组');
+  eq(o.tokens ?? tokensOf(o), tokensOf(o), '四项 token 仍然算得出来(卡片数字不受影响)');
+  const legacy = { ...edge, byModel: [{ model: 'real-top-model', input: 1, calls: 1 }] };
+  eq(rangeOverview(legacy, '7d', T).byModel, [], '就算全量 byModel 有名字也不拿来冒充窗口内的分组');
 }
 
 console.log(`check-r131-usage-views-pure: PASS(${n} 条断言)`);

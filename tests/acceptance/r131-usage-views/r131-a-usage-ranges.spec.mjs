@@ -45,11 +45,18 @@ test('A1 byDayModel 是 day → model → 五项的对象;'+"'unknown'"+' 键成
   });
   expect(sorted(Object.keys(body.byDayModel)), '只许有夹具造出的两个日期 + unknown').toEqual(sorted([D1, 'unknown']));
   expect(sorted(Object.keys(body.byDayModel[D1]))).toEqual(sorted([M1, M2]));
-  expect(sorted(Object.keys(body.byDayModel[D1][M1]))).toEqual(sorted([...FOUR, 'calls']));
+  // 行 = 五项 + byPeriod 三桶(分时段计价的模型要靠它才在按范围的图例里算得出金额)
+  expect(sorted(Object.keys(body.byDayModel[D1][M1]))).toEqual(sorted([...FOUR, 'calls', 'byPeriod']));
+  expect(sorted(Object.keys(body.byDayModel[D1][M1].byPeriod))).toEqual(['offPeak', 'peak', 'unknown']);
   expect(four(dmRow(body, D1, M1)), `${M1} 在 ${D1} 的四项 = 收尾那片(去重后)`).toEqual([100, 20, 300, 40]);
   expect(dmRow(body, D1, M1).calls).toBe(1);
   expect(four(dmRow(body, D1, M2))).toEqual([7, 3, 0, 0]);
   expect(four(dmRow(body, 'unknown', M2)), '无时间戳的记录进 unknown 键').toEqual([7, 3, 0, 0]);
+  // 分时段三桶之和 = 行合计(与根上 byModel 行同一约定)
+  const dm0 = dmRow(body, D1, M1);
+  for (const f of FOUR.concat('calls')) {
+    expect(dm0.byPeriod.peak[f] + dm0.byPeriod.offPeak[f] + dm0.byPeriod.unknown[f], `byDayModel[${D1}][${M1}].${f} 的三桶之和`).toBe(dm0[f]);
+  }
   // 与 byDay 的同日合计对得上(byDayModel 是 byDay 的按模型拆分)
   const day = dayRow(body, D1);
   const sum = FOUR.map((k) => dmRow(body, D1, M1)[k] + dmRow(body, D1, M2)[k]);
@@ -87,7 +94,12 @@ test('A3 ranges 只有 7d / 30d 两个键,各含约定字段;7d 窗口 = 今天�
   for (const k of RANGE_KEYS) {
     const range = body.ranges[k];
     expect(sorted(Object.keys(range)), `ranges.${k} 字段`).toEqual(sorted(RANGE_FIELDS));
-    expect(sorted(Object.keys(range.byModel[0]))).toEqual(sorted([...FOUR, 'calls', 'model']));
+    expect(sorted(Object.keys(range.byModel[0]))).toEqual(sorted([...FOUR, 'calls', 'model', 'byPeriod']));
+    // 反向:分时段三桶之和必须等于行合计(否则金额会用错的分档数据算)
+    const row0 = range.byModel[0];
+    for (const f of ['input', 'output', 'cacheRead', 'cacheWrite', 'calls']) {
+      expect(row0.byPeriod.peak[f] + row0.byPeriod.offPeak[f] + row0.byPeriod.unknown[f], `ranges.${k}.byModel[0].${f} 的三桶之和`).toBe(row0[f]);
+    }
   }
   const t7 = sum4(STD) * 2; const t30 = sum4(STD) * 4;
   expect(body.ranges['7d'].input).toBe(STD[0] * 2);
@@ -208,4 +220,18 @@ test('A8 特殊模型名走普通键(不进原型链):byDayModel 里能查到自
   expect(four(dmRow(body, D, '__proto__'))).toEqual(STD);
   expect(body.byDayModel[D].constructor.calls).toBe(1);
   expect(body.ranges['7d'].byModel.map((m) => m.model)).toEqual(expect.arrayContaining(['__proto__', 'constructor']));
+});
+
+test('A9 byDayModel 与 byDay 的窗口一致(最多 400 天 + 1 行 unknown),不许无界增长', async () => {
+  // 造 405 个不同的历史日期(每个都有记录)。契约 INTERFACE-r131 §A:两份数据都只保留最近 400 天。
+  const days = Array.from({ length: 405 }, (_, i) => dayAgo(i + 1));
+  const { body } = await run('a9-window-bound', (home) => {
+    writeJsonl(sessionFile(home, S1), days.map((d, i) => assistant({ ts: isoAt(d, 12), model: `r131-w${i % 7}`, u: [10, 1, 0, 0] })));
+  });
+  expect(body.byDay.length, 'byDay 最多 400 行').toBeLessThanOrEqual(400);
+  const byDayModelDays = Object.keys(body.byDayModel);
+  expect(byDayModelDays.length, `byDayModel 也必须 ≤ 400(实际 ${byDayModelDays.length};它曾漏了截断,见安全审计新-2)`).toBeLessThanOrEqual(400);
+  expect(byDayModelDays.length, 'byDayModel 的天数与 byDay 行数一致(同一窗口)').toBe(body.byDay.length);
+  // 两份数据覆盖的天必须逐字相同(不能一个截了另一个没截)
+  expect([...byDayModelDays].sort()).toEqual(body.byDay.map((r) => r.day).sort());
 });

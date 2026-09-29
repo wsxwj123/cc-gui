@@ -77,7 +77,7 @@ const legendRows = (page) => page.getByTestId('home-usage-legend-row');
 const chartBars = (page) => page.getByTestId('home-usage-chart-bar');
 const chart = (page) => page.getByTestId('home-usage-chart');
 const rangeActive = (page) => page.locator('[data-testid^="home-usage-range-"][aria-pressed="true"]');
-const tabActive = (page) => page.locator('[data-testid^="home-usage-tab-"][aria-pressed="true"]');
+const tabActive = (page) => page.locator('[data-testid^="home-usage-tab-"][aria-selected="true"]');
 const chartSvg = (page) => chart(page).locator('svg').first();
 
 // ───────────── C1 顶部一行:分页 + 范围 ─────────────
@@ -114,7 +114,7 @@ test('C1b 分页与范围选中态记在 localStorage(cgui- 前缀键),刷新后
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(chart(page), '刷新后仍在模型分页').toBeVisible({ timeout: 20_000 });
   await expect(rangeActive(page), '刷新后仍是 7 天').toHaveAttribute('data-testid', 'home-usage-range-7d');
-  await expect(page.getByTestId('home-usage-tab-models')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('home-usage-tab-models')).toHaveAttribute('aria-selected', 'true');
 });
 
 // ───────────── C2 分页切换 ─────────────
@@ -400,28 +400,93 @@ test('C5d tap(触屏上下文,375×812)点柱子 → 由 click 显示并钉住�
 
 // ───────────── C6 375px 窄屏 ─────────────
 
-test('C6a 375×812:无横滚,柱状图横向压到容器宽,图例文字截断', async ({ browser }) => {
+// 375px 下图例名(11px 字号)的可见宽度下限:低于它连 "claude-" 前缀都读不全,用户无从区分 opus / sonnet。
+const MIN_NAME_W = 40;
+
+test('C6a 375×812:整页不横滚、柱状图不超容器、图例每行不溢出、长模型名真被裁(title 完整)、输入框在视口内', async ({ browser }) => {
+  // 夹具三行图例:第一行的模型 id 去掉 8 位日期后缀后仍 45 字符 → 375px 下必然宽于可用列宽,
+  // 于是"被裁"是可证的(而不是只看 class 名)。后两行是真 Claude / 第三方短名做对照。
+  const LONG = 'claude-opus-4-1-experimental-long-variant-name-20250805';
+  const t = (u, n = 1) => ({ input: u.input * n, output: u.output * n, cacheRead: u.cacheRead * n, cacheWrite: u.cacheWrite * n, calls: n });
+  const day0 = today();
+  const byModel = [row(LONG, t(TOK.opus, 6)), row(OPUS, t(TOK.opus, 2)), row(DEEP, t(TOK.deep, 1))];
+  const byDayModel = dmOf(day0, { [LONG]: t(TOK.opus, 6), [OPUS]: t(TOK.opus, 2), [DEEP]: t(TOK.deep, 1) });
+  const byDay = [dayEntry(day0, sum4(t(TOK.opus, 6)) + sum4(t(TOK.opus, 2)) + sum4(t(TOK.deep, 1)), { messages: 3, sessions: 1 })];
   const ctx = await browser.newContext({ viewport: { width: 375, height: 812 }, baseURL: process.env.R131_UI_BASE, timezoneId: 'Asia/Shanghai', locale: 'zh-CN' });
   const page = await ctx.newPage();
   try {
-    await stubUsage(page, typical());
+    await stubUsage(page, payload({ total: { sessionCount: 1 }, byDay, byModel, byDayModel }));
     await gotoHome(page);
     await pickTab(page, 'models');
-    const m = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth }));
-    expect(m.sw, `不该横滚(scrollWidth ${m.sw} ≤ innerWidth ${m.iw})`).toBeLessThanOrEqual(m.iw);
-    const u = await usage(page).boundingBox();
-    const svg = await chartSvg(page).boundingBox();
-    expect(svg.width, '柱状图宽度不超过容器').toBeLessThanOrEqual(u.width + 1);
-    expect(svg.width).toBeGreaterThan(200);
-    // 图例行整体不许溢出容器(模型名 + in/out + 占比在 375px 下要放得下)
-    const rowOverflow = await legendRows(page).first().evaluate((el) => el.scrollWidth - el.clientWidth);
-    expect(rowOverflow, `图例行不该溢出容器(scrollWidth - clientWidth = ${rowOverflow};1px 是子像素取整)`).toBeLessThanOrEqual(1);
-    // truncate 机制仍在:超长模型名必须被裁掉,完整名字靠 title 保底
-    const long = legendRows(page).first().locator('[data-testid="home-usage-legend-name"]');
-    const clipped = await long.evaluate((el) => el.scrollWidth > el.clientWidth + 1 || el.classList.contains('truncate'));
-    expect(clipped, '模型名必须有 truncate(超长时裁掉,title 里是完整 id)').toBe(true);
-    expect(await long.getAttribute('title'), 'title = 完整模型 id').toBeTruthy();
-    await expect(homeInput(page)).toBeVisible();
+    const rows = legendRows(page);
+    await expect(rows, '夹具三个模型各一行').toHaveCount(3);
+    await expect(chartSvg(page)).toBeVisible();
+
+    // ① 整页不横滚(html 与 body 都量,避免只压住其中一个)
+    const doc = await page.evaluate(() => ({ hsw: document.documentElement.scrollWidth, bsw: document.body.scrollWidth, iw: innerWidth }));
+    expect(doc.hsw, `整页不该横滚:documentElement.scrollWidth ${doc.hsw} ≤ innerWidth ${doc.iw}`).toBeLessThanOrEqual(doc.iw);
+    expect(doc.bsw, `body 不该横滚:body.scrollWidth ${doc.bsw} ≤ innerWidth ${doc.iw}`).toBeLessThanOrEqual(doc.iw);
+
+    // ② 柱状图宽度 ≤ 容器宽度,且左右两缘都落在用量块里;同时不能被压塌(要"压到容器宽"而不是留一条缝)
+    const [u, svg, wrap] = await Promise.all([usage(page).boundingBox(), chartSvg(page).boundingBox(), chart(page).boundingBox()]);
+    expect(u.x + u.width, `用量块右缘 ${(u.x + u.width).toFixed(1)} 也在视口内(≤ ${doc.iw})`).toBeLessThanOrEqual(doc.iw + 1);
+    expect(svg.width, `SVG 宽 ${svg.width.toFixed(1)} ≤ 用量块宽 ${u.width.toFixed(1)}(+1px 子像素)`).toBeLessThanOrEqual(u.width + 1);
+    expect(svg.width, `SVG 宽 ${svg.width.toFixed(1)} 应占到容器宽 ${u.width.toFixed(1)} 的 75% 以上(压到容器宽,不是塌成一条)`).toBeGreaterThan(u.width * 0.75);
+    expect(svg.x, `SVG 左缘 ${svg.x.toFixed(1)} 不超出用量块左缘 ${u.x.toFixed(1)}`).toBeGreaterThanOrEqual(u.x - 1);
+    expect(svg.x + svg.width, `SVG 右缘 ${(svg.x + svg.width).toFixed(1)} 不超出用量块右缘 ${(u.x + u.width).toFixed(1)}`).toBeLessThanOrEqual(u.x + u.width + 1);
+    expect(wrap.x + wrap.width, '图表容器右缘不超出用量块').toBeLessThanOrEqual(u.x + u.width + 1);
+
+    // ③ 图例每一行都不溢出它的容器:行矩形 ⊆ legend 矩形,且行内内容不撑出行的 content box
+    const legendBox = await page.getByTestId('home-usage-legend').boundingBox();
+    const data = await rows.evaluateAll((els) => els.map((el) => {
+      const name = el.querySelector('[data-testid="home-usage-legend-name"]');
+      const rb = el.getBoundingClientRect(); const nb = name.getBoundingClientRect();
+      return {
+        model: el.getAttribute('data-model'),
+        rowOverflow: el.scrollWidth - el.clientWidth,
+        rowLeft: rb.left, rowRight: rb.right,
+        nameW: name.clientWidth, nameScrollW: name.scrollWidth, nameRight: nb.right,
+        title: name.getAttribute('title'),
+      };
+    }));
+    for (const d of data) {
+      expect(d.rowLeft, `行 ${d.model} 左缘不超出图例容器`).toBeGreaterThanOrEqual(legendBox.x - 1);
+      expect(d.rowRight, `行 ${d.model} 右缘 ${d.rowRight.toFixed(1)} 不超出图例容器右缘 ${(legendBox.x + legendBox.width).toFixed(1)}`).toBeLessThanOrEqual(legendBox.x + legendBox.width + 1);
+      expect(d.rowOverflow, `行 ${d.model} 内容不溢出(scrollWidth - clientWidth = ${d.rowOverflow}px)`).toBeLessThanOrEqual(1);
+      expect(d.nameRight, `行 ${d.model} 的模型名右缘不撑出行`).toBeLessThanOrEqual(d.rowRight + 1);
+      // ④ 模型名的可见宽度是正数且 ≥ 40px:11px 字号一个字符约 5.5–6.5px,40px ≈ 6–7 个字符,
+      //    刚好读全 "claude-" 前缀;再窄只剩 4 个字符,区分不了 opus / sonnet。
+      expect(d.nameW, `模型名可见宽度 ${d.nameW}px 必须 ≥ ${MIN_NAME_W}px(${d.model})`).toBeGreaterThanOrEqual(MIN_NAME_W);
+    }
+
+    // ⑤ 名字长于可用宽度时真的被裁:先用"同字体的量具"证明完整短名确实放不下(前提非空),再看裁切结果
+    expect(data[0].model, '按占比降序:长名模型应排第一行').toBe(LONG);
+    const longRow = data[0];
+    const longShort = LONG.replace(/-\d{8}$/, '');
+    const naturalW = await rows.nth(0).locator('[data-testid="home-usage-legend-name"]').evaluate((el, shortName) => {
+      const cs = getComputedStyle(el);
+      const probe = document.createElement('span');
+      probe.style.position = 'absolute'; probe.style.left = '-10000px'; probe.style.top = '0'; probe.style.whiteSpace = 'nowrap';
+      probe.style.fontFamily = cs.fontFamily; probe.style.fontSize = cs.fontSize; probe.style.fontWeight = cs.fontWeight;
+      probe.style.fontStyle = cs.fontStyle; probe.style.letterSpacing = cs.letterSpacing; probe.style.wordSpacing = cs.wordSpacing;
+      probe.textContent = shortName;
+      (document.body || document.documentElement).appendChild(probe);
+      const w = probe.getBoundingClientRect().width;
+      probe.remove();
+      return w;
+    }, longShort);
+    expect(naturalW, `前提:完整短名「${longShort}」(${longShort.length} 字符,自然宽 ${naturalW.toFixed(1)}px)确实放不下 ${longRow.nameW}px 的列`).toBeGreaterThan(longRow.nameW);
+    expect(longRow.nameScrollW, `长名必须真被裁:scrollWidth ${longRow.nameScrollW} > clientWidth ${longRow.nameW}`).toBeGreaterThan(longRow.nameW + 1);
+    expect(longRow.title, 'title 是完整模型 id(不是短名)').toBe(LONG);
+    expect(data.some((d) => d.nameScrollW > d.nameW + 1), '夹具里至少有一行真的被裁').toBe(true);
+
+    // ⑥ 输入框整个矩形都在视口内(不是只有一点露在视口里)
+    const ib = await homeInput(page).boundingBox();
+    expect(ib, '输入框应有几何矩形(在视口内)').not.toBeNull();
+    expect(ib.x, `输入框左缘 ${ib.x.toFixed(1)} 在视口内`).toBeGreaterThanOrEqual(-1);
+    expect(ib.x + ib.width, `输入框右缘 ${(ib.x + ib.width).toFixed(1)} ≤ 视口宽 375`).toBeLessThanOrEqual(375 + 1);
+    expect(ib.y, `输入框上缘 ${ib.y.toFixed(1)} 在视口内`).toBeGreaterThanOrEqual(-1);
+    expect(ib.y + ib.height, `输入框下缘 ${(ib.y + ib.height).toFixed(1)} ≤ 视口高 812`).toBeLessThanOrEqual(812 + 1);
   } finally { await ctx.close(); }
 });
 
@@ -436,6 +501,79 @@ test('C6b 375×812:总览分页八卡仍两列,热力图仍在,页面不横滚',
     expect(m.sw).toBeLessThanOrEqual(m.iw);
     expect(m.sh, '单屏首页整页不滚(溢出在图区内部滚)').toBeLessThanOrEqual(m.ih);
   } finally { await ctx.close(); }
+});
+
+// C4a 已确立的"费用列可见形式":金额(¥/$)或占位(「—」/「订阅内」)。
+const FEE_COL_RE = /[¥$]|—|订阅内/;
+
+test('C6c 费用列:窄屏(<640px)收进图例行的 title,宽屏(1440×900)在行内看得见', async ({ browser }) => {
+  // 同一个载荷、只换视口宽度。三行覆盖费用列的三种可见形式(INTERFACE §C3):
+  //   OPUS   = Claude + 订阅态 → 占位「订阅内」(按量计费的机器上会是金额,所以不钉死这一行)
+  //   PRICED = 非 Claude + 官方价目表里有单价 → 必须显示真实金额(¥…),证明宽屏不是只会显示占位
+  //   FREE   = 查不到价目 → 占位「—」
+  // 375px 放不下「色块 + 名称 + in/out + 占比 + 费用」五列 → 费用列收起;1440px 必须回到行内。
+  const PRICED = 'deepseek-chat';
+  const FREE = 'third-party-model-no-pricing-20250101';
+  const defs = [
+    { model: OPUS, input: 1_200_000, output: 300_000, calls: 1 },
+    { model: PRICED, input: 1_200_000, output: 300_000, calls: 1 },
+    { model: FREE, input: 4_000, output: 1_000, calls: 1 },
+  ];
+  const day0 = today();
+  const byModel = defs.map((d) => row(d.model, { input: d.input, output: d.output, cacheRead: 0, cacheWrite: 0, calls: d.calls }));
+  const byDayModel = dmOf(day0, Object.fromEntries(defs.map((d) => [d.model, { input: d.input, output: d.output, cacheRead: 0, cacheWrite: 0, calls: d.calls }])));
+  const byDay = [dayEntry(day0, defs.reduce((s, d) => s + d.input + d.output, 0), { messages: 2, sessions: 1 })];
+  const body = payload({ total: { sessionCount: 1 }, byDay, byModel, byDayModel });
+  const open = async (viewport) => {
+    const ctx = await browser.newContext({ viewport, baseURL: process.env.R131_UI_BASE, timezoneId: 'Asia/Shanghai', locale: 'zh-CN' });
+    const page = await ctx.newPage();
+    await stubUsage(page, body);
+    await gotoHome(page);
+    await pickTab(page, 'models');
+    await expect(legendRows(page)).toHaveCount(defs.length);
+    return { ctx, page };
+  };
+  // 行的可见文本(innerText 不含 display:none 的内容)与 title(悬浮 / 长按能看到的那份)
+  const readRows = (page) => legendRows(page).evaluateAll((els) => els.map((el) => ({
+    model: el.getAttribute('data-model'),
+    inner: (el.innerText || '').replace(/\s+/g, ' ').trim(),
+    title: el.getAttribute('title') || '',
+  })));
+  // 窄屏 375×812:行内看不到费用,完整信息(模型 id + 输入 + 输出 + 占比)在行 title 里
+  {
+    const narrow = await open({ width: 375, height: 812 });
+    try {
+      const got = await readRows(narrow.page);
+      for (const r of got) {
+        const exp = defs.find((d) => d.model === r.model);
+        expect(exp, `窄屏行 ${r.model} 应是夹具里的模型`).toBeTruthy();
+        expect(r.inner, `375px 行内不该出现金额/占位(费用列应收起):「${r.inner}」`).not.toMatch(FEE_COL_RE);
+        expect(r.title, `行 title 要有完整模型 id(实际「${r.title}」)`).toContain(r.model);
+        expect(r.title, `行 title 要有输入 ${fmtTokens(exp.input)} in`).toContain(`${fmtTokens(exp.input)} in`);
+        expect(r.title, `行 title 要有输出 ${fmtTokens(exp.output)} out`).toContain(`${fmtTokens(exp.output)} out`);
+        expect(r.title, `行 title 要有占比(实际「${r.title}」)`).toMatch(/\d+(\.\d+)?%/);
+        // 费用列收起 ≠ 费用没有出口:窄屏时金额(或它的占位文字)必须在 title 里,
+        // 否则用户在 375px 上根本看不到这个模型花了多少钱(费用列本来就是这个分页的目的之一)。
+        expect(r.title, `窄屏 title 里必须有费用或它的占位文字(实际「${r.title}」)`)
+          .toMatch(/[¥$]|订阅内|无定价数据/);
+      }
+    } finally { await narrow.ctx.close(); }
+  }
+
+  // 宽屏 1440×900:费用列回到行内可见
+  {
+    const wide = await open({ width: 1440, height: 900 });
+    try {
+      const got = await readRows(wide.page);
+      for (const r of got) {
+        expect(r.inner, `1440px 行内必须看得见金额或占位(实际「${r.inner}」)`).toMatch(FEE_COL_RE);
+      }
+      const priced = got.find((r) => r.model === PRICED);
+      const free = got.find((r) => r.model === FREE);
+      expect(priced.inner, `有单价的模型在宽屏行内要显示真实金额(不是占位):「${priced.inner}」`).toMatch(/[¥$]/);
+      expect(free.inner, `查不到价目的模型在宽屏行内要显示占位文字:「${free.inner}」`).toMatch(/—|订阅内/);
+    } finally { await wide.ctx.close(); }
+  }
 });
 
 // ───────────── C7 不变项 ─────────────
@@ -467,18 +605,44 @@ test('C7b 分屏(paneCount>1):整个用量块(含分页与范围)消失;回单�
   await expect(chart(page), '回单屏后选中态还是模型分页').toBeVisible();
 });
 
-test('C7c 旧响应(没有 byDayModel / ranges 根键)也不崩:分页仍在,模型分页用 byDay 兜底或给空态', async ({ page }) => {
-  await stubUsage(page, payload({ total: { sessionCount: 2 }, byDay: [dayEntry(today(), 1000), dayEntry(dayAgo(2), 500)], byDayModel: null, ranges: null }));
+test('C7c 旧响应(没有 byDayModel / ranges 根键)也不崩:图还在,按天/按窗口的模型明细**不编造**', async ({ page }) => {
+  // 注意:payload() 传 byDayModel/ranges 为 null 只是"不覆盖",helper 还会**自动生成**一份
+  // (dayModelOf / rangesOf)—— 那是假的新响应,不是旧响应。要造真的旧响应必须把两个键删掉。
+  const oldShape = payload({ total: { sessionCount: 2 }, byDay: [dayEntry(today(), 1000), dayEntry(dayAgo(2), 500)] });
+  delete oldShape.byDayModel; delete oldShape.ranges;
+  await stubUsage(page, oldShape);
   await gotoHome(page);
   await expect(cards(page)).toBeVisible();
   await pickTab(page, 'models');
+  // 图还在(柱高退回 byDay 的每日合计,单序列)
   await expect(chart(page)).toBeVisible();
-  await expect(legendRows(page).first()).toBeVisible();
-  await expect(legendRows(page).first().getAttribute('data-model')).toBeTruthy();
+  await expect(chartBars(page).first()).toBeVisible();
+  // 根上的 byModel 是**既有字段**(旧响应一直有),图例按它渲染是对的;但它只有一个全局数字,
+  // 不带分时段桶 → 占比 100% 是"这个响应的真实能给出的信息",不算编造。
+  // 真正不许编造的是:**按天 / 按窗口**的模型分组(byDayModel / ranges 缺了就不给假的)。
+  const names = await legendRows(page).evaluateAll((els) => els.map((e) => e.getAttribute('data-model')));
+  expect(names, '图例的模型来自根 byModel(旧响应也有),不允许凭空出现别的模型').toEqual(
+    oldShape.byModel.map((m) => m.model),
+  );
   await expect(page.getByTestId('home-usage-error')).toHaveCount(0);
 });
 
-// ───────────── C8 真数据端到端 ─────────────
+test('C7d 旧响应缺 ranges 时切范围:卡片数字走前端兜底(不崩、不发新请求)', async ({ page }) => {
+  const oldShape = payload({ total: { sessionCount: 2 }, byDay: [dayEntry(today(), 1000, { messages: 4 }), dayEntry(dayAgo(2), 500, { messages: 3 })] });
+  delete oldShape.byDayModel; delete oldShape.ranges;
+  const st = await stubUsage(page, oldShape);
+  await gotoHome(page);
+  const n0 = st.hits.length;
+  await pickRange(page, '7d');
+  await expect(cards(page)).toBeVisible();
+  // 兜底也算得出窗口内的数字(7 天窗口含今天与 2 天前 → 消息数 7,活跃天数 2)
+  await expect(card(page, 'active-days')).toHaveAttribute('data-value', '2');
+  await pickRange(page, 'all');
+  // 全部口径的消息数来自 overview(打桩 1234);切回全部要能复原
+  await expect(card(page, 'messages')).toHaveAttribute('data-value', '1234');
+  expect(st.hits.length, '切范围不发新请求').toBe(n0);
+  await expect(page.getByTestId('home-usage-error')).toHaveCount(0);
+});
 
 test('C8 真隔离实例数据(UI 夹具:两条今天的会话):模型分页图例 = claude-sonnet-4-6,7 天/全部数字一致', async ({ page }) => {
   await gotoHome(page);

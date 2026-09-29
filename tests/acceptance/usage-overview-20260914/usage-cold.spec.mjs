@@ -184,7 +184,7 @@ group('U6 无缓存文件 → 走冷路径(行为与今天一致)');
     return `${expected.byModel.length} 个模型 / ${expected.byDayRows.length} 个日期逐行 / ${rows.length} 个项目逐行(共 ${expected.byProjectCount} 个) / total.input=${expected.total.input}`;
   });
 
-  await test('U6b', '不新增既有字段之外的根字段(只许新增 meta)', () => {
+  await test('U6b', '不新增约定之外的根字段(白名单:total/byModel/byProject/byDay/overview/meta/byDayModel/ranges)', () => {
     const extra = Object.keys(R_fresh).filter((k) => !ROOT_KEYS_OK.has(k));
     assertTrue(!extra.length, `根上多出未约定字段: ${extra.join(',')}`);
     return `根字段 ${Object.keys(R_fresh).join(',')}`;

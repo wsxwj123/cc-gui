@@ -116,8 +116,26 @@ export async function dismissOverlays(page, passes = 6) {
   }
 }
 /** 进应用并落到单屏首页(能看到 home-input)。已经在会话里时点侧栏「新建会话」回首页。 */
+/**
+ * 进首页前把用量块的视图偏好复位一次(跨用例隔离)。
+ * 为什么要这一下:选中态是**跨页面持久**的(cgui-usage-tab / cgui-usage-range),用例之间共用
+ * 浏览器上下文时上一个用例选过的分页会带进下一个(C6a 选了「模型」→ C6b 进来找不到八卡)。
+ * 用 sessionStorage 标记**只复位一次**:用例内部自己的 reload 不受影响(C1b 靠"刷新后保留"判过)。
+ */
+export async function resetUsageViewPrefs(page) {
+  try {
+    // 先落到同源首页(此时可能已经渲染成「模型」分页,没关系),再清掉偏好 —— 清完由调用方导航/刷新,
+    // 下一次加载读到的就是默认值。用一次性 addInitScript 会让用例内部的 reload 也复位,C1b(刷新后
+    // 保留)就过不去了;这一下必须只发生一次。
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await page.evaluate(() => { try { localStorage.removeItem('cgui-usage-tab'); localStorage.removeItem('cgui-usage-range'); } catch { /* 忽略 */ } });
+  } catch { /* 忽略 */ }
+  return page;
+}
+
 export async function gotoHome(page) {
   await prime(page);
+  await resetUsageViewPrefs(page);
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('[data-cgui="panel-dock"], [data-testid="home-input"]').first(), '应用应挂载(面板坞或首页输入框可见)').toBeVisible({ timeout: 40_000 });
   await dismissOverlays(page);
