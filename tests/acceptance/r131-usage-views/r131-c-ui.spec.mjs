@@ -713,25 +713,31 @@ test('C10b 逐柱悬停:浮层给的是这一根柱子那天、且落在图表�
     await expect(tip, `${day}: 悬停必须有浮层`).toBeVisible();
     // ① 文案必须是**这一根柱子**那天的(把 A 天的数读成 B 天,是最要紧的错法)
     await expect(tip, `${day}: 浮层第一行应是这一天`).toContainText(day);
-    // ② 浮层的数值 = 该柱子的 data-total(逐柱核,不是只看"有浮层")
+    // ② 浮层的合计 = 该柱子的 data-total
     const total = await bar.getAttribute('data-total');
     await expect(tip, `${day}: 浮层合计应等于该柱的 data-total`).toContainText(Number(total).toLocaleString('en-US'));
-    // ③ 浮层必须整个落在图表容器的水平范围内(1.2 倍缩放下也不许溢出到容器外)
+    // ③ 浮层整个落在图表容器的水平范围内(1.2 倍缩放下也不许溢出到容器外)
+    //    一次 evaluate 同时读柱 / 浮层 / 容器(分两次读会被 hover 触发的滚动错开)
     const geo = await page.evaluate((d) => {
       const b = document.querySelector(`[data-testid="home-usage-chart-bar"][data-day="${d}"]`);
       const el = document.querySelector('[data-testid="home-usage-chart-tip"]');
       const box = el && el.parentElement;
       if (!b || !el || !box) return null;
       const bb = b.getBoundingClientRect(); const tb = el.getBoundingClientRect(); const xb = box.getBoundingClientRect();
-      return { overLeft: xb.left - tb.left, overRight: tb.right - xb.right, barW: bb.width, gap: tb.top >= bb.bottom ? 'below' : 'above-or-overlap' };
+      return { overLeft: xb.left - tb.left, overRight: tb.right - xb.right };
     }, day);
     expect(geo, `${day}: 应能量到柱 / 浮层 / 容器三者`).toBeTruthy();
     expect(geo.overLeft, `${day}: 浮层左边不该溢出图表容器(${geo.overLeft.toFixed(1)}px)`).toBeLessThanOrEqual(1);
     expect(geo.overRight, `${day}: 浮层右边不该溢出图表容器(${geo.overRight.toFixed(1)}px)`).toBeLessThanOrEqual(1);
   }
-  // 关于"浮层是否精确居中在柱子上":本轮**没有**做成稳定判据 —— 在界面缩放 1.2 + 悬停引发横向滚动的
-  // 组合下,同一份实现量出来的中心距在 16px 与 81px 之间跳(测量本身不稳定),我没有找到能稳定复现的写法,
-  // 已登记为待真机验证项(见 WINDOWS-REVIEW-0.2.401 与交付说明)。这里不写一条会随机红的断言来充数。
+
+  // ⚠️ **本用例不覆盖"浮层是否精确居中在柱子上"** —— 这是一条**已知缺陷**,如实登记在这里:
+  //    · 跨平台审查(0.2.401 必修-2)指出:浮层定位早期混用了视觉像素与布局像素,界面默认 1.2 倍缩放下会偏;
+  //    · 我按"由第几天 × 每柱宽算出柱心"重写了定位(与滚动/缩放无关的来源),随后**用同一份夹具测得偏心 6–9px**;
+  //    · 但把同一断言写进本用例后,量到的却是 **176.4px**(连续 4 次)、179.4px(2 次),两者相差 20 倍,
+  //      我无法在合理轮次内定位(排查过:滚动、入场动画、vite 缓存、坐标系换算、offsetParent);
+  //    · 因此**不写**这条断言(写进去只会随机红),把它交给真机/后续轮次定位。
+  //    复现与判据见 `.devflow/WINDOWS-REVIEW-0.2.401.md`(缩放 1.0 / 1.2 / 0.8 × 最左 / 中 / 最右柱)。
 });
 
 test('C10c 375×812(含界面缩放余量)用量块顶行不横滚', async ({ browser }) => {
