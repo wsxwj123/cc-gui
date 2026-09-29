@@ -262,35 +262,36 @@ export const HomeUsage = React.memo(function HomeUsage() {
     setTipPos({ left, top });
   }, [tipCell]);
 
-  // 柱状图浮层定位。三条硬约束(每条都是我踩过之后写下的):
-  //   ① 参考系必须与浮层的绝对定位父级一致 —— 浮层挂在**图表容器**(chartWrapRef 里那层 relative)上,
-  //      不是外层 wrap(它有内边距,拿它当参考系等于把内边距算两遍);
-  //   ② 长度一律用 getBoundingClientRect(querySelector 拿到的是 SVG 元素:`offsetLeft` / `offsetParent`
-  //      对 SVG 没有意义,恒为 0 —— 那会让浮层永远贴在左上角);
-  //   ③ 一律取 rect(视口坐标)并在**同一次布局读取**里换算成相对量,这样界面缩放(默认 1.2 倍)与
-  //      页面横向滚动都不影响结果(不能混用 clientWidth / offsetTop 这类布局像素)。
-  // 水平方向优先贴柱心(判断"这是哪一天"靠它),右侧放不下翻到柱子左侧,两侧都放不下才夹回容器内。
+  // 柱状图浮层定位:**几何量一律取与滚动/缩放无关的来源**。踩过三个坑(每个都让浮层偏几十像素):
+  //   ① 混用 `getBoundingClientRect`(视觉像素)与 `offsetHeight/clientWidth`(布局像素)—— 界面默认 1.2 倍缩放;
+  //   ② 拿有内边距的外层 wrap 当参考系 —— 内边距被算两遍;
+  //   ③ 用 rect 相对"当时的位置"算,而悬停本身会触发横向滚动 → 量到的柱子位置是**滚动前**的,
+  //      而 effect 不会因为滚动重跑,于是浮层整块偏掉(实测偏 176px,且与柱子位置无关 —— "值过期"的脚印)。
+  // 现在:柱心由"第几根柱子 × 每柱宽"直接算出(与渲染柱子用的是同一组数,天然与滚动/缩放无关),
+  // 浮层尺寸取 offsetWidth / offsetHeight(布局像素),浮层就绝对定位在这个容器里 —— 三者同一个坐标系。
   useLayoutEffect(() => {
     const wrap = chartWrapRef.current;
     const el = ctipRef.current;
     if (!ctipDay || !wrap || !el) { setCtipPos(null); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ctipDay.day))) { setCtipPos(null); return; }
-    const barEl = wrap.querySelector(`[data-testid="home-usage-chart-bar"][data-day="${ctipDay.day}"] [data-hit]`);
-    const boxEl = el.parentElement;
-    if (!barEl || !boxEl) { setCtipPos(null); return; }
-    const boxRect = boxEl.getBoundingClientRect();
-    const barRect = barEl.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const cx = barRect.left + barRect.width / 2 - boxRect.left;
-    const barW = barRect.width;
-    let left = cx - elRect.width / 2;
-    if (left + elRect.width > boxRect.width) left = cx - barW / 2 - elRect.width - 6;
-    if (left < 0) left = cx + barW / 2 + 6;
-    left = Math.max(0, Math.min(left, Math.max(0, boxRect.width - elRect.width)));
-    let top = barRect.top - boxRect.top - elRect.height - 6;
-    if (top < 0) top = barRect.bottom - boxRect.top + 6;
+    const idx = chartData.days.findIndex((d) => d.day === ctipDay.day);
+    if (idx < 0) { setCtipPos(null); return; }
+    const boxW = wrap.offsetWidth;
+    const plotW = Math.max(1, boxW - PAD_LEFT);
+    const barW = plotW / chartData.days.length;
+    const cx = PAD_LEFT + (idx + 0.5) * barW;          // 柱心(相对容器左缘)
+    const vw = el.offsetWidth;
+    const vh = el.offsetHeight;
+    let left = cx - vw / 2;
+    if (left + vw > boxW) left = cx - barW / 2 - vw - 6;   // 右侧放不下 → 翻到柱子左侧
+    if (left < 0) left = cx + barW / 2 + 6;                // 左侧也放不下 → 柱右
+    left = Math.max(0, Math.min(left, Math.max(0, boxW - vw)));
+    // 纵向:柱子顶在图表顶部,浮层默认放上方,放不下就放到柱子下方
+    const plotH = Math.max(1, chartH - PAD_TOP - PAD_BOTTOM);
+    let top = PAD_TOP - vh - 6;
+    if (top < 0) top = PAD_TOP + plotH + 6;
     setCtipPos({ left: Math.round(left), top: Math.round(top) });
-  }, [ctipDay]);
+  }, [ctipDay, chartData.days, chartH]);
 
   // 格子数组只随 grid 变(回调都是稳定引用):hover 的 setTip 只重渲浮层节点,不重建几百个格子。
   const cellNodes = useMemo(() => (grid ? grid.cells.map((cell) => (cell.future
