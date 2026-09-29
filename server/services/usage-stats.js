@@ -4,7 +4,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { streamJsonl } from '../utils/jsonl-parser.js';
 import { periodFor } from '../utils/pricing-rules.js';
-import { localDayKey, localHour, dayKeyOf, computeStreaks } from '../utils/usage-calendar.js';
+import { localDayKey, localHour, dayKeyOf, computeStreaks, shiftDayKey } from '../utils/usage-calendar.js';
 import { isUserMessage } from '../utils/usage-record.js';
 import { broadcast } from '../broadcast.js';
 
@@ -22,8 +22,8 @@ const CACHE_PATH = join(CACHE_DIR, 'usage-stats-cache.json');
 // 的 mtime 变了才会触发。bump 一次 = 旧缓存整份作废 —— r130 起不再退回冷路径:上一版(1)的
 // 文件形状仍合法,loadCache 先回放它秒回旧值、标 needsRecompute,后台核对时必重算升级(见下)。
 // 版本史:1 = 2026-09-14 初版;2 = r130(切日改为进程本地时区、byDay 加 sessions/messages、
-// 新增 overview、窗口 30 → 400 天、缓存头加 tz)。
-const CACHE_VERSION = 2;
+// 新增 overview、窗口 30 → 400 天、缓存头加 tz);3 = r131(新增两个根键 byDayModel 与 ranges)。
+const CACHE_VERSION = 3;
 // 缓存头里记写入进程的时区:切日按进程本地时区,换了时区旧值就是错的 —— 同 sig 也要重算。
 const PROCESS_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 // byDay 保留窗口(天):53 周热力图 + 余量;overview 在截断前的全量表上算,不受它影响。
@@ -63,13 +63,16 @@ let _cooldownTimer = null;
 // 宁可到点后重新发起一次核对(最多多跑一遍),也不能永远不核对。
 const REVALIDATE_TIMEOUT_MS = 5 * 60_000;
 
-// 启动即读回填。磁盘回放的数据在后台确认 sig 之前一律标 stale=true。三分支(INTERFACE-r130 §B-1~4):
-//   ① version 2 + tz 等于本进程 + 形状合法(含 overview 对象)→ 正常回放,只按 sig 核对;
-//   ② version 2 + tz 不等 → 回放 + needsRecompute:'tz'(旧值是别的时区切的日,先秒回再必重算);
-//   ③ version 1 + 形状合法(不要求 overview)→ 回放 + needsRecompute:'version'(升级路径:界面对
-//     缺失字段显示占位,后台重算落地经广播补全;不退回冷路径 = 升级后首屏不用等 40 s);
-//   其余(version 0 / 999 / 缺、半截 JSON、缺 data、v2 缺 overview)一律不信 → 冷路径,那份结果
-//   随后把坏文件覆盖成合法内容。
+// 启动即读回填。磁盘回放的数据在后台确认 sig 之前一律标 stale=true。分支(r130 INTERFACE §B-1~4 + r131 §B):
+//   ① version 3 + tz 等于本进程 + 形状合法(含 overview、byDayModel、ranges)→ 正常回放,只按 sig 核对;
+//   ② version 3 + tz 不等 → 回放 + needsRecompute:'tz'(旧值是别的时区切的日,先秒回再必重算);
+//   ③ version 1 或 2 + 形状合法(v2 要求 overview,v1 不要求)→ 回放 + needsRecompute:'version'
+//      (升级路径:**无论 sig 是否相同都必须重算** —— 旧版文件缺新根键,界面拿到后靠 ranges /
+//      byDayModel 显示按范围重算的数字,缺了就退回前端自算兜底。不退回冷路径 = 升级后首屏不用等 40 s);
+//   其余(version 0 / 999 / 缺、半截 JSON、缺 data、v3 缺 overview / byDayModel / ranges)一律不信 →
+//   冷路径,那份结果随后把坏文件覆盖成合法内容。
+// 注意 v3 的三个形状判据:认不出形状就当坏文件,**不能**回放一份看着合法实则缺键的 v3 文件
+// (那会让 byDayModel 缺失的响应被标成"就是当前数据")。
 function loadCache() {
   try {
     const parsed = JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
@@ -79,8 +82,12 @@ function loadCache() {
     let needsRecompute = null;
     if (parsed.version === CACHE_VERSION) {
       if (!d.overview || typeof d.overview !== 'object' || Array.isArray(d.overview)) return;
+      if (!d.byDayModel || typeof d.byDayModel !== 'object' || Array.isArray(d.byDayModel)) return;
+      if (!d.ranges || typeof d.ranges !== 'object' || Array.isArray(d.ranges)) return;
       if (parsed.tz !== PROCESS_TZ) needsRecompute = 'tz';
-    } else if (parsed.version === 1) {
+    } else if (parsed.version === 1 || parsed.version === 2) {
+      // v1 没有 overview;v2 有 overview 但没有 byDayModel / ranges。两者都先回放旧值再必重算升级。
+      if (parsed.version === 2 && (!d.overview || typeof d.overview !== 'object' || Array.isArray(d.overview))) return;
       needsRecompute = 'version';
     } else {
       return;
@@ -236,6 +243,9 @@ async function recompute(jsonlFiles, sig) {
   const byModel = Object.create(null);
   const byProject = Object.create(null);
   const byDay = Object.create(null);
+  // r131:day → model → 五项。挂在**新的根键** byDayModel 上,不往 byDay 行里塞新键(byDay 行的键集被
+  // r130 D1c 逐字锁死)。键同样是外部字符串 → 用 Map,序列化时再摊成 null 原型对象(见 buildByDayModel)。
+  const byDayModel = new Map();
   let totalInput = 0;
   let totalOutput = 0;
   let totalCacheRead = 0;
@@ -248,11 +258,15 @@ async function recompute(jsonlFiles, sig) {
   const dayExtra = new Map();
   const extraOf = (day) => { let x = dayExtra.get(day); if (!x) { x = { users: 0, sessions: new Set() }; dayExtra.set(day, x); } return x; };
   const hourCounts = new Array(24).fill(0);
+  // r131:day → 24 小时桶。窗口内的 hourCounts 从这里取(小时只出现在 assistant 记录上,
+  // 光靠 byDayModel 还原不出来);与全量 hourCounts 在 noteAssistant 里同一处累加。
+  const dayHours = new Map();
+  const hoursOf = (day) => { let x = dayHours.get(day); if (!x) { x = new Array(24).fill(0); dayHours.set(day, x); } return x; };
   const userUuids = new Set();
   let userMessages = 0;
   // 一条(去重后的)assistant 记录落账时顺带记小时与会话归属;与 bump 分开写,不碰它的签名。
   const noteAssistant = (day, hour, sessionKey) => {
-    if (hour != null) hourCounts[hour]++;
+    if (hour != null) { hourCounts[hour]++; hoursOf(day)[hour]++; }
     extraOf(day).sessions.add(sessionKey);
   };
 
@@ -280,6 +294,14 @@ async function recompute(jsonlFiles, sig) {
   // byModel 行上再按「该条记录自身时间戳落在哪个时段」分三个桶(peak/offPeak/unknown)。
   // 分时段计价的模型(DeepSeek)在面板里因此能各自按档出价;不分时段的模型这列也照给
   // (三桶之和恒等于行合计),面板不必按模型名白名单判。
+  /** day → model 的桶,按需建(两层都是 Map:两层的键都来自外部字符串)。 */
+  const modelRowOf = (day, model) => {
+    let byModelOfDay = byDayModel.get(day);
+    if (!byModelOfDay) { byModelOfDay = new Map(); byDayModel.set(day, byModelOfDay); }
+    let row = byModelOfDay.get(model);
+    if (!row) { row = emptyTotals(); byModelOfDay.set(model, row); }
+    return row;
+  };
   const bump = (model, project, day, u, period) => {
     totalInput += u.input; totalOutput += u.output;
     totalCacheRead += u.cacheRead; totalCacheWrite += u.cacheWrite;
@@ -303,6 +325,12 @@ async function recompute(jsonlFiles, sig) {
         slot.calls++;
       }
     }
+    // r131:同一笔(去重后的)记录同时落 day × model —— 图与按范围图例都从这一个桶派生。
+    // 必须与三个既有桶用**同一份** u(去重口径、四项 token 完全一致),不许另建一套累加。
+    const dm = modelRowOf(day, model);
+    dm.input += u.input; dm.output += u.output;
+    dm.cacheRead += u.cacheRead; dm.cacheWrite += u.cacheWrite;
+    dm.calls++;
   };
   {
     for (const fileInfo of jsonlFiles) {
@@ -395,13 +423,19 @@ async function recompute(jsonlFiles, sig) {
   hourCounts.forEach((n, h) => { if (n > peakN) { peakN = n; peakHour = h; } });   // 严格大于 = 并列取最小小时
   // 常用模型 = 四项 token 合计最高者(排除无 model 的 'unknown' 与错误/合成消息的 '<synthetic>'),
   // 并列取 id 字符串较小者;都没有 → null。
-  let favoriteModel = null;
-  let favoriteTotal = -1;
-  for (const m of byModelRows) {
-    if (m.model === 'unknown' || m.model === '<synthetic>') continue;
-    const t = m.input + m.output + m.cacheRead + m.cacheWrite;
-    if (t > favoriteTotal || (t === favoriteTotal && m.model < favoriteModel)) { favoriteTotal = t; favoriteModel = m.model; }
-  }
+  // r131 把它抽成函数:ranges 的每个窗口都要用**同一口径**算一遍(不然按范围切换会换出一套
+  // 与全量不一致的"常用模型")。
+  const pickFavorite = (rows) => {
+    let best = null;
+    let bestTotal = -1;
+    for (const m of rows) {
+      if (m.model === 'unknown' || m.model === '<synthetic>') continue;
+      const t = m.input + m.output + m.cacheRead + m.cacheWrite;
+      if (t > bestTotal || (t === bestTotal && m.model < best)) { bestTotal = t; best = m.model; }
+    }
+    return best;
+  };
+  const favoriteModel = pickFavorite(byModelRows);
   const overview = {
     messages: userMessages + byModelRows.reduce((s, m) => s + m.calls, 0),
     activeDays: activeDaysDesc.length,
@@ -414,6 +448,104 @@ async function recompute(jsonlFiles, sig) {
     favoriteModel,
   };
 
+  // ── r131:ranges(7 天 / 30 天窗口内的聚合)+ byDayModel ──────────────────────────────
+  // 窗口口径 = 含今天的最近 N 个**本地日**:rangeStart(N) = 今天 − (N−1) 天。与前端
+  // client/src/utils/homeUsage.js 的 rangeStartKey 必须同一天(N 天 = 今天在内的 N 天)。
+  // 只统计 byDayAll(截断前的全量表)里 day ∈ [rangeStart, 今天] 的行:
+  //   · 'unknown' 没有日期 → 两边都不计(不是一个"天");
+  //   · 未来日(> 今天)不计 —— 与 overview 的 activeDays 同一判据(时钟拨错/时区切换会造出来);
+  //   · sessions 用**集合去重**(byDay[].sessions 是每天各自的会话数,跨天直接相加会重复计数);
+  //   · 消息 / 活跃天 / 连续 / 高峰时段 / 常用模型全部按窗口内数据重算(a+b=c 可核对)。
+  const windowStart = (days) => shiftDayKey(todayKey, -(days - 1));
+  const RANGE_DAYS = { '7d': 7, '30d': 30 };
+  const accOf = Object.create(null);   // 固定两个字面量键也无妨,但保持全文件同一套写法
+  const rangeAcc = (key) => {
+    let a = accOf[key];
+    if (!a) {
+      a = {
+        sessions: new Set(), messages: 0, calls: 0, users: 0,
+        tokens: emptyTotals(), hourCounts: new Array(24).fill(0), models: Object.create(null),
+      };
+      accOf[key] = a;
+    }
+    return a;
+  };
+  for (const [key, days] of Object.entries(RANGE_DAYS)) {
+    const from = windowStart(days);
+    const a = rangeAcc(key);
+    for (const r of byDayAll) {
+      if (r.day === 'unknown' || r.day > todayKey || r.day < from) continue;
+      a.messages += r.messages;
+      a.calls += r.calls;
+      a.tokens.input += r.input; a.tokens.output += r.output;
+      a.tokens.cacheRead += r.cacheRead; a.tokens.cacheWrite += r.cacheWrite;
+      const extra = dayExtra.get(r.day);
+      if (!extra) continue;
+      a.users += extra.users;
+      for (const s of extra.sessions) a.sessions.add(s);
+    }
+    // 小时分布与模型分组只累加**窗口内**的 assistant 记录(与 byDayModel 同源、同窗口)
+    for (const [day, byModelOfDay] of byDayModel) {
+      if (day === 'unknown' || day > todayKey || day < from) continue;
+      for (const [model, u] of byModelOfDay) {
+        let bucket = a.models[model];
+        if (!bucket) { bucket = emptyTotals(); a.models[model] = bucket; }
+        bucket.input += u.input; bucket.output += u.output;
+        bucket.cacheRead += u.cacheRead; bucket.cacheWrite += u.cacheWrite;
+        bucket.calls += u.calls;
+      }
+    }
+  }
+  // hourCounts 按窗口重算:小时只出现在 assistant 记录上,所以另存一份 day → 24 桶(几 KB),
+  // 与全量 hourCounts 同时填(见 noteAssistant)。不这么做就只能拿全量的 hourCounts 去充数 ——
+  // 「高峰时段」在 7 天窗口里就成了"全历史的高峰",用户切了范围却看到同一个数。
+  for (const [key, days] of Object.entries(RANGE_DAYS)) {
+    const from = windowStart(days);
+    const a = accOf[key];
+    for (const [day, perHour] of dayHours) {
+      if (day === 'unknown' || day > todayKey || day < from) continue;
+      for (let h = 0; h < 24; h += 1) a.hourCounts[h] += perHour[h];
+    }
+  }
+  const rangeOf = (key) => {
+    const a = accOf[key];
+    const rows = Object.entries(a.models)
+      .map(([model, stats]) => ({ model, ...stats }))
+      .sort((x, y) => (y.input + y.output) - (x.input + x.output));
+    const days = byDayAll.filter((r) => r.day !== 'unknown' && r.day <= todayKey && r.day >= windowStart(RANGE_DAYS[key]) && r.messages > 0).map((r) => r.day);
+    const { currentStreak: cur, longestStreak: longest } = computeStreaks(days, todayKey);
+    let ph = null;
+    let phN = 0;
+    a.hourCounts.forEach((n, h) => { if (n > phN) { phN = n; ph = h; } });
+    return {
+      sessions: a.sessions.size,
+      messages: a.messages,
+      input: a.tokens.input,
+      output: a.tokens.output,
+      cacheRead: a.tokens.cacheRead,
+      cacheWrite: a.tokens.cacheWrite,
+      calls: a.calls,
+      activeDays: days.length,
+      firstDay: days.length ? days[days.length - 1] : null,
+      lastActiveDay: days.length ? days[0] : null,
+      currentStreak: cur,
+      longestStreak: longest,
+      hourCounts: a.hourCounts,
+      peakHour: ph,
+      favoriteModel: pickFavorite(rows),
+      byModel: rows,
+    };
+  };
+  const ranges = { '7d': rangeOf('7d'), '30d': rangeOf('30d') };
+  // byDayModel 的序列化:Map → null 原型嵌套对象(模型名来自第三方响应,'__proto__' 当键会被
+  // 普通对象当作原型 setter 吃掉 → 用 Object.create(null) 起手,再逐键赋值)。
+  const byDayModelObj = Object.create(null);
+  for (const [day, byModelOfDay] of byDayModel) {
+    const row = Object.create(null);
+    for (const [model, stats] of byModelOfDay) row[model] = { ...stats };
+    byDayModelObj[day] = row;
+  }
+
   const result = {
     total: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite, sessionCount },
     byModel: byModelRows,
@@ -422,6 +554,9 @@ async function recompute(jsonlFiles, sig) {
       .sort((a, b) => (b.input + b.output) - (a.input + a.output))
       .slice(0, 20),
     byDay: byDayAll.slice(0, BYDAY_WINDOW),
+    // 400 天窗口与 byDay 一致:超出窗口的在图上也没有位置。
+    byDayModel: byDayModelObj,
+    ranges,
     overview,
   };
   const scannedAt = Date.now();
