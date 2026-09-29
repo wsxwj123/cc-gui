@@ -614,9 +614,19 @@ test('C7c 旧响应(没有 byDayModel / ranges 根键)也不崩:图还在,按天
   await gotoHome(page);
   await expect(cards(page)).toBeVisible();
   await pickTab(page, 'models');
-  // 图还在(柱高退回 byDay 的每日合计,单序列)
+  // 图还在(柱高退回 byDay 的每日合计,单序列),但这条序列**不许**冒充某个模型:
+  // 以前挂的是全量第一名模型的名字,浮层会把"当天全量"读成那个模型的数(= 编造归属,
+  // 跨平台审查 0.2.401 建议-2)。现在必须是明确的"合计(无模型明细)"。
   await expect(chart(page)).toBeVisible();
   await expect(chartBars(page).first()).toBeVisible();
+  await chartBars(page).first().hover();
+  const ctip = page.getByTestId('home-usage-chart-tip');
+  await expect(ctip, '兜底序列的浮层要可见').toBeVisible();
+  await expect(ctip, '兜底序列必须写明"没有模型明细"').toContainText('合计(无模型明细)');
+  for (const m of oldShape.byModel.map((x) => x.model)) {
+    await expect(ctip, `兜底序列的浮层不许出现真实模型 ${m}`).not.toContainText(m);
+  }
+  await page.keyboard.press('Escape');
   // 根上的 byModel 是**既有字段**(旧响应一直有),图例按它渲染是对的;但它只有一个全局数字,
   // 不带分时段桶 → 占比 100% 是"这个响应的真实能给出的信息",不算编造。
   // 真正不许编造的是:**按天 / 按窗口**的模型分组(byDayModel / ranges 缺了就不给假的)。
@@ -841,4 +851,37 @@ test('C10c 375×812(含界面缩放余量)用量块顶行不横滚', async ({ br
     expect(m.rangeRight, '范围组右缘不超出用量块').toBeLessThanOrEqual(m.usageRight + 1);
     expect(m.headRight, '顶行右缘不超出用量块').toBeLessThanOrEqual(m.usageRight + 1);
   } finally { await ctx.close(); }
+});
+
+test('C10e 320×568 × 缩放 1.2 / 1.0:顶行与整页都不横滚(跨平台审查 0.2.401 建议-3 的判据)', async ({ browser }) => {
+  // 建议-3 的验收判据:C4 的「scrollWidth ≤ innerWidth」要在 375×812 **与 320×568** 两档 ×
+  // 默认缩放 1.2 与 1.0 全部成立。顶行能不能放下靠 `flex-wrap`(792fbe19 起),这条锁钉的是
+  // **结果**(不横滚 + 两组控件仍可见),换成别的实现写法也一样过。
+  for (const zoom of [1.2, 1.0]) {
+    const ctx = await browser.newContext({ viewport: { width: 320, height: 568 }, baseURL: process.env.R131_UI_BASE, timezoneId: 'Asia/Shanghai', locale: 'zh-CN' });
+    const page = await ctx.newPage();
+    try {
+      // 缩放档走应用自己的档位(localStorage),不能直接写 html.style.zoom —— App 的 effect 会把
+      // 它打回档位值(详见 C10d 的注释),这里用 addInitScript 保证每次导航前就写好。
+      await page.addInitScript((v) => { try { localStorage.setItem('cgui-ui-font-scale', String(v)); } catch { /* 忽略 */ } }, zoom);
+      await stubUsage(page, typical());
+      await gotoHome(page);
+      await expect.poll(async () => Number(await page.evaluate(() => getComputedStyle(document.documentElement).zoom)),
+        { message: `界面缩放应切到 ${zoom}`, timeout: 15_000 }).toBeCloseTo(zoom, 3);
+      const m = await page.evaluate(() => {
+        const head = document.querySelector('[data-testid="home-usage-tabs"]').parentElement;
+        const tabs = document.querySelector('[data-testid="home-usage-tabs"]');
+        const ranges = document.querySelector('[data-testid="home-usage-ranges"]');
+        return {
+          sw: document.documentElement.scrollWidth, iw: innerWidth,
+          headRight: head.getBoundingClientRect().right,
+          usageRight: document.querySelector('[data-testid="home-usage"]').getBoundingClientRect().right,
+          tabsW: tabs.getBoundingClientRect().width, rangesW: ranges.getBoundingClientRect().width,
+        };
+      });
+      expect(m.sw, `320px + 缩放 ${zoom}:整页不该横滚(scrollWidth ${m.sw} ≤ ${m.iw})`).toBeLessThanOrEqual(m.iw);
+      expect(m.headRight, `320px + 缩放 ${zoom}:顶行右缘不超出用量块`).toBeLessThanOrEqual(m.usageRight + 1);
+      expect(m.tabsW > 0 && m.rangesW > 0, `320px + 缩放 ${zoom}:分页与范围两组都还要有可见宽度(tabs ${m.tabsW} / ranges ${m.rangesW})`).toBe(true);
+    } finally { await ctx.close(); }
+  }
 });
