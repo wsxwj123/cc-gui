@@ -294,13 +294,20 @@ async function recompute(jsonlFiles, sig) {
   // byModel 行上再按「该条记录自身时间戳落在哪个时段」分三个桶(peak/offPeak/unknown)。
   // 分时段计价的模型(DeepSeek)在面板里因此能各自按档出价;不分时段的模型这列也照给
   // (三桶之和恒等于行合计),面板不必按模型名白名单判。
-  /** day → model 的桶,按需建(两层都是 Map:两层的键都来自外部字符串)。 */
-  const modelRowOf = (day, model) => {
+  /** day → model 的桶,按需建(两层都是 Map:两层的键都来自外部字符串)。
+   *  行形状 = 五项 + `byPeriod` 三桶(与根上 byModel 行同形):分时段计价的模型(DeepSeek 一类)
+   *  在按范围的图例里也要算得出金额 —— 光有四项 token 的话 aggregateCost 拿不到 byPeriod,
+   *  会把"能算的价"显示成「无定价数据」(代码审查 R1 / 安全 新-1)。 */
+  const modelRowOf = (day, model, period) => {
     let byModelOfDay = byDayModel.get(day);
     if (!byModelOfDay) { byModelOfDay = new Map(); byDayModel.set(day, byModelOfDay); }
     let row = byModelOfDay.get(model);
-    if (!row) { row = emptyTotals(); byModelOfDay.set(model, row); }
-    return row;
+    if (!row) {
+      row = emptyTotals();
+      row.byPeriod = { peak: emptyTotals(), offPeak: emptyTotals(), unknown: emptyTotals() };
+      byModelOfDay.set(model, row);
+    }
+    return { row, slot: period === 'peak' ? row.byPeriod.peak : (period === 'off-peak' ? row.byPeriod.offPeak : row.byPeriod.unknown) };
   };
   const bump = (model, project, day, u, period) => {
     totalInput += u.input; totalOutput += u.output;
@@ -327,10 +334,14 @@ async function recompute(jsonlFiles, sig) {
     }
     // r131:同一笔(去重后的)记录同时落 day × model —— 图与按范围图例都从这一个桶派生。
     // 必须与三个既有桶用**同一份** u(去重口径、四项 token 完全一致),不许另建一套累加。
-    const dm = modelRowOf(day, model);
+    // 该笔记录自身的时间戳落在哪个时段,就同时进那个 byPeriod 桶(与根 byModel 的判据同一个 period)。
+    const { row: dm, slot: dmp } = modelRowOf(day, model, period);
     dm.input += u.input; dm.output += u.output;
     dm.cacheRead += u.cacheRead; dm.cacheWrite += u.cacheWrite;
     dm.calls++;
+    dmp.input += u.input; dmp.output += u.output;
+    dmp.cacheRead += u.cacheRead; dmp.cacheWrite += u.cacheWrite;
+    dmp.calls++;
   };
   {
     for (const fileInfo of jsonlFiles) {
@@ -363,11 +374,15 @@ async function recompute(jsonlFiles, sig) {
           const usage = record.message?.usage;
           if (!usage) return;
 
+          // 四项一律 Number() 强转:第三方中转往 usage 里写字符串("1234")时,`+=` 会做字符串拼接,
+          // 一路污染 total / byDay / byDayModel / ranges 与落盘缓存(安全审计既-1 / r130 待办①)。
+          // 非有限值(含字符串数字以外的垃圾)按 0,不让 NaN 传播。
+          const n = (v) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
           const u = {
-            input: usage.input_tokens || 0,
-            output: usage.output_tokens || 0,
-            cacheRead: usage.cache_read_input_tokens || 0,
-            cacheWrite: usage.cache_creation_input_tokens || 0,
+            input: n(usage.input_tokens),
+            output: n(usage.output_tokens),
+            cacheRead: n(usage.cache_read_input_tokens),
+            cacheWrite: n(usage.cache_creation_input_tokens),
           };
           const model = record.message?.model || 'unknown';
           // r130:切日按**进程本地时区**(旧版取 ISO 串前 10 位 = UTC 日,+08:00 早 8 点前的用量记到
@@ -489,10 +504,18 @@ async function recompute(jsonlFiles, sig) {
       if (day === 'unknown' || day > todayKey || day < from) continue;
       for (const [model, u] of byModelOfDay) {
         let bucket = a.models[model];
-        if (!bucket) { bucket = emptyTotals(); a.models[model] = bucket; }
+        if (!bucket) { bucket = emptyTotals(); bucket.byPeriod = { peak: emptyTotals(), offPeak: emptyTotals(), unknown: emptyTotals() }; a.models[model] = bucket; }
         bucket.input += u.input; bucket.output += u.output;
         bucket.cacheRead += u.cacheRead; bucket.cacheWrite += u.cacheWrite;
         bucket.calls += u.calls;
+        const src = u.byPeriod || {};
+        for (const [name, dst] of [['peak', bucket.byPeriod.peak], ['offPeak', bucket.byPeriod.offPeak], ['unknown', bucket.byPeriod.unknown]]) {
+          const from2 = src[name];
+          if (!from2) continue;
+          dst.input += from2.input; dst.output += from2.output;
+          dst.cacheRead += from2.cacheRead; dst.cacheWrite += from2.cacheWrite;
+          dst.calls += from2.calls;
+        }
       }
     }
   }
@@ -539,10 +562,15 @@ async function recompute(jsonlFiles, sig) {
   const ranges = { '7d': rangeOf('7d'), '30d': rangeOf('30d') };
   // byDayModel 的序列化:Map → null 原型嵌套对象(模型名来自第三方响应,'__proto__' 当键会被
   // 普通对象当作原型 setter 吃掉 → 用 Object.create(null) 起手,再逐键赋值)。
+  // **窗口与 byDay 一致**:只保留最近 BYDAY_WINDOW 天(+ 'unknown' 占一格),否则有多年历史的机器
+  // 上这份数据会无界增长(契约 INTERFACE-r131 §A 写的就是"最多 400 天",安全审计 新-2 抓到这里
+  // 实现与注释相反)。截断口径直接复用上面算好的 byDayAll 的排序与切片,两处不可能不一致。
+  const byDayWindowDays = new Set(byDayAll.slice(0, BYDAY_WINDOW).map((r) => r.day));
   const byDayModelObj = Object.create(null);
   for (const [day, byModelOfDay] of byDayModel) {
+    if (!byDayWindowDays.has(day)) continue;
     const row = Object.create(null);
-    for (const [model, stats] of byModelOfDay) row[model] = { ...stats };
+    for (const [model, stats] of byModelOfDay) row[model] = { ...stats, byPeriod: { peak: { ...stats.byPeriod.peak }, offPeak: { ...stats.byPeriod.offPeak }, unknown: { ...stats.byPeriod.unknown } } };
     byDayModelObj[day] = row;
   }
 

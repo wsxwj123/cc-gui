@@ -212,19 +212,21 @@ export function rangeOverview(stats, range, todayKey) {
     }
   }
   if (!models.size) {
-    // 没有 byDayModel(旧响应):只能按 byDay 的每日合计归到"全量第一名的模型"上 —— 图例至少
-    // 不是空的,但模型分组在这个降级路径下是不准的(byDay 行里没有模型维度)。UI 里有测试守着。
-    const name = stats?.byModel?.[0]?.model;
-    const acc = { model: name, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+    // 没有 byDayModel(旧响应):**按天的模型明细在 byDay 行里根本不存在**,所以这里**不编造**分组。
+    // 早先的写法把窗口内全部 token 挂在"全量第一名模型"名下 → 图例显示一个模型、占比 100%,
+    // 用户会当成事实读(代码审查 R2)。现在只把四项 token 与 calls 汇总到卡片能用的字段里,
+    // out.byModel 留空,界面自己说"这些天的用量没有模型明细"。
     for (const r of rows) {
-      acc.input += num(r.input); acc.output += num(r.output);
-      acc.cacheRead += num(r.cacheRead); acc.cacheWrite += num(r.cacheWrite); acc.calls += num(r.calls);
+      out.input += num(r.input); out.output += num(r.output);
+      out.cacheRead += num(r.cacheRead); out.cacheWrite += num(r.cacheWrite); out.calls += num(r.calls);
     }
-    if (name && acc.calls > 0) models.set(name, acc);
   }
-  for (const m of models.values()) {
-    out.input += m.input; out.output += m.output;
-    out.cacheRead += m.cacheRead; out.cacheWrite += m.cacheWrite; out.calls += m.calls;
+  if (models.size) {
+    out.input = 0; out.output = 0; out.cacheRead = 0; out.cacheWrite = 0; out.calls = 0;
+    for (const m of models.values()) {
+      out.input += m.input; out.output += m.output;
+      out.cacheRead += m.cacheRead; out.cacheWrite += m.cacheWrite; out.calls += m.calls;
+    }
   }
   out.totalTokens = out.input + out.output + out.cacheRead + out.cacheWrite;
   out.byModel = [...models.values()].sort((a, b) => (tokensOf(b) - tokensOf(a)) || (a.model < b.model ? -1 : 1));

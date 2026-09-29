@@ -249,6 +249,9 @@ export const HomeUsage = React.memo(function HomeUsage() {
     const root = heatRef.current;
     const el = tipRef.current;
     if (!tipCell || !root || !el) { setTipPos(null); return; }
+    // day 正常是 YYYY-MM-DD(日期算术保证);万一缓存被改坏带了引号/括号,直接进选择器会抛
+    // SyntaxError 把整块用量渲染搞崩。先守格式(不匹配就不定位;tooltip 仍由 React 文本节点渲染)。
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(tipCell.day))) { setTipPos(null); return; }
     const cellEl = root.querySelector(`[data-testid="home-usage-cell"][data-day="${tipCell.day}"]`);
     if (!cellEl) { setTipPos(null); return; }
     const cx = cellEl.offsetLeft + cellEl.offsetWidth / 2;
@@ -264,6 +267,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
     const wrap = chartWrapRef.current;
     const el = ctipRef.current;
     if (!ctipDay || !wrap || !el) { setCtipPos(null); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ctipDay.day))) { setCtipPos(null); return; }
     const barEl = wrap.querySelector(`[data-testid="home-usage-chart-bar"][data-day="${ctipDay.day}"] [data-hit]`);
     if (!barEl) { setCtipPos(null); return; }
     const wrapRect = wrap.getBoundingClientRect();
@@ -295,19 +299,43 @@ export const HomeUsage = React.memo(function HomeUsage() {
       />
     ))) : null), [grid, onCellEnter, onCellLeave, onCellClick]);
 
+  // 绘图区的三个纯计算量必须声明在 barNodes **之前**(barNodes 的依赖数组里有 barGap;
+  // 写到后面会 TDZ: Cannot access 'barGap' before initialization,而渲染期抛错会被 ErrorBoundary
+  // 兜成"用量块整块不渲染"——外面只看到几条 UI 用例红、看不到真正的错(我踩过一次)。
+  const plotW = Math.max(1, (width || 0) - PAD_LEFT);
+  const barW = chartData.days.length ? plotW / chartData.days.length : plotW;
+  const barGap = barW >= 4 ? 1 : 0;
   // 柱子的颜色按序列(占比排名)取:同一模型在所有柱里颜色一致,与图例色块同源。
   const colorOf = useMemo(() => {
     const map = new Map(chartData.series.map((s) => [s.model, s.fill]));
     return (model) => map.get(model) || 'text-accent/25';
   }, [chartData.series]);
+  // 柱子节点 memo 掉(同 cellNodes 的手法):悬停柱子会 setCtip 重渲,不 memo 的话每动一下鼠标
+  // 都要重建最多 400 根柱子 × 每柱模型数个 <rect>(代码审查 R3;安全审计也点了"DOM 无界放大")。
+  const barNodes = useMemo(() => (chartData.days.length === 0 ? null : (
+    <svg width="100%" height={chartH} role="img" aria-label="按天的模型用量堆叠图">
+      <g>
+        {chartData.days.map((d, i) => (
+          <Bar
+            key={d.day}
+            day={d}
+            plotH={plotH}
+            colorOf={colorOf}
+            onEnter={onBarEnter}
+            onLeave={onBarLeave}
+            onClick={onBarClick}
+            leftPct={(i * 100) / chartData.days.length}
+            widthPct={(100 / chartData.days.length) * (barGap ? 0.92 : 1)}
+          />
+        ))}
+      </g>
+    </svg>
+  )), [chartData.days, chartH, plotH, colorOf, barGap, onBarEnter, onBarLeave, onBarClick]);
 
   const gridCols = cols === 2 ? 'grid-cols-2' : 'grid-cols-4';
   const stale = ready && !!stats.meta?.stale;
   const pickTab = (k) => { setTab(k); writePref(TAB_KEY, k); };
   const pickRange = (k) => { setRange(k); writePref(RANGE_KEY, k); };
-  const plotW = Math.max(1, (width || 0) - PAD_LEFT);
-  const barW = chartData.days.length ? plotW / chartData.days.length : plotW;
-  const barGap = barW >= 4 ? 1 : 0;
   return (
     <div ref={rootRef} data-testid="home-usage" className="w-full min-w-0">
       <div className="flex items-center gap-2 mb-2 min-w-0">
@@ -321,7 +349,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
               type="button"
               role="tab"
               data-testid={`home-usage-tab-${t.key}`}
-              aria-pressed={tab === t.key}
+              aria-selected={tab === t.key}
               onClick={() => pickTab(t.key)}
               className={tab === t.key ? TAB_ON : TAB_OFF}
             >{t.label}</button>
@@ -409,23 +437,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
                     >{t.text}</div>
                   ))}
                   <div className="absolute" style={{ left: PAD_LEFT, right: 0, top: 0, height: chartH }}>
-                    <svg width="100%" height={chartH} role="img" aria-label="按天的模型用量堆叠图">
-                      <g>
-                        {chartData.days.map((d, i) => (
-                          <Bar
-                            key={d.day}
-                            day={d}
-                            plotH={plotH}
-                            colorOf={colorOf}
-                            onEnter={onBarEnter}
-                            onLeave={onBarLeave}
-                            onClick={onBarClick}
-                            leftPct={(i * 100) / chartData.days.length}
-                            widthPct={(100 / chartData.days.length) * (barGap ? 0.92 : 1)}
-                          />
-                        ))}
-                      </g>
-                    </svg>
+                    {barNodes}
                   </div>
                   {/* x 轴标签:等距(每 1–2 周一个)。用 flex + space-between 让**布局引擎均分间隔** ——
                       绝对定位 + translateX(-50%) 时 WebKit 对每个文本块各自取整,相邻间隔实测会差 1–3px
@@ -464,7 +476,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
                 return (
                   <div key={m.model} data-testid="home-usage-legend-row" data-model={m.model} data-share={m.share.toFixed(2)} data-block={m.block}
                     className="flex items-center justify-between gap-1 py-1 min-w-0"
-                    title={`${m.model} · ${abbrevTokens(m.input)} in · ${abbrevTokens(m.output)} out · ${m.share.toFixed(1)}%`}>
+                    title={`${m.model} · ${abbrevTokens(m.input)} in · ${abbrevTokens(m.output)} out · ${m.share.toFixed(1)}% · ${cost.subscription ? '订阅内' : cost.usd != null ? formatCost(displayUsd(cost.usd, cost.currency)) + (cost.partial ? ' *' : '') : '无定价数据'}`}>
                     <span className={`inline-block w-2.5 h-2.5 rounded-[2px] shrink-0 ${m.shade}`} aria-hidden="true" />
                     <span data-testid="home-usage-legend-name" title={m.model}
                       className="flex-1 min-w-0 truncate text-[11px] font-body text-ink">{m.name}</span>
