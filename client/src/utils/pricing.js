@@ -297,7 +297,7 @@ function compatPrices() {
 function remoteLookup(model) {
   const table = compatPrices();
   if (!model || !table) return null;
-  let e = table[model];
+  let e = Object.prototype.hasOwnProperty.call(table, model) ? table[model] : null;
   if (!e) e = table[model.replace(/-\d{8}$/, '')];
   if (!e) {
     // 前缀兜底取**最长**匹配(与下方内置表 lookupByModel 同口径):键序不确定时
@@ -314,7 +314,7 @@ function remoteLookup(model) {
 function remoteLookupDetailed(model) {
   const table = compatPrices();
   if (!model || !table) return null;
-  if (table[model]) return { entry: { ...table[model], currency: 'USD' }, matchedExactly: true };
+  if (Object.prototype.hasOwnProperty.call(table, model)) return { entry: { ...table[model], currency: 'USD' }, matchedExactly: true };
   const stripped = model.replace(/-\d{8}$/, '');
   if (stripped !== model && table[stripped]) return { entry: { ...table[stripped], currency: 'USD' }, matchedExactly: false };
   const k = Object.keys(table)
@@ -466,7 +466,8 @@ const ALIASES = {
 // (matchedExactly=false),展示层据此加「·疑似」后缀,不再静默顶替。
 function lookupByModel(model) {
   const table = (entry) => ({ entry, matchedExactly: true });
-  if (model && PRICES[model]) return table(PRICES[model]);
+  // 内置离线表同样是普通对象:模型名撞 constructor / __proto__ / toString 时会命中原型成员(假价目)
+  if (model && Object.prototype.hasOwnProperty.call(PRICES, model)) return table(PRICES[model]);
   if (ALIASES[model] && PRICES[ALIASES[model]]) return table(PRICES[ALIASES[model]]);
   const guessed = (entry) => ({ entry, matchedExactly: false });
   const stripped = model && model.replace(/-\d{8}$/, '');

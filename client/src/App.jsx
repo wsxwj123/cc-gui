@@ -2237,35 +2237,57 @@ function HomeState({ tabIndex = 0 }) {
   };
   // r130 单屏:三段式(招呼 → 用量图区 flex-1 内部滚 → composer 被推到底部),父链每级都是 flex 列/行 +
   // overflow-hidden 给了确定高度(见 T5 commit);分屏两层 className 逐字维持旧样(验收 C2b 锁定字面量)。
+  // r131:招呼的分段渲染(称呼段走 accent 渐变)抽成节点变量 —— 单屏分支把它放进图区的居中内层,
+  // 分屏分支照旧放在外层;两处内容必须逐字一致,所以只有一份定义。
+  const greetingNode = homeGreetingParts(hour, custom?.greeting, displayName).map((p, i) => p.name ? (
+    <span
+      key={i}
+      className="bg-gradient-to-r from-accent to-accent-hover bg-clip-text text-transparent font-semibold"
+    >{p.text}</span>
+  ) : (
+    <span key={i}>{p.text}</span>
+  ));
   return (
     <div data-cgui="home" className={showUsage ? 'flex-1 flex flex-col min-h-0 px-6' : 'flex-1 flex items-center justify-center px-6'}>
       <div className={showUsage ? 'w-full max-w-[600px] mx-auto flex-1 min-h-0 flex flex-col items-center pt-6 pb-4' : 'w-full max-w-[560px] flex flex-col items-center'}>
-        {custom?.icon ? (
-          <img src={custom.icon} alt="" className="w-12 h-12 rounded-lg object-cover mb-4" />
-        ) : (
-          <div className="w-12 h-12 rounded-lg border border-canvas-deep/70 flex items-center justify-center mb-4">
-            <Sparkles size={22} className="text-accent" />
-          </div>
+        {/* r131:单屏(showUsage)时**图标 + 招呼 + 用量块是一个整体**,一起在 home-usage-slot 里垂直居中
+            (r130 把用量块单独居中,招呼留在外层顶部 → 招呼顶在页面上沿、中间一大片空白)。
+            DOM 顺序仍是 招呼 → home-usage → home-input(验收 C1a/C1b 钉着),孤儿提示块仍在输入框上方;
+            分屏分支一个字不动。 */}
+        {!showUsage && (
+          <>
+            {custom?.icon ? (
+              <img src={custom.icon} alt="" className="w-12 h-12 rounded-lg object-cover mb-4" />
+            ) : (
+              <div className="w-12 h-12 rounded-lg border border-canvas-deep/70 flex items-center justify-center mb-4">
+                <Sparkles size={22} className="text-accent" />
+              </div>
+            )}
+            <h2 data-cgui="home-greeting" className="text-[22px] font-display font-medium text-ink mb-5 tracking-tight">{greetingNode}</h2>
+          </>
         )}
-        {/* r11-⑫:问候分段渲染——称呼段用主题 accent 细渐变(token,不硬编码色值),
-            皮肤模板 {name} 占位符同路径;无称呼时占位符整段降级(homeGreetingParts)。 */}
-        <h2 data-cgui="home-greeting" className="text-[22px] font-display font-medium text-ink mb-5 tracking-tight">
-          {homeGreetingParts(hour, custom?.greeting, displayName).map((p, i) => p.name ? (
-            <span
-              key={i}
-              className="bg-gradient-to-r from-accent to-accent-hover bg-clip-text text-transparent font-semibold"
-            >{p.text}</span>
-          ) : (
-            <span key={i}>{p.text}</span>
-          ))}
-        </h2>
         {/* r130:用量总览 + 热力图(组件与算法在 components/HomeUsage.jsx / utils/homeUsage.js,不进本文件:
             四个单测按 HomeState 切片计数)。图区 flex-1 + min-h-0 + overflow-y-auto:溢出时在图区内部滚,
-            composer 始终在视口内;min-h-full + justify-center 让不溢出时垂直居中。ErrorBoundary 兜住组件内异常。 */}
+            composer 始终在视口内;min-h-full 让内容撑满可滚高度、组的居中交给子元素的 my-auto。
+            **为什么是 my-auto 而不是父级 justify-center**:内容比图区高时(title + 图表 + 图例在 375px
+            / 上百根柱子的场景下会超)父级 justify-center 会把溢出的部分顶到滚动区**上方**、滚不回去,
+            顶部招呼就会被裁掉半个字。margin:auto 的居中在空间不够时自动退化成 0,内容从头铺到尾。 */}
         {showUsage && (
           <div data-testid="home-usage-slot" className="w-full flex-1 min-h-0 overflow-y-auto py-4">
-            <div className="min-h-full flex flex-col justify-center">
-              <ErrorBoundary label="用量总览"><HomeUsage /></ErrorBoundary>
+            <div className="min-h-full flex flex-col">
+              <div className="my-auto w-full">
+                {custom?.icon ? (
+                  <img src={custom.icon} alt="" className="w-12 h-12 rounded-lg object-cover mb-4" />
+                ) : (
+                  <div className="w-12 h-12 rounded-lg border border-canvas-deep/70 flex items-center justify-center mb-4">
+                    <Sparkles size={22} className="text-accent" />
+                  </div>
+                )}
+                {/* r11-⑫:问候分段渲染——称呼段用主题 accent 细渐变(token,不硬编码色值),
+                    皮肤模板 {name} 占位符同路径;无称呼时占位符整段降级(homeGreetingParts)。 */}
+                <h2 data-cgui="home-greeting" className="text-[22px] font-display font-medium text-ink mb-3 tracking-tight">{greetingNode}</h2>
+                <ErrorBoundary label="用量总览"><HomeUsage /></ErrorBoundary>
+              </div>
             </div>
           </div>
         )}

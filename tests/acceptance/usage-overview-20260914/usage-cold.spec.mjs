@@ -13,7 +13,7 @@ import { mainHome, scratchHome, rmHome, startInstance, stopInstance, getUsage, g
 
 const PROBE_MODEL = 'claude-opus-9-fixture-probe';   // 造 sig 不一致用的独有模型名
 const PROBE_INPUT = 7_000_000;
-const ROOT_KEYS_OK = new Set(['total', 'byModel', 'byProject', 'byDay', 'meta', 'overview']);   // r130 INTERFACE §D:根键只多 overview 一个
+const ROOT_KEYS_OK = new Set(['total', 'byModel', 'byProject', 'byDay', 'meta', 'overview', 'byDayModel', 'ranges']);   // r130 §D 只多 overview;r131 §A 再 + byDayModel / ranges
 const BOOT_QUIET_MS = 13_000;   // 实例启动后到"CPU 噪声带过去"的等待;窗口不许落在前 10 秒里(见 U3a)
 const WINDOW_MS = 3000;         // U3a 的观测窗口长度(基线窗口同长)
 
@@ -184,7 +184,7 @@ group('U6 无缓存文件 → 走冷路径(行为与今天一致)');
     return `${expected.byModel.length} 个模型 / ${expected.byDayRows.length} 个日期逐行 / ${rows.length} 个项目逐行(共 ${expected.byProjectCount} 个) / total.input=${expected.total.input}`;
   });
 
-  await test('U6b', '不新增既有字段之外的根字段(只许新增 meta)', () => {
+  await test('U6b', '不新增约定之外的根字段(白名单:total/byModel/byProject/byDay/overview/meta/byDayModel/ranges)', () => {
     const extra = Object.keys(R_fresh).filter((k) => !ROOT_KEYS_OK.has(k));
     assertTrue(!extra.length, `根上多出未约定字段: ${extra.join(',')}`);
     return `根字段 ${Object.keys(R_fresh).join(',')}`;

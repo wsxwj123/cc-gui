@@ -18,7 +18,7 @@ async function run(slug) {
 }
 const sorted = (a) => [...a].sort();
 
-test('D1a 根键只许是既有五键 + overview,既有五键必在', async () => {
+test('D1a 根键只许是既有五键 + overview + byDayModel + ranges(r131 追加的两个),既有五键必在', async () => {
   const body = await run('d1a-root-keys');
   const keys = Object.keys(body);
   expect(keys.filter((k) => !ROOT_KEYS.includes(k)), '根上不许多出约定之外的键').toEqual([]);

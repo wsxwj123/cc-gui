@@ -1,5 +1,5 @@
-// r130 · 夹具:隔离 HOME + 几十字节的小 jsonl + 本地日期/时间换算。
-// 依据只有 .devflow/BRIEF-r130.md 与 .devflow/INTERFACE-r130.md;没看实现代码。
+// r131 · 夹具:隔离 HOME + 几十字节的小 jsonl + 本地日期/时间换算。
+// 依据只有 .devflow/BRIEF-r131.md 与 .devflow/INTERFACE-r131.md(本任务设计说明 .devflow/DESIGN-r131.md)。
 // 铁规:所有写文件的路径必须落在本套件 .artifacts 之下,绝不碰真实 ~/.claude、~/.claude-gui。
 // 时区:测试进程与实例进程都由 run.sh 注入 TZ=Asia/Shanghai(INTERFACE §0);本文件在被 import 时就核对。
 import fs from 'node:fs';
@@ -10,12 +10,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 export const suiteDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const WORKTREE = path.resolve(suiteDir, '..', '..', '..');
 export const suitePath = (...p) => path.join(suiteDir, ...p);
-export const dataRoot = () => process.env.R130_DATA_ROOT || suitePath('.artifacts', 'runtime-data');
+export const dataRoot = () => process.env.R131_DATA_ROOT || suitePath('.artifacts', 'runtime-data');
 /** 断外网预载(复用 r128 的 helper,file:// URL 形式塞进 NODE_OPTIONS)。 */
 export const noOutboundUrl = () => pathToFileURL(path.join(WORKTREE, 'tests', 'acceptance', 'r128-checkpoint-perf', 'helpers', 'no-outbound.mjs')).href;
 export const TZ = 'Asia/Shanghai';
 
-if (process.env.TZ !== TZ) throw new Error(`r130 测试进程必须 TZ=${TZ}(用 run.sh 跑;当前 TZ=${process.env.TZ || '(未设)'})`);
+if (process.env.TZ !== TZ) throw new Error(`r131 测试进程必须 TZ=${TZ}(用 run.sh 跑;当前 TZ=${process.env.TZ || '(未设)'})`);
 
 /** 安全阀:只允许写本套件 .artifacts 之下的路径。 */
 export function assertIsolated(p) {
@@ -40,7 +40,7 @@ export function buildHome(home) {
   return home;
 }
 
-/** 每条用例自己的数据根:<R130_DATA_ROOT>/<group>/<slug>/{home,*.log,*.pid} */
+/** 每条用例自己的数据根:<R131_DATA_ROOT>/<group>/<slug>/{home,*.log,*.pid} */
 export function caseRoot(group, slug) {
   const root = path.join(dataRoot(), group, slug);
   assertIsolated(root);
@@ -52,7 +52,7 @@ export function caseRoot(group, slug) {
 
 export const projectsDir = (home) => path.join(home, '.claude', 'projects');
 export const cachePath = (home) => path.join(home, '.claude-gui', 'usage-stats-cache.json');
-export const PROJ = '-Users-r130-fixture-proj';        // 默认项目目录名(与真 CLI 同形:cwd 非字母数字换成 '-')
+export const PROJ = '-Users-r131-fixture-proj';        // 默认项目目录名(与真 CLI 同形:cwd 非字母数字换成 '-')
 /** 会话 id 用十六进制 UUID 形(侧栏只列合法 id 的会话;接口层无所谓,但统一用它)。 */
 export const sid = (n) => `c130${String(n).padStart(4, '0')}-0000-4000-8000-00000000${String(n).padStart(4, '0')}`;
 
@@ -75,7 +75,7 @@ export function appendJsonl(file, records) {
 
 // ── 记录形状(照 tests/acceptance 里已被产品认出来的夹具形状,只留聚合要看的字段)────────────
 let seq = 0;
-export const nextUuid = (tag = 'u') => `r130-${tag}-${++seq}-${process.pid}`;
+export const nextUuid = (tag = 'u') => `r131-${tag}-${++seq}-${process.pid}`;
 /** 四项 token:[input, output, cacheRead, cacheWrite] → message.usage */
 export const usageOf = ([i, o, cr, cw]) => ({ input_tokens: i, output_tokens: o, cache_read_input_tokens: cr, cache_creation_input_tokens: cw });
 export const sum4 = ([i, o, cr, cw]) => i + o + cr + cw;
@@ -84,10 +84,10 @@ export const STD = [100, 20, 300, 40];    // 基准元组,合计 460
 /** assistant 记录:有 message.usage 才算数;id 缺省自动唯一;ts 传 undefined = 无 timestamp。 */
 export function assistant({ id, model = 'claude-sonnet-4-6', ts, uuid, u = STD, sidechain = false, sessionId = 'ignored-session-field' } = {}) {
   const rec = {
-    parentUuid: null, isSidechain: sidechain, userType: 'external', cwd: '/Users/r130/fixture/proj', sessionId, version: '2.1.267',
+    parentUuid: null, isSidechain: sidechain, userType: 'external', cwd: '/Users/r131/fixture/proj', sessionId, version: '2.1.267',
     type: 'assistant', uuid: uuid ?? nextUuid('a'), timestamp: ts,
-    message: { id: id ?? nextUuid('msg'), model, type: 'message', role: 'assistant', content: [{ type: 'text', text: 'r130 夹具正文' }], stop_reason: 'end_turn', usage: usageOf(u) },
-    requestId: 'req_r130',
+    message: { id: id ?? nextUuid('msg'), model, type: 'message', role: 'assistant', content: [{ type: 'text', text: 'r131 夹具正文' }], stop_reason: 'end_turn', usage: usageOf(u) },
+    requestId: 'req_r131',
   };
   if (ts === undefined) delete rec.timestamp;
   if (id === null) delete rec.message.id;
@@ -96,9 +96,9 @@ export function assistant({ id, model = 'claude-sonnet-4-6', ts, uuid, u = STD, 
   return rec;
 }
 /** user 记录:text(字符串)或 content(数组)二选一;isMeta / sidechain 可控;uuid 传 null = 无 uuid。 */
-export function user({ text = '你好,r130', content, ts, uuid, isMeta = false, sidechain = false, sessionId = 'ignored-session-field' } = {}) {
+export function user({ text = '你好,r131', content, ts, uuid, isMeta = false, sidechain = false, sessionId = 'ignored-session-field' } = {}) {
   const rec = {
-    parentUuid: null, isSidechain: sidechain, userType: 'external', cwd: '/Users/r130/fixture/proj', sessionId, version: '2.1.267',
+    parentUuid: null, isSidechain: sidechain, userType: 'external', cwd: '/Users/r131/fixture/proj', sessionId, version: '2.1.267',
     type: 'user', uuid: uuid ?? nextUuid('u'), timestamp: ts, isMeta,
     message: { role: 'user', content: content ?? text },
   };
@@ -106,7 +106,7 @@ export function user({ text = '你好,r130', content, ts, uuid, isMeta = false, 
   if (uuid === null) delete rec.uuid;
   return rec;
 }
-export const toolResultBlock = (id = 'toolu_r130') => ({ type: 'tool_result', tool_use_id: id, content: '(夹具)工具输出' });
+export const toolResultBlock = (id = 'toolu_r131') => ({ type: 'tool_result', tool_use_id: id, content: '(夹具)工具输出' });
 
 // ── 本地日期 / 时间(进程 TZ=Asia/Shanghai,固定 +08:00,无夏令时)────────────────────────
 const pad = (n) => String(n).padStart(2, '0');
@@ -128,11 +128,12 @@ export const dayDiff = (a, b) => Math.round((Date.parse(`${a}T12:00:00+08:00`) -
 
 /** 空账 overview(INTERFACE §B-5a 逐字)。 */
 export const EMPTY_OVERVIEW = { messages: 0, activeDays: 0, firstDay: null, lastActiveDay: null, currentStreak: 0, longestStreak: 0, hourCounts: Array(24).fill(0), peakHour: null, favoriteModel: null };
-// r131:根键新增 byDayModel(day → model → 五项)与 ranges(7d/30d 窗口聚合)。
-// 本组用例守的是"根上不许多出约定之外的键",新键进了 r131 的接口契约就该加进白名单。
+// r131:根键新增 byDayModel(day → model → 五项)与 ranges(7d/30d 的范围内聚合)。
 export const ROOT_KEYS = ['total', 'byModel', 'byProject', 'byDay', 'meta', 'overview', 'byDayModel', 'ranges'];
 export const TOTAL_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite', 'sessionCount'];
 export const BYDAY_OLD_KEYS = ['day', 'input', 'output', 'cacheRead', 'cacheWrite', 'calls'];
 export const BYDAY_KEYS = [...BYDAY_OLD_KEYS, 'sessions', 'messages'];
+export const RANGE_KEYS = ['7d', '30d'];
+export const RANGE_FIELDS = ['sessions', 'messages', 'input', 'output', 'cacheRead', 'cacheWrite', 'calls', 'activeDays', 'firstDay', 'lastActiveDay', 'currentStreak', 'longestStreak', 'hourCounts', 'peakHour', 'favoriteModel', 'byModel'];
 export const OVERVIEW_KEYS = ['messages', 'activeDays', 'firstDay', 'lastActiveDay', 'currentStreak', 'longestStreak', 'hourCounts', 'peakHour', 'favoriteModel'];
 export const dayRow = (body, day) => (body?.byDay || []).find((r) => r.day === day) ?? null;
