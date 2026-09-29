@@ -654,6 +654,22 @@ test('C7d 旧响应缺 ranges 时切范围:卡片数字走前端兜底(不崩、
   await expect(page.getByTestId('home-usage-error')).toHaveCount(0);
 });
 
+test('C7e 旧响应且没有可归属到某天的数据:模型分页给空态提示,不画零高度的空图', async ({ page }) => {
+  // TEST-PLAN 里旧响应那条判据的"空态"腿(审查裁判指出该腿在 C7c 里没有字面对应):
+  // 有会话(sessionCount > 0,整块不算"还没有用量记录")但 `byDay` 只有 `unknown` 行 ——
+  // 也就是"算得出总量、但没有一天能画柱子"的旧响应。这时模型分页必须给一句可读提示,
+  // 而不是一张零高度的空图;有可归属的天时按 C7c 的口径(退成「合计(无模型明细)」的柱子)。
+  const noDays = payload({ total: { sessionCount: 2 }, byDay: [dayEntry('unknown', 1000, { sessions: 2, messages: 3 })] });
+  delete noDays.byDayModel; delete noDays.ranges;
+  await stubUsage(page, noDays);
+  await gotoHome(page);
+  await pickTab(page, 'models');
+  await expect(page.getByTestId('home-usage-empty'), '有会话 → 不该整块走"还没有用量记录"').toHaveCount(0);
+  await expect(page.getByText('这些天的用量没有模型明细'), '没有可归属的天 → 空态提示').toBeVisible();
+  expect(await chartBars(page).count(), '空态下不该有柱子').toBe(0);
+  await expect(page.getByTestId('home-usage-error')).toHaveCount(0);
+});
+
 test('C8 真隔离实例数据(UI 夹具:两条今天的会话):模型分页图例 = claude-sonnet-4-6,7 天/全部数字一致', async ({ page }) => {
   await gotoHome(page);
   await expect(cards(page)).toBeVisible({ timeout: 30_000 });
