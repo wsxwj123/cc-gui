@@ -105,10 +105,15 @@ function saveCache(sig, scannedAt, data) {
     // 冷扫。写临时文件再 rename,任何时刻被杀都只会看到完整旧值或完整新值。
     writeFileSync(tmp, JSON.stringify({ version: CACHE_VERSION, tz: PROCESS_TZ, sig, scannedAt, data }));
     renameSync(tmp, CACHE_PATH);
-  } catch {
-    // 目录不可写/路径被占(例如缓存路径本身是个目录):内存态照常服务,落盘失败不许冒到
-    // /api/usage 上。顺手删掉本次的临时文件:文件名带 pid,不删就是每次进程启动都往
-    // ~/.claude-gui 里留一份几 MB 的半成品,永久堆积。
+  } catch (err) {
+    // 目录不可写/路径被占(例如缓存路径本身是个目录、Windows 上被杀软或索引器短暂占住 rename):
+    // 内存态照常服务,落盘失败不许冒到 /api/usage 上。**但必须留一行日志** —— 否则磁盘永远停在
+    // 旧版本(实测 v2 → v3 之后每次启动都重跑一遍全量 parse,本机约 40s),而 server.log 里
+    // 一点线索都没有,用户只看到「统计中，数据可能略旧」长期不退(跨平台审查 0.2.401 建议-1)。
+    // 只打错误码与两个路径,不含任何会话内容。
+    console.error(`[usage] 缓存落盘失败(${err?.code || err?.name || 'unknown'}): ${CACHE_PATH}(tmp ${tmp})`);
+    // 顺手删掉本次的临时文件:文件名带 pid,不删就是每次进程启动都往 ~/.claude-gui 里留一份
+    // 几 MB 的半成品,永久堆积。
     try { unlinkSync(tmp); } catch { /* 本来就没写出来 / 也删不掉:已无计可施 */ }
   }
 }
