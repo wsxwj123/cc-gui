@@ -239,9 +239,22 @@ const CMDS = [
   assert.ok(C.indexOf('// ── @ 引用选择器') > C.indexOf('const selectCommand ='),
     't10: check-input-history-nav 的切片锚点必须留在 selectCommand 之后');
 
-  // 首页:两个面板向下弹、挂在工具行之后、会话槽按所选项目取
-  assert.equal(cnt(H, 'absolute top-full'), 2, 't10: 首页两个面板都向下弹');
-  assert.equal(cnt(H, 'absolute bottom-full'), 0);
+  // 首页:弹出方向按布局分(r130)。r97 时 composer 垂直居中、下方有空,两个面板都向下弹;r130 单屏
+  // 首页把 composer 推到底部,向下弹会被窗格 overflow-hidden 裁掉(验收 r130 C13 钉"完整可见"),所以
+  // 单屏不传 className、走组件默认(向上弹,与会话内 ChatInput 同);分屏首页仍居中,保留向下弹字面量。
+  // 锁法:向下弹字面量仍恰好 2 处(两个面板各一,只在三元的分屏分支里);HomeState 内不许手写
+  // bottom-full(向上弹靠组件默认,不复制类名);两个面板的 className 都必须是
+  // `showUsage ? undefined : "…absolute top-full…"` 这个三元 —— 钉住"单屏不强制向下、分屏仍向下"。
+  assert.equal(cnt(H, 'absolute top-full'), 2, 't10: 向下弹字面量恰 2 处(分屏分支,斜杠 + @)');
+  assert.equal(cnt(H, 'absolute bottom-full'), 0, 't10: 单屏向上弹走组件默认,HomeState 内不手写 bottom-full');
+  assert.match(H, /const showUsage = paneCount === 1;/, 't10: 单屏门控 showUsage 必须存在(面板方向与用量图共用它)');
+  const homeMenuTag = H.slice(H.indexOf('<SlashCommandMenu'), H.indexOf('/>', H.indexOf('<SlashCommandMenu')));
+  const homePanelTag = H.slice(H.indexOf('<AtRefPanel'), H.indexOf('/>', H.indexOf('<AtRefPanel')));
+  const DOWN_ONLY_IN_SPLIT = 'className={showUsage ? undefined : "glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"}';
+  assert.equal(cnt(homeMenuTag, DOWN_ONLY_IN_SPLIT), 1, 't10: 首页斜杠菜单:单屏 undefined(组件默认向上)/ 分屏原字面量向下');
+  assert.equal(cnt(homePanelTag, DOWN_ONLY_IN_SPLIT), 1, 't10: 首页 @ 面板:单屏 undefined(组件默认向上)/ 分屏原字面量向下');
+  assert.equal(cnt(homeMenuTag, 'className'), 1, 't10: 首页斜杠菜单只有这一个 className(别处再传就绕开了三元)');
+  assert.equal(cnt(homePanelTag, 'className'), 1, 't10: 首页 @ 面板只有这一个 className');
   const send = H.indexOf('data-testid="home-send"');
   assert.ok(H.indexOf('<SlashCommandMenu') > send && H.indexOf('<AtRefPanel') > send,
     't10: 面板必须挂在工具行之后(挂 textarea 之前会踩附件保护窗口)');

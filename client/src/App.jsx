@@ -80,6 +80,7 @@ import { ModelBadge, ProviderAvatar, ProviderMark } from './components/ModelBadg
 import { RemoteControlButton, ProviderSwitcher, ModelSelector, ProviderSourceBadge, AnchoredPopover } from './components/SessionSelectors.jsx';
 import { mergeProviderLists, rowIsCurrent, parseAvatar, searchMarks } from './utils/providerList.js';
 import { UsagePanel } from './components/UsagePanel.jsx';
+import { HomeUsage } from './components/HomeUsage.jsx';
 import { ProcessPanel } from './components/ProcessPanel.jsx';
 import { SettingsPanel, ChatBackgroundCard } from './components/SettingsPanel.jsx';
 import { FileExplorerPanel } from './components/FileExplorerPanel.jsx';
@@ -1984,6 +1985,10 @@ function HomeState({ tabIndex = 0 }) {
   const projects = useStore((s) => s.projects);
   const selectedProject = useStore((s) => s.selectedProject);
   const displayName = useStore((s) => s.displayName); // r11-⑫ 称呼(多端共享)
+  // r130:单屏才显示用量总览(BRIEF 决定 4;分屏首页逐字维持现状)。原始值选择器,引用稳定;store 变更即重渲,
+  // 切分屏 ↔ 单屏时 HomeUsage 卸载 / 挂载,不需刷新。dock 单显(panes 1 但 paneCount>1)按 paneCount 算分屏。
+  const paneCount = useStore((s) => s.paneCount);
+  const showUsage = paneCount === 1;
   // r11-③:皮肤切换(home.icon/greeting 接管)时重渲——readHomeCustom 每次渲染重读,
   // 这里只负责触发渲染;无皮肤时 version 恒定零开销。
   useSyncExternalStore(subscribeSkin, getSkinVersion, getSkinVersion);
@@ -2230,9 +2235,11 @@ function HomeState({ tabIndex = 0 }) {
     if (st.sidebarCollapsed) st.toggleSidebar();
     setTimeout(() => window.dispatchEvent(new CustomEvent('cgui:add-project')), 60);
   };
+  // r130 单屏:三段式(招呼 → 用量图区 flex-1 内部滚 → composer 被推到底部),父链每级都是 flex 列/行 +
+  // overflow-hidden 给了确定高度(见 T5 commit);分屏两层 className 逐字维持旧样(验收 C2b 锁定字面量)。
   return (
-    <div data-cgui="home" className="flex-1 flex items-center justify-center px-6">
-      <div className="w-full max-w-[560px] flex flex-col items-center">
+    <div data-cgui="home" className={showUsage ? 'flex-1 flex flex-col min-h-0 px-6' : 'flex-1 flex items-center justify-center px-6'}>
+      <div className={showUsage ? 'w-full max-w-[600px] mx-auto flex-1 min-h-0 flex flex-col items-center pt-6 pb-4' : 'w-full max-w-[560px] flex flex-col items-center'}>
         {custom?.icon ? (
           <img src={custom.icon} alt="" className="w-12 h-12 rounded-lg object-cover mb-4" />
         ) : (
@@ -2252,6 +2259,16 @@ function HomeState({ tabIndex = 0 }) {
             <span key={i}>{p.text}</span>
           ))}
         </h2>
+        {/* r130:用量总览 + 热力图(组件与算法在 components/HomeUsage.jsx / utils/homeUsage.js,不进本文件:
+            四个单测按 HomeState 切片计数)。图区 flex-1 + min-h-0 + overflow-y-auto:溢出时在图区内部滚,
+            composer 始终在视口内;min-h-full + justify-center 让不溢出时垂直居中。ErrorBoundary 兜住组件内异常。 */}
+        {showUsage && (
+          <div data-testid="home-usage-slot" className="w-full flex-1 min-h-0 overflow-y-auto py-4">
+            <div className="min-h-full flex flex-col justify-center">
+              <ErrorBoundary label="用量总览"><HomeUsage /></ErrorBoundary>
+            </div>
+          </div>
+        )}
         {/* r26-B1:上次没发出去的排队消息(孤儿 draft 队列)。填入=进当前 Home
             输入框(本地 setText,不回流 messageQueue);丢弃=从孤儿表摘除。 */}
         {orphanEntries.length > 0 && (
@@ -2411,9 +2428,12 @@ function HomeState({ tabIndex = 0 }) {
               <Send size={14} className="text-white -mr-0.5" />
             </button>
           </div>
-          {/* r97:与会话内同一套斜杠命令 / @ 引用。首页 composer 垂直居中,向上弹会被顶栏
-              切掉列表顶部(默认选中项就在那里),所以两个面板在首页都向下弹。
-              位置固定在工具行之后:插到 textarea 之前会顶掉附件粘贴/拖放的既有保护窗口。 */}
+          {/* r97:与会话内同一套斜杠命令 / @ 引用。位置固定在工具行之后:插到 textarea 之前会顶掉
+              附件粘贴/拖放的既有保护窗口。
+              r130 弹出方向按布局分:分屏首页 composer 仍垂直居中(上方紧贴顶栏、下方有空),保留 r97 的
+              向下弹字面量;单屏首页 composer 已贴底,向下弹会被窗格 overflow-hidden 裁掉(实测 1440×900
+              「/」菜单超出 338 px),所以不传 className、走组件默认(与会话内 ChatInput 一致,向上弹,上方
+              是整块用量图区,放得下)。锁:tests/unit/check-r97-dev-pure.mjs t10;验收 r130 C13。 */}
           {showCmds && (
             <SlashCommandMenu
               commands={filteredCmds}
@@ -2421,12 +2441,12 @@ function HomeState({ tabIndex = 0 }) {
               provider={slash.provider}
               isAnthropic={slash.isAnthropic}
               onPick={pickCommand}
-              className="glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"
+              className={showUsage ? undefined : "glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"}
             />
           )}
           <AtRefPanel
             {...at.panelProps}
-            className="glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"
+            className={showUsage ? undefined : "glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"}
           />
         </div>
         <div className="mt-3 text-[11.5px] text-ink-faint font-body">发送后在所选项目里创建新会话；历史会话在左侧列表。</div>
