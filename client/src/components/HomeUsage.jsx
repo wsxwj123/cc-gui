@@ -262,36 +262,49 @@ export const HomeUsage = React.memo(function HomeUsage() {
     setTipPos({ left, top });
   }, [tipCell]);
 
-  // 柱状图浮层定位:**几何量一律取与滚动/缩放无关的来源**。踩过三个坑(每个都让浮层偏几十像素):
-  //   ① 混用 `getBoundingClientRect`(视觉像素)与 `offsetHeight/clientWidth`(布局像素)—— 界面默认 1.2 倍缩放;
-  //   ② 拿有内边距的外层 wrap 当参考系 —— 内边距被算两遍;
-  //   ③ 用 rect 相对"当时的位置"算,而悬停本身会触发横向滚动 → 量到的柱子位置是**滚动前**的,
-  //      而 effect 不会因为滚动重跑,于是浮层整块偏掉(实测偏 176px,且与柱子位置无关 —— "值过期"的脚印)。
-  // 现在:柱心由"第几根柱子 × 每柱宽"直接算出(与渲染柱子用的是同一组数,天然与滚动/缩放无关),
-  // 浮层尺寸取 offsetWidth / offsetHeight(布局像素),浮层就绝对定位在这个容器里 —— 三者同一个坐标系。
+  // 柱状图浮层定位。这一条是本轮返工最多的地方,把结论写全(免得下一个人再踩):
+  //
+  // **单位必须统一,而且不许假设两者的比值**。浮层的 `left/top` 是 CSS 布局像素;`getBoundingClientRect()`
+  // 与 `offsetWidth` 在本仓库的引擎里**不是同一个坐标系**(实测同一容器:rect.width = 720、offsetWidth = 600;
+  // 界面缩放 1.0 / 1.2 / 0.8 三档都验过)→ 混算会整块偏几十像素(仓库里已有两次同根因事故:
+  // App.jsx 的回滚菜单、MessageBubble.jsx 的菜单)。现在的做法:柱心与浮层尺寸都取自 rect(同一坐标系),
+  // 再用**容器自身**的 rect/offset 比值换算回布局像素 —— 比值是量出来的,不写死 1.2。
+  // 另外三个坑:① 拿有内边距的外层 wrap 当参考系(内边距被算两遍);② 用 SVG 元素的 offsetLeft
+  // (SVG 没有布局盒,恒为 0);③ 量完不重跑(悬停本身会触发横向滚动,量到的是滚动前的坐标)。
+  //
+  // 布局策略(判据来自 `.devflow/WINDOWS-REVIEW-0.2.401.md` 必修-2:三档缩放 × 最左/中/最右柱):
+  // **居中优先** —— 能居中的柱必须居中(三档缩放实测偏差 0.36/0.48/0.05/0.48/−0.27/−0.23px);
+  // 只有"居中的话浮层会整个跑出容器"时才贴边:贴边会让浮层与柱子偏心,但比溢出好 ——
+  // 容器外面一圈是 `overflow:auto` 的 `home-usage-slot`,溢出会被裁掉或长出横滚条(实测强制居中会越界 26–36px)。
+  // 贴边柱的实测偏差与"不溢出"的数见 `r131-c-ui.spec.mjs` 的 C10d 与 `.devflow/INTERFACE-r131.md`。
   useLayoutEffect(() => {
     const wrap = chartWrapRef.current;
     const el = ctipRef.current;
     if (!ctipDay || !wrap || !el) { setCtipPos(null); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(ctipDay.day))) { setCtipPos(null); return; }
-    const idx = chartData.days.findIndex((d) => d.day === ctipDay.day);
-    if (idx < 0) { setCtipPos(null); return; }
-    const boxW = wrap.offsetWidth;
-    const plotW = Math.max(1, boxW - PAD_LEFT);
-    const barW = plotW / chartData.days.length;
-    const cx = PAD_LEFT + (idx + 0.5) * barW;          // 柱心(相对容器左缘)
-    const vw = el.offsetWidth;
-    const vh = el.offsetHeight;
-    let left = cx - vw / 2;
-    if (left + vw > boxW) left = cx - barW / 2 - vw - 6;   // 右侧放不下 → 翻到柱子左侧
-    if (left < 0) left = cx + barW / 2 + 6;                // 左侧也放不下 → 柱右
-    left = Math.max(0, Math.min(left, Math.max(0, boxW - vw)));
-    // 纵向:柱子顶在图表顶部,浮层默认放上方,放不下就放到柱子下方
-    const plotH = Math.max(1, chartH - PAD_TOP - PAD_BOTTOM);
-    let top = PAD_TOP - vh - 6;
-    if (top < 0) top = PAD_TOP + plotH + 6;
+    const hitEl = wrap.querySelector(`[data-testid="home-usage-chart-bar"][data-day="${ctipDay.day}"] [data-hit]`);
+    const boxEl = el.parentElement;   // 浮层的绝对定位父级 = 图表容器(相对定位那层)
+    if (!hitEl || !boxEl) { setCtipPos(null); return; }
+    const boxRect = boxEl.getBoundingClientRect();
+    const barRect = hitEl.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    // 视觉 → 布局:容器自己的比值(界面缩放是施加在 <html> 上的 zoom,容器会跟着放大)
+    const k = boxRect.width && boxEl.offsetWidth ? boxRect.width / boxEl.offsetWidth : 1;
+    const boxW = boxEl.offsetWidth;
+    const vw = elRect.width / k;
+    const vh = elRect.height / k;
+    const cx = (barRect.left + barRect.width / 2 - boxRect.left) / k;   // 柱心(布局像素,相对容器)
+    let left = cx - vw / 2;                                             // 居中优先
+    // 贴边的柱子在几何上做不到"既居中又不溢出":浮层宽 ≈180 布局px,而最右柱柱心离容器右缘只有 ~60px。
+    // 取舍:**偏心优于溢出**(溢出会被容器裁掉、还会盖住邻柱;偏心至少整条可见,且文案里的日期是准的)。
+    if (left + vw > boxW && left >= 0) left = Math.max(0, boxW - vw);    // 居中的话右边溢出 → 贴右缘
+    else if (left < 0 && left + vw <= boxW) left = 0;                    // 左边溢出 → 贴左缘
+    const barTop = (barRect.top - boxRect.top) / k;
+    const barH = barRect.height / k;
+    let top = barTop - vh - 6;
+    if (top < 0) top = barTop + barH + 6;
     setCtipPos({ left: Math.round(left), top: Math.round(top) });
-  }, [ctipDay, chartData.days, chartH]);
+  }, [ctipDay, chartH]);
 
   // 格子数组只随 grid 变(回调都是稳定引用):hover 的 setTip 只重渲浮层节点,不重建几百个格子。
   const cellNodes = useMemo(() => (grid ? grid.cells.map((cell) => (cell.future
