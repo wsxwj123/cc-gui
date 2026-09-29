@@ -662,3 +662,96 @@ test('C8 真隔离实例数据(UI 夹具:两条今天的会话):模型分页图�
   // 柱高口径 = 输入 + 输出 = (1200+800) + (300+200);缓存读写不计入柱子
   expect(Number(await chartBars(page).first().getAttribute('data-total'))).toBe(1200 + 800 + 300 + 200);
 });
+
+// ───────────── C10 视觉/坐标:三条由平台兼容审查提出的必修项 ─────────────
+
+test('C10a 堆叠柱的段与图例色块的深浅逐级变化(色带不依赖 Tailwind 是否收录某个透明度类)', async ({ page }) => {
+  await stubUsage(page, typical());
+  await gotoHome(page);
+  await pickTab(page, 'models');
+  await expect(legendRows(page)).toHaveCount(3);
+  // 图例色块:按排名由深到浅,opacity 必须严格递减
+  const sw = await legendRows(page).evaluateAll((els) => els.map((el) => {
+    const dot = el.querySelector('span[aria-hidden="true"]');
+    return Number(getComputedStyle(dot).opacity);
+  }));
+  expect(sw.length).toBe(3);
+  expect(sw[0], `排第一的色块该最深(${sw.join(' / ')})`).toBeGreaterThan(sw[1]);
+  expect(sw[1]).toBeGreaterThan(sw[2]);
+  // 柱子的段:同一天两个模型时,排名靠前的那段 opacity 必须更大(且都不是默认 1 或 NaN)
+  const seg = await page.evaluate(() => {
+    const rects = [...document.querySelectorAll('[data-testid="home-usage-chart-bar"] rect[data-segment-model]')];
+    const byBar = new Map();
+    for (const r of rects) {
+      const bar = r.closest('[data-testid="home-usage-chart-bar"]');
+      const day = bar.getAttribute('data-day');
+      const list = byBar.get(day) || [];
+      list.push({ model: r.getAttribute('data-segment-model'), op: r.getAttribute('fill-opacity'), fill: getComputedStyle(r).fill });
+      byBar.set(day, list);
+    }
+    for (const [, list] of byBar) if (list.length >= 2) return { day: [...byBar.keys()].find((d) => byBar.get(d).length >= 2), segs: list };
+    return { day: null, segs: [] };
+  });
+  expect(seg.day, '夹具里应有"同一天两个模型"的柱子').toBeTruthy();
+  const ops = seg.segs.map((x) => Number(x.op));
+  expect(ops.every((v) => Number.isFinite(v) && v > 0 && v <= 1), `段的 fill-opacity 必须是 (0,1] 的数,实际 ${JSON.stringify(seg.segs)}`).toBe(true);
+  expect(Math.max(...ops), '同一根柱子里各段的深浅不全相同(否则排名色失效)').toBeGreaterThan(Math.min(...ops));
+  // 段的填充色必须真的解析出来(不是 none / transparent):回落成继承色时这里会露馅
+  expect(seg.segs.every((x) => x.fill && x.fill !== 'none' && !/rgba?\(0, 0, 0, 0\)/.test(x.fill)), `段必须有色,实际 ${JSON.stringify(seg.segs.map((x) => x.fill))}`).toBe(true);
+});
+
+test('C10b 逐柱悬停:浮层给的是这一根柱子那天、且落在图表容器内(界面 1.2 倍缩放下)', async ({ page }) => {
+  const body = typical();
+  await stubUsage(page, body);
+  await gotoHome(page);
+  await pickTab(page, 'models');
+  const days = body.byDay.map((r) => r.day).reverse();
+  for (const day of days) {
+    const bar = page.locator(`[data-testid="home-usage-chart-bar"][data-day="${day}"]`);
+    await bar.hover();
+    const tip = page.getByTestId('home-usage-chart-tip');
+    await expect(tip, `${day}: 悬停必须有浮层`).toBeVisible();
+    // ① 文案必须是**这一根柱子**那天的(把 A 天的数读成 B 天,是最要紧的错法)
+    await expect(tip, `${day}: 浮层第一行应是这一天`).toContainText(day);
+    // ② 浮层的数值 = 该柱子的 data-total(逐柱核,不是只看"有浮层")
+    const total = await bar.getAttribute('data-total');
+    await expect(tip, `${day}: 浮层合计应等于该柱的 data-total`).toContainText(Number(total).toLocaleString('en-US'));
+    // ③ 浮层必须整个落在图表容器的水平范围内(1.2 倍缩放下也不许溢出到容器外)
+    const geo = await page.evaluate((d) => {
+      const b = document.querySelector(`[data-testid="home-usage-chart-bar"][data-day="${d}"]`);
+      const el = document.querySelector('[data-testid="home-usage-chart-tip"]');
+      const box = el && el.parentElement;
+      if (!b || !el || !box) return null;
+      const bb = b.getBoundingClientRect(); const tb = el.getBoundingClientRect(); const xb = box.getBoundingClientRect();
+      return { overLeft: xb.left - tb.left, overRight: tb.right - xb.right, barW: bb.width, gap: tb.top >= bb.bottom ? 'below' : 'above-or-overlap' };
+    }, day);
+    expect(geo, `${day}: 应能量到柱 / 浮层 / 容器三者`).toBeTruthy();
+    expect(geo.overLeft, `${day}: 浮层左边不该溢出图表容器(${geo.overLeft.toFixed(1)}px)`).toBeLessThanOrEqual(1);
+    expect(geo.overRight, `${day}: 浮层右边不该溢出图表容器(${geo.overRight.toFixed(1)}px)`).toBeLessThanOrEqual(1);
+  }
+  // 关于"浮层是否精确居中在柱子上":本轮**没有**做成稳定判据 —— 在界面缩放 1.2 + 悬停引发横向滚动的
+  // 组合下,同一份实现量出来的中心距在 16px 与 81px 之间跳(测量本身不稳定),我没有找到能稳定复现的写法,
+  // 已登记为待真机验证项(见 WINDOWS-REVIEW-0.2.401 与交付说明)。这里不写一条会随机红的断言来充数。
+});
+
+test('C10c 375×812(含界面缩放余量)用量块顶行不横滚', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 375, height: 812 }, baseURL: process.env.R131_UI_BASE, timezoneId: 'Asia/Shanghai', locale: 'zh-CN' });
+  const page = await ctx.newPage();
+  try {
+    await stubUsage(page, typical());
+    await gotoHome(page);
+    // 分页与范围两组都必须在容器里放得下(或被允许换行),不许把整页撑出横向滚动
+    const m = await page.evaluate(() => {
+      const head = document.querySelector('[data-testid="home-usage-tabs"]').parentElement;
+      const ranges = document.querySelector('[data-testid="home-usage-ranges"]');
+      return {
+        sw: document.documentElement.scrollWidth, iw: innerWidth,
+        headRight: head.getBoundingClientRect().right, rangeRight: ranges.getBoundingClientRect().right,
+        usageRight: document.querySelector('[data-testid="home-usage"]').getBoundingClientRect().right,
+      };
+    });
+    expect(m.sw, `顶行不该把页面撑横滚(scrollWidth ${m.sw} ≤ ${m.iw})`).toBeLessThanOrEqual(m.iw);
+    expect(m.rangeRight, '范围组右缘不超出用量块').toBeLessThanOrEqual(m.usageRight + 1);
+    expect(m.headRight, '顶行右缘不超出用量块').toBeLessThanOrEqual(m.usageRight + 1);
+  } finally { await ctx.close(); }
+});
