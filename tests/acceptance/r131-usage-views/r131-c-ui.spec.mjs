@@ -949,13 +949,16 @@ test('C12b 贪吃蛇:系统开了"减少动态效果"就不渲染、不动', asy
 
 test('C12c 贪吃蛇:数据刷新(usage-updated)不得留下旧吃痕 —— 格子必须全部复原', async ({ page }) => {
   // 独立审查必修 M1:effect 重跑时若不复原 visibility,频繁刷新会积下一片永久隐身的格子。
-  await page.addInitScript(() => { try { window.__cguiSnakeMs = 5; } catch { /* 忽略 */ } });
-  await stubUsage(page, typical());
+  // ⚠️ 夹具必须**密集**:typical() 只有 5 个有量日 → 隐藏数天花板 5,任何阈值 ≥5 的断言都不可能红
+  // (盲判第二轮抓到过这个废钉:删掉复原它照样绿)。这里给 60 天连续用量,隐藏数能到几十,判据才真能红。
+  await page.addInitScript(() => { try { window.__cguiSnakeMs = 8; } catch { /* 忽略 */ } });
+  const dense = payload({ byDay: Array.from({ length: 60 }, (_, i) => dayEntry(dayAgo(i), 5000 + i, { messages: 2, sessions: 1 })) });
+  await stubUsage(page, dense);
   await gotoHome(page);
   const hidden = () => page.locator('[data-testid="home-usage-cell"][style*="visibility: hidden"]').count();
-  await expect.poll(hidden, { timeout: 6000, message: '跑起来后应先把格子吃掉' }).toBeGreaterThan(0);
+  await expect.poll(hidden, { timeout: 8000, message: '跑起来后应吃掉一大片格子(密集夹具)' }).toBeGreaterThan(20);
   await page.evaluate(() => window.dispatchEvent(new CustomEvent('cgui:usage-updated')));
-  await page.waitForTimeout(700);
+  await page.waitForTimeout(800);
   const n = await hidden();
-  expect(n, `刷新重挂后只该剩当前这一趟的吃痕(≤8),不该留上一整片的旧吃痕(实得 ${n})`).toBeLessThanOrEqual(8);
+  expect(n, `刷新重挂后只该剩这一趟刚开始吃的几格(≤10);实得 ${n} —— 几十说明上一整片旧吃痕没被复原`).toBeLessThanOrEqual(10);
 });

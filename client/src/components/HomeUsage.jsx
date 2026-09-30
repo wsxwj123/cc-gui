@@ -17,18 +17,18 @@ import { useStore } from '../stores/sessionStore.js';
 const SLOW_MS = 3000;             // 首次请求超过 3 s 未返回 → 骨架加「正在统计全部会话…」(本机冷扫 40 s)
 const STALE_REFETCH_MS = 45_000;  // 收到 stale 响应后的一次延迟静默重取(广播丢失的兜底;定时器单份)
 const CELL = 11;                  // 格子边长 px
+const CELL_GAP = 2;              // 格子间距 px —— GRID_STYLE / LABEL_STYLE / SNAKE_PITCH 唯一来源
 // C11 修法(用户实报:回合结束后 chat-done 会让会话列表重载 → 首屏组件重挂 → 刚挂载的用量块走
 // "非静默首取" → 骨架闪一下)。这里留一份"上次的载荷":重挂时直接以 ready + 旧数据起步、只做静默刷新,
 // 只有**真·第一次**加载才显示骨架。存模块级(不是 localStorage):页面刷新即重来,不留陈旧数据。
 let lastStatsCache = null;   // { data, at } —— 带时间戳;太旧时静默失败要回落错误态
 
 const SNAKE_LEN = 8;              // 蛇身段数(头 + 7 节尾)
-const CELL_GAP = 2;              // 与 GRID_STYLE 的 gap 同一个值
 const SNAKE_PITCH = CELL + CELL_GAP;
 const LEVEL_CLASS = ['bg-canvas-deep', 'bg-accent/25', 'bg-accent/45', 'bg-accent/70', 'bg-accent'];   // 随主题 accent 走
 const ROW_LABELS = ['一', '', '三', '', '五', '', ''];
-const GRID_STYLE = { display: 'grid', gridTemplateRows: `repeat(7, ${CELL}px)`, gridAutoFlow: 'column', gridAutoColumns: `${CELL}px`, gap: '2px' };
-const LABEL_STYLE = { display: 'grid', gridTemplateRows: `repeat(7, ${CELL}px)`, gap: '2px', width: 18 };
+const GRID_STYLE = { display: 'grid', gridTemplateRows: `repeat(7, ${CELL}px)`, gridAutoFlow: 'column', gridAutoColumns: `${CELL}px`, gap: `${CELL_GAP}px` };
+const LABEL_STYLE = { display: 'grid', gridTemplateRows: `repeat(7, ${CELL}px)`, gap: `${CELL_GAP}px`, width: 18 };
 
 // 选中态落 localStorage(键名与项目其他 UI 偏好同前缀;读不到 / 值不合法 → 回默认,不抛)。
 const TAB_KEY = 'cgui-usage-tab';
