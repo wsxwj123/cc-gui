@@ -8,7 +8,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   cardValuesFor, cardCols, heatWeeks, heatmapGrid, isEmptyStats, tipText, localTodayKey,
-  snakePath,
+  snakeRoute,
   RANGE_KEYS, LEGEND_DEFAULT_ROWS, legendItems, stackedByDay, yTicks, xTickIndexes, chartTip, abbrevTokens,
 } from '../utils/homeUsage.js';
 import { aggregateCost, displayUsd, formatCost } from '../utils/pricing.js';
@@ -230,44 +230,54 @@ export const HomeUsage = React.memo(function HomeUsage() {
     if (!layer || !gridEl) return undefined;
     setSnakeOff({ x: gridEl.offsetLeft, y: gridEl.offsetTop });
     const segs = [...layer.querySelectorAll('[data-snake-seg]')];
-    // snk 的做法:蛇经过的**有色格子被吃掉**(从图上消失),一轮走完再全部长回来。
-    // 直接改真实格子的 visibility(不进 React 状态),所以每步都不会重渲。
+    // 照 Platane/snk 的做法:路线 = 按等级从浅到深 + 同级就近(BFS 相邻路径),见 utils/homeUsage.js 的 snakeRoute。
+    // 「吃掉」的表现按用户要求:**格子永不消失**,有量的格子被吃掉后只做**颜色变化**(整格变淡 = 去过一次),
+    // 没量的格子(level 0)全程保持背景色、永不被标记。每趟开头把上一趟的染色复原。
     const cells = new Map([...gridEl.querySelectorAll('[data-cell-index]')].map((el) => [Number(el.dataset.cellIndex), el]));
-    const eatenList = [];
-    // 45ms 一步;窗口上的 __cguiSnakeMs 是**验收测试的加速缝**(生产不设它 → 默认 45)
+    let marked = [];
+    let route = snakeRoute(grid.cells);
+    let eatAt = new Set(route.eatAt);
+    layer.dataset.snakeTotal = String(route.path.length);
+    layer.dataset.snakeEaten = '0';
+    // 45ms 一步;窗口上的 __cguiSnakeMs 是**验收测试的加速缝**(生产不设它 → 默认 45,并钳在 8–2000ms)
     const stepMs = Math.min(2000, Math.max(8, Math.round(Number(typeof window !== 'undefined' && window.__cguiSnakeMs) || 45)));
-    let path = snakePath(weeks);      // 每趟重新随机:同一屏里看不到两条一样的路径
-    layer.dataset.snakeTotal = String(path.length);
     let step = 0;
-    const eatenSet = new Set();
     let timer = null;
+    const restore = () => {
+      for (const el of marked) { el.style.opacity = ''; delete el.dataset.eaten; }
+      marked = [];
+      layer.dataset.snakeEaten = '0';
+    };
     const tick = () => {
       if (step === 0) {
-        for (const el of eatenList) el.style.visibility = '';   // 新一轮:格子全部长回来
-        eatenList.length = 0;
-        eatenSet.clear();
-        path = snakePath(weeks);
-        layer.dataset.snakeTotal = String(path.length);
+        restore();                                   // 上一趟的染色全部复原(格子从不消失)
+        route = snakeRoute(grid.cells);              // 每趟重新规划:并列项随机 → 每趟路线不同
+        eatAt = new Set(route.eatAt);
+        layer.dataset.snakeTotal = String(route.path.length);
       }
-      const idx = path[step];
-      const target = cells.get(idx);
-      if (target && grid.cells[idx] && grid.cells[idx].level > 0 && !eatenSet.has(idx)) { target.style.visibility = 'hidden'; eatenList.push(target); eatenSet.add(idx); }
+      const idx = route.path[step];
+      if (eatAt.has(step)) {
+        const target = cells.get(idx);
+        if (target && !target.dataset.eaten) {       // 只在真的有量(路线只把有量的格子当目标)时染色
+          target.dataset.eaten = '1';
+          target.style.opacity = '0.3';
+          marked.push(target);
+          layer.dataset.snakeEaten = String(marked.length);
+        }
+      }
       for (let i = 0; i < segs.length; i += 1) {
-        const cell = grid.cells[path[Math.max(0, step - i)]]   // H1:不环绕 —— 环绕会取到新路径末尾,头身散架;
+        const cell = grid.cells[route.path[Math.max(0, step - i)]];
         segs[i].style.transform = `translate(${cell.col * SNAKE_PITCH}px, ${cell.row * SNAKE_PITCH}px)`;
       }
       layer.dataset.snakeStep = String(step);
-      step = (step + 1) % path.length;
+      step = (step + 1) % route.path.length;
     };
     tick();
     timer = setInterval(tick, stepMs);
+    // M1(独立审查必修):cleanup 必须把染色复原(数据刷新会让 effect 重跑,新闭包的 marked 是空的)
     return () => {
       clearInterval(timer);
-      // M1(独立审查必修):数据每次刷新都会让 grid 变成新对象 → effect 重跑、step 归零,
-      // 而新闭包里的 eatenList 是空的 → 不复原就会永久留下上一轮的吃痕(React 按 key 复用 DOM,
-      // 内联 visibility 不会被重渲冲掉)。所以 cleanup 必须把格子放出来。
-      for (const el of eatenList) el.style.visibility = '';
-      eatenList.length = 0;
+      restore();
     };
   }, [snakeOn, grid, snakeTotal]);
   const tipCell = useMemo(() => (tip && grid ? grid.cells.find((c) => c.day === tip.day) || null : null), [tip, grid]);

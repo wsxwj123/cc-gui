@@ -138,58 +138,84 @@ export function heatmapGrid({ byDay, todayKey, weeks }) {
   return { cells, thresholds };
 }
 
-/** 贪吃蛇的路径:**随机化 DFS**(参考 Platane/snk 的观感 —— 蛇在格子里乱走,不是一列列扫)。
- *  为什么不用"随机游走 + 跳到最近未访问格":那样会出现**瞬移**(两头不相邻的一步),看着像闪现。
- *  这里用随机化深度优先:每步随机挑一个没吃过的相邻格;四个方向都吃过就**原路退回一格**继续找,
- *  所以路径里每一步都真的相邻,而且必然覆盖每一个格子。
- *  ⚠️ 能不能走过去只取决于这条路线,与"那一天有没有用量"无关:有量的格子被吃掉(隐藏),
- *  没量的格子只是被踩过 —— 每天都有用量时蛇照样一格不落地走完,只是把整片依次吃掉。
- *  格子是**列优先**排的(heatmapGrid 里 index = col * 7 + row,DOM 顺序同)。rng 可注入(单测用)。
- *  返回"行走序列"(可能重复经过已吃过的格子 —— 那是原路退回);数组长度 ≥ 格子数。 */
-export function snakePath(cols, rows = 7, rng = Math.random) {
-  const total = cols * rows;
-  if (total <= 0) return [];
-  const idx = (c, r) => c * rows + r;
+/**
+ * 贪吃蛇的路线 —— **按 Platane/snk 的真实做法**(packages/solver/getBestRoute.ts):
+ * 它把格子按「颜色等级」从浅到深逐级清掉(1 → 2 → 3 …),每一级内部用寻路走到下一个目标格。
+ * 这里照着这个可观测行为实现:
+ *   · 目标 = **有量的格子**(level ≥ 1);没量的格子只是被路过,**永远不当目标、不改变外观**;
+ *   · 先吃完所有最浅一级,再吃下一级(顺序按 level 升序);
+ *   · 同一级里每次挑「离当前最近的」目标(并列随机),并从当前格走**相邻最短路径**过去
+ *     (不瞬移、可重复经过格子)——这就是 snk 那种"就近跳着吃、看着随机"的观感来源。
+ * 返回 { path:[格子下标…], eatAt:[在 path 里第几步抵达某个目标] }。
+ * 每次调用都重新随机并列项,所以每一趟路线都不一样。
+ */
+export function snakeRoute(cells, rows = 7, rng = Math.random) {
+  const total = cells.length;
+  if (!total) return { path: [], eatAt: [] };
+  const cols = Math.ceil(total / rows);
   const colOf = (i) => Math.floor(i / rows);
   const rowOf = (i) => i % rows;
+  const toIdx = (c, r) => c * rows + r;
   const nbrs = (i) => {
     const c = colOf(i);
     const r = rowOf(i);
     const out = [];
-    if (c > 0) out.push(idx(c - 1, r));
-    if (c < cols - 1) out.push(idx(c + 1, r));
-    if (r > 0) out.push(idx(c, r - 1));
-    if (r < rows - 1) out.push(idx(c, r + 1));
+    if (c > 0) out.push(toIdx(c - 1, r));
+    if (c < cols - 1) out.push(toIdx(c + 1, r));
+    if (r > 0) out.push(toIdx(c, r - 1));
+    if (r < rows - 1) out.push(toIdx(c, r + 1));
     return out;
   };
-  const visited = new Uint8Array(total);
-  const startCell = idx(0, Math.floor(rng() * rows) % rows);
-  visited[startCell] = 1;
-  const stack = [startCell];
-  const path = [startCell];
-  let seen = 1;
-  while (stack.length && seen < total) {
-    const cur = stack[stack.length - 1];
-    const fresh = nbrs(cur).filter((i) => !visited[i]);
-    if (fresh.length) {
-      // Warnsdorff 式启发:优先走"自己剩下的未访问邻居最少"的那格(并列随机)。
-      // 纯随机挑会频繁走进死胡同 → 约 40–50% 的步数是原路倒退,既不像 snk(一直在往前爬)
-      // 又让一趟的长度接近 2×格子数(52 周要 30s 才吃光一轮)。加这条后路径基本贴着格子数。
-      const deg = (i) => nbrs(i).filter((j) => !visited[j]).length;
-      const scored = fresh.map((i) => ({ i, d: deg(i) }));
-      const minD = Math.min(...scored.map((x) => x.d));
-      const best = scored.filter((x) => x.d === minD);
-      const n = best[Math.floor(rng() * best.length) % best.length].i;
-      visited[n] = 1;
-      seen += 1;
-      stack.push(n);
-      path.push(n);
-    } else {
-      stack.pop();
-      if (stack.length) path.push(stack[stack.length - 1]);   // 原路退回一格(相邻)
+  const bfs = (from, to) => {
+    if (from === to) return [];
+    const prev = new Map([[from, null]]);
+    const q = [from];
+    while (q.length) {
+      const cur = q.shift();
+      if (cur === to) break;
+      for (const n of nbrs(cur)) if (!prev.has(n)) { prev.set(n, cur); q.push(n); }
+    }
+    if (!prev.has(to)) return null;
+    const out = [];
+    for (let at = to; at != null && at !== from; at = prev.get(at)) out.push(at);
+    return out.reverse();
+  };
+  const levelOf = (i) => {
+    const cell = cells[i];
+    return cell && !cell.future && typeof cell.level === 'number' ? cell.level : 0;
+  };
+  // 目标按等级分组(浅 → 深)
+  const buckets = new Map();
+  for (let i = 0; i < total; i += 1) {
+    const lv = levelOf(i);
+    if (lv > 0) {
+      if (!buckets.has(lv)) buckets.set(lv, []);
+      buckets.get(lv).push(i);
     }
   }
-  return path;
+  const path = [];
+  const eatAt = [];
+  let cur = toIdx(0, Math.floor(rows / 2));   // 像 snk 一样从网格左侧进场
+  path.push(cur);
+  for (const lv of [...buckets.keys()].sort((a, b) => a - b)) {
+    const rest = buckets.get(lv).slice();
+    while (rest.length) {
+      let bestD = Infinity;
+      let cand = [];
+      for (const t of rest) {
+        const d = Math.abs(colOf(t) - colOf(cur)) + Math.abs(rowOf(t) - rowOf(cur));
+        if (d < bestD) { bestD = d; cand = [t]; } else if (d === bestD) cand.push(t);
+      }
+      const target = cand[Math.floor(rng() * cand.length) % cand.length];
+      const leg = bfs(cur, target);
+      if (!leg) { rest.splice(rest.indexOf(target), 1); continue; }
+      path.push(...leg);
+      eatAt.push(path.length - 1);
+      cur = target;
+      rest.splice(rest.indexOf(target), 1);
+    }
+  }
+  return { path, eatAt };
 }
 
 /** 浮层文案:byDay 有该天 → 「YYYY-MM-DD · N tokens」(千分位);无 → 「YYYY-MM-DD · 无记录」。 */

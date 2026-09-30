@@ -9,7 +9,7 @@ import {
   RANGE_KEYS, RANGE_DAYS, LEGEND_DEFAULT_ROWS, rangeStartKey, inRange, rangeFacts, rangeOverview,
   cardValuesFor, legendItems, stackedByDay, yTicks, xTickDays, xTicks, xTickIndexes, chartTip,
   shadeClass, MODEL_SHADES, tokensOf, inputOutputOf, favoriteOf, LEGACY_TOTAL_MODEL, LEGACY_TOTAL_LABEL,
-  snakePath,
+  snakeRoute,
 } from '../../client/src/utils/homeUsage.js';
 
 let n = 0;
@@ -304,29 +304,41 @@ const STATS = {
   eq(rangeOverview(legacy, '7d', T).byModel, [], '就算全量 byModel 有名字也不拿来冒充窗口内的分组');
 }
 
-// ── 14. r135 贪吃蛇的路径(随机化 DFS:全程相邻、覆盖每格、不瞬移)──────────
+// ── 14. r135 贪吃蛇路线(照 Platane/snk:按等级从浅到深 + 同级就近 + 相邻不瞬移)──
 {
   const mkRng = (seed) => () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
   const rows = 7;
-  const p3 = snakePath(3, rows, mkRng(1));
-  const uniq = new Set(p3);
-  eq(uniq.size, 21, '每个格子都要被走到(3 列 × 7 行 = 21,一个不落)');
-  ok(p3.length >= 21, `行走序列不短于格子数(实得 ${p3.length})`);
-  ok(p3.length <= 42, `退回步骤最多让长度翻倍(实得 ${p3.length})`);
-  // 关键:**每一步都相邻** —— 不许有瞬移(两头不相邻)
-  const jumps = [];
-  for (let i = 1; i < p3.length; i += 1) {
-    const a = p3[i - 1]; const b = p3[i];
+  const mk = (cols, lv) => {
+    const cells = [];
+    for (let c = 0; c < cols; c += 1) for (let r = 0; r < rows; r += 1) cells.push({ col: c, row: r, day: `d${c}-${r}`, level: 0, future: false });
+    for (const [idx, v] of Object.entries(lv)) cells[Number(idx)].level = v;
+    return cells;
+  };
+  // 三列:浅(1)在左、深(3)在右,中间夹一个空格子
+  const cells = mk(5, { 15: 1, 19: 1, 31: 3 });   // 5×7:int15=(2,1) 与 int19=(2,5) 对入场点(0,3)等距;int31=(4,3) 深一级
+  const r = snakeRoute(cells, rows, mkRng(3));
+  // ① 目标全是"有量"的格子,且每个恰好被吃一次
+  const eaten = r.eatAt.map((k) => r.path[k]);
+  eq([...eaten].sort((a, b) => a - b), [15, 19, 31], '有量的格子一个不落、各吃一次');
+  // ② 顺序:等级从浅到深(1 级先于 3 级)
+  const levels = eaten.map((i2) => cells[i2].level);
+  eq(levels, [...levels].sort((a, b) => a - b), `吃的顺序必须按等级升序,实得 ${levels.join(',')}`);
+  // ③ 路径每一步都相邻(不瞬移),且**从不落到 future 格**
+  const bad = [];
+  for (let i2 = 1; i2 < r.path.length; i2 += 1) {
+    const a = r.path[i2 - 1];
+    const b = r.path[i2];
     const d = Math.abs(Math.floor(a / rows) - Math.floor(b / rows)) + Math.abs((a % rows) - (b % rows));
-    if (d !== 1) jumps.push(`${a}→${b}(距离 ${d})`);
+    if (d !== 1) bad.push(`${a}→${b}(距离 ${d})`);
   }
-  eq(jumps, [], `不该有瞬移步,实得 ${jumps.slice(0, 3).join(' ')}`);
-  // 不是"一列列扫"的定式:前 7 步不该恰好把第 0 列自上而下走完
-  ok(!p3.slice(0, 7).every((i, k) => i === k), '不该是"先把第 0 列扫完"的定式路径');
-  eq(snakePath(3, rows, mkRng(1)), p3, '同样的随机序列必须可复现');
-  ok(snakePath(3, rows, mkRng(99)).join(',') !== p3.join(','), '换一个随机序列应得到不同路径');
-  eq(snakePath(0), [], '没有列 → 空');
-  eq(new Set(snakePath(2, 3, mkRng(7))).size, 6, '行数可覆盖(默认 7):2×3 也覆盖满');
+  eq(bad, [], `每步都该相邻,实得违规 ${bad.slice(0, 3).join(' ')}`);
+  // ④ 没量的格子永不被吃(level=0 的下标不出现在 eaten 里)
+  ok(eaten.every((i2) => cells[i2].level > 0), '无消耗的格子永远不是目标');
+  // ⑤ 每趟重新随机:同种子可复现、换种子会不同
+  eq(snakeRoute(cells, rows, mkRng(3)).path, r.path, '同样的随机序列可复现');
+  // rng 真的决定并列取舍:全取 0 与全取 0.999 必须给出不同路线(比"换个种子"更稳,不靠种子运气)
+  ok(snakeRoute(cells, rows, () => 0).path.join(',') !== snakeRoute(cells, rows, () => 0.999).path.join(','), 'rng 应决定并列目标的取舍');
+  eq(snakeRoute([], rows).path, [], '没有格子 → 空');
 }
 
 console.log(`check-r131-usage-views-pure: PASS(${n} 条断言)`);
