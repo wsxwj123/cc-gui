@@ -17,6 +17,8 @@ test('C9a 招呼与用量块顶部行紧贴(≤40px),不再顶在页面上沿', 
   const t = await title(page).boundingBox();
   const u = await usage(page).boundingBox();
   expect(g && t && u, '三者都应可见').toBeTruthy();
+  // r134:招呼语要与用量块**同轴**水平居中(用户两次实报"招呼文本仍然在左侧")
+  expect(Math.abs((g.x + g.width / 2) - (u.x + u.width / 2)), `招呼中轴 ${Math.round(g.x + g.width / 2)} 应≈用量块中轴 ${Math.round(u.x + u.width / 2)}`).toBeLessThanOrEqual(2);
   expect(t.y - (g.y + g.height), `招呼底边 → 用量块顶部行的间隙应当很小(现在 ${Math.round(t.y - (g.y + g.height))}px)`).toBeLessThanOrEqual(40);
   expect(g.y + g.height).toBeLessThanOrEqual(u.y + 1);
   // 用量块顶边之上就是招呼:两者之间不该再夹着别的块
