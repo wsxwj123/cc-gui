@@ -1,11 +1,12 @@
 // r131 · C9(必做小修):招呼语位置 —— 从"顶在页面上沿、中间一大片空白"改成"紧贴用量块标题上方,和用量块一起垂直居中"。
-// 判据:① 招呼与「用量总览」标题的垂直间隙在一行以内(≤ 40 px);② 整组垂直居中(招呼上方留白 ≈ 输入框上方留白);
+// 判据:① 招呼与用量块顶部行(分页控件)的垂直间隙在一行以内(≤ 40 px);② 整组垂直居中(招呼上方留白 ≈ 输入框上方留白);
 //       ③ DOM 顺序仍是 招呼 → home-usage → home-input;④ 输入框仍贴底;⑤ 分屏一个字不动(由 r130 C2b 守);⑥ 孤儿提示仍在输入框上方。
 import { test, expect } from '@playwright/test';
 import { gotoHome, stubUsage, payload, dayEntry, dayAgo, usage, cards, greeting, homeInput, home, setPaneCount } from './helpers/ui.mjs';
 
-// 「用量总览」这一行 = 用量块的顶部行;i18n 与 r130 一致(分页控件与范围控件也在这一行里)
-const title = (page) => page.getByTestId('home-usage-title');
+// 用量块的顶部行 = 「总览 | 模型」分页控件所在的那一行(范围控件在同一行右侧)
+// r133:「用量总览」标题已删 —— 用量块的顶部行现在由「总览 | 模型」分页控件开头
+const title = (page) => page.getByTestId('home-usage-tabs');
 const stub = (page) => stubUsage(page, payload({ total: { sessionCount: 2 }, byDay: [dayEntry(dayAgo(1), 1000), dayEntry(dayAgo(3), 500)] }));
 
 test('C9a 招呼与用量块顶部行紧贴(≤40px),不再顶在页面上沿', async ({ page }) => {
