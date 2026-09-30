@@ -947,18 +947,30 @@ test('C12b 贪吃蛇:系统开了"减少动态效果"就不渲染、不动', asy
   } finally { await ctx.close(); }
 });
 
-test('C12c 贪吃蛇:数据刷新(usage-updated)不得留下旧吃痕 —— 格子必须全部复原', async ({ page }) => {
-  // 独立审查必修 M1:effect 重跑时若不复原 visibility,频繁刷新会积下一片永久隐身的格子。
-  // ⚠️ 夹具必须**密集**:typical() 只有 5 个有量日 → 隐藏数天花板 5,任何阈值 ≥5 的断言都不可能红
-  // (盲判第二轮抓到过这个废钉:删掉复原它照样绿)。这里给 60 天连续用量,隐藏数能到几十,判据才真能红。
+test('C12c 贪吃蛇:数据刷新(usage-updated)必须先复原旧吃痕,再重新开吃', async ({ page }) => {
+  // 独立审查必修 M1:effect 重跑时若不复原 visibility,刷新会积下一片永久隐身的格子。
+  // 判据要点(第三轮盲判两次打回的教训):
+  //   ① 夹具必须**密集**(60 天有量):稀疏夹具下隐藏数天花板 5 → 任何阈值都"不可能红"(废钉);
+  //   ② 断言必须取**新一圈刚开始那一瞬**:新一圈 600ms 内就会重新吃掉十几格,所以在外面固定 sleep
+  //      再断言阈值,测到的是"新圈走了多远"而不是"旧吃痕复原没"(反向废钉:正确代码也必红)。
+  // 做法:派发事件后**在页内**每 40ms 采样一次隐藏数、取这一窗的最小值 —— 复原发生则最小值为 0,
+  // 没复原则最小值一直停在几十。
   await page.addInitScript(() => { try { window.__cguiSnakeMs = 8; } catch { /* 忽略 */ } });
   const dense = payload({ byDay: Array.from({ length: 60 }, (_, i) => dayEntry(dayAgo(i), 5000 + i, { messages: 2, sessions: 1 })) });
   await stubUsage(page, dense);
   await gotoHome(page);
   const hidden = () => page.locator('[data-testid="home-usage-cell"][style*="visibility: hidden"]').count();
   await expect.poll(hidden, { timeout: 8000, message: '跑起来后应吃掉一大片格子(密集夹具)' }).toBeGreaterThan(20);
-  await page.evaluate(() => window.dispatchEvent(new CustomEvent('cgui:usage-updated')));
-  await page.waitForTimeout(800);
-  const n = await hidden();
-  expect(n, `刷新重挂后只该剩这一趟刚开始吃的几格(≤10);实得 ${n} —— 几十说明上一整片旧吃痕没被复原`).toBeLessThanOrEqual(10);
+  const r = await page.evaluate(async () => {
+    const count = () => document.querySelectorAll('[data-testid="home-usage-cell"][style*="visibility: hidden"]').length;
+    window.dispatchEvent(new CustomEvent('cgui:usage-updated'));
+    let min = Infinity;
+    const t0 = performance.now();
+    while (performance.now() - t0 < 1500) {
+      min = Math.min(min, count());
+      await new Promise((res) => setTimeout(res, 40));
+    }
+    return { min };
+  });
+  expect(r.min, `刷新后旧吃痕必须先被复原(这一窗内隐藏数最小值应 ≈0;一直几十就是没复原)。实得 ${r.min}`).toBeLessThanOrEqual(2);
 });
