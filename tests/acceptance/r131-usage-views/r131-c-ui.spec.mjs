@@ -902,38 +902,53 @@ test('C10e 320×568 × 缩放 1.2 / 1.0:顶行与整页都不横滚(跨平台审
   }
 });
 
-test('C12a 贪吃蛇:热力图上有蛇在走、会回绕(循环)、并且把格子吃掉', async ({ page }) => {
-  // r135:用户要求"一直循环、像 Platane/snk 那样随机地走"。判据:①覆盖层在;②步数在变;
-  // ③步数回绕过(循环);④一趟之内真有格子被吃掉。
-  // 采样在**页内**用 MutationObserver 盯 data-snake-step 属性(外部轮询会漏掉回绕那一帧)。
+test('C12a 贪吃蛇:路线覆盖有量格子、按等级从浅到深、会循环,且格子从不消失', async ({ page }) => {
+  // 照 Platane/snk 的可观测行为:目标 = 有量的格子,按颜色等级从浅到深逐级吃,同级内就近跳着吃;
+  // 「吃掉」= 只做颜色变化(加 data-eaten + 变淡),**格子不消失**;每趟开头全部复原(循环)。
   await page.addInitScript(() => { try { window.__cguiSnakeMs = 8; } catch { /* 忽略 */ } });
-  await stubUsage(page, typical());
+  const dense = payload({ byDay: Array.from({ length: 60 }, (_, i) => dayEntry(dayAgo(i), 5000 + i, { messages: 2, sessions: 1 })) });
+  await stubUsage(page, dense);
   await gotoHome(page);
   const snake = page.getByTestId('home-usage-snake');
   await expect(snake, '热力图上该有蛇的覆盖层').toBeVisible();
-  const total = Number(await snake.getAttribute('data-snake-total'));
-  expect(total, '路径长度(≥ 格子数;退回步骤会多走几步)').toBeGreaterThan(50);
   const r = await page.evaluate(async () => {
-    const el = document.querySelector('[data-testid="home-usage-snake"]');
-    const seen = [];
-    let eatenMax = 0;
-    const obs = new MutationObserver(() => seen.push(Number(el.dataset.snakeStep)));
-    obs.observe(el, { attributes: true, attributeFilter: ['data-snake-step'] });
+    const layer = document.querySelector('[data-testid="home-usage-snake"]');
+    const seq = [];
+    let prevStep = Number(layer.dataset.snakeStep);
+    let wrapped = false;
+    let eatenAtWrap = null;
+    let maxEaten = 0;
+    let cellsMin = Infinity;
+    let cellsMax = 0;
+    const obs = new MutationObserver((muts) => {
+      for (const m of muts) {
+        if (m.attributeName === 'data-eaten' && m.target.dataset.eaten === '1') seq.push(Number(m.target.dataset.level));
+        else if (m.attributeName === 'data-snake-step') {
+          const v = Number(layer.dataset.snakeStep);
+          if (v < prevStep) { wrapped = true; eatenAtWrap = Number(layer.dataset.snakeEaten); }
+          prevStep = v;
+        }
+      }
+    });
+    obs.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['data-eaten', 'data-snake-step'] });
     const t0 = performance.now();
-    while (performance.now() - t0 < 9000) {
-      eatenMax = Math.max(eatenMax, document.querySelectorAll('[data-testid="home-usage-cell"][style*="visibility: hidden"]').length);
+    while (performance.now() - t0 < 10000 && !wrapped) {
+      const n = document.querySelectorAll('[data-testid="home-usage-cell"]').length;
+      cellsMin = Math.min(cellsMin, n);
+      cellsMax = Math.max(cellsMax, n);
+      maxEaten = Math.max(maxEaten, Number(layer.dataset.snakeEaten || 0));
       await new Promise((res) => setTimeout(res, 40));
     }
     obs.disconnect();
-    let wrapped = false;
-    for (let i = 1; i < seen.length; i += 1) if (seen[i] < seen[i - 1]) wrapped = true;
-    return { n: seen.length, wrapped, max: Math.max(0, ...seen), eatenMax, segs: el.querySelectorAll('[data-snake-seg]').length };
+    return { seq, maxEaten, cellsMin, cellsMax, wrapped, eatenAtWrap, total: Number(layer.dataset.snakeTotal) };
   });
-  expect(r.n, `步数应在变化(实得 ${r.n} 次变化)`).toBeGreaterThan(5);
-  expect(r.max, `应走到路径靠后处(最远 ${r.max} / 共 ${total})`).toBeGreaterThan(total * 0.5);
-  expect(r.wrapped, '跑到末尾应回绕到 0(循环)').toBe(true);
-  expect(r.eatenMax, `一趟之内应有格子被吃掉(最多同时 ${r.eatenMax} 个隐藏格子)`).toBeGreaterThan(0);
-  expect(r.segs, '蛇身段数固定').toBe(8);
+  expect(r.wrapped, '10 秒内应看到回绕(循环)').toBe(true);
+  expect(r.maxEaten, `一趟之内应把有量格子都吃掉(峰值 ${r.maxEaten})`).toBeGreaterThan(20);
+  expect(r.eatenAtWrap, `回绕那一刻染色数应回到 0(上一趟全部复原;实得 ${r.eatenAtWrap})`).toBeLessThanOrEqual(1);
+  expect(r.seq.length, `应当真吃到很多格子(实得 ${r.seq.length} 次染色)`).toBeGreaterThan(20);
+  const sorted = [...r.seq].sort((a, b) => a - b);
+  expect(r.seq, `吃格子的顺序必须按等级从浅到深(前 20 个等级:${r.seq.slice(0, 20).join(',')})`).toEqual(sorted);
+  expect(r.cellsMin, '格子从不消失:动画期间格子数量不应减少').toBe(r.cellsMax);
 });
 
 test('C12b 贪吃蛇:系统开了"减少动态效果"就不渲染、不动', async ({ browser }) => {
@@ -947,22 +962,17 @@ test('C12b 贪吃蛇:系统开了"减少动态效果"就不渲染、不动', asy
   } finally { await ctx.close(); }
 });
 
-test('C12c 贪吃蛇:数据刷新(usage-updated)必须先复原旧吃痕,再重新开吃', async ({ page }) => {
-  // 独立审查必修 M1:effect 重跑时若不复原 visibility,刷新会积下一片永久隐身的格子。
-  // 判据要点(第三轮盲判两次打回的教训):
-  //   ① 夹具必须**密集**(60 天有量):稀疏夹具下隐藏数天花板 5 → 任何阈值都"不可能红"(废钉);
-  //   ② 断言必须取**新一圈刚开始那一瞬**:新一圈 600ms 内就会重新吃掉十几格,所以在外面固定 sleep
-  //      再断言阈值,测到的是"新圈走了多远"而不是"旧吃痕复原没"(反向废钉:正确代码也必红)。
-  // 做法:派发事件后**在页内**每 40ms 采样一次隐藏数、取这一窗的最小值 —— 复原发生则最小值为 0,
-  // 没复原则最小值一直停在几十。
+test('C12c 贪吃蛇:数据刷新(usage-updated)不得留下旧染色 —— 必须全部复原', async ({ page }) => {
+  // 独立审查必修 M1:effect 重跑时若不复原,刷新会积下一片永久变淡的格子。
+  // 夹具必须**密集**(60 天有量),否则染色数上限太低、判据不可能失败(前几轮踩过这个废钉)。
   await page.addInitScript(() => { try { window.__cguiSnakeMs = 8; } catch { /* 忽略 */ } });
   const dense = payload({ byDay: Array.from({ length: 60 }, (_, i) => dayEntry(dayAgo(i), 5000 + i, { messages: 2, sessions: 1 })) });
   await stubUsage(page, dense);
   await gotoHome(page);
-  const hidden = () => page.locator('[data-testid="home-usage-cell"][style*="visibility: hidden"]').count();
-  await expect.poll(hidden, { timeout: 8000, message: '跑起来后应吃掉一大片格子(密集夹具)' }).toBeGreaterThan(20);
+  const eaten = () => page.locator('[data-testid="home-usage-cell"][data-eaten="1"]').count();
+  await expect.poll(eaten, { timeout: 8000, message: '跑起来后应吃掉一大片格子(密集夹具)' }).toBeGreaterThan(20);
   const r = await page.evaluate(async () => {
-    const count = () => document.querySelectorAll('[data-testid="home-usage-cell"][style*="visibility: hidden"]').length;
+    const count = () => document.querySelectorAll('[data-testid="home-usage-cell"][data-eaten="1"]').length;
     window.dispatchEvent(new CustomEvent('cgui:usage-updated'));
     let min = Infinity;
     const t0 = performance.now();
@@ -972,38 +982,29 @@ test('C12c 贪吃蛇:数据刷新(usage-updated)必须先复原旧吃痕,再重�
     }
     return { min };
   });
-  expect(r.min, `刷新后旧吃痕必须先被复原(这一窗内隐藏数最小值应 ≈0;一直几十就是没复原)。实得 ${r.min}`).toBeLessThanOrEqual(2);
+  expect(r.min, `刷新后旧染色必须先被复原(这一窗内染色数最小值应 ≈0;一直几十就是没复原)。实得 ${r.min}`).toBeLessThanOrEqual(2);
 });
 
-test('C12d 贪吃蛇:一趟跑完回绕时,吃掉的一片格子必须长回来', async ({ page }) => {
-  // 覆盖「每趟开头那处复原」(独立裁判第四轮点名的唯一实质缺口:C12c 走刷新路径、由 cleanup 负责,够不着它)。
-  // 采样难点:回绕复原后新一圈**下一拍就重新开吃**(8ms/步),"盯着隐藏数等它变 0"必然漏。
-  // 改成盯 data-snake-step:它变小的那一刻就是回绕,而复原发生在同一拍里(先复原、后写属性),
-  // 所以在属性变化回调里读到的隐藏数 = 复原之后 + 新圈刚吃的那一两格。
+test('C12d 贪吃蛇:没有消耗的格子(level 0)永远不被染色', async ({ page }) => {
+  // snk 的路线只把**有色格子**当目标;没量(背景色)的格子只是被路过,外观永远不变。
   await page.addInitScript(() => { try { window.__cguiSnakeMs = 8; } catch { /* 忽略 */ } });
   const dense = payload({ byDay: Array.from({ length: 60 }, (_, i) => dayEntry(dayAgo(i), 5000 + i, { messages: 2, sessions: 1 })) });
   await stubUsage(page, dense);
   await gotoHome(page);
-  const hidden = () => page.locator('[data-testid="home-usage-cell"][style*="visibility: hidden"]').count();
-  await expect.poll(hidden, { timeout: 8000, message: '跑起来后应吃掉一大片格子(密集夹具)' }).toBeGreaterThan(20);
   const r = await page.evaluate(async () => {
-    const el = document.querySelector('[data-testid="home-usage-snake"]');
-    const count = () => document.querySelectorAll('[data-testid="home-usage-cell"][style*="visibility: hidden"]').length;
-    let prev = Number(el.dataset.snakeStep);
-    const atWrap = [];
-    const obs = new MutationObserver(() => {
-      const v = Number(el.dataset.snakeStep);
-      if (v < prev) atWrap.push(count());
-      prev = v;
-    });
-    obs.observe(el, { attributes: true, attributeFilter: ['data-snake-step'] });
+    const zero = () => [...document.querySelectorAll('[data-testid="home-usage-cell"][data-eaten="1"]')].filter((el) => el.dataset.level === '0').length;
+    let badMin = Infinity;
+    let zeroEaten = 0;
     const t0 = performance.now();
-    while (performance.now() - t0 < 12000 && atWrap.length < 2) await new Promise((res) => setTimeout(res, 50));
-    obs.disconnect();
-    return { wraps: atWrap.length, worst: atWrap.length ? Math.max(...atWrap) : -1 };
+    while (performance.now() - t0 < 6000) {
+      badMin = Math.min(badMin, zero());
+      zeroEaten = Math.max(zeroEaten, document.querySelectorAll('[data-testid="home-usage-cell"][data-level="0"]').length);
+      await new Promise((res) => setTimeout(res, 40));
+    }
+    return { bad: zero ? (Number.isFinite(badMin) ? badMin : -1) : 0, zeroEaten };
   });
-  expect(r.wraps, '12 秒内至少要看到 2 次回绕(一趟约 310 步 × 8ms ≈ 2.5s)').toBeGreaterThanOrEqual(2);
-  expect(r.worst, `回绕那一刻隐藏数应 ≈0;残留 ${r.worst} 说明上一趟吃掉的格子没长回来`).toBeLessThanOrEqual(5);
+  expect(r.bad, `level 0 的格子永不该带 data-eaten(实得 ${r.bad} 个)`).toBe(0);
+  expect(r.zeroEaten, '夹具里该有没消耗的格子(否则这条判据是空的)').toBeGreaterThan(0);
 });
 
 test('C12e 贪吃蛇:不设加速缝时按生产默认速度走(约 45ms/步)', async ({ page }) => {
