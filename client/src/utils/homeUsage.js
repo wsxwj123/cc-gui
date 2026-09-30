@@ -138,15 +138,58 @@ export function heatmapGrid({ byDay, todayKey, weeks }) {
   return { cells, thresholds };
 }
 
-/** 贪吃蛇的访问顺序(蛇形:第 0 列自上而下、第 1 列自下而上……)。
- *  返回格子下标;格子是**列优先**排的(heatmapGrid 里 index = col * 7 + row,DOM 顺序同)。
- *  纯函数,只用来算"蛇该按什么顺序走",与渲染无关。 */
-export function snakeOrder(cols, rows = 7) {
-  const out = [];
-  for (let c = 0; c < cols; c += 1) {
-    for (let r = 0; r < rows; r += 1) out.push(c * rows + (c % 2 ? rows - 1 - r : r));
+/** 贪吃蛇的路径:**随机化 DFS**(参考 Platane/snk 的观感 —— 蛇在格子里乱走,不是一列列扫)。
+ *  为什么不用"随机游走 + 跳到最近未访问格":那样会出现**瞬移**(两头不相邻的一步),看着像闪现。
+ *  这里用随机化深度优先:每步随机挑一个没吃过的相邻格;四个方向都吃过就**原路退回一格**继续找,
+ *  所以路径里每一步都真的相邻,而且必然覆盖每一个格子。
+ *  ⚠️ 能不能走过去只取决于这条路线,与"那一天有没有用量"无关:有量的格子被吃掉(隐藏),
+ *  没量的格子只是被踩过 —— 每天都有用量时蛇照样一格不落地走完,只是把整片依次吃掉。
+ *  格子是**列优先**排的(heatmapGrid 里 index = col * 7 + row,DOM 顺序同)。rng 可注入(单测用)。
+ *  返回"行走序列"(可能重复经过已吃过的格子 —— 那是原路退回);数组长度 ≥ 格子数。 */
+export function snakePath(cols, rows = 7, rng = Math.random) {
+  const total = cols * rows;
+  if (total <= 0) return [];
+  const idx = (c, r) => c * rows + r;
+  const colOf = (i) => Math.floor(i / rows);
+  const rowOf = (i) => i % rows;
+  const nbrs = (i) => {
+    const c = colOf(i);
+    const r = rowOf(i);
+    const out = [];
+    if (c > 0) out.push(idx(c - 1, r));
+    if (c < cols - 1) out.push(idx(c + 1, r));
+    if (r > 0) out.push(idx(c, r - 1));
+    if (r < rows - 1) out.push(idx(c, r + 1));
+    return out;
+  };
+  const visited = new Uint8Array(total);
+  const startCell = idx(0, Math.floor(rng() * rows) % rows);
+  visited[startCell] = 1;
+  const stack = [startCell];
+  const path = [startCell];
+  let seen = 1;
+  while (stack.length && seen < total) {
+    const cur = stack[stack.length - 1];
+    const fresh = nbrs(cur).filter((i) => !visited[i]);
+    if (fresh.length) {
+      // Warnsdorff 式启发:优先走"自己剩下的未访问邻居最少"的那格(并列随机)。
+      // 纯随机挑会频繁走进死胡同 → 约 40–50% 的步数是原路倒退,既不像 snk(一直在往前爬)
+      // 又让一趟的长度接近 2×格子数(52 周要 30s 才吃光一轮)。加这条后路径基本贴着格子数。
+      const deg = (i) => nbrs(i).filter((j) => !visited[j]).length;
+      const scored = fresh.map((i) => ({ i, d: deg(i) }));
+      const minD = Math.min(...scored.map((x) => x.d));
+      const best = scored.filter((x) => x.d === minD);
+      const n = best[Math.floor(rng() * best.length) % best.length].i;
+      visited[n] = 1;
+      seen += 1;
+      stack.push(n);
+      path.push(n);
+    } else {
+      stack.pop();
+      if (stack.length) path.push(stack[stack.length - 1]);   // 原路退回一格(相邻)
+    }
   }
-  return out;
+  return path;
 }
 
 /** 浮层文案:byDay 有该天 → 「YYYY-MM-DD · N tokens」(千分位);无 → 「YYYY-MM-DD · 无记录」。 */

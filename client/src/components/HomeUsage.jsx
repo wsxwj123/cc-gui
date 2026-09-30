@@ -8,7 +8,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   cardValuesFor, cardCols, heatWeeks, heatmapGrid, isEmptyStats, tipText, localTodayKey,
-  snakeOrder,
+  snakePath,
   RANGE_KEYS, LEGEND_DEFAULT_ROWS, legendItems, stackedByDay, yTicks, xTickIndexes, chartTip, abbrevTokens,
 } from '../utils/homeUsage.js';
 import { aggregateCost, displayUsd, formatCost } from '../utils/pricing.js';
@@ -17,8 +17,14 @@ import { useStore } from '../stores/sessionStore.js';
 const SLOW_MS = 3000;             // 首次请求超过 3 s 未返回 → 骨架加「正在统计全部会话…」(本机冷扫 40 s)
 const STALE_REFETCH_MS = 45_000;  // 收到 stale 响应后的一次延迟静默重取(广播丢失的兜底;定时器单份)
 const CELL = 11;                  // 格子边长 px
+// C11 修法(用户实报:回合结束后 chat-done 会让会话列表重载 → 首屏组件重挂 → 刚挂载的用量块走
+// "非静默首取" → 骨架闪一下)。这里留一份"上次的载荷":重挂时直接以 ready + 旧数据起步、只做静默刷新,
+// 只有**真·第一次**加载才显示骨架。存模块级(不是 localStorage):页面刷新即重来,不留陈旧数据。
+let lastStatsCache = null;   // { data, at } —— 带时间戳;太旧时静默失败要回落错误态
+
 const SNAKE_LEN = 8;              // 蛇身段数(头 + 7 节尾)
-const SNAKE_PITCH = 13;           // CELL + gap(2)                  // 格子边长 px;间距 2 → 每列 13 px(utils/homeUsage.js heatWeeks 按同一尺寸算周数)
+const CELL_GAP = 2;              // 与 GRID_STYLE 的 gap 同一个值
+const SNAKE_PITCH = CELL + CELL_GAP;
 const LEVEL_CLASS = ['bg-canvas-deep', 'bg-accent/25', 'bg-accent/45', 'bg-accent/70', 'bg-accent'];   // 随主题 accent 走
 const ROW_LABELS = ['一', '', '三', '', '五', '', ''];
 const GRID_STYLE = { display: 'grid', gridTemplateRows: `repeat(7, ${CELL}px)`, gridAutoFlow: 'column', gridAutoColumns: `${CELL}px`, gap: '2px' };
@@ -107,8 +113,8 @@ function Bar({ day, colorOf, onEnter, onLeave, onClick, leftPct, widthPct, plotH
 }
 
 export const HomeUsage = React.memo(function HomeUsage() {
-  const [stats, setStats] = useState(null);
-  const [status, setStatus] = useState('loading');   // 'loading' | 'error' | 'ready'
+  const [stats, setStats] = useState(() => (lastStatsCache ? lastStatsCache.data : null));
+  const [status, setStatus] = useState(() => (lastStatsCache ? 'ready' : 'loading'));   // 'loading' | 'error' | 'ready'
   const [slow, setSlow] = useState(false);
   const [width, setWidth] = useState(0);
   const [tip, setTip] = useState(null);               // { day, pinned } —— 热力图
@@ -120,7 +126,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
   const [ctipRev, setCtipRev] = useState(0);          // 浮层/容器尺寸变化 → +1,让定位 effect 重算
   const [legendOpen, setLegendOpen] = useState(false);
   const [snakeOff, setSnakeOff] = useState({ x: 0, y: 0 });
-  const [reduceMotion, setReduceMotion] = useState(false);
+  const [reduceMotion, setReduceMotion] = useState(() => (typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)').matches : false));
   const mountedRef = useRef(false);
   const bootedRef = useRef(false);
   const rootRef = useRef(null);
@@ -142,10 +148,15 @@ export const HomeUsage = React.memo(function HomeUsage() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (!mountedRef.current) return;
+      lastStatsCache = { data, at: Date.now() };
       setStats(data);
       setStatus('ready');
     } catch {
-      if (!silent && mountedRef.current) setStatus('error');
+      if (!mountedRef.current) return;
+      // H2(独立审查重要):静默失败平时保留手上数据,但**手上数据已陈旧(>5 分钟)**时不能再装没事 ——
+      // 否则服务端挂掉后首页永远显示旧数字、连重试入口都没有。
+      const stale = !lastStatsCache || (Date.now() - lastStatsCache.at) > 5 * 60 * 1000;
+      if (!silent || stale) setStatus('error');
     }
   }, []);
 
@@ -153,7 +164,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
     mountedRef.current = true;
     // 挂载取一次。bootedRef:React.StrictMode(dev)把 effect 挂载→卸载→再挂载跑两遍,没有这道守卫 dev 下
     // 首屏会打两次 /api/usage(生产 build 不会);ref 在模拟重挂载时保留,生产路径行为不变。
-    if (!bootedRef.current) { bootedRef.current = true; fetchStats(false); }
+    if (!bootedRef.current) { bootedRef.current = true; fetchStats(!!lastStatsCache); }   // 有缓存 → 首取也是静默的(不闪骨架)
     const onRefresh = () => fetchStats(true);
     window.addEventListener('cgui:usage-updated', onRefresh);   // 服务端重算落地(WS 转发,既有)
     window.addEventListener('cgui:chat-done', onRefresh);       // 本端回合结束(与 UsagePanel 同一事件)
@@ -202,7 +213,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
   const grid = useMemo(() => (ready && !empty ? heatmapGrid({ byDay: stats.byDay, todayKey, weeks }) : null), [ready, empty, stats, todayKey, weeks]);
   // r135:贪吃蛇(用户要"一直循环")—— 访问顺序是纯函数算的,动画只改内联 transform/opacity,
   // **不进 React 状态**,所以每 45ms 一步不会重渲任何格子(400 个格子重渲会明显掉帧)。
-  const snakePath = useMemo(() => (grid ? snakeOrder(weeks) : []), [grid, weeks]);
+  const snakeTotal = grid ? weeks * 7 : 0;   // 格子数(路径长度 ≥ 它,退回步骤会多走几步)
   const snakeOn = ready && !empty && !!grid && !reduceMotion;
   useEffect(() => {
     const mq = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
@@ -213,33 +224,52 @@ export const HomeUsage = React.memo(function HomeUsage() {
     return () => mq.removeEventListener?.('change', on);
   }, []);
   useEffect(() => {
-    if (!snakeOn || !grid || !snakePath.length) return undefined;
+    if (!snakeOn || !grid || !snakeTotal) return undefined;
     const layer = snakeRef.current;
     const gridEl = gridRef.current;
     if (!layer || !gridEl) return undefined;
     setSnakeOff({ x: gridEl.offsetLeft, y: gridEl.offsetTop });
     const segs = [...layer.querySelectorAll('[data-snake-seg]')];
-    const eaten = new Map([...layer.querySelectorAll('[data-snake-cell]')].map((el) => [Number(el.dataset.snakeCell), el]));
+    // snk 的做法:蛇经过的**有色格子被吃掉**(从图上消失),一轮走完再全部长回来。
+    // 直接改真实格子的 visibility(不进 React 状态),所以每步都不会重渲。
+    const cells = new Map([...gridEl.querySelectorAll('[data-cell-index]')].map((el) => [Number(el.dataset.cellIndex), el]));
+    const eatenList = [];
     // 45ms 一步;窗口上的 __cguiSnakeMs 是**验收测试的加速缝**(生产不设它 → 默认 45)
-    const stepMs = (typeof window !== 'undefined' && Number(window.__cguiSnakeMs)) || 45;
+    const stepMs = Math.min(2000, Math.max(8, Math.round(Number(typeof window !== 'undefined' && window.__cguiSnakeMs) || 45)));
+    let path = snakePath(weeks);      // 每趟重新随机:同一屏里看不到两条一样的路径
+    layer.dataset.snakeTotal = String(path.length);
     let step = 0;
+    const eatenSet = new Set();
     let timer = null;
     const tick = () => {
-      if (step === 0) for (const el of eaten.values()) el.style.opacity = '0';   // 新一轮先抹掉上一轮的"吃痕"
-      const idx = snakePath[step];
-      const box = eaten.get(idx);
-      if (box) box.style.opacity = '0.38';
+      if (step === 0) {
+        for (const el of eatenList) el.style.visibility = '';   // 新一轮:格子全部长回来
+        eatenList.length = 0;
+        eatenSet.clear();
+        path = snakePath(weeks);
+        layer.dataset.snakeTotal = String(path.length);
+      }
+      const idx = path[step];
+      const target = cells.get(idx);
+      if (target && grid.cells[idx] && grid.cells[idx].level > 0 && !eatenSet.has(idx)) { target.style.visibility = 'hidden'; eatenList.push(target); eatenSet.add(idx); }
       for (let i = 0; i < segs.length; i += 1) {
-        const cell = grid.cells[snakePath[(step - i + snakePath.length) % snakePath.length]];
+        const cell = grid.cells[path[Math.max(0, step - i)]]   // H1:不环绕 —— 环绕会取到新路径末尾,头身散架;
         segs[i].style.transform = `translate(${cell.col * SNAKE_PITCH}px, ${cell.row * SNAKE_PITCH}px)`;
       }
       layer.dataset.snakeStep = String(step);
-      step = (step + 1) % snakePath.length;
+      step = (step + 1) % path.length;
     };
     tick();
     timer = setInterval(tick, stepMs);
-    return () => clearInterval(timer);
-  }, [snakeOn, grid, snakePath]);
+    return () => {
+      clearInterval(timer);
+      // M1(独立审查必修):数据每次刷新都会让 grid 变成新对象 → effect 重跑、step 归零,
+      // 而新闭包里的 eatenList 是空的 → 不复原就会永久留下上一轮的吃痕(React 按 key 复用 DOM,
+      // 内联 visibility 不会被重渲冲掉)。所以 cleanup 必须把格子放出来。
+      for (const el of eatenList) el.style.visibility = '';
+      eatenList.length = 0;
+    };
+  }, [snakeOn, grid, snakeTotal]);
   const tipCell = useMemo(() => (tip && grid ? grid.cells.find((c) => c.day === tip.day) || null : null), [tip, grid]);
   // 模型分页的数据:图例(按范围)与图(全部历史,不随范围裁)。data 为空时不算,免得刚 mount 就白算一遍。
   const showModels = ready && !empty && tab === 'models';
@@ -370,13 +400,14 @@ export const HomeUsage = React.memo(function HomeUsage() {
   }, [ctipDay]);
 
   // 格子数组只随 grid 变(回调都是稳定引用):hover 的 setTip 只重渲浮层节点,不重建几百个格子。
-  const cellNodes = useMemo(() => (grid ? grid.cells.map((cell) => (cell.future
+  const cellNodes = useMemo(() => (grid ? grid.cells.map((cell, i) => (cell.future
     ? <div key={`f${cell.col}-${cell.row}`} data-testid="home-usage-cell-future" className="rounded-[2px] bg-canvas-deep/40" aria-hidden="true" />
     : (
       <button
         key={cell.day}
         type="button"
         data-testid="home-usage-cell"
+        data-cell-index={i}
         data-day={cell.day}
         data-tokens={cell.tokens}
         data-level={cell.level}
@@ -502,16 +533,12 @@ export const HomeUsage = React.memo(function HomeUsage() {
             {/* r135:贪吃蛇覆盖层 —— 绝对定位盖在网格上方,pointer-events-none 不吃任何鼠标事件;
                 系统开了"减少动态效果"就不渲染。格子本身一个类都不加(测试与真人都读同一套 data-*)。 */}
             {snakeOn && (
-              <div ref={snakeRef} data-testid="home-usage-snake" data-snake-total={snakePath.length}
+              <div ref={snakeRef} data-testid="home-usage-snake" data-snake-total={snakeTotal}
                 className="absolute pointer-events-none z-10" aria-hidden="true"
                 style={{ left: snakeOff.x, top: snakeOff.y, width: Math.max(0, weeks * SNAKE_PITCH - 2), height: 7 * SNAKE_PITCH - 2 }}>
-                {grid.cells.map((cell, i) => (cell.future ? null : (
-                  <div key={`e${i}`} data-snake-cell={i} className="absolute w-[11px] h-[11px] rounded-[2px] bg-accent"
-                    style={{ left: cell.col * SNAKE_PITCH, top: cell.row * SNAKE_PITCH, opacity: 0 }} />
-                )))}
                 {Array.from({ length: SNAKE_LEN }).map((_, i) => (
                   <div key={`s${i}`} data-snake-seg={i} className="absolute w-[11px] h-[11px] rounded-[2px] bg-accent"
-                    style={{ left: 0, top: 0, opacity: i === 0 ? 1 : Math.max(0.22, 1 - i * 0.12) }} />
+                    style={{ left: 0, top: 0, opacity: i === 0 ? 1 : 0.82 }} />
                 ))}
               </div>
             )}

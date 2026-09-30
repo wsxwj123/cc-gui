@@ -9,7 +9,7 @@ import {
   RANGE_KEYS, RANGE_DAYS, LEGEND_DEFAULT_ROWS, rangeStartKey, inRange, rangeFacts, rangeOverview,
   cardValuesFor, legendItems, stackedByDay, yTicks, xTickDays, xTicks, xTickIndexes, chartTip,
   shadeClass, MODEL_SHADES, tokensOf, inputOutputOf, favoriteOf, LEGACY_TOTAL_MODEL, LEGACY_TOTAL_LABEL,
-  snakeOrder,
+  snakePath,
 } from '../../client/src/utils/homeUsage.js';
 
 let n = 0;
@@ -304,16 +304,29 @@ const STATS = {
   eq(rangeOverview(legacy, '7d', T).byModel, [], '就算全量 byModel 有名字也不拿来冒充窗口内的分组');
 }
 
-// ── 14. r135 贪吃蛇的访问顺序(蛇形)─────────────────────────────────────
+// ── 14. r135 贪吃蛇的路径(随机化 DFS:全程相邻、覆盖每格、不瞬移)──────────
 {
-  const o = snakeOrder(3);
-  eq(o.length, 21, '3 列 × 7 行 = 21 个格子全都要走到');
-  eq(new Set(o).size, 21, '不许重复访问(每个格子只走一次)');
-  eq(o.slice(0, 7), [0, 1, 2, 3, 4, 5, 6], '第 0 列自上而下');
-  eq(o.slice(7, 14), [13, 12, 11, 10, 9, 8, 7], '第 1 列自下而上(蛇形折返)');
-  eq(o.slice(14, 21), [14, 15, 16, 17, 18, 19, 20], '第 2 列又自上而下');
-  eq(snakeOrder(0), [], '没有列 → 空');
-  eq(snakeOrder(2, 3), [0, 1, 2, 5, 4, 3], '行数可覆盖(默认 7)');
+  const mkRng = (seed) => () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const rows = 7;
+  const p3 = snakePath(3, rows, mkRng(1));
+  const uniq = new Set(p3);
+  eq(uniq.size, 21, '每个格子都要被走到(3 列 × 7 行 = 21,一个不落)');
+  ok(p3.length >= 21, `行走序列不短于格子数(实得 ${p3.length})`);
+  ok(p3.length <= 42, `退回步骤最多让长度翻倍(实得 ${p3.length})`);
+  // 关键:**每一步都相邻** —— 不许有瞬移(两头不相邻)
+  const jumps = [];
+  for (let i = 1; i < p3.length; i += 1) {
+    const a = p3[i - 1]; const b = p3[i];
+    const d = Math.abs(Math.floor(a / rows) - Math.floor(b / rows)) + Math.abs((a % rows) - (b % rows));
+    if (d !== 1) jumps.push(`${a}→${b}(距离 ${d})`);
+  }
+  eq(jumps, [], `不该有瞬移步,实得 ${jumps.slice(0, 3).join(' ')}`);
+  // 不是"一列列扫"的定式:前 7 步不该恰好把第 0 列自上而下走完
+  ok(!p3.slice(0, 7).every((i, k) => i === k), '不该是"先把第 0 列扫完"的定式路径');
+  eq(snakePath(3, rows, mkRng(1)), p3, '同样的随机序列必须可复现');
+  ok(snakePath(3, rows, mkRng(99)).join(',') !== p3.join(','), '换一个随机序列应得到不同路径');
+  eq(snakePath(0), [], '没有列 → 空');
+  eq(new Set(snakePath(2, 3, mkRng(7))).size, 6, '行数可覆盖(默认 7):2×3 也覆盖满');
 }
 
 console.log(`check-r131-usage-views-pure: PASS(${n} 条断言)`);
