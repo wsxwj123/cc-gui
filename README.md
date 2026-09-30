@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.407</b>(2026-09-30)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>热力图上的贪吃蛇照 Platane/snk 的算法重做</summary>
+
+按格子颜色**从浅到深**逐级吃(同一级里就近跳着吃,所以看着像随机游走,不再是一条条扫过去);被吃过的格子**只变淡、不再消失**,没有消耗的格子全程保持背景色。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.406</b>(2026-09-30)· 修复 2 条</summary>
 
 **修复**
