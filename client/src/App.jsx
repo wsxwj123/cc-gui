@@ -2276,16 +2276,18 @@ function HomeState({ tabIndex = 0 }) {
           <div data-testid="home-usage-slot" className="w-full flex-1 min-h-0 overflow-y-auto py-4">
             <div className="min-h-full flex flex-col">
               <div className="my-auto w-full">
+                {/* r134:图标与招呼语**水平居中**(用户实报"招呼文本仍然在左侧" —— 块本身是居中的,
+                    但块里的文字/图标贴着左缘)。分屏分支一个字不动。 */}
                 {custom?.icon ? (
-                  <img src={custom.icon} alt="" className="w-12 h-12 rounded-lg object-cover mb-4" />
+                  <img src={custom.icon} alt="" className="w-12 h-12 rounded-lg object-cover mb-4 mx-auto" />
                 ) : (
-                  <div className="w-12 h-12 rounded-lg border border-canvas-deep/70 flex items-center justify-center mb-4">
+                  <div className="w-12 h-12 rounded-lg border border-canvas-deep/70 flex items-center justify-center mb-4 mx-auto">
                     <Sparkles size={22} className="text-accent" />
                   </div>
                 )}
                 {/* r11-⑫:问候分段渲染——称呼段用主题 accent 细渐变(token,不硬编码色值),
                     皮肤模板 {name} 占位符同路径;无称呼时占位符整段降级(homeGreetingParts)。 */}
-                <h2 data-cgui="home-greeting" className="text-[22px] font-display font-medium text-ink mb-3 tracking-tight">{greetingNode}</h2>
+                <h2 data-cgui="home-greeting" className="text-[22px] font-display font-medium text-ink mb-3 tracking-tight text-center">{greetingNode}</h2>
                 <ErrorBoundary label="用量总览"><HomeUsage /></ErrorBoundary>
               </div>
             </div>
