@@ -901,3 +901,42 @@ test('C10e 320×568 × 缩放 1.2 / 1.0:顶行与整页都不横滚(跨平台审
     } finally { await ctx.close(); }
   }
 });
+
+test('C12a 贪吃蛇:热力图上有蛇在走、并且会循环(加速缝 __cguiSnakeMs)', async ({ page }) => {
+  // r135:用户要求"一直循环"。判据只看两件事:①蛇头位置随时间变化(真的在动);
+  // ②步数会回绕(真的在循环,不是跑一趟就停)。加速缝是窗口上的 __cguiSnakeMs(生产不设=45ms)。
+  await page.addInitScript(() => { try { window.__cguiSnakeMs = 5; } catch { /* 忽略 */ } });
+  await stubUsage(page, typical());
+  await gotoHome(page);
+  const snake = page.getByTestId('home-usage-snake');
+  await expect(snake, '热力图上该有蛇的覆盖层').toBeVisible();
+  const total = Number(await snake.getAttribute('data-snake-total'));
+  expect(total, '路径长度 = 列数 × 7').toBeGreaterThan(50);
+  const steps = new Set();
+  let wrapped = false; let prev = -1;
+  for (let i = 0; i < 60; i += 1) {
+    const v = Number(await snake.getAttribute('data-snake-step'));
+    steps.add(v);
+    if (prev >= 0 && v < prev) wrapped = true;
+    prev = v;
+    if (wrapped && steps.size > 5) break;
+    await page.waitForTimeout(50);
+  }
+  expect(steps.size, `步数应在变化(实得 ${steps.size} 个不同值)`).toBeGreaterThan(5);
+  expect(wrapped, '跑到末尾应回绕到 0(循环)').toBe(true);
+  // 蛇身段数固定,且段都在覆盖层里(不碰格子本身)
+  expect(await snake.locator('[data-snake-seg]').count()).toBe(8);
+  const cellCount = await page.getByTestId('home-usage-cell').count();
+  expect(await snake.locator('[data-snake-cell]').count()).toBeLessThanOrEqual(cellCount + 7);
+});
+
+test('C12b 贪吃蛇:系统开了"减少动态效果"就不渲染、不动', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, baseURL: process.env.R131_UI_BASE, timezoneId: 'Asia/Shanghai', locale: 'zh-CN', reducedMotion: 'reduce' });
+  const page = await ctx.newPage();
+  try {
+    await stubUsage(page, typical());
+    await gotoHome(page);
+    await expect(page.getByTestId('home-usage-heatmap')).toBeVisible();
+    expect(await page.getByTestId('home-usage-snake').count(), 'prefers-reduced-motion: reduce → 不该有蛇').toBe(0);
+  } finally { await ctx.close(); }
+});
