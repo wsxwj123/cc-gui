@@ -382,8 +382,8 @@ export const HomeUsage = React.memo(function HomeUsage() {
   return (
     <div ref={rootRef} data-testid="home-usage" className="w-full min-w-0">
       <div className="flex flex-wrap items-center gap-2 mb-2 min-w-0">
-        {/* r130 的「用量总览」标题保留在最左(它也是 r131 C9a 的"用量块顶部行"锚点)。 */}
-        <span data-testid="home-usage-title" className="text-[11px] text-ink-muted font-body shrink-0">用量总览</span>
+        {/* r133:去掉「用量总览」四个字(用户要求) —— 分页控件自带「总览」，标题是多余的。
+            这一行现在由「总览 | 模型」开头,验收里的"用量块顶部行"锚点改指 home-usage-tabs。 */}
         {/* 左:分页;右:范围。375px 下两者都要放得下 → 分组控件本身不换行,由父级的 min-w-0 收窄。 */}
         <div data-testid="home-usage-tabs" role="tablist" className="flex items-center gap-0.5 shrink-0">
           {TABS.map((t) => (
