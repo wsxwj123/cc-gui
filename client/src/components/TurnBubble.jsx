@@ -31,7 +31,7 @@ import {
   stripSummary, isFoldableSegment, getSkillDocReadName,
 } from '../utils/streamStatus.js';
 import { Linkify } from '../utils/linkify.jsx';
-import { ImageLightbox } from './ImageLightbox.jsx';
+import { ToolResultImages } from './tools/ToolResultImages.jsx';
 
 // Tools that get their own bespoke inline card (rendered in chronological order
 // inside the turn). Anything not in this set falls through to ToolCallsGroup,
@@ -129,12 +129,10 @@ function InterruptedToolCard({ toolCall }) {
 // 图像块来源见 utils/toolResult.js 的 extractToolResultImages(computer-use 截图主用例)。
 function McpToolCard({ toolCall }) {
   const [expanded, setExpanded] = useState(true);
-  // r116:点卡片截图放大 = 应用共享灯箱(与聊天图片同一组件)。灯箱的 Esc 挂 window 捕获相位并
-  // stopImmediatePropagation,先于 App.jsx 会话级「Esc 停止」(window 冒泡)→ 关大图不会停掉回复。
-  const [zoomIndex, setZoomIndex] = useState(null);
+  // 点卡片截图放大 = 共享图片组件里的应用灯箱(与聊天图片同一组件;Esc 相位与"关大图不停回复"
+  // 的约定都在那边,见 ToolResultImages / ImageLightbox)。
   const result = toolCall.result;
   const images = Array.isArray(result?.images) ? result.images : [];
-  const zoomImage = zoomIndex != null ? images[zoomIndex] : null;
   const nameParts = (toolCall.name || '').split('__');
   const shortName = nameParts.pop() || toolCall.name;
   const serverName = nameParts[1] || '';
@@ -164,27 +162,10 @@ function McpToolCard({ toolCall }) {
           {result?.content && (
             <pre className="text-[11px] whitespace-pre-wrap break-all max-h-64 overflow-auto font-mono text-ink-muted"><Linkify text={result.content} /></pre>
           )}
-          {images.length > 0 && (
-            <div className="space-y-2">
-              {images.map((img, i) => (
-                <img
-                  key={i}
-                  src={`data:${img.mime};base64,${img.data}`}
-                  alt={`${shortName} 结果 ${i + 1}`}
-                  loading="lazy"
-                  onClick={(e) => { e.stopPropagation(); setZoomIndex(i); }}
-                  className="max-w-full h-auto rounded border border-canvas-deep cursor-zoom-in"
-                />
-              ))}
-            </div>
-          )}
+          <ToolResultImages images={images} name={`${shortName} 结果`} />
         </div>
       )}
-      <ImageLightbox
-        src={zoomImage ? `data:${zoomImage.mime};base64,${zoomImage.data}` : null}
-        name={zoomImage ? `${shortName} 结果 ${zoomIndex + 1}` : undefined}
-        onClose={() => setZoomIndex(null)}
-      />
+
     </div>
   );
 }
@@ -402,6 +383,8 @@ function ToolCallRow({ toolCall, onRetryTool }) {
                     ? toolCall.result.content.slice(0, 4000)
                     : JSON.stringify(toolCall.result.content, null, 2)?.slice(0, 4000)}
                 </pre>
+                {/* r132:通用兜底卡也要出图(以前只有 MCP 卡出图,其它工具读到的图全丢) */}
+                <ToolResultImages images={toolCall.result.images} name={toolCall.name || '结果'} className="mt-2" />
               </div>
             )}
           </div>

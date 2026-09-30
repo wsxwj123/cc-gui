@@ -55,17 +55,117 @@ function workflowRunOf(toolUseResult, content) {
 // JSON.stringify:图片进不了卡片,几十万字符的 base64 当正文塞进 <pre><Linkify> → 界面卡死。
 // 字符串原样;数组/字符串以外的形态保持原逻辑(JSON.stringify,缺 content 仍是 undefined)。
 // 不含图片不加 images 键(其余 tool_result 形状一字不变)。
+// ── r132:图片载荷提取(与 client/src/utils/toolResult.js 的同名函数逐条同口径)──────────
+// 有些 provider / 工具把图片塞进**文本**(`data:image/...;base64,…` 或
+// `{"type":"image","file":{"base64":…}}`,甚至双层转义),以前整段当正文 → 用户看到满屏
+// base64、看不到图(用户实报)。这里把载荷抽成 images 并从正文里摘掉;**不含图片载荷的字符串
+// 一字不改**(反向锁见 tests/unit/check-r116-tool-result-shape.mjs)。
+const MIN_IMAGE_PAYLOAD = 512;
+const IMAGE_MIME_RE = /image\/(png|jpe?g|webp|gif|bmp|avif)/i;
+const B64_RUN_RE = /[A-Za-z0-9+/]{512,}={0,2}/g;
+const IMAGE_CONTEXT_RE = /image\/(png|jpe?g|webp|gif|bmp|avif)|"type"\s*:\s*"image"|\\"type\\"\s*:\s*\\"image\\"|"base64"|\\"base64\\"/i;
+
+/** 已知图片格式的 base64 前缀 → mime;认不出返回 null(不用 atob/Buffer,两份拷贝逐字相同)。 */
+function sniffMimeFromB64(b64) {
+  const head = String(b64 || '').slice(0, 24);
+  if (head.startsWith('iVBORw0KGgo')) return 'image/png';
+  if (head.startsWith('/9j/')) return 'image/jpeg';
+  if (head.startsWith('R0lGOD')) return 'image/gif';
+  if (head.startsWith('UklGR')) return 'image/webp';
+  if (head.startsWith('Qk')) return 'image/bmp';
+  return null;
+}
+
+/** 字符串 → { images:[{mime,data}], rest }。认不出图片时 rest 与入参逐字相同。 */
+/** 单层反转义(有些工具把 JSON 序列化了两次:`{\\"type\\":\\"image\\"…}`)。 */
+function unescapeJsonOnce(t) {
+  return String(t).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+}
+
+/** 整个字符串就是一个 JSON 值时:按结构走一遍,抽图(含 file.base64 / source.data / MCP 形态)
+ *  并把 text 字段当正文。返回 {images, rest} 或 null(不是 JSON / 没图)。 */
+function jsonImageScan(src) {
+  const t = String(src).trim();
+  if (!/^[[{]/.test(t) || !/[}\]]$/.test(t)) return null;
+  for (const cand of [t, unescapeJsonOnce(t)]) {
+    let obj;
+    try { obj = JSON.parse(cand); } catch { continue; }
+    const images = [];
+    const texts = [];
+    const walk = (n, insideImg) => {
+      if (Array.isArray(n)) { for (const x of n) walk(x, insideImg); return; }
+      if (!n || typeof n !== 'object') return;
+      const str = (v) => (typeof v === 'string' ? v : '');
+      const data = str(n.source?.data || n.base64 || n.data || n.file?.base64);
+      const typeStr = str(n.type);
+      const looksImg = typeStr === 'image' || /^image\//.test(typeStr) || (insideImg && !!data);
+      if (looksImg && data) {
+        const mime = str(n.source?.media_type || n.mimeType || n.media_type || n.file?.type || (/^image\//.test(typeStr) ? typeStr : '')) || sniffMimeFromB64(data) || 'image/png';
+        const dm = data.match(/^data:([\w.+-]+\/[\w.+-]+);base64,(.*)$/);
+        images.push(dm
+          ? { mime: dm[1].toLowerCase(), data: dm[2].replace(/\s+/g, '') }
+          : { mime: mime.toLowerCase(), data });
+        return;   // 同一棵子树里的内层 base64 不再重复认
+      }
+      if (typeof n.text === 'string') texts.push(n.text);
+      for (const v of Object.values(n)) walk(v, false);
+    };
+    walk(obj, false);
+    if (images.length) return { images, rest: texts.join('\n').trim() };
+  }
+  return null;
+}
+
+function splitImagePayloadsInString(input) {
+  const src = typeof input === 'string' ? input : (input == null ? '' : String(input));
+  if (src.length < 256) return { images: [], rest: src };
+  const asJson = jsonImageScan(src);
+  if (asJson) return asJson;
+  const images = [];
+  let rest = src.replace(/data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=\s]{256,})/gi, (_m, mime, data) => {
+    images.push({ mime: String(mime).toLowerCase(), data: String(data).replace(/\s+/g, '') });
+    return '';
+  });
+  rest = rest.replace(B64_RUN_RE, (run, offset) => {
+    const around = rest.slice(Math.max(0, offset - 400), offset + run.length + 400);
+    if (!IMAGE_CONTEXT_RE.test(around)) return run;
+    const hit = around.match(IMAGE_MIME_RE);
+    images.push({ mime: hit ? `image/${hit[1].toLowerCase()}` : (sniffMimeFromB64(run) || 'image/png'), data: run });
+    return '';
+  });
+  if (!images.length) return { images: [], rest: src };
+  const cleaned = rest
+    .replace(/data:image\/[\w.+-]+;base64,\s*/gi, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  // 摘完剩下的是**普通散文**就原样留(不许把"图在这:…完事"这种短句吞掉);
+  // 只有当它长得像 JSON 脚手架时,才按"去掉键名后还剩多少可读内容"决定要不要留。
+  if (!/[{[\"]/.test(cleaned)) return { images, rest: cleaned };
+  const stripped = cleaned.replace(/"(?:type|source|base64|data|media_type|mimeType|file|file_path|dimensions|originalSize|displayWidth|displayHeight|image|text)"\s*:?/g, '');
+  const meaningful = stripped.replace(/[\s{}[\]",:\\]+/g, '');
+  const hasCJK = /[\u4e00-\u9fff]/.test(meaningful);
+  return { images, rest: (hasCJK || meaningful.length >= 24) ? cleaned : '' };
+}
+
 function toolResultBody(content) {
-  if (typeof content === 'string') return { content };
-  if (!Array.isArray(content)) return { content: JSON.stringify(content) };
-  const text = content
-    .filter((b) => b && (b.type === 'text' || typeof b.text === 'string'))
-    .map((b) => b.text || '')
-    .join('\n');
-  const images = content
+  const fromBlocks = (blocks) => blocks
     .filter((b) => b && (b.type === 'image' || typeof b.data === 'string'))
     .map((b) => ({ mime: b.source?.media_type || b.mimeType || 'image/png', data: b.source?.data || b.data || '' }))
     .filter((b) => b.data);
+  if (typeof content === 'string') {
+    const { images, rest } = splitImagePayloadsInString(content);
+    return images.length ? { content: rest, images } : { content };
+  }
+  if (!Array.isArray(content)) return { content: JSON.stringify(content) };
+  const text = content
+    .filter((b) => b && (b.type === 'text' || typeof b.text === 'string'))
+    .map((b) => splitImagePayloadsInString(b.text || '').rest)
+    .join('\n');
+  const images = fromBlocks(content);
+  for (const b of content) {
+    if (b && typeof b.text === 'string') images.push(...splitImagePayloadsInString(b.text).images);
+  }
   return images.length ? { content: text, images } : { content: text };
 }
 

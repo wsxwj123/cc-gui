@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { FileText, ChevronDown, ChevronRight, Loader2 } from '../Icon.jsx';
+import { ToolResultImages } from './ToolResultImages.jsx';
 
 const PREVIEW_LINES = 10;
 const MAX_EXPANDED_LINES = 400;
@@ -13,8 +14,11 @@ export function ReadCard({ toolCall }) {
   const result = toolCall.result;
   const isError = result?.isError;
   const content = typeof result?.content === 'string' ? result.content : '';
+  // r132:Read 读的若是图片,结果里没有一行正文、只有 image 块(Anthropic source:{data} 等)。
+  // 以前这张卡只渲染文本 → 卡片显示"1 行"、图完全看不到,用户只能去文件浏览器。现在出图,
+  // 与 MCP 卡同一套(点开可放大)。折叠态仍默认收起,但标题上写清"图片 N 张",不用瞎点。
+  const images = Array.isArray(result?.images) ? result.images.filter((i) => i && i.data) : [];
   const allLines = content.split('\n');
-  const hasMore = allLines.length > PREVIEW_LINES;
   const shown = expanded
     ? allLines.slice(0, MAX_EXPANDED_LINES).join('\n')
     : allLines.slice(0, PREVIEW_LINES).join('\n');
@@ -43,7 +47,9 @@ export function ReadCard({ toolCall }) {
         {result && (
           isError
             ? <span className="text-red-500 text-[10px] ml-auto shrink-0">错误</span>
-            : <span className="text-ink-faint text-[10px] ml-auto shrink-0">{allLines.length} 行</span>
+            : images.length > 0
+              ? <span className="text-ink-faint text-[10px] ml-auto shrink-0">图片 {images.length} 张</span>
+              : <span className="text-ink-faint text-[10px] ml-auto shrink-0">{allLines.length} 行</span>
         )}
       </button>
 
@@ -53,9 +59,15 @@ export function ReadCard({ toolCall }) {
         </div>
       )}
 
-      {expanded && result && !isError && content && (
+      {expanded && result && !isError && images.length > 0 && (
+        <div className="px-3 py-2 bg-canvas-warm/40" data-testid="read-card-images">
+          <ToolResultImages images={images} name={fileName || '图片'} />
+        </div>
+      )}
+      {/* 读图时 content 通常只剩一个空串/一行占位,不必再画一块空 <pre> */}
+      {expanded && result && !isError && content && !(images.length > 0 && content.trim() === '') && (
         <pre className="px-3 py-2 text-[11px] font-mono text-ink-muted overflow-auto whitespace-pre leading-relaxed bg-canvas-warm/40 max-h-[600px]">
-          {content}
+          {shown}
         </pre>
       )}
       {result && isError && (

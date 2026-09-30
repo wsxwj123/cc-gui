@@ -22,6 +22,10 @@ const IMG_B = b64('r116-image-B');
 const IMG_C = b64('r116-image-C');
 const IMG_D = b64('r116-image-D');
 const BIG = randomBytes(300_000).toString('base64');
+const BIGB64 = randomBytes(2000).toString('base64');          // r132:足够长的载荷(≥512 才认)
+const STR_DATAURL = `截图已保存:/private/tmp/shot.png\ndata:image/png;base64,${BIGB64}\n(完)`;
+const STR_JSONIMG = JSON.stringify({ type: 'image', file: { base64: BIGB64 }, dimensions: { originalWidth: 10 }, file_path: '/private/tmp/shot.png' });
+const STR_PLAIN = '这是普通输出:提到 image/png 与 base64 两个字,但没有任何载荷。'.repeat(20);
 
 const text = (t) => ({ type: 'text', text: t });
 const anthImg = (data, media_type) => ({ type: 'image', source: media_type ? { type: 'base64', media_type, data } : { type: 'base64', data } });
@@ -41,6 +45,9 @@ const CALLS = [
   { id: 'toolu_str', name: 'Bash', content: JSONISH, is_error: true },
   { id: 'toolu_big', name: CU, content: [text('大图截好了'), anthImg(BIG, 'image/png')] },
   { id: 'toolu_wf', name: 'Workflow', content: [text(LAUNCH)] },
+  { id: 'toolu_str_dataurl', name: 'Read', content: STR_DATAURL },
+  { id: 'toolu_str_jsonimg', name: 'Read', content: STR_JSONIMG },
+  { id: 'toolu_str_plain', name: 'Bash', content: STR_PLAIN },
 ];
 const HASH = '-tmp-r116-shape-fixture';
 const SID = 'a1160099-0000-4000-8000-000000000116';
@@ -129,6 +136,23 @@ check('U8 [约束 反向] 工作流结果(纯文字块数组)的 workflowRun 照
   const r = resultOf('toolu_wf');
   assert.equal(r.workflowRun?.runId, 'wf_631a4c46-1d3', `workflowRun 实得 ${brief(r.workflowRun)}`);
   assert.equal(r.workflowRun?.taskId, 'w1zi6gd0p', `workflowRun 实得 ${brief(r.workflowRun)}`);
+});
+
+check('U9 [r132] 字符串里的 data URL → images 一张、content 不含 base64(载荷被摘掉)', () => {
+  const r = resultOf('toolu_str_dataurl');
+  assert.deepEqual(r.images, [{ mime: 'image/png', data: BIGB64 }], `images 实得 ${brief(r.images)}`);
+  assert.ok(!r.content.includes(BIGB64), 'content 里不许再出现那段 base64');
+  assert.ok(r.content.includes('截图已保存') || r.content.includes('(完)'), `正文其余部分该在,实得 ${brief(r.content)}`);
+});
+check('U10 [r132] 字符串是 JSON 图片对象(file.base64)→ images 一张、content 不留 JSON 脚手架', () => {
+  const r = resultOf('toolu_str_jsonimg');
+  assert.deepEqual(r.images, [{ mime: 'image/png', data: BIGB64 }], `images 实得 ${brief(r.images)}`);
+  assert.equal(r.content, '', `脚手架该被丢掉,实得 ${brief(r.content)}`);
+});
+check('U11 [r132 反向] 长字符串只提到 image/png / base64 但没有载荷 → content 逐字不变、没有 images 键', () => {
+  const r = resultOf('toolu_str_plain');
+  assert.equal(r.content, STR_PLAIN, `content 实得 ${brief(r.content)}`);
+  assert.equal('images' in r, false, `不该长出 images,实得 ${brief(r.images)}`);
 });
 
 console.log(failed ? `FAIL check-r116-tool-result-shape(${failed} 条红)` : 'PASS check-r116-tool-result-shape');

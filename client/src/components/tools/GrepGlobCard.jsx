@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Search, ChevronDown, ChevronRight, Loader2, FileText } from '../Icon.jsx';
+import { ToolResultImages } from './ToolResultImages.jsx';
 
 // Combined renderer for Grep + Glob. Input shape:
 //   Grep: { pattern, path?, glob?, output_mode?, head_limit?, ... }
@@ -46,6 +47,8 @@ export function GrepGlobCard({ toolCall }) {
       )}
 
       {expanded && result && (
+        <>
+        <ToolResultImages images={result.images} name={toolCall.name || 'GrepGlobCard'} className="mb-2" />
         <div className={`px-3 py-2 text-[11px] font-mono whitespace-pre-wrap leading-relaxed overflow-auto max-h-[600px] ${
           isError ? 'bg-red-50 text-red-700' : 'bg-canvas-warm/40 text-ink-muted'
         }`}>
@@ -56,6 +59,7 @@ export function GrepGlobCard({ toolCall }) {
             </div>
           ))}
         </div>
+        </>
       )}
     </div>
   );

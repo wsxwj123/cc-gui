@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Globe, ChevronDown, ChevronRight, Loader2, ExternalLink } from '../Icon.jsx';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { openExternalUrl } from '../../utils/openExternal.js';
+import { ToolResultImages } from './ToolResultImages.jsx';
 
 // WebSearch input: { query, allowed_domains?, blocked_domains? }
 // WebFetch input: { url, prompt }
@@ -53,6 +54,8 @@ export function WebCard({ toolCall }) {
       )}
 
       {expanded && result && (
+        <>
+        <ToolResultImages images={result.images} name={toolCall.name || 'WebCard'} className="mb-2" />
         <div className={`px-3 py-2 text-[11px] max-h-[600px] overflow-y-auto ${
           isError ? 'bg-red-50 text-red-700' : 'bg-canvas-warm/40 text-ink-muted'
         }`}>
@@ -61,6 +64,7 @@ export function WebCard({ toolCall }) {
             : <MarkdownRenderer content={content} />
           }
         </div>
+        </>
       )}
     </div>
   );

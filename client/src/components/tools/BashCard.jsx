@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Terminal, ChevronDown, ChevronRight, Loader2 } from '../Icon.jsx';
 import { Linkify } from '../../utils/linkify.jsx';
+import { ToolResultImages } from './ToolResultImages.jsx';
 
 const PREVIEW_LINES = 8;
 
@@ -41,6 +42,10 @@ export function BashCard({ toolCall }) {
         </div>
       )}
 
+      {/* r132:工具结果里的图片(以前只有 MCP 卡出图) */}
+      {expanded && result && (
+        <ToolResultImages images={result.images} name={toolCall.name || 'Bash'} className="px-3 pb-2" />
+      )}
       {expanded && result && output && (
         <pre className={`px-3 py-2 text-[11px] font-mono overflow-auto whitespace-pre-wrap leading-relaxed max-h-[600px] ${
           isError ? 'bg-red-50 text-red-700' : 'bg-canvas-warm text-ink-muted'
