@@ -1005,3 +1005,28 @@ test('C12d 贪吃蛇:一趟跑完回绕时,吃掉的一片格子必须长回来'
   expect(r.wraps, '12 秒内至少要看到 2 次回绕(一趟约 310 步 × 8ms ≈ 2.5s)').toBeGreaterThanOrEqual(2);
   expect(r.worst, `回绕那一刻隐藏数应 ≈0;残留 ${r.worst} 说明上一趟吃掉的格子没长回来`).toBeLessThanOrEqual(5);
 });
+
+test('C12e 贪吃蛇:不设加速缝时按生产默认速度走(约 45ms/步)', async ({ page }) => {
+  // 为什么要有这条:其它验收用例都设了 window.__cguiSnakeMs = 8 的加速缝,于是"生产默认 45ms"
+  // 这条路**没有任何用例钉** —— 把默认改成 8(快得看不清)或负值/过大都不会红。
+  // 判据:不设缝,量 2 秒内 data-snake-step 的变化次数 ≈ 22 次/秒;上下各留足余量(10–60),
+  // 只挡"跑成加速缝速度"和"几乎不动"这两类坏法。
+  await stubUsage(page, typical());
+  await gotoHome(page);
+  const snake = page.getByTestId('home-usage-snake');
+  await expect(snake, '热力图上该有蛇').toBeVisible();
+  const r = await page.evaluate(async () => {
+    const el = document.querySelector('[data-testid="home-usage-snake"]');
+    let prev = Number(el.dataset.snakeStep);
+    let ticks = 0;
+    const obs = new MutationObserver(() => { const v = Number(el.dataset.snakeStep); if (v !== prev) ticks += 1; prev = v; });
+    obs.observe(el, { attributes: true, attributeFilter: ['data-snake-step'] });
+    const t0 = performance.now();
+    await new Promise((res) => setTimeout(res, 2000));
+    obs.disconnect();
+    return { ticks, dt: performance.now() - t0 };
+  });
+  const perSec = r.ticks / (r.dt / 1000);
+  expect(perSec, `默认速度应约 22 步/秒(45ms/步);实得 ${perSec.toFixed(1)} 步/秒`).toBeGreaterThan(10);
+  expect(perSec, `默认速度不该跑到加速缝的速度(8ms→约 125 步/秒);实得 ${perSec.toFixed(1)} 步/秒`).toBeLessThan(60);
+});

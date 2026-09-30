@@ -1,0 +1,1067 @@
+<!-- claude-gui 项目本地 learnings。仅含本项目专属事故；跨项目通用规则在全局 ~/.learnings/（2026-09-13 重新分节：流水条目已按主题归位）。 -->
+
+# claude-gui LEARNINGS
+
+**这是什么**：claude-gui(Claude Code CLI 的 Tauri 桌面壳)踩过的坑与结论。gitignored,不进公开仓。
+**任务前怎么查**：开工前连同全局 `~/.learnings/` 一起回顾;先扫下面的分节标题,再进对应节。本机重建前**必看**「发版 · 构建 · 签名」首条。
+**新条目怎么加**：先自问「换个项目还适用吗」——适用就写进全局 `~/.learnings/`，别堆这里。项目专属的归到对应分节，格式 `**(日期/版本) 标题**:正文`，正文 3-8 行，保留判据/命令/文件:行号/失败模式/正确做法。硬事实(日期、版本号、报错原文、命令、路径、hash、密码名)原样保留。同主题已有条目就并进去补增量事实，别另起流水账。
+**分节**：1 发版构建签名 · 2 Windows 移植 · 3 WKWebView 前端渲染 · 4 会话与流式状态 · 5 Provider 与配置写入 · 6 MCP 插件技能 · 7 CLI/SDK 行为事实 · 8 安全 · 9 验证与测试方法论 · 10 沙箱与 Codex 环境 · 11 产品原则 · 12 子代理与开发流程 · 13 网络代理缓存与 npm 渠道 · 14 诊断方法论
+
+---
+
+**反复踩过的（≥3 次）——先看这几条**
+1. **dev 预览是 Chromium、真机是 WKWebView/WebView2**：真机 bug 禁止用 Chromium 行为推断，必须真机取证或项目内差分。
+2. **「改了没生效」先查 stale 产物 / 旧进程 / 没重启**（清 `client/dist` + vite 缓存、Cmd+Q 退净、`curl /api/health` 看版本），别急着改代码或回滚。
+3. **装机/发版**：必 bump 版本号 → 验签名与 `_up_/server/routes/bots.local.js` → `rm -rf` 旧 app 后 `ditto`；公开版（push tag 出）与 bot 版（本地 build）是两条互不替代的产物。
+4. **凡新增 app command 必须同步 build.rs manifest + remote capability**，否则 dev 全绿、生产整体死。
+5. **交互/观感/配色/权限/事件名这类全局性改动必过判官**，且要 grep 全仓所有写法变体——只看 diff 必漏。
+6. **测试锁的三条死法**：注释救绿、`indexOf` 锚点找不到恒真、跨目录计数当金丝雀；锁定测试 ≠ 绝对正确。
+
+---
+
+## 发版 · 构建 · 签名 · 打包
+
+**本机带 bot 版构建(反复踩,发版前必看)**:公开 release 不含 bot,app 内更新会丢 bot,本机 dogfood 版必须本地重建。命令(全程不弹窗):
+```sh
+security unlock-keychain -p cgui-local-signing ~/Library/Keychains/cgui-signing.keychain-db
+security set-keychain-settings ~/Library/Keychains/cgui-signing.keychain-db   # 免自动锁
+cd ~/Desktop/claude/claude\ gui
+rm -rf src-tauri/target/release/bundle   # 删过源文件时必须,Tauri 资源打包是增量的、删的文件不会自动 prune
+PATH=/usr/bin:$PATH CGUI_PUBLIC_BUILD=1 APPLE_SIGNING_IDENTITY=LocalCodeSign cargo tauri build
+```
+要点:①**不走** `npm run tauri:build`/public-build.cjs(那个 stash 掉 .local 出公开版);直跑 `cargo tauri build` 则 .local 留原地被打进。②`CGUI_PUBLIC_BUILD=1` 只为过 `require-public-build.cjs` 门禁,运行时不门控 bot;bot/.local 按**文件存在**加载。③`PATH=/usr/bin` 治 xattr(pyenv shim 遮蔽 xattr);解锁钥匙串治 `errSecInternalComponent`(LocalCodeSign 私钥在专用钥匙串 `cgui-signing.keychain-db`、被锁→codesign 非交互拿不到私钥→回落 adhoc→FDA 失效)。两者缺一不可。④钥匙串密码=`cgui-local-signing`(固定项目密码,非登录密码)。
+
+**验证签名产物**:`codesign -dv <App>` 应 `Signature=...`(非 adhoc);`codesign -d -r- <App>` 的 DR 含 `certificate leaf = H"76297e177211adec91e3ca2d8ada23eb44a28480"`(LocalCodeSign,DR 锚定证书 CN 使 FDA 跨 build 存活);验签三连 `codesign --verify` + `--deep --strict` + `codesign -dvvv | grep Authority`(=LocalCodeSign)。bot 代码落 `Contents/Resources/_up_/server/routes/bots.local.js`(Tauri 2 把 `../` 资源放 `_up_/`,别查 `Resources/server/` 会扑空)。
+
+**装机用 `ditto` 不用 `cp -R`,且先删旧 app 目录**:`cp -R` 破坏签名(不保留 `_CodeSignature`/xattr)→ `codesign --verify` 报 "code object is not signed"→ Gatekeeper 拦 + FDA 失效;首次侥幸过二次就坏。`ditto` 叠加进已存在旧目录会残留旧版文件(不在新 seal 里)→ "a sealed resource is missing or invalid"。正解:`rm -rf "/Applications/Claude GUI.app"` 后再 `ditto "src.app" "/Applications/Claude GUI.app"`。
+
+**重装前必须先强制退干净**(2026-06-24):用户常开着旧版边测边等,进程占 bundle 内文件→`rm -rf`/`ditto` 部分失败、静默装了旧版(`codesign --verify` 仍显有效)。正规:`osascript -e 'tell application "Claude GUI" to quit'; pkill -9 -f "Claude GUI.app"; pgrep 验证为空; lsof -ti tcp:6677 -sTCP:LISTEN | xargs kill -9; sleep 2` 再 `rm -rf` + `ditto`。复核:`grep` bundle 里的新代码特征 + 比对 mtime。
+
+**双产物:公开版 push tag 出,bot 版本地 build**(记忆 [[release-two-artifacts-tag-and-local-bot-build]]):①公开 release 靠 `git tag vX.Y.Z && git push origin vX.Y.Z` 触发 CI(tauri.yml `on: push: tags: ['v*']`);**只 push commit 不打 tag = release 不出、app 检测不到**(曾漏打 tag 4 版被用户发现)。CI checkout 无 .local(gitignored)→ 包天然干净;本地 `npm run tauri:build` 走 public-build.cjs stash 掉 .local。②bot 版走上面的本地 build。
+
+**data: URL 启动窗 = 运行时 feature 门控**(v0.2.98,全量崩):Tauri 2 用 `WebviewUrl::External(data:...)` 需 Cargo feature `webview-data-url`,缺了 **cargo check/test 全过、运行时 setup panic 闪退**("意外退出")。铁律:凡动 lib.rs 窗口/webview 创建路径,发版前必须真启动一次打包 app(`open` + ps 存活 + health);cargo check 证明不了运行时。取证:直接跑 `/Applications/xxx.app/Contents/MacOS/<bin>` 终端看 panic 原文,比翻 DiagnosticReports 快。启动感知延迟根因=窗口在 setup 末尾串行等完 find_node→spawn→健康轮询(最长20s)→杀旧 才创建;修法=data: URL 启动页立即建窗 + 后台初始化 + win.navigate。
+
+**macOS app 前台激活**(2026-06-07):公开包 `CFBundleIdentifier=com.claudegui.app` 与 macOS bundle extension 冲突 + 只 `set_focus` 无应用级 activate → 双击不切前台。修:identifier 改 `com.claudegui.desktop`;窗口创建后 `show` + `set_focus` + macOS `osascript tell application id ... activate`。
+
+**GitHub 更新检测:releases/latest 太脆,退回 tag**(v0.2.73):`api.github.com/.../releases/latest` **零 release 即 404**(非限流);"push tag 后立刻删上一版 release" + CI ~9min 造成**零 release 空窗**→检测失效。修:`fetchGitHubLatest` 404 时退回 `/tags?per_page=100` 取最大 semver tag(tag 一推即存在);下载链接用 `buildFallbackAssets` 的 tag 直链兜底(CI 发布 DMG 后即可下)。**流程铁律:删旧 release 必须等新 release 确认发布(Latest 在线+3资产)之后**,绝不在 push tag 后立刻删(记忆 [[github-keep-latest-release-only]])。排 GitHub API 失败先 `curl /rate_limit` 区分限流(403)vs 资源不存在(404)。
+
+**gh 删 release 403/404 = 双账户非 owner**(2026-07-06):本机 gh 有两个 keyring 账户,常驻活跃的 `euphoriaaaaaa1` **不是仓库 owner**(GitHub 对无权限 DELETE 返回 404 不暴露存在性,非 token scope 问题)。删 release 前 `gh auth switch -u wsxwj123`,删完切回。git push 走 SSH host 别名与 gh 活跃账户无关。
+
+**发版脚本别接管道、"被拒绝"可能已执行**:①`release.local.sh ... | head -5` 让脚本在 head 关管道后被 SIGPIPE 截断(commit+push 完成但构建/装机没跑);发版脚本必须裸跑或重定向文件,输出用 tail 看。②commit+push+tag 在前几步,工具调用中途被打断则 tag 可能已 push、CI 已在建;重发前 `git ls-remote --tags` + `node -p 版本` 核对真实状态,别假设"拒绝=没跑"。③**SSH push 被代理劫持是常态**(198.18.x:22,set -e 中止):commit 已本地成功,`git push` 重试几次 + `git ls-remote` 核实远端=HEAD 是权威,tag 单独重试至 ls-remote 确认;脚本因版本已 bump 不能重跑,手动补 push/tag/构建/装机。版本号发前对照 `git tag -l` 最新号+1(曾笔误 175 跳过 174,随 tag 推上不可回收)。
+
+**双击 launcher 用了缓存里的坏 binding**(2026-06-03):新机 clone 后双击 gui.command,`npx vite build` 报 "Cannot find native binding"(rolldown darwin-arm64 Team ID 不匹配)。根因:client 依赖未装时 `npx vite` 从 ~/.npm `_npx` 缓存拉**最新** vite(7,带 rolldown native binding),.node 签名 Team-ID 与当前 Node 不匹配→dlopen 失败(项目锁 vite 6.3.5)。修:launcher 首次自动 `npm install` + `npm --prefix client install` 再 build。预防:任何"双击即用"脚本必须先装好依赖,不能裸 `npx <bin>`(会 fallback 到缓存随机版本)。
+
+**换构建目录后先 `npm install` 再 build**(2026-06-29,弃用 worktree):已弃 worktree(`git worktree remove --force` 清掉腾 1.5G;曾用于 SDK 迁移,分支 sdk-chat-migration、侧装名 "Claude Code GUI"/`com.claudegui.codegui` 共存),主仓 master 直接开发(`cargo tauri build` 出 bot 版,`npm run tauri:build`/public-build.cjs 出公开版,两者都在 master)。换目录首次 build 必踩 `client/node_modules` 早分叉——缺 `remark-math`/`rehype-katex` 等,`vite build` 报 `Rollup failed to resolve import`。修:`cd client && npm install`(物化 lockfile,不改 package.json)。
+
+**合并 worktree 分支勿带 node_modules 软链**:子代理常 `git add -f` 指向主仓的 node_modules 软链,merge 后 `rm node_modules` 会连主仓真实依赖一起丢(软链目标=主仓自身)→ 后端 `ERR_MODULE_NOT_FOUND ws`。合并后 `git ls-files node_modules` 查,有则 rm --cached;合并前 `git ls-tree -r <branch> --name-only | grep node_modules` 预检。 **根因补记(原全局 ERRORS 条目)**:`.gitignore` 里写的是 `node_modules/`(带斜杠)——只匹配目录,**不匹配名为 `node_modules` 的软链**,所以 `git add -A` 能把它提交进仓库;忽略规则要写成无斜杠的 `node_modules`(或两条都写)。
+
+**死功能排查**:`grep "<Component"` 会漏组件表动态渲染(`PANEL_MAP={k:{component:X}}` + `<PanelComponent/>`),必须追到渲染落地。代码注释会撒谎(AgentsPanel 注释称可达但 c15a95a 重构遗漏从未接线)——以渲染引用为准。
+
+**Rust 编译两坑**:`TcpStream::write_all` 要 `req.as_bytes()`(不接 String);Tauri 健康探针别用 `read_to_string()` 等 EOF(HTTP 连接不关就假 unhealthy),读第一个响应 chunk 检查即可(ERR-20260606-003/004)。
+
+---
+
+**(2026-07-16/v0.2.225) 自定义 Tauri command 生产包被 ACL 拒=dev 过真机挂**:本 app 生产窗口 navigate 到 `http://127.0.0.1:<port>`,在 Tauri ACL 里是 **remote 上下文**(is_local_url 只认 devUrl/frontendDist/tauri 协议);app 自定义 command(#[tauri::command]+invoke_handler)默认**无任何 capability 授权**→生产 invoke 一律被 "not allowed by ACL" 拒;dev 因 devUrl 同源 is_local=true 放行→**dev 全绿、发布版功能整体死亡**(首例:set_screenshot_hotkey/focus_main_window,改热键存不上还报误导文案)。修=两处配套:①build.rs 用 `tauri_build::Attributes::new().app_manifest(AppManifest::new().commands(&[...]))` 声明命令生成 allow-* 权限;②capabilities/ 加带 `remote.urls`(127.0.0.1:6677–6687,照抄 dialog.json)的 capability 引用这些权限。权限 id 拼法以 cargo 构建报错为准(capability 引用不存在的 id 构建期就炸=天然验收)。**规则:凡新增 app command,必须同步 build.rs manifest+remote capability,且发布前真机 .app 验一次 invoke**;plugin 命令(dialog/updater 等)不受此坑影响因为它们的 capability 早带了 remote.urls。
+
+### 2026-07-19 · 在 GUI 会话里 kill 6677 后端 = 自杀,装机类操作必须交给用户在终端跑
+- **事故**:从 GUI 会话里排查"6677 残留后端",`pgrep -fl "Claude GUI"` 匹配不到进程名就误判 app 已退出、把监听 6677 的 node 后端当孤儿,准备 kill 后重装 app。实际上那个后端**正是服务当前会话的活进程**——kill 它 = 切断自己所在的对话通道,用户界面当场失效被迫重启。
+- **根因**:本会话就跑在被诊断/被重装的那台 app 里。`pgrep "Claude GUI"` 匹配不到 Tauri 进程名不代表 app 没跑;只要 6677 有 node 在 LISTEN 且这个会话还能对话,它就是活的。
+- **规则**:①凡是 kill 6677 后端、`rm -rf /Applications/Claude GUI.app`、ditto 重装这类操作,**一律写成确切命令交给用户自己在终端跑**,或执行前明示"这会中断当前会话";②判断 app 死活看 6677 LISTEN 进程 + 会话存活,不看 GUI 进程名;③诊断类只读命令(lsof/codesign --verify)随便跑,写操作先想"这一刀下去我是不是也死了"。
+
+**(2026-07-20/修正批#1b) 弹层三判据统一 AnchoredPopover + dvh 陷阱**:所有选择器弹层(权限/Provider/模型/力度)统一走 `SessionSelectors.jsx` 的 `AnchoredPopover`(portal 到 body + fixed + zIndex 9999 + 越界翻转/夹紧 + ResizeObserver 重定位),绕开一切祖先 stacking context/transform 陷阱;新写弹层别再手写 absolute+z-50。两个坑:①**dvh/vh 在 Chromium 系(dev 浏览器/Windows WebView2)按布局 px 解释**,大字号 CSS zoom 1.45 下 `max-h-[calc(100dvh-6rem)]` 视觉超屏(实测主题弹层 976>800);WKWebView 则已除过 zoom 不超。跨引擎正确单位=`var(--app-h)`(innerHeight÷zoom)。②portal 后弹层不在锚点 wrap 内,调用方旧的 `wrapRef.contains` outside-click 判定会误关且 mousedown 先关闭导致列表项 click 丢失——outside/Esc 必须由 AnchoredPopover 自己管(同时豁免 anchorRef)。另:dev 联调时 5173/6677 常被其它会话的主仓进程占用,worktree 验证必须自起独立端口(vite --config 临时配置代理到自起后端),先 `curl /src/<改过的文件> | grep 新代码特征` 确认服务的是本 worktree 源码再下结论。
+
+### 2026-09-02 装机脚本两处过期判据(0.2.369)
+- 产物名已是 `src-tauri/target/release/bundle/macos/CC-GUI.app`、装机目标 `/Applications/CC-GUI.app`(不再是 `Claude GUI.app`);退出用 `osascript -e 'tell application "CC-GUI" to quit'`,进程匹配 `pgrep -f 'CC-GUI.app/Contents/MacOS'`。
+- 签名判据 `codesign -dv` 输出行是 `Signature size=1678`,grep 用 `^Signature`(带 `=` 会空匹配 → 误判"三查未过")。
+
+### 2026-08-24 签名报"item could not be found in keychain"=专用钥匙串掉出搜索列表
+- 形态:构建到 codesign 步报 `The specified item could not be found in the keychain`(不是锁住的 errSecInternalComponent);`security find-identity -v -p codesigning` 全局 0 个身份,但显式指 `~/Library/Keychains/cgui-signing.keychain-db` 能看到 LocalCodeSign(76297E17…)。
+- 根因:cgui-signing.keychain-db 不在用户钥匙串**搜索列表**里(list-keychains 只剩 login)——codesign 按搜索列表找身份,unlock 成功也没用。会被系统更新/其他工具悄悄重置。
+- 修复:`security list-keychains -d user -s ~/Library/Keychains/login.keychain-db ~/Library/Keychains/cgui-signing.keychain-db` 加回(保留 login),再 unlock 重建。
+- 另:`cmd | tail` 会吃掉真实退出码,后台构建判成败要看输出尾部有没有 error,别信 exit 0。
+
+### 2026-07-14 tauri signer 空密码密钥在 CI 解密失败
+*(2026-09-13 由全局 ERRORS.md 迁入)*
+- 症状:CI `tauri build` 报 `failed to decode secret key: incorrect updater private key password: Wrong password for that key`,本地生成时看似成功。
+- 根因:`cargo tauri signer generate --password ""` 生成的密钥是"用空串加密"的,CI 上 TAURI_SIGNING_PRIVATE_KEY_PASSWORD 为空 secret 时 tauri-cli 的空串/未设语义有歧义,解不开。
+- 修法:**必须用真实非空密码生成密钥**(--password "<真密码>"),密码与私钥一起进 CI secrets;换钥要同步换 tauri.conf.json 的 pubkey(客户端持钥前换零成本,发过可更新版后换=已装机器失联)。
+
+### 2026-07-14 本机重建后必须验证 dist 新鲜度/版本再说"装好了"
+*(2026-09-13 由全局 ERRORS.md 迁入)*
+- claude-gui 本机 dogfood 重建:一次 build 完成但装机(ditto)步骤被上个进程退出打断,没真装,我却说"装好了"→ 用户测新功能没生效,困惑半天。
+- 且本机重建不 bump 版本号(恒 0.2.216),用户从版本号看不出新旧,无法自证装对。
+- 教训:①装机后必须 curl /api/health 确认 + grep app 内 dist 的新代码字符串常量(minify 不改字符串,可 grep 功能文案)证明代码真在,再说"装好了";②正式发版才 bump 版本号,本机 dogfood 重建版本号不变属正常,要靠功能/grep 确认而非版本号。
+
+---
+
+## Windows 移植
+
+**Windows 移植三件套(改进程查询/shell/spawn 前必看)**(记忆 [[windows-porting-gotchas-wmic-shell]]):
+- **wmic 已死**:自 Win10 21H1 弃用,**Win11 24H2 起从默认镜像移除**→ `execFileP('wmic',...)` 可能 ENOENT。正解 `Get-CimInstance Win32_Process`(PS3+/Win8+ 恒有,`ConvertTo-Json` 顺带免疫 CSV 逗号错位),wmic 仅老系统回落。同类适配全仓 grep 一致化(agents.js 早用 CIM,processes.js 三处曾漏网)。
+- **`SHELL||'/bin/bash' -lc` 是 mac 惯性**:Windows SHELL 为空→/bin/bash 不存在→pty ENOENT。win32 分支直接 spawn 绝对路径(ConPTY 无需 login shell 补 PATH,那是 POSIX 裸 spawn 的 posix_spawnp 问题)。
+- **execFile 内嵌双引号脆**:用单引号。
+
+**execFile 跑 .cmd/.bat 必须 cmd.exe /c**(第二次踩,v0.2.138):现代 Node 出于 CVE-2024-27980 禁止直接 execFile `.cmd/.bat`→EINVAL。npm 是 npm.cmd、npx/uvx/uv/claude 在 Win 全是 .cmd。凡 server 里 spawn/execFile 可能命中 .cmd 的调用一律 grep 复查经 `cmd.exe /c`。**getClaudeVersion 对所有 Win 路径经 cmd.exe,claudeCommand 只对 .cmd/.bat 经、漏无扩展名裸路径**→"版本检测正常但 MCP/agents 挂"(v0.2.166):Win 除 .exe 外都走 cmd.exe。
+
+**`.bat` 里调 npm/任意 .cmd 不加 `call` 会吞掉后续命令**(v0.2.147,疑似"npm 装了检测不到"长期根因):cmd.exe 跳过去不回来→`&& powershell`(写 PATH)和 `pause` 全被跳、窗口闪退。修 `call npm install ...`。
+
+**cmd.exe /c 参数注入:一次性 spawn 的 --model 是活口**(v0.2.182):Win claude 常是 .cmd,`spawn('cmd.exe',['/c',bin,...args])`。libuv 只给含空格/tab/双引号的参数加引号,`& | < > ^` 裸穿→cmd 重解析把 `x&calc` 的 `&` 当分隔符执行=**绕过整个权限卡体系**(局域网模式=RCE)。触发面:title/context/compact-segment 三个一次性 spawn 把 `--model <用户传>` 当参数(主 /chat 走 SDK query() 不经 cmd 无面)。修=白名单 `safeModelArg`(`/^[\w.:\-\[\]/]{1,128}$/`,不匹配→不传 --model 回落默认)。凡"用户可控字符串当 spawn 参数且 Win 可能经 cmd.exe"都要白名单;prompt/长文本一律 stdin 喂。
+
+**node-pty 原生模块 ABI 拖垮整个后端**(v0.2.53,记忆 [[native-module-abi-crashes-backend]]):另一台 Win 装 exe/msi 打不开,反复 `backend on port 6677/6678/6679/6680 did not accept connections`。根因:node-pty 是唯一原生模块,`.node` 按构建时 Node ABI 编译(CI Node 20,NODE_MODULE_VERSION 115),用户机跑任意版本系统 node(项目不打包 node),大版本不符→顶层静态 import 抛 `NODE_MODULE_VERSION mismatch`→整个后端加载即崩。修=惰性加载+容错(`await import('node-pty')` 包在首次调用处,失败只让该功能返错;commit 4e9b4dd / v0.2.53)。**症状区分**:首端口即停=缺 node/缺入口(`find_node()` None→循环首轮 `else{break}`);逐端口反复=server 崩没绑端口。排查先要 `%USERPROFILE%\.claude-gui\server.log`(崩因)+ `tauri-startup.log`。
+
+**Tauri v2 Windows resource_dir() 的 verbatim 前缀崩 node**(v0.2.55,非 C: 盘打不开的真因):`app.path().resource_dir()` 在 Win 返回**扩展长度路径 `\\?\D:\...`**(网络盘 `\\?\UNC\...`),当 node 入口脚本参数→node 处理不了 `\\?\`→退化对裸盘符 `D:` 做 lstat→`EISDIR: illegal operation on a directory, lstat 'D:'`(server.log 实锤,node 解析入口就崩)。装 C: 盘/dev 正常。修=lib.rs `strip_verbatim_prefix()`(`\\?\UNC\`→`\\`、`\\?\`→剥掉、POSIX 原样),spawn_backend 剥前缀再传 node;cargo test 覆盖 C/D/E/G+UNC+Mac(node 崩点在 resolveMainPath;Rust 标准做法是 dunce crate,本项目手写 strip 免加依赖)。**教训**:曾据症状(逐端口失败)猜 node-pty ABI 白发 v0.2.53;"换盘符打不开"必须先拿 server.log 再动手,不据症状猜。凡把 resource_dir 路径交外部进程当参数都要剥 `\\?\`。
+
+**PowerShell irm 不读 HTTP_PROXY 环境变量**(v0.2.63):Win 一键装 claude 极慢——`.bat` 里 `set HTTP_PROXY` 再 `irm https://claude.ai/install.ps1 | iex`,但 **PS 5.1 的 Invoke-RestMethod/WebRequest 只认 WinINET 系统代理、不读 HTTP_PROXY env**(curl/npm 读)。修:检测到本机代理时 PS 命令内显式 `[System.Net.WebRequest]::DefaultWebProxy=New-Object System.Net.WebProxy($p); $env:HTTP_PROXY=$p; $env:HTTPS_PROXY=$p`;并加 npm 装法(`npm i -g @anthropic-ai/claude-code`,认 env 代理)。规则:墙内 Win 下载命令注代理——curl/npm/原生二进制→HTTP_PROXY env 够;PS irm/iwr(5.1)→ 必须 .NET DefaultWebProxy 或 `-Proxy`。uv 安装同坑(`irm https://astral.sh/uv/install.ps1`,v0.2.63)。
+
+**Windows PATH 是安装前旧快照 → "装了要重启才认"**(v0.2.146):安装器写 `HKCU\Environment\Path`,但已运行的 Explorer/GUI 持旧 PATH,子进程继承旧的→where claude 看不到。解法=PowerShell 读注册表实时 PATH(`[Environment]::GetEnvironmentVariable('Path','User'/'Machine')`)逐目录找,无需重启。抽 `winLivePathDirs()` 供 claude/py/git/uv 检测复用(v0.2.147);修好一个平台根因要 grep 同类检测点一起补。写用户 PATH 用 `[Environment]::SetEnvironmentVariable('Path',...,'User')`(自动广播 WM_SETTINGCHANGE),**别用 setx**(>1024 字符静默截断毁 PATH)。PS 5.1 管道过滤结果要 `@()` 包裹才有 `.Count`。
+
+**NSIS 提权安装器 node 检测盲区**(v0.2.98):安装器是管理员进程,`where node` 读系统+管理员 PATH,读不到当前登录用户 PATH;per-user 官方安装(`%LOCALAPPDATA%\Programs\nodejs`)是最大盲区→"装时报没装、运行时用户身份又检测到"。修:installer-hooks.nsh 补 per-user/volta/scoop 固定候选(与 lib.rs `windows_node_candidates` 同清单)。
+
+**winget 不是所有 Windows 都有**(v0.2.147):LTSC/Server/旧 Win10/企业锁机可能没 App Installer,裸 `winget install` 卡死。命令加探测兜底 `where winget >nul 2>nul & if errorlevel 1 (start 官方下载页) else (winget install)`。node/python/git 中招,uv/claude 本就不靠 winget。npm 版被列两条重复项:npm shim(`<prefix>\claude.cmd`)是包装脚本非软链,与包内二进制 realpath 各是自己→去重键改【逻辑安装身份】(包内二进制正则回前缀、shim 用所在目录)。
+
+**Win spawn 裸 npx/uvx/uv 必 ENOENT**(v0.2 CA 审查):`spawn(cmd,args)` 不带 `shell:true` 无法解析 .cmd。probeStdioStderr 修 `shell: process.platform==='win32'`(同"execFile .cmd 要 cmd.exe /c"的不同写法)。**裸 child.kill 留孤儿**:`spawn('uvx ...')` fork 出真 server 子进程(uv→python、npx→node),`child.kill('SIGKILL')` 只杀壳、孙进程成孤儿。修 `spawn(...,{detached:true})` + `process.kill(-child.pid,'SIGKILL')` 杀整组,Win 用 `taskkill /pid X /T /F`。mcp login 超时在 Win 只杀 cmd.exe 留 claude 孤儿占死 OAuth 端口→自管超时 `taskkill /T`(v0.2.182)。
+
+**Windows 后端 spawn 继承坏 stdio**(v0.2.13,记忆 [[windows-backend-spawn-inherited-stdio]]):Tauri(GUI 无 console)spawn node 继承无效 stdout/stderr→node 写 banner 阻塞→server 卡死;单独 node 跑正常=铁证。修:重定向 stdout→null / stderr→server.log。
+
+**路径分隔符显示**(记忆 [[windows-path-separator-display]]):双端 dogfood,取文件夹/文件名按 `[/\\]` 切;只按 `/` 切会让反斜杠整条当最后一段(Win 显示全路径根因)。gitShadow ls-tree 中文名要 `-c core.quotepath=off`(否则 `\346..` 转义→includes 恒 false 回滚静默失效)。
+
+**NUL 文件真凶=settings.json 的 hook 用 cmd 风格 `>/dev/null`**(2026-06-16,非 GUI 专属):`findstr /i "nul" %USERPROFILE%\.claude\settings.json` → claude-pets 5 个 hook 尾部 `>/dev/null 2>&1`(cmd 风格),claude 在 Win 用 Git Bash 跑 hook→`>NUL` 落盘成 NUL 文件;`UserPromptSubmit` hook 使"新会话发首条即触发"。Mac settings 用 `/dev/null`(对),Win 被写成 `>NUL`(错);原生 claude 在 Win 同样中招。根治=改回 `>/dev/null 2>&1` 或删 hook(属用户配置,不在 GUI 仓)。**方法教训**:用户报"GUI 才有 X"先要诊断输出定位(`where claude`/`where bash`/`CLAUDE_CODE_GIT_BASH_PATH` 是否设置/`findstr nul settings.json`),别在 GUI 代码硬找——绕了 4 圈,最后一条 `findstr` 揪出来。
+
+### 2026-08-26 Tauri Windows 产物布局真机取证(照 mac 类推 = 三处全错)
+- 事故:npm 通道在 Windows 上**从发布起就不可用**。用户实报 `added 2 packages` → `正在安装 CC-GUI v0.2.354…` → `安装失败:安装器已退出但没找到安装目录`。而注册表显示应用**已装好**(DisplayVersion 0.2.354),只是启动器复核时找错了地方。
+- 真机取证 `%LOCALAPPDATA%\CC-GUI\`:
+  ```
+  _up_\package.json      ← 资源直接展开在安装根,**没有** resources\ 这一层
+  claude-gui.exe         ← 主程序名 = Cargo 包名,**不是** productName
+  uninstall.exe
+  ```
+- 三处照 mac 类推的错误假设(全部写在 npm/lib/main.js 的 Windows 分支):
+  1. 版本文件写成 `resources\_up_\package.json` —— `Contents/Resources/` 是 **mac 才有**的层级;Windows 的 resources 直接落安装根。→ 永远读不到已装版本,装完必报"没找到安装目录"。
+  2. 主程序按 productName 拼 `CC-GUI.exe` —— **未设 `mainBinaryName` 时 Tauri 用 Cargo 包名做二进制名**(`src-tauri/Cargo.toml` 的 `name = claude-gui`),productName 只决定安装目录与显示名。mac 侧同理(`Contents/MacOS/claude-gui`),但本机用 `open -a <app>` 打开整包,**正好绕过这个名字**,所以 mac 一直没暴露。
+  3. `tasklist /FI "IMAGENAME eq CC-GUI.exe"` 同错 → 运行检测恒判"没在跑",会在用户正用着时让 NSIS 强杀。
+- 连带既有 bug:`installer-hooks.nsh` 装前主杀 `CC-GUI.exe` / `Claude GUI.exe`,**两个名字机器上从来不存在**(Cargo 包名自 918cdcd 建壳起没改过),整条主杀一直空转 —— 覆盖安装报"无法 write"时真正生效的只有按 CommandLine 匹配 node 的兜底那步。
+- **测试为什么全绿**:133 个用例锁的全是"我以为的行为"——断言直接抄实现里的字符串(`'/FI IMAGENAME eq CC-GUI.exe /NH'`)。这种测试只能验证**代码没变**,验证不了**代码对**。已改成从 `Cargo.toml` / `tauri.conf.json` **推导**主程序名,谁改了包名或补了 mainBinaryName 立刻红。
+- 铁律:①跨平台分支只要没在该平台真机跑过,就当它是坏的,不管测试多绿;②断言里的常量凡能从事实源(配置/构建产物/上游文档)推导的,一律推导,别抄实现;③写 Windows 分支时先问"这条是不是从 mac 类推的"。
+
+### 2026-09-01 Windows PowerShell 默认拦 npx(.ps1 启动器被执行策略禁止)
+- 现象:全新 Windows 只装 Node,PowerShell 里跑 `npx @wsxwj123/cc-gui` 报「无法加载文件 npx.ps1,因为在此系统上禁止运行脚本」。npx 在 Windows 有 npx.cmd/npx.ps1/npx 三个启动器,PowerShell 优先 .ps1,默认执行策略 Restricted 全拦。任何 npx 都中招,非本包问题。
+- 解法(不改系统设置):`npx.cmd @wsxwj123/cc-gui`,或换 cmd.exe 跑原命令。别教用户 Set-ExecutionPolicy。
+- 产品侧:README(中/英各 3 处)与 version-check.js:346 的 npmUpgradeCommand 都只给 `npx …` 形态,Windows 用户照抄进 PowerShell 必撞;应给 Windows 写 `npx.cmd` 形态或并列注明。
+- 补记:审计结论——PowerShell 执行策略只拦 `.ps1` **文件**,`powershell -Command "…"` 内联与 `irm … | iex` 不受影响;GUI 内所有 Windows 子进程(cmd.exe /c npm、shell:true=cmd、-Command 内联、-File 处已带 -ExecutionPolicy Bypass)全部免疫,该坑只在"用户手敲 npx"这一条路上。
+- **更正**:上面"-Command 内联不受影响"只对内联命令**本身**成立;内联里若再调用 `npm`/`npx`/`claude` 这类带 .ps1 shim 的命令,PowerShell 仍会挑 .ps1 并被 Restricted 拦(version-check.js npm 分支的 psAppend 就是)。规矩:**任何 powershell 调用一律带 `-ExecutionPolicy Bypass`,内联里调 npm 系命令一律写 `npm.cmd`**;审计"是否受执行策略影响"要看整条命令链的每一层,不能只看最外层外壳。我的第一次审计因此漏判,用户真机打脸。
+
+### 2026-09-03 r110:Windows 经 cmd.exe 起 claude.cmd 时参数里的 `<` 被当重定向
+- 现象:Windows npm 装的 claude(claude.cmd)在 GUI 添加 paper-search 报 `The system cannot find the file specified.` 且无提示;原生安装器(claude.exe)用户不报。
+- 根因:`claudeExecSpec`/`claudeSpawn` 用 `spawn('cmd.exe',['/c',bin,...args])`,Node/libuv 只给含空格或引号的参数加引号,`mcp<2` 裸露进 cmd 命令行 → `<2` 变成"从文件 2 读 stdin" → cmd 自己报错,claude 未运行,GUI 把 stderr 原文抛出(不是 ENOENT,所以"找不到命令"的提示永远不触发)。
+- 教训:①凡是 `cmd.exe /c <批处理> <参数>` 的拼法,参数只要可能含 `<>|&^%` 就必须走 verbatim 引号(每 token 加引号、内嵌引号翻倍、外层再套一对、`/d /s /c` + `windowsVerbatimArguments:true`);r108 只修了 MCP 探测那条路,漏了 claude.cmd 这条 → 修同类问题要 grep 全仓 `'cmd.exe'` 所有拼法一次改完。②"The system cannot find the file specified." 精确原文出自 cmd.exe 的重定向失败 / Rust os error 2,不是 Node ENOENT(那是 `spawn xxx ENOENT`)——看到这句先怀疑 cmd 元字符或 Rust 工具,别按"命令不在 PATH"修。③临时绕过:命令里 `mcp<2` 改 `mcp~=1.0`。
+
+### 2026-09-03 r110:改共用函数返回形状时,"回滚到原样"的消费者可能反而被弄坏
+- 我让作者把 remote-control.js 回滚到 master 原样,但它消费的 `claudeCommand` 返回形状已被本轮改成 verbatim(cmd.exe /d /s /c "整行"),node-pty 对 string[] 会二次转义引号 → 原样代码在新形状下必坏(比修前更糟)。作者第一版的 pty 特判其实是对的。
+- 规则:改一个共用 helper 的返回形状/语义时,消费者清单里每一项都要按"新形状下还对不对"逐个判,不能按"这文件跟本 bug 无关就回滚"处理;特别留意不走 Node spawn 的消费者(node-pty、execa、shell 字符串拼接)——它们对 `windowsVerbatimArguments` 与引号的处理规则不同。
+
+### 2026-09-03 r111:Windows 命令行引号的反斜杠规则(CRT)
+- 给 token 加引号时,结尾的 `\` 会和收尾引号组成 `\"`,cmd 层不管(引号奇偶不变),但目标程序(node.exe 的 CRT / CommandLineToArgvW)把 `\"` 当转义引号 → 闭合失效,后面的参数全并进同一个字符串;旧写法(libuv 不给无空格参数加引号)反而没事,所以这是 verbatim 引号引入的回归。
+- 规则:引号函数必须把**结尾的连续反斜杠翻倍**(`replace(/(\\+)$/,'$1$1')`),中间的反斜杠不动;写 Windows 引号函数时按 execa/npm 的 `windowsVerbatimArguments` 参考实现逐条对照(引号翻倍 + 尾反斜杠翻倍 + 外层引号),别只做其中一半。
+
+### 2026-09-04 Windows 坑目录已迁入技能 platform-compat-review
+- 本文件 Windows 相关条目(移植三件套、cmd.exe 引号、npm 壳、PATH 快照、PowerShell、产物布局、WebView2 引擎分裂等)已合并整理为 `~/.claude/skills/platform-compat-review/references/checkpoints.md`(W-A1…W-F6,含扫描判据与真机验证项),附 `scripts/scan.mjs`(静态扫描)与 `scripts/crt-roundtrip.mjs`(cmd/CRT 引号往返)。以后新坑先写进技能,这里只留一行指针。
+- 首次全树扫描基线(0.2.375,主树):必修 24(powershell 调用缺 -ExecutionPolicy Bypass ×9、cmd.exe /c 旧拼法 ×12(npm 探测/cmd start/where node、version-check shell:true)、wmic 回落 ×2、session-reader /tmp ×1),提醒 140;这些是既有债,不是新回归,下轮按 W-A15/W-A2 分批清。
+
+---
+
+## WKWebView · 前端渲染 · 移动端
+
+**Tauri 禁用 window.confirm/alert**(记忆 [[tauri-no-native-confirm-alert]]):WKWebView/WebView2 禁用原生 `window.confirm`(返回 falsy)/`alert`(no-op)→破坏性操作"点了没反应"。一律用 `client/src/utils/confirmDialog.jsx` 的 `await confirmDialog(msg,{danger})`(删会话、删 agent 都栽过)。
+
+**自挂载 modal 并发=同位重叠 + 全局键盘监听互踩**(2026-07-09):promise-based 自挂载弹窗每次独立 createRoot+append,并发时①全屏遮罩同位重叠只见最上一个;②每个实例 `document.addEventListener('keydown')`→按一次 Esc 所有实例同时 `resolve(false)`,底下没看到的通知丢。修=模块级 promise 链队列化(`_queue.then(()=>show())`),同一时刻只挂一个。任何"自挂载到 body 的单例式 UI"都要考虑并发,要么队列化要么单例复用。
+
+**模态"整卡滚 + sticky footer"在 WKWebView/WebView2 失效**(v0.2.147,记忆 [[sticky-fails-under-transform-modal-flex-column]]):animate-glass-rise 的 glassRise 动画以 `scale(1)+fill:both` 收尾让卡片永久带 transform→带 transform 滚动容器内 `sticky bottom-0` 哑→长表单滚不到"添加"按钮。根治=flex 列三段(头/底 `shrink-0` + 正文 `flex-1 min-h-0 overflow-y-auto`)。所有 `.glass-popover` 模态潜在踩;桌面 webview≠Chrome 别拿 Chrome 行为假设。
+
+**WKWebView 吞掉右键**(记忆 [[wkwebview-no-contextmenu-on-userselect-none]]):macOS WKWebView 原生层吞掉整个次级点击(contextmenu+mousedown button2 都不进 DOM),文件树右键"没反应"。真解=加左键 `⋮` 按钮开同一菜单,别指望右键;preview(Chromium)复现不了,别拿 Chrome 行为下结论。
+⚠️ **本条已被 2026-07-17 翻案**(见下节「WKWebView 原生吞右键」翻案条):同版 wry 三层最小复现证明右键四事件全进 DOM;真凶是自家手势时序 bug(mousedown 兜底开菜单 → 同一手势的 contextmenu 落在新遮罩上被关)。⋮ 按钮保留为全平台兜底;排查原生层指控必须先钉死同版最小复现、剥离 stale 产物。
+
+**React hooks 不能放早返回之后**(2026-06-16,白屏 P0):为"性能优化"把值改 `useMemo` 但放在 SessionDetail 早返回 `if(loading&&tabIndex===0) return` 之后→切会话时 loading 切换那帧跳过该 hook→`Rendered fewer hooks than expected`→整页白屏。dev HMR 会"恢复"白屏掩盖,生产不会。hooks 一律放组件顶部(所有早返回之前);要 memo 早返回后的值就上移或不 memo。
+
+**Zustand 选择器新引用→白屏**(记忆 [[zustand-selector-new-ref-185]]):选择器内 `|| []` 返回新引用→React #185 整页白屏;默认值移到选择器外复用 EMPTY_ARRAY。ModelSelector `currentModel` 返回字符串(基元)无此风险。ChatInput 是 per-pane 多实例,读 cwd/projectHash 用 `useStore.getState()` 快照(优先匹配自己 sessionId 的 paneSessions),不能用返回新对象的 selector(v0.2.169)。
+
+**production header 消失/顶栏不渲染 = 损坏或缓存的旧 bundle**(2026-05-29,记忆 [[bundle-version-handshake]]):playwright headless 全新无缓存访问 6677→header 完整零错误→判定客户端加载了残缺 bundle(React 树不全→header 不渲染+事件未挂→"点了没反应")。诊断手段:headless 访问目标端口对比 dev,排除"源码 bug" vs "客户端缓存"。__BUILD_VERSION__ 与 /api/health 握手 + `?b=` buster(v0.1.84)。
+
+**CSS zoom 缩放坑**:①`zoom>1` + 根容器 `height:100vh`→底部 UI 溢出视口(vh 不受 zoom 影响),修=根容器 `calc(100dvh/var(--ui-zoom))`+`calc(100vw/var(--ui-zoom))`。②iOS Safari 下 vw/vh 在 zoom 上下文解析时机使补偿与 zoom 完全抵消→调字体"毫无变化"(Chromium 正常),修=根容器改 `position:fixed; inset:0`(零 inset 不被 zoom 缩放)。③getBoundingClientRect 返回视觉坐标(已×zoom),fixed/SVG 在 zoom 上下文会被再×zoom→必须 ÷zoom 还原;zoom 直读 `parseFloat(document.documentElement.style.zoom)||1`,别用 overlay rect 估算(v0.2.107-117)。
+
+**移动端 overflow/hover/软键盘**:①`overflow-x-auto` 横滚条形成裁剪上下文,裁掉子控件 `absolute` 下拉→手机"点了没反应",修=`flex-wrap` 或宽弹窗 `max-md:fixed`。②`opacity-0 group-hover:opacity-100` 手机永不显示,改 `opacity-100 md:opacity-0 md:group-hover:opacity-100`。③软键盘遮输入框:`window.visualViewport` 监听,`kb=innerHeight-vv.height-vv.offsetTop`,根容器 `position:fixed; bottom:var(--kb)`;`bottom` inset 会被 html zoom 放大需 `kb/uiFontScale` 预除。④手机头部信息过载用 `max-md:hidden` 砍非核心统计。
+
+**手机端多 pane 架构遗留三坑**(2026-05-30):①splitMode 路由陷阱:`splitMode=paneCount>1`,手机从 localStorage 读到 paneCount>1,只渲染 pane 0 但 SessionList.handleSelect 把选中塞进隐藏的 `paneSessions[activeTabIndex]` 而非 selectedSession→选会话/新建"没反应";修=手机挂载 effect 强制 `setPaneCount(1)`,排查表象 bug 前先确认全局模式状态。②paneMessages vs legacy messages:新建会话只 `setState({messages:[]})` 清 legacy 字段,UI 读的是 `paneMessages[tabIndex]`→旧消息不消失;修=新建入口补 `setPaneMessages(0,[])`,同名/相似字段要确认 UI 实际读哪个。③button 嵌套 button:会话行外层 `<button>` 内嵌操作 `<button>`,React 19 刷屏 hydration 报错;外层改 `<div role="button" tabIndex onKeyDown>`。
+
+**EnvCheckPanel 过渡态卡死**(v0.2.147):安装失败后卡在"已开终端"再点不了安装——`launched[key]` 一点即永久 true 且优先于 ok 判断。修=check() 拉新结果后 `setLaunched({})`;过渡态标记必须在"重新拉权威状态"时清掉。
+
+**Tailwind v4 自动内容扫描跳过 .gitignore 文件**(2026-05-30):gitignore 的本地组件(`*.local.jsx`)独有的 Tailwind 类完全不生效(元素退回 `position:fixed;top:0;left:0` 挤左上角),共用类正常→极具迷惑性。根因:Tailwind v4 自动 content detection 默认遵守 .gitignore。验证:注入探针 `<div class="left-3 bottom-20 w-10">` 读 computedStyle,`left/width` 为 auto 即确认未生成。修:本地组件改**内联样式 + 主题 CSS 变量**(`var(--color-canvas)`),不依赖扫描。
+
+**preview 验证坑**:①viewport 默认缩成窄条(~50px)→响应式隐藏顶栏(顶栏按钮全 MISSING),必须 `preview_resize {width:1320,height:860}`(app min_inner_size 900x600)再查 DOM。②顶栏功能按钮只在选中会话时渲染,preview reload 后无会话→data-tour 元素为 0。③console/server log buffer **跨 reload 不清空**,旧报错一直在→判"修复是否生效"要查当前 DOM(元素数),别只看 console。④Vite HMR 抓到"开标签已改闭标签未改"瞬时报 "Failed to reload"→看错误**总数是否增长**,干净验证就 stop+start dev server。⑤preview 自带截图/inspect 不需 computer-use 授权,验对齐/坐标首选(换官方 SVG logo 对齐用 boundingBox 算中心 y)。⑥Chromium 预览加载不出项目树、开不了会话→驱动不了"流式中途切会话"等真实态,只能逻辑推演+断言。⑦深层嵌套下拉里的表单,preview_eval 合成 MouseEvent 触发不了 React 事件委托的 onClick(toggle 是 DIV)→打不开就靠"后端 curl 实测+vite build 过+逻辑审查"组合判断,别死磕 preview。
+
+**process.platform 在浏览器未定义**(v0.2.145):前端 JSX 写 `process.platform` ReferenceError 白屏(Vite 不 polyfill)。平台文案用中性占位或走后端 serverPlatform 字段。
+
+**MarkdownRenderer 复用等比缩小 + 计划"已批准"判据两代**(v0.2.170):顶层写死 `text-[15px]` 基准、标题用 em 相对字号→小面板复用容器加 `[&_.markdown-content]:text-[12.5px]` 后代选择器压基准即整套等比缩小(复合选择器 specificity 胜单类)。计划"已批准"判据有两代:SDK 引擎批准=allow→ExitPlanMode result 非错误;旧 hook 路径=isError=true 但 result 文案含"用户已批准此计划"(TurnBubble O1 同款)——取数逻辑必须两个都认,只查 isError 会漏掉全部历史会话。返回 null 的子组件若被父级包外壳,隐藏后留空边框壳→外壳该组件自带(standalone prop)。引用目标项目不存在的 CSS 变量(如 `var(--ease-out)`)会让**整条 animation 声明失效**(动画完全不动非降级),移植要连依赖变量一起搬(v0.2.98)。
+
+**导引/悬停注解专题(v0.2.107-120,8 版返工)**:①**元教训**:用户反复不满同一东西,先停下确认"我理解的需求对不对"别埋头改实现(来回 8 版根子=我从头理解错:用户要"悬停按钮 2s 弹注解"我一直改"点问号的导引 overlay")。②pointer-events 坑:全屏遮罩带 onClick/`pointer-events:auto` 截走整屏鼠标事件→盖在按钮上的 hover 层收不到 mouseenter;正解遮罩 `pointer-events:none`(纯视觉)、关闭放底层 div、hover 捕获层 `pointer-events:auto` 叠按钮位。③坏了先回退单文件:`git checkout <验证过的commit> -- 该文件`(先 `git diff <commit>..HEAD -- . ':(exclude)该文件'` 确认其间没别的功能改动)。④**用户 v0.2.120 否决常驻悬停 tooltip**("太碍事了")→删 GlobalTooltip + STEP_INFO,只留点问号逐步高亮导引(GuideTour.jsx,54a8224 稳定版)。悬停常驻注解这类"贴心"功能用户嫌打扰,别自作主张加。
+
+### 2026-07-15 第222轮卡点5真机打回:四类"dev复现不了"的WKWebView/zoom坑(靠项目内差分钉根因)
+教训总纲:**dev预览是Chromium,真机是WKWebView(mac)/WebView2(win),行为不同。dev复现不了的真机bug,根因必须靠"项目内能用的vs不能用的差分"或真机坐实,禁止拿Chromium行为推断。**本轮先在⋮菜单栽跟头(自信transform陷阱根因、dev验不了就发版,真机打脸),后面全靠差分定死。
+1. **portal的fixed菜单坐标必须÷--ui-zoom**:全app默认CSS zoom=1.2。`e.clientX/getBoundingClientRect`是视觉px(已×zoom),portal到body的fixed/absolute菜单left/top按布局px解释→坐标飞出屏幕。检查点/上下文/模型菜单早都÷z了,文件树⋮漏了→真机点⋮"没反应"(其实菜单在屏外)。修:`clientX/z`+`innerWidth/z-200`。(FileExplorerPanel onCtx)
+2. **display:flex加在`<summary>`上→WKWebView禁用原生`<details>`toggle**:WebKit已知行为,summary的display非list-item(flex/grid/block)就不再当可点击披露控件,点了不展开;Chromium无此限制。差分铁证:全项目8处details只有思考那处summary带flex、也只有它点不开。修:改受控useState展开(像ToolCallCard),别赌原生details。
+3. **全屏浮层用裸vw/vh→WebView2下溢出、关闭键被裁**:Chromium内核vw/vh不随zoom折算(WKWebView已预折算),叠加zoom1.2把92vh撑到110%视口→垂直居中顶栏(关闭键)出屏,三条退出路径全断只能重启。Mac正常故没早发现。修:vw/vh→%(相对fixed inset-0背景层,两引擎一致)+关闭键锚背景层视口角(非缩放卡片内,照ImageLightbox)+Esc改capture。App根布局早用--app-w/h规避,全屏浮层是漏网。
+
+### 2026-07-17 · "WKWebView 原生吞右键"翻案(两轮"实测"都被混淆变量骗了)
+- **旧结论错在哪**:v0.2.182/183 两次实测"右键事件不进 DOM"就定性"macOS WKWebView 原生层吞次级点击",但两次都没剥离两个混淆变量:①stale 产物/插桩没进包(本项目同型事故见"改了还复发=先查改动进没进HEAD/产物"条);②自家手势时序 bug——mousedown(button2) 兜底开菜单后,同一手势的 contextmenu 落在刚挂的全屏遮罩上被 onContextMenu 立即关掉,"开了又关"肉眼=没反应(f2f7a8b 修)。
+- **翻案证据**:Cargo.lock 自 v0.2.117 起 wry 0.55.1/tao 0.35.3 未变(出bug版本=现版本);wry 0.55.1 源码无 rightMouseDown override;三层最小复现(裸 WKWebView / 同版 wry+tao / 同版 wry 加载真实 6677 前端)右键四事件全进 DOM,user-select:none 也进("不发 contextmenu"是 iOS 资料,macOS 不适用)。
+- **通用教训**:指控"事件在原生层被吞"之前,必须用**同版本依赖的最小复现**钉死,并确认被测产物是当前代码;否则一个自家 bug + 一次 stale 构建就能伪造出"平台限制",让功能被错误放弃一年。
+
+### 2026-07-20 · iOS Safari 双坑:输入框<16px 聚焦自动放大不回退 + 覆盖层高度别依赖测量值(0.2.256)
+- **症状鉴别**:同一 iPhone,Chrome 正常、Safari 登录后整页放大顶栏消失——iOS 上两者同 WebKit 内核,差异在壳:**Safari 对 font-size<16px 的输入框聚焦自动放大(blur 不回退),iOS Chrome 抑制了它**。"仅 Safari 复现"是这坑的指纹。
+- **修法**:手机断点内 `input,textarea,select{font-size:max(16px,calc(16px/var(--ui-zoom,1)))!important}`——计算值与 ×zoom 渲染值双双≥16,任何字号档不触发;禁走 maximum-scale=1(损无障碍)。手机输入框永远别写 <16px 字号。
+- **覆盖层几何**:全高覆盖层(抽屉/遮罩)用 `top:0;bottom:0` 天然贴边,**不要用 height:calc(var(--app-h)−…) 依赖 JS 测量值**——Safari innerHeight 随工具栏伸缩/放大态变化,测量时机不对就矮一截;--kb 键盘高度用 padding-bottom 抬内容(加在滚动区之外的容器上),而不是砍高度。--app-h 只该用于"需要 zoom 折算的尺寸上限",不该用于"贴边"。
+
+### 2026-08-17 内嵌浏览器面板冒烟的首帧视口坑
+- 现象:preview面板首帧outerWidth≈400px(<768)后才应用1280仿真,应用的isMobile收起effect在首帧命中→cgui-sidebar-collapsed被持久化true→之后怎么刷新侧栏都是收起,看着像"新面板没渲染/fetchProjects没跑"。
+- 排查套路:先curl后端端点(/api/projects数量)分清前后端,再javascript_tool查{aside存在,localStorage值,innerWidth/outerWidth}——outerWidth与innerWidth不一致即面板仿真时序问题。
+- 预防:用面板冒烟GUI前先resize_window desktop preset再首载,或首载后清cgui-sidebar-collapsed重进。存量健壮性问题(一帧窄视口即永久持久化)已挂账。
+
+### 2026-08-17 跨API几何比值=引擎相关假设;归一化用无量纲分数法
+- 现象:回合刻度zoom修复(⑬)用 `raw*(clientHeight/rect.height)` 估1/zoom,node单测全绿,真机WKWebView大字体档回归(命中错位+鱼眼消失=中心跑出条外)。根因:clientHeight(Element布局度量)与rect.height(client坐标系)是两个API家族,zoom下的缩放口径引擎各异——比值语义本身就是引擎假设,node测试永远造不出这种分歧。
+- 规则:凡"指针事件坐标→本地布局坐标"的归一化,禁止跨API族做比值;唯一引擎无关式=同一次getBoundingClientRect内取无量纲分数 `fraction=(clientY-rect.top)/rect.height`(分子分母同坐标系,zoom约掉)再乘自家布局态高度。单测要构造两种对立引擎语义矩阵(缩放版/不缩放版)证明式子在两者下都不漂,否则测试只是复述实现。
+- 教训链:这是同一处的第二次真机打回(第一次⑬比值法过了判官+单测)。"数学上等价"的两个式子在真机可以不等价,因为等价性依赖的前提(两API同缩放口径)本身是假的。
+
+### 2026-08-18 T2 皮肤改布局尺寸必须消费 --app-h 口径,禁止自算 dvh
+- 现象:QQ2008 皮肤(dsh qq98 移植)做"悬浮窗口"效果时用 `--app-h: calc(100dvh - 66px)` 覆盖,zoom=1(默认字体)看着正常,大字体档(html zoom=1.2)下应用溢出视口、桌面边距消失。
+- 根因:App 的官方口径是 JS 算好的 zoom 不变量 px(`--app-h = innerHeight/zoom`,App.jsx:9900),dvh/vw 在 html zoom 语境下不折算 → 静态 CSS 换算必漂(与 p5-1 刻度回归同族:zoom 语境下的单位/API 语义陷阱)。
+- 修法:皮肤 client.js 复刻同口径写 body 作用域(resize+MutationObserver 跟 html style 的 zoom 变化,卸载器清理);CSS 只 `var(--app-h)` 消费。注意 CSS 自定义属性不能自引用继承值(`--app-h: calc(var(--app-h) - 66px)` = 循环失效),必须 JS 间接。
+- 待办:skinPrompt.js 的 AI 提示词生成器应写明 --app-h/--app-w 语义与这条禁令,否则用户 AI 生成的皮肤会复踩。
+
+### 2026-08-19 0.2.296全端渲染崩溃:useMemo deps数组也是渲染期求值,单测+build防不住TDZ
+- 现象:r13折叠树装机后全端崩(WebKit"Cannot access uninitialized variable"/Chromium"Cannot access 'Oe' before initialization"),侧栏未渲染的端点展开才崩、渲染侧栏的开屏即崩。
+- 根因:flatSessions useMemo(约337行)的回调**和deps数组**都在渲染时同步求值,引用了声明在556行的pendingIds=组件体内声明前使用(TDZ)。120单测(node不渲染)+build:local(不执行)+判官静态审全绿漏过;我装机前也没做一次真渲染冒烟(QQ皮肤轮做了、296轮省了)。
+- 修法:声明块下移至依赖之后+原位勿回移注释+t6源码声明顺序回归钉(indexOf比较)。
+- 规则(立即生效):①每次bump装机前必须浏览器面板打开6677截图冒烟一次主视图(零额度30秒),渲染类改动加载崩=当场拦;②组件体大重构(挪块/收敛)后,grep检查所有useMemo/useEffect/直接表达式引用的组件内const是否声明在前——回调延迟执行(useCallback/事件处理器)安全,deps数组永远不安全;③"Cannot access uninitialized variable"=WebKit的TDZ,先查声明顺序,与既有verify-real-send教训同族。
+
+### 2026-08-19 zoom 下的坐标口径:offsetY=视觉像素;换算一律用两点标定,别信任何单一 API 假设
+- 事故链(三版):p5-1 比值法(clientHeight/rect.height 跨API)→真机漂;p2-12 改 offsetY→更漂(低 20%);p2-14 两点标定→正确。
+- **引擎实证**(Playwright webkit+chromium 同一探针页,html zoom=1.2,元素 offsetHeight=400):clientY=320, rect.top=120, rect.height=480, **offsetY=200**, 真值(布局px)=166.67。结论:①getBoundingClientRect 与 clientY 都是视觉像素(两内核一致);②offsetHeight 是布局像素;③**offsetY 也是视觉像素**(不是元素本地布局坐标,这是最反直觉的一条)。
+- 规则:凡"屏幕坐标→自家布局坐标"的换算,放两枚与目标同定位方式的隐形探针实测 origin/scale(两点标定),按实测比例反算。这条同样适用于 position:fixed 弹层定位(p5-2 已用同法根治「菜单挡标题/不对齐」)。
+- 排查纪律:①先做**引擎最小复现页**再改代码——本轮前两版都是靠推理改的,连错两回;②浏览器面板**后台标签不跑 requestAnimationFrame**,基于 hover 的实测会静默失效(我据此误判过一次"没触发=没变形");③测 6702 前先确认端口无残留服务(check-permission-hook-bridge 要求 6702 无人监听,我留着测试服务器导致假失败)。
+
+### 2026-08-19 刻度四版终案:两内核的 zoom 坐标口径是"混合"的;真机取证必须用 computer-use
+- 我连错三版(比值法/offsetY/纯 rect 探针标定),每版都在 Chromium 里"验证通过",装机到 WKWebView 全错。第四版靠 **computer-use 在真实 App 里两点悬停+截图量距** 才定案。
+- **定案事实**(真机实测:鼠标 250→高亮 296、450→高亮 530,偏差比 1.17≈zoom):
+  · `getBoundingClientRect`:WebKit 返回**布局坐标(未缩放)**,Chromium 返回**视觉坐标(已缩放)**;
+  · `MouseEvent.clientY`:**两内核都是视觉坐标**;
+  · `offsetY`:也是视觉坐标(两内核一致,p2-12 实证)。
+  → 任何"只在一个空间里标定"的做法在另一内核必差一个 zoom。
+- **通用式**:`localY = clientY/zoom − originRectTop × (span/spanRect)`,探针跨度自动区分内核语义(Chromium 跨度=span×zoom,WebKit 跨度=span)。两语义代入同一真值。
+- **流程铁律**(本轮最大教训):凡"指针坐标↔布局坐标"的跨内核问题,**禁止只用 Chromium 验证就装机交付**。必须其一:①computer-use 在真机 App 里量;②构造两内核对立语义的单测矩阵并明确写出各自口径。我因为省了这步,让用户当了四轮验证工具。
+
+### 2026-09-07 r115:两条用户实报 bug 与三个踩坑
+- **flex 行里"谁该让步"必须显式指定**:首页 composer 工具行放不下时,唯一没有 `shrink-0` 的元素被压成竖排(发送键被压到 24px、"发送"两字竖排盖住项目名)。规则:一行里的定宽控件全给 `shrink-0`,选一个"可让步"的元素给 `min-w-0`+`truncate`(通常是名字/路径)。只写 `max-w-[220px]` 不够——那是上限不是压缩许可,`min-w-0` 才让 truncate 在 flex 里生效。
+- **genui 的 `upstream/` 不许直接 import `utils/`**:`check-genui-host-primitives.mjs` 第 4 条机械拦截(断环护栏),宿主件必须经 `genui/host/` 转手。新加宿主适配(读主题、读缩放这类)一律落 `genui/host/`,`components/` 也可从那里取,不必再复制一份。
+- **造测试会话 jsonl 至少要 3 行**:`session-reader` 的 `listSessions` 有 `if (totalLines < 3) continue`,两行的会话文件在磁盘上存在、`/api/sessions/:id/messages` 也读得到,但**不出现在侧栏列表**里 —— 造沙箱会话时容易白查半天。
+- **无头点侧栏要等钩子不要等延时**:会话行的稳定钩子是 `data-cgui="session-row"`;首页 composer 里也有同名的项目文字,`getByText('claude gui')` 会匹配到多个。流程:关掉更新/引导提示条 → 点项目候选 → `waitFor('[data-cgui="session-row"]')` → 用 `locator(...).filter({hasText})` 选目标行。
+- **真机复现优先于隔离复现**:mermaid 被裁那条在隔离页面里怎么都复现不出来(隔离环境 zoom=1),必须在真实 app 页面里量才暴露。凡"用户看到、我复现不出来"的显示 bug,先把环境差异列出来逐个对齐(缩放、字体、CSS 层叠、容器宽度),别急着改代码。
+
+---
+
+## 会话与流式状态(串扰 / 门控 / 转后台 / 停止)
+
+**(2026-08-10/v0.2.283) reattach 闩锁复位口被轮询消耗=横幅卡死;fork 共享 tool_use.id 打穿全局 activeAgents**:①「一个 pid 只 reattach 一次」的闩锁,唯一复位口要求 backgroundPid「变 null 且没在流」的跳变,而该跳变在 reattach 流存活期间被 1.5s 轮询消耗→第二次复活起永不重连=「仍在后台工作中」横幅常驻+画面静止(只剩落盘刷新)。修=闩锁决策抽纯函数 nextReattachGuard(streamEnd: null|'done'|'takeover'|'dropped'),done 收尾清、takeover/掉线不清;横幅派生加 2s 门槛(`isStreaming||backgroundPid` 入队门口径逐字不动);服务端 4s 去抖源头刻意不动(调大会把"子代理真跑完"的回合锁死几十秒)。②fork 只重写 jsonl 顶层 sessionId,tool_use.id/uuid 原样复制→全局 activeAgents(按 tool_use.id 键)被分支会话直接命中**原会话还活着的 agent 对象**,停止路由 `agent.sessionId||paneSession` 又把原会话 id 排前=停到原会话。修=渲染层归属校验(turn.sessionId 经 TaskOwnerContext 供给,`agent.sessionId≠ownerSid` 当不存在→落既有"已停止"残骸显示)+停止路由 ownerSid 优先;fork 不建 worktree、共用 cwd、原文件字节不变。**规则:凡以 record.uuid / tool_use.id 当跨会话全局键的消费者,fork 后必串,一律要归属校验。**
+
+**(2026-07-12/v0.2.199) draft→init 迁移点必须铺满全部"按会话键的本地态"**:draft 升真 sid 时,init 绑定块(App.jsx `selIsOrigin` 分支)是**唯一**迁移点,任何按 `sessionQueueKey`/draft-key 存的本地态漏迁=键升级后成死数据。已迁清单:store 的 model/permission/effort/agent pin+messageQueue(migrateSessionKey)、流归属(setStreamOwner)、**chatMessages 的 ownerKey**(v0.2.199 补:漏了则 draft 里发的 /btw 气泡 init 后 visibleChat 键永不匹配=凭空消失)、**ChatInput 的 localStorage 草稿 `cgui-draft:<key>`**(v0.2.199 补:漏了则 init 瞬间清空输入框正打的下一条,`[draftKey]` effect 读新键必空)。**新增任何按会话键的本地态,必须同时加进这个迁移点**。同批审计(opus+sonnet 双审 v0.2.190–198,7 条全修)另修:权限 tab 现读磁盘应用单条 delta(快照写顶掉 CLI「始终允许」刚落的规则)、save() 补 res.ok(否则 `{error}` 被当 settings 快照连锁丢数据)、切会话同步清 backgroundPid/lastSeenPidRef(≤1.5s 窗口停止按钮杀错上个会话进程)、reconcile 保留 `interrupted && !known.has(tkey)`(停止场景"用户消息落盘≠整轮落盘")、HooksTab busy 禁增删;1M 自愈守卫位名 `oneMRetry`。方法论:大批改动后跑独立双审计互证——本批 7 条全是"修复未铺满同类路径"型,审计网是最后防线。
+
+**归属标记修串扰,别抑制产出**(v0.2.129→131→190→191→192,反复纠正):异步回调(SSE/setTimeout/WS)里"读当前选中 + 写操作"=串扰审查点,归属数据必须来自**发起时闭包**,绝不回落 `getLocalSession()`(记忆 [[async-callback-current-selection-leak]])。
+- **draftId 唯一标识**(v0.2.129):`draft-<projectHash>` 同项目共享→两个先后 draft 无法区分,init 回调"只判是 draft 就抢绑 event.session_id"→会话B首条串进A。修=draftId 唯一(6 处创建点)+ init 归属校验(发起于真会话永不抢绑)。**fable 审计抓到**(v0.2.131):draftId 只改了 grep `"draft: true"` 命中的 6 处,漏了 Cmd+N(setPaneSession 形态)和移动端(字段顺序不同)2 处——grep 单一字面模式找"所有创建点"必漏变体,应按行为多模式交叉。校验收紧严格 `===`(一边有一边无=拒绝绑定=安全失败,不回退宽松=复活 bug)。
+- **liveVisible 的 `streamOwnerKey==null` 子句**(v0.2 CQ):`liveVisible = streamOwnerKey==null || streamOwnerKey===sessionQueueKey`,pane 初挂/刚 `setChatMessages([])` 那帧 owner=null→liveVisible 恒 true→上个会话残留 chatMessages 显示到当前会话。修=删 `streamOwnerKey==null||`。
+- **v0.2.192 定论(纠正 v0.2.190 的 stillHere)**:抑制产出=丢数据(v0.2.190 加 stillHere 跳过 push 把"切回看到半截回复"的设计机制杀了)。正解=**照常 push + 打 `ownerKey: streamSid||sessionQueueKey`,渲染层按归属门控**:`visibleChat=chatMessages.filter(m=>m.ownerKey?m.ownerKey===sessionQueueKey:liveVisible)`——带归属的本地条目(btw/半截回复/error turn)只在归属会话显示,无归属条目维持 liveVisible(流式防串)。**通用律**:本地产物串到别的容器,第一反应不是"别产出"而是"产出时打归属、消费端按归属过滤";凡新增 chatMessages 本地条目(无 jsonl 孪生)一律带 ownerKey。
+
+**本地注记(/btw)散在多个清空/门控点,只改一处漏竞态**(v0.2.190):btw 答案 push 进 chatMessages 但被 `liveVisible` 门控吞(那门是给流式跨会话防串设的,btw 本不该套)。fable 揪出同类三档清空点漏保留 btw:①**高** 两处 reconcile(watcher `cgui:sessions-changed` ~3058、dedup effect ~3083)整轮落盘 `return []` 漏保留(和 finalize ~4470 是同一操作,当初只在 finalize 加了 `prev.some(btw)?prev.filter(btw):[]`);②**中** detach 后迟到 catch(AbortError 半截 ~4340、error turn ~4357)在 `setChatMessages([])` 后异步 push→孤儿 turn 下次开流串新会话;③**低** 回滚/summarize/重做三处无条件 `[]` 抹掉锚在裁剪点前的 btw→改 `filter(m=>m.type==='btw')`。**排查口径**:新增"本地注记"时 grep 全部 `setChatMessages` 清空点逐个确认"该保留就 filter";渲染别套 liveVisible。
+
+**转后台(backgroundPid=回合在服务端跑)是"进行中"语义,漏判即并发/丢消息**(v0.2.191):GUI 两种"回合进行中"——①前台流(streamingRef/activeProcRef);②转后台(abort 本端 SSE、activeProcRef=null、streamingRef 被 finally 置 false,但进程仍在服务端跑、backgroundPid 有值)。**凡判"回合是否进行中"只查 streamingRef/activeProcRef 会漏②**。fable 三处同根漏判:①入队门漏 backgroundPid→转后台后再发消息不入队直发 POST→busy slot 另起进程 `--resume` 同 sessionId=**双写同一 jsonl**;②队列排空只在流 finally,转后台无 reattach 流→入队消息永不发出,修=轮询"pid 有→无"分支补 shiftMessage+handleSend(互斥判据同 finally 的 `!acceleratingRef`),**且同步 `backgroundPidRef.current=null`**(否则靠 useEffect 异步更新,出队 handleSend 撞旧 pid→入队门又塞回=丢消息死锁,自引入竞态);③定向压缩守卫漏 backgroundPid→后台跑时压缩放行按旧快照裁掉新内容。守卫必须同时查 `streamingRef.current || backgroundPidRef.current`;handleSend 闭包读 backgroundPid 用 ref(state stale),确知 pid 消失处同步清 ref。
+
+**停止联动子代理**(v0.2.131,记忆 [[async-callback-current-selection-leak]]):主会话 Esc/停止后子代理继续跑到完。双层根因:①`await slot.query.interrupt()`——回合正跑子代理时 CLI 对 interrupt 的响应要等子代理收尾,await 把后面 abort 兜底**永远挡住**;②中断后 tool_result 永不到达,activeAgents 停留 running 卡片永远转圈。修:①interrupt fire-and-forget + 2s 优雅窗 abort,判据 `slot.lastResultAt >= stopAt`(stop 之后到达的 result 才算——不能看 pumpEnded 因子代理回合 result 后 4s 关流去抖、不能看"到过任何 result"因中间 result 早出现);②前端流 finally 兜底把本流 Task 标 stopped,扫 currentToolCalls 而非 orderedBlocks(mimo 等不发 partial 的 provider Task 只走整条 assistant 消息)。**范式**:await 一个"响应时机取决于对端忙闲"的控制调用再跟兜底=兜底可能永不执行→控制类调用 fire-and-forget+超时兜底。
+
+**停止后再发消息被 10s 内掐断=双 resume 竞争(v0.2.224,r217 停止重构引入)**:主动停止结束回合后,同会话立刻再发一条→"正在回复"几秒后变空、最后一条停在用户消息。根因链三条:①**双 resume**——停止后 slot 处于 `closing / !idle / !pumpEnded`(进程还没死透),复用守卫(`if(!s.idle||s.closing||s.pumpEnded)continue`)把它跳过→turn-2 冷启第二个 `claude --resume <同 sid>` 和还活着的 turn-1 抢同一 jsonl→turn-2 读半写态空产出。修=冷启前先等同 sid 的 lingering slot 收尾(pumpEnded/被 delete,50ms 轮询上限 4s,超时才强制 abort+close),对齐 #26"一会话一进程"。②**停止兜底 setTimeout 无句柄不可取消**→在 stopAt+2~3s 触发时误伤已被复用成 turn-2 的 slot。修=句柄存 `slot.stopTimer`、复用/finalize/finishSlot 都 clearTimeout,再加 `slot.turnEpoch` 世代门控(回调进门比对 captured epoch 失配则 no-op),双保险;epoch 自增+clearTimeout 要放在任何 `await`(如 setPermissionMode)之前,别依赖"idle 可复用 slot 无 pending timer"的隐性不变式。③**前端 finalize 轮询清掉 turn-2 在途消息**——turn-1 停止的 finally 落盘轮询守卫只比 sessionId,同会话 stop→resend 不 break→`setChatMessages([])` 清掉 turn-2 刚 push 的本地消息。初版以 `activeProcRef.current!=null` 识别新回合，但普通发送在任何 pid 返回前已同步写入用户消息和流状态，旧 finally 仍可误清。终版=每个 SessionDetail/pane 在任何 await/状态写入前递增回合 token，finally/轮询/清理回调全部只在 token 仍为当前回合时动作；`activeProcRef` 只能表示已获服务端进程，不是回合归属。专项测试至少直接验证 token 失配不允许清理，仍须真机覆盖 stop→秒发的窄时序。**铁律坑(判官揪出)**:①的强制 abort 若不排除后台 shell,会在"有 run_in_background 训练 shell 的会话+改配置(settings.json mtime/换 model/effort 使 compatKey 不匹配→close 但 CLI 为后台保活 pumpEnded 永假)"时,等满 4s 后 abort 杀掉训练(不可恢复)。修=shell 检查提进等待循环,`t.kind==='shell'`(判据同选择性停止路径)则 `lingering=null;break` 早退——**既不白等也不 abort,退回孤儿存活容忍双 resume**(误杀不可恢复 > 双 resume 竞争)。dev 首版只做了"不 abort"漏了"不白等"(仍白等 4s),复审二次才补全。WKWebView-only(时序窗太窄,dev/Chromium 复现不了)。
+
+**分屏双击 Esc 全停(改了却没生效的幽灵 bug)**(v0.2.133,记忆 [[fix-not-in-head-ghost-bug]][[per-pane-window-effect-global-state-leak]]):真凶=ChatInput 的 CD-2 document 捕获 listener(原为"双击 Esc 停止"功能而加:isStreaming 时 600ms 内连按两次 Esc→onStop 对齐 CLI,坏在无 paneIsActive 守卫,每个流式 pane 挂一个,双击一次全体 onStop)。**为什么改了还犯**:正确删除补丁一直躺工作区未提交(历轮手动 `git add <指定文件>` 从未带上),dist/装机版全存活旧代码,dev(读源码)不复现、生产(dist)3/3 复现。**破案手法**:①数数长任务当活体探针(被杀=截断+`stop_reason=None`,max_tokens 会伪装被杀必须验 stop_reason);②生产 vs dev 差分;③monkey-patch fetch 抓 /stop 调用栈,minified 栈行列号反查特征字符串定位组件。**规则**:"改了还复发"先查改动是否真进 HEAD 与产物(`git diff HEAD -- <file>` + dist 内容特征)再查逻辑;发版前看 `git status --short` 不留计划外残留。
+
+**流式回复"完成后消失再重现(像刷新)"竞态**(2026-06-03):jsonl 落盘 user 先 assistant 后,与 SSE result 竞态;渲染层 `allMessages=[...persisted,...chatMessages]` 裸拼接不去重;旧 dedup "user prompt 已落盘→`return []` 清本地整轮"→拉取赶在 assistant 落盘前则助手回合被清、下次拉取重现(慢磁盘放大)。不能简单 `filter(!persisted)`(流式累计文本≠最终 jsonl 文本→重复渲染两次)。修(App.jsx finally):**轮询**拉取(最多 8×200ms),`roundLanded` 判"user prompt 后是否出现 `type:'turn'`",整轮落盘后再 `setChatMessages([])`;空/报错回合跳过等待保留本地 ⚠️/❌。**范式**:本地乐观渲染+后台拉取,裸拼接不去重必有消失/重复闪烁,"清本地"必须在"持久态已完整包含"之后。**重复 prompt 回复被清**(v0.2 第二轮):finally 用文本 `lastIndexOf(userKey)` 判本轮落盘会命中上一轮同文本('继续'/'ok')的 turn→提前清新回复,改 `turnsBefore`(本轮前 turn 计数)增长才算落盘;finalize 轮询(≤1.4s)期间切会话→fetch 旧会话进当前 tab、清错会话消息,加 finalizeSid 守卫。
+
+**正常回复末尾误报 ⚠️"provider 没返回内容"**(2026-06-03):后台 pid 轮询用 `stoppable===true` 判后台运行,但刚结束进程在 60s 宽限期内仍 stoppable=true→当后台任务 auto-reattach→连已结束的流→空→误报。修:空 reattach 流≠provider 没返回,给空分支加 `!reattachPid` 守卫(只有 fresh send 真空才提示)。"进程还在 stoppable"≠"进程还在产出"。
+
+**ask 卡永不超时**(v0.2.130):`PENDING_TTL_MS`(15min)安全网把"等人决定"的卡扫掉。修:`NO_TTL_TOOLS=Set(['AskUserQuestion','ExitPlanMode'])` 豁免;安全性:挂着只是进程内 Promise 无 socket 泄漏,进程结束 `dropPendingForSession` 必清。全链路唯一超时源就是这个 TTL。上下文徽章 usage 取单次调用 usage(message_start/delta)非 result.usage(整轮累加口径,cache_read 加 N 遍会爆表误触发 compact,记忆 [[context-badge-usage-source]])。
+
+**按会话状态改造后同步所有读取点**(2026-05-28,记忆 [[per-pane-window-effect-global-state-leak]]):全局 `permissionMode`→按会话 `permissionModeBySession` 后,`useWebSocket` 自动放行判断仍读全局 mirror→会话B授权被会话A的 bypass 放行("授权串号")。改全局态为按实体(会话/pane)态时 grep 所有读旧全局字段处逐一改(尤其 WS/effect 副作用入口)。多分屏 React key 用稳定 paneId(随 splice 移动),不用位置 index(关中间分屏复用错实例)也不用 sessionId(draft→真实id 切换误重挂正在流式的新会话)。
+
+**长会话卡顿**(记忆 [[long-session-memo-stable-callbacks]]):历史 messages.map(2万节点)与流式同树每 token 重渲占满主线程。修=历史列表抽 `React.memo(MessageList)`,但传入回调 deps 含 messages→流式每 token 变身份使 memo 失效,必须用 ref 包成稳定身份。
+
+**skill/slash 开头会话丢首条**(记忆 [[slash-opener-filtered-missing-first-msg]]):jsonl 首条 `<command-name>/xxx` 整块被 isLocalCommandEcho 过滤→会话凭空从 AI 回复开始;修=reconstructCommandPrompt 带 args 重建成 `/name args` 用户气泡。CLI 会把历史段原样重放追加进同一 jsonl(resume,单会话上千条 uuid 逐字节重复)→线性解析必须按记录 uuid 去重保留首现(v0.2.98)。**但只按 record.uuid 去重不够(v0.2.224,CJ-1 变体):停止→resume 的重放段可能带【新的 record.uuid】,uuid 认不出→同一 AI 回复渲染两遍(内容一字不差、同时间戳)。补按 `message.id`+内容签名去重(`dedupReplayedRecords`)。关键坑:CLI 把【一次】assistant API 调用拆成【多条】jsonl 记录(thinking/text/tool_use 各一条、各自 uuid、共享同一 message.id;大会话实测 1988 个 id 里 1504 个对应≥2 条),所以纯 message.id 去重会吞掉同一次调用的不同块=丢内容,必须 `message.id + JSON.stringify(content)` 当键;user 记录不参与(可能共享/无 message.id)。前端多层去重只能对齐流式/落库,删不掉 messages 数组内部两条→必须服务端 getSessionMessages 去重口治。** compact/resume 拓扑:`/compact` 在原文件写 boundary 继续,`--resume` 才新开文件回放历史;可靠分组信号=同一 boundary uuid 复制到所有后代文件→按共享 boundary uuid 并查集。
+
+**手机复制按钮无效**(2026-06-03):`navigator.clipboard` 只在安全上下文(https/localhost)存在,手机经 Tailscale `http://100.x.x.x:6677` 该 API undefined。任何复制功能必须有 `execCommand('copy')` 降级(隐藏 textarea+focus+select+`setSelectionRange(0,len)` iOS 必需);判断用 `navigator.clipboard && window.isSecureContext`。复制函数返回 boolean,只有成功才翻"已复制"。
+
+---
+
+**(2026-07-16/v0.2.226) 第三方auto-compact后回合断=CLI只认anthropic措辞的超限错误**:CLI 自动压缩=全量历史一次发"摘要请求",第三方上易 400;**CLI 只在错误文案含 anthropic 原文 `prompt is too long` 时才缩组重试**(实测 msgs 7→3 重试成功无缝续跑),中转/OpenAI 措辞("maximum context length is N tokens")不认→compact 判失败→**CLI 当场杀回合**(assistant "Prompt is too long"+result IS_ERROR)。官方不断=用量精确+文案本就是那句。修=两代理错误出口把超限类错误**窄匹配归一化**为 `prompt is too long: <原文>`(401/429/余额类绝不误伤)。**曾走错一版**:先前推断"服务端 finalize 在压缩中间 result 上过早关流"被实测推翻(compact 成功=单 result 收尾,chat.js 无罪)——用户一句"官方不断只有第三方断"的观测直接干掉了错误假设,**用户观测数据>代码推断**。**零成本复现手法(以后排查 compact 必用)**:本地 mock anthropic 协议上游+`ANTHROPIC_BASE_URL` 接管 CLI,在响应 usage 里**虚报 `input_tokens:196000`**,CLI 采信透传 usage 算占比→回合中真触发 native auto-compact,五场景 A/B 全抓到原始事件序列,不烧任何真额度。
+
+### 2026-07-21 上下文徽章爆红(389k/200k 194%)+自动压缩
+- **模型→窗口本地表会过时**:`nativeContextWindow`(App.jsx)曾把全部 claude 系按 200K 算,而 2026 官方口径 fable-5/mythos/sonnet-5/opus-4.6+/sonnet-4.6 **原生 1M(无需 [1m] beta)**,仅 haiku/老代 200K。新 claude 模型发布后必须核对该表(claude-api skill 的 models.md 是权威;CLI /context 实测可印证,sonnet-5 报 ~967k)。别名 pin("sonnet"/"opus")=当前 tier 最新,也要按 1M 算——用户爆红会话的 pin 正是 "sonnet"。
+- **jsonl 永远不含 [1m]**:message.model 是 API 回包裸 id;判断历史会话是否跑在 1M 上,唯一可靠证据是单次调用 ctxUsage(input+cache_read+cache_creation)> 名义窗口(物理不可能)。整轮累加的 m.usage 不能当证据(合法可超窗)。
+- **GUI 侧曾有"80%+10s 倒计时自动 /compact"看门狗**(第三方 provider,AutoCompactBanner):分母突变(1M→200k)会瞬间爆表触发误压。已改为提示+用户点击确认,GUI 永不自动压缩;CLI 原生 auto-compact 不归 GUI 管。
+
+- **去抖/延迟定时器的"取消"必须配对重武装路径,且按事件归属守卫**(2026-07-22,chat.js收摊卡死):result后4s去抖finalize的取消分支①不查parent_tool_use_id(后台子代理事件误取消)②取消后无重武装(唯一重武装点=下一个result,主回合结束不会再来)→finalize永不跑→前端双信号锁死卡队列。教训:任何"取消定时器等更晚时机"的逻辑,先问"那个更晚时机一定来吗";事件过滤守卫要与相邻守卫(复活守卫1056)对称;原生SDK语义=result与后台任务解耦,result后用户随时可发新消息开新回合,外壳别挡路。
+
+### 2026-08-10 r7:引导 fold 形态落盘被全员漏判(设计乙两红线齐破)
+- **事实**:CLI 往忙回合注入的消息,有工具边界时 fold 落盘为 `attachment{type:'queued_command',prompt,source_uuid}`,**不写 user 行**(resume 实测会重建=一等历史);纯文本回合排到回合末自动另起新回合才是 user 行(uuid=command uuid)。设计乙"落盘核对只认 user 行"在 fold 形态下:消息从 GUI 历史永久消失 + 对账误判未落盘→翻回队列→drain 双发。
+- **为什么判官+用户实测都没抓到**:所有测试回合都是纯文本(新回合形态,有 user 行,一切正常);fold 形态只在"回合里还有工具调用"时出现——恰是引导的主场。
+- **规则**:①对 CLI 落盘行为的每个假设,必须**逐形态**真机取证(同一功能不同分支的落盘形态可以完全不同);②fixture 必须取自真实 transcript 行,不许手搓想象形态;③"判官过+用户实测过"不等于功能成立——未覆盖的原生形态分支要主动枚举(本次靠用户追问 Desktop 差异才回头翻实验 jsonl 发现)。
+- **顺带**:zsh 里 `echo ===` 会触发 =word 扩展报 "== not found",分隔符用引号或 '---'。
+
+### 2026-09-02 "标题兜底频发"的真因不在判据,在续接进程
+- 现象:粗查以为 GUI 认标题的判据与原生落点不一致;r90 实证判据逐字一致(jsonl `{"type":"ai-title","aiTitle"}`),真因=①resume/压缩续接的 CLI 进程根本不跑原生标题 ②上游回非 JSON 时原生每回合白打不落盘。
+- 规矩:先用真实数据反查(2099 个 jsonl 统计落点/位置),再用假上游复现三种上游形态(纯 JSON/thinking+JSON/非 JSON),最后才改;"照抄原生"要先把原生的请求形态、触发条件(首条 <10 字符不起名)、落盘形态全部拿到证据。
+- 补记:`.devflow/` 在 .gitignore 里,`git worktree add` 出来的树里没有它——判官/作者在 worktree 里按"同路径"读 PLAN 会读空。开树后必须 `cp .devflow/PLAN-*.md RESEARCH-*.md` 进 worktree 的 .devflow(r92 判官因此只按我消息里的要点判)。
+
+---
+
+## Provider · settings · 配置写入
+
+**(2026-08-19 / 0.2.310 · r15) 模型能力目录:别自己写正则猜,先找现成的实测数据源;键要带协议**
+- 起因:用户问"学 dsh 的按 provider/模型给对应思考强度怎么没做"。查证=**做了但零生效**(见下条),而且**我写的家族正则本身多处判错**:`^kimi-k2` 把 k2.5/2.6/2.7 全判成"不支持思考"(实际都支持)、`deepseek-chat` 正则捡漏把 deepseek-chat-v3.1 判死。
+- **不对称原则(本轮反复用到的判据)**:判错成 `reasoning:false` = UI 锁灰 + 发送静默摘档,**用户可见的功能损失**;判错成 `null` 只是维持全档,**无害**。所以拿不准一律不进目录、宁可全档别判死。凡是"能力/白名单"类判定表都适用。
+- 数据源:**dsh 装机版内置 `@earendil-works/pi-ai`(MIT)**,路径 `/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/@earendil-works/pi-ai/dist/`,`providers/data/*.json` 有 1109 条模型的 `thinkingLevelMap`,`models.js` 的 `getSupportedThinkingLevels` 两条规则就是要抄的核心(显式 `null`=该档无效;`xhigh`/`max` 是 opt-in,没声明就不给)。提取脚本落 `scripts/gen-thinking-levels.mjs`(参数化 dist 路径,dsh 升级后重跑即刷新)。
+- **键的设计走了三步弯路,最终形态值得记**:①按 provider baseUrl host(我的原案)→用户驳"应该按 model id",对中转站也确实不可靠;②纯 byId→**实测有失真**:同一带前缀 id(`deepseek/deepseek-v4-pro`)在 openrouter 与 vercel 都有、口径不同,合并取并集被撑宽;③终案 **byId 共用 + 只把"两协议都有数据且结论不同"的 9 个 id 放进 byProto 按 provider.type 区分**。触发点是用户追问"不同 model 可能 openai 或 anthropic 兼容"——实测 `deepseek/deepseek-v4-flash` openai=[high,xhigh] 而 anthropic=[low,medium,high],几乎不重叠;`kwaipilot/kat-coder-pro-v2` openai 下根本不能思考、anthropic 下三档。
+- **但严格分协议双表是陷阱**:pi-ai 里"某模型没有 anthropic 条目"只代表**它没收录那个端点**,不代表该模型经 anthropic 协议没档位。本机 DeepSeek/MiMo/Kimi Code 三个 provider 都是 `type:anthropic` 而 pi-ai 只有它们的 openai 数据 —— 分表会让这三家全部落空=白修。故"默认共用,有确凿证据才分"。
+- 顺带钉死的事实:**CLI 2.1.235 的 `--effort` 只认 `low/medium/high/xhigh/max`**(`claude --help` 实测),不收 `minimal`、不收 `none`。所以"关思考"档 GUI 做不了(dsh 能关是它直连 API 发 `thinking.type:disabled` 不经 CLI);而 `EFFORT_ORDER`/`EFFORT_LEVEL_IDS` 里的 `minimal` 是**算得出、显示不了、传不过去**的死档,已全链路收成五档。改 effort 相关代码前先对齐这五处:`EFFORT_ORDER`/`EFFORT_LEVEL_IDS`/`EFFORT_IDS`/`VALID_EFFORTS`/`EFFORT_LEVELS`。
+
+**settings.json 写入只动自身字段,防 lost update**(近期主线,记忆 [[provider-store-architecture]][[provider-override-needs-reapply]]):写入源(settings.json)与读取源(db/快照)不一致时,要么统一真相源,要么加 GUI 侧 marker 覆盖陈旧读取源。
+- **窄端点读-合-写只动目标键**:全局 hooks 保存改 GET/PUT `/api/global-hooks`(原走整文件 PUT `/settings` 用面板快照→面板开着期间别处写的字段被旧快照带回=lost update);项目级 hooks 走 `/api/project-hooks`(resolveWorkspacePath 门禁+读合写只动 hooks 键+损坏拒写);权限 tab 去 spread 只发 permissions 单键;新增 PUT `/api/settings-env` 单键补丁(现读逐键 set/del,env 其它键零触碰);EnvEditor 四路径+SmallFastModelInput 改单键。至此 GUI 全部 settings 写只动自身字段(JSON tab 显式整文件编辑除外)。并发场景实测别处写入键存活。
+- **provider marker 覆盖陈旧 db**(2026-05-30):`POST /api/provider/switch` 只改 settings.json 不更新 cc-switch.db,而 `GET /api/providers` 的 isCurrent 读 db `is_current`→永远停在 cc-switch 桌面应用最后选择。修=新增 `~/.claude-gui/active-provider.json` 记 GUI 最后切换 id,GET 优先据此算 isCurrent。附:常驻 6677 由 gui.command watchdog 拉起,watchdog 死后(node 被 launchd 托管 ppid=1)直接 kill 不会自动重启,需 `nohup ./gui.command & disown` 重拉恢复。overrides.json 只是 GUI 持久层,CLI 只读 settings.json env→改完档位映射要重新切 provider 才注入 `ANTHROPIC_DEFAULT_*_MODEL`(v0.2.41 PUT 后自动 reapply 当前激活 provider)。
+
+**cc-switch 通过 settings.json 全局污染所有 Claude 进程**(2026-05-15,记忆 [[spawn-env-pollution]]):cc-switch 切 provider 改 `~/.claude/settings.json` 的 `env.ANTHROPIC_BASE_URL`(指向本机 127.0.0.1:15501 本地代理)+ `ANTHROPIC_AUTH_TOKEN`,是 **user-scope、所有 Claude CLI 进程都读**(含 bot spawn 的子进程、`claude --print`)。bot 日志显示 `model=claude-sonnet-4-6` 是骗人的(env 早已重定向)。错误码:`-32603 hit your limit`=Anthropic 真限额;`403 Request not allowed`=可能是 cc-switch 路由的 provider 端拒(先 `tail ~/.cc-switch/logs/cc-switch.log | grep "请求 URL"` 看实际 endpoint);`401`=OAuth token 真过期。跑 OAuth 刷新(`claude --print "ok"`)前先 `unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN` 或切回 Claude Official(否则 keychain 写入垃圾 token→bot 整体 401)。读 cc-switch.db 不加依赖:系统 `sqlite3 -json -readonly <db> "<sql>"` 经 execFile(表 providers,字段 app_type(claude/codex/gemini/opencode)/name/settings_config/is_current;`settings_config` 是一整份完整 settings.json 快照,切换=整份写入);防 SQL 注入:不拼前端 id 进 SQL,SELECT 全部后 JS find(id)。
+
+**OAuth 优先级压制 settings token**(2026-06-01,记忆 [[oauth-precedence-over-settings-token]]):登录态下 CLI 强制用钥匙串 `Claude Code-credentials` 的订阅 OAuth accessToken,附到所有请求 Authorization 头,**压过 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`**→第三方 provider 报 401「your api key ****XXXX is invalid」(尾号搜遍配置找不到=就是 OAuth token;实例尾号 6gAA,`security find-generic-password -s "Claude Code-credentials" -w` → `claudeAiOauth.accessToken`)。验证:curl 直连 provider `/v1/messages` 带 provider 自己的 key→200。**彻底解法=GUI anthropic 透传反代**(已实测):`server/services/anthropic-proxy.js` 在 127.0.0.1:8789 纯透传,丢弃 CLI 发来的被毒化 Authorization/x-api-key,注入 provider 真 token 转发。native/custom 的**第三方** anthropic provider(baseURL 非 anthropic.com)切换时改写 `ANTHROPIC_BASE_URL` 指向反代;**官方 anthropic 保持直连**(走订阅 OAuth)。`anthropic-active.json` 存 id/name/baseURL(不存 token),重启 `restoreAnthropicProvider` 从 cc-switch.db 重读 token。这是 8789 anthropic-proxy 必须存在的根因。
+
+**切 provider 后模型显示/复原异常根因链**(2026-05-30~06-04 合并簇):切 provider 后会话模型不跟随(显示 sonnet)、手机刷新不变、重启复原。多重根因逐一修:①前端会话模型 `modelBySession[permKey]||currentModel`,曾手动钉过模型的会话被 per-session 覆盖掩盖→切 provider 后调 `clearModelOverrides()` 清空(桌面 ProviderSwitcher + MobileProviderPage 两处)。②iOS Safari 对无 `Cache-Control` 的 /api GET 启发式缓存(桌面 Chromium 用 ETag 重校验躲过、只真机复现)→全局中间件对 /api 加 `Cache-Control: no-store`。③boot 时 `restoreOpenAIProvider()` 读残留 `~/.claude-gui/openai-active.json` 把 settings 重写回 gpt-5.4→切原生 claude 时 `unlink(OPENAI_ACTIVE_PATH)`。④relay 无模型时 `getDefaultModel` 落到硬编码兜底 `claude-sonnet-4-6`→把"loopback relay 在用"判断提前到 process.env/硬编码之前,relay 无显式 model 时只认 relay markers models[0],真没有返回 `''`(绝不假装 Claude,记忆 [[default-model-haiku-settings-residue]])。**排查**:让用户 `node -e` dump settings.json 的 env(一条 `{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8789"}` 无 ANTHROPIC_MODEL 直接定位)远胜反复猜;服务端改动必须重启 node(只 `npm run build` 前端不重启后端=旧后端一直跑="改了还一样")。多数 cc-switch 的 claude provider 快照**不含** `env.ANTHROPIC_MODEL`(只 base_url+token,是 Claude 中继切换不改模型名符合预期),真换模型的是 DeepSeek/OpenRouter/OpenAI 格式那批。
+
+**自定义 provider/模型架构**(2026-05-31):自定义存 `~/.claude-gui/custom-providers.json`(不碰 cc-switch.db,只读别人数据),`{id,name,type,baseURL,apiKey,models}`,apiKey 仅服务端用 GET 只回 hasKey。`/api/provider/switch`:openai→复用 `switchToOpenAIUpstream` 走内置代理;anthropic→直写 settings.json env。restoreOpenAIProvider 要同时查 custom store。**模型列表是 env 推导非实时拉取**:GUI 模型列表=settings.json 的 `*_MODEL` 键 + CLI 别名推导,显示的是 cc-switch 里配死的名字;Claude Official 无凭证只能显示别名(opus=CLI 解析最新 4.8,功能正确)。`getAvailableModels` 枚举只读 settings.env 不碰 process.env(否则启动 shell 继承的残留 `ANTHROPIC_REASONING_MODEL`/`ANTHROPIC_MODEL` 在每个 provider 冒出幽灵行;排查用 `ps eww -p <pid>` 看进程实际 env)。process.env 仅作 getDefaultModel 单个当前模型的兜底。
+
+**激活 provider 模型列表是"切换时快照",编辑后须同步**(2026-06-03):`getAvailableModels` 读切换那刻写的 `{openai,anthropic}-active.json` 快照,而改模型的 `PUT /provider-models`、`PUT /custom-providers` 只更新各自存储不碰快照→下拉陈旧。修=抽 `syncActiveProviderSnapshot(activePath,providerId,models)`,两个 PUT 写完若改的是当前激活 provider 就同步(当前 model 被取消勾选则回退首个并同步 settings.json 的 ANTHROPIC_MODEL);前端保存后 `fetchModel()`+广播 `cgui:provider-change`。多选存 `~/.claude-gui/provider-models.json`,GET /providers 用选择覆盖 cc-switch 静态 models。取消勾选所有模型时要清 active.model/ANTHROPIC_MODEL(否则 CLI 仍发被移除模型)。改 type 时旧类型 `*-active.json` 标记残留→读错格式快照。
+
+**MiMo/Claude 协议中转 /v1/models 404**(2026-06-03):`token-plan-cn.xiaomimimo.com/anthropic` 拉取 404(openresty)——**Claude 协议中转普遍只转发 /v1/messages 不实现 /v1/models**,自动拉取原理上不可能,正解=手填模型 ID(form save 不依赖 fetch)。auto-fetch 只对实现该端点的 OpenAI 兼容端点可靠。"默认 sonnet 注入所有 provider"根因:relay 404→列表空,`switchToAnthropicUpstream`(settings.js:555)models=[] 且无 requestedModel 时 `chosen=env.ANTHROPIC_MODEL`(继承上个 provider 残留),再被 `getAvailableModels`(model-resolver.js:197)的 `if(!models.has(current)) add(current)` 塞进 picker;手填模型后全好(models[0] 而非继承)。没改继承逻辑(Claude 协议中转可能接受 sonnet/opus/haiku 别名映射,贸然改"无模型就 400"会回归靠别名工作的 relay)。**Node 原生 fetch(undici)默认不读 `http_proxy`**(只 curl 读,Node 24+ 有 flag `NODE_USE_ENV_PROXY=1`);Node fetch 默认 UA "node" 部分 relay WAF 返 403→补 `User-Agent: claude-gui`+`Accept: application/json`。base 已含 /v1 时探测拼成 /v1/v1/models 404→`/\/v\d+$/.test(b)?b+'/models':b+'/v1/models'`。排查法(先证伪 GUI bug):probe 函数对公开端点(openrouter `https://openrouter.ai/api/v1` 免 key)自测拿到 343 模型=函数没坏;带/不带 http_proxy 各 fetch api.openai.com 都 401=连通性没问题→"总失败"=中转端点本身非 200。失败时把上游响应正文片段(160 字)+探测 url 拼进错误 `上游 {url} 返回 {status}: {body}`,404(端点不存在只能手填)与 401/403(鉴权/WAF 可修)一眼分。鉴权头:OpenAI `Authorization: Bearer`、Anthropic `x-api-key`+`anthropic-version`,解析 data[].id 或 models[].id,AbortController 10s 超时。实测 OpenRouter /v1/models 返回 355 个含 anthropic/claude-opus-4.8、DeepSeek /anthropic/v1/models 404、官方无凭证→"无脑全自动拉取"不现实,做按需拉取+搜索过滤。
+
+**provider 连接测试(BZ-1)+ 内联表单防丢输入(BZ-2)**(2026-06-25):①`POST /api/custom-providers/test` 按 type 发最小请求(openai→/chat/completions、anthropic→/v1/messages,`max_tokens:1`)验证鉴权+模型可达(比"获取模型"直接,那只验 /v1/models 存在);编辑态前端不持 key,带 id 时按 id 读存储 key 兜底——兜底按维度解耦(key/baseURL/type 各自 `x = x || stored.x`,别塞同一个 if,前端只回传部分字段时其余维度 undefined);实测假 key 打真 DeepSeek 返回上游真实 401 `Authentication Fails...`。②CustomProviderForm 渲染在下拉内部,onDocClick/onEsc 关下拉→卸载表单→useState 全丢(url/key/model 白填);修=表单 `onDirtyChange` 上报 dirty,父级持 `formDirtyRef`,dirty 时 handler return 不关(仍可点 X/取消)。通用:任何"点击外部即关闭"容器内嵌有状态表单,必须 dirty 守卫或草稿持久化。
+
+**推理力度按模型存 + effort 门控按协议**(2026-05-31,记忆 [[effort-precedence-gui-vs-bots]][[provider-protocol-vs-hint]]):Claude Code `--effort low/medium/high/xhigh/max` 是**模型能力**(Opus 4.8/4.7 支持 xhigh,Opus 4.6/Sonnet 4.6 不支持,越界自动降级);API `output_config.effort` 已取代 budget_tokens。**协议跟 provider 走,档位跟模型走**;门控按 protocol(openai-active.json)判别用 providerHint(mimo/deepseek 是 claude 协议中转)。第三方端点 CC 靠模型 ID 匹配启用 effort,中转名匹配不上需 `ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES` 声明。effort 存 `effortByModel`(按模型 id 去 [1m]),setEffortForModel 不写全局 effort(否则某模型设置泄漏成他模型兜底)。effort 优先级 GUI `--effort` > settings.json env > CLI 默认(GUI 改力度只影响 GUI 当前会话不碰 bot)。来源:code.claude.com/docs/en/model-config、platform.claude.com/docs/en/build-with-claude/effort。
+
+**第三方缓存被计费 nonce 打穿 + attribution 注入时序**(v0.2.139/140,记忆 [[third-party-cache-busted-by-attribution-nonce]]):CC 注入每次变的 `cch=` nonce 打穿第三方前缀缓存(官方自动剥、第三方不剥);缓解 `CLAUDE_CODE_ATTRIBUTION_HEADER=0`。**同函数内后置清洗把新修复变哑**(v0.2.140,"你实测了吗"抓出):attribution 注入写在 `stripHostClaudeEnv`(整类删 `CLAUDE_CODE_*`)之前→注了个寂寞,v0.2.139 该修复实际无效。规则:往有 env 清洗管线的函数加键必须实测最终输出而非看插入点。cleanChildEnv 每次 spawn 兜底剥官方 `ANTHROPIC_*`(记忆 [[spawn-env-pollution]],6677 从 Claude Desktop 继承会覆盖 provider)。provider 缓存命中实测(5824 会话):只有官方 Claude 与 Qwen(anthropic 兼容)上报 cache_creation;openai 协议中转(deepseek/mimo/gpt/gemini)cache_creation 恒 0 是协议差异非 bug(把各家原生命中字段映射进 cache_read,读缓存真实)。命中率是模型自报口径≠账单折扣。
+
+**"环境"在 GUI 有两个含义别混**(2026-07-04):概览 tab 的「环境变量」折叠块=`EnvEditor`(编辑 settings.json 的 env 键值对);「环境」tab=`EnvCheckPanel`(/api/env-check,检测 node/python/claude 软件依赖装没装)。两个同名 UI 不等于重复,下结论前读 `SettingsPanel.jsx` 的 tab 渲染确认各自是什么。环境依赖检查分层(记忆 [[env-prereq-check-layered]]):node 走原生报错框(没 node 没界面),claude+python 走应用内 EnvCheckPanel。
+
+**route 反向 import 入口 index.js = 循环依赖 TDZ**(2026-07-04):`server/routes/*.js` 从 `server/index.js` import(曾 chat/prefs/permissions import `broadcast`)形成环,孤立 import 某 route 时 index.js 顶层 `app.use('/api',sessionRoutes)` 在 sessionRoutes 未初始化时引用→`ReferenceError: Cannot access 'sessionRoutes' before initialization`(生产入口正常、只坏孤立 import 的测试)。规则:route/service 绝不 import 入口 index.js,共享物抽到无反向依赖的纯模块(`server/broadcast.js`)。排查先 `grep "from '../index.js'" server/routes/`。
+
+### 2026-07-17 · provider 价格表两条口径约定(第229轮判官链沉淀)
+- **同名模型 id 国内外双价**(如 glm-5 系:国内 bigmodel.cn 人民币 vs 国际站 Z.ai 美元):本地表按用户拍板**取国内人民币价**(主受众国内),注释保留国际站美元价备查,国际站用户运行时靠 LiteLLM 远端表覆盖。价格表按模型 id 一键一价、无 provider 维度,这是结构性局限。
+- **cacheWrite 第4参最容易错的两种方式**:①漏写→吃 cny()/usd() 默认 1.25×input(Kimi 这类"只有命中/未命中两档、无写入费"的厂商会被高估25%,应显式=input,照 DeepSeek 成例);②手滑抄成 output 价((in,out) 复制成 (in,out,in,out),judge 用 computeCost 实跑探针抓出 4 键)。写价格键时第4参必须逐键有意识决定,并与行内注释口径自洽。
+- 价目页很多是 SPA(bigmodel/minimaxi/together/fireworks),curl 抓不到要浏览器渲染;拿不到干净官方数字就留空靠 LiteLLM,不用二手聚合页数字(ERNIE 成例)。ChatWise app.asar 里 grep URL 可当"别家客户端内置了哪些 provider"的差集线索,但端点/协议定论必须回官方文档。
+
+### 2026-07-29 同一端点混用补丁/全文语义=静默还原型bug
+- 现象:设置高级选项手改settings.json保存即还原。根因=PUT /api/settings对所有请求浅合并{...磁盘,...body},局部补丁调用方(各设置tab)靠它工作,但JSON编辑器发的整份全文也被当补丁→删掉的顶层键被磁盘旧值复活,响应回填编辑器,用户看到"保存无效"。
+- 教训:一个写端点若同时服务"局部补丁"和"全文编辑器"两类调用方,必须显式区分语义(本次=_replace标记+computeUpdatedSettings纯函数);"保存后被还原"类bug先怀疑服务端merge把删除项合并回来,而不是先怀疑前端没发出去。JsonTab的警示横幅早就写着"保存=覆盖全部字段",实际后端是合并——文案与实现背离也是线索。
+
+### 2026-09-02 "界面藏掉的字段"不等于"不会发出去"
+- 现象:r87 能力表只驱动控件显隐,保存与协议组装不看它;换模型后旧值原样下发,官方接口 400,用户界面上无处可清。
+- 规矩:①字段可用性(能力表)必须在**请求组装的共同经过点**门控,前端显隐只是它的投影;②前后端各抄一份的表迟早漂,照 avatar.js 先例放 server/utils 由 client 再导出;③测试要有"换模型/换方言后残值不下发"的负向用例,只测"设了就发"必漏这一类。
+
+### 2026-09-02 放开一个原本写死的参数 = 重审所有默认它写死的消费方
+- 现象:r87 把生图 `n` 从硬编码 1 放开成 1–4,但同步取图 `extractImage` 仍只取 data[0],多张已计费却丢弃;真机只测了 apimart(任务制多图链本就通),官方同步链漏测。
+- 规矩:①放开/加宽任何参数前 grep 该参数的全部消费方(尤其"取第一个""恒 1""单数形态"这类隐含假设);②真机验证必须覆盖每条协议分支(同步/任务制各一),不能只测手头能免费打的那条;③文案里的能力承诺("会分别落盘")要么由测试证明,要么不写。
+
+---
+
+## MCP · 插件 · 技能
+
+**MCP 一键添加 = 自维护精选清单,不接 registry**(v0.2.63):照抄 builtinProviders.js 模式建 `client/src/utils/builtinMcpServers.js`,McpForm 新增态加「快速模板」下拉回填,零后端改动复用 POST `/api/mcp`。**包名漂移坑**(写死必过时,首发查官方 README/npm):github `@modelcontextprotocol/server-github` 已 archived→用远程 `https://api.githubcopilot.com/mcp/`;brave 搬到 `@brave/brave-search-mcp-server`(需 `--transport stdio`);fetch 官方只 Python 版 `uvx mcp-server-fetch`;context7/tavily 有官方远程端点。env 逐字:`GITHUB_PERSONAL_ACCESS_TOKEN`/`TAVILY_API_KEY`/`BRAVE_API_KEY`。
+
+**MCP 加了不显示 = mcp list 健康检查超时→回退错文件**(v0.2.67,多机复现):`claude mcp list` 对每个服务器健康检查,服务器多就慢(实测 33168ms),`runClaude` 默认 10000ms 超时→ETIMEDOUT→`buildMcpList` 落 catch→回退读 `~/.claude/settings.json`。但 **`claude mcp add` 写的是 `~/.claude.json`(home 下,不是 .claude/settings.json)**,两个文件!回退读错文件→列表丢。修:①新增 `readUserMcpServers()` 直读 `~/.claude.json` 顶层 mcpServers(秒回)作基底;②超时 10s→60s 降级为尽力而为;③删错误 fallback;④`parseMcpList` 图标:CLI 实际输出 `✔/✘`(U+2714/2718),老正则匹配 `✓/✗`(U+2713/2717)对不上→status 恒 unknown。**fallback 必须读"写入端真正写的文件"**;排"加了不显示"先 POST→GET 真复现看 fallback 命中没。
+
+**MCP 面板"每次都慢" = 健康检查在响应路径**(v0.2.68):`claude mcp list` 耗时剧烈波动 3~33s(卡认证/断连服务器),v0.2.67 把超时 10s→60s 让数据变对却把被超时掩盖的健康检查暴露成可见等待。修:`buildMcpList({liveStatus})`——`false`=只读 ~/.claude.json+plugin list ~300ms 秒回(冷加载);`true`=补 `claude mcp list`(后台 refreshMcpCache)。GET 冷路径返快结果后再后台增强,`?fresh=1` 阻塞做完整。实测冷 GET 0.3s(原 3-33s)。**通用**:凡"权威数据来自带网络往返/健康检查的慢 CLI"绝不放进 HTTP 响应路径,纯文件读秒回 + CLI 后台增强;判据=一个 await 的耗时是否波动不可控(3~33s)。
+
+**paper-search MCP 连不上 + 看不见报错**(v0.2 BV):①命令错——`uvx paper-search-mcp` 报 "Package does not provide any executables"(该 PyPI 包无同名 console-script),正确 `uvx --from paper-search-mcp python -m paper_search_mcp.server`(README 的 uvx 一行是错的);别照抄 README uvx 命令,要 spawn 实跑验证。②看不见报错——GUI ping 走 `claude mcp get <name>` 只报 "Status: ✘ Failed to connect" 不吐子进程 stderr;修=ping 端点对 stdio 失败者自己 spawn(env 合 process.env+cfg.env,6s 超时杀)抓 stderr,前端 PingButton 失败弹可见可滚可关的浮层(原来只塞 title tooltip+✘ 3s 消失)。expandClaudePath 增补 `~/.pyenv/shims`、`~/.cargo/bin`(uv/uvx 常落点)。凡"包装第三方 CLI 且 CLI 把子进程错误抽象成一句话"要提供"直接 spawn 抓 stderr"诊断通道。
+
+**claude mcp add 同名"假成功" + 管道吞退出码**(v0.2.72):`claude mcp add` 遇同名**打 "already exists" 到 stderr 且退出码非零**(既不覆盖也不报错),GUI 的 `runClaude` 只取 stdout→检测不到→假成功。**排查踩坑**:`cmd | head; echo $?` 取的是 head 的退出码不是 claude 的!查命令退出码用 `cmd; echo $?` 或 `PIPESTATUS`。修:`runMcpAdd` 同时看 reject 分支 `e.stderr` 和 resolve 分支 `res.stderr`,命中 `/already exists/i` 抛 `err.status=409`。PUT 改名撞名:改名前 `getServerDetails(newName)` 前置查重(在删旧的之前),否则 remove-then-add 撞名=旧的没了新的没加。delete 端点对 user/project/local 三 scope `claude mcp remove` + 清 disabled/autoapprove/meta,删得干净;stdio 型无持久安装(npx/uvx 运行时现拉,包缓存无害),删后重加=全新配置,各机 ~/.claude.json 独立不跨机冲突。MCP 单工具禁用只能 SDK disallowedTools(记忆 [[mcp-per-tool-disable-sdk-disallowedtools]],CLI 无命令列工具、permissions.deny 只拦不隐藏)。
+
+**MCP 自动同步进 agent tools**(v0.2 CD,官方文档确认):subagent 的 `tools:` 是白名单,MCP 工具必须显式写 `mcp__<server>__*`(server 级)或 `mcp__<server>__<tool>`;**`mcp__*` 全通配只能用于 disallowedTools 黑名单不能用于 tools 白名单**;不写 tools 字段=继承全部工具。名称转义:冒号→下划线(`plugin:context7:context7`→`plugin_context7_context7`),连字符保留。GUI 在 MCP 增删时 `syncMcpToAgents({add,remove,files})` 把 `mcp__<server>__*` 同步进 `~/.claude/agents/` 下所有 .md 的 tools 行(**add-only 幂等**,无 tools 字段跳过;新建 agent 同步当前所有 MCP;启动 9s 后回填)。plugin 型 MCP 不在 ~/.claude.json mcpServers 不在同步范围。
+
+**官方插件一键安装 + 与 MCP 去重**(v0.2.75):官方 marketplace=`claude-plugins-official`(仓库 `anthropics/claude-plugins-official`,203 个但只约 50 个 Anthropic 自维护)。`claude plugin install <name>@claude-plugins-official` **完全非交互**(退出码 0 无 TUI),落 ~/.claude/plugins/ 记进 installed_plugins.json(key `name@marketplace`)。**插件 vs MCP 重叠**:playwright/context7/github 这些"官方插件"本体就是一条 .mcp.json→走插件安装比手填 MCP 更省事(自动配+plugin update 版本管理)→从 builtinMcpServers 移到 builtinPlugins(12 个 0 配置精选)去重;复合插件(feature-dev/pr-review-toolkit/hookify)无 MCP 等价物是插件清单独占价值;排除需登录/key/Docker 的(github/linear/firebase)和依赖本机 LSP 二进制的 12 个 LSP 插件。调研外部生态先用本机 CLI 拿一手(`claude plugin marketplace list`)比 web 搜准;"官方 marketplace"≠全是官方维护。
+
+**uvx 型 MCP 加 uv 检测(只检测 uv 不管 python)**:`uvx <tool>` 缺合适 Python 会自动下载托管 CPython。detectUv 跨平台已知路径(踩真机补的):mac 我的 uv 在 `~/.pyenv/shims/uv`(pyenv 垫片,常规列表会漏);Windows winget 装 uv 在 `%LOCALAPPDATA%\Microsoft\WinGet\Links\uv.exe`(不在 WindowsApps,那是 MSIX 别名)。策略 PATH→login-shell(`sh -lc command -v uv`)→已知路径。
+
+**技能三态 + 插件 skill 落点**(v0.2.147,记忆 [[skills-three-state-and-plugin-location]]):两套体系——①本机 Skill 在 `~/.claude/skills`(GUI 三态:添加/归档=移出加载目录天然停用可恢复/删除需重下,id 挡路径穿透);②插件 skill 在 `~/.claude/plugins` 缓存以 `superpowers:xxx` 命名不进 skills 目录、用 `claude plugin` 管、不受三态影响。用户问"装了本机列表看不到"多半是插件 skill;"删 GUI 会不会删 claude"都不碰插件缓存和本体。
+
+**skill 版本"不显示" = frontmatter 两种格式**(2026-07-09):Anthropic 官方 skill 把版本嵌在 `metadata:` 下缩进 `version:`(design/read/write/teacher-paper 等 6 个),顶格正则 `^version:` 全漏。parseFrontmatter 兜底解析缩进 version(顶格优先)。解析第三方约定文件前先抽样真实文件看格式变体。
+
+**Gitee/多 host skill 导入**(2026-07-09):Gitee 的 `git/trees/:sha?recursive=1` API 与 GitHub 完全同构(分支名可当 :sha,返回 `{tree:[{path,type:'blob'|'tree'}]}`),locateSkills 无需改。坑:raw URL `gitee.com/:repo/raw/:branch/:path` 返 302 跳转(curl 不加 -L 看到 HTML 跳转页),但 **node fetch 默认 redirect:follow** 自动跟到真实内容→直接 fetch 即可,别被 curl 假象误导。GitLab tree API 分页(per_page≤100)shape 不同、单独处理。抽象成 HOSTS 适配器(api/tree/raw/label)。id 校验正则放行纯点名是路径穿透大坑(v0.2.165):`/^[a-zA-Z0-9._-]+$/` 允许 `.`/`..`→`join(DIR,'..')`=父目录,delete/rm 直接删整个 ~/.claude;必须 `(?!\.+$)` 排除纯点名,grep 全仓同款一起改。
+
+### 2026-08-31 移植他人功能时,"模型怎么知道它存在"本身是独立移植面(r66 补 genui 教学层)
+- 事故:r64 移植 dsh-genui,渲染器/技能/安全层全搬齐、验收全过,但**上游是两层教学**——①~2KB 精简描述注入每次系统提示(围栏语法+类型白名单+关键规则,注释明言 "Deliberately slim: the skill carries the full mapping")+②15KB SKILL.md 按需查字段。我们只搬了②,①整层丢失 → 模型默认不知道 genui 存在,渲染开着也白开,用户装完问"为啥还要装技能才能用"才暴露。
+- 根因:BRIEF 决策"避免 15KB 常驻、做成按需技能"把两层压扁成一层看,躲 15KB 时把 2KB 的开箱即用一起否了。调研文档写了 494 行也没把"能力发现/教学"单独列为移植面——所有人盯着"渲染对不对、安不安全",没人问"模型凭什么会用它"。
+- 规则:移植/集成任何"模型输出驱动"的功能,**教学层(capability discovery)单独立项核对**:上游靠什么让模型知道语法(系统提示注入?工具描述?技能?几层?),逐层决定搬/裁/替,禁止默认"有个文档就算教了"。分层设计(常驻契约+按需细节)是刻意取舍,压扁前先找作者注释。
+- 附:验收测试也测不出这类缺失——测试全是"给定围栏→渲染对",没有"不给提示→模型会主动产出围栏吗"的端到端;后者要真模型,黑盒清单里应显式有一条。
+
+### 2026-09-02 uvx 预设不钉传递依赖 = 上游大版本一发就全网连不上
+- 现象:内置 paper-search MCP 预设靠 uvx 每次解析最新依赖,mcp 2.0(FastMCP 改名)发布后 5 周内公开版用户点添加即 ModuleNotFoundError;本机因私有配置钉了 mcp==1.* 而毫无察觉。
+- 规矩:①`uvx`/`npx -y` 类"永远最新"的预设,对已知会破坏性升级的核心依赖(mcp SDK)显式钉大版本,并在注释里写清解钉条件;②发版前用干净环境(不带本机缓存/配置)起一遍每条内置预设,看能否连上;③自己机器"能用"不能证明公开版能用——本机私有配置是最容易掩盖公开版故障的地方。
+- 补记(第二次断网):死掉的代理会留下它起的测试服务(6703/6704 两个 node),重派前必 `lsof -iTCP:6703-6709 -sTCP:LISTEN` 逐个看清命令行再按 PID 杀,否则新代理"先 lsof 再占"会全部避让到别的口甚至误判端口被占;仍禁按端口段批量 kill。
+
+### 2026-09-03 bot 常驻代理的 launchd 标签是 com.wsxwj.anthropic-proxy
+- 重启命令:`launchctl kickstart -k gui/$(id -u)/com.wsxwj.anthropic-proxy`(plist 在 ~/Library/LaunchAgents/com.wsxwj.anthropic-proxy.plist,进程 `node ~/.claude/dispatcher/anthropic-proxy-daemon.mjs`)。改了仓库 openai-proxy/anthropic-proxy 模块后必须重启它才生效(ESM 加载时求值)。
+- 补充(2026-09-03):同类坏锁还有"自 merge-base(HEAD, master) 以来 server/** 零 diff"这种 git 分支范围锁(r92/r97/r99 各种过一次),在别的分支上必红。测试设计任务书里明写:禁止 `git diff`/`merge-base` 型断言,"别人没改"只归判官。
+
+---
+
+## CLI / SDK 行为事实
+
+**(2026-08-10/v0.2.284) 基线提交按钮四缺陷=单测 fixture 缺"用户真实退化形态"**:r5 修 Bug7 后用户实测当场打回——按钮在「空文件夹 + 零提交巨型父仓(整个 ~/Desktop/claude 被意外 init)」上无效循环。四缺陷:①`git -C 子目录 add -A` 无 pathspec=扫整棵父树(git≥2.0)→15s 超时;修 `add -A -- .`;②"没东西可提交"静默跳过→空文件夹永远零提交;修=无 HEAD 时 `commit --allow-empty`(基线只要 HEAD 存在);③成功/部分态被重探测 effect 无条件冲掉→用户看不到任何反馈;④客户端探测 fetch 失败误显"不是仓库"(fail-safe 必须不显横幅)。追加判官揪出:init 异步回调无 cwd 归属守卫→慢 init 期间切项目,结果写到别的项目头上(串扰家族老模式,写 state 前必须 `mine()` 比发起时闭包)。**教训:四轮判官都没抓到,用户一次实测就炸——fixture 全是"有文件的仓库",没造"空文件夹/零提交父仓"这种用户真实退化形态;涉及文件系统状态的功能,fixture 必须枚举退化形态(空/巨大/嵌套/无提交/无权限)。**
+
+**(2026-08-10/v0.2.283) 回合中注入(steering)原生语义 + GUI 接线四坑**:SDK streaming-input 回合进行中 push 第二条 user 消息 = **同回合吸收**(1 init/1 result,下一工具结果边界折叠进当前回合;`priority:'later'` 才排到回合末另起新回合;消息带 uuid 才回吐 `command_lifecycle{queued|started|completed}`,该类型不在 sdk.d.ts,前端要宽松解析)。GUI 落地 `POST /api/chat/steer`(按 sessionId 找忙 slot 做 input.push,idle slot 绝不 push=会开前端不知道的新回合)。四坑:①**makeInputQueue.push 在 close 后是静默 no-op**→200 空吞用户消息;修=push 返回布尔,false→409(finalize 的 keepAlive=false else 分支关 input 但不置 closing/idle,到 finishSlot 置 pumpEnded 之间有百毫秒"伪忙"窗,布尔守卫在 push 本体=所有关流点唯一汇聚位);②发送门注入判据必须 `activeProcRef||backgroundPidRef` 与 ⚡ canSteer 同口径——用 streamingRef 会把回滚 tearingDown 4s 替换窗内的手打消息注进必死 slot 随 abort 丢;③steer 已送达但折叠前停止=CLI 内存队列随进程死+本地气泡被对账清掉→对账清空点前按 `steerId+持久化查无此条` 回捞进队列(不能按角标态判,第三方 10s 兜底会摘角标漏捞;宁重勿丢);④已注入不可撤回(原生终端 Up 撤回是 CLI 内部能力,SDK 无接口)。回滚/重做类"有意打断替换"重发=forceSend 绕入队门+轮询本地两 ref≤4s(禁裸 await 控制调用)+与 handleStop 对称三件记账(stoppedPidsRef/清 backgroundPid/后台态先 fire-and-forget /stop hard)。
+
+**agent-teams(teammate)三轮反转终版(2026-07-16 fable 反编译+抓包,推翻前一轮"空开关"结论;记忆 [[agent-teams-not-visualizable-headless]])**:①**flag 是真实开关**——门控 Agent 工具 **schema 字段**(`name/team_name/mode`,关=模型没法给 agent 起名)+ teammate 提示词,**不门控工具名单**(工具列表恒同,这正是误判来源)。②前一轮"开/关工具集逐字节相同→空开关"是**实验污染**:用户 settings.json env 里早写着 `=1`,CLI 启动 `Object.assign(process.env, settingsEnv)` **自注入**→A/B 两边其实都开着;**测 CLI env 开关必须用干净 CLAUDE_CONFIG_DIR**,且"工具列表相同"≠"无行为差异"(schema 字段/提示词也是门控面),拿不准就反编译二进制找门控函数+本地 capture server 冒充 BASE_URL 抓真实发给 API 的 tools。③headless(=GUI 的 SDK 路径)真 in-process teams **永不初始化**(`initializeSessionTeam` 带 `!pn()` 守卫,不建 teams 目录),但 **teammate-lite 完整可用**:命名后台 agent+`SendMessage{to:名字}`续聊(记上文)+完成通知唤醒 lead,全流经父 stream-json、GUI 事件通道已全接。④GUI 唯一该做=显示层读 `input.name` 显真名(v0.2.225 落地);别做 env 注入/GUI 开关(settings.json env 就是原生开关,GUI 注入是假开关)/`local_agent` 队友标记(所有后台子代理共有)/"队友"文案。settings mtime 已在 compatKey,改 settings 自动重开进程。
+
+**后台化子代理"工作中却显示已完成"=收尾路径不止一条 + abort≠杀进程**(2026-07-13,v0.2.214,用户实报深度调研子代理,fable 两轮复审各揪一个缺口):run_in_background 子代理(深度调研等)派发后本回合顶层 result 先返回、子代理仍在后台跑,真正 task_notification 几分钟后(跨回合)才到。**根治要点三条,少一条都漏**:①标记"该 agent 由 task_notification 权威收尾"必须**持久钉在 activeAgents 条目上**(`taskManaged:true`),不能用 per-stream Set——reattach 后 Set 空(task_started 断连前实时投递不回放)会重新误标;②收尾路径**不止顶层 result 兜底**,`finally` 块**每回合 done-break 都跑**(不只停止),也级联 finalizeAgent,两处都要 `if taskManaged continue`;③`finally` 的"是否收后台子代理"必须看**进程是否真被杀**而非"客户端流是否 abort"——`abortRef.abort()` 有两条"断流不杀进程"的路径(后台化 backgroundify、切会话 detach,后者注释明写 Do NOT POST /stop),只有 POST /chat/:pid/stop 的路径(停止/加速/编辑重发)才算真杀。用 `killedRef`(send 起始重置,4 个真杀点置 true,catch 里 `if killedRef turnAborted=true`)区分;误当停止会把后台子代理钉成 sticky stopped、之后真 notification 被终态守卫忽略、卡到重载。taskManaged 的 resultSeen 是"已派发提前回执"非真完成,停止语义要 `&& !taskManaged` 排除(否则回执让停止标 done)。**既有限制**(非本次引入):live 期 notification 不来则卡 working 直到重载(重载读派发回执 toolCall.result→done,跨重载表达不了"后台运行中")。教训:改停止/收尾链前先列全【所有 finalizeAgent 调用点】(task_notification/顶层 result/finally/task_updated 四处)和【所有 abort 调用点】(区分杀/不杀),FSM 把每条路径×正常完成/停止/detach/reattach 全跑一遍——这链 v0.2.131/133/209/210/211/214 烧了六版。
+
+**workflow 实时可见=父流 task_started(local_workflow) 建条目,不是磁盘轮询**(2026-07-13,v0.2.212,fable 实测定档):Workflow 工具起的独立 runtime agent 不发带 parent_tool_use_id 的 stream 增量(内层 agent 实时不可见),但父流【实时发】`{type:'system', subtype:'task_started', task_type:'local_workflow', workflow_name, tool_use_id}` + task_progress(带 description)+ 权威 task_notification(全带同一 tool_use_id=主回合 Workflow 工具块 id)。GUI 已在收这些事件但被"activeAgents[tuid] 必须已存在"挡住 no-op → 没人给 Workflow 块建条目。修=纯客户端小改:task_started(local_workflow) 时 upsertAgent(tool_use_id,{workflow:true,name:workflow_name,status:'working'}),task_progress 滚动 description,task_notification 走现有 finalizeAgent 自动收尾;监控加"工作流"badge。**workflow agent 不写 ~/.claude/sessions 注册表**(扩 /api/agents/active 那条路作废);磁盘转写在 `<sid>/subagents/workflows/wf_*/agent-*.jsonl` 实时出现(session-reader 已递归读=历史可见),要"内层 agent 各自实时卡"才需中改磁盘轮询第四源(mtime 判活+journal.jsonl 的 result 定终态,不猜时长)。启用需 query 传 enableWorkflows:true。
+
+**--bg 后台代理泄漏进 cli-session 区→pid kill 连坐**(2026-07-13,v0.2.212,fable 核查):`claude --bg` 后台代理有正确停止端点(/api/agents/background/stop→`claude stop <id>`),但它同时以 cli-session 身份被 /api/agents/active 列出(sessions 注册表 kind='bg'),前端"Claude 子进程"区给它一个走 pid kill 的停止按钮→多个 --bg 代理 pid 都指向同一 CLI supervisor→**连坐全停**(后端注释早警告)。修=server 共享出口一行 `if (s.kind==='bg'||s.kind==='background') continue`(注册表文件 kind='bg'、`claude agents --json` 是 'background',两处都跳)。App.jsx 消费 /agents/active 处都先过滤 kind==='chat-process',跳过 bg 零影响;bg 代理仍在后台代理区正确显示。
+
+**嵌套子代理收尾必须级联,监控卡死根因=孤儿 activeAgents 条目**(2026-07-13,v0.2.211,fable 评估+opus 实测):能起 Task 的自定义 agent(orchestrator/web-search-agent 等 .md tools 含 Task 的,官方普通子代理剥离 Task 但这些没剥)起的嵌套子代理 B,经 `upsertAgent(B,{model})`(B 出内容时 parent_tool_use_id=B 触发)建成**独立 activeAgents 条目、无 status、无 sessionId**;同时 B 作为 A 的一个 toolCall 挂进 A.toolCalls。监控 working 桶命中 `!a.status` → B 永久转圈;三条收尾路径(task_notification 按 tool_use_id、顶层 result 只扫 currentToolCalls 顶层、停止 finally)全够不着 B(实测嵌套 B 的父流不发以 B 为 tool_use_id 的 task_notification)。修=**finalizeAgent 级联**:收尾后顺 `ag.toolCalls` 找 `activeAgents[tc.id]` 存在且非终态的后代递归收(visited 防环,`activeAgents[tc.id]` 存在即证明是子代理不是普通工具因 tool_use id 全局唯一);停止 finally 也改走同一个级联(tnStatus='stopped' 时按 resultSeen 决定 done/stopped)。task_notification/顶层 result 共用 finalizeAgent 故自动获得级联。⚠️zustand 陷阱:`st=getState()` 捕获后 `upsertAgent` 的 set() 换新 map 使 `st.activeAgents` 成陈旧快照——级联递归里每次重读 `st.activeAgents[id]`(而非闭包旧值)+visited 去重才对。
+
+**分屏"活动会话"回退劫持 selectedProject**(2026-07-13,v0.2.211,fable 渲染排查+opus 验证,全项目唯一功能性渲染缺陷):`selectedSession` 是 `paneSessions[0]` 的镜像(setSelectedSession/setPaneSession(0) 同写两者)。同步 effect 让左侧 selectedProject 跟活动窗格项目走,取活动会话用了 `paneSessions[activeTabIndex] || selectedSession`——分屏焦点在 pane1 时删其会话(setPaneSession(1,null)),回退到 selectedSession=pane0 会话(**另一个项目**)→ effect 把 selectedProject 跳过去(用户实报"列表跳走")。修=同步取值分屏下**只认活动窗格**(`paneCount>1 ? paneSessions[activeTabIndex]||null : ...`),空窗格→activeProjectHash undefined→effect 早退不跳;顶栏标题/权限 chip 用的原 activeSession(带回退)保留不动。通用规则:**分屏下"跟随活动窗格"的派生值绝不能回退到 selectedSession/pane0**——那是跨窗格串扰源(同类记忆 [[per-pane-window-effect-global-state-leak]])。
+
+**子代理权威终点=task_notification 事件,不是 tool_result**(2026-07-13,v0.2.210,实测+opencode 调研,推翻 v0.2.209 的 5s 兜底方案):CLI 2.1.x 把 Task 子代理丢后台跑,父流里 Task 的 `tool_result` 是"已派发"提前回执(实测开工 124ms 就返回,与子代理内容 flush 是竞态)→ 据它标 done = 勾号过早。**正解**:SDK/CLI 为每个子代理发 `{type:'system', subtype:'task_notification', tool_use_id, status:'completed'|'failed'|'stopped'}`(实测恒在子代理真正结束那刻、带卡片键 tool_use_id),这是权威终点。配套还有 `task_started`(建 task_id↔tool_use_id 映射)、`task_updated`(patch.status,**只带 task_id 不带 tool_use_id**,靠 task_started 的映射)。**chat.js 逐条透传所有 SDK 消息**(`for await(m of q) deliverLine(JSON.stringify(m))`),这些 system 事件天然到前端,无需改 server。落地:tool_result 只存结果不标 done;task_notification 按 tool_use_id 精确标终态;顶层 result 作粗兜底(第三方 provider 不发 task_notification);停止 finally 用 resultSeen 区分 done/stopped。**弃用 5s 静默兜底**——审计实锤"子代理跑 30s 长工具时父流静默>5s 会误标 done",时长猜测根上就错。TaskCard 行内勾号也要改:`isDone = agent ? agentDone : !!toolCall.result`(有活跃 agent 时只认 agent.status,别被 124ms tool_result 点亮)。opencode 对照:它子代理是独立子会话、完成信号是 session.idle,但它也踩过"idle 事件不带 parentID 无法归属"(issue #30043)——同类病。复现手法:SDK query + includePartialMessages,打印 `type:'system' subtype:task_*` 事件的 tool_use_id/status。相关记忆 [[subagent-turn-single-result-refutes-debounce]](那条"单回合1个result"没记 task_notification,是缺口)。
+
+**GUI 是 CLI 壳子优先原生**(记忆 [[gui-is-cli-shell-prefer-native]]):CLI/SDK 有的能力(沙箱/权限/压缩/插件市场/更新/slash)一律包一层暴露别在 server 重造;只有纯壳层关注点(输入框撤销/引导/分屏/预览停靠)CLI 没有才自己写。排查 bug 先对齐原生 CLI 行为。
+
+**主 chat 走 SDK query()(已从裸 CLI 迁移)**(v0.2.139 常驻,记忆 [[cli-control-channel-stream-json]][[persistent-mcp-streaming-process]]):`server/routes/chat.js` 的 POST /chat + /stream + /permission-mode + /stop 走 `@anthropic-ai/claude-agent-sdk` 的 `query()`;title/context/usage 仍 bare-CLI。SDK 0.3.191 + CLI 2.1.191 实测:
+- **canUseTool 确实收到 ExitPlanMode**(input.plan+planFilePath)**和 AskUserQuestion**(input.questions=[{question,header,options,multiSelect}]);AskUserQuestion 答案回灌 `{behavior:'allow',updatedInput:{questions,answers:{[问题原文]:label}}}`。
+- **消息形状=裸 CLI stream-json 同构**(stream_event/assistant/result subtype:success/is_error)→前端 SSE 契约零改;多出 hook_started/status/rate_limit_event/post_turn_summary 等新类型,前端忽略未知类型无害。
+- **迁移接线**:permissions.js 的 pending 改双 backend(`res` 给旧 hook / `resolve` 给进程内 canUseTool),新增 `requestPermission()`,`/respond` 透传 `updatedInput`;PermissionPrompt.jsx:AskUserQuestion→allow+updatedInput、approvePlan→allow+POST /chat/permission-mode acceptEdits(SDK 同回合续跑,去掉 respawn)。首个 dogfood 版保留 SDK 自带二进制作兜底;体积优化 `npm i --omit=optional` 砍 237M 留后续。
+- **第三方 provider**:SDK 底层仍 spawn claude 读 env;`env` 选项整体替换(传 `cleanChildEnv()`);必须 `settingSources:['user','project','local']` 才加载 settings.json+CLAUDE.md;`systemPrompt` 显式 `{type:'preset',preset:'claude_code'}`。
+- **避开 237M 自带二进制**:`pathToClaudeCodeExecutable` 指向 `resolveUserClaude()`(`which claude`)。
+- **streaming-input 必需**:`setPermissionMode`/`interrupt` 仅 streaming-input 可用→prompt 传可控异步队列(makeInputQueue),首条推入后保持打开作 control 通道,result 到达再 close(简单 generator 结束→进程关→控制通道死"Query closed before response")。
+- **常驻复用判据**(v0.2.139):回合末不关 input 保活;复用必须"配置键完全一致"——把 settings.json 的 **mtime 算进兼容键**是最省事的 provider/全局配置变更检测(终端 cc-switch 也覆盖,不用挂 watcher)。配套四件:①stop 一律彻底关闭不转 idle;②一切 jsonl 改写端点(删除/trim×3)前置关进程(内存上下文与文件分叉=答非所问);③agents/active 增 idle 态,所有"运行中"UI 判定排除 idle;④空闲超时回收。plan 档热切用 `query.setPermissionMode`,模型变更宁可重开不用 setModel。E2E 首字 6855→1867ms。`getContextUsage()` 等控制方法要 slot.query 存活(draft/首轮/回收时回落旧路径)。**首条消息成本实测**:曾以为 MCP 工具定义是大头,strictMcpConfig 对照只占 ~800/35285 token——真大头是 claude_code preset+全局 CLAUDE.md+技能元数据+记忆索引;方法=SDK 两次 spawn 对照抓 message_start usage,几分钱定案。
+
+**plan/ask 卡片失效终极定论:ExitPlanMode 退役、改走 canUseTool(SDK-only)**(2026-06-25,四次纠正,记忆 [[headless-plan-mode]]):官方文档确证 `ExitPlanMode` 已从文档体系彻底移除;plan 的"待批准"走 **`canUseTool` 回调**(plan 下模型尝试 write/edit 触发),`AskUserQuestion` 仍在但也经 canUseTool 路由,不再是普通可搜索模型工具。**裸 CLI 为什么没有**:canUseTool 是 SDK 包层回调,裸 `claude -p`/stream-json 没这通道→SDK 不注册这俩→init `tools[]` 无、ToolSearch 搜不到。CLI 2.1.191 六种跑法实测 init 工具表全「无」:`-p` plan / stream-json 流式(GUI 真实跑法)/ `ENABLE_TOOL_SEARCH=false` / `--strict-mcp-config` 去掉所有 MCP / `CLAUDE_CODE_PLAN_MODE_REQUIRED=1`;二进制 strings 有 "is not available in this environment / Run it from the Claude Code terminal instead"(工具定义+plan 系统提示完整存在但不发给 SDK 会话);实例:opus 把计划写进 zazzy-launching-sunbeam.md 却调不到 ExitPlanMode。GUI 旧架构"裸 CLI+PreToolUse hook 等模型 call ExitPlanMode"→这俩已不作为模型工具发出→hook 永不触发。**与模型/provider/权限模式全无关**。前面三次错判(qwen 不发元工具/放任模式禁用/CLI 不注册)都是没复现就套结论。**金标准排查**:`claude -p "hi" --output-format stream-json --verbose --permission-mode plan` 抓 init 行 `tools[]` 看目标工具在不在,直接区分 GUI/CLI/模型 哪方没给。docs:agent-sdk/permissions.md、agent-sdk/user-input.md、headless.md。
+
+**Stream closed 真根因 = 子代理打穿 canUseTool 通道**(2026-06-26,推翻"dummy hook 是真修复"):模型在 ExitPlanMode 之前起 Task/Agent 子代理→SDK 为子代理二次 initialize control 流→子代理跑完父回合的 canUseTool 通道未 re-arm→父调 ExitPlanMode 时 80ms 报 "Stream closed"、canUseTool 不触发。对照:`disallowedTools:['Task','Agent']`→100% 正常;起子代理→必现。**dummy hook 无效**:官方那句 hook 只针对 Python;我"加 hook 就好了"是**因果误判**(真正波动的是模型那几次恰好没起子代理,plan 下起不起 Explore 是采样随机)。范围 BROAD:default 模式子代理后连普通 Bash 的 canUseTool 都不触发,SDK 无 re-arm API。**修法(已落地)**:`chat.js` plan 模式加 `options.disallowedTools=['Task','Agent']`(plan 本只读,改 Bash/Read 直跑探索可接受),ExitPlanMode 100% 正常;plan 探索自动放行(canUseTool 里 plan 非写类一律 allow)。非 plan 模式的"编排器委派后父再要权限"仍是已知 SDK 风险(较少见未根治)。**教训**:改了 A 而好转,先排除同时变化的未受控变量 B(这里 B=子代理),否则把运气当修复;packaged app 改完彻底退干净再 ditto 装,别被脏进程/孤儿 claude 子进程带偏。诊断手法:写独立诊断文件(`fs.appendFileSync('~/.claude-gui/sdk-diag.log')` 记 canUseTool ENTER/RESOLVED),packaged app 的 console.log→null 全丢、console.error→共用 server.log 噪音大。
+
+**子代理"勾号过早"= tool_result 与子代理内容的 flush 竞态**(2026-07-13,v0.2.209,真机复现):CLI 2.1.x 把 Task 子代理丢后台跑,父流里 Task 的 `tool_result` 是"已派发"提前信号(实测开工后 124ms 就返回),但子代理真正的 thinking/text 经 `parent_tool_use_id` 事件几秒后才流进来,两者谁先 flush 是**竞态**——所以用户观感"有时正常有时勾号过早、点进去还在流"。前端在 tool_result 一到就标 done(App.jsx),于是勾号完成、内容还在流。**间隙可变(实测 tool_result→迟到内容差 4.2s)故 timeout 去抖不可靠**。权威终点=顶层 `result` 事件(实测恒在所有子代理内容之后)。三段协同修:①tool_result 仍乐观标 done(无迟到内容的干净情况快反馈);②迟到 `parent_tool_use_id` 内容到达 done 的 agent→翻回 working;③顶层 result 把本回合还 working 的 Task/Agent 收成 done。与停止 finally(working→stopped)不冲突(正常完成走②③、停止走 finally)。复现手法:SDK query + `includePartialMessages:true` + 提示起 Task 子代理,打印带 parent_tool_use_id 的 stream_event delta 相对 tool_result 时序;非确定性,多跑几次才见竞态。状态机 4 时序模拟验证(纯函数 sim-agent-fsm)。⚠️这是 UI 状态侧;停止真杀进程是另一条链(chat.js,更危险,单独做)。
+
+**全新机器(从未跑过 claude)四件套**(2026-07-13,v0.2.203,用户新机实报批):①`~/.claude` 目录不存在,settings.json 全部写点 writeFile 直写必 ENOENT("找不到 settings.json")——boot 一次 `mkdirSync(recursive)` 根治,别逐写点补;②CLI 零凭证才报 "run /login"——settings env 有 BASE_URL+**任意** token 就直接发请求(mock 上游实测,AUTH_TOKEN/API_KEY 两形态都不拦),报 /login=切 provider 时没写 token(anthropic 代理路径曾赌 OAuth 兜底,openai 路径早写了占位 `sk-openai-proxy`,不对称);③无 `~/.claude.json` 时终端交互式 claude 进首次向导强制官方 OAuth→墙内报"不支持某些国家",写 `hasCompletedOnboarding:true` 跳过(cc-switch 同款;headless -p 不走向导所以测不出);④两步保存(添加成功+切换失败)不能报整体"保存失败"→用户重试=重复条目,写端幂等查重+前端如实提示。**测试手法**:HOME 覆盖模拟新机;mock 上游回 401 记录请求(到达=认证门槛已过)替代 ECONNREFUSED(CLI 重试风暴假死);env -i 防 shell 继承的 ANTHROPIC_* 污染;mac 无 timeout 命令用 `perl -e 'alarm N; exec @ARGV'`。
+
+**always-allow suggestions 默认 destination=localSettings,且混着会话级条目**(2026-07-12,v0.2.201):CLI 给 canUseTool 的 suggestions,allow 规则自带 `destination:"localSettings"`(落**项目** `.claude/settings.local.json`,非全局)——GUI 权限卡承诺"写入 ~/.claude/settings.json"+权限页只读全局,原样返回=用户批的规则永远看不见。修=addRules 的 destination 统一改写 userSettings。**坑**:suggestions 同组还带 `addDirectories(cwd, session)` 和 `setMode(session)`,第一版连 addDirectories 一起改写→点一次"始终允许"就把项目目录**永久**写进全局 additionalDirectories=越权,E2E 实抓才暴露;只能改写 addRules,其余保持原 destination。E2E 手法:直接 `import { query } from sdk.mjs` + `pathToClaudeCodeExecutable=which claude` + default 模式跑 `touch`(echo 被安全白名单自动放行不触发 canUseTool),canUseTool 里打印真实 suggestions;测完 settings.json 残留要手术式清除(别整文件恢复备份,期间别处可能写过)。
+
+**canUseTool 无法区分子代理来源**(v0.2 CQ):`CanUseTool(toolName,input,options)` 的 options 只有 signal/suggestions/blockedPath/decisionReason,**无 agentName**→plan 模式无法让子代理走 default 独立权限;plan 写类拦截在 SDK 层(早于 canUseTool)改也放行不了。记为已知限制(plan 下子代理仍能 Read/Bash/Grep 读类)。
+
+**子代理弹窗硬限制 + agent tools=md∩注册表**(2026-06-21,记忆 [[subagent-toolset-not-from-md-todowrite-primary-only]][[subagent-turn-single-result-refutes-debounce]]):忠实复刻 GUI spawn 实测——**AskUserQuestion/ExitPlanMode 在子代理(Task)上下文被 CLI 硬剥离**(tool_use 恒 0,只降级成纯文本 tool_result 回主控);但**主控本体能弹**(`--agent X` 主控工具=`agent.md tools ∩ 真实注册表`,加进 agent.md tools 即可)。授予公式:`子代理实际工具=agent.md tools ∩ 注册表 ∩ 子上下文允许集`。**2.1.183 真实注册表 31 内置工具,已删除**:`Grep/Glob/LS/NotebookRead/TodoWrite/BashOutput/KillShell/SlashCommand`(写错名静默丢,搜索靠 Bash,后台读取用 `TaskOutput/TaskStop/Monitor`);无 TodoWrite 改成 `TaskCreate/TaskUpdate/TaskList`。改 `~/.claude/agents/*.md` CLI 直读即生效不用重建 GUI;判"谁发的"看 tool_use 的 `parent_tool_use_id`(None=主控,有值=子代理)。起子代理的回合只 1 个 top-level result 无"中间 result"(4s 去抖前提错)。别凭记忆假设工具名,改 agent 前 headless 抓 init 的 tools 看真实注册表。
+
+**子代理模型解析**(记忆 [[subagent-task-model-alias-collapse]]):子代理=CLI 内部 Task(读 ~/.claude/agents/*.md 生效);alias **不塌缩 models[0]**,CLI 经 `ANTHROPIC_DEFAULT_*_MODEL` 重定向,GUI 切第三方已自动设好→agent 本就跨 provider 工作。被不被调用取决于主模型工具遵循度(qwen3.7-plus/gpt-5.4 当主控不发元工具的 tool_use)。会话内继承的 `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL=deepseek-*` 会打挂子代理/WebSearch(Agent 调用不指定 model 继承父会话已解析的具体 id 即可)。
+
+**PreToolUse hook 批准格式**(2026-06-04):`{"continue":true}` **不批准工具**(只表示别中止会话),CLI 回落 `--permission-mode` 在 headless default 拒绝。批准必须用 `hookSpecificOutput.permissionDecision`(allow/deny/ask)+ `permissionDecisionReason`(拒绝也可旧版 `decision:"block"`)。plan 模式注入 PreToolUse 拦"所有"工具会冻结(plan 依赖工具自动放行才能探索,一刀切=静默死锁);修=`CGUI_PLAN_MODE=1` 放行除 ExitPlanMode+写类外的所有工具。放任(bypassPermissions)下两处 mid-stream auto-allow(useWebSocket 新 permission:request、App.jsx 切放任批量放行)都要排除 `AskUserQuestion`(否则 auto-allow→CLI headless 跑不了→AI 退化成正文提问),与服务端 `CGUI_BYPASS_ALL_EXCEPT_ASK` 对齐。验证文档时模型类工具不可用就 `curl 文档.md`(Claude 文档站有 .md 版)grep;hook 脚本 CLI 每次 spawn 现读,改完无需重启下次对话即生效。
+
+**CLI stream-json 错误形态**(记忆 [[cli-stream-json-error-shape]]):API 错误走 result 事件(subtype 误标 "success" 但 is_error,文案在 result 不在 errors/subtype);前端检测必须取 `event.result`(签名自愈不触发的根因)。
+
+**remote-control 需要 PTY 不需要窗口**(2026-05-29):`claude --remote-control` 检查 `isatty()`(stdout 是不是 TTY),不是"有没有窗口";stdout 是管道→退回 print 报错,给伪终端即进交互模式连 Anthropic relay。`-p`(每轮 spawn 无 TTY)无法开远程控制。实现:`pty.spawn($SHELL,['-lc','claude --remote-control --resume <uuid>'],{cwd,env})`(登录 shell 解析 PATH,裸 claude 经 node-pty 直接 spawn 会 posix_spawnp failed)。双写护栏:RC pty 长期持有 session jsonl,GUI 不能再对同 session 起 `-p`。切第三方 provider 后 remote-control 不可用(依赖 Anthropic relay);Tailscale+GUI 手机控制与 provider 无关。**node-pty 1.1.0 prebuild spawn-helper 丢可执行位**→`posix_spawnp failed`(连 /bin/ls),`postinstall: chmod +x node_modules/node-pty/prebuilds/*/spawn-helper`。**node-pty 打包体积**:prebuilds 捆绑所有平台二进制,mac 上 win32-* 58M 永不用→postinstall `rm -rf node_modules/node-pty/prebuilds/win32-*`(87M→29M)。
+
+**jsonl 的 cwd 不在 system 记录**(2026-05-28):cwd 挂在 attachment/user/assistant 记录(首次约第 3 行),system init 记录**不带** cwd。`head.find(r=>typeof r?.cwd==='string' && r.cwd)?.cwd`(不限 type)。依赖外部工具产物字段位置前先 `head -12 | 逐行 JSON.parse 打印` 实测;单测用贴近真实的数据形态(第一次用 system 记录带 cwd 的假数据误判通过)。**/context 无法获取根因=cwd 哈希不匹配**(v0.2.166):/context 走 `claude --resume <sid> --fork-session`,CLI 按【进程 cwd 字符串哈希】定位 `~/.claude/projects/<hash>/`;前端传空 cwd→后端回落 homedir→哈希不匹配→"No conversation found"→2.5s 返回无 "Context Usage"。**与 provider 无关**;根治=后端从会话 jsonl 消息行读权威 cwd(`"cwd":"..."`,首行无但消息行有)。/context 对每类各打一次 count_tokens 网络 API(记忆 [[context-cmd-calls-count-tokens]],非纯本地);`getContextUsage()` 地板≈3s 不是"秒级"(v0.2.182,keepAlive idle 场景 2.8-2.9s,count_tokens 网络往返成本照付,Anthropic 无 Claude3+ 离线 tokenizer)。
+
+**后台代理停止用 `claude stop <id>` 不能 pid kill**(v0.2.98):`claude agents --json` 里多个后台代理的 pid 都指向同一 CLI supervisor,按 pid kill 会连坐全停/停不动。官方 stop 保留会话可 attach。`--bg` 与 `-p` 冲突(帮助没写),prompt 走位置参数 `claude --bg '<task>'`;`claude stop/logs/attach <id>` 子命令存在。后台任务落盘 .output 的 mac/win 两种路径形态(记忆 [[bgtask-visualization-architecture]],win=`AppData\Local\Temp\claude\` 反斜杠无 -uid→纯 POSIX 正则让 Win tail 全 400);三态 running/idle/stopped 不谎称完成;停止按 OS 进程杀(mac lsof/win CIM)。
+
+**prompt-suggestions:d.ts 有类型≠功能可用**(2026-07-03):CLI 2.1.198 有 `--prompt-suggestions` flag、SDK 0.3.191 有 promptSuggestions 选项,但四种组合双轮真发**全部 0 建议**(疑似服务端 statsig 灰度未放量)。涉 CLI 新功能先 headless 双轮真发验证再设计 UI 依赖;接线可保留(默认关+标实验+优雅降级,放量自动生效)。"死件"最高 ROI:prompt_suggestion 服务端 100% 就绪、前端从没接=从没生效,接前端开关+chip 即激活(v0.2.181)。chat.js result 后建议等待窗(suggestOn,3s)内 SDK 生成建议那次调用限流会发 `system/api_retry`→走 cancelClose 清 closeTimer 无重武装;post-result 窗的 cancelClose 豁免名单要含 `system`(不只 rate_limit_event),否则回合挂死"正在预测下一步输入…"(v0.2.191);纯信息事件不代表还有回合,真续跑只会是 assistant/tool 事件。
+
+**其它 CLI 事实**:`autoCompactWindow` 是官方 settings.json 键(int 100000–1000000,env `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 优先);`claude -p /insights` headless 可用报告落 ~/.claude/usage-data/report-*.html;`claude project purge -y <path>` 只删 ~/.claude/projects/<hash> 不碰源码;/fast 无 headless 等价物(v0.2.98)。`--no-session-persistence` 不留 jsonl(实测 CLI 2.1.201 成功/SIGKILL/错误路径+运行期 0.5s 粒度探测均无)但仍在 `~/.claude/projects/<cwd hash>/` 建 hash 目录(memory/索引痕迹)→标题调用 cwd 固定 `tmpdir()/cgui-title`(v0.2.129,headless 辅助调用一律用专用 tmp cwd 物理隔离,CLI 落盘/索引跨版本不可依赖)。npm claude-code 是 wrapper 包,真实二进制在 `<全局 node_modules>/@anthropic-ai/claude-code/bin/claude.exe`(全平台叫 .exe,mac 是 Mach-O 可直接执行)→resolver 直扫这路径与 PATH/shim 解耦。`[1m]` 是 Claude Code 通用 1M 后缀不止官方(记忆 [[one-million-context-suffix-anthropic-only]],MiMo 官方支持 mimo-v2.5-pro[1m],开关对所有 provider 开放)。第三方 /context 走本地估算恒显全类别 GUI 无 bug(记忆 [[third-party-context-degraded-autocompact]])。
+
+**标题生成兜底要含调用失败**(v0.2.98):CLI/provider 报错(未登录/鉴权/限流)时 stdout 是英文错误文本,只拦中文元话术会漏→错误当标题。加 `/not logged in|invalid|api key|rate limit|error:|failed/i` 回退用户消息截断。
+
+**"claude 检测不到"多是没重启非 bug**(记忆 [[stale-backend-no-restart-not-a-bug]]):升级 ditto 进 /Applications 但没完全退 app→6677 还跑旧版后端。诊断 `curl 6677/api/health` 看 version+ps 看启动时间,`PORT=6699 node server/index.js` 跑当前源码对比证明代码没问题;解法 Cmd+Q 完全退再打开让 Tauri kill_stale 重 spawn。resolver 已有 PATH/login-shell/npm-prefix/pkgBin/固定候选五重兜底仍够不到→给手动路径输入兜底(installed 取 `!!resolvedPath` 非 `!!version`,版本取不到只标 versionProbeFailed;`--version` 因杀毒/npm shim 冷启 >8s 超时不该报"未安装",v0.2.166)。**mac 头号根因 `sh -lc` 不读 .zshrc**(v0.2.146):mac 默认 zsh PATH 常只在 ~/.zshrc,resolver 探测必须用 `$SHELL -ilc`(交互 -i 才 source .zshrc);三个防护:stdin 给 EOF、超时兜底、**从 error.stdout 救回**(rc 末尾非零退出让整体非零→execFileSync 抛错丢掉已打到 stdout 的正确结果)。显式检查端点不该给热路径负缓存下毒(`if(!refresh) _missAt=Date.now()`,v0.2.166)。
+
+### 2026-07-15 思考正文"消失"根因=官方display:"omitted"模式,非bug非中转非GUI能修
+- 新模型(Fable5/Opus4.8·4.7/Sonnet5/Mythos5)extended thinking默认`display:"omitted"`:思考正文**从不返回客户端**(连流式thinking_delta都不推),只有加密进signature;落盘jsonl必为`thinking:""+signature`。旧模型(Sonnet4.6/Haiku4.5/Opus4.6)默认`summarized`返回摘要正文→落盘→"以前能看到思考"的来源。
+- 实测本机数百会话完全吻合官方默认表;redacted_thinking全库0个;claude-official官方直连,空正文是官方API亲自返回,非第三方中转丢。同会话同CLI版本7/14全空→7/15全有正文(服务端/CLI切了summarized),说明会自愈、非GUI的bug。
+- **GUI层sidecar持久化兜底无效**:omitted流式期无正文可抓,存不了。想让新模型显示思考只能让CLI请求带display:"summarized"(CLI/SDK请求参数,GUI壳子不直接控,待CLI暴露开关)。
+- session-reader:786空思考丢弃(c.thinking为空不push)是正确的,不是回归。可选:GUI读到空thinking+signature时显示"思考已省略"客观提示而非空白(区分redacted_thinking才是安全编辑,本项目0个)。
+
+### 2026-09-02 给 claude CLI 传新 flag 必须先探测能力
+- 现象:r89 无条件给 SDK 加 `--system-prompt-snapshot`,该 flag 仅 2.1.25x 起有;老 CLI 报 unknown option 进程直退,等于把用户全线打挂。
+- 规矩:①任何新 CLI flag/env 语义先在本机多版本目录(`~/.local/share/claude/versions/*`)实测最低支持版本;②按 claudePath 缓存一次 `--help` 探测再决定加不加(仓内先例 subscription-usage.js:33);③"是否第三方/是否官方"这类判据全仓只许一个函数,端点与切换路径共用,别在路由里另写 `!!BASE_URL`。
+
+### 2026-09-02 CLI 的"模型不存在"报错是一句人话,错误判定正则要用真机原文当锚
+- 现象:r90 加了"小快档失败→会话模型重跑",但旧 `isErr` 正则匹配的是 `error`/`_error"` 之类,而 CLI 对不存在的模型输出的是「There's an issue with the selected model (X). It may not exist or you may not have access to it…」——一个 error 字样都没有,重跑分支永远不触发。
+- 规矩:①错误判定的锚点必须来自真机抓到的原文(存进 fixture),不能凭"报错总会带 error"的直觉;②任何"失败则回退"分支都要配一条"用真实失败文本触发回退"的端到端用例,否则回退是摆设;③正常标题(2–5 词)要有反向用例证明锚点不误伤。
+
+### 2026-09-02 改共享探测函数=改它所有消费方;能力探测必须对准"实际会执行的那个二进制"
+- 现象:为修标题路径的 Windows 探测,把 defaultHelpProbe 改成 cmd.exe /c 可跑 .cmd;主聊天路径的探测入参在 win32 是 null(SDK 回落自带 CLI 2.1.191),改后探测跑到 PATH 上的 2.1.257 得"支持",把新 flag 交给 2.1.191 → unknown option 每轮失败。改前那条路是"探测失败→不加 flag",误打误撞正确。
+- 规矩:①能力探测的对象必须与实际 spawn 的可执行文件完全同一个;拿不到路径(SDK 回落自带二进制)就按"不支持"处理,不拿 PATH 上的替身猜;②改共享函数前 grep 所有调用方逐个推演新旧行为差,尤其"以前靠失败闭合碰巧正确"的调用方;③SDK 自带 CLI 版本(package.json claudeCodeVersion)与用户 PATH claude 可能相差几十个版本,任何按版本/flag 门控都要分清走的是哪个。
+
+### 2026-09-05 Agent SDK 对比:interrupt 杀后台子代理的官方解释 = 未声明 perTaskStopAffordance
+- 2026-07-27 真机实测"SDK interrupt() 自己杀掉全部在飞 local_agent",当时判为"CLI 与文档不符,保留机制属前瞻"。这次逐版对比 sdk.d.ts 发现 0.3.261 新增 Options `perTaskStopAffordance`,文档原文:不声明则 CLI fails closed,interrupt 连后台 agent/workflow 一起杀;声明后只停当前回合,后台靠 stop_task 逐个停。本机 CLI 2.1.257 二进制已含该串,只是项目锁的 SDK 0.3.191 没这个键、initialize 请求里发不出去。
+- 规则:GUI 行为与 SDK 文档不符时,先对比"项目锁的 SDK 版本"与"用户装的 CLI 版本"是否错位(SDK JS 负责发 initialize 字段,CLI 负责执行;任一方旧都表现为"文档说有、实际没有"),别急着下"CLI 不按文档来"的结论。
+- 对比方法已固化:.devflow/SDK-COMPAT-0.2.375.md 头部 + memory agent-sdk-compat-check-method。
+- 信源优先级(LRN-20260814-001):判 CLI/SDK 能力**先读项目 lockfile 锁定版本的包类型声明与实现**——`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts` 的 `Query.getContextUsage()`、流式 `AsyncIterable<SDKUserMessage>`、`streamInput()`、`SDKUserMessage.priority: 'now' | 'next' | 'later'` 这类声明比网页文档更贴近实际代码链路;官方网页文档只用于补充默认键位/终端 UI 语义。
+
+---
+
+## 安全(注入 / 越权 / 门禁 / rebinding / SSRF)
+
+**(2026-08-19 / r16) 新增任何"拿用户配置的 URL 去 fetch"的调用点,必须过 assertPublicBaseURL —— 两个独立功能同一天栽在同一处**
+- r16 并行做了两个功能(第三方额度查询、自定义生图),两个 fixer 各自独立开发,**两份代码都漏了同一道闸**:
+  - 额度:`probeQuota` 直接拿存储的 apiKey 打存储的 baseURL,只做了协议校验(`safeURL` 拦非 http(s)),没过 `assertPublicBaseURL`;
+  - 生图:下载分支对**上游返回的** `data[0].url` 无条件 fetch —— 而同一个函数里对 baseURL 刚调过一次守卫,唯独漏了这个**攻击者可控性最高**的 URL。
+- **`server/routes/settings.js:1723` 的注释早就把原则写死了**:「SSRF 守卫放在这里 = 所有调用点一次全覆盖,不漏 sibling caller」。新路由就是新的 sibling caller,但没人回头看那句话。**凡新增外呼,这道闸是默认动作,不是想起来才加。**
+- 判官实测出的三条硬事实(都靠本地假上游,零真实 API):
+  1. **URL 后缀不能当证据**:生图原判据是"Content-Type 不是图片 **或** URL 以 .png 结尾"就放行 → `http://127.0.0.1:xxx/internal/creds.png` 回 `text/html` 照样落盘成"图片",内容是内网响应。后缀是攻击者写的。只认 Content-Type。
+  2. **不禁跟随重定向 = 事后校验白做**:守卫只解析 baseURL 主机名,302 跳 `169.254.169.254` 照样发起连接。必须 `redirect:'manual'` + 3xx 判失败。
+  3. **好消息**:跨源 302 时 undici **会剥掉 Authorization**(实测目标收到 `authorization: null`),所以 key 不会经重定向泄漏;成立的风险是**内网盲探测**,以及 DNS rebinding / 守卫上线前存下的老条目这两条绕过写入端守卫的路径。
+- 连带发现(同批):`resolve()` 是纯字面计算**不解软链** —— savePath 里预埋 `evil.png -> /外部/id_rsa` 就能读走任意文件(判官实测 200 + 明文)。本仓 `server/utils/safe-path.js:96` 早防过同一招,新代码又漏。**IO 校验(realpathSync)放路由层,别塞进声明了"零 IO 纯函数"的工具文件**,否则毁掉它的可测性。
+- 另一条同批教训:**"读-改-写"只把写排队等于没排**。生图 CRUD 的 `readImageProviders` 在串行队列外,判官实测并发 5 次 POST **丢了 4 条配置**。既有的 `custom-providers` CRUD 是同款写法(本轮未动),下次碰到一并修。
+
+**路径门禁选型口径 + 校验不改写**(2026-07-13,v0.2.205/206,purge/git/agents 三连同类):凡端点输入语义是【项目/工作区路径或其子路径】(purge、git status/init、后台代理派发、文件浏览、hooks、checkpoints)一律用 `resolveWorkspacePath`(工作区例外:$HOME 外但 ~/.claude/projects 有 hash 的放行)——Windows 用户项目常在 D:\ 等其他盘,用严格 `resolveUnderHome` 必炸"outside $HOME"且往往**静默失效**(GitInitBanner 把 400 JSON 当正常体解析,isRepo=undefined 落 repo 分支横幅永不出现);严格版只留给"任意写目标/涉密文件"(export-session targetPath、files 写)。**新增此类端点时这是默认检查项**。第二口径:**校验不改写**——resolveWorkspacePath 返回 realpath/normalize 后形态(mac /tmp→/private/tmp、Win junction/OneDrive),而 CLI 按【记录时原始 cwd 字符串】hash 匹配项目(chat.js "DO NOT normalize cwd" 是铁证),凡把路径再传给 CLI 做 hash 查找的(project purge、--resume),门禁用解析结果、CLI 传原串;git -C / spawn cwd 按文件系统身份工作则形态无害。审计手法:grep 全部 resolveUnderHome/resolveWorkspacePath/isPathInside/startsWith(home 调用点逐个判"输入会不会合法地在 $HOME 外"。
+
+**localhost 服务三大结构性漏洞**(v0.2.178):
+- **DNS-rebinding 是头号威胁**:"回环免密"+"CORS 用 Origin==自身 Host 自指判定"叠加=攻击者把域名重绑 127.0.0.1,受害者浏览其网页即以伪造 Host 连回环被当本机免密接管全 API。根治唯一=**Host 头白名单中间件挂最前**(主机名∈localhost/127.0.0.1/::1/本机 LAN IP 否则 403,浏览器无法伪造 Host);只查 socket 地址远远不够。WS 升级不走 express 中间件,verifyClient 要单独加同款。复现:`curl --noproxy '*' -H 'Host: attacker.com' 127.0.0.1:PORT/api/...`(mac 有 http_proxy 时必须 `--noproxy` 强制直连,否则走代理看到 nginx 301 假象)。
+- **SSRF+密钥外泄**:任何"用户填 baseURL、server 带存储凭据主动 fetch 并反射响应"的端点=SSRF+密钥漏斗。两层防护:`assertPublicBaseURL`(dns.lookup 解析主机名后拒环回/私网/链路本地/云元数据 169.254.169.254/IPv4-mapped `::ffff:`)+ 带 id 用存储 key 时 baseURL 强制取存储值(不接受请求覆盖)。守卫放**根因函数**内(probeUpstreamModels,3 caller 一次覆盖)别在每个 caller 补(v0.2.179)。手写正则剥端口会吃掉裸 IPv6 冒号(`:\d+$` 把 `::1` 剥成 `:`)→用 `new URL('http://'+host).hostname` 归一化。
+- **plan 模式黑名单必漏,改弹卡**:危险 Bash 黑名单(rm-rf/reset--hard)挡不住 `>file` 清空/`mv` 覆盖/`python -c "shutil.rmtree()"`/`find|xargs rm`。正解=plan 下 Bash 一律弹卡(读类工具仍自动放行),别枚举危险命令。
+- 受保护文件清单覆盖"凭据+启动即执行配置"整类(network/settings/custom-providers 明文 key/.credentials OAuth/.claude.json MCP),write 和 delete 端点共用同一清单。
+
+**回滚+权限审计 P0**(v0.2.177):①**plan 模式最危险假设"SDK plan 层会拦写"**——实测 canUseTool 返回 allow 会覆盖 SDK plan 拦截,plan 写类必须**服务端直接 deny 不靠弹卡**(用户点允许就真写了);plan 下非写类默认全放行(含任意 Bash),危险 Bash 也要 deny(plan 反比 default 不安全)。②安全判定必须服务端权威(canUseTool),客户端那份只做 UI 渲染("两端各一份改一处同步"的注释是定时炸弹,同步对象 permission-bridge.js 早删了→单端化失效)。③**Write≠新建**:`toolUseResult.type` 才是真相(create/update),按工具名当"新建"授权删除会销毁被覆写的 gitignored 文件。④并行工具在 jsonl 交错布局(asst A/asst B/res A/res B),"配对 tool_result"要向后扫全部行按 tool_use_id 集齐。⑤安全/权限硬 deny 前先 grep 有没有既存合法例外(plan 一刀切 deny 把客户端"plan 可写计划文档"特性打成死代码,v0.2.179;对齐而非覆盖)。
+
+**路径门禁:$HOME 之下是 mac 惯性,Windows 项目常在别的盘**(v0.2.141/173):
+- 白名单"claude 用过的工作区"(`~/.claude/projects` 的 hash 目录反查,CLI 同款 dash 编码 `replace(/[^A-Za-z0-9]/g,'-')`,大小写不敏感+realpath 前后两形态)。**坑**:cwd=`/` 跑过一次 claude 就留 hash 条目 `-`,祖先游走到根必命中→整盘放行门禁失效;文件系统根必须排除。白名单/门禁改动必须用"应拒绝的路径"做负向实测。
+- 抽 `resolveWorkspacePath` 共享(门禁+工作区例外+realpath best-effort:目标可能不存在如恢复已删文件,往上找最近存在祖先 realpath 再拼回,否则 mac /tmp→/private/tmp symlink 解不开 hash 对不上)。同一假设("路径必在 HOME 内")的坑会在每个独立门禁点重复爆发(files.js 加过例外但 file-changes revert/checkpoints 没同步)。requireCanonical 的 `../.` 段检查在例外分支也要保留。
+- **startsWith(HOME) 前缀检查可被同级目录绕过**(2026-05-29):`real.startsWith('/Users/wsxwj')` 对 `/Users/wsxwj2`、`/Users/wsxwj-backup` 也 true→越权。修 `real===HOME || real.startsWith(HOME+path.sep)`。id 校验放行纯点名是路径穿透(见技能节)。
+
+**后端服务杂项**(合并):①**chokidar v4 移除 fsevents→大目录 EMFILE**(2026-05-29):`[file-watcher] error: EMFILE: too many open files, watch`——v4 在 macOS 改用 fs.watch,每个被监听目录占一个 fd,上千 jsonl 的 ~/.claude 撑爆 fd 上限(v3 用 fsevents 系统级不占 fd 无此问题)。修=`{usePolling:true, interval:2500, binaryInterval:5000}`(stat 轮询对 EMFILE 免疫,interval 调大控 CPU)或降级 v3;`ulimit -n` 治标不可靠。②**开放 LAN 绑定必须同步放宽 CORS**(2026-05-29):改绑 0.0.0.0 后手机 `http://<lanIp>:port` 的 Origin 是 LAN IP,被只放行 localhost 的 CORS 挡 403"开了也连不上";LAN 模式放宽 origin(访问控制交给 tailscale/局域网),WebSocketServer({server,path}) 默认不校验 origin 无需改;`os.networkInterfaces()` 枚举 LAN/Tailscale IPv4(过滤 internal)直接展示访问地址。③**node fetch 不读系统代理是服务端联外隐形地雷**(v0.2.138):墙内 Clash 只设系统代理时 server 里 fetch(downloads.claude.ai) 必失败→回落 npm 渠道比对→原生用户"永远差一版"假阳性;修=直连失败后 detectLocalProxy 探测本机代理端口经 `curl -x` 重试(mac/Win10+ 自带 curl);同类排查 grep server 所有 fetch 外网域名。④**mcp.js listMcpTools 的 timer TDZ**(v0.2.191):`timer` 要提前 `let` 声明——finish 里 clearTimeout(timer) 在同步 spawn 失败路径先于末尾 const 赋值→TDZ。
+
+**服务端托管的子进程/pty 必须注册退出清理**(2026-05-29):child_process/node-pty 起的长期子进程,父进程崩溃/重启后被 launchd 收养继续跑;状态存内存 Map 重启后 Map 空→重新激活同 id 起第二个进程→并发写同一文件损坏。修:`process.once('exit'/'SIGINT'/'SIGTERM',killAll)` 遍历 Map term.kill(),SIGINT/SIGTERM 里手动 process.exit。
+
+**replace_all 抽公共函数误伤函数体自身**(2026-06-20):把 5 处 `copyFile(...bak)` 替换成 `backupSettings(ts)`,但新函数体内也含那句→全局替换把它也换成 `await backupSettings(ts)`=自我递归。发现:替换计数 6 而非 5,grep 定义体没了。抽取/内联式重构用全局字符串替换时先确认"被替换串"是否也出现在新帮助函数体内,替换后核对计数=预期调用点数并 grep 确认定义体完整,改完必 node --check。
+
+**shadow-git 回滚/审查审计的可泛化坑**(v0.2.175/176 fable 三域审计):①**"快照里没有→删除"是危险推断**:shadow git 的 `add -A` 尊重 .gitignore,被 ignore 的文件永远不进快照→restore-file 曾把"恢复 gitignored 文件"执行成"删除并报成功"。任何"目标不在基准里→删除现状"的差集逻辑,删除分支都必须显式授权(allowDelete 只给 write=本轮新建语义)。②**git ls-tree/porcelain 输出恒正斜杠,Windows path.resolve 产反斜杠**→比较/传 pathspec 前必须 `split(sep).join('/')` 否则整类匹配静默 false;worktree porcelain 的 `prunable` 行是幽灵 worktree(目录被手删)唯一信号,不解析就让用户进 spawn 必失败的会话。③差集回滚前先 `add -A`+pre-restore commit(否则上个 checkpoint 后新建文件不进 headFiles、回滚后残留);嵌套 git 仓 gitlink 在快照无内容 rm 后不可重建→removeWorktreePath 先 stat 子 .git 再删。④resolve 最近邻(Math.abs)在目标 checkpoint 缺失时会匹配到**之后**的快照(文件没回退 UI 报成功)→回滚语义一律带 `before=true`;draft 首条消息 sessionId 为 null→checkpoint skip,补拍时机=init 拿到真 sid 处、数据取发起时闭包。⑤**错误统一降级成温和文案会撒谎**:restore 超时=可能部分还原≠"文件未改动"→服务端错误带 code、客户端按 code 分文案。⑥execFile 默认 maxBuffer 1MB 在 git 大仓输出(`ls-tree -r`、首次 commit 无 `-q`)必爆→shadow git 封装统一 32MB+`commit -q`;checkpoint 时间用 meta 的 `messageTimestamp` 口径(commit ct 是 add -A 完成后秒级时间、大仓漂移数秒);unified diff 的 `---`/`+++` 特判只能作用前两行(正文里 `--`/`++` 开头的内容行如 SQL 注释拼上符号后同前缀);子代理改动在 `<sid>/subagents/agent-*.jsonl`,只读主 jsonl 的审查面板对派发改动全盲。
+
+---
+
+## 验证与测试方法论
+
+**(2026-08-19 / 0.2.310 · r15) "功能做了但对存量用户零生效"=写路径预填的通病,判据是数据文件 mtime**
+- 症状:用户说"这个功能怎么没做",而代码里纯函数层/UI 层/存储层/单测**全都在**。真相=功能**只在写路径触发**(新建 provider 的 POST、编辑保存的 PUT 各调一次 `applyCatalogPrefill`),而存量数据从功能上线后就没被写过 → 预填从未跑过 → 下游一律拿到空值 → 整套机制静默关闭。
+- **一分钟判据**:`ls -la` 看数据文件 mtime,若**早于该功能上线的 commit 日期**,基本可以确诊。本轮:`~/.claude-gui/custom-providers.json` 是 8-13,预填功能 8-17 上线,8 个 provider 的 `modelMeta` 全空 = 铁证。
+- **修法选读侧兜底,别写一次性迁移脚本**:在读出口(`activeProviderModelMeta`)套一次同样的纯函数 —— 零写盘、幂等、新老数据统一口径、用户手动声明仍由 `source!=='catalog'` 守卫压住。迁移脚本要挑时机、会改用户数据、还得考虑失败回滚。
+- **连带风险(判官揪出的致命项)**:这类"休眠判定"一旦被唤醒,就从"没人看的注释"变成**对外发请求的实时闸门**——`App.jsx` 发送前会按它静默摘掉 effort。所以唤醒前必须复核判定表的准确性,并确保用户有可见、可覆盖的逃生口。本轮的逃生口(Provider 编辑器)当时正好是坏的:`GET /api/providers` 从来不下发 `modelMeta` → 编辑器恒开成空 → 保存恒发 `{}` → 后端把用户手配的声明删光。**"接口 A 下发了、接口 B 漏了"是这类 bug 的经典形态**(`GET /api/custom-providers` 一直带,只有 `GET /api/providers` 漏),已加"两处都要有"的断言。
+- 另一条连带:唤醒后**编辑器要渲染的行数暴涨**(OpenRouter 364 模型 → 几百行 × 5 个复选框)。凡是"原本 0 条、现在服务端开始下发"的列表,都要回头看它的渲染方(本轮改成只渲染用户声明行 + 一行摘要)。
+
+**(2026-07-20/0.2.252) 测试代理真点 provider 切换=污染全局 settings.json(重大事故)**:P2 UI 测试代理被指示"provider 弹层切换真调接口"——测试服务器(任意端口)共用真实 ~/.claude/settings.json,每次真点切换=改写全局 provider,用户的 Claude Desktop、其他会话、子代理、bot 全部被连坐切到 deepseek,主会话权限分类器也被拖挂(报 deepseek-v4-flash unavailable、Bash 全阻)。规则:**给测试/判官代理的 prompt 里,provider 相关只许验渲染/列表/入口跳转,禁止真点切换**;必须实切时同一测试内立即切回官方+终态核对 settings.json 无第三方残留。同理适用一切写全局共享状态的端点(settings/prefs/归档):测试要么只读,要么改完即还原并核对。
+
+**改完必须真在 app 里实测,编译通过≠行为正确**(反复,记忆 [[verify-real-send-not-just-curl]]):
+- UI 行为修复不能只靠"代码逻辑+vite build 通过"就发版——React 渲染条件、流式时序、hover/opacity 只有真跑才暴露(Connecting 修复引入回归:content_block_start push 空 block→`streamingBlocks.length===0` 判占位符→占位符消失内容没来→空白;上一版对 3 个前端 bug 只逻辑分析就发,用户装上才发现)。任何"用户能看到/点到"的修复发版前必须 preview_start + 真实发消息/点击复现。
+- 改 handleSend/发送链路必须 playwright 真发一条消息验,curl 打后端绕过客户端 handleSend(BG5 的 TDZ 炸了 v0.2.35–38 四版因只 curl 后端 200 就以为过)。
+- 声称"已修复"最低门槛=至少一条可执行验证(某轮五处"代码审查过"里一处是真 bug,1/5 失败率)。纯逻辑函数 export 出来单测;shell 命令串用**生产同款字符串**跑(自己重打会掩盖转义 bug);平台测不了的明确记验证债。
+- **块级 const 引用块外 = node --check 查不出、只运行时炸**(v0.2.177):v0.2.175 加的"首条消息补拍"引用 if 块内 const userMsgUuid,补拍在块外→每个 draft 首条 ReferenceError 炸整轮流式(逃过语法检查+vite build)。凡"往老函数插新代码块"先 grep 引用的每个变量声明块是否包住使用点。
+
+**多代理审计要配对抗式核实,假阳性率高**(2026-05-29/06-04):4 个并行 sonnet 报约 20 条,逐条读码**真 bug 仅 6 条**。典型误报:"shell 注入"(正则字符集已排除元字符)、"return 只跳 if 块"(JS return 退出函数)、"卸载后 setState"(React 18+ no-op)、"SSRF"(ping 用户自己配的 MCP URL)、React effect dep null→id 触发、字符串基元无 #185 风险、服务端已有防护。真 bug 共性:防护新增时漏个别端点(全端点一致性检查>找新漏洞)、listener 重挂累积、localStorage 裸读未走 helper。流程:让代理"引用代码+触发条件自证",我再读实际代码确认,不盲信严重度标签。**修复要打真实数据的靶别照注释假设的布局**(v0.2.179):trim 并行工具修复针对"同一 assistant 多个 tool_use"但实测每条记录只一个(0/6051),并行是【跨记录】→修复分支 0 命中=没修,而单测合成数据恰好绕过盲区。改 jsonl 处理前先 `python3` 扫真实 jsonl 确认实际布局,单测数据复刻真实布局。
+
+**探针模型选择 + 合成 jsonl + 用户数据隔离**(v0.2.136/138):
+- **deepseek-v4-flash 不适合当长活体探针**:数数任务会被内容过滤拦(API Error: Output blocked by content filtering)或几秒 max_tokens 自续→"进程在删除瞬间死了"全是探针自己先死。甄别:对照组(正常切走会话进程存活=清 pane 不杀进程)+ monkey-patch fetch 抓 /stop(0 次=前端没杀)。结论靠排除法闭环不靠单次现象。
+- **合成 jsonl 是零成本渲染验证利器**:手拼 3 行(user+assistant含tool_use+tool_result)写进 `<hash>/<uuid>.jsonl` 即成可打开会话;uuid 必须合法 hex(fork 端点 UUID_RE 校验)。
+- **模拟交互卡片零成本实测**:`curl -X POST localhost:6677/api/permissions/request -d '{"toolName":"AskUserQuestion","toolInput":{...},"sessionId":null}'`(后台挂起)即在任意选中会话弹真卡片(WS 广播/respond/updatedInput 全走真链路,不用真跑 claude);sessionId 填 null 走单窗格孤儿规则、填真实 sid 验按会话门控;跳过/提交后 curl 拿到 decision JSON=端到端闭环。
+- **流式测试禁用用户真实项目**(⚠️事故):在 travel 项目测流,数数消息混入真实会话、打开超限 TREK 会话(389k/200k)触发 AutoCompactBanner 自动 /compact 改写历史+把 autoTitle 写成"/compact"。还原:jsonl 按行号剪回(compact 只追加不删行,`head -n <原行数>`)+ PUT auto-titles 空串删残留。下次 mkdir 专用测试项目目录测完删净。
+
+**⚠️事故:隔离后端 6699 与生产共用 ~/.claude-gui 配置,严禁跑改写状态的测试**(v0.2.179):测密码门槛时对 6699 发 `POST /api/network/password {clear:true}` 清掉生产 network.json 的 LAN 密码哈希(单向哈希不可恢复、无 .bak、不在 git)。6699 只换端口,读写的还是同一份 ~/.claude-gui/network.json、~/.claude/settings.json、custom-providers.json、checkpoints 真实文件——**隔离的只有端口不是数据**。铁律:对 6699 只跑 GET/只读校验(路径门禁、SSRF 拒绝、rebinding 拦截这类不改盘的);任何 set/clear/write/delete 配置或用户数据的端点【绝对不测】,要测在 /tmp 临时目录+临时 sessionId。改写类端点正确性靠"读代码+纯函数单测"验。
+
+**验收测试三件套**(2026-06-01):①Playwright Python 装了但 bundled Chromium 缺→用系统 Chrome(`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`)headless,别默认装浏览器;②GUI server 可能是 stale 长驻进程(cwd 指向当前仓也一样)——声称"当前代码行为"前先 `/api/restart` 并验证端点响应 shape 变了;③官方 provider 可能因账号限流让发送验收失败→先 raw `claude -p` 复现再怪 GUI,用已配置的非官方 provider 测,finally 恢复原 provider。
+
+**测试写真实配置路径前必须隔离 HOME**(2026-05-30):测 /api/prefs 时 curl 真实 server 又 `rm -f ~/.claude-gui/prefs.json` 清理,误删了用户真实的隐藏项目列表(前端迁移会自愈,仍是失误)。凡端点会写 ~/.claude-gui 等真实路径,一律 `HOME=/tmp/xxx` 隔离启动测试(鉴权测试做对了,prefs 漏了)。
+
+**临时后端端口复用致验旧代码**(反复):多轮子代理+主进程都用 6690-6695/6699,旧进程残留占端口→curl 打到旧代码(标题兜底改了却返回旧结果的假象),或新进程 EADDRINUSE 静默死掉全绿=假验证。验证前 `lsof -ti tcp:<port> | xargs kill -9` 清端口或每次换没用过的端口。假 HOME(`os.homedir` 在 POSIX 读 $HOME)+ 假 settings.json 是零风险单测 server 配置逻辑的标准姿势。
+
+**并行子代理撞订阅额度/尽早 commit**(记忆 [[parallel-subagents-quota-early-commit]]):8 个 fable 并行首跑全灭于额度上限且无 commit→worktree 自动回收零残留。派前看额度窗口;prompt 强制"每完成一个可编译步骤立即 commit"。
+
+**多功能并行 worktree + 串行合并**(v0.2.181):①先做冲突矩阵(Explore 子代理列每个功能改哪些文件),撞同文件的进【同一 worktree 串行】,文件独立才真并行。②分两波:第一波做文件独立的(合并零冲突)合入 master 后第二波从新基线开(撞热点文件 App.jsx/ChatInput 放第二波)。③串行合并每合一个跑 node --check+单测+build,最后一组(最热)手工解冲突。④冲突几乎都是"各加字段/组件/请求体键"互补型两边都保留;JSX 组件撞在一起注意闭合标签别共享。⑤给 worktree fable 铁律:6699 只读/临时目录/fake HOME 测,严禁碰真实 ~/.claude 配置。⑥改 catch 附近多行注释块时 Edit 的 old_string 若含结构行(`if(...){`),new_string 忘带上=静默删语法行→改完立刻 node --check/build 别攒。
+
+**onClick={fn} 会把 SyntheticEvent 当第一参数传入**:若 fn 首参是 silent/force 之类 truthy flag,点击=永远传 true。一律 `onClick={()=>fn()}`。原子替换必须能回滚不能"先删旧再放新"(`rm(dest)→rename(tmp,dest)` 若 rename 失败则旧的没了新的没进=数据凭空消失,正解 stash-old `rename(dest,dest.old)`→`rename(tmp,dest)`→失败回滚,v0.2.165)。CRLF 文件让顶层字段正则整条失配(`.` 不匹配 `\r`、`$` 不在 `\r` 前命中)→解析 frontmatter/yaml 先 `.replace(/\r/g,'')`。busy 单值 state 漏并发→操作进行中禁用整组 `disabled={!!busy}`(spinner 仍只 `busy===id` 转)或 busy 改 Set。
+
+### 2026-07-20 · 测试端口残留旧进程=另一种"改了没生效"(源码验证也会被骗)
+- 验证 server 源码改动时,`PORT=6698 nohup node server/index.js &` 起服务、curl 打 6698——但 6698 上挂着**昨晚残留的旧服务进程**(此前轮次 nohup 起的没杀干净),新进程起失败(端口占用、报错进 nohup 日志没人看),curl 全打在旧代码上 → 新字段"不生效",差点误判改动有问题。`lsof -ti:6698` 揪出 lstart 是前一天的进程,杀光重起后一切正常。
+- **规则**:起测试服务前必 `lsof -ti:<port> | xargs kill -9` 清场;或起后核对 `/api/health` 的启动时间/版本。这是"改了还复发=先查改动进没进HEAD/产物"家族的**端口进程变体**——产物没问题,是打错了进程。
+- 顺带:zsh 的 `kill %1` 只杀最后一个 job,多轮 nohup 会积累孤儿。
+- **(2026-08-19 r15 增量,反向踩法)**:残留进程还会造成**假失败**——`tests/unit/check-permission-hook-bridge.mjs` 断言的是"GUI 不可达时 hook 必须 fail-safe deny",它要求 6702 **无人监听**;我端到端验证完忘了杀 6702 后端,全量跑批就报这一个 FAIL,差点当成代码回归去查。这已是同一坑第二次(前一次同样是 6702 残留)。**规则升级**:①端到端验证脚本收尾一律 `lsof -ti:6702 | xargs kill -9` + 删临时 HOME,写进脚本本身别靠记性;②跑全量单测前先确认 6702 空;③单测失败先看它是不是"依赖端口空"的那一类,再怀疑代码。
+
+### 2026-07-20 · 审计批沉淀:四类可复用 bug 模式(0.2.255)
+- **模式A"假不继承"**:状态真值在服务端/store,但某端 UI 没人拉取或断线后不补拉→显示"未选/?"造成"要重新选"假象(手机模型徽章案例:发送链一直正确,纯显示层没 fetchModel)。排查口径:每个 fetch* 列挂载/事件/重连三类触发点,两端对照;修口径:ws-reconnected+visibilitychange(节流)补拉。**用户报"不继承/丢状态"先查显示层再查数据层**。
+- **模式B"vh×zoom 引擎分裂"**:WKWebView 的 vh 已除 zoom(安全),Chromium 系(WebView2/Android/dev 浏览器)不除→裸 `90vh`/`min(92vw,420px)` 在大字号档膨胀超屏。仓内标准=`min(Xvh, calc(var(--app-h) - 2rem))`;新代码禁裸 vh/vw 定尺寸。
+- **模式E"非 portal 模态困局"**:`fixed inset-0` 模态若渲染在 animate-glass-rise 祖先内(fill:both 残留 transform),fixed 相对祖先而非视口→遮罩只盖局部、卡片被圆角裁切(MCP 表单/添加项目弹窗案例)。规则:**模态一律 createPortal(document.body)**,弹层一律 AnchoredPopover。
+- **跨设备同步"删除不传播+无条件回推=复活"**:离线端 pushLocalOnly 每次水合都回推本地残留→另一端已清的键被复活(旧 provider pin 发无效模型)。修=回推降级为一次性存量迁移(localStorage marker,GET 成功才置位);设计同步机制时"清除"必须有记账(时间戳)或回推必须有门控,二者缺一必复活。
+
+### 2026-08-11 r8 审计教训:能力"是否已接入"的 grep 必须全变体
+- 审计 SDK 新能力是否已被 GUI 采纳时,用 CLI flag 的连字符名(`forward-subagent-text`)去 grep,漏掉代码里用的 SDK 驼峰选项名(`forwardSubagentText`)→ 把已上线的功能误判为缺口,写进了给用户的清单。与"accent按钮两套写法"同根:grep 单一字面模式必漏变体。规则:判"有没有接入 X"至少查三种拼法(kebab-flag/camelCase选项/snake_case事件字段),零命中才可下"未接入"结论。
+- 同轮正反馈:spike 实测(spike-a/b/c)三下就推翻/坐实了三个审计结论(setModel可用、depth-2已通、workflow仍不发)——"能力现状"类问题实验比读代码快且不会错。
+
+### 2026-08-26 验证性判据必须先自检(同日两次被瞎判据骗)
+- 两起同型事故:①变异测试统计用 `grep -cE "^not ok"`,而本仓测试框架失败时输出的是 `FAIL - `,三刀变异全报"0 条失败",差点把有牙的测试判成纸老虎;②验证发布出去的 npm 包是否含"剥引号"代码,用 `grep -q "replace(/^\"+|\"+$/g"`,shell 双引号里 `$/` 被吃掉恒不命中,误报"包里缺这段"——实际 awk 打印函数全文,代码好端端在。
+- **口令:任何验证性 grep / 断言,在拿它下结论之前,先用一个已知为真的样本打一遍,确认判据能亮。** 判据自检不过就先修判据,别忙着解释"为什么代码不对"。
+- 两个具体坑:①本仓测试失败输出是 `FAIL - <名>`,不是 TAP 的 `not ok`,统计红条数用 `grep -cE '^FAIL'` 或直接看退出码;②含 `$`/`|`/`/` 的正则别塞进 shell 双引号,改用单引号、`grep -F` 固定串,或干脆 `awk '/^function x/,/^}/'` 把整段打出来人眼看。
+
+### 2026-08-28 写"可测锚契约"必须写清可达性前提(r64 因此返工两次)
+- 事故:验收测试要开分屏、要 fork 会话,契约只给了**状态锚**(`pane-split`)没给**入口锚**,测试作者按中文名 `/分屏|拆分|split/i`、`/分支|fork|复刻/` 怎么搜都搜不到,连续两轮卡在同一形态。
+- 真相是两条本仓特有的可达性前提:
+  1. **两步入口**:分屏按钮藏在面板坞 rail 里(先展开坞→再点分屏→再选数量,三步);fork 藏在会话行的"会话操作"浮层菜单里(先点菜单→再点分支会话)。只补末端锚,测试仍卡在第一步。
+  2. **悬停才显现**:会话操作按钮桌面端是 `md:opacity-0 md:group-hover:opacity-100`,不 hover 就"看不见"——按可见性筛选的定位一律落空(移动端反而恒显)。
+- 还踩到一条**契约写错事实**:原契约写 `pane-split` "仅分屏时存在",实测单屏也在(代码恒走 SplitMain)→ 照契约写的用例会永远判错分屏与否。判分屏要数 `[data-testid="pane"]` 个数。以及停靠面板打开时分屏只渲染聚焦窗格 → 串扰用例必须在未开停靠面板时跑,否则假绿。
+- 规则:**写可测锚契约时,每条锚都要回答"从零开始怎么够到它"**——中间要点几下、有没有 hover/聚焦前提、有没有互斥的界面状态(如停靠面板会改变渲染)。只写"这个锚标在哪"不够。
+- 配套规则:**"既有控件本轮要补属性"必须显式进契约与任务清单**。实现方只照契约做,契约里不写就没人加,测试一直红,最后变成"测试是不是有问题"的扯皮。r64 这类锚有 10 个(settings-open / panel-dock-toggle / pane-count / pane / pane-split / queue-* 等),已逐条落到文件行号。
+
+### 2026-08-31 macOS /var 符号链接会让"同一目录"算出两个身份(r64 夹具第三坑)
+- 形态:夹具用 `mkdtemp` 返回的原始路径(`/var/folders/…`)预建 `$HOME/.claude/projects/<enc(cwd)>`,被测进程按 `process.cwd()`(已被 macOS 解析成 `/private/var/folders/…`)落盘——dash 编码后是**两个不同的 project 目录**,应用读不到历史,所有 reload 类用例齐红且症状一致(侧栏"暂无会话")。
+- 修法一行:参与身份编码的路径先 `fs.realpathSync` 再用。
+- 通用律:**凡把"路径"当"身份/键"用(编码进目录名、当 map key、算 hash),必须先 realpath 归一**;macOS 的 `/var`→`/private/var`、`/tmp`→`/private/tmp` 是最常踩的两条。判据:同症状成片红 + 症状是"数据像凭空消失"→先查路径身份是否分裂。
+
+### 2026-08-31 多断言用例的红因会"接力",归因与修复验证都要按断言行记(r64 M12b/M12c)
+- 形态:一个用例的红只代表**第一个**失败断言。B19 修掉"显示字符数"缺口后,同用例下一行 expectNoRoundTrip 的既有夹具缺陷(auto-titles PUT 噪声,即已归档的 B11 类)接着变成新红因——用例级看数字"还是红",实际性质已从实现缺口变夹具缺陷。B108 同理:①夹具路由拦不到 chunk+②文案不符,双缺陷叠在一个用例上,修了②它仍红。
+- 规则:成绩单归因、修复后的验证,都落到**断言行号**(如"红在 b02:160 非 :159"),别停在用例名;修复验证要证明"原失败断言过了",而不是"用例绿了"(可能永远绿不了,因为还压着别的缺陷)。
+- 配套:声称"修完仍红=别的原因"必须给非因果证据(本批用未触碰的 B21 同形复现自证)。
+
+### 2026-08-31 打桩全局 Storage.prototype 会触发宿主"拒发"保护,genui 类断言根本够不到(B111 归因)
+- 链路:夹具 stub Storage.prototype 抛错 → persistQueueSnapshot 返 false(sessionStore.js) → enqueueMessage **刻意**返 null(自带注释的既有保护:存不了待发快照就不发) → App 拒发并提示「无法保存待发消息」→ CLI 从未被调 → 助手消息不存在 → 被测组件永不渲染,超时红。pageerror=0,静态 grep 全带 try/catch 查不出——**运行时取证(看页面实际停在哪一步)才破案**。
+- 规则:写"存储不可用"类浏览器用例,打桩范围要避开宿主发送链路(先把消息发出去再打桩,或只打被测模块用到的键),否则测的是宿主保护不是目标组件。静态读源归不了因的红,补运行时取证再下结论,归不了就如实标"未归因"(M12b 这么做是对的,别编造)。
+- 又一发作点(r65 修,worktree jovial-volhard f308fb1):server/routes/fork.js 的包含校验对目标 realpath 后要求位于 PROJECTS_DIR 内,但 PROJECTS_DIR 自己没归一——**边界校验的"基准侧"同样要 realpath**,不止"路径编码进身份"那一侧;软链 HOME 下两侧基准分裂→fork 恒 400(B48 类用例不可达的底层原因之一)。单测 check-fork-projects-dir-realpath.mjs 用软链 HOME 夹具锁行为(反证能红);顺带被 r49 守卫抓过一次:测试动 process.env.HOME 必须同步动 USERPROFILE。
+
+### 2026-09-01 一次性轮次纪律禁写成永久单测(r71 范围锁地雷,r72 首撞)
+- 形态:r71 在单测里写"git diff 对 merge-base 必须落在本轮 4 文件白名单"的范围锁。在 master 上 merge-base==HEAD 恒绿(判官/合并全过),但**任何后续 feature 分支或带在制品的工作区跑全量单测必红**——r72 第一个撞上,红因与自己零相关,浪费排查。
+- 规则:轮次专属纪律(范围白名单/领地锁/临时探针)的生命周期=该轮判官放行即结束,**放行后必须拆除或做成只在该分支生效**;永久单测只锁"内容与行为"(文案锚/接线/安全断言),不锁 git 状态。判官审带范围锁的批次时,应把"合并后此锁对后续分支的影响"列为放行前检查项。
+- 修法:master 直拆该节(01b0bce1),①②内容锁保留。
+- 撞车附记:另一会话在 worktree 分支从旧 master(90dc7c7d)独立做了同一修复(15:22),与 01b0bce1(15:16)只差 6 分钟,成品仅注释措辞不同,该分支已判废弃不合并。规则:worktree 里做修复,**提交前 `git log master -1` 对一眼最新 master**(worktree 共享 refs 不用 fetch),master 已修就停手,别产出注定冲突的重复 commit。
+
+### 2026-09-01 源码锁测试的三条假绿通道(genui mermaid chunk 轮,判官变异实证)
+- 本仓大量 `check-*.mjs` 走"源码锁"(readFileSync + 切片 + 正则断言,因为 .tsx 裸 node 加载不了)。这类锁有三种**看着有牙实则全绿**的死法,本轮被两任判官用变异逐条打出来:
+  1. **注释救绿**:断言在含注释的切片上做 `includes('渲染中…')`,而组件自己的 CGUI-PATCH 注释里就写着这四个字 → 把真 UI 整条删掉照样绿。最狠的形态:删掉真 `.catch`、留一句 `/* TODO 以后补 .catch(() => { if (alive) setFailed(true) }) */`,整份锁全绿——**锁存在的全部理由被一句 TODO 顶掉**。修法=切片后先剥注释,且必须**块注释 `/* */` 与 JSX 注释 `{/* */}` 一起剥**(只剥整行 `//` 只堵四条通道里的一条);行尾 `//` 通用剥法会误伤 URL/字符串,按性价比留作已知残留通道并写进文件头。剥完必须 dump 一次自查四个切片锚点没被剥没。
+  2. **顺序没锁**:`if (failed)` / `if (html === null)` 两条早退 return 的**先后**才是修复能生效的前提,调换后 bug 原样复活(chunk 失败时 html 恒 null,loading 分支先命中)而所有"catch 在、置了 failed、文案都在"的断言仍绿。**凡"A 必须先于 B 命中"的逻辑,断言里必须显式比较 indexOf**,别只锁两者都存在。
+  3. **同一字面量在切片里出现两次**:`<pre>{code}</pre>` 降级分支和 loading 分支各一份,只删降级那份仍绿,断言文案却写着"降级时必须仍显示源码"。修法=把断言收窄到该分支的**区间**上(`slice(iFailedBranch, iLoadingBranch)`),不是在整段切片上匹配。
+- **通用判据**:写完源码锁,必须自己做**双向**变异——真回归必须红(且红在对的那条断言上)、无害演进(加 className/`catch (e)`/换行格式化/deps 换序)必须绿。只跑"改了就红"不够,只跑一条也不够;同文件有姊妹组件(MermaidNode ⇄ Scene3DNode)时,两个方向的隔离都要实测(邻居坏我不许红、邻居好我坏必须红)。
+- **源码锁的天花板**:只保结构与顺序,不保语义。守卫取反 `if (!alive)`、短路 `alive && false` 这类语义变异任何源码锁都抓不到,别在文件头把它吹成全能,写明边界省得后人误判。
+
+### 2026-09-01 单测端口家族已根治(listen(0))+ 两个把"验证"骗过去的坑
+- **根治落地**:上一条"全量单测随机红=6703/6704 端口家族(根治未做)"已做完。39 个 unit 文件一律改 `listen(0, '127.0.0.1')`,端口从 `server.address().port` 读回;9 份文件内自带的 `listenWithRetry` 与 10 处从 `tests/acceptance/r26/lib.mjs` 引入的退让重试**全部删除**(共享资源没了,重试就没有存在理由),净删 ~190 行。`tests/acceptance/` 只读没碰,其 `listenWithRetry` 仍被 4 个验收用例使用,保留。
+- **"3 轮全绿"这种验收门槛对偶发 bug 是假门槛**:修前在安静机器上连跑两轮全量,336/336 全绿——因为顺序跑时进程退出即释放端口,碰撞只在**别的 worktree/GUI 同时占着口**时才发生。照这个门槛验,不改代码也能"通过"。
+  - **有效做法=把偶发变必然**:写个 hog 脚本死占 6702-6705 再跑受影响子集。修前 **38 FAIL / 2 PASS**(那 2 个恰好就是本来不钉端口的 check-r34、check-scroll-clamp,相关性完美),修后 **0 FAIL / 40 PASS**。这才是能证伪的门槛。凡"环境竞争型" flaky,验收都该这么造。
+- **macOS 没有 `timeout` 命令**:测试跑批脚本里写 `timeout 120 node "$f"` → 每条都 127 退出 → 全 FAIL,看起来像"改崩了一切"。差点把这个当成 38/40 的证据发出去。规则:跑批脚本先验一句 `command -v timeout`,或干脆别用(mac 上是 `gtimeout`,来自 coreutils)。
+- **顺手揪出的第二个 flaky(与端口无关)**:`check-r33-server-sidecar-concurrency.mjs` 断言"不同 session 不共用全局锁"之前只 `await setTimeout(0)` 一个 tick 就断言 B 已进入 writeFile;而 B 到 writeFile 前还有 `mkdir` + `readFile` 两次真实 I/O,机器一忙就随机红。改成**带 5s 截止时间地轮询该条件**:真有全局锁时 B 永远起不来、照样红,红的语义一个字没变。已做双向变异实证(把 sessionTails 改成全局锁 → 红在正确那条断言;还原 → 绿)。
+- **通用判据**:测试里凡"等一个 tick 再断言异步状态"都是定时炸弹;要么等条件(带截止),要么等一个真实信号(Promise/事件),别赌调度。
+
+### 2026-09-01 变异测试必须在改动 commit 之后跑
+- 现象:r83 作者对未提交的四处改动跑变异哨兵,用 `git checkout -- 文件` 回滚变异时把自己的未提交改动一并冲掉,重做一遍。前几轮没出事只因改动恰好已提交。
+- 规矩:①变异复做前先 commit(或至少 `git diff > 备份.patch`);②回滚变异优先用"改前拷贝一份到 scratchpad、改后 cp 回来",不用 checkout;③任务书里"变异自证"条款后面加一句"先 commit 再变异"。
+
+### 2026-09-02 源码顺序锁必须先断言锚点存在
+- 现象:check-r82 t8 用 `indexOf(A) < indexOf(B)` 锁函数定义顺序,r87 改名后 A 找不到返回 -1,`-1 < N` 恒真,锁静默失效,直到作者改名撞上才发现。
+- 规矩:所有 `indexOf` 型源码锁先 `assert(iA >= 0 && iB >= 0, '锚点必须都能找到')` 再比大小;判官复核源码锁时做一次"让锚失配"的变异确认它会红。
+
+### 2026-09-02 r92 真机验权限卡:playwright 三条路径坑(烧了三轮才跑通)
+- 现象:灌了权限卡(POST /api/permissions/request,服务端把 HTTP 响应挂起=送达的一手证据)但界面上没有卡。三处根因:①**首页那个 composer 不挂 PermissionPrompt** —— bootUI 停在"下午好,从这里开始"就以为进了会话,必须真点开一个会话(SessionDetail→ChatInput)才有卡;②分屏第二格默认停在"点左侧任一会话填入本分屏"空态,**得先点空窗格再点会话行**,否则会话填进原来那格(表现为只出 1 张卡);③窄屏(375px)侧栏收进抽屉,路径是「会话」按钮 → 菜单 → **会话与项目** → 项目 → 会话行,直接找会话行必然找不到。另:seedSession 造的会话必须在**首次加载前**落盘,页面加载后再 seed 侧栏不会自动刷新。
+- 规矩:验权限/计划卡一律走"进真会话 → POST /permissions/request → 界面作答 → 那个挂起的 fetch 兑现"这条闭环,它同时证明了送达;高度类断言别写"小于展开的 50%"这种相对魔数,直接断言**正文元素高度 === 0**(窄屏按钮行会换行,折叠后总高比桌面大 50px,魔数必假红)。
+
+### 2026-09-02 "照抄原生形态"≠复制原文;探测目标必须与 spawn 同源
+- M1:让代理"照原生形态写短提示"时它抄了 5 段原文,判官用最长公共子串抓出来。规矩:任务书写明"语义照抄、文字重写",并加 LCS<25 字符的断言当门。
+- M3:Windows 上 `resolveUserClaude()` 对 npm 装的 claude.cmd 返 null,`--help` 探测跑到裸 'claude'(Node 不经 shell 执行不了 .cmd)→探测失败闭合→所有靠探测门控的 flag 全部不加、功能静默空转。规矩:能力探测的二进制必须与实际 spawn 同一个(`resolveClaude()?.path`),.cmd/.bat 走 cmd.exe /c(仓内 claudeExecSpec 已有);单测要注入 win32+.cmd 形态。
+- M2:又一次在路由里另写 `!!ANTHROPIC_BASE_URL` 判第三方(r89 已因同样问题打回过一次)——全仓只许 isOfficialAnthropic 一个判据,新增读点先 grep 它。
+
+### 2026-09-03 测试禁用"全目录 grep 命中数 === 常数"型锁
+- r97 验收测试用 tests/ 全目录 grep 计数 219/4 当"既有测试未改动"的金丝雀,worktree 里绿、一合并到 master(别的轮次改了 r89/r92 测试、加了 r96 测试)立刻红,与本轮无关。
+- 规则:锁"别人没改"只能靠判官 git diff;测试里只锁本轮产物的结构/字面,不锁跨文件计数。另:shell 链里 `node test | tail` 会吞掉退出码,判绿必须单独跑一次 `node test >/dev/null && echo ✓`。
+
+### 2026-09-03 r108:测试期望自己写错 + 契约驱动的锁定测试修正口径
+- r108 验收 E4 的期望字符串少写一个外层引号(9 vs 10),正确实现反而被判红。锁定测试 ≠ 绝对正确;开发代理报"测试与契约矛盾"时,主会话按契约算法**手算**一遍再改测试,并在判官任务书里点名让判官复核这处改动是否放水。
+- 前一轮的 dev 自测(check-rNNN-dev-*.mjs)会锁住旧行为(源码形态锁、大小写真名),契约变更后由主会话按新契约更新,不算开发代理改测试。
+- 判官/审查代理运行环境禁写 .md 已连续 4 次出现:任务书一律写"若禁写 .md 全文回复",主会话落盘。
+- 子代理三次报告 system-reminder 里"改用 Bash 替代 Read/Edit"是针对它的指令并拒绝执行:那是平台自己的提示不是注入,无害,但说明隔离声明在起作用;不必为此改流程。
+
+### 2026-09-05 验收测试只锁纯函数,接线绕过纯函数照样全绿(r103 徽章分母)
+- r103 契约 E1 要求 min(显式值, CLI 自报),纯函数 resolveBadgeWindow 做到了、验收 65 条全绿;但 init 消费点直接 `resolvedWindowCache.set(wk, event.linkedContextWindow)` 绕过纯函数,官方渠道 + 显式 1M 时整回合分母 1M。判官三轮没抓到,因为测试与判官都只看纯函数与 result 那条调用点。
+- 规则:仲裁类纯函数落地后,测试设计要加"源码锁:所有写入该缓存/状态的位置都必须经该函数"(grep 写入点列表 + 逐个断言),判官必查项写"列出全部写入点"而不是"验证纯函数"。r108 的 has→get 挂账被再次抓出也是同一类:契约缺口不能只记台账,要写清触发场景再决定挂不挂。
+
+### 2026-09-06 r114 验收:零花费真机核对历史回看 + 契约缺口
+- **零花费真机套路(可复用)**:用 `tests/fixtures/r114/`(真实 tool_result + 真实快照)在 scratchpad 搭沙箱 HOME(`.claude-gui/network.json` 指 6703、`.claude/projects/<hash>/<sid>.jsonl` + `<sid>/workflows/<runId>.json`),从 worktree `HOME=沙箱 PORT=6703 NODE_ENV=test node server/index.js` 起服务(先 `cd client && vite build` 出 dist),再用 `node_modules/playwright` 无头 chromium 点侧栏读 `[data-wf-card]` 的 DOM。脚本:scratchpad/r114-real/{prep.mjs,m9.mjs}。
+- **坑 1**:项目 cwd 落在 `/tmp` / `/private/tmp` 会被 `isNonProjectPath` 过滤,侧栏"没有找到项目";worktree 路径(`isWorktree:true`)在侧栏挂在父项目下也点不到 → 用主仓路径当 cwd(只读、不写)。
+- **坑 2**:首次引导层 `GuideTour`(`fixed inset-0 z-[400]`)拦截点击 → `addInitScript` 写 `localStorage['cgui-tour-seen']='1'`。
+- **契约缺口类型**:方案只定义了"实时条目→整体状态",没定义"快照→整体状态";纯函数测试全绿、SSR 冒烟也过(SSR 不跑 effect 拿不到快照),只有端到端真机才露。教训:凡"两个来源一种形状"的设计,契约要对每个来源各写一遍"状态怎么定",测试要有一条走完整降级链的行为链用例。
+- **坑 3(2026-09-06 r114)**:`tests/unit/check-r114-server.mjs` 起沙箱服务时按 6703→6709 轮询 `/api/health`,谁先在 6703 应答就当成自己的子进程 —— 我为真机核对起的 6703 沙箱服务被它当成测试服务,A4 段 18 条假红(修复代理误报"既有失败")。**跑任何单测前必须先停掉自己起的 6703–6709 服务**(按 pid 杀);测试本身的探测应改为核对子进程身份(如 health 带 HOME/nonce),待下一轮补。
+
+### 预览/harness 注入 PORT 劫持 node 后端端口（2026-07-21）
+*(2026-09-13 由全局 ERRORS.md 迁入)*
+**现象**：node server 读 `process.env.PORT || 6699`；预览工具(launch.json 声明 port:5173)启动 `npm run dev` 时注入 `PORT=5173`，server 抢了 5173 和 vite 撞，`/api` 代理指向的 6699 无人监听，全站 API 挂。
+**修复**：server 用专用 env 名并置于 PORT 之前 `process.env.ST_PORT || process.env.PORT || 6699`；dev 脚本显式锁 `ST_PORT=6699 node server/index.js`（覆盖注入的 PORT）。测试用独立 env(ST_TEST_PORT→PORT) 隔离端口，不受影响。
+**预防**：本地"后端+vite"并存的项目，后端端口永远用专用 env 名，别用通用 PORT（会被各种 harness/PaaS 注入劫持）。
+
+### [LRN-20260811-C7A] 审计恢复类目录：无直属 JSONL ≠ 无用文件
+*(2026-09-13 由全局 LEARNINGS.md 迁入)*
+
+**Summary**：`~/.claude/gui/checkpoints/<sessionId>` 找不到直属会话 JSONL，只能判定为「与当前会话列表脱钩」，不能直接判定为无用文件。
+
+**Details**：GUI 会话列表读 `~/.claude/projects/<project>/<sessionId>.jsonl`，归档不移动 JSONL；但删会话接口只删 JSONL、归档标记、注册与偏好，**没有同步删除** shadow-git checkpoint。实测：无直属 JSONL 的 235 个 checkpoint 中，172 个仍有 `.jsonl.bak`，60 个元数据指向仍存在的工作目录，具备手工恢复价值。
+
+**规则**：审计恢复类目录时区分「当前 UI 不可达」「有备份可关联」「彻底不可恢复」三类；只有结合产品删除语义、备份和保留策略之后，才能提出删除候选。相关文件：`server/routes/checkpoints.js`、`server/routes/sessions.js`。
+
+---
+
+## 沙箱 / Codex 环境(EPERM / 网络 / 提权)
+
+**沙箱内本地监听/index.lock/网络会 EPERM,用提权重跑同命令别改代码**(ERR-20260531/0605/0606/0607 合并):
+- Codex 沙箱 Node `listen 127.0.0.1:<port>` 返 EPERM(smoke:http 6686、PORT=6679、验证端口 6699 都栽);回归测试需临时 localhost 监听时用 `require_escalated` 重跑同命令,别当项目失败。
+- `git commit`/`git add <explicit files>` 报 `.git/index.lock: Operation not permitted`→保持明确文件列表用提权重跑,别 `git add .` 也别反复重 stage。
+- 沙箱 Node fetch 访问本地服务报 `connect EPERM`,不能据此判 API 故障;本机 `http_proxy=127.0.0.1:7897` 时 curl localhost 也可能被代理劫持报 000/7897→用 `/usr/bin/curl --noproxy '*'`。
+- `gh run view`/`gh` 经本地代理 `proxyconnect tcp: dial tcp 127.0.0.1:7897: operation not permitted`→先试普通 gh,被拦就同一只读 gh 命令 `require_escalated` 重跑。
+
+**Codex/沙箱杂项**:exec_command 启长驻 server 未设 `tty=true`,后续 write_stdin 返 "stdin is closed" 且不能 Ctrl-C→用 `lsof -ti:<port>` 找 PID kill,要交互式停止一开始就 `tty=true`(ERR-20260531-001)。Playwright 对含 WebSocket 的本地 SPA 用 `waitUntil=networkidle` 会因连接长驻超时→前端验收导航用 `domcontentloaded/load` 再单独查 console+关键 API(ERR-20260531-002)。curl URL 含 `&` 在 zsh 未加引号报 `no matches found`→带 query string 的 URL 整条加引号。type:module 下 `node -e` require+top-level await 失败→包 IIFE;Node fetch 拒本地验证端口"bad port"→用 http.request;静态回归别用脆弱正则打模板字面量→稳定 substring/assertion;`rg` pattern 以 `*` 开头失败→`rg -F` 匹配字面 glob。audit-public.cjs 加 source marker 检查会 match 自身 denylist→排除审计脚本自己或编码 denylist 使不 verbatim 出现(ERR-20260606-002)。
+
+**worktree 场景的沙箱 EPERM 族**(ERR-20260814-002/004/005/006/007/008 合并,2026-08-14):外置 worktree 复用主仓依赖与产物时,沙箱对软链/清理/元数据一律拒绝——建链 `ln: node_modules: Operation not permitted`、清链 `unlink: node_modules / client/node_modules: Operation not permitted`、Vite 二次构建清自己旧产物报 `EPERM, Operation not permitted: .../client/dist/assets`;worktree 的 git 元数据在主仓共享,`fatal: Unable to create .../.git/worktrees/codex-fix-session-interactions/index.lock: Operation not permitted`;单测/预览监听 `listen EPERM: operation not permitted 127.0.0.1`、`0.0.0.0:6699`、`127.0.0.1:5199`(选 6699/5199 是为不占用打包版 6677)。统一修法同本节总则:先 `ls -l` 确认目标是本轮 worktree 的精确路径,再 `require_escalated` 重跑同命令;别手工递归删未知目录,也别改代码绕。工具杂项(ERR-20260814-001):fetch-everything 抓 `https://code.claude.com/docs/en/interactive-mode` 返 `status=failed, reason=no_candidate`(公开文档、无登录墙,自动路线全无候选),按回退规则直接 WebFetch 同一页面。
+
+---
+
+## 产品原则
+
+**功能全保留不做减法**(记忆 [[keep-all-features-no-reduction]]):用户明确都留着;密度靠收纳(进已有面板/添加弹层)不靠删,不新增顶栏按钮。GUI 文案用客观陈述风格(记忆 [[gui-copy-objective-style]]):条件+祈使式精确陈述,禁 AI 营销腔/口语卖萌/黑话堆砌,MCP/agent/tools 等产品名词保留。GUI 设置持久化两层(记忆 [[gui-settings-persistence-two-layers]]):文件类(~/.claude-gui+~/.claude)永远存活,UI 偏好在 localStorage 靠稳定 bundle id `com.claudegui.desktop`+端口恒 6677 存活;字体主题留 localStorage 是刻意设计(手机/Mac 独立)。公开版默认开局域网+每台随机密码(记忆 [[public-build-lan-default-random-password]]):首启默认 0.0.0.0+randomBytes 随机密码,本地版回环;公开/本地靠 `existsSync(routes/bots.local.js)` 区分;LAN 配置存 network.json。bot 相关:4 个 bot 全读 settings.json 取 provider(记忆 [[bots-follow-settings-provider-sync]]),bots.local.js watcher 监听文件自动刷新;bot connection refused 根因=GUI 把回环代理 :8789/:8788 写进共用 settings.json(记忆 [[bot-connection-refused-loopback-proxy-daemon]]),解法常驻 daemon :8799/8798。
+
+**文档落点**:LEARNINGS + ISSUES_TRACKING 一律写**主仓 `~/Desktop/claude/claude gui/`**(gitignored 未跟踪、各目录独立一份不随分支同步,别在 worktree 改);ISSUES 已归档,代办/状态记 PROJECT.md。同族坑(ERR-20260814-003):gitignored 的 `.local.*`/发版说明在一次性 worktree 里**读不到**(`sed: CLAUDE.local.md: No such file or directory`)——需要在 worktree 工作时从主仓绝对路径只读核对,别复制/链接 `.local.*` 进功能分支。
+
+**@ 引用/文件树杂项**:①会话引用不塞 jsonl 原文——渲染成精简 md 落 `~/.claude-gui/session-refs/` 再插 `@绝对路径`(CLI 原生 @ 读文件省 token);②文件搜索 `git ls-files --cached --others --exclude-standard` 一条命令覆盖已跟踪+未跟踪且尊重 gitignore;③dev preview 的 vite proxy 写死 6677(打包版旧后端),新端点在 preview 里 404 回落 SPA HTML→验前端逻辑用页面内 monkey-patch fetch mock、后端逻辑另起 6699 curl(v0.2.169);④"10s 可撤销删除"用前端延迟提交(点删只隐藏+setTimeout 10s 后才调 API,撤销=clearTimeout,失败方向天然安全),倒计时 interval 首帧陈旧 tick 要 `setNowTick(Date.now())` 归零(v0.2.171);⑤preview 快速定位历史会话:改 localStorage `cgui-selected-session` 的 sessionId/projectHash 再 reload(先备份验完恢复)。**agent teams 不值得可视化**(记忆 [[agent-teams-not-visualizable-headless]]):N 个独立 claude 进程+tmux+Mailbox 文件不流经父 stream,headless -p 无 TTY/tmux 起不来。**workflow agent transcript 深埋**(记忆见 auto-memory):workflow 起的 agent 在 `subagents/workflows/wf_*/agent-*.jsonl` 比普通 Task 深两层,session-reader 不递归就扫不到。
+
+### 2026-08-25 r49 收尾
+- **放任档语义文案**:放任(bypassPermissions)抑制的是【权限确认卡】,AskUserQuestion【提问卡】照弹(chat.js autoDecide 特判先于 bypass 放行)。任何描述该档位的文案禁写"跳过全部提示"——用户明确指正过,两处(ChatInput MODE_META/GuideTour)已改为明说"提问卡仍会弹出"。
+- ~~**本仓浏览器冒烟用 playwright MCP**~~ **(2026-08-28 已过时,见下)**:仓库自身无 playwright 依赖;本机三处外部 playwright-core 的 browsers.json 版本(2140/2158)与 ~/Library/Caches/ms-playwright 缓存(webkit-2227/2336)全不匹配,直接 launch 必炸。走 mcp__playwright__* (navigate about:blank + evaluate 注入 IIFE)最稳,皮肤穿/停冒烟已用此路径跑通。
+  - **更正(2026-08-28,r64)**:上条只适用于**外部**装的那几份 playwright。项目内 `npm i -D @playwright/test`(现 1.62.1,已入 devDependencies,commit 44fe8eb)自带匹配的 browsers.json,要的 chromium-1234 / ffmpeg-1011 本机缓存**已有,零下载**。实测三关全过:启动+渲染+点击+断言 480ms;`PORT=6703 node server/index.js` 起后端后 playwright 能驱动真实应用、页面零 pageerror。**以后要写可提交复跑的浏览器验收测试,直接用项目内这份,别再绕 MCP**(MCP 是交互式驱动,产不出可提交的 spec 文件)。
+- **本机构建必带 --bundles app**:tauri targets 含 dmg,默认构建会跑 bundle_dmg.sh——它用 AppleScript 驱动访达开卷宗小窗摆图标(左上角),访达记住"最后窗口几何"→用户的访达窗口每次装机都被缩小挪到左上角(用户实报)。本机装机只用 .app(ditto),DMG 纯浪费;release.local.sh 与 CLAUDE.local.md 的构建命令均已加 --bundles app。CI 出公开包不受影响(自己的 workflow 命令)。
+- **新浮层 Esc/层级四件套契约(r52 判官抓的三宿主全破案)**:仓内浮层 Esc 是"window 捕获+stopImmediatePropagation"军备竞赛,新浮层挂 document 冒泡=排最末被全员抢跑(哑键/关错层/宿主整窗关闭丢状态)。新增任何模态/浮层必须:①Esc 挂 window 捕获+stopImmediatePropagation(对齐 ImageLightbox) ②根节点挂 data-cgui-xxx 标记,所有可能宿主(右侧面板守卫/ProviderManager/其它 tryClose 型)在关自己前 querySelector 该标记让行(先注册的宿主 stopImmediatePropagation 也拦不住,让行是唯一解) ③z 必须压过 AnchoredPopover 内联 9999 ④从弹层里打开时先 setOpen(false) 关下层(层级与按键竞争一并消)。测试锚:属性断言写 data-cgui-xxx= 带等号防注释同名骗过(r52 变异实抓过一次纸老虎)。
+- **变异动线违纪第三次(2026-08-25 r60)**:又对未提交修复 `git checkout -- 文件` 恢复变异,把修复一起冲掉。铁律重申并升级:**任何变异注入前,修复必须已 commit**;临时想省一步=重做一遍的代价。自查口令:注入变异前先跑 `git status`,目标文件有未提交改动就先 commit。
+- **WKWebView 60s 无活动超时已三案(生图同步请求/更新长活流)**:mac 壳内任何"一条 HTTP 请求陪跑长任务"的形态都会在≥60s 静默时被 NSURLSession 掐断报 "Load failed"(有字节流动则计时重置——所以流式通道的死点是【静默段】)。新写长任务通道二选一:任务化秒回+短轮询(r51 范式),或流式+15s 心跳帧(r62 范式);排查口令:前端"Load failed"+后端实际成功=先怀疑这条。
+
+---
+
+## 子代理 · 开发流程 · 判官（rNN 轮次纪律）
+
+### 2026-07-27 微任务降档教训(用户流程审计揪出)
+- 事故:portal弹层Esc补丁(6cc22ac,两行data属性)按微任务跳过fable判官直接进0.2.274装机;用户问"严格遵守devflow了吗"才补审(结果放行,但流程上是降档)。
+- 判据修正:**"给既有机制追加覆盖项/匹配项"不是微任务**——它新增行为路径(portal弹层内Esc从外泄变截断),dev-flow明文"再加一个分支不算微任务"。微任务档只留改文案/改数值/改名这类零行为变化的改动。
+- 关联教训:Esc/消息归属这类雷区(本轮三轮判官才磨干净)里没有"小改动";越是判官刚放行的区域,追加补丁越要过审——补丁复用的机制对,不代表新载体的边角(portal/相位/记账)对。
+
+### 2026-08-03 17项批次修复的三条工程教训
+- **refs/stash 是全仓库共享的，跨 worktree/多代理共用一个栈**：开发代理在 worktree 里 `git stash pop` 弹出了 dev 分支上别人的 wip stash（&&短路使 stash 没执行、;后的 pop 照跑）。规矩：多 worktree 项目禁用 git stash；验"修前失败"用 `git show HEAD:file` 导出到 scratchpad 跑。
+- **源码里的字面控制字符（NUL）= 全仓 grep 静默盲区**：session-reader.js 一个字面 NUL 让 file 判 data、grep 跳过整个 955 行文件，直接导致 PLAN 写出"totalLines 零消费者"的错误结论（实有 6 处消费）。规矩：含控制字符的分隔符一律写转义（\u0000），审计用 grep -a；连主会话往 PROJECT.md 追加台账时都因从上下文复用了被污染的文本片段连续 3 次被 InputValidationError 拦——控制字符会顺着复制粘贴传播，发现被拦就换 Write 工具+python 过滤重写，别反复重试同一段文本。
+- **"实测优先于映射表"**：批G 两条 curl 推翻了两项预设（DeepSeek /anthropic 端点已回填官方 cache 字段；[1m] 后缀被服务端显式识别且共享缓存桶），照映射表字面实施会写出守护不存在问题的死代码。判官认可"比表更充分的实测后不动手"与立法本意一致。
+
+> **同族(2026-08-31，r67b 实锤)**：stash 栈挂在**仓库**不挂 worktree——代理在自己 worktree 里 `git stash push -- <已提交文件>` 做基线对比，**无内容可存时静默不入栈**，随后 `stash pop` 弹出的是 dev 分支多日前的无关旧存档，把无关文件冲突灌进当前工作区。规矩：**多 worktree 项目禁用 git stash**；验「修前失败」用 `git show HEAD:<file>` 或另开临时目录，不要 stash。
+
+### 2026-08-17 审外部代理(Codex)分支:先验测试可执行性,再信"自带验收"
+- 现象:codex分支自带7个playwright验收spec+fixture,commit声称"lock session interaction acceptance",但@playwright/test不在任何依赖、无playwright.config、fixture所称"验收宿主"(重置合成会话)在仓库不存在——spec是不可执行的愿望清单,且4处选择器与真实DOM不符。
+- 教训:外部代理的"测试"先跑三问:①runner依赖装了吗②config在吗③fixture依赖的宿主/数据谁造?三者缺一,"自带测试"按文档评审,不算验收证据。判官简报里要把可执行性定性列为独立攻击面。
+- 顺带:SDKUserMessage.priority('now'|'next'|'later')在SDK 0.3.x类型里真实存在但零文档注释;凡"类型存在但无文档"的字段,语义必须真机spike,不能按字段名望文生义(codex把steer注入从不传priority改成'now'即此坑)。
+- 流程适配:外部分支没有.devflow/LOCK,05 Step1的"动没动验收测试"改为"对既有单测的改动逐个判加强/放水"(本例check-steer-inject 528→170行重写,判官判新版import真函数质量更高,但变异哨兵变薄)。
+
+### 2026-08-17 worktree全绿≠合并态全绿:gitignored .local文件只在主仓
+- 现象:r11-b3 icon间接层新增"全仓禁直连lucide"守卫测试,worktree 114/114绿;合并回主仓后同一测试红——主仓有gitignored的BotControl.local.jsx直连lucide,worktree里根本没有这些文件。
+- 规则:凡新增"全仓扫描类"守卫(import约束/裸类名清零/字面量白名单),合并回主仓后必须重跑全量,且要意识到.local私有文件是worktree测不到的盲区;修法优先把.local文件迁入同一机制(本例补一个导出+换import行),别给守卫开豁免。
+- 另:撞账号额度死掉的子代理,用spawn时返回的原始agentId经SendMessage可从transcript满上下文恢复续跑(名字寻址会失效,id寻址有效)。
+
+### 2026-08-19 worktree 软链翻车:主仓 client/node_modules 变成自指链接
+- 症状:主仓所有 npx/构建命令返回 194 且**零输出**;直接跑 node_modules/.bin/vite 报 `too many levels of symbolic links`。
+- 根因:主仓 client/node_modules 指向了它自己(worktree 软链与主仓目录被写反),真实目录内容丢失。
+- 修法:`rm client/node_modules`(删链接本身,不带 -rf 目录) → `cd client && npm install`。
+- 预防:worktree 只软链**主仓的**目录;凡在主仓/worktree 之间做过 node_modules 相关删除操作后,先 `ls -ld` 确认两端链接指向再构建。
+
+### 2026-08-26 长报告子代理必须"边写边落盘+返回极短"
+- 现象:r63 npm 方案审查代理两连殇——第一次进程重启被杀(报告没落盘=全丢),第二次把整份长报告塞进最终返回文本,超单条回复 16k 输出上限(CLAUDE_CODE_MAX_OUTPUT_TOKENS)整代理报错终止,文件同样零字节。
+- 规则:凡产出长报告的子代理(审查/判官/排查),prompt 必须硬性写明:①边审边用 Write/Edit 分段写进产物文件;②最终返回文本≤3 行(只给结论+条数);③每条问题限"位置/为什么/怎么改"三句。落盘是唯一可靠交付,返回文本只当信号弹。
+- 顺带:进程重启会杀全部在飞子代理且状态丢失;重派前先查产物文件与 worktree 残留(git status+未提交改动),半成品可审后续用(r63b 续任实证可行)。
+- 补充(同日第三殇):"边写边落盘"还不够——**单次 Write/Edit 的 content 本身就是该条回复的输出 token**,一次 Write 整份长报告照样爆 16k 上限(r63 npm 审查三派:读完文件后一条 Write 报告直接截断)。终版规则:长报告代理必须**分多次小段落盘**(单次工具调用内容≤80 行),报告分段追加,最终返回一行。失败代理可 SendMessage 续接(transcript 在,已读文件的上下文不丢,比重派省一半)。
+
+> **同族(2026-08-26，r63 npm 方案审查代理两连殇)**：第一次进程重启被杀(报告没落盘=全丢)，第二次把整份长报告塞进最终返回文本、超单条回复 16k 输出上限整代理报错终止，文件同样零字节。规则：凡产出长报告的子代理(审查/判官/排查)，prompt 必须硬写「边审边用 Write/Edit 分节落盘 + 最终只回极短摘要」。
+
+### 2026-08-31 并行代理的提交纪律必须在**派发时**写死,不能事后补(r64 夹带事故)
+- 事故:同一 worktree 上 M6(先派)与 M5 打回修复(后派)并行。后派的任务书里写了"禁 git add -A、只 add 自己的文件路径",先派的没写——M6 整目录 add 把 M5 的致命修复+新单测卷进自己 commit(1398c85)。内容无损但归属混乱:单独回滚该 commit 会连带撤掉别人的致命修复。
+- 根因不是代理违纪,是**主会话把纪律当"打回时才想起来的补丁"**:LEARNINGS 早有"同一 worktree 多代理并行禁提交同文件/整文件 add 会夹带在制品"的记录(dev-in-worktree-not-master),但只在出过事的那条线上执行,新派代理的任务书没有默认带上。
+- 规则:**凡同一工作区可能出现第二个并行代理,每一份开发任务书从第一天就写死三条**——①禁 add -A/add ./整目录 add,提交用明确文件路径列表;②提交前 git status 自查,非自己改的文件不进 commit;③发现夹带不改写历史(并行分支上 rebase/amend 会把别人搞乱),报告注明由主会话记账。
+- 补救原则:内容核对无损+历史未改 → 记账说明该 commit 的混入物,回滚时人工拆;不值得为归属干净去 rebase 在飞分支。
+
+### 2026-09-01 两条并发/流程教训(r79 翻案+r80 端口误杀)
+- **根因指控没实证就写进任务书=差点白改**:r79 任务书里我把"genui 继承到 --font-ui"这个**读码推断**写成"已钉死",实际挂载点带 .font-reading、module.css 刻意不声明 font-family=正文本就跟随;幸好开发代理守了"先实证再改"翻案,只交了锁定测试零源码改动。规则:修 bug 任务书里的根因必须是**真机实证过**的(dev-flow 修 bug 模式第 1 步就是复现,主会话自己也不许跳);"读码推的"只能写成待验假设,让代理先验。用户报"字体不变"时,先确认他看的是哪个节点——本案用户看的是按设计恒等宽的 stat 数字。
+- **清端口只许按自己记录的 pid 杀,禁按端口段批量杀**:r80 代理收尾按 6703-6709 段 kill,把起始扫描后新起的三个别人实例(6706/6707/6708)一起 TERM 了。"起始时是空的"不构成归属证明——并行代理随时新起。规则:起实例时记 pid(文件或变量),收尾 kill 该 pid 并复扫;任务书纪律段的"杀自己的"必须写明=按 pid,不是按端口。
+
+### 2026-09-01 判官代理终审可能"思考完不吐文本"就结束
+- 现象:fable 判官(r78)干完全部核查后,最后一条回复只有 thinking 无可见文本,任务标记 completed 但裁决没送达(transcript 里连续出现"no visible output, please continue"提示后仍以 thinking 收尾)。
+- 处置:SendMessage 续同一代理,明确要求"只输出文字裁决,不许再跑命令",几十秒即回完整裁决。同轮同判官续话讨要结论不违反"判官新开"(那条约束跨轮)。
+- 预防:判官任务书本就该写明裁决格式;若通知 result 为空或只有过程行,第一反应是续话讨结论,不是重派新判官(重派=全部核查白做)。
+
+### 2026-09-01 派发器新开的 worktree 不带 node_modules 软链=52 个假 FAIL(scene3d 轮首撞)
+- 现象:自动派发的 worktree(.claude/worktrees/musing-lovelace-*)里跑全量单测,52 个 FAIL 横跨新旧轮次,连 r80 刚提交时明明全绿的测试也红。真因:该 worktree 根与 client/ 都没有 node_modules 软链(手开 worktree 的惯例步骤,派发器不做),凡 import 依赖的测试全崩。
+- 判据:**集体性、跨轮次的大面积 FAIL 先怀疑环境别查代码**——刚提交时绿的测试成批变红,几乎不可能是代码回归。先 `ls node_modules client/node_modules`。
+- 修法:`ln -s "主仓/node_modules" node_modules && ln -s "主仓/client/node_modules" client/node_modules`,补链后重跑仅剩 check-r33-server-sidecar-concurrency 偶发 flaky(单跑复核即过)。注意软链会以 `?? node_modules` 出现在 git status(gitignore 的 `node_modules/` 尾斜杠不匹配符号链接),commit 必须用明确路径,禁 add -A/add . 。
+- 附:zsh 里 `echo ===` 会触发等号展开报错并中止整条命令(后续分号命令全不跑),分隔符用引号包起来。
+
+### 2026-09-01 断网/进程重启后后台代理不可续,重派要带"接手现状"
+- 现象:宿主断网→Claude Code 进程退出,新会话里对旧 agentId 发 SendMessage 报 `No transcript found`,系统通知里"可 SendMessage 续跑"的说法在跨进程时不成立。
+- 处置:①先盘点各 worktree(`git log master..HEAD` + `git status`)与 6703-6709 残留监听;②重派新代理,任务书开头加「接手现状」段(哪些文件已落、零 commit、先 git diff/读文件再决定沿用还是重写);③把断网前通过 SendMessage 追加、可能没送达的条款**全部合并进新任务书**(queued 消息随进程一起丢)。
+- 预防:任务书强制"尽早分步 commit"(每个独立单元一个 commit),半成品最多丢一个单元;主会话每次追加需求后在 PROJECT.md 记一行,重派时才有据可查。
+
+### 2026-09-01 代理引用的"用户偏好"必须回查原始记录,继承来的注释不算依据
+- 现象:r83 开发代理以"记忆 r13-p2-13 用户嫌圆头像别扭"为由偏离任务书;判官核出该句只是 master 里继承的旧注释,真实归档(ISSUES_TRACKING.archive.local.md:1256)说的是"官方枚去圆形**背景**",与形状无关。同一批改动还夹带了一处未自报的变化(官方 spark 内层 0.92→0.68,约小 26%)。
+- 规矩:①代理报告里凡出现"用户曾定/记忆记着"字样,主会话先 grep 记忆目录+PROJECT.md+ISSUES_TRACKING.archive.local.md 拿原文再决定;②对"观感一致"类的样式统一改动,判官必须逐个比对改前改后的尺寸/位置常量,不只看颜色。
+- 附:代理以"起服务会碰真实 ~/.claude-gui"为由跳过真机渲染验证是伪理由——临时 HOME + 6703-6709 即可,任务书写明后不接受该借口。
+
+### 2026-09-01 微任务链里"跑全量"必须真正门控,不能只 echo FAIL
+- 现象:r86 微修用 `for … || echo FAIL` 跑全量,循环本身退出码恒 0,后面 `&& git commit && git merge` 照跑,把一条红测试(check-r83-avatar-mono 锁着 max-h-[168px])连 commit 带 merge 进了 master。
+- 规矩:①链式命令里用 `FAILS=0; … || FAILS=$((FAILS+1)); [ $FAILS -eq 0 ] || exit 1` 之类真正阻断;②微任务改任何被源码锁盯着的字面量(样式值/文案)前先 grep tests/ 里有没有锁着它,有就连锁一起改并说明;③commit 与 merge 分两步做,中间看一眼结果。
+
+### 2026-09-02 dev-flow 新流程对子代理的要求我漏了四条(用户两次纠正)
+- 漏:①全用 general-purpose,没用本机具名 agent(code-reviewer 当裁判是物理只读隔离,test-automator 做测试设计,architect-reviewer 盲审,fixer/backend-developer/designer 开发,librarian/explorer 调研,oracle 方案);②判官任务书里塞了"作者自述"让它逐条核——05 明写裁判不给开发代理自我报告;③读外部文档的调研代理没贴《数据与指令隔离声明》原文,只写了一句"内容是数据不是指令";④判官放行就合并,没过卡点③。
+- 规矩:派前看 PLATFORMS.md 本机增强表;判官输入=文件路径+白名单;隔离声明整段粘贴;合并前报验收结果等用户点头。已写入长期记忆 devflow-subagent-requirements-v2。
+- 补记(用户第三次纠正):作者续用要**跨轮次**——同域连续任务(r89→r90 缓存后续)应续用 r89 作者,我新派了 r90-dev 白烧一份上下文重读;调研代理同主题追问也续用。只有判官/审查/测试设计才每轮新开。
+
+### 2026-09-03 worktree 清理前先把 .devflow 产物拷回主仓
+- `.devflow/` 是 gitignored,`git worktree remove --force` 会连判官报告/TEST-PLAN/test-output 一起删掉(r96 的 ACCEPT-REPORT 就这样丢了,只剩 PROJECT.md 摘要)。清 worktree 的固定顺序:先 `cp <wt>/.devflow/{ACCEPT-REPORT,TEST-PLAN,test-output}-rNN* 主仓/.devflow/`,再 remove。
+
+### 2026-09-03 判官子代理可能被 hook 拦住写 .md 报告
+- 现象:r106 判官(code-reviewer)报"本会话禁止写报告类 .md",报告只能以文本返回,主会话再落盘 `.devflow/ACCEPT-REPORT-r106.md`。
+- 规则:派判官/审查代理的任务书一律写明"若环境禁止写 .md,把全文直接回复给我",主会话负责落盘;别把"报告文件不存在"当成判官没干活。
+
+### 2026-09-05 r113:审查代理的白名单要连"测试已改到哪一步"一起给,否则会误报
+- 代码质量盲审代理按白名单只看源码 diff(aa22c209..HEAD)、不许看测试,于是把"契约点名要改写的 5 个既有测试"判成没做(重要-1),实际它们在锁定 commit(diff 起点之前)已改完且全绿。
+- 规则:给盲审/判官划 diff 范围时,把"测试锁定 commit 与其包含的测试改写"作为已知事实写进 prompt(一句"tests 已按契约改写并锁定于 X,不在你的审查范围"),或把 diff 起点放到测试改写之前;不然它只能按契约文字推断,必然误报。
+- 同轮另两条:①SendMessage 在本会话不可用,作者续用做不到,契约小修订只能主会话直接改并标注,大修订要重派;②小任务档跳过方案盲审,契约两条各自成立合起来互斥(同步失败挡 TTL 内预热 vs 预热必须覆盖同步失败)到开发阶段才暴露——小任务也值得让审查代理专查"契约自洽性"一遍,几分钟能省一轮返工。
+
+### 2026-09-06 r113 复盘:契约自相矛盾、审查白名单误报、代理续用不可用
+- **契约两条各自成立、合起来互斥**:INTERFACE §1.3「同步失败写带 TTL 的失败表」+ §1.4「失败表 TTL 内挡预热」与 §1.5「同步失败后预热立刻覆盖」矛盾;黑盒测试各写一条(P2 vs P10),到开发阶段才暴露,返工一轮(改契约 v2 → 改测试 → 重锁 → 重派开发)。小任务档跳过了方案盲审,而盲审必查项里正有"接口约定含糊/矛盾"。规则:小任务也让方案代理在 INTERFACE 末尾自附"规则交叉表"(每条状态转移各由哪条规则决定),或主会话派测试设计前先用 5 分钟对 INTERFACE 做一遍"两条规则同时触发时结论唯一吗"的自检。
+- **审查代理白名单排除测试文件 → 误报"测试没改"**:代码质量审查只许看 diff 与源码,它据 §5.4 描述断言"五个测试没改写"报了重要-1,实际那些改写在锁定 commit(diff 范围之前)。规则:给审查代理的任务书要写明测试状态("§5.4 改写已在 commit X 完成并全绿,不需你核")或把 diff 范围写成含锁定 commit;否则它只能靠推断。
+- **SendMessage 在本会话不可用**:方案/开发/测试代理都无法续用,小修订(几行)由主会话按契约直接改并在 PROJECT.md 标注,大修订重派新代理并给足现状(commit、已过测试清单)。
+- **`git merge -F -` 不认 stdin**(第二次踩,已记全局 ERRORS.md):merge 说明写临时文件;merge 后的 worktree remove / branch -d 必须 `&&` 依赖合并成功。
+- **主线工作区手工拷入的产物会挡合并**:把 worktree 的 TEST-PLAN 拷回主仓工作区后,分支也改了同一文件 → merge 拒绝("请先提交或贮藏")。规则:.devflow 里被 -f 入库的产物只在 worktree 分支上改,主仓等合并带入,不要两边都改。
+
+---
+
+## 网络 · 代理 · 缓存 · npm 渠道
+
+### 2026-08-20 【诊断错误复盘】把「Tailscale 劫持 DNS」误判成「机器只配了系统代理」
+
+> **真因是用户自己找到的:那台 Mac 开着 Tailscale。关掉 Tailscale,所有 provider 立刻全通(0.2.311,未打任何补丁)。**
+>
+> Tailscale 的 MagicDNS 把系统 DNS 指到 `100.100.100.100` 由 tailnet 代答;该解析器答不出公网域名时,
+> 症状就是 `curl` 报 `Could not resolve host`,而 `https_proxy=… curl` 通 —— **因为代理在它自己那边做 DNS**。
+>
+> **我犯的错:把"走代理能通"读成了"需要代理",实际是"绕过了坏掉的解析器"。**
+> 同一份证据支持两个假设(缺代理 / DNS 坏),我只验证了支持前者的那条,没做能区分两者的实验。
+>
+> **能一句话证伪的实验(当时就该做,只要 5 秒)**:
+> ```
+> nslookup api.deepseek.com            # 直接问系统解析器
+> scutil --dns | head -20              # 看当前 DNS 服务器是不是 100.100.100.100 之类
+> ```
+> DNS 服务器不是路由器/运营商那几个 = 有东西(VPN/Tailscale/企业 DNS)接管了解析,先关它再谈代码。
+>
+> **更早就该起疑的信号(我当时忽略了)**:用户说"0.2.287 是好的"。我查证后发现 0.2.287 的
+> `anthropic-proxy.js:150` 与 `openai-proxy.js:563` **用的同样是裸 fetch**、`assertPublicBaseURL`
+> 的 DNS 校验也早在 7-11 就进来了 —— **代码在这条链路上根本没变**。
+> "同样的代码、不同的行为" ⇒ 变量在环境里,不在代码里(这条本项目已记过一次:见 stale 产物那条)。
+> 我当时看到了这个矛盾却继续往代码里找,是本次最大的方法论失误。
+
+以下技术结论**本身仍然成立**(独立验证过,与上面的误判无关),但**不要再引用它的"用户场景"部分**:
+
+### 2026-08-20 Node fetch 与代理:三条独立成立的技术结论(r17-6/7)
+
+**当时的观察(因果已被推翻,见上)**:第二台 Mac 上拉模型失败、连接测试失败、会话恒 502;
+`curl https://api.deepseek.com/v1/models` → `Could not resolve host`,`https_proxy=… curl` → 401。
+**真因是 Tailscale 劫持 DNS,不是缺代理。** 下面这条 Node 行为是排查途中顺带测出来的,独立成立。
+
+**根因:Node 内置 fetch(undici)不读系统代理。** 实测表(Node v25.9.0,假代理数 CONNECT):
+
+| 配置 | 是否走代理 |
+|---|---|
+| 无 env | 直连,CONNECT=0 |
+| `https_proxy` / `HTTPS_PROXY` | **直连,CONNECT=0(不读)** |
+| `https_proxy` + `NODE_USE_ENV_PROXY=1` | 走代理,CONNECT=1 |
+| 只有系统代理(本例) | 直连,永远不走 —— **无论怎么设 env 都救不了,因为根本没有 env** |
+
+**"旧版好新版坏"的解释(已作废)**:我曾归因于 2026-06-01(8222b34)把 `ANTHROPIC_BASE_URL`
+改指向本机回环代理、把对外那一跳从 CLI 搬到我们的 Node fetch。**这个解释是错的** ——
+0.2.287(8-11)早已带着那次改动,且两个 proxy 的转发同样是裸 fetch。真因是 Tailscale。
+
+**修法**:`server/utils/proxy-fetch.js` 的 `pfetch` —— 直连优先,**只有网络层失败**才读系统
+代理走 CONNECT 隧道重试一次;HTTP 4xx/5xx 绝不回落(那是对方答复了);调用方 abort 不回落
+(否则等于把已取消的请求复活,停止链路会被拖坏);回环/私网永不走代理。
+直连可达的机器行为一字不变 = 零回归。
+
+#### 坑 1:`https.request(url, {createConnection})` 会把 Host 拼成 `host:80`
+
+隧道挖通、TLS 握手也成功,但真服务器一律 400。抓到实际写进隧道的字节:
+
+```
+GET /zen HTTP/1.1\r\n…\r\nHost: api.github.com:80\r\n…     → GitHub 400 Bad request
+```
+
+node 的 `ClientRequest` 只在 `options.createConnection === undefined` 时才分配 agent;
+而 Host 拼端口用的 `defaultPort` 取自 `options.defaultPort || (options.agent && options.agent.defaultPort)`。
+传了 `createConnection` → 没 agent → defaultPort 落空 → 回落成 **80**。
+**修:options 里显式加 `defaultPort: 443`。**
+
+#### 坑 2:`agent: false` 会让 node **完全无视** 你传的 `createConnection`
+
+`github-fetch.js`(r14-1)的 `proxyGet` 写的是
+`httpsRequest(url, { createConnection: () => socket, agent: false, headers })`。
+`agent: false` 让 node 新建一个默认 `https.Agent`,而 Agent 用的是**它自己的**
+createConnection —— 我们辛苦挖的 CONNECT 隧道被丢掉,node 转头对目标域名**另开一条直连**。
+
+最小复现(独立验证过):
+
+```
+createConnection 被调用 = false
+错误 = ECONNRESET
+```
+
+**结论:GitHub 那条"代理回落"从 r14-1 上线起就没工作过**,只是本机有 TUN、直连照样通,
+所以三个月没人发现。r17-7 已删掉 proxyGet,`gfetch` 改用 pfetch。
+另:代理只转裸字节,CONNECT 之后**必须自己 `tls.connect` 握手**,socket 还是明文的。
+
+#### 坑 3(最该记住的):自造的假上游太宽容,严重 bug 全绿通过
+
+坑 1 那个 Host bug **通过了全部 137 个单测**,因为假上游是个 node https server,
+根本不校验 Host。是我打**真实代理 + 真实公网**才发现的。
+
+- **协议层改动(自己拼 HTTP/TLS/代理)必须至少打一次真实对端**,fixture 绿不算数。
+- fixture 要**故意变严格**:现在假上游 Host 不匹配直接回 400,以后任何 Host 拼错立刻红。
+- 变异验证要针对"真实对端会拒但 fixture 会放行"的那一类,而不只是逻辑分支。
+
+#### 顺带修的两处「错误信息等于没说」
+
+- `/api/git/init` 把「超时 / git 没装 / 系统拒绝访问」全变成同一句
+  `Command failed: git -C <path> init`(实测三者 `err.message` 逐字相同,真正原因在
+  `err.killed` 和 `err.stderr` 里)。而**同文件的 `/api/git/status` 早就分开报了** ——
+  同一对兄弟端点、一个精细一个粗糙,是本项目反复出现的形态。
+  用户症状:点初始化转十几秒、无任何可操作提示;刷新后横幅依旧让他初始化
+  (被掐断的 git init 留下半成品 `.git`,rev-parse 说 not a git repository)→ 无限循环。
+- `scripts/check-http-smoke.cjs` 等的是 `'Claude GUI server READY'`,而 b366880 改名
+  cc-gui 时漏改 → **冒烟测试从此永远超时**,服务端其实起来了。
+  改成只认 `'server READY'`:品牌名还会变,横幅语义不会。
+
+### 2026-08-26 诊断本机服务必须 --noproxy(shell profile 里的 http_proxy 会拦 127.0.0.1)
+- 现象:排查"本机版没 bot"时,`curl 127.0.0.1:6677/api/health` 空响应、`/api/bots` 返 502,据此误判"后端崩了/包没 bot",连查十余轮。
+- 真相:shell profile 常驻 `http_proxy=http://127.0.0.1:7897`(Clash),curl 把 127.0.0.1 请求也交给代理 → 代理连不上目标返 **502**、超时返空。**502/空 是代理的回答,不是应用的**。
+- 铁律:凡诊断本机服务(health/端口/接口),curl 一律加 `--noproxy '*'`;真·未监听的信号是 exit 7 / 000(connection refused),不是 502。
+- 连带教训:①`server.log` 是长期累积文件,尾部报错可能是几天前的(本次 ERR_MODULE_NOT_FOUND 实为 8/24 遗留),判时效要看 mtime 或先记录 size 再触发新启动比对增量;②`pgrep -af "关键词"` 会匹配到自己的 grep/shell 命令行,进程数判断要用 `ps -o ppid,command` 确认父子关系。
+
+### 2026-08-11 npm 渠道变"引导壳"包 → CLI 静默降级 26 个版本无人察觉
+- **事故链（复盘修正版）**：GUI 更新页对 npm 安装跑 `npm i -g @anthropic-ai/claude-code`（8/11 09:41）→ 2.1.227 的 npm 包已改成原生安装器引导壳（`bin` 指 `bin/claude.exe` ASCII 假启动器，真二进制是 optionalDependency 平台包 `claude-code-darwin-arm64`，postinstall 只做拷贝）→ **npmmirror 对该 81MB tarball 只有 16-20KB/s**（带不带代理都一样，瓶颈在镜像对这个新文件的分发；**旧 npm 包只是几 MB 的 JS 所以历来更新秒完**，慢是 2.1.227 新包名+81MB 大二进制的冷缓存特有，不是镜像整体慢）→ 下载要 20+ 分钟，npm 进程一直没走到"建 bin 链+跑 postinstall"，GUI 更新流 8 分钟超时放弃**但没杀 npm**（僵尸挂在 localhost:7897 连接上一个多小时）→ `~/.npm-global/bin/claude` 从未建立 → GUI 的 claude-bin.json override 指向死路径 → resolver 静默回落 PATH → 跑回 7 月的原生 2.1.201（比 r7 验证用的 2.1.226 旧 26 版）。⚠️初版记录把根因写成"TUN 拦 GitHub 下载"——错，二进制走 npm registry 不走 GitHub。
+- **修复配方（离线可复用）**：杀干净所有 npm 进程（pkill 模式注意子进程命令行没有 `-g`，按 `claude-code@latest` 匹配再 kill -9）→ 走 Clash 代理从**官方 registry** curl 平台包 tarball（4.8MB/s vs 镜像 16KB/s）：`registry.npmjs.org/@anthropic-ai/claude-code-darwin-arm64/-/claude-code-darwin-arm64-<ver>.tgz` → 解包把 `package/claude` 拷到壳包 `node_modules/@anthropic-ai/claude-code-darwin-arm64/claude` → 壳包目录里 `node install.cjs` → 手动 `ln -sf ../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe ~/.npm-global/bin/claude`。
+- **教训**：①npm 渠道对 claude-code 已死，更新动作一律走原生 `claude update`；②override 失效静默回落 = 版本降级无任何提示，必须显式横幅；③"CLI 行为验证过"绑定的是验证时的版本，生产解析到的二进制可能悄悄换——排查行为异常先 `curl /api/cli-check` 看实际 version/path。
+- **诊断一条龙**：`curl :6677/api/cli-check`（实际用哪个）+ `cat ~/.claude-gui/claude-bin.json`（override 指哪）+ `ls -la ~/.local/bin/claude`（原生符号链钉在哪版）。
+
+### 2026-08-26 npmmirror 是按需同步:GET 不触发,必须 PUT /-/package/<pkg>/syncs
+- 现象:Windows 用户 `npm i -g @wsxwj123/cc-gui --registry=npmmirror` 输出 `added 1 package`(应为 2),启动器报"没找到当前平台的安装包"。
+- 根因:npmmirror **只镜像被人请求过的包**。主包因当初发 0.0.1 占位时被访问过而存在;两个平台分包从没人碰过 → 镜像上 404。而 npm 装 `optionalDependencies` 失败**静默跳过**(optional 的语义),用户看到"装成功了"却少了 69MB 的平台包。
+- CI 里本来就有 `Warm npmmirror` 预热步骤,但写的是 **GET 包元数据 —— GET 不触发同步**。铁证:v0.2.354 发布 8 小时后两个分包在镜像上仍是 404。唯一触发入口是 `PUT https://registry.npmmirror.com/-/package/<pkg>/syncs`(返回 `{ok:true,id,state:"waiting"}`,25 秒左右完成,scoped 包名要 URL 编码 `@scope%2Fname`)。
+- 已修:CI 发布后对三个包各 PUT 一次(`continue-on-error`,包已发出不该弄红 job)。手动触发后实测镜像 tarball 200 可下 72.7MB,走镜像源试装 `added 2 packages` 载荷在位。
+- 连带:面向用户的错误提示别写"通常十几分钟内完成"——按需同步可能**一直**缺,干等无效。要给可执行命令(`--registry=https://registry.npmjs.org` 换官方源装一次)。
+
+### 2026-09-01 proxyGet 事件回调内同步 throw=悬死响应(限流修复判官 M1 实锤)
+- 机制:server/utils/github-fetch.js 的 proxyGet 在 `creq.on('connect')` 回调里同步调 `httpsRequest(url, {headers})`;headers 含非法字符(如换行)时它**同步 throw**,事件回调里没人接 → 逃逸成 uncaughtException(index.js 全局 handler 兜住不崩)→ **Promise 永不 settle,HTTP 响应悬死**,前端 await 卡死。无代理机器反而正常(裸 fetch reject 被正常 catch),挂代理的才踩。
+- 已修入口:POST /skills/github-token 形状校验(TOKEN_RE)前置到拼 header 之前(单测⑤锁顺序)。**未修根**:proxyGet 的 connect 回调仍无 try/catch,以后给 gfetch/proxyGet 加新调用方、且 headers 含任何用户可控值时,必须先校验或给回调包 try/catch reject。
+- 泄露面核过:该异常 message 只含 header 名不含值,令牌不落日志。
+
+### 2026-09-02 缓存命中率:一条错记忆挂了两个月,先量再改
+- 现象:项目记忆把第三方缓存命中低归因于 `cch=` nonce,并据此加了 `CLAUDE_CODE_ATTRIBUTION_HEADER=0` 两层缓解;本轮零费用假上游逐轮 diff 证明该 nonce 在当前 CLI 是常量且第三方根本收不到,真凶是冷启重算 gitStatus(prompt 8.3% 处)+ GUI append 关掉了 CLI 的静态系统提示快照 + ToolSearch 改工具数组 + chatCompatKey 频繁冷启;真机还证实 DeepSeek 按 metadata.user_id(含 session_id)隔离缓存,每个新会话前缀从零。
+- 规矩:①"前缀被打穿"类问题一律先抓两次相邻请求体做字节 diff(或 `claude --debug api` 看 `[PROMPT CACHE BREAK] … diff:`),定位到字段/偏移再谈根因;②凡写进记忆的根因必须附"怎么证明的",没有实测的只能写"假设";③模型侧缓存规则(粒度/TTL/隔离键)每次排查都重新抓官方文档,不用记忆里的旧版本。
+
+### 2026-09-03 仓库名已改 cc-gui;npm publish 的 E404 = token 失效的伪装
+- 仓库 `wsxwj123/claude-gui` 已改名 **`wsxwj123/cc-gui`**(用户手改),本机 remote 已 `git remote set-url origin git@github.com-wsxwj123:wsxwj123/cc-gui.git`;CLAUDE.local.md 等旧文档里的 `claude-gui` 仓路径与 `gh repo` 命令都要按新名字走。GitHub 改名后旧名 git 操作会重定向,但 SSH 本就走不通(fake-IP),别被旧 remote 指向迷惑。
+- **npm publish PUT 报 E404 ≠ 包不存在**:`@wsxwj123/cc-gui(-darwin-arm64/-win32-x64)` 昨天 0.2.368 还发成功、今天同一 token PUT 404 → token(CI secret `CCGUI`)过期或账号被 npm 风控,npm 把无权发布伪装成 404。诊断法:先 `npm view 子包 versions` 排除"新包没权限"(历史版本齐全=老包),再比"昨天成功今天失败"=凭证侧问题。修复=换新 Automation token → `gh secret set CCGUI --repo wsxwj123/cc-gui`(用户自己贴,token 不过会话)→ `gh run rerun <id> --failed`(`--failed` 只重跑 publish-npm,脚本自带"已存在跳过"幂等)。
+
+### 2026-09-03 Windows「拉不到模型/连不上」优先怀疑代理模式
+- 其他用户 Windows 上 b.ai 拉模型失败,Mac 上正常;对方切 Clash TUN 模式即好 → 根因是系统代理(HTTP 代理)模式下后端 node 进程不走代理。排查顺序:先问代理模式,再看报错文案三分类(连不上/SSRF 拒绝/鉴权失败)。
+
+### 2026-09-03 DeepSeek 两条口都把 system+tools 全部算进前缀缓存(实测)
+- 实验:system ~3k + tools 24 个 ~5.5k + 逐轮增长 messages,anthropic 口第 2 轮 hit=8576/8602,openai 口同(且两口共享同一缓存,openai 口第 1 轮就命中 anthropic 口写入的前缀)。脚本 scratchpad/r96-curl/ds-tools-cache.mjs。
+- 推论:GUI 会话里"命中数恒 ≈ 系统提示长度、tools+messages 全 miss"不是 DeepSeek 不缓存 tools,而是 system 与 messages 之间(tools 段)逐轮有变化——首先怀疑 MCP 服务器连接抖动/延迟连接(tools 列表变)、ToolSearch 未关、CLI 版本不支持快照。排查先要 settings.json 三键 + `claude --version` + `claude mcp list`。
+
+### 2026-09-03 r96 P0 取向错误的教训:上游"接受"≠上游"缓存友好"
+- 我用真 key 只验证了"中途 system 消息不 400",没验证缓存行为;真机实测 DeepSeek OpenAI 口对中途 system 消息内容变化 → 整个前缀 hit=0。规则:凡影响前缀的改动,真机验证必须看 `prompt_cache_hit_tokens`(或 cache_read),不能只看 HTTP 状态;假上游 LCP 只能证明"我们发的字节稳定",证明不了上游怎么切前缀。
+
+### Cloudflare Tunnel + WebSocket 白屏：httpHostHeader 只改 Host 不改 Origin
+*(详细复盘在 `~/.learnings/cloudflare-tunnel-websocket-origin.md`)*
+- 现象:经 Cloudflare Tunnel 暴露带 WebSocket 的 SPA,页面白屏,HTTP API 正常。
+- 根因:tunnel 的 `originRequest.httpHostHeader` **只改写 Host 头,不改写 Origin 头**。浏览器发 WebSocket 握手**必带 Origin**(`https://6677.wsxwj123.top`),服务端 `isAllowedBrowserOrigin` 发现它既不是 localhost 也不匹配(已被重写的)Host → 拒握手 → 前端卡在等 WS 就绪 → 白屏。HTTP API 不受影响是因为同源请求**不发 Origin 头**,`isAllowedBrowserOrigin(null)` 直接放行。
+- 修法:①(推荐)服务端 Origin 校验加可信域名兜底;②不改代码就在 cloudflared 与后端之间插本地代理剥掉 Origin 头。
+- 适用范围:任何**只能改写 Host 不能改写 Origin** 的反向代理/隧道,都会踩这个。
+
+---
+
+## 诊断方法论(装机 / 日志 / 差分)
+
+### 2026-08-26 "功能不见了"先分清 代码缺失 / 渲染不出 / 渲染了但看不见
+- 事故:用户报"本机版没 bot 按钮",我连查十余轮(源码.local在位→装机包bots.local.js在→前端chunk在→图标导出在→渲染点在→chunk HTTP 200→后端 available:true),全绿却仍无按钮;真因是**按钮渲染了但在视口外**——BotControl 位置存 localStorage(cgui-botctl-pos={left:1642,top:901}),`useState(loadPos)` 直接采用历史坐标**未对当前视口 clamp**(clamp 只用于首次默认位与拖动中),窗口比记录小 → 按钮永久失踪且无复位入口。
+- **决定性手法**:用 playwright/浏览器打开同一后端端口(全新 profile 无 localStorage)对照——浏览器有、app 没有 ⇒ 立即锁定"客户端持久化状态"而非代码/打包;若两边都没,才查代码链路。这一步该**第一个**做,不是第十个。
+- 通用规则:任何"位置/尺寸/布局"类持久化(悬浮按钮、面板宽度、窗口分栏)在**读取时**必须按当前视口重新钳制,并监听 resize 再钳制;只在写入时钳制 = 换屏/缩窗后状态永久越界。
+- 连带:.local.jsx/.local.js 是 gitignored **无 git 回退保护**,改前必须先拷贝备份到 scratchpad;它们也不被任何测试/判官覆盖,回归只能靠人工。
+
+### 2026-09-01 装机排障:先看日志 mtime,陈旧 server.log 会伪装成当前故障
+- 现象:装 0.2.365 后 6677 无响应,`~/.claude-gui/server.log` 尾部赫然是 `ERR_MODULE_NOT_FOUND: client/src/utils/plan.js`,差点当成打包缺失去改 tauri.conf 的 resources。
+- 真相:该日志 mtime 是 8/26,那个 import 早由 `684b8f9d` 修掉(当前源码还留着注释"不 import 那个模块:打包只带 server/ 与 client/dist")。真正原因是我收尾用的 `pkill -f "CC-GUI.app"` 与随后的 `open -a` 撞车,把刚启动的进程杀了。
+- 规矩:①读 server.log/tauri-startup.log 前先 `stat -f "%Sm"` 看 mtime,或直接看日志里的版本号是否为当前版本;②退旧 app 用 `osascript -e 'quit app'` 后**等待进程真退再 open**,别在同一批命令里 pkill+open;③判断"后端有没有起来"最快的证据是 tauri-startup.log 里有没有当前版本号的 `===== launch vX.Y.Z =====` 行。
+
+### 2026-09-10 batch 工作树三个操作事实
+- 本机 6695–6794 端口段被常驻实例占用（6710/6723/6758 等）：脚本用固定/区间端口会随机假失败，统一探测空闲端口（net createServer listen(0)）。
+- 用户的 6689 开发实例就跑在 `.claude/worktrees/batch`（cwd=worktrees/batch），跑的是实例启动时刻的代码；测试实例必须隔离 HOME + 独立端口，绝不 kill 6677/6689。
+- `npm run build:local` 会跑 gen-release-notes.mjs 覆盖用户 release-notes 脏文件；验证脚本/测试构建一律用 `client/node_modules/.bin/vite build`。
+
+## 2026-09-16 验收套件对"跑在哪"敏感：工作树里绿、主仓库里红
+- `tests/acceptance/r118-switch-back`（以及沿用同名 `openSessionBySearch` 助手的 `r119-stop-response`）里的辅助函数用 `getByRole('button', { name: /mark/ }).first()` 点"第一个名字匹配的按钮"。**搜索结果行是 `button.sidebar-item`，而侧栏会话行是 `div[role=button].sidebar-item`**；当夹具项目在侧栏可见时，会话行先被点到 → 不清搜索词 → 侧栏仍被过滤 → 后续"侧栏应出现某条会话行"的断言必红。
+- 项目可见与否由**路径形态**决定：路径含 `/.claude/worktrees/` 的会被服务端标 `isWorktree`（`server/services/session-reader.js:385`），侧栏默认隐藏（`client/src/utils/projectPanel.js:39`）。所以**同一份代码：worktree 里跑全绿，主仓库里跑必红**（实测 B3/B4 两条）。
+- 影响：在**主仓库**复跑这两套验收会得到假红，曾据此误判出一次不存在的"回归"（详见全局 ERRORS.md 2026-09-16 条）。
+- 处置（待做，属测试资产需新派测试设计代理）：①辅助函数精确点 `button.sidebar-item` 搜索结果行（再收窄到搜索区块，AgentsPanel 也用同名 class）；或②点完显式清空搜索框再断言。在此之前，**这两套只在 worktree 里跑**，主仓跑出的红不算产品证据。
+
+## 2026-09-16 checkpoint 快照库只增不减，且 App 内无删除入口
+- 存储：`~/.claude/gui/checkpoints/<sessionId>/`（各是一个 bare shadow git 库 + `meta.json`）。实测本机 174 个会话目录共 **50 GB**，其中单会话 7 个快照就占 **37 GB**（大二进制文件每个快照全量重存，git 不去重增量；这个量级用户几乎必踩）。
+- **没有 DELETE 端点，App 里也删不掉**：`server/routes/checkpoints.js` 只有 POST `/checkpoints`、GET `/:sessionId`、GET `/:sessionId/resolve`、POST `/:sessionId/restore`、POST `/:sessionId/restore-file`；`App.jsx` 的 `CheckpointButton` 只有「新建快照 / 回到此处」。删会话亦不连带清理（全仓 grep 无引用）。
+- 所以只能手删目录：`rm -rf ~/.claude/gui/checkpoints/<sessionId>`（或 `/*` 全清）。丢的是该会话的回滚点，**不影响** `~/.claude/projects/**/*.jsonl` 对话记录、不影响用户真实 Git 仓库。
+- 反查「哪个会话吃空间」：`du -sh ~/.claude/gui/checkpoints/*/ | sort -rh`；会话标题在 jsonl 的 `{"type":"custom-title","customTitle":…}`（手改名，优先显示）/ `{"type":"ai-title","aiTitle":…}`（CLI 自动，见 `server/services/session-reader.js:203-214`──两者在 SDK 的 `SDKSessionInfo.customTitle` 里被混成同一字段，必须分开取）。sessionId → 项目：`ls ~/.claude/projects/*/<sid>.jsonl`。
+- 待办（源头上血，非本次处理）：`handleSend` 每轮 fire-and-forget 拍快照，代码里**无任何 GC/过期策略**。需要时加「每会话保留最近 N 条 / 超过 M 天清理」。
+
+## 2026-09-21 "验收目录零改动"锁要按提交判"不混改",不能按分支判"没改过"
+- 现象:`check-r94-panel §7.9`、`check-r95-image-nav E9` 用 `merge-base(HEAD, master)..HEAD` 判 `tests/acceptance/**` 既有文件零修改。r122 里测试设计代理在**锁定前**合法对齐了三个旧套件(默认折叠改成开关后,旧套件要预置开关=开才还在测原来的逻辑),这两把锁立即红,而开发代理又不许碰 tests/acceptance —— 锁把"谁在什么阶段改"这一维丢了。
+- 规则:零 diff 锁的真实意图是"开发不得把改验收测试和改产品代码混在一起"。判据应是**逐提交**:改了既有 `tests/acceptance/**` 的提交不得同时改 `server/**`/`client/src/**`;外加工作区里 tests/acceptance 无未提交改动。这样测试代理的 `test(…)` 提交天然放行,开发的偷改一样被抓。
+- 复核拷问:「这把锁红了,是有人篡改,还是流程里合法的一步被锁误伤?先看提交表再决定改代码还是改锁。」
+
+## 2026-09-21 装机链里的"静态门"要先对着真代码验一次
+- 现象:为回应判官"诊断 url 是否脱敏"的疑问,我在装机链里加了一道 grep 静态门(`url:\s*redactKey|redactKey\([^)]*url|…`),真实代码写的是 `const url = redact(info.url …)`(局部封装),门没匹配上 → 合并与 bump 都做完了却在装机前误停。
+- 规则:临时判据(grep/正则)加进自动化链之前,先在当前代码上单独跑一遍确认"该绿时绿",否则它只会在关键时刻误报;更稳的做法是直接读那一段代码给出结论,而不是让正则替你读。
+
+## 2026-09-21 CHANGELOG 条目必须写成「- **标题**:正文」一行,生成器才能折叠
+- 现象:0.2.396 / 0.2.397 的更新说明我写成"**粗体标题** + 下面一串嵌套小项",`scripts/gen-changelog-md.mjs` 认不出"标题:正文",README 与 Release 正文里不出现折叠块,`check-r109-changelog-md` 的 t7(`--release <最新版> 输出含折叠块`)直接红,还被开发代理当成"基线既有红"绕了一圈。
+- 规则:每条更新写成一行 `- **一句话标题**:正文(可长)`;不要在条目下嵌套子列表;写完 bump 前先 `node tests/unit/check-r109-changelog-md.mjs` 跑一遍。
+- **补(2026-09-22,又踩一次)**:改完 CHANGELOG **还要跑 `npm run gen:readme-changelog`** 把 README 的更新记录段重新生成,否则 `check-r109-changelog-md` 的 t7 报"README 更新记录过期"。守卫脚本的报错文案里直接写了该跑哪条命令,照着跑即可。顺序:改 CHANGELOG → `npm run gen:readme-changelog` → 跑守卫 → 一起 commit。
+
+## 2026-09-21 给判官的证据文件要保留完整逐条输出,别只 `tail -25`
+- 现象:三轮判官(r122/r125/r126)都在回报里写"输出文件只含第 N 条起的逐条行,前面靠聚合计数推定"——因为我的证据脚本对 playwright 输出做了 `tail -25`,长套件的前几十条逐行结果被截掉,判官只能凭 "N passed / exit 0" 计过。
+- 规则:证据脚本把验收套件的完整 stdout 原样落盘(单独文件或不截断),摘要行另外 grep 出来放顶部;判官白名单里给完整文件。锁定完整性、退出码、计数三者齐全才算"可独立核对"。
+
+## 2026-09-22 回滚点回收改成"延后"之后,已摘掉未回收的提交必须 graft 成无父 root
+- 背景(r128):为了不让拍快照的响应等回收,把"腾空间"从响应路径挪到后台节流。副作用是被摘掉的提交会在影子仓里多待一会儿。
+- 现象:这些提交的**真实父往往上一轮就被回收掉了**,于是 `git fsck` 报 broken link(不可达对象的连通性 fsck 照查),`git rev-list --objects <它>` 也因父缺失整条失败 —— 后者直接导致"本轮该立即删哪些对象"(exempt 集)算不出来,只能退回等宽限。B 组竞态测试第 4/5 轮稳定复现。
+- 做法:`writeGrafts` 里除了 keep 链,**给每个"已摘掉但待回收"的提交各写一行无父 graft**;后台回收跑完用 `git cat-file --batch-check` 对账,把真没了的从待回收标记与 grafts 里清掉,没删成的留到下次。残留一两行指向不存在对象的 graft 对 git 无害(实测不报错、不影响 log)。
+- 教训:**把同步操作改成异步,要单独想"中间态在磁盘上长什么样"**。同步时不存在的中间态(摘掉即删),异步后会变成一个真实存在、且会被外部工具(这里是 git fsck / rev-list)看见的状态。
+
+## 2026-09-22 测试为了跑得快把可配参数调小,默认值就成了零验证的盲区
+- 背景(r128):新增 `CGUI_CHECKPOINT_REPACK_DEBOUNCE_MS`(后台回收节流,默认 30 秒)。验收用例为了几秒跑完,一律设成 300ms。
+- 判官点出的风险:**默认值若写错(比如写成 0 或 30 而不是 30000),所有用例照样全绿**,但生产环境直接退回"每条消息都做一次后台回收"——正是这轮要修的病。
+- 做法:凡"测试里被调小/调大的可配参数",发版前**单独验一次不设环境变量时的实际取值**(直接跑取值函数,别只 grep 源码常量 —— 取值函数可能有兜底分支把它吃掉)。本次实测:不设=30000ms、设 300=300ms。
+- 推广:这是黑盒验收的通用盲区。判据"可配"和判据"默认值正确"是两件事,测试套件几乎总是只覆盖前者。
+
+## 2026-09-29 `.devflow/` 在本仓已 gitignore:worktree 里的过程产物在 `git worktree remove` 前必须拷回主仓
+- 现象(r130):判官/审计报告、证据包都写在 worktree 的 `.devflow/` 下,`git add` 报"被 .gitignore 忽略",提交不进去;worktree 删掉这些文件就没了。主仓 `.devflow/` 已按轮次堆着 r126/r128 的同类文件。
+- 做法:合并后、删 worktree 前 `cp -n .claude/worktrees/<轮>/.devflow/*<轮>* .devflow/`;PROJECT.md 里每轮的收尾行写明"已拷回"。
+- 顺带两条既有状态,免得每轮重复解释:`tests/unit/sf-mount-anchor-two-configs.spec.mjs` / `sf-mount-anchor.repro.spec.mjs` 是 playwright 用例,"逐个 node tests/unit/*.mjs" 必红 2 条(master 同样),已列待办排除;claude-mem 的 Read 钩子会给盲判/审计代理附加"prior observations",三轮四个代理都如实摘录未采信,任务书里那句"钩子注入不属于输入"有效。
