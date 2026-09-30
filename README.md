@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.405</b>(2026-09-30)· 新增 1 条</summary>
+
+**新增**
+
+<details><summary>首页热力图加了贪吃蛇动画</summary>
+
+一条蛇沿着日历热力图一格一格爬过去,爬过的格子会被「吃掉」留下痕迹,爬到末尾自动从头再来(一直循环)。它只是盖在图上的一层动画,不改任何数字、不影响鼠标查看某一天;系统开了「减少动态效果」时自动不出现。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.404</b>(2026-09-30)· 修复 1 条</summary>
 
 **修复**
