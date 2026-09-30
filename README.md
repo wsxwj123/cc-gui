@@ -278,6 +278,25 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.402</b>(2026-09-30)· 修复 2 条</summary>
+
+**修复**
+
+<details><summary>AI 读图、工具返回图片时聊天里看不到图</summary>
+
+内置 `Read` 工具的卡片(以及其它工具的通用卡)以前只渲染文本 —— 读一张图时卡片只显示「1 行」、图完全不出现,只能去文件浏览器看;现在这些卡片也会直接显示图片,点一下可放大(与「电脑操控截图」那张卡同一套)。
+
+</details>
+
+<details><summary>图片以 base64 文本回来时,聊天里只看到一大串编码</summary>
+
+部分工具/中转把图片塞在文本里(`data:image/png;base64,…` 或 `{"type":"image","file":{"base64":…}}`,甚至双层转义),现在会被认出来渲染成图片、编码不再当正文显示;**不含图片载荷的文本一字不改**。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.401</b>(2026-09-29)· 新增 2 条 · 优化 2 条 · 修复 4 条</summary>
 
 **新增**
