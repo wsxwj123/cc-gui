@@ -8,6 +8,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   cardValuesFor, cardCols, heatWeeks, heatmapGrid, isEmptyStats, tipText, localTodayKey,
+  snakeOrder,
   RANGE_KEYS, LEGEND_DEFAULT_ROWS, legendItems, stackedByDay, yTicks, xTickIndexes, chartTip, abbrevTokens,
 } from '../utils/homeUsage.js';
 import { aggregateCost, displayUsd, formatCost } from '../utils/pricing.js';
@@ -15,7 +16,9 @@ import { useStore } from '../stores/sessionStore.js';
 
 const SLOW_MS = 3000;             // 首次请求超过 3 s 未返回 → 骨架加「正在统计全部会话…」(本机冷扫 40 s)
 const STALE_REFETCH_MS = 45_000;  // 收到 stale 响应后的一次延迟静默重取(广播丢失的兜底;定时器单份)
-const CELL = 11;                  // 格子边长 px;间距 2 → 每列 13 px(utils/homeUsage.js heatWeeks 按同一尺寸算周数)
+const CELL = 11;                  // 格子边长 px
+const SNAKE_LEN = 8;              // 蛇身段数(头 + 7 节尾)
+const SNAKE_PITCH = 13;           // CELL + gap(2)                  // 格子边长 px;间距 2 → 每列 13 px(utils/homeUsage.js heatWeeks 按同一尺寸算周数)
 const LEVEL_CLASS = ['bg-canvas-deep', 'bg-accent/25', 'bg-accent/45', 'bg-accent/70', 'bg-accent'];   // 随主题 accent 走
 const ROW_LABELS = ['一', '', '三', '', '五', '', ''];
 const GRID_STYLE = { display: 'grid', gridTemplateRows: `repeat(7, ${CELL}px)`, gridAutoFlow: 'column', gridAutoColumns: `${CELL}px`, gap: '2px' };
@@ -116,10 +119,14 @@ export const HomeUsage = React.memo(function HomeUsage() {
   const [ctipPos, setCtipPos] = useState(null);
   const [ctipRev, setCtipRev] = useState(0);          // 浮层/容器尺寸变化 → +1,让定位 effect 重算
   const [legendOpen, setLegendOpen] = useState(false);
+  const [snakeOff, setSnakeOff] = useState({ x: 0, y: 0 });
+  const [reduceMotion, setReduceMotion] = useState(false);
   const mountedRef = useRef(false);
   const bootedRef = useRef(false);
   const rootRef = useRef(null);
   const heatRef = useRef(null);
+  const gridRef = useRef(null);
+  const snakeRef = useRef(null);
   const tipRef = useRef(null);
   const chartWrapRef = useRef(null);
   const ctipRef = useRef(null);
@@ -193,6 +200,46 @@ export const HomeUsage = React.memo(function HomeUsage() {
   const empty = ready && isEmptyStats(stats);
   const cards = useMemo(() => (ready ? cardValuesFor(stats, range, todayKey) : []), [ready, stats, range, todayKey]);
   const grid = useMemo(() => (ready && !empty ? heatmapGrid({ byDay: stats.byDay, todayKey, weeks }) : null), [ready, empty, stats, todayKey, weeks]);
+  // r135:贪吃蛇(用户要"一直循环")—— 访问顺序是纯函数算的,动画只改内联 transform/opacity,
+  // **不进 React 状态**,所以每 45ms 一步不会重渲任何格子(400 个格子重渲会明显掉帧)。
+  const snakePath = useMemo(() => (grid ? snakeOrder(weeks) : []), [grid, weeks]);
+  const snakeOn = ready && !empty && !!grid && !reduceMotion;
+  useEffect(() => {
+    const mq = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+    if (!mq) return undefined;
+    const on = () => setReduceMotion(!!mq.matches);
+    on();
+    mq.addEventListener?.('change', on);
+    return () => mq.removeEventListener?.('change', on);
+  }, []);
+  useEffect(() => {
+    if (!snakeOn || !grid || !snakePath.length) return undefined;
+    const layer = snakeRef.current;
+    const gridEl = gridRef.current;
+    if (!layer || !gridEl) return undefined;
+    setSnakeOff({ x: gridEl.offsetLeft, y: gridEl.offsetTop });
+    const segs = [...layer.querySelectorAll('[data-snake-seg]')];
+    const eaten = new Map([...layer.querySelectorAll('[data-snake-cell]')].map((el) => [Number(el.dataset.snakeCell), el]));
+    // 45ms 一步;窗口上的 __cguiSnakeMs 是**验收测试的加速缝**(生产不设它 → 默认 45)
+    const stepMs = (typeof window !== 'undefined' && Number(window.__cguiSnakeMs)) || 45;
+    let step = 0;
+    let timer = null;
+    const tick = () => {
+      if (step === 0) for (const el of eaten.values()) el.style.opacity = '0';   // 新一轮先抹掉上一轮的"吃痕"
+      const idx = snakePath[step];
+      const box = eaten.get(idx);
+      if (box) box.style.opacity = '0.38';
+      for (let i = 0; i < segs.length; i += 1) {
+        const cell = grid.cells[snakePath[(step - i + snakePath.length) % snakePath.length]];
+        segs[i].style.transform = `translate(${cell.col * SNAKE_PITCH}px, ${cell.row * SNAKE_PITCH}px)`;
+      }
+      layer.dataset.snakeStep = String(step);
+      step = (step + 1) % snakePath.length;
+    };
+    tick();
+    timer = setInterval(tick, stepMs);
+    return () => clearInterval(timer);
+  }, [snakeOn, grid, snakePath]);
   const tipCell = useMemo(() => (tip && grid ? grid.cells.find((c) => c.day === tip.day) || null : null), [tip, grid]);
   // 模型分页的数据:图例(按范围)与图(全部历史,不随范围裁)。data 为空时不算,免得刚 mount 就白算一遍。
   const showModels = ready && !empty && tab === 'models';
@@ -450,8 +497,24 @@ export const HomeUsage = React.memo(function HomeUsage() {
               <div style={LABEL_STYLE} className="shrink-0 text-[9px] leading-[11px] text-ink-faint font-body text-right select-none" aria-hidden="true">
                 {ROW_LABELS.map((l, i) => <span key={i}>{l}</span>)}
               </div>
-              <div style={GRID_STYLE} className="shrink-0">{cellNodes}</div>
+              <div ref={gridRef} style={GRID_STYLE} className="shrink-0">{cellNodes}</div>
             </div>
+            {/* r135:贪吃蛇覆盖层 —— 绝对定位盖在网格上方,pointer-events-none 不吃任何鼠标事件;
+                系统开了"减少动态效果"就不渲染。格子本身一个类都不加(测试与真人都读同一套 data-*)。 */}
+            {snakeOn && (
+              <div ref={snakeRef} data-testid="home-usage-snake" data-snake-total={snakePath.length}
+                className="absolute pointer-events-none z-10" aria-hidden="true"
+                style={{ left: snakeOff.x, top: snakeOff.y, width: Math.max(0, weeks * SNAKE_PITCH - 2), height: 7 * SNAKE_PITCH - 2 }}>
+                {grid.cells.map((cell, i) => (cell.future ? null : (
+                  <div key={`e${i}`} data-snake-cell={i} className="absolute w-[11px] h-[11px] rounded-[2px] bg-accent"
+                    style={{ left: cell.col * SNAKE_PITCH, top: cell.row * SNAKE_PITCH, opacity: 0 }} />
+                )))}
+                {Array.from({ length: SNAKE_LEN }).map((_, i) => (
+                  <div key={`s${i}`} data-snake-seg={i} className="absolute w-[11px] h-[11px] rounded-[2px] bg-accent"
+                    style={{ left: 0, top: 0, opacity: i === 0 ? 1 : Math.max(0.22, 1 - i * 0.12) }} />
+                ))}
+              </div>
+            )}
             {tipCell && (
               <div ref={tipRef} role="tooltip" data-testid="home-usage-tip"
                 className="glass-popover absolute z-30 px-2 py-1 text-[11px] font-mono text-ink whitespace-nowrap pointer-events-none"

@@ -138,6 +138,17 @@ export function heatmapGrid({ byDay, todayKey, weeks }) {
   return { cells, thresholds };
 }
 
+/** 贪吃蛇的访问顺序(蛇形:第 0 列自上而下、第 1 列自下而上……)。
+ *  返回格子下标;格子是**列优先**排的(heatmapGrid 里 index = col * 7 + row,DOM 顺序同)。
+ *  纯函数,只用来算"蛇该按什么顺序走",与渲染无关。 */
+export function snakeOrder(cols, rows = 7) {
+  const out = [];
+  for (let c = 0; c < cols; c += 1) {
+    for (let r = 0; r < rows; r += 1) out.push(c * rows + (c % 2 ? rows - 1 - r : r));
+  }
+  return out;
+}
+
 /** 浮层文案:byDay 有该天 → 「YYYY-MM-DD · N tokens」(千分位);无 → 「YYYY-MM-DD · 无记录」。 */
 export const tipText = (cell) => (cell.known ? `${cell.day} · ${fmtInt(cell.tokens)} tokens` : `${cell.day} · 无记录`);
 

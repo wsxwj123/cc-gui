@@ -9,6 +9,7 @@ import {
   RANGE_KEYS, RANGE_DAYS, LEGEND_DEFAULT_ROWS, rangeStartKey, inRange, rangeFacts, rangeOverview,
   cardValuesFor, legendItems, stackedByDay, yTicks, xTickDays, xTicks, xTickIndexes, chartTip,
   shadeClass, MODEL_SHADES, tokensOf, inputOutputOf, favoriteOf, LEGACY_TOTAL_MODEL, LEGACY_TOTAL_LABEL,
+  snakeOrder,
 } from '../../client/src/utils/homeUsage.js';
 
 let n = 0;
@@ -301,6 +302,18 @@ const STATS = {
   eq(o.tokens ?? tokensOf(o), tokensOf(o), '四项 token 仍然算得出来(卡片数字不受影响)');
   const legacy = { ...edge, byModel: [{ model: 'real-top-model', input: 1, calls: 1 }] };
   eq(rangeOverview(legacy, '7d', T).byModel, [], '就算全量 byModel 有名字也不拿来冒充窗口内的分组');
+}
+
+// ── 14. r135 贪吃蛇的访问顺序(蛇形)─────────────────────────────────────
+{
+  const o = snakeOrder(3);
+  eq(o.length, 21, '3 列 × 7 行 = 21 个格子全都要走到');
+  eq(new Set(o).size, 21, '不许重复访问(每个格子只走一次)');
+  eq(o.slice(0, 7), [0, 1, 2, 3, 4, 5, 6], '第 0 列自上而下');
+  eq(o.slice(7, 14), [13, 12, 11, 10, 9, 8, 7], '第 1 列自下而上(蛇形折返)');
+  eq(o.slice(14, 21), [14, 15, 16, 17, 18, 19, 20], '第 2 列又自上而下');
+  eq(snakeOrder(0), [], '没有列 → 空');
+  eq(snakeOrder(2, 3), [0, 1, 2, 5, 4, 3], '行数可覆盖(默认 7)');
 }
 
 console.log(`check-r131-usage-views-pure: PASS(${n} 条断言)`);
