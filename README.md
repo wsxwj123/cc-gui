@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.403</b>(2026-09-30)· 优化 1 条</summary>
+
+**优化**
+
+<details><summary>首页用量块顶行去掉「用量总览」四个字</summary>
+
+左边那组「总览 | 模型」分页控件本身就说清了这是什么,标题是多余的;现在顶行是「总览 | 模型」在左、「全部 / 30 天 / 7 天」在右。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.402</b>(2026-09-30)· 修复 2 条</summary>
 
 **修复**
