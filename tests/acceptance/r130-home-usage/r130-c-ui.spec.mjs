@@ -392,6 +392,12 @@ for (const ev of ['cgui:usage-updated', 'cgui:chat-done']) {
     const s = await stubUsage(page, typical());
     await bootWith(page, null);
     await expect.poll(() => s.hits.length, { timeout: 15_000 }).toBe(1);
+    // ⚠️ hits 计数是在**路由被调用**时 +1,不代表响应已落地。原用例在 hits==1 后立刻开观察窗,
+    // 于是存在这样一个窗口:首取响应还没应用(缓存还是 null)时若发生重挂,新实例会走**非静默首取** → 闪骨架。
+    // 这是竞态(实测 1/3 红),与本用例要测的"静默重取"无关。改成确定性:等首屏真正 ready、
+    // 骨架元素**不在** DOM 里,再开观察窗 —— 之后任何骨架出现都只能来自被测的那条路径。
+    await expect(cards(page), '首屏要先真正 ready(卡片出现)').toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('home-usage-loading'), '开观察窗前骨架必须已经消失').toHaveCount(0);
     await watchLoading(page);
     await page.evaluate((name) => window.dispatchEvent(new CustomEvent(name)), ev);
     await expect.poll(() => s.hits.length, { timeout: 5000, message: `${ev} 之后应再发一次 GET` }).toBe(2);
