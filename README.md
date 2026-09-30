@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.404</b>(2026-09-30)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>首页的招呼语与图标没有水平居中</summary>
+
+用量块自己是居中的,但块里的图标与那句「下午好,开发者」贴着左边;现在二者都在块内居中(分屏首页维持原样)。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.403</b>(2026-09-30)· 优化 1 条</summary>
 
 **优化**
