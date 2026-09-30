@@ -25,6 +25,16 @@ test('C9a 招呼与用量块顶部行紧贴(≤40px),不再顶在页面上沿', 
   expect(u.y - (g.y + g.height)).toBeLessThanOrEqual(40);
 });
 
+test('C9a2 [r133/r134 锁] 「用量总览」四个字不许回来 + 招呼语在块内水平居中', async ({ page }) => {
+  // 盲判指出:删标题与"块内居中"零断言(改回去不会红)。这两颗钉钉结果本身。
+  await stub(page);
+  await gotoHome(page);
+  await expect(cards(page)).toBeVisible();
+  await expect(page.getByText('用量总览'), '顶行不该再有「用量总览」四个字').toHaveCount(0);
+  const align = await page.locator('h2[data-cgui="home-greeting"]').evaluate((el) => getComputedStyle(el).textAlign);
+  expect(align, `招呼语要在块内水平居中(实得 text-align: ${align})`).toBe('center');
+});
+
 test('C9b 招呼 + 用量块作为一整组垂直居中(上方留白与下方留白都为正、量级相当)', async ({ page }) => {
   await stub(page);
   await gotoHome(page);
