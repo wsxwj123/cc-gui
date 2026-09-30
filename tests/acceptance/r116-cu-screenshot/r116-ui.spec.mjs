@@ -48,6 +48,26 @@ async function openShotCard(page, i) {
   return header.locator('xpath=..');
 }
 
+/** 按卡片头文字展开一张工具卡(与 openShotCard 同款,只是用文字定位而不是 screenshot 序数)。 */
+async function openCardByText(page, text) {
+  const head = page.locator('[data-strip="head"]').first();
+  await expect(head).toBeVisible({ timeout: 15_000 });
+  if ((await head.getAttribute('aria-expanded')) !== 'true') await head.click();
+  const header = page.locator('[data-strip-item="group"] button').filter({ hasText: text }).first();
+  if (!(await header.isVisible())) await page.getByRole('button', { name: /次工具调用/ }).first().click();
+  await expect(header).toBeVisible({ timeout: 10_000 });
+  const card = header.locator('xpath=..');
+  // 卡片默认折叠。判据用"卡里有没有图",不用"下一个兄弟可见" —— Read 卡下面紧跟一行路径,恒可见。
+  // 连点两次兜底:工具组展开带入場动画,第一下偶尔被吞(实测)。
+  const imgCount = () => card.locator('img[src^="data:image"]').count();
+  if (!(await imgCount())) {
+    await header.click();
+    await page.waitForTimeout(250);
+    if (!(await imgCount())) { await header.click(); await page.waitForTimeout(250); }
+  }
+  return { header, card };
+}
+
 const naturalSize = (loc) => loc.evaluate((el) => `${el.naturalWidth}x${el.naturalHeight}`);
 /** 浮层里(position:fixed 祖先)可见的、天然尺寸为 w×h 的图有几张。 */
 const zoomedCount = (page, { w, h }) => page.evaluate(([w, h]) => [...document.querySelectorAll('img')].filter((im) => {
@@ -109,4 +129,32 @@ test('UI-3 [R6] 大截图(约 42 万字符编码)会话:卡片文字照常显示
     return { head: t.includes(head), run: run ? `${run[0].slice(0, 40)}…(${run[0].length} 字符)` : null };
   }, IMG.big.data.slice(0, 48));
   expect(leak, '页面文字里不该出现截图编码(开头片段或 ≥200 字符的 base64 连串)').toEqual({ head: false, run: null });
+});
+
+test('UI-4 [r132 Read 读图] Read 卡显示图片(修前只有「1 行」文字),点开可放大', async ({ page }) => {
+  await boot(page);
+  await openHistory(page, MARK.read);
+  const { header, card } = await openCardByText(page, /r132-read\.png/i);
+  await expect(header, '折叠态也要写清是图片,不然没人知道要点开').toContainText('图片 1 张');
+  const readImg = card.locator('img[alt*="r132-read"]').first();
+  await expect(readImg, 'Read 卡展开后应显示图片').toBeVisible({ timeout: 10_000 });
+  await expect.poll(() => naturalSize(readImg), { timeout: 10_000 }).toBe(`${IMG.read.w}x${IMG.read.h}`);
+  await expectZoomOpensAndEscCloses(page, readImg, IMG.read);
+});
+
+test('UI-5 [r132 字符串里的图] 结果是 base64 文本时渲染成图,页面上不出现编码文字', async ({ page }) => {
+  await boot(page);
+  await openHistory(page, MARK.strImg);
+  // 卡片头显示的是命令原文($ cat shot.b64),不是工具名 —— 按可见文字定位
+  const { card } = await openCardByText(page, /cat shot\.b64/);
+  const strImg = card.locator('img[alt*="Bash"]').first();
+  await expect(strImg, '字符串里的 data URL 应渲染成图片').toBeVisible({ timeout: 10_000 });
+  await expect.poll(() => naturalSize(strImg), { timeout: 10_000 }).toBe(`${IMG.strImg.w}x${IMG.strImg.h}`);
+  const leak = await page.evaluate((probe) => {
+    const t = document.body.innerText;
+    const run = t.match(/[A-Za-z0-9+/=]{200,}/);
+    return { probe: t.includes(probe), run: run ? `${run[0].slice(0, 40)}…(${run[0].length} 字符)` : null };
+  }, IMG.strImg.probe);
+  expect(leak, '页面上不该出现编码文字(指纹或 ≥200 字符的 base64 连串)').toEqual({ probe: false, run: null });
+  await expectZoomOpensAndEscCloses(page, strImg, IMG.strImg);
 });

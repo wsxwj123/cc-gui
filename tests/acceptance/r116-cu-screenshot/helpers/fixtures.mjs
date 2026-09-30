@@ -54,9 +54,11 @@ export const IMG = {
   live: img(140, 80, gradient(2, 9)),         // 回复进行中(假 CLI 发出)
   userImg: img(100, 70, gradient(7, 13)),     // 用户消息里的图(聊天图片放大 = 应用共享的看大图视图,作对照)
   big: img(380, 280, () => [noise(), noise(), noise()]), // 大截图:噪点不可压缩,编码约 42 万字符
+  read: img(180, 120, gradient(3, 17)),       // r132 · Read 读到的图片(image 块,结果里没有正文)
+  strImg: img(130, 110, gradient(19, 5)),     // r132 · 结果是一个**字符串**,图片以 data URL 夹在里面
 };
 
-export const MARK = { hist: 'R116HISTSHOT', big: 'R116BIGSHOT', userImg: 'R116USERIMG' };
+export const MARK = { hist: 'R116HISTSHOT', big: 'R116BIGSHOT', userImg: 'R116USERIMG', read: 'R116READIMG', strImg: 'R116STRIMG' };
 export const TEXT = {
   histAnth: 'R116 截图完成:主屏 1 张',
   histMcp: 'R116 第二张(MCP 直传)',
@@ -71,7 +73,7 @@ export const TEXT = {
 };
 export const CU_TOOL = 'mcp__ccgui-computer-use__screenshot';
 // 会话 id 必须是十六进制 UUID:侧栏只列合法 id 的会话(实测带 r 的 id 整个项目都不出现)
-export const SESSION = { hist: 'a1160001-0000-4000-8000-0000000000a1', big: 'a1160002-0000-4000-8000-0000000000b2', userImg: 'a1160003-0000-4000-8000-0000000000c3' };
+export const SESSION = { hist: 'a1160001-0000-4000-8000-0000000000a1', big: 'a1160002-0000-4000-8000-0000000000b2', userImg: 'a1160003-0000-4000-8000-0000000000c3', read: 'a1160004-0000-4000-8000-0000000000d4', strImg: 'a1160005-0000-4000-8000-0000000000e5' };
 
 const text = (t) => ({ type: 'text', text: t });
 const anthImg = (i) => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: i.data } });
@@ -129,6 +131,15 @@ export function buildFixtures() {
   ], TEXT.bigDone));
   fs.writeFileSync(path.join(proj, `${SESSION.userImg}.jsonl`), sessionLines(SESSION.userImg, cwd,
     [text(`${MARK.userImg} 看这张图`), anthImg(IMG.userImg)], [], 'R116USERIMG 收到这张图了。'));
+
+  // r132 · Read 读图:tool_result 只有 image 块、没有一行正文(用户实报"卡片只有 N 行、看不到图")
+  fs.writeFileSync(path.join(proj, `${SESSION.read}.jsonl`), sessionLines(SESSION.read, cwd, `${MARK.read} 读一张图`, [
+    { id: 'toolu_r132_read', name: 'Read', input: { file_path: '/private/tmp/r132-read.png' }, content: [anthImg(IMG.read)] },
+  ], 'R116READIMG 图我看完了。'));
+  // r132 · 结果是一个**字符串**:图片以 data URL 夹在文本里(用户实报"看到的是 base64")
+  fs.writeFileSync(path.join(proj, `${SESSION.strImg}.jsonl`), sessionLines(SESSION.strImg, cwd, `${MARK.strImg} 看看这个输出`, [
+    { id: 'toolu_r132_str', name: 'Bash', input: { command: 'cat shot.b64' }, content: `从文件读到的图:\ndata:image/png;base64,${IMG.strImg.data}\n(完)` },
+  ], 'R116STRIMG 收到了。'));
 
   const shim = path.join(fakebinDir(), 'claude');
   fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${suitePath('helpers', 'fake-claude.mjs')}" "$@"\n`);
