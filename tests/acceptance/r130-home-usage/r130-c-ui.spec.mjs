@@ -458,3 +458,21 @@ for (const [w, h] of [[1440, 900], [375, 812]]) {
     assertPopupFullyVisible(m, `${w}×${h} 引用面板`);
   });
 }
+
+test('C11b 真重挂(分屏切走再切回)不闪骨架:带缓存重挂要以旧数据 ready 起步、只静默刷新', async ({ page }) => {
+  // 盲判 2026-09-30 指出:原 C11 只在同一实例上派 window 事件,够不着"回合结束导致组件重挂"这条真路径 ——
+  // 把缓存整个废掉它照样全绿(假绿)。这里用**真重挂**(分屏切走 → 切回)把需求钉死:
+  // 重挂后不得闪骨架,但仍要静默补一次 GET。
+  const s = await stubUsage(page, typical());
+  await bootWith(page, null);
+  await expect.poll(() => s.hits.length, { timeout: 15_000 }).toBe(1);
+  await setPaneCount(page, 2);
+  await expect(usage(page), '分屏时用量块整块卸载').toHaveCount(0, { timeout: 5000 });
+  await watchLoading(page);                       // 观察窗从"重挂前"开始
+  const before = s.hits.length;
+  await setPaneCount(page, 1);
+  await expect(cards(page), '回单屏后卡片要直接出现').toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(800);
+  expect(await page.evaluate(() => window.__r130LoadingSeen), '重挂不该闪骨架(缓存以 ready 起步)').toBe(false);
+  await expect.poll(() => s.hits.length, { timeout: 5000, message: '重挂后仍应静默补一次 GET' }).toBeGreaterThan(before);
+});
