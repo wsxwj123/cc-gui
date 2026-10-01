@@ -1,0 +1,103 @@
+{
+  "generatedAt": "2026-10-01T15:10:57.152Z",
+  "note": "r142 测试基线:由修前(pre-fix)代码导出。mac 分支必须逐字节不变。",
+  "capabilityReportDarwin": {
+    "capabilities": {
+      "screenshot": {
+        "status": "available"
+      },
+      "screenshotTarget": {
+        "status": "unverified",
+        "reason": "按应用/窗口截图尚未在真机验证;能力未证明前不返回前台其他应用的画面顶替"
+      },
+      "windowList": {
+        "status": "available"
+      },
+      "cursorPosition": {
+        "status": "available"
+      },
+      "backgroundClick": {
+        "status": "available"
+      },
+      "backgroundType": {
+        "status": "available"
+      },
+      "backgroundKey": {
+        "status": "available"
+      },
+      "screenScope": {
+        "status": "unverified",
+        "reason": "需要单独授权「允许主屏全部可见内容」后才允许主屏截图;当前只能通过 POST /api/computer-use/grants 设置 screenScope:true,图形界面尚未提供该入口"
+      },
+      "lockscreen": {
+        "status": "unverified",
+        "reason": "锁屏持续/遮蔽显示器需要已验证的授权组件,当前无公开可复用接口;未证明前不声明可用"
+      }
+    },
+    "lockscreen": {
+      "state": "disabled",
+      "reason": "本构建不提供锁屏操控;显式启用锁屏需要独立授权组件,尚未验证(见 capabilityReport.lockscreen)"
+    }
+  },
+  "capabilityReportWin32Prefixed": {
+    "capabilities": {
+      "screenshot": {
+        "status": "unsupported",
+        "reason": "computer use 当前只实现 macOS;Windows 无桌面执行层"
+      },
+      "screenshotTarget": {
+        "status": "unverified",
+        "reason": "按应用/窗口截图尚未在真机验证;能力未证明前不返回前台其他应用的画面顶替"
+      },
+      "windowList": {
+        "status": "unsupported",
+        "reason": "仅 macOS"
+      },
+      "cursorPosition": {
+        "status": "unsupported",
+        "reason": "仅 macOS"
+      },
+      "backgroundClick": {
+        "status": "unsupported",
+        "reason": "仅 macOS"
+      },
+      "backgroundType": {
+        "status": "unsupported",
+        "reason": "仅 macOS"
+      },
+      "backgroundKey": {
+        "status": "unsupported",
+        "reason": "仅 macOS"
+      },
+      "screenScope": {
+        "status": "unverified",
+        "reason": "需要单独授权「允许主屏全部可见内容」后才允许主屏截图;当前只能通过 POST /api/computer-use/grants 设置 screenScope:true,图形界面尚未提供该入口"
+      },
+      "lockscreen": {
+        "status": "unverified",
+        "reason": "锁屏持续/遮蔽显示器需要已验证的授权组件,当前无公开可复用接口;未证明前不声明可用"
+      }
+    },
+    "lockscreen": {
+      "state": "disabled",
+      "reason": "本构建不提供锁屏操控;显式启用锁屏需要独立授权组件,尚未验证(见 capabilityReport.lockscreen)"
+    }
+  },
+  "toolsExportNames": [
+    "INSTANCE_ID",
+    "SIDE_EFFECT_TOOLS",
+    "TOOLS",
+    "__instanceId",
+    "__instanceShort",
+    "checkCoordinateArg",
+    "checkCoordinateBounds",
+    "expectedAfter",
+    "fail",
+    "mapPoint",
+    "parseKeySpec",
+    "pruneActions",
+    "resolveSnapshot",
+    "shotsToPrune",
+    "state"
+  ]
+}

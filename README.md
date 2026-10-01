@@ -278,7 +278,20 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.409</b>(2026-10-01)· 修复 1 条</summary>
+<summary><b>v0.2.410</b>(2026-10-01)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>切换会话时,上一个会话的回复不会再跑到新会话里</summary>
+
+以前在"消息已发出、回复还没开始出字"的那几秒里切到别的会话并在那边发消息,正在等待的那条回复会被画到新会话的气泡里(会话文件本身没写错,是界面归错了地方)。现在每条回复都会钉住自己所属的会话,切走就不再接管;切走期间原来的回复仍在后台继续跑完,切回去能看到完整结果。
+
+</details>
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.409">v0.2.409</a></b>(2026-10-01)· 修复 1 条</summary>
 
 **修复**
 

@@ -1,0 +1,520 @@
+[
+  {
+    "name": "screenshot",
+    "description": "截取画面。不带 target 时截主屏,必须先由用户勾选「允许主屏全部可见内容」,否则 CU_SCREEN_SCOPE_REQUIRED 且不返回任何像素。回执给出 snapshotId 与图像精确像素尺寸 imgW×imgH——后续坐标工具都以这张图的像素为准。坐标一律使用【最近一次 screenshot 返回图像的像素坐标】,左上角为 (0,0);服务端自动映射为屏幕逻辑坐标。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "max_width": {
+          "type": "integer",
+          "description": "返回图像最大宽度像素(默认 1600,0=原始分辨率)。坐标始终按实际返回的图像尺寸计。"
+        },
+        "target": {
+          "type": "object",
+          "description": "target 必须是当前已授权窗口(window_list 只列已授权应用的窗口):bundleId/pid/windowId 三字段都要给。",
+          "properties": {
+            "bundleId": {
+              "type": "string",
+              "description": "目标应用 bundleId(如 com.apple.TextEdit)"
+            },
+            "pid": {
+              "type": "integer",
+              "description": "目标进程 pid"
+            },
+            "windowId": {
+              "type": "integer",
+              "description": "目标窗口 id(CGWindowID,来自 window_list)"
+            }
+          },
+          "required": [
+            "bundleId",
+            "pid",
+            "windowId"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "window_list",
+    "description": "列出【已授权应用】的前台层窗口(id/pid/bundleId/标题/bounds/displayId,逻辑坐标)。未授权应用的窗口连标题也不返回。被动查询,不动焦点/鼠标。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "cursor_position",
+    "description": "查询鼠标光标位置。未授权全屏范围时只在已授权目标窗口内返回局部坐标,其他位置返回 CU_SCREEN_SCOPE_REQUIRED。被动查询,零干扰。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "doctor",
+    "description": "环境自检:屏幕录制/辅助功能/运行时/各应用授权的分别状态。被动,不激活窗口、不输入。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "action_status",
+    "description": "只读查询某个 actionId 在本实例的状态(queued/running/dispatched/verified/unknown/failed/cancelled)与已有回执。从未登记 CU_ACTION_NOT_FOUND,超出保留窗口 CU_ACTION_EXPIRED;都不代表\"未执行\"。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "actionId": {
+          "type": "string",
+          "description": "actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。"
+        },
+        "instanceId": {
+          "type": "string",
+          "description": "MCP 实例身份。"
+        }
+      },
+      "required": [
+        "actionId"
+      ]
+    }
+  },
+  {
+    "name": "left_click",
+    "description": "在 (x,y) 单击左键。默认后台定向投递到 target 窗口(不抢前台、不动用户光标);找不到窗口就是 CU_TARGET_NOT_FOUND,绝不退化成全局点击。只有 foreground:true 才走全局事件(会打断用户前台)。坐标一律使用【最近一次 screenshot 返回图像的像素坐标】,左上角为 (0,0);服务端自动映射为屏幕逻辑坐标。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "actionId": {
+          "type": "string",
+          "description": "actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。"
+        },
+        "target": {
+          "type": "object",
+          "description": "target 必须是当前已授权窗口(window_list 只列已授权应用的窗口):bundleId/pid/windowId 三字段都要给。",
+          "properties": {
+            "bundleId": {
+              "type": "string",
+              "description": "目标应用 bundleId(如 com.apple.TextEdit)"
+            },
+            "pid": {
+              "type": "integer",
+              "description": "目标进程 pid"
+            },
+            "windowId": {
+              "type": "integer",
+              "description": "目标窗口 id(CGWindowID,来自 window_list)"
+            }
+          },
+          "required": [
+            "bundleId",
+            "pid",
+            "windowId"
+          ]
+        },
+        "snapshotId": {
+          "type": "string",
+          "description": "截图身份(来自 screenshot 回执)。省略 = 用本实例最近一次有效截图。"
+        },
+        "foreground": {
+          "type": "boolean",
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+        },
+        "instanceId": {
+          "type": "string",
+          "description": "MCP 实例身份(initialize 回执的 instanceId)。"
+        },
+        "x": {
+          "type": "integer",
+          "description": "截图像素 X"
+        },
+        "y": {
+          "type": "integer",
+          "description": "截图像素 Y"
+        }
+      },
+      "required": [
+        "actionId",
+        "target",
+        "x",
+        "y"
+      ]
+    }
+  },
+  {
+    "name": "double_click",
+    "description": "在 (x,y) 双击左键。前后台策略同 left_click。坐标一律使用【最近一次 screenshot 返回图像的像素坐标】,左上角为 (0,0);服务端自动映射为屏幕逻辑坐标。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "actionId": {
+          "type": "string",
+          "description": "actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。"
+        },
+        "target": {
+          "type": "object",
+          "description": "target 必须是当前已授权窗口(window_list 只列已授权应用的窗口):bundleId/pid/windowId 三字段都要给。",
+          "properties": {
+            "bundleId": {
+              "type": "string",
+              "description": "目标应用 bundleId(如 com.apple.TextEdit)"
+            },
+            "pid": {
+              "type": "integer",
+              "description": "目标进程 pid"
+            },
+            "windowId": {
+              "type": "integer",
+              "description": "目标窗口 id(CGWindowID,来自 window_list)"
+            }
+          },
+          "required": [
+            "bundleId",
+            "pid",
+            "windowId"
+          ]
+        },
+        "snapshotId": {
+          "type": "string",
+          "description": "截图身份(来自 screenshot 回执)。省略 = 用本实例最近一次有效截图。"
+        },
+        "foreground": {
+          "type": "boolean",
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+        },
+        "instanceId": {
+          "type": "string",
+          "description": "MCP 实例身份(initialize 回执的 instanceId)。"
+        },
+        "x": {
+          "type": "integer",
+          "description": "截图像素 X"
+        },
+        "y": {
+          "type": "integer",
+          "description": "截图像素 Y"
+        }
+      },
+      "required": [
+        "actionId",
+        "target",
+        "x",
+        "y"
+      ]
+    }
+  },
+  {
+    "name": "right_click",
+    "description": "在 (x,y) 单击右键(上下文菜单)。前后台策略同 left_click。坐标一律使用【最近一次 screenshot 返回图像的像素坐标】,左上角为 (0,0);服务端自动映射为屏幕逻辑坐标。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "actionId": {
+          "type": "string",
+          "description": "actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。"
+        },
+        "target": {
+          "type": "object",
+          "description": "target 必须是当前已授权窗口(window_list 只列已授权应用的窗口):bundleId/pid/windowId 三字段都要给。",
+          "properties": {
+            "bundleId": {
+              "type": "string",
+              "description": "目标应用 bundleId(如 com.apple.TextEdit)"
+            },
+            "pid": {
+              "type": "integer",
+              "description": "目标进程 pid"
+            },
+            "windowId": {
+              "type": "integer",
+              "description": "目标窗口 id(CGWindowID,来自 window_list)"
+            }
+          },
+          "required": [
+            "bundleId",
+            "pid",
+            "windowId"
+          ]
+        },
+        "snapshotId": {
+          "type": "string",
+          "description": "截图身份(来自 screenshot 回执)。省略 = 用本实例最近一次有效截图。"
+        },
+        "foreground": {
+          "type": "boolean",
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+        },
+        "instanceId": {
+          "type": "string",
+          "description": "MCP 实例身份(initialize 回执的 instanceId)。"
+        },
+        "x": {
+          "type": "integer",
+          "description": "截图像素 X"
+        },
+        "y": {
+          "type": "integer",
+          "description": "截图像素 Y"
+        }
+      },
+      "required": [
+        "actionId",
+        "target",
+        "x",
+        "y"
+      ]
+    }
+  },
+  {
+    "name": "drag",
+    "description": "从 (x1,y1) 按住左键拖到 (x2,y2)。默认后台定向投递到 target;foreground:true 才走全局(影响前台)。坐标一律使用【最近一次 screenshot 返回图像的像素坐标】,左上角为 (0,0);服务端自动映射为屏幕逻辑坐标。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "actionId": {
+          "type": "string",
+          "description": "actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。"
+        },
+        "target": {
+          "type": "object",
+          "description": "target 必须是当前已授权窗口(window_list 只列已授权应用的窗口):bundleId/pid/windowId 三字段都要给。",
+          "properties": {
+            "bundleId": {
+              "type": "string",
+              "description": "目标应用 bundleId(如 com.apple.TextEdit)"
+            },
+            "pid": {
+              "type": "integer",
+              "description": "目标进程 pid"
+            },
+            "windowId": {
+              "type": "integer",
+              "description": "目标窗口 id(CGWindowID,来自 window_list)"
+            }
+          },
+          "required": [
+            "bundleId",
+            "pid",
+            "windowId"
+          ]
+        },
+        "snapshotId": {
+          "type": "string",
+          "description": "截图身份(来自 screenshot 回执)。省略 = 用本实例最近一次有效截图。"
+        },
+        "foreground": {
+          "type": "boolean",
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+        },
+        "instanceId": {
+          "type": "string",
+          "description": "MCP 实例身份(initialize 回执的 instanceId)。"
+        },
+        "x1": {
+          "type": "integer"
+        },
+        "y1": {
+          "type": "integer"
+        },
+        "x2": {
+          "type": "integer"
+        },
+        "y2": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "actionId",
+        "target",
+        "x1",
+        "y1",
+        "x2",
+        "y2"
+      ]
+    }
+  },
+  {
+    "name": "scroll",
+    "description": "在 (x,y) 滚轮滚动。direction: up/down(默认 down);amount: 行数(默认 3,正整数)。默认后台定向投递到 target。坐标一律使用【最近一次 screenshot 返回图像的像素坐标】,左上角为 (0,0);服务端自动映射为屏幕逻辑坐标。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "actionId": {
+          "type": "string",
+          "description": "actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。"
+        },
+        "target": {
+          "type": "object",
+          "description": "target 必须是当前已授权窗口(window_list 只列已授权应用的窗口):bundleId/pid/windowId 三字段都要给。",
+          "properties": {
+            "bundleId": {
+              "type": "string",
+              "description": "目标应用 bundleId(如 com.apple.TextEdit)"
+            },
+            "pid": {
+              "type": "integer",
+              "description": "目标进程 pid"
+            },
+            "windowId": {
+              "type": "integer",
+              "description": "目标窗口 id(CGWindowID,来自 window_list)"
+            }
+          },
+          "required": [
+            "bundleId",
+            "pid",
+            "windowId"
+          ]
+        },
+        "snapshotId": {
+          "type": "string",
+          "description": "截图身份(来自 screenshot 回执)。省略 = 用本实例最近一次有效截图。"
+        },
+        "foreground": {
+          "type": "boolean",
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+        },
+        "instanceId": {
+          "type": "string",
+          "description": "MCP 实例身份(initialize 回执的 instanceId)。"
+        },
+        "x": {
+          "type": "integer",
+          "description": "截图像素 X"
+        },
+        "y": {
+          "type": "integer",
+          "description": "截图像素 Y"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down"
+          ]
+        },
+        "amount": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "actionId",
+        "target",
+        "x",
+        "y"
+      ]
+    }
+  },
+  {
+    "name": "type",
+    "description": "把文本输入 target 窗口的文本元素(后台直接写入目标自己,不抢前台、无全局事件),并用读回原文验证;读不回时回执 verification=unknown,不声称输入成功。上限 5000 个 Unicode 码点,空串成功且零动作。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "actionId": {
+          "type": "string",
+          "description": "actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。"
+        },
+        "target": {
+          "type": "object",
+          "description": "target 必须是当前已授权窗口(window_list 只列已授权应用的窗口):bundleId/pid/windowId 三字段都要给。",
+          "properties": {
+            "bundleId": {
+              "type": "string",
+              "description": "目标应用 bundleId(如 com.apple.TextEdit)"
+            },
+            "pid": {
+              "type": "integer",
+              "description": "目标进程 pid"
+            },
+            "windowId": {
+              "type": "integer",
+              "description": "目标窗口 id(CGWindowID,来自 window_list)"
+            }
+          },
+          "required": [
+            "bundleId",
+            "pid",
+            "windowId"
+          ]
+        },
+        "snapshotId": {
+          "type": "string",
+          "description": "截图身份(来自 screenshot 回执)。省略 = 用本实例最近一次有效截图。"
+        },
+        "foreground": {
+          "type": "boolean",
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+        },
+        "instanceId": {
+          "type": "string",
+          "description": "MCP 实例身份(initialize 回执的 instanceId)。"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "actionId",
+        "target",
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "key",
+    "description": "按快捷键/单键,如 \"cmd+c\"、\"return\"、\"escape\"、\"arrow_left\"。支持字母/数字、return/enter、escape/esc、tab、space、backspace/delete、up/down/left/right(=arrow_*),修饰符 cmd/command、option/alt、ctrl/control、shift 用 + 连接(大小写忽略)。整串先校验再投递:非法键不产生部分按键。已投递的组合键以目标光标/选择/文本状态验证,读不回就报 unknown。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "actionId": {
+          "type": "string",
+          "description": "actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。"
+        },
+        "target": {
+          "type": "object",
+          "description": "target 必须是当前已授权窗口(window_list 只列已授权应用的窗口):bundleId/pid/windowId 三字段都要给。",
+          "properties": {
+            "bundleId": {
+              "type": "string",
+              "description": "目标应用 bundleId(如 com.apple.TextEdit)"
+            },
+            "pid": {
+              "type": "integer",
+              "description": "目标进程 pid"
+            },
+            "windowId": {
+              "type": "integer",
+              "description": "目标窗口 id(CGWindowID,来自 window_list)"
+            }
+          },
+          "required": [
+            "bundleId",
+            "pid",
+            "windowId"
+          ]
+        },
+        "snapshotId": {
+          "type": "string",
+          "description": "截图身份(来自 screenshot 回执)。省略 = 用本实例最近一次有效截图。"
+        },
+        "foreground": {
+          "type": "boolean",
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+        },
+        "instanceId": {
+          "type": "string",
+          "description": "MCP 实例身份(initialize 回执的 instanceId)。"
+        },
+        "keys": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "actionId",
+        "target",
+        "keys"
+      ]
+    }
+  }
+]
