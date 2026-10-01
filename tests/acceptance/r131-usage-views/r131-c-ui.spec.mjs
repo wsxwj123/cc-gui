@@ -355,6 +355,22 @@ test('C5b y 轴刻度 4–5 个且用缩写(≥1e6 出 M / ≥1e9 出 B),x 轴�
   // (约 1 天/14 天 ≈ 7%),既保住"分布均匀、不是挤在一头"的意图,又不把浏览器舍入和日期巧合当 bug。
   const ratio = Math.max(...gaps) / Math.min(...gaps);
   expect(ratio, `标签间隔应大致等距(相差 ≤10%),实际间隔 ${gaps.join(',')}(比值 ${ratio.toFixed(3)})`).toBeLessThanOrEqual(1.1);
+  // ↑ 上面这条只测**布局**等距(坐标由 flex 均分决定,与取点规则无关)。
+  // 独立裁判 r139 实测:把取点规则改成"相邻 3 天",上面这条**照样绿** —— 它对该用例名字里的
+  // "约每两周一个"零覆盖。所以下面是**语义判据**:把标签文本反解回夹具里的那一天,断言相邻**天数**
+  // 等距且不挤在一起。这才钉得住 xTickIndexes 的取点规则本身。
+  const dayIdx = labels.map((t) => {
+    const [m, d] = t.split('/').map(Number);
+    const hit = days.findIndex((k) => {
+      const dt = new Date(`${k}T00:00:00`);
+      return dt.getMonth() + 1 === m && dt.getDate() === d;
+    });
+    expect(hit, `标签 ${t} 应能在夹具的 60 天里找到对应那天`).toBeGreaterThanOrEqual(0);
+    return hit;
+  });
+  const dayGaps = dayIdx.slice(1).map((x, i) => x - dayIdx[i]);
+  expect(Math.max(...dayGaps) - Math.min(...dayGaps), `标签之间的**天数**应等距,实际 ${dayGaps.join(',')}`).toBeLessThanOrEqual(1);
+  expect(Math.min(...dayGaps), `标签不该挤在一起(实际最短 ${Math.min(...dayGaps)} 天;取点规则坏掉时会出现 1–3 天)`).toBeGreaterThanOrEqual(10);
 });
 
 test('C5c 悬停柱子出浮层:日期 + 当天合计 + 当天各模型 token(鼠标进显示、离开隐藏);柱子无原生 title', async ({ page }) => {
