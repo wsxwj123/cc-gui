@@ -71,7 +71,11 @@ function shapeOf(caps) {
 }
 function expectedShape(table) {
   const out = {};
-  for (const [key, [status, extra]] of Object.entries(table)) {
+  // 键顺序必须与 shapeOf 的固定顺序一致:JSON.stringify 保留插入顺序,而三张表的字面量把
+  // screenScope/lockscreen 写在了 foreground* 之后 ⇒ 直接遍历 Object.entries(table) 得到的键序
+  // 与 shapeOf 不同,字符串比较**恒不相等**(T1-02 会永久红,与实现无关)。这里改用同一个键序。
+  for (const key of [...MAC_KEYS, ...WIN_INPUT_KEYS]) {
+    const [status, extra] = table[key];
     out[key] = `${status}${extra?.coverage ? `/${extra.coverage}` : ''}${extra?.degradation ? `/${extra.degradation}` : ''}`;
   }
   return out;

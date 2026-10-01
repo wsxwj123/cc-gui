@@ -52,13 +52,22 @@ if [ "$UI_MODE" = "on" ]; then UI_PORT="${CGUI_TEST_UI_PORT:-$(pick_port "$API_P
 mkdir -p "$ROOT" "$SUITE/.artifacts/logs"
 PREP_FLAG=""
 [ "$NO_VENV" = "1" ] && PREP_FLAG="--no-venv"
-node "$SUITE/helpers/prepare-home.mjs" "$ROOT/home" "$WORKTREE" $PREP_FLAG
+# CGUI_TEST_PLATFORM 必须一起传:夹具按它决定造 venv-win/Scripts\python.exe 还是 venv/bin/python3
+CGUI_TEST_PLATFORM="$PLATFORM" node "$SUITE/helpers/prepare-home.mjs" "$ROOT/home" "$WORKTREE" $PREP_FLAG
 
 # ── 隔离实例:平台伪装 + 夹具 HOME(产品代码零改动)────────────────────
 cd "$ROOT"
+# ⚠️ PATH 最前面那个 decoy 是**必须的**(2026-10-02 修,裁判实测根因):
+# server/index.js:97-127 的 expandClaudePath() 用 `process.platform === 'win32' ? ';' : ':'` 切 PATH。
+# 伪 win32 时它把整条 POSIX PATH 当成**一个**条目再 join(';'),产出的字符串按 ':' 拆开时,
+# **原 PATH 的第一个 ':' 分量会被粘到那一长串后面而失效**。夹具的 bin 就排在第一,于是被粘掉、
+# 本机 ~/.pyenv/shims/python 反而被找到 → 建出来的是真 venv(bin/python3.10)。
+# 放一个不存在的 decoy 在第一,替夹具 bin 挡这一刀即可(真 darwin 那遍无副作用)。
+PATH_DECOY="/nonexistent-r142-path-decoy"
 env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY \
   HOME="$ROOT/home" USERPROFILE="$ROOT/home" PORT="$API_PORT" CGUI_DISABLE_FILE_WATCHER=1 \
-  CGUI_TEST_PLATFORM="$PLATFORM" PATH="$ROOT/home/bin:$PATH" \
+  CGUI_TEST_PLATFORM="$PLATFORM" PATH="$PATH_DECOY:$ROOT/home/bin:$PATH" \
+  CU_STUB_LOG="$ROOT/home/argv.jsonl" CU_STUB_SCENARIO="$ROOT/home/scenario.json" \
   nohup node --import "$SUITE/helpers/win-preload.mjs" "$WORKTREE/server/index.js" \
   > "$ROOT/server.log" 2>&1 &
 API_PID=$!
@@ -103,7 +112,8 @@ fi
 cd "$WORKTREE"
 set +e
 CGUI_TEST_API_PORT="$API_PORT" CGUI_TEST_UI_PORT="$UI_PORT" CGUI_TEST_UI_BASE="$UI_BASE" \
-  CGUI_TEST_PLATFORM="$PLATFORM" WORKTREE="$WORKTREE" BASE_URL="http://127.0.0.1:$API_PORT" \
+  CGUI_TEST_PLATFORM="$PLATFORM" CGUI_TEST_HOME="$ROOT/home" WORKTREE="$WORKTREE" \
+  BASE_URL="http://127.0.0.1:$API_PORT" \
   npx playwright test -c "$SUITE/playwright.config.mjs" ${ARGS+"${ARGS[@]}"}
 CODE=$?
 set -e

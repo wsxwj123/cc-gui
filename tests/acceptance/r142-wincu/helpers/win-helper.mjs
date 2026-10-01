@@ -17,11 +17,18 @@ if (argv.includes('--version')) { record({ kind: 'py', subcmd: '--version', pyna
 if (argv[0] === '-m') {
   record({ kind: 'py', subcmd: `-m ${argv[1]}`, args: argv.slice(1) });
   if (argv[1] === 'venv') {
+    // 造出目标平台的 venv 布局。⚠️ 必须写 `#!/bin/sh` 壳脚本:
+    // 旧版用 copyFileSync 把本文件(.mjs)拷成 Scripts/python.exe,执行时 Node 按扩展名判定模块类型
+    // → ERR_UNKNOWN_FILE_EXTENSION(W-06 因此跑不通)。壳脚本没有这个问题。
     const dir = argv[2];
-    fs.mkdirSync(path.join(dir, 'Scripts'), { recursive: true });
+    const win = (process.env.CGUI_TEST_PLATFORM || 'win32') === 'win32';
+    const pyRel = win ? path.join('Scripts', 'python.exe') : path.join('bin', 'python3');
+    const py = path.join(dir, pyRel);
+    fs.mkdirSync(path.dirname(py), { recursive: true });
+    fs.writeFileSync(py, `#!/bin/sh\nexec "${process.execPath}" "${process.argv[1]}" "$@"\n`);
+    fs.chmodSync(py, 0o755);
     fs.writeFileSync(path.join(dir, 'pyvenv.cfg'), 'home = C:\\Fake\n');
-    fs.copyFileSync(process.argv[1], path.join(dir, 'Scripts', 'python.exe'));
-    fs.chmodSync(path.join(dir, 'Scripts', 'python.exe'), 0o755);
+    record({ kind: 'venv-created', dir, py: pyRel });
   }
   process.exit(0);
 }

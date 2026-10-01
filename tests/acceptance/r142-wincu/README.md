@@ -16,13 +16,16 @@
 
 ```sh
 cd tests/acceptance/r142-wincu
-./run-isolated.sh --platform win32                 # HTTP:W-01..W-06
-./run-isolated.sh --platform win32 --no-venv       # 加 POST /prepare(W-06 需要空运行时)
-./run-isolated.sh --platform win32 --ui            # 加 UI:U-01..U-04
+./run-isolated.sh --platform win32                 # HTTP:W-01..W-06(6 passed)
+./run-isolated.sh --platform win32 --no-venv -g W-06   # 单独验「准备环境」(W-06 自带清运行时前置,两种配置都能跑)
+./run-isolated.sh --platform win32 --no-venv --ui -g 'U-0[1-4]'   # UI:U-01..U-04
 ./run-isolated.sh --platform darwin -g W-D         # macOS 反向守卫 W-D01..W-D03
 ./run-isolated.sh --platform darwin --ui -g U-05   # mac UI 一字不改
-./run-isolated.sh --platform linux -g U-06         # 不支持平台的占位卡
+./run-isolated.sh --platform linux --ui -g U-06    # 不支持平台的占位卡
 ```
+
+> UI 那几遍建议带 `--no-venv`:U-03 要的是"缓存说 UIA 不可用"的确定态,而**运行时已就绪 + 缓存缺失**
+> 时产品会发起异步补偿探测(§2.5②),会和 U-03 写的缓存抢;空运行时下没有这个竞争。
 
 **端口**:本套件用 **7200-7299**。6700-6999 归另一个代理的 r140 套件(2026-10-01 起在跑),
 不抢;用户实例 6677 / 6689 硬拒。杀进程只按记录下来的 pid。
@@ -55,9 +58,28 @@ cd tests/acceptance/r142-wincu
 其余定位一律用公开文案与 role(卡片标题「桌面操控(computer use)」、按钮「准备环境」、
 占位「当前平台…不支持」),与既有验收套件同规矩。
 
-## 状态
+## 状态(2026-10-02 实测)
 
-**代码已写,尚未执行**(2026-10-01:另一个代理在 `fix/r140-crosstalk` 上跑 Playwright,
-占用 6700-6999;本套件虽然用 7200-7299,但按本轮任务约束"需要起 GUI 实例的用例先只写不跑")。
-第一次跑之前请先确认:①产品侧已经落地 §3.1 A-3 / §4.2 的改动;②webkit 浏览器已安装
-(`npx playwright install webkit`);③U-03 会改夹具的 uia 缓存,建议单独一遍跑。
+| 跑法 | 结果 |
+|---|---|
+| `--platform win32 -g 'W-0'` | **6 passed**(W-01..W-06) |
+| `--platform win32 --no-venv -g W-06` | **1 passed**(单独验「准备环境」) |
+| `--platform darwin -g W-D` | **3 passed**(W-D01..W-D03) |
+| `--platform win32 --no-venv --ui -g 'U-0[1-4]'` | **4 passed**(U-01..U-04) |
+| `--platform darwin --ui -g U-05` | **1 passed** |
+| `--platform linux --ui -g U-06` | **1 passed** |
+
+U 组六条按平台分三遍跑(每条的适用平台写在用例标题里)——这是设计,不是跳过。
+
+## 2026-10-02 修掉的三个夹具缺陷(裁判实测认定)
+
+1. **只造 Windows 布局** ⇒ darwin 那遍 `runtimeReady` 恒 false、W-D03 报 `CU_RUNTIME_UNAVAILABLE`。
+   现在 `prepare-home.mjs` 按 `CGUI_TEST_PLATFORM` 造对应布局,目录名/解释器相对路径/戳文件名/依赖戳
+   **全部从产品纯函数取**(`venvDirFor/venvPyFor/stampFileFor/pyDepsFor/depsStampFor`),产品改名自动跟随。
+2. **`-m venv` 把 `.mjs` 拷成 `Scripts/python.exe`** ⇒ `ERR_UNKNOWN_FILE_EXTENSION`,W-06 走不通。
+   现在写 `#!/bin/sh` 壳脚本(按平台决定 `Scripts/python.exe` 还是 `bin/python3`)。
+3. **伪 win32 下 PATH 被 `expandClaudePath()` 用 `;` 重拼**,夹具 `bin` 被粘掉、本机 `~/.pyenv/shims/python`
+   反被选中(建出 `venv-win/bin/python3.10`)。现在 `run-isolated.sh` 在 PATH 最前放一个 decoy 挡这一刀。
+
+另外补了两处:桩日志(`CU_STUB_LOG`)接进隔离实例(报文可自证)、runner 传 `CGUI_TEST_HOME`
+(U-03 改成只写夹具家目录 —— 旧写法会写到操作者真实的 `~/.claude-gui`)。

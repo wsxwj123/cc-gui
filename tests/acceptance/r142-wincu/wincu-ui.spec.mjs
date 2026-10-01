@@ -27,10 +27,21 @@ async function openCard(page) {
   return status.body;
 }
 
-/** 直接改夹具里的 uia 缓存再刷新页面 —— 等价于"探测结果变了",不用真跑 Windows。 */
-function writeUiaCache(home, uia) {
-  const file = path.join(home, '.claude-gui', 'cu-runtime', 'uia-capability.json');
+/**
+ * 直接改**夹具**里的 uia 缓存再刷新页面 —— 等价于"探测结果变了",不用真跑 Windows。
+ * ⚠️ 路径必须取 CGUI_TEST_HOME(run-isolated.sh 传的夹具家目录),绝不能用 process.env.HOME:
+ * Playwright 进程的 HOME 是**真实**家目录,那样会写到操作者自己的 ~/.claude-gui(2026-10-02 修)。
+ */
+function fixtureHome() {
+  const home = process.env.CGUI_TEST_HOME;
+  if (!home) throw new EnvironmentBlocked('CGUI_TEST_HOME 未设置(run-isolated.sh 负责传夹具 HOME);拒绝猜家目录');
+  return home;
+}
+
+function writeUiaCache(uia) {
+  const file = path.join(fixtureHome(), '.claude-gui', 'cu-runtime', 'uia-capability.json');
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  // 依赖戳从产品源码抠(与 mcp-server.js 的 PY_DEPS_WIN 字面量一致,见 R13)
   const src = fs.readFileSync(path.join(process.env.WORKTREE, 'server', 'computer-use', 'mcp-server.js'), 'utf8');
   const m = /const PY_DEPS_WIN = \[([^\]]*)\]/.exec(src);
   const deps = (m ? m[1] : "'mss','Pillow','comtypes>=1.4.0'").split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
@@ -51,17 +62,24 @@ test('U-02 win32 副标题按 inputMode 写实话(不许照抄 mac 的"不抢前
   await expect(subtitle).toBeVisible();
   const text = await subtitle.innerText();
   expect(text, '§4.2:mac 的原文在 Windows 上是假话,不许出现').not.toBe(MAC_SUBTITLE);
-  if (st.inputMode === 'none') {
-    expect(text, '§4.2 的 none 档要点').toMatch(/仅支持截图|点击与输入尚未提供/);
-  } else {
-    expect(text, '§4.2 的 background-partial 档要点').toMatch(/优先后台|UI ?Automation|元素/);
-    expect(text, '§4.2:覆盖不到时要明说会明确报错,不会偷偷抢前台').toMatch(/明确报错|覆盖不到|不会.*抢前台|不会偷偷/);
+  // 五档逐档断言(2026-10-02 修:旧版只分了 none / 其它两枝,background-message-only 会被误判成红 ——
+  // 而"只走消息投递"那档的文案本来就不该出现"优先后台/UIA"字样)
+  const EXPECT = {
+    'background-partial': [/优先后台|UI ?Automation|元素/, /明确报错|覆盖不到|不会.*抢前台|不会偷偷/],
+    'background-message-only': [/消息投递/, /浏览器|传统桌面程序/, /不会.*抢前台|不抢前台/],
+    'global-only': [/后台通道不可用/, /显式同意/],
+    none: [/仅支持截图|尚未提供|还没/, /截图|窗口/],
+  };
+  const rules = EXPECT[st.inputMode];
+  expect(rules, `未知 inputMode=${st.inputMode}(§4.1 只有五态)`).toBeTruthy();
+  for (const [i, re] of rules.entries()) {
+    expect(text, `§4.2 的 ${st.inputMode} 档第 ${i + 1} 条要点(实际文案:${text})`).toMatch(re);
   }
 });
 
 test('U-03 win32 降级提示条:走消息投递时说明"浏览器类大概率无效"', async ({ page }) => {
   if (platform() !== 'win32') throw new EnvironmentBlocked('本用例要求 CGUI_TEST_PLATFORM=win32');
-  writeUiaCache(process.env.HOME, false);
+  writeUiaCache(false);
   const st = await openCard(page);
   const note = page.getByTestId('cu-mode-note');
   await expect(note, '§4.2:降级提示条(background-message-only 是黄条)').toBeVisible({ timeout: 20_000 });

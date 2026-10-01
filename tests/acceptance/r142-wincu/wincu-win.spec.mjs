@@ -5,6 +5,9 @@
 //
 // ⚠️ 这是"平台分派"验收,不是 Windows API 验收:真机行为见 TEST-PLAN 的 Windows 清单。
 import { test, expect } from '@playwright/test';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { api, platform, EnvironmentBlocked, waitFor } from './helpers/harness.mjs';
 
 test.beforeAll(async () => {
@@ -72,20 +75,40 @@ test('W-05 not-applicable 只允许出现在 doctor 的 checks/permissions,不�
   expect(JSON.stringify(doctor.body.checks)).toContain('not-applicable');
 });
 
-test('W-06 POST /prepare 存在且可用:建运行时 → 跑 uia-probe → 写缓存', async () => {
-  // 这个用例要求实例是 `run-isolated.sh --platform win32 --no-venv` 起的(没有预置 venv-win)。
+test('W-06 POST /prepare 存在且可用:清掉运行时 → 建 venv-win → 装依赖 → 跑 uia-probe → 写缓存', async () => {
+  // 自带前置(2026-10-02 修):旧版要求实例用 --no-venv 起,否则报 ENVIRONMENT_BLOCKED ——
+  // 那让"跑一遍 -g W-0"永远带一个红,而且验的其实是"起实例的方式"。
+  // 现在自己把夹具里的 venv-win / 依赖戳 / uia 缓存删掉(等价于全新机器),再走 /prepare 重建,
+  // 比原来更强:任何配置下都能跑,且真的会执行一次 venv 创建。
+  const home = process.env.CGUI_TEST_HOME;
+  if (!home) throw new EnvironmentBlocked('CGUI_TEST_HOME 未设置(run-isolated.sh 负责传夹具 HOME)');
+  const runtime = path.join(home, '.claude-gui', 'cu-runtime');
+  fs.rmSync(path.join(runtime, 'venv-win'), { recursive: true, force: true });
+  fs.rmSync(path.join(runtime, 'venv-win.stamp'), { force: true });
+  fs.rmSync(path.join(runtime, 'uia-capability.json'), { force: true });
+
   const before = await api('/api/computer-use/status');
-  if (before.body.runtimeReady === true) {
-    throw new EnvironmentBlocked('实例的运行时已经就绪;本用例要用 --no-venv 起实例,才能验「准备环境」这条路径');
-  }
+  expect(before.body.runtimeReady, '清掉 venv-win 之后 runtimeReady 必须为 false(前置成立,不是假设)').toBe(false);
+  expect(before.body.uiaReady, '缓存也清掉了 ⇒ uiaReady 不能还是 true').toBe(false);
+
   const r = await api('/api/computer-use/prepare', { method: 'POST', timeoutMs: 120_000 });
   expect(r.status, `§2.5②:PREPARE 是用户主动准备入口(HTTP ${r.status})`).toBe(200);
   expect(r.body.ok, `prepare 应成功:${JSON.stringify(r.body).slice(0, 300)}`).toBe(true);
+  expect(r.body.uiaReady, '§2.5②:prepare 顺带跑一次 uia-probe --selftest,回执里要有结论').toBe(true);
+
   const after = await waitFor(async () => {
     const s = await api('/api/computer-use/status');
     return s.body.runtimeReady ? s.body : null;
   }, { timeoutMs: 20_000 });
   expect(after?.runtimeReady, 'prepare 之后 runtimeReady 必须为真(venv-win + venv-win.stamp 都建出来)').toBe(true);
-  expect(after?.uiaReady, '§2.5②:prepare 顺带跑一次 uia-probe --selftest,缓存里要有结论').toBe(true);
+  expect(after?.uiaReady, 'prepare 写下的 uia 结论要能被 /status 读到').toBe(true);
   expect(after?.inputMode, 'uiaReady=true ⇒ background-partial').toBe('background-partial');
+
+  // 端到端证据:建出来的解释器必须是**能执行的** POSIX 壳脚本(旧夹具把 .mjs 拷成 .exe ⇒ ERR_UNKNOWN_FILE_EXTENSION)
+  const py = path.join(runtime, 'venv-win', 'Scripts', 'python.exe');
+  expect(fs.existsSync(py), 'Windows venv 布局必须是 venv-win/Scripts/python.exe').toBe(true);
+  const head = fs.readFileSync(py, 'utf8').split('\n')[0];
+  expect(head, `新解释器必须是 #!/bin/sh 壳脚本,实际首行:${head}`).toBe('#!/bin/sh');
+  const probe = spawnSync(py, ['--version'], { encoding: 'utf8' });
+  expect(probe.status, `建出来的解释器执行失败(旧缺陷 2 就是这个):${probe.stderr}`).toBe(0);
 });

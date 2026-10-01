@@ -174,8 +174,17 @@ export async function startWinMcp(fake, { env = {} } = {}) {
   };
 }
 
-/** 读取桩日志里 release-hold 那次调用(用于"先杀后释放"的顺序判定)。 */
+/**
+ * 读取桩日志里 release-hold 那次调用(用于"先杀后释放"的顺序判定)。
+ *
+ * ⚠️ 必须连 `kind === 'release-hold'` 那条记录一起取:桩对每次调用会写**两条**记录 ——
+ * 一条是通用的 `{kind:'helper', subcmd, args}`(顶部),一条是 release-hold 分支专用的
+ * `{kind:'release-hold', latestBeatAt, argvKeys}`(在 finish() 里,后写,**没有 subcmd 字段**)。
+ * `helperCalls()` 只认 `kind === 'helper'`,而 `latestBeatAt` **只存在于专用记录里** ——
+ * 只取前者会让 T4-01 的 `rel.latestBeatAt` 恒为 undefined(那条断言与实现无关地永远红)。
+ */
 export function releaseHoldEntry(fake) {
-  const entries = fake.helperCalls('release-hold');
+  const entries = fake.log().filter((e) => e.kind === 'release-hold'
+    || (e.kind === 'helper' && e.subcmd === 'release-hold'));
   return entries.length ? entries[entries.length - 1] : null;
 }
