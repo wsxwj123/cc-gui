@@ -278,6 +278,35 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.412</b>(2026-10-02)· 新增 2 条 · 优化 2 条</summary>
+
+**新增**
+
+<details><summary>Windows 上也能用 computer use(操作电脑)了</summary>
+
+此前这个能力在 Windows 上被一段平台判断直接关掉了 —— 界面上连卡片都不出现,也没有任何解释,所以你会觉得"Mac 有、Windows 没有"。现在 Windows 上补了完整的执行层:截图、按坐标点击/拖拽/滚轮、键盘输入与组合键,并且**默认不抢你的前台**:能用后台消息投递就用后台,不行才退到需要你显式同意的全局投递。首次使用点卡片上的「准备环境」装一次依赖即可。
+
+</details>
+
+<details><summary>不支持该能力的平台上,卡片不再凭空消失</summary>
+
+改成显示一张说明卡,告诉你这台机器上缺什么、能做什么。
+
+</details>
+
+**优化**
+
+<details><summary>Windows 上的按键安全兜底</summary>
+
+拖拽/按住类操作会记一份"按住状态";即使程序被强杀,也会由独立看护进程或下一次启动时把按住的键抬起来,避免出现"某个键一直按着"的失控状态。
+
+</details>
+
+- 说明文档补齐了 Windows 的阶梯、限制与排错(含"前台核验可能拿不到"这条与 macOS 的差异)。
+
+</details>
+
+<details>
 <summary><b>v0.2.411</b>(2026-10-02)· 修复 1 条</summary>
 
 **修复**
