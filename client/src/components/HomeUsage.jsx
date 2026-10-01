@@ -214,7 +214,9 @@ export const HomeUsage = React.memo(function HomeUsage() {
   // r135:贪吃蛇(用户要"一直循环")—— 访问顺序是纯函数算的,动画只改内联 transform/opacity,
   // **不进 React 状态**,所以每 45ms 一步不会重渲任何格子(400 个格子重渲会明显掉帧)。
   const snakeTotal = grid ? weeks * 7 : 0;   // 格子数(路径长度 ≥ 它,退回步骤会多走几步)
-  const snakeOn = ready && !empty && !!grid && !reduceMotion;
+  // r139:必须带上 tab —— 覆盖层只在总览分支渲染,切到模型页它会**卸载 DOM**;若 effect 依赖里没有 tab,
+  // 切页时依赖不变 ⇒ 定时器不停、继续操作已脱离文档的旧节点,切回来 React 建的新节点没人动 → 蛇"消失"。
+  const snakeOn = ready && !empty && !!grid && !reduceMotion && tab === 'overview';
   useEffect(() => {
     const mq = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
     if (!mq) return undefined;
@@ -279,7 +281,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
       clearInterval(timer);
       restore();
     };
-  }, [snakeOn, grid, snakeTotal]);
+  }, [snakeOn, grid, snakeTotal, tab]);
   const tipCell = useMemo(() => (tip && grid ? grid.cells.find((c) => c.day === tip.day) || null : null), [tip, grid]);
   // 模型分页的数据:图例(按范围)与图(全部历史,不随范围裁)。data 为空时不算,免得刚 mount 就白算一遍。
   const showModels = ready && !empty && tab === 'models';
