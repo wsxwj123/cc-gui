@@ -75,6 +75,23 @@ export const dup = {
   /** 历史口径的拼法(服务端逐条 push、前端 '' join)。 */
   fullHistory: (sid) => [dup.chunk1(sid), dup.chunk2(sid), dup.final(sid)].join(''),
 };
+// ---- r141 判据① 专用(长正文:把判据③ 的"覆盖下限"压下去)--------------------
+// 为什么必须更长:判据③ 成立的条件之一是「历史那份的指纹长度 >= 本地那份」。夹具里这一轮的
+// assistant 记录会与**预置的旧回复并进同一个 turn**(user 记录被 hold-user 闸住 ⇒ 没有回合边界),
+// 所以历史那份 = 预置正文 + 本轮记录。开 trimhist 后本轮记录只剩 60% ——
+// 只有本地正文足够长(0.4×L > 预置长度)时,③ 才**必然**不成立;否则"③ 不成立"是假的
+// (裁判实测:手搓口径 11 字 vs 客户端实际 114 字,③ 其实成立 ⇒ 用例自称 ①-exclusive 名不副实)。
+export const LONG_PROMPT_MARK = 'R141LONGROUND';
+export const LONG_MARK = 'LONGCHUNK1';
+const LONG_TAIL = '一二三四五六七八九十'.repeat(4);          // 40 字,不含空白
+export const dupLong = {
+  chunk1: (sid) => `LONGCHUNK1 ${String(sid).slice(0, 8)} 判据① 专用长正文第 1 段:${LONG_TAIL}`,
+  chunk2: (sid) => `LONGCHUNK2 ${String(sid).slice(0, 8)} 判据① 专用长正文第 2 段:${LONG_TAIL}`,
+  final: (sid) => `LONGCHUNK3 ${String(sid).slice(0, 8)} 判据① 专用长正文第 3 段:${LONG_TAIL}`,
+  full: (sid) => [dupLong.chunk1(sid), dupLong.chunk2(sid), dupLong.final(sid)].join('\n'),
+  blocks: (sid) => [dupLong.chunk1(sid), dupLong.chunk2(sid), dupLong.final(sid)].map((t) => ({ type: 'text', content: t })),
+};
+
 /** r141 不变量用例专用会话池(不动 R141/POOL/EXTRA,既有用例拿到的会话一字不变)。 */
 // 20 条:主 spec 用 base+0..base+3,judge1(P-2/J1)用 base+4/base+5,而 R141D_BASE 会按 4 递进
 // (0/4/8/…)—— 留够 20 条才不会被越界(idx 越界会以 "reading 'sid'" 这种没信息量的姿势炸)。

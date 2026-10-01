@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import crypto from 'node:crypto';
-import { encodeProjectDir, live, dup, DUP_PROMPT_MARK } from './fixtures.mjs';
+import { encodeProjectDir, live, dup, dupLong, DUP_PROMPT_MARK, LONG_PROMPT_MARK } from './fixtures.mjs';
 
 const argv = process.argv.slice(2);
 if (argv.includes('--version') || argv.includes('-v')) { console.log('99.0.0 (Claude Code)'); process.exit(0); }
@@ -157,8 +157,9 @@ async function round(userText) {
   out({ type: 'system', subtype: 'init', session_id: sid, cwd, model: MODEL, tools: [], mcp_servers: [], permissionMode: 'default', uuid: crypto.randomUUID() });
 
   try { fs.unlinkSync(phaseFile('chunk')); fs.unlinkSync(phaseFile('done')); fs.unlinkSync(phaseFile('go')); } catch { /* 本来就没有 */ }
-  // r141:prompt 里带 DUP 回合标记 ⇒ 用短块文案(mark 必须落在弱键 80 字窗口内,见 fixtures 注释)。
-  const T = String(userText || '').includes(DUP_PROMPT_MARK) ? dup : live;
+  // r141:按 prompt 里的回合标记选文案 —— DUP=短块(压弱键 80 字窗),LONG=长正文(压判据③ 的下限)。
+  const _p = String(userText || '');
+  const T = _p.includes(LONG_PROMPT_MARK) ? dupLong : (_p.includes(DUP_PROMPT_MARK) ? dup : live);
   say(T.chunk1(sid, userText));
   writePhase('phase', 'chunk1');
   await waitFor('chunk');                       // 切走/切回就发生在这段停住里

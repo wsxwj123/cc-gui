@@ -27,7 +27,9 @@
 import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
-import { NAV, R141D, DUP_MARK, DUP_PROMPT_MARK, QUIET_MARK, dup, countTranscriptLines, readTranscript, WORKTREE } from './helpers/fixtures.mjs';
+import path0 from 'node:path';
+import { NAV, R141D, DUP_MARK, DUP_PROMPT_MARK, LONG_MARK, LONG_PROMPT_MARK, QUIET_MARK,
+  dup, dupLong, countTranscriptLines, encodeProjectDir, fixtureCwd, readTranscript, WORKTREE } from './helpers/fixtures.mjs';
 import {
   boot, clearPhase, clearR141Ctl, clearSlowStart, clearSlowStartFor, dumpSseProbe, holdTranscript, holdUserTranscript,
   localCopyCount, openSessionBySearch, phaseOf, readStreamLog, releaseAllRuns, releaseChunk2, releaseLand, releaseTurnEnd,
@@ -44,6 +46,33 @@ const hasJudge1Data = () => {
   try { return fs.readFileSync(path.join(WORKTREE, 'client', 'src', 'App.jsx'), 'utf8').includes('srcUuids'); } catch { return false; }
 };
 const strip = (s) => String(s || '').replace(/\s+/g, '');
+
+/**
+ * 判据口径必须钉在实现上(裁判实测的教训):手搓"历史正文"极易与客户端**实际比较的那个 turn**
+ * 不同口径 —— 夹具里本轮 assistant 记录会与**预置旧回复并进同一个 turn**(user 记录被 hold-user
+ * 闸住 ⇒ 没有回合边界),于是"③ 不成立"是假的、用例自称 ①-exclusive 名不副实。
+ * 这里改用【服务端自己的解析器】+【产品自己的谓词】在同一次运行里实算,口径不可能漂。
+ */
+async function loadProduct() {
+  const prevHome = process.env.HOME;
+  // session-reader 的 projects 根在**模块加载时**读 HOME ⇒ 必须先改再 import。
+  process.env.HOME = path0.join(process.env.R118_DATA_ROOT || '', 'home');
+  let parser = null; let ti = null;
+  try {
+    try { parser = await import('../../../server/services/session-reader.js'); } catch { /* 老树 */ }
+    try { ti = await import('../../../client/src/utils/turnIdentity.js'); } catch { /* r141 修法未落地 */ }
+  } finally { process.env.HOME = prevHome; }
+  return { parser, ti };
+}
+/** 夹具会话被服务端解析出来的消息列表(与 app 调 /api/sessions/:sid/messages 同源)。 */
+async function parseFixtureHistory(parser, sid) {
+  const prevHome = process.env.HOME;
+  process.env.HOME = path0.join(process.env.R118_DATA_ROOT || '', 'home');
+  try {
+    const res = await parser.getSessionMessages(sid, encodeProjectDir(fixtureCwd()));
+    return res?.messages || [];
+  } finally { process.env.HOME = prevHome; }
+}
 
 test.beforeEach(async ({ page }) => {
   await startSseProbe(page, 'p2');   // 必须在 goto 之前
@@ -138,67 +167,102 @@ test('R141-P2 [探针] 判据① 的输入:uuid 到得了客户端,且 sameuuid 
   }
 });
 
-test('R141-J1 [判据①-exclusive] 普通回合 + sameuuid + 历史更短 ⇒ 只有 uuid 能认出副本', async ({ page }) => {
+test('R141-J1 [判据①-exclusive] 长正文 + sameuuid + 历史更短 ⇒ 只有 uuid 能认出副本', async ({ page }) => {
   const base = Number(process.env.R141D_BASE || 0);
   const S = R141D[base + 5];
   const sid = S.sid;
-  const prompt = `${DUP_PROMPT_MARK} j1 第1轮:只有 uuid 能认出这条副本。`;
+  const prompt = `${LONG_PROMPT_MARK} j1 第1轮:只有 uuid 能认出这条副本。`;
   const quietPrompt = `${QUIET_MARK} j1 抢 token 用的空回合。`;
-  const localFull = dup.full(sid);          // 本地副本的正文(三块 \n 拼)
+  const { parser, ti } = await loadProduct();
   try {
     clearR141Ctl(CTL, sid);
     await switchTo(page, S.mark);
-    // 判据① 有数据(sameuuid)+ 判据② 必不相等(历史正文被改短)+ 判据③ 必不成立(历史更短)
-    sameUuid(CTL, sid);
-    trimHist(CTL, sid);
-    holdTranscript(CTL, sid);        // 孪生落后:assistant 记录推迟到 .land
-    holdUserTranscript(CTL, sid);    // I3:user 记录不落盘 ⇒ 不会触发 :4182 整清(假绿)
+    await page.waitForTimeout(700);
 
-    // ① 起流(普通回合,非 reattach ⇒ A4 的 uuid 收集是完整的)
-    clearPhase(CTL, sid);
+    // ── 为什么这条用例走【C1 那条时序】(切走→切回→种回流),而不是普通回合 ──────────────
+    // ① 要"有数据",历史孪生就必须**自成一回合**(turn.uuid = 本轮第一条 assistant 记录的
+    // uuid)。而 user 记录若被 hold 住,本轮记录会**并进夹具预置的那条 turn** —— 实测:那条
+    // turn 的 uuid 是预置记录的 `${sid}-a1`,与本轮流侧 uuid 永远没有交集 ⇒ 判据① **永远无
+    // 数据**,用例就只是"自称 ①-exclusive"(裁判 M2b 抓到的正是这一层)。
+    // 让 user 记录**即时落盘**(= C2 的"不同闸")才有回合边界;而本 spec 的 I3 由"切走暂存 →
+    // 切回对账撤除本地 user 气泡"这条路径保证(观察点 A/B0/B1 会逐拍记下来)。
+    // 种回流不重置 roundUuidsRef(实现是 A4b′:`if (!reattachPid)` 复位)⇒ ① 在种回路径上
+    // 依然有数据 —— 这条用例顺带把 A4b′ 这个选择也钉住了。
+    holdTranscript(CTL, sid);        // 孪生落后:assistant 记录推迟到 .land
+    sameUuid(CTL, sid);              // ① 有数据(两侧同一 uuid);不开就是对照组
+    trimHist(CTL, sid);              // 历史只写 60% ⇒ ③ 的长度下限必不成立、② 必不等
+
+    // ① 起流(普通回合)
     await sendPrompt(page, prompt);
-    await expect.poll(() => phaseOf(CTL, sid), { timeout: 30_000, intervals: [100] }).toBe('chunk1');
+    await expect.poll(() => runPid(CTL, sid), { timeout: 25_000, intervals: [100] }).not.toBeNull();
+    await expect(page.getByText(dupLong.chunk1(sid), { exact: false }).first(), 'J1:①段直播气泡应吐出第一块').toBeVisible({ timeout: 30_000 });
+
+    // ② 切走(abort ⇒ 写 r68 快照)→ 等 user 记录即时落盘 → 切回(⇒ poll 命中 ⇒ seeded reattach)
+    await switchTo(page, NAV.mark);
+    await page.waitForTimeout(1_400);
+    expect(countTranscriptLines(sid, 'user', prompt), 'J1:user 记录应已即时落盘(不同闸)—— 有它才有回合边界').toBe(1);
+    await switchTo(page, S.mark);
+    await expect(page.getByText(dupLong.chunk1(sid), { exact: false }).first(), 'J1:②段切回后应起 seeded reattach(种回第一块)').toBeVisible({ timeout: 30_000 });
+
+    // ③ 一次性放行三段 → 收尾推本地定稿副本 C → 立刻发空回合 M2 抢 turn token
     releaseChunk2(CTL, sid);
     releaseTurnEnd(CTL, sid);
-    // ② 等本地定稿副本 C 出现,立刻发空回合 M2 抢 turn token(:7098 break ⇒ C 不被自己的收尾清掉)
     await expect.poll(() => localCopyCount(page), { timeout: 20_000, intervals: [40] }).toBeGreaterThan(0);
-    const snapC = await turnNodes(page);
     await sendPrompt(page, quietPrompt);
     await waitForPhase(CTL, sid, 'quiet', 20_000);
-    // ③ 放行 assistant 记录(历史那份是【更短】的版本)→ M2 空回合收尾会拉历史 ⇒ 孪生进 store
+    // ④ 放行 assistant 记录(历史那份是【更短】的版本)→ M2 空回合收尾拉历史 ⇒ 孪生进 store
     releaseLand(CTL, sid);
     await waitForPhase(CTL, sid, 'quiet-done', 20_000);
     await page.waitForTimeout(4_000);
 
     const nodes = await turnNodes(page);
-    const copies = nodes.filter((n) => n.text.includes(DUP_MARK));
-    const nJson = countTranscriptLines(sid, 'assistant', DUP_MARK);
-    const histRecords = readTranscript(sid).filter((l) => l.type === 'assistant' && (l.message?.content || []).some((b) => (b.text || '').includes(DUP_MARK)));
-    const histText = histRecords.map((l) => (l.message?.content || []).map((b) => b.text || '').join('')).join('');
-    const judge2Equal = strip(histText) === strip(localFull);
-    const judge3Ok = strip(histText).length >= strip(localFull).length;
-    const hasFix = hasJudge1Data();
-    dump('r141-j1', { sid, hasFix, nodes, snapC, nJson, histText, localFull, judge2Equal, judge3Ok, copies });
+    const copies = nodes.filter((n) => n.text.includes(LONG_MARK));
+    const nJson = countTranscriptLines(sid, 'assistant', LONG_MARK);
+    const localCopyNum = await localCopyCount(page);
 
-    // ── 恒断言:前置(与产品行为无关,修前修后都必须成立)────────────────────
-    expect(copies.length, `J1:前置——副本与孪生必须同屏在场(I1+I2)。copies=${JSON.stringify(copies)}`).toBeGreaterThan(0);
-    expect(judge2Equal, `J1:前置——判据② 必须【不】命中(历史正文被改短),否则本用例证明不了①。`
-      + `hist=${JSON.stringify(histText)} local=${JSON.stringify(localFull)}`).toBe(false);
-    expect(judge3Ok, `J1:前置——判据③ 的覆盖下限必须不成立(历史那份更短),否则可能是③ 命中。`
-      + `len(hist)=${strip(histText).length} len(local)=${strip(localFull).length}`).toBe(false);
-    expect(nJson, `J1:jsonl 里这一轮的 assistant 记录数应当 = 1(第一块那条)`).toBe(1);
+    // ── 行为断言:同一条回复只能画一遍,且活下来的必须是历史那条 ─────────────────────
+    expect(copies.length, `J1[判据① 生效]:同一条回复只能画一遍。实际 ${copies.length} 条 ${JSON.stringify(copies)}`
+      + `(② 不命中 / ③ 长度下限不成立 ⇒ 只有 ① 能解释)`).toBe(1);
+    expect(copies[0].local, 'J1[判据① 生效]:活下来的应当是历史那条(修法只藏派生的本地副本)').toBe(false);
+    expect(localCopyNum, 'J1[判据① 生效]:本地定稿副本必须已被判据① 藏掉').toBe(0);
 
-    // ── 行为断言:按 A3/A4 是否落地自动收紧 ────────────────────────────────
-    if (hasFix) {
-      expect(copies.length, `J1[判据① 生效]:同一条回复只能画一遍。实际 ${copies.length} 条 ${JSON.stringify(copies)}`).toBe(1);
-      expect(copies[0].local, 'J1[判据① 生效]:活下来的应当是历史那条(修法只藏派生的本地副本)').toBe(false);
-      expect(await localCopyCount(page), 'J1[判据① 生效]:本地定稿副本必须已被判据① 藏掉').toBe(0);
-    } else {
-      // 判据① 无数据来源(A3/A4 未落地)⇒ 不硬凑断言,只如实记录修前实测条数
-      console.log(`[r141-j1] A3/A4 未落地:判据① 无数据。修前实测 ${copies.length} 条`
-        + `(本地 ${copies.filter((c) => c.local).length} / 历史 ${copies.filter((c) => !c.local).length});`
-        + `② 不命中=${!judge2Equal} ③ 不成立=${!judge3Ok} ⇒ 落修后本用例自动收紧为"恰好 1 条"`);
+    // ── 前置:全部用【服务端解析器的真实历史】+【产品自己的谓词】实算(不许手搓口径)──────
+    const messages = parser ? await parseFixtureHistory(parser, sid) : [];
+    const streamUuids = readStreamLog(CTL, sid).map((e) => e.uuid).filter(Boolean);
+    const nowMs = Date.now();
+    const localEntry = {
+      type: 'turn', uuid: 'chat-assistant-<local>', timestamp: new Date(nowMs).toISOString(),
+      text: [dupLong.full(sid)], blocks: dupLong.blocks(sid),
+      srcUuids: streamUuids, roundStartTs: nowMs - 300_000,   // 保守:窗口更宽 ⇒ 判"③ 不成立"更强
+    };
+    const idx = ti ? ti.makeTurnIdentityIndex(messages) : null;
+    const fpLocal = ti ? ti.turnFingerprint(localEntry) : strip(dupLong.full(sid));
+    const histTurns = messages.filter((m) => m.type === 'turn');
+    const histFps = histTurns.map((m) => (ti ? ti.turnFingerprint(m) : strip(String(m.text || ''))));
+    const maxHistFp = Math.max(0, ...histFps.map((f) => f.length));
+    const j2Hit = !!idx && idx.fingerprints.has(fpLocal);
+    const turnUuids = new Set(histTurns.map((m) => String(m.uuid)));
+    const uuidHits = streamUuids.filter((u) => turnUuids.has(u));
+    const j3Candidates = idx ? idx.turns.filter((t) => t.ts >= localEntry.roundStartTs && t.ts <= nowMs + 2000) : [];
+    const j3Hit = j3Candidates.some((t) => t.len >= fpLocal.length);
+    const implSays = ti ? ti.localTurnTakenOver(localEntry, idx) : null;
+    dump('r141-j1', { sid, hasProductTI: !!ti, nodes, nJson, copies, localCopyNum, streamUuids,
+      localFp: fpLocal.length, histFps, maxHistFp, j2Hit, uuidHits: uuidHits.length, j3Hit,
+      j3Candidates: j3Candidates.length, implSays,
+      histTurns: histTurns.map((m) => ({ uuid: m.uuid, ts: m.timestamp, fp: (ti ? ti.turnFingerprint(m) : '').length })) });
+    expect(histTurns.length, `J1:前置——服务端解析出的历史里必须有 turn(实际 ${histTurns.length})`).toBeGreaterThan(0);
+    // ③ 的**长度下限**:历史最长指纹 < 本地指纹 ⇒ 无论时间窗怎么取,③ 都不可能命中
+    expect(maxHistFp, `J1:前置——判据③ 的覆盖下限必须不成立:历史最长指纹 ${maxHistFp} 字 < 本地 ${fpLocal.length} 字`
+      + `(histFps=${JSON.stringify(histFps)};histTurns=${JSON.stringify(histTurns.map((m) => m.uuid))})`).toBeLessThan(fpLocal.length);
+    expect(j3Hit, `J1:前置——判据③ 不得命中(窗口内候选 ${j3Candidates.length} 个)`).toBe(false);
+    expect(j2Hit, `J1:前置——判据② 不得命中(本地指纹 ${fpLocal.length} 字)`).toBe(false);
+    expect(uuidHits.length, `J1:前置——判据① 必须有数据:流侧 uuid ${JSON.stringify(streamUuids)} 与历史 turn uuid `
+      + `${JSON.stringify([...turnUuids])} 无交集。histTurns=${JSON.stringify(histTurns.map((m) => m.uuid))}`).toBeGreaterThan(0);
+    if (ti) {
+      expect(implSays, 'J1:前置——修法的 localTurnTakenOver 对这条本地副本必须判 true(①②③ 里只有 ① 有数据)').toBe(true);
     }
+    expect(nJson, 'J1:jsonl 里这一轮的 assistant 记录数应当 = 1(第一块那条)').toBe(1);
+
   } finally {
     releaseChunk2(CTL, sid); releaseTurnEnd(CTL, sid); releaseLand(CTL, sid); clearR141Ctl(CTL, sid);
   }
