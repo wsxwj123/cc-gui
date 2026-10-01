@@ -1031,3 +1031,33 @@ test('C12e 贪吃蛇:不设加速缝时按生产默认速度走(约 100ms/步)',
   expect(perSec, `默认速度应约 22 步/秒(100ms/步);实得 ${perSec.toFixed(1)} 步/秒`).toBeGreaterThan(4);
   expect(perSec, `默认速度不该跑到加速缝的速度(8ms→约 125 步/秒);实得 ${perSec.toFixed(1)} 步/秒`).toBeLessThan(30);
 });
+
+test('C12f 贪吃蛇:切到「模型」页再切回「总览」,蛇必须还在动', async ({ page }) => {
+  // 用户实报:切到模型页再切回总览,蛇就不见了。
+  // 结构原因:覆盖层只在总览分支渲染(切走 = 卸载 DOM),而 effect 依赖 [snakeOn, grid, snakeTotal]
+  // 在切页时都不变 ⇒ 定时器没停、仍操作**已脱离文档的旧节点**;切回来 React 建的是新节点,
+  // 旧闭包永远碰不到 → 新覆盖层一直停在初始位置(看着就是"蛇没了")。
+  await page.addInitScript(() => { try { window.__cguiSnakeMs = 8; } catch { /* 忽略 */ } });
+  await stubUsage(page, typical());
+  await gotoHome(page);
+  const snake = page.getByTestId('home-usage-snake');
+  await expect(snake, '总览页该有蛇').toBeVisible();
+  await page.getByTestId('home-usage-tab-models').click();
+  await expect(snake, '模型页不该有覆盖层').toHaveCount(0);
+  await page.getByTestId('home-usage-tab-overview').click();
+  await expect(snake, '切回总览后覆盖层要回来').toBeVisible();
+  const r = await page.evaluate(async () => {
+    const el = document.querySelector('[data-testid="home-usage-snake"]');
+    const seg = el.querySelector('[data-snake-seg]');
+    const t0 = seg.style.transform;
+    let prev = Number(el.dataset.snakeStep);
+    let changes = 0;
+    const obs = new MutationObserver(() => { const v = Number(el.dataset.snakeStep); if (v !== prev) { changes += 1; prev = v; } });
+    obs.observe(el, { attributes: true, attributeFilter: ['data-snake-step'] });
+    await new Promise((res) => setTimeout(res, 1500));
+    obs.disconnect();
+    return { changes, moved: seg.style.transform !== t0 };
+  });
+  expect(r.changes, `切回来之后蛇必须继续走(实得 ${r.changes} 次步进;0 = 定时器还在操作已被卸载的旧 DOM)`).toBeGreaterThan(3);
+  expect(r.moved, '蛇身段应该真的在移动').toBe(true);
+});
