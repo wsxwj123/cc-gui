@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.409</b>(2026-10-01)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>切到「模型」页再切回「总览」,贪吃蛇会消失</summary>
+
+切页时蛇的定时器没停、还在画那块已经被卸载的旧热力图,切回来后新的热力图就没人动了;现在切走即停、切回来重新开始。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.408</b>(2026-09-30)· 修复 1 条</summary>
 
 **修复**
