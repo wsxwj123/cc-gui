@@ -5240,13 +5240,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const SC_TEXT = 1; const SC_THINKING = 2; const SC_TOOLS = 4; const SC_BLOCKS = 8;
     let scDirty = 0;
     const commitStream = createStreamCommit(() => {
+      // r140(C1)归属闸:本 pane 已经开了新回合(切走后在别的会话发了消息 ⇒
+      // streamTurnTokenRef 已推进)⇒ 这条流不再是"本窗格当前消费的流",这一帧丢弃。
+      // 不加这道的后果:切走时旧流尚未 attach(abortRef 还是 null,断不掉),它出生后
+      // 仍会把正文写进窗格级的流式缓冲,被 B 的 setStreamOwner 一开闸就画在 B 上。
+      if (!isCurrentTurn()) return;
       const d = scDirty; scDirty = 0;
       if (d & SC_TEXT) setStreamingText(accumulatedText);
       if (d & SC_THINKING) setStreamingThinking(accumulatedThinking);
       if (d & SC_TOOLS) setStreamingToolCalls([...currentToolCalls]);
       if (d & SC_BLOCKS) setStreamingBlocks([...orderedBlocks]);
     });
-    const scheduleStreamCommit = (flags) => { scDirty |= flags; commitStream.schedule(); };
+    const scheduleStreamCommit = (flags) => {
+      if (!isCurrentTurn()) return; // r140:同上 —— 别人的回合不必再排一帧空转的 rAF
+      scDirty |= flags; commitStream.schedule();
+    };
     const resetStreamCommit = () => { scDirty = 0; commitStream.cancel(); };
     // 供 handleStop(点击即时反馈)与 detachStream(卸载/切会话)按 ref 调用(不进闭包依赖)。
     streamCommitFlushRef.current = () => commitStream.flush();
@@ -5405,6 +5413,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // streaming a non-existent pid — that would hang forever as a stuck
       // "connecting" with no reply (the catch below renders the message).
       if (!res.ok || !respJson.pid) throw new Error(respJson.error || `发送失败 (${res.status})`);
+      // r140(C1 步骤③)孤儿流复判:本 pane 在 POST 窗口里已经切走 ⇒ 这条流不属于本窗格了。
+      // 从这里直接 return,一并跳过下面五处认领:pid / activeProcRef(否则在 B 按停止会停到 A)、
+      // activeProcOwnerRef、liveChatPid(否则 B 的 ⚡ 误报可点)、streamingModel(否则 B 的流式气泡
+      // 与 Connecting 头像会画上 A 的模型),也不 attach —— 本端不再消费它。
+      // 进程照跑 = detach-don't-abort(用户已拍板 (a));pid 由既有 poll 按 sessionId/draftId
+      // 自行发现,切回时经 auto-reattach 续播。不写 backgroundPidRef:那会与 poll 的写点打架
+      // (它每 1.5s 自己会发现),且该 ref 声明在 handleSend 之后(TDZ)。
+      // 走既有 finally:它已由 isCurrentTurn() 守好,不会污染新回合。
+      if (queueKeyFor(getLocalSession()) !== sessionQueueKey) return;
       pid = respJson.pid;
       activeProcRef.current = pid;
       // R13:本 pid 的期望身份 = 发起这条流的会话(sid 优先;draft 期是原始 draftId,
@@ -5423,6 +5440,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // attach 通道断了的统一恢复。两个调用点:①attach 非 2xx(下面);②已连上的流被静默
       // 掐断(收到 done 之前 reader 就结束,见循环之后)。两者都是【传输掉线】—— 真正的
       // "被接管"由服务端发 detached 事件明说,走它自己的分支,不到这里。
+      // r140(C2-a):重连前的"本 pane 是否已切走"判据原来是 `streamSid && getLocalSession()?.sessionId
+      // !== streamSid` —— streamSid 为 null(draft 发起、init 之前的 attach 失败)时整条短路 ⇒
+      // 1.5s 后无条件重连,把 A 的流接进当时屏幕上的任何会话。改成与步骤③ 同源的判等:owner 是
+      // 本闭包捕获的 sessionQueueKey(发起时那一刻的窗格键);后一个子句专治"draft→真 sid 升级后
+      // 本 pane 仍是自己"的误伤(升级后 queueKeyFor 已是真 sid,而闭包 owner 还是 draft 键 ⇒
+      // 纯判等会拒绝自己)。
       const recoverAttach = () => {
         reattachedPidRef.current = null;   // 清 reattach 守卫,允许重连
         const tries = nextAttachTry(attachFailRef.current, String(pid), ATTACH_MAX_TRIES);
@@ -5446,7 +5469,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         attachRetryTimerRef.current = setTimeout(() => {
           attachRetryTimerRef.current = null;
           if (streamingRef.current || reattachedPidRef.current) return;   // 已有流 / 已被别处接管
-          if (streamSid && getLocalSession()?.sessionId !== streamSid) return; // 本 pane 已切走
+          const k = queueKeyFor(getLocalSession());   // r140(C2-a):见 recoverAttach 上方注释
+          if (k !== sessionQueueKey && !(streamSid && k === streamSid)) return; // 本 pane 已切走
           handleSendRef.current?.(null, { reattachPid: pid });
         }, 1500);
       };
@@ -5816,7 +5840,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'system' && event.subtype === 'compact_boundary') {
             setChatMessages((prev) => {
               if (prev.some((m) => m.type === 'compact' && m._live)) return prev;
-              return [...prev, { type: 'compact', uuid: 'live-compact', _live: true }];
+              return [...prev, { type: 'compact', uuid: 'live-compact', _live: true, ownerKey: streamSid || sessionQueueKey }];
             });
             // U8:压缩边界后,压缩前写入的即时 usage 已是旧值,清掉 —— 否则它优先级
             // 高于 jsonl 的 lastUsage,徽章在压缩后纹丝不动(用户报告)。
@@ -6043,7 +6067,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // streamSid(发起时闭包/init 确定),渲染时与当前查看会话比对,不串窗。
           if (event.type === 'prompt_suggestion') {
             const sTxt = typeof event.suggestion === 'string' ? event.suggestion.trim() : '';
-            if (sTxt) useStore.getState().setPromptSuggestionFor(streamSid || streamOwnerKeyRef.current, sTxt);
+            if (sTxt) useStore.getState().setPromptSuggestionFor(streamSid || sessionQueueKey, sTxt);
             setLiveStatus(null);
           }
 
@@ -6368,7 +6392,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 setChatMessages((prev) => [...prev, {
                   uuid: 'goal-fb-' + Date.now(),
                   type: 'goal',
-                  ownerKey: streamSid || streamOwnerKeyRef.current,
+                  ownerKey: streamSid || sessionQueueKey,
                   timestamp: new Date().toISOString(),
                   met: false,
                   sentinel: false,
@@ -6447,6 +6471,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             setChatMessages((prev) => [...prev, {
               uuid: 'stall-' + Date.now(),
               type: 'turn',
+              ownerKey: streamSid || sessionQueueKey,
               timestamp: new Date().toISOString(),
               model: streamingModel,
               text: [`⏸ ${event.text || '上游长时间无输出,本回合已自动收尾。'}`],
@@ -6478,6 +6503,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               setChatMessages((prev) => [...prev, {
                 uuid: 'chat-budget-' + Date.now(),
                 type: 'turn',
+                ownerKey: streamSid || sessionQueueKey,
                 timestamp: new Date().toISOString(),
                 model: streamingModel,
                 text: [`已达到设置的对话花费上限${_cap ? `($${_cap})` : ''},本轮已停止。若需继续,请在 通用 → 会话 里调高或清除「对话花费上限」后重发。`],
@@ -6584,7 +6610,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 超限;横幅要把真实窗口亮给用户并给对建议(压缩摘要请求自身也会超小窗,难自救)。
               const _lim = /(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)\s*maximum/i.exec(msg);
               setCtxOverflow({
-                has1m: /\[1m\]/i.test(currentModel || ''), wasCompact: isCompact, ownerKey: streamOwnerKeyRef.current,
+                has1m: /\[1m\]/i.test(currentModel || ''), wasCompact: isCompact, ownerKey: streamSid || sessionQueueKey,
                 used: _lim ? Number(_lim[1].replace(/,/g, '')) : null,
                 limit: _lim ? Number(_lim[2].replace(/,/g, '')) : null,
               });
@@ -6617,6 +6643,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             setChatMessages((prev) => [...prev, {
               uuid: 'chat-error-' + Date.now(),
               type: 'turn',
+              ownerKey: streamSid || sessionQueueKey,
               timestamp: new Date().toISOString(),
               model: streamingModel,
               text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}${loginHint}`],
@@ -6792,6 +6819,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // finalize(roundLanded → 清本地 → 同帧清 cutoff),没有任何 seeded 专属分支。
         if (!reattachPid || seeded) setChatMessages((prev) => [...prev, {
           uuid: 'chat-assistant-' + Date.now(), type: 'turn',
+          ownerKey: streamSid || sessionQueueKey,
           timestamp: new Date().toISOString(), model: streamingModel,
           text: accumulatedText ? [accumulatedText] : [],
           thinking: accumulatedThinking ? [accumulatedThinking] : [],
@@ -6817,6 +6845,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-cleared-' + Date.now(),
           type: 'turn',
+          ownerKey: streamSid || sessionQueueKey,
           timestamp: new Date().toISOString(),
           model: streamingModel,
           text: [okText],
@@ -6842,6 +6871,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-empty-' + Date.now(),
           type: 'turn',
+          ownerKey: streamSid || sessionQueueKey,
           timestamp: new Date().toISOString(),
           model: streamingModel,
           text: [`⚠️ ${msg}`],
@@ -7276,11 +7306,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const _ls = getLocalSession();
         const curKey = queueKeyFor(_ls);
         const queueKey = streamSid || streamOwnerKeyRef.current || curKey;
-        const next = queueKey === curKey ? useStore.getState().shiftMessage(queueKey) : null;
-        if (next?.text) {
-          // 透传入队时的 opts(尤其 hiddenUserMessage)——否则计划执行这种隐藏续跑消息
-          // 出队重发时会变成可见的用户气泡(#5)。
-          setTimeout(() => handleSendRef.current?.(next.text, next.opts || (next.hidden ? { hiddenUserMessage: true } : {})), 50);
+        if (queueKey === curKey) {
+          const drainKey = queueKey;
+          // r140(C5):弹队与派发之间隔了 50ms,而这 50ms 里用户可能已经切走 —— 而 handleSendRef
+          // 永远发进【本窗格当前会话】,先弹后发就会把 A 的排队消息投给 B 并写进 B 的会话文件
+          // (不可撤销的数据污染;next.opts 还可能带 hiddenUserMessage 悄悄投错)。故把 shiftMessage
+          // 一并挪进定时器,并在落地前复查 pane key(与本文件 1.5s poll 排空同款范式):换了队列
+          // 就【不弹不发】,消息留在原队列里,交给该会话下一次进入或流收尾的排空。
+          setTimeout(() => {
+            if (queueKeyFor(getLocalSession()) !== drainKey) return;
+            const next = useStore.getState().shiftMessage(drainKey);
+            // 透传入队时的 opts(尤其 hiddenUserMessage)——否则计划执行这种隐藏续跑消息
+            // 出队重发时会变成可见的用户气泡(#5)。
+            if (next?.text) handleSendRef.current?.(next.text, next.opts || (next.hidden ? { hiddenUserMessage: true } : {}));
+          }, 50);
         }
       }
       backgroundedRef.current = false;
@@ -7754,6 +7793,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // R13:上一条流的连接状态/运行身份都属于刚切走的那个 owner,不能挂在新会话上。
         setStreamConnNotice(null);
         setStreamRunId(null);
+        // r140(hunk16):liveChatPid 是刚才那条流的"可停止"身份。步骤③ 只挡 POST 窗口里的切走,
+        // 这一句补上"流已 attach 之后才切走"的窗口 —— 不清的话 B 的 ⚡ 会拿 A 的 pid 误报可点。
+        setLiveChatPid(null);
         // Clear reattach guard so navigating back to a session with the same
         // backgroundPid triggers a fresh reattach attempt.
         reattachedPidRef.current = null;
