@@ -50,8 +50,10 @@ const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
   const seg = ws.slice(ws.indexOf("case 'prompt-suggestion-bg':"), ws.indexOf("case 'prompt-suggestion-bg':") + 700);
   assert.ok(/setPromptSuggestionFor\(data\.sessionId, data\.suggestion\)/.test(seg),
     'WS 兜底须按 sessionId 入位到与 SSE 同一 store 入口');
-  assert.ok(/setPromptSuggestionFor\(streamSid \|\| streamOwnerKeyRef\.current, sTxt\)/.test(app),
-    'SSE 分支须写同一个 store 入口(不再是组件 useState)');
+  // r140(hunk12):断言跟着实现形态更新(不是放宽)—— 归属键从会被别的会话改写的 `streamOwnerKeyRef.current`
+  // 换成发起时闭包捕获的 `sessionQueueKey`。语义一字未动:仍走同一个 store 入口,且归属键必须是本流自己的会话键。
+  assert.ok(/setPromptSuggestionFor\(streamSid \|\| sessionQueueKey, sTxt\)/.test(app),
+    'SSE 分支须写同一个 store 入口(不再是组件 useState),归属键用发起时的会话键');
   assert.ok(!/setPromptSuggestion\(/.test(app),
     '组件内 useState 的 setPromptSuggestion 必须全部撤掉(切窗格即丢是本 bug 的另一半)');
   assert.ok(/clearPromptSuggestion\(sessionQueueKey, selectedSession\?\.sessionId\)/.test(app),

@@ -120,8 +120,11 @@ const PID = 'sdk-7';
   assert.match(src, /if \(!backgroundedRef\.current\) \{/,
     '转后台期间仍不得排空；steer 由队首 barrier 防双发');
   assert.doesNotMatch(src, /acceleratingRef/, '不得退回跨条目共享的 accelerating 布尔锁');
-  assert.match(src, /const next = queueKey === curKey \? useStore\.getState\(\)\.shiftMessage\(queueKey\) : null;/,
-    '排空的 owner 归属校验必须原样保留(否则跨会话串扰 + 双 resume)');
+  // r140(C5):断言跟着实现形态更新(不是放宽)—— 原来是"同步三元 pop",先 pop 后派发,那 50ms 里
+  // 切走会把 A 的排队消息投给 B;现在是"同 key 才进分支 + 50ms 后复查 pane key + 再 pop"。
+  // 语义一字未动:仍要求 owner 队列 == 本 pane 队列才排空,且 shiftMessage 弹的仍是 owner key。
+  assert.match(src, /if \(queueKey === curKey\) \{[\s\S]{0,300}?const drainKey = queueKey;[\s\S]{0,400}?if \(queueKeyFor\(getLocalSession\(\)\) !== drainKey\) return;[\s\S]{0,200}?const next = useStore\.getState\(\)\.shiftMessage\(drainKey\);/,
+    '排空的 owner 归属校验必须保留(否则跨会话串扰 + 双 resume):同 key 才排空 + 派发前复查 + pop 走 owner key');
 }
 
 console.log('✅ check-reattach-guard: 闩锁 done 复位 + takeover/掉线不清 + 两次复活两次接 + 横幅门槛 全部通过');

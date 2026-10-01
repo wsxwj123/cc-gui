@@ -135,8 +135,11 @@ assert.ok(/useEffect\(\(\) => detachStream[,)]/.test(src),
     '未到上限必须自己排定时器重连(id 挂 attachRetryTimerRef,供 detachStream 清)—— 靠 backgroundPid 轮询等于不重试');
   assert.ok(/if \(streamingRef\.current \|\| reattachedPidRef\.current\) return;/.test(seg),
     '重试前必须复查:已有流 / 已被别处接管就放弃');
-  assert.ok(/getLocalSession\(\)\?\.sessionId !== streamSid\) return;/.test(seg),
-    '重试前必须复查本 pane 没切走');
+  // r140(C2-a):断言跟着实现形态更新(不是放宽)—— 旧判据 `streamSid && …sessionId !== streamSid`
+  // 在 streamSid 为 null(draft 发起、init 之前的 attach 失败)时整条短路,切走后仍会无条件重连;
+  // 实现改成与流收尾/步骤③ 同源的窗格键判等。语义一字未动:仍是"本 pane 已切走就必须 return"。
+  assert.ok(/const k = queueKeyFor\(getLocalSession\(\)\)[\s\S]{0,200}?if \(k !== sessionQueueKey && !\(streamSid && k === streamSid\)\) return;/.test(seg),
+    '重试前必须复查本 pane 没切走(按窗格键判等;draft→真 sid 升级后仍算自己)');
   assert.ok(/tries\.exhausted/.test(seg) && /sticky: true/.test(seg),
     '到上限要亮【可关闭且不自动消失】的提示');
   assert.ok(/retryPid: String\(pid\)/.test(seg),
