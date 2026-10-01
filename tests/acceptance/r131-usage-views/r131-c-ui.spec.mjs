@@ -1007,11 +1007,11 @@ test('C12d 贪吃蛇:没有消耗的格子(level 0)永远不被染色', async ({
   expect(r.zeroEaten, '夹具里该有没消耗的格子(否则这条判据是空的)').toBeGreaterThan(0);
 });
 
-test('C12e 贪吃蛇:不设加速缝时按生产默认速度走(约 45ms/步)', async ({ page }) => {
+test('C12e 贪吃蛇:不设加速缝时按生产默认速度走(约 100ms/步)', async ({ page }) => {
   // 为什么要有这条:其它验收用例都设了 window.__cguiSnakeMs = 8 的加速缝,于是"生产默认 45ms"
   // 这条路**没有任何用例钉** —— 把默认改成 8(快得看不清)或负值/过大都不会红。
-  // 判据:不设缝,量 2 秒内 data-snake-step 的变化次数 ≈ 22 次/秒;上下各留足余量(10–60),
-  // 只挡"跑成加速缝速度"和"几乎不动"这两类坏法。
+  // 判据:不设缝,量 2 秒内 data-snake-step 的变化次数 ≈ 10 次/秒;上下留余量(4–30),
+  // 只挡"跑成加速缝速度"和"几乎不动"这两类坏法(用户实报过"太快",所以也要挡住"又被改快")。
   await stubUsage(page, typical());
   await gotoHome(page);
   const snake = page.getByTestId('home-usage-snake');
@@ -1028,6 +1028,6 @@ test('C12e 贪吃蛇:不设加速缝时按生产默认速度走(约 45ms/步)', 
     return { ticks, dt: performance.now() - t0 };
   });
   const perSec = r.ticks / (r.dt / 1000);
-  expect(perSec, `默认速度应约 22 步/秒(45ms/步);实得 ${perSec.toFixed(1)} 步/秒`).toBeGreaterThan(10);
-  expect(perSec, `默认速度不该跑到加速缝的速度(8ms→约 125 步/秒);实得 ${perSec.toFixed(1)} 步/秒`).toBeLessThan(60);
+  expect(perSec, `默认速度应约 22 步/秒(100ms/步);实得 ${perSec.toFixed(1)} 步/秒`).toBeGreaterThan(4);
+  expect(perSec, `默认速度不该跑到加速缝的速度(8ms→约 125 步/秒);实得 ${perSec.toFixed(1)} 步/秒`).toBeLessThan(30);
 });

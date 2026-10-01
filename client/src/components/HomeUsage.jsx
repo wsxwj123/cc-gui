@@ -239,8 +239,8 @@ export const HomeUsage = React.memo(function HomeUsage() {
     let eatAt = new Set(route.eatAt);
     layer.dataset.snakeTotal = String(route.path.length);
     layer.dataset.snakeEaten = '0';
-    // 45ms 一步;窗口上的 __cguiSnakeMs 是**验收测试的加速缝**(生产不设它 → 默认 45,并钳在 8–2000ms)
-    const stepMs = Math.min(2000, Math.max(8, Math.round(Number(typeof window !== 'undefined' && window.__cguiSnakeMs) || 45)));
+    // 100ms 一步(用户实报「45ms 太快」后放慢;一趟约 37 秒);窗口上的 __cguiSnakeMs 是**验收测试的加速缝**(生产不设它 → 默认 100,并钳在 8–2000ms)
+    const stepMs = Math.min(2000, Math.max(8, Math.round(Number(typeof window !== 'undefined' && window.__cguiSnakeMs) || 100)));
     let step = 0;
     let timer = null;
     const restore = () => {
