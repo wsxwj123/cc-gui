@@ -34,9 +34,30 @@ const SCOPE_CONFIRM = '开启「允许主屏全部可见内容」后，模型可
 // 授权对下一个 MCP 动作立即生效,但模型上下文里可能已有一条"未授权"的结论 —— 提示人让它重试,不自动往会话注入任何东西。
 const HINT_RETRY = '授权已更新。模型若刚刚得到「未授权」的结论，请让它重试一次；授权对下一个动作立即生效。';
 
+// ── 文案按"应用身份"切(§4.3)──────────────────────────────────────────
+// macOS 的应用身份是 bundleId(com.apple.TextEdit),Windows 是 exe 绝对路径(C:\…\notepad.exe)。
+// 讲 Dock 图标、讲 bundleId 的措辞在 Windows 上是错的;`bundleId` 那一份**逐字不变**(mac 现状)。
+const WORDS = {
+  bundleId: { desc: DESC, empty: EMPTY, appsNote: APPS_NOTE, appsEmpty: APPS_EMPTY, appsUnavailable: APPS_UNAVAILABLE,
+    searchPlaceholder: SEARCH_PLACEHOLDER, manualTitle: MANUAL_TITLE,
+    resultMissing: RESULT_MISSING, resultUnverified: RESULT_UNVERIFIED },
+  exePath: {
+    desc: '只有列在下面的应用才能被查询窗口、点击或输入。授权按 exe 路径逐个生效，撤销立即生效。',
+    empty: EMPTY,
+    appsNote: '当前正在运行的桌面应用（只读取应用名称与可执行文件路径，不读取窗口标题、窗口位置或屏幕内容）。',
+    appsEmpty: '没有可列举的桌面应用（没有正在运行且带顶层窗口的程序）；可手动填写 exe 路径。',
+    appsUnavailable: '运行时尚未就绪（点卡片上的「准备环境」完成准备）；可直接手动填写 exe 路径。',
+    searchPlaceholder: '按名称或路径筛选',
+    manualTitle: '手动填写 exe 路径',
+    resultMissing: '未在系统中找到该路径对应的可执行文件（可能路径有误）。',
+    resultUnverified: '未校验：请先确认 exe 路径与目标应用一致。',
+  },
+};
+
 const byBundleId = (a, b) => (a.bundleId < b.bundleId ? -1 : a.bundleId > b.bundleId ? 1 : 0);
 
-export function CuGrants({ runtimeReady }) {
+export function CuGrants({ runtimeReady, appIdKind = 'bundleId' }) {
+  const W = WORDS[appIdKind] || WORDS.bundleId;
   const [grants, setGrants] = useState(null);   // { screenScope, apps } —— 服务端真值
   const [grantErr, setGrantErr] = useState(''); // GET /grants 失败
   const [open, setOpen] = useState(false);       // 候选列表(默认不展开)
@@ -160,13 +181,13 @@ export function CuGrants({ runtimeReady }) {
           {ADD}
         </button>
       </div>
-      <div data-testid="cu-grants-desc" className="text-[10.5px] text-ink-faint font-body leading-snug mt-0.5">{DESC}</div>
+      <div data-testid="cu-grants-desc" className="text-[10.5px] text-ink-faint font-body leading-snug mt-0.5">{W.desc}</div>
 
       {grantErr && <div data-testid="cu-grants-error" className="text-[10.5px] text-error font-body leading-snug mt-1.5">{grantErr}</div>}
       <div data-testid="cu-grants-list" className="mt-1.5">
         {/* 空态只在拿到服务端真值之后才显示:加载中闪一下"尚未授权"会把有授权的情况说成没有 */}
         {grants && !grantErr && rows.length === 0 && (
-          <div data-testid="cu-grants-empty" className="text-[10.5px] text-ink-faint font-body leading-snug">{EMPTY}</div>
+          <div data-testid="cu-grants-empty" className="text-[10.5px] text-ink-faint font-body leading-snug">{W.empty}</div>
         )}
         {rows.map((a) => (
           <div key={a.bundleId} data-testid="cu-grant-row" data-bundle-id={a.bundleId}
@@ -187,23 +208,23 @@ export function CuGrants({ runtimeReady }) {
 
       {open && (
         <div className="mt-2 pt-2 border-t border-canvas-deep">
-          <div data-testid="cu-apps-note" className="text-[10.5px] text-ink-faint font-body leading-snug">{APPS_NOTE}</div>
+          <div data-testid="cu-apps-note" className="text-[10.5px] text-ink-faint font-body leading-snug">{W.appsNote}</div>
           {/* 请求在途时先按卡上已知的运行时状态说话(status 是卡片挂载时读的,可能已过期;
               请求回来一律以服务端响应为准)。 */}
           {phase === 'loading' && (runtimeReady === false ? (
-            <div data-testid="cu-apps-unavailable" className="text-[10.5px] text-ink-faint font-body leading-snug mt-1">{APPS_UNAVAILABLE}</div>
+            <div data-testid="cu-apps-unavailable" className="text-[10.5px] text-ink-faint font-body leading-snug mt-1">{W.appsUnavailable}</div>
           ) : (
             <div data-testid="cu-apps-loading" className="text-[10.5px] text-ink-faint font-body leading-snug mt-1">{APPS_LOADING}</div>
           ))}
           {phase === 'unavailable' && (
-            <div data-testid="cu-apps-unavailable" className="text-[10.5px] text-ink-faint font-body leading-snug mt-1">{APPS_UNAVAILABLE}</div>
+            <div data-testid="cu-apps-unavailable" className="text-[10.5px] text-ink-faint font-body leading-snug mt-1">{W.appsUnavailable}</div>
           )}
           {phase === 'error' && (
             <div data-testid="cu-apps-error" className="text-[10.5px] text-error font-body leading-snug mt-1">读取应用列表失败：{appsErr}</div>
           )}
           <div className="flex items-center gap-1.5 mt-1.5">
             <input data-testid="cu-app-search" value={filter} onChange={(e) => setFilter(e.target.value)}
-              placeholder={SEARCH_PLACEHOLDER}
+              placeholder={W.searchPlaceholder}
               className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded-md px-2 py-1 text-[10.5px] text-ink font-body placeholder:text-ink-faint outline-none focus:border-accent" />
             <button type="button" data-testid="cu-apps-refresh" onClick={loadApps} disabled={phase === 'loading'}
               className="px-2 py-1 rounded-md text-[10px] text-ink-muted hover:bg-canvas border border-canvas-deep font-body transition-colors disabled:opacity-50 shrink-0">
@@ -212,7 +233,7 @@ export function CuGrants({ runtimeReady }) {
           </div>
           <div className="mt-1">
             {phase === 'ok' && (apps || []).length === 0 && (
-              <div data-testid="cu-apps-empty" className="text-[10.5px] text-ink-faint font-body leading-snug">{APPS_EMPTY}</div>
+              <div data-testid="cu-apps-empty" className="text-[10.5px] text-ink-faint font-body leading-snug">{W.appsEmpty}</div>
             )}
             {phase === 'ok' && (apps || []).length > 0 && visible.length === 0 && (
               <div className="text-[10.5px] text-ink-faint font-body leading-snug">没有匹配「{filter}」的应用。</div>
@@ -241,7 +262,7 @@ export function CuGrants({ runtimeReady }) {
           </div>
 
           <div className="mt-2 pt-2 border-t border-canvas-deep">
-            <div data-testid="cu-manual-title" className="text-[10.5px] text-ink-muted font-body">{MANUAL_TITLE}</div>
+            <div data-testid="cu-manual-title" className="text-[10.5px] text-ink-muted font-body">{W.manualTitle}</div>
             <div className="flex items-center gap-1.5 mt-1">
               <input data-testid="cu-manual-input" value={manualId}
                 onChange={(e) => { setManualId(e.target.value); setCheck(null); setCheckErr(''); }}
@@ -263,7 +284,7 @@ export function CuGrants({ runtimeReady }) {
               <div data-testid="cu-manual-result" data-state={manualState}
                 className={`text-[10.5px] font-body leading-snug mt-1 ${manualState === 'ok' ? 'text-ink-muted' : 'text-ink-faint'}`}>
                 {manualState === 'ok' ? `已安装：${check.name}（${check.path}）`
-                  : manualState === 'missing' ? RESULT_MISSING : RESULT_UNVERIFIED}
+                  : manualState === 'missing' ? W.resultMissing : W.resultUnverified}
               </div>
             )}
             {checkErr && (

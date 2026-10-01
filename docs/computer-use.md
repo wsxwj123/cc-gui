@@ -10,7 +10,10 @@
 
 ## 首次运行
 
-1. 首次调用任一工具时自动建 Python venv 并装依赖（mss / pyautogui / pyobjc 三框架，约 1-3 分钟，主源失败自动切清华镜像）。
+1. 首次调用任一工具时自动建 Python venv 并装依赖（约 1-3 分钟，主源失败自动切清华镜像）。依赖按平台给：
+   - macOS：`mss` / `pyautogui` / `pyobjc-framework-{Cocoa,Quartz,ApplicationServices}`，运行时目录 `~/.claude-gui/cu-runtime/venv`；
+   - Windows：`mss` / `Pillow` / `comtypes>=1.4.0`，运行时目录 `~/.claude-gui/cu-runtime/venv-win`（解释器 `venv-win\Scripts\python.exe`）。
+     Windows 上卡片会多一个「准备环境」按钮（用户主动准备入口：建运行时 + 跑一次 UIA 可用性探测），macOS 保持"首次调用时自动准备"不变。**两个平台都不装 pywin32**（Windows 侧用 `ctypes` + `comtypes`）。
 2. **系统权限**（首次会弹，按提示授权）：
    - 屏幕录制 —— 截图用（`doctor` 用 CGPreflightScreenCaptureAccess 查 TCC，不拿一张抽样图当结论）
    - 辅助功能 —— 窗口读取与定向输入用
@@ -62,7 +65,8 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 
 **坐标契约**：所有坐标 = 最近一次 `screenshot` 返回图像的像素坐标（左上 (0,0)），服务端按截图时记录的尺寸映射回屏幕逻辑坐标。合法性按**原图整数**先判（`0≤x<imgW`、`0≤y<imgH`，负/小数/非有限/越界都拒绝），换算一律服务端做。
 
-**错误码**（都在 `structuredContent.code`）：`CU_INVALID_ARGUMENT`、`CU_INVALID_COORDINATE`、`CU_SCREENSHOT_REQUIRED`、`CU_STALE_SNAPSHOT`、`CU_APP_NOT_ALLOWED`、`CU_TARGET_NOT_FOUND`、`CU_TARGET_LOOKUP_FAILED`、`CU_PERMISSION_REQUIRED`、`CU_DISPATCH_FAILED`、`CU_BACKGROUND_UNSUPPORTED`、`CU_TARGET_CHANGED`、`CU_SCREEN_SCOPE_REQUIRED`、`CU_INSTANCE_CHANGED`、`CU_ACTION_CONFLICT`、`CU_ACTION_NOT_FOUND`、`CU_ACTION_EXPIRED`、`CU_UNSUPPORTED_KEY`、`CU_BUSY`、`CU_TIMEOUT`。成功回执含 `ok/actionId/method(target=background|foreground)/target/verification`；`verification` 为 `not-applicable/dispatched/verified/unknown`，**unknown 一律不写"成功完成"**。
+**错误码**（都在 `structuredContent.code`）：`CU_INVALID_ARGUMENT`、`CU_INVALID_COORDINATE`、`CU_SCREENSHOT_REQUIRED`、`CU_STALE_SNAPSHOT`、`CU_APP_NOT_ALLOWED`、`CU_TARGET_NOT_FOUND`、`CU_TARGET_LOOKUP_FAILED`、`CU_PERMISSION_REQUIRED`、`CU_DISPATCH_FAILED`、`CU_BACKGROUND_UNSUPPORTED`、`CU_TARGET_CHANGED`、`CU_SCREEN_SCOPE_REQUIRED`、`CU_INSTANCE_CHANGED`、`CU_ACTION_CONFLICT`、`CU_ACTION_NOT_FOUND`、`CU_ACTION_EXPIRED`、`CU_UNSUPPORTED_KEY`、`CU_BUSY`、`CU_TIMEOUT`，以及 Windows 阶梯新增的三个：`CU_INPUT_UNSUPPORTED`（后台输入通道不可用/执行层缺失，零投递）、`CU_UIA_BLOCKED`（UI Automation 元素或 pattern 不可达，可降级到消息投递）、`CU_UIPI_BLOCKED`（目标进程完整性级别更高，`SendInput` 被 UIPI 拦截）。
+成功回执含 `ok/actionId/method/target/verification`；`method` 取值：`capture`（截图）、`passive`（被动查询）、`query`（action_status）、`background`/`foreground`（macOS 的定向/全局投递）、`uia`（Windows UI Automation 元素级）、`post-message`（Windows 消息投递）。`verification` 为 `not-applicable/dispatched/verified/unknown`，**unknown 一律不写"成功完成"**；Windows 的消息投递回执另带 `effect:{observed:'changed'|'unchanged', diffRatio}`，它只是**弱证据**。
 
 ## 【不抢前台】的工作规则（写给模型，也是排错依据）
 
@@ -71,6 +75,26 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 3. 严禁用 AppleScript/shell 激活窗口来"绕路抢前台"；只有用户明确要求前台操作时才 `foreground:true`（且要求目标就是当面前台应用，否则 `CU_TARGET_CHANGED`）。
 4. `type`/`key` 带 `target` 时写的是目标窗口，不是"当前焦点窗口"——不会打进用户正在编辑的应用。
 5. macOS 的"虚拟鼠标"（如 Codex 沙箱那类）在本机场景不存在——Codex 控制的是它自己的 VM 桌面；本机等价物就是按 pid 定向投递。
+6. **Windows 上没有 `CGEventPostToPid` 的等价物**，后台是**阶梯**：`--method uia`（UI Automation 元素级：`InvokePattern` 点按钮、`ValuePattern` 直写文本值并读回校验、`ScrollPattern` 滚动，不抢前台、不动光标）→ 只有拿到**明确的 COM 失败信号**时才降级到消息投递（`PostMessage` 直投 HWND；只对传统 Win32 控件有效，Chromium/UWP/Java/自绘界面基本无效，**且没有可靠的失败信号**）。两条都不通 → `CU_BACKGROUND_UNSUPPORTED` + 可行动指引（**用新的 actionId 重试并显式 `foreground:true`**），**绝不自动改成全局点击**。
+7. Windows 上消息投递**永远不判硬失败**：截图 diff 在窗口被遮挡/最小化/在别的虚拟桌面时双向误判，所以 `unchanged` 也回成功回执 + `verification:unknown`，文案明说"无法据此判定投递失败"。
+8. `foreground:true` 在 Windows 上 = `SendInput` 全局投递（会移动真实光标，通常也会把目标窗口切到前台）；`SendInput` 返回值少于请求数会被判成 `CU_UIPI_BLOCKED`/`CU_DISPATCH_FAILED`（返回数相等只证明"入了队列"，不证明目标消费了它）。
+
+### ⚠️ Windows 的一条放宽：前台核验可能拿不到（与 macOS 不同）
+
+**为什么放宽**：macOS 的显式前台动作要求"目标必须就是当前前台应用"（`frontmost.pid === target.pid`），否则 `CU_TARGET_CHANGED` —— 这个判据能成立，是因为 mac 助手一定能报出前台窗口。Windows 没有这个保证：`GetForegroundWindow` 在**安全桌面、UWP/沙箱边界、部分权限受限场景**下拿不到，或返回的目标进程信息查不全。此时若照抄 mac 的严格判据，用户**已经显式同意**的全局投递会永远失败，而且失败原因是"核验不了"而不是"目标不对"。
+
+**放宽成什么**：Windows 上拿到前台窗口就照旧严格比对（pid 不符 → `CU_TARGET_CHANGED`，一次都不放宽）；**拿不到时不再拦**，按用户的显式同意执行全局投递。macOS 侧一字未改。
+
+**用户会看到什么（回执按事实分叉，不许把没核验的当结论）**：
+
+| 情况 | 回执里的那一句 |
+|---|---|
+| 拿到了前台窗口并匹配 | `已核验:目标就是当前前台窗口` |
+| 拿不到前台窗口（放宽生效） | `未能核验目标是否为当前前台(全局投递已按你的显式同意执行)` |
+
+两种情况下回执都只陈述"做了什么"（移动了真实光标、在 (x,y) 投递了点击/输入/按键），不再写"目标窗口被切到前台"这种**没核验过的确定性结论**；拿不到前台时也**不会**冒充"已影响用户前台"。要确认效果，请按回执提示重新截图观察。
+
+**与 macOS 的差异一览**：判据（严格比对 vs 拿不到时放行）＋ 回执措辞（用户前台被影响 vs 已核验/未能核验）都不同，这是平台能力差异（`GetForegroundWindow` 的可靠性）倒逼的，不是"Windows 少做了一层校验"。
 
 ## 已知边界（别当成 bug）
 
@@ -82,6 +106,11 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 | 锁屏（R19） | 需要已验证的授权组件接口，当前无公开可复用入口 | `status.lockscreen.state` 只会是 `disabled`/`unverified`，不代表已支持 |
 | 停止操控 / 用户接管 | 需要图形界面的入口，尚未提供 | 契约里的 `CU_INTERRUPTED` 路径暂不可达，`actionId` 登记表可查历史 |
 | 执行中撤权 | 界面上按动作粒度取消是设计意图，该入口尚未提供 | 撤销后**下一个**动作立即 `CU_APP_NOT_ALLOWED`；已投递动作不回滚 |
+| Windows 后台覆盖不到 Chromium/Electron 的一部分界面 | 渲染器默认不打 accessibility 树；UIA 客户端接入会触发按需开启但**有延迟** | `capabilities.backgroundClick/Type.coverage='partial'`；首次可能失败，**重试一次**通常就好；`--force-renderer-accessibility=off` 或企业策略禁用时拿不到 |
+| Windows 后台覆盖不到 Java/自绘界面/安全桌面 | 没有元素树（Java 需 Java Access Bridge；UAC/锁屏是独立桌面） | 明确报 `CU_BACKGROUND_UNSUPPORTED`，**不会**偷偷改成全局点击 |
+| Windows 上没有 `comtypes`（装不上/`comtypes.gen` 不可写） | UIA 接口靠它运行时生成 | 自动降级：点击/输入仍可用，但只走消息投递（`coverage='narrow'`、`inputMode='background-message-only'`）；自检里 `uia` 一项会报不可用 |
+| Windows 后台按键读不回、组合键只能走消息投递 | UIA 没有"投递按键"的 pattern | `key` 的 `verification` 恒为 `unknown`（不声称按下了）；组合键对浏览器类应用大概率无效 |
+| Windows 上打字/点击后系统里可能残留按住的键（超时/强杀） | `SIGTERM` 在 Windows 上是硬杀，helper 来不及自己补发抬起 | 四层释放：一批投递 + 常驻 watcher（父进程一死就补发）+ helper 侧 30s 硬上限 + 关停/超时路径先杀后释放 |
 
 ## 排错
 
@@ -94,19 +123,56 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 | 点击无反应 | 无辅助功能权限，或该 App 不吃后台事件 | 自检看 accessibility；确有必要再 `foreground:true`（会打断用户） |
 | 工具报 `CU_SCREENSHOT_REQUIRED` | 坐标工具前没截图 | 先 screenshot |
 | 坐标点偏 | 窗口移动/切换空间后用了旧截图 | 重新 screenshot 再算坐标 |
-| 首次调用卡 1-3 分钟 | 在建 venv 装依赖 | 等一次即可，之后秒回 |
+| 首次调用卡 1-3 分钟 | 在建 venv 装依赖 | 等一次即可，之后秒回（Windows 可先点卡片上的「准备环境」） |
+| Windows：点击/输入报 `CU_BACKGROUND_UNSUPPORTED` | 目标没有 UIA 元素，也投不进窗口消息（自绘界面/Java/安全桌面） | 这是**设计内**的明确失败；确有必要时用**新的 actionId** 重试并显式 `foreground:true`（会移动真实光标、把目标切到前台） |
+| Windows：点击/输入报 `CU_UIPI_BLOCKED` | 目标以管理员身份运行，完整性级别更高 | 用管理员身份重试，或换一个同级别的目标；前置自检的 `integrityLevel` 会报本进程级别 |
+| Windows：Chrome/Edge 第一次后台失败、第二次成功 | 渲染器的 accessibility 树是按需开启的，生效有延迟 | 重试一次即可（**这是已知边界，不是 bug**） |
+| Windows：`inputMode` 停在 `none`、提示"点击与输入尚未提供" | 还没建立 UIA 可用性结论（缓存缺失） | 点卡片上的「准备环境」（或「环境自检」）跑一次探测；结论出来前本仓不声明输入可用 |
+| Windows：报"helper 输出不可解析" | 中文控制台的 cp936 把 JSON 编坏了 | 已修（helper 侧 `sys.stdout.reconfigure(encoding="utf-8")` + spawn 注入 `PYTHONIOENCODING=utf-8`）；仍复现请附自检输出 |
+| Windows：安装/自检/截图时闪黑框 | 每次 helper spawn 都开控制台窗口 | 已修（7 处 spawn 全部 `windowsHide: true`）；仍闪框请报是哪一步 |
 | `computer-use` 名字注册失败 | 保留名 | 用面板安装（自动叫 `ccgui-computer-use`） |
 
 ## 文件与实现
 
 - `server/computer-use/mcp-server.js` — MCP stdio server（零依赖手写 JSON-RPC：错误码 `-32700/-32600/-32601/-32602`、实例身份、动作登记表、快照表、授权与坐标判定、回执信封）
-- `server/computer-use/cu_helper.py` — 执行层子命令 CLI（stdout 只出 JSON；AX 定向读写 + 事件定向投递 + 截图 + 权限自检）
-- `server/computer-use/cu-common.js` — Runtime 目录解析、授权存储、能力/锁屏状态（GUI 后端与 MCP 共用）
-- `server/routes/computer-use.js` — GUI 的 status/doctor/grants 端点
-- `client/src/components/MCPPanel.jsx` — 安装卡（注册复用通用 `/api/mcp`）
-- 运行时：`~/.claude-gui/cu-runtime/`（venv + SHA256 戳 + `grants.json` + `shots/`，每实例最多留 5 个已完成图片文件）
-- 单测：`tests/unit/check-cu-{mapping,keys,shots,protocol,actions}.mjs`（node 直跑，失败非零退出）
+- `server/computer-use/cu_helper.py` — macOS 执行层子命令 CLI（stdout 只出 JSON；AX 定向读写 + 事件定向投递 + 截图 + 权限自检）
+- `server/computer-use/cu_helper_windows.py` — Windows 执行层（同一套子命令名；`mss`+Pillow 截图、`ctypes` 枚举窗口/DPI/完整性级别、UIA 元素级操作 + `PostMessage` 消息投递 + `SendInput` 全局投递、hold/release-hold）
+- `server/computer-use/cu-hold-watcher.js` — Windows 按键释放的常驻守护（父进程一死就从管道 EOF 醒来，读 hold 文件补发抬起）
+- `server/computer-use/cu-common.js` — Runtime 目录解析（按平台）、依赖表/解释器候选、授权存储、能力/锁屏状态、UIA 可用性缓存（GUI 后端与 MCP 共用）
+- `server/routes/computer-use.js` — GUI 的 status/doctor/prepare/grants/apps/app-info 端点
+- `client/src/components/MCPPanel.jsx` — 安装卡（注册复用通用 `/api/mcp`）；`CuGrants.jsx` — 按应用授权区块（文案按 `appIdKind` 切）
+- 运行时：`~/.claude-gui/cu-runtime/`（`grants.json` + `shots/` + 依赖戳；Windows 另有 `uia-capability.json` 缓存 UIA 可用性结论、`hold-<pid>.json` 记录"正按住的键"）
+  - macOS：`venv/`（`bin/python3`）+ `venv.stamp`；Windows：`venv-win/`（`Scripts\python.exe`）+ `venv-win.stamp`。两套布局按平台各取一套，互不影响。
+- 单测：`tests/unit/check-cu-{mapping,keys,shots,protocol,actions}.mjs`（node 直跑，失败非零退出）；Windows 平台分派另有 `check-cu-{capabilities-platform,platform-dispatch,uia-cache,win-tool-desc,helper-contract,no-silent-global,win-hold-release}.mjs`（本机 mac 上用"伪 win32"跑 Node 侧，Windows API 层只能真机验）
 
 ## Windows 支持状态
 
-v1 仅 macOS；`status.supported=false`，不伪造桌面支持。Windows 需另写 helper（截图 `mss` 通用；输入换 `pywin32`/`SendInput`；窗口信息换 `pywin32`；cmd 形态 spawn 参照 `remote-control.js:162-170`），接口已按子命令 CLI 对齐，替换 `cu_helper_windows.py` + mcp-server 平台分支即可。
+**已提供**（与 macOS 同一套工具名与契约，`status.supported=true`）：
+
+| 能力 | Windows 实现 | 与 macOS 的差别 |
+|---|---|---|
+| 截图 / 窗口列表 / 光标 / 自检 | `mss` + Pillow；`EnumWindows` + `QueryFullProcessImageNameW`；`GetCursorPos` + `WindowFromPoint` | 有 DPI 感知（`SetProcessDpiAwarenessContext`，150% 缩放下坐标才对）、完整性级别、UIA 三项自检；没有 TCC 权限模型（自检里辅助功能恒 `not-applicable`） |
+| 应用身份 | **exe 绝对路径**（`/status.appIdKind='exePath'`） | macOS 是 bundleId；授权、`window_list`、`app-info` 的字段名沿用 `bundleId`，值换成了路径 |
+| 后台点击/输入 | UIA 元素级 → `PostMessage` 消息投递（阶梯） | macOS 是 `CGEventPostToPid` + AX 直写，覆盖率高；Windows 只做到**部分覆盖**（见"已知边界"），拿不到元素时**明确报错**而不是偷偷抢前台 |
+| 后台按键 | 消息投递（组合键没有 UIA pattern） | 读不回目标文本 ⇒ `verification` 恒 `unknown` |
+| 前台（显式 `foreground:true`） | `SendInput`，多显示器负坐标按虚拟屏原点归一化 | 同 macOS 的"只在显式同意后才走"，只是机制换成全屏注入 |
+| 按键释放 | 四层保证（一批投递 / 常驻 watcher / helper 30s 上限 / 关停与超时先杀后释放） | macOS 靠可捕获的 `SIGTERM` + `up_on_abort`；Windows 的 `SIGTERM` 是硬杀，所以另做了一套 |
+| 锁屏 / 按应用窗口截图 | 未提供 | 与 macOS 一样：`unverified`/`disabled`，不伪造 |
+
+**没做的**：Java/自绘界面/安全桌面（UAC、锁屏）覆盖不到；UWP/WinUI 的跨进程边界可能需要 `UIAccess` 清单；Windows 上的"后台"不是 macOS 那种真后台直投，而是"元素级优先 + 消息投递兜底"的降级链。
+
+**EDR / 杀软（企业环境必读）**：本功能会做三件在安全软件视野里很显眼的事 —— ①建 venv 并联网 pip 安装（首次）；②持续抓屏；③注入键鼠输入（全局 `SendInput` 尤其像键盘记录器）。我们**不做任何绕过手段**：不隐藏进程、不注入 DLL、不改系统设置。企业机器上可能遇到 `python.exe` 被隔离、`SendInput` 被拦（回执会报 `CU_UIPI_BLOCKED`/`CU_DISPATCH_FAILED`）、或静默无效果。遇到拦截请让 IT 加白名单，而不是绕过；自检里的 `integrity_level` 与回执的稳定错误码就是给这件事定位用的。
+
+**平台分派点（为什么这些门不是"能力被关掉"，W-C5 三问已逐条答过）**：
+
+| 分派点 | ①是平台门吗 | ②有替代实现吗 | ③用户被告知了吗 |
+|---|---|---|---|
+| `mcp-server.js` 的 `HELPER`（`cu_helper.py` / `cu_helper_windows.py`） | 是（按平台选执行层文件） | 两个平台**各有完整执行层**，不是"关掉一侧" | 本文档 + 面板文案 |
+| `ACTIVE_PY_DEPS`（pyobjc 表 / mss+Pillow+comtypes 表） | 是（依赖表按平台） | 见上：Windows 侧是一份**能装能跑**的完整依赖表 | 本文档「首次运行」 |
+| `if (!IS_WIN) return …`：`releaseHeldKeys` / `startHoldWatcher` / `probeUia` / `platformFields` | 是（这四处是"Windows 专属机制"的门） | macOS 有**自己的等价实现**：可捕获的 `SIGTERM` + `up_on_abort` 补发抬起（不需要 watcher）、AX 定向投递（不需要 UIA）、`/status` 按契约不带 `inputMode/uiaReady`（W-D02 反向守卫锁死） | 本文档「Windows 支持状态」+「已知边界」 |
+| `capabilityReport` 的三张 win32 表 / `inputMode` 五态 | 不是门，是**声明**：`available/unsupported/unverified` 逐项带 reason | 覆盖不到的场景都有明确降级路径（UIA → 消息投递 → `CU_BACKGROUND_UNSUPPORTED`） | 面板副标题 + 降级提示条 + 本文档 |
+| 不支持的平台（linux 等） | 是（`supported:false`） | 没有实现，也没有替代实现 | **UI 占位卡直说"当前平台(linux)不支持：…"**（不再静默消失）+ 本文档；接口同时回 `reason` |
+
+> 本表的用途是留痕：`platform-compat-review` 的 W-C5 规则会把上面这些 `!IS_WIN` 门卫与平台常量报成 must/hint 命中 —— 命中不等于缺陷，按三问核对后**有意保留**在这里，改动前请重跑一次全树 scan 并更新本表。
+
+**真机验证**：Windows API 层（`SendInput` 结构体布局、UIA 覆盖率、DPI/UIPI、cp936、EDR 反应）**在本仓的 CI 上零覆盖**（CI 不跑任何单测/真机脚本），必须按 `.devflow/TEST-PLAN-r142.md` §5 的 A/B 两组清单在真机上跑一遍。

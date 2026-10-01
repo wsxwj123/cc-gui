@@ -5,25 +5,34 @@ import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import {
-  GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, VENV_PY,
-  capabilityReport, readGrants, runtimeReady, screenScopeGranted, setGrant,
+  GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, VENV_PY, capabilityReport, depsStampFor, ensureRuntime,
+  findPython3, inputModeFor, pyDepsFor, readGrants, readUiaCapability, runtimeReady,
+  screenScopeGranted, setGrant, writeStampFile, writeUiaCapability,
 } from '../computer-use/cu-common.js';
 
 // computer use(cc-gui 桌面操控)的 GUI 侧管理端点。
 // 安装/卸载/开关本体不在这里:注册走通用 POST/DELETE /api/mcp(claude mcp add -s user,
 // 带缓存失效+换代戳+agents 同步),本路由只提供「装它需要知道的东西」:
-//   GET  /api/computer-use/status  → 脚本绝对路径 / 是否已注册 / 运行时 / 能力与锁屏状态
-//   POST /api/computer-use/doctor  → 跑 helper doctor,回屏幕读取/辅助功能/运行时/各应用授权
-//   GET  /api/computer-use/grants  → 当前授权(按应用 + 主屏范围)
-//   POST /api/computer-use/grants  → 用户显式启用/撤销(撤销立即使后续动作 CU_APP_NOT_ALLOWED)
-//   GET  /api/computer-use/apps     → 只读:「常规应用」(有 Dock 图标)的身份名单,给面板选授权对象
-//   GET  /api/computer-use/app-info → 只读:一个 bundleId 是否已安装(name/path 来自 bundle 本体)
+//   GET  /api/computer-use/status   → 脚本绝对路径 / 是否已注册 / 运行时 / 能力与锁屏状态
+//   POST /api/computer-use/doctor   → 跑 helper doctor,回屏幕读取/辅助功能/运行时/各应用授权
+//   POST /api/computer-use/prepare  → Windows 的「准备环境」:建运行时 + 跑 UIA 可用性探测 + 写缓存
+//   GET  /api/computer-use/grants   → 当前授权(按应用 + 主屏范围)
+//   POST /api/computer-use/grants   → 用户显式启用/撤销(撤销立即使后续动作 CU_APP_NOT_ALLOWED)
+//   GET  /api/computer-use/apps     → 只读:「常规应用」的身份名单,给面板选授权对象
+//   GET  /api/computer-use/app-info → 只读:一个 bundleId(exe 路径)是否已安装
 // 客户端(MCPPanel 安装卡)拿 status 里的 nodePath+mcpPath 拼 commandLine 去调通用端点。
+//
+// 平台分派(r142):Windows 上「应用身份」= exe 绝对路径(appIdKind='exePath'),输入走阶梯,
+// 因此多出 inputMode/uiaReady 两个顶层字段;**它们只在 win32 出现**(mac 输出逐字节不变,
+// 见 tests/acceptance/r142-wincu 的 W-D02)。
 
-/** helper 的权限自查结果 -> 稳定状态词(ok/denied/unknown -> available/unavailable/unverified)。 */
+/** helper 的权限自查结果 -> 稳定状态词(ok/denied/other -> available/unavailable/unverified)。 */
 function permissionStatus(value) {
   if (value === 'ok') return 'available';
   if (value === 'denied') return 'unavailable';
+  // Windows 没有 macOS 的 TCC 模型,"辅助功能"这一项恒 not-applicable(§A-4);
+  // 它只允许出现在 doctor 的 checks/permissions,**不许进 capabilities**(合同第 9 段的枚举)。
+  if (value === 'not-applicable') return 'not-applicable';
   return 'unverified';
 }
 
@@ -32,7 +41,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // server/routes → server/computer-use
 const CU_DIR = join(HERE, '..', 'computer-use');
 const MCP_SERVER = join(CU_DIR, 'mcp-server.js');
-const HELPER = join(CU_DIR, 'cu_helper.py');
+const IS_WIN = process.platform === 'win32';
+const HELPER = join(CU_DIR, IS_WIN ? 'cu_helper_windows.py' : 'cu_helper.py');
+const SUPPORTED = process.platform === 'darwin' || IS_WIN;
+const UNSUPPORTED_REASON = 'computer use 的执行层目前只在 macOS 与 Windows 上提供;当前平台没有实现';
 
 async function registered() {
   try {
@@ -56,7 +68,7 @@ function runHelper(args, { timeoutMs = 15_000 } = {}) {
     }
     let child;
     try {
-      child = spawn(VENV_PY, [HELPER, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawn(VENV_PY, [HELPER, ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     } catch (e) {
       return resolve({ ok: false, code: 'CU_RUNTIME_UNAVAILABLE', error: String(e.message).slice(0, 300) });
     }
@@ -100,11 +112,50 @@ function helperFailure(r, args) {
   return null;
 }
 
+// UIA 可用性探测(只读、无副作用):结论写磁盘缓存,面板读它决定"点击还能不能用"的措辞。
+// 只有 win32 跑:mac 上没有 UIA 这条通道,也不需要这个结论(mac 分支完全不碰缓存)。
+async function probeUia({ timeoutMs = 15_000 } = {}) {
+  if (!IS_WIN) return null;
+  const r = await runHelper(['uia-probe', '--selftest'], { timeoutMs });
+  if (!r.ok) return null;
+  const parsed = r.parsed || {};
+  return {
+    uia: parsed.uia === true,
+    comtypes: typeof parsed.comtypes === 'string' ? parsed.comtypes : null,
+    code: parsed.ok === false ? parsed.code || null : null,
+    error: typeof parsed.error === 'string' ? parsed.error : null,
+  };
+}
+
+/** 探测 + 写缓存。失败也写(把"探测过、结论是不可用"记下来,与"尚未探测"区分开)。 */
+async function refreshUiaCapability() {
+  const probe = await probeUia();
+  if (!probe) return null;
+  return writeUiaCapability({ uia: probe.uia, comtypes: probe.comtypes });
+}
+
+/** 顶层平台字段:只在 win32 出现(W-D02:darwin 的 /status 不带这三个键)。 */
+function platformFields(capabilities) {
+  if (!IS_WIN) return {};
+  const probe = readUiaCapability();
+  return {
+    appIdKind: 'exePath',
+    inputMode: inputModeFor(capabilities, 'win32'),
+    uiaReady: probe.checked === true && probe.uia === true,
+  };
+}
+
 router.get('/computer-use/status', async (req, res) => {
   const { capabilities, lockscreen } = capabilityReport();
+  // 缓存缺失但运行时已就绪 ⇒ 后台异步补一次探测(不阻塞本次响应,下一次 status 就能读到)。
+  // 避免"刚装好、还没点准备环境"的面板把 uiaReady 当成 false 的错误结论。
+  if (IS_WIN && runtimeReady() && readUiaCapability().checked !== true) {
+    refreshUiaCapability().catch(() => { /* 探测失败不影响本次响应 */ });
+  }
   res.json({
     platform: process.platform,
-    supported: process.platform === 'darwin',
+    supported: SUPPORTED,
+    ...(SUPPORTED ? {} : { reason: UNSUPPORTED_REASON }),
     path: CU_DIR,               // 旧客户端读的字段:computer use 资产目录
     mcpPath: MCP_SERVER,
     helperPath: HELPER,
@@ -116,6 +167,39 @@ router.get('/computer-use/status', async (req, res) => {
     runtimeReady: runtimeReady(),
     capabilities,
     lockscreen,
+    ...platformFields(capabilities),
+  });
+});
+
+// Windows 的「准备环境」:唯一的用户主动准备入口(§2.5②⑤)。
+// 建 venv + 装依赖 → 紧接着跑一次 UIA 可用性探测 → 写缓存。macOS 上也可调(等价于确保运行时),
+// 但不跑 UIA 探测(mac 没有这条通道)。失败也回 HTTP 200 + 稳定 code(与 doctor 同体例)。
+router.post('/computer-use/prepare', async (req, res) => {
+  if (!SUPPORTED) {
+    return res.json({ ok: false, code: 'CU_PLATFORM_UNSUPPORTED', error: UNSUPPORTED_REASON });
+  }
+  try {
+    await ensureRuntime({
+      deps: pyDepsFor(process.platform),
+      stamp: depsStampFor(process.platform),
+      findPython: findPython3,
+      // 落盘走 tmp+rename(server/routes 不在 check-q8-atomic-write 的扫描目录里,但仍按同一口径写)
+      onReady: (stamp) => writeStampFile(stamp),
+    });
+  } catch (e) {
+    return res.json({
+      ok: false,
+      code: 'CU_RUNTIME_UNAVAILABLE',
+      error: `准备运行时失败:${String(e.message || e).slice(0, 300)}`,
+    });
+  }
+  const cache = await refreshUiaCapability();
+  res.json({
+    ok: true,
+    runtimeReady: runtimeReady(),
+    uiaReady: cache ? cache.uia === true : false,
+    ...(cache ? { comtypes: cache.comtypes } : {}),
+    ...platformFields(capabilityReport().capabilities),
   });
 });
 
@@ -146,7 +230,7 @@ router.post('/computer-use/doctor', async (req, res) => {
       checks: { runtime: { status: 'unavailable', detail: 'venv 未就绪' } },
     });
   }
-  const p = spawn(VENV_PY, [HELPER, 'doctor'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const p = spawn(VENV_PY, [HELPER, 'doctor'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   let stdout = '', stderr = '';
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -179,8 +263,25 @@ router.post('/computer-use/doctor', async (req, res) => {
         detail: parsed.accessibility_detail || null },
       runtime: { status: 'available', detail: null },
       captureTest: { status: parsed.capture_test || 'unknown', detail: parsed.capture_test_detail || null },
+      // Windows 专属三项(§A-4):DPI 感知是否生效、进程完整性级别(UIPI 前置)、UIA 是否可用。
+      // macOS 的 doctor 输出里没有这些键 ⇒ 这一段在 mac 上是空的,输出逐字节不变。
+      ...(IS_WIN ? {
+        dpiAwareness: { status: parsed.dpi_awareness && parsed.dpi_awareness !== 'failed' ? 'available' : 'unavailable',
+          detail: parsed.dpi_awareness || null },
+        integrityLevel: { status: 'available', detail: parsed.integrity_level || 'unknown' },
+        uia: { status: parsed.uia === 'available' ? 'available' : 'unavailable', detail: parsed.uia_detail || null },
+      } : {}),
     };
-    const ok = checks.screenRead.status === 'available' && checks.accessibility.status === 'available';
+    // ok 判据的放宽**只给 win32**(§A-3 #5):Windows 没有 TCC 模型,辅助功能恒 not-applicable,
+    // 拿 mac 的"两项都必须 available"去判会永远报缺权限。mac 判据一字不改。
+    if (IS_WIN) {
+      // 顺带刷新 UIA 缓存(§2.5②:「环境自检」是用户主动的探测时机之一)
+      refreshUiaCapability().catch(() => { /* 探测失败不影响本次自检结论 */ });
+    }
+    const ok = IS_WIN
+      ? checks.screenRead.status === 'available'
+        && (checks.accessibility.status === 'available' || checks.accessibility.status === 'not-applicable')
+      : checks.screenRead.status === 'available' && checks.accessibility.status === 'available';
     return res.json({
       ...base,
       ok,

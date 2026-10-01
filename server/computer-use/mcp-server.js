@@ -1,11 +1,19 @@
 #!/usr/bin/env node
-// cc-gui computer use —— MCP stdio server(macOS v1)。
+// cc-gui computer use —— MCP stdio server(macOS v1 + Windows 阶梯输入,见 PLAN-r142)。
 //
 // 零依赖:协议就是换行分隔的 JSON-RPC 2.0,方法 initialize / tools/list / tools/call
 // 手写即可,不拖 @modelcontextprotocol/sdk 的依赖树 —— 本文件会被 Claude CLI 从任意
 // cwd 直接 spawn,零依赖 = 不存在 node_modules 解析风险。
 //
-// 执行层:Python 子进程(cu_helper.py,venv 位于 ~/.claude-gui/cu-runtime)。
+// 执行层:Python 子进程(macOS `cu_helper.py` / Windows `cu_helper_windows.py`,venv 位于
+// ~/.claude-gui/cu-runtime;Windows 用 venv-win)。
+//
+// 平台语义差异(方案 §2.3,写在这里免得下一个人以为两端一样):
+//   * macOS:后台定向投递(CGEventPostToPid + AX 直写)真后台,覆盖好。
+//   * Windows:后台 = UI Automation 元素级(真后台、可读回)→ 有明确 COM 失败信号才降级到
+//     PostMessage 消息投递(只对传统 Win32 有效,截图 diff 只是**弱证据**:`unchanged`
+//     不构成投递失败的证据)。两条都不通 → CU_BACKGROUND_UNSUPPORTED,绝不自动升级成
+//     SendInput 全局投递;全局只在调用方显式 foreground:true 时可达。
 //
 // 契约要点(INTERFACE「桌面操控与Codex对齐」R14–R19):
 //   * 副作用工具必须带 actionId(1–64 位字母/数字/_/-)、target{bundleId,pid,windowId}、
@@ -21,19 +29,30 @@ import { createHash, randomBytes } from 'crypto';
 import { spawn, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { createInterface } from 'readline';
-import { platform, homedir } from 'os';
+import { platform } from 'os';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import {
   GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, STAMP_FILE, VENV_PY,
-  appGranted, readGrants, screenScopeGranted,
+  appGranted, ensureRuntime as ensureRuntimeImpl, findPython3, readGrants, screenScopeGranted,
 } from './cu-common.js';
 
-const IS_MAC = platform() === 'darwin';
+const PLATFORM = platform();
+const IS_MAC = PLATFORM === 'darwin';
+const IS_WIN = PLATFORM === 'win32';
+const SUPPORTED = IS_MAC || IS_WIN;
 const HERE = dirname(fileURLToPath(import.meta.url));
-const HELPER = join(HERE, 'cu_helper.py');
+const HELPER = join(HERE, IS_WIN ? 'cu_helper_windows.py' : 'cu_helper.py');
+const HOLD_WATCHER = join(HERE, 'cu-hold-watcher.js');
+// ⚠️ 测试契约行:tests/unit/q8-helpers/cu-harness.mjs:27 与 check-cu-uia-cache.mjs 用正则
+// `/const PY_DEPS = \[([^\]]*)\]/` 从**本文件源码**抠这份依赖表算依赖戳。形态(字面量、名字、
+// 等号两侧的空格)不许动;平台分派走下面的 ACTIVE_PY_DEPS,不要改写这一行。
 const PY_DEPS = ['mss', 'pyautogui', 'pyobjc-framework-Cocoa', 'pyobjc-framework-Quartz', 'pyobjc-framework-ApplicationServices'];
-const DEPS_STAMP = createHash('sha256').update(PY_DEPS.join('|')).digest('hex');
+// Windows 依赖表(§2.4 钉版本):pyobjc 在 Windows 上装不上也不用;comtypes 用来生成 UIA 接口。
+// 与 cu-common.js 的 PY_DEPS_WIN / PY_DEPS_MAC 必须逐项一致(那边算 uia 缓存的 depsStamp)。
+const PY_DEPS_WIN = ['mss', 'Pillow', 'comtypes>=1.4.0'];
+const ACTIVE_PY_DEPS = IS_WIN ? PY_DEPS_WIN : PY_DEPS;
+const DEPS_STAMP = createHash('sha256').update(ACTIVE_PY_DEPS.join('|')).digest('hex');
 const SHOT_PREFIX = 'cu-';         // 截图文件名前缀(带实例短标识,便于按实例清理)
 const MAX_SHOT_FILES = 5;          // 每实例最多保留的已完成图片文件数(合同第 21 段)
 // 别的实例遗留文件的清理阈值:helper 最长超时 155 s,24 h 的文件不可能还在途;取 24 h 而非
@@ -60,53 +79,17 @@ function ensureRuntime() {
 }
 
 async function bootstrapRuntime() {
-  if (!IS_MAC) throw new Error('computer use v1 仅支持 macOS(Windows 执行层未实现)');
-  if (existsSync(VENV_PY) && existsSync(STAMP_FILE)
-    && readFileSync(STAMP_FILE, 'utf8').trim() === DEPS_STAMP) return;
-  mkdirSync(RUNTIME_DIR, { recursive: true });
-  const py = findPython3();
-  if (!py) throw new Error('找不到 python3(需要 3.9+,请安装并确保在 PATH)');
-  // VENV_PY 是指向 base 解释器的符号链接:Python 升级后会悬空(existsSync=false)
-  // 而 pyvenv.cfg 还在 —— 只判 cfg 会跳过重建,直接走到 pip 必 ENOENT。
-  if (!existsSync(VENV_PY) || !existsSync(join(RUNTIME_DIR, 'venv', 'pyvenv.cfg'))) {
-    await run(py, ['-m', 'venv', join(RUNTIME_DIR, 'venv')], 180_000);
-  }
-  await run(VENV_PY, ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', ...PY_DEPS], 600_000)
-    .catch(async (firstErr) => {
-      await run(VENV_PY, ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check',
-        '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple', ...PY_DEPS], 600_000)
-        .catch((mirrorErr) => { throw new Error(`pip 主源与镜像均失败: ${mirrorErr.message} (主源: ${firstErr.message})`); });
-    });
-  writeFileSync(STAMP_FILE, DEPS_STAMP + '\n');
-}
-
-function findPython3() {
-  // HOME 在 Windows 上通常没有(那边是 USERPROFILE),旧写法回落 '/tmp' 在 win32 不存在。
-  // 用 os.homedir() 兜底:它在两个平台都给真实家目录;`|| '/tmp'` 那层已删——三源全空时
-  // homedir() 仍会给值,留着只会让跨平台扫描继续把它当"硬编码 /tmp"命中。
-  const home = process.env.HOME || process.env.USERPROFILE || homedir();
-  for (const cmd of ['python3', '/usr/bin/python3', '/opt/homebrew/bin/python3', `${home}/.pyenv/shims/python3`]) {
-    try {
-      const r = spawnSync(cmd, ['--version'], { timeout: 5000 });
-      if (r.status === 0) return cmd;
-    } catch { /* 试下一个 */ }
-  }
-  return null;
-}
-
-function run(file, args, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(file, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', stderr = '';
-    const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* 已退出 */ } reject(new Error(`命令超时: ${file} ${args[0]}`)); }, timeoutMs);
-    p.stdout.on('data', (d) => { stdout += d; });
-    p.stderr.on('data', (d) => { stderr += d; });
-    p.on('error', (e) => { clearTimeout(timer); reject(e); });
-    p.on('exit', (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`${file} 退出码 ${code}: ${(stderr || stdout).slice(-400)}`));
-    });
+  if (!SUPPORTED) throw new Error(`computer use 尚未支持当前平台(${PLATFORM});macOS 与 Windows 才有执行层`);
+  // 建 venv + pip install 抽到 cu-common.ensureRuntime:GUI 侧 POST /prepare 要复用同一条路径,
+  // 而本文件一被 import 就会 createInterface(process.stdin),Express 里绝不能 import 它。
+  // stamp 落盘仍在本文件(下面那行)完成 —— check-q8-atomic-write 的 Q8-09c allowlist 键是
+  // 精确串 `server/computer-use/mcp-server.js::STAMP_FILE`,形态必须保留。
+  await ensureRuntimeImpl({
+    platformName: PLATFORM,
+    deps: ACTIVE_PY_DEPS,
+    stamp: DEPS_STAMP,
+    findPython: findPython3,
+    onReady: (s) => writeFileSync(STAMP_FILE, s + '\n'),
   });
 }
 
@@ -117,7 +100,14 @@ async function runHelper(args, { timeoutMs = 20_000, input } = {}) {
   await ensureRuntime();
   // 文本/窗口标题只经 stdin(input → JSON,helper 侧 --stdin-json)传,绝不进 argv:
   // 进程表全机可读(ps 能看到明文),且 '-' 开头的值在 argv 里会被 argparse 当成选项
-  const p = spawn(VENV_PY, [HELPER, ...args], { stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+  const p = spawn(VENV_PY, [HELPER, ...args], {
+    stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+    // R7:中文 Windows 的控制台上,Python 的 stdout 默认随控制台代码页(cp936)编码 ⇒ helper 的
+    // JSON 会乱码成"输出不可解析"。helper 自己也 reconfigure 了 UTF-8,这里再加一道环境变量兜底
+    // (只对 win32 注入,mac 侧的进程环境一字不改)。
+    ...(IS_WIN ? { env: { ...process.env, PYTHONIOENCODING: 'utf-8' } } : {}),
+  });
   activeHelpers.add(p);
   if (input !== undefined) {
     p.stdin.on('error', () => { /* helper 没读完就退出(EPIPE):结果以 exit/stdout 为准 */ });
@@ -128,6 +118,8 @@ async function runHelper(args, { timeoutMs = 20_000, input } = {}) {
   let killTimer = null;
   // 不能一上来就 SIGKILL:它不可捕获,落在按下/抬起之间就会残留按住的修饰键/鼠标键
   // (合同 CU_TIMEOUT 承诺不留)。SIGTERM 让 helper 补发抬起后自退,宽限后仍在才强杀。
+  // ⚠️ Windows 上 SIGTERM 就是 TerminateProcess(不可捕获),"让 helper 自己补发抬起"这条
+  // 在 Windows 上不成立 ⇒ 走层 4(下面 exit 分支里先杀后释放;常驻 watcher 是层 2)。
   const timer = setTimeout(() => {
     timedOut = true;
     try { p.kill('SIGTERM'); } catch { /* 已退出 */ }
@@ -141,6 +133,9 @@ async function runHelper(args, { timeoutMs = 20_000, input } = {}) {
     p.on('exit', () => {
       done();
       if (timedOut) {
+        // 层 4(§3.2 B-2,限定 Windows):先 SIGKILL 所有 helper(杀完不可能再有人按下,
+        // 消除 TOCTOU),再 spawnSync 补发 release-hold。macOS 保持 v1 行为(SIGTERM 宽限已够)。
+        if (IS_WIN) { killAllHelpers(); releaseHeldKeys('timeout'); }
         // 稳定错误码(helperFailure 认 code 不认文案);被终止后的 stdout 不可信,一律按超时报
         reject(Object.assign(new Error(`helper 超时(${timeoutMs}ms): ${args[0]}`), { code: 'CU_TIMEOUT' }));
         return;
@@ -155,6 +150,70 @@ async function runHelper(args, { timeoutMs = 20_000, input } = {}) {
       }
     });
   });
+}
+
+// ── 按键释放保证(§3.2 B-2,Windows) ─────────────────────────────────────
+// hold-<pid>.json 由 helper 自己原子落盘(先写盘再按下、先抬起再清盘);helper 被
+// TerminateProcess 后文件仍在 ⇒ 释放进程读得到。watcher(cu-hold-watcher.js,层 2)守的是
+// "父进程猝死"这条路径;这里是层 4(超时 / 关停)。
+function holdFiles() {
+  try {
+    return readdirSync(RUNTIME_DIR).filter((f) => /^hold-.*\.json$/.test(f));
+  } catch { return []; }
+}
+
+function readHeldKeys() {
+  const keys = new Set();
+  for (const file of holdFiles()) {
+    try {
+      const body = JSON.parse(readFileSync(join(RUNTIME_DIR, file), 'utf8'));
+      for (const k of Array.isArray(body?.keys) ? body.keys : (Array.isArray(body?.held) ? body.held : [])) {
+        if (typeof k === 'string' && k) keys.add(k);
+      }
+    } catch { /* 半截文件:跳过,释放仍按"尽力而为" */ }
+  }
+  return [...keys];
+}
+
+function clearHoldFiles() {
+  for (const file of holdFiles()) {
+    try { unlinkSync(join(RUNTIME_DIR, file)); } catch { /* 已被并发清理 */ }
+  }
+  try {
+    for (const f of readdirSync(RUNTIME_DIR)) {
+      if (/^hold-.*\.json\.tmp$/.test(f)) { try { unlinkSync(join(RUNTIME_DIR, f)); } catch { /* 同上 */ } }
+    }
+  } catch { /* 目录不存在 */ }
+}
+
+/** 同步补发抬起(spawnSync:process.on('exit') 里只能跑同步代码)。限定 Windows。 */
+function releaseHeldKeys(reason) {
+  if (!IS_WIN) return false;
+  const keys = readHeldKeys();
+  try {
+    spawnSync(VENV_PY, [HELPER, 'release-hold', ...(keys.length ? ['--keys', keys.join(',')] : [])],
+      { timeout: 5000, windowsHide: true, stdio: 'ignore' });
+  } catch { /* 释放尽力而为:绝不因为释放失败把收尾搞崩 */ }
+  clearHoldFiles();
+  return true;
+}
+
+// 层 2:常驻守护进程。父进程以任何方式死掉(含任务管理器整树强杀)⇒ 管道 EOF ⇒ watcher 释放。
+// 只挂 win32(mac 有可捕获的 SIGTERM,不需要多一个进程);stdin 与子进程都 unref:
+// 不改变"stdin 关闭即自然退出"的既有生命周期。
+function startHoldWatcher() {
+  if (!IS_WIN) return;
+  try {
+    const child = spawn(process.execPath, [HOLD_WATCHER], {
+      stdio: ['pipe', 'ignore', 'ignore'],
+      windowsHide: true,
+      env: { ...process.env, CU_WATCH_VENV_PY: VENV_PY, CU_WATCH_HELPER: HELPER, CU_WATCH_RUNTIME_DIR: RUNTIME_DIR },
+    });
+    child.on('error', () => { /* watcher 起不来只是少了层 2,不阻塞 MCP 本体 */ });
+    child.stdin?.on?.('error', () => { /* 同上 */ });
+    child.unref();
+    child.stdin?.unref?.();
+  } catch { /* 同上 */ }
 }
 
 class HelperError extends Error {
@@ -190,7 +249,15 @@ const DEFAULT_MESSAGES = {
   CU_TARGET_LOOKUP_FAILED: '窗口查询失败;未投递任何动作。',
   CU_PERMISSION_REQUIRED: '缺少系统权限(屏幕录制/辅助功能);未投递任何动作。',
   CU_DISPATCH_FAILED: '投递失败;未执行全局点击,真实指针/焦点/内容不变。',
-  CU_BACKGROUND_UNSUPPORTED: '该目标当前不接受后台输入,且本调用未显式要求前台;未动用户前台。',
+  // Windows 专用码(§2.3)。文案里必须带「用新的 actionId 重试」:canonicalParams 把 foreground
+  // 算进参数指纹,同一个 actionId 换成 foreground:true 会撞 CU_ACTION_CONFLICT(第二个困惑错误)。
+  CU_INPUT_UNSUPPORTED: '本平台的后台输入通道不可用(执行层缺失或尚未声明);未投递任何动作,也没有改成全局点击。',
+  CU_UIA_BLOCKED: 'UI Automation 元素级通道不可达(元素/pattern 不可用);未投递任何动作。',
+  CU_UIPI_BLOCKED: '目标进程的完整性级别高于本进程(UIPI),输入被系统拦截;已投递的部分不会生效,请以管理员身份重试本工具。',
+  CU_BACKGROUND_UNSUPPORTED: IS_WIN
+    ? '该目标没有可用的后台通道(UI Automation 元素不可达,消息投递也拿不到可投递的窗口);本平台不会自动改成全局点击。'
+      + '如需全局投递,请用【新的 actionId】重试并显式 foreground:true —— 那会移动真实光标、把目标窗口切到前台,可能打断你。'
+    : '该目标当前不接受后台输入,且本调用未显式要求前台;未动用户前台。',
   CU_TARGET_CHANGED: '目标与当前焦点不符;未动用户前台。',
   CU_SCREEN_SCOPE_REQUIRED: '需要用户独立勾选「允许主屏全部可见内容」;本次不返回任何屏幕像素。',
   CU_INSTANCE_CHANGED: 'instanceId 与本实例不符(旧进程/其他实例的请求);零投递。',
@@ -251,11 +318,68 @@ const KEYCODES = {
   arrow_left: 123, arrow_right: 124, arrow_down: 125, arrow_up: 126,
 };
 
+// ── Windows 虚拟键码(VK) ────────────────────────────────────────────────
+// Windows 的修饰符集合是 ctrl/shift/alt(option 是 alt 的别名);**没有 cmd**(它是 macOS 专用键,
+// 在 win32 上必须整串拒绝,不许"当作没看见修饰符"退化成普通按键)。
+const WIN_MODIFIER_ALIASES = {
+  ctrl: 'ctrl', control: 'ctrl',
+  shift: 'shift',
+  alt: 'alt', option: 'alt',
+};
+// 与 mac 的 KEY_ALIASES 同口径:delete 是 backspace 的别名(向后删,VK_BACK=0x08),
+// enter 与 return 同义(VK_RETURN=0x0D)。
+const WIN_VK = {
+  a: 0x41, b: 0x42, c: 0x43, d: 0x44, e: 0x45, f: 0x46, g: 0x47, h: 0x48, i: 0x49, j: 0x4a,
+  k: 0x4b, l: 0x4c, m: 0x4d, n: 0x4e, o: 0x4f, p: 0x50, q: 0x51, r: 0x52, s: 0x53, t: 0x54,
+  u: 0x55, v: 0x56, w: 0x57, x: 0x58, y: 0x59, z: 0x5a,
+  '0': 0x30, '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34,
+  '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
+  tab: 0x09, space: 0x20, backspace: 0x08, escape: 0x1b, return: 0x0d,
+  arrow_left: 0x25, arrow_up: 0x26, arrow_right: 0x27, arrow_down: 0x28,
+};
+
+/** Windows 侧解析(VK 表);mac 侧走下面的老实现,两边互不影响。 */
+function parseKeySpecWin(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return { ok: false };
+  const parts = raw.split('+');
+  if (parts.some((p) => p === '')) return { ok: false };
+  const mods = [];
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const mod = WIN_MODIFIER_ALIASES[parts[i].toLowerCase()];
+    if (!mod) return { ok: false };                       // "cmd+c"(macOS 修饰符)整串拒绝
+    if (mods.includes(mod)) return { ok: false };          // "ctrl+ctrl+a"
+    mods.push(mod);
+  }
+  if (mods.length !== parts.length - 1) return { ok: false };
+  const rawKey = parts[parts.length - 1];
+  const lower = rawKey.toLowerCase();
+  let key = KEY_ALIASES[lower];                            // up/down/left/right/enter/escape/delete 等别名
+  let unicode = null;
+  if (!key && /^[a-z]$/.test(lower)) {
+    key = lower;
+    unicode = rawKey;
+  } else if (!key && /^[0-9]$/.test(lower)) {
+    key = lower;
+    unicode = lower;
+  }
+  if (!key) return { ok: false };                          // "f13" / "unknown_key"
+  if (key === 'enter') key = 'return';
+  const vk = WIN_VK[key];
+  if (vk === undefined) return { ok: false };
+  const isChar = /^[a-z0-9]$/.test(key);
+  // 带 ctrl/alt 的单字符键按"真实快捷键"投递(走 VK,不塞 WM_CHAR),否则按字符投递。
+  const useChar = isChar && !mods.includes('ctrl') && !mods.includes('alt');
+  if (!useChar) unicode = null;
+  return { ok: true, mods, key, vk, keycode: vk, flags: 0, unicode, isChar };
+}
+
 /**
  * 解析按键串。整串先完整解析,任何一处不合法都拒绝(不产生部分按键)。
- * 返回 {ok:true, mods:[...], key, keycode, flags, unicode} 或 {ok:false}。
+ * 返回 {ok:true, mods:[...], key, keycode, flags, unicode} 或 {ok:false};
+ * Windows 上额外给 `vk`(虚拟键码)。第二参可选:省略 = 当前进程平台(既有调用方与 mac 语义不变)。
  */
-export function parseKeySpec(raw) {
+export function parseKeySpec(raw, platformName = process.platform) {
+  if (platformName === 'win32') return parseKeySpecWin(raw);
   if (typeof raw !== 'string' || raw.length === 0) return { ok: false };
   const parts = raw.split('+');
   if (parts.some((p) => p === '')) return { ok: false };        // "cmd+" / "+a"
@@ -613,6 +737,45 @@ const TOOLS = [
 
 const SIDE_EFFECT_TOOLS = new Set(['left_click', 'double_click', 'right_click', 'drag', 'scroll', 'type', 'key']);
 
+// ── 工具描述的平台化(§A-2 #10) ─────────────────────────────────────────
+// 模型只看得见描述:macOS 那句"后台定向投递不抢前台"照搬到 Windows 就是假话(Chromium/UWP
+// 的后台通道盖不到),模型会据此以为一定成功。工具集合与 inputSchema 两个平台完全一致
+// (check-cu-protocol 的"必须保留"断言 + schema 循环),**只有描述**按平台给。
+const WIN_LADDER_NOTE = '【Windows 后台通道】先走 UI Automation 元素级操作(不抢前台、不动光标、可读回校验);'
+  + '元素/pattern 不可达时才降级成窗口消息投递(PostMessage/直投,只对传统 Win32 控件有效,'
+  + '浏览器/自绘界面覆盖不到,且没有可靠的失败信号)。两条都不通时明确报 CU_BACKGROUND_UNSUPPORTED,'
+  + '**绝不自动改成全局点击**。全局投递(SendInput)只在你显式同意(foreground:true)时才走:'
+  + '那会移动真实光标、把目标窗口切到前台。';
+
+const WIN_TOOL_DESCRIPTIONS = {
+  left_click: `在 (x,y) 单击左键。${WIN_LADDER_NOTE}${COORD_NOTE}${ACTION_NOTE}`,
+  double_click: `在 (x,y) 双击左键。${WIN_LADDER_NOTE}${COORD_NOTE}${ACTION_NOTE}`,
+  right_click: `在 (x,y) 单击右键(上下文菜单)。${WIN_LADDER_NOTE}${COORD_NOTE}${ACTION_NOTE}`,
+  drag: `从 (x1,y1) 按住左键拖到 (x2,y2)。${WIN_LADDER_NOTE}${COORD_NOTE}${ACTION_NOTE}`,
+  scroll: `在 (x,y) 滚轮滚动。direction: up/down(默认 down);amount: 行数(默认 3,正整数)。`
+    + `Windows 上优先用 UI Automation 的 ScrollPattern(不需要光标与焦点),拿不到才降级成窗口消息。`
+    + `${WIN_LADDER_NOTE}${COORD_NOTE}${ACTION_NOTE}`,
+  type: '把文本输入 target 窗口的文本元素。'
+    + 'Windows 上优先用 UI Automation 的 ValuePattern 直接写控件值(不抢前台、不经键盘、不经焦点),并读回 CurrentValue 校验;'
+    + '没有 ValuePattern 时才降级成窗口消息逐字符投递(WM_CHAR,只对传统 Win32 编辑控件有效)。'
+    + '读回校验成功时 verification=verified;**读不回或没有可读回的元素时 verification=unknown,不声称输入成功**。'
+    + `${WIN_LADDER_NOTE}上限 5000 个 Unicode 码点,空串成功且零动作。${ACTION_NOTE}`,
+  key: '按快捷键/单键,如 "ctrl+a"、"return"、"escape"、"arrow_left"。'
+    + '支持字母/数字、return/enter、escape/esc、tab、space、backspace/delete、up/down/left/right(=arrow_*),'
+    + '修饰符 ctrl/control、shift、alt/option 用 + 连接(大小写忽略;**cmd 是 macOS 专用修饰符,在 Windows 上整串拒绝**)。'
+    + '整串先校验再投递:非法键不产生部分按键。Windows 上组合键没有对应的 UI Automation pattern,'
+    + '后台按键以窗口消息投递执行且**读不回目标文本**(verification 恒为 unknown,不声称按下了)。'
+    + `${WIN_LADDER_NOTE}${ACTION_NOTE}`,
+};
+
+/** 工具清单(纯函数:注入平台名即可测描述,不需要任何产品 env 钩子)。 */
+export function buildTools(platformName = process.platform) {
+  if (platformName !== 'win32') return TOOLS;
+  return TOOLS.map((tool) => (WIN_TOOL_DESCRIPTIONS[tool.name]
+    ? { ...tool, description: WIN_TOOL_DESCRIPTIONS[tool.name] }
+    : tool));
+}
+
 // ── 动作登记 + 串行队列 ─────────────────────────────────────────────────
 let toolQueue = Promise.resolve();
 const MAX_WAITING = 32;
@@ -634,6 +797,15 @@ function helperFailure(error, actionId) {
     if (payload.code === 'UNREADABLE' || payload.reason === 'permission') {
       return fail('CU_PERMISSION_REQUIRED', { actionId, message: `${DEFAULT_MESSAGES.CU_PERMISSION_REQUIRED} (${payload.code || payload.reason})` });
     }
+    // Windows 的稳定码原样透传(§3.2 B-3 #4):CU_BACKGROUND_UNSUPPORTED 的文案里带
+    // "用新的 actionId 重试"这条可行动指引,不能被改写成泛化的 CU_DISPATCH_FAILED。
+    // 文本面 = 本仓的默认文案 + helper 的原始错误(默认文案是模型要读的指引)。
+    if (PASSTHROUGH_CODES.has(payload.code)) {
+      return fail(payload.code, {
+        actionId,
+        message: `${DEFAULT_MESSAGES[payload.code]}${message ? ` (helper: ${message})` : ''}`,
+      });
+    }
     return fail('CU_DISPATCH_FAILED', { actionId, message: `${message}` });
   }
   if (error?.code === 'CU_TIMEOUT' || /超时|timeout/i.test(message)) {
@@ -641,6 +813,9 @@ function helperFailure(error, actionId) {
   }
   return fail('CU_DISPATCH_FAILED', { actionId, message });
 }
+
+/** helper 回给 Node 侧、需要原样冒泡到回执的稳定码(其余一律归 CU_DISPATCH_FAILED)。 */
+const PASSTHROUGH_CODES = new Set(['CU_INPUT_UNSUPPORTED', 'CU_UIA_BLOCKED', 'CU_UIPI_BLOCKED', 'CU_BACKGROUND_UNSUPPORTED']);
 
 /** 副作用工具统一入口:参数校验 -> actionId 去重/冲突 -> 排队串行执行。 */
 async function runAction(name, args, body) {
@@ -669,6 +844,14 @@ async function runAction(name, args, body) {
   }
   if (args.snapshotId !== undefined && (typeof args.snapshotId !== 'string' || args.snapshotId.length === 0)) {
     return fail('CU_INVALID_ARGUMENT', { actionId, message: 'snapshotId 必须是非空字符串;零投递。' });
+  }
+  // 阶段 A 的静态拒绝(§3.2 B-3 #1a):Windows 执行层不在位时,副作用工具在**登记之前**
+  // 零投递地拒绝 —— 登记之后再拒会给模型一个"已登记但失败"的 actionId,重试还得换 id,
+  // 而且降级链的结果依赖运行期(必须留在各 tool* body 内,见 #1b)。
+  // 当前构建带着 cu_helper_windows.py ⇒ 生产里这条不触发;它是"执行层缺失时不许静默变成
+  // 全局点击"的结构性保险,也是阶段 A 唯一残留的门。
+  if (IS_WIN && SIDE_EFFECT_TOOLS.has(name) && !existsSync(HELPER)) {
+    return fail('CU_INPUT_UNSUPPORTED', { actionId });
   }
   const paramsKey = canonicalParams(name, args);
   const existing = state.actions.get(actionId);
@@ -736,6 +919,264 @@ function targetDescriptor(window) {
 /** 显式前台动作前:目标必须就是当前前台应用,否则 CU_TARGET_CHANGED(未动用户前台)。 */
 function focusMatches(window, frontmost) {
   return Boolean(frontmost) && frontmost.pid === window.pid;
+}
+
+// ── Windows 后台阶梯(§2.3;macOS 一律不走这里) ──────────────────────────
+/**
+ * UIA 不可达的**明确失败信号**才算降级依据(§2.1 阶梯 0 独有)。
+ * 其余失败(超时/权限/参数)照原样冒泡 —— 降级链不许把"别的问题"吞成"消息投递试试"。
+ */
+function isUiaUnreachable(error) {
+  const code = error instanceof HelperError ? error.payload?.code : null;
+  return code === 'CU_UIA_BLOCKED' || code === 'CU_UIA_UNAVAILABLE' || code === 'CU_AX_UNSUPPORTED';
+}
+
+/** 回执里的 effect(§4.1 附加字段):helper 做了截图 diff 才有;observed 只允许 changed/unchanged。 */
+function effectExtra(result) {
+  const eff = result?.effect;
+  if (!eff || typeof eff !== 'object') return {};
+  return {
+    effect: {
+      observed: eff.observed === 'changed' ? 'changed' : 'unchanged',
+      diffRatio: typeof eff.diffRatio === 'number' ? eff.diffRatio : 0,
+    },
+  };
+}
+
+/**
+ * 消息投递的回执(§2.2 修订判据):截图 diff 是**弱证据** —— 目标被遮挡/最小化/在别的虚拟桌面时
+ * 双向误判,所以 `unchanged` **不构成投递失败的证据**:一律回成功回执 + verification=unknown,
+ * 只在文案里明说"未观察到变化 ≠ 失败"。
+ */
+function postMessageReceipt(actionId, descriptor, verb, result, extra = {}) {
+  const eff = effectExtra(result);
+  const note = eff.effect && eff.effect.observed === 'unchanged'
+    ? '截图未观察到变化——目标窗口可能被遮挡、最小化或在别的虚拟桌面,无法据此判定投递失败'
+    : '截图显示目标区域有变化(弱证据:只说明画面变了,不证明目标应用消费了这次输入)';
+  return ok(actionId, 'post-message', descriptor, 'unknown',
+    `${verb}(窗口消息直投);已投递,${note}。`,
+    { ...extra, ...eff });
+}
+
+/**
+ * 阶梯 0(UI Automation 元素级)→ 阶梯 1(消息投递)的两跳。
+ * 只有**明确的 COM 失败信号**才降级(§2.1:阶梯 0 是唯一有硬失败信号的通道);
+ * 别的失败(超时/权限/参数)照原样冒泡 —— 阶梯 1 永远不产生硬失败,它的结论只能是 unknown。
+ */
+async function winLadder({ actionId, descriptor, uiaArgs, postArgs, timeoutMs, input, uiaVerb, postVerb, extra = {} }) {
+  try {
+    const r = await runHelper(uiaArgs, { timeoutMs, ...(input === undefined ? {} : { input }) });
+    const verified = r?.verified === true;
+    return ok(actionId, 'uia', descriptor, verified ? 'verified' : 'unknown',
+      `${uiaVerb}(UI Automation 元素级操作:不抢前台、不动光标);`
+      + (verified ? '已读回校验。' : '未读回校验,效果未验证(verification=unknown)。'),
+      { ...extra, ...effectExtra(r) });
+  } catch (error) {
+    if (!isUiaUnreachable(error)) throw error;
+    const r = await runHelper(postArgs, { timeoutMs, ...(input === undefined ? {} : { input }) });
+    return postMessageReceipt(actionId, descriptor, postVerb, r, extra);
+  }
+}
+
+/**
+ * 显式前台(阶梯 2)前的目标校验。macOS 保持严格(必须有 frontmost 且 pid 相符);
+ * Windows 上 helper 可能**报不出前台窗口**(EnumWindows 权限、安全桌面、UWP 边界),
+ * 拿不到时不阻塞用户已经显式同意的全局投递,拿得到就必须匹配 —— 否则就是"点错窗口"。
+ */
+function foregroundTargetOk(window, frontmost) {
+  if (IS_WIN && !frontmost) return true;
+  return focusMatches(window, frontmost);
+}
+
+/**
+ * 全局投递回执里"前台核验"那一句 —— **按事实分叉,不许把没核验的事写成结论**:
+ * 拿不到 frontmost 时(上面的放宽生效),回执必须明说"未能核验",而不是"目标窗口被切到前台"
+ * 这种确定性措辞;拿得到时明说已核验(mac 走不到这里,mac 的前台判据严格且回执一字不改)。
+ */
+function foregroundFocusNote(frontmost) {
+  return frontmost
+    ? '已核验:目标就是当前前台窗口'
+    : '未能核验目标是否为当前前台(全局投递已按你的显式同意执行)';
+}
+
+// ── Windows 工具实现(§2.3 的降级链;macOS 走各自的老实现,互不影响) ──────
+function hwndArgs(window) {
+  return ['--hwnd', String(window.id)];
+}
+
+async function winClick(name, args, ctx) {
+  const kinds = { left_click: { clicks: 1, button: 'left' }, double_click: { clicks: 2, button: 'left' }, right_click: { clicks: 1, button: 'right' } };
+  const { clicks, button } = kinds[name];
+  const prep = await prepareCoordAction(args, ctx.target, ctx.actionId, [['x', args.x], ['y', args.y]]);
+  if (prep.receipt) return prep.receipt;
+  const { snap, window } = prep;
+  const [lx, ly] = mapPoint(snap, args.x, args.y);
+  const descriptor = targetDescriptor(window);
+  const point = { point: [lx, ly] };
+  if (ctx.foreground) {
+    const listing = await listWindows();
+    if (!foregroundTargetOk(window, listing.frontmost)) {
+      return fail('CU_TARGET_CHANGED', { actionId: ctx.actionId, extra: { target: descriptor } });
+    }
+    await runHelper(['click', '--method', 'global', ...hwndArgs(window), '--x', String(lx), '--y', String(ly),
+      '--button', button, '--clicks', String(clicks)], { timeoutMs: helperTimeoutMs('click') });
+    return ok(ctx.actionId, 'foreground', descriptor, 'dispatched',
+      `已用全局投递(SendInput,你已显式同意)把真实光标移到 (${lx},${ly}) 并投递${labelOf(name)};`
+      + `${foregroundFocusNote(listing.frontmost)};效果需重新截图确认。`, point);
+  }
+  const tail = [...hwndArgs(window), '--x', String(lx), '--y', String(ly), '--button', button, '--clicks', String(clicks)];
+  return winLadder({
+    actionId: ctx.actionId, descriptor, timeoutMs: helperTimeoutMs('click'), extra: point,
+    uiaArgs: ['click', '--method', 'uia', ...tail],
+    postArgs: ['click', '--method', 'post', ...tail],
+    uiaVerb: `已在 (${lx},${ly}) 触发 ${window.title || window.bundleId} 的${labelOf(name)}`,
+    postVerb: `已向 ${window.title || window.bundleId}(pid ${window.pid})直投${labelOf(name)},坐标 (${lx},${ly})`,
+  });
+}
+
+async function winDrag(args, ctx) {
+  const pairs = [['x1', args.x1], ['y1', args.y1], ['x2', args.x2], ['y2', args.y2]];
+  for (const [name, value] of pairs) {
+    if (value === undefined) {
+      return fail('CU_INVALID_ARGUMENT', { actionId: ctx.actionId, message: `drag 需要完整的 ${pairs.map(([n]) => n).join('/')};零投递。` });
+    }
+  }
+  const prep = await prepareCoordAction(args, ctx.target, ctx.actionId, pairs);
+  if (prep.receipt) return prep.receipt;
+  const { snap, window } = prep;
+  const [lx1, ly1] = mapPoint(snap, args.x1, args.y1);
+  const [lx2, ly2] = mapPoint(snap, args.x2, args.y2);
+  const descriptor = targetDescriptor(window);
+  const extra = { from: [lx1, ly1], to: [lx2, ly2] };
+  if (ctx.foreground) {
+    const listing = await listWindows();
+    if (!foregroundTargetOk(window, listing.frontmost)) {
+      return fail('CU_TARGET_CHANGED', { actionId: ctx.actionId, extra: { target: descriptor } });
+    }
+    await runHelper(['drag', '--method', 'global', ...hwndArgs(window), '--x1', String(lx1), '--y1', String(ly1),
+      '--x2', String(lx2), '--y2', String(ly2)], { timeoutMs: helperTimeoutMs('drag', 10_000) });
+    return ok(ctx.actionId, 'foreground', descriptor, 'dispatched',
+      `已用全局投递(SendInput,你已显式同意)把真实光标从 (${lx1},${ly1}) 拖到 (${lx2},${ly2});`
+      + `${foregroundFocusNote(listing.frontmost)};效果需重新观察。`, extra);
+  }
+  const tail = [...hwndArgs(window), '--x1', String(lx1), '--y1', String(ly1), '--x2', String(lx2), '--y2', String(ly2)];
+  return winLadder({
+    actionId: ctx.actionId, descriptor, timeoutMs: helperTimeoutMs('drag', 10_000), extra,
+    uiaArgs: ['drag', '--method', 'uia', ...tail],
+    postArgs: ['drag', '--method', 'post', ...tail],
+    uiaVerb: `已向 ${window.title || window.bundleId} 发起拖拽 (${lx1},${ly1})→(${lx2},${ly2})`,
+    postVerb: `已向 ${window.title || window.bundleId}(pid ${window.pid})直投拖拽 (${lx1},${ly1})→(${lx2},${ly2})`,
+  });
+}
+
+async function winScroll(args, ctx) {
+  const direction = args.direction === undefined ? 'down' : args.direction;
+  if (direction !== 'up' && direction !== 'down') {
+    return fail('CU_INVALID_ARGUMENT', { actionId: ctx.actionId, message: 'direction 只能是 up/down;零投递。' });
+  }
+  const amount = args.amount === undefined ? 3 : args.amount;
+  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount <= 0) {
+    return fail('CU_INVALID_ARGUMENT', { actionId: ctx.actionId, message: 'amount 必须是正整数(默认 3);零投递。' });
+  }
+  const prep = await prepareCoordAction(args, ctx.target, ctx.actionId, [['x', args.x], ['y', args.y]]);
+  if (prep.receipt) return prep.receipt;
+  const { snap, window } = prep;
+  const [lx, ly] = mapPoint(snap, args.x, args.y);
+  const descriptor = targetDescriptor(window);
+  const extra = { point: [lx, ly], direction, amount };
+  if (ctx.foreground) {
+    const listing = await listWindows();
+    if (!foregroundTargetOk(window, listing.frontmost)) {
+      return fail('CU_TARGET_CHANGED', { actionId: ctx.actionId, extra: { target: descriptor } });
+    }
+    await runHelper(['scroll', '--method', 'global', ...hwndArgs(window), '--x', String(lx), '--y', String(ly),
+      '--direction', direction, '--amount', String(amount)], { timeoutMs: helperTimeoutMs('scroll') });
+    return ok(ctx.actionId, 'foreground', descriptor, 'dispatched',
+      `已用全局投递(SendInput,你已显式同意)在 (${lx},${ly}) ${direction === 'up' ? '上' : '下'}滚 ${amount} 行;`
+      + `${foregroundFocusNote(listing.frontmost)}。`, extra);
+  }
+  const tail = [...hwndArgs(window), '--x', String(lx), '--y', String(ly), '--direction', direction, '--amount', String(amount)];
+  return winLadder({
+    actionId: ctx.actionId, descriptor, timeoutMs: helperTimeoutMs('scroll'), extra,
+    uiaArgs: ['scroll', '--method', 'uia', ...tail],
+    postArgs: ['scroll', '--method', 'post', ...tail],
+    uiaVerb: `已用 ScrollPattern 在 (${lx},${ly}) ${direction === 'up' ? '上' : '下'}滚 ${amount} 行(不需要光标与焦点)`,
+    postVerb: `已向 ${window.title || window.bundleId}(pid ${window.pid})直投滚轮(${direction} ${amount} 行)`,
+  });
+}
+
+async function winType(args, ctx) {
+  const text = args.text;
+  if (typeof text !== 'string') {
+    return fail('CU_INVALID_ARGUMENT', { actionId: ctx.actionId, message: 'text 必须是字符串;零投递。' });
+  }
+  if (codePointLength(text) > TEXT_MAX_CODE_POINTS) {
+    return fail('CU_INVALID_ARGUMENT', {
+      actionId: ctx.actionId,
+      message: `text 超过 ${TEXT_MAX_CODE_POINTS} 个 Unicode 码点(按码点计,不按 UTF-16 单元);零投递。`,
+    });
+  }
+  const resolved = await resolveTarget(ctx.target);
+  if (!resolved.ok) return fail(resolved.code, { actionId: ctx.actionId, extra: resolved.detail ? { detail: resolved.detail } : {} });
+  const window = resolved.window;
+  const descriptor = targetDescriptor(window);
+  const chars = codePointLength(text);
+  if (ctx.foreground) {
+    const listing = await listWindows();
+    if (!foregroundTargetOk(window, listing.frontmost)) {
+      return fail('CU_TARGET_CHANGED', { actionId: ctx.actionId, extra: { target: descriptor } });
+    }
+    if (text === '') return ok(ctx.actionId, 'foreground', descriptor, 'not-applicable', '空串:零动作(未向目标输入任何内容)。', { chars: 0 });
+    const r = await runHelper(['type', '--method', 'global', ...hwndArgs(window),
+      ...(chars > 40 ? ['--fast'] : []), '--stdin-json'],
+    { timeoutMs: helperTimeoutMs('type', chars), input: { text } });
+    const verified = r?.verified === true;
+    return ok(ctx.actionId, 'foreground', descriptor, verified ? 'verified' : 'unknown',
+      `已用全局投递(SendInput,你已显式同意)向目标窗口 ${window.title || window.bundleId} 输入 ${chars} 个字符;`
+      + `${foregroundFocusNote(listing.frontmost)};`
+      + (verified ? '读回包含原文。' : 'Windows 上读不回目标文本,verification=unknown(不声称输入成功)。'),
+      { chars });
+  }
+  if (text === '') return ok(ctx.actionId, 'background', descriptor, 'not-applicable', '空串:零动作(未向目标写入任何内容)。', { chars: 0 });
+  return winLadder({
+    actionId: ctx.actionId, descriptor, timeoutMs: helperTimeoutMs('type', chars), input: { text }, extra: { chars },
+    uiaArgs: ['type', '--method', 'uia', ...hwndArgs(window), '--stdin-json'],
+    postArgs: ['type', '--method', 'post', ...hwndArgs(window), '--stdin-json'],
+    uiaVerb: `已用 ValuePattern 把 ${chars} 个码点直接写入 ${window.title || window.bundleId} 的控件值(不经键盘、不经焦点)`,
+    postVerb: `已向 ${window.title || window.bundleId}(pid ${window.pid})逐字符投递 ${chars} 个码点(WM_CHAR)`,
+  });
+}
+
+async function winKey(args, ctx) {
+  const spec = parseKeySpec(args.keys, 'win32');
+  if (!spec.ok) {
+    return fail('CU_UNSUPPORTED_KEY', {
+      actionId: ctx.actionId,
+      message: `"${String(args.keys).slice(0, 40)}" 不是 Windows 上支持的键或键组合(支持字母/数字、return/enter、escape/esc、tab、space、backspace/delete、方向键与 ctrl/shift/alt 组合;**cmd 是 macOS 专用修饰符,在 Windows 上整串拒绝**);整串在投递前拒绝,没有部分按键。`,
+    });
+  }
+  const resolved = await resolveTarget(ctx.target);
+  if (!resolved.ok) return fail(resolved.code, { actionId: ctx.actionId, extra: resolved.detail ? { detail: resolved.detail } : {} });
+  const window = resolved.window;
+  const descriptor = targetDescriptor(window);
+  const extra = { keys: args.keys, vk: spec.vk, mods: spec.mods };
+  if (ctx.foreground) {
+    const listing = await listWindows();
+    if (!foregroundTargetOk(window, listing.frontmost)) {
+      return fail('CU_TARGET_CHANGED', { actionId: ctx.actionId, extra: { target: descriptor } });
+    }
+    await runHelper(['key', '--method', 'global', ...hwndArgs(window), '--keys', args.keys], { timeoutMs: helperTimeoutMs('key') });
+    return ok(ctx.actionId, 'foreground', descriptor, 'dispatched',
+      `已用全局投递(SendInput,你已显式同意)向目标窗口 ${window.title || window.bundleId} 投递按键 ${args.keys};`
+      + `${foregroundFocusNote(listing.frontmost)}。`, extra);
+  }
+  // 阶梯 0 对组合键无解(UIA 没有"投递按键"的 pattern)⇒ 后台按键直接走消息投递,失败就是失败。
+  const r = await runHelper(['key', '--method', 'post', ...hwndArgs(window), '--keys', args.keys],
+    { timeoutMs: helperTimeoutMs('key') });
+  return ok(ctx.actionId, 'post-message', descriptor, 'unknown',
+    `已向 ${window.title || window.bundleId}(pid ${window.pid})直投按键 ${args.keys}(窗口消息);`
+    + 'Windows 上后台按键读不回目标文本,verification=unknown(不声称按下了)。',
+    { ...extra, ...effectExtra(r) });
 }
 
 // ── 工具实现 ────────────────────────────────────────────────────────────
@@ -891,7 +1332,11 @@ async function toolDoctor() {
     return { receipt: fail('CU_RUNTIME_UNAVAILABLE', { message: `自检失败:${String(error.message).slice(0, 200)}` }) };
   }
   const grants = readGrants();
-  const perm = (value) => (value === 'ok' ? 'available' : (value === 'denied' ? 'unavailable' : 'unverified'));
+  // 口径与 GUI 侧 routes/computer-use.js 的 permissionStatus 一致:Windows 的"辅助功能"恒
+  // not-applicable(没有 TCC 模型),不许因为"不是 ok"就报成 unverified —— 那会让面板与模型侧
+  // 对同一台机器给出两个结论。not-applicable 只出现在 checks/permissions,不进 capabilities。
+  const perm = (value) => (value === 'ok' ? 'available'
+    : (value === 'denied' ? 'unavailable' : (value === 'not-applicable' ? 'not-applicable' : 'unverified')));
   const checks = {
     screenRead: { status: perm(payload.screen_recording), detail: payload.screen_recording_detail || null },
     accessibility: { status: perm(payload.accessibility), detail: payload.accessibility_detail || null },
@@ -949,6 +1394,7 @@ async function toolActionStatus(args) {
 }
 
 async function toolClick(name, args, ctx) {
+  if (IS_WIN) return winClick(name, args, ctx);
   const kinds = { left_click: { clicks: 1, button: 'left' }, double_click: { clicks: 2, button: 'left' }, right_click: { clicks: 1, button: 'right' } };
   const { clicks, button } = kinds[name];
   const prep = await prepareCoordAction(args, ctx.target, ctx.actionId, [['x', args.x], ['y', args.y]]);
@@ -981,6 +1427,7 @@ function labelOf(name) {
 }
 
 async function toolDrag(args, ctx) {
+  if (IS_WIN) return winDrag(args, ctx);
   const pairs = [['x1', args.x1], ['y1', args.y1], ['x2', args.x2], ['y2', args.y2]];
   for (const [name, value] of pairs) {
     if (value === undefined) {
@@ -1012,6 +1459,7 @@ async function toolDrag(args, ctx) {
 }
 
 async function toolScroll(args, ctx) {
+  if (IS_WIN) return winScroll(args, ctx);
   const direction = args.direction === undefined ? 'down' : args.direction;
   if (direction !== 'up' && direction !== 'down') {
     return fail('CU_INVALID_ARGUMENT', { actionId: ctx.actionId, message: 'direction 只能是 up/down;零投递。' });
@@ -1043,6 +1491,7 @@ async function toolScroll(args, ctx) {
 }
 
 async function toolType(args, ctx) {
+  if (IS_WIN) return winType(args, ctx);
   const text = args.text;
   if (typeof text !== 'string') {
     return fail('CU_INVALID_ARGUMENT', { actionId: ctx.actionId, message: 'text 必须是字符串;零投递。' });
@@ -1123,6 +1572,7 @@ async function readState(window) {
 }
 
 async function toolKey(args, ctx) {
+  if (IS_WIN) return winKey(args, ctx);
   const spec = parseKeySpec(args.keys);
   if (!spec.ok) {
     return fail('CU_UNSUPPORTED_KEY', {
@@ -1255,7 +1705,7 @@ function handleLine(line) {
       if (!isNotification) reply(id, {});
       return;
     case 'tools/list':
-      if (!isNotification) reply(id, { tools: TOOLS });
+      if (!isNotification) reply(id, { tools: buildTools(PLATFORM) });
       return;
     case 'tools/call':
       if (isNotification) return;
@@ -1276,14 +1726,21 @@ function killAllHelpers() {
   for (const p of activeHelpers) { try { p.kill('SIGKILL'); } catch { /* 已退出 */ } }
   activeHelpers.clear();
 }
-process.on('SIGTERM', () => { killAllHelpers(); process.exit(0); });
-process.on('SIGINT', () => { killAllHelpers(); process.exit(0); });
-process.on('exit', killAllHelpers);
+// 层 4(关停路径,§3.2 B-2):Windows 上 SIGTERM/SIGINT 也是 TerminateProcess,helper 来不及
+// 自己补发抬起 ⇒ 先杀(杀完不可能再有人按下),再同步补一次 release-hold。macOS 有可捕获的
+// SIGTERM 宽限,保持 v1 行为(releaseHeldKeys 在非 win32 上是 no-op)。
+function shutdown() { killAllHelpers(); releaseHeldKeys('shutdown'); }
+process.on('SIGTERM', () => { shutdown(); process.exit(0); });
+process.on('SIGINT', () => { shutdown(); process.exit(0); });
+process.on('exit', shutdown);
+
+startHoldWatcher();
 
 // 供白盒单测直接 import(不作为 stdin 循环的副作用)
 export {
   TOOLS, SIDE_EFFECT_TOOLS, state, resolveSnapshot, mapPoint,
   checkCoordinateArg, checkCoordinateBounds, pruneActions, INSTANCE_ID,
+  IS_WIN, IS_MAC, PLATFORM, HELPER,
 };
 export const __instanceId = INSTANCE_ID;
 export const __instanceShort = INSTANCE_SHORT;

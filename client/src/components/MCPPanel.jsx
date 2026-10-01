@@ -21,6 +21,26 @@ function formatPingDetail(d) {
 // 自带 MCP server(零依赖 Node 脚本 + Python 执行层,见 server/computer-use/)。
 // 注册走通用 POST/DELETE /api/mcp(缓存失效/换代戳/agents 同步全在那一侧),
 // 这里只负责:拿脚本绝对路径拼命令行、装/卸、跑 doctor 给权限状态。
+//
+// 平台差异(r142):mac 的卖点是"后台定向投递不抢前台";Windows 上后台是**阶梯**
+// (UI Automation 元素级 → 消息投递),覆盖不到的应用会明确报错,全局投递只在用户显式
+// 同意后才走。所以副标题与降级提示条都按 /status.inputMode 写实话(mac 那句在 Windows 上是假话)。
+const CU_SUBTITLE = {
+  background: '让会话能截图、点鼠标、敲键盘、读窗口。模型可见的工具注册为「computer-use」;截图/窗口查询完全被动,点击优先后台投递不抢你的前台。',
+  'background-partial': '让会话能截图、点鼠标、敲键盘、读窗口。模型可见的工具注册为「computer-use」;点击/输入优先后台(UI Automation 元素级 → 消息投递),覆盖不到的应用会明确报错,不会偷偷改成抢前台的操作。',
+  'background-message-only': '让会话能截图、点鼠标、敲键盘、读窗口。模型可见的工具注册为「computer-use」;点击/输入只能走消息投递(仅传统桌面程序有效,浏览器类应用大概率无效);不会抢前台。',
+  'global-only': '让会话能截图、点鼠标、敲键盘、读窗口。模型可见的工具注册为「computer-use」;后台通道不可用,只有你显式同意后才走全局投递 ⇒ 不会自动抢前台。',
+  none: '让会话能截图、窗口列表与光标查询。当前阶段仅支持截图、窗口列表与光标查询;点击与输入尚未提供。',
+};
+// 降级提示条:partial/message-only 是黄(能用但有边界),global-only 是红(后台通道不可用),
+// none 是灰(还没建立结论)。mac('background')没有这一条 —— 输出与修前逐字一致。
+const CU_MODE_NOTE = {
+  'background-partial': { tone: 'warn', text: 'Windows 后台通道:优先后台(UIA 元素级 + 消息投递),覆盖不到的应用会明确报错,不会偷偷抢前台。' },
+  'background-message-only': { tone: 'warn', text: 'UIA 不可用(comtypes 未就绪):点击/输入只能走消息投递,仅传统桌面程序有效、浏览器类应用大概率无效;不会抢前台。' },
+  'global-only': { tone: 'error', text: '后台通道不可用;只有你显式同意(foreground:true)后才走全局投递 ⇒ 不会自动抢前台。' },
+  none: { tone: 'muted', text: '点击与输入尚未建立可用性结论:先点「准备环境」跑一次探测;结论出来之前不声明输入可用。' },
+};
+
 function ComputerUseCard({ onChanged }) {
   const [st, setSt] = useState(null); // /api/computer-use/status
   const [busy, setBusy] = useState('');
@@ -32,7 +52,26 @@ function ComputerUseCard({ onChanged }) {
   };
   useEffect(load, []);
 
-  if (!st || !st.supported) return null; // 非 macOS 隐藏(v1 仅 mac)
+  if (!st) return null;                       // 还没拿到 status:先不画(与修前一致)
+  if (!st.supported) {                        // 平台不支持:给占位卡,不许整张消失(§4.2)
+    return (
+      <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3 mb-2">
+        <div className="text-[12px] text-ink font-body font-medium">桌面操控(computer use)</div>
+        <div data-testid="cu-card-subtitle" className="text-[10.5px] text-ink-faint font-body leading-snug mt-0.5">
+          当前平台({st.platform})不支持:{st.reason || '没有可用的执行层'}
+        </div>
+      </div>
+    );
+  }
+
+  const mode = st.inputMode || (st.platform === 'darwin' ? 'background' : 'none');
+  const subtitle = CU_SUBTITLE[mode] || CU_SUBTITLE.none;
+  const note = CU_MODE_NOTE[mode];
+  const noteClass = note?.tone === 'error'
+    ? 'text-error border-error/30 bg-error/10'
+    : note?.tone === 'warn'
+      ? 'text-amber-700 border-amber-500/30 bg-amber-500/10'
+      : 'text-ink-faint border-canvas-deep bg-canvas';
 
   const install = async () => {
     setBusy('install'); setErr('');
@@ -62,7 +101,19 @@ function ComputerUseCard({ onChanged }) {
     try {
       const r = await fetch('/api/computer-use/doctor', { method: 'POST' });
       setDoctor(await r.json());
-    } catch (e) { setErr(e.message); } finally { setBusy(''); }
+    } catch (e) { setErr(e.message); } finally { setBusy(''); load(); }
+  };
+  // 「准备环境」只给 Windows:mac 的运行时由首次调用工具时自动准备(现状不变)。
+  // Windows 上首次要建 venv-win + 装 comtypes,给一个显式入口 + 进度,顺带跑 UIA 可用性探测。
+  const prepare = async () => {
+    setBusy('prepare'); setErr('');
+    try {
+      const r = await fetch('/api/computer-use/prepare', { method: 'POST' });
+      const d = await r.json().catch(() => null);
+      if (!r.ok || !d || d.ok === false) throw new Error(d?.error || `准备失败(HTTP ${r.status})`);
+      if (d.uiaReady === false && d.comtypes) setErr(`UIA 探测结论:不可用(${d.comtypes})`);
+      load();
+    } catch (e) { setErr(e.message); } finally { setBusy(''); load(); }
   };
 
   return (
@@ -73,11 +124,17 @@ function ComputerUseCard({ onChanged }) {
             桌面操控(computer use)
             {st.registered && <span className="text-[10px] text-green-600">● 已注册</span>}
           </div>
-          <div className="text-[10.5px] text-ink-faint font-body leading-snug mt-0.5">
-            让会话能截图、点鼠标、敲键盘、读窗口。模型可见的工具注册为「computer-use」;截图/窗口查询完全被动,点击优先后台投递不抢你的前台。
+          <div data-testid="cu-card-subtitle" className="text-[10.5px] text-ink-faint font-body leading-snug mt-0.5">
+            {subtitle}
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0 ml-2">
+          {st.platform === 'win32' && st.runtimeReady === false && (
+            <button onClick={prepare} disabled={!!busy}
+              className="px-2 py-1 rounded-md text-[10px] text-ink-muted hover:bg-canvas border border-canvas-deep font-body transition-colors disabled:opacity-50">
+              {busy === 'prepare' ? '准备中…' : '准备环境'}
+            </button>
+          )}
           {st.registered ? (
             <>
               <button onClick={runDoctor} disabled={!!busy}
@@ -97,7 +154,13 @@ function ComputerUseCard({ onChanged }) {
           )}
         </div>
       </div>
-      {st.registered && <CuGrants runtimeReady={st.runtimeReady} />}
+      {note && (
+        <div data-testid="cu-mode-note"
+          className={`mt-2 text-[10.5px] font-body leading-snug border rounded px-2 py-1.5 ${noteClass}`}>
+          {note.text}
+        </div>
+      )}
+      {st.registered && <CuGrants runtimeReady={st.runtimeReady} appIdKind={st.appIdKind || 'bundleId'} />}
       {err && <div className="mt-2 text-[10.5px] text-error font-body">{err}</div>}
       {doctor && (
         <pre className="mt-2 text-[10px] font-mono whitespace-pre-wrap break-all leading-snug max-h-40 overflow-auto text-ink-soft border border-canvas-deep rounded p-2">
