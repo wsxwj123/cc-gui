@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.408</b>(2026-09-30)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>贪吃蛇放慢</summary>
+
+每步 45ms → **100ms**(跑完一趟约 37 秒),不再一闪而过。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.407</b>(2026-09-30)· 修复 1 条</summary>
 
 **修复**
