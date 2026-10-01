@@ -116,6 +116,7 @@ import { extractToolResultText, extractToolResultImages, finalizePendingToolCall
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY } from './utils/steerQueue.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
+import { localTurnTakenOver, makeTurnIdentityIndex } from './utils/turnIdentity.js';   // r141 渲染期身份闸门
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
@@ -3533,12 +3534,16 @@ function TopbarHitRate({ sessionId }) {
 //   · 全文:本地气泡的 text 就是发出去的 prompt,落盘记录逐字相同;
 //   · 时间:同机时钟,CLI 在 POST 之后才写盘,本回合那条的 timestamp 必然 ≥ 本地发送时刻;
 //          再发一条一模一样的短消息(连发两条"继续")时,旧副本的时间早于新气泡 → 不误判。
-// 其余类型沿用弱口径:回合正文是流式累积文本,与最终 jsonl 常有细微差异,只有弱口径能命中
-// (命中后由调用点的 lastUser 闸门兜底防双渲染)。
+// 其余类型沿用弱口径(回合再叠一层 r141 的身份判据,见下)。
+// r141:回合(turn)的弱口径 `类型|前 80 字` 对不上"本地副本"——本地块间用 `\n` 拼、历史逐条
+// push 后 `''` join,一回合只要有 ≥2 段文本,前 80 字必然差在拼接处。所以 turn 分支再加一层
+// 三层身份(uuid 精确对账 / 正文指纹 / 时间窗内的覆盖下限,全部集中在 utils/turnIdentity.js),
+// 弱口径保留作兜底;user 分支一字不动(R37 的强口径:全文 + 落盘时间,开快路径会让用户气泡凭空消失)。
 const msgTextOf = (m) => (Array.isArray(m?.text) ? m.text.join('') : (m?.text || ''));
 function makePersistedIndex(persisted) {
   const weak = new Set();
   const userLatest = new Map();
+  const turnIdentity = makeTurnIdentityIndex(persisted);
   for (const m of persisted || []) {
     const text = msgTextOf(m);
     weak.add(`${m?.type}|${text.slice(0, 80)}`);
@@ -3550,7 +3555,9 @@ function makePersistedIndex(persisted) {
   return {
     has(m) {
       const text = msgTextOf(m);
-      if (m?.type !== 'user') return weak.has(`${m?.type}|${text.slice(0, 80)}`);
+      if (m?.type !== 'user') {
+        return weak.has(`${m?.type}|${text.slice(0, 80)}`) || localTurnTakenOver(m, turnIdentity);
+      }
       const latest = userLatest.get(text);
       const ts = Date.parse(m?.timestamp);
       return latest !== undefined && Number.isFinite(ts) && latest >= ts;
@@ -3887,6 +3894,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const [streamingBlocks, setStreamingBlocks] = useState([]);
   // CJ-4:本回合发起时间戳,驱动流式/connecting 的实时耗时计数(ElapsedTime)。
   const streamStartRef = useRef(null);
+  // r141:本流收到过的 assistant 事件 uuid —— 判据①(uuid 精确对账)的输入,见
+  // utils/turnIdentity.js。生命周期 = 一条流(或一条可继承的会话链,复位见 handleSend);
+  // 跨会话残留无害:uuid 全局唯一,判据只与【本会话已渲染的 turn】比对。存数组进 state 前
+  // 必须拷贝(`[...roundUuidsRef.current]`),绝不把活的 Set 塞进 chatMessages。
+  const roundUuidsRef = useRef(new Set());
   // "重做此工具"进行中的 turn uuid——只控制转圈指示器的显示。截断由 turn 上的
   // _retryTrimToolId 标记负责(回退状态需一直保持),指示器在重跑流式内容出现后清掉,
   // 否则会一直转(用户报告:AI 回复完成后仍显示"正在重做")。
@@ -4280,6 +4292,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       return { ...m, toolCalls: fin, blocks: applyFinalizedToBlocks(m.blocks, fin) };
     });
   }, [visibleMessages, backgroundPid, isStreaming, streamOwnerKey, sessionQueueKey]);
+  // r141:渲染期身份闸门 —— 本地派生的条目(定稿副本 chat-assistant-*)只要【已渲染的历史】里
+  // 已有同身份的回合,就不画。三条判据(uuid 精确对账 / 正文指纹 / 时间窗内的覆盖下限)全部
+  // 集中在 utils/turnIdentity.js;只作用于 type==='turn',不碰 user(R37 强口径)与 btw/compact。
+  // ⚠️ 比较对象必须是 finalizedMessages:它已过 streamHistCutoff 截断与半成品收口。**不得**
+  // 把这个 memo 上提到 finalizedMessages 之前 —— 那里只有 messages(未收口的半成品 turn 会被
+  // 当成孪生,把唯一可见的副本藏掉 = BF-1/R37 同类空窗)。
+  const renderedTurnIdentity = useMemo(
+    () => makeTurnIdentityIndex(finalizedMessages),
+    [finalizedMessages],
+  );
+  // 上屏/统计统一认这一份(renderChat = 已过 ownerKey 门控的 visibleChat 再做身份减法)。
+  const renderChat = useMemo(
+    () => visibleChat.filter((m) => !localTurnTakenOver(m, renderedTurnIdentity)),
+    [visibleChat, renderedTurnIdentity],
+  );
   // Transient toast for "auto-stripped thinking blocks after provider switch".
   // { text, expires } — set by handleSend's pre-flight check, auto-cleared.
   const [providerSwitchNotice, setProviderSwitchNotice] = useState(null);
@@ -5031,6 +5058,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // now 会让耗时从 0 重新计(用户明明已等了几秒)。改取该会话的 detach 时刻(切走/转后台/
     // 上一段流收尾时记的,恒 ≤ now),使耗时接续、不跳回 0;无记录才回落 now。首发仍取 now。
     // r68:有快照时用快照里的原始起流时刻,耗时严格接续(比 detach 时刻更准)。
+    // r141:uuid 集合按【一条流】一个生命周期。普通发送(新回合)无条件复位;seeded reattach 是
+    // 同一回合的续挂 —— 复位会把原流已收到的 uuid 丢掉,那个回合的判据① 静默失效、退化到 ②③。
+    if (!reattachPid) roundUuidsRef.current = new Set();
     streamStartRef.current = seed?.streamStart
       || (reattachPid && detachTsBySidRef.current[selectedSession?.sessionId]) || Date.now();
     updateStreaming(true);
@@ -5627,6 +5657,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'conversation_reset') {
             conversationResetFrom = event.session_id || streamSid || null;
             setChatMessages([]);
+            roundUuidsRef.current = new Set();   // r141:旧会话归档,它的 uuid 不得留到新会话
             dropUserStash(conversationResetFrom); // r118:旧会话归档,它的暂存气泡别在切回时被补回来
             continue;
           }
@@ -6122,6 +6153,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               continue;
             }
 
+            // r141:partial 路径的 uuid 收集。真 CLI 实测:stream_event 包装层每条事件的 uuid
+            // 互不相同,只有 message_start 那条是消息级 —— 逐 delta 收会把 5 个非消息级 uuid
+            // 也塞进集合(永远对不上历史,只会污染判据)。
+            if (ev.type === 'message_start' && event.uuid) roundUuidsRef.current.add(String(event.uuid));
+
             // Main turn — top-level model output
             // 等待状态(G):新一次 API 调用的内容开始到达 → 之前的重试/限流等待已结束,清行。
             if (ev.type === 'message_start') setLiveStatus(null);
@@ -6269,6 +6305,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
               continue;
             }
+            // r141:判据① 的 uuid 来源 —— 整条快照型 assistant 事件(真 CLI 实测:这条事件的
+            // `uuid` 与写进 jsonl 的同一条记录逐字相同)。子代理的已在上面 `continue` 分流掉。
+            if (event.uuid) roundUuidsRef.current.add(String(event.uuid));
             // r65:非 partial 的第三方(mimo 等)不发 delta,整条 assistant 快照即其全部产出;据此置位。
             markSawOutput();
             // 整条消息型 provider:把这一条快照**按到达顺序**也写进 orderedBlocks,让流式气泡
@@ -6831,6 +6870,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // 直播补齐:冻结副本到历史接管之间这段窗口也要看得见子代理金额,否则回合结束
           // 那一刻金额会先消失、等历史刷新回来才重现。取当时的快照(不是渲染时那份 memo)。
           subUsage: liveSubUsageAgents(useStore.getState().liveSubUsage),
+          // r141:副本身份(判据①②③,见 utils/turnIdentity.js;纯追加,不动 r140 的 ownerKey 行)
+          srcUuids: [...roundUuidsRef.current], roundStartTs: streamStartRef.current,
         }]);
         // M3(Q9)→T2 重构:完成悬浮提醒改由服务端 WS 'turn-complete' 广播驱动
         // (见 useWebSocket)。这里的流闭包在用户切走会话时会被切会话 effect
@@ -8466,7 +8507,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 与 visibleChat 已上移到 currentTodos 之前(串扰窗口2,hook 区),这里直接使用。
   // BF-1:展示口径统一走 finalizedMessages(=visibleMessages 再补历史中断态,活跃流
   // 期间剔除本回合半成品),回合进度条/成本等派生统计与消息列表同源。
-  const allMessages = [...finalizedMessages, ...visibleChat];
+  // r141:本地派生条目再走一道身份闸门(renderChat 定义在 hook 区,紧跟 finalizedMessages
+  // 之后 —— 那里才能引用到已收口的 finalizedMessages;上提到更早只能用 messages,
+  // 半成品 turn 会被误判成孪生)。上屏与 allMessages 派生统计只认这一份,不再双计。
+  const allMessages = [...finalizedMessages, ...renderChat];
   // 右侧回合进度条数据:每个用户回合一个点(摘要取去附件后的显示文本)。
   // 注意:必须是普通计算,不能用 useMemo —— 这里在 SessionDetail 的早返回
   // (if loading && tabIndex===0 return)之后,加 hook 会导致切换会话(loading 切换)时
@@ -8980,7 +9024,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         data-run-id={streamRunId || undefined}
         className="h-full overflow-y-auto relative z-10"
       >
-          {visibleMessages.length === 0 && visibleChat.filter((m) => m.type !== 'btw').length === 0 ? (
+          {visibleMessages.length === 0 && renderChat.filter((m) => m.type !== 'btw').length === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
               {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
             </div>
@@ -9006,7 +9050,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 retryActiveUuid={retryActiveUuid}
               />
               {/* btw 旁问不再进主流内联渲染 —— 改由右下角 BtwWindow 浮窗聚合成连续线程。 */}
-              {visibleChat.filter((msg) => msg.type !== 'btw').map((msg, i) => (
+              {renderChat.filter((msg) => msg.type !== 'btw').map((msg, i) => (
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
                   {msg.type === 'compact'
                     ? <CompactDivider />
