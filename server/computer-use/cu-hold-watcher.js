@@ -28,22 +28,65 @@ const holdFiles = () => {
   } catch { return []; }
 };
 
-function readKeys() {
-  const keys = new Set();
-  for (const file of holdFiles()) {
-    try {
-      const body = JSON.parse(readFileSync(join(RUNTIME_DIR, file), 'utf8'));
-      const list = Array.isArray(body?.keys) ? body.keys : (Array.isArray(body?.held) ? body.held : []);
-      for (const k of list) if (typeof k === 'string' && k) keys.add(k);
-    } catch { /* 半截文件:跳过,释放仍按"尽力而为" */ }
+/** 属主进程还活着吗(pid 会被回收,但这里的窗口只有一次动作的时长)。 */
+function ownsAliveProcess(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;                                   // 存在(且我们有权限)
+  } catch (err) {
+    return err && err.code === 'EPERM';            // 存在但无权限查
   }
-  return [...keys];
 }
 
-function clearHoldFiles() {
+/** 读目录里所有 hold 凭据:[{file, pid, keys, stale}]。 */
+function holdEntries() {
+  const now = Date.now();
+  const out = [];
   for (const file of holdFiles()) {
-    try { unlinkSync(join(RUNTIME_DIR, file)); } catch { /* 已被并发清理 */ }
+    let body = null;
+    try { body = JSON.parse(readFileSync(join(RUNTIME_DIR, file), 'utf8')); } catch { body = null; }
+    const list = Array.isArray(body?.keys) ? body.keys : (Array.isArray(body?.held) ? body.held : []);
+    let stale = false;
+    try { stale = now - statSync(join(RUNTIME_DIR, file)).mtimeMs > STALE_HOLD_MS; } catch { stale = true; }
+    out.push({ file, pid: Number(body?.pid), keys: list.filter((k) => typeof k === 'string' && k), stale });
   }
+  return out;
+}
+
+/**
+ * 这份凭据该由我收尾吗:**属主已不在**(或超期/读不出属主)才算。
+ *
+ * ⚠️ 属主还活着的凭据一律不碰(0.2.412 delta 审查 D-2):`RUNTIME_DIR` 是同一用户共享的,
+ * 同机可能同时跑着另一个 cc-gui 会话,它的 helper 正拖拽时会往这个目录里写 `hold-<pid>.json`
+ * (`keys` 里有 `MOUSE_LEFT`)—— 我们替它"收尾"就是当场把它的拖拽松开、还删掉它的凭据。
+ * 那本侧 helper 若只是"父进程死了但自己还活着",不需要我们救:helper 的层 3(`_start_guard`)
+ * 持有父进程的 SYNCHRONIZE 句柄,父进程一死 200ms 内自己补发抬起并 `os._exit`。
+ */
+function isOrphanEntry(entry) {
+  return entry.stale || !ownsAliveProcess(entry.pid);
+}
+
+/** 补发抬起 + 清掉这些凭据(venv 缺失时只清不抬:没有执行层可用,是"尽力而为"的边界)。 */
+function releaseEntries(entries) {
+  if (!entries.length) return false;
+  const keys = new Set();
+  for (const entry of entries) for (const k of entry.keys) keys.add(k);
+  if (VENV_PY && HELPER && existsSync(VENV_PY) && existsSync(HELPER)) {
+    try {
+      spawnSync(VENV_PY, [HELPER, 'release-hold', ...(keys.size ? ['--keys', [...keys].join(',')] : [])],
+        { timeout: 5000, windowsHide: true, stdio: 'ignore' });
+    } catch { /* 释放尽力而为:失败也不能让守护进程卡住 */ }
+  }
+  for (const entry of entries) {
+    try { unlinkSync(join(RUNTIME_DIR, entry.file)); } catch { /* 已被并发清理 */ }
+  }
+  sweepTemp();
+  return true;
+}
+
+/** 写盘中途崩溃留下的 .tmp(先写 tmp 再 rename)一并收掉。 */
+function sweepTemp() {
   try {
     for (const f of readdirSync(RUNTIME_DIR)) {
       if (/^hold-.*\.json\.tmp$/.test(f)) { try { unlinkSync(join(RUNTIME_DIR, f)); } catch { /* 同上 */ } }
@@ -51,32 +94,25 @@ function clearHoldFiles() {
   } catch { /* 目录不存在 */ }
 }
 
-/** 启动时清过期垃圾:上次崩溃留下的 hold 文件不该被当成"还有键按着"。 */
-function pruneStale() {
-  const now = Date.now();
-  for (const file of holdFiles()) {
-    try {
-      if (now - statSync(join(RUNTIME_DIR, file)).mtimeMs > STALE_HOLD_MS) unlinkSync(join(RUNTIME_DIR, file));
-    } catch { /* 已被并发清理 */ }
-  }
+/**
+ * 启动时的收尾:**把上一次会话留下的按住键抬起来**,而不是把凭据一删了之。
+ * 发版说明承诺的"下一次启动会把按住的键抬起来"就是这里(0.2.412 审查 建议-2:旧版只 unlink)。
+ * 只处理孤儿凭据(判据见 isOrphanEntry)。
+ */
+function releaseLeftovers() {
+  releaseEntries(holdEntries().filter(isOrphanEntry));
 }
 
 let released = false;
+/** 父进程死掉(管道 EOF)⇒ 收尾:同样只收孤儿凭据。 */
 function releaseAndExit() {
   if (released) return;
   released = true;
-  const keys = readKeys();
-  if (VENV_PY && HELPER && existsSync(VENV_PY) && existsSync(HELPER)) {
-    try {
-      spawnSync(VENV_PY, [HELPER, 'release-hold', ...(keys.length ? ['--keys', keys.join(',')] : [])],
-        { timeout: 5000, windowsHide: true, stdio: 'ignore' });
-    } catch { /* 释放尽力而为:失败也不能让守护进程卡住 */ }
-  }
-  clearHoldFiles();
+  releaseEntries(holdEntries().filter(isOrphanEntry));
   process.exit(0);
 }
 
-pruneStale();
+releaseLeftovers();
 
 // 父进程死掉 ⇒ 管道写端关闭 ⇒ 'end'/'close'。stdin 必须 resume 才会流动。
 process.stdin.resume();

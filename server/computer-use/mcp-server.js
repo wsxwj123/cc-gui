@@ -34,7 +34,8 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import {
   GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, STAMP_FILE, VENV_PY,
-  appGranted, ensureRuntime as ensureRuntimeImpl, findPython3, readGrants, screenScopeGranted,
+  appGranted, ensureRuntime as ensureRuntimeImpl, findPython3, normalizeAppId, readGrants,
+  sameAppId, screenScopeGranted,
 } from './cu-common.js';
 
 const PLATFORM = platform();
@@ -130,12 +131,28 @@ async function runHelper(args, { timeoutMs = 20_000, input } = {}) {
     p.stdout.on('data', (d) => { stdout += d; });
     p.stderr.on('data', (d) => { stderr += d; });
     p.on('error', (e) => { done(); reject(e); });
-    p.on('exit', () => {
+    p.on('exit', (code) => {
       done();
+      // 层 4 的触发条件(§3.2 B-2;0.2.412 审查 建议-1):**只要 helper 退出后 hold 文件还在**,
+      // 就说明可能有按住的键没人抬 —— 不只是"超时"这一条路径。EDR/杀软终止 python.exe
+      // (非超时、非零退出)时,层 2 的 watcher 只在 mcp-server 自己死掉时才醒,所以那时
+      // 只有这里能收尾。mac 不走这条(它靠可捕获的 SIGTERM + up_on_abort)。
+      if (IS_WIN) {
+        if (timedOut) {
+          // 超时:先 SIGKILL 所有**本进程的** helper(杀完不可能再有人按下,消除 TOCTOU),再释放。
+          // deadPids = 刚触发 exit 的这个 + 马上要被杀的这些(见 shutdown 的两条硬约束):
+          // 绝不能是"目录里所有凭据的属主" —— 那会把别的会话的拖拽一起抬掉。
+          const mine = [p.pid, ...[...activeHelpers].map((x) => x.pid)];
+          killAllHelpers();
+          releaseHeldKeys('timeout', { onlyDeadOwners: true, deadPids: mine });
+        } else if (hasOrphanHold()) {
+          // 非超时异常退出(EDR 杀 python.exe 等):只抬"属主已经不在了"的那份 ——
+          // 判据是"存在属主已死的凭据",而不是"存在任何 hold 文件":后者会让**另一个正在拖拽的
+          // helper** 每退出一个无关 helper 就被 release-hold 扫一次(还会把它的左键松开)。
+          releaseHeldKeys(`helper-exit(${code})`, { onlyDeadOwners: true, deadPids: [p.pid] });
+        }
+      }
       if (timedOut) {
-        // 层 4(§3.2 B-2,限定 Windows):先 SIGKILL 所有 helper(杀完不可能再有人按下,
-        // 消除 TOCTOU),再 spawnSync 补发 release-hold。macOS 保持 v1 行为(SIGTERM 宽限已够)。
-        if (IS_WIN) { killAllHelpers(); releaseHeldKeys('timeout'); }
         // 稳定错误码(helperFailure 认 code 不认文案);被终止后的 stdout 不可信,一律按超时报
         reject(Object.assign(new Error(`helper 超时(${timeoutMs}ms): ${args[0]}`), { code: 'CU_TIMEOUT' }));
         return;
@@ -162,23 +179,39 @@ function holdFiles() {
   } catch { return []; }
 }
 
-function readHeldKeys() {
-  const keys = new Set();
-  for (const file of holdFiles()) {
-    try {
-      const body = JSON.parse(readFileSync(join(RUNTIME_DIR, file), 'utf8'));
-      for (const k of Array.isArray(body?.keys) ? body.keys : (Array.isArray(body?.held) ? body.held : [])) {
-        if (typeof k === 'string' && k) keys.add(k);
-      }
-    } catch { /* 半截文件:跳过,释放仍按"尽力而为" */ }
-  }
-  return [...keys];
+/** 至少有一份"属主已经不在"的 hold 凭据吗(层 4 非超时路径的触发条件)。 */
+function hasOrphanHold() {
+  return holdEntries().some((e) => !holdOwnerAlive(e.pid));
 }
 
-function clearHoldFiles() {
-  for (const file of holdFiles()) {
-    try { unlinkSync(join(RUNTIME_DIR, file)); } catch { /* 已被并发清理 */ }
+/** hold 文件的属主进程还活着吗(Windows 上 pid 会被回收,但这里的窗口只有一次动作的时长)。 */
+function holdOwnerAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;                         // 存在(且我们有权限)
+  } catch (err) {
+    return Boolean(err) && err.code === 'EPERM';   // 存在但无权限查
   }
+}
+
+/** 读出所有 hold 文件:[{file, pid, keys}]。半截文件按"空 keys"处理(仍会被清掉)。 */
+function holdEntries() {
+  const out = [];
+  for (const file of holdFiles()) {
+    let body = null;
+    try { body = JSON.parse(readFileSync(join(RUNTIME_DIR, file), 'utf8')); } catch { body = null; }
+    const list = Array.isArray(body?.keys) ? body.keys : (Array.isArray(body?.held) ? body.held : []);
+    out.push({
+      file,
+      pid: Number(body?.pid),
+      keys: list.filter((k) => typeof k === 'string' && k),
+    });
+  }
+  return out;
+}
+
+function sweepHoldTmp() {
   try {
     for (const f of readdirSync(RUNTIME_DIR)) {
       if (/^hold-.*\.json\.tmp$/.test(f)) { try { unlinkSync(join(RUNTIME_DIR, f)); } catch { /* 同上 */ } }
@@ -186,15 +219,35 @@ function clearHoldFiles() {
   } catch { /* 目录不存在 */ }
 }
 
-/** 同步补发抬起(spawnSync:process.on('exit') 里只能跑同步代码)。限定 Windows。 */
-function releaseHeldKeys(reason) {
+/**
+ * 同步补发抬起(spawnSync:process.on('exit') 里只能跑同步代码)。限定 Windows。
+ *
+ * `onlyDeadOwners` 决定"抬谁"(0.2.412 delta 审查 第 3 条):
+ *   · false(超时 / 关停路径):这两条路径都是**先 killAllHelpers()** 再释放 —— 所有 helper
+ *     都已被同步终止,释放全部是安全的、也是必须的(不能漏)。
+ *   · true(helper 非超时异常退出,如 EDR 杀 python.exe):此时**可能还有别的 helper 正按着**
+ *     (拖拽是唯一长时间持有的动作)。只释放"属主已不在"的那些,并把它们的 hold 文件一起删掉;
+ *     活着的属主那份凭据**原样保留**(既不动它的键,也不删它的文件)。
+ */
+function releaseHeldKeys(reason, { onlyDeadOwners = false, deadPids = [] } = {}) {
   if (!IS_WIN) return false;
-  const keys = readHeldKeys();
+  const entries = holdEntries();
+  const knownDead = new Set(deadPids.map(Number));
+  // deadPids = 调用方**已经确定死亡**的 pid(比如刚刚触发 exit 事件的那个 helper:子进程刚退出时
+  // 句柄可能还在回收,`kill(pid,0)` 会短暂地仍报存活 —— 那是唯一会漏掉自己那份凭据的窗口)
+  const targets = onlyDeadOwners
+    ? entries.filter((e) => knownDead.has(e.pid) || !holdOwnerAlive(e.pid))
+    : entries;
+  const keys = new Set();
+  for (const entry of targets) for (const k of entry.keys) keys.add(k);
   try {
-    spawnSync(VENV_PY, [HELPER, 'release-hold', ...(keys.length ? ['--keys', keys.join(',')] : [])],
+    spawnSync(VENV_PY, [HELPER, 'release-hold', ...(keys.size ? ['--keys', [...keys].join(',')] : [])],
       { timeout: 5000, windowsHide: true, stdio: 'ignore' });
   } catch { /* 释放尽力而为:绝不因为释放失败把收尾搞崩 */ }
-  clearHoldFiles();
+  for (const entry of targets) {
+    try { unlinkSync(join(RUNTIME_DIR, entry.file)); } catch { /* 已被并发清理 */ }
+  }
+  sweepHoldTmp();
   return true;
 }
 
@@ -336,6 +389,10 @@ const WIN_VK = {
   '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
   tab: 0x09, space: 0x20, backspace: 0x08, escape: 0x1b, return: 0x0d,
   arrow_left: 0x25, arrow_up: 0x26, arrow_right: 0x27, arrow_down: 0x28,
+  // 真正的 Delete 键。契约里 `delete` 是 backspace 的别名(两端同义,check-cu-keys 锁死),
+  // Windows 上想按标着 Delete 的那个键就用这两个名字 —— **描述里承诺过的键名必须在这里认**,
+  // 否则模型照描述调用会拿到 CU_UNSUPPORTED_KEY(0.2.412 delta 审查 D-1)。
+  vk_delete: 0x2e, del: 0x2e,
 };
 
 /** Windows 侧解析(VK 表);mac 侧走下面的老实现,两边互不影响。 */
@@ -362,6 +419,8 @@ function parseKeySpecWin(raw) {
     key = lower;
     unicode = lower;
   }
+  // 具名键(不是单字符也不是别名):先查 WIN_VK,再决定整串拒绝 —— `vk_delete`/`del` 就走这条
+  if (!key && Object.prototype.hasOwnProperty.call(WIN_VK, lower)) key = lower;
   if (!key) return { ok: false };                          // "f13" / "unknown_key"
   if (key === 'enter') key = 'return';
   const vk = WIN_VK[key];
@@ -527,8 +586,10 @@ async function listWindows() {
 }
 
 function findTargetWindow(windows, target) {
+  // bundleId 的比较走平台口径(mac 精确;Windows 归一化大小写/分隔符)—— 授权表里存的可能是
+  // 手填的另一种写法,窗口路径来自内核,不归一化就会"授权了却找不到窗口"(0.2.412 审查 必修-5)。
   return windows.find((w) => w.pid === target.pid && Number(w.id) === target.windowId
-    && w.bundleId === target.bundleId) || null;
+    && sameAppId(w.bundleId, target.bundleId)) || null;
 }
 
 /** 目标解析:①授权 ②窗口查找。返回 {ok:true, window} 或失败码。 */
@@ -763,7 +824,8 @@ const WIN_TOOL_DESCRIPTIONS = {
   key: '按快捷键/单键,如 "ctrl+a"、"return"、"escape"、"arrow_left"。'
     + '支持字母/数字、return/enter、escape/esc、tab、space、backspace/delete、up/down/left/right(=arrow_*),'
     + '修饰符 ctrl/control、shift、alt/option 用 + 连接(大小写忽略;**cmd 是 macOS 专用修饰符,在 Windows 上整串拒绝**)。'
-    + '整串先校验再投递:非法键不产生部分按键。Windows 上组合键没有对应的 UI Automation pattern,'
+    + '整串先校验再投递:非法键不产生部分按键。**Windows 上 delete 与 backspace 同义(都是退格,契约与 macOS 一致);'
+    + '标着 Delete 的那个键用 vk_delete 或 del(VK_DELETE 0x2E)**。Windows 上组合键没有对应的 UI Automation pattern,'
     + '后台按键以窗口消息投递执行且**读不回目标文本**(verification 恒为 unknown,不声称按下了)。'
     + `${WIN_LADDER_NOTE}${ACTION_NOTE}`,
 };
@@ -1266,16 +1328,18 @@ async function toolWindowList() {
   } catch (error) {
     return { receipt: fail('CU_TARGET_LOOKUP_FAILED', { message: `窗口查询失败:${String(error.message).slice(0, 200)}` }) };
   }
-  const allowed = new Set(Object.keys(grants.apps));
-  const windows = listing.windows.filter((w) => allowed.has(w.bundleId));
+  const allowedList = Object.keys(grants.apps);
+  const allowed = new Set(allowedList.map((id) => normalizeAppId(id)));
+  const windows = listing.windows.filter((w) => allowed.has(normalizeAppId(w.bundleId)));
   const front = listing.frontmost;
-  const frontAllowed = Boolean(front) && allowed.has(front.bundleId);
+  const frontAllowed = Boolean(front) && allowed.has(normalizeAppId(front.bundleId));
   const frontText = front
     ? (frontAllowed ? `前台应用: ${front.name} (pid ${front.pid});` : '前台应用: (未授权应用,不显示);')
     : '前台应用: (未知);';
   const lines = windows.map((w) => `#${w.id} pid=${w.pid} [${w.bundleId}] ${String(w.title || '').slice(0, 120)} `
     + `(${w.bounds.x},${w.bounds.y} ${w.bounds.w}x${w.bounds.h})`);
-  const text = `${frontText}\n窗口 ${windows.length} 个(仅已授权应用,逻辑坐标):\n${lines.join('\n')}`;
+  const coordNote = IS_WIN ? '物理像素,与截图像素同一坐标系' : '逻辑坐标';
+  const text = `${frontText}\n窗口 ${windows.length} 个(仅已授权应用,${coordNote}):\n${lines.join('\n')}`;
   return {
     receipt: {
       isError: false,
@@ -1284,7 +1348,7 @@ async function toolWindowList() {
         ok: true, actionId: null, method: 'passive', target: null, verification: 'not-applicable',
         // 模型读的是结构面:未授权前台应用在这里同样不给 pid/name/bundleId(与文本面口径一致,合同 L69)
         state: 'not-applicable', windows, frontmost: frontAllowed ? front : null,
-        authorizedApps: [...allowed],
+        authorizedApps: allowedList,
       },
     },
   };
@@ -1729,7 +1793,17 @@ function killAllHelpers() {
 // 层 4(关停路径,§3.2 B-2):Windows 上 SIGTERM/SIGINT 也是 TerminateProcess,helper 来不及
 // 自己补发抬起 ⇒ 先杀(杀完不可能再有人按下),再同步补一次 release-hold。macOS 有可捕获的
 // SIGTERM 宽限,保持 v1 行为(releaseHeldKeys 在非 win32 上是 no-op)。
-function shutdown() { killAllHelpers(); releaseHeldKeys('shutdown'); }
+// 关停路径:先 SIGKILL 所有**本进程的** helper,再补发抬起。两条硬约束(0.2.412 delta 审查 D-2):
+//  ① deadPids 只能是"我刚杀掉的"这些 pid —— 绝不能是"目录里所有凭据的属主":
+//     RUNTIME_DIR 是同一用户共享的,另一个会话的 helper 可能正按着(拖拽),把它的 pid 塞进来
+//     会让属主过滤(`knownDead.has(pid) || !holdOwnerAlive(pid)`)恒真 ⇒ 抬掉并删掉别人的凭据。
+//  ② 必须在 killAllHelpers() **之前**快照:那个函数里有 activeHelpers.clear(),先杀再取会拿到空集。
+// 不属于本进程、且属主还活着的凭据一律不碰(它的层 3 会自己收尾)。
+function shutdown() {
+  const mine = [...activeHelpers].map((p) => p.pid);
+  killAllHelpers();
+  releaseHeldKeys('shutdown', { onlyDeadOwners: true, deadPids: mine });
+}
 process.on('SIGTERM', () => { shutdown(); process.exit(0); });
 process.on('SIGINT', () => { shutdown(); process.exit(0); });
 process.on('exit', shutdown);

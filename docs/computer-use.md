@@ -110,7 +110,12 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 | Windows 后台覆盖不到 Java/自绘界面/安全桌面 | 没有元素树（Java 需 Java Access Bridge；UAC/锁屏是独立桌面） | 明确报 `CU_BACKGROUND_UNSUPPORTED`，**不会**偷偷改成全局点击 |
 | Windows 上没有 `comtypes`（装不上/`comtypes.gen` 不可写） | UIA 接口靠它运行时生成 | 自动降级：点击/输入仍可用，但只走消息投递（`coverage='narrow'`、`inputMode='background-message-only'`）；自检里 `uia` 一项会报不可用 |
 | Windows 后台按键读不回、组合键只能走消息投递 | UIA 没有"投递按键"的 pattern | `key` 的 `verification` 恒为 `unknown`（不声称按下了）；组合键对浏览器类应用大概率无效 |
-| Windows 上打字/点击后系统里可能残留按住的键（超时/强杀） | `SIGTERM` 在 Windows 上是硬杀，helper 来不及自己补发抬起 | 四层释放：一批投递 + 常驻 watcher（父进程一死就补发）+ helper 侧 30s 硬上限 + 关停/超时路径先杀后释放 |
+| Windows 上打字/点击后系统里可能残留按住的键（超时/强杀） | `SIGTERM` 在 Windows 上是硬杀，helper 来不及自己补发抬起 | 四层释放：①一次 `SendInput` 打包 down…up（不产生按住窗口）②常驻 watcher（父进程一死就补抬；**启动时也会收尾上一轮残留**）③helper 侧 30s 硬上限 ④超时与**非超时异常退出**（EDR 杀 python.exe）时补抬；拖拽中途失败会保留 hold 凭据交给 ②/③ 补抬 |
+| Windows 释放时"抬错对象"（把别人的拖拽松开） | `~/.claude-gui/cu-runtime` 是**同一用户共享**的：同机可能同时跑着另一个 cc-gui 会话，它的 helper 正拖拽时会在同一个目录里留下 `hold-<pid>.json`（`keys` 里有 `MOUSE_LEFT`） | 三条收尾路径（超时 / 关停 / watcher 的启动与 EOF）**都按属主 pid 过滤**，只收"属主已不在（或凭据超期）"的那些；`release-hold` 只在**给了 `--keys` 时抬这些键**（不给才退回"ctrl/shift/alt/win + 左右键"的兜底）；没有孤儿凭据时**一次 `release-hold` 都不发**。<br>两条实现约束（`0.2.412` delta 审查 D-2）：①`deadPids` 的语义是"**调用方确定已死亡的 pid**"（我刚 SIGKILL 的、刚触发 exit 的），**绝不能**塞"目录里所有凭据的属主"（那会让过滤退化成 no-op）；②关停路径必须在 `killAllHelpers()` **之前**快照 `activeHelpers`（那个函数会 `clear()`）。<br>**属主还活着的孤儿 helper 不归这三条路管**：helper 的层 3（`_start_guard` 持有父进程的 `SYNCHRONIZE` 句柄）在父进程死后 200ms 内自己补发抬起并退出 —— 这条是已实现的保证，不是"窗口小"。 |
+| Windows：`venv` 缺失时启动收尾只清凭据、不补抬 | 补抬要走 venv 里的 Python；运行时还没建好就没有执行层可用 | watcher 启动时若 `VENV_PY`/helper 不存在：**删掉**孤儿凭据（清掉幽灵状态）但不发 `release-hold` —— 这是"尽力而为"的边界，不是"删了等于抬了"。首次「准备环境」完成后才有补抬能力 |
+| 依赖 Python **3.9+**（两个平台都是） | `findPython3` 会解析 `--version`，非 3.9+ 的候选直接跳过（Windows 上 `py` 可能挑到 2.7，macOS 上旧 `python3` 同理） | macOS 3.8 及以下：从"能跑"变成明确报错「找不到 Python（需要 3.9+）」（mac 侧的 pyobjc 依赖本来也要求较新的解释器）；Windows 会继续试下一个候选 |
+| Windows 上 `delete` 是退格不是 Delete 键 | 契约里 `delete` 是 `backspace` 的别名（与 macOS 一致，两端同义） | 想按标着 Delete 的那个键，用 `vk_delete` 或 `del`（`VK_DELETE` 0x2E）；工具描述里已写明 |
+| 手填的 exe 路径大小写/斜杠与内核路径不同 | 同一台机器上 `c:/windows/system32/notepad.exe` 与 `C:\Windows\System32\notepad.exe` 是同一个文件 | 授权查表、窗口匹配、`cursor` 的授权过滤都做**归一化**（分隔符统一 + 大小写不敏感）；`/app-info` 还会把路径换回内核里的真实大小写 |
 
 ## 排错
 
@@ -129,7 +134,7 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 | Windows：Chrome/Edge 第一次后台失败、第二次成功 | 渲染器的 accessibility 树是按需开启的，生效有延迟 | 重试一次即可（**这是已知边界，不是 bug**） |
 | Windows：`inputMode` 停在 `none`、提示"点击与输入尚未提供" | 还没建立 UIA 可用性结论（缓存缺失） | 点卡片上的「准备环境」（或「环境自检」）跑一次探测；结论出来前本仓不声明输入可用 |
 | Windows：报"helper 输出不可解析" | 中文控制台的 cp936 把 JSON 编坏了 | 已修（helper 侧 `sys.stdout.reconfigure(encoding="utf-8")` + spawn 注入 `PYTHONIOENCODING=utf-8`）；仍复现请附自检输出 |
-| Windows：安装/自检/截图时闪黑框 | 每次 helper spawn 都开控制台窗口 | 已修（7 处 spawn 全部 `windowsHide: true`）；仍闪框请报是哪一步 |
+| Windows：安装/自检/截图时闪黑框 | 每次 helper spawn 都开控制台窗口 | 已修（8 处 spawn 全部 `windowsHide: true`：`findPython3` 探测、建 venv/pip、`runHelper`、`releaseHeldKeys`、watcher、watcher 的 `release-hold`、路由侧两处）；仍闪框请报是哪一步 |
 | `computer-use` 名字注册失败 | 保留名 | 用面板安装（自动叫 `ccgui-computer-use`） |
 
 ## 文件与实现
@@ -161,7 +166,18 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 
 **没做的**：Java/自绘界面/安全桌面（UAC、锁屏）覆盖不到；UWP/WinUI 的跨进程边界可能需要 `UIAccess` 清单；Windows 上的"后台"不是 macOS 那种真后台直投，而是"元素级优先 + 消息投递兜底"的降级链。
 
-**EDR / 杀软（企业环境必读）**：本功能会做三件在安全软件视野里很显眼的事 —— ①建 venv 并联网 pip 安装（首次）；②持续抓屏；③注入键鼠输入（全局 `SendInput` 尤其像键盘记录器）。我们**不做任何绕过手段**：不隐藏进程、不注入 DLL、不改系统设置。企业机器上可能遇到 `python.exe` 被隔离、`SendInput` 被拦（回执会报 `CU_UIPI_BLOCKED`/`CU_DISPATCH_FAILED`）、或静默无效果。遇到拦截请让 IT 加白名单，而不是绕过；自检里的 `integrity_level` 与回执的稳定错误码就是给这件事定位用的。
+**EDR / 杀软（企业环境必读）**：本功能会做三件在安全软件视野里很显眼的事 —— ①建 venv 并联网 pip 安装（首次）；②持续抓屏；③注入键鼠输入（全局 `SendInput` 尤其像键盘记录器）。我们**不做任何绕过手段**：不隐藏进程、不注入 DLL、不改系统设置。企业机器上可能遇到 `python.exe` 被隔离、`SendInput` 被拦（回执会报 `CU_UIPI_BLOCKED`/`CU_DISPATCH_FAILED`）、或静默无效果。遇到拦截请让 IT 加白名单，而不是绕过；自检里的 `integrity_level` 与回执的稳定错误码就是给这件事定位用的（`integrity_level` 拿不到真实级别时自检报 `unverified`，不写 `available`）。
+
+## Windows 的三个坐标/范围口径（真机验收时按这节核对）
+
+| 口径 | 定义 | 为什么 |
+|---|---|---|
+| **坐标系** | Windows 侧**全程物理像素**：`window_list` 的 `bounds`、截图的 `pixel`/`logical`/`bounds`、以及所有输入坐标都在同一个空间 | 进程在启动时设了 DPI 感知（`SetProcessDpiAwarenessContext`），此时 `GetSystemMetrics`/`GetWindowRect`/`mss` 拿到的都是物理像素。macOS 才有"逻辑点 vs 像素"两套（输入 API 用点），Windows 不需要除以缩放 —— 除了会让 `bounds` 比真实值小 1/scale、模型按 `bounds` 中心点算就会偏 |
+| **`logical` 字段** | = 被捕获区域在**输入坐标系**里的尺寸（Windows 上就等于物理像素尺寸；mac 上是逻辑点） | 字段名沿用跨平台契约；Node 侧 `mapPoint` 用它把「图片像素」折算回「输入坐标」—— 两边不同坐标系时折算就会错 |
+| **取屏范围** | 截图只含**主屏**（`SM_CXSCREEN`/`SM_CYSCREEN`，原点 (0,0)）；`displayId` 恒为 `1`（主屏的合成 id） | 用户被问的是「允许**主屏**全部可见内容」。旧实现抓 `monitors[0]`（全显示器拼接虚拟屏）会把副屏像素也交给模型，属于同意范围被实现放大 |
+| **`scale` 字段** | 只作**报告**用（`doctor.scale` / 截图回执）；不参与任何坐标折算 | 保留它是为了让自检能核对系统缩放，而不是当作坐标系换算因子 |
+
+Windows 的窗口尺寸验收（150% 缩放机器）：截一张图，量某个窗口在图片里占的像素高，应当等于 `window_list` 里该窗口的 `bounds.h`（±1）。
 
 **平台分派点（为什么这些门不是"能力被关掉"，W-C5 三问已逐条答过）**：
 

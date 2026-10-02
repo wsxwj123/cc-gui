@@ -39,7 +39,8 @@ RUNTIME_DIR = os.path.join(os.path.expanduser("~"), ".claude-gui", "cu-runtime")
 HOLD_FILE = os.path.join(RUNTIME_DIR, "hold-%d.json" % os.getpid())
 HOLD_GUARD_MS = 30000          # 层 3 的硬上限:按住超过这个时间一定补发抬起
 HOLD_POLL_SEC = 0.2            # 层 3 的轮询周期
-STALE_HOLD_MS = 10 * 60 * 1000  # 启动时清理的过期 hold 文件(与 mcp-server 侧同量级)
+# 过期 hold 文件的清理/补发抬起由 cu-hold-watcher.js 在 mcp-server 启动时做(它才是常驻进程;
+# 单个 helper 进程只执行一条子命令,在这里做清理既没有时机也没有资格)。
 
 try:
     import ctypes.wintypes
@@ -130,12 +131,24 @@ def dpi_scale():
     return 1.0
 
 
-# ── 虚拟屏与坐标 ────────────────────────────────────────────────────────
+# ── 虚拟屏与坐标(Windows 全程物理像素)──────────────────────────────────
+# main() 开头就设了 DPI 感知 ⇒ GetSystemMetrics / GetWindowRect / mss 三者拿到的都是**物理像素**,
+# 是同一个坐标系。mac 侧才有"逻辑点 vs 像素"两套(cu_helper.py 用 NSScreen.frame 取逻辑点、mss
+# 取像素,所以才要除以 scale);Windows 上照抄那个除法会让 window_list 的 bounds 比真实值小
+# 1/scale(0.2.412 审查 必修-3),模型按 bounds 中心点算出的坐标就会偏。
+# 回执语义(与 mac 对齐的字段名,值域说明见 docs/computer-use.md):
+#   pixel   = 返回图片的像素尺寸(可能被 max_width 降采样)
+#   logical = 被捕获区域在**输入坐标系**里的尺寸(Windows = 物理像素;mac = 逻辑点)
+#   bounds  = 被捕获区域的原点与尺寸(与 logical 同坐标系;mapPoint 按它把图片像素折算回去)
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
 SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
 
 
+SM_CXSCREEN, SM_CYSCREEN = 0, 1
+
+
 def virtual_screen():
+    """物理像素的虚拟屏(所有显示器拼接)原点与尺寸 —— SendInput 归一化用。"""
     if user32 is None:
         return (0, 0, 1920, 1080)
     return (
@@ -154,14 +167,23 @@ def cursor_pos():
     return (int(pt.x), int(pt.y))
 
 
+def primary_screen():
+    """主屏(物理像素):Windows 上主屏的左上角恒为 (0,0),尺寸取 SM_CXSCREEN/SM_CYSCREEN。"""
+    if user32 is None:
+        return {"left": 0, "top": 0, "width": 1920, "height": 1080}
+    return {"left": 0, "top": 0,
+            "width": int(user32.GetSystemMetrics(SM_CXSCREEN)),
+            "height": int(user32.GetSystemMetrics(SM_CYSCREEN))}
+
+
 def window_rect(hwnd):
+    """窗口矩形,**物理像素**(DPI 感知进程的 GetWindowRect 返回的就是物理像素,不除 scale)。"""
     rect = ctypes.wintypes.RECT()
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         return None
-    scale = dpi_scale() or 1.0
     return {
-        "x": int(round(rect.left / scale)), "y": int(round(rect.top / scale)),
-        "w": int(round((rect.right - rect.left) / scale)), "h": int(round((rect.bottom - rect.top) / scale)),
+        "x": int(rect.left), "y": int(rect.top),
+        "w": int(rect.right - rect.left), "h": int(rect.bottom - rect.top),
     }
 
 
@@ -169,6 +191,35 @@ def window_pid(hwnd):
     pid = ctypes.c_ulong(0)
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     return int(pid.value)
+
+
+def normalize_app_id(value):
+    """Windows 的 exe 路径做**身份比较**时的规范形态:分隔符统一成 `\\` + 全小写。
+
+    本仓 AGENTS.md 的 Windows 口径(路径按 `[/\\]` 切、比较需大小写归一化)。授权表里存的可能是
+    手填的 `c:/windows/system32/notepad.exe`,而 `enum_windows` 报的是内核路径
+    `C:\\Windows\\System32\\notepad.exe` —— 不归一化就是"授权看着成功、动作永远被拒"(0.2.412 审查 必修-5)。
+    """
+    text = str(value or "").replace("/", "\\")
+    while "\\\\" in text:
+        text = text.replace("\\\\", "\\")
+    return text.rstrip("\\").lower()
+
+
+def canonical_path(path):
+    """把用户填的路径换回**内核里的真实大小写**(GetLongPathNameW);失败就原样返回。"""
+    if user32 is None or not path:
+        return path
+    try:
+        size = user32.GetLongPathNameW(str(path), None, 0)
+        if not size:
+            return path
+        buf = ctypes.create_unicode_buffer(size + 1)
+        if not user32.GetLongPathNameW(str(path), buf, size + 1):
+            return path
+        return buf.value or path
+    except Exception:
+        return path
 
 
 def process_image_path(pid):
@@ -240,9 +291,45 @@ def frontmost_window():
 
 
 # ── 完整性级别(UIPI 前置检查)──────────────────────────────────────────
+class SID_AND_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", ctypes.wintypes.DWORD)]
+
+
+class TOKEN_MANDATORY_LABEL(ctypes.Structure):
+    _fields_ = [("Label", SID_AND_ATTRIBUTES)]
+
+
+_ADVAPI_DECLARED = {"done": False}
+
+
+def _declare_advapi_signatures():
+    """按 MSDN 显式声明签名。
+
+    0.2.412 审查 必修-4:`GetSidSubAuthorityCount` 返回的是 **PUCHAR**,ctypes 未设 restype 时按
+    C int 处理返回值 ⇒ 64 位下指针被截断成 Python int ⇒ 随后 `count[0]` 抛 TypeError 被
+    `except` 吞成 `"unknown"`,于是 UIPI/EDR 唯一的前置诊断量永远是 unknown。
+    """
+    if _ADVAPI_DECLARED["done"] or advapi32 is None:
+        return
+    advapi32.OpenProcessToken.restype = ctypes.wintypes.BOOL
+    advapi32.OpenProcessToken.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD,
+                                          ctypes.POINTER(ctypes.wintypes.HANDLE)]
+    advapi32.GetTokenInformation.restype = ctypes.wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [ctypes.wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                             ctypes.wintypes.DWORD, ctypes.POINTER(ctypes.wintypes.DWORD)]
+    advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+    advapi32.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+    advapi32.GetSidSubAuthority.restype = ctypes.POINTER(ctypes.c_ulong)
+    advapi32.GetSidSubAuthority.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
+    kernel32.GetCurrentProcess.argtypes = []
+    _ADVAPI_DECLARED["done"] = True
+
+
 def integrity_level():
     """low/medium/high/system —— 目标级别比本进程高时,SendInput 会被 UIPI 静默丢掉。"""
     TOKEN_QUERY, TokenIntegrityLevel = 0x0008, 25
+    _declare_advapi_signatures()
     token = ctypes.wintypes.HANDLE()
     if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)):
         return "unknown"
@@ -253,12 +340,20 @@ def integrity_level():
         if not advapi32.GetTokenInformation(token, TokenIntegrityLevel, buf, size.value, ctypes.byref(size)):
             return "unknown"
         # TOKEN_MANDATORY_LABEL { SID_AND_ATTRIBUTES { Sid, Attributes } } → 取 SID 的最后一个子授权值
-        sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
-        count = advapi32.GetSidSubAuthorityCount(sid_ptr)
-        if not count:
+        label = ctypes.cast(buf, ctypes.POINTER(TOKEN_MANDATORY_LABEL)).contents
+        sid = label.Label.Sid
+        if not sid:
             return "unknown"
-        last = advapi32.GetSidSubAuthority(sid_ptr, ctypes.c_ubyte(count[0] - 1))
-        value = ctypes.cast(last, ctypes.POINTER(ctypes.c_ulong))[0]
+        count_ptr = advapi32.GetSidSubAuthorityCount(sid)
+        if not count_ptr:
+            return "unknown"
+        count = int(count_ptr.contents.value)
+        if count <= 0:
+            return "unknown"
+        last = advapi32.GetSidSubAuthority(sid, count - 1)
+        if not last:
+            return "unknown"
+        value = int(last.contents.value)
         if value >= 0x4000:
             return "system"
         if value >= 0x3000:
@@ -273,27 +368,58 @@ def integrity_level():
 
 
 # ── 截图(mss + Pillow;不用 macOS 那套外部命令行工具,那个会静默失败)──────
+# ⚠️ 字节契约:mss 的 `shot.rgb` 是 **3 字节/像素**(RGBRGB…),4 字节/像素的是 `shot.raw`/`.bgra`。
+# 这个常量必须与 `Image.frombytes` 的模式成对(3B/px ↔ "RGB",4B/px ↔ "BGRX")。
+# 0.2.412 审查 致命-1:这里曾把 3B/px 的 `.rgb` 喂给 "BGRX" ⇒ 真机上每次 screenshot 都抛
+# `ValueError: not enough image data` ⇒ 无 snapshotId ⇒ 所有坐标工具 CU_SCREENSHOT_REQUIRED。
+SHOT_BYTES_PER_PIXEL = 3
+
+
+def _primary_monitor(sct):
+    """主屏(物理像素坐标)。
+
+    授权文案问的是「允许**主屏**全部可见内容」,所以取屏范围必须只含主屏:
+    `sct.monitors[0]` 是**全体拼接虚拟屏**(副屏在主屏左侧时含负坐标、把副屏像素也交给模型),
+    0.2.412 审查 必修-2 就是这条越权。判定用"包含虚拟屏原点 (0,0) 的那块屏" —— Windows 上
+    主屏左上角恒为 (0,0),不依赖 mss 的枚举顺序。
+    """
+    monitors = list(getattr(sct, "monitors", []) or [])
+    for mon in monitors[1:]:
+        left, top = int(mon["left"]), int(mon["top"])
+        if left <= 0 < left + int(mon["width"]) and top <= 0 < top + int(mon["height"]):
+            return dict(mon)
+    if len(monitors) > 1:
+        return dict(monitors[1])
+    if monitors:
+        return dict(monitors[0])
+    return dict(primary_screen())
+
+
 def _grab(region=None):
     import mss
     with mss.mss() as sct:
-        monitor = {"left": 0, "top": 0, "width": 0, "height": 0}
-        full = sct.monitors[0]
         if region is None:
-            monitor = dict(full)
+            monitor = _primary_monitor(sct)
         else:
             left, top, width, height = region
-            monitor = {"left": left, "top": top, "width": max(1, width), "height": max(1, height)}
+            monitor = {"left": int(left), "top": int(top), "width": max(1, int(width)), "height": max(1, int(height))}
         shot = sct.grab(monitor)
         return shot, dict(monitor)
 
 
-def _downscale(raw_bgra, width, height, max_width):
-    """Pillow 降采样 + JPEG 编码(失败时明确报错,而不是静默保留一张巨图)。"""
+def _downscale(raw, width, height, max_width):
+    """Pillow 解码 + 降采样。字节数不符**立刻抛**(不许按错字节数静默解)。"""
     try:
         from PIL import Image
     except Exception as exc:
         die("CU_RUNTIME_UNAVAILABLE", "Pillow 不可用:%s" % exc)
-    img = Image.frombytes("RGB", (width, height), raw_bgra, "raw", "BGRX")
+    expected = int(width) * int(height) * SHOT_BYTES_PER_PIXEL
+    if len(raw) != expected:
+        raise ValueError(
+            "截图缓冲不是 %d 字节/像素的 RGB(应为 %d 字节,实际 %d):数据源与解码模式必须成对 "
+            "(mss 的 shot.rgb = 3B/px 配 'RGB';shot.raw/.bgra = 4B/px 配 'BGRX')"
+            % (SHOT_BYTES_PER_PIXEL, expected, len(raw)))
+    img = Image.frombytes("RGB", (width, height), raw)
     if max_width and width > max_width:
         ratio = float(max_width) / float(width)
         img = img.resize((int(width * ratio), max(1, int(height * ratio))), Image.LANCZOS)
@@ -301,19 +427,22 @@ def _downscale(raw_bgra, width, height, max_width):
 
 
 def cmd_screen_info(_args):
-    left, top, width, height = virtual_screen()
-    scale = dpi_scale() or 1.0
+    """主屏信息(物理像素)。scale 只作报告用:本进程 DPI 感知,坐标与尺寸全程物理像素。"""
+    mon = primary_screen()
+    vx, vy, vw, vh = virtual_screen()
     out({
         "ok": True,
-        "pixel": {"w": int(round(width * scale)), "h": int(round(height * scale))},
-        "logical": {"w": width, "h": height},
-        "scale": scale,
-        "bounds": {"x": left, "y": top, "w": width, "h": height},
+        "pixel": {"w": mon["width"], "h": mon["height"]},
+        "logical": {"w": mon["width"], "h": mon["height"]},   # 同坐标系:输入空间尺寸 = 物理像素
+        "scale": dpi_scale() or 1.0,
+        "bounds": {"x": mon["left"], "y": mon["top"], "w": mon["width"], "h": mon["height"]},
+        "virtual_bounds": {"x": vx, "y": vy, "w": vw, "h": vh},
         "display_id": 1,
     })
 
 
 def cmd_screenshot(args):
+    # 取屏范围 = 主屏(用户被问过的那块屏);`shot.rgb` 是 3 字节/像素,与 _downscale 的 "RGB" 成对。
     shot, monitor = _grab()
     scale = dpi_scale() or 1.0
     img = _downscale(shot.rgb, shot.width, shot.height, args.max_width)
@@ -343,13 +472,14 @@ def cmd_screenshot(args):
 
 def cmd_cursor(args):
     allowed = [b for b in (args.allow_bundle_ids or "").split(",") if b]
+    allowed_keys = set(normalize_app_id(b) for b in allowed)
     x, y = cursor_pos()
     hwnd = user32.WindowFromPoint(ctypes.wintypes.POINT(x, y)) if user32 else 0
     local = None
     if hwnd:
         pid = window_pid(hwnd)
         path = process_image_path(pid)
-        if path and (not allowed or path in allowed):
+        if path and (not allowed_keys or normalize_app_id(path) in allowed_keys):
             pt = ctypes.wintypes.POINT(x, y)
             user32.ScreenToClient(hwnd, ctypes.byref(pt))
             local = {"bundleId": path, "windowId": int(hwnd), "x": int(pt.x), "y": int(pt.y)}
@@ -370,10 +500,14 @@ def cmd_apps(_args):
 
 
 def cmd_app_info(args):
-    path = args.bundle_id or ""
-    installed = bool(path) and os.path.exists(path)
-    name = os.path.splitext(os.path.basename(path))[0] if path else None
-    out({"ok": True, "installed": installed, "name": name, "path": path if installed else None})
+    raw = args.bundle_id or ""
+    # 存在性判定用原串(Windows 文件系统本就大小写不敏感、正斜杠也合法);返回**内核路径**,
+    # 让 GUI 侧可以把规范形态存进授权表(与 enum_windows 报的路径同形)。
+    installed = bool(raw) and os.path.exists(raw)
+    path = canonical_path(raw) if installed else None
+    name = os.path.splitext(os.path.basename(path or raw))[0] if raw else None
+    out({"ok": True, "installed": installed, "name": name, "path": path,
+         "bundleId": path if installed else raw})
 
 
 # ── UI Automation(comtypes;缺失不致命)──────────────────────────────────
@@ -559,8 +693,9 @@ def post_key(hwnd, keys, vk_map):
 
 def post_scroll(hwnd, x, y, direction, amount):
     delta = 120 * int(amount) * (-1 if direction == "down" else 1)
-    cx, cy = screen_to_client(hwnd, x, y)
-    user32.PostMessageW(hwnd, WM_MOUSEWHEEL, (delta << 16) & 0xFFFFFFFF, _lparam(cx, cy))
+    # ⚠️ MSDN:WM_MOUSEWHEEL 的 lParam 用的是**屏幕坐标**(与其他鼠标消息相反),
+    # 这里不做 ScreenToClient(0.2.412 审查 建议-5)。
+    user32.PostMessageW(hwnd, WM_MOUSEWHEEL, (delta << 16) & 0xFFFFFFFF, _lparam(x, y))
     return {"ok": True, "method": "post-message", "direction": direction, "amount": int(amount)}
 
 
@@ -568,6 +703,7 @@ def post_drag(hwnd, x1, y1, x2, y2):
     cx1, cy1 = screen_to_client(hwnd, x1, y1)
     cx2, cy2 = screen_to_client(hwnd, x2, y2)
     _hold_write(["MOUSE_LEFT"])            # 顺序:先落盘,再按下
+    up_sent = False
     try:
         user32.PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, _lparam(cx1, cy1))
         steps = 8
@@ -576,8 +712,12 @@ def post_drag(hwnd, x1, y1, x2, y2):
                                 _lparam(cx1 + (cx2 - cx1) * i // steps, cy1 + (cy2 - cy1) * i // steps))
             time.sleep(0.01)
         user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, _lparam(cx2, cy2))
+        up_sent = True
     finally:
-        _hold_clear()                      # 顺序:先抬起,再清盘(上面的 up 已发出)
+        # ⚠️ 只有"抬起已发出"才清凭据(顺序:先抬起,再清盘)。中途失败时**保留** hold 文件:
+        # 那是层 2(watcher)/层 3(守护线程)唯一能知道"还按着什么"的依据(0.2.412 审查 建议-1)。
+        if up_sent:
+            _hold_clear()
     return {"ok": True, "method": "post-message", "from": [x1, y1], "to": [x2, y2]}
 
 
@@ -675,6 +815,7 @@ def global_drag(x1, y1, x2, y2):
     nx2, ny2 = _normalized_absolute(x2, y2)
     move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
     _hold_write(["MOUSE_LEFT"])            # 先落盘(拖拽是真正的"按住"动作)
+    up_sent = False
     try:
         events = [_mouse_input(nx1, ny1, 0, move), _mouse_input(0, 0, 0, MOUSEEVENTF_LEFTDOWN)]
         _send_inputs(events)
@@ -684,8 +825,11 @@ def global_drag(x1, y1, x2, y2):
             _send_inputs(events)
             time.sleep(0.01)
         _send_inputs([_mouse_input(0, 0, 0, MOUSEEVENTF_LEFTUP)])
+        up_sent = True
     finally:
-        _hold_clear()                      # 先抬起,再清盘
+        # 中途抛错(UIPI 拦截等)时**不动** hold 文件,交给守护线程/watcher 补发抬起。
+        if up_sent:
+            _hold_clear()
     return {"ok": True, "method": "global", "foreground_affected": True, "from": [x1, y1], "to": [x2, y2]}
 
 
@@ -739,7 +883,9 @@ def _utf16_units(text):
 # ── 键解析(VK 表;与 mcp-server 的 WIN_VK 同口径)────────────────────────
 VK_TABLE = {
     "return": 0x0D, "enter": 0x0D, "escape": 0x1B, "tab": 0x09, "space": 0x20,
-    "backspace": 0x08, "delete": 0x08,
+    # 契约:`delete` 与 `backspace` 同义(都是退格,与 macOS 一致,mcp-server 的键表锁死这条)。
+    # Windows 上那个标着 Delete 的键是 VK_DELETE(0x2E),单列成 vk_delete / del(0.2.412 审查 建议-3)。
+    "backspace": 0x08, "delete": 0x08, "vk_delete": 0x2E, "del": 0x2E,
     "arrow_left": 0x25, "arrow_up": 0x26, "arrow_right": 0x27, "arrow_down": 0x28,
     "shift": VK_SHIFT, "ctrl": VK_CONTROL, "alt": VK_MENU,
 }
@@ -848,19 +994,40 @@ def _start_guard():
     thread.start()
 
 
+MOUSE_KEY_NAMES = {"MOUSE_LEFT": MOUSEEVENTF_LEFTUP, "MOUSELEFT": MOUSEEVENTF_LEFTUP, "LEFT": MOUSEEVENTF_LEFTUP,
+                   "MOUSE_RIGHT": MOUSEEVENTF_RIGHTUP, "MOUSERIGHT": MOUSEEVENTF_RIGHTUP, "RIGHT": MOUSEEVENTF_RIGHTUP}
+VK_NAME_ALIASES = {"LWIN": 0x5B, "WIN": 0x5B, "LMETA": 0x5B, "RWIN": 0x5C, "RMETA": 0x5C}
+
+
 def release_all(extra_keys):
-    """补发抬起:修饰键 + 鼠标左右键(用 SendInput,与按下时同一套机制)。"""
+    """补发抬起(用 SendInput,与按下时同一套机制)。
+
+    **给了 keys 就只抬这些键**(hold 文件里记着什么就抬什么):这是为了"抬一个已经死掉的 helper 的键"
+    不会顺手把**另一个还活着的 helper** 正按着的鼠标左键松开 —— 拖拽是唯一长时间持有的动作
+    (0.2.412 delta 审查 第 3 条)。只有没给 keys 时才退回"标准一组"(ctrl/shift/alt/win + 左右键),
+    那是"不知道按了什么"的兜底。
+    """
     events = []
-    for vk in (VK_CONTROL, VK_SHIFT, VK_MENU, 0x5B, 0x5C):   # ctrl/shift/alt/LWin/RWin
-        events.append(_key_input(vk, KEYEVENTF_KEYUP))
-    for flags in (MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTUP):
-        events.append(_mouse_input(0, 0, 0, flags))
-    for raw in extra_keys:
-        try:
-            spec = parse_keys(raw)
-            events.append(_key_input(spec["vk"], KEYEVENTF_KEYUP))
-        except SystemExit:
-            continue
+    if extra_keys:
+        for raw in extra_keys:
+            name = str(raw).strip()
+            upper = name.upper()
+            if upper in MOUSE_KEY_NAMES:
+                events.append(_mouse_input(0, 0, 0, MOUSE_KEY_NAMES[upper]))
+                continue
+            if upper in VK_NAME_ALIASES:
+                events.append(_key_input(VK_NAME_ALIASES[upper], KEYEVENTF_KEYUP))
+                continue
+            try:
+                spec = parse_keys(name)
+                events.append(_key_input(spec["vk"], KEYEVENTF_KEYUP))
+            except SystemExit:
+                continue
+    else:
+        for vk in (VK_CONTROL, VK_SHIFT, VK_MENU, 0x5B, 0x5C):   # ctrl/shift/alt/LWin/RWin
+            events.append(_key_input(vk, KEYEVENTF_KEYUP))
+        for flags in (MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTUP):
+            events.append(_mouse_input(0, 0, 0, flags))
     if events and user32 is not None:
         try:
             count = len(events)
@@ -883,10 +1050,16 @@ def cmd_release_hold(args):
 
 
 # ── 输入子命令 ──────────────────────────────────────────────────────────
+def _sample_region(x, y):
+    """diff 取样区:**相对坐标**给,不夹到 0 —— 副屏在主屏左侧时负坐标是合法的
+    (旧版 `max(0, …)` 会把取样区拉到主屏左上角,弱证据指错地方;0.2.412 审查 建议-5)。"""
+    return (int(x) - 120, int(y) - 80, 240, 160)
+
+
 def _screen_diff(x, y, before):
     """截图 diff(**弱证据**):目标被遮挡/最小化时双向误判,只用来写文案,不判失败。"""
     try:
-        shot, _monitor = _grab((max(0, x - 120), max(0, y - 80), 240, 160))
+        shot, _monitor = _grab(_sample_region(x, y))
         after = bytes(shot.rgb)
     except Exception:
         return None
@@ -907,7 +1080,7 @@ def _screen_diff(x, y, before):
 
 def _grab_around(x, y):
     try:
-        shot, _monitor = _grab((max(0, x - 120), max(0, y - 80), 240, 160))
+        shot, _monitor = _grab(_sample_region(x, y))
         return bytes(shot.rgb)
     except Exception:
         return None

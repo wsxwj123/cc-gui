@@ -6,7 +6,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import {
   GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, VENV_PY, capabilityReport, depsStampFor, ensureRuntime,
-  findPython3, inputModeFor, pyDepsFor, readGrants, readUiaCapability, runtimeReady,
+  findPython3, inputModeFor, normalizeAppId, pyDepsFor, readGrants, readUiaCapability, runtimeReady,
   screenScopeGranted, setGrant, writeStampFile, writeUiaCapability,
 } from '../computer-use/cu-common.js';
 
@@ -127,11 +127,25 @@ async function probeUia({ timeoutMs = 15_000 } = {}) {
   };
 }
 
-/** 探测 + 写缓存。失败也写(把"探测过、结论是不可用"记下来,与"尚未探测"区分开)。 */
-async function refreshUiaCapability() {
-  const probe = await probeUia();
-  if (!probe) return null;
-  return writeUiaCapability({ uia: probe.uia, comtypes: probe.comtypes });
+/**
+ * 探测 + 写缓存。失败也写(把"探测过、结论是不可用"记下来,与"尚未探测"区分开)。
+ * **单飞**:缓存缺失时 /status 会后台补探测,而卡片反复挂载/连点会并发请求 ⇒ 没有去重就会
+ * 同时起好几个 python(0.2.412 审查 建议-5)。写缓存失败(杀软/OneDrive 占位)向外抛,由调用方决定口径。
+ */
+let uiaProbeInFlight = null;
+function refreshUiaCapability() {
+  if (!IS_WIN) return Promise.resolve(null);
+  if (uiaProbeInFlight) return uiaProbeInFlight;
+  uiaProbeInFlight = (async () => {
+    try {
+      const probe = await probeUia();
+      if (!probe) return null;
+      return writeUiaCapability({ uia: probe.uia, comtypes: probe.comtypes });
+    } finally {
+      uiaProbeInFlight = null;
+    }
+  })();
+  return uiaProbeInFlight;
 }
 
 /** 顶层平台字段:只在 win32 出现(W-D02:darwin 的 /status 不带这三个键)。 */
@@ -193,7 +207,13 @@ router.post('/computer-use/prepare', async (req, res) => {
       error: `准备运行时失败:${String(e.message || e).slice(0, 300)}`,
     });
   }
-  const cache = await refreshUiaCapability();
+  // 写缓存失败(权限/占位文件)不能把整个 /prepare 变成 500:运行时本身已经建好了。
+  let cache = null;
+  try {
+    cache = await refreshUiaCapability();
+  } catch (e) {
+    cache = null;
+  }
   res.json({
     ok: true,
     runtimeReady: runtimeReady(),
@@ -268,7 +288,11 @@ router.post('/computer-use/doctor', async (req, res) => {
       ...(IS_WIN ? {
         dpiAwareness: { status: parsed.dpi_awareness && parsed.dpi_awareness !== 'failed' ? 'available' : 'unavailable',
           detail: parsed.dpi_awareness || null },
-        integrityLevel: { status: 'available', detail: parsed.integrity_level || 'unknown' },
+        // 拿不到真实级别时不许写 available(0.2.412 审查 必修-4:旧实现恒 unknown 却报 available)
+        integrityLevel: {
+          status: parsed.integrity_level && parsed.integrity_level !== 'unknown' ? 'available' : 'unverified',
+          detail: parsed.integrity_level || null,
+        },
         uia: { status: parsed.uia === 'available' ? 'available' : 'unavailable', detail: parsed.uia_detail || null },
       } : {}),
     };
@@ -340,7 +364,8 @@ router.post('/computer-use/grants', (req, res) => {
 // 面板「添加应用」的候选名单:只回应用身份(bundleId/name/granted),不回 pid/标题/几何/像素(I3)。
 // 失败与 doctor 同体例:HTTP 恒 200 + 稳定 code(报告,不是失败请求);绝不建 venv、不写文件(I4)。
 router.get('/computer-use/apps', async (req, res) => {
-  const grantedIds = new Set(Object.keys(readGrants().apps)); // B5:请求开始时刻的一次读取
+  // B5:请求开始时刻的一次读取。比较口径与 appGranted 一致(Windows 上 exe 路径大小写/分隔符归一化)
+  const grantedIds = new Set(Object.keys(readGrants().apps).map((id) => normalizeAppId(id)));
   const r = await runHelper(['apps']);
   const failure = helperFailure(r, ['apps']);
   if (failure) return res.json({ ok: false, ...failure, apps: [] });
@@ -348,11 +373,12 @@ router.get('/computer-use/apps', async (req, res) => {
   const byId = new Map();
   for (const entry of Array.isArray(r.parsed.apps) ? r.parsed.apps : []) {
     const id = typeof entry?.bundleId === 'string' ? entry.bundleId : '';
-    if (!id || byId.has(id)) continue;
-    byId.set(id, {
+    const key = normalizeAppId(id);
+    if (!id || byId.has(key)) continue;
+    byId.set(key, {
       bundleId: id,
       name: typeof entry.name === 'string' && entry.name ? entry.name : id,
-      granted: grantedIds.has(id),
+      granted: grantedIds.has(key),
     });
   }
   const apps = [...byId.values()].sort((a, b) => (a.bundleId < b.bundleId ? -1 : a.bundleId > b.bundleId ? 1 : 0));

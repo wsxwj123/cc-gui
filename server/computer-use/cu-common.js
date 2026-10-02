@@ -77,8 +77,11 @@ export function pythonCandidates(platformName = process.platform) {
     out.push({ cmd: process.env.CCGUI_CU_PYTHON, args: [] });
   }
   if (platformName === 'win32') {
-    // python.org 安装版 / Microsoft Store 版都提供 python.exe;py launcher 用 -3 锁主版本。
-    out.push({ cmd: 'python', args: [] }, { cmd: 'py', args: ['-3'] }, { cmd: 'py', args: [] });
+    // ⚠️ 顺序:`py`(py launcher)**先于** `python`。理由:Microsoft Store 的"应用执行别名"
+    // `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe` 是个转发器 —— 无参运行会打开商店窗口
+    // (windowsHide 只隐藏控制台,挡不住这个 GUI),带参运行返回非零;真 Python 没装时白弹一次窗。
+    // py launcher 没有这个问题;两者都靠下面的"版本下限校验"兜底(见 findPython3)。
+    out.push({ cmd: 'py', args: [] }, { cmd: 'py', args: ['-3'] }, { cmd: 'python', args: [] });
     return out;
   }
   // HOME 在 Windows 上通常没有(那边是 USERPROFILE),旧写法回落 '/tmp' 在 win32 不存在。
@@ -91,13 +94,21 @@ export function pythonCandidates(platformName = process.platform) {
   return out;
 }
 
-/** 逐个试候选(带 --version 探测),返回第一个能跑起来的 {cmd,args};都没有返回 null。 */
+/**
+ * 逐个试候选(带 --version 探测),返回第一个**版本满足 3.9+** 的 {cmd,args};都没有返回 null。
+ * 为什么要解析版本:win32 的 `py` 不带 `-3` 时可能挑到系统里最老的 Python(极端情况是 2.7),
+ * 光看退出码会把 `py`(2.7)当成可用解释器。mac 侧同理(旧 python3 直接跳过)。
+ */
 export function findPython3(platformName = process.platform) {
   for (const candidate of pythonCandidates(platformName)) {
     try {
       const r = spawnSync(candidate.cmd, [...candidate.args, '--version'],
-        { timeout: 5000, windowsHide: true });
-      if (r.status === 0) return candidate;
+        { timeout: 5000, windowsHide: true, encoding: 'utf8' });
+      if (r.status !== 0) continue;
+      const out = `${r.stdout || ''}${r.stderr || ''}`;   // Python 2 把版本打到 stderr
+      const m = /Python\s+(\d+)\.(\d+)/.exec(out);
+      if (!m) continue;
+      if (Number(m[1]) === 3 && Number(m[2]) >= 9) return candidate;
     } catch { /* 试下一个 */ }
   }
   return null;
@@ -398,18 +409,49 @@ export function setGrant({ bundleId = null, name = null, granted = true, screenS
       : { granted: false, grantedAt: null };
   }
   if (bundleId) {
+    // 归一化去重:同一应用换个大小写/斜杠再授权一次,应该覆盖原来那条而不是并存两条
+    // (并存两条时 appGranted 仍能命中,但面板会显示重复行)。
+    const key = normalizeAppId(bundleId);
+    const existingKey = Object.keys(next.apps).find((k) => normalizeAppId(k) === key) || bundleId;
     if (granted) {
-      next.apps[bundleId] = { name: name || current.apps[bundleId]?.name || bundleId,
+      next.apps[existingKey] = { name: name || current.apps[existingKey]?.name || bundleId,
         grantedAt: new Date().toISOString() };
     } else {
-      delete next.apps[bundleId];
+      delete next.apps[existingKey];
     }
   }
   return writeGrants(next);
 }
 
-export function appGranted(grants, bundleId) {
-  return Boolean(bundleId && grants.apps && grants.apps[bundleId]);
+/**
+ * 应用身份的规范形态(仅用于**比较/查表**,不改写用户看到的原文)。
+ * Windows 的应用身份是 exe 路径:`C:\\Windows\\System32\\notepad.exe` 与
+ * `c:/windows/system32/notepad.exe` 是同一个应用(文件系统本就大小写不敏感、正斜杠合法),
+ * 不归一化就会出现"面板说已授权、动作永远 CU_APP_NOT_ALLOWED"(0.2.412 审查 必修-5)。
+ * macOS 的 bundleId 大小写敏感 ⇒ 原样返回(行为与修前一致)。
+ */
+export function normalizeAppId(id, platformName = process.platform) {
+  if (typeof id !== 'string' || !id) return '';
+  if (platformName !== 'win32') return id;
+  let text = id.replace(/\//g, '\\').replace(/\\+/g, '\\');
+  while (text.endsWith('\\')) text = text.slice(0, -1);
+  return text.toLowerCase();
+}
+
+/** 两个应用身份是不是同一个(平台口径见 normalizeAppId)。 */
+export function sameAppId(a, b, platformName = process.platform) {
+  const na = normalizeAppId(a, platformName);
+  return na !== '' && na === normalizeAppId(b, platformName);
+}
+
+export function appGranted(grants, bundleId, platformName = process.platform) {
+  if (!bundleId || !grants.apps) return false;
+  if (grants.apps[bundleId]) return true;
+  // 归一化兜底:授权表里存的可能是另一种大小写/分隔符写法(手填、旧数据、别的工具写入)。
+  // platformName 是给纯函数测试注入用的(生产走默认 = 当前进程平台)。
+  const key = normalizeAppId(bundleId, platformName);
+  if (!key) return false;
+  return Object.keys(grants.apps).some((k) => normalizeAppId(k, platformName) === key);
 }
 
 export function screenScopeGranted(grants) {
