@@ -32,7 +32,7 @@
 //
 // 只由 run.sh 调起(它负责起隔离实例 + dev server 并注入 R143_UI_BASE / R143_CTL)。
 import { test, expect } from '@playwright/test';
-import { B, CNT, CNT_MSG_ONLY, CNT_TOKEN, NAV, POOL, live } from './helpers/fixtures.mjs';
+import { B, CNT, CNT_ARCH, CNT_MSG_ONLY, CNT_TOKEN, NAV, POOL, live } from './helpers/fixtures.mjs';
 import {
   armPermissionCard, boot, clearSearchBtn, clearSearchHintBtn, confirmHost, denyBtn, disarmPermissionCard,
   filterHint, hitRow, openDeleteConfirm, openFixtureProject, releaseAllRuns, releaseChunk2, searchInput,
@@ -43,8 +43,8 @@ const CTL = process.env.R143_CTL;
 
 // 跑回合的那条 / 当"被过滤见证"的那条,按用例分开:回合跑完后应用会改写会话标题,
 // 同一轮运行里再拿旧标记去找那条会话行就会找不到(TEST-PLAN §5 的夹具纪律)。
-const RUN_OF = { S3: POOL[0], S4: POOL[1], S7: POOL[3] };
-const WITNESS_OF = { S3: POOL[5], S4: POOL[4] };
+const RUN_OF = { S3: POOL[0], S4: POOL[1], S4b: POOL[2], S7: POOL[3] };
+const WITNESS_OF = { S3: POOL[5], S4: POOL[4], S4b: POOL[5] };
 
 /** 把搜索词打进侧栏搜索框并等界面真的按它过滤(前提条件,失败要说清是哪一步)。 */
 async function searchAndAssertFiltered(page, mark, hiddenMark = B.mark) {
@@ -118,6 +118,54 @@ test('S2 [回归网] 点搜索结果行:搜索词清空、列表恢复、被点�
     '被点的会话应成为当前会话').toBeVisible({ timeout: 10_000 });
 });
 
+test('S2b [契约] 命中行必须带产品句柄 data-cgui="search-hit"', async ({ page }) => {
+  await boot(page);
+  await openFixtureProject(page, NAV.mark);
+  await expect(sessionRow(page, B.mark), '基线:夹具项目下应能看到另一条会话').toBeVisible({ timeout: 20_000 });
+
+  // 搜 NAV(默认的"被过滤见证"就是 B)⇒ B 被过滤掉,NAV 那行是"会话行 + 命中行都在"的那种
+  const search = await searchAndAssertFiltered(page, NAV.mark);
+  const hit = hitRow(page, NAV.mark);
+
+  // ① 命中行必须真的带这个句柄 —— 少了它,helpers 的双选择器会**静默退回**"侧栏里的原生 button",
+  //    没人报警,而"命中行 vs 会话行"的消歧又变回靠标签/时序的隐式约定。
+  await expect(hit, '命中行应带 data-cgui="search-hit"').toHaveAttribute('data-cgui', 'search-hit', { timeout: 15_000 });
+  // ② 阴性一半:会话行的句柄是 session-row,不是 search-hit(两个元素不许共用一个句柄)
+  await expect(sessionRow(page, NAV.mark), '会话行的句柄应是 session-row').toHaveAttribute('data-cgui', 'session-row');
+  await expect(sessionRow(page, NAV.mark), '会话行不该带 search-hit').not.toHaveAttribute('data-cgui', 'search-hit');
+
+  // 收尾:清掉搜索词,别把过滤态留给后面的用例(本用例自己不做别的断言)
+  await clearSearchHintBtn(page).click();
+  await expect(search, '收尾:搜索词应被清空').toHaveValue('', { timeout: 5_000 });
+});
+
+test('S2c [契约·冷启动异步分支] 项目会话列表还没加载时点命中行:搜索词照样清空、会话照样打开', async ({ page }) => {
+  // 冷启动 = 这一页从没展开过夹具项目 ⇒ `sessionsByProject[hash]` 里没有这条会话
+  // ⇒ handlePickHit 走 `if (!known)` 那条异步分支(UnifiedSidebar.jsx:875-885:
+  //    先用命中行造最小对象顶上,再 fetchSessions(hash).then() 用完整对象补齐)。
+  // 注意:全程不再点第二次,断言的就是"这一下"(清词发生在 :886,与那一轮往返无关)。
+  await boot(page);
+  // 前提:冷启动 ⇒ 侧栏里**一条会话行都没有**(项目没展开、会话列表没加载)——
+  // 这就是"走 !known 那条异步分支"的判据(不能用 searchAndAssertFiltered:它要求会话行已存在)
+  await expect(sessionRows(page), '前提:冷启动时侧栏还没有该项目的会话行').toHaveCount(0);
+  const search = searchInput(page);
+  await search.click();
+  await search.fill(NAV.mark);
+  await expect(search, '搜索词应进到搜索框').toHaveValue(NAV.mark, { timeout: 5_000 });
+
+  const hit = hitRow(page, NAV.mark);
+  await expect(hit, '冷启动时也应出现消息命中行').toBeVisible({ timeout: 15_000 });
+  await hit.click();
+
+  // ① 搜索词照样被清空(修前/修后都该如此 —— 这条锁的是"冷启动那条路不许漏清词")
+  await expect(search, '冷启动点命中行后搜索词也应被清空').toHaveValue('', { timeout: 5_000 });
+  // ② 会话照样被打开(命中行造的最小对象顶上 + 异步补齐之后仍然停在它上面)
+  await expect(page.locator('[role=button].sidebar-item.active').filter({ hasText: NAV.mark }).first(),
+    '冷启动点命中行后,被点的会话应成为当前会话(异步补齐不抢走选择)').toBeVisible({ timeout: 20_000 });
+  // ③ 补齐之后侧栏真的把该项目的会话列出来了(证明异步那一轮确实跑过,不是"压根没走这条路")
+  await expect(sessionRow(page, B.mark), '异步补齐后该项目会话应已进侧栏').toBeVisible({ timeout: 20_000 });
+});
+
 test('S3 [核心·新缺陷] 回合在跑时按一次 Escape:搜索词清空,回合不许被停', async ({ page }) => {
   const run = RUN_OF.S3;
   const witness = WITNESS_OF.S3;
@@ -164,13 +212,62 @@ test('S4 [阴性对照] 搜索词为空时按 Escape:回合仍然照旧被停', 
   await search.press('Escape');
 
   // 空搜索词 ⇒ 侧栏不许接管,这一击照旧落到会话级语义:把正在跑的回合停掉
+  // (判据 = 界面不再认为这一轮在跑:停止键消失 —— 与 r118/r119 的既有口径一致)
   await expect(stopBtn(page), '搜索词为空时按 Escape,回合应照旧被停(停止键应消失)')
     .toHaveCount(0, { timeout: 15_000 });
-  // 反向证据:回合真被停了,再放行第二块也不该画出来
+  // ⚠️ 这里**不**再断言"放行第二块不该画出来":实测该断言会 flaky(2026-10-02 单跑 3 次:红/红/绿)。
+  //    原因是"停止是否真的下达到子进程"本身偶发不成立(`.phase` 已走到 `chunk2`),那属 r119 的考题面
+  //    (停止链路/不许谎报),不是 r143 的侧栏搜索面 —— 详见 TEST-PLAN §3.8。本用例只守"这一击归会话级语义"。
+});
+
+test('S4b [守卫·IME] 组字中按 Escape:侧栏不许接管(词留着),也不许把回合停掉', async ({ page }) => {
+  const run = RUN_OF.S4b;
+  const prompt = 'R143 S4b:这一轮要一直跑着,用来验证 IME 组字时的 Esc 不接管。';
+
+  await boot(page);
+
+  // ── 前置自证(先做,此刻没有搜索词也没有回合 ⇒ 派发不产生任何副作用)────────────
+  // 浏览器里造不出真输入法组字序列,只能派发一个带 isComposing 的 keydown(≈"候选词期间按 Esc")。
+  // 但"派发了"不等于"监听者看得到":这里用一个**原生捕获监听**取回事件的真实读数,
+  // 证明这一击在原生层就是 isComposing=true(否则本用例只是"测不到",不能算数)。
+  const seen = await page.evaluate(() => new Promise((resolve) => {
+    const el = document.querySelector('[data-cgui="sidebar-search"]');
+    const onKey = (e) => {
+      window.removeEventListener('keydown', onKey, true);
+      resolve({ isComposing: e.isComposing, keyCode: e.keyCode, key: e.key });
+    };
+    window.addEventListener('keydown', onKey, true);
+    el.focus();
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', isComposing: true, bubbles: true, cancelable: true }));
+  }));
+  expect(seen.isComposing, `前置自证:原生监听应看到 isComposing=true(实测 ${JSON.stringify(seen)})`).toBe(true);
+  expect(seen.key, '前置自证:这一击的 key 是 Escape').toBe('Escape');
+  test.info().annotations.push({
+    type: 'IME 近似',
+    description: `派发 isComposing=true 的 keydown(原生读数 ${JSON.stringify(seen)}),非真输入法组字 —— 见 TEST-PLAN §4`,
+  });
+
+  // ── 正式场景:搜索词非空 + 回合在跑 ⇒ 组字中的这一击谁都不许接 ────────────────
+  await openFixtureProject(page, NAV.mark);
+  await startTurn(page, run, prompt);
+
+  const search = await searchAndAssertFiltered(page, NAV.mark, B.mark);
+  await expect(stopBtn(page), '前提:这一轮确实在跑').toHaveCount(1, { timeout: 5_000 });
+
+  await search.evaluate((el) => {
+    el.focus();
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', isComposing: true, bubbles: true, cancelable: true }));
+  });
+  await page.waitForTimeout(1_500);   // 给停止链路落定的时间(同 S3)
+
+  // ① 组字中的这一击不许被侧栏搜索接管 ⇒ 搜索词原样留着
+  await expect(search, '组字中按 Escape 不该被侧栏搜索接管(搜索词应原样留着)').toHaveValue(NAV.mark);
+  // ② 也不许把它当"停回合":会话级 Esc 自己也有 isComposing 守卫(App.jsx:7609)
+  await expect(stopBtn(page), '组字中按 Escape 不该把正在跑的回合停掉').toHaveCount(1, { timeout: 5_000 });
+  // ③ 硬证据:放行第二块,画得出来才算这一轮真的没被停
   releaseChunk2(CTL, run.sid);
-  await page.waitForTimeout(6_000);
-  await expect(page.getByText(live.chunk2(run.sid), { exact: false }), '回合已被停,第二块不该再出现')
-    .toHaveCount(0);
+  await expect(page.getByText(live.chunk2(run.sid), { exact: false }).first(),
+    '放行第二块后应看到它 —— 组字中的那一击没停掉回合').toBeVisible({ timeout: 20_000 });
 });
 
 test('S5 [新契约·P3] 有词时出现 × 清空钮:点它清词并恢复列表;无词时它不存在', async ({ page }) => {
@@ -236,6 +333,27 @@ test('S5c [新契约·P3 计数口径] 说明行只数"标题匹配"的会话,�
   await expect(search, '清空后搜索词应为空').toHaveValue('', { timeout: 5_000 });
 });
 
+test('S5d [新契约·P3 计数口径] 已归档的会话即使标题匹配,也不算进「匹配 N 条会话」', async ({ page }) => {
+  // 夹具里 CNT_ARCH 那条:标题含 R143CNTMARK,但服务端标了归档(`<sid>.jsonl.archived`)。
+  // 计数契约 = 标题匹配 + 已加载项目 + **未归档** ⇒ N 仍是 3(CNT 那三条),不是 4。
+  await boot(page);
+  await openFixtureProject(page, NAV.mark);
+  await expect(sessionRow(page, B.mark), '基线:夹具项目下应能看到另一条会话').toBeVisible({ timeout: 20_000 });
+
+  const search = await searchAndAssertFiltered(page, CNT_TOKEN);
+
+  await expect(filterHint(page), '说明行应出现').toBeVisible({ timeout: 10_000 });
+  await expect(filterHint(page), '已归档那条不该被算进去 ⇒ 计数仍是 3 条')
+    .toContainText(/匹配\s*3\s*条会话/, { timeout: 5_000 });
+  await expect(sessionRows(page), '过滤后侧栏应只剩未归档的那 3 条').toHaveCount(CNT.length, { timeout: 10_000 });
+  // 反向对照:那条已归档的会话标题确实含词(所以"没数它"只能是因为归档),
+  // 但它不在侧栏行里(归档会话默认视图不列)
+  await expect(sessionRow(page, CNT_ARCH.mark), '已归档的会话不该出现在侧栏行里').toBeHidden();
+
+  await clearSearchHintBtn(page).click();
+  await expect(search, '收尾:搜索词应被清空').toHaveValue('', { timeout: 5_000 });
+});
+
 test('S6 [守卫] 重命名输入框里按 Esc:取消重命名,且不许顺手清掉搜索词', async ({ page }) => {
   await boot(page);
   await openFixtureProject(page, NAV.mark);
@@ -299,4 +417,32 @@ test('S9 [守卫] 确认框开着时按 Esc:确认框被取消,不许被侧栏�
   await expect(confirmHost(page), '确认框应被取消(Esc = 取消)').toHaveCount(0, { timeout: 10_000 });
   // ② 确认框才是这一层最上面的那层 ⇒ 搜索词不该被清
   await expect(search, '确认框才是这一击的对象,搜索词不该被清掉').toHaveValue(NAV.mark, { timeout: 5_000 });
+});
+
+test('S8 [核心·P1 绑根节点的唯一正面证据] 焦点在侧栏会话行、无浮层、有词 ⇒ Esc 清词并恢复列表', async ({ page }) => {
+  // 这条与 S7/S9 是同一落点、但**不带任何浮层**:它测的正是 P1"绑在侧栏根节点"这个设计决策本身 ——
+  // 焦点不在搜索框里(所以绑 input 收不到),而在侧栏内的非可编辑元素(会话行)上。
+  // 修前:那一击冒泡到会话级 Esc(空闲态落 'arm' = 什么都不做)⇒ 搜索词留着 ⇒ 红。
+  await boot(page);
+  await openFixtureProject(page, NAV.mark);
+  await expect(sessionRow(page, B.mark), '基线:夹具项目下应能看到另一条会话').toBeVisible({ timeout: 20_000 });
+
+  const search = await searchAndAssertFiltered(page, NAV.mark, B.mark);
+
+  // 焦点落在侧栏会话行上(键盘用户 Tab 到会话行的落点;点会话行之后的落点见实验 A)
+  await sessionRow(page, NAV.mark).focus();
+  const focused = await page.evaluate(() => {
+    const a = document.activeElement;
+    const root = document.querySelector('[data-cgui="sidebar"]');
+    return { inSidebar: !!(a && root && root.contains(a)), tag: a?.tagName || 'none', cgui: a?.getAttribute?.('data-cgui') || null };
+  });
+  expect(focused.inSidebar, `前提:这一击的事件源必须在侧栏内(实测 ${JSON.stringify(focused)})`).toBe(true);
+  expect(focused.cgui, '前提:焦点应落在会话行上(不是搜索框)').toBe('session-row');
+
+  await page.keyboard.press('Escape');
+
+  // ① 搜索词被清空(修前红在这里:焦点在会话行上,绑 input 的监听收不到)
+  await expect(search, '① 焦点在侧栏会话行上按 Escape,也应清空搜索词').toHaveValue('', { timeout: 5_000 });
+  // ② 被过滤掉的会话重新出现(列表恢复完整)
+  await expect(sessionRow(page, B.mark), '② 清空后侧栏列表应恢复完整').toBeVisible({ timeout: 10_000 });
 });

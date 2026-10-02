@@ -29,10 +29,13 @@ export const POOL = Array.from({ length: 6 }, (_, i) => ({ sid: sidOf(i + 1), ma
 // S5c 用的一组(专门测"过滤态说明行数的是谁"):CNT 三条**标题**含同一个词;
 // CNT_MSG_ONLY 一条**标题不含**、只有助手那句回复里含 —— 消息搜索能搜到它,
 // 但计数口径是"标题匹配"⇒ 说明行应当说 3 条,不是 4 条。口径见 TEST-PLAN §6.4。
+// CNT_ARCH 第 4 条**标题也含同一个词、但已归档**(服务端标记文件 `<sid>.jsonl.archived`,
+// 见 server/routes/sessions.js:692)⇒ 计数口径里的"未归档"那一半(S5d 用)。
 const CNT_TOKEN = 'R143CNTMARK';
 export { CNT_TOKEN };
 export const CNT = Array.from({ length: 3 }, (_, i) => ({ sid: sidOf(21 + i), mark: `${CNT_TOKEN} 第${i + 1}条` }));
 export const CNT_MSG_ONLY = { sid: sidOf(29), mark: 'R143MSGMARK', token: CNT_TOKEN };
+export const CNT_ARCH = { sid: sidOf(24), mark: `${CNT_TOKEN} 已归档的那条` };
 
 export const TEXT = { bReply: 'R143B 这是别的会话里的旧回复。' };
 // 假 CLI 在一个回合里吐的三段文字(本套件不跑回合,保留给"以后要跑回合"的用例;测试与假 CLI 共用同一组构造器)。
@@ -82,6 +85,12 @@ export function buildFixtures() {
   fs.writeFileSync(path.join(proj, `${CNT_MSG_ONLY.sid}.jsonl`),
     sessionLines(CNT_MSG_ONLY.sid, cwd, `${CNT_MSG_ONLY.mark} 先来一句话`,
       `${CNT_MSG_ONLY.token} 只在这条会话的消息正文里出现,标题里没有这个词。`));
+  // S5d 的"标题匹配但已归档"那条:JSONL 照写,额外放一个服务端认的归档标记文件
+  // (空文件 = 已归档,见 server/routes/sessions.js:678-706)。
+  fs.writeFileSync(path.join(proj, `${CNT_ARCH.sid}.jsonl`),
+    sessionLines(CNT_ARCH.sid, cwd, `${CNT_ARCH.mark} 先来一句话`,
+      `${CNT_ARCH.mark} 收到,这条会话已被归档(标题仍含计数词,不该被算进「匹配 N 条会话」)。`));
+  fs.writeFileSync(path.join(proj, `${CNT_ARCH.sid}.jsonl.archived`), '');
 
   const shim = path.join(fakebinDir(), 'claude');
   fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${suitePath('helpers', 'fake-claude.mjs')}" "$@"\n`);
