@@ -9,6 +9,12 @@ export const SKIN_ANCHORS = [
   { id: 'topbar-mobile', desc: '手机顶栏(header)' },
   { id: 'sidebar', desc: '左侧项目/会话面板根' },
   { id: 'sidebar-search', desc: '侧栏搜索输入框' },
+  // r143:侧栏搜索的出口与过滤态说明(死状态修复)。四个挂点同族,集中放在 sidebar-search 之后:
+  // 清空出口两个(输入框里的 ×、说明行里的「清空」)、过滤态说明一行、全局搜索结果行一个。
+  { id: 'sidebar-search-clear', desc: '侧栏搜索框的 × 清空按钮(仅在有搜索词时出现)' },
+  { id: 'sidebar-search-filter-hint', desc: '侧栏「已按搜索词过滤 · 匹配 N 条会话」说明行' },
+  { id: 'sidebar-search-clear-hint', desc: '过滤态说明行内的「清空」按钮' },
+  { id: 'search-hit', desc: '全局搜索结果行(侧栏搜索结果列表里的命中项,原生 button)' },
   { id: 'panel-dock', desc: '右侧面板坞按钮组' },
   { id: 'artifact-dock', desc: '代码/预览停靠面板根' },
   // ── 项目/会话列表 ──
