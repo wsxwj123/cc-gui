@@ -898,7 +898,10 @@ export function UnifiedSidebar() {
   //     容器且自己 stopPropagation,这里根本收不到,不用判;
   //   · 晚于这里的两类层要显式让行:确认框(document 冒泡)、权限/计划/越界卡(window 冒泡)。
   const onSidebarKeyDown = (e) => {
-    if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
+    // IME 组字中的 Esc = 取消候选词,不是"清空搜索":判据取**原生事件**的 isComposing
+    // —— React 合成事件的 KeyboardEventInterface 不含 isComposing,写 e.isComposing 会恒为
+    // undefined 变成死代码(同 ChatInput.jsx:801 / App.jsx:2173 的 e.nativeEvent?.isComposing 写法)。
+    if (e.key !== 'Escape' || e.nativeEvent?.isComposing || e.keyCode === 229) return;
     if (!searchQuery) return;                                   // 空击不吞:会话级 Esc 语义照旧
     const t = e.target;
     // 别的可编辑控件(会话/项目内联重命名、worktree 命名等)自己管 Esc —— 一律不接管,
