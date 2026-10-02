@@ -1,6 +1,6 @@
 // r122 界面操作层:只按用户看得见的东西 + INTERFACE-r122 公布的锚点定位。
 // 依据只有 .devflow/BRIEF-r122.md 与 .devflow/INTERFACE-r122.md;没看实现代码。
-import { expect } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -67,17 +67,41 @@ export async function dismissOverlays(page, passes = 6) {
   }
 }
 
-/** 侧栏里打开带 mark 的夹具会话(夹具项目第一次必须走搜索)。打开的判据:消息流里出现了轮行。 */
+/**
+ * **搜索结果行** —— 拾取只能点它,不能点"名字里含标记的第一个按钮"。
+ *   命中行 = 原生 `<button class="sidebar-item">`(产品句柄 `data-cgui="search-hit"`,App.jsx:1602,**没有 role 属性**);
+ *   会话行 = `<div role="button" data-cgui="session-row">`(App.jsx:1754)。
+ *   `getByRole('button', { name: /标记/ })` **两个都会命中** ⇒ 项目已展开时 `.first()` 会落到会话行
+ *   = 2026-09-16 那次假红的根因。先认产品句柄,没有就退回"侧栏里的原生 button"。
+ */
+const hitRow = (page, mark) =>
+  page.locator('[data-cgui="sidebar"] [data-cgui="search-hit"], [data-cgui="sidebar"] button.sidebar-item')
+    .filter({ hasText: mark }).first();
+
+/**
+ * 侧栏里打开带 mark 的夹具会话(夹具项目第一次必须走搜索)。打开的判据:消息流里出现了轮行。
+ *
+ * r143 加固(2026-10-02;四条契约见 .devflow/TEST-PLAN-r143.md §7):
+ *   ① 拾取定位器换成 `hitRow`(产品句柄优先);② 删掉拾取后的 `keyboard.press('Escape')`
+ *   (拾取后焦点落回 body,那一击会冒泡到会话级 Esc、可能停掉正在跑的回合);
+ *   ③ 收尾先硬断言搜索词被清空,失败才兜底 `fill('')` + annotation。**硬契约归 r143 的 S2 独占**。
+ */
 export async function openSessionBySearch(page, mark) {
   const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索项目/ });
   await expect(async () => {
     await search.click();
     await search.fill(mark);
     await expect(search).toHaveValue(mark, { timeout: 2_000 });
-    await expect(page.getByRole('button', { name: new RegExp(mark) }).first()).toBeVisible({ timeout: 8_000 });
+    await expect(hitRow(page, mark)).toBeVisible({ timeout: 8_000 });
   }).toPass({ timeout: 90_000 });
-  await page.getByRole('button', { name: new RegExp(mark) }).first().click();
-  await page.keyboard.press('Escape');
+  await hitRow(page, mark).click();
+  try {
+    await expect(search, '点搜索结果行后搜索词应被清空(硬契约见 r143 的 S2)').toHaveValue('', { timeout: 5_000 });
+  } catch {
+    await search.fill('');
+    test.info().annotations.push({ type: '⚠️ 搜索词未自动清空(已兜底)', description: 'r122-ui-batch openSessionBySearch' });
+    console.warn('[r122-ui-batch] 搜索词未自动清空,已兜底 fill("") —— 硬契约见 r143 的 S2');
+  }
   await expect(page.locator('[data-turn-uuid]').first(), `会话 ${mark} 打开后消息流里应出现轮行`).toBeVisible({ timeout: 30_000 });
   await page.waitForTimeout(400);
 }

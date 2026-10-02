@@ -1,6 +1,6 @@
 // r118 界面操作层:只按用户看得见的东西定位(侧栏会话行、输入框、发送/停止按钮、页面文字)。
 // 依据只有 .devflow/INTERFACE-r118.md §A:会话切换 = 点会话列表里的另一条再点回来。
-import { expect } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { live } from './fixtures.mjs';
@@ -24,8 +24,29 @@ export async function boot(page) {
 }
 
 /**
+ * **搜索结果行** —— 拾取只能点它,不能点"名字里含标记的第一个按钮"。
+ *   命中行 = 原生 `<button class="sidebar-item">`(产品句柄 `data-cgui="search-hit"`,App.jsx:1602,**没有 role 属性**);
+ *   会话行 = `<div role="button" data-cgui="session-row">`(App.jsx:1754)。
+ *   `getByRole('button', { name: /标记/ })` **两个都会命中**:全局搜索有 220ms 防抖 + 一次 /api/search 往返,
+ *   而侧栏会话行是同步渲染的 ⇒ 项目已展开时 `.first()` 会落到会话行 = 2026-09-16 那次假红的根因
+ *   (会话被打开、搜索词留在框里、侧栏被这个词永久过滤)。
+ * 先认产品句柄,没有就退回"侧栏里的原生 button"(会话行是 div,天然排除)。
+ */
+const hitRow = (page, mark) =>
+  page.locator('[data-cgui="sidebar"] [data-cgui="search-hit"], [data-cgui="sidebar"] button.sidebar-item')
+    .filter({ hasText: mark }).first();
+
+/**
  * 打开某条夹具会话。实测:夹具项目不进侧栏常规列表(显示"没有找到项目"),第一次必须走搜索;
  * 打开一次之后它的会话才作为侧栏行出现(见 sessionRow)。
+ *
+ * r143 加固(2026-10-02;四条契约见 .devflow/TEST-PLAN-r143.md §7):
+ *   ① 拾取定位器换成上面的 `hitRow`(产品句柄优先),不再用 `getByRole('button', { name: /标记/ })`;
+ *   ② 删掉拾取后那句 `page.keyboard.press('Escape')` —— 成功拾取后搜索结果面板卸载、焦点落回 body,
+ *      那一击会冒泡到会话级 Esc(App.jsx:7639),**有回合在跑时会把正在跑的那一轮停掉**
+ *      (r143 的产品改动绑在侧栏根上,覆盖不到这条路径);它的原作用已由 ① 的精确点击 + ③ 的兜底替代;
+ *   ③ 收尾先**硬断言**搜索词被清空;只有失败才 `fill('')` 兜底并推一条 annotation + console.warn。
+ *      **兜底不算产品契约的守卫**:硬契约归 r143 的 S2 独占(TEST-PLAN §7-④)。
  */
 export async function openSessionBySearch(page, mark) {
   const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索项目/ });
@@ -33,10 +54,16 @@ export async function openSessionBySearch(page, mark) {
     await search.click();
     await search.fill(mark);
     await expect(search).toHaveValue(mark, { timeout: 2_000 });
-    await expect(page.getByRole('button', { name: new RegExp(mark) }).first()).toBeVisible({ timeout: 8_000 });
+    await expect(hitRow(page, mark)).toBeVisible({ timeout: 8_000 });
   }).toPass({ timeout: 60_000 });
-  await page.getByRole('button', { name: new RegExp(mark) }).first().click();
-  await page.keyboard.press('Escape');
+  await hitRow(page, mark).click();
+  try {
+    await expect(search, '点搜索结果行后搜索词应被清空(硬契约见 r143 的 S2)').toHaveValue('', { timeout: 5_000 });
+  } catch {
+    await search.fill('');
+    test.info().annotations.push({ type: '⚠️ 搜索词未自动清空(已兜底)', description: 'r118-switch-back openSessionBySearch' });
+    console.warn('[r118-switch-back] 搜索词未自动清空,已兜底 fill("") —— 硬契约见 r143 的 S2');
+  }
   await page.waitForTimeout(800);
 }
 
