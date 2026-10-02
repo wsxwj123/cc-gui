@@ -95,7 +95,11 @@ function beatersAfter(fake, t, excludePid) {
   const mcpWin = await startWinMcp(fake);
   await mcpWin.call('window_list', {}, 20_000).catch(() => null); // 确保运行时/watcher 已经起来
   fake.clearLogs();
-  const holdFile = fake.writeHoldFile(4242, ['CTRL']);
+  // ⚠️ 属主 pid 必须用**超出进程号空间**的值(本机 kern.maxproc=16000、pid 上限 99999):
+  // watcher 的收尾要按属主 pid 判活(`process.kill(pid, 0)`),拿 4242 这种常见 pid 时,机器上
+  // 恰好有同号活进程就会把这份凭据当"还活着"⇒ 用例间歇性假红(方向是假红不是假绿,但间歇红
+  // 最容易被当噪声忽略)。9_999_999 必然 ESRCH,确定性。
+  const holdFile = fake.writeHoldFile(9_999_999, ['CTRL']);
   const killedAt = Date.now();
   mcpWin.killParentOnly('SIGKILL');
   await mcpWin.waitExit(3000);
