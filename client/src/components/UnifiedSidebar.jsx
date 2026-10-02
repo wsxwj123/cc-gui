@@ -18,6 +18,7 @@ import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, so
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
+import { escYieldCardId, isEditableTarget } from '../utils/escAction.js';
 // 循环 import(App.jsx ⇄ 本文件)安全性:这些都是 App.jsx 的模块级 function 声明
 // (提升,求值前可用)或组件渲染期才解引用的 live binding;本模块顶层不调用它们。
 import {
@@ -376,6 +377,16 @@ export function UnifiedSidebar() {
     () => sessionQueryMatchHashes({ sessionsByProject, query: q, titleOf }),
     [sessionsByProject, q, titleOf],
   );
+  // r143:过滤态说明用的条数 —— 与 composePanelSessions 同一判据(标题含词),
+  // 只统计「已加载项目」里未归档的会话(未加载的项目不在 sessionsByProject,所以措辞不写成全库总数)。
+  const queryMatchCount = useMemo(() => {
+    if (!q) return 0;
+    let n = 0;
+    for (const list of Object.values(sessionsByProject)) {
+      for (const s of (list || [])) if (!s.archived && String(titleOf(s) || '').toLowerCase().includes(q)) n += 1;
+    }
+    return n;
+  }, [sessionsByProject, q, titleOf]);
   const rows = useMemo(() => composePanelProjects({
     projects, hidden, showWorktrees: showWorktreeProjects, query: q,
     panes, pinned: pinnedProjSet, queryMatchHashes,
@@ -876,6 +887,38 @@ export function UnifiedSidebar() {
     setSearchQuery('');
   };
 
+  // ── r143 侧栏搜索的「退出」手段 ─────────────────────────────────────────────
+  // 以前清空搜索词只有一条路径(handlePickHit 末尾),而 Escape 没绑在这个输入框上:任何一次
+  // "点击没走完拾取链路"都会把侧栏永久过滤成只剩一条,用户只能手清输入框。绑定放在侧栏根节点
+  // (不是 input)上:点完搜索结果/会话行后焦点会落在被点的行元素上,只绑 input 收不到那一击。
+  // 顺带堵掉一个坏味道:以前这一击会冒到 window 上的会话级 Esc(生成中单击即停),
+  // 在搜索框里按 Esc 反而停掉正在跑的回合。
+  // 让行判据(按相位读码定,见 .devflow/PLAN-r143-sidebar-search.md §3.6.1/§3.6.2):
+  //   · 捕获相位的浮层(灯箱/预览/选择器/菜单/勾选弹窗/速查/右侧面板/窗内检索)先于 React 根
+  //     容器且自己 stopPropagation,这里根本收不到,不用判;
+  //   · 晚于这里的两类层要显式让行:确认框(document 冒泡)、权限/计划/越界卡(window 冒泡)。
+  const onSidebarKeyDown = (e) => {
+    if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
+    if (!searchQuery) return;                                   // 空击不吞:会话级 Esc 语义照旧
+    const t = e.target;
+    // 别的可编辑控件(会话/项目内联重命名、worktree 命名等)自己管 Esc —— 一律不接管,
+    // 否则在重命名框里按 Esc 会把搜索词一起清掉(React 根容器只有一份监听,行内那句
+    // native stopImmediatePropagation 挡不住冒泡到这里的 React 处理器)。
+    if (isEditableTarget(t) && t?.dataset?.cgui !== 'sidebar-search') return;
+    if (document.querySelector('[data-cgui-confirm]')) return;  // 确认框开着 → 这一击归它
+    const st = useStore.getState();
+    const yieldId = escYieldCardId({                            // 权限/计划/越界卡开着 → 让行(同 App.jsx:7618)
+      targetTag: t,
+      pendingList: st.pendingPermissions,
+      psid: (st.paneSessions && st.paneSessions[st.activeTabIndex || 0])?.sessionId || null,
+      yieldedForId: null,
+    });
+    if (yieldId) return;
+    e.preventDefault();
+    e.stopPropagation();                                        // 挡住 App.jsx 的会话级 Esc
+    setSearchQuery('');
+  };
+
   // r11-p3-4:「彻底清理项目」前端入口随项目头🗑按钮按用户指令整体移除
   // (原 purgeProject 函数一并删;POST /api/project/purge 端点保留,恢复入口时直接接回)。
 
@@ -1124,7 +1167,7 @@ export function UnifiedSidebar() {
 
   // ── 渲染 ───────────────────────────────────────────────────────────────────
   return (
-    <div data-cgui="sidebar" data-tour="sidebar-list" className="relative flex flex-col h-full">
+    <div data-cgui="sidebar" data-tour="sidebar-list" className="relative flex flex-col h-full" onKeyDown={onSidebarKeyDown}>
       <div className="px-4 pt-4 pb-3">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body">
@@ -1151,13 +1194,35 @@ export function UnifiedSidebar() {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             data-cgui="sidebar-search"
-            className="w-full bg-canvas border border-canvas-sunken rounded-lg pl-8 pr-3 py-1.5 text-xs text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body"
+            className={`w-full bg-canvas border border-canvas-sunken rounded-lg pl-8 ${searchQuery ? 'pr-7' : 'pr-3'} py-1.5 text-xs text-ink placeholder-ink-ghost focus:outline-none focus:border-accent/40 font-body`}
           />
+          {searchQuery && (
+            <button
+              type="button"
+              data-cgui="sidebar-search-clear"
+              onClick={() => setSearchQuery('')}
+              title="清空搜索"
+              aria-label="清空搜索"
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-ink-ghost hover:text-ink-soft"
+            >
+              <X size={12} />
+            </button>
+          )}
         </div>
       </div>
       <div className="flex-1 overflow-y-auto px-2 stagger">
         {searchQuery.length >= 2 && (
           <GlobalSearchResults q={searchQuery} onPick={handlePickHit} />
+        )}
+        {q && (
+          // r143:死状态的受害者是鼠标用户 —— 可见的「为什么只剩几条」和可见的出口才是根治
+          // (位置与措辞参考本文件 :1187 的空态提示 emptyHint)。
+          <div data-cgui="sidebar-search-filter-hint"
+            className="px-3 py-2 flex items-center justify-between gap-2 text-[11px] text-ink-faint font-body">
+            <span>已按搜索词过滤 · 匹配 {queryMatchCount} 条会话</span>
+            <button type="button" data-cgui="sidebar-search-clear-hint" onClick={() => setSearchQuery('')}
+              className="shrink-0 text-accent hover:underline">清空</button>
+          </div>
         )}
         {/* ── r13-① dsh 折叠树:项目行(chevron+名称)点击折叠/展开,展开时行下直接列
             该项目会话(两页合一,「返回项目列表」退役)。hover 操作收敛为「+」新建与

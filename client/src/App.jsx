@@ -1599,7 +1599,7 @@ export function GlobalSearchResults({ q, onPick }) {
         <span className="text-ink-ghost font-mono">{loading ? '…' : hits.length}{truncated ? '+' : ''}</span>
       </div>
       {hits.map((h, i) => (
-        <button key={i} onClick={() => onPick(h)}
+        <button key={i} onClick={() => onPick(h)} data-cgui="search-hit"
           className="sidebar-item w-full text-left px-3 py-2 rounded-lg mb-0.5 animate-slide-in">
           <div className="flex items-center gap-2 mb-0.5">
             <span className={`chip ${h.role === 'user' ? 'chip-accent' : ''}`}>{h.role}</span>
