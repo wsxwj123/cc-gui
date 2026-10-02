@@ -278,7 +278,20 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.412</b>(2026-10-02)· 新增 2 条 · 修复 1 条 · 优化 2 条</summary>
+<summary><b>v0.2.413</b>(2026-10-02)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>用输入法打字时,在侧栏搜索框按 Esc 不会再误清搜索词</summary>
+
+0.2.412 给侧栏搜索加 Esc 清空时,那半个"输入法组字中不接管"的判断写错了字段(读的是 React 包装后的事件对象,而它根本没有这个字段),等于没生效 —— 结果你在用输入法组字、按 Esc 取消候选词时,搜索框会被一起清掉。现在改成读原始事件,行为符合预期。
+
+</details>
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.412">v0.2.412</a></b>(2026-10-02)· 新增 2 条 · 修复 1 条 · 优化 2 条</summary>
 
 **新增**
 
