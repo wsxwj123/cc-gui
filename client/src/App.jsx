@@ -1256,6 +1256,14 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   const [rightPanelWidth, onRightDrag] = useResizable({
     initial: 340, min: 280, max: 600, axis: 'x', invert: true, storageKey: 'cgui-right-panel-width',
   });
+  // r144:把「侧栏实际占宽」暴露成 CSS 变量 --sidebar-w(挂 <html>,portal 出去的浮层也读得到)。
+  // 用途:更新提示 / 更新说明这类浮层要**在内容区(去掉会话列表)里居中**,而不是在整个窗口居中 ——
+  // 有会话列表时按整窗居中会看着压在内容区左边偏。收起 / 移动端时为 0(等于整窗居中)。
+  useEffect(() => {
+    const w = (isMobile || sidebarCollapsed) ? 0 : sidebarWidth;
+    document.documentElement.style.setProperty('--sidebar-w', w + 'px');
+    return () => document.documentElement.style.removeProperty('--sidebar-w');
+  }, [sidebarWidth, sidebarCollapsed, isMobile]);
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const setActiveTabIndex = useStore((s) => s.setActiveTabIndex);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
@@ -12864,7 +12872,10 @@ export default function App() {
         // 而 WKWebView 里 fixed 的包含块会被 zoom 缩成 innerWidth/zoom(= --app-w),弹窗自身 px 却不缩放,
         // 结果它在一个更小的框里居中、整体偏左上、还比预期小(用户实测:窗口 1004 / 居中框 828 = 1/1.2)。
         // 根容器是 relative,absolute 跟着正常 zoom 坐标走,居中/尺寸/层级都对。
-        <div className="absolute inset-0 z-[200] flex items-start justify-center pt-[8vh] pointer-events-none">
+        <div
+          className="absolute top-0 bottom-0 right-0 z-[200] flex items-center justify-center pointer-events-none"
+          style={{ left: 'var(--sidebar-w, 0px)' }}
+        >
           <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-panel shadow-popover animate-glass-rise overflow-hidden pointer-events-auto">
             <div className="px-5 py-4 flex items-start gap-3">
               <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center shrink-0 text-[18px]">🎉</div>

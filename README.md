@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.415</b>(2026-10-04)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>更新提示与「本次更新」弹窗,现在都在内容区正中央</summary>
+
+以前有会话列表时,它们按整个窗口居中,看着压在内容区偏左;更新提示还偏在顶部。现在按"去掉会话列表之后的那块区域"居中,并且是画面正中(不再贴顶)。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.414</b>(2026-10-04)· 修复 1 条</summary>
 
 **修复**
