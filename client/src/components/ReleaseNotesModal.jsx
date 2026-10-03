@@ -59,8 +59,8 @@ export function ReleaseNotesModal({ open, initialVersion, initialNotes = null, o
     // 非模态浮层(无遮罩):更新说明是低优先级通知,不锁页面交互(顶栏/会话保持可点)。
     <GenuiActionProvider value={null}>
     <div
-      className="absolute top-0 bottom-0 right-0 z-[220] flex items-center justify-center pointer-events-none"
-      style={{ left: 'var(--sidebar-w, 0px)' }}
+      className="absolute top-0 bottom-0 z-[220] flex items-center justify-center pointer-events-none"
+      style={{ left: 'var(--content-left, 0px)', width: 'var(--content-w, 100%)' }}
     >
       <div
         className="glass-popover w-[520px] max-w-[calc(var(--app-w,100vw)-1.5rem)] max-h-[min(80vh,calc(var(--app-h,100dvh)-3rem))] rounded-panel shadow-popover animate-glass-rise overflow-hidden flex flex-col pointer-events-auto"

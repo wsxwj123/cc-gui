@@ -1256,14 +1256,47 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   const [rightPanelWidth, onRightDrag] = useResizable({
     initial: 340, min: 280, max: 600, axis: 'x', invert: true, storageKey: 'cgui-right-panel-width',
   });
-  // r144:把「侧栏实际占宽」暴露成 CSS 变量 --sidebar-w(挂 <html>,portal 出去的浮层也读得到)。
-  // 用途:更新提示 / 更新说明这类浮层要**在内容区(去掉会话列表)里居中**,而不是在整个窗口居中 ——
-  // 有会话列表时按整窗居中会看着压在内容区左边偏。收起 / 移动端时为 0(等于整窗居中)。
+  // r144:把「可见内容区」的位置与宽度暴露成 CSS 变量(挂 <html>,portal 出去的浮层也读得到),供更新提示 /
+  // 更新说明这类浮层**在内容区里居中**(而不是按整个窗口居中 —— 有会话列表/右侧面板时会看着压一边)。
+  //
+  // 三条硬约束(来自独立盲审 M1–M3,别改回去):
+  // ① 基准元素必须是**内容区**(SplitMain 根节点 [data-testid="pane-split"]),不是侧栏内层 div ——
+  //    挂错会让 left/width 算成侧栏的量、浮层盒宽塌成 0;
+  // ② 依赖必须跟着布局变(isMobile/sidebarCollapsed/sidebarWidth/rightPanel/rightPanelWidth/panelWidth),
+  //    且元素可能不在首帧存在(空则等下一帧),否则"收起时挂载"会永远量不到、"开→收"会留脏值;
+  // ③ **只用 rect 自己的值**(left / width),绝不与 window.innerWidth/innerHeight 混算 ——
+  //    大字号档下两者坐标系不同,混算出来的右边距在真机会是错的(本机测不出)。
+  // 说明:直接量内容区容器,而不是把侧栏宽、面板宽、坞宽(ArtifactDock 的 state 在它自己内部)、
+  // Splitter 宽拼起来 —— 拼法必然漏块。
   useEffect(() => {
-    const w = (isMobile || sidebarCollapsed) ? 0 : sidebarWidth;
-    document.documentElement.style.setProperty('--sidebar-w', w + 'px');
-    return () => document.documentElement.style.removeProperty('--sidebar-w');
-  }, [sidebarWidth, sidebarCollapsed, isMobile]);
+    let ro = null;
+    let raf = 0;
+    let el = null;
+    const measure = () => {
+      if (!el) return;
+      const b = el.getBoundingClientRect();
+      const s = document.documentElement.style;
+      s.setProperty('--content-left', Math.round(b.left) + 'px');
+      s.setProperty('--content-w', Math.round(b.width) + 'px');
+    };
+    const attach = () => {
+      el = document.querySelector('[data-testid="pane-split"]');
+      if (!el) { raf = requestAnimationFrame(attach); return; }   // 首帧可能还没挂上
+      measure();
+      ro = new ResizeObserver(measure);
+      ro.observe(el);
+    };
+    attach();
+    window.addEventListener('resize', measure);
+    return () => {
+      cancelAnimationFrame(raf);
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', measure);
+      const s = document.documentElement.style;
+      s.removeProperty('--content-left');
+      s.removeProperty('--content-w');
+    };
+  }, [isMobile, sidebarCollapsed, sidebarWidth, rightPanel, rightPanelWidth]);
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const setActiveTabIndex = useStore((s) => s.setActiveTabIndex);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
@@ -12868,13 +12901,13 @@ export default function App() {
       {updateNotice && !updateModalDismissed && !releaseNotesOpen && (
         // 更新提示是低优先级通知,不做全屏模态(遮罩会锁死顶栏/会话交互,与导览
         // 看门狗同款教训):浮层无遮罩,页面保持可点,顶栏「更新」按钮持续提醒。
-        // r144:定位用 absolute(相对根容器)而不是 fixed —— 本仓在"大字号档"下给 <html> 加了 zoom,
-        // 而 WKWebView 里 fixed 的包含块会被 zoom 缩成 innerWidth/zoom(= --app-w),弹窗自身 px 却不缩放,
-        // 结果它在一个更小的框里居中、整体偏左上、还比预期小(用户实测:窗口 1004 / 居中框 828 = 1/1.2)。
-        // 根容器是 relative,absolute 跟着正常 zoom 坐标走,居中/尺寸/层级都对。
+        // r144:定位用 absolute(相对根容器)而不是 fixed —— 用户在大字号档下实测到"偏左上、也不在顶层";
+        // 怀疑是 fixed 的包含块与 html zoom 的交互(WKWebView 与 Chromium 行为可能不同,**待真机确认**,
+        // 本机 Playwright 复现不出)。根容器是 position:relative,absolute 跟着正常 zoom 坐标走,
+        // 居中/尺寸/层级都不依赖那个未确认的结论。基准取"可见内容区"(变量由内容区容器实测得到)。
         <div
-          className="absolute top-0 bottom-0 right-0 z-[200] flex items-center justify-center pointer-events-none"
-          style={{ left: 'var(--sidebar-w, 0px)' }}
+          className="absolute top-0 bottom-0 z-[200] flex items-center justify-center pointer-events-none"
+          style={{ left: 'var(--content-left, 0px)', width: 'var(--content-w, 100%)' }}
         >
           <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-panel shadow-popover animate-glass-rise overflow-hidden pointer-events-auto">
             <div className="px-5 py-4 flex items-start gap-3">
