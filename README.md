@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.417</b>(2026-10-04)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>上一版那两个弹窗在"大字号"档下会偏右</summary>
+
+上一版把它们改成按内容区居中,但算位置时把一个"已经按字号放大过"的尺寸又当普通尺寸用了一次,于是字号档越大偏得越多(默认档就偏 176 像素)。现在按字号换算回去,各档位都居中。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.416</b>(2026-10-04)· 修复 2 条</summary>
 
 **修复**

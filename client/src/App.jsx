@@ -1256,6 +1256,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   const [rightPanelWidth, onRightDrag] = useResizable({
     initial: 340, min: 280, max: 600, axis: 'x', invert: true, storageKey: 'cgui-right-panel-width',
   });
+  const uiFontScale = useStore((s) => s.uiFontScale); // r144:字号档变了要重算内容区基准
   // r144:把「可见内容区」的位置与宽度暴露成 CSS 变量(挂 <html>,portal 出去的浮层也读得到),供更新提示 /
   // 更新说明这类浮层**在内容区里居中**(而不是按整个窗口居中 —— 有会话列表/右侧面板时会看着压一边)。
   //
@@ -1274,10 +1275,15 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
     let el = null;
     const measure = () => {
       if (!el) return;
+      // ⚠️ 缩放口径(测试侧实测抓到的真缺陷):大字号档下 `<html>` 带 zoom,而
+      // `getBoundingClientRect()` 返回的**已经是含 zoom 的视觉坐标**(zoom1.2 时 928 布局 px 量到 1113.6),
+      // 若把它当 CSS 长度写回变量,同一棵 zoom 树里会**再乘一次 zoom** ⇒ 盒子放大 zoom 倍、中心右移
+      // ((zoom−1)×width/2,1.45 档实测偏 412px)。所以必须**除以当前 zoom**,换算回布局坐标再写。
+      const z = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
       const b = el.getBoundingClientRect();
       const s = document.documentElement.style;
-      s.setProperty('--content-left', Math.round(b.left) + 'px');
-      s.setProperty('--content-w', Math.round(b.width) + 'px');
+      s.setProperty('--content-left', (b.left / z).toFixed(2) + 'px');
+      s.setProperty('--content-w', (b.width / z).toFixed(2) + 'px');
     };
     const attach = () => {
       el = document.querySelector('[data-testid="pane-split"]');
@@ -1296,7 +1302,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
       s.removeProperty('--content-left');
       s.removeProperty('--content-w');
     };
-  }, [isMobile, sidebarCollapsed, sidebarWidth, rightPanel, rightPanelWidth]);
+  }, [isMobile, sidebarCollapsed, sidebarWidth, rightPanel, rightPanelWidth, uiFontScale]);
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const setActiveTabIndex = useStore((s) => s.setActiveTabIndex);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
