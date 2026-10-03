@@ -1279,9 +1279,17 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
       // `getBoundingClientRect()` 返回的**已经是含 zoom 的视觉坐标**(zoom1.2 时 928 布局 px 量到 1113.6),
       // 若把它当 CSS 长度写回变量,同一棵 zoom 树里会**再乘一次 zoom** ⇒ 盒子放大 zoom 倍、中心右移
       // ((zoom−1)×width/2,1.45 档实测偏 412px)。所以必须**除以当前 zoom**,换算回布局坐标再写。
-      const z = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
-      const b = el.getBoundingClientRect();
       const s = document.documentElement.style;
+      const z = parseFloat(getComputedStyle(document.documentElement).zoom);
+      // 引擎若把 zoom 计算值返成 `'normal'`(旧 WebKit 可能),parseFloat 得 NaN —— 此时**不要**猜 1,
+      // 而是**撤掉变量**,让浮层回落到 CSS 兜底(`left:0 / width:100%` = 铺满整窗且居中):宁可"没避开
+      // 侧栏/面板",也不能写错值造成偏得离谱(测试侧 §③-1 的建议)。
+      if (!Number.isFinite(z) || z <= 0) {
+        s.removeProperty('--content-left');
+        s.removeProperty('--content-w');
+        return;
+      }
+      const b = el.getBoundingClientRect();
       s.setProperty('--content-left', (b.left / z).toFixed(2) + 'px');
       s.setProperty('--content-w', (b.width / z).toFixed(2) + 'px');
     };
