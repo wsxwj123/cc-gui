@@ -1269,7 +1269,9 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   //    大字号档下两者坐标系不同,混算出来的右边距在真机会是错的(本机测不出)。
   // 说明:直接量内容区容器,而不是把侧栏宽、面板宽、坞宽(ArtifactDock 的 state 在它自己内部)、
   // Splitter 宽拼起来 —— 拼法必然漏块。
-  useEffect(() => {
+  // 用 useLayoutEffect(绘制前跑)而不是 useEffect:字体档/面板/坞变化时变量要在**同一帧**内更新,
+  // 否则会有一帧旧值(裁判残余风险:开坞后首帧变量滞后 435.6px@0.9 / 701.6px@1.45,约 29–33ms 才追上)。
+  useLayoutEffect(() => {
     let ro = null;
     let raf = 0;
     let el = null;
@@ -1283,10 +1285,15 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
       // 上一版按 Playwright 的口径写了 `rect ÷ zoom`,在真机(系统 WebKit)上就除反了:
       // 用户实测 0.9 / 1.2 / 1.45 档分别偏 +93.6 / −147.2 / −284.7px,只有 1.0 档正确。
       // **offset* 两个引擎上的值都一致(误差 ≤0.09px)**,且不需要任何 zoom 换算 —— 零引擎假设。
-      let x = 0;
-      for (let node = el; node; node = node.offsetParent) x += node.offsetLeft || 0;
+      // 累加值要减掉**包含块自身**在文档里的偏移:浮层的包含块是根容器,只有"根容器恰在文档原点"
+      // 时 base 才是 0 —— 今天成立,但那是隐式前提(裁判用 `#root{margin-left:40px}` 施压,会偏 +40px)。
+      // 减掉 base 后假设消失,行为与今天完全一致。
+      let sum = 0;
+      for (let node = el; node; node = node.offsetParent) sum += node.offsetLeft || 0;
+      let base = 0;
+      for (let node = el.offsetParent; node; node = node.offsetParent) base += node.offsetLeft || 0;
       const s = document.documentElement.style;
-      s.setProperty('--content-left', Math.round(x) + 'px');
+      s.setProperty('--content-left', Math.round(sum - base) + 'px');
       s.setProperty('--content-w', Math.round(el.offsetWidth) + 'px');
     };
     const attach = () => {
