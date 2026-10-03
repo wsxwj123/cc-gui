@@ -278,7 +278,20 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.413</b>(2026-10-02)· 修复 1 条</summary>
+<summary><b>v0.2.414</b>(2026-10-04)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>「发现新版本」的提示不再跑到左上角</summary>
+
+用了大字号档时,这条提示因为定位方式的问题会缩到一个更小的框里居中,看起来既没居中、也不在最上层。现在改成按应用区域定位,居中和层级都正常。
+
+</details>
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.413">v0.2.413</a></b>(2026-10-02)· 修复 1 条</summary>
 
 **修复**
 

@@ -12860,7 +12860,11 @@ export default function App() {
       {updateNotice && !updateModalDismissed && !releaseNotesOpen && (
         // 更新提示是低优先级通知,不做全屏模态(遮罩会锁死顶栏/会话交互,与导览
         // 看门狗同款教训):浮层无遮罩,页面保持可点,顶栏「更新」按钮持续提醒。
-        <div className="fixed inset-0 z-[200] flex items-start justify-center pt-[8vh] pointer-events-none">
+        // r144:定位用 absolute(相对根容器)而不是 fixed —— 本仓在"大字号档"下给 <html> 加了 zoom,
+        // 而 WKWebView 里 fixed 的包含块会被 zoom 缩成 innerWidth/zoom(= --app-w),弹窗自身 px 却不缩放,
+        // 结果它在一个更小的框里居中、整体偏左上、还比预期小(用户实测:窗口 1004 / 居中框 828 = 1/1.2)。
+        // 根容器是 relative,absolute 跟着正常 zoom 坐标走,居中/尺寸/层级都对。
+        <div className="absolute inset-0 z-[200] flex items-start justify-center pt-[8vh] pointer-events-none">
           <div className="glass-popover w-[420px] max-w-[calc(var(--app-w,100vw)-1.5rem)] rounded-panel shadow-popover animate-glass-rise overflow-hidden pointer-events-auto">
             <div className="px-5 py-4 flex items-start gap-3">
               <div className="w-9 h-9 rounded-lg bg-amber-100 flex items-center justify-center shrink-0 text-[18px]">🎉</div>
