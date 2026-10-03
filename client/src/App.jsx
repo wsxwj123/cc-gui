@@ -1275,23 +1275,19 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
     let el = null;
     const measure = () => {
       if (!el) return;
-      // ⚠️ 缩放口径(测试侧实测抓到的真缺陷):大字号档下 `<html>` 带 zoom,而
-      // `getBoundingClientRect()` 返回的**已经是含 zoom 的视觉坐标**(zoom1.2 时 928 布局 px 量到 1113.6),
-      // 若把它当 CSS 长度写回变量,同一棵 zoom 树里会**再乘一次 zoom** ⇒ 盒子放大 zoom 倍、中心右移
-      // ((zoom−1)×width/2,1.45 档实测偏 412px)。所以必须**除以当前 zoom**,换算回布局坐标再写。
+      // 只用**布局坐标**量基准:offsetLeft(沿 offsetParent 链累加到文档)+ offsetWidth。
+      //
+      // 为什么不用 getBoundingClientRect():它的返回值**随引擎而变** ——
+      //   系统 WebKit(= Tauri 的 WKWebView):rect = 布局 px(不含 html zoom);
+      //   Playwright 自带的 webkit 构建:rect = 视觉 px(含 zoom)。
+      // 上一版按 Playwright 的口径写了 `rect ÷ zoom`,在真机(系统 WebKit)上就除反了:
+      // 用户实测 0.9 / 1.2 / 1.45 档分别偏 +93.6 / −147.2 / −284.7px,只有 1.0 档正确。
+      // **offset* 两个引擎上的值都一致(误差 ≤0.09px)**,且不需要任何 zoom 换算 —— 零引擎假设。
+      let x = 0;
+      for (let node = el; node; node = node.offsetParent) x += node.offsetLeft || 0;
       const s = document.documentElement.style;
-      const z = parseFloat(getComputedStyle(document.documentElement).zoom);
-      // 引擎若把 zoom 计算值返成 `'normal'`(旧 WebKit 可能),parseFloat 得 NaN —— 此时**不要**猜 1,
-      // 而是**撤掉变量**,让浮层回落到 CSS 兜底(`left:0 / width:100%` = 铺满整窗且居中):宁可"没避开
-      // 侧栏/面板",也不能写错值造成偏得离谱(测试侧 §③-1 的建议)。
-      if (!Number.isFinite(z) || z <= 0) {
-        s.removeProperty('--content-left');
-        s.removeProperty('--content-w');
-        return;
-      }
-      const b = el.getBoundingClientRect();
-      s.setProperty('--content-left', (b.left / z).toFixed(2) + 'px');
-      s.setProperty('--content-w', (b.width / z).toFixed(2) + 'px');
+      s.setProperty('--content-left', Math.round(x) + 'px');
+      s.setProperty('--content-w', Math.round(el.offsetWidth) + 'px');
     };
     const attach = () => {
       el = document.querySelector('[data-testid="pane-split"]');
