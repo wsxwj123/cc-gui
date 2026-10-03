@@ -206,7 +206,9 @@ async function dismissOverlays(page) {
   }
   // 「本次更新」/「更新说明」弹层会盖住整页（同 preset-save-ui.spec.mjs 的处理）。
   for (let i = 0; i < 3; i += 1) {
-    const overlay = page.locator('div.fixed.inset-0').filter({ hasText: /本次更新|更新说明/ }).first();
+    // r144:同 preset-save-ui.spec.mjs —— 浮层定位方式已从 fixed 改为 absolute(内容区居中),
+    // 按 `div.fixed.inset-0` 定位会静默 no-op。改为按卡片本体 + 文案定位。
+    const overlay = page.locator('.glass-popover').filter({ hasText: /本次更新|更新说明/ }).first();
     if (await overlay.count() && await overlay.isVisible().catch(() => false)) {
       await overlay.locator('button[title="关闭"]').first().click().catch(() => {});
       await page.waitForTimeout(300);

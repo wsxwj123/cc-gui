@@ -49,7 +49,11 @@ const TESTID = {
  * 出现就关掉：卡片的标题栏有关闭键（`title="关闭"`）。
  */
 async function dismissReleaseNotes(page) {
-  const overlay = page.locator('div.fixed.inset-0').filter({ hasText: '本次更新' }).first();
+  // r144:「本次更新」浮层从 `fixed inset-0` 改成 `absolute` + 内容区 left/width(在可见内容区里居中),
+  // 于是按定位方式写死的 `div.fixed.inset-0` 再也匹配不到 ⇒ 下面这句变成**静默 no-op**、
+  // 弹层继续挡页面(本文件注释自己写明:不关掉它第一条用例必红)。改成按**卡片本体 + 文案**定位,
+  // 与定位方式无关。断言(必须能被它的关闭键关掉)一字未改。
+  const overlay = page.locator('.glass-popover').filter({ hasText: '本次更新' }).first();
   const appeared = await overlay.waitFor({ state: 'visible', timeout: 2_000 }).then(() => true).catch(() => false);
   if (!appeared) return;
   await overlay.locator('button[title="关闭"]').first().click();
