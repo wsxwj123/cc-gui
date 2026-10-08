@@ -115,6 +115,7 @@ import { computeCostForMessage, displayUsd, formatCost, setUserPrices, observeOf
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY } from './utils/steerQueue.js';
+import { leaveSessionNotice, takeSessionNotice } from './utils/sessionNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
 import { localTurnTakenOver, makeTurnIdentityIndex } from './utils/turnIdentity.js';   // r141 渲染期身份闸门
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
@@ -4439,6 +4440,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const id = setTimeout(() => setProviderSwitchNotice(null), 5000);
     return () => clearTimeout(id);
   }, [providerSwitchNotice]);
+  // r146b:别处给本会话留的一次性提示(回退中途切走、原定的重发没有发出等,见 utils/sessionNotice.js):
+  // 本会话显示在本窗格时取出,常驻到手动关。留言那一刻本会话若正显示着,经 cgui:session-notice 立刻取。
+  const noticeKeyRef = useRef(sessionQueueKey);
+  noticeKeyRef.current = sessionQueueKey;
+  useEffect(() => {
+    const show = () => {
+      const text = takeSessionNotice(noticeKeyRef.current);
+      if (text) setProviderSwitchNotice({ text, sticky: true });
+    };
+    show();
+    const onNotice = (e) => { if (e?.detail?.key && e.detail.key === noticeKeyRef.current) show(); };
+    window.addEventListener('cgui:session-notice', onNotice);
+    return () => window.removeEventListener('cgui:session-notice', onNotice);
+  }, [sessionQueueKey]);
   const reportAttachmentSidecarResult = useCallback((result) => {
     const text = attachmentSidecarNotice(result);
     if (text) setProviderSwitchNotice({ text });
@@ -8007,6 +8022,36 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 输入框草稿(草稿为空时),回到 A 能看到、自己决定发不发。
     let rbKey = queueKeyFor(sel);
     const stillHere = () => paneStillOn(rbKey);
+    // r146b:本来要重发的内容 —— 编辑后重发(resendText 是对象)取改后的文字与附件;其余取原消息的
+    // 完整 outbound(含 @path 附件引用)。中途切走时留给本会话的就是它,不是改前原文。
+    const pendingResend = () => {
+      if (resendText && typeof resendText === 'object') return { prompt: resendText.prompt || '', meta: resendText.options?.meta || null };
+      if (typeof resendText === 'string' && resendText) return { prompt: resendText, meta: null };
+      const p = resendPayloadForMessage(msg);
+      return { prompt: p?.prompt || '', meta: p?.meta || null };
+    };
+    // r146b:切走后留给本会话 —— 内容放回本会话输入框草稿(草稿已有内容就追加在后面,不覆盖、不丢),
+    // 留一条回到本会话时能看到的提示。本会话若正显示在别的窗格,两件事立刻生效(事件)。
+    const leaveForOwner = (notes = []) => {
+      const { prompt: left } = pendingResend();
+      let appended = false;
+      if (left && rbKey) {
+        try {
+          const dk = `cgui-draft:${rbKey}`;
+          const cur = localStorage.getItem(dk) || '';
+          appended = !!cur.trim() && !cur.includes(left);
+          const next = appended ? `${cur}\n\n${left}` : (cur.includes(left) ? cur : left);
+          localStorage.setItem(dk, next);
+          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: next, targetKey: rbKey } }));
+        } catch {}
+      }
+      leaveSessionNotice(rbKey, [
+        '回退过程中切换了会话：会话记录已回退，原定的重发没有发出。',
+        left ? (appended ? '要重发的内容已追加到输入框原有内容之后，确认后再发送。' : '要重发的内容已放回输入框，确认后再发送。') : '',
+        ...notes,
+      ].filter(Boolean).join(''));
+      window.dispatchEvent(new CustomEvent('cgui:session-notice', { detail: { key: rbKey } }));
+    };
     // 会话优先于全局项目:setSelectedProject 支持"浏览别的项目、右侧会话不动",
     // 且 worktree 会话的 projectPath 与主项目不同。取全局项目会把 A 会话的快照写进
     // B 目录、trim 用错 hash(对齐 handleSend/FileReviewPanel 的会话优先口径)。
@@ -8215,12 +8260,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
       } catch { trimFailed = true; }
     }
-    // r146 R3:裁剪期间切走 —— 磁盘已裁,窗格动作与重发全部放弃;原文留回原会话输入框草稿。
+    // r146 R3:裁剪期间切走 —— 磁盘已裁,窗格动作与重发全部放弃,本来要重发的内容留给本会话。
     if (!stillHere()) {
-      const leftText = composerText || resendPayloadForMessage(msg).prompt || '';
-      if (mode !== 'edit' && leftText && rbKey) {
-        try { const k = `cgui-draft:${rbKey}`; if (!localStorage.getItem(k)) localStorage.setItem(k, leftText); } catch {}
-      }
+      leaveForOwner();
       return;
     }
     // trim 失败(磁盘 jsonl 没裁)但 UI 已裁+即将重发 → 重发会落在未裁历史上、且
