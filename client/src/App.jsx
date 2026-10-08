@@ -6721,7 +6721,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               const _base = String(sentModel || currentModel || '').replace(/\[1m\]/i, ''); // r146 R6
               if (_base) _st.setModelFor(sessionQueueKey, _base);
               if (/\[1m\]/i.test(_st.currentModel || '')) _st.setModel(String(_st.currentModel).replace(/\[1m\]/i, ''));
-              setProviderSwitchNotice({ text: '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。' });
+              // r146b:提示条是窗格级的 —— 窗格已不是本会话就不弹(模型 pin 按会话键改,与窗格无关,照改)。
+              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。' });
               retryLater({ ...opts, oneMRetry: true });
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
@@ -6753,7 +6754,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // found"。自动转 draft + 重发本条:下次不带 --resume = 在同项目新建会话,
             // 用户不必手动处理僵尸会话。freshRetry 守卫防无限循环。
             if (/No conversation found/i.test(msg) && !opts.freshRetry && prompt) {
-              const _s = getLocalSession();
+              // r146b:换成新 draft、弹提示、重发都是窗格动作 —— 窗格已不是本会话就都不做(否则会把别的
+              // 会话换成 draft、提示挂到别的会话上)。
+              const _here = paneStillOn(sessionQueueKey, streamSid);
+              const _s = _here ? getLocalSession() : null;
               let _freshKey = null; // r146 R4:本支自己把窗格换成的新 draft 键
               if (_s?.sessionId) {
                 const _nd = newDraftId(); // r26-B5:draft 键带 draftId,迁移目标与将创建的 draft 同键
@@ -6761,8 +6765,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 useStore.getState().migrateSessionKey?.(_s.sessionId, _freshKey);
                 setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: _nd });
               }
-              setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
-              retryLater({ ...opts, freshRetry: true }, _freshKey);
+              if (_here) {
+                setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
+                retryLater({ ...opts, freshRetry: true }, _freshKey);
+              }
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -6777,7 +6783,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               markAutoUnavailable(_st.currentProvider?.providerHint || 'anthropic',
                 _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
               _st.setPermissionMode('default', sessionQueueKey);
-              setProviderSwitchNotice({ text: '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
+              // r146b:权限档按会话键改(与窗格无关);提示条只在窗格仍是本会话时弹。
+              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
               retryLater({ ...opts, autoRetry: true });
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
