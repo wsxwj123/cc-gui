@@ -3,6 +3,7 @@ import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { join, resolve as resolvePath, sep, basename, dirname } from 'path';
 import { stat, mkdir, readFile, writeFile, rm, access, readdir } from 'fs/promises';
+import { homedir } from 'os';
 import { resolveWorkspacePath } from '../utils/safe-path.js';
 import { CHECKPOINTS_ROOT } from '../utils/checkpoint-paths.js';
 import { findSessionFile, readSessionTitles } from '../services/session-reader.js';
