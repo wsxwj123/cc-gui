@@ -5385,6 +5385,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r146 R2:本流是否真的接上过服务端的流(attach 2xx)。POST 窗口里就切走的流(下面
     // 「孤儿流复判」直接 return)一个字都没收过,不代表任何直播内容 —— 它不能写直播快照。
     let streamAttached = false;
+    // r146 R4:错误后的自动重发(1M 被拒 / 签名自愈 / 会话失效转 draft / auto 档回退)统一走这里。
+    // handleSendRef 恒发进【本窗格当前会话】;原来 80ms 定时器落地前不复查,这段时间(签名自愈还要
+    // 先等剥离与拉历史)切走,原文就被发进了新会话。落地前确认本窗格仍是发起会话(或 init 升级出的
+    // 真 sid);expectKey 给"本支自己把窗格换成了新 draft"的会话失效那一支用。
+    const retryLater = (nextOpts, expectKey = null) => setTimeout(() => {
+      if (expectKey ? !paneStillOn(expectKey) : !paneStillOn(sessionQueueKey, streamSid)) return;
+      handleSendRef.current?.(prompt, nextOpts);
+    }, 80);
     // 发起时的 projectHash 闭包(判官盲审重要1):finally 拉历史必须用它,不能现取
     // getLocalSession()?.projectHash —— 流式期间用户切到另一个项目的会话时两者对不上,
     // 会拉错项目历史/404。draft 会话也带 projectHash,全程有效。
@@ -6668,22 +6676,25 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               if (_base) _st.setModelFor(sessionQueueKey, _base);
               if (/\[1m\]/i.test(_st.currentModel || '')) _st.setModel(String(_st.currentModel).replace(/\[1m\]/i, ''));
               setProviderSwitchNotice({ text: '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。' });
-              setTimeout(() => handleSendRef.current?.(prompt, { ...opts, oneMRetry: true }), 80);
+              retryLater({ ...opts, oneMRetry: true });
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
             }
             if (/invalid signature in thinking/i.test(msg) && !opts.signatureRetry && prompt) {
-              const _s = getLocalSession();
+              // r146 R4:自愈的对象是【本流的会话】(窗格已不是它就不碰窗格当前那条)。
+              const _s = paneStillOn(sessionQueueKey, streamSid) ? getLocalSession() : null;
               if (_s?.sessionId && _s?.projectHash) {
                 try {
                   await runHistoryOp(_s.sessionId, 'strip-thinking', { projectHash: _s.projectHash });
                   await fetchMessagesForTab(_s.sessionId, _s.projectHash, { silent: true });
                 } catch {}
-                setProviderSwitchNotice({ text: '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。' });
                 // 透传原 opts(工具重做带的 appendSystemPrompt/hiddenUserMessage 必须保留),
-                // 只追加守卫位防无限重试。
-                setTimeout(() => handleSendRef.current?.(prompt, { ...opts, signatureRetry: true }), 80);
+                // 只追加守卫位防无限重试。剥离期间切走 → 提示与重发都放弃(提示会落在别的会话上)。
+                if (paneStillOn(sessionQueueKey, streamSid)) {
+                  setProviderSwitchNotice({ text: '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。' });
+                  retryLater({ ...opts, signatureRetry: true });
+                }
                 // 本次失败的产物正是 "API Error: ...Invalid signature..." 文案,它也作为
                 // assistant text 落进了 accumulatedText。清空,否则循环结束后会被当成正常
                 // 回复气泡再插一条,用户就会看到那条报错(即用户报告的现象)。
@@ -6697,13 +6708,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 用户不必手动处理僵尸会话。freshRetry 守卫防无限循环。
             if (/No conversation found/i.test(msg) && !opts.freshRetry && prompt) {
               const _s = getLocalSession();
+              let _freshKey = null; // r146 R4:本支自己把窗格换成的新 draft 键
               if (_s?.sessionId) {
                 const _nd = newDraftId(); // r26-B5:draft 键带 draftId,迁移目标与将创建的 draft 同键
-                useStore.getState().migrateSessionKey?.(_s.sessionId, queueKeyFor({ projectHash: _s.projectHash, draftId: _nd }));
+                _freshKey = queueKeyFor({ projectHash: _s.projectHash, draftId: _nd });
+                useStore.getState().migrateSessionKey?.(_s.sessionId, _freshKey);
                 setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: _nd });
               }
               setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
-              setTimeout(() => handleSendRef.current?.(prompt, { ...opts, freshRetry: true }), 80);
+              retryLater({ ...opts, freshRetry: true }, _freshKey);
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -6719,7 +6732,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
               _st.setPermissionMode('default', sessionQueueKey);
               setProviderSwitchNotice({ text: '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
-              setTimeout(() => handleSendRef.current?.(prompt, { ...opts, autoRetry: true }), 80);
+              retryLater({ ...opts, autoRetry: true });
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -7066,8 +7079,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           markAutoUnavailable(_st.currentProvider?.providerHint || 'anthropic',
             _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
           _st.setPermissionMode('default', sessionQueueKey);
-          setProviderSwitchNotice({ text: '当前 CLI / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
-          setTimeout(() => handleSendRef.current?.(prompt, { ...opts, autoRetry: true }), 80);
+          // r146 R4:POST 返回 500 时窗格可能已切走 —— 提示与重发都只在仍是本会话时做。
+          if (paneStillOn(sessionQueueKey, streamSid)) {
+            setProviderSwitchNotice({ text: '当前 CLI / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
+            retryLater({ ...opts, autoRetry: true });
+          }
         } else {
         console.error('Chat error:', err);
         // Render the failure as a visible turn so the user isn't left staring at
@@ -8084,7 +8100,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const opts = typeof resendText === 'object' ? (resendText?.options || {}) : {};
       if (txt && handleSendRef.current) {
         setProviderSwitchNotice({ text: '未能定位原消息位置,已作为新消息发送(未裁剪历史)。' });
-        setTimeout(() => handleSendRef.current(txt, opts), 50);
+        // r146 R4:50ms 里切走了就不发(handleSendRef 恒发进本窗格当前会话)
+        setTimeout(() => { if (stillHere()) handleSendRef.current?.(txt, opts); }, 50);
       }
       return;
     }
