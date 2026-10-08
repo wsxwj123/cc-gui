@@ -39,6 +39,18 @@ export function isEditableTarget(el) {
   return TYPING_TAGS.has(String(el.tagName || '').toUpperCase()) || !!el.isContentEditable;
 }
 
+// 「这一击 Enter 该归焦点所在的控件自己吗」(r147 K3):按钮 / 链接 / [role=button] 自带 Enter 激活
+// (按钮的 click、链接的跳转)。窗口级的 Enter 快捷键(权限类卡片的「允许 / 执行 / 提交」)若在这种
+// 目标上接管并 preventDefault,焦点停在「拒绝」上按 Enter 执行的就成了「允许」。
+// 只看焦点元素本身(keydown 的 target 就是焦点元素),不向上找祖先:卡片、窗格这类大容器不算控件。
+// 输入框 / 下拉 / 富文本不在这里判,归 isEditableTarget。
+export function isActivatableTarget(el) {
+  if (!el) return false;
+  const tag = String(el.tagName || '').toUpperCase();
+  if (tag === 'BUTTON' || tag === 'A') return true;
+  return typeof el.getAttribute === 'function' && el.getAttribute('role') === 'button';
+}
+
 // 这一击 Esc 要不要让给挂起的权限/计划/越界卡:返回让行的卡片 id(调用方记下来,
 // 一张卡只让一击),null = 不让,继续走 escRoute。
 // 归属口径:命中本窗格会话的请求 + 无 sessionId 的孤儿(调用方只在活动窗格注册,

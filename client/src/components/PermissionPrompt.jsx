@@ -4,7 +4,7 @@ import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
-import { isEditableTarget } from '../utils/escAction.js';
+import { isActivatableTarget, isEditableTarget } from '../utils/escAction.js';
 import { isImeReactKeydown } from '../utils/imeGuard.js';
 import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
 
@@ -170,7 +170,10 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
       if (!paneHasKeyboard(tabIndex)) return;
       const t = e.target;
       if (isEditableTarget(t)) return; // 口径统一在 utils/escAction.js
-      if (e.key === 'Enter') { e.preventDefault(); onApprove(req); }
+      if (e.key === 'Enter') {
+        if (isActivatableTarget(t)) return; // 焦点在按钮 / 链接上:Enter 归控件自己(如「拒绝」的原生激活),不抢成肯定动作(r147 K3)
+        e.preventDefault(); onApprove(req);
+      }
       else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny', '用户取消计划'); }
     };
     window.addEventListener('keydown', onKey);
@@ -480,7 +483,10 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
       if (!paneHasKeyboard(tabIndex)) return;
       const t = e.target;
       if (isEditableTarget(t)) return; // 口径统一在 utils/escAction.js
-      if (e.key === 'Enter') { e.preventDefault(); onAuthorizeDir(req, permanent); }
+      if (e.key === 'Enter') {
+        if (isActivatableTarget(t)) return; // 焦点在按钮 / 链接上:Enter 归控件自己(如「拒绝」的原生激活),不抢成肯定动作(r147 K3)
+        e.preventDefault(); onAuthorizeDir(req, permanent);
+      }
       else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny'); }
     };
     window.addEventListener('keydown', onKey);
@@ -572,7 +578,10 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
     const onKey = (e) => {
       if (!paneHasKeyboard(tabIndex)) return;
       if (isEditableTarget(e.target)) return; // 焦点在表单控件里时交给控件自己处理
-      if (e.key === 'Enter') { e.preventDefault(); submit(); }
+      if (e.key === 'Enter') {
+        if (isActivatableTarget(e.target)) return; // 焦点在按钮 / 链接上:Enter 归控件自己(如「拒绝」的原生激活),不抢成肯定动作(r147 K3)
+        e.preventDefault(); submit();
+      }
       else if (e.key === 'Escape') { e.preventDefault(); onDecline(req); }
     };
     window.addEventListener('keydown', onKey);
@@ -686,7 +695,10 @@ function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydr
     const onKey = (e) => {
       if (!paneHasKeyboard(tabIndex)) return;
       if (isEditableTarget(e.target)) return;
-      if (e.key === 'Enter') { e.preventDefault(); onChoose(req, 'retry_fallback'); }
+      if (e.key === 'Enter') {
+        if (isActivatableTarget(e.target)) return; // 焦点在按钮 / 链接上:Enter 归控件自己(如「拒绝」的原生激活),不抢成肯定动作(r147 K3)
+        e.preventDefault(); onChoose(req, 'retry_fallback');
+      }
       else if (e.key === 'Escape') { e.preventDefault(); onCancel(req); }
     };
     window.addEventListener('keydown', onKey);
@@ -794,6 +806,9 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
       const t = e.target;
       if (isEditableTarget(t)) return; // 口径统一在 utils/escAction.js
       if (e.key === 'Enter') {
+        // 焦点在「拒绝」等按钮 / 链接上:Enter 归控件自己(按钮的原生激活)。不让行的话 preventDefault
+        // 掉了按钮的激活、再执行 doAllow —— Tab 到「拒绝」按 Enter 变成允许,选了「始终允许」时还写永久规则(r147 K3)。
+        if (isActivatableTarget(t)) return;
         e.preventDefault();
         doAllow();
       } else if (e.key === 'Escape') {
