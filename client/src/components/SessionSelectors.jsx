@@ -15,7 +15,7 @@ import { notifyOauthMissing } from '../utils/officialAuth.js';
 import { ModelPickModal, replaceModelLines, stripJunkModels } from './ModelPickModal.jsx';
 import { fetchProviderList, getCachedProviderList } from '../utils/providerListFetch.js';
 import ProviderListWarning from './ProviderListWarning.jsx';
-import { isImeReactKeydown } from '../utils/imeGuard.js';
+import { isImeKeydown, isImeReactKeydown } from '../utils/imeGuard.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -157,7 +157,8 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
     // stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)。
     // R1:相位挂 window 捕获(与灯箱/预览/文件树等浮层同款)。原来挂 document 冒泡 → 晚于
     // 右侧面板监听的 document 捕获,面板开着时这一击先关面板、弹层留着(层级颠倒)。
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onRequestClose?.('escape'); } };
+    // r147 K5:组字中的 Esc 是取消候选词(WebKit 上 isComposing 可能已为 false,只剩 keyCode 229),不关弹层。
+    const onEsc = (e) => { if (e.key === 'Escape' && !isImeKeydown(e)) { e.stopPropagation(); onRequestClose?.('escape'); } };
     document.addEventListener('mousedown', onDown);
     window.addEventListener('keydown', onEsc, true);
     return () => {

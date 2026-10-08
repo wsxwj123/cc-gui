@@ -149,7 +149,7 @@ import { effortCapsFor, effortAllowed, effortMemoryKey, effortSourceNote, useEff
 import { ProviderThinkingEditor } from './components/ProviderThinkingEditor.jsx';
 import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
-import { isImeReactKeydown } from './utils/imeGuard.js';
+import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
@@ -9754,7 +9754,8 @@ function ProviderManagerModal({ open, onClose, editId = null }) {
   useEffect(() => {
     if (!open) return;
     const onEsc = (e) => {
-      if (e.key !== 'Escape') return;
+      // r147 K5:Provider 表单里组字时按 Esc 是取消候选词,不是关弹窗(否则直接弹「丢弃未保存」确认)。
+      if (e.key !== 'Escape' || isImeKeydown(e)) return;
       // r52:模型勾选弹窗开着时这一击归它(同为 window 捕获,注册更早的本监听会抢跑 →
       // 不让行就是跳过弹窗直接关掉整个管理弹窗,勾选与未保存表单一起丢)。同 data-cgui-confirm 手法。
       if (document.querySelector('[data-cgui-modelpick]')) return;
