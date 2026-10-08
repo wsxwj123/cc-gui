@@ -7539,12 +7539,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 发之前先【轮询本地两个 ref】等停止落地,上限 4s 到点也发:绝不裸 await 任何控制类调用
   // (LEARNINGS「控制类调用必须 fire-and-forget + 超时兜底」——await interrupt 挡住兜底
   // 就是当年"停止失效"的成因)。
-  // r146 R3:ownerKey = 发起这次重发的会话键。最长 4s 的等待期间用户可能切走,handleSendRef
-  // 永远发进【本窗格当前会话】—— 落地前复查,换了会话就不发(绝不把 A 的原文发进 B)。
-  const resendReplacing = useCallback((text, opts = {}, ownerKey = null) => {
+  // r146 R3:最长 4s 的等待期间用户可能切走,而 handleSendRef 永远发进【本窗格当前会话】——
+  // 调用这一刻本窗格的会话就是发起重发的会话(调用方都已在各自的等待点之后复查过窗格),锁住它,
+  // 每一跳落地前复查,换了会话就不发(绝不把 A 的原文发进 B)。
+  const resendReplacing = useCallback((text, opts = {}) => {
+    const ownerKey = queueKeyFor(getLocalSession());
     const deadline = Date.now() + 4000;
     const tick = () => {
-      if (ownerKey && !paneStillOn(ownerKey)) return;
+      if (!paneStillOn(ownerKey)) return;
       if (Date.now() < deadline && (streamingRef.current || backgroundPidRef.current)) {
         setTimeout(tick, 100);
         return;
@@ -7552,7 +7554,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       handleSendRef.current?.(text, { ...opts, forceSend: true });
     };
     setTimeout(tick, 50);
-  }, [paneStillOn]);
+  }, [getLocalSession, paneStillOn]);
 
   // Auto-reattach: when the backgroundPid poll finds this session has a live
   // CLI proc that nobody's listening to (user navigated away mid-stream),
@@ -8279,7 +8281,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (resendPrompt && handleSendRef.current) {
       // Bug8:走 resendReplacing —— forceSend 绕过入队门 + 发前轮询本地 ref 等停止落地(≤4s)。
       if (typeof resendText === 'object' && resendText) {
-        resendReplacing(resendText.prompt || resendPrompt, resendText.options || {}, rbKey);
+        resendReplacing(resendText.prompt || resendPrompt, resendText.options || {});
       } else {
         if (resendMeta?.attachments?.length) {
           // r63-根因C:附件本体在 tmp 有 7 天 TTL(upload.js sweep),旧消息的文件可能已被清理。
@@ -8294,7 +8296,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             }
           }).catch(() => {});
         }
-        resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {}, rbKey);
+        resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {});
       }
     }
   }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession, resendReplacing, paneStillOn]);
@@ -8457,7 +8459,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             ? `<cgui-tool-retry>${opts.continuePrompt}</cgui-tool-retry>`
             : `<cgui-tool-retry tool="${toolCall.name}">继续</cgui-tool-retry>`,
           { appendSystemPrompt, hiddenUserMessage: true },
-          rtKey,
         );
       } catch (err) {
         confirmDialog(opts.contentRisk ? '回退失败：' + err.message : '工具局部重做失败：' + err.message);
