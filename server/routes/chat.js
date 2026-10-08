@@ -6,7 +6,7 @@ import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, 
 import { readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, AbortError } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel, isOfficialAnthropic } from '../services/model-resolver.js';
 import { findSessionFile, readSessionTitles, findAgentRunEvidence, isSessionIdShape, AGENT_TERMINAL_STATUSES, readSubagentUsageForToolUse } from '../services/session-reader.js';
 import { dropPendingForSession, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
@@ -1707,6 +1707,16 @@ router.post('/chat', async (req, res) => {
   return withTurnLock(`${turnPrincipal(req)}|${turnId}`, () => handleChatPost(req, res));
 });
 
+// r145 F4:SDK 泵的 catch 用它判"本 slot 是不是被主动中止的"(停止 / 关闭 / 看门狗拆进程都走 slot.abort.abort())。
+// 是 → 不发 error 行,否则流里多一条 "Claude Code process aborted by user",前端当成报错。
+// SDK 0.3.273 的 AbortError 实例 name === 'Error'(类名被压缩,已实测),只按 name 判必漏:以本 slot 自己的
+// abort 信号为准,再认 SDK 导出的 AbortError 类;name === 'AbortError' 留给标准 DOM / fetch 的中止异常。
+export function isSelfAbortError(err, signal) {
+  if (signal?.aborted) return true;
+  if (err instanceof AbortError) return true;
+  return err?.name === 'AbortError';
+}
+
 // POST /api/chat 主流程(原 handler 原样下移;所有锁定行为的时序不变)。
 async function handleChatPost(req, res) {
   // R13 输入闸门:非法输入一律 {ok:false,code,error} 且【不起任何 CLI、不回 pid】。
@@ -2498,7 +2508,7 @@ async function handleChatPost(req, res) {
         }
       }
     } catch (e) {
-      if (e?.name !== 'AbortError') {
+      if (!isSelfAbortError(e, abort.signal)) {
         deliverLine(slot, JSON.stringify({ type: 'error', error: e?.message || String(e) }));
       }
     } finally {
