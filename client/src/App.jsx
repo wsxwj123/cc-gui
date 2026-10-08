@@ -114,7 +114,7 @@ import { quotaValueText } from './utils/quotaFormat.js';
 import { computeCostForMessage, displayUsd, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, createQueueId } from './utils/steerQueue.js';
 import { leaveSessionNotice, takeSessionNotice } from './utils/sessionNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
 import { localTurnTakenOver, makeTurnIdentityIndex } from './utils/turnIdentity.js';   // r141 渲染期身份闸门
@@ -8231,6 +8231,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     //    landed in the jsonl (the CLI persists its own uuid but keeps the ts).
     let sessionWasReset = false;
     let trimFailed = false;
+    let wipedAway = false; // r146b:会话被裁空(sessionReset)时窗格已切走 —— 见下方切走分支
     if (sel?.sessionId && projectHash) {
       const body = msg.uuid && !msg.uuid.startsWith('chat-')
         ? { projectHash, uuid: msg.uuid }
@@ -8242,6 +8243,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // drop the sessionId locally — otherwise the next /api/chat would
         // try --resume on a deleted jsonl and CLI silently exits with
         // "No conversation found".
+        if (tr.sessionReset && !stillHere()) wipedAway = true;
         if (tr.sessionReset && stillHere()) { // r146 R3:转 draft 是窗格动作,切走了就不做
           sessionWasReset = true;
           // sessionId 失效 → 切到 draft 态。但 permissionMode / model 的 per-session
@@ -8273,6 +8275,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         fetch(`/api/chat/${startPid}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
       }
       if (trimFailed) diskNotes.push('会话记录裁剪失败（磁盘历史未改动），回退可能不完整。');
+      // 会话被裁空 → 侧栏不再列出它、回不去,写进它的输入框草稿等于找不回。本来要重发的内容按它转成的
+      // draft 身份记成一条孤儿,进首页「未发出的消息」(按项目过滤,可填回输入框、含附件)。
+      if (wipedAway) {
+        const { prompt: left, meta: leftMeta } = pendingResend();
+        if (left && sel?.projectHash) {
+          useStore.getState().addOrphanDraftMessage(
+            queueKeyFor({ projectHash: sel.projectHash, draftId: newDraftId() }), sel.projectHash,
+            { queueId: createQueueId('rollback'), text: left, queuedAt: Date.now(), opts: leftMeta ? { meta: attachmentMetaForPersistence(leftMeta) } : {} },
+          );
+        }
+        return;
+      }
       leaveForOwner(diskNotes);
       return;
     }

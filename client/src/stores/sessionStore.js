@@ -702,6 +702,22 @@ export const useStore = create((set, get) => ({
     persistOrphanDraftQueues(next);
     return { orphanDraftQueues: next };
   }),
+  // r146b:运行中补一条孤儿。回退中途切走、会话又被裁空(侧栏不再列出它)时,本来要重发的内容
+  // 无处可去 —— 进首页「未发出的消息」横幅(按 projectHash 过滤,可填回输入框、含附件)。持久化
+  // 写失败就不改表,返回 false(调用方据此知道没留住)。
+  addOrphanDraftMessage: (queueKey, projectHash, item) => {
+    let ok = false;
+    set((s) => {
+      if (!queueKey || !item) return s;
+      const cur = s.orphanDraftQueues || {};
+      const entry = cur[queueKey] || { projectHash: projectHash || draftQueueProjectHash(queueKey), items: [] };
+      const next = { ...cur, [queueKey]: { ...entry, items: [...(entry.items || []), item] } };
+      if (!persistOrphanDraftQueues(next, true)) return s;
+      ok = true;
+      return { orphanDraftQueues: next };
+    });
+    return ok;
+  },
   // 「填入输入框」:从孤儿表摘出该条(返回它),键空即删。一次只填一条,
   // 填入即从孤儿表摘除(防连点重复填入)。
   takeOrphanDraftMessage: (queueKey, queueId) => {
