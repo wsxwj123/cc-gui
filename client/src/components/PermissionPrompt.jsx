@@ -223,6 +223,15 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
                 e.stopPropagation();
                 if (feedback.trim() && !processing) submitRefine();
               }
+              // r147 K4:Esc = 取消本次输入(收起意见框,同下方「取消」按钮)。必须就地截断:卡片的
+              // window 级监听跳过输入框,会话级监听又不让行给输入框里的 Esc —— 不截断就落到停止分支,
+              // 整轮被停、卡片被清。组字中的 Esc 是取消候选词,不算。
+              else if (e.key === 'Escape' && !isImeReactKeydown(e)) {
+                e.preventDefault();
+                e.nativeEvent?.stopImmediatePropagation?.();
+                setShowRefine(false);
+                setFeedback('');
+              }
             }}
             placeholder="告诉 Claude 该如何修改这份计划...（⌘/Ctrl+Enter 提交）"
             rows={3}
@@ -416,6 +425,14 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
             value={customs[qi] || ''}
             onChange={(e) => setCustoms((prev) => ({ ...prev, [qi]: e.target.value }))}
             onKeyDown={(e) => {
+              // r147 K4:Esc = 退出输入框(写了一半的字留着),就地截断 —— 理由同计划修改意见框:
+              // 不截断会落到会话级停止分支,整轮被停、卡片被清。组字中的 Esc 是取消候选词,不算。
+              if (e.key === 'Escape' && !isImeReactKeydown(e)) {
+                e.preventDefault();
+                e.nativeEvent?.stopImmediatePropagation?.();
+                e.currentTarget.blur();
+                return;
+              }
               // 输入框内 Enter:末题(含单题)直接提交,非末题已答则下一题 —— 与窗口级
               // Enter 语义一致(窗口级 handler 刻意忽略 INPUT,这里补上)。
               // 输入法上屏的那一下 Enter(WebKit 上 keyCode 229)不是提交(r147 K2)。
@@ -649,7 +666,16 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
                 max={f.type === 'number' && f.max != null ? f.max : undefined}
                 step={f.type === 'number' && f.integer ? 1 : undefined}
                 onChange={(e) => setVal(f.key, e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) { e.preventDefault(); submit(); } }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !isImeReactKeydown(e)) { e.preventDefault(); submit(); }
+                  // r147 K4:Esc = 退出输入框(字留着),就地截断,不落到会话级停止分支;
+                  // 退出后再按一次 Esc 才是卡片的「拒绝」。组字中的 Esc 是取消候选词,不算。
+                  else if (e.key === 'Escape' && !isImeReactKeydown(e)) {
+                    e.preventDefault();
+                    e.nativeEvent?.stopImmediatePropagation?.();
+                    e.currentTarget.blur();
+                  }
+                }}
                 placeholder={f.type === 'number' && (f.min != null || f.max != null) ? `${f.min ?? ''}～${f.max ?? ''}` : ''}
                 className="w-full text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-canvas text-ink"
               />

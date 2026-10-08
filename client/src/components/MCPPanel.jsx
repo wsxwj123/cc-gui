@@ -7,6 +7,7 @@ import { McpForm } from './McpForm.jsx';
 import { CuGrants } from './CuGrants.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { TOOL_TABS, readToolTab, writeToolTab } from '../utils/toolTabs.js';
+import { isImeKeydown } from '../utils/imeGuard.js';
 
 // /api/mcp/:name/ping 结果 → 展示文案(PingButton 与「添加后自动探测」共用)。
 // 失败时优先展示真实子进程 stderr(后端 spawn 抓的),这才是用户要看的"为什么连不上"。
@@ -406,6 +407,20 @@ export function MCPPanel() {
   const [pluginErr, setPluginErr] = useState('');
   // 对齐 MCP 的交互:推荐插件收进"添加"按钮打开的弹层,列表只展示已安装项。
   const [pluginAddOpen, setPluginAddOpen] = useState(false);
+  // r147 K4:Esc 只关「添加插件」弹层(同 ✕ / 点遮罩),理由与 McpForm 相同:没有自己的 Esc 处理时,
+  // 这一击落到右侧面板的 Esc 监听,整个面板连同弹层一起关掉。window 捕获 + stopPropagation。
+  useEffect(() => {
+    if (!pluginAddOpen) return;
+    const onEsc = (e) => {
+      if (e.key !== 'Escape' || isImeKeydown(e)) return;
+      if (document.querySelector('[data-cgui-confirm]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPluginAddOpen(false);
+    };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
+  }, [pluginAddOpen]);
   // 折叠式"全市场搜索"(默认收起,不占密度):走 GET /api/plugins/available(后端缓存
   // `claude plugin list --available --json`);query 变化去抖 350ms 再拉,后端内存过滤。
   const [searchOpen, setSearchOpen] = useState(false);
