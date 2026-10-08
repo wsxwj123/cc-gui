@@ -3753,27 +3753,43 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       window.removeEventListener('cgui:open-search', onOpenSearch);
     };
   }, [paneIsActive, tabIndex]);
+  // r146 R5:"本窗格此刻在第几格"一律按稳定窗格 id 现查,不吃闭包里的位置号。关掉左边窗格时
+  // 右边窗格的组件实例保留(key = paneId)、位置号减 1(closePane 的 splice),而进行中的发送、
+  // 只按会话 id 重建的常驻 effect 握的是旧闭包 —— 位置号从闭包取,就会读写到别的格(排队不发、
+  // 转后台回复不上屏、重连不补拉、新会话首条 init 认不出发起窗格)。下面五个函数是本窗格读写
+  // store 的唯一入口,全部改走 paneIndexNow(),依赖随之稳定;窗格已不在(被关 / 单格换新 id)
+  // 时返回 -1:读到 null、写入一律不做。
+  const paneIdRef = useRef(paneId);
+  paneIdRef.current = paneId;
+  const paneIndexNow = useCallback(() => (useStore.getState().paneIds || []).indexOf(paneIdRef.current), []);
   const setSelectedSession = useCallback((s) => {
-    useStore.getState().setPaneSession(tabIndex, s);
-  }, [tabIndex]);
+    const i = paneIndexNow();
+    if (i >= 0) useStore.getState().setPaneSession(i, s);
+  }, [paneIndexNow]);
   const setLocalMessages = useCallback((msgs) => {
     const st = useStore.getState();
+    const i = paneIndexNow();
+    if (i < 0) return;
     // 归属 = 写入时刻本 pane 的会话(回滚裁剪/工具重做等都是对当前显示内容的改写)。
-    st.setPaneMessages(tabIndex, Array.isArray(msgs) ? msgs : [], st.paneSessions[tabIndex]?.sessionId || null);
-  }, [tabIndex]);
+    st.setPaneMessages(i, Array.isArray(msgs) ? msgs : [], st.paneSessions[i]?.sessionId || null);
+  }, [paneIndexNow]);
   const getLocalMessages = useCallback(() => {
-    return useStore.getState().paneMessages[tabIndex] || [];
-  }, [tabIndex]);
+    const i = paneIndexNow();
+    return (i >= 0 && useStore.getState().paneMessages[i]) || [];
+  }, [paneIndexNow]);
   // Latest session for the local tab — used inside async callbacks where
   // closure'd `selectedSession` would be stale.
   const getLocalSession = useCallback(() => {
-    return useStore.getState().paneSessions[tabIndex] || null;
-  }, [tabIndex]);
-  // Tab-aware fetchMessages wrapper: forwards tabIndex so the store writes
-  // into the correct messages slot.
+    const i = paneIndexNow();
+    return (i >= 0 && useStore.getState().paneSessions[i]) || null;
+  }, [paneIndexNow]);
+  // Tab-aware fetchMessages wrapper: forwards the pane's CURRENT index so the
+  // store writes into the correct messages slot.
   const fetchMessagesForTab = useCallback((sid, ph, opts = {}) => {
-    return useStore.getState().fetchMessages(sid, ph, { ...opts, tab: tabIndex });
-  }, [tabIndex]);
+    const i = paneIndexNow();
+    if (i < 0) return Promise.resolve();
+    return useStore.getState().fetchMessages(sid, ph, { ...opts, tab: i });
+  }, [paneIndexNow]);
   // r146:异步落地前的统一复查 —— 本窗格此刻显示的会话是不是 ownerKey(发起时的会话键)。
   // 也接受 altKey(draft 发起、init 升级出的真 sid:升级后窗格键已是真 sid)。
   const paneStillOn = useCallback((ownerKey, altKey = null) => {
@@ -5660,7 +5676,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // fetchMessages 内部有乱序守卫(响应落地时 pane 已切走则整条丢弃),数据没被应用时
       // 签名自然不变,所以这里不需要再判一次归属。
       const noteHistApplied = () => {
-        const arr = useStore.getState().paneMessages[tabIndex] || [];
+        const arr = getLocalMessages(); // r146 R5:按窗格当前位置读(关左窗格后位置号会变)
         const sig = histSig(arr[arr.length - 1]);
         const prev = histFreshRef.current;
         if (prev.sig === null) { histFreshRef.current = { at: prev.at, sig }; return; } // 首次只记基线
@@ -5807,7 +5823,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
               // 清历史 + 归属守卫直接认领新 sid(旧会话历史不属于新会话;
               // setPaneMessages 同写 arr+sid+pane0 镜像,无需再 claimPaneMessages)。
-              useStore.getState().setPaneMessages(tabIndex, [], event.session_id);
+              { const _pi = paneIndexNow(); if (_pi >= 0) useStore.getState().setPaneMessages(_pi, [], event.session_id); } // r146 R5
               // 新会话对象:身份/路径/模型继承,标题类字段清零(旧会话的标题不属于它,
               // 侧栏刷新后由 jsonl 重新解析)。
               setSelectedSession({
@@ -5868,7 +5884,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
               // 串扰窗口1守卫的 draft→真 sid 升级:pane 历史(draft 期为空)的归属标记
               // 同步升级成真 sid,否则绑定后、首次 fetch 回来前守卫会误藏活会话。
-              useStore.getState().claimPaneMessages(tabIndex, event.session_id);
+              { const _pi = paneIndexNow(); if (_pi >= 0) useStore.getState().claimPaneMessages(_pi, event.session_id); } // r146 R5
               setSelectedSession({
                 ...sel,
                 draft: false,
@@ -7807,13 +7823,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const refreshed = await fetchMessagesForTab(before.sessionId, before.projectHash, { silent: true });
     const after = getLocalSession();
     const current = after?.sessionId === before.sessionId && after?.projectHash === before.projectHash;
-    const persisted = current ? (useStore.getState().paneMessages[tabIndex] || []) : [];
+    const persisted = current ? getLocalMessages() : []; // r146 R5:await 之后按窗格当前位置读
     const keys = persistedSteerKeys(persisted);
     const item = (useStore.getState().messageQueue[sessionQueueKey] || []).find((entry) => entry?.queueId === queueId);
     const matched = !!(item?.steerId && keys.has(String(item.steerId).toLowerCase()));
     useStore.getState().reconcileSteerQueue(sessionQueueKey, keys);
     return { matched, current, refreshed };
-  }, [fetchMessagesForTab, getLocalSession, sessionQueueKey, tabIndex]);
+  }, [fetchMessagesForTab, getLocalSession, getLocalMessages, sessionQueueKey, tabIndex]);
   const liveSteerItems = useMemo(
     () => messageQueue.filter((m) => isSteered(m) && !persistedSteerIds.has(m.steerId)),
     [messageQueue, persistedSteerIds]);
@@ -8555,14 +8571,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 与侧栏分支按钮同待遇:标题「分支N」标识 + 继承 model/effort/权限。之前这里
       // 三样全缺 → 用户分不清窗口里是不是 fork(标题一模一样),列表也迟迟不出现。
       adoptFork(st, sess, data.newSessionId);
-      if (tabIndex === 0 && st.paneCount === 1) st.setSelectedSession(fork);
-      else st.setPaneSession(tabIndex, fork);
+      // r146 R5:await 之后按窗格当前位置写(确认弹窗 / 请求期间关掉左边窗格,位置号会左移)。
+      const _pi = paneIndexNow();
+      if (_pi < 0) return;
+      const st2 = useStore.getState();
+      if (_pi === 0 && st2.paneCount === 1) st2.setSelectedSession(fork);
+      else st2.setPaneSession(_pi, fork);
       // 锚点分叉的历史被截断,必须重拉;不拉的话窗格还挂着源会话的完整消息列表
-      st.fetchMessages(data.newSessionId, sess.projectHash, { tab: tabIndex, silent: true });
+      st2.fetchMessages(data.newSessionId, sess.projectHash, { tab: _pi, silent: true });
       // 列表立刻可见:打包版禁用了文件 watcher,新 jsonl 不会自动触发侧栏刷新
       if (st.selectedProject?.hash === sess.projectHash) st.fetchSessions(sess.projectHash, { silent: true });
     } catch (e) { await confirmDialog('分叉失败：' + String(e.message || e)); }
-  }, [tabIndex]);
+  }, [tabIndex, paneIndexNow]);
   const stableRetryTool = useCallback((turn, toolCall) => handleRetryToolRef.current?.(turn, toolCall), []);
   const stableRollback = useCallback((msg, opts) => handleRollbackRef.current?.(msg, opts), []);
 
