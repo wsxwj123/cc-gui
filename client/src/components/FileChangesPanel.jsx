@@ -3,6 +3,7 @@ import { FileText, Edit3, Terminal, RefreshCw, ChevronDown, ChevronRight, Extern
 import { useStore } from '../stores/sessionStore.js';
 import { DiffViewer } from './DiffViewer.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { createLatestGate } from '../utils/latestRequest.js';
 
 function formatTime(ts) {
   if (!ts) return '';
@@ -248,7 +249,12 @@ export function FileChangesPanel({ sessionId, projectHash, cwd }) {
     saveReviewedMap(next);
   };
 
+  // r146 R7:面板跟随活动窗格,会话一换就重取;先发的那次(上一个会话)可能晚回来。
+  // 只认最新一次请求,过期响应一律丢弃(否则列出的是另一个会话的改动,撤销却按当前会话做)。
+  const latestFetchRef = useRef(null);
+  if (!latestFetchRef.current) latestFetchRef.current = createLatestGate();
   const fetchChanges = async () => {
+    const isLatest = latestFetchRef.current.begin();
     if (!sessionId || !projectHash) return;
     setLoading(true);
     setLoadError(null);
@@ -262,13 +268,16 @@ export function FileChangesPanel({ sessionId, projectHash, cwd }) {
       // AI 没改任何文件。
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
+        if (!isLatest()) return;
         setLoadError(d.error || `${res.status}`);
         setChanges([]);
       } else {
         const data = await res.json().catch(() => []);
+        if (!isLatest()) return;
         setChanges(Array.isArray(data) ? data : []);
       }
     } catch (err) {
+      if (!isLatest()) return;
       console.error('Failed to fetch file changes:', err);
       setLoadError(err.message);
     }
