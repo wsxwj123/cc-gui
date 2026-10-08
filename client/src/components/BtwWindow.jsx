@@ -3,6 +3,7 @@ import { MessageSquare, Minus, Send, Trash2, Loader2 } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { isImeReactKeydown } from '../utils/imeGuard.js';
 
 // 旁问浮窗:右下角可拖动/可最小化的浮动小窗,把 /btw 的"我问→AI答→我再问"渲染成
 // 一条连续线程(而非散落主对话流的独立气泡)。数据仍活在 SessionDetail 的 per-pane
@@ -248,7 +249,7 @@ export default function BtwWindow({
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !isImeReactKeydown(e)) { e.preventDefault(); submit(); } }}
           rows={1}
           placeholder="继续旁问…（Enter 发送）"
           className="flex-1 resize-none max-h-24 text-[13px] font-body bg-transparent outline-none placeholder:text-ink-faint"

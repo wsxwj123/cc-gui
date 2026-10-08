@@ -5,6 +5,7 @@ import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
 import { isEditableTarget } from '../utils/escAction.js';
+import { isImeReactKeydown } from '../utils/imeGuard.js';
 import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
 
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
@@ -214,7 +215,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
             onKeyDown={(e) => {
               // 与输入框一致:Cmd/Ctrl+Enter 提交修改意见,裸 Enter 换行。stopPropagation
               // 防冒泡到卡片 window 级 Enter 监听(那个会触发"按计划执行")。
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !isImeReactKeydown(e)) {
                 e.preventDefault();
                 e.stopPropagation();
                 if (feedback.trim() && !processing) submitRefine();
@@ -414,7 +415,8 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
             onKeyDown={(e) => {
               // 输入框内 Enter:末题(含单题)直接提交,非末题已答则下一题 —— 与窗口级
               // Enter 语义一致(窗口级 handler 刻意忽略 INPUT,这里补上)。
-              if (e.key !== 'Enter' || processing) return;
+              // 输入法上屏的那一下 Enter(WebKit 上 keyCode 229)不是提交(r147 K2)。
+              if (e.key !== 'Enter' || processing || isImeReactKeydown(e)) return;
               e.preventDefault();
               if (isLast) submit();
               else if (answerOf(qi)) setQi((i) => i + 1);
@@ -638,7 +640,7 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
                 max={f.type === 'number' && f.max != null ? f.max : undefined}
                 step={f.type === 'number' && f.integer ? 1 : undefined}
                 onChange={(e) => setVal(f.key, e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) { e.preventDefault(); submit(); } }}
                 placeholder={f.type === 'number' && (f.min != null || f.max != null) ? `${f.min ?? ''}～${f.max ?? ''}` : ''}
                 className="w-full text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-canvas text-ink"
               />

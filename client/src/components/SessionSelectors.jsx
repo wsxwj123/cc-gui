@@ -15,6 +15,7 @@ import { notifyOauthMissing } from '../utils/officialAuth.js';
 import { ModelPickModal, replaceModelLines, stripJunkModels } from './ModelPickModal.jsx';
 import { fetchProviderList, getCachedProviderList } from '../utils/providerListFetch.js';
 import ProviderListWarning from './ProviderListWarning.jsx';
+import { isImeReactKeydown } from '../utils/imeGuard.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -755,7 +756,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
             {/* 修正批#5:自定义模型 ID 输入框移到卡片顶部(sticky 头内),列表再长也不用滚着找。 */}
             <div className="flex gap-1.5 mt-1.5">
               <input type="text" value={customInput} onChange={e => setCustomInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleCustomSubmit()}
+                onKeyDown={e => { if (e.key === 'Enter' && !isImeReactKeydown(e)) handleCustomSubmit(); }}
                 placeholder="自定义模型 ID..."
                 className="flex-1 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-xs font-mono text-ink focus:outline-none focus:border-accent/40" />
               <button onClick={handleCustomSubmit} disabled={!customInput.trim()}

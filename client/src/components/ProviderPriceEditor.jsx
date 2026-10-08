@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Trash2, Plus } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { isImeReactKeydown } from '../utils/imeGuard.js';
 
 // R3:Provider 表单里的「计价」编辑器 —— 用户为该 provider 的每个模型填实付单价。
 // 存进 provider 条目的 modelPrices,查价时优先级最高(client/src/utils/pricing.js)。
@@ -107,7 +108,7 @@ export function ProviderPriceEditor({ value, onChange, models, inputCls }) {
           {unpriced.map((m) => (<option key={m} value={m}>{m}</option>))}
         </select>
         <input value={manual} onChange={(e) => setManual(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addRow(manual); setManual(''); } }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) { e.preventDefault(); addRow(manual); setManual(''); } }}
           placeholder="或手输 model id"
           className={`${inputCls} flex-1 min-w-0 font-mono !py-1.5 !text-[12px]`}
           title="计价按消息里的真实 model id 匹配。上游返回的 id 与「模型」框里填的不一致时，在此手输真实 id。" />

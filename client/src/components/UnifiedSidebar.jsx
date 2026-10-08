@@ -19,6 +19,7 @@ import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 import { escYieldCardId, isEditableTarget } from '../utils/escAction.js';
+import { isImeReactKeydown } from '../utils/imeGuard.js';
 // 循环 import(App.jsx ⇄ 本文件)安全性:这些都是 App.jsx 的模块级 function 声明
 // (提升,求值前可用)或组件渲染期才解引用的 live binding;本模块顶层不调用它们。
 import {
@@ -1727,7 +1728,7 @@ function WorktreePickerModal({
               type="text"
               value={newWorktreeName}
               onChange={(e) => setNewWorktreeName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && createWorktree()}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) createWorktree(); }}
               placeholder="分支名 (如 feature-X)"
               className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono text-ink focus:outline-none focus:border-accent/40"
             />

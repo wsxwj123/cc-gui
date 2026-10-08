@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { ChevronUp, ChevronDown, X } from './Icon.jsx';
 import { searchScrollDelta } from '../utils/searchScroll.js';
+import { isImeReactKeydown } from '../utils/imeGuard.js';
 
 // 窗内检索浮层(Cmd/Ctrl+F)。高亮用 CSS Custom Highlight API(CSS.highlights +
 // Range),**完全不改 DOM** —— 否则边流式 re-render 边包 <mark> 会触发 React
@@ -158,7 +159,7 @@ export default function ChatSearch({ containerRef, onClose }) {
   }, [onClose]);
 
   const onKeyDown = (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); go(e.shiftKey ? -1 : 1); }
+    if (e.key === 'Enter' && !isImeReactKeydown(e)) { e.preventDefault(); go(e.shiftKey ? -1 : 1); }
   };
 
   return (

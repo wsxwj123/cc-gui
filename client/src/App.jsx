@@ -149,6 +149,7 @@ import { effortCapsFor, effortAllowed, effortMemoryKey, effortSourceNote, useEff
 import { ProviderThinkingEditor } from './components/ProviderThinkingEditor.jsx';
 import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
+import { isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
@@ -205,6 +206,7 @@ function EditableSessionTitle({ session }) {
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
+          if (isImeReactKeydown(e)) return; // 输入法上屏 / 取消候选那一下不是保存或取消(r147 K2)
           if (e.key === 'Enter') { e.preventDefault(); save(); }
           // 取消重命名的 Esc 已被消费,挡住 window 上的会话级监听(生成中单击即停)。
           else if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); setEditing(false); }
@@ -1804,6 +1806,7 @@ export const SessionItem = React.memo(function SessionItem({ session, isSelected
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
+              if (isImeReactKeydown(e)) return; // 输入法上屏 / 取消候选那一下不是保存或取消(r147 K2)
               if (e.key === 'Enter') { e.preventDefault(); saveRename(); }
               // 取消重命名的 Esc 已被消费,挡住 window 上的会话级监听(生成中单击即停)。
               else if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); setRenaming(false); }
@@ -10322,7 +10325,7 @@ function MobileModelPage({ permKey }) {
         {/* 修正批#5:自定义模型 ID 输入框移到页顶(与桌面弹层一致),列表长了不用滚着找。 */}
         <div className="flex gap-2">
           <input value={customInput} onChange={(e) => setCustomInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } } }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } } }}
             placeholder="自定义模型 ID…"
             className="flex-1 bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] font-mono text-ink focus:outline-none focus:border-accent" />
           <button onClick={() => { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } }}
@@ -11117,7 +11120,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           <div className="flex items-center gap-2">
             <input className={inputCls} placeholder="图片 URL(https)或 emoji" value={avatarInput}
               onChange={(e) => setAvatarInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); applyAvatarInput(); } }} />
+              onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) { e.preventDefault(); applyAvatarInput(); } }} />
             <button type="button" onClick={applyAvatarInput} disabled={avatarBusy || !avatarInput.trim()}
               className="shrink-0 px-2 py-1.5 text-[11px] rounded-lg border border-canvas-deep text-ink-muted hover:border-accent disabled:opacity-50">
               {avatarBusy ? '抓取中…' : '使用'}</button>
