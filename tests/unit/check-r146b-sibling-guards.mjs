@@ -16,13 +16,29 @@ let failed = 0;
 const check = (name, fn) => {
   try { fn(); console.log(`  ✓ ${name}`); } catch (e) { failed += 1; console.log(`  ✗ ${name}\n      ${e.message}`); }
 };
-/** 从支路的 if 行起,截到 sink 第一次出现处(含),断言其间有 paneStillOn( 复查。 */
+// r146c 加强(判官要求):原来只断言"支路里 sink 之前出现过 paneStillOn(",复查结果不管用不用、sink 在不在
+// 它守住的块里都能过。现在要求 sink 确实被一个"条件里直接调用 paneStillOn( 的 if"守住:要么在它的 {} 块内
+// (任意一层),要么是它的单语句体。
+/** sink 必须被 if (paneStillOn(…)) 守住。 */
 const guardedBefore = (branchAnchor, sink) => {
   const start = app.indexOf(branchAnchor);
   assert.ok(start > 0, `找不到支路:${branchAnchor}`);
   const at = app.indexOf(sink, start);
   assert.ok(at > start && at - start < 3000, `支路里找不到 ${sink}`);
-  assert.match(app.slice(start, at), /paneStillOn\(/, `${sink} 之前没有窗格复查`);
+  // ① 单语句体:同一行上 sink 前面紧挨着 if (paneStillOn(...))
+  const line = app.slice(app.lastIndexOf('\n', at) + 1, at);
+  if (/if \(paneStillOn\([^)]*\)\) $/.test(line)) return;
+  // ② 块内:从 sink 往外逐层找包住它的 {,任一层 { 前面的 if 条件直接调用 paneStillOn( 即可(到支路起点为止)
+  let depth = 0;
+  for (let i = at - 1; i > start; i -= 1) {
+    const ch = app[i];
+    if (ch === '}') depth += 1;
+    else if (ch === '{') {
+      if (depth > 0) { depth -= 1; continue; }
+      if (/if \(paneStillOn\([^{}]*\)\s*$/.test(app.slice(Math.max(start, i - 200), i))) return;
+    }
+  }
+  assert.fail(`${sink} 不在 if (paneStillOn(…)) 守住的块里`);
 };
 
 console.log('r146b 同族支路的窗格复查');
