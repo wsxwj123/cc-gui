@@ -153,15 +153,15 @@ try {
     assert.equal(JSON.parse(readFileSync(SETTINGS, 'utf8')).env?.ANTHROPIC_MODEL, 'model-anth');
   });
   await check('合法文件(带 UTF-8 BOM 也算合法)→ 写路径不丢数据:要么 200 且其它字段都在,要么 409 且文件不变', async () => {
-    for (const text of [GOOD_TEXT, `﻿${GOOD_TEXT}`]) {
+    for (const text of [GOOD_TEXT, `\uFEFF${GOOD_TEXT}`]) {
       writeFileSync(SETTINGS, text);
       const before = readFileSync(SETTINGS);
       const r = await call('POST', '/api/provider/switch', { id: 'r145-anth' });
       if (r.status === 409) { assert.ok(readFileSync(SETTINGS).equals(before), '409 却改了文件'); continue; }
       assert.equal(r.status, 200, `实际 ${r.status} ${r.text.slice(0, 200)}`);
-      const after = JSON.parse(readFileSync(SETTINGS, 'utf8').replace(/^﻿/, ''));
+      const after = JSON.parse(readFileSync(SETTINGS, 'utf8').replace(/^\uFEFF/, ''));
       assert.deepEqual([after.hooks, after.permissions, after.enabledPlugins, after.env?.MY_KEY],
-        [GOOD.hooks, GOOD.permissions, GOOD.enabledPlugins, 'keep'], `${text.startsWith('﻿') ? '带 BOM 的' : ''}合法文件写后丢了字段`);
+        [GOOD.hooks, GOOD.permissions, GOOD.enabledPlugins, 'keep'], `${text.startsWith('\uFEFF') ? '带 BOM 的' : ''}合法文件写后丢了字段`);
     }
   });
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // r145 F7:剥 BOM 的正则里直接写着不可见字符 U+FEFF(字节 EF BB BF)——编辑器格式化、复制粘贴、某些
 // 工具链都会悄悄丢掉它,正则就变成 /^/,剥 BOM 成了空操作,而肉眼完全看不出来。修好后改成转义写法
-// ﻿,行为不变。
+// \uFEFF,行为不变。
 // 为什么红只能来自源码断言:"字面字符"和"转义写法"在运行时是同一个正则,行为上无从区分 —— 所以
-// ① 源码级:两个文件里不再含 EF BB BF 字节,对应位置是 ﻿ 转义;② 行为级(修前修后都应绿,
+// ① 源码级:两个文件里不再含 EF BB BF 字节,对应位置是 \uFEFF 转义;② 行为级(修前修后都应绿,
 // 守"行为不变"):readJsonGuarded 仍能读带 BOM 的合法 JSON,sanitizeSvg 仍剥掉开头 BOM。
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -38,7 +38,7 @@ try {
     assert.deepEqual([r.corrupt, r.value], [false, { a: 1 }]);
   });
   await check('sanitizeSvg:开头 BOM 被剥掉', () => {
-    const r = sanitizeSvg('﻿<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>');
+    const r = sanitizeSvg('\uFEFF<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>');
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.ok(r.svg.startsWith('<svg'), `svg 开头仍带 BOM:${JSON.stringify(r.svg.slice(0, 6))}`);
   });
