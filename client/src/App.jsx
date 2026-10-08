@@ -8022,6 +8022,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 输入框草稿(草稿为空时),回到 A 能看到、自己决定发不发。
     let rbKey = queueKeyFor(sel);
     const stillHere = () => paneStillOn(rbKey);
+    // r146b:磁盘侧(还原文件 → 裁剪)只动本会话自己的文件与会话记录、与窗格无关,一旦开始就做完,
+    // 中途切走也不停在"文件已回退、历史没裁"的半截;只在做完之后才判断窗格动作做不做。
+    // 开始那一刻本会话在跑的进程记下来(窗格级 ref 切走后就属于别的会话了),切走时按它停。
+    const startPid = activeProcRef.current || backgroundPidRef.current;
+    // 磁盘侧的提示:仍在本会话 → 立刻显示;已切走 → 攒着,随留给本会话的提示一起给出(不挂到别的会话上)。
+    const diskNotes = [];
+    const noteHere = (text) => { if (stillHere()) setProviderSwitchNotice({ text }); else diskNotes.push(text); };
     // r146b:本来要重发的内容 —— 编辑后重发(resendText 是对象)取改后的文字与附件;其余取原消息的
     // 完整 outbound(含 @path 附件引用)。中途切走时留给本会话的就是它,不是改前原文。
     const pendingResend = () => {
@@ -8187,19 +8194,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 1) git restore only for modes that explicitly include files.
     const shouldRestoreFiles = mode === 'both' || mode === 'edit';
     const checkpointSha = shouldRestoreFiles && sel?.sessionId && cwd ? await resolveCheckpointSha() : null;
-    if (!stillHere()) return; // r146 R3:找快照期间切走 —— 什么都还没动,整段放弃
     if (shouldRestoreFiles && !checkpointSha && !softFiles) {
       // 没有文件快照(非 git 项目 / 旧消息 / 快照丢失)不该让整个回退"没反应"——以前这里
       // alert + return,既不裁剪也不重发,用户关掉弹窗后什么都没发生。降级处理:跳过文件
       // 还原,继续裁剪会话并按 mode 重发 / 回填输入框,只用一条提示告知文件未动。
-      setProviderSwitchNotice({ text: '未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。' });
+      noteHere('未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。');
     }
     if (shouldRestoreFiles && checkpointSha && sel?.sessionId && cwd) {
       // 还原失败最常见的就是这条消息发送前后没有任何被跟踪文件改动:shadow 仓库里
       // 那个 commit 是空树,`git checkout <sha> -- .` 报 pathspec 不匹配。这属于"本来
       // 就没文件要还原"而非真错,不该 alert+return 中断整个回退。降级:跳过文件还原,
       // 继续裁剪会话/重发,只用一条提示告知项目文件未动。
-      const softDegrade = () => setProviderSwitchNotice({ text: '未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。' });
+      const softDegrade = () => noteHere('未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。');
       try {
         const r = await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
           method: 'POST',
@@ -8211,13 +8217,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // (超时把 checkout 杀在半路等)可能已部分还原,如实提示别撒谎。
           const d = await r.json().catch(() => ({}));
           if (d.code === 'restore_failed') {
-            setProviderSwitchNotice({ text: '文件还原过程出错，工作区可能已部分还原，请检查改动（会话已回退）。' });
+            noteHere('文件还原过程出错，工作区可能已部分还原，请检查改动（会话已回退）。');
           } else softDegrade();
         }
       } catch {
         softDegrade();
       }
-      if (!stillHere()) return; // r146 R3:还原文件期间切走 —— 会话没裁、也不重发
     }
 
     // 2) trim on-disk jsonl so the resumed CLI doesn't see stale history.
@@ -8262,7 +8267,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     // r146 R3:裁剪期间切走 —— 磁盘已裁,窗格动作与重发全部放弃,本来要重发的内容留给本会话。
     if (!stillHere()) {
-      leaveForOwner();
+      // 开始回退时本会话在跑的回合:按它自己的 pid 停掉(不碰窗格 ref),否则它继续往刚裁剪的记录里追加。
+      if (startPid) {
+        stoppedPidsRef.current.add(String(startPid));
+        fetch(`/api/chat/${startPid}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
+      }
+      if (trimFailed) diskNotes.push('会话记录裁剪失败（磁盘历史未改动），回退可能不完整。');
+      leaveForOwner(diskNotes);
       return;
     }
     // trim 失败(磁盘 jsonl 没裁)但 UI 已裁+即将重发 → 重发会落在未裁历史上、且
