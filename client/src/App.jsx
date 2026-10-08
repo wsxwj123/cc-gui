@@ -5129,6 +5129,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!reattachPid) roundUuidsRef.current = new Set();
     streamStartRef.current = seed?.streamStart
       || (reattachPid && detachTsBySidRef.current[selectedSession?.sessionId]) || Date.now();
+    // r146 R2:本流自己的起流时刻(闭包常量)。streamStartRef 是【窗格级】的:切到别的会话后,
+    // 那边的 reattach 会把它改写成别的会话的起点。本流迟到的 finally 若再读它去写直播快照,
+    // 别的会话的起点就成了本会话的历史截断口径(切回时已落盘的回复被整段藏掉、计时从别人的
+    // 起点算 = 用户实报的「Connecting… 14m33s」)。快照一律用这个值。
+    const turnStreamStart = streamStartRef.current;
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
@@ -5377,6 +5382,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 本次流真正归属的 sessionId:发起于真会话=闭包 sid;发起于 draft=init 事件里的新 sid。
     // result 后的标题兜底等"归属敏感"逻辑一律用它,绝不摸 getLocalSession()(用户可能已切走)。
     let streamSid = selectedSession?.sessionId || null;
+    // r146 R2:本流是否真的接上过服务端的流(attach 2xx)。POST 窗口里就切走的流(下面
+    // 「孤儿流复判」直接 return)一个字都没收过,不代表任何直播内容 —— 它不能写直播快照。
+    let streamAttached = false;
     // 发起时的 projectHash 闭包(判官盲审重要1):finally 拉历史必须用它,不能现取
     // getLocalSession()?.projectHash —— 流式期间用户切到另一个项目的会话时两者对不上,
     // 会拉错项目历史/404。draft 会话也带 projectHash,全程有效。
@@ -5591,6 +5599,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         recoverAttach();
         return; // 本 return 照样走 finally,finalizeInFlightRef 的 ±1 配对不破
       }
+      streamAttached = true; // r146 R2:见声明处
       // attach 成功 = 三振那条 sticky 失败横幅已经过时,清掉。sticky 不自动过期,不清就
       // 一直挂着,恢复之后还在报错。函数式更新避开闭包陈旧值。
       // 注意这里【不】清失败计数:计数在收到 done(本流真的跑完)时才清,见循环之后。
@@ -7326,9 +7335,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       //   ② 回合真结束(done)或用户真停止(killedRef):历史即将/已经是全量,再种就是双份;
       //   ③ 被别的窗格接管(takeover):此后的行归对方消费,我们手里的尾巴已经落后 ——
       //      连旧快照一并清掉,让下一次 attach 老老实实退回今天的行为(宁空窗不丢字)。
+      // r146 R2:④ 本流根本没接上过(POST 窗口里切走)→ 不写。快照的起点 / 截断口径用本流自己的
+      //   turnStreamStart,不读窗格级 streamStartRef(此刻可能已是别的会话的流)。
       if (streamSid && streamEndMirror !== 'done' && !killedRef.current) {
         if (streamEndMirror === 'takeover') dropStreamSnapshot(streamSid);
-        else if (!reattachPid || seeded) putStreamSnapshot(streamSid, {
+        else if (streamAttached && (!reattachPid || seeded)) putStreamSnapshot(streamSid, {
           text: accumulatedText,
           thinking: accumulatedThinking,
           toolCalls: currentToolCalls,
@@ -7337,8 +7348,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           steerAnchors: { ...steerAnchorRef.current },
           // 本流用的历史截断口径(普通发送=本次起流时刻;种回=一路继承的原始起流时刻)。
           // 它必须跟着快照走:种回时用 afterLastUser 之类的替代口径会切错位置(⚡引导折叠)。
-          cutoff: seed?.cutoff || { sinceTs: streamStartRef.current, keepUser: true },
-          streamStart: streamStartRef.current,
+          cutoff: seed?.cutoff || { sinceTs: turnStreamStart, keepUser: true },
+          streamStart: turnStreamStart,
         });
       }
       // 复位只归当前 generation 所有:上面的 finalize 轮询含 await(最长 ~2.4s),这期间
