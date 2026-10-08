@@ -6762,20 +6762,29 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // found"。自动转 draft + 重发本条:下次不带 --resume = 在同项目新建会话,
             // 用户不必手动处理僵尸会话。freshRetry 守卫防无限循环。
             if (/No conversation found/i.test(msg) && !opts.freshRetry && prompt) {
-              // r146b:换成新 draft、弹提示、重发都是窗格动作 —— 窗格已不是本会话就都不做(否则会把别的
+              // r146b:换成新 draft、弹提示、重发都是窗格动作 —— 只在窗格仍是本会话时做(否则会把别的
               // 会话换成 draft、提示挂到别的会话上)。
-              const _here = paneStillOn(sessionQueueKey, streamSid);
-              const _s = _here ? getLocalSession() : null;
-              let _freshKey = null; // r146 R4:本支自己把窗格换成的新 draft 键
-              if (_s?.sessionId) {
-                const _nd = newDraftId(); // r26-B5:draft 键带 draftId,迁移目标与将创建的 draft 同键
-                _freshKey = queueKeyFor({ projectHash: _s.projectHash, draftId: _nd });
-                useStore.getState().migrateSessionKey?.(_s.sessionId, _freshKey);
-                setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: _nd });
-              }
-              if (_here) {
+              if (paneStillOn(sessionQueueKey, streamSid)) {
+                const _s = getLocalSession();
+                let _freshKey = null; // r146 R4:本支自己把窗格换成的新 draft 键
+                if (_s?.sessionId) {
+                  const _nd = newDraftId(); // r26-B5:draft 键带 draftId,迁移目标与将创建的 draft 同键
+                  _freshKey = queueKeyFor({ projectHash: _s.projectHash, draftId: _nd });
+                  useStore.getState().migrateSessionKey?.(_s.sessionId, _freshKey);
+                  setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: _nd });
+                }
                 setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
                 retryLater({ ...opts, freshRetry: true }, _freshKey);
+              } else if (prompt && !hiddenUserMessage && streamOwnerPh) {
+                // r146c:窗格已换走 —— 这条提问没发出去,不能静默丢。原会话的会话文件已失效、侧栏不再列出它,
+                // 留给它等于找不回(与回退裁空同理),记成首页「未发出的消息」,并在此刻窗格上说明去向。
+                const _saved = useStore.getState().addOrphanDraftMessage(
+                  orphanKeyFor(streamOwnerPh), streamOwnerPh,
+                  { queueId: createQueueId('noconv'), text: prompt, queuedAt: Date.now(), opts: meta ? { meta: attachmentMetaForPersistence(meta) } : {} },
+                );
+                showNoticeHere(_saved
+                  ? '另一个会话的历史已失效，那条消息没有发出，已放到首页「未发出的消息」里。'
+                  : `另一个会话的历史已失效，那条消息没有发出，也没能保存（本地存储写入失败），原文：${String(prompt).slice(0, 200)}`);
               }
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
