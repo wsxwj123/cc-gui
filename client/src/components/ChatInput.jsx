@@ -482,7 +482,15 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     try { localStorage.setItem(historyKey, JSON.stringify(list.slice(0, 100))); } catch {}
   };
 
+  // r146b:每次渲染递增的序号。装载草稿的 effect 记下"在哪一次提交里装载",持久化 effect 在同一次
+  // 提交里(装载的 setText 还没生效,text 仍是挂载 / 换键之前的值)一律不写 —— 原来挂载帧(会话区
+  // loading 早返回后的重挂载、StrictMode 的 effect 双跑)会拿初始空值 removeItem,把刚要读回来的
+  // 草稿删掉:切走再切回,输入框里的草稿就没了(回退中途切走时留回输入框的原文也随之丢失)。
+  const renderSeqRef = useRef(0);
+  renderSeqRef.current += 1;
+  const hydrateSeqRef = useRef(null);
   useEffect(() => {
+    hydrateSeqRef.current = { key: draftKey, seq: renderSeqRef.current };
     try { setText(claimDraft?.sendable ? claimDraft.text : (localStorage.getItem(draftKey) || '')); }
     catch { setText(''); }
     setAttachments(claimDraft?.sendable && Array.isArray(claimDraft.attachments) ? claimDraft.attachments : []);
@@ -512,6 +520,8 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
   const prevDraftKeyRef = useRef(draftKey);
   useEffect(() => {
     if (prevDraftKeyRef.current !== draftKey) { prevDraftKeyRef.current = draftKey; return; }
+    const h = hydrateSeqRef.current;
+    if (h && h.key === draftKey && h.seq === renderSeqRef.current) return; // r146b:装载尚未生效的那次提交,见上
     try {
       if (claimDraft?.sendable) {
         useStore.getState().updateClaimDraft(paneId, claimDraft.claimId, { text, attachments });
