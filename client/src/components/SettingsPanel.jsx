@@ -7,6 +7,7 @@ import { desktopNotifyEnabled, NOTIFY_PREF_KEY } from '../utils/desktopNotify.js
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
 import EnvCheckPanel from './EnvCheckPanel.jsx';
+import { isImeReactKeydown } from '../utils/imeGuard.js';
 // R44:进程管理入口自坞 rail 收进本面板(高级 tab 内嵌),复用同一组件、不复制。
 import { ProcessPanel } from './ProcessPanel.jsx';
 
@@ -2129,7 +2130,7 @@ function EnvEditor({ env, onEnvPatch, saving }) {
               value={draft[k] ?? ''}
               onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
               onBlur={() => saveValue(k)}
-              onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) e.currentTarget.blur(); }}
               disabled={saving}
               className="flex-1 min-w-0 text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
             )}
@@ -2151,7 +2152,7 @@ function EnvEditor({ env, onEnvPatch, saving }) {
           placeholder="新变量名" disabled={saving}
           className="w-[42%] text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
         <input value={newVal} onChange={(e) => setNewVal(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') addKey(); }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) addKey(); }}
           placeholder="值" disabled={saving}
           className="flex-1 min-w-0 text-[11px] font-mono bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
         <button onClick={addKey} disabled={saving || !newKey.trim()}
@@ -2217,7 +2218,7 @@ function DisplayNameInput() {
         value={draft}
         onChange={(e) => setDraft(truncateByCodePoints(e.target.value, 20))}
         onBlur={commit}
-        onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+        onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) e.currentTarget.blur(); }}
         className="w-36 shrink-0 text-[12px] font-body bg-canvas-base border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
     </div>
   );
@@ -2573,7 +2574,7 @@ function SmallFastModelInput({ env, onEnvPatch, saving }) {
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
-        onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+        onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) e.currentTarget.blur(); }}
         disabled={saving}
         placeholder="默认"
         className="shrink-0 w-44 text-[11px] font-mono bg-canvas-base border border-canvas-deep rounded px-2 py-1 text-ink focus:border-accent outline-none" />
@@ -2897,7 +2898,7 @@ function PermissionsTab({ settings, onSave, saving, saved }) {
               <input
                 value={drafts[key]}
                 onChange={(e) => setDrafts({ ...drafts, [key]: e.target.value })}
-                onKeyDown={(e) => { if (e.key === 'Enter') addRule(key); }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) addRule(key); }}
                 placeholder="如 Bash(git *) / Read(//path/**) / WebFetch(domain:example.com)"
                 className="flex-1 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono"
               />

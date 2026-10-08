@@ -114,7 +114,8 @@ import { quotaValueText } from './utils/quotaFormat.js';
 import { computeCostForMessage, displayUsd, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, createQueueId } from './utils/steerQueue.js';
+import { leaveSessionNotice, mergeDraftText, takeSessionNotice } from './utils/sessionNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
 import { localTurnTakenOver, makeTurnIdentityIndex } from './utils/turnIdentity.js';   // r141 渲染期身份闸门
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
@@ -149,6 +150,7 @@ import { effortCapsFor, effortAllowed, effortMemoryKey, effortSourceNote, useEff
 import { ProviderThinkingEditor } from './components/ProviderThinkingEditor.jsx';
 import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
+import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
@@ -161,6 +163,11 @@ import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js'
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
 import { askSaveLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot, willAskLargeSnapshot } from './utils/largeSnapshot.js';
+import { createLatestGate } from './utils/latestRequest.js';
+
+// r146b/r146c:没有任何窗格承载、也回不去的内容,按"它转成的 draft 身份"记成孤儿 draft 排队消息
+// (首页「未发出的消息」按项目过滤展示)。回退裁空会话、会话失效两处共用这一个键形。
+const orphanKeyFor = (projectHash) => queueKeyFor({ projectHash, draftId: newDraftId() });
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // R7 询问编排的纯逻辑 + 弹窗文案在 utils/largeSnapshot.js(白盒单测直接 import 断言
@@ -204,6 +211,7 @@ function EditableSessionTitle({ session }) {
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
+          if (isImeReactKeydown(e)) return; // 输入法上屏 / 取消候选那一下不是保存或取消(r147 K2)
           if (e.key === 'Enter') { e.preventDefault(); save(); }
           // 取消重命名的 Esc 已被消费,挡住 window 上的会话级监听(生成中单击即停)。
           else if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); setEditing(false); }
@@ -237,11 +245,17 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
   // R1:被体积安全阀跳过时如实告诉用户(否则"拍了个寂寞"看起来就是没反应)。
   const [skipReason, setSkipReason] = useState('');
 
+  // r146 R8:下拉开着时会话可能被换掉(回滚转 draft、/clear 轮换、会话失效转新会话),旧会话的
+  // 慢响应后到会把别的会话的回滚点画上来 —— 只认最新一次请求。
+  const latestLoadRef = useRef(null);
+  if (!latestLoadRef.current) latestLoadRef.current = createLatestGate();
   const load = async () => {
+    const isLatest = latestLoadRef.current.begin();
     if (!sessionId) return;
     try {
       const r = await fetch(`/api/checkpoints/${sessionId}`);
       const d = await r.json();
+      if (!isLatest()) return;
       setEntries(d.entries || []);
     } catch {}
   };
@@ -1797,6 +1811,7 @@ export const SessionItem = React.memo(function SessionItem({ session, isSelected
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
+              if (isImeReactKeydown(e)) return; // 输入法上屏 / 取消候选那一下不是保存或取消(r147 K2)
               if (e.key === 'Enter') { e.preventDefault(); saveRename(); }
               // 取消重命名的 Esc 已被消费,挡住 window 上的会话级监听(生成中单击即停)。
               else if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); setRenaming(false); }
@@ -3753,27 +3768,51 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       window.removeEventListener('cgui:open-search', onOpenSearch);
     };
   }, [paneIsActive, tabIndex]);
+  // r146 R5:"本窗格此刻在第几格"一律按稳定窗格 id 现查,不吃闭包里的位置号。关掉左边窗格时
+  // 右边窗格的组件实例保留(key = paneId)、位置号减 1(closePane 的 splice),而进行中的发送、
+  // 只按会话 id 重建的常驻 effect 握的是旧闭包 —— 位置号从闭包取,就会读写到别的格(排队不发、
+  // 转后台回复不上屏、重连不补拉、新会话首条 init 认不出发起窗格)。下面五个函数是本窗格读写
+  // store 的唯一入口,全部改走 paneIndexNow(),依赖随之稳定;窗格已不在(被关 / 单格换新 id)
+  // 时返回 -1:读到 null、写入一律不做。
+  const paneIdRef = useRef(paneId);
+  paneIdRef.current = paneId;
+  const paneIndexNow = useCallback(() => (useStore.getState().paneIds || []).indexOf(paneIdRef.current), []);
   const setSelectedSession = useCallback((s) => {
-    useStore.getState().setPaneSession(tabIndex, s);
-  }, [tabIndex]);
+    const i = paneIndexNow();
+    if (i >= 0) useStore.getState().setPaneSession(i, s);
+  }, [paneIndexNow]);
   const setLocalMessages = useCallback((msgs) => {
     const st = useStore.getState();
+    const i = paneIndexNow();
+    if (i < 0) return;
     // 归属 = 写入时刻本 pane 的会话(回滚裁剪/工具重做等都是对当前显示内容的改写)。
-    st.setPaneMessages(tabIndex, Array.isArray(msgs) ? msgs : [], st.paneSessions[tabIndex]?.sessionId || null);
-  }, [tabIndex]);
+    st.setPaneMessages(i, Array.isArray(msgs) ? msgs : [], st.paneSessions[i]?.sessionId || null);
+  }, [paneIndexNow]);
   const getLocalMessages = useCallback(() => {
-    return useStore.getState().paneMessages[tabIndex] || [];
-  }, [tabIndex]);
+    const i = paneIndexNow();
+    return (i >= 0 && useStore.getState().paneMessages[i]) || [];
+  }, [paneIndexNow]);
   // Latest session for the local tab — used inside async callbacks where
   // closure'd `selectedSession` would be stale.
   const getLocalSession = useCallback(() => {
-    return useStore.getState().paneSessions[tabIndex] || null;
-  }, [tabIndex]);
-  // Tab-aware fetchMessages wrapper: forwards tabIndex so the store writes
-  // into the correct messages slot.
+    const i = paneIndexNow();
+    return (i >= 0 && useStore.getState().paneSessions[i]) || null;
+  }, [paneIndexNow]);
+  // Tab-aware fetchMessages wrapper: forwards the pane's CURRENT index so the
+  // store writes into the correct messages slot.
   const fetchMessagesForTab = useCallback((sid, ph, opts = {}) => {
-    return useStore.getState().fetchMessages(sid, ph, { ...opts, tab: tabIndex });
-  }, [tabIndex]);
+    const i = paneIndexNow();
+    if (i < 0) return Promise.resolve();
+    return useStore.getState().fetchMessages(sid, ph, { ...opts, tab: i });
+  }, [paneIndexNow]);
+  // r146:异步落地前的统一复查 —— 本窗格此刻显示的会话是不是 ownerKey(发起时的会话键)。
+  // 也接受 altKey(draft 发起、init 升级出的真 sid:升级后窗格键已是真 sid)。
+  const paneStillOn = useCallback((ownerKey, altKey = null) => {
+    const s = getLocalSession();
+    if (!s || !ownerKey) return false;   // 窗格已空 / 已不在:一律当"已换走"
+    const k = queueKeyFor(s);
+    return k === ownerKey || (!!altKey && k === altKey);
+  }, [getLocalSession]);
   // Subscribe to these EARLY (before any conditional return) so React's hook
   // order stays stable. After a session-load transition we'd otherwise add a
   // hook below the early return → React #310 → blank page.
@@ -4405,6 +4444,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const id = setTimeout(() => setProviderSwitchNotice(null), 5000);
     return () => clearTimeout(id);
   }, [providerSwitchNotice]);
+  // r146b:别处给本会话留的一次性提示(回退中途切走、原定的重发没有发出等,见 utils/sessionNotice.js):
+  // 本会话显示在本窗格时取出,常驻到手动关。留言那一刻本会话若正显示着,经 cgui:session-notice 立刻取。
+  const noticeKeyRef = useRef(sessionQueueKey);
+  noticeKeyRef.current = sessionQueueKey;
+  // r146c:给用户此刻所在窗格的提示(内容说的是别的会话的事),带此刻窗格的会话键 —— 换会话即隐藏。
+  const showNoticeHere = useCallback((text) => {
+    if (text) setProviderSwitchNotice({ text, sticky: true, ownerKey: queueKeyFor(getLocalSession()) });
+  }, [getLocalSession]);
+  useEffect(() => {
+    const show = () => {
+      const text = takeSessionNotice(noticeKeyRef.current);
+      if (text) setProviderSwitchNotice({ text, sticky: true, ownerKey: noticeKeyRef.current });
+    };
+    show();
+    const onNotice = (e) => { if (e?.detail?.key && e.detail.key === noticeKeyRef.current) show(); };
+    window.addEventListener('cgui:session-notice', onNotice);
+    return () => window.removeEventListener('cgui:session-notice', onNotice);
+  }, [sessionQueueKey]);
   const reportAttachmentSidecarResult = useCallback((result) => {
     const text = attachmentSidecarNotice(result);
     if (text) setProviderSwitchNotice({ text });
@@ -5121,6 +5178,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!reattachPid) roundUuidsRef.current = new Set();
     streamStartRef.current = seed?.streamStart
       || (reattachPid && detachTsBySidRef.current[selectedSession?.sessionId]) || Date.now();
+    // r146 R2:本流自己的起流时刻(闭包常量)。streamStartRef 是【窗格级】的:切到别的会话后,
+    // 那边的 reattach 会把它改写成别的会话的起点。本流迟到的 finally 若再读它去写直播快照,
+    // 别的会话的起点就成了本会话的历史截断口径(切回时已落盘的回复被整段藏掉、计时从别人的
+    // 起点算 = 用户实报的「Connecting… 14m33s」)。快照一律用这个值。
+    const turnStreamStart = streamStartRef.current;
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
@@ -5176,15 +5238,26 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const deferBubbleForAsk = willAskLargeSnapshot(selectedSession?.sessionId);
     userMsgUuid = 'chat-user-' + Date.now();
     userMsgTimestamp = new Date().toISOString();
-    const pushBubble = () => setChatMessages((prev) => [...prev, {
-      uuid: userMsgUuid, type: 'user',
-      timestamp: userMsgTimestamp, text: prompt,
-      checkpointSha: null,
-      // L3: 附件卡片渲染数据。displayText 是去附件标签后的纯文本(气泡显示用),
-      // attachments 用于渲染缩略图/文件名卡片。prompt(text)仍是给 CLI 的完整 outbound。
-      attachments: meta?.attachments,
-      displayText: meta?.displayText,
-    }]);
+    // r146 R1:用户气泡一律带 ownerKey(发起时的会话键)。原来不带,可见性就退化成"本窗格当前
+    // 消费的流是谁"(localEntryVisible 无 ownerKey 分支)—— 而气泡在多数会话里是推迟画的(下面
+    // deferBubbleForAsk:要等发送前拍快照那一次往返回来),这段时间里切到一个有回合在跑的会话,
+    // 推迟的气泡就落进了那个会话的窗格、并且显示出来(用户实报:别的会话的消息出现在当前会话底部)。
+    // 落地前再复查一次:窗格已经不是发起会话 → 不写进窗格,改存进 r118 的按会话暂存,切回原会话时
+    // 由既有对账补回 / 撤除(与切走时暂存在途气泡同一条路)。
+    const bubbleOwnerKey = sessionQueueKey;
+    const pushBubble = () => {
+      const bubble = {
+        uuid: userMsgUuid, type: 'user', ownerKey: bubbleOwnerKey,
+        timestamp: userMsgTimestamp, text: prompt,
+        checkpointSha: null,
+        // L3: 附件卡片渲染数据。displayText 是去附件标签后的纯文本(气泡显示用),
+        // attachments 用于渲染缩略图/文件名卡片。prompt(text)仍是给 CLI 的完整 outbound。
+        attachments: meta?.attachments,
+        displayText: meta?.displayText,
+      };
+      if (!paneStillOn(bubbleOwnerKey)) { stashUserBubbles(bubbleOwnerKey, [bubble]); return; }
+      setChatMessages((prev) => [...prev, bubble]);
+    };
     if (!deferBubbleForAsk) pushBubble();
     // L4:所有附件 sidecar 先进入持久 outbox，再尝试 POST。draft 先以会话 ownerKey
     // 记账，init 拿到真实 sid 后统一绑定；真实 session 发送也走同一条可靠链。
@@ -5358,6 +5431,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 本次流真正归属的 sessionId:发起于真会话=闭包 sid;发起于 draft=init 事件里的新 sid。
     // result 后的标题兜底等"归属敏感"逻辑一律用它,绝不摸 getLocalSession()(用户可能已切走)。
     let streamSid = selectedSession?.sessionId || null;
+    // r146 R2:本流是否真的接上过服务端的流(attach 2xx)。POST 窗口里就切走的流(下面
+    // 「孤儿流复判」直接 return)一个字都没收过,不代表任何直播内容 —— 它不能写直播快照。
+    let streamAttached = false;
+    // r146 R6:本次发送【实际用的】模型(下面发送块里从 store 现解析)。外层同名 currentModel 是
+    // 渲染期快照,换模型只改 modelBySession、不会让 handleSend 重建 —— 1M 被拒的自动恢复与超窗
+    // 横幅读它就会拿到换模型之前的旧值(恢复成旧模型、1M 判断错)。reattach 不走发送块,为 null 时回落。
+    let sentModel = null;
+    // r146 R4:错误后的自动重发(1M 被拒 / 签名自愈 / 会话失效转 draft / auto 档回退)统一走这里。
+    // handleSendRef 恒发进【本窗格当前会话】;原来 80ms 定时器落地前不复查,这段时间(签名自愈还要
+    // 先等剥离与拉历史)切走,原文就被发进了新会话。落地前确认本窗格仍是发起会话(或 init 升级出的
+    // 真 sid);expectKey 给"本支自己把窗格换成了新 draft"的会话失效那一支用。
+    const retryLater = (nextOpts, expectKey = null) => setTimeout(() => {
+      if (expectKey ? !paneStillOn(expectKey) : !paneStillOn(sessionQueueKey, streamSid)) return;
+      handleSendRef.current?.(prompt, nextOpts);
+    }, 80);
     // 发起时的 projectHash 闭包(判官盲审重要1):finally 拉历史必须用它,不能现取
     // getLocalSession()?.projectHash —— 流式期间用户切到另一个项目的会话时两者对不上,
     // 会拉错项目历史/404。draft 会话也带 projectHash,全程有效。
@@ -5426,6 +5514,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // TDZ)。pin 显式关 1m 时 syncContext1m 已清标记,不会误补。
       const _c1m = selectedSession?.sessionId && _stM.context1mBySession?.[selectedSession.sessionId];
       if (_c1m && currentModel && !/\[1m\]/i.test(currentModel)) currentModel = currentModel + '[1m]';
+      sentModel = currentModel; // r146 R6:见声明处
       let effort = useStore.getState().getEffortFor(sessionQueueKey);
       // r10-9:模型能力门控——模型声明不支持思考或该档不支持时不传 effort(不写 env,
       // CLI 端零痕迹)。UI 已回落兜底,这里是发送侧防御(pin 残留/竞态)。
@@ -5572,6 +5661,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         recoverAttach();
         return; // 本 return 照样走 finally,finalizeInFlightRef 的 ±1 配对不破
       }
+      streamAttached = true; // r146 R2:见声明处
       // attach 成功 = 三振那条 sticky 失败横幅已经过时,清掉。sticky 不自动过期,不清就
       // 一直挂着,恢复之后还在报错。函数式更新避开闭包陈旧值。
       // 注意这里【不】清失败计数:计数在收到 done(本流真的跑完)时才清,见循环之后。
@@ -5624,7 +5714,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // fetchMessages 内部有乱序守卫(响应落地时 pane 已切走则整条丢弃),数据没被应用时
       // 签名自然不变,所以这里不需要再判一次归属。
       const noteHistApplied = () => {
-        const arr = useStore.getState().paneMessages[tabIndex] || [];
+        const arr = getLocalMessages(); // r146 R5:按窗格当前位置读(关左窗格后位置号会变)
         const sig = histSig(arr[arr.length - 1]);
         const prev = histFreshRef.current;
         if (prev.sig === null) { histFreshRef.current = { at: prev.at, sig }; return; } // 首次只记基线
@@ -5771,7 +5861,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
               // 清历史 + 归属守卫直接认领新 sid(旧会话历史不属于新会话;
               // setPaneMessages 同写 arr+sid+pane0 镜像,无需再 claimPaneMessages)。
-              useStore.getState().setPaneMessages(tabIndex, [], event.session_id);
+              { const _pi = paneIndexNow(); if (_pi >= 0) useStore.getState().setPaneMessages(_pi, [], event.session_id); } // r146 R5
               // 新会话对象:身份/路径/模型继承,标题类字段清零(旧会话的标题不属于它,
               // 侧栏刷新后由 jsonl 重新解析)。
               setSelectedSession({
@@ -5832,7 +5922,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
               // 串扰窗口1守卫的 draft→真 sid 升级:pane 历史(draft 期为空)的归属标记
               // 同步升级成真 sid,否则绑定后、首次 fetch 回来前守卫会误藏活会话。
-              useStore.getState().claimPaneMessages(tabIndex, event.session_id);
+              { const _pi = paneIndexNow(); if (_pi >= 0) useStore.getState().claimPaneMessages(_pi, event.session_id); } // r146 R5
               setSelectedSession({
                 ...sel,
                 draft: false,
@@ -6636,26 +6726,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 内可用(/context 实测真 1M 窗口),不会走到这。
             if (/usage credits required for 1m context|long context beta is not (yet )?available/i.test(msg) && !opts.oneMRetry && prompt) {
               const _st = useStore.getState();
-              const _base = String(currentModel || '').replace(/\[1m\]/i, '');
+              const _base = String(sentModel || currentModel || '').replace(/\[1m\]/i, ''); // r146 R6
               if (_base) _st.setModelFor(sessionQueueKey, _base);
               if (/\[1m\]/i.test(_st.currentModel || '')) _st.setModel(String(_st.currentModel).replace(/\[1m\]/i, ''));
-              setProviderSwitchNotice({ text: '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。' });
-              setTimeout(() => handleSendRef.current?.(prompt, { ...opts, oneMRetry: true }), 80);
+              // r146b:提示条是窗格级的 —— 窗格已不是本会话就不弹(模型 pin 按会话键改,与窗格无关,照改)。
+              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。' });
+              retryLater({ ...opts, oneMRetry: true });
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
             }
             if (/invalid signature in thinking/i.test(msg) && !opts.signatureRetry && prompt) {
-              const _s = getLocalSession();
+              // r146 R4:自愈的对象是【本流的会话】(窗格已不是它就不碰窗格当前那条)。
+              const _s = paneStillOn(sessionQueueKey, streamSid) ? getLocalSession() : null;
               if (_s?.sessionId && _s?.projectHash) {
                 try {
                   await runHistoryOp(_s.sessionId, 'strip-thinking', { projectHash: _s.projectHash });
                   await fetchMessagesForTab(_s.sessionId, _s.projectHash, { silent: true });
                 } catch {}
-                setProviderSwitchNotice({ text: '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。' });
                 // 透传原 opts(工具重做带的 appendSystemPrompt/hiddenUserMessage 必须保留),
-                // 只追加守卫位防无限重试。
-                setTimeout(() => handleSendRef.current?.(prompt, { ...opts, signatureRetry: true }), 80);
+                // 只追加守卫位防无限重试。剥离期间切走 → 提示与重发都放弃(提示会落在别的会话上)。
+                if (paneStillOn(sessionQueueKey, streamSid)) {
+                  setProviderSwitchNotice({ text: '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。' });
+                  retryLater({ ...opts, signatureRetry: true });
+                }
                 // 本次失败的产物正是 "API Error: ...Invalid signature..." 文案,它也作为
                 // assistant text 落进了 accumulatedText。清空,否则循环结束后会被当成正常
                 // 回复气泡再插一条,用户就会看到那条报错(即用户报告的现象)。
@@ -6668,14 +6762,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // found"。自动转 draft + 重发本条:下次不带 --resume = 在同项目新建会话,
             // 用户不必手动处理僵尸会话。freshRetry 守卫防无限循环。
             if (/No conversation found/i.test(msg) && !opts.freshRetry && prompt) {
-              const _s = getLocalSession();
-              if (_s?.sessionId) {
-                const _nd = newDraftId(); // r26-B5:draft 键带 draftId,迁移目标与将创建的 draft 同键
-                useStore.getState().migrateSessionKey?.(_s.sessionId, queueKeyFor({ projectHash: _s.projectHash, draftId: _nd }));
-                setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: _nd });
+              // r146b:换成新 draft、弹提示、重发都是窗格动作 —— 只在窗格仍是本会话时做(否则会把别的
+              // 会话换成 draft、提示挂到别的会话上)。
+              if (paneStillOn(sessionQueueKey, streamSid)) {
+                const _s = getLocalSession();
+                let _freshKey = null; // r146 R4:本支自己把窗格换成的新 draft 键
+                if (_s?.sessionId) {
+                  const _nd = newDraftId(); // r26-B5:draft 键带 draftId,迁移目标与将创建的 draft 同键
+                  _freshKey = queueKeyFor({ projectHash: _s.projectHash, draftId: _nd });
+                  useStore.getState().migrateSessionKey?.(_s.sessionId, _freshKey);
+                  setSelectedSession({ ..._s, sessionId: null, draft: true, draftId: _nd });
+                }
+                setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
+                retryLater({ ...opts, freshRetry: true }, _freshKey);
+              } else if (prompt && !hiddenUserMessage && streamOwnerPh) {
+                // r146c:窗格已换走 —— 这条提问没发出去,不能静默丢。原会话的会话文件已失效、侧栏不再列出它,
+                // 留给它等于找不回(与回退裁空同理),记成首页「未发出的消息」,并在此刻窗格上说明去向。
+                const _saved = useStore.getState().addOrphanDraftMessage(
+                  orphanKeyFor(streamOwnerPh), streamOwnerPh,
+                  { queueId: createQueueId('noconv'), text: prompt, queuedAt: Date.now(), opts: meta ? { meta: attachmentMetaForPersistence(meta) } : {} },
+                );
+                showNoticeHere(_saved
+                  ? '另一个会话的历史已失效，那条消息没有发出，已放到首页「未发出的消息」里。'
+                  : `另一个会话的历史已失效，那条消息没有发出，也没能保存（本地存储写入失败），原文：${String(prompt).slice(0, 200)}`);
               }
-              setProviderSwitchNotice({ text: '原会话历史已失效，已自动新建会话并重发本条。' });
-              setTimeout(() => handleSendRef.current?.(prompt, { ...opts, freshRetry: true }), 80);
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -6690,8 +6800,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               markAutoUnavailable(_st.currentProvider?.providerHint || 'anthropic',
                 _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
               _st.setPermissionMode('default', sessionQueueKey);
-              setProviderSwitchNotice({ text: '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
-              setTimeout(() => handleSendRef.current?.(prompt, { ...opts, autoRetry: true }), 80);
+              // r146b:权限档按会话键改(与窗格无关);提示条只在窗格仍是本会话时弹。
+              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
+              retryLater({ ...opts, autoRetry: true });
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -6707,7 +6818,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 超限;横幅要把真实窗口亮给用户并给对建议(压缩摘要请求自身也会超小窗,难自救)。
               const _lim = /(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)\s*maximum/i.exec(msg);
               setCtxOverflow({
-                has1m: /\[1m\]/i.test(currentModel || ''), wasCompact: isCompact, ownerKey: streamSid || sessionQueueKey,
+                has1m: /\[1m\]/i.test(sentModel || currentModel || ''), wasCompact: isCompact, ownerKey: streamSid || sessionQueueKey, // r146 R6
                 used: _lim ? Number(_lim[1].replace(/,/g, '')) : null,
                 limit: _lim ? Number(_lim[2].replace(/,/g, '')) : null,
               });
@@ -7038,8 +7149,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           markAutoUnavailable(_st.currentProvider?.providerHint || 'anthropic',
             _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
           _st.setPermissionMode('default', sessionQueueKey);
-          setProviderSwitchNotice({ text: '当前 CLI / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
-          setTimeout(() => handleSendRef.current?.(prompt, { ...opts, autoRetry: true }), 80);
+          // r146 R4:POST 返回 500 时窗格可能已切走 —— 提示与重发都只在仍是本会话时做。
+          if (paneStillOn(sessionQueueKey, streamSid)) {
+            setProviderSwitchNotice({ text: '当前 CLI / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
+            retryLater({ ...opts, autoRetry: true });
+          }
         } else {
         console.error('Chat error:', err);
         // Render the failure as a visible turn so the user isn't left staring at
@@ -7307,9 +7421,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       //   ② 回合真结束(done)或用户真停止(killedRef):历史即将/已经是全量,再种就是双份;
       //   ③ 被别的窗格接管(takeover):此后的行归对方消费,我们手里的尾巴已经落后 ——
       //      连旧快照一并清掉,让下一次 attach 老老实实退回今天的行为(宁空窗不丢字)。
+      // r146 R2:④ 本流根本没接上过(POST 窗口里切走)→ 不写。快照的起点 / 截断口径用本流自己的
+      //   turnStreamStart,不读窗格级 streamStartRef(此刻可能已是别的会话的流)。
       if (streamSid && streamEndMirror !== 'done' && !killedRef.current) {
         if (streamEndMirror === 'takeover') dropStreamSnapshot(streamSid);
-        else if (!reattachPid || seeded) putStreamSnapshot(streamSid, {
+        else if (streamAttached && (!reattachPid || seeded)) putStreamSnapshot(streamSid, {
           text: accumulatedText,
           thinking: accumulatedThinking,
           toolCalls: currentToolCalls,
@@ -7318,8 +7434,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           steerAnchors: { ...steerAnchorRef.current },
           // 本流用的历史截断口径(普通发送=本次起流时刻;种回=一路继承的原始起流时刻)。
           // 它必须跟着快照走:种回时用 afterLastUser 之类的替代口径会切错位置(⚡引导折叠)。
-          cutoff: seed?.cutoff || { sinceTs: streamStartRef.current, keepUser: true },
-          streamStart: streamStartRef.current,
+          cutoff: seed?.cutoff || { sinceTs: turnStreamStart, keepUser: true },
+          streamStart: turnStreamStart,
         });
       }
       // 复位只归当前 generation 所有:上面的 finalize 轮询含 await(最长 ~2.4s),这期间
@@ -7465,9 +7581,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 发之前先【轮询本地两个 ref】等停止落地,上限 4s 到点也发:绝不裸 await 任何控制类调用
   // (LEARNINGS「控制类调用必须 fire-and-forget + 超时兜底」——await interrupt 挡住兜底
   // 就是当年"停止失效"的成因)。
+  // r146 R3:最长 4s 的等待期间用户可能切走,而 handleSendRef 永远发进【本窗格当前会话】——
+  // 调用这一刻本窗格的会话就是发起重发的会话(调用方都已在各自的等待点之后复查过窗格),锁住它,
+  // 每一跳落地前复查,换了会话就不发(绝不把 A 的原文发进 B)。
+  // r146c:调用方登记的"放弃重发时的善后"(回退把本来要重发的内容留回原会话)。resendReplacing 一被调用
+  // 就取走并清空,一次一对,不跨调用残留;工具重做不登记(它的续跑是隐藏消息,没有可留回的文字)。
+  const resendAbandonRef = useRef(null);
   const resendReplacing = useCallback((text, opts = {}) => {
+    const ownerKey = queueKeyFor(getLocalSession());
+    const onAbandon = resendAbandonRef.current;
+    resendAbandonRef.current = null;
     const deadline = Date.now() + 4000;
     const tick = () => {
+      if (!paneStillOn(ownerKey)) { onAbandon?.(); return; }
       if (Date.now() < deadline && (streamingRef.current || backgroundPidRef.current)) {
         setTimeout(tick, 100);
         return;
@@ -7475,7 +7601,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       handleSendRef.current?.(text, { ...opts, forceSend: true });
     };
     setTimeout(tick, 50);
-  }, []);
+  }, [getLocalSession, paneStillOn]);
 
   // Auto-reattach: when the backgroundPid poll finds this session has a live
   // CLI proc that nobody's listening to (user navigated away mid-stream),
@@ -7758,13 +7884,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const refreshed = await fetchMessagesForTab(before.sessionId, before.projectHash, { silent: true });
     const after = getLocalSession();
     const current = after?.sessionId === before.sessionId && after?.projectHash === before.projectHash;
-    const persisted = current ? (useStore.getState().paneMessages[tabIndex] || []) : [];
+    const persisted = current ? getLocalMessages() : []; // r146 R5:await 之后按窗格当前位置读
     const keys = persistedSteerKeys(persisted);
     const item = (useStore.getState().messageQueue[sessionQueueKey] || []).find((entry) => entry?.queueId === queueId);
     const matched = !!(item?.steerId && keys.has(String(item.steerId).toLowerCase()));
     useStore.getState().reconcileSteerQueue(sessionQueueKey, keys);
     return { matched, current, refreshed };
-  }, [fetchMessagesForTab, getLocalSession, sessionQueueKey, tabIndex]);
+  }, [fetchMessagesForTab, getLocalSession, getLocalMessages, sessionQueueKey, tabIndex]);
   const liveSteerItems = useMemo(
     () => messageQueue.filter((m) => isSteered(m) && !persistedSteerIds.has(m.steerId)),
     [messageQueue, persistedSteerIds]);
@@ -7918,6 +8044,72 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const handleRollback = useCallback(async (msg, { mode, resendText = null, softFiles = false } = {}) => {
     const sel = getLocalSession();
     const proj = useStore.getState().selectedProject;
+    // r146 R3:回退 / 重发链路里有好几个等待点(找快照、还原文件、裁剪会话、拉历史、等停止落地),
+    // 每个等待点之后先确认本窗格仍是发起回退的会话;中途切走 → 后续的窗格动作(停流、裁界面、
+    // 写窗格历史、重发)一律放弃 —— 原来没有这道复查:A 裁剪后的历史以 B 的名义写进窗格,原文被
+    // 重发进 B 的会话文件,B 在跑的回合还会被强停。磁盘已经裁剪了才发现切走的,把原文留回 A 的
+    // 输入框草稿(草稿为空时),回到 A 能看到、自己决定发不发。
+    let rbKey = queueKeyFor(sel);
+    const stillHere = () => paneStillOn(rbKey);
+    // r146b:磁盘侧(还原文件 → 裁剪)只动本会话自己的文件与会话记录、与窗格无关,一旦开始就做完,
+    // 中途切走也不停在"文件已回退、历史没裁"的半截;只在做完之后才判断窗格动作做不做。
+    // 开始那一刻本会话在跑的进程记下来(窗格级 ref 切走后就属于别的会话了),切走时按它停。
+    const startPid = activeProcRef.current || backgroundPidRef.current;
+    // 磁盘侧的提示:仍在本会话 → 立刻显示;已切走 → 攒着,随留给本会话的提示一起给出(不挂到别的会话上)。
+    const diskNotes = [];
+    const noteHere = (text) => { if (stillHere()) setProviderSwitchNotice({ text }); else diskNotes.push(text); };
+    // r146b:本来要重发的内容 —— 编辑后重发(resendText 是对象)取改后的文字与附件;其余取原消息的
+    // 完整 outbound(含 @path 附件引用)。中途切走时留给本会话的就是它,不是改前原文。
+    const pendingResend = () => {
+      if (resendText && typeof resendText === 'object') return { prompt: resendText.prompt || '', meta: resendText.options?.meta || null };
+      if (typeof resendText === 'string' && resendText) return { prompt: resendText, meta: null };
+      const p = resendPayloadForMessage(msg);
+      return { prompt: p?.prompt || '', meta: p?.meta || null };
+    };
+    // r146b/r146c:窗格切走、重发放弃时,把本来要重发的内容留给本会话,并留一条按实际结果措辞的提示。
+    // 三个放弃点共用(裁剪期间 / 拉历史期间 / 等停止落地期间切走),不再有直接 return 丢内容的出口。
+    //   · trimOk:会话记录裁剪是否成功 —— 失败时不说"已回退"(原来两句话自相矛盾);
+    //   · wiped:会话已被裁空(或窗格已转成没有任何窗格承载的 draft)—— 侧栏不再列出它、回不去,内容进
+    //     首页「未发出的消息」,提示挂在用户此刻所在的窗格上(带该窗格的会话键,换会话即隐藏);
+    //   · 否则内容进本会话输入框草稿(已有草稿就追加在后面,整串 / 结尾相同才算已在),提示按会话键留言,
+    //     回到本会话时显示。本会话若正显示在别的窗格,两件事立刻生效(事件)。
+    const leaveForOwner = ({ notes = [], trimOk = true, wiped = false } = {}) => {
+      const { prompt: left, meta: leftMeta } = pendingResend();
+      if (wiped) {
+        const saved = !!left && !!sel?.projectHash && useStore.getState().addOrphanDraftMessage(
+          orphanKeyFor(sel.projectHash), sel.projectHash,
+          { queueId: createQueueId('rollback'), text: left, queuedAt: Date.now(), opts: leftMeta ? { meta: attachmentMetaForPersistence(leftMeta) } : {} },
+        );
+        const where = !left ? ''
+          : saved ? '要重发的内容已放到首页「未发出的消息」里，可在那里填回输入框。'
+            : `要重发的内容没能保存（本地存储写入失败），原文：${left.slice(0, 200)}${left.length > 200 ? '…' : ''}`;
+        showNoticeHere(['另一个会话的回退已完成：会话记录已清空，原定的重发没有发出。', where, ...notes].join(''));
+        return;
+      }
+      let outcome = 'none';
+      if (left && rbKey) {
+        try {
+          const dk = `cgui-draft:${rbKey}`;
+          const merged = mergeDraftText(localStorage.getItem(dk) || '', left);
+          outcome = merged.outcome;
+          localStorage.setItem(dk, merged.next);
+          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: merged.next, targetKey: rbKey } }));
+        } catch { outcome = 'failed'; }
+      }
+      const where = {
+        placed: '要重发的内容已放回输入框，确认后再发送。',
+        appended: '要重发的内容已追加到输入框原有内容之后，确认后再发送。',
+        same: '要重发的内容已在输入框里，确认后再发送。',
+        failed: `要重发的内容没能放回输入框（本地存储写入失败），原文：${left.slice(0, 200)}${left.length > 200 ? '…' : ''}`,
+      }[outcome] || '';
+      leaveSessionNotice(rbKey, [
+        trimOk ? '回退过程中切换了会话：会话记录已回退，原定的重发没有发出。'
+          : '回退过程中切换了会话：会话记录裁剪失败（磁盘历史未改动），原定的重发没有发出。',
+        where,
+        ...notes,
+      ].filter(Boolean).join(''));
+      window.dispatchEvent(new CustomEvent('cgui:session-notice', { detail: { key: rbKey } }));
+    };
     // 会话优先于全局项目:setSelectedProject 支持"浏览别的项目、右侧会话不动",
     // 且 worktree 会话的 projectPath 与主项目不同。取全局项目会把 A 会话的快照写进
     // B 目录、trim 用错 hash(对齐 handleSend/FileReviewPanel 的会话优先口径)。
@@ -8044,7 +8236,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const opts = typeof resendText === 'object' ? (resendText?.options || {}) : {};
       if (txt && handleSendRef.current) {
         setProviderSwitchNotice({ text: '未能定位原消息位置,已作为新消息发送(未裁剪历史)。' });
-        setTimeout(() => handleSendRef.current(txt, opts), 50);
+        // r146 R4:50ms 里切走了就不发(handleSendRef 恒发进本窗格当前会话)
+        setTimeout(() => { if (stillHere()) handleSendRef.current?.(txt, opts); }, 50);
       }
       return;
     }
@@ -8056,14 +8249,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 没有文件快照(非 git 项目 / 旧消息 / 快照丢失)不该让整个回退"没反应"——以前这里
       // alert + return,既不裁剪也不重发,用户关掉弹窗后什么都没发生。降级处理:跳过文件
       // 还原,继续裁剪会话并按 mode 重发 / 回填输入框,只用一条提示告知文件未动。
-      setProviderSwitchNotice({ text: '未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。' });
+      noteHere('未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。');
     }
     if (shouldRestoreFiles && checkpointSha && sel?.sessionId && cwd) {
       // 还原失败最常见的就是这条消息发送前后没有任何被跟踪文件改动:shadow 仓库里
       // 那个 commit 是空树,`git checkout <sha> -- .` 报 pathspec 不匹配。这属于"本来
       // 就没文件要还原"而非真错,不该 alert+return 中断整个回退。降级:跳过文件还原,
       // 继续裁剪会话/重发,只用一条提示告知项目文件未动。
-      const softDegrade = () => setProviderSwitchNotice({ text: '未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。' });
+      const softDegrade = () => noteHere('未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。');
       try {
         const r = await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
           method: 'POST',
@@ -8075,7 +8268,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // (超时把 checkout 杀在半路等)可能已部分还原,如实提示别撒谎。
           const d = await r.json().catch(() => ({}));
           if (d.code === 'restore_failed') {
-            setProviderSwitchNotice({ text: '文件还原过程出错，工作区可能已部分还原，请检查改动（会话已回退）。' });
+            noteHere('文件还原过程出错，工作区可能已部分还原，请检查改动（会话已回退）。');
           } else softDegrade();
         }
       } catch {
@@ -8089,6 +8282,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     //    landed in the jsonl (the CLI persists its own uuid but keeps the ts).
     let sessionWasReset = false;
     let trimFailed = false;
+    let wipedAway = false; // r146b:会话被裁空(sessionReset)时窗格已切走 —— 见下方切走分支
     if (sel?.sessionId && projectHash) {
       const body = msg.uuid && !msg.uuid.startsWith('chat-')
         ? { projectHash, uuid: msg.uuid }
@@ -8100,7 +8294,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // drop the sessionId locally — otherwise the next /api/chat would
         // try --resume on a deleted jsonl and CLI silently exits with
         // "No conversation found".
-        if (tr.sessionReset) {
+        if (tr.sessionReset && !stillHere()) wipedAway = true;
+        if (tr.sessionReset && stillHere()) { // r146 R3:转 draft 是窗格动作,切走了就不做
           sessionWasReset = true;
           // sessionId 失效 → 切到 draft 态。但 permissionMode / model 的 per-session
           // pin 还在 modelBySession[oldSid] / permissionModeBySession[oldSid] 下,
@@ -8119,8 +8314,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             draft: true,
             draftId: _nd,
           });
+          rbKey = draftKey; // 窗格现在是这条新 draft,后续复查认它
         }
       } catch { trimFailed = true; }
+    }
+    // r146 R3:裁剪期间切走 —— 磁盘已裁,窗格动作与重发全部放弃,本来要重发的内容留给本会话。
+    if (!stillHere()) {
+      // 开始回退时本会话在跑的回合:按它自己的 pid 停掉(不碰窗格 ref),否则它继续往刚裁剪的记录里追加。
+      if (startPid) {
+        stoppedPidsRef.current.add(String(startPid));
+        fetch(`/api/chat/${startPid}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
+      }
+      // 会话被裁空(wipedAway)→ 侧栏不再列出它、回不去:内容进首页「未发出的消息」(见 leaveForOwner)。
+      leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, wiped: wipedAway });
+      return;
     }
     // trim 失败(磁盘 jsonl 没裁)但 UI 已裁+即将重发 → 重发会落在未裁历史上、且
     // step5 refetch 把旧消息全拉回。如实告知,不再静默(对齐 CheckpointsPanel)。
@@ -8171,6 +8378,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!sessionWasReset && sel?.sessionId && projectHash) {
       try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
     }
+    // r146c:拉历史期间切走 —— 不重发,本来要重发的内容同样留给本会话(原来直接 return,改后的文字就丢了)。
+    if (!stillHere()) { leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, wiped: sessionWasReset }); return; }
 
     // 6) act per mode
     if (mode === 'edit') return; // composer was filled at the top of this branch
@@ -8180,6 +8389,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 后的 composerText —— 纯附件消息 displayText 为空,旧守卫会让整条消息裁掉后不重发。
     const { prompt: resendPrompt, meta: resendMeta } = resendPayloadForMessage(msg);
     if (resendPrompt && handleSendRef.current) {
+      // r146c:等停止落地(≤4s)期间切走 → resendReplacing 放弃重发时调这个善后(一次性登记、一次性取走)。
+      resendAbandonRef.current = () => leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, wiped: sessionWasReset });
       // Bug8:走 resendReplacing —— forceSend 绕过入队门 + 发前轮询本地 ref 等停止落地(≤4s)。
       if (typeof resendText === 'object' && resendText) {
         resendReplacing(resendText.prompt || resendPrompt, resendText.options || {});
@@ -8200,7 +8411,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {});
       }
     }
-  }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession, resendReplacing]);
+  }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession, resendReplacing, paneStillOn]);
   useEffect(() => { handleRollbackRef.current = handleRollback; }, [handleRollback]);
   // 切换会话时清掉待回滚 + 即时上下文用量 + 打开的子代理视图,避免泄漏到另一会话。
   useEffect(() => {
@@ -8264,6 +8475,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       return;
     }
     const sel = getLocalSession();
+    const rtKey = queueKeyFor(sel); // r146:发起重做的会话键(异步落地前复查用)
     const projectHash = sel?.projectHash || useStore.getState().selectedProject?.hash;
     if (!sel?.sessionId || !projectHash) {
       confirmDialog('缺少 sessionId 或 projectHash，无法局部重做工具');
@@ -8334,6 +8546,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
         const tr = await runHistoryOp(sel.sessionId, 'trim-before-tool', { projectHash, toolUseId: toolCall.id });
         if (!tr.ok) throw new Error(tr.error || tr.status);
+        // r146 R3 同族:等停止 / 裁剪期间切走了 —— 后续窗格动作与重跑一律放弃(重跑会发进别的会话)。
+        if (!paneStillOn(rtKey)) return;
         // r99b(Windows 审查中-1):截断真正成功后才通知调用方 —— Windows 上 rename 覆盖被
         // 占用的文件会 EPERM,失败时不该把"本会话唯一一次自动回退"的机会烧掉。
         opts.onTrimmed?.();
@@ -8365,7 +8579,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
       }
     })();
-  }, [getLocalSession, fetchMessagesForTab, getLocalMessages, setLocalMessages, resendReplacing]);
+  }, [getLocalSession, fetchMessagesForTab, getLocalMessages, setLocalMessages, resendReplacing, paneStillOn]);
 
   // AZ11:给 memo 的 MessageList 传【引用稳定】的回调。原始 handleRollback/handleRetryTurn
   // 的 deps 含 messages/chatMessages → 流式中每 token 都会换新身份 → 直接传会让 memo
@@ -8482,14 +8696,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 与侧栏分支按钮同待遇:标题「分支N」标识 + 继承 model/effort/权限。之前这里
       // 三样全缺 → 用户分不清窗口里是不是 fork(标题一模一样),列表也迟迟不出现。
       adoptFork(st, sess, data.newSessionId);
-      if (tabIndex === 0 && st.paneCount === 1) st.setSelectedSession(fork);
-      else st.setPaneSession(tabIndex, fork);
+      // r146 R5:await 之后按窗格当前位置写(确认弹窗 / 请求期间关掉左边窗格,位置号会左移)。
+      const _pi = paneIndexNow();
+      if (_pi < 0) return;
+      const st2 = useStore.getState();
+      if (_pi === 0 && st2.paneCount === 1) st2.setSelectedSession(fork);
+      else st2.setPaneSession(_pi, fork);
       // 锚点分叉的历史被截断,必须重拉;不拉的话窗格还挂着源会话的完整消息列表
-      st.fetchMessages(data.newSessionId, sess.projectHash, { tab: tabIndex, silent: true });
+      st2.fetchMessages(data.newSessionId, sess.projectHash, { tab: _pi, silent: true });
       // 列表立刻可见:打包版禁用了文件 watcher,新 jsonl 不会自动触发侧栏刷新
       if (st.selectedProject?.hash === sess.projectHash) st.fetchSessions(sess.projectHash, { silent: true });
     } catch (e) { await confirmDialog('分叉失败：' + String(e.message || e)); }
-  }, [tabIndex]);
+  }, [tabIndex, paneIndexNow]);
   const stableRetryTool = useCallback((turn, toolCall) => handleRetryToolRef.current?.(turn, toolCall), []);
   const stableRollback = useCallback((msg, opts) => handleRollbackRef.current?.(msg, opts), []);
 
@@ -8569,6 +8787,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 之后 —— 那里才能引用到已收口的 finalizedMessages;上提到更早只能用 messages,
   // 半成品 turn 会被误判成孪生)。上屏与 allMessages 派生统计只认这一份,不再双计。
   const allMessages = [...finalizedMessages, ...renderChat];
+  // r146c:带所属会话键的提示(会话留言 / 别的会话的回退结果)只在键与本窗格当前会话一致时显示;
+  // 不带键的照旧(窗格级瞬时提示)。原来一律显示,回到 A 不关、再切到 C,A 的提示就挂在了 C 上。
+  const shownNotice = providerSwitchNotice && (!providerSwitchNotice.ownerKey || providerSwitchNotice.ownerKey === sessionQueueKey)
+    ? providerSwitchNotice : null;
   // 右侧回合进度条数据:每个用户回合一个点(摘要取去附件后的显示文本)。
   // 注意:必须是普通计算,不能用 useMemo —— 这里在 SessionDetail 的早返回
   // (if loading && tabIndex===0 return)之后,加 hook 会导致切换会话(loading 切换)时
@@ -8935,7 +9157,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           回显;providerSwitchNotice 的 5s 计时独立运行,压制期间到期即清(可接受)。 */}
       {/* Permission-mode hint banner — moved here from ChatInput so it sits
           directly under the session title. Banner is dismissible per-user. */}
-      {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && !providerSwitchNotice && (
+      {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && !shownNotice && (
         <PermissionModeHintBanner permKey={sessionQueueKey} />
       )}
 
@@ -8971,18 +9193,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       {/* Provider-switch notice — fades after 5s. Tells the user we just
           stripped thinking blocks from on-disk jsonl so cc switch's new
           backend won't reject the resumed history. */}
-      {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && providerSwitchNotice && (
+      {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && shownNotice && (
         <div className="shrink-0 mx-6 mt-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 flex items-start gap-2 animate-fade-up">
           <span className="text-amber-700 text-[12px] font-body leading-snug flex-1">
-            🔄 {providerSwitchNotice.text}
+            🔄 {shownNotice.text}
           </span>
           {/* 三振出局(attach 连败 ATTACH_MAX_TRIES 次)后的手动重连入口。原文案让用户
               "切走再切回"才能重试 —— 那是把复位动作交给用户去猜。点这里等价:清该 pid
               的失败计数 + 清 reattach 闩锁 + bump nonce 触发 auto-reattach effect。 */}
-          {providerSwitchNotice.retryPid && (
+          {shownNotice.retryPid && (
             <button
               onClick={() => {
-                if (attachFailRef.current?.pid === providerSwitchNotice.retryPid) attachFailRef.current = null;
+                if (attachFailRef.current?.pid === shownNotice.retryPid) attachFailRef.current = null;
                 reattachedPidRef.current = null;
                 setProviderSwitchNotice(null);
                 // nonce 是必须的:重试时 backgroundPid 没变,effect 的 deps 被 Object.is
@@ -9645,7 +9867,8 @@ function ProviderManagerModal({ open, onClose, editId = null }) {
   useEffect(() => {
     if (!open) return;
     const onEsc = (e) => {
-      if (e.key !== 'Escape') return;
+      // r147 K5:Provider 表单里组字时按 Esc 是取消候选词,不是关弹窗(否则直接弹「丢弃未保存」确认)。
+      if (e.key !== 'Escape' || isImeKeydown(e)) return;
       // r52:模型勾选弹窗开着时这一击归它(同为 window 捕获,注册更早的本监听会抢跑 →
       // 不让行就是跳过弹窗直接关掉整个管理弹窗,勾选与未保存表单一起丢)。同 data-cgui-confirm 手法。
       if (document.querySelector('[data-cgui-modelpick]')) return;
@@ -10216,7 +10439,7 @@ function MobileModelPage({ permKey }) {
         {/* 修正批#5:自定义模型 ID 输入框移到页顶(与桌面弹层一致),列表长了不用滚着找。 */}
         <div className="flex gap-2">
           <input value={customInput} onChange={(e) => setCustomInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } } }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } } }}
             placeholder="自定义模型 ID…"
             className="flex-1 bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2 text-[13px] font-mono text-ink focus:outline-none focus:border-accent" />
           <button onClick={() => { const v = customInput.trim(); if (v) { addCustom(v); setCustomInput(''); } }}
@@ -11011,7 +11234,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
           <div className="flex items-center gap-2">
             <input className={inputCls} placeholder="图片 URL(https)或 emoji" value={avatarInput}
               onChange={(e) => setAvatarInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); applyAvatarInput(); } }} />
+              onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) { e.preventDefault(); applyAvatarInput(); } }} />
             <button type="button" onClick={applyAvatarInput} disabled={avatarBusy || !avatarInput.trim()}
               className="shrink-0 px-2 py-1.5 text-[11px] rounded-lg border border-canvas-deep text-ink-muted hover:border-accent disabled:opacity-50">
               {avatarBusy ? '抓取中…' : '使用'}</button>
@@ -12004,9 +12227,12 @@ export default function App() {
       // pane 里,closest 命中不到 [data-cgui-panel],语义原样不动。
       // 面板内没有任何组件用 React onKeyDown 接 Esc(录制快捷键/文件树右键菜单都挂 window
       // 捕获、相位在本监听之前),所以捕获阶段截断不会掐掉面板自己的"取消编辑"。
+      // r147 K1 例外:内置终端(xterm)接键盘的也是一个 TEXTAREA,但终端里的 Esc 是给终端程序的
+      // (vim 退插入模式、less / fzf 退出),捕获阶段截断它就到不了 xterm。终端目标在这里放行,
+      // 由下面的 onTermEscBubble 在冒泡阶段截断 —— 先让 xterm 收到,再挡住会话级监听。
       const _t = e.target;
       if (isEditableTarget(_t)) {
-        if (_t.closest?.('[data-cgui-panel]')) e.stopPropagation();
+        if (_t.closest?.('[data-cgui-panel]') && !_t.closest('.xterm')) e.stopPropagation();
         return;
       }
       // confirmDialog 挂在 document 冒泡阶段(晚于本监听),不避让会「面板关了、确认框还在」。
@@ -12022,8 +12248,19 @@ export default function App() {
       e.stopPropagation();
       setRightPanel(null);
     };
+    // r147 K1:终端里的 Esc 在目标阶段已经交给 xterm(它处理完通常自己会 stopPropagation),
+    // 这里在 document 冒泡阶段再兜一层:不管 xterm 截没截,都不让它冒到 window 上的会话级
+    // 停止监听(生成中一击停整轮)。document 冒泡早于 window 冒泡,所以挡得住。
+    const onTermEscBubble = (e) => {
+      if (e.key !== 'Escape') return;
+      if (e.target?.closest?.('[data-cgui-panel] .xterm')) e.stopPropagation();
+    };
     document.addEventListener('keydown', onEsc, true);
-    return () => document.removeEventListener('keydown', onEsc, true);
+    document.addEventListener('keydown', onTermEscBubble);
+    return () => {
+      document.removeEventListener('keydown', onEsc, true);
+      document.removeEventListener('keydown', onTermEscBubble);
+    };
   }, [rightPanel, setRightPanel]);
 
   // 修正批#7:Provider 管理独立弹窗(顶栏切换卡片底部「管理 Provider」触发;设置里的

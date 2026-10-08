@@ -15,6 +15,7 @@ import { notifyOauthMissing } from '../utils/officialAuth.js';
 import { ModelPickModal, replaceModelLines, stripJunkModels } from './ModelPickModal.jsx';
 import { fetchProviderList, getCachedProviderList } from '../utils/providerListFetch.js';
 import ProviderListWarning from './ProviderListWarning.jsx';
+import { isImeKeydown, isImeReactKeydown } from '../utils/imeGuard.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
 
@@ -156,7 +157,8 @@ export function AnchoredPopover({ anchorRef, open, onRequestClose, drop = 'down'
     // stopPropagation:关弹层的 Esc 不冒到 window 上的会话级监听(生成中单击即停)。
     // R1:相位挂 window 捕获(与灯箱/预览/文件树等浮层同款)。原来挂 document 冒泡 → 晚于
     // 右侧面板监听的 document 捕获,面板开着时这一击先关面板、弹层留着(层级颠倒)。
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onRequestClose?.('escape'); } };
+    // r147 K5:组字中的 Esc 是取消候选词(WebKit 上 isComposing 可能已为 false,只剩 keyCode 229),不关弹层。
+    const onEsc = (e) => { if (e.key === 'Escape' && !isImeKeydown(e)) { e.stopPropagation(); onRequestClose?.('escape'); } };
     document.addEventListener('mousedown', onDown);
     window.addEventListener('keydown', onEsc, true);
     return () => {
@@ -755,7 +757,7 @@ export function ModelSelector({ compact = false, permKey = null, tourAnchor = fa
             {/* 修正批#5:自定义模型 ID 输入框移到卡片顶部(sticky 头内),列表再长也不用滚着找。 */}
             <div className="flex gap-1.5 mt-1.5">
               <input type="text" value={customInput} onChange={e => setCustomInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleCustomSubmit()}
+                onKeyDown={e => { if (e.key === 'Enter' && !isImeReactKeydown(e)) handleCustomSubmit(); }}
                 placeholder="自定义模型 ID..."
                 className="flex-1 bg-canvas-warm border border-canvas-deep rounded px-2 py-1 text-xs font-mono text-ink focus:outline-none focus:border-accent/40" />
               <button onClick={handleCustomSubmit} disabled={!customInput.trim()}

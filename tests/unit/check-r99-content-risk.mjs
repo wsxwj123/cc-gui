@@ -455,11 +455,13 @@ check('§4.3 App.jsx confirmDialog 计数锁定为 66(r120 对齐真实值 65;20
   const n = countF(A, 'confirmDialog');
   assert.equal(n, 66, `实得 ${n} 次,应恰为 66`);
 });
-check('§4.3 App.jsx cgui:composer-fill 恰 5 次(改前 4:新开会话预填 +1)', () => {
-  assert.strictEqual(countF(A, 'cgui:composer-fill'), 5);
+// r146b:5 → 6(+1:回退中途切走,把本来要重发的内容留回原会话输入框,原会话正显示在别的窗格时立刻填入)。
+check('§4.3 App.jsx cgui:composer-fill 恰 6 次(改前 4:新开会话预填 +1;r146b 回退切走留回输入框 +1)', () => {
+  assert.strictEqual(countF(A, 'cgui:composer-fill'), 6);
 });
-check('§4.3 App.jsx newDraftId() 恰 9 次(改前 8:新开会话转 draft +1)', () => {
-  assert.strictEqual(countF(A, 'newDraftId()'), 9);
+// r146b:9 → 10(+1:回退中途切走且会话被裁空,按它转成的 draft 身份记一条孤儿消息)。
+check('§4.3 App.jsx newDraftId() 恰 10 次(改前 8:新开会话转 draft +1;r146b 裁空会话记孤儿 +1)', () => {
+  assert.strictEqual(countF(A, 'newDraftId()'), 10);
 });
 check('§4.3 App.jsx handleRetryTool 恰 8 次(改前 7:新增一次 Ref 调用)', () => {
   assert.strictEqual(countF(A, 'handleRetryTool'), 8);

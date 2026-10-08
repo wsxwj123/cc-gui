@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Target, Pencil, Trash2, Check, X, EyeOff, ChevronRight } from './Icon.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { isImeReactKeydown } from '../utils/imeGuard.js';
 import { forgetHiddenGoalIdentity, goalIdentity, isGoalIdentityHidden, legacyGoalIdentities, migrateHiddenGoalIdentity, rememberHiddenGoalIdentity, resolveGoalHiddenState } from '../utils/goal.js';
 
 /**
@@ -95,8 +96,9 @@ export function GoalBar({ goal, onSend, permKey = 'global' }) {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             // IME 合成期放行(同 composer);Enter=保存,Esc=取消(停住传播,别穿透到全局停止)。
+            // 只判 isComposing 拦不住 WebKit 上屏那一下(isComposing=false、keyCode=229),走共用判定(r147 K2)。
             onKeyDown={(e) => {
-              if (e.nativeEvent?.isComposing) return;
+              if (isImeReactKeydown(e)) return;
               if (e.key === 'Enter') { e.preventDefault(); saveEdit(); }
               else if (e.key === 'Escape') { e.preventDefault(); e.nativeEvent?.stopImmediatePropagation?.(); cancelEdit(); }
             }}

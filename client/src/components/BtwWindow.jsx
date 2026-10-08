@@ -3,6 +3,7 @@ import { MessageSquare, Minus, Send, Trash2, Loader2 } from './Icon.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { isImeKeydown, isImeReactKeydown } from '../utils/imeGuard.js';
 
 // 旁问浮窗:右下角可拖动/可最小化的浮动小窗,把 /btw 的"我问→AI答→我再问"渲染成
 // 一条连续线程(而非散落主对话流的独立气泡)。数据仍活在 SessionDetail 的 per-pane
@@ -177,6 +178,24 @@ export default function BtwWindow({
   };
   const endDrag = (e) => { dragRef.current = null; e.currentTarget.releasePointerCapture?.(e.pointerId); };
 
+  // r147 K4:焦点在旁问窗里(输入框 / 按钮)时 Esc = 收起旁问窗。挂 window 捕获、stopPropagation
+  // (同 ChatSearch):不拦的话这一击冒到 window 上的会话级监听 —— 主回合生成中想收起旁问,结果把
+  // 主回合停了(旁问恰好是生成中用的)。只认窗内焦点:焦点在主输入框时 Esc 仍是"停止 / 清空",
+  // 会话级语义不变。收起不卸载组件,输入框里写了一半的字留着。组字中的 Esc 是取消候选词。
+  useEffect(() => {
+    if (!expanded) return;
+    const onEsc = (e) => {
+      if (e.key !== 'Escape' || isImeKeydown(e)) return;
+      if (!rootRef.current?.contains(e.target)) return;
+      if (document.querySelector('[data-cgui-confirm]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setCollapsed(true);
+    };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
+  }, [expanded]);
+
   // 收起态:不渲染任何浮层 —— 入口(「旁问」按钮 + 未读角标)已移到输入框工具行(方案A),宿主
   // 经 onUnreadChange 拿未读数、点击时用 openSignal 展开。组件仍挂载,hooks 继续算 unread 并上报。
   if (!expanded) return null;
@@ -248,7 +267,7 @@ export default function BtwWindow({
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !isImeReactKeydown(e)) { e.preventDefault(); submit(); } }}
           rows={1}
           placeholder="继续旁问…（Enter 发送）"
           className="flex-1 resize-none max-h-24 text-[13px] font-body bg-transparent outline-none placeholder:text-ink-faint"

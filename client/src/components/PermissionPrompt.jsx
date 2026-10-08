@@ -4,7 +4,8 @@ import { useStore } from '../stores/sessionStore.js';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js';
-import { isEditableTarget } from '../utils/escAction.js';
+import { isActivatableTarget, isEditableTarget } from '../utils/escAction.js';
+import { isImeReactKeydown } from '../utils/imeGuard.js';
 import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
 
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
@@ -151,6 +152,19 @@ function CardHeadTail({ collapsed, onToggle, summary, children }) {
 const paneHasKeyboard = (tabIndex) =>
   tabIndex == null || useStore.getState().activeTabIndex === tabIndex;
 
+// r147 K4:卡片里的表单控件(输入框 / 下拉 / 勾选框 / 数字框)上按 Esc = 退出该控件,并就地截断。
+// 卡片自己的 window 级键盘监听跳过可编辑目标("交给控件自己处理"),会话级 Esc 监听也不让行给可编辑
+// 目标 —— 两边都不接,这一击就落到会话级的停止分支:整轮被停、卡片被清。挂在每张卡的根节点 onKeyDown
+// 上,一处覆盖卡内所有控件(React 的 stopPropagation 会连带截断原生冒泡,window 上的监听收不到)。
+// 退出后焦点回到页面,再按一次 Esc 才是卡片自己的「拒绝 / 取消」。组字中的 Esc 是取消候选词,不算。
+// 计划卡的修改意见框另有自己的 Esc(收起意见框),在它自己的 onKeyDown 里处理并截断,不会走到这里。
+function exitControlOnEsc(e) {
+  if (e.key !== 'Escape' || isImeReactKeydown(e) || !isEditableTarget(e.target)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.target.blur?.();
+}
+
 function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydrate, tabIndex }) {
   const plan = String(req.toolInput?.plan || '').trim();
   const [collapsed, setCollapsed] = useState(false);   // r92 折叠态:只属于这张卡,见 CardBody
@@ -169,7 +183,10 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
       if (!paneHasKeyboard(tabIndex)) return;
       const t = e.target;
       if (isEditableTarget(t)) return; // 口径统一在 utils/escAction.js
-      if (e.key === 'Enter') { e.preventDefault(); onApprove(req); }
+      if (e.key === 'Enter') {
+        if (isActivatableTarget(t)) return; // 焦点在按钮 / 链接上:Enter 归控件自己(如「拒绝」的原生激活),不抢成肯定动作(r147 K3)
+        e.preventDefault(); onApprove(req);
+      }
       else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny', '用户取消计划'); }
     };
     window.addEventListener('keydown', onKey);
@@ -183,7 +200,7 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
   return (
     // 审计批E1:卡壳 bg-white→bg-canvas、头带固定浅色 X-50/60→半透明 X-500/10 —— 深色
     // 主题下 text-ink 是浅色,压在固定浅底上不可读;半透明染色叠在主题 canvas 上明暗都成立。
-    <div data-cgui="permission-card" className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
+    <div data-cgui="permission-card" onKeyDown={exitControlOnEsc} className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-blue-500/10">
         <div className="w-6 h-6 rounded-md bg-blue-100 flex items-center justify-center shrink-0">
           <ClipboardList size={13} className="text-blue-700" />
@@ -214,10 +231,18 @@ function PlanReviewCard({ req, onResolve, onApprove, processing, position, hydra
             onKeyDown={(e) => {
               // 与输入框一致:Cmd/Ctrl+Enter 提交修改意见,裸 Enter 换行。stopPropagation
               // 防冒泡到卡片 window 级 Enter 监听(那个会触发"按计划执行")。
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !isImeReactKeydown(e)) {
                 e.preventDefault();
                 e.stopPropagation();
                 if (feedback.trim() && !processing) submitRefine();
+              }
+              // r147 K4:Esc = 取消本次输入(收起意见框,同下方「取消」按钮),就地截断(理由见
+              // exitControlOnEsc;这里比通用处理多一步收起意见框)。组字中的 Esc 是取消候选词,不算。
+              else if (e.key === 'Escape' && !isImeReactKeydown(e)) {
+                e.preventDefault();
+                e.stopPropagation();
+                setShowRefine(false);
+                setFeedback('');
               }
             }}
             placeholder="告诉 Claude 该如何修改这份计划...（⌘/Ctrl+Enter 提交）"
@@ -366,7 +391,7 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
   const summary = total ? `第 ${qi + 1}/${total} 题：${q.question || ''}` : '';
 
   return (
-    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
+    <div onKeyDown={exitControlOnEsc} className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-violet-500/10">
         <div className="w-6 h-6 rounded-md bg-violet-100 flex items-center justify-center shrink-0">
           <AlertCircle size={13} className="text-violet-700" />
@@ -414,7 +439,8 @@ function AskQuestionCard({ req, onAnswer, processing, position, hydrate, tabInde
             onKeyDown={(e) => {
               // 输入框内 Enter:末题(含单题)直接提交,非末题已答则下一题 —— 与窗口级
               // Enter 语义一致(窗口级 handler 刻意忽略 INPUT,这里补上)。
-              if (e.key !== 'Enter' || processing) return;
+              // 输入法上屏的那一下 Enter(WebKit 上 keyCode 229)不是提交(r147 K2)。
+              if (e.key !== 'Enter' || processing || isImeReactKeydown(e)) return;
               e.preventDefault();
               if (isLast) submit();
               else if (answerOf(qi)) setQi((i) => i + 1);
@@ -478,7 +504,10 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
       if (!paneHasKeyboard(tabIndex)) return;
       const t = e.target;
       if (isEditableTarget(t)) return; // 口径统一在 utils/escAction.js
-      if (e.key === 'Enter') { e.preventDefault(); onAuthorizeDir(req, permanent); }
+      if (e.key === 'Enter') {
+        if (isActivatableTarget(t)) return; // 焦点在按钮 / 链接上:Enter 归控件自己(如「拒绝」的原生激活),不抢成肯定动作(r147 K3)
+        e.preventDefault(); onAuthorizeDir(req, permanent);
+      }
       else if (e.key === 'Escape') { e.preventDefault(); onResolve(req, 'deny'); }
     };
     window.addEventListener('keydown', onKey);
@@ -486,7 +515,7 @@ function BoundaryCard({ req, onResolve, onAuthorizeDir, processing, position, hy
   }, [hydrate, position, tabIndex, req, permanent, onResolve, onAuthorizeDir]);
 
   return (
-    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
+    <div onKeyDown={exitControlOnEsc} className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-rose-500/10">
         <div className="w-6 h-6 rounded-md bg-rose-100 flex items-center justify-center shrink-0">
           <ShieldAlert size={13} className="text-rose-700" />
@@ -570,7 +599,10 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
     const onKey = (e) => {
       if (!paneHasKeyboard(tabIndex)) return;
       if (isEditableTarget(e.target)) return; // 焦点在表单控件里时交给控件自己处理
-      if (e.key === 'Enter') { e.preventDefault(); submit(); }
+      if (e.key === 'Enter') {
+        if (isActivatableTarget(e.target)) return; // 焦点在按钮 / 链接上:Enter 归控件自己(如「拒绝」的原生激活),不抢成肯定动作(r147 K3)
+        e.preventDefault(); submit();
+      }
       else if (e.key === 'Escape') { e.preventDefault(); onDecline(req); }
     };
     window.addEventListener('keydown', onKey);
@@ -578,7 +610,7 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
   }, [hydrate, position, tabIndex, req, values, processing, onSubmit, onDecline]);
 
   return (
-    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
+    <div onKeyDown={exitControlOnEsc} className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-cyan-500/10">
         <div className="w-6 h-6 rounded-md bg-cyan-100 flex items-center justify-center shrink-0">
           <FormInput size={13} className="text-cyan-700" />
@@ -638,7 +670,7 @@ function ElicitCard({ req, onSubmit, onDecline, processing, position, hydrate, t
                 max={f.type === 'number' && f.max != null ? f.max : undefined}
                 step={f.type === 'number' && f.integer ? 1 : undefined}
                 onChange={(e) => setVal(f.key, e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) { e.preventDefault(); submit(); } }}
                 placeholder={f.type === 'number' && (f.min != null || f.max != null) ? `${f.min ?? ''}～${f.max ?? ''}` : ''}
                 className="w-full text-[12px] font-body px-2.5 py-1.5 rounded-md border border-canvas-deep bg-canvas text-ink"
               />
@@ -684,7 +716,10 @@ function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydr
     const onKey = (e) => {
       if (!paneHasKeyboard(tabIndex)) return;
       if (isEditableTarget(e.target)) return;
-      if (e.key === 'Enter') { e.preventDefault(); onChoose(req, 'retry_fallback'); }
+      if (e.key === 'Enter') {
+        if (isActivatableTarget(e.target)) return; // 焦点在按钮 / 链接上:Enter 归控件自己(如「拒绝」的原生激活),不抢成肯定动作(r147 K3)
+        e.preventDefault(); onChoose(req, 'retry_fallback');
+      }
       else if (e.key === 'Escape') { e.preventDefault(); onCancel(req); }
     };
     window.addEventListener('keydown', onKey);
@@ -692,7 +727,7 @@ function RefusalDialogCard({ req, onChoose, onCancel, processing, position, hydr
   }, [hydrate, position, tabIndex, req, onChoose, onCancel]);
 
   return (
-    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
+    <div onKeyDown={exitControlOnEsc} className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-orange-500/10">
         <div className="w-6 h-6 rounded-md bg-orange-100 flex items-center justify-center shrink-0">
           <MessageSquareWarning size={13} className="text-orange-700" />
@@ -792,6 +827,9 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
       const t = e.target;
       if (isEditableTarget(t)) return; // 口径统一在 utils/escAction.js
       if (e.key === 'Enter') {
+        // 焦点在「拒绝」等按钮 / 链接上:Enter 归控件自己(按钮的原生激活)。不让行的话 preventDefault
+        // 掉了按钮的激活、再执行 doAllow —— Tab 到「拒绝」按 Enter 变成允许,选了「始终允许」时还写永久规则(r147 K3)。
+        if (isActivatableTarget(t)) return;
         e.preventDefault();
         doAllow();
       } else if (e.key === 'Escape') {
@@ -804,7 +842,7 @@ function PermissionCard({ req, onResolve, onWhitelistAndAllow, onAlwaysAllow, on
   }, [hydrate, position, tabIndex, req, remember, dangerous, onResolve, onWhitelistAndAllow, onAlwaysAllow]);
 
   return (
-    <div className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
+    <div onKeyDown={exitControlOnEsc} className="flex flex-col max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden animate-fade-up relative">
       <div className="px-4 py-2.5 flex items-center gap-2 border-b border-canvas-deep bg-amber-500/10">
         <div className="w-6 h-6 rounded-md bg-amber-100 flex items-center justify-center shrink-0">
           <AlertCircle size={13} className="text-amber-700" />

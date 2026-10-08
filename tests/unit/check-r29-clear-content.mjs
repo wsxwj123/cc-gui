@@ -43,7 +43,9 @@ import { isResetBindingOrigin, isCliNoContentPlaceholder, isInitBindingOrigin } 
   assert.match(app, /isResetBindingOrigin\(conversationResetFrom, sel\)/, 't3: init 块接入 reset 判定');
   assert.match(app, /let conversationResetFrom = null;/, 't3: 每流 reset 状态初始化(老 CLI 恒 null)');
   const bind = app.slice(app.indexOf('if (resetIsOrigin) {'), app.indexOf('if (resetIsOrigin) {') + 1500);
-  assert.match(bind, /setPaneMessages\(tabIndex, \[\], event\.session_id\)/, 't3: 换绑清本地历史并认领新 sid');
+  // r146 R5:窗格位置号改为按稳定窗格 id 现查(paneIndexNow),不再吃闭包里的 tabIndex(关左窗格
+  // 后它会过期);被锁的行为不变 —— 仍是"清本窗格本地历史并认领新 sid"。
+  assert.match(bind, /const _pi = paneIndexNow\(\); if \(_pi >= 0\) useStore\.getState\(\)\.setPaneMessages\(_pi, \[\], event\.session_id\)/, 't3: 换绑清本地历史并认领新 sid');
   assert.match(bind, /setSelectedSession\(\{[\s\S]*?sessionId: event\.session_id/, 't3: 窗格换绑新会话');
   assert.match(bind, /firstPrompt: ''/, 't3: 旧会话标题不带进新会话');
   assert.match(bind, /conversationResetFrom = null;/, 't3: 一次性消费,后续 init 不再触发');

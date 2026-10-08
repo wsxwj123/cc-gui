@@ -19,6 +19,7 @@ import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 import { escYieldCardId, isEditableTarget } from '../utils/escAction.js';
+import { isImeKeydown, isImeReactKeydown } from '../utils/imeGuard.js';
 // 循环 import(App.jsx ⇄ 本文件)安全性:这些都是 App.jsx 的模块级 function 声明
 // (提升,求值前可用)或组件渲染期才解引用的 live binding;本模块顶层不调用它们。
 import {
@@ -736,6 +737,21 @@ export function UnifiedSidebar() {
   const [addPathInput, setAddPathInput] = useState('');
   const [addError, setAddError] = useState('');
   const [addingProject, setAddingProject] = useState(false);
+  // r147 K4:路径弹窗的 Esc 只关弹窗(同「取消」按钮)。挂 window 捕获、stopPropagation(同 ChatSearch
+  // 等浮层):不拦的话焦点在输入框里按 Esc 会冒到 window 上的会话级监听 —— 生成中一击停掉整轮,
+  // 弹窗反倒还开着。组字中的 Esc 是取消候选词;确认框开着时这一击归确认框。
+  useEffect(() => {
+    if (!addDialogOpen) return;
+    const onEsc = (e) => {
+      if (e.key !== 'Escape' || isImeKeydown(e)) return;
+      if (document.querySelector('[data-cgui-confirm]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setAddDialogOpen(false);
+    };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
+  }, [addDialogOpen]);
   const isMobileLayout = typeof window !== 'undefined' && window.innerWidth < 768;
   const registerProjectPath = async (rawPath) => {
     const path = String(rawPath || '').trim();
@@ -1505,6 +1521,21 @@ function WorktreePickerModal({
   toggleWtCommits, toggleWtDirty, wtToggleFile, wtCommit, wtBaseLabel,
 }) {
   const selProjPath = useStore((s) => s.selectedProject?.path);
+  // r147 K4:Esc 只关本弹窗(同右上角 ✕)。挂 window 捕获、stopPropagation,理由同上方路径弹窗:
+  // 不拦就冒到会话级监听,在分支名框里按 Esc 会停掉正在生成的回合。起点分支下拉开着时这一击归下拉
+  // (下拉自己的 Esc 监听也挂 window 捕获,同一相位谁先谁后看注册顺序,靠不住 —— 由这里主动让行)。
+  useEffect(() => {
+    const onEsc = (e) => {
+      if (e.key !== 'Escape' || isImeKeydown(e)) return;
+      if (wtBaseOpen) return;
+      if (document.querySelector('[data-cgui-confirm]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
+  }, [wtBaseOpen, onClose]);
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-soft animate-fade-in"
@@ -1727,7 +1758,7 @@ function WorktreePickerModal({
               type="text"
               value={newWorktreeName}
               onChange={(e) => setNewWorktreeName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && createWorktree()}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !isImeReactKeydown(e)) createWorktree(); }}
               placeholder="分支名 (如 feature-X)"
               className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded px-2 py-1 text-[11px] font-mono text-ink focus:outline-none focus:border-accent/40"
             />

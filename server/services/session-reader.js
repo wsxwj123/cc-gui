@@ -395,6 +395,9 @@ async function mapLimit(items, limit, fn) {
  * 注意:顶层 readdir 的 EACCES/EPERM 不上捞兜住——原样抛给路由层,由 /projects
  * 路由经 isAccessDenied 分类成 403(sessions.js,与 r17-4 契约同构)。
  */
+// r146c:推断项目真实路径时最多往回看几个会话文件(最新的取不到 cwd 才继续;画像有落盘缓存)。
+const CWD_PROBE_MAX = 10;
+
 export async function listProjects(projectsDir = PROJECTS_DIR) {
   const entries = await readdir(projectsDir, { withFileTypes: true });
   const projects = [];
@@ -435,12 +438,20 @@ export async function listProjects(projectsDir = PROJECTS_DIR) {
       const sidecarCwd = await readSidecarCwd(projectPath);
       let realPath = sidecarCwd;
       if (!realPath && newestFile) {
-        try {
-          // 只要头 10 条判 cwd:head10 级画像读满 10 条可解析记录即收工(不至于为一行
-          // cwd 走完整个文件),与 parseJsonl({limit:10})+cwdFromHead 等价(INTERFACE §A.5),
-          // 且结果按 (ino,mtimeMs,size) 落盘 —— 冷启动的 /api/projects 因此不必再逐文件头读。
-          realPath = (await loadProfile(join(projectPath, newestFile), stats.get(newestFile), 'head10', idxHash)).cwd10;
-        } catch {}
+        // r146c:按修改时间新 → 旧逐个取 cwd,取到为止(最多 CWD_PROBE_MAX 个)。原来只看最新的那一个:
+        // 回退到第一条会把会话裁得只剩摘要行(没有 cwd),它又恰是最新修改的文件 → cwd 落空、退回有损的
+        // decodeProjectHash(路径里的空格 / 点 / 中文都被编成了 -)→ 解出的路径不存在 → 下面 isNonProjectPath
+        // 把整个项目当"已删除的目录"滤掉:项目连同其余会话一起从列表里消失。
+        const byNewest = [...jsonlFiles].sort((a, b) => stats.get(b).mtimeMs - stats.get(a).mtimeMs);
+        for (const f of byNewest.slice(0, CWD_PROBE_MAX)) {
+          try {
+            // 只要头 10 条判 cwd:head10 级画像读满 10 条可解析记录即收工(不至于为一行
+            // cwd 走完整个文件),与 parseJsonl({limit:10})+cwdFromHead 等价(INTERFACE §A.5),
+            // 且结果按 (ino,mtimeMs,size) 落盘 —— 冷启动的 /api/projects 因此不必再逐文件头读。
+            realPath = (await loadProfile(join(projectPath, f), stats.get(f), 'head10', idxHash)).cwd10;
+          } catch {}
+          if (realPath) break;
+        }
       }
       if (!realPath) realPath = decodeProjectHash(entry.name);
 

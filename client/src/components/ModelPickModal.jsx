@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, X } from './Icon.jsx';
 import { filterModels } from '../utils/modelPick.js';
+import { isImeKeydown } from '../utils/imeGuard.js';
 
 // 纯逻辑在 utils/modelPick.js(单测直击),此处一并转出,调用方只 import 这一个模块即可。
 export { JUNK_MODEL_RE, filterModels, mergeModelLines, replaceModelLines, selectAllTargets, stripJunkModels } from '../utils/modelPick.js';
@@ -41,7 +42,8 @@ export function ModelPickModal({ candidates = [], existing = [], onConfirm, onPi
   // (同相位、注册更早的监听抢不过 stopImmediatePropagation,只能靠宿主主动查标记避让)。
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key !== 'Escape') return;
+      // r147 K5:搜索框里组字时按 Esc 是取消候选词,不清搜索、不关弹窗。
+      if (e.key !== 'Escape' || isImeKeydown(e)) return;
       e.stopImmediatePropagation();
       e.preventDefault();
       if (query) setQuery(''); else onClose?.();

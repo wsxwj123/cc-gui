@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { X, Plus, Trash2, RefreshCw, ExternalLink, ArrowLeft, Search, ChevronRight } from './Icon.jsx';
 import { BUILTIN_MCP_SERVERS, findBuiltinMcp } from '../utils/builtinMcpServers.js';
 import { openExternalUrl } from '../utils/openExternal.js';
+import { isImeKeydown } from '../utils/imeGuard.js';
 
 // MCP 服务器 添加/编辑 表单(模态)。
 //  - editing=null → 新增;editing={name} → 编辑(挂载时拉 /config 回填)。
@@ -76,6 +77,21 @@ export function McpForm({ editing, seed, onClose, onSaved }) {
   };
   // 用户一旦改过命令/URL,后台补全就不再覆盖这两个字段,避免边输入边被刷掉。
   const dirtyRef = React.useRef(false);
+  // r147 K4:Esc 只关本表单(同「取消」/ ✕ / 点遮罩)。挂 window 捕获、stopPropagation(同 ChatSearch):
+  // 原来没有自己的 Esc 处理,焦点在空白处时这一击落到右侧面板的 Esc 监听 → 整个面板连同表单一起关掉;
+  // 焦点在输入框里时又被面板监听截断 → 完全没反应。window 捕获早于面板监听的 document 捕获。
+  // 组字中的 Esc 是取消候选词;确认框开着时这一击归确认框。
+  useEffect(() => {
+    const onEsc = (e) => {
+      if (e.key !== 'Escape' || isImeKeydown(e)) return;
+      if (document.querySelector('[data-cgui-confirm]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onClose?.();
+    };
+    window.addEventListener('keydown', onEsc, true);
+    return () => window.removeEventListener('keydown', onEsc, true);
+  }, [onClose]);
 
   // 注册表搜索(仅新增态,折叠式,交互对齐插件面板的全市场搜索):关键词去抖 400ms 后
   // GET /api/mcp/registry-search(后端 15min 缓存)。选中条目 → applyRegistryItem 预填表单,
