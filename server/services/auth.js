@@ -145,7 +145,12 @@ export function parseCookies(req) {
   for (const part of raw.split(';')) {
     const i = part.indexOf('=');
     if (i === -1) continue;
-    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    const value = part.slice(i + 1).trim();
+    // r145 F5:单个 cookie 解码失败(裸 %,如同域别的页面写的 `x=100%`)只影响它自己 —— 保留原文,其余照常。
+    // 此前 decodeURIComponent 直接抛 URIError:该设备所有 /api/* 回 500,WS 握手抛未捕获异常。
+    let decoded = value;
+    try { decoded = decodeURIComponent(value); } catch { /* 保留原文 */ }
+    out[part.slice(0, i).trim()] = decoded;
   }
   return out;
 }
