@@ -76,8 +76,10 @@ assert.match(resendBlock, /streamingRef\.current \|\| backgroundPidRef\.current/
 const rollbackBlock = app.slice(app.indexOf('const handleRollback = useCallback'), app.indexOf('useEffect(() => { handleRollbackRef.current = handleRollback; }'));
 assert.match(rollbackBlock, /stoppedPidsRef\.current\.add\(String\(_rbPid\)\);/,
   '回滚必须把被杀 pid 记进 stoppedPidsRef(否则轮询复活死 pid→重发被门进队列)');
-assert.equal((rollbackBlock.match(/JSON\.stringify\(\{ hard: true \}\)/g) || []).length, 2,
-  '前台流与转后台两种形态都必须真发 hard /stop');
+// r146b:2 → 3。第三处是"回退中途切走"那支:按回退开始那一刻记下的 pid 停掉原会话在跑的回合
+// (切走后窗格 ref 已属于别的会话,不能再用),免得它往刚裁剪的记录里继续追加。前两处原样保留。
+assert.equal((rollbackBlock.match(/JSON\.stringify\(\{ hard: true \}\)/g) || []).length, 3,
+  '前台流与转后台两种形态都必须真发 hard /stop(另加切走那支按原 pid 停)');
 assert.match(rollbackBlock, /backgroundPidRef\.current = null;/,
   '回滚必须同步清 backgroundPidRef(state 有一帧延迟)');
 
