@@ -12110,9 +12110,12 @@ export default function App() {
       // pane 里,closest 命中不到 [data-cgui-panel],语义原样不动。
       // 面板内没有任何组件用 React onKeyDown 接 Esc(录制快捷键/文件树右键菜单都挂 window
       // 捕获、相位在本监听之前),所以捕获阶段截断不会掐掉面板自己的"取消编辑"。
+      // r147 K1 例外:内置终端(xterm)接键盘的也是一个 TEXTAREA,但终端里的 Esc 是给终端程序的
+      // (vim 退插入模式、less / fzf 退出),捕获阶段截断它就到不了 xterm。终端目标在这里放行,
+      // 由下面的 onTermEscBubble 在冒泡阶段截断 —— 先让 xterm 收到,再挡住会话级监听。
       const _t = e.target;
       if (isEditableTarget(_t)) {
-        if (_t.closest?.('[data-cgui-panel]')) e.stopPropagation();
+        if (_t.closest?.('[data-cgui-panel]') && !_t.closest('.xterm')) e.stopPropagation();
         return;
       }
       // confirmDialog 挂在 document 冒泡阶段(晚于本监听),不避让会「面板关了、确认框还在」。
@@ -12128,8 +12131,19 @@ export default function App() {
       e.stopPropagation();
       setRightPanel(null);
     };
+    // r147 K1:终端里的 Esc 在目标阶段已经交给 xterm(它处理完通常自己会 stopPropagation),
+    // 这里在 document 冒泡阶段再兜一层:不管 xterm 截没截,都不让它冒到 window 上的会话级
+    // 停止监听(生成中一击停整轮)。document 冒泡早于 window 冒泡,所以挡得住。
+    const onTermEscBubble = (e) => {
+      if (e.key !== 'Escape') return;
+      if (e.target?.closest?.('[data-cgui-panel] .xterm')) e.stopPropagation();
+    };
     document.addEventListener('keydown', onEsc, true);
-    return () => document.removeEventListener('keydown', onEsc, true);
+    document.addEventListener('keydown', onTermEscBubble);
+    return () => {
+      document.removeEventListener('keydown', onEsc, true);
+      document.removeEventListener('keydown', onTermEscBubble);
+    };
   }, [rightPanel, setRightPanel]);
 
   // 修正批#7:Provider 管理独立弹窗(顶栏切换卡片底部「管理 Provider」触发;设置里的
