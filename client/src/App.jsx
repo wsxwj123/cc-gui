@@ -3774,6 +3774,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const fetchMessagesForTab = useCallback((sid, ph, opts = {}) => {
     return useStore.getState().fetchMessages(sid, ph, { ...opts, tab: tabIndex });
   }, [tabIndex]);
+  // r146:异步落地前的统一复查 —— 本窗格此刻显示的会话是不是 ownerKey(发起时的会话键)。
+  // 也接受 altKey(draft 发起、init 升级出的真 sid:升级后窗格键已是真 sid)。
+  const paneStillOn = useCallback((ownerKey, altKey = null) => {
+    const s = getLocalSession();
+    if (!s || !ownerKey) return false;   // 窗格已空 / 已不在:一律当"已换走"
+    const k = queueKeyFor(s);
+    return k === ownerKey || (!!altKey && k === altKey);
+  }, [getLocalSession]);
   // Subscribe to these EARLY (before any conditional return) so React's hook
   // order stays stable. After a session-load transition we'd otherwise add a
   // hook below the early return → React #310 → blank page.
@@ -5176,15 +5184,26 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const deferBubbleForAsk = willAskLargeSnapshot(selectedSession?.sessionId);
     userMsgUuid = 'chat-user-' + Date.now();
     userMsgTimestamp = new Date().toISOString();
-    const pushBubble = () => setChatMessages((prev) => [...prev, {
-      uuid: userMsgUuid, type: 'user',
-      timestamp: userMsgTimestamp, text: prompt,
-      checkpointSha: null,
-      // L3: 附件卡片渲染数据。displayText 是去附件标签后的纯文本(气泡显示用),
-      // attachments 用于渲染缩略图/文件名卡片。prompt(text)仍是给 CLI 的完整 outbound。
-      attachments: meta?.attachments,
-      displayText: meta?.displayText,
-    }]);
+    // r146 R1:用户气泡一律带 ownerKey(发起时的会话键)。原来不带,可见性就退化成"本窗格当前
+    // 消费的流是谁"(localEntryVisible 无 ownerKey 分支)—— 而气泡在多数会话里是推迟画的(下面
+    // deferBubbleForAsk:要等发送前拍快照那一次往返回来),这段时间里切到一个有回合在跑的会话,
+    // 推迟的气泡就落进了那个会话的窗格、并且显示出来(用户实报:别的会话的消息出现在当前会话底部)。
+    // 落地前再复查一次:窗格已经不是发起会话 → 不写进窗格,改存进 r118 的按会话暂存,切回原会话时
+    // 由既有对账补回 / 撤除(与切走时暂存在途气泡同一条路)。
+    const bubbleOwnerKey = sessionQueueKey;
+    const pushBubble = () => {
+      const bubble = {
+        uuid: userMsgUuid, type: 'user', ownerKey: bubbleOwnerKey,
+        timestamp: userMsgTimestamp, text: prompt,
+        checkpointSha: null,
+        // L3: 附件卡片渲染数据。displayText 是去附件标签后的纯文本(气泡显示用),
+        // attachments 用于渲染缩略图/文件名卡片。prompt(text)仍是给 CLI 的完整 outbound。
+        attachments: meta?.attachments,
+        displayText: meta?.displayText,
+      };
+      if (!paneStillOn(bubbleOwnerKey)) { stashUserBubbles(bubbleOwnerKey, [bubble]); return; }
+      setChatMessages((prev) => [...prev, bubble]);
+    };
     if (!deferBubbleForAsk) pushBubble();
     // L4:所有附件 sidecar 先进入持久 outbox，再尝试 POST。draft 先以会话 ownerKey
     // 记账，init 拿到真实 sid 后统一绑定；真实 session 发送也走同一条可靠链。
