@@ -161,6 +161,7 @@ import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js'
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
 import { askSaveLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot, willAskLargeSnapshot } from './utils/largeSnapshot.js';
+import { createLatestGate } from './utils/latestRequest.js';
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // R7 询问编排的纯逻辑 + 弹窗文案在 utils/largeSnapshot.js(白盒单测直接 import 断言
@@ -237,11 +238,17 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
   // R1:被体积安全阀跳过时如实告诉用户(否则"拍了个寂寞"看起来就是没反应)。
   const [skipReason, setSkipReason] = useState('');
 
+  // r146 R8:下拉开着时会话可能被换掉(回滚转 draft、/clear 轮换、会话失效转新会话),旧会话的
+  // 慢响应后到会把别的会话的回滚点画上来 —— 只认最新一次请求。
+  const latestLoadRef = useRef(null);
+  if (!latestLoadRef.current) latestLoadRef.current = createLatestGate();
   const load = async () => {
+    const isLatest = latestLoadRef.current.begin();
     if (!sessionId) return;
     try {
       const r = await fetch(`/api/checkpoints/${sessionId}`);
       const d = await r.json();
+      if (!isLatest()) return;
       setEntries(d.entries || []);
     } catch {}
   };
