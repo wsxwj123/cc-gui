@@ -278,7 +278,116 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.418</b>(2026-10-04)· 修复 1 条</summary>
+<summary><b>v0.2.419</b>(2026-10-08)· 修复 17 条</summary>
+
+**修复**
+
+<details><summary>切会话时消息不再显示到别的会话</summary>
+
+在一个会话里发出消息后马上切到另一个正在运行的会话,这条消息的气泡不会再出现在那边;切回原会话时,已经写完的回复会完整显示,不再卡在「Connecting」。
+
+</details>
+
+<details><summary>关掉分屏左边的窗格后,右边的窗格照常工作</summary>
+
+排队的消息会自动发出,转到后台的回合跑完后回复会显示,新会话的首条回复不会再消失或另开一个会话。
+
+</details>
+
+<details><summary>回滚、编辑重发、自动重发不会落到别的会话</summary>
+
+请求还没返回时切走,原会话的历史与原文不会写进新会话,也不会停掉新会话正在跑的回合;本来要重发的内容会留回原会话的输入框或首页「未发出的消息」,并给出提示。
+
+</details>
+
+<details><summary>项目不再从侧栏消失</summary>
+
+回退到会话第一条后,路径含中文、空格或点的项目不会再从列表里消失。
+
+</details>
+
+<details><summary>1M 上下文被拒后的自动恢复沿用你选的模型</summary>
+
+不会再悄悄换回之前用过的模型。
+
+</details>
+
+<details><summary>文件审查面板与检查点下拉不再显示别的会话的数据</summary>
+
+快速切换时只显示当前会话的结果。
+
+</details>
+
+<details><summary>内置终端里按 Esc 有效</summary>
+
+vim 等程序能正常退出插入模式。
+
+</details>
+
+<details><summary>输入法按 Enter 确认候选词不再触发提交</summary>
+
+旁问框、提问卡的自定义回答、会话重命名、目标条、MCP 表单、worktree 名、权限规则等输入框都已修正。
+
+</details>
+
+<details><summary>权限卡上焦点在按钮时按 Enter,执行的是这个按钮</summary>
+
+焦点在「拒绝」上按 Enter 不会再执行「允许」。
+
+</details>
+
+<details><summary>弹窗里按 Esc 只关弹窗</summary>
+
+添加项目、worktree、旁问窗、MCP 表单、添加插件等弹窗和卡片里的输入框,按 Esc 不会再停掉正在生成的回合或关掉整个右侧面板;浮层输入框里用输入法组字时按 Esc 不会关掉浮层。
+
+</details>
+
+<details><summary>设置文件读不出时不再被覆盖</summary>
+
+`~/.claude/settings.json` 有语法错误时,在界面里选模型、切 provider、改缓存开关会提示文件损坏并拒绝写入,不会再把 hooks、权限、插件开关清空。
+
+</details>
+
+<details><summary>MCP 关掉再打开不丢配置</summary>
+
+环境变量、带空格的参数和作用域会原样恢复。
+
+</details>
+
+<details><summary>切换 provider 不再互相覆盖</summary>
+
+连点或多端同时切换时,界面显示的与实际使用的是同一家;写配置失败时不会切到一半。
+
+</details>
+
+<details><summary>主动停止回合时不再多出一条「aborted by user」报错</summary>
+
+。
+
+</details>
+
+<details><summary>局域网访问时,带特殊字符的 cookie 不再让整台设备的请求报错</summary>
+
+。
+
+</details>
+
+<details><summary>单独还原检查点后,其他端会刷新</summary>
+
+。
+
+</details>
+
+<details><summary>旁问接口会校验会话 ID</summary>
+
+;命令行工具提前退出时不再写崩溃日志。
+
+</details>
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.418">v0.2.418</a></b>(2026-10-04)· 修复 1 条</summary>
 
 **修复**
 
