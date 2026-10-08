@@ -3608,6 +3608,12 @@ router.post('/chat/btw', async (req, res) => {
   const question = String(req.body?.question || '').slice(0, 8000).trim();
   if (!question) return res.status(400).json({ error: 'question is required' });
   const sessionId = (typeof req.body?.sessionId === 'string') ? req.body.sessionId.trim() : '';
+  // r145 F8:sessionId 会作为独立 argv 跟在 --resume 后面,必须是会话 id 形态(字符集与 /context 的
+  // CONTEXT_SESSION_RE 同口径),并另拒 - 开头 —— 那个字符集放得进 `--tools` 这类串,CLI 会把它当成选项,
+  // 绕开旁问的零工具约束。空 = 草稿会话,照常起(不带 --resume)。在 spawn 之前拒,不起进程。
+  if (sessionId && (!CONTEXT_SESSION_RE.test(sessionId) || sessionId.startsWith('-'))) {
+    return res.status(400).json({ error: 'sessionId 格式不合法' });
+  }
   const model = safeModelArg(String(req.body?.model || '').replace(/\[1m\]/i, ''));
   const cwd = (typeof req.body?.cwd === 'string' && req.body.cwd) ? req.body.cwd : homedir();
   try { if (!statSync(cwd).isDirectory()) throw new Error('nd'); }
