@@ -32,6 +32,10 @@ const PARAMS = [
   // 下面所有顺序断言一字未动(不注入 = 真实源码必抛 "runHistoryOp is not defined",
   // 三条用例会以"环境不成立"而不是"顺序错了"收场)。
   'runHistoryOp',
+  // r146 R3 同族:裁剪返回后先复查"本窗格仍是发起重做的会话"(rtKey 是发起时的会话键)。注入同样
+  // 不放松:替身恒答"仍在本会话",下面的顺序断言一字未动(不注入 = 真实源码必抛 "paneStillOn is
+  // not defined",用例会以"环境不成立"收场)。
+  'paneStillOn', 'rtKey',
 ];
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const run = new AsyncFunction(...PARAMS, BODY);
@@ -72,6 +76,8 @@ function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = 
       calls.push(`runHistoryOp:${op}${params.toolUseId ? ':' + params.toolUseId : ''}`);
       return { ok: true, status: 200, data: {} };
     },
+    paneStillOn: () => true,
+    rtKey: 'sess-1',
   };
   return { calls, sent, ctx, go: () => run(...PARAMS.map((p) => ctx[p])) };
 }

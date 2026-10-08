@@ -114,7 +114,8 @@ const snap = (over = {}) => ({
 
   // 哨兵 5:删掉"无快照 reattach 不写快照" → 它的缓冲只是重放的半截、cutoff 是 null,
   // 存下来会在下一次种回时与历史双画。
-  assert.match(app, /else if \(!reattachPid \|\| seeded\) putStreamSnapshot\(streamSid, \{/,
+  // r146 R2:另加"本流真的接上过服务端的流"(streamAttached)—— 只会更严,原约束原样保留。
+  assert.match(app, /else if \(streamAttached && \(!reattachPid \|\| seeded\)\) putStreamSnapshot\(streamSid, \{/,
     '只有【在画直播气泡】的流(普通发送 / 已种回)才许写快照');
 
   // 哨兵 6:回合真结束/用户真停止不写快照(历史已是全量,再种就是双份)。
