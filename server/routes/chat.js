@@ -3493,12 +3493,16 @@ router.post('/chat/title', async (req, res) => {
         env: childEnv,
       });
       // prompt 经 stdin 喂入(见上方注释:绕开 Windows cmd 参数解析)。写完即关,让 -p 一次性执行。
+      // r145 F9:CLI 先退出(没装好 / 秒崩 / 被杀)时,剩余 prompt 写进已关闭的管道 → stdin 以 'error' 事件抛 EPIPE
+      // (异步,外面的 try 接不住),不监听就是未捕获异常。标题拿不到会走兜底,吞掉即可。
+      proc.stdin?.on('error', () => {});
       try { proc.stdin.write(prompt); proc.stdin.end(); } catch {}
     } catch {
       cleanupTitleCwd();
       return resolve('');
     }
-    if (!proc.pid) { cleanupTitleCwd(); return resolve(''); }
+    // spawn 失败(ENOENT 等)时子进程随后 emit 'error',同样要有监听(同 /chat/btw)。
+    if (!proc.pid) { proc.on('error', () => {}); cleanupTitleCwd(); return resolve(''); }
     // stderr 设了 pipe 但下面只读 stdout —— 不排空的话 CLI 往 stderr 写超 ~64KB(TCC/MCP 警告等)
     // 会撑爆管道缓冲区 → 子进程阻塞 → close 永不触发 → 卡到超时。drain 掉即可(标题生成用不到 stderr)。
     proc.stderr?.resume();
@@ -3643,6 +3647,9 @@ router.post('/chat/btw', async (req, res) => {
   let proc;
   try {
     proc = claudeSpawn(args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: cleanChildEnv() });
+    // r145 F9:CLI 先退出(没装好 / 秒崩 / 被杀)时,剩余 prompt 写进已关闭的管道 → stdin 以 'error' 事件抛 EPIPE
+    // (异步,外面的 try 接不住),不监听就是未捕获异常。CLI 退了 close 照常收尾、回错误,这里吞掉即可。
+    proc.stdin?.on('error', () => {});
     proc.stdin.write(wrapBtwInline(composed)); proc.stdin.end();
   } catch (e) { return res.status(500).json({ error: 'spawn claude failed: ' + e.message }); }
   if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
