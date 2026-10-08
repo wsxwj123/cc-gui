@@ -18,3 +18,18 @@ export function takeSessionNotice(key) {
   if (text) notices.delete(key);
   return text;
 }
+
+/**
+ * r146c:把"本来要重发的内容"并进某会话输入框的已有草稿。
+ * 判"已经在里面"只认整串相等或结尾那一段相等(上一次留回就是追加在结尾的);中间碰巧包含同样的
+ * 字(例如很短的"继续")不算,照样追加 —— 原来用 includes,会把这种情况误判成已在、什么都不留。
+ * @returns {{ next: string, outcome: 'none'|'placed'|'appended'|'same' }} outcome 供提示按实际结果措辞
+ */
+export function mergeDraftText(cur, left) {
+  const c = String(cur || '');
+  const l = String(left || '');
+  if (!l) return { next: c, outcome: 'none' };
+  if (!c.trim()) return { next: l, outcome: 'placed' };
+  if (c === l || c.endsWith(`\n\n${l}`)) return { next: c, outcome: 'same' };
+  return { next: `${c}\n\n${l}`, outcome: 'appended' };
+}

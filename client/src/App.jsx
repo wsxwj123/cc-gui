@@ -115,7 +115,7 @@ import { computeCostForMessage, displayUsd, formatCost, setUserPrices, observeOf
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, createQueueId } from './utils/steerQueue.js';
-import { leaveSessionNotice, takeSessionNotice } from './utils/sessionNotice.js';
+import { leaveSessionNotice, mergeDraftText, takeSessionNotice } from './utils/sessionNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
 import { localTurnTakenOver, makeTurnIdentityIndex } from './utils/turnIdentity.js';   // r141 渲染期身份闸门
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
@@ -164,6 +164,10 @@ import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
 import { askSaveLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot, willAskLargeSnapshot } from './utils/largeSnapshot.js';
 import { createLatestGate } from './utils/latestRequest.js';
+
+// r146b/r146c:没有任何窗格承载、也回不去的内容,按"它转成的 draft 身份"记成孤儿 draft 排队消息
+// (首页「未发出的消息」按项目过滤展示)。回退裁空会话、会话失效两处共用这一个键形。
+const orphanKeyFor = (projectHash) => queueKeyFor({ projectHash, draftId: newDraftId() });
 
 // ── Per-session shadow-git checkpoints ──────────────────────────
 // R7 询问编排的纯逻辑 + 弹窗文案在 utils/largeSnapshot.js(白盒单测直接 import 断言
@@ -8048,24 +8052,46 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const p = resendPayloadForMessage(msg);
       return { prompt: p?.prompt || '', meta: p?.meta || null };
     };
-    // r146b:切走后留给本会话 —— 内容放回本会话输入框草稿(草稿已有内容就追加在后面,不覆盖、不丢),
-    // 留一条回到本会话时能看到的提示。本会话若正显示在别的窗格,两件事立刻生效(事件)。
-    const leaveForOwner = (notes = []) => {
-      const { prompt: left } = pendingResend();
-      let appended = false;
+    // r146b/r146c:窗格切走、重发放弃时,把本来要重发的内容留给本会话,并留一条按实际结果措辞的提示。
+    // 三个放弃点共用(裁剪期间 / 拉历史期间 / 等停止落地期间切走),不再有直接 return 丢内容的出口。
+    //   · trimOk:会话记录裁剪是否成功 —— 失败时不说"已回退"(原来两句话自相矛盾);
+    //   · wiped:会话已被裁空(或窗格已转成没有任何窗格承载的 draft)—— 侧栏不再列出它、回不去,内容进
+    //     首页「未发出的消息」,提示挂在用户此刻所在的窗格上(带该窗格的会话键,换会话即隐藏);
+    //   · 否则内容进本会话输入框草稿(已有草稿就追加在后面,整串 / 结尾相同才算已在),提示按会话键留言,
+    //     回到本会话时显示。本会话若正显示在别的窗格,两件事立刻生效(事件)。
+    const leaveForOwner = ({ notes = [], trimOk = true, wiped = false } = {}) => {
+      const { prompt: left, meta: leftMeta } = pendingResend();
+      if (wiped) {
+        const saved = !!left && !!sel?.projectHash && useStore.getState().addOrphanDraftMessage(
+          orphanKeyFor(sel.projectHash), sel.projectHash,
+          { queueId: createQueueId('rollback'), text: left, queuedAt: Date.now(), opts: leftMeta ? { meta: attachmentMetaForPersistence(leftMeta) } : {} },
+        );
+        const where = !left ? ''
+          : saved ? '要重发的内容已放到首页「未发出的消息」里，可在那里填回输入框。'
+            : `要重发的内容没能保存（本地存储写入失败），原文：${left.slice(0, 200)}${left.length > 200 ? '…' : ''}`;
+        showNoticeHere(['另一个会话的回退已完成：会话记录已清空，原定的重发没有发出。', where, ...notes].join(''));
+        return;
+      }
+      let outcome = 'none';
       if (left && rbKey) {
         try {
           const dk = `cgui-draft:${rbKey}`;
-          const cur = localStorage.getItem(dk) || '';
-          appended = !!cur.trim() && !cur.includes(left);
-          const next = appended ? `${cur}\n\n${left}` : (cur.includes(left) ? cur : left);
-          localStorage.setItem(dk, next);
-          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: next, targetKey: rbKey } }));
-        } catch {}
+          const merged = mergeDraftText(localStorage.getItem(dk) || '', left);
+          outcome = merged.outcome;
+          localStorage.setItem(dk, merged.next);
+          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: merged.next, targetKey: rbKey } }));
+        } catch { outcome = 'failed'; }
       }
+      const where = {
+        placed: '要重发的内容已放回输入框，确认后再发送。',
+        appended: '要重发的内容已追加到输入框原有内容之后，确认后再发送。',
+        same: '要重发的内容已在输入框里，确认后再发送。',
+        failed: `要重发的内容没能放回输入框（本地存储写入失败），原文：${left.slice(0, 200)}${left.length > 200 ? '…' : ''}`,
+      }[outcome] || '';
       leaveSessionNotice(rbKey, [
-        '回退过程中切换了会话：会话记录已回退，原定的重发没有发出。',
-        left ? (appended ? '要重发的内容已追加到输入框原有内容之后，确认后再发送。' : '要重发的内容已放回输入框，确认后再发送。') : '',
+        trimOk ? '回退过程中切换了会话：会话记录已回退，原定的重发没有发出。'
+          : '回退过程中切换了会话：会话记录裁剪失败（磁盘历史未改动），原定的重发没有发出。',
+        where,
         ...notes,
       ].filter(Boolean).join(''));
       window.dispatchEvent(new CustomEvent('cgui:session-notice', { detail: { key: rbKey } }));
@@ -8285,20 +8311,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         stoppedPidsRef.current.add(String(startPid));
         fetch(`/api/chat/${startPid}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
       }
-      if (trimFailed) diskNotes.push('会话记录裁剪失败（磁盘历史未改动），回退可能不完整。');
-      // 会话被裁空 → 侧栏不再列出它、回不去,写进它的输入框草稿等于找不回。本来要重发的内容按它转成的
-      // draft 身份记成一条孤儿,进首页「未发出的消息」(按项目过滤,可填回输入框、含附件)。
-      if (wipedAway) {
-        const { prompt: left, meta: leftMeta } = pendingResend();
-        if (left && sel?.projectHash) {
-          useStore.getState().addOrphanDraftMessage(
-            queueKeyFor({ projectHash: sel.projectHash, draftId: newDraftId() }), sel.projectHash,
-            { queueId: createQueueId('rollback'), text: left, queuedAt: Date.now(), opts: leftMeta ? { meta: attachmentMetaForPersistence(leftMeta) } : {} },
-          );
-        }
-        return;
-      }
-      leaveForOwner(diskNotes);
+      // 会话被裁空(wipedAway)→ 侧栏不再列出它、回不去:内容进首页「未发出的消息」(见 leaveForOwner)。
+      leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, wiped: wipedAway });
       return;
     }
     // trim 失败(磁盘 jsonl 没裁)但 UI 已裁+即将重发 → 重发会落在未裁历史上、且
