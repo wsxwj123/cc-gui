@@ -7495,9 +7495,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 发之前先【轮询本地两个 ref】等停止落地,上限 4s 到点也发:绝不裸 await 任何控制类调用
   // (LEARNINGS「控制类调用必须 fire-and-forget + 超时兜底」——await interrupt 挡住兜底
   // 就是当年"停止失效"的成因)。
-  const resendReplacing = useCallback((text, opts = {}) => {
+  // r146 R3:ownerKey = 发起这次重发的会话键。最长 4s 的等待期间用户可能切走,handleSendRef
+  // 永远发进【本窗格当前会话】—— 落地前复查,换了会话就不发(绝不把 A 的原文发进 B)。
+  const resendReplacing = useCallback((text, opts = {}, ownerKey = null) => {
     const deadline = Date.now() + 4000;
     const tick = () => {
+      if (ownerKey && !paneStillOn(ownerKey)) return;
       if (Date.now() < deadline && (streamingRef.current || backgroundPidRef.current)) {
         setTimeout(tick, 100);
         return;
@@ -7505,7 +7508,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       handleSendRef.current?.(text, { ...opts, forceSend: true });
     };
     setTimeout(tick, 50);
-  }, []);
+  }, [paneStillOn]);
 
   // Auto-reattach: when the backgroundPid poll finds this session has a live
   // CLI proc that nobody's listening to (user navigated away mid-stream),
@@ -7948,6 +7951,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const handleRollback = useCallback(async (msg, { mode, resendText = null, softFiles = false } = {}) => {
     const sel = getLocalSession();
     const proj = useStore.getState().selectedProject;
+    // r146 R3:回退 / 重发链路里有好几个等待点(找快照、还原文件、裁剪会话、拉历史、等停止落地),
+    // 每个等待点之后先确认本窗格仍是发起回退的会话;中途切走 → 后续的窗格动作(停流、裁界面、
+    // 写窗格历史、重发)一律放弃 —— 原来没有这道复查:A 裁剪后的历史以 B 的名义写进窗格,原文被
+    // 重发进 B 的会话文件,B 在跑的回合还会被强停。磁盘已经裁剪了才发现切走的,把原文留回 A 的
+    // 输入框草稿(草稿为空时),回到 A 能看到、自己决定发不发。
+    let rbKey = queueKeyFor(sel);
+    const stillHere = () => paneStillOn(rbKey);
     // 会话优先于全局项目:setSelectedProject 支持"浏览别的项目、右侧会话不动",
     // 且 worktree 会话的 projectPath 与主项目不同。取全局项目会把 A 会话的快照写进
     // B 目录、trim 用错 hash(对齐 handleSend/FileReviewPanel 的会话优先口径)。
@@ -8082,6 +8092,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 1) git restore only for modes that explicitly include files.
     const shouldRestoreFiles = mode === 'both' || mode === 'edit';
     const checkpointSha = shouldRestoreFiles && sel?.sessionId && cwd ? await resolveCheckpointSha() : null;
+    if (!stillHere()) return; // r146 R3:找快照期间切走 —— 什么都还没动,整段放弃
     if (shouldRestoreFiles && !checkpointSha && !softFiles) {
       // 没有文件快照(非 git 项目 / 旧消息 / 快照丢失)不该让整个回退"没反应"——以前这里
       // alert + return,既不裁剪也不重发,用户关掉弹窗后什么都没发生。降级处理:跳过文件
@@ -8111,6 +8122,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       } catch {
         softDegrade();
       }
+      if (!stillHere()) return; // r146 R3:还原文件期间切走 —— 会话没裁、也不重发
     }
 
     // 2) trim on-disk jsonl so the resumed CLI doesn't see stale history.
@@ -8130,7 +8142,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // drop the sessionId locally — otherwise the next /api/chat would
         // try --resume on a deleted jsonl and CLI silently exits with
         // "No conversation found".
-        if (tr.sessionReset) {
+        if (tr.sessionReset && stillHere()) { // r146 R3:转 draft 是窗格动作,切走了就不做
           sessionWasReset = true;
           // sessionId 失效 → 切到 draft 态。但 permissionMode / model 的 per-session
           // pin 还在 modelBySession[oldSid] / permissionModeBySession[oldSid] 下,
@@ -8149,8 +8161,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             draft: true,
             draftId: _nd,
           });
+          rbKey = draftKey; // 窗格现在是这条新 draft,后续复查认它
         }
       } catch { trimFailed = true; }
+    }
+    // r146 R3:裁剪期间切走 —— 磁盘已裁,窗格动作与重发全部放弃;原文留回原会话输入框草稿。
+    if (!stillHere()) {
+      const leftText = composerText || resendPayloadForMessage(msg).prompt || '';
+      if (mode !== 'edit' && leftText && rbKey) {
+        try { const k = `cgui-draft:${rbKey}`; if (!localStorage.getItem(k)) localStorage.setItem(k, leftText); } catch {}
+      }
+      return;
     }
     // trim 失败(磁盘 jsonl 没裁)但 UI 已裁+即将重发 → 重发会落在未裁历史上、且
     // step5 refetch 把旧消息全拉回。如实告知,不再静默(对齐 CheckpointsPanel)。
@@ -8201,6 +8222,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!sessionWasReset && sel?.sessionId && projectHash) {
       try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
     }
+    if (!stillHere()) return; // r146 R3:拉历史期间切走 —— 不重发
 
     // 6) act per mode
     if (mode === 'edit') return; // composer was filled at the top of this branch
@@ -8212,7 +8234,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (resendPrompt && handleSendRef.current) {
       // Bug8:走 resendReplacing —— forceSend 绕过入队门 + 发前轮询本地 ref 等停止落地(≤4s)。
       if (typeof resendText === 'object' && resendText) {
-        resendReplacing(resendText.prompt || resendPrompt, resendText.options || {});
+        resendReplacing(resendText.prompt || resendPrompt, resendText.options || {}, rbKey);
       } else {
         if (resendMeta?.attachments?.length) {
           // r63-根因C:附件本体在 tmp 有 7 天 TTL(upload.js sweep),旧消息的文件可能已被清理。
@@ -8227,10 +8249,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             }
           }).catch(() => {});
         }
-        resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {});
+        resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {}, rbKey);
       }
     }
-  }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession, resendReplacing]);
+  }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession, resendReplacing, paneStillOn]);
   useEffect(() => { handleRollbackRef.current = handleRollback; }, [handleRollback]);
   // 切换会话时清掉待回滚 + 即时上下文用量 + 打开的子代理视图,避免泄漏到另一会话。
   useEffect(() => {
@@ -8294,6 +8316,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       return;
     }
     const sel = getLocalSession();
+    const rtKey = queueKeyFor(sel); // r146:发起重做的会话键(异步落地前复查用)
     const projectHash = sel?.projectHash || useStore.getState().selectedProject?.hash;
     if (!sel?.sessionId || !projectHash) {
       confirmDialog('缺少 sessionId 或 projectHash，无法局部重做工具');
@@ -8364,6 +8387,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
         const tr = await runHistoryOp(sel.sessionId, 'trim-before-tool', { projectHash, toolUseId: toolCall.id });
         if (!tr.ok) throw new Error(tr.error || tr.status);
+        // r146 R3 同族:等停止 / 裁剪期间切走了 —— 后续窗格动作与重跑一律放弃(重跑会发进别的会话)。
+        if (!paneStillOn(rtKey)) return;
         // r99b(Windows 审查中-1):截断真正成功后才通知调用方 —— Windows 上 rename 覆盖被
         // 占用的文件会 EPERM,失败时不该把"本会话唯一一次自动回退"的机会烧掉。
         opts.onTrimmed?.();
@@ -8387,6 +8412,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             ? `<cgui-tool-retry>${opts.continuePrompt}</cgui-tool-retry>`
             : `<cgui-tool-retry tool="${toolCall.name}">继续</cgui-tool-retry>`,
           { appendSystemPrompt, hiddenUserMessage: true },
+          rtKey,
         );
       } catch (err) {
         confirmDialog(opts.contentRisk ? '回退失败：' + err.message : '工具局部重做失败：' + err.message);
@@ -8395,7 +8421,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
       }
     })();
-  }, [getLocalSession, fetchMessagesForTab, getLocalMessages, setLocalMessages, resendReplacing]);
+  }, [getLocalSession, fetchMessagesForTab, getLocalMessages, setLocalMessages, resendReplacing, paneStillOn]);
 
   // AZ11:给 memo 的 MessageList 传【引用稳定】的回调。原始 handleRollback/handleRetryTurn
   // 的 deps 含 messages/chatMessages → 流式中每 token 都会换新身份 → 直接传会让 memo
