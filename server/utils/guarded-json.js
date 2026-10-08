@@ -159,7 +159,7 @@ export async function readJsonGuarded(file) {
     }
     return { file, value: undefined, missing: false, corrupt: false, unreadable: true, backup: null, error: err?.code || err?.message || String(err) };
   }
-  const text = raw.toString('utf-8').replace(/^﻿/, '');   // 剥 UTF-8 BOM(见文件头 r128 说明)
+  const text = raw.toString('utf-8').replace(/^\uFEFF/, '');   // 剥 UTF-8 BOM(见文件头 r128 说明)
   if (!text.trim()) {
     corruptState.delete(file);
     return { file, value: undefined, missing: true, corrupt: false, unreadable: false, backup: null, error: null };

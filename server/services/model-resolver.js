@@ -1,6 +1,7 @@
 import { readFile, writeFile, stat } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
+import { readJsonGuarded, guardError, ConfigGuardError } from '../utils/guarded-json.js';
 
 const CLAUDE_SETTINGS = join(homedir(), '.claude', 'settings.json');
 // Written by switchToOpenAIUpstream when an OpenAI-format provider is active.
@@ -37,6 +38,36 @@ async function readSettings() {
     settingsCacheMtime = 0;
   }
   return settingsCache;
+}
+
+/**
+ * r145 F1:凡是要写回 ~/.claude/settings.json 的路径,都用它读(每次现读盘,不走上面的 mtime 缓存)。
+ * 不存在 = 新机器,按 {};存在但读不出 / 解析失败 = 抛 ConfigGuardError(status 409,CONFIG_CORRUPT /
+ * CONFIG_UNREADABLE,与 r126 守卫同一出口),调用方在任何写之前拒绝 —— 当 {} 写回去只剩 env,
+ * hooks / permissions / 插件开关全丢。
+ * 与 guarded-json 的差异:它把 0 字节 / 纯空白归为 missing(GUI 自己的配置没东西可保护);settings.json
+ * 不行 —— 空文件多半是 CLI 或另一个写者截断后还没写完,此时按 {} 写回会冲掉对方马上要落盘的完整内容。
+ */
+export async function readClaudeSettingsForWrite() {
+  const r = await readJsonGuarded(CLAUDE_SETTINGS);
+  const err = guardError(r);
+  if (err) throw err;
+  if (r.missing) {
+    let present = false;
+    try { await stat(CLAUDE_SETTINGS); present = true; } catch { /* ENOENT:真的没有 */ }
+    if (!present) return {};
+    throw new ConfigGuardError({
+      code: 'CONFIG_CORRUPT', file: CLAUDE_SETTINGS, backup: null,
+      message: 'settings.json 是空文件（可能正被 Claude Code 或其他程序写到一半），为避免覆盖即将写入的内容已拒绝写入；稍后重试。若它确实应为空，删除该文件（程序会重建）后重试。',
+    });
+  }
+  if (!r.value || typeof r.value !== 'object' || Array.isArray(r.value)) {
+    throw new ConfigGuardError({
+      code: 'CONFIG_CORRUPT', file: CLAUDE_SETTINGS, backup: null,
+      message: 'settings.json 顶层不是 JSON 对象，为避免覆盖原有内容已拒绝写入；检查并修复该文件，或删除它（程序会重建）后重试。',
+    });
+  }
+  return r.value;
 }
 
 // ── 外部模型名残留:三层防线共用的判据 ───────────────────────────────────
@@ -283,7 +314,8 @@ export async function getAvailableModels() {
  * Set the default model in settings.json env section.
  */
 export async function setDefaultModel(modelId) {
-  const settings = await readSettings();
+  // r145 F1:写路径现读盘;损坏 / 读不出抛 409,不写(原来 readSettings 把任何失败都当 {})。
+  const settings = await readClaudeSettingsForWrite();
   // 防线之一(写入拒绝):官方端点下不接受非 claude 模型名。挡在写盘前,残留就进不了
   // settings.json —— 否则每个读点都要自愈一遍,且 CLI 会拿着它直接向官方发请求。
   // 守卫放在这里(不在路由里)是为了覆盖所有调用方;err.status 让路由回 400 而非 500。

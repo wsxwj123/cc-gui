@@ -440,9 +440,13 @@ function generateSegmentSummary(segment, model) {
       if (model) args.push('--model', model);
       mkdirSync(compactCwd, { recursive: true }); // 必须同步建目录:spawn 的 cwd 不存在 = 首次必失败
       proc = claudeSpawn(args, { cwd: compactCwd, stdio: ['pipe', 'pipe', 'pipe'], env: cleanChildEnv() });
+      // r145 F9:CLI 先退出(没装好 / 秒崩 / 被杀)时,剩余 prompt 写进已关闭的管道 → stdin 以 'error' 事件抛 EPIPE
+      // (异步,外面的 try 接不住),不监听就是未捕获异常。摘要拿不到按空处理,吞掉即可。
+      proc.stdin?.on('error', () => {});
       proc.stdin.write(prompt); proc.stdin.end();
     } catch { cleanup(); return resolve(''); }
-    if (!proc.pid) { cleanup(); return resolve(''); }
+    // spawn 失败(ENOENT 等)时子进程随后 emit 'error',同样要有监听。
+    if (!proc.pid) { proc.on('error', () => {}); cleanup(); return resolve(''); }
     proc.stderr?.resume(); // 不排空 stderr 超 64KB 会把子进程写死
     let out = '';
     let done = false;

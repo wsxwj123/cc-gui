@@ -11,6 +11,7 @@ import { claudeCommand, winLivePathDirsAsync } from '../utils/claude-resolver.js
 import { winCmdSpawnSpec } from '../utils/win-cmd.js';
 import { detectUv, detectLocalProxy, probeTcp, isLoopbackProxyHost } from './version-check.js';
 import { searchRegistry, browseRegistry } from '../services/mcp-registry.js';
+import { assertWritable, isConfigGuardError, sendConfigGuardError } from '../utils/guarded-json.js';
 
 const execFileP = promisify(execFile);
 
@@ -616,7 +617,8 @@ async function buildMcpList({ liveStatus = true } = {}) {
           transport: cfg.transport || 'stdio',
           status: 'disconnected',
           enabled: false,
-          disabledConfig: cfg,
+          // r145 F2:禁用条目里新存的 env(多为密钥)与 CLI 原条目 raw 只给启用用,列表接口不外发(前端不读它们)。
+          disabledConfig: { ...cfg, env: undefined, raw: undefined },
         });
       }
       if (stale) { try { await writeDisabled(disabled); } catch {} }
@@ -726,6 +728,38 @@ export function parseHeadersFromDetails(details) {
     }
   }
   return headers;
+}
+
+// 从 `claude mcp get` 文本解析 Environment: 段(缩进的 KEY=value 行,stdio 才有)。编辑回填与禁用的
+// 回落路径共用;值里的空格 / = 原样保留(只按第一个 = 切键)。
+function parseEnvFromDetails(details) {
+  const env = {};
+  const envSection = String(details || '').split(/Environment:/)[1];
+  if (envSection) {
+    for (const line of envSection.split('\n')) {
+      if (/^To remove/.test(line.trim())) break;
+      const em = line.match(/^\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+      if (em) env[em[1]] = em[2];
+    }
+  }
+  return env;
+}
+
+// r145 F2:禁用前取 CLI 落盘的原条目(args 数组边界、env、headers 及其它字段全保真),启用时
+// `claude mcp add-json` 原样写回。只认 CLI 的真实落点:user = ~/.claude.json 顶层 mcpServers;
+// local = ~/.claude.json 的 projects[cwd].mcpServers;project = <cwd>/.mcp.json。cwd 与 `claude mcp
+// get / remove` 子进程同源(runClaude 不设 cwd,继承本进程)。读不到返回 null → 回落解析 get 文本。
+async function readMcpEntryForScope(name, scope) {
+  const asEntry = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
+  try {
+    if (scope === 'project') {
+      return asEntry(JSON.parse(await readFile(join(process.cwd(), '.mcp.json'), 'utf-8'))?.mcpServers?.[name]);
+    }
+    const j = JSON.parse(await readFile(join(homedir(), '.claude.json'), 'utf-8'));
+    if (scope === 'user') return asEntry(j?.mcpServers?.[name]);
+    if (scope === 'local') return asEntry(j?.projects?.[process.cwd()]?.mcpServers?.[name]);
+  } catch { /* 读不到就回落文本解析 */ }
+  return null;
 }
 
 async function getServerDetails(name) {
@@ -899,18 +933,29 @@ router.put('/mcp/:name/enable', async (req, res) => {
         error: `无法启用「${name}」：该 ${config.transport} 服务器的连接地址(URL)未保存(早期版本禁用 http MCP 时丢了 URL)。请点删除后用「添加」重新填写 URL 即可。`,
       });
     }
-    const args = ['mcp', 'add'];
-    if (isHttp) args.push('--transport', config.transport);
-    if (config.scope) args.push('-s', String(config.scope));
-    args.push(name);
-    if (isHttp) {
-      args.push(String(httpUrl).trim());
-      // 禁用时存下的请求头原样带回,否则带 headers 的 server 启用后连不上。
-      for (const [k, v] of Object.entries(config.headers || {})) {
-        if (HEADER_KEY_RE.test(String(k).trim())) args.push('-H', `${String(k).trim()}: ${v ?? ''}`);
-      }
+    let args;
+    if (config.raw && typeof config.raw === 'object' && !Array.isArray(config.raw)) {
+      // r145 F2:禁用时存了 CLI 原条目 → add-json 原样写回同一 scope(command / args / env / headers 全保真)。
+      args = ['mcp', 'add-json', '-s', String(config.scope || 'user'), name, JSON.stringify(config.raw)];
     } else {
-      args.push('--', String(config.command), ...((config.args || []).map(String)));
+      // 旧版禁用条目(无 raw)或禁用时读不到原条目:按存下的字段重建。
+      args = ['mcp', 'add'];
+      if (isHttp) args.push('--transport', config.transport);
+      if (config.scope) args.push('-s', String(config.scope));
+      args.push(name);
+      if (isHttp) {
+        args.push(String(httpUrl).trim());
+        // 禁用时存下的请求头原样带回,否则带 headers 的 server 启用后连不上。
+        for (const [k, v] of Object.entries(config.headers || {})) {
+          if (HEADER_KEY_RE.test(String(k).trim())) args.push('-H', `${String(k).trim()}: ${v ?? ''}`);
+        }
+      } else {
+        // -e 在名称之后、-- 之前(-e 是变长参数,-- 终止它),与 buildAddArgs 同口径。
+        for (const [k, v] of Object.entries(config.env || {})) {
+          if (k && String(k).trim()) args.push('-e', `${String(k).trim()}=${v ?? ''}`);
+        }
+        args.push('--', String(config.command), ...((config.args || []).map(String)));
+      }
     }
 
     try {
@@ -958,9 +1003,23 @@ router.put('/mcp/:name/disable', async (req, res) => {
     } else {
       config.command = cmdMatch ? cmdMatch[1].trim() : '';
       config.args = argsMatch ? argsMatch[1].trim().split(/\s+/) : [];
+      config.env = parseEnvFromDetails(details); // 回落路径至少不丢 env(带空格的参数边界只有原条目里有)
+    }
+    // r145 F2:原条目优先 —— 文本里 Args 已按空格拼平,带空格的参数无从还原;env 也只在原条目里完整。
+    const raw = await readMcpEntryForScope(name, config.scope);
+    if (raw) {
+      config.raw = raw;
+      if (config.transport === 'stdio') {
+        if (typeof raw.command === 'string') config.command = raw.command;
+        if (Array.isArray(raw.args)) config.args = raw.args.map(String);
+        config.env = (raw.env && typeof raw.env === 'object' && !Array.isArray(raw.env)) ? { ...raw.env } : {};
+      }
     }
 
-    const disabled = await readDisabled();
+    // r145 F2:disabled 表读不出(非法 JSON / 无权限)→ 409 拒写:当 {} 写回会冲掉此前所有禁用项,
+    // 也不能往下 remove(条目没记上,配置就永久丢了)。读-改-写紧贴,中间不夹长耗时的 await。
+    const guard = await assertWritable(DISABLED_FILE);
+    const disabled = (guard.value && typeof guard.value === 'object' && !Array.isArray(guard.value)) ? guard.value : {};
     disabled[name] = config;
     await writeDisabled(disabled);
 
@@ -968,6 +1027,7 @@ router.put('/mcp/:name/disable', async (req, res) => {
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: false });
   } catch (err) {
+    if (isConfigGuardError(err)) return sendConfigGuardError(res, err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1173,15 +1233,7 @@ router.get('/mcp/:name/config', async (req, res) => {
     const cmd = cmdMatch ? cmdMatch[1].trim() : '';
     const cargs = argsMatch && argsMatch[1].trim() ? argsMatch[1].trim() : '';
     // 解析 Environment: 段(缩进的 KEY=value),否则编辑时会丢失已有 env。
-    const env = {};
-    const envSection = details.split(/Environment:/)[1];
-    if (envSection) {
-      for (const line of envSection.split('\n')) {
-        if (/^To remove/.test(line.trim())) break;
-        const em = line.match(/^\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-        if (em) env[em[1]] = em[2];
-      }
-    }
+    const env = parseEnvFromDetails(details);
     res.json({
       name, transport,
       scope: scopeMatch ? scopeMatch[1].trim().toLowerCase() : 'user',

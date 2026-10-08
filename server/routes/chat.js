@@ -6,7 +6,7 @@ import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, 
 import { readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, AbortError } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel, isOfficialAnthropic } from '../services/model-resolver.js';
 import { findSessionFile, readSessionTitles, findAgentRunEvidence, isSessionIdShape, AGENT_TERMINAL_STATUSES, readSubagentUsageForToolUse } from '../services/session-reader.js';
 import { dropPendingForSession, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
@@ -1707,6 +1707,16 @@ router.post('/chat', async (req, res) => {
   return withTurnLock(`${turnPrincipal(req)}|${turnId}`, () => handleChatPost(req, res));
 });
 
+// r145 F4:SDK 泵的 catch 用它判"本 slot 是不是被主动中止的"(停止 / 关闭 / 看门狗拆进程都走 slot.abort.abort())。
+// 是 → 不发 error 行,否则流里多一条 "Claude Code process aborted by user",前端当成报错。
+// SDK 0.3.273 的 AbortError 实例 name === 'Error'(类名被压缩,已实测),只按 name 判必漏:以本 slot 自己的
+// abort 信号为准,再认 SDK 导出的 AbortError 类;name === 'AbortError' 留给标准 DOM / fetch 的中止异常。
+export function isSelfAbortError(err, signal) {
+  if (signal?.aborted) return true;
+  if (err instanceof AbortError) return true;
+  return err?.name === 'AbortError';
+}
+
 // POST /api/chat 主流程(原 handler 原样下移;所有锁定行为的时序不变)。
 async function handleChatPost(req, res) {
   // R13 输入闸门:非法输入一律 {ok:false,code,error} 且【不起任何 CLI、不回 pid】。
@@ -2498,7 +2508,7 @@ async function handleChatPost(req, res) {
         }
       }
     } catch (e) {
-      if (e?.name !== 'AbortError') {
+      if (!isSelfAbortError(e, abort.signal)) {
         deliverLine(slot, JSON.stringify({ type: 'error', error: e?.message || String(e) }));
       }
     } finally {
@@ -3483,12 +3493,16 @@ router.post('/chat/title', async (req, res) => {
         env: childEnv,
       });
       // prompt 经 stdin 喂入(见上方注释:绕开 Windows cmd 参数解析)。写完即关,让 -p 一次性执行。
+      // r145 F9:CLI 先退出(没装好 / 秒崩 / 被杀)时,剩余 prompt 写进已关闭的管道 → stdin 以 'error' 事件抛 EPIPE
+      // (异步,外面的 try 接不住),不监听就是未捕获异常。标题拿不到会走兜底,吞掉即可。
+      proc.stdin?.on('error', () => {});
       try { proc.stdin.write(prompt); proc.stdin.end(); } catch {}
     } catch {
       cleanupTitleCwd();
       return resolve('');
     }
-    if (!proc.pid) { cleanupTitleCwd(); return resolve(''); }
+    // spawn 失败(ENOENT 等)时子进程随后 emit 'error',同样要有监听(同 /chat/btw)。
+    if (!proc.pid) { proc.on('error', () => {}); cleanupTitleCwd(); return resolve(''); }
     // stderr 设了 pipe 但下面只读 stdout —— 不排空的话 CLI 往 stderr 写超 ~64KB(TCC/MCP 警告等)
     // 会撑爆管道缓冲区 → 子进程阻塞 → close 永不触发 → 卡到超时。drain 掉即可(标题生成用不到 stderr)。
     proc.stderr?.resume();
@@ -3598,6 +3612,12 @@ router.post('/chat/btw', async (req, res) => {
   const question = String(req.body?.question || '').slice(0, 8000).trim();
   if (!question) return res.status(400).json({ error: 'question is required' });
   const sessionId = (typeof req.body?.sessionId === 'string') ? req.body.sessionId.trim() : '';
+  // r145 F8:sessionId 会作为独立 argv 跟在 --resume 后面,必须是会话 id 形态(字符集与 /context 的
+  // CONTEXT_SESSION_RE 同口径),并另拒 - 开头 —— 那个字符集放得进 `--tools` 这类串,CLI 会把它当成选项,
+  // 绕开旁问的零工具约束。空 = 草稿会话,照常起(不带 --resume)。在 spawn 之前拒,不起进程。
+  if (sessionId && (!CONTEXT_SESSION_RE.test(sessionId) || sessionId.startsWith('-'))) {
+    return res.status(400).json({ error: 'sessionId 格式不合法' });
+  }
   const model = safeModelArg(String(req.body?.model || '').replace(/\[1m\]/i, ''));
   const cwd = (typeof req.body?.cwd === 'string' && req.body.cwd) ? req.body.cwd : homedir();
   try { if (!statSync(cwd).isDirectory()) throw new Error('nd'); }
@@ -3627,6 +3647,9 @@ router.post('/chat/btw', async (req, res) => {
   let proc;
   try {
     proc = claudeSpawn(args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: cleanChildEnv() });
+    // r145 F9:CLI 先退出(没装好 / 秒崩 / 被杀)时,剩余 prompt 写进已关闭的管道 → stdin 以 'error' 事件抛 EPIPE
+    // (异步,外面的 try 接不住),不监听就是未捕获异常。CLI 退了 close 照常收尾、回错误,这里吞掉即可。
+    proc.stdin?.on('error', () => {});
     proc.stdin.write(wrapBtwInline(composed)); proc.stdin.end();
   } catch (e) { return res.status(500).json({ error: 'spawn claude failed: ' + e.message }); }
   if (!proc.pid) { proc.on('error', () => {}); return res.status(500).json({ error: 'claude CLI not found' }); }
