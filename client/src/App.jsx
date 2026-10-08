@@ -5401,6 +5401,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r146 R2:本流是否真的接上过服务端的流(attach 2xx)。POST 窗口里就切走的流(下面
     // 「孤儿流复判」直接 return)一个字都没收过,不代表任何直播内容 —— 它不能写直播快照。
     let streamAttached = false;
+    // r146 R6:本次发送【实际用的】模型(下面发送块里从 store 现解析)。外层同名 currentModel 是
+    // 渲染期快照,换模型只改 modelBySession、不会让 handleSend 重建 —— 1M 被拒的自动恢复与超窗
+    // 横幅读它就会拿到换模型之前的旧值(恢复成旧模型、1M 判断错)。reattach 不走发送块,为 null 时回落。
+    let sentModel = null;
     // r146 R4:错误后的自动重发(1M 被拒 / 签名自愈 / 会话失效转 draft / auto 档回退)统一走这里。
     // handleSendRef 恒发进【本窗格当前会话】;原来 80ms 定时器落地前不复查,这段时间(签名自愈还要
     // 先等剥离与拉历史)切走,原文就被发进了新会话。落地前确认本窗格仍是发起会话(或 init 升级出的
@@ -5477,6 +5481,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // TDZ)。pin 显式关 1m 时 syncContext1m 已清标记,不会误补。
       const _c1m = selectedSession?.sessionId && _stM.context1mBySession?.[selectedSession.sessionId];
       if (_c1m && currentModel && !/\[1m\]/i.test(currentModel)) currentModel = currentModel + '[1m]';
+      sentModel = currentModel; // r146 R6:见声明处
       let effort = useStore.getState().getEffortFor(sessionQueueKey);
       // r10-9:模型能力门控——模型声明不支持思考或该档不支持时不传 effort(不写 env,
       // CLI 端零痕迹)。UI 已回落兜底,这里是发送侧防御(pin 残留/竞态)。
@@ -6688,7 +6693,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 内可用(/context 实测真 1M 窗口),不会走到这。
             if (/usage credits required for 1m context|long context beta is not (yet )?available/i.test(msg) && !opts.oneMRetry && prompt) {
               const _st = useStore.getState();
-              const _base = String(currentModel || '').replace(/\[1m\]/i, '');
+              const _base = String(sentModel || currentModel || '').replace(/\[1m\]/i, ''); // r146 R6
               if (_base) _st.setModelFor(sessionQueueKey, _base);
               if (/\[1m\]/i.test(_st.currentModel || '')) _st.setModel(String(_st.currentModel).replace(/\[1m\]/i, ''));
               setProviderSwitchNotice({ text: '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。' });
@@ -6764,7 +6769,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 超限;横幅要把真实窗口亮给用户并给对建议(压缩摘要请求自身也会超小窗,难自救)。
               const _lim = /(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)\s*maximum/i.exec(msg);
               setCtxOverflow({
-                has1m: /\[1m\]/i.test(currentModel || ''), wasCompact: isCompact, ownerKey: streamSid || sessionQueueKey,
+                has1m: /\[1m\]/i.test(sentModel || currentModel || ''), wasCompact: isCompact, ownerKey: streamSid || sessionQueueKey, // r146 R6
                 used: _lim ? Number(_lim[1].replace(/,/g, '')) : null,
                 limit: _lim ? Number(_lim[2].replace(/,/g, '')) : null,
               });
