@@ -427,7 +427,7 @@ const SVG_ALLOWED_TAGS = new Set([
 export function sanitizeSvg(text, maxBytes = ZIP_LIMITS.maxSvgBytes) {
   if (typeof text !== 'string') return { ok: false, reason: 'not_text' };
   if (Buffer.byteLength(text, 'utf8') > maxBytes) return { ok: false, reason: 'too_large' };
-  let s = text.replace(/^﻿/, '').replace(/<\?xml[\s\S]*?\?>/gi, '').replace(/<!--[\s\S]*?-->/g, '').trim();
+  let s = text.replace(/^\uFEFF/, '').replace(/<\?xml[\s\S]*?\?>/gi, '').replace(/<!--[\s\S]*?-->/g, '').trim();
   const low = s.toLowerCase();
   if (!low.startsWith('<svg')) return { ok: false, reason: 'not_svg' };
   if (low.includes('<!doctype') || low.includes('<!entity') || low.includes('<![cdata[')) {
