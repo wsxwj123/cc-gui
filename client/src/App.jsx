@@ -4444,10 +4444,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 本会话显示在本窗格时取出,常驻到手动关。留言那一刻本会话若正显示着,经 cgui:session-notice 立刻取。
   const noticeKeyRef = useRef(sessionQueueKey);
   noticeKeyRef.current = sessionQueueKey;
+  // r146c:给用户此刻所在窗格的提示(内容说的是别的会话的事),带此刻窗格的会话键 —— 换会话即隐藏。
+  const showNoticeHere = useCallback((text) => {
+    if (text) setProviderSwitchNotice({ text, sticky: true, ownerKey: queueKeyFor(getLocalSession()) });
+  }, [getLocalSession]);
   useEffect(() => {
     const show = () => {
       const text = takeSessionNotice(noticeKeyRef.current);
-      if (text) setProviderSwitchNotice({ text, sticky: true });
+      if (text) setProviderSwitchNotice({ text, sticky: true, ownerKey: noticeKeyRef.current });
     };
     show();
     const onNotice = (e) => { if (e?.detail?.key && e.detail.key === noticeKeyRef.current) show(); };
@@ -8752,6 +8756,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 之后 —— 那里才能引用到已收口的 finalizedMessages;上提到更早只能用 messages,
   // 半成品 turn 会被误判成孪生)。上屏与 allMessages 派生统计只认这一份,不再双计。
   const allMessages = [...finalizedMessages, ...renderChat];
+  // r146c:带所属会话键的提示(会话留言 / 别的会话的回退结果)只在键与本窗格当前会话一致时显示;
+  // 不带键的照旧(窗格级瞬时提示)。原来一律显示,回到 A 不关、再切到 C,A 的提示就挂在了 C 上。
+  const shownNotice = providerSwitchNotice && (!providerSwitchNotice.ownerKey || providerSwitchNotice.ownerKey === sessionQueueKey)
+    ? providerSwitchNotice : null;
   // 右侧回合进度条数据:每个用户回合一个点(摘要取去附件后的显示文本)。
   // 注意:必须是普通计算,不能用 useMemo —— 这里在 SessionDetail 的早返回
   // (if loading && tabIndex===0 return)之后,加 hook 会导致切换会话(loading 切换)时
@@ -9118,7 +9126,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           回显;providerSwitchNotice 的 5s 计时独立运行,压制期间到期即清(可接受)。 */}
       {/* Permission-mode hint banner — moved here from ChatInput so it sits
           directly under the session title. Banner is dismissible per-user. */}
-      {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && !providerSwitchNotice && (
+      {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && !shownNotice && (
         <PermissionModeHintBanner permKey={sessionQueueKey} />
       )}
 
@@ -9154,18 +9162,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       {/* Provider-switch notice — fades after 5s. Tells the user we just
           stripped thinking blocks from on-disk jsonl so cc switch's new
           backend won't reject the resumed history. */}
-      {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && providerSwitchNotice && (
+      {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && shownNotice && (
         <div className="shrink-0 mx-6 mt-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 flex items-start gap-2 animate-fade-up">
           <span className="text-amber-700 text-[12px] font-body leading-snug flex-1">
-            🔄 {providerSwitchNotice.text}
+            🔄 {shownNotice.text}
           </span>
           {/* 三振出局(attach 连败 ATTACH_MAX_TRIES 次)后的手动重连入口。原文案让用户
               "切走再切回"才能重试 —— 那是把复位动作交给用户去猜。点这里等价:清该 pid
               的失败计数 + 清 reattach 闩锁 + bump nonce 触发 auto-reattach effect。 */}
-          {providerSwitchNotice.retryPid && (
+          {shownNotice.retryPid && (
             <button
               onClick={() => {
-                if (attachFailRef.current?.pid === providerSwitchNotice.retryPid) attachFailRef.current = null;
+                if (attachFailRef.current?.pid === shownNotice.retryPid) attachFailRef.current = null;
                 reattachedPidRef.current = null;
                 setProviderSwitchNotice(null);
                 // nonce 是必须的:重试时 backgroundPid 没变,effect 的 deps 被 Object.is
