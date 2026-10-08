@@ -7575,11 +7575,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // r146 R3:最长 4s 的等待期间用户可能切走,而 handleSendRef 永远发进【本窗格当前会话】——
   // 调用这一刻本窗格的会话就是发起重发的会话(调用方都已在各自的等待点之后复查过窗格),锁住它,
   // 每一跳落地前复查,换了会话就不发(绝不把 A 的原文发进 B)。
+  // r146c:调用方登记的"放弃重发时的善后"(回退把本来要重发的内容留回原会话)。resendReplacing 一被调用
+  // 就取走并清空,一次一对,不跨调用残留;工具重做不登记(它的续跑是隐藏消息,没有可留回的文字)。
+  const resendAbandonRef = useRef(null);
   const resendReplacing = useCallback((text, opts = {}) => {
     const ownerKey = queueKeyFor(getLocalSession());
+    const onAbandon = resendAbandonRef.current;
+    resendAbandonRef.current = null;
     const deadline = Date.now() + 4000;
     const tick = () => {
-      if (!paneStillOn(ownerKey)) return;
+      if (!paneStillOn(ownerKey)) { onAbandon?.(); return; }
       if (Date.now() < deadline && (streamingRef.current || backgroundPidRef.current)) {
         setTimeout(tick, 100);
         return;
@@ -8364,7 +8369,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!sessionWasReset && sel?.sessionId && projectHash) {
       try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
     }
-    if (!stillHere()) return; // r146 R3:拉历史期间切走 —— 不重发
+    // r146c:拉历史期间切走 —— 不重发,本来要重发的内容同样留给本会话(原来直接 return,改后的文字就丢了)。
+    if (!stillHere()) { leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, wiped: sessionWasReset }); return; }
 
     // 6) act per mode
     if (mode === 'edit') return; // composer was filled at the top of this branch
@@ -8374,6 +8380,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 后的 composerText —— 纯附件消息 displayText 为空,旧守卫会让整条消息裁掉后不重发。
     const { prompt: resendPrompt, meta: resendMeta } = resendPayloadForMessage(msg);
     if (resendPrompt && handleSendRef.current) {
+      // r146c:等停止落地(≤4s)期间切走 → resendReplacing 放弃重发时调这个善后(一次性登记、一次性取走)。
+      resendAbandonRef.current = () => leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, wiped: sessionWasReset });
       // Bug8:走 resendReplacing —— forceSend 绕过入队门 + 发前轮询本地 ref 等停止落地(≤4s)。
       if (typeof resendText === 'object' && resendText) {
         resendReplacing(resendText.prompt || resendPrompt, resendText.options || {});
