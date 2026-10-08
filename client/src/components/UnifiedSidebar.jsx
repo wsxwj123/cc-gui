@@ -1523,7 +1523,7 @@ function WorktreePickerModal({
   const selProjPath = useStore((s) => s.selectedProject?.path);
   // r147 K4:Esc 只关本弹窗(同右上角 ✕)。挂 window 捕获、stopPropagation,理由同上方路径弹窗:
   // 不拦就冒到会话级监听,在分支名框里按 Esc 会停掉正在生成的回合。起点分支下拉开着时这一击归下拉
-  // (它与 UnifiedSidebar 的 wtBaseOpen 监听同挂 window 捕获、注册在本监听之后,只能由这里让行)。
+  // (下拉自己的 Esc 监听也挂 window 捕获,同一相位谁先谁后看注册顺序,靠不住 —— 由这里主动让行)。
   useEffect(() => {
     const onEsc = (e) => {
       if (e.key !== 'Escape' || isImeKeydown(e)) return;
