@@ -1240,7 +1240,20 @@ router.get('/providers', async (_req, res) => {
 // chosen provider's snapshot. Timestamped backup first so it's reversible. We
 // never write the CC Switch db (so its own is_current may lag — GUI reads the
 // live settings.json via GET /provider, which is authoritative).
-router.post('/provider/switch', async (req, res) => {
+//
+// r145 F3:切换 / 保存后自动重切 / 删除 provider 走同一条串行队列(同一进程内一次只跑一个)。
+// 代理上游是进程内单一变量,settings.json 是另一份状态,中间隔着多次 await:两次切换交错时上游以
+// "后设置"为准、settings.json 以"后写入"为准,可分属两家(界面显示 B,对话却发往 A 并用 A 的密钥)。
+// 写法同 writeCustomProviders 的队列:前一个失败不阻塞后一个;fn 自己兜底错误、不 reject。
+let _providerOpQueue = Promise.resolve();
+function serializeProviderOp(fn) {
+  const run = _providerOpQueue.catch(() => {}).then(fn);
+  _providerOpQueue = run;
+  return run;
+}
+// 路由层只负责排队;实现在 handleProviderSwitch —— reapplyIfActive 已在队列里,直接调实现(不经路由层),免重入死锁。
+router.post('/provider/switch', (req, res) => serializeProviderOp(() => handleProviderSwitch(req, res)));
+async function handleProviderSwitch(req, res) {
   try {
     const { id, model } = req.body || {};
     if (!id || typeof id !== 'string') return res.status(400).json({ error: 'id required' });
@@ -1376,7 +1389,7 @@ router.post('/provider/switch', async (req, res) => {
   } catch (err) {
     sendRouteError(res, err);
   }
-});
+}
 
 // BB6: per-provider 档位映射。把子代理/标题/compact 用的 tier alias(haiku/sonnet/
 // opus/fable)分别映射到该 provider 的真实模型(简单任务用便宜的,难的用强的)。
@@ -1441,10 +1454,10 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
     : (models[0] || requestedModel);
   if (!model) return res.status(400).json({ error: 'provider 未配置任何模型,需手动指定 model' });
 
-  // Start the proxy (idempotent, fixed port) and point it at this upstream.
+  // Start the proxy (idempotent, fixed port). It is pointed at this upstream only
+  // after settings.json is written (r145 F3, see below).
   let port = getProxyPort();
   if (!port) port = await startOpenAIProxy();
-  setOpenAIUpstream({ baseURL: up.baseURL, apiKey: up.apiKey, model });
 
   // Start from the live settings.json so hooks/permissions survive the switch.
   const current = await readClaudeSettingsForWrite();
@@ -1481,6 +1494,9 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   await backupSettings(ts);
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
+  // r145 F3:settings.json 落盘成功之后才切上游 —— 写盘失败时上游保持切换前的值(此前先切上游再写盘,
+  // 写失败接口回 500,对话却已发往新的那家)。与上面的 writeFile 之间没有 await,不存在可观察的中间态。
+  setOpenAIUpstream({ baseURL: up.baseURL, apiKey: up.apiKey, model });
   await ensureOnboardingFlag(); // 第三方无需登录:跳过终端首次向导(新机地区屏蔽根治)
   // Remember the active provider id (not the key) for restart recovery. Also
   // persist the provider's FULL model list + name so model-resolver can offer
@@ -1509,7 +1525,7 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   let port = getAnthropicProxyPort();
   if (!port) port = await startAnthropicProxy();
   if (!port) return res.status(500).json({ error: 'anthropic 代理启动失败(端口占用)' });
-  setAnthropicUpstream({ baseURL: up.baseURL, authToken: up.authToken });
+  // 上游在 settings.json 落盘成功之后才切(r145 F3,见下方写盘处)。
 
   // Preserve the current settings base (hooks/MCP/plugins/permissions) and only
   // import provider env/model aliases from the provider snapshot, then redirect
@@ -1564,6 +1580,8 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   await backupSettings(ts);
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
+  // r145 F3:落盘成功之后才切上游(同 switchToOpenAIUpstream):写盘失败时上游保持切换前的值。
+  setAnthropicUpstream({ baseURL: up.baseURL, authToken: up.authToken });
   await ensureOnboardingFlag(); // 第三方无需登录:跳过终端首次向导(新机地区屏蔽根治)
   // Persist the active marker (id/name/baseURL/model/models — NEVER the token).
   try {
@@ -1992,7 +2010,9 @@ router.put('/custom-providers/:id', async (req, res) => {
 });
 
 // DELETE /api/custom-providers/:id — remove one.
-router.delete('/custom-providers/:id', async (req, res) => {
+// r145 F3:与切换同一队列 —— 正在进行的切换还没写 active 标记时删掉它的目标,"删的是不是在用的"会判错,
+// 切换随后把 active 写成一个已删除的 provider。
+router.delete('/custom-providers/:id', (req, res) => serializeProviderOp(async () => {
   try {
     // r126:同 PUT —— 损坏先拒 409,不误报 404。
     await assertWritable(CUSTOM_PROVIDERS_PATH);
@@ -2005,7 +2025,7 @@ router.delete('/custom-providers/:id', async (req, res) => {
     if ((await readActiveProviderId()) === req.params.id) await unlink(ACTIVE_PROVIDER_PATH).catch(() => {});
     res.json({ ok: true });
   } catch (err) { sendRouteError(res, err); }
-});
+}));
 
 // B 方案: 按 provider id 解析其 models[](与 GET /providers 同口径),供
 // PUT /provider-overrides/:id 校验 defaultModel/tierModels。覆盖三组:
@@ -2058,23 +2078,25 @@ async function resolveProviderModelsById(id) {
 // 拿不到就回落 models[0]),绝不会写出列表外的模型。
 // 无递归风险:switch 从不写 custom-providers.json(全部 5 个写入点都是路由处理器)。
 async function reapplyIfActive(id) {
-  try {
-    if ((await readActiveProviderId()) !== id) return false;
-    const layer = router.stack.find((l) => l.route && l.route.path === '/provider/switch');
-    if (!layer) return false;
-    // _status 初始 0(不是 200):handler 异步抛错、根本没碰过 res 时,下面的 catch 吞掉异常,
-    // 初值 200 会把"什么都没发生"报成 reapplied:true —— 前端据此显示"已生效",而 settings.json
-    // 里还是旧映射。json() 补默认 200 是照 express 语义(成功路径只调 res.json,不调 res.status)。
-    const fakeRes = {
-      _status: 0, _body: null,
-      status(s) { this._status = s; return this; },
-      json(b) { if (!this._status) this._status = 200; this._body = b; return this; },
-    };
-    const fakeReq = { body: { id }, headers: { 'Content-Type': 'application/json' } };
-    // 复用 /provider/switch 的实现:它已正确处理 anthropic / openai / custom 三类。
-    await Promise.resolve(layer.route.stack[0].handle(fakeReq, fakeRes, () => {})).catch(() => {});
-    return fakeRes._status >= 200 && fakeRes._status < 300;
-  } catch { return false; }
+  // r145 F3:"是不是当前在用"的判断与重切同在切换队列里 —— 在队列外判断会读到旧的 active(正在进行的
+  // 切换还没写标记),就把用户刚切走的 provider 又切回来。队列里直接调实现函数,不经路由层(那层也排队,会死锁)。
+  return serializeProviderOp(async () => {
+    try {
+      if ((await readActiveProviderId()) !== id) return false;
+      // _status 初始 0(不是 200):handler 异步抛错、根本没碰过 res 时,下面的 catch 吞掉异常,
+      // 初值 200 会把"什么都没发生"报成 reapplied:true —— 前端据此显示"已生效",而 settings.json
+      // 里还是旧映射。json() 补默认 200 是照 express 语义(成功路径只调 res.json,不调 res.status)。
+      const fakeRes = {
+        _status: 0, _body: null,
+        status(s) { this._status = s; return this; },
+        json(b) { if (!this._status) this._status = 200; this._body = b; return this; },
+      };
+      const fakeReq = { body: { id }, headers: { 'Content-Type': 'application/json' } };
+      // 复用 /provider/switch 的实现:它已正确处理 anthropic / openai / custom 三类。
+      await handleProviderSwitch(fakeReq, fakeRes).catch(() => {});
+      return fakeRes._status >= 200 && fakeRes._status < 300;
+    } catch { return false; }
+  });
 }
 
 // GET /api/provider-overrides — 回显全部 override(无文件 = {})。
