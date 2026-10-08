@@ -11,7 +11,7 @@ import { parseAvatar, sanitizeAvatar, AVATAR_FILE_RE } from '../utils/avatar.js'
 import { createConnection } from 'node:net';
 import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/openai-proxy.js';
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
-import { isOfficialAnthropic, isClaudeModel } from '../services/model-resolver.js';
+import { isOfficialAnthropic, isClaudeModel, readClaudeSettingsForWrite } from '../services/model-resolver.js';
 import { applyCatalogPrefill, catalogPrefillEntry } from '../utils/model-capabilities.js';
 import { updatePrefs, loadPrefs } from './prefs.js';
 import {
@@ -134,6 +134,8 @@ function mergeProviderEnv(currentEnv = {}, providerEnv = {}) {
   return env;
 }
 
+// 只给读路径(GET 展示)用:读不出当 {}。r145 F1:要写回 settings.json 的路径一律改用
+// readClaudeSettingsForWrite —— 存在但读不出 / 解析失败时抛 409、不写,不能把 {} 写回去冲掉 hooks 等。
 async function readCurrentSettings() {
   try { return JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); }
   catch { return {}; }
@@ -298,15 +300,20 @@ router.get('/prompt-cache', async (_req, res) => {
 router.put('/prompt-cache', async (req, res) => {
   const mode = req.body?.mode;
   if (!PROMPT_CACHE_MODES.includes(mode)) return res.status(400).json({ error: 'mode 必须是 auto/on/off' });
-  const cur = await readCurrentSettings();
-  const env = { ...(cur.env || {}) };
-  const { memo } = await readPromptCachePref();
-  const nextMemo = applyPromptCacheEnv(env, resolvePromptCacheOn(mode, isThirdPartyEnv(env)), memo);
-  await updatePrefs((prefs) => { prefs.promptCache = { mode, memo: nextMemo }; });
-  // 与五条 provider 切换路径同口径:直写 settings.json 前先备份(BK-8 的滚动 3 份)。
-  await backupSettings(new Date().toISOString().replace(/[:.]/g, '-'));
-  await writeFile(SETTINGS_PATH, JSON.stringify({ ...cur, env }, null, 2));
-  res.json({ ok: true, ...promptCacheState(env, mode) });
+  try {
+    // r145 F1:settings.json 损坏 / 读不出 → 409,偏好也不改(先于 updatePrefs)。
+    const cur = await readClaudeSettingsForWrite();
+    const env = { ...(cur.env || {}) };
+    const { memo } = await readPromptCachePref();
+    const nextMemo = applyPromptCacheEnv(env, resolvePromptCacheOn(mode, isThirdPartyEnv(env)), memo);
+    await updatePrefs((prefs) => { prefs.promptCache = { mode, memo: nextMemo }; });
+    // 与五条 provider 切换路径同口径:直写 settings.json 前先备份(BK-8 的滚动 3 份)。
+    await backupSettings(new Date().toISOString().replace(/[:.]/g, '-'));
+    await writeFile(SETTINGS_PATH, JSON.stringify({ ...cur, env }, null, 2));
+    res.json({ ok: true, ...promptCacheState(env, mode) });
+  } catch (err) {
+    sendRouteError(res, err);
+  }
 });
 
 // GUI-managed custom providers (Option A: isolated from cc-switch.db). Each:
@@ -1240,6 +1247,8 @@ router.post('/provider/switch', async (req, res) => {
     // r126:active-provider.json 损坏时在**任何副作用之前**拒绝(409):切换路径先改写 settings.json 再写
     // 这个标记,若到最后一步才拦,CLI 已切走而 GUI 标记没跟上。writeActiveProviderId 里还有同一道闸兜底。
     await assertWritable(ACTIVE_PROVIDER_PATH);
+    // r145 F1:settings.json 存在但读不出 / 解析失败 → 同样在任何副作用之前 409(各写点读盘时还有同一道闸兜底)。
+    await readClaudeSettingsForWrite();
 
     // Read ALL claude providers and match in JS — user input never touches SQL.
     // withBuiltinOfficial:db 无官方行时补合成行,使其 id 命中下面【现成的】official 分支。
@@ -1289,7 +1298,7 @@ router.post('/provider/switch', async (req, res) => {
     // to deepseek. So for official: strip routing/auth env (use OAuth) and any
     // NON-claude model overrides, then write directly (no proxy).
     if (hit.category === 'official') {
-      const current = await readCurrentSettings();
+      const current = await readClaudeSettingsForWrite();
       const env = { ...(current.env || {}) };
       for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_ATTRIBUTION_HEADER']) delete env[k];
       for (const k of Object.keys(env)) {
@@ -1345,9 +1354,9 @@ router.post('/provider/switch', async (req, res) => {
     if (snapBase) {
       try { await assertPublicBaseURL(snapBase); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
     }
+    const current = await readClaudeSettingsForWrite(); // 先读:损坏就 409,连备份都不滚
     await backupSettings(ts);
 
-    const current = await readCurrentSettings();
     const env = mergeProviderEnv(current.env, snapshot.env || {});
     // r89:这条是"claude 格式 provider 直写"路径(官方端点,或非官方但没带 token)。
     // 按 baseURL 判类别:非官方端点才算第三方。
@@ -1438,7 +1447,7 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   setOpenAIUpstream({ baseURL: up.baseURL, apiKey: up.apiKey, model });
 
   // Start from the live settings.json so hooks/permissions survive the switch.
-  const current = await readCurrentSettings();
+  const current = await readClaudeSettingsForWrite();
   const env = { ...(current.env || {}) };
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await pickProxyPort(DAEMON_OPENAI_PORT, port)}`;
   // The CLI must send *some* token; the proxy ignores it and injects the real
@@ -1508,7 +1517,7 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   // AUTH_TOKEN is left as-is — the CLI's value is ignored (OAuth overrides it and
   // the proxy strips both), the proxy injects the real token from its upstream.
   const snapshot = (up.snapshot && typeof up.snapshot === 'object') ? up.snapshot : {};
-  const current = await readCurrentSettings();
+  const current = await readClaudeSettingsForWrite();
   const env = mergeProviderEnv(current.env, snapshot.env || {});
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await pickProxyPort(DAEMON_ANTHROPIC_PORT, port)}`;
   // 全新机器(从未 /login、无 OAuth、无旧 token)修复:CLI 手里必须有【某个】凭证才会发请求,
@@ -1599,7 +1608,7 @@ async function switchToCustomProvider(p, requestedModel, res) {
   // passthrough proxy so a logged-in subscription's OAuth token can't poison it.
   const models = p.models || [];
   if (!isOfficialAnthropic(p.baseURL)) {
-    const cur = await readCurrentSettings();
+    const cur = await readClaudeSettingsForWrite();
     const snapEnv = { ...(cur.env || {}) };
     delete snapEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL;
     delete snapEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
@@ -1615,7 +1624,7 @@ async function switchToCustomProvider(p, requestedModel, res) {
   try { await assertPublicBaseURL(p.baseURL); } catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
   const model = (effModel && models.includes(effModel))
     ? effModel : (defModel || models[0] || effModel || '');
-  const current = await readCurrentSettings();
+  const current = await readClaudeSettingsForWrite();
   const env = { ...(current.env || {}) };
   env.ANTHROPIC_BASE_URL = p.baseURL;
   env.ANTHROPIC_AUTH_TOKEN = p.apiKey;

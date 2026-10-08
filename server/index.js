@@ -56,6 +56,7 @@ import { readStats as readSessionIndexStats } from './services/session-index.js'
 import { resolveWorkspacePath } from './utils/safe-path.js';
 import { clients, broadcast } from './broadcast.js';
 import { getDefaultModel, getAvailableModels, setDefaultModel } from './services/model-resolver.js';
+import { isConfigGuardError, sendConfigGuardError } from './utils/guarded-json.js';
 import { readdir, readFile } from 'fs/promises';
 import { homedir, networkInterfaces } from 'os';
 import { stripInheritedProviderEnv } from './utils/provider-env.js';
@@ -614,6 +615,8 @@ app.put('/api/model', async (req, res) => {
     await setDefaultModel(model);
     res.json({ ok: true, model });
   } catch (err) {
+    // r145 F1:settings.json 损坏 / 读不出 → 与 settings 路由同一出口:409 { error, code, file, backup }。
+    if (isConfigGuardError(err)) return sendConfigGuardError(res, err);
     // setDefaultModel 的官方端点残留守卫抛 err.status=400(用户输入问题,不是服务端故障)。
     res.status(err.status || 500).json({ error: err.message });
   }
