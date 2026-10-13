@@ -8,6 +8,7 @@ import { CuGrants } from './CuGrants.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { TOOL_TABS, readToolTab, writeToolTab } from '../utils/toolTabs.js';
 import { isImeKeydown } from '../utils/imeGuard.js';
+import { makeFetchGate } from '../utils/fetchGate.js';
 
 // /api/mcp/:name/ping 结果 → 展示文案(PingButton 与「添加后自动探测」共用)。
 // 失败时优先展示真实子进程 stderr(后端 spawn 抓的),这才是用户要看的"为什么连不上"。
@@ -279,11 +280,13 @@ export function MCPPanel() {
   // silent=true:不显示加载态,用于后台静默刷新(拉取后端补好的在线状态)。
   // force=true:?fresh=1 绕过后端 5min 缓存,手动「刷新」按钮用 —— 否则刚 `claude mcp add`
   // 的服务器要等缓存过期才出现(用户报「刷新看不到新加的 MCP」根因)。
-  // r150 E3:只采纳最后发起的那次读取。读取可能很慢(?fresh=1 要等健康检查),慢的那次回来时界面上
-  // 可能已经有更新的状态(后发起的读取先回来了,或者用户刚切了一个插件的开关)—— 过期的结果直接丢掉。
-  const fetchSeq = useRef(0);
+  // r150 E3 / r150c M1:几次读取会同时在路上,回来的先后和发起的先后不一样,每次回来都要判一下还该不该采纳。
+  // 判定在 utils/fetchGate.js(强制读取与读缓存的读取分开判)。上一版只有一个序号、谁最后发起谁算数:
+  // 面板打开后 5 秒内点「刷新」,第 5 秒那次静默读取发起得更晚、回来得更早,「刷新」的结果反而被丢掉。
+  const fetchGate = useRef(null);
+  if (!fetchGate.current) fetchGate.current = makeFetchGate();
   const fetchData = async (silent = false, force = false) => {
-    const seq = ++fetchSeq.current;
+    const ticket = fetchGate.current.begin({ fresh: force });
     if (!silent) setLoading(true);
     setError(null);
     try {
@@ -291,15 +294,21 @@ export function MCPPanel() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (!mounted.current) return;
-      if (seq === fetchSeq.current) {
+      if (fetchGate.current.accept(ticket)) {
         setServers(data.mcpServers || []);
         setPlugins(data.plugins || []);
         setExternal(data.external || []);
       }
     } catch (err) {
-      if (mounted.current && !silent && seq === fetchSeq.current) setError(err.message);
+      if (mounted.current && !silent) setError(err.message);
     }
     if (mounted.current && !silent) setLoading(false);
+  };
+  // 改了东西之后的重读(装 / 卸 / 更新插件、增删改 MCP、登录登出):先作废还在路上的读取 —— 它们读到的
+  // 可能是改之前的状态,而且其中若有强制读取,它落地后会把这次重读(读缓存)的结果压掉。
+  const reloadAfterChange = (silent = false, force = false) => {
+    fetchGate.current.invalidate();
+    return fetchData(silent, force);
   };
 
   useEffect(() => {
@@ -318,7 +327,7 @@ export function MCPPanel() {
     const { name } = plugin;
     const newEnabled = plugin.enabled === false;
     // r150 E3:作废还在路上的读取 —— 它读到的是切换之前的状态,回来会把下面的乐观更新盖掉。
-    fetchSeq.current += 1;
+    fetchGate.current.invalidate();
     setPlugins((prev) => prev.map((p) => p.name === name ? { ...p, enabled: newEnabled } : p));
     setToggling(name);
     const endpoint = newEnabled
@@ -329,11 +338,12 @@ export function MCPPanel() {
       // r150 E3:切换成功后重读一次(静默、?fresh=1)。插件带来的 MCP 在「MCP 服务器」页签里,停用 / 启用
       // 一个插件,那边的列表也要跟着变;原来只改了本页的开关,MCP 列表要等用户手动点刷新。
       // 用 ?fresh=1:后端的缓存刚被这次切换作废,普通读取只有配置文件里的 MCP,插件带来的要等健康检查补。
-      .then(() => { fetchData(true, true); })
+      // 重读之前再作废一次:命令执行期间发起的读取(比如第 5 秒那次静默读取)读到的可能还是切换之前的状态。
+      .then(() => { fetchGate.current.invalidate(); fetchData(true, true); })
       .catch((err) => {
         console.error('Plugin toggle failed:', err);
         setPlugins((prev) => prev.map((p) => p.name === name ? { ...p, enabled: !newEnabled } : p));
-        fetchData(true);   // 上面作废了在路上的读取,失败时补读一次拿回真实状态
+        reloadAfterChange(true);   // 上面作废了在路上的读取,失败时补读一次拿回真实状态(命令可能其实已经生效)
       })
       .finally(() => setToggling(null));
   };
@@ -373,7 +383,7 @@ export function MCPPanel() {
       const r = await fetch(`/api/mcp/${encodeURIComponent(srv.name)}/login`, { method: 'POST' });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      await fetchData(false, true);
+      await reloadAfterChange(false, true);
     } catch (err) {
       await confirmDialog(`登录「${srv.label || srv.name}」失败:\n${err.message}`, { confirmText: '知道了' });
     }
@@ -390,7 +400,7 @@ export function MCPPanel() {
       const r = await fetch(`/api/mcp/${encodeURIComponent(srv.name)}/logout`, { method: 'POST' });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      await fetchData(false, true);
+      await reloadAfterChange(false, true);
     } catch (err) {
       await confirmDialog(`退出登录「${srv.label || srv.name}」失败:\n${err.message}`, { confirmText: '知道了' });
     }
@@ -405,7 +415,7 @@ export function MCPPanel() {
       if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.status); }
     } catch (err) {
       console.error('MCP delete failed:', err);
-      fetchData(); // 失败回拉真实状态
+      reloadAfterChange(); // 失败回拉真实状态
     }
   };
 
@@ -475,7 +485,7 @@ export function MCPPanel() {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(pluginInstallErrorMessage(d.error));
-      await fetchData(); // 刷新已安装列表
+      await reloadAfterChange(); // 刷新已安装列表
       setInstallingPlugin(null); // 先停 spinner 再弹窗
       // 与插件更新一致:安装成功弹窗提示(新会话生效);有 usage 的追加用法说明。
       await confirmDialog(
@@ -494,7 +504,7 @@ export function MCPPanel() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '更新失败');
       setRestartHint(true);
-      await fetchData();
+      await reloadAfterChange();
       setPluginActioning(null); // 更新已完成,先停 spinner 再弹窗
       // 版本号更新前后没变 → 明确显示"无更新",不再误报"已更新为 vX"。
       const pn = plugin.name.split('@')[0];
@@ -537,7 +547,7 @@ export function MCPPanel() {
       const r = await fetch(`/api/plugins/${encodeURIComponent(plugin.name)}`, { method: 'DELETE' });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '卸载失败');
-      await fetchData();
+      await reloadAfterChange();
       setPluginActioning(null); // 先停 spinner 再弹窗
       await confirmDialog(`插件「${plugin.name.split('@')[0]}」已卸载`, { confirmText: '知道了' });
     } catch (e) { setPluginErr(`${plugin.name}: ${e.message}`); }
@@ -630,7 +640,7 @@ export function MCPPanel() {
             <Plus size={11} />添加
           </button>
         </h3>
-        <ComputerUseCard onChanged={fetchData} />
+        <ComputerUseCard onChanged={() => reloadAfterChange()} />
         {servers.length > 0 ? (
           <div className="space-y-2">
             {sortedServers.map((srv) => {
@@ -939,7 +949,7 @@ export function MCPPanel() {
         <McpForm
           editing={form.add ? null : form}
           onClose={() => setForm(null)}
-          onSaved={(savedName, isNew) => { fetchData(); setRestartHint(true); if (isNew && savedName) autoProbe(savedName); }}
+          onSaved={(savedName, isNew) => { reloadAfterChange(); setRestartHint(true); if (isNew && savedName) autoProbe(savedName); }}
         />
       )}
 
