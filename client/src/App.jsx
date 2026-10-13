@@ -105,7 +105,7 @@ import { readCacheUsage, addCacheUsage, formatHitPct, formatHitPctOrDash, EMPTY_
 import { publishTurnCache, subscribeTurnCache, readTurnCache } from './utils/turnCacheBus.js';
 import { ensurePricingCatalog, subscribePricingVersion, getPricingVersion } from './utils/pricingCatalog.js';
 import { afterBoot, bootSettled } from './utils/bootDefer.js';
-import { slimInputHistory, slimInputHistoryOnce } from './utils/inputHistory.js';
+import { slimInputHistoryOnce } from './utils/inputHistory.js';
 import { queueSaveFailedNotice } from './utils/storageNotice.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
@@ -12039,8 +12039,7 @@ export default function App() {
   // r150 J2:只在这份本地存储没瘦过身时跑(slimInputHistoryOnce 用一个标记键记着),不再每次启动都跑 ——
   // 每次都剔的话,用户在会话里重发过、又恰好在旧全局里的那一条,重启后会从第 1 位掉到后面。
   // 存储写满时腾空间那条路(freeInputHistoryAndRetry)仍然无条件瘦身。
-  // 第二个参数就是默认值,显式写出来是为了让这里看得见启动时跑的是哪个函数(r149 的单测按这个写法认这一行)。
-  useEffect(() => afterBoot(() => { slimInputHistoryOnce(localStorage, () => slimInputHistory(localStorage)); }), []);
+  useEffect(() => afterBoot(() => { slimInputHistoryOnce(localStorage); }), []);
   // R4-b:记下"官方 provider 当前是怎么计费的"(OAuth 订阅 / API key 按量)。历史消息里
   // 没有当时的鉴权方式,拿此刻的顶替会让切一次 provider 就把订阅期的 Claude 消息按 API
   // 单价重算(判官实测 ¥4,690 → ¥498,876)。这里是全局唯一观察点,跟随 store 的刷新节奏。
