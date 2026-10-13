@@ -106,6 +106,7 @@ import { publishTurnCache, subscribeTurnCache, readTurnCache } from './utils/tur
 import { ensurePricingCatalog, subscribePricingVersion, getPricingVersion } from './utils/pricingCatalog.js';
 import { afterBoot, bootSettled } from './utils/bootDefer.js';
 import { slimInputHistory } from './utils/inputHistory.js';
+import { queueSaveFailedNotice } from './utils/storageNotice.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
@@ -2312,7 +2313,8 @@ function HomeState({ tabIndex = 0 }) {
       })
       : enqueueHomeDraft(homeDraftArgs);
     if (!queued) {
-      setAttachmentError('无法保存待发消息：本地存储空间不足。附件仍保留，请移除部分附件后重试。');
+      // r149 S6:走到这里 = 落盘失败且自动腾空间重试后仍失败(见 persistQueueSnapshot)。没带附件时不提附件。
+      setAttachmentError(queueSaveFailedNotice({ hasAttachments: attachments.length > 0 }));
       return;
     }
   };
@@ -5124,7 +5126,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (queueOpts.meta) queueOpts.meta = attachmentMetaForPersistence(queueOpts.meta);
       const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts: queueOpts });
       if (!queued) {
-        const message = '无法保存待发消息：本地存储空间不足。附件与草稿仍保留，请处理后重试。';
+        // r149 S6:同首页那处 —— 自动腾空间重试后仍失败才会到这里;没带附件时不提附件。
+        const message = queueSaveFailedNotice({ hasAttachments: (queueOpts.meta?.attachments?.length || 0) > 0, inSession: true });
         onEnqueueFailure?.(message);
         setProviderSwitchNotice({ text: message });
         return;
