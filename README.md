@@ -278,6 +278,71 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.421</b>(2026-10-13)· 新增 1 条 · 修复 6 条 · 优化 2 条</summary>
+
+**新增**
+
+<details><summary>插件面板显示账号同步的插件</summary>
+
+从 claude.ai 账号同步到本机的插件单独成组显示,可以直接停用或启用;停用后它带来的 MCP 会从列表里消失。
+
+</details>
+
+**修复**
+
+<details><summary>新模型的费用不再显示「未定价」或算错</summary>
+
+补上 Opus 5.5、Sonnet 5.5、Haiku 5.5 的价格;Haiku 5.5 按提示长度分两档计价;opus、sonnet、haiku、fable 这些简称按最新一代计价。
+
+</details>
+
+<details><summary>5.5 一代模型的上下文窗口按 1M 显示</summary>
+
+不再按 200K 计算占用比例。
+
+</details>
+
+<details><summary>本地存储写满又腾不出空间时不再白删输入历史</summary>
+
+腾不出就原样恢复。
+
+</details>
+
+<details><summary>会话里重发过的常用句重启后不再排到后面</summary>
+
+启动时的输入历史清理只做一次。
+
+</details>
+
+<details><summary>存储不足的提示更准确</summary>
+
+消息来自输入框时会说明输入内容仍在输入框中。
+
+</details>
+
+<details><summary>以 - 开头的插件名不再被当成命令选项</summary>
+
+这类名字直接拒绝。
+
+</details>
+
+**优化**
+
+<details><summary>工具面板的列表读取不再互相覆盖</summary>
+
+刷新、切换插件、定时读取同时发生时,以最新的结果为准。
+
+</details>
+
+<details><summary>停用或启用插件后列表立即更新</summary>
+
+不再等缓存过期;命令超时后也会重新读取。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.420</b>(2026-10-13)· 修复 5 条 · 优化 9 条</summary>
 
 **修复**
