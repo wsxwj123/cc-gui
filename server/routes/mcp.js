@@ -1815,8 +1815,8 @@ router.get('/plugins/available', async (req, res) => {
 //   `marketplace add <repo>` + `marketplace update <marketplace>` 再装 `<name>@<marketplace>`。
 router.post('/plugins/install', async (req, res) => {
   try {
-    // r150c S6:三个参数都会作为命令行参数传给 claude(<name>@<marketplace>、marketplace update <marketplace>、
-    // marketplace add <repo>),以 - 开头会被当成选项 —— 同样拒绝。这里沿用本接口原有的错误形态(结构化错误),不另出 400。
+    // r150c S6:name / marketplace / repo 三个都会作为命令行参数传给 claude,以 - 开头会被当成选项 —— 同样拒绝。
+    // 这里沿用本接口原有的错误形态(结构化错误),不另出 400。
     const name = String(req.body?.name || '');
     if (!/^[A-Za-z0-9._-]{1,80}$/.test(name) || name.startsWith('-')) throw new Error('invalid plugin name');
     const repo = req.body?.repo ? String(req.body.repo) : '';
