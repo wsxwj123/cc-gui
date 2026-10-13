@@ -103,7 +103,7 @@ import BtwWindow from './components/BtwWindow.jsx';
 import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyExactResult, relativeAgeLabel } from './utils/contextCache.js';
 import { readCacheUsage, addCacheUsage, formatHitPct, formatHitPctOrDash, EMPTY_CACHE_USAGE } from './utils/cacheStats.js';
 import { publishTurnCache, subscribeTurnCache, readTurnCache } from './utils/turnCacheBus.js';
-import { loadPricingCatalog } from './utils/pricingCatalog.js';
+import { loadPricingCatalog, subscribePricingVersion, getPricingVersion } from './utils/pricingCatalog.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
@@ -8789,6 +8789,47 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     [streamingBlocks, streamingText, streamingThinking, streamingToolCalls, liveSteerSegments, streamingModel, liveSubUsageTurn],
   );
 
+  // r148 P6:会话汇总(费用 / 工具调用数 / 用过的模型)记忆化 —— 只在消息列表、provider 或查价数据变了才重算。
+  // 原来这三样在下面的提前 return 之后做普通计算:会话组件每渲染一次(流式时每帧一次)就把全部历史消息
+  // 过一遍、逐条查价。**必须放在这里(提前 return 之前)**:return 之后加 hook 会在切会话(loading 切换)时
+  // 因 hook 数量变化而整页白屏。算法与求和顺序一字未改(先定稿消息、后本地派生条目)。
+  // pricingVersion:查价读的三样数据(官方价目 / 用户单价 / 官方计费方式)是异步到达的,到了要重算。
+  const pricingVersion = useSyncExternalStore(subscribePricingVersion, getPricingVersion, getPricingVersion);
+  const sessionSummary = useMemo(() => {
+    const all = [...finalizedMessages, ...renderChat];
+    // Sum per-message cost. Skipping models we don't have prices for. Uses
+    // currentProvider (subscribed above, before early returns) so cc switch
+    // redirects (Claude → DeepSeek/MiMo) get the right backend price table.
+    // 逐条走 computeCostForMessage(带 usageCalls → 分时段模型按每次调用自己的时刻判档);
+    // 金额先归一到展示口径再相加 —— 官方 CNY 报价是原币种数字,不同币种的数字不能直接相加。
+    const cost = all.reduce((acc, m) => {
+      if (m.usage && (m.model || currentProvider?.model)) {
+        const c = computeCostForMessage(m, currentProvider);
+        if (c) acc += displayUsd(c.totalUsd, c.currency);
+      }
+      return acc;
+    }, 0);
+    const tools = all.reduce((acc, m) => acc + (m.toolCalls?.length || 0), 0);
+    const modelList = [...new Set(all.filter((m) => m.model).map((m) => m.model))];
+    return { totalCostUsd: cost, toolCallCount: tools, models: modelList };
+    // 依赖里的 pricingVersion 是"查价数据变了"的信号,函数体里不读它。
+  }, [finalizedMessages, renderChat, currentProvider, pricingVersion]);
+
+  // r148 P6:传给输入框的回调稳定下来(输入框已记忆化;每次渲染新建的内联函数会让记忆化白做)。
+  // 同样必须在提前 return 之前。
+  const dismissSuggestion = useCallback(
+    () => useStore.getState().clearPromptSuggestion(sessionQueueKey, selectedSession?.sessionId),
+    [sessionQueueKey, selectedSession?.sessionId],
+  );
+  const removeFromQueueAt = useCallback((i) => useStore.getState().removeFromQueue(sessionQueueKey, i), [sessionQueueKey]);
+  const editFromQueueAt = useCallback((i) => {
+    const item = messageQueue[i];
+    if (!item) return;
+    useStore.getState().removeFromQueue(sessionQueueKey, i);
+    window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
+  }, [messageQueue, sessionQueueKey]);
+  const openBtw = useCallback(() => setBtwToggleSignal((n) => n + 1), []);
+
   // In split mode, tab 0's `loading` would otherwise blank out tab 1 too.
   // We only let the loading screen short-circuit the primary tab — tab 1
   // fetches with silent:true so it never sets the global flag, and tab 0
@@ -8882,20 +8923,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const usageDetailTitle = `输入 ${totalTokens.input.toLocaleString()} · 输出 ${totalTokens.output.toLocaleString()} · 缓存命中 ${totalTokens.cacheRead.toLocaleString()} · 缓存写入 ${(totalTokens.cacheCreation || 0).toLocaleString()}
 总 token = 四项之和;命中率 = 缓存命中 / (输入 + 缓存命中 + 缓存写入)
 未命中(按未命中价计费的提示 token)= 输入 + 缓存写入 = ${sessionCache.miss.toLocaleString()}`;
-  // Sum per-message cost. Skipping models we don't have prices for. Uses
-  // currentProvider (subscribed above, before early returns) so cc switch
-  // redirects (Claude → DeepSeek/MiMo) get the right backend price table.
-  // 逐条走 computeCostForMessage(带 usageCalls → 分时段模型按每次调用自己的时刻判档);
-  // 金额先归一到展示口径再相加 —— 官方 CNY 报价是原币种数字,不同币种的数字不能直接相加。
-  const totalCostUsd = allMessages.reduce((acc, m) => {
-    if (m.usage && (m.model || currentProvider?.model)) {
-      const c = computeCostForMessage(m, currentProvider);
-      if (c) acc += displayUsd(c.totalUsd, c.currency);
-    }
-    return acc;
-  }, 0);
-  const toolCallCount = allMessages.reduce((acc, m) => acc + (m.toolCalls?.length || 0), 0);
-  const models = [...new Set(allMessages.filter((m) => m.model).map((m) => m.model))];
+  // r148 P6:费用 / 工具调用数 / 模型集合已挪到上面 hook 区的 sessionSummary(记忆化),这里只取结果。
+  const { totalCostUsd, toolCallCount, models } = sessionSummary;
 
   // Context-window fill of the LATEST turn (= what the next send carries), so
   // you can see how full the context is and when to /compact (#13). The prompt
@@ -9570,7 +9599,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         onBackground={isStreaming ? handleBackgroundify : undefined}
         // A 输入预测:promptSuggestion 已按本会话的 key 取(见声明处),不会串窗;流式中不显示。
         suggestion={(!isStreaming && !backgroundPid && promptSuggestion) ? promptSuggestion : null}
-        onDismissSuggestion={() => useStore.getState().clearPromptSuggestion(sessionQueueKey, selectedSession?.sessionId)}
+        onDismissSuggestion={dismissSuggestion}
         disabled={false}
         // Composer treats "background CLI still running" the same as local
         // streaming for UI purposes: send button becomes the small rounded-
@@ -9582,20 +9611,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         paneId={paneId}
         claimDraft={claimDraft}
         onRefreshQueueEvidence={refreshQueueEvidence}
-        onRemoveFromQueue={(i) => useStore.getState().removeFromQueue(sessionQueueKey, i)}
-        onEditFromQueue={(i) => {
-          const item = messageQueue[i];
-          if (!item) return;
-          useStore.getState().removeFromQueue(sessionQueueKey, i);
-          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
-        }}
+        onRemoveFromQueue={removeFromQueueAt}
+        onEditFromQueue={editFromQueueAt}
         todos={currentTodos}
         plans={currentPlans}
         goal={effectiveGoal}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
         tabIndex={tabIndex}
-        onBtwOpen={(messages.length > 0 || selectedSession?.sessionId || paneCount <= 1) ? () => setBtwToggleSignal((n) => n + 1) : undefined}
+        onBtwOpen={(messages.length > 0 || selectedSession?.sessionId || paneCount <= 1) ? openBtw : undefined}
         btwUnread={btwUnread}
       />
     </div>

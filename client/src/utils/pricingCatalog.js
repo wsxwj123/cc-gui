@@ -61,9 +61,28 @@ export function getPricingCatalogCached() {
   return cache;
 }
 
+// ── 查价输入的版本号(r148)──────────────────────────────────
+// 查价是纯函数,只读已缓存的数据(官方价目目录 / 用户自填单价 / 官方计费方式)。这三样都是**异步到达**的,
+// 到达时原来没有任何通知:已经算好的金额要等"下一次渲染"才更新 —— 那时会话组件每 1.5 秒整体重渲染一次,
+// 所以几乎立刻就更新了。r148 去掉了那个无谓的重渲染、并把会话汇总做了记忆化,这个顺带的刷新也就没了,
+// 所以给一个明确的信号:这三样任一变了就 +1,算金额的地方订阅它
+// (React:useSyncExternalStore(subscribePricingVersion, getPricingVersion))。
+let pricingVersion = 0;
+const pricingListeners = new Set();
+export function getPricingVersion() { return pricingVersion; }
+export function subscribePricingVersion(cb) {
+  pricingListeners.add(cb);
+  return () => { pricingListeners.delete(cb); };
+}
+export function bumpPricingVersion() {
+  pricingVersion += 1;
+  for (const cb of [...pricingListeners]) { try { cb(); } catch { /* 一家出错不连累别家 */ } }
+}
+
 export function setPricingCatalog(data) {
   if (data && typeof data === 'object') cache = data;
   rebuild(cache);
+  bumpPricingVersion();
   return cache;
 }
 
@@ -71,7 +90,7 @@ export function loadPricingCatalog() {
   if (inflight) return inflight;
   inflight = fetch('/api/pricing')
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-    .then((data) => { cache = data; rebuild(data); return data; })
+    .then((data) => { cache = data; rebuild(data); bumpPricingVersion(); return data; })
     .finally(() => { inflight = null; });
   return inflight;
 }

@@ -330,7 +330,23 @@ function steerBlockTitle(canSteer, queueItems) {
   }
 }
 
-export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, stopping = false, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, paneId = null, claimDraft = null, onRefreshQueueEvidence, todos = null, plan = '', plans = null, goal = null, permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
+// r148 P6:记忆化。会话组件在流式期间每帧都重渲染;输入框自己的属性没变时不必跟着重跑
+// (它有一千行、十几个 store 选择器,流式时在同一格打字发涩的来源之一)。
+// 前提是传进来的回调引用稳定 —— 见 App.jsx 里 <ChatInput> 上方的 useCallback。
+// 比较规则:逐个属性按引用比;todos / plans 例外,按内容比 —— 它们是从流式缓冲派生出来的纯数据,
+// 流式期间每帧都是"内容一样的新对象"(实测:纯文字流式时 plans 每帧换一个新的空数组),按引用比等于每帧都变。
+const sameContent = (a, b) => {
+  try { return JSON.stringify(a ?? null) === JSON.stringify(b ?? null); } catch { return false; }
+};
+function chatInputPropsEqual(prev, next) {
+  for (const key of new Set([...Object.keys(prev), ...Object.keys(next)])) {
+    if (prev[key] === next[key]) continue;
+    if ((key === 'todos' || key === 'plans') && sameContent(prev[key], next[key])) continue;
+    return false;
+  }
+  return true;
+}
+export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canSteer = false, onBackground, suggestion = null, onDismissSuggestion, disabled, isStreaming, stopping = false, backgroundWorking = false, queueLength = 0, queueItems = [], onRemoveFromQueue, onEditFromQueue, paneId = null, claimDraft = null, onRefreshQueueEvidence, todos = null, plan = '', plans = null, goal = null, permKey = null, sessionId = null, tabIndex = null, onBtwOpen, btwUnread = 0 }) {
   const [text, setText] = useState('');
   // 编辑重发态(#4):点击「重新编辑并发送」后进入。此时历史消息尚未被破坏,
   // 按 Esc 可整条取消(清空输入+通知上层撤销待回滚),给用户反悔余地。
@@ -1327,4 +1343,4 @@ export function ChatInput({ onSend, onStop, onStopBackground, onAccelerate, canS
     </div>
     </div>
   );
-}
+}, chatInputPropsEqual);
