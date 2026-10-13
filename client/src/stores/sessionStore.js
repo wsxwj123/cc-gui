@@ -10,6 +10,7 @@ import { fetchProviderList } from '../utils/providerListFetch.js';
 import { attachmentSidecarNotice, draftSidecarBindingsForSessions, recoverAttachmentSidecarBindings } from '../utils/attachments.js';
 import { rotatedPaneGenerations } from '../utils/sessionFlowIdentity.js';
 import { createStreamCommit } from '../utils/streamCommit.js';
+import { freeInputHistoryAndRetry } from '../utils/inputHistory.js';
 
 const recoverDraftSidecarsFromSessions = (sessions, projectHash) => (
   recoverAttachmentSidecarBindings(draftSidecarBindingsForSessions(sessions, projectHash))
@@ -544,13 +545,30 @@ const persistOrphanDraftQueues = (map, verify = false) => {
 };
 persistOrphanDraftQueues(initialOrphanDraftQueues);
 
+// 当前各窗格正在显示的会话键(r149 S4:本地存储满了自动清输入历史时,这些会话的不许删)。
+export const openPaneSessionKeys = () => {
+  try {
+    const s = useStore.getState();
+    return (s.paneSessions || []).slice(0, s.paneCount || 1).filter(Boolean).map((p) => queueKeyFor(p)).filter(Boolean);
+  } catch { return []; }
+};
 const persistQueueSnapshot = (messageQueue, verify = false) => {
   if (typeof localStorage === 'undefined') return true;
-  try {
-    const serialized = JSON.stringify(messageQueue);
-    localStorage.setItem(QUEUE_STORAGE_KEY, serialized);
-    return !verify || localStorage.getItem(QUEUE_STORAGE_KEY) === serialized;
-  } catch { return false; }
+  let serialized = '';
+  try { serialized = JSON.stringify(messageQueue); } catch { return false; }
+  const attempt = () => {
+    try {
+      localStorage.setItem(QUEUE_STORAGE_KEY, serialized);
+      return !verify || localStorage.getItem(QUEUE_STORAGE_KEY) === serialized;
+    } catch { return false; }
+  };
+  if (attempt()) return true;
+  // r149 S4:存不进(本地存储满)时先自动腾空间再重试一次 —— 只在"先落盘成功才算排上"的那条路上
+  // (verify=true:入队 / 改队列的各个动作,调用方据返回值决定排没排上、报不报错)。
+  // 能腾的只有输入历史(先瘦身;不够再按占用从大到小删没在任何窗格显示的会话的),别的键一律不碰。
+  // 用户实报的现场:输入历史占了本地存储的九成,首页发一条不带附件的消息被"本地存储空间不足"拦下。
+  if (!verify) return false;
+  return freeInputHistoryAndRetry(localStorage, attempt, openPaneSessionKeys());
 };
 persistQueueSnapshot(recoveredQueueMap);
 

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Loader2, Square, Gauge, ChevronDown, X, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, MessagesSquare, Sparkles, ArrowDownToLine, Zap, BellOff } from './Icon.jsx';
-import { useStore, PERMISSION_MODES } from '../stores/sessionStore.js';
+import { useStore, PERMISSION_MODES, openPaneSessionKeys } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -473,7 +473,8 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
   //       写进本会话键,每个新会话抄一份,两百多个会话把本地存储占满);
   // 读 —— 上键翻出来的是本会话的在前、隔离改造前旧全局键里的在后(去重),升级前的历史仍翻得出来。
   const readHistory = () => readInputHistory(localStorage, permKey);
-  const saveHistoryEntry = (value) => { saveInputHistoryEntry(localStorage, permKey, value); };
+  // 写不进(本地存储满)时会自动腾空间重试(r149 S4);正在各窗格显示的会话的输入历史不在可腾之列。
+  const saveHistoryEntry = (value) => { saveInputHistoryEntry(localStorage, permKey, value, { openSessionKeys: openPaneSessionKeys() }); };
 
   // r146b:每次渲染递增的序号。装载草稿的 effect 记下"在哪一次提交里装载",持久化 effect 在同一次
   // 提交里(装载的 setText 还没生效,text 仍是挂载 / 换键之前的值)一律不写 —— 原来挂载帧(会话区

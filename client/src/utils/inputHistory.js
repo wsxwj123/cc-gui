@@ -51,20 +51,22 @@ export function readInputHistory(storage, sessionKey) {
 /**
  * 把一条输入记进本会话的输入历史(提到最前、去重、最多留 INPUT_HISTORY_MAX_ENTRIES 条)。
  * **只基于本会话键自己的列表**,不把旧全局的条目带进来。空白、超长(S3)的不记。返回是否写入。
+ * 写不进(本地存储满)时腾空间重试一次(S4,见 freeInputHistoryAndRetry);openSessionKeys = 当前各窗格
+ * 正在显示的会话键,腾空间时它们的输入历史不删(正在写的这个会话自己也不删)。
  */
-export function saveInputHistoryEntry(storage, sessionKey, value) {
+export function saveInputHistoryEntry(storage, sessionKey, value, { openSessionKeys = [] } = {}) {
   const entry = String(value || '').trim();
   if (!entry) return false;
   if (entry.length > INPUT_HISTORY_MAX_ENTRY_CHARS) return false;   // S3
   const key = inputHistoryKey(sessionKey);
   const list = readList(storage, key).filter((x) => x !== entry);
   list.unshift(entry);
-  try {
-    storage.setItem(key, JSON.stringify(list.slice(0, INPUT_HISTORY_MAX_ENTRIES)));
-    return true;
-  } catch {
-    return false;
-  }
+  const serialized = JSON.stringify(list.slice(0, INPUT_HISTORY_MAX_ENTRIES));
+  const attempt = () => {
+    try { storage.setItem(key, serialized); return true; } catch { return false; }
+  };
+  if (attempt()) return true;
+  return freeInputHistoryAndRetry(storage, attempt, [sessionKey || 'global', ...openSessionKeys]);
 }
 
 // ── S2:瘦身 ────────────────────────────────────────────────
@@ -135,4 +137,32 @@ export function slimInputHistory(storage) {
     }
   } catch { /* 存储不可用:什么都不做 */ }
   return result;
+}
+
+// ── S4:写不进时腾空间 ───────────────────────────────────────
+/**
+ * 本地存储写不进时调用:腾出输入历史占的空间,然后重试。attempt() 做那次写入并返回成没成。
+ * 顺序:
+ *   ① 先瘦身一次(S2:只剔旧全局的副本,不丢任何历史),再试;
+ *   ② 还不够,按占用从大到小删"没有显示在任何窗格里的会话"的输入历史键,每删一个试一次,成功即停;
+ *   ③ 没有可删的了仍失败 → 返回 false(调用方这时才报错)。
+ * **只动会话级的输入历史键**(cgui-input-history:<会话键>):它是锦上添花的东西,丢了只是少翻几条。
+ * 草稿、待发队列、标题、权限模式等一律不碰;旧全局键、没有会话键的输入框用的 global 键也不删。
+ * openSessionKeys:当前各窗格正在显示的会话键 —— 用户眼前的会话,它的输入历史不删。
+ */
+export function freeInputHistoryAndRetry(storage, attempt, openSessionKeys = []) {
+  try {
+    slimInputHistory(storage);
+    if (attempt()) return true;
+    const keep = new Set([inputHistoryKey(null), ...(openSessionKeys || []).filter(Boolean).map((k) => inputHistoryKey(k))]);
+    const candidates = inputHistoryKeysOf(storage)
+      .filter((key) => !keep.has(key))
+      .map((key) => ({ key, size: key.length + String(storage.getItem(key) ?? '').length }))
+      .sort((a, b) => b.size - a.size);
+    for (const { key } of candidates) {
+      storage.removeItem(key);
+      if (attempt()) return true;
+    }
+  } catch { /* 存储不可用 */ }
+  return false;
 }
