@@ -18,6 +18,10 @@
 //   R2 Claude 模型:内置表里有这个模型(逐字 / 去日期 / 去 […] 后缀后逐字)就用内置表;远程表只在内置表没有
 //      这个模型时才用(等价写法排在最长前缀之前)。原因:远程表对带分档的模型只给高档价。
 //   R3 裸别名 fable 指向 claude-fable-5-1(同一份 CLI 目录)。
+// 再返工(r150c):
+//   S1 没有逐次明细的记录不拿一轮合计去判 haiku 5.5 的档,按基础档算(与用量面板同口径)。
+//   S2 逐次明细里某一项是空用量时跳过它,不整轮退回合计。
+//   S3 判断"内置表有没有这个模型"时,不带 anthropic/ 前缀的名字按归一化后的写法比(点与连字符、大小写)。
 // 数值(美元 / 百万 token:输入 / 输出 / 缓存读 / 缓存写 5m):
 //   opus 5.5 = 4 / 20 / 0.2 / 5;sonnet 5.5 = 2 / 10 / 0.1 / 2.5;haiku 5.5 见 R1。
 // Run: node tests/unit/check-r150-pricing.mjs
@@ -175,13 +179,38 @@ await check('R1 一轮里只有一次调用超过 10 万:只有那一次按高�
   assert.deepEqual(c.appliedConditions, [{ minPromptTokens: 100_000 }], '适用条件只写一次');
   assert.equal(c.unknownDimensions, undefined, '没有时刻不算"时段未知"(这个模型不分时段)');
 });
-await check('R1 没有逐次明细的记录按它自己的量判;逐次明细里有一项用量坏了 → 不抛,退回按这条记录的合计算', async () => {
+await check('S1 没有逐次明细的记录(一轮的合计、流式进行中):不拿合计去判档,按基础档算 —— 与有明细时、与用量面板同一个数', async () => {
   useRemote({});
+  // 3 次调用、每次提示 5 万的合计。有明细时是 $0.00252;原来没有明细时拿合计 15 万去比,算成 $0.0126
   const usage = { input_tokens: 3000, cache_read_input_tokens: 147_000, output_tokens: 1500 };
-  let c = computeCostForMessage({ model: HAIKU, usage }, provider);
-  near(c.totalUsd, (3000 * 0.5 + 147_000 * 0.05 + 1500 * 2.5) / M, '单条记录提示 15 万 → 高档');
-  c = computeCostForMessage({ model: HAIKU, usage, usageCalls: [{ usage: { input_tokens: 1000, output_tokens: 5 } }, { usage: null }] }, provider);
-  near(c.totalUsd, (3000 * 0.5 + 147_000 * 0.05 + 1500 * 2.5) / M, '明细不全 → 按合计');
+  const base = (3000 * 0.1 + 147_000 * 0.01 + 1500 * 0.5) / M;
+  near(base, 0.00252, '基础档应得');
+  const noCalls = computeCostForMessage({ model: HAIKU, usage }, provider);
+  near(noCalls.totalUsd, base, '没有明细');
+  assert.deepEqual(noCalls.appliedConditions, [], '没有明细时不套高档');
+  near(computeCostForMessage({ model: HAIKU, usage, usageCalls: [] }, provider).totalUsd, base, '明细是空数组');
+  const one = { input_tokens: 1000, cache_read_input_tokens: 49_000, output_tokens: 500 };
+  near(computeCostForMessage({ model: HAIKU, usage, usageCalls: [{ usage: one }, { usage: one }, { usage: one }] }, provider).totalUsd, base, '有明细(每次 5 万)');
+  near(aggregateCost(HAIKU, { input: 3000, output: 1500, cacheRead: 147_000, cacheWrite: 0 }, provider).usd, base, '用量面板');
+  // 对照:直接拿一次调用的用量来算(computeCost)仍然按这次的量判档
+  near(computeCost(HAIKU, usage, provider).totalUsd, (3000 * 0.5 + 147_000 * 0.05 + 1500 * 2.5) / M, '单次调用提示 15 万 → 高档');
+});
+await check('S2 逐次明细里有空用量的项(那次调用本来就没有费用):跳过它,其余照样逐次判档;用量畸形才退回按合计算', async () => {
+  useRemote({});
+  const big = { input_tokens: 2000, cache_read_input_tokens: 118_000, output_tokens: 800 };
+  const small = { input_tokens: 1000, cache_read_input_tokens: 19_000, output_tokens: 300 };
+  const usage = { input_tokens: 3000, cache_read_input_tokens: 137_000, output_tokens: 1100 };
+  const want = (2000 * 0.5 + 118_000 * 0.05 + 800 * 2.5) / M + (1000 * 0.1 + 19_000 * 0.01 + 300 * 0.5) / M;
+  let c = computeCostForMessage({ model: HAIKU, usage, usageCalls: [{ usage: small }, { usage: null }, { usage: {} }, {}, { usage: big }] }, provider);
+  near(c.totalUsd, want, '空用量的三项跳过:一次基础档 + 一次高档');
+  assert.deepEqual(c.appliedConditions, [{ minPromptTokens: 100_000 }]);
+  // 用量畸形(负数):这份明细不可信 → 退回按合计算(合计不判档 = 基础档)
+  const base = (3000 * 0.1 + 137_000 * 0.01 + 1100 * 0.5) / M;
+  c = computeCostForMessage({ model: HAIKU, usage, usageCalls: [{ usage: small }, { usage: { input_tokens: -5 } }, { usage: big }] }, provider);
+  near(c.totalUsd, base, '有畸形项 → 按合计');
+  // 明细全是空用量:等于没有明细
+  c = computeCostForMessage({ model: HAIKU, usage, usageCalls: [{ usage: null }, { usage: {} }] }, provider);
+  near(c.totalUsd, base, '明细全空 → 按合计');
 });
 await check('R1 用量面板(按模型汇总的 token,没有单次提示量):haiku 5.5 按基础档算,不拿汇总量去判档', async () => {
   useRemote({});
@@ -253,6 +282,34 @@ await check('R2 不串型号:远程表只有 5 代时,内置表没有的 claude-
 await check('R2 模型名本身带 anthropic/ 前缀(经聚合平台接入时的写法):内置表里没有这个写法,按远程表里那个键的价', async () => {
   useRemote({ 'anthropic/claude-opus-5.5': { input: 40, output: 200, cacheRead: 2, cacheWrite: 50 } });
   expectPrice('anthropic/claude-opus-5.5', { tier: 'official-compat', exact: true, in: 40, out: 200, cr: 2, cw: 50 });
+});
+await check('S3 不带 anthropic/ 前缀的 Claude 模型名按归一化后的写法认内置表:点写法、大小写不同的也用内置表(含分档);带前缀的仍走远程表', async () => {
+  useRemote({
+    'anthropic/claude-haiku-5.5': { input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 },   // 远程表只有高档价
+    'anthropic/claude-opus-5.5': { input: 40, output: 200, cacheRead: 2, cacheWrite: 50 },
+  });
+  for (const model of ['claude-haiku-5.5', 'Claude-Haiku-5-5', 'CLAUDE-HAIKU-5.5']) expectPrice(model, { tier: 'offline', exact: true, ...HAIKU_BASE }, `写法 ${model}`);
+  for (const model of ['claude-haiku-5.5[1m]', 'claude-haiku-5.5-20260901', 'Claude-Haiku-5-5[1m]']) expectPrice(model, { tier: 'offline', ...HAIKU_BASE }, `写法 ${model}`);
+  expectPrice('claude-haiku-5.5', { tier: 'offline', ...HAIKU_LONG }, '点写法、提示 30 万', 300_000);
+  expectPrice('claude-opus-5.5', { tier: 'offline', exact: true, ...V55['claude-opus-5-5'] });
+  expectPrice('Claude-Opus-5-5', { tier: 'offline', exact: true, ...V55['claude-opus-5-5'] });
+  // 带 anthropic/ 前缀:经聚合平台接入时的写法,维持现状(按远程表里那个键的价)
+  expectPrice('anthropic/claude-haiku-5.5', { tier: 'official-compat', exact: true, in: 0.5, out: 2.5, cr: 0.05, cw: 0.625 });
+  expectPrice('anthropic/claude-opus-5.5', { tier: 'official-compat', exact: true, in: 40, out: 200, cr: 2, cw: 50 });
+  expectPrice('anthropic/claude-opus-5-5', { tier: 'official-compat', in: 40, out: 200, cr: 2, cw: 50 });
+  // 点写法的 haiku 有逐次明细时同样逐次判档
+  const one = { input_tokens: 1000, cache_read_input_tokens: 49_000, output_tokens: 500 };
+  const c = computeCostForMessage({
+    model: 'claude-haiku-5.5', usage: { input_tokens: 3000, cache_read_input_tokens: 147_000, output_tokens: 1500 },
+    usageCalls: [{ usage: one }, { usage: one }, { usage: { input_tokens: 1000, cache_read_input_tokens: 149_000, output_tokens: 500 } }],
+  }, provider);
+  near(c.totalUsd, 2 * (1000 * 0.1 + 49_000 * 0.01 + 500 * 0.5) / M + (1000 * 0.5 + 149_000 * 0.05 + 500 * 2.5) / M, '两次基础档 + 一次高档');
+  // 没有远程表时也查得到(原来:点写法在内置表里找不到任何行)
+  useRemote({});
+  expectPrice('claude-haiku-5.5', { tier: 'offline', exact: true, ...HAIKU_BASE });
+  expectPrice('Claude-Sonnet-5.5', { tier: 'offline', exact: true, ...V55['claude-sonnet-5-5'] });
+  // 对照:内置表里没有的型号,归一化之后也没有 → 照旧(这里只有内置表的最长前缀可用)
+  expectPrice('claude-opus-5.9', { tier: 'offline', exact: false, in: 5, out: 25, cr: 0.5, cw: 6.25 });
 });
 await check('R2 优先级不变:用户自填单价 > 官方报价层 > 内置表(内置表有这个模型)/ 远程表(内置表没有)', async () => {
   useRemote({ ...REMOTE_55, 'anthropic/claude-opus-5.9': { input: 7, output: 9, cacheRead: 0.7, cacheWrite: 8 } });

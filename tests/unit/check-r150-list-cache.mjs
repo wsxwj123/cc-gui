@@ -126,12 +126,19 @@ await check('接线:server/routes/mcp.js 的列表缓存走这个模块(作废 /
   assert.ok(!/\bmcpCache\s*=[^=]/.test(src), 'mcp.js 里还有裸的 mcpCache = … 赋值(拦不住作废之前开始的构建)');
   assert.match(src, /\.commit\(/, '冷读 / 强制刷新的结果应经 commit 写入');
 });
-await check('接线:面板切换插件成功后重读一次列表(MCP 列表随之更新),并且只采纳最后发起的那次读取', async () => {
+await check('接线:面板切换插件成功后重读一次列表(MCP 列表随之更新);读取结果要不要采纳的判定见 check-r150-fetch-gate.mjs', async () => {
   const src = readFileSync(root + 'client/src/components/MCPPanel.jsx', 'utf8');
   const at = src.indexOf('const handleTogglePlugin = async');
   const body = src.slice(at, src.indexOf('const handleToggle = async', at));
   assert.match(body, /fetchData\(true, true\)/, '切换成功后应静默、强制地重读一次(fetchData(true, true))');
-  assert.match(src, /fetchSeq/, 'fetchData 应丢弃过期的读取结果');
+});
+await check('S7 接线:停用 / 启用命令失败时也作废列表缓存(命令可能其实已经生效)', async () => {
+  const src = readFileSync(root + 'server/routes/mcp.js', 'utf8');
+  for (const action of ['enable', 'disable']) {
+    const at = src.indexOf(`router.put('/plugins/:name/${action}'`);
+    const body = src.slice(at, src.indexOf('});', src.indexOf('sendPluginPublicError', at)));
+    assert.match(body, /catch \(err\) \{[\s\S]*invalidateMcpListCache\(\)[\s\S]*sendPluginPublicError/, `${action}:失败分支里没有作废列表缓存`);
+  }
 });
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');

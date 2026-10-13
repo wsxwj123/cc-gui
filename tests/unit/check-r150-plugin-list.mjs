@@ -91,6 +91,27 @@ await check('E1 已安装插件的启用状态只取"已安装"那一段:同名�
   const { installed } = M.parsePluginList(SAMPLE);
   assert.deepEqual(installed, { pua: true, design: true, broken: false });
 });
+await check('S8 标题本身就能把一段认成同步段:标题之后的条目即使名字不带 @synced 也归同步段(两种标题都认),不混进已安装', async () => {
+  need();
+  for (const header of ['Synced from claude.ai:', 'Synced from claude.ai — sync is off in this shell; these load only in a synced session:']) {
+    const out = `  ❯ pua@pua-skills\n    Version: 2.0.0\n    Status: ✔ enabled\n\n${header}\n  ❯ design@claude-ai\n    Version: 1.2.0\n    Status: ✔ loaded\n  ❯ notes\n    Version: 0.3.0\n    Status: ✘ disabled\n`;
+    const { installed, synced } = M.parsePluginList(out);
+    assert.deepEqual(installed, { pua: true }, `标题「${header.slice(0, 30)}…」之后的条目不该算已安装`);
+    assert.deepEqual(synced.map((p) => [p.name, p.enabled, p.version]), [['design@synced', true, '1.2.0'], ['notes@synced', false, '0.3.0']]);
+  }
+});
+await check('S8 没有标题时,名字带 @synced 的条目同样归同步段(后缀兜底),不混进已安装', async () => {
+  need();
+  const { installed, synced } = M.parsePluginList('  ❯ pua@pua-skills\n    Status: ✔ enabled\n  ❯ design@synced\n    Version: 1.2.0\n    Status: ✔ enabled\n');
+  assert.deepEqual(installed, { pua: true });
+  assert.deepEqual(synced.map((p) => [p.name, p.enabled]), [['design@synced', true]]);
+});
+await check('S6 插件名校验 isSafePluginName:以 - 开头的(会被命令行当成选项)不行,@ 后面那段以 - 开头的也不行;合法名字照旧', async () => {
+  need();
+  assert.equal(typeof M.isSafePluginName, 'function', '缺少导出 isSafePluginName');
+  for (const ok of ['pua', 'pua@pua-skills', 'design@synced', 'bio-research@synced', 'a.b_c-d@org/repo', 'x-', 'a@b-c']) assert.equal(M.isSafePluginName(ok), true, `应放行 ${ok}`);
+  for (const bad of ['-x', '--help', '-x@synced', 'foo@-bar', 'foo@--flag', '', 'a b', 'a;b', 'x'.repeat(101), null, undefined, 42]) assert.equal(M.isSafePluginName(bad), false, `应拒绝 ${String(bad).slice(0, 20)}`);
+});
 await check('E1 没有同步段、空输出、非字符串:不抛,synced 为空', async () => {
   need();
   assert.deepEqual(M.parsePluginList('  ❯ pua@pua-skills\n    Version: 2.0.0\n    Status: ✔ enabled\n'), { installed: { pua: true }, synced: [] });

@@ -98,6 +98,22 @@ await check('J1 对照:腾得出时照旧 —— 从占用最大的删起,够了
   assert.equal(st.getItem('r150-target').length, 1400);
 });
 
+await check('S5 腾空间途中那次写入自己抛了异常:已经删掉的输入历史同样写回;函数返回 false,不往外抛', async () => {
+  const st = makeStorage();
+  st.setItem('r150-ballast', 'b'.repeat(60_000));
+  for (let i = 0; i < 6; i += 1) st.setItem(`${P}other-${i}`, JSON.stringify([`别的会话${i}的一条 ` + 'x'.repeat(200 + i * 30)]));
+  const before = st.snapshot();
+  st.quota = st.used() + 5;
+  let attempts = 0;
+  // 第 1 次(瘦身之后)、第 2 次(删了一个键之后)写不进;第 3 次(又删了一个之后)直接抛
+  const attempt = () => { attempts += 1; if (attempts >= 3) throw new Error('写入时出了别的错'); return false; };
+  let result;
+  assert.doesNotThrow(() => { result = H.freeInputHistoryAndRetry(st, attempt, []); });
+  assert.equal(result, false);
+  assert.equal(attempts, 3, '前提:确实是在已经删过键之后抛的');
+  assert.deepEqual(st.snapshot(), before, '已删的键应原样写回(原来:抛异常时直接跳出,删掉的没写回)');
+});
+
 // ── J2 ────────────────────────────────────────────────────
 await check('J2 模块导出 slimInputHistoryOnce 与标记键名;标记键不是输入历史键(不会被瘦身 / 腾空间当成会话历史)', async () => {
   assert.equal(typeof H.slimInputHistoryOnce, 'function', '缺少导出 slimInputHistoryOnce');
@@ -214,6 +230,23 @@ await check('J4 没有附件时的报错文案:「无法保存待发消息：本
   assert.equal(queueSaveFailedNotice(), plain);
   assert.equal(queueSaveFailedNotice({ hasAttachments: true }), '无法保存待发消息：本地存储空间不足。附件仍保留，请移除部分附件后重试。');
   assert.equal(queueSaveFailedNotice({ hasAttachments: true, inSession: true }), '无法保存待发消息：本地存储空间不足。附件与草稿仍保留，请处理后重试。');
+});
+
+await check('S4 不经输入框的发送(动作按钮、隐藏消息)存不进时:文案不带「输入内容仍在输入框中。」;来自输入框的照旧带', async () => {
+  const { queueSaveFailedNotice } = await import(root + 'client/src/utils/storageNotice.js');
+  const bare = '无法保存待发消息：本地存储已满。';
+  assert.equal(queueSaveFailedNotice({ hasAttachments: false, inSession: true, fromComposer: false }), bare);
+  assert.equal(queueSaveFailedNotice({ hasAttachments: false, fromComposer: false }), bare);
+  assert.equal(queueSaveFailedNotice({ hasAttachments: false, inSession: true, fromComposer: true }), `${bare}输入内容仍在输入框中。`);
+});
+await check('S4 接线:会话里的那个出口按"这次发送是不是来自输入框"决定;只有输入框自己的发送标了来源,入队时不把这个标记存进队列', async () => {
+  const app = read('client/src/App.jsx');
+  assert.match(app, /queueSaveFailedNotice\(\{[^}]*inSession: true[^}]*fromComposer: !!opts\.fromComposer[^}]*\}\)/, '会话里的出口应传 fromComposer: !!opts.fromComposer');
+  assert.match(app, /queueSaveFailedNotice\(\{[^}]*fromComposer: true[^}]*\}\)/, '首页的出口(一定来自输入框)应显式传 fromComposer: true');
+  assert.match(app, /delete queueOpts\.fromComposer/, '入队前应去掉 fromComposer(出队重发时来源已不是输入框)');
+  const chat = read('client/src/components/ChatInput.jsx');
+  assert.match(chat, /fromComposer: true,\s*\n\s*onEnqueueFailure:/, 'ChatInput 的发送应标 fromComposer: true');
+  assert.ok(!read('client/src/genui/host/action-send.js').includes('fromComposer'), '动作按钮的发送不该标成来自输入框');
 });
 
 // ── J5 注释 ───────────────────────────────────────────────
