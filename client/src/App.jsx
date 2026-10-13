@@ -9971,6 +9971,15 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
   const wrapRef = useRef(null);
   const menuRef = useRef(null);
   const requestRef = useRef(null);
+  // r148b A3:弹窗里的「刚刚 / N 分钟前」是按当前时间算的(relativeAgeLabel),却没有东西按时间刷新它 ——
+  // 原来靠会话组件每 1.5 秒整体重渲染顺带更新,r148 去掉那个重渲染后,弹窗开着不动时这段文字就停住了。
+  // 弹窗打开期间每 30 秒自己刷新一次;关着时不起定时器。
+  const [, refreshAgeLabel] = useState(0);
+  useEffect(() => {
+    if (!open) return undefined;
+    const id = setInterval(() => refreshAgeLabel((n) => n + 1), 30_000);
+    return () => clearInterval(id);
+  }, [open]);
   const canonicalKey = useMemo(
     () => contextCanonicalKey(sessionId, projectHash, cwd, model),
     [sessionId, projectHash, cwd, model],

@@ -32,5 +32,20 @@ await check('A1 用量面板订阅了价格版本,且订阅在提前 return(if (
   assert.match(src, /import \{ usePricingVersion \} from '\.\.\/hooks\/usePricingVersion\.js';/);
 });
 
+// ── A3 ────────────────────────────────────────────────────
+// 上下文明细弹窗里的「刚刚 / N 分钟前」按当前时间算,原来靠会话组件每 1.5 秒重渲染顺带更新。
+await check('A3 上下文明细弹窗:打开期间每 30 秒自己刷新一次相对时间,关着时不起定时器', async () => {
+  const app = read('client/src/App.jsx');
+  const start = app.indexOf('function ContextBreakdownButton(');
+  assert.ok(start > 0, '找不到 ContextBreakdownButton');
+  const end = app.indexOf('\nfunction ', start + 10);
+  const body = app.slice(start, end > 0 ? end : start + 20000);
+  assert.match(body, /relativeAgeLabel\(data\.sampledAt\)/, '弹窗里应仍用 relativeAgeLabel 显示采样时间');
+  const m = body.match(/useEffect\(\(\) => \{\s*if \(!open\) return undefined;\s*const id = setInterval\(\(\) => (\w+)\(\(n\) => n \+ 1\), 30_000\);\s*return \(\) => clearInterval\(id\);\s*\}, \[open\]\);/);
+  assert.ok(m, '没有找到"弹窗打开时起 30 秒定时器、关闭时清掉"的 effect');
+  assert.match(body, new RegExp(`const \\[, ${m[1]}\\] = useState\\(0\\);`), '定时器推动的应是本组件自己的一个状态(触发重渲染)');
+  // 定时器只在 open 为真时起:effect 第一句就是 if (!open) return(上面的正则已钉),依赖只有 open
+});
+
 if (failed) { console.log(`\n${failed} 项失败`); process.exit(1); }
 console.log('\n全部通过');
