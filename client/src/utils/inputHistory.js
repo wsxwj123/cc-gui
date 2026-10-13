@@ -145,7 +145,8 @@ export function slimInputHistory(storage) {
  * 顺序:
  *   ① 先瘦身一次(S2:只剔旧全局的副本,不丢任何历史),再试;
  *   ② 还不够,按占用从大到小删"没有显示在任何窗格里的会话"的输入历史键,每删一个试一次,成功即停;
- *   ③ 没有可删的了仍失败 → 返回 false(调用方这时才报错)。
+ *   ③ 没有可删的了仍失败 → 把第②步删掉的原样写回去,再返回 false(调用方这时才报错)。
+ *      r150 J1:原来不写回 —— 占满存储的不是输入历史时,别的会话的输入历史全被删光,要写的东西还是没写进,白删。
  * **只动会话级的输入历史键**(cgui-input-history:<会话键>):它是锦上添花的东西,丢了只是少翻几条。
  * 草稿、待发队列、标题、权限模式等一律不碰;旧全局键、没有会话键的输入框用的 global 键也不删。
  * openSessionKeys:当前各窗格正在显示的会话键 —— 用户眼前的会话,它的输入历史不删。
@@ -157,11 +158,17 @@ export function freeInputHistoryAndRetry(storage, attempt, openSessionKeys = [])
     const keep = new Set([inputHistoryKey(null), ...(openSessionKeys || []).filter(Boolean).map((k) => inputHistoryKey(k))]);
     const candidates = inputHistoryKeysOf(storage)
       .filter((key) => !keep.has(key))
-      .map((key) => ({ key, size: key.length + String(storage.getItem(key) ?? '').length }))
+      .map((key) => { const value = storage.getItem(key); return { key, value, size: key.length + String(value ?? '').length }; })
       .sort((a, b) => b.size - a.size);
-    for (const { key } of candidates) {
+    const removed = [];   // J1:删掉的键值留在内存里,全部删完仍写不进就写回去
+    for (const { key, value } of candidates) {
       storage.removeItem(key);
+      removed.push([key, value]);
       if (attempt()) return true;
+    }
+    for (const [key, value] of removed) {
+      if (value == null) continue;
+      try { storage.setItem(key, value); } catch { /* 这一个写不回去:只丢它,继续写回其余的 */ }
     }
   } catch { /* 存储不可用 */ }
   return false;
