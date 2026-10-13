@@ -162,6 +162,7 @@ import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRe
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
+import { subscribeAgentsActive } from './utils/agentsActivePoller.js';
 import { askSaveLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot, willAskLargeSnapshot } from './utils/largeSnapshot.js';
 import { createLatestGate } from './utils/latestRequest.js';
 
@@ -4512,10 +4513,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     lastSeenPidRef.current = null;
     let cancelled = false;
     let drainScheduled = false; // 排队消息排空的在途标记(见下方 drain 分支)
-    const poll = async () => {
+    // r148 P2:数据来源换成全应用共用的那一份轮询(utils/agentsActivePoller.js)—— 原来是本窗格自己
+    // 每 1.5 秒 fetch 一次,6 个分屏就是 6 份一样的请求。**下面的判定体一字未动、先后顺序不变**,
+    // 只是 d 由「自己取」变成「共用轮询交过来」。订阅当下会立刻取一份新的(等价于原来的首轮 poll()),
+    // 且只收到订阅之后才发出的请求的结果(不会拿切会话之前发出的旧结果来判本会话)。
+    const poll = (d) => {
       try {
-        const r = await fetch('/api/agents/active');
-        const d = await r.json();
         if (cancelled) return;
         // Use `stoppable` (= server's !finished), NOT `exitCode`: the
         // /agents/active payload has no exitCode field, so `a.exitCode == null`
@@ -4578,9 +4581,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setBackgroundPid(next);
       } catch {}
     };
-    poll();
-    const id = setInterval(poll, 1500);
-    return () => { cancelled = true; clearInterval(id); };
+    const unsubscribe = subscribeAgentsActive(poll);
+    return () => { cancelled = true; unsubscribe(); };
   }, [selectedSession?.sessionId, selectedSession?.draftId]);
 
   // B「后台工作中」横幅的存在门槛(理由见 utils/reattach.js BG_BANNER_DELAY_MS):
@@ -12674,10 +12676,9 @@ export default function App() {
   const [waitingKeys, setWaitingKeys] = useState('');
   useEffect(() => {
     let cancelled = false;
-    const poll = async () => {
+    // r148 P2:与各窗格、监控面板共用同一份轮询(utils/agentsActivePoller.js),不再自己另起一份。
+    const poll = (d) => {
       try {
-        const r = await fetch('/api/agents/active');
-        const d = await r.json();
         if (cancelled) return;
         // #26:排除 idle(常驻保活)——它不是"正在跑",否则会话绿点永远亮着
         const running = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.stoppable === true && a.status !== 'idle');
@@ -12688,9 +12689,8 @@ export default function App() {
         setWaitingKeys(waitingSessionKeys(d.agents));
       } catch {}
     };
-    poll();
-    const id = setInterval(poll, 1500);
-    return () => { cancelled = true; clearInterval(id); };
+    const unsubscribe = subscribeAgentsActive(poll);
+    return () => { cancelled = true; unsubscribe(); };
   }, []);
   // app 级"在等你"提示:待处理卡片 + 在等你的代理(同一会话两边都有则只算一件事)。
   // Dock 角标(mac)+ 窗口标题计数(跨平台兜底)+ 坞图标小红点(前台可见)。

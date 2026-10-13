@@ -5,6 +5,7 @@ import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { WorkflowCard } from './tools/WorkflowCard.jsx';
 import { SubagentCostContext, SubagentCostTag } from './tools/SubagentCost.jsx';
 import { buildSubagentCostIndex } from '../utils/subagentCost.js';
+import { subscribeAgentsActive, fetchAgentsActiveFresh } from '../utils/agentsActivePoller.js';
 import {
   AGENT_TERMINAL_STATUSES, agentHydrationStatus, agentOpenFailureAction, buildAgentRows, fetchAgentHistory,
   locateParentPane, shouldApplyHistory, splitHistoryBlocks,
@@ -783,18 +784,23 @@ export function AgentMonitorPanel() {
   const costReadyFor = (sessionId) => !sessionId || costForPanes.loaded.has(sessionId);
 
   const mountedRef = useRef(true);
-  const fetchActive = async (silent = false) => {
+  // r148 P2:「运行进程」数据与各窗格、根组件共用同一份轮询(utils/agentsActivePoller.js),本面板不再自己
+  // 每 1.5 秒另拉一遍。fetchActive 的两步(落 remote → 拉 workflow 内层 agent)不变,只是第一步的数据
+  // 可以由调用方给(共用轮询每拍交来的那份;null = 这次没取到,跳过第一步);不给就要一份新鲜的
+  // (手动刷新 / 操作后刷新)。
+  const fetchActive = async (silent = false, given = undefined) => {
     if (!silent) setLoading(true);
     try {
-      const r = await fetch('/api/agents/active');
-      const data = await r.json();
+      const data = given !== undefined ? given : await fetchAgentsActiveFresh();
       // 卸载守卫:1.5s 轮询的在途请求可能在组件卸载后才 resolve → 原来无条件 setRemote
       // 会对已卸载组件 setState(React 告警 + 可能用旧数据覆盖)。卸载后直接丢弃结果。
       if (!mountedRef.current) return;
-      setRemote({
-        agents: Array.isArray(data.agents) ? data.agents : [],
-        sources: data.sources || { chatProcesses: 0, cliSessions: 0 },
-      });
+      if (data) {
+        setRemote({
+          agents: Array.isArray(data.agents) ? data.agents : [],
+          sources: data.sources || { chatProcesses: 0, cliSessions: 0 },
+        });
+      }
     } catch {}
     // workflow 内层 agent:只扫【当前打开会话】的 workflows 目录(面板关闭即停轮询)。
     // 多分屏窗格各自的 sid 都拉,合并去重;无 workflow 的会话返回空,零开销。
@@ -819,11 +825,23 @@ export function AgentMonitorPanel() {
 
   useEffect(() => {
     mountedRef.current = true;
-    fetchActive();
-    const id = setInterval(() => fetchActive(true), 1500);
+    // 共用轮询每交来一份就处理一份。第一份 = 原来挂载时的首取(非静默:处理完把"加载中"关掉),之后的静默。
+    setLoading(true);
+    let first = true;
+    const unsubscribe = subscribeAgentsActive((data) => {
+      const isFirst = first;
+      first = false;
+      void fetchActive(!isFirst, data);
+    });
+    // 首取失败时共用轮询不回调;原来的首取在失败后照样往下走(拉 workflow 内层 agent、关掉"加载中"),这里补上。
+    fetchAgentsActiveFresh().catch(() => {
+      if (!first || !mountedRef.current) return;
+      first = false;
+      void fetchActive(false, null);
+    });
     return () => {
       mountedRef.current = false;
-      clearInterval(id);
+      unsubscribe();
       readAbortRef.current?.abort();   // 关面板 = 取消这次读取(不产生可见错误)
     };
   }, []);
