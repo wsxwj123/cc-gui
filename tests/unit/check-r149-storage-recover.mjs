@@ -112,7 +112,8 @@ await check('S6 两处报错(首页发送、会话里排队)都走这个函数,A
 // ── 接线锚 ────────────────────────────────────────────────
 await check('S2 启动后瘦身一次,且不在首屏关键路径上(放在启动闸之后)', async () => {
   const app = read('client/src/App.jsx');
-  assert.match(app, /afterBoot\(\(\) => \{[^}]*slimInputHistory\(localStorage\)[^}]*\}\)/, 'App.jsx 里没有"启动闸之后跑 slimInputHistory(localStorage)"');
+  // r150 J2 / R4:启动时的瘦身改为只跑一次(slimInputHistoryOnce,用标记键记着),这条锚跟着改认新的函数名。
+  assert.match(app, /afterBoot\(\(\) => \{[^}]*slimInputHistoryOnce\(localStorage\)[^}]*\}\)/, 'App.jsx 里没有"启动闸之后跑 slimInputHistoryOnce(localStorage)"');
 });
 await check('S1 / S3 / S4 输入框读写输入历史走新模块,不再自己拼"回落读旧全局再整份写回"', async () => {
   const chat = read('client/src/components/ChatInput.jsx');

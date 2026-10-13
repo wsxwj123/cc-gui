@@ -8,6 +8,8 @@
 // 口径与内置表同一条(pricing.js:Claude 家族 1h 写价 = input × 2);本机 CLI 2.1.296 自带价目表里
 // opus 5.5 的 1h 写价 = 8(= 4 × 2)、sonnet 5.5 = 4(= 2 × 2),与这条规则一致。
 // 只管 Claude 家族;别的厂商的条目不补(它们没有这条规则)。
+// 返工(R2)之后:内置表里有的 Claude 模型不再走远程表,这条规则只对"内置表没有、远程表有"的 Claude 模型生效,
+// 所以下面用内置表里没有的型号(claude-opus-5-9 / claude-sonnet-5-9)来测。
 // Run: node tests/unit/check-r150-pricing-remote-1h.mjs
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
@@ -28,16 +30,16 @@ const near = (a, b, msg) => assert.ok(typeof a === 'number' && Math.abs(a - b) <
 setPricingCatalog({
   source: 'official-sources', quotes: [], providers: [], refresh: null,
   prices: {
-    'anthropic/claude-opus-5.5': { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
-    'anthropic/claude-sonnet-5.5': { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+    'anthropic/claude-opus-5.9': { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+    'anthropic/claude-sonnet-5.9': { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
     'gpt-5.6-terra': { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2 },
   },
 });
 
 console.log('r150 P1 配套:命中远程表的 Claude 模型,1 小时档缓存写');
 
-await check('命中远程表的 opus 5.5 / sonnet 5.5:1 小时档缓存写按 输入价 × 2 算(8 / 4),不是「写费未知」', async () => {
-  for (const [model, input] of [['claude-opus-5-5', 4], ['claude-sonnet-5-5', 2]]) {
+await check('命中远程表的 Claude 模型(内置表没有的型号):1 小时档缓存写按 输入价 × 2 算(8 / 4),不是「写费未知」', async () => {
+  for (const [model, input] of [['claude-opus-5-9', 4], ['claude-sonnet-5-9', 2]]) {
     const price = resolvePrice(model, { provider });
     assert.equal(price.tier, 'official-compat', `${model} 应命中远程表`);
     near(price.prices.cacheWrite1h, input * 2, `${model} 的 1 小时档缓存写价`);
@@ -52,7 +54,7 @@ await check('命中远程表的 opus 5.5 / sonnet 5.5:1 小时档缓存写按 �
   }
 });
 await check('命中远程表的 Claude 模型:只有顶层写量、没有两档分配 → 写费未知(两档价不同,不拿任一档去猜;与内置表、官方报价层同口径)', async () => {
-  const cost = computeCost('claude-opus-5-5', { input_tokens: M, cache_creation_input_tokens: M }, provider);
+  const cost = computeCost('claude-opus-5-9', { input_tokens: M, cache_creation_input_tokens: M }, provider);
   assert.ok(cost);
   assert.equal(cost.tier, 'official-compat');
   near(cost.breakdown.cacheWrite, 0, '写费应被摘出去');

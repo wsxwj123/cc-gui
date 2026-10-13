@@ -152,10 +152,11 @@ await check('J2 存储写满时腾空间那条路仍然无条件瘦身(标记已
   assert.equal(H.freeInputHistoryAndRetry(st, attempt, []), true);
   for (let i = 0; i < 30; i += 1) assert.deepEqual(JSON.parse(st.getItem(`${P}sid-${i}`)), [`会话${i}自己发的一条`], `会话 ${i}:只剔副本,自己的条目保留`);
 });
-await check('J2 接线:App.jsx 启动闸之后经 slimInputHistoryOnce 调瘦身(不再每次启动都直接跑)', async () => {
+await check('J2 / R4 接线:App.jsx 启动闸之后直接调 slimInputHistoryOnce(localStorage),不再出现直接跑 slimInputHistory 的写法', async () => {
   const app = read('client/src/App.jsx');
-  assert.match(app, /afterBoot\(\(\) => \{[^}]*slimInputHistoryOnce\(localStorage[^}]*\}\)/, 'App.jsx 的启动闸回调里没有 slimInputHistoryOnce(localStorage…)');
-  assert.ok(!/afterBoot\(\(\) => \{\s*slimInputHistory\(localStorage\);?\s*\}\)/.test(app), 'App.jsx 里还在每次启动都直接跑 slimInputHistory(localStorage)');
+  assert.match(app, /afterBoot\(\(\) => \{\s*slimInputHistoryOnce\(localStorage\);?\s*\}\)/, 'App.jsx 的启动闸回调应就是 slimInputHistoryOnce(localStorage)');
+  assert.ok(!/\bslimInputHistory\(/.test(app), 'App.jsx 里还有 slimInputHistory(…) 的调用(启动时应只经 slimInputHistoryOnce)');
+  assert.match(app, /import \{ slimInputHistoryOnce \} from '\.\/utils\/inputHistory\.js'/, 'App.jsx 从 inputHistory.js 只需要引入 slimInputHistoryOnce');
 });
 
 // ── J3 ────────────────────────────────────────────────────
