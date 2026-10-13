@@ -823,7 +823,10 @@ export const useStore = create((set, get) => ({
       const cur = s.orphanDraftQueues || {};
       const entry = cur[queueKey] || { projectHash: projectHash || draftQueueProjectHash(queueKey), items: [] };
       const next = { ...cur, [queueKey]: { ...entry, items: [...(entry.items || []), item] } };
-      if (!persistOrphanDraftQueues(next, true)) return s;
+      // r150 J3:写不进(本地存储满)时同样先腾空间再重试一次 —— 与待发队列入队同一条路(persistQueueSnapshot)。
+      // 这条消息已经无处可去,这里再存不进就真丢了;能腾的只有输入历史,别的键不碰。
+      if (!persistOrphanDraftQueues(next, true)
+        && !freeInputHistoryAndRetry(localStorage, () => persistOrphanDraftQueues(next, true), openPaneSessionKeys())) return s;
       ok = true;
       return { orphanDraftQueues: next };
     });
