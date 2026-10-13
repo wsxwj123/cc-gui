@@ -54,7 +54,9 @@ assert.deepEqual(visiblePlanItems([], '# stale'), [], '显式空复数列表不�
 const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
 const chat = readFileSync(new URL('../../client/src/components/ChatInput.jsx', import.meta.url), 'utf8');
 assert.match(app, /<ChatInput[\s\S]*?plans=\{currentPlans\}/, 'App 将 currentPlans 交给 ChatInput');
-assert.match(chat, /export function ChatInput\(\{[^}]*\bplans = null\b/, 'ChatInput 必须接收 plans prop');
+// r148 P6:ChatInput 改成了记忆化组件(export const ChatInput = React.memo(function ChatInput({…})),
+// 被钉的行为不变 —— 参数表里仍有 plans(默认 null)。只跟着更新声明形态的锚点。
+assert.match(chat, /export const ChatInput = React\.memo\(function ChatInput\(\{[^}]*\bplans = null\b/, 'ChatInput 必须接收 plans prop');
 assert.match(chat, /<TodoPanel[^>]*\bplans=\{plans\}/, 'ChatInput 必须把 plans 继续交给 TodoPanel');
 // 隐藏动作必须触发淘汰,否则上界函数写了也白写。
 const todoPanel = readFileSync(new URL('../../client/src/components/TodoPanel.jsx', import.meta.url), 'utf8');
