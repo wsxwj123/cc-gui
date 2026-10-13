@@ -1285,28 +1285,37 @@ function rejectOptionLikePluginName(name, res) {
 
 // Plugin enable/disable — delegates to `claude plugin {enable|disable} <name>`.
 // Accepts either bare name ("pua") or qualified ("pua@pua-skills"); CLI handles both.
+// r150c S7:命令失败(含超时)时它可能其实已经生效,所以失败分支也把列表缓存作废 —— 否则面板随后读到的
+// 还是缓存里的旧状态。只清列表缓存,不动换代戳(命令没确认成功,不让各会话白白换一次进程)。
+// ran 区分"命令跑过"与"名字校验就没过":后者什么都没发生,不用作废。
 router.put('/plugins/:name/enable', async (req, res) => {
+  let ran = false;
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
     if (rejectOptionLikePluginName(name, res)) return;
+    ran = true;
     await runClaude(['plugin', 'enable', name], { timeout: 15000 });
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: true });
   } catch (err) {
+    if (ran) invalidateMcpListCache();
     return sendPluginPublicError(res, err, { fallback: '启用失败' });
   }
 });
 
 router.put('/plugins/:name/disable', async (req, res) => {
+  let ran = false;
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
     if (rejectOptionLikePluginName(name, res)) return;
+    ran = true;
     await runClaude(['plugin', 'disable', name], { timeout: 15000 });
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: false });
   } catch (err) {
+    if (ran) invalidateMcpListCache();
     return sendPluginPublicError(res, err, { fallback: '停用失败' });
   }
 });
