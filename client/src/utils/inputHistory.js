@@ -61,3 +61,73 @@ export function saveInputHistoryEntry(storage, sessionKey, value) {
     return false;
   }
 }
+
+// ── S2:瘦身 ────────────────────────────────────────────────
+// 存量:S1 之前每个会话键里都躺着旧全局键的副本。把会话键里"与旧全局键相同的条目"剔掉(它们仍能经
+// readInputHistory 从旧全局键翻出来,一条都不丢),剔空的键整个删除。幂等:跑第二遍什么都不改。
+
+/** 存储里所有会话级输入历史键的名字(不含旧全局键)。 */
+function inputHistoryKeysOf(storage) {
+  const keys = [];
+  for (let i = 0; i < storage.length; i += 1) {
+    const key = storage.key(i);
+    if (typeof key === 'string' && key.startsWith(INPUT_HISTORY_PREFIX)) keys.push(key);
+  }
+  return keys;
+}
+
+/**
+ * 瘦身的纯计算。entries = { 会话级输入历史键: 条目数组 },legacyList = 旧全局键里的条目。
+ * 返回 { rewrite: { 键: 剔除副本后的数组 }, remove: [剔空了的键] };与旧全局没有重叠的键不出现在结果里。
+ */
+export function slimInputHistoryEntries(entries, legacyList) {
+  const legacy = new Set(legacyList);
+  const rewrite = {};
+  const remove = [];
+  if (!legacy.size) return { rewrite, remove };
+  for (const [key, list] of Object.entries(entries)) {
+    const kept = list.filter((x) => !legacy.has(x));
+    if (kept.length === list.length) continue;
+    if (kept.length) rewrite[key] = kept;
+    else remove.push(key);
+  }
+  return { rewrite, remove };
+}
+
+/**
+ * 对一份本地存储做瘦身。只碰 cgui-input-history:<会话键>;旧全局键、别的键、解析不了或形态不认识的
+ * 输入历史键一律不动。返回 { removedKeys, rewrittenKeys, freedChars }。不抛。
+ */
+export function slimInputHistory(storage) {
+  const result = { removedKeys: 0, rewrittenKeys: 0, freedChars: 0 };
+  try {
+    const legacy = parseInputHistory(storage.getItem(LEGACY_INPUT_HISTORY_KEY));
+    if (!legacy.length) return result;
+    const entries = {};
+    const sizes = {};
+    for (const key of inputHistoryKeysOf(storage)) {
+      const raw = storage.getItem(key);
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch { continue; }
+      if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === 'string')) continue;
+      entries[key] = parsed;
+      sizes[key] = raw.length;
+    }
+    const { rewrite, remove } = slimInputHistoryEntries(entries, legacy);
+    // 先删剔空的(立刻腾出空间),再把变小了的写回去
+    for (const key of remove) {
+      storage.removeItem(key);
+      result.removedKeys += 1;
+      result.freedChars += key.length + sizes[key];
+    }
+    for (const [key, list] of Object.entries(rewrite)) {
+      const next = JSON.stringify(list);
+      try {
+        storage.setItem(key, next);
+        result.rewrittenKeys += 1;
+        result.freedChars += sizes[key] - next.length;
+      } catch { /* 连更小的值都写不回去:原样留着 */ }
+    }
+  } catch { /* 存储不可用:什么都不做 */ }
+  return result;
+}

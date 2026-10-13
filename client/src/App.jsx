@@ -105,6 +105,7 @@ import { readCacheUsage, addCacheUsage, formatHitPct, formatHitPctOrDash, EMPTY_
 import { publishTurnCache, subscribeTurnCache, readTurnCache } from './utils/turnCacheBus.js';
 import { ensurePricingCatalog, subscribePricingVersion, getPricingVersion } from './utils/pricingCatalog.js';
 import { afterBoot, bootSettled } from './utils/bootDefer.js';
+import { slimInputHistory } from './utils/inputHistory.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
@@ -12030,6 +12031,9 @@ export default function App() {
   // R20:官方价目在应用起来后先取一次(失败不影响任何功能),用量面板的价格区打开即有。
   // r148 P8:价目不在启动第一批里取,延后到启动闸之后;有界面要显示金额时会更早取(见 ensurePricingCatalog 的调用处)。
   useEffect(() => afterBoot(() => ensurePricingCatalog()), []);
+  // r149 S2:启动后把输入历史瘦身一次(幂等)。存量里每个会话键都躺着旧全局 100 条的副本,合起来能占掉
+  // 本地存储的九成;剔掉副本不丢任何历史(上键仍从旧全局键翻得出)。放在启动闸之后,不在首屏关键路径上。
+  useEffect(() => afterBoot(() => { slimInputHistory(localStorage); }), []);
   // R4-b:记下"官方 provider 当前是怎么计费的"(OAuth 订阅 / API key 按量)。历史消息里
   // 没有当时的鉴权方式,拿此刻的顶替会让切一次 provider 就把订阅期的 Claude 消息按 API
   // 单价重算(判官实测 ¥4,690 → ¥498,876)。这里是全局唯一观察点,跟随 store 的刷新节奏。
