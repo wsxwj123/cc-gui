@@ -15,6 +15,10 @@
 export const LEGACY_INPUT_HISTORY_KEY = 'cgui-input-history';
 export const INPUT_HISTORY_PREFIX = 'cgui-input-history:';
 export const INPUT_HISTORY_MAX_ENTRIES = 100;
+// S3:单条超过这么多字符的输入不记进输入历史(发送、草稿不受影响)。输入历史是给"上键翻回一条再改改"
+// 用的,整段粘贴的长文没有这个用途,却最吃空间(实测存量里有 20 条超过 4000 字符,最长约 14000)。
+// 只管新写入;存量里已有的超长条目不动。
+export const INPUT_HISTORY_MAX_ENTRY_CHARS = 4000;
 
 /** 会话键 → 它的输入历史键。没有会话键时沿用原来的 global。 */
 export const inputHistoryKey = (sessionKey) => `${INPUT_HISTORY_PREFIX}${sessionKey || 'global'}`;
@@ -46,11 +50,12 @@ export function readInputHistory(storage, sessionKey) {
 
 /**
  * 把一条输入记进本会话的输入历史(提到最前、去重、最多留 INPUT_HISTORY_MAX_ENTRIES 条)。
- * **只基于本会话键自己的列表**,不把旧全局的条目带进来。返回是否写入。
+ * **只基于本会话键自己的列表**,不把旧全局的条目带进来。空白、超长(S3)的不记。返回是否写入。
  */
 export function saveInputHistoryEntry(storage, sessionKey, value) {
   const entry = String(value || '').trim();
   if (!entry) return false;
+  if (entry.length > INPUT_HISTORY_MAX_ENTRY_CHARS) return false;   // S3
   const key = inputHistoryKey(sessionKey);
   const list = readList(storage, key).filter((x) => x !== entry);
   list.unshift(entry);
