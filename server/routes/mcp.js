@@ -12,6 +12,7 @@ import { winCmdSpawnSpec } from '../utils/win-cmd.js';
 import { detectUv, detectLocalProxy, probeTcp, isLoopbackProxyHost } from './version-check.js';
 import { searchRegistry, browseRegistry } from '../services/mcp-registry.js';
 import { assertWritable, isConfigGuardError, sendConfigGuardError } from '../utils/guarded-json.js';
+import { parsePluginList } from '../utils/plugin-list.js';
 
 const execFileP = promisify(execFile);
 
@@ -535,20 +536,15 @@ async function buildMcpList({ liveStatus = true } = {}) {
     }
 
     // 2. Installed plugins (also parse `claude plugin list` for enabled state)
+    //    输出格式与解析见 utils/plugin-list.js。r150 E1:输出里还有一段「Synced from claude.ai」——
+    //    Claude CLI 从账号同步下来的插件,不在 installed_plugins.json 里,原来面板完全看不到它们。
     let pluginEnabled = {};
+    let syncedPlugins = [];
     try {
       const out = await runClaude(['plugin', 'list'], { timeout: 8000 });
-      // Format: blocks separated by blank lines, each containing
-      //   ❯ <name>@<marketplace>
-      //   ...
-      //   Status: ✔ enabled | ✘ disabled | ✘ failed to load
-      const blocks = out.split(/\n(?=\s*❯)/);
-      for (const block of blocks) {
-        const nameMatch = block.match(/❯\s*([^@\s]+)/);
-        if (!nameMatch) continue;
-        const name = nameMatch[1];
-        pluginEnabled[name] = /Status:\s*✔\s*enabled/i.test(block);
-      }
+      const parsed = parsePluginList(out);
+      pluginEnabled = parsed.installed;
+      syncedPlugins = parsed.synced;
     } catch {}
     try {
       const pluginsData = JSON.parse(
@@ -571,6 +567,26 @@ async function buildMcpList({ liveStatus = true } = {}) {
         });
       }
     } catch {}
+    // r150 E1:账号同步的插件接在后面,带来源标记 source: 'synced'(前端据此单独成组、不给卸载与更新)。
+    // name 是 <插件名>@synced —— 停用 / 启用走现有的 PUT /plugins/:name/{disable|enable},传的就是这个名字。
+    // 不放进上面那个 try:installed_plugins.json 读不了(没装过任何插件时文件不存在)也不该连累这一段。
+    {
+      const known = new Set(result.plugins.map((p) => p.name));
+      for (const sp of syncedPlugins) {
+        if (known.has(sp.name)) continue;
+        known.add(sp.name);
+        result.plugins.push({
+          name: sp.name,
+          version: sp.version || '?',
+          scope: 'synced',
+          source: 'synced',
+          installPath: sp.path || '',
+          installedAt: null,
+          lastUpdated: null,
+          enabled: sp.enabled,
+        });
+      }
+    }
 
     // 4. External MCP projects
     try {
