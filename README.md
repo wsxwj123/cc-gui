@@ -278,6 +278,99 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.420</b>(2026-10-13)· 修复 5 条 · 优化 9 条</summary>
+
+**修复**
+
+<details><summary>首页发消息不再被「本地存储空间不足」拦住</summary>
+
+输入历史不再给每个新会话重复保存一份旧记录;已有的重复内容在启动后自动清理;本地存储写满时先自动腾出空间再重试。
+
+</details>
+
+<details><summary>存储不足的提示不再误提附件</summary>
+
+没有带附件时,提示里不再要求移除附件。
+
+</details>
+
+<details><summary>删除会话时一并清掉它的输入历史</summary>
+
+不再留在本地存储里占空间。
+
+</details>
+
+<details><summary>用量面板的金额在价格更新后马上刷新</summary>
+
+不用等下一次统计刷新。
+
+</details>
+
+<details><summary>上下文明细里的「N 分钟前」会自己更新</summary>
+
+弹窗开着时每 30 秒刷新一次。
+
+</details>
+
+**优化**
+
+<details><summary>空闲时界面不再反复重绘</summary>
+
+开着会话什么都不做时,不再每 1.5 秒整体重绘一次。
+
+</details>
+
+<details><summary>运行状态查询全应用共用一份</summary>
+
+分屏与监控面板不再各查各的;窗口隐藏时降到 15 秒一次;单次查询卡住不会拖停后续查询。
+
+</details>
+
+<details><summary>AI 输出时输入框不再跟着重绘</summary>
+
+同一个窗格里边看输出边打字更顺。
+
+</details>
+
+<details><summary>子代理输出合并刷新</summary>
+
+子代理大量输出时界面更新次数大幅减少。
+
+</details>
+
+<details><summary>长会话的费用与工具统计只在内容变化时重算</summary>
+
+不再每次重绘都算一遍。
+
+</details>
+
+<details><summary>读取上下文明细不再卡住后台</summary>
+
+会话文件很大时其他操作不受影响。
+
+</details>
+
+<details><summary>会话很多时列表索引不再反复重建</summary>
+
+索引上限从 4000 提到 50000。
+
+</details>
+
+<details><summary>启动更快</summary>
+
+MCP 预热、两个版本检查、价格表延后到首屏之后再请求。
+
+</details>
+
+<details><summary>窗口隐藏时首页贪吃蛇暂停</summary>
+
+回到窗口从停下的地方继续。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.419</b>(2026-10-08)· 修复 17 条</summary>
 
 **修复**
