@@ -5121,15 +5121,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
       const queuedAt = Date.now();
       const queueOpts = { ...opts };
-      // fromComposer(r150c S4)同理:它说的是"这一次发送来自输入框",出队重发时已经不是了,不存进队列。
       delete queueOpts.onEnqueueFailure; delete queueOpts.onQueued; delete queueOpts.fromComposer;
       // 只剥进队列这份克隆的整图预览(内存预览不动),否则超 localStorage 配额被硬拒。
       if (queueOpts.meta) queueOpts.meta = attachmentMetaForPersistence(queueOpts.meta);
       const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts: queueOpts });
       if (!queued) {
         // r149 S6:同首页那处 —— 自动腾空间重试后仍失败才会到这里;没带附件时不提附件。
-        // r150c S4:这个出口也服务于不经输入框的发送(动作按钮、隐藏的续跑消息);只有输入框自己的发送
-        // (ChatInput 标了 fromComposer)才说「输入内容仍在输入框中。」。
         const message = queueSaveFailedNotice({ hasAttachments: (queueOpts.meta?.attachments?.length || 0) > 0, inSession: true, fromComposer: !!opts.fromComposer });
         onEnqueueFailure?.(message);
         setProviderSwitchNotice({ text: message });
