@@ -27,6 +27,7 @@ import {
   StatusDot, GlobalSearchResults, DeleteButton, SessionItem, FORK_RUNNING_CONFIRM,
   adoptFork, importGitState, GitInitBanner,
 } from '../App.jsx';
+import { removeInputHistory } from '../utils/inputHistory.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
 const EMPTY_OBJECT = Object.freeze({});
@@ -573,6 +574,8 @@ export function UnifiedSidebar() {
       if (!r.ok) { const e = await r.json().catch(() => ({})); confirmDialog('删除失败：' + (e.error || r.status)); return; }
       useStore.getState().clearSessionStopped?.(session.sessionId);
       useStore.getState().clearQueue?.(session.sessionId);
+      // r149 S5:会话删了,它的输入历史键一并删(原来留着不清,只增不减,是本地存储被占满的来源之一)。
+      removeInputHistory(localStorage, session.sessionId);
       // 条带折叠:该会话的异常标记(roundStrip)一起清 —— 与上面两条同款"会话没了不留
       // per-session 态"。放在 DELETE 成功之后(而不是 handleDelete 当下):撤销窗口里会话
       // 还活着,提前清会把它那轮的撑开态抹掉。撤回/重做等路径**不清**(INTERFACE §B.2:
@@ -649,6 +652,7 @@ export function UnifiedSidebar() {
     all.forEach((p) => {
       clearInterval(p.timer);
       useStore.getState().clearQueue?.(p.session.sessionId);
+      removeInputHistory(localStorage, p.session.sessionId); // r149 S5:同 reallyDelete
       fetch(
         `/api/sessions/${p.session.sessionId}?projectHash=${encodeURIComponent(p.session.projectHash)}`,
         { method: 'DELETE', keepalive: true },

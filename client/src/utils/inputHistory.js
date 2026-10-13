@@ -166,3 +166,10 @@ export function freeInputHistoryAndRetry(storage, attempt, openSessionKeys = [])
   } catch { /* 存储不可用 */ }
   return false;
 }
+
+// ── S5:删会话 ───────────────────────────────────────────────
+/** 会话被删除时调用:删掉它的输入历史键(原来删了会话这个键还留着,只增不减)。没有会话键则什么都不做。 */
+export function removeInputHistory(storage, sessionKey) {
+  if (!sessionKey) return;
+  try { storage.removeItem(inputHistoryKey(sessionKey)); } catch { /* 存储不可用 */ }
+}
