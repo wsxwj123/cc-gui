@@ -47,5 +47,29 @@ await check('A3 上下文明细弹窗:打开期间每 30 秒自己刷新一次�
   // 定时器只在 open 为真时起:effect 第一句就是 if (!open) return(上面的正则已钉),依赖只有 open
 });
 
+// ── A4 ────────────────────────────────────────────────────
+// 兜底价格表(REMOTE)在模块加载 3 秒后才载入;它也是查价的输入,换了新的要通知价格版本。
+await check('A4 兜底价格表载入成功后通知价格版本(bumpPricingVersion 在赋值之后、同一个成功分支里)', async () => {
+  const src = read('client/src/utils/pricing.js');
+  const start = src.indexOf('async function hydrateRemotePrices()');
+  assert.ok(start > 0, '找不到 hydrateRemotePrices');
+  const body = src.slice(start, src.indexOf('\n}\n', start));
+  // 成功分支 = `if (j && j.prices && Object.keys(j.prices).length) { … }` 这一块(按花括号配对取出来)
+  const ifAt = body.indexOf('if (j && j.prices && Object.keys(j.prices).length) {');
+  assert.ok(ifAt > 0, '找不到"取到了非空价格表"的那个判断');
+  let depth = 0; let blockEnd = -1;
+  for (let i = body.indexOf('{', ifAt); i < body.length; i += 1) {
+    if (body[i] === '{') depth += 1;
+    else if (body[i] === '}') { depth -= 1; if (depth === 0) { blockEnd = i; break; } }
+  }
+  const block = body.slice(ifAt, blockEnd);
+  const assign = block.indexOf('REMOTE = j.prices;');
+  const bump = block.indexOf('bumpPricingVersion();');
+  assert.ok(assign > 0, '成功分支里找不到 REMOTE = j.prices;');
+  assert.ok(bump > assign, '载入成功后(赋值之后、同一个成功分支里)没有调 bumpPricingVersion() —— 失败 / 空表时不该通知');
+  assert.equal(body.split('bumpPricingVersion();').length - 1, 1, '只该在成功分支里通知一次');
+  assert.match(src, /import \{[^}]*\bbumpPricingVersion\b[^}]*\} from '\.\/pricingCatalog\.js';/);
+});
+
 if (failed) { console.log(`\n${failed} 项失败`); process.exit(1); }
 console.log('\n全部通过');

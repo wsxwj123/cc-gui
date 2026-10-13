@@ -280,6 +280,9 @@ async function hydrateRemotePrices() {
     if (j && j.prices && Object.keys(j.prices).length) {
       REMOTE = j.prices;
       try { localStorage.setItem('cgui-litellm-prices', JSON.stringify(j.prices)); } catch {}
+      // r148b A4:兜底价格表换了新的 → 通知算金额的地方重算(它也是查价的输入;这次载入在模块加载 3 秒后
+      // 才发生,那时金额多半已经画出来了)。
+      bumpPricingVersion();
     }
   } catch { /* 离线/失败 → 沿用缓存或内置表 */ }
 }
