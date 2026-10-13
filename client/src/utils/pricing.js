@@ -377,6 +377,22 @@ function remoteClaudeLookup(table, model) {
   return { entry: table[hit.tableKey], matchedExactly: !canon.guessed && !hit.guessed };
 }
 
+/**
+ * r150 R2:内置表里有没有这个 Claude 模型 —— 逐字,或去掉 […] 后缀、日期后缀之后逐字。有就不看远程表。
+ * 为什么:远程表(官方兼容视图)每个模型只有一组价,而带分档的模型它给的是高的那一档(haiku 5.5 在远程表里
+ * 是 $0.50/$2.50,那只是提示超过 10 万 token 的价)。内置表里的 Claude 条目是照官方 / CLI 自带价目逐条核过的,
+ * 有它就以它为准;远程表只用来兜内置表还没收录的新型号。
+ * 只按模型名本身认,不认 anthropic/ 前缀与点写法:带前缀的名字是经聚合平台接入时的写法,那时该用聚合平台自己的价
+ * (远程表里逐字的那个键)。不是 Claude 家族的一律返回 false —— 别的厂商仍是远程表在前,结果不变。
+ */
+function offlineHasClaudeModel(model) {
+  if (!claudeCanon(model)) return false;
+  const raw = String(model);
+  const noSuffix = raw.replace(/\[[^\]]*\]$/, '');
+  const noDate = noSuffix.replace(/-\d{8}$/, '');
+  return [raw, noSuffix, noDate].some((id) => Object.prototype.hasOwnProperty.call(PRICES, id));
+}
+
 function remoteLookup(model) {
   const table = compatPrices();
   if (!model || !table) return null;
@@ -855,7 +871,8 @@ export function resolvePrice(model, opts = {}) {
   }
 
   // ③ 官方兼容视图 prices(精确 → 去日期后缀 → Claude 模型的另一种写法(r150 P1,见 claudeCanon)→ 最长前缀)
-  const compat = remoteLookupDetailed(model);
+  // r150 R2:Claude 模型在内置表里有条目时跳过这一层,直接用内置表(见 offlineHasClaudeModel)。
+  const compat = offlineHasClaudeModel(model) ? null : remoteLookupDetailed(model);
   if (compat) {
     const e = compat.entry;
     // r150:远程表每个模型只有四个数,没有 1 小时档的缓存写价。Claude 家族按 input × 2 补 —— 与内置表同一条
