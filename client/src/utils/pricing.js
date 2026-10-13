@@ -815,9 +815,14 @@ export function resolvePrice(model, opts = {}) {
   const compat = remoteLookupDetailed(model);
   if (compat) {
     const e = compat.entry;
+    // r150:远程表每个模型只有四个数,没有 1 小时档的缓存写价。Claude 家族按 input × 2 补 —— 与内置表同一条
+    // 规则(见上方「Claude 家族 1h 写价 = input×2」那段)。P1 之前 Claude 模型命中不了这一层,不存在这个问题;
+    // P1 之后不补的话,带 1 小时档写量的调用会变成「写费未知」,没有两档分配的又会被当成单档价去算。
+    // 别的厂商不补(它们没有这条规则)。
+    const write1h = e.cacheWrite1h ?? (claudeCanon(model) && typeof e.input === 'number' ? e.input * 2 : null);
     return {
       ok: true, tier: 'official-compat', matchedExactly: compat.matchedExactly, currency: 'USD', unit: UNIT,
-      prices: { input: e.input ?? null, output: e.output ?? null, cacheRead: e.cacheRead ?? null, cacheWrite5m: e.cacheWrite ?? null, cacheWrite1h: e.cacheWrite1h ?? null },
+      prices: { input: e.input ?? null, output: e.output ?? null, cacheRead: e.cacheRead ?? null, cacheWrite5m: e.cacheWrite ?? null, cacheWrite1h: write1h },
       quoteId: null, sourceUrl: null, fetchedAt: null, appliedConditions: [], skipped, note: null, retired: false,
     };
   }
