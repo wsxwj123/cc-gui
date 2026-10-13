@@ -184,16 +184,24 @@ export function freeInputHistoryAndRetry(storage, attempt, openSessionKeys = [])
       .map((key) => { const value = storage.getItem(key); return { key, value, size: key.length + String(value ?? '').length }; })
       .sort((a, b) => b.size - a.size);
     const removed = [];   // J1:删掉的键值留在内存里,全部删完仍写不进就写回去
-    for (const { key, value } of candidates) {
-      storage.removeItem(key);
-      removed.push([key, value]);
-      if (attempt()) return true;
+    let done = false;
+    try {
+      for (const { key, value } of candidates) {
+        storage.removeItem(key);
+        removed.push([key, value]);
+        if (attempt()) { done = true; return true; }
+      }
+    } finally {
+      // r150c S5:放在 finally 里 —— attempt() 自己抛异常时(不是"写不进"而是别的错)同样要把删掉的写回,
+      // 原来那种情况直接跳到外层 catch,已删的键就丢了。
+      if (!done) {
+        for (const [key, value] of removed) {
+          if (value == null) continue;
+          try { storage.setItem(key, value); } catch { /* 这一个写不回去:只丢它,继续写回其余的 */ }
+        }
+      }
     }
-    for (const [key, value] of removed) {
-      if (value == null) continue;
-      try { storage.setItem(key, value); } catch { /* 这一个写不回去:只丢它,继续写回其余的 */ }
-    }
-  } catch { /* 存储不可用 */ }
+  } catch { /* 存储不可用,或 attempt() 抛了异常:当作没写进 */ }
   return false;
 }
 
