@@ -51,7 +51,7 @@ function fetchServerEpoch() {
     .then(() => { serverEpochInFlight = null; return serverEpochCache; });
   return serverEpochInFlight;
 }
-import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark } from './stores/sessionStore.js';
+import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, flushAgentDeltas } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
@@ -4116,6 +4116,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r119:丢掉挂起的流式提交(卸载/切会话)。收尾路径(broken 流的 finally)也会再 cancel
     // 一次,幂等;此处保证"组件已经拆了"这一刻不再有任何排队中的帧回调。
     streamCommitCancelRef.current?.();
+    // r148 P4:子代理的流式增量也是合并提交的(store 里的队列)。切会话 / 卸载这一刻把它落下去 ——
+    // 主回合那份是窗格级的显示缓冲所以丢弃,子代理的文字属于记录本身,不能丢。
+    flushAgentDeltas();
   }, []);
   // 卸载即 detach。关窗格(closePane splice paneIds)只让本 pane 的 SessionDetail 卸载,
   // 兄弟窗格 key 稳定不受影响;abortRef 为 null 时是纯 no-op,故 StrictMode 的
@@ -7259,6 +7262,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // ⚠ 延迟提交意味着"落盘轮询(await 期间开了新回合)"可能先发生 → 用 teardownMine()
       // 把每一次写入都做成"还属于本回合本流才动"的守卫更新(与既有的 isCurrentTurn 同口径)。
       const teardownMine = () => isCurrentTurn() && !streamingRef.current;
+      // r148 P4:回合收尾 —— 子代理的增量缓冲无条件落下去(它属于子代理记录本身,与"本窗格是否还在
+      // 看这条流"无关,所以不放在下面的 isCurrentTurn 守卫里)。
+      flushAgentDeltas();
       if (isCurrentTurn()) {
         // r119 回合终止的强制 flush:合并器可能还挂着一帧(最后一批累积正文没进 state)。
         // 这里【同步、高优先级】提交 —— 此刻内容仍归本回合(下面的守卫更新才是可推迟的那组)。
@@ -7680,6 +7686,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 「停止中」。清掉它只有两处:本轮收尾(见 handleSend 的 finally)与后台分支的停止请求
     // 回话(那条没有本地流、没有 finally 可等)。前台分支【不】在回话时就清,理由见下面注释。
     streamCommitFlushRef.current?.();
+    flushAgentDeltas(); // r148 P4:子代理的增量缓冲同样在停止这一刻落下去
     if (pid) setStopping(true);
     abortRef.current?.abort();
     // R13:停止请求带上期望身份(owner)。只发【能证明属于这个 pid 的 owner】:本端起流时

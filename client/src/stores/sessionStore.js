@@ -9,6 +9,7 @@ import { mergeProviderLists } from '../utils/providerList.js';
 import { fetchProviderList } from '../utils/providerListFetch.js';
 import { attachmentSidecarNotice, draftSidecarBindingsForSessions, recoverAttachmentSidecarBindings } from '../utils/attachments.js';
 import { rotatedPaneGenerations } from '../utils/sessionFlowIdentity.js';
+import { createStreamCommit } from '../utils/streamCommit.js';
 
 const recoverDraftSidecarsFromSessions = (sessions, projectHash) => (
   recoverAttachmentSidecarBindings(draftSidecarBindingsForSessions(sessions, projectHash))
@@ -399,6 +400,96 @@ function appendAgentBlock(blocks, type, delta) {
     return [...arr.slice(0, -1), { ...last, content: (last.content || '') + delta }];
   }
   return [...arr, { type, content: delta }];
+}
+
+// ── 子代理流式增量的合并提交(r148 P4)────────────────────────────
+// 病灶:主回合的流式正文早就按帧合并了(utils/streamCommit.js),子代理没有 —— 每来一条文字 / 思考增量
+// 就 set 一次,每次都拷贝整张子代理表和该子代理的全部文字数组,并通知全部订阅者。几个子代理并发时每秒上百次。
+// 改法:文字 / 思考增量只进这个队列,用与主回合**同一个合并器**提交(每个动画帧最多一次,一次 set)。
+// 一个字不丢、顺序不乱靠两条:
+//   ① 队列按到达顺序保存,提交时逐条按原规则并块(末块同类型则并入,否则新起一块);
+//   ② **任何别的子代理写入之前先把队列落下去**(upsertAgent / appendAgentTool / updateAgentTool / 迁移 / 清空):
+//      子代理结束、回合收尾、停止、存活集剪枝改状态走的都是 upsertAgent,所以这些时刻写进去时文字已经完整。
+// 页面不可见时浏览器不给动画帧,那时改用定时器(否则缓冲要等到回到可见才落)。
+let agentDeltaQueue = [];   // { id, kind: 'text' | 'thinking', delta }[]
+function applyAgentDeltaQueue() {
+  if (!agentDeltaQueue.length) return;
+  const queue = agentDeltaQueue;
+  agentDeltaQueue = [];
+  useStore.setState((s) => {
+    const work = new Map();   // id → { cur, text, thinking, blocks, ownLast } | null(没有这条记录:丢,与原来一致)
+    for (const { id, kind, delta } of queue) {
+      let w = work.get(id);
+      if (w === undefined) {
+        const cur = s.activeAgents[id];
+        w = cur ? { cur, text: [], thinking: [], blocks: Array.isArray(cur.blocks) ? cur.blocks.slice() : [], ownLast: false } : null;
+        work.set(id, w);
+      }
+      if (!w) continue;
+      (kind === 'text' ? w.text : w.thinking).push(delta);
+      const last = w.blocks[w.blocks.length - 1];
+      if (last && last.type === kind) {
+        // 末块同类型:并入。末块还是 store 里那个对象时先换成新对象,不原地改旧 state。
+        if (w.ownLast) last.content += delta;
+        else { w.blocks[w.blocks.length - 1] = { ...last, content: (last.content || '') + delta }; w.ownLast = true; }
+      } else {
+        w.blocks.push({ type: kind, content: delta });
+        w.ownLast = true;
+      }
+    }
+    let next = null;
+    for (const [id, w] of work) {
+      if (!w) continue;
+      if (!next) next = { ...s.activeAgents };
+      next[id] = {
+        ...w.cur,
+        text: w.text.length ? [...w.cur.text, ...w.text] : w.cur.text,
+        thinking: w.thinking.length ? [...w.cur.thinking, ...w.thinking] : w.cur.thinking,
+        blocks: w.blocks,
+      };
+    }
+    return next ? { activeAgents: next } : s;
+  });
+}
+const agentDeltaCommit = createStreamCommit(applyAgentDeltaQueue, {
+  raf: (fn) => ((typeof requestAnimationFrame === 'function' && !(typeof document !== 'undefined' && document.hidden))
+    ? { frame: requestAnimationFrame(fn) }
+    : { timer: setTimeout(fn, 32) }),
+  cancelRaf: (h) => { if (h.frame !== undefined) cancelAnimationFrame(h.frame); else clearTimeout(h.timer); },
+});
+/** 立刻把缓冲里的子代理增量落进 store(没有就什么都不做)。 */
+export function flushAgentDeltas() { agentDeltaCommit.flush(); }
+
+// ── 子代理记录的回收(r148 P4)──────────────────────────────────
+// 病灶:activeAgents 只增不减(clearAgents 没人调),跑过的每个子代理的全文一直留在内存里,GUI 常连开好几天。
+// 规则:**已结束、且不在任何打开的视图里**的记录最多留最近 AGENT_RECYCLE_KEEP 条,更早的回收。
+// 「在打开的视图里」= 所属会话开在某个窗格里(口径与 Subagent 监控面板相同:paneSessions 的前 paneCount 格)
+// 或正在主区放大查看。这样的记录卡片 / 监控面板 / 放大视图还在用,一条不动。
+// 不回收的还有:没结束的(运行中 / 启动中 / 等输入 —— 存活集剪枝与单卡停止管的就是它们);
+// 单卡停止还在等核对的(optimisticStop);没记归属会话的老条目(卡片对它不做归属校验,判断不了有没有人在用)。
+// 被回收的记录,再打开那条会话时卡片按历史里的结果显示、点放大时按历史补建 —— 与刷新页面后重新打开完全一样。
+// 时机:每次写子代理记录(upsertAgent)时顺手检查;总数没超过上限时是一次长度比较。
+export const AGENT_RECYCLE_KEEP = 30;
+const AGENT_RECYCLE_TERMINAL = ['done', 'error', 'stopped'];
+function recycleAgentRecords(agents, s) {
+  const ids = Object.keys(agents);
+  if (ids.length <= AGENT_RECYCLE_KEEP) return agents;
+  const openSessions = new Set((s.paneSessions || []).slice(0, s.paneCount || 1).filter(Boolean).map((p) => p.sessionId).filter(Boolean));
+  const viewing = new Set(Object.values(s.viewingAgentByTab || {}).filter(Boolean));
+  const idle = [];
+  for (const id of ids) {
+    const a = agents[id];
+    if (!a || !AGENT_RECYCLE_TERMINAL.includes(a.status)) continue;
+    if (a.optimisticStop || !a.sessionId) continue;
+    if (openSessions.has(a.sessionId) || viewing.has(id)) continue;
+    idle.push(id);
+  }
+  if (idle.length <= AGENT_RECYCLE_KEEP) return agents;
+  const endedAt = (id) => agents[id].finishedAt || agents[id].startedAt || 0;
+  idle.sort((x, y) => endedAt(y) - endedAt(x));
+  const next = { ...agents };
+  for (const id of idle.slice(AGENT_RECYCLE_KEEP)) delete next[id];
+  return next;
 }
 
 const QUEUE_STORAGE_KEY = 'cgui-message-queue';
@@ -1187,6 +1278,7 @@ export const useStore = create((set, get) => ({
     // 判官重要2②:draft 阶段 upsert 的子代理/后台任务条目的 sessionId 是 draft-<hash> 键
     // (App.jsx streamOwnerSid draft 回落),init 后必须随真 sid 迁移 —— 否则清理路径
     // (finalizeSessionAgents 按真 sid 严格相等扫)永远扫不到 → 残留 + 监控幽灵条目。
+    flushAgentDeltas(); // r148 P4:整表重建之前先把缓冲里的子代理增量落下去
     const aas = get().activeAgents;
     if (aas && Object.values(aas).some((ag) => ag && ag.sessionId === fromKey)) {
       const next = {};
@@ -1784,36 +1876,39 @@ export const useStore = create((set, get) => ({
   // 喂给 CoworkBlocks 与母会话共用同一套 cowork 渲染(§1.5)。因 append 调用本就按
   // 时序到达,直接在 reducer 里"末块同类型则并入、否则新起一块"即可重建时序,
   // App.jsx 两条子代理路径(stream_event / 整块 assistant)无需改动。
-  upsertAgent: (id, patch) => set((s) => ({
-    activeAgents: {
-      ...s.activeAgents,
-      [id]: { ...(s.activeAgents[id] || { id, text: [], thinking: [], toolCalls: [], blocks: [] }), ...patch },
-    },
-  })),
-  appendAgentText: (id, delta) => set((s) => {
-    const cur = s.activeAgents[id];
-    if (!cur) return s;
-    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, text: [...cur.text, delta], blocks: appendAgentBlock(cur.blocks,'text', delta) } } };
-  }),
-  appendAgentThinking: (id, delta) => set((s) => {
-    const cur = s.activeAgents[id];
-    if (!cur) return s;
-    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, thinking: [...cur.thinking, delta], blocks: appendAgentBlock(cur.blocks,'thinking', delta) } } };
-  }),
-  appendAgentTool: (id, tc) => set((s) => {
-    const cur = s.activeAgents[id];
-    if (!cur) return s;
-    return { activeAgents: { ...s.activeAgents, [id]: { ...cur, toolCalls: [...cur.toolCalls, tc], blocks: [...(cur.blocks || []), { type: 'tool_use', toolCall: tc }] } } };
-  }),
-  updateAgentTool: (id, toolId, patch) => set((s) => {
-    const cur = s.activeAgents[id];
-    if (!cur) return s;
-    return { activeAgents: { ...s.activeAgents, [id]: {
-      ...cur,
-      toolCalls: cur.toolCalls.map((tc) => tc.id === toolId ? { ...tc, ...patch } : tc),
-      blocks: (cur.blocks || []).map((b) => (b.type === 'tool_use' && b.toolCall?.id === toolId) ? { ...b, toolCall: { ...b.toolCall, ...patch } } : b),
-    } } };
-  }),
+  // r148 P4:文字 / 思考增量走合并队列(见文件顶部「子代理流式增量的合并提交」);其余写入一律先把队列落下去,
+  // 保证到达顺序;upsertAgent 顺手做记录回收(见「子代理记录的回收」)。
+  upsertAgent: (id, patch) => {
+    flushAgentDeltas();
+    set((s) => ({
+      activeAgents: recycleAgentRecords({
+        ...s.activeAgents,
+        [id]: { ...(s.activeAgents[id] || { id, text: [], thinking: [], toolCalls: [], blocks: [] }), ...patch },
+      }, s),
+    }));
+  },
+  appendAgentText: (id, delta) => { agentDeltaQueue.push({ id, kind: 'text', delta }); agentDeltaCommit.schedule(); },
+  appendAgentThinking: (id, delta) => { agentDeltaQueue.push({ id, kind: 'thinking', delta }); agentDeltaCommit.schedule(); },
+  appendAgentTool: (id, tc) => {
+    flushAgentDeltas();
+    set((s) => {
+      const cur = s.activeAgents[id];
+      if (!cur) return s;
+      return { activeAgents: { ...s.activeAgents, [id]: { ...cur, toolCalls: [...cur.toolCalls, tc], blocks: [...(cur.blocks || []), { type: 'tool_use', toolCall: tc }] } } };
+    });
+  },
+  updateAgentTool: (id, toolId, patch) => {
+    flushAgentDeltas();
+    set((s) => {
+      const cur = s.activeAgents[id];
+      if (!cur) return s;
+      return { activeAgents: { ...s.activeAgents, [id]: {
+        ...cur,
+        toolCalls: cur.toolCalls.map((tc) => tc.id === toolId ? { ...tc, ...patch } : tc),
+        blocks: (cur.blocks || []).map((b) => (b.type === 'tool_use' && b.toolCall?.id === toolId) ? { ...b, toolCall: { ...b.toolCall, ...patch } } : b),
+      } } };
+    });
+  },
 
   // ── 后台任务(Bash run_in_background)──────────────────────────
   // keyed by tool_use id(创建时);result 到达后补 shellId + outputPath(供 tail)。
@@ -1822,7 +1917,7 @@ export const useStore = create((set, get) => ({
   upsertBgTask: (id, patch) => set((s) => ({
     bgTasks: { ...s.bgTasks, [id]: { ...(s.bgTasks[id] || { id }), ...patch } },
   })),
-  clearAgents: () => set({ activeAgents: {} }),
+  clearAgents: () => { agentDeltaQueue = []; agentDeltaCommit.cancel(); set({ activeAgents: {} }); },
   // 部件①单卡精确停止:停某一个子代理/teammate。做成 store action 而非 App handler+props——
   // TaskCard 深嵌在 TurnBubble(3 处渲染)下,透传要改 TurnBubble(不在方案文件清单里),
   // 且卡片本就自带 fetch+getState 直调风格(见 TaskCard.openAgentView)。
