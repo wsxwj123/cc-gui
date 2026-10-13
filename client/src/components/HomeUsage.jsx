@@ -274,11 +274,18 @@ export const HomeUsage = React.memo(function HomeUsage() {
       layer.dataset.snakeStep = String(step);
       step = (step + 1) % route.path.length;
     };
+    // r148 P3:页面不可见(窗口最小化 / 切到别的桌面)时停表,回到可见从停下的那一步接着走 ——
+    // 原来窗口藏起来也照样每 100ms 改一次样式。step 留在闭包里,所以是"接着走"不是"从头再来"。
+    const start = () => { if (timer === null) timer = setInterval(tick, stepMs); };
+    const stop = () => { if (timer !== null) { clearInterval(timer); timer = null; } };
+    const onVisibility = () => { if (document.hidden) stop(); else start(); };
     tick();
-    timer = setInterval(tick, stepMs);
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', onVisibility);
     // M1(独立审查必修):cleanup 必须把染色复原(数据刷新会让 effect 重跑,新闭包的 marked 是空的)
     return () => {
-      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      stop();
       restore();
     };
   }, [snakeOn, grid, snakeTotal, tab]);
