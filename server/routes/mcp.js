@@ -13,6 +13,7 @@ import { detectUv, detectLocalProxy, probeTcp, isLoopbackProxyHost } from './ver
 import { searchRegistry, browseRegistry } from '../services/mcp-registry.js';
 import { assertWritable, isConfigGuardError, sendConfigGuardError } from '../utils/guarded-json.js';
 import { parsePluginList } from '../utils/plugin-list.js';
+import { makeListCache } from '../utils/list-cache.js';
 
 const execFileP = promisify(execFile);
 
@@ -448,8 +449,11 @@ function parseMcpList(output) {
 // In-memory cache. `runClaude(['mcp', 'list'])` spawns the claude CLI, which
 // takes ~2s cold start. Result is stable for a session, so cache it. Enable/
 // disable mutations invalidate the cache below.
-let mcpCache = null;
-let mcpCacheAt = 0;
+// r150 E3:缓存槽换成 utils/list-cache.js(原来是 mcpCache / mcpCacheAt / mcpRefreshing 三个变量)。
+// 原来作废只是把缓存置空,拦不住已经在跑的构建:面板冷读起了一次后台完整刷新(健康检查几秒到几十秒),
+// 这时停用一个插件,那次刷新跑完照样把停用之前读到的 MCP 列表写回缓存 —— 已停用插件带来的 MCP 又出现,
+// 一直到缓存过期。现在作废会让此前开始的构建全部写不进来,并在有人等刷新时自动补跑一次。
+const mcpListCache = makeListCache();
 // Long TTL because mcp/plugin list rarely changes mid-session.
 // Mutations (enable/disable) invalidate explicitly via invalidateMcpCache().
 // Pass `?fresh=1` to force a refresh.
@@ -467,7 +471,7 @@ const MCP_STAMP_FILE = join(GUI_DIR, 'mcp-config.stamp');
 let availablePluginsCache = null; // { at, items }
 const AVAILABLE_PLUGINS_TTL_MS = 5 * 60_000;
 function invalidateMcpListCache() {
-  mcpCache = null; mcpCacheAt = 0;
+  mcpListCache.invalidate();
   availablePluginsCache = null; // 装/卸插件后 installed 标记会变,一并失效
   try { invalidateDetailsCache(); } catch {}
 }
@@ -657,14 +661,9 @@ async function buildMcpList({ liveStatus = true } = {}) {
     return result;
 }
 
-let mcpRefreshing = false;
+// 后台完整刷新(含健康检查)。同一时刻只跑一次;跑的过程中缓存被作废,它的结果不写进缓存(见 list-cache.js)。
 function refreshMcpCache() {
-  if (mcpRefreshing) return;
-  mcpRefreshing = true;
-  buildMcpList()
-    .then((r) => { mcpCache = r; mcpCacheAt = Date.now(); })
-    .catch(() => {})
-    .finally(() => { mcpRefreshing = false; });
+  mcpListCache.refresh(() => buildMcpList());
 }
 
 // GET /api/mcp — stale-while-revalidate:有缓存(即使过期)立即秒回,过期再后台刷新。
@@ -672,16 +671,18 @@ function refreshMcpCache() {
 // "每次进面板都卡几十秒等 claude mcp list 健康检查"。?fresh=1 强制阻塞做完整健康检查。
 router.get('/mcp', async (req, res) => {
   const fresh = req.query.fresh === '1';
-  if (!fresh && mcpCache) {
-    res.json(mcpCache);
-    if (Date.now() - mcpCacheAt >= MCP_CACHE_TTL_MS) refreshMcpCache();
+  const hit = fresh ? null : mcpListCache.peek();
+  if (hit) {
+    res.json(hit.value);
+    if (Date.now() - hit.at >= MCP_CACHE_TTL_MS) refreshMcpCache();
     return;
   }
   try {
     // fresh=1:阻塞做完整(含健康检查)。冷加载:只做快路径秒回,随后后台补在线状态。
+    const token = mcpListCache.begin();
     const result = await buildMcpList({ liveStatus: fresh });
-    mcpCache = result;
-    mcpCacheAt = Date.now();
+    // 构建途中缓存被作废(有人刚改了 MCP / 插件)→ 这份结果照常回给本次请求,但不进缓存,下次读取重建。
+    mcpListCache.commit(token, result);
     res.json(result);
     if (!fresh) refreshMcpCache(); // 后台 liveStatus:true 覆盖在线状态 + 补 plugin/project MCP
   } catch (err) {

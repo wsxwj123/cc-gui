@@ -279,7 +279,11 @@ export function MCPPanel() {
   // silent=true:不显示加载态,用于后台静默刷新(拉取后端补好的在线状态)。
   // force=true:?fresh=1 绕过后端 5min 缓存,手动「刷新」按钮用 —— 否则刚 `claude mcp add`
   // 的服务器要等缓存过期才出现(用户报「刷新看不到新加的 MCP」根因)。
+  // r150 E3:只采纳最后发起的那次读取。读取可能很慢(?fresh=1 要等健康检查),慢的那次回来时界面上
+  // 可能已经有更新的状态(后发起的读取先回来了,或者用户刚切了一个插件的开关)—— 过期的结果直接丢掉。
+  const fetchSeq = useRef(0);
   const fetchData = async (silent = false, force = false) => {
+    const seq = ++fetchSeq.current;
     if (!silent) setLoading(true);
     setError(null);
     try {
@@ -287,11 +291,13 @@ export function MCPPanel() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (!mounted.current) return;
-      setServers(data.mcpServers || []);
-      setPlugins(data.plugins || []);
-      setExternal(data.external || []);
+      if (seq === fetchSeq.current) {
+        setServers(data.mcpServers || []);
+        setPlugins(data.plugins || []);
+        setExternal(data.external || []);
+      }
     } catch (err) {
-      if (mounted.current && !silent) setError(err.message);
+      if (mounted.current && !silent && seq === fetchSeq.current) setError(err.message);
     }
     if (mounted.current && !silent) setLoading(false);
   };
@@ -311,6 +317,8 @@ export function MCPPanel() {
     if (!plugin) return;
     const { name } = plugin;
     const newEnabled = plugin.enabled === false;
+    // r150 E3:作废还在路上的读取 —— 它读到的是切换之前的状态,回来会把下面的乐观更新盖掉。
+    fetchSeq.current += 1;
     setPlugins((prev) => prev.map((p) => p.name === name ? { ...p, enabled: newEnabled } : p));
     setToggling(name);
     const endpoint = newEnabled
@@ -318,9 +326,14 @@ export function MCPPanel() {
       : `/api/plugins/${encodeURIComponent(name)}/disable`;
     fetch(endpoint, { method: 'PUT' })
       .then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.error); }); })
+      // r150 E3:切换成功后重读一次(静默、?fresh=1)。插件带来的 MCP 在「MCP 服务器」页签里,停用 / 启用
+      // 一个插件,那边的列表也要跟着变;原来只改了本页的开关,MCP 列表要等用户手动点刷新。
+      // 用 ?fresh=1:后端的缓存刚被这次切换作废,普通读取只有配置文件里的 MCP,插件带来的要等健康检查补。
+      .then(() => { fetchData(true, true); })
       .catch((err) => {
         console.error('Plugin toggle failed:', err);
         setPlugins((prev) => prev.map((p) => p.name === name ? { ...p, enabled: !newEnabled } : p));
+        fetchData(true);   // 上面作废了在路上的读取,失败时补读一次拿回真实状态
       })
       .finally(() => setToggling(null));
   };
