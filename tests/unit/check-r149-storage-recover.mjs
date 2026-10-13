@@ -98,8 +98,8 @@ await check('S4 占满存储的不是输入历史:腾不出,照旧返回 null、
 // ── S6 文案 ───────────────────────────────────────────────
 await check('S6 报错文案:没有附件时不提附件、客观陈述;有附件时保留原来的句子', async () => {
   const { queueSaveFailedNotice } = await import(root + 'client/src/utils/storageNotice.js');
-  assert.equal(queueSaveFailedNotice({ hasAttachments: false }), '无法保存待发消息：本地存储已满。');
-  assert.equal(queueSaveFailedNotice({ hasAttachments: false, inSession: true }), '无法保存待发消息：本地存储已满。');
+  assert.equal(queueSaveFailedNotice({ hasAttachments: false }), '无法保存待发消息：本地存储已满。输入内容仍在输入框中。');
+  assert.equal(queueSaveFailedNotice({ hasAttachments: false, inSession: true }), '无法保存待发消息：本地存储已满。输入内容仍在输入框中。');
   assert.equal(queueSaveFailedNotice({ hasAttachments: true }), '无法保存待发消息：本地存储空间不足。附件仍保留，请移除部分附件后重试。');
   assert.equal(queueSaveFailedNotice({ hasAttachments: true, inSession: true }), '无法保存待发消息：本地存储空间不足。附件与草稿仍保留，请处理后重试。');
 });
