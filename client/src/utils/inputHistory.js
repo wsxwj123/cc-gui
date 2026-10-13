@@ -139,6 +139,27 @@ export function slimInputHistory(storage) {
   return result;
 }
 
+// ── r150 J2:启动时的瘦身只跑一次 ─────────────────────────────
+// 标记键:写了它 = 这份本地存储已经瘦过身。名字不在 cgui-input-history:<会话键> 前缀下,
+// 不会被当成某个会话的输入历史(瘦身、腾空间、删会话都碰不到它)。
+export const INPUT_HISTORY_SLIM_DONE_KEY = 'cgui-input-history-slim-done';
+
+/**
+ * 启动时用:没有标记才瘦身一次,跑完写标记;已有标记什么都不做(返回 null)。否则返回瘦身的结果。
+ * 为什么不能每次启动都瘦身:瘦身剔的是"会话键里与旧全局键相同的条目"。S1 之后这种条目只有一个来源 ——
+ * 用户在这个会话里又发了一遍旧全局里也有的那句话(它被提到本会话历史的第 1 位)。每次启动都剔,这一条
+ * 重启后就从第 1 位掉到本会话所有条目之后。存量的副本(S1 之前留下的)瘦一次就清完了,之后不会再产生。
+ * 存储写满时腾空间那条路(freeInputHistoryAndRetry)不看这个标记,仍然无条件瘦身。
+ * 标记写不进(存储满、瘦身又没腾出地方)时不抛,下次启动再跑一次;存储读不了 = 不跑。
+ * slim 可以换(单测用来数跑了几次)。
+ */
+export function slimInputHistoryOnce(storage, slim = slimInputHistory) {
+  try { if (storage.getItem(INPUT_HISTORY_SLIM_DONE_KEY) != null) return null; } catch { return null; }
+  const result = slim(storage);
+  try { storage.setItem(INPUT_HISTORY_SLIM_DONE_KEY, '1'); } catch { /* 写不进:下次启动再跑一次 */ }
+  return result;
+}
+
 // ── S4:写不进时腾空间 ───────────────────────────────────────
 /**
  * 本地存储写不进时调用:腾出输入历史占的空间,然后重试。attempt() 做那次写入并返回成没成。
