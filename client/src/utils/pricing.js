@@ -559,8 +559,8 @@ if (typeof window !== 'undefined') {
 // sonnet → claude-sonnet-5-5、haiku → claude-haiku-5-5;同一份目录的 latest_per_family 也是这三个。
 // (目录里另有按云厂商的例外:foundry 的 opus 是 4-6,企业网关登录 gateway 是 4-7 / 4-6 / 4-5,
 //  bedrock / vertex 的 sonnet、haiku 是 4-5 —— 本应用不走这些通道,不建模。)
-// fable 在同一份目录里 default 是 claude-fable-5-1(gateway 是 claude-fable-5);本轮任务只点了
-// 前三条,fable 那条不动。
+// r150 R3:fable 由 5 改为 5.1 —— 同一份目录里 aliases.fable.default 是 claude-fable-5-1(只有企业网关登录
+// gateway 那一列是 claude-fable-5)。两代的输入 / 输出价相同,差在命中价($0.25 对 $1)。
 const ALIASES = {
   'sonnet': 'claude-sonnet-5-5',
   'opus':   'claude-opus-5-5',
@@ -568,7 +568,7 @@ const ALIASES = {
   // 与上面三条同理:CLI 发裸 'fable' 时原先四路查价全落空 = 无价可显。
   // (本机 3749 个 jsonl 的 assistant 消息里实际出现 0 次 —— 上一版注释写的"717 条"
   //  是拿 rg 抓 "model":" 时把 Agent 工具入参 model:"fable" 也算进去了,不是真调用。)
-  'fable':  'claude-fable-5',
+  'fable':  'claude-fable-5-1',
 };
 
 // 按 model id 查内置离线表(纯解析,不碰 provider):精确 → 别名 → 去日期后缀 → 最长前缀
