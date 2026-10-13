@@ -7686,8 +7686,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // —— 停止状态和新正文同帧出现,不会出现"按钮变了但正文还停在上上帧"的错位;②立刻进入
     // 「停止中」。清掉它只有两处:本轮收尾(见 handleSend 的 finally)与后台分支的停止请求
     // 回话(那条没有本地流、没有 finally 可等)。前台分支【不】在回话时就清,理由见下面注释。
-    streamCommitFlushRef.current?.();
     flushAgentDeltas(); // r148 P4:子代理的增量缓冲同样在停止这一刻落下去
+    streamCommitFlushRef.current?.();
     if (pid) setStopping(true);
     abortRef.current?.abort();
     // R13:停止请求带上期望身份(owner)。只发【能证明属于这个 pid 的 owner】:本端起流时
