@@ -61,3 +61,17 @@ export function parsePluginList(output) {
   flush();
   return { installed, synced };
 }
+
+// ── 插件名校验(r150c S6)──────────────────────────────────────
+// 插件名会原样作为参数传给 `claude plugin enable / disable / update / uninstall <名字>`。以 - 开头的名字
+// 会被命令行当成选项(-x、--help 之类),不是插件名。更新时 @ 后面那段还会单独传给
+// `claude plugin marketplace update <市场>`,所以它也不许以 - 开头。
+// 字符集与长度沿用路由里原有的那条规则;合法名字的判定不变。
+const PLUGIN_NAME_RE = /^[A-Za-z0-9._@\-/]{1,100}$/;
+
+/** 这个名字能不能安全地当作命令行参数传给 claude(字符集合法、不以 - 开头、@ 后各段也不以 - 开头)。 */
+export function isSafePluginName(name) {
+  if (typeof name !== 'string' || !PLUGIN_NAME_RE.test(name)) return false;
+  return name.split('@').every((part) => !part.startsWith('-'));
+}
+

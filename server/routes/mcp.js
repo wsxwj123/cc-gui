@@ -12,7 +12,7 @@ import { winCmdSpawnSpec } from '../utils/win-cmd.js';
 import { detectUv, detectLocalProxy, probeTcp, isLoopbackProxyHost } from './version-check.js';
 import { searchRegistry, browseRegistry } from '../services/mcp-registry.js';
 import { assertWritable, isConfigGuardError, sendConfigGuardError } from '../utils/guarded-json.js';
-import { parsePluginList } from '../utils/plugin-list.js';
+import { parsePluginList, isSafePluginName } from '../utils/plugin-list.js';
 import { makeListCache } from '../utils/list-cache.js';
 
 const execFileP = promisify(execFile);
@@ -1274,12 +1274,22 @@ router.put('/mcp/:name/autoapprove', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// r150c S6:名字以 - 开头(或 @ 后面那段以 - 开头)时,命令行会把它当成选项而不是插件名 —— 直接拒绝,
+// 返回 400,不执行命令。字符集 / 长度不合法的仍走各接口原有的那条检查(行为不变)。
+// 返回 true 表示已经回了 400,调用方直接 return。
+function rejectOptionLikePluginName(name, res) {
+  if (isSafePluginName(name)) return false;
+  res.status(400).json({ error: '插件名不能以 - 开头' });
+  return true;
+}
+
 // Plugin enable/disable — delegates to `claude plugin {enable|disable} <name>`.
 // Accepts either bare name ("pua") or qualified ("pua@pua-skills"); CLI handles both.
 router.put('/plugins/:name/enable', async (req, res) => {
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    if (rejectOptionLikePluginName(name, res)) return;
     await runClaude(['plugin', 'enable', name], { timeout: 15000 });
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: true });
@@ -1292,6 +1302,7 @@ router.put('/plugins/:name/disable', async (req, res) => {
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    if (rejectOptionLikePluginName(name, res)) return;
     await runClaude(['plugin', 'disable', name], { timeout: 15000 });
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: false });
@@ -1306,6 +1317,7 @@ router.post('/plugins/:name/update', async (req, res) => {
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    if (rejectOptionLikePluginName(name, res)) return;   // r150c S6(下面 mk 会单独传给命令行,@ 后那段也在校验之内)
     const mk = name.includes('@') ? name.split('@')[1] : '';
     const readVer = async () => {
       try {
@@ -1339,6 +1351,7 @@ router.delete('/plugins/:name', async (req, res) => {
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    if (rejectOptionLikePluginName(name, res)) return;   // r150c S6
     await runClaude(['plugin', 'uninstall', name], { timeout: 30000 });
     invalidateMcpCache();
     res.json({ ok: true, name });
@@ -1793,13 +1806,15 @@ router.get('/plugins/available', async (req, res) => {
 //   `marketplace add <repo>` + `marketplace update <marketplace>` 再装 `<name>@<marketplace>`。
 router.post('/plugins/install', async (req, res) => {
   try {
+    // r150c S6:三个参数都会作为命令行参数传给 claude(<name>@<marketplace>、marketplace update <marketplace>、
+    // marketplace add <repo>),以 - 开头会被当成选项 —— 同样拒绝。这里沿用本接口原有的错误形态(结构化错误),不另出 400。
     const name = String(req.body?.name || '');
-    if (!/^[A-Za-z0-9._-]{1,80}$/.test(name)) throw new Error('invalid plugin name');
+    if (!/^[A-Za-z0-9._-]{1,80}$/.test(name) || name.startsWith('-')) throw new Error('invalid plugin name');
     const repo = req.body?.repo ? String(req.body.repo) : '';
     const marketplace = req.body?.marketplace ? String(req.body.marketplace) : OFFICIAL_MARKETPLACE;
-    if (!/^[A-Za-z0-9._-]{1,80}$/.test(marketplace)) throw new Error('invalid marketplace');
+    if (!/^[A-Za-z0-9._-]{1,80}$/.test(marketplace) || marketplace.startsWith('-')) throw new Error('invalid marketplace');
     const isCustom = !!repo && marketplace !== OFFICIAL_MARKETPLACE;
-    if (isCustom && !/^[A-Za-z0-9._\/-]{1,100}$/.test(repo)) throw new Error('invalid repo');
+    if (isCustom && (!/^[A-Za-z0-9._\/-]{1,100}$/.test(repo) || repo.startsWith('-'))) throw new Error('invalid repo');
 
     let childEnv = null;
 
