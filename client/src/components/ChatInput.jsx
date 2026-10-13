@@ -19,6 +19,7 @@ import { filterSlashCommands, slashBlocked, fetchSlashCommands } from '../utils/
 import { SlashCommandMenu } from './SlashCommandMenu.jsx';
 import { useAtRef } from '../hooks/useAtRef.js';
 import { AtRefPanel } from './AtRefPanel.jsx';
+import { readInputHistory, saveInputHistoryEntry } from '../utils/inputHistory.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -467,36 +468,12 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
 
   const draftKey = `cgui-draft:${permKey || 'global'}`;
   // 输入历史按会话隔离(permKey=sessionId 或 draft-项目hash):全局单一列表会让 A 会话的
-  // 输入在 B 会话上键翻出(用户实报)。
-  const historyKey = `cgui-input-history:${permKey || 'global'}`;
-  // 隔离改造前的旧全局键。存量从未迁移 → 升级后所有既有历史 ↑ 翻不出来(像被清空)。
-  // 迁移策略:本会话键为空时【只读】回落到旧键,不删旧键 —— 多会话/多标签页同时在跑,
-  // 谁都可能是第一个读到的,删了就随机丢给其它会话。首次 saveHistoryEntry 会把回落读到的
-  // 列表连同新条目写进本会话键,此后该会话不再回落(旧键留着给还没写过的其它会话)。
-  const LEGACY_HISTORY_KEY = 'cgui-input-history';
-  const parseHistory = (raw) => {
-    try {
-      const parsed = JSON.parse(raw || '[]');
-      return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string' && x.trim()) : [];
-    } catch {
-      return [];
-    }
-  };
-  const readHistory = () => {
-    try {
-      const list = parseHistory(localStorage.getItem(historyKey));
-      return list.length ? list : parseHistory(localStorage.getItem(LEGACY_HISTORY_KEY));
-    } catch {
-      return [];
-    }
-  };
-  const saveHistoryEntry = (value) => {
-    const v = String(value || '').trim();
-    if (!v) return;
-    const list = readHistory().filter((x) => x !== v);
-    list.unshift(v);
-    try { localStorage.setItem(historyKey, JSON.stringify(list.slice(0, 100))); } catch {}
-  };
+  // 输入在 B 会话上键翻出(用户实报)。存取规则在 utils/inputHistory.js:
+  // 写 —— 只写本会话自己发过的(r149 S1:原来本会话键为空时把旧全局键回落读到的 100 条连同新条目整份
+  //       写进本会话键,每个新会话抄一份,两百多个会话把本地存储占满);
+  // 读 —— 上键翻出来的是本会话的在前、隔离改造前旧全局键里的在后(去重),升级前的历史仍翻得出来。
+  const readHistory = () => readInputHistory(localStorage, permKey);
+  const saveHistoryEntry = (value) => { saveInputHistoryEntry(localStorage, permKey, value); };
 
   // r146b:每次渲染递增的序号。装载草稿的 effect 记下"在哪一次提交里装载",持久化 effect 在同一次
   // 提交里(装载的 setText 还没生效,text 仍是挂载 / 换键之前的值)一律不写 —— 原来挂载帧(会话区
