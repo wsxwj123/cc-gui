@@ -515,11 +515,18 @@ if (typeof window !== 'undefined') {
 
 // Common aliases the CLI may emit.
 // 裸别名对应哪一代是有歧义的(会话当年跑的可能是别的代),只能取"该别名当前指向的
-// 主力型号";已存在的三条不动(改了也只是把一个猜测换成另一个猜测)。
+// 主力型号"。
+// r150 P3:前三条由 4.6 / 4.7 / 4.5 改为 5.5 一代。依据 = 本机 CLI 2.1.296 自带模型目录的
+// aliases.<别名>.default(直连 Anthropic 与自定义端点都走 default):opus → claude-opus-5-5、
+// sonnet → claude-sonnet-5-5、haiku → claude-haiku-5-5;同一份目录的 latest_per_family 也是这三个。
+// (目录里另有按云厂商的例外:foundry 的 opus 是 4-6,企业网关登录 gateway 是 4-7 / 4-6 / 4-5,
+//  bedrock / vertex 的 sonnet、haiku 是 4-5 —— 本应用不走这些通道,不建模。)
+// fable 在同一份目录里 default 是 claude-fable-5-1(gateway 是 claude-fable-5);本轮任务只点了
+// 前三条,fable 那条不动。
 const ALIASES = {
-  'sonnet': 'claude-sonnet-4-6',
-  'opus':   'claude-opus-4-7',
-  'haiku':  'claude-haiku-4-5',
+  'sonnet': 'claude-sonnet-5-5',
+  'opus':   'claude-opus-5-5',
+  'haiku':  'claude-haiku-5-5',
   // 与上面三条同理:CLI 发裸 'fable' 时原先四路查价全落空 = 无价可显。
   // (本机 3749 个 jsonl 的 assistant 消息里实际出现 0 次 —— 上一版注释写的"717 条"
   //  是拿 rg 抓 "model":" 时把 Agent 工具入参 model:"fable" 也算进去了,不是真调用。)
