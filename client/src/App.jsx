@@ -1725,8 +1725,19 @@ export function SessionRowStatus({ sessionId, running, isSelected }) {
 }
 
 export function StatusDot({ running, lastActivity, className = '' }) {
-  if (running) return <Loader2 size={11} className={`text-accent animate-spin shrink-0 ${className}`} />;
   const t = lastActivity ? new Date(lastActivity).getTime() : NaN;
+  // r148 P1:这个勾只显示 RUNNING_DONE_WINDOW_MS(按当前时间算)。原来没有任何东西通知它"到点了" ——
+  // 靠根组件每 1.5 秒整体重渲染顺带把过期的勾收掉。那个重渲染去掉后,到点自己刷新一次。
+  // (hook 必须在下面的提前 return 之前。)
+  const [, bumpExpired] = useState(0);
+  useEffect(() => {
+    if (running || !Number.isFinite(t)) return undefined;
+    const left = t + RUNNING_DONE_WINDOW_MS - Date.now();
+    if (left <= 0) return undefined;
+    const id = setTimeout(() => bumpExpired((n) => n + 1), left + 50);
+    return () => clearTimeout(id);
+  }, [running, t]);
+  if (running) return <Loader2 size={11} className={`text-accent animate-spin shrink-0 ${className}`} />;
   if (Number.isFinite(t) && Date.now() - t < RUNNING_DONE_WINDOW_MS)
     return <CheckCircle2 size={11} className={`text-success shrink-0 ${className}`} />;
   return null;
@@ -3645,7 +3656,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // so single-pane behavior is identical. EVERY downstream selectedSession
   // reference reads the local alias below, so the rest of this 700-line
   // component is unchanged.
-  const { selectedProject, loading } = useStore();
+  // r148 P1:只订阅用到的两个字段。原来这里不带选择器(= 订阅整个 state),store 里任何一次写入
+  // (包括每 1.5 秒一次的运行状态轮询)都会让这个五千多行的组件连同输入框整体重跑一遍。
+  const selectedProject = useStore((s) => s.selectedProject);
+  const loading = useStore((s) => s.loading);
   // Pane routing generalized to N panes (0..5). Each SessionDetail reads/writes
   // its own slot in paneSessions/paneMessages. setPaneSession/setPaneMessages
   // keep the legacy selectedSession/messages (pane 0) + secondary* (pane 1)
@@ -3669,6 +3683,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 本会话的队列/pin/owner key(草稿用 draft-<hash>-<draftId>,r26-B5)。必须在所有引用它的 effect 之前声明,
   // 否则 effect 依赖数组在渲染期先求值会命中 TDZ(Cannot access before initialization)。
   const sessionQueueKey = queueKeyFor(selectedSession);
+  // r148 P1:本会话的标题改成订阅。原来在渲染时直接读 store(下面子代理视图的「母会话」标题、导出按钮的文件名),
+  // 标题变了它自己不会重渲染,全靠上面那个整库订阅顺带刷新;整库订阅去掉后必须自己订。
+  // 选择器返回字符串(基元),值没变不触发重渲染。
+  const sessionTitle = useStore((s) => resolveSessionTitle(
+    selectedSession,
+    s.customTitles[selectedSession?.sessionId],
+    s.autoTitles[selectedSession?.sessionId],
+  ));
   // /goal 当前是否还挂着:取历史里【最后一条】goal 记录。达成与手动清除都写 met:true
   // (CLI 的写入函数只有这一种表达)。用户需求:目标条要像计划卡一样常驻输入框上方,
   // 不能只在消息流里出现、一滚动就消失。因此这里取最后一条 goal 作为常驻条数据,
@@ -8990,11 +9012,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             tabIndex={tabIndex}
             active={paneIsActive}
             parentSessionId={selectedSession?.sessionId || null}
-            parentTitle={resolveSessionTitle(
-              selectedSession,
-              useStore.getState().customTitles[selectedSession?.sessionId],
-              useStore.getState().autoTitles[selectedSession?.sessionId],
-            ) || '母会话'}
+            parentTitle={sessionTitle || '母会话'}
             onBack={() => useStore.getState().setViewingAgent(tabIndex, null)}
           />
         </div>
@@ -9092,11 +9110,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             <SessionHeaderMore forceOpenSignal={rewindSignal}>
               <ExportSessionButton
                 messages={[...messages, ...chatMessages]}
-                title={resolveSessionTitle(
-                  selectedSession,
-                  useStore.getState().customTitles[selectedSession?.sessionId],
-                  useStore.getState().autoTitles[selectedSession?.sessionId],
-                ) || '会话'}
+                title={sessionTitle || '会话'}
               />
               <CheckpointButton
                 openSignal={rewindSignal}
@@ -11664,6 +11678,12 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
   const selectedProject = useStore((s) => s.selectedProject);
   const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
   const permKey = queueKeyFor(activeSession);
+  // r148 P1:导出文件名用的会话标题改成订阅(原来渲染时现读 store,见 SessionDetail 的 sessionTitle)。
+  const activeSessionTitle = useStore((s) => resolveSessionTitle(
+    activeSession,
+    s.customTitles[activeSession?.sessionId],
+    s.autoTitles[activeSession?.sessionId],
+  ));
 
   // r26-F2:手机菜单模型行走与桌面同一解析链 resolveSelectorModel(pin→元数据→全局,
   // 每环过 provider 白名单 + context1m 后缀)——裸 `pin || global` 会把 guard 拒掉的
@@ -11759,11 +11779,7 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
                 <div className="px-4 py-1 flex items-center gap-2">
                   <ExportSessionButton
                     messages={menuMessages}
-                    title={resolveSessionTitle(
-                      activeSession,
-                      useStore.getState().customTitles[activeSession.sessionId],
-                      useStore.getState().autoTitles[activeSession.sessionId],
-                    ) || '会话'}
+                    title={activeSessionTitle || '会话'}
                   />
                   <CheckpointButton
                     sessionId={activeSession.sessionId}
@@ -12004,7 +12020,11 @@ export default function App() {
     }, 5000);
     return () => clearInterval(id);
   }, []);
-  const { sidebarCollapsed, toggleSidebar, selectedProject, selectedSession } = useStore();
+  // r148 P1:只订阅用到的四个字段(原来是整库订阅:store 任何写入都重渲染根组件 → 侧栏 → 所有窗格)。
+  const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
+  const toggleSidebar = useStore((s) => s.toggleSidebar);
+  const selectedProject = useStore((s) => s.selectedProject);
+  const selectedSession = useStore((s) => s.selectedSession);
   // 修正批#1b:顶栏选择器(Provider/模型/力度/远程)作用于「活跃窗格」的会话——
   // 未分屏 = selectedSession;分屏 = 聚焦格。返回既有对象引用,选择器稳定。
   const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || s.selectedSession);

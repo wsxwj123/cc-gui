@@ -649,7 +649,7 @@ export const useStore = create((set, get) => ({
   liveSubUsage: {},
   pushLiveSubUsage: (entry) => set((s) => {
     const id = entry?.toolUseId;
-    if (!id) return {};
+    if (!id) return s; // r148 P1:没东西可写就原样返回(返回 {} 也会通知全部订阅者)
     const next = { ...s.liveSubUsage, [id]: entry };
     const keys = Object.keys(next);
     if (keys.length > LIVE_SUB_USAGE_MAX) delete next[keys[0]]; // 插入序 = 最老的在最前
@@ -658,13 +658,15 @@ export const useStore = create((set, get) => ({
 
   // 侧栏状态符号数据源:有活跃 chat-process 的 sessionId(转圈)+ 它们的 cwd(让
   // ProjectList 在任一会话运行时给项目转圈)。App 每 1.5s 轮询 /agents/active 写入;
-  // setter 在内容不变时返回 {} 保持 Set 引用稳定,避免侧栏无谓重渲染。
+  // setter 在内容不变时原样返回 state:Set 引用稳定,且**不通知任何订阅者**。
+  // r148 P1:这里原来返回 {} —— zustand 5 里返回 {} 照样换一个新的 state 对象并通知全部订阅者
+  // (只有返回原 state 才不通知),于是空闲时每 1.5 秒把所有选择器白跑一遍、整库订阅的组件整体重渲染。
   runningSessionIds: new Set(),
   runningCwds: new Set(),
   setRunningStatus: (ids, cwds) => set((s) => {
     const sameIds = s.runningSessionIds.size === ids.size && [...ids].every((x) => s.runningSessionIds.has(x));
     const sameCwds = s.runningCwds.size === cwds.size && [...cwds].every((x) => s.runningCwds.has(x));
-    if (sameIds && sameCwds) return {};
+    if (sameIds && sameCwds) return s;
     return {
       runningSessionIds: sameIds ? s.runningSessionIds : ids,
       runningCwds: sameCwds ? s.runningCwds : cwds,
