@@ -14,8 +14,6 @@ import {
 import { aggregateCost, displayUsd, formatCost } from '../utils/pricing.js';
 import { useStore } from '../stores/sessionStore.js';
 import { usePricingVersion } from '../hooks/usePricingVersion.js';
-import { afterBoot } from '../utils/bootDefer.js';
-import { ensurePricingCatalog } from '../utils/pricingCatalog.js';
 
 const SLOW_MS = 3000;             // 首次请求超过 3 s 未返回 → 骨架加「正在统计全部会话…」(本机冷扫 40 s)
 const STALE_REFETCH_MS = 45_000;  // 收到 stale 响应后的一次延迟静默重取(广播丢失的兜底;定时器单份)
@@ -168,14 +166,10 @@ export const HomeUsage = React.memo(function HomeUsage() {
     mountedRef.current = true;
     // 挂载取一次。bootedRef:React.StrictMode(dev)把 effect 挂载→卸载→再挂载跑两遍,没有这道守卫 dev 下
     // 首屏会打两次 /api/usage(生产 build 不会);ref 在模拟重挂载时保留,生产路径行为不变。
-    // r148 P8:应用刚启动时的这次首取延后到启动闸之后(它可能触发后端全盘统计,不和首屏请求挤第一批);
-    // 延后期间照常显示骨架(status 初值就是 loading,3 秒慢态仍从挂载起算)。闸开之后才挂载的(回到首页、
-    // 分屏切回)立刻取,与原来一样。定时器不随卸载取消:dev 的 StrictMode 会先模拟卸载一次,取消了就再也不取;
-    // 真卸载后才触发也无害(fetchStats 落地前会看 mountedRef)。金额要用价目,一并确保。
-    if (!bootedRef.current) {
-      bootedRef.current = true;
-      afterBoot(() => { ensurePricingCatalog(); fetchStats(!!lastStatsCache); });   // 有缓存 → 首取也是静默的(不闪骨架)
-    }
+    // r148b A5:首取不延后(r148 P8 曾把它推到启动闸之后 1.5 秒)。首页用量是首屏内容:首页一出来它就该在取,
+    // 推后会让首页白等 1.5 秒骨架,也让"首页一落定就读数据"的既有验收(r131 C4a / C4b / C5b / C7d)落空。
+    // 价目仍由根组件延后加载;它晚到时由上面的 usePricingVersion() 让模型分页的金额重算一次。
+    if (!bootedRef.current) { bootedRef.current = true; fetchStats(!!lastStatsCache); }   // 有缓存 → 首取也是静默的(不闪骨架)
     const onRefresh = () => fetchStats(true);
     window.addEventListener('cgui:usage-updated', onRefresh);   // 服务端重算落地(WS 转发,既有)
     window.addEventListener('cgui:chat-done', onRefresh);       // 本端回合结束(与 UsagePanel 同一事件)

@@ -223,20 +223,20 @@ test('P6 会话汇总挪进记忆化后切会话不白屏:在两条会话与首�
 });
 
 // ───────────────────────── P8 ─────────────────────────
-test('P8 启动时可以延后的 5 类请求不挤在第一批:头 1 秒里不发,10 秒内都发出;项目列表等首屏请求照常第一批发', async ({ page }) => {
+test('P8 启动时可以延后的 4 类请求不挤在第一批:头 1 秒里不发,10 秒内都发出;项目列表、首页用量等首屏请求照常第一批发', async ({ page }) => {
   const reqs = recordApiRequests(page);
   await boot(page);                                  // boot 把两个版本检查接口钉成立即返回(只改响应,不影响它们何时发出)
   await expect(page.getByTestId('home-input'), '应落在首页(首页用量块才会取数)').toBeVisible({ timeout: 20_000 });
-  const DEFERRED = ['/api/mcp', '/api/version-check', '/api/claude-version-check', '/api/pricing', '/api/usage'];
-  await expect.poll(() => DEFERRED.filter((p) => !reqs.some((r) => r.path === p)), { message: '这 5 类请求 10 秒内都应发出(功能不变)', timeout: 10_000 }).toEqual([]);
+  const DEFERRED = ['/api/mcp', '/api/version-check', '/api/claude-version-check', '/api/pricing'];
+  await expect.poll(() => DEFERRED.filter((p) => !reqs.some((r) => r.path === p)), { message: '这 4 类请求 10 秒内都应发出(功能不变)', timeout: 10_000 }).toEqual([]);
   const t0 = reqs[0].at;
   const firstAt = (p) => reqs.find((r) => r.path === p).at - t0;
   const got = Object.fromEntries(DEFERRED.map((p) => [p, firstAt(p)]));
   console.log(`[P8] 相对第一个请求的发出时刻(ms):${JSON.stringify(got)};头 1 秒共 ${reqs.filter((r) => r.at - t0 < 1000).length} 个请求`);
-  // 修前实测:前 4 个都在 110ms 左右、首页用量 173ms。
+  // 修前实测:这 4 个都在 110ms 左右。首页用量(/api/usage)不在延后之列 —— 它是首屏内容(r148b A5),见下面的首屏列表。
   for (const p of DEFERRED) expect(got[p], `${p} 应延后到首屏之后(相对第一个请求 ≥ 1000ms)`).toBeGreaterThanOrEqual(1000);
   for (const p of DEFERRED) expect(got[p], `${p} 也不能拖太久`).toBeLessThanOrEqual(8000);
-  for (const p of ['/api/projects', '/api/providers', '/api/model']) {
+  for (const p of ['/api/projects', '/api/providers', '/api/model', '/api/usage']) {
     expect(reqs.some((r) => r.path === p), `${p} 应发出`).toBe(true);
     expect(firstAt(p), `${p} 是首屏要用的,不能被延后`).toBeLessThan(1000);
   }
