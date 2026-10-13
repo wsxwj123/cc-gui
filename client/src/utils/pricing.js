@@ -383,15 +383,21 @@ function remoteClaudeLookup(table, model) {
  * 为什么:远程表(官方兼容视图)每个模型只有一组价,而带分档的模型它给的是高的那一档(haiku 5.5 在远程表里
  * 是 $0.50/$2.50,那只是提示超过 10 万 token 的价)。内置表里的 Claude 条目是照官方 / CLI 自带价目逐条核过的,
  * 有它就以它为准;远程表只用来兜内置表还没收录的新型号。
- * 只按模型名本身认,不认 anthropic/ 前缀与点写法:带前缀的名字是经聚合平台接入时的写法,那时该用聚合平台自己的价
- * (远程表里逐字的那个键)。不是 Claude 家族的一律返回 false —— 别的厂商仍是远程表在前,结果不变。
+ * r150c S3:比之前先把名字归一化(小写、版本号里的点换成连字符)—— 'claude-haiku-5.5'、'Claude-Haiku-5-5'
+ * 和 'claude-haiku-5-5' 是同一个模型,原来前两种写法被判成"内置表没有",落到远程表的高档价上。
+ * 带 anthropic/ 前缀的名字不在此列:那是经聚合平台接入时的写法,用聚合平台自己的价(远程表里逐字的那个键)。
+ * 不是 Claude 家族的一律不算 —— 别的厂商仍是远程表在前,结果不变。
+ *
+ * 返回内置表里该用哪个名字去查(归一化后的写法,[…] 后缀与日期后缀原样保留);内置表没有则返回 null。
  */
-function offlineHasClaudeModel(model) {
-  if (!claudeCanon(model)) return false;
-  const raw = String(model);
-  const noSuffix = raw.replace(/\[[^\]]*\]$/, '');
+function offlineClaudeId(model) {
+  const id = String(model || '').trim().toLowerCase();
+  if (!id.startsWith('claude-')) return null;
+  const normalized = id.replace(/(\d)\.(?=\d)/g, '$1-');
+  const noSuffix = normalized.replace(/\[[^\]]*\]$/, '');
   const noDate = noSuffix.replace(/-\d{8}$/, '');
-  return [raw, noSuffix, noDate].some((id) => Object.prototype.hasOwnProperty.call(PRICES, id));
+  const found = [normalized, noSuffix, noDate].some((key) => Object.prototype.hasOwnProperty.call(PRICES, key));
+  return found ? normalized : null;
 }
 
 function remoteLookup(model) {
@@ -872,8 +878,9 @@ export function resolvePrice(model, opts = {}) {
   }
 
   // ③ 官方兼容视图 prices(精确 → 去日期后缀 → Claude 模型的另一种写法(r150 P1,见 claudeCanon)→ 最长前缀)
-  // r150 R2:Claude 模型在内置表里有条目时跳过这一层,直接用内置表(见 offlineHasClaudeModel)。
-  const compat = offlineHasClaudeModel(model) ? null : remoteLookupDetailed(model);
+  // r150 R2:Claude 模型在内置表里有条目时跳过这一层,直接用内置表(见 offlineClaudeId)。
+  const builtinId = offlineClaudeId(model);
+  const compat = builtinId ? null : remoteLookupDetailed(model);
   if (compat) {
     const e = compat.entry;
     // r150:远程表每个模型只有四个数,没有 1 小时档的缓存写价。Claude 家族按 input × 2 补 —— 与内置表同一条
@@ -891,7 +898,8 @@ export function resolvePrice(model, opts = {}) {
   // ④ community 兜底层:当前无来源(实现延后),恒跳过 —— 命中不了就不是错误。
 
   // ⑤ 内置离线表(现行回退链,不改)
-  const offline = offlineLookup(model, provider);
+  // builtinId:内置表里有这个 Claude 模型时,用归一化后的名字去查(点写法 / 大小写不同的名字逐字查不到)。
+  const offline = offlineLookup(builtinId ?? model, provider);
   if (offline) {
     let e = offline.entry;
     const applied = [];
@@ -1227,7 +1235,7 @@ export function computeCostForMessage(message, provider) {
 
 /** 这个模型此刻是不是按内置表里"带提示长度分档"的条目计价(用户没自填、官方报价层也没命中)。 */
 function usesOfflinePromptTiers(model, provider, at) {
-  if (!offlineLookup(model, provider)?.entry?.longPrompt) return false;   // 先查内置表(便宜),绝大多数模型在这里就返回
+  if (!offlineLookup(offlineClaudeId(model) ?? model, provider)?.entry?.longPrompt) return false;   // 先查内置表(便宜),绝大多数模型在这里就返回
   return resolvePrice(model, { provider, at }).tier === 'offline';
 }
 
