@@ -11,11 +11,17 @@
 //   fetchFresh()    要一份"调用之后才发出"的结果(手动刷新用)。与轮询共用请求,不另开并发。失败 reject。
 // 同一时刻最多一个请求在飞:在飞期间又有人要新鲜数据,就等它回来后立刻补发一次;同一个同步任务里的
 // 多次请求并成一次(6 个窗格同时挂载 = 1 个请求)。定时的那一拍撞上在飞的请求则跳过,不堆叠。
+// 在飞的请求有超时(timeoutMs):到点就放弃这一拍 —— 取消请求、按"这次没取到"处理、之后晚到的结果不认,
+// 下一拍照常发。没有超时的话,一次请求挂住不回,"在飞"就永远不结束,全应用的轮询跟着停。
 //
 // 页面不可见(document.hidden)时停掉 intervalMs 的拍子,回到可见立刻补一次并恢复。
 // 不可见期间按 hiddenIntervalMs 的慢拍取(0 = 完全不取)。应用里用的慢拍见下面的常量及其说明。
 
 export const AGENTS_ACTIVE_INTERVAL_MS = 1500;
+
+// 在飞请求的超时(r148b A2)。这个接口正常几十毫秒就回;10 秒还没回只能是挂住了。
+// 不取得更短:后端一时繁忙(列目录、逐个探活)时别把慢请求当成挂住而反复取消重发。
+export const AGENTS_ACTIVE_TIMEOUT_MS = 10_000;
 
 // 页面不可见时的慢拍。**没有设成 0(全停)的原因**:这份数据在窗口不可见时仍有三个用处 ——
 //   ① Dock 角标「有代理在等你」(后台代理卡在授权 / 外部 CLI 会话停下等人):角标就是给"没在看窗口"的时候用的;
@@ -36,8 +42,12 @@ export function createAgentsActivePoller({
   fetchActive,
   intervalMs = AGENTS_ACTIVE_INTERVAL_MS,
   hiddenIntervalMs = 0,
+  timeoutMs = AGENTS_ACTIVE_TIMEOUT_MS,
   setTimer = (fn, ms) => setInterval(fn, ms),
   clearTimer = (id) => clearInterval(id),
+  // 超时计时用的一次性定时器(node 下 unref:不为了等它而拖住进程退出)
+  setTimeoutFn = (fn, ms) => { const t = setTimeout(fn, ms); t?.unref?.(); return t; },
+  clearTimeoutFn = (id) => clearTimeout(id),
   isHidden = defaultIsHidden,
   onVisibilityChange = defaultOnVisibilityChange,
 } = {}) {
@@ -45,6 +55,8 @@ export function createAgentsActivePoller({
   let waiters = [];         // fetchFresh 的等待者 { since, resolve, reject }
   let sentSeq = 0;          // 已发出的请求序号
   let inFlight = false;
+  let flightSeq = 0;        // 在飞的那次请求的序号(0 = 没有);只认它的结果
+  let flightTimeout = null; // 在飞请求的超时计时
   let wantAnother = false;  // 在飞期间又有人要新鲜数据 → 回来后立刻补发
   let kickQueued = false;   // 同一个同步任务里的多次请求并成一次
   let timer = null;
@@ -53,6 +65,9 @@ export function createAgentsActivePoller({
   let hiddenNow = false;
 
   const settle = (seq, data, err) => {
+    if (seq !== flightSeq) return;                          // 已经超时放弃的那次:晚到的结果不认
+    flightSeq = 0;
+    if (flightTimeout !== null) { clearTimeoutFn(flightTimeout); flightTimeout = null; }
     inFlight = false;
     const due = waiters.filter((w) => w.since < seq);
     waiters = waiters.filter((w) => w.since >= seq);
@@ -72,7 +87,16 @@ export function createAgentsActivePoller({
     wantAnother = false;
     sentSeq += 1;
     const seq = sentSeq;
-    Promise.resolve().then(() => fetchActive()).then(
+    flightSeq = seq;
+    const abort = typeof AbortController === 'function' ? new AbortController() : null;
+    if (timeoutMs > 0) {
+      flightTimeout = setTimeoutFn(() => {
+        flightTimeout = null;
+        try { abort?.abort(); } catch { /* 取消不了也照样放弃这一拍 */ }
+        settle(seq, null, new Error('agents/active timeout'));
+      }, timeoutMs);
+    }
+    Promise.resolve().then(() => fetchActive({ signal: abort ? abort.signal : undefined })).then(
       (data) => settle(seq, data, null),
       (err) => settle(seq, null, err || new Error('agents/active failed')),
     );
@@ -128,7 +152,7 @@ export function createAgentsActivePoller({
 
 // 应用里用的那一份(模块级单例)。
 const appPoller = createAgentsActivePoller({
-  fetchActive: () => fetch('/api/agents/active').then((r) => r.json()),
+  fetchActive: ({ signal } = {}) => fetch('/api/agents/active', { signal }).then((r) => r.json()),
   hiddenIntervalMs: AGENTS_ACTIVE_HIDDEN_INTERVAL_MS,
 });
 /** 订阅全应用共用的那一份「运行进程」数据。cb(data):data = 接口返回的 JSON。返回退订函数。 */
