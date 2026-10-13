@@ -226,11 +226,12 @@ function PingButton({ name }) {
   );
 }
 
-function Toggle({ enabled, onToggle, loading }) {
+function Toggle({ enabled, onToggle, loading, testId }) {
   return (
     <button
       onClick={onToggle}
       disabled={loading}
+      data-testid={testId}
       className={`relative w-9 h-5 rounded-full transition-colors shrink-0 overflow-hidden ${
         enabled ? 'bg-success' : 'bg-canvas-sunken'
       } ${loading ? 'opacity-50' : ''}`}
@@ -399,10 +400,15 @@ export function MCPPanel() {
   // stable). Re-sorts automatically when a toggle flips `enabled` in state.
   const byEnabled = (a, b) => (a.enabled === false ? 1 : 0) - (b.enabled === false ? 1 : 0);
   const sortedServers = [...servers].sort(byEnabled);
-  const sortedPlugins = [...plugins].sort(byEnabled);
+  // r150 E2:账号同步的插件(Claude CLI 从 claude.ai 账号同步到本机的,后端标 source: 'synced')单独成组。
+  // 它们不是在本机安装的:只给停用 / 启用,不给卸载、更新、查看内容(这三样都按 installed_plugins.json 工作)。
+  const isSyncedPlugin = (p) => p?.source === 'synced';
+  const sortedPlugins = plugins.filter((p) => !isSyncedPlugin(p)).sort(byEnabled);
+  const sortedSyncedPlugins = plugins.filter(isSyncedPlugin).sort(byEnabled);
 
   // 官方插件一键安装:已装名(去掉 @marketplace 后缀)用于过滤"添加插件"弹层的推荐项。
-  const installedPluginIds = new Set(plugins.map((p) => String(p.name).split('@')[0]));
+  // 只算本机安装的:账号同步来的同名插件不该让推荐项显示成"已安装"。
+  const installedPluginIds = new Set(sortedPlugins.map((p) => String(p.name).split('@')[0]));
   const [installingPlugin, setInstallingPlugin] = useState(null);
   const [pluginErr, setPluginErr] = useState('');
   // 对齐 MCP 的交互:推荐插件收进"添加"按钮打开的弹层,列表只展示已安装项。
@@ -725,6 +731,7 @@ export function MCPPanel() {
       {/* Plugins(r16-5:整块进「插件」页,块内一行未动) */}
       {tab === 'plugins' && (
       <div>
+        <div data-testid="plugins-installed-group">
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
           <Package size={11} />
           已安装插件
@@ -736,13 +743,16 @@ export function MCPPanel() {
           </button>
         </h3>
         {!pluginAddOpen && pluginErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 break-all mb-2 normal-case tracking-normal">{pluginErr}</div>}
-        {plugins.length > 0 ? (
+        {sortedPlugins.length > 0 ? (
           <div className="space-y-2">
             {sortedPlugins.map((plugin) => {
               const disabled = plugin.enabled === false;
               return (
                 <div
                   key={plugin.name}
+                  data-testid="plugin-card"
+                  data-plugin-name={plugin.name}
+                  data-enabled={disabled ? 'false' : 'true'}
                   className={`bg-canvas-warm border rounded-lg p-3 transition-opacity ${
                     disabled ? 'border-ink-ghost/30 opacity-50' : 'border-canvas-deep'
                   }`}
@@ -770,6 +780,7 @@ export function MCPPanel() {
                         enabled={!disabled}
                         loading={toggling === plugin.name}
                         onToggle={() => handleTogglePlugin(plugin)}
+                        testId="plugin-toggle"
                       />
                     </div>
                   </div>
@@ -816,6 +827,57 @@ export function MCPPanel() {
         ) : (
           <div className="text-xs text-ink-faint font-body py-3 text-center bg-canvas-warm border border-canvas-deep rounded-lg">
             没有已安装的插件
+          </div>
+        )}
+        </div>
+        {/* r150 E2:账号同步的插件单独成组。只有停用 / 启用(走现有接口,名字是 <name>@synced);
+            卸载、更新不提供 —— 它们由账号同步管理,本机卸了下次同步还会回来。 */}
+        {sortedSyncedPlugins.length > 0 && (
+          <div data-testid="plugins-synced-group" className="mt-5">
+            <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-1.5 flex items-center gap-1.5">
+              <Package size={11} />
+              账号同步的插件
+            </h3>
+            <p className="text-[10.5px] text-ink-faint font-body leading-snug mb-2">
+              Claude CLI 从 claude.ai 账号同步到本机的插件。在此停用或启用；安装、卸载与更新在 claude.ai 账号中进行。
+            </p>
+            <div className="space-y-2">
+              {sortedSyncedPlugins.map((plugin) => {
+                const disabled = plugin.enabled === false;
+                return (
+                  <div
+                    key={plugin.name}
+                    data-testid="plugin-card"
+                    data-plugin-name={plugin.name}
+                    data-enabled={disabled ? 'false' : 'true'}
+                    className={`bg-canvas-warm border rounded-lg p-3 transition-opacity ${
+                      disabled ? 'border-ink-ghost/30 opacity-50' : 'border-canvas-deep'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Package size={12} className={`shrink-0 ${disabled ? 'text-ink-ghost' : 'text-warning/70'}`} />
+                      <span className={`text-xs font-medium font-body truncate min-w-0 ${disabled ? 'text-ink-faint line-through' : 'text-ink'}`} title={plugin.name}>
+                        {plugin.name}
+                      </span>
+                      {plugin.version && plugin.version !== '?' && (
+                        <span className="shrink-0 text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">
+                          v{plugin.version}
+                        </span>
+                      )}
+                      <div className="ml-auto flex items-center gap-1 shrink-0">
+                        {disabled && <span className="text-[10px] text-ink-ghost">已停用</span>}
+                        <Toggle
+                          enabled={!disabled}
+                          loading={toggling === plugin.name}
+                          onToggle={() => handleTogglePlugin(plugin)}
+                          testId="plugin-toggle"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
