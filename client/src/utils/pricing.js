@@ -1231,14 +1231,20 @@ function usesOfflinePromptTiers(model, provider, at) {
   return resolvePrice(model, { provider, at }).tier === 'offline';
 }
 
-/** 逐次调用各算一次再相加(每次用自己的用量判档)。任何一项算不出 → null,由调用方退回按合计算。 */
+/**
+ * 逐次调用各算一次再相加(每次用自己的用量判档)。
+ * 空用量的项跳过(r150c S2):那次调用没有用量,费用本来就是 0,不该因为它整轮退回合计。
+ * 其余任何一项算不出(用量畸形)→ null,由调用方退回按合计算;明细全是空用量也返回 null(等于没有明细)。
+ */
 function sumCallCosts(model, calls, provider, fallbackAt) {
   const parts = [];
   for (const call of calls) {
+    if (usageProblem(call?.usage) === 'USAGE_EMPTY') continue;
     const cost = computeCost(model, call?.usage, provider, { at: call?.at ?? fallbackAt });
     if (!cost) return null;
     parts.push(cost);
   }
+  if (!parts.length) return null;
   const breakdown = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite5m: null, cacheWrite1h: null };
   const unknown = [];
   const applied = [];
