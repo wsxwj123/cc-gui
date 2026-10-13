@@ -297,11 +297,58 @@ function compatPrices() {
   return prices && Object.keys(prices).length ? prices : REMOTE;
 }
 
+// ── r150 P1:Claude 模型的两种写法互认 ───────────────────────────
+// 远程表里 Claude 模型的键是 'anthropic/claude-opus-5.5' 这种写法(带 anthropic/ 前缀、版本号用点),
+// CLI 报的模型名是 'claude-opus-5-5'(连字符)。下面的查找原先只有逐字 / 去日期后缀 / startsWith 三步,
+// 这两种写法从来对不上 —— 远程表对所有 Claude 模型都没命中过,一直落到内置表(新模型在内置表里没有
+// 条目时就是「未定价」或借用上一代的价)。
+// 比较键:小写 → 去掉 [1m] 之类的方括号后缀 → 去掉 anthropic/ 前缀 → 去掉日期后缀 → 版本号里的点换成连字符。
+// 【只管 Claude 家族】比较键不以 claude- 开头的一律不参与:别的厂商带不带前缀可能是两个价不同的模型
+// (见 normModelKey 上方 Groq / Cerebras 的例子),它们的命中结果一个字不改。
+// 【只认等价,不做前缀猜测】'claude-opus-5-5' 不会去借 'anthropic/claude-opus-5' 的价。
+// guessed = 剥掉过方括号后缀或日期后缀(沿用本层"去日期后缀 = 靠规则猜"的口径,命中记 matchedExactly=false);
+// 只差前缀、点与连字符的是同一个 id 的两种写法,算等价命中。
+function claudeCanon(id) {
+  const raw = String(id || '').trim().toLowerCase();
+  const noSuffix = raw.replace(/\[[^\]]*\]$/, '');
+  const base = noSuffix.startsWith('anthropic/') ? noSuffix.slice('anthropic/'.length) : noSuffix;
+  if (!base.startsWith('claude-')) return null;
+  const noDate = base.replace(/-\d{8}$/, '');
+  return { key: noDate.replace(/(\d)\.(?=\d)/g, '$1-'), guessed: noSuffix !== raw || noDate !== base };
+}
+
+// 每张远程表建一次索引(比较键 → 表里的键)。查价是逐条消息调的,不能每次扫全表;表换了(新对象)自动重建。
+const claudeKeyIndexes = new WeakMap();
+function claudeKeyIndex(table) {
+  let index = claudeKeyIndexes.get(table);
+  if (index) return index;
+  index = new Map();
+  for (const key of Object.keys(table).sort()) {
+    const canon = claudeCanon(key);
+    if (!canon) continue;
+    const prev = index.get(canon.key);
+    // 同一个模型在表里有多个写法时:键本身不带日期 / 方括号后缀的优先,其次取字典序最小(结果稳定)。
+    if (!prev || (prev.guessed && !canon.guessed)) index.set(canon.key, { tableKey: key, guessed: canon.guessed });
+  }
+  claudeKeyIndexes.set(table, index);
+  return index;
+}
+
+/** 按比较键在远程表里找同一个 Claude 模型的另一种写法。返回 { entry, matchedExactly } 或 null。 */
+function remoteClaudeLookup(table, model) {
+  const canon = claudeCanon(model);
+  if (!canon) return null;
+  const hit = claudeKeyIndex(table).get(canon.key);
+  if (!hit) return null;
+  return { entry: table[hit.tableKey], matchedExactly: !canon.guessed && !hit.guessed };
+}
+
 function remoteLookup(model) {
   const table = compatPrices();
   if (!model || !table) return null;
   let e = Object.prototype.hasOwnProperty.call(table, model) ? table[model] : null;
   if (!e) e = table[model.replace(/-\d{8}$/, '')];
+  if (!e) e = remoteClaudeLookup(table, model)?.entry || null;   // r150 P1:排在最长前缀之前(等价比前缀可靠)
   if (!e) {
     // 前缀兜底取**最长**匹配(与下方内置表 lookupByModel 同口径):键序不确定时
     // 短键(claude-3-5)不许抢走长键(claude-3-5-haiku)。
@@ -320,6 +367,8 @@ function remoteLookupDetailed(model) {
   if (Object.prototype.hasOwnProperty.call(table, model)) return { entry: { ...table[model], currency: 'USD' }, matchedExactly: true };
   const stripped = model.replace(/-\d{8}$/, '');
   if (stripped !== model && table[stripped]) return { entry: { ...table[stripped], currency: 'USD' }, matchedExactly: false };
+  const alias = remoteClaudeLookup(table, model);   // r150 P1
+  if (alias) return { entry: { ...alias.entry, currency: 'USD' }, matchedExactly: alias.matchedExactly };
   const k = Object.keys(table)
     .filter((key) => model.startsWith(key))
     .sort((a, b) => b.length - a.length)[0];
@@ -762,7 +811,7 @@ export function resolvePrice(model, opts = {}) {
     }
   }
 
-  // ③ 官方兼容视图 prices(现行精确 → 去日期后缀 → 最长前缀,本次不改回退链)
+  // ③ 官方兼容视图 prices(精确 → 去日期后缀 → Claude 模型的另一种写法(r150 P1,见 claudeCanon)→ 最长前缀)
   const compat = remoteLookupDetailed(model);
   if (compat) {
     const e = compat.entry;
