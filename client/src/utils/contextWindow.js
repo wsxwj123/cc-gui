@@ -187,10 +187,15 @@ export function nativeContextWindow(model) {
   // 保守 200K 现状,由 1M 运行时推断(App.jsx 单次 ctxUsage 超窗证据,6bfc207)自愈。
   if (/claude|anthropic|opus|sonnet|haiku/.test(id)) {
     if (/fable|mythos/.test(id)) return 1_000_000;
+    // r150 P4:5.5 一代三档(opus / sonnet / haiku)都是原生 1M —— CLI 2.1.296 自带模型目录里这三个的
+    // context 都是 {window:1e6, native_1m:true}。必须单列一支:下面两支的 (?![\d-]) 把 "-5" 后面再跟
+    // "-" 的一律挡掉(本意是挡带日期的新代),于是 opus-5-5 / sonnet-5-5 落到 200K;haiku 更是整系写死 200K。
+    // (?!\d) 挡数字续接(opus-5-50 不是 5.5);带日期的 opus-5-5-20260901 仍中本支。
+    if (/(opus|sonnet|haiku)-?5[-.]5(?!\d)/.test(id)) return 1_000_000;
     if (/opus-?4-?[7-9]|opus-?[5-9](?![\d-])/.test(id)) return 1_000_000;
     if (/sonnet-?4-?[7-9]|sonnet-?[5-9](?![\d-])/.test(id)) return 1_000_000;
     if (/^(opus|sonnet)$/.test(id)) return 1_000_000;   // CLI 别名 = 当前 tier 最新 → 1M
-    return 200_000;                                     // haiku 全系 / opus≤4.5 / sonnet≤4.5 / claude-3-x
+    return 200_000;                                     // haiku ≤4.5 / opus≤4.5 / sonnet≤4.5 / claude-3-x(5.5 一代见上方单列的一支)
   }
   // DeepSeek 按代际拆分(与服务端表同口径)。旧的"deepseek|mimo 一律 200K"被实测证伪:
   // deepseek-v4-flash 历史最大 prompt 680,100 早已打穿 200K。
