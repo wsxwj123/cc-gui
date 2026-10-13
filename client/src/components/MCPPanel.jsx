@@ -8,6 +8,7 @@ import { CuGrants } from './CuGrants.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { TOOL_TABS, readToolTab, writeToolTab } from '../utils/toolTabs.js';
 import { isImeKeydown } from '../utils/imeGuard.js';
+import { makeFetchGate } from '../utils/fetchGate.js';
 
 // /api/mcp/:name/ping 结果 → 展示文案(PingButton 与「添加后自动探测」共用)。
 // 失败时优先展示真实子进程 stderr(后端 spawn 抓的),这才是用户要看的"为什么连不上"。
@@ -226,11 +227,12 @@ function PingButton({ name }) {
   );
 }
 
-function Toggle({ enabled, onToggle, loading }) {
+function Toggle({ enabled, onToggle, loading, testId }) {
   return (
     <button
       onClick={onToggle}
       disabled={loading}
+      data-testid={testId}
       className={`relative w-9 h-5 rounded-full transition-colors shrink-0 overflow-hidden ${
         enabled ? 'bg-success' : 'bg-canvas-sunken'
       } ${loading ? 'opacity-50' : ''}`}
@@ -278,7 +280,13 @@ export function MCPPanel() {
   // silent=true:不显示加载态,用于后台静默刷新(拉取后端补好的在线状态)。
   // force=true:?fresh=1 绕过后端 5min 缓存,手动「刷新」按钮用 —— 否则刚 `claude mcp add`
   // 的服务器要等缓存过期才出现(用户报「刷新看不到新加的 MCP」根因)。
+  // r150 E3 / r150c M1:几次读取会同时在路上,回来的先后和发起的先后不一样,每次回来都要判一下还该不该采纳。
+  // 判定在 utils/fetchGate.js(强制读取与读缓存的读取分开判)。上一版只有一个序号、谁最后发起谁算数:
+  // 面板打开后 5 秒内点「刷新」,第 5 秒那次静默读取发起得更晚、回来得更早,「刷新」的结果反而被丢掉。
+  const fetchGate = useRef(null);
+  if (!fetchGate.current) fetchGate.current = makeFetchGate();
   const fetchData = async (silent = false, force = false) => {
+    const ticket = fetchGate.current.begin({ fresh: force });
     if (!silent) setLoading(true);
     setError(null);
     try {
@@ -286,13 +294,21 @@ export function MCPPanel() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (!mounted.current) return;
-      setServers(data.mcpServers || []);
-      setPlugins(data.plugins || []);
-      setExternal(data.external || []);
+      if (fetchGate.current.accept(ticket)) {
+        setServers(data.mcpServers || []);
+        setPlugins(data.plugins || []);
+        setExternal(data.external || []);
+      }
     } catch (err) {
       if (mounted.current && !silent) setError(err.message);
     }
     if (mounted.current && !silent) setLoading(false);
+  };
+  // 改了东西之后的重读(装 / 卸 / 更新插件、增删改 MCP、登录登出):先作废还在路上的读取 —— 它们读到的
+  // 可能是改之前的状态,而且其中若有强制读取,它落地后会把这次重读(读缓存)的结果压掉。
+  const reloadAfterChange = (silent = false, force = false) => {
+    fetchGate.current.invalidate();
+    return fetchData(silent, force);
   };
 
   useEffect(() => {
@@ -310,6 +326,8 @@ export function MCPPanel() {
     if (!plugin) return;
     const { name } = plugin;
     const newEnabled = plugin.enabled === false;
+    // r150 E3:作废还在路上的读取 —— 它读到的是切换之前的状态,回来会把下面的乐观更新盖掉。
+    fetchGate.current.invalidate();
     setPlugins((prev) => prev.map((p) => p.name === name ? { ...p, enabled: newEnabled } : p));
     setToggling(name);
     const endpoint = newEnabled
@@ -317,9 +335,15 @@ export function MCPPanel() {
       : `/api/plugins/${encodeURIComponent(name)}/disable`;
     fetch(endpoint, { method: 'PUT' })
       .then((r) => { if (!r.ok) return r.json().then((e) => { throw new Error(e.error); }); })
+      // r150 E3:切换成功后重读一次(静默、?fresh=1)。插件带来的 MCP 在「MCP 服务器」页签里,停用 / 启用
+      // 一个插件,那边的列表也要跟着变;原来只改了本页的开关,MCP 列表要等用户手动点刷新。
+      // 用 ?fresh=1:后端的缓存刚被这次切换作废,普通读取只有配置文件里的 MCP,插件带来的要等健康检查补。
+      // 重读之前再作废一次:命令执行期间发起的读取(比如第 5 秒那次静默读取)读到的可能还是切换之前的状态。
+      .then(() => { fetchGate.current.invalidate(); fetchData(true, true); })
       .catch((err) => {
         console.error('Plugin toggle failed:', err);
         setPlugins((prev) => prev.map((p) => p.name === name ? { ...p, enabled: !newEnabled } : p));
+        reloadAfterChange(true);   // 上面作废了在路上的读取,失败时补读一次拿回真实状态(命令可能其实已经生效)
       })
       .finally(() => setToggling(null));
   };
@@ -359,7 +383,7 @@ export function MCPPanel() {
       const r = await fetch(`/api/mcp/${encodeURIComponent(srv.name)}/login`, { method: 'POST' });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      await fetchData(false, true);
+      await reloadAfterChange(false, true);
     } catch (err) {
       await confirmDialog(`登录「${srv.label || srv.name}」失败:\n${err.message}`, { confirmText: '知道了' });
     }
@@ -376,7 +400,7 @@ export function MCPPanel() {
       const r = await fetch(`/api/mcp/${encodeURIComponent(srv.name)}/logout`, { method: 'POST' });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      await fetchData(false, true);
+      await reloadAfterChange(false, true);
     } catch (err) {
       await confirmDialog(`退出登录「${srv.label || srv.name}」失败:\n${err.message}`, { confirmText: '知道了' });
     }
@@ -391,7 +415,7 @@ export function MCPPanel() {
       if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.status); }
     } catch (err) {
       console.error('MCP delete failed:', err);
-      fetchData(); // 失败回拉真实状态
+      reloadAfterChange(); // 失败回拉真实状态
     }
   };
 
@@ -399,10 +423,15 @@ export function MCPPanel() {
   // stable). Re-sorts automatically when a toggle flips `enabled` in state.
   const byEnabled = (a, b) => (a.enabled === false ? 1 : 0) - (b.enabled === false ? 1 : 0);
   const sortedServers = [...servers].sort(byEnabled);
-  const sortedPlugins = [...plugins].sort(byEnabled);
+  // r150 E2:账号同步的插件(Claude CLI 从 claude.ai 账号同步到本机的,后端标 source: 'synced')单独成组。
+  // 它们不是在本机安装的:只给停用 / 启用,不给卸载、更新、查看内容(这三样都按 installed_plugins.json 工作)。
+  const isSyncedPlugin = (p) => p?.source === 'synced';
+  const sortedPlugins = plugins.filter((p) => !isSyncedPlugin(p)).sort(byEnabled);
+  const sortedSyncedPlugins = plugins.filter(isSyncedPlugin).sort(byEnabled);
 
   // 官方插件一键安装:已装名(去掉 @marketplace 后缀)用于过滤"添加插件"弹层的推荐项。
-  const installedPluginIds = new Set(plugins.map((p) => String(p.name).split('@')[0]));
+  // 只算本机安装的:账号同步来的同名插件不该让推荐项显示成"已安装"。
+  const installedPluginIds = new Set(sortedPlugins.map((p) => String(p.name).split('@')[0]));
   const [installingPlugin, setInstallingPlugin] = useState(null);
   const [pluginErr, setPluginErr] = useState('');
   // 对齐 MCP 的交互:推荐插件收进"添加"按钮打开的弹层,列表只展示已安装项。
@@ -456,7 +485,7 @@ export function MCPPanel() {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(pluginInstallErrorMessage(d.error));
-      await fetchData(); // 刷新已安装列表
+      await reloadAfterChange(); // 刷新已安装列表
       setInstallingPlugin(null); // 先停 spinner 再弹窗
       // 与插件更新一致:安装成功弹窗提示(新会话生效);有 usage 的追加用法说明。
       await confirmDialog(
@@ -475,7 +504,7 @@ export function MCPPanel() {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '更新失败');
       setRestartHint(true);
-      await fetchData();
+      await reloadAfterChange();
       setPluginActioning(null); // 更新已完成,先停 spinner 再弹窗
       // 版本号更新前后没变 → 明确显示"无更新",不再误报"已更新为 vX"。
       const pn = plugin.name.split('@')[0];
@@ -518,7 +547,7 @@ export function MCPPanel() {
       const r = await fetch(`/api/plugins/${encodeURIComponent(plugin.name)}`, { method: 'DELETE' });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || '卸载失败');
-      await fetchData();
+      await reloadAfterChange();
       setPluginActioning(null); // 先停 spinner 再弹窗
       await confirmDialog(`插件「${plugin.name.split('@')[0]}」已卸载`, { confirmText: '知道了' });
     } catch (e) { setPluginErr(`${plugin.name}: ${e.message}`); }
@@ -611,7 +640,7 @@ export function MCPPanel() {
             <Plus size={11} />添加
           </button>
         </h3>
-        <ComputerUseCard onChanged={fetchData} />
+        <ComputerUseCard onChanged={() => reloadAfterChange()} />
         {servers.length > 0 ? (
           <div className="space-y-2">
             {sortedServers.map((srv) => {
@@ -725,6 +754,7 @@ export function MCPPanel() {
       {/* Plugins(r16-5:整块进「插件」页,块内一行未动) */}
       {tab === 'plugins' && (
       <div>
+        <div data-testid="plugins-installed-group">
         <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
           <Package size={11} />
           已安装插件
@@ -736,13 +766,16 @@ export function MCPPanel() {
           </button>
         </h3>
         {!pluginAddOpen && pluginErr && <div className="text-[11px] text-error bg-error/10 border border-error/20 rounded px-2 py-1.5 break-all mb-2 normal-case tracking-normal">{pluginErr}</div>}
-        {plugins.length > 0 ? (
+        {sortedPlugins.length > 0 ? (
           <div className="space-y-2">
             {sortedPlugins.map((plugin) => {
               const disabled = plugin.enabled === false;
               return (
                 <div
                   key={plugin.name}
+                  data-testid="plugin-card"
+                  data-plugin-name={plugin.name}
+                  data-enabled={disabled ? 'false' : 'true'}
                   className={`bg-canvas-warm border rounded-lg p-3 transition-opacity ${
                     disabled ? 'border-ink-ghost/30 opacity-50' : 'border-canvas-deep'
                   }`}
@@ -770,6 +803,7 @@ export function MCPPanel() {
                         enabled={!disabled}
                         loading={toggling === plugin.name}
                         onToggle={() => handleTogglePlugin(plugin)}
+                        testId="plugin-toggle"
                       />
                     </div>
                   </div>
@@ -818,6 +852,57 @@ export function MCPPanel() {
             没有已安装的插件
           </div>
         )}
+        </div>
+        {/* r150 E2:账号同步的插件单独成组。只有停用 / 启用(走现有接口,名字是 <name>@synced);
+            卸载、更新不提供 —— 它们由账号同步管理,本机卸了下次同步还会回来。 */}
+        {sortedSyncedPlugins.length > 0 && (
+          <div data-testid="plugins-synced-group" className="mt-5">
+            <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-1.5 flex items-center gap-1.5">
+              <Package size={11} />
+              账号同步的插件
+            </h3>
+            <p className="text-[10.5px] text-ink-faint font-body leading-snug mb-2">
+              Claude CLI 从 claude.ai 账号同步到本机的插件。在此停用或启用；安装、卸载与更新在 claude.ai 账号中进行。
+            </p>
+            <div className="space-y-2">
+              {sortedSyncedPlugins.map((plugin) => {
+                const disabled = plugin.enabled === false;
+                return (
+                  <div
+                    key={plugin.name}
+                    data-testid="plugin-card"
+                    data-plugin-name={plugin.name}
+                    data-enabled={disabled ? 'false' : 'true'}
+                    className={`bg-canvas-warm border rounded-lg p-3 transition-opacity ${
+                      disabled ? 'border-ink-ghost/30 opacity-50' : 'border-canvas-deep'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Package size={12} className={`shrink-0 ${disabled ? 'text-ink-ghost' : 'text-warning/70'}`} />
+                      <span className={`text-xs font-medium font-body truncate min-w-0 ${disabled ? 'text-ink-faint line-through' : 'text-ink'}`} title={plugin.name}>
+                        {plugin.name}
+                      </span>
+                      {plugin.version && plugin.version !== '?' && (
+                        <span className="shrink-0 text-[10px] px-1.5 py-0.5 bg-canvas-deep text-ink-faint rounded font-mono">
+                          v{plugin.version}
+                        </span>
+                      )}
+                      <div className="ml-auto flex items-center gap-1 shrink-0">
+                        {disabled && <span className="text-[10px] text-ink-ghost">已停用</span>}
+                        <Toggle
+                          enabled={!disabled}
+                          loading={toggling === plugin.name}
+                          onToggle={() => handleTogglePlugin(plugin)}
+                          testId="plugin-toggle"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
       )}
 
@@ -864,7 +949,7 @@ export function MCPPanel() {
         <McpForm
           editing={form.add ? null : form}
           onClose={() => setForm(null)}
-          onSaved={(savedName, isNew) => { fetchData(); setRestartHint(true); if (isNew && savedName) autoProbe(savedName); }}
+          onSaved={(savedName, isNew) => { reloadAfterChange(); setRestartHint(true); if (isNew && savedName) autoProbe(savedName); }}
         />
       )}
 

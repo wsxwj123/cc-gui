@@ -4,10 +4,17 @@
 // 会话的输入历史,见 utils/inputHistory.js 的 freeInputHistoryAndRetry)仍然失败 —— 也就是占满本地存储的
 // 不是可以自动清理的东西。
 // 原来不论有没有附件都说「附件仍保留，请移除部分附件后重试」;用户没带附件时这句话既不对也没法照做。
-//   没有附件:只陈述事实。
+//   没有附件:只陈述事实 —— 存不进的原因,以及刚才输入的内容还在不在(r150 J4:补上后半句。输入框的发送
+//     是在清空输入框之前就返回的,输入内容确实还在;只说"已满"用户不知道刚打的字丢没丢)。
+//     r150c S4:后半句只在这次发送来自输入框时才说(fromComposer)。会话里那个出口还服务于不经输入框的发送
+//     (界面里的动作按钮、隐藏的续跑消息),那时输入框里并没有这段内容。默认 true 是首页那处的口径
+//     (首页只有输入框一种来源);会话里的出口必须显式传(App.jsx 的 handleSend:fromComposer: !!opts.fromComposer,
+//     由 ChatInput 在自己的发送上标 true;入队时这个标记不存进队列 —— 出队重发时来源已经不是输入框)。
+//     这段说明写在这里而不是 handleSend 的入队那几行旁边:tests/unit/check-scroll-clamp.mjs 有一条源码锚
+//     限着那一段的字符数,往里加注释会把它顶破。
 //   有附件:保留原来的句子(整图预览确实可能是写不进的原因,移除附件是可行的做法)。
-export function queueSaveFailedNotice({ hasAttachments = false, inSession = false } = {}) {
-  if (!hasAttachments) return '无法保存待发消息：本地存储已满。';
+export function queueSaveFailedNotice({ hasAttachments = false, inSession = false, fromComposer = true } = {}) {
+  if (!hasAttachments) return fromComposer ? '无法保存待发消息：本地存储已满。输入内容仍在输入框中。' : '无法保存待发消息：本地存储已满。';
   return inSession
     ? '无法保存待发消息：本地存储空间不足。附件与草稿仍保留，请处理后重试。'
     : '无法保存待发消息：本地存储空间不足。附件仍保留，请移除部分附件后重试。';

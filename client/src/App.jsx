@@ -105,7 +105,7 @@ import { readCacheUsage, addCacheUsage, formatHitPct, formatHitPctOrDash, EMPTY_
 import { publishTurnCache, subscribeTurnCache, readTurnCache } from './utils/turnCacheBus.js';
 import { ensurePricingCatalog, subscribePricingVersion, getPricingVersion } from './utils/pricingCatalog.js';
 import { afterBoot, bootSettled } from './utils/bootDefer.js';
-import { slimInputHistory } from './utils/inputHistory.js';
+import { slimInputHistoryOnce } from './utils/inputHistory.js';
 import { queueSaveFailedNotice } from './utils/storageNotice.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
@@ -2314,7 +2314,7 @@ function HomeState({ tabIndex = 0 }) {
       : enqueueHomeDraft(homeDraftArgs);
     if (!queued) {
       // r149 S6:走到这里 = 落盘失败且自动腾空间重试后仍失败(见 persistQueueSnapshot)。没带附件时不提附件。
-      setAttachmentError(queueSaveFailedNotice({ hasAttachments: attachments.length > 0 }));
+      setAttachmentError(queueSaveFailedNotice({ hasAttachments: attachments.length > 0, fromComposer: true }));
       return;
     }
   };
@@ -5121,13 +5121,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
       const queuedAt = Date.now();
       const queueOpts = { ...opts };
-      delete queueOpts.onEnqueueFailure; delete queueOpts.onQueued;
+      delete queueOpts.onEnqueueFailure; delete queueOpts.onQueued; delete queueOpts.fromComposer;
       // 只剥进队列这份克隆的整图预览(内存预览不动),否则超 localStorage 配额被硬拒。
       if (queueOpts.meta) queueOpts.meta = attachmentMetaForPersistence(queueOpts.meta);
       const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts: queueOpts });
       if (!queued) {
         // r149 S6:同首页那处 —— 自动腾空间重试后仍失败才会到这里;没带附件时不提附件。
-        const message = queueSaveFailedNotice({ hasAttachments: (queueOpts.meta?.attachments?.length || 0) > 0, inSession: true });
+        const message = queueSaveFailedNotice({ hasAttachments: (queueOpts.meta?.attachments?.length || 0) > 0, inSession: true, fromComposer: !!opts.fromComposer });
         onEnqueueFailure?.(message);
         setProviderSwitchNotice({ text: message });
         return;
@@ -12036,7 +12036,10 @@ export default function App() {
   useEffect(() => afterBoot(() => ensurePricingCatalog()), []);
   // r149 S2:启动后把输入历史瘦身一次(幂等)。存量里每个会话键都躺着旧全局 100 条的副本,合起来能占掉
   // 本地存储的九成;剔掉副本不丢任何历史(上键仍从旧全局键翻得出)。放在启动闸之后,不在首屏关键路径上。
-  useEffect(() => afterBoot(() => { slimInputHistory(localStorage); }), []);
+  // r150 J2:只在这份本地存储没瘦过身时跑(slimInputHistoryOnce 用一个标记键记着),不再每次启动都跑 ——
+  // 每次都剔的话,用户在会话里重发过、又恰好在旧全局里的那一条,重启后会从第 1 位掉到后面。
+  // 存储写满时腾空间那条路(freeInputHistoryAndRetry)仍然无条件瘦身。
+  useEffect(() => afterBoot(() => { slimInputHistoryOnce(localStorage); }), []);
   // R4-b:记下"官方 provider 当前是怎么计费的"(OAuth 订阅 / API key 按量)。历史消息里
   // 没有当时的鉴权方式,拿此刻的顶替会让切一次 provider 就把订阅期的 Claude 消息按 API
   // 单价重算(判官实测 ¥4,690 → ¥498,876)。这里是全局唯一观察点,跟随 store 的刷新节奏。

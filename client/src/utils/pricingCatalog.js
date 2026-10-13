@@ -96,8 +96,9 @@ export function loadPricingCatalog() {
 }
 
 /**
- * 还没有价目就去取一次(已有 / 正在取则什么都不做)。r148 P8:启动时的那次加载延后了,
- * 需要金额的界面(打开了一条会话、首页用量块)挂载时调它,保证不会比延后闸更晚才有价目。
+ * 还没有价目就去取一次(已有 / 正在取则什么都不做)。r148 P8:启动时的那次加载延后到了启动闸之后。
+ * 调用处只有两个,都在 App.jsx:打开了一条会话时(会话里要显示金额,不等启动闸),以及启动闸之后的那次兜底。
+ * 用量面板(UsagePanel)不经这里,它打开时自己调 loadPricingCatalog。
  */
 export function ensurePricingCatalog() {
   if (cache || inflight) return;

@@ -98,8 +98,8 @@ await check('S4 占满存储的不是输入历史:腾不出,照旧返回 null、
 // ── S6 文案 ───────────────────────────────────────────────
 await check('S6 报错文案:没有附件时不提附件、客观陈述;有附件时保留原来的句子', async () => {
   const { queueSaveFailedNotice } = await import(root + 'client/src/utils/storageNotice.js');
-  assert.equal(queueSaveFailedNotice({ hasAttachments: false }), '无法保存待发消息：本地存储已满。');
-  assert.equal(queueSaveFailedNotice({ hasAttachments: false, inSession: true }), '无法保存待发消息：本地存储已满。');
+  assert.equal(queueSaveFailedNotice({ hasAttachments: false }), '无法保存待发消息：本地存储已满。输入内容仍在输入框中。');
+  assert.equal(queueSaveFailedNotice({ hasAttachments: false, inSession: true }), '无法保存待发消息：本地存储已满。输入内容仍在输入框中。');
   assert.equal(queueSaveFailedNotice({ hasAttachments: true }), '无法保存待发消息：本地存储空间不足。附件仍保留，请移除部分附件后重试。');
   assert.equal(queueSaveFailedNotice({ hasAttachments: true, inSession: true }), '无法保存待发消息：本地存储空间不足。附件与草稿仍保留，请处理后重试。');
 });
@@ -112,7 +112,8 @@ await check('S6 两处报错(首页发送、会话里排队)都走这个函数,A
 // ── 接线锚 ────────────────────────────────────────────────
 await check('S2 启动后瘦身一次,且不在首屏关键路径上(放在启动闸之后)', async () => {
   const app = read('client/src/App.jsx');
-  assert.match(app, /afterBoot\(\(\) => \{[^}]*slimInputHistory\(localStorage\)[^}]*\}\)/, 'App.jsx 里没有"启动闸之后跑 slimInputHistory(localStorage)"');
+  // r150 J2 / R4:启动时的瘦身改为只跑一次(slimInputHistoryOnce,用标记键记着),这条锚跟着改认新的函数名。
+  assert.match(app, /afterBoot\(\(\) => \{[^}]*slimInputHistoryOnce\(localStorage\)[^}]*\}\)/, 'App.jsx 里没有"启动闸之后跑 slimInputHistoryOnce(localStorage)"');
 });
 await check('S1 / S3 / S4 输入框读写输入历史走新模块,不再自己拼"回落读旧全局再整份写回"', async () => {
   const chat = read('client/src/components/ChatInput.jsx');

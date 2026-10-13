@@ -12,6 +12,8 @@ import { winCmdSpawnSpec } from '../utils/win-cmd.js';
 import { detectUv, detectLocalProxy, probeTcp, isLoopbackProxyHost } from './version-check.js';
 import { searchRegistry, browseRegistry } from '../services/mcp-registry.js';
 import { assertWritable, isConfigGuardError, sendConfigGuardError } from '../utils/guarded-json.js';
+import { parsePluginList, isSafePluginName } from '../utils/plugin-list.js';
+import { makeListCache } from '../utils/list-cache.js';
 
 const execFileP = promisify(execFile);
 
@@ -447,8 +449,11 @@ function parseMcpList(output) {
 // In-memory cache. `runClaude(['mcp', 'list'])` spawns the claude CLI, which
 // takes ~2s cold start. Result is stable for a session, so cache it. Enable/
 // disable mutations invalidate the cache below.
-let mcpCache = null;
-let mcpCacheAt = 0;
+// r150 E3:缓存槽换成 utils/list-cache.js(原来是 mcpCache / mcpCacheAt / mcpRefreshing 三个变量)。
+// 原来作废只是把缓存置空,拦不住已经在跑的构建:面板冷读起了一次后台完整刷新(健康检查几秒到几十秒),
+// 这时停用一个插件,那次刷新跑完照样把停用之前读到的 MCP 列表写回缓存 —— 已停用插件带来的 MCP 又出现,
+// 一直到缓存过期。现在作废会让此前开始的构建全部写不进来,并在有人等刷新时自动补跑一次。
+const mcpListCache = makeListCache();
 // Long TTL because mcp/plugin list rarely changes mid-session.
 // Mutations (enable/disable) invalidate explicitly via invalidateMcpCache().
 // Pass `?fresh=1` to force a refresh.
@@ -466,7 +471,7 @@ const MCP_STAMP_FILE = join(GUI_DIR, 'mcp-config.stamp');
 let availablePluginsCache = null; // { at, items }
 const AVAILABLE_PLUGINS_TTL_MS = 5 * 60_000;
 function invalidateMcpListCache() {
-  mcpCache = null; mcpCacheAt = 0;
+  mcpListCache.invalidate();
   availablePluginsCache = null; // 装/卸插件后 installed 标记会变,一并失效
   try { invalidateDetailsCache(); } catch {}
 }
@@ -535,20 +540,15 @@ async function buildMcpList({ liveStatus = true } = {}) {
     }
 
     // 2. Installed plugins (also parse `claude plugin list` for enabled state)
+    //    输出格式与解析见 utils/plugin-list.js。r150 E1:输出里还有一段「Synced from claude.ai」——
+    //    Claude CLI 从账号同步下来的插件,不在 installed_plugins.json 里,原来面板完全看不到它们。
     let pluginEnabled = {};
+    let syncedPlugins = [];
     try {
       const out = await runClaude(['plugin', 'list'], { timeout: 8000 });
-      // Format: blocks separated by blank lines, each containing
-      //   ❯ <name>@<marketplace>
-      //   ...
-      //   Status: ✔ enabled | ✘ disabled | ✘ failed to load
-      const blocks = out.split(/\n(?=\s*❯)/);
-      for (const block of blocks) {
-        const nameMatch = block.match(/❯\s*([^@\s]+)/);
-        if (!nameMatch) continue;
-        const name = nameMatch[1];
-        pluginEnabled[name] = /Status:\s*✔\s*enabled/i.test(block);
-      }
+      const parsed = parsePluginList(out);
+      pluginEnabled = parsed.installed;
+      syncedPlugins = parsed.synced;
     } catch {}
     try {
       const pluginsData = JSON.parse(
@@ -571,6 +571,26 @@ async function buildMcpList({ liveStatus = true } = {}) {
         });
       }
     } catch {}
+    // r150 E1:账号同步的插件接在后面,带来源标记 source: 'synced'(前端据此单独成组、不给卸载与更新)。
+    // name 是 <插件名>@synced —— 停用 / 启用走现有的 PUT /plugins/:name/{disable|enable},传的就是这个名字。
+    // 不放进上面那个 try:installed_plugins.json 读不了(没装过任何插件时文件不存在)也不该连累这一段。
+    {
+      const known = new Set(result.plugins.map((p) => p.name));
+      for (const sp of syncedPlugins) {
+        if (known.has(sp.name)) continue;
+        known.add(sp.name);
+        result.plugins.push({
+          name: sp.name,
+          version: sp.version || '?',
+          scope: 'synced',
+          source: 'synced',
+          installPath: sp.path || '',
+          installedAt: null,
+          lastUpdated: null,
+          enabled: sp.enabled,
+        });
+      }
+    }
 
     // 4. External MCP projects
     try {
@@ -641,14 +661,9 @@ async function buildMcpList({ liveStatus = true } = {}) {
     return result;
 }
 
-let mcpRefreshing = false;
+// 后台完整刷新(含健康检查)。同一时刻只跑一次;跑的过程中缓存被作废,它的结果不写进缓存(见 list-cache.js)。
 function refreshMcpCache() {
-  if (mcpRefreshing) return;
-  mcpRefreshing = true;
-  buildMcpList()
-    .then((r) => { mcpCache = r; mcpCacheAt = Date.now(); })
-    .catch(() => {})
-    .finally(() => { mcpRefreshing = false; });
+  mcpListCache.refresh(() => buildMcpList());
 }
 
 // GET /api/mcp — stale-while-revalidate:有缓存(即使过期)立即秒回,过期再后台刷新。
@@ -656,16 +671,18 @@ function refreshMcpCache() {
 // "每次进面板都卡几十秒等 claude mcp list 健康检查"。?fresh=1 强制阻塞做完整健康检查。
 router.get('/mcp', async (req, res) => {
   const fresh = req.query.fresh === '1';
-  if (!fresh && mcpCache) {
-    res.json(mcpCache);
-    if (Date.now() - mcpCacheAt >= MCP_CACHE_TTL_MS) refreshMcpCache();
+  const hit = fresh ? null : mcpListCache.peek();
+  if (hit) {
+    res.json(hit.value);
+    if (Date.now() - hit.at >= MCP_CACHE_TTL_MS) refreshMcpCache();
     return;
   }
   try {
     // fresh=1:阻塞做完整(含健康检查)。冷加载:只做快路径秒回,随后后台补在线状态。
+    const token = mcpListCache.begin();
     const result = await buildMcpList({ liveStatus: fresh });
-    mcpCache = result;
-    mcpCacheAt = Date.now();
+    // 构建途中缓存被作废(有人刚改了 MCP / 插件)→ 这份结果照常回给本次请求,但不进缓存,下次读取重建。
+    mcpListCache.commit(token, result);
     res.json(result);
     if (!fresh) refreshMcpCache(); // 后台 liveStatus:true 覆盖在线状态 + 补 plugin/project MCP
   } catch (err) {
@@ -1257,28 +1274,48 @@ router.put('/mcp/:name/autoapprove', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// r150c S6:名字以 - 开头(或 @ 后面那段以 - 开头)时,命令行会把它当成选项而不是插件名 —— 直接拒绝,
+// 返回 400,不执行命令。字符集 / 长度不合法的仍走各接口原有的那条检查(行为不变)。
+// 返回 true 表示已经回了 400,调用方直接 return。
+function rejectOptionLikePluginName(name, res) {
+  if (isSafePluginName(name)) return false;
+  res.status(400).json({ error: '插件名不能以 - 开头' });
+  return true;
+}
+
 // Plugin enable/disable — delegates to `claude plugin {enable|disable} <name>`.
 // Accepts either bare name ("pua") or qualified ("pua@pua-skills"); CLI handles both.
+// r150c S7:命令失败(含超时)时它可能其实已经生效,所以失败分支也把列表缓存作废 —— 否则面板随后读到的
+// 还是缓存里的旧状态。只清列表缓存,不动换代戳(命令没确认成功,不让各会话白白换一次进程)。
+// ran 区分"命令跑过"与"名字校验就没过":后者什么都没发生,不用作废。
 router.put('/plugins/:name/enable', async (req, res) => {
+  let ran = false;
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    if (rejectOptionLikePluginName(name, res)) return;
+    ran = true;
     await runClaude(['plugin', 'enable', name], { timeout: 15000 });
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: true });
   } catch (err) {
+    if (ran) invalidateMcpListCache();
     return sendPluginPublicError(res, err, { fallback: '启用失败' });
   }
 });
 
 router.put('/plugins/:name/disable', async (req, res) => {
+  let ran = false;
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    if (rejectOptionLikePluginName(name, res)) return;
+    ran = true;
     await runClaude(['plugin', 'disable', name], { timeout: 15000 });
     invalidateMcpCache();
     res.json({ ok: true, name, enabled: false });
   } catch (err) {
+    if (ran) invalidateMcpListCache();
     return sendPluginPublicError(res, err, { fallback: '停用失败' });
   }
 });
@@ -1289,6 +1326,7 @@ router.post('/plugins/:name/update', async (req, res) => {
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    if (rejectOptionLikePluginName(name, res)) return;   // r150c S6(下面 mk 会单独传给命令行,@ 后那段也在校验之内)
     const mk = name.includes('@') ? name.split('@')[1] : '';
     const readVer = async () => {
       try {
@@ -1322,6 +1360,7 @@ router.delete('/plugins/:name', async (req, res) => {
   try {
     const { name } = req.params;
     if (!/^[A-Za-z0-9._@\-/]{1,100}$/.test(name)) throw new Error('invalid plugin name');
+    if (rejectOptionLikePluginName(name, res)) return;   // r150c S6
     await runClaude(['plugin', 'uninstall', name], { timeout: 30000 });
     invalidateMcpCache();
     res.json({ ok: true, name });
@@ -1776,13 +1815,15 @@ router.get('/plugins/available', async (req, res) => {
 //   `marketplace add <repo>` + `marketplace update <marketplace>` 再装 `<name>@<marketplace>`。
 router.post('/plugins/install', async (req, res) => {
   try {
+    // r150c S6:name / marketplace / repo 三个都会作为命令行参数传给 claude,以 - 开头会被当成选项 —— 同样拒绝。
+    // 这里沿用本接口原有的错误形态(结构化错误),不另出 400。
     const name = String(req.body?.name || '');
-    if (!/^[A-Za-z0-9._-]{1,80}$/.test(name)) throw new Error('invalid plugin name');
+    if (!/^[A-Za-z0-9._-]{1,80}$/.test(name) || name.startsWith('-')) throw new Error('invalid plugin name');
     const repo = req.body?.repo ? String(req.body.repo) : '';
     const marketplace = req.body?.marketplace ? String(req.body.marketplace) : OFFICIAL_MARKETPLACE;
-    if (!/^[A-Za-z0-9._-]{1,80}$/.test(marketplace)) throw new Error('invalid marketplace');
+    if (!/^[A-Za-z0-9._-]{1,80}$/.test(marketplace) || marketplace.startsWith('-')) throw new Error('invalid marketplace');
     const isCustom = !!repo && marketplace !== OFFICIAL_MARKETPLACE;
-    if (isCustom && !/^[A-Za-z0-9._\/-]{1,100}$/.test(repo)) throw new Error('invalid repo');
+    if (isCustom && (!/^[A-Za-z0-9._\/-]{1,100}$/.test(repo) || repo.startsWith('-'))) throw new Error('invalid repo');
 
     let childEnv = null;
 

@@ -717,6 +717,8 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
     onSend(built.prompt, {
       ...submitOpts,
       ...(built.meta ? { meta: built.meta } : {}),
+      // r150c S4:标明这次发送来自输入框 —— 存不进时的报错据此才说「输入内容仍在输入框中。」(下面失败即返回,不清空)。
+      fromComposer: true,
       onEnqueueFailure: (message) => { enqueueFailure = message; setAttachmentError(message); },
     });
     if (enqueueFailure) return;

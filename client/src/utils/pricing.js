@@ -59,6 +59,24 @@ const PRICES = {
   // Opus 5: 官方页 $5/$25、5m 写 $6.25、命中 $0.50(= usd() 默认倍率)。历史里 4.2 万条
   // 调用却一直缺条目,只靠 LiteLLM 远端表兜着 —— 远端拉不到时整批消息无价可显。
   'claude-opus-5':               usd(5, 25),
+  // 5.5 一代(r150 P2)。不补这三行时:'claude-opus-5-5' / 'claude-sonnet-5-5' 靠最长前缀落到上面 5 代的行
+  // (价不同),'claude-haiku-5-5' 没有任何行可中 = 界面显示未定价。
+  // 数值取远程价格表(/api/pricing 的 prices)里现有的那组:opus 5.5 = $4/$20、命中 $0.20、5m 写 $5;
+  // sonnet 5.5 = $2/$10、命中 $0.10、5m 写 $2.50;haiku 5.5 = $0.50/$2.50、命中 $0.05、5m 写 $0.625。
+  // 旁证:CLI 2.1.296 自带价目表里 opus 5.5(tier_4_20_cache_read_0_20)、sonnet 5.5
+  // (tier_2_10_cache_read_0_10)与这里逐项一致,1h 写价 $8 / $4 也等于下方循环补的 input×2。
+  // 【haiku 5.5 分两档(r150 R1)】远程表给它的那组数($0.50/$2.50、命中 $0.05、5m 写 $0.625)只是高档。
+  // CLI 2.1.296 自带价目表原文:
+  //   haiku_55:{input:0.1,output:0.5,cache_write_5m:0.125,cache_write_1h:0.2,cache_read:0.01,
+  //     long_prompt:{above_prompt_tokens:1e5,input:0.5,output:2.5,cache_write_5m:0.625,cache_write_1h:1,cache_read:0.05}}
+  // 即:提示不超过 10 万 token 的调用按基础档;超过 10 万的那次调用**整次**(输入 / 输出 / 缓存读写)按高档。
+  // 登记方式与判定口径见下方「内置表的提示长度分档」(longPrompt 字段)。
+  'claude-opus-5-5':             usd(4, 20, 0.2, 5),
+  'claude-sonnet-5-5':           usd(2, 10, 0.1, 2.5),
+  'claude-haiku-5-5':            usd(0.1, 0.5, 0.01, 0.125, {
+    cacheWrite1h: 0.2,
+    longPrompt: { above: 100_000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625, cacheWrite1h: 1 },
+  }),
   'claude-opus-4-8':             usd(5, 25),       // 4.8 用新 tokenizer,可能多消耗 ~35% token
   'claude-opus-4-7':             usd(5, 25),
   'claude-opus-4-6':             usd(5, 25),
@@ -267,6 +285,23 @@ for (const [id, entry] of Object.entries(PRICES)) {
   }
 }
 
+// ── r150 R1:内置表的提示长度分档(longPrompt)────────────────────
+// 条目可带 longPrompt: { above, input, output, cacheRead, cacheWrite, cacheWrite1h }:这次调用的提示 token
+// **严格大于** above 时,整次调用改用这组价(resolvePrice 的内置表那一层处理,并在适用条件里写明)。
+// 【提示 token 的口径】= input_tokens + cache_read_input_tokens + cache_creation_input_tokens 三项相加。
+//   Anthropic 的 usage 里 input_tokens 只是没走缓存的那部分,缓存读、缓存写另列;三项相加才是这次调用的提示总量。
+//   CLI 2.1.296 自带的计费函数就是这么判的(原文):
+//     n.input_tokens+(n.cache_read_input_tokens??0)+(n.cache_creation_input_tokens??0)>r.abovePromptTokens?r:e
+//   注意它和官方报价层「长上下文档」的判据(opts.promptTokens = input_tokens 原值,见 server/utils/pricing-rules.js
+//   的 LONG_CONTEXT_THRESHOLDS)不是同一个量:那边登记的是 OpenAI 系模型,它们的 input_tokens 本身已含缓存部分。
+//   所以这里另传一个量(opts.fullPromptTokens),不复用 promptTokens,也不往那张阈值表里登记 Claude 模型。
+// 【按每次调用判】档位是单次 API 调用的属性。一轮里有多次调用时要逐次判再相加(computeCostForMessage),
+//   拿一轮的合计去比会把"每次 5 万、共 3 次"误判成高档。
+// 【不知道单次提示量时用基础档】两处:用量面板拿到的是按模型汇总的 token(aggregateCost);一条记录没有逐次
+//   明细时(流式进行中、旧记录)手里只有这一轮的合计(r150c S1)。都无从判档 → 按基础档算,两处同一个口径;
+//   超过 10 万提示的那些调用会被低估。调用方用 opts.aggregated 告诉 computeCost"这是合计,不是一次调用的量"。
+// 目前只有 claude-haiku-5-5 一条用它。
+
 // ── Z2: LiteLLM 远端单价表 ──────────────────────────────────────
 // server /api/pricing 下发(USD/1M,已含 cacheRead/cacheWrite),比上面的手抄表
 // 新且权威,查价时优先。localStorage 缓存使后续加载同步可用;启动后异步刷新。
@@ -297,11 +332,80 @@ function compatPrices() {
   return prices && Object.keys(prices).length ? prices : REMOTE;
 }
 
+// ── r150 P1:Claude 模型的两种写法互认 ───────────────────────────
+// 远程表里 Claude 模型的键是 'anthropic/claude-opus-5.5' 这种写法(带 anthropic/ 前缀、版本号用点),
+// CLI 报的模型名是 'claude-opus-5-5'(连字符)。下面的查找原先只有逐字 / 去日期后缀 / startsWith 三步,
+// 这两种写法从来对不上 —— 远程表对所有 Claude 模型都没命中过,一直落到内置表(新模型在内置表里没有
+// 条目时就是「未定价」或借用上一代的价)。
+// 比较键:小写 → 去掉 [1m] 之类的方括号后缀 → 去掉 anthropic/ 前缀 → 去掉日期后缀 → 版本号里的点换成连字符。
+// 【只管 Claude 家族】比较键不以 claude- 开头的一律不参与:别的厂商带不带前缀可能是两个价不同的模型
+// (见 normModelKey 上方 Groq / Cerebras 的例子),它们的命中结果一个字不改。
+// 【只认等价,不做前缀猜测】'claude-opus-5-5' 不会去借 'anthropic/claude-opus-5' 的价。
+// guessed = 剥掉过方括号后缀或日期后缀(沿用本层"去日期后缀 = 靠规则猜"的口径,命中记 matchedExactly=false);
+// 只差前缀、点与连字符的是同一个 id 的两种写法,算等价命中。
+function claudeCanon(id) {
+  const raw = String(id || '').trim().toLowerCase();
+  const noSuffix = raw.replace(/\[[^\]]*\]$/, '');
+  const base = noSuffix.startsWith('anthropic/') ? noSuffix.slice('anthropic/'.length) : noSuffix;
+  if (!base.startsWith('claude-')) return null;
+  const noDate = base.replace(/-\d{8}$/, '');
+  return { key: noDate.replace(/(\d)\.(?=\d)/g, '$1-'), guessed: noSuffix !== raw || noDate !== base };
+}
+
+// 每张远程表建一次索引(比较键 → 表里的键)。查价是逐条消息调的,不能每次扫全表;表换了(新对象)自动重建。
+const claudeKeyIndexes = new WeakMap();
+function claudeKeyIndex(table) {
+  let index = claudeKeyIndexes.get(table);
+  if (index) return index;
+  index = new Map();
+  for (const key of Object.keys(table).sort()) {
+    const canon = claudeCanon(key);
+    if (!canon) continue;
+    const prev = index.get(canon.key);
+    // 同一个模型在表里有多个写法时:键本身不带日期 / 方括号后缀的优先,其次取字典序最小(结果稳定)。
+    if (!prev || (prev.guessed && !canon.guessed)) index.set(canon.key, { tableKey: key, guessed: canon.guessed });
+  }
+  claudeKeyIndexes.set(table, index);
+  return index;
+}
+
+/** 按比较键在远程表里找同一个 Claude 模型的另一种写法。返回 { entry, matchedExactly } 或 null。 */
+function remoteClaudeLookup(table, model) {
+  const canon = claudeCanon(model);
+  if (!canon) return null;
+  const hit = claudeKeyIndex(table).get(canon.key);
+  if (!hit) return null;
+  return { entry: table[hit.tableKey], matchedExactly: !canon.guessed && !hit.guessed };
+}
+
+/**
+ * r150 R2:内置表里有没有这个 Claude 模型 —— 逐字,或去掉 […] 后缀、日期后缀之后逐字。有就不看远程表。
+ * 为什么:远程表(官方兼容视图)每个模型只有一组价,而带分档的模型它给的是高的那一档(haiku 5.5 在远程表里
+ * 是 $0.50/$2.50,那只是提示超过 10 万 token 的价)。内置表里的 Claude 条目是照官方 / CLI 自带价目逐条核过的,
+ * 有它就以它为准;远程表只用来兜内置表还没收录的新型号。
+ * r150c S3:比之前先把名字归一化(小写、版本号里的点换成连字符)—— 'claude-haiku-5.5'、'Claude-Haiku-5-5'
+ * 和 'claude-haiku-5-5' 是同一个模型,原来前两种写法被判成"内置表没有",落到远程表的高档价上。
+ * 带 anthropic/ 前缀的名字不在此列:那是经聚合平台接入时的写法,用聚合平台自己的价(远程表里逐字的那个键)。
+ * 不是 Claude 家族的一律不算 —— 别的厂商仍是远程表在前,结果不变。
+ *
+ * 返回内置表里该用哪个名字去查(归一化后的写法,[…] 后缀与日期后缀原样保留);内置表没有则返回 null。
+ */
+function offlineClaudeId(model) {
+  const id = String(model || '').trim().toLowerCase();
+  if (!id.startsWith('claude-')) return null;
+  const normalized = id.replace(/(\d)\.(?=\d)/g, '$1-');
+  const noSuffix = normalized.replace(/\[[^\]]*\]$/, '');
+  const noDate = noSuffix.replace(/-\d{8}$/, '');
+  const found = [normalized, noSuffix, noDate].some((key) => Object.prototype.hasOwnProperty.call(PRICES, key));
+  return found ? normalized : null;
+}
+
 function remoteLookup(model) {
   const table = compatPrices();
   if (!model || !table) return null;
   let e = Object.prototype.hasOwnProperty.call(table, model) ? table[model] : null;
   if (!e) e = table[model.replace(/-\d{8}$/, '')];
+  if (!e) e = remoteClaudeLookup(table, model)?.entry || null;   // r150 P1:排在最长前缀之前(等价比前缀可靠)
   if (!e) {
     // 前缀兜底取**最长**匹配(与下方内置表 lookupByModel 同口径):键序不确定时
     // 短键(claude-3-5)不许抢走长键(claude-3-5-haiku)。
@@ -320,6 +424,8 @@ function remoteLookupDetailed(model) {
   if (Object.prototype.hasOwnProperty.call(table, model)) return { entry: { ...table[model], currency: 'USD' }, matchedExactly: true };
   const stripped = model.replace(/-\d{8}$/, '');
   if (stripped !== model && table[stripped]) return { entry: { ...table[stripped], currency: 'USD' }, matchedExactly: false };
+  const alias = remoteClaudeLookup(table, model);   // r150 P1
+  if (alias) return { entry: { ...alias.entry, currency: 'USD' }, matchedExactly: alias.matchedExactly };
   const k = Object.keys(table)
     .filter((key) => model.startsWith(key))
     .sort((a, b) => b.length - a.length)[0];
@@ -454,15 +560,22 @@ if (typeof window !== 'undefined') {
 
 // Common aliases the CLI may emit.
 // 裸别名对应哪一代是有歧义的(会话当年跑的可能是别的代),只能取"该别名当前指向的
-// 主力型号";已存在的三条不动(改了也只是把一个猜测换成另一个猜测)。
+// 主力型号"。
+// r150 P3:前三条由 4.6 / 4.7 / 4.5 改为 5.5 一代。依据 = 本机 CLI 2.1.296 自带模型目录的
+// aliases.<别名>.default(直连 Anthropic 与自定义端点都走 default):opus → claude-opus-5-5、
+// sonnet → claude-sonnet-5-5、haiku → claude-haiku-5-5;同一份目录的 latest_per_family 也是这三个。
+// (目录里另有按云厂商的例外:foundry 的 opus 是 4-6,企业网关登录 gateway 是 4-7 / 4-6 / 4-5,
+//  bedrock / vertex 的 sonnet、haiku 是 4-5 —— 本应用不走这些通道,不建模。)
+// r150 R3:fable 由 5 改为 5.1 —— 同一份目录里 aliases.fable.default 是 claude-fable-5-1(只有企业网关登录
+// gateway 那一列是 claude-fable-5)。两代的输入 / 输出价相同,差在命中价($0.25 对 $1)。
 const ALIASES = {
-  'sonnet': 'claude-sonnet-4-6',
-  'opus':   'claude-opus-4-7',
-  'haiku':  'claude-haiku-4-5',
+  'sonnet': 'claude-sonnet-5-5',
+  'opus':   'claude-opus-5-5',
+  'haiku':  'claude-haiku-5-5',
   // 与上面三条同理:CLI 发裸 'fable' 时原先四路查价全落空 = 无价可显。
   // (本机 3749 个 jsonl 的 assistant 消息里实际出现 0 次 —— 上一版注释写的"717 条"
   //  是拿 rg 抓 "model":" 时把 Agent 工具入参 model:"fable" 也算进去了,不是真调用。)
-  'fable':  'claude-fable-5',
+  'fable':  'claude-fable-5-1',
 };
 
 // 按 model id 查内置离线表(纯解析,不碰 provider):精确 → 别名 → 去日期后缀 → 最长前缀
@@ -670,6 +783,8 @@ const fail = (reason, extra = {}) => ({ ok: false, reason, detail: REASON_DETAIL
 export function resolvePrice(model, opts = {}) {
   const provider = opts.provider || null;
   const promptTokens = typeof opts.promptTokens === 'number' && Number.isFinite(opts.promptTokens) ? opts.promptTokens : null;
+  // r150 R1:这次调用的提示总量(输入 + 缓存读 + 缓存写),只给内置表的提示长度分档用;不知道就是 null。
+  const fullPromptTokens = typeof opts.fullPromptTokens === 'number' && Number.isFinite(opts.fullPromptTokens) ? opts.fullPromptTokens : null;
   const ts = parseTimestamp(opts.at);
   const skipped = [];
 
@@ -762,13 +877,20 @@ export function resolvePrice(model, opts = {}) {
     }
   }
 
-  // ③ 官方兼容视图 prices(现行精确 → 去日期后缀 → 最长前缀,本次不改回退链)
-  const compat = remoteLookupDetailed(model);
+  // ③ 官方兼容视图 prices(精确 → 去日期后缀 → Claude 模型的另一种写法(r150 P1,见 claudeCanon)→ 最长前缀)
+  // r150 R2:Claude 模型在内置表里有条目时跳过这一层,直接用内置表(见 offlineClaudeId)。
+  const builtinId = offlineClaudeId(model);
+  const compat = builtinId ? null : remoteLookupDetailed(model);
   if (compat) {
     const e = compat.entry;
+    // r150:远程表每个模型只有四个数,没有 1 小时档的缓存写价。Claude 家族按 input × 2 补 —— 与内置表同一条
+    // 规则(见上方「Claude 家族 1h 写价 = input×2」那段)。P1 之前 Claude 模型命中不了这一层,不存在这个问题;
+    // P1 之后不补的话,带 1 小时档写量的调用会变成「写费未知」,没有两档分配的又会被当成单档价去算。
+    // 别的厂商不补(它们没有这条规则)。
+    const write1h = e.cacheWrite1h ?? (claudeCanon(model) && typeof e.input === 'number' ? e.input * 2 : null);
     return {
       ok: true, tier: 'official-compat', matchedExactly: compat.matchedExactly, currency: 'USD', unit: UNIT,
-      prices: { input: e.input ?? null, output: e.output ?? null, cacheRead: e.cacheRead ?? null, cacheWrite5m: e.cacheWrite ?? null, cacheWrite1h: e.cacheWrite1h ?? null },
+      prices: { input: e.input ?? null, output: e.output ?? null, cacheRead: e.cacheRead ?? null, cacheWrite5m: e.cacheWrite ?? null, cacheWrite1h: write1h },
       quoteId: null, sourceUrl: null, fetchedAt: null, appliedConditions: [], skipped, note: null, retired: false,
     };
   }
@@ -776,13 +898,21 @@ export function resolvePrice(model, opts = {}) {
   // ④ community 兜底层:当前无来源(实现延后),恒跳过 —— 命中不了就不是错误。
 
   // ⑤ 内置离线表(现行回退链,不改)
-  const offline = offlineLookup(model, provider);
+  // builtinId:内置表里有这个 Claude 模型时,用归一化后的名字去查(点写法 / 大小写不同的名字逐字查不到)。
+  const offline = offlineLookup(builtinId ?? model, provider);
   if (offline) {
-    const e = offline.entry;
+    let e = offline.entry;
+    const applied = [];
+    // r150 R1:提示长度分档(见上方「内置表的提示长度分档」)。不知道提示量 → 基础档。
+    const tier = e.longPrompt;
+    if (tier && fullPromptTokens != null && fullPromptTokens > tier.above) {
+      e = { ...e, ...tier };
+      applied.push({ minPromptTokens: tier.above });
+    }
     return {
       ok: true, tier: 'offline', matchedExactly: offline.matchedExactly, currency: e.currency || 'USD', unit: UNIT,
       prices: { input: e.input ?? null, output: e.output ?? null, cacheRead: e.cacheRead ?? null, cacheWrite5m: e.cacheWrite ?? null, cacheWrite1h: e.cacheWrite1h ?? null },
-      quoteId: null, sourceUrl: null, fetchedAt: null, appliedConditions: [], skipped,
+      quoteId: null, sourceUrl: null, fetchedAt: null, appliedConditions: applied, skipped,
       note: e.note || null, retired: !!e.retired,
     };
   }
@@ -979,7 +1109,11 @@ export function computeCost(model, usage, provider, opts) {
   const cacheWrite = num(usage.cache_creation_input_tokens);
   // 长上下文判据 = **单次调用 API 字段 input_tokens 的原值**(它已含缓存读写的总量),
   // 不得再加 cache_read/cache_creation —— 见 server/utils/pricing-rules.js 的阈值表注释。
-  const price = resolvePrice(model, { at: opts?.at, provider, promptTokens: input });
+  // r150 R1:内置表的提示长度分档用另一个量 —— 输入 + 缓存读 + 缓存写(Anthropic 的 input_tokens 不含缓存部分)。
+  // opts.aggregated = 传进来的是合计(用量面板按模型汇总的量、一条记录没有逐次明细时的整轮合计),
+  // 不是一次调用的量,不能拿去判档。
+  const fullPromptTokens = opts?.aggregated ? null : input + cacheRead + cacheWrite;
+  const price = resolvePrice(model, { at: opts?.at, provider, promptTokens: input, fullPromptTokens });
   if (!price.ok) return null;
   const p = price.prices;
   const M = 1_000_000;
@@ -1052,7 +1186,7 @@ export function computeCostForMessage(message, provider) {
       if (!cost) { missingTime += 1; continue; }
       parts.push(cost);
     }
-    if (!parts.length) return computeCost(model, message.usage, provider, { at: message.timestamp });
+    if (!parts.length) return computeCost(model, message.usage, provider, { at: message.timestamp, aggregated: true });
     const total = { totalUsd: 0, breakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite5m: 0, cacheWrite1h: 0 } };
     const unknown = [];
     const applied = [];
@@ -1086,7 +1220,64 @@ export function computeCostForMessage(message, provider) {
       ...(unknown.includes('cacheWrite') ? { writeUnknown: true } : {}),
     };
   }
-  return computeCost(model, message.usage, provider, { at: message.timestamp });
+  // r150 R1:按内置表的提示长度分档计价的模型(haiku 5.5),档位要按每次调用各自判 —— message.usage 是这一轮
+  // 所有调用的合计,拿合计去比会把"每次 5 万提示、共 3 次"误判成高档。有逐次明细就逐次算再相加;
+  // 明细里有一项算不出(用量畸形)就不拼半截,仍按合计算。
+  if (calls && calls.length && usesOfflinePromptTiers(model, provider, message.timestamp)) {
+    const summed = sumCallCosts(model, calls, provider, message.timestamp);
+    if (summed) return summed;
+  }
+  // r150c S1:走到这里手里只有 message.usage —— 这一轮所有调用的合计,不是哪一次调用的量。标成合计,
+  // 内置表的提示长度分档不拿它去判(按基础档算,与用量面板同口径)。原来拿合计去比:3 次调用、每次提示 5 万,
+  // 有明细时 $0.00252,没明细时算成 $0.0126。
+  return computeCost(model, message.usage, provider, { at: message.timestamp, aggregated: true });
+}
+
+/** 这个模型此刻是不是按内置表里"带提示长度分档"的条目计价(用户没自填、官方报价层也没命中)。 */
+function usesOfflinePromptTiers(model, provider, at) {
+  if (!offlineLookup(offlineClaudeId(model) ?? model, provider)?.entry?.longPrompt) return false;   // 先查内置表(便宜),绝大多数模型在这里就返回
+  return resolvePrice(model, { provider, at }).tier === 'offline';
+}
+
+/**
+ * 逐次调用各算一次再相加(每次用自己的用量判档)。
+ * 空用量的项跳过(r150c S2):那次调用没有用量,费用本来就是 0,不该因为它整轮退回合计。
+ * 其余任何一项算不出(用量畸形)→ null,由调用方退回按合计算;明细全是空用量也返回 null(等于没有明细)。
+ */
+function sumCallCosts(model, calls, provider, fallbackAt) {
+  const parts = [];
+  for (const call of calls) {
+    if (usageProblem(call?.usage) === 'USAGE_EMPTY') continue;
+    const cost = computeCost(model, call?.usage, provider, { at: call?.at ?? fallbackAt });
+    if (!cost) return null;
+    parts.push(cost);
+  }
+  if (!parts.length) return null;
+  const breakdown = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite5m: null, cacheWrite1h: null };
+  const unknown = [];
+  const applied = [];
+  const seen = new Set();
+  let totalUsd = 0;
+  for (const cost of parts) {
+    totalUsd += cost.totalUsd;
+    for (const key of ['input', 'output', 'cacheRead', 'cacheWrite']) breakdown[key] += cost.breakdown[key];
+    for (const key of ['cacheWrite5m', 'cacheWrite1h']) {
+      if (cost.breakdown[key] != null) breakdown[key] = (breakdown[key] || 0) + cost.breakdown[key];
+    }
+    for (const dim of cost.unknownDimensions || []) if (!unknown.includes(dim)) unknown.push(dim);
+    for (const condition of cost.appliedConditions || []) {
+      const id = JSON.stringify(condition);
+      if (!seen.has(id)) { seen.add(id); applied.push(condition); }
+    }
+  }
+  const head = parts[0];
+  return {
+    totalUsd, breakdown, currency: head.currency, source: head.source,
+    tier: head.tier, matchedExactly: head.matchedExactly, quoteId: head.quoteId, skipped: head.skipped,
+    note: head.note, retired: head.retired, appliedConditions: applied,
+    ...(unknown.length ? { unknownDimensions: unknown, partial: true } : {}),
+    ...(unknown.includes('cacheWrite') ? { writeUnknown: true } : {}),
+  };
 }
 
 /**
@@ -1193,7 +1384,7 @@ export function aggregateCost(model, tokens, provider) {
     for (const bucket of buckets) {
       const row = byPeriod[bucket];
       if (!row) continue;
-      const c = computeCost(model, asUsage(row), provider, { at: AGGREGATE_PERIOD_AT[bucket] });
+      const c = computeCost(model, asUsage(row), provider, { at: AGGREGATE_PERIOD_AT[bucket], aggregated: true });
       if (!c) continue;
       any = true;
       usd += c.totalUsd;
@@ -1205,7 +1396,8 @@ export function aggregateCost(model, tokens, provider) {
     if (any) return { usd, currency: firstCurrency(model, provider), ...(partial ? { partial: true, unknownDimensions: unknown } : {}) };
     return isPlanBilling(provider, model) ? { subscription: true } : { unknown: true };
   }
-  const c = computeCost(model, asUsage(tokens), provider);
+  // aggregated:这里是按模型汇总的 token,没有单次调用的提示量 —— 内置表的提示长度分档按基础档算(r150 R1)。
+  const c = computeCost(model, asUsage(tokens), provider, { aggregated: true });
   if (c) return { usd: c.totalUsd, currency: c.currency, ...(c.partial ? { partial: true, unknownDimensions: c.unknownDimensions } : {}) };
   // computeCost 返回 null 有两种原因,面板要分开显示:套餐/订阅档 vs 查无单价。
   return isPlanBilling(provider, model) ? { subscription: true } : { unknown: true };

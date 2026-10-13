@@ -139,13 +139,37 @@ export function slimInputHistory(storage) {
   return result;
 }
 
+// ── r150 J2:启动时的瘦身只跑一次 ─────────────────────────────
+// 标记键:写了它 = 这份本地存储已经瘦过身。名字不在 cgui-input-history:<会话键> 前缀下,
+// 不会被当成某个会话的输入历史(瘦身、腾空间、删会话都碰不到它)。
+export const INPUT_HISTORY_SLIM_DONE_KEY = 'cgui-input-history-slim-done';
+
+/**
+ * 启动时用:没有标记才瘦身一次,跑完写标记;已有标记什么都不做(返回 null)。否则返回瘦身的结果。
+ * 为什么不能每次启动都瘦身:瘦身剔的是"会话键里与旧全局键相同的条目"。S1 之后这种条目只有一个来源 ——
+ * 用户在这个会话里又发了一遍旧全局里也有的那句话(它被提到本会话历史的第 1 位)。每次启动都剔,这一条
+ * 重启后就从第 1 位掉到本会话所有条目之后。存量的副本(S1 之前留下的)瘦一次就清完了,之后不会再产生。
+ * 存储写满时腾空间那条路(freeInputHistoryAndRetry)不看这个标记,仍然无条件瘦身。
+ * 标记写不进(存储满、瘦身又没腾出地方)时不抛,下次启动再跑一次;存储读不了 = 不跑。
+ * slim 可以换(单测用来数跑了几次)。
+ */
+export function slimInputHistoryOnce(storage, slim = slimInputHistory) {
+  try { if (storage.getItem(INPUT_HISTORY_SLIM_DONE_KEY) != null) return null; } catch { return null; }
+  const result = slim(storage);
+  try { storage.setItem(INPUT_HISTORY_SLIM_DONE_KEY, '1'); } catch { /* 写不进:下次启动再跑一次 */ }
+  return result;
+}
+
 // ── S4:写不进时腾空间 ───────────────────────────────────────
 /**
  * 本地存储写不进时调用:腾出输入历史占的空间,然后重试。attempt() 做那次写入并返回成没成。
  * 顺序:
  *   ① 先瘦身一次(S2:只剔旧全局的副本,不丢任何历史),再试;
- *   ② 还不够,按占用从大到小删"没有显示在任何窗格里的会话"的输入历史键,每删一个试一次,成功即停;
- *   ③ 没有可删的了仍失败 → 返回 false(调用方这时才报错)。
+ *   ② 还不够,按占用从大到小删"没有显示在任何窗格里的会话"的输入历史键,每删一个试一次,成功即停。
+ *      这一步只按键名认(cgui-input-history:<会话键>),不看值的内容:值解析不了、形态不认识的会话键也会删
+ *      (第①步的瘦身遇到这种键是跳过不动的)。范围只限输入历史键;
+ *   ③ 没有可删的了仍失败 → 把第②步删掉的原样写回去,再返回 false(调用方这时才报错)。
+ *      r150 J1:原来不写回 —— 占满存储的不是输入历史时,别的会话的输入历史全被删光,要写的东西还是没写进,白删。
  * **只动会话级的输入历史键**(cgui-input-history:<会话键>):它是锦上添花的东西,丢了只是少翻几条。
  * 草稿、待发队列、标题、权限模式等一律不碰;旧全局键、没有会话键的输入框用的 global 键也不删。
  * openSessionKeys:当前各窗格正在显示的会话键 —— 用户眼前的会话,它的输入历史不删。
@@ -157,13 +181,27 @@ export function freeInputHistoryAndRetry(storage, attempt, openSessionKeys = [])
     const keep = new Set([inputHistoryKey(null), ...(openSessionKeys || []).filter(Boolean).map((k) => inputHistoryKey(k))]);
     const candidates = inputHistoryKeysOf(storage)
       .filter((key) => !keep.has(key))
-      .map((key) => ({ key, size: key.length + String(storage.getItem(key) ?? '').length }))
+      .map((key) => { const value = storage.getItem(key); return { key, value, size: key.length + String(value ?? '').length }; })
       .sort((a, b) => b.size - a.size);
-    for (const { key } of candidates) {
-      storage.removeItem(key);
-      if (attempt()) return true;
+    const removed = [];   // J1:删掉的键值留在内存里,全部删完仍写不进就写回去
+    let done = false;
+    try {
+      for (const { key, value } of candidates) {
+        storage.removeItem(key);
+        removed.push([key, value]);
+        if (attempt()) { done = true; return true; }
+      }
+    } finally {
+      // r150c S5:放在 finally 里 —— attempt() 自己抛异常时(不是"写不进"而是别的错)同样要把删掉的写回,
+      // 原来那种情况直接跳到外层 catch,已删的键就丢了。
+      if (!done) {
+        for (const [key, value] of removed) {
+          if (value == null) continue;
+          try { storage.setItem(key, value); } catch { /* 这一个写不回去:只丢它,继续写回其余的 */ }
+        }
+      }
     }
-  } catch { /* 存储不可用 */ }
+  } catch { /* 存储不可用,或 attempt() 抛了异常:当作没写进 */ }
   return false;
 }
 
