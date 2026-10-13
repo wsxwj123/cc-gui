@@ -297,8 +297,9 @@ for (const [id, entry] of Object.entries(PRICES)) {
 //   所以这里另传一个量(opts.fullPromptTokens),不复用 promptTokens,也不往那张阈值表里登记 Claude 模型。
 // 【按每次调用判】档位是单次 API 调用的属性。一轮里有多次调用时要逐次判再相加(computeCostForMessage),
 //   拿一轮的合计去比会把"每次 5 万、共 3 次"误判成高档。
-// 【不知道单次提示量时用基础档】用量面板拿到的是按模型汇总的 token(aggregateCost),无从判档 → 按基础档算,
-//   超过 10 万提示的那些调用在面板上会被低估。
+// 【不知道单次提示量时用基础档】两处:用量面板拿到的是按模型汇总的 token(aggregateCost);一条记录没有逐次
+//   明细时(流式进行中、旧记录)手里只有这一轮的合计(r150c S1)。都无从判档 → 按基础档算,两处同一个口径;
+//   超过 10 万提示的那些调用会被低估。调用方用 opts.aggregated 告诉 computeCost"这是合计,不是一次调用的量"。
 // 目前只有 claude-haiku-5-5 一条用它。
 
 // ── Z2: LiteLLM 远端单价表 ──────────────────────────────────────
@@ -1101,7 +1102,8 @@ export function computeCost(model, usage, provider, opts) {
   // 长上下文判据 = **单次调用 API 字段 input_tokens 的原值**(它已含缓存读写的总量),
   // 不得再加 cache_read/cache_creation —— 见 server/utils/pricing-rules.js 的阈值表注释。
   // r150 R1:内置表的提示长度分档用另一个量 —— 输入 + 缓存读 + 缓存写(Anthropic 的 input_tokens 不含缓存部分)。
-  // opts.aggregated = 传进来的是按模型汇总的 token(用量面板),不是一次调用的量,不能拿去判档。
+  // opts.aggregated = 传进来的是合计(用量面板按模型汇总的量、一条记录没有逐次明细时的整轮合计),
+  // 不是一次调用的量,不能拿去判档。
   const fullPromptTokens = opts?.aggregated ? null : input + cacheRead + cacheWrite;
   const price = resolvePrice(model, { at: opts?.at, provider, promptTokens: input, fullPromptTokens });
   if (!price.ok) return null;
@@ -1176,7 +1178,7 @@ export function computeCostForMessage(message, provider) {
       if (!cost) { missingTime += 1; continue; }
       parts.push(cost);
     }
-    if (!parts.length) return computeCost(model, message.usage, provider, { at: message.timestamp });
+    if (!parts.length) return computeCost(model, message.usage, provider, { at: message.timestamp, aggregated: true });
     const total = { totalUsd: 0, breakdown: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite5m: 0, cacheWrite1h: 0 } };
     const unknown = [];
     const applied = [];
@@ -1212,12 +1214,15 @@ export function computeCostForMessage(message, provider) {
   }
   // r150 R1:按内置表的提示长度分档计价的模型(haiku 5.5),档位要按每次调用各自判 —— message.usage 是这一轮
   // 所有调用的合计,拿合计去比会把"每次 5 万提示、共 3 次"误判成高档。有逐次明细就逐次算再相加;
-  // 明细里有一项算不出(用量缺失 / 畸形)就不拼半截,仍按合计算。
+  // 明细里有一项算不出(用量畸形)就不拼半截,仍按合计算。
   if (calls && calls.length && usesOfflinePromptTiers(model, provider, message.timestamp)) {
     const summed = sumCallCosts(model, calls, provider, message.timestamp);
     if (summed) return summed;
   }
-  return computeCost(model, message.usage, provider, { at: message.timestamp });
+  // r150c S1:走到这里手里只有 message.usage —— 这一轮所有调用的合计,不是哪一次调用的量。标成合计,
+  // 内置表的提示长度分档不拿它去判(按基础档算,与用量面板同口径)。原来拿合计去比:3 次调用、每次提示 5 万,
+  // 有明细时 $0.00252,没明细时算成 $0.0126。
+  return computeCost(model, message.usage, provider, { at: message.timestamp, aggregated: true });
 }
 
 /** 这个模型此刻是不是按内置表里"带提示长度分档"的条目计价(用户没自填、官方报价层也没命中)。 */
