@@ -14,7 +14,11 @@ import { randomUUID } from 'crypto';
 import { PROFILE_VERSION, isProfileValid, profileLevel } from './session-profile.js';
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
-const MAX_ENTRIES = 4000;                  // §C.1:值 ≈0.4 KB/条 ⇒ 上限 ≈2 MB
+// §C.1 条数上限(值 ≈0.4 KB/条)。r148 P7:4000 → 50000(内存上限约 20 MB)。
+// 原来的 4000 离实际用量太近:本机项目目录顶层的会话文件已约 2800 个(每个文件占一条),按近几个月的
+// 增速两个月左右触顶;触顶后每次列项目都把刚淘汰的再全量扫回来、又挤掉别的,反复淘汰重扫。
+// 仍保留一个有限上限作防御;单个项目索引文件的体积防御(MAX_INDEX_BYTES)不变。
+const MAX_ENTRIES = 50_000;
 const MAX_INDEX_BYTES = 4 * 1024 * 1024;   // §C.2 体积防御:超了不落盘
 const FLUSH_DEBOUNCE_MS = 2000;            // §C.2「≤3 s 尾随去抖」的实现值
 const LOG = () => process.env.CGUI_SESSION_INDEX_LOG === '1';

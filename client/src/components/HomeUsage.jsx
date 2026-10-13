@@ -13,6 +13,7 @@ import {
 } from '../utils/homeUsage.js';
 import { aggregateCost, displayUsd, formatCost } from '../utils/pricing.js';
 import { useStore } from '../stores/sessionStore.js';
+import { usePricingVersion } from '../hooks/usePricingVersion.js';
 
 const SLOW_MS = 3000;             // 首次请求超过 3 s 未返回 → 骨架加「正在统计全部会话…」(本机冷扫 40 s)
 const STALE_REFETCH_MS = 45_000;  // 收到 stale 响应后的一次延迟静默重取(广播丢失的兜底;定时器单份)
@@ -139,6 +140,7 @@ export const HomeUsage = React.memo(function HomeUsage() {
   const staleTimerRef = useRef(null);
   // 与用量面板同源:金额只有一个出口(utils/pricing.js 的 aggregateCost),provider 透传保证两处口径一致。
   const provider = useStore((s) => s.currentProvider);
+  usePricingVersion(); // r148:查价数据晚到时,模型分页里的金额重算一次
 
   // silent = 静默重取:不闪骨架;失败时保留手上的数据(只有非静默的首取 / 重试失败才进错误态)。
   const fetchStats = useCallback(async (silent) => {
@@ -164,6 +166,9 @@ export const HomeUsage = React.memo(function HomeUsage() {
     mountedRef.current = true;
     // 挂载取一次。bootedRef:React.StrictMode(dev)把 effect 挂载→卸载→再挂载跑两遍,没有这道守卫 dev 下
     // 首屏会打两次 /api/usage(生产 build 不会);ref 在模拟重挂载时保留,生产路径行为不变。
+    // r148b A5:首取不延后(r148 P8 曾把它推到启动闸之后 1.5 秒)。首页用量是首屏内容:首页一出来它就该在取,
+    // 推后会让首页白等 1.5 秒骨架,也让"首页一落定就读数据"的既有验收(r131 C4a / C4b / C5b / C7d)落空。
+    // 价目仍由根组件延后加载;它晚到时由上面的 usePricingVersion() 让模型分页的金额重算一次。
     if (!bootedRef.current) { bootedRef.current = true; fetchStats(!!lastStatsCache); }   // 有缓存 → 首取也是静默的(不闪骨架)
     const onRefresh = () => fetchStats(true);
     window.addEventListener('cgui:usage-updated', onRefresh);   // 服务端重算落地(WS 转发,既有)
@@ -274,11 +279,18 @@ export const HomeUsage = React.memo(function HomeUsage() {
       layer.dataset.snakeStep = String(step);
       step = (step + 1) % route.path.length;
     };
+    // r148 P3:页面不可见(窗口最小化 / 切到别的桌面)时停表,回到可见从停下的那一步接着走 ——
+    // 原来窗口藏起来也照样每 100ms 改一次样式。step 留在闭包里,所以是"接着走"不是"从头再来"。
+    const start = () => { if (timer === null) timer = setInterval(tick, stepMs); };
+    const stop = () => { if (timer !== null) { clearInterval(timer); timer = null; } };
+    const onVisibility = () => { if (document.hidden) stop(); else start(); };
     tick();
-    timer = setInterval(tick, stepMs);
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', onVisibility);
     // M1(独立审查必修):cleanup 必须把染色复原(数据刷新会让 effect 重跑,新闭包的 marked 是空的)
     return () => {
-      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      stop();
       restore();
     };
   }, [snakeOn, grid, snakeTotal, tab]);

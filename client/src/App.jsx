@@ -51,7 +51,7 @@ function fetchServerEpoch() {
     .then(() => { serverEpochInFlight = null; return serverEpochCache; });
   return serverEpochInFlight;
 }
-import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark } from './stores/sessionStore.js';
+import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, flushAgentDeltas } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
@@ -103,7 +103,10 @@ import BtwWindow from './components/BtwWindow.jsx';
 import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyExactResult, relativeAgeLabel } from './utils/contextCache.js';
 import { readCacheUsage, addCacheUsage, formatHitPct, formatHitPctOrDash, EMPTY_CACHE_USAGE } from './utils/cacheStats.js';
 import { publishTurnCache, subscribeTurnCache, readTurnCache } from './utils/turnCacheBus.js';
-import { loadPricingCatalog } from './utils/pricingCatalog.js';
+import { ensurePricingCatalog, subscribePricingVersion, getPricingVersion } from './utils/pricingCatalog.js';
+import { afterBoot, bootSettled } from './utils/bootDefer.js';
+import { slimInputHistory } from './utils/inputHistory.js';
+import { queueSaveFailedNotice } from './utils/storageNotice.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
@@ -162,6 +165,7 @@ import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRe
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
+import { subscribeAgentsActive } from './utils/agentsActivePoller.js';
 import { askSaveLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot, willAskLargeSnapshot } from './utils/largeSnapshot.js';
 import { createLatestGate } from './utils/latestRequest.js';
 
@@ -1725,8 +1729,19 @@ export function SessionRowStatus({ sessionId, running, isSelected }) {
 }
 
 export function StatusDot({ running, lastActivity, className = '' }) {
-  if (running) return <Loader2 size={11} className={`text-accent animate-spin shrink-0 ${className}`} />;
   const t = lastActivity ? new Date(lastActivity).getTime() : NaN;
+  // r148 P1:这个勾只显示 RUNNING_DONE_WINDOW_MS(按当前时间算)。原来没有任何东西通知它"到点了" ——
+  // 靠根组件每 1.5 秒整体重渲染顺带把过期的勾收掉。那个重渲染去掉后,到点自己刷新一次。
+  // (hook 必须在下面的提前 return 之前。)
+  const [, bumpExpired] = useState(0);
+  useEffect(() => {
+    if (running || !Number.isFinite(t)) return undefined;
+    const left = t + RUNNING_DONE_WINDOW_MS - Date.now();
+    if (left <= 0) return undefined;
+    const id = setTimeout(() => bumpExpired((n) => n + 1), left + 50);
+    return () => clearTimeout(id);
+  }, [running, t]);
+  if (running) return <Loader2 size={11} className={`text-accent animate-spin shrink-0 ${className}`} />;
   if (Number.isFinite(t) && Date.now() - t < RUNNING_DONE_WINDOW_MS)
     return <CheckCircle2 size={11} className={`text-success shrink-0 ${className}`} />;
   return null;
@@ -2298,7 +2313,8 @@ function HomeState({ tabIndex = 0 }) {
       })
       : enqueueHomeDraft(homeDraftArgs);
     if (!queued) {
-      setAttachmentError('无法保存待发消息：本地存储空间不足。附件仍保留，请移除部分附件后重试。');
+      // r149 S6:走到这里 = 落盘失败且自动腾空间重试后仍失败(见 persistQueueSnapshot)。没带附件时不提附件。
+      setAttachmentError(queueSaveFailedNotice({ hasAttachments: attachments.length > 0 }));
       return;
     }
   };
@@ -3645,7 +3661,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // so single-pane behavior is identical. EVERY downstream selectedSession
   // reference reads the local alias below, so the rest of this 700-line
   // component is unchanged.
-  const { selectedProject, loading } = useStore();
+  // r148 P1:只订阅用到的两个字段。原来这里不带选择器(= 订阅整个 state),store 里任何一次写入
+  // (包括每 1.5 秒一次的运行状态轮询)都会让这个五千多行的组件连同输入框整体重跑一遍。
+  const selectedProject = useStore((s) => s.selectedProject);
+  const loading = useStore((s) => s.loading);
   // Pane routing generalized to N panes (0..5). Each SessionDetail reads/writes
   // its own slot in paneSessions/paneMessages. setPaneSession/setPaneMessages
   // keep the legacy selectedSession/messages (pane 0) + secondary* (pane 1)
@@ -3669,6 +3688,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 本会话的队列/pin/owner key(草稿用 draft-<hash>-<draftId>,r26-B5)。必须在所有引用它的 effect 之前声明,
   // 否则 effect 依赖数组在渲染期先求值会命中 TDZ(Cannot access before initialization)。
   const sessionQueueKey = queueKeyFor(selectedSession);
+  // r148 P1:本会话的标题改成订阅。原来在渲染时直接读 store(下面子代理视图的「母会话」标题、导出按钮的文件名),
+  // 标题变了它自己不会重渲染,全靠上面那个整库订阅顺带刷新;整库订阅去掉后必须自己订。
+  // 选择器返回字符串(基元),值没变不触发重渲染。
+  const sessionTitle = useStore((s) => resolveSessionTitle(
+    selectedSession,
+    s.customTitles[selectedSession?.sessionId],
+    s.autoTitles[selectedSession?.sessionId],
+  ));
   // /goal 当前是否还挂着:取历史里【最后一条】goal 记录。达成与手动清除都写 met:true
   // (CLI 的写入函数只有这一种表达)。用户需求:目标条要像计划卡一样常驻输入框上方,
   // 不能只在消息流里出现、一滚动就消失。因此这里取最后一条 goal 作为常驻条数据,
@@ -4093,6 +4120,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r119:丢掉挂起的流式提交(卸载/切会话)。收尾路径(broken 流的 finally)也会再 cancel
     // 一次,幂等;此处保证"组件已经拆了"这一刻不再有任何排队中的帧回调。
     streamCommitCancelRef.current?.();
+    // r148 P4:子代理的流式增量也是合并提交的(store 里的队列)。切会话 / 卸载这一刻把它落下去 ——
+    // 主回合那份是窗格级的显示缓冲所以丢弃,子代理的文字属于记录本身,不能丢。
+    flushAgentDeltas();
   }, []);
   // 卸载即 detach。关窗格(closePane splice paneIds)只让本 pane 的 SessionDetail 卸载,
   // 兄弟窗格 key 稳定不受影响;abortRef 为 null 时是纯 no-op,故 StrictMode 的
@@ -4490,10 +4520,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     lastSeenPidRef.current = null;
     let cancelled = false;
     let drainScheduled = false; // 排队消息排空的在途标记(见下方 drain 分支)
-    const poll = async () => {
+    // r148 P2:数据来源换成全应用共用的那一份轮询(utils/agentsActivePoller.js)—— 原来是本窗格自己
+    // 每 1.5 秒 fetch 一次,6 个分屏就是 6 份一样的请求。**下面的判定体一字未动、先后顺序不变**,
+    // 只是 d 由「自己取」变成「共用轮询交过来」。订阅当下会立刻取一份新的(等价于原来的首轮 poll()),
+    // 且只收到订阅之后才发出的请求的结果(不会拿切会话之前发出的旧结果来判本会话)。
+    const poll = (d) => {
       try {
-        const r = await fetch('/api/agents/active');
-        const d = await r.json();
         if (cancelled) return;
         // Use `stoppable` (= server's !finished), NOT `exitCode`: the
         // /agents/active payload has no exitCode field, so `a.exitCode == null`
@@ -4556,9 +4588,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setBackgroundPid(next);
       } catch {}
     };
-    poll();
-    const id = setInterval(poll, 1500);
-    return () => { cancelled = true; clearInterval(id); };
+    const unsubscribe = subscribeAgentsActive(poll);
+    return () => { cancelled = true; unsubscribe(); };
   }, [selectedSession?.sessionId, selectedSession?.draftId]);
 
   // B「后台工作中」横幅的存在门槛(理由见 utils/reattach.js BG_BANNER_DELAY_MS):
@@ -5095,7 +5126,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (queueOpts.meta) queueOpts.meta = attachmentMetaForPersistence(queueOpts.meta);
       const queued = useStore.getState().enqueueMessage(sessionQueueKey, { text: prompt, queuedAt, hidden: !!hiddenUserMessage, opts: queueOpts });
       if (!queued) {
-        const message = '无法保存待发消息：本地存储空间不足。附件与草稿仍保留，请处理后重试。';
+        // r149 S6:同首页那处 —— 自动腾空间重试后仍失败才会到这里;没带附件时不提附件。
+        const message = queueSaveFailedNotice({ hasAttachments: (queueOpts.meta?.attachments?.length || 0) > 0, inSession: true });
         onEnqueueFailure?.(message);
         setProviderSwitchNotice({ text: message });
         return;
@@ -7235,6 +7267,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // ⚠ 延迟提交意味着"落盘轮询(await 期间开了新回合)"可能先发生 → 用 teardownMine()
       // 把每一次写入都做成"还属于本回合本流才动"的守卫更新(与既有的 isCurrentTurn 同口径)。
       const teardownMine = () => isCurrentTurn() && !streamingRef.current;
+      // r148 P4:回合收尾 —— 子代理的增量缓冲无条件落下去(它属于子代理记录本身,与"本窗格是否还在
+      // 看这条流"无关,所以不放在下面的 isCurrentTurn 守卫里)。
+      flushAgentDeltas();
       if (isCurrentTurn()) {
         // r119 回合终止的强制 flush:合并器可能还挂着一帧(最后一批累积正文没进 state)。
         // 这里【同步、高优先级】提交 —— 此刻内容仍归本回合(下面的守卫更新才是可推迟的那组)。
@@ -7655,6 +7690,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // —— 停止状态和新正文同帧出现,不会出现"按钮变了但正文还停在上上帧"的错位;②立刻进入
     // 「停止中」。清掉它只有两处:本轮收尾(见 handleSend 的 finally)与后台分支的停止请求
     // 回话(那条没有本地流、没有 finally 可等)。前台分支【不】在回话时就清,理由见下面注释。
+    flushAgentDeltas(); // r148 P4:子代理的增量缓冲同样在停止这一刻落下去
     streamCommitFlushRef.current?.();
     if (pid) setStopping(true);
     abortRef.current?.abort();
@@ -8758,6 +8794,49 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     [streamingBlocks, streamingText, streamingThinking, streamingToolCalls, liveSteerSegments, streamingModel, liveSubUsageTurn],
   );
 
+  // r148 P6:会话汇总(费用 / 工具调用数 / 用过的模型)记忆化 —— 只在消息列表、provider 或查价数据变了才重算。
+  // 原来这三样在下面的提前 return 之后做普通计算:会话组件每渲染一次(流式时每帧一次)就把全部历史消息
+  // 过一遍、逐条查价。**必须放在这里(提前 return 之前)**:return 之后加 hook 会在切会话(loading 切换)时
+  // 因 hook 数量变化而整页白屏。算法与求和顺序一字未改(先定稿消息、后本地派生条目)。
+  // pricingVersion:查价读的三样数据(官方价目 / 用户单价 / 官方计费方式)是异步到达的,到了要重算。
+  const pricingVersion = useSyncExternalStore(subscribePricingVersion, getPricingVersion, getPricingVersion);
+  // r148 P8:启动时的价目加载延后了;这一格只要开着一条会话(要显示金额)就立刻确保有价目,不等启动闸。
+  useEffect(() => { if (selectedSession?.sessionId) ensurePricingCatalog(); }, [selectedSession?.sessionId]);
+  const sessionSummary = useMemo(() => {
+    const all = [...finalizedMessages, ...renderChat];
+    // Sum per-message cost. Skipping models we don't have prices for. Uses
+    // currentProvider (subscribed above, before early returns) so cc switch
+    // redirects (Claude → DeepSeek/MiMo) get the right backend price table.
+    // 逐条走 computeCostForMessage(带 usageCalls → 分时段模型按每次调用自己的时刻判档);
+    // 金额先归一到展示口径再相加 —— 官方 CNY 报价是原币种数字,不同币种的数字不能直接相加。
+    const cost = all.reduce((acc, m) => {
+      if (m.usage && (m.model || currentProvider?.model)) {
+        const c = computeCostForMessage(m, currentProvider);
+        if (c) acc += displayUsd(c.totalUsd, c.currency);
+      }
+      return acc;
+    }, 0);
+    const tools = all.reduce((acc, m) => acc + (m.toolCalls?.length || 0), 0);
+    const modelList = [...new Set(all.filter((m) => m.model).map((m) => m.model))];
+    return { totalCostUsd: cost, toolCallCount: tools, models: modelList };
+    // 依赖里的 pricingVersion 是"查价数据变了"的信号,函数体里不读它。
+  }, [finalizedMessages, renderChat, currentProvider, pricingVersion]);
+
+  // r148 P6:传给输入框的回调稳定下来(输入框已记忆化;每次渲染新建的内联函数会让记忆化白做)。
+  // 同样必须在提前 return 之前。
+  const dismissSuggestion = useCallback(
+    () => useStore.getState().clearPromptSuggestion(sessionQueueKey, selectedSession?.sessionId),
+    [sessionQueueKey, selectedSession?.sessionId],
+  );
+  const removeFromQueueAt = useCallback((i) => useStore.getState().removeFromQueue(sessionQueueKey, i), [sessionQueueKey]);
+  const editFromQueueAt = useCallback((i) => {
+    const item = messageQueue[i];
+    if (!item) return;
+    useStore.getState().removeFromQueue(sessionQueueKey, i);
+    window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
+  }, [messageQueue, sessionQueueKey]);
+  const openBtw = useCallback(() => setBtwToggleSignal((n) => n + 1), []);
+
   // In split mode, tab 0's `loading` would otherwise blank out tab 1 too.
   // We only let the loading screen short-circuit the primary tab — tab 1
   // fetches with silent:true so it never sets the global flag, and tab 0
@@ -8851,20 +8930,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const usageDetailTitle = `输入 ${totalTokens.input.toLocaleString()} · 输出 ${totalTokens.output.toLocaleString()} · 缓存命中 ${totalTokens.cacheRead.toLocaleString()} · 缓存写入 ${(totalTokens.cacheCreation || 0).toLocaleString()}
 总 token = 四项之和;命中率 = 缓存命中 / (输入 + 缓存命中 + 缓存写入)
 未命中(按未命中价计费的提示 token)= 输入 + 缓存写入 = ${sessionCache.miss.toLocaleString()}`;
-  // Sum per-message cost. Skipping models we don't have prices for. Uses
-  // currentProvider (subscribed above, before early returns) so cc switch
-  // redirects (Claude → DeepSeek/MiMo) get the right backend price table.
-  // 逐条走 computeCostForMessage(带 usageCalls → 分时段模型按每次调用自己的时刻判档);
-  // 金额先归一到展示口径再相加 —— 官方 CNY 报价是原币种数字,不同币种的数字不能直接相加。
-  const totalCostUsd = allMessages.reduce((acc, m) => {
-    if (m.usage && (m.model || currentProvider?.model)) {
-      const c = computeCostForMessage(m, currentProvider);
-      if (c) acc += displayUsd(c.totalUsd, c.currency);
-    }
-    return acc;
-  }, 0);
-  const toolCallCount = allMessages.reduce((acc, m) => acc + (m.toolCalls?.length || 0), 0);
-  const models = [...new Set(allMessages.filter((m) => m.model).map((m) => m.model))];
+  // r148 P6:费用 / 工具调用数 / 模型集合已挪到上面 hook 区的 sessionSummary(记忆化),这里只取结果。
+  const { totalCostUsd, toolCallCount, models } = sessionSummary;
 
   // Context-window fill of the LATEST turn (= what the next send carries), so
   // you can see how full the context is and when to /compact (#13). The prompt
@@ -8990,11 +9057,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             tabIndex={tabIndex}
             active={paneIsActive}
             parentSessionId={selectedSession?.sessionId || null}
-            parentTitle={resolveSessionTitle(
-              selectedSession,
-              useStore.getState().customTitles[selectedSession?.sessionId],
-              useStore.getState().autoTitles[selectedSession?.sessionId],
-            ) || '母会话'}
+            parentTitle={sessionTitle || '母会话'}
             onBack={() => useStore.getState().setViewingAgent(tabIndex, null)}
           />
         </div>
@@ -9092,11 +9155,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             <SessionHeaderMore forceOpenSignal={rewindSignal}>
               <ExportSessionButton
                 messages={[...messages, ...chatMessages]}
-                title={resolveSessionTitle(
-                  selectedSession,
-                  useStore.getState().customTitles[selectedSession?.sessionId],
-                  useStore.getState().autoTitles[selectedSession?.sessionId],
-                ) || '会话'}
+                title={sessionTitle || '会话'}
               />
               <CheckpointButton
                 openSignal={rewindSignal}
@@ -9547,7 +9606,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         onBackground={isStreaming ? handleBackgroundify : undefined}
         // A 输入预测:promptSuggestion 已按本会话的 key 取(见声明处),不会串窗;流式中不显示。
         suggestion={(!isStreaming && !backgroundPid && promptSuggestion) ? promptSuggestion : null}
-        onDismissSuggestion={() => useStore.getState().clearPromptSuggestion(sessionQueueKey, selectedSession?.sessionId)}
+        onDismissSuggestion={dismissSuggestion}
         disabled={false}
         // Composer treats "background CLI still running" the same as local
         // streaming for UI purposes: send button becomes the small rounded-
@@ -9559,20 +9618,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         paneId={paneId}
         claimDraft={claimDraft}
         onRefreshQueueEvidence={refreshQueueEvidence}
-        onRemoveFromQueue={(i) => useStore.getState().removeFromQueue(sessionQueueKey, i)}
-        onEditFromQueue={(i) => {
-          const item = messageQueue[i];
-          if (!item) return;
-          useStore.getState().removeFromQueue(sessionQueueKey, i);
-          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
-        }}
+        onRemoveFromQueue={removeFromQueueAt}
+        onEditFromQueue={editFromQueueAt}
         todos={currentTodos}
         plans={currentPlans}
         goal={effectiveGoal}
         permKey={sessionQueueKey}
         sessionId={selectedSession?.sessionId || null}
         tabIndex={tabIndex}
-        onBtwOpen={(messages.length > 0 || selectedSession?.sessionId || paneCount <= 1) ? () => setBtwToggleSignal((n) => n + 1) : undefined}
+        onBtwOpen={(messages.length > 0 || selectedSession?.sessionId || paneCount <= 1) ? openBtw : undefined}
         btwUnread={btwUnread}
       />
     </div>
@@ -9921,6 +9975,15 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
   const wrapRef = useRef(null);
   const menuRef = useRef(null);
   const requestRef = useRef(null);
+  // r148b A3:弹窗里的「刚刚 / N 分钟前」是按当前时间算的(relativeAgeLabel),却没有东西按时间刷新它 ——
+  // 原来靠会话组件每 1.5 秒整体重渲染顺带更新,r148 去掉那个重渲染后,弹窗开着不动时这段文字就停住了。
+  // 弹窗打开期间每 30 秒自己刷新一次;关着时不起定时器。
+  const [, refreshAgeLabel] = useState(0);
+  useEffect(() => {
+    if (!open) return undefined;
+    const id = setInterval(() => refreshAgeLabel((n) => n + 1), 30_000);
+    return () => clearInterval(id);
+  }, [open]);
   const canonicalKey = useMemo(
     () => contextCanonicalKey(sessionId, projectHash, cwd, model),
     [sessionId, projectHash, cwd, model],
@@ -11664,6 +11727,12 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
   const selectedProject = useStore((s) => s.selectedProject);
   const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
   const permKey = queueKeyFor(activeSession);
+  // r148 P1:导出文件名用的会话标题改成订阅(原来渲染时现读 store,见 SessionDetail 的 sessionTitle)。
+  const activeSessionTitle = useStore((s) => resolveSessionTitle(
+    activeSession,
+    s.customTitles[activeSession?.sessionId],
+    s.autoTitles[activeSession?.sessionId],
+  ));
 
   // r26-F2:手机菜单模型行走与桌面同一解析链 resolveSelectorModel(pin→元数据→全局,
   // 每环过 provider 白名单 + context1m 后缀)——裸 `pin || global` 会把 guard 拒掉的
@@ -11759,11 +11828,7 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
                 <div className="px-4 py-1 flex items-center gap-2">
                   <ExportSessionButton
                     messages={menuMessages}
-                    title={resolveSessionTitle(
-                      activeSession,
-                      useStore.getState().customTitles[activeSession.sessionId],
-                      useStore.getState().autoTitles[activeSession.sessionId],
-                    ) || '会话'}
+                    title={activeSessionTitle || '会话'}
                   />
                   <CheckpointButton
                     sessionId={activeSession.sessionId}
@@ -11967,7 +12032,11 @@ export default function App() {
   // SessionDetail 挂载和后续发送还会按 session 重试。
   useEffect(() => { void retryAttachmentSidecars(); }, []);
   // R20:官方价目在应用起来后先取一次(失败不影响任何功能),用量面板的价格区打开即有。
-  useEffect(() => { loadPricingCatalog().catch(() => {}); }, []);
+  // r148 P8:价目不在启动第一批里取,延后到启动闸之后;有界面要显示金额时会更早取(见 ensurePricingCatalog 的调用处)。
+  useEffect(() => afterBoot(() => ensurePricingCatalog()), []);
+  // r149 S2:启动后把输入历史瘦身一次(幂等)。存量里每个会话键都躺着旧全局 100 条的副本,合起来能占掉
+  // 本地存储的九成;剔掉副本不丢任何历史(上键仍从旧全局键翻得出)。放在启动闸之后,不在首屏关键路径上。
+  useEffect(() => afterBoot(() => { slimInputHistory(localStorage); }), []);
   // R4-b:记下"官方 provider 当前是怎么计费的"(OAuth 订阅 / API key 按量)。历史消息里
   // 没有当时的鉴权方式,拿此刻的顶替会让切一次 provider 就把订阅期的 Claude 消息按 API
   // 单价重算(判官实测 ¥4,690 → ¥498,876)。这里是全局唯一观察点,跟随 store 的刷新节奏。
@@ -12004,7 +12073,11 @@ export default function App() {
     }, 5000);
     return () => clearInterval(id);
   }, []);
-  const { sidebarCollapsed, toggleSidebar, selectedProject, selectedSession } = useStore();
+  // r148 P1:只订阅用到的四个字段(原来是整库订阅:store 任何写入都重渲染根组件 → 侧栏 → 所有窗格)。
+  const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
+  const toggleSidebar = useStore((s) => s.toggleSidebar);
+  const selectedProject = useStore((s) => s.selectedProject);
+  const selectedSession = useStore((s) => s.selectedSession);
   // 修正批#1b:顶栏选择器(Provider/模型/力度/远程)作用于「活跃窗格」的会话——
   // 未分屏 = selectedSession;分屏 = 聚焦格。返回既有对象引用,选择器稳定。
   const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || s.selectedSession);
@@ -12443,13 +12516,15 @@ export default function App() {
       try { const d = await (await fetch('/api/claude-version-check')).json(); if (d.hasUpdate) n.cc = d.latestVersion; } catch {}
       setUpdateNotice((n.gui || n.cc) ? n : null);
     };
-    checkUpdates(true);
+    // r148 P8:启动时的这一次延后到启动闸之后(两个接口都要问外网,不必和首屏请求挤在第一批)。
+    // 闸开之前的窗口聚焦事件不抢跑(闸一开这里就会查)。
+    const cancelBootCheck = afterBoot(() => checkUpdates(true));
     const timer = setInterval(() => checkUpdates(true), 30 * 60_000);
-    const onFocus = () => checkUpdates(false);
+    const onFocus = () => { if (bootSettled()) checkUpdates(false); };
     const onRecheck = () => checkUpdates(true);
     window.addEventListener('focus', onFocus);
     window.addEventListener('cgui:recheck-updates', onRecheck);
-    return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); window.removeEventListener('cgui:recheck-updates', onRecheck); };
+    return () => { cancelBootCheck(); clearInterval(timer); window.removeEventListener('focus', onFocus); window.removeEventListener('cgui:recheck-updates', onRecheck); };
   }, []);
 
   // r17-2:装完新版打开 GUI → 弹「更新说明」。内容全程离线(CHANGELOG.md 构建期切成
@@ -12654,10 +12729,9 @@ export default function App() {
   const [waitingKeys, setWaitingKeys] = useState('');
   useEffect(() => {
     let cancelled = false;
-    const poll = async () => {
+    // r148 P2:与各窗格、监控面板共用同一份轮询(utils/agentsActivePoller.js),不再自己另起一份。
+    const poll = (d) => {
       try {
-        const r = await fetch('/api/agents/active');
-        const d = await r.json();
         if (cancelled) return;
         // #26:排除 idle(常驻保活)——它不是"正在跑",否则会话绿点永远亮着
         const running = (d.agents || []).filter((a) => a.kind === 'chat-process' && a.stoppable === true && a.status !== 'idle');
@@ -12668,9 +12742,8 @@ export default function App() {
         setWaitingKeys(waitingSessionKeys(d.agents));
       } catch {}
     };
-    poll();
-    const id = setInterval(poll, 1500);
-    return () => { cancelled = true; clearInterval(id); };
+    const unsubscribe = subscribeAgentsActive(poll);
+    return () => { cancelled = true; unsubscribe(); };
   }, []);
   // app 级"在等你"提示:待处理卡片 + 在等你的代理(同一会话两边都有则只算一件事)。
   // Dock 角标(mac)+ 窗口标题计数(跨平台兜底)+ 坞图标小红点(前台可见)。
@@ -12941,8 +13014,10 @@ export default function App() {
     document.addEventListener('visibilitychange', onVis);
     // Warm the MCP cache so the first click on the MCP panel is instant
     // (claude mcp list cold spawn is ~2s).
-    fetch('/api/mcp').catch(() => {});
+    // r148 P8:预热延后到启动闸之后(它要起子进程,不必和首屏请求挤在第一批)。
+    const cancelMcpWarm = afterBoot(() => { fetch('/api/mcp').catch(() => {}); });
     return () => {
+      cancelMcpWarm();
       window.removeEventListener('cgui:provider-change', onProvCh);
       window.removeEventListener('cgui:ws-reconnected', onReconn);
       document.removeEventListener('visibilitychange', onVis);

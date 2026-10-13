@@ -10,6 +10,7 @@ import { quotaItemText, quotaUsedPercent, quotaTone, resetTooltip } from '../uti
 import { useStore } from '../stores/sessionStore.js';
 import { addCacheUsage, formatHitPct, formatHitPctOrDash, EMPTY_CACHE_USAGE } from '../utils/cacheStats.js';
 import { getPricingCatalogCached, loadPricingCatalog, setPricingCatalog } from '../utils/pricingCatalog.js';
+import { usePricingVersion } from '../hooks/usePricingVersion.js';
 
 // R4-a:面板的费用口径 = 消息气泡的口径,只有 aggregateCost / computeCost 一个出口。
 // 服务端把 byModel 聚合成 { input, output, cacheRead, cacheWrite, calls },aggregateCost
@@ -711,6 +712,9 @@ export function UsagePanel() {
   // R4-a:与消息气泡同源的 provider,透传给 aggregateCost —— 两个视图必须用同一个判据,
   // 否则又会出现"面板和气泡对同一批数据给两个数"。
   const provider = useStore((s) => s.currentProvider);
+  // r148b A1:面板在渲染时算金额(aggregateCost),而查价数据(价目 / 用户单价 / 计费方式)是异步到达的。
+  // 订阅它的版本:晚到时面板自己重渲染一次,金额跟着更新。必须在下面的 if (loading) 提前 return 之前。
+  usePricingVersion();
 
   const fetchStats = async (silent = false) => {
     if (!silent) setLoading(true);

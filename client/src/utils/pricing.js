@@ -10,7 +10,7 @@
 // cacheRead=0.1×input、cacheWrite=1.25×input(5min TTL)。
 
 import {
-  getPricingCatalogCached, officialQuotesByModelId, officialQuotesByDisplayKey, officialNameKey,
+  getPricingCatalogCached, bumpPricingVersion, officialQuotesByModelId, officialQuotesByDisplayKey, officialNameKey,
 } from './pricingCatalog.js';
 import {
   periodFor, LONG_CONTEXT_THRESHOLDS, OFFICIAL_MODEL_ALIASES, AGGREGATE_PERIOD_AT,
@@ -280,6 +280,9 @@ async function hydrateRemotePrices() {
     if (j && j.prices && Object.keys(j.prices).length) {
       REMOTE = j.prices;
       try { localStorage.setItem('cgui-litellm-prices', JSON.stringify(j.prices)); } catch {}
+      // r148b A4:兜底价格表换了新的 → 通知算金额的地方重算(它也是查价的输入;这次载入在模块加载 3 秒后
+      // 才发生,那时金额多半已经画出来了)。
+      bumpPricingVersion();
     }
   } catch { /* 离线/失败 → 沿用缓存或内置表 */ }
 }
@@ -417,6 +420,7 @@ export function setUserPrices(providers, persist = true) {
   USER_ANY = any;
   // 缓存使下次加载首帧就有用户价(与 REMOTE 同一套路);hydrate 成功后覆盖。
   if (persist) { try { localStorage.setItem(UP_KEY, JSON.stringify(slim)); } catch { /* 隐私模式/配额 */ } }
+  bumpPricingVersion(); // r148:用户单价变了 → 通知算金额的地方重算(见 pricingCatalog.js「查价输入的版本号」)
 }
 
 /**
@@ -884,6 +888,7 @@ export function observeOfficialBilling(provider) {
   if (mode === lastOfficialBilling) return;
   lastOfficialBilling = mode;
   try { localStorage.setItem(OFFICIAL_BILLING_KEY, mode); } catch { /* 隐私模式/配额 */ }
+  bumpPricingVersion(); // r148:官方计费方式变了 → 金额要不要显示跟着变
 }
 
 /**
@@ -915,6 +920,7 @@ export function probeOfficialBilling() {
       if (!lastOfficialBilling && j && j.official === true && (j.session || j.weekAll || j.weekScoped)) {
         lastOfficialBilling = 'oauth';
         try { localStorage.setItem(OFFICIAL_BILLING_KEY, 'oauth'); } catch { /* 隐私模式/配额 */ }
+        bumpPricingVersion(); // r148:探测结果落地(原注释里的"已知天花板":要等下一次渲染才更新)
       }
     } catch { /* 网络/解析失败 → 不写记录 */ }
     return lastOfficialBilling;

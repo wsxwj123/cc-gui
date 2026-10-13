@@ -32,6 +32,7 @@ import {
 } from '../utils/streamStatus.js';
 import { Linkify } from '../utils/linkify.jsx';
 import { ToolResultImages } from './tools/ToolResultImages.jsx';
+import { usePricingVersion } from '../hooks/usePricingVersion.js';
 
 // Tools that get their own bespoke inline card (rendered in chronological order
 // inside the turn). Anything not in this set falls through to ToolCallsGroup,
@@ -782,6 +783,7 @@ function UsageDisplay({ message }) {
   // hook 必须无条件调用:移到 early return 之前(原在 if(!usage)return 之后=条件调用 hook,
   // usage 有无切换时 hooks 数量变→React 崩;ESLint rules-of-hooks 抓出的真隐患)。
   const provider = useStore((s) => s.currentProvider);
+  usePricingVersion(); // r148:查价数据(价目 / 用户单价 / 计费方式)晚到时,这条金额自己重算一次
   const usage = message?.usage;
   if (!usage) return null;
   const model = message.model;
