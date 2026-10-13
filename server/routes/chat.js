@@ -2,8 +2,9 @@ import { Router } from 'express';
 import { spawn, execFileSync } from 'child_process';
 import { dirname, join as pathJoin, isAbsolute, parse as pathParse } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync, mkdirSync, rmSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFileSync, statSync, writeFileSync, unlinkSync, readdirSync, watch, existsSync, mkdirSync, rmSync, createReadStream } from 'node:fs';
+import { readFile, readdir, access } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import { homedir, tmpdir } from 'node:os';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { query, AbortError } from '@anthropic-ai/claude-agent-sdk';
@@ -3898,35 +3899,47 @@ export function validateContextRequest(req) {
   return { sessionId, ...values };
 }
 
-function readHistoricalContextMeta(sessionId) {
+// 会话没有活进程时,从它的 jsonl 里取工作目录(第一条带 cwd 的记录)和模型(最后一条 assistant 的真模型名)。
+// r148 P5:改成异步、流式逐行读。原来在请求路径上同步列目录 + readFileSync 整个文件再逐行解析 ——
+// 几十 MB 的会话会把事件循环整段占住 0.1–0.5 秒,这期间所有会话的流式转发、别的接口全部停住。
+// 取到的内容与原来逐项相同(同样的目录遍历顺序、同样的取值规则、坏行跳过、读不了返回 null)。
+export async function readHistoricalContextMeta(sessionId) {
   const projectsDir = pathJoin(homedir(), '.claude', 'projects');
   let file = '';
   let projectHash = '';
   let dirs = [];
-  try { dirs = readdirSync(projectsDir); } catch {}
+  try { dirs = await readdir(projectsDir); } catch {}
   for (const dir of dirs) {
     if (!CONTEXT_PROJECT_RE.test(dir)) continue;
     const candidate = pathJoin(projectsDir, dir, `${sessionId}.jsonl`);
-    if (existsSync(candidate)) { file = candidate; projectHash = dir; break; }
+    try { await access(candidate); file = candidate; projectHash = dir; break; } catch {}
   }
   if (!file) return null;
-  let raw = '';
-  try { raw = readFileSync(file, 'utf8'); } catch { return null; }
   let cwd = '';
   let model = null;
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const record = JSON.parse(line);
-      if (!cwd && typeof record?.cwd === 'string' && record.cwd) cwd = record.cwd;
-      if (record?.type === 'assistant' && typeof record.message?.model === 'string'
-        && record.message.model && !record.message.model.startsWith('<')) model = record.message.model;
-    } catch {}
-  }
+  let failed = false;
+  const stream = createReadStream(file, { encoding: 'utf8' });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  // readline 不替输入流兜 error:不接住的话,文件在探到之后被删 / 读失败会变成未处理的 error 事件。
+  stream.on('error', () => { failed = true; lines.close(); });
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      // 工作目录已经有了之后,只有 assistant 记录还可能改变结果;别的行不必解析(行里必有 "assistant" 字样才可能是)。
+      if (cwd && !line.includes('"assistant"')) continue;
+      try {
+        const record = JSON.parse(line);
+        if (!cwd && typeof record?.cwd === 'string' && record.cwd) cwd = record.cwd;
+        if (record?.type === 'assistant' && typeof record.message?.model === 'string'
+          && record.message.model && !record.message.model.startsWith('<')) model = record.message.model;
+      } catch {}
+    }
+  } catch { failed = true; }
+  if (failed) return null;
   return { sessionId, projectHash, cwd, model };
 }
 
-function trustedContextMeta(sessionId) {
+async function trustedContextMeta(sessionId) {
   for (const slot of activeProcesses.values()) {
     if (slot.sessionId !== sessionId || slot.exitCode !== null || slot.closing) continue;
     const cwd = typeof slot.cwd === 'string' ? slot.cwd : '';
@@ -3983,7 +3996,7 @@ export function validContextPayload(payload) {
 router.get('/context/:sessionId', async (req, res) => {
   const request = validateContextRequest(req);
   if (!request) return res.status(400).json({ ok: false, code: 'invalid-context-request', error: '上下文请求参数无效' });
-  const meta = trustedContextMeta(request.sessionId);
+  const meta = await trustedContextMeta(request.sessionId);
   if (!meta) return res.status(404).json({ ok: false, code: 'context-session-not-found', error: '找不到对应会话' });
   if (!contextHintsMatch(request, meta)) {
     return res.status(409).json({ ok: false, code: 'context-session-mismatch', error: '上下文请求与会话不匹配' });
