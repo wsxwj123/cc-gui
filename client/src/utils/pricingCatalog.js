@@ -95,6 +95,15 @@ export function loadPricingCatalog() {
   return inflight;
 }
 
+/**
+ * 还没有价目就去取一次(已有 / 正在取则什么都不做)。r148 P8:启动时的那次加载延后了,
+ * 需要金额的界面(打开了一条会话、首页用量块)挂载时调它,保证不会比延后闸更晚才有价目。
+ */
+export function ensurePricingCatalog() {
+  if (cache || inflight) return;
+  loadPricingCatalog().catch(() => {});
+}
+
 /** modelId 逐字相等的官方报价(大小写敏感:模型 id 是机器标识)。 */
 export function officialQuotesByModelId(modelId) {
   return byModelId.get(modelId) || [];

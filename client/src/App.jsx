@@ -103,7 +103,8 @@ import BtwWindow from './components/BtwWindow.jsx';
 import { contextCanonicalKey, isValidContextResponse, pickBreakdownTier, applyExactResult, relativeAgeLabel } from './utils/contextCache.js';
 import { readCacheUsage, addCacheUsage, formatHitPct, formatHitPctOrDash, EMPTY_CACHE_USAGE } from './utils/cacheStats.js';
 import { publishTurnCache, subscribeTurnCache, readTurnCache } from './utils/turnCacheBus.js';
-import { loadPricingCatalog, subscribePricingVersion, getPricingVersion } from './utils/pricingCatalog.js';
+import { ensurePricingCatalog, subscribePricingVersion, getPricingVersion } from './utils/pricingCatalog.js';
+import { afterBoot, bootSettled } from './utils/bootDefer.js';
 import EnvCheckPanel from './components/EnvCheckPanel.jsx';
 import { ArtifactDock } from './components/ArtifactPreview.jsx';
 import { FullDiskAccessModal } from './components/FullDiskAccessModal.jsx';
@@ -8795,6 +8796,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 因 hook 数量变化而整页白屏。算法与求和顺序一字未改(先定稿消息、后本地派生条目)。
   // pricingVersion:查价读的三样数据(官方价目 / 用户单价 / 官方计费方式)是异步到达的,到了要重算。
   const pricingVersion = useSyncExternalStore(subscribePricingVersion, getPricingVersion, getPricingVersion);
+  // r148 P8:启动时的价目加载延后了;这一格只要开着一条会话(要显示金额)就立刻确保有价目,不等启动闸。
+  useEffect(() => { if (selectedSession?.sessionId) ensurePricingCatalog(); }, [selectedSession?.sessionId]);
   const sessionSummary = useMemo(() => {
     const all = [...finalizedMessages, ...renderChat];
     // Sum per-message cost. Skipping models we don't have prices for. Uses
@@ -12016,7 +12019,8 @@ export default function App() {
   // SessionDetail 挂载和后续发送还会按 session 重试。
   useEffect(() => { void retryAttachmentSidecars(); }, []);
   // R20:官方价目在应用起来后先取一次(失败不影响任何功能),用量面板的价格区打开即有。
-  useEffect(() => { loadPricingCatalog().catch(() => {}); }, []);
+  // r148 P8:价目不在启动第一批里取,延后到启动闸之后;有界面要显示金额时会更早取(见 ensurePricingCatalog 的调用处)。
+  useEffect(() => afterBoot(() => ensurePricingCatalog()), []);
   // R4-b:记下"官方 provider 当前是怎么计费的"(OAuth 订阅 / API key 按量)。历史消息里
   // 没有当时的鉴权方式,拿此刻的顶替会让切一次 provider 就把订阅期的 Claude 消息按 API
   // 单价重算(判官实测 ¥4,690 → ¥498,876)。这里是全局唯一观察点,跟随 store 的刷新节奏。
@@ -12496,13 +12500,15 @@ export default function App() {
       try { const d = await (await fetch('/api/claude-version-check')).json(); if (d.hasUpdate) n.cc = d.latestVersion; } catch {}
       setUpdateNotice((n.gui || n.cc) ? n : null);
     };
-    checkUpdates(true);
+    // r148 P8:启动时的这一次延后到启动闸之后(两个接口都要问外网,不必和首屏请求挤在第一批)。
+    // 闸开之前的窗口聚焦事件不抢跑(闸一开这里就会查)。
+    const cancelBootCheck = afterBoot(() => checkUpdates(true));
     const timer = setInterval(() => checkUpdates(true), 30 * 60_000);
-    const onFocus = () => checkUpdates(false);
+    const onFocus = () => { if (bootSettled()) checkUpdates(false); };
     const onRecheck = () => checkUpdates(true);
     window.addEventListener('focus', onFocus);
     window.addEventListener('cgui:recheck-updates', onRecheck);
-    return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); window.removeEventListener('cgui:recheck-updates', onRecheck); };
+    return () => { cancelBootCheck(); clearInterval(timer); window.removeEventListener('focus', onFocus); window.removeEventListener('cgui:recheck-updates', onRecheck); };
   }, []);
 
   // r17-2:装完新版打开 GUI → 弹「更新说明」。内容全程离线(CHANGELOG.md 构建期切成
@@ -12992,8 +12998,10 @@ export default function App() {
     document.addEventListener('visibilitychange', onVis);
     // Warm the MCP cache so the first click on the MCP panel is instant
     // (claude mcp list cold spawn is ~2s).
-    fetch('/api/mcp').catch(() => {});
+    // r148 P8:预热延后到启动闸之后(它要起子进程,不必和首屏请求挤在第一批)。
+    const cancelMcpWarm = afterBoot(() => { fetch('/api/mcp').catch(() => {}); });
     return () => {
+      cancelMcpWarm();
       window.removeEventListener('cgui:provider-change', onProvCh);
       window.removeEventListener('cgui:ws-reconnected', onReconn);
       document.removeEventListener('visibilitychange', onVis);
