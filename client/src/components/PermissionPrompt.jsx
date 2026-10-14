@@ -8,6 +8,7 @@ import { isActivatableTarget, isEditableTarget } from '../utils/escAction.js';
 import { isImeReactKeydown } from '../utils/imeGuard.js';
 import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
 import { isAuditStreakReason } from '../../../server/utils/cli-strings.js';
+import { sessionWhitelistAllows } from '../utils/sessionAllow.js';
 
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
 const PLAN_WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
@@ -1000,8 +1001,8 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           // 共享遗留键 cgui-perm-wl-none 不生效:draft(sessionId=null)不吃白名单,
           // 否则任何 draft 的同名工具都被旧存量键自动放行(串放行)。
           try { wl = it.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${it.sessionId}`) || '[]') : []; } catch {}
-          if (wl.includes(it.toolName) && !it.blockedPath) {
-            // 白名单命中:放行但不入表。越界请求(blockedPath)不吃白名单,必须弹卡。
+          if (sessionWhitelistAllows(it, wl)) {
+            // 白名单命中:放行但不入表。越界请求(blockedPath)与第三方「自动」档上交的请求(mustPrompt)不吃白名单,必须弹卡。
             // 共享提交器自带重试到送达 + in-flight 去重(双实例 hydrate 也不双发)。
             respondPermission(it.id, { decision: 'allow', nonce: it.nonce });
           } else {

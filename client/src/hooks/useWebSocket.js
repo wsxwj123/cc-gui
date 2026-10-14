@@ -3,6 +3,7 @@ import { useStore } from '../stores/sessionStore.js';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
 import { maybeNotify, permissionNotice } from '../utils/desktopNotify.js';
 import { dropStreamSnapshot } from '../utils/reattach.js';
+import { sessionWhitelistAllows } from '../utils/sessionAllow.js';
 import { getSkinState, deactivateSkin } from '../utils/skins.js';
 
 // G3:危险命令启发式 —— 删除类 + 网络/装包 + sudo。命中即强制弹窗,不被任何自动放行豁免。
@@ -119,7 +120,8 @@ function handlePermissionRequest(req) {
   // 越界访问(blockedPath)不吃白名单 → 强制弹越界卡(沙箱边界不静默扩权)。
   let wl = [];
   try { wl = req.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${req.sessionId}`) || '[]') : []; } catch {}
-  if (Array.isArray(wl) && wl.includes(req.toolName) && !req.blockedPath) {
+  // r151a 审查 M1:第三方「自动」档上交的请求(mustPrompt)同样不吃白名单 —— 判定在 utils/sessionAllow.js。
+  if (sessionWhitelistAllows(req, wl)) {
     if (import.meta.env?.DEV) console.log('[cgui-perm] auto-allow: whitelist', req.id, req.toolName);
     // r26-H1:auto-allow 也要带 nonce(broadcast 下发的 req.nonce),否则服务端 403、
     // 白名单放行这条路径被 nonce 闸整体锁死。

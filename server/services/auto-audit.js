@@ -108,3 +108,9 @@ export function thirdPartyAutoPreToolUse({ thirdParty, mode, dangerous }) {
   if (thirdParty !== true || mode !== 'auto' || dangerous !== true) return null;
   return thirdPartyAutoAskOutput();
 }
+
+// 第三方 auto 档下 CLI 上交给 GUI 的调用(含审核连拦后上交)必须由人确认(INTERFACE Y.3.3,审查 M1):
+// 权限请求带 mustPrompt,前端"本会话永远允许"白名单遇到它不代为放行。官方 auto 与其它档不带(与改动前相同)。
+export function thirdPartyAutoMustPrompt({ thirdParty, mode }) {
+  return thirdParty === true && mode === 'auto';
+}

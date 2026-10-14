@@ -26,7 +26,7 @@ import { SERVER_EPOCH } from '../utils/server-epoch.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
 import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCache } from '../utils/prompt-cache-env.js';
 import {
-  autoModeServerInjection, gateAutoPermissionMode, thirdPartyAutoPreToolUse, thirdPartyAutoAskOutput,
+  autoModeServerInjection, gateAutoPermissionMode, thirdPartyAutoPreToolUse, thirdPartyAutoAskOutput, thirdPartyAutoMustPrompt,
 } from '../services/auto-audit.js';
 import { readThirdPartyAutoSync } from './prefs.js';
 
@@ -1074,7 +1074,8 @@ export function makePreToolUseHook(slot) {
   };
 }
 
-function makeCanUseTool(slot) {
+// 导出仅为可单测(r151a 审查 M1:第三方 auto 上交的请求带 mustPrompt)。
+export function makeCanUseTool(slot) {
   // 第三参 opts(sdk.d.ts CanUseTool):blockedPath=触发本次请求的沙箱越界路径;
   // suggestions=CLI 生成的"始终允许"规则建议(整组返回即官方 always-allow 语义);
   // decisionReason/toolUseID 透传给前端展示/去重。
@@ -1083,6 +1084,8 @@ function makeCanUseTool(slot) {
     const ask = () => requestPermission({
       toolName, toolInput: input, sessionId: slot.sessionId, cwd: slot.cwd,
       blockedPath: boundary, decisionReason: opts.decisionReason || null, toolUseID: opts.toolUseID || null,
+      // r151a 审查 M1:第三方 auto 档上交的调用(含审核连拦后上交)必须弹卡,前端白名单不得代为放行。按发请求时的档位判。
+      mustPrompt: thirdPartyAutoMustPrompt({ thirdParty: slot.thirdPartyProvider === true, mode: slot.guiMode }),
     });
     // 统一 allow 构造:updatedInput 沿用旧语义;r.always=用户点"始终允许"→ 经
     // updatedPermissions 写 settings.json 的 permissions.allow(CLI 落盘,终端同享);
