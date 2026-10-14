@@ -2159,6 +2159,10 @@ router.put('/provider-overrides/:id', async (req, res) => {
     const tm = sanitizeTierModels(tierModels, models);
     if (tm) entry.tierModels = tm;
 
+    // r151a 审查建议 1:覆盖层损坏 / 读不出时不许按空表整份写回(同审核模型接口)。
+    try { await assertWritable(PROVIDER_OVERRIDES_PATH); } catch {
+      return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
+    }
     const map = await readProviderOverrides();
     if (Object.keys(entry).length) map[id] = entry;
     else delete map[id]; // 空 = 清除,恢复无 override 的原始行为
@@ -2279,6 +2283,11 @@ router.put('/auto-audit/model', (req, res) => serializeProviderOp(async () => {
     if (model && !models.includes(model)) return auditModelError(res, 400, 'MODEL_NOT_IN_PROVIDER', '该模型不在此 provider 的模型列表里');
     if (model && isUnusableAuditor(model)) return auditModelError(res, 400, 'MODEL_UNUSABLE_AS_AUDITOR', '该型号不能用作审核模型（CLI 限制）');
 
+    // 审查建议 1:覆盖层损坏 / 读不出时不许按空表整份写回(会丢掉其它 provider 的覆盖设置)。assertWritable 同时留
+    // .corrupt-<时间戳> 备份;命中回约定里的 500 STORAGE_WRITE_FAILED,已有数据不变。
+    try { await assertWritable(PROVIDER_OVERRIDES_PATH); } catch {
+      return auditModelError(res, 500, 'STORAGE_WRITE_FAILED', '保存失败，请重试');
+    }
     const map = await readProviderOverrides();
     const prev = map[providerId];
     const eff = effectiveTierModels(prev, { ...info, models });
