@@ -148,7 +148,7 @@ export function requestUserDialog({ dialogKind, payload, toolUseID, sessionId, c
  * resolve 值: { decision:'allow'|'deny', reason?, updatedInput?, always?, authorizeDir? }
  * blockedPath:SDK canUseTool 第三参透传的沙箱越界路径 → 前端渲染"越界访问"卡。
  */
-export function requestPermission({ toolName, toolInput, sessionId, cwd, blockedPath, decisionReason, toolUseID }) {
+export function requestPermission({ toolName, toolInput, sessionId, cwd, blockedPath, decisionReason, toolUseID, mustPrompt }) {
   return new Promise((resolve) => {
     const id = randomUUID();
     const request = {
@@ -162,6 +162,9 @@ export function requestPermission({ toolName, toolInput, sessionId, cwd, blocked
       ...(blockedPath ? { blockedPath } : {}),
       ...(decisionReason ? { decisionReason } : {}),
       ...(toolUseID ? { toolUseID } : {}),
+      // r151a 审查 M1:第三方「自动」档上交的调用必须弹卡 —— 前端"本会话永远允许"白名单遇到它不代为放行。
+      // 只在为真时出现这个键(其余请求的形状与改动前相同);实时广播与 /permissions/pending 用的是同一个对象。
+      ...(mustPrompt === true ? { mustPrompt: true } : {}),
     };
     const nonce = mintNonce();
     pending.set(id, { request, nonce, resolve });

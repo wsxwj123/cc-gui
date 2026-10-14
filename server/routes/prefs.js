@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { readFile, writeFile, mkdir, rename, appendFile } from 'fs/promises';
+import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { renameSession } from '@anthropic-ai/claude-agent-sdk';
@@ -19,6 +20,14 @@ const PREFS_PATH = join(homedir(), '.claude-gui', 'prefs.json');
 export async function loadPrefs() {
   try { return JSON.parse(await readFile(PREFS_PATH, 'utf-8')); }
   catch { return {}; }
+}
+
+// r151a:第三方 provider 的「自动」档总开关(thirdPartyAuto,默认关)的同步读取。
+// 同步是因为调用方都在同步路径上(cleanChildEnv、/chat 入口门控、审核状态组装)。
+// 文件不存在、损坏、键缺失或值不是布尔 true → false;只读,不改写文件。
+export function readThirdPartyAutoSync() {
+  try { return JSON.parse(readFileSync(PREFS_PATH, 'utf-8'))?.thirdPartyAuto === true; }
+  catch { return false; }
 }
 // 原子写:先写临时文件再 rename(rename 同目录原子)。此前 writeFile 直写,进程崩溃/
 // 断电写一半 → JSON 损坏 → loadPrefs 回落 {} → 下一次任何 PUT 把整份 prefs 静默重置。
@@ -139,6 +148,27 @@ router.put('/prefs/hidden-projects', async (req, res) => {
 router.get('/prefs/hidden-providers', async (_req, res) => {
   const prefs = await loadPrefs();
   res.json({ hidden: Array.isArray(prefs.hiddenProviders) ? prefs.hiddenProviders : [] });
+});
+
+// r151a:第三方 provider 的「自动」档总开关(INTERFACE Y.3.1)。默认关:关 = 第三方下没有「自动」档、
+// 服务端把 auto 请求降成逐步确认、会话进程不注入 CLAUDE_CODE_AUTO_MODE_SERVER(与改动前逐字相同)。
+// 读走同步 readThirdPartyAutoSync(与服务端门控同一个读取点);写走 updatePrefs(串行 + 原子写)。
+router.get('/prefs/third-party-auto', (_req, res) => {
+  res.json({ enabled: readThirdPartyAutoSync() });
+});
+router.put('/prefs/third-party-auto', async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.enabled !== 'boolean') {
+    return res.status(400).json({ ok: false, code: 'INVALID_INPUT', error: 'enabled 必须是布尔值' });
+  }
+  const { enabled } = body;
+  try {
+    await updatePrefs((prefs) => { prefs.thirdPartyAuto = enabled; });
+  } catch {
+    return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
+  }
+  broadcast({ type: 'third-party-auto', enabled });
+  res.json({ ok: true, enabled });
 });
 
 // P1: 关闭行为(ask|minimize|quit)。独立文件 ~/.claude-gui/close-behavior.json —

@@ -25,6 +25,10 @@ import { isLocalReq } from '../services/auth.js';
 import { SERVER_EPOCH } from '../utils/server-epoch.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
 import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCache } from '../utils/prompt-cache-env.js';
+import {
+  autoModeServerInjection, gateAutoPermissionMode, thirdPartyAutoPreToolUse, thirdPartyAutoAskOutput, thirdPartyAutoMustPrompt,
+} from '../services/auto-audit.js';
+import { readThirdPartyAutoSync } from './prefs.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
@@ -1002,7 +1006,7 @@ function mcpAutoApproved(toolName) {
 // 返回:{ decision:'allow', authorizeDir? } 自动放行 / { decision:'deny', reason } 自动拒绝 /
 // null = 需要用户决定(弹卡/留卡)。
 const EXIT_PLAN_DENY_REASON = '用户已切出规划模式。请勿继续规划或再次调用 ExitPlanMode，直接简要总结并结束本回合；用户将以新模式重新发起请求。';
-export function autoDecide(mode, toolName, input, boundary) {
+export function autoDecide(mode, toolName, input, boundary, { thirdParty = false } = {}) {
   // 提问卡永远等人;计划确认卡只在 plan 档等人 —— 已切出 plan 直接 deny(U5 上收服务端)。
   if (toolName === 'AskUserQuestion') return null;
   if (toolName === 'ExitPlanMode') {
@@ -1027,6 +1031,9 @@ export function autoDecide(mode, toolName, input, boundary) {
   // auto 档(P2.2):放行/拦截由 SDK 内部分类器完成,能到达 canUseTool 的都是分类器
   // 上交/ask 规则强制的 → 走与 default 相同的分支(下方危险命令/MCP 自动放行/弹卡),
   // GUI 不做二次裁决。无需显式分支:'auto' 不命中 plan/bypass/acceptEdits 任何一支。
+  // r151a T-Y10 ①:第三方 provider 的 auto 档 —— 能到这里的都是审核上交(含连拦多次后交给宿主)或 ask 规则强制的,
+  // 一律弹卡,不走下面的"MCP 自动执行"名单(官方 auto 不变,仍按下方分支)。
+  if (mode === 'auto' && thirdParty === true) return null;
   // 放任模式:一切放行(AskUserQuestion 上面已排除);越界附 session 级目录授权。
   if (mode === 'bypassPermissions') {
     return { decision: 'allow', ...(boundary ? { authorizeDir: 'session' } : {}) };
@@ -1049,7 +1056,26 @@ export function autoDecide(mode, toolName, input, boundary) {
   return null;
 }
 
-function makeCanUseTool(slot) {
+// r151a T-Y10 ②:PreToolUse 回调。判定规则在 services/auto-audit.js(thirdPartyAutoPreToolUse);档位读 slot.guiMode
+// (可被中途切档改)。整体 try/catch:判定出错时第三方按询问处理(不放行),官方照旧 continue,并记一行日志(R-Y13)。
+export function makePreToolUseHook(slot) {
+  return async (input) => {
+    try {
+      const out = thirdPartyAutoPreToolUse({
+        thirdParty: slot.thirdPartyProvider === true,
+        mode: slot.guiMode,
+        dangerous: isDangerousBash(input?.tool_name, input?.tool_input),
+      });
+      return out || { continue: true };
+    } catch (e) {
+      console.warn(`[r151a] PreToolUse 判定出错,按询问处理:${e?.message || e}`);
+      return slot.thirdPartyProvider === true ? thirdPartyAutoAskOutput() : { continue: true };
+    }
+  };
+}
+
+// 导出仅为可单测(r151a 审查 M1:第三方 auto 上交的请求带 mustPrompt)。
+export function makeCanUseTool(slot) {
   // 第三参 opts(sdk.d.ts CanUseTool):blockedPath=触发本次请求的沙箱越界路径;
   // suggestions=CLI 生成的"始终允许"规则建议(整组返回即官方 always-allow 语义);
   // decisionReason/toolUseID 透传给前端展示/去重。
@@ -1058,6 +1084,8 @@ function makeCanUseTool(slot) {
     const ask = () => requestPermission({
       toolName, toolInput: input, sessionId: slot.sessionId, cwd: slot.cwd,
       blockedPath: boundary, decisionReason: opts.decisionReason || null, toolUseID: opts.toolUseID || null,
+      // r151a 审查 M1:第三方 auto 档上交的调用(含审核连拦后上交)必须弹卡,前端白名单不得代为放行。按发请求时的档位判。
+      mustPrompt: thirdPartyAutoMustPrompt({ thirdParty: slot.thirdPartyProvider === true, mode: slot.guiMode }),
     });
     // 统一 allow 构造:updatedInput 沿用旧语义;r.always=用户点"始终允许"→ 经
     // updatedPermissions 写 settings.json 的 permissions.allow(CLI 落盘,终端同享);
@@ -1114,7 +1142,7 @@ function makeCanUseTool(slot) {
     }
     // mode 相关自动裁决统一走 autoDecide(与切档重裁共用一份判定,详见其注释)。
     const mode = slot.guiMode;
-    const verdict = autoDecide(mode, toolName, input, boundary);
+    const verdict = autoDecide(mode, toolName, input, boundary, { thirdParty: slot.thirdPartyProvider === true });
     if (verdict) {
       if (verdict.decision === 'allow') {
         return allowResult(verdict.authorizeDir ? { authorizeDir: verdict.authorizeDir } : {}, { allowAlways: false });
@@ -1228,7 +1256,7 @@ function readSettingsSplit() {
   return settingsSplitCache;
 }
 
-export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, globalRead, dirs, maxBudgetUsd, acw, genui }) { // export 仅为可单测
+export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, globalRead, dirs, maxBudgetUsd, acw, genui, ams }) { // export 仅为可单测
   const { nonPerm, perm } = readSettingsSplit();
   if (lastPermFp === null) lastPermFp = perm;              // 首次调用建基线,不推进代数
   else if (perm !== lastPermFp) {
@@ -1275,6 +1303,9 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     // r66:genui 教学段进没进系统提示。系统提示 spawn 时定死,不计入键则用户翻完
     // 渲染开关会复用旧进程、旧系统提示照常生效 = 开关是摆设。
     genui: genui !== false,
+    // r151a:进程环境里注入的 CLAUDE_CODE_AUTO_MODE_SERVER(spawn 时定死)。只在注入时出现 ——
+    // 官方 / 第三方 auto 总开关关时键与改动前逐字相同;开关翻转后该会话下一条消息换新进程。
+    ...(ams ? { ams } : {}),
   });
 }
 
@@ -1664,6 +1695,7 @@ function turnHitResponse(record) {
     // 首次已把 prompt 交给该运行;但若那次初始化超时过(504),送达仍是未确认的,照实回。
     delivered: record.startTimedOut ? 'unknown' : true,
     status: turnLiveStatus(record, slot),
+    ...(record.permissionModeDowngraded ? { permissionModeDowngraded: record.permissionModeDowngraded } : {}),
   };
 }
 
@@ -1727,7 +1759,7 @@ async function handleChatPost(req, res) {
     prompt, sessionId, cwd,
     model: requestedModel,
     effort, addDirs,
-    permissionMode,
+    permissionMode: requestedPermissionMode,
     globalRead,
     appendSystemPrompt,
     agent,
@@ -1740,6 +1772,14 @@ async function handleChatPost(req, res) {
   // 上限时本轮停止并返回 result subtype=error_max_budget_usd(前端有专门提示)。
   const budgetUsd = Number(maxBudgetUsd);
   const budget = Number.isFinite(budgetUsd) && budgetUsd > 0 ? budgetUsd : null;
+  // r151a:服务端对 auto 的门控(INTERFACE Y.3.1 末)—— 第三方 + 第三方 auto 总开关没开 → 按「逐步确认」起回合,
+  // 应答多 permissionModeDowngraded、事件流补一条带 reason 的 mode_mismatch。判据与会话进程环境注入同源
+  // (settings.json 的地址 + prefs 的开关),只在请求 auto 时才读。官方端点、开关开、其它档:与改动前相同。
+  const autoGate = requestedPermissionMode === 'auto'
+    ? gateAutoPermissionMode('auto', { official: settingsProviderIsOfficial(), enabled: readThirdPartyAutoSync() })
+    : { mode: requestedPermissionMode, downgraded: null };
+  const permissionMode = autoGate.mode;
+  const downgradeFields = autoGate.downgraded ? { permissionModeDowngraded: autoGate.downgraded } : {};
 
   const model = requestedModel || await getDefaultModel();
   // DO NOT normalize cwd here. Claude CLI hashes the EXACT cwd string to
@@ -1839,6 +1879,7 @@ async function handleChatPost(req, res) {
     globalRead, dirs: [...dirSet].sort(),
     maxBudgetUsd: budget,
     acw: acwSettings?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? null,
+    ams: childEnv.CLAUDE_CODE_AUTO_MODE_SERVER ?? null,
     genui,
   });
   if (sessionId) {
@@ -1923,11 +1964,14 @@ async function handleChatPost(req, res) {
       s.promptPreview = String(prompt).slice(0, 80);
       s.guiMode = chosenMode;
       s.permissionMode = chosenMode;
+      // r151a:服务端门控降级 —— 复用的进程不会再发 init,降级信号在本回合开头直接补发。
+      if (autoGate.downgraded) deliverModeMismatch(s, autoGate.downgraded);
       s.input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
       // R13:复用同一进程开新回合 —— 记录绑到本回合的 turnEpoch 上(旧回合的记录早已
       // 在它自己的收尾点结算,pid→record 的映射换成这一回合,停止才不会停错回合)。
       if (turnRecord) bindTurnRecord(turnRecord, alivePid, s);
-      return res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running' });
+      if (turnRecord && autoGate.downgraded) turnRecord.permissionModeDowngraded = autoGate.downgraded;
+      return res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running', ...downgradeFields });
     }
   }
 
@@ -2017,6 +2061,9 @@ async function handleChatPost(req, res) {
     promptPreview: String(prompt).slice(0, 80),
     permissionMode: permissionMode || 'default',
     guiMode: chosenMode,
+    autoDowngrade: autoGate.downgraded,   // r151a:服务端门控降级,init 到达时补发一条带 reason 的 mode_mismatch
+    // r151a:本进程连的是不是第三方端点(T-Y10 两条收紧的前置条件)。provider 一变 settings 指纹就变,不会复用到这个槽。
+    thirdPartyProvider: !settingsProviderIsOfficial(),
     startedAt: Date.now(),
     // #26 会话常驻状态
     idle: false,             // 回合间保活等待下一条消息
@@ -2123,7 +2170,8 @@ async function handleChatPost(req, res) {
     // 实证那是误判(真因是子代理打穿 canUseTool 通道,见 disallowedTools 那段);此 hook 对
     // TS 无实质作用(官方那条"需 dummy hook"只针对 Python)。保留作无害保险(保持流活性)。
     hooks: {
-      PreToolUse: [{ hooks: [async () => ({ continue: true })] }],
+      // r151a T-Y10 ②:第三方 auto 档下命中危险命令规则的 Bash → ask(交给 canUseTool 弹卡);其余照旧 continue。
+      PreToolUse: [{ hooks: [makePreToolUseHook(slot)] }],
       // 曾在此注册 TeammateIdle hook 广播「待命」态。实测(SDK 0.3.191 / claude 2.1.220,
       // 含命名 agent + SendMessage 排队 + 长任务三组 probe)全程零触发:二进制里该 hook 被
       // in-process teammate 的 AsyncLocalStorage 上下文门控,SDK 起的 local_agent 走的是
@@ -2442,7 +2490,11 @@ async function handleChatPost(req, res) {
             }));
           }
           const mismatch = permissionModeMismatch(slot.guiMode, m.permissionMode);
-          if (mismatch) deliverLine(slot, JSON.stringify({ type: 'system', subtype: 'mode_mismatch', ...mismatch }));
+          if (mismatch) deliverModeMismatch(slot, mismatch);
+          if (slot.autoDowngrade) {
+            deliverModeMismatch(slot, slot.autoDowngrade);
+            slot.autoDowngrade = null;
+          }
         }
         // Bug 修复(子代理后主 agent 续跑「看起来停了」):中间 result 已被 4s 去抖 finalize 转 idle,
         // 但主 agent 又续跑了新回合(子代理完 → 续开回合去弹计划/权限卡,期间第三方 provider TTFT
@@ -2550,7 +2602,8 @@ async function handleChatPost(req, res) {
   }
   // R13:连同运行身份与送达状态一起回 —— 客户端据此对账"这次 prompt 到底送出去了没有",
   // 响应丢失时用同一 clientTurnId 重发即可拿回同一个 pid(命中分支),不必新造 id 再发。
-  res.json({ ok: true, pid: procId, model, runId: procId, delivered: true, status: 'running' });
+  if (turnRecord && autoGate.downgraded) turnRecord.permissionModeDowngraded = autoGate.downgraded;
+  res.json({ ok: true, pid: procId, model, runId: procId, delivered: true, status: 'running', ...downgradeFields });
 }
 
 
@@ -2597,6 +2650,11 @@ export async function applyPermissionModeToSlots(procs, sessionId, mode) {
 // 只有 auto/plan 在 SDK 层有专属值,拿不到就是真没生效(CLI guard 拒了)。
 // 不维护"哪些模型支持 auto"的名单——名单会变,init 回报是唯一真相源。
 // 纯函数,tests/unit/check-mode-mismatch.mjs 真 import(六档 × init 值矩阵)。
+// 档位不符的系统行只从这一个口子发(r49b② 的 init 对账;r151a 服务端门控降级也走它,多一个 reason 键)。
+function deliverModeMismatch(slot, payload) {
+  deliverLine(slot, JSON.stringify({ type: 'system', subtype: 'mode_mismatch', ...payload }));
+}
+
 export function permissionModeMismatch(guiMode, effective) {
   if (typeof effective !== 'string' || !effective) return null; // 旧版 CLI 不带该字段:不凭空判定
   if (guiMode !== 'auto' && guiMode !== 'plan') return null;
@@ -2608,14 +2666,20 @@ router.post('/chat/permission-mode', async (req, res) => {
   if (!sessionId || !mode || !VALID_PERMISSION_MODES.has(mode)) {
     return res.status(400).json({ error: 'sessionId 与合法 mode 必填' });
   }
+  // r151a:服务端对 auto 的门控(INTERFACE Y.3.1 末):第三方 + 总开关没开 → 409,不切任何进程的档位。
+  if (mode === 'auto' && gateAutoPermissionMode('auto', { official: settingsProviderIsOfficial(), enabled: readThirdPartyAutoSync() }).downgraded) {
+    return res.status(409).json({ ok: false, code: 'THIRD_PARTY_AUTO_DISABLED', error: '第三方 provider 的「自动」档未开启' });
+  }
   const { attempted, delivered, failed } = await applyPermissionModeToSlots(activeProcesses, sessionId, mode);
   // A1 切档重裁:对该会话已 pending 的卡按【新档】重新自动裁决(判定与 canUseTool 共用
   // autoDecide 同一份)。allow/deny 走既有 settle 幂等路径,null 的卡保持等待用户。
   // 原客户端"切放任批量放行"effect 与各 mode 抢答分支的职责全部由这里接管。
   // r49b①:全部被拒时跳过——档位没生效,按新档重裁 = 按幻觉档放行/拒绝。
+  // r151a T-Y10 ①:切到第三方 auto 时,挂着的卡同样不走"MCP 自动执行"名单(只在切 auto 时才读 settings)。
+  const tpForRejudge = mode === 'auto' && !settingsProviderIsOfficial();
   if (delivered > 0 || attempted === 0) {
     try {
-      resolvePendingForSession(sessionId, (r) => autoDecide(mode, r.toolName, r.toolInput, r.blockedPath || null));
+      resolvePendingForSession(sessionId, (r) => autoDecide(mode, r.toolName, r.toolInput, r.blockedPath || null, { thirdParty: tpForRejudge }));
     } catch {}
   }
   // 有进程却一个都没收下 = 切档失败,如实回 409 带 CLI 原文(前端据此回滚档位并显示原因);
@@ -3764,6 +3828,11 @@ export function cleanChildEnv() {
     if (se.ANTHROPIC_BASE_URL && se.CLAUDE_CODE_ATTRIBUTION_HEADER === undefined) {
       out.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
     }
+    // r151a:第三方 + 第三方 auto 总开关开 + settings.json 没显式写 → CLAUDE_CODE_AUTO_MODE_SERVER=0
+    // (关服务端审核通道,首个主请求不再带含本机路径的 safeguards)。规则见 autoModeServerInjection;
+    // 同样必须在 strip 之后(宿主自己的同名键先被剥掉)。开关关 = 不注入 = 与改动前相同。
+    const ams = autoModeServerInjection(se, readThirdPartyAutoSync());
+    if (ams !== null) out.CLAUDE_CODE_AUTO_MODE_SERVER = ams;
   } catch {}
   return out;
 }

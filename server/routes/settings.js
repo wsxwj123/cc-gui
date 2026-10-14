@@ -13,7 +13,11 @@ import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/o
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
 import { isOfficialAnthropic, isClaudeModel, readClaudeSettingsForWrite } from '../services/model-resolver.js';
 import { applyCatalogPrefill, catalogPrefillEntry } from '../utils/model-capabilities.js';
-import { updatePrefs, loadPrefs } from './prefs.js';
+import { updatePrefs, loadPrefs, readThirdPartyAutoSync } from './prefs.js';
+import { broadcast } from '../broadcast.js';
+import {
+  buildAutoAuditStatus, isUnusableAuditor, normalizeAuditModelName, hasAnyTier, auditModelOverrideEntry,
+} from '../services/auto-audit.js';
 import {
   SNAPSHOT_ENV_KEY, TOOL_SEARCH_ENV_KEY, PROMPT_CACHE_MODES,
   normalizePromptCacheMode, resolvePromptCacheOn, applyPromptCacheEnv, cliSupportsSnapshotFlag,
@@ -618,16 +622,29 @@ export async function applyProviderModelSelection(data) {
 // 无文件 / 无该 id 条目 = 行为完全不变(向后兼容硬要求)。从不写 cc-switch.db。
 const PROVIDER_OVERRIDES_PATH = join(homedir(), '.claude-gui', 'provider-overrides.json');
 
+const overridesMapOf = (d) => (d && typeof d === 'object' && !Array.isArray(d) ? d : {});
 async function readProviderOverrides() {
   try {
-    const d = JSON.parse(await readFile(PROVIDER_OVERRIDES_PATH, 'utf-8'));
-    return d && typeof d === 'object' && !Array.isArray(d) ? d : {};
+    // r151a 复审:与写入守卫同口径剥 UTF-8 BOM(否则带 BOM 的文件在只读路径上被当成空表,覆盖设置被静默忽略)。
+    return overridesMapOf(JSON.parse((await readFile(PROVIDER_OVERRIDES_PATH, 'utf-8')).replace(/^\uFEFF/, '')));
   } catch { return {}; }
 }
+// 写路由专用:写入守卫 + 读取合成一次(r151a 复审建议 2)。损坏 / 读不出 → 抛 ConfigGuardError(调用方回 500
+// STORAGE_WRITE_FAILED,守卫已留 .corrupt-<时间戳> 备份);可写 → 直接用守卫读到的那份值,不再读第二次 ——
+// 守卫剥 BOM、第二次读不剥时,带 BOM 的文件会被当成空表整份写回,其它 provider 的设置全丢。
+async function readProviderOverridesForWrite() {
+  return overridesMapOf((await assertWritable(PROVIDER_OVERRIDES_PATH)).value);
+}
 
-async function writeProviderOverrides(map) {
-  await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
-  await writeFile(PROVIDER_OVERRIDES_PATH, JSON.stringify(map, null, 2));
+
+// 覆盖层 tierModels 怎么压 provider 自带的(两条切换路径与审核状态共用这一个口径):
+// 按 models[] 校验后非空 → 整体替换;是空对象 {} → 全部档跟随所选模型(r151a 清掉审核模型时写出,
+// 用来压住 provider 自带的档位;既有写入点从不写空对象);缺键 / 校验后一个不剩 → undefined = 沿用自带。
+function overrideTierModels(ovTm, models) {
+  const tm = sanitizeTierModels(ovTm, models);
+  if (tm) return tm;
+  if (ovTm && typeof ovTm === 'object' && !Array.isArray(ovTm) && Object.keys(ovTm).length === 0) return null;
+  return undefined;
 }
 
 // 把某 provider 的 override 合并进将传给 upstream 切换函数的 `up` 对象:
@@ -641,8 +658,8 @@ async function applyProviderOverride(up) {
   if (typeof ov.defaultModel === 'string' && models.includes(ov.defaultModel)) {
     out.defaultModel = ov.defaultModel;
   }
-  const tm = sanitizeTierModels(ov.tierModels, models);
-  if (tm) out.tierModels = tm;
+  const tm = overrideTierModels(ov.tierModels, models);
+  if (tm !== undefined) out.tierModels = tm;
   return out;
 }
 
@@ -1252,7 +1269,23 @@ function serializeProviderOp(fn) {
   return run;
 }
 // 路由层只负责排队;实现在 handleProviderSwitch —— reapplyIfActive 已在队列里,直接调实现(不经路由层),免重入死锁。
-router.post('/provider/switch', (req, res) => serializeProviderOp(() => handleProviderSwitch(req, res)));
+// r151a:切换成功后广播一次 {type:'auto-audit', status}(INTERFACE Y.3.3);放在路由层,重切(reapply)不重复广播。
+// 应答先扣住、广播发完再放行:调用方拿到应答时这次切换的广播已经发出(之后才连上的 WS 不会收到它);
+// 在队列里算完再放行下一个切换,广播出去的状态不会和下一次切换交错。
+router.post('/provider/switch', (req, res) => serializeProviderOp(async () => {
+  const sendJson = res.json.bind(res);
+  let held = null;
+  res.json = (body) => { held = { body }; return res; };
+  try {
+    await handleProviderSwitch(req, res);
+  } finally {
+    res.json = sendJson;
+    if (held) {
+      if (res.statusCode >= 200 && res.statusCode < 300) await broadcastAutoAuditStatus();
+      sendJson(held.body);
+    }
+  }
+}));
 async function handleProviderSwitch(req, res) {
   try {
     const { id, model } = req.body || {};
@@ -1607,8 +1640,8 @@ async function switchToCustomProvider(p, requestedModel, res) {
   if (ov && typeof ov === 'object') {
     const models = p.models || [];
     if (typeof ov.defaultModel === 'string' && models.includes(ov.defaultModel)) p = { ...p, defaultModel: ov.defaultModel };
-    const tm = sanitizeTierModels(ov.tierModels, models);
-    if (tm) p = { ...p, tierModels: tm };
+    const tm = overrideTierModels(ov.tierModels, models);
+    if (tm !== undefined) p = { ...p, tierModels: tm };
   }
   // AZ8: GUI 主动切 provider 且未显式带 model 时,优先用该 provider 的 defaultModel
   // (仍须在 models[] 内才生效),否则下游回退 models[0]。defaultModel 一并透传给
@@ -2032,6 +2065,12 @@ router.delete('/custom-providers/:id', (req, res) => serializeProviderOp(async (
 // cc-switch claude(snapshot.env 的 _MODEL)/ openai(multi-select 优先,否则 parsed)
 // / custom(custom-providers.json)。找不到返回 null。
 async function resolveProviderModelsById(id) {
+  const info = await resolveProviderInfoById(id);
+  return info ? info.models : null;
+}
+// 同口径的完整形态(r151a 审核模型要用):{ models, official, tierModels(provider 自带的,只有自定义 provider 有) }。
+// official 与切换路径同判据:cc-switch 官方行;claude 行的 snapshot 地址是官方端点;自定义 anthropic 的地址是官方端点。
+async function resolveProviderInfoById(id) {
   const imported = await isCCSwitchImported();
   if (!imported) {
     const claudeRows = await ccSwitchQuery(
@@ -2039,13 +2078,14 @@ async function resolveProviderModelsById(id) {
     );
     const c = claudeRows.find((r) => r.id === id);
     if (c) {
-      if (c.category === 'official') return [];
+      if (c.category === 'official') return { models: [], official: true, tierModels: null };
       try {
         const env = JSON.parse(c.settings_config)?.env || {};
-        return [...new Set(Object.entries(env)
+        const models = [...new Set(Object.entries(env)
           .filter(([k, v]) => /_MODEL$/.test(k) && typeof v === 'string' && v)
           .map(([, v]) => v))];
-      } catch { return []; }
+        return { models, official: isOfficialAnthropic(env.ANTHROPIC_BASE_URL || env.ANTHROPIC_API_URL || ''), tierModels: null };
+      } catch { return { models: [], official: false, tierModels: null }; }
     }
     const oaRows = await ccSwitchQuery(
       "SELECT id, settings_config FROM providers WHERE app_type IN ('codex','opencode')"
@@ -2053,16 +2093,18 @@ async function resolveProviderModelsById(id) {
     const o = oaRows.find((r) => r.id === id);
     if (o) {
       const sel = await readProviderModels();
-      if (sel[id]?.length) return sel[id];
+      if (sel[id]?.length) return { models: sel[id], official: false, tierModels: null };
       const p = parseOpenAIProvider(o.settings_config);
-      return p ? p.models : [];
+      return { models: p ? p.models : [], official: false, tierModels: null };
     }
   }
   const custom = (await readCustomProviders()).find((p) => p.id === id);
   if (custom) {
     const sel = await readProviderModels();
-    if (custom.type === 'openai' && sel[id]?.length) return sel[id];
-    return custom.models || [];
+    const official = custom.type !== 'openai' && isOfficialAnthropic(custom.baseURL);
+    const tierModels = custom.tierModels && typeof custom.tierModels === 'object' ? custom.tierModels : null;
+    if (custom.type === 'openai' && sel[id]?.length) return { models: sel[id], official, tierModels };
+    return { models: custom.models || [], official, tierModels };
   }
   return null;
 }
@@ -2077,26 +2119,33 @@ async function resolveProviderModelsById(id) {
 // 不传 model:让 switch 按 provider 自己的 defaultModel 重算(它已校验在 models[] 内,
 // 拿不到就回落 models[0]),绝不会写出列表外的模型。
 // 无递归风险:switch 从不写 custom-providers.json(全部 5 个写入点都是路由处理器)。
+// 排队版:自己不在切换队列里的调用方用它(PUT /custom-providers/:id)。
 async function reapplyIfActive(id) {
   // r145 F3:"是不是当前在用"的判断与重切同在切换队列里 —— 在队列外判断会读到旧的 active(正在进行的
-  // 切换还没写标记),就把用户刚切走的 provider 又切回来。队列里直接调实现函数,不经路由层(那层也排队,会死锁)。
+  // 切换还没写标记),就把用户刚切走的 provider 又切回来。
   return serializeProviderOp(async () => {
-    try {
-      if ((await readActiveProviderId()) !== id) return false;
-      // _status 初始 0(不是 200):handler 异步抛错、根本没碰过 res 时,下面的 catch 吞掉异常,
-      // 初值 200 会把"什么都没发生"报成 reapplied:true —— 前端据此显示"已生效",而 settings.json
-      // 里还是旧映射。json() 补默认 200 是照 express 语义(成功路径只调 res.json,不调 res.status)。
-      const fakeRes = {
-        _status: 0, _body: null,
-        status(s) { this._status = s; return this; },
-        json(b) { if (!this._status) this._status = 200; this._body = b; return this; },
-      };
-      const fakeReq = { body: { id }, headers: { 'Content-Type': 'application/json' } };
-      // 复用 /provider/switch 的实现:它已正确处理 anthropic / openai / custom 三类。
-      await handleProviderSwitch(fakeReq, fakeRes).catch(() => {});
-      return fakeRes._status >= 200 && fakeRes._status < 300;
-    } catch { return false; }
+    try { return (await rerunSwitchIfActive(id)).ok; } catch { return false; }
   });
+}
+
+// 不排队版:调用方必须【已在】切换队列里(审核模型、provider-overrides 的读改写都在队列里做),在队列里再排队会死锁。
+// 返回 { active, ok }:active = 它是不是当前在用的 provider;ok = 重跑切换是否成功(settings.json 已写)。
+// 直接调实现函数 handleProviderSwitch,不经路由层(那层也排队)。
+async function rerunSwitchIfActive(id) {
+  if ((await readActiveProviderId()) !== id) return { active: false, ok: false };
+  // _status 初始 0(不是 200):handler 异步抛错、根本没碰过 res 时,下面的 catch 吞掉异常,
+  // 初值 200 会把"什么都没发生"报成 reapplied:true —— 前端据此显示"已生效",而 settings.json
+  // 里还是旧映射。json() 补默认 200 是照 express 语义(成功路径只调 res.json,不调 res.status)。
+  const fakeRes = {
+    _status: 0, _body: null,
+    status(s) { this._status = s; return this; },
+    json(b) { if (!this._status) this._status = 200; this._body = b; return this; },
+  };
+  // 不传 model:让 switch 按 provider 自己的 defaultModel 重算(已校验在 models[] 内),绝不写出列表外的模型。
+  const fakeReq = { body: { id }, headers: { 'Content-Type': 'application/json' } };
+  // 复用 /provider/switch 的实现:它已正确处理 anthropic / openai / custom 三类。
+  await handleProviderSwitch(fakeReq, fakeRes).catch(() => {});
+  return { active: true, ok: fakeRes._status >= 200 && fakeRes._status < 300 };
 }
 
 // GET /api/provider-overrides — 回显全部 override(无文件 = {})。
@@ -2107,7 +2156,9 @@ router.get('/provider-overrides', async (_req, res) => {
 // PUT /api/provider-overrides/:id { defaultModel?, tierModels? } — 写该 provider 的
 // override。defaultModel/tierModels 均按其 models[] 校验;两者皆空 = 删除该条目。
 // 从不写 cc-switch.db。
-router.put('/provider-overrides/:id', async (req, res) => {
+// r151a 审查建议 2:整段读改写放进切换串行队列(与审核模型接口、切换 / 重切互斥,并发写不再互相覆盖);
+// 队列里重切调不排队的 rerunSwitchIfActive(再排队会死锁)。
+router.put('/provider-overrides/:id', (req, res) => serializeProviderOp(async () => {
   try {
     const id = req.params.id;
     const models = await resolveProviderModelsById(id);
@@ -2120,10 +2171,14 @@ router.put('/provider-overrides/:id', async (req, res) => {
     const tm = sanitizeTierModels(tierModels, models);
     if (tm) entry.tierModels = tm;
 
-    const map = await readProviderOverrides();
+    // r151a 审查建议 1:覆盖层损坏 / 读不出时不许按空表整份写回(同审核模型接口)。
+    let map;
+    try { map = await readProviderOverridesForWrite(); } catch {
+      return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
+    }
     if (Object.keys(entry).length) map[id] = entry;
     else delete map[id]; // 空 = 清除,恢复无 override 的原始行为
-    await writeProviderOverrides(map);
+    await writeProviderOverridesAtomic(map);   // r151a 复审建议 4:与审核模型接口同一个原子写(临时文件 + 改名)
     // BG9:overrides 写入 .claude-gui/provider-overrides.json,但 CLI 只读 settings.json
     // 的 env(ANTHROPIC_DEFAULT_*_MODEL)。所以**用户在 GUI 改完档位映射,仍要去重新点
     // 一次 provider 切换才生效**——很反直觉(用户问"是不是要重启 GUI")。这里若该 provider
@@ -2132,10 +2187,126 @@ router.put('/provider-overrides/:id', async (req, res) => {
     // 前端是否已重写 settings,以提示"立刻生效"或"切回该 provider 后生效"。
     // 清空 override 同样要 reapply:否则旧档位映射还留在 settings.json 里(原来带
     // `Object.keys(entry).length` 条件,清空时静默不生效)。
-    const reapplied = await reapplyIfActive(id);
+    let reapplied = false;
+    try { reapplied = (await rerunSwitchIfActive(id)).ok; } catch { /* 同 reapplyIfActive:重切失败按"没生效"回 */ }
     res.json({ ok: true, id, override: map[id] || null, reapplied });
   } catch (err) { res.status(500).json({ error: err.message }); }
+}));
+
+// ── r151a 功能 Y:审核模型 = 当前 provider 的 sonnet 档(INTERFACE Y.3.1)─────────────
+// 切换时实际生效的档位映射:覆盖层的(口径见 overrideTierModels),否则 provider 自带的。
+function effectiveTierModels(ovEntry, info) {
+  const ovTm = ovEntry && typeof ovEntry === 'object' ? ovEntry.tierModels : undefined;
+  const o = overrideTierModels(ovTm, info.models);
+  if (o !== undefined) return o;
+  return info.tierModels;
+}
+
+// GET /api/auto-audit/status 的应答。只读:任何读取失败都按"认不出当前 provider"降级,不抛。
+// official 与服务端门控同判据(settings.json 的 env.ANTHROPIC_BASE_URL 过 isOfficialAnthropic,读不出 = 官方);
+// providerId = active-provider.json 记的那个,要求它还存在、且官方 / 第三方与 settings.json 一致,否则 null。
+export async function computeAutoAuditStatus() {
+  const enabled = readThirdPartyAutoSync();
+  let official = true;
+  let settingsSonnet = null;
+  let providerId = null;
+  let models = [];
+  let sonnetTierSet = false;
+  try {
+    let settings = {};
+    let readable = true;
+    try { settings = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8')); } catch (e) { readable = e?.code === 'ENOENT'; settings = {}; }
+    const env = settings && typeof settings === 'object' && settings.env && typeof settings.env === 'object' ? settings.env : {};
+    official = isOfficialAnthropic(env.ANTHROPIC_BASE_URL || '');
+    settingsSonnet = typeof env.ANTHROPIC_DEFAULT_SONNET_MODEL === 'string' ? env.ANTHROPIC_DEFAULT_SONNET_MODEL : null;
+    const activeId = readable && settings && typeof settings === 'object' && !Array.isArray(settings) ? await readActiveProviderId() : null;
+    if (activeId === BUILTIN_OFFICIAL_ID) {
+      if (official) providerId = activeId;
+    } else if (activeId) {
+      const info = await resolveProviderInfoById(activeId);
+      if (info && info.official === official) {
+        providerId = activeId;
+        if (!official) {
+          models = Array.isArray(info.models) ? info.models : [];
+          const eff = effectiveTierModels((await readProviderOverrides())[activeId], { ...info, models });
+          sonnetTierSet = !!(eff && typeof eff.sonnet === 'string' && eff.sonnet);
+        }
+      }
+    }
+  } catch {
+    providerId = null; models = []; sonnetTierSet = false;
+  }
+  return buildAutoAuditStatus({ official, enabled, providerId, models, settingsSonnet, sonnetTierSet });
+}
+
+async function broadcastAutoAuditStatus() {
+  try { broadcast({ type: 'auto-audit', status: await computeAutoAuditStatus() }); } catch { /* 广播失败不影响主流程 */ }
+}
+
+router.get('/auto-audit/status', async (_req, res) => {
+  res.json(await computeAutoAuditStatus());
 });
+
+// 覆盖层原子写(临时文件 + 改名):失败时原文件不变、进程中途被杀也不留半截文件。两个写路由共用(审核模型、provider-overrides)。
+async function writeProviderOverridesAtomic(map) {
+  await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
+  const tmp = `${PROVIDER_OVERRIDES_PATH}.tmp.${process.pid}.${Date.now()}`;
+  try {
+    await writeFile(tmp, JSON.stringify(map, null, 2));
+    await rename(tmp, PROVIDER_OVERRIDES_PATH);
+  } catch (e) {
+    await unlink(tmp).catch(() => {});
+    throw e;
+  }
+}
+
+// PUT /api/auto-audit/model { providerId, model } —— 只改该 provider 的 sonnet 档,其它档与默认模型覆盖不变。
+// 整段(校验 → 读改写覆盖层 → 重切)在切换队列里跑:与切换 / 重切互斥,读改写不会被交错覆盖。
+const auditModelError = (res, status, code, error) => res.status(status).json({ ok: false, code, error });
+router.put('/auto-audit/model', (req, res) => serializeProviderOp(async () => {
+  try {
+    const body = req.body;
+    const isObj = !!body && typeof body === 'object' && !Array.isArray(body);
+    if (!isObj || typeof body.providerId !== 'string' || !body.providerId || typeof body.model !== 'string') {
+      return auditModelError(res, 400, 'INVALID_INPUT', 'providerId 与 model 必须是字符串');
+    }
+    const { providerId } = body;
+    const info = providerId === BUILTIN_OFFICIAL_ID
+      ? { models: [], official: true, tierModels: null }
+      : await resolveProviderInfoById(providerId);
+    if (!info) return auditModelError(res, 404, 'PROVIDER_NOT_FOUND', 'provider 不存在');
+    if (info.official) return auditModelError(res, 400, 'OFFICIAL_PROVIDER', '官方端点不使用此设置');
+    const models = Array.isArray(info.models) ? info.models.filter((m) => typeof m === 'string' && m) : [];
+    if (!models.length) return auditModelError(res, 409, 'PROVIDER_MODELS_UNAVAILABLE', '取不到该 provider 的模型列表');
+    const model = normalizeAuditModelName(body.model);
+    if (model && !models.includes(model)) return auditModelError(res, 400, 'MODEL_NOT_IN_PROVIDER', '该模型不在此 provider 的模型列表里');
+    if (model && isUnusableAuditor(model)) return auditModelError(res, 400, 'MODEL_UNUSABLE_AS_AUDITOR', '该型号不能用作审核模型（CLI 限制）');
+
+    // 审查建议 1:覆盖层损坏 / 读不出时不许按空表整份写回(会丢掉其它 provider 的覆盖设置)。assertWritable 同时留
+    // .corrupt-<时间戳> 备份;命中回约定里的 500 STORAGE_WRITE_FAILED,已有数据不变。
+    let map;
+    try { map = await readProviderOverridesForWrite(); } catch {
+      return auditModelError(res, 500, 'STORAGE_WRITE_FAILED', '保存失败，请重试');
+    }
+    const prev = map[providerId];
+    const eff = effectiveTierModels(prev, { ...info, models });
+    const entry = auditModelOverrideEntry(prev, eff, hasAnyTier(info.tierModels), model);
+    if (Object.keys(entry).length) map[providerId] = entry;
+    else delete map[providerId];
+    try { await writeProviderOverridesAtomic(map); } catch {
+      return auditModelError(res, 500, 'STORAGE_WRITE_FAILED', '保存失败，请重试');
+    }
+    const r = await rerunSwitchIfActive(providerId);
+    const status = await computeAutoAuditStatus();
+    broadcast({ type: 'auto-audit', status });
+    return res.json({
+      ok: true, providerId, auditModel: model || null,
+      reapplied: r.active && r.ok, warning: r.active && !r.ok ? 'APPLY_FAILED' : null,
+    });
+  } catch {
+    if (!res.headersSent) auditModelError(res, 500, 'STORAGE_WRITE_FAILED', '保存失败，请重试');
+  }
+}));
 
 // Live-fetch a provider's model catalogue via GET {baseURL}/v1/models. Tries the
 // Anthropic header style first (x-api-key) then OpenAI (Bearer) — some relays

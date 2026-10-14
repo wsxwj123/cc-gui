@@ -1,0 +1,31 @@
+{
+  "note": "改动前(未改动的工作树)openai 协议代理发往上游的请求体原文;只录一次,不要在实现落地后重录",
+  "version": "0.2.421",
+  "capturedAt": "2026-10-14T07:24:40.734Z",
+  "cases": {
+    "stream-basic": {
+      "path": "/chat/completions",
+      "raw": "{\"model\":\"r151-chat\",\"messages\":[{\"role\":\"system\",\"content\":\"你是测试助手\"},{\"role\":\"user\",\"content\":\"你好 R151\"}],\"stream\":true,\"max_tokens\":256,\"stream_options\":{\"include_usage\":true}}"
+    },
+    "stream-tools": {
+      "path": "/chat/completions",
+      "raw": "{\"model\":\"r151-chat\",\"messages\":[{\"role\":\"system\",\"content\":\"系统提示一\\n系统提示二\"},{\"role\":\"user\",\"content\":\"帮我看看目录 R151\"},{\"role\":\"assistant\",\"content\":\"好的\",\"tool_calls\":[{\"id\":\"toolu_r151_a\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"toolu_r151_a\",\"content\":\"a.txt\\nb.txt\"}],\"stream\":true,\"max_tokens\":1024,\"temperature\":0.3,\"top_p\":0.9,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"description\":\"执行命令\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}}}],\"tool_choice\":\"auto\",\"stream_options\":{\"include_usage\":true}}"
+    },
+    "stream-with-stop": {
+      "path": "/chat/completions",
+      "raw": "{\"model\":\"r151-chat\",\"messages\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":64,\"stream_options\":{\"include_usage\":true}}"
+    },
+    "stream-thinking": {
+      "path": "/chat/completions",
+      "raw": "{\"model\":\"r151-reasoner\",\"messages\":[{\"role\":\"user\",\"content\":\"想一想 R151\"}],\"stream\":true,\"max_tokens\":4096,\"stream_options\":{\"include_usage\":true}}"
+    },
+    "nostream-base": {
+      "path": "/chat/completions",
+      "raw": "{\"model\":\"r151-audit\",\"messages\":[{\"role\":\"system\",\"content\":\"审核系统提示 R151\"},{\"role\":\"user\",\"content\":\"<transcript>\\nUser: 删掉临时文件\\n</transcript>\\n请判断\"}],\"stream\":true,\"max_tokens\":2112,\"stream_options\":{\"include_usage\":true}}"
+    },
+    "nostream-tools": {
+      "path": "/chat/completions",
+      "raw": "{\"model\":\"r151-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"帮我看看目录 R151\"},{\"role\":\"assistant\",\"content\":\"好的\",\"tool_calls\":[{\"id\":\"toolu_r151_a\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"toolu_r151_a\",\"content\":\"a.txt\\nb.txt\"}],\"stream\":true,\"max_tokens\":512,\"temperature\":0.2,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"description\":\"执行命令\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}}}],\"stream_options\":{\"include_usage\":true}}"
+    }
+  }
+}

@@ -7,6 +7,8 @@ import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js'
 import { isActivatableTarget, isEditableTarget } from '../utils/escAction.js';
 import { isImeReactKeydown } from '../utils/imeGuard.js';
 import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
+import { isAuditStreakReason } from '../../../server/utils/cli-strings.js';
+import { sessionWhitelistAllows, batchWhitelistTargets } from '../utils/sessionAllow.js';
 
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
 const PLAN_WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
@@ -74,10 +76,18 @@ function renderInput(toolName, input) {
 // 看到的只有工具名和参数,判断不了是规则命中、沙箱越界还是分类器上交。
 // sdk.d.ts 声明为 string,但它直接来自 CLI 的 decision_reason,不排除对象形态;
 // 取不出可读文本就整行不显示,绝不渲染成 [object Object]。
+// r151a:自动审核连续拦下多次后,CLI 把这次调用交给宿主 —— 原因之前加一行中文说明(INTERFACE Y.3.4)。
 function DecisionReason({ reason }) {
   const text = typeof reason === 'string' ? reason : (typeof reason?.reason === 'string' ? reason.reason : '');
   if (!text.trim()) return null;
-  return <div className="text-[11px] text-ink-faint leading-snug mb-2">原因：{text}</div>;
+  return (
+    <>
+      {isAuditStreakReason(text) && (
+        <div data-testid="perm-audit-streak" className="text-[11px] text-amber-700 leading-snug mb-1">自动审核已连续拦下多次操作，这一次由你决定。</div>
+      )}
+      <div className="text-[11px] text-ink-faint leading-snug mb-2">原因：{text}</div>
+    </>
+  );
 }
 
 // 排队 pill 与折叠态标题行共用的一句摘要:取该工具最主要的那个参数。
@@ -991,8 +1001,8 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
           // 共享遗留键 cgui-perm-wl-none 不生效:draft(sessionId=null)不吃白名单,
           // 否则任何 draft 的同名工具都被旧存量键自动放行(串放行)。
           try { wl = it.sessionId ? JSON.parse(localStorage.getItem(`cgui-perm-wl-${it.sessionId}`) || '[]') : []; } catch {}
-          if (wl.includes(it.toolName) && !it.blockedPath) {
-            // 白名单命中:放行但不入表。越界请求(blockedPath)不吃白名单,必须弹卡。
+          if (sessionWhitelistAllows(it, wl)) {
+            // 白名单命中:放行但不入表。越界请求(blockedPath)与第三方「自动」档上交的请求(mustPrompt)不吃白名单,必须弹卡。
             // 共享提交器自带重试到送达 + in-flight 去重(双实例 hydrate 也不双发)。
             respondPermission(it.id, { decision: 'allow', nonce: it.nonce });
           } else {
@@ -1095,9 +1105,9 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     // allow 只对"之后"到达的请求生效,所以这几条会卡着要逐条点。这里补扫一次(#8)。
     // req.sessionId 为 null(draft 孤儿)时不补扫:null === null 会把【其他 draft 会话】
     // 的同名工具请求一并放行 → 只放行当前这一条,宁可少自动放行。
-    const sameTool = req.sessionId == null ? [] : all.filter(
-      (p) => p.id !== req.id && p.sessionId === req.sessionId && p.toolName === req.toolName,
-    );
+    // r151a 复审:补扫只带走"自己也能走白名单"的挂起请求 —— 第三方「自动」档上交的(mustPrompt)、越界的、危险命令
+    // 都留着逐条确认(与实时 / 补拉两处白名单分支同口径,判定在 utils/sessionAllow.js)。
+    const sameTool = batchWhitelistTargets(req, all, isDangerousCommand);
     await Promise.all([req, ...sameTool].map((r) => resolve(r, 'allow')));
   };
 
