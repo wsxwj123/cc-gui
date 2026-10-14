@@ -15,6 +15,9 @@
 //    {canUseTool:{…}}            向宿主发 can_use_tool 控制请求,等答复(最多 45 秒),答复记进 perm-responses.jsonl
 //    {hook:{callback_id,input}}  向宿主发 hook_callback 控制请求,等答复,答复记进 hook-responses.jsonl
 //    {errorIfMode:{mode,text}}   当前档位等于 mode 时以"API 错误"形态的 result 收场(文本 = text)
+//                                可选 status:HTTP 状态(result 的 api_error_status,不给 = 400);
+//                                可选 transcript:true —— 同时像真实 CLI 那样往会话记录追加一条 API 报错的 assistant 行(形态见 apiErrorLine)。
+//                                不给 transcript 时只吐 result、会话记录里没有这条报错(与加这个选项之前完全相同)。
 //    {result:{…}}                以给定字段的 result 收场
 // 没写 result 的脚本,演完自动补一条成功的 result。
 import fs from 'node:fs';
@@ -57,6 +60,33 @@ const assistant = (content, stop = 'end_turn') => {
   out({ type: 'assistant', session_id: sid, uuid, parent_tool_use_id: null, message });
   transcript({ ...base(), type: 'assistant', uuid, parentUuid: null, message });
 };
+// 回合因上游 API 报错结束时,真实 CLI 往会话记录追加的那一行。2026-10-14 用本机真实 CLI 2.1.296 对本地假接口实录
+// (临时 HOME + 临时 CLAUDE_CONFIG_DIR,上游各回一次 HTTP 500 / HTTP 400):
+//   顶层键依次为 parentUuid, isSidechain, type:"assistant", uuid, timestamp, message, error, isApiErrorMessage:true,
+//   apiErrorStatus:<HTTP 状态,数字>, perTurnEffort:null, userType, entrypoint, cwd, sessionId, version, gitBranch;
+//   error:500 → "server_error",400 → "unknown"(其它状态没有实录,按 "unknown";脚本可用 errorKind 指定);
+//   message:model "<synthetic>"、stop_reason "stop_sequence"、stop_sequence ""、usage 全零、
+//           content = [{ type:"text", text:<与 result 的 result 字段相同的报错文本> }];parentUuid 指向本回合的提问那条链。
+const API_ERROR_KIND = { 400: 'unknown', 500: 'server_error' };
+function apiErrorLine({ text, status, errorKind, parentUuid }) {
+  const message = {
+    diagnostics: null, id: crypto.randomUUID(), container: null, model: '<synthetic>', role: 'assistant', stop_details: null,
+    stop_reason: 'stop_sequence', stop_sequence: '', type: 'message',
+    usage: {
+      output_tokens_details: null, input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+      server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 }, service_tier: null,
+      cache_creation: { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 }, inference_geo: null, iterations: null, speed: null, fallback_credit: null,
+    },
+    content: [{ type: 'text', text }],
+    context_management: null,
+  };
+  const b = base();
+  transcript({
+    parentUuid, isSidechain: b.isSidechain, type: 'assistant', uuid: crypto.randomUUID(), timestamp: b.timestamp, message,
+    error: errorKind || API_ERROR_KIND[status] || 'unknown', isApiErrorMessage: true, apiErrorStatus: status, perTurnEffort: null,
+    userType: b.userType, entrypoint: b.entrypoint, cwd: b.cwd, sessionId: b.sessionId, version: b.version, gitBranch: b.gitBranch,
+  });
+}
 
 // ---- 向宿主发控制请求并等答复 ----
 const pending = new Map();
@@ -71,7 +101,8 @@ function askHost(request, file, timeoutMs) {
 
 async function runTurn(text) {
   transcript({ type: 'summary', summary: String(text).slice(0, 40) || '新会话', leafUuid: crypto.randomUUID() });
-  transcript({ ...base(), type: 'user', uuid: crypto.randomUUID(), parentUuid: null, message: { role: 'user', content: text } });
+  const userUuid = crypto.randomUUID();
+  transcript({ ...base(), type: 'user', uuid: userUuid, parentUuid: null, message: { role: 'user', content: text } });
   let steps = null;
   const m = /R151S:([A-Za-z0-9_.-]+)/.exec(text);
   if (m) { try { steps = JSON.parse(fs.readFileSync(path.join(CTL, 'scripts', `${m[1]}.json`), 'utf8')); } catch { steps = null; } }
@@ -93,8 +124,11 @@ async function runTurn(text) {
     else if (s.hook) await askHost({ subtype: 'hook_callback', ...s.hook }, 'hook-responses.jsonl', 30_000);
     else if (s.errorIfMode) {
       if (mode === s.errorIfMode.mode) {
-        out({ type: 'result', subtype: 'success', is_error: true, api_error_status: 400, session_id: sid, uuid: crypto.randomUUID(),
-          result: String(s.errorIfMode.text), duration_ms: 10, num_turns: 1, total_cost_usd: 0, usage });
+        const status = Number.isInteger(s.errorIfMode.status) ? s.errorIfMode.status : 400;
+        const errText = String(s.errorIfMode.text);
+        if (s.errorIfMode.transcript === true) apiErrorLine({ text: errText, status, errorKind: s.errorIfMode.errorKind, parentUuid: userUuid });
+        out({ type: 'result', subtype: 'success', is_error: true, api_error_status: status, session_id: sid, uuid: crypto.randomUUID(),
+          result: errText, duration_ms: 10, num_turns: 1, total_cost_usd: 0, usage });
         return;
       }
     } else if (s.result) { out({ type: 'result', subtype: 'success', is_error: false, session_id: sid, uuid: crypto.randomUUID(), duration_ms: 10, num_turns: 1, total_cost_usd: 0, usage, result: 'R151-FINAL', ...s.result }); return; }

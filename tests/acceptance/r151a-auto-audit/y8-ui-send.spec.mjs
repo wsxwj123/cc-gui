@@ -96,7 +96,8 @@ test('H4 第三方 + 自动档,回合报错不含那四句 → 不记不可用�
   await useProvider(id);
   await tpAutoOn();
   const name = `h4-${Date.now().toString(36)}`;
-  writeScript(name, [{ errorIfMode: { mode: 'auto', text: 'API Error: 500 {"type":"error","error":{"message":"upstream overloaded, auto retry later"}}' } }]);
+  // 真实 CLI 回合以 API 报错结束时,会话记录里也会留下这条报错(界面刷新历史以会话记录为准),所以让假 claude 照样写进去。
+  writeScript(name, [{ errorIfMode: { mode: 'auto', status: 500, transcript: true, text: 'API Error: 500 {"type":"error","error":{"message":"upstream overloaded, auto retry later"}}' } }]);
   await boot(page);
   await openFreshSession(page, 'h4');
   await chooseMode(page, 'auto');
