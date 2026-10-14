@@ -636,10 +636,6 @@ async function readProviderOverridesForWrite() {
   return overridesMapOf((await assertWritable(PROVIDER_OVERRIDES_PATH)).value);
 }
 
-async function writeProviderOverrides(map) {
-  await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
-  await writeFile(PROVIDER_OVERRIDES_PATH, JSON.stringify(map, null, 2));
-}
 
 // 覆盖层 tierModels 怎么压 provider 自带的(两条切换路径与审核状态共用这一个口径):
 // 按 models[] 校验后非空 → 整体替换;是空对象 {} → 全部档跟随所选模型(r151a 清掉审核模型时写出,
@@ -2182,7 +2178,7 @@ router.put('/provider-overrides/:id', (req, res) => serializeProviderOp(async ()
     }
     if (Object.keys(entry).length) map[id] = entry;
     else delete map[id]; // 空 = 清除,恢复无 override 的原始行为
-    await writeProviderOverrides(map);
+    await writeProviderOverridesAtomic(map);   // r151a 复审建议 4:与审核模型接口同一个原子写(临时文件 + 改名)
     // BG9:overrides 写入 .claude-gui/provider-overrides.json,但 CLI 只读 settings.json
     // 的 env(ANTHROPIC_DEFAULT_*_MODEL)。所以**用户在 GUI 改完档位映射,仍要去重新点
     // 一次 provider 切换才生效**——很反直觉(用户问"是不是要重启 GUI")。这里若该 provider
@@ -2251,7 +2247,7 @@ router.get('/auto-audit/status', async (_req, res) => {
   res.json(await computeAutoAuditStatus());
 });
 
-// 覆盖层原子写(临时文件 + 改名):失败时原文件不变。只给审核模型接口用,既有写入点不动。
+// 覆盖层原子写(临时文件 + 改名):失败时原文件不变、进程中途被杀也不留半截文件。两个写路由共用(审核模型、provider-overrides)。
 async function writeProviderOverridesAtomic(map) {
   await mkdir(join(homedir(), '.claude-gui'), { recursive: true });
   const tmp = `${PROVIDER_OVERRIDES_PATH}.tmp.${process.pid}.${Date.now()}`;
