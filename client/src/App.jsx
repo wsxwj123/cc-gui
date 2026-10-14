@@ -73,6 +73,7 @@ import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
 import { runHistoryOp } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
 import { isThirdPartyProvider } from './utils/autoAudit.js';
+import { saveOutcome } from './utils/saveOutcome.js';
 import { matchesAutoUnavailable, denialKind } from '../../server/utils/cli-strings.js';
 import { filterSlashCommands, slashBlocked, fetchSlashCommands } from './utils/slashCommands.js';
 import { SlashCommandMenu } from './components/SlashCommandMenu.jsx';
@@ -10753,6 +10754,9 @@ function ProviderOverrideEditor({ provider, override, onSaved }) {
         }),
       });
       const d = await r.json().catch(() => ({}));
+      // r151a 复审:先判成败(口径同下方模型选择的保存:2xx 且没写 ok:false),失败显示应答里的 error,不再一律"已保存"。
+      const out = saveOutcome(r.status, d);
+      if (!out.ok) { setSaveMsg(`保存失败：${out.error}`); setBusy(false); return; }
       // BG9:服务端若识别这是当前激活 provider,会自动重写 settings.json env(reapplied=true)
       // → 新会话立刻生效。否则提示用户:切回该 provider 时才生效。
       setSaveMsg(d?.reapplied ? '✓ 已保存并应用到当前 provider，新会话生效' : '✓ 已保存（切回该 provider 时生效）');
