@@ -62,7 +62,7 @@ test.describe('I 拒绝提示行(denial-notice)', () => {
       denied(id, { decision_reason_type: 'rule', decision_reason: 'Bash(rm:*) 在拒绝规则里', message: 'Permission to use Bash with command rm -rf build has been denied.' }), { say: 'R151-I3-DONE' }]);
     await expect(notices(page)).toHaveCount(1, { timeout: 15_000 });
     await expect(notices(page).first()).toHaveAttribute('data-denial-kind', 'other');
-    await expect(notices(page).first()).not.toContainText('(自动档审核)');
+    await expect(notices(page).first()).not.toContainText('自动档审核');   // 不论标点全角半角,"other" 都不该带这几个字
     await expect(notices(page).first()).not.toContainText('审核模型没有给出结论');
   });
 

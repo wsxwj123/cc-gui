@@ -195,9 +195,13 @@ test.describe('C 审核模型 · 名字的规范化与边界', () => {
 });
 
 test.describe('C 审核模型 · 错误码(任何 4xx 都不改文件、不广播)', () => {
+  // 顶层 JSON 原始值由既有的全局 JSON 解析层在进入路由前拒绝(INTERFACE 第 9 行):只断言 400,应答体不在约定内
+  test('C8p 请求体是字符串(顶层原始值)→ 400(由全局 JSON 解析层拒绝,应答体形态不在约定内)', async () => {
+    const r = await call('PUT', M, '"r151-chat"');
+    expect(r.status, `应答原文:${r.text.slice(0, 200)}`).toBe(400);
+  });
   const invalid = [
     ['请求体是数组', '[]'],
-    ['请求体是字符串', '"r151-chat"'],
     ['providerId 缺失', JSON.stringify({ model: 'r151-chat' })],
     ['providerId 是空串', JSON.stringify({ providerId: '', model: 'r151-chat' })],
     ['providerId 是数字', JSON.stringify({ providerId: 123, model: 'r151-chat' })],

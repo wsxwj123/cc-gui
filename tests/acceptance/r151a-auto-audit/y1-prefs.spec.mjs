@@ -115,10 +115,15 @@ test.describe('A 开关偏好接口 · 写', () => {
 });
 
 test.describe('A 开关偏好接口 · 非法输入(400 INVALID_INPUT,不写文件、不广播)', () => {
+  // 顶层 JSON 原始值(字符串、布尔)由既有的全局 JSON 解析层在进入路由前拒绝(INTERFACE 第 9 行):只断言 400,应答体不在约定内
+  for (const [label, raw] of [['请求体是 JSON 字符串 "true"', '"true"'], ['请求体是 JSON 布尔 true', 'true']]) {
+    test(`A8p ${label}(顶层原始值)→ 400(由全局 JSON 解析层拒绝,应答体形态不在约定内)`, async () => {
+      const r = await call('PUT', P, raw);
+      expect(r.status, `应答原文:${r.text.slice(0, 200)}`).toBe(400);
+    });
+  }
   const cases = [
     ['请求体是数组 []', '[]'],
-    ['请求体是 JSON 字符串 "true"', '"true"'],
-    ['请求体是 JSON 布尔 true', 'true'],
     ['请求体是空对象 {}', '{}'],
     ['enabled 是字符串 "true"', '{"enabled":"true"}'],
     ['enabled 是数字 1', '{"enabled":1}'],
