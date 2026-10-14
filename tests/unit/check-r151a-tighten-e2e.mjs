@@ -21,6 +21,7 @@ if (!CLI) { console.log('check-r151a-tighten-e2e: SKIP(本机没有真实 claude
 const tmp = mkdtempSync(join(tmpdir(), 'cgui-r151a-tighten-e2e-'));
 // 产品模块读 homedir() 的地方都指到临时目录(本测试不经 GUI 服务端,只用 makePreToolUseHook)
 process.env.HOME = join(tmp, 'gui-home');
+process.env.USERPROFILE = process.env.HOME;   // Windows 的 os.homedir() 读它(与 HOME 成对,check-r49-test-home-isolation)
 mkdirSync(process.env.HOME, { recursive: true });
 const { makePreToolUseHook } = await import('../../server/routes/chat.js');
 const { THIRD_PARTY_AUTO_ASK_REASON } = await import('../../server/services/auto-audit.js');
@@ -55,7 +56,7 @@ async function runCase(tag, slot) {
   lane(tag, { classifier: 'allow', main: { tools: [{ name: 'Bash', input: { command: 'rm -rf ../victim', description: 'r151 tighten e2e' } }], text: 'R151-E2E-DONE' } });
   const asked = [];
   const env = {
-    PATH: process.env.PATH, HOME: join(base, 'home'), CLAUDE_CONFIG_DIR: join(base, 'cfg'), TMPDIR: join(base, 'tmp'), LANG: 'en_US.UTF-8',
+    PATH: process.env.PATH, HOME: join(base, 'home'), USERPROFILE: join(base, 'home'), CLAUDE_CONFIG_DIR: join(base, 'cfg'), TMPDIR: join(base, 'tmp'), LANG: 'en_US.UTF-8',
     ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}/lane/${tag}`, ANTHROPIC_AUTH_TOKEN: 'dummy-r151-token', ANTHROPIC_MODEL: 'r151-main',
     ANTHROPIC_DEFAULT_SONNET_MODEL: 'r151-audit', CLAUDE_CODE_AUTO_MODE_SERVER: '0',
     DISABLE_TELEMETRY: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1', DISABLE_ERROR_REPORTING: '1',
