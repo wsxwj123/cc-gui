@@ -2,7 +2,7 @@
 import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import {
-  get, wsCollector, useProvider, useOfficial, useUnknownProvider, tpAutoOn, tpAutoOff, resetOverrides, settingsEnv, readText,
+  get, wsCollector, useProvider, useOfficial, useUnknownProvider, tpAutoOn, tpAutoOff, resetOverrides, resetSettings, settingsEnv, readText,
   snapshot, expectUnchanged, PREFS, OVERRIDES, SETTINGS, ACTIVE_PROVIDER, OFFICIAL_ID,
 } from './helpers/api.mjs';
 import { CUSTOM_PROVIDERS } from './helpers/fixtures.mjs';
@@ -82,6 +82,7 @@ test('B3 第三方且没设 sonnet 档:auditModel = 默认模型(settings.json �
 
 test('B4 第三方、settings.json 里没有 ANTHROPIC_DEFAULT_SONNET_MODEL:auditModel 与 auditModelSource 都是 null', async () => {
   const id = await provider('nodef');
+  resetSettings();   // 自己建立前提:切到没配模型的 provider 时应用会沿用 settings.json 里已有的主模型名,先还原成干净基线
   await useProvider(id);
   expect(settingsEnv().ANTHROPIC_DEFAULT_SONNET_MODEL, '前置:没有默认模型也没有档位时不写 sonnet 档').toBeUndefined();
   const r = await get(S);

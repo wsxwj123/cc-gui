@@ -1,9 +1,10 @@
 // D 组:服务端对 auto 的门控(INTERFACE Y.3.1 末)—— POST /api/chat 降级、POST /api/chat/permission-mode 拒绝。
 // 会话进程是挂在 PATH 上的假 claude:它记下自己被拉起时的 --permission-mode,以及宿主发来的每个控制请求。
 import { test, expect } from '@playwright/test';
+import fs from 'node:fs';
 import {
   post, expectError, startTurn, readStream, waitSpawn, controlRecords, useProvider, useOfficial, tpAutoOn, tpAutoOff,
-  resetOverrides, stripRunKeys,
+  resetOverrides, stripRunKeys, snapshot, SETTINGS,
 } from './helpers/api.mjs';
 import { ERR, DOWNGRADE } from './helpers/texts.mjs';
 import { provider } from './helpers/scenes.mjs';
@@ -12,10 +13,14 @@ const PM = '/api/chat/permission-mode';
 let n = 0;
 const ws = (tag) => `d-${tag}-${Date.now().toString(36)}-${(n += 1)}`;
 
+let saved = {};
 test.beforeEach(async () => {
+  saved = snapshot([SETTINGS()]);
   await tpAutoOff();
   resetOverrides({});
 });
+// 收尾:切 provider 会改写 CLI 设置(settings.json),还原成用例开始前的样子,别把本组的场景留给后面的组
+test.afterEach(async () => { for (const [p, c] of Object.entries(saved)) if (c !== null) fs.writeFileSync(p, c); });
 
 async function thirdParty() { const id = await provider('main'); await useProvider(id); return id; }
 

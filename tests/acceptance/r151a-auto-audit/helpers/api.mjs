@@ -4,7 +4,7 @@ import { expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  ctlDir, mockDir, PREFS, OVERRIDES, SETTINGS, ACTIVE_PROVIDER, GUI_DIR, CLAUDE_DIR, makeWorkspace,
+  ctlDir, mockDir, PREFS, OVERRIDES, SETTINGS, ACTIVE_PROVIDER, GUI_DIR, CLAUDE_DIR, makeWorkspace, cleanSettings,
 } from './fixtures.mjs';
 
 export const API = process.env.R151A_API_BASE || 'http://127.0.0.1:0';
@@ -177,6 +177,12 @@ export function expectUnchanged(before, what) {
   for (const [p, content] of Object.entries(before)) expect(readText(p), `${what}:${path.basename(p)} 不应被改动`).toBe(content);
 }
 export const settingsEnv = () => (readJson(SETTINGS()) || {}).env || {};
+/**
+ * 前置:把隔离实例的 CLI 设置(settings.json)还原成起实例时的干净基线。
+ * 切到"没配任何模型"的 provider 时,应用会沿用 settings.json 里已有的主模型名 —— 要"切过去后没有任何模型键"
+ * 这个前提的用例,先调它,不依赖前面的用例(或别的组)有没有把 settings.json 还原。
+ */
+export function resetSettings() { writeJson(SETTINGS(), cleanSettings()); }
 export { PREFS, OVERRIDES, SETTINGS, ACTIVE_PROVIDER, GUI_DIR, CLAUDE_DIR };
 
 /**

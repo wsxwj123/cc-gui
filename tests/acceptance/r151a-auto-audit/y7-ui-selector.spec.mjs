@@ -1,6 +1,6 @@
 // G 组:权限档选择器(INTERFACE Y.3.4 "权限档选择器")。真实界面(dev server 源码直出)+ 隔离实例。
 import { test, expect } from '@playwright/test';
-import { useProvider, useOfficial, useUnknownProvider, tpAutoOn, tpAutoOff, resetOverrides, setTpAuto, snapshot, SETTINGS } from './helpers/api.mjs';
+import { get, useProvider, useOfficial, useUnknownProvider, tpAutoOn, tpAutoOff, resetOverrides, resetSettings, setTpAuto, snapshot, SETTINGS } from './helpers/api.mjs';
 import { boot, openFreshSession, readOptions, autoOption, openSelector, closeSelector } from './helpers/ui.mjs';
 import { UI, OFFICIAL_OPTION_TITLES_BEFORE, MODE_OF_TITLE } from './helpers/texts.mjs';
 import { provider } from './helpers/scenes.mjs';
@@ -51,8 +51,16 @@ test('G3 第三方 + 开关开 + 没单独设(来源 default):显示「审核模
 });
 
 test('G4 第三方 + 开关开 + 审核模型为 null:显示「审核模型:未知」', async ({ page }) => {
-  await useProvider(await provider('nodef'));
+  // 自己建立前提:切到没配任何模型的 provider 时应用会沿用 settings.json 里已有的主模型名,
+  // 所以先把 CLI 设置还原成干净基线,不依赖前面的用例 / 别的组有没有还原它。
+  const id = await provider('nodef');
+  resetSettings();
+  await useProvider(id);
   await tpAutoOn();
+  const st = await get('/api/auto-audit/status');
+  expect(st.body && st.body.auditModel,
+    `前置不成立:切到没配任何模型的 provider(nodef)后,GET /api/auto-audit/status 的 auditModel 应为 null;`
+    + `不是 null 说明隔离实例的 CLI 设置里仍有别的场景留下的模型名(应答 ${st.status}:${st.text.slice(0, 300)})`).toBeNull();
   await boot(page);
   await openFreshSession(page, 'g4');
   await openSelector(page);

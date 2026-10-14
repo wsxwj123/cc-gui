@@ -24,6 +24,8 @@ export const OVERRIDES = () => path.join(GUI_DIR(), 'provider-overrides.json');
 export const CUSTOM_PROVIDERS = () => path.join(GUI_DIR(), 'custom-providers.json');
 export const ACTIVE_PROVIDER = () => path.join(GUI_DIR(), 'active-provider.json');
 export const SETTINGS = () => path.join(CLAUDE_DIR(), 'settings.json');
+/** 隔离实例 CLI 设置(settings.json)的干净基线:起实例前就是它;用例要"没有任何残留模型键"的前提时还原成它。每次返回新对象。 */
+export const cleanSettings = () => ({ env: {} });
 
 export function buildFixtures() {
   const home = homeDir();
@@ -33,7 +35,7 @@ export function buildFixtures() {
   fs.writeFileSync(PREFS(), JSON.stringify({ releaseNotesSeen: version }, null, 2));
   fs.writeFileSync(path.join(GUI_DIR(), 'permission-guide-shown.flag'), '2026-09-15T00:00:00.000Z');
   fs.writeFileSync(path.join(GUI_DIR(), 'network.json'), JSON.stringify({ host: '127.0.0.1' }));
-  fs.writeFileSync(SETTINGS(), JSON.stringify({ env: {} }, null, 2));
+  fs.writeFileSync(SETTINGS(), JSON.stringify(cleanSettings(), null, 2));
   const shim = path.join(fakebinDir(), 'claude');
   fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${suitePath('helpers', 'fake-claude.mjs')}" "$@"\n`);
   fs.chmodSync(shim, 0o755);
