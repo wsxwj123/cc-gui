@@ -364,7 +364,10 @@ export function buildOpenAIRequest(body) { // export 仅为可单测(r63 接线�
     model: body.model,
     // r63:透传 body.model —— 视觉判定按本次请求实际模型(而非切换时刻的 upstream.model)
     messages: anthropicToOpenAIMessages(body.messages, body.system, body.model),
-    stream: body.stream !== false,
+    // r151a:Anthropic 协议缺省就是非流式,只有明确 stream:true 才流式。CLI 主对话请求明确带 true
+    // (不受影响);auto 审核等非流式调用不带 stream 字段,旧判定 `!== false` 把它们按流式转发,
+    // CLI 收到事件流判"审核不可用"并拒绝(验证 G 的 g2a)。
+    stream: body.stream === true,
   };
   if (body.max_tokens) req.max_tokens = body.max_tokens;
   if (typeof body.temperature === 'number') req.temperature = body.temperature;
@@ -382,6 +385,14 @@ export function buildOpenAIRequest(body) { // export 仅为可单测(r63 接线�
     }
   }
   if (req.stream) req.stream_options = { include_usage: true };
+  else {
+    // r151a:只对非流式请求把 stop_sequences 里的非空字符串转成上游 stop(OpenAI 协议最多 4 个),
+    // 审核请求靠它在 </block> 处收住、少花输出 token;流式请求的转换逐字节不变。
+    const stop = Array.isArray(body.stop_sequences)
+      ? body.stop_sequences.filter((s) => typeof s === 'string' && s.length > 0).slice(0, 4)
+      : [];
+    if (stop.length) req.stop = stop;
+  }
   return req;
 }
 
