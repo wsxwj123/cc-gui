@@ -6831,10 +6831,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // provider/模型自动重试)→ 该组合下「自动」项隐藏;本会话切回逐步确认并
             // 自动重发本条(autoRetry 防循环)。
             // r151a:官方判据逐字不变;第三方只认 CLI 的四句原文(宽正则会被上游普通报错误伤)。
+            // 四句原文都含 auto,所以前置的 /auto/ 对第三方分支不改变结果。
             const _tpFallback = isThirdPartyProvider(useStore.getState().autoAuditStatus, useStore.getState().currentProvider?.providerHint);
             if (useStore.getState().getPermissionModeFor(sessionQueueKey) === 'auto' && !opts.autoRetry && prompt
-              && (_tpFallback ? matchesAutoUnavailable(msg)
-                : (/auto/i.test(msg) && /support|avail|invalid|eligib|permission|denied|mode/i.test(msg)))) {
+              && /auto/i.test(msg) && (_tpFallback ? matchesAutoUnavailable(msg) : /support|avail|invalid|eligib|permission|denied|mode/i.test(msg))) {
               const _st = useStore.getState();
               markAutoUnavailable(_st, _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
               _st.setPermissionMode('default', sessionQueueKey);

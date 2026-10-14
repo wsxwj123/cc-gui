@@ -51,7 +51,7 @@ for (const t of ['upstream overloaded, auto retry later', 'auto mode', 'permissi
 
 // ── 5. 官方分支的两条宽正则逐字保留(运行时回退的官方判据不动)──
 const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
-assert.ok(app.includes("(/auto/i.test(msg) && /support|avail|invalid|eligib|permission|denied|mode/i.test(msg))"), '回合报错回退:官方宽正则应原样保留');
+assert.ok(app.includes("&& /auto/i.test(msg) && (_tpFallback ? matchesAutoUnavailable(msg) : /support|avail|invalid|eligib|permission|denied|mode/i.test(msg))"), '回合报错回退:官方仍是两条宽正则(文本不变),第三方换成四句原文');
 assert.ok(app.includes("/auto|permission/i.test(String(err.message || ''))"), '启动失败回退:官方宽正则应原样保留');
 assert.equal((app.match(/matchesAutoUnavailable\(/g) || []).length, 2, '两处运行时回退的第三方分支都只认四句原文');
 
