@@ -21,3 +21,67 @@ export function autoModeServerInjection(settingsEnv, enabled) {
   if (hasOwn(settingsEnv, 'CLAUDE_CODE_AUTO_MODE_SERVER')) return null;
   return '0';
 }
+
+// 不能当审核模型的型号:CLI 遇到它们会无视设置、改用内置默认(调研 Y §1)。
+// 规则:转小写后等于或以这两个前缀开头(前缀匹配,所以带日期 / [1m] 的变体同样算)。
+const UNUSABLE_AUDITOR_PREFIXES = ['claude-sonnet-5-5', 'claude-opus-5-5'];
+export function isUnusableAuditor(name) {
+  if (typeof name !== 'string') return false;
+  const s = name.toLowerCase();
+  return UNUSABLE_AUDITOR_PREFIXES.some((p) => s.startsWith(p));
+}
+
+// PUT /api/auto-audit/model 的名字规范化:去首尾空白与结尾的 [1m](不区分大小写),存处理后的名字。
+export function normalizeAuditModelName(name) {
+  return String(name).trim().replace(/\[1m\]$/i, '').trim();
+}
+
+const TIERS = ['haiku', 'sonnet', 'opus', 'fable'];
+const tierValue = (tm, t) => (tm && typeof tm === 'object' && typeof tm[t] === 'string' && tm[t] ? tm[t] : '');
+// 档位映射里有没有任何一档(值为非空字符串)。
+export function hasAnyTier(tm) {
+  return TIERS.some((t) => tierValue(tm, t));
+}
+
+// 审核模型写入时,覆盖层里该 provider 条目改成什么(只动 sonnet 一档)。
+//   prevEntry   覆盖层里该 provider 原有的条目(可缺)
+//   effective   切换时实际生效的档位映射(覆盖层的校验后非空 → 它;否则 provider 自带的)
+//   ownHasTiers provider 自带的档位映射非空
+//   model       已规范化的新值;'' = 清掉 sonnet 档(回到"等于默认模型")
+// 覆盖层的 tierModels 一旦存在就整体替换 provider 自带的,只写 sonnet 会把自带的其它档冲掉,
+// 所以以"生效的档位"为底改 sonnet 一格后整体写回;defaultModel 等其它键原样保留。
+// 清掉后一档不剩:provider 自带有档位 → 写 {}(全部跟随默认模型,压住自带的);否则删掉 tierModels 键。
+export function auditModelOverrideEntry(prevEntry, effective, ownHasTiers, model) {
+  const entry = prevEntry && typeof prevEntry === 'object' && !Array.isArray(prevEntry) ? { ...prevEntry } : {};
+  const tm = {};
+  for (const t of TIERS) {
+    if (t === 'sonnet') continue;
+    const v = tierValue(effective, t);
+    if (v) tm[t] = v;
+  }
+  if (model) tm.sonnet = model;
+  if (Object.keys(tm).length) entry.tierModels = tm;
+  else if (ownHasTiers) entry.tierModels = {};
+  else delete entry.tierModels;
+  return entry;
+}
+
+// GET /api/auto-audit/status 的应答组装(读文件在 routes/settings.js,这里只拼字段)。
+//   official      当前 provider 是否官方端点(调用方按与服务端门控相同的判据算好传入)
+//   providerId    当前在用的 provider id;认不出 → null,此时 models 一律 []
+//   settingsSonnet settings.json 里 env.ANTHROPIC_DEFAULT_SONNET_MODEL 的值(审核模型 = sonnet 档)
+//   sonnetTierSet 该 provider 显式设了 sonnet 档(覆盖层或 provider 自带,口径同切换时的合并)
+export function buildAutoAuditStatus({ official, enabled, providerId, models, settingsSonnet, sonnetTierSet }) {
+  const id = typeof providerId === 'string' && providerId ? providerId : null;
+  const list = id && !official && Array.isArray(models) ? [...new Set(models.filter((m) => typeof m === 'string' && m))] : [];
+  const auditModel = !official && typeof settingsSonnet === 'string' && settingsSonnet ? settingsSonnet : null;
+  return {
+    official: official === true,
+    enabled: enabled === true,
+    providerId: id,
+    auditModel,
+    auditModelSource: auditModel === null ? null : (id && sonnetTierSet ? 'tier' : 'default'),
+    models: list,
+    unusable: list.filter(isUnusableAuditor),
+  };
+}
