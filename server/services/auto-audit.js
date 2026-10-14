@@ -85,3 +85,14 @@ export function buildAutoAuditStatus({ official, enabled, providerId, models, se
     unusable: list.filter(isUnusableAuditor),
   };
 }
+
+// 服务端对 auto 的门控(INTERFACE Y.3.1 末,审查 I3):第三方 + 第三方 auto 总开关没开 + 请求 auto →
+// 按 default 起回合,并给出降级信号(应答 permissionModeDowngraded、事件流里带 reason 的 mode_mismatch)。
+// 官方端点、或开关开、或请求的不是 auto:原样(与改动前相同)。前端的发送前降级保留,这里是最后一道。
+export const THIRD_PARTY_AUTO_DISABLED = 'third-party-auto-disabled';
+export function gateAutoPermissionMode(requested, { official, enabled }) {
+  if (requested === 'auto' && official !== true && enabled !== true) {
+    return { mode: 'default', downgraded: { requested: 'auto', effective: 'default', reason: THIRD_PARTY_AUTO_DISABLED } };
+  }
+  return { mode: requested, downgraded: null };
+}

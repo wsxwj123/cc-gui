@@ -25,7 +25,7 @@ import { isLocalReq } from '../services/auth.js';
 import { SERVER_EPOCH } from '../utils/server-epoch.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
 import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCache } from '../utils/prompt-cache-env.js';
-import { autoModeServerInjection } from '../services/auto-audit.js';
+import { autoModeServerInjection, gateAutoPermissionMode } from '../services/auto-audit.js';
 import { readThirdPartyAutoSync } from './prefs.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
@@ -1669,6 +1669,7 @@ function turnHitResponse(record) {
     // 首次已把 prompt 交给该运行;但若那次初始化超时过(504),送达仍是未确认的,照实回。
     delivered: record.startTimedOut ? 'unknown' : true,
     status: turnLiveStatus(record, slot),
+    ...(record.permissionModeDowngraded ? { permissionModeDowngraded: record.permissionModeDowngraded } : {}),
   };
 }
 
@@ -1732,7 +1733,7 @@ async function handleChatPost(req, res) {
     prompt, sessionId, cwd,
     model: requestedModel,
     effort, addDirs,
-    permissionMode,
+    permissionMode: requestedPermissionMode,
     globalRead,
     appendSystemPrompt,
     agent,
@@ -1745,6 +1746,14 @@ async function handleChatPost(req, res) {
   // 上限时本轮停止并返回 result subtype=error_max_budget_usd(前端有专门提示)。
   const budgetUsd = Number(maxBudgetUsd);
   const budget = Number.isFinite(budgetUsd) && budgetUsd > 0 ? budgetUsd : null;
+  // r151a:服务端对 auto 的门控(INTERFACE Y.3.1 末)—— 第三方 + 第三方 auto 总开关没开 → 按「逐步确认」起回合,
+  // 应答多 permissionModeDowngraded、事件流补一条带 reason 的 mode_mismatch。判据与会话进程环境注入同源
+  // (settings.json 的地址 + prefs 的开关),只在请求 auto 时才读。官方端点、开关开、其它档:与改动前相同。
+  const autoGate = requestedPermissionMode === 'auto'
+    ? gateAutoPermissionMode('auto', { official: settingsProviderIsOfficial(), enabled: readThirdPartyAutoSync() })
+    : { mode: requestedPermissionMode, downgraded: null };
+  const permissionMode = autoGate.mode;
+  const downgradeFields = autoGate.downgraded ? { permissionModeDowngraded: autoGate.downgraded } : {};
 
   const model = requestedModel || await getDefaultModel();
   // DO NOT normalize cwd here. Claude CLI hashes the EXACT cwd string to
@@ -1929,11 +1938,14 @@ async function handleChatPost(req, res) {
       s.promptPreview = String(prompt).slice(0, 80);
       s.guiMode = chosenMode;
       s.permissionMode = chosenMode;
+      // r151a:服务端门控降级 —— 复用的进程不会再发 init,降级信号在本回合开头直接补发。
+      if (autoGate.downgraded) deliverModeMismatch(s, autoGate.downgraded);
       s.input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
       // R13:复用同一进程开新回合 —— 记录绑到本回合的 turnEpoch 上(旧回合的记录早已
       // 在它自己的收尾点结算,pid→record 的映射换成这一回合,停止才不会停错回合)。
       if (turnRecord) bindTurnRecord(turnRecord, alivePid, s);
-      return res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running' });
+      if (turnRecord && autoGate.downgraded) turnRecord.permissionModeDowngraded = autoGate.downgraded;
+      return res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running', ...downgradeFields });
     }
   }
 
@@ -2023,6 +2035,7 @@ async function handleChatPost(req, res) {
     promptPreview: String(prompt).slice(0, 80),
     permissionMode: permissionMode || 'default',
     guiMode: chosenMode,
+    autoDowngrade: autoGate.downgraded,   // r151a:服务端门控降级,init 到达时补发一条带 reason 的 mode_mismatch
     startedAt: Date.now(),
     // #26 会话常驻状态
     idle: false,             // 回合间保活等待下一条消息
@@ -2448,7 +2461,11 @@ async function handleChatPost(req, res) {
             }));
           }
           const mismatch = permissionModeMismatch(slot.guiMode, m.permissionMode);
-          if (mismatch) deliverLine(slot, JSON.stringify({ type: 'system', subtype: 'mode_mismatch', ...mismatch }));
+          if (mismatch) deliverModeMismatch(slot, mismatch);
+          if (slot.autoDowngrade) {
+            deliverModeMismatch(slot, slot.autoDowngrade);
+            slot.autoDowngrade = null;
+          }
         }
         // Bug 修复(子代理后主 agent 续跑「看起来停了」):中间 result 已被 4s 去抖 finalize 转 idle,
         // 但主 agent 又续跑了新回合(子代理完 → 续开回合去弹计划/权限卡,期间第三方 provider TTFT
@@ -2556,7 +2573,8 @@ async function handleChatPost(req, res) {
   }
   // R13:连同运行身份与送达状态一起回 —— 客户端据此对账"这次 prompt 到底送出去了没有",
   // 响应丢失时用同一 clientTurnId 重发即可拿回同一个 pid(命中分支),不必新造 id 再发。
-  res.json({ ok: true, pid: procId, model, runId: procId, delivered: true, status: 'running' });
+  if (turnRecord && autoGate.downgraded) turnRecord.permissionModeDowngraded = autoGate.downgraded;
+  res.json({ ok: true, pid: procId, model, runId: procId, delivered: true, status: 'running', ...downgradeFields });
 }
 
 
@@ -2603,6 +2621,11 @@ export async function applyPermissionModeToSlots(procs, sessionId, mode) {
 // 只有 auto/plan 在 SDK 层有专属值,拿不到就是真没生效(CLI guard 拒了)。
 // 不维护"哪些模型支持 auto"的名单——名单会变,init 回报是唯一真相源。
 // 纯函数,tests/unit/check-mode-mismatch.mjs 真 import(六档 × init 值矩阵)。
+// 档位不符的系统行只从这一个口子发(r49b② 的 init 对账;r151a 服务端门控降级也走它,多一个 reason 键)。
+function deliverModeMismatch(slot, payload) {
+  deliverLine(slot, JSON.stringify({ type: 'system', subtype: 'mode_mismatch', ...payload }));
+}
+
 export function permissionModeMismatch(guiMode, effective) {
   if (typeof effective !== 'string' || !effective) return null; // 旧版 CLI 不带该字段:不凭空判定
   if (guiMode !== 'auto' && guiMode !== 'plan') return null;
@@ -2613,6 +2636,10 @@ router.post('/chat/permission-mode', async (req, res) => {
   const { sessionId, mode } = req.body || {};
   if (!sessionId || !mode || !VALID_PERMISSION_MODES.has(mode)) {
     return res.status(400).json({ error: 'sessionId 与合法 mode 必填' });
+  }
+  // r151a:服务端对 auto 的门控(INTERFACE Y.3.1 末):第三方 + 总开关没开 → 409,不切任何进程的档位。
+  if (mode === 'auto' && gateAutoPermissionMode('auto', { official: settingsProviderIsOfficial(), enabled: readThirdPartyAutoSync() }).downgraded) {
+    return res.status(409).json({ ok: false, code: 'THIRD_PARTY_AUTO_DISABLED', error: '第三方 provider 的「自动」档未开启' });
   }
   const { attempted, delivered, failed } = await applyPermissionModeToSlots(activeProcesses, sessionId, mode);
   // A1 切档重裁:对该会话已 pending 的卡按【新档】重新自动裁决(判定与 canUseTool 共用
