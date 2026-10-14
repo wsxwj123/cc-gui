@@ -72,6 +72,8 @@ import { confirmDialog } from './utils/confirmDialog.jsx';
 import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
 import { runHistoryOp } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
+import { isThirdPartyProvider } from './utils/autoAudit.js';
+import { matchesAutoUnavailable } from '../../server/utils/cli-strings.js';
 import { filterSlashCommands, slashBlocked, fetchSlashCommands } from './utils/slashCommands.js';
 import { SlashCommandMenu } from './components/SlashCommandMenu.jsx';
 import { useAtRef } from './hooks/useAtRef.js';
@@ -5514,14 +5516,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // session's stored value (keyed by sessionQueueKey) so each pane/session
       // sends with its own settings, not whatever was last globally selected.
       let permissionMode = useStore.getState().getPermissionModeFor(sessionQueueKey);
-      // 修正批#5/判官①:auto 档仅官方 Anthropic 可用(SDK 安全分类器)。切到第三方后
-      // 静态过滤只是藏选项、不清已 pin 的 auto → 会原样发出;第三方的报错大概率不含
-      // "auto",运行时回退(报错文案正则)接不住,用户卡死。发送前就地降为 default
-      // 并回写 pin 闭环,附切换通知横幅。
-      if (permissionMode === 'auto' && (useStore.getState().currentProvider?.providerHint || 'anthropic') !== 'anthropic') {
-        permissionMode = 'default';
-        useStore.getState().setPermissionMode('default', sessionQueueKey);
-        setProviderSwitchNotice({ text: '「自动」权限档仅官方 Anthropic 端点支持,本会话已自动切回「逐步确认」。' });
+      // 修正批#5/判官①:切到第三方后静态过滤只是藏选项、不清已 pin 的 auto → 会原样发出。
+      // 发送前就地降为 default 并回写 pin 闭环,附切换通知横幅。
+      // r151a:第三方判据读审核状态的 official(与服务端同判据);第三方 auto 总开关开着就原样发 auto。
+      if (permissionMode === 'auto') {
+        const _stAuto = useStore.getState();
+        if (isThirdPartyProvider(_stAuto.autoAuditStatus, _stAuto.currentProvider?.providerHint) && _stAuto.autoAuditStatus?.enabled !== true) {
+          permissionMode = 'default';
+          _stAuto.setPermissionMode('default', sessionQueueKey);
+          setProviderSwitchNotice({ text: '「自动」权限档在第三方 provider 下默认关闭，本会话已切回「逐步确认」。可在 设置 → 权限 中开启。' });
+        }
       }
       // 模型解析与徽章一致(#8):pin → 历史模型 → 全局默认。否则发送时只读 pin||全局,
       // 全局被 WS 重置成默认后,没 pin 的会话(尤其回滚后)会用默认模型发出,与徽章不符。
@@ -6826,11 +6830,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 不支持 auto → 报错。记 auto-unavailable(provider+model 键,本地存储,换
             // provider/模型自动重试)→ 该组合下「自动」项隐藏;本会话切回逐步确认并
             // 自动重发本条(autoRetry 防循环)。
+            // r151a:官方判据逐字不变;第三方只认 CLI 的四句原文(宽正则会被上游普通报错误伤)。
+            const _tpFallback = isThirdPartyProvider(useStore.getState().autoAuditStatus, useStore.getState().currentProvider?.providerHint);
             if (useStore.getState().getPermissionModeFor(sessionQueueKey) === 'auto' && !opts.autoRetry && prompt
-              && /auto/i.test(msg) && /support|avail|invalid|eligib|permission|denied|mode/i.test(msg)) {
+              && (_tpFallback ? matchesAutoUnavailable(msg)
+                : (/auto/i.test(msg) && /support|avail|invalid|eligib|permission|denied|mode/i.test(msg)))) {
               const _st = useStore.getState();
-              markAutoUnavailable(_st.currentProvider?.providerHint || 'anthropic',
-                _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
+              markAutoUnavailable(_st, _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
               _st.setPermissionMode('default', sessionQueueKey);
               // r146b:权限档按会话键改(与窗格无关);提示条只在窗格仍是本会话时弹。
               if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
@@ -7175,11 +7181,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       } else if (!isNetworkDrop) {
         // P2.2 auto 档 spawn 失败回退:旧 SDK/CLI 不接受 permissionMode:'auto' 时
         // POST /chat 直接 500(query() failed)落到这里 —— 同 result 错误路径处置。
+        // r151a:同上,第三方只认四句原文;官方判据逐字不变。
+        const _tpSpawnFallback = isThirdPartyProvider(useStore.getState().autoAuditStatus, useStore.getState().currentProvider?.providerHint);
         if (useStore.getState().getPermissionModeFor(sessionQueueKey) === 'auto' && !opts.autoRetry && prompt
-          && /auto|permission/i.test(String(err.message || ''))) {
+          && (_tpSpawnFallback ? matchesAutoUnavailable(String(err.message || ''))
+            : /auto|permission/i.test(String(err.message || '')))) {
           const _st = useStore.getState();
-          markAutoUnavailable(_st.currentProvider?.providerHint || 'anthropic',
-            _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
+          markAutoUnavailable(_st, _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
           _st.setPermissionMode('default', sessionQueueKey);
           // r146 R4:POST 返回 500 时窗格可能已切走 —— 提示与重发都只在仍是本会话时做。
           if (paneStillOn(sessionQueueKey, streamSid)) {

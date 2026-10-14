@@ -20,6 +20,9 @@ import { SlashCommandMenu } from './SlashCommandMenu.jsx';
 import { useAtRef } from '../hooks/useAtRef.js';
 import { AtRefPanel } from './AtRefPanel.jsx';
 import { readInputHistory, saveInputHistoryEntry } from '../utils/inputHistory.js';
+import {
+  isThirdPartyProvider, officialAutoKey, thirdPartyAutoKey, autoUnavailableKeyFor, THIRD_PARTY_AUTO_DESC, auditModelLineText,
+} from '../utils/autoAudit.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -36,32 +39,41 @@ export const MODE_META = {
 // 静态过滤:仅官方 Anthropic provider 显示「自动」(第三方中转不支持 SDK auto 分类器);
 // 运行时失败(账户/模型/CLI 版本不够)由发送错误链路调用 markAutoUnavailable 记本地标记
 // (provider+model 键,换 provider/模型自动重试),此后该组合下隐藏。
+// r151a:第三方 provider 也可开「自动」档(总开关 thirdPartyAuto,默认关)。判据与键的写法在 utils/autoAudit.js。
 const AUTO_UNAVAILABLE_KEY = 'cgui-auto-unavailable';
-const autoKey = (hint, model) => `${hint || 'anthropic'}|${String(model || '').replace(/\[1m\]/i, '')}`;
+const readAutoUnavailable = () => {
+  try { return JSON.parse(localStorage.getItem(AUTO_UNAVAILABLE_KEY) || '{}') || {}; } catch { return {}; }
+};
 export function isAutoUnavailable(hint, model) {
-  try { return !!(JSON.parse(localStorage.getItem(AUTO_UNAVAILABLE_KEY) || '{}'))[autoKey(hint, model)]; }
-  catch { return false; }
+  return !!readAutoUnavailable()[officialAutoKey(hint, model)];
 }
-export function markAutoUnavailable(hint, model) {
+// 按当前 provider(官方 / 第三方)记"该 provider|模型 不可用"。state = useStore.getState()。
+export function markAutoUnavailable(state, model) {
   try {
-    const map = JSON.parse(localStorage.getItem(AUTO_UNAVAILABLE_KEY) || '{}');
-    map[autoKey(hint, model)] = true;
+    const map = readAutoUnavailable();
+    map[autoUnavailableKeyFor(state.autoAuditStatus, state.currentProvider?.providerHint, model)] = true;
     localStorage.setItem(AUTO_UNAVAILABLE_KEY, JSON.stringify(map));
   } catch {}
   window.dispatchEvent(new CustomEvent('cgui:auto-availability'));
 }
 // 当前可见的权限档列表(desktop 模式按钮与手机模式分页共用同一份门控)。
+// 官方:与改动前相同(未被记不可用就显示);第三方:总开关开 且 该 provider|模型 未被记不可用 才显示。
 export function useVisiblePermissionModes(permKey = null) {
   const providerHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
   const model = useStore((s) => (permKey && s.modelBySession[permKey]) || s.currentModel || '');
+  const auditStatus = useStore((s) => s.autoAuditStatus);
   const [, setBump] = useState(0);
   useEffect(() => {
     const f = () => setBump((n) => n + 1);
     window.addEventListener('cgui:auto-availability', f);
     return () => window.removeEventListener('cgui:auto-availability', f);
   }, []);
-  return PERMISSION_MODES.filter((m) => m !== 'auto'
-    || (providerHint === 'anthropic' && !isAutoUnavailable(providerHint, model)));
+  const thirdParty = isThirdPartyProvider(auditStatus, providerHint);
+  return PERMISSION_MODES.filter((m) => {
+    if (m !== 'auto') return true;
+    if (!thirdParty) return !isAutoUnavailable(providerHint, model);
+    return auditStatus?.enabled === true && !readAutoUnavailable()[thirdPartyAutoKey(auditStatus?.providerId, model)];
+  });
 }
 
 // 修正批#1b 模式按钮:composer 工具行最左(桌面+手机同入口),弹层上弹。
@@ -73,6 +85,11 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
   const permissionMode = useStore((s) => (permKey ? (s.permissionModeBySession[permKey] || s.permissionMode) : s.permissionMode));
   const setPermissionMode = useStore((s) => s.setPermissionMode);
   const visibleModes = useVisiblePermissionModes(permKey);
+  // r151a:第三方下「自动」档换专用说明,并在其下显示审核模型(官方不变)。
+  const auditStatus = useStore((s) => s.autoAuditStatus);
+  const selectorHint = useStore((s) => s.currentProvider?.providerHint || 'anthropic');
+  const thirdPartyView = isThirdPartyProvider(auditStatus, selectorHint);
+  const descOf = (m) => (m === 'auto' && thirdPartyView ? THIRD_PARTY_AUTO_DESC : (MODE_META[m] || MODE_META.default).desc);
   // r49b①:切档被 CLI 拒绝时,档位已回滚,这里把原因说出来(6s 自清,形态同思考力度回落 toast)。
   const modeNotice = useStore((s) => s.permissionModeNotice);
   const myNotice = modeNotice && modeNotice.key === permKey ? modeNotice : null;
@@ -133,7 +150,7 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
         data-testid="permission-mode-selector"
         aria-haspopup="listbox" aria-expanded={open}
         className="flex items-center gap-1 px-2 py-1 rounded-md hover:bg-black/5 transition-colors"
-        title={`权限模式: ${current.label} — ${current.desc}`}>
+        title={`权限模式: ${current.label} — ${descOf(permissionMode)}`}>
         <Icon size={12} className={current.tone} />
         <span className={`cgui-perm-label text-[11px] font-body whitespace-nowrap ${current.tone}`}>{current.label}</span>
         <ChevronDown size={10} className="text-ink-faint" />
@@ -155,6 +172,7 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
               <button key={m}
                 ref={(node) => { optionRefs.current[index] = node; }}
                 role="option"
+                data-mode={m}
                 aria-selected={permissionMode === m}
                 tabIndex={activeIndex === index ? 0 : -1}
                 onFocus={() => setActiveIndex(index)}
@@ -163,7 +181,10 @@ export function PermissionModeSelector({ permKey, tourAnchor = false }) {
                 <MIcon size={13} className={`${meta.tone} mt-0.5 shrink-0`} />
                 <div className="flex-1 min-w-0">
                   <div className="text-xs font-medium text-ink font-body">{meta.label}</div>
-                  <div className="text-[10px] text-ink-faint font-body">{meta.desc}</div>
+                  <div className="text-[10px] text-ink-faint font-body">{descOf(m)}</div>
+                  {m === 'auto' && thirdPartyView && (
+                    <div data-testid="auto-audit-model" className="text-[10px] text-ink-muted font-body mt-0.5">{auditModelLineText(auditStatus)}</div>
+                  )}
                 </div>
                 {permissionMode === m && <div className="w-1.5 h-1.5 rounded-full bg-accent mt-1.5 shrink-0" />}
               </button>

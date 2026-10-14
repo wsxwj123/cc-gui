@@ -412,6 +412,8 @@ function appendAgentBlock(blocks, type, delta) {
 //   ② **任何别的子代理写入之前先把队列落下去**(upsertAgent / appendAgentTool / updateAgentTool / 迁移 / 清空):
 //      子代理结束、回合收尾、停止、存活集剪枝改状态走的都是 upsertAgent,所以这些时刻写进去时文字已经完整。
 // 页面不可见时浏览器不给动画帧,那时改用定时器(否则缓冲要等到回到可见才落)。
+// r151a:审核状态的写入序号 —— 广播 / 开关变化每来一次就 +1,拉取返回时序号变了就丢弃(旧结果不盖新广播)。
+let autoAuditSeq = 0;
 let agentDeltaQueue = [];   // { id, kind: 'text' | 'thinking', delta }[]
 function applyAgentDeltaQueue() {
   if (!agentDeltaQueue.length) return;
@@ -595,6 +597,9 @@ export const useStore = create((set, get) => ({
   // CLI's Claude-shaped API calls to deepseek/mimo/etc, this tells us the
   // real upstream so pricing.js can charge correctly. Defaults to anthropic.
   currentProvider: { providerHint: 'anthropic', baseUrl: '', model: null },
+  // r151a:GET /api/auto-audit/status 的应答(第三方 auto 审计:official / enabled / providerId / 审核模型…);
+  // null = 还没取到(此时"是不是第三方"沿用 providerHint、总开关按关)。WS auto-audit / third-party-auto 广播刷新。
+  autoAuditStatus: null,
   // r76:已配置 provider 行(mergeProviderLists 的输出,含 name + models[])。
   // 助手气泡头按消息的 model id 在这里找归属 provider。恒为数组(选择器直取,
   // 不许写 `|| []` —— 新引用会触发 React #185 白屏)。
@@ -2563,6 +2568,30 @@ export const useStore = create((set, get) => ({
       const d = await fetchProviderList();
       set({ providerRows: mergeProviderLists(d || {}) });
     } catch {}
+    // r151a:同一批触发口(挂载 / provider 变化 / 重连 / 回前台)顺带刷新审核状态。
+    get().fetchAutoAuditStatus();
+  },
+
+  fetchAutoAuditStatus: async () => {
+    const seq = ++autoAuditSeq;
+    try {
+      const res = await fetch('/api/auto-audit/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (seq === autoAuditSeq && data && typeof data === 'object' && typeof data.official === 'boolean') set({ autoAuditStatus: data });
+    } catch {}
+  },
+  setAutoAuditStatus: (status) => {
+    if (!status || typeof status !== 'object' || typeof status.official !== 'boolean') return;
+    autoAuditSeq += 1;
+    set({ autoAuditStatus: status });
+  },
+  // 总开关变化(WS third-party-auto):有状态就就地改 enabled;还没状态就去拉一次。
+  setThirdPartyAutoEnabled: (enabled) => {
+    const cur = get().autoAuditStatus;
+    if (!cur) { get().fetchAutoAuditStatus(); return; }
+    autoAuditSeq += 1;
+    set({ autoAuditStatus: { ...cur, enabled: enabled === true } });
   },
 
   // Set model (just updates local state, API call happens via ModelSelector)

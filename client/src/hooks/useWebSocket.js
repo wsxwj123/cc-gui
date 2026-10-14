@@ -222,6 +222,13 @@ export function useWebSocket() {
             case 'model':
               setCurrentModel(data.model);
               break;
+            // r151a:审核状态(切换 provider / 改审核模型后服务端推)与第三方 auto 总开关变化。
+            case 'auto-audit':
+              useStore.getState().setAutoAuditStatus?.(data.status);
+              break;
+            case 'third-party-auto':
+              useStore.getState().setThirdPartyAutoEnabled?.(data.enabled);
+              break;
             case 'provider-change':
               // ~/.claude/settings.json changed (e.g. `cc switch`). Tell any
               // component that cares to refetch — handled via a window event so
