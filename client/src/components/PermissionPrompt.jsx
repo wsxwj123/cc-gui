@@ -7,6 +7,7 @@ import { isDangerousCommand, respondPermission } from '../hooks/useWebSocket.js'
 import { isActivatableTarget, isEditableTarget } from '../utils/escAction.js';
 import { isImeReactKeydown } from '../utils/imeGuard.js';
 import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
+import { isAuditStreakReason } from '../../../server/utils/cli-strings.js';
 
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
 const PLAN_WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
@@ -74,10 +75,18 @@ function renderInput(toolName, input) {
 // 看到的只有工具名和参数,判断不了是规则命中、沙箱越界还是分类器上交。
 // sdk.d.ts 声明为 string,但它直接来自 CLI 的 decision_reason,不排除对象形态;
 // 取不出可读文本就整行不显示,绝不渲染成 [object Object]。
+// r151a:自动审核连续拦下多次后,CLI 把这次调用交给宿主 —— 原因之前加一行中文说明(INTERFACE Y.3.4)。
 function DecisionReason({ reason }) {
   const text = typeof reason === 'string' ? reason : (typeof reason?.reason === 'string' ? reason.reason : '');
   if (!text.trim()) return null;
-  return <div className="text-[11px] text-ink-faint leading-snug mb-2">原因：{text}</div>;
+  return (
+    <>
+      {isAuditStreakReason(text) && (
+        <div data-testid="perm-audit-streak" className="text-[11px] text-amber-700 leading-snug mb-1">自动审核已连续拦下多次操作，这一次由你决定。</div>
+      )}
+      <div className="text-[11px] text-ink-faint leading-snug mb-2">原因：{text}</div>
+    </>
+  );
 }
 
 // 排队 pill 与折叠态标题行共用的一句摘要:取该工具最主要的那个参数。

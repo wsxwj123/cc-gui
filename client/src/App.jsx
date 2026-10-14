@@ -73,7 +73,7 @@ import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
 import { runHistoryOp } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
 import { isThirdPartyProvider } from './utils/autoAudit.js';
-import { matchesAutoUnavailable } from '../../server/utils/cli-strings.js';
+import { matchesAutoUnavailable, denialKind } from '../../server/utils/cli-strings.js';
 import { filterSlashCommands, slashBlocked, fetchSlashCommands } from './utils/slashCommands.js';
 import { SlashCommandMenu } from './components/SlashCommandMenu.jsx';
 import { useAtRef } from './hooks/useAtRef.js';
@@ -3143,13 +3143,30 @@ const DENIAL_SOURCE = {
 // 被自动拒绝的工具调用(auto 档分类器 / deny 规则 / dontAsk 档 / 后台代理自动判定)不弹
 // 授权卡片,此前界面上只留下一条 is_error 的 tool_result,看不到拒绝原因。SDK 的
 // system/permission_denied 带人话原因与判定来源,单独渲染成一行系统提示。
+// r151a:来源是自动档审核时分两种说法(INTERFACE Y.3.4)—— blocked = 审核判定为拦;unavailable = 审核没给出
+// 结论(不可用 / 超时 / 解析不出),明说"不是对安全性的判定"。其它来源(other)文案与改动前相同。
 function DenialNotice({ denial }) {
+  const kind = denial.kind === 'blocked' || denial.kind === 'unavailable' ? denial.kind : 'other';
+  const tool = denial.toolName || '工具调用';
+  if (kind !== 'other') {
+    const reason = denial.reason || '';
+    return (
+      <div data-testid="denial-notice" data-denial-kind={kind} className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
+        <Shield size={11} className="shrink-0 mt-0.5 text-ink-faint" />
+        <div className="min-w-0 text-[11px] font-body leading-snug">
+          {kind === 'blocked'
+            ? <><span className="text-ink-muted">已拒绝 {tool}（自动档审核）</span>{reason && <span className="text-ink-faint">：{reason}</span>}</>
+            : <span className="text-ink-muted">未执行 {tool}：审核模型没有给出结论（{reason}）。这不是对该操作安全性的判定。</span>}
+        </div>
+      </div>
+    );
+  }
   const src = DENIAL_SOURCE[denial.reasonType] || '';
   return (
-    <div className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
+    <div data-testid="denial-notice" data-denial-kind="other" className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
       <Shield size={11} className="shrink-0 mt-0.5 text-ink-faint" />
       <div className="min-w-0 text-[11px] font-body leading-snug">
-        <span className="text-ink-muted">已拒绝 {denial.toolName || '工具调用'}{src ? `（${src}）` : ''}</span>
+        <span className="text-ink-muted">已拒绝 {tool}{src ? `（${src}）` : ''}</span>
         {denial.message && <span className="text-ink-faint">：{denial.message}</span>}
       </div>
     </div>
@@ -3213,8 +3230,10 @@ function ModeMismatchNotice({ notice, permKey }) {
     <div className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
       <Shield size={11} className="shrink-0 mt-0.5 text-amber-600" />
       <div className="min-w-0 text-[11px] font-body leading-snug text-ink-muted">
-        权限档位未生效:请求 {label(notice.requested)},实际 {label(notice.effective)}
-        {notice.requested === 'auto' && <span className="text-ink-faint">;当前模型可能不支持自动档</span>}
+        {notice.reason === 'third-party-auto-disabled'
+          ? '第三方 provider 的「自动」档未开启，本回合按「逐步确认」执行。可在 设置 → 权限 中开启。'
+          : <>权限档位未生效:请求 {label(notice.requested)},实际 {label(notice.effective)}
+            {notice.requested === 'auto' && <span className="text-ink-faint">;当前模型可能不支持自动档</span>}</>}
       </div>
       {MODE_META[notice.effective] && (
         <button
@@ -4040,6 +4059,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 重试)/rate_limit_event 的即时文案。{ text } —— message_start(新内容开始流)与回合
   // 收尾时清空。与 StreamingStatusLine 并存:那个描述"正在产出什么",这个描述"为什么在等"。
   const [liveStatus, setLiveStatus] = useState(null);
+  // r151a:自动档审核进行中(CLI 的 system/permission_check_status)。[{ id: tool_use_id, toolName }],
+  // checking 进、done / 该工具出结果 / 回合收尾 出;显示最后一条(INTERFACE Y.3.4)。
+  const [auditChecking, setAuditChecking] = useState([]);
   // 流式 result 事件携带本轮真实 usage(input+cache)。直接据此即时更新上下文徽章,
   // 不必等 jsonl refetch——修复"压缩后/每轮要等几轮才更新"的延迟(#5)。切换会话时清空。
   const [liveContextUsage, setLiveContextUsage] = useState(null);
@@ -5246,6 +5268,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // "切在末尾",引导气泡位置偏(内容不丢)。合并而不是覆盖:别动本会话其他回合的锚点。
     if (seed?.steerAnchors) steerAnchorRef.current = { ...steerAnchorRef.current, ...seed.steerAnchors };
     setLiveStatus(null);
+    setAuditChecking([]); // r151a:新回合开始,上一回合残留的「正在审核」作废
     // 输入预测(A):新回合开始,上一回合的建议作废(reattach 是同一回合的续播,不清)。
     // 只清本会话的两个 key,别的会话的建议不受影响(store 是全局 map)。
     if (!reattachPid) useStore.getState().clearPromptSuggestion(sessionQueueKey, selectedSession?.sessionId);
@@ -6103,6 +6126,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 截断:拒绝语里内嵌被拒命令的完整文本(heredoc 长命令会整段上屏),
               // 同本文件 compact_error 的处理口径。
               message: String(event.message || event.decision_reason || '').slice(0, 300),
+              // r151a:自动档审核的两种说法用 decision_reason(审核给的原因),同样截 300 字。
+              kind: denialKind(event.decision_reason_type, event.decision_reason, event.message),
+              reason: String(event.decision_reason || event.message || '').slice(0, 300),
             }]));
           }
           // r49b②:CLI init 回报的生效档位与请求档不一致(guard 拒了 auto/plan)——
@@ -6129,7 +6155,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             }
           }
           if (event.type === 'system' && event.subtype === 'mode_mismatch') {
-            const mUuid = `mode-mismatch-${event.requested}-${event.effective}`;
+            const mUuid = `mode-mismatch-${event.requested}-${event.effective}${event.reason ? `-${event.reason}` : ''}`;
             setChatMessages((prev) => (prev.some((m) => m.uuid === mUuid) ? prev : [...prev, {
               uuid: mUuid,
               type: 'mode-mismatch',
@@ -6137,6 +6163,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               timestamp: new Date().toISOString(),
               requested: event.requested,
               effective: event.effective,
+              // r151a:服务端门控降级(第三方 auto 未开启)时带 reason,提示行换说法。
+              ...(typeof event.reason === 'string' ? { reason: event.reason } : {}),
             }]));
           }
           // 等待状态(G):API 可重试错误(限流/5xx/超时),SDK 自动退避重试 ——
@@ -6256,6 +6284,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             const tuid = event.tool_use_id || (event.task_id ? taskIdToToolUse[event.task_id] : null)
               || findAgentIdByTaskId(_st, event.task_id);
             if (tuid && _st.activeAgents[tuid]) finalizeAgent(_st, tuid, event.patch.status === 'killed' ? 'stopped' : event.patch.status, undefined, true);
+          }
+          // r151a:审核进行中。缺 tool_use_id 或 status 不是 checking / done 的一律忽略。
+          if (event.type === 'system' && event.subtype === 'permission_check_status') {
+            const cid = typeof event.tool_use_id === 'string' && event.tool_use_id ? event.tool_use_id : null;
+            if (cid && event.status === 'checking') {
+              const cname = currentToolCalls.find((t) => t.id === cid)?.name || '';
+              setAuditChecking((prev) => [...prev.filter((x) => x.id !== cid), { id: cid, toolName: cname }]);
+            } else if (cid && event.status === 'done') {
+              setAuditChecking((prev) => (prev.some((x) => x.id === cid) ? prev.filter((x) => x.id !== cid) : prev));
+            }
           }
           if (event.type === 'system' && event.subtype === 'api_retry') {
             const waitS = Math.ceil((event.retry_delay_ms || 0) / 1000);
@@ -6624,6 +6662,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 }]);
               }
               if (block.type === 'tool_result') {
+                // r151a:该工具的结果到了,「正在审核」随之收起(没等到 done 的情形)。
+                if (block.tool_use_id) setAuditChecking((prev) => (prev.some((x) => x.id === block.tool_use_id) ? prev.filter((x) => x.id !== block.tool_use_id) : prev));
                 // CG-2 兜底:本回合先委派了子代理 → SDK 的 canUseTool 通道被打穿 → 之后的
                 // ExitPlanMode/AskUserQuestion/授权请求会报 "Tool permission request failed:
                 // Stream closed"(卡片弹不出)。给一条清晰温和提示,免得用户对着正文里
@@ -7306,6 +7346,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       setRetryActiveUuid(null);
       setCompacting(false);
       setLiveStatus(null); // 等待状态(G):回合收尾一律清,不留残行
+      setAuditChecking([]); // r151a:审核进行中同样随回合收尾清掉
       // After the stream ends locally, hand the displayed history back to the
       // persisted jsonl. The catch: jsonl flushes the user prompt BEFORE the
       // assistant reply, and that flush races the stream's `result`. A single
@@ -9555,6 +9596,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     {/* r11-⑥:自动压缩进行中 —— 与手动压缩同一不确定态动画条
                         (CompactProgressBar),起止随真实 status/compact_boundary 事件。 */}
                     {liveStatus.compacting && <CompactProgressBar />}
+                  </div>
+                </div>
+              )}
+              {/* r151a:自动档审核进行中(CLI 的 permission_check_status)。按 tool_use_id 找不到工具名时说"操作"。 */}
+              {liveVisible && isStreaming && auditChecking.length > 0 && (
+                <div className="px-6 -mt-1 pb-3 animate-fade-in">
+                  <div className="max-w-[var(--content-max)] mx-auto pl-[50px]">
+                    <div data-testid="audit-checking" className="flex items-center gap-2 text-[12px] text-ink-faint font-body">
+                      <Loader2 size={11} className="animate-spin shrink-0 text-emerald-600" />
+                      <span>{auditChecking[auditChecking.length - 1].toolName ? `正在审核 ${auditChecking[auditChecking.length - 1].toolName}…` : '正在审核操作…'}</span>
+                    </div>
                   </div>
                 </div>
               )}
