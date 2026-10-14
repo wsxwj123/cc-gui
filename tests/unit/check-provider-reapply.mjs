@@ -28,9 +28,24 @@ assert.ok(has('/provider/switch', 'post'), 'POST /provider/switch 必须存在�
 assert.ok(has('/custom-providers/:id', 'put'), 'PUT /custom-providers/:id 必须存在');
 assert.ok(has('/provider-overrides/:id', 'put'), 'PUT /provider-overrides/:id 必须存在');
 
-// ── 2. 两条改模型路径共用同一个 reapply(定义 1 处、调用 2 处)────────
+// ── 2. 两条改模型路径都重切,且重切只有一份实现 ─────────────────────
+// r151a 审查建议 2:provider-overrides 的读改写挪进切换串行队列,在队列里只能调【不排队】的 rerunSwitchIfActive
+// (再调排队的 reapplyIfActive 会死锁);custom-providers 不在队列里,仍调排队版。两者共用 rerunSwitchIfActive 这一份实现。
 assert.equal(count(src, 'async function reapplyIfActive('), 1, 'reapplyIfActive 只该定义一次');
-assert.equal(count(src, 'await reapplyIfActive('), 2, '两条改模型路径(custom-providers / provider-overrides)都要调 reapplyIfActive');
+assert.equal(count(src, 'async function rerunSwitchIfActive('), 1, 'rerunSwitchIfActive(重切的唯一实现)只该定义一次');
+assert.equal(count(src, 'await reapplyIfActive('), 1, 'custom-providers 改模型后调排队版 reapplyIfActive');
+{
+  const route = src.slice(src.indexOf("router.put('/provider-overrides/:id'"));
+  const body = route.slice(0, route.indexOf('\n}));\n') + 5);
+  assert.ok(/serializeProviderOp\(async \(\) => \{/.test(body), 'provider-overrides 的读改写在切换串行队列里');
+  assert.ok(/await rerunSwitchIfActive\(id\)/.test(body), 'provider-overrides 改模型后在队列里调不排队的 rerunSwitchIfActive');
+  assert.ok(!/reapplyIfActive\(/.test(body), '队列里不得再调排队版(会死锁)');
+}
+{
+  const fn = src.slice(src.indexOf('async function reapplyIfActive('));
+  const body = fn.slice(0, fn.indexOf('\n}\n') + 2);
+  assert.ok(/serializeProviderOp\(/.test(body) && /rerunSwitchIfActive\(id\)/.test(body), 'reapplyIfActive = 排队 + 调 rerunSwitchIfActive');
+}
 
 // ── 3. 清空 override 也要 reapply ────────────────────────────────
 // 原来的条件是 `activeId === id && Object.keys(entry).length`:清空档位映射时不重跑 switch,
@@ -43,7 +58,7 @@ assert.ok(/if \(Object\.keys\(entry\)\.length\) map\[id\] = entry;/.test(src), '
 // 重跑 switch 时不传 model → switch 用 provider 自己的 defaultModel(已校验在 models[] 内),
 // 拿不到就回落 models[0]。传了 model 就有写出列表外模型的风险。
 {
-  const fn = src.slice(src.indexOf('async function reapplyIfActive('));
+  const fn = src.slice(src.indexOf('async function rerunSwitchIfActive('));
   const body = fn.slice(0, fn.indexOf('\n}\n') + 2);
   assert.ok(/body: \{ id \}/.test(body), 'reapply 重跑 switch 时只传 id,不传 model');
   assert.ok(!/body: \{ id, model/.test(body), 'reapply 不得指定 model');
@@ -53,7 +68,7 @@ assert.ok(/if \(Object\.keys\(entry\)\.length\) map\[id\] = entry;/.test(src), '
 // fakeRes._status 初值若是 200,handler 异步抛错(异常被 catch 吞掉、根本没碰过 res)
 // 也会被报成 reapplied:true —— 前端显示"已生效",settings.json 其实一个字没写。
 {
-  const fn = src.slice(src.indexOf('async function reapplyIfActive('));
+  const fn = src.slice(src.indexOf('async function rerunSwitchIfActive('));
   const body = fn.slice(0, fn.indexOf('\n}\n') + 2);
   assert.ok(/_status: 0,/.test(body), 'fakeRes._status 必须初始为 0(不是 200):没写过状态 = 不算成功');
   assert.ok(/fakeRes\._status >= 200 && fakeRes\._status < 300/.test(body), 'reapply 成功判定按 2xx 区间');

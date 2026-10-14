@@ -2116,26 +2116,33 @@ async function resolveProviderInfoById(id) {
 // 不传 model:让 switch 按 provider 自己的 defaultModel 重算(它已校验在 models[] 内,
 // 拿不到就回落 models[0]),绝不会写出列表外的模型。
 // 无递归风险:switch 从不写 custom-providers.json(全部 5 个写入点都是路由处理器)。
+// 排队版:自己不在切换队列里的调用方用它(PUT /custom-providers/:id)。
 async function reapplyIfActive(id) {
   // r145 F3:"是不是当前在用"的判断与重切同在切换队列里 —— 在队列外判断会读到旧的 active(正在进行的
-  // 切换还没写标记),就把用户刚切走的 provider 又切回来。队列里直接调实现函数,不经路由层(那层也排队,会死锁)。
+  // 切换还没写标记),就把用户刚切走的 provider 又切回来。
   return serializeProviderOp(async () => {
-    try {
-      if ((await readActiveProviderId()) !== id) return false;
-      // _status 初始 0(不是 200):handler 异步抛错、根本没碰过 res 时,下面的 catch 吞掉异常,
-      // 初值 200 会把"什么都没发生"报成 reapplied:true —— 前端据此显示"已生效",而 settings.json
-      // 里还是旧映射。json() 补默认 200 是照 express 语义(成功路径只调 res.json,不调 res.status)。
-      const fakeRes = {
-        _status: 0, _body: null,
-        status(s) { this._status = s; return this; },
-        json(b) { if (!this._status) this._status = 200; this._body = b; return this; },
-      };
-      const fakeReq = { body: { id }, headers: { 'Content-Type': 'application/json' } };
-      // 复用 /provider/switch 的实现:它已正确处理 anthropic / openai / custom 三类。
-      await handleProviderSwitch(fakeReq, fakeRes).catch(() => {});
-      return fakeRes._status >= 200 && fakeRes._status < 300;
-    } catch { return false; }
+    try { return (await rerunSwitchIfActive(id)).ok; } catch { return false; }
   });
+}
+
+// 不排队版:调用方必须【已在】切换队列里(审核模型、provider-overrides 的读改写都在队列里做),在队列里再排队会死锁。
+// 返回 { active, ok }:active = 它是不是当前在用的 provider;ok = 重跑切换是否成功(settings.json 已写)。
+// 直接调实现函数 handleProviderSwitch,不经路由层(那层也排队)。
+async function rerunSwitchIfActive(id) {
+  if ((await readActiveProviderId()) !== id) return { active: false, ok: false };
+  // _status 初始 0(不是 200):handler 异步抛错、根本没碰过 res 时,下面的 catch 吞掉异常,
+  // 初值 200 会把"什么都没发生"报成 reapplied:true —— 前端据此显示"已生效",而 settings.json
+  // 里还是旧映射。json() 补默认 200 是照 express 语义(成功路径只调 res.json,不调 res.status)。
+  const fakeRes = {
+    _status: 0, _body: null,
+    status(s) { this._status = s; return this; },
+    json(b) { if (!this._status) this._status = 200; this._body = b; return this; },
+  };
+  // 不传 model:让 switch 按 provider 自己的 defaultModel 重算(已校验在 models[] 内),绝不写出列表外的模型。
+  const fakeReq = { body: { id }, headers: { 'Content-Type': 'application/json' } };
+  // 复用 /provider/switch 的实现:它已正确处理 anthropic / openai / custom 三类。
+  await handleProviderSwitch(fakeReq, fakeRes).catch(() => {});
+  return { active: true, ok: fakeRes._status >= 200 && fakeRes._status < 300 };
 }
 
 // GET /api/provider-overrides — 回显全部 override(无文件 = {})。
@@ -2146,7 +2153,9 @@ router.get('/provider-overrides', async (_req, res) => {
 // PUT /api/provider-overrides/:id { defaultModel?, tierModels? } — 写该 provider 的
 // override。defaultModel/tierModels 均按其 models[] 校验;两者皆空 = 删除该条目。
 // 从不写 cc-switch.db。
-router.put('/provider-overrides/:id', async (req, res) => {
+// r151a 审查建议 2:整段读改写放进切换串行队列(与审核模型接口、切换 / 重切互斥,并发写不再互相覆盖);
+// 队列里重切调不排队的 rerunSwitchIfActive(再排队会死锁)。
+router.put('/provider-overrides/:id', (req, res) => serializeProviderOp(async () => {
   try {
     const id = req.params.id;
     const models = await resolveProviderModelsById(id);
@@ -2175,10 +2184,11 @@ router.put('/provider-overrides/:id', async (req, res) => {
     // 前端是否已重写 settings,以提示"立刻生效"或"切回该 provider 后生效"。
     // 清空 override 同样要 reapply:否则旧档位映射还留在 settings.json 里(原来带
     // `Object.keys(entry).length` 条件,清空时静默不生效)。
-    const reapplied = await reapplyIfActive(id);
+    let reapplied = false;
+    try { reapplied = (await rerunSwitchIfActive(id)).ok; } catch { /* 同 reapplyIfActive:重切失败按"没生效"回 */ }
     res.json({ ok: true, id, override: map[id] || null, reapplied });
   } catch (err) { res.status(500).json({ error: err.message }); }
-});
+}));
 
 // ── r151a 功能 Y:审核模型 = 当前 provider 的 sonnet 档(INTERFACE Y.3.1)─────────────
 // 切换时实际生效的档位映射:覆盖层的(口径见 overrideTierModels),否则 provider 自带的。
@@ -2247,20 +2257,6 @@ async function writeProviderOverridesAtomic(map) {
   }
 }
 
-// 该 provider 正在用就重跑一次切换(同 reapplyIfActive,但调用方已在切换队列里,不再排队):
-// { active:false } = 不在用;{ active:true, ok } = 重跑的结果(ok:false 即 settings.json 没写成)。
-async function rerunSwitchIfActiveInQueue(id) {
-  if ((await readActiveProviderId()) !== id) return { active: false, ok: false };
-  const fakeRes = {
-    _status: 0, _body: null,
-    status(s) { this._status = s; return this; },
-    json(b) { if (!this._status) this._status = 200; this._body = b; return this; },
-  };
-  const fakeReq = { body: { id }, headers: { 'Content-Type': 'application/json' } };
-  await handleProviderSwitch(fakeReq, fakeRes).catch(() => {});
-  return { active: true, ok: fakeRes._status >= 200 && fakeRes._status < 300 };
-}
-
 // PUT /api/auto-audit/model { providerId, model } —— 只改该 provider 的 sonnet 档,其它档与默认模型覆盖不变。
 // 整段(校验 → 读改写覆盖层 → 重切)在切换队列里跑:与切换 / 重切互斥,读改写不会被交错覆盖。
 const auditModelError = (res, status, code, error) => res.status(status).json({ ok: false, code, error });
@@ -2297,7 +2293,7 @@ router.put('/auto-audit/model', (req, res) => serializeProviderOp(async () => {
     try { await writeProviderOverridesAtomic(map); } catch {
       return auditModelError(res, 500, 'STORAGE_WRITE_FAILED', '保存失败，请重试');
     }
-    const r = await rerunSwitchIfActiveInQueue(providerId);
+    const r = await rerunSwitchIfActive(providerId);
     const status = await computeAutoAuditStatus();
     broadcast({ type: 'auto-audit', status });
     return res.json({
