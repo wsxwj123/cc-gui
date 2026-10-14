@@ -150,6 +150,27 @@ router.get('/prefs/hidden-providers', async (_req, res) => {
   res.json({ hidden: Array.isArray(prefs.hiddenProviders) ? prefs.hiddenProviders : [] });
 });
 
+// r151a:第三方 provider 的「自动」档总开关(INTERFACE Y.3.1)。默认关:关 = 第三方下没有「自动」档、
+// 服务端把 auto 请求降成逐步确认、会话进程不注入 CLAUDE_CODE_AUTO_MODE_SERVER(与改动前逐字相同)。
+// 读走同步 readThirdPartyAutoSync(与服务端门控同一个读取点);写走 updatePrefs(串行 + 原子写)。
+router.get('/prefs/third-party-auto', (_req, res) => {
+  res.json({ enabled: readThirdPartyAutoSync() });
+});
+router.put('/prefs/third-party-auto', async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.enabled !== 'boolean') {
+    return res.status(400).json({ ok: false, code: 'INVALID_INPUT', error: 'enabled 必须是布尔值' });
+  }
+  const { enabled } = body;
+  try {
+    await updatePrefs((prefs) => { prefs.thirdPartyAuto = enabled; });
+  } catch {
+    return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
+  }
+  broadcast({ type: 'third-party-auto', enabled });
+  res.json({ ok: true, enabled });
+});
+
 // P1: 关闭行为(ask|minimize|quit)。独立文件 ~/.claude-gui/close-behavior.json —
 // Tauri Rust 侧在 CloseRequested 时直接读同一文件,不经 server。
 const CLOSE_BEHAVIOR_PATH = join(homedir(), '.claude-gui', 'close-behavior.json');
