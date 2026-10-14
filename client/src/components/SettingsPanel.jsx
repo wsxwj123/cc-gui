@@ -65,6 +65,7 @@ const SETTINGS_INDEX = [
   { id: 'set-env-editor', tab: 'advanced', title: '环境变量', keys: 'env 变量 environment anthropic provider' },
   { id: 'set-env-check', tab: 'env', title: '环境检查(node / claude / python / git / uv)', keys: '环境 依赖 node python git uv 安装' },
   { id: 'set-permissions', tab: 'permissions', title: '权限规则(允许 / 询问 / 拒绝)', keys: 'permissions allow ask deny 权限 规则 工具' },
+  { id: 'set-third-party-auto', tab: 'permissions', title: '第三方 provider 的自动档', keys: 'auto 自动 审核 审核模型 第三方 provider 分类器 classifier sonnet 不可用' },
   { id: 'set-hooks', tab: 'hooks', title: 'Hooks 钩子脚本', keys: 'hooks 钩子 脚本 事件' },
   { id: 'set-json', tab: 'advanced', title: '原始配置 settings.json', keys: 'json 原始 配置 settings' },
   { id: 'set-storage', tab: 'advanced', title: '.bak 备份清理', keys: '存储 备份 bak 清理 磁盘 空间' },
@@ -270,7 +271,10 @@ export function SettingsPanel() {
       {tab === 'session' && <SessionTab settings={settings} onSave={save} onEnvPatch={envPatch} saving={saving} />}
       {tab === 'env' && <div id="set-env-check"><EnvCheckPanel asModal={false} /></div>}
       {tab === 'permissions' && (
-        <div id="set-permissions"><PermissionsTab settings={settings} onSave={save} saving={saving} saved={saved} /></div>
+        <>
+          <div id="set-permissions"><PermissionsTab settings={settings} onSave={save} saving={saving} saved={saved} /></div>
+          <div id="set-third-party-auto" className="mt-4"><ThirdPartyAutoSection /></div>
+        </>
       )}
       {tab === 'hooks' && (
         <div id="set-hooks"><HooksTab settings={settings} onSave={save} saving={saving} saved={saved} /></div>
@@ -2813,6 +2817,120 @@ const PERMISSION_GROUPS = [
   ['ask', '询问', '命中规则时必弹窗确认（优先于允许规则）'],
   ['deny', '拒绝', '命中规则的调用直接拒绝（最高优先级，任何允许规则无法覆盖）'],
 ];
+
+// r151a 功能 Y(INTERFACE Y.3.4 设置页):第三方 provider 的「自动」档 —— 总开关、告知、审核模型(= 该 provider 的
+// sonnet 档)、清除本地"不可用"标记。状态取 store 的 autoAuditStatus(GET /api/auto-audit/status,WS 广播刷新)。
+// 控件写法照 AutoFoldSection:role=switch 的 button。失败一律回到原值并显示服务端给的 error。
+const AUTO_UNAVAILABLE_LS_KEY = 'cgui-auto-unavailable';
+const hasAutoUnavailableMarks = () => {
+  try { const m = JSON.parse(localStorage.getItem(AUTO_UNAVAILABLE_LS_KEY) || '{}'); return !!m && typeof m === 'object' && Object.keys(m).length > 0; }
+  catch { return false; }
+};
+function ThirdPartyAutoSection() {
+  const status = useStore((s) => s.autoAuditStatus);
+  const [pendingOn, setPendingOn] = useState(null);       // 开关保存中显示的值
+  const [pendingModel, setPendingModel] = useState(null); // 下拉保存中显示的值
+  const [err, setErr] = useState('');
+  const [note, setNote] = useState('');
+  const [hasMarks, setHasMarks] = useState(hasAutoUnavailableMarks);
+  useEffect(() => { useStore.getState().fetchAutoAuditStatus?.(); }, []);
+  useEffect(() => {
+    const f = () => setHasMarks(hasAutoUnavailableMarks());
+    window.addEventListener('cgui:auto-availability', f);
+    return () => window.removeEventListener('cgui:auto-availability', f);
+  }, []);
+  const official = status?.official === true;
+  const providerId = status?.providerId || null;
+  const enabled = pendingOn ?? (status?.enabled === true);
+  const models = Array.isArray(status?.models) ? status.models : [];
+  const unusable = new Set(Array.isArray(status?.unusable) ? status.unusable : []);
+  const currentModel = status?.auditModelSource === 'tier' && status?.auditModel ? status.auditModel : '';
+  const shownModel = pendingModel ?? currentModel;
+  const modelDisabled = !status || official || !providerId;
+
+  const toggle = async () => {
+    if (official || pendingOn !== null) return;
+    const next = !enabled;
+    setErr(''); setPendingOn(next);
+    try {
+      const r = await fetch('/api/prefs/third-party-auto', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: next }) });
+      const body = await r.json().catch(() => null);
+      if (!r.ok || !body?.ok) throw new Error(body?.error || '保存失败，请重试');
+      useStore.getState().setThirdPartyAutoEnabled?.(body.enabled === true);
+    } catch (e) {
+      setErr(e?.message || '保存失败，请重试');
+    } finally { setPendingOn(null); }
+  };
+  const pickModel = async (model) => {
+    if (modelDisabled) return;
+    setErr(''); setNote(''); setPendingModel(model);
+    try {
+      const r = await fetch('/api/auto-audit/model', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ providerId, model }) });
+      const body = await r.json().catch(() => null);
+      if (!r.ok || !body?.ok) throw new Error(body?.error || '保存失败，请重试');
+      if (body.warning === 'APPLY_FAILED') setNote('已保存，但未能写入当前配置；重新切换一次该 provider 后生效');
+      await useStore.getState().fetchAutoAuditStatus?.();
+    } catch (e) {
+      setErr(e?.message || '保存失败，请重试');
+    } finally { setPendingModel(null); }
+  };
+  const clearMarks = () => {
+    try { localStorage.removeItem(AUTO_UNAVAILABLE_LS_KEY); } catch {}
+    setHasMarks(false);
+    window.dispatchEvent(new CustomEvent('cgui:auto-availability'));
+  };
+
+  return (
+    <div data-testid="third-party-auto-section" className="bg-canvas-warm border border-canvas-deep rounded-lg">
+      <div className="px-3 py-2.5 flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-ink font-body font-medium">第三方 provider 的自动档</div>
+          <div className="text-[10.5px] text-ink-faint font-body">开启后，第三方 provider 下的权限档选择器里出现「自动」档：由你设置的审核模型逐个操作判定是否执行。默认关闭。</div>
+        </div>
+        <button data-testid="third-party-auto-toggle" role="switch" aria-checked={enabled} onClick={toggle} disabled={official}
+          className={`shrink-0 w-9 h-5 rounded-full transition-colors relative disabled:opacity-50 disabled:cursor-not-allowed ${enabled ? 'bg-accent' : 'bg-ink-faint/30'}`}
+          title={enabled ? '已开启' : '已关闭'}>
+          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${enabled ? 'left-[18px]' : 'left-0.5'}`} />
+        </button>
+      </div>
+      <div className="px-3 pb-3 space-y-2">
+        {official && (
+          <div data-testid="third-party-auto-official" className="text-[11px] text-ink-muted font-body">当前是官方端点：自动档不受此开关影响。</div>
+        )}
+        <div data-testid="third-party-auto-notice" className="text-[10.5px] text-ink-muted font-body leading-relaxed space-y-0.5">
+          <div>审核由你设置的模型完成，判错会放行危险操作；较弱的模型判错更多。</div>
+          <div>每个需要审核的操作会向当前 provider 额外发 1–2 次请求，每次约 3 万输入 token（2026-10 实测，随对话变长而增加）。</div>
+          <div>审核请求包含待执行的命令、文件路径和部分对话内容，会发给当前 provider。</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-ink font-body shrink-0">审核模型</span>
+          <select data-testid="auto-audit-model-select" value={shownModel} disabled={modelDisabled || pendingModel !== null}
+            onChange={(e) => pickModel(e.target.value)}
+            className="min-w-0 flex-1 text-[11px] font-body bg-canvas border border-canvas-deep rounded px-2 py-1 disabled:opacity-50">
+            <option value="">跟随默认模型</option>
+            {models.map((m) => (
+              <option key={m} value={m} disabled={unusable.has(m)}>{unusable.has(m) ? `${m}（不可用作审核模型）` : m}</option>
+            ))}
+          </select>
+        </div>
+        {status && !official && !providerId && (
+          <div className="text-[10.5px] text-ink-muted font-body">未识别当前 provider，无法设置审核模型。</div>
+        )}
+        {status && !official && status.enabled === true && status.auditModelSource === 'default' && status.auditModel && (
+          <div data-testid="auto-audit-model-unset" className="text-[10.5px] text-amber-700 font-body">{`尚未选择审核模型，当前使用该 provider 的默认模型 ${status.auditModel}。`}</div>
+        )}
+        <div data-testid="auto-audit-alias-note" className="text-[10.5px] text-ink-faint font-body">审核模型与 sonnet 档共用同一设置：以 sonnet 别名发起的调用（例如指定 sonnet 的子代理）也使用它。</div>
+        <div data-testid="auto-audit-model-hint" className="text-[10.5px] text-ink-faint font-body">审核请求限定了很短的输出长度。把推理型模型设为审核模型时，它可能在限定长度内给不出结论，导致重复请求并拒绝操作。</div>
+        {note && <div className="text-[10.5px] text-amber-700 font-body">{note}</div>}
+        {err && <div className="text-[11px] text-error font-body">{err}</div>}
+        <div>
+          <button data-testid="auto-unavailable-reset" onClick={clearMarks} disabled={!hasMarks}
+            className="px-2.5 py-1 rounded border border-canvas-deep text-[11px] text-ink-muted font-body hover:border-accent/40 disabled:opacity-50 disabled:cursor-not-allowed">清除不可用标记</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function PermissionsTab({ settings, onSave, saving, saved }) {
   const readLists = (s) => {
