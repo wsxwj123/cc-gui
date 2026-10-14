@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { readFile, writeFile, mkdir, rename, appendFile } from 'fs/promises';
+import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { renameSession } from '@anthropic-ai/claude-agent-sdk';
@@ -19,6 +20,14 @@ const PREFS_PATH = join(homedir(), '.claude-gui', 'prefs.json');
 export async function loadPrefs() {
   try { return JSON.parse(await readFile(PREFS_PATH, 'utf-8')); }
   catch { return {}; }
+}
+
+// r151a:第三方 provider 的「自动」档总开关(thirdPartyAuto,默认关)的同步读取。
+// 同步是因为调用方都在同步路径上(cleanChildEnv、/chat 入口门控、审核状态组装)。
+// 文件不存在、损坏、键缺失或值不是布尔 true → false;只读,不改写文件。
+export function readThirdPartyAutoSync() {
+  try { return JSON.parse(readFileSync(PREFS_PATH, 'utf-8'))?.thirdPartyAuto === true; }
+  catch { return false; }
 }
 // 原子写:先写临时文件再 rename(rename 同目录原子)。此前 writeFile 直写,进程崩溃/
 // 断电写一半 → JSON 损坏 → loadPrefs 回落 {} → 下一次任何 PUT 把整份 prefs 静默重置。

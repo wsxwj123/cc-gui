@@ -25,6 +25,8 @@ import { isLocalReq } from '../services/auth.js';
 import { SERVER_EPOCH } from '../utils/server-epoch.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
 import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCache } from '../utils/prompt-cache-env.js';
+import { autoModeServerInjection } from '../services/auto-audit.js';
+import { readThirdPartyAutoSync } from './prefs.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
@@ -1228,7 +1230,7 @@ function readSettingsSplit() {
   return settingsSplitCache;
 }
 
-export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, globalRead, dirs, maxBudgetUsd, acw, genui }) { // export 仅为可单测
+export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, globalRead, dirs, maxBudgetUsd, acw, genui, ams }) { // export 仅为可单测
   const { nonPerm, perm } = readSettingsSplit();
   if (lastPermFp === null) lastPermFp = perm;              // 首次调用建基线,不推进代数
   else if (perm !== lastPermFp) {
@@ -1275,6 +1277,9 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     // r66:genui 教学段进没进系统提示。系统提示 spawn 时定死,不计入键则用户翻完
     // 渲染开关会复用旧进程、旧系统提示照常生效 = 开关是摆设。
     genui: genui !== false,
+    // r151a:进程环境里注入的 CLAUDE_CODE_AUTO_MODE_SERVER(spawn 时定死)。只在注入时出现 ——
+    // 官方 / 第三方 auto 总开关关时键与改动前逐字相同;开关翻转后该会话下一条消息换新进程。
+    ...(ams ? { ams } : {}),
   });
 }
 
@@ -1839,6 +1844,7 @@ async function handleChatPost(req, res) {
     globalRead, dirs: [...dirSet].sort(),
     maxBudgetUsd: budget,
     acw: acwSettings?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? null,
+    ams: childEnv.CLAUDE_CODE_AUTO_MODE_SERVER ?? null,
     genui,
   });
   if (sessionId) {
@@ -3764,6 +3770,11 @@ export function cleanChildEnv() {
     if (se.ANTHROPIC_BASE_URL && se.CLAUDE_CODE_ATTRIBUTION_HEADER === undefined) {
       out.CLAUDE_CODE_ATTRIBUTION_HEADER = '0';
     }
+    // r151a:第三方 + 第三方 auto 总开关开 + settings.json 没显式写 → CLAUDE_CODE_AUTO_MODE_SERVER=0
+    // (关服务端审核通道,首个主请求不再带含本机路径的 safeguards)。规则见 autoModeServerInjection;
+    // 同样必须在 strip 之后(宿主自己的同名键先被剥掉)。开关关 = 不注入 = 与改动前相同。
+    const ams = autoModeServerInjection(se, readThirdPartyAutoSync());
+    if (ams !== null) out.CLAUDE_CODE_AUTO_MODE_SERVER = ams;
   } catch {}
   return out;
 }
