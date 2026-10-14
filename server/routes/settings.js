@@ -622,11 +622,18 @@ export async function applyProviderModelSelection(data) {
 // 无文件 / 无该 id 条目 = 行为完全不变(向后兼容硬要求)。从不写 cc-switch.db。
 const PROVIDER_OVERRIDES_PATH = join(homedir(), '.claude-gui', 'provider-overrides.json');
 
+const overridesMapOf = (d) => (d && typeof d === 'object' && !Array.isArray(d) ? d : {});
 async function readProviderOverrides() {
   try {
-    const d = JSON.parse(await readFile(PROVIDER_OVERRIDES_PATH, 'utf-8'));
-    return d && typeof d === 'object' && !Array.isArray(d) ? d : {};
+    // r151a 复审:与写入守卫同口径剥 UTF-8 BOM(否则带 BOM 的文件在只读路径上被当成空表,覆盖设置被静默忽略)。
+    return overridesMapOf(JSON.parse((await readFile(PROVIDER_OVERRIDES_PATH, 'utf-8')).replace(/^\uFEFF/, '')));
   } catch { return {}; }
+}
+// 写路由专用:写入守卫 + 读取合成一次(r151a 复审建议 2)。损坏 / 读不出 → 抛 ConfigGuardError(调用方回 500
+// STORAGE_WRITE_FAILED,守卫已留 .corrupt-<时间戳> 备份);可写 → 直接用守卫读到的那份值,不再读第二次 ——
+// 守卫剥 BOM、第二次读不剥时,带 BOM 的文件会被当成空表整份写回,其它 provider 的设置全丢。
+async function readProviderOverridesForWrite() {
+  return overridesMapOf((await assertWritable(PROVIDER_OVERRIDES_PATH)).value);
 }
 
 async function writeProviderOverrides(map) {
@@ -2169,10 +2176,10 @@ router.put('/provider-overrides/:id', (req, res) => serializeProviderOp(async ()
     if (tm) entry.tierModels = tm;
 
     // r151a 审查建议 1:覆盖层损坏 / 读不出时不许按空表整份写回(同审核模型接口)。
-    try { await assertWritable(PROVIDER_OVERRIDES_PATH); } catch {
+    let map;
+    try { map = await readProviderOverridesForWrite(); } catch {
       return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
     }
-    const map = await readProviderOverrides();
     if (Object.keys(entry).length) map[id] = entry;
     else delete map[id]; // 空 = 清除,恢复无 override 的原始行为
     await writeProviderOverrides(map);
@@ -2281,10 +2288,10 @@ router.put('/auto-audit/model', (req, res) => serializeProviderOp(async () => {
 
     // 审查建议 1:覆盖层损坏 / 读不出时不许按空表整份写回(会丢掉其它 provider 的覆盖设置)。assertWritable 同时留
     // .corrupt-<时间戳> 备份;命中回约定里的 500 STORAGE_WRITE_FAILED,已有数据不变。
-    try { await assertWritable(PROVIDER_OVERRIDES_PATH); } catch {
+    let map;
+    try { map = await readProviderOverridesForWrite(); } catch {
       return auditModelError(res, 500, 'STORAGE_WRITE_FAILED', '保存失败，请重试');
     }
-    const map = await readProviderOverrides();
     const prev = map[providerId];
     const eff = effectiveTierModels(prev, { ...info, models });
     const entry = auditModelOverrideEntry(prev, eff, hasAnyTier(info.tierModels), model);
