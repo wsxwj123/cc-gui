@@ -96,3 +96,15 @@ export function gateAutoPermissionMode(requested, { official, enabled }) {
   }
   return { mode: requested, downgraded: null };
 }
+
+// 第三方 auto 档下 PreToolUse 回调的判定(T-Y10 ②,方案 Y.1;H10 已实测:返回 ask 后 CLI 把调用交给 canUseTool,
+// 审核请求不再发出)。审核判"放行"时 CLI 不回调宿主,GUI 的危险命令强制弹卡在这条路径上失效,所以对命中危险命令
+// 规则的 Bash 在这里要求人工确认。官方 / 非 auto 档 / 不危险 → null(回调照旧 continue,与改动前相同)。
+export const THIRD_PARTY_AUTO_ASK_REASON = '第三方 provider 的「自动」档下，这类命令需要你确认后才执行。';
+export function thirdPartyAutoAskOutput() {
+  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask', permissionDecisionReason: THIRD_PARTY_AUTO_ASK_REASON } };
+}
+export function thirdPartyAutoPreToolUse({ thirdParty, mode, dangerous }) {
+  if (thirdParty !== true || mode !== 'auto' || dangerous !== true) return null;
+  return thirdPartyAutoAskOutput();
+}

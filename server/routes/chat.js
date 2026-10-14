@@ -25,7 +25,9 @@ import { isLocalReq } from '../services/auth.js';
 import { SERVER_EPOCH } from '../utils/server-epoch.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
 import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCache } from '../utils/prompt-cache-env.js';
-import { autoModeServerInjection, gateAutoPermissionMode } from '../services/auto-audit.js';
+import {
+  autoModeServerInjection, gateAutoPermissionMode, thirdPartyAutoPreToolUse, thirdPartyAutoAskOutput,
+} from '../services/auto-audit.js';
 import { readThirdPartyAutoSync } from './prefs.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
@@ -1004,7 +1006,7 @@ function mcpAutoApproved(toolName) {
 // 返回:{ decision:'allow', authorizeDir? } 自动放行 / { decision:'deny', reason } 自动拒绝 /
 // null = 需要用户决定(弹卡/留卡)。
 const EXIT_PLAN_DENY_REASON = '用户已切出规划模式。请勿继续规划或再次调用 ExitPlanMode，直接简要总结并结束本回合；用户将以新模式重新发起请求。';
-export function autoDecide(mode, toolName, input, boundary) {
+export function autoDecide(mode, toolName, input, boundary, { thirdParty = false } = {}) {
   // 提问卡永远等人;计划确认卡只在 plan 档等人 —— 已切出 plan 直接 deny(U5 上收服务端)。
   if (toolName === 'AskUserQuestion') return null;
   if (toolName === 'ExitPlanMode') {
@@ -1029,6 +1031,9 @@ export function autoDecide(mode, toolName, input, boundary) {
   // auto 档(P2.2):放行/拦截由 SDK 内部分类器完成,能到达 canUseTool 的都是分类器
   // 上交/ask 规则强制的 → 走与 default 相同的分支(下方危险命令/MCP 自动放行/弹卡),
   // GUI 不做二次裁决。无需显式分支:'auto' 不命中 plan/bypass/acceptEdits 任何一支。
+  // r151a T-Y10 ①:第三方 provider 的 auto 档 —— 能到这里的都是审核上交(含连拦多次后交给宿主)或 ask 规则强制的,
+  // 一律弹卡,不走下面的"MCP 自动执行"名单(官方 auto 不变,仍按下方分支)。
+  if (mode === 'auto' && thirdParty === true) return null;
   // 放任模式:一切放行(AskUserQuestion 上面已排除);越界附 session 级目录授权。
   if (mode === 'bypassPermissions') {
     return { decision: 'allow', ...(boundary ? { authorizeDir: 'session' } : {}) };
@@ -1049,6 +1054,24 @@ export function autoDecide(mode, toolName, input, boundary) {
   }
   if (mcpAutoApproved(toolName) && !boundary) return { decision: 'allow' };
   return null;
+}
+
+// r151a T-Y10 ②:PreToolUse 回调。判定规则在 services/auto-audit.js(thirdPartyAutoPreToolUse);档位读 slot.guiMode
+// (可被中途切档改)。整体 try/catch:判定出错时第三方按询问处理(不放行),官方照旧 continue,并记一行日志(R-Y13)。
+export function makePreToolUseHook(slot) {
+  return async (input) => {
+    try {
+      const out = thirdPartyAutoPreToolUse({
+        thirdParty: slot.thirdPartyProvider === true,
+        mode: slot.guiMode,
+        dangerous: isDangerousBash(input?.tool_name, input?.tool_input),
+      });
+      return out || { continue: true };
+    } catch (e) {
+      console.warn(`[r151a] PreToolUse 判定出错,按询问处理:${e?.message || e}`);
+      return slot.thirdPartyProvider === true ? thirdPartyAutoAskOutput() : { continue: true };
+    }
+  };
 }
 
 function makeCanUseTool(slot) {
@@ -1116,7 +1139,7 @@ function makeCanUseTool(slot) {
     }
     // mode 相关自动裁决统一走 autoDecide(与切档重裁共用一份判定,详见其注释)。
     const mode = slot.guiMode;
-    const verdict = autoDecide(mode, toolName, input, boundary);
+    const verdict = autoDecide(mode, toolName, input, boundary, { thirdParty: slot.thirdPartyProvider === true });
     if (verdict) {
       if (verdict.decision === 'allow') {
         return allowResult(verdict.authorizeDir ? { authorizeDir: verdict.authorizeDir } : {}, { allowAlways: false });
@@ -2036,6 +2059,8 @@ async function handleChatPost(req, res) {
     permissionMode: permissionMode || 'default',
     guiMode: chosenMode,
     autoDowngrade: autoGate.downgraded,   // r151a:服务端门控降级,init 到达时补发一条带 reason 的 mode_mismatch
+    // r151a:本进程连的是不是第三方端点(T-Y10 两条收紧的前置条件)。provider 一变 settings 指纹就变,不会复用到这个槽。
+    thirdPartyProvider: !settingsProviderIsOfficial(),
     startedAt: Date.now(),
     // #26 会话常驻状态
     idle: false,             // 回合间保活等待下一条消息
@@ -2142,7 +2167,8 @@ async function handleChatPost(req, res) {
     // 实证那是误判(真因是子代理打穿 canUseTool 通道,见 disallowedTools 那段);此 hook 对
     // TS 无实质作用(官方那条"需 dummy hook"只针对 Python)。保留作无害保险(保持流活性)。
     hooks: {
-      PreToolUse: [{ hooks: [async () => ({ continue: true })] }],
+      // r151a T-Y10 ②:第三方 auto 档下命中危险命令规则的 Bash → ask(交给 canUseTool 弹卡);其余照旧 continue。
+      PreToolUse: [{ hooks: [makePreToolUseHook(slot)] }],
       // 曾在此注册 TeammateIdle hook 广播「待命」态。实测(SDK 0.3.191 / claude 2.1.220,
       // 含命名 agent + SendMessage 排队 + 长任务三组 probe)全程零触发:二进制里该 hook 被
       // in-process teammate 的 AsyncLocalStorage 上下文门控,SDK 起的 local_agent 走的是
@@ -2646,9 +2672,11 @@ router.post('/chat/permission-mode', async (req, res) => {
   // autoDecide 同一份)。allow/deny 走既有 settle 幂等路径,null 的卡保持等待用户。
   // 原客户端"切放任批量放行"effect 与各 mode 抢答分支的职责全部由这里接管。
   // r49b①:全部被拒时跳过——档位没生效,按新档重裁 = 按幻觉档放行/拒绝。
+  // r151a T-Y10 ①:切到第三方 auto 时,挂着的卡同样不走"MCP 自动执行"名单(只在切 auto 时才读 settings)。
+  const tpForRejudge = mode === 'auto' && !settingsProviderIsOfficial();
   if (delivered > 0 || attempted === 0) {
     try {
-      resolvePendingForSession(sessionId, (r) => autoDecide(mode, r.toolName, r.toolInput, r.blockedPath || null));
+      resolvePendingForSession(sessionId, (r) => autoDecide(mode, r.toolName, r.toolInput, r.blockedPath || null, { thirdParty: tpForRejudge }));
     } catch {}
   }
   // 有进程却一个都没收下 = 切档失败,如实回 409 带 CLI 原文(前端据此回滚档位并显示原因);
