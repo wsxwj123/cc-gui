@@ -8,7 +8,7 @@ import { isActivatableTarget, isEditableTarget } from '../utils/escAction.js';
 import { isImeReactKeydown } from '../utils/imeGuard.js';
 import { elicitFields, elicitMissing, buildElicitContent, initialElicitValues } from '../utils/elicitSchema.js';
 import { isAuditStreakReason } from '../../../server/utils/cli-strings.js';
-import { sessionWhitelistAllows } from '../utils/sessionAllow.js';
+import { sessionWhitelistAllows, batchWhitelistTargets } from '../utils/sessionAllow.js';
 
 // plan 档不写持久规则的工具集(与服务端 chat.js WRITE_CLASS 对齐)。
 const PLAN_WRITE_CLASS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
@@ -1105,9 +1105,9 @@ export function PermissionPrompt({ sessionId = null, onExecutePlan = null, hydra
     // allow 只对"之后"到达的请求生效,所以这几条会卡着要逐条点。这里补扫一次(#8)。
     // req.sessionId 为 null(draft 孤儿)时不补扫:null === null 会把【其他 draft 会话】
     // 的同名工具请求一并放行 → 只放行当前这一条,宁可少自动放行。
-    const sameTool = req.sessionId == null ? [] : all.filter(
-      (p) => p.id !== req.id && p.sessionId === req.sessionId && p.toolName === req.toolName,
-    );
+    // r151a 复审:补扫只带走"自己也能走白名单"的挂起请求 —— 第三方「自动」档上交的(mustPrompt)、越界的、危险命令
+    // 都留着逐条确认(与实时 / 补拉两处白名单分支同口径,判定在 utils/sessionAllow.js)。
+    const sameTool = batchWhitelistTargets(req, all, isDangerousCommand);
     await Promise.all([req, ...sameTool].map((r) => resolve(r, 'allow')));
   };
 
