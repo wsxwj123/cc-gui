@@ -51,10 +51,15 @@ test.describe('S 开关', () => {
   test('S2 点开关 → 发 PUT /api/prefs/third-party-auto {enabled:true},开关变成 aria-checked="true",服务端读到 true', async ({ page }) => {
     await openAt(page, () => thirdParty());
     const puts = recordRequests(page, '/api/prefs/third-party-auto');
+    // 开关是先变后存(存失败会回到原位,见 S3):读服务端状态之前,先等这次 PUT 的应答回来(= 这次保存完成)
+    const putDone = page.waitForResponse((r) => r.request().method() === 'PUT' && new URL(r.url()).pathname === '/api/prefs/third-party-auto', { timeout: 15_000 });
+    putDone.catch(() => {});   // 前面的断言先失败时,别让它变成未处理的拒绝
     await toggle(page).click();
     await expect(toggle(page)).toHaveAttribute('aria-checked', 'true');
     await expect.poll(() => puts.filter((r) => r.method === 'PUT').map((r) => r.body)).toEqual([{ enabled: true }]);
-    expect((await get('/api/prefs/third-party-auto')).body).toEqual({ enabled: true });
+    const resp = await putDone;
+    await expect.poll(async () => (await get('/api/prefs/third-party-auto')).body,
+      { message: `服务端应读到 {enabled:true}(这次 PUT 的应答状态 ${resp.status()})`, timeout: 5_000 }).toEqual({ enabled: true });
   });
 
   test('S3 开关保存失败 → 开关回到原位,并显示错误文本', async ({ page }) => {
@@ -106,7 +111,8 @@ test.describe('S 审核模型下拉', () => {
     const puts = recordRequests(page, '/api/auto-audit/model');
     await pickModel(page, 'r151-reasoner');
     await expect.poll(() => puts.filter((r) => r.method === 'PUT').map((r) => r.body)).toEqual([{ providerId: id, model: 'r151-reasoner' }]);
-    await expect.poll(() => (readJson(OVERRIDES())[id] || {}).tierModels?.sonnet).toBe('r151-reasoner');
+    // 覆盖层文件可能正被写入(读到半截时 readJson 为 null):当作"还没写好",接着等
+    await expect.poll(() => ((readJson(OVERRIDES()) || {})[id] || {}).tierModels?.sonnet).toBe('r151-reasoner');
   });
 
   test('S7 保存返回 4xx → 下拉回到原选项,并显示返回的 error', async ({ page }) => {
@@ -173,8 +179,9 @@ test.describe('S 清除不可用标记', () => {
     const btn = page.getByTestId('auto-unavailable-reset');
     await expect(btn).toBeEnabled();
     await btn.click();
-    const left = await readLocal(page, 'cgui-auto-unavailable');
-    expect(left === null || left === '{}' || left === '', `剩下:${left}`).toBe(true);
+    // 点完不立刻读:等到键被清空(null / "{}" / "" 三者之一;null 按 "" 比),失败时报出实际剩下的值
+    await expect.poll(async () => (await readLocal(page, 'cgui-auto-unavailable')) ?? '',
+      { message: '点击后 cgui-auto-unavailable 应被清空', timeout: 5_000 }).toMatch(/^(\{\})?$/);
     await page.keyboard.press('Escape').catch(() => {});
     await openSelector(page);
     await expect(autoOption(page)).toHaveCount(1, { timeout: 5_000 });
