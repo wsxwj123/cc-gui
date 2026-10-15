@@ -149,7 +149,47 @@ ok(compact(retrySrc).includes(compact(`return setTimeout(() => {
   handleSendRef.current?.(prompt, nextOpts);
 }, 80);`)), '普通发送的重发定时器与改动前逐字相同(忽略缩进)');
 eq([...APP.matchAll(/retryLater\(\{ \.\.\.opts, (\w+): true \}/g)].map((m) => m[1]),
-  ['oneMRetry', 'signatureRetry', 'freshRetry', 'autoRetry', 'autoRetry'], '五处自动重发都经 retryLater');
+  ['oneMRetry', 'signatureRetry', 'freshRetry', 'freshRetry', 'autoRetry', 'autoRetry'], '五处自动重发都经 retryLater(会话失效那一处按是否点卡片分两支)');
+
+// ── 4. r151c 先修 1:会话失效那一支原样取出来跑 —— 点卡片发出的回合不转新草稿、不重发、不记「未发出的消息」 ──
+{
+  const NC_HEAD = '            if (/No conversation found/i.test(msg) && !opts.freshRetry && prompt) {\n';
+  const n0 = APP.indexOf(NC_HEAD);
+  ok(n0 > 0 && APP.indexOf(NC_HEAD, n0 + 1) < 0, '会话失效分支只有一处');
+  const ncSrc = APP.slice(n0, APP.indexOf('\n            }\n', n0) + '\n            }'.length);
+  ok(/sawError = true;\s*break;\s*\}$/.test(ncSrc), '取到的是整个分支(以 sawError / break 收尾)');
+  function runNoConv({ xsProcess, pane = true, hidden = false }) {
+    const log = { retry: [], notice: [], migrate: [], select: [], orphan: [], here: [] };
+    const deps = {
+      msg: 'No conversation found with session ID: x', prompt: PROMPT, hiddenUserMessage: hidden, streamOwnerPh: 'ph-1', meta: null,
+      opts: xsProcess ? { xsProcess, hiddenUserMessage: true } : {},
+      sessionQueueKey: 'sqk-B', streamSid: B,
+      paneStillOn: () => pane,
+      retryLater: (...a) => log.retry.push(a),
+      getLocalSession: () => ({ sessionId: B, projectHash: 'ph-1' }),
+      newDraftId: () => 'nd-1',
+      queueKeyFor: ({ projectHash, draftId }) => `draft-${projectHash}-${draftId}`,
+      useStore: { getState: () => ({ migrateSessionKey: (...a) => log.migrate.push(a), addOrphanDraftMessage: (...a) => { log.orphan.push(a); return true; } }) },
+      setSelectedSession: (v) => log.select.push(v),
+      setProviderSwitchNotice: (v) => log.notice.push(v),
+      orphanKeyFor: (ph) => `orphan-${ph}`, createQueueId: (p) => `${p}-q`, attachmentMetaForPersistence: (m) => m,
+      showNoticeHere: (t) => log.here.push(t),
+    };
+    // eslint-disable-next-line no-new-func
+    new Function(...Object.keys(deps), `let accumulatedText, accumulatedThinking, currentToolCalls, sawError;\nfor (;;) {\n${ncSrc}\nbreak;\n}`)(...Object.values(deps));
+    return log;
+  }
+  const xl = runNoConv({ xsProcess: XP });
+  eq([xl.migrate, xl.select, xl.notice, xl.orphan, xl.here], [[], [], [], [], []], '点卡片:不转新草稿、不换窗格、不弹"已自动新建会话并重发"、不记未发出的消息');
+  eq(xl.retry, [[{ xsProcess: XP, hiddenUserMessage: true, freshRetry: true }]], '点卡片:只经 retryLater 拦截一次(不带 expectKey,窗格按原会话判)');
+  const xa = runNoConv({ xsProcess: XP, pane: false });
+  eq([xa.retry.length, xa.orphan, xa.here], [1, [], []], '点卡片且窗格已换走:照样经 retryLater 刷新卡片,不把占位提示记成未发出的消息');
+  const nl = runNoConv({});
+  eq([nl.migrate.length, nl.select.length, nl.notice, nl.retry], [1, 1, [{ text: '原会话历史已失效，已自动新建会话并重发本条。' }], [[{ freshRetry: true }, 'draft-ph-1-nd-1']]],
+    '普通发送:与改动前相同(转新草稿、弹提示、按新草稿键重发)');
+  const na = runNoConv({ pane: false });
+  eq([na.retry, na.orphan.length, na.here.length], [[], 1, 1], '普通发送且窗格已换走:与改动前相同(记成未发出的消息)');
+}
 ok(!/handleSendRef\.current\?\.\(prompt,\s*\{\s*\.\.\.opts/.test(APP), '没有绕过 retryLater、直接带原 opts 重发的地方');
 eq((APP.match(/claimXsForSend\(/g) || []).length, 1, '认领只在发送块一处(只有重发才会再走到)');
 

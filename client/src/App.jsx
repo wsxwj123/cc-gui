@@ -6902,7 +6902,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             if (/No conversation found/i.test(msg) && !opts.freshRetry && prompt) {
               // r146b:换成新 draft、弹提示、重发都是窗格动作 —— 只在窗格仍是本会话时做(否则会把别的
               // 会话换成 draft、提示挂到别的会话上)。
-              if (paneStillOn(sessionQueueKey, streamSid)) {
+              // r151c 先修 1:点卡片【处理】发出的回合(带 xsProcess)不转新草稿、不重发 —— 窗格留在原会话,经 retryLater
+              // 的拦截刷新卡片(服务端已按出错结算),卡片可【忽略】,待处理计数随 xs:message 收敛。转新草稿会让这张卡片
+              // 看不到(卡片按会话挂)、Dock 计数卡住;窗格已换走时也不能把占位 prompt 记成「未发出的消息」。
+              if (opts.xsProcess) {
+                retryLater({ ...opts, freshRetry: true });
+              } else if (paneStillOn(sessionQueueKey, streamSid)) {
                 const _s = getLocalSession();
                 let _freshKey = null; // r146 R4:本支自己把窗格换成的新 draft 键
                 if (_s?.sessionId) {
