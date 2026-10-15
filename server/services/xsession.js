@@ -603,10 +603,14 @@ export async function xsNativeGuard(input, ctx) {
 // ── r151c:发送档案(方案 A5 / A6 / A12 / A13)───────────────────────────────────────────────────────────────
 // 开关开着时,每个回合开始按本回合的会话级参数记一份档案:replay(重放用:请求原值,model 为解析值)与 judge(判定用:界面档位、
 // provider 指纹、记录时刻)。新会话首回合开始时还没有会话 id,拿到会话 id(CLI 的 init)时立即补记(补充约定),回合结束时再兜一次。内容没变不写盘;本次启用之前记的档案即使内容
-// 没变也重记一次(刷新记录时刻,否则重新打开开关后它永远不算数)。写失败只记日志:该会话按旧档案或没有档案判(偏安全)。
-// 切档(/chat/permission-mode 200)同步改 replay.permissionMode 与 judge.mode;删会话时删档案(forgetXsSession)。
+// 没变也重记一次(刷新记录时刻,否则重新打开开关后它永远不算数)。写失败记日志,该会话按旧档案或没有档案判,但档位一项按"未知"
+// (见 profileModeUnknown)。切档(/chat/permission-mode 200)同步改 replay.permissionMode 与 judge.mode;删会话时删档案(forgetXsSession)。
 const TURN_RECORDS_MAX = 512;
 const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合开始时的), params };回合开始记、结束删
+// 档位未知(方案风险⑥):该会话的档案写失败过(切档没落盘、回合开始按新档位没记上),盘上的旧档位可能比用户最新的选择宽,
+// "按旧档案判"在档位这一项并不偏安全。没有存活槽时按"读不出档位"判(去向表⑦ class-mismatch,sameClass 读不出按不同),
+// 该会话下一次档案成功落盘(或内容没变、无需落盘)后清掉。只在内存:服务重启后丢失,之后按盘上的档案判。
+const profileModeUnknown = new Set(); // 会话 id(小写)
 
 let accountCache = { key: null, accountId: '' };
 /** GUI 起会话时 CLI 读的那份配置里的 provider 身份(与起进程同源,不读宿主进程环境变量)。凭据原文只留在内存里、不出本函数的调用方。 */
@@ -657,8 +661,10 @@ async function recordProfile(sessionId, params) {
       if (prevKey) delete d.sessions[prevKey];
       d.sessions[sessionId] = { replay, judge: { mode, providerFp, recordedAt: new Date().toISOString() } };
     });
+    profileModeUnknown.delete(sessionId.toLowerCase());
   } catch (e) {
-    console.warn(`[xsession] 会话 ${sessionId} 的发送档案未能落盘:${e?.cause?.code || e?.code || e?.message || e}`);
+    profileModeUnknown.add(sessionId.toLowerCase());
+    console.warn(`[xsession] 会话 ${sessionId} 的发送档案未能落盘(档位按未知判,直到下次记录成功):${e?.cause?.code || e?.code || e?.message || e}`);
   }
 }
 
@@ -702,8 +708,10 @@ async function xsModeChange({ sessionId, mode } = {}) {
         p.judge.mode = mode;
       }
     });
+    profileModeUnknown.delete(sessionId.toLowerCase());
   } catch (e) {
-    console.warn(`[xsession] 会话 ${sessionId} 的档案档位未能落盘:${e?.cause?.code || e?.code || e?.message || e}`);
+    profileModeUnknown.add(sessionId.toLowerCase()); // 盘上仍是切档前的档位:不能再按它判同类
+    console.warn(`[xsession] 会话 ${sessionId} 的档案档位未能落盘(档位按未知判,直到下次记录成功):${e?.cause?.code || e?.code || e?.message || e}`);
   }
 }
 
@@ -714,6 +722,7 @@ export async function forgetXsSession(sessionId) {
   for (const [k, r] of turnChains) if (sameId(r.sessionId, sessionId)) turnChains.delete(k); // 连锁标记与单回合发送计数
   scheduler.forget(sessionId);
   queuedHint.delete(sessionId.toLowerCase());
+  profileModeUnknown.delete(sessionId.toLowerCase());
   return dropXsProfile(sessionId);
 }
 
@@ -788,7 +797,8 @@ function liveGuiMode(sessionId) {
 function fingerprintOrNull(salt) {
   try { return currentProviderFp(salt); } catch { return null; }
 }
-// 去向表里与目标有关的几项。判定与重放用同一读数的档位(targetMode)。
+// 去向表里与目标有关的几项。判定与重放用同一读数的档位(targetMode):存活槽的档位优先;没有存活槽时用档案的,
+// 档案写失败过(档位未知)则为 null(落 class-mismatch)。
 function targetFacts(sessionId, prefs, profiles, fp) {
   const inbound = Object.keys(prefs.inbound).some((k) => sameId(k, sessionId)) ? 'auto' : 'card';
   const pk = profiles ? Object.keys(profiles.sessions).find((k) => sameId(k, sessionId)) : null;
@@ -797,7 +807,7 @@ function targetFacts(sessionId, prefs, profiles, fp) {
     inbound,
     hasProfile: profileIsCurrent(profile, prefs.enabledAt),
     profileFresh: !!profile && !!fp && profile.judge.providerFp === fp,
-    targetMode: liveGuiMode(sessionId) ?? profile?.judge.mode ?? null,
+    targetMode: liveGuiMode(sessionId) ?? (profileModeUnknown.has(sessionId.toLowerCase()) ? null : profile?.judge.mode ?? null),
     replay: profile?.replay ?? null,
   };
 }

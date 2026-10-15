@@ -10,6 +10,8 @@
 //   ⑥ 连锁:hop 逐跳加 1、chainId 不变(回合结束后再发也一样),hop 5 → chain-limit;用户回合清空标记。
 //   ⑦ 上限:单次 8 个目标、单回合 16 条(失败项不计)、长度 / 空白 / 字节数、自己、找不到、重名合并。
 //   ⑧ 全局 10 分钟 20 次:第 20 次后暂停(广播一次、写盘)、之后落 paused、时间过去不自动恢复;盘上暂停即暂停;恢复清零。
+//   末尾补充约定各条之后:档案写失败(xsession 目录只读;切档没落盘 / 回合开始没记上)→ 没有存活槽时档位按未知判,
+//      不按盘上更宽的旧档位判同类(落 class-mismatch);该会话下一次档案记录成功后恢复。
 // node tests/unit/check-r151c-xs-auto.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, realpathSync, readFileSync, existsSync, utimesSync } from 'node:fs';
@@ -459,6 +461,49 @@ try {
   const manual = await xs.sendManualMessages({ to: [DT], body: 'R151C 手动转发', fromSessionId: SX }, ROWS);
   const pubMan = await publicOf(DT, manual[0].id);
   ok(pubMan.from.kind === 'user' && !Object.hasOwn(pubMan.from, 'project'), `手动转发的不带 from.project(${JSON.stringify(pubMan.from)})`);
+
+  // 5) 档案写失败后档位未知:没有存活槽时不按盘上更宽的旧档位判同类;该会话下一次档案记录成功后恢复
+  const offTurn = async (sid, mode) => { // 不保活的用户回合:跑完进程退出,之后没有存活槽
+    await userTurn(sid, mode, { keepAlive: false });
+    await waitFor(() => !slotOf(sid), `${TITLES.get(sid)} 的进程退出`, 20_000);
+    await store.readXsProfiles(); // 同一条存储队列:返回时回合开始那次档案记录已经结束
+  };
+  const readonlyXsDir = async (fn) => {
+    chmodSync(XS_DIR, 0o500);
+    try { return await fn(); } finally { chmodSync(XS_DIR, 0o700); }
+  };
+  const modeOf = async (sid) => (await store.readXsProfiles()).sessions[sid]?.judge.mode;
+  const sBy = { sessionId: SX, runId: 'r-mode-unknown', turnEpoch: 0, guiMode: 'bypassPermissions' };
+  const sDef = { sessionId: SX, runId: 'r-mode-unknown', turnEpoch: 1, guiMode: 'default' };
+  // 5a) 没有进程时切档(/chat/permission-mode 200),档案写失败
+  const TM = mk('目标 TM 切档没落盘');
+  await offTurn(TM, 'bypassPermissions');
+  eq(await modeOf(TM), 'bypassPermissions', '前置:TM 有「放任」档案、没有存活槽');
+  await setInbound([TM]);
+  const rPm = await readonlyXsDir(async () => {
+    const res = await api('POST', '/chat/permission-mode', { sessionId: TM, mode: 'default' });
+    await store.readXsProfiles(); // 切档通知里的档案写入排在它前面
+    await sleep(50);
+    return res;
+  });
+  eq([rPm.status, await modeOf(TM)], [200, 'bypassPermissions'], '前置:切到「逐步确认」200,档案写失败、盘上仍是「放任」');
+  let rMU = await send(sBy, [TM], 'R151C 切档没落盘');
+  eq(rMU.results.map((x) => [x.delivery, x.note]), [['card', HELD['class-mismatch']]], '切档没落盘:「放任」发送方不按旧档位判同类 → 卡片 class-mismatch');
+  eq((await fromSession(TM)()).map((m) => [m.status, m.heldReason]), [['pending', 'class-mismatch']], '落 pending / class-mismatch');
+  ok(!ws.some((e) => e.type === 'xs:turn' && e.sessionId === TM), '没有为 TM 起回合');
+  await offTurn(TM, 'default');
+  eq(await modeOf(TM), 'default', '下一个回合按「逐步确认」记档案成功');
+  rMU = await send(sDef, [TM], 'R151C 记录成功后');
+  eq(rMU.results.map((x) => [x.delivery, x.note]), [['auto', NOTE.auto]], '记录成功后档位恢复可判:非放任 → 非放任 auto');
+  await waitStatus((await fromSession(TM)()).at(-1).id, 'done', 15_000);
+  // 5b) 回合开始按新档位记档案失败(盘上留着更宽的旧档位)
+  const TN = mk('目标 TN 回合开始没记上');
+  await offTurn(TN, 'bypassPermissions');
+  await setInbound([TN]);
+  await readonlyXsDir(() => offTurn(TN, 'default'));
+  eq(await modeOf(TN), 'bypassPermissions', '前置:以「逐步确认」开始的回合档案写失败,盘上仍是「放任」');
+  rMU = await send(sBy, [TN], 'R151C 回合开始没记上');
+  eq(rMU.results.map((x) => [x.delivery, x.note]), [['card', HELD['class-mismatch']]], '回合开始记档案失败:「放任」发送方不按旧档位判同类 → 卡片 class-mismatch');
 
   console.log(`PASS check-r151c-xs-auto(${checks} 项)`);
 } finally {
