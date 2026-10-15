@@ -37,7 +37,7 @@ test('X01 总开关关(默认):config 回 enabled:false;其余 /api/xsession/* �
     await test.step('GET /api/xsession/config → 200,enabled:false;一期字段齐,二期字段不出现', async () => {
       const r = await api.config();
       expect.soft(r.status, `状态码(${r.text.slice(0, 200)})`).toBe(200);
-      expect.soft(r.body, 'config 应答体').toEqual({ enabled: false, limits: { bodyBytes: 32768, pendingPerSession: 50 }, nativeGuard: { lastFailureAt: null } });
+      expect.soft(r.body, 'config 应答体').toEqual({ enabled: false, limits: { bodyBytes: 32768, pendingPerSession: 50 }, nativeGuard: { lastFailureAt: null }, stored: { unfinished: 0 } });
     });
     await test.step('其余接口一律 409 XS_DISABLED', async () => {
       softDisabled(await api.sessions(), 'GET /api/xsession/sessions');
