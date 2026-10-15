@@ -4,7 +4,7 @@
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身,不起 claude 进程;临时 HOME;端口 6900–6990(跳过 6710)。
 // node tests/unit/check-r151b-audit-fixes.mjs
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync, rmSync, readdirSync, existsSync, symlinkSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync, rmSync, readdirSync, existsSync, symlinkSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -371,6 +371,110 @@ try {
     const pub = (await xs.listInboxMessages({ sessionId: O, statuses: new Set(['dismissed']) })).find((m) => m.id === m2);
     eq(pub.from.title, '', '对外的消息对象里 from.title 为空字符串');
     await xs.dismissMessage(m5); // 收尾:不给后面几节留未结束的消息
+  }
+
+  // ── 接口(审计后补):GET config 的 stored.unfinished;POST /api/xsession/clear ─────────────────────────────────────
+  {
+    const store = await import('../../server/services/xsession-store.js');
+    const GUI = join(HOME, '.claude-gui'); const XSD = join(GUI, 'xsession'); const BOD = join(XSD, 'bodies');
+    const tree = (d) => { const out = []; const walk = (x) => { if (!existsSync(x)) return; for (const e of readdirSync(x, { withFileTypes: true })) { const p = join(x, e.name); if (e.isDirectory()) walk(p); else out.push(`${p.slice(XSD.length + 1)} ${statSync(p).mtimeMs}`); } }; walk(d); return out.sort(); };
+    const CLEAR_409 = { ok: false, code: 'XS_CLEAR_WHILE_ENABLED', error: '请先关闭跨会话消息，或在卡片上逐条处理' };
+    const P = 'p1p1p1p1-0000-4000-8000-000000000001'.replace(/p/g, '6'); const Q = '77777777-0000-4000-8000-000000000002';
+    const rows = [{ sessionId: P, title: '甲', projectDir: WORK }, { sessionId: Q, title: '乙', projectDir: WORK }];
+
+    setEnabled(true);
+    let r = await api('POST', '/xsession/clear');
+    eq([r.status, r.body], [409, CLEAR_409], '开关开着:clear → 409 XS_CLEAR_WHILE_ENABLED,错误体逐字');
+    const [n1] = await xs.sendManualMessages({ to: [P], body: 'R151B clear 一', fromSessionId: Q }, rows);
+    const [n2] = await xs.sendManualMessages({ to: [Q], body: 'R151B clear 二', fromSessionId: P }, rows);
+    await xs.claimMessage(n2.id); // pending 1 + claimed 1 = 未结束 2;前几节留下的都已结束
+    const all = await store.listXsMessages();
+    eq(all.filter((m) => store.isOpenStatus(m.status)).length, 2, '前置:未结束 2 条');
+    r = await api('GET', '/xsession/config');
+    eq([r.status, r.body.enabled, r.body.stored], [200, true, { unfinished: 2 }], '开着时也带 stored');
+    setEnabled(false);
+    r = await api('GET', '/xsession/config');
+    eq([r.status, r.body.enabled, r.body.stored], [200, false, { unfinished: 2 }], '关着:stored.unfinished = 未结束条数(已结束的不算)');
+    eq(Object.keys(r.body).sort(), ['enabled', 'limits', 'nativeGuard', 'stored'], 'config 应答的键');
+    eq((await api('GET', '/xsession/pending')).status, 409, '关着:其它接口照旧 409');
+    eq([(await api('GET', '/xsession/clear')).status, (await api('PUT', '/xsession/clear', {})).status], [409, 409], '关着:clear 只放行 POST,别的方法照旧 409');
+
+    // 摆上损坏留存、本模块的临时文件、不是本模块的文件、xsession 以外的兄弟目录
+    writeFileSync(join(XSD, 'messages.json.corrupt-123'), '{坏');
+    writeFileSync(join(XSD, `messages.json.tmp.${process.pid}.77`), '{}');
+    writeFileSync(join(BOD, `${'8'.repeat(8)}-0000-4000-8000-000000000008.txt`), '孤儿正文');
+    writeFileSync(join(BOD, `${n1.id}.txt.tmp.99999990.1`), '半截');
+    writeFileSync(join(BOD, 'notes.txt'), '不是正文');
+    writeFileSync(join(XSD, 'README'), '不是本模块的');
+    mkdirSync(join(GUI, 'xsession-keep'), { recursive: true });
+    writeFileSync(join(GUI, 'xsession-keep', 'keep.txt'), 'keep');
+    const prefsBefore = readFileSync(join(GUI, 'prefs.json'), 'utf8');
+    ok(existsSync(join(BOD, `${n1.id}.txt`)) && existsSync(join(BOD, `${n2.id}.txt`)), '前置:未结束消息的正文在');
+
+    r = await api('POST', '/xsession/clear', { r151b: '请求体忽略' });
+    eq([r.status, r.body], [200, { ok: true, removed: all.length }], '关着:clear → 200 {ok, removed: 消息总条数(含已结束)}');
+    eq(tree(XSD), [`README ${statSync(join(XSD, 'README')).mtimeMs}`, `bodies/notes.txt ${statSync(join(BOD, 'notes.txt')).mtimeMs}`].sort(),
+      '收件箱记录、全部正文与正文临时文件、损坏留存、记录临时文件都删了;不是本模块命名的不动');
+    eq([readFileSync(join(GUI, 'xsession-keep', 'keep.txt'), 'utf8'), readFileSync(join(GUI, 'prefs.json'), 'utf8')], ['keep', prefsBefore], 'xsession 以外不动');
+
+    const t0 = tree(XSD);
+    r = await api('GET', '/xsession/config');
+    eq(r.body.stored, { unfinished: 0 }, '清空后 stored 为 0');
+    eq(tree(XSD), t0, '读 stored 不产生文件');
+    r = await api('POST', '/xsession/clear');
+    eq([r.status, r.body], [200, { ok: true, removed: 0 }], '已清空再 clear → removed 0');
+    r = await api('POST', '/xsession/clear', '{坏的 JSON');
+    eq([r.status, r.body], [200, { ok: true, removed: 0 }], '请求体不是合法 JSON 也照常处理(请求体本来就忽略)');
+    eq(tree(XSD), t0, '收件箱不存在时 clear 不新建文件');
+    setEnabled(true);
+    eq([(await xs.listInboxMessages({ sessionId: P, statuses: new Set(store.XS_STATUSES) })).length, (await xs.listInboxMessages({ sessionId: Q, statuses: new Set(store.XS_STATUSES) })).length],
+      [0, 0], '重新打开后一条消息都没有(内存里的也清了)');
+    const [n3] = await xs.sendManualMessages({ to: [P], body: 'R151B clear 三', fromSessionId: Q }, rows);
+    setEnabled(false);
+
+    // 删除失败 → 500 STORAGE_WRITE_FAILED,数据不变
+    chmodSync(XSD, 0o500);
+    try {
+      r = await api('POST', '/xsession/clear');
+      eq([r.status, r.body?.code], [500, 'STORAGE_WRITE_FAILED'], '删不掉 → 500 STORAGE_WRITE_FAILED');
+    } finally { chmodSync(XSD, 0o700); }
+    eq((await api('GET', '/xsession/config')).body.stored, { unfinished: 1 }, '删除失败时数据不变');
+    eq((await store.listXsMessages()).map((m) => m.id), [n3.id], '删除失败时记录不变');
+    eq((await api('POST', '/xsession/clear')).body, { ok: true, removed: 1 }, '恢复权限后可以清空');
+
+    // 只读计数:另一份存储实例(没读过盘)直接数文件,不做恢复、不挪损坏文件、不写
+    const freshStore = async (tag, home) => {
+      const prev = process.env.HOME;
+      process.env.HOME = home; process.env.USERPROFILE = home;
+      try { return await import(`../../server/services/xsession-store.js?${tag}`); } finally { process.env.HOME = prev; process.env.USERPROFILE = prev; }
+    };
+    const H3 = join(TMP, 'home-stored'); const X3 = join(H3, '.claude-gui', 'xsession');
+    mkdirSync(join(X3, 'bodies'), { recursive: true });
+    const rec = (id, status) => ({ id, status, to: { sessionId: P } });
+    const recs = [rec('31313131-0000-4000-8000-000000000001', 'claimed'), rec('31313131-0000-4000-8000-000000000002', 'processing'), rec('31313131-0000-4000-8000-000000000003', 'done'), { id: 'bad' }];
+    writeFileSync(join(X3, 'messages.json'), JSON.stringify({ version: 1, messages: recs }));
+    writeFileSync(join(X3, 'bodies', '31313131-0000-4000-8000-000000000009.txt'), '孤儿');
+    const st3 = await freshStore('stored-a', H3);
+    const before3 = tree(X3).join('|');
+    eq(await st3.countUnfinishedXsMessages(), 2, '没读过盘:直接数文件里的未结束条数(不合规的记录不算)');
+    eq([tree(X3).join('|'), JSON.parse(readFileSync(join(X3, 'messages.json'), 'utf8')).messages], [before3, recs], '只读:不做恢复、不清孤儿、不写');
+    writeFileSync(join(X3, 'messages.json'), '{坏的');
+    eq(await st3.countUnfinishedXsMessages(), 0, '文件损坏 → 0');
+    ok(!readdirSync(X3).some((f) => f.includes('corrupt')), '只读:损坏文件不挪走');
+    const st4 = await freshStore('stored-b', join(TMP, 'home-none'));
+    eq(await st4.countUnfinishedXsMessages(), 0, '文件不存在 → 0');
+    eq(await st4.clearXsInbox(), 0, '文件不存在时清空 → 0');
+    ok(!existsSync(join(TMP, 'home-none')), '文件不存在时读计数与清空都不建任何目录');
+
+    // 正文目录是符号链接:clear 不跟进去
+    const H5 = join(TMP, 'home-clear-link'); const X5 = join(H5, '.claude-gui', 'xsession'); const OUT5 = join(TMP, 'outside-clear');
+    mkdirSync(X5, { recursive: true }); mkdirSync(OUT5, { recursive: true });
+    writeFileSync(join(OUT5, '31313131-0000-4000-8000-000000000001.txt'), 'outside');
+    symlinkSync(OUT5, join(X5, 'bodies'));
+    writeFileSync(join(X5, 'messages.json'), JSON.stringify({ version: 1, messages: [rec('31313131-0000-4000-8000-000000000001', 'pending')] }));
+    const st5 = await freshStore('clear-link', H5);
+    eq(await st5.clearXsInbox(), 1, '符号链接场景:记录照删');
+    eq([existsSync(join(X5, 'messages.json')), readdirSync(OUT5)], [false, ['31313131-0000-4000-8000-000000000001.txt']], '正文目录是符号链接 → 不删链接那头的文件');
   }
 } finally {
   try { await chat.closeAllPersistentProcesses(); } catch {}

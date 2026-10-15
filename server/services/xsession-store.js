@@ -11,8 +11,10 @@
 //     和本模块自己留下的临时文件(上次在"写临时文件"与"改名"之间退出)。只认本模块的命名:正文只删 <消息id>.txt,
 //     临时文件只删 messages.json.tmp.<pid>.<n> 与 <消息id>.txt.tmp.<pid>.<n>(pid 是另一个还活着的进程时不动);
 //     正文目录是符号链接时整个跳过,不跟着链接删别处的文件。
-// 懒加载:第一次用到时才读盘。总开关关着时路由层先回 409,本模块不会经 /api/xsession/* 被调到;但删会话时
-//   (DELETE /api/sessions/:id)不看开关,会读收件箱、有变化时写 —— 收件箱文件不存在时什么都不写、不建目录。
+// 懒加载:第一次用到时才读盘。总开关关着时路由层先回 409,本模块不会经那些接口被调到;关着时仍会被调到的只有:
+//   · 删会话(DELETE /api/sessions/:id):会读收件箱、有变化时写 —— 收件箱文件不存在时什么都不写、不建目录;
+//   · GET /api/xsession/config 的 stored 计数(countUnfinishedXsMessages):只读,不做恢复、不写、不建目录;
+//   · POST /api/xsession/clear(clearXsInbox,只在关着时可用):只删本模块的文件,不建任何东西。
 // 日志只带消息 id,不带任何正文片段。
 //
 // 一条记录的字段由 xsession.js(T-X4)定;本模块只依赖下面这几个:
@@ -219,6 +221,66 @@ export async function pendingCountsBySession() {
     if (m.status === 'pending') counts.set(m.to.sessionId, (counts.get(m.to.sessionId) || 0) + 1);
   }
   return counts;
+}
+
+/**
+ * 未结束(pending / queued / claimed / processing)的消息条数(GET /api/xsession/config 的 stored;总开关关着也调)。
+ * 只读:本进程读过盘就数内存里的;没读过就直接数文件里的(不做启动恢复、不挪损坏文件、不写、不建目录)。
+ * 文件不存在、读不出或解析不了 → 0(配置接口不因收件箱出错而失败)。
+ */
+export async function countUnfinishedXsMessages() {
+  if (cache) return cache.filter((m) => isOpenStatus(m.status)).length;
+  let raw;
+  try { raw = await readFile(MESSAGES_PATH, 'utf-8'); } catch (e) {
+    if (e?.code !== 'ENOENT') console.warn(`[xsession] 读取收件箱失败,未处理条数按 0:${e.code || e.message}`);
+    return 0;
+  }
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return 0; }
+  return Array.isArray(parsed?.messages) ? parsed.messages.filter((m) => isValidRecord(m) && isOpenStatus(m.status)).length : 0;
+}
+
+async function unlinkIfExists(file) {
+  try { await unlink(file); } catch (e) {
+    if (e?.code !== 'ENOENT') throw e;
+  }
+}
+
+/**
+ * 清空收件箱(POST /api/xsession/clear;路由层只在总开关关着时调)。在存储队列里跑,与其它读写串行。删:
+ *   messages.json(先删它:删不掉就整次失败、什么都没变)、xsession/ 下的 messages.json.corrupt-* 与 messages.json 的临时文件、
+ *   正文目录里本模块的正文(<消息id>.txt)与正文临时文件;正文目录不是真目录(符号链接等)时不进去。
+ * 不删 xsession/ 以外的任何东西,不建任何目录或文件。返回删掉的消息总条数(含已结束的;文件不存在为 0)。
+ * 删除失败(不是"不存在")→ XsStorageError;记录已删、正文没删完时,剩下的正文在下次读盘恢复时按孤儿清掉。
+ */
+export function clearXsInbox() {
+  return enqueue(async () => {
+    let removed = 0;
+    if (cache) removed = cache.length;
+    else {
+      try {
+        const parsed = JSON.parse(await readFile(MESSAGES_PATH, 'utf-8'));
+        if (Array.isArray(parsed?.messages)) removed = parsed.messages.filter(isValidRecord).length;
+      } catch { /* 不存在或解析不了:按 0 条(读不出的话下面的删除也会失败) */ }
+    }
+    try {
+      await unlinkIfExists(MESSAGES_PATH);
+      cache = null; // 之后第一次用到时重新读盘:文件不存在 = 空表
+      let top = [];
+      try { top = await readdir(XS_DIR); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
+      for (const f of top) {
+        const t = TEMP_SUFFIX_RE.exec(f);
+        if (f.startsWith('messages.json.corrupt-') || (t && f.slice(0, t.index) === 'messages.json')) await unlinkIfExists(join(XS_DIR, f));
+      }
+      for (const f of (await bodiesDirEntries()) || []) {
+        const m = TEMP_SUFFIX_RE.exec(f);
+        if (isBodyFileName(m ? f.slice(0, m.index) : f)) await unlinkIfExists(join(BODIES_DIR, f));
+      }
+    } catch (e) {
+      throw new XsStorageError('xsession 清空失败', e);
+    }
+    return removed;
+  });
 }
 
 /** 读正文;已删除、不存在或 id 形状不对 → null。 */

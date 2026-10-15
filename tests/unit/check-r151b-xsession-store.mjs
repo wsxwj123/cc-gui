@@ -191,7 +191,7 @@ try {
     else ok(typeof r.body.error === 'string' && r.body.error.length > 0, `${what}:error 非空`);
   };
   try {
-    const DEFAULT_CFG = { enabled: false, limits: { bodyBytes: 32768, pendingPerSession: 50 }, nativeGuard: { lastFailureAt: null } };
+    const DEFAULT_CFG = { enabled: false, limits: { bodyBytes: 32768, pendingPerSession: 50 }, nativeGuard: { lastFailureAt: null }, stored: { unfinished: 0 } };
     let r = await call('GET', '/api/xsession/config');
     eq([r.status, r.body], [200, DEFAULT_CFG], '没有偏好文件:默认值');
     const sid = randomUUID();

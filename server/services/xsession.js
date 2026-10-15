@@ -14,7 +14,7 @@ import { broadcast } from '../broadcast.js';
 import { readXsEnabledSync } from '../routes/prefs.js';
 import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, preToolUseGuardTimeoutAt } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
-import { XS_LIMITS, XS_STATUSES, XsStorageError, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
+import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
 import { buildXsEnvelope, neutralizeXsBody } from './xsession-envelope.js';
 
 export const XS_DISABLED_TEXT = '跨会话消息未开启';
@@ -287,6 +287,18 @@ export async function dropXsMessagesForSession(sessionId) {
   await announce(removed.map((m) => ({ ...m, status: 'dismissed', heldReason: null })));
   releaseTurnHooksIfIdle();
   return removed.length;
+}
+
+/**
+ * POST /api/xsession/clear 的业务(路由层已确认总开关关着):清空收件箱(记录、正文、损坏留存),返回删掉的消息总条数。
+ * 已兑换、还没结算的回合记录已不在,不会再结算:撤掉它们的定时器与登记。不广播(开关关着时界面不显示卡片与计数)。
+ */
+export async function clearAllXsMessages() {
+  const removed = await clearXsInbox();
+  for (const f of inflight.values()) clearTimeout(f.timer);
+  inflight.clear();
+  releaseTurnHooksIfIdle();
+  return removed;
 }
 
 // ── /chat 路由入口:兑换凭据、换成信封、绑定回合;回合开始补 xs_message;回合结束结算 ─────────────────

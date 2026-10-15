@@ -6,10 +6,11 @@ import { isAuthorized } from '../services/auth.js';
 import { loadPrefs, readXsEnabledSync, updatePrefs } from './prefs.js';
 import { getActiveChatProcesses } from './chat.js';
 import { listProjects, listSessions, isSessionIdShape } from '../services/session-reader.js';
-import { XS_LIMITS, XsStorageError, pendingCountsBySession } from '../services/xsession-store.js';
+import { XS_LIMITS, XsStorageError, countUnfinishedXsMessages, pendingCountsBySession } from '../services/xsession-store.js';
 import {
   XS_DISABLED_TEXT, XS_STORAGE_FAILED_TEXT, XsError, parseManualSend, sendManualMessages, parseListQuery, listInboxMessages,
   pendingSummary, claimMessage, releaseMessage, dismissMessage, syncXsRuntimeHooks, noteNativeGuardFailure, nativeGuardLastFailure,
+  clearAllXsMessages,
 } from '../services/xsession.js';
 import { assignShortIds, selectXsSessions } from '../services/xsession-resolve.js';
 import { resolveSessionTitle } from '../utils/session-title.js';
@@ -23,13 +24,15 @@ export function xsError(res, status, code, error, extra) {
   return res.status(status).json({ ok: false, code, error, ...extra });
 }
 
-// config 两个接口不受总开关约束。判法与 Express 的路由匹配同口径(不分大小写、容忍结尾斜杠)。
+// 不受总开关约束的:config 两个接口、POST clear(它只在关着时可用)。判法与 Express 的路由匹配同口径(不分大小写、容忍结尾斜杠)。
 const CONFIG_PATH_RE = /^\/config\/?$/i;
+const CLEAR_PATH_RE = /^\/clear\/?$/i;
+const isClearRequest = (method, path) => method === 'POST' && CLEAR_PATH_RE.test(path);
 
-// 总开关闸门:关着时 /api/xsession/ 下除 config 以外的请求一律 409(含【二期】路径)。
+// 总开关闸门:关着时 /api/xsession/ 下除 config 与 POST clear 以外的请求一律 409(含【二期】路径)。
 // 按整个前缀判,而不是逐个接口挂:逐个挂时路径写法(大小写、结尾斜杠)与路由匹配稍有出入就会漏过闸门。
 router.use('/xsession', (req, res, next) => {
-  if (CONFIG_PATH_RE.test(req.path) || readXsEnabledSync()) return next();
+  if (CONFIG_PATH_RE.test(req.path) || isClearRequest(req.method, req.path) || readXsEnabledSync()) return next();
   return xsError(res, 409, 'XS_DISABLED', DISABLED_TEXT);
 });
 
@@ -38,14 +41,32 @@ router.use('/xsession', (req, res, next) => {
 export { noteNativeGuardFailure };
 
 // GET /api/xsession/config → 一期字段(autoPaused、autoBudget、limits 的另三项是【二期】,不出现)。
-// 偏好文件损坏或读不出 → readXsEnabledSync 给 false,照常 200。
-router.get('/xsession/config', (_req, res) => {
+// 偏好文件损坏或读不出 → readXsEnabledSync 给 false,照常 200。stored.unfinished:收件箱里未结束的消息条数,
+// 开关关着也给(设置块据此提示"仍有 N 条…"并给【清空】);只读,不产生任何文件,收件箱读不出时为 0。
+router.get('/xsession/config', async (_req, res) => {
+  const enabled = readXsEnabledSync();
+  const unfinished = await countUnfinishedXsMessages();
   res.json({
-    enabled: readXsEnabledSync(),
+    enabled,
     limits: { bodyBytes: XS_LIMITS.bodyBytes, pendingPerSession: XS_LIMITS.pendingPerSession },
     nativeGuard: { lastFailureAt: nativeGuardLastFailure() },
+    stored: { unfinished },
   });
 });
+
+// POST /api/xsession/clear —— 设置块的【清空】。只在总开关关着时可用;不需要请求体(给了也忽略)。
+// 删 ~/.claude-gui/xsession/ 下的收件箱记录、全部正文、损坏留存(messages.json.corrupt-*),回删掉的消息总条数。
+const CLEAR_WHILE_ENABLED_TEXT = '请先关闭跨会话消息，或在卡片上逐条处理';
+async function handleXsClear(_req, res) {
+  if (readXsEnabledSync()) return xsError(res, 409, 'XS_CLEAR_WHILE_ENABLED', CLEAR_WHILE_ENABLED_TEXT);
+  try {
+    res.json({ ok: true, removed: await clearAllXsMessages() });
+  } catch (e) {
+    console.warn(`[xsession] 清空收件箱失败:${e?.cause?.code || e?.code || e?.message || e}`);
+    xsError(res, 500, 'STORAGE_WRITE_FAILED', STORAGE_FAILED_TEXT);
+  }
+}
+router.post('/xsession/clear', handleXsClear);
 
 // PUT /api/xsession/config { enabled } —— 一期只认 enabled;其它键(含二期的 autoPaused、chainLimit)一律 400,不写文件。
 router.put('/xsession/config', async (req, res) => {
@@ -211,13 +232,14 @@ router.get('/xsession/pending', async (_req, res) => {
 
 // index.js 的全局 JSON 解析器在路由之前跑:请求体不是 JSON、或是 "on" / null 这类非对象时直接进错误链,到不了上面的
 // 闸门与校验。这个错误处理器(index.js 挂在通用错误处理之前)把 /api/xsession/* 的请求体错误改回本节的错误体:
-// 总开关关着(config 除外)先回 409,否则解析失败回 400 XS_INVALID_INPUT。未通过鉴权的请求、其它路径、其它错误
+// POST clear 照常处理(它忽略请求体);总开关关着(config 除外)先回 409,否则解析失败回 400 XS_INVALID_INPUT。未通过鉴权的请求、其它路径、其它错误
 // 原样交给下一个错误处理器(未鉴权时不透露开关状态)。
 const XS_URL_RE = /^\/api\/xsession(\/[^?]*)?(?:\?|$)/i;
 export function xsessionBodyErrorHandler(err, req, res, next) {
   const m = XS_URL_RE.exec(req.originalUrl || '');
   const isBodyError = typeof err?.type === 'string' && err.status >= 400 && err.status < 500;
   if (!m || !isBodyError || res.headersSent || !isAuthorized(req)) return next(err);
+  if (isClearRequest(req.method, m[1] || '/')) return handleXsClear(req, res); // clear 本来就忽略请求体:解析不了也照常处理
   if (!CONFIG_PATH_RE.test(m[1] || '/') && !readXsEnabledSync()) return xsError(res, 409, 'XS_DISABLED', DISABLED_TEXT);
   if (err.type === 'entity.parse.failed') return xsError(res, 400, 'XS_INVALID_INPUT', '请求体不是合法的 JSON 对象');
   return next(err);
