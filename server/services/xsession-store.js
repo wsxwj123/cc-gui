@@ -6,7 +6,7 @@
 //   - 新消息先写正文、再写元数据:调用方拿到成功时两者都已在盘上;元数据写失败就删掉刚写的正文,整次不生效。
 //   - 一律"临时文件 + 改名"写入,进程内串行(一条 promise 链);目录 0700、文件 0600。
 //   - 全库最多留 500 条:超出时按到达先后删最旧的已结束消息,未结束的一条不删(宁可超出也不丢)。
-//   - 本进程第一次读盘时做恢复:遗留的 processing / claimed 一律退回 pending、原因 interrupted,不自动重跑
+//   - 本进程第一次读盘时做恢复:遗留的 processing / claimed / queued(r151c)一律退回 pending、原因 interrupted,不自动重跑
 //     (重跑可能把同一件事做两遍);同时清掉没有对应未结束消息的孤儿正文(上次在"改元数据"与"删正文"之间退出)
 //     和本模块自己留下的临时文件(上次在"写临时文件"与"改名"之间退出),以及保留满 7 天的损坏留存文件
 //     messages.json.corrupt-*(起算取修改时间与文件名里挪开时刻的较晚者;挪开时也把修改时间设成那一刻)。只认本模块的命名:正文只删 <消息id>.txt,
@@ -36,12 +36,16 @@ export const XS_STATUSES = ['pending', 'queued', 'claimed', 'processing', 'done'
 const OPEN_STATUSES = new Set(['pending', 'queued', 'claimed', 'processing']);
 export const isOpenStatus = (status) => OPEN_STATUSES.has(status);
 
-// 不可配置的固定值(接口 X.3.5)。
+// 不可配置的固定值(接口 X.3.5;r151c 加连锁深度、单回合发送数、全局自动处理次数与窗口)。
 export const XS_LIMITS = Object.freeze({
   bodyBytes: 32768,
   pendingPerSession: 50,
   targetsPerSend: 8,
   maxKept: 500,
+  chainDepth: 4,
+  sendsPerTurn: 16,
+  autoPerWindow: 20,
+  autoWindowMs: 600_000,
 });
 
 // 恢复时清掉的临时字段(见文件头)。
@@ -100,7 +104,8 @@ function isValidRecord(m) {
     && !!m.to && typeof m.to === 'object' && typeof m.to.sessionId === 'string';
 }
 
-// processing / claimed → pending + interrupted;via 保留(合法组合:出错退回时 via = 上次的方式)。
+// processing / claimed / queued(r151c)→ pending + interrupted;via 保留(合法组合:出错退回时 via = 上次的方式)。
+// queued 也转卡片:重启后不自动处理(用户常靠重启止损;与 processing 重启后转 interrupted 一致)。
 function recoverInterrupted(m) {
   m.status = 'pending';
   m.heldReason = 'interrupted';
@@ -139,7 +144,7 @@ async function loadIfNeeded() {
     }
   }
   for (const m of messages) {
-    if (m.status === 'processing' || m.status === 'claimed') { recoverInterrupted(m); dirty = true; }
+    if (m.status === 'processing' || m.status === 'claimed' || m.status === 'queued') { recoverInterrupted(m); dirty = true; }
   }
   if (dirty) {
     // 恢复结果写不进去也照样用内存里的:下一次成功的写会带上它;重启后会再恢复一遍,结果相同。
@@ -203,14 +208,16 @@ async function unlinkQuietly(file) {
   }
 }
 
-// 损坏留存文件(messages.json.corrupt-<挪开时刻的毫秒数>)保留 7 天;只删普通文件,不跟链接、不删目录。
+// 损坏留存文件(messages.json.corrupt-<挪开时刻的毫秒数>,r151c 起含 profiles.json.corrupt-*)保留 7 天;只删普通文件,不跟链接、不删目录。
 // r151c 先修 6:起算时刻 = max(修改时间, 文件名里的毫秒时间戳)。改名不改修改时间,挪开后设修改时间失败时它仍是原文件最后一次
 // 写入的时刻(可能早已超过 7 天,下次启动就被删);文件名里的就是挪开那一刻。取较晚的只会多留、不会早删;文件名后缀不是
 // 纯数字时只看修改时间。
 export const XS_CORRUPT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 const CORRUPT_PREFIX = 'messages.json.corrupt-';
+const PROFILES_CORRUPT_PREFIX = 'profiles.json.corrupt-';
+const corruptPrefixOf = (name) => [CORRUPT_PREFIX, PROFILES_CORRUPT_PREFIX].find((p) => name.startsWith(p)) || null;
 function corruptKeptSince(name, mtimeMs) {
-  const tail = name.slice(CORRUPT_PREFIX.length);
+  const tail = name.slice(corruptPrefixOf(name).length);
   const named = /^\d{1,16}$/.test(tail) ? Number(tail) : NaN;
   return Number.isFinite(named) ? Math.max(mtimeMs, named) : mtimeMs;
 }
@@ -219,7 +226,7 @@ async function sweepStaleCorruptFiles() {
   try { top = await readdir(XS_DIR); } catch { return; }
   const now = Date.now();
   for (const f of top) {
-    if (!f.startsWith(CORRUPT_PREFIX)) continue;
+    if (!corruptPrefixOf(f)) continue;
     try {
       const st = await lstat(join(XS_DIR, f));
       if (st.isFile() && now - corruptKeptSince(f, st.mtimeMs) > XS_CORRUPT_KEEP_MS) await unlink(join(XS_DIR, f));
@@ -420,7 +427,7 @@ export function mutateXsInbox(fn) {
 // model 为解析后的值),只用于重放;judge = { mode(解析后的界面档位), providerFp(provider 指纹,加盐摘要), recordedAt(ISO) },
 // 判定只读它。salt:本机首次需要时随机生成 32 字节(十六进制),随第一次写盘落下,不出本机。
 // 与收件箱共用同一条串行队列与"临时文件 + 改名"写法(目录 0700、文件 0600);只认白名单字段;内容没变不写盘;
-// 文件损坏时挪到 profiles.json.corrupt-<毫秒> 留证、从空开始。文件不存在时只读、删条目都不建任何东西。
+// 文件损坏时挪到 profiles.json.corrupt-<毫秒> 留证、从空开始(与收件箱的损坏留存同样保留 7 天,由启动清理删)。文件不存在时只读、删条目都不建任何东西。
 // 凭据明文不在这里:providerFp 是摘要,原文只在内存里参与计算(见 xsession-policy.js)。
 const PROFILES_PATH = join(XS_DIR, 'profiles.json');
 export const XS_PROFILE_REPLAY_KEYS = Object.freeze(['cwd', 'model', 'effort', 'addDirs', 'permissionMode', 'globalRead', 'appendSystemPrompt', 'promptSuggestions', 'keepAlive', 'maxBudgetUsd', 'genui']);
@@ -475,8 +482,14 @@ async function loadProfilesIfNeeded() {
       sessions = pickSessions(parsed.sessions);
     } else {
       const aside = `${PROFILES_PATH}.corrupt-${Date.now()}`;
-      try { await rename(PROFILES_PATH, aside); } catch {}
+      let moved = false;
+      try { await rename(PROFILES_PATH, aside); moved = true; } catch {}
       console.warn(`[xsession] profiles.json 无法解析,已移到 ${aside}`);
+      // 同收件箱:修改时间设成挪开这一刻,"保留 7 天"(启动清理)从这里算
+      if (moved) {
+        const now = new Date();
+        try { await utimes(aside, now, now); } catch (e) { console.warn(`[xsession] 损坏留存文件未能更新修改时间:${e.code || e.message}`); }
+      }
     }
   }
   profiles = { salt: salt || randomBytes(32).toString('hex'), sessions };
