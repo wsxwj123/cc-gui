@@ -3491,6 +3491,8 @@ function SessionHeaderMore({ children, forceOpenSignal = 0 }) {
       // Checkpoint 的弹层是 body portal(不在 wrap 内):点它不能收起本组,否则按钮先卸载、
       // 弹层随之消失,mousedown→click 之间条目点击直接失效。
       if (e.target?.closest?.('.glass-popover')) return;
+      // r151c:接收设置弹出的确认框(body 上单独挂的根)同理:点它不收起本组,确认后菜单里直接看到新值
+      if (e.target?.closest?.('[data-cgui-confirm]')) return;
       setOpen(false);
     };
     // R1:window 捕获(同 ThemeToggle,详见那里注释);stopPropagation 仍挡住会话级停止监听。
