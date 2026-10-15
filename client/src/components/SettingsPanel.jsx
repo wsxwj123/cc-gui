@@ -6,6 +6,7 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { desktopNotifyEnabled, NOTIFY_PREF_KEY } from '../utils/desktopNotify.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
+import { useXsEnabled, useXsGuardFailureAt, loadXsConfig, setXsEnabled } from '../utils/xsession.js';
 import EnvCheckPanel from './EnvCheckPanel.jsx';
 import { isImeReactKeydown } from '../utils/imeGuard.js';
 // R44:进程管理入口自坞 rail 收进本面板(高级 tab 内嵌),复用同一组件、不复制。
@@ -60,6 +61,7 @@ const SETTINGS_INDEX = [
   { id: 'set-prompt-snapshot', tab: 'session', title: '缓存优化', keys: '缓存 cache 前缀 动态 快照 snapshot 系统提示 carved slate toolsearch 工具搜索 mcp 阻塞 连接 nonblocking' },
   { id: 'set-auto-compact', tab: 'session', title: '自动压缩窗口', keys: '压缩 compact token 上下文 窗口' },
   { id: 'set-small-fast-model', tab: 'session', title: '轻量快速模型', keys: '模型 标题 haiku 快速 small fast' },
+  { id: 'set-xsession', tab: 'session', title: '跨会话消息', keys: '跨会话 消息 转发 卡片 其它会话 sendmessage 原生 引导 xsession' },
   // 修正批#7:Provider tab 已删——管理迁独立弹窗(顶栏 Provider 切换卡片底部「管理」
   // 打开;手机在 Provider/模型合并入口页内),设置里不再留双入口。环境变量编辑器迁 高级。
   { id: 'set-env-editor', tab: 'advanced', title: '环境变量', keys: 'env 变量 environment anthropic provider' },
@@ -2772,6 +2774,55 @@ function GeneralTab({ settings }) {
   );
 }
 
+// r151b 跨会话消息(一期):总开关、一期说明、原生 SendMessage 引导失效提示;没有连锁上限输入框(固定 4 次)。
+// 本块不受总开关门控(关着也要能看见、能打开)。开关的状态与接口调用都在 utils/xsession.js。
+const XSESSION_NOTICE = '开启后，你可以把回复转发给本机 CC-GUI 的其它会话，对方会话里会出现一张卡片，确认后才处理。GUI 会话之间经 CLI 原生通道直接发送的消息会被拒绝并提示改为转发。消息只在本机会话之间传递，对方处理时会随它的模型请求发给它所用的 provider。';
+function fmtXsGuardTime(iso) {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : String(iso);
+}
+function XsessionSettingsSection() {
+  const enabled = useXsEnabled();
+  const guardFailureAt = useXsGuardFailureAt();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  // 打开设置页时取一次:除总开关外还要 nativeGuard.lastFailureAt(WS xs:config 不带它)
+  useEffect(() => { void loadXsConfig(); }, []);
+  const toggle = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErr('');
+    const r = await setXsEnabled(!enabled);
+    if (!r.ok) setErr(r.error);
+    setBusy(false);
+  };
+  return (
+    <div data-testid="xsession-settings-section" className="bg-canvas-warm border border-canvas-deep rounded-lg">
+      <div className="px-3 py-2.5 flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-ink font-body font-medium">跨会话消息</div>
+          <div data-testid="xsession-notice" className="text-[10.5px] text-ink-faint font-body">{XSESSION_NOTICE}</div>
+        </div>
+        <button data-testid="xsession-toggle" role="switch" aria-checked={enabled} onClick={toggle} disabled={busy}
+          className={`shrink-0 w-9 h-5 rounded-full transition-colors relative disabled:opacity-50 disabled:cursor-not-allowed ${enabled ? 'bg-accent' : 'bg-ink-faint/30'}`}
+          title={enabled ? '已开启' : '已关闭'}>
+          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${enabled ? 'left-[18px]' : 'left-0.5'}`} />
+        </button>
+      </div>
+      {(guardFailureAt || err) && (
+        <div className="px-3 pb-2.5 space-y-1">
+          {guardFailureAt && (
+            <div data-testid="xsession-guard-warning" className="text-[10.5px] text-amber-700 font-body">
+              {`最近一次未能检查 CLI 原生消息的目标（${fmtXsGuardTime(guardFailureAt)}），GUI 会话之间的原生消息可能未被引导。`}
+            </div>
+          )}
+          {err && <div className="text-[11px] text-error font-body">{err}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SessionTab({ settings, onSave, onEnvPatch, saving }) {
   const env = settings?.env || {};
   return (
@@ -2784,6 +2835,7 @@ function SessionTab({ settings, onSave, onEnvPatch, saving }) {
       <div id="set-prompt-snapshot"><PromptCacheSnapshotToggle /></div>
       <div id="set-auto-compact"><AutoCompactWindowSelect settings={settings} onSave={onSave} saving={saving} /></div>
       <div id="set-small-fast-model"><SmallFastModelInput env={env} onEnvPatch={onEnvPatch} saving={saving} /></div>
+      <div id="set-xsession"><XsessionSettingsSection /></div>
     </div>
   );
 }

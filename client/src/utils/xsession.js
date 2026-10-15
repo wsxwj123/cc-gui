@@ -29,6 +29,8 @@ export const PEER_BODY_MISSING = '（内容未能解析）';
 
 export const useXsStore = create(() => ({
   enabled: false,
+  // GET config 的 nativeGuard.lastFailureAt(ISO 字符串或 null):设置块的引导失效提示用,不随总开关清空
+  guardFailureAt: null,
   pendingTotal: 0,
   pendingBySession: EMPTY_MAP, // { [sessionId]: 待处理条数 }
   pendingByProject: EMPTY_MAP, // { [项目目录(去尾部分隔符)]: 待处理条数 }
@@ -69,16 +71,29 @@ function applyEnabled(on) {
   for (const sid of watched.keys()) void refreshInbox(sid);
 }
 
-/** 读一次总开关;开着且原本就开着(如 WS 重连后)时顺带对账计数与已关注的收件箱。 */
+/** 读一次总开关(与引导失效时刻);开着且原本就开着(如 WS 重连后)时顺带对账计数与已关注的收件箱。 */
 export async function loadXsConfig() {
   const r = await xsRequest('GET', '/api/xsession/config');
   if (!r.ok || !r.body || typeof r.body.enabled !== 'boolean') return;
+  const guard = r.body.nativeGuard;
+  const failureAt = guard && typeof guard.lastFailureAt === 'string' && guard.lastFailureAt ? guard.lastFailureAt : null;
+  if (useXsStore.getState().guardFailureAt !== failureAt) useXsStore.setState({ guardFailureAt: failureAt });
   const was = useXsStore.getState().enabled;
   applyEnabled(r.body.enabled);
   if (r.body.enabled && was) {
     void refreshPending();
     for (const sid of watched.keys()) void refreshInbox(sid);
   }
+}
+
+/** 设置块的总开关:PUT /api/xsession/config { enabled }。成功后按应答收敛(随后到达的 WS xs:config 同值,幂等)。 */
+export async function setXsEnabled(on) {
+  const r = await xsRequest('PUT', '/api/xsession/config', { enabled: on === true });
+  if (r.ok && r.body && typeof r.body.enabled === 'boolean') {
+    applyEnabled(r.body.enabled);
+    return { ok: true };
+  }
+  return { ok: false, error: replyError(r, r.status === 0 ? '网络错误，未能保存' : '保存失败，请重试') };
 }
 
 // ── 待处理计数 ───────────────────────────────────────────────────────────────────
@@ -539,6 +554,7 @@ export function placeAnchoredPeers(list, chat) {
 
 // ── 订阅(选择器的默认值都是模块级常量:返回新引用会触发 React #185 整页白屏) ─────────────
 export const useXsEnabled = () => useXsStore((s) => s.enabled);
+export const useXsGuardFailureAt = () => useXsStore((s) => s.guardFailureAt);
 export const useXsInbox = (sid) => useXsStore((s) => (s.enabled && sid && s.inbox[sid]) || EMPTY_LIST);
 export const useXsBusy = (id) => useXsStore((s) => !!(id && s.busy[id]));
 export const useXsSessionPending = (sid) => useXsStore((s) => (s.enabled && sid ? s.pendingBySession[sid] || 0 : 0));
