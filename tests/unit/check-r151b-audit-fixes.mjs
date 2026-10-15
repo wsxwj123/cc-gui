@@ -397,7 +397,7 @@ try {
     setEnabled(false);
     r = await api('GET', '/xsession/config');
     eq([r.status, r.body.enabled, r.body.stored], [200, false, { unfinished: 2 }], '关着:stored.unfinished = 未结束条数(已结束的不算)');
-    eq(Object.keys(r.body).sort(), ['enabled', 'limits', 'nativeGuard', 'stored'], 'config 应答的键');
+    eq(Object.keys(r.body).sort(), ['autoBudget', 'autoPaused', 'enabled', 'limits', 'nativeGuard', 'stored'], 'config 应答的键(r151c 加 autoPaused、autoBudget)');
     eq((await api('GET', '/xsession/pending')).status, 409, '关着:其它接口照旧 409');
     eq([(await api('GET', '/xsession/clear')).status, (await api('PUT', '/xsession/clear', {})).status], [409, 409], '关着:clear 只放行 POST,别的方法照旧 409');
 
@@ -517,7 +517,7 @@ try {
     const by = Object.fromEntries(r.body.sessions.map((s) => [s.sessionId, s]));
     eq([by[s1]?.projectHash, by[s2]?.projectHash], [h1, h2], '每项的 projectHash = 项目目录的编码名');
     ok(r.body.sessions.every((s) => typeof s.projectHash === 'string' && s.projectHash.length > 0), '每项都带 projectHash');
-    eq(Object.keys(by[s1]).sort(), ['lastActivity', 'pending', 'project', 'projectHash', 'sessionId', 'shortId', 'state', 'title'], '单项的键(projectDir 等服务端字段不出现)');
+    eq(Object.keys(by[s1]).sort(), ['hasProfile', 'inbound', 'lastActivity', 'pending', 'project', 'projectHash', 'sessionId', 'shortId', 'state', 'title'], '单项的键(r151c 加 inbound / hasProfile;projectDir 等服务端字段不出现)');
     const hist = await api('GET', `/sessions/${s2}/messages?projectHash=${encodeURIComponent(by[s2].projectHash)}`);
     eq(hist.status, 200, '拿 projectHash 调既有历史接口能取到这个会话');
     r = await api('GET', `/xsession/sessions?ids=${s2}`);

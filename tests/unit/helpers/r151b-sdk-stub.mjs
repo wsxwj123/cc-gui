@@ -25,7 +25,8 @@ const calls = (globalThis.__r151bSdkCalls ||= []);
 
 // 可选控制 globalThis.__r151bSdkControl(只有 check-r151b-runtime-hooks 设它;没设 = 下面的原行为,基线照旧):
 //   throwOnQuery: true → 下一次 query() 直接抛错(进程起不来),用一次即复位;
-//   reply(input) → 'ok'(默认)| 'error'(结果为错误)| 'exit'(不给结果就结束)| 'hold'(不回应,直到被 abort)。
+//   reply(input) → 'ok'(默认)| 'error'(结果为错误)| 'exit'(不给结果就结束)| 'hold'(不回应,直到被 abort),
+//   或一个之后兑现为上述之一的 Promise(r151c:兑现前算回合在跑)。
 export function query({ prompt, options = {} } = {}) {
   const ctl = globalThis.__r151bSdkControl;
   if (ctl?.throwOnQuery) { ctl.throwOnQuery = false; throw new Error('r151b stub: query() 起不来'); }
@@ -54,7 +55,13 @@ export function query({ prompt, options = {} } = {}) {
           apiKeySource: 'none', claude_code_version: '0.0.0-r151b-stub', output_style: 'default',
         };
       }
-      const mode = typeof ctl?.reply === 'function' ? ctl.reply(next.value) : 'ok';
+      let mode = typeof ctl?.reply === 'function' ? ctl.reply(next.value) : 'ok';
+      // r151c:reply 可返回 Promise(到点才回应;被 abort 时按结束处理),用来模拟"会忙一阵的回合";返回字符串的照旧同步
+      if (mode && typeof mode.then === 'function') {
+        const r = await Promise.race([mode, aborted.then(() => 'aborted')]);
+        if (r === 'aborted') return;
+        mode = r;
+      }
       if (mode === 'exit') return;
       if (mode === 'hold') { await aborted; return; }
       yield {

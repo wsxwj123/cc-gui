@@ -1,16 +1,16 @@
 // r151b:跨会话消息的 HTTP 接口(接口 X.3.1)。挂在 /api 下,在 index.js 的 authMiddleware 之后(同既有鉴权)。
-// 错误体一律 { ok:false, code, error }。【二期】接口一期不存在(总开关开着时落到 404)。
+// 错误体一律 { ok:false, code, error }。r151c 起有【二期】字段与 PUT …/sessions/:id/inbound(接口 r151c §4)。
 import { Router } from 'express';
 import { broadcast } from '../broadcast.js';
 import { isAuthorized } from '../services/auth.js';
-import { loadPrefs, readXsEnabledSync, updatePrefs } from './prefs.js';
+import { loadPrefs, readXsEnabledSync, readXsPrefsSync, updatePrefs } from './prefs.js';
 import { getActiveChatProcesses } from './chat.js';
 import { listProjects, listSessions, isSessionIdShape } from '../services/session-reader.js';
-import { XS_LIMITS, XsStorageError, countUnfinishedXsMessages, pendingCountsBySession } from '../services/xsession-store.js';
+import { XS_LIMITS, XsStorageError, countUnfinishedXsMessages, pendingCountsBySession, readXsProfiles } from '../services/xsession-store.js';
 import {
   XS_DISABLED_TEXT, XS_STORAGE_FAILED_TEXT, XsError, parseManualSend, sendManualMessages, parseListQuery, listInboxMessages,
   pendingSummary, claimMessage, releaseMessage, dismissMessage, syncXsRuntimeHooks, noteNativeGuardFailure, nativeGuardLastFailure,
-  clearAllXsMessages,
+  clearAllXsMessages, xsAutoState, resumeXsAuto, kickAllXsQueued, noteXsInboundChanged, profileIsCurrent,
 } from '../services/xsession.js';
 import { assignShortIds, selectXsSessions } from '../services/xsession-resolve.js';
 import { resolveSessionTitle } from '../utils/session-title.js';
@@ -40,15 +40,22 @@ router.use('/xsession', (req, res, next) => {
 // (引导守卫在那里;从这里 import 回去会成环),这里转出原名。
 export { noteNativeGuardFailure };
 
-// GET /api/xsession/config → 一期字段(autoPaused、autoBudget、limits 的另三项是【二期】,不出现)。
+// GET /api/xsession/config → 一期字段 + 二期的 autoPaused、autoBudget、limits 的另三项。
 // 偏好文件损坏或读不出 → readXsEnabledSync 给 false,照常 200。stored.unfinished:收件箱里未结束的消息条数,
 // 开关关着也给(设置块据此提示"仍有 N 条…"并给【清空】);只读,不产生任何文件,收件箱读不出时为 0。
+// autoPaused:偏好里的 xsAutoPaused(非布尔按 false)或本进程触顶时的暂停;autoBudget.used 是内存计数,服务重启清零。
 router.get('/xsession/config', async (_req, res) => {
   const enabled = readXsEnabledSync();
   const unfinished = await countUnfinishedXsMessages();
+  const auto = xsAutoState();
   res.json({
     enabled,
-    limits: { bodyBytes: XS_LIMITS.bodyBytes, pendingPerSession: XS_LIMITS.pendingPerSession },
+    autoPaused: auto.paused,
+    autoBudget: { limit: XS_LIMITS.autoPerWindow, windowMs: XS_LIMITS.autoWindowMs, used: auto.used },
+    limits: {
+      bodyBytes: XS_LIMITS.bodyBytes, pendingPerSession: XS_LIMITS.pendingPerSession,
+      chainDepth: XS_LIMITS.chainDepth, targetsPerSend: XS_LIMITS.targetsPerSend, sendsPerTurn: XS_LIMITS.sendsPerTurn,
+    },
     nativeGuard: { lastFailureAt: nativeGuardLastFailure() },
     stored: { unfinished },
   });
@@ -68,26 +75,41 @@ async function handleXsClear(_req, res) {
 }
 router.post('/xsession/clear', handleXsClear);
 
-// PUT /api/xsession/config { enabled } —— 一期只认 enabled;其它键(含二期的 autoPaused、chainLimit)一律 400,不写文件。
+// PUT /api/xsession/config { enabled?, autoPaused? } —— 认 enabled(布尔)与 autoPaused(只能是 false = 恢复自动处理),
+// 至少给一个、可同时给,一次偏好写入完成;其它键(含 chainLimit)、autoPaused:true 一律 400,不写文件、不广播。
+// 写盘失败 → 500,enabled / autoPaused / 启用时刻都不变、不广播、10 分钟窗口不清。应答 { ok, enabled, autoPaused },广播 xs:config 同值。
+const CONFIG_KEYS = new Set(['enabled', 'autoPaused']);
 router.put('/xsession/config', async (req, res) => {
   const body = req.body;
   const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : null;
-  if (!keys || keys.length === 0 || keys.some((k) => k !== 'enabled') || typeof body.enabled !== 'boolean') {
-    return xsError(res, 400, 'XS_INVALID_INPUT', '请求体须为 { enabled: 布尔值 }，不能带其它键');
+  if (!keys || keys.length === 0 || keys.some((k) => !CONFIG_KEYS.has(k))
+    || ('enabled' in body && typeof body.enabled !== 'boolean') || ('autoPaused' in body && body.autoPaused !== false)) {
+    return xsError(res, 400, 'XS_INVALID_INPUT', '请求体须为 { enabled?: 布尔值, autoPaused?: false }，至少给一个，不能带其它键');
   }
-  const { enabled } = body;
+  const resume = body.autoPaused === false;
+  let enabled = false;
+  let turnedOn = false;
   try {
     // r151c:由关变开的同一次写入里记启用时刻 —— 之前记下的发送档案从此不再算数(见 xsession.js profileIsCurrent)
     await updatePrefs((prefs) => {
-      if (enabled && prefs.xsEnabled !== true) prefs.xsEnabledAt = new Date().toISOString();
-      prefs.xsEnabled = enabled;
+      const was = prefs.xsEnabled === true;
+      if (typeof body.enabled === 'boolean') {
+        if (body.enabled && !was) prefs.xsEnabledAt = new Date().toISOString();
+        prefs.xsEnabled = body.enabled;
+      }
+      if (resume) delete prefs.xsAutoPaused;
+      enabled = prefs.xsEnabled === true;
+      turnedOn = enabled && !was;
     });
   } catch {
     return xsError(res, 500, 'STORAGE_WRITE_FAILED', STORAGE_FAILED_TEXT);
   }
+  if (resume) resumeXsAuto(); // 清内存暂停与 10 分钟窗口,对有 queued 的会话评估一次
   syncXsRuntimeHooks(enabled); // 开着才挂回合开始 / 结束钩子(关着时只留 /chat 入口钩子)
-  broadcast({ type: 'xs:config', enabled });
-  res.json({ ok: true, enabled });
+  if (turnedOn && !resume) kickAllXsQueued(); // 关着时排着的(若有)按去向表重判
+  const autoPaused = xsAutoState().paused;
+  broadcast({ type: 'xs:config', enabled, autoPaused });
+  res.json({ ok: true, enabled, autoPaused });
 });
 
 // ── GET /api/xsession/sessions?query=&limit=&exclude=&ids= ─────────────────────────────────────
@@ -153,7 +175,7 @@ function parseSessionsQuery(q) {
 
 // 已落盘会话的行(按最近活动倒序、同 id 只留最近的一条),sessions 接口与转发接口共用:转发能发到的目标,
 // 就是转发对话框里列得出来的会话。projectDir 只给服务端用(转发时记进消息,GET /api/xsession/pending 用),不进应答。
-async function loadSessionRows() {
+export async function loadSessionRows() {
   const [all, prefs, pending] = await Promise.all([listAllSessions(), loadPrefs(), pendingCountsBySession()]);
   const customTitles = prefs?.customTitles && typeof prefs.customTitles === 'object' ? prefs.customTitles : {};
   const autoTitles = prefs?.autoTitles && typeof prefs.autoTitles === 'object' ? prefs.autoTitles : {};
@@ -190,9 +212,55 @@ router.get('/xsession/sessions', async (req, res) => {
     return xsError(res, 500, 'XS_LIST_FAILED', '读取会话列表失败');
   }
   const shortIds = assignShortIds(rows.map((r) => r.sessionId)); // 冲突按全部会话判,筛选之前算
+  // r151c:inbound(接收设置,xsInbound 里记为 auto 的才是 auto)、hasProfile(有本次启用之后记录的发送档案;不看 provider 是否已换)
+  const prefs = readXsPrefsSync();
+  const inboundIds = new Set(Object.keys(prefs.inbound).map((k) => k.toLowerCase()));
+  let profiled = new Set();
+  try {
+    const { sessions: profiles } = await readXsProfiles();
+    profiled = new Set(Object.entries(profiles).filter(([, p]) => profileIsCurrent(p, prefs.enabledAt)).map(([k]) => k.toLowerCase()));
+  } catch (e) { console.warn(`[xsession] 读发送档案失败,hasProfile 按 false:${e?.code || e?.message || e}`); }
   const sessions = selectXsSessions(rows.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), opts)
-    .map(({ sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity }) => ({ sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity }));
+    .map(({ sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity }) => ({
+      sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity,
+      inbound: inboundIds.has(sessionId.toLowerCase()) ? 'auto' : 'card', hasProfile: profiled.has(sessionId.toLowerCase()),
+    }));
   res.json({ sessions });
+});
+
+// PUT /api/xsession/sessions/:id/inbound { mode:'card'|'auto' } —— 接收设置。判定顺序(接口 r151c §4 错误总表):总开关关 → 409
+// (前缀闸门)→ id 形状 / 请求体 / mode → 400 → 会话不在会话列表的认定里 → 404 → 读会话列表失败 → 500 XS_LIST_FAILED →
+// 写偏好失败 → 500 STORAGE_WRITE_FAILED;失败时设置不变、不广播。auto 写键、card 删键(会话 id 不分大小写)。
+// 成功:广播 xs:inbound,改成 card 时该会话排着的消息立即重判(落 target-card)。
+const INBOUND_MODES = new Set(['card', 'auto']);
+router.put('/xsession/sessions/:id/inbound', async (req, res) => {
+  const id = req.params.id;
+  const body = req.body;
+  if (!isSessionIdShape(id) || !body || typeof body !== 'object' || Array.isArray(body)
+    || Object.keys(body).some((k) => k !== 'mode') || !INBOUND_MODES.has(body.mode)) {
+    return xsError(res, 400, 'XS_INVALID_INPUT', '会话 id 形状不对，或请求体须为 { mode: "card" | "auto" }');
+  }
+  let rows;
+  try { rows = await loadSessionRows(); } catch {
+    return xsError(res, 500, 'XS_LIST_FAILED', '读取会话列表失败');
+  }
+  const row = rows.find((r) => r.sessionId.toLowerCase() === id.toLowerCase());
+  if (!row) return xsError(res, 404, 'XS_TARGET_NOT_FOUND', '目标会话不存在');
+  const { mode } = body;
+  try {
+    await updatePrefs((prefs) => {
+      const inbound = prefs.xsInbound && typeof prefs.xsInbound === 'object' && !Array.isArray(prefs.xsInbound) ? prefs.xsInbound : {};
+      for (const k of Object.keys(inbound)) if (k.toLowerCase() === row.sessionId.toLowerCase()) delete inbound[k];
+      if (mode === 'auto') inbound[row.sessionId] = 'auto';
+      if (Object.keys(inbound).length) prefs.xsInbound = inbound;
+      else delete prefs.xsInbound;
+    });
+  } catch {
+    return xsError(res, 500, 'STORAGE_WRITE_FAILED', STORAGE_FAILED_TEXT);
+  }
+  broadcast({ type: 'xs:inbound', sessionId: row.sessionId, mode });
+  noteXsInboundChanged(row.sessionId);
+  res.json({ ok: true, sessionId: row.sessionId, mode });
 });
 
 // ── 转发、收件列表、认领 / 撤回 / 忽略、待处理计数(接口 X.3.1;业务在 services/xsession.js)──────────────

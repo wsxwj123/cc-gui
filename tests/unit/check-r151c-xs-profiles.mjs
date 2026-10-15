@@ -133,7 +133,7 @@ try {
   // ── ④ 启用时刻 ──────────────────────────────────────────────────────────────────────
   let t0 = Date.now();
   let r = await call('PUT', '/xsession/config', { enabled: true });
-  eq(r, { status: 200, body: { ok: true, enabled: true } }, '应答仍是一期形状');
+  eq(r, { status: 200, body: { ok: true, enabled: true, autoPaused: false } }, '应答形状(派工 3 起多 autoPaused)');
   const at1 = prefsFile().xsEnabledAt;
   ok(typeof at1 === 'string' && Date.parse(at1) >= t0 - 5 && Date.parse(at1) <= Date.now() + 5, '由关变开记下启用时刻');
   await sleep(5);

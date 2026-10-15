@@ -191,7 +191,8 @@ try {
     else ok(typeof r.body.error === 'string' && r.body.error.length > 0, `${what}:error 非空`);
   };
   try {
-    const DEFAULT_CFG = { enabled: false, limits: { bodyBytes: 32768, pendingPerSession: 50 }, nativeGuard: { lastFailureAt: null }, stored: { unfinished: 0 } };
+    // r151c 起 config 多 autoPaused、autoBudget 与 limits 的另三项(接口 r151c §5 第 1 条)
+    const DEFAULT_CFG = { enabled: false, autoPaused: false, autoBudget: { limit: 20, windowMs: 600000, used: 0 }, limits: { bodyBytes: 32768, pendingPerSession: 50, chainDepth: 4, targetsPerSend: 8, sendsPerTurn: 16 }, nativeGuard: { lastFailureAt: null }, stored: { unfinished: 0 } };
     let r = await call('GET', '/api/xsession/config');
     eq([r.status, r.body], [200, DEFAULT_CFG], '没有偏好文件:默认值');
     const sid = randomUUID();
@@ -221,7 +222,8 @@ try {
     const prefsBefore = readFileSync(PREFS, 'utf8');
     for (const [label, b, raw] of [
       ['数组', '[]', true], ['字符串', '"on"', true], ['null', 'null', true], ['数字', '5', true], ['空对象', {}],
-      ['带 autoPaused', { enabled: true, autoPaused: false }], ['只有 autoPaused', { autoPaused: false }],
+      // r151c(接口 §5 第 2 条):autoPaused:false 改为合法(200),autoPaused:true 仍 400
+      ['autoPaused:true', { autoPaused: true }], ['enabled + autoPaused:true', { enabled: true, autoPaused: true }],
       ['chainLimit', { enabled: true, chainLimit: 3 }], ['未知键', { enabled: false, foo: 1 }], ['__proto__ 键', '{"__proto__":{"x":1},"enabled":true}', true],
       ['enabled 字符串', { enabled: 'true' }], ['enabled 数字', { enabled: 1 }], ['enabled null', { enabled: null }],
     ]) {
@@ -234,13 +236,13 @@ try {
 
     // PUT 成功:写偏好(保留其它键)+ 广播(一期没有 autoPaused)
     r = await call('PUT', '/api/xsession/config', { enabled: true });
-    eq([r.status, r.body], [200, { ok: true, enabled: true }], 'PUT enabled:true');
-    eq(bc.filter((m) => m.type === 'xs:config'), [{ type: 'xs:config', enabled: true }], '广播 xs:config');
+    eq([r.status, r.body], [200, { ok: true, enabled: true, autoPaused: false }], 'PUT enabled:true');
+    eq(bc.filter((m) => m.type === 'xs:config'), [{ type: 'xs:config', enabled: true, autoPaused: false }], '广播 xs:config');
     const saved = JSON.parse(readFileSync(PREFS, 'utf8'));
     eq([saved.xsEnabled, saved.other, saved.releaseNotesSeen], [true, { a: 1 }, '0.2.421'], '只改 xsEnabled');
     eq((await call('GET', '/api/xsession/config')).body.enabled, true, '之后 GET 为 true');
     r = await call('PUT', `/api/xsession/sessions/${sid}/inbound`, { mode: 'auto' });
-    ok(r.status === 404 && !String(r.body?.code || '').startsWith('XS_'), '开着:【二期】接口 404(不是本节错误体)');
+    isErr(r, 404, 'XS_TARGET_NOT_FOUND', '开着:PUT …/inbound 对不存在的会话 → 404(r151c 起接口存在,接口 §5 第 3 条)');
     isErr(await call('POST', '/api/xsession/messages', '{ bad json', true), 400, 'XS_INVALID_INPUT', '开着:畸形 JSON → 400');
 
     // 写盘失败 → 500 STORAGE_WRITE_FAILED,不广播,开关不变
@@ -253,7 +255,7 @@ try {
     eq((await call('GET', '/api/xsession/config')).body.enabled, true, '写盘失败后开关不变');
 
     r = await call('PUT', '/api/xsession/config', { enabled: false });
-    eq([r.status, r.body, bc.at(-1)], [200, { ok: true, enabled: false }, { type: 'xs:config', enabled: false }], 'PUT enabled:false');
+    eq([r.status, r.body, bc.at(-1)], [200, { ok: true, enabled: false, autoPaused: false }, { type: 'xs:config', enabled: false, autoPaused: false }], 'PUT enabled:false');
     ok(!existsSync(XS), '整段路由测试没有产生 ~/.claude-gui/xsession/');
   } finally {
     await new Promise((r) => server.close(r));
