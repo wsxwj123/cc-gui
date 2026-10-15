@@ -11,9 +11,17 @@
 //   · pending*:GET /api/xsession/pending 的计数(只数 status 为 pending 的),侧栏会话行、项目行与 Dock 共用。
 // xs:message 不带正文:已知的消息只就地合并状态(保留已有正文);没见过的消息要正文时才重拉该会话的列表。
 // 不做"收到事件就整表重拉"—— 那会让卡片在用户眼前按别的消息的事件跳变,也掩盖接口 409 的刷新路径。
+//
+// r151c 二期:
+//   · autoPaused / autoUsed / autoLimit:GET config 的 autoPaused 与 autoBudget;暂停与恢复只经 WS xs:config(没有 xs:paused)。
+//   · inboundBySession[sid]:接收设置('card' | 'auto'),只为"更多"菜单里正显示接收设置的会话去取;WS xs:inbound 按事件里的
+//     sessionId 收敛。inboundError[sid]:改接收设置失败的提示(会话头下方显示)。
+//   · WS xs:turn(服务端为某会话开始了自动处理的回合):只当"立刻探测一次后台运行"的触发器,各窗格按自己的会话认领。
+//   · 断线重连后重取 config、正显示的接收设置与卡片(loadXsConfig)。
 import { create } from 'zustand';
 import { useStore } from '../stores/sessionStore.js';
 import { setXsDockExtra } from './attention.js';
+import { fetchAgentsActiveFresh } from './agentsActivePoller.js';
 
 const SID_RE = /^[0-9a-fA-F-]{36}$/; // 既有判据:36 位、只含十六进制字符与连字符(消息 id 同形)
 export const isXsId = (v) => typeof v === 'string' && SID_RE.test(v);
@@ -39,6 +47,12 @@ export const useXsStore = create(() => ({
   pendingByProject: EMPTY_MAP, // { [项目目录(去尾部分隔符)]: 待处理条数 }
   inbox: EMPTY_MAP, // { [sessionId]: 消息对象[] }
   busy: EMPTY_MAP, // { [messageId]: true } 卡片按钮的请求在路上
+  // r151c:GET config 的 autoPaused(服务端状态,不随总开关清空;界面只在开着时显示)与 autoBudget
+  autoPaused: false,
+  autoUsed: 0,
+  autoLimit: 20,
+  inboundBySession: EMPTY_MAP, // { [sessionId]: 'card' | 'auto' }(取到过的才有)
+  inboundError: EMPTY_MAP, // { [sessionId]: 提示文案 }
 }));
 
 // ── 接口调用(不抛错;网络失败 status 为 0) ─────────────────────────────────────
@@ -66,16 +80,34 @@ function applyEnabled(on) {
   const next = on === true;
   if (useXsStore.getState().enabled === next) return;
   if (!next) {
-    useXsStore.setState({ enabled: false, pendingTotal: 0, pendingBySession: EMPTY_MAP, pendingByProject: EMPTY_MAP, inbox: EMPTY_MAP, busy: EMPTY_MAP });
+    heldClaims.clear();
+    useXsStore.setState({ enabled: false, pendingTotal: 0, pendingBySession: EMPTY_MAP, pendingByProject: EMPTY_MAP, inbox: EMPTY_MAP, busy: EMPTY_MAP, inboundBySession: EMPTY_MAP, inboundError: EMPTY_MAP });
     return;
   }
   useXsStore.setState({ enabled: true });
   void refreshPending();
   for (const sid of watched.keys()) void refreshInbox(sid);
+  for (const sid of watchedInbound.keys()) void refreshInbound(sid);
 }
 
-/** 读一次总开关(与引导失效时刻);开着且原本就开着(如 WS 重连后)时顺带对账计数与已关注的收件箱。 */
-export async function loadXsConfig() {
+// GET config / WS xs:config 的 autoPaused、autoBudget(r151c)。值没变不写,订阅它们的界面不白重渲。
+function applyAutoState(body) {
+  const patch = {};
+  const cur = useXsStore.getState();
+  if (typeof body.autoPaused === 'boolean' && body.autoPaused !== cur.autoPaused) patch.autoPaused = body.autoPaused;
+  const b = body.autoBudget;
+  if (b && typeof b === 'object') {
+    if (Number.isInteger(b.used) && b.used >= 0 && b.used !== cur.autoUsed) patch.autoUsed = b.used;
+    if (Number.isInteger(b.limit) && b.limit > 0 && b.limit !== cur.autoLimit) patch.autoLimit = b.limit;
+  }
+  if (Object.keys(patch).length) useXsStore.setState(patch);
+}
+
+/**
+ * 读一次 config(总开关、引导失效时刻、残留条数、自动处理的暂停与计数);开着且原本就开着(如 WS 重连后)时顺带对账
+ * 计数、已关注的收件箱与正显示的接收设置。reconcile:false 只读 config 不对账(设置块每 60 秒的重取用)。
+ */
+export async function loadXsConfig({ reconcile = true } = {}) {
   const r = await xsRequest('GET', '/api/xsession/config');
   if (!r.ok || !r.body || typeof r.body.enabled !== 'boolean') return;
   const guard = r.body.nativeGuard;
@@ -84,12 +116,28 @@ export async function loadXsConfig() {
   const n = r.body.stored && r.body.stored.unfinished;
   const unfinished = Number.isInteger(n) && n > 0 ? n : 0;
   if (useXsStore.getState().storedUnfinished !== unfinished) useXsStore.setState({ storedUnfinished: unfinished });
+  applyAutoState(r.body);
   const was = useXsStore.getState().enabled;
   applyEnabled(r.body.enabled);
-  if (r.body.enabled && was) {
+  if (r.body.enabled && was && reconcile) {
     void refreshPending();
     for (const sid of watched.keys()) void refreshInbox(sid);
+    for (const sid of watchedInbound.keys()) void refreshInbound(sid);
   }
+}
+
+/**
+ * 【恢复自动处理】(暂停提示条与设置块共用):PUT /api/xsession/config { autoPaused:false }。成功后按应答收敛,再重取一次
+ * config(服务端恢复时清空了 10 分钟窗口,计数要跟着回到 0)。返回 { ok:true } / { ok:false, error:"没有恢复：<原因>" }。
+ */
+export async function resumeXsAuto() {
+  const r = await xsRequest('PUT', '/api/xsession/config', { autoPaused: false });
+  if (r.ok && r.body && r.body.ok === true) {
+    applyAutoState({ autoPaused: r.body.autoPaused === true });
+    await loadXsConfig({ reconcile: false });
+    return { ok: true };
+  }
+  return { ok: false, error: `没有恢复：${replyError(r, r.status === 0 ? '网络错误' : '请求失败')}` };
 }
 
 /** 设置块的总开关:PUT /api/xsession/config { enabled }。成功后按应答收敛(随后到达的 WS xs:config 同值,幂等)。 */
@@ -236,6 +284,7 @@ function mergeXsMessage(m) {
   if (!m || typeof m !== 'object' || !isXsId(m.id)) return;
   const sid = m.to && m.to.sessionId;
   if (!isXsId(sid) || !useXsStore.getState().enabled) return;
+  if (m.status !== 'claimed') heldClaims.delete(m.id); // 已不是认领态(撤回 / 忽略 / 兑换 / 重启转回):先领的凭据作废
   schedulePendingRefresh();
   bumpEpoch(sid);
   const list = useXsStore.getState().inbox[sid];
@@ -248,17 +297,101 @@ function mergeXsMessage(m) {
   if (ACTIVE_STATUSES.has(m.status) && watched.has(sid)) void refreshInbox(sid);
 }
 
-/** useWebSocket 的分发入口:只认 xs:config / xs:message。 */
+// ── 接收设置(r151c;"更多"菜单里的 xs-inbound-select) ─────────────────────────────────────
+const INBOUND_MODES = new Set(['card', 'auto']);
+const watchedInbound = new Map(); // sessionId → 关注计数(菜单打开时关注;分屏里同一会话可能两处同时打开)
+const inboundSeq = new Map(); // sessionId → 本地改动序号:取的途中本地改过(或收到 xs:inbound)就不拿旧应答覆盖
+
+function patchSessionMap(key, sid, value) {
+  const cur = useXsStore.getState()[key];
+  if (value === undefined ? !(sid in cur) : cur[sid] === value) return;
+  const next = { ...cur };
+  if (value === undefined) delete next[sid]; else next[sid] = value;
+  useXsStore.setState({ [key]: Object.keys(next).length ? next : EMPTY_MAP });
+}
+const setInboundMode = (sid, mode) => {
+  inboundSeq.set(sid, (inboundSeq.get(sid) || 0) + 1);
+  patchSessionMap('inboundBySession', sid, mode);
+};
+
+async function refreshInbound(sid) {
+  if (!isXsId(sid) || !useXsStore.getState().enabled) return;
+  const seq0 = inboundSeq.get(sid) || 0;
+  const r = await xsRequest('GET', `/api/xsession/sessions?ids=${encodeURIComponent(sid)}`);
+  if (isDisabledReply(r)) { applyEnabled(false); return; }
+  if (!r.ok || !r.body || !Array.isArray(r.body.sessions) || !useXsStore.getState().enabled) return;
+  if ((inboundSeq.get(sid) || 0) !== seq0) return; // 途中本地改过 / 收到了 xs:inbound:以它为准
+  const it = r.body.sessions.find((s) => s && typeof s.sessionId === 'string' && s.sessionId.toLowerCase() === sid.toLowerCase());
+  if (it && INBOUND_MODES.has(it.inbound)) patchSessionMap('inboundBySession', sid, it.inbound);
+}
+
+/** 接收设置的下拉框挂载时调用:关注该会话的接收设置并取一次;返回取消关注函数。 */
+export function watchXsInbound(sid) {
+  if (!isXsId(sid)) return () => {};
+  watchedInbound.set(sid, (watchedInbound.get(sid) || 0) + 1);
+  void refreshInbound(sid);
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    const n = (watchedInbound.get(sid) || 1) - 1;
+    if (n <= 0) watchedInbound.delete(sid); else watchedInbound.set(sid, n);
+  };
+}
+
+/**
+ * 改接收设置:PUT /api/xsession/sessions/:id/inbound { mode }。先按新值显示,失败时回到原值并记下提示
+ * "接收设置没有保存：<原因>"(会话头下方显示,下次改动或收到该会话的 xs:inbound 时清掉)。确认框由调用方先弹。
+ * 返回 { ok:true } / { ok:false, error }。
+ */
+export async function setXsInbound(sid, mode) {
+  if (!isXsId(sid) || !INBOUND_MODES.has(mode) || !useXsStore.getState().enabled) return { ok: false, error: '' };
+  const before = useXsStore.getState().inboundBySession[sid];
+  patchSessionMap('inboundError', sid, undefined);
+  setInboundMode(sid, mode);
+  const r = await xsRequest('PUT', `/api/xsession/sessions/${encodeURIComponent(sid)}/inbound`, { mode });
+  if (r.ok && r.body && r.body.ok === true && INBOUND_MODES.has(r.body.mode)) {
+    setInboundMode(sid, r.body.mode);
+    return { ok: true };
+  }
+  if (isDisabledReply(r)) { applyEnabled(false); return { ok: false, error: '' }; }
+  setInboundMode(sid, before); // before 为 undefined(没取到过)时删掉:下拉框回到"未知"再去取
+  if (before === undefined) void refreshInbound(sid);
+  const error = `接收设置没有保存：${replyError(r, r.status === 0 ? '网络错误' : '请求失败')}`;
+  patchSessionMap('inboundError', sid, error);
+  return { ok: false, error };
+}
+
+/** 会话头下方的提示条点 ✕:清掉该会话改接收设置失败的提示。 */
+export function clearXsInboundError(sid) {
+  if (isXsId(sid)) patchSessionMap('inboundError', sid, undefined);
+}
+
+/** useWebSocket 的分发入口:认 xs:config / xs:message / xs:turn / xs:inbound,一律按事件自带的会话 id 收敛,不读当前选中会话。 */
 export function handleXsWsEvent(data) {
   if (!data || typeof data !== 'object') return;
   if (data.type === 'xs:config') {
+    const pausedBefore = useXsStore.getState().autoPaused;
+    applyAutoState(data);
     if (typeof data.enabled === 'boolean') {
       applyEnabled(data.enabled);
-      if (!data.enabled) void loadXsConfig(); // 别处关了开关:取一次残留条数(设置块的提示)
+      if (!data.enabled) { void loadXsConfig(); return; } // 别处关了开关:取一次残留条数(设置块的提示)
     }
+    // 暂停 / 恢复:计数跟着变(恢复时服务端清空了窗口),重取一次 config
+    if (useXsStore.getState().autoPaused !== pausedBefore && useXsStore.getState().enabled) void loadXsConfig({ reconcile: false });
     return;
   }
-  if (data.type === 'xs:message') mergeXsMessage(data.message);
+  if (data.type === 'xs:message') { mergeXsMessage(data.message); return; }
+  if (!useXsStore.getState().enabled || !isXsId(data.sessionId)) return;
+  if (data.type === 'xs:inbound') {
+    if (!INBOUND_MODES.has(data.mode)) return;
+    setInboundMode(data.sessionId, data.mode);
+    patchSessionMap('inboundError', data.sessionId, undefined);
+    return;
+  }
+  // 服务端为 data.sessionId 开始了自动处理的回合:立刻探测一次后台运行(与轮询共用请求),
+  // 显示这个会话的窗格据此把它显示为后台在跑并重新接流;别的窗格只看自己的会话,不受影响。
+  if (data.type === 'xs:turn') fetchAgentsActiveFresh().catch(() => {});
 }
 
 /**
@@ -323,8 +456,42 @@ export async function processXsMessage({ sessionId, messageId, send, isStillOn }
   if (!useXsStore.getState().enabled || !isXsId(sessionId) || !isXsId(messageId) || typeof send !== 'function') return { ok: false, error: '' };
   if (useXsStore.getState().busy[messageId] || queueHasXsProcess(useStore.getState().messageQueue, messageId)) return { ok: false, error: '' };
   if (typeof isStillOn === 'function' && !isStillOn()) return { ok: false, error: '' };
+  const cur = (useXsStore.getState().inbox[sessionId] || EMPTY_LIST).find((m) => m.id === messageId);
+  if (cur && cur.status === 'queued') {
+    const held = await holdQueuedForManual(sessionId, messageId);
+    if (!held.ok) return held;
+    if (typeof isStillOn === 'function' && !isStillOn()) { // 认领途中本窗格换了会话:交还(退回卡片),不发
+      heldClaims.delete(messageId);
+      void xsRequest('POST', `/api/xsession/messages/${messageId}/release`).then(() => refreshInbox(sessionId));
+      return { ok: false, error: '' };
+    }
+  }
   Promise.resolve().then(() => send(XS_PROMPT_PLACEHOLDER, { hiddenUserMessage: true, xsProcess: { messageId, sessionId } })).catch(() => { void refreshInbox(sessionId); });
   return { ok: true };
+}
+
+// r151c P22:服务端排着等自动处理的消息(queued)点【处理】= 取消自动处理、改由人处理。必须在点下的那一刻就让服务端停止
+// 对它的自动处理 —— 只靠前端排队去抢先不行:目标会话的回合一结束,调度器会先把它自动处理掉。所以此刻就认领(queued → claimed;
+// 调度器只投 queued)。拿到的一次性凭据只记在本模块的内存里(heldClaims),不进 opts / 排队 / 任何持久存储(审计 F1);
+// 真正发出时 claimXsForSend 取用。页面刷新后内存里的凭据就没了:卡片停在"等待发送",【撤回】后可重新处理。
+const heldClaims = new Map(); // messageId → { sessionId, token }
+async function holdQueuedForManual(sessionId, messageId) {
+  if (!markBusy(messageId)) return { ok: false, error: '' };
+  try {
+    const r = await xsRequest('POST', `/api/xsession/messages/${messageId}/claim`);
+    if (!r.ok || !r.body || !isXsId(r.body.token)) {
+      if (isDisabledReply(r)) { applyEnabled(false); return { ok: false, error: '' }; }
+      bumpEpoch(sessionId);
+      await refreshInbox(sessionId); // 409:已被自动处理 / 忽略 / 别处认领 —— 卡片按最新状态刷新即可
+      return { ok: false, error: r.status === 409 || r.status === 404 ? '' : `跨会话消息没有发出：${replyError(r, '未能开始处理')}。卡片已按最新状态刷新。` };
+    }
+    heldClaims.set(messageId, { sessionId, token: r.body.token });
+    bumpEpoch(sessionId);
+    patchInboxMessage(sessionId, messageId, (old) => mergeMessageFields(old, { status: 'claimed', heldReason: null, heldText: null }));
+    return { ok: true };
+  } finally {
+    clearBusy(messageId);
+  }
 }
 
 /**
@@ -339,6 +506,12 @@ export async function claimXsForSend(xsProcess, sendSessionId) {
   const refresh = () => { if (sid) { bumpEpoch(sid); void refreshInbox(sid); } };
   if (!sid || !isXsId(p.messageId) || sid !== sendSessionId || !useXsStore.getState().enabled) { refresh(); return { ok: false, notice: '' }; }
   const messageId = p.messageId;
+  // r151c P22:点【处理】那一刻已认领(原是 queued)的,用内存里那张凭据,不再认领;只用一次
+  const held = heldClaims.get(messageId);
+  if (held && held.sessionId === sid) {
+    heldClaims.delete(messageId);
+    return { ok: true, fields: { xsMessageId: messageId, xsToken: held.token } };
+  }
   if (!markBusy(messageId)) { refresh(); return { ok: false, notice: '' }; } // 撤回 / 忽略正在路上
   try {
     const r = await xsRequest('POST', `/api/xsession/messages/${messageId}/claim`);
@@ -368,6 +541,7 @@ export async function releaseXsMessage({ sessionId, messageId }) {
     const r = await xsRequest('POST', `/api/xsession/messages/${messageId}/release`);
     if (r.ok) {
       dropQueuedProcess(messageId);
+      heldClaims.delete(messageId);
       bumpEpoch(sessionId);
       patchInboxMessage(sessionId, messageId, (old) => mergeMessageFields(old, {
         status: 'pending',
@@ -391,6 +565,7 @@ export async function dismissXsMessage({ sessionId, messageId }) {
     const r = await xsRequest('POST', `/api/xsession/messages/${messageId}/dismiss`);
     if (r.ok) {
       dropQueuedProcess(messageId);
+      heldClaims.delete(messageId);
       bumpEpoch(sessionId);
       removeInboxMessage(sessionId, messageId);
       return { ok: true };
@@ -493,7 +668,15 @@ export function xsCardFromText(m) {
   const f = (m && m.from) || {};
   const title = typeof f.title === 'string' && f.title.trim() ? f.title : '';
   if (f.kind === 'user') return title ? `由你从 ${title} 转发` : '由你转发';
-  return title ? `来自 ${title}` : '来自另一个会话';
+  const base = title ? `来自 ${title}` : '来自另一个会话';
+  // r151c:AI 发来的(from.kind:"session")另带发送方会话所在项目的目录名
+  const project = f.kind === 'session' && typeof f.project === 'string' && f.project.trim() ? f.project : '';
+  return project ? `${base} · ${project}` : base;
+}
+/** r151c:连锁次数(hop 大于 1 时显示"连锁第 N 次";否则空串不显示)。 */
+export function xsCardHopText(m) {
+  const hop = m && Number(m.hop);
+  return Number.isInteger(hop) && hop > 1 ? `连锁第 ${hop} 次` : '';
 }
 // 会话正忙时点了【处理】、"处理这条消息"已排进前端队列(消息在服务端仍是 pending)时的原因文案
 export const XS_LOCAL_QUEUED_TEXT = '已排队，当前回合结束后处理';
@@ -663,6 +846,12 @@ export const useXsInbox = (sid) => useXsStore((s) => (s.enabled && sid && s.inbo
 export const useXsBusy = (id) => useXsStore((s) => !!(id && s.busy[id]));
 /** 这条消息的"处理"是否已排在前端队列里(选择器返回布尔,引用稳定)。 */
 export const useXsQueuedHere = (id) => useStore((s) => queueHasXsProcess(s.messageQueue, id));
+// r151c:暂停提示条与设置块只在总开关开时显示;接收设置未取到时为 null
+export const useXsAutoPaused = () => useXsStore((s) => s.enabled && s.autoPaused);
+export const useXsAutoUsed = () => useXsStore((s) => s.autoUsed);
+export const useXsAutoLimit = () => useXsStore((s) => s.autoLimit);
+export const useXsInboundMode = (sid) => useXsStore((s) => (s.enabled && sid ? s.inboundBySession[sid] || null : null));
+export const useXsInboundError = (sid) => useXsStore((s) => (s.enabled && sid ? s.inboundError[sid] || '' : ''));
 export const useXsSessionPending = (sid) => useXsStore((s) => (s.enabled && sid ? s.pendingBySession[sid] || 0 : 0));
 export const useXsProjectPendingMap = () => useXsStore((s) => (s.enabled ? s.pendingByProject : EMPTY_MAP));
 export const xsProjectPending = (map, path) => (map && map[normProjectPath(path)]) || 0;
