@@ -546,14 +546,23 @@ export function peerFromXsEvent(ev) {
   };
 }
 
-/** 回合的顶层 result 带 origin.kind:"peer"、没有 senderTaskId、没有 hostInjected(CLI 原生通道来的)→ 气泡;其余 null。 */
-export function peerFromResultEvent(ev) {
+/**
+ * 回合的顶层 result 带 origin.kind:"peer"、没有 senderTaskId、没有 hostInjected(CLI 原生通道来的)→ 气泡;其余 null。
+ * turnStartMs(r151c 先修 4)= 本回合在前端的起流时刻(App.jsx 的 turnStreamStart),记成气泡的 turnStartMs,供按来源名
+ * 对账时当下界。原生消息开的回合多半是后台复活后重新接流看到的,起流时刻会晚于回合真正开始;result 自带的 duration_ms
+ * 往回推更接近,两者取早的(下界偏早只是退回改动前的认法,偏晚会让同一条显示两次)。都没有时为 null(对账照旧)。
+ */
+export function peerFromResultEvent(ev, turnStartMs = null) {
   if (!ev || ev.type !== 'result' || ev.parent_tool_use_id) return null;
   const o = ev.origin;
   if (!o || typeof o !== 'object' || o.kind !== 'peer' || o.senderTaskId || o.hostInjected) return null;
   const key = ev.uuid || (ev.runId != null && ev.seq != null ? `${ev.runId}:${ev.seq}` : null);
   if (!key) return null;
+  const starts = [];
+  if (typeof turnStartMs === 'number' && Number.isFinite(turnStartMs)) starts.push(turnStartMs);
+  if (typeof ev.duration_ms === 'number' && Number.isFinite(ev.duration_ms) && ev.duration_ms >= 0) starts.push(Date.now() - ev.duration_ms);
   return {
+    turnStartMs: starts.length ? Math.min(...starts) : null,
     uuid: `peer-native-${key}`,
     type: 'peer-message',
     live: true,
@@ -569,16 +578,33 @@ export function peerFromResultEvent(ev) {
 // 同一条(两边都有正文时正文相同;任一边没有正文时来源名相同)就交给历史,否则留着 —— 记录里没写出这条时
 // 气泡不凭空消失。历史那条的 body 可能是 null(CLI 没给 origin.body、文本兜底也解析不出),这时只能按来源名认,
 // 否则直播气泡永远不被接管,同一视图里出现两个来源气泡(判官建议 1)。
+// r151c 先修 4:按来源名认是弱匹配 —— 同一来源更早的消息来源名也一样,会把这一条的直播气泡提前收走。按来源名认时,
+// 历史条目的时间不得早于该气泡所在回合的开始:xs_message 气泡取构造时刻(它在回合开始时补发)、原生气泡取 turnStartMs,
+// 都减 2 秒容差(会话记录的时间由 CLI 写,与前端各计各的)。原生气泡没记 turnStartMs(旧快照)时照旧不设下界。
+// 按正文认的不受这条约束。
 const PEER_LAND_WINDOW_MS = 6 * 60 * 60 * 1000;
+const PEER_LAND_SKEW_MS = 2000;
+function peerNameFloor(local) {
+  if (local.via === 'native') {
+    return typeof local.turnStartMs === 'number' && Number.isFinite(local.turnStartMs) ? local.turnStartMs - PEER_LAND_SKEW_MS : null;
+  }
+  const built = Date.parse(local.timestamp);
+  return Number.isFinite(built) ? built - PEER_LAND_SKEW_MS : null;
+}
 function peerLanded(local, persisted) {
   if (!Array.isArray(persisted)) return false;
   const t0 = Date.parse(local.timestamp);
+  const nameFloor = peerNameFloor(local);
   for (const h of persisted) {
     if (!h || h.type !== 'peer-message' || h.live === true) continue;
     const ht = Date.parse(h.timestamp);
     if (Number.isFinite(t0) && Number.isFinite(ht) && ht < t0 - PEER_LAND_WINDOW_MS) continue;
-    const byBody = local.body != null && h.body != null;
-    if (byBody ? h.body === local.body : (h.fromName ?? null) === (local.fromName ?? null)) return true;
+    if (local.body != null && h.body != null) {
+      if (h.body === local.body) return true;
+      continue;
+    }
+    if (nameFloor !== null && !(Number.isFinite(ht) && ht >= nameFloor)) continue;
+    if ((h.fromName ?? null) === (local.fromName ?? null)) return true;
   }
   return false;
 }

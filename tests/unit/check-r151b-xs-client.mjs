@@ -259,6 +259,22 @@ routes['GET /api/xsession/messages'] = (u) => ({ status: 200, body: { messages: 
   assert.equal(xs.keepLivePeer(live, histNoBody('用户转发自 乙')), true, '历史正文为 null、来源名不同 → 留着');
   const natLive = { ...nat, timestamp: live.timestamp };
   assert.equal(xs.keepLivePeer(natLive, [{ type: 'peer-message', timestamp: live.timestamp, from: 'uds:/x', fromName: '乙', body: null }]), false, '原生直播同理');
+  // r151c 先修 4:按来源名认时,历史条目不得早于该气泡所在回合的开始(xs_message 气泡:构造时刻减 2 秒;原生:本回合开始减 2 秒)
+  const histAt = (fromName, ts, body = null) => [{ type: 'peer-message', timestamp: ts, from: 'gui:user', fromName, body }];
+  assert.equal(xs.keepLivePeer(live, histAt('用户转发自 甲', '2026-10-15T00:59:58.999Z')), true, 'xs:同来源名但早于构造时刻 2 秒以上(同一来源更早的消息)→ 不算,留着');
+  assert.equal(xs.keepLivePeer(live, histAt('用户转发自 甲', '2026-10-15T00:59:59.000Z')), false, 'xs:2 秒容差以内 → 交给历史');
+  assert.equal(xs.keepLivePeer(live, histAt('用户转发自 甲', '2026-10-15T00:30:00.000Z', '正文')), false, '按正文认的不受这条约束(仍是 6 小时窗)');
+  const iso = (ms) => new Date(ms).toISOString();
+  const tStart = Date.now() - 60000;
+  const natT = xs.peerFromResultEvent({ type: 'result', uuid: 'u-9', origin: { kind: 'peer', from: 'uds:/x', name: '丙' } }, tStart);
+  assert.equal(natT.turnStartMs, tStart, '原生:记下本回合开始时刻');
+  assert.equal(xs.keepLivePeer(natT, [{ type: 'peer-message', timestamp: iso(tStart - 2001), fromName: '丙', body: null }]), true, '原生:早于本回合开始 2 秒以上的同名条目 → 留着');
+  assert.equal(xs.keepLivePeer(natT, [{ type: 'peer-message', timestamp: iso(tStart - 1000), fromName: '丙', body: null }]), false, '原生:本回合开始(含容差)之后的同名条目 → 交给历史');
+  const natD = xs.peerFromResultEvent({ type: 'result', uuid: 'u-10', duration_ms: 30000, origin: { kind: 'peer', name: '丙' } }, Date.now());
+  assert.ok(Math.abs(natD.turnStartMs - (Date.now() - 30000)) < 1000, '起流时刻偏晚(重新接流):按 result 的 duration_ms 往回推,取早的');
+  assert.equal(xs.peerFromResultEvent({ type: 'result', uuid: 'u-11', origin: { kind: 'peer', name: '丙' } }).turnStartMs, null, '两者都没有 → 不记');
+  assert.equal(xs.peerFromResultEvent({ type: 'result', uuid: 'u-12', origin: { kind: 'peer', name: '丙' } }, null).turnStartMs, null, 'null 不当 0');
+  assert.equal(xs.keepLivePeer({ ...natT, turnStartMs: null }, [{ type: 'peer-message', timestamp: iso(tStart - 3600000), fromName: '丙', body: null }]), false, '原生没记下界(旧快照)→ 照旧按来源名认');
   // 卡片文案
   assert.equal(xs.xsCardFromText(msg(M1, 'pending')), '由你从 甲 转发');
   assert.equal(xs.xsCardFromText({ from: { kind: 'session', title: '丁' } }), '来自 丁');

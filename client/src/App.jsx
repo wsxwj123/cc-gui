@@ -6175,7 +6175,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // (senderTaskId / hostInjected)= 经 CLI 原生通道从别的会话来的。本回合的回复在流结束时才进
           // chatMessages,所以追加在末尾就是"该回合之前";按 uuid 去重(重放 / reattach 不画两遍)。
           if (event.type === 'xs_message' || event.type === 'result') {
-            const peer = event.type === 'xs_message' ? peerFromXsEvent(event) : peerFromResultEvent(event);
+            // r151c 先修 4:原生气泡带上本回合的起流时刻(按来源名对账时历史条目不得早于它,见 utils/xsession.js peerLanded)
+            const peer = event.type === 'xs_message' ? peerFromXsEvent(event) : peerFromResultEvent(event, turnStreamStart);
             if (peer) setChatMessages((prev) => (prev.some((m) => m.uuid === peer.uuid) ? prev : [...prev, { ...peer, ownerKey: streamOwnerSid() }]));
           }
           if (event.type === 'system' && event.subtype === 'permission_denied') {
