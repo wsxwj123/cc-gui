@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import { seedSession, uniq, makeWorkspace, realCliPath } from '../r151b-xsession-p1/helpers/fixtures.mjs';
 import { xs, shared, writeScript, touchCtl } from '../r151b-xsession-p1/helpers/api.mjs';
 import { boot, sidebar, showWorktreeProjects } from '../r151b-xsession-p1/helpers/ui.mjs';
-import { SM, NOTE, HELD, addScript, aiCalls, resultJson, blast, inboundOk, entry, msgs, waitMsg, profileTurn, wsT, startInstanceP2 } from './helpers/p2.mjs';
+import { SM, NOTE, HELD, addScript, aiCalls, blast, inboundOk, entry, msgs, waitMsg, profileTurn, wsT, startInstanceP2 } from './helpers/p2.mjs';
 
 test.describe.configure({ timeout: 420_000 });
 test.beforeEach(() => { test.skip(!realCliPath(), '本机没有真 claude CLI'); });
@@ -27,7 +27,12 @@ test('P17 连锁:自动处理开始的回合里发出的消息 hop 加 1、chain
   addScript('real', K[2], [{ name: SM, input: { to: [A.sid], message: `${K[3]} 第 4 跳` } }]);
   addScript('real', K[3], [{ name: SM, input: { to: [B.sid], message: `${K[4]} 第 5 跳` } }]);
   const u = await aiCalls(shared, { cwd: makeWorkspace(`real-p17a-${run}`), sid: A.sid, steps: [{ name: SM, input: { to: [B.sid], message: `${K[0]} 第 1 跳` } }] });
-  expect(resultJson(u, 0, 1)?.results?.[0]?.delivery, '第 1 跳自动处理').toBe('auto');
+  // 这一轮收集到的工具结果按目标挑:B 的自动回合也走同一假接口车道,它发回 A 的第 2 跳结果可能先到、混进这一轮
+  const sentTo = (r, sid) => r.results.map((x) => x.json && Array.isArray(x.json.results) && x.json.results.find((y) => y && y.to === sid)).filter(Boolean);
+  const all = (r) => JSON.stringify(r.results.map((x) => x.text.slice(0, 160)));
+  const hop1 = sentTo(u, B.sid);
+  expect(hop1.length, `前置:这一轮里 A 发给 B 的工具结果恰好 1 条(本轮全部:${all(u)})`).toBe(1);
+  expect(hop1[0].delivery, '第 1 跳自动处理').toBe('auto');
   const last = await waitMsg(shared, B.sid, (x) => fromSession(x) && x.hop === 5, 180_000);
   const chain = [...await msgs(shared, A.sid), ...await msgs(shared, B.sid)].filter((x) => fromSession(x) && x.chainId === (last || {}).chainId)
     .sort((x, y) => Date.parse(x.createdAt) - Date.parse(y.createdAt));
@@ -61,7 +66,7 @@ test('P17 连锁:自动处理开始的回合里发出的消息 hop 加 1、chain
   expect(restoreErr, '收尾:「在项目列表显示 worktree 项目」已拨回').toBeNull();
 
   const reset = await aiCalls(shared, { cwd: makeWorkspace(`real-p17a-${run}`), sid: A.sid, steps: [{ name: SM, input: { to: [B.sid], message: `R151C p17 用户发消息之后 ${run}` } }] });
-  expect(reset.results.length, '前置:调用有结果').toBe(1);
+  expect(sentTo(reset, B.sid).length, `前置:调用有结果 —— 这一轮里 A 发给 B 的工具结果恰好 1 条(本轮全部:${all(reset)})`).toBe(1);
   const fresh = await waitMsg(shared, B.sid, (x) => fromSession(x) && x.chainId !== last.chainId && String(x.createdAt) > String(last.createdAt));
   expect(fresh && fresh.hop, '用户在发送方会话发消息后,下一次发送回到 hop:1').toBe(1);
 });
