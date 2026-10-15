@@ -9,7 +9,7 @@ import { listProjects, listSessions, isSessionIdShape } from '../services/sessio
 import { XS_LIMITS, XsStorageError, pendingCountsBySession } from '../services/xsession-store.js';
 import {
   XS_DISABLED_TEXT, XS_STORAGE_FAILED_TEXT, XsError, parseManualSend, sendManualMessages, parseListQuery, listInboxMessages,
-  pendingSummary, claimMessage, releaseMessage, dismissMessage, syncXsRuntimeHooks,
+  pendingSummary, claimMessage, releaseMessage, dismissMessage, syncXsRuntimeHooks, noteNativeGuardFailure, nativeGuardLastFailure,
 } from '../services/xsession.js';
 import { assignShortIds, selectXsSessions } from '../services/xsession-resolve.js';
 import { resolveSessionTitle } from '../utils/session-title.js';
@@ -33,11 +33,9 @@ router.use('/xsession', (req, res, next) => {
   return xsError(res, 409, 'XS_DISABLED', DISABLED_TEXT);
 });
 
-// nativeGuard.lastFailureAt:原生 SendMessage 引导最近一次检查失效的时刻(ISO 字符串),由引导守卫(T-X6)调用记下。
-let nativeGuardLastFailureAt = null;
-export function noteNativeGuardFailure(at = new Date()) {
-  nativeGuardLastFailureAt = at.toISOString();
-}
+// nativeGuard.lastFailureAt:原生 SendMessage 引导最近一次检查失效的时刻(ISO 字符串)。状态放在 services/xsession.js
+// (引导守卫在那里;从这里 import 回去会成环),这里转出原名。
+export { noteNativeGuardFailure };
 
 // GET /api/xsession/config → 一期字段(autoPaused、autoBudget、limits 的另三项是【二期】,不出现)。
 // 偏好文件损坏或读不出 → readXsEnabledSync 给 false,照常 200。
@@ -45,7 +43,7 @@ router.get('/xsession/config', (_req, res) => {
   res.json({
     enabled: readXsEnabledSync(),
     limits: { bodyBytes: XS_LIMITS.bodyBytes, pendingPerSession: XS_LIMITS.pendingPerSession },
-    nativeGuard: { lastFailureAt: nativeGuardLastFailureAt },
+    nativeGuard: { lastFailureAt: nativeGuardLastFailure() },
   });
 });
 

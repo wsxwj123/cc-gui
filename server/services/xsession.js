@@ -7,9 +7,12 @@
 // 日志只带消息 id,不带正文与凭据;凭据(token)只出现在认领应答里,不进任何列表应答与广播(publicMessage 是白名单)。
 // 依赖只朝一个方向:本模块经 chat.js 导出的窄接口挂钩子,chat.js 不认识本模块。
 import { randomUUID, timingSafeEqual } from 'crypto';
+import { readdir, readFile } from 'fs/promises';
+import { join } from 'path';
+import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
 import { readXsEnabledSync } from '../routes/prefs.js';
-import { registerSessionRuntimeHooks, deliverRunEvent } from '../routes/chat.js';
+import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
 import { buildXsEnvelope, neutralizeXsBody } from './xsession-envelope.js';
@@ -387,11 +390,90 @@ async function settleTurn(id, key, outcome, detail) {
   releaseTurnHooksIfIdle();
 }
 
+// ── 原生 SendMessage 引导(T-X6;PLAN X.1.1,接口行为清单 25)──────────────────────────────────────
+// 总开关开着时,会话里的模型(含子代理,它们的调用也经过本会话的 PreToolUse 回调)用 CLI 原生 SendMessage 发给本 GUI
+// 的另一个会话 → 拒绝,让 GUI 会话之间只走 GUI 通道(卡片、上限不被绕过)。目标只按 CLI 的会话登记表认,不碰套接字。
+// 失效(读不到登记表 / 内部出错)→ 放行(= 现状),记日志并记下 nativeGuard.lastFailureAt 给设置块显示。
+// H5b 实测(2026-10-15,CLI 2.1.296):SDK 的 default / bypassPermissions / auto / plan 四档下,回调拒绝都生效、
+// 原因原样成为模型看到的工具结果;回调输入的 tool_input 带 CLI 补的 recipient 与 recipient_kind。
+export const NATIVE_GUARD_REASON = '这个会话由 CC-GUI 管理，不接收经 SendMessage 发来的消息。如需把内容交给它，请告诉用户在 CC-GUI 里转发。';
+
+let nativeGuardLastFailureAt = null;
+export function noteNativeGuardFailure(at = new Date()) {
+  nativeGuardLastFailureAt = at.toISOString();
+}
+export const nativeGuardLastFailure = () => nativeGuardLastFailureAt;
+
+// 套接字地址的比较口径:去掉 uds: 前缀;/private/tmp 与 /tmp 是同一处(macOS 的 /tmp 是它的链接)。
+const socketKey = (p) => String(p).replace(/^uds:/i, '').replace(/^\/private\/tmp\//, '/tmp/');
+
+/** SendMessage 的目标 → { kind:'name'|'session', value } | null(其它种类:main、子代理、bridge:、did: 等,一律不管)。 */
+function nativeTargetOf(toolInput) {
+  const raw = typeof toolInput?.recipient === 'string' ? toolInput.recipient : (typeof toolInput?.to === 'string' ? toolInput.to : '');
+  if (!raw) return null;
+  // recipient_kind 是 CLI 补的;万一没补(别的 CLI 版本),按 to 的写法推:uds: 开头是地址,否则当名字(只有命中登记表才会拒)
+  const kind = toolInput.recipient_kind ?? (/^uds:/i.test(raw) ? 'session' : 'name');
+  if (kind === 'name') return { kind, value: raw.replace(/\s*\[[^\]]*\]\s*$/, '').trim() }; // ListAgents 显示为"名字 [短号]"
+  if (kind === 'session') return { kind, value: socketKey(raw) };
+  return null;
+}
+
+/**
+ * 纯判定:这次 SendMessage 要不要拒。命中登记表里的条目、条目的会话属于 GUI 当前的进程槽、且不是发送方自己 → 拒。
+ * entries:登记表条目;guiSessionIds:GUI 存活进程槽的会话 id;selfSessionId:发送方会话。
+ */
+export function nativeGuardShouldDeny(toolInput, entries, guiSessionIds, selfSessionId) {
+  const target = nativeTargetOf(toolInput);
+  if (!target || !target.value) return false;
+  const gui = new Set([...guiSessionIds].filter((id) => typeof id === 'string').map((id) => id.toLowerCase()));
+  return entries.some((e) => {
+    if (!e || typeof e.sessionId !== 'string' || !gui.has(e.sessionId.toLowerCase()) || sameId(e.sessionId, selfSessionId)) return false;
+    return target.kind === 'name'
+      ? typeof e.name === 'string' && e.name === target.value
+      : typeof e.messagingSocketPath === 'string' && socketKey(e.messagingSocketPath) === target.value;
+  });
+}
+
+// CLI 会话登记表 <配置目录>/sessions/*.json(GUI 全仓按 ~/.claude 取配置目录)。目录读不出 → 抛出(算失效);
+// 单个文件读不出或不是 JSON(正被改写、或刚随进程退出删掉)→ 跳过这一个。
+async function readCliRegistry() {
+  const dir = join(homedir(), '.claude', 'sessions');
+  const entries = [];
+  for (const f of await readdir(dir)) {
+    if (!f.endsWith('.json')) continue;
+    try { entries.push(JSON.parse(await readFile(join(dir, f), 'utf-8'))); } catch { /* 跳过这一个 */ }
+  }
+  return entries;
+}
+
+function nativeGuardFailed(why) {
+  noteNativeGuardFailure();
+  console.warn(`[xsession] 原生 SendMessage 引导未能检查目标,本次放行:${why}`);
+  return null;
+}
+
+/** preToolUse 钩子:只看 SendMessage;拒绝时返回 PreToolUse 的 deny 输出,其余返回 null(既有判定照常)。 */
+export async function xsNativeGuard(input, ctx) {
+  if (input?.tool_name !== 'SendMessage') return null;
+  try {
+    if (!readXsEnabledSync()) return null; // 开关以偏好文件为准(与路由闸门同源):关着一律不管
+    if (!nativeTargetOf(input.tool_input)) return null;
+    let entries;
+    try { entries = await readCliRegistry(); } catch (e) { return nativeGuardFailed(`读不到 CLI 会话登记表(${e?.code || e?.message || e})`); }
+    const guiSessionIds = getActiveChatProcesses().filter((p) => p.sessionId && p.exitCode == null).map((p) => p.sessionId);
+    if (!nativeGuardShouldDeny(input.tool_input, entries, guiSessionIds, ctx?.sessionId)) return null;
+    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: NATIVE_GUARD_REASON } };
+  } catch (e) {
+    return nativeGuardFailed(`内部出错(${e?.message || e})`);
+  }
+}
+
 // ── 钩子挂接与总开关 ────────────────────────────────────────────────────────────────────────
-// 总开关关时只挂 chatEntry(两个新字段都没带时立即返回 null = 零影响);开着时再挂回合开始 / 结束。
-// 关掉时若还有已兑换、没结算的回合,回合钩子留到它们结算完再撤(否则它们永远等不到结算)。
+// 总开关关时只挂 chatEntry(两个新字段都没带时立即返回 null = 零影响);开着时再挂回合开始 / 结束与原生引导。
+// 关掉时若还有已兑换、没结算的回合,回合钩子留到它们结算完再撤(否则它们永远等不到结算);原生引导随开关即撤。
 let unhookEntry = null;
 let unhookTurns = null;
+let unhookGuard = null;
 let turnHooksWanted = false;
 
 function releaseTurnHooksIfIdle() {
@@ -405,6 +487,11 @@ function releaseTurnHooksIfIdle() {
 export function syncXsRuntimeHooks(enabled) {
   turnHooksWanted = enabled === true;
   if (turnHooksWanted && !unhookTurns) unhookTurns = registerSessionRuntimeHooks({ turnStart: onTurnStart, turnEnd: onTurnEnd });
+  if (turnHooksWanted && !unhookGuard) unhookGuard = registerSessionRuntimeHooks({ preToolUse: xsNativeGuard });
+  else if (!turnHooksWanted && unhookGuard) {
+    unhookGuard();
+    unhookGuard = null;
+  }
   releaseTurnHooksIfIdle();
 }
 
