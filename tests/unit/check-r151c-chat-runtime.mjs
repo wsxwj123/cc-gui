@@ -248,6 +248,9 @@ try {
   const sb = snap(busy.body.pid);
   eq([sb.busy, sb.exitCode, ends().length], [true, null, ends0], '用户回合不受影响(仍在跑、没有结束通知)');
   eq(starts().length, starts0, '遇忙没有开始新回合');
+  const CTID = uuid(50);
+  const iBusyCtid = await startInternalTurn(BODY({ sessionId: SID_B, prompt: 'auto ctid', clientTurnId: CTID }), INTERNAL);
+  eq([iBusyCtid.status, iBusyCtid.body.code], [409, 'CHAT_SESSION_BUSY'], '带 clientTurnId 遇忙同样 409');
   // (b) HTTP 请求等满 4 秒中止在跑的回合 → stopped
   const busyEpoch = sb.turnEpoch;
   const late = await api('/chat', BODY({ sessionId: SID_B, prompt: 'user second' }));
@@ -256,6 +259,11 @@ try {
   eq(endBusy.outcome, 'stopped', '被后到请求中止的回合报 stopped(旁路 b)');
   const endLate = await waitFor(() => ends().find((e) => e.pid === late.body.pid), '后到回合结束');
   eq(endLate.outcome, 'completed', '后到回合正常完成');
+  await waitFor(() => idleOf(late.body.pid), '后到回合收尾');
+  const startsBeforeRetry = starts().length;
+  const retry = await startInternalTurn(BODY({ sessionId: SID_B, prompt: 'auto ctid', clientTurnId: CTID }), INTERNAL);
+  eq(retry.status, 200, '遇忙被拒的 clientTurnId 之后可重试');
+  eq(starts().length, startsBeforeRetry + 1, '重试真的开始了回合(遇忙时回合记录已撤,没有命中旧记录)');
   ctl.reply = undefined;
   unhook();
   console.log(`PASS check-r151c-chat-runtime(${checks} 项)`);

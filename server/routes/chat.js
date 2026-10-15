@@ -2339,7 +2339,11 @@ async function handleChatPost(req, res) {
   // 已在飞,极少走到)。idle 可复用 slot 不在此列(上面复用块已 return),不误伤 shell 保活。
   if (sessionId) {
     // r151c 旁路 (a):内部起的回合(跨会话自动处理)遇到同会话正在跑的回合 → 立即 409,不等待、不中止它(自动处理永远不打断用户的回合)。
-    if (internal && findBusySlot(activeProcesses, sessionId)) return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+    // 带了 clientTurnId 的话撤掉本回合记录(同 id 可重试,与入口钩子拒绝同一处理)。
+    if (internal && findBusySlot(activeProcesses, sessionId)) {
+      dropTurnRecord(turnRecord);
+      return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+    }
     const tearingDown = () => {
       for (const s of activeProcesses.values()) {
         if (s.sessionId !== sessionId) continue;
