@@ -4,7 +4,7 @@
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身,不起 claude 进程;临时 HOME;端口 6900–6990(跳过 6710)。
 // node tests/unit/check-r151b-audit-fixes.mjs
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync, rmSync, readdirSync, existsSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { registerR151bSdkStub } from './helpers/r151b-sdk-stub.mjs';
@@ -199,6 +199,61 @@ try {
     }
     const dots = `uds:${'/..'.repeat(150)}/tmp/cc-socks/103.sock`; // 限长(512)以内的大量 ..
     eq(within(20, () => deny(bySock(dots), entries, gui, A), '规范化 150 个 ..'), true, '大量 .. 也规范化到同一处');
+  }
+
+  // ── S5 + 判官建议 6:启动恢复只删 <uuid>.txt 形状的孤儿正文、正文目录是符号链接时跳过;一并清掉本模块自己的临时文件 ──
+  {
+    // 每种场景用一份新的存储模块实例(URL 带查询串 = 新实例,cache 从空开始)和一个独立的 HOME(XS_DIR 在模块加载时定)
+    const freshStore = async (tag, home) => {
+      const prev = process.env.HOME;
+      process.env.HOME = home; process.env.USERPROFILE = home;
+      try { return await import(`../../server/services/xsession-store.js?${tag}`); } finally { process.env.HOME = prev; process.env.USERPROFILE = prev; }
+    };
+    const uid = (n) => `5e5e5e5e-0000-4000-8000-${String(n).padStart(12, '0')}`;
+    const DEAD = 99999990; // 不存在的 pid
+    const msg = (id, status) => ({ id, createdAt: '2026-10-15T00:00:00.000Z', status, chainId: uid(900), hop: 1, from: { kind: 'user', sessionId: null, title: null },
+      to: { sessionId: C, title: '丙' }, bodyBytes: 1, via: null, heldReason: status === 'pending' ? 'target-card' : null });
+
+    // ① 正文目录是真目录
+    const H1 = join(TMP, 'home-s5a'); const X1 = join(H1, '.claude-gui', 'xsession'); const B1 = join(X1, 'bodies');
+    mkdirSync(B1, { recursive: true });
+    writeFileSync(join(X1, 'messages.json'), JSON.stringify({ version: 1, messages: [msg(uid(1), 'pending'), msg(uid(2), 'done')] }));
+    const files1 = {
+      [`bodies/${uid(1)}.txt`]: true, // 未结束消息的正文:留
+      [`bodies/${uid(2)}.txt`]: false, // 已结束消息的正文:孤儿,删
+      [`bodies/${uid(3)}.txt`]: false, // 没有记录的 <uuid>.txt:孤儿,删
+      'bodies/notes.txt': true, // 不是 <uuid>.txt 形状:不动
+      [`bodies/${uid(4)}.TXT`]: true,
+      [`bodies/x${uid(5)}.txt`]: true,
+      [`bodies/${uid(6)}.txt.tmp.${DEAD}.3`]: false, // 本模块的临时文件、写它的进程已不在:删
+      [`bodies/${uid(7)}.txt.tmp.${process.ppid}.1`]: true, // 写它的进程还活着(同一 HOME 的另一个实例):不动
+      [`bodies/notes.txt.tmp.${DEAD}.1`]: true, // 不是本模块命名:不动
+      [`messages.json.tmp.${DEAD}.12`]: false,
+      [`messages.json.tmp.${process.pid}.99`]: false, // 本进程号(上一个同号进程留下的;本进程读盘时还没开始写):删
+      [`messages.json.tmp.${process.ppid}.2`]: true,
+      [`messages.json.tmp.${DEAD}`]: true, // 不是完整的临时文件名
+      [`other.json.tmp.${DEAD}.1`]: true,
+      [`messages.json.corrupt-1`]: true,
+    };
+    for (const f of Object.keys(files1)) writeFileSync(join(X1, f), 'x');
+    const st1 = await freshStore('s5a', H1);
+    eq((await st1.listXsMessages()).map((m) => m.id), [uid(1), uid(2)], '读盘恢复照常');
+    for (const [f, keep] of Object.entries(files1)) eq(existsSync(join(X1, f)), keep, `启动恢复后 ${f} ${keep ? '留着' : '删掉'}`);
+
+    // ② 正文目录是指向别处的符号链接:不跟着链接删(孤儿正文与临时文件都不动)
+    const H2 = join(TMP, 'home-s5b'); const X2 = join(H2, '.claude-gui', 'xsession'); const OUT = join(TMP, 'outside-bodies');
+    mkdirSync(X2, { recursive: true }); mkdirSync(OUT, { recursive: true });
+    writeFileSync(join(OUT, `${uid(3)}.txt`), 'outside');
+    writeFileSync(join(OUT, `${uid(6)}.txt.tmp.${DEAD}.3`), 'outside');
+    symlinkSync(OUT, join(X2, 'bodies'));
+    writeFileSync(join(X2, 'messages.json'), JSON.stringify({ version: 1, messages: [msg(uid(1), 'done')] }));
+    const st2 = await freshStore('s5b', H2);
+    eq((await st2.listXsMessages()).length, 1, '符号链接场景读盘照常');
+    eq(readdirSync(OUT).sort(), [`${uid(3)}.txt`, `${uid(6)}.txt.tmp.${DEAD}.3`].sort(), '正文目录是符号链接 → 不清链接那头的文件');
+
+    // ③ 头注释与实际一致(判官建议 5):不再声称"关着时不读不写"
+    const head = readFileSync(new URL('../../server/services/xsession-store.js', import.meta.url), 'utf8').split('\n').slice(0, 25).join('\n');
+    ok(!head.includes('关着时不读、不写、不建目录'), '存储层头注释不再写"关着时不读、不写、不建目录"');
   }
 } finally {
   try { await chat.closeAllPersistentProcesses(); } catch {}

@@ -7,14 +7,18 @@
 //   - 一律"临时文件 + 改名"写入,进程内串行(一条 promise 链);目录 0700、文件 0600。
 //   - 全库最多留 500 条:超出时按到达先后删最旧的已结束消息,未结束的一条不删(宁可超出也不丢)。
 //   - 本进程第一次读盘时做恢复:遗留的 processing / claimed 一律退回 pending、原因 interrupted,不自动重跑
-//     (重跑可能把同一件事做两遍);同时清掉没有对应未结束消息的孤儿正文(上次在"改元数据"与"删正文"之间退出)。
-// 懒加载:总开关关着时路由层先回 409,本模块不会被调到 —— 关着时不读、不写、不建目录。
+//     (重跑可能把同一件事做两遍);同时清掉没有对应未结束消息的孤儿正文(上次在"改元数据"与"删正文"之间退出)
+//     和本模块自己留下的临时文件(上次在"写临时文件"与"改名"之间退出)。只认本模块的命名:正文只删 <消息id>.txt,
+//     临时文件只删 messages.json.tmp.<pid>.<n> 与 <消息id>.txt.tmp.<pid>.<n>(pid 是另一个还活着的进程时不动);
+//     正文目录是符号链接时整个跳过,不跟着链接删别处的文件。
+// 懒加载:第一次用到时才读盘。总开关关着时路由层先回 409,本模块不会经 /api/xsession/* 被调到;但删会话时
+//   (DELETE /api/sessions/:id)不看开关,会读收件箱、有变化时写 —— 收件箱文件不存在时什么都不写、不建目录。
 // 日志只带消息 id,不带任何正文片段。
 //
 // 一条记录的字段由 xsession.js(T-X4)定;本模块只依赖下面这几个:
 //   id(会话 id 同形状)、status(六种之一)、to.sessionId、heldReason、via,
 //   以及认领 / 处理期间的临时字段 token、heldBefore、turn —— 恢复时删掉它们(旧凭据随之作废)。
-import { readFile, writeFile, rename, unlink, mkdir, readdir } from 'fs/promises';
+import { readFile, writeFile, rename, unlink, mkdir, readdir, lstat } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import { isSessionIdShape } from './session-reader.js';
@@ -131,15 +135,59 @@ async function loadIfNeeded() {
     try { await persist(messages); } catch (e) { console.warn(`[xsession] 启动恢复未能落盘:${e.cause?.code || e.message}`); }
   }
   cache = messages;
-  if (!quarantined) await sweepOrphanBodies(messages);
+  if (!quarantined) {
+    await sweepOwnTempFiles();
+    await sweepOrphanBodies(messages);
+  }
 }
 
+// 正文目录不是真目录(符号链接、文件、不存在)→ null:不往里面清东西。
+async function bodiesDirEntries() {
+  try {
+    const st = await lstat(BODIES_DIR);
+    if (!st.isDirectory()) return null; // lstat 不跟链接:符号链接在这里不算目录
+    return await readdir(BODIES_DIR);
+  } catch { return null; }
+}
+
+const isBodyFileName = (f) => f.endsWith('.txt') && isSessionIdShape(f.slice(0, -4));
+
 async function sweepOrphanBodies(messages) {
-  let files;
-  try { files = await readdir(BODIES_DIR); } catch { return; }
+  const files = await bodiesDirEntries();
+  if (!files) return;
   const keep = new Set(messages.filter((m) => isOpenStatus(m.status)).map((m) => `${m.id}.txt`));
   for (const f of files) {
-    if (f.endsWith('.txt') && !keep.has(f)) await removeBody(f.slice(0, -4));
+    if (isBodyFileName(f) && !keep.has(f)) await removeBody(f.slice(0, -4));
+  }
+}
+
+// atomicWrite 的临时文件名:<目标文件名>.tmp.<pid>.<序号>。
+const TEMP_SUFFIX_RE = /\.tmp\.(\d{1,10})\.\d{1,16}$/;
+function pidAlive(pid) {
+  if (!(pid > 0)) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e?.code === 'EPERM'; }
+}
+// 只删本模块命名的临时文件;文件名里的 pid 是另一个还活着的进程(同一 HOME 下另一个 GUI 实例正在写)时不动。
+async function sweepOwnTempFiles() {
+  const stale = (name, isTarget) => {
+    const m = TEMP_SUFFIX_RE.exec(name);
+    if (!m || !isTarget(name.slice(0, m.index))) return false;
+    const pid = Number(m[1]);
+    return pid === process.pid || !pidAlive(pid);
+  };
+  let top = [];
+  try { top = await readdir(XS_DIR); } catch { /* 目录不存在 */ }
+  for (const f of top) {
+    if (stale(f, (base) => base === 'messages.json')) await unlinkQuietly(join(XS_DIR, f));
+  }
+  for (const f of (await bodiesDirEntries()) || []) {
+    if (stale(f, isBodyFileName)) await unlinkQuietly(join(BODIES_DIR, f));
+  }
+}
+
+async function unlinkQuietly(file) {
+  try { await unlink(file); } catch (e) {
+    if (e?.code !== 'ENOENT') console.warn(`[xsession] 临时文件删除失败:${e.code || e.message}`);
   }
 }
 
