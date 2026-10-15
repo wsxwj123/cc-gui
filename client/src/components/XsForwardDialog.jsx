@@ -8,6 +8,7 @@ import { Send, X, Check } from './Icon.jsx';
 import {
   useXsEnabled, isXsId, listXsTargets, forwardXsMessage, xsUtf8Bytes, XS_BODY_MAX_BYTES, XS_MAX_TARGETS,
 } from '../utils/xsession.js';
+import { getSidebarShownProjects } from '../utils/projectPanel.js';
 
 const STATE_TEXT = { running: '运行中', idle: '空闲', stopped: '未运行' };
 const DELIVERED_TEXT = '已送达，等待对方会话里确认处理';
@@ -33,6 +34,8 @@ function ForwardDialog({ initialBody, fromSessionId, onClose }) {
   const [sending, setSending] = useState(false);
   // { ok:true, rows:[{ sessionId, title }] } | { ok:false, error, bad:[{ sessionId, title }] }
   const [result, setResult] = useState(null);
+  // 打开时读一次侧栏此刻显示的项目(侧栏登记的同一份结果);目标所在项目不在其中 → 标"所在项目已隐藏"。null = 不知道,不标
+  const [shownProjects] = useState(getSidebarShownProjects);
 
   const bytes = xsUtf8Bytes(body);
   const tooLarge = bytes > XS_BODY_MAX_BYTES;
@@ -167,6 +170,7 @@ function ForwardDialog({ initialBody, fromSessionId, onClose }) {
               {(list || []).map((s) => {
                 const on = picked.some((t) => t.sessionId === s.sessionId);
                 const bad = !!(badIds && badIds.has(s.sessionId));
+                const projHidden = !!(shownProjects && typeof s.projectHash === 'string' && s.projectHash && !shownProjects.has(s.projectHash));
                 return (
                   <button
                     key={s.sessionId}
@@ -183,7 +187,12 @@ function ForwardDialog({ initialBody, fromSessionId, onClose }) {
                       {on && <Check size={10} />}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className={`block truncate text-[12px] font-body ${bad ? 'text-error' : 'text-ink'}`}>{s.title}</span>
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span className={`min-w-0 truncate text-[12px] font-body ${bad ? 'text-error' : 'text-ink'}`}>{s.title}</span>
+                        {projHidden && (
+                          <span data-testid="xs-forward-target-hidden" className="shrink-0 text-[10.5px] text-ink-faint font-body">所在项目已隐藏</span>
+                        )}
+                      </span>
                       <span className="block truncate text-[10.5px] text-ink-faint font-body">{s.project}</span>
                     </span>
                     <span className="shrink-0 text-[10.5px] text-ink-faint font-body">{STATE_TEXT[s.state] || ''}</span>

@@ -14,7 +14,7 @@ import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { resolveSessionTitle } from '../utils/sessionTitle.js';
 import { queueKeyFor } from '../utils/steerQueue.js';
-import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual, watcherRefreshTargets, clampPaneIndex, ACCESS_DENIED_HINT } from '../utils/projectPanel.js';
+import { composePanelProjects, composePanelSessions, sessionQueryMatchHashes, sortProjectRows, flattenSessionRows, singleModeVisibleProjects, sessionEmptyHint, showAccessSettingsButton, reorderManual, watcherRefreshTargets, clampPaneIndex, ACCESS_DENIED_HINT, setSidebarShownProjects } from '../utils/projectPanel.js';
 import { pickDirectory, isTauri } from '../utils/pickDirectory.js';
 import { completionTracker } from '../utils/sessionDots.js';
 import { AnchoredPopover } from './SessionSelectors.jsx';
@@ -427,6 +427,16 @@ export function UnifiedSidebar() {
   // r23-①:懒拉与渲染共用同一个可见集 —— 上一轮只改了拉取,渲染仍平铺「所有已加载的
   // 组」,而 toggleHidden 不清 sessionsByProject → 先展开再隐藏,平铺里照样全在。
   const visibleHashes = useMemo(() => new Set(singleModeRows.map((p) => p.hash)), [singleModeRows]);
+  // r151b 第 27 条:把"侧栏此刻显示的项目"(不含搜索框过滤)登记出去,转发对话框据此标注目标"所在项目已隐藏"。
+  // 按项目分组时与项目行同一判据(composePanelProjects:隐藏集 + worktree 显示开关 + 窗格豁免);单列表模式就是 visibleHashes。
+  const shownProjectHashes = useMemo(() => (view.groupMode === 'single'
+    ? visibleHashes
+    : new Set(composePanelProjects({ projects, hidden, showWorktrees: showWorktreeProjects, query: '', panes, pinned: pinnedProjSet }).map((p) => p.hash))),
+  [view.groupMode, visibleHashes, projects, hidden, showWorktreeProjects, panes, pinnedProjSet]);
+  useEffect(() => {
+    setSidebarShownProjects(shownProjectHashes);
+    return () => setSidebarShownProjects(null);
+  }, [shownProjectHashes]);
   useEffect(() => {
     if (view.groupMode !== 'single') return;
     const st = useStore.getState();
