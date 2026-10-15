@@ -1075,7 +1075,8 @@ const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolU
  *   info = { pid, runId, sessionId, draftId, cwd, turnEpoch, reused, tag }。
  *   turnEnd 每个回合至多一次(起过子代理的回合去抖收尾后又被续跑复活时,只算第一次),info 同上(无 reused)另带
  *   outcome:'completed' | 'failed'(结果为错误、没等到结果进程就退出、或进程起不来) | 'stopped'(本回合收到过停止请求),
- *   errorSummary:failed 时本回合最后一条错误的一行摘要(脱敏、截短),取不到或不是 failed 为 null。
+ *   errorSummary:入口钩子改写过(带 tag)的回合 failed 时,本回合最后一条错误的一行摘要(脱敏、截短);
+ *   取不到、不是 failed、或回合没带 tag 为 null。
  * · preToolUse(input, ctx) → null | PreToolUse 钩子输出(可异步);ctx = { toolUseID, sessionId, cwd, runId }。
  *   返回对象时它就是这次 PreToolUse 的输出;返回 null 或抛错时按没挂接处理(既有判定照常)。
  */
@@ -1136,12 +1137,13 @@ function notifyTurnEnd(slot, pid) {
   if (!rt || rt.ended || rt.epoch !== (slot.turnEpoch | 0)) return;
   rt.ended = true;
   const outcome = rt.stopRequested ? 'stopped' : (slot.lastResultAt == null || slot.lastResultError) ? 'failed' : 'completed';
-  const errorSummary = outcome === 'failed' ? runtimeTurnErrorSummary(slot, rt.startSeq | 0) : null;
+  // 摘要只给入口钩子改写过的回合(带 tag = 跨会话兑换回合)算:其它回合没人用它,不必对外部错误文本跑脱敏(审计 I2)
+  const errorSummary = outcome === 'failed' && rt.tag !== undefined ? runtimeTurnErrorSummary(slot, rt.startSeq | 0) : null;
   callRuntimeHook('turnEnd', { ...runtimeTurnInfo(slot, pid), outcome, errorSummary });
 }
 
 // turnEnd 的 errorSummary:本回合投递过的事件里最后一条错误(错误终态的 result、或 error 行),脱敏、压成一行、截短;
-// 找不到为 null。从已盖章的事件环形窗里倒着找(只看本回合的序号),不碰消息泵;只在挂接了回合钩子且回合失败时才算。
+// 找不到为 null。从已盖章的事件环形窗里倒着找(只看本回合的序号),不碰消息泵;只在挂接了回合钩子、回合带 tag 且失败时才算。
 function runtimeTurnErrorSummary(slot, startSeq) {
   const log = Array.isArray(slot.eventLog) ? slot.eventLog : [];
   for (let i = log.length - 1; i >= 0 && log[i].seq > startSeq; i--) {
@@ -1158,26 +1160,37 @@ function runtimeTurnErrorSummary(slot, startSeq) {
 }
 
 const TURN_ERROR_SUMMARY_MAX = 200;
+// 错误文本来自 CLI 或第三方端点(可能很长、可能是恶意构造的),进任何正则之前先截到这个长度;下面的正则量词也都有上限
+// (审计 I2 / 判官建议 2:原先先跑正则后截断,不限长的 [\w-]* 前缀遇到几十 KB 的长串是平方级,会卡住事件循环)。
+const TURN_ERROR_INPUT_MAX = 2000;
+const cutBeforeSurrogateSplit = (s, max) => s.slice(0, /[\uD800-\uDBFF]/.test(s[max - 1]) ? max - 1 : max);
 /**
- * 错误文本 → 给人看的一行摘要:先抹掉像密钥 / 令牌的片段,再把空白压成单个空格,超过 200 个字符截短加"…"
- * (不切开代理对)。不是字符串或抹完为空 → null。(export 仅为可单测。)
+ * 错误文本 → 给人看的一行摘要:先截到 2000 字(截断时连带丢掉被截开的最后一段非空白,免得半截凭据躲过下面的规则),
+ * 再抹掉像密钥 / 令牌的片段,把空白压成单个空格,超过 200 个字符截短加"…"(不切开代理对)。
+ * 不是字符串或抹完为空 → null。(export 仅为可单测。)
  */
 export function summarizeTurnError(text) {
   if (typeof text !== 'string') return null;
-  let s = text
-    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, '***') // sk- 开头的 API key
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 ***') // Authorization 头的值
+  let s = text;
+  if (s.length > TURN_ERROR_INPUT_MAX) {
+    s = cutBeforeSurrogateSplit(s, TURN_ERROR_INPUT_MAX);
+    let end = s.length;
+    while (end > 0 && !/\s/.test(s[end - 1])) end -= 1;
+    s = s.slice(0, end);
+  }
+  s = s
+    // URL 里的"用户名:密码@"(scheme://user:pass@host)
+    .replace(/\b([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s:/?#@]{1,256}:[^\s/?#@]{1,256}@/gi, '$1***@')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,2000}/g, '***') // sk- 开头的 API key
+    .replace(/\b(Bearer|Basic)\s{1,16}[A-Za-z0-9._~+/=-]{1,2000}/gi, '$1 ***') // Authorization 头的值
     // key=value、"key": "value" 这类写法里名字像凭据的值
-    .replace(/([\w-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)[\w-]*)(["']?\s*[:=]\s*["']?)[^\s"',;&}]+/gi, '$1$2***')
-    .replace(/[A-Za-z0-9_+=-]{32,}/g, '***') // 其余长串(JWT 段、十六进制 / base64 密钥)
-    .replace(/\s+/g, ' ')
+    .replace(/([\w-]{0,64}(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)[\w-]{0,64})(["']?\s{0,16}[:=]\s{0,16}["']?)[^\s"',;&}]{1,2000}/gi, '$1$2***')
+    // 其余长串:JWT(带点)、十六进制 / base64 / base64url 密钥(带 / + = - _)
+    .replace(/[A-Za-z0-9_+/=.-]{32,2000}/g, '***')
+    .replace(/\s{1,4000}/g, ' ')
     .trim();
   if (!s) return null;
-  if (s.length > TURN_ERROR_SUMMARY_MAX) {
-    let cut = TURN_ERROR_SUMMARY_MAX;
-    if (/[\uD800-\uDBFF]/.test(s[cut - 1])) cut -= 1;
-    s = `${s.slice(0, cut).trimEnd()}…`;
-  }
+  if (s.length > TURN_ERROR_SUMMARY_MAX) s = `${cutBeforeSurrogateSplit(s, TURN_ERROR_SUMMARY_MAX).trimEnd()}…`;
   return s;
 }
 const ENTRY_HOOK_FAILED = { reject: { status: 500, body: { ok: false, code: 'CHAT_ENTRY_HOOK_FAILED', error: '服务端内部错误，本条消息没有发出，请重试' } } };

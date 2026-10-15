@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // r151b:回合结束通知带错误摘要(接口 X.3.6 末尾 2026-10-15 补的第二条)。
 //   ① summarizeTurnError:抹掉像密钥 / 令牌的片段、空白压成一行、超 200 字截短加"…"(不切开代理对);非字符串 / 空 → null。
-//   ② turnEnd 的 errorSummary:failed 时取本回合最后一条错误(错误终态的 result / error 行);completed、stopped、
-//      没有任何错误输出的 failed → null。
+//   ② turnEnd 的 errorSummary:入口钩子改写过(带 tag)的回合 failed 时取本回合最后一条错误(错误终态的 result / error 行);
+//      completed、stopped、没有任何错误输出的 failed、没带 tag 的回合(审计 I2:只给兑换回合算)→ null。
 //   ③ 跨会话结算:处理消息的回合出错 → heldText = "处理该消息的回合出错：<摘要>";取不到摘要 → 原来的固定文案。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身,不起 claude 进程;临时 HOME;端口 6900–6990(跳过 6710)。
 // node tests/unit/check-r151b-turn-error-summary.mjs
@@ -86,7 +86,11 @@ ctl.reply = (input) => (textOf(input).includes('MAKE-ERROR') ? 'error' : textOf(
 
 try {
   const ends = []; const starts = [];
-  const unhook = registerSessionRuntimeHooks({ turnStart: (info) => starts.push(info), turnEnd: (info) => ends.push(info) });
+  let tagTurns = true; // 入口钩子给回合打 tag(= 兑换回合);摘要只给带 tag 的回合算
+  const unhook = registerSessionRuntimeHooks({
+    chatEntry: (ctx) => (tagTurns ? { prompt: ctx.body.prompt, tag: { r151b: 'turn-error-summary' } } : null),
+    turnStart: (info) => starts.push(info), turnEnd: (info) => ends.push(info),
+  });
   const endOf = (pid) => waitFor(() => ends.find((x) => x.pid === pid), `回合 ${pid} 结束`);
   let r = await post('/chat', BODY({ prompt: 'MAKE-ERROR 1' }));
   let e = await endOf(r.body.pid);
@@ -103,6 +107,10 @@ try {
   await post(`/chat/${pidHold}/stop`, {});
   e = await endOf(pidHold);
   eq([e.outcome, e.errorSummary], ['stopped', null], '停止 → 没有摘要');
+  tagTurns = false;
+  r = await post('/chat', BODY({ prompt: 'MAKE-ERROR 没带 tag' }));
+  e = await endOf(r.body.pid);
+  eq([e.outcome, e.errorSummary, e.tag], ['failed', null, undefined], '没带 tag 的回合出错 → failed,不算摘要');
   unhook();
   closeAllPersistentProcesses();
 

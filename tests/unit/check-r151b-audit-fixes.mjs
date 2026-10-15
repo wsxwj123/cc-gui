@@ -80,6 +80,41 @@ try {
     eq(reads, 1, 'xsNativeGuard 每次调用只解析一次目标');
     setEnabled(false);
   }
+
+  // ── I2 + S7 + 判官建议 2:回合错误摘要先截到 2000 字、正则量词有上限、脱敏补带 / + = . 的长串与 URL 里的 用户名:密码@ ──
+  {
+    const { summarizeTurnError: sum } = chat;
+    for (const [label, s] of [
+      ['20 万个字母数字', 'a1'.repeat(100_000)],
+      ['20 万个 "-"', '-'.repeat(200_000)],
+      ['重复 4 万次 token', 'token'.repeat(40_000)],
+      ['重复 2 万次 api_key=', 'api_key='.repeat(25_000)],
+      ['scheme:// 后 20 万个字母', `https://${'a'.repeat(200_000)}`],
+      ['20 万个 "a:"', 'a:'.repeat(100_000)],
+      ['重复 3 万次 "Bearer "', 'Bearer '.repeat(30_000)],
+      ['20 万个空白', ' \t\n'.repeat(70_000)],
+      ['20 万个 base64 字符带点和斜杠', 'Ab+/=.'.repeat(35_000)],
+    ]) {
+      const out = within(50, () => sum(s), `错误摘要 ${label}`);
+      ok(out === null || out.length <= 201, `${label} → 摘要不超过 200 字加省略号`);
+    }
+    // 先截到 2000 字;截断时被截开的最后一段非空白一并丢掉(半截的凭据不会因为太短躲过脱敏)
+    eq(sum(`${' '.repeat(1990)}sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ`), null, '截点落在凭据中间 → 半截凭据丢掉(这里只剩空白 → null)');
+    eq(sum(`错误 ${' '.repeat(1990)}ABCDEFGHIJKLMNOPQRSTUVWXYZ`), '错误', '截断后只留完整的部分');
+    ok(!sum(`${'x '.repeat(999)}${'😀'.repeat(10)}`).includes('\uFFFD'), '截到 2000 字不切开代理对');
+    const leaks = [
+      ['base64 带斜杠', 'key material AbCd/EfGh+IjKl/MnOp=QrSt/UvWx+YzAb/CdEf== rejected', 'AbCd/EfGh'],
+      ['JWT 带点', 'jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N bad', 'eyJzdWIiOiIxMjM0NTY3ODkwIn0'],
+      ['URL 用户名:密码@', 'connect https://alice:s3cr3t-pass@proxy.example.com:8080 failed', 's3cr3t'],
+      ['URL 用户名:密码@(密码里带冒号)', 'GET http://bob:pa:ss@10.0.0.1/x', 'pa:ss'],
+    ];
+    for (const [label, text, secret] of leaks) {
+      const s = sum(text);
+      ok(typeof s === 'string' && !s.includes(secret) && s.includes('***'), `脱敏 ${label}:${text} → ${s}`);
+    }
+    eq(sum('connect https://alice:s3cr3t-pass@proxy.example.com:8080 failed'), 'connect https://***@proxy.example.com:8080 failed', 'URL 只抹用户名与密码,主机留着');
+    eq(sum('fetch https://api.example.com/v1/messages failed: 503'), 'fetch https://api.example.com/v1/messages failed: 503', '不带凭据的短 URL 原样');
+  }
 } finally {
   try { await chat.closeAllPersistentProcesses(); } catch {}
   rmSync(TMP, { recursive: true, force: true });
