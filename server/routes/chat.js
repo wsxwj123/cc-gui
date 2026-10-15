@@ -1068,10 +1068,10 @@ export function autoDecide(mode, toolName, input, boundary, { thirdParty = false
 // 四个位置:/chat 路由入口改写(chatEntry)、回合开始(turnStart)、回合结束(turnEnd)、PreToolUse 守卫
 // (preToolUse);外加补事件的出口 deliverRunEvent。每处都是"有挂接就调、没挂接就跳过";没挂接时
 // 不多 await 一次、不往 slot 上写任何字段 —— 行为与改动前相同(check-r151b-baseline*)。
-const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolUse: null, sessionOptions: null, modeChange: null };
+const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolUse: null, sessionOptions: null, modeChange: null, sessionBound: null };
 
 /**
- * 挂接钩子(启动时调用)。只认上面六个键,值必须是函数;返回注销函数(只撤本次挂上、且仍在位的那几个)。
+ * 挂接钩子(启动时调用)。只认上面七个键,值必须是函数;返回注销函数(只撤本次挂上、且仍在位的那几个)。
  * · chatEntry(ctx) → null | { reject: { status, body } } | { prompt, tag }(可异步)。
  *   ctx = { body, sessionId, clientTurnId, principal, internal }(internal:经 startInternalTurn 起的回合是调用方给的对象,
  *   HTTP 请求恒为 null)。调用时机:输入闸门、工作目录检查、同 clientTurnId 命中
@@ -1097,6 +1097,8 @@ const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolU
  *   记一行日志。挂着它时复用兼容键多一项 xs:1(开关翻转后该会话下一条消息换新进程)。
  * · modeChange({ sessionId, mode })(r151c):POST /chat/permission-mode 回 200 时通知(生效或会话没有进程);409 不调。
  *   同步通知,返回值忽略,抛错只记日志。
+ * · sessionBound(info)(r151c):新会话的回合拿到会话 id(收到 CLI 的 init)时通知,只认本槽当前那一回合、且它还没报结束;
+ *   info 同 turnEnd 的公共部分(带 sessionId,无 outcome)。同步通知,返回值忽略,抛错只记日志;没挂接 = 不调。
  */
 export function registerSessionRuntimeHooks(hooks) {
   if (!hooks || typeof hooks !== 'object') throw new TypeError('registerSessionRuntimeHooks:参数必须是对象');
@@ -1188,6 +1190,12 @@ function settleTurnStartedByRequest(req) {
   if (!slot) return;
   turnStartedByRequest.delete(req);
   if (activeProcesses.get(slot.runId) !== slot) notifyTurnEnd(slot, slot.runId);
+}
+// r151c:新会话的回合拿到会话 id(init)—— 通知一次(没挂接 = 跳过;回合钩子没挂接时本槽也没有 runtimeTurn)。
+function notifyTurnSessionBound(slot, pid) {
+  const rt = slot.runtimeTurn;
+  if (!runtimeHooks.sessionBound || !rt || rt.ended || rt.epoch !== (slot.turnEpoch | 0)) return;
+  callRuntimeHook('sessionBound', runtimeTurnInfo(slot, pid));
 }
 // 回合结束:只认本 slot 当前那一回合,且只报一次。
 function notifyTurnEnd(slot, pid) {
@@ -2742,6 +2750,7 @@ async function handleChatPost(req, res) {
         if (!slot.sessionId && m.type === 'system' && m.subtype === 'init' && m.session_id) {
           slot.sessionId = m.session_id;
           adoptTurnSession(slot, m.session_id); // R13:draft 回合的 owner 换成真实 sid(同一回合)
+          notifyTurnSessionBound(slot, procId); // r151c:拿到会话 id 即通知(跨会话的发送档案不等回合结束)
           // draftId 由发起客户端生成，session_id 由 CLI init 权威给出。在 init 透传给
           // 客户端之前持久记录映射；这样 pane 已切走或整个 App 重启后，已有 sessions
           // 列表仍能把本地未绑定附件 outbox 迁到真实会话，不依赖 server slot 内存寿命。

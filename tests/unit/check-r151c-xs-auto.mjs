@@ -381,6 +381,14 @@ try {
   ok(seqTS.includes('processing') && !seqTS.slice(seqTS.indexOf('processing')).includes('queued'), `开始处理后没有退回排队(没回"会话正忙"):${seqTS.join('→')}`);
   ok(ws.some((e) => e.type === 'xs:turn' && e.messageId === mTS.id), '收尾后起了回合(xs:turn)');
 
+  // 2) 新会话拿到会话 id(init)即记发送档案:回合还在跑、还没有回合结束通知
+  const rNew = await api('POST', '/chat', { prompt: 'R151C-HOLD 新会话首回合', cwd: WORK, model: 'r151c-model', permissionMode: 'bypassPermissions', keepAlive: true });
+  eq(rNew.status, 200, `前置:新会话回合 200(${JSON.stringify(rNew.body).slice(0, 160)})`);
+  const newSid = await waitFor(() => chat.getActiveChatProcesses().find((p) => p.pid === rNew.body.pid)?.sessionId, '新会话拿到会话 id');
+  const profNew = await waitFor(async () => (await store.readXsProfiles()).sessions[newSid], '新会话的档案(回合还在跑)', 3000);
+  eq([profNew.judge.mode, profNew.replay.cwd, slotOf(newSid)?.busy], ['bypassPermissions', WORK, true], '拿到会话 id 即记档案,不等回合结束');
+  eq((await api('POST', `/chat/${encodeURIComponent(rNew.body.pid)}/stop`, {})).status, 200, '收尾:停止新会话的回合');
+
   console.log(`PASS check-r151c-xs-auto(${checks} 项)`);
 } finally {
   await chat.closeAllPersistentProcesses?.();

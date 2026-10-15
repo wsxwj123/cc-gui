@@ -597,7 +597,7 @@ export async function xsNativeGuard(input, ctx) {
 
 // ── r151c:发送档案(方案 A5 / A6 / A12 / A13)───────────────────────────────────────────────────────────────
 // 开关开着时,每个回合开始按本回合的会话级参数记一份档案:replay(重放用:请求原值,model 为解析值)与 judge(判定用:界面档位、
-// provider 指纹、记录时刻)。新会话首回合开始时还没有会话 id,到回合结束时补记。内容没变不写盘;本次启用之前记的档案即使内容
+// provider 指纹、记录时刻)。新会话首回合开始时还没有会话 id,拿到会话 id(CLI 的 init)时立即补记(补充约定),回合结束时再兜一次。内容没变不写盘;本次启用之前记的档案即使内容
 // 没变也重记一次(刷新记录时刻,否则重新打开开关后它永远不算数)。写失败只记日志:该会话按旧档案或没有档案判(偏安全)。
 // 切档(/chat/permission-mode 200)同步改 replay.permissionMode 与 judge.mode;删会话时删档案(forgetXsSession)。
 const TURN_RECORDS_MAX = 512;
@@ -665,12 +665,25 @@ function noteTurnStartProfile(info) {
   if (info.sessionId) recordProfile(info.sessionId, params);
 }
 
+// chat.js 的 sessionBound 通知:新会话的回合拿到会话 id。回合记录与连锁记录补上会话 id,立即记档案(不等回合结束)。
+function onSessionBound(info) {
+  if (!info?.runId || !isIdString(info.sessionId)) return;
+  const key = `${info.runId}:${info.turnEpoch | 0}`;
+  const rec = turnRecords.get(key);
+  if (rec && !rec.sessionId) {
+    rec.sessionId = info.sessionId;
+    recordProfile(info.sessionId, rec.params);
+  }
+  const chain = turnChains.get(key);
+  if (chain && !chain.sessionId) chain.sessionId = info.sessionId;
+}
+
 function noteTurnEndProfile(info) {
   const key = `${info?.runId}:${info?.turnEpoch | 0}`;
   const rec = turnRecords.get(key);
   if (!rec) return;
   turnRecords.delete(key);
-  if (!rec.sessionId && info.sessionId) recordProfile(info.sessionId, rec.params); // 新会话首回合:开始时还没有会话 id
+  if (!rec.sessionId && info.sessionId) recordProfile(info.sessionId, rec.params); // 新会话首回合没收到 sessionBound 时兜底
 }
 
 // modeChange 钩子:切档生效(或会话没有进程)时同步该会话档案里的两处档位;没有档案不新建。
@@ -1267,7 +1280,7 @@ function releaseTurnHooksIfIdle() {
 /** 开关变化时调用(PUT /api/xsession/config 写盘成功后)。 */
 export function syncXsRuntimeHooks(enabled) {
   turnHooksWanted = enabled === true;
-  if (turnHooksWanted && !unhookTurns) unhookTurns = registerSessionRuntimeHooks({ turnStart: onTurnStart, turnEnd: onTurnEnd });
+  if (turnHooksWanted && !unhookTurns) unhookTurns = registerSessionRuntimeHooks({ turnStart: onTurnStart, turnEnd: onTurnEnd, sessionBound: onSessionBound });
   // r151c:切档通知(同步发送档案的档位)、按会话挂工具(派工 4)与原生引导同一生命周期:随开关即挂即撤。撤掉后已在跑的进程
   // 里工具仍在,但 list_sessions 不再免确认(chat.js 认挂接点同一性),调用整次失败 XS_DISABLED;下一条消息换新进程(兼容键少 xs:1)。
   if (turnHooksWanted && !unhookGuard) unhookGuard = registerSessionRuntimeHooks({ preToolUse: xsNativeGuard, modeChange: xsModeChange, sessionOptions: xsSessionOptions });
