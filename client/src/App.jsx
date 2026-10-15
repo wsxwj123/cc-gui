@@ -158,7 +158,8 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
-import { startXsession, xsChatFields, xsClaimNotSent } from './utils/xsession.js';
+import { startXsession, xsChatFields, xsClaimNotSent, keepLivePeer, peerFromXsEvent, peerFromResultEvent } from './utils/xsession.js';
+import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
@@ -3279,6 +3280,9 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
         ? null
         : msg.type === 'task-notice'
         ? <TaskNoticeRow notice={msg} />
+        // r151b:跨会话消息(历史条目)—— 独立气泡,不是用户提问,没有回滚 / 分叉入口
+        : msg.type === 'peer-message'
+        ? <PeerMessageBubble message={msg} />
         : msg.type === 'denial'
         ? <DenialNotice denial={msg} />
         : msg.type === 'turn'
@@ -4313,8 +4317,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 下方 localOnly)与未落盘的停止半截回复(interrupted:停止场景
         // "末条用户消息已落盘"≠"整轮落盘",半截 assistant 可能没写进 jsonl,整清=丢内容;
         // 已落盘的(命中)照清防双渲染)。审计#7。
-        if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || (m.interrupted && !known.has(m)));
-        return prev.filter((m) => !known.has(m));
+        // r151b:直播来源气泡同样只活在本地,历史里有了同一条才交给历史(keepLivePeer)。
+        if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || keepLivePeer(m, persisted) || (m.interrupted && !known.has(m)));
+        return prev.filter((m) => !known.has(m) || keepLivePeer(m, persisted));
       });
     };
     // WS 重连成功 → 断线期间本会话的 file-change 可能已丢,合成一个命中自己 sid 的
@@ -4344,8 +4349,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const known = makePersistedIndex(messages);
       const lastUser = [...prev].reverse().find((m) => m.type === 'user');
       // 保留 btw / denial 与未落盘的停止半截回复(同上面 reconcile,审计#7)。
-      if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || (m.interrupted && !known.has(m)));
-      const next = prev.filter((m) => !known.has(m));
+      if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || keepLivePeer(m, messages) || (m.interrupted && !known.has(m)));
+      const next = prev.filter((m) => !known.has(m) || keepLivePeer(m, messages));
       return next.length === prev.length ? prev : next;
     });
   }, [messages, sessionQueueKey]);
@@ -6125,6 +6130,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           //   deny 规则 / dontAsk 档拒 / 后台代理自动判定四条路径——它们此前在界面上只留下
           //   一条 is_error 的 tool_result,拒绝原因完全不可见。按 tool_use_id 去重(同一次
           //   调用只发一条),ownerKey 走流归属,和 goal 提示同一套门控。
+          // r151b:跨会话消息的来源气泡(直播)。xs_message = GUI 投递的那条(点卡片兑换后服务端在本回合
+          // 模型输出之前补发);顶层 result 带 origin.kind:"peer"、不是子代理回传、不是 GUI 自己投递的
+          // (senderTaskId / hostInjected)= 经 CLI 原生通道从别的会话来的。本回合的回复在流结束时才进
+          // chatMessages,所以追加在末尾就是"该回合之前";按 uuid 去重(重放 / reattach 不画两遍)。
+          if (event.type === 'xs_message' || event.type === 'result') {
+            const peer = event.type === 'xs_message' ? peerFromXsEvent(event) : peerFromResultEvent(event);
+            if (peer) setChatMessages((prev) => (prev.some((m) => m.uuid === peer.uuid) ? prev : [...prev, { ...peer, ownerKey: streamOwnerSid() }]));
+          }
           if (event.type === 'system' && event.subtype === 'permission_denied') {
             const dUuid = 'denied-' + (event.tool_use_id || event.uuid || Date.now());
             setChatMessages((prev) => (prev.some((m) => m.uuid === dUuid) ? prev : [...prev, {
@@ -7464,7 +7477,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             localCopiesCleared = true; // r119:见声明处 —— 之后不许再补本地副本
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
-              return prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(m)) : prev;
+              const hist = getLocalMessages(); // r151b:直播来源气泡按历史是否已有同一条决定去留
+              return prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(m) || keepLivePeer(m, hist)) : prev;
             });
             break;
           }
@@ -7480,7 +7494,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             localCopiesCleared = true; // r119:见声明处 —— 之后不许再补本地副本
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
-              const localOnly = (m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch';
+              const localOnly = (m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || keepLivePeer(m, getLocalMessages()); // r151b:直播来源气泡在历史有同一条之前保留
               return prev.some(localOnly) ? prev.filter(localOnly) : [];
             });
             break;
@@ -9459,6 +9473,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     ? null
                     : msg.type === 'task-notice'
                     ? <TaskNoticeRow notice={msg} />
+                    : msg.type === 'peer-message'
+                    ? <PeerMessageBubble message={msg} />
                     : msg.type === 'denial'
                     ? <DenialNotice denial={msg} />
                     : msg.type === 'mode-mismatch'
