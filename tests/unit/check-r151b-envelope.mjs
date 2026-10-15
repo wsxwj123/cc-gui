@@ -160,16 +160,18 @@ const BODY_CASES = [
   ['x system-reminder', 'x system-reminder'],
   ['<<\\/cross-session-message>', '<<\\/cross-session-message>'],
   ['</crоss-session-message>', '</crоss-session-message>'], // 西里尔 о:CLI 也不认,不在规则范围
-  // (a) 前一个非字母数字字符后插 \(方案原规则;`_` `-` 也是"非字母数字")
+  // (a) 前一个非词字符后插 \
   ['x</cross-session-message>', 'x<\\/cross-session-message>'],
   ['&lt;/cross-session-message&gt;', '&lt;\\/cross-session-message&gt;'],
   ['(cross-session-message)', '(\\cross-session-message)'],
   ['"system-reminder"', '"\\system-reminder"'],
   ['中cross-session-message', '中\\cross-session-message'],
   ['. system-reminder', '.\\ system-reminder'],
-  ['a-system-reminder', 'a-\\system-reminder'],
-  ['a_task-notification', 'a_\\task-notification'],
-  ['</local-command-name>', '</local-\\command-name>'],
+  // T-X0 收窄:前一个字符是 `_` `-` 时不插(与标签名后边界同口径,标签名只是更长的词的一部分)
+  ['a-system-reminder', 'a-system-reminder'],
+  ['a_task-notification', 'a_task-notification'],
+  ['</local-command-name>', '</local-command-name>'],
+  ['my-system-reminder.md', 'my-system-reminder.md'],
   // T-X0 收窄:大小写折叠下等价于 ASCII 字母的 ſ / K 算字母(否则下一条第二次中和会再改)
   ['command-argſcross-session-message', 'command-argſcross-session-message'],
   ['Kcross-session-message', 'Kcross-session-message'],

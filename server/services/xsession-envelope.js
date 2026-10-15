@@ -15,10 +15,12 @@
 //      加上全部格式字符与组合记号)、标签名后面是词字符(`A–Z a–z 0–9 _ -`)以外的字符或正文结尾。标签名前面可以有
 //      一个斜杠(`/` `／` `∕` `⁄`),斜杠与标签名之间同样可夹空白与不可见字符。
 //   3. 对每处匹配做两件事,需要插 `\` 的位置去重后一次插入:
-//      (a) 取匹配(含斜杠)前面、跳过空白与不可见字符后最近的一个字符;如果它不是 ASCII 字母或数字、也不是 `\`,
-//          就在它后面插入 `\`(方案原规则)。T-X0 收窄一处:大小写折叠下与 ASCII 字母等价的 `ſ`(U+017F)、
-//          `K`(U+212A)也算字母 —— 否则 `command-argſ` 这种以 `ſ` 结尾的标签名写法,后面插进 `\` 后就变成一个
-//          完整的标签名,第二次中和还会再改,违反幂等。
+//      (a) 取匹配(含斜杠)前面、跳过空白与不可见字符后最近的一个字符;如果它不是词字符(ASCII 字母、数字、`_`、
+//          `-`)、也不是 `\`,就在它后面插入 `\`。相对方案原规则("不是 ASCII 字母数字")收窄两处:
+//          · `_` `-` 也算词字符:与标签名后边界同一口径,标签名只是一个更长的词的一部分时不动,免得把
+//            `my-system-reminder.md`、`--command-name` 这类代码文本改坏(两种口径都通过往返与无未转义标签检查);
+//          · 大小写折叠下与 ASCII 字母等价的 `ſ`(U+017F)、`K`(U+212A)也算字母 —— 否则 `command-argſ` 这种以
+//            `ſ` 结尾的标签名写法,后面插进 `\` 后就变成一个完整的标签名,第二次中和还会再改,违反幂等。
 //      (b) 从标签名第一个字母往前,跨过所有"既不是词字符、也不是类尖括号"的字符(CLI 闭合标签匹配里类小于号与
 //          标签名之间允许出现的就是这些字符:汉字、标点、`\`、斜杠、换行……);如果停在一个类小于号上,而它后面
 //          紧跟的不是 `\`,就在它后面插入 `\`。T-X0 加强:CLI 只检查类小于号紧后那一个字符是不是 `\`,
@@ -66,8 +68,7 @@ const LT_LIKE = chars(0x3c, 0xff1c, 0xfe64, 0x2329, 0x27e8, 0x3008, 0x2039, 0x02
 const GT_LIKE = chars(0x3e, 0xff1e, 0xfe65, 0x232a, 0x27e9, 0x3009, 0x203a, 0x02c3, 0x1433, 0x276d, 0x276f, 0x2771, 0x29fd, 0x226f, 0x227b, 0x22d7);
 const SLASH_LIKE = chars(0x2f, 0xff0f, 0x2215, 0x2044);
 // 带 `iu`:与 CLI 的 `[^A-Za-z0-9_\-]` 同口径(Unicode 大小写折叠下 `ſ` 算 s、开尔文符号算 k)。
-const WORD_ONE = /^[A-Za-z0-9_-]$/iu; // 词字符:标签名边界、(b) 的停止条件
-const ALNUM_ONE = /^[A-Za-z0-9]$/iu; // ASCII 字母或数字:(a) 不插 `\` 的条件
+const WORD_ONE = /^[A-Za-z0-9_-]$/iu; // 词字符:标签名边界、(a) 不插 `\` 的条件、(b) 的停止条件
 
 const tagPattern = (tag) => [...tag].map((ch, i) => (i === 0 ? '' : `${FILL_CLASS}*`) + (ch === '-' ? CONNECTOR_CLASS : ch)).join('');
 const TAG_NAME_RE = new RegExp(`(?:${XS_NEUTRALIZE_TAGS.map(tagPattern).join('|')})(?=[^A-Za-z0-9_\\-]|$)`, 'giu');
@@ -108,7 +109,7 @@ export function neutralizeXsBody(text) {
     const nearestEnd = skipFillBackward(s, matchStart);
     if (nearestEnd > 0) {
       const nearest = s.slice(codePointStartBefore(s, nearestEnd), nearestEnd);
-      if (nearest !== '\\' && !ALNUM_ONE.test(nearest)) insertAfter.add(nearestEnd);
+      if (nearest !== '\\' && !WORD_ONE.test(nearest)) insertAfter.add(nearestEnd);
     }
     // (b) 跨过 CLI 允许夹在类小于号与标签名之间的字符,停在类小于号上且它后面不是 `\` → 在它后面插 `\`
     let p = nameStart;
