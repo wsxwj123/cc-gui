@@ -205,6 +205,23 @@ try {
   open4b();
   await waitIdle(T4);
 
+  // ── ③b P22 的服务端前提:点【处理】一条 queued 的消息 = 前端当场认领(queued → claimed);目标回合结束后调度器不再自动处理它 ──
+  await setInbound([T4]);
+  const open4c = gate('GATE-X4C');
+  await userTurn(T4, 'bypassPermissions', { prompt: 'GATE-X4C 第三个长回合' });
+  await waitFor(() => slotOf(T4)?.busy, 'T4 第三次忙');
+  r = await send(sS, [T4], 'R151C 排队后被人认领');
+  const q4c = (await fromSession(T4)()).find((m) => m.status === 'queued');
+  ok(r.results[0].delivery === 'queued' && q4c, '前置:又排上一条');
+  const held4c = await xs.claimMessage(q4c.id);
+  ok(typeof held4c.token === 'string' && held4c.token.length > 0, 'queued 可直接认领(拿到一次性凭据)');
+  open4c();
+  await waitIdle(T4);
+  await sleep(2500);
+  eq((await msgById(q4c.id)).status, 'claimed', '目标回合结束、空闲满 1.5 秒后:仍是 claimed(调度器只投 queued,不抢人已认领的)');
+  ok(!ws.some((e) => e.type === 'xs:turn' && e.messageId === q4c.id), '没有为它开始自动处理');
+  await xs.dismissMessage(q4c.id);
+
   // ── ④ 结算 ──
   const T5 = mk('目标 T5 目录没了'); const T6 = mk('目标 T6 会出错'); const T7 = mk('目标 T7 起不来'); const T8 = mk('目标 T8 会被停止');
   await profiled(T5, 'bypassPermissions', WORK5);
