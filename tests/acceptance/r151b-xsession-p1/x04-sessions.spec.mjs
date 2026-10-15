@@ -18,7 +18,9 @@ test('X04 GET /api/xsession/sessions:按最近活动倒序;无标题为"未命�
     const mark = uniq('Q4m');
     const s1 = seedSession(`x04-new-${mark}`, { home, title: `R151B 新 ${mark}`, mtime: new Date(now - 1_000) });
     const s2 = seedSession(`x04-mid-${mark}`, { home, title: 'R151B 中间', mtime: new Date(now - 3_600_000) });
-    const s3 = seedSession(`x04-untitled-${mark}`, { home, title: null, firstPrompt: '', reply: 'R151B 无标题会话的回复', mtime: new Date(now - 7_200_000) });
+    // 没改过名、也没有自动标题(不写 summary 行),只有首条提问:标题应取首条提问
+    const s3Prompt = `R151B 未改名会话的首条提问 ${mark}`;
+    const s3 = seedSession(`x04-untitled-${mark}`, { home, title: null, firstPrompt: s3Prompt, reply: 'R151B 无标题会话的回复', mtime: new Date(now - 7_200_000) });
     const c1 = seedSession(`x04-c1-${mark}`, { home, sid: 'abcdef12-0000-4000-8000-000000000001', title: 'R151B 冲突一', mtime: new Date(now - 10_800_000) });
     const c2 = seedSession(`x04-c2-${mark}`, { home, sid: 'abcdef12-0000-4000-8000-000000000002', title: 'R151B 冲突二', mtime: new Date(now - 14_400_000) });
 
@@ -31,7 +33,7 @@ test('X04 GET /api/xsession/sessions:按最近活动倒序;无标题为"未命�
       sessionId: s1.sid, shortId: s1.sid.slice(0, 8), title: `R151B 新 ${mark}`, project: path.basename(s1.cwd), state: 'stopped', pending: 0,
     });
     expect(Number.isNaN(Date.parse(lastActivity)) ? lastActivity : 'ISO', 'lastActivity 是时间字符串').toBe('ISO');
-    expect(by[s3.sid].title, '没有标题 → "未命名会话"').toBe('未命名会话');
+    expect(by[s3.sid].title, '没改过名、也没有自动标题 → 取首条提问').toBe(s3Prompt);
     for (const c of [c1, c2]) {
       const sh = by[c.sid].shortId;
       expect(c.sid.startsWith(sh) && sh.length > 8, `前 8 位冲突时加长(${c.sid} → ${sh})`).toBe(true);
