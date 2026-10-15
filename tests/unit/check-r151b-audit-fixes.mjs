@@ -300,8 +300,8 @@ try {
     chat.notifyTurnStart(slot, 'sdk-j3', false, { n: 1 });
     slot.turnEpoch = 2; // 复用路径:回合代数先 +1,再通知回合开始
     chat.notifyTurnStart(slot, 'sdk-j3', true, { n: 2 });
-    eq(brief(), [['start', 1, 1, null, null, 'sdk-j3'], ['end', 1, 1, 'failed', null, 'sdk-j3'], ['start', 2, 2, null, null, 'sdk-j3']],
-      '上一回合没报过结束 → 先补报 failed(带它自己的 tag 与回合代数),再报新回合开始');
+    eq(brief(), [['start', 1, 1, null, null, 'sdk-j3'], ['end', 1, 1, 'stopped', null, 'sdk-j3'], ['start', 2, 2, null, null, 'sdk-j3']],
+      '上一回合没报过结束 → 先补报 stopped(结算成 interrupted;带它自己的 tag 与回合代数),再报新回合开始');
     slot.runtimeTurn.stopRequested = true;
     slot.turnEpoch = 3;
     chat.notifyTurnStart(slot, 'sdk-j3', true, { n: 3 });

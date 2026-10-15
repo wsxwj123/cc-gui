@@ -1119,8 +1119,8 @@ const runtimeTurnInfo = (slot, pid) => ({
 const turnStartedByRequest = new WeakMap();
 // 回合开始:两个回合钩子都没挂接时什么都不做(slot 上不出现 runtimeTurn)。
 // 上一回合的记录还没报过结束就要被覆盖时,先给它补报一次(判官建议 3;否则绑在它上面的跨会话消息停在 processing
-// 直到重启)。走到这里说明上一回合没经过回合收尾(收尾会先报结束),按"没等到结果"报 failed,收到过停止请求的报
-// stopped;此时事件窗已随新回合清空,摘要为 null。(export 仅为可单测。)
+// 直到重启)。走到这里说明上一回合没经过回合收尾(收尾会先报结束),一律按"被中断"报 stopped(结算成 pending /
+// interrupted;主会话裁定:没等到结果不等于回合出错,不报 failed);此时事件窗已随新回合清空,摘要为 null。(export 仅为可单测。)
 export function notifyTurnStart(slot, pid, reused, tag, req) {
   if (!runtimeHooks.turnStart && !runtimeHooks.turnEnd) return;
   const prev = slot.runtimeTurn;
@@ -1128,7 +1128,7 @@ export function notifyTurnStart(slot, pid, reused, tag, req) {
     prev.ended = true;
     callRuntimeHook('turnEnd', {
       ...runtimeTurnInfo(slot, pid), turnEpoch: prev.epoch, tag: prev.tag,
-      outcome: prev.stopRequested ? 'stopped' : 'failed', errorSummary: null,
+      outcome: 'stopped', errorSummary: null,
     });
   }
   // startSeq:本回合开始前最后一个事件序号(序号跨回合单调),回合结束时只从它之后的事件里找错误摘要
