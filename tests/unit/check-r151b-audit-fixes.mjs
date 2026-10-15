@@ -255,6 +255,28 @@ try {
     const head = readFileSync(new URL('../../server/services/xsession-store.js', import.meta.url), 'utf8').split('\n').slice(0, 25).join('\n');
     ok(!head.includes('关着时不读、不写、不建目录'), '存储层头注释不再写"关着时不读、不写、不建目录"');
   }
+
+  // ── 判官建议 3:回合开始覆盖上一回合的记录前,上一回合若还没报过结束,先补报一次 ─────────────────────────────────
+  {
+    const log = [];
+    const unhook = chat.registerSessionRuntimeHooks({ turnStart: (i) => log.push(['start', i]), turnEnd: (i) => log.push(['end', i]) });
+    const brief = () => log.map(([k, i]) => [k, i.tag?.n, i.turnEpoch, i.outcome ?? null, i.errorSummary ?? null, i.pid]);
+    const slot = { runId: 'sdk-j3', sessionId: A, cwd: WORK, turnEpoch: 1, seq: 7 };
+    chat.notifyTurnStart(slot, 'sdk-j3', false, { n: 1 });
+    slot.turnEpoch = 2; // 复用路径:回合代数先 +1,再通知回合开始
+    chat.notifyTurnStart(slot, 'sdk-j3', true, { n: 2 });
+    eq(brief(), [['start', 1, 1, null, null, 'sdk-j3'], ['end', 1, 1, 'failed', null, 'sdk-j3'], ['start', 2, 2, null, null, 'sdk-j3']],
+      '上一回合没报过结束 → 先补报 failed(带它自己的 tag 与回合代数),再报新回合开始');
+    slot.runtimeTurn.stopRequested = true;
+    slot.turnEpoch = 3;
+    chat.notifyTurnStart(slot, 'sdk-j3', true, { n: 3 });
+    eq(brief().slice(3), [['end', 2, 2, 'stopped', null, 'sdk-j3'], ['start', 3, 3, null, null, 'sdk-j3']], '上一回合收到过停止请求 → 补报 stopped');
+    slot.runtimeTurn.ended = true; // 正常收尾报过结束的
+    slot.turnEpoch = 4;
+    chat.notifyTurnStart(slot, 'sdk-j3', true, { n: 4 });
+    eq(brief().slice(5), [['start', 4, 4, null, null, 'sdk-j3']], '上一回合已报过结束 → 不再补报');
+    unhook();
+  }
 } finally {
   try { await chat.closeAllPersistentProcesses(); } catch {}
   rmSync(TMP, { recursive: true, force: true });

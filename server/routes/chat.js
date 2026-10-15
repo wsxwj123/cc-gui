@@ -1118,8 +1118,19 @@ const runtimeTurnInfo = (slot, pid) => ({
 // 冷启路径里开始过的回合 → 发起它的那次请求(进程没起来时由 /chat 路由层补报结束,见 settleTurnStartedByRequest)。
 const turnStartedByRequest = new WeakMap();
 // 回合开始:两个回合钩子都没挂接时什么都不做(slot 上不出现 runtimeTurn)。
-function notifyTurnStart(slot, pid, reused, tag, req) {
+// 上一回合的记录还没报过结束就要被覆盖时,先给它补报一次(判官建议 3;否则绑在它上面的跨会话消息停在 processing
+// 直到重启)。走到这里说明上一回合没经过回合收尾(收尾会先报结束),按"没等到结果"报 failed,收到过停止请求的报
+// stopped;此时事件窗已随新回合清空,摘要为 null。(export 仅为可单测。)
+export function notifyTurnStart(slot, pid, reused, tag, req) {
   if (!runtimeHooks.turnStart && !runtimeHooks.turnEnd) return;
+  const prev = slot.runtimeTurn;
+  if (prev && !prev.ended) {
+    prev.ended = true;
+    callRuntimeHook('turnEnd', {
+      ...runtimeTurnInfo(slot, pid), turnEpoch: prev.epoch, tag: prev.tag,
+      outcome: prev.stopRequested ? 'stopped' : 'failed', errorSummary: null,
+    });
+  }
   // startSeq:本回合开始前最后一个事件序号(序号跨回合单调),回合结束时只从它之后的事件里找错误摘要
   slot.runtimeTurn = { epoch: slot.turnEpoch | 0, tag, ended: false, stopRequested: false, startSeq: slot.seq | 0 };
   if (req) turnStartedByRequest.set(req, slot);
