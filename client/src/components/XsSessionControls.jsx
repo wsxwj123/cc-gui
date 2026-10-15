@@ -75,15 +75,17 @@ export function XsPausedBanner() {
     if (!r.ok) setErr(r.error);
     setBusy(false);
   };
+  // 文字靠左、按钮靠右:触顶暂停时正好有一批自动处理的会话收尾,"会话完成"提示会在顶部正中排成一列(fixed、层级更高),
+  // 按钮放正中会被它们盖住点不到;也不能把本条层级抬到它们之上(会盖住顶栏弹出的下拉菜单)。
   return (
     <div data-testid="xs-paused-banner" role="status"
-      className="shrink-0 px-4 py-1.5 bg-amber-500/10 border-b border-amber-500/25 text-[12px] text-amber-700 font-body flex items-center justify-center gap-3 flex-wrap relative z-30">
-      <span>{`跨会话自动处理已暂停（10 分钟内已自动处理 ${limit} 次）。`}</span>
+      className="shrink-0 px-4 py-1.5 bg-amber-500/10 border-b border-amber-500/25 text-[12px] text-amber-700 font-body flex items-center gap-3 flex-wrap relative z-30">
+      <span className="flex-1 min-w-0">{`跨会话自动处理已暂停（10 分钟内已自动处理 ${limit} 次）。`}</span>
+      {err && <span className="text-error">{err}</span>}
       <button onClick={resume} disabled={busy}
         className="shrink-0 px-2 py-0.5 rounded-md bg-accent text-white text-[11px] hover:bg-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
         恢复自动处理
       </button>
-      {err && <span className="text-error">{err}</span>}
     </div>
   );
 }
