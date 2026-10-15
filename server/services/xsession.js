@@ -19,8 +19,9 @@ import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, lis
 import { XS_PROFILE_MODES, XS_PROFILE_REPLAY_KEYS, dropXsProfile, mutateXsProfiles, readXsProfiles } from './xsession-store.js';
 import { chainForNewTurn, decideRoute, providerFingerprint } from './xsession-policy.js';
 import { createAutoBudget, createXsScheduler } from './xsession-scheduler.js';
-import { assignShortIds, resolveTarget } from './xsession-resolve.js';
-import { buildXsEnvelope, neutralizeXsBody } from './xsession-envelope.js';
+import { assignShortIds, resolveTarget, selectXsSessions } from './xsession-resolve.js';
+import { buildXsEnvelope, neutralizeXsBody, normalizeXsSourceName } from './xsession-envelope.js';
+import { XS_LIST_SESSIONS_TOOL, XS_TOOLS_SERVER, createXsToolHandlers, createXsToolsServer } from './xsession-tools.js';
 
 export const XS_DISABLED_TEXT = '跨会话消息未开启';
 export const XS_CLAIM_INVALID_TEXT = '跨会话消息凭据无效';
@@ -817,9 +818,49 @@ function exceedsChars(s, max) {
   return false;
 }
 
+// rows 可以是会话行数组,也可以是取会话行的异步函数(工具用:先判完开关、发送方与长度,再读会话列表 —— 读失败属于错误总表 ⑧)。
+async function resolveRows(rows, internalText) {
+  if (typeof rows !== 'function') return Array.isArray(rows) ? rows : [];
+  let out;
+  try { out = await rows(); } catch (e) {
+    console.warn(`[xsession] 读会话列表失败:${e?.code || e?.message || e}`);
+    throw new XsError(500, 'XS_INTERNAL', internalText);
+  }
+  return Array.isArray(out) ? out : [];
+}
+
+// ── 会话里的 AI 列出会话(mcp__ccgui-sessions__list_sessions 的业务;接口 X.3.2 与 r151c §4 错误总表 ①③④⑧)──────────
+const AI_LIST_MAX = 30;
+const AI_QUERY_MAX_CHARS = 100;
+const AI_LIST_INTERNAL_TEXT = '读取会话列表失败';
+/**
+ * sender 同 sendAiMessages;rows 同上(数组或异步函数)。返回 { self:{id,name}, sessions:[{id,name,project,state,inbound}], truncated }:
+ * 不含自己、按最近活动倒序(rows 已排好)、最多 30 项;id 是短 id(冲突按全部会话判,与会话列表同口径);name 是会话列表同口径的
+ * 标题再按来源名规则清洗;query 与会话列表的 query 同规则(标题或目录名、不分大小写的子串)。整次失败抛 XsError。
+ */
+export async function listAiSessions({ sender, query } = {}, rows) {
+  if (!readXsEnabledSync()) throw new XsError(409, 'XS_DISABLED', XS_DISABLED_TEXT);
+  if (!isIdString(sender?.sessionId)) throw new XsError(500, 'XS_INTERNAL', '取不到发送方会话');
+  if (query !== undefined && (typeof query !== 'string' || exceedsChars(query, AI_QUERY_MAX_CHARS))) {
+    throw new XsError(400, 'XS_INVALID_INPUT', `query 必须是不超过 ${AI_QUERY_MAX_CHARS} 字的字符串`);
+  }
+  const all = await resolveRows(rows, AI_LIST_INTERNAL_TEXT);
+  const selfRow = all.find((r) => sameId(r.sessionId, sender.sessionId)) || null;
+  const selfId = selfRow ? selfRow.sessionId : sender.sessionId;
+  const shortIds = assignShortIds([...all.map((r) => r.sessionId), ...(selfRow ? [] : [selfId])]);
+  const inbound = readXsPrefsSync().inbound;
+  const inboundOf = (id) => (Object.keys(inbound).some((k) => sameId(k, id)) ? 'auto' : 'card');
+  const picked = selectXsSessions(all.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), { query: query ?? '', limit: AI_LIST_MAX + 1, exclude: selfId });
+  return {
+    self: { id: shortIds.get(selfId), name: normalizeXsSourceName(selfRow?.title) },
+    sessions: picked.slice(0, AI_LIST_MAX).map((s) => ({ id: s.shortId, name: normalizeXsSourceName(s.title), project: s.project, state: s.state, inbound: inboundOf(s.sessionId) })),
+    truncated: picked.length > AI_LIST_MAX,
+  };
+}
+
 /**
  * sender = { sessionId, runId, turnEpoch, guiMode }(发送方槽在调用那一刻的值);rows = 已落盘会话行(与会话列表同一认定,
- * [{ sessionId, title, project, projectDir }])。整次失败抛 XsError(code 为 XS_DISABLED / XS_INTERNAL / XS_INVALID_INPUT /
+ * [{ sessionId, title, project, projectDir }];也可以是取它的异步函数,见 resolveRows)。整次失败抛 XsError(code 为 XS_DISABLED / XS_INTERNAL / XS_INVALID_INPUT /
  * XS_TOO_MANY_TARGETS / XS_BODY_TOO_LARGE / XS_TURN_SEND_LIMIT),一条不发、不计入 16;否则返回 { results, notice }。
  */
 export async function sendAiMessages({ sender, to, message } = {}, rows) {
@@ -834,7 +875,7 @@ export async function sendAiMessages({ sender, to, message } = {}, rows) {
   if (typeof message !== 'string' || !message.trim() || exceedsChars(message, AI_MESSAGE_MAX_CHARS)) {
     throw invalid(`message 须为非空字符串，不超过 ${AI_MESSAGE_MAX_CHARS} 字`);
   }
-  const all = Array.isArray(rows) ? rows : [];
+  const all = await resolveRows(rows, XS_INTERNAL_TEXT);
   const shortIds = assignShortIds(all.map((r) => r.sessionId));
   const sessions = all.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) }));
   const senderRow = sessions.find((r) => sameId(r.sessionId, sender.sessionId)) || null;
@@ -1126,6 +1167,55 @@ async function xsInternalEntry(internal, sessionId) {
   return { prompt: f.prompt, tag: { xsMessageId: internal.messageId, key: internal.key } };
 }
 
+// ── 给模型的两个工具:按会话挂进程内 MCP 服务(sessionOptions 挂接点;r151c 派工 4)─────────────────────────────
+// 会话行由 routes/xsession.js 的 loadSessionRows 提供(与会话列表、转发、PUT inbound 同一认定)。那边 import 本模块,
+// 本模块不能 import 回去(成环),由它在加载时登记进来;没登记时两个工具读会话列表即失败(XS_INTERNAL)。
+let loadToolRows = null;
+export function setXsSessionRowsLoader(fn) {
+  loadToolRows = typeof fn === 'function' ? fn : null;
+}
+const toolRows = () => {
+  if (!loadToolRows) throw new Error('会话列表读取函数未登记');
+  return loadToolRows();
+};
+// 发送方 = 调用那一刻本槽的会话 id、运行 id、回合序号与界面档位(view 的 getter 每次现取)。
+const senderOf = (view) => ({ sessionId: view.sessionId, runId: view.runId, turnEpoch: view.turnEpoch, guiMode: view.guiMode });
+
+// 用户 / 项目自己配了同名服务:挂上 GUI 服务的进程里它被 GUI 的同名服务代替(SDK 经 --mcp-config 传入的优先),记一行日志。
+// 只读、不阻塞冷启;~/.claude.json 可能很大,先做子串判断,含这个名字才解析。
+async function noteShadowedUserServer(cwd) {
+  const has = (j, ...path) => !!path.reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), j)?.[XS_TOOLS_SERVER];
+  const where = [];
+  try {
+    const raw = await readFile(join(homedir(), '.claude.json'), 'utf-8');
+    if (raw.includes(`"${XS_TOOLS_SERVER}"`)) {
+      const j = JSON.parse(raw);
+      if (has(j, 'mcpServers')) where.push('用户');
+      if (cwd && has(j, 'projects', cwd, 'mcpServers')) where.push('本地');
+    }
+  } catch { /* 没有 / 读不出 = 不记 */ }
+  if (cwd) {
+    try { if (has(JSON.parse(await readFile(join(cwd, '.mcp.json'), 'utf-8')), 'mcpServers')) where.push('项目'); } catch { /* 同上 */ }
+  }
+  if (where.length) console.warn(`[xsession] ${where.join('、')}配置里有同名 MCP 服务 ${XS_TOOLS_SERVER},本会话进程里由 CC-GUI 的同名服务代替`);
+}
+
+/**
+ * sessionOptions 挂接点(chat.js 冷启建 options 时同步调用):给本槽挂 ccgui-sessions 服务,list_sessions 免确认
+ * (只在本槽、且本挂接点仍在位时;send_message 照 MCP 工具既有的档位规则)。总开关关时本挂接点不在,工具不存在。
+ */
+export function xsSessionOptions(view) {
+  noteShadowedUserServer(view.cwd).catch(() => {});
+  return { mcpServers: { [XS_TOOLS_SERVER]: createXsToolsServer(xsToolHandlersFor(view)) }, autoAllow: [XS_LIST_SESSIONS_TOOL] };
+}
+/** 某个槽(view)的两个工具处理函数;xsSessionOptions 用它建服务,单测可直接调。 */
+export function xsToolHandlersFor(view) {
+  return createXsToolHandlers({
+    list: ({ query }) => listAiSessions({ sender: senderOf(view), query }, toolRows),
+    send: ({ to, message }) => sendAiMessages({ sender: senderOf(view), to, message }, toolRows),
+  });
+}
+
 // ── 钩子挂接与总开关 ────────────────────────────────────────────────────────────────────────
 // 总开关关时只挂 chatEntry(两个新字段都没带时立即返回 null = 零影响);开着时再挂回合开始 / 结束与原生引导。
 // 关掉时若还有已兑换、没结算的回合,回合钩子留到它们结算完再撤(否则它们永远等不到结算);原生引导随开关即撤。
@@ -1145,8 +1235,9 @@ function releaseTurnHooksIfIdle() {
 export function syncXsRuntimeHooks(enabled) {
   turnHooksWanted = enabled === true;
   if (turnHooksWanted && !unhookTurns) unhookTurns = registerSessionRuntimeHooks({ turnStart: onTurnStart, turnEnd: onTurnEnd });
-  // r151c:切档通知(同步发送档案的档位)与原生引导同一生命周期:随开关即挂即撤
-  if (turnHooksWanted && !unhookGuard) unhookGuard = registerSessionRuntimeHooks({ preToolUse: xsNativeGuard, modeChange: xsModeChange });
+  // r151c:切档通知(同步发送档案的档位)、按会话挂工具(派工 4)与原生引导同一生命周期:随开关即挂即撤。撤掉后已在跑的进程
+  // 里工具仍在,但 list_sessions 不再免确认(chat.js 认挂接点同一性),调用整次失败 XS_DISABLED;下一条消息换新进程(兼容键少 xs:1)。
+  if (turnHooksWanted && !unhookGuard) unhookGuard = registerSessionRuntimeHooks({ preToolUse: xsNativeGuard, modeChange: xsModeChange, sessionOptions: xsSessionOptions });
   else if (!turnHooksWanted && unhookGuard) {
     unhookGuard();
     unhookGuard = null;

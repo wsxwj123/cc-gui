@@ -10,7 +10,7 @@ import { XS_LIMITS, XsStorageError, countUnfinishedXsMessages, pendingCountsBySe
 import {
   XS_DISABLED_TEXT, XS_STORAGE_FAILED_TEXT, XsError, parseManualSend, sendManualMessages, parseListQuery, listInboxMessages,
   pendingSummary, claimMessage, releaseMessage, dismissMessage, syncXsRuntimeHooks, noteNativeGuardFailure, nativeGuardLastFailure,
-  clearAllXsMessages, xsAutoState, resumeXsAuto, kickAllXsQueued, noteXsInboundChanged, profileIsCurrent,
+  clearAllXsMessages, xsAutoState, resumeXsAuto, kickAllXsQueued, noteXsInboundChanged, profileIsCurrent, setXsSessionRowsLoader,
 } from '../services/xsession.js';
 import { assignShortIds, selectXsSessions } from '../services/xsession-resolve.js';
 import { resolveSessionTitle } from '../utils/session-title.js';
@@ -203,6 +203,9 @@ export async function loadSessionRows() {
   }
   return rows;
 }
+
+// 给模型的两个工具读会话行也用它(services 不能 import 本文件,成环),在这里登记过去。
+setXsSessionRowsLoader(loadSessionRows);
 
 router.get('/xsession/sessions', async (req, res) => {
   const opts = parseSessionsQuery(req.query || {});
