@@ -9,7 +9,7 @@ import { listProjects, listSessions, isSessionIdShape } from '../services/sessio
 import { XS_LIMITS, XsStorageError, pendingCountsBySession } from '../services/xsession-store.js';
 import {
   XS_DISABLED_TEXT, XS_STORAGE_FAILED_TEXT, XsError, parseManualSend, sendManualMessages, parseListQuery, listInboxMessages,
-  pendingSummary, claimMessage, releaseMessage, dismissMessage,
+  pendingSummary, claimMessage, releaseMessage, dismissMessage, syncXsRuntimeHooks,
 } from '../services/xsession.js';
 import { assignShortIds, selectXsSessions } from '../services/xsession-resolve.js';
 import { resolveSessionTitle } from '../utils/session-title.js';
@@ -62,6 +62,7 @@ router.put('/xsession/config', async (req, res) => {
   } catch {
     return xsError(res, 500, 'STORAGE_WRITE_FAILED', STORAGE_FAILED_TEXT);
   }
+  syncXsRuntimeHooks(enabled); // 开着才挂回合开始 / 结束钩子(关着时只留 /chat 入口钩子)
   broadcast({ type: 'xs:config', enabled });
   res.json({ ok: true, enabled });
 });

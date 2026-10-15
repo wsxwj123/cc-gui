@@ -5,13 +5,17 @@
 //   stopped → pending/interrupted)。
 // 正文是另一个会话的模型输出 = 不可信输入:只原样存盘、原样给本机界面;进模型之前只经 xsession-envelope 的中和。
 // 日志只带消息 id,不带正文与凭据;凭据(token)只出现在认领应答里,不进任何列表应答与广播(publicMessage 是白名单)。
-// 依赖只朝一个方向:本模块经 chat.js 导出的窄接口挂钩子,chat.js 不认识本模块(/chat 入口兑换与回合结算随后加入)。
-import { randomUUID } from 'crypto';
+// 依赖只朝一个方向:本模块经 chat.js 导出的窄接口挂钩子,chat.js 不认识本模块。
+import { randomUUID, timingSafeEqual } from 'crypto';
 import { broadcast } from '../broadcast.js';
+import { readXsEnabledSync } from '../routes/prefs.js';
+import { registerSessionRuntimeHooks, deliverRunEvent } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
+import { buildXsEnvelope, neutralizeXsBody } from './xsession-envelope.js';
 
 export const XS_DISABLED_TEXT = '跨会话消息未开启';
+export const XS_CLAIM_INVALID_TEXT = '跨会话消息凭据无效';
 export const XS_STORAGE_FAILED_TEXT = '保存失败，请重试';
 
 /** 业务错误:路由层按 { ok:false, code, error, ...extra } 应答。 */
@@ -34,6 +38,7 @@ const HELD_TEXT = { 'target-card': '等待你确认后处理', interrupted: '上
 const TURN_ERROR_PREFIX = '处理该消息的回合出错：';
 // 回合结束通知只给 outcome、不带错误文本,所以 failed 的摘要是这句固定话;"始终没开始回合"有自己的摘要。
 const TURN_FAILED_SUMMARY = '模型返回了错误或进程提前退出';
+const NEVER_STARTED_SUMMARY = '未能开始处理';
 
 function heldTextOf(m) {
   if (m.status !== 'pending' || !m.heldReason) return null;
@@ -243,4 +248,168 @@ export async function dismissMessage(id) {
   });
   await announce([m]);
   return { ok: true, id: m.id, status: 'dismissed' };
+}
+
+// ── /chat 路由入口:兑换凭据、换成信封、绑定回合;回合开始补 xs_message;回合结束结算 ─────────────────
+
+// 已兑换、还没结算的消息:id → { key(本次兑换的回合标识), event(预先备好的 xs_message), timer, pid }。
+// 回合开始通知是同步的,事件必须在那一刻同步投递才能排在本回合 CLI 输出之前,所以正文在兑换时就读好、中和好。
+const inflight = new Map();
+let redeeming = 0; // 正在兑换(还没进 inflight)的请求数:关开关时不能在这期间撤掉回合钩子
+// 兑换后迟迟等不到回合开始(chat.js 在起回合前抛了异常)→ 退回 pending,免得卡在 processing 直到重启。
+// 正常情况回合开始只比兑换晚几秒(复用路径最多等热切 5 秒,冷启路径最多等旧进程收尾 4 秒)。
+const START_GUARD_MS = 60_000;
+
+const reject = (status, code, error) => ({ reject: { status, body: { ok: false, code, error } } });
+const claimInvalid409 = () => new XsError(409, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
+
+function tokenMatches(stored, given) {
+  if (typeof stored !== 'string' || typeof given !== 'string') return false;
+  const a = Buffer.from(stored);
+  const b = Buffer.from(given);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * chatEntry 钩子。请求里两个新字段都没带 → 立即 null(不读盘、不做别的,总开关开关都一样)。
+ * 带了:总开关关 → 409 XS_DISABLED(先于字段形状);只带一个或形状不对 → 400 XS_CLAIM_INVALID;
+ * 消息不存在 / 凭据对不上 / 不是 claimed / 目标不是请求的 sessionId → 409 XS_CLAIM_INVALID;都不起进程。
+ * 通过 → { prompt: 信封, tag }。自己兜住所有错误(抛出去会变成 500 CHAT_ENTRY_HOOK_FAILED)。
+ */
+export async function xsChatEntry({ body, sessionId } = {}) {
+  const hasId = body?.xsMessageId !== undefined;
+  const hasToken = body?.xsToken !== undefined;
+  if (!hasId && !hasToken) return null;
+  if (!readXsEnabledSync()) return reject(409, 'XS_DISABLED', XS_DISABLED_TEXT);
+  if (!isIdString(body.xsMessageId) || !isIdString(body.xsToken)) return reject(400, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
+  // 开关以偏好文件为准(与路由闸门同源):文件里是开着的,就确保回合钩子在位,否则兑换后等不到补事件与结算。
+  syncXsRuntimeHooks(true);
+  redeeming += 1;
+  try {
+    return await redeemClaim(body.xsMessageId, body.xsToken, sessionId);
+  } catch (e) {
+    if (e instanceof XsError) return reject(e.status, e.code, e.message);
+    console.warn(`[xsession] 兑换消息 ${body.xsMessageId} 失败:${e?.cause?.code || e?.message || e}`);
+    return reject(500, 'STORAGE_WRITE_FAILED', XS_STORAGE_FAILED_TEXT);
+  } finally {
+    redeeming -= 1;
+  }
+}
+
+async function redeemClaim(messageId, token, sessionId) {
+  const key = randomUUID();
+  const { m, text } = await mutateXsInbox(async (messages) => {
+    const m = findById(messages, messageId);
+    if (!m || m.status !== 'claimed' || !tokenMatches(m.token, token) || !sameId(m.to.sessionId, sessionId)) throw claimInvalid409();
+    const text = await readXsBody(m.id);
+    if (text === null) {
+      console.warn(`[xsession] 消息 ${m.id} 的正文缺失,不兑换`);
+      throw claimInvalid409();
+    }
+    m.status = 'processing';
+    m.via = 'card';
+    m.heldReason = null;
+    for (const k of ['heldBefore', 'heldDetail', 'token']) delete m[k]; // 凭据只能兑换一次
+    m.turn = { key };
+    return { m: structuredClone(m), text };
+  });
+  const name = m.from.sessionId ? `用户转发自 ${m.from.title ?? ''}` : '用户';
+  const prompt = buildXsEnvelope({ from: 'gui:user', name, body: text }); // 一期只有手动转发
+  const event = {
+    type: 'xs_message', id: m.id,
+    from: { kind: m.from.kind, sessionId: m.from.sessionId ?? null, title: m.from.title ?? null },
+    body: neutralizeXsBody(text), // 与模型收到的、历史里 origin.body 一致
+    via: 'card', hop: m.hop,
+  };
+  const timer = setTimeout(() => { settleTurn(m.id, key, 'failed', NEVER_STARTED_SUMMARY); }, START_GUARD_MS);
+  timer.unref?.();
+  inflight.set(m.id, { key, event, timer, pid: null });
+  announce([m]);
+  return { prompt, tag: { xsMessageId: m.id, key } };
+}
+
+function inflightFor(tag) {
+  const id = tag && typeof tag === 'object' ? tag.xsMessageId : null;
+  const f = id ? inflight.get(id) : null;
+  return f && f.key === tag.key ? { id, f } : null;
+}
+
+// 回合开始:补 xs_message(同步投递 → 排在本回合任何 CLI 输出之前),记下承载它的进程号与回合代数。
+function onTurnStart(info) {
+  const hit = inflightFor(info?.tag);
+  if (!hit) return;
+  const { id, f } = hit;
+  clearTimeout(f.timer);
+  f.timer = null;
+  f.pid = info.pid;
+  if (!deliverRunEvent(info.pid, f.event)) console.warn(`[xsession] 消息 ${id} 的 xs_message 未能投递`);
+  mutateXsInbox((messages) => {
+    const m = findById(messages, id);
+    if (m && m.status === 'processing' && m.turn?.key === f.key) m.turn = { key: f.key, pid: info.pid, turnEpoch: info.turnEpoch };
+  }).catch((e) => console.warn(`[xsession] 消息 ${id} 的回合绑定未能落盘:${e?.cause?.code || e?.message || e}`));
+}
+
+function onTurnEnd(info) {
+  const hit = inflightFor(info?.tag);
+  if (hit) settleTurn(hit.id, hit.f.key, info.outcome);
+}
+
+/** 结算一条 processing 的消息(只认本次兑换的回合 key,迟到的旧回合不动它)。 */
+async function settleTurn(id, key, outcome, detail) {
+  const f = inflight.get(id);
+  if (f && f.key === key) {
+    clearTimeout(f.timer);
+    inflight.delete(id);
+  }
+  try {
+    const m = await mutateXsInbox((messages) => {
+      const m = findById(messages, id);
+      if (!m || m.status !== 'processing' || m.turn?.key !== key) return null;
+      delete m.turn;
+      if (outcome === 'completed') {
+        m.status = 'done'; // 正文由存储层删除
+        m.heldReason = null;
+      } else if (outcome === 'stopped') {
+        m.status = 'pending';
+        m.heldReason = 'interrupted';
+      } else {
+        m.status = 'pending';
+        m.heldReason = 'turn-error';
+        if (detail) m.heldDetail = detail;
+      }
+      return structuredClone(m);
+    });
+    if (m) await announce([m]);
+  } catch (e) {
+    // 写不进去:消息停在 processing,重启时恢复成 pending / interrupted(不自动重跑)
+    console.warn(`[xsession] 消息 ${id} 的结算未能落盘:${e?.cause?.code || e?.message || e}`);
+  }
+  releaseTurnHooksIfIdle();
+}
+
+// ── 钩子挂接与总开关 ────────────────────────────────────────────────────────────────────────
+// 总开关关时只挂 chatEntry(两个新字段都没带时立即返回 null = 零影响);开着时再挂回合开始 / 结束。
+// 关掉时若还有已兑换、没结算的回合,回合钩子留到它们结算完再撤(否则它们永远等不到结算)。
+let unhookEntry = null;
+let unhookTurns = null;
+let turnHooksWanted = false;
+
+function releaseTurnHooksIfIdle() {
+  if (unhookTurns && !turnHooksWanted && inflight.size === 0 && redeeming === 0) {
+    unhookTurns();
+    unhookTurns = null;
+  }
+}
+
+/** 开关变化时调用(PUT /api/xsession/config 写盘成功后)。 */
+export function syncXsRuntimeHooks(enabled) {
+  turnHooksWanted = enabled === true;
+  if (turnHooksWanted && !unhookTurns) unhookTurns = registerSessionRuntimeHooks({ turnStart: onTurnStart, turnEnd: onTurnEnd });
+  releaseTurnHooksIfIdle();
+}
+
+/** 启动时调用一次(server/index.js,在开始接请求之前):挂 chatEntry,按当前开关挂回合钩子。 */
+export function installXsessionRuntime() {
+  if (!unhookEntry) unhookEntry = registerSessionRuntimeHooks({ chatEntry: xsChatEntry });
+  syncXsRuntimeHooks(readXsEnabledSync());
 }

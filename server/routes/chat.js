@@ -1939,7 +1939,11 @@ async function handleChatPost(req, res) {
         ok: false, code: 'TURN_CONFLICT', error: '同一 clientTurnId 的参数与本回合首次请求不一致',
       });
     }
-    if (turnRecord) return res.json(turnHitResponse(turnRecord));
+    // r151b:入口钩子改写过的回合(跨会话兑换)重发时钩子不再被调,原样回放第一次的应答(接口 X.3.1「与第一次相同」);
+    // 其余回合照旧(没改写过的记录上没有 firstResponse)。
+    if (turnRecord) return turnRecord.firstResponse
+      ? res.status(turnRecord.firstResponse.status).json(turnRecord.firstResponse.body)
+      : res.json(turnHitResponse(turnRecord));
     turnRecord = openTurnRecord({ key: `${principal}|${clientTurnId}`, principal, clientTurnId, fingerprint });
     if (!turnRecord) {
       return res.status(503).json({ ok: false, code: 'TURN_CAPACITY', error: '服务端回合记录已满，请稍后重试' });
@@ -1957,6 +1961,11 @@ async function handleChatPost(req, res) {
   }
   const turnPrompt = entry ? entry.prompt : prompt;
   const turnTag = entry ? entry.tag : undefined;
+  if (entry && turnRecord) {
+    // 记下本请求的应答(只有改写过的回合才记;见上方命中处)
+    const sendJson = res.json.bind(res);
+    res.json = (payload) => { turnRecord.firstResponse = { status: res.statusCode, body: payload }; return sendJson(payload); };
+  }
 
   const chosenMode = (permissionMode && VALID_PERMISSION_MODES.has(permissionMode))
     ? permissionMode : 'default';

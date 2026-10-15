@@ -48,6 +48,7 @@ import imageRoutes from './routes/image.js';
 import clientLogRoutes, { rotateLogIfBig, writeCrashLog } from './routes/client-log.js';
 import xsessionRoutes, { xsessionBodyErrorHandler } from './routes/xsession.js'; // r151b 跨会话消息
 import { loadXsInbox } from './services/xsession-store.js';
+import { installXsessionRuntime } from './services/xsession.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, setDefaultRandomPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
@@ -485,6 +486,9 @@ app.use('/api', imageRoutes); // r16-3 生图(/api/image-providers、/api/image/
 app.use('/api', clientLogRoutes); // r29 取证:前端错误上报落 client.log(挂在 authMiddleware 之后自动带鉴权)
 app.use('/api', xsessionRoutes); // r151b 跨会话消息(总开关关时除 config 外一律 409,见 routes/xsession.js)
 app.use('/api', xsessionBodyErrorHandler); // 必须在下方通用错误处理之前:把 /api/xsession/* 的请求体解析错误改回本节错误体
+// r151b:向 chat.js 挂跨会话钩子 —— /chat 入口钩子常驻(请求没带两个新字段时立即放行),回合开始 / 结束钩子只在总开关开着时挂。
+// 在 server.listen 之前做,保证第一个 /chat 请求到来时入口钩子已在位。
+installXsessionRuntime();
 
 // Auto-load optional local-only routes only when explicitly requested. These
 // files are gitignored personal integrations; packaged/public builds must not
