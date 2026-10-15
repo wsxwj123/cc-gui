@@ -128,7 +128,8 @@ test('X19 卡片区:来源 / 折叠展开 / 原因文案;【处理】→ peer-me
   });
   const chats = recordRequests(page, '/api/chat');
   await boot(page);
-  await openSessionBySearch(page, mark, B.reply);
+  // 按目标会话的完整标题搜:只搜 mark 会连来源会话一起命中,结果第一条是来源会话
+  await openSessionBySearch(page, B.title, B.reply);
 
   await test.step('卡片:来源、原因、折叠与展开、pending 时没有【撤回】', async () => {
     await expect(page.getByTestId('xs-inbox')).toBeVisible({ timeout: 15_000 });

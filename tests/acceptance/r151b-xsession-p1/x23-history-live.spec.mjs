@@ -59,7 +59,8 @@ test('X23 历史:origin.kind=peer 且不是子代理回传的行 → 触发的�
   expect(JSON.stringify(peers), '子代理回传不算').not.toContain('子代理');
 
   await boot(page);
-  await openSessionBySearch(page, `${mark} 历史`, `${mark} 回复四`);
+  // "<mark> 历史"只写在 summary 行,侧栏的会话标题和搜索都不用它;改按首条提问(= 会话标题,也是消息文字)搜
+  await openSessionBySearch(page, `${mark} 首条提问`, `${mark} 回复四`);
   const bubbles = page.getByTestId('peer-message');
   await expect(bubbles, '界面显示两个 peer-message 气泡').toHaveCount(2, { timeout: 15_000 });
   await expect(bubbles.nth(0)).toHaveAttribute('data-via', 'gui');

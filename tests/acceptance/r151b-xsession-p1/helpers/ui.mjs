@@ -67,3 +67,41 @@ export async function openSessionSettings(page) {
 }
 
 export function note(text) { test.info().annotations.push({ type: 'note', description: text }); }
+
+/**
+ * 打开设置页「会话」分区里的「在项目列表显示 worktree 项目」(开关按钮的名称 已开启 / 已关闭,默认关)。
+ * 本套件的工作区都建在工作树(…/.claude/worktrees/…)下,侧栏默认把它们当 worktree 项目不列出;
+ * 要看侧栏项目行的用例先调它。返回收尾函数:把开关拨回调用前的状态(调用前已开着则什么都不做);
+ * 拨开后确认失败时先尽力拨回再抛错,不把开着的状态留给后面的用例。
+ */
+export async function showWorktreeProjects(page) {
+  const state = /^已(开启|关闭)$/;
+  // 同时含这一行文字和一个"已开启/已关闭"按钮的最内层元素 = 这一行;取行里的那个按钮
+  const row = page.locator('body *').filter({ hasText: /在项目列表显示\s*worktree\s*项目/i })
+    .filter({ has: page.getByRole('button', { name: state }) }).last();
+  const toggle = row.getByRole('button', { name: state });
+  const isOn = async () => (await row.getByRole('button', { name: '已开启', exact: true }).count()) > 0;
+  await openSessionSettings(page);
+  await expect(toggle, '前置:设置页「会话」分区里有「在项目列表显示 worktree 项目」开关').toBeVisible({ timeout: 10_000 });
+  const wasOn = await isOn();
+  const restore = async () => {
+    if (wasOn) return;
+    // 设置页还开着就直接拨;这时再调 openSessionSettings 会点「通用」,把已打开的面板收起
+    if (!(await toggle.isVisible().catch(() => false))) {
+      const section = page.getByRole('button', { name: '会话', exact: true }).first();
+      if (await section.isVisible().catch(() => false)) await section.click();
+      else await openSessionSettings(page);
+    }
+    await expect(toggle).toBeVisible({ timeout: 10_000 });
+    if (await isOn()) await toggle.click();
+    await expect(toggle, '收尾:「在项目列表显示 worktree 项目」已拨回').toHaveAccessibleName('已关闭', { timeout: 10_000 });
+  };
+  if (!wasOn) await toggle.click();
+  try {
+    await expect(toggle, '前置:「在项目列表显示 worktree 项目」已打开').toHaveAccessibleName('已开启', { timeout: 10_000 });
+  } catch (e) {
+    await restore().catch(() => {});
+    throw e;
+  }
+  return restore;
+}

@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 import path from 'node:path';
 import { seedSession, uniq, makeWorkspace } from './helpers/fixtures.mjs';
 import { xs } from './helpers/api.mjs';
-import { boot, openSessionSettings, sidebar, note } from './helpers/ui.mjs';
+import { boot, openSessionSettings, sidebar, note, showWorktreeProjects } from './helpers/ui.mjs';
 
 test.describe.configure({ timeout: 180_000 });
 const api = xs();
@@ -32,19 +32,26 @@ test('X20 侧栏:会话行 xs-unread = 该会话待处理条数(0 不出现);项
   await api.send(src.sid, [sNew.sid], 'R151B x20 二');
   await api.send(src.sid, [sOld.sid], 'R151B x20 三');
   await boot(page);
-  const projLabel = sidebar(page).getByText(projName).first();
-  await expect(projLabel, '前置:侧栏里有这个项目').toBeVisible({ timeout: 30_000 });
-  const rowVisible = () => sidebar(page).getByText(`${mark} 最新`).first().isVisible().catch(() => false);
-  if (!(await rowVisible())) await projLabel.click();
-  await expect(sidebar(page).getByText(`${mark} 最新`).first(), '前置:项目已展开').toBeVisible({ timeout: 10_000 });
+  // 前置:本套件的工作区都建在工作树(…/.claude/worktrees/…)里,侧栏默认不列 worktree 项目 →
+  // 先经设置页「会话」分区打开「在项目列表显示 worktree 项目」;用例结束时拨回,不留给后面的用例
+  const restoreWorktree = await showWorktreeProjects(page);
+  try {
+    const projLabel = sidebar(page).getByText(projName).first();
+    await expect(projLabel, '前置:侧栏里有这个项目').toBeVisible({ timeout: 30_000 });
+    const rowVisible = () => sidebar(page).getByText(`${mark} 最新`).first().isVisible().catch(() => false);
+    if (!(await rowVisible())) await projLabel.click();
+    await expect(sidebar(page).getByText(`${mark} 最新`).first(), '前置:项目已展开').toBeVisible({ timeout: 10_000 });
 
-  await expect.poll(() => badgeNear(page, 'xs-unread', `${mark} 最新`), { timeout: 15_000, message: '会话行显示 2' }).toBe('2');
-  expect(await badgeNear(page, 'xs-unread', `${mark} 没有消息`), '0 条时不出现').toBeNull();
-  expect(await badgeNear(page, 'xs-unread-project', projName), '项目展开时不出现项目汇总').toBeNull();
-  await projLabel.click();
-  await expect.poll(() => badgeNear(page, 'xs-unread-project', projName), { timeout: 10_000, message: '折叠后项目行显示 3(含侧栏没列出的会话)' }).toBe('3');
-  await projLabel.click();
-  await expect.poll(() => badgeNear(page, 'xs-unread-project', projName), { timeout: 10_000, message: '再展开后项目汇总消失' }).toBeNull();
+    await expect.poll(() => badgeNear(page, 'xs-unread', `${mark} 最新`), { timeout: 15_000, message: '会话行显示 2' }).toBe('2');
+    expect(await badgeNear(page, 'xs-unread', `${mark} 没有消息`), '0 条时不出现').toBeNull();
+    expect(await badgeNear(page, 'xs-unread-project', projName), '项目展开时不出现项目汇总').toBeNull();
+    await projLabel.click();
+    await expect.poll(() => badgeNear(page, 'xs-unread-project', projName), { timeout: 10_000, message: '折叠后项目行显示 3(含侧栏没列出的会话)' }).toBe('3');
+    await projLabel.click();
+    await expect.poll(() => badgeNear(page, 'xs-unread-project', projName), { timeout: 10_000, message: '再展开后项目汇总消失' }).toBeNull();
+  } finally {
+    await restoreWorktree().catch((e) => note(`收尾:「在项目列表显示 worktree 项目」没能拨回:${String((e && e.message) || e).slice(0, 200)}`));
+  }
 });
 
 test('X21 Dock 角标:浏览器里观测不到角标本身;总开关开着、来了待处理消息时,窗口标题不变', async ({ page }) => {
