@@ -6,7 +6,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { seedSession, uniq, makeWorkspace, realCliPath } from '../r151b-xsession-p1/helpers/fixtures.mjs';
 import { xs, shared, writeScript, touchCtl } from '../r151b-xsession-p1/helpers/api.mjs';
-import { boot, openSessionBySearch } from '../r151b-xsession-p1/helpers/ui.mjs';
+import { boot, sidebar, showWorktreeProjects } from '../r151b-xsession-p1/helpers/ui.mjs';
 import { SM, NOTE, HELD, addScript, aiCalls, resultJson, blast, inboundOk, entry, msgs, waitMsg, profileTurn, wsT, startInstanceP2 } from './helpers/p2.mjs';
 
 test.describe.configure({ timeout: 420_000 });
@@ -35,11 +35,30 @@ test('P17 连锁:自动处理开始的回合里发出的消息 hop 加 1、chain
   expect(last, '第 5 跳 → pending / chain-limit,不处理').toMatchObject({ status: 'pending', heldReason: 'chain-limit', heldText: HELD['chain-limit'] });
 
   const bt = (await entry(shared, B.sid)).title;
+  const bMark = (String(bt).match(/R151CK\S+/) || [bt])[0];   // B 标题里的唯一标记(aiCalls 建会话时的 prompt 开头)
   await boot(page);
-  await openSessionBySearch(page, bt);
-  const card = page.locator(`[data-testid="xs-card"][data-message-id="${last.id}"]`);
-  await expect(card.getByTestId('xs-card-hop'), 'hop>1 时卡片显示连锁次数').toHaveText('连锁第 5 次', { timeout: 15_000 });
-  await expect(card.getByTestId('xs-card-reason')).toHaveText(HELD['chain-limit']);
+  // 打开 B:B 建在工作树(…/.claude/worktrees/…)下,侧栏默认不列 worktree 项目;按 B 的标题搜索会落到 A 的内容命中
+  // (A 的历史里有"来自 <B 标题>"的来源气泡)。改为先打开「在项目列表显示 worktree 项目」,再点 B 项目下
+  // 标题含 B 唯一标记的那条会话行(会话行只按标题匹配,不按消息内容);用完把开关拨回。
+  const restoreWorktree = await showWorktreeProjects(page);
+  let restoreErr = null;
+  try {
+    const projB = sidebar(page).getByText(`real-p17b-${run}`).first();
+    const rowB = sidebar(page).locator('[data-cgui="session-row"]').filter({ hasText: bMark });
+    await expect(projB, '前置:侧栏里有 B 的项目').toBeVisible({ timeout: 30_000 });
+    await expect(async () => {
+      if (!(await rowB.first().isVisible().catch(() => false))) await projB.click();
+      await expect(rowB.first()).toBeVisible({ timeout: 3_000 });
+    }, '前置:B 的项目已展开,看得到 B 的会话行').toPass({ timeout: 30_000 });
+    await expect(rowB, '前置:标题含 B 唯一标记的会话行只有一条(就是 B)').toHaveCount(1);
+    await rowB.click();
+    const card = page.locator(`[data-testid="xs-card"][data-message-id="${last.id}"]`);
+    await expect(card.getByTestId('xs-card-hop'), 'hop>1 时卡片显示连锁次数').toHaveText('连锁第 5 次', { timeout: 15_000 });
+    await expect(card.getByTestId('xs-card-reason')).toHaveText(HELD['chain-limit']);
+  } finally {
+    try { await restoreWorktree(); } catch (e) { restoreErr = String((e && e.message) || e).slice(0, 300); }
+  }
+  expect(restoreErr, '收尾:「在项目列表显示 worktree 项目」已拨回').toBeNull();
 
   const reset = await aiCalls(shared, { cwd: makeWorkspace(`real-p17a-${run}`), sid: A.sid, steps: [{ name: SM, input: { to: [B.sid], message: `R151C p17 用户发消息之后 ${run}` } }] });
   expect(reset.results.length, '前置:调用有结果').toBe(1);
