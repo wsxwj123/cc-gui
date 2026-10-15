@@ -165,6 +165,41 @@ try {
     await sleep(700); // 让迟到的结果 / 错误落地:不得变成未处理的 rejection,也不改变已经给出的判定
     unhook();
   }
+
+  // ── S2 + 判官建议 10:原生引导比对地址前规范化;Windows 管道地址、会话名不区分大小写 ─────────────────────────────
+  {
+    const { nativeGuardShouldDeny: deny } = xs;
+    const entries = [
+      { pid: 101, sessionId: A, name: 'proj-a1', messagingSocketPath: '/tmp/cc-socks/101.sock' },
+      { pid: 103, sessionId: C, name: 'Proj-C3', messagingSocketPath: '/private/tmp/cc-socks/103.sock' },
+      { pid: 105, sessionId: E, name: 'win-e5', messagingSocketPath: '\\\\.\\pipe\\Claude-Code-105' },
+    ];
+    const gui = [A, C, E];
+    const bySock = (to) => ({ to, recipient: to, recipient_kind: 'session' });
+    for (const [addr, want, what] of [
+      ['uds:/tmp/cc-socks/103.sock', true, '登记表写 /private/tmp、目标写 /tmp'],
+      ['uds:/tmp//cc-socks///103.sock', true, '重复斜杠'],
+      ['uds:/tmp/cc-socks/../cc-socks/./103.sock', true, '带 .. 与 .'],
+      ['uds:/private/tmp/../tmp/cc-socks/103.sock', true, '/private/tmp 里绕一圈'],
+      ['uds:/tmp/../private/tmp/cc-socks/103.sock', true, '/tmp 里绕回 /private/tmp'],
+      ['uds:/tmp/cc-socks/103.sock/', true, '结尾斜杠'],
+      ['UDS:/tmp/cc-socks/103.sock', true, 'uds: 前缀不分大小写'],
+      ['uds:\\\\.\\PIPE\\claude-code-105', true, 'Windows 命名管道不分大小写'],
+      ['uds://./pipe/CLAUDE-CODE-105', true, 'Windows 命名管道斜杠方向不限'],
+      ['uds:/tmp/cc-socks/101.sock', false, '发送方自己'],
+      ['uds:/tmp/cc-socks/103.sock.bak', false, '只是前缀相同'],
+      ['uds:/var/tmp/cc-socks/103.sock', false, '别的目录'],
+      ['uds:/private/tmpx/cc-socks/103.sock', false, '/private/tmpx 不是 /private/tmp'],
+      ['uds:/tmp/CC-SOCKS/103.sock', false, 'POSIX 路径区分大小写'],
+      ['uds:cc-socks/103.sock', false, '相对路径'],
+    ]) eq(deny(bySock(addr), entries, gui, A), want, `地址 ${addr}(${what})`);
+    eq(deny({ to: 'uds:/tmp//cc-socks/../cc-socks/103.sock' }, entries, gui, A), true, '没有 recipient_kind 时按 uds: 推断,同样规范化');
+    for (const [name, want] of [['PROJ-C3', true], ['proj-c3 [AB12]', true], ['Win-E5', true], ['proj-c', false], ['PROJ-A1', false]]) {
+      eq(deny({ to: name, recipient: name, recipient_kind: 'name' }, entries, gui, A), want, `会话名 ${name} 不区分大小写比较`);
+    }
+    const dots = `uds:${'/..'.repeat(150)}/tmp/cc-socks/103.sock`; // 限长(512)以内的大量 ..
+    eq(within(20, () => deny(bySock(dots), entries, gui, A), '规范化 150 个 ..'), true, '大量 .. 也规范化到同一处');
+  }
 } finally {
   try { await chat.closeAllPersistentProcesses(); } catch {}
   rmSync(TMP, { recursive: true, force: true });

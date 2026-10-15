@@ -8,7 +8,7 @@
 // 依赖只朝一个方向:本模块经 chat.js 导出的窄接口挂钩子,chat.js 不认识本模块。
 import { randomUUID, timingSafeEqual } from 'crypto';
 import { readdir, readFile } from 'fs/promises';
-import { join } from 'path';
+import { join, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
 import { readXsEnabledSync } from '../routes/prefs.js';
@@ -439,8 +439,18 @@ export function nativeGuardLastFailure() {
   return own && timedOut ? (own > timedOut ? own : timedOut) : (own || timedOut);
 }
 
-// 套接字地址的比较口径:去掉 uds: 前缀;/private/tmp 与 /tmp 是同一处(macOS 的 /tmp 是它的链接)。
-const socketKey = (p) => String(p).replace(/^uds:/i, '').replace(/^\/private\/tmp\//, '/tmp/');
+// 套接字地址的比较口径(审计 S2 / 判官建议 10;目标与登记表两边同一口径):去掉 uds: 前缀;
+//   · Windows 命名管道(\\.\pipe\…,斜杠方向不限)或在 Windows 上:按 Windows 规范化,名字不区分大小写 → 统一小写;
+//   · 其余按 POSIX 规范化:合并重复斜杠、解析 . 与 ..、去掉结尾斜杠;/private/tmp 与 /tmp 是同一处(macOS 的 /tmp 是它的链接)。
+const WIN_PIPE_RE = /^[\\/]{2}[.?][\\/]pipe[\\/]/i;
+function socketKey(p) {
+  const s = String(p).replace(/^uds:/i, '');
+  if (process.platform === 'win32' || WIN_PIPE_RE.test(s)) return win32Path.normalize(s).toLowerCase();
+  let n = posixPath.normalize(s);
+  if (n.length > 1 && n.endsWith('/')) n = n.slice(0, -1);
+  if (n === '/private/tmp' || n.startsWith('/private/tmp/')) n = n.slice('/private'.length);
+  return n;
+}
 
 // 发送目标由模型填写(可被提示词注入操纵),回调又跑在权限弹卡之前:超过这个长度的不可能是会话名或套接字地址,
 // 直接判"不是 GUI 会话目标",后面的字符串处理只碰有界的输入。
@@ -473,8 +483,8 @@ function targetIsOtherGuiSession(target, entries, guiSessionIds, selfSessionId) 
   const gui = new Set([...guiSessionIds].filter((id) => typeof id === 'string').map((id) => id.toLowerCase()));
   return entries.some((e) => {
     if (!e || typeof e.sessionId !== 'string' || !gui.has(e.sessionId.toLowerCase()) || sameId(e.sessionId, selfSessionId)) return false;
-    return target.kind === 'name'
-      ? typeof e.name === 'string' && e.name === target.value
+    return target.kind === 'name' // 会话名不区分大小写(换个大小写不能绕过引导)
+      ? typeof e.name === 'string' && e.name.toLowerCase() === target.value.toLowerCase()
       : typeof e.messagingSocketPath === 'string' && socketKey(e.messagingSocketPath) === target.value;
   });
 }
