@@ -66,6 +66,9 @@ function heldTextOf(m) {
   return HELD_TEXT[m.heldReason] ?? null;
 }
 
+// 来源:会话里的 AI 发来的(kind:'session')另带 project(发送方会话所在项目目录名,r151c 补充约定);手动转发的不带。
+const sourceOf = (f) => ({ kind: f?.kind ?? 'user', sessionId: f?.sessionId ?? null, title: f?.title ?? null, ...(f?.kind === 'session' ? { project: f.project ?? null } : {}) });
+
 /** 对外的消息对象(白名单字段;不带 token / heldBefore / heldDetail / turn / projectPath)。body 不传 = 不带 body 键(广播用)。 */
 function publicMessage(m, { deleted = false, body } = {}) {
   return {
@@ -74,7 +77,7 @@ function publicMessage(m, { deleted = false, body } = {}) {
     status: m.status,
     chainId: m.chainId,
     hop: m.hop,
-    from: { kind: m.from?.kind ?? 'user', sessionId: m.from?.sessionId ?? null, title: m.from?.title ?? null, deleted },
+    from: { ...sourceOf(m.from), deleted },
     to: { sessionId: m.to.sessionId, title: m.to?.title ?? null },
     ...(body !== undefined ? { body } : {}),
     bodyBytes: m.bodyBytes,
@@ -397,7 +400,7 @@ async function redeemClaim(messageId, token, sessionId) {
   const prompt = buildXsEnvelope({ from: fromSession ? `gui:${m.from.sessionId}` : 'gui:user', name, body: text });
   const event = {
     type: 'xs_message', id: m.id,
-    from: { kind: m.from.kind, sessionId: m.from.sessionId ?? null, title: m.from.title ?? null },
+    from: sourceOf(m.from),
     body: neutralizeXsBody(text), // 与模型收到的、历史里 origin.body 一致
     via: 'card', hop: m.hop,
   };
@@ -939,7 +942,10 @@ export async function sendAiMessages({ sender, to, message } = {}, rows) {
     // 连锁:发送方当前回合的标记 + 1;没有标记 = 新链(同一次发送共用一个 chainId)
     const chainId = rec.chain?.chainId ?? randomUUID();
     const hop = (rec.chain?.hop ?? 0) + 1;
-    const from = { kind: 'session', sessionId: senderRow ? senderRow.sessionId : sender.sessionId, title: senderRow ? senderRow.title : null, mode: typeof sender.guiMode === 'string' ? sender.guiMode : null };
+    const from = {
+      kind: 'session', sessionId: senderRow ? senderRow.sessionId : sender.sessionId, title: senderRow ? senderRow.title : null,
+      project: typeof senderRow?.project === 'string' ? senderRow.project : null, mode: typeof sender.guiMode === 'string' ? sender.guiMode : null,
+    };
     const createdAt = new Date().toISOString();
     try {
       outcome = await mutateXsInbox((messages, tx) => {
@@ -1102,7 +1108,7 @@ function launchAuto(pick, key, budgetStamp) {
   const sessionId = m.to.sessionId;
   const event = {
     type: 'xs_message', id: m.id,
-    from: { kind: 'session', sessionId: m.from.sessionId, title: m.from.title ?? null },
+    from: sourceOf(m.from),
     body: neutralizeXsBody(text), via: 'auto', hop: m.hop,
   };
   const stuckTimer = setTimeout(() => scheduler.kick(sessionId), XS_STUCK_MS + 1000);

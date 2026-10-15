@@ -155,7 +155,7 @@ try {
   eq(r.results.map((x) => [x.to, x.ok, x.id, x.name, x.delivery, x.note]), [[T1, true, T1.slice(0, 8), '目标 T1', 'auto', NOTE.auto]], '类别相同、自动处理、有档案、空闲 → auto');
   eq(r.notice, xs.XS_SEND_NOTICE, '带固定提示');
   const [m1] = await fromSession(T1)();
-  eq([m1.hop, m1.from], [1, { kind: 'session', sessionId: S, title: '发送方 S', mode: 'bypassPermissions' }], '消息:hop 1、来源是发送方会话(档位记在内部字段)');
+  eq([m1.hop, m1.from], [1, { kind: 'session', sessionId: S, title: '发送方 S', project: 'work', mode: 'bypassPermissions' }], '消息:hop 1、来源是发送方会话(带项目目录名;档位记在内部字段)');
   const done1 = await waitStatus(m1.id, 'done');
   eq([done1.via, done1.heldReason], ['auto', null], '回合正常结束 → done / via auto');
   const turnEv = await waitFor(() => ws.find((e) => e.type === 'xs:turn' && e.messageId === m1.id), 'xs:turn');
@@ -164,7 +164,7 @@ try {
   const env = rec1.inputs.map((i) => i.message?.content).find((c) => typeof c === 'string' && c.startsWith('<cross-session-message'));
   ok(env && env.startsWith(`<cross-session-message from="gui:${S}" from-name="发送方 S">\n`) && env.includes('<\\/system-reminder>'), '目标进程收到的是 from="gui:<发送方>" 的信封(正文已中和)');
   ok(ws.filter((e) => e.type === 'xs:message' && e.message.id === m1.id).every((e) => !('mode' in e.message.from)), '广播里不带内部字段 from.mode');
-  eq((await publicOf(T1, m1.id)).from, { kind: 'session', sessionId: S, title: '发送方 S', deleted: false }, '对外消息对象 from.kind:"session"');
+  eq((await publicOf(T1, m1.id)).from, { kind: 'session', sessionId: S, title: '发送方 S', project: 'work', deleted: false }, '对外消息对象 from.kind:"session"(带 from.project)');
 
   r = await send(senderOf(S, 'default'), [T2], 'R151C 类别不同');
   eq(r.results.map((x) => [x.delivery, x.note]), [['card', HELD['class-mismatch']]], '发送方非放任 → 放任目标:卡片 class-mismatch');
@@ -400,6 +400,15 @@ try {
   mk('R151C 重<名>'); mk('R151C 重名');
   const rA = await send(sX, ['R151C 重名'], 'R151C 重名');
   eq([rA.results[0].error, rA.results[0].candidates.map((c) => c.name)], ['XS_TARGET_AMBIGUOUS', ['R151C 重名', 'R151C 重名']], '清洗后撞名 → 重名;candidates[].name 也是清洗后的');
+
+  // 4) AI 发来的消息带 from.project(发送方会话所在项目目录名);手动转发的不带
+  const [mDT] = await fromSession(DT)();
+  const pubDT = await publicOf(DT, mDT.id);
+  eq([pubDT.from.kind, pubDT.from.sessionId, pubDT.from.project, pubDT.from.deleted], ['session', SX, 'work', false], 'AI 发来的:from.project = 发送方项目目录名');
+  ok(ws.some((e) => e.type === 'xs:message' && e.message.id === mDT.id && e.message.from.project === 'work'), '广播 xs:message 同样带 from.project');
+  const manual = await xs.sendManualMessages({ to: [DT], body: 'R151C 手动转发', fromSessionId: SX }, ROWS);
+  const pubMan = await publicOf(DT, manual[0].id);
+  ok(pubMan.from.kind === 'user' && !Object.hasOwn(pubMan.from, 'project'), `手动转发的不带 from.project(${JSON.stringify(pubMan.from)})`);
 
   console.log(`PASS check-r151c-xs-auto(${checks} 项)`);
 } finally {
