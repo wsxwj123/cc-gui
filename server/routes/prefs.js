@@ -29,6 +29,14 @@ export function readThirdPartyAutoSync() {
   try { return JSON.parse(readFileSync(PREFS_PATH, 'utf-8'))?.thirdPartyAuto === true; }
   catch { return false; }
 }
+
+// r151b:跨会话消息总开关 xsEnabled(默认关,接口 X.3.5)的同步读取,同 readThirdPartyAutoSync 的口径:
+// 文件不存在、损坏、键缺失或值不是布尔 true(含手写的 "true"、1)→ false;只读,不报错、不改写文件。
+// 同步是因为 /api/xsession/* 的开关闸门与 /chat 入口钩子都在请求路径上直接判。
+export function readXsEnabledSync() {
+  try { return JSON.parse(readFileSync(PREFS_PATH, 'utf-8'))?.xsEnabled === true; }
+  catch { return false; }
+}
 // 原子写:先写临时文件再 rename(rename 同目录原子)。此前 writeFile 直写,进程崩溃/
 // 断电写一半 → JSON 损坏 → loadPrefs 回落 {} → 下一次任何 PUT 把整份 prefs 静默重置。
 let tmpSeq = 0;

@@ -9,6 +9,7 @@ import { isRealUserQuestion } from './fork.js';
 import { accessDeniedHint, canOpenAccessSettings, isAccessDenied } from '../utils/access-hint.js';
 import { removeSessionFromPrefs } from './prefs.js';
 import { dropSessionCheckpoints } from '../utils/checkpoint-paths.js';
+import { dropXsMessagesForSession } from '../services/xsession.js';
 
 // Guard against path traversal: projectHash / sessionId arrive from request
 // bodies and queries, then get concatenated into fs paths. A crafted value
@@ -664,6 +665,11 @@ router.delete('/sessions/:sessionId', async (req, res) => {
     try { await unlink(join(homedir(), '.claude', 'sessions', `${req.params.sessionId}.json`)); } catch {}
     // Best-effort prefs GC(1M 标记/双份标题/置顶),失败不阻断删除响应。
     try { await removeSessionFromPrefs(req.params.sessionId); } catch {}
+    // r151b:以它为目标、还没结束的跨会话消息连同正文一并删除并广播(否则 Dock 角标留下没处可清的数字)。
+    // best-effort:清理失败只记日志,不阻断删除(消息留在收件箱,不丢别的数据)。
+    try { await dropXsMessagesForSession(req.params.sessionId); } catch (e) {
+      console.warn(`[xsession] 删除会话时未能清理以它为目标的跨会话消息:${e?.cause?.code || e?.message || e}`);
+    }
     // R4:回滚检查点连带清理 —— 会话没了,它的快照目录(可能几十 G)必须一并清掉,
     // 否则空间永远只涨不跌。best-effort:清理失败只记日志,绝不阻断会话删除。
     await dropSessionCheckpoints(req.params.sessionId);

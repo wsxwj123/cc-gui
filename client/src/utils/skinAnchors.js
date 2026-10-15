@@ -52,6 +52,8 @@ export const SKIN_ANCHORS = [
   // 形态被投影成同一行系统提示 —— 与 message-user/message-assistant 同级的消息行类型,
   // 永久留在历史里(不是转瞬即逝的提示)。通知行不存在时选择器落空不炸。
   { id: 'task-notice', desc: '后台任务通知行(CLI task-notification 信封投影成的系统提示行)' },
+  // r151b:跨会话消息的来源气泡(历史、点卡片处理、CLI 原生通道三处同一个元素),与 task-notice 同级的消息行类型。
+  { id: 'peer-message', desc: '跨会话消息来源气泡(另一个会话发来、交给本会话模型的那条消息)' },
   // R42:轮末/消息用量行里的金额元素(两处渲染点 TurnBubble/MessageBubble 各一个),
   // 价格来源词挂在它的 title 上(窄面板下不再用行内文字占宽)。
   { id: 'usage-amount', desc: '用量行金额(悬停 title 首行 = 价格来源)' },
@@ -69,6 +71,8 @@ export const SKIN_ANCHORS = [
   // 合同身份 data-parent-session-id / data-tool-use-id。
   { id: 'subagent-view', desc: '子代理会话视图根(覆盖在母会话之上的只读面)' },
   { id: 'permission-card', desc: '权限确认卡片' },
+  // r151b:跨会话消息的卡片区(目标会话输入框上方,与权限卡同区;总开关开且有待处理 / 处理中的消息时才出现)。
+  { id: 'xs-inbox', desc: '跨会话消息卡片区(目标会话输入框上方)' },
   // r64:模型生成界面(genui 围栏)。挂在渲染成功的块根上,与 data-testid="genui-block"
   // 同一个元素(INTERFACE r64 §9.0);围栏退回代码块时整个块不存在,选择器落空不炸。
   { id: 'genui-block', desc: '模型生成界面块(genui 围栏渲染成功时的根容器)' },

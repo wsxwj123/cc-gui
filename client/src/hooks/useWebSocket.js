@@ -5,6 +5,7 @@ import { maybeNotify, permissionNotice } from '../utils/desktopNotify.js';
 import { dropStreamSnapshot } from '../utils/reattach.js';
 import { sessionWhitelistAllows } from '../utils/sessionAllow.js';
 import { getSkinState, deactivateSkin } from '../utils/skins.js';
+import { handleXsWsEvent } from '../utils/xsession.js';
 
 // G3:危险命令启发式 —— 删除类 + 网络/装包 + sudo。命中即强制弹窗,不被任何自动放行豁免。
 // 【权威判定在服务端 server/routes/chat.js 的 DANGEROUS_BASH】(canUseTool 内强拦,
@@ -223,6 +224,11 @@ export function useWebSocket() {
           switch (data.type) {
             case 'model':
               setCurrentModel(data.model);
+              break;
+            // r151b:跨会话消息。xs:message 按 message.to.sessionId 收敛进各会话自己的收件箱(不读当前选中会话)。
+            case 'xs:message':
+            case 'xs:config':
+              handleXsWsEvent(data);
               break;
             // r151a:审核状态(切换 provider / 改审核模型后服务端推)与第三方 auto 总开关变化。
             case 'auto-audit':

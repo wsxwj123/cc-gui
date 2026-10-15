@@ -146,7 +146,7 @@ import {
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
   Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star, Puzzle,
-  Image as ImageIcon, Paperclip, Send,
+  Image as ImageIcon, Paperclip, Send, CornerLeftUp,
 } from './components/Icon.jsx';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
@@ -158,6 +158,8 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
+import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAutoRetrySkipped, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
+import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
@@ -1803,6 +1805,8 @@ export const SessionItem = React.memo(function SessionItem({ session, isSelected
   // (后端已取 jsonl 最后一条 assistant 的 model 非首条;但「切了还没发新消息」时它仍是旧值)。
   // primitive selector 只订阅本条 pin,不因 setModelFor 换整个 map 引用而触发全列表重渲。
   const pinModel = useStore((s) => s.modelBySession[session.sessionId]);
+  // r151b:该会话待处理的跨会话消息条数(只数 pending;总开关关 / 0 条时为 0,不渲染徽标)
+  const xsUnread = useXsSessionPending(session.sessionId);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
   const [menuOpen, setMenuOpen] = useState(false); // r11-p3-3:⋯ 菜单(开着时操作钮保持可见)
@@ -1875,6 +1879,14 @@ export const SessionItem = React.memo(function SessionItem({ session, isSelected
             {resolveSessionTitle(session, customTitle, autoTitle) || '(空会话)'}
           </span>
           {pinned && <Pin size={9} className="text-accent fill-accent shrink-0" />}
+          {xsUnread > 0 && (
+            <span className="ml-auto shrink-0 flex items-center" title={`${xsUnread} 条跨会话消息待处理`}>
+              <span className="inline-flex items-center gap-0.5 px-1 rounded-full bg-accent/12 text-accent text-[10px] leading-4 font-body">
+                <CornerLeftUp size={9} className="shrink-0" />
+                <span data-testid="xs-unread" className="tabular-nums">{xsUnread}</span>
+              </span>
+            </span>
+          )}
         </div>
       )}
       {/* r11-p3-3(dsh 式):5 图标横排撤销,行尾只留 ⋯ 触发钮(hover/选中/菜单开时可见,
@@ -3278,6 +3290,9 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
         ? null
         : msg.type === 'task-notice'
         ? <TaskNoticeRow notice={msg} />
+        // r151b:跨会话消息(历史条目)—— 独立气泡,不是用户提问,没有回滚 / 分叉入口
+        : msg.type === 'peer-message'
+        ? <PeerMessageBubble message={msg} />
         : msg.type === 'denial'
         ? <DenialNotice denial={msg} />
         : msg.type === 'turn'
@@ -4312,8 +4327,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 下方 localOnly)与未落盘的停止半截回复(interrupted:停止场景
         // "末条用户消息已落盘"≠"整轮落盘",半截 assistant 可能没写进 jsonl,整清=丢内容;
         // 已落盘的(命中)照清防双渲染)。审计#7。
-        if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || (m.interrupted && !known.has(m)));
-        return prev.filter((m) => !known.has(m));
+        // r151b:直播来源气泡同样只活在本地,历史里有了同一条才交给历史(keepLivePeer)。
+        if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || keepLivePeer(m, persisted) || (m.interrupted && !known.has(m)));
+        return prev.filter((m) => !known.has(m) || keepLivePeer(m, persisted));
       });
     };
     // WS 重连成功 → 断线期间本会话的 file-change 可能已丢,合成一个命中自己 sid 的
@@ -4343,8 +4359,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const known = makePersistedIndex(messages);
       const lastUser = [...prev].reverse().find((m) => m.type === 'user');
       // 保留 btw / denial 与未落盘的停止半截回复(同上面 reconcile,审计#7)。
-      if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || (m.interrupted && !known.has(m)));
-      const next = prev.filter((m) => !known.has(m));
+      if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || keepLivePeer(m, messages) || (m.interrupted && !known.has(m)));
+      const next = prev.filter((m) => !known.has(m) || keepLivePeer(m, messages));
       return next.length === prev.length ? prev : next;
     });
   }, [messages, sessionQueueKey]);
@@ -4703,6 +4719,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (mountFromResolved <= 0) return finalizedMessages;   // 不裁时返回原引用(不打穿 MessageList 的 memo)
     return sliceRows(finalizedMessages, { from: mountFromResolved, to: finalizedMessages.length });
   }, [finalizedMessages, mountFromResolved]);
+  // r151b:回合落盘后历史里没有对应条目的直播来源气泡,按锚点插回它触发的那个回复之前;没有时原引用。
+  const peerPlacement = useMemo(() => placeAnchoredPeers(mountedMessages, visibleChat), [mountedMessages, visibleChat]);
   // 挂载集合变化(补齐 / 搜索开关 / 跳转)会整批挂上或卸掉视口**上方**的行 —— 文档总高变了
   // 而 scrollTop 不变,视野就被顶走。变化前记下"视口最上方那一行 + 行内偏移",变化后在同一
   // 次 layout 提交里搬回原位:比按比例准,且不用任何高度估算。
@@ -5061,6 +5079,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 靠 isStreaming 猜忙不忙 —— isStreaming 说的是"本条 turn 还在产出",而入队判据是
     // "会话忙不忙"(下面那道门读 streamingRef/backgroundPidRef),两者并不等价。
     const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta, onEnqueueFailure, onQueued } = opts;
+    // 自动标题的素材(下面每一处 POST /api/chat/title 的触发条件与 firstUser 都用它,不直接用 prompt):
+    // 点卡片处理跨会话消息时 prompt 只是占位,不能拿去起标题;其余发送它就是 prompt。
+    const autoTitlePrompt = xsAutoTitlePrompt(prompt, opts);
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -5500,10 +5521,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // handleSendRef 恒发进【本窗格当前会话】;原来 80ms 定时器落地前不复查,这段时间(签名自愈还要
     // 先等剥离与拉历史)切走,原文就被发进了新会话。落地前确认本窗格仍是发起会话(或 init 升级出的
     // 真 sid);expectKey 给"本支自己把窗格换成了新 draft"的会话失效那一支用。
-    const retryLater = (nextOpts, expectKey = null) => setTimeout(() => {
-      if (expectKey ? !paneStillOn(expectKey) : !paneStillOn(sessionQueueKey, streamSid)) return;
-      handleSendRef.current?.(prompt, nextOpts);
-    }, 80);
+    // r151b 复审建议 1:点卡片【处理】发出的回合(带 xsProcess)在这里拦下 —— 不重发、不重新认领(认领只在发送块里、
+    // 只有重发才会再走到);该回合由服务端按出错结算(pending / turn-error),这里按最新状态刷新卡片,并把调用点刚弹的
+    // "…并重发本条"改写成"未自动重发"。调用点在重发前做的会话级修正(剥 [1m]、剥签名、切回逐步确认等)照做。
+    // 普通发送走下面的定时器,与改动前相同。
+    const retryLater = (nextOpts, expectKey = null) => {
+      if (nextOpts && nextOpts.xsProcess) {
+        const xsText = xsAutoRetrySkipped(nextOpts.xsProcess);
+        if (expectKey ? paneStillOn(expectKey) : paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: xsText });
+        return undefined;
+      }
+      return setTimeout(() => {
+        if (expectKey ? !paneStillOn(expectKey) : !paneStillOn(sessionQueueKey, streamSid)) return;
+        handleSendRef.current?.(prompt, nextOpts);
+      }, 80);
+    };
     // 发起时的 projectHash 闭包(判官盲审重要1):finally 拉历史必须用它,不能现取
     // getLocalSession()?.projectHash —— 流式期间用户切到另一个项目的会话时两者对不上,
     // 会拉错项目历史/404。draft 会话也带 projectHash,全程有效。
@@ -5597,6 +5629,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 缓存空(首次发送 / 刚被判 TURN_SERVER_CHANGED)才现取一次。
       const clientTurnId = opts.clientTurnId || newClientTurnId();
       const turnEpoch = serverEpochCache || await fetchServerEpoch();
+      // r151b 审计 F1:点卡片【处理】的这条(opts.xsProcess 只带消息 id;会话正忙时排进队列的也只有 id)到这里、
+      // 真正发出前才认领拿一次性凭据。凭据只在 xsFields 这个局部变量里、只进本次请求体,不进 opts / 排队 /
+      // 任何持久存储。认领不成(已被忽略、已不在、目标不是本会话)→ 不发送,卡片已按最新状态刷新,走既有 finally 收尾。
+      let xsFields = null;
+      if (opts.xsProcess) {
+        const xsClaimed = await claimXsForSend(opts.xsProcess, sid);
+        if (!xsClaimed.ok || !xsClaimed.fields) { // 凭据字段不全也不发(审计 S4)
+          if (xsClaimed.notice) setProviderSwitchNotice({ text: xsClaimed.notice });
+          return;
+        }
+        xsFields = xsClaimed.fields;
+      }
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5629,9 +5673,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // r66:genui 渲染开关同时门控"教不教模型这套围栏语法"。关掉时 server 不把
           // 教学段注入系统提示(开关也计入常驻进程复用键,翻完开关不会复用旧系统提示)。
           genui: useStore.getState().genuiRender !== false,
+          // r151b:点卡片【处理】发出的这条带跨会话消息 id 与一次性凭据(服务端兑换后把 prompt 换成信封);
+          // 其它发送 xsFields 为 null,请求体与改动前逐字相同。
+          ...(xsFields || {}),
         }),
       });
       const respJson = await res.json();
+      // r151b:点卡片发出的这条被拒(400 / 409 凭据无效、409 开关已关、500 入口出错、回合身份冲突)= 没发出:
+      // 按最新状态刷新卡片(可撤回或已退回),给一行提示,不画错误回合;走既有 finally 收尾。
+      if (opts.xsProcess && (!res.ok || !respJson.pid)) {
+        setProviderSwitchNotice({ text: xsClaimNotSent(opts.xsProcess, respJson) });
+        return;
+      }
       // R13 身份冲突(409):本条请求不属于当前服务实例/与既有回合参数不符/已过期 ——
       // 一律【不自动重发】。先恢复该会话历史让用户看到真实状态,再让用户自己决定重发。
       if (res.status === 409 && (respJson.code === 'TURN_CONFLICT' || respJson.code === 'TURN_SERVER_CHANGED' || respJson.code === 'TURN_EXPIRED')) {
@@ -6014,12 +6067,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               try {
                 const _sid = event.session_id;
                 const _st = useStore.getState();
-                if (!titleAttempted.has(_sid) && !_st.customTitles[_sid] && !_st.autoTitles[_sid] && prompt && !hiddenUserMessage) {
+                if (!titleAttempted.has(_sid) && !_st.customTitles[_sid] && !_st.autoTitles[_sid] && autoTitlePrompt && !hiddenUserMessage) {
                   titleAttempted.add(_sid);
                   const _m = String(_st.modelBySession[_sid] || _st.currentModel || '').replace(/\[1m\]/i, '');
                   fetch('/api/chat/title', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ firstUser: prompt, firstAssistant: '', cwd, model: _m, sessionId: _sid }),
+                    body: JSON.stringify({ firstUser: autoTitlePrompt, firstAssistant: '', cwd, model: _m, sessionId: _sid }),
                   }).then((r) => r.json()).then((d) => {
                     if (d?.title) useStore.getState().setAutoTitle(_sid, d.title);
                     else titleAttempted.delete(_sid);
@@ -6115,6 +6168,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           //   deny 规则 / dontAsk 档拒 / 后台代理自动判定四条路径——它们此前在界面上只留下
           //   一条 is_error 的 tool_result,拒绝原因完全不可见。按 tool_use_id 去重(同一次
           //   调用只发一条),ownerKey 走流归属,和 goal 提示同一套门控。
+          // r151b:跨会话消息的来源气泡(直播)。xs_message = GUI 投递的那条(点卡片兑换后服务端在本回合
+          // 模型输出之前补发);顶层 result 带 origin.kind:"peer"、不是子代理回传、不是 GUI 自己投递的
+          // (senderTaskId / hostInjected)= 经 CLI 原生通道从别的会话来的。本回合的回复在流结束时才进
+          // chatMessages,所以追加在末尾就是"该回合之前";按 uuid 去重(重放 / reattach 不画两遍)。
+          if (event.type === 'xs_message' || event.type === 'result') {
+            const peer = event.type === 'xs_message' ? peerFromXsEvent(event) : peerFromResultEvent(event);
+            if (peer) setChatMessages((prev) => (prev.some((m) => m.uuid === peer.uuid) ? prev : [...prev, { ...peer, ownerKey: streamOwnerSid() }]));
+          }
           if (event.type === 'system' && event.subtype === 'permission_denied') {
             const dUuid = 'denied-' + (event.tool_use_id || event.uuid || Date.now());
             setChatMessages((prev) => (prev.some((m) => m.uuid === dUuid) ? prev : [...prev, {
@@ -7171,6 +7232,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }]);
       }
     } catch (err) {
+      // r151b:点卡片发出的这条中途出错(断网 / 非 JSON 应答):消息状态以服务端为准,刷新卡片。
+      if (opts.xsProcess) xsClaimNotSent(opts.xsProcess, null);
       // A dropped SSE connection (network blip, phone sleep/lock, wifi↔cellular
       // handoff) surfaces as a TypeError — Safari: "Load failed", Chrome: "Failed
       // to fetch". The CLI keeps running and writing its jsonl in the background,
@@ -7452,7 +7515,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             localCopiesCleared = true; // r119:见声明处 —— 之后不许再补本地副本
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
-              return prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(m)) : prev;
+              const hist = getLocalMessages(); // r151b:直播来源气泡按历史是否已有同一条决定去留
+              return prev.length ? prev.filter((m) => m.type === 'turn' || !known.has(m) || keepLivePeer(m, hist)) : prev;
             });
             break;
           }
@@ -7468,9 +7532,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             localCopiesCleared = true; // r119:见声明处 —— 之后不许再补本地副本
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
-              const localOnly = (m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch';
+              const localOnly = (m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || keepLivePeer(m, getLocalMessages()); // r151b:直播来源气泡在历史有同一条之前保留
               return prev.some(localOnly) ? prev.filter(localOnly) : [];
             });
+            // r151b:留下来的本回合来源气泡记下锚点(历史里本回合第一条回复),渲染时插回它之前
+            setChatMessages((prev) => (isCurrentTurn() ? anchorLivePeers(prev, getLocalMessages(), turnStreamStart) : prev));
             break;
           }
           if (i < 11) await new Promise((r) => setTimeout(r, 200));
@@ -7560,7 +7626,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const _ownerKey = streamOwnerKeyRef.current;
         const titleSid = streamSid || ((_ownerKey && !_ownerKey.startsWith('draft-')) ? _ownerKey : null);
         const st = useStore.getState();
-        if (titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && prompt) {
+        if (titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && autoTitlePrompt) {
           // 标记"已尝试"——无论成功失败都不再重试,避免 provider 失败时每轮 spawn。
           titleAttempted.add(titleSid);
           // 标题用【当前 provider 有效】的模型:本会话 pin 或当前选中模型,去掉 [1m]。
@@ -7573,7 +7639,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             headers: { 'Content-Type': 'application/json' },
             // 带 sessionId:服务端先看该会话 jsonl 里 CLI 有没有写好 ai-title,有就直接用,
             // 省掉一次 `claude -p` 冷启(回合已结束,这时它通常已经落盘)。
-            body: JSON.stringify({ firstUser: prompt, firstAssistant: accumulatedText || '', cwd, model: titleModel, sessionId: titleSid }),
+            body: JSON.stringify({ firstUser: autoTitlePrompt, firstAssistant: accumulatedText || '', cwd, model: titleModel, sessionId: titleSid }),
           })
             .then((r) => r.json())
             .then((d) => {
@@ -9431,7 +9497,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 </div>
               )}
               <MessageList
-                messages={mountedMessages}
+                messages={peerPlacement.list}
                 onRetryTurn={stableRetryTurn}
                 onRetryTool={stableRetryTool}
                 onRollback={stableRollback}
@@ -9439,7 +9505,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 retryActiveUuid={retryActiveUuid}
               />
               {/* btw 旁问不再进主流内联渲染 —— 改由右下角 BtwWindow 浮窗聚合成连续线程。 */}
-              {renderChat.filter((msg) => msg.type !== 'btw').map((msg, i) => (
+              {renderChat.filter((msg) => msg.type !== 'btw' && !peerPlacement.placed.has(msg.uuid)).map((msg, i) => (
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
                   {msg.type === 'compact'
                     ? <CompactDivider />
@@ -9447,6 +9513,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     ? null
                     : msg.type === 'task-notice'
                     ? <TaskNoticeRow notice={msg} />
+                    : msg.type === 'peer-message'
+                    ? <PeerMessageBubble message={msg} />
                     : msg.type === 'denial'
                     ? <DenialNotice denial={msg} />
                     : msg.type === 'mode-mismatch'
@@ -12818,6 +12886,8 @@ export default function App() {
   const pendingKeys = useStore((s) => s.pendingPermissions.map((p) => p.sessionId || '').join(','));
   const attentionCount = countAttention(waitingKeys, pendingKeys);
   useEffect(() => { applyAttentionBadge(attentionCount); }, [attentionCount]);
+  // r151b:跨会话消息 —— 读总开关、WS 重连后对账(状态收敛全在 utils/xsession.js)。
+  useEffect(() => startXsession(), []);
   // L2:窗口不在前台时,后台代理【新】转 waiting/blocked 发一条系统通知。依赖是等待集合
   // 本身(字符串),notifyWaiting 内部只挑上升沿 —— 按水平值发会每 1.5s 重发一遍。
   useEffect(() => { notifyWaiting(waitingKeys); }, [waitingKeys]);

@@ -63,6 +63,13 @@ export function composePanelProjects({
   });
 }
 
+// r151b 第 27 条:侧栏此刻显示哪些项目(当前分组模式下的隐藏集、worktree 显示开关、窗格豁免;不含搜索框过滤)。
+// 由 UnifiedSidebar 用渲染项目行的同一套函数算好后登记;转发对话框读它标注目标"所在项目已隐藏" —— 与侧栏同一份结果,
+// 不另算一套。null = 侧栏没挂载 / 还没算出(调用方按"不知道"处理,不标注)。
+let sidebarShownProjects = null;
+export function setSidebarShownProjects(hashes) { sidebarShownProjects = hashes instanceof Set ? hashes : null; }
+export function getSidebarShownProjects() { return sidebarShownProjects; }
+
 /**
  * r23-①②:单列表(平铺)模式的可见项目集 —— 懒拉与渲染共用同一个来源。
  * 只按 hidden 过滤,**不按 worktree 显示开关过滤**:那个开关管的是"侧栏要不要显示
