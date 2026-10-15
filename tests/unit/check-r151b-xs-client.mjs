@@ -275,6 +275,41 @@ routes['GET /api/xsession/messages'] = (u) => ({ status: 200, body: { messages: 
   assert.equal(xs.peerFromResultEvent({ type: 'result', uuid: 'u-11', origin: { kind: 'peer', name: '丙' } }).turnStartMs, null, '两者都没有 → 不记');
   assert.equal(xs.peerFromResultEvent({ type: 'result', uuid: 'u-12', origin: { kind: 'peer', name: '丙' } }, null).turnStartMs, null, 'null 不当 0');
   assert.equal(xs.keepLivePeer({ ...natT, turnStartMs: null }, [{ type: 'peer-message', timestamp: iso(tStart - 3600000), fromName: '丙', body: null }]), false, '原生没记下界(旧快照)→ 照旧按来源名认');
+  // ── 8b. r151c 先修 8(X27 补测):转发目标"所在项目已隐藏" —— 手动隐藏的项目与没开 worktree 显示时的 worktree 项目都标注;
+  //        侧栏没挂载 / 还没算出(null)时一律不标注。登记的集合与项目行同一套函数(两种分组模式),对话框的判断式取自源码。
+  {
+  const pp = await import('../../client/src/utils/projectPanel.js');
+  const { readFileSync } = await import('node:fs');
+  const SB = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx', import.meta.url), 'utf8');
+  assert.ok(SB.includes("composePanelProjects({ projects, hidden, showWorktrees: showWorktreeProjects, query: '', panes, pinned: pinnedProjSet })"), '分组模式:登记的集合与项目行同一套函数');
+  assert.ok(SB.includes('setSidebarShownProjects(shownProjectHashes)') && SB.includes('return () => setSidebarShownProjects(null)'), '侧栏卸载时撤回登记(= 不标注)');
+  const DLG = readFileSync(new URL('../../client/src/components/XsForwardDialog.jsx', import.meta.url), 'utf8');
+  const hm = /const projHidden = (.+);\n/.exec(DLG);
+  assert.ok(hm && DLG.includes('useState(getSidebarShownProjects)'), '对话框:打开时读一次侧栏登记的集合,按判断式标注');
+  // eslint-disable-next-line no-new-func
+  const projHidden = new Function('shownProjects', 's', `return ${hm[1]};`);
+  const projects = [{ hash: 'p-main', path: '/w/main' }, { hash: 'p-hid', path: '/w/hid' }, { hash: 'p-wt', path: '/w/main-worktrees/a', isWorktree: true }];
+  const hidden = new Set(['p-hid']);
+  const shownOf = (rows) => new Set(rows.map((p) => p.hash));
+  const grouped = shownOf(pp.composePanelProjects({ projects, hidden, showWorktrees: false, query: '', panes: [], pinned: new Set() }));
+  const single = shownOf(pp.singleModeVisibleProjects({ projects, hidden, panes: [], pinned: new Set() }));
+  const target = (projectHash) => ({ sessionId: 'x', projectHash });
+  for (const [mode, shown] of [['分组', grouped], ['单列表', single]]) {
+    pp.setSidebarShownProjects(shown);
+    assert.equal(projHidden(pp.getSidebarShownProjects(), target('p-hid')), true, `${mode}:手动隐藏的项目 → 标注`);
+    assert.equal(projHidden(pp.getSidebarShownProjects(), target('p-main')), false, `${mode}:显示中的项目 → 不标注`);
+  }
+  pp.setSidebarShownProjects(grouped);
+  assert.equal(projHidden(pp.getSidebarShownProjects(), target('p-wt')), true, '分组:没开 worktree 显示时的 worktree 项目 → 标注');
+  pp.setSidebarShownProjects(shownOf(pp.composePanelProjects({ projects, hidden, showWorktrees: true, query: '', panes: [], pinned: new Set() })));
+  assert.equal(projHidden(pp.getSidebarShownProjects(), target('p-wt')), false, '打开 worktree 显示后 → 不标注');
+  assert.equal(projHidden(pp.getSidebarShownProjects(), target('p-hid')), true, '打开 worktree 显示不影响手动隐藏的');
+  pp.setSidebarShownProjects(null);
+  assert.equal(projHidden(pp.getSidebarShownProjects(), target('p-hid')), false, '侧栏没挂载 / 还没算出(null)→ 不标注');
+  pp.setSidebarShownProjects(['p-main']);
+  assert.equal(pp.getSidebarShownProjects(), null, '登记的不是 Set → 按没登记处理');
+  assert.equal(projHidden(grouped, { sessionId: 'x' }), false, '目标没有 projectHash → 不标注');
+  }
   // 卡片文案
   assert.equal(xs.xsCardFromText(msg(M1, 'pending')), '由你从 甲 转发');
   assert.equal(xs.xsCardFromText({ from: { kind: 'session', title: '丁' } }), '来自 丁');

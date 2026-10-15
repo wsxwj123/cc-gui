@@ -444,6 +444,19 @@ try {
     eq((await store.listXsMessages()).map((m) => m.id), [n3.id], '删除失败时记录不变');
     eq((await api('POST', '/xsession/clear')).body, { ok: true, removed: 1 }, '恢复权限后可以清空');
 
+    // r151c 先修 8(X26 补测):记录删掉之后正文删不掉 → 仍 200、removed 照实(以收件箱记录为准),正文留待下次启动清理
+    setEnabled(true);
+    const [n4] = await xs.sendManualMessages({ to: [P], body: 'R151B clear 四', fromSessionId: Q }, rows);
+    setEnabled(false);
+    const BOD4 = join(XSD, 'bodies');
+    chmodSync(BOD4, 0o500); // 正文目录只读:记录(在 xsession/ 下)删得掉,正文删不掉
+    try {
+      r = await api('POST', '/xsession/clear');
+      eq([r.status, r.body], [200, { ok: true, removed: 1 }], '记录删掉后正文删除失败 → 仍 200,removed 照实');
+    } finally { chmodSync(BOD4, 0o700); }
+    ok(existsSync(join(BOD4, `${n4.id}.txt`)), '删不掉的正文留着(由下次启动清理删)');
+    eq((await api('GET', '/xsession/config')).body.stored, { unfinished: 0 }, '以记录为准:未处理条数为 0');
+
     // 只读计数:另一份存储实例(没读过盘)直接数文件,不做恢复、不挪损坏文件、不写
     const freshStore = async (tag, home) => {
       const prev = process.env.HOME;
