@@ -426,13 +426,19 @@ export function xsClaimNotSent(xsProcess, reply) {
  * 点卡片发出的这条回合遇到会触发既有"自动重发"的错误(1M 被拒、思考签名、会话失效、自动档不可用;App.jsx retryLater 统一拦):
  * 不重发、不重新认领 —— 该回合由服务端按出错结算(pending / turn-error),这里按最新状态刷新卡片,返回提示文案(复审建议 1)。
  * 刷新早于服务端结算时拿到的仍是 processing,结算后的 xs:message 广播会把卡片收敛到 turn-error。xsProcess = opts.xsProcess。
+ * shownNotice(r151c 先修 2)= 调用点刚弹的会话级修正提示(剥 [1m]、剥签名、切回逐步确认):保留它,只把"并重发本条"换成
+ * "，未自动重发",再接卡片提示;没有或不含这几个字时用通用文案。
  */
-export function xsAutoRetrySkipped(xsProcess) {
+const XS_RETRY_CARD_HINT = '卡片已按最新状态刷新；如需重试，在卡片上点【处理】。';
+export function xsAutoRetrySkipped(xsProcess, shownNotice = null) {
   if (xsProcess && isXsId(xsProcess.sessionId)) {
     bumpEpoch(xsProcess.sessionId);
     void refreshInbox(xsProcess.sessionId);
   }
-  return '跨会话消息的处理回合出错，未自动重发。卡片已按最新状态刷新；如需重试，在卡片上点【处理】。';
+  if (typeof shownNotice === 'string' && shownNotice.includes('并重发本条')) {
+    return `${shownNotice.replace('并重发本条', '，未自动重发')}${XS_RETRY_CARD_HINT}`;
+  }
+  return `跨会话消息的处理回合出错，未自动重发。${XS_RETRY_CARD_HINT}`;
 }
 
 // ── 转发(对话框 XsForwardDialog 只调这里) ────────────────────────────────────────

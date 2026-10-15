@@ -70,6 +70,14 @@ eq(card()?.status, 'processing', '前置:卡片是"处理中"');
   for (const bad of [null, undefined, {}, { messageId: M1, sessionId: 'not-a-uuid' }]) eq(typeof xs.xsAutoRetrySkipped(bad), 'string', '凭据对象不合规也返回提示');
   await settle();
   eq(calls.length, n0, '凭据对象不合规:不发任何请求');
+  // r151c 先修 2:调用点刚弹的会话级修正提示保留,只把"并重发本条"换成"未自动重发",再接卡片提示
+  const HINT = '卡片已按最新状态刷新；如需重试，在卡片上点【处理】。';
+  const rewrite = (shown) => xs.xsAutoRetrySkipped({ messageId: M1, sessionId: 'not-a-uuid' }, shown);
+  eq(rewrite('订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。'),
+    `订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文，未自动重发。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。${HINT}`, '1M:保留"已切回标准上下文"与开通说明');
+  eq(rewrite('历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。'), `历史思考块签名不被当前 provider 接受，已自动剥离，未自动重发。${HINT}`, '签名:保留"已自动剥离"');
+  eq(rewrite('当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。'), `当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」，未自动重发。${HINT}`, '自动档:保留"已回退逐步确认"');
+  for (const plain of [null, undefined, '', '别的提示', 42]) eq(rewrite(plain), `跨会话消息的处理回合出错，未自动重发。${HINT}`, `没有可改写的提示(${String(plain)}):用通用文案`);
 }
 
 // ── 2. retryLater 原样取出来跑 ──
@@ -80,7 +88,7 @@ ok(s0 > 0 && APP.indexOf(HEAD, s0 + 1) < 0, 'retryLater 只定义一处');
 const retrySrc = APP.slice(s0, APP.indexOf('\n    };\n', s0) + '\n    };'.length);
 const PROMPT = '（跨会话消息）';
 function makeRetryLater(pane = () => true) {
-  const log = { pane: [], notice: [], skipped: [], sent: [] };
+  const log = { pane: [], notice: [], skipped: [], sent: [], shown: [] };
   const deps = {
     paneStillOn: (...a) => { log.pane.push(a); return pane(...a); },
     sessionQueueKey: 'sqk-B',
@@ -88,7 +96,7 @@ function makeRetryLater(pane = () => true) {
     handleSendRef: { current: (p, o) => log.sent.push([p, o]) },
     prompt: PROMPT,
     setProviderSwitchNotice: (v) => log.notice.push(v),
-    xsAutoRetrySkipped: (p) => { log.skipped.push(p); return '提示-X'; },
+    xsAutoRetrySkipped: (p, shown) => { log.skipped.push(p); log.shown.push(shown); return '提示-X'; },
   };
   // eslint-disable-next-line no-new-func
   const fn = new Function(...Object.keys(deps), `${retrySrc}\nreturn retryLater;`)(...Object.values(deps));
@@ -111,6 +119,13 @@ for (const flag of ['oneMRetry', 'signatureRetry', 'freshRetry', 'autoRetry']) {
   fn({ xsProcess: XP, freshRetry: true }, 'draft-key');
   await sleep(150);
   eq([log.pane, log.sent, log.skipped], [[['draft-key']], [], [XP]], 'expectKey:按它判窗格,不重发,刷新卡片');
+}
+{ // r151c 先修 2:调用点传进来的提示原样交给 xsAutoRetrySkipped 改写;没传时为 null
+  const { fn, log } = makeRetryLater();
+  fn({ xsProcess: XP, oneMRetry: true }, null, '刚弹的提示并重发本条。');
+  fn({ xsProcess: XP, autoRetry: true });
+  await sleep(150);
+  eq([log.shown, log.notice, log.sent], [['刚弹的提示并重发本条。', null], [{ text: '提示-X' }, { text: '提示-X' }], []], '调用点提示交给改写;不重发');
 }
 { // 窗格已换走:不弹提示(提示条是窗格级的),卡片照样刷新
   const { fn, log } = makeRetryLater(() => false);
@@ -150,6 +165,17 @@ ok(compact(retrySrc).includes(compact(`return setTimeout(() => {
 }, 80);`)), '普通发送的重发定时器与改动前逐字相同(忽略缩进)');
 eq([...APP.matchAll(/retryLater\(\{ \.\.\.opts, (\w+): true \}/g)].map((m) => m[1]),
   ['oneMRetry', 'signatureRetry', 'freshRetry', 'freshRetry', 'autoRetry', 'autoRetry'], '五处自动重发都经 retryLater(会话失效那一处按是否点卡片分两支)');
+
+// r151c 先修 2:四处弹了会话级修正提示再重发的调用点,弹的那句与交给 retryLater 的是同一个常量,且都含"并重发本条"
+{
+  const sites = [...APP.matchAll(/const (_notice\w+) = '([^']*)';/g)].map((m) => ({ name: m[1], text: m[2] }));
+  eq(sites.map((s) => s.name), ['_notice1m', '_noticeSig', '_noticeAuto', '_noticeAutoSpawn'], '四处调用点各一个提示常量');
+  for (const s of sites) {
+    ok(s.text.includes('并重发本条'), `${s.name}:含"并重发本条"(改写依据)`);
+    ok(APP.includes(`setProviderSwitchNotice({ text: ${s.name} })`), `${s.name}:弹的就是它`);
+    ok(new RegExp(`retryLater\\(\\{ \\.\\.\\.opts, \\w+: true \\}, null, ${s.name}\\)`).test(APP), `${s.name}:同一句交给 retryLater`);
+  }
+}
 
 // ── 4. r151c 先修 1:会话失效那一支原样取出来跑 —— 点卡片发出的回合不转新草稿、不重发、不记「未发出的消息」 ──
 {

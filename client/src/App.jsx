@@ -5524,10 +5524,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r151b 复审建议 1:点卡片【处理】发出的回合(带 xsProcess)在这里拦下 —— 不重发、不重新认领(认领只在发送块里、
     // 只有重发才会再走到);该回合由服务端按出错结算(pending / turn-error),这里按最新状态刷新卡片,并把调用点刚弹的
     // "…并重发本条"改写成"未自动重发"。调用点在重发前做的会话级修正(剥 [1m]、剥签名、切回逐步确认等)照做。
+    // r151c 先修 2:shownNotice = 调用点刚弹的那句提示(会话级修正的说明),改写时保留它,只把"并重发本条"换成"未自动重发",
+    // 不再整条覆盖成通用文案;没有时用通用文案。普通发送不读它。
     // 普通发送走下面的定时器,与改动前相同。
-    const retryLater = (nextOpts, expectKey = null) => {
+    const retryLater = (nextOpts, expectKey = null, shownNotice = null) => {
       if (nextOpts && nextOpts.xsProcess) {
-        const xsText = xsAutoRetrySkipped(nextOpts.xsProcess);
+        const xsText = xsAutoRetrySkipped(nextOpts.xsProcess, shownNotice);
         if (expectKey ? paneStillOn(expectKey) : paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: xsText });
         return undefined;
       }
@@ -6868,8 +6870,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               if (_base) _st.setModelFor(sessionQueueKey, _base);
               if (/\[1m\]/i.test(_st.currentModel || '')) _st.setModel(String(_st.currentModel).replace(/\[1m\]/i, ''));
               // r146b:提示条是窗格级的 —— 窗格已不是本会话就不弹(模型 pin 按会话键改,与窗格无关,照改)。
-              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。' });
-              retryLater({ ...opts, oneMRetry: true });
+              const _notice1m = '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。';
+              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: _notice1m });
+              retryLater({ ...opts, oneMRetry: true }, null, _notice1m);
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -6885,8 +6888,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 // 透传原 opts(工具重做带的 appendSystemPrompt/hiddenUserMessage 必须保留),
                 // 只追加守卫位防无限重试。剥离期间切走 → 提示与重发都放弃(提示会落在别的会话上)。
                 if (paneStillOn(sessionQueueKey, streamSid)) {
-                  setProviderSwitchNotice({ text: '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。' });
-                  retryLater({ ...opts, signatureRetry: true });
+                  const _noticeSig = '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。';
+                  setProviderSwitchNotice({ text: _noticeSig });
+                  retryLater({ ...opts, signatureRetry: true }, null, _noticeSig);
                 }
                 // 本次失败的产物正是 "API Error: ...Invalid signature..." 文案,它也作为
                 // assistant text 落进了 accumulatedText。清空,否则循环结束后会被当成正常
@@ -6946,8 +6950,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               markAutoUnavailable(_st, _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
               _st.setPermissionMode('default', sessionQueueKey);
               // r146b:权限档按会话键改(与窗格无关);提示条只在窗格仍是本会话时弹。
-              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
-              retryLater({ ...opts, autoRetry: true });
+              const _noticeAuto = '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。';
+              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: _noticeAuto });
+              retryLater({ ...opts, autoRetry: true }, null, _noticeAuto);
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -7300,8 +7305,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           _st.setPermissionMode('default', sessionQueueKey);
           // r146 R4:POST 返回 500 时窗格可能已切走 —— 提示与重发都只在仍是本会话时做。
           if (paneStillOn(sessionQueueKey, streamSid)) {
-            setProviderSwitchNotice({ text: '当前 CLI / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
-            retryLater({ ...opts, autoRetry: true });
+            const _noticeAutoSpawn = '当前 CLI / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。';
+            setProviderSwitchNotice({ text: _noticeAutoSpawn });
+            retryLater({ ...opts, autoRetry: true }, null, _noticeAutoSpawn);
           }
         } else {
         console.error('Chat error:', err);
