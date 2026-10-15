@@ -104,7 +104,7 @@ try {
   const hook = makePreToolUseHook(sender);
   const call = (toolInput, toolName = 'SendMessage') => hook({ hook_event_name: 'PreToolUse', tool_name: toolName, tool_input: toolInput }, 'toolu_r151b_1');
   const DENY = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: NATIVE_GUARD_REASON } };
-  eq(NATIVE_GUARD_REASON, '这个会话由 CC-GUI 管理，不接收经 SendMessage 发来的消息。如需把内容交给它，请告诉用户在 CC-GUI 里转发。', '拒绝原因逐字');
+  eq(NATIVE_GUARD_REASON, '这个会话由 CC-GUI 管理。给 CC-GUI 里的其它会话发消息请用 mcp__ccgui-sessions__send_message（可先用 mcp__ccgui-sessions__list_sessions 查看）；它也能发给当前没在运行的会话。', '拒绝原因逐字(r151c 二期文案)');
 
   setEnabled(true);
   mkdirSync(REG, { recursive: true });

@@ -481,7 +481,7 @@ async function settleTurn(id, key, outcome, detail) {
 // 失效(读不到登记表 / 内部出错 / chat.js 那边等了 2 秒没结果)→ 放行(= 现状),记日志并记下 nativeGuard.lastFailureAt 给设置块显示。
 // H5b 实测(2026-10-15,CLI 2.1.296):SDK 的 default / bypassPermissions / auto / plan 四档下,回调拒绝都生效、
 // 原因原样成为模型看到的工具结果;回调输入的 tool_input 带 CLI 补的 recipient 与 recipient_kind。
-export const NATIVE_GUARD_REASON = '这个会话由 CC-GUI 管理，不接收经 SendMessage 发来的消息。如需把内容交给它，请告诉用户在 CC-GUI 里转发。';
+export const NATIVE_GUARD_REASON = '这个会话由 CC-GUI 管理。给 CC-GUI 里的其它会话发消息请用 mcp__ccgui-sessions__send_message（可先用 mcp__ccgui-sessions__list_sessions 查看）；它也能发给当前没在运行的会话。';
 
 let nativeGuardLastFailureAt = null;
 export function noteNativeGuardFailure(at = new Date()) {
