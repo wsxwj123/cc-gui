@@ -253,6 +253,35 @@ export async function dismissMessage(id) {
   return { ok: true, id: m.id, status: 'dismissed' };
 }
 
+// ── 目标会话在本 GUI 里被删除(接口 X.3.6 末尾 2026-10-15 补的第一条)──────────────────────────────────
+/**
+ * DELETE /api/sessions/:sessionId 删掉记录文件之后调用:以它为目标、还没结束的消息连同正文一并删除(否则待处理条数与
+ * Dock 角标会留下用户没处可清的数字),每条广播一次 xs:message。记录已不在,广播里 status 记为 dismissed(前端按
+ * "已结束"收起卡片、减掉计数)。不看总开关:关着时留下的待处理,之后打开照样会计数;收件箱文件不存在时什么都不写。
+ * 已结束(done / dismissed)的只剩元数据,不动。返回删掉的条数。
+ */
+export async function dropXsMessagesForSession(sessionId) {
+  if (!isIdString(sessionId)) return 0;
+  const removed = await mutateXsInbox((messages) => {
+    const gone = [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (sameId(messages[i].to?.sessionId, sessionId) && isOpenStatus(messages[i].status)) gone.unshift(...messages.splice(i, 1));
+    }
+    return gone; // 存储层在写盘成功后删掉这些消息的正文
+  });
+  if (!removed.length) return 0;
+  for (const m of removed) { // 已兑换、还没结算的:它的回合不会再来结算了(或结算时找不到记录)
+    const f = inflight.get(m.id);
+    if (f) {
+      clearTimeout(f.timer);
+      inflight.delete(m.id);
+    }
+  }
+  await announce(removed.map((m) => ({ ...m, status: 'dismissed', heldReason: null })));
+  releaseTurnHooksIfIdle();
+  return removed.length;
+}
+
 // ── /chat 路由入口:兑换凭据、换成信封、绑定回合;回合开始补 xs_message;回合结束结算 ─────────────────
 
 // 已兑换、还没结算的消息:id → { key(本次兑换的回合标识), event(预先备好的 xs_message), timer, pid }。
