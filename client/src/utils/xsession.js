@@ -325,9 +325,13 @@ export async function claimXsForSend(xsProcess, sendSessionId) {
       return { ok: false, notice: r.status === 409 || r.status === 404 ? '' : `跨会话消息没有发出：${replyError(r, '未能开始处理')}。卡片已按最新状态刷新。` };
     }
     bumpEpoch(sid);
+    if (!isXsId(r.body.token)) {
+      // 审计 S4:凭据字段不全 / 形状不对 → 不发送(否则请求不带凭据、占位文字被当成普通消息发给模型),按最新状态刷新卡片
+      await refreshInbox(sid);
+      return { ok: false, notice: '跨会话消息没有发出：认领凭据无效。卡片已按最新状态刷新。' };
+    }
     patchInboxMessage(sid, messageId, (old) => mergeMessageFields(old, { status: 'claimed', heldReason: null, heldText: null }));
-    const fields = isXsId(r.body.token) ? { xsMessageId: messageId, xsToken: r.body.token } : null;
-    return { ok: true, fields };
+    return { ok: true, fields: { xsMessageId: messageId, xsToken: r.body.token } };
   } finally {
     clearBusy(messageId);
   }

@@ -118,15 +118,33 @@ function useXsStoreStatus(id) { return (xs.useXsStore.getState().inbox[B] || [])
   console.log('✓ 认领失败:不发送、刷新卡片');
 }
 
+// ── 3b. 审计 S4:认领应答里凭据字段不全 / 形状不对 → 不发送(不给请求字段),按最新状态刷新卡片,给一行提示 ──
+{
+  for (const bad of [{ ok: true, id: M3, sessionId: B }, { ok: true, id: M3, sessionId: B, token: 'abc' }, { ok: true, id: M3, sessionId: B, token: '' }]) {
+    serverMsgs = [msg(M1, 'claimed'), msg(M3, 'claimed')];
+    routes[`POST /api/xsession/messages/${M3}/claim`] = () => ({ status: 200, body: bad });
+    const before = count('GET /api/xsession/messages');
+    const c = await xs.claimXsForSend({ messageId: M3, sessionId: B }, B);
+    await settle();
+    assert.equal(c.ok, false, `凭据 ${JSON.stringify(bad.token)}:不发送`);
+    assert.equal(c.fields, undefined, '不给请求字段');
+    assert.ok(typeof c.notice === 'string' && c.notice.includes('没有发出'), '给一行提示');
+    assert.ok(count('GET /api/xsession/messages') > before, '按最新状态刷新卡片');
+  }
+  serverMsgs = [msg(M1, 'claimed'), msg(M3, 'pending')];
+  console.log('✓ S4:凭据字段不全时不发送、刷新卡片');
+}
+
 // ── 4. 排队中点【忽略】:排队里的这一条一并取消,出队时不会再去认领 ──
 {
+  const claimed0 = count(`POST /api/xsession/messages/${M3}/claim`);
   await xs.processXsMessage({ sessionId: B, messageId: M3, send: busySend, isStillOn: () => true });
   await settle();
   assert.equal(queueOf().length, 1, '前提:M3 已排队');
   routes[`POST /api/xsession/messages/${M3}/dismiss`] = () => ({ status: 200, body: { ok: true, id: M3, status: 'dismissed' } });
   assert.deepEqual(await xs.dismissXsMessage({ sessionId: B, messageId: M3 }), { ok: true });
   assert.equal(queueOf().length, 0, '排队里的这一条被取消');
-  assert.equal(count(`POST /api/xsession/messages/${M3}/claim`), 0, '从头到尾没认领过');
+  assert.equal(count(`POST /api/xsession/messages/${M3}/claim`), claimed0, '排队到取消都没认领过');
   console.log('✓ 排队中忽略:一并取消排队');
 }
 unwatch();
@@ -146,6 +164,7 @@ unwatch();
   const post = body.indexOf("await fetch('/api/chat', {");
   assert.ok(enq > 0 && enqCall > enq, '会话正忙时入队的是 opts 的浅拷贝(与第 1 节 busySend 同一写法)');
   assert.ok(claim > enqCall && post > claim, '认领在入队之后(只在真正发出的路径上)、POST /api/chat 之前');
+  assert.ok(body.includes('if (!xsClaimed.ok || !xsClaimed.fields) {'), '认领不成或凭据字段不全都不发送(S4)');
   const code = body.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n'); // 去掉整行注释
   const uses = code.match(/\bxsFields\b/g) || [];
   assert.equal(uses.length, 3, `xsFields 只在声明、赋值、请求体里出现(实际 ${uses.length} 处)`);

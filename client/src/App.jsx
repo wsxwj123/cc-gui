@@ -5624,7 +5624,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       let xsFields = null;
       if (opts.xsProcess) {
         const xsClaimed = await claimXsForSend(opts.xsProcess, sid);
-        if (!xsClaimed.ok) {
+        if (!xsClaimed.ok || !xsClaimed.fields) { // 凭据字段不全也不发(审计 S4)
           if (xsClaimed.notice) setProviderSwitchNotice({ text: xsClaimed.notice });
           return;
         }
