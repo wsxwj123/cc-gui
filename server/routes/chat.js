@@ -1205,6 +1205,9 @@ export function summarizeTurnError(text) {
   if (s.length > TURN_ERROR_SUMMARY_MAX) s = `${cutBeforeSurrogateSplit(s, TURN_ERROR_SUMMARY_MAX).trimEnd()}…`;
   return s;
 }
+// 入口钩子改写过的回合(现只有跨会话兑换)在进程预览(promptPreview,进程列表等处显示)里用这句固定文字:
+// 改写后的内容是信封 + 另一个会话的正文,不往预览里带(审计 S8 / 判官建议 7)。
+const REWRITTEN_TURN_PREVIEW = '（跨会话消息）';
 const ENTRY_HOOK_FAILED = { reject: { status: 500, body: { ok: false, code: 'CHAT_ENTRY_HOOK_FAILED', error: '服务端内部错误，本条消息没有发出，请重试' } } };
 async function runChatEntryHook(ctx) {
   let out;
@@ -2058,6 +2061,7 @@ async function handleChatPost(req, res) {
   }
   const turnPrompt = entry ? entry.prompt : prompt;
   const turnTag = entry ? entry.tag : undefined;
+  const turnPreview = entry ? REWRITTEN_TURN_PREVIEW : String(prompt).slice(0, 80);
   if (entry && turnRecord) {
     // 记下本请求的应答(只有改写过的回合才记;见上方命中处)
     const sendJson = res.json.bind(res);
@@ -2196,7 +2200,7 @@ async function handleChatPost(req, res) {
       if (s.startupTimer) { clearTimeout(s.startupTimer); s.startupTimer = null; }
       s.turnSawLine = true;
       s.startTimedOut = false;
-      s.promptPreview = String(turnPrompt).slice(0, 80);
+      s.promptPreview = turnPreview;
       s.guiMode = chosenMode;
       s.permissionMode = chosenMode;
       // r151a:服务端门控降级 —— 复用的进程不会再发 init,降级信号在本回合开头直接补发。
@@ -2294,7 +2298,7 @@ async function handleChatPost(req, res) {
     // R8-4:进程内当前生效模型(spawn 时=options.model 实际值;复用路径 setModel 成功后
     // 更新)。compatKey 已不含 model,复用对账全靠它。
     currentModel: model,
-    promptPreview: String(turnPrompt).slice(0, 80),
+    promptPreview: turnPreview,
     permissionMode: permissionMode || 'default',
     guiMode: chosenMode,
     autoDowngrade: autoGate.downgraded,   // r151a:服务端门控降级,init 到达时补发一条带 reason 的 mode_mismatch

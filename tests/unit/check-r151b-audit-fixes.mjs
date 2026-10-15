@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync, rmSync, readdirSync, existsSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import net from 'node:net';
 import { registerR151bSdkStub } from './helpers/r151b-sdk-stub.mjs';
 
 const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'cgui-r151b-audit-')));
@@ -34,6 +35,40 @@ function within(ms, fn, what) {
   const dt = performance.now() - t0;
   ok(dt < ms, `${what}:耗时 ${dt.toFixed(1)}ms,应 < ${ms}ms`);
   return v;
+}
+
+// 后几节共用的 HTTP 夹具(第一次用到时才起):chat、xsession、sessions 三组路由与 index.js 同样挂在 /api 下。
+let http = null;
+async function api(method, path, body) {
+  if (!http) {
+    const { default: express } = await import('express');
+    const { default: xsRoutes, xsessionBodyErrorHandler } = await import('../../server/routes/xsession.js');
+    const { default: sessionRoutes } = await import('../../server/routes/sessions.js');
+    const app = express();
+    app.use(express.json());
+    for (const r of [chat.default, xsRoutes, sessionRoutes]) app.use('/api', r);
+    app.use('/api', xsessionBodyErrorHandler);
+    let port = 0;
+    for (let p = 6990; p >= 6900 && !port; p -= 1) {
+      if (p === 6710) continue;
+      if (await new Promise((r) => { const t = net.createServer().once('error', () => r(false)).once('listening', () => t.close(() => r(true))).listen(p, '127.0.0.1'); })) port = p;
+    }
+    if (!port) throw new Error('6900–6990 没有空闲端口');
+    const server = await new Promise((r) => { const t = app.listen(port, '127.0.0.1', () => r(t)); });
+    http = { port, server };
+  }
+  const init = { method, headers: { 'content-type': 'application/json' } };
+  if (body !== undefined) init.body = typeof body === 'string' ? body : JSON.stringify(body);
+  const r = await fetch(`http://127.0.0.1:${http.port}/api${path}`, init);
+  const text = await r.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* 非 JSON */ }
+  return { status: r.status, body: json, text };
+}
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, what, ms = 8000) {
+  for (const t = Date.now(); Date.now() - t < ms;) { const v = await pred(); if (v) return v; await sleepMs(20); }
+  throw new Error(`等不到:${what}`);
 }
 
 const A = 'aaaaaaaa-0000-4000-8000-000000000001';
@@ -277,8 +312,34 @@ try {
     eq(brief().slice(5), [['start', 4, 4, null, null, 'sdk-j3']], '上一回合已报过结束 → 不再补报');
     unhook();
   }
+
+  // ── S8 + 判官建议 7:入口钩子改写过的回合,进程预览用固定文字"（跨会话消息）",不带信封与正文 ────────────────────
+  {
+    const ENVELOPE = '<cross-session-message from="gui:user" from-name="用户">\nR151B-机密正文-不该进预览\n</cross-session-message>';
+    let rewrite = true;
+    const unhook = chat.registerSessionRuntimeHooks({ chatEntry: () => (rewrite ? { prompt: ENVELOPE, tag: { r151b: 'preview' } } : null) });
+    const previewOf = (pid) => chat.getActiveChatProcesses().find((p) => p.pid === pid)?.promptPreview;
+    const idleOf = (pid) => chat.getActiveChatProcesses().find((p) => p.pid === pid && p.idle);
+    const BODY = (extra) => ({ prompt: '（跨会话消息）', cwd: WORK, model: 'r151b-model', permissionMode: 'default', keepAlive: true, ...extra });
+    let r = await api('POST', '/chat', BODY({}));
+    eq(r.status, 200, '改写回合(冷启)起来了');
+    const pid = r.body.pid;
+    eq(previewOf(pid), '（跨会话消息）', '冷启:进程预览是固定文字');
+    const sid = (await waitFor(() => idleOf(pid), '冷启回合收尾')).sessionId;
+    r = await api('POST', '/chat', BODY({ sessionId: sid }));
+    eq([r.status, r.body.reused, r.body.pid], [200, true, pid], '改写回合复用空闲进程');
+    eq(previewOf(pid), '（跨会话消息）', '复用:进程预览是固定文字');
+    ok(!JSON.stringify(chat.getActiveChatProcesses()).includes('R151B-机密正文'), '进程列表里任何字段都不带正文');
+    await waitFor(() => idleOf(pid), '复用回合收尾');
+    rewrite = false;
+    r = await api('POST', '/chat', BODY({ sessionId: sid, prompt: '普通提问 R151B-plain' }));
+    eq([r.body.reused, previewOf(pid)], [true, '普通提问 R151B-plain'], '没改写的回合照旧取提问原文');
+    await waitFor(() => idleOf(pid), '普通回合收尾');
+    unhook();
+  }
 } finally {
   try { await chat.closeAllPersistentProcesses(); } catch {}
+  http?.server.close();
   rmSync(TMP, { recursive: true, force: true });
 }
 console.log(`check-r151b-audit-fixes: ${passed} 项通过`);
