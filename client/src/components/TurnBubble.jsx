@@ -33,6 +33,7 @@ import {
 import { Linkify } from '../utils/linkify.jsx';
 import { ToolResultImages } from './tools/ToolResultImages.jsx';
 import { usePricingVersion } from '../hooks/usePricingVersion.js';
+import { XsForwardButton } from './XsForwardDialog.jsx';
 
 // Tools that get their own bespoke inline card (rendered in chronological order
 // inside the turn). Anything not in this set falls through to ToolCallsGroup,
@@ -1029,6 +1030,8 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
               </button>
             )}
             <CopyButton text={fullText} />
+            {/* r151b 跨会话消息:转发按钮。总开关关着 / 流式中的临时回复(没有会话 id)时不渲染任何东西 */}
+            <XsForwardButton text={fullText} sessionId={turn.sessionId} bubbleRef={bubbleRef} />
             {onFork && (
               <button
                 onClick={() => onFork(turn.uuid)}

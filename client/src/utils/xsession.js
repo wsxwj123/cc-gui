@@ -37,9 +37,15 @@ export const useXsStore = create(() => ({
 }));
 
 // ── 接口调用(不抛错;网络失败 status 为 0) ─────────────────────────────────────
-async function xsRequest(method, url) {
+// payload 给了才带 JSON 请求体;不给时请求与原来逐字相同(只有 method)。
+async function xsRequest(method, url, payload) {
   try {
-    const res = await fetch(url, { method });
+    const init = { method };
+    if (payload !== undefined) {
+      init.headers = { 'Content-Type': 'application/json' };
+      init.body = JSON.stringify(payload);
+    }
+    const res = await fetch(url, init);
     let body = null;
     try { body = await res.json(); } catch { body = null; }
     return { ok: res.ok, status: res.status, body };
@@ -346,6 +352,53 @@ export function xsClaimNotSent(xsClaim, reply) {
   }
   const err = reply && typeof reply.error === 'string' && reply.error ? reply.error : '发送失败';
   return `跨会话消息没有发出：${err}。卡片已按最新状态刷新。`;
+}
+
+// ── 转发(对话框 XsForwardDialog 只调这里) ────────────────────────────────────────
+export const XS_BODY_MAX_BYTES = 32768; // 正文 UTF-8 上限(X.3.5 固定值,与服务端判 XS_BODY_TOO_LARGE 同一口径)
+export const XS_MAX_TARGETS = 8; // 单次转发的目标上限(同上,XS_TOO_MANY_TARGETS)
+let utf8Encoder = null;
+/** 正文的 UTF-8 字节数。孤立代理项按 3 字节计(编码成 U+FFFD),与服务端 Buffer.byteLength 一致。 */
+export function xsUtf8Bytes(s) {
+  if (typeof s !== 'string' || !s) return 0;
+  if (!utf8Encoder) utf8Encoder = new TextEncoder();
+  return utf8Encoder.encode(s).length;
+}
+
+/**
+ * 转发对话框的目标列表:GET /api/xsession/sessions(按最近活动倒序,默认条数)。exclude = 来源会话,列表不含它;
+ * query 为空时不带。返回 { ok:true, sessions } / { ok:false, error }。
+ */
+export async function listXsTargets({ query, exclude } = {}) {
+  const qs = new URLSearchParams();
+  const q = typeof query === 'string' ? query.trim().slice(0, 100) : ''; // 接口上限 100 字,超了整次 400
+  if (q) qs.set('query', q);
+  if (isXsId(exclude)) qs.set('exclude', exclude);
+  const search = qs.toString();
+  const r = await xsRequest('GET', `/api/xsession/sessions${search ? `?${search}` : ''}`);
+  if (isDisabledReply(r)) applyEnabled(false);
+  if (!r.ok || !r.body || !Array.isArray(r.body.sessions)) return { ok: false, error: replyError(r, '未能读取会话列表') };
+  return { ok: true, sessions: r.body.sessions.filter((s) => s && isXsId(s.sessionId) && s.sessionId !== exclude) };
+}
+
+/**
+ * 手动转发:POST /api/xsession/messages(一律落成卡片,没有"立即处理")。fromSessionId 不是会话 id 时请求体里
+ * 不带这个键(传 null 会被拒为 400)。返回 { ok:true, messages } / { ok:false, code, error, targets }:失败时服务端
+ * 整次拒绝、一条没发;targets 是 XS_TARGET_NOT_FOUND / XS_INBOX_FULL 附带的出错目标。
+ */
+export async function forwardXsMessage({ to, body, fromSessionId }) {
+  const payload = { to: [...new Set(Array.isArray(to) ? to : [])], body: typeof body === 'string' ? body : '' };
+  if (isXsId(fromSessionId)) payload.fromSessionId = fromSessionId;
+  const r = await xsRequest('POST', '/api/xsession/messages', payload);
+  if (r.ok && r.body && r.body.ok === true && Array.isArray(r.body.messages)) return { ok: true, messages: r.body.messages };
+  if (isDisabledReply(r)) applyEnabled(false);
+  const b = r.body && typeof r.body === 'object' ? r.body : {};
+  return {
+    ok: false,
+    code: typeof b.code === 'string' ? b.code : '',
+    error: replyError(r, r.status === 0 ? '网络错误，未能发送' : '发送失败'),
+    targets: Array.isArray(b.targets) ? b.targets.filter(isXsId) : [],
+  };
 }
 
 // ── 卡片文案 ─────────────────────────────────────────────────────────────────────
