@@ -31,6 +31,9 @@ export const useXsStore = create(() => ({
   enabled: false,
   // GET config 的 nativeGuard.lastFailureAt(ISO 字符串或 null):设置块的引导失效提示用,不随总开关清空
   guardFailureAt: null,
+  // GET config 的 stored.unfinished:收件箱里还没结束的消息条数。总开关关着且 > 0 时设置块显示残留提示与【清空】;
+  // 不随总开关清空(它正是"关着时还剩多少")
+  storedUnfinished: 0,
   pendingTotal: 0,
   pendingBySession: EMPTY_MAP, // { [sessionId]: 待处理条数 }
   pendingByProject: EMPTY_MAP, // { [项目目录(去尾部分隔符)]: 待处理条数 }
@@ -78,6 +81,9 @@ export async function loadXsConfig() {
   const guard = r.body.nativeGuard;
   const failureAt = guard && typeof guard.lastFailureAt === 'string' && guard.lastFailureAt ? guard.lastFailureAt : null;
   if (useXsStore.getState().guardFailureAt !== failureAt) useXsStore.setState({ guardFailureAt: failureAt });
+  const n = r.body.stored && r.body.stored.unfinished;
+  const unfinished = Number.isInteger(n) && n > 0 ? n : 0;
+  if (useXsStore.getState().storedUnfinished !== unfinished) useXsStore.setState({ storedUnfinished: unfinished });
   const was = useXsStore.getState().enabled;
   applyEnabled(r.body.enabled);
   if (r.body.enabled && was) {
@@ -91,9 +97,24 @@ export async function setXsEnabled(on) {
   const r = await xsRequest('PUT', '/api/xsession/config', { enabled: on === true });
   if (r.ok && r.body && typeof r.body.enabled === 'boolean') {
     applyEnabled(r.body.enabled);
+    if (!r.body.enabled) await loadXsConfig(); // 关着时设置块要显示残留条数(stored 只在 GET config 里有)
     return { ok: true };
   }
   return { ok: false, error: replyError(r, r.status === 0 ? '网络错误，未能保存' : '保存失败，请重试') };
+}
+
+/**
+ * 设置块的【清空】(总开关关着、还有未结束的消息时):POST /api/xsession/clear。服务端不广播,成功后本地条数先置 0
+ * 再重取 config 对账。返回 { ok:true } / { ok:false, error }(error 为服务端返回的 error,显示在设置块里)。
+ */
+export async function clearXsStored() {
+  const r = await xsRequest('POST', '/api/xsession/clear');
+  if (r.ok && r.body && r.body.ok === true) {
+    useXsStore.setState({ storedUnfinished: 0 });
+    await loadXsConfig();
+    return { ok: true };
+  }
+  return { ok: false, error: replyError(r, r.status === 0 ? '网络错误，未能清空' : '清空失败，请重试') };
 }
 
 // ── 待处理计数 ───────────────────────────────────────────────────────────────────
@@ -231,7 +252,10 @@ function mergeXsMessage(m) {
 export function handleXsWsEvent(data) {
   if (!data || typeof data !== 'object') return;
   if (data.type === 'xs:config') {
-    if (typeof data.enabled === 'boolean') applyEnabled(data.enabled);
+    if (typeof data.enabled === 'boolean') {
+      applyEnabled(data.enabled);
+      if (!data.enabled) void loadXsConfig(); // 别处关了开关:取一次残留条数(设置块的提示)
+    }
     return;
   }
   if (data.type === 'xs:message') mergeXsMessage(data.message);
@@ -590,6 +614,7 @@ export function placeAnchoredPeers(list, chat) {
 // ── 订阅(选择器的默认值都是模块级常量:返回新引用会触发 React #185 整页白屏) ─────────────
 export const useXsEnabled = () => useXsStore((s) => s.enabled);
 export const useXsGuardFailureAt = () => useXsStore((s) => s.guardFailureAt);
+export const useXsStoredUnfinished = () => useXsStore((s) => s.storedUnfinished);
 export const useXsInbox = (sid) => useXsStore((s) => (s.enabled && sid && s.inbox[sid]) || EMPTY_LIST);
 export const useXsBusy = (id) => useXsStore((s) => !!(id && s.busy[id]));
 /** 这条消息的"处理"是否已排在前端队列里(选择器返回布尔,引用稳定)。 */

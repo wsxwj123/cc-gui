@@ -183,6 +183,29 @@ routes['GET /api/xsession/messages'] = (u) => ({ status: 200, body: { messages: 
   console.log('✓ 关开关:状态清空');
 }
 
+// ── 6b. 行为清单第 26 条:关着时取残留条数;【清空】失败给服务端 error、成功置 0 并重取 config(服务端不广播) ──
+{
+  const cfg = (unfinished) => () => ({ status: 200, body: { enabled: false, limits: { bodyBytes: 32768, pendingPerSession: 50 }, nativeGuard: { lastFailureAt: null }, stored: { unfinished } } });
+  routes['GET /api/xsession/config'] = cfg(2);
+  xs.handleXsWsEvent({ type: 'xs:config', enabled: false }); // 别处关了开关
+  await settle();
+  assert.equal(useXsStore.getState().storedUnfinished, 2, '关着时重取 config 拿到残留条数');
+  assert.equal(useXsStore.getState().enabled, false);
+  routes['POST /api/xsession/clear'] = () => ({ status: 500, body: { ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' } });
+  assert.deepEqual(await xs.clearXsStored(), { ok: false, error: '保存失败，请重试' }, '失败:返回服务端 error');
+  assert.equal(useXsStore.getState().storedUnfinished, 2, '失败时条数不变');
+  routes['POST /api/xsession/clear'] = () => ({ status: 200, body: { ok: true, removed: 3 } });
+  routes['GET /api/xsession/config'] = cfg(0);
+  const gets = count('GET /api/xsession/config');
+  assert.deepEqual(await xs.clearXsStored(), { ok: true });
+  assert.equal(useXsStore.getState().storedUnfinished, 0, '成功后条数为 0(提示与按钮消失)');
+  assert.ok(count('GET /api/xsession/config') > gets, '成功后重取 config');
+  routes['GET /api/xsession/config'] = () => ({ status: 200, body: { enabled: false, nativeGuard: { lastFailureAt: null } } });
+  await xs.loadXsConfig();
+  assert.equal(useXsStore.getState().storedUnfinished, 0, '应答没有 stored 时按 0');
+  console.log('✓ 第 26 条:关着时取残留条数;清空失败给 error、成功置 0 并重取');
+}
+
 // ── 7. Dock 角标合并规则:角标 = 改动前的计数 + 跨会话待处理条数;标题只看改动前的计数 ─────────────
 {
   resetBadgeState();

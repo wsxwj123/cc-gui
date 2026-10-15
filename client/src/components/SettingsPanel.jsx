@@ -6,7 +6,7 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { desktopNotifyEnabled, NOTIFY_PREF_KEY } from '../utils/desktopNotify.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
-import { useXsEnabled, useXsGuardFailureAt, loadXsConfig, setXsEnabled } from '../utils/xsession.js';
+import { useXsEnabled, useXsGuardFailureAt, useXsStoredUnfinished, loadXsConfig, setXsEnabled, clearXsStored } from '../utils/xsession.js';
 import EnvCheckPanel from './EnvCheckPanel.jsx';
 import { isImeReactKeydown } from '../utils/imeGuard.js';
 // R44:进程管理入口自坞 rail 收进本面板(高级 tab 内嵌),复用同一组件、不复制。
@@ -2784,6 +2784,9 @@ function fmtXsGuardTime(iso) {
 function XsessionSettingsSection() {
   const enabled = useXsEnabled();
   const guardFailureAt = useXsGuardFailureAt();
+  const unfinished = useXsStoredUnfinished();
+  // 总开关关着时收件箱里还有没结束的消息:提示条数并给【清空】(开着时在卡片上逐条处理)
+  const showResidual = !enabled && unfinished > 0;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   // 打开设置页时取一次:除总开关外还要 nativeGuard.lastFailureAt(WS xs:config 不带它)
@@ -2793,6 +2796,15 @@ function XsessionSettingsSection() {
     setBusy(true);
     setErr('');
     const r = await setXsEnabled(!enabled);
+    if (!r.ok) setErr(r.error);
+    setBusy(false);
+  };
+  const clearResidual = async () => {
+    if (busy) return;
+    if (!(await confirmDialog('清空后，这些消息和它们的正文都会删除，无法恢复。', { danger: true, confirmText: '清空', cancelText: '取消' }))) return;
+    setBusy(true);
+    setErr('');
+    const r = await clearXsStored();
     if (!r.ok) setErr(r.error);
     setBusy(false);
   };
@@ -2809,8 +2821,17 @@ function XsessionSettingsSection() {
           <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${enabled ? 'left-[18px]' : 'left-0.5'}`} />
         </button>
       </div>
-      {(guardFailureAt || err) && (
+      {(guardFailureAt || err || showResidual) && (
         <div className="px-3 pb-2.5 space-y-1">
+          {showResidual && (
+            <div className="flex items-center gap-2">
+              <div data-testid="xsession-residual" className="flex-1 min-w-0 text-[10.5px] text-ink-muted font-body">{`仍有 ${unfinished} 条跨会话消息未处理。`}</div>
+              <button data-testid="xsession-clear" onClick={clearResidual} disabled={busy}
+                className="shrink-0 px-2 py-0.5 rounded-md border border-canvas-deep text-[11px] text-ink-muted font-body hover:border-error/40 hover:text-error transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                清空
+              </button>
+            </div>
+          )}
           {guardFailureAt && (
             <div data-testid="xsession-guard-warning" className="text-[10.5px] text-amber-700 font-body">
               {`最近一次未能检查 CLI 原生消息的目标（${fmtXsGuardTime(guardFailureAt)}），GUI 会话之间的原生消息可能未被引导。`}
