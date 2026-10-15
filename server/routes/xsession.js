@@ -3,8 +3,12 @@
 import { Router } from 'express';
 import { broadcast } from '../broadcast.js';
 import { isAuthorized } from '../services/auth.js';
-import { readXsEnabledSync, updatePrefs } from './prefs.js';
-import { XS_LIMITS } from '../services/xsession-store.js';
+import { loadPrefs, readXsEnabledSync, updatePrefs } from './prefs.js';
+import { getActiveChatProcesses } from './chat.js';
+import { listProjects, listSessions, isSessionIdShape } from '../services/session-reader.js';
+import { XS_LIMITS, pendingCountsBySession } from '../services/xsession-store.js';
+import { assignShortIds, selectXsSessions } from '../services/xsession-resolve.js';
+import { resolveSessionTitle } from '../utils/session-title.js';
 
 const router = Router();
 
@@ -56,6 +60,103 @@ router.put('/xsession/config', async (req, res) => {
   }
   broadcast({ type: 'xs:config', enabled });
   res.json({ ok: true, enabled });
+});
+
+// ── GET /api/xsession/sessions?query=&limit=&exclude=&ids= ─────────────────────────────────────
+// 转发对话框的目标列表,也用来查单个会话。
+
+const UNTITLED = '未命名会话';
+const DEFAULT_LIMIT = 30;
+const dirNameOf = (p) => String(p || '').split(/[/\\]/).filter(Boolean).pop() || String(p || '');
+const strOrEmpty = (v) => (typeof v === 'string' ? v : '');
+
+// 所有项目里已落盘的会话。认定口径与侧栏会话列表相同,直接复用它的两层:listProjects(滤掉 /tmp、已删目录、
+// ~/.claude 内部目录)+ listSessions(滤掉没有用户提问的文件、子代理记录、空壳,compact 续段折成一条)。不另写过滤。
+// projectDir 取项目条目的路径(侧栏按它分组),不取会话行里可能是有损解码的 projectPath。
+async function listAllSessions() {
+  let projects;
+  try { projects = await listProjects(); } catch (e) {
+    if (e?.code === 'ENOENT') return []; // 还没有任何会话(~/.claude/projects 不存在)
+    throw e;
+  }
+  const out = [];
+  for (const p of projects) {
+    let sessions;
+    try { sessions = await listSessions(p.hash); } catch { continue; } // 单个项目读不了不连累整张表
+    for (const s of sessions) out.push({ ...s, projectDir: p.path });
+  }
+  return out;
+}
+
+// running(有回合在跑)/ idle(有常驻进程、没在跑)/ stopped(没有进程)。进程收尾后槽还会在表里留一会儿(exitCode 已置),不算。
+function runtimeStates() {
+  const states = new Map();
+  for (const p of getActiveChatProcesses()) {
+    if (!p.sessionId || p.exitCode !== null) continue;
+    if (states.get(p.sessionId) !== 'running') states.set(p.sessionId, p.idle ? 'idle' : 'running');
+  }
+  return states;
+}
+
+// 查询参数校验:不合规 → 返回错误文案;合规 → 返回解析结果。
+function parseSessionsQuery(q) {
+  const out = { query: '', limit: DEFAULT_LIMIT, exclude: null, ids: null };
+  if (q.query !== undefined) {
+    if (typeof q.query !== 'string' || [...q.query].length > 100) return { error: 'query 须为不超过 100 字的字符串' };
+    out.query = q.query;
+  }
+  if (q.limit !== undefined) {
+    const n = typeof q.limit === 'string' && /^[0-9]+$/.test(q.limit) ? Number(q.limit) : NaN;
+    if (!(n >= 1 && n <= 100)) return { error: 'limit 须为 1–100 的整数' };
+    out.limit = n;
+  }
+  if (q.exclude !== undefined) {
+    if (typeof q.exclude !== 'string' || !isSessionIdShape(q.exclude)) return { error: 'exclude 须为一个会话 id' };
+    out.exclude = q.exclude;
+  }
+  if (q.ids !== undefined) {
+    const parts = typeof q.ids === 'string' ? q.ids.split(',') : null;
+    if (!parts || parts.length > 50 || !parts.every((id) => isSessionIdShape(id))) return { error: 'ids 须为逗号分隔的会话 id，最多 50 个' };
+    out.ids = parts;
+  }
+  return out;
+}
+
+router.get('/xsession/sessions', async (req, res) => {
+  const opts = parseSessionsQuery(req.query || {});
+  if (opts.error) return xsError(res, 400, 'XS_INVALID_INPUT', opts.error);
+  let all; let prefs; let pending;
+  try {
+    [all, prefs, pending] = await Promise.all([listAllSessions(), loadPrefs(), pendingCountsBySession()]);
+  } catch {
+    return xsError(res, 500, 'XS_LIST_FAILED', '读取会话列表失败');
+  }
+  const customTitles = prefs?.customTitles && typeof prefs.customTitles === 'object' ? prefs.customTitles : {};
+  const autoTitles = prefs?.autoTitles && typeof prefs.autoTitles === 'object' ? prefs.autoTitles : {};
+  const states = runtimeStates();
+  const timeOf = (s) => { const t = Date.parse(s.lastActivity); return Number.isFinite(t) ? t : 0; };
+  // 按最近活动倒序;同一个 id 出现在两个项目目录里时只留最近的那条
+  all.sort((a, b) => timeOf(b) - timeOf(a) || (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0));
+  const seen = new Set();
+  const rows = [];
+  for (const s of all) {
+    const key = s.sessionId.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const t = timeOf(s);
+    rows.push({
+      sessionId: s.sessionId,
+      title: resolveSessionTitle(s, strOrEmpty(customTitles[s.sessionId]), strOrEmpty(autoTitles[s.sessionId])) || UNTITLED,
+      project: dirNameOf(s.projectDir),
+      state: states.get(s.sessionId) || 'stopped',
+      pending: pending.get(s.sessionId) || 0,
+      lastActivity: t ? new Date(t).toISOString() : (s.lastActivity || null),
+    });
+  }
+  const shortIds = assignShortIds(rows.map((r) => r.sessionId)); // 冲突按全部会话判,筛选之前算
+  const sessions = selectXsSessions(rows.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), opts)
+    .map(({ sessionId, shortId, title, project, state, pending: n, lastActivity }) => ({ sessionId, shortId, title, project, state, pending: n, lastActivity }));
+  res.json({ sessions });
 });
 
 // index.js 的全局 JSON 解析器在路由之前跑:请求体不是 JSON、或是 "on" / null 这类非对象时直接进错误链,到不了上面的
