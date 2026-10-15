@@ -568,6 +568,8 @@ export function getActiveChatProcesses() {
       cronHold: slot.cronHoldUntil > Date.now(),
       // r151c:回合正在跑(判据同 findBusySlot)、界面档位、回合代数、在飞后台任务数(跨会话自动处理的调度与判定用)
       busy: !slot.idle && !slot.closing && !slot.pumpEnded && slot.exitCode === null && !!slot.input,
+      // r151c:回合结果已出、只差输入预测(此时 busy 仍为 true;跨会话判定按空闲算,投递等它收尾再起)
+      awaitingSuggestion: !!slot.awaitingSuggestion,
       guiMode: slot.guiMode || null,
       turnEpoch: slot.turnEpoch | 0,
       liveTasks: slot.liveTasks instanceof Map ? slot.liveTasks.size : 0,
@@ -2639,7 +2641,8 @@ async function handleChatPost(req, res) {
   let closeTimer = null;
   let closeDelayMs = 0; // 本回合 result 分支算出的关流延迟,收摊重武装时复用同一窗口
   let lastResultLine = null;
-  const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
+  // r151c:slot.awaitingSuggestion = 本回合结果已出、收尾窗只为等输入预测(result 分支置上);收尾窗一撤(续跑 / 收尾 / 泵结束)即清
+  const cancelClose = () => { slot.awaitingSuggestion = false; if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
   const finalize = () => {
     cancelClose();
     // R13:本回合到此结束 —— 让等待该回合落地的停止入口拿到真实终态(被停 → stopped,
@@ -2902,6 +2905,8 @@ async function handleChatPost(req, res) {
           closeDelayMs = delay;
           if (delay) { cancelClose(); closeTimer = setTimeout(() => finalize(), delay); }
           else finalize();
+          // r151c:收尾窗只为等输入预测(不是子代理去抖窗)→ 跨会话判定把本会话当空闲(只读标记,不改收尾时序)
+          if (delay && suggestOn && !slot.turnSubagentSeen) slot.awaitingSuggestion = true;
         } else if (m.type === 'prompt_suggestion') {
           // 建议是本回合最后一条消息:result 已到(closeTimer 在挂)就立即收尾,
           // 不能走下面的 cancelClose 分支——那会把关闭取消掉、进程挂死等不到下一条。

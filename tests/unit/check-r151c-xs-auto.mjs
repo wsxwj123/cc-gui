@@ -192,8 +192,8 @@ try {
   await waitStatus(q4.id, 'done');
   const proc4 = ws.find((e) => e.type === 'xs:message' && e.message.id === q4.id && e.message.status === 'processing');
   ok(proc4 && proc4.at - t0 >= 1500, `回合结束后满 1.5 秒才开始处理(实际 ${proc4 && proc4.at - t0}ms)`);
-  const open4b = gate('GATE-T4B');
-  await userTurn(T4, 'bypassPermissions', { prompt: 'GATE-T4B 又一个长回合' });
+  const open4b = gate('GATE-X4B');
+  await userTurn(T4, 'bypassPermissions', { prompt: 'GATE-X4B 又一个长回合' });
   await waitFor(() => slotOf(T4)?.busy, 'T4 又忙');
   r = await send(sS, [T4], 'R151C 排队后改回 card');
   const q4b = (await fromSession(T4)()).find((m) => m.status === 'queued');
@@ -357,6 +357,29 @@ try {
   for (const [label, b] of [['autoPaused:true', { autoPaused: true }], ['未知键', { autoPaused: false, x: 1 }], ['空对象', {}], ['enabled 非布尔', { enabled: 'true' }]]) {
     eq((await api('PUT', '/xsession/config', b)).status, 400, `PUT config ${label} → 400`);
   }
+
+  // ── ⑨ 派工 4b 补充约定 ──
+  // 1) 回合结果已出、只差输入预测(替身不发 prompt_suggestion → 4 秒收尾窗)→ 按空闲判 auto;投递等收尾再起,不退回排队
+  const SX = mk('发送方 SX');
+  await userTurn(SX);
+  await waitIdle(SX);
+  const sX = senderOf(SX, 'bypassPermissions');
+  const TS = mk('目标 TS 只差输入预测');
+  await profiled(TS);
+  await setInbound([TS]);
+  await userTurn(TS, 'bypassPermissions', { promptSuggestions: true });
+  await waitFor(() => slotOf(TS)?.awaitingSuggestion, 'TS 结果已出、在等输入预测');
+  eq(slotOf(TS).busy, true, '前置:只差输入预测时槽仍是 busy(findBusySlot 判据不变)');
+  const wsTS = ws.length;
+  const rTS = await send(sX, [TS], 'R151C 只差输入预测');
+  eq(rTS.results.map((x) => [x.delivery, x.note]), [['auto', NOTE.auto]], '只差输入预测 → 按空闲判:delivery auto');
+  const [mTS] = await fromSession(TS)();
+  await waitStatus(mTS.id, 'processing', 3000);
+  ok(slotOf(TS)?.awaitingSuggestion, '消息已 processing 时输入预测的收尾窗仍在(没被中止,回合等它收尾再起)');
+  await waitStatus(mTS.id, 'done', 15_000);
+  const seqTS = ws.slice(wsTS).filter((e) => e.type === 'xs:message' && e.message?.id === mTS.id).map((e) => e.message.status);
+  ok(seqTS.includes('processing') && !seqTS.slice(seqTS.indexOf('processing')).includes('queued'), `开始处理后没有退回排队(没回"会话正忙"):${seqTS.join('→')}`);
+  ok(ws.some((e) => e.type === 'xs:turn' && e.messageId === mTS.id), '收尾后起了回合(xs:turn)');
 
   console.log(`PASS check-r151c-xs-auto(${checks} 项)`);
 } finally {

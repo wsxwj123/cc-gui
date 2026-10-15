@@ -732,10 +732,24 @@ function dropInflight(id, key) {
 }
 
 // 目标忙:有正在跑的回合(判据同 findBusySlot)、或有已兑换 / 已投递还没结算的消息;调度投递时另把"刚转空闲、没满 1.5 秒"算作忙。
+// 回合结果已出、只差输入预测(补充约定"回合结果出来就算结束")不算在跑:那个槽、以及回合已开始的那条消息都不算忙;
+// 还没起回合的消息(含等预测收尾再起的)照样算忙,一个会话一次只投一条。
 function targetBusy(sessionId, includeSettling) {
   if (includeSettling && scheduler.settling(sessionId)) return true;
-  for (const f of inflight.values()) if (sameId(f.sessionId, sessionId)) return true;
-  return getActiveChatProcesses().some((p) => sameId(p.sessionId, sessionId) && p.busy);
+  const procs = getActiveChatProcesses().filter((p) => sameId(p.sessionId, sessionId));
+  const resultOut = procs.some((p) => p.busy && p.awaitingSuggestion);
+  for (const f of inflight.values()) if (sameId(f.sessionId, sessionId) && !(resultOut && f.started)) return true;
+  return procs.some((p) => p.busy && !p.awaitingSuggestion);
+}
+// 目标只差输入预测(SDK 在结果之后另生成下一步输入预测,收尾窗最长约 4 秒)时等它收尾再起回合:不中止预测,
+// 也不让内部入口因此回"会话正忙"。按轮次计时(不看墙上时间);等不到(续跑了 / 超时)照常起,真忙由 409 退回排队。
+const SUGGEST_SETTLE_POLL_MS = 100;
+const SUGGEST_SETTLE_MAX_POLLS = 100;
+const awaitingSuggestion = (sessionId) => getActiveChatProcesses().some((p) => sameId(p.sessionId, sessionId) && p.busy && p.awaitingSuggestion);
+async function waitSuggestionSettled(sessionId) {
+  for (let i = 0; i < SUGGEST_SETTLE_MAX_POLLS && awaitingSuggestion(sessionId); i += 1) {
+    await new Promise((r) => setTimeout(r, SUGGEST_SETTLE_POLL_MS));
+  }
 }
 // 卡住:有一条自动处理的消息开始处理超过 30 分钟仍未结算(按此刻的 Date.now() 判)。
 function targetStuck(sessionId) {
@@ -1085,9 +1099,13 @@ function launchAuto(pick, key, budgetStamp) {
   });
   // 重放档案:去掉值为 null 的键,档位用判定时的同一读数
   const body = { ...Object.fromEntries(Object.entries(replay).filter(([, v]) => v !== null)), sessionId, prompt: AUTO_PLACEHOLDER_PROMPT, permissionMode: targetMode };
-  let call;
-  try { call = startInternalTurn(body, { kind: 'xs-auto', messageId: m.id, key }); } catch (e) { call = Promise.reject(e); }
-  call.then((res) => onAutoResponse(m.id, key, res), (e) => onAutoResponse(m.id, key, { status: 0, body: { error: e?.message || String(e) } }));
+  const begin = () => {
+    let call;
+    try { call = startInternalTurn(body, { kind: 'xs-auto', messageId: m.id, key }); } catch (e) { call = Promise.reject(e); }
+    call.then((res) => onAutoResponse(m.id, key, res), (e) => onAutoResponse(m.id, key, { status: 0, body: { error: e?.message || String(e) } }));
+  };
+  if (awaitingSuggestion(sessionId)) waitSuggestionSettled(sessionId).then(begin);
+  else begin();
 }
 
 // 内部入口应答里的原因 → 给人看的一行(脱敏、≤200 字);200 为 null。
