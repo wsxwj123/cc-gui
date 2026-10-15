@@ -93,7 +93,7 @@ test('X22 设置页「会话」分区:xsession-settings-section(搜"跨会话消
   await expect(toggle).toHaveAttribute('aria-checked', 'false', { timeout: 10_000 });
   await expect.poll(async () => (await api.config()).body.enabled).toBe(false);
 
-  const search = page.locator('[data-cgui="panel-dock"] input[type="search"], [data-cgui="panel-dock"] input[placeholder*="搜索"]').first();
+  const search = page.locator('input[data-testid="settings-search"], [data-testid="settings-search"] input').first();
   await expect(search, '设置页有搜索框').toBeVisible({ timeout: 5_000 });
   await search.fill('跨会话消息');
   await expect(page.locator('#set-xsession'), '搜"跨会话消息"能找到这个块').toBeVisible({ timeout: 10_000 });
