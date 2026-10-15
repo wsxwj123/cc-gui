@@ -40,6 +40,23 @@ const guardedBefore = (branchAnchor, sink) => {
   }
   assert.fail(`${sink} 不在 if (paneStillOn(…)) 守住的块里`);
 };
+// r151c 先修 2 把 1M 被拒、auto 档回退两支的提示文字提成了常量(_notice1m / _noticeAuto,同一句还交给 retryLater
+// 保留)。源码锚跟到常量:提示语句仍须被 if (paneStillOn(…)) 守住(guardedBefore),常量在同一支路里、弹提示之前定义,
+// 值与原来那句逐字相同。
+/** 支路里先有 const <name> = '<原文>';,之后才 setProviderSwitchNotice({ text: <name> })。 */
+const noticeConst = (branchAnchor, name, text) => {
+  const start = app.indexOf(branchAnchor);
+  assert.ok(start > 0, `找不到支路:${branchAnchor}`);
+  const decl = `const ${name} = '${text}';`;
+  const at = app.indexOf(decl, start);
+  assert.ok(at > start && at - start < 3000, `支路里找不到 ${decl}`);
+  const use = app.indexOf(`setProviderSwitchNotice({ text: ${name} })`, start);
+  assert.ok(use > at && use - start < 3000, `${name} 要在同一支路里、弹提示条之前定义`);
+};
+const BRANCH_1M = "if (/usage credits required for 1m context|long context beta is not (yet )?available/i.test(msg) && !opts.oneMRetry && prompt) {";
+const BRANCH_AUTO = "if (useStore.getState().getPermissionModeFor(sessionQueueKey) === 'auto' && !opts.autoRetry && prompt\n              && /auto/i.test(msg)";
+const TEXT_1M = '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。';
+const TEXT_AUTO = '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。';
 
 console.log('r146b 同族支路的窗格复查');
 check('「No conversation found」:把窗格换成新 draft 之前先复查窗格', () =>
@@ -47,9 +64,11 @@ check('「No conversation found」:把窗格换成新 draft 之前先复查窗�
 check('「No conversation found」:提示条落地前复查窗格', () =>
   guardedBefore("if (/No conversation found/i.test(msg) && !opts.freshRetry && prompt) {", "setProviderSwitchNotice({ text: '原会话历史已失效"));
 check('1M 被拒:提示条落地前复查窗格', () =>
-  guardedBefore("if (/usage credits required for 1m context|long context beta is not (yet )?available/i.test(msg) && !opts.oneMRetry && prompt) {", "setProviderSwitchNotice({ text: '订阅未开通 1M"));
+  guardedBefore(BRANCH_1M, 'setProviderSwitchNotice({ text: _notice1m })'));
+check('1M 被拒:提示原文逐字不变(常量 _notice1m)', () => noticeConst(BRANCH_1M, '_notice1m', TEXT_1M));
 check('auto 档回退(结果报错那支):提示条落地前复查窗格', () =>
-  guardedBefore("if (useStore.getState().getPermissionModeFor(sessionQueueKey) === 'auto' && !opts.autoRetry && prompt\n              && /auto/i.test(msg)", "setProviderSwitchNotice({ text: '当前模型 / 账户不支持「自动」权限档"));
+  guardedBefore(BRANCH_AUTO, 'setProviderSwitchNotice({ text: _noticeAuto })'));
+check('auto 档回退(结果报错那支):提示原文逐字不变(常量 _noticeAuto)', () => noticeConst(BRANCH_AUTO, '_noticeAuto', TEXT_AUTO));
 
 if (failed) { console.log(`\n${failed} 项失败`); process.exit(1); }
 console.log('\n全部通过');
