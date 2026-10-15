@@ -146,7 +146,7 @@ import {
   Archive, ArchiveRestore, Trash2, EyeOff, Columns2, Smartphone, Pencil, Type, Palette,
   Menu, SquarePen, Gauge, Cpu, CheckCircle2, BookText, Sparkles, HelpCircle, Pin,
   Download, ClipboardCopy, LayoutGrid, MoreHorizontal, Star, Puzzle,
-  Image as ImageIcon, Paperclip, Send,
+  Image as ImageIcon, Paperclip, Send, CornerLeftUp,
 } from './components/Icon.jsx';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
@@ -158,7 +158,7 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
-import { startXsession, xsChatFields, xsClaimNotSent, keepLivePeer, peerFromXsEvent, peerFromResultEvent } from './utils/xsession.js';
+import { startXsession, xsChatFields, xsClaimNotSent, keepLivePeer, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
@@ -1805,6 +1805,8 @@ export const SessionItem = React.memo(function SessionItem({ session, isSelected
   // (后端已取 jsonl 最后一条 assistant 的 model 非首条;但「切了还没发新消息」时它仍是旧值)。
   // primitive selector 只订阅本条 pin,不因 setModelFor 换整个 map 引用而触发全列表重渲。
   const pinModel = useStore((s) => s.modelBySession[session.sessionId]);
+  // r151b:该会话待处理的跨会话消息条数(只数 pending;总开关关 / 0 条时为 0,不渲染徽标)
+  const xsUnread = useXsSessionPending(session.sessionId);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
   const [menuOpen, setMenuOpen] = useState(false); // r11-p3-3:⋯ 菜单(开着时操作钮保持可见)
@@ -1877,6 +1879,14 @@ export const SessionItem = React.memo(function SessionItem({ session, isSelected
             {resolveSessionTitle(session, customTitle, autoTitle) || '(空会话)'}
           </span>
           {pinned && <Pin size={9} className="text-accent fill-accent shrink-0" />}
+          {xsUnread > 0 && (
+            <span className="ml-auto shrink-0 flex items-center" title={`${xsUnread} 条跨会话消息待处理`}>
+              <span className="inline-flex items-center gap-0.5 px-1 rounded-full bg-accent/12 text-accent text-[10px] leading-4 font-body">
+                <CornerLeftUp size={9} className="shrink-0" />
+                <span data-testid="xs-unread" className="tabular-nums">{xsUnread}</span>
+              </span>
+            </span>
+          )}
         </div>
       )}
       {/* r11-p3-3(dsh 式):5 图标横排撤销,行尾只留 ⋯ 触发钮(hover/选中/菜单开时可见,

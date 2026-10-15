@@ -8,7 +8,7 @@ import { createPortal } from 'react-dom';
 import {
   Plus, Search, FolderOpen, EyeOff, Trash2, Pin, X, GitBranch, GitMerge,
   ChevronDown, ChevronRight, RefreshCw, Archive, Loader2, MoreHorizontal,
-  Check, SlidersHorizontal, GripVertical,
+  Check, SlidersHorizontal, GripVertical, CornerLeftUp,
 } from './Icon.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
@@ -28,6 +28,7 @@ import {
   adoptFork, importGitState, GitInitBanner,
 } from '../App.jsx';
 import { removeInputHistory } from '../utils/inputHistory.js';
+import { useXsProjectPendingMap, xsProjectPending } from '../utils/xsession.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
 const EMPTY_OBJECT = Object.freeze({});
@@ -159,6 +160,8 @@ function SidebarViewMenu() {
 }
 
 export function UnifiedSidebar() {
+  // r151b:各项目的跨会话待处理条数(含侧栏没列出的会话;总开关关时为空表)。项目折叠时显示在项目行上。
+  const xsProjectMap = useXsProjectPendingMap();
   // r17-4:磁盘访问被系统拒绝时,空列表要说实话 —— 静默的「暂无会话」和真的没有
   // 会话长得一模一样,用户实测的第一反应是「数据被删了」。
   // r26-E2(C-E2 契约,PKG-2 产出):错误态按 projectHash 存 ——
@@ -1278,6 +1281,7 @@ export function UnifiedSidebar() {
           const hash = project.hash;
           const isSelProj = selectedProject?.hash === hash;
           const isOpen = expandedSet.has(hash);
+          const xsProjectCount = isOpen ? 0 : xsProjectPending(xsProjectMap, project.path);
           const rawSessions = sessionsByProject[hash];
           const showArchived = archivedOpen.has(hash);
           const activeCount = Array.isArray(rawSessions) ? rawSessions.filter((s) => !s.archived).length : null;
@@ -1318,6 +1322,15 @@ export function UnifiedSidebar() {
                     <span className="text-[9px] px-1 py-0.5 bg-canvas-deep/60 text-ink-faint rounded font-mono shrink-0" title="Git worktree(独立工作树,非主仓目录)">⎇</span>
                   )}
                   {pinnedProjSet.has(hash) && <Pin size={9} className="text-accent fill-accent shrink-0" />}
+                  {/* r151b:项目折叠时汇总该项目下所有会话的待处理条数;展开时由各会话行显示 */}
+                  {xsProjectCount > 0 && (
+                    <span className="ml-auto shrink-0 flex items-center" title={`${xsProjectCount} 条跨会话消息待处理`}>
+                      <span className="inline-flex items-center gap-0.5 px-1 rounded-full bg-accent/12 text-accent text-[10px] leading-4 font-body">
+                        <CornerLeftUp size={9} className="shrink-0" />
+                        <span data-testid="xs-unread-project" className="tabular-nums">{xsProjectCount}</span>
+                      </span>
+                    </span>
+                  )}
                 </div>
                 <div className="absolute top-1/2 -translate-y-1/2 right-1 flex items-center gap-0.5">
                   {view.sortMode === 'manual' && !pinnedProjSet.has(hash) && (

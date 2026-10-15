@@ -13,6 +13,7 @@
 // 不做"收到事件就整表重拉"—— 那会让卡片在用户眼前按别的消息的事件跳变,也掩盖接口 409 的刷新路径。
 import { create } from 'zustand';
 import { useStore } from '../stores/sessionStore.js';
+import { setXsDockExtra } from './attention.js';
 
 const SID_RE = /^[0-9a-fA-F-]{36}$/; // 既有判据:36 位、只含十六进制字符与连字符(消息 id 同形)
 export const isXsId = (v) => typeof v === 'string' && SID_RE.test(v);
@@ -215,12 +216,21 @@ export function handleXsWsEvent(data) {
   if (data.type === 'xs:message') mergeXsMessage(data.message);
 }
 
-/** App 挂载时调用一次:读总开关;WS 重连后再读一次并对账(断线期间的广播可能丢了)。 */
+/**
+ * App 挂载时调用一次:读总开关;WS 重连后再读一次并对账(断线期间的广播可能丢了);
+ * Dock 角标跟着待处理总数走(总开关关着时为 0 = 与改动前相同)。
+ */
 export function startXsession() {
   void loadXsConfig();
+  const syncDock = (s) => setXsDockExtra(s.enabled ? s.pendingTotal : 0);
+  syncDock(useXsStore.getState());
+  const unsubscribe = useXsStore.subscribe(syncDock);
   const onReconnect = () => { void loadXsConfig(); };
   window.addEventListener('cgui:ws-reconnected', onReconnect);
-  return () => window.removeEventListener('cgui:ws-reconnected', onReconnect);
+  return () => {
+    unsubscribe();
+    window.removeEventListener('cgui:ws-reconnected', onReconnect);
+  };
 }
 
 // ── 卡片按钮 ─────────────────────────────────────────────────────────────────────

@@ -30,21 +30,30 @@ export function countAttention(waitingKeys, pendingKeys) {
   return pending.length + waiting.filter((sid) => !carded.has(sid)).length;
 }
 
-// 上一次真正下发的计数。防抖:1.5s 轮询下计数多数时候不变,每轮空调一次 Tauri IPC
-// 纯属浪费(还会让窗口标题反复重设)。
+// 上一次真正下发的状态(计数 + 跨会话附加数)。防抖:1.5s 轮询下计数多数时候不变,每轮空调一次
+// Tauri IPC 纯属浪费(还会让窗口标题反复重设)。
 let lastApplied = null;
+
+// r151b:跨会话消息的待处理条数(总开关开着时 = GET /api/xsession/pending 的 total,关着时 0,由
+// utils/xsession.js 经 setXsDockExtra 推进来)。只加到 Dock 角标那一路,两部分直接相加、不去重
+// (上面的计数按会话计,跨会话消息按条数计);窗口标题计数与坞图标小红点口径不变(接口文件 X.3.4)。
+let xsDockExtra = 0;
+let lastAttention = null; // 最近一次 applyAttentionBadge 收到的计数,附加数变化时用它重发
 
 /**
  * 计数变化时给出要下发的角标状态,没变返回 null(调用方直接跳过)。
  * count=undefined 是 Tauri setBadgeCount 的"清除角标"约定(传 0 在 macOS 上会显示 "0")。
- * 导出供单测直接跑;reset 仅测试用。
+ * xsExtra 只进角标(count),不进标题(title)。导出供单测直接跑;reset 仅测试用。
  */
-export function nextBadgeState(n) {
+export function nextBadgeState(n, xsExtra = 0) {
   const count = Number(n) > 0 ? Number(n) : 0;
-  if (count === lastApplied) return null;
-  lastApplied = count;
+  const extra = Number(xsExtra) > 0 ? Math.floor(Number(xsExtra)) : 0;
+  const key = `${count}|${extra}`;
+  if (key === lastApplied) return null;
+  lastApplied = key;
+  const dock = count + extra;
   return {
-    count: count > 0 ? count : undefined,
+    count: dock > 0 ? dock : undefined,
     title: count > 0 ? `CC-GUI (${count})` : 'CC-GUI',
   };
 }
@@ -57,7 +66,8 @@ export function resetBadgeState() { lastApplied = null; }
  * 非 Tauri 环境(浏览器/手机端)直接静默降级 —— 那里没有 Dock 也没有原生标题栏。
  */
 export function applyAttentionBadge(n) {
-  const next = nextBadgeState(n);
+  lastAttention = n;
+  const next = nextBadgeState(n, xsDockExtra);
   if (!next) return;
   import('@tauri-apps/api/window')
     .then(({ getCurrentWindow }) => {
@@ -66,4 +76,12 @@ export function applyAttentionBadge(n) {
       w.setTitle(next.title).catch(() => {});
     })
     .catch(() => {});
+}
+
+/** r151b:跨会话待处理条数变了 → 用最近一次的计数重发(去抖照常生效)。 */
+export function setXsDockExtra(extra) {
+  const v = Number(extra) > 0 ? Math.floor(Number(extra)) : 0;
+  if (v === xsDockExtra) return;
+  xsDockExtra = v;
+  applyAttentionBadge(lastAttention ?? 0);
 }
