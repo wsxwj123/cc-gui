@@ -1077,8 +1077,9 @@ const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolU
  *   outcome:'completed' | 'failed'(结果为错误、没等到结果进程就退出、或进程起不来) | 'stopped'(本回合收到过停止请求),
  *   errorSummary:入口钩子改写过(带 tag)的回合 failed 时,本回合最后一条错误的一行摘要(脱敏、截短);
  *   取不到、不是 failed、或回合没带 tag 为 null。
- * · preToolUse(input, ctx) → null | PreToolUse 钩子输出(可异步);ctx = { toolUseID, sessionId, cwd, runId }。
- *   返回对象时它就是这次 PreToolUse 的输出;返回 null 或抛错时按没挂接处理(既有判定照常)。
+ * · preToolUse(input, ctx) → null | PreToolUse 的 deny 输出(可异步);ctx = { toolUseID, sessionId, cwd, runId }。
+ *   守卫只能拒绝:只认 hookSpecificOutput.permissionDecision === 'deny'(输出只保留拒绝与原因);其它返回值、null、
+ *   抛错都按没挂接处理(既有判定照常);2 秒没给结果按"检查失效"处理(既有判定照常,记下时刻,见 preToolUseGuardTimeoutAt)。
  */
 export function registerSessionRuntimeHooks(hooks) {
   if (!hooks || typeof hooks !== 'object') throw new TypeError('registerSessionRuntimeHooks:参数必须是对象');
@@ -1208,13 +1209,41 @@ async function runChatEntryHook(ctx) {
   console.warn('[r151b] /chat 入口钩子的返回值不合规,不起进程');
   return ENTRY_HOOK_FAILED;
 }
+// PreToolUse 守卫(审计 S1):只能拒绝,不能借返回值跳过下面第三方 auto 的审核;卡住也不能拖住工具调用。
+const PRE_TOOL_USE_GUARD_TIMEOUT_MS = 2000;
+const GUARD_TIMED_OUT = Symbol('guard-timed-out');
+let preToolUseGuardLastTimeoutAt = null;
+/** 最近一次 PreToolUse 守卫超时(2 秒没给结果)的时刻,ISO 字符串或 null(跨会话模块并入 nativeGuard.lastFailureAt)。 */
+export const preToolUseGuardTimeoutAt = () => preToolUseGuardLastTimeoutAt;
+
+// 守卫的返回值 → 规范化的 deny 输出;不是明确的 deny 一律 null(按没挂接处理)。
+function guardDenyOutput(out) {
+  const h = out && typeof out === 'object' ? out.hookSpecificOutput : null;
+  if (!h || typeof h !== 'object' || h.permissionDecision !== 'deny') return null;
+  const reason = typeof h.permissionDecisionReason === 'string' ? h.permissionDecisionReason : '';
+  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
+}
+
 async function runPreToolUseGuard(slot, input, toolUseID) {
+  const fn = runtimeHooks.preToolUse;
+  const ctx = { toolUseID: toolUseID ?? null, sessionId: slot.sessionId || null, cwd: slot.cwd || null, runId: slot.runId || null };
+  let timer = null;
   try {
-    const out = await runtimeHooks.preToolUse(input, { toolUseID: toolUseID ?? null, sessionId: slot.sessionId || null, cwd: slot.cwd || null, runId: slot.runId || null });
-    return out && typeof out === 'object' ? out : null;
+    const call = (async () => fn(input, ctx))(); // 同步抛错也变成 rejection
+    call.catch(() => {}); // 超时后迟到的错误丢弃
+    const timeout = new Promise((resolve) => { timer = setTimeout(resolve, PRE_TOOL_USE_GUARD_TIMEOUT_MS, GUARD_TIMED_OUT); });
+    const out = await Promise.race([call, timeout]);
+    if (out === GUARD_TIMED_OUT) {
+      preToolUseGuardLastTimeoutAt = new Date().toISOString();
+      console.warn(`[r151b] PreToolUse 守卫 ${PRE_TOOL_USE_GUARD_TIMEOUT_MS}ms 没给结果,按检查失效处理(既有判定照常)`);
+      return null;
+    }
+    return guardDenyOutput(out);
   } catch (e) {
     console.warn(`[r151b] PreToolUse 守卫出错,按没挂接处理:${e?.message || e}`);
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

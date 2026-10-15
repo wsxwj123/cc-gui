@@ -7,7 +7,7 @@
 //      不合规 → 500 CHAT_ENTRY_HOOK_FAILED、不起进程。
 //   ③ 回合开始 / 结束:参数正确;turnStart 里补的事件盖了 runId + seq、排在本回合任何 CLI 输出之前;结束的
 //      outcome 分 completed / failed(结果为错误、没有结果就退出、进程起不来) / stopped;每回合至多一次。
-//   ④ PreToolUse 守卫位:返回对象即输出;返回 null / 抛错按没挂接处理。
+//   ④ PreToolUse 守卫位:返回 deny 即输出(只认 deny,其余与 2 秒超时见 check-r151b-audit-fixes);返回 null / 抛错按没挂接处理。
 //   ⑤ 注销后恢复没挂接的行为。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身(含可选控制 __r151bSdkControl),不起 claude 进程;临时 HOME;端口 6900–6990(跳过 6710)。
 // node tests/unit/check-r151b-runtime-hooks.mjs
@@ -207,7 +207,7 @@ try {
   const deny = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'R' } };
   const hook = makePreToolUseHook(slot);
   guardImpl = () => deny;
-  eq(await hook({ tool_name: 'SendMessage', tool_input: { to: 'x' } }, 'tu-1'), deny, '守卫返回对象 → 它就是输出');
+  eq(await hook({ tool_name: 'SendMessage', tool_input: { to: 'x' } }, 'tu-1'), deny, '守卫返回 deny → 它就是输出');
   const g = log.filter((e) => e[0] === 'guard').at(-1);
   eq([g[1].tool_name, g[2]], ['SendMessage', { toolUseID: 'tu-1', sessionId: 'S-1', cwd: '/w', runId: 'sdk-x' }], '守卫收到的参数');
   guardImpl = async () => deny;

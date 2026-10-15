@@ -115,6 +115,56 @@ try {
     eq(sum('connect https://alice:s3cr3t-pass@proxy.example.com:8080 failed'), 'connect https://***@proxy.example.com:8080 failed', 'URL 只抹用户名与密码,主机留着');
     eq(sum('fetch https://api.example.com/v1/messages failed: 503'), 'fetch https://api.example.com/v1/messages failed: 503', '不带凭据的短 URL 原样');
   }
+
+  // ── S1:PreToolUse 守卫位只认明确的 deny;其它返回值回落既有判定;2 秒没返回按检查失效(回落 + 记失效时间)────────
+  {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    let guardImpl = () => null;
+    const unhook = chat.registerSessionRuntimeHooks({ preToolUse: (input, ctx) => guardImpl(input, ctx) });
+    const DENY = (reason) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
+    for (const slot of [
+      { label: '官方', thirdPartyProvider: false, guiMode: 'default', sessionId: A, cwd: WORK, runId: 'sdk-a' },
+      { label: '第三方 auto', thirdPartyProvider: true, guiMode: 'auto', sessionId: A, cwd: WORK, runId: 'sdk-b' },
+    ]) {
+      const hook = chat.makePreToolUseHook(slot);
+      const input = { tool_name: 'Bash', tool_input: { command: 'rm -rf /' } };
+      guardImpl = () => null;
+      const baseline = await hook(input, 'tu-0');
+      for (const [what, out] of [
+        ['{continue:true}', { continue: true }],
+        ['allow', { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } }],
+        ['ask', { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' } }],
+        ['decision 大小写不对', { hookSpecificOutput: { permissionDecision: 'DENY' } }],
+        ['字符串', 'deny'],
+        ['空对象', {}],
+      ]) {
+        guardImpl = () => out;
+        eq(await hook(input, 'tu-1'), baseline, `${slot.label}:守卫返回 ${what} → 回落既有判定`);
+      }
+      guardImpl = () => ({ ...DENY('R'), continue: false, systemMessage: 'x', hookSpecificOutput: { ...DENY('R').hookSpecificOutput, updatedInput: { command: 'ls' } } });
+      eq(await hook(input, 'tu-2'), DENY('R'), `${slot.label}:deny → 只保留拒绝与原因`);
+      guardImpl = () => ({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: 42 } });
+      eq(await hook(input, 'tu-3'), DENY(''), `${slot.label}:deny 的原因不是字符串 → 空串`);
+      guardImpl = async () => { await sleep(300); return DENY('慢一点'); };
+      eq(await hook(input, 'tu-4'), DENY('慢一点'), `${slot.label}:2 秒内给出的 deny 照常生效`);
+      eq(chat.preToolUseGuardTimeoutAt(), null, '没超时就不记失效时间');
+    }
+    const hook = chat.makePreToolUseHook({ thirdPartyProvider: false, guiMode: 'default', sessionId: A, cwd: WORK, runId: 'sdk-c' });
+    for (const [what, impl] of [['永不返回', () => new Promise(() => {})], ['2.5 秒后才 deny', async () => { await sleep(2500); return DENY('迟到'); }],
+      ['2.5 秒后才抛错', async () => { await sleep(2500); throw new Error('迟到的错'); }]]) {
+      guardImpl = impl;
+      const t0 = Date.now();
+      const before = Date.now();
+      eq(await hook({ tool_name: 'SendMessage', tool_input: { to: 'x' } }, 'tu-5'), { continue: true }, `守卫${what} → 回落既有判定`);
+      const dt = Date.now() - t0;
+      ok(dt >= 1900 && dt < 3000, `守卫${what}:约 2 秒后回落(实际 ${dt}ms)`);
+      const at = Date.parse(chat.preToolUseGuardTimeoutAt());
+      ok(at >= before - 5 && at <= Date.now(), '记下失效时间');
+      eq(xs.nativeGuardLastFailure(), chat.preToolUseGuardTimeoutAt(), 'nativeGuard.lastFailureAt 取到守卫超时的时刻');
+    }
+    await sleep(700); // 让迟到的结果 / 错误落地:不得变成未处理的 rejection,也不改变已经给出的判定
+    unhook();
+  }
 } finally {
   try { await chat.closeAllPersistentProcesses(); } catch {}
   rmSync(TMP, { recursive: true, force: true });

@@ -12,7 +12,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
 import { readXsEnabledSync } from '../routes/prefs.js';
-import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses } from '../routes/chat.js';
+import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, preToolUseGuardTimeoutAt } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
 import { buildXsEnvelope, neutralizeXsBody } from './xsession-envelope.js';
@@ -423,7 +423,7 @@ async function settleTurn(id, key, outcome, detail) {
 // ── 原生 SendMessage 引导(T-X6;PLAN X.1.1,接口行为清单 25)──────────────────────────────────────
 // 总开关开着时,会话里的模型(含子代理,它们的调用也经过本会话的 PreToolUse 回调)用 CLI 原生 SendMessage 发给本 GUI
 // 的另一个会话 → 拒绝,让 GUI 会话之间只走 GUI 通道(卡片、上限不被绕过)。目标只按 CLI 的会话登记表认,不碰套接字。
-// 失效(读不到登记表 / 内部出错)→ 放行(= 现状),记日志并记下 nativeGuard.lastFailureAt 给设置块显示。
+// 失效(读不到登记表 / 内部出错 / chat.js 那边等了 2 秒没结果)→ 放行(= 现状),记日志并记下 nativeGuard.lastFailureAt 给设置块显示。
 // H5b 实测(2026-10-15,CLI 2.1.296):SDK 的 default / bypassPermissions / auto / plan 四档下,回调拒绝都生效、
 // 原因原样成为模型看到的工具结果;回调输入的 tool_input 带 CLI 补的 recipient 与 recipient_kind。
 export const NATIVE_GUARD_REASON = '这个会话由 CC-GUI 管理，不接收经 SendMessage 发来的消息。如需把内容交给它，请告诉用户在 CC-GUI 里转发。';
@@ -432,7 +432,12 @@ let nativeGuardLastFailureAt = null;
 export function noteNativeGuardFailure(at = new Date()) {
   nativeGuardLastFailureAt = at.toISOString();
 }
-export const nativeGuardLastFailure = () => nativeGuardLastFailureAt;
+// 两个来源取较晚的:本模块记的(读不到登记表 / 内部出错)与 chat.js 记的(守卫 2 秒没给结果)。ISO 字符串定长,按字符串比较即先后。
+export function nativeGuardLastFailure() {
+  const own = nativeGuardLastFailureAt;
+  const timedOut = preToolUseGuardTimeoutAt();
+  return own && timedOut ? (own > timedOut ? own : timedOut) : (own || timedOut);
+}
 
 // 套接字地址的比较口径:去掉 uds: 前缀;/private/tmp 与 /tmp 是同一处(macOS 的 /tmp 是它的链接)。
 const socketKey = (p) => String(p).replace(/^uds:/i, '').replace(/^\/private\/tmp\//, '/tmp/');
