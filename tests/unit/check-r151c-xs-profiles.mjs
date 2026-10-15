@@ -162,8 +162,13 @@ try {
   ok(xs.currentProviderFp(file.salt) !== fpA, '换 token → 指纹不同');
   writeSettings({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_AUTH_TOKEN: SECRET_TOKEN, ANTHROPIC_MODEL: 'm-main' }, { apiKeyHelper: SECRET_HELPER });
   eq(xs.currentProviderFp(file.salt), fpA, '换回 → 相同');
-  writeAccount('acc1acc1-other'); ok(xs.currentProviderFp(file.salt) !== fpA, '换登录账号 → 指纹不同');
-  writeAccount(ACCOUNT_UUID); eq(xs.currentProviderFp(file.salt), fpA, '账号换回 → 相同');
+  // ~/.claude.json 有最短间隔缓存:换号后间隔内仍用上次的读数,过了间隔才看到新账号
+  const pastInterval = () => sleep(xs.XS_CLAUDE_JSON_MIN_MS + 150);
+  writeAccount('acc1acc1-other');
+  eq(xs.currentProviderFp(file.salt), fpA, `换登录账号后 ${xs.XS_CLAUDE_JSON_MIN_MS} 毫秒内仍用上次的读数(最短间隔缓存)`);
+  await pastInterval();
+  ok(xs.currentProviderFp(file.salt) !== fpA, '过了最短间隔:换登录账号 → 指纹不同');
+  writeAccount(ACCOUNT_UUID); await pastInterval(); eq(xs.currentProviderFp(file.salt), fpA, '账号换回 → 相同');
   // 六种档位
   for (const mode of ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']) {
     const p = await turn({ sessionId: B, permissionMode: mode, prompt: `m-${mode}` });

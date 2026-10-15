@@ -270,12 +270,13 @@ try {
   let cj0 = '{}';
   try { cj0 = readFileSync(CJ, 'utf-8'); } catch { /* 没有 */ }
   const SRV = { 'ccgui-sessions': { command: 'echo' } };
+  const pastInterval = () => sleep(xs.XS_CLAUDE_JSON_MIN_MS + 150); // ~/.claude.json 有最短间隔缓存:改完等过间隔再看
   try {
-    writeFileSync(CJ, JSON.stringify({ mcpServers: SRV }));
+    writeFileSync(CJ, JSON.stringify({ mcpServers: SRV })); await pastInterval();
     eq(xs.xsSessionOptions(viewAt(WORK)).autoAllow, [], '用户配置(~/.claude.json 的 mcpServers)里有同名服务 → 不免确认');
-    writeFileSync(CJ, JSON.stringify({ projects: { [WORK]: { mcpServers: SRV } } }));
+    writeFileSync(CJ, JSON.stringify({ projects: { [WORK]: { mcpServers: SRV } } })); await pastInterval();
     eq(xs.xsSessionOptions(viewAt(join(WORK, 'pkg'))).autoAllow, [], '本地配置(~/.claude.json 的 projects[目录])里有同名服务 → 该目录及子目录不免确认');
-    writeFileSync(CJ, JSON.stringify({ projects: { [`${WORK}-other`]: { mcpServers: SRV } }, mcpServers: { other: { command: 'echo' } } }));
+    writeFileSync(CJ, JSON.stringify({ projects: { [`${WORK}-other`]: { mcpServers: SRV } }, mcpServers: { other: { command: 'echo' } } })); await pastInterval();
     eq(xs.xsSessionOptions(viewAt(WORK)).autoAllow, [LS], '前缀相似的别的目录、不同名的服务不算 → 照常免确认');
   } finally { writeFileSync(CJ, cj0); }
 

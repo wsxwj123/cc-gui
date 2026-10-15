@@ -613,10 +613,19 @@ const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合
 const profileModeUnknown = new Set(); // 会话 id(小写)
 
 // ~/.claude.json 的两项读数:登录账号(provider 指纹用)与哪些作用域配了同名 MCP 服务(免确认守卫用,见 shadowingXsServerScopes)。
-// 文件可能很大且 CLI 常写:按修改时间 + 大小缓存解析结果,只留这两项。
+// 文件可能很大且 CLI 常写:按修改时间 + 大小缓存解析结果,只留这两项;另设最短间隔(XS_CLAUDE_JSON_MIN_MS)。
 const EMPTY_CLAUDE_JSON = Object.freeze({ key: null, accountId: '', userXs: false, localXsDirs: Object.freeze([]) });
 let claudeJsonCache = EMPTY_CLAUDE_JSON;
+// 两次读 ~/.claude.json 的最短间隔(单调时钟,不受墙上时间平移影响)。CLI 每次启动 / 退出都会改写这个文件,按修改时间缓存
+// 几乎回回失效,每个回合开始记档案、每次判定、每次冷启都要整份重读重解析。间隔内直接用上次的读数,代价:换登录账号
+// (oauthAccount)或增删同名 MCP 服务后最多晚 2 秒才被看到 —— 这 2 秒内判定 / 投递的消息仍按换号前的账号算 provider 指纹,
+// 即换号后档案最多晚 2 秒判 profile-stale;冷启的同名服务检查同理最多晚 2 秒。settings.json 不在此列(每次现读)。
+export const XS_CLAUDE_JSON_MIN_MS = 2000;
+let claudeJsonReadAt = -Infinity;
 function readClaudeJsonSync() {
+  const now = performance.now();
+  if (now - claudeJsonReadAt < XS_CLAUDE_JSON_MIN_MS) return claudeJsonCache;
+  claudeJsonReadAt = now;
   const file = join(homedir(), '.claude.json');
   try {
     const st = statSync(file);
