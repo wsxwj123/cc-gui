@@ -18,9 +18,23 @@ test('X04 GET /api/xsession/sessions:按最近活动倒序;无标题为"未命�
     const mark = uniq('Q4m');
     const s1 = seedSession(`x04-new-${mark}`, { home, title: `R151B 新 ${mark}`, mtime: new Date(now - 1_000) });
     const s2 = seedSession(`x04-mid-${mark}`, { home, title: 'R151B 中间', mtime: new Date(now - 3_600_000) });
-    // 没改过名、也没有自动标题(不写 summary 行),只有首条提问:标题应取首条提问
+    // 没改过名、也没有自动标题(不写 summary 行),只有首条提问:标题应取首条提问。
+    // 既有会话列表不认少于 3 行的记录文件,所以给它两轮问答(4 行,时间都不晚于修改时间);
+    // 第二条提问与首条不同、也不含 mark,标题若错取成它,标题断言会直接显出来。
     const s3Prompt = `R151B 未改名会话的首条提问 ${mark}`;
-    const s3 = seedSession(`x04-untitled-${mark}`, { home, title: null, firstPrompt: s3Prompt, reply: 'R151B 无标题会话的回复', mtime: new Date(now - 7_200_000) });
+    const s3Reply = 'R151B 无标题会话的回复';
+    const s3Mtime = new Date(now - 7_200_000);
+    const s3Sid = newSid();
+    const s3At = (ms) => new Date(s3Mtime.getTime() - ms).toISOString();
+    const s3Asst = (n, parentUuid, timestamp, text) => ({ type: 'assistant', uuid: `${s3Sid}-a${n}`, parentUuid, timestamp, requestId: `req_${s3Sid.slice(0, 8)}_${n}`,
+      message: { id: `msg_${s3Sid.slice(0, 8)}_${n}`, type: 'message', role: 'assistant', model: 'r151-chat', content: [{ type: 'text', text }],
+        stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 10, output_tokens: 5 } } });
+    const s3 = seedSession(`x04-untitled-${mark}`, { home, sid: s3Sid, title: null, firstPrompt: s3Prompt, reply: s3Reply, mtime: s3Mtime, lines: [
+      { type: 'user', uuid: `${s3Sid}-u0`, parentUuid: null, timestamp: s3At(3000), message: { role: 'user', content: s3Prompt } },
+      s3Asst(1, `${s3Sid}-u0`, s3At(2000), s3Reply),
+      { type: 'user', uuid: `${s3Sid}-u2`, parentUuid: `${s3Sid}-a1`, timestamp: s3At(1000), message: { role: 'user', content: 'R151B 未改名会话的第二条提问' } },
+      s3Asst(3, `${s3Sid}-u2`, s3At(0), 'R151B 无标题会话的第二条回复'),
+    ] });
     const c1 = seedSession(`x04-c1-${mark}`, { home, sid: 'abcdef12-0000-4000-8000-000000000001', title: 'R151B 冲突一', mtime: new Date(now - 10_800_000) });
     const c2 = seedSession(`x04-c2-${mark}`, { home, sid: 'abcdef12-0000-4000-8000-000000000002', title: 'R151B 冲突二', mtime: new Date(now - 14_400_000) });
 
