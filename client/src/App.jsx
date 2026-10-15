@@ -158,7 +158,7 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
-import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAutoRetrySkipped, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
+import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAutoRetrySkipped, keepLivePeer, anchorLivePeers, placeAnchoredPeers, mergeLivePeersIntoHistory, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
@@ -4723,8 +4723,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (mountFromResolved <= 0) return finalizedMessages;   // 不裁时返回原引用(不打穿 MessageList 的 memo)
     return sliceRows(finalizedMessages, { from: mountFromResolved, to: finalizedMessages.length });
   }, [finalizedMessages, mountFromResolved]);
+  // r151c 实点:回合进行中历史里已有与直播来源气泡是同一条的条目时只画一个 —— 历史那条留在原位、带直播的 via
+  // (见 utils/xsession.js mergeLivePeersIntoHistory)。只在渲染层合并,不动 chatMessages(流式缓冲仍是真相源)。
+  // 本回合的历史被截断时(正常发送 / 种回,同 visibleMessages 的条件)历史里不可能有本回合那条,不认领。
+  const peerMerge = useMemo(
+    () => (streamHistCutoff && streamOwnerKey === sessionQueueKey
+      ? { list: mountedMessages, taken: null }
+      : mergeLivePeersIntoHistory(mountedMessages, visibleChat)),
+    [mountedMessages, visibleChat, streamHistCutoff, streamOwnerKey, sessionQueueKey],
+  );
   // r151b:回合落盘后历史里没有对应条目的直播来源气泡,按锚点插回它触发的那个回复之前;没有时原引用。
-  const peerPlacement = useMemo(() => placeAnchoredPeers(mountedMessages, visibleChat), [mountedMessages, visibleChat]);
+  const peerPlacement = useMemo(() => placeAnchoredPeers(peerMerge.list, visibleChat), [peerMerge, visibleChat]);
   // 挂载集合变化(补齐 / 搜索开关 / 跳转)会整批挂上或卸掉视口**上方**的行 —— 文档总高变了
   // 而 scrollTop 不变,视野就被顶走。变化前记下"视口最上方那一行 + 行内偏移",变化后在同一
   // 次 layout 提交里搬回原位:比按比例准,且不用任何高度估算。
@@ -9525,7 +9534,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 retryActiveUuid={retryActiveUuid}
               />
               {/* btw 旁问不再进主流内联渲染 —— 改由右下角 BtwWindow 浮窗聚合成连续线程。 */}
-              {renderChat.filter((msg) => msg.type !== 'btw' && !peerPlacement.placed.has(msg.uuid)).map((msg, i) => (
+              {renderChat.filter((msg) => msg.type !== 'btw' && !peerPlacement.placed.has(msg.uuid) && !peerMerge.taken?.has(msg.uuid)).map((msg, i) => (
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
                   {msg.type === 'compact'
                     ? <CompactDivider />

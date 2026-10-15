@@ -818,6 +818,43 @@ export function anchorLivePeers(list, persisted, sinceMs) {
 }
 
 const EMPTY_SET = new Set();
+
+/**
+ * r151c 实点:回合还在跑,历史里却已经有了与某个直播来源气泡是同一条的条目(CLI 在回合开始时就把这条写进会话记录;
+ * 在跑的自动处理回合里打开会话、上一回合收尾时刷新历史、接管在跑进程期间按节流刷新历史,都会把它带进来)。
+ * 两个来源只画一个:历史那条留在原位、改用直播气泡的 via(回合进行中照样显示"自动处理"徽标;回合落盘对账收走直播
+ * 气泡后、或刷新后,它才是 gui),直播气泡不再在末尾单独画。
+ * 同一条的判定就是 peerLanded(与回合落盘对账同一口径)。新的配新的:历史从后往前,每个直播气泡只认领一条、
+ * 每条历史只被一个直播气泡认领。已有锚点的直播气泡(回合落盘时历史里没有同一条,见 anchorLivePeers)不参与。
+ * 返回 { list, taken }:list 有改动时是新数组,否则原引用(不打穿 MessageList 的 memo);taken = 被认领的直播气泡 uuid。
+ * 取舍:按正文认不看时间与来源 —— 历史里还没有新这条、却有 6 小时内正文完全相同的更早一条时,新这条先认领那条
+ * (那条在原位显示成直播的 via,新这条不单独画),直到历史刷新出新这条才改认新这条。调用方在本回合的历史被截断时
+ * (正常发送 / 种回)不调用:那时历史里不可能有本回合那条,能认领的只会是更早的同正文消息。
+ */
+export function mergeLivePeersIntoHistory(list, chat) {
+  if (!Array.isArray(list) || !Array.isArray(chat)) return { list, taken: EMPTY_SET };
+  const live = chat.filter((p) => p && p.type === 'peer-message' && p.live === true && !p.anchorUuid && p.uuid);
+  if (!live.length) return { list, taken: EMPTY_SET };
+  const taken = new Set();
+  let out = null;
+  for (let i = list.length - 1; i >= 0 && taken.size < live.length; i--) {
+    const h = list[i];
+    if (!h || h.type !== 'peer-message' || h.live === true) continue;
+    for (let j = live.length - 1; j >= 0; j--) {
+      const p = live[j];
+      if (taken.has(p.uuid) || !peerLanded(p, [h])) continue;
+      taken.add(p.uuid);
+      const via = peerVia(p);
+      if (peerVia(h) !== via) {
+        if (!out) out = list.slice();
+        out[i] = { ...h, via };
+      }
+      break;
+    }
+  }
+  return { list: out || list, taken: taken.size ? taken : EMPTY_SET };
+}
+
 /** 把带锚点的直播来源气泡插到历史列表里锚点那一条之前。返回 { list, placed };没有可插的返回原数组(不打穿 MessageList 的 memo)。 */
 export function placeAnchoredPeers(list, chat) {
   if (!Array.isArray(list) || !Array.isArray(chat)) return { list, placed: EMPTY_SET };
