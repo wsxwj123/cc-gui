@@ -149,12 +149,16 @@ async function loadIfNeeded() {
 }
 
 // 正文目录不是真目录(符号链接、文件、不存在)→ null:不往里面清东西。
-async function bodiesDirEntries() {
+// onError(可选,r151c 先修 7):列目录出错(不是"不存在")时回调一次,给调用方记日志;返回值照样是 null。
+async function bodiesDirEntries(onError = null) {
   try {
     const st = await lstat(BODIES_DIR);
     if (!st.isDirectory()) return null; // lstat 不跟链接:符号链接在这里不算目录
     return await readdir(BODIES_DIR);
-  } catch { return null; }
+  } catch (e) {
+    if (onError && e?.code !== 'ENOENT') onError(e);
+    return null;
+  }
 }
 
 const isBodyFileName = (f) => f.endsWith('.txt') && isSessionIdShape(f.slice(0, -4));
@@ -341,7 +345,9 @@ export function clearXsInbox() {
       const t = TEMP_SUFFIX_RE.exec(f);
       if (f.startsWith(CORRUPT_PREFIX) || (t && f.slice(0, t.index) === 'messages.json')) await unlinkLeftover(join(XS_DIR, f), f);
     }
-    for (const f of (await bodiesDirEntries()) || []) {
+    // r151c 先修 7:正文目录列不出来(权限等)时原先静默跳过,现在记一行日志;剩下的正文留待下次启动清理
+    const bodyFiles = await bodiesDirEntries((e) => console.warn(`[xsession] 清空时读正文目录失败,留待下次启动清理:${e.code || e.message}`));
+    for (const f of bodyFiles || []) {
       const m = TEMP_SUFFIX_RE.exec(f);
       if (isBodyFileName(m ? f.slice(0, m.index) : f)) await unlinkLeftover(join(BODIES_DIR, f), f);
     }

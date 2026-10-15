@@ -1108,9 +1108,10 @@ async function relisten(newHost) {
 server.listen(PORT, HOST, () => {
   // R20:官方价目目录装载磁盘缓存并在过期/首次时后台预热一次(应用关闭时不承诺定时更新)。
   try { bootPricingCatalog(); } catch (e) { console.error('[pricing] boot warmup failed:', e?.message || e); }
-  // r151b:跨会话收件箱启动恢复(遗留的 processing / claimed → pending + interrupted)。只在总开关开着时做 ——
-  // 关着时不读不写 ~/.claude-gui/xsession/;之后再打开,首次访问收件箱时同样会先恢复。
-  // r151b 复审建议 2:关着时也做只删不写的启动清理(clear 没删成的残留、超过 7 天的损坏留存文件),不读盘恢复、不建目录
+  // r151b:跨会话收件箱启动恢复(遗留的 processing / claimed → pending + interrupted)。只在总开关开着时做;之后再打开,
+  // 首次访问收件箱时同样会先恢复。
+  // 关着时(r151b 复审建议 2;r151c 先修 7 改正这里原先"关着时不读不写"的说法):不做恢复、不写、不建目录,但会只读地看一眼
+  // 收件箱记录,做只删不写的启动清理(clear 没删成的残留、本模块的临时文件、保留满 7 天的损坏留存文件)。
   if (readXsEnabledSync()) loadXsInbox().catch((e) => console.error('[xsession] 收件箱启动恢复失败:', e?.message || e));
   else sweepXsLeftovers().catch((e) => console.error('[xsession] 启动清理失败:', e?.message || e));
   // r122 R5:回滚点启动清扫 —— 延迟(默认 60s)后在后台逐会话回收超限的旧回滚点,一次进程只跑一遍。
