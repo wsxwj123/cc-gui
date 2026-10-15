@@ -1056,10 +1056,120 @@ export function autoDecide(mode, toolName, input, boundary, { thirdParty = false
   return null;
 }
 
+// ── r151b X.1.9:会话运行时的钩子位 ──────────────────────────────────────────────────────────
+// 依赖只朝一个方向:本文件不认识跨会话功能,跨会话模块在启动时经 registerSessionRuntimeHooks 挂进来。
+// 四个位置:/chat 路由入口改写(chatEntry)、回合开始(turnStart)、回合结束(turnEnd)、PreToolUse 守卫
+// (preToolUse);外加补事件的出口 deliverRunEvent。每处都是"有挂接就调、没挂接就跳过";没挂接时
+// 不多 await 一次、不往 slot 上写任何字段 —— 行为与改动前相同(check-r151b-baseline*)。
+const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolUse: null };
+
+/**
+ * 挂接钩子(启动时调用)。只认上面四个键,值必须是函数;返回注销函数(只撤本次挂上、且仍在位的那几个)。
+ * · chatEntry(ctx) → null | { reject: { status, body } } | { prompt, tag }(可异步)。
+ *   ctx = { body, sessionId, clientTurnId, principal }。调用时机:输入闸门、工作目录检查、同 clientTurnId 命中
+ *   之后,起进程 / 推消息之前。reject:回这个应答、不起进程、撤掉本回合的 clientTurnId 记录(同 id 可重试);
+ *   prompt:本回合推给模型的内容换成它,tag 随本回合带到 turnStart / turnEnd。抛错或返回值不合规 →
+ *   500 CHAT_ENTRY_HOOK_FAILED、不起进程(宁可不发,不发错)。
+ * · turnStart(info) / turnEnd(info):同步通知,返回值忽略,抛错只记日志。
+ *   turnStart 在本回合的用户消息推进输入流之前调用(此时用 deliverRunEvent 补的事件排在本回合任何 CLI 输出之前);
+ *   info = { pid, runId, sessionId, draftId, cwd, turnEpoch, reused, tag }。
+ *   turnEnd 每个回合至多一次(起过子代理的回合去抖收尾后又被续跑复活时,只算第一次),info 同上(无 reused)另带
+ *   outcome:'completed' | 'failed'(结果为错误、没等到结果进程就退出、或进程起不来) | 'stopped'(本回合收到过停止请求)。
+ * · preToolUse(input, ctx) → null | PreToolUse 钩子输出(可异步);ctx = { toolUseID, sessionId, cwd, runId }。
+ *   返回对象时它就是这次 PreToolUse 的输出;返回 null 或抛错时按没挂接处理(既有判定照常)。
+ */
+export function registerSessionRuntimeHooks(hooks) {
+  if (!hooks || typeof hooks !== 'object') throw new TypeError('registerSessionRuntimeHooks:参数必须是对象');
+  const entries = Object.entries(hooks);
+  for (const [k, fn] of entries) {
+    if (!Object.hasOwn(runtimeHooks, k)) throw new TypeError(`registerSessionRuntimeHooks:没有这个钩子位 ${k}`);
+    if (typeof fn !== 'function') throw new TypeError(`registerSessionRuntimeHooks:${k} 必须是函数`);
+  }
+  for (const [k, fn] of entries) runtimeHooks[k] = fn;
+  return () => { for (const [k, fn] of entries) if (runtimeHooks[k] === fn) runtimeHooks[k] = null; };
+}
+
+/** 往某个运行(pid)的事件流补一条事件:走与 CLI 事件同一个投递口(盖 runId + seq、没人连着时进缓冲)。找不到运行或事件不合规返回 false。 */
+export function deliverRunEvent(pid, event) {
+  const slot = activeProcesses.get(pid);
+  if (!slot || !event || typeof event !== 'object' || Array.isArray(event) || typeof event.type !== 'string' || !event.type) return false;
+  let text; // 不叫 line:check-r114-locks E1-5b 按名字锁"line 不许被重新赋值"
+  try { text = JSON.stringify(event); } catch { return false; }
+  deliverLine(slot, text);
+  return true;
+}
+
+function callRuntimeHook(name, arg) {
+  const fn = runtimeHooks[name];
+  if (!fn) return;
+  const warn = (e) => console.warn(`[r151b] 钩子 ${name} 出错:${e?.message || e}`);
+  try {
+    const r = fn(arg);
+    if (r && typeof r.then === 'function') r.then(null, warn);
+  } catch (e) { warn(e); }
+}
+const runtimeTurnInfo = (slot, pid) => ({
+  pid, runId: slot.runId || pid, sessionId: slot.sessionId || null, draftId: slot.draftId || null,
+  cwd: slot.cwd || null, turnEpoch: slot.turnEpoch | 0, tag: slot.runtimeTurn?.tag,
+});
+// 冷启路径里开始过的回合 → 发起它的那次请求(进程没起来时由 /chat 路由层补报结束,见 settleTurnStartedByRequest)。
+const turnStartedByRequest = new WeakMap();
+// 回合开始:两个回合钩子都没挂接时什么都不做(slot 上不出现 runtimeTurn)。
+function notifyTurnStart(slot, pid, reused, tag, req) {
+  if (!runtimeHooks.turnStart && !runtimeHooks.turnEnd) return;
+  slot.runtimeTurn = { epoch: slot.turnEpoch | 0, tag, ended: false, stopRequested: false };
+  if (req) turnStartedByRequest.set(req, slot);
+  callRuntimeHook('turnStart', { ...runtimeTurnInfo(slot, pid), reused });
+}
+// 请求结束时:它开始过的回合所在的槽已被撤下(只有"进程没起来"会在请求期间撤槽),该回合不会再有收尾 → 补报结束。
+function settleTurnStartedByRequest(req) {
+  const slot = turnStartedByRequest.get(req);
+  if (!slot) return;
+  turnStartedByRequest.delete(req);
+  if (activeProcesses.get(slot.runId) !== slot) notifyTurnEnd(slot, slot.runId);
+}
+// 回合结束:只认本 slot 当前那一回合,且只报一次。
+function notifyTurnEnd(slot, pid) {
+  const rt = slot.runtimeTurn;
+  if (!rt || rt.ended || rt.epoch !== (slot.turnEpoch | 0)) return;
+  rt.ended = true;
+  const outcome = rt.stopRequested ? 'stopped' : (slot.lastResultAt == null || slot.lastResultError) ? 'failed' : 'completed';
+  callRuntimeHook('turnEnd', { ...runtimeTurnInfo(slot, pid), outcome });
+}
+const ENTRY_HOOK_FAILED = { reject: { status: 500, body: { ok: false, code: 'CHAT_ENTRY_HOOK_FAILED', error: '服务端内部错误，本条消息没有发出，请重试' } } };
+async function runChatEntryHook(ctx) {
+  let out;
+  try { out = await runtimeHooks.chatEntry(ctx); } catch (e) {
+    console.warn(`[r151b] /chat 入口钩子出错,不起进程:${e?.message || e}`);
+    return ENTRY_HOOK_FAILED;
+  }
+  if (out == null) return null;
+  if (out.reject) {
+    const { status, body } = out.reject;
+    if (Number.isInteger(status) && status >= 400 && status <= 599 && body && typeof body === 'object') return { reject: { status, body } };
+  } else if (typeof out.prompt === 'string' && out.prompt) return { prompt: out.prompt, tag: out.tag };
+  console.warn('[r151b] /chat 入口钩子的返回值不合规,不起进程');
+  return ENTRY_HOOK_FAILED;
+}
+async function runPreToolUseGuard(slot, input, toolUseID) {
+  try {
+    const out = await runtimeHooks.preToolUse(input, { toolUseID: toolUseID ?? null, sessionId: slot.sessionId || null, cwd: slot.cwd || null, runId: slot.runId || null });
+    return out && typeof out === 'object' ? out : null;
+  } catch (e) {
+    console.warn(`[r151b] PreToolUse 守卫出错,按没挂接处理:${e?.message || e}`);
+    return null;
+  }
+}
+
 // r151a T-Y10 ②:PreToolUse 回调。判定规则在 services/auto-audit.js(thirdPartyAutoPreToolUse);档位读 slot.guiMode
 // (可被中途切档改)。整体 try/catch:判定出错时第三方按询问处理(不放行),官方照旧 continue,并记一行日志(R-Y13)。
+// r151b:最前面是守卫挂接位(没挂接 = 跳过)。
 export function makePreToolUseHook(slot) {
-  return async (input) => {
+  return async (input, toolUseID) => {
+    if (runtimeHooks.preToolUse) {
+      const guarded = await runPreToolUseGuard(slot, input, toolUseID);
+      if (guarded) return guarded;
+    }
     try {
       const out = thirdPartyAutoPreToolUse({
         thirdParty: slot.thirdPartyProvider === true,
@@ -1582,6 +1692,7 @@ export function settleTurnRecord(record, status) {
 // 回合收尾/进程收尾的统一入口:只对"本 slot 当前那一回合"生效。已请求停止的回合,无论
 // 因 interrupt 结束还是自然结束,对调用方的语义都是"被停掉的"。
 function settleSlotTurn(slot, fallback = 'completed') {
+  if (slot) notifyTurnEnd(slot, slot.runId); // r151b:回合结束通知(没挂接 = 跳过;回合收尾与进程收尾都经过这里)
   const rec = slot?.turnRecord;
   if (!rec || rec.settledAt) return;
   settleTurnRecord(rec, rec.stopRequested ? 'stopped' : fallback);
@@ -1736,6 +1847,12 @@ router.post('/chat', async (req, res) => {
   // (GUI 现状 / bot)直接进,不吃任何新语义。
   const turnId = typeof req.body?.clientTurnId === 'string' && CLIENT_TURN_RE.test(req.body.clientTurnId)
     ? req.body.clientTurnId : null;
+  // r151b:挂接了回合结束钩子时,本请求开始过、却在请求期间就被撤下的回合(进程没起来)补报一次结束。没挂接走下面原路。
+  if (runtimeHooks.turnEnd) {
+    try {
+      return await (turnId ? withTurnLock(`${turnPrincipal(req)}|${turnId}`, () => handleChatPost(req, res)) : handleChatPost(req, res));
+    } finally { settleTurnStartedByRequest(req); }
+  }
   if (!turnId) return handleChatPost(req, res);
   return withTurnLock(`${turnPrincipal(req)}|${turnId}`, () => handleChatPost(req, res));
 });
@@ -1828,6 +1945,18 @@ async function handleChatPost(req, res) {
       return res.status(503).json({ ok: false, code: 'TURN_CAPACITY', error: '服务端回合记录已满，请稍后重试' });
     }
   }
+
+  // r151b X.1.9:/chat 路由入口改写位(没挂接 = 跳过,不多 await)。拒绝 → 撤掉本回合记录、回它给的应答、不起进程;
+  // 改写 → 本回合推给模型的内容换成它给的(R13 指纹仍按请求原文算,同 clientTurnId 重发照旧命中上面的记录)。
+  const entry = runtimeHooks.chatEntry
+    ? await runChatEntryHook({ body: req.body, sessionId: sessionId || null, clientTurnId, principal })
+    : null;
+  if (entry?.reject) {
+    dropTurnRecord(turnRecord);
+    return res.status(entry.reject.status).json(entry.reject.body);
+  }
+  const turnPrompt = entry ? entry.prompt : prompt;
+  const turnTag = entry ? entry.tag : undefined;
 
   const chosenMode = (permissionMode && VALID_PERMISSION_MODES.has(permissionMode))
     ? permissionMode : 'default';
@@ -1961,12 +2090,13 @@ async function handleChatPost(req, res) {
       if (s.startupTimer) { clearTimeout(s.startupTimer); s.startupTimer = null; }
       s.turnSawLine = true;
       s.startTimedOut = false;
-      s.promptPreview = String(prompt).slice(0, 80);
+      s.promptPreview = String(turnPrompt).slice(0, 80);
       s.guiMode = chosenMode;
       s.permissionMode = chosenMode;
       // r151a:服务端门控降级 —— 复用的进程不会再发 init,降级信号在本回合开头直接补发。
       if (autoGate.downgraded) deliverModeMismatch(s, autoGate.downgraded);
-      s.input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
+      notifyTurnStart(s, alivePid, true, turnTag); // r151b:回合开始(没挂接 = 跳过)
+      s.input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
       // R13:复用同一进程开新回合 —— 记录绑到本回合的 turnEpoch 上(旧回合的记录早已
       // 在它自己的收尾点结算,pid→record 的映射换成这一回合,停止才不会停错回合)。
       if (turnRecord) bindTurnRecord(turnRecord, alivePid, s);
@@ -2058,7 +2188,7 @@ async function handleChatPost(req, res) {
     // R8-4:进程内当前生效模型(spawn 时=options.model 实际值;复用路径 setModel 成功后
     // 更新)。compatKey 已不含 model,复用对账全靠它。
     currentModel: model,
-    promptPreview: String(prompt).slice(0, 80),
+    promptPreview: String(turnPrompt).slice(0, 80),
     permissionMode: permissionMode || 'default',
     guiMode: chosenMode,
     autoDowngrade: autoGate.downgraded,   // r151a:服务端门控降级,init 到达时补发一条带 reason 的 mode_mismatch
@@ -2110,9 +2240,10 @@ async function handleChatPost(req, res) {
   slot.nulWatcher = startWinNulWatcher(workingDir);
   if (turnRecord) bindTurnRecord(turnRecord, procId, slot); // R13:本回合的权威身份就此落位
   armTurnStartup(slot); // R13:冷启路径才等初始化(复用路径上面已置 turnSawLine=true)
+  notifyTurnStart(slot, procId, false, turnTag, req); // r151b:回合开始(没挂接 = 跳过)
 
   // 首条用户消息(streaming-input);保持 input 打开作 control 通道。
-  input.push({ type: 'user', message: { role: 'user', content: String(prompt) } });
+  input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
 
   const appendText = composeAppendSystemPrompt(appendSystemPrompt);
   const fullAppend = composeGenuiAppend(appendText, genui);
@@ -3074,6 +3205,7 @@ function applyStop(slot, pid, flags) {
   // 进程(子代理是 CLI 进程内循环,进程死即全停)。input.close 同步延后——它与 interrupt
   // 共用 stdin 通道,立即关会把刚发的 interrupt 请求截断。
   // express.json 全局挂载:无 body → {} → hard=false,老调用方向后兼容(选择性)。
+  if (slot.runtimeTurn) slot.runtimeTurn.stopRequested = true; // r151b:回合结束通知报 stopped 用(没挂接时没有 runtimeTurn)
   const hard = flags.hard === true;
   // A1:allTasks=true 只由「停止后台 N」总闸传(用户显式"停掉所有后台"),保持全量语义;
   // 主停止键 / Esc 不传 → 只停本回合派出的任务,跨回合后台子代理保留。

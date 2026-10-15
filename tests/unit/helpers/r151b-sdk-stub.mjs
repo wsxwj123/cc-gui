@@ -23,7 +23,12 @@ export function registerR151bSdkStub() {
 
 const calls = (globalThis.__r151bSdkCalls ||= []);
 
+// 可选控制 globalThis.__r151bSdkControl(只有 check-r151b-runtime-hooks 设它;没设 = 下面的原行为,基线照旧):
+//   throwOnQuery: true → 下一次 query() 直接抛错(进程起不来),用一次即复位;
+//   reply(input) → 'ok'(默认)| 'error'(结果为错误)| 'exit'(不给结果就结束)| 'hold'(不回应,直到被 abort)。
 export function query({ prompt, options = {} } = {}) {
+  const ctl = globalThis.__r151bSdkControl;
+  if (ctl?.throwOnQuery) { ctl.throwOnQuery = false; throw new Error('r151b stub: query() 起不来'); }
   const record = { options, inputs: [], closed: false };
   calls.push(record);
   const sessionId = options.resume || randomUUID();
@@ -49,6 +54,9 @@ export function query({ prompt, options = {} } = {}) {
           apiKeySource: 'none', claude_code_version: '0.0.0-r151b-stub', output_style: 'default',
         };
       }
+      const mode = typeof ctl?.reply === 'function' ? ctl.reply(next.value) : 'ok';
+      if (mode === 'exit') return;
+      if (mode === 'hold') { await aborted; return; }
       yield {
         type: 'assistant', ...base(), parent_tool_use_id: null,
         message: {
@@ -58,7 +66,7 @@ export function query({ prompt, options = {} } = {}) {
         },
       };
       yield {
-        type: 'result', subtype: 'success', ...base(), is_error: false, duration_ms: 1, duration_api_ms: 1,
+        type: 'result', subtype: mode === 'error' ? 'error_during_execution' : 'success', ...base(), is_error: mode === 'error', duration_ms: 1, duration_api_ms: 1,
         num_turns: 1, result: 'R151B-STUB-REPLY', total_cost_usd: 0, permission_denials: [], modelUsage: {},
         usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
       };
