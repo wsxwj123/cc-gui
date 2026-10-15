@@ -904,7 +904,8 @@ export async function sendAiMessages({ sender, to, message } = {}, rows) {
   }
   const all = await resolveRows(rows, XS_INTERNAL_TEXT);
   const shortIds = assignShortIds(all.map((r) => r.sessionId));
-  const sessions = all.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) }));
+  // name = 会话列表标题再按来源名规则清洗(与 list_sessions 的 name 同口径);按标题找目标时清洗前后的写法都认
+  const sessions = all.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId), name: normalizeXsSourceName(r.title) }));
   const senderRow = sessions.find((r) => sameId(r.sessionId, sender.sessionId)) || null;
   // 解析并按会话去重(同一会话写两次只发一条);解析不了、是自己的项单独失败,不计入 8 个
   const items = [];
@@ -913,7 +914,7 @@ export async function sendAiMessages({ sender, to, message } = {}, rows) {
     const r = resolveTarget(spec, sessions);
     if (!r.ok) {
       items.push({ to: spec, fail: r.reason === 'ambiguous'
-        ? { error: 'XS_TARGET_AMBIGUOUS', message: '有多个会话叫这个名字，请改用 id', candidates: r.candidates.map((c) => ({ id: c.shortId, name: c.title, project: c.project })) }
+        ? { error: 'XS_TARGET_AMBIGUOUS', message: '有多个会话叫这个名字，请改用 id', candidates: r.candidates.map((c) => ({ id: c.shortId, name: normalizeXsSourceName(c.title), project: c.project })) }
         : { error: 'XS_TARGET_NOT_FOUND', message: '没有叫这个名字的会话，请先调用 list_sessions' } });
       continue;
     }
@@ -990,7 +991,7 @@ export async function sendAiMessages({ sender, to, message } = {}, rows) {
     const x = outcome.get(it.key);
     if (x.full) return { to: it.to, ok: false, error: 'XS_INBOX_FULL', message: `目标会话的待处理消息已满（${XS_LIMITS.pendingPerSession} 条）` };
     const t = firstOf.get(it.key);
-    return { to: it.to, ok: true, id: t.shortId, name: t.title, delivery: x.delivery, note: it.merged ? SEND_NOTE.merged : noteOf(x) };
+    return { to: it.to, ok: true, id: t.shortId, name: t.name, delivery: x.delivery, note: it.merged ? SEND_NOTE.merged : noteOf(x) };
   });
   return { results, notice: XS_SEND_NOTICE };
 }

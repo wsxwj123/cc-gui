@@ -389,6 +389,18 @@ try {
   eq([profNew.judge.mode, profNew.replay.cwd, slotOf(newSid)?.busy], ['bypassPermissions', WORK, true], '拿到会话 id 即记档案,不等回合结束');
   eq((await api('POST', `/chat/${encodeURIComponent(rNew.body.pid)}/stop`, {})).status, 200, '收尾:停止新会话的回合');
 
+  // 3) 名字口径:结果 name、candidates[].name 与 list_sessions 同口径(会话列表标题按来源名规则清洗);清洗前后的写法都认
+  const { normalizeXsSourceName: cleanName } = await import('../../server/services/xsession-envelope.js');
+  const DT = mk('  R151C "脏"<标题>\u0007尾  ');
+  const DN = cleanName(TITLES.get(DT));
+  ok(DN !== TITLES.get(DT).trim(), `前置:清洗前后写法不同(${DN})`);
+  const rN = await send(sX, [TITLES.get(DT), DN], 'R151C 名字口径');
+  eq(rN.results.map((x) => [x.ok, x.name]), [[true, DN], [true, DN]], '清洗前、清洗后的写法都认;结果 name 是清洗后的标题');
+  eq(rN.results[1].note, NOTE.merged, '两种写法是同一会话 → 合并');
+  mk('R151C 重<名>'); mk('R151C 重名');
+  const rA = await send(sX, ['R151C 重名'], 'R151C 重名');
+  eq([rA.results[0].error, rA.results[0].candidates.map((c) => c.name)], ['XS_TARGET_AMBIGUOUS', ['R151C 重名', 'R151C 重名']], '清洗后撞名 → 重名;candidates[].name 也是清洗后的');
+
   console.log(`PASS check-r151c-xs-auto(${checks} 项)`);
 } finally {
   await chat.closeAllPersistentProcesses?.();
