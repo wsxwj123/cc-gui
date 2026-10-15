@@ -566,6 +566,11 @@ export function getActiveChatProcesses() {
       turnRunning: !!(slot.turnRecord && !slot.turnRecord.settledAt),
       // F2:本会话建过 cron,进程正被豁免于 15 分钟闲置回收 —— 让"这个进程为什么不退"可见。
       cronHold: slot.cronHoldUntil > Date.now(),
+      // r151c:回合正在跑(判据同 findBusySlot)、界面档位、回合代数、在飞后台任务数(跨会话自动处理的调度与判定用)
+      busy: !slot.idle && !slot.closing && !slot.pumpEnded && slot.exitCode === null && !!slot.input,
+      guiMode: slot.guiMode || null,
+      turnEpoch: slot.turnEpoch | 0,
+      liveTasks: slot.liveTasks instanceof Map ? slot.liveTasks.size : 0,
     });
   }
   return out;
@@ -1061,18 +1066,21 @@ export function autoDecide(mode, toolName, input, boundary, { thirdParty = false
 // 四个位置:/chat 路由入口改写(chatEntry)、回合开始(turnStart)、回合结束(turnEnd)、PreToolUse 守卫
 // (preToolUse);外加补事件的出口 deliverRunEvent。每处都是"有挂接就调、没挂接就跳过";没挂接时
 // 不多 await 一次、不往 slot 上写任何字段 —— 行为与改动前相同(check-r151b-baseline*)。
-const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolUse: null };
+const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolUse: null, sessionOptions: null, modeChange: null };
 
 /**
- * 挂接钩子(启动时调用)。只认上面四个键,值必须是函数;返回注销函数(只撤本次挂上、且仍在位的那几个)。
+ * 挂接钩子(启动时调用)。只认上面六个键,值必须是函数;返回注销函数(只撤本次挂上、且仍在位的那几个)。
  * · chatEntry(ctx) → null | { reject: { status, body } } | { prompt, tag }(可异步)。
- *   ctx = { body, sessionId, clientTurnId, principal }。调用时机:输入闸门、工作目录检查、同 clientTurnId 命中
+ *   ctx = { body, sessionId, clientTurnId, principal, internal }(internal:经 startInternalTurn 起的回合是调用方给的对象,
+ *   HTTP 请求恒为 null)。调用时机:输入闸门、工作目录检查、同 clientTurnId 命中
  *   之后,起进程 / 推消息之前。reject:回这个应答、不起进程、撤掉本回合的 clientTurnId 记录(同 id 可重试);
  *   prompt:本回合推给模型的内容换成它,tag 随本回合带到 turnStart / turnEnd。抛错或返回值不合规 →
  *   500 CHAT_ENTRY_HOOK_FAILED、不起进程(宁可不发,不发错)。
  * · turnStart(info) / turnEnd(info):同步通知,返回值忽略,抛错只记日志。
  *   turnStart 在本回合的用户消息推进输入流之前调用(此时用 deliverRunEvent 补的事件排在本回合任何 CLI 输出之前);
- *   info = { pid, runId, sessionId, draftId, cwd, turnEpoch, reused, tag }。
+ *   info = { pid, runId, sessionId, draftId, cwd, turnEpoch, reused, tag, params }。params(r151c)= { body, guiMode }:
+ *   body 是本回合请求体里的会话级参数(TURN_PARAM_KEYS,请求原值,没带为 null;model 换成解析后的值),guiMode 是本回合
+ *   解析后的界面档位(与槽的 guiMode 同一口径)。只在挂接了回合钩子时构造,不写 slot。
  *   turnEnd 每个回合至多一次(起过子代理的回合去抖收尾后又被续跑复活时,只算第一次),info 同上(无 reused)另带
  *   outcome:'completed' | 'failed'(结果为错误、没等到结果进程就退出、或进程起不来) | 'stopped'(本回合收到过停止请求),
  *   errorSummary:入口钩子改写过(带 tag)的回合 failed 时,本回合最后一条错误的一行摘要(脱敏、截短);
@@ -1080,6 +1088,13 @@ const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolU
  * · preToolUse(input, ctx) → null | PreToolUse 的 deny 输出(可异步);ctx = { toolUseID, sessionId, cwd, runId }。
  *   守卫只能拒绝:只认 hookSpecificOutput.permissionDecision === 'deny'(输出只保留拒绝与原因);其它返回值、null、
  *   抛错都按没挂接处理(既有判定照常);2 秒没给结果按"检查失效"处理(既有判定照常,记下时刻,见 preToolUseGuardTimeoutAt)。
+ * · sessionOptions(view) → null | { mcpServers?, autoAllow? }(r151c,必须同步返回):冷启建 options 时调用。view 是本槽的只读窄视图
+ *   (sessionId、runId、turnEpoch、guiMode、cwd 的 getter,取的是调用那一刻的值)。mcpServers(对象)并进 options.mcpServers;
+ *   autoAllow(完整工具名的字符串数组)记在本槽:canUseTool 在既有判定之前,只在"名单含此名且挂上它的那个挂接点仍在位"时放行
+ *   (本文件不认识任何工具名;撤掉挂接点即不再放行;没经它挂上工具的槽一概不放行)。抛错、返回 Promise 或形状不对 → 什么都不挂,
+ *   记一行日志。挂着它时复用兼容键多一项 xs:1(开关翻转后该会话下一条消息换新进程)。
+ * · modeChange({ sessionId, mode })(r151c):POST /chat/permission-mode 回 200 时通知(生效或会话没有进程);409 不调。
+ *   同步通知,返回值忽略,抛错只记日志。
  */
 export function registerSessionRuntimeHooks(hooks) {
   if (!hooks || typeof hooks !== 'object') throw new TypeError('registerSessionRuntimeHooks:参数必须是对象');
@@ -1121,7 +1136,8 @@ const turnStartedByRequest = new WeakMap();
 // 上一回合的记录还没报过结束就要被覆盖时,先给它补报一次(判官建议 3;否则绑在它上面的跨会话消息停在 processing
 // 直到重启)。走到这里说明上一回合没经过回合收尾(收尾会先报结束),一律按"被中断"报 stopped(结算成 pending /
 // interrupted;主会话裁定:没等到结果不等于回合出错,不报 failed);此时事件窗已随新回合清空,摘要为 null。(export 仅为可单测。)
-export function notifyTurnStart(slot, pid, reused, tag, req) {
+// r151c:makeParams(可选)= 构造本回合 params 的函数,只在挂接了回合钩子时才调(没挂接 = 不构造)。
+export function notifyTurnStart(slot, pid, reused, tag, req, makeParams) {
   if (!runtimeHooks.turnStart && !runtimeHooks.turnEnd) return;
   const prev = slot.runtimeTurn;
   if (prev && !prev.ended) {
@@ -1134,7 +1150,35 @@ export function notifyTurnStart(slot, pid, reused, tag, req) {
   // startSeq:本回合开始前最后一个事件序号(序号跨回合单调),回合结束时只从它之后的事件里找错误摘要
   slot.runtimeTurn = { epoch: slot.turnEpoch | 0, tag, ended: false, stopRequested: false, startSeq: slot.seq | 0 };
   if (req) turnStartedByRequest.set(req, slot);
-  callRuntimeHook('turnStart', { ...runtimeTurnInfo(slot, pid), reused });
+  callRuntimeHook('turnStart', { ...runtimeTurnInfo(slot, pid), reused, params: typeof makeParams === 'function' ? makeParams() : null });
+}
+
+// r151c:turnStart 的 params.body 收的会话级参数 = handleChatPost 从请求体解构的键去掉 prompt / sessionId / agent。
+export const TURN_PARAM_KEYS = Object.freeze(['cwd', 'model', 'effort', 'addDirs', 'permissionMode', 'globalRead', 'appendSystemPrompt', 'promptSuggestions', 'keepAlive', 'maxBudgetUsd', 'genui']);
+
+// r151c:冷启建 options 时调 sessionOptions 挂接点(没挂接 = 跳过)。见 registerSessionRuntimeHooks 的说明;整体兜住,出错只是不挂。
+function applySessionOptions(slot, options) {
+  const fn = runtimeHooks.sessionOptions;
+  if (!fn) return;
+  const view = Object.freeze({
+    get sessionId() { return slot.sessionId || null; },
+    get runId() { return slot.runId; },
+    get turnEpoch() { return slot.turnEpoch | 0; },
+    get guiMode() { return slot.guiMode; },
+    get cwd() { return slot.cwd || null; },
+  });
+  try {
+    const out = fn(view);
+    if (out == null) return;
+    if (typeof out !== 'object' || typeof out.then === 'function') throw new Error('返回值必须是同步的对象或 null');
+    const { mcpServers, autoAllow } = out;
+    if (mcpServers !== undefined && (!mcpServers || typeof mcpServers !== 'object' || Array.isArray(mcpServers))) throw new Error('mcpServers 必须是对象');
+    if (autoAllow !== undefined && (!Array.isArray(autoAllow) || !autoAllow.every((n) => typeof n === 'string' && n))) throw new Error('autoAllow 必须是工具名数组');
+    if (mcpServers) options.mcpServers = { ...(options.mcpServers || {}), ...mcpServers };
+    if (autoAllow?.length) slot.sessionAutoAllow = { names: new Set(autoAllow), hook: fn };
+  } catch (e) {
+    console.warn(`[r151c] sessionOptions 挂接点出错,本进程不挂会话工具:${e?.message || e}`);
+  }
 }
 // 请求结束时:它开始过的回合所在的槽已被撤下(只有"进程没起来"会在请求期间撤槽),该回合不会再有收尾 → 补报结束。
 function settleTurnStartedByRequest(req) {
@@ -1290,6 +1334,12 @@ export function makeCanUseTool(slot) {
   // suggestions=CLI 生成的"始终允许"规则建议(整组返回即官方 always-allow 语义);
   // decisionReason/toolUseID 透传给前端展示/去重。
   return async (toolName, input, opts = {}) => {
+    // r151c 槽级放行:本槽冷启时经 sessionOptions 挂上的工具里声明免确认的那几个,且挂上它们的挂接点仍在位(见 applySessionOptions)。
+    // 先于下面一切判定;不按名字认(没经它挂上工具的槽、挂接点撤了之后,同名工具照既有规则走)。
+    const preAllowed = slot.sessionAutoAllow;
+    if (preAllowed && preAllowed.hook === runtimeHooks.sessionOptions && preAllowed.names.has(toolName)) {
+      return { behavior: 'allow', updatedInput: input };
+    }
     const boundary = typeof opts.blockedPath === 'string' && opts.blockedPath ? opts.blockedPath : null;
     const ask = () => requestPermission({
       toolName, toolInput: input, sessionId: slot.sessionId, cwd: slot.cwd,
@@ -1516,6 +1566,9 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     // r151a:进程环境里注入的 CLAUDE_CODE_AUTO_MODE_SERVER(spawn 时定死)。只在注入时出现 ——
     // 官方 / 第三方 auto 总开关关时键与改动前逐字相同;开关翻转后该会话下一条消息换新进程。
     ...(ams ? { ams } : {}),
+    // r151c:挂着 sessionOptions(跨会话总开关开)时冷启的进程带会话工具 —— 只在挂着时出现,关时键与改动前逐字相同;
+    // 开关翻转后该会话下一条消息换新进程(带不带工具在 spawn 时定死)。
+    ...(runtimeHooks.sessionOptions ? { xs: 1 } : {}),
   });
 }
 
@@ -1942,7 +1995,8 @@ export async function withTurnLock(key, fn) {
   }
 }
 
-router.post('/chat', async (req, res) => {
+// POST /api/chat 的路由包装(r151c 起抽成命名函数:HTTP 与 startInternalTurn 共用同一个包装)。
+async function chatRoute(req, res) {
   // 带 clientTurnId 的请求先过锁再进主流程(见 withTurnLock);不带 clientTurnId 的老请求
   // (GUI 现状 / bot)直接进,不吃任何新语义。
   const turnId = typeof req.body?.clientTurnId === 'string' && CLIENT_TURN_RE.test(req.body.clientTurnId)
@@ -1955,7 +2009,57 @@ router.post('/chat', async (req, res) => {
   }
   if (!turnId) return handleChatPost(req, res);
   return withTurnLock(`${turnPrincipal(req)}|${turnId}`, () => handleChatPost(req, res));
-});
+}
+router.post('/chat', chatRoute);
+
+// ── r151c:服务端自己起回合的内部入口(跨会话自动处理用)─────────────────────────────────────────────
+// 不经 HTTP:造一对适配对象,调与 POST /api/chat 同一个路由包装(输入闸门、工作目录检查、入口钩子、复用 / 冷启、回合通知
+// 全部同一条路)。internal 挂在 req 的模块私有 Symbol 上 —— HTTP 请求在结构上带不了它(入口钩子 ctx.internal 恒为 null)。
+// 适配对象是白名单 Proxy:主流程将来若读了名单外的属性,这里立即抛错(而不是静默拿到 undefined 走错分支)。
+const INTERNAL_TURN = Symbol('cgui-internal-turn');
+const INTERNAL_REQ_KEYS = new Set(['body', 'headers', 'socket', 'query', INTERNAL_TURN]);
+const INTERNAL_RES_KEYS = new Set(['statusCode', 'status', 'json']);
+function strictAdapter(target, allowed, label) {
+  const check = (prop) => {
+    if (!allowed.has(prop)) throw new TypeError(`内部回合的 ${label} 适配对象不提供 ${String(prop)}`);
+  };
+  return new Proxy(target, {
+    get(t, prop, receiver) {
+      // async 函数 return res 时 Promise 解析会探测 then:按"没有"答,不算越界
+      if (prop === 'then') return undefined;
+      check(prop);
+      return Reflect.get(t, prop, receiver);
+    },
+    set(t, prop, value, receiver) { check(prop); return Reflect.set(t, prop, value, receiver); },
+    has(t, prop) { check(prop); return Reflect.has(t, prop); },
+    deleteProperty(t, prop) { check(prop); return Reflect.deleteProperty(t, prop); },
+    defineProperty(t, prop, desc) { check(prop); return Reflect.defineProperty(t, prop, desc); },
+  });
+}
+/** 造一对内部回合的适配对象(export 仅为可单测)。sent() → 第一次应答 { status, body },还没应答为 null。 */
+export function makeInternalTurnAdapters(body, internal) {
+  let sent = null;
+  const req = strictAdapter({ body, headers: {}, socket: { remoteAddress: '127.0.0.1' }, query: {}, [INTERNAL_TURN]: internal }, INTERNAL_REQ_KEYS, 'req');
+  const res = strictAdapter({
+    statusCode: 200,
+    status(code) { this.statusCode = code; return this; },
+    json(payload) { if (!sent) sent = { status: this.statusCode, body: payload }; return this; },
+  }, INTERNAL_RES_KEYS, 'res');
+  return { req, res, sent: () => sent };
+}
+/**
+ * 服务端内部起一个回合 → Promise<{ status, body }>(与同一请求体经 HTTP POST /api/chat 得到的应答相同)。
+ * internal:非 null 的对象,原样交给入口钩子(ctx.internal)。与 HTTP 的唯一行为差别:同会话有正在跑的回合时立即回
+ * 409 CHAT_SESSION_BUSY,不等待、不中止它(自动处理永远不打断用户的回合)。主流程抛错 → 本 Promise 拒绝;主流程没应答 → 抛错。
+ */
+export async function startInternalTurn(body, internal) {
+  if (!internal || typeof internal !== 'object') throw new TypeError('startInternalTurn:internal 必须是对象');
+  const { req, res, sent } = makeInternalTurnAdapters(body, internal);
+  await chatRoute(req, res);
+  const out = sent();
+  if (!out) throw new Error('内部回合没有应答');
+  return out;
+}
 
 // r145 F4:SDK 泵的 catch 用它判"本 slot 是不是被主动中止的"(停止 / 关闭 / 看门狗拆进程都走 slot.abort.abort())。
 // 是 → 不发 error 行,否则流里多一条 "Claude Code process aborted by user",前端当成报错。
@@ -2052,8 +2156,10 @@ async function handleChatPost(req, res) {
 
   // r151b X.1.9:/chat 路由入口改写位(没挂接 = 跳过,不多 await)。拒绝 → 撤掉本回合记录、回它给的应答、不起进程;
   // 改写 → 本回合推给模型的内容换成它给的(R13 指纹仍按请求原文算,同 clientTurnId 重发照旧命中上面的记录)。
+  // r151c:经 startInternalTurn 起的回合 = 调用方给的对象;HTTP 请求恒为 null(Symbol 键,请求里带不进来)。
+  const internal = req[INTERNAL_TURN] ?? null;
   const entry = runtimeHooks.chatEntry
-    ? await runChatEntryHook({ body: req.body, sessionId: sessionId || null, clientTurnId, principal })
+    ? await runChatEntryHook({ body: req.body, sessionId: sessionId || null, clientTurnId, principal, internal })
     : null;
   if (entry?.reject) {
     dropTurnRecord(turnRecord);
@@ -2075,6 +2181,15 @@ async function handleChatPost(req, res) {
   // GUI 的 default/acceptEdits/bypassPermissions 一律用 SDK 'default',放行/弹窗由 canUseTool
   // 按 slot.guiMode 决定(集中分级,复刻旧 hook 的语义)。
   const sdkPermMode = chosenMode === 'plan' ? 'plan' : chosenMode === 'auto' ? 'auto' : 'default';
+  // r151c:回合开始通知的 params(只在挂接了回合钩子时由 notifyTurnStart 调用构造)。请求原值,没带为 null;model 是解析后的。
+  const turnParams = () => ({
+    body: {
+      cwd, model, effort: effort ?? null, addDirs: addDirs ?? null, permissionMode: requestedPermissionMode ?? null,
+      globalRead: globalRead ?? null, appendSystemPrompt: appendSystemPrompt ?? null, promptSuggestions: promptSuggestions ?? null,
+      keepAlive: keepAlive ?? null, maxBudgetUsd: maxBudgetUsd ?? null, genui: genui ?? null,
+    },
+    guiMode: chosenMode,
+  });
 
   // additionalDirectories = SDK 的文件访问沙箱边界。越界访问现经 canUseTool 第三参的
   // blockedPath 透出 → makeCanUseTool 弹"越界访问"卡,用户可仅本次放行或授权目录
@@ -2205,7 +2320,7 @@ async function handleChatPost(req, res) {
       s.permissionMode = chosenMode;
       // r151a:服务端门控降级 —— 复用的进程不会再发 init,降级信号在本回合开头直接补发。
       if (autoGate.downgraded) deliverModeMismatch(s, autoGate.downgraded);
-      notifyTurnStart(s, alivePid, true, turnTag); // r151b:回合开始(没挂接 = 跳过)
+      notifyTurnStart(s, alivePid, true, turnTag, undefined, turnParams); // r151b:回合开始(没挂接 = 跳过)
       s.input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
       // R13:复用同一进程开新回合 —— 记录绑到本回合的 turnEpoch 上(旧回合的记录早已
       // 在它自己的收尾点结算,pid→record 的映射换成这一回合,停止才不会停错回合)。
@@ -2223,6 +2338,8 @@ async function handleChatPost(req, res) {
   // pumpEnded 或被 delete 再冷启;非阻塞短轮询到上限,超时才强制 abort 兜底(interrupt
   // 已在飞,极少走到)。idle 可复用 slot 不在此列(上面复用块已 return),不误伤 shell 保活。
   if (sessionId) {
+    // r151c 旁路 (a):内部起的回合(跨会话自动处理)遇到同会话正在跑的回合 → 立即 409,不等待、不中止它(自动处理永远不打断用户的回合)。
+    if (internal && findBusySlot(activeProcesses, sessionId)) return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
     const tearingDown = () => {
       for (const s of activeProcesses.values()) {
         if (s.sessionId !== sessionId) continue;
@@ -2247,6 +2364,8 @@ async function handleChatPost(req, res) {
       // 走到这里 lingering 必无活 shell(有 shell 已上面 break 清空),是正在停止/被弃用的进程,
       // 强制 abort 是正确兜底,避免同 sid 双 --resume 抢会话锁。
       lingering.closing = true;
+      // r151c 旁路 (b):被后到的请求中止的回合按"收到停止请求"结束(回合结束通知报 stopped,而不是 failed)
+      if (lingering.runtimeTurn) lingering.runtimeTurn.stopRequested = true;
       try { lingering.abort?.abort(); } catch {}
       try { lingering.input?.close(); } catch {}
       const hardDeadline = Date.now() + 1000;
@@ -2350,7 +2469,7 @@ async function handleChatPost(req, res) {
   slot.nulWatcher = startWinNulWatcher(workingDir);
   if (turnRecord) bindTurnRecord(turnRecord, procId, slot); // R13:本回合的权威身份就此落位
   armTurnStartup(slot); // R13:冷启路径才等初始化(复用路径上面已置 turnSawLine=true)
-  notifyTurnStart(slot, procId, false, turnTag, req); // r151b:回合开始(没挂接 = 跳过)
+  notifyTurnStart(slot, procId, false, turnTag, req, turnParams); // r151b:回合开始(没挂接 = 跳过)
 
   // 首条用户消息(streaming-input);保持 input 打开作 control 通道。
   input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
@@ -2483,6 +2602,8 @@ async function handleChatPost(req, res) {
       promptPreview: String(prompt).slice(0, 60),
     }));
   }
+
+  applySessionOptions(slot, options); // r151c:按会话挂工具(没挂接 = 跳过)
 
   let q;
   try {
@@ -2931,6 +3052,7 @@ router.post('/chat/permission-mode', async (req, res) => {
       error: failed[0]?.error || '权限档位切换被 CLI 拒绝',
     });
   }
+  callRuntimeHook('modeChange', { sessionId, mode }); // r151c:切档生效(或会话没有进程)时通知(没挂接 = 跳过)
   res.json({ ok: true, attempted, delivered, failed });
 });
 
