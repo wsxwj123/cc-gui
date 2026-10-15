@@ -9,7 +9,7 @@
 import { randomUUID, timingSafeEqual } from 'crypto';
 import { access, readdir, readFile } from 'fs/promises';
 import { constants as fsConstants, readFileSync, statSync } from 'fs';
-import { join, posix as posixPath, win32 as win32Path } from 'path';
+import { dirname, join, resolve, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
 import { readXsEnabledSync, readXsPrefsSync, updatePrefs } from '../routes/prefs.js';
@@ -612,23 +612,37 @@ const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合
 // 该会话下一次档案成功落盘(或内容没变、无需落盘)后清掉。只在内存:服务重启后丢失,之后按盘上的档案判。
 const profileModeUnknown = new Set(); // 会话 id(小写)
 
-let accountCache = { key: null, accountId: '' };
+// ~/.claude.json 的两项读数:登录账号(provider 指纹用)与哪些作用域配了同名 MCP 服务(免确认守卫用,见 shadowingXsServerScopes)。
+// 文件可能很大且 CLI 常写:按修改时间 + 大小缓存解析结果,只留这两项。
+const EMPTY_CLAUDE_JSON = Object.freeze({ key: null, accountId: '', userXs: false, localXsDirs: Object.freeze([]) });
+let claudeJsonCache = EMPTY_CLAUDE_JSON;
+function readClaudeJsonSync() {
+  const file = join(homedir(), '.claude.json');
+  try {
+    const st = statSync(file);
+    const key = `${st.mtimeMs}:${st.size}`;
+    if (claudeJsonCache.key !== key) {
+      let j = null;
+      try { j = JSON.parse(readFileSync(file, 'utf-8')); } catch { /* 读不到 / 损坏 → 全空 */ }
+      const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+      const root = obj(j);
+      const id = obj(root.oauthAccount).accountUuid;
+      const projects = obj(root.projects);
+      claudeJsonCache = {
+        key, accountId: typeof id === 'string' ? id : '',
+        userXs: !!obj(root.mcpServers)[XS_TOOLS_SERVER],
+        localXsDirs: Object.keys(projects).filter((k) => !!obj(obj(projects[k]).mcpServers)[XS_TOOLS_SERVER]),
+      };
+    }
+  } catch { claudeJsonCache = EMPTY_CLAUDE_JSON; }
+  return claudeJsonCache;
+}
 /** GUI 起会话时 CLI 读的那份配置里的 provider 身份(与起进程同源,不读宿主进程环境变量)。凭据原文只留在内存里、不出本函数的调用方。 */
 function readProviderIdentitySync() {
   let settings = null;
   try { settings = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf-8')); } catch { /* 没有 / 损坏 → 全空 */ }
-  const accountPath = join(homedir(), '.claude.json');
-  try {
-    const st = statSync(accountPath); // ~/.claude.json 可能很大且 CLI 常写:按修改时间 + 大小缓存解析结果
-    const key = `${st.mtimeMs}:${st.size}`;
-    if (accountCache.key !== key) {
-      let id = '';
-      try { id = JSON.parse(readFileSync(accountPath, 'utf-8'))?.oauthAccount?.accountUuid; } catch { /* 读不到为空串 */ }
-      accountCache = { key, accountId: typeof id === 'string' ? id : '' };
-    }
-  } catch { accountCache = { key: null, accountId: '' }; }
   const s = settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : {};
-  return { settingsEnv: s.env, apiKeyHelper: s.apiKeyHelper, accountId: accountCache.accountId };
+  return { settingsEnv: s.env, apiKeyHelper: s.apiKeyHelper, accountId: readClaudeJsonSync().accountId };
 }
 
 /** 当前配置的 provider 指纹(salt 取自档案文件,见 readXsProfiles)。 */
@@ -1269,32 +1283,42 @@ async function toolRowsWithSender(senderId) {
 // 发送方 = 调用那一刻本槽的会话 id、运行 id、回合序号与界面档位(view 的 getter 每次现取)。
 const senderOf = (view) => ({ sessionId: view.sessionId, runId: view.runId, turnEpoch: view.turnEpoch, guiMode: view.guiMode });
 
-// 用户 / 项目自己配了同名服务:挂上 GUI 服务的进程里它被 GUI 的同名服务代替(SDK 经 --mcp-config 传入的优先),记一行日志。
-// 只读、不阻塞冷启;~/.claude.json 可能很大,先做子串判断,含这个名字才解析。
-async function noteShadowedUserServer(cwd) {
-  const has = (j, ...path) => !!path.reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), j)?.[XS_TOOLS_SERVER];
-  const where = [];
-  try {
-    const raw = await readFile(join(homedir(), '.claude.json'), 'utf-8');
-    if (raw.includes(`"${XS_TOOLS_SERVER}"`)) {
-      const j = JSON.parse(raw);
-      if (has(j, 'mcpServers')) where.push('用户');
-      if (cwd && has(j, 'projects', cwd, 'mcpServers')) where.push('本地');
-    }
-  } catch { /* 没有 / 读不出 = 不记 */ }
-  if (cwd) {
-    try { if (has(JSON.parse(await readFile(join(cwd, '.mcp.json'), 'utf-8')), 'mcpServers')) where.push('项目'); } catch { /* 同上 */ }
+// 用户 / 本地 / 项目自己配了同名服务 ccgui-sessions 的作用域(冷启时同步判,决定本槽给不给 list_sessions 免确认)。
+// 实测(CLI 2.1.x,用户级与项目级各一次):两份服务都会连上;同名工具(list_sessions / send_message)执行的是 CC-GUI 的,
+// 外来那份独有的工具也以 mcp__ccgui-sessions__* 出现在工具表里。同名工具归哪一份是 CLI 没写明的行为,所以配了同名服务的
+// 会话不给免确认(list_sessions 按当前档位的规则),免得按工具名放行了外来工具。本地作用域(~/.claude.json 的 projects)
+// 按目录前缀认(Windows 上斜杠统一、不分大小写),项目作用域(.mcp.json)从工作目录逐级往上找:宁可多认,多认只是多一次确认。
+const normDir = (p) => (process.platform === 'win32' ? String(p).replace(/\\/g, '/').toLowerCase() : String(p)).replace(/\/+$/, '');
+function shadowingXsServerScopes(cwd) {
+  const scopes = [];
+  const cj = readClaudeJsonSync();
+  if (cj.userXs) scopes.push('用户');
+  if (typeof cwd !== 'string' || !cwd) return scopes;
+  const here = normDir(cwd);
+  if (cj.localXsDirs.some((k) => { const d = normDir(k); return here === d || here.startsWith(`${d}/`); })) scopes.push('本地');
+  for (let dir = resolve(cwd), i = 0; i < 64; i += 1) {
+    try { if (JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf-8'))?.mcpServers?.[XS_TOOLS_SERVER]) { scopes.push('项目'); break; } } catch { /* 没有 / 读不出 */ }
+    const up = dirname(dir);
+    if (up === dir) break;
+    dir = up;
   }
-  if (where.length) console.warn(`[xsession] ${where.join('、')}配置里有同名 MCP 服务 ${XS_TOOLS_SERVER},本会话进程里由 CC-GUI 的同名服务代替`);
+  return scopes;
 }
 
 /**
  * sessionOptions 挂接点(chat.js 冷启建 options 时同步调用):给本槽挂 ccgui-sessions 服务,list_sessions 免确认
  * (只在本槽、且本挂接点仍在位时;send_message 照 MCP 工具既有的档位规则)。总开关关时本挂接点不在,工具不存在。
+ * 用户 / 本地 / 项目配置里有同名服务时照样挂,但不给免确认,记一行日志(见 shadowingXsServerScopes)。
  */
 export function xsSessionOptions(view) {
-  noteShadowedUserServer(view.cwd).catch(() => {});
-  return { mcpServers: { [XS_TOOLS_SERVER]: createXsToolsServer(xsToolHandlersFor(view)) }, autoAllow: [XS_LIST_SESSIONS_TOOL] };
+  let shadowed = null;
+  try { shadowed = shadowingXsServerScopes(view.cwd); } catch (e) {
+    console.warn(`[xsession] 检查同名 MCP 服务出错,本会话进程里 ${XS_LIST_SESSIONS_TOOL} 按当前档位确认:${e?.message || e}`);
+  }
+  if (shadowed?.length) {
+    console.warn(`[xsession] ${shadowed.join('、')}配置里有同名 MCP 服务 ${XS_TOOLS_SERVER}:本会话进程里两份同时加载,${XS_LIST_SESSIONS_TOOL} 不免确认、按当前档位确认`);
+  }
+  return { mcpServers: { [XS_TOOLS_SERVER]: createXsToolsServer(xsToolHandlersFor(view)) }, autoAllow: shadowed?.length === 0 ? [XS_LIST_SESSIONS_TOOL] : [] };
 }
 /** 某个槽(view)的两个工具处理函数;xsSessionOptions 用它建服务,单测可直接调。 */
 export function xsToolHandlersFor(view) {

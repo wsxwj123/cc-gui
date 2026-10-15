@@ -8,7 +8,7 @@
 //   ④ 整次失败的先后:关(XS_DISABLED)→ 发送方 id 取不到(XS_INTERNAL)→ 长度 / 数量 / 空白(XS_INVALID_INPUT)→ 超 8 个 →
 //      超 32768 字节 → 本回合超 16 → 读会话列表失败 / 写盘失败(XS_INTERNAL);都是一条不发。
 //   ⑤ 单项失败(不存在 / 重名附 candidates / 自己 / 满 50)不影响其它目标、不算报错;失败项不计入 16。
-//   ⑥ 用户配置里的同名服务:冷启时记一行日志。
+//   ⑥ 用户 / 本地 / 项目配置里的同名服务:冷启时记一行日志;照样挂 GUI 的服务,但 list_sessions 不免确认(.mcp.json 往上逐级找)。
 // node tests/unit/check-r151c-xs-tools.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, realpathSync, utimesSync, rmSync } from 'node:fs';
@@ -248,16 +248,36 @@ try {
   eq([G.self.id, G.self.name], [ghost.slice(0, 8), '未命名会话'], '记录一直不在:短 id 照算、标题按未命名');
   ok(Date.now() - t1 < 2500, `一直不在时有限次等待后返回(${Date.now() - t1}ms)`);
 
-  // ── ⑥ 同名服务:冷启时记一行日志 ──
+  // ── ⑥ 同名服务:冷启时记一行日志;用户 / 本地 / 项目配置里有同名服务的会话照样挂 GUI 的服务,但 list_sessions 不免确认 ──
   writeFileSync(join(SHADOW, '.mcp.json'), JSON.stringify({ mcpServers: { 'ccgui-sessions': { command: 'echo' } } }));
+  const viewAt = (cwd) => ({ sessionId: A, runId: 'r', turnEpoch: 0, guiMode: 'default', cwd });
   const warns = [];
   const origWarn = console.warn;
   console.warn = (...a) => { warns.push(a.join(' ')); };
-  try {
-    xs.xsSessionOptions({ sessionId: A, runId: 'r', turnEpoch: 0, guiMode: 'default', cwd: SHADOW });
-    for (let i = 0; i < 40 && !warns.some((w) => w.includes('同名 MCP 服务')); i += 1) await sleep(25);
-  } finally { console.warn = origWarn; }
+  let o6;
+  try { o6 = xs.xsSessionOptions(viewAt(SHADOW)); } finally { console.warn = origWarn; }
   ok(warns.some((w) => w.includes('项目') && w.includes('同名 MCP 服务 ccgui-sessions')), `同名服务记一行日志(${warns.join(' | ').slice(0, 200)})`);
+  eq([o6.mcpServers['ccgui-sessions']?.type, o6.autoAllow], ['sdk', []], '项目配置(.mcp.json)里有同名服务:照样挂 GUI 的服务,list_sessions 不进免确认名单');
+  mkdirSync(join(SHADOW, 'sub', 'deeper'), { recursive: true });
+  eq(xs.xsSessionOptions(viewAt(join(SHADOW, 'sub', 'deeper'))).autoAllow, [], '.mcp.json 在上级目录也算');
+  const n6 = calls.length;
+  const r6 = await api('POST', '/chat', { prompt: 'r151c 工具 同名服务', cwd: SHADOW, permissionMode: 'default', keepAlive: true });
+  eq(r6.status, 200, `同名服务的工作目录冷启 200(${JSON.stringify(r6.body).slice(0, 160)})`);
+  const sh = calls[n6].options;
+  ok(sh.mcpServers?.['ccgui-sessions']?.type === 'sdk', '冷启 options 照样带 GUI 的 ccgui-sessions');
+  ok(!(await settlesWithin(sh.canUseTool(LS, {}, { toolUseID: 'r151c-t6' }), 300)), '同名服务的会话里 list_sessions 不免确认(default 档走既有权限卡)');
+  const CJ = join(HOME, '.claude.json');
+  let cj0 = '{}';
+  try { cj0 = readFileSync(CJ, 'utf-8'); } catch { /* 没有 */ }
+  const SRV = { 'ccgui-sessions': { command: 'echo' } };
+  try {
+    writeFileSync(CJ, JSON.stringify({ mcpServers: SRV }));
+    eq(xs.xsSessionOptions(viewAt(WORK)).autoAllow, [], '用户配置(~/.claude.json 的 mcpServers)里有同名服务 → 不免确认');
+    writeFileSync(CJ, JSON.stringify({ projects: { [WORK]: { mcpServers: SRV } } }));
+    eq(xs.xsSessionOptions(viewAt(join(WORK, 'pkg'))).autoAllow, [], '本地配置(~/.claude.json 的 projects[目录])里有同名服务 → 该目录及子目录不免确认');
+    writeFileSync(CJ, JSON.stringify({ projects: { [`${WORK}-other`]: { mcpServers: SRV } }, mcpServers: { other: { command: 'echo' } } }));
+    eq(xs.xsSessionOptions(viewAt(WORK)).autoAllow, [LS], '前缀相似的别的目录、不同名的服务不算 → 照常免确认');
+  } finally { writeFileSync(CJ, cj0); }
 
   await client.close().catch(() => {});
   console.log(`check-r151c-xs-tools: ${checks} 项全部通过`);
