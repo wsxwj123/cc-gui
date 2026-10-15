@@ -1178,6 +1178,20 @@ const toolRows = () => {
   if (!loadToolRows) throw new Error('会话列表读取函数未登记');
   return loadToolRows();
 };
+// 新会话首回合:CLI 的会话记录是攒批写盘的,模型很快就调工具时发送方自己可能还不在会话列表里(标题取不到,
+// self.name 与来源名都会成"未命名会话")。这时每 150ms 看一次它的记录文件,最多看 8 次,出现了就重读一次会话行。
+// 只在发送方不在列表里时才等(真实模型首次回复通常要几秒,记录早已落盘,不会走到这里)。
+const SELF_ROW_POLLS = 8;
+const SELF_ROW_POLL_MS = 150;
+async function toolRowsWithSender(senderId) {
+  const rows = await toolRows();
+  if (!isIdString(senderId) || rows.some((r) => sameId(r.sessionId, senderId))) return rows;
+  for (let i = 0; i < SELF_ROW_POLLS; i += 1) {
+    await new Promise((r) => setTimeout(r, SELF_ROW_POLL_MS));
+    if (await findSessionFile(senderId)) return toolRows();
+  }
+  return rows;
+}
 // 发送方 = 调用那一刻本槽的会话 id、运行 id、回合序号与界面档位(view 的 getter 每次现取)。
 const senderOf = (view) => ({ sessionId: view.sessionId, runId: view.runId, turnEpoch: view.turnEpoch, guiMode: view.guiMode });
 
@@ -1210,9 +1224,10 @@ export function xsSessionOptions(view) {
 }
 /** 某个槽(view)的两个工具处理函数;xsSessionOptions 用它建服务,单测可直接调。 */
 export function xsToolHandlersFor(view) {
+  const rows = () => toolRowsWithSender(view.sessionId);
   return createXsToolHandlers({
-    list: ({ query }) => listAiSessions({ sender: senderOf(view), query }, toolRows),
-    send: ({ to, message }) => sendAiMessages({ sender: senderOf(view), to, message }, toolRows),
+    list: ({ query }) => listAiSessions({ sender: senderOf(view), query }, rows),
+    send: ({ to, message }) => sendAiMessages({ sender: senderOf(view), to, message }, rows),
   });
 }
 

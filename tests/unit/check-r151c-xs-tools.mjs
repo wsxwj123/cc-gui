@@ -11,7 +11,7 @@
 //   ⑥ 用户配置里的同名服务:冷启时记一行日志。
 // node tests/unit/check-r151c-xs-tools.mjs
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync, utimesSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, realpathSync, utimesSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -225,6 +225,28 @@ try {
   eq(parse(await h.send_message({ to: OTHERS.slice(10, 17), message: body })).isError, false, '9 + 7 = 16 照发');
   S.turnEpoch = 3;
   eq(parse(await h.send_message({ to: [OTHERS[20]], message: body })).isError, false, '下一回合重新计数');
+
+  // ── 新会话首回合:发送方的记录文件晚一点才落盘 → 等它出现后再取标题;一直不出现 → 有限次等待后照常返回 ──
+  const late = { ...S, sessionId: randomUUID(), turnEpoch: 1 };
+  const hLate = xs.xsToolHandlersFor({ get sessionId() { return late.sessionId; }, get runId() { return late.runId; }, get turnEpoch() { return late.turnEpoch; }, get guiMode() { return late.guiMode; }, get cwd() { return late.cwd; } });
+  const lateTitle = 'R151C 工具 晚落盘的发送方';
+  setTimeout(() => {
+    const sid = mk(lateTitle, 0.1); // mk 生成新 id:把它当成 late 的记录文件改名过去
+    prefs.customTitles[late.sessionId] = lateTitle; delete prefs.customTitles[sid]; savePrefs();
+    const src = join(PROJ_DIR, `${sid}.jsonl`);
+    writeFileSync(join(PROJ_DIR, `${late.sessionId}.jsonl`), readFileSync(src, 'utf8').replaceAll(sid, late.sessionId));
+    rmSync(src);
+  }, 300);
+  const t0 = Date.now();
+  const LL = parse(await hLate.list_sessions({})).json;
+  eq(LL.self.name, lateTitle, '发送方记录晚落盘:等到后取到自己的标题');
+  ok(Date.now() - t0 < 1500, '等待有上限');
+  const ghost = randomUUID();
+  const hGhost = xs.xsToolHandlersFor({ sessionId: ghost, runId: 'r151c-ghost', turnEpoch: 1, guiMode: 'default', cwd: WORK });
+  const t1 = Date.now();
+  const G = parse(await hGhost.list_sessions({})).json;
+  eq([G.self.id, G.self.name], [ghost.slice(0, 8), '未命名会话'], '记录一直不在:短 id 照算、标题按未命名');
+  ok(Date.now() - t1 < 2500, `一直不在时有限次等待后返回(${Date.now() - t1}ms)`);
 
   // ── ⑥ 同名服务:冷启时记一行日志 ──
   writeFileSync(join(SHADOW, '.mcp.json'), JSON.stringify({ mcpServers: { 'ccgui-sessions': { command: 'echo' } } }));
