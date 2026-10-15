@@ -258,14 +258,21 @@ export async function dismissMessage(id) {
  * DELETE /api/sessions/:sessionId 删掉记录文件之后调用:以它为目标、还没结束的消息连同正文一并删除(否则待处理条数与
  * Dock 角标会留下用户没处可清的数字),每条广播一次 xs:message。记录已不在,广播里 status 记为 dismissed(前端按
  * "已结束"收起卡片、减掉计数)。不看总开关:关着时留下的待处理,之后打开照样会计数;收件箱文件不存在时什么都不写。
- * 已结束(done / dismissed)的只剩元数据,不动。返回删掉的条数。
+ * 已结束(done / dismissed)的只剩元数据:其中该会话的标题(来源或目标一侧)抹成空字符串(标题常是首条提问原文,
+ * 会话删了不再留着;接口 X.3.6 审计后补)。以它为来源、还没结束的消息不动(卡片与信封还要用来源标题)。返回删掉的条数。
  */
 export async function dropXsMessagesForSession(sessionId) {
   if (!isIdString(sessionId)) return 0;
   const removed = await mutateXsInbox((messages) => {
     const gone = [];
     for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (sameId(messages[i].to?.sessionId, sessionId) && isOpenStatus(messages[i].status)) gone.unshift(...messages.splice(i, 1));
+      const m = messages[i];
+      if (isOpenStatus(m.status)) {
+        if (sameId(m.to?.sessionId, sessionId)) gone.unshift(...messages.splice(i, 1));
+        continue;
+      }
+      if (m.to && sameId(m.to.sessionId, sessionId) && m.to.title) m.to.title = '';
+      if (m.from && sameId(m.from.sessionId, sessionId) && m.from.title) m.from.title = '';
     }
     return gone; // 存储层在写盘成功后删掉这些消息的正文
   });

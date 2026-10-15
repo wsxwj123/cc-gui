@@ -337,6 +337,41 @@ try {
     await waitFor(() => idleOf(pid), '普通回合收尾');
     unhook();
   }
+
+  // ── 接口(审计后补):会话在本 GUI 里被删除时,已结束记录里该会话的标题抹成空字符串 ──────────────────────────────
+  {
+    const store = await import('../../server/services/xsession-store.js');
+    const PROJ = '-r151b-audit-del';
+    const projDir = join(HOME, '.claude', 'projects', PROJ);
+    mkdirSync(projDir, { recursive: true });
+    const S = '5a5a5a5a-0000-4000-8000-0000000000a1'; const T = '5b5b5b5b-0000-4000-8000-0000000000b2'; const O = '5c5c5c5c-0000-4000-8000-0000000000c3';
+    for (const sid of [S, T]) writeFileSync(join(projDir, `${sid}.jsonl`), `${JSON.stringify({ type: 'user', uuid: `${sid.slice(0, 8)}-u`, sessionId: sid, message: { role: 'user', content: '你好' } })}\n`);
+    const rows = [{ sessionId: S, title: '源会话标题', projectDir: WORK }, { sessionId: T, title: '目标会话标题', projectDir: WORK }, { sessionId: O, title: '其它会话', projectDir: WORK }];
+    const send = async (from, to) => (await xs.sendManualMessages({ to: [to], body: `R151B 删会话 ${from.slice(0, 2)}→${to.slice(0, 2)}`, fromSessionId: from }, rows))[0].id;
+    const m1 = await send(S, T); // 未结束,来源 S
+    const m2 = await send(S, O); await xs.dismissMessage(m2); // 已结束,来源 S
+    const m3 = await send(O, T); await xs.dismissMessage(m3); // 已结束,目标 T
+    const m4 = await send(O, S); // 未结束,目标 S → 删 S 时删掉
+    const m5 = await send(T, O); // 未结束,来源 T
+    const titles = async () => Object.fromEntries((await store.listXsMessages()).map((m) => [m.id, [m.status, m.from.title, m.to.title]]));
+    let r = await api('DELETE', `/sessions/${S}?projectHash=${PROJ}`);
+    eq(r.status, 200, '删会话 S');
+    let t = await titles();
+    eq([t[m1], t[m2], t[m3], t[m4], t[m5]], [
+      ['pending', '源会话标题', '目标会话标题'], // 以 S 为来源、未结束:卡片还要用来源标题,不动
+      ['dismissed', '', '其它会话'], // 已结束、来源是 S → 来源标题抹空
+      ['dismissed', '其它会话', '目标会话标题'],
+      undefined, // 以 S 为目标、未结束 → 删除(既有行为)
+      ['pending', '目标会话标题', '其它会话'],
+    ], '删 S:已结束记录里 S 的标题抹成空串,其余不动');
+    r = await api('DELETE', `/sessions/${T}?projectHash=${PROJ}`);
+    t = await titles();
+    eq([t[m1], t[m2], t[m3], t[m5]], [undefined, ['dismissed', '', '其它会话'], ['dismissed', '其它会话', ''], ['pending', '目标会话标题', '其它会话']],
+      '删 T:以 T 为目标的未结束消息删除;已结束记录里 T 的标题抹空;以 T 为来源的未结束消息不动');
+    const pub = (await xs.listInboxMessages({ sessionId: O, statuses: new Set(['dismissed']) })).find((m) => m.id === m2);
+    eq(pub.from.title, '', '对外的消息对象里 from.title 为空字符串');
+    await xs.dismissMessage(m5); // 收尾:不给后面几节留未结束的消息
+  }
 } finally {
   try { await chat.closeAllPersistentProcesses(); } catch {}
   http?.server.close();
