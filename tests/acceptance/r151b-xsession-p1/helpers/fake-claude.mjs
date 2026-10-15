@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// r151b 假 claude CLI(从 r151a 同名文件复制;改动:收到的每条用户消息原文记进 <CTL>/inputs.jsonl;消息里带 R151BERR 时回合以出错收场)。
+// r151b 假 claude CLI(从 r151a 同名文件复制;改动:收到的每条用户消息原文记进 <CTL>/inputs.jsonl;消息里带 R151BERR 时回合以出错收场;
+//   收到跨会话信封(文本以 "<cross-session-message " 开头)时照真 CLI 2.1.296 的写法记进会话记录,默认回复不回显原文,见 envelopeUserLine)。
 // 原说明:挂在隔离实例的 PATH 上。不发任何网络请求。三件事:
 // 1) 记录:每次被拉起都往 <CTL>/spawn.jsonl 记一行 { pid, sid, cwd, argv, mode, hasAutoModeServer, autoModeServer, interactive };
 //    宿主发来的每个控制请求记进 <CTL>/control.jsonl(set_permission_mode 等);本进程发出的权限询问的答复记进 <CTL>/perm-responses.jsonl。
@@ -100,10 +101,29 @@ function askHost(request, file, timeoutMs) {
   });
 }
 
+// 跨会话信封:收到的文本以 "<cross-session-message " 开头。只有这一种输入走下面的写法,其它输入照旧。
+// 真 CLI 2.1.296 对能严格解析的信封,会话记录里写的不是普通提问,而是 isMeta:true、promptSource:"system"、turnOrigin:"peer"、
+// origin:{ kind:"peer", from, name, body, hostInjected:true } 的 user 行(body = 信封里的正文,原样),文本套上固定前后缀;
+// 写法照本套件 x23-history-live.spec.mjs 里取自真 CLI 实录的历史夹具。解析不出来时 origin 不带 name / body(文本按原文)。
+// 真 CLI 不拿这类消息做摘要,所以这一回合不写 summary 行;没有脚本时的默认回复是固定一句,不回显信封。
+const XS_HEAD = '<cross-session-message ';
+const XS_STRICT = /^<cross-session-message from="([^"]*)" from-name="([^"]*)">\n([\s\S]*)\n<\/cross-session-message>$/;
+const XS_PREFIX = 'Another Claude session sent a message:\n';
+const XS_SUFFIX = '\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf.';
+const XS_DEFAULT_REPLY = 'R151-REPLY 已收到跨会话消息';
+function envelopeUserLine(text, uuid) {
+  const line = { ...base(), type: 'user', uuid, parentUuid: null, isMeta: true, promptSource: 'system', turnOrigin: 'peer' };
+  const m = XS_STRICT.exec(text);
+  if (m) return { ...line, origin: { kind: 'peer', from: m[1], name: m[2], body: m[3], hostInjected: true }, message: { role: 'user', content: `${XS_PREFIX}${text}${XS_SUFFIX}` } };
+  const f = /^<cross-session-message\s[^>]*?\bfrom="([^"]*)"/.exec(text);
+  return { ...line, origin: { kind: 'peer', ...(f ? { from: f[1] } : {}), hostInjected: true }, message: { role: 'user', content: text } };
+}
+
 async function runTurn(text) {
-  transcript({ type: 'summary', summary: String(text).slice(0, 40) || '新会话', leafUuid: crypto.randomUUID() });
+  const envelope = String(text).startsWith(XS_HEAD);
+  if (!envelope) transcript({ type: 'summary', summary: String(text).slice(0, 40) || '新会话', leafUuid: crypto.randomUUID() });
   const userUuid = crypto.randomUUID();
-  transcript({ ...base(), type: 'user', uuid: userUuid, parentUuid: null, message: { role: 'user', content: text } });
+  transcript(envelope ? envelopeUserLine(text, userUuid) : { ...base(), type: 'user', uuid: userUuid, parentUuid: null, message: { role: 'user', content: text } });
   let steps = null;
   const m = /R151S:([A-Za-z0-9_.-]+)/.exec(text);
   if (m) { try { steps = JSON.parse(fs.readFileSync(path.join(CTL, 'scripts', `${m[1]}.json`), 'utf8')); } catch { steps = null; } }
@@ -115,7 +135,7 @@ async function runTurn(text) {
     out({ type: 'result', subtype: 'success', is_error: true, api_error_status: 400, session_id: sid, uuid: crypto.randomUUID(), result: 'R151B 回合出错', duration_ms: 10, num_turns: 1, total_cost_usd: 0, usage });
     return;
   }
-  if (!steps) steps = [{ say: `R151-REPLY ${String(text).slice(0, 60)}` }];
+  if (!steps) steps = [{ say: envelope ? XS_DEFAULT_REPLY : `R151-REPLY ${String(text).slice(0, 60)}` }];
   for (const s of steps) {
     if (s.emit) out({ session_id: sid, uuid: crypto.randomUUID(), ...s.emit });
     else if (typeof s.say === 'string') assistant([{ type: 'text', text: s.say }]);
