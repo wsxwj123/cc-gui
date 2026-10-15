@@ -77,7 +77,11 @@ router.put('/xsession/config', async (req, res) => {
   }
   const { enabled } = body;
   try {
-    await updatePrefs((prefs) => { prefs.xsEnabled = enabled; });
+    // r151c:由关变开的同一次写入里记启用时刻 —— 之前记下的发送档案从此不再算数(见 xsession.js profileIsCurrent)
+    await updatePrefs((prefs) => {
+      if (enabled && prefs.xsEnabled !== true) prefs.xsEnabledAt = new Date().toISOString();
+      prefs.xsEnabled = enabled;
+    });
   } catch {
     return xsError(res, 500, 'STORAGE_WRITE_FAILED', STORAGE_FAILED_TEXT);
   }

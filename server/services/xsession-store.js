@@ -24,6 +24,7 @@
 //   以及认领 / 处理期间的临时字段 token、heldBefore、turn —— 恢复时删掉它们(旧凭据随之作废)。
 import { readFile, writeFile, rename, unlink, mkdir, readdir, lstat, utimes } from 'fs/promises';
 import { join } from 'path';
+import { randomBytes } from 'crypto';
 import { homedir } from 'os';
 import { isSessionIdShape } from './session-reader.js';
 
@@ -65,8 +66,8 @@ function enqueue(task) {
 }
 
 let tmpSeq = 0;
-async function atomicWrite(file, data) {
-  await mkdir(BODIES_DIR, { recursive: true, mode: 0o700 }); // 连带建出 xsession/
+async function atomicWrite(file, data, dir = BODIES_DIR) {
+  await mkdir(dir, { recursive: true, mode: 0o700 }); // 默认连带建出 xsession/;发送档案只建 xsession/
   const tmp = `${file}.tmp.${process.pid}.${tmpSeq++}`;
   try {
     await writeFile(tmp, data, { encoding: 'utf-8', mode: 0o600 });
@@ -189,7 +190,7 @@ async function sweepOwnTempFiles() {
   let top = [];
   try { top = await readdir(XS_DIR); } catch { /* 目录不存在 */ }
   for (const f of top) {
-    if (stale(f, (base) => base === 'messages.json')) await unlinkQuietly(join(XS_DIR, f));
+    if (stale(f, (base) => base === 'messages.json' || base === 'profiles.json')) await unlinkQuietly(join(XS_DIR, f));
   }
   for (const f of (await bodiesDirEntries()) || []) {
     if (stale(f, isBodyFileName)) await unlinkQuietly(join(BODIES_DIR, f));
@@ -411,5 +412,114 @@ export function mutateXsInbox(fn) {
       if (isOpenStatus(m.status) && !openAfter.has(m.id)) await removeBody(m.id);
     }
     return result;
+  });
+}
+
+// ── r151c:发送档案 ~/.claude-gui/xsession/profiles.json(方案 A5 / A12)──────────────────────────────────
+// { salt, sessions: { <会话id>: { replay, judge } } }。replay = 该会话最近一次回合请求体里的会话级参数(请求原值,没带为 null,
+// model 为解析后的值),只用于重放;judge = { mode(解析后的界面档位), providerFp(provider 指纹,加盐摘要), recordedAt(ISO) },
+// 判定只读它。salt:本机首次需要时随机生成 32 字节(十六进制),随第一次写盘落下,不出本机。
+// 与收件箱共用同一条串行队列与"临时文件 + 改名"写法(目录 0700、文件 0600);只认白名单字段;内容没变不写盘;
+// 文件损坏时挪到 profiles.json.corrupt-<毫秒> 留证、从空开始。文件不存在时只读、删条目都不建任何东西。
+// 凭据明文不在这里:providerFp 是摘要,原文只在内存里参与计算(见 xsession-policy.js)。
+const PROFILES_PATH = join(XS_DIR, 'profiles.json');
+export const XS_PROFILE_REPLAY_KEYS = Object.freeze(['cwd', 'model', 'effort', 'addDirs', 'permissionMode', 'globalRead', 'appendSystemPrompt', 'promptSuggestions', 'keepAlive', 'maxBudgetUsd', 'genui']);
+export const XS_PROFILE_MODES = Object.freeze(['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']);
+const SALT_RE = /^[0-9a-f]{64}$/;
+const FP_RE = /^[0-9a-f]{16}$/;
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+// replay 的值只收 JSON 标量与字符串数组(请求体里这 11 个键本来就只有这些形态);cwd 必须是非空字符串。
+const isReplayValue = (v) => v === null || typeof v === 'string' || typeof v === 'boolean'
+  || (typeof v === 'number' && Number.isFinite(v)) || (Array.isArray(v) && v.every((x) => typeof x === 'string'));
+
+/** 一条档案 → 只含白名单字段的新对象;不合规返回 null。 */
+function pickProfile(p) {
+  if (!isPlainObject(p) || !isPlainObject(p.replay) || !isPlainObject(p.judge)) return null;
+  const replay = {};
+  for (const k of XS_PROFILE_REPLAY_KEYS) {
+    const v = p.replay[k] === undefined ? null : p.replay[k];
+    if (!isReplayValue(v)) return null;
+    replay[k] = Array.isArray(v) ? [...v] : v;
+  }
+  if (typeof replay.cwd !== 'string' || !replay.cwd) return null;
+  const { mode, providerFp, recordedAt } = p.judge;
+  if (!XS_PROFILE_MODES.includes(mode) || typeof providerFp !== 'string' || !FP_RE.test(providerFp)
+    || typeof recordedAt !== 'string' || Number.isNaN(Date.parse(recordedAt))) return null;
+  return { replay, judge: { mode, providerFp, recordedAt } };
+}
+function pickSessions(sessions) {
+  const out = {};
+  if (!isPlainObject(sessions)) return out;
+  for (const [id, p] of Object.entries(sessions)) {
+    const picked = isSessionIdShape(id) ? pickProfile(p) : null;
+    if (picked) out[id] = picked;
+  }
+  return out;
+}
+
+let profiles = null; // 已加载的 { salt, sessions };null = 本进程还没读过盘
+// 只在队列里调。读盘失败(不是"文件不存在")原样抛出,profiles 保持 null,下次再试(不拿空表顶上,免得下一次写把它覆盖掉)。
+async function loadProfilesIfNeeded() {
+  if (profiles) return;
+  let raw = null;
+  try { raw = await readFile(PROFILES_PATH, 'utf-8'); } catch (e) {
+    if (e?.code !== 'ENOENT') throw e;
+  }
+  let salt = null;
+  let sessions = {};
+  if (raw !== null) {
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch { parsed = undefined; }
+    if (isPlainObject(parsed) && isPlainObject(parsed.sessions)) {
+      if (typeof parsed.salt === 'string' && SALT_RE.test(parsed.salt)) salt = parsed.salt;
+      sessions = pickSessions(parsed.sessions);
+    } else {
+      const aside = `${PROFILES_PATH}.corrupt-${Date.now()}`;
+      try { await rename(PROFILES_PATH, aside); } catch {}
+      console.warn(`[xsession] profiles.json 无法解析,已移到 ${aside}`);
+    }
+  }
+  profiles = { salt: salt || randomBytes(32).toString('hex'), sessions };
+}
+
+/** 读档案:{ salt, sessions } 的深拷贝(与写入同一条队列,读到的是此前所有事务提交后的状态)。 */
+export function readXsProfiles() {
+  return enqueue(async () => {
+    await loadProfilesIfNeeded();
+    return structuredClone(profiles);
+  });
+}
+
+/**
+ * 档案事务:fn(draft) 在 { salt, sessions } 的深拷贝上改 sessions(salt 改了也不认);提交时按白名单重新取一遍(不合规的条目丢掉),
+ * 与改之前逐字相同就不写盘。写失败 → 抛 XsStorageError,内存不变。返回 fn 的返回值。
+ */
+export function mutateXsProfiles(fn) {
+  return enqueue(async () => {
+    await loadProfilesIfNeeded();
+    const before = profiles;
+    const draft = structuredClone(before);
+    const result = await fn(draft);
+    const next = { salt: before.salt, sessions: pickSessions(draft.sessions) };
+    if (JSON.stringify(next) === JSON.stringify(before)) return result;
+    try {
+      await atomicWrite(PROFILES_PATH, JSON.stringify(next), XS_DIR);
+    } catch (e) {
+      throw new XsStorageError('xsession 发送档案写入失败', e);
+    }
+    profiles = next;
+    return result;
+  });
+}
+
+/** 删掉某会话的档案(会话 id 不分大小写);没有这一条、文件不存在时什么都不写。返回是否删了。 */
+export function dropXsProfile(sessionId) {
+  const target = String(sessionId || '').toLowerCase();
+  return mutateXsProfiles((d) => {
+    let dropped = false;
+    for (const k of Object.keys(d.sessions)) {
+      if (k.toLowerCase() === target) { delete d.sessions[k]; dropped = true; }
+    }
+    return dropped;
   });
 }

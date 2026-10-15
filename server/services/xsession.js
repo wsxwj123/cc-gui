@@ -8,13 +8,16 @@
 // 依赖只朝一个方向:本模块经 chat.js 导出的窄接口挂钩子,chat.js 不认识本模块。
 import { randomUUID, timingSafeEqual } from 'crypto';
 import { readdir, readFile } from 'fs/promises';
+import { readFileSync, statSync } from 'fs';
 import { join, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
-import { readXsEnabledSync } from '../routes/prefs.js';
+import { readXsEnabledSync, readXsPrefsSync } from '../routes/prefs.js';
 import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, preToolUseGuardTimeoutAt } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
+import { XS_PROFILE_MODES, XS_PROFILE_REPLAY_KEYS, dropXsProfile, mutateXsProfiles } from './xsession-store.js';
+import { providerFingerprint } from './xsession-policy.js';
 import { buildXsEnvelope, neutralizeXsBody } from './xsession-envelope.js';
 
 export const XS_DISABLED_TEXT = '跨会话消息未开启';
@@ -401,6 +404,7 @@ function inflightFor(tag) {
 
 // 回合开始:补 xs_message(同步投递 → 排在本回合任何 CLI 输出之前),记下承载它的进程号与回合代数。
 function onTurnStart(info) {
+  noteTurnStartProfile(info);
   const hit = inflightFor(info?.tag);
   if (!hit) return;
   const { id, f } = hit;
@@ -415,6 +419,7 @@ function onTurnStart(info) {
 }
 
 function onTurnEnd(info) {
+  noteTurnEndProfile(info);
   const hit = inflightFor(info?.tag);
   const detail = typeof info?.errorSummary === 'string' && info.errorSummary.trim() ? info.errorSummary : undefined;
   if (hit) settleTurn(hit.id, hit.f.key, info.outcome, detail);
@@ -574,6 +579,107 @@ export async function xsNativeGuard(input, ctx) {
   }
 }
 
+// ── r151c:发送档案(方案 A5 / A6 / A12 / A13)───────────────────────────────────────────────────────────────
+// 开关开着时,每个回合开始按本回合的会话级参数记一份档案:replay(重放用:请求原值,model 为解析值)与 judge(判定用:界面档位、
+// provider 指纹、记录时刻)。新会话首回合开始时还没有会话 id,到回合结束时补记。内容没变不写盘;本次启用之前记的档案即使内容
+// 没变也重记一次(刷新记录时刻,否则重新打开开关后它永远不算数)。写失败只记日志:该会话按旧档案或没有档案判(偏安全)。
+// 切档(/chat/permission-mode 200)同步改 replay.permissionMode 与 judge.mode;删会话时删档案(forgetXsSession)。
+const TURN_RECORDS_MAX = 512;
+const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合开始时的), params };回合开始记、结束删
+
+let accountCache = { key: null, accountId: '' };
+/** GUI 起会话时 CLI 读的那份配置里的 provider 身份(与起进程同源,不读宿主进程环境变量)。凭据原文只留在内存里、不出本函数的调用方。 */
+function readProviderIdentitySync() {
+  let settings = null;
+  try { settings = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf-8')); } catch { /* 没有 / 损坏 → 全空 */ }
+  const accountPath = join(homedir(), '.claude.json');
+  try {
+    const st = statSync(accountPath); // ~/.claude.json 可能很大且 CLI 常写:按修改时间 + 大小缓存解析结果
+    const key = `${st.mtimeMs}:${st.size}`;
+    if (accountCache.key !== key) {
+      let id = '';
+      try { id = JSON.parse(readFileSync(accountPath, 'utf-8'))?.oauthAccount?.accountUuid; } catch { /* 读不到为空串 */ }
+      accountCache = { key, accountId: typeof id === 'string' ? id : '' };
+    }
+  } catch { accountCache = { key: null, accountId: '' }; }
+  const s = settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : {};
+  return { settingsEnv: s.env, apiKeyHelper: s.apiKeyHelper, accountId: accountCache.accountId };
+}
+
+/** 当前配置的 provider 指纹(salt 取自档案文件,见 readXsProfiles)。 */
+export function currentProviderFp(salt) {
+  return providerFingerprint({ ...readProviderIdentitySync(), salt });
+}
+
+/** 档案是不是本次启用(xsEnabledAt)之后记录的;enabledAt 为 null 时一律不认。 */
+export function profileIsCurrent(profile, enabledAt) {
+  if (!profile || typeof enabledAt !== 'string') return false;
+  const at = Date.parse(enabledAt);
+  const rec = Date.parse(profile.judge?.recordedAt);
+  return Number.isFinite(at) && Number.isFinite(rec) && rec >= at;
+}
+
+async function recordProfile(sessionId, params) {
+  if (!isIdString(sessionId) || !params || typeof params !== 'object') return;
+  const prefs = readXsPrefsSync();
+  if (!prefs.enabled) return; // 档案只在开着时写(关开关时回合钩子会为在途回合多留一会儿)
+  const body = params.body && typeof params.body === 'object' ? params.body : {};
+  const replay = Object.fromEntries(XS_PROFILE_REPLAY_KEYS.map((k) => [k, body[k] === undefined ? null : body[k]]));
+  const mode = params.guiMode;
+  try {
+    await mutateXsProfiles((d) => {
+      const providerFp = currentProviderFp(d.salt);
+      const prevKey = Object.keys(d.sessions).find((k) => sameId(k, sessionId));
+      const prev = prevKey ? d.sessions[prevKey] : null;
+      const same = prev && prev.judge.mode === mode && prev.judge.providerFp === providerFp && JSON.stringify(prev.replay) === JSON.stringify(replay);
+      if (same && (profileIsCurrent(prev, prefs.enabledAt) || !prefs.enabledAt)) return; // 内容没变不写盘
+      if (prevKey) delete d.sessions[prevKey];
+      d.sessions[sessionId] = { replay, judge: { mode, providerFp, recordedAt: new Date().toISOString() } };
+    });
+  } catch (e) {
+    console.warn(`[xsession] 会话 ${sessionId} 的发送档案未能落盘:${e?.cause?.code || e?.code || e?.message || e}`);
+  }
+}
+
+function noteTurnStartProfile(info) {
+  const params = info?.params;
+  if (!params || typeof params !== 'object' || !info.runId) return;
+  if (turnRecords.size >= TURN_RECORDS_MAX) turnRecords.delete(turnRecords.keys().next().value); // 兜底:没等到结束的回合不无限累积
+  turnRecords.set(`${info.runId}:${info.turnEpoch | 0}`, { sessionId: info.sessionId || null, params });
+  if (info.sessionId) recordProfile(info.sessionId, params);
+}
+
+function noteTurnEndProfile(info) {
+  const key = `${info?.runId}:${info?.turnEpoch | 0}`;
+  const rec = turnRecords.get(key);
+  if (!rec) return;
+  turnRecords.delete(key);
+  if (!rec.sessionId && info.sessionId) recordProfile(info.sessionId, rec.params); // 新会话首回合:开始时还没有会话 id
+}
+
+// modeChange 钩子:切档生效(或会话没有进程)时同步该会话档案里的两处档位;没有档案不新建。
+async function xsModeChange({ sessionId, mode } = {}) {
+  if (!isIdString(sessionId) || !XS_PROFILE_MODES.includes(mode) || !readXsEnabledSync()) return;
+  try {
+    await mutateXsProfiles((d) => {
+      for (const [k, p] of Object.entries(d.sessions)) {
+        if (!sameId(k, sessionId)) continue;
+        p.replay.permissionMode = mode;
+        p.judge.mode = mode;
+      }
+    });
+  } catch (e) {
+    console.warn(`[xsession] 会话 ${sessionId} 的档案档位未能落盘:${e?.cause?.code || e?.code || e?.message || e}`);
+  }
+}
+
+/** DELETE /api/sessions/:id 删掉记录文件之后调用:删该会话的发送档案(接收设置由 removeSessionFromPrefs 清)。不看总开关;文件不存在时什么都不写。 */
+export async function forgetXsSession(sessionId) {
+  if (!isIdString(sessionId)) return false;
+  for (const [k, r] of turnRecords) if (sameId(r.sessionId, sessionId)) turnRecords.delete(k);
+  return dropXsProfile(sessionId);
+}
+
 // ── 钩子挂接与总开关 ────────────────────────────────────────────────────────────────────────
 // 总开关关时只挂 chatEntry(两个新字段都没带时立即返回 null = 零影响);开着时再挂回合开始 / 结束与原生引导。
 // 关掉时若还有已兑换、没结算的回合,回合钩子留到它们结算完再撤(否则它们永远等不到结算);原生引导随开关即撤。
@@ -593,7 +699,8 @@ function releaseTurnHooksIfIdle() {
 export function syncXsRuntimeHooks(enabled) {
   turnHooksWanted = enabled === true;
   if (turnHooksWanted && !unhookTurns) unhookTurns = registerSessionRuntimeHooks({ turnStart: onTurnStart, turnEnd: onTurnEnd });
-  if (turnHooksWanted && !unhookGuard) unhookGuard = registerSessionRuntimeHooks({ preToolUse: xsNativeGuard });
+  // r151c:切档通知(同步发送档案的档位)与原生引导同一生命周期:随开关即挂即撤
+  if (turnHooksWanted && !unhookGuard) unhookGuard = registerSessionRuntimeHooks({ preToolUse: xsNativeGuard, modeChange: xsModeChange });
   else if (!turnHooksWanted && unhookGuard) {
     unhookGuard();
     unhookGuard = null;
