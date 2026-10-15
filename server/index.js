@@ -33,7 +33,7 @@ import pickerRoutes from './routes/picker.js';
 import permissionsRoutes from './routes/permissions.js';
 import filesRoutes from './routes/files.js';
 import remoteControlRoutes from './routes/remote-control.js';
-import prefsRoutes from './routes/prefs.js';
+import prefsRoutes, { readXsEnabledSync } from './routes/prefs.js';
 import cliCheckRoutes from './routes/cli-check.js';
 import permissionCheckRoutes from './routes/permission-check.js';
 import versionCheckRoutes from './routes/version-check.js';
@@ -46,6 +46,8 @@ import skinsPacksRoutes from './routes/skins-packs.js';
 import screenshotRoutes from './routes/screenshot.js';
 import imageRoutes from './routes/image.js';
 import clientLogRoutes, { rotateLogIfBig, writeCrashLog } from './routes/client-log.js';
+import xsessionRoutes, { xsessionBodyErrorHandler } from './routes/xsession.js'; // r151b 跨会话消息
+import { loadXsInbox } from './services/xsession-store.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, setDefaultRandomPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
@@ -481,6 +483,8 @@ app.use('/api', skinsPacksRoutes); // r11-③ 皮肤包(/api/skins,避开既有 
 app.use('/api', screenshotRoutes);
 app.use('/api', imageRoutes); // r16-3 生图(/api/image-providers、/api/image/*),配置独立不碰 settings.json
 app.use('/api', clientLogRoutes); // r29 取证:前端错误上报落 client.log(挂在 authMiddleware 之后自动带鉴权)
+app.use('/api', xsessionRoutes); // r151b 跨会话消息(总开关关时除 config 外一律 409,见 routes/xsession.js)
+app.use('/api', xsessionBodyErrorHandler); // 必须在下方通用错误处理之前:把 /api/xsession/* 的请求体解析错误改回本节错误体
 
 // Auto-load optional local-only routes only when explicitly requested. These
 // files are gitignored personal integrations; packaged/public builds must not
@@ -1100,6 +1104,9 @@ async function relisten(newHost) {
 server.listen(PORT, HOST, () => {
   // R20:官方价目目录装载磁盘缓存并在过期/首次时后台预热一次(应用关闭时不承诺定时更新)。
   try { bootPricingCatalog(); } catch (e) { console.error('[pricing] boot warmup failed:', e?.message || e); }
+  // r151b:跨会话收件箱启动恢复(遗留的 processing / claimed → pending + interrupted)。只在总开关开着时做 ——
+  // 关着时不读不写 ~/.claude-gui/xsession/;之后再打开,首次访问收件箱时同样会先恢复。
+  if (readXsEnabledSync()) loadXsInbox().catch((e) => console.error('[xsession] 收件箱启动恢复失败:', e?.message || e));
   // r122 R5:回滚点启动清扫 —— 延迟(默认 60s)后在后台逐会话回收超限的旧回滚点,一次进程只跑一遍。
   // unref:这个定时器不许拖住进程退出;CGUI_CHECKPOINT_SWEEP=0 直接不排程。整个 run 在
   // runStartupSweep 里包了 try/catch,任何失败只打日志、不影响服务。
