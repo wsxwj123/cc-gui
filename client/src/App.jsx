@@ -158,7 +158,7 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
-import { startXsession, xsChatFields, xsClaimNotSent, keepLivePeer, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
+import { startXsession, xsChatFields, xsClaimNotSent, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
@@ -4719,6 +4719,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (mountFromResolved <= 0) return finalizedMessages;   // 不裁时返回原引用(不打穿 MessageList 的 memo)
     return sliceRows(finalizedMessages, { from: mountFromResolved, to: finalizedMessages.length });
   }, [finalizedMessages, mountFromResolved]);
+  // r151b:回合落盘后历史里没有对应条目的直播来源气泡,按锚点插回它触发的那个回复之前;没有时原引用。
+  const peerPlacement = useMemo(() => placeAnchoredPeers(mountedMessages, visibleChat), [mountedMessages, visibleChat]);
   // 挂载集合变化(补齐 / 搜索开关 / 跳转)会整批挂上或卸掉视口**上方**的行 —— 文档总高变了
   // 而 scrollTop 不变,视野就被顶走。变化前记下"视口最上方那一行 + 行内偏移",变化后在同一
   // 次 layout 提交里搬回原位:比按比例准,且不用任何高度估算。
@@ -7507,6 +7509,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               const localOnly = (m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || keepLivePeer(m, getLocalMessages()); // r151b:直播来源气泡在历史有同一条之前保留
               return prev.some(localOnly) ? prev.filter(localOnly) : [];
             });
+            // r151b:留下来的本回合来源气泡记下锚点(历史里本回合第一条回复),渲染时插回它之前
+            setChatMessages((prev) => (isCurrentTurn() ? anchorLivePeers(prev, getLocalMessages(), turnStreamStart) : prev));
             break;
           }
           if (i < 11) await new Promise((r) => setTimeout(r, 200));
@@ -9467,7 +9471,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 </div>
               )}
               <MessageList
-                messages={mountedMessages}
+                messages={peerPlacement.list}
                 onRetryTurn={stableRetryTurn}
                 onRetryTool={stableRetryTool}
                 onRollback={stableRollback}
@@ -9475,7 +9479,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 retryActiveUuid={retryActiveUuid}
               />
               {/* btw 旁问不再进主流内联渲染 —— 改由右下角 BtwWindow 浮窗聚合成连续线程。 */}
-              {renderChat.filter((msg) => msg.type !== 'btw').map((msg, i) => (
+              {renderChat.filter((msg) => msg.type !== 'btw' && !peerPlacement.placed.has(msg.uuid)).map((msg, i) => (
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
                   {msg.type === 'compact'
                     ? <CompactDivider />

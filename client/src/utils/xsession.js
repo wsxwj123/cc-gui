@@ -442,6 +442,48 @@ export function keepLivePeer(m, persisted) {
   return !!m && m.type === 'peer-message' && m.live === true && !peerLanded(m, persisted);
 }
 
+/**
+ * 回合整轮落盘后,留下来的本回合直播来源气泡(历史里没有同一条)记下锚点 = 历史里本回合的第一条回复
+ * (sinceMs 之后的第一个 turn);渲染时由 placeAnchoredPeers 插回它之前,保持"在该回合之前"。
+ * 已有锚点的、本回合之前就有的、找不到锚点的都不动(没有锚点的留在直播列表末尾)。没变化返回原数组。
+ */
+export function anchorLivePeers(list, persisted, sinceMs) {
+  const since = Number(sinceMs);
+  if (!Array.isArray(list) || !Number.isFinite(since)) return list;
+  const isFresh = (m) => m && m.type === 'peer-message' && m.live === true && !m.anchorUuid && !(Date.parse(m.timestamp) < since);
+  if (!list.some(isFresh) || !Array.isArray(persisted)) return list;
+  const first = persisted.find((h) => h && h.type === 'turn' && h.uuid && Date.parse(h.timestamp) >= since);
+  if (!first) return list;
+  let changed = false;
+  const next = list.map((m) => {
+    if (!isFresh(m) || !keepLivePeer(m, persisted)) return m;
+    changed = true;
+    return { ...m, anchorUuid: first.uuid };
+  });
+  return changed ? next : list;
+}
+
+const EMPTY_SET = new Set();
+/** 把带锚点的直播来源气泡插到历史列表里锚点那一条之前。返回 { list, placed };没有可插的返回原数组(不打穿 MessageList 的 memo)。 */
+export function placeAnchoredPeers(list, chat) {
+  if (!Array.isArray(list) || !Array.isArray(chat)) return { list, placed: EMPTY_SET };
+  let byAnchor = null;
+  for (const p of chat) {
+    if (!p || p.type !== 'peer-message' || !p.anchorUuid) continue;
+    if (!byAnchor) byAnchor = new Map();
+    byAnchor.set(p.anchorUuid, [...(byAnchor.get(p.anchorUuid) || []), p]);
+  }
+  if (!byAnchor) return { list, placed: EMPTY_SET };
+  const out = [];
+  const placed = new Set();
+  for (const m of list) {
+    const ps = m && m.uuid ? byAnchor.get(m.uuid) : null;
+    if (ps) for (const p of ps) { out.push(p); placed.add(p.uuid); }
+    out.push(m);
+  }
+  return placed.size ? { list: out, placed } : { list, placed: EMPTY_SET };
+}
+
 // ── 订阅(选择器的默认值都是模块级常量:返回新引用会触发 React #185 整页白屏) ─────────────
 export const useXsEnabled = () => useXsStore((s) => s.enabled);
 export const useXsInbox = (sid) => useXsStore((s) => (s.enabled && sid && s.inbox[sid]) || EMPTY_LIST);

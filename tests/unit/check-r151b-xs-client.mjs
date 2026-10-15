@@ -233,7 +233,19 @@ routes['GET /api/xsession/messages'] = (u) => ({ status: 200, body: { messages: 
   assert.equal(xs.xsCardReasonText(msg(M1, 'pending')), '等待你确认后处理');
   assert.equal(xs.xsCardReasonText({ status: 'claimed' }), '等待发送');
   assert.equal(xs.xsCardReasonText({ status: 'processing' }), '处理中');
-  console.log('✓ 气泡对象(card / native / 历史)、对账过滤、卡片文案');
+  // 回合整轮落盘后留下的来源气泡(历史里没写出它):锚到本回合第一条回复,渲染时插回它之前
+  const since = Date.parse('2026-10-15T01:00:00.000Z');
+  const oldPeer = { ...card, uuid: 'old-peer', timestamp: '2026-10-15T00:59:00.000Z' };
+  const hist = [{ type: 'turn', uuid: 'T0', timestamp: '2026-10-15T00:59:30.000Z' }, { type: 'user', uuid: 'U1', timestamp: '2026-10-15T01:00:00.500Z' }, { type: 'turn', uuid: 'T1', timestamp: '2026-10-15T01:00:02.000Z' }];
+  const anchored = xs.anchorLivePeers([oldPeer, live], hist, since);
+  assert.equal(anchored[1].anchorUuid, 'T1', '锚到本回合第一条回复');
+  assert.equal(anchored[0].anchorUuid, undefined, '本回合之前的不动');
+  assert.equal(xs.anchorLivePeers(anchored, hist, since), anchored, '没变化返回原数组');
+  const placed = xs.placeAnchoredPeers(hist, anchored);
+  assert.deepEqual(placed.list.map((m) => m.uuid), ['T0', 'U1', live.uuid, 'T1'], '插在锚点之前(该回合的回复之前)');
+  assert.ok(placed.placed.has(live.uuid) && !placed.placed.has('old-peer'));
+  assert.equal(xs.placeAnchoredPeers(hist, [oldPeer]).list, hist, '没有可插的返回原引用(不打穿 MessageList 的 memo)');
+  console.log('✓ 气泡对象(card / native / 历史)、对账过滤、落盘后锚定插回、卡片文案');
 }
 
 console.log('PASS check-r151b-xs-client');
