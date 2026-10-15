@@ -158,6 +158,7 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
+import { startXsession, xsChatFields, xsClaimNotSent } from './utils/xsession.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
@@ -5629,9 +5630,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // r66:genui 渲染开关同时门控"教不教模型这套围栏语法"。关掉时 server 不把
           // 教学段注入系统提示(开关也计入常驻进程复用键,翻完开关不会复用旧系统提示)。
           genui: useStore.getState().genuiRender !== false,
+          // r151b:点卡片【处理】发出的这条带跨会话消息 id 与一次性凭据(服务端兑换后把 prompt 换成信封);
+          // 其它发送 xsChatFields 返回 null,请求体与改动前逐字相同。
+          ...(xsChatFields(opts) || {}),
         }),
       });
       const respJson = await res.json();
+      // r151b:点卡片发出的这条被拒(400 / 409 凭据无效、409 开关已关、500 入口出错、回合身份冲突)= 没发出:
+      // 按最新状态刷新卡片(可撤回或已退回),给一行提示,不画错误回合;走既有 finally 收尾。
+      if (opts.xsClaim && (!res.ok || !respJson.pid)) {
+        setProviderSwitchNotice({ text: xsClaimNotSent(opts.xsClaim, respJson) });
+        return;
+      }
       // R13 身份冲突(409):本条请求不属于当前服务实例/与既有回合参数不符/已过期 ——
       // 一律【不自动重发】。先恢复该会话历史让用户看到真实状态,再让用户自己决定重发。
       if (res.status === 409 && (respJson.code === 'TURN_CONFLICT' || respJson.code === 'TURN_SERVER_CHANGED' || respJson.code === 'TURN_EXPIRED')) {
@@ -7171,6 +7181,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }]);
       }
     } catch (err) {
+      // r151b:点卡片发出的这条中途出错(断网 / 非 JSON 应答):消息状态以服务端为准,刷新卡片。
+      if (opts.xsClaim) xsClaimNotSent(opts.xsClaim, null);
       // A dropped SSE connection (network blip, phone sleep/lock, wifi↔cellular
       // handoff) surfaces as a TypeError — Safari: "Load failed", Chrome: "Failed
       // to fetch". The CLI keeps running and writing its jsonl in the background,
@@ -12818,6 +12830,8 @@ export default function App() {
   const pendingKeys = useStore((s) => s.pendingPermissions.map((p) => p.sessionId || '').join(','));
   const attentionCount = countAttention(waitingKeys, pendingKeys);
   useEffect(() => { applyAttentionBadge(attentionCount); }, [attentionCount]);
+  // r151b:跨会话消息 —— 读总开关、WS 重连后对账(状态收敛全在 utils/xsession.js)。
+  useEffect(() => startXsession(), []);
   // L2:窗口不在前台时,后台代理【新】转 waiting/blocked 发一条系统通知。依赖是等待集合
   // 本身(字符串),notifyWaiting 内部只挑上升沿 —— 按水平值发会每 1.5s 重发一遍。
   useEffect(() => { notifyWaiting(waitingKeys); }, [waitingKeys]);
