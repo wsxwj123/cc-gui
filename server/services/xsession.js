@@ -755,7 +755,8 @@ export async function forgetXsSession(sessionId) {
 // turn.key 并计数;事务提交之后才登记 inflight 并调内部入口起回合(入口钩子也读收件箱、走同一条存储队列,在事务里起回合会自锁)。
 // 结算只看这条消息的回合有没有开始:开始了只等结束通知(completed → done、stopped → interrupted、failed → turn-error);
 // 没开始(应答非 200 或抛错):409 CHAT_SESSION_BUSY → 退回 queued 等下一次;其余 → pending / wake-failed,不自动重试。
-// 进程没起来(CHAT_START_FAILED:吐出第一条事件之前就退出 / query() 起不来)即使已报过回合开始,也按没开始结算(补充约定)。
+// 进程没起来(CHAT_START_FAILED:吐出第一条事件之前就退出 / query() 起不来)即使已报过回合开始,也按没开始结算
+// (行为清单第 12 条:自动处理起不来 → wake-failed,不自动重试)。
 // 防失控:连锁深度 4(hop 记在消息上,标记记进回合记录)、单次 8 个目标、单回合 16 条、全局 10 分钟 20 次(触顶即暂停,
 // 写盘 + 广播 xs:config,重启仍暂停,用户恢复时清窗口)。自动处理超过 30 分钟未结算 → 该会话"卡住":排队中的与新到的落
 // target-stuck,直到那条结算;那个回合不被自动中止。时长一律在事件到来时拿 Date.now() 比较起算时刻(定时器只是提前叫醒)。

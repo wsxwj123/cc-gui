@@ -1068,7 +1068,9 @@ export function autoDecide(mode, toolName, input, boundary, { thirdParty = false
 // 依赖只朝一个方向:本文件不认识跨会话功能,跨会话模块在启动时经 registerSessionRuntimeHooks 挂进来。
 // 四个位置:/chat 路由入口改写(chatEntry)、回合开始(turnStart)、回合结束(turnEnd)、PreToolUse 守卫
 // (preToolUse);外加补事件的出口 deliverRunEvent。每处都是"有挂接就调、没挂接就跳过";没挂接时
-// 不多 await 一次、不往 slot 上写任何字段 —— 行为与改动前相同(check-r151b-baseline*)。
+// 不多 await 一次、不往 slot 上写钩子用的字段 —— 行为与改动前相同(check-r151b-baseline*)。例外:r151c 的
+// slot.suggestWaitSince(结果已出、只差输入预测时的结果时刻)不论挂没挂接都会写,只供运行快照的 awaitingSuggestion /
+// suggestWaitSince 读,不改变既有行为。
 const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolUse: null, sessionOptions: null, modeChange: null, sessionBound: null };
 
 /**
