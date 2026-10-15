@@ -6,14 +6,18 @@ import { isAuthorized } from '../services/auth.js';
 import { loadPrefs, readXsEnabledSync, updatePrefs } from './prefs.js';
 import { getActiveChatProcesses } from './chat.js';
 import { listProjects, listSessions, isSessionIdShape } from '../services/session-reader.js';
-import { XS_LIMITS, pendingCountsBySession } from '../services/xsession-store.js';
+import { XS_LIMITS, XsStorageError, pendingCountsBySession } from '../services/xsession-store.js';
+import {
+  XS_DISABLED_TEXT, XS_STORAGE_FAILED_TEXT, XsError, parseManualSend, sendManualMessages, parseListQuery, listInboxMessages,
+  pendingSummary, claimMessage, releaseMessage, dismissMessage,
+} from '../services/xsession.js';
 import { assignShortIds, selectXsSessions } from '../services/xsession-resolve.js';
 import { resolveSessionTitle } from '../utils/session-title.js';
 
 const router = Router();
 
-const DISABLED_TEXT = '跨会话消息未开启';
-const STORAGE_FAILED_TEXT = '保存失败，请重试';
+const DISABLED_TEXT = XS_DISABLED_TEXT;
+const STORAGE_FAILED_TEXT = XS_STORAGE_FAILED_TEXT;
 
 export function xsError(res, status, code, error, extra) {
   return res.status(status).json({ ok: false, code, error, ...extra });
@@ -122,15 +126,10 @@ function parseSessionsQuery(q) {
   return out;
 }
 
-router.get('/xsession/sessions', async (req, res) => {
-  const opts = parseSessionsQuery(req.query || {});
-  if (opts.error) return xsError(res, 400, 'XS_INVALID_INPUT', opts.error);
-  let all; let prefs; let pending;
-  try {
-    [all, prefs, pending] = await Promise.all([listAllSessions(), loadPrefs(), pendingCountsBySession()]);
-  } catch {
-    return xsError(res, 500, 'XS_LIST_FAILED', '读取会话列表失败');
-  }
+// 已落盘会话的行(按最近活动倒序、同 id 只留最近的一条),sessions 接口与转发接口共用:转发能发到的目标,
+// 就是转发对话框里列得出来的会话。projectDir 只给服务端用(转发时记进消息,GET /api/xsession/pending 用),不进应答。
+async function loadSessionRows() {
+  const [all, prefs, pending] = await Promise.all([listAllSessions(), loadPrefs(), pendingCountsBySession()]);
   const customTitles = prefs?.customTitles && typeof prefs.customTitles === 'object' ? prefs.customTitles : {};
   const autoTitles = prefs?.autoTitles && typeof prefs.autoTitles === 'object' ? prefs.autoTitles : {};
   const states = runtimeStates();
@@ -151,12 +150,64 @@ router.get('/xsession/sessions', async (req, res) => {
       state: states.get(s.sessionId) || 'stopped',
       pending: pending.get(s.sessionId) || 0,
       lastActivity: t ? new Date(t).toISOString() : (s.lastActivity || null),
+      projectDir: s.projectDir,
     });
+  }
+  return rows;
+}
+
+router.get('/xsession/sessions', async (req, res) => {
+  const opts = parseSessionsQuery(req.query || {});
+  if (opts.error) return xsError(res, 400, 'XS_INVALID_INPUT', opts.error);
+  let rows;
+  try { rows = await loadSessionRows(); } catch {
+    return xsError(res, 500, 'XS_LIST_FAILED', '读取会话列表失败');
   }
   const shortIds = assignShortIds(rows.map((r) => r.sessionId)); // 冲突按全部会话判,筛选之前算
   const sessions = selectXsSessions(rows.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), opts)
     .map(({ sessionId, shortId, title, project, state, pending: n, lastActivity }) => ({ sessionId, shortId, title, project, state, pending: n, lastActivity }));
   res.json({ sessions });
+});
+
+// ── 转发、收件列表、认领 / 撤回 / 忽略、待处理计数(接口 X.3.1;业务在 services/xsession.js)──────────────
+
+// 业务错误按它的状态码与错误码应答;写接口落盘失败(含读不出收件箱、没法写)→ 500 STORAGE_WRITE_FAILED;
+// 读接口读盘出错 → 500 XS_READ_FAILED。日志只记错误码,不带正文。
+function sendXsFailure(res, e, isWrite) {
+  if (e instanceof XsError) return xsError(res, e.status, e.code, e.message, e.extra);
+  if (!(e instanceof XsStorageError)) console.warn(`[xsession] 收件箱${isWrite ? '写入' : '读取'}失败:${e?.code || e?.message || e}`);
+  if (isWrite) return xsError(res, 500, 'STORAGE_WRITE_FAILED', STORAGE_FAILED_TEXT);
+  return xsError(res, 500, 'XS_READ_FAILED', '读取跨会话消息失败，请重试');
+}
+
+// POST /api/xsession/messages { to, body, fromSessionId? } —— 手动转发,一律落成卡片。校验顺序见 parseManualSend / sendManualMessages。
+router.post('/xsession/messages', async (req, res) => {
+  let parsed;
+  try { parsed = parseManualSend(req.body); } catch (e) { return sendXsFailure(res, e, true); }
+  let rows;
+  try { rows = await loadSessionRows(); } catch {
+    return xsError(res, 500, 'XS_LIST_FAILED', '读取会话列表失败');
+  }
+  try { res.json({ ok: true, messages: await sendManualMessages(parsed, rows) }); } catch (e) { sendXsFailure(res, e, true); }
+});
+
+// GET /api/xsession/messages?sessionId=&status= —— 某会话收到的消息(按到达先后),带正文。
+router.get('/xsession/messages', async (req, res) => {
+  let query;
+  try { query = parseListQuery(req.query || {}); } catch (e) { return sendXsFailure(res, e, false); }
+  try { res.json({ messages: await listInboxMessages(query) }); } catch (e) { sendXsFailure(res, e, false); }
+});
+
+// POST /api/xsession/messages/:id/claim | release | dismiss —— 卡片上的【处理】【撤回】【忽略】。
+for (const [action, run] of [['claim', claimMessage], ['release', releaseMessage], ['dismiss', dismissMessage]]) {
+  router.post(`/xsession/messages/:id/${action}`, async (req, res) => {
+    try { res.json(await run(req.params.id)); } catch (e) { sendXsFailure(res, e, true); }
+  });
+}
+
+// GET /api/xsession/pending —— 侧栏会话行、项目行汇总与 Dock 角标共用的待处理计数。
+router.get('/xsession/pending', async (_req, res) => {
+  try { res.json(await pendingSummary()); } catch (e) { sendXsFailure(res, e, false); }
 });
 
 // index.js 的全局 JSON 解析器在路由之前跑:请求体不是 JSON、或是 "on" / null 这类非对象时直接进错误链,到不了上面的
