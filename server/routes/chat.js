@@ -1074,7 +1074,8 @@ const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolU
  *   turnStart 在本回合的用户消息推进输入流之前调用(此时用 deliverRunEvent 补的事件排在本回合任何 CLI 输出之前);
  *   info = { pid, runId, sessionId, draftId, cwd, turnEpoch, reused, tag }。
  *   turnEnd 每个回合至多一次(起过子代理的回合去抖收尾后又被续跑复活时,只算第一次),info 同上(无 reused)另带
- *   outcome:'completed' | 'failed'(结果为错误、没等到结果进程就退出、或进程起不来) | 'stopped'(本回合收到过停止请求)。
+ *   outcome:'completed' | 'failed'(结果为错误、没等到结果进程就退出、或进程起不来) | 'stopped'(本回合收到过停止请求),
+ *   errorSummary:failed 时本回合最后一条错误的一行摘要(脱敏、截短),取不到或不是 failed 为 null。
  * · preToolUse(input, ctx) → null | PreToolUse 钩子输出(可异步);ctx = { toolUseID, sessionId, cwd, runId }。
  *   返回对象时它就是这次 PreToolUse 的输出;返回 null 或抛错时按没挂接处理(既有判定照常)。
  */
@@ -1117,7 +1118,8 @@ const turnStartedByRequest = new WeakMap();
 // 回合开始:两个回合钩子都没挂接时什么都不做(slot 上不出现 runtimeTurn)。
 function notifyTurnStart(slot, pid, reused, tag, req) {
   if (!runtimeHooks.turnStart && !runtimeHooks.turnEnd) return;
-  slot.runtimeTurn = { epoch: slot.turnEpoch | 0, tag, ended: false, stopRequested: false };
+  // startSeq:本回合开始前最后一个事件序号(序号跨回合单调),回合结束时只从它之后的事件里找错误摘要
+  slot.runtimeTurn = { epoch: slot.turnEpoch | 0, tag, ended: false, stopRequested: false, startSeq: slot.seq | 0 };
   if (req) turnStartedByRequest.set(req, slot);
   callRuntimeHook('turnStart', { ...runtimeTurnInfo(slot, pid), reused });
 }
@@ -1134,7 +1136,49 @@ function notifyTurnEnd(slot, pid) {
   if (!rt || rt.ended || rt.epoch !== (slot.turnEpoch | 0)) return;
   rt.ended = true;
   const outcome = rt.stopRequested ? 'stopped' : (slot.lastResultAt == null || slot.lastResultError) ? 'failed' : 'completed';
-  callRuntimeHook('turnEnd', { ...runtimeTurnInfo(slot, pid), outcome });
+  const errorSummary = outcome === 'failed' ? runtimeTurnErrorSummary(slot, rt.startSeq | 0) : null;
+  callRuntimeHook('turnEnd', { ...runtimeTurnInfo(slot, pid), outcome, errorSummary });
+}
+
+// turnEnd 的 errorSummary:本回合投递过的事件里最后一条错误(错误终态的 result、或 error 行),脱敏、压成一行、截短;
+// 找不到为 null。从已盖章的事件环形窗里倒着找(只看本回合的序号),不碰消息泵;只在挂接了回合钩子且回合失败时才算。
+function runtimeTurnErrorSummary(slot, startSeq) {
+  const log = Array.isArray(slot.eventLog) ? slot.eventLog : [];
+  for (let i = log.length - 1; i >= 0 && log[i].seq > startSeq; i--) {
+    const text = log[i].line;
+    if (!text.startsWith('{"type":"error"') && !(text.startsWith('{"type":"result"') && text.includes('"is_error":true'))) continue;
+    let ev;
+    try { ev = JSON.parse(text); } catch { continue; }
+    const errors = Array.isArray(ev.errors) ? ev.errors.filter((e) => typeof e === 'string' && e.trim()).join('; ') : '';
+    const raw = ev.type === 'error' ? ev.error : (errors || ev.result || ev.subtype);
+    const summary = summarizeTurnError(raw);
+    if (summary) return summary;
+  }
+  return null;
+}
+
+const TURN_ERROR_SUMMARY_MAX = 200;
+/**
+ * 错误文本 → 给人看的一行摘要:先抹掉像密钥 / 令牌的片段,再把空白压成单个空格,超过 200 个字符截短加"…"
+ * (不切开代理对)。不是字符串或抹完为空 → null。(export 仅为可单测。)
+ */
+export function summarizeTurnError(text) {
+  if (typeof text !== 'string') return null;
+  let s = text
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, '***') // sk- 开头的 API key
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 ***') // Authorization 头的值
+    // key=value、"key": "value" 这类写法里名字像凭据的值
+    .replace(/([\w-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)[\w-]*)(["']?\s*[:=]\s*["']?)[^\s"',;&}]+/gi, '$1$2***')
+    .replace(/[A-Za-z0-9_+=-]{32,}/g, '***') // 其余长串(JWT 段、十六进制 / base64 密钥)
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return null;
+  if (s.length > TURN_ERROR_SUMMARY_MAX) {
+    let cut = TURN_ERROR_SUMMARY_MAX;
+    if (/[\uD800-\uDBFF]/.test(s[cut - 1])) cut -= 1;
+    s = `${s.slice(0, cut).trimEnd()}…`;
+  }
+  return s;
 }
 const ENTRY_HOOK_FAILED = { reject: { status: 500, body: { ok: false, code: 'CHAT_ENTRY_HOOK_FAILED', error: '服务端内部错误，本条消息没有发出，请重试' } } };
 async function runChatEntryHook(ctx) {

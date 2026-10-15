@@ -39,7 +39,7 @@ const sameId = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toL
 // heldReason → heldText(一期只会出现这三种;全角标点)。turn-error 后面接摘要。
 const HELD_TEXT = { 'target-card': '等待你确认后处理', interrupted: '上次处理被中断' };
 const TURN_ERROR_PREFIX = '处理该消息的回合出错：';
-// 回合结束通知只给 outcome、不带错误文本,所以 failed 的摘要是这句固定话;"始终没开始回合"有自己的摘要。
+// failed 的摘要取回合结束通知带的 errorSummary(chat.js 已脱敏、截短);取不到时用这句固定话。"始终没开始回合"有自己的摘要。
 const TURN_FAILED_SUMMARY = '模型返回了错误或进程提前退出';
 const NEVER_STARTED_SUMMARY = '未能开始处理';
 
@@ -354,7 +354,8 @@ function onTurnStart(info) {
 
 function onTurnEnd(info) {
   const hit = inflightFor(info?.tag);
-  if (hit) settleTurn(hit.id, hit.f.key, info.outcome);
+  const detail = typeof info?.errorSummary === 'string' && info.errorSummary.trim() ? info.errorSummary : undefined;
+  if (hit) settleTurn(hit.id, hit.f.key, info.outcome, detail);
 }
 
 /** 结算一条 processing 的消息(只认本次兑换的回合 key,迟到的旧回合不动它)。 */
