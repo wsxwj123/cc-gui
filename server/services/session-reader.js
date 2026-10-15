@@ -1108,6 +1108,41 @@ function isLocalCommandEcho(text) {
   return /^\s*<(local-command-(caveat|stdout|stderr)|command-(name|message|args)|task-notification|cgui-tool-retry)\b/.test(text);
 }
 
+// ── r151b T-X5:跨会话消息的读取端投影(接口 X.3.3「历史消息」)─────────────────────────────
+// 这类消息落盘是一条 isMeta 的 user 行,原先被整条跳过 → 刷新后只剩一个凭空出现的回复。
+// 认法只看 origin:kind 为 peer 且没有 senderTaskId。带 senderTaskId 的是子代理发回主会话的消息,维持原处理;
+// 不看 promptSource / turnOrigin(旧 CLI 2.1.273 的行 promptSource 为 sdk、没有 turnOrigin)。
+const PEER_TEXT_PREFIX = 'Another Claude session sent a message:\n';
+const PEER_TEXT_SUFFIX = '\n\nThis came from another Claude session';
+
+// origin 里没有 body 时(CLI 严格解析失败的形态)从该行文本取:去掉固定前缀与从固定后缀起的结尾,
+// 剩下的原样(信封标签不再拆);两段固定文字都找不到 → null。后缀取最后一处:CLI 把它追加在整条末尾,
+// 正文里碰巧写了同一句时取第一处会把正文截短。
+function peerBodyFromText(text) {
+  let rest = text;
+  let matched = false;
+  if (rest.startsWith(PEER_TEXT_PREFIX)) { rest = rest.slice(PEER_TEXT_PREFIX.length); matched = true; }
+  const cut = rest.lastIndexOf(PEER_TEXT_SUFFIX);
+  if (cut >= 0) { rest = rest.slice(0, cut); matched = true; }
+  return matched ? rest : null;
+}
+
+/** 跨会话消息行 → { type:'peer-message', uuid, timestamp, fromName, from, body, hostInjected };不是这类行 → null。 */
+export function peerMessageOf(record) {
+  const origin = record?.origin;
+  if (!origin || typeof origin !== 'object' || origin.kind !== 'peer' || origin.senderTaskId) return null;
+  const text = normalizeContent(record.message?.content).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+  return {
+    type: 'peer-message',
+    uuid: record.uuid,
+    timestamp: record.timestamp,
+    fromName: typeof origin.name === 'string' ? origin.name : null,
+    from: typeof origin.from === 'string' ? origin.from : null,
+    body: typeof origin.body === 'string' ? origin.body : peerBodyFromText(text),
+    hostInjected: origin.hostInjected === true,
+  };
+}
+
 // ── R10:task-notification 的读取端投影 ────────────────────────────────────────
 // CLI 把同一个后台任务通知信封同时以【两种形态】落盘(真机转写实测):
 //   · 普通 user 记录:origin.kind='task-notification' + queueSkipAttachments:true
@@ -1802,6 +1837,14 @@ export async function getSessionMessages(sessionId, projectHash) {
       // are CLI/Desktop bookkeeping, never a real prompt — Desktop itself never
       // renders them. Skip so they don't surface as a stray user bubble in the
       // GUI when switching into such a session.
+      // r151b T-X5:跨会话消息也是 isMeta 行,要在跳过之前认出来;切一刀保住它在回合之间的位置
+      // (它触发的回复从下一段开始),不算用户提问(不置 sawRealUser,没有回滚 / 分叉入口)。
+      const peer = peerMessageOf(record);
+      if (peer) {
+        flushTurn();
+        messages.push(peer);
+        continue;
+      }
       if (record.isMeta) continue;
       // After /compact the CLI stores the summary as a synthetic `user` message
       // flagged isCompactSummary. Render a collapsed "compacted" divider instead
