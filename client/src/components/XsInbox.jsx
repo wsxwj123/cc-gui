@@ -26,7 +26,8 @@ function formatArrival(iso) {
   return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 
-const XsCard = React.memo(function XsCard({ message, onProcess, onRelease, onDismiss }) {
+// noFold:目标会话(本窗格会话)在「放任」档 —— 点【处理】后工具不经确认直接执行,正文整段摊开、不给折叠(审计 S6)
+const XsCard = React.memo(function XsCard({ message, noFold = false, onProcess, onRelease, onDismiss }) {
   const busy = useXsBusy(message.id);
   // 会话正忙时点过【处理】:"处理这条消息"已排在前端队列里(消息在服务端仍是 pending),轮到它时才认领
   const queuedHere = useXsQueuedHere(message.id);
@@ -35,13 +36,14 @@ const XsCard = React.memo(function XsCard({ message, onProcess, onRelease, onDis
   const bodyRef = useRef(null);
   const body = typeof message.body === 'string' ? message.body : '';
   const lineCount = body ? body.split('\n').length : 0;
+  const unfolded = expanded || noFold;
   // 折叠态一律按 8 行截断;是否需要「展开」看实际有没有被截(长行自动折行也算),不只数换行
   useLayoutEffect(() => {
     const el = bodyRef.current;
-    if (!el || expanded) return;
+    if (!el || unfolded) return;
     setOverflow(el.scrollHeight > el.clientHeight + 1);
-  }, [body, expanded]);
-  const foldable = lineCount > FOLD_LINES || overflow;
+  }, [body, unfolded]);
+  const foldable = !noFold && (lineCount > FOLD_LINES || overflow);
   const status = message.status;
   const canProcess = !busy && !queuedHere && (status === 'pending' || status === 'queued');
   const canDismiss = !busy && (status === 'pending' || status === 'queued' || status === 'claimed');
@@ -56,7 +58,7 @@ const XsCard = React.memo(function XsCard({ message, onProcess, onRelease, onDis
       </div>
       <div ref={bodyRef} data-testid="xs-card-body"
         className="mt-1.5 text-[12.5px] leading-relaxed text-ink font-body whitespace-pre-wrap break-words"
-        style={expanded ? undefined : CLAMP_STYLE}>
+        style={unfolded ? undefined : CLAMP_STYLE}>
         {body || '（正文不可用）'}
       </div>
       {foldable && (
@@ -81,8 +83,8 @@ const XsCard = React.memo(function XsCard({ message, onProcess, onRelease, onDis
   );
 });
 
-/** sessionId = 本窗格当前会话;onSend = 本窗格的既有发送入口(App.jsx handleSend,经 ChatInput 透传)。 */
-export const XsInbox = React.memo(function XsInbox({ sessionId = null, onSend }) {
+/** sessionId = 本窗格当前会话;onSend = 本窗格的既有发送入口(App.jsx handleSend,经 ChatInput 透传);noFold = 本会话在「放任」档。 */
+export const XsInbox = React.memo(function XsInbox({ sessionId = null, onSend, noFold = false }) {
   const enabled = useXsEnabled();
   const messages = useXsInbox(sessionId);
   const [error, setError] = useState('');
@@ -120,7 +122,7 @@ export const XsInbox = React.memo(function XsInbox({ sessionId = null, onSend })
       {error && <div className="text-[11px] text-amber-700 font-body px-1">{error}</div>}
       <div className="space-y-2 max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] overflow-y-auto">
         {messages.map((m) => (
-          <XsCard key={m.id} message={m} onProcess={onProcess} onRelease={onRelease} onDismiss={onDismiss} />
+          <XsCard key={m.id} message={m} noFold={noFold} onProcess={onProcess} onRelease={onRelease} onDismiss={onDismiss} />
         ))}
       </div>
     </div>
