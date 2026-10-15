@@ -7,7 +7,7 @@ import { CornerLeftUp, ChevronDown, ChevronRight } from './Icon.jsx';
 import {
   useXsEnabled, useXsInbox, useXsBusy, useXsQueuedHere, watchXsInbox,
   processXsMessage, releaseXsMessage, dismissXsMessage,
-  xsCardFromText, xsCardReasonText,
+  xsCardFromText, xsCardReasonText, xsCardHopText,
 } from '../utils/xsession.js';
 
 const FOLD_LINES = 8;
@@ -48,12 +48,14 @@ const XsCard = React.memo(function XsCard({ message, noFold = false, onProcess, 
   const canProcess = !busy && !queuedHere && (status === 'pending' || status === 'queued');
   const canDismiss = !busy && (status === 'pending' || status === 'queued' || status === 'claimed');
   const arrival = formatArrival(message.createdAt);
+  const hopText = xsCardHopText(message); // r151c:hop 大于 1 时"连锁第 N 次"
   return (
     <div data-testid="xs-card" data-message-id={message.id} data-status={status}
       className="rounded-panel bg-canvas border border-canvas-deep shadow-popover px-3 py-2.5 animate-fade-up">
       <div className="flex items-center gap-1.5 min-w-0 text-[11px] font-body text-ink-muted">
         <CornerLeftUp size={12} className="shrink-0 text-accent" />
         <span data-testid="xs-card-from" className="truncate min-w-0">{xsCardFromText(message)}</span>
+        {hopText && <span data-testid="xs-card-hop" className="shrink-0 px-1.5 py-0.5 rounded bg-accent/12 text-accent text-[10px]">{hopText}</span>}
         {arrival && <span className="shrink-0 text-ink-faint font-mono" title={new Date(Date.parse(message.createdAt)).toLocaleString()}>{arrival}</span>}
       </div>
       <div ref={bodyRef} data-testid="xs-card-body"

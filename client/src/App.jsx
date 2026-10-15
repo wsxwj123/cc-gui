@@ -160,6 +160,7 @@ import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
 import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAutoRetrySkipped, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
+import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
@@ -3493,7 +3494,8 @@ function SessionHeaderMore({ children, forceOpenSignal = 0 }) {
       setOpen(false);
     };
     // R1:window 捕获(同 ThemeToggle,详见那里注释);stopPropagation 仍挡住会话级停止监听。
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
+    // r151c:组内的接收设置会弹确认框(document 冒泡阶段听 Esc)—— 确认框开着时这次 Esc 归它,本组不抢。
+    const onEsc = (e) => { if (e.key === 'Escape' && !document.querySelector('[data-cgui-confirm]')) { e.stopPropagation(); setOpen(false); } };
     document.addEventListener('mousedown', onDoc);
     window.addEventListener('keydown', onEsc, true);
     return () => { document.removeEventListener('mousedown', onDoc); window.removeEventListener('keydown', onEsc, true); };
@@ -9306,6 +9308,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   <Activity size={14} />
                 </button>
               )}
+              {/* r151c:接收设置(只对已落盘会话、总开关开时出现;组件内自己判) */}
+              <XsInboundSelect sessionId={selectedSession?.sessionId} />
             </SessionHeaderMore>
           </div>
         </div>
@@ -9342,6 +9346,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           同一时刻最多渲染一条,优先级:超窗恢复(错误) > 切换通知(5s 自消) > 规划
           模式提示(常驻可关)。低优先级横幅被压制期间条件仍在则待高优先级消失后自然
           回显;providerSwitchNotice 的 5s 计时独立运行,压制期间到期即清(可接受)。 */}
+      {/* r151c:改接收设置失败的提示(会话头下方;没有时不渲染) */}
+      <XsInboundNotice sessionId={selectedSession?.sessionId} />
       {/* Permission-mode hint banner — moved here from ChatInput so it sits
           directly under the session title. Banner is dismissible per-user. */}
       {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && !shownNotice && (
@@ -13221,6 +13227,7 @@ export default function App() {
         {/* ③ 全局自定义背景层(手机端同桌面)。 */}
         <GlobalBackgroundLayer />
         <MobileTopBar onMenu={toggleSidebar} onNew={startMobileNewChat} title={mobileTitle} />
+        <XsPausedBanner />
         <MainLayout
           sidebarCollapsed={sidebarCollapsed}
           selectedProject={selectedProject}
@@ -13314,6 +13321,8 @@ export default function App() {
           </button>
         </div>
       </header>
+      {/* r151c:跨会话自动处理暂停提示条(只在总开关开、已暂停时渲染) */}
+      <XsPausedBanner />
 
       {/* Main content */}
       <MainLayout
