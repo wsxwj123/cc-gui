@@ -82,7 +82,7 @@ eq(card()?.status, 'processing', '前置:卡片是"处理中"');
 
 // ── 2. retryLater 原样取出来跑 ──
 const APP = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
-const HEAD = '    const retryLater = (nextOpts, expectKey = null) => {\n';
+const HEAD = '    const retryLater = (nextOpts, expectKey = null, shownNotice = null) => {\n';
 const s0 = APP.indexOf(HEAD);
 ok(s0 > 0 && APP.indexOf(HEAD, s0 + 1) < 0, 'retryLater 只定义一处');
 const retrySrc = APP.slice(s0, APP.indexOf('\n    };\n', s0) + '\n    };'.length);
