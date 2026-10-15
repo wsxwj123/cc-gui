@@ -158,7 +158,7 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
-import { startXsession, xsChatFields, xsClaimNotSent, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
+import { startXsession, xsChatFields, xsAutoTitlePrompt, xsClaimNotSent, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
@@ -5079,6 +5079,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 靠 isStreaming 猜忙不忙 —— isStreaming 说的是"本条 turn 还在产出",而入队判据是
     // "会话忙不忙"(下面那道门读 streamingRef/backgroundPidRef),两者并不等价。
     const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta, onEnqueueFailure, onQueued } = opts;
+    // 自动标题的素材(下面每一处 POST /api/chat/title 的触发条件与 firstUser 都用它,不直接用 prompt):
+    // 点卡片处理跨会话消息时 prompt 只是占位,不能拿去起标题;其余发送它就是 prompt。
+    const autoTitlePrompt = xsAutoTitlePrompt(prompt, opts);
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
     // rejects them ("isn't available in this environment"). Instead we launch
@@ -6041,12 +6044,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               try {
                 const _sid = event.session_id;
                 const _st = useStore.getState();
-                if (!titleAttempted.has(_sid) && !_st.customTitles[_sid] && !_st.autoTitles[_sid] && prompt && !hiddenUserMessage) {
+                if (!titleAttempted.has(_sid) && !_st.customTitles[_sid] && !_st.autoTitles[_sid] && autoTitlePrompt && !hiddenUserMessage) {
                   titleAttempted.add(_sid);
                   const _m = String(_st.modelBySession[_sid] || _st.currentModel || '').replace(/\[1m\]/i, '');
                   fetch('/api/chat/title', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ firstUser: prompt, firstAssistant: '', cwd, model: _m, sessionId: _sid }),
+                    body: JSON.stringify({ firstUser: autoTitlePrompt, firstAssistant: '', cwd, model: _m, sessionId: _sid }),
                   }).then((r) => r.json()).then((d) => {
                     if (d?.title) useStore.getState().setAutoTitle(_sid, d.title);
                     else titleAttempted.delete(_sid);
@@ -7600,7 +7603,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const _ownerKey = streamOwnerKeyRef.current;
         const titleSid = streamSid || ((_ownerKey && !_ownerKey.startsWith('draft-')) ? _ownerKey : null);
         const st = useStore.getState();
-        if (titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && prompt) {
+        if (titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && autoTitlePrompt) {
           // 标记"已尝试"——无论成功失败都不再重试,避免 provider 失败时每轮 spawn。
           titleAttempted.add(titleSid);
           // 标题用【当前 provider 有效】的模型:本会话 pin 或当前选中模型,去掉 [1m]。
@@ -7613,7 +7616,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             headers: { 'Content-Type': 'application/json' },
             // 带 sessionId:服务端先看该会话 jsonl 里 CLI 有没有写好 ai-title,有就直接用,
             // 省掉一次 `claude -p` 冷启(回合已结束,这时它通常已经落盘)。
-            body: JSON.stringify({ firstUser: prompt, firstAssistant: accumulatedText || '', cwd, model: titleModel, sessionId: titleSid }),
+            body: JSON.stringify({ firstUser: autoTitlePrompt, firstAssistant: accumulatedText || '', cwd, model: titleModel, sessionId: titleSid }),
           })
             .then((r) => r.json())
             .then((d) => {

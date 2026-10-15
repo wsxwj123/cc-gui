@@ -359,6 +359,16 @@ export function xsChatFields(opts) {
   if (!c || !isXsId(c.messageId) || !isXsId(c.token)) return null;
   return { xsMessageId: c.messageId, xsToken: c.token };
 }
+/**
+ * 自动标题(App.jsx handleSend 里每一处 POST /api/chat/title)拿来当"首条用户消息"的文字:触发条件与请求体都只读它。
+ * 点卡片发出的那条(opts.xsClaim)的 prompt 只是占位 XS_PROMPT_PLACEHOLDER,不是用户写的话 —— 拿去起标题,
+ * 没有标题的会话(第三方 provider 常见)就被写成占位文字:返回 '',触发条件不成立。
+ * 其余发送原样返回 prompt(包括别的隐藏消息),自动标题行为与改动前相同。
+ * 判 xsClaim 而不判 xsChatFields:认领字段残缺时请求体不带 xsMessageId,但 prompt 照样是占位。
+ */
+export function xsAutoTitlePrompt(prompt, opts) {
+  return opts && opts.xsClaim ? '' : prompt;
+}
 /** /api/chat 拒了这条点卡片的请求(400 / 409 XS_CLAIM_INVALID、409 XS_DISABLED、500 …):按"没发出"处理,刷新卡片,返回提示文案。 */
 export function xsClaimNotSent(xsClaim, reply) {
   if (xsClaim && isXsId(xsClaim.sessionId)) {
