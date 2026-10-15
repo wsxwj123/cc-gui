@@ -247,6 +247,9 @@ router.get('/agents/active', async (req, res) => {
       status,
       stoppable: !finished,
       cronHold: !!p.cronHold, // 建过 cron(/loop),进程被豁免于闲置回收(chat.js CRON_HOLD_MS)
+      // r151c:回合代数(常驻进程每开一个新回合加一)。前端按 pid#turnEpoch 认"同一进程上的新回合",
+      // 紧跟在上一回合之后开始、轮询看不到中间空闲时也能重新接流(client/src/utils/reattach.js)。
+      turnEpoch: p.turnEpoch | 0,
     });
     seenPids.add(Number(p.pid));
     if (p.sessionId) seenSessionIds.add(p.sessionId);

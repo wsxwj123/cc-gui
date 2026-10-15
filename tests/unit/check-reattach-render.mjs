@@ -162,7 +162,8 @@ import {
     'attachFailRef 复位点只应有 2 处(done 收尾 + 三振横幅的重试按钮)');
   // 重试按钮的 nonce 必须进 auto-reattach effect 的 deps,否则 pid 不变时 Object.is 短路,
   // effect 永不重跑 = 按钮点了没反应(已知坑)。
-  assert.match(src, /\}, \[backgroundPid, attachRetryNonce\]\);/,
+  // r151c:deps 另含 backgroundTurn(同一进程开新回合时 pid 不变,靠回合身份变化让 effect 重跑),锚跟着实现形态更新。
+  assert.match(src, /\}, \[backgroundPid, backgroundTurn, attachRetryNonce\]\);/,
     'auto-reattach effect 的 deps 必须含 attachRetryNonce');
   assert.doesNotMatch(src, /会话流连接失败,请切走再切回重试。/,
     '三振文案不得再让用户"切走再切回"猜复位动作,改为横幅上的重试按钮');

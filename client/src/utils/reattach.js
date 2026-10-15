@@ -173,18 +173,42 @@ export function nextAttachTry(prev, pid, maxTries = 3) {
  *   'dropped'  传输被静默掐断(既无 done 也无 detached)→ 【不清】,这形态归 recoverAttach
  *              的 per-pid 三振重试管,这里插手会打穿三振保护。
  *
- * @param {{guard?: string|null, backgroundPid?: string|null, streaming?: boolean,
- *          streamEnd?: null|'done'|'takeover'|'dropped'}} o
+ * r151c 回合身份(backgroundTurn,由 backgroundTurnKey 算出):常驻进程上紧接着开始的新回合
+ * (上一回合 turn-complete 后几十毫秒,自动处理的 xs:turn 即此形态)pid 不变,1.5s 轮询又看不到
+ * 中间那段空闲 —— 只按 pid 记,闩锁要么停在「接过了」,要么 state 值没变、effect 根本不重跑,
+ * 页面只挂横幅不接流。所以 effect 写进闩锁的是回合身份:新回合身份不同 → 照接;同一回合 → 不重复接。
+ * 闩锁里是【裸 pid】的(被接管 / 三振出局 / 用户转后台,这三处直接写 String(pid))仍然整个进程
+ * 都不接 —— 那三种语义本来就是"这个进程别再自动接",与回合无关。没有回合身份时(旧服务端)退回只按 pid。
+ *
+ * @param {{guard?: string|null, backgroundPid?: string|null, backgroundTurn?: string|null,
+ *          streaming?: boolean, streamEnd?: null|'done'|'takeover'|'dropped'}} o
  * @returns {{guard: string|null, reattach: boolean}} guard = 闩锁的新值(原样写回 ref)
  */
-export function nextReattachGuard({ guard = null, backgroundPid = null, streaming = false, streamEnd = null } = {}) {
+export function nextReattachGuard({ guard = null, backgroundPid = null, backgroundTurn = null, streaming = false, streamEnd = null } = {}) {
   if (streamEnd) return { guard: streamEnd === 'done' ? null : guard, reattach: false };
   // backgroundPid 为空【不等于】后台进程没了:本地正在流时轮询恒写 null。只有真的没有
   // 本地流,这个空值才算「进程闲下来了」的复位信号。
   if (!backgroundPid) return { guard: streaming ? guard : null, reattach: false };
   if (streaming) return { guard, reattach: false };              // 本地已有流,不必也不该再接
-  if (guard === backgroundPid) return { guard, reattach: false }; // 这一次复活已经接过了
-  return { guard: backgroundPid, reattach: true };
+  if (guard === backgroundPid) return { guard, reattach: false }; // 整个进程上了闩(或没有回合身份时:这一次复活已经接过了)
+  const key = backgroundTurn || backgroundPid;
+  if (guard === key) return { guard, reattach: false };           // 这一回合已经接过了
+  return { guard: key, reattach: true };
+}
+
+/**
+ * 回合身份:/api/agents/active 的 chat-process 条目 → "pid#turnEpoch"。turnEpoch 是服务端常驻进程
+ * 每开一个新回合就加一的回合代数(chat.js 复用块),同一进程上的新回合身份必然不同。
+ * 条目没带 turnEpoch(旧服务端)→ null,调用方退回只按 pid 判。不会等于裸 pid(带 # 分隔),
+ * 所以与"整个进程上闩"的裸 pid 闩锁不会混淆。
+ * @param {{pid?: string|number, turnEpoch?: number}|null|undefined} entry
+ * @returns {string|null}
+ */
+export function backgroundTurnKey(entry) {
+  if (!entry || entry.pid === undefined || entry.pid === null) return null;
+  const epoch = entry.turnEpoch;
+  if (typeof epoch !== 'number' || !Number.isInteger(epoch) || epoch < 0) return null;
+  return `${entry.pid}#${epoch}`;
 }
 
 /**

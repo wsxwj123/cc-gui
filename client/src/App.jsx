@@ -162,7 +162,7 @@ import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAut
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
-import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
+import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
@@ -4434,6 +4434,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // expose `backgroundPid` so the composer can render the stop button + a
   // "正在继续工作…" indicator, matching how multi-terminal CLI sessions feel.
   const [backgroundPid, setBackgroundPid] = useState(null);
+  // r151c:后台运行的回合身份(pid#turnEpoch,见 utils/reattach.js backgroundTurnKey)。只给 auto-reattach
+  // 用:常驻进程上紧跟着开始的新回合 pid 不变,backgroundPid 的值不变 effect 就不重跑,靠它的变化重新接流。
+  const [backgroundTurn, setBackgroundTurn] = useState(null);
   // 引导注入的可用性(⚡ 置灰判据):activeProcRef 的 state 影子 —— POST /api/chat 返回 pid
   // 之后才有值,即"服务端确实有这个会话的活 slot"。connecting 窗口(POST 还没回,最坏 5s)
   // 恒为 null,此时注入必然 409,所以 ⚡ 置灰 + 直发回落入队。ref 不是响应式的,渲染要 state。
@@ -4561,6 +4564,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // A 的"后台工作中",此刻点停止会 POST /chat/<A-pid>/stop 杀错 A 的后台回合(审计#5,
     // 停止不可逆)。lastSeenPidRef 一并清,防 B 首轮 poll 误触"pid 有→无"的排空分支。
     setBackgroundPid(null);
+    setBackgroundTurn(null);
     backgroundPidRef.current = null;
     lastSeenPidRef.current = null;
     let cancelled = false;
@@ -4631,6 +4635,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
         lastSeenPidRef.current = next;
         setBackgroundPid(next);
+        setBackgroundTurn(next ? backgroundTurnKey(hit) : null);
       } catch {}
     };
     const unsubscribe = subscribeAgentsActive(poll);
@@ -7792,13 +7797,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 会让"刚被别的视图接管"的本视图立刻回连反踢对方,两边 1.5s 一轮互踢不停。
     // 失败计数已按 pid 记(nextAttachTry),pid 变了自然归零,这里不必也不该动它。
     const { guard, reattach } = nextReattachGuard({
-      guard: reattachedPidRef.current, backgroundPid, streaming: streamingRef.current,
+      guard: reattachedPidRef.current, backgroundPid, streaming: streamingRef.current, backgroundTurn,
     });
     reattachedPidRef.current = guard;
     if (reattach) handleSendRef.current?.(null, { reattachPid: backgroundPid });
     // attachRetryNonce:三振横幅上的「重试」按钮触发器。pid 不变时 setBackgroundPid 被
     // Object.is 短路,只依赖 backgroundPid 的话 effect 永不重跑 = 按钮点了没反应。
-  }, [backgroundPid, attachRetryNonce]);
+    // backgroundTurn(r151c):同一进程开了新回合,pid 不变而回合身份变了 → effect 重跑、按回合判要不要接。
+  }, [backgroundPid, backgroundTurn, attachRetryNonce]);
 
   // H 转后台(用户主动):复用切走会话的 detach 路径 —— 只 abort 本端 SSE,进程照常
   // 在服务端跑、jsonl 继续落盘。与切走的区别:留在本会话,所以要 ① 预置 reattachedPidRef
