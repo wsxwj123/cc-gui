@@ -132,6 +132,15 @@ try {
   eq([back.heldReason, back.heldText], ['turn-error', '处理该消息的回合出错：R151B-STUB-REPLY'], '出错 → heldText 带本回合的错误摘要');
   back = await processOnce('MAKE-EXIT 这一回合没有结果');
   eq([back.heldReason, back.heldText], ['turn-error', '处理该消息的回合出错：模型返回了错误或进程提前退出'], '取不到摘要 → 原来的固定文案');
+  // r151c 先修 5:来源会话已删(记录文件不在)、消息之后才正常结算成 done → 同一事务里 from.title 抹成空串
+  {
+    const S = 'eeeeeeee-0000-4000-8000-0000000000e5'; // 没有记录文件 = 已删
+    const [sm] = await xs.sendManualMessages({ to: [B], body: '来源已删的一条', fromSessionId: S }, [...rows, { sessionId: S, title: '会话戊', projectDir: WORK }]);
+    const { token } = await xs.claimMessage(sm.id);
+    eq((await post('/chat', BODY({ sessionId: B, xsMessageId: sm.id, xsToken: token }))).status, 200, '兑换后起回合(来源已删)');
+    const done = await waitFor(async () => (await xs.listInboxMessages({ sessionId: B, statuses: new Set(['done']) })).find((m) => m.id === sm.id), `消息 ${sm.id} 结算成 done`);
+    eq([done.from.title, done.from.deleted], ['', true], '删会话之后才结算的:来源标题抹成空串');
+  }
   xs.syncXsRuntimeHooks(false);
 } finally {
   try { closeAllPersistentProcesses(); } catch { /* */ }

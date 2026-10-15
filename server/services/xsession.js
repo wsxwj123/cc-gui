@@ -237,16 +237,30 @@ export async function releaseMessage(id) {
   return { ok: true, id: m.id, status: 'pending' };
 }
 
+// r151c 先修 5:删会话(dropXsMessagesForSession)只抹已结束记录里该会话的标题;那一刻还没结束、以它为来源的消息不动
+// (卡片与信封还要用来源标题)。这些消息之后才结束(结算、忽略)时,在变为已结束的同一事务里补抹:来源会话的记录文件已不在
+// → from.title 抹成空字符串(与 from.deleted 同一判据)。查不出时不动,不让结算 / 忽略因此失败。
+async function eraseTitleIfSourceDeleted(m) {
+  const sid = m.from?.sessionId;
+  if (!sid || !m.from.title) return;
+  try {
+    if (!(await findSessionFile(sid))) m.from.title = '';
+  } catch (e) {
+    console.warn(`[xsession] 消息 ${m.id} 的来源会话查不出,来源标题未处理:${e?.code || e?.message || e}`);
+  }
+}
+
 /** pending / queued / claimed → dismissed;正文随即删除(存储层在消息结束时删),认领过的凭据作废。 */
 export async function dismissMessage(id) {
   assertMessageId(id);
-  const m = await mutateXsInbox((messages) => {
+  const m = await mutateXsInbox(async (messages) => {
     const m = findById(messages, id);
     if (!m) throw notFound();
     if (!['pending', 'queued', 'claimed'].includes(m.status)) throw new XsError(409, 'XS_NOT_PENDING', '这条消息不是待处理状态', { status: m.status });
     m.status = 'dismissed';
     m.heldReason = null;
     for (const k of ['heldBefore', 'heldDetail', 'token']) delete m[k];
+    await eraseTitleIfSourceDeleted(m);
     return structuredClone(m);
   });
   await announce([m]);
@@ -414,13 +428,14 @@ async function settleTurn(id, key, outcome, detail) {
     inflight.delete(id);
   }
   try {
-    const m = await mutateXsInbox((messages) => {
+    const m = await mutateXsInbox(async (messages) => {
       const m = findById(messages, id);
       if (!m || m.status !== 'processing' || m.turn?.key !== key) return null;
       delete m.turn;
       if (outcome === 'completed') {
         m.status = 'done'; // 正文由存储层删除
         m.heldReason = null;
+        await eraseTitleIfSourceDeleted(m); // r151c 先修 5
       } else if (outcome === 'stopped') {
         m.status = 'pending';
         m.heldReason = 'interrupted';

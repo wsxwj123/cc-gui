@@ -103,6 +103,25 @@ try {
   eq((await del(C)).status, 200, '关着时删会话');
   eq((await store.listXsMessages()).map((m) => m.id), [b3], '关着时也清掉以它为目标的未结束消息');
   eq(wsMsgs.filter((e) => e.type === 'xs:message').map((e) => [e.message.id, e.message.status]), [[c1, 'dismissed']], '照样广播');
+
+  // ④ r151c 先修 5:来源会话删掉之后才结束(忽略)的消息,在结束的同一事务里把 from.title 抹成空串;来源还在的照留
+  setEnabled(true);
+  const E = 'eeeeeeee-0000-4000-8000-0000000000e5';
+  const F = 'ffffffff-0000-4000-8000-0000000000f6';
+  seedSession(E); seedSession(F);
+  const rows2 = [{ sessionId: E, title: '会话戊', projectDir: WORK }, { sessionId: F, title: '会话己', projectDir: WORK }];
+  const [e1] = await xs.sendManualMessages({ to: [F], body: '戊发给己的一', fromSessionId: E }, rows2);
+  const [e2] = await xs.sendManualMessages({ to: [F], body: '戊发给己的二', fromSessionId: E }, rows2);
+  await xs.dismissMessage(e2.id);
+  const titleOf = async (id) => (await store.listXsMessages()).find((m) => m.id === id)?.from?.title;
+  eq(await titleOf(e2.id), '会话戊', '来源还在:忽略后来源标题照留');
+  eq((await del(E)).status, 200, '删来源会话');
+  eq([await titleOf(e2.id), await titleOf(e1.id)], ['', '会话戊'], '删会话时:已结束的抹掉(一期已有),还没结束的不动(卡片还要用)');
+  wsMsgs.length = 0;
+  await xs.dismissMessage(e1.id);
+  eq(await titleOf(e1.id), '', '删会话之后才忽略的:结束的同一事务里抹掉');
+  const ev = wsMsgs.find((e) => e.type === 'xs:message' && e.message.id === e1.id);
+  eq([ev?.message.status, ev?.message.from.title, ev?.message.from.deleted], ['dismissed', '', true], '广播里的来源标题同样为空');
 } finally {
   server.close();
 }
