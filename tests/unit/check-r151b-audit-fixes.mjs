@@ -476,6 +476,39 @@ try {
     eq(await st5.clearXsInbox(), 1, '符号链接场景:记录照删');
     eq([existsSync(join(X5, 'messages.json')), readdirSync(OUT5)], [false, ['31313131-0000-4000-8000-000000000001.txt']], '正文目录是符号链接 → 不删链接那头的文件');
   }
+
+  // ── 接口(审计后补):GET /api/xsession/sessions 每项带 projectHash(该会话项目目录的编码名,与历史接口同一口径)────
+  {
+    setEnabled(true);
+    const seedIn = (cwd, sid, prompt, ageMin) => {
+      const hash = cwd.replace(/[^A-Za-z0-9]/g, '-');
+      const dir = join(HOME, '.claude', 'projects', hash);
+      mkdirSync(dir, { recursive: true }); mkdirSync(cwd, { recursive: true });
+      const at = new Date(Date.now() - ageMin * 60_000).toISOString();
+      const base = { cwd, sessionId: sid, timestamp: at, isSidechain: false, userType: 'external' };
+      const lines = [
+        { ...base, type: 'user', uuid: `${sid.slice(0, 8)}-u0`, parentUuid: null, message: { role: 'user', content: prompt } },
+        { ...base, type: 'assistant', uuid: `${sid.slice(0, 8)}-a1`, parentUuid: `${sid.slice(0, 8)}-u0`, message: { id: `m-${sid.slice(0, 8)}`, type: 'message', role: 'assistant', model: 'x', content: [{ type: 'text', text: '好' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } } },
+        { ...base, type: 'user', uuid: `${sid.slice(0, 8)}-u2`, parentUuid: `${sid.slice(0, 8)}-a1`, message: { role: 'user', content: '再问一句' } },
+      ];
+      writeFileSync(join(dir, `${sid}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
+      return hash;
+    };
+    const W1 = join(TMP, 'ws', 'proj-one'); const W2 = join(TMP, 'ws', 'proj.two_2');
+    const s1 = '91919191-0000-4000-8000-000000000001'; const s2 = '92929292-0000-4000-8000-000000000002';
+    const h1 = seedIn(W1, s1, 'R151B 项目一的提问', 2); const h2 = seedIn(W2, s2, 'R151B 项目二的提问', 1);
+    let r = await api('GET', '/xsession/sessions');
+    eq(r.status, 200, 'GET sessions');
+    const by = Object.fromEntries(r.body.sessions.map((s) => [s.sessionId, s]));
+    eq([by[s1]?.projectHash, by[s2]?.projectHash], [h1, h2], '每项的 projectHash = 项目目录的编码名');
+    ok(r.body.sessions.every((s) => typeof s.projectHash === 'string' && s.projectHash.length > 0), '每项都带 projectHash');
+    eq(Object.keys(by[s1]).sort(), ['lastActivity', 'pending', 'project', 'projectHash', 'sessionId', 'shortId', 'state', 'title'], '单项的键(projectDir 等服务端字段不出现)');
+    const hist = await api('GET', `/sessions/${s2}/messages?projectHash=${encodeURIComponent(by[s2].projectHash)}`);
+    eq(hist.status, 200, '拿 projectHash 调既有历史接口能取到这个会话');
+    r = await api('GET', `/xsession/sessions?ids=${s2}`);
+    eq(r.body.sessions.map((s) => [s.sessionId, s.projectHash]), [[s2, h2]], '按 ids 查单个会话也带 projectHash');
+    setEnabled(false);
+  }
 } finally {
   try { await chat.closeAllPersistentProcesses(); } catch {}
   http?.server.close();

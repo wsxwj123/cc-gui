@@ -96,7 +96,8 @@ const strOrEmpty = (v) => (typeof v === 'string' ? v : '');
 
 // 所有项目里已落盘的会话。认定口径与侧栏会话列表相同,直接复用它的两层:listProjects(滤掉 /tmp、已删目录、
 // ~/.claude 内部目录)+ listSessions(滤掉没有用户提问的文件、子代理记录、空壳,compact 续段折成一条)。不另写过滤。
-// projectDir 取项目条目的路径(侧栏按它分组),不取会话行里可能是有损解码的 projectPath。
+// projectDir 取项目条目的路径(侧栏按它分组),不取会话行里可能是有损解码的 projectPath;projectHash 取项目条目的
+// 目录编码名(与既有历史接口 / 侧栏用的 projectHash 同一口径,前端据此判断所在项目在侧栏是否显示)。
 async function listAllSessions() {
   let projects;
   try { projects = await listProjects(); } catch (e) {
@@ -107,7 +108,7 @@ async function listAllSessions() {
   for (const p of projects) {
     let sessions;
     try { sessions = await listSessions(p.hash); } catch { continue; } // 单个项目读不了不连累整张表
-    for (const s of sessions) out.push({ ...s, projectDir: p.path });
+    for (const s of sessions) out.push({ ...s, projectDir: p.path, projectHash: p.hash });
   }
   return out;
 }
@@ -170,6 +171,7 @@ async function loadSessionRows() {
       state: states.get(s.sessionId) || 'stopped',
       pending: pending.get(s.sessionId) || 0,
       lastActivity: t ? new Date(t).toISOString() : (s.lastActivity || null),
+      projectHash: s.projectHash,
       projectDir: s.projectDir,
     });
   }
@@ -185,7 +187,7 @@ router.get('/xsession/sessions', async (req, res) => {
   }
   const shortIds = assignShortIds(rows.map((r) => r.sessionId)); // 冲突按全部会话判,筛选之前算
   const sessions = selectXsSessions(rows.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), opts)
-    .map(({ sessionId, shortId, title, project, state, pending: n, lastActivity }) => ({ sessionId, shortId, title, project, state, pending: n, lastActivity }));
+    .map(({ sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity }) => ({ sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity }));
   res.json({ sessions });
 });
 
