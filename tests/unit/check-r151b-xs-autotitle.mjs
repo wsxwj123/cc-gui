@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// r151b 缺陷修复:点卡片处理跨会话消息(handleSend 带 opts.xsClaim → 请求体带 xsMessageId)不触发自动标题;
+// r151b 缺陷修复:点卡片处理跨会话消息(handleSend 带 opts.xsProcess → 发出前认领、请求体带 xsMessageId)不触发自动标题;
 // 普通发送照常触发。现象:没有标题的会话(第三方 provider 常见)处理完一条转发消息,标题变成"（跨会话消息）"。
 // 白盒:真 import 判定函数 xsAutoTitlePrompt;从 App.jsx 源码取出 autoTitlePrompt 的定义、每一处
 // POST /api/chat/title 的触发条件与 firstUser 表达式,代入真实判定结果求值(不抄写 App 里的条件)。
@@ -23,34 +23,31 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CLIENT_SRC = join(ROOT, 'client', 'src');
-const { xsAutoTitlePrompt, xsChatFields, XS_PROMPT_PLACEHOLDER } = await import('../../client/src/utils/xsession.js');
+const { xsAutoTitlePrompt, XS_PROMPT_PLACEHOLDER } = await import('../../client/src/utils/xsession.js');
 
 const SID = 'aaaaaaaa-0000-4000-8000-00000000000a';
 const MID = '11111111-0000-4000-8000-000000000001';
-const TOKEN = 'cccccccc-0000-4000-8000-00000000000c';
-const CLAIM = { messageId: MID, token: TOKEN, sessionId: SID };
-const CARD_OPTS = { hiddenUserMessage: true, xsClaim: CLAIM }; // utils/xsession.js 点【处理】实际传给 handleSend 的 opts
+const PROC = { messageId: MID, sessionId: SID }; // 审计 F1 后:opts 只带消息 id,凭据到发出前才认领、不进 opts
+const CARD_OPTS = { hiddenUserMessage: true, xsProcess: PROC }; // utils/xsession.js 点【处理】实际传给 handleSend 的 opts
 const USER_TEXT = '帮我看看登录页为什么白屏';
 
 // ── 1. 判定函数本身 ──
 {
   assert.equal(typeof xsAutoTitlePrompt, 'function', 'utils/xsession.js 导出 xsAutoTitlePrompt');
-  assert.equal(xsChatFields(CARD_OPTS)?.xsMessageId, MID, '前提:点卡片这条请求体带 xsMessageId');
   assert.equal(xsAutoTitlePrompt(XS_PROMPT_PLACEHOLDER, CARD_OPTS), '', '点卡片发送:占位文字不当标题素材');
-  // 错误自动重发({...opts, xxxRetry})与排队回放(next.opts)都透传 xsClaim → 照样不用
+  // 错误自动重发({...opts, xxxRetry})与排队回放(next.opts)都透传 xsProcess → 照样不用
   for (const extra of [{ oneMRetry: true }, { signatureRetry: true }, { freshRetry: true }]) {
     assert.equal(xsAutoTitlePrompt(XS_PROMPT_PLACEHOLDER, { ...CARD_OPTS, ...extra }), '', `重发 ${Object.keys(extra)[0]}`);
   }
-  assert.equal(xsAutoTitlePrompt(XS_PROMPT_PLACEHOLDER, { xsClaim: CLAIM }), '', '不靠 hiddenUserMessage 判定');
-  // 认领字段残缺:请求体不带 xsMessageId,但 prompt 仍是占位
-  assert.equal(xsChatFields({ xsClaim: { messageId: MID } }), null);
-  assert.equal(xsAutoTitlePrompt(XS_PROMPT_PLACEHOLDER, { hiddenUserMessage: true, xsClaim: { messageId: MID } }), '');
+  assert.equal(xsAutoTitlePrompt(XS_PROMPT_PLACEHOLDER, { xsProcess: PROC }), '', '不靠 hiddenUserMessage 判定');
+  // 字段残缺(不会发出,见 check-r151b-xs-claim-late):prompt 仍是占位,同样不当标题素材
+  assert.equal(xsAutoTitlePrompt(XS_PROMPT_PLACEHOLDER, { hiddenUserMessage: true, xsProcess: { messageId: MID } }), '');
   // 普通发送(含别的隐藏消息):原样返回,行为与改动前相同
   for (const opts of [undefined, {}, { meta: { displayText: USER_TEXT } }, { steer: true }, { reattachPid: 4321 },
-    { hiddenUserMessage: true, appendSystemPrompt: 'x' }, { xsClaim: null }]) {
+    { hiddenUserMessage: true, appendSystemPrompt: 'x' }, { xsProcess: null }]) {
     assert.equal(xsAutoTitlePrompt(USER_TEXT, opts), USER_TEXT, `普通发送 opts=${JSON.stringify(opts)}`);
   }
-  console.log('✓ xsAutoTitlePrompt:带 xsClaim(请求体带 xsMessageId)返回空,其余原样返回 prompt');
+  console.log('✓ xsAutoTitlePrompt:带 xsProcess(点卡片处理)返回空,其余原样返回 prompt');
 }
 
 // ── 2. 前端所有自动标题触发都经同一个判定 ──
@@ -110,7 +107,7 @@ for (const at of fetchIdx) {
   assert.ok(evalExpr(cond, normal), `第 ${line} 行:普通发送照常触发`);
   assert.equal(evalExpr(firstUser[1], normal), USER_TEXT, `第 ${line} 行:普通发送 firstUser 就是用户写的话`);
   assert.ok(!evalExpr(cond, envFor(XS_PROMPT_PLACEHOLDER, CARD_OPTS)), `第 ${line} 行:点卡片处理不触发`);
-  assert.ok(!evalExpr(cond, envFor(XS_PROMPT_PLACEHOLDER, { xsClaim: CLAIM })), `第 ${line} 行:去掉 hidden 也不触发`);
+  assert.ok(!evalExpr(cond, envFor(XS_PROMPT_PLACEHOLDER, { xsProcess: PROC })), `第 ${line} 行:去掉 hidden 也不触发`);
   assert.ok(!evalExpr(cond, envFor(XS_PROMPT_PLACEHOLDER, { ...CARD_OPTS, signatureRetry: true })), `第 ${line} 行:透传 opts 的重发不触发`);
 }
 console.log(`✓ App.jsx ${fetchIdx.length} 处自动标题触发都读同一个 autoTitlePrompt:点卡片不触发,普通发送照常`);

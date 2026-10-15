@@ -158,7 +158,7 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
-import { startXsession, xsChatFields, xsAutoTitlePrompt, xsClaimNotSent, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
+import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
@@ -5618,6 +5618,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 缓存空(首次发送 / 刚被判 TURN_SERVER_CHANGED)才现取一次。
       const clientTurnId = opts.clientTurnId || newClientTurnId();
       const turnEpoch = serverEpochCache || await fetchServerEpoch();
+      // r151b 审计 F1:点卡片【处理】的这条(opts.xsProcess 只带消息 id;会话正忙时排进队列的也只有 id)到这里、
+      // 真正发出前才认领拿一次性凭据。凭据只在 xsFields 这个局部变量里、只进本次请求体,不进 opts / 排队 /
+      // 任何持久存储。认领不成(已被忽略、已不在、目标不是本会话)→ 不发送,卡片已按最新状态刷新,走既有 finally 收尾。
+      let xsFields = null;
+      if (opts.xsProcess) {
+        const xsClaimed = await claimXsForSend(opts.xsProcess, sid);
+        if (!xsClaimed.ok) {
+          if (xsClaimed.notice) setProviderSwitchNotice({ text: xsClaimed.notice });
+          return;
+        }
+        xsFields = xsClaimed.fields;
+      }
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5651,15 +5663,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // 教学段注入系统提示(开关也计入常驻进程复用键,翻完开关不会复用旧系统提示)。
           genui: useStore.getState().genuiRender !== false,
           // r151b:点卡片【处理】发出的这条带跨会话消息 id 与一次性凭据(服务端兑换后把 prompt 换成信封);
-          // 其它发送 xsChatFields 返回 null,请求体与改动前逐字相同。
-          ...(xsChatFields(opts) || {}),
+          // 其它发送 xsFields 为 null,请求体与改动前逐字相同。
+          ...(xsFields || {}),
         }),
       });
       const respJson = await res.json();
       // r151b:点卡片发出的这条被拒(400 / 409 凭据无效、409 开关已关、500 入口出错、回合身份冲突)= 没发出:
       // 按最新状态刷新卡片(可撤回或已退回),给一行提示,不画错误回合;走既有 finally 收尾。
-      if (opts.xsClaim && (!res.ok || !respJson.pid)) {
-        setProviderSwitchNotice({ text: xsClaimNotSent(opts.xsClaim, respJson) });
+      if (opts.xsProcess && (!res.ok || !respJson.pid)) {
+        setProviderSwitchNotice({ text: xsClaimNotSent(opts.xsProcess, respJson) });
         return;
       }
       // R13 身份冲突(409):本条请求不属于当前服务实例/与既有回合参数不符/已过期 ——
@@ -7210,7 +7222,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       }
     } catch (err) {
       // r151b:点卡片发出的这条中途出错(断网 / 非 JSON 应答):消息状态以服务端为准,刷新卡片。
-      if (opts.xsClaim) xsClaimNotSent(opts.xsClaim, null);
+      if (opts.xsProcess) xsClaimNotSent(opts.xsProcess, null);
       // A dropped SSE connection (network blip, phone sleep/lock, wifi↔cellular
       // handoff) surfaces as a TypeError — Safari: "Load failed", Chrome: "Failed
       // to fetch". The CLI keeps running and writing its jsonl in the background,

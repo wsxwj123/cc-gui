@@ -5,7 +5,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { CornerLeftUp, ChevronDown, ChevronRight } from './Icon.jsx';
 import {
-  useXsEnabled, useXsInbox, useXsBusy, watchXsInbox,
+  useXsEnabled, useXsInbox, useXsBusy, useXsQueuedHere, watchXsInbox,
   processXsMessage, releaseXsMessage, dismissXsMessage,
   xsCardFromText, xsCardReasonText,
 } from '../utils/xsession.js';
@@ -28,6 +28,8 @@ function formatArrival(iso) {
 
 const XsCard = React.memo(function XsCard({ message, onProcess, onRelease, onDismiss }) {
   const busy = useXsBusy(message.id);
+  // 会话正忙时点过【处理】:"处理这条消息"已排在前端队列里(消息在服务端仍是 pending),轮到它时才认领
+  const queuedHere = useXsQueuedHere(message.id);
   const [expanded, setExpanded] = useState(false);
   const [overflow, setOverflow] = useState(false);
   const bodyRef = useRef(null);
@@ -41,7 +43,7 @@ const XsCard = React.memo(function XsCard({ message, onProcess, onRelease, onDis
   }, [body, expanded]);
   const foldable = lineCount > FOLD_LINES || overflow;
   const status = message.status;
-  const canProcess = !busy && (status === 'pending' || status === 'queued');
+  const canProcess = !busy && !queuedHere && (status === 'pending' || status === 'queued');
   const canDismiss = !busy && (status === 'pending' || status === 'queued' || status === 'claimed');
   const arrival = formatArrival(message.createdAt);
   return (
@@ -65,7 +67,7 @@ const XsCard = React.memo(function XsCard({ message, onProcess, onRelease, onDis
         </button>
       )}
       <div className="mt-2 flex items-center gap-2 min-w-0">
-        <span data-testid="xs-card-reason" className="flex-1 min-w-0 truncate text-[11px] text-ink-faint font-body">{xsCardReasonText(message)}</span>
+        <span data-testid="xs-card-reason" className="flex-1 min-w-0 truncate text-[11px] text-ink-faint font-body">{xsCardReasonText(message, queuedHere)}</span>
         <button data-testid="xs-card-process" disabled={!canProcess} onClick={() => onProcess(message.id)} className={BTN_PRIMARY}
           title="把这条消息交给本会话的模型处理(用本会话当前的模型与权限档)">处理</button>
         {status === 'claimed' && (

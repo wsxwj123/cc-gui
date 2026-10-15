@@ -110,45 +110,48 @@ routes['GET /api/xsession/messages'] = (u) => ({ status: 200, body: { messages: 
   console.log('✓ 收件箱:按目标会话分发、已知消息就地合并、新消息才重拉');
 }
 
-// ── 4. 【处理】:认领成功 → 交给发送入口(隐藏消息 + 凭据);认领 409 → 按最新状态刷新、不发送 ───────
+// ── 4. 【处理】:只交出消息 id(不认领、不带凭据);真正发出前 claimXsForSend 才认领;认领 409 → 刷新、不给凭据 ───────
 {
   const unwatch = xs.watchXsInbox(B);
   await settle();
   const sent = [];
-  routes['POST /api/xsession/messages/' + M2 + '/claim'] = () => ({ status: 200, body: { ok: true, id: M2, sessionId: B, token: TOKEN } });
+  const claims = (id) => count(`POST /api/xsession/messages/${id}/claim`);
   let r = await xs.processXsMessage({ sessionId: B, messageId: M2, send: (p, o) => { sent.push([p, o]); }, isStillOn: () => true });
   await settle();
   assert.deepEqual(r, { ok: true });
-  assert.equal(sent.length, 1, '发一次');
+  assert.equal(sent.length, 1, '交给发送入口一次');
   assert.equal(sent[0][0], xs.XS_PROMPT_PLACEHOLDER);
   assert.ok(sent[0][0].trim() && !sent[0][0].startsWith('/'), '占位 prompt 非空、不是斜杠命令');
-  assert.deepEqual(sent[0][1], { hiddenUserMessage: true, xsClaim: { messageId: M2, token: TOKEN, sessionId: B } }, '不画"你"的气泡,带凭据');
+  assert.deepEqual(sent[0][1], { hiddenUserMessage: true, xsProcess: { messageId: M2, sessionId: B } }, '不画"你"的气泡;只带消息 id,不带凭据');
+  assert.equal(claims(M2), 0, '点【处理】这一步不认领');
+  assert.equal(useXsStore.getState().inbox[B].find((m) => m.id === M2).status, 'pending', '没认领前消息仍是 pending');
+  // 真正发出前才认领:凭据只在返回值里(给这一次请求体)
+  routes['POST /api/xsession/messages/' + M2 + '/claim'] = () => ({ status: 200, body: { ok: true, id: M2, sessionId: B, token: TOKEN } });
+  let c = await xs.claimXsForSend(sent[0][1].xsProcess, B);
+  assert.deepEqual(c, { ok: true, fields: { xsMessageId: M2, xsToken: TOKEN } }, '发出前认领,请求体两个新字段');
+  assert.equal(claims(M2), 1);
   assert.equal(useXsStore.getState().inbox[B].find((m) => m.id === M2).status, 'claimed', '卡片转"等待发送"');
-  assert.deepEqual(xs.xsChatFields(sent[0][1]), { xsMessageId: M2, xsToken: TOKEN }, '请求体两个新字段');
-  assert.equal(xs.xsChatFields({}), null, '普通发送不带新字段');
-  assert.equal(xs.xsChatFields({ xsClaim: { messageId: 'x', token: TOKEN } }), null, '形状不对不带');
-  // 认领 409(背后已被忽略)
+  // 要发往的会话不是消息的目标:不认领、不发
+  c = await xs.claimXsForSend({ messageId: M1, sessionId: B }, A);
+  assert.deepEqual(c, { ok: false, notice: '' });
+  assert.equal(claims(M1), 0, '目标不是本会话 → 不认领');
+  // 认领 409(背后已被忽略)→ 不给凭据、按最新状态刷新
   serverMsgs = [msg(M2, 'claimed')];
   routes['POST /api/xsession/messages/' + M1 + '/claim'] = () => ({ status: 409, body: { ok: false, code: 'XS_NOT_PENDING', error: '消息不是待处理状态', status: 'dismissed' } });
   const before = count('GET /api/xsession/messages');
-  r = await xs.processXsMessage({ sessionId: B, messageId: M1, send: (p, o) => { sent.push([p, o]); }, isStillOn: () => true });
+  c = await xs.claimXsForSend({ messageId: M1, sessionId: B }, B);
   await settle();
-  assert.equal(sent.length, 1, '409 不发送');
-  assert.equal(r.ok, false);
-  assert.equal(r.error, '', '409 只刷新,不另行提示');
+  assert.deepEqual(c, { ok: false, notice: '' }, '409 不给凭据,只刷新不另行提示');
   assert.ok(count('GET /api/xsession/messages') > before, '409 → 按最新状态刷新');
   assert.deepEqual(useXsStore.getState().inbox[B].map((m) => m.id), [M2], '刷新后已忽略的卡片消失');
-  // 认领途中本窗格换了会话 → 撤回,不发送
+  // 本窗格已换了会话 → 不交出去
   serverMsgs = [msg(M1, 'pending'), msg(M2, 'claimed')];
-  routes['POST /api/xsession/messages/' + M1 + '/claim'] = () => ({ status: 200, body: { ok: true, id: M1, sessionId: B, token: TOKEN } });
-  let released = 0;
-  routes['POST /api/xsession/messages/' + M1 + '/release'] = () => { released += 1; return { status: 200, body: { ok: true, id: M1, status: 'pending' } }; };
-  await xs.processXsMessage({ sessionId: B, messageId: M1, send: (p, o) => { sent.push([p, o]); }, isStillOn: () => false });
+  r = await xs.processXsMessage({ sessionId: B, messageId: M1, send: (p, o) => { sent.push([p, o]); }, isStillOn: () => false });
   await settle();
-  assert.equal(sent.length, 1, '换了会话不发送');
-  assert.equal(released, 1, '换了会话就撤回');
+  assert.equal(r.ok, false);
+  assert.equal(sent.length, 1, '换了会话不交出去');
   unwatch();
-  console.log('✓ 【处理】:认领→隐藏发送带凭据;409 刷新不发;中途换会话撤回');
+  console.log('✓ 【处理】:只交出消息 id;发出前才认领;目标不符不认领;409 刷新不给凭据;换会话不交出');
 }
 
 // ── 5. 【撤回】恢复原因;【撤回】/【忽略】顺带撤掉前端排队里同一条 ─────────────────────────
@@ -161,7 +164,7 @@ routes['GET /api/xsession/messages'] = (u) => ({ status: 200, body: { messages: 
   const m1 = useXsStore.getState().inbox[B].find((m) => m.id === M1);
   assert.equal(m1.status, 'pending');
   assert.equal(xs.xsCardReasonText(m1), '等待你确认后处理', '撤回后原因恢复为认领前的');
-  const queued = useStore.getState().enqueueMessage(B, { text: xs.XS_PROMPT_PLACEHOLDER, queuedAt: Date.now(), hidden: true, opts: { hiddenUserMessage: true, xsClaim: { messageId: M2, token: TOKEN, sessionId: B } } });
+  const queued = useStore.getState().enqueueMessage(B, { text: xs.XS_PROMPT_PLACEHOLDER, queuedAt: Date.now(), hidden: true, opts: { hiddenUserMessage: true, xsProcess: { messageId: M2, sessionId: B } } });
   assert.ok(queued, '前置:入队成功');
   routes['POST /api/xsession/messages/' + M2 + '/dismiss'] = () => ({ status: 200, body: { ok: true, id: M2, status: 'dismissed' } });
   assert.deepEqual(await xs.dismissXsMessage({ sessionId: B, messageId: M2 }), { ok: true });

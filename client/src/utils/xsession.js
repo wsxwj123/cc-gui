@@ -269,42 +269,65 @@ function clearBusy(id) {
   useXsStore.setState({ busy: Object.keys(rest).length ? rest : EMPTY_MAP });
 }
 
-/** 撤回 / 忽略之后,前端排队里还没发出的那条(带同一消息 id 的凭据)一并撤掉,免得之后发出去再被拒。 */
-function dropQueuedClaim(messageId) {
+// 前端排队(sessionStore.messageQueue,会落 localStorage)里"处理这条消息"的条目:opts.xsProcess 只带
+// { messageId, sessionId },绝不带凭据(审计 F1)。凭据到真正发出前才由 claimXsForSend 认领拿到。
+const isProcessEntryOf = (messageId) => (q) => !!(q && q.opts && q.opts.xsProcess && q.opts.xsProcess.messageId === messageId);
+function queueHasXsProcess(queues, messageId) {
+  if (!queues || !isXsId(messageId)) return false;
+  const hit = isProcessEntryOf(messageId);
+  for (const list of Object.values(queues)) if (Array.isArray(list) && list.some(hit)) return true;
+  return false;
+}
+
+/** 撤回 / 忽略之后,前端排队里还没发出的同一条一并撤掉(忽略时排队里的这一条一并取消)。 */
+function dropQueuedProcess(messageId) {
   const st = useStore.getState();
   for (const [key, list] of Object.entries(st.messageQueue || {})) {
     if (!Array.isArray(list)) continue;
-    const idx = list.findIndex((q) => q && q.opts && q.opts.xsClaim && q.opts.xsClaim.messageId === messageId);
+    const idx = list.findIndex(isProcessEntryOf(messageId));
     if (idx >= 0) st.removeFromQueue(key, idx);
   }
 }
 
 /**
- * 【处理】:先认领拿一次性凭据,再交给既有发送流程(send = 本窗格的 handleSend)发一条隐藏的消息,
- * 请求体带消息 id 与凭据;会话正忙时由既有发送流程放进排队。认领回 409(已被处理 / 忽略 / 撤回)
- * 等失败时按最新状态刷新卡片。isStillOn():认领途中本窗格换了会话就撤回,不把凭据发到别的会话去。
- * 返回 { ok } / { ok:false, error }(error 为空表示已按最新状态刷新,无需另行提示)。
+ * 【处理】:交给既有发送流程(send = 本窗格的 handleSend)发一条隐藏的消息,只带消息 id(opts.xsProcess),不带凭据。
+ * 会话正忙时既有发送流程把它原样排进队列(队列会落 localStorage),消息在服务端保持 pending,卡片显示"已排队";
+ * 轮到它真正发出时 handleSend 才调 claimXsForSend 认领拿一次性凭据(审计 F1)。已在排队里的同一条不重复排;
+ * isStillOn():本窗格已换了会话就不交出去。返回 { ok } / { ok:false, error }(error 为空 = 无需另行提示)。
  */
 export async function processXsMessage({ sessionId, messageId, send, isStillOn }) {
   if (!useXsStore.getState().enabled || !isXsId(sessionId) || !isXsId(messageId) || typeof send !== 'function') return { ok: false, error: '' };
-  if (!markBusy(messageId)) return { ok: false, error: '' };
+  if (useXsStore.getState().busy[messageId] || queueHasXsProcess(useStore.getState().messageQueue, messageId)) return { ok: false, error: '' };
+  if (typeof isStillOn === 'function' && !isStillOn()) return { ok: false, error: '' };
+  Promise.resolve().then(() => send(XS_PROMPT_PLACEHOLDER, { hiddenUserMessage: true, xsProcess: { messageId, sessionId } })).catch(() => { void refreshInbox(sessionId); });
+  return { ok: true };
+}
+
+/**
+ * handleSend 真正发出点卡片的这条之前调用(直接发送,或排队轮到它时):这时才认领拿一次性凭据。
+ * 返回 { ok:true, fields:{ xsMessageId, xsToken } } —— fields 只放进这一次 POST /api/chat 的请求体,
+ * 不进 opts / 排队 / 任何持久存储;或 { ok:false, notice } —— 不发送,卡片已按最新状态刷新(notice 为空 = 不用另行提示)。
+ * sendSessionId:这次请求要发往的会话;与消息的目标会话不同就不认领(不把凭据发到别的会话去)。
+ */
+export async function claimXsForSend(xsProcess, sendSessionId) {
+  const p = xsProcess && typeof xsProcess === 'object' ? xsProcess : {};
+  const sid = isXsId(p.sessionId) ? p.sessionId : null;
+  const refresh = () => { if (sid) { bumpEpoch(sid); void refreshInbox(sid); } };
+  if (!sid || !isXsId(p.messageId) || sid !== sendSessionId || !useXsStore.getState().enabled) { refresh(); return { ok: false, notice: '' }; }
+  const messageId = p.messageId;
+  if (!markBusy(messageId)) { refresh(); return { ok: false, notice: '' }; } // 撤回 / 忽略正在路上
   try {
     const r = await xsRequest('POST', `/api/xsession/messages/${messageId}/claim`);
     if (!r.ok || !r.body || typeof r.body.token !== 'string') {
-      if (isDisabledReply(r)) { applyEnabled(false); return { ok: false, error: '' }; }
-      await refreshInbox(sessionId);
-      return { ok: false, error: r.status === 409 || r.status === 404 ? '' : `未能开始处理：${replyError(r, '请求失败')}` };
+      if (isDisabledReply(r)) { applyEnabled(false); return { ok: false, notice: '' }; }
+      bumpEpoch(sid);
+      await refreshInbox(sid);
+      return { ok: false, notice: r.status === 409 || r.status === 404 ? '' : `跨会话消息没有发出：${replyError(r, '未能开始处理')}。卡片已按最新状态刷新。` };
     }
-    const claim = { messageId, token: r.body.token, sessionId };
-    bumpEpoch(sessionId);
-    patchInboxMessage(sessionId, messageId, (old) => mergeMessageFields(old, { status: 'claimed', heldReason: null, heldText: null }));
-    if (typeof isStillOn === 'function' && !isStillOn()) {
-      clearBusy(messageId);
-      await releaseXsMessage({ sessionId, messageId });
-      return { ok: false, error: '' };
-    }
-    Promise.resolve().then(() => send(XS_PROMPT_PLACEHOLDER, { hiddenUserMessage: true, xsClaim: claim })).catch(() => { void refreshInbox(sessionId); });
-    return { ok: true };
+    bumpEpoch(sid);
+    patchInboxMessage(sid, messageId, (old) => mergeMessageFields(old, { status: 'claimed', heldReason: null, heldText: null }));
+    const fields = isXsId(r.body.token) ? { xsMessageId: messageId, xsToken: r.body.token } : null;
+    return { ok: true, fields };
   } finally {
     clearBusy(messageId);
   }
@@ -316,7 +339,7 @@ export async function releaseXsMessage({ sessionId, messageId }) {
   try {
     const r = await xsRequest('POST', `/api/xsession/messages/${messageId}/release`);
     if (r.ok) {
-      dropQueuedClaim(messageId);
+      dropQueuedProcess(messageId);
       bumpEpoch(sessionId);
       patchInboxMessage(sessionId, messageId, (old) => mergeMessageFields(old, {
         status: 'pending',
@@ -339,7 +362,7 @@ export async function dismissXsMessage({ sessionId, messageId }) {
   try {
     const r = await xsRequest('POST', `/api/xsession/messages/${messageId}/dismiss`);
     if (r.ok) {
-      dropQueuedClaim(messageId);
+      dropQueuedProcess(messageId);
       bumpEpoch(sessionId);
       removeInboxMessage(sessionId, messageId);
       return { ok: true };
@@ -353,27 +376,20 @@ export async function dismissXsMessage({ sessionId, messageId }) {
 }
 
 // ── 与既有发送流程的接缝(App.jsx handleSend) ─────────────────────────────────────
-/** 请求体里的两个新字段;不是点卡片发出的请求返回 null(请求体与改动前逐字相同)。 */
-export function xsChatFields(opts) {
-  const c = opts && opts.xsClaim;
-  if (!c || !isXsId(c.messageId) || !isXsId(c.token)) return null;
-  return { xsMessageId: c.messageId, xsToken: c.token };
-}
 /**
  * 自动标题(App.jsx handleSend 里每一处 POST /api/chat/title)拿来当"首条用户消息"的文字:触发条件与请求体都只读它。
- * 点卡片发出的那条(opts.xsClaim)的 prompt 只是占位 XS_PROMPT_PLACEHOLDER,不是用户写的话 —— 拿去起标题,
+ * 点卡片发出的那条(opts.xsProcess)的 prompt 只是占位 XS_PROMPT_PLACEHOLDER,不是用户写的话 —— 拿去起标题,
  * 没有标题的会话(第三方 provider 常见)就被写成占位文字:返回 '',触发条件不成立。
  * 其余发送原样返回 prompt(包括别的隐藏消息),自动标题行为与改动前相同。
- * 判 xsClaim 而不判 xsChatFields:认领字段残缺时请求体不带 xsMessageId,但 prompt 照样是占位。
  */
 export function xsAutoTitlePrompt(prompt, opts) {
-  return opts && opts.xsClaim ? '' : prompt;
+  return opts && opts.xsProcess ? '' : prompt;
 }
-/** /api/chat 拒了这条点卡片的请求(400 / 409 XS_CLAIM_INVALID、409 XS_DISABLED、500 …):按"没发出"处理,刷新卡片,返回提示文案。 */
-export function xsClaimNotSent(xsClaim, reply) {
-  if (xsClaim && isXsId(xsClaim.sessionId)) {
-    bumpEpoch(xsClaim.sessionId);
-    void refreshInbox(xsClaim.sessionId);
+/** /api/chat 拒了这条点卡片的请求(400 / 409 XS_CLAIM_INVALID、409 XS_DISABLED、500 …):按"没发出"处理,刷新卡片,返回提示文案。xsProcess = opts.xsProcess。 */
+export function xsClaimNotSent(xsProcess, reply) {
+  if (xsProcess && isXsId(xsProcess.sessionId)) {
+    bumpEpoch(xsProcess.sessionId);
+    void refreshInbox(xsProcess.sessionId);
   }
   const err = reply && typeof reply.error === 'string' && reply.error ? reply.error : '发送失败';
   return `跨会话消息没有发出：${err}。卡片已按最新状态刷新。`;
@@ -433,9 +449,11 @@ export function xsCardFromText(m) {
   if (f.kind === 'user') return title ? `由你从 ${title} 转发` : '由你转发';
   return title ? `来自 ${title}` : '来自另一个会话';
 }
-export function xsCardReasonText(m) {
+// 会话正忙时点了【处理】、"处理这条消息"已排进前端队列(消息在服务端仍是 pending)时的原因文案
+export const XS_LOCAL_QUEUED_TEXT = '已排队，当前回合结束后处理';
+export function xsCardReasonText(m, queuedHere = false) {
   switch (m && m.status) {
-    case 'pending': return (m.heldText && String(m.heldText)) || '';
+    case 'pending': return queuedHere ? XS_LOCAL_QUEUED_TEXT : ((m.heldText && String(m.heldText)) || '');
     case 'queued': return '目标会话正在运行，回合结束后自动处理';
     case 'claimed': return '等待发送';
     case 'processing': return '处理中';
@@ -567,6 +585,8 @@ export const useXsEnabled = () => useXsStore((s) => s.enabled);
 export const useXsGuardFailureAt = () => useXsStore((s) => s.guardFailureAt);
 export const useXsInbox = (sid) => useXsStore((s) => (s.enabled && sid && s.inbox[sid]) || EMPTY_LIST);
 export const useXsBusy = (id) => useXsStore((s) => !!(id && s.busy[id]));
+/** 这条消息的"处理"是否已排在前端队列里(选择器返回布尔,引用稳定)。 */
+export const useXsQueuedHere = (id) => useStore((s) => queueHasXsProcess(s.messageQueue, id));
 export const useXsSessionPending = (sid) => useXsStore((s) => (s.enabled && sid ? s.pendingBySession[sid] || 0 : 0));
 export const useXsProjectPendingMap = () => useXsStore((s) => (s.enabled ? s.pendingByProject : EMPTY_MAP));
 export const xsProjectPending = (map, path) => (map && map[normProjectPath(path)]) || 0;
