@@ -4,7 +4,7 @@
 import { test, expect } from '@playwright/test';
 import { seedSession, uniq, makeWorkspace, realCliPath } from '../r151b-xsession-p1/helpers/fixtures.mjs';
 import { xs, shared, cleanName, waitFor } from '../r151b-xsession-p1/helpers/api.mjs';
-import { SM, LS, NOTE, SEND_NOTICE, laneReq, aiCalls, resultJson, entry, msgs, startInstanceP2, touchMock } from './helpers/p2.mjs';
+import { SM, LS, NOTE, SEND_NOTICE, ALL, laneReq, aiCalls, resultJson, entry, msgs, startInstanceP2, touchMock } from './helpers/p2.mjs';
 
 test.describe.configure({ timeout: 360_000 });
 test.beforeEach(() => { test.skip(!realCliPath(), '本机没有真 claude CLI'); });
@@ -105,7 +105,14 @@ test('P15 send_message 整次失败(超 8 个目标 / 正文超 32768 字节 / �
     expect(r.results[9].is_error, '8 个目标(本回合累计 9 条)照发').toBe(false);
     whole(10, 'XS_TURN_SEND_LIMIT', '本回合 9 + 8 > 16');
     whole(11, 'XS_DISABLED', '回合中途关开关');
-    const count = async (s) => (await msgs(c, s.sid)).filter((m) => m.from && m.from.kind === 'session').length;
+    // 总开关关着时 GET /api/xsession/messages 回 409(数出来恒为 0,验不出东西)。关开关不删收件箱(只有关着时的 clear 才删),
+    // 所以等这一回合全部调用结束后重新打开再数;每次计数都要求接口 200,不让 409 被当成"0 条"。
+    await api.on();
+    const count = async (s) => {
+      const res = await c.get(`/api/xsession/messages?sessionId=${s.sid}&status=${encodeURIComponent(ALL)}`);
+      expect(res.status, `计数前置:重新打开后 GET /api/xsession/messages(${s.sid})应 200(${res.text.slice(0, 160)})`).toBe(200);
+      return res.body.messages.filter((m) => m.from && m.from.kind === 'session').length;
+    };
     expect(await count(B), 'B 只收到单项失败那次的 1 条').toBe(1);
     for (const t of T.slice(0, 8)) expect(await count(t), '前 8 个目标各 1 条').toBe(1);
     expect(await count(T[8]), '第 9 个目标 0 条').toBe(0);

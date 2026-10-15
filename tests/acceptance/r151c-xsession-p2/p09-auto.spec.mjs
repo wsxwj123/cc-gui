@@ -6,7 +6,7 @@ import path from 'node:path';
 import { seedSession, uniq, makeWorkspace, realCliPath, ctlDir } from '../r151b-xsession-p1/helpers/fixtures.mjs';
 import { xs, shared, waitFor, inputRecords, turnRecords, writeScript, touchCtl, envelope, cleanName, readStream } from '../r151b-xsession-p1/helpers/api.mjs';
 import { boot, openSessionBySearch } from '../r151b-xsession-p1/helpers/ui.mjs';
-import { SM, NOTE, HELD, QUEUED_REASON, aiCalls, resultJson, inboundOk, msgs, waitMsg, profileTurn, wsT } from './helpers/p2.mjs';
+import { SM, NOTE, HELD, QUEUED_REASON, aiCalls, resultJson, inboundOk, entry, msgs, waitMsg, profileTurn, wsT } from './helpers/p2.mjs';
 
 test.describe.configure({ timeout: 300_000 });
 test.beforeEach(() => { test.skip(!realCliPath(), '本机没有真 claude CLI'); });
@@ -77,7 +77,7 @@ test('P10 类别不同 → 卡片 class-mismatch;目标在跑回合 → queued,�
   expect(await waitMsg(shared, B2.sid, (x) => x.id === q.id && x.status === 'done'), '处理完 done').toMatchObject({ via: 'auto' });
 });
 
-test('P12 自动处理起不来(工作目录不存在)→ 卡片 wake-failed 不自动重试;回合开始后出错 → turn-error;被【停止】中止 → interrupted', async () => {
+test('P12 自动处理起不来(W 仍在会话列表里,但进程进不了它的工作目录、启动失败)→ 卡片 wake-failed 不自动重试;回合开始后出错 → turn-error;被【停止】中止 → interrupted', async () => {
   await api.on();
   const run = uniq('');
   const W = seedSession(`p12-w-${run}`); const E = seedSession(`p12-e-${run}`); const S = seedSession(`p12-s-${run}`);
@@ -85,10 +85,13 @@ test('P12 自动处理起不来(工作目录不存在)→ 卡片 wake-failed 不
   for (const s of [E, S]) await profileTurn(shared, s, 'bypassPermissions');
   for (const s of [W, E, S]) await inboundOk(shared, s.sid, 'auto');
   await new Promise((res) => setTimeout(res, 1_500));
-  fs.rmSync(W.cwd, { recursive: true, force: true });
   writeScript(`p12hold${run}`, [{ waitFile: `p12-never-${run}` }]);
   const ws = await wsT();
+  // 不删 W 的工作目录(删了 W 会被会话列表跳过,工具只会回 XS_TARGET_NOT_FOUND),只去掉目录的进入(执行)权限:
+  // 目录还在、W 留在会话列表里;W 的建档进程已随 R151EXIT 退出,自动处理要为 W 新起进程,而进程进不了工作目录 → 启动失败、回合没开始。
+  fs.chmodSync(W.cwd, 0o600);
   try {
+    expect(await entry(shared, W.sid), '前置:W 的工作目录还在 → W 仍在会话列表里').toBeTruthy();
     const r = await aiCalls(shared, { cwd: makeWorkspace(`real-p12-${run}`), steps: [
       { name: SM, input: { to: [W.sid], message: `R151C p12 起不来 ${run}` } },
       { name: SM, input: { to: [E.sid], message: `R151C p12 R151BERR ${run}` } },
@@ -118,7 +121,10 @@ test('P12 自动处理起不来(工作目录不存在)→ 卡片 wake-failed 不
     expect(stop.status, `前置:停止 200(${stop.text.slice(0, 200)})`).toBe(200);
     const si = await waitMsg(shared, S.sid, (x) => x.id === sm.id && x.status === 'pending');
     expect(si, 'S:被【停止】中止 → pending / interrupted').toMatchObject({ heldReason: 'interrupted', heldText: HELD.interrupted, via: 'auto' });
-  } finally { ws.close(); }
+  } finally {
+    ws.close();
+    try { fs.chmodSync(W.cwd, 0o755); } catch { /* 恢复权限失败不掩盖用例本身的结果 */ }
+  }
 });
 
 test('P13 自动处理不打断用户正在跑的回合:用户回合进行中消息保持 queued,用户回合完整结束后才处理', async () => {
