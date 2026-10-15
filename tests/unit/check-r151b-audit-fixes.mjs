@@ -225,7 +225,8 @@ try {
       ['uds:/tmp/cc-socks/103.sock.bak', false, '只是前缀相同'],
       ['uds:/var/tmp/cc-socks/103.sock', false, '别的目录'],
       ['uds:/private/tmpx/cc-socks/103.sock', false, '/private/tmpx 不是 /private/tmp'],
-      ['uds:/tmp/CC-SOCKS/103.sock', false, 'POSIX 路径区分大小写'],
+      // r151c 先修 3:macOS 默认文件系统不区分大小写,两边统一转小写 → 拒;其它 POSIX 平台仍区分大小写
+      ['uds:/tmp/CC-SOCKS/103.sock', process.platform === 'darwin', process.platform === 'darwin' ? 'macOS 地址不区分大小写' : 'POSIX 路径区分大小写'],
       ['uds:cc-socks/103.sock', false, '相对路径'],
     ]) eq(deny(bySock(addr), entries, gui, A), want, `地址 ${addr}(${what})`);
     eq(deny({ to: 'uds:/tmp//cc-socks/../cc-socks/103.sock' }, entries, gui, A), true, '没有 recipient_kind 时按 uds: 推断,同样规范化');
@@ -345,7 +346,8 @@ try {
     const projDir = join(HOME, '.claude', 'projects', PROJ);
     mkdirSync(projDir, { recursive: true });
     const S = '5a5a5a5a-0000-4000-8000-0000000000a1'; const T = '5b5b5b5b-0000-4000-8000-0000000000b2'; const O = '5c5c5c5c-0000-4000-8000-0000000000c3';
-    for (const sid of [S, T]) writeFileSync(join(projDir, `${sid}.jsonl`), `${JSON.stringify({ type: 'user', uuid: `${sid.slice(0, 8)}-u`, sessionId: sid, message: { role: 'user', content: '你好' } })}\n`);
+    // r151c 先修 5:O 也给记录文件 —— 记录文件不在 = 来源已删,忽略时会把来源标题抹掉;这一段要的是"O 还在"
+    for (const sid of [S, T, O]) writeFileSync(join(projDir, `${sid}.jsonl`), `${JSON.stringify({ type: 'user', uuid: `${sid.slice(0, 8)}-u`, sessionId: sid, message: { role: 'user', content: '你好' } })}\n`);
     const rows = [{ sessionId: S, title: '源会话标题', projectDir: WORK }, { sessionId: T, title: '目标会话标题', projectDir: WORK }, { sessionId: O, title: '其它会话', projectDir: WORK }];
     const send = async (from, to) => (await xs.sendManualMessages({ to: [to], body: `R151B 删会话 ${from.slice(0, 2)}→${to.slice(0, 2)}`, fromSessionId: from }, rows))[0].id;
     const m1 = await send(S, T); // 未结束,来源 S
