@@ -34,10 +34,10 @@ test('X01 总开关关(默认):config 回 enabled:false;其余 /api/xsession/* �
     const A = seedSession(`x01-a-${uniq('')}`, { home: inst.home });
     const B = seedSession(`x01-b-${uniq('')}`, { home: inst.home });
     const anyId = newSid();
-    await test.step('GET /api/xsession/config → 200,enabled:false;一期字段齐,二期字段不出现', async () => {
+    await test.step('GET /api/xsession/config → 200,enabled:false;一期字段与二期字段(autoPaused / autoBudget / limits 三项)齐', async () => {
       const r = await api.config();
       expect.soft(r.status, `状态码(${r.text.slice(0, 200)})`).toBe(200);
-      expect.soft(r.body, 'config 应答体').toEqual({ enabled: false, limits: { bodyBytes: 32768, pendingPerSession: 50 }, nativeGuard: { lastFailureAt: null }, stored: { unfinished: 0 } });
+      expect.soft(r.body, 'config 应答体').toEqual({ enabled: false, autoPaused: false, limits: { chainDepth: 4, targetsPerSend: 8, sendsPerTurn: 16, bodyBytes: 32768, pendingPerSession: 50 }, autoBudget: { limit: 20, windowMs: 600000, used: 0 }, nativeGuard: { lastFailureAt: null }, stored: { unfinished: 0 } });
     });
     await test.step('其余接口一律 409 XS_DISABLED', async () => {
       softDisabled(await api.sessions(), 'GET /api/xsession/sessions');
@@ -65,16 +65,16 @@ test('X02 PUT config {enabled:true} → 200 {ok:true,enabled:true} 并广播 xs:
   try {
     const r = await api.setConfig({ enabled: true });
     expect(r.status, `状态码(${r.text.slice(0, 200)})`).toBe(200);
-    expect(r.body, '一期应答没有 autoPaused').toEqual({ ok: true, enabled: true });
+    expect(r.body, '二期应答带 autoPaused').toEqual({ ok: true, enabled: true, autoPaused: false });
     const ev = await ws.waitFor((m) => m && m.type === 'xs:config' && m.enabled === true);
     expect(ev, '应广播 { type:"xs:config", enabled:true }').not.toBeNull();
-    expect(ev, '一期广播里没有 autoPaused').not.toHaveProperty('autoPaused');
+    expect(ev.autoPaused, '二期广播里带 autoPaused:false').toBe(false);
     expect((await api.config()).body.enabled, '之后 GET config 为 true').toBe(true);
 
     const before = readText(prefsPath());
     const bad = [
       ['请求体是数组', '[]'], ['请求体是字符串', '"on"'], ['请求体是 null', 'null'], ['空对象(没有能认的键)', {}],
-      ['一期带 autoPaused', { enabled: true, autoPaused: false }], ['只有 autoPaused', { autoPaused: false }],
+      ['autoPaused 为 true', { enabled: true, autoPaused: true }], ['只有 autoPaused:true', { autoPaused: true }],
       ['chainLimit', { enabled: true, chainLimit: 3 }], ['未知键', { enabled: false, foo: 1 }],
       ['enabled 是字符串', { enabled: 'true' }], ['enabled 是数字', { enabled: 1 }], ['enabled 是 null', { enabled: null }],
     ];
@@ -84,10 +84,13 @@ test('X02 PUT config {enabled:true} → 200 {ok:true,enabled:true} 并广播 xs:
       expect(readText(prefsPath()), `${label}:偏好文件不应变`).toBe(before);
     }
     expect((await api.config()).body.enabled, '非法请求之后开关仍是 true').toBe(true);
+    for (const body of [{ enabled: true, autoPaused: false }, { autoPaused: false }]) {
+      const ok = await api.setConfig(body);
+      expect([ok.status, ok.body], `二期 ${JSON.stringify(body)} 由 400 变 200`).toEqual([200, { ok: true, enabled: true, autoPaused: false }]);
+    }
 
     const r3 = await put(`/api/xsession/sessions/${newSid()}/inbound`, { mode: 'auto' });
-    expect(r3.status, '【二期】接收设置接口一期不存在 → 404').toBe(404);
-    expect(String(r3.body && r3.body.code), '404 不是本节的错误体').not.toMatch(/^XS_/);
+    expectError(r3, 404, 'XS_TARGET_NOT_FOUND', undefined, '二期接收设置接口存在:会话不存在 → 404 XS_TARGET_NOT_FOUND');
   } finally { ws.close(); await api.off(); }
 });
 

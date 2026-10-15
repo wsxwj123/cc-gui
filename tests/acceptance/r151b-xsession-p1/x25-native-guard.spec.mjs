@@ -6,10 +6,12 @@ import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { uniq, makeWorkspace, realCliPath, homeDir } from './helpers/fixtures.mjs';
-import { xs, chat, readStream, waitFor, setLane, laneRequests, REFUSAL, ID_RE } from './helpers/api.mjs';
+import { xs, chat, readStream, waitFor, setLane, laneRequests, ID_RE } from './helpers/api.mjs';
 
 test.describe.configure({ timeout: 360_000 });
 const api = xs();
+// 二期起拒绝原因换成二期文案(接口文件第 4 节;一期 helpers/api.mjs 的 REFUSAL 仍是一期文案,不改辅助函数,在这里覆盖)
+const REFUSAL = '这个会话由 CC-GUI 管理。给 CC-GUI 里的其它会话发消息请用 mcp__ccgui-sessions__send_message（可先用 mcp__ccgui-sessions__list_sessions 查看）；它也能发给当前没在运行的会话。';
 
 function registry() {
   const d = path.join(homeDir(), '.claude', 'sessions');
