@@ -461,11 +461,14 @@ export function nativeGuardLastFailure() {
 // 套接字地址的比较口径(审计 S2 / 判官建议 10;目标与登记表两边同一口径):去掉 uds: 前缀;
 //   · Windows 命名管道(\\.\pipe\…,斜杠方向不限)或在 Windows 上:按 Windows 规范化,名字不区分大小写 → 统一小写;
 //   · 其余按 POSIX 规范化:合并重复斜杠、解析 . 与 ..、去掉结尾斜杠;/private/tmp 与 /tmp 是同一处(macOS 的 /tmp 是它的链接)。
+//   · macOS(r151c 先修 3):默认文件系统不区分大小写,只差大小写的两个地址指向同一个套接字 → 两边统一转小写
+//     (先转小写再认 /private/tmp,/Private/Tmp 也算)。只会多拒、不会漏拒;套接字名是 <pid>.sock,不会因此误伤别的会话。
 const WIN_PIPE_RE = /^[\\/]{2}[.?][\\/]pipe[\\/]/i;
 function socketKey(p) {
   const s = String(p).replace(/^uds:/i, '');
   if (process.platform === 'win32' || WIN_PIPE_RE.test(s)) return win32Path.normalize(s).toLowerCase();
   let n = posixPath.normalize(s);
+  if (process.platform === 'darwin') n = n.toLowerCase();
   if (n.length > 1 && n.endsWith('/')) n = n.slice(0, -1);
   if (n === '/private/tmp' || n.startsWith('/private/tmp/')) n = n.slice('/private'.length);
   return n;
@@ -476,6 +479,11 @@ function socketKey(p) {
 const NATIVE_TARGET_MAX_CHARS = 512;
 
 // ListAgents 把会话显示为"名字 [短号]":结尾(去空白后)是 "[…]" 且括号里没有 "]" 时去掉它。
+// r151c 先修 3 实测(真 CLI 2.1.296,隔离 HOME、只连本地假接口):CLI 按名字找会话不区分大小写(mixcase-alpha、
+// MIXCASE-ALPHA 都送到 MixCase-Alpha;重名时只回候选、不送达);"名字 [短号]"要名字(不分大小写)与短号(区分大小写)
+// 都对上才送达,名字前缀加短号、单独的短号都不送达。短号是每个进程自己的 6 位十六进制,登记表任何字段(含 .key 文件)
+// 都推不出来 → 没法按条目精确判:去掉短号只按名字认。偏严:同名的 GUI 会话与终端会话并存、短号指向终端那个时会误拒;
+// 不会漏拒。
 // 用 lastIndexOf / indexOf 线性判,不用带回溯的正则(审计 I1:"\s*\[[^\]]*\]\s*$" 对长输入是平方级)。
 function stripShortIdSuffix(raw) {
   const s = raw.trim();
