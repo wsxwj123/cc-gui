@@ -8,8 +8,8 @@
 //   - 全库最多留 500 条:超出时按到达先后删最旧的已结束消息,未结束的一条不删(宁可超出也不丢)。
 //   - 本进程第一次读盘时做恢复:遗留的 processing / claimed 一律退回 pending、原因 interrupted,不自动重跑
 //     (重跑可能把同一件事做两遍);同时清掉没有对应未结束消息的孤儿正文(上次在"改元数据"与"删正文"之间退出)
-//     和本模块自己留下的临时文件(上次在"写临时文件"与"改名"之间退出),以及修改时间超过 7 天的损坏留存文件
-//     messages.json.corrupt-*(挪开时把修改时间设成挪开那一刻)。只认本模块的命名:正文只删 <消息id>.txt,
+//     和本模块自己留下的临时文件(上次在"写临时文件"与"改名"之间退出),以及保留满 7 天的损坏留存文件
+//     messages.json.corrupt-*(起算取修改时间与文件名里挪开时刻的较晚者;挪开时也把修改时间设成那一刻)。只认本模块的命名:正文只删 <消息id>.txt,
 //     临时文件只删 messages.json.tmp.<pid>.<n> 与 <消息id>.txt.tmp.<pid>.<n>(pid 是另一个还活着的进程时不动);
 //     正文目录是符号链接时整个跳过,不跟着链接删别处的文件。
 // 懒加载:第一次用到时才读盘。总开关关着时路由层先回 409,本模块不会经那些接口被调到;关着时仍会被调到的只有:
@@ -198,9 +198,17 @@ async function unlinkQuietly(file) {
   }
 }
 
-// 损坏留存文件(messages.json.corrupt-*)保留 7 天,按修改时间算(挪开时已设成挪开那一刻);只删普通文件,不跟链接、不删目录。
+// 损坏留存文件(messages.json.corrupt-<挪开时刻的毫秒数>)保留 7 天;只删普通文件,不跟链接、不删目录。
+// r151c 先修 6:起算时刻 = max(修改时间, 文件名里的毫秒时间戳)。改名不改修改时间,挪开后设修改时间失败时它仍是原文件最后一次
+// 写入的时刻(可能早已超过 7 天,下次启动就被删);文件名里的就是挪开那一刻。取较晚的只会多留、不会早删;文件名后缀不是
+// 纯数字时只看修改时间。
 export const XS_CORRUPT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 const CORRUPT_PREFIX = 'messages.json.corrupt-';
+function corruptKeptSince(name, mtimeMs) {
+  const tail = name.slice(CORRUPT_PREFIX.length);
+  const named = /^\d{1,16}$/.test(tail) ? Number(tail) : NaN;
+  return Number.isFinite(named) ? Math.max(mtimeMs, named) : mtimeMs;
+}
 async function sweepStaleCorruptFiles() {
   let top = [];
   try { top = await readdir(XS_DIR); } catch { return; }
@@ -209,7 +217,7 @@ async function sweepStaleCorruptFiles() {
     if (!f.startsWith(CORRUPT_PREFIX)) continue;
     try {
       const st = await lstat(join(XS_DIR, f));
-      if (st.isFile() && now - st.mtimeMs > XS_CORRUPT_KEEP_MS) await unlink(join(XS_DIR, f));
+      if (st.isFile() && now - corruptKeptSince(f, st.mtimeMs) > XS_CORRUPT_KEEP_MS) await unlink(join(XS_DIR, f));
     } catch (e) {
       if (e?.code !== 'ENOENT') console.warn(`[xsession] 过期的损坏留存文件删除失败(${f}):${e.code || e.message}`);
     }

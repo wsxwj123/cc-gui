@@ -159,6 +159,27 @@ try {
     await (await freshStore(h)).loadXsInbox();
     ok(existsSync(join(x, aside[0])), '下次启动:不满 7 天的损坏留存留着');
   }
+
+  // ── 7. r151c 先修 6:7 天起算 = max(修改时间, 文件名里的毫秒时间戳)(挪开后设修改时间失败的那份不会被提前删) ──
+  {
+    const { h, x } = mkHome('h6');
+    const now = Date.now();
+    const files = [
+      [`messages.json.corrupt-${now - 1 * DAY}`, 30], // 文件名是昨天挪开的、修改时间一个月前(设修改时间失败)→ 留
+      [`messages.json.corrupt-${now - 8 * DAY}`, 30], // 两者都超过 7 天 → 删
+      [`messages.json.corrupt-${now - 30 * DAY}`, 1], // 文件名超过 7 天、修改时间昨天 → 取较晚的,留
+      ['messages.json.corrupt-abc', 8], //              后缀不是数字:只看修改时间 → 删
+      ['messages.json.corrupt-xyz', 6], //              同上,不到 7 天 → 留
+    ];
+    for (const [f, d] of files) { writeFileSync(join(x, f), '{坏'); age(join(x, f), d); }
+    await (await freshStore(h)).sweepXsLeftovers(); // 关着启动
+    eq(readdirSync(x).filter((f) => f.startsWith('messages.json.corrupt-')).sort(), [files[0][0], files[2][0], 'messages.json.corrupt-xyz'].sort(),
+      '关着启动:按两者较晚的算满 7 天才删;后缀不是数字只看修改时间');
+    const { h: h2, x: x2 } = mkHome('h7');
+    for (const [f, d] of files) { writeFileSync(join(x2, f), '{坏'); age(join(x2, f), d); }
+    await (await freshStore(h2)).loadXsInbox(); // 开着启动(读盘恢复)同一口径
+    eq(readdirSync(x2).filter((f) => f.startsWith('messages.json.corrupt-')).sort(), [files[0][0], files[2][0], 'messages.json.corrupt-xyz'].sort(), '开着启动:同一口径');
+  }
 } finally {
   console.warn = origWarn;
   rmSync(TMP, { recursive: true, force: true });
