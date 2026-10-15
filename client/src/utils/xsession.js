@@ -524,7 +524,9 @@ export function peerFromResultEvent(ev) {
 }
 
 // 直播气泡只活在本地(历史里那条由服务端从会话记录读出,两者 uuid 不同)。回合落盘对账时:历史里已有
-// 同一条(正文相同;没有正文时来源名相同)就交给历史,否则留着 —— 记录里没写出这条时气泡不凭空消失。
+// 同一条(两边都有正文时正文相同;任一边没有正文时来源名相同)就交给历史,否则留着 —— 记录里没写出这条时
+// 气泡不凭空消失。历史那条的 body 可能是 null(CLI 没给 origin.body、文本兜底也解析不出),这时只能按来源名认,
+// 否则直播气泡永远不被接管,同一视图里出现两个来源气泡(判官建议 1)。
 const PEER_LAND_WINDOW_MS = 6 * 60 * 60 * 1000;
 function peerLanded(local, persisted) {
   if (!Array.isArray(persisted)) return false;
@@ -533,7 +535,8 @@ function peerLanded(local, persisted) {
     if (!h || h.type !== 'peer-message' || h.live === true) continue;
     const ht = Date.parse(h.timestamp);
     if (Number.isFinite(t0) && Number.isFinite(ht) && ht < t0 - PEER_LAND_WINDOW_MS) continue;
-    if (local.body != null ? h.body === local.body : (h.fromName ?? null) === (local.fromName ?? null)) return true;
+    const byBody = local.body != null && h.body != null;
+    if (byBody ? h.body === local.body : (h.fromName ?? null) === (local.fromName ?? null)) return true;
   }
   return false;
 }

@@ -230,6 +230,12 @@ routes['GET /api/xsession/messages'] = (u) => ({ status: 200, body: { messages: 
   assert.equal(xs.keepLivePeer({ type: 'peer-message', timestamp: live.timestamp, body: '正文' }, []), false, '历史条目本身不归它管');
   const natNoBody = { ...R({ kind: 'peer', from: 'uds:/x', name: '丙' }), timestamp: live.timestamp };
   assert.equal(xs.keepLivePeer(natNoBody, [{ type: 'peer-message', timestamp: live.timestamp, fromName: '丙', body: null }]), false, '没有正文时按来源名认');
+  // 判官建议 1:直播有正文、历史那条 body 为 null(CLI 没给 origin.body、文本兜底也解析不出)→ 改按来源名认,不出现两个气泡
+  const histNoBody = (fromName) => [{ type: 'peer-message', timestamp: '2026-10-15T01:00:00.900Z', from: 'gui:user', fromName, body: null }];
+  assert.equal(xs.keepLivePeer(live, histNoBody('用户转发自 甲')), false, '历史正文为 null、来源名相同 → 交给历史');
+  assert.equal(xs.keepLivePeer(live, histNoBody('用户转发自 乙')), true, '历史正文为 null、来源名不同 → 留着');
+  const natLive = { ...nat, timestamp: live.timestamp };
+  assert.equal(xs.keepLivePeer(natLive, [{ type: 'peer-message', timestamp: live.timestamp, from: 'uds:/x', fromName: '乙', body: null }]), false, '原生直播同理');
   // 卡片文案
   assert.equal(xs.xsCardFromText(msg(M1, 'pending')), '由你从 甲 转发');
   assert.equal(xs.xsCardFromText({ from: { kind: 'session', title: '丁' } }), '来自 丁');
