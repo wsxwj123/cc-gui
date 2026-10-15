@@ -7,8 +7,8 @@
 // 日志只带消息 id,不带正文与凭据;凭据(token)只出现在认领应答里,不进任何列表应答与广播(publicMessage 是白名单)。
 // 依赖只朝一个方向:本模块经 chat.js 导出的窄接口挂钩子,chat.js 不认识本模块。
 import { randomUUID, timingSafeEqual } from 'crypto';
-import { readdir, readFile } from 'fs/promises';
-import { readFileSync, statSync } from 'fs';
+import { access, readdir, readFile } from 'fs/promises';
+import { constants as fsConstants, readFileSync, statSync } from 'fs';
 import { join, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
@@ -721,6 +721,7 @@ export async function forgetXsSession(sessionId) {
 // turn.key 并计数;事务提交之后才登记 inflight 并调内部入口起回合(入口钩子也读收件箱、走同一条存储队列,在事务里起回合会自锁)。
 // 结算只看这条消息的回合有没有开始:开始了只等结束通知(completed → done、stopped → interrupted、failed → turn-error);
 // 没开始(应答非 200 或抛错):409 CHAT_SESSION_BUSY → 退回 queued 等下一次;其余 → pending / wake-failed,不自动重试。
+// 进程没起来(CHAT_START_FAILED:吐出第一条事件之前就退出 / query() 起不来)即使已报过回合开始,也按没开始结算(补充约定)。
 // 防失控:连锁深度 4(hop 记在消息上,标记记进回合记录)、单次 8 个目标、单回合 16 条、全局 10 分钟 20 次(触顶即暂停,
 // 写盘 + 广播 xs:config,重启仍暂停,用户恢复时清窗口)。自动处理超过 30 分钟未结算 → 该会话"卡住":排队中的与新到的落
 // target-stuck,直到那条结算;那个回合不被自动中止。时长一律在事件到来时拿 Date.now() 比较起算时刻(定时器只是提前叫醒)。
@@ -1115,7 +1116,7 @@ function launchAuto(pick, key, budgetStamp) {
   stuckTimer.unref?.();
   inflight.set(m.id, {
     key, event, timer: null, stuckTimer, pid: null, sessionId, auto: true, chainId: m.chainId, hop: m.hop, prompt,
-    startedAt: Date.now(), started: false, responded: null, ended: null, budgetStamp,
+    startedAt: Date.now(), started: false, responded: null, ended: null, budgetStamp, cwd: replay.cwd,
   });
   // 重放档案:去掉值为 null 的键,档位用判定时的同一读数
   const body = { ...Object.fromEntries(Object.entries(replay).filter(([, v]) => v !== null)), sessionId, prompt: AUTO_PLACEHOLDER_PROMPT, permissionMode: targetMode };
@@ -1140,6 +1141,7 @@ function onAutoResponse(id, key, res) {
   const f = inflight.get(id);
   if (!f || f.key !== key) return;
   f.responded = res;
+  if (startFailed(res)) { settleStartFailed(id, f, res); return; } // 进程没起来:不论回合开始通知报没报过
   if (res.status === 200) broadcast({ type: 'xs:turn', sessionId: f.sessionId, pid: res.body?.pid ?? f.pid ?? null, messageId: id });
   if (f.started) { // 回合开始了:只等结束通知(若它已先到,现在结算)
     if (f.ended) finishAutoTurn(id, f);
@@ -1150,6 +1152,7 @@ function onAutoResponse(id, key, res) {
 }
 
 function finishAutoTurn(id, f) {
+  if (startFailed(f.responded)) return; // 进程没起来:由应答那一侧按 wake-failed 结算(结束通知可能先到)
   const { outcome, detail } = f.ended;
   settleTurn(id, f.key, outcome, detail || (outcome === 'failed' ? responseReason(f.responded) || undefined : undefined))
     .then(() => scheduler.kick(f.sessionId));
@@ -1182,6 +1185,24 @@ function requeueAuto(id, f) {
 }
 function settleNotStarted(id, f, reason) {
   return settleAutoNotStarted(id, f, (m) => { m.status = 'pending'; m.heldReason = 'wake-failed'; m.heldDetail = reason; });
+}
+
+// 进程没起来 = 回合没开始(在收到 CLI 任何输出之前就失败)。SDK 此时的报错常是误导性的(如把进不了工作目录导致的
+// 启动失败说成二进制与系统 libc 不匹配),不进 heldText:原因按工作目录现状给一句人话,报错原文脱敏后只进服务日志。
+const startFailed = (res) => !!res && res.status !== 200 && res.body?.code === 'CHAT_START_FAILED';
+async function startFailureCause(cwd) {
+  if (typeof cwd === 'string' && cwd) {
+    try { await access(cwd, fsConstants.X_OK); } catch (e) {
+      if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') return '会话的工作目录不存在';
+      if (e?.code === 'EACCES' || e?.code === 'EPERM') return '无法进入会话的工作目录（没有权限）';
+    }
+  }
+  return '会话进程没能启动';
+}
+async function settleStartFailed(id, f, res) {
+  const raw = typeof res.body?.error === 'string' ? summarizeTurnError(res.body.error) : null;
+  console.warn(`[xsession] 消息 ${id} 的回合没能开始(会话进程没起来):${raw || res.body?.code}`);
+  return settleNotStarted(id, f, await startFailureCause(f.cwd));
 }
 
 // r151c:经 startInternalTurn 起的自动处理回合(internal = { kind:'xs-auto', messageId, key })。调度器已在存储事务里把消息

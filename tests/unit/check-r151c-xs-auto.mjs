@@ -4,7 +4,7 @@
 //   ① 启动:开着却没有启用时刻 → 补记;上次进程留下的 queued / processing → pending / interrupted;档案损坏留存按 7 天清理。
 //   ② 自动投递:类别相同 → auto、xs:turn、目标收到 from="gui:<发送方>" 的信封、done;类别不同 → class-mismatch;非放任内部宽窄不限。
 //   ③ 目标忙 → queued,不打断;回合结束满 1.5 秒才投;改回 card → 排着的落 target-card。
-//   ④ 结算(A3):没开始(目录不存在)→ wake-failed 不重试;开始后出错 → turn-error;起不来(结束通知先于应答)→ turn-error;
+//   ④ 结算(A3):没开始(目录不存在)→ wake-failed 不重试;开始后出错 → turn-error;进程起不来 / 进不了目录 → wake-failed;
 //      被停止 → interrupted。
 //   ⑤ 卡住(平移 Date.now 越过 30 分钟):新到的与排着的落 target-stuck,那条不被中止;结束后恢复。
 //   ⑥ 连锁:hop 逐跳加 1、chainId 不变(回合结束后再发也一样),hop 5 → chain-limit;用户回合清空标记。
@@ -232,8 +232,31 @@ try {
   await send(sS, [T7], 'R151C 进程起不来');
   const [s7] = await fromSession(T7)();
   const sf = await waitStatus(s7.id, 'pending');
-  eq([sf.heldReason, sf.via], ['turn-error', 'auto'], '冷启时进程起不来:已报过回合开始(结束通知先于应答到)→ 按开始后失败结算 turn-error');
-  ok(typeof sf.heldDetail === 'string' && sf.heldDetail.length > 0, `摘要取结束通知或应答里的原因(${sf.heldDetail})`);
+  // 派工 4b 补充约定:进程没起来(在 CLI 任何输出之前失败)= 回合没开始 → wake-failed(原为 turn-error)
+  eq([sf.heldReason, sf.via], ['wake-failed', 'auto'], '冷启时进程起不来(已报过回合开始、结束通知可能先于应答到)→ 回合没开始:wake-failed');
+  ok(typeof sf.heldDetail === 'string' && sf.heldDetail.length > 0, `原因记在 heldDetail(${sf.heldDetail})`);
+  const pub7 = await publicOf(T7, s7.id);
+  ok(/^未能开始处理：.+/.test(pub7.heldText) && !pub7.heldText.includes('stub') && pub7.heldText.length - 7 <= 200, `heldText 是人话、不带 SDK 报错原文(${pub7.heldText})`);
+  await sleep(1500);
+  eq((await msgById(s7.id)).heldReason, 'wake-failed', '不自动重试;结束通知后到也不改判');
+  const WORK7 = join(TMP, 'work7');
+  mkdirSync(WORK7);
+  const S7 = mk('发送方 S7'); const T7b = mk('目标 T7b 进不了目录');
+  await userTurn(S7);
+  await waitIdle(S7);
+  await profiled(T7b, 'bypassPermissions', WORK7);
+  await setInbound([T7b]);
+  await chat.closePersistentForSession(T7b);
+  await waitFor(() => !slotOf(T7b), 'T7b 没有存活进程');
+  chmodSync(WORK7, 0o600);
+  ctl.throwOnQuery = true; // 替身不真进目录:用"query() 起不来"模拟进程进不了工作目录
+  try {
+    await send(senderOf(S7, 'bypassPermissions'), [T7b], 'R151C 进不了目录');
+    const [s7b] = await fromSession(T7b)();
+    await waitStatus(s7b.id, 'pending');
+    const pub7b = await publicOf(T7b, s7b.id);
+    eq([pub7b.heldReason, pub7b.heldText], ['wake-failed', '未能开始处理：无法进入会话的工作目录（没有权限）'], '进不了工作目录 → wake-failed,原因指向工作目录');
+  } finally { chmodSync(WORK7, 0o755); ctl.throwOnQuery = false; }
 
   await send(sS, [T8], 'R151C-HOLD 会被停止');
   const [h8] = await fromSession(T8)();
