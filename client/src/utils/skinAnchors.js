@@ -69,6 +69,8 @@ export const SKIN_ANCHORS = [
   // 合同身份 data-parent-session-id / data-tool-use-id。
   { id: 'subagent-view', desc: '子代理会话视图根(覆盖在母会话之上的只读面)' },
   { id: 'permission-card', desc: '权限确认卡片' },
+  // r151b:跨会话消息的卡片区(目标会话输入框上方,与权限卡同区;总开关开且有待处理 / 处理中的消息时才出现)。
+  { id: 'xs-inbox', desc: '跨会话消息卡片区(目标会话输入框上方)' },
   // r64:模型生成界面(genui 围栏)。挂在渲染成功的块根上,与 data-testid="genui-block"
   // 同一个元素(INTERFACE r64 §9.0);围栏退回代码块时整个块不存在,选择器落空不炸。
   { id: 'genui-block', desc: '模型生成界面块(genui 围栏渲染成功时的根容器)' },

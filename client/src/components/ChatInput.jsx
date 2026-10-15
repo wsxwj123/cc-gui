@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Send, Loader2, Square, Gauge, ChevronDown, X, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, MessagesSquare, Sparkles, ArrowDownToLine, Zap, BellOff } from './Icon.jsx';
 import { useStore, PERMISSION_MODES, openPaneSessionKeys } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
+import { XsInbox } from './XsInbox.jsx';
 import { TodoPanel } from './TodoPanel.jsx';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { GoalBar } from './GoalBar.jsx';
@@ -965,6 +966,8 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
           setPermissionMode('acceptEdits', permKey);
         }}
       />
+      {/* r151b:跨会话消息卡片区(与权限卡同在输入框上方);总开关关 / 没有消息时不渲染任何东西 */}
+      <XsInbox sessionId={sessionId} onSend={onSend} />
       {editingResend && (
         <div className="px-6 pt-3">
           <div className="max-w-[var(--content-max)] mx-auto flex items-center justify-between gap-3 rounded-lg border border-accent/30 bg-accent/8 px-3 py-2 text-[12px] text-accent font-body">
