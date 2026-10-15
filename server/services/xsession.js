@@ -437,23 +437,33 @@ export const nativeGuardLastFailure = () => nativeGuardLastFailureAt;
 // 套接字地址的比较口径:去掉 uds: 前缀;/private/tmp 与 /tmp 是同一处(macOS 的 /tmp 是它的链接)。
 const socketKey = (p) => String(p).replace(/^uds:/i, '').replace(/^\/private\/tmp\//, '/tmp/');
 
-/** SendMessage 的目标 → { kind:'name'|'session', value } | null(其它种类:main、子代理、bridge:、did: 等,一律不管)。 */
+// 发送目标由模型填写(可被提示词注入操纵),回调又跑在权限弹卡之前:超过这个长度的不可能是会话名或套接字地址,
+// 直接判"不是 GUI 会话目标",后面的字符串处理只碰有界的输入。
+const NATIVE_TARGET_MAX_CHARS = 512;
+
+// ListAgents 把会话显示为"名字 [短号]":结尾(去空白后)是 "[…]" 且括号里没有 "]" 时去掉它。
+// 用 lastIndexOf / indexOf 线性判,不用带回溯的正则(审计 I1:"\s*\[[^\]]*\]\s*$" 对长输入是平方级)。
+function stripShortIdSuffix(raw) {
+  const s = raw.trim();
+  if (!s.endsWith(']')) return s;
+  const open = s.lastIndexOf('[');
+  if (open < 0 || s.indexOf(']', open) !== s.length - 1) return s;
+  return s.slice(0, open).trim();
+}
+
+/** SendMessage 的目标 → { kind:'name'|'session', value } | null(其它种类:main、子代理、bridge:、did: 等,一律不管;超长也不管)。 */
 function nativeTargetOf(toolInput) {
   const raw = typeof toolInput?.recipient === 'string' ? toolInput.recipient : (typeof toolInput?.to === 'string' ? toolInput.to : '');
-  if (!raw) return null;
+  if (!raw || raw.length > NATIVE_TARGET_MAX_CHARS) return null;
   // recipient_kind 是 CLI 补的;万一没补(别的 CLI 版本),按 to 的写法推:uds: 开头是地址,否则当名字(只有命中登记表才会拒)
   const kind = toolInput.recipient_kind ?? (/^uds:/i.test(raw) ? 'session' : 'name');
-  if (kind === 'name') return { kind, value: raw.replace(/\s*\[[^\]]*\]\s*$/, '').trim() }; // ListAgents 显示为"名字 [短号]"
+  if (kind === 'name') return { kind, value: stripShortIdSuffix(raw) };
   if (kind === 'session') return { kind, value: socketKey(raw) };
   return null;
 }
 
-/**
- * 纯判定:这次 SendMessage 要不要拒。命中登记表里的条目、条目的会话属于 GUI 当前的进程槽、且不是发送方自己 → 拒。
- * entries:登记表条目;guiSessionIds:GUI 存活进程槽的会话 id;selfSessionId:发送方会话。
- */
-export function nativeGuardShouldDeny(toolInput, entries, guiSessionIds, selfSessionId) {
-  const target = nativeTargetOf(toolInput);
+// 已解析好的目标对登记表判定(xsNativeGuard 与 nativeGuardShouldDeny 共用,目标每次调用只解析一次)。
+function targetIsOtherGuiSession(target, entries, guiSessionIds, selfSessionId) {
   if (!target || !target.value) return false;
   const gui = new Set([...guiSessionIds].filter((id) => typeof id === 'string').map((id) => id.toLowerCase()));
   return entries.some((e) => {
@@ -462,6 +472,14 @@ export function nativeGuardShouldDeny(toolInput, entries, guiSessionIds, selfSes
       ? typeof e.name === 'string' && e.name === target.value
       : typeof e.messagingSocketPath === 'string' && socketKey(e.messagingSocketPath) === target.value;
   });
+}
+
+/**
+ * 纯判定:这次 SendMessage 要不要拒。命中登记表里的条目、条目的会话属于 GUI 当前的进程槽、且不是发送方自己 → 拒。
+ * entries:登记表条目;guiSessionIds:GUI 存活进程槽的会话 id;selfSessionId:发送方会话。
+ */
+export function nativeGuardShouldDeny(toolInput, entries, guiSessionIds, selfSessionId) {
+  return targetIsOtherGuiSession(nativeTargetOf(toolInput), entries, guiSessionIds, selfSessionId);
 }
 
 // CLI 会话登记表 <配置目录>/sessions/*.json(GUI 全仓按 ~/.claude 取配置目录)。目录读不出 → 抛出(算失效);
@@ -487,11 +505,12 @@ export async function xsNativeGuard(input, ctx) {
   if (input?.tool_name !== 'SendMessage') return null;
   try {
     if (!readXsEnabledSync()) return null; // 开关以偏好文件为准(与路由闸门同源):关着一律不管
-    if (!nativeTargetOf(input.tool_input)) return null;
+    const target = nativeTargetOf(input.tool_input);
+    if (!target) return null;
     let entries;
     try { entries = await readCliRegistry(); } catch (e) { return nativeGuardFailed(`读不到 CLI 会话登记表(${e?.code || e?.message || e})`); }
     const guiSessionIds = getActiveChatProcesses().filter((p) => p.sessionId && p.exitCode == null).map((p) => p.sessionId);
-    if (!nativeGuardShouldDeny(input.tool_input, entries, guiSessionIds, ctx?.sessionId)) return null;
+    if (!targetIsOtherGuiSession(target, entries, guiSessionIds, ctx?.sessionId)) return null;
     return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: NATIVE_GUARD_REASON } };
   } catch (e) {
     return nativeGuardFailed(`内部出错(${e?.message || e})`);
