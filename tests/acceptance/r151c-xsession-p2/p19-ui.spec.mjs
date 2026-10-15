@@ -123,26 +123,35 @@ test('P21 被自动处理的消息在目标会话显示为 peer-message 气泡(d
   await api.on();
   const run = uniq('');
   const B = await autoTarget('p21-b', run);
+  // 第 21 条看的是"回合进行中"的直播气泡:B 的自动处理回合必须停住,等这边看完直播气泡再放行,否则回合可能在页面接上之前就跑完。
+  // 假 CLI 见到消息里的 R151S:<脚本名> 就照脚本演;脚本先等放行文件 go(每个 waitFile 最多等 60 秒,连写两个 = 最多停 120 秒)。
+  const hold = `p21hold${run}`;
+  const go = `p21-go-${run}`;
+  writeScript(hold, [{ waitFile: go }, { waitFile: go }, { say: `R151C p21 处理完 ${run}` }]);
   await boot(page);
   await openSessionBySearch(page, B.title, B.reply);
   const body = `R151C p21 正文 ${run}`;
-  const r = await aiCalls(shared, { cwd: makeWorkspace(`real-p21-${run}`), steps: [{ name: SM, input: { to: [B.sid], message: body } }] });
-  expect(resultJson(r, 0, 1)?.results?.[0]?.delivery, '前置:自动处理').toBe('auto');
-  const m = await waitMsg(shared, B.sid, fromSession);
-  const live = page.locator('[data-testid="peer-message"][data-via="auto"]').filter({ hasText: body });
-  await expect(live, '直播气泡 data-via="auto"').toHaveCount(1, { timeout: 20_000 });
-  await expect(live.getByTestId('peer-message-auto')).toHaveText('自动处理');
-  await expect(live.getByTestId('peer-message-from')).toHaveText(`来自 ${m.from.title}`);
-  const stray = await page.evaluate((needle) => {
-    const out = [];
-    const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    for (let n = w.nextNode(); n; n = w.nextNode()) {
-      if (!n.data.includes(needle) && !n.data.includes('cross-session-message')) continue;
-      if (!n.parentElement.closest('[data-testid="peer-message"],[data-testid="xs-card"]')) out.push(n.data.slice(0, 80));
-    }
-    return out;
-  }, body);
-  expect(stray, '正文 / 信封不出现在"你"的气泡里').toEqual([]);
+  let m;
+  try {
+    const r = await aiCalls(shared, { cwd: makeWorkspace(`real-p21-${run}`), steps: [{ name: SM, input: { to: [B.sid], message: `${body} R151S:${hold}` } }] });
+    expect(resultJson(r, 0, 1)?.results?.[0]?.delivery, '前置:自动处理').toBe('auto');
+    m = await waitMsg(shared, B.sid, fromSession);
+    expect(await waitFor(() => turnRecords().some((t) => t.sid === B.sid && t.text.includes(`R151S:${hold}`)), 15_000), '前置:B 的自动处理回合已开始,停在放行之前').toBeTruthy();
+    const live = page.locator('[data-testid="peer-message"][data-via="auto"]').filter({ hasText: body });
+    await expect(live, '直播气泡 data-via="auto"').toHaveCount(1, { timeout: 20_000 });
+    await expect(live.getByTestId('peer-message-auto')).toHaveText('自动处理');
+    await expect(live.getByTestId('peer-message-from')).toHaveText(`来自 ${m.from.title}`);
+    const stray = await page.evaluate((needle) => {
+      const out = [];
+      const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      for (let n = w.nextNode(); n; n = w.nextNode()) {
+        if (!n.data.includes(needle) && !n.data.includes('cross-session-message')) continue;
+        if (!n.parentElement.closest('[data-testid="peer-message"],[data-testid="xs-card"]')) out.push(n.data.slice(0, 80));
+      }
+      return out;
+    }, body);
+    expect(stray, '正文 / 信封不出现在"你"的气泡里').toEqual([]);
+  } finally { touchCtl(go); } // 看完直播气泡(或中途失败)都放行,不让 B 的回合空等到超时
   expect(await waitMsg(shared, B.sid, (x) => x.id === m.id && x.status === 'done'), '前置:处理完').toBeTruthy();
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.locator('[data-cgui="panel-dock"]')).toBeVisible({ timeout: 40_000 });
