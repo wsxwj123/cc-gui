@@ -158,7 +158,7 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
-import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
+import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAutoRetrySkipped, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
@@ -5521,10 +5521,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // handleSendRef 恒发进【本窗格当前会话】;原来 80ms 定时器落地前不复查,这段时间(签名自愈还要
     // 先等剥离与拉历史)切走,原文就被发进了新会话。落地前确认本窗格仍是发起会话(或 init 升级出的
     // 真 sid);expectKey 给"本支自己把窗格换成了新 draft"的会话失效那一支用。
-    const retryLater = (nextOpts, expectKey = null) => setTimeout(() => {
-      if (expectKey ? !paneStillOn(expectKey) : !paneStillOn(sessionQueueKey, streamSid)) return;
-      handleSendRef.current?.(prompt, nextOpts);
-    }, 80);
+    // r151b 复审建议 1:点卡片【处理】发出的回合(带 xsProcess)在这里拦下 —— 不重发、不重新认领(认领只在发送块里、
+    // 只有重发才会再走到);该回合由服务端按出错结算(pending / turn-error),这里按最新状态刷新卡片,并把调用点刚弹的
+    // "…并重发本条"改写成"未自动重发"。调用点在重发前做的会话级修正(剥 [1m]、剥签名、切回逐步确认等)照做。
+    // 普通发送走下面的定时器,与改动前相同。
+    const retryLater = (nextOpts, expectKey = null) => {
+      if (nextOpts && nextOpts.xsProcess) {
+        const xsText = xsAutoRetrySkipped(nextOpts.xsProcess);
+        if (expectKey ? paneStillOn(expectKey) : paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: xsText });
+        return undefined;
+      }
+      return setTimeout(() => {
+        if (expectKey ? !paneStillOn(expectKey) : !paneStillOn(sessionQueueKey, streamSid)) return;
+        handleSendRef.current?.(prompt, nextOpts);
+      }, 80);
+    };
     // 发起时的 projectHash 闭包(判官盲审重要1):finally 拉历史必须用它,不能现取
     // getLocalSession()?.projectHash —— 流式期间用户切到另一个项目的会话时两者对不上,
     // 会拉错项目历史/404。draft 会话也带 projectHash,全程有效。

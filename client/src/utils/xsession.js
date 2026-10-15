@@ -422,6 +422,18 @@ export function xsClaimNotSent(xsProcess, reply) {
   const err = reply && typeof reply.error === 'string' && reply.error ? reply.error : '发送失败';
   return `跨会话消息没有发出：${err}。卡片已按最新状态刷新。`;
 }
+/**
+ * 点卡片发出的这条回合遇到会触发既有"自动重发"的错误(1M 被拒、思考签名、会话失效、自动档不可用;App.jsx retryLater 统一拦):
+ * 不重发、不重新认领 —— 该回合由服务端按出错结算(pending / turn-error),这里按最新状态刷新卡片,返回提示文案(复审建议 1)。
+ * 刷新早于服务端结算时拿到的仍是 processing,结算后的 xs:message 广播会把卡片收敛到 turn-error。xsProcess = opts.xsProcess。
+ */
+export function xsAutoRetrySkipped(xsProcess) {
+  if (xsProcess && isXsId(xsProcess.sessionId)) {
+    bumpEpoch(xsProcess.sessionId);
+    void refreshInbox(xsProcess.sessionId);
+  }
+  return '跨会话消息的处理回合出错，未自动重发。卡片已按最新状态刷新；如需重试，在卡片上点【处理】。';
+}
 
 // ── 转发(对话框 XsForwardDialog 只调这里) ────────────────────────────────────────
 export const XS_BODY_MAX_BYTES = 32768; // 正文 UTF-8 上限(X.3.5 固定值,与服务端判 XS_BODY_TOO_LARGE 同一口径)
