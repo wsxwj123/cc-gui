@@ -47,7 +47,7 @@ import screenshotRoutes from './routes/screenshot.js';
 import imageRoutes from './routes/image.js';
 import clientLogRoutes, { rotateLogIfBig, writeCrashLog } from './routes/client-log.js';
 import xsessionRoutes, { xsessionBodyErrorHandler } from './routes/xsession.js'; // r151b 跨会话消息
-import { loadXsInbox } from './services/xsession-store.js';
+import { loadXsInbox, sweepXsLeftovers } from './services/xsession-store.js';
 import { installXsessionRuntime } from './services/xsession.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
@@ -1110,7 +1110,9 @@ server.listen(PORT, HOST, () => {
   try { bootPricingCatalog(); } catch (e) { console.error('[pricing] boot warmup failed:', e?.message || e); }
   // r151b:跨会话收件箱启动恢复(遗留的 processing / claimed → pending + interrupted)。只在总开关开着时做 ——
   // 关着时不读不写 ~/.claude-gui/xsession/;之后再打开,首次访问收件箱时同样会先恢复。
+  // r151b 复审建议 2:关着时也做只删不写的启动清理(clear 没删成的残留、超过 7 天的损坏留存文件),不读盘恢复、不建目录
   if (readXsEnabledSync()) loadXsInbox().catch((e) => console.error('[xsession] 收件箱启动恢复失败:', e?.message || e));
+  else sweepXsLeftovers().catch((e) => console.error('[xsession] 启动清理失败:', e?.message || e));
   // r122 R5:回滚点启动清扫 —— 延迟(默认 60s)后在后台逐会话回收超限的旧回滚点,一次进程只跑一遍。
   // unref:这个定时器不许拖住进程退出;CGUI_CHECKPOINT_SWEEP=0 直接不排程。整个 run 在
   // runStartupSweep 里包了 try/catch,任何失败只打日志、不影响服务。

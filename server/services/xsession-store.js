@@ -8,19 +8,21 @@
 //   - 全库最多留 500 条:超出时按到达先后删最旧的已结束消息,未结束的一条不删(宁可超出也不丢)。
 //   - 本进程第一次读盘时做恢复:遗留的 processing / claimed 一律退回 pending、原因 interrupted,不自动重跑
 //     (重跑可能把同一件事做两遍);同时清掉没有对应未结束消息的孤儿正文(上次在"改元数据"与"删正文"之间退出)
-//     和本模块自己留下的临时文件(上次在"写临时文件"与"改名"之间退出)。只认本模块的命名:正文只删 <消息id>.txt,
+//     和本模块自己留下的临时文件(上次在"写临时文件"与"改名"之间退出),以及修改时间超过 7 天的损坏留存文件
+//     messages.json.corrupt-*(挪开时把修改时间设成挪开那一刻)。只认本模块的命名:正文只删 <消息id>.txt,
 //     临时文件只删 messages.json.tmp.<pid>.<n> 与 <消息id>.txt.tmp.<pid>.<n>(pid 是另一个还活着的进程时不动);
 //     正文目录是符号链接时整个跳过,不跟着链接删别处的文件。
 // 懒加载:第一次用到时才读盘。总开关关着时路由层先回 409,本模块不会经那些接口被调到;关着时仍会被调到的只有:
 //   · 删会话(DELETE /api/sessions/:id):会读收件箱、有变化时写 —— 收件箱文件不存在时什么都不写、不建目录;
 //   · GET /api/xsession/config 的 stored 计数(countUnfinishedXsMessages):只读,不做恢复、不写、不建目录;
-//   · POST /api/xsession/clear(clearXsInbox,只在关着时可用):只删本模块的文件,不建任何东西。
+//   · POST /api/xsession/clear(clearXsInbox,只在关着时可用):只删本模块的文件,不建任何东西;
+//   · 服务启动(sweepXsLeftovers;开着时改由读盘恢复做同样的清理):只删本模块的残留,不做恢复、不写、不建目录。
 // 日志只带消息 id,不带任何正文片段。
 //
 // 一条记录的字段由 xsession.js(T-X4)定;本模块只依赖下面这几个:
 //   id(会话 id 同形状)、status(六种之一)、to.sessionId、heldReason、via,
 //   以及认领 / 处理期间的临时字段 token、heldBefore、turn —— 恢复时删掉它们(旧凭据随之作废)。
-import { readFile, writeFile, rename, unlink, mkdir, readdir, lstat } from 'fs/promises';
+import { readFile, writeFile, rename, unlink, mkdir, readdir, lstat, utimes } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import { isSessionIdShape } from './session-reader.js';
@@ -125,8 +127,14 @@ async function loadIfNeeded() {
       // 文件损坏:挪到一边留证(不覆盖),从空表开始。这一次不清孤儿正文,给手工找回留余地。
       quarantined = true;
       const aside = `${MESSAGES_PATH}.corrupt-${Date.now()}`;
-      try { await rename(MESSAGES_PATH, aside); } catch {}
+      let moved = false;
+      try { await rename(MESSAGES_PATH, aside); moved = true; } catch {}
       console.warn(`[xsession] messages.json 无法解析,已移到 ${aside}`);
+      // 改名不改修改时间:设成挪开这一刻,"保留 7 天"从这里算(设不上只记日志,最坏是不满 7 天就被启动清理删掉)
+      if (moved) {
+        const now = new Date();
+        try { await utimes(aside, now, now); } catch (e) { console.warn(`[xsession] 损坏留存文件未能更新修改时间:${e.code || e.message}`); }
+      }
     }
   }
   for (const m of messages) {
@@ -137,10 +145,7 @@ async function loadIfNeeded() {
     try { await persist(messages); } catch (e) { console.warn(`[xsession] 启动恢复未能落盘:${e.cause?.code || e.message}`); }
   }
   cache = messages;
-  if (!quarantined) {
-    await sweepOwnTempFiles();
-    await sweepOrphanBodies(messages);
-  }
+  if (!quarantined) await sweepLeftovers(messages);
 }
 
 // 正文目录不是真目录(符号链接、文件、不存在)→ null:不往里面清东西。
@@ -193,6 +198,32 @@ async function unlinkQuietly(file) {
   }
 }
 
+// 损坏留存文件(messages.json.corrupt-*)保留 7 天,按修改时间算(挪开时已设成挪开那一刻);只删普通文件,不跟链接、不删目录。
+export const XS_CORRUPT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+const CORRUPT_PREFIX = 'messages.json.corrupt-';
+async function sweepStaleCorruptFiles() {
+  let top = [];
+  try { top = await readdir(XS_DIR); } catch { return; }
+  const now = Date.now();
+  for (const f of top) {
+    if (!f.startsWith(CORRUPT_PREFIX)) continue;
+    try {
+      const st = await lstat(join(XS_DIR, f));
+      if (st.isFile() && now - st.mtimeMs > XS_CORRUPT_KEEP_MS) await unlink(join(XS_DIR, f));
+    } catch (e) {
+      if (e?.code !== 'ENOENT') console.warn(`[xsession] 过期的损坏留存文件删除失败(${f}):${e.code || e.message}`);
+    }
+  }
+}
+
+// 启动清理(只删,不写、不建):过期的损坏留存文件、本模块的临时文件、没有对应未结束消息的正文。
+// clear 删掉记录后没删成的正文 / 临时文件 / 损坏留存文件也由这里收尾(正文此时都是孤儿;损坏留存按 7 天)。
+async function sweepLeftovers(messages) {
+  await sweepStaleCorruptFiles();
+  await sweepOwnTempFiles();
+  await sweepOrphanBodies(messages);
+}
+
 function trimToCapacity(messages) {
   let excess = messages.length - XS_LIMITS.maxKept;
   if (excess <= 0) return messages;
@@ -205,6 +236,29 @@ function trimToCapacity(messages) {
 /** 确保本进程已读过盘(含启动恢复)。index.js 启动时在总开关开着时调一次;其余入口都会自己触发。 */
 export function loadXsInbox() {
   return cache ? Promise.resolve() : enqueue(loadIfNeeded);
+}
+
+/**
+ * 服务启动时总开关关着用(index.js;开着时由 loadXsInbox 的读盘恢复做同样的清理):只删不写 —— 不做恢复、不挪损坏文件、
+ * 不建目录。按只读读到的 messages.json 判哪些正文还有用:文件不存在 = 都没用;读不出或解析不了 → 这一次什么都不清
+ * (与读盘时挪开损坏文件那一次一样,给手工找回留余地)。本进程已读过盘时什么都不做(读盘时清过了)。
+ */
+export function sweepXsLeftovers() {
+  return enqueue(async () => {
+    if (cache) return;
+    let raw = null;
+    try { raw = await readFile(MESSAGES_PATH, 'utf-8'); } catch (e) {
+      if (e?.code !== 'ENOENT') return;
+    }
+    let messages = [];
+    if (raw !== null) {
+      let parsed;
+      try { parsed = JSON.parse(raw); } catch { return; }
+      if (!parsed || !Array.isArray(parsed.messages)) return;
+      messages = parsed.messages.filter(isValidRecord);
+    }
+    await sweepLeftovers(messages);
+  });
 }
 
 /** 全部消息记录(按到达先后;深拷贝,随便改不影响存储)。 */
@@ -251,7 +305,9 @@ async function unlinkIfExists(file) {
  *   messages.json(先删它:删不掉就整次失败、什么都没变)、xsession/ 下的 messages.json.corrupt-* 与 messages.json 的临时文件、
  *   正文目录里本模块的正文(<消息id>.txt)与正文临时文件;正文目录不是真目录(符号链接等)时不进去。
  * 不删 xsession/ 以外的任何东西,不建任何目录或文件。返回删掉的消息总条数(含已结束的;文件不存在为 0)。
- * 删除失败(不是"不存在")→ XsStorageError;记录已删、正文没删完时,剩下的正文在下次读盘恢复时按孤儿清掉。
+ * 以收件箱记录为准(复审建议 2):messages.json 删不掉(不是"不存在")→ XsStorageError(路由回 500),什么都没改;
+ * 记录删掉之后,删正文 / 损坏留存 / 临时文件失败只记日志(只带文件名),整次仍算成功、removed 照实;剩下的由下次启动的
+ * 清理删掉(sweepLeftovers:正文此时都是孤儿,临时文件按 pid,损坏留存按 7 天)。
  */
 export function clearXsInbox() {
   return enqueue(async () => {
@@ -265,22 +321,31 @@ export function clearXsInbox() {
     }
     try {
       await unlinkIfExists(MESSAGES_PATH);
-      cache = null; // 之后第一次用到时重新读盘:文件不存在 = 空表
-      let top = [];
-      try { top = await readdir(XS_DIR); } catch (e) { if (e?.code !== 'ENOENT') throw e; }
-      for (const f of top) {
-        const t = TEMP_SUFFIX_RE.exec(f);
-        if (f.startsWith('messages.json.corrupt-') || (t && f.slice(0, t.index) === 'messages.json')) await unlinkIfExists(join(XS_DIR, f));
-      }
-      for (const f of (await bodiesDirEntries()) || []) {
-        const m = TEMP_SUFFIX_RE.exec(f);
-        if (isBodyFileName(m ? f.slice(0, m.index) : f)) await unlinkIfExists(join(BODIES_DIR, f));
-      }
     } catch (e) {
       throw new XsStorageError('xsession 清空失败', e);
     }
+    cache = null; // 之后第一次用到时重新读盘:文件不存在 = 空表
+    let top = [];
+    try { top = await readdir(XS_DIR); } catch (e) {
+      if (e?.code !== 'ENOENT') console.warn(`[xsession] 清空时读目录失败,留待下次启动清理:${e.code || e.message}`);
+    }
+    for (const f of top) {
+      const t = TEMP_SUFFIX_RE.exec(f);
+      if (f.startsWith(CORRUPT_PREFIX) || (t && f.slice(0, t.index) === 'messages.json')) await unlinkLeftover(join(XS_DIR, f), f);
+    }
+    for (const f of (await bodiesDirEntries()) || []) {
+      const m = TEMP_SUFFIX_RE.exec(f);
+      if (isBodyFileName(m ? f.slice(0, m.index) : f)) await unlinkLeftover(join(BODIES_DIR, f), f);
+    }
     return removed;
   });
+}
+
+// clear 删掉记录之后的删除:失败只记日志(文件名里只有消息 id,没有正文),不抛。
+async function unlinkLeftover(file, name) {
+  try { await unlink(file); } catch (e) {
+    if (e?.code !== 'ENOENT') console.warn(`[xsession] 清空时 ${name} 删除失败,留待下次启动清理:${e.code || e.message}`);
+  }
 }
 
 /** 读正文;已删除、不存在或 id 形状不对 → null。 */
