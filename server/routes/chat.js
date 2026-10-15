@@ -569,7 +569,8 @@ export function getActiveChatProcesses() {
       // r151c:回合正在跑(判据同 findBusySlot)、界面档位、回合代数、在飞后台任务数(跨会话自动处理的调度与判定用)
       busy: !slot.idle && !slot.closing && !slot.pumpEnded && slot.exitCode === null && !!slot.input,
       // r151c:回合结果已出、只差输入预测(此时 busy 仍为 true;跨会话判定按空闲算,投递等它收尾再起)
-      awaitingSuggestion: !!slot.awaitingSuggestion,
+      awaitingSuggestion: !!slot.suggestWaitSince,
+      suggestWaitSince: slot.suggestWaitSince || null, // 结果时刻(回合结束通知里按它算转空闲的时刻)
       guiMode: slot.guiMode || null,
       turnEpoch: slot.turnEpoch | 0,
       liveTasks: slot.liveTasks instanceof Map ? slot.liveTasks.size : 0,
@@ -2649,13 +2650,14 @@ async function handleChatPost(req, res) {
   let closeTimer = null;
   let closeDelayMs = 0; // 本回合 result 分支算出的关流延迟,收摊重武装时复用同一窗口
   let lastResultLine = null;
-  // r151c:slot.awaitingSuggestion = 本回合结果已出、收尾窗只为等输入预测(result 分支置上);收尾窗一撤(续跑 / 收尾 / 泵结束)即清
-  const cancelClose = () => { slot.awaitingSuggestion = false; if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
+  // r151c:slot.suggestWaitSince = 本回合结果已出、收尾窗只为等输入预测时的结果时刻(result 分支置上);续跑或收尾报完回合结束即清
+  const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
   const finalize = () => {
     cancelClose();
     // R13:本回合到此结束 —— 让等待该回合落地的停止入口拿到真实终态(被停 → stopped,
     // 正常收尾 → completed/failed)。主 agent 随后续跑会经 reviveSlotTurn 翻回活跃。
     settleSlotTurn(slot, slot.lastResultError ? 'failed' : 'completed');
+    slot.suggestWaitSince = 0; // r151c:回合结束通知已带着它报出(结束时刻按结果时刻算),此后不再是"只差输入预测"
     // 回合优雅收尾:上一个 stop 武装的 abort 兜底不再需要,清掉防其误伤后续复用回合。
     if (slot.stopTimer) { clearTimeout(slot.stopTimer); slot.stopTimer = null; }
     if (lastResultLine) { maybeBroadcastTurnComplete(slot, lastResultLine); lastResultLine = null; } // 回合完成 WS 只在最终 result 播
@@ -2915,7 +2917,7 @@ async function handleChatPost(req, res) {
           if (delay) { cancelClose(); closeTimer = setTimeout(() => finalize(), delay); }
           else finalize();
           // r151c:收尾窗只为等输入预测(不是子代理去抖窗)→ 跨会话判定把本会话当空闲(只读标记,不改收尾时序)
-          if (delay && suggestOn && !slot.turnSubagentSeen) slot.awaitingSuggestion = true;
+          slot.suggestWaitSince = delay && suggestOn && !slot.turnSubagentSeen ? Date.now() : 0;
         } else if (m.type === 'prompt_suggestion') {
           // 建议是本回合最后一条消息:result 已到(closeTimer 在挂)就立即收尾,
           // 不能走下面的 cancelClose 分支——那会把关闭取消掉、进程挂死等不到下一条。
@@ -2937,6 +2939,7 @@ async function handleChatPost(req, res) {
           // 由 result 分支单点决定);closeDelayMs 为 0(无子代理无 suggest 本不挂窗)
           // 防御性兜底 4s。teammate/任何未预见事件类型最多推迟收摊,不会再造成永久挂死。
           cancelClose();
+          slot.suggestWaitSince = 0; // r151c:续跑了,那个结果不是最终的
           closeTimer = setTimeout(() => finalize(), closeDelayMs || 4000);
         }
       }

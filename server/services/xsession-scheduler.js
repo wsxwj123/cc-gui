@@ -52,11 +52,12 @@ export function createXsScheduler({ evaluate, hasQueued = () => true, now = () =
   return {
     kick,
     /** 某会话的一个回合结束:记下转空闲的时刻;可能有排队时 idleMs 后评估一次。 */
-    noteTurnEnd(id) {
+    noteTurnEnd(id, endedAt) {
       if (typeof id !== 'string' || !id) return;
       const st = stateOf(id);
-      st.lastEndAt = now();
-      if (hasQueued(id)) arm(st, 'idle', idleMs);
+      // endedAt:回合实际结束的时刻(r151c 补充约定:结果已出、只差输入预测的回合按结果时刻算),不给 / 不合法按此刻
+      st.lastEndAt = Number.isFinite(endedAt) ? Math.min(endedAt, now()) : now();
+      if (hasQueued(id)) arm(st, 'idle', settleLeft(st));
     },
     /** 目标刚转空闲、还没满 idleMs(评估时按"忙"对待,只是不投)。 */
     settling(id) {

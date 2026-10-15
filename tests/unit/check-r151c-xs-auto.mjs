@@ -403,6 +403,16 @@ try {
   const seqTS = ws.slice(wsTS).filter((e) => e.type === 'xs:message' && e.message?.id === mTS.id).map((e) => e.message.status);
   ok(seqTS.includes('processing') && !seqTS.slice(seqTS.indexOf('processing')).includes('queued'), `开始处理后没有退回排队(没回"会话正忙"):${seqTS.join('→')}`);
   ok(ws.some((e) => e.type === 'xs:turn' && e.messageId === mTS.id), '收尾后起了回合(xs:turn)');
+  // 1b) 目标进程不保活:收尾窗撤掉后要等进程退出才能接新回合(不等就会被回"会话正忙"、退回排队、计数退回)
+  await userTurn(TS, 'bypassPermissions', { promptSuggestions: true, keepAlive: false });
+  await waitFor(() => slotOf(TS)?.awaitingSuggestion, 'TS(不保活)结果已出、在等输入预测');
+  const wsTS2 = ws.length;
+  const rTS2 = await send(sX, [TS], 'R151C 只差输入预测 不保活');
+  eq(rTS2.results[0].delivery, 'auto', '不保活也按空闲判 auto');
+  const mTS2 = (await fromSession(TS)()).at(-1);
+  await waitStatus(mTS2.id, 'done', 20_000);
+  const seqTS2 = ws.slice(wsTS2).filter((e) => e.type === 'xs:message' && e.message?.id === mTS2.id).map((e) => e.message.status);
+  ok(!seqTS2.slice(seqTS2.indexOf('processing')).includes('queued'), `不保活:开始处理后没有退回排队:${seqTS2.join('→')}`);
 
   // 2) 新会话拿到会话 id(init)即记发送档案:回合还在跑、还没有回合结束通知
   const rNew = await api('POST', '/chat', { prompt: 'R151C-HOLD 新会话首回合', cwd: WORK, model: 'r151c-model', permissionMode: 'bypassPermissions', keepAlive: true });

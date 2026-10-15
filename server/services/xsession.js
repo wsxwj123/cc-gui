@@ -445,7 +445,9 @@ function onTurnEnd(info) {
     hit.f.ended = { outcome: info.outcome, detail };
     if (hit.f.responded) finishAutoTurn(hit.id, hit.f);
   } else if (hit) settleTurn(hit.id, hit.f.key, info.outcome, detail);
-  if (info?.sessionId) scheduler.noteTurnEnd(info.sessionId); // 目标转空闲:有排队的,满 1.5 秒仍空闲再投
+  // 目标转空闲:有排队的,满 1.5 秒仍空闲再投。只差输入预测的回合(结束通知在预测收尾时才来)按结果时刻算转空闲
+  const since = info?.pid ? getActiveChatProcesses().find((p) => p.pid === info.pid)?.suggestWaitSince : null;
+  if (info?.sessionId) scheduler.noteTurnEnd(info.sessionId, since ?? undefined);
 }
 
 /** 结算一条 processing 的消息(只认本次兑换的回合 key,迟到的旧回合不动它)。 */
@@ -760,13 +762,16 @@ function targetBusy(sessionId, includeSettling) {
 }
 // 目标只差输入预测(SDK 在结果之后另生成下一步输入预测,收尾窗最长约 4 秒)时等它收尾再起回合:不中止预测,
 // 也不让内部入口因此回"会话正忙"。按轮次计时(不看墙上时间);等不到(续跑了 / 超时)照常起,真忙由 409 退回排队。
+// 收尾窗撤掉之后:不保活的进程是关了输入流再等它退出,退出之前槽仍算忙(内部入口会回 409),再给一小段时间等它真正退出。
 const SUGGEST_SETTLE_POLL_MS = 100;
 const SUGGEST_SETTLE_MAX_POLLS = 100;
-const awaitingSuggestion = (sessionId) => getActiveChatProcesses().some((p) => sameId(p.sessionId, sessionId) && p.busy && p.awaitingSuggestion);
+const SUGGEST_EXIT_GRACE_POLLS = 30;
+const sessionSlots = (sessionId) => getActiveChatProcesses().filter((p) => sameId(p.sessionId, sessionId) && p.busy);
+const awaitingSuggestion = (sessionId) => sessionSlots(sessionId).some((p) => p.awaitingSuggestion);
 async function waitSuggestionSettled(sessionId) {
-  for (let i = 0; i < SUGGEST_SETTLE_MAX_POLLS && awaitingSuggestion(sessionId); i += 1) {
-    await new Promise((r) => setTimeout(r, SUGGEST_SETTLE_POLL_MS));
-  }
+  const pause = () => new Promise((r) => setTimeout(r, SUGGEST_SETTLE_POLL_MS));
+  for (let i = 0; i < SUGGEST_SETTLE_MAX_POLLS && awaitingSuggestion(sessionId); i += 1) await pause();
+  for (let i = 0; i < SUGGEST_EXIT_GRACE_POLLS && sessionSlots(sessionId).length; i += 1) await pause();
 }
 // 卡住:有一条自动处理的消息开始处理超过 30 分钟仍未结算(按此刻的 Date.now() 判)。
 function targetStuck(sessionId) {
