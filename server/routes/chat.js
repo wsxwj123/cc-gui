@@ -3306,7 +3306,7 @@ function stopTimeoutResult(pid, owner) {
 
 // 停止的实际动作(硬/选择性两条路径的时序与改动前逐字节一致)。flags = {hard, allTasks},
 // 只认显式 true(路由层已归一)。返回值 = 该请求的 JSON 响应体。
-function applyStop(slot, pid, flags) {
+export function applyStop(slot, pid, flags) { // export 仅为可单测(check-stop-timing-behavior.mjs)
   // SDK:interrupt 让当前回合优雅停;abort 兜底强停;close input 让 generator 收尾。
   // **不能 await interrupt**(用户实报"按停止后子代理继续跑到完"的根因):回合正在跑
   // 子代理时,CLI 对 interrupt 控制请求的响应可能等到子代理收尾才回,await 会把下面的
