@@ -2778,6 +2778,9 @@ function GeneralTab({ settings }) {
 // 本块不受总开关门控(关着也要能看见、能打开)。开关的状态与接口调用都在 utils/xsession.js。
 // r151c 二期:说明换二期文案;开着时多一行自动处理计数(暂停时为"自动处理已暂停"与【恢复自动处理】),块可见期间每 60 秒重取 config。
 const XSESSION_NOTICE = '开启后，会话里的 AI 可以给本机 CC-GUI 的其它会话发消息，你也可以把回复转发给其它会话。收到的消息默认显示为卡片，确认后才处理；设为自动处理的会话会自行开始回合并消耗额度。AI 列出可发送的会话时，会话标题与目录名会随请求发给当前 provider。';
+// r151d:本机回环请求免鉴权是既有设计 —— 本机其它程序,以及能执行命令的会话(「放任」档等),都能经本地接口改跨会话设置、
+// 各会话的接收方式、暂停状态与同步的全局设置。总开关开着时写明(接口 r151d 行为清单第 6 条,文案逐字)。
+const XSESSION_LOCAL_API_NOTE = '本机其它程序，以及「放任」档会话里的 AI，都能通过本地接口修改这里的设置和各会话的接收方式。';
 const XSESSION_CONFIG_REFRESH_MS = 60_000;
 function fmtXsGuardTime(iso) {
   const t = Date.parse(iso);
@@ -2852,6 +2855,9 @@ function XsessionSettingsSection() {
             </button>
           )}
         </div>
+      )}
+      {enabled && (
+        <div data-testid="xsession-local-api-note" className="px-3 pb-2.5 text-[10.5px] text-ink-faint font-body">{XSESSION_LOCAL_API_NOTE}</div>
       )}
       {(guardFailureAt || err || showResidual) && (
         <div className="px-3 pb-2.5 space-y-1">
