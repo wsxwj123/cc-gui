@@ -620,6 +620,8 @@ const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合
 // 盘上已有的名单(减去本进程清掉的)再写,本进程没读到的标记不会被它的写入删掉。
 // 判官 S3:某次落盘失败后,之后每次有会话被标记(含同一会话再次写失败)都重试落盘,直到成功一次。
 // r151e ③:落盘失败后另由恢复定时器(runXsRecovery)在偏好文件恢复后补存,不靠下一次标记。
+// r151e ⑤:名单读到的那一刻(profileWriteFailedReady,恢复定时器也经它读),本进程在读到之前清掉的会话若还在盘上的名单里,立即排一次
+// 落盘把它们删掉 —— 否则这次读到之后再没有标记变化时,重启后又按没有档案判,直到它再成功写一次档案(偏紧,但不该发生)。
 const profileWriteFailed = new Set(); // 会话 id(小写);按加入先后排
 const profileWriteFailedCleared = new Set(); // 本进程清掉、还没确认已从偏好文件里删掉的(读到 / 落盘时从盘上的名单里减去)
 let profileWriteFailedLoaded = false; // 偏好文件里的名单读到过没有(文件不存在也算读到)
@@ -633,6 +635,7 @@ function profileWriteFailedReady() {
   for (const k of ids) if (!profileWriteFailedCleared.has(k)) profileWriteFailed.add(k);
   for (const k of mine) { profileWriteFailed.delete(k); profileWriteFailed.add(k); } // 本进程标记的排在后面(更近)
   profileWriteFailedLoaded = true;
+  if (ids.some((k) => profileWriteFailedCleared.has(k) && !profileWriteFailed.has(k))) persistProfileWriteFailed(); // ⑤ 不会拒绝;失败交给恢复定时器
   return true;
 }
 function markProfileWriteFailed(sessionId) {
@@ -1682,8 +1685,9 @@ async function runXsRecovery() {
       xsRecoveryHooks = false;
       syncXsRuntimeHooks(prefs.enabled);
     }
-    if (!profileWriteFailedReady()) return;
-    if (profileFailPersistFailed && !(await persistProfileWriteFailed())) return;
+    if (!profileWriteFailedReady()) return; // 读到名单时若要补删本进程清掉的标记,这里已排下一次落盘(⑤)
+    // 排着的(含上一行刚排的)等它写完;上次落盘失败的补落盘。写不成就按间隔再来(失败路径已记日志)。
+    if ((profileFailPersistQueued || profileFailPersistFailed) && !(await persistProfileWriteFailed())) return;
     done = true;
   } catch (e) {
     if (!xsRecoveryNoted) noteXsRecoveryFailure(`恢复定时器出错,稍后重试:${e?.message || e}`);

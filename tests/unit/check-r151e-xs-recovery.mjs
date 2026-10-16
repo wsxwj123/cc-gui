@@ -210,6 +210,30 @@ try {
   eq((await api('POST', '/chat/permission-mode', { sessionId: randomUUID(), mode: 'plan' })).status, 200, '没有档案的会话切档照常 200');
   ok(Date.now() - tNoProc < 1_000, '没有要写的档案:不多等');
 
+  // ── ⑤ 名单读到之前本进程清掉的标记:读到名单的那一刻补落盘,把它从盘上的名单里删掉(否则重启后又按没有档案判)──
+  // 清标记用 forgetXsSession(同步清):读到名单之前清掉、再读到名单,两步之间不让出事件循环,不依赖恢复定时器的时机。
+  const onDiskFailed = () => prefsJson()?.xsProfileWriteFailed ?? [];
+  const T5 = mk('目标 T5 判定时读到名单');
+  const T5b = mk('目标 T5b 恢复定时器读到名单');
+  setPrefs({ ...prefsJson(), xsProfileWriteFailed: [...onDiskFailed(), T5.toLowerCase(), T5b.toLowerCase()] }); // 上一个进程留在盘上的标记
+  const before5 = onDiskFailed();
+  chmodSync(PREFS, 0o000);
+  try { xs.installXsessionRuntime(); } finally { chmodSync(PREFS, 0o644); } // 模拟重启:启动这一刻偏好文件读不出,随后恢复
+  const forgot5 = xs.forgetXsSession(T5); // 名单读到之前清掉 T5
+  ok(!xs.profileCountsFor(T5, null, ENABLED_AT), '判定时读到名单');
+  await forgot5;
+  await waitFor(() => !onDiskFailed().includes(T5.toLowerCase()), '5a:读到名单的那一刻补落盘,T5 从盘上的名单里删掉', 5_000);
+  eq([...onDiskFailed()].sort(), before5.filter((k) => k !== T5.toLowerCase()).sort(), '5a:盘上其它标记都还在(先后按本进程标记的排后,不比顺序)');
+  setPrefs({ ...prefsJson(), xsProfileWriteFailed: [...onDiskFailed().filter((k) => k !== T5b.toLowerCase()), T5b.toLowerCase()] });
+  const before5b = onDiskFailed();
+  ok(before5b.length >= 2, '5b 前置:盘上除 T5b 外还有别的标记');
+  chmodSync(PREFS, 0o000);
+  try { xs.installXsessionRuntime(); } finally { chmodSync(PREFS, 0o644); }
+  await xs.forgetXsSession(T5b); // 读到名单之前清掉 T5b,之后不做任何判定,只等恢复定时器读到名单
+  ok(onDiskFailed().includes(T5b.toLowerCase()), '5b 前置:清掉时盘上还有 T5b');
+  await waitFor(() => !onDiskFailed().includes(T5b.toLowerCase()), '5b:恢复定时器读到名单后补落盘,T5b 从盘上的名单里删掉', 10_000);
+  eq([...onDiskFailed()].sort(), before5b.filter((k) => k !== T5b.toLowerCase()).sort(), '5b:盘上其它标记都还在');
+
   console.log(`PASS check-r151e-xs-recovery(${checks} 项)`);
 } finally {
   ctl.onInputEnd = null; ctl.setModel = null; ctl.setPermissionMode = null;
