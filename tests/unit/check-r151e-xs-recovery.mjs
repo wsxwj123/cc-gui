@@ -177,6 +177,39 @@ try {
     ok(failedIdsOnDisk().includes(T3.toLowerCase()), '补存时盘上原有的标记还在');
   } finally { console.warn = origWarn; }
 
+  // ── 主会话裁定:切档接口等新档位写进发送档案再回 200,最多等 MODE_CHANGE_PERSIST_WAIT_MS(回 200 后立即重启时盘上不再是旧档位)──
+  const PROFILES = join(XS_DIR, 'profiles.json');
+  const diskModeOf = (sid) => { try { return JSON.parse(readFileSync(PROFILES, 'utf8')).sessions?.[sid]?.judge?.mode ?? null; } catch { return null; } };
+  const holdStore = async () => { // 占住存储队列(档案与收件箱共用):切档的档案写入排在它后面
+    let open = null;
+    const held = store.mutateXsProfiles(() => new Promise((r) => { open = r; }));
+    await waitFor(() => open, '占住存储队列');
+    return async () => { open(); await held; };
+  };
+  const T2 = mk('目标 T2 切档等落盘');
+  await offTurn(T2, 'bypassPermissions');
+  await waitFor(() => profileOf(T2), 'T2 的档案');
+  let release = await holdStore();
+  let modeAtAnswer = null;
+  const pA = api('POST', '/chat/permission-mode', { sessionId: T2, mode: 'default' }).then((r) => { modeAtAnswer = diskModeOf(T2); return r; });
+  await sleep(600);
+  eq(modeAtAnswer, null, '档案还没写盘:切档接口先不回应答');
+  await release();
+  eq((await pA).status, 200, '档案写盘后回 200');
+  eq(modeAtAnswer, 'default', '回 200 的那一刻盘上档案已是新档位');
+  release = await holdStore();
+  const t2 = Date.now();
+  const rSlow = await api('POST', '/chat/permission-mode', { sessionId: T2, mode: 'acceptEdits' });
+  const waited = Date.now() - t2;
+  eq(rSlow.status, 200, '档案迟迟写不进:照常回 200');
+  ok(waited >= chat.MODE_CHANGE_PERSIST_WAIT_MS - 100 && waited < chat.MODE_CHANGE_PERSIST_WAIT_MS + 1_500, `最多等 ${chat.MODE_CHANGE_PERSIST_WAIT_MS}ms(实际 ${waited}ms)`);
+  eq(diskModeOf(T2), 'default', '前置:超时回 200 时档案还没写');
+  await release();
+  await waitFor(() => diskModeOf(T2) === 'acceptEdits', '超时之后写入在后台继续完成', 5_000);
+  const tNoProc = Date.now();
+  eq((await api('POST', '/chat/permission-mode', { sessionId: randomUUID(), mode: 'plan' })).status, 200, '没有档案的会话切档照常 200');
+  ok(Date.now() - tNoProc < 1_000, '没有要写的档案:不多等');
+
   console.log(`PASS check-r151e-xs-recovery(${checks} 项)`);
 } finally {
   ctl.onInputEnd = null; ctl.setModel = null; ctl.setPermissionMode = null;

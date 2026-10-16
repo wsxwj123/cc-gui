@@ -1104,7 +1104,8 @@ const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolU
  *   (本文件不认识任何工具名;撤掉挂接点即不再放行;没经它挂上工具的槽一概不放行)。抛错、返回 Promise 或形状不对 → 什么都不挂,
  *   记一行日志。挂着它时复用兼容键多一项 xs:1(开关翻转后该会话下一条消息换新进程)。
  * · modeChange({ sessionId, mode })(r151c):POST /chat/permission-mode 回 200 时通知(生效或会话没有进程);409 不调。
- *   同步通知,返回值忽略,抛错只记日志。
+ *   同步调用,抛错只记日志。r151e:返回 Promise 时(跨会话:新档位写进发送档案),接口等它兑现再回 200,最多等
+ *   MODE_CHANGE_PERSIST_WAIT_MS;超时照常回 200,它在后台继续;拒绝只记日志。其它返回值忽略。
  * · sessionBound(info)(r151c):新会话的回合拿到会话 id(收到 CLI 的 init)时通知,只认本槽当前那一回合、且它还没报结束;
  *   info 同 turnEnd 的公共部分(带 sessionId,无 outcome)。同步通知,返回值忽略,抛错只记日志;没挂接 = 不调。
  */
@@ -1129,14 +1130,18 @@ export function deliverRunEvent(pid, event) {
   return true;
 }
 
+// 返回钩子的返回值;是 Promise 时换成"拒绝只记日志、兑现为 undefined"的那一个(调用方可以等它也可以不管,都不会有未处理的拒绝)。
 function callRuntimeHook(name, arg) {
   const fn = runtimeHooks[name];
-  if (!fn) return;
+  if (!fn) return undefined;
   const warn = (e) => console.warn(`[r151b] 钩子 ${name} 出错:${e?.message || e}`);
   try {
     const r = fn(arg);
-    if (r && typeof r.then === 'function') r.then(null, warn);
-  } catch (e) { warn(e); }
+    return r && typeof r.then === 'function' ? r.then(null, warn) : r;
+  } catch (e) {
+    warn(e);
+    return undefined;
+  }
 }
 const runtimeTurnInfo = (slot, pid) => ({
   pid, runId: slot.runId || pid, sessionId: slot.sessionId || null, draftId: slot.draftId || null,
@@ -3041,6 +3046,8 @@ router.get('/model-window', (req, res) => {
   res.json({ window: info.window, source: info.origin });
 });
 
+// r151e(主会话裁定):切档接口回 200 之前等 modeChange 钩子(新档位写进跨会话发送档案)的最长时间。
+export const MODE_CHANGE_PERSIST_WAIT_MS = 2000;
 // r151d 判官 S2:正在进行的切档请求(会话 id 小写 → 个数),见 POST /chat/permission-mode。
 const permissionModeSwitching = new Map();
 /** 该会话有没有还没完成的切档请求(控制请求还没返回、新档位还没记下)。跨会话自动处理据此不起回合、退回排队。 */
@@ -3142,7 +3149,19 @@ router.post('/chat/permission-mode', async (req, res) => {
       error: failed[0]?.error || '权限档位切换被 CLI 拒绝',
     });
   }
-  callRuntimeHook('modeChange', { sessionId, mode }); // r151c:切档生效(或会话没有进程)时通知(没挂接 = 跳过)
+  // r151c:切档生效(或会话没有进程)时通知(没挂接 = 跳过)。钩子在返回之前已同步记下最新档位、踢过调度器 —— 从上面清掉
+  // "切档进行中"标记到这里没有 await(判官 S2)。
+  const persisted = callRuntimeHook('modeChange', { sessionId, mode });
+  // r151e(主会话裁定):等新档位写进发送档案再回 200,最多 MODE_CHANGE_PERSIST_WAIT_MS —— 否则回 200 后立即重启服务时,盘上还是
+  // 切档前(可能更宽)的档位。超时照常回 200,写入在后台继续(写失败照旧打标记);persisted 不会拒绝(见 callRuntimeHook)。
+  if (persisted && typeof persisted.then === 'function') {
+    let waitTimer = null;
+    await Promise.race([persisted, new Promise((resolve) => {
+      waitTimer = setTimeout(resolve, MODE_CHANGE_PERSIST_WAIT_MS);
+      waitTimer.unref?.();
+    })]);
+    clearTimeout(waitTimer);
+  }
   res.json({ ok: true, attempted, delivered, failed });
 });
 
