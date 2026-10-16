@@ -234,6 +234,48 @@ try {
   await waitFor(() => !onDiskFailed().includes(T5b.toLowerCase()), '5b:恢复定时器读到名单后补落盘,T5b 从盘上的名单里删掉', 10_000);
   eq([...onDiskFailed()].sort(), before5b.filter((k) => k !== T5b.toLowerCase()).sort(), '5b:盘上其它标记都还在');
 
+  // ── ④ 切档控制请求超时 ──
+  // 4a) 切档接口逐进程限时(超时时长经参数注入):超时的进程计入 failed、置关闭中并关掉输入;档位字段不改,晚到的结果也改不了;
+  //     CLI 明确拒绝的照旧只记 failed、进程照常可用
+  {
+    const mkInput = () => { let closed = false; return { close() { closed = true; }, isClosed: () => closed }; };
+    let lateAnswer = null;
+    const base = { sessionId: 'sid-r151e-4a', exitCode: null, guiMode: 'bypassPermissions', permissionMode: 'bypassPermissions', sdkMode: 'default' };
+    const hung = { ...base, input: mkInput(), query: { setPermissionMode: () => new Promise((r) => { lateAnswer = r; }) } };
+    const refused = { ...base, input: mkInput(), query: { setPermissionMode: async () => { throw new Error('CLI 拒绝了这次切换'); } } };
+    const fine = { ...base, input: mkInput(), query: { setPermissionMode: async () => {} } };
+    const t4 = Date.now();
+    const r4 = await chat.applyPermissionModeToSlots(new Map([[1, hung], [2, refused]]), 'sid-r151e-4a', 'plan', { timeoutMs: 200 });
+    ok(Date.now() - t4 < 1_500, `超时之后就返回(${Date.now() - t4}ms)`);
+    eq([r4.attempted, r4.delivered, r4.failed.length], [2, 0, 2], '超时与拒绝都计入 failed(接口据此回 409)');
+    ok(/超时/.test(r4.failed[0].error), `超时的原因写明(${r4.failed[0].error})`);
+    eq([hung.closing, hung.input.isClosed()], [true, true], '超时的进程:置关闭中、关掉输入(跑完手上的回合就退出,不再接新回合)');
+    eq([hung.guiMode, hung.permissionMode, hung.sdkMode], ['bypassPermissions', 'bypassPermissions', 'default'], '超时的进程档位字段不改');
+    eq([!!refused.closing, refused.input.isClosed()], [false, false], 'CLI 明确拒绝的进程照常可用');
+    lateAnswer();
+    await sleep(50);
+    eq([hung.guiMode, hung.permissionMode, hung.sdkMode], ['bypassPermissions', 'bypassPermissions', 'default'], '超时之后才到的结果不改档位字段');
+    const r4b = await chat.applyPermissionModeToSlots(new Map([[3, fine]]), 'sid-r151e-4a', 'plan', { timeoutMs: 200 });
+    eq([r4b.delivered, fine.guiMode, fine.sdkMode, !!fine.closing], [1, 'plan', 'plan', false], '按时回应的照常收下');
+    eq(chat.PERMISSION_MODE_SWITCH_TIMEOUT_MS, 10_000, '切档接口默认限时 10 秒');
+  }
+  // 4b) 复用常驻进程时热切档位 5 秒没回应:放弃复用、关旧开新,用户这条消息照常由新进程处理(不一直挂着)
+  {
+    const T4 = mk('目标 T4 复用热切不回应');
+    const pid4 = await userTurn(T4, 'default');
+    await waitFor(() => slotOf(T4) && !slotOf(T4).busy, 'T4 的回合结束、进程转空闲', 10_000);
+    ctl.setPermissionMode = () => new Promise(() => {}); // 收到热切档位请求就不回应
+    const t4b = Date.now();
+    let r4c;
+    try { r4c = await api('POST', '/chat', { sessionId: T4, prompt: 'r151e 复用热切', cwd: WORK, model: 'r151e-model', permissionMode: 'plan', ...LIVE }); }
+    finally { ctl.setPermissionMode = null; }
+    const took = Date.now() - t4b;
+    eq(r4c.status, 200, `这条消息照常 200(${JSON.stringify(r4c.body).slice(0, 120)})`);
+    ok(r4c.body.pid !== pid4, '换了新进程处理');
+    ok(took >= 4_800 && took < 12_000, `热切等满 5 秒放弃复用(实际 ${took}ms)`);
+    eq(calls.at(-1).options.permissionMode, 'plan', '新进程按新档位冷启');
+  }
+
   console.log(`PASS check-r151e-xs-recovery(${checks} 项)`);
 } finally {
   ctl.onInputEnd = null; ctl.setModel = null; ctl.setPermissionMode = null;

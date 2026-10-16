@@ -2291,13 +2291,14 @@ async function handleChatPost(req, res) {
       // "idle slot 无 pending stopTimer"这条隐性不变式。
       if (s.stopTimer) { clearTimeout(s.stopTimer); s.stopTimer = null; }
       s.turnEpoch = (s.turnEpoch | 0) + 1;
-      // SDK 层档位不一致(plan/auto/default 三种可能)→ 热切;失败放弃复用关旧开新。
+      // SDK 层档位不一致(plan/auto/default 三种可能)→ 热切;失败、或 REUSE_HOT_SWITCH_TIMEOUT_MS(与下面 setModel 同为 5 秒)内
+      // 没回应(r151e ④:之前没有超时,进程活着却不回应时用户发的这条消息一直挂着)→ 放弃复用关旧开新。
       if (sdkPermMode !== s.sdkMode) {
         try {
-          await s.query.setPermissionMode(sdkPermMode);
+          await withControlTimeout(s.query.setPermissionMode(sdkPermMode), REUSE_HOT_SWITCH_TIMEOUT_MS, '切档请求');
           s.sdkMode = sdkPermMode;
         } catch {
-          // 热切失败 → 放弃复用,关旧开新
+          // 热切失败 / 超时 → 放弃复用,关旧开新(超时后晚到的结果不改 sdkMode:赋值只在按时兑现时才跑)
           s.closing = true;
           try { s.input.close(); } catch {}
           break;
@@ -3048,6 +3049,23 @@ router.get('/model-window', (req, res) => {
 
 // r151e(主会话裁定):切档接口回 200 之前等 modeChange 钩子(新档位写进跨会话发送档案)的最长时间。
 export const MODE_CHANGE_PERSIST_WAIT_MS = 2000;
+// r151e ④:切档控制请求(setPermissionMode)的超时。进程活着却一直不回应时,切档接口不再一直挂着(这期间"切档进行中"标记不清,
+// 该会话的跨会话自动处理一直排着);复用块里的热切档位与同处 setModel 统一为 5 秒(用户发的消息不再一直挂着)。
+export const PERMISSION_MODE_SWITCH_TIMEOUT_MS = 10_000;
+const REUSE_HOT_SWITCH_TIMEOUT_MS = 5000;
+// 控制请求限时:ms 内没回应 → 抛带 controlTimeout 的错误。晚到的结果被丢掉(调用方只在按时兑现后才改字段);晚到的拒绝已被
+// race 接住,不会成为未处理的拒绝。
+async function withControlTimeout(promise, ms, what) {
+  let timer = null;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error(`${what}超时(${ms / 1000} 秒内没有回应)`), { controlTimeout: true })), ms);
+      timer.unref?.();
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 // r151d 判官 S2:正在进行的切档请求(会话 id 小写 → 个数),见 POST /chat/permission-mode。
 const permissionModeSwitching = new Map();
 /** 该会话有没有还没完成的切档请求(控制请求还没返回、新档位还没记下)。跨会话自动处理据此不起回合、退回排队。 */
@@ -3060,7 +3078,8 @@ export function permissionModeSwitchPending(sessionId) {
 // 响应里成功与被拒长得一模一样 → 界面停在一个根本没生效的档上。被拒的 slot 一个字段都不改:
 // canUseTool 继续按【旧档】裁决,绝不按没生效的新档放行。
 // 纯逻辑,tests/unit/check-mode-switch-failure.mjs 真 import(mock slot.query,不打真实 CLI)。
-export async function applyPermissionModeToSlots(procs, sessionId, mode) {
+// r151e ④:每个进程的控制请求限时 timeoutMs(默认 PERMISSION_MODE_SWITCH_TIMEOUT_MS;参数只为单测注入)。
+export async function applyPermissionModeToSlots(procs, sessionId, mode, { timeoutMs = PERMISSION_MODE_SWITCH_TIMEOUT_MS } = {}) {
   const sdkMode = mode === 'plan' ? 'plan' : mode === 'auto' ? 'auto' : 'default';
   let attempted = 0;
   let delivered = 0;
@@ -3079,13 +3098,20 @@ export async function applyPermissionModeToSlots(procs, sessionId, mode) {
       continue;
     }
     try {
-      await slot.query.setPermissionMode(sdkMode);
+      await withControlTimeout(slot.query.setPermissionMode(sdkMode), timeoutMs, '切档请求');
       slot.guiMode = mode;
       slot.permissionMode = mode;
       slot.sdkMode = sdkMode; // #26:常驻复用的 plan 热切判据与此保持同步
       delivered++;
     } catch (e) {
       failed.push({ sessionId: slot.sessionId, error: e?.message || String(e) });
+      // r151e ④:超时 = 这个进程没收下。照复用块热切失败的写法置关闭中、关掉输入:跑完手上的回合就退出,不再接新回合(复用块与
+      // 引导都跳过关闭中的槽,下一条消息换新进程)。档位字段一个不改,晚到的结果也改不了(上面的赋值只在按时兑现时才跑),
+      // 不会与界面回滚后的档位不一致。CLI 明确拒绝(不是超时)的照旧只记 failed,进程照常可用。
+      if (e?.controlTimeout) {
+        slot.closing = true;
+        try { slot.input?.close(); } catch {}
+      }
     }
   }
   return { attempted, delivered, failed };
