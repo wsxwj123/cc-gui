@@ -9,6 +9,7 @@
 //   ③ 行为清单 4、5:档案写盘失败的会话 id 随偏好写入落盘(xsProfileWriteFailed)、服务启动时读回,档案成功写入一次后清除;
 //      偏好文件也写不进 / 在却读不出时只记日志、内存标记照旧,不整份覆盖偏好文件;新偏好键的读取规则。
 //      判官 R1:启动时偏好文件读不出、之后能读 → 被标记的会话仍按没有档案判;别的会话写失败落盘不删盘上原有的标记。
+//      判官 S3:名单落盘失败后,之后再有会话被标记(含同一会话再次写失败)时重试落盘。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身(onInputEnd 模拟旧进程推迟退出、setModel 模拟热切让出事件循环);临时 HOME;端口 6930–6979。
 // node tests/unit/check-r151d-xs-hardening.mjs
 import assert from 'node:assert/strict';
@@ -320,6 +321,25 @@ try {
   eq([await hasProfile(TY), await hasProfile(TZ)], [false, false], '偏好文件能读之后:被标记的 TY 仍按没有档案判(读回了盘上的名单),TZ 同样');
   eq((await send(sBypass, [TY], 'R151D-UNIT 启动时名单读不出之后')).results.map((x) => x.delivery), ['card'], '「放任」发送方发给 TY → 卡片');
   eq((await lastTo(TY)).heldReason, 'no-profile', '落 no-profile(不按盘上那份较早的档案判)');
+  // 3h) 判官 S3:名单落盘失败后会重试 —— 同一会话再次写失败(内存里已有它的标记)时,偏好文件已恢复可写就补写进去
+  const TQ = mk('目标 TQ 落盘失败后重试');
+  await offTurn(TQ, 'bypassPermissions');
+  await waitFor(async () => (await store.readXsProfiles()).sessions[TQ], 'TQ 的档案');
+  ok(await hasProfile(TQ), '前置:TQ 有可用档案');
+  const profQ = (await store.readXsProfiles()).sessions[TQ];
+  const asideQ = join(TMP, 'profiles-aside-q.json');
+  renameSync(PROFILES, asideQ); mkdirSync(PROFILES); writeFileSync(join(PROFILES, 'keep'), 'x');
+  chmodSync(GUI_DIR, 0o500);
+  try {
+    await offTurn(TQ, 'bypassPermissions', { model: 'r151d-model-q2' });
+    await waitFor(() => !xs.profileCountsFor(TQ, profQ, prefsMod.readXsPrefsSync().enabledAt), 'TQ 写失败、被标记(按没有档案判)');
+    await sleep(300);
+    ok(!(failedIdsOnDisk() || []).includes(TQ.toLowerCase()), '前置:偏好文件写不进,TQ 的标记没落盘');
+  } finally { chmodSync(GUI_DIR, 0o700); }
+  await offTurn(TQ, 'bypassPermissions', { model: 'r151d-model-q3' }); // 偏好文件已可写,发送档案仍写不进:同一会话再次写失败
+  await waitFor(() => (failedIdsOnDisk() || []).includes(TQ.toLowerCase()), '上次落盘失败:同一会话再次写失败时重试、标记落进偏好文件', 10_000);
+  ok(failedIdsOnDisk().includes(TY.toLowerCase()), '重试写入同样保留盘上原有的标记');
+  renameSync(PROFILES, join(TMP, 'profiles-block-q')); renameSync(asideQ, PROFILES);
 
   console.log(`PASS check-r151d-xs-hardening(${checks} 项)`);
 } finally {

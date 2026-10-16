@@ -618,9 +618,11 @@ const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合
 // 判官 R1:这个键读不出时的默认值([] = 没有标记)是放宽方向,不套已有键"读不出按默认"的规则。偏好文件在、却读不出(Windows 上
 // 被杀毒 / 备份软件占着)时记为"名单还没读到",每次判定前(profileCountsFor)再读,读到之前所有会话一律按没有档案判;落盘时先并进
 // 盘上已有的名单(减去本进程清掉的)再写,本进程没读到的标记不会被它的写入删掉。
+// 判官 S3:某次落盘失败后,之后每次有会话被标记(含同一会话再次写失败)都重试落盘,直到成功一次。
 const profileWriteFailed = new Set(); // 会话 id(小写);按加入先后排
 const profileWriteFailedCleared = new Set(); // 本进程清掉、还没确认已从偏好文件里删掉的(读到 / 落盘时从盘上的名单里减去)
 let profileWriteFailedLoaded = false; // 偏好文件里的名单读到过没有(文件不存在也算读到)
+let profileFailPersistFailed = false; // 上一次落盘失败了(S3:之后每次标记都重试)
 function profileWriteFailedReady() {
   if (profileWriteFailedLoaded) return true;
   const { ids, readFailed } = readXsProfileWriteFailedSync();
@@ -637,7 +639,7 @@ function markProfileWriteFailed(sessionId) {
   profileWriteFailedCleared.delete(k);
   const had = profileWriteFailed.delete(k);
   profileWriteFailed.add(k); // 重新排到最后(落盘超上限时留最近加入的)
-  if (!had) persistProfileWriteFailed();
+  if (!had || profileFailPersistFailed) persistProfileWriteFailed();
 }
 function clearProfileWriteFailed(sessionId) {
   const k = String(sessionId).toLowerCase();
@@ -661,10 +663,12 @@ function persistProfileWriteFailed() {
     if (ids.length) p.xsProfileWriteFailed = ids;
     else delete p.xsProfileWriteFailed;
   }).then(() => {
+    profileFailPersistFailed = false;
     for (const k of applied) if (!profileWriteFailed.has(k)) profileWriteFailedCleared.delete(k); // 已从偏好文件里删掉
   }, (e) => {
     if (!ran) profileFailPersistQueued = false; // 读盘就失败了(没走到 mutator)
-    console.warn(`[xsession] 档案写失败标记未能写进偏好文件(本进程内照旧按没有档案判):${e?.code || e?.message || e}`);
+    profileFailPersistFailed = true;
+    console.warn(`[xsession] 档案写失败标记未能写进偏好文件(本进程内照旧按没有档案判,下次有会话被标记时重试):${e?.code || e?.message || e}`);
   });
 }
 // 最新档位(审计 S1;接口"审计之后的补充约定"第 3 条:存活进程 > 最近一次切档 > 发送档案):切档钩子与回合开始钩子里同步记
