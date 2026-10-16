@@ -12,7 +12,7 @@ import { constants as fsConstants, readFileSync, realpathSync, statSync } from '
 import { dirname, join, resolve, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
-import { XS_PROFILE_WRITE_FAILED_MAX, readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, readXsProfileWriteFailedSync, updatePrefs } from '../routes/prefs.js';
+import { XS_PROFILE_WRITE_FAILED_MAX, normalizeXsProfileWriteFailed, readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, readXsProfileWriteFailedSync, updatePrefs, updatePrefsStrict } from '../routes/prefs.js';
 import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
@@ -614,28 +614,58 @@ const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合
 // 该会话下一次档案成功落盘(或内容没变、无需落盘)后清掉。
 // r151d:随偏好写入落盘(偏好键 xsProfileWriteFailed,只记会话 id,最多 XS_PROFILE_WRITE_FAILED_MAX 个,超出时只写最近加入的),
 // 服务启动时读回(installXsessionRuntime)—— 否则重启后又按盘上那份可能更宽的旧档案判。偏好文件也写不进(或在、却读不出:
-// 不能拿空对象整份覆盖它)时记一行日志,内存标记照旧。
+// 不能拿空对象整份覆盖它,见 updatePrefsStrict)时记一行日志,内存标记照旧。
+// 判官 R1:这个键读不出时的默认值([] = 没有标记)是放宽方向,不套已有键"读不出按默认"的规则。偏好文件在、却读不出(Windows 上
+// 被杀毒 / 备份软件占着)时记为"名单还没读到",每次判定前(profileCountsFor)再读,读到之前所有会话一律按没有档案判;落盘时先并进
+// 盘上已有的名单(减去本进程清掉的)再写,本进程没读到的标记不会被它的写入删掉。
 const profileWriteFailed = new Set(); // 会话 id(小写);按加入先后排
+const profileWriteFailedCleared = new Set(); // 本进程清掉、还没确认已从偏好文件里删掉的(读到 / 落盘时从盘上的名单里减去)
+let profileWriteFailedLoaded = false; // 偏好文件里的名单读到过没有(文件不存在也算读到)
+function profileWriteFailedReady() {
+  if (profileWriteFailedLoaded) return true;
+  const { ids, readFailed } = readXsProfileWriteFailedSync();
+  if (readFailed) return false;
+  const mine = [...profileWriteFailed];
+  profileWriteFailed.clear();
+  for (const k of ids) if (!profileWriteFailedCleared.has(k)) profileWriteFailed.add(k);
+  for (const k of mine) { profileWriteFailed.delete(k); profileWriteFailed.add(k); } // 本进程标记的排在后面(更近)
+  profileWriteFailedLoaded = true;
+  return true;
+}
 function markProfileWriteFailed(sessionId) {
   const k = String(sessionId).toLowerCase();
+  profileWriteFailedCleared.delete(k);
   const had = profileWriteFailed.delete(k);
   profileWriteFailed.add(k); // 重新排到最后(落盘超上限时留最近加入的)
   if (!had) persistProfileWriteFailed();
 }
 function clearProfileWriteFailed(sessionId) {
-  if (profileWriteFailed.delete(String(sessionId).toLowerCase())) persistProfileWriteFailed();
+  const k = String(sessionId).toLowerCase();
+  const had = profileWriteFailed.delete(k);
+  if (!had && profileWriteFailedLoaded) return;
+  profileWriteFailedCleared.add(k); // 名单还没读到时也记下:读到时不把盘上的它当作标记
+  if (had) persistProfileWriteFailed();
 }
 let profileFailPersistQueued = false;
 function persistProfileWriteFailed() {
   if (profileFailPersistQueued) return; // 已排着一次:那次写入时取的是当时内存里的最新集合
   profileFailPersistQueued = true;
-  updatePrefs((p) => {
+  let ran = false;
+  let applied = [];
+  updatePrefsStrict((p) => {
+    ran = true;
     profileFailPersistQueued = false;
-    if (readXsPrefsDetailedSync().readFailed) throw Object.assign(new Error('偏好文件读不出'), { code: 'PREFS_UNREADABLE' });
-    const ids = [...profileWriteFailed].slice(-XS_PROFILE_WRITE_FAILED_MAX);
+    applied = [...profileWriteFailedCleared];
+    const onDisk = normalizeXsProfileWriteFailed(p).filter((k) => !profileWriteFailedCleared.has(k) && !profileWriteFailed.has(k));
+    const ids = [...onDisk, ...profileWriteFailed].slice(-XS_PROFILE_WRITE_FAILED_MAX);
     if (ids.length) p.xsProfileWriteFailed = ids;
     else delete p.xsProfileWriteFailed;
-  }).catch((e) => console.warn(`[xsession] 档案写失败标记未能写进偏好文件(本进程内照旧按没有档案判,重启后不保留):${e?.code || e?.message || e}`));
+  }).then(() => {
+    for (const k of applied) if (!profileWriteFailed.has(k)) profileWriteFailedCleared.delete(k); // 已从偏好文件里删掉
+  }, (e) => {
+    if (!ran) profileFailPersistQueued = false; // 读盘就失败了(没走到 mutator)
+    console.warn(`[xsession] 档案写失败标记未能写进偏好文件(本进程内照旧按没有档案判):${e?.code || e?.message || e}`);
+  });
 }
 // 最新档位(审计 S1;接口"审计之后的补充约定"第 3 条:存活进程 > 最近一次切档 > 发送档案):切档钩子与回合开始钩子里同步记
 // (在任何读盘、写盘之前),判定时排在存活槽之后、档案之前。档案经存储队列异步落盘,而 evaluateSession / sendAiMessages 先读档案
@@ -723,6 +753,7 @@ export function profileIsCurrent(profile, enabledAt) {
 
 /** 这条档案算不算数(去向表⑤与会话列表 hasProfile 同口径):本次启用之后记录的,且该会话此后没有档案写失败(见 profileWriteFailed)。 */
 export function profileCountsFor(sessionId, profile, enabledAt) {
+  if (!profileWriteFailedReady()) return false; // 偏好文件里的写失败名单还没读到(判官 R1):一律按没有档案判
   return !profileWriteFailed.has(String(sessionId).toLowerCase()) && profileIsCurrent(profile, enabledAt);
 }
 
@@ -1571,7 +1602,9 @@ export function syncXsRuntimeHooks(enabled) {
 
 /** 启动时调用一次(server/index.js,在开始接请求之前):挂 chatEntry,按当前开关挂回合钩子。 */
 export function installXsessionRuntime() {
-  for (const id of readXsProfileWriteFailedSync()) profileWriteFailed.add(id); // r151d:写失败标记跨重启保留
+  // r151d:写失败标记跨重启保留。偏好文件在、却读不出 → 记为"名单还没读到",判定前再读,读到之前一律按没有档案判(判官 R1)
+  profileWriteFailedLoaded = false;
+  if (!profileWriteFailedReady()) console.warn('[xsession] 启动时偏好文件读不出,档案写失败名单还没读到:读到之前所有会话按没有档案判');
   if (!unhookEntry) unhookEntry = registerSessionRuntimeHooks({ chatEntry: xsChatEntry });
   syncXsRuntimeHooks(readXsEnabledSync());
   backfillXsEnabledAt();

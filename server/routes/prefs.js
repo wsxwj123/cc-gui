@@ -63,7 +63,7 @@ export function readXsPrefsSync() {
 /**
  * r151d:发送档案写盘失败的会话(xsProfileWriteFailed,内部键;只记会话 id,不记档案内容)。读取规则同上(读到非法值不报错、
  * 不改写文件):不是数组 → [];只留会话 id 形状的字符串,转小写、去重(重复的按最后一次出现排);最多留最后
- * XS_PROFILE_WRITE_FAILED_MAX 个。写入由 services/xsession.js 经 updatePrefs 做(超上限时只写最近加入的)。
+ * XS_PROFILE_WRITE_FAILED_MAX 个。写入由 services/xsession.js 经 updatePrefsStrict 做(并进盘上已有的名单;超上限时只写最近加入的)。
  */
 export const XS_PROFILE_WRITE_FAILED_MAX = 256;
 export function normalizeXsProfileWriteFailed(prefs) {
@@ -78,10 +78,17 @@ export function normalizeXsProfileWriteFailed(prefs) {
   }
   return [...ids].slice(-XS_PROFILE_WRITE_FAILED_MAX);
 }
+/**
+ * r151d 判官 R1:{ ids, readFailed }。这个键的默认值 [](没有标记)是放宽方向 —— 读不出时若当成 [],被标记的会话会按盘上那份
+ * 较旧、可能更宽的档案判 —— 所以不套已有键"读不出按默认"的规则:文件不存在 → { ids: [], readFailed: false };文件在、却读不出
+ * 或解析不了(Windows 上被杀毒 / 备份软件占着的 EBUSY / EPERM 等)→ { ids: [], readFailed: true },调用方在读到之前一律按没有档案判。
+ * 读到的内容按上面的规则规范化(非法值不报错、不改写文件)。
+ */
 export function readXsProfileWriteFailedSync() {
   let prefs = null;
-  try { prefs = JSON.parse(readFileSync(PREFS_PATH, 'utf-8')); } catch { /* 不存在 / 读不出 / 损坏 → [] */ }
-  return normalizeXsProfileWriteFailed(prefs);
+  let readFailed = false;
+  try { prefs = JSON.parse(readFileSync(PREFS_PATH, 'utf-8')); } catch (e) { readFailed = e?.code !== 'ENOENT'; }
+  return { ids: normalizeXsProfileWriteFailed(prefs), readFailed };
 }
 /**
  * 同 readXsPrefsSync,另给 readFailed:文件在、却读不出或解析不了时为 true(文件不存在不算,此时总开关就是关的),其余字段按默认。
@@ -120,6 +127,21 @@ function withPrefsQueue(task) {
 export async function updatePrefs(mutator) {
   return withPrefsQueue(async () => {
     const p = await loadPrefs();
+    await mutator(p);
+    await savePrefs(p);
+  });
+}
+// r151d 判官 R1:同 updatePrefs(同一条写队列、原子写),但偏好文件在、却读不出或解析不了(或不是对象)时整次放弃、把错误抛回
+// 调用方,不拿空对象整份覆盖它 —— updatePrefs 的 loadPrefs 读失败回 {},写回会把其它键连同 mutator 要合并的盘上内容一起抹掉。
+// 文件不存在按 {} 写。用于 mutator 要以盘上已有内容为准做合并的写入(档案写失败名单)。
+export async function updatePrefsStrict(mutator) {
+  return withPrefsQueue(async () => {
+    let p;
+    try { p = JSON.parse(await readFile(PREFS_PATH, 'utf-8')); } catch (e) {
+      if (e?.code !== 'ENOENT') throw e;
+      p = {};
+    }
+    if (!p || typeof p !== 'object' || Array.isArray(p)) throw Object.assign(new Error('偏好文件的内容不是对象'), { code: 'PREFS_UNREADABLE' });
     await mutator(p);
     await savePrefs(p);
   });

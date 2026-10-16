@@ -8,6 +8,7 @@
 //      值完全相同的定时重同步只刷新有效期,不改变生效值。
 //   ③ 行为清单 4、5:档案写盘失败的会话 id 随偏好写入落盘(xsProfileWriteFailed)、服务启动时读回,档案成功写入一次后清除;
 //      偏好文件也写不进 / 在却读不出时只记日志、内存标记照旧,不整份覆盖偏好文件;新偏好键的读取规则。
+//      判官 R1:启动时偏好文件读不出、之后能读 → 被标记的会话仍按没有档案判;别的会话写失败落盘不删盘上原有的标记。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身(onInputEnd 模拟旧进程推迟退出、setModel 模拟热切让出事件循环);临时 HOME;端口 6930–6979。
 // node tests/unit/check-r151d-xs-hardening.mjs
 import assert from 'node:assert/strict';
@@ -287,10 +288,38 @@ try {
   const goodNow = readFileSync(PREFS, 'utf8');
   writeFileSync(PREFS, JSON.stringify({ ...JSON.parse(goodNow), xsProfileWriteFailed: 'oops' }));
   const oopsText = readFileSync(PREFS, 'utf8');
-  eq([prefsMod.readXsProfileWriteFailedSync(), readFileSync(PREFS, 'utf8')], [[], oopsText], '读到非法值:按 [] 处理、不报错、不改写文件');
+  eq([prefsMod.readXsProfileWriteFailedSync(), readFileSync(PREFS, 'utf8')], [{ ids: [], readFailed: false }, oopsText], '读到非法值:按 [] 处理、不报错、不改写文件');
+  // 判官 R1:读不出时的 [] 是放宽方向,读取要区分"文件不存在"(没有标记)与其它失败(readFailed,调用方读到之前一律按没有档案判)
   writeFileSync(PREFS, '{broken');
-  eq(prefsMod.readXsProfileWriteFailedSync(), [], '偏好文件损坏 → []');
+  eq(prefsMod.readXsProfileWriteFailedSync(), { ids: [], readFailed: true }, '偏好文件损坏 → readFailed(不当作没有标记)');
   writeFileSync(PREFS, goodNow);
+  chmodSync(PREFS, 0o000);
+  try { eq(prefsMod.readXsProfileWriteFailedSync(), { ids: [], readFailed: true }, '偏好文件在、却读不出 → readFailed'); } finally { chmodSync(PREFS, 0o644); }
+  renameSync(PREFS, `${PREFS}.aside`);
+  try { eq(prefsMod.readXsProfileWriteFailedSync(), { ids: [], readFailed: false }, '偏好文件不存在 → 没有标记(不算读失败)'); } finally { renameSync(`${PREFS}.aside`, PREFS); }
+
+  // 3g) 判官 R1:启动这一刻偏好文件在、却读不出(Windows 上被杀毒 / 备份软件占着),之后又能读了 → 读到写失败名单之前一律按没有档案判,
+  //     读到之后被标记的会话仍按没有档案判;别的会话写失败落盘时先并进盘上已有的名单,不把本进程没读到的标记删掉
+  const TY = mk('目标 TY 启动时名单读不出');
+  const TZ = mk('目标 TZ 之后写失败');
+  await offTurn(TY, 'bypassPermissions');
+  await offTurn(TZ, 'bypassPermissions');
+  await waitFor(async () => { const d = await store.readXsProfiles(); return d.sessions[TY] && d.sessions[TZ]; }, 'TY、TZ 的档案');
+  await setInbound([TY, TZ]);
+  eq([await hasProfile(TY), await hasProfile(TZ)], [true, true], '前置:TY、TZ 都有可用档案');
+  writeFileSync(PREFS, JSON.stringify({ ...prefsJson(), xsProfileWriteFailed: [TY.toLowerCase()] })); // 上次运行里标记过 TY(本进程内存里没有)
+  chmodSync(PREFS, 0o000);
+  try { xs.installXsessionRuntime(); } finally { chmodSync(PREFS, 0o644); } // 模拟重启:启动这一刻偏好文件读不出
+  xs.syncXsRuntimeHooks(true); // 启动时总开关也读成了关、回合钩子被撤;按开着重新挂上(同 PUT /api/xsession/config)
+  const asideY = join(TMP, 'profiles-aside-y.json');
+  renameSync(PROFILES, asideY); mkdirSync(PROFILES); writeFileSync(join(PROFILES, 'keep'), 'x'); // 只让发送档案写不进
+  await offTurn(TZ, 'bypassPermissions', { model: 'r151d-model-z2' });
+  await waitFor(() => (failedIdsOnDisk() || []).includes(TZ.toLowerCase()), 'TZ 的写失败标记落进偏好文件');
+  ok(failedIdsOnDisk().includes(TY.toLowerCase()), '别的会话写失败落盘之后:盘上原有的 TY 标记还在(先并进盘上已有的名单再写)');
+  renameSync(PROFILES, join(TMP, 'profiles-block-y')); renameSync(asideY, PROFILES); // 放回写失败之前那份档案(TY 的档案仍在、仍算新)
+  eq([await hasProfile(TY), await hasProfile(TZ)], [false, false], '偏好文件能读之后:被标记的 TY 仍按没有档案判(读回了盘上的名单),TZ 同样');
+  eq((await send(sBypass, [TY], 'R151D-UNIT 启动时名单读不出之后')).results.map((x) => x.delivery), ['card'], '「放任」发送方发给 TY → 卡片');
+  eq((await lastTo(TY)).heldReason, 'no-profile', '落 no-profile(不按盘上那份较早的档案判)');
 
   console.log(`PASS check-r151d-xs-hardening(${checks} 项)`);
 } finally {
