@@ -12,7 +12,7 @@ import { constants as fsConstants, readFileSync, statSync } from 'fs';
 import { dirname, join, resolve, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
-import { readXsEnabledSync, readXsPrefsSync, updatePrefs } from '../routes/prefs.js';
+import { readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, updatePrefs } from '../routes/prefs.js';
 import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
@@ -612,6 +612,27 @@ const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合
 // 重放都不偏安全。整条按"没有档案"判(去向表⑤ no-profile,落卡片;会话列表 hasProfile 同口径为 false,见 profileCountsFor),
 // 该会话下一次档案成功落盘(或内容没变、无需落盘)后清掉。只在内存:服务重启后丢失,之后按盘上的档案判。
 const profileWriteFailed = new Set(); // 会话 id(小写)
+// 最新档位(审计 S1;接口"审计之后的补充约定"第 3 条:存活进程 > 最近一次切档 > 发送档案):切档钩子与回合开始钩子里同步记
+// (在任何读盘、写盘之前),判定时排在存活槽之后、档案之前。档案经存储队列异步落盘,而 evaluateSession / sendAiMessages 先读档案
+// 快照、后进收件箱事务,两步之间用户切档并落盘的话快照里还是旧档位;判定与重放都读这张表,用的就是最新的选择。只记合法的六档、
+// 只在内存;删会话时清掉;服务重启后丢失,之后按盘上的档案判。拿到会话 id、回合结束兜底两处用的是回合开始时的参数,
+// 表里已有就不覆盖(回合中途切过档时不把旧档位写回)。
+const LATEST_MODES_MAX = 1024;
+const latestGuiMode = new Map(); // 会话 id(小写)→ 界面档位
+function noteLatestMode(sessionId, mode, { ifAbsent = false } = {}) {
+  if (!isIdString(sessionId) || !XS_PROFILE_MODES.includes(mode)) return;
+  const k = sessionId.toLowerCase();
+  if (ifAbsent && latestGuiMode.has(k)) return;
+  latestGuiMode.delete(k); // 重新排到最后:满了先淘汰最久没动的
+  if (latestGuiMode.size >= LATEST_MODES_MAX) latestGuiMode.delete(latestGuiMode.keys().next().value);
+  latestGuiMode.set(k, mode);
+}
+// 偏好文件在、却读不出(审计 S1):不能当"总开关关着"静默跳过 —— 那样既不写盘也不留标记,判定仍按盘上的旧档案。
+// 按档案写失败处理(该会话按没有档案判,见 profileWriteFailed),直到下一次记录成功。
+function profilePrefsUnreadable(sessionId, what) {
+  profileWriteFailed.add(sessionId.toLowerCase());
+  console.warn(`[xsession] 会话 ${sessionId} 的${what}没有记进档案:偏好文件读不出(按没有档案判,直到下次记录成功)`);
+}
 
 // ~/.claude.json 的两项读数:登录账号(provider 指纹用)与哪些作用域配了同名 MCP 服务(免确认守卫用,见 shadowingXsServerScopes)。
 // 文件可能很大且 CLI 常写:按修改时间 + 大小缓存解析结果,只留这两项;另设最短间隔(XS_CLAUDE_JSON_MIN_MS)。
@@ -675,7 +696,8 @@ export function profileCountsFor(sessionId, profile, enabledAt) {
 
 async function recordProfile(sessionId, params) {
   if (!isIdString(sessionId) || !params || typeof params !== 'object') return;
-  const prefs = readXsPrefsSync();
+  const prefs = readXsPrefsDetailedSync();
+  if (prefs.readFailed) return profilePrefsUnreadable(sessionId, '发送档案');
   if (!prefs.enabled) return; // 档案只在开着时写(关开关时回合钩子会为在途回合多留一会儿)
   const body = params.body && typeof params.body === 'object' ? params.body : {};
   const replay = Object.fromEntries(XS_PROFILE_REPLAY_KEYS.map((k) => [k, body[k] === undefined ? null : body[k]]));
@@ -702,7 +724,10 @@ function noteTurnStartProfile(info) {
   if (!params || typeof params !== 'object' || !info.runId) return;
   if (turnRecords.size >= TURN_RECORDS_MAX) turnRecords.delete(turnRecords.keys().next().value); // 兜底:没等到结束的回合不无限累积
   turnRecords.set(`${info.runId}:${info.turnEpoch | 0}`, { sessionId: info.sessionId || null, params });
-  if (info.sessionId) recordProfile(info.sessionId, params);
+  if (info.sessionId) {
+    noteLatestMode(info.sessionId, params.guiMode);
+    recordProfile(info.sessionId, params);
+  }
 }
 
 // chat.js 的 sessionBound 通知:新会话的回合拿到会话 id。回合记录与连锁记录补上会话 id,立即记档案(不等回合结束)。
@@ -712,6 +737,7 @@ function onSessionBound(info) {
   const rec = turnRecords.get(key);
   if (rec && !rec.sessionId) {
     rec.sessionId = info.sessionId;
+    noteLatestMode(info.sessionId, rec.params.guiMode, { ifAbsent: true });
     recordProfile(info.sessionId, rec.params);
   }
   const chain = turnChains.get(key);
@@ -723,12 +749,19 @@ function noteTurnEndProfile(info) {
   const rec = turnRecords.get(key);
   if (!rec) return;
   turnRecords.delete(key);
-  if (!rec.sessionId && info.sessionId) recordProfile(info.sessionId, rec.params); // 新会话首回合没收到 sessionBound 时兜底
+  if (!rec.sessionId && info.sessionId) { // 新会话首回合没收到 sessionBound 时兜底
+    noteLatestMode(info.sessionId, rec.params.guiMode, { ifAbsent: true });
+    recordProfile(info.sessionId, rec.params);
+  }
 }
 
-// modeChange 钩子:切档生效(或会话没有进程)时同步该会话档案里的两处档位;没有档案不新建。
+// modeChange 钩子:切档生效(或会话没有进程)时先同步记最新档位,再同步该会话档案里的两处档位;没有档案不新建。
 async function xsModeChange({ sessionId, mode } = {}) {
-  if (!isIdString(sessionId) || !XS_PROFILE_MODES.includes(mode) || !readXsEnabledSync()) return;
+  if (!isIdString(sessionId) || !XS_PROFILE_MODES.includes(mode)) return;
+  noteLatestMode(sessionId, mode);
+  const prefs = readXsPrefsDetailedSync();
+  if (prefs.readFailed) return profilePrefsUnreadable(sessionId, '切档');
+  if (!prefs.enabled) return;
   try {
     await mutateXsProfiles((d) => {
       for (const [k, p] of Object.entries(d.sessions)) {
@@ -752,6 +785,7 @@ export async function forgetXsSession(sessionId) {
   scheduler.forget(sessionId);
   queuedHint.delete(sessionId.toLowerCase());
   profileWriteFailed.delete(sessionId.toLowerCase());
+  latestGuiMode.delete(sessionId.toLowerCase());
   return dropXsProfile(sessionId);
 }
 
@@ -827,7 +861,8 @@ function liveGuiMode(sessionId) {
 function fingerprintOrNull(salt) {
   try { return currentProviderFp(salt); } catch { return null; }
 }
-// 去向表里与目标有关的几项。判定与重放用同一读数的档位(targetMode):存活槽的档位优先;没有存活槽时用档案的。
+// 去向表里与目标有关的几项。判定与重放用同一读数的档位(targetMode):存活槽的档位 > 最近一次切档 / 回合开始记的
+// (latestGuiMode)> 档案的(接口"审计之后的补充约定"第 3 条)。
 // 档案写失败过的会话整条按没有档案判(hasProfile 为 false → no-profile,见 profileCountsFor)。
 function targetFacts(sessionId, prefs, profiles, fp) {
   const inbound = Object.keys(prefs.inbound).some((k) => sameId(k, sessionId)) ? 'auto' : 'card';
@@ -837,7 +872,7 @@ function targetFacts(sessionId, prefs, profiles, fp) {
     inbound,
     hasProfile: profileCountsFor(sessionId, profile, prefs.enabledAt),
     profileFresh: !!profile && !!fp && profile.judge.providerFp === fp,
-    targetMode: liveGuiMode(sessionId) ?? profile?.judge.mode ?? null,
+    targetMode: liveGuiMode(sessionId) ?? latestGuiMode.get(sessionId.toLowerCase()) ?? profile?.judge.mode ?? null,
     replay: profile?.replay ?? null,
   };
 }

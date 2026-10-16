@@ -57,9 +57,18 @@ export function normalizeXsPrefs(prefs) {
   return { enabled: p.xsEnabled === true, enabledAt: at, inbound, autoPaused: p.xsAutoPaused === true };
 }
 export function readXsPrefsSync() {
+  const { readFailed: _readFailed, ...prefs } = readXsPrefsDetailedSync();
+  return prefs;
+}
+/**
+ * 同 readXsPrefsSync,另给 readFailed:文件在、却读不出或解析不了时为 true(文件不存在不算,此时总开关就是关的),其余字段按默认。
+ * r151c 审计 S1:发送档案的两个钩子据此区分"总开关真的关着"与"偏好读失败"(后者不能静默跳过)。
+ */
+export function readXsPrefsDetailedSync() {
   let prefs = null;
-  try { prefs = JSON.parse(readFileSync(PREFS_PATH, 'utf-8')); } catch { /* 不存在 / 损坏 → 全按默认 */ }
-  return normalizeXsPrefs(prefs);
+  let readFailed = false;
+  try { prefs = JSON.parse(readFileSync(PREFS_PATH, 'utf-8')); } catch (e) { readFailed = e?.code !== 'ENOENT'; }
+  return { ...normalizeXsPrefs(prefs), readFailed };
 }
 // 原子写:先写临时文件再 rename(rename 同目录原子)。此前 writeFile 直写,进程崩溃/
 // 断电写一半 → JSON 损坏 → loadPrefs 回落 {} → 下一次任何 PUT 把整份 prefs 静默重置。
