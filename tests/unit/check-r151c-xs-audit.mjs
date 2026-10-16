@@ -12,6 +12,7 @@
 //   ⑤ 复审建议 1:同步请求带界面实例标识 uiId,按界面分开记、取最窄(全盘读取全开才开、附加目录交集、花费上限取小、其余取最近
 //      一次同步的);10 分钟没再同步的界面不算;没有有效界面时按最窄、其余退回档案(第 2 条)。
 //   ⑥ 复审建议 2:请求体不合规(400)时删掉该 uiId 之前的记录、按其余有效界面重算;uiId 本身不合规时不删任何记录(第 3 条)。
+//   ⑦ 复审建议 4:存活进程按更宽的旧设置起、设置变窄后自动处理不复用它;总开关关着时同步接口 409 XS_DISABLED。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身;临时 HOME;端口 6800–6899。
 // node tests/unit/check-r151c-xs-audit.mjs
 import assert from 'node:assert/strict';
@@ -337,6 +338,30 @@ try {
   eq((await put({ uiId: UB, ...uiW, maxBudgetUsd: 0 })).status, 400, '界面 B 的值不合规 → 400');
   const c6c = await autoCold(TK, 'R151C 两个界面都被拒之后');
   eq(seen(c6c), [false, false, false, false], `都被拒、没有其它有效界面:全盘读取按关、附加目录按空(${JSON.stringify(dirsOf(c6c))})`);
+
+  // ── ⑦ 复审建议 4:补两条断言 ──
+  // 7a) 存活进程是按更宽的旧设置起的(全盘读取开);界面现在关掉了全盘读取 → 自动处理不复用它,按此刻的设置新起
+  const liveWide = { globalRead: true, addDirs: [], maxBudgetUsd: null, keepAlive: true, promptSuggestions: false, genui: true };
+  eq((await put({ uiId: U0, ...liveWide })).status, 200, '前置:界面同步与下面用户回合相同的设置(全盘读取开)');
+  const TJ = mk('目标 TJ 设置变窄');
+  const nJ0 = calls.length;
+  await profiled(TJ, 'bypassPermissions', { globalRead: true, keepAlive: true, promptSuggestions: false, genui: true });
+  await setInbound([TJ]);
+  const pidJ = slotOf(TJ).pid;
+  ok(dirsOf(coldCallsFor(TJ, nJ0)[0]).includes(HOME), '前置:存活进程起的时候开着全盘读取');
+  eq((await put({ uiId: U0, ...liveWide, globalRead: false })).status, 200, '前置:界面关掉全盘读取');
+  const nJ = calls.length;
+  eq((await send(sBy2, [TJ], 'R151C 设置变窄之后')).results.map((x) => x.delivery), ['auto'], '设置变窄之后照常 auto');
+  await waitStatus((await lastTo(TJ)).id, 'done', 20_000);
+  const coldJ = coldCallsFor(TJ, nJ);
+  ok(coldJ.length === 1 && !dirsOf(coldJ[0]).includes(HOME), `不复用按更宽设置起的存活进程:按此刻的设置新起、不带全盘读取(冷启 ${coldJ.length} 次)`);
+  ok(slotOf(TJ)?.pid !== pidJ, '换了新进程');
+  // 7b) 总开关关着:PUT /api/xsession/send-settings → 409 XS_DISABLED
+  const prefsOn = readFileSync(PREFS, 'utf8');
+  let rOff;
+  writeFileSync(PREFS, JSON.stringify({ ...JSON.parse(prefsOn), xsEnabled: false }));
+  try { rOff = await put({ uiId: U0, ...narrow }); } finally { writeFileSync(PREFS, prefsOn); }
+  eq([rOff.status, rOff.body?.code], [409, 'XS_DISABLED'], '总开关关着:PUT /api/xsession/send-settings → 409 XS_DISABLED');
 
   console.log(`PASS check-r151c-xs-audit(${checks} 项)`);
 } finally {
