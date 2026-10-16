@@ -838,10 +838,13 @@ async function xsModeChange({ sessionId, mode } = {}) {
   noteLatestMode(sessionId, mode);
   if (queuedHint.has(sessionId.toLowerCase())) scheduler.kick(sessionId); // 判官 S2:切档期间退回排队的按新档位重判
   const prefs = readXsPrefsDetailedSync();
-  // r151e ①:偏好文件在、却读不出时不知道总开关开没开,照样把新档位写进该会话已有的档案(同下:只改两处档位,不改记录时刻,
-  // 不新建档案)—— 读不出期间的切档随后即使重启也不丢;总开关实际关着、或启用时刻更晚时,这份档案照旧不算数。写不进才打标记。
-  // 写成了也不清该会话已有的写失败标记:读不出时名单可能还没读到,也不知道那个标记是不是切档以外的原因留下的(偏安全)。
-  if (!prefs.readFailed && !prefs.enabled) return;
+  // r151e ①(主会话裁定 B,2026-10-17):偏好文件在、却读不出时不知道总开关开没开,照旧先打写失败标记(审计 S1:该会话按没有档案判,
+  // 在任何 await 之前),同时照样把新档位写进该会话已有的档案(同下:只改两处档位,不改记录时刻,不新建档案)—— 标记若在重启前
+  // 没能存进偏好文件,重启后也按新档位判;总开关实际关着、或启用时刻更晚时,这份档案照旧不算数。写成了也不清标记(偏安全)。
+  if (prefs.readFailed) {
+    markProfileWriteFailed(sessionId);
+    console.warn(`[xsession] 会话 ${sessionId} 切档时偏好文件读不出:新档位照写进已有档案,该会话先按没有档案判(直到下次记录成功)`);
+  } else if (!prefs.enabled) return;
   try {
     await mutateXsProfiles((d) => {
       for (const [k, p] of Object.entries(d.sessions)) {

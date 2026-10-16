@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // r151e 偏好文件读失败加固:跨会话部分(任务文件修法 ①③⑤④)。
 //   ① 启动时偏好文件在、却读不出:按"开着"挂上全部跨会话钩子(读不出期间的切档照样记、新起的进程带跨会话工具);
-//      切档钩子在读不出时把新档位写进该会话已有的档案(只改两处档位,不改记录时刻,不新建档案);
+//      切档钩子在读不出时把新档位写进该会话已有的档案(只改两处档位,不改记录时刻,不新建档案),写失败标记也照打(主会话裁定 B);
 //      恢复可读后由恢复定时器按实际总开关挂或撤(撤走 syncXsRuntimeHooks(false) 的现有路径)。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身;临时 HOME;端口 6880–6929。
 // node tests/unit/check-r151e-xs-recovery.mjs
@@ -114,6 +114,9 @@ try {
     const V1 = mk('会话 V1 读不出期间新起');
     ok(withXsTools(await offTurn(V1, 'default')), '读不出期间新起的进程带跨会话工具(钩子按开着挂)');
   } finally { chmodSync(PREFS, 0o644); }
+  // 裁定 B:读不出时切档,档案照写、写失败标记也照打 —— 恢复可读后 T1 按没有档案判;标记由恢复定时器补存进偏好文件(重启后同样按没有档案判)
+  ok(!xs.profileCountsFor(T1, await profileOf(T1), ENABLED_AT), '读不出期间切过档的 T1:恢复可读后按没有档案判(写失败标记照打)');
+  await waitFor(() => (prefsJson()?.xsProfileWriteFailed ?? []).includes(T1.toLowerCase()), 'T1 的写失败标记由恢复定时器补存进偏好文件', 25_000);
   const V2 = mk('会话 V2 恢复后');
   ok(withXsTools(await offTurn(V2, 'default')), '恢复可读、总开关开着:钩子照旧挂着');
   // 总开关实际关着:读不出时先按开着挂,恢复可读后恢复定时器撤掉
