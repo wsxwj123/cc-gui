@@ -47,7 +47,8 @@ export function selectXsSessions(list, { query = '', limit = 30, exclude = null,
 const candidateOf = ({ sessionId, shortId, title, project }) => ({ sessionId, shortId, title, project });
 
 /**
- * 把一个目标写法解析成会话。按顺序:会话 id 或其前缀(≥8 位、不分大小写,能唯一确定才算)→ 标题(去首尾空白后逐字相等)。
+ * 把一个目标写法解析成会话。按顺序:会话 id 或其前缀(≥8 位、不分大小写,能唯一确定才算)→ 标题(去首尾空白后逐字相等;
+ * 会话项带 name(调用方给的清洗后标题,r151c 口径统一)时,与 name 逐字相等也算 —— 清洗前、清洗后的写法都认)。
  * 返回 { ok:true, session } | { ok:false, reason:'ambiguous', candidates } | { ok:false, reason:'not-found' }。
  * 重名(同一标题命中多个)或前缀命中多个 → ambiguous,不替调用方挑,candidates 每项带短 id 与目录名,让它改用短 id;
  * 改名后旧标题、或根本没有的写法 → not-found(让调用方重新列一次)。
@@ -63,7 +64,7 @@ export function resolveTarget(spec, sessions) {
     if (hits.length === 1 || exact.length === 1) return { ok: true, session: exact[0] || hits[0] };
     if (hits.length > 1) return { ok: false, reason: 'ambiguous', candidates: hits.map(candidateOf) };
   }
-  const byTitle = list.filter((s) => s.title.trim() === want);
+  const byTitle = list.filter((s) => s.title.trim() === want || (typeof s.name === 'string' && s.name === want));
   if (byTitle.length === 1) return { ok: true, session: byTitle[0] };
   if (byTitle.length > 1) return { ok: false, reason: 'ambiguous', candidates: byTitle.map(candidateOf) };
   return { ok: false, reason: 'not-found' };

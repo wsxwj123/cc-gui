@@ -6,10 +6,10 @@
 //   - 新消息先写正文、再写元数据:调用方拿到成功时两者都已在盘上;元数据写失败就删掉刚写的正文,整次不生效。
 //   - 一律"临时文件 + 改名"写入,进程内串行(一条 promise 链);目录 0700、文件 0600。
 //   - 全库最多留 500 条:超出时按到达先后删最旧的已结束消息,未结束的一条不删(宁可超出也不丢)。
-//   - 本进程第一次读盘时做恢复:遗留的 processing / claimed 一律退回 pending、原因 interrupted,不自动重跑
+//   - 本进程第一次读盘时做恢复:遗留的 processing / claimed / queued(r151c)一律退回 pending、原因 interrupted,不自动重跑
 //     (重跑可能把同一件事做两遍);同时清掉没有对应未结束消息的孤儿正文(上次在"改元数据"与"删正文"之间退出)
-//     和本模块自己留下的临时文件(上次在"写临时文件"与"改名"之间退出),以及修改时间超过 7 天的损坏留存文件
-//     messages.json.corrupt-*(挪开时把修改时间设成挪开那一刻)。只认本模块的命名:正文只删 <消息id>.txt,
+//     和本模块自己留下的临时文件(上次在"写临时文件"与"改名"之间退出),以及保留满 7 天的损坏留存文件
+//     messages.json.corrupt-*(起算取修改时间与文件名里挪开时刻的较晚者;挪开时也把修改时间设成那一刻)。只认本模块的命名:正文只删 <消息id>.txt,
 //     临时文件只删 messages.json.tmp.<pid>.<n> 与 <消息id>.txt.tmp.<pid>.<n>(pid 是另一个还活着的进程时不动);
 //     正文目录是符号链接时整个跳过,不跟着链接删别处的文件。
 // 懒加载:第一次用到时才读盘。总开关关着时路由层先回 409,本模块不会经那些接口被调到;关着时仍会被调到的只有:
@@ -24,6 +24,7 @@
 //   以及认领 / 处理期间的临时字段 token、heldBefore、turn —— 恢复时删掉它们(旧凭据随之作废)。
 import { readFile, writeFile, rename, unlink, mkdir, readdir, lstat, utimes } from 'fs/promises';
 import { join } from 'path';
+import { randomBytes } from 'crypto';
 import { homedir } from 'os';
 import { isSessionIdShape } from './session-reader.js';
 
@@ -35,12 +36,16 @@ export const XS_STATUSES = ['pending', 'queued', 'claimed', 'processing', 'done'
 const OPEN_STATUSES = new Set(['pending', 'queued', 'claimed', 'processing']);
 export const isOpenStatus = (status) => OPEN_STATUSES.has(status);
 
-// 不可配置的固定值(接口 X.3.5)。
+// 不可配置的固定值(接口 X.3.5;r151c 加连锁深度、单回合发送数、全局自动处理次数与窗口)。
 export const XS_LIMITS = Object.freeze({
   bodyBytes: 32768,
   pendingPerSession: 50,
   targetsPerSend: 8,
   maxKept: 500,
+  chainDepth: 4,
+  sendsPerTurn: 16,
+  autoPerWindow: 20,
+  autoWindowMs: 600_000,
 });
 
 // 恢复时清掉的临时字段(见文件头)。
@@ -65,8 +70,8 @@ function enqueue(task) {
 }
 
 let tmpSeq = 0;
-async function atomicWrite(file, data) {
-  await mkdir(BODIES_DIR, { recursive: true, mode: 0o700 }); // 连带建出 xsession/
+async function atomicWrite(file, data, dir = BODIES_DIR) {
+  await mkdir(dir, { recursive: true, mode: 0o700 }); // 默认连带建出 xsession/;发送档案只建 xsession/
   const tmp = `${file}.tmp.${process.pid}.${tmpSeq++}`;
   try {
     await writeFile(tmp, data, { encoding: 'utf-8', mode: 0o600 });
@@ -99,7 +104,8 @@ function isValidRecord(m) {
     && !!m.to && typeof m.to === 'object' && typeof m.to.sessionId === 'string';
 }
 
-// processing / claimed → pending + interrupted;via 保留(合法组合:出错退回时 via = 上次的方式)。
+// processing / claimed / queued(r151c)→ pending + interrupted;via 保留(合法组合:出错退回时 via = 上次的方式)。
+// queued 也转卡片:重启后不自动处理(用户常靠重启止损;与 processing 重启后转 interrupted 一致)。
 function recoverInterrupted(m) {
   m.status = 'pending';
   m.heldReason = 'interrupted';
@@ -138,7 +144,7 @@ async function loadIfNeeded() {
     }
   }
   for (const m of messages) {
-    if (m.status === 'processing' || m.status === 'claimed') { recoverInterrupted(m); dirty = true; }
+    if (m.status === 'processing' || m.status === 'claimed' || m.status === 'queued') { recoverInterrupted(m); dirty = true; }
   }
   if (dirty) {
     // 恢复结果写不进去也照样用内存里的:下一次成功的写会带上它;重启后会再恢复一遍,结果相同。
@@ -149,12 +155,16 @@ async function loadIfNeeded() {
 }
 
 // 正文目录不是真目录(符号链接、文件、不存在)→ null:不往里面清东西。
-async function bodiesDirEntries() {
+// onError(可选,r151c 先修 7):列目录出错(不是"不存在")时回调一次,给调用方记日志;返回值照样是 null。
+async function bodiesDirEntries(onError = null) {
   try {
     const st = await lstat(BODIES_DIR);
     if (!st.isDirectory()) return null; // lstat 不跟链接:符号链接在这里不算目录
     return await readdir(BODIES_DIR);
-  } catch { return null; }
+  } catch (e) {
+    if (onError && e?.code !== 'ENOENT') onError(e);
+    return null;
+  }
 }
 
 const isBodyFileName = (f) => f.endsWith('.txt') && isSessionIdShape(f.slice(0, -4));
@@ -185,7 +195,7 @@ async function sweepOwnTempFiles() {
   let top = [];
   try { top = await readdir(XS_DIR); } catch { /* 目录不存在 */ }
   for (const f of top) {
-    if (stale(f, (base) => base === 'messages.json')) await unlinkQuietly(join(XS_DIR, f));
+    if (stale(f, (base) => base === 'messages.json' || base === 'profiles.json')) await unlinkQuietly(join(XS_DIR, f));
   }
   for (const f of (await bodiesDirEntries()) || []) {
     if (stale(f, isBodyFileName)) await unlinkQuietly(join(BODIES_DIR, f));
@@ -198,18 +208,28 @@ async function unlinkQuietly(file) {
   }
 }
 
-// 损坏留存文件(messages.json.corrupt-*)保留 7 天,按修改时间算(挪开时已设成挪开那一刻);只删普通文件,不跟链接、不删目录。
+// 损坏留存文件(messages.json.corrupt-<挪开时刻的毫秒数>,r151c 起含 profiles.json.corrupt-*)保留 7 天;只删普通文件,不跟链接、不删目录。
+// r151c 先修 6:起算时刻 = max(修改时间, 文件名里的毫秒时间戳)。改名不改修改时间,挪开后设修改时间失败时它仍是原文件最后一次
+// 写入的时刻(可能早已超过 7 天,下次启动就被删);文件名里的就是挪开那一刻。取较晚的只会多留、不会早删;文件名后缀不是
+// 纯数字时只看修改时间。
 export const XS_CORRUPT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 const CORRUPT_PREFIX = 'messages.json.corrupt-';
+const PROFILES_CORRUPT_PREFIX = 'profiles.json.corrupt-';
+const corruptPrefixOf = (name) => [CORRUPT_PREFIX, PROFILES_CORRUPT_PREFIX].find((p) => name.startsWith(p)) || null;
+function corruptKeptSince(name, mtimeMs) {
+  const tail = name.slice(corruptPrefixOf(name).length);
+  const named = /^\d{1,16}$/.test(tail) ? Number(tail) : NaN;
+  return Number.isFinite(named) ? Math.max(mtimeMs, named) : mtimeMs;
+}
 async function sweepStaleCorruptFiles() {
   let top = [];
   try { top = await readdir(XS_DIR); } catch { return; }
   const now = Date.now();
   for (const f of top) {
-    if (!f.startsWith(CORRUPT_PREFIX)) continue;
+    if (!corruptPrefixOf(f)) continue;
     try {
       const st = await lstat(join(XS_DIR, f));
-      if (st.isFile() && now - st.mtimeMs > XS_CORRUPT_KEEP_MS) await unlink(join(XS_DIR, f));
+      if (st.isFile() && now - corruptKeptSince(f, st.mtimeMs) > XS_CORRUPT_KEEP_MS) await unlink(join(XS_DIR, f));
     } catch (e) {
       if (e?.code !== 'ENOENT') console.warn(`[xsession] 过期的损坏留存文件删除失败(${f}):${e.code || e.message}`);
     }
@@ -333,7 +353,9 @@ export function clearXsInbox() {
       const t = TEMP_SUFFIX_RE.exec(f);
       if (f.startsWith(CORRUPT_PREFIX) || (t && f.slice(0, t.index) === 'messages.json')) await unlinkLeftover(join(XS_DIR, f), f);
     }
-    for (const f of (await bodiesDirEntries()) || []) {
+    // r151c 先修 7:正文目录列不出来(权限等)时原先静默跳过,现在记一行日志;剩下的正文留待下次启动清理
+    const bodyFiles = await bodiesDirEntries((e) => console.warn(`[xsession] 清空时读正文目录失败,留待下次启动清理:${e.code || e.message}`));
+    for (const f of bodyFiles || []) {
       const m = TEMP_SUFFIX_RE.exec(f);
       if (isBodyFileName(m ? f.slice(0, m.index) : f)) await unlinkLeftover(join(BODIES_DIR, f), f);
     }
@@ -397,5 +419,124 @@ export function mutateXsInbox(fn) {
       if (isOpenStatus(m.status) && !openAfter.has(m.id)) await removeBody(m.id);
     }
     return result;
+  });
+}
+
+// ── r151c:发送档案 ~/.claude-gui/xsession/profiles.json(方案 A5 / A12)──────────────────────────────────
+// { salt, sessions: { <会话id>: { replay, judge } } }。replay = 该会话最近一次回合请求体里的会话级参数(请求原值,没带为 null,
+// model 为解析后的值;appendSystemPrompt 不记,见 XS_PROFILE_REPLAY_KEYS),只用于重放;judge = { mode(解析后的界面档位), providerFp(provider 指纹,加盐摘要), recordedAt(ISO) },
+// 判定只读它。salt:本机首次需要时随机生成 32 字节(十六进制),随第一次写盘落下,不出本机。
+// 与收件箱共用同一条串行队列与"临时文件 + 改名"写法(目录 0700、文件 0600);只认白名单字段;内容没变不写盘;
+// 文件损坏时挪到 profiles.json.corrupt-<毫秒> 留证、从空开始(与收件箱的损坏留存同样保留 7 天,由启动清理删)。文件不存在时只读、删条目都不建任何东西。
+// 凭据明文不在这里:providerFp 是摘要,原文只在内存里参与计算(见 xsession-policy.js)。
+const PROFILES_PATH = join(XS_DIR, 'profiles.json');
+// replay 只记 chat.js 回合参数键(TURN_PARAM_KEYS)里的这 10 个,不含 appendSystemPrompt(审计 F1;接口"审计之后的补充约定"第 1 条):
+// 前端只在"重跑工具 / 风险续跑"这类单个回合里带它,内容是重做某次工具调用的指令加原工具入参(可能有命令里的密钥、写入的配置)。
+// 记下它,之后每次自动处理都会带着它起回合、重做那次旧调用,入参原文也落进本文件。旧文件里若有这个键,读取时按白名单丢掉
+// (pickProfile 只取下面这些键),下一次写盘时随之消失。
+export const XS_PROFILE_REPLAY_KEYS = Object.freeze(['cwd', 'model', 'effort', 'addDirs', 'permissionMode', 'globalRead', 'promptSuggestions', 'keepAlive', 'maxBudgetUsd', 'genui']);
+export const XS_PROFILE_MODES = Object.freeze(['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']);
+const SALT_RE = /^[0-9a-f]{64}$/;
+const FP_RE = /^[0-9a-f]{16}$/;
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+// replay 的值只收 JSON 标量与字符串数组(请求体里这些键本来就只有这些形态);cwd 必须是非空字符串。
+const isReplayValue = (v) => v === null || typeof v === 'string' || typeof v === 'boolean'
+  || (typeof v === 'number' && Number.isFinite(v)) || (Array.isArray(v) && v.every((x) => typeof x === 'string'));
+
+/** 一条档案 → 只含白名单字段的新对象;不合规返回 null。 */
+function pickProfile(p) {
+  if (!isPlainObject(p) || !isPlainObject(p.replay) || !isPlainObject(p.judge)) return null;
+  const replay = {};
+  for (const k of XS_PROFILE_REPLAY_KEYS) {
+    const v = p.replay[k] === undefined ? null : p.replay[k];
+    if (!isReplayValue(v)) return null;
+    replay[k] = Array.isArray(v) ? [...v] : v;
+  }
+  if (typeof replay.cwd !== 'string' || !replay.cwd) return null;
+  const { mode, providerFp, recordedAt } = p.judge;
+  if (!XS_PROFILE_MODES.includes(mode) || typeof providerFp !== 'string' || !FP_RE.test(providerFp)
+    || typeof recordedAt !== 'string' || Number.isNaN(Date.parse(recordedAt))) return null;
+  return { replay, judge: { mode, providerFp, recordedAt } };
+}
+function pickSessions(sessions) {
+  const out = {};
+  if (!isPlainObject(sessions)) return out;
+  for (const [id, p] of Object.entries(sessions)) {
+    const picked = isSessionIdShape(id) ? pickProfile(p) : null;
+    if (picked) out[id] = picked;
+  }
+  return out;
+}
+
+let profiles = null; // 已加载的 { salt, sessions };null = 本进程还没读过盘
+// 只在队列里调。读盘失败(不是"文件不存在")原样抛出,profiles 保持 null,下次再试(不拿空表顶上,免得下一次写把它覆盖掉)。
+async function loadProfilesIfNeeded() {
+  if (profiles) return;
+  let raw = null;
+  try { raw = await readFile(PROFILES_PATH, 'utf-8'); } catch (e) {
+    if (e?.code !== 'ENOENT') throw e;
+  }
+  let salt = null;
+  let sessions = {};
+  if (raw !== null) {
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch { parsed = undefined; }
+    if (isPlainObject(parsed) && isPlainObject(parsed.sessions)) {
+      if (typeof parsed.salt === 'string' && SALT_RE.test(parsed.salt)) salt = parsed.salt;
+      sessions = pickSessions(parsed.sessions);
+    } else {
+      const aside = `${PROFILES_PATH}.corrupt-${Date.now()}`;
+      let moved = false;
+      try { await rename(PROFILES_PATH, aside); moved = true; } catch {}
+      console.warn(`[xsession] profiles.json 无法解析,已移到 ${aside}`);
+      // 同收件箱:修改时间设成挪开这一刻,"保留 7 天"(启动清理)从这里算
+      if (moved) {
+        const now = new Date();
+        try { await utimes(aside, now, now); } catch (e) { console.warn(`[xsession] 损坏留存文件未能更新修改时间:${e.code || e.message}`); }
+      }
+    }
+  }
+  profiles = { salt: salt || randomBytes(32).toString('hex'), sessions };
+}
+
+/** 读档案:{ salt, sessions } 的深拷贝(与写入同一条队列,读到的是此前所有事务提交后的状态)。 */
+export function readXsProfiles() {
+  return enqueue(async () => {
+    await loadProfilesIfNeeded();
+    return structuredClone(profiles);
+  });
+}
+
+/**
+ * 档案事务:fn(draft) 在 { salt, sessions } 的深拷贝上改 sessions(salt 改了也不认);提交时按白名单重新取一遍(不合规的条目丢掉),
+ * 与改之前逐字相同就不写盘。写失败 → 抛 XsStorageError,内存不变。返回 fn 的返回值。
+ */
+export function mutateXsProfiles(fn) {
+  return enqueue(async () => {
+    await loadProfilesIfNeeded();
+    const before = profiles;
+    const draft = structuredClone(before);
+    const result = await fn(draft);
+    const next = { salt: before.salt, sessions: pickSessions(draft.sessions) };
+    if (JSON.stringify(next) === JSON.stringify(before)) return result;
+    try {
+      await atomicWrite(PROFILES_PATH, JSON.stringify(next), XS_DIR);
+    } catch (e) {
+      throw new XsStorageError('xsession 发送档案写入失败', e);
+    }
+    profiles = next;
+    return result;
+  });
+}
+
+/** 删掉某会话的档案(会话 id 不分大小写);没有这一条、文件不存在时什么都不写。返回是否删了。 */
+export function dropXsProfile(sessionId) {
+  const target = String(sessionId || '').toLowerCase();
+  return mutateXsProfiles((d) => {
+    let dropped = false;
+    for (const k of Object.keys(d.sessions)) {
+      if (k.toLowerCase() === target) { delete d.sessions[k]; dropped = true; }
+    }
+    return dropped;
   });
 }

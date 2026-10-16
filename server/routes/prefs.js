@@ -5,7 +5,7 @@ import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { renameSession } from '@anthropic-ai/claude-agent-sdk';
 import { broadcast } from '../broadcast.js';
-import { findSessionFile } from '../services/session-reader.js';
+import { findSessionFile, isSessionIdShape } from '../services/session-reader.js';
 import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../session-sync.js';
 
 // Server-side preferences that must be SHARED across devices (phone + Mac).
@@ -36,6 +36,39 @@ export function readThirdPartyAutoSync() {
 export function readXsEnabledSync() {
   try { return JSON.parse(readFileSync(PREFS_PATH, 'utf-8'))?.xsEnabled === true; }
   catch { return false; }
+}
+
+/**
+ * r151c:跨会话的全部偏好键,一次读文件(接口 X.3.5 的读取规则;读到非法值不报错、不改写文件):
+ * · enabled    —— xsEnabled === true(同 readXsEnabledSync);
+ * · enabledAt  —— xsEnabledAt(内部键:xsEnabled 由关变开的同一次写入里记的 ISO 时刻);不是能解析成时刻的字符串 → null
+ *                 (此时所有发送档案都不认);
+ * · inbound    —— xsInbound,只留键是会话 id 形状、值是 "auto" 的条目;不是对象 → {};
+ * · autoPaused —— xsAutoPaused === true。
+ */
+export function normalizeXsPrefs(prefs) {
+  const p = prefs && typeof prefs === 'object' && !Array.isArray(prefs) ? prefs : {};
+  const at = typeof p.xsEnabledAt === 'string' && !Number.isNaN(Date.parse(p.xsEnabledAt)) ? p.xsEnabledAt : null;
+  const inbound = {};
+  const raw = p.xsInbound;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [id, mode] of Object.entries(raw)) if (mode === 'auto' && isSessionIdShape(id)) inbound[id] = 'auto';
+  }
+  return { enabled: p.xsEnabled === true, enabledAt: at, inbound, autoPaused: p.xsAutoPaused === true };
+}
+export function readXsPrefsSync() {
+  const { readFailed: _readFailed, ...prefs } = readXsPrefsDetailedSync();
+  return prefs;
+}
+/**
+ * 同 readXsPrefsSync,另给 readFailed:文件在、却读不出或解析不了时为 true(文件不存在不算,此时总开关就是关的),其余字段按默认。
+ * r151c 审计 S1:发送档案的两个钩子据此区分"总开关真的关着"与"偏好读失败"(后者不能静默跳过)。
+ */
+export function readXsPrefsDetailedSync() {
+  let prefs = null;
+  let readFailed = false;
+  try { prefs = JSON.parse(readFileSync(PREFS_PATH, 'utf-8')); } catch (e) { readFailed = e?.code !== 'ENOENT'; }
+  return { ...normalizeXsPrefs(prefs), readFailed };
 }
 // 原子写:先写临时文件再 rename(rename 同目录原子)。此前 writeFile 直写,进程崩溃/
 // 断电写一半 → JSON 损坏 → loadPrefs 回落 {} → 下一次任何 PUT 把整份 prefs 静默重置。
@@ -101,7 +134,15 @@ export async function removeSessionFromPrefs(sessionId) {
         }
       }
     }
-    if (!changed.context1m && !changed.autoTitles && !changed.customTitles && !pinnedChanged && !syncChanged) return;
+    // r151c:跨会话接收设置(xsInbound,只记"自动处理"的会话)随会话删除清掉;id 不分大小写。不广播(会话已不在)。
+    let xsInboundChanged = false;
+    const inbound = prefs.xsInbound;
+    if (inbound && typeof inbound === 'object' && !Array.isArray(inbound)) {
+      for (const k of Object.keys(inbound)) {
+        if (k.toLowerCase() === sessionId.toLowerCase()) { delete inbound[k]; xsInboundChanged = true; }
+      }
+    }
+    if (!changed.context1m && !changed.autoTitles && !changed.customTitles && !pinnedChanged && !syncChanged && !xsInboundChanged) return;
     await savePrefs(prefs);
     // r10-11:pinned 也有广播类型了,GC 掉被删会话的置顶时同步各端。
     if (pinnedChanged) {

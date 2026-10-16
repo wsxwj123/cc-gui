@@ -226,8 +226,11 @@ export function useWebSocket() {
               setCurrentModel(data.model);
               break;
             // r151b:跨会话消息。xs:message 按 message.to.sessionId 收敛进各会话自己的收件箱(不读当前选中会话)。
+            // r151c:xs:turn(服务端开始了自动处理的回合)、xs:inbound(接收设置变化)同样按事件里的 sessionId 收敛。
             case 'xs:message':
             case 'xs:config':
+            case 'xs:turn':
+            case 'xs:inbound':
               handleXsWsEvent(data);
               break;
             // r151a:审核状态(切换 provider / 改审核模型后服务端推)与第三方 auto 总开关变化。

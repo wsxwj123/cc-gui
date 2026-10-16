@@ -7,7 +7,7 @@
 // 白盒:临时 HOME,每次 import 新的模块实例 = 模拟服务重启;删除失败用"同名目录"替身造(unlink 删不了目录),不改目录权限。
 // node tests/unit/check-r151b-xs-clear-leftovers.mjs
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, existsSync, statSync, readdirSync, utimesSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync, existsSync, statSync, readdirSync, utimesSync, unlinkSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -158,6 +158,45 @@ try {
     ok(Math.abs(Date.now() - statSync(join(x, aside[0])).mtimeMs) < 60000, '挪开时修改时间设成挪开那一刻(不沿用一个月前的)');
     await (await freshStore(h)).loadXsInbox();
     ok(existsSync(join(x, aside[0])), '下次启动:不满 7 天的损坏留存留着');
+  }
+
+  // ── 7. r151c 先修 6:7 天起算 = max(修改时间, 文件名里的毫秒时间戳)(挪开后设修改时间失败的那份不会被提前删) ──
+  {
+    const { h, x } = mkHome('h6');
+    const now = Date.now();
+    const files = [
+      [`messages.json.corrupt-${now - 1 * DAY}`, 30], // 文件名是昨天挪开的、修改时间一个月前(设修改时间失败)→ 留
+      [`messages.json.corrupt-${now - 8 * DAY}`, 30], // 两者都超过 7 天 → 删
+      [`messages.json.corrupt-${now - 30 * DAY}`, 1], // 文件名超过 7 天、修改时间昨天 → 取较晚的,留
+      ['messages.json.corrupt-abc', 8], //              后缀不是数字:只看修改时间 → 删
+      ['messages.json.corrupt-xyz', 6], //              同上,不到 7 天 → 留
+    ];
+    for (const [f, d] of files) { writeFileSync(join(x, f), '{坏'); age(join(x, f), d); }
+    await (await freshStore(h)).sweepXsLeftovers(); // 关着启动
+    eq(readdirSync(x).filter((f) => f.startsWith('messages.json.corrupt-')).sort(), [files[0][0], files[2][0], 'messages.json.corrupt-xyz'].sort(),
+      '关着启动:按两者较晚的算满 7 天才删;后缀不是数字只看修改时间');
+    const { h: h2, x: x2 } = mkHome('h7');
+    for (const [f, d] of files) { writeFileSync(join(x2, f), '{坏'); age(join(x2, f), d); }
+    await (await freshStore(h2)).loadXsInbox(); // 开着启动(读盘恢复)同一口径
+    eq(readdirSync(x2).filter((f) => f.startsWith('messages.json.corrupt-')).sort(), [files[0][0], files[2][0], 'messages.json.corrupt-xyz'].sort(), '开着启动:同一口径');
+  }
+
+  // ── 8. r151c 先修 7:清空时正文目录列不出来 → 记一行日志,记录照删、照常返回 removed,正文留待下次启动清理 ──
+  {
+    const { h, x, b } = mkHome('h8');
+    const A = uid(41);
+    writeFileSync(join(x, 'messages.json'), JSON.stringify({ version: 1, messages: [rec(A, 'pending')] }));
+    writeFileSync(join(b, `${A}.txt`), '甲');
+    const S = await freshStore(h);
+    warns.length = 0;
+    chmodSync(b, 0o000); // 目录本身还在(lstat 得到),但列不出来
+    try {
+      eq(await S.clearXsInbox(), 1, '正文目录列不出来:记录照删,照常返回 removed');
+    } finally { chmodSync(b, 0o700); }
+    eq(warns.filter((s) => s.includes('清空时读正文目录失败')).length, 1, '记一行日志(带错误码,不带正文)');
+    eq([existsSync(join(x, 'messages.json')), existsSync(join(b, `${A}.txt`))], [false, true], '记录已删;正文留待下次启动清理');
+    await (await freshStore(h)).sweepXsLeftovers();
+    eq(readdirSync(b), [], '下次启动(关着)把这份孤儿正文删掉');
   }
 } finally {
   console.warn = origWarn;

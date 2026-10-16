@@ -66,6 +66,18 @@ eq(nativeGuardShouldDeny({ to: 'main', recipient: 'main', recipient_kind: 'main'
 eq(nativeGuardShouldDeny({ to: 'proj-c3' }, entries, gui, A), true, '没有 recipient_kind 时按 to 当名字');
 eq(nativeGuardShouldDeny({ to: 'uds:/tmp/cc-socks/103.sock' }, entries, gui, A), true, '没有 recipient_kind 且 to 是 uds: 地址');
 eq(nativeGuardShouldDeny({}, entries, gui, A), false, '没有目标 → 不拒');
+// r151c 先修 3:macOS 上套接字地址两边统一转小写(默认文件系统不区分大小写;其它 POSIX 平台照旧区分);
+// 名字照 CLI 实测不区分大小写;短号从登记表推不出,去掉后只按名字认(偏严);名字前缀加短号 CLI 不送达,不拒。
+const isMac = process.platform === 'darwin';
+eq(nativeGuardShouldDeny({ to: 'uds:/TMP/CC-SOCKS/103.SOCK', recipient_kind: 'session' }, entries, gui, A), isMac, '地址只差大小写:macOS 拒,其它 POSIX 平台不拒');
+eq(nativeGuardShouldDeny({ to: 'uds:/Private/Tmp/cc-socks/103.sock', recipient_kind: 'session' }, entries, gui, A), isMac, 'macOS:/Private/Tmp 也认作 /tmp');
+eq(nativeGuardShouldDeny({ to: 'uds:/tmp/cc-socks/103.sock', recipient_kind: 'session' }, [{ ...entries[1], messagingSocketPath: '/TMP/cc-socks/103.sock' }], gui, A), isMac,
+  'macOS:登记表一侧的大小写同样不计');
+eq(nativeGuardShouldDeny({ to: 'uds:/TMP/CC-SOCKS/104.SOCK', recipient_kind: 'session' }, entries, gui, A), false, '转小写后指向终端会话 → 仍不拒');
+eq(nativeGuardShouldDeny(byName('PROJ-C3'), entries, gui, A), true, '名字不区分大小写(CLI 实测照样送达)');
+eq(nativeGuardShouldDeny(byName('Proj-C3  [FFFFFF]'), entries, gui, A), true, '名字 + 任意短号:短号推不出,按名字认(偏严)');
+eq(nativeGuardShouldDeny(byName('proj [ab12cd]'), entries, gui, A), false, '名字前缀 + 短号:CLI 不送达 → 不拒');
+eq(nativeGuardShouldDeny(byName('PROJ-A1 [ab12cd]'), entries, gui, A), false, '换大小写发给自己 → 仍不拒');
 
 // ── ② 接线 ────────────────────────────────────────────────────────────────────────────────
 async function freePort() {
@@ -92,7 +104,7 @@ try {
   const hook = makePreToolUseHook(sender);
   const call = (toolInput, toolName = 'SendMessage') => hook({ hook_event_name: 'PreToolUse', tool_name: toolName, tool_input: toolInput }, 'toolu_r151b_1');
   const DENY = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: NATIVE_GUARD_REASON } };
-  eq(NATIVE_GUARD_REASON, '这个会话由 CC-GUI 管理，不接收经 SendMessage 发来的消息。如需把内容交给它，请告诉用户在 CC-GUI 里转发。', '拒绝原因逐字');
+  eq(NATIVE_GUARD_REASON, '这个会话由 CC-GUI 管理。给 CC-GUI 里的其它会话发消息请用 mcp__ccgui-sessions__send_message（可先用 mcp__ccgui-sessions__list_sessions 查看）；它也能发给当前没在运行的会话。', '拒绝原因逐字(r151c 二期文案)');
 
   setEnabled(true);
   mkdirSync(REG, { recursive: true });

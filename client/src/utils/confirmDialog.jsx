@@ -7,7 +7,8 @@ import { createRoot } from 'react-dom/client';
 // 即可,返回 true/false。Esc/点击遮罩=取消,Enter/确定按钮=确认。
 // testId(可选,INTERFACE §10.11⑥):给验收用例一个稳定的定位钩子 —— 根节点 + 两键。
 // 不传 = DOM 与今天逐字相同(现有调用方零影响);传了只多三个 data-testid 属性,不改行为。
-function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, testId, onResolve }) {
+// okTestId(可选,r151c):确认键另用这个标识(接口文件写死了确认键的标识时用);不传照旧为 `${testId}-confirm`。
+function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, testId, okTestId, onResolve }) {
   const [checked, setChecked] = useState(false);
   // 有 checkbox 时把勾选状态一并回传 → { confirmed, checked };否则保持布尔(向后兼容)。
   const resolve = (confirmed) => onResolve(checkbox ? { confirmed, checked } : confirmed);
@@ -64,7 +65,7 @@ function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, test
           </button>
           <button
             autoFocus={!danger}
-            data-testid={testId ? `${testId}-confirm` : undefined}
+            data-testid={okTestId || (testId ? `${testId}-confirm` : undefined)}
             onClick={() => resolve(true)}
             className={`px-3 py-1.5 rounded-md text-[12px] font-body transition-colors ${danger ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-accent hover:bg-accent/90 text-on-accent'}`}
           >
@@ -86,7 +87,7 @@ export function confirmDialog(message, opts) {
   return p;
 }
 
-function showConfirmDialog(message, { danger = false, confirmText = '确定', cancelText = '取消', checkbox = null, testId = null } = {}) {
+function showConfirmDialog(message, { danger = false, confirmText = '确定', cancelText = '取消', checkbox = null, testId = null, okTestId = null } = {}) {
   return new Promise((resolve) => {
     const host = document.createElement('div');
     // 标记供别处避让:确认框的 Esc 监听在 document 冒泡阶段,更早相位的监听(如面板页
@@ -110,6 +111,7 @@ function showConfirmDialog(message, { danger = false, confirmText = '确定', ca
         cancelText={cancelText}
         checkbox={checkbox}
         testId={testId}
+        okTestId={okTestId}
         onResolve={finish}
       />
     );

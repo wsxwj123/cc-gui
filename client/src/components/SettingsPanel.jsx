@@ -6,7 +6,7 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { desktopNotifyEnabled, NOTIFY_PREF_KEY } from '../utils/desktopNotify.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
-import { useXsEnabled, useXsGuardFailureAt, useXsStoredUnfinished, loadXsConfig, setXsEnabled, clearXsStored } from '../utils/xsession.js';
+import { useXsEnabled, useXsGuardFailureAt, useXsStoredUnfinished, useXsAutoPaused, useXsAutoUsed, useXsAutoLimit, loadXsConfig, setXsEnabled, clearXsStored, resumeXsAuto } from '../utils/xsession.js';
 import EnvCheckPanel from './EnvCheckPanel.jsx';
 import { isImeReactKeydown } from '../utils/imeGuard.js';
 // R44:进程管理入口自坞 rail 收进本面板(高级 tab 内嵌),复用同一组件、不复制。
@@ -2774,9 +2774,11 @@ function GeneralTab({ settings }) {
   );
 }
 
-// r151b 跨会话消息(一期):总开关、一期说明、原生 SendMessage 引导失效提示;没有连锁上限输入框(固定 4 次)。
+// r151b 跨会话消息:总开关、说明、原生 SendMessage 引导失效提示;没有连锁上限输入框(固定 4 次)。
 // 本块不受总开关门控(关着也要能看见、能打开)。开关的状态与接口调用都在 utils/xsession.js。
-const XSESSION_NOTICE = '开启后，你可以把回复转发给本机 CC-GUI 的其它会话，对方会话里会出现一张卡片，确认后才处理。GUI 会话之间经 CLI 原生通道直接发送的消息会被拒绝并提示改为转发。消息只在本机会话之间传递，对方处理时会随它的模型请求发给它所用的 provider。';
+// r151c 二期:说明换二期文案;开着时多一行自动处理计数(暂停时为"自动处理已暂停"与【恢复自动处理】),块可见期间每 60 秒重取 config。
+const XSESSION_NOTICE = '开启后，会话里的 AI 可以给本机 CC-GUI 的其它会话发消息，你也可以把回复转发给其它会话。收到的消息默认显示为卡片，确认后才处理；设为自动处理的会话会自行开始回合并消耗额度。AI 列出可发送的会话时，会话标题与目录名会随请求发给当前 provider。';
+const XSESSION_CONFIG_REFRESH_MS = 60_000;
 function fmtXsGuardTime(iso) {
   const t = Date.parse(iso);
   return Number.isFinite(t) ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : String(iso);
@@ -2787,10 +2789,27 @@ function XsessionSettingsSection() {
   const unfinished = useXsStoredUnfinished();
   // 总开关关着时收件箱里还有没结束的消息:提示条数并给【清空】(开着时在卡片上逐条处理)
   const showResidual = !enabled && unfinished > 0;
+  const autoPaused = useXsAutoPaused();
+  const autoUsed = useXsAutoUsed();
+  const autoLimit = useXsAutoLimit();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   // 打开设置页时取一次:除总开关外还要 nativeGuard.lastFailureAt(WS xs:config 不带它)
   useEffect(() => { void loadXsConfig(); }, []);
+  // 开着时块可见期间每 60 秒重取一次 config(自动处理计数没有推送)
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const t = setInterval(() => { void loadXsConfig({ reconcile: false }); }, XSESSION_CONFIG_REFRESH_MS);
+    return () => clearInterval(t);
+  }, [enabled]);
+  const resume = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErr('');
+    const r = await resumeXsAuto();
+    if (!r.ok) setErr(r.error);
+    setBusy(false);
+  };
   const toggle = async () => {
     if (busy) return;
     setBusy(true);
@@ -2821,6 +2840,19 @@ function XsessionSettingsSection() {
           <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${enabled ? 'left-[18px]' : 'left-0.5'}`} />
         </button>
       </div>
+      {enabled && (
+        <div className="px-3 pb-2.5 flex items-center gap-2">
+          <div data-testid="xsession-auto-budget" className={`flex-1 min-w-0 text-[10.5px] font-body ${autoPaused ? 'text-amber-700' : 'text-ink-muted'}`}>
+            {autoPaused ? '自动处理已暂停' : `过去 10 分钟自动处理 ${autoUsed} / ${autoLimit}`}
+          </div>
+          {autoPaused && (
+            <button data-testid="xsession-auto-resume" onClick={resume} disabled={busy}
+              className="shrink-0 px-2 py-0.5 rounded-md border border-canvas-deep text-[11px] text-ink-muted font-body hover:border-accent/40 hover:text-ink transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+              恢复自动处理
+            </button>
+          )}
+        </div>
+      )}
       {(guardFailureAt || err || showResidual) && (
         <div className="px-3 pb-2.5 space-y-1">
           {showResidual && (

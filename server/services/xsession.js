@@ -7,15 +7,21 @@
 // 日志只带消息 id,不带正文与凭据;凭据(token)只出现在认领应答里,不进任何列表应答与广播(publicMessage 是白名单)。
 // 依赖只朝一个方向:本模块经 chat.js 导出的窄接口挂钩子,chat.js 不认识本模块。
 import { randomUUID, timingSafeEqual } from 'crypto';
-import { readdir, readFile } from 'fs/promises';
-import { join, posix as posixPath, win32 as win32Path } from 'path';
+import { access, readdir, readFile } from 'fs/promises';
+import { constants as fsConstants, readFileSync, realpathSync, statSync } from 'fs';
+import { dirname, join, resolve, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
-import { readXsEnabledSync } from '../routes/prefs.js';
-import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, preToolUseGuardTimeoutAt } from '../routes/chat.js';
+import { readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, updatePrefs } from '../routes/prefs.js';
+import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
-import { buildXsEnvelope, neutralizeXsBody } from './xsession-envelope.js';
+import { XS_PROFILE_MODES, XS_PROFILE_REPLAY_KEYS, dropXsProfile, mutateXsProfiles, readXsProfiles } from './xsession-store.js';
+import { chainForNewTurn, decideRoute, providerFingerprint } from './xsession-policy.js';
+import { createAutoBudget, createXsScheduler } from './xsession-scheduler.js';
+import { assignShortIds, resolveTarget, selectXsSessions } from './xsession-resolve.js';
+import { buildXsEnvelope, neutralizeXsBody, normalizeXsSourceName } from './xsession-envelope.js';
+import { XS_LIST_SESSIONS_TOOL, XS_TOOLS_SERVER, createXsToolHandlers, createXsToolsServer } from './xsession-tools.js';
 
 export const XS_DISABLED_TEXT = '跨会话消息未开启';
 export const XS_CLAIM_INVALID_TEXT = '跨会话消息凭据无效';
@@ -36,8 +42,18 @@ export class XsError extends Error {
 const isIdString = (v) => typeof v === 'string' && isSessionIdShape(v);
 const sameId = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 
-// heldReason → heldText(一期只会出现这三种;全角标点)。turn-error 后面接摘要。
-const HELD_TEXT = { 'target-card': '等待你确认后处理', interrupted: '上次处理被中断' };
+// heldReason → heldText(全角标点)。turn-error、wake-failed 后面接摘要 / 原因(heldDetail)。r151c 加自动处理的六种。
+const HELD_TEXT = {
+  'target-card': '等待你确认后处理',
+  interrupted: '上次处理被中断',
+  'chain-limit': `已到连锁上限（${XS_LIMITS.chainDepth} 次）`,
+  paused: '自动处理已暂停',
+  'no-profile': '没有可用的发送设置，需在该会话里手动处理',
+  'profile-stale': '该会话上次发送后切换过 provider，需在该会话里手动处理一次',
+  'class-mismatch': '发送方与目标会话的权限类别不同（一方是「放任」档、另一方不是），不自动处理',
+  'target-stuck': '目标会话的上一条消息还没处理完',
+};
+const WAKE_FAILED_PREFIX = '未能开始处理：';
 const TURN_ERROR_PREFIX = '处理该消息的回合出错：';
 // failed 的摘要取回合结束通知带的 errorSummary(chat.js 已脱敏、截短);取不到时用这句固定话。"始终没开始回合"有自己的摘要。
 const TURN_FAILED_SUMMARY = '模型返回了错误或进程提前退出';
@@ -46,8 +62,12 @@ const NEVER_STARTED_SUMMARY = '未能开始处理';
 function heldTextOf(m) {
   if (m.status !== 'pending' || !m.heldReason) return null;
   if (m.heldReason === 'turn-error') return TURN_ERROR_PREFIX + (m.heldDetail || TURN_FAILED_SUMMARY);
+  if (m.heldReason === 'wake-failed') return WAKE_FAILED_PREFIX + (m.heldDetail || NEVER_STARTED_SUMMARY);
   return HELD_TEXT[m.heldReason] ?? null;
 }
+
+// 来源:会话里的 AI 发来的(kind:'session')另带 project(发送方会话所在项目目录名,r151c 补充约定);手动转发的不带。
+const sourceOf = (f) => ({ kind: f?.kind ?? 'user', sessionId: f?.sessionId ?? null, title: f?.title ?? null, ...(f?.kind === 'session' ? { project: f.project ?? null } : {}) });
 
 /** 对外的消息对象(白名单字段;不带 token / heldBefore / heldDetail / turn / projectPath)。body 不传 = 不带 body 键(广播用)。 */
 function publicMessage(m, { deleted = false, body } = {}) {
@@ -57,7 +77,7 @@ function publicMessage(m, { deleted = false, body } = {}) {
     status: m.status,
     chainId: m.chainId,
     hop: m.hop,
-    from: { kind: m.from?.kind ?? 'user', sessionId: m.from?.sessionId ?? null, title: m.from?.title ?? null, deleted },
+    from: { ...sourceOf(m.from), deleted },
     to: { sessionId: m.to.sessionId, title: m.to?.title ?? null },
     ...(body !== undefined ? { body } : {}),
     bodyBytes: m.bodyBytes,
@@ -237,16 +257,30 @@ export async function releaseMessage(id) {
   return { ok: true, id: m.id, status: 'pending' };
 }
 
+// r151c 先修 5:删会话(dropXsMessagesForSession)只抹已结束记录里该会话的标题;那一刻还没结束、以它为来源的消息不动
+// (卡片与信封还要用来源标题)。这些消息之后才结束(结算、忽略)时,在变为已结束的同一事务里补抹:来源会话的记录文件已不在
+// → from.title 抹成空字符串(与 from.deleted 同一判据)。查不出时不动,不让结算 / 忽略因此失败。
+async function eraseTitleIfSourceDeleted(m) {
+  const sid = m.from?.sessionId;
+  if (!sid || !m.from.title) return;
+  try {
+    if (!(await findSessionFile(sid))) m.from.title = '';
+  } catch (e) {
+    console.warn(`[xsession] 消息 ${m.id} 的来源会话查不出,来源标题未处理:${e?.code || e?.message || e}`);
+  }
+}
+
 /** pending / queued / claimed → dismissed;正文随即删除(存储层在消息结束时删),认领过的凭据作废。 */
 export async function dismissMessage(id) {
   assertMessageId(id);
-  const m = await mutateXsInbox((messages) => {
+  const m = await mutateXsInbox(async (messages) => {
     const m = findById(messages, id);
     if (!m) throw notFound();
     if (!['pending', 'queued', 'claimed'].includes(m.status)) throw new XsError(409, 'XS_NOT_PENDING', '这条消息不是待处理状态', { status: m.status });
     m.status = 'dismissed';
     m.heldReason = null;
     for (const k of ['heldBefore', 'heldDetail', 'token']) delete m[k];
+    await eraseTitleIfSourceDeleted(m);
     return structuredClone(m);
   });
   await announce([m]);
@@ -277,13 +311,7 @@ export async function dropXsMessagesForSession(sessionId) {
     return gone; // 存储层在写盘成功后删掉这些消息的正文
   });
   if (!removed.length) return 0;
-  for (const m of removed) { // 已兑换、还没结算的:它的回合不会再来结算了(或结算时找不到记录)
-    const f = inflight.get(m.id);
-    if (f) {
-      clearTimeout(f.timer);
-      inflight.delete(m.id);
-    }
-  }
+  for (const m of removed) dropInflight(m.id); // 已兑换 / 自动投递、还没结算的:它的回合不会再来结算了(或结算时找不到记录)
   await announce(removed.map((m) => ({ ...m, status: 'dismissed', heldReason: null })));
   releaseTurnHooksIfIdle();
   return removed.length;
@@ -295,8 +323,8 @@ export async function dropXsMessagesForSession(sessionId) {
  */
 export async function clearAllXsMessages() {
   const removed = await clearXsInbox();
-  for (const f of inflight.values()) clearTimeout(f.timer);
-  inflight.clear();
+  for (const id of [...inflight.keys()]) dropInflight(id);
+  queuedHint.clear();
   releaseTurnHooksIfIdle();
   return removed;
 }
@@ -312,6 +340,7 @@ let redeeming = 0; // 正在兑换(还没进 inflight)的请求数:关开关时�
 const START_GUARD_MS = 60_000;
 
 const reject = (status, code, error) => ({ reject: { status, body: { ok: false, code, error } } });
+const XS_MODE_CHANGED = 'XS_MODE_CHANGED'; // 只在内部回合的应答里出现(不对外)
 const claimInvalid409 = () => new XsError(409, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
 
 function tokenMatches(stored, given) {
@@ -327,7 +356,8 @@ function tokenMatches(stored, given) {
  * 消息不存在 / 凭据对不上 / 不是 claimed / 目标不是请求的 sessionId → 409 XS_CLAIM_INVALID;都不起进程。
  * 通过 → { prompt: 信封, tag }。自己兜住所有错误(抛出去会变成 500 CHAT_ENTRY_HOOK_FAILED)。
  */
-export async function xsChatEntry({ body, sessionId } = {}) {
+export async function xsChatEntry({ body, sessionId, internal } = {}) {
+  if (internal) return xsInternalEntry(internal, sessionId, body); // r151c:服务端自己起的自动处理回合(HTTP 请求恒为 null)
   const hasId = body?.xsMessageId !== undefined;
   const hasToken = body?.xsToken !== undefined;
   if (!hasId && !hasToken) return null;
@@ -364,17 +394,20 @@ async function redeemClaim(messageId, token, sessionId) {
     m.turn = { key };
     return { m: structuredClone(m), text };
   });
-  const name = m.from.sessionId ? `用户转发自 ${m.from.title ?? ''}` : '用户';
-  const prompt = buildXsEnvelope({ from: 'gui:user', name, body: text }); // 一期只有手动转发
+  // r151c A11:按来源种类构造信封 —— 会话里的 AI 发来的(kind:'session')来源是发送方会话、来源名是发送时存下的发送方标题;
+  // 用户手动转发的是 gui:user 与"用户转发自 <标题>"/"用户"。
+  const fromSession = m.from.kind === 'session' && isIdString(m.from.sessionId);
+  const name = fromSession ? (m.from.title ?? '') : (m.from.sessionId ? `用户转发自 ${m.from.title ?? ''}` : '用户');
+  const prompt = buildXsEnvelope({ from: fromSession ? `gui:${m.from.sessionId}` : 'gui:user', name, body: text });
   const event = {
     type: 'xs_message', id: m.id,
-    from: { kind: m.from.kind, sessionId: m.from.sessionId ?? null, title: m.from.title ?? null },
+    from: sourceOf(m.from),
     body: neutralizeXsBody(text), // 与模型收到的、历史里 origin.body 一致
     via: 'card', hop: m.hop,
   };
   const timer = setTimeout(() => { settleTurn(m.id, key, 'failed', NEVER_STARTED_SUMMARY); }, START_GUARD_MS);
   timer.unref?.();
-  inflight.set(m.id, { key, event, timer, pid: null });
+  inflight.set(m.id, { key, event, timer, pid: null, sessionId: m.to.sessionId });
   announce([m]);
   return { prompt, tag: { xsMessageId: m.id, key } };
 }
@@ -387,12 +420,15 @@ function inflightFor(tag) {
 
 // 回合开始:补 xs_message(同步投递 → 排在本回合任何 CLI 输出之前),记下承载它的进程号与回合代数。
 function onTurnStart(info) {
+  noteTurnStartProfile(info);
   const hit = inflightFor(info?.tag);
+  noteTurnStartChain(info, hit);
   if (!hit) return;
   const { id, f } = hit;
   clearTimeout(f.timer);
   f.timer = null;
   f.pid = info.pid;
+  if (f.auto) f.started = true; // 自动处理:回合开始了 → 只等结束通知(方案 A3)
   if (!deliverRunEvent(info.pid, f.event)) console.warn(`[xsession] 消息 ${id} 的 xs_message 未能投递`);
   mutateXsInbox((messages) => {
     const m = findById(messages, id);
@@ -401,26 +437,32 @@ function onTurnStart(info) {
 }
 
 function onTurnEnd(info) {
+  noteTurnEndProfile(info);
+  noteTurnEndChain(info);
   const hit = inflightFor(info?.tag);
   const detail = typeof info?.errorSummary === 'string' && info.errorSummary.trim() ? info.errorSummary : undefined;
-  if (hit) settleTurn(hit.id, hit.f.key, info.outcome, detail);
+  if (hit?.f.auto) {
+    // 自动处理:结束通知与内部入口的应答谁先到都行;两样都到了才结算(failed 没有摘要时用应答里的原因)
+    hit.f.ended = { outcome: info.outcome, detail };
+    if (hit.f.responded) finishAutoTurn(hit.id, hit.f);
+  } else if (hit) settleTurn(hit.id, hit.f.key, info.outcome, detail);
+  // 目标转空闲:有排队的,满 1.5 秒仍空闲再投。只差输入预测的回合(结束通知在预测收尾时才来)按结果时刻算转空闲
+  const since = info?.pid ? getActiveChatProcesses().find((p) => p.pid === info.pid)?.suggestWaitSince : null;
+  if (info?.sessionId) scheduler.noteTurnEnd(info.sessionId, since ?? undefined);
 }
 
 /** 结算一条 processing 的消息(只认本次兑换的回合 key,迟到的旧回合不动它)。 */
 async function settleTurn(id, key, outcome, detail) {
-  const f = inflight.get(id);
-  if (f && f.key === key) {
-    clearTimeout(f.timer);
-    inflight.delete(id);
-  }
+  dropInflight(id, key);
   try {
-    const m = await mutateXsInbox((messages) => {
+    const m = await mutateXsInbox(async (messages) => {
       const m = findById(messages, id);
       if (!m || m.status !== 'processing' || m.turn?.key !== key) return null;
       delete m.turn;
       if (outcome === 'completed') {
         m.status = 'done'; // 正文由存储层删除
         m.heldReason = null;
+        await eraseTitleIfSourceDeleted(m); // r151c 先修 5
       } else if (outcome === 'stopped') {
         m.status = 'pending';
         m.heldReason = 'interrupted';
@@ -445,7 +487,7 @@ async function settleTurn(id, key, outcome, detail) {
 // 失效(读不到登记表 / 内部出错 / chat.js 那边等了 2 秒没结果)→ 放行(= 现状),记日志并记下 nativeGuard.lastFailureAt 给设置块显示。
 // H5b 实测(2026-10-15,CLI 2.1.296):SDK 的 default / bypassPermissions / auto / plan 四档下,回调拒绝都生效、
 // 原因原样成为模型看到的工具结果;回调输入的 tool_input 带 CLI 补的 recipient 与 recipient_kind。
-export const NATIVE_GUARD_REASON = '这个会话由 CC-GUI 管理，不接收经 SendMessage 发来的消息。如需把内容交给它，请告诉用户在 CC-GUI 里转发。';
+export const NATIVE_GUARD_REASON = '这个会话由 CC-GUI 管理。给 CC-GUI 里的其它会话发消息请用 mcp__ccgui-sessions__send_message（可先用 mcp__ccgui-sessions__list_sessions 查看）；它也能发给当前没在运行的会话。';
 
 let nativeGuardLastFailureAt = null;
 export function noteNativeGuardFailure(at = new Date()) {
@@ -461,11 +503,14 @@ export function nativeGuardLastFailure() {
 // 套接字地址的比较口径(审计 S2 / 判官建议 10;目标与登记表两边同一口径):去掉 uds: 前缀;
 //   · Windows 命名管道(\\.\pipe\…,斜杠方向不限)或在 Windows 上:按 Windows 规范化,名字不区分大小写 → 统一小写;
 //   · 其余按 POSIX 规范化:合并重复斜杠、解析 . 与 ..、去掉结尾斜杠;/private/tmp 与 /tmp 是同一处(macOS 的 /tmp 是它的链接)。
+//   · macOS(r151c 先修 3):默认文件系统不区分大小写,只差大小写的两个地址指向同一个套接字 → 两边统一转小写
+//     (先转小写再认 /private/tmp,/Private/Tmp 也算)。只会多拒、不会漏拒;套接字名是 <pid>.sock,不会因此误伤别的会话。
 const WIN_PIPE_RE = /^[\\/]{2}[.?][\\/]pipe[\\/]/i;
 function socketKey(p) {
   const s = String(p).replace(/^uds:/i, '');
   if (process.platform === 'win32' || WIN_PIPE_RE.test(s)) return win32Path.normalize(s).toLowerCase();
   let n = posixPath.normalize(s);
+  if (process.platform === 'darwin') n = n.toLowerCase();
   if (n.length > 1 && n.endsWith('/')) n = n.slice(0, -1);
   if (n === '/private/tmp' || n.startsWith('/private/tmp/')) n = n.slice('/private'.length);
   return n;
@@ -476,6 +521,11 @@ function socketKey(p) {
 const NATIVE_TARGET_MAX_CHARS = 512;
 
 // ListAgents 把会话显示为"名字 [短号]":结尾(去空白后)是 "[…]" 且括号里没有 "]" 时去掉它。
+// r151c 先修 3 实测(真 CLI 2.1.296,隔离 HOME、只连本地假接口):CLI 按名字找会话不区分大小写(mixcase-alpha、
+// MIXCASE-ALPHA 都送到 MixCase-Alpha;重名时只回候选、不送达);"名字 [短号]"要名字(不分大小写)与短号(区分大小写)
+// 都对上才送达,名字前缀加短号、单独的短号都不送达。短号是每个进程自己的 6 位十六进制,登记表任何字段(含 .key 文件)
+// 都推不出来 → 没法按条目精确判:去掉短号只按名字认。偏严:同名的 GUI 会话与终端会话并存、短号指向终端那个时会误拒;
+// 不会漏拒。
 // 用 lastIndexOf / indexOf 线性判,不用带回溯的正则(审计 I1:"\s*\[[^\]]*\]\s*$" 对长输入是平方级)。
 function stripShortIdSuffix(raw) {
   const s = raw.trim();
@@ -551,6 +601,893 @@ export async function xsNativeGuard(input, ctx) {
   }
 }
 
+// ── r151c:发送档案(方案 A5 / A6 / A12 / A13)───────────────────────────────────────────────────────────────
+// 开关开着时,每个回合开始按本回合的会话级参数记一份档案:replay(重放用:请求原值,model 为解析值)与 judge(判定用:界面档位、
+// provider 指纹、记录时刻)。新会话首回合开始时还没有会话 id,拿到会话 id(CLI 的 init)时立即补记(补充约定),回合结束时再兜一次。内容没变不写盘;本次启用之前记的档案即使内容
+// 没变也重记一次(刷新记录时刻,否则重新打开开关后它永远不算数)。写失败记日志,该会话整条档案按没有档案判
+// (见 profileWriteFailed)。切档(/chat/permission-mode 200)同步改 replay.permissionMode 与 judge.mode;删会话时删档案(forgetXsSession)。
+const TURN_RECORDS_MAX = 512;
+const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合开始时的), params };回合开始记、结束删
+// 档案写失败(接口"审计之后的补充约定"第 4 条,取代派工 8 的"档位未知 → class-mismatch"):该会话的档案写失败过(切档没落盘、
+// 回合开始 / 拿到会话 id / 回合结束兜底时没记上),盘上那份的档位可能比用户最新的选择宽、其余重放参数也是旧的,按它判同类或
+// 重放都不偏安全。整条按"没有档案"判(去向表⑤ no-profile,落卡片;会话列表 hasProfile 同口径为 false,见 profileCountsFor),
+// 该会话下一次档案成功落盘(或内容没变、无需落盘)后清掉。只在内存:服务重启后丢失,之后按盘上的档案判。
+const profileWriteFailed = new Set(); // 会话 id(小写)
+// 最新档位(审计 S1;接口"审计之后的补充约定"第 3 条:存活进程 > 最近一次切档 > 发送档案):切档钩子与回合开始钩子里同步记
+// (在任何读盘、写盘之前),判定时排在存活槽之后、档案之前。档案经存储队列异步落盘,而 evaluateSession / sendAiMessages 先读档案
+// 快照、后进收件箱事务,两步之间用户切档并落盘的话快照里还是旧档位;判定与重放都读这张表,用的就是最新的选择。只记合法的六档、
+// 只在内存;删会话时清掉;服务重启后丢失,之后按盘上的档案判。拿到会话 id、回合结束兜底两处用的是回合开始时的参数,
+// 表里已有就不覆盖(回合中途切过档时不把旧档位写回)。
+const LATEST_MODES_MAX = 1024;
+const latestGuiMode = new Map(); // 会话 id(小写)→ 界面档位
+function noteLatestMode(sessionId, mode, { ifAbsent = false } = {}) {
+  if (!isIdString(sessionId) || !XS_PROFILE_MODES.includes(mode)) return;
+  const k = sessionId.toLowerCase();
+  if (ifAbsent && latestGuiMode.has(k)) return;
+  latestGuiMode.delete(k); // 重新排到最后:满了先淘汰最久没动的
+  if (latestGuiMode.size >= LATEST_MODES_MAX) latestGuiMode.delete(latestGuiMode.keys().next().value);
+  latestGuiMode.set(k, mode);
+}
+// 偏好文件在、却读不出(审计 S1):不能当"总开关关着"静默跳过 —— 那样既不写盘也不留标记,判定仍按盘上的旧档案。
+// 按档案写失败处理(该会话按没有档案判,见 profileWriteFailed),直到下一次记录成功。
+function profilePrefsUnreadable(sessionId, what) {
+  profileWriteFailed.add(sessionId.toLowerCase());
+  console.warn(`[xsession] 会话 ${sessionId} 的${what}没有记进档案:偏好文件读不出(按没有档案判,直到下次记录成功)`);
+}
+
+// ~/.claude.json 的两项读数:登录账号(provider 指纹用)与哪些作用域配了同名 MCP 服务(免确认守卫用,见 shadowingXsServerScopes)。
+// 文件可能很大且 CLI 常写:按修改时间 + 大小缓存解析结果,只留这两项;另设最短间隔(XS_CLAUDE_JSON_MIN_MS)。
+const EMPTY_CLAUDE_JSON = Object.freeze({ key: null, accountId: '', userXs: false, localXsDirs: Object.freeze([]), unreadable: false });
+let claudeJsonCache = EMPTY_CLAUDE_JSON;
+// 两次读 ~/.claude.json 的最短间隔(单调时钟,不受墙上时间平移影响)。CLI 每次启动 / 退出都会改写这个文件,按修改时间缓存
+// 几乎回回失效,每个回合开始记档案、每次判定、每次冷启都要整份重读重解析。间隔内直接用上次的读数,代价:换登录账号
+// (oauthAccount)或增删同名 MCP 服务后最多晚 2 秒才被看到 —— 这 2 秒内判定 / 投递的消息仍按换号前的账号算 provider 指纹,
+// 即换号后档案最多晚 2 秒判 profile-stale;冷启的同名服务检查同理最多晚 2 秒。settings.json 不在此列(每次现读)。
+export const XS_CLAUDE_JSON_MIN_MS = 2000;
+let claudeJsonReadAt = -Infinity;
+function readClaudeJsonSync() {
+  const now = performance.now();
+  if (now - claudeJsonReadAt < XS_CLAUDE_JSON_MIN_MS) return claudeJsonCache;
+  claudeJsonReadAt = now;
+  const file = join(homedir(), '.claude.json');
+  try {
+    const st = statSync(file);
+    const key = `${st.mtimeMs}:${st.size}`;
+    if (claudeJsonCache.key !== key) {
+      let j;
+      try { j = JSON.parse(readFileSync(file, 'utf-8')); } catch { j = undefined; }
+      // 读不出 / 损坏(审计 S2):登录账号按空(provider 指纹随之不同,档案判 profile-stale);同名服务按"有"(失败时不免确认)
+      if (j === undefined) { claudeJsonCache = { ...EMPTY_CLAUDE_JSON, key, unreadable: true }; return claudeJsonCache; }
+      const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+      const root = obj(j);
+      const id = obj(root.oauthAccount).accountUuid;
+      const projects = obj(root.projects);
+      claudeJsonCache = {
+        key, accountId: typeof id === 'string' ? id : '',
+        userXs: !!obj(root.mcpServers)[XS_TOOLS_SERVER],
+        localXsDirs: Object.keys(projects).filter((k) => !!obj(obj(projects[k]).mcpServers)[XS_TOOLS_SERVER]),
+        unreadable: false,
+      };
+    }
+  } catch (e) { claudeJsonCache = e?.code === 'ENOENT' ? EMPTY_CLAUDE_JSON : { ...EMPTY_CLAUDE_JSON, unreadable: true }; } // 不存在 = 没配
+  return claudeJsonCache;
+}
+/** GUI 起会话时 CLI 读的那份配置里的 provider 身份(与起进程同源,不读宿主进程环境变量)。凭据原文只留在内存里、不出本函数的调用方。 */
+function readProviderIdentitySync() {
+  let settings = null;
+  try { settings = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf-8')); } catch { /* 没有 / 损坏 → 全空 */ }
+  const s = settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : {};
+  return {
+    settingsEnv: s.env, apiKeyHelper: s.apiKeyHelper, accountId: readClaudeJsonSync().accountId,
+    helpers: { awsAuthRefresh: s.awsAuthRefresh, awsCredentialExport: s.awsCredentialExport, gcpAuthRefresh: s.gcpAuthRefresh },
+  };
+}
+
+/** 当前配置的 provider 指纹(salt 取自档案文件,见 readXsProfiles)。 */
+export function currentProviderFp(salt) {
+  return providerFingerprint({ ...readProviderIdentitySync(), salt });
+}
+
+/** 档案是不是本次启用(xsEnabledAt)之后记录的;enabledAt 为 null 时一律不认。 */
+export function profileIsCurrent(profile, enabledAt) {
+  if (!profile || typeof enabledAt !== 'string') return false;
+  const at = Date.parse(enabledAt);
+  const rec = Date.parse(profile.judge?.recordedAt);
+  return Number.isFinite(at) && Number.isFinite(rec) && rec >= at;
+}
+
+/** 这条档案算不算数(去向表⑤与会话列表 hasProfile 同口径):本次启用之后记录的,且该会话此后没有档案写失败(见 profileWriteFailed)。 */
+export function profileCountsFor(sessionId, profile, enabledAt) {
+  return !profileWriteFailed.has(String(sessionId).toLowerCase()) && profileIsCurrent(profile, enabledAt);
+}
+
+async function recordProfile(sessionId, params) {
+  if (!isIdString(sessionId) || !params || typeof params !== 'object') return;
+  const prefs = readXsPrefsDetailedSync();
+  if (prefs.readFailed) return profilePrefsUnreadable(sessionId, '发送档案');
+  if (!prefs.enabled) return; // 档案只在开着时写(关开关时回合钩子会为在途回合多留一会儿)
+  const body = params.body && typeof params.body === 'object' ? params.body : {};
+  const replay = Object.fromEntries(XS_PROFILE_REPLAY_KEYS.map((k) => [k, body[k] === undefined ? null : body[k]]));
+  const mode = params.guiMode;
+  try {
+    await mutateXsProfiles((d) => {
+      const providerFp = currentProviderFp(d.salt);
+      const prevKey = Object.keys(d.sessions).find((k) => sameId(k, sessionId));
+      const prev = prevKey ? d.sessions[prevKey] : null;
+      const same = prev && prev.judge.mode === mode && prev.judge.providerFp === providerFp && JSON.stringify(prev.replay) === JSON.stringify(replay);
+      if (same && (profileIsCurrent(prev, prefs.enabledAt) || !prefs.enabledAt)) return; // 内容没变不写盘
+      if (prevKey) delete d.sessions[prevKey];
+      d.sessions[sessionId] = { replay, judge: { mode, providerFp, recordedAt: new Date().toISOString() } };
+    });
+    profileWriteFailed.delete(sessionId.toLowerCase());
+  } catch (e) {
+    profileWriteFailed.add(sessionId.toLowerCase());
+    console.warn(`[xsession] 会话 ${sessionId} 的发送档案未能落盘(按没有档案判,直到下次记录成功):${e?.cause?.code || e?.code || e?.message || e}`);
+  }
+}
+
+function noteTurnStartProfile(info) {
+  const params = info?.params;
+  if (!params || typeof params !== 'object' || !info.runId) return;
+  if (turnRecords.size >= TURN_RECORDS_MAX) turnRecords.delete(turnRecords.keys().next().value); // 兜底:没等到结束的回合不无限累积
+  turnRecords.set(`${info.runId}:${info.turnEpoch | 0}`, { sessionId: info.sessionId || null, params });
+  if (info.sessionId) {
+    noteLatestMode(info.sessionId, params.guiMode);
+    recordProfile(info.sessionId, params);
+  }
+}
+
+// chat.js 的 sessionBound 通知:新会话的回合拿到会话 id。回合记录与连锁记录补上会话 id,立即记档案(不等回合结束)。
+function onSessionBound(info) {
+  if (!info?.runId || !isIdString(info.sessionId)) return;
+  const key = `${info.runId}:${info.turnEpoch | 0}`;
+  const rec = turnRecords.get(key);
+  if (rec && !rec.sessionId) {
+    rec.sessionId = info.sessionId;
+    noteLatestMode(info.sessionId, rec.params.guiMode, { ifAbsent: true });
+    recordProfile(info.sessionId, rec.params);
+  }
+  const chain = turnChains.get(key);
+  if (chain && !chain.sessionId) chain.sessionId = info.sessionId;
+}
+
+function noteTurnEndProfile(info) {
+  const key = `${info?.runId}:${info?.turnEpoch | 0}`;
+  const rec = turnRecords.get(key);
+  if (!rec) return;
+  turnRecords.delete(key);
+  if (!rec.sessionId && info.sessionId) { // 新会话首回合没收到 sessionBound 时兜底
+    noteLatestMode(info.sessionId, rec.params.guiMode, { ifAbsent: true });
+    recordProfile(info.sessionId, rec.params);
+  }
+}
+
+// modeChange 钩子:切档生效(或会话没有进程)时先同步记最新档位,再同步该会话档案里的两处档位;没有档案不新建。
+async function xsModeChange({ sessionId, mode } = {}) {
+  if (!isIdString(sessionId) || !XS_PROFILE_MODES.includes(mode)) return;
+  noteLatestMode(sessionId, mode);
+  const prefs = readXsPrefsDetailedSync();
+  if (prefs.readFailed) return profilePrefsUnreadable(sessionId, '切档');
+  if (!prefs.enabled) return;
+  try {
+    await mutateXsProfiles((d) => {
+      for (const [k, p] of Object.entries(d.sessions)) {
+        if (!sameId(k, sessionId)) continue;
+        p.replay.permissionMode = mode;
+        p.judge.mode = mode;
+      }
+    });
+    profileWriteFailed.delete(sessionId.toLowerCase());
+  } catch (e) {
+    profileWriteFailed.add(sessionId.toLowerCase()); // 盘上仍是切档前的档位:不能再按它判同类、重放
+    console.warn(`[xsession] 会话 ${sessionId} 的档案档位未能落盘(按没有档案判,直到下次记录成功):${e?.cause?.code || e?.code || e?.message || e}`);
+  }
+}
+
+/** DELETE /api/sessions/:id 删掉记录文件之后调用:删该会话的发送档案(接收设置由 removeSessionFromPrefs 清)。不看总开关;文件不存在时什么都不写。 */
+export async function forgetXsSession(sessionId) {
+  if (!isIdString(sessionId)) return false;
+  for (const [k, r] of turnRecords) if (sameId(r.sessionId, sessionId)) turnRecords.delete(k);
+  for (const [k, r] of turnChains) if (sameId(r.sessionId, sessionId)) turnChains.delete(k); // 连锁标记与单回合发送计数
+  scheduler.forget(sessionId);
+  queuedHint.delete(sessionId.toLowerCase());
+  profileWriteFailed.delete(sessionId.toLowerCase());
+  latestGuiMode.delete(sessionId.toLowerCase());
+  return dropXsProfile(sessionId);
+}
+
+// ── r151c:自动处理(方案 A2 / A3 / A10 / A12,§3 调度与判定;接口 §4 去向表与错误总表)──────────────────────────────
+// 消息到达(AI 发送)时按去向表判一次:落卡片的直接 pending;其余写成 queued,提交后通知调度器。调度器在目标会话的串行链上
+// 评估:一次存储事务里把该会话的 queued 按去向表全部重判(不满足的转 pending)、取最早一条置 processing / via:auto /
+// turn.key 并计数;事务提交之后才登记 inflight 并调内部入口起回合(入口钩子也读收件箱、走同一条存储队列,在事务里起回合会自锁)。
+// 结算只看这条消息的回合有没有开始:开始了只等结束通知(completed → done、stopped → interrupted、failed → turn-error);
+// 没开始(应答非 200 或抛错):409 CHAT_SESSION_BUSY → 退回 queued 等下一次;其余 → pending / wake-failed,不自动重试。
+// 进程没起来(CHAT_START_FAILED:吐出第一条事件之前就退出 / query() 起不来)即使已报过回合开始,也按没开始结算
+// (行为清单第 12 条:自动处理起不来 → wake-failed,不自动重试)。
+// 防失控:连锁深度 4(hop 记在消息上,标记记进回合记录)、单次 8 个目标、单回合 16 条、全局 10 分钟 20 次(触顶即暂停,
+// 写盘 + 广播 xs:config,重启仍暂停,用户恢复时清窗口)。自动处理超过 30 分钟未结算 → 该会话"卡住":排队中的与新到的落
+// target-stuck,直到那条结算;那个回合不被自动中止。时长一律在事件到来时拿 Date.now() 比较起算时刻(定时器只是提前叫醒)。
+export const XS_STUCK_MS = 30 * 60_000;
+const AUTO_PLACEHOLDER_PROMPT = '（跨会话消息）'; // 内部回合的占位 prompt:入口钩子随即整条换成信封
+const queuedHint = new Set(); // 可能有 queued 消息的会话(小写);只用来省掉无谓的评估,真假以收件箱为准
+let autoPausedMem = false; // 本进程内的暂停(触顶那一刻立即生效;写盘失败时也按它暂停)
+const budget = createAutoBudget({ limit: XS_LIMITS.autoPerWindow, windowMs: XS_LIMITS.autoWindowMs });
+const scheduler = createXsScheduler({ evaluate: evaluateSession, hasQueued: (id) => queuedHint.has(String(id).toLowerCase()) });
+
+const isAutoPaused = (prefs) => autoPausedMem || prefs.autoPaused === true;
+/** GET /api/xsession/config 的 autoPaused 与 autoBudget.used。 */
+export function xsAutoState() {
+  return { paused: isAutoPaused(readXsPrefsSync()), used: budget.used() };
+}
+
+/** 撤掉一条 inflight 登记(给了 key 时只撤这一次的)与它的定时器;返回撤掉的登记或 null。 */
+function dropInflight(id, key) {
+  const f = inflight.get(id);
+  if (!f || (key !== undefined && f.key !== key)) return null;
+  clearTimeout(f.timer);
+  clearTimeout(f.stuckTimer);
+  inflight.delete(id);
+  return f;
+}
+
+// 目标忙:有正在跑的回合(判据同 findBusySlot)、或有已兑换 / 已投递还没结算的消息;调度投递时另把"刚转空闲、没满 1.5 秒"算作忙。
+// 回合结果已出、只差输入预测(补充约定"回合结果出来就算结束")不算在跑:那个槽、以及回合已开始的那条消息都不算忙;
+// 还没起回合的消息(含等预测收尾再起的)照样算忙,一个会话一次只投一条。
+function targetBusy(sessionId, includeSettling) {
+  if (includeSettling && scheduler.settling(sessionId)) return true;
+  const procs = getActiveChatProcesses().filter((p) => sameId(p.sessionId, sessionId));
+  const resultOut = procs.some((p) => p.busy && p.awaitingSuggestion);
+  for (const f of inflight.values()) if (sameId(f.sessionId, sessionId) && !(resultOut && f.started)) return true;
+  return procs.some((p) => p.busy && !p.awaitingSuggestion);
+}
+// 目标只差输入预测(SDK 在结果之后另生成下一步输入预测,收尾窗最长约 4 秒)时等它收尾再起回合:不中止预测,
+// 也不让内部入口因此回"会话正忙"。按轮次计时(不看墙上时间);等不到(续跑了 / 超时)照常起,真忙由 409 退回排队。
+// 收尾窗撤掉之后:不保活的进程是关了输入流再等它退出,退出之前槽仍算忙(内部入口会回 409),再给一小段时间等它真正退出。
+const SUGGEST_SETTLE_POLL_MS = 100;
+const SUGGEST_SETTLE_MAX_POLLS = 100;
+const SUGGEST_EXIT_GRACE_POLLS = 30;
+const sessionSlots = (sessionId) => getActiveChatProcesses().filter((p) => sameId(p.sessionId, sessionId) && p.busy);
+const awaitingSuggestion = (sessionId) => sessionSlots(sessionId).some((p) => p.awaitingSuggestion);
+async function waitSuggestionSettled(sessionId) {
+  const pause = () => new Promise((r) => setTimeout(r, SUGGEST_SETTLE_POLL_MS));
+  for (let i = 0; i < SUGGEST_SETTLE_MAX_POLLS && awaitingSuggestion(sessionId); i += 1) await pause();
+  for (let i = 0; i < SUGGEST_EXIT_GRACE_POLLS && sessionSlots(sessionId).length; i += 1) await pause();
+}
+// 卡住:有一条自动处理的消息开始处理超过 30 分钟仍未结算(按此刻的 Date.now() 判)。
+function targetStuck(sessionId) {
+  const now = Date.now();
+  for (const f of inflight.values()) if (f.auto && sameId(f.sessionId, sessionId) && now - f.startedAt > XS_STUCK_MS) return true;
+  return false;
+}
+// 存活槽的界面档位(有就优先于档案,方案 A5)。
+function liveGuiMode(sessionId) {
+  let mode = null;
+  for (const p of getActiveChatProcesses()) if (sameId(p.sessionId, sessionId) && p.exitCode === null && p.guiMode) mode = p.guiMode;
+  return mode;
+}
+// 目标此刻的档位:存活槽的 > 最近一次切档 / 回合开始记的(latestGuiMode)> 档案的(接口"审计之后的补充约定"第 3 条)。
+// 判定、起回合前重读、内部入口核对都用这一个顺序(接口"复审之后的补充约定"第 1 条)。
+function currentTargetMode(sessionId, profile) {
+  return liveGuiMode(sessionId) ?? latestGuiMode.get(String(sessionId).toLowerCase()) ?? profile?.judge.mode ?? null;
+}
+const profileIn = (profiles, sessionId) => {
+  const pk = profiles ? Object.keys(profiles.sessions).find((k) => sameId(k, sessionId)) : null;
+  return pk ? profiles.sessions[pk] : null;
+};
+function fingerprintOrNull(salt) {
+  try { return currentProviderFp(salt); } catch { return null; }
+}
+// 去向表里与目标有关的几项。判定与重放用同一读数的档位(targetMode):存活槽的档位 > 最近一次切档 / 回合开始记的
+// (latestGuiMode)> 档案的(接口"审计之后的补充约定"第 3 条)。
+// 档案写失败过的会话整条按没有档案判(hasProfile 为 false → no-profile,见 profileCountsFor)。
+function targetFacts(sessionId, prefs, profiles, fp) {
+  const inbound = Object.keys(prefs.inbound).some((k) => sameId(k, sessionId)) ? 'auto' : 'card';
+  const profile = profileIn(profiles, sessionId);
+  return {
+    inbound,
+    hasProfile: profileCountsFor(sessionId, profile, prefs.enabledAt),
+    profileFresh: !!profile && !!fp && profile.judge.providerFp === fp,
+    targetMode: currentTargetMode(sessionId, profile),
+    replay: profile?.replay ?? null,
+  };
+}
+async function readProfilesQuietly() {
+  try { return await readXsProfiles(); } catch (e) {
+    console.warn(`[xsession] 读发送档案失败,按没有档案判:${e?.code || e?.message || e}`);
+    return null;
+  }
+}
+
+// ── 连锁标记与单回合发送计数:记进回合记录(键 runId:turnEpoch;回合结束后保留,回合结束后才发消息的后台任务读的仍是它)──
+const TURN_CHAINS_MAX = 1024;
+const turnChains = new Map(); // key → { sessionId, chain: { chainId, hop } | null, sends }
+function rememberTurnChain(key, rec) {
+  turnChains.delete(key);
+  if (turnChains.size >= TURN_CHAINS_MAX) turnChains.delete(turnChains.keys().next().value);
+  turnChains.set(key, rec);
+  return rec;
+}
+function noteTurnStartChain(info, hit) {
+  if (!info?.runId) return;
+  const epoch = info.turnEpoch | 0;
+  const plain = !hit && info.tag === undefined;
+  const liveTasks = plain ? (getActiveChatProcesses().find((p) => p.pid === info.pid)?.liveTasks | 0) : 0;
+  const previous = liveTasks > 0 ? (turnChains.get(`${info.runId}:${epoch - 1}`)?.chain ?? null) : null;
+  rememberTurnChain(`${info.runId}:${epoch}`, { sessionId: info.sessionId || null, chain: chainForNewTurn({ redeemed: hit?.f ?? null, liveTasks, previous }), sends: 0 });
+}
+function noteTurnEndChain(info) {
+  const rec = info?.runId ? turnChains.get(`${info.runId}:${info.turnEpoch | 0}`) : null;
+  if (rec && !rec.sessionId && info.sessionId) rec.sessionId = info.sessionId; // 新会话首回合:开始时还没有会话 id
+}
+function senderTurnRecord({ runId, turnEpoch, sessionId }) {
+  const key = `${runId}:${turnEpoch | 0}`;
+  return turnChains.get(key) || rememberTurnChain(key, { sessionId: sessionId || null, chain: null, sends: 0 });
+}
+
+// ── 会话里的 AI 发消息(mcp__ccgui-sessions__send_message 的业务;接口 §4 错误总表的 ①④–⑧ 与单项失败)──────────────
+export const XS_SEND_NOTICE = '发送后不会同步收到回复。对方若回复，会作为一条新的跨会话消息到达本会话。对方处理消息会消耗额度。';
+const SEND_NOTE = {
+  card: '对方设置为待处理，需其用户确认后才会处理',
+  queued: '对方正在运行，回合结束后自动处理',
+  auto: '对方将立即开始处理',
+  merged: '与前面的目标是同一个会话，已合并',
+};
+const AI_TO_MAX_ITEMS = 32;
+const AI_TO_ITEM_MAX_CHARS = 256;
+const AI_MESSAGE_MAX_CHARS = 65536;
+const XS_INTERNAL_TEXT = '发送失败，未投递任何消息';
+// 字数按码点计;输入是另一个模型的输出,先看 UTF-16 长度,超了才逐个数(数到上限即停,不为超长输入分配大数组)。
+function exceedsChars(s, max) {
+  if (s.length <= max) return false;
+  let n = 0;
+  for (const _ of s) if (++n > max) return true; // eslint-disable-line no-unused-vars
+  return false;
+}
+
+// rows 可以是会话行数组,也可以是取会话行的异步函数(工具用:先判完开关、发送方与长度,再读会话列表 —— 读失败属于错误总表 ⑧)。
+async function resolveRows(rows, internalText) {
+  if (typeof rows !== 'function') return Array.isArray(rows) ? rows : [];
+  let out;
+  try { out = await rows(); } catch (e) {
+    console.warn(`[xsession] 读会话列表失败:${e?.code || e?.message || e}`);
+    throw new XsError(500, 'XS_INTERNAL', internalText);
+  }
+  return Array.isArray(out) ? out : [];
+}
+
+// ── 会话里的 AI 列出会话(mcp__ccgui-sessions__list_sessions 的业务;接口 X.3.2 与 r151c §4 错误总表 ①③④⑧)──────────
+const AI_LIST_MAX = 30;
+const AI_QUERY_MAX_CHARS = 100;
+const AI_LIST_INTERNAL_TEXT = '读取会话列表失败';
+/**
+ * sender 同 sendAiMessages;rows 同上(数组或异步函数)。返回 { self:{id,name}, sessions:[{id,name,project,state,inbound}], truncated }:
+ * 不含自己、按最近活动倒序(rows 已排好)、最多 30 项;id 是短 id(冲突按全部会话判,与会话列表同口径);name 是会话列表同口径的
+ * 标题再按来源名规则清洗;query 与会话列表的 query 同规则(标题或目录名、不分大小写的子串)。整次失败抛 XsError。
+ */
+export async function listAiSessions({ sender, query } = {}, rows) {
+  if (!readXsEnabledSync()) throw new XsError(409, 'XS_DISABLED', XS_DISABLED_TEXT);
+  if (!isIdString(sender?.sessionId)) throw new XsError(500, 'XS_INTERNAL', '取不到发送方会话');
+  if (query !== undefined && (typeof query !== 'string' || exceedsChars(query, AI_QUERY_MAX_CHARS))) {
+    throw new XsError(400, 'XS_INVALID_INPUT', `query 必须是不超过 ${AI_QUERY_MAX_CHARS} 字的字符串`);
+  }
+  const all = await resolveRows(rows, AI_LIST_INTERNAL_TEXT);
+  const selfRow = all.find((r) => sameId(r.sessionId, sender.sessionId)) || null;
+  const selfId = selfRow ? selfRow.sessionId : sender.sessionId;
+  const shortIds = assignShortIds([...all.map((r) => r.sessionId), ...(selfRow ? [] : [selfId])]);
+  const inbound = readXsPrefsSync().inbound;
+  const inboundOf = (id) => (Object.keys(inbound).some((k) => sameId(k, id)) ? 'auto' : 'card');
+  const picked = selectXsSessions(all.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), { query: query ?? '', limit: AI_LIST_MAX + 1, exclude: selfId });
+  return {
+    self: { id: shortIds.get(selfId), name: normalizeXsSourceName(selfRow?.title) },
+    sessions: picked.slice(0, AI_LIST_MAX).map((s) => ({ id: s.shortId, name: normalizeXsSourceName(s.title), project: s.project, state: s.state, inbound: inboundOf(s.sessionId) })),
+    truncated: picked.length > AI_LIST_MAX,
+  };
+}
+
+/**
+ * sender = { sessionId, runId, turnEpoch, guiMode }(发送方槽在调用那一刻的值);rows = 已落盘会话行(与会话列表同一认定,
+ * [{ sessionId, title, project, projectDir }];也可以是取它的异步函数,见 resolveRows)。整次失败抛 XsError(code 为 XS_DISABLED / XS_INTERNAL / XS_INVALID_INPUT /
+ * XS_TOO_MANY_TARGETS / XS_BODY_TOO_LARGE / XS_TURN_SEND_LIMIT),一条不发、不计入 16;否则返回 { results, notice }。
+ */
+export async function sendAiMessages({ sender, to, message } = {}, rows) {
+  const invalid = (msg) => new XsError(400, 'XS_INVALID_INPUT', msg);
+  if (!readXsEnabledSync()) throw new XsError(409, 'XS_DISABLED', XS_DISABLED_TEXT);
+  if (!isIdString(sender?.sessionId) || typeof sender.runId !== 'string' || !sender.runId) throw new XsError(500, 'XS_INTERNAL', '取不到发送方会话');
+  const specs = typeof to === 'string' ? [to] : to;
+  if (!Array.isArray(specs) || specs.length === 0 || specs.length > AI_TO_MAX_ITEMS
+    || !specs.every((x) => typeof x === 'string' && x.trim() && !exceedsChars(x, AI_TO_ITEM_MAX_CHARS))) {
+    throw invalid(`to 须为会话 id 或标题：非空字符串，或 1–${AI_TO_MAX_ITEMS} 项的数组，每项不超过 ${AI_TO_ITEM_MAX_CHARS} 字`);
+  }
+  if (typeof message !== 'string' || !message.trim() || exceedsChars(message, AI_MESSAGE_MAX_CHARS)) {
+    throw invalid(`message 须为非空字符串，不超过 ${AI_MESSAGE_MAX_CHARS} 字`);
+  }
+  const all = await resolveRows(rows, XS_INTERNAL_TEXT);
+  const shortIds = assignShortIds(all.map((r) => r.sessionId));
+  // name = 会话列表标题再按来源名规则清洗(与 list_sessions 的 name 同口径);按标题找目标时清洗前后的写法都认
+  const sessions = all.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId), name: normalizeXsSourceName(r.title) }));
+  const senderRow = sessions.find((r) => sameId(r.sessionId, sender.sessionId)) || null;
+  // 解析并按会话去重(同一会话写两次只发一条);解析不了、是自己的项单独失败,不计入 8 个
+  const items = [];
+  const firstOf = new Map();
+  for (const spec of specs) {
+    const r = resolveTarget(spec, sessions);
+    if (!r.ok) {
+      items.push({ to: spec, fail: r.reason === 'ambiguous'
+        ? { error: 'XS_TARGET_AMBIGUOUS', message: '有多个会话叫这个名字，请改用 id', candidates: r.candidates.map((c) => ({ id: c.shortId, name: normalizeXsSourceName(c.title), project: c.project })) }
+        : { error: 'XS_TARGET_NOT_FOUND', message: '没有叫这个名字的会话，请先调用 list_sessions' } });
+      continue;
+    }
+    const k = r.session.sessionId.toLowerCase();
+    if (sameId(k, sender.sessionId)) items.push({ to: spec, fail: { error: 'XS_SELF_TARGET', message: '不能发给当前会话自己' } });
+    else if (firstOf.has(k)) items.push({ to: spec, key: k, merged: true });
+    else { firstOf.set(k, r.session); items.push({ to: spec, key: k }); }
+  }
+  const targets = [...firstOf.values()];
+  if (targets.length > XS_LIMITS.targetsPerSend) throw new XsError(400, 'XS_TOO_MANY_TARGETS', `一次最多发给 ${XS_LIMITS.targetsPerSend} 个会话`);
+  const bodyBytes = Buffer.byteLength(message, 'utf8');
+  if (bodyBytes > XS_LIMITS.bodyBytes) throw new XsError(400, 'XS_BODY_TOO_LARGE', `正文超过 ${XS_LIMITS.bodyBytes} 字节`);
+  const rec = senderTurnRecord(sender);
+  if (rec.sends + targets.length > XS_LIMITS.sendsPerTurn) throw new XsError(400, 'XS_TURN_SEND_LIMIT', `一个回合最多发 ${XS_LIMITS.sendsPerTurn} 条`);
+
+  let outcome = new Map();
+  if (targets.length) {
+    rec.sends += targets.length; // 先占住名额(同一回合并发的两次调用不会一起越过 16),提交后按实际入箱数退回差额
+    const prefs = readXsPrefsSync();
+    const profiles = await readProfilesQuietly();
+    const fp = profiles ? fingerprintOrNull(profiles.salt) : null;
+    // 连锁:发送方当前回合的标记 + 1;没有标记 = 新链(同一次发送共用一个 chainId)
+    const chainId = rec.chain?.chainId ?? randomUUID();
+    const hop = (rec.chain?.hop ?? 0) + 1;
+    const from = {
+      kind: 'session', sessionId: senderRow ? senderRow.sessionId : sender.sessionId, title: senderRow ? senderRow.title : null,
+      project: typeof senderRow?.project === 'string' ? senderRow.project : null, mode: typeof sender.guiMode === 'string' ? sender.guiMode : null,
+    };
+    const createdAt = new Date().toISOString();
+    try {
+      outcome = await mutateXsInbox((messages, tx) => {
+        const openOf = new Map(); // "待处理已满 50":自动处理这一路把 queued 也算进去(排着的同样占着用户的待办)
+        for (const m of messages) {
+          if (m.status === 'pending' || m.status === 'queued') openOf.set(m.to.sessionId.toLowerCase(), (openOf.get(m.to.sessionId.toLowerCase()) || 0) + 1);
+        }
+        const res = new Map();
+        for (const t of targets) {
+          const k = t.sessionId.toLowerCase();
+          if ((openOf.get(k) || 0) >= XS_LIMITS.pendingPerSession) { res.set(k, { full: true }); continue; }
+          const f = targetFacts(t.sessionId, prefs, profiles, fp);
+          const route = decideRoute({
+            manual: false, inbound: f.inbound, hop, paused: isAutoPaused(prefs), hasProfile: f.hasProfile, profileFresh: f.profileFresh,
+            senderMode: from.mode, targetMode: f.targetMode, stuck: targetStuck(t.sessionId), busy: targetBusy(t.sessionId, false),
+          });
+          const m = {
+            id: randomUUID(), createdAt, status: route.status === 'pending' ? 'pending' : 'queued', chainId, hop,
+            from: { ...from }, to: { sessionId: t.sessionId, title: t.title, projectPath: t.projectDir ?? null },
+            bodyBytes, via: null, heldReason: route.status === 'pending' ? route.heldReason : null,
+          };
+          messages.push(m);
+          tx.putBody(m.id, message);
+          res.set(k, { m: structuredClone(m), delivery: route.status === 'pending' ? 'card' : route.status === 'queued' ? 'queued' : 'auto' });
+        }
+        return res;
+      });
+    } catch (e) {
+      rec.sends -= targets.length;
+      if (e instanceof XsError) throw e;
+      console.warn(`[xsession] AI 发送未能落盘:${e?.cause?.code || e?.code || e?.message || e}`);
+      throw new XsError(500, 'XS_INTERNAL', XS_INTERNAL_TEXT);
+    }
+    const created = [...outcome.values()].filter((x) => x.m).map((x) => x.m);
+    rec.sends -= targets.length - created.length; // 失败的目标不计入 16
+    if (created.length) await announce(created);
+    for (const m of created) {
+      if (m.status !== 'queued') continue;
+      queuedHint.add(m.to.sessionId.toLowerCase());
+      scheduler.kick(m.to.sessionId);
+    }
+  }
+  const noteOf = (x) => {
+    if (x.delivery === 'card') return x.m.heldReason === 'target-card' ? SEND_NOTE.card : heldTextOf(x.m);
+    return SEND_NOTE[x.delivery];
+  };
+  const results = items.map((it) => {
+    if (it.fail) return { to: it.to, ok: false, ...it.fail };
+    const x = outcome.get(it.key);
+    if (x.full) return { to: it.to, ok: false, error: 'XS_INBOX_FULL', message: `目标会话的待处理消息已满（${XS_LIMITS.pendingPerSession} 条）` };
+    const t = firstOf.get(it.key);
+    return { to: it.to, ok: true, id: t.shortId, name: t.name, delivery: x.delivery, note: it.merged ? SEND_NOTE.merged : noteOf(x) };
+  });
+  return { results, notice: XS_SEND_NOTICE };
+}
+
+// ── 调度器的评估(每会话串行;见 xsession-scheduler.js)──────────────────────────────────────────────────────────
+async function evaluateSession(sessionId) {
+  const prefs = readXsPrefsSync();
+  if (!prefs.enabled) return { queuedLeft: false, busy: false }; // 关着不投;排着的留到重新打开时重判(或重启转卡片)
+  const profiles = await readProfilesQuietly();
+  const fp = profiles ? fingerprintOrNull(profiles.salt) : null;
+  const key = randomUUID();
+  let noted = null; // 本次事务里记的那一次计数(写盘失败时退回)
+  let pausedHere = false;
+  let out;
+  try {
+    out = await mutateXsInbox(async (messages) => {
+      const changed = [];
+      let pick = null;
+      let left = 0;
+      let busy = targetBusy(sessionId, true);
+      for (const m of messages) {
+        if (m.status !== 'queued' || !sameId(m.to.sessionId, sessionId)) continue;
+        const f = targetFacts(m.to.sessionId, prefs, profiles, fp);
+        const route = decideRoute({
+          manual: m.from?.kind !== 'session', inbound: f.inbound, hop: m.hop, paused: isAutoPaused(prefs), hasProfile: f.hasProfile,
+          profileFresh: f.profileFresh, senderMode: m.from?.mode, targetMode: f.targetMode, stuck: targetStuck(sessionId), busy,
+        });
+        if (route.status === 'queued') { left += 1; continue; }
+        if (route.status === 'pending') {
+          m.status = 'pending';
+          m.heldReason = route.heldReason;
+          changed.push(structuredClone(m));
+          continue;
+        }
+        const text = await readXsBody(m.id);
+        let prompt = null;
+        try { if (text !== null) prompt = buildXsEnvelope({ from: `gui:${m.from.sessionId}`, name: m.from.title ?? '', body: text }); } catch { prompt = null; }
+        if (prompt === null || !f.replay?.cwd) {
+          m.status = 'pending';
+          m.heldReason = 'wake-failed';
+          m.heldDetail = text === null ? '消息正文缺失' : '没有可用的发送设置';
+          changed.push(structuredClone(m));
+          continue;
+        }
+        m.status = 'processing';
+        m.via = 'auto';
+        m.heldReason = null;
+        delete m.heldDetail;
+        m.turn = { key };
+        // 计数与"已暂停"判断在同一个存储事务里(各会话的事务在存储队列里串行):触顶那一刻起后面的都按暂停判
+        noted = budget.note();
+        if (noted.reached && !autoPausedMem) { autoPausedMem = true; pausedHere = true; }
+        pick = { m: structuredClone(m), text, prompt, targetMode: f.targetMode, replay: f.replay };
+        busy = true;
+        changed.push(structuredClone(m));
+      }
+      return { changed, pick, left };
+    });
+  } catch (e) {
+    if (noted) budget.refund(noted.stamp);
+    if (pausedHere) autoPausedMem = false;
+    console.warn(`[xsession] 会话 ${sessionId} 的排队消息未能处理(写盘失败,稍后再试):${e?.cause?.code || e?.message || e}`);
+    return { queuedLeft: true, busy: true };
+  }
+  if (out.changed.length) announce(out.changed);
+  if (out.pick) launchAuto(out.pick, key, noted.stamp);
+  if (pausedHere) announceAutoPaused();
+  if (out.left) queuedHint.add(sessionId.toLowerCase());
+  else queuedHint.delete(sessionId.toLowerCase());
+  return { queuedLeft: out.left > 0, busy: !!out.pick || targetBusy(sessionId, false) };
+}
+
+// 触顶:广播一次 xs:config;写 xsAutoPaused(失败只记日志,本进程内仍暂停);排着的都按暂停重判。
+function announceAutoPaused() {
+  broadcast({ type: 'xs:config', enabled: true, autoPaused: true });
+  updatePrefs((p) => { p.xsAutoPaused = true; })
+    .catch((e) => console.warn(`[xsession] 自动处理已暂停,暂停状态未能写盘(本进程内仍暂停):${e?.code || e?.message || e}`));
+  kickAllXsQueued();
+}
+
+/** PUT /api/xsession/config {autoPaused:false} 写盘成功后:清内存暂停与 10 分钟窗口,对有 queued 的会话评估一次。 */
+export function resumeXsAuto() {
+  autoPausedMem = false;
+  budget.clear();
+  kickAllXsQueued();
+}
+
+/** 对收件箱里有 queued 消息的会话各评估一次(开关打开、恢复、触顶时)。 */
+export async function kickAllXsQueued() {
+  let list;
+  try { list = await listXsMessages(); } catch { return; }
+  const ids = new Map();
+  for (const m of list) if (m.status === 'queued') ids.set(m.to.sessionId.toLowerCase(), m.to.sessionId);
+  for (const id of ids.values()) {
+    queuedHint.add(id.toLowerCase());
+    scheduler.kick(id);
+  }
+}
+
+/** PUT …/sessions/:id/inbound 写盘成功后:改成 card 时该会话排着的立即重判(落 target-card)。 */
+export function noteXsInboundChanged(sessionId) {
+  if (queuedHint.has(String(sessionId).toLowerCase())) scheduler.kick(sessionId);
+}
+
+// ── 自动处理回合用"此刻的设置"(接口"审计之后的补充约定"第 2、3 条;审计 I1)───────────────────────────────────────
+// 重放键分两类(按前端发送 /api/chat 时各键的来源核实,见 App.jsx sendMessage 与 sessionStore):
+// · 会话自己的:cwd(会话工作目录)、model(会话的模型)、effort(按会话记的思考强度)—— 取发送档案;permissionMode 用判定时的
+//   同一读数(存活进程 > 最近一次切档 > 发送档案)。
+// · 全局的(界面上对所有会话生效、只在浏览器本地、随每次发送带上):globalRead(全盘读取)、addDirs(附加目录)、maxBudgetUsd
+//   (花费上限)、keepAlive(会话常驻进程)、promptSuggestions(输入预测)、genui(genui 渲染)—— 取界面同步来的当前值
+//   (PUT /api/xsession/send-settings,只在内存;多个界面时的合并见下方 effectiveSendSettings);一个有效界面都没有时
+//   全盘读取按关、附加目录按空,其余四项退回档案里上次发送的值。
+// 请求体就是"此刻在该会话里手动发一条"会带的值、形态与界面发送时相同:目标有存活的常驻进程、且这些值与它起进程时一致(兼容键
+// 相同)时,chat.js 照常在现有进程里处理;为某一回合带着附加系统提示起的进程、或全局设置改过之后兼容键不同,chat.js 关旧开新,
+// 与用户此刻手动发一条的结果相同。
+export const XS_SEND_SETTING_KEYS = Object.freeze(['globalRead', 'addDirs', 'maxBudgetUsd', 'keepAlive', 'promptSuggestions', 'genui']);
+// 多个界面同时打开时按界面实例(uiId,每次打开页面随机生成)分开记,合起来取最窄(接口"复审之后的补充约定"第 2 条)。
+// 界面打开期间每 5 分钟重同步一次;10 分钟没再同步的界面不算有效。只在内存,服务重启后全部作废(界面重连时会强制重同步)。
+export const XS_UI_STALE_MS = 10 * 60_000;
+export const XS_UI_MAX = 32; // 条目上限(防刷爆):满了先清过期的,仍满就淘汰最久没同步的那个
+const uiSendSettings = new Map(); // uiId → { v, at };按同步先后排,最后一条是最近一次同步的
+/** PUT /api/xsession/send-settings 校验通过后调用(uiId 与 v 已是合规形态,见 routes/xsession.js)。 */
+export function setXsSendSettings(uiId, v) {
+  const now = Date.now();
+  uiSendSettings.delete(uiId);
+  if (uiSendSettings.size >= XS_UI_MAX) {
+    for (const [id, e] of uiSendSettings) if (!(now - e.at < XS_UI_STALE_MS)) uiSendSettings.delete(id);
+  }
+  while (uiSendSettings.size >= XS_UI_MAX) uiSendSettings.delete(uiSendSettings.keys().next().value);
+  uiSendSettings.set(uiId, { v: Object.freeze({ ...v, addDirs: Object.freeze([...v.addDirs]) }), at: now });
+}
+/** 同步被拒(请求体不合规、uiId 本身合规)时调用:删掉这个界面之前的记录,按其余有效界面重算(接口"复审之后的补充约定"第 3 条)。 */
+export function forgetXsSendSettings(uiId) {
+  uiSendSettings.delete(uiId);
+}
+// 此刻有效的界面合起来的值(按此刻的 Date.now() 判有效):全盘读取全部为开才开;附加目录取交集(按最近一次同步那份的顺序);
+// 花费上限取最小,null(不限)算最宽;常驻进程、输入预测、生图界面取最近一次同步的。一个有效的都没有 → null。
+function effectiveSendSettings() {
+  const now = Date.now();
+  const live = [...uiSendSettings.values()].filter((e) => now - e.at < XS_UI_STALE_MS).map((e) => e.v);
+  if (!live.length) return null;
+  const latest = live[live.length - 1];
+  const budgets = live.map((v) => v.maxBudgetUsd).filter((b) => b !== null);
+  return {
+    globalRead: live.every((v) => v.globalRead === true),
+    addDirs: latest.addDirs.filter((d) => live.every((v) => v.addDirs.includes(d))),
+    maxBudgetUsd: budgets.length ? Math.min(...budgets) : null,
+    keepAlive: latest.keepAlive, promptSuggestions: latest.promptSuggestions, genui: latest.genui,
+  };
+}
+function autoTurnBody(replay, sessionId, targetMode) {
+  const g = effectiveSendSettings() ?? {
+    globalRead: false, addDirs: [],
+    maxBudgetUsd: replay.maxBudgetUsd, keepAlive: replay.keepAlive, promptSuggestions: replay.promptSuggestions, genui: replay.genui,
+  };
+  const picked = {
+    cwd: replay.cwd, model: replay.model, effort: replay.effort,
+    globalRead: g.globalRead, addDirs: g.addDirs.length ? [...g.addDirs] : null, maxBudgetUsd: g.maxBudgetUsd,
+    keepAlive: g.keepAlive, promptSuggestions: g.promptSuggestions, genui: g.genui,
+  };
+  // 值为 null 的键不带(同界面发送时的 undefined);档位用判定时的同一读数
+  return { ...Object.fromEntries(Object.entries(picked).filter(([, v]) => v !== null && v !== undefined)), sessionId, prompt: AUTO_PLACEHOLDER_PROMPT, permissionMode: targetMode };
+}
+
+// 事务提交之后:登记 inflight(信封、补发事件、30 分钟卡住提醒),再经内部入口起回合。
+function launchAuto(pick, key, budgetStamp) {
+  const { m, text, prompt, targetMode, replay } = pick;
+  const sessionId = m.to.sessionId;
+  const event = {
+    type: 'xs_message', id: m.id,
+    from: sourceOf(m.from),
+    body: neutralizeXsBody(text), via: 'auto', hop: m.hop,
+  };
+  const stuckTimer = setTimeout(() => scheduler.kick(sessionId), XS_STUCK_MS + 1000);
+  stuckTimer.unref?.();
+  inflight.set(m.id, {
+    key, event, timer: null, stuckTimer, pid: null, sessionId, auto: true, chainId: m.chainId, hop: m.hop, prompt,
+    startedAt: Date.now(), started: false, responded: null, ended: null, budgetStamp, cwd: replay.cwd,
+  });
+  const begin = async () => {
+    // 起回合前按同一顺序重读档位(接口"复审之后的补充约定"第 1 条):判定之后切过档(例如等输入预测收尾的这几秒)就不起回合,
+    // 走"起不来退回排队"(退回计数、重新判定;类别变了落 class-mismatch)—— 不以判定时的旧档位起回合,也不让回合开始把它写回成最新档位。
+    const profiles = await readProfilesQuietly();
+    const f = inflight.get(m.id);
+    if (!f || f.key !== key) return; // 等待期间已被认领 / 结算
+    if (currentTargetMode(sessionId, profileIn(profiles, sessionId)) !== targetMode) { requeueAuto(m.id, f); return; }
+    let call;
+    // 等过输入预测收尾之后再取"此刻的设置"
+    try { call = startInternalTurn(autoTurnBody(replay, sessionId, targetMode), { kind: 'xs-auto', messageId: m.id, key }); } catch (e) { call = Promise.reject(e); }
+    call.then((res) => onAutoResponse(m.id, key, res), (e) => onAutoResponse(m.id, key, { status: 0, body: { error: e?.message || String(e) } }));
+  };
+  if (awaitingSuggestion(sessionId)) waitSuggestionSettled(sessionId).then(begin);
+  else begin();
+}
+
+// 内部入口应答里的原因 → 给人看的一行(脱敏、≤200 字);200 为 null。
+function responseReason(res) {
+  if (!res || res.status === 200) return null;
+  const b = res.body && typeof res.body === 'object' ? res.body : {};
+  const raw = typeof b.error === 'string' && b.error.trim() ? b.error : typeof b.code === 'string' ? b.code : `HTTP ${res.status}`;
+  return summarizeTurnError(raw) || `HTTP ${res.status}`;
+}
+
+function onAutoResponse(id, key, res) {
+  const f = inflight.get(id);
+  if (!f || f.key !== key) return;
+  f.responded = res;
+  if (startFailed(res)) { settleStartFailed(id, f, res); return; } // 进程没起来:不论回合开始通知报没报过
+  if (res.status === 200) broadcast({ type: 'xs:turn', sessionId: f.sessionId, pid: res.body?.pid ?? f.pid ?? null, messageId: id });
+  if (f.started) { // 回合开始了:只等结束通知(若它已先到,现在结算)
+    if (f.ended) finishAutoTurn(id, f);
+    return;
+  }
+  // 目标正忙 / 内部入口核对到档位已改变:回 queued 等下一次(重新判定)
+  if (res.status === 409 && (res.body?.code === 'CHAT_SESSION_BUSY' || res.body?.code === XS_MODE_CHANGED)) return requeueAuto(id, f);
+  settleNotStarted(id, f, responseReason(res) || '回合没有开始');
+}
+
+function finishAutoTurn(id, f) {
+  if (startFailed(f.responded)) return; // 进程没起来:由应答那一侧按 wake-failed 结算(结束通知可能先到)
+  const { outcome, detail } = f.ended;
+  settleTurn(id, f.key, outcome, detail || (outcome === 'failed' ? responseReason(f.responded) || undefined : undefined))
+    .then(() => scheduler.kick(f.sessionId));
+}
+
+// 回合没开始的两种结算:退回排队(不算一次自动处理)/ 转卡片 wake-failed(不自动重试)。
+async function settleAutoNotStarted(id, f, apply) {
+  dropInflight(id, f.key);
+  budget.refund(f.budgetStamp);
+  try {
+    const m = await mutateXsInbox((messages) => {
+      const m = findById(messages, id);
+      if (!m || m.status !== 'processing' || m.turn?.key !== f.key) return null;
+      delete m.turn;
+      apply(m);
+      return structuredClone(m);
+    });
+    if (m) {
+      if (m.status === 'queued') queuedHint.add(f.sessionId.toLowerCase());
+      await announce([m]);
+    }
+  } catch (e) {
+    console.warn(`[xsession] 消息 ${id} 的结算未能落盘:${e?.cause?.code || e?.message || e}`);
+  }
+  releaseTurnHooksIfIdle();
+  scheduler.kick(f.sessionId);
+}
+function requeueAuto(id, f) {
+  return settleAutoNotStarted(id, f, (m) => { m.status = 'queued'; m.via = null; });
+}
+function settleNotStarted(id, f, reason) {
+  return settleAutoNotStarted(id, f, (m) => { m.status = 'pending'; m.heldReason = 'wake-failed'; m.heldDetail = reason; });
+}
+
+// 进程没起来 = 回合没开始(在收到 CLI 任何输出之前就失败)。SDK 此时的报错常是误导性的(如把进不了工作目录导致的
+// 启动失败说成二进制与系统 libc 不匹配),不进 heldText:原因按工作目录现状给一句人话,报错原文脱敏后只进服务日志。
+const startFailed = (res) => !!res && res.status !== 200 && res.body?.code === 'CHAT_START_FAILED';
+async function startFailureCause(cwd) {
+  if (typeof cwd === 'string' && cwd) {
+    try { await access(cwd, fsConstants.X_OK); } catch (e) {
+      if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') return '会话的工作目录不存在';
+      if (e?.code === 'EACCES' || e?.code === 'EPERM') return '无法进入会话的工作目录（没有权限）';
+    }
+  }
+  return '会话进程没能启动';
+}
+async function settleStartFailed(id, f, res) {
+  const raw = typeof res.body?.error === 'string' ? summarizeTurnError(res.body.error) : null;
+  console.warn(`[xsession] 消息 ${id} 的回合没能开始(会话进程没起来):${raw || res.body?.code}`);
+  return settleNotStarted(id, f, await startFailureCause(f.cwd));
+}
+
+// r151c:经 startInternalTurn 起的自动处理回合(internal = { kind:'xs-auto', messageId, key })。调度器已在存储事务里把消息
+// 置为 processing、绑定 turn.key,并登记了 inflight(信封、补发事件);这里只核对、不改任何状态(内部请求遇忙的 409 在入口
+// 钩子之后才回,有副作用就收不回来)。
+async function xsInternalEntry(internal, sessionId, body) {
+  if (internal.kind !== 'xs-auto' || !isIdString(internal.messageId) || typeof internal.key !== 'string') return reject(400, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
+  if (!readXsEnabledSync()) return reject(409, 'XS_DISABLED', XS_DISABLED_TEXT);
+  const f = inflight.get(internal.messageId);
+  if (!f || !f.auto || f.key !== internal.key) return reject(409, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
+  try {
+    const current = await mutateXsInbox((messages) => {
+      const m = findById(messages, internal.messageId);
+      return !!m && m.status === 'processing' && m.turn?.key === internal.key && sameId(m.to.sessionId, sessionId);
+    });
+    if (!current) return reject(409, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
+  } catch (e) {
+    console.warn(`[xsession] 自动处理消息 ${internal.messageId} 核对失败:${e?.cause?.code || e?.message || e}`);
+    return reject(500, 'STORAGE_WRITE_FAILED', XS_STORAGE_FAILED_TEXT);
+  }
+  // 上面的核对让出过事件循环:这期间切了档(存活槽 / 最近一次切档与请求体里的档位不同)同样不起回合,由应答那一侧退回排队
+  const nowMode = liveGuiMode(sessionId) ?? latestGuiMode.get(String(sessionId).toLowerCase()) ?? null;
+  if (nowMode !== null && nowMode !== body?.permissionMode) return reject(409, XS_MODE_CHANGED, '目标会话的权限档位已改变，重新判定');
+  return { prompt: f.prompt, tag: { xsMessageId: internal.messageId, key: internal.key } };
+}
+
+// ── 给模型的两个工具:按会话挂进程内 MCP 服务(sessionOptions 挂接点;r151c 派工 4)─────────────────────────────
+// 会话行由 routes/xsession.js 的 loadSessionRows 提供(与会话列表、转发、PUT inbound 同一认定)。那边 import 本模块,
+// 本模块不能 import 回去(成环),由它在加载时登记进来;没登记时两个工具读会话列表即失败(XS_INTERNAL)。
+let loadToolRows = null;
+export function setXsSessionRowsLoader(fn) {
+  loadToolRows = typeof fn === 'function' ? fn : null;
+}
+const toolRows = () => {
+  if (!loadToolRows) throw new Error('会话列表读取函数未登记');
+  return loadToolRows();
+};
+// 新会话首回合:CLI 的会话记录是攒批写盘的,模型很快就调工具时发送方自己可能还不在会话列表里(标题取不到,
+// self.name 与来源名都会成"未命名会话")。这时每 150ms 看一次它的记录文件,最多看 8 次,出现了就重读一次会话行。
+// 只在发送方不在列表里时才等(真实模型首次回复通常要几秒,记录早已落盘,不会走到这里)。
+const SELF_ROW_POLLS = 8;
+const SELF_ROW_POLL_MS = 150;
+async function toolRowsWithSender(senderId) {
+  const rows = await toolRows();
+  if (!isIdString(senderId) || rows.some((r) => sameId(r.sessionId, senderId))) return rows;
+  for (let i = 0; i < SELF_ROW_POLLS; i += 1) {
+    await new Promise((r) => setTimeout(r, SELF_ROW_POLL_MS));
+    if (await findSessionFile(senderId)) return toolRows();
+  }
+  return rows;
+}
+// 发送方 = 调用那一刻本槽的会话 id、运行 id、回合序号与界面档位(view 的 getter 每次现取)。
+const senderOf = (view) => ({ sessionId: view.sessionId, runId: view.runId, turnEpoch: view.turnEpoch, guiMode: view.guiMode });
+
+// 用户 / 本地 / 项目自己配了同名服务 ccgui-sessions 的作用域(冷启时同步判,决定本槽给不给 list_sessions 免确认)。
+// 实测(CLI 2.1.x,用户级与项目级各一次):两份服务都会连上;同名工具(list_sessions / send_message)执行的是 CC-GUI 的,
+// 外来那份独有的工具也以 mcp__ccgui-sessions__* 出现在工具表里。同名工具归哪一份是 CLI 没写明的行为,所以配了同名服务的
+// 会话不给免确认(list_sessions 按当前档位的规则),免得按工具名放行了外来工具。本地作用域(~/.claude.json 的 projects)
+// 按目录前缀认(Windows 上斜杠统一、不分大小写),项目作用域(.mcp.json)从工作目录逐级往上找:宁可多认,多认只是多一次确认。
+// 本地级比较前两边都先转成真实路径(符号链接、. / ..),再统一分隔符;Windows 与 macOS 的默认文件系统不分大小写,按不分大小写比
+// (分大小写的卷上会多判"有同名",偏安全)。转不了(目录已不在)就按原样的绝对路径比。
+const realDirOf = (p) => { try { return realpathSync.native(p); } catch { return resolve(String(p)); } };
+const normDir = (p) => {
+  let s = String(p);
+  if (process.platform === 'win32') s = s.replace(/\\/g, '/');
+  if (process.platform === 'win32' || process.platform === 'darwin') s = s.toLowerCase();
+  return s.replace(/\/+$/, '');
+};
+// 企业托管的 MCP 配置(审计 S2):目录按平台固定,取法与本机 CLI 一致(macOS /Library/Application Support/ClaudeCode、
+// Windows C:\Program Files\ClaudeCode、其它 /etc/claude-code)。2026-10-16 在 CLI 2.1.296 二进制里核实:取目录的函数按平台
+// 写死这三个字面量,不读环境变量(不看 %ProgramFiles% / %ProgramData%),managed-mcp.json 只认这一个位置;WSL 走 Linux 分支取
+// /etc/claude-code(/mnt/c/Program Files/ClaudeCode 只在开了 wslInheritsWindowsSettings 时用于 managed-settings,不用于本文件)。
+export const XS_MANAGED_MCP_PATH = join(process.platform === 'darwin' ? '/Library/Application Support/ClaudeCode'
+  : process.platform === 'win32' ? 'C:\\Program Files\\ClaudeCode' : '/etc/claude-code', 'managed-mcp.json');
+// 一份 MCP 配置文件里有没有同名服务:'no'(文件不存在或没配)| 'yes' | 'unreadable'(在、却读不出或解析不了 —— 按"有"算)。
+function mcpFileDeclaresXs(file) {
+  let raw;
+  try { raw = readFileSync(file, 'utf-8'); } catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? 'no' : 'unreadable'; }
+  try { return JSON.parse(raw)?.mcpServers?.[XS_TOOLS_SERVER] ? 'yes' : 'no'; } catch { return 'unreadable'; }
+}
+/** 哪些作用域配了同名服务(给日志用的名字;空 = 没有)。managedPath 只为单测可换路径,产品调用一律用平台固定路径。 */
+export function shadowingXsServerScopes(cwd, { managedPath = XS_MANAGED_MCP_PATH } = {}) {
+  const scopes = [];
+  const managed = mcpFileDeclaresXs(managedPath);
+  if (managed !== 'no') scopes.push(managed === 'yes' ? '企业托管' : '企业托管(managed-mcp.json 读不出,按有算)');
+  const cj = readClaudeJsonSync();
+  if (cj.unreadable) scopes.push('用户 / 本地(~/.claude.json 读不出,按有算)');
+  if (cj.userXs) scopes.push('用户');
+  if (typeof cwd !== 'string' || !cwd) return scopes;
+  const here = normDir(realDirOf(cwd));
+  if (cj.localXsDirs.some((k) => { const d = normDir(realDirOf(k)); return here === d || here.startsWith(`${d}/`); })) scopes.push('本地');
+  for (let dir = resolve(cwd), i = 0; i < 64; i += 1) {
+    try { if (JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf-8'))?.mcpServers?.[XS_TOOLS_SERVER]) { scopes.push('项目'); break; } } catch { /* 没有 / 读不出 */ }
+    const up = dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  return scopes;
+}
+
+/**
+ * sessionOptions 挂接点(chat.js 冷启建 options 时同步调用):给本槽挂 ccgui-sessions 服务,list_sessions 免确认
+ * (只在本槽、且本挂接点仍在位时;send_message 照 MCP 工具既有的档位规则)。总开关关时本挂接点不在,工具不存在。
+ * 用户 / 本地 / 项目配置里有同名服务时照样挂,但不给免确认,记一行日志(见 shadowingXsServerScopes)。
+ */
+export function xsSessionOptions(view) {
+  let shadowed = null;
+  try { shadowed = shadowingXsServerScopes(view.cwd); } catch (e) {
+    console.warn(`[xsession] 检查同名 MCP 服务出错,本会话进程里 ${XS_LIST_SESSIONS_TOOL} 按当前档位确认:${e?.message || e}`);
+  }
+  if (shadowed?.length) {
+    console.warn(`[xsession] ${shadowed.join('、')}配置里有同名 MCP 服务 ${XS_TOOLS_SERVER}:本会话进程里两份同时加载,${XS_LIST_SESSIONS_TOOL} 不免确认、按当前档位确认`);
+  }
+  return { mcpServers: { [XS_TOOLS_SERVER]: createXsToolsServer(xsToolHandlersFor(view)) }, autoAllow: shadowed?.length === 0 ? [XS_LIST_SESSIONS_TOOL] : [] };
+}
+/** 某个槽(view)的两个工具处理函数;xsSessionOptions 用它建服务,单测可直接调。 */
+export function xsToolHandlersFor(view) {
+  const rows = () => toolRowsWithSender(view.sessionId);
+  return createXsToolHandlers({
+    list: ({ query }) => listAiSessions({ sender: senderOf(view), query }, rows),
+    send: ({ to, message }) => sendAiMessages({ sender: senderOf(view), to, message }, rows),
+  });
+}
+
 // ── 钩子挂接与总开关 ────────────────────────────────────────────────────────────────────────
 // 总开关关时只挂 chatEntry(两个新字段都没带时立即返回 null = 零影响);开着时再挂回合开始 / 结束与原生引导。
 // 关掉时若还有已兑换、没结算的回合,回合钩子留到它们结算完再撤(否则它们永远等不到结算);原生引导随开关即撤。
@@ -569,8 +1506,10 @@ function releaseTurnHooksIfIdle() {
 /** 开关变化时调用(PUT /api/xsession/config 写盘成功后)。 */
 export function syncXsRuntimeHooks(enabled) {
   turnHooksWanted = enabled === true;
-  if (turnHooksWanted && !unhookTurns) unhookTurns = registerSessionRuntimeHooks({ turnStart: onTurnStart, turnEnd: onTurnEnd });
-  if (turnHooksWanted && !unhookGuard) unhookGuard = registerSessionRuntimeHooks({ preToolUse: xsNativeGuard });
+  if (turnHooksWanted && !unhookTurns) unhookTurns = registerSessionRuntimeHooks({ turnStart: onTurnStart, turnEnd: onTurnEnd, sessionBound: onSessionBound });
+  // r151c:切档通知(同步发送档案的档位)、按会话挂工具(派工 4)与原生引导同一生命周期:随开关即挂即撤。撤掉后已在跑的进程
+  // 里工具仍在,但 list_sessions 不再免确认(chat.js 认挂接点同一性),调用整次失败 XS_DISABLED;下一条消息换新进程(兼容键少 xs:1)。
+  if (turnHooksWanted && !unhookGuard) unhookGuard = registerSessionRuntimeHooks({ preToolUse: xsNativeGuard, modeChange: xsModeChange, sessionOptions: xsSessionOptions });
   else if (!turnHooksWanted && unhookGuard) {
     unhookGuard();
     unhookGuard = null;
@@ -582,4 +1521,16 @@ export function syncXsRuntimeHooks(enabled) {
 export function installXsessionRuntime() {
   if (!unhookEntry) unhookEntry = registerSessionRuntimeHooks({ chatEntry: xsChatEntry });
   syncXsRuntimeHooks(readXsEnabledSync());
+  backfillXsEnabledAt();
+}
+
+// 主会话裁定(2026-10-15):总开关开着、却没有(合法的)启用时刻 = 一期升级上来的用户 → 启动时补记一次。一期从未写过档案,
+// 补记不会让任何旧档案生效。关着时什么都不写(行为与改动前相同)。写失败只记日志:没有启用时刻时所有档案都不认(偏安全)。
+function backfillXsEnabledAt() {
+  const prefs = readXsPrefsSync();
+  if (!prefs.enabled || prefs.enabledAt) return;
+  updatePrefs((p) => {
+    const valid = typeof p.xsEnabledAt === 'string' && !Number.isNaN(Date.parse(p.xsEnabledAt));
+    if (p.xsEnabled === true && !valid) p.xsEnabledAt = new Date().toISOString();
+  }).catch((e) => console.warn(`[xsession] 启动时补记启用时刻失败:${e?.code || e?.message || e}`));
 }

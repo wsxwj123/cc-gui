@@ -158,10 +158,11 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
-import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAutoRetrySkipped, keepLivePeer, anchorLivePeers, placeAnchoredPeers, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
+import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAutoRetrySkipped, keepLivePeer, anchorLivePeers, placeAnchoredPeers, mergeLivePeersIntoHistory, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
+import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
-import { BG_BANNER_DELAY_MS, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
+import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
@@ -3490,10 +3491,13 @@ function SessionHeaderMore({ children, forceOpenSignal = 0 }) {
       // Checkpoint 的弹层是 body portal(不在 wrap 内):点它不能收起本组,否则按钮先卸载、
       // 弹层随之消失,mousedown→click 之间条目点击直接失效。
       if (e.target?.closest?.('.glass-popover')) return;
+      // r151c:接收设置弹出的确认框(body 上单独挂的根)同理:点它不收起本组,确认后菜单里直接看到新值
+      if (e.target?.closest?.('[data-cgui-confirm]')) return;
       setOpen(false);
     };
     // R1:window 捕获(同 ThemeToggle,详见那里注释);stopPropagation 仍挡住会话级停止监听。
-    const onEsc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); } };
+    // r151c:组内的接收设置会弹确认框(document 冒泡阶段听 Esc)—— 确认框开着时这次 Esc 归它,本组不抢。
+    const onEsc = (e) => { if (e.key === 'Escape' && !document.querySelector('[data-cgui-confirm]')) { e.stopPropagation(); setOpen(false); } };
     document.addEventListener('mousedown', onDoc);
     window.addEventListener('keydown', onEsc, true);
     return () => { document.removeEventListener('mousedown', onDoc); window.removeEventListener('keydown', onEsc, true); };
@@ -4430,6 +4434,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // expose `backgroundPid` so the composer can render the stop button + a
   // "正在继续工作…" indicator, matching how multi-terminal CLI sessions feel.
   const [backgroundPid, setBackgroundPid] = useState(null);
+  // r151c:后台运行的回合身份(pid#turnEpoch,见 utils/reattach.js backgroundTurnKey)。只给 auto-reattach
+  // 用:常驻进程上紧跟着开始的新回合 pid 不变,backgroundPid 的值不变 effect 就不重跑,靠它的变化重新接流。
+  const [backgroundTurn, setBackgroundTurn] = useState(null);
   // 引导注入的可用性(⚡ 置灰判据):activeProcRef 的 state 影子 —— POST /api/chat 返回 pid
   // 之后才有值,即"服务端确实有这个会话的活 slot"。connecting 窗口(POST 还没回,最坏 5s)
   // 恒为 null,此时注入必然 409,所以 ⚡ 置灰 + 直发回落入队。ref 不是响应式的,渲染要 state。
@@ -4557,6 +4564,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // A 的"后台工作中",此刻点停止会 POST /chat/<A-pid>/stop 杀错 A 的后台回合(审计#5,
     // 停止不可逆)。lastSeenPidRef 一并清,防 B 首轮 poll 误触"pid 有→无"的排空分支。
     setBackgroundPid(null);
+    setBackgroundTurn(null);
     backgroundPidRef.current = null;
     lastSeenPidRef.current = null;
     let cancelled = false;
@@ -4627,6 +4635,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
         lastSeenPidRef.current = next;
         setBackgroundPid(next);
+        setBackgroundTurn(next ? backgroundTurnKey(hit) : null);
       } catch {}
     };
     const unsubscribe = subscribeAgentsActive(poll);
@@ -4719,8 +4728,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (mountFromResolved <= 0) return finalizedMessages;   // 不裁时返回原引用(不打穿 MessageList 的 memo)
     return sliceRows(finalizedMessages, { from: mountFromResolved, to: finalizedMessages.length });
   }, [finalizedMessages, mountFromResolved]);
+  // r151c 实点:回合进行中历史里已有与直播来源气泡是同一条的条目时只画一个 —— 历史那条留在原位、带直播的 via
+  // (见 utils/xsession.js mergeLivePeersIntoHistory)。只在渲染层合并,不动 chatMessages(流式缓冲仍是真相源)。
+  // 本回合的历史被截断时(正常发送 / 种回,同 visibleMessages 的条件)历史里不可能有本回合那条,不认领。
+  const peerMerge = useMemo(
+    () => (streamHistCutoff && streamOwnerKey === sessionQueueKey
+      ? { list: mountedMessages, taken: null }
+      : mergeLivePeersIntoHistory(mountedMessages, visibleChat)),
+    [mountedMessages, visibleChat, streamHistCutoff, streamOwnerKey, sessionQueueKey],
+  );
   // r151b:回合落盘后历史里没有对应条目的直播来源气泡,按锚点插回它触发的那个回复之前;没有时原引用。
-  const peerPlacement = useMemo(() => placeAnchoredPeers(mountedMessages, visibleChat), [mountedMessages, visibleChat]);
+  const peerPlacement = useMemo(() => placeAnchoredPeers(peerMerge.list, visibleChat), [peerMerge, visibleChat]);
   // 挂载集合变化(补齐 / 搜索开关 / 跳转)会整批挂上或卸掉视口**上方**的行 —— 文档总高变了
   // 而 scrollTop 不变,视野就被顶走。变化前记下"视口最上方那一行 + 行内偏移",变化后在同一
   // 次 layout 提交里搬回原位:比按比例准,且不用任何高度估算。
@@ -5524,10 +5542,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r151b 复审建议 1:点卡片【处理】发出的回合(带 xsProcess)在这里拦下 —— 不重发、不重新认领(认领只在发送块里、
     // 只有重发才会再走到);该回合由服务端按出错结算(pending / turn-error),这里按最新状态刷新卡片,并把调用点刚弹的
     // "…并重发本条"改写成"未自动重发"。调用点在重发前做的会话级修正(剥 [1m]、剥签名、切回逐步确认等)照做。
+    // r151c 先修 2:shownNotice = 调用点刚弹的那句提示(会话级修正的说明),改写时保留它,只把"并重发本条"换成"未自动重发",
+    // 不再整条覆盖成通用文案;没有时用通用文案。普通发送不读它。
     // 普通发送走下面的定时器,与改动前相同。
-    const retryLater = (nextOpts, expectKey = null) => {
+    const retryLater = (nextOpts, expectKey = null, shownNotice = null) => {
       if (nextOpts && nextOpts.xsProcess) {
-        const xsText = xsAutoRetrySkipped(nextOpts.xsProcess);
+        const xsText = xsAutoRetrySkipped(nextOpts.xsProcess, shownNotice);
         if (expectKey ? paneStillOn(expectKey) : paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: xsText });
         return undefined;
       }
@@ -6173,7 +6193,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // (senderTaskId / hostInjected)= 经 CLI 原生通道从别的会话来的。本回合的回复在流结束时才进
           // chatMessages,所以追加在末尾就是"该回合之前";按 uuid 去重(重放 / reattach 不画两遍)。
           if (event.type === 'xs_message' || event.type === 'result') {
-            const peer = event.type === 'xs_message' ? peerFromXsEvent(event) : peerFromResultEvent(event);
+            // r151c 先修 4:原生气泡带上本回合的起流时刻(按来源名对账时历史条目不得早于它,见 utils/xsession.js peerLanded)
+            const peer = event.type === 'xs_message' ? peerFromXsEvent(event) : peerFromResultEvent(event, turnStreamStart);
             if (peer) setChatMessages((prev) => (prev.some((m) => m.uuid === peer.uuid) ? prev : [...prev, { ...peer, ownerKey: streamOwnerSid() }]));
           }
           if (event.type === 'system' && event.subtype === 'permission_denied') {
@@ -6868,8 +6889,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               if (_base) _st.setModelFor(sessionQueueKey, _base);
               if (/\[1m\]/i.test(_st.currentModel || '')) _st.setModel(String(_st.currentModel).replace(/\[1m\]/i, ''));
               // r146b:提示条是窗格级的 —— 窗格已不是本会话就不弹(模型 pin 按会话键改,与窗格无关,照改)。
-              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。' });
-              retryLater({ ...opts, oneMRetry: true });
+              const _notice1m = '订阅未开通 1M 上下文按量额度（usage credits），已自动切回标准上下文并重发本条。如需 1M：先到 claude.ai/settings/usage 开启 usage credits，再打开模型菜单的 1M 开关。';
+              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: _notice1m });
+              retryLater({ ...opts, oneMRetry: true }, null, _notice1m);
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -6885,8 +6907,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 // 透传原 opts(工具重做带的 appendSystemPrompt/hiddenUserMessage 必须保留),
                 // 只追加守卫位防无限重试。剥离期间切走 → 提示与重发都放弃(提示会落在别的会话上)。
                 if (paneStillOn(sessionQueueKey, streamSid)) {
-                  setProviderSwitchNotice({ text: '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。' });
-                  retryLater({ ...opts, signatureRetry: true });
+                  const _noticeSig = '历史思考块签名不被当前 provider 接受，已自动剥离并重发本条。';
+                  setProviderSwitchNotice({ text: _noticeSig });
+                  retryLater({ ...opts, signatureRetry: true }, null, _noticeSig);
                 }
                 // 本次失败的产物正是 "API Error: ...Invalid signature..." 文案,它也作为
                 // assistant text 落进了 accumulatedText。清空,否则循环结束后会被当成正常
@@ -6902,7 +6925,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             if (/No conversation found/i.test(msg) && !opts.freshRetry && prompt) {
               // r146b:换成新 draft、弹提示、重发都是窗格动作 —— 只在窗格仍是本会话时做(否则会把别的
               // 会话换成 draft、提示挂到别的会话上)。
-              if (paneStillOn(sessionQueueKey, streamSid)) {
+              // r151c 先修 1:点卡片【处理】发出的回合(带 xsProcess)不转新草稿、不重发 —— 窗格留在原会话,经 retryLater
+              // 的拦截刷新卡片(服务端已按出错结算),卡片可【忽略】,待处理计数随 xs:message 收敛。转新草稿会让这张卡片
+              // 看不到(卡片按会话挂)、Dock 计数卡住;窗格已换走时也不能把占位 prompt 记成「未发出的消息」。
+              if (opts.xsProcess) {
+                retryLater({ ...opts, freshRetry: true });
+              } else if (paneStillOn(sessionQueueKey, streamSid)) {
                 const _s = getLocalSession();
                 let _freshKey = null; // r146 R4:本支自己把窗格换成的新 draft 键
                 if (_s?.sessionId) {
@@ -6941,8 +6969,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               markAutoUnavailable(_st, _st.modelBySession[sessionQueueKey] || _st.currentModel || '');
               _st.setPermissionMode('default', sessionQueueKey);
               // r146b:权限档按会话键改(与窗格无关);提示条只在窗格仍是本会话时弹。
-              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
-              retryLater({ ...opts, autoRetry: true });
+              const _noticeAuto = '当前模型 / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。';
+              if (paneStillOn(sessionQueueKey, streamSid)) setProviderSwitchNotice({ text: _noticeAuto });
+              retryLater({ ...opts, autoRetry: true }, null, _noticeAuto);
               accumulatedText = ''; accumulatedThinking = ''; currentToolCalls = [];
               sawError = true;
               break;
@@ -7295,8 +7324,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           _st.setPermissionMode('default', sessionQueueKey);
           // r146 R4:POST 返回 500 时窗格可能已切走 —— 提示与重发都只在仍是本会话时做。
           if (paneStillOn(sessionQueueKey, streamSid)) {
-            setProviderSwitchNotice({ text: '当前 CLI / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。' });
-            retryLater({ ...opts, autoRetry: true });
+            const _noticeAutoSpawn = '当前 CLI / 账户不支持「自动」权限档，已回退「逐步确认」并重发本条。';
+            setProviderSwitchNotice({ text: _noticeAutoSpawn });
+            retryLater({ ...opts, autoRetry: true }, null, _noticeAutoSpawn);
           }
         } else {
         console.error('Chat error:', err);
@@ -7767,13 +7797,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 会让"刚被别的视图接管"的本视图立刻回连反踢对方,两边 1.5s 一轮互踢不停。
     // 失败计数已按 pid 记(nextAttachTry),pid 变了自然归零,这里不必也不该动它。
     const { guard, reattach } = nextReattachGuard({
-      guard: reattachedPidRef.current, backgroundPid, streaming: streamingRef.current,
+      guard: reattachedPidRef.current, backgroundPid, streaming: streamingRef.current, backgroundTurn,
     });
     reattachedPidRef.current = guard;
     if (reattach) handleSendRef.current?.(null, { reattachPid: backgroundPid });
     // attachRetryNonce:三振横幅上的「重试」按钮触发器。pid 不变时 setBackgroundPid 被
     // Object.is 短路,只依赖 backgroundPid 的话 effect 永不重跑 = 按钮点了没反应。
-  }, [backgroundPid, attachRetryNonce]);
+    // backgroundTurn(r151c):同一进程开了新回合,pid 不变而回合身份变了 → effect 重跑、按回合判要不要接。
+  }, [backgroundPid, backgroundTurn, attachRetryNonce]);
 
   // H 转后台(用户主动):复用切走会话的 detach 路径 —— 只 abort 本端 SSE,进程照常
   // 在服务端跑、jsonl 继续落盘。与切走的区别:留在本会话,所以要 ① 预置 reattachedPidRef
@@ -9294,6 +9325,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   <Activity size={14} />
                 </button>
               )}
+              {/* r151c:接收设置(只对已落盘会话、总开关开时出现;组件内自己判) */}
+              <XsInboundSelect sessionId={selectedSession?.sessionId} />
             </SessionHeaderMore>
           </div>
         </div>
@@ -9330,6 +9363,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           同一时刻最多渲染一条,优先级:超窗恢复(错误) > 切换通知(5s 自消) > 规划
           模式提示(常驻可关)。低优先级横幅被压制期间条件仍在则待高优先级消失后自然
           回显;providerSwitchNotice 的 5s 计时独立运行,压制期间到期即清(可接受)。 */}
+      {/* r151c:改接收设置失败的提示(会话头下方;没有时不渲染) */}
+      <XsInboundNotice sessionId={selectedSession?.sessionId} />
       {/* Permission-mode hint banner — moved here from ChatInput so it sits
           directly under the session title. Banner is dismissible per-user. */}
       {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && !shownNotice && (
@@ -9505,7 +9540,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 retryActiveUuid={retryActiveUuid}
               />
               {/* btw 旁问不再进主流内联渲染 —— 改由右下角 BtwWindow 浮窗聚合成连续线程。 */}
-              {renderChat.filter((msg) => msg.type !== 'btw' && !peerPlacement.placed.has(msg.uuid)).map((msg, i) => (
+              {renderChat.filter((msg) => msg.type !== 'btw' && !peerPlacement.placed.has(msg.uuid) && !peerMerge.taken?.has(msg.uuid)).map((msg, i) => (
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
                   {msg.type === 'compact'
                     ? <CompactDivider />
@@ -13209,6 +13244,7 @@ export default function App() {
         {/* ③ 全局自定义背景层(手机端同桌面)。 */}
         <GlobalBackgroundLayer />
         <MobileTopBar onMenu={toggleSidebar} onNew={startMobileNewChat} title={mobileTitle} />
+        <XsPausedBanner />
         <MainLayout
           sidebarCollapsed={sidebarCollapsed}
           selectedProject={selectedProject}
@@ -13302,6 +13338,8 @@ export default function App() {
           </button>
         </div>
       </header>
+      {/* r151c:跨会话自动处理暂停提示条(只在总开关开、已暂停时渲染) */}
+      <XsPausedBanner />
 
       {/* Main content */}
       <MainLayout

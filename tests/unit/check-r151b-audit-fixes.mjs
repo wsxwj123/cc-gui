@@ -225,7 +225,8 @@ try {
       ['uds:/tmp/cc-socks/103.sock.bak', false, '只是前缀相同'],
       ['uds:/var/tmp/cc-socks/103.sock', false, '别的目录'],
       ['uds:/private/tmpx/cc-socks/103.sock', false, '/private/tmpx 不是 /private/tmp'],
-      ['uds:/tmp/CC-SOCKS/103.sock', false, 'POSIX 路径区分大小写'],
+      // r151c 先修 3:macOS 默认文件系统不区分大小写,两边统一转小写 → 拒;其它 POSIX 平台仍区分大小写
+      ['uds:/tmp/CC-SOCKS/103.sock', process.platform === 'darwin', process.platform === 'darwin' ? 'macOS 地址不区分大小写' : 'POSIX 路径区分大小写'],
       ['uds:cc-socks/103.sock', false, '相对路径'],
     ]) eq(deny(bySock(addr), entries, gui, A), want, `地址 ${addr}(${what})`);
     eq(deny({ to: 'uds:/tmp//cc-socks/../cc-socks/103.sock' }, entries, gui, A), true, '没有 recipient_kind 时按 uds: 推断,同样规范化');
@@ -345,7 +346,8 @@ try {
     const projDir = join(HOME, '.claude', 'projects', PROJ);
     mkdirSync(projDir, { recursive: true });
     const S = '5a5a5a5a-0000-4000-8000-0000000000a1'; const T = '5b5b5b5b-0000-4000-8000-0000000000b2'; const O = '5c5c5c5c-0000-4000-8000-0000000000c3';
-    for (const sid of [S, T]) writeFileSync(join(projDir, `${sid}.jsonl`), `${JSON.stringify({ type: 'user', uuid: `${sid.slice(0, 8)}-u`, sessionId: sid, message: { role: 'user', content: '你好' } })}\n`);
+    // r151c 先修 5:O 也给记录文件 —— 记录文件不在 = 来源已删,忽略时会把来源标题抹掉;这一段要的是"O 还在"
+    for (const sid of [S, T, O]) writeFileSync(join(projDir, `${sid}.jsonl`), `${JSON.stringify({ type: 'user', uuid: `${sid.slice(0, 8)}-u`, sessionId: sid, message: { role: 'user', content: '你好' } })}\n`);
     const rows = [{ sessionId: S, title: '源会话标题', projectDir: WORK }, { sessionId: T, title: '目标会话标题', projectDir: WORK }, { sessionId: O, title: '其它会话', projectDir: WORK }];
     const send = async (from, to) => (await xs.sendManualMessages({ to: [to], body: `R151B 删会话 ${from.slice(0, 2)}→${to.slice(0, 2)}`, fromSessionId: from }, rows))[0].id;
     const m1 = await send(S, T); // 未结束,来源 S
@@ -395,7 +397,7 @@ try {
     setEnabled(false);
     r = await api('GET', '/xsession/config');
     eq([r.status, r.body.enabled, r.body.stored], [200, false, { unfinished: 2 }], '关着:stored.unfinished = 未结束条数(已结束的不算)');
-    eq(Object.keys(r.body).sort(), ['enabled', 'limits', 'nativeGuard', 'stored'], 'config 应答的键');
+    eq(Object.keys(r.body).sort(), ['autoBudget', 'autoPaused', 'enabled', 'limits', 'nativeGuard', 'stored'], 'config 应答的键(r151c 加 autoPaused、autoBudget)');
     eq((await api('GET', '/xsession/pending')).status, 409, '关着:其它接口照旧 409');
     eq([(await api('GET', '/xsession/clear')).status, (await api('PUT', '/xsession/clear', {})).status], [409, 409], '关着:clear 只放行 POST,别的方法照旧 409');
 
@@ -441,6 +443,19 @@ try {
     eq((await api('GET', '/xsession/config')).body.stored, { unfinished: 1 }, '删除失败时数据不变');
     eq((await store.listXsMessages()).map((m) => m.id), [n3.id], '删除失败时记录不变');
     eq((await api('POST', '/xsession/clear')).body, { ok: true, removed: 1 }, '恢复权限后可以清空');
+
+    // r151c 先修 8(X26 补测):记录删掉之后正文删不掉 → 仍 200、removed 照实(以收件箱记录为准),正文留待下次启动清理
+    setEnabled(true);
+    const [n4] = await xs.sendManualMessages({ to: [P], body: 'R151B clear 四', fromSessionId: Q }, rows);
+    setEnabled(false);
+    const BOD4 = join(XSD, 'bodies');
+    chmodSync(BOD4, 0o500); // 正文目录只读:记录(在 xsession/ 下)删得掉,正文删不掉
+    try {
+      r = await api('POST', '/xsession/clear');
+      eq([r.status, r.body], [200, { ok: true, removed: 1 }], '记录删掉后正文删除失败 → 仍 200,removed 照实');
+    } finally { chmodSync(BOD4, 0o700); }
+    ok(existsSync(join(BOD4, `${n4.id}.txt`)), '删不掉的正文留着(由下次启动清理删)');
+    eq((await api('GET', '/xsession/config')).body.stored, { unfinished: 0 }, '以记录为准:未处理条数为 0');
 
     // 只读计数:另一份存储实例(没读过盘)直接数文件,不做恢复、不挪损坏文件、不写
     const freshStore = async (tag, home) => {
@@ -502,7 +517,7 @@ try {
     const by = Object.fromEntries(r.body.sessions.map((s) => [s.sessionId, s]));
     eq([by[s1]?.projectHash, by[s2]?.projectHash], [h1, h2], '每项的 projectHash = 项目目录的编码名');
     ok(r.body.sessions.every((s) => typeof s.projectHash === 'string' && s.projectHash.length > 0), '每项都带 projectHash');
-    eq(Object.keys(by[s1]).sort(), ['lastActivity', 'pending', 'project', 'projectHash', 'sessionId', 'shortId', 'state', 'title'], '单项的键(projectDir 等服务端字段不出现)');
+    eq(Object.keys(by[s1]).sort(), ['hasProfile', 'inbound', 'lastActivity', 'pending', 'project', 'projectHash', 'sessionId', 'shortId', 'state', 'title'], '单项的键(r151c 加 inbound / hasProfile;projectDir 等服务端字段不出现)');
     const hist = await api('GET', `/sessions/${s2}/messages?projectHash=${encodeURIComponent(by[s2].projectHash)}`);
     eq(hist.status, 200, '拿 projectHash 调既有历史接口能取到这个会话');
     r = await api('GET', `/xsession/sessions?ids=${s2}`);

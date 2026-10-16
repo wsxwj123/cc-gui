@@ -43,8 +43,8 @@ test('X04 GET /api/xsession/sessions:按最近活动倒序;无标题为"未命�
     expect(ids(r), '按最近活动倒序').toEqual([s1.sid, s2.sid, s3.sid, c1.sid, c2.sid]);
     const by = Object.fromEntries(r.body.sessions.map((s) => [s.sessionId, s]));
     const { lastActivity, ...rest } = by[s1.sid];
-    expect(rest, '单项字段(一期没有 inbound / hasProfile)').toEqual({
-      sessionId: s1.sid, shortId: s1.sid.slice(0, 8), title: `R151B 新 ${mark}`, project: path.basename(s1.cwd), projectHash: encodeProjectDir(s1.cwd), state: 'stopped', pending: 0,
+    expect(rest, '单项字段(含二期 inbound / hasProfile)').toEqual({
+      sessionId: s1.sid, shortId: s1.sid.slice(0, 8), title: `R151B 新 ${mark}`, project: path.basename(s1.cwd), projectHash: encodeProjectDir(s1.cwd), state: 'stopped', pending: 0, inbound: 'card', hasProfile: false,
     });
     expect(Number.isNaN(Date.parse(lastActivity)) ? lastActivity : 'ISO', 'lastActivity 是时间字符串').toBe('ISO');
     expect(by[s3.sid].title, '没改过名、也没有自动标题 → 取首条提问').toBe(s3Prompt);
