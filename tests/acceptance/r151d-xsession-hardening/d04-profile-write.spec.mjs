@@ -1,12 +1,14 @@
-// r151d 行为清单 4、5:发送档案写盘失败导致的"按没有档案判",服务重启后仍然保持,直到该会话的发送档案成功写入一次。
+// r151d 行为清单 4、4b、5:发送档案写盘失败导致的"按没有档案判",服务重启后仍然保持,直到该会话的发送档案成功写入一次。
 // 一次性实例(要重启服务、要动跨会话数据目录,不碰共享实例)。
 // "只让发送档案写不进、收件箱仍可写" = 在测试自己的临时 HOME 里,用一个同名的空目录占住发送档案文件
 // .claude-gui/xsession/profiles.json 的位置(原来有这个文件就先改名留在同目录,不删);同目录下的收件箱照常可写。
 // "撤掉占位" = 用非递归的 rmdirSync 删掉这个空目录;用例结束无论成败都撤掉占位、停掉实例。
 // T 先在发送档案可写时跑过一个回合(盘上已有一份档案),再在占位期间跑一个回合。
 // 发送档案里记着这一回合的模型,内容没变的回合不会重写档案(实测),所以占位期间那一回合换一个模型,确保真的要写盘;
-// 撤掉占位后的那一回合再换一个盘上、内存里都没出现过的模型,确保真的写成一次。改名移开的旧档案不放回原位,
+// 撤掉占位后的那一回合再换一个盘上、内存里都没出现过的模型,确保真的写成一次。D04、D05 里改名移开的旧档案不放回原位,
 // 所以 D05 里"再重启仍为 true"只能来自撤掉占位后那一次真正写成的档案。
+// D04b(行为清单 4b)反过来:撤掉占位后把改名移开的那份较早档案改回原位,在 T 成功写入之前重启 —— 盘上的较早档案读得到,
+// 只有"写失败标记跨重启保留"才能让 hasProfile 仍为 false(占位还在时重启分辨不出这一点:那时连较早的档案也读不到)。
 // 发送方 = 真 CLI 会话(「放任」),模型请求只到本地假接口。
 import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
@@ -21,21 +23,22 @@ test.beforeEach(() => { test.skip(!realCliPath(), '本机没有真 claude CLI(�
 
 /**
  * 只让发送档案写不进、收件箱仍可写:在临时 HOME 的跨会话数据目录里,用同名空目录占住 profiles.json 的位置。
- * 原来有这个文件就先用 renameSync 改名留在同目录(不删)。返回 { file, hadFile, restore };
- * restore 只用非递归的 rmdirSync 删掉这个空目录(重复调用不再动手),不把改名移开的旧文件放回原位。
+ * 原来有这个文件就先用 renameSync 改名留在同目录(不删)。返回 { file, aside(移开后的路径;原来没有文件时为 null), hadFile, restore };
+ * restore 只用非递归的 rmdirSync 删掉这个空目录(重复调用不再动手),不把改名移开的旧文件放回原位(要放回由用例自己用 aside 改名)。
  */
 function blockProfileWrites(home) {
   const dir = xsDir(home);
   const file = path.join(dir, 'profiles.json');
+  const aside = path.join(dir, `profiles.json.r151d-aside-${Date.now().toString(36)}`);
   const hadFile = fs.existsSync(file);
   if (hadFile) {
     expect(fs.lstatSync(file).isFile(), `前置:${file} 是普通文件`).toBe(true);
-    fs.renameSync(file, path.join(dir, `profiles.json.r151d-aside-${Date.now().toString(36)}`));
+    fs.renameSync(file, aside);
   }
   fs.mkdirSync(file);
   let restored = false;
   const restore = () => { if (restored) return; restored = true; fs.rmdirSync(file); };
-  return { file, hadFile, restore };
+  return { file, aside: hadFile ? aside : null, hadFile, restore };
 }
 
 /**
@@ -83,6 +86,33 @@ test('D04 写盘失败标记跨重启保留:只让发送档案写不进(收件�
       expect(r && { delivery: r.delivery, note: r.note }, '工具结果:卡片 / 没有可用的发送设置').toEqual({ delivery: 'card', note: HELD['no-profile'] });
       const m = await waitNewMsg(inst.c, T.sid, known);
       expect(m && { status: m.status, heldReason: m.heldReason }, '收件列表(收件箱仍可写,消息存得进):pending / no-profile').toEqual({ status: 'pending', heldReason: 'no-profile' });
+      await sleep(3_000);
+      expect((await waitSettled(inst.c, T.sid, m.id, 1)).status, '之后也不自动处理').toBe('pending');
+      expect(ws.ofType('xs:turn').filter((e) => e.sessionId === T.sid), '事件流里没有 T 的自动处理回合').toEqual([]);
+    } finally { ws.close(); }
+  });
+});
+
+test('D04b 写盘失败后恢复可写、但还没写成时重启:撤掉占位并把写失败之前那份较早的档案放回原位,T 成功写入之前重启 → hasProfile 仍 false;「放任」发送方发来消息 → 卡片 no-profile,不自动处理(不按盘上较早的档案判)', async () => {
+  await withProfileWritesBlocked('d04b', async ({ inst, T, S, run, blk }) => {
+    expect(blk.hadFile, '前置:占位前盘上已有一份较早的档案 profiles.json(写失败之前成功写出的那份)').toBe(true);
+    expect((await entry(inst.c, T.sid)).hasProfile, '前置:发送档案写不进时跑完回合 → hasProfile:false').toBe(false);
+    // 先停服务,再撤占位、把较早的档案改回原位,然后起服务:这段时间服务不在,T 不可能有任何一次写成(连退出时顺手写盘也被占位挡住)。
+    // restart 里的 stop 对已退出的进程直接返回,这里等于只把服务重新起来。
+    await inst.stop();
+    blk.restore();
+    fs.renameSync(blk.aside, blk.file);
+    await inst.restart();
+    expect((await entry(inst.c, T.sid)).hasProfile,
+      '发送档案已恢复可写、盘上是写失败之前那份较早的档案,T 还没成功写入就重启 → hasProfile 仍为 false').toBe(false);
+
+    const ws = await wsT(inst.base);
+    try {
+      const known = new Set((await msgs(inst.c, T.sid)).map((x) => x.id));
+      const r = await sendFrom(inst.c, S, T.sid, `R151D d04b ${run}`);
+      expect(r && { delivery: r.delivery, note: r.note }, '工具结果:卡片 / 没有可用的发送设置').toEqual({ delivery: 'card', note: HELD['no-profile'] });
+      const m = await waitNewMsg(inst.c, T.sid, known);
+      expect(m && { status: m.status, heldReason: m.heldReason }, '收件列表:pending / no-profile(不按盘上那份较早的档案判)').toEqual({ status: 'pending', heldReason: 'no-profile' });
       await sleep(3_000);
       expect((await waitSettled(inst.c, T.sid, m.id, 1)).status, '之后也不自动处理').toBe('pending');
       expect(ws.ofType('xs:turn').filter((e) => e.sessionId === T.sid), '事件流里没有 T 的自动处理回合').toEqual([]);

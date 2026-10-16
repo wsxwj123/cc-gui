@@ -1,6 +1,6 @@
 // r151d 本套件辅助(只走 HTTP / WS / 文件 / 外部进程记录,不 import 产品代码)。
 // 一期 helpers/ 与二期 helpers/p2.mjs 原样复用;这里只放本轮新增:界面同步全局设置、进程列表、切档、
-// 让旧进程推迟退出(配合 hold-claude.mjs)、把跨会话数据目录设为不可写、真 CLI 发送方发一条消息。
+// 让旧进程推迟退出(配合 hold-claude.mjs)、真 CLI 发送方发一条消息。
 import { expect } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -55,21 +55,6 @@ const mark = (ctl, dir, sid) => { const d = path.join(ctl, dir); fs.mkdirSync(d,
 export const holdExit = (ctl, sid) => mark(ctl, 'r151d-hold', sid);
 export const releaseExit = (ctl, sid) => mark(ctl, 'r151d-release', sid);
 export const exitLog = (ctl) => jsonl(path.join(ctl, 'r151d-exit.jsonl'));
-
-// ---------------- 把目录设为不可写(它本身、其下所有子目录与文件都去掉写权限);返回恢复函数(恢复成原来的权限) ----------------
-export function lockTree(dir) {
-  const items = [];
-  const walk = (d) => {
-    items.push([d, fs.statSync(d).mode & 0o777, 0o555]);
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) walk(p); else if (e.isFile()) items.push([p, fs.statSync(p).mode & 0o777, 0o444]);
-    }
-  };
-  walk(dir);
-  for (const [p, , m] of items.slice().reverse()) fs.chmodSync(p, m);
-  return () => { for (const [p, m] of items) { try { fs.chmodSync(p, m); } catch { /* 尽力恢复 */ } } };
-}
 
 // ---------------- 会话跑一个回合(可指定模型:发送档案里记着模型,内容有变化的回合才会重写档案) ----------------
 export async function turnWith(c, s, { mode = 'bypassPermissions', model, note = '' } = {}) {
