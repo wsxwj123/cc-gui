@@ -105,6 +105,15 @@ try {
   ok(providerFingerprint({ ...BASE, apiKeyHelper: 'other' }) !== fp0, 'apiKeyHelper 变 → 指纹变');
   ok(providerFingerprint({ ...BASE, accountId: 'other' }) !== fp0, '账号 uuid 变 → 指纹变');
   eq(providerFingerprint({ ...BASE, settingsEnv: { ...BASE.settingsEnv, OTHER_KEY: 'x' } }), fp0, '别的 env 键不参与');
+  // 审计 S5:OAuth 令牌、自定义请求头、Bedrock / Vertex 的键也参与(按模型分区域的 VERTEX_REGION_* 按前缀收)
+  for (const k of ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'CLAUDE_CODE_USE_BEDROCK', 'AWS_REGION', 'AWS_PROFILE', 'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_BEARER_TOKEN_BEDROCK', 'ANTHROPIC_BEDROCK_BASE_URL', 'CLAUDE_CODE_SKIP_BEDROCK_AUTH',
+    'CLAUDE_CODE_USE_VERTEX', 'CLOUD_ML_REGION', 'ANTHROPIC_VERTEX_PROJECT_ID', 'ANTHROPIC_VERTEX_BASE_URL', 'GOOGLE_APPLICATION_CREDENTIALS',
+    'CLAUDE_CODE_SKIP_VERTEX_AUTH', 'VERTEX_REGION_CLAUDE_4_5_SONNET', 'VERTEX_REGION_CLAUDE_FUTURE_MODEL']) {
+    ok(providerFingerprint({ ...BASE, settingsEnv: { ...BASE.settingsEnv, [k]: 'v1' } }) !== providerFingerprint({ ...BASE, settingsEnv: { ...BASE.settingsEnv, [k]: 'v2' } }), `${k} 变 → 指纹变`);
+  }
+  ok(providerFingerprint({ ...BASE, settingsEnv: { ...BASE.settingsEnv, VERTEX_REGION_CLAUDE_A: 'r' } }) !== providerFingerprint({ ...BASE, settingsEnv: { ...BASE.settingsEnv, VERTEX_REGION_CLAUDE_B: 'r' } }), 'VERTEX_REGION_* 连键名一起参与');
+  for (const k of ['awsAuthRefresh', 'awsCredentialExport', 'gcpAuthRefresh']) ok(providerFingerprint({ ...BASE, helpers: { [k]: 'cmd-1' } }) !== providerFingerprint({ ...BASE, helpers: { [k]: 'cmd-2' } }), `settings 顶层 ${k} 变 → 指纹变`);
   eq(providerFingerprint({ salt: SALT }), providerFingerprint({ salt: SALT, settingsEnv: { ANTHROPIC_MODEL: 3 }, apiKeyHelper: null, accountId: undefined }), '缺的、不是字符串的按空串');
   for (const bad of [undefined, '', 'zz'.repeat(32), 'ab'.repeat(31)]) assert.throws(() => providerFingerprint({ ...BASE, salt: bad }), TypeError), checks++;
   eq([...store.XS_PROFILE_REPLAY_KEYS], chat.TURN_PARAM_KEYS.filter((k) => k !== 'appendSystemPrompt'), '档案 replay 键 = chat.js 回合参数键去掉 appendSystemPrompt(审计 F1)');
@@ -162,6 +171,10 @@ try {
   const fpA = pA.judge.providerFp;
   writeSettings({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_AUTH_TOKEN: `${SECRET_TOKEN}-2`, ANTHROPIC_MODEL: 'm-main' }, { apiKeyHelper: SECRET_HELPER });
   ok(xs.currentProviderFp(file.salt) !== fpA, '换 token → 指纹不同');
+  writeSettings({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_AUTH_TOKEN: SECRET_TOKEN, ANTHROPIC_MODEL: 'm-main', CLAUDE_CODE_OAUTH_TOKEN: 'r151c-oauth-secret' }, { apiKeyHelper: SECRET_HELPER });
+  ok(xs.currentProviderFp(file.salt) !== fpA, '审计 S5:settings.json 里加 OAuth 令牌 → 指纹不同');
+  writeSettings({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_AUTH_TOKEN: SECRET_TOKEN, ANTHROPIC_MODEL: 'm-main' }, { apiKeyHelper: SECRET_HELPER, awsAuthRefresh: 'aws sso login' });
+  ok(xs.currentProviderFp(file.salt) !== fpA, '审计 S5:settings.json 顶层加 awsAuthRefresh → 指纹不同');
   writeSettings({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_AUTH_TOKEN: SECRET_TOKEN, ANTHROPIC_MODEL: 'm-main' }, { apiKeyHelper: SECRET_HELPER });
   eq(xs.currentProviderFp(file.salt), fpA, '换回 → 相同');
   // ~/.claude.json 有最短间隔缓存:换号后间隔内仍用上次的读数,过了间隔才看到新账号

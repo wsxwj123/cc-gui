@@ -2,25 +2,48 @@
 // provider 指纹(派工 2)、权限类别与去向表(派工 3)。
 import { createHmac } from 'crypto';
 
-// 参与指纹的 settings.json env 键:路由与模型(换 provider、换模型映射即变)+ 两种凭据。顺序固定,改动即所有旧档案按"换过"判。
+// 参与指纹的 settings.json env 键:路由与模型(换 provider、换模型映射即变)+ 凭据。顺序固定,改动即所有旧档案按"换过"判。
+// 审计 S5 补:OAuth 令牌、自定义请求头,以及 Bedrock / Vertex(和同类的 Foundry / Mantle / 网关)的开关、端点、区域、项目与凭据
+// (键名按本机 CLI 认的环境变量核过)。按模型分区域的 VERTEX_REGION_* 另按前缀收(见 FP_ENV_PREFIXES)。
 const FP_ENV_KEYS = Object.freeze([
   'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_FABLE_MODEL',
   'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_UNIX_SOCKET',
+  // Bedrock
+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_SKIP_BEDROCK_AUTH', 'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION',
+  'AWS_REGION', 'AWS_DEFAULT_REGION', 'AWS_PROFILE', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+  'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ROLE_ARN', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_CONFIG_FILE',
+  'AWS_ENDPOINT_URL', 'AWS_ENDPOINT_URL_BEDROCK', 'AWS_ENDPOINT_URL_BEDROCK_RUNTIME',
+  // Vertex
+  'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_SKIP_VERTEX_AUTH', 'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_VERTEX_PROJECT_ID', 'CLOUD_ML_REGION',
+  'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT', 'GCLOUD_PROJECT',
+  // 同类的云上路由
+  'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_SKIP_FOUNDRY_AUTH', 'ANTHROPIC_FOUNDRY_BASE_URL', 'ANTHROPIC_FOUNDRY_RESOURCE',
+  'ANTHROPIC_FOUNDRY_API_KEY', 'ANTHROPIC_FOUNDRY_AUTH_TOKEN', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_SKIP_MANTLE_AUTH',
+  'ANTHROPIC_BEDROCK_MANTLE_BASE_URL', 'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH', 'CLAUDE_CODE_USE_GATEWAY',
 ]);
+// 按前缀收的 env 键(键名本身不固定):Vertex 按模型分的区域。按键名排序后连同键名一起进指纹。
+const FP_ENV_PREFIX_RE = /^VERTEX_REGION_[A-Z0-9_]+$/;
+// settings.json 顶层与 apiKeyHelper 同类的凭据命令(Bedrock 的刷新 / 导出、Vertex 的刷新)。
+const FP_HELPER_KEYS = Object.freeze(['awsAuthRefresh', 'awsCredentialExport', 'gcpAuthRefresh']);
 const SALT_RE = /^[0-9a-f]{64}$/;
 const str = (v) => (typeof v === 'string' ? v : '');
 
 /**
  * provider 指纹:以 salt(本机随机 32 字节的十六进制)为键的 HMAC-SHA256,取前 16 位十六进制。
- * 内容 = settings.json env 里 FP_ENV_KEYS 的值、settings.json 的 apiKeyHelper 原文、OAuth 账号 uuid(~/.claude.json 的
- * oauthAccount.accountUuid);缺的、不是字符串的按空串。凭据只在这里的内存里参与计算,返回值不可逆、不含原文。
+ * 内容 = settings.json env 里 FP_ENV_KEYS 的值、按前缀收的 VERTEX_REGION_*(键名排序,连键名)、settings.json 的 apiKeyHelper 原文、
+ * OAuth 账号 uuid(~/.claude.json 的 oauthAccount.accountUuid)、settings.json 顶层的 FP_HELPER_KEYS(helpers 对象里给);
+ * 缺的、不是字符串的按空串。凭据只在这里的内存里参与计算,返回值不可逆、不含原文;本函数不写盘、不打日志。
  * salt 不合规 → 抛 TypeError(调用方不该拿没盐的摘要去比较)。
  */
-export function providerFingerprint({ settingsEnv, apiKeyHelper, accountId, salt } = {}) {
+export function providerFingerprint({ settingsEnv, apiKeyHelper, accountId, helpers, salt } = {}) {
   if (typeof salt !== 'string' || !SALT_RE.test(salt)) throw new TypeError('providerFingerprint:salt 必须是 64 位十六进制');
   const env = settingsEnv && typeof settingsEnv === 'object' && !Array.isArray(settingsEnv) ? settingsEnv : {};
-  const parts = [...FP_ENV_KEYS.map((k) => str(env[k])), str(apiKeyHelper), str(accountId)];
+  const h = helpers && typeof helpers === 'object' && !Array.isArray(helpers) ? helpers : {};
+  const prefixed = Object.keys(env).filter((k) => FP_ENV_PREFIX_RE.test(k) && typeof env[k] === 'string').sort().map((k) => [k, env[k]]);
+  const parts = [...FP_ENV_KEYS.map((k) => str(env[k])), str(apiKeyHelper), str(accountId), prefixed, ...FP_HELPER_KEYS.map((k) => str(h[k]))];
   return createHmac('sha256', Buffer.from(salt, 'hex')).update(JSON.stringify(parts)).digest('hex').slice(0, 16);
 }
 

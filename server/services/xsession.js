@@ -676,7 +676,10 @@ function readProviderIdentitySync() {
   let settings = null;
   try { settings = JSON.parse(readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf-8')); } catch { /* 没有 / 损坏 → 全空 */ }
   const s = settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : {};
-  return { settingsEnv: s.env, apiKeyHelper: s.apiKeyHelper, accountId: readClaudeJsonSync().accountId };
+  return {
+    settingsEnv: s.env, apiKeyHelper: s.apiKeyHelper, accountId: readClaudeJsonSync().accountId,
+    helpers: { awsAuthRefresh: s.awsAuthRefresh, awsCredentialExport: s.awsCredentialExport, gcpAuthRefresh: s.gcpAuthRefresh },
+  };
 }
 
 /** 当前配置的 provider 指纹(salt 取自档案文件,见 readXsProfiles)。 */
