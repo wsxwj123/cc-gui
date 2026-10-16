@@ -61,6 +61,29 @@ export function readXsPrefsSync() {
   return prefs;
 }
 /**
+ * r151d:发送档案写盘失败的会话(xsProfileWriteFailed,内部键;只记会话 id,不记档案内容)。读取规则同上(读到非法值不报错、
+ * 不改写文件):不是数组 → [];只留会话 id 形状的字符串,转小写、去重(重复的按最后一次出现排);最多留最后
+ * XS_PROFILE_WRITE_FAILED_MAX 个。写入由 services/xsession.js 经 updatePrefs 做(超上限时只写最近加入的)。
+ */
+export const XS_PROFILE_WRITE_FAILED_MAX = 256;
+export function normalizeXsProfileWriteFailed(prefs) {
+  const raw = prefs && typeof prefs === 'object' && !Array.isArray(prefs) ? prefs.xsProfileWriteFailed : undefined;
+  if (!Array.isArray(raw)) return [];
+  const ids = new Set();
+  for (const id of raw) {
+    if (typeof id !== 'string' || !isSessionIdShape(id)) continue;
+    const k = id.toLowerCase();
+    ids.delete(k);
+    ids.add(k);
+  }
+  return [...ids].slice(-XS_PROFILE_WRITE_FAILED_MAX);
+}
+export function readXsProfileWriteFailedSync() {
+  let prefs = null;
+  try { prefs = JSON.parse(readFileSync(PREFS_PATH, 'utf-8')); } catch { /* 不存在 / 读不出 / 损坏 → [] */ }
+  return normalizeXsProfileWriteFailed(prefs);
+}
+/**
  * 同 readXsPrefsSync,另给 readFailed:文件在、却读不出或解析不了时为 true(文件不存在不算,此时总开关就是关的),其余字段按默认。
  * r151c 审计 S1:发送档案的两个钩子据此区分"总开关真的关着"与"偏好读失败"(后者不能静默跳过)。
  */

@@ -6,10 +6,12 @@
 //      切档时旧进程的输入流已关(真 SDK 的控制请求送不到,要等它退出才失败)→ 只改本地档位、立即 200,不挂到旧进程退出、不报 409。
 //   ② 行为清单 3:多个界面同步全局设置时,常驻进程 / 输入预测 / 生图界面取最近一次发生变化的那个界面的值;
 //      值完全相同的定时重同步只刷新有效期,不改变生效值。
+//   ③ 行为清单 4、5:档案写盘失败的会话 id 随偏好写入落盘(xsProfileWriteFailed)、服务启动时读回,档案成功写入一次后清除;
+//      偏好文件也写不进 / 在却读不出时只记日志、内存标记照旧,不整份覆盖偏好文件;新偏好键的读取规则。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身(onInputEnd 模拟旧进程推迟退出、setModel 模拟热切让出事件循环);临时 HOME;端口 6930–6979。
 // node tests/unit/check-r151d-xs-hardening.mjs
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync, chmodSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -205,6 +207,90 @@ try {
   eq(await autoThenResident('R151D-UNIT 多界面 四'), false, 'A 改成关:A 成了最近一次变化的界面 → 回合后不常驻(不是"取最近一次同步",也不是"取最窄")');
   await syncUi(UB, { keepAlive: true });
   eq(await autoThenResident('R151D-UNIT 多界面 五'), false, 'B 用相同的值重同步:仍取 A → 不常驻');
+
+  // ── ③ 档案写盘失败标记落盘、启动时读回(行为清单 4、5)──
+  const PROFILES = join(XS_DIR, 'profiles.json');
+  const GUI_DIR = join(HOME, '.claude-gui');
+  const prefsJson = () => { try { return JSON.parse(readFileSync(PREFS, 'utf8')); } catch { return null; } };
+  const failedIdsOnDisk = () => prefsJson()?.xsProfileWriteFailed ?? null;
+  const hasProfile = async (sid) => xs.profileCountsFor(sid, (await store.readXsProfiles()).sessions[sid], prefsMod.readXsPrefsSync().enabledAt);
+  let asideN = 0;
+  const blockProfiles = () => { // profiles.json 的位置被一个目录占住:档案写入最后的改名落不下去(收件箱照常可写)
+    renameSync(PROFILES, join(TMP, `profiles-aside-${asideN++}.json`));
+    mkdirSync(PROFILES); writeFileSync(join(PROFILES, 'keep'), 'x');
+  };
+  const unblockProfiles = () => renameSync(PROFILES, join(TMP, `profiles-block-${asideN++}`));
+  const offTurn = async (sid, mode, extra = {}) => { // 不保活的用户回合:跑完进程退出
+    await userTurn(sid, mode, { keepAlive: false, ...extra });
+    await waitFor(() => !slotOf(sid), `${TITLES.get(sid)} 的进程退出`, 20_000);
+  };
+  const TW = mk('目标 TW 写盘失败');
+  const TX = mk('目标 TX 启动读回');
+  await offTurn(TW, 'bypassPermissions');
+  await offTurn(TX, 'bypassPermissions');
+  await waitFor(async () => { const d = await store.readXsProfiles(); return d.sessions[TW] && d.sessions[TX]; }, 'TW、TX 的档案');
+  await setInbound([TW, TX]);
+  eq([await hasProfile(TW), await hasProfile(TX), failedIdsOnDisk()], [true, true, null], '前置:两个会话都有可用档案,偏好文件里没有写失败标记');
+  // 3a) 档案写盘失败 → 按没有档案判;会话 id(小写)随偏好写入落盘
+  blockProfiles();
+  await offTurn(TW, 'bypassPermissions', { model: 'r151d-model-w2' });
+  await waitFor(() => (failedIdsOnDisk() || []).includes(TW.toLowerCase()), '写失败标记落进偏好文件');
+  eq(failedIdsOnDisk(), [TW.toLowerCase()], '偏好文件里只记会话 id(小写),不记档案内容');
+  ok(!(await hasProfile(TW)), '写失败:TW 按没有档案判');
+  eq((await send(sBypass, [TW], 'R151D-UNIT 写失败之后')).results.map((x) => x.delivery), ['card'], '「放任」发送方发来 → 卡片');
+  eq((await lastTo(TW)).heldReason, 'no-profile', '落 no-profile');
+  // 3b) 服务启动时读回(模拟重启:偏好文件里另记着 TX 和几项非法值,重新装一次运行时)→ TX 按没有档案判
+  await prefsMod.updatePrefs((p) => { p.xsProfileWriteFailed = [...(p.xsProfileWriteFailed || []), TX, 'not-a-session-id', 42]; });
+  xs.installXsessionRuntime();
+  eq([await hasProfile(TW), await hasProfile(TX)], [false, false], '启动时读回:偏好文件里记着的会话按没有档案判');
+  // 3c) 恢复可写、TW 再跑一个回合 → 档案写成一次 → 标记清掉(偏好文件里也删掉);TX 记录成功(内容没变也算)后同样清掉
+  unblockProfiles();
+  await offTurn(TW, 'bypassPermissions', { model: 'r151d-model-w3' });
+  await waitFor(async () => (await hasProfile(TW)) && !(failedIdsOnDisk() || []).includes(TW.toLowerCase()), 'TW 档案写成后标记清掉');
+  eq(failedIdsOnDisk(), [TX.toLowerCase()], 'TW 的标记从偏好文件里删掉(只剩 TX)');
+  await offTurn(TX, 'bypassPermissions');
+  await waitFor(async () => (await hasProfile(TX)) && failedIdsOnDisk() === null, 'TX 记录成功后标记清掉、偏好键删掉');
+  eq((await send(sBypass, [TW], 'R151D-UNIT 恢复之后')).results.map((x) => x.delivery), ['auto'], '恢复后「放任」发送方发来 → 自动处理');
+  await waitStatus((await lastTo(TW)).id, 'done', 20_000);
+  // 3d) 偏好文件也写不进:只记日志,内存标记照旧(按没有档案判)
+  const TV = mk('目标 TV 偏好也写不进');
+  await offTurn(TV, 'bypassPermissions');
+  await waitFor(async () => (await store.readXsProfiles()).sessions[TV], 'TV 的档案');
+  await setInbound([TV]);
+  const prefsBefore = readFileSync(PREFS, 'utf8');
+  blockProfiles();
+  chmodSync(GUI_DIR, 0o500);
+  try {
+    await offTurn(TV, 'bypassPermissions', { model: 'r151d-model-v2' });
+    await waitFor(async () => !(await hasProfile(TV)), 'TV 按没有档案判');
+    await sleep(300);
+    eq(readFileSync(PREFS, 'utf8'), prefsBefore, '偏好文件写不进:文件原样(只记日志)');
+  } finally { chmodSync(GUI_DIR, 0o700); }
+  unblockProfiles();
+  ok(!(await hasProfile(TV)), '内存标记照旧');
+  // 3e) 偏好文件在、却读不出:写失败标记不落盘,也不拿空对象把它整份覆盖
+  const TU = mk('目标 TU 偏好读不出');
+  const prefsGood = readFileSync(PREFS, 'utf8');
+  writeFileSync(PREFS, '{broken');
+  try {
+    await offTurn(TU, 'bypassPermissions');
+    await sleep(500);
+    eq(readFileSync(PREFS, 'utf8'), '{broken', '偏好文件读不出:不被写失败标记的写入整份覆盖');
+  } finally { writeFileSync(PREFS, prefsGood); }
+  // 3f) 新偏好键的读取规则(同已有偏好键:读到非法值不报错、不改写文件)
+  const ID1 = randomUUID(); const ID2 = randomUUID();
+  for (const v of [undefined, null, 'x', 1, {}, [1, null, 'nope']]) eq(prefsMod.normalizeXsProfileWriteFailed({ xsProfileWriteFailed: v }), [], `xsProfileWriteFailed=${JSON.stringify(v)} → []`);
+  eq(prefsMod.normalizeXsProfileWriteFailed({ xsProfileWriteFailed: [ID1.toUpperCase(), 'nope', ID2, ID1] }), [ID2, ID1], '只留会话 id 形状的,转小写、去重(按最后一次出现排)');
+  const many = Array.from({ length: prefsMod.XS_PROFILE_WRITE_FAILED_MAX + 5 }, () => randomUUID());
+  eq(prefsMod.normalizeXsProfileWriteFailed({ xsProfileWriteFailed: many }), many.slice(5), `最多留最后 ${prefsMod.XS_PROFILE_WRITE_FAILED_MAX} 个`);
+  for (const bad of [null, [], 'x']) eq(prefsMod.normalizeXsProfileWriteFailed(bad), [], `偏好不是对象(${JSON.stringify(bad)})→ []`);
+  const goodNow = readFileSync(PREFS, 'utf8');
+  writeFileSync(PREFS, JSON.stringify({ ...JSON.parse(goodNow), xsProfileWriteFailed: 'oops' }));
+  const oopsText = readFileSync(PREFS, 'utf8');
+  eq([prefsMod.readXsProfileWriteFailedSync(), readFileSync(PREFS, 'utf8')], [[], oopsText], '读到非法值:按 [] 处理、不报错、不改写文件');
+  writeFileSync(PREFS, '{broken');
+  eq(prefsMod.readXsProfileWriteFailedSync(), [], '偏好文件损坏 → []');
+  writeFileSync(PREFS, goodNow);
 
   console.log(`PASS check-r151d-xs-hardening(${checks} 项)`);
 } finally {

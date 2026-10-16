@@ -12,7 +12,7 @@ import { constants as fsConstants, readFileSync, realpathSync, statSync } from '
 import { dirname, join, resolve, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
-import { readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, updatePrefs } from '../routes/prefs.js';
+import { XS_PROFILE_WRITE_FAILED_MAX, readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, readXsProfileWriteFailedSync, updatePrefs } from '../routes/prefs.js';
 import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
@@ -611,8 +611,32 @@ const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合
 // 档案写失败(接口"审计之后的补充约定"第 4 条,取代派工 8 的"档位未知 → class-mismatch"):该会话的档案写失败过(切档没落盘、
 // 回合开始 / 拿到会话 id / 回合结束兜底时没记上),盘上那份的档位可能比用户最新的选择宽、其余重放参数也是旧的,按它判同类或
 // 重放都不偏安全。整条按"没有档案"判(去向表⑤ no-profile,落卡片;会话列表 hasProfile 同口径为 false,见 profileCountsFor),
-// 该会话下一次档案成功落盘(或内容没变、无需落盘)后清掉。只在内存:服务重启后丢失,之后按盘上的档案判。
-const profileWriteFailed = new Set(); // 会话 id(小写)
+// 该会话下一次档案成功落盘(或内容没变、无需落盘)后清掉。
+// r151d:随偏好写入落盘(偏好键 xsProfileWriteFailed,只记会话 id,最多 XS_PROFILE_WRITE_FAILED_MAX 个,超出时只写最近加入的),
+// 服务启动时读回(installXsessionRuntime)—— 否则重启后又按盘上那份可能更宽的旧档案判。偏好文件也写不进(或在、却读不出:
+// 不能拿空对象整份覆盖它)时记一行日志,内存标记照旧。
+const profileWriteFailed = new Set(); // 会话 id(小写);按加入先后排
+function markProfileWriteFailed(sessionId) {
+  const k = String(sessionId).toLowerCase();
+  const had = profileWriteFailed.delete(k);
+  profileWriteFailed.add(k); // 重新排到最后(落盘超上限时留最近加入的)
+  if (!had) persistProfileWriteFailed();
+}
+function clearProfileWriteFailed(sessionId) {
+  if (profileWriteFailed.delete(String(sessionId).toLowerCase())) persistProfileWriteFailed();
+}
+let profileFailPersistQueued = false;
+function persistProfileWriteFailed() {
+  if (profileFailPersistQueued) return; // 已排着一次:那次写入时取的是当时内存里的最新集合
+  profileFailPersistQueued = true;
+  updatePrefs((p) => {
+    profileFailPersistQueued = false;
+    if (readXsPrefsDetailedSync().readFailed) throw Object.assign(new Error('偏好文件读不出'), { code: 'PREFS_UNREADABLE' });
+    const ids = [...profileWriteFailed].slice(-XS_PROFILE_WRITE_FAILED_MAX);
+    if (ids.length) p.xsProfileWriteFailed = ids;
+    else delete p.xsProfileWriteFailed;
+  }).catch((e) => console.warn(`[xsession] 档案写失败标记未能写进偏好文件(本进程内照旧按没有档案判,重启后不保留):${e?.code || e?.message || e}`));
+}
 // 最新档位(审计 S1;接口"审计之后的补充约定"第 3 条:存活进程 > 最近一次切档 > 发送档案):切档钩子与回合开始钩子里同步记
 // (在任何读盘、写盘之前),判定时排在存活槽之后、档案之前。档案经存储队列异步落盘,而 evaluateSession / sendAiMessages 先读档案
 // 快照、后进收件箱事务,两步之间用户切档并落盘的话快照里还是旧档位;判定与重放都读这张表,用的就是最新的选择。只记合法的六档、
@@ -632,7 +656,7 @@ function noteLatestMode(sessionId, mode, { ifAbsent = false } = {}) {
 // 偏好文件在、却读不出(审计 S1):不能当"总开关关着"静默跳过 —— 那样既不写盘也不留标记,判定仍按盘上的旧档案。
 // 按档案写失败处理(该会话按没有档案判,见 profileWriteFailed),直到下一次记录成功。
 function profilePrefsUnreadable(sessionId, what) {
-  profileWriteFailed.add(sessionId.toLowerCase());
+  markProfileWriteFailed(sessionId);
   console.warn(`[xsession] 会话 ${sessionId} 的${what}没有记进档案:偏好文件读不出(按没有档案判,直到下次记录成功)`);
 }
 
@@ -720,9 +744,9 @@ async function recordProfile(sessionId, params) {
       if (prevKey) delete d.sessions[prevKey];
       d.sessions[sessionId] = { replay, judge: { mode, providerFp, recordedAt: new Date().toISOString() } };
     });
-    profileWriteFailed.delete(sessionId.toLowerCase());
+    clearProfileWriteFailed(sessionId);
   } catch (e) {
-    profileWriteFailed.add(sessionId.toLowerCase());
+    markProfileWriteFailed(sessionId);
     console.warn(`[xsession] 会话 ${sessionId} 的发送档案未能落盘(按没有档案判,直到下次记录成功):${e?.cause?.code || e?.code || e?.message || e}`);
   }
 }
@@ -778,9 +802,9 @@ async function xsModeChange({ sessionId, mode } = {}) {
         p.judge.mode = mode;
       }
     });
-    profileWriteFailed.delete(sessionId.toLowerCase());
+    clearProfileWriteFailed(sessionId);
   } catch (e) {
-    profileWriteFailed.add(sessionId.toLowerCase()); // 盘上仍是切档前的档位:不能再按它判同类、重放
+    markProfileWriteFailed(sessionId); // 盘上仍是切档前的档位:不能再按它判同类、重放
     console.warn(`[xsession] 会话 ${sessionId} 的档案档位未能落盘(按没有档案判,直到下次记录成功):${e?.cause?.code || e?.code || e?.message || e}`);
   }
 }
@@ -792,7 +816,7 @@ export async function forgetXsSession(sessionId) {
   for (const [k, r] of turnChains) if (sameId(r.sessionId, sessionId)) turnChains.delete(k); // 连锁标记与单回合发送计数
   scheduler.forget(sessionId);
   queuedHint.delete(sessionId.toLowerCase());
-  profileWriteFailed.delete(sessionId.toLowerCase());
+  clearProfileWriteFailed(sessionId);
   latestGuiMode.delete(sessionId.toLowerCase());
   return dropXsProfile(sessionId);
 }
@@ -1547,6 +1571,7 @@ export function syncXsRuntimeHooks(enabled) {
 
 /** 启动时调用一次(server/index.js,在开始接请求之前):挂 chatEntry,按当前开关挂回合钩子。 */
 export function installXsessionRuntime() {
+  for (const id of readXsProfileWriteFailedSync()) profileWriteFailed.add(id); // r151d:写失败标记跨重启保留
   if (!unhookEntry) unhookEntry = registerSessionRuntimeHooks({ chatEntry: xsChatEntry });
   syncXsRuntimeHooks(readXsEnabledSync());
   backfillXsEnabledAt();
