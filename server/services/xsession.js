@@ -1433,7 +1433,9 @@ const normDir = (p) => {
   return s.replace(/\/+$/, '');
 };
 // 企业托管的 MCP 配置(审计 S2):目录按平台固定,取法与本机 CLI 一致(macOS /Library/Application Support/ClaudeCode、
-// Windows C:\Program Files\ClaudeCode、其它 /etc/claude-code)。
+// Windows C:\Program Files\ClaudeCode、其它 /etc/claude-code)。2026-10-16 在 CLI 2.1.296 二进制里核实:取目录的函数按平台
+// 写死这三个字面量,不读环境变量(不看 %ProgramFiles% / %ProgramData%),managed-mcp.json 只认这一个位置;WSL 走 Linux 分支取
+// /etc/claude-code(/mnt/c/Program Files/ClaudeCode 只在开了 wslInheritsWindowsSettings 时用于 managed-settings,不用于本文件)。
 export const XS_MANAGED_MCP_PATH = join(process.platform === 'darwin' ? '/Library/Application Support/ClaudeCode'
   : process.platform === 'win32' ? 'C:\\Program Files\\ClaudeCode' : '/etc/claude-code', 'managed-mcp.json');
 // 一份 MCP 配置文件里有没有同名服务:'no'(文件不存在或没配)| 'yes' | 'unreadable'(在、却读不出或解析不了 —— 按"有"算)。
