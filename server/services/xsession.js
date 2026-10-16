@@ -340,6 +340,7 @@ let redeeming = 0; // 正在兑换(还没进 inflight)的请求数:关开关时�
 const START_GUARD_MS = 60_000;
 
 const reject = (status, code, error) => ({ reject: { status, body: { ok: false, code, error } } });
+const XS_MODE_CHANGED = 'XS_MODE_CHANGED'; // 只在内部回合的应答里出现(不对外)
 const claimInvalid409 = () => new XsError(409, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
 
 function tokenMatches(stored, given) {
@@ -356,7 +357,7 @@ function tokenMatches(stored, given) {
  * 通过 → { prompt: 信封, tag }。自己兜住所有错误(抛出去会变成 500 CHAT_ENTRY_HOOK_FAILED)。
  */
 export async function xsChatEntry({ body, sessionId, internal } = {}) {
-  if (internal) return xsInternalEntry(internal, sessionId); // r151c:服务端自己起的自动处理回合(HTTP 请求恒为 null)
+  if (internal) return xsInternalEntry(internal, sessionId, body); // r151c:服务端自己起的自动处理回合(HTTP 请求恒为 null)
   const hasId = body?.xsMessageId !== undefined;
   const hasToken = body?.xsToken !== undefined;
   if (!hasId && !hasToken) return null;
@@ -864,6 +865,15 @@ function liveGuiMode(sessionId) {
   for (const p of getActiveChatProcesses()) if (sameId(p.sessionId, sessionId) && p.exitCode === null && p.guiMode) mode = p.guiMode;
   return mode;
 }
+// 目标此刻的档位:存活槽的 > 最近一次切档 / 回合开始记的(latestGuiMode)> 档案的(接口"审计之后的补充约定"第 3 条)。
+// 判定、起回合前重读、内部入口核对都用这一个顺序(接口"复审之后的补充约定"第 1 条)。
+function currentTargetMode(sessionId, profile) {
+  return liveGuiMode(sessionId) ?? latestGuiMode.get(String(sessionId).toLowerCase()) ?? profile?.judge.mode ?? null;
+}
+const profileIn = (profiles, sessionId) => {
+  const pk = profiles ? Object.keys(profiles.sessions).find((k) => sameId(k, sessionId)) : null;
+  return pk ? profiles.sessions[pk] : null;
+};
 function fingerprintOrNull(salt) {
   try { return currentProviderFp(salt); } catch { return null; }
 }
@@ -872,13 +882,12 @@ function fingerprintOrNull(salt) {
 // 档案写失败过的会话整条按没有档案判(hasProfile 为 false → no-profile,见 profileCountsFor)。
 function targetFacts(sessionId, prefs, profiles, fp) {
   const inbound = Object.keys(prefs.inbound).some((k) => sameId(k, sessionId)) ? 'auto' : 'card';
-  const pk = profiles ? Object.keys(profiles.sessions).find((k) => sameId(k, sessionId)) : null;
-  const profile = pk ? profiles.sessions[pk] : null;
+  const profile = profileIn(profiles, sessionId);
   return {
     inbound,
     hasProfile: profileCountsFor(sessionId, profile, prefs.enabledAt),
     profileFresh: !!profile && !!fp && profile.judge.providerFp === fp,
-    targetMode: liveGuiMode(sessionId) ?? latestGuiMode.get(sessionId.toLowerCase()) ?? profile?.judge.mode ?? null,
+    targetMode: currentTargetMode(sessionId, profile),
     replay: profile?.replay ?? null,
   };
 }
@@ -1234,7 +1243,13 @@ function launchAuto(pick, key, budgetStamp) {
     key, event, timer: null, stuckTimer, pid: null, sessionId, auto: true, chainId: m.chainId, hop: m.hop, prompt,
     startedAt: Date.now(), started: false, responded: null, ended: null, budgetStamp, cwd: replay.cwd,
   });
-  const begin = () => {
+  const begin = async () => {
+    // 起回合前按同一顺序重读档位(接口"复审之后的补充约定"第 1 条):判定之后切过档(例如等输入预测收尾的这几秒)就不起回合,
+    // 走"起不来退回排队"(退回计数、重新判定;类别变了落 class-mismatch)—— 不以判定时的旧档位起回合,也不让回合开始把它写回成最新档位。
+    const profiles = await readProfilesQuietly();
+    const f = inflight.get(m.id);
+    if (!f || f.key !== key) return; // 等待期间已被认领 / 结算
+    if (currentTargetMode(sessionId, profileIn(profiles, sessionId)) !== targetMode) { requeueAuto(m.id, f); return; }
     let call;
     // 等过输入预测收尾之后再取"此刻的设置"
     try { call = startInternalTurn(autoTurnBody(replay, sessionId, targetMode), { kind: 'xs-auto', messageId: m.id, key }); } catch (e) { call = Promise.reject(e); }
@@ -1262,7 +1277,8 @@ function onAutoResponse(id, key, res) {
     if (f.ended) finishAutoTurn(id, f);
     return;
   }
-  if (res.status === 409 && res.body?.code === 'CHAT_SESSION_BUSY') return requeueAuto(id, f); // 目标正忙:回 queued 等下一次
+  // 目标正忙 / 内部入口核对到档位已改变:回 queued 等下一次(重新判定)
+  if (res.status === 409 && (res.body?.code === 'CHAT_SESSION_BUSY' || res.body?.code === XS_MODE_CHANGED)) return requeueAuto(id, f);
   settleNotStarted(id, f, responseReason(res) || '回合没有开始');
 }
 
@@ -1323,7 +1339,7 @@ async function settleStartFailed(id, f, res) {
 // r151c:经 startInternalTurn 起的自动处理回合(internal = { kind:'xs-auto', messageId, key })。调度器已在存储事务里把消息
 // 置为 processing、绑定 turn.key,并登记了 inflight(信封、补发事件);这里只核对、不改任何状态(内部请求遇忙的 409 在入口
 // 钩子之后才回,有副作用就收不回来)。
-async function xsInternalEntry(internal, sessionId) {
+async function xsInternalEntry(internal, sessionId, body) {
   if (internal.kind !== 'xs-auto' || !isIdString(internal.messageId) || typeof internal.key !== 'string') return reject(400, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
   if (!readXsEnabledSync()) return reject(409, 'XS_DISABLED', XS_DISABLED_TEXT);
   const f = inflight.get(internal.messageId);
@@ -1338,6 +1354,9 @@ async function xsInternalEntry(internal, sessionId) {
     console.warn(`[xsession] 自动处理消息 ${internal.messageId} 核对失败:${e?.cause?.code || e?.message || e}`);
     return reject(500, 'STORAGE_WRITE_FAILED', XS_STORAGE_FAILED_TEXT);
   }
+  // 上面的核对让出过事件循环:这期间切了档(存活槽 / 最近一次切档与请求体里的档位不同)同样不起回合,由应答那一侧退回排队
+  const nowMode = liveGuiMode(sessionId) ?? latestGuiMode.get(String(sessionId).toLowerCase()) ?? null;
+  if (nowMode !== null && nowMode !== body?.permissionMode) return reject(409, XS_MODE_CHANGED, '目标会话的权限档位已改变，重新判定');
   return { prompt: f.prompt, tag: { xsMessageId: internal.messageId, key: internal.key } };
 }
 

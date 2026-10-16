@@ -7,6 +7,8 @@
 //   ③ 审计 I1:目标没有存活进程时按"此刻的设置"起进程 —— 全局项取界面同步来的当前值(PUT /api/xsession/send-settings),
 //      没同步到时全盘读取按关、附加目录按空;关掉全盘读取、去掉附加目录后冷启的内部回合不带它们;有存活进程且设置相同时照常复用;
 //      同步接口的参数校验与固定文案。
+//   ④ 复审重要 1:判定之后、起回合之前(等目标上一回合的输入预测收尾)切了档 → 起回合前按同一顺序重读档位:类别变了不起回合、
+//      落 class-mismatch;类别没变按新档位起;都不把判定时的旧档位写回(接口"复审之后的补充约定"第 1 条)。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身;临时 HOME;端口 6800–6899。
 // node tests/unit/check-r151c-xs-audit.mjs
 import assert from 'node:assert/strict';
@@ -228,6 +230,41 @@ try {
   eq((await send(sBy, [TF], 'R151C 有存活进程')).results.map((x) => x.delivery), ['auto'], '有存活进程:照常 auto');
   await waitStatus((await lastTo(TF)).id, 'done', 15_000);
   eq([coldCallsFor(TF, n3).length, slotOf(TF)?.pid], [0, pidF], '有存活进程:不冷启,在现有进程里处理(同一 pid)');
+
+  // ── ④ 复审重要 1:起回合前重读档位(接口"复审之后的补充约定"第 1 条)──
+  // 替身不发 prompt_suggestion → 结果出来后有约 4 秒收尾窗;这期间到达的消息按空闲判 auto,回合等收尾之后才起。
+  const profileMode = async (sid) => (await store.readXsProfiles()).sessions[sid]?.judge.mode;
+  const gotText = (text) => calls.some((c) => c.inputs.some((i) => JSON.stringify(i?.message?.content ?? '').includes(text)));
+  // 4a) 「放任」→「放任」判成 auto;等收尾期间目标切到「逐步确认」→ 不起回合,重新判定落 class-mismatch
+  const TG = mk('目标 TG 等预测时切档');
+  await profiled(TG);
+  await setInbound([TG]);
+  await userTurn(TG, 'bypassPermissions', { promptSuggestions: true });
+  await waitFor(() => slotOf(TG)?.awaitingSuggestion, 'TG 结果已出、在等输入预测');
+  eq((await send(sBy, [TG], 'R151C 等预测时切档')).results.map((x) => x.delivery), ['auto'], '前置:只差输入预测 → 按空闲判 auto');
+  const mG = await lastTo(TG);
+  await waitStatus(mG.id, 'processing', 3000);
+  ok(slotOf(TG)?.awaitingSuggestion, '前置:消息已 processing、目标仍在等输入预测(回合还没起)');
+  eq((await api('POST', '/chat/permission-mode', { sessionId: TG, mode: 'default' })).status, 200, '前置:等收尾期间切到「逐步确认」');
+  const heldG = await waitStatus(mG.id, 'pending', 20_000);
+  eq(heldG.heldReason, 'class-mismatch', '起回合前重读到新档位、类别变了:不起回合,重新判定落 class-mismatch');
+  ok(!gotText('R151C 等预测时切档'), '没有任何进程收到这条消息');
+  eq([slotOf(TG)?.guiMode ?? null, await profileMode(TG)], ['default', 'default'], '存活进程没被改回「放任」;档案里的档位仍是「逐步确认」(没把判定时的旧档位写回)');
+  // 4b) 非放任 → 非放任判成 auto;等收尾期间目标从「逐步确认」切到「接受编辑」(类别没变,进程不保活、收尾后冷启)
+  //     → 退回排队重新判定,内部回合按新档位起
+  const TH = mk('目标 TH 等预测时同类切档');
+  await offTurn(TH, 'default');
+  await setInbound([TH]);
+  const sDef = { sessionId: S, runId: 'r-audit-sender-def', turnEpoch: 0, guiMode: 'default' };
+  await userTurn(TH, 'default', { promptSuggestions: true, keepAlive: false });
+  await waitFor(() => slotOf(TH)?.awaitingSuggestion, 'TH(不保活)结果已出、在等输入预测');
+  eq((await send(sDef, [TH], 'R151C 等预测时同类切档')).results.map((x) => x.delivery), ['auto'], '前置:非放任 → 非放任、只差输入预测 → auto');
+  const mH = await lastTo(TH);
+  await waitStatus(mH.id, 'processing', 3000);
+  eq((await api('POST', '/chat/permission-mode', { sessionId: TH, mode: 'acceptEdits' })).status, 200, '前置:等收尾期间切到「接受编辑」');
+  await waitStatus(mH.id, 'done', 30_000);
+  ok(gotText('R151C 等预测时同类切档'), '重新判定后照常处理');
+  eq(await profileMode(TH), 'acceptEdits', '内部回合按「接受编辑」起(回合开始记下的档位不是判定时的「逐步确认」)');
 
   console.log(`PASS check-r151c-xs-audit(${checks} 项)`);
 } finally {
