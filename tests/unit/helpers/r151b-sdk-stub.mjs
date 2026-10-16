@@ -26,7 +26,11 @@ const calls = (globalThis.__r151bSdkCalls ||= []);
 // 可选控制 globalThis.__r151bSdkControl(只有 check-r151b-runtime-hooks 设它;没设 = 下面的原行为,基线照旧):
 //   throwOnQuery: true → 下一次 query() 直接抛错(进程起不来),用一次即复位;
 //   reply(input) → 'ok'(默认)| 'error'(结果为错误)| 'exit'(不给结果就结束)| 'hold'(不回应,直到被 abort),
-//   或一个之后兑现为上述之一的 Promise(r151c:兑现前算回合在跑)。
+//   或一个之后兑现为上述之一的 Promise(r151c:兑现前算回合在跑);
+//   onInputEnd(record) → 可选 Promise(r151d):输入流被关(常驻进程被要求退出)后等它兑现再结束,模拟旧进程推迟退出;被 abort 时立即结束;
+//   setModel(record, model) → 可选 Promise(r151d):替换热切模型的应答时刻,模拟热切期间让出事件循环;
+//   setPermissionMode(record, mode) → 可选 Promise(r151d):替换热切档位的应答(record.inputEnded = 输入流已被关,真 SDK 此时的
+//   控制请求送不到 CLI,要等进程退出才以失败收场)。
 export function query({ prompt, options = {} } = {}) {
   const ctl = globalThis.__r151bSdkControl;
   if (ctl?.throwOnQuery) { ctl.throwOnQuery = false; throw new Error('r151b stub: query() 起不来'); }
@@ -45,7 +49,11 @@ export function query({ prompt, options = {} } = {}) {
     let initSent = false;
     while (!record.closed) {
       const next = await Promise.race([inputIterator.next(), aborted]);
-      if (next.done || record.closed) return;
+      if (next.done || record.closed) {
+        record.inputEnded = true;
+        if (!record.closed && !signal?.aborted && typeof ctl?.onInputEnd === 'function') await Promise.race([ctl.onInputEnd(record), aborted]);
+        return;
+      }
       record.inputs.push(next.value);
       if (!initSent) {
         initSent = true;
@@ -82,8 +90,12 @@ export function query({ prompt, options = {} } = {}) {
   const generator = run();
   const noop = async () => {};
   return Object.assign(generator, {
-    setPermissionMode: noop,
-    setModel: noop,
+    setPermissionMode: async (m) => {
+      if (typeof ctl?.setPermissionMode !== 'function') return;
+      const r = await Promise.race([Promise.resolve(ctl.setPermissionMode(record, m)).then(() => 'ok'), aborted.then(() => 'aborted')]);
+      if (r === 'aborted') throw new Error('r151b stub:进程被中止,控制请求没有送达'); // 同真 SDK:中止时挂着的控制请求以失败收场
+    },
+    setModel: async (m) => { if (typeof ctl?.setModel === 'function') await ctl.setModel(record, m); },
     interrupt: noop,
     stopTask: noop,
     applyFlagSettings: noop,

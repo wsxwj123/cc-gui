@@ -617,7 +617,8 @@ const profileWriteFailed = new Set(); // 会话 id(小写)
 // (在任何读盘、写盘之前),判定时排在存活槽之后、档案之前。档案经存储队列异步落盘,而 evaluateSession / sendAiMessages 先读档案
 // 快照、后进收件箱事务,两步之间用户切档并落盘的话快照里还是旧档位;判定与重放都读这张表,用的就是最新的选择。只记合法的六档、
 // 只在内存;删会话时清掉;服务重启后丢失,之后按盘上的档案判。拿到会话 id、回合结束兜底两处用的是回合开始时的参数,
-// 表里已有就不覆盖(回合中途切过档时不把旧档位写回)。
+// 表里已有就不覆盖(回合中途切过档时不把旧档位写回)。回合开始那一处:自动处理回合在 chat.js 置档 / 建进程之前同步核对过
+// 档位(internalTurnRecheck,r151d),核对到回合开始之间不让出事件循环,记下的就是此刻的档位,不会以判定时的旧档位盖掉其间的切档。
 const LATEST_MODES_MAX = 1024;
 const latestGuiMode = new Map(); // 会话 id(小写)→ 界面档位
 function noteLatestMode(sessionId, mode, { ifAbsent = false } = {}) {
@@ -1384,10 +1385,24 @@ async function xsInternalEntry(internal, sessionId, body) {
     console.warn(`[xsession] 自动处理消息 ${internal.messageId} 核对失败:${e?.cause?.code || e?.message || e}`);
     return reject(500, 'STORAGE_WRITE_FAILED', XS_STORAGE_FAILED_TEXT);
   }
-  // 上面的核对让出过事件循环:这期间切了档(存活槽 / 最近一次切档与请求体里的档位不同)同样不起回合,由应答那一侧退回排队
+  // 上面的核对让出过事件循环:这期间切了档(存活槽 / 最近一次切档与请求体里的档位不同)同样不起回合,由应答那一侧退回排队。
+  // r151d:之后 chat.js 还会让出事件循环(复用路径热切档位 / 模型、冷启路径等同会话的旧进程退出,最长约 5 秒),
+  // 同一核对作为 recheck 交给 chat.js,在复用路径置档之前、冷启路径建进程之前再同步调一次。
+  const mode = body?.permissionMode;
+  const recheck = () => internalTurnRecheck(internal, sessionId, mode);
+  const changed = recheck();
+  if (changed) return changed;
+  return { prompt: f.prompt, tag: { xsMessageId: internal.messageId, key: internal.key }, recheck };
+}
+// 内部回合起回合前的同步核对(入口与 chat.js 起回合之前共用):这条消息仍是这一次的自动处理,且目标此刻的档位
+// (存活槽 > 最近一次切档 / 回合开始记的;都没有时以判定为准 —— 判定之后的切档一定先记进 latestGuiMode)等于请求档位。
+// 不一致 → 409 XS_MODE_CHANGED,应答那一侧退回排队重判(类别变了落 class-mismatch,同类按新档位重起)。
+function internalTurnRecheck(internal, sessionId, mode) {
+  const f = inflight.get(internal.messageId);
+  if (!f || !f.auto || f.key !== internal.key) return reject(409, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
   const nowMode = liveGuiMode(sessionId) ?? latestGuiMode.get(String(sessionId).toLowerCase()) ?? null;
-  if (nowMode !== null && nowMode !== body?.permissionMode) return reject(409, XS_MODE_CHANGED, '目标会话的权限档位已改变，重新判定');
-  return { prompt: f.prompt, tag: { xsMessageId: internal.messageId, key: internal.key } };
+  if (nowMode !== null && nowMode !== mode) return reject(409, XS_MODE_CHANGED, '目标会话的权限档位已改变，重新判定');
+  return null;
 }
 
 // ── 给模型的两个工具:按会话挂进程内 MCP 服务(sessionOptions 挂接点;r151c 派工 4)─────────────────────────────
