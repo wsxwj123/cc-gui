@@ -10,7 +10,7 @@ import { XS_LIMITS, XsStorageError, countUnfinishedXsMessages, pendingCountsBySe
 import {
   XS_DISABLED_TEXT, XS_STORAGE_FAILED_TEXT, XsError, parseManualSend, sendManualMessages, parseListQuery, listInboxMessages,
   pendingSummary, claimMessage, releaseMessage, dismissMessage, syncXsRuntimeHooks, noteNativeGuardFailure, nativeGuardLastFailure,
-  clearAllXsMessages, xsAutoState, resumeXsAuto, kickAllXsQueued, noteXsInboundChanged, profileIsCurrent, setXsSessionRowsLoader,
+  clearAllXsMessages, xsAutoState, resumeXsAuto, kickAllXsQueued, noteXsInboundChanged, profileCountsFor, setXsSessionRowsLoader,
 } from '../services/xsession.js';
 import { assignShortIds, selectXsSessions } from '../services/xsession-resolve.js';
 import { resolveSessionTitle } from '../utils/session-title.js';
@@ -90,7 +90,7 @@ router.put('/xsession/config', async (req, res) => {
   let enabled = false;
   let turnedOn = false;
   try {
-    // r151c:由关变开的同一次写入里记启用时刻 —— 之前记下的发送档案从此不再算数(见 xsession.js profileIsCurrent)
+    // r151c:由关变开的同一次写入里记启用时刻 —— 之前记下的发送档案从此不再算数(见 xsession.js profileIsCurrent / profileCountsFor)
     await updatePrefs((prefs) => {
       const was = prefs.xsEnabled === true;
       if (typeof body.enabled === 'boolean') {
@@ -221,7 +221,7 @@ router.get('/xsession/sessions', async (req, res) => {
   let profiled = new Set();
   try {
     const { sessions: profiles } = await readXsProfiles();
-    profiled = new Set(Object.entries(profiles).filter(([, p]) => profileIsCurrent(p, prefs.enabledAt)).map(([k]) => k.toLowerCase()));
+    profiled = new Set(Object.entries(profiles).filter(([k, p]) => profileCountsFor(k, p, prefs.enabledAt)).map(([k]) => k.toLowerCase()));
   } catch (e) { console.warn(`[xsession] 读发送档案失败,hasProfile 按 false:${e?.code || e?.message || e}`); }
   const sessions = selectXsSessions(rows.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), opts)
     .map(({ sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity }) => ({

@@ -10,8 +10,9 @@
 //   ⑥ 连锁:hop 逐跳加 1、chainId 不变(回合结束后再发也一样),hop 5 → chain-limit;用户回合清空标记。
 //   ⑦ 上限:单次 8 个目标、单回合 16 条(失败项不计)、长度 / 空白 / 字节数、自己、找不到、重名合并。
 //   ⑧ 全局 10 分钟 20 次:第 20 次后暂停(广播一次、写盘)、之后落 paused、时间过去不自动恢复;盘上暂停即暂停;恢复清零。
-//   末尾补充约定各条之后:档案写失败(xsession 目录只读;切档没落盘 / 回合开始没记上)→ 没有存活槽时档位按未知判,
-//      不按盘上更宽的旧档位判同类(落 class-mismatch);该会话下一次档案记录成功后恢复。
+//   末尾补充约定各条之后:档案写失败(xsession 目录只读;切档没落盘 / 回合开始没记上)→ 该会话整条档案按没有档案判
+//      (落 no-profile,不论发送方档位;会话列表 hasProfile 同口径),不按盘上的旧档案判同类或重放;下一次档案记录成功后恢复
+//      (接口"审计之后的补充约定"第 4 条,取代派工 8 的 class-mismatch)。
 // node tests/unit/check-r151c-xs-auto.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, realpathSync, readFileSync, existsSync, utimesSync } from 'node:fs';
@@ -98,6 +99,7 @@ const eq = (a, b, m) => { assert.deepEqual(a, b, m); checks++; };
 const HELD = {
   'chain-limit': '已到连锁上限（4 次）', paused: '自动处理已暂停', 'class-mismatch': '发送方与目标会话的权限类别不同（一方是「放任」档、另一方不是），不自动处理',
   'target-stuck': '目标会话的上一条消息还没处理完', 'target-card': '等待你确认后处理', interrupted: '上次处理被中断',
+  'no-profile': '没有可用的发送设置，需在该会话里手动处理',
 };
 const NOTE = { auto: '对方将立即开始处理', queued: '对方正在运行，回合结束后自动处理', card: '对方设置为待处理，需其用户确认后才会处理', merged: '与前面的目标是同一个会话，已合并' };
 const slotOf = (sid) => chat.getActiveChatProcesses().filter((p) => p.sessionId === sid && p.exitCode === null).at(-1) || null;
@@ -462,7 +464,7 @@ try {
   const pubMan = await publicOf(DT, manual[0].id);
   ok(pubMan.from.kind === 'user' && !Object.hasOwn(pubMan.from, 'project'), `手动转发的不带 from.project(${JSON.stringify(pubMan.from)})`);
 
-  // 5) 档案写失败后档位未知:没有存活槽时不按盘上更宽的旧档位判同类;该会话下一次档案记录成功后恢复
+  // 5) 档案写失败后整条按没有档案判(no-profile):不按盘上的旧档案判同类或重放;该会话下一次档案记录成功后恢复
   const offTurn = async (sid, mode) => { // 不保活的用户回合:跑完进程退出,之后没有存活槽
     await userTurn(sid, mode, { keepAlive: false });
     await waitFor(() => !slotOf(sid), `${TITLES.get(sid)} 的进程退出`, 20_000);
@@ -487,12 +489,16 @@ try {
     return res;
   });
   eq([rPm.status, await modeOf(TM)], [200, 'bypassPermissions'], '前置:切到「逐步确认」200,档案写失败、盘上仍是「放任」');
+  const counts = async (sid) => xs.profileCountsFor(sid, (await store.readXsProfiles()).sessions[sid], prefsMod.readXsPrefsSync().enabledAt);
   let rMU = await send(sBy, [TM], 'R151C 切档没落盘');
-  eq(rMU.results.map((x) => [x.delivery, x.note]), [['card', HELD['class-mismatch']]], '切档没落盘:「放任」发送方不按旧档位判同类 → 卡片 class-mismatch');
-  eq((await fromSession(TM)()).map((m) => [m.status, m.heldReason]), [['pending', 'class-mismatch']], '落 pending / class-mismatch');
+  eq(rMU.results.map((x) => [x.delivery, x.note]), [['card', HELD['no-profile']]], '切档没落盘:「放任」发送方不按盘上的旧档位判同类 → 卡片 no-profile');
+  rMU = await send(sDef, [TM], 'R151C 切档没落盘 同类');
+  eq(rMU.results.map((x) => [x.delivery, x.note]), [['card', HELD['no-profile']]], '与最新档位同类的发送方同样 no-profile(整条档案不算数,不按旧档案重放)');
+  eq((await fromSession(TM)()).map((m) => [m.status, m.heldReason]), [['pending', 'no-profile'], ['pending', 'no-profile']], '都落 pending / no-profile');
+  eq(await counts(TM), false, '会话列表 hasProfile 同口径为 false(profileCountsFor)');
   ok(!ws.some((e) => e.type === 'xs:turn' && e.sessionId === TM), '没有为 TM 起回合');
   await offTurn(TM, 'default');
-  eq(await modeOf(TM), 'default', '下一个回合按「逐步确认」记档案成功');
+  eq([await modeOf(TM), await counts(TM)], ['default', true], '下一个回合按「逐步确认」记档案成功,档案重新算数');
   rMU = await send(sDef, [TM], 'R151C 记录成功后');
   eq(rMU.results.map((x) => [x.delivery, x.note]), [['auto', NOTE.auto]], '记录成功后档位恢复可判:非放任 → 非放任 auto');
   await waitStatus((await fromSession(TM)()).at(-1).id, 'done', 15_000);
@@ -503,7 +509,8 @@ try {
   await readonlyXsDir(() => offTurn(TN, 'default'));
   eq(await modeOf(TN), 'bypassPermissions', '前置:以「逐步确认」开始的回合档案写失败,盘上仍是「放任」');
   rMU = await send(sBy, [TN], 'R151C 回合开始没记上');
-  eq(rMU.results.map((x) => [x.delivery, x.note]), [['card', HELD['class-mismatch']]], '回合开始记档案失败:「放任」发送方不按旧档位判同类 → 卡片 class-mismatch');
+  eq(rMU.results.map((x) => [x.delivery, x.note]), [['card', HELD['no-profile']]], '回合开始记档案失败:整条档案按没有档案判 → 卡片 no-profile');
+  eq(await counts(TN), false, '会话列表 hasProfile 同口径为 false');
 
   console.log(`PASS check-r151c-xs-auto(${checks} 项)`);
 } finally {
