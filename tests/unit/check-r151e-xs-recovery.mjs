@@ -133,6 +133,47 @@ try {
   xs.installXsessionRuntime();
   ok(withXsTools(await offTurn(mk('会话 V5 重新打开'), 'default')), '前置:偏好可读、总开关开 → 钩子挂上');
 
+  // ── ③ 名单落盘失败:偏好文件恢复后恢复定时器自己补存(不靠下一次有会话被标记);日志只在首次失败与恢复时各记一行 ──
+  const failedIdsOnDisk = () => prefsJson()?.xsProfileWriteFailed ?? [];
+  const FAIL_LINE = '档案写失败标记未能写进偏好文件';
+  const RECOVERED_LINE = '偏好文件已恢复可读';
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...a) => { warns.push(a.join(' ')); origWarn(...a); };
+  const countWarns = (s) => warns.filter((w) => w.includes(s)).length;
+  try {
+    const T3 = mk('目标 T3 名单落盘失败');
+    await offTurn(T3, 'bypassPermissions');
+    await waitFor(() => profileOf(T3), 'T3 的档案');
+    warns.length = 0;
+    chmodSync(PREFS, 0o000);
+    try {
+      await offTurn(T3, 'bypassPermissions', { model: 'r151e-model-t3' }); // 偏好文件读不出:按没有档案判,标记落不了盘
+      await sleep(3_500); // 这期间恢复定时器重读过两次(1 秒、再 2 秒),都读不出
+    } finally { chmodSync(PREFS, 0o644); }
+    ok(!failedIdsOnDisk().includes(T3.toLowerCase()), '前置:读不出期间标记没落盘');
+    eq(countWarns(FAIL_LINE), 1, '首次失败记一行');
+    await waitFor(() => failedIdsOnDisk().includes(T3.toLowerCase()), '偏好文件恢复后不做任何操作,标记被补存进偏好文件', 25_000);
+    await sleep(300);
+    eq([countWarns(FAIL_LINE), countWarns(RECOVERED_LINE)], [1, 1], '重试期间不再记日志;恢复时记一行');
+
+    // 偏好文件内容坏了:后台补存一直抛 PREFS_UNREADABLE,不重建、不动文件,按最长间隔安静地重试;内容恢复后补存
+    const T3b = mk('目标 T3b 偏好内容坏了');
+    await offTurn(T3b, 'bypassPermissions');
+    await waitFor(() => profileOf(T3b), 'T3b 的档案');
+    const good = readFileSync(PREFS, 'utf8');
+    warns.length = 0;
+    writeFileSync(PREFS, '{broken');
+    try {
+      await offTurn(T3b, 'bypassPermissions', { model: 'r151e-model-t3b' });
+      await sleep(2_500);
+      eq(readFileSync(PREFS, 'utf8'), '{broken', '内容坏了:后台补存不重建、不覆盖偏好文件');
+      ok(countWarns(FAIL_LINE) <= 1, '内容坏了:重试不刷日志');
+    } finally { writeFileSync(PREFS, good); }
+    await waitFor(() => failedIdsOnDisk().includes(T3b.toLowerCase()), '内容恢复后补存进偏好文件', 25_000);
+    ok(failedIdsOnDisk().includes(T3.toLowerCase()), '补存时盘上原有的标记还在');
+  } finally { console.warn = origWarn; }
+
   console.log(`PASS check-r151e-xs-recovery(${checks} 项)`);
 } finally {
   ctl.onInputEnd = null; ctl.setModel = null; ctl.setPermissionMode = null;
