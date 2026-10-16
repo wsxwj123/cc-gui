@@ -311,12 +311,12 @@ try {
   const c5b = await autoCold(TK, 'R151C 界面 B 过期');
   eq(seen(c5b), [true, true, true, false], `过期的界面不算:全盘读取开、附加目录是界面 A 的(${JSON.stringify(dirsOf(c5b))})`);
   eq([c5b.options.maxBudgetUsd, c5b.options.promptSuggestions], [3, undefined], '花费上限与输入预测都按界面 A');
-  // 5c) 没有有效界面 → 全盘读取按关、附加目录按空,其余三项退回档案(档案按每次回合开始记,先让用户发一条把花费上限记成 7)
+  // 5c) 没有有效界面 → 全盘读取按关、附加目录按空,其余四项退回档案(档案按每次回合开始记,先让用户发一条把花费上限记成 7)
   await offTurn(TK, 'bypassPermissions', { ...wide, maxBudgetUsd: 7 });
   await putAgo(11 * 60_000, { uiId: U0, ...uiA }, '前置:界面 A 的同步也记在 11 分钟前');
   const c5c = await autoCold(TK, 'R151C 没有有效界面');
   eq(seen(c5c), [false, false, false, false], `没有有效界面:全盘读取按关、附加目录按空(不看档案里上次发送的;${JSON.stringify(dirsOf(c5c))})`);
-  eq(c5c.options.maxBudgetUsd, 7, '其余三项退回档案(花费上限是档案里上次发送的 7,不是过期界面 A 的 3)');
+  eq(c5c.options.maxBudgetUsd, 7, '其余四项退回档案(花费上限是档案里上次发送的 7,不是过期界面 A 的 3)');
 
   // ── ⑥ 复审建议 2:同步被拒时清掉该界面的值(接口"复审之后的补充约定"第 3 条)──
   const uiN = { globalRead: false, addDirs: [EXTRA2], maxBudgetUsd: 2, keepAlive: false, promptSuggestions: false, genui: true };

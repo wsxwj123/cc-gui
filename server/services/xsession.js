@@ -12,8 +12,8 @@ import { constants as fsConstants, readFileSync, realpathSync, statSync } from '
 import { dirname, join, resolve, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
-import { readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, updatePrefs } from '../routes/prefs.js';
-import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError } from '../routes/chat.js';
+import { XS_PROFILE_WRITE_FAILED_MAX, normalizeXsProfileWriteFailed, readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, readXsProfileWriteFailedSync, updatePrefs, updatePrefsStrict } from '../routes/prefs.js';
+import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, permissionModeSwitchPending, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
 import { XS_PROFILE_MODES, XS_PROFILE_REPLAY_KEYS, dropXsProfile, mutateXsProfiles, readXsProfiles } from './xsession-store.js';
@@ -611,13 +611,72 @@ const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合
 // 档案写失败(接口"审计之后的补充约定"第 4 条,取代派工 8 的"档位未知 → class-mismatch"):该会话的档案写失败过(切档没落盘、
 // 回合开始 / 拿到会话 id / 回合结束兜底时没记上),盘上那份的档位可能比用户最新的选择宽、其余重放参数也是旧的,按它判同类或
 // 重放都不偏安全。整条按"没有档案"判(去向表⑤ no-profile,落卡片;会话列表 hasProfile 同口径为 false,见 profileCountsFor),
-// 该会话下一次档案成功落盘(或内容没变、无需落盘)后清掉。只在内存:服务重启后丢失,之后按盘上的档案判。
-const profileWriteFailed = new Set(); // 会话 id(小写)
+// 该会话下一次档案成功落盘(或内容没变、无需落盘)后清掉。
+// r151d:随偏好写入落盘(偏好键 xsProfileWriteFailed,只记会话 id,最多 XS_PROFILE_WRITE_FAILED_MAX 个,超出时只写最近加入的),
+// 服务启动时读回(installXsessionRuntime)—— 否则重启后又按盘上那份可能更宽的旧档案判。偏好文件也写不进(或在、却读不出:
+// 不能拿空对象整份覆盖它,见 updatePrefsStrict)时记一行日志,内存标记照旧。
+// 判官 R1:这个键读不出时的默认值([] = 没有标记)是放宽方向,不套已有键"读不出按默认"的规则。偏好文件在、却读不出(Windows 上
+// 被杀毒 / 备份软件占着)时记为"名单还没读到",每次判定前(profileCountsFor)再读,读到之前所有会话一律按没有档案判;落盘时先并进
+// 盘上已有的名单(减去本进程清掉的)再写,本进程没读到的标记不会被它的写入删掉。
+// 判官 S3:某次落盘失败后,之后每次有会话被标记(含同一会话再次写失败)都重试落盘,直到成功一次。
+const profileWriteFailed = new Set(); // 会话 id(小写);按加入先后排
+const profileWriteFailedCleared = new Set(); // 本进程清掉、还没确认已从偏好文件里删掉的(读到 / 落盘时从盘上的名单里减去)
+let profileWriteFailedLoaded = false; // 偏好文件里的名单读到过没有(文件不存在也算读到)
+let profileFailPersistFailed = false; // 上一次落盘失败了(S3:之后每次标记都重试)
+function profileWriteFailedReady() {
+  if (profileWriteFailedLoaded) return true;
+  const { ids, readFailed } = readXsProfileWriteFailedSync();
+  if (readFailed) return false;
+  const mine = [...profileWriteFailed];
+  profileWriteFailed.clear();
+  for (const k of ids) if (!profileWriteFailedCleared.has(k)) profileWriteFailed.add(k);
+  for (const k of mine) { profileWriteFailed.delete(k); profileWriteFailed.add(k); } // 本进程标记的排在后面(更近)
+  profileWriteFailedLoaded = true;
+  return true;
+}
+function markProfileWriteFailed(sessionId) {
+  const k = String(sessionId).toLowerCase();
+  profileWriteFailedCleared.delete(k);
+  const had = profileWriteFailed.delete(k);
+  profileWriteFailed.add(k); // 重新排到最后(落盘超上限时留最近加入的)
+  if (!had || profileFailPersistFailed) persistProfileWriteFailed();
+}
+function clearProfileWriteFailed(sessionId) {
+  const k = String(sessionId).toLowerCase();
+  const had = profileWriteFailed.delete(k);
+  if (!had && profileWriteFailedLoaded) return;
+  profileWriteFailedCleared.add(k); // 名单还没读到时也记下:读到时不把盘上的它当作标记
+  if (had) persistProfileWriteFailed();
+}
+let profileFailPersistQueued = false;
+function persistProfileWriteFailed() {
+  if (profileFailPersistQueued) return; // 已排着一次:那次写入时取的是当时内存里的最新集合
+  profileFailPersistQueued = true;
+  let ran = false;
+  let applied = [];
+  updatePrefsStrict((p) => {
+    ran = true;
+    profileFailPersistQueued = false;
+    applied = [...profileWriteFailedCleared];
+    const onDisk = normalizeXsProfileWriteFailed(p).filter((k) => !profileWriteFailedCleared.has(k) && !profileWriteFailed.has(k));
+    const ids = [...onDisk, ...profileWriteFailed].slice(-XS_PROFILE_WRITE_FAILED_MAX);
+    if (ids.length) p.xsProfileWriteFailed = ids;
+    else delete p.xsProfileWriteFailed;
+  }).then(() => {
+    profileFailPersistFailed = false;
+    for (const k of applied) if (!profileWriteFailed.has(k)) profileWriteFailedCleared.delete(k); // 已从偏好文件里删掉
+  }, (e) => {
+    if (!ran) profileFailPersistQueued = false; // 读盘就失败了(没走到 mutator)
+    profileFailPersistFailed = true;
+    console.warn(`[xsession] 档案写失败标记未能写进偏好文件(本进程内照旧按没有档案判,下次有会话被标记时重试):${e?.code || e?.message || e}`);
+  });
+}
 // 最新档位(审计 S1;接口"审计之后的补充约定"第 3 条:存活进程 > 最近一次切档 > 发送档案):切档钩子与回合开始钩子里同步记
 // (在任何读盘、写盘之前),判定时排在存活槽之后、档案之前。档案经存储队列异步落盘,而 evaluateSession / sendAiMessages 先读档案
 // 快照、后进收件箱事务,两步之间用户切档并落盘的话快照里还是旧档位;判定与重放都读这张表,用的就是最新的选择。只记合法的六档、
 // 只在内存;删会话时清掉;服务重启后丢失,之后按盘上的档案判。拿到会话 id、回合结束兜底两处用的是回合开始时的参数,
-// 表里已有就不覆盖(回合中途切过档时不把旧档位写回)。
+// 表里已有就不覆盖(回合中途切过档时不把旧档位写回)。回合开始那一处:自动处理回合在 chat.js 置档 / 建进程之前同步核对过
+// 档位(internalTurnRecheck,r151d),核对到回合开始之间不让出事件循环,记下的就是此刻的档位,不会以判定时的旧档位盖掉其间的切档。
 const LATEST_MODES_MAX = 1024;
 const latestGuiMode = new Map(); // 会话 id(小写)→ 界面档位
 function noteLatestMode(sessionId, mode, { ifAbsent = false } = {}) {
@@ -631,7 +690,7 @@ function noteLatestMode(sessionId, mode, { ifAbsent = false } = {}) {
 // 偏好文件在、却读不出(审计 S1):不能当"总开关关着"静默跳过 —— 那样既不写盘也不留标记,判定仍按盘上的旧档案。
 // 按档案写失败处理(该会话按没有档案判,见 profileWriteFailed),直到下一次记录成功。
 function profilePrefsUnreadable(sessionId, what) {
-  profileWriteFailed.add(sessionId.toLowerCase());
+  markProfileWriteFailed(sessionId);
   console.warn(`[xsession] 会话 ${sessionId} 的${what}没有记进档案:偏好文件读不出(按没有档案判,直到下次记录成功)`);
 }
 
@@ -698,6 +757,7 @@ export function profileIsCurrent(profile, enabledAt) {
 
 /** 这条档案算不算数(去向表⑤与会话列表 hasProfile 同口径):本次启用之后记录的,且该会话此后没有档案写失败(见 profileWriteFailed)。 */
 export function profileCountsFor(sessionId, profile, enabledAt) {
+  if (!profileWriteFailedReady()) return false; // 偏好文件里的写失败名单还没读到(判官 R1):一律按没有档案判
   return !profileWriteFailed.has(String(sessionId).toLowerCase()) && profileIsCurrent(profile, enabledAt);
 }
 
@@ -719,9 +779,9 @@ async function recordProfile(sessionId, params) {
       if (prevKey) delete d.sessions[prevKey];
       d.sessions[sessionId] = { replay, judge: { mode, providerFp, recordedAt: new Date().toISOString() } };
     });
-    profileWriteFailed.delete(sessionId.toLowerCase());
+    clearProfileWriteFailed(sessionId);
   } catch (e) {
-    profileWriteFailed.add(sessionId.toLowerCase());
+    markProfileWriteFailed(sessionId);
     console.warn(`[xsession] 会话 ${sessionId} 的发送档案未能落盘(按没有档案判,直到下次记录成功):${e?.cause?.code || e?.code || e?.message || e}`);
   }
 }
@@ -766,6 +826,7 @@ function noteTurnEndProfile(info) {
 async function xsModeChange({ sessionId, mode } = {}) {
   if (!isIdString(sessionId) || !XS_PROFILE_MODES.includes(mode)) return;
   noteLatestMode(sessionId, mode);
+  if (queuedHint.has(sessionId.toLowerCase())) scheduler.kick(sessionId); // 判官 S2:切档期间退回排队的按新档位重判
   const prefs = readXsPrefsDetailedSync();
   if (prefs.readFailed) return profilePrefsUnreadable(sessionId, '切档');
   if (!prefs.enabled) return;
@@ -777,9 +838,9 @@ async function xsModeChange({ sessionId, mode } = {}) {
         p.judge.mode = mode;
       }
     });
-    profileWriteFailed.delete(sessionId.toLowerCase());
+    clearProfileWriteFailed(sessionId);
   } catch (e) {
-    profileWriteFailed.add(sessionId.toLowerCase()); // 盘上仍是切档前的档位:不能再按它判同类、重放
+    markProfileWriteFailed(sessionId); // 盘上仍是切档前的档位:不能再按它判同类、重放
     console.warn(`[xsession] 会话 ${sessionId} 的档案档位未能落盘(按没有档案判,直到下次记录成功):${e?.cause?.code || e?.code || e?.message || e}`);
   }
 }
@@ -791,7 +852,7 @@ export async function forgetXsSession(sessionId) {
   for (const [k, r] of turnChains) if (sameId(r.sessionId, sessionId)) turnChains.delete(k); // 连锁标记与单回合发送计数
   scheduler.forget(sessionId);
   queuedHint.delete(sessionId.toLowerCase());
-  profileWriteFailed.delete(sessionId.toLowerCase());
+  clearProfileWriteFailed(sessionId);
   latestGuiMode.delete(sessionId.toLowerCase());
   return dropXsProfile(sessionId);
 }
@@ -835,6 +896,7 @@ function dropInflight(id, key) {
 // 还没起回合的消息(含等预测收尾再起的)照样算忙,一个会话一次只投一条。
 function targetBusy(sessionId, includeSettling) {
   if (includeSettling && scheduler.settling(sessionId)) return true;
+  if (permissionModeSwitchPending(sessionId)) return true; // 判官 S2:切档还没完成也算忙(不投;完成后按新档位重判)
   const procs = getActiveChatProcesses().filter((p) => sameId(p.sessionId, sessionId));
   const resultOut = procs.some((p) => p.busy && p.awaitingSuggestion);
   for (const f of inflight.values()) if (sameId(f.sessionId, sessionId) && !(resultOut && f.started)) return true;
@@ -1212,30 +1274,43 @@ export function noteXsInboundChanged(sessionId) {
 export const XS_SEND_SETTING_KEYS = Object.freeze(['globalRead', 'addDirs', 'maxBudgetUsd', 'keepAlive', 'promptSuggestions', 'genui']);
 // 多个界面同时打开时按界面实例(uiId,每次打开页面随机生成)分开记,合起来取最窄(接口"复审之后的补充约定"第 2 条)。
 // 界面打开期间每 5 分钟重同步一次;10 分钟没再同步的界面不算有效。只在内存,服务重启后全部作废(界面重连时会强制重同步)。
+// r151d:值与该界面上一次同步的完全相同(定时重同步)只刷新有效期,不算一次变化 —— 三项"取最近一次"按变化先后选,
+// 不随哪个界面的定时器先到点来回翻(否则自动处理随之反复关掉常驻进程重新冷启)。
 export const XS_UI_STALE_MS = 10 * 60_000;
 export const XS_UI_MAX = 32; // 条目上限(防刷爆):满了先清过期的,仍满就淘汰最久没同步的那个
-const uiSendSettings = new Map(); // uiId → { v, at };按同步先后排,最后一条是最近一次同步的
+// uiId → { v, at, changeSeq };Map 按同步先后排(淘汰用)。at = 最近一次同步的时刻(判有效);changeSeq = 该界面的值最近一次
+// 变化的序号(进程内单调递增,不受墙上时间平移影响;首次同步算一次变化)。
+const uiSendSettings = new Map();
+let uiChangeSeq = 0;
+const sameSendSettings = (a, b) => XS_SEND_SETTING_KEYS.every((k) => (k === 'addDirs'
+  ? a.addDirs.length === b.addDirs.length && a.addDirs.every((d, i) => d === b.addDirs[i])
+  : a[k] === b[k]));
 /** PUT /api/xsession/send-settings 校验通过后调用(uiId 与 v 已是合规形态,见 routes/xsession.js)。 */
 export function setXsSendSettings(uiId, v) {
   const now = Date.now();
+  const prev = uiSendSettings.get(uiId);
+  const next = Object.freeze({ ...v, addDirs: Object.freeze([...v.addDirs]) });
+  const changeSeq = prev && sameSendSettings(prev.v, next) ? prev.changeSeq : ++uiChangeSeq;
   uiSendSettings.delete(uiId);
   if (uiSendSettings.size >= XS_UI_MAX) {
     for (const [id, e] of uiSendSettings) if (!(now - e.at < XS_UI_STALE_MS)) uiSendSettings.delete(id);
   }
   while (uiSendSettings.size >= XS_UI_MAX) uiSendSettings.delete(uiSendSettings.keys().next().value);
-  uiSendSettings.set(uiId, { v: Object.freeze({ ...v, addDirs: Object.freeze([...v.addDirs]) }), at: now });
+  uiSendSettings.set(uiId, { v: next, at: now, changeSeq });
 }
 /** 同步被拒(请求体不合规、uiId 本身合规)时调用:删掉这个界面之前的记录,按其余有效界面重算(接口"复审之后的补充约定"第 3 条)。 */
 export function forgetXsSendSettings(uiId) {
   uiSendSettings.delete(uiId);
 }
-// 此刻有效的界面合起来的值(按此刻的 Date.now() 判有效):全盘读取全部为开才开;附加目录取交集(按最近一次同步那份的顺序);
-// 花费上限取最小,null(不限)算最宽;常驻进程、输入预测、生图界面取最近一次同步的。一个有效的都没有 → null。
+// 此刻有效的界面合起来的值(按此刻的 Date.now() 判有效):全盘读取全部为开才开;附加目录取交集(按最近一次变化那份的顺序);
+// 花费上限取最小,null(不限)算最宽;常驻进程、输入预测、生图界面取有效界面里最近一次发生变化的那个界面的值(r151d)。
+// 一个有效的都没有 → null。
 function effectiveSendSettings() {
   const now = Date.now();
-  const live = [...uiSendSettings.values()].filter((e) => now - e.at < XS_UI_STALE_MS).map((e) => e.v);
-  if (!live.length) return null;
-  const latest = live[live.length - 1];
+  const entries = [...uiSendSettings.values()].filter((e) => now - e.at < XS_UI_STALE_MS);
+  if (!entries.length) return null;
+  const live = entries.map((e) => e.v);
+  const latest = entries.reduce((a, b) => (b.changeSeq > a.changeSeq ? b : a)).v;
   const budgets = live.map((v) => v.maxBudgetUsd).filter((b) => b !== null);
   return {
     globalRead: live.every((v) => v.globalRead === true),
@@ -1384,10 +1459,27 @@ async function xsInternalEntry(internal, sessionId, body) {
     console.warn(`[xsession] 自动处理消息 ${internal.messageId} 核对失败:${e?.cause?.code || e?.message || e}`);
     return reject(500, 'STORAGE_WRITE_FAILED', XS_STORAGE_FAILED_TEXT);
   }
-  // 上面的核对让出过事件循环:这期间切了档(存活槽 / 最近一次切档与请求体里的档位不同)同样不起回合,由应答那一侧退回排队
+  // 上面的核对让出过事件循环:这期间切了档(存活槽 / 最近一次切档与请求体里的档位不同)同样不起回合,由应答那一侧退回排队。
+  // r151d:之后 chat.js 还会让出事件循环(复用路径热切档位 / 模型、冷启路径等同会话的旧进程退出,最长约 5 秒),
+  // 同一核对作为 recheck 交给 chat.js,在复用路径置档之前、冷启路径建进程之前再同步调一次。
+  const mode = body?.permissionMode;
+  const recheck = () => internalTurnRecheck(internal, sessionId, mode);
+  const changed = recheck();
+  if (changed) return changed;
+  return { prompt: f.prompt, tag: { xsMessageId: internal.messageId, key: internal.key }, recheck };
+}
+// 内部回合起回合前的同步核对(入口与 chat.js 起回合之前共用):这条消息仍是这一次的自动处理,且目标此刻的档位
+// (存活槽 > 最近一次切档 / 回合开始记的;都没有时以判定为准 —— 判定之后的切档一定先记进 latestGuiMode)等于请求档位。
+// 不一致 → 409 XS_MODE_CHANGED,应答那一侧退回排队重判(类别变了落 class-mismatch,同类按新档位重起)。
+function internalTurnRecheck(internal, sessionId, mode) {
+  const f = inflight.get(internal.messageId);
+  if (!f || !f.auto || f.key !== internal.key) return reject(409, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
+  // 判官 S2:用户切档的请求还没完成(控制请求往返期间槽与最近一次切档都还是旧档位,下面的比对会通过)→ 同样退回排队,
+  // 切档完成后(modeChange 通知里踢调度器)按新档位重判
+  if (permissionModeSwitchPending(sessionId)) return reject(409, XS_MODE_CHANGED, '目标会话正在切换权限档位，重新判定');
   const nowMode = liveGuiMode(sessionId) ?? latestGuiMode.get(String(sessionId).toLowerCase()) ?? null;
-  if (nowMode !== null && nowMode !== body?.permissionMode) return reject(409, XS_MODE_CHANGED, '目标会话的权限档位已改变，重新判定');
-  return { prompt: f.prompt, tag: { xsMessageId: internal.messageId, key: internal.key } };
+  if (nowMode !== null && nowMode !== mode) return reject(409, XS_MODE_CHANGED, '目标会话的权限档位已改变，重新判定');
+  return null;
 }
 
 // ── 给模型的两个工具:按会话挂进程内 MCP 服务(sessionOptions 挂接点;r151c 派工 4)─────────────────────────────
@@ -1519,6 +1611,9 @@ export function syncXsRuntimeHooks(enabled) {
 
 /** 启动时调用一次(server/index.js,在开始接请求之前):挂 chatEntry,按当前开关挂回合钩子。 */
 export function installXsessionRuntime() {
+  // r151d:写失败标记跨重启保留。偏好文件在、却读不出 → 记为"名单还没读到",判定前再读,读到之前一律按没有档案判(判官 R1)
+  profileWriteFailedLoaded = false;
+  if (!profileWriteFailedReady()) console.warn('[xsession] 启动时偏好文件读不出,档案写失败名单还没读到:读到之前所有会话按没有档案判');
   if (!unhookEntry) unhookEntry = registerSessionRuntimeHooks({ chatEntry: xsChatEntry });
   syncXsRuntimeHooks(readXsEnabledSync());
   backfillXsEnabledAt();

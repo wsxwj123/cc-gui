@@ -715,6 +715,8 @@ function makeInputQueue() {
       closed = true;
       if (waiting) { const w = waiting; waiting = null; w({ value: undefined, done: true }); }
     },
+    // r151d:关过没有(只读)。关了之后 SDK 那边的 stdin 随之关闭,控制请求(热切档位等)再也送不到 CLI。
+    isClosed() { return closed; },
     iterable: {
       [Symbol.asyncIterator]() { return this; },
       next() {
@@ -1075,12 +1077,15 @@ const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolU
 
 /**
  * 挂接钩子(启动时调用)。只认上面七个键,值必须是函数;返回注销函数(只撤本次挂上、且仍在位的那几个)。
- * · chatEntry(ctx) → null | { reject: { status, body } } | { prompt, tag }(可异步)。
+ * · chatEntry(ctx) → null | { reject: { status, body } } | { prompt, tag, recheck? }(可异步)。
  *   ctx = { body, sessionId, clientTurnId, principal, internal }(internal:经 startInternalTurn 起的回合是调用方给的对象,
  *   HTTP 请求恒为 null)。调用时机:输入闸门、工作目录检查、同 clientTurnId 命中
  *   之后,起进程 / 推消息之前。reject:回这个应答、不起进程、撤掉本回合的 clientTurnId 记录(同 id 可重试);
  *   prompt:本回合推给模型的内容换成它,tag 随本回合带到 turnStart / turnEnd。抛错或返回值不合规 →
  *   500 CHAT_ENTRY_HOOK_FAILED、不起进程(宁可不发,不发错)。
+ *   recheck(r151d,可选,必须同步)→ null | { reject }:入口钩子之后到真正起回合之间还会让出事件循环(复用路径热切档位 /
+ *   模型、冷启路径等同会话的旧进程退出,最长约 5 秒),给了它就在复用路径置档之前、冷启路径建进程之前再调一次;
+ *   reject 同上(复用路径另把那个常驻进程关掉,下一回合冷启),抛错或返回值不合规同上。
  * · turnStart(info) / turnEnd(info):同步通知,返回值忽略,抛错只记日志。
  *   turnStart 在本回合的用户消息推进输入流之前调用(此时用 deliverRunEvent 补的事件排在本回合任何 CLI 输出之前);
  *   info = { pid, runId, sessionId, draftId, cwd, turnEpoch, reused, tag, params }。params(r151c)= { body, guiMode }:
@@ -1276,8 +1281,24 @@ async function runChatEntryHook(ctx) {
   if (out.reject) {
     const { status, body } = out.reject;
     if (Number.isInteger(status) && status >= 400 && status <= 599 && body && typeof body === 'object') return { reject: { status, body } };
-  } else if (typeof out.prompt === 'string' && out.prompt) return { prompt: out.prompt, tag: out.tag };
+  } else if (typeof out.prompt === 'string' && out.prompt) {
+    return { prompt: out.prompt, tag: out.tag, recheck: typeof out.recheck === 'function' ? out.recheck : null };
+  }
   console.warn('[r151b] /chat 入口钩子的返回值不合规,不起进程');
+  return ENTRY_HOOK_FAILED;
+}
+// r151d:入口钩子给的 recheck(见 registerSessionRuntimeHooks 的说明)。没给 → null(不多做任何事);只认同步返回值。
+function runEntryRecheck(entry) {
+  if (!entry?.recheck) return null;
+  let out;
+  try { out = entry.recheck(); } catch (e) {
+    console.warn(`[r151d] /chat 入口钩子的起回合前核对出错,不起回合:${e?.message || e}`);
+    return ENTRY_HOOK_FAILED;
+  }
+  if (out == null) return null;
+  const r = out.reject;
+  if (r && Number.isInteger(r.status) && r.status >= 400 && r.status <= 599 && r.body && typeof r.body === 'object') return { reject: { status: r.status, body: r.body } };
+  console.warn('[r151d] /chat 入口钩子的起回合前核对返回值不合规,不起回合');
   return ENTRY_HOOK_FAILED;
 }
 // PreToolUse 守卫(审计 S1):只能拒绝,不能借返回值跳过下面第三方 auto 的审核;卡住也不能拖住工具调用。
@@ -2304,6 +2325,15 @@ async function handleChatPost(req, res) {
           if (switchTimer) clearTimeout(switchTimer);
         }
       }
+      // r151d:上面的热切让出过事件循环,入口钩子要求的话在置档之前再核对一次(跨会话自动处理:这期间切了档就不起回合、
+      // 退回排队重判)。不通过 → 不复用、把这个常驻进程关掉(热切已动过它的档位 / 模型,下一回合冷启),回入口钩子给的应答。
+      const reuseRecheck = runEntryRecheck(entry);
+      if (reuseRecheck) {
+        s.closing = true;
+        try { s.input.close(); } catch {}
+        dropTurnRecord(turnRecord);
+        return res.status(reuseRecheck.reject.status).json(reuseRecheck.reject.body);
+      }
       // 重置回合级状态(新回合从干净缓冲开始;上一回合内容客户端已消费或以 jsonl 为准)
       s.idle = false;
       s.earlyLines = [];
@@ -2391,6 +2421,13 @@ async function handleChatPost(req, res) {
         await new Promise((r) => setTimeout(r, 50));
       }
     }
+  }
+  // r151d:等旧进程退出的这几秒让出过事件循环,入口钩子要求的话在建进程之前再核对一次(跨会话自动处理:这期间切了档就
+  // 不起回合、退回排队重判)。从这里到下面回合开始通知之间没有 await:通过了,回合就按此刻的档位开始。
+  const recheckOut = runEntryRecheck(entry);
+  if (recheckOut) {
+    dropTurnRecord(turnRecord);
+    return res.status(recheckOut.reject.status).json(recheckOut.reject.body);
   }
 
   const procId = 'sdk-' + (++sdkCounter);
@@ -3004,6 +3041,13 @@ router.get('/model-window', (req, res) => {
   res.json({ window: info.window, source: info.origin });
 });
 
+// r151d 判官 S2:正在进行的切档请求(会话 id 小写 → 个数),见 POST /chat/permission-mode。
+const permissionModeSwitching = new Map();
+/** 该会话有没有还没完成的切档请求(控制请求还没返回、新档位还没记下)。跨会话自动处理据此不起回合、退回排队。 */
+export function permissionModeSwitchPending(sessionId) {
+  return typeof sessionId === 'string' && permissionModeSwitching.has(sessionId.toLowerCase());
+}
+
 // r49b①:热切逐 slot 记结果。CLI 2.1.240 的 guardPermissionModeChange 会拒掉一部分切换
 // (auto 受模型门控、bypass 未带 dangerously-skip 启动),原来整段包在 `catch {}` 里吞掉,
 // 响应里成功与被拒长得一模一样 → 界面停在一个根本没生效的档上。被拒的 slot 一个字段都不改:
@@ -3017,6 +3061,16 @@ export async function applyPermissionModeToSlots(procs, sessionId, mode) {
   for (const slot of procs.values()) {
     if (slot.sessionId !== sessionId || slot.exitCode !== null || !slot.query) continue;
     attempted++;
+    // r151d:输入流已关的进程(被要求退出、不再承载新回合:设置变了被关掉的常驻进程、不保活回合结束后正在退出的进程等)
+    // 收不到控制请求 —— setPermissionMode 只会挂到它退出后以失败收场,这期间本请求一直不回,最后还把这次切档报成 409,
+    // 而同会话新起的进程(例如跨会话自动处理等它退出后冷启的)在此之前看不到这次切档。只改本地档位(canUseTool 按它裁决:
+    // 它若因后台任务多活一阵,之后的工具调用按新档位判),算作已收下;SDK 层档位(sdkMode)改不了,保持原样。
+    if (slot.input?.isClosed?.()) {
+      slot.guiMode = mode;
+      slot.permissionMode = mode;
+      delivered++;
+      continue;
+    }
     try {
       await slot.query.setPermissionMode(sdkMode);
       slot.guiMode = mode;
@@ -3056,7 +3110,19 @@ router.post('/chat/permission-mode', async (req, res) => {
   if (mode === 'auto' && gateAutoPermissionMode('auto', { official: settingsProviderIsOfficial(), enabled: readThirdPartyAutoSync() }).downgraded) {
     return res.status(409).json({ ok: false, code: 'THIRD_PARTY_AUTO_DISABLED', error: '第三方 provider 的「自动」档未开启' });
   }
-  const { attempted, delivered, failed } = await applyPermissionModeToSlots(activeProcesses, sessionId, mode);
+  // r151d 判官 S2:从这里起到新档位记下(下面同步调的 modeChange 通知)之前算"切档进行中" —— 控制请求往返期间槽与最近一次切档
+  // 都还是旧档位,跨会话自动处理的起回合前核对若照常通过,回合会落在切档之后的档位上(放宽方向即绕过类别规则)。核对据此退回排队。
+  const switchKey = String(sessionId).toLowerCase();
+  permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
+  let applied;
+  try {
+    applied = await applyPermissionModeToSlots(activeProcesses, sessionId, mode);
+  } finally { // 之后到 modeChange 通知之间没有 await:清掉标记与记下新档位之间不会插进别的核对
+    const left = (permissionModeSwitching.get(switchKey) || 1) - 1;
+    if (left > 0) permissionModeSwitching.set(switchKey, left);
+    else permissionModeSwitching.delete(switchKey);
+  }
+  const { attempted, delivered, failed } = applied;
   // A1 切档重裁:对该会话已 pending 的卡按【新档】重新自动裁决(判定与 canUseTool 共用
   // autoDecide 同一份)。allow/deny 走既有 settle 幂等路径,null 的卡保持等待用户。
   // 原客户端"切放任批量放行"effect 与各 mode 抢答分支的职责全部由这里接管。
