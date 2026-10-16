@@ -178,6 +178,19 @@ export async function updatePrefs(mutator, { rebuildCorrupt = true } = {}) {
 // (沿用 r151d:后台自动写入不替用户重建坏文件,见单测 check-r151d-xs-hardening 3e),落盘失败由调用方记日志、之后重试。
 export const updatePrefsStrict = (mutator) => updatePrefs(mutator, { rebuildCorrupt: false });
 
+// r151e ⑥:添加项目时把它的 hash 移出隐藏列表(settings.js 的 PUT /settings {_addProject})。之前那边直接 readFile + writeFile,
+// 绕过写队列(与队列里的写入互相覆盖)、也不是原子写(写到一半崩溃留下坏文件)。现在同一条写队列、同一套严格读、原子写;
+// 只有真的移出了条目才写盘。返回是否移出了;读不出 / 写不进时抛错(调用方只记日志,添加项目照旧成功)。
+export async function unhideProjectInPrefs(hash) {
+  return withPrefsQueue(async () => {
+    const prefs = await loadPrefsForWrite();
+    if (!Array.isArray(prefs.hiddenProjects) || !prefs.hiddenProjects.includes(hash)) return false;
+    prefs.hiddenProjects = prefs.hiddenProjects.filter((h) => h !== hash);
+    await savePrefs(prefs);
+    return true;
+  });
+}
+
 // 会话删除时的 prefs GC:清掉四处按 sessionId 挂的残留(1M 标记/自动标题/自定义标题/
 // 置顶会话列表),否则 prefs.json 随删除只增不减,且被删 sid 的标记会污染未来复用同 id
 // 的水合。走 withPrefsQueue 与常规 PUT 串行;只对真有变化的类别广播。

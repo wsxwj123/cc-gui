@@ -1,15 +1,17 @@
 #!/usr/bin/env node
-// r151e 偏好写入改严格读(接口 r151e-prefs-read-hardening-接口.md 行为清单 A 1–6、对外行为变化 1、2 的服务端部分)。
+// r151e 偏好写入改严格读(接口 r151e-prefs-read-hardening-接口.md 行为清单 A 1–6、15,对外行为变化 1、2、7 的服务端部分)。
 //   ② 写入路径(updatePrefs / updatePrefsStrict / removeSessionFromPrefs / 偏好路由各 PUT)在写队列里严格读:
 //      · 文件在、却读不出(权限 000 模拟)→ 抛错 / 回已有的 500,mutator 不跑,文件逐字节不变;
 //      · 文件不存在 → 按 {} 新建;
 //      · 内容不是合法 JSON 对象(截断的 JSON、[]、null、数字)→ 原字节另存 prefs.json.corrupt-*(逐字节相同),从空白重建、写入成功;
 //        备份失败 → 整次放弃、文件不变;别的程序写到一半、随即写完 → 隔一会儿重读到完整内容,不备份;开头带 BOM 的合法文件不算坏。
+//   ⑥ 添加项目(PUT /api/settings {_addProject})移出隐藏列表:排在同一条写队列里(前一段写入没完成就等着,两边的改动都留下),
+//      不丢别的键;没有可移出的条目不写盘;偏好文件读不出时跳过,添加项目照常 200、文件逐字节不变。
 // 断言失败不中断,全部跑完后列出失败项(便于确认"去掉修复则红"时红的是哪几项)。
 // 临时 HOME(POSIX 权限模拟读不出);端口 6880–6899。
 // node tests/unit/check-r151e-prefs-strict.mjs
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, chmodSync, realpathSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, chmodSync, realpathSync, unlinkSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -25,8 +27,10 @@ for (const k of Object.keys(process.env)) if (/^ANTHROPIC_/.test(k) || /^(https?
 
 const { default: express } = await import('express');
 const prefsMod = await import('../../server/routes/prefs.js');
+const settingsRouter = (await import('../../server/routes/settings.js')).default;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const deferred = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
 async function freePort() {
   for (let p = 6899; p >= 6880; p--) {
     const free = await new Promise((r) => { const s = net.createServer().once('error', () => r(false)).once('listening', () => s.close(() => r(true))).listen(p, '127.0.0.1'); });
@@ -37,6 +41,7 @@ async function freePort() {
 const app = express();
 app.use(express.json());
 app.use('/api', prefsMod.default);
+app.use('/api', settingsRouter);
 const port = await freePort();
 const server = await new Promise((r) => { const s = app.listen(port, '127.0.0.1', () => r(s)); });
 const api = async (method, path, body) => {
@@ -149,6 +154,36 @@ try {
   seed();
   eq((await api('PUT', '/prefs/hidden-projects', { hidden: ['p2'] })).status, 200, '内容正常:PUT 回 200');
   eq(json(), { ...BASE, hiddenProjects: ['p2'] }, '内容正常:只换隐藏列表,其它键原样');
+
+  // ── 添加项目时移出隐藏列表(⑥,行为清单 15、对外行为变化 7)──
+  const PROJ = join(TMP, 'r151e-proj');
+  mkdirSync(PROJ, { recursive: true });
+  const addProject = () => api('PUT', '/settings', { _addProject: PROJ });
+  seed({ keep: 3 });
+  const first = await addProject();
+  const xHash = first.body?.addedHash;
+  ok(first.status === 200 && typeof xHash === 'string' && xHash.length > 0, `前置:添加项目 200、应答里有它的 hash(${JSON.stringify(first.body)?.slice(0, 160)})`);
+  const F_BASE = { hiddenProjects: ['r151e-other', xHash], customTitles: { [SID]: 'R151E 标题' }, xsEnabled: true };
+  seed(F_BASE);
+  // 写队列里先排一段"读 → 改 → 写"、卡在改这一步:移出隐藏若走同一条队列,就得等它写完再读,两边的改动都留下
+  const gate = deferred();
+  const held = prefsMod.updatePrefs(async (p) => { await gate.p; p.displayName = 'R151E 并发'; });
+  const adding = addProject();
+  await sleep(300);
+  eq(json().hiddenProjects, ['r151e-other', xHash], '队列里前一段写入还没完成:移出隐藏在排队,没有绕过队列直接写');
+  gate.open();
+  await held;
+  eq((await adding).status, 200, '排队等到之后:添加项目成功');
+  eq(json(), { ...F_BASE, hiddenProjects: ['r151e-other'], displayName: 'R151E 并发' }, '移出了 X,并发写入的键与其它偏好都在(不互相覆盖)');
+  const ino = statSync(PREFS).ino;
+  const before2 = bytes();
+  eq((await addProject()).status, 200, '再加一次(已不在隐藏列表):200');
+  ok(statSync(PREFS).ino === ino && bytes().equals(before2), '没有可移出的条目:不写盘');
+  seed(F_BASE);
+  const before3 = bytes();
+  const rU = await unreadable(() => addProject());
+  eq(rU.status, 200, '偏好文件读不出:添加项目照常成功');
+  ok(bytes().equals(before3), '偏好文件读不出:移出隐藏这一步跳过,文件逐字节不变');
 
   if (failures.length) {
     console.error(`FAIL check-r151e-prefs-strict:${failures.length}/${checks} 项\n- ${failures.join('\n- ')}`);
