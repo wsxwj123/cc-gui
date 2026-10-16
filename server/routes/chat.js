@@ -3046,6 +3046,12 @@ router.get('/model-window', (req, res) => {
 // 响应里成功与被拒长得一模一样 → 界面停在一个根本没生效的档上。被拒的 slot 一个字段都不改:
 // canUseTool 继续按【旧档】裁决,绝不按没生效的新档放行。
 // 纯逻辑,tests/unit/check-mode-switch-failure.mjs 真 import(mock slot.query,不打真实 CLI)。
+// r151d 判官 S2:正在进行的切档请求(会话 id 小写 → 个数),见 POST /chat/permission-mode。
+const permissionModeSwitching = new Map();
+/** 该会话有没有还没完成的切档请求(控制请求还没返回、新档位还没记下)。跨会话自动处理据此不起回合、退回排队。 */
+export function permissionModeSwitchPending(sessionId) {
+  return typeof sessionId === 'string' && permissionModeSwitching.has(sessionId.toLowerCase());
+}
 export async function applyPermissionModeToSlots(procs, sessionId, mode) {
   const sdkMode = mode === 'plan' ? 'plan' : mode === 'auto' ? 'auto' : 'default';
   let attempted = 0;
@@ -3103,7 +3109,19 @@ router.post('/chat/permission-mode', async (req, res) => {
   if (mode === 'auto' && gateAutoPermissionMode('auto', { official: settingsProviderIsOfficial(), enabled: readThirdPartyAutoSync() }).downgraded) {
     return res.status(409).json({ ok: false, code: 'THIRD_PARTY_AUTO_DISABLED', error: '第三方 provider 的「自动」档未开启' });
   }
-  const { attempted, delivered, failed } = await applyPermissionModeToSlots(activeProcesses, sessionId, mode);
+  // r151d 判官 S2:从这里起到新档位记下(下面同步调的 modeChange 通知)之前算"切档进行中" —— 控制请求往返期间槽与最近一次切档
+  // 都还是旧档位,跨会话自动处理的起回合前核对若照常通过,回合会落在切档之后的档位上(放宽方向即绕过类别规则)。核对据此退回排队。
+  const switchKey = String(sessionId).toLowerCase();
+  permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
+  let applied;
+  try {
+    applied = await applyPermissionModeToSlots(activeProcesses, sessionId, mode);
+  } finally { // 之后到 modeChange 通知之间没有 await:清掉标记与记下新档位之间不会插进别的核对
+    const left = (permissionModeSwitching.get(switchKey) || 1) - 1;
+    if (left > 0) permissionModeSwitching.set(switchKey, left);
+    else permissionModeSwitching.delete(switchKey);
+  }
+  const { attempted, delivered, failed } = applied;
   // A1 切档重裁:对该会话已 pending 的卡按【新档】重新自动裁决(判定与 canUseTool 共用
   // autoDecide 同一份)。allow/deny 走既有 settle 幂等路径,null 的卡保持等待用户。
   // 原客户端"切放任批量放行"effect 与各 mode 抢答分支的职责全部由这里接管。

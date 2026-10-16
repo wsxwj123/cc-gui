@@ -4,6 +4,7 @@
 //      冷启等旧进程退出期间切到不同类别 → 不起回合、退回排队重判落 class-mismatch,之后也不回到旧档位;
 //      切到同类 → 按新档位起回合;复用路径热切模型期间切档 → 不起回合、关掉那个常驻进程、重判。
 //      切档时旧进程的输入流已关(真 SDK 的控制请求送不到,要等它退出才失败)→ 只改本地档位、立即 200,不挂到旧进程退出、不报 409。
+//      判官 S2:用户切档的控制请求还没返回时到达的自动处理 → 不起回合、退回排队;切档完成后按新档位重判。
 //   ② 行为清单 3:多个界面同步全局设置时,常驻进程 / 输入预测 / 生图界面取最近一次发生变化的那个界面的值;
 //      值完全相同的定时重同步只刷新有效期,不改变生效值。
 //   ③ 行为清单 4、5:档案写盘失败的会话 id 随偏好写入落盘(xsProfileWriteFailed)、服务启动时读回,档案成功写入一次后清除;
@@ -181,6 +182,38 @@ try {
   ok(!gotText('R151D-UNIT 热切时切档'), '没有任何进程收到这条消息');
   await waitFor(() => !chat.getActiveChatProcesses().some((p) => p.pid === pidC && p.exitCode === null), 'TC 的常驻进程被关掉', 10_000);
   eq(calls.slice(nC).filter((c) => c.options.resume === TC).length, 0, '也没有为它冷启新进程');
+
+  // 1d) 判官 S2:用户切档的控制请求还没返回时(槽与最近一次切档都还是旧档位)到达的自动处理 → 不起回合、退回排队;
+  //     切档完成后按新档位重判(逐步确认 → 放任:「逐步确认」发送方的这条落 class-mismatch,不在「放任」下运行)
+  const TS = mk('目标 TS 切档进行中');
+  await residentWithProfile(TS, 'default');
+  await setInbound([TS]);
+  await store.mutateXsProfiles((d) => { d.sessions[TS].replay.model = 'r151d-other-model-s'; }); // 复用路径要热切模型:在这里让出事件循环
+  const hS = holdExitOf(TS); // 核对不通过时那个常驻进程被关掉:让它晚点退出(挂着的切档控制请求不被中止)
+  const swapS = deferred(); const swapGateS = deferred();
+  ctl.setModel = (record, m) => { if (record.options.resume !== TS) return null; swapS.open(m); return swapGateS.p; };
+  const prevSetMode = ctl.setPermissionMode;
+  const modeAsked = deferred(); const modeGate = deferred();
+  ctl.setPermissionMode = (record, m) => (record.options.resume === TS && !record.inputEnded ? (modeAsked.open(m), modeGate.p) : prevSetMode(record, m));
+  try {
+    eq((await send(sDefault, [TS], 'R151D-UNIT 切档进行中')).results.map((x) => x.delivery), ['auto'], '前置:逐步确认 → 逐步确认 auto');
+    const mS = await lastTo(TS);
+    eq(await Promise.race([swapS.p, sleep(10_000).then(() => 'timeout')]), 'r151d-other-model-s', '前置:复用常驻进程、正在热切模型');
+    const switching = api('POST', '/chat/permission-mode', { sessionId: TS, mode: 'bypassPermissions' });
+    await Promise.race([modeAsked.p, sleep(10_000).then(() => { throw new Error('等不到:TS 的切档控制请求'); })]);
+    swapGateS.open(); ctl.setModel = null;
+    eq((await waitStatus(mS.id, 'queued', 10_000)).via ?? null, null, '切档控制请求挂起期间:置档之前核对到切档正在进行,不起回合、退回排队');
+    await sleep(400);
+    eq((await msgById(mS.id)).status, 'queued', '切档完成之前一直排着(不按切档前的档位再投)');
+    ok(!gotText('R151D-UNIT 切档进行中'), '没有任何进程收到这条消息');
+    modeGate.open();
+    eq((await switching).status, 200, '前置:切档完成(200)');
+    eq((await waitStatus(mS.id, 'pending', 10_000)).heldReason, 'class-mismatch', '切档完成后按新档位重判:「逐步确认」发送方 vs「放任」目标 → class-mismatch');
+    ok(!gotText('R151D-UNIT 切档进行中'), '始终没有进程收到这条消息(没在「放任」下运行)');
+  } finally {
+    ctl.setPermissionMode = prevSetMode; ctl.setModel = null;
+    modeGate.open(); swapGateS.open(); hS.release();
+  }
 
   // ── ② 多个界面:常驻进程 / 输入预测 / 生图界面三项取最近一次发生变化的那个界面的值(行为清单 3)──
   // 目标先跑一个不保活的用户回合(建档、进程退出);之后每次自动处理看回合结束后进程是否常驻(空闲进程留着)。

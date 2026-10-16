@@ -13,7 +13,7 @@ import { dirname, join, resolve, posix as posixPath, win32 as win32Path } from '
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
 import { XS_PROFILE_WRITE_FAILED_MAX, normalizeXsProfileWriteFailed, readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, readXsProfileWriteFailedSync, updatePrefs, updatePrefsStrict } from '../routes/prefs.js';
-import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError } from '../routes/chat.js';
+import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, permissionModeSwitchPending, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
 import { XS_PROFILE_MODES, XS_PROFILE_REPLAY_KEYS, dropXsProfile, mutateXsProfiles, readXsProfiles } from './xsession-store.js';
@@ -826,6 +826,7 @@ function noteTurnEndProfile(info) {
 async function xsModeChange({ sessionId, mode } = {}) {
   if (!isIdString(sessionId) || !XS_PROFILE_MODES.includes(mode)) return;
   noteLatestMode(sessionId, mode);
+  if (queuedHint.has(sessionId.toLowerCase())) scheduler.kick(sessionId); // 判官 S2:切档期间退回排队的按新档位重判
   const prefs = readXsPrefsDetailedSync();
   if (prefs.readFailed) return profilePrefsUnreadable(sessionId, '切档');
   if (!prefs.enabled) return;
@@ -895,6 +896,7 @@ function dropInflight(id, key) {
 // 还没起回合的消息(含等预测收尾再起的)照样算忙,一个会话一次只投一条。
 function targetBusy(sessionId, includeSettling) {
   if (includeSettling && scheduler.settling(sessionId)) return true;
+  if (permissionModeSwitchPending(sessionId)) return true; // 判官 S2:切档还没完成也算忙(不投;完成后按新档位重判)
   const procs = getActiveChatProcesses().filter((p) => sameId(p.sessionId, sessionId));
   const resultOut = procs.some((p) => p.busy && p.awaitingSuggestion);
   for (const f of inflight.values()) if (sameId(f.sessionId, sessionId) && !(resultOut && f.started)) return true;
@@ -1472,6 +1474,9 @@ async function xsInternalEntry(internal, sessionId, body) {
 function internalTurnRecheck(internal, sessionId, mode) {
   const f = inflight.get(internal.messageId);
   if (!f || !f.auto || f.key !== internal.key) return reject(409, 'XS_CLAIM_INVALID', XS_CLAIM_INVALID_TEXT);
+  // 判官 S2:用户切档的请求还没完成(控制请求往返期间槽与最近一次切档都还是旧档位,下面的比对会通过)→ 同样退回排队,
+  // 切档完成后(modeChange 通知里踢调度器)按新档位重判
+  if (permissionModeSwitchPending(sessionId)) return reject(409, XS_MODE_CHANGED, '目标会话正在切换权限档位，重新判定');
   const nowMode = liveGuiMode(sessionId) ?? latestGuiMode.get(String(sessionId).toLowerCase()) ?? null;
   if (nowMode !== null && nowMode !== mode) return reject(409, XS_MODE_CHANGED, '目标会话的权限档位已改变，重新判定');
   return null;
