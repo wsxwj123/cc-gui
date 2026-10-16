@@ -1213,30 +1213,43 @@ export function noteXsInboundChanged(sessionId) {
 export const XS_SEND_SETTING_KEYS = Object.freeze(['globalRead', 'addDirs', 'maxBudgetUsd', 'keepAlive', 'promptSuggestions', 'genui']);
 // 多个界面同时打开时按界面实例(uiId,每次打开页面随机生成)分开记,合起来取最窄(接口"复审之后的补充约定"第 2 条)。
 // 界面打开期间每 5 分钟重同步一次;10 分钟没再同步的界面不算有效。只在内存,服务重启后全部作废(界面重连时会强制重同步)。
+// r151d:值与该界面上一次同步的完全相同(定时重同步)只刷新有效期,不算一次变化 —— 三项"取最近一次"按变化先后选,
+// 不随哪个界面的定时器先到点来回翻(否则自动处理随之反复关掉常驻进程重新冷启)。
 export const XS_UI_STALE_MS = 10 * 60_000;
 export const XS_UI_MAX = 32; // 条目上限(防刷爆):满了先清过期的,仍满就淘汰最久没同步的那个
-const uiSendSettings = new Map(); // uiId → { v, at };按同步先后排,最后一条是最近一次同步的
+// uiId → { v, at, changeSeq };Map 按同步先后排(淘汰用)。at = 最近一次同步的时刻(判有效);changeSeq = 该界面的值最近一次
+// 变化的序号(进程内单调递增,不受墙上时间平移影响;首次同步算一次变化)。
+const uiSendSettings = new Map();
+let uiChangeSeq = 0;
+const sameSendSettings = (a, b) => XS_SEND_SETTING_KEYS.every((k) => (k === 'addDirs'
+  ? a.addDirs.length === b.addDirs.length && a.addDirs.every((d, i) => d === b.addDirs[i])
+  : a[k] === b[k]));
 /** PUT /api/xsession/send-settings 校验通过后调用(uiId 与 v 已是合规形态,见 routes/xsession.js)。 */
 export function setXsSendSettings(uiId, v) {
   const now = Date.now();
+  const prev = uiSendSettings.get(uiId);
+  const next = Object.freeze({ ...v, addDirs: Object.freeze([...v.addDirs]) });
+  const changeSeq = prev && sameSendSettings(prev.v, next) ? prev.changeSeq : ++uiChangeSeq;
   uiSendSettings.delete(uiId);
   if (uiSendSettings.size >= XS_UI_MAX) {
     for (const [id, e] of uiSendSettings) if (!(now - e.at < XS_UI_STALE_MS)) uiSendSettings.delete(id);
   }
   while (uiSendSettings.size >= XS_UI_MAX) uiSendSettings.delete(uiSendSettings.keys().next().value);
-  uiSendSettings.set(uiId, { v: Object.freeze({ ...v, addDirs: Object.freeze([...v.addDirs]) }), at: now });
+  uiSendSettings.set(uiId, { v: next, at: now, changeSeq });
 }
 /** 同步被拒(请求体不合规、uiId 本身合规)时调用:删掉这个界面之前的记录,按其余有效界面重算(接口"复审之后的补充约定"第 3 条)。 */
 export function forgetXsSendSettings(uiId) {
   uiSendSettings.delete(uiId);
 }
-// 此刻有效的界面合起来的值(按此刻的 Date.now() 判有效):全盘读取全部为开才开;附加目录取交集(按最近一次同步那份的顺序);
-// 花费上限取最小,null(不限)算最宽;常驻进程、输入预测、生图界面取最近一次同步的。一个有效的都没有 → null。
+// 此刻有效的界面合起来的值(按此刻的 Date.now() 判有效):全盘读取全部为开才开;附加目录取交集(按最近一次变化那份的顺序);
+// 花费上限取最小,null(不限)算最宽;常驻进程、输入预测、生图界面取有效界面里最近一次发生变化的那个界面的值(r151d)。
+// 一个有效的都没有 → null。
 function effectiveSendSettings() {
   const now = Date.now();
-  const live = [...uiSendSettings.values()].filter((e) => now - e.at < XS_UI_STALE_MS).map((e) => e.v);
-  if (!live.length) return null;
-  const latest = live[live.length - 1];
+  const entries = [...uiSendSettings.values()].filter((e) => now - e.at < XS_UI_STALE_MS);
+  if (!entries.length) return null;
+  const live = entries.map((e) => e.v);
+  const latest = entries.reduce((a, b) => (b.changeSeq > a.changeSeq ? b : a)).v;
   const budgets = live.map((v) => v.maxBudgetUsd).filter((b) => b !== null);
   return {
     globalRead: live.every((v) => v.globalRead === true),

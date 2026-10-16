@@ -4,6 +4,8 @@
 //      冷启等旧进程退出期间切到不同类别 → 不起回合、退回排队重判落 class-mismatch,之后也不回到旧档位;
 //      切到同类 → 按新档位起回合;复用路径热切模型期间切档 → 不起回合、关掉那个常驻进程、重判。
 //      切档时旧进程的输入流已关(真 SDK 的控制请求送不到,要等它退出才失败)→ 只改本地档位、立即 200,不挂到旧进程退出、不报 409。
+//   ② 行为清单 3:多个界面同步全局设置时,常驻进程 / 输入预测 / 生图界面取最近一次发生变化的那个界面的值;
+//      值完全相同的定时重同步只刷新有效期,不改变生效值。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身(onInputEnd 模拟旧进程推迟退出、setModel 模拟热切让出事件循环);临时 HOME;端口 6930–6979。
 // node tests/unit/check-r151d-xs-hardening.mjs
 import assert from 'node:assert/strict';
@@ -175,6 +177,34 @@ try {
   ok(!gotText('R151D-UNIT 热切时切档'), '没有任何进程收到这条消息');
   await waitFor(() => !chat.getActiveChatProcesses().some((p) => p.pid === pidC && p.exitCode === null), 'TC 的常驻进程被关掉', 10_000);
   eq(calls.slice(nC).filter((c) => c.options.resume === TC).length, 0, '也没有为它冷启新进程');
+
+  // ── ② 多个界面:常驻进程 / 输入预测 / 生图界面三项取最近一次发生变化的那个界面的值(行为清单 3)──
+  // 目标先跑一个不保活的用户回合(建档、进程退出);之后每次自动处理看回合结束后进程是否常驻(空闲进程留着)。
+  xs.forgetXsSendSettings('ui-r151d-unit-a');
+  const TK = mk('目标 TK 多界面');
+  await userTurn(TK, 'bypassPermissions', { keepAlive: false });
+  await waitFor(() => !slotOf(TK), 'TK 的进程退出', 20_000);
+  await waitFor(async () => (await store.readXsProfiles()).sessions[TK], 'TK 的档案');
+  await setInbound([TK]);
+  const autoThenResident = async (text) => {
+    eq((await send(sBypass, [TK], text)).results.map((x) => x.delivery), ['auto'], `前置:${text} → auto`);
+    await waitStatus((await lastTo(TK)).id, 'done', 20_000);
+    await sleep(600);
+    const s = slotOf(TK);
+    return !!s && s.idle;
+  };
+  const UA = 'ui-r151d-unit-A'; const UB = 'ui-r151d-unit-B';
+  await syncUi(UA, { keepAlive: true });
+  await syncUi(UB, { keepAlive: false });
+  eq(await autoThenResident('R151D-UNIT 多界面 一'), false, '界面 A 开、随后 B 关:取最近一次变化的 B → 回合后不常驻');
+  await syncUi(UA, { keepAlive: true });
+  eq(await autoThenResident('R151D-UNIT 多界面 二'), false, 'A 用完全相同的值重同步(定时):不算变化,仍取 B → 不常驻');
+  await syncUi(UB, { keepAlive: true });
+  eq(await autoThenResident('R151D-UNIT 多界面 三'), true, 'B 改成开:取 B → 回合后常驻');
+  await syncUi(UA, { keepAlive: false });
+  eq(await autoThenResident('R151D-UNIT 多界面 四'), false, 'A 改成关:A 成了最近一次变化的界面 → 回合后不常驻(不是"取最近一次同步",也不是"取最窄")');
+  await syncUi(UB, { keepAlive: true });
+  eq(await autoThenResident('R151D-UNIT 多界面 五'), false, 'B 用相同的值重同步:仍取 A → 不常驻');
 
   console.log(`PASS check-r151d-xs-hardening(${checks} 项)`);
 } finally {
