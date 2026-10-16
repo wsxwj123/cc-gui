@@ -107,7 +107,7 @@ try {
   eq(providerFingerprint({ ...BASE, settingsEnv: { ...BASE.settingsEnv, OTHER_KEY: 'x' } }), fp0, '别的 env 键不参与');
   eq(providerFingerprint({ salt: SALT }), providerFingerprint({ salt: SALT, settingsEnv: { ANTHROPIC_MODEL: 3 }, apiKeyHelper: null, accountId: undefined }), '缺的、不是字符串的按空串');
   for (const bad of [undefined, '', 'zz'.repeat(32), 'ab'.repeat(31)]) assert.throws(() => providerFingerprint({ ...BASE, salt: bad }), TypeError), checks++;
-  eq([...store.XS_PROFILE_REPLAY_KEYS], [...chat.TURN_PARAM_KEYS], '档案 replay 键 = chat.js 回合参数键');
+  eq([...store.XS_PROFILE_REPLAY_KEYS], chat.TURN_PARAM_KEYS.filter((k) => k !== 'appendSystemPrompt'), '档案 replay 键 = chat.js 回合参数键去掉 appendSystemPrompt(审计 F1)');
 
   // ── ② 偏好读取 ──────────────────────────────────────────────────────────────────────
   const A = uuid(1); const B = uuid(2); const C = uuid(3);
@@ -148,7 +148,8 @@ try {
   eq(Object.keys(file).sort(), ['salt', 'sessions'], '文件顶层只有 salt 与 sessions');
   ok(/^[0-9a-f]{64}$/.test(file.salt), '盐是 32 字节十六进制');
   eq(Object.keys(pA).sort(), ['judge', 'replay'], '每条两份');
-  eq(pA.replay, FULL, 'replay = 请求原值(model 为解析值)');
+  const { appendSystemPrompt: _append, ...FULL_REPLAY } = FULL;
+  eq(pA.replay, FULL_REPLAY, 'replay = 请求原值(model 为解析值;appendSystemPrompt 不记)');
   eq(Object.keys(pA.judge).sort(), ['mode', 'providerFp', 'recordedAt'], 'judge 三个键');
   eq(pA.judge.mode, 'acceptEdits', 'judge.mode = 界面档位');
   eq(pA.judge.providerFp, xs.currentProviderFp(file.salt), 'judge.providerFp = 当前配置的指纹');
@@ -156,6 +157,7 @@ try {
   eq([statSync(PROFILES).mode & 0o777, statSync(XS_DIR).mode & 0o777], [0o600, 0o700], '文件 0600、目录 0700');
   const text = readFileSync(PROFILES, 'utf8');
   for (const secret of [SECRET_TOKEN, SECRET_HELPER, ACCOUNT_UUID]) ok(!text.includes(secret), '档案里没有凭据 / 账号明文');
+  ok(!text.includes(_append) && !text.includes('appendSystemPrompt'), '档案里没有附加系统提示(键与原文都没有)');
   // 指纹随配置变
   const fpA = pA.judge.providerFp;
   writeSettings({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_AUTH_TOKEN: `${SECRET_TOKEN}-2`, ANTHROPIC_MODEL: 'm-main' }, { apiKeyHelper: SECRET_HELPER });

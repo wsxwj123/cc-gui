@@ -424,18 +424,22 @@ export function mutateXsInbox(fn) {
 
 // ── r151c:发送档案 ~/.claude-gui/xsession/profiles.json(方案 A5 / A12)──────────────────────────────────
 // { salt, sessions: { <会话id>: { replay, judge } } }。replay = 该会话最近一次回合请求体里的会话级参数(请求原值,没带为 null,
-// model 为解析后的值),只用于重放;judge = { mode(解析后的界面档位), providerFp(provider 指纹,加盐摘要), recordedAt(ISO) },
+// model 为解析后的值;appendSystemPrompt 不记,见 XS_PROFILE_REPLAY_KEYS),只用于重放;judge = { mode(解析后的界面档位), providerFp(provider 指纹,加盐摘要), recordedAt(ISO) },
 // 判定只读它。salt:本机首次需要时随机生成 32 字节(十六进制),随第一次写盘落下,不出本机。
 // 与收件箱共用同一条串行队列与"临时文件 + 改名"写法(目录 0700、文件 0600);只认白名单字段;内容没变不写盘;
 // 文件损坏时挪到 profiles.json.corrupt-<毫秒> 留证、从空开始(与收件箱的损坏留存同样保留 7 天,由启动清理删)。文件不存在时只读、删条目都不建任何东西。
 // 凭据明文不在这里:providerFp 是摘要,原文只在内存里参与计算(见 xsession-policy.js)。
 const PROFILES_PATH = join(XS_DIR, 'profiles.json');
-export const XS_PROFILE_REPLAY_KEYS = Object.freeze(['cwd', 'model', 'effort', 'addDirs', 'permissionMode', 'globalRead', 'appendSystemPrompt', 'promptSuggestions', 'keepAlive', 'maxBudgetUsd', 'genui']);
+// replay 只记 chat.js 回合参数键(TURN_PARAM_KEYS)里的这 10 个,不含 appendSystemPrompt(审计 F1;接口"审计之后的补充约定"第 1 条):
+// 前端只在"重跑工具 / 风险续跑"这类单个回合里带它,内容是重做某次工具调用的指令加原工具入参(可能有命令里的密钥、写入的配置)。
+// 记下它,之后每次自动处理都会带着它起回合、重做那次旧调用,入参原文也落进本文件。旧文件里若有这个键,读取时按白名单丢掉
+// (pickProfile 只取下面这些键),下一次写盘时随之消失。
+export const XS_PROFILE_REPLAY_KEYS = Object.freeze(['cwd', 'model', 'effort', 'addDirs', 'permissionMode', 'globalRead', 'promptSuggestions', 'keepAlive', 'maxBudgetUsd', 'genui']);
 export const XS_PROFILE_MODES = Object.freeze(['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']);
 const SALT_RE = /^[0-9a-f]{64}$/;
 const FP_RE = /^[0-9a-f]{16}$/;
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-// replay 的值只收 JSON 标量与字符串数组(请求体里这 11 个键本来就只有这些形态);cwd 必须是非空字符串。
+// replay 的值只收 JSON 标量与字符串数组(请求体里这些键本来就只有这些形态);cwd 必须是非空字符串。
 const isReplayValue = (v) => v === null || typeof v === 'string' || typeof v === 'boolean'
   || (typeof v === 'number' && Number.isFinite(v)) || (Array.isArray(v) && v.every((x) => typeof x === 'string'));
 
