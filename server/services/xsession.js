@@ -1646,10 +1646,11 @@ export function installXsessionRuntime() {
   backfillXsEnabledAt();
 }
 
-// ── r151e ①③:恢复定时器 ──
+// ── r151e ①③⑤:恢复定时器 ──
 // 触发:启动时偏好文件读不出(installXsessionRuntime),或档案写失败名单落盘失败(persistProfileWriteFailed)。按逐步拉长的间隔重读
 // 偏好文件,读到之后:按实际总开关挂或撤钩子(只在启动时读不出、钩子按开着挂的那种;撤走 syncXsRuntimeHooks(false) 的现有路径,
-// 在途回合结算完再撤回合钩子)→ 读入写失败名单 → 上次落盘失败的补落盘 → 全部完成就停。最长间隔 20 秒:偏好文件恢复后 30 秒内补上;
+// 在途回合结算完再撤回合钩子),同时补跑启动时跳过的那次启用时刻补记(backfillXsEnabledAt)→ 读入写失败名单(本进程在读到之前
+// 清掉的若还在盘上,排一次落盘,⑤)→ 排着的、上次落盘失败的补落盘 → 全部完成就停。最长间隔 20 秒:偏好文件恢复后 30 秒内补上;
 // 偏好文件内容坏了时落盘一直抛 PREFS_UNREADABLE,按最长间隔重试。定时器 unref,不拖住进程退出。日志只在首次失败与恢复时各记一行。
 export const XS_RECOVERY_DELAYS_MS = Object.freeze([1000, 2000, 4000, 8000, 15_000, 20_000]);
 let xsRecoveryTimer = null;
@@ -1684,6 +1685,7 @@ async function runXsRecovery() {
     if (xsRecoveryHooks) {
       xsRecoveryHooks = false;
       syncXsRuntimeHooks(prefs.enabled);
+      backfillXsEnabledAt(); // 启动时读不出跳过的那次补记启用时刻(一期升级用户;已有合法启用时刻时什么都不写)
     }
     if (!profileWriteFailedReady()) return; // 读到名单时若要补删本进程清掉的标记,这里已排下一次落盘(⑤)
     // 排着的(含上一行刚排的)等它写完;上次落盘失败的补落盘。写不成就按间隔再来(失败路径已记日志)。

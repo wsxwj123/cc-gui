@@ -276,6 +276,27 @@ try {
     eq(calls.at(-1).options.permissionMode, 'plan', '新进程按新档位冷启');
   }
 
+  // ── 主会话裁定:启动时偏好文件读不出、跳过了启用时刻补记(一期升级用户:总开关开着却没有启用时刻),恢复可读后恢复定时器补跑一次 ──
+  // (放在最后:补记的启用时刻是"此刻",之前记的档案都不再算数)
+  {
+    const { xsEnabledAt: _drop, ...noAt } = prefsJson();
+    setPrefs({ ...noAt, xsEnabled: true });
+    chmodSync(PREFS, 0o000);
+    try { xs.installXsessionRuntime(); } finally { chmodSync(PREFS, 0o644); } // 启动这一刻读不出:补记跳过
+    ok(prefsJson().xsEnabledAt === undefined, '前置:启动时读不出,启用时刻没补记');
+    const tBackfill = Date.now();
+    const at = await waitFor(() => prefsJson()?.xsEnabledAt, '恢复可读后恢复定时器补记启用时刻', 25_000);
+    ok(!Number.isNaN(Date.parse(at)) && Date.parse(at) >= tBackfill - 1_000, `补记的是恢复之后的时刻(${at})`);
+    eq(prefsJson().xsEnabled, true, '总开关不变');
+    const { xsEnabledAt: _at2, ...noAt2 } = prefsJson();
+    const withAt = { ...noAt2, xsEnabledAt: ENABLED_AT };
+    setPrefs(withAt);
+    chmodSync(PREFS, 0o000);
+    try { xs.installXsessionRuntime(); } finally { chmodSync(PREFS, 0o644); }
+    await sleep(2_500); // 恢复定时器第一次(1 秒)已读到
+    eq(prefsJson().xsEnabledAt, ENABLED_AT, '已有合法启用时刻:恢复后补跑也不改它');
+  }
+
   console.log(`PASS check-r151e-xs-recovery(${checks} 项)`);
 } finally {
   ctl.onInputEnd = null; ctl.setModel = null; ctl.setPermissionMode = null;
