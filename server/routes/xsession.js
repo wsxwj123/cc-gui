@@ -268,9 +268,11 @@ router.put('/xsession/sessions/:id/inbound', async (req, res) => {
 });
 
 // ── PUT /api/xsession/send-settings(r151c 审计 I1;接口"审计之后的补充约定"第 3 条)──────────────────────────
-// 界面把随每次发送带上的全局设置的当前值同步过来(启动、总开关打开、断线重连、这几项变化时),自动处理按它起进程。
-// 只在服务端内存(重启后、收到之前按最窄范围,见 services/xsession.js autoTurnBody);不广播;受总开关闸门约束(关着 409)。
-// 六个键都要给、不能有别的键;形态与界面发送 /api/chat 时一致。不合规 → 400 XS_INVALID_INPUT(固定文案),内存不变。
+// 界面把随每次发送带上的全局设置的当前值同步过来(启动、总开关打开、断线重连、这几项变化时,打开期间另每 5 分钟一次),
+// 自动处理按它起进程。请求体另带界面实例标识 uiId(8–64 个字母、数字、- 或 _),服务端按 uiId 分开记、多个界面时取最窄
+// (接口"复审之后的补充约定"第 2 条;合并与有效期见 services/xsession.js effectiveSendSettings)。只在服务端内存;不广播;
+// 受总开关闸门约束(关着 409)。uiId 加六个键都要给、不能有别的键;六个键的形态与界面发送 /api/chat 时一致。
+// 不合规 → 400 XS_INVALID_INPUT(固定文案)。
 const SEND_SETTINGS_MAX_DIRS = 64;
 const SEND_SETTINGS_MAX_DIR_CHARS = 4096;
 const SEND_SETTINGS_MAX_BUDGET_USD = 1_000_000;
@@ -286,10 +288,18 @@ export function parseSendSettings(b) {
     || !addDirs.every((d) => typeof d === 'string' && d.length > 0 && d.length <= SEND_SETTINGS_MAX_DIR_CHARS)) return null;
   return { globalRead, addDirs: [...addDirs], maxBudgetUsd, keepAlive, promptSuggestions, genui };
 }
+const UI_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+const SEND_SETTINGS_INVALID_TEXT = '请求体须为 { uiId, globalRead, addDirs, maxBudgetUsd, keepAlive, promptSuggestions, genui }，七个键都要给，不能带其它键（uiId 为 8–64 个字母、数字、- 或 _）';
 router.put('/xsession/send-settings', (req, res) => {
-  const v = parseSendSettings(req.body);
-  if (!v) return xsError(res, 400, 'XS_INVALID_INPUT', '请求体须为 { globalRead, addDirs, maxBudgetUsd, keepAlive, promptSuggestions, genui }，六个键都要给，不能带其它键');
-  setXsSendSettings(v);
+  const b = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
+  const uiId = b && typeof b.uiId === 'string' && UI_ID_RE.test(b.uiId) ? b.uiId : null;
+  let v = null;
+  if (uiId) {
+    const { uiId: _uiId, ...settings } = b;
+    v = parseSendSettings(settings);
+  }
+  if (!v) return xsError(res, 400, 'XS_INVALID_INPUT', SEND_SETTINGS_INVALID_TEXT);
+  setXsSendSettings(uiId, v);
   res.json({ ok: true });
 });
 

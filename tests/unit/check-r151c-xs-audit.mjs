@@ -9,6 +9,8 @@
 //      同步接口的参数校验与固定文案。
 //   ④ 复审重要 1:判定之后、起回合之前(等目标上一回合的输入预测收尾)切了档 → 起回合前按同一顺序重读档位:类别变了不起回合、
 //      落 class-mismatch;类别没变按新档位起;都不把判定时的旧档位写回(接口"复审之后的补充约定"第 1 条)。
+//   ⑤ 复审建议 1:同步请求带界面实例标识 uiId,按界面分开记、取最窄(全盘读取全开才开、附加目录交集、花费上限取小、其余取最近
+//      一次同步的);10 分钟没再同步的界面不算;没有有效界面时按最窄、其余退回档案(第 2 条)。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身;临时 HOME;端口 6800–6899。
 // node tests/unit/check-r151c-xs-audit.mjs
 import assert from 'node:assert/strict';
@@ -197,18 +199,22 @@ try {
   const [autoD] = coldCallsFor(TD, n1);
   ok(!!autoD && ![HOME, EXTRA, '/'].some((d) => dirsOf(autoD).includes(d)), `没同步到:全盘读取按关、附加目录按空(${JSON.stringify(dirsOf(autoD))})`);
   eq(autoD.options.maxBudgetUsd, 5, '没同步到:花费上限退回档案里上次发送的值');
-  // 3b) 同步接口:六个键都要给、类型对、不能有别的键
-  const SEND_SETTINGS_ERR = '请求体须为 { globalRead, addDirs, maxBudgetUsd, keepAlive, promptSuggestions, genui }，六个键都要给，不能带其它键';
+  // 3b) 同步接口:界面实例标识 uiId 加六个键都要给、类型对、不能有别的键
+  const SEND_SETTINGS_ERR = '请求体须为 { uiId, globalRead, addDirs, maxBudgetUsd, keepAlive, promptSuggestions, genui }，七个键都要给，不能带其它键（uiId 为 8–64 个字母、数字、- 或 _）';
+  const U0 = 'ui-r151c-audit-0';
   const narrow = { globalRead: false, addDirs: [], maxBudgetUsd: null, keepAlive: false, promptSuggestions: false, genui: true };
   const { genui: _g, ...missing } = narrow;
-  for (const bad of [[], {}, missing, { ...narrow, extra: 1 }, { ...narrow, globalRead: 'false' }, { ...narrow, addDirs: [1] }, { ...narrow, addDirs: 'x' },
+  const badBodies = [[], {}, missing, { ...narrow, extra: 1 }, { ...narrow, globalRead: 'false' }, { ...narrow, addDirs: [1] }, { ...narrow, addDirs: 'x' },
     { ...narrow, addDirs: [''] }, { ...narrow, addDirs: ['x'.repeat(4097)] }, { ...narrow, addDirs: Array(65).fill('/x') }, { ...narrow, maxBudgetUsd: 0 },
-    { ...narrow, maxBudgetUsd: '5' }, { ...narrow, maxBudgetUsd: 2e6 }, { ...narrow, promptSuggestions: 'on' }, { ...narrow, keepAlive: null }]) {
+    { ...narrow, maxBudgetUsd: '5' }, { ...narrow, maxBudgetUsd: 2e6 }, { ...narrow, promptSuggestions: 'on' }, { ...narrow, keepAlive: null }]
+    .map((b) => (Array.isArray(b) ? b : { uiId: U0, ...b }));
+  for (const uiId of [undefined, 'ui-1234', 'u'.repeat(65), 'ui r151c x', 'ui/r151c/x', `${U0}\n`, 12345678, [U0]]) badBodies.push(uiId === undefined ? { ...narrow } : { uiId, ...narrow });
+  for (const bad of badBodies) {
     const r = await api('PUT', '/xsession/send-settings', bad);
     eq([r.status, r.body?.code, r.body?.error], [400, 'XS_INVALID_INPUT', SEND_SETTINGS_ERR], `不合规 → 400 固定文案(${JSON.stringify(bad).slice(0, 80)})`);
   }
-  eq(await api('PUT', '/xsession/send-settings', { ...narrow, ...wide, promptSuggestions: 'auto' }), { status: 200, body: { ok: true } }, '合规 → 200 {ok:true}');
-  eq((await api('PUT', '/xsession/send-settings', narrow)).status, 200, '再同步一次:后到的为准');
+  eq(await api('PUT', '/xsession/send-settings', { uiId: U0, ...narrow, ...wide, promptSuggestions: 'auto' }), { status: 200, body: { ok: true } }, '合规 → 200 {ok:true}');
+  eq((await api('PUT', '/xsession/send-settings', { uiId: U0, ...narrow })).status, 200, '同一界面再同步一次:后到的为准');
   // 3c) 关掉全盘读取、去掉附加目录、清空花费上限之后:冷启的内部回合不带它们
   const TE = mk('目标 TE 同步后');
   await offTurn(TE, 'bypassPermissions', wide);
@@ -221,7 +227,7 @@ try {
   ok(!autoE.options.maxBudgetUsd, '花费上限取界面当前值(已清空)');
   // 3d) 有存活进程、设置与它起进程时相同:照常在现有进程里处理
   const live = { globalRead: true, addDirs: [], maxBudgetUsd: null, keepAlive: true, promptSuggestions: false, genui: true };
-  eq((await api('PUT', '/xsession/send-settings', live)).status, 200, '前置:同步与下面用户回合相同的设置');
+  eq((await api('PUT', '/xsession/send-settings', { uiId: U0, ...live })).status, 200, '前置:同步与下面用户回合相同的设置');
   const TF = mk('目标 TF 有存活进程');
   await profiled(TF, 'bypassPermissions', { globalRead: true, keepAlive: true, promptSuggestions: false, genui: true });
   await setInbound([TF]);
@@ -265,6 +271,50 @@ try {
   await waitStatus(mH.id, 'done', 30_000);
   ok(gotText('R151C 等预测时同类切档'), '重新判定后照常处理');
   eq(await profileMode(TH), 'acceptEdits', '内部回合按「接受编辑」起(回合开始记下的档位不是判定时的「逐步确认」)');
+
+  // ── ⑤ 复审建议 1:多个界面同时同步时取最窄(接口"复审之后的补充约定"第 2 条)──
+  // 目标没有存活进程,每次自动处理都冷启,看内部回合起进程的选项;档案里上次发送的花费上限是 5
+  const EXTRA2 = join(TMP, 'extra2'); const EXTRA3 = join(TMP, 'extra3');
+  for (const d of [EXTRA2, EXTRA3]) mkdirSync(d, { recursive: true });
+  const UB = 'ui-r151c-audit-B';
+  const sBy2 = { sessionId: S, runId: 'r-audit-sender-2', turnEpoch: 0, guiMode: 'bypassPermissions' };
+  const TK = mk('目标 TK 多个界面');
+  await offTurn(TK, 'bypassPermissions', wide);
+  await setInbound([TK]);
+  const autoCold = async (sid, text) => { // 一次自动处理、冷启的那次 SDK 调用
+    await waitFor(() => !slotOf(sid), `${TITLES.get(sid)} 没有存活进程`, 20_000);
+    const n = calls.length;
+    eq((await send(sBy2, [sid], text)).results.map((x) => x.delivery), ['auto'], `前置:${text} → auto`);
+    await waitStatus((await lastTo(sid)).id, 'done', 20_000);
+    const [c] = coldCallsFor(sid, n);
+    ok(!!c, `${text}:冷启了内部回合`);
+    return c;
+  };
+  const seen = (c) => [HOME, EXTRA, EXTRA2, EXTRA3].map((d) => dirsOf(c).includes(d));
+  const putAgo = async (ms, body, what) => { // 把这次同步记在 ms 毫秒之前(只在这一次请求期间平移 Date.now)
+    const realNow = Date.now;
+    Date.now = () => realNow() - ms;
+    try { eq((await api('PUT', '/xsession/send-settings', body)).status, 200, what); } finally { Date.now = realNow; }
+  };
+  const uiA = { globalRead: true, addDirs: [EXTRA, EXTRA2], maxBudgetUsd: 3, keepAlive: false, promptSuggestions: false, genui: true };
+  const uiB = { globalRead: false, addDirs: [EXTRA2, EXTRA3], maxBudgetUsd: null, keepAlive: false, promptSuggestions: true, genui: true };
+  // 5a) 两个界面都有效:一开一关取关、附加目录取交集、花费上限取小(null 算最宽);输入预测等取最近一次同步的(界面 B)
+  eq((await api('PUT', '/xsession/send-settings', { uiId: U0, ...uiA })).status, 200, '前置:界面 A 同步');
+  eq((await api('PUT', '/xsession/send-settings', { uiId: UB, ...uiB })).status, 200, '前置:界面 B 同步(最近一次)');
+  const c5a = await autoCold(TK, 'R151C 两个界面');
+  eq(seen(c5a), [false, false, true, false], `全盘读取一开一关 → 关;附加目录取交集(${JSON.stringify(dirsOf(c5a))})`);
+  eq([c5a.options.maxBudgetUsd, c5a.options.promptSuggestions], [3, true], '花费上限取小(另一个是不限);输入预测取最近一次同步的');
+  // 5b) 界面 B 10 分钟没再同步 → 不算,只按界面 A
+  await putAgo(11 * 60_000, { uiId: UB, ...uiB }, '前置:界面 B 的同步记在 11 分钟前');
+  const c5b = await autoCold(TK, 'R151C 界面 B 过期');
+  eq(seen(c5b), [true, true, true, false], `过期的界面不算:全盘读取开、附加目录是界面 A 的(${JSON.stringify(dirsOf(c5b))})`);
+  eq([c5b.options.maxBudgetUsd, c5b.options.promptSuggestions], [3, undefined], '花费上限与输入预测都按界面 A');
+  // 5c) 没有有效界面 → 全盘读取按关、附加目录按空,其余三项退回档案(档案按每次回合开始记,先让用户发一条把花费上限记成 7)
+  await offTurn(TK, 'bypassPermissions', { ...wide, maxBudgetUsd: 7 });
+  await putAgo(11 * 60_000, { uiId: U0, ...uiA }, '前置:界面 A 的同步也记在 11 分钟前');
+  const c5c = await autoCold(TK, 'R151C 没有有效界面');
+  eq(seen(c5c), [false, false, false, false], `没有有效界面:全盘读取按关、附加目录按空(不看档案里上次发送的;${JSON.stringify(dirsOf(c5c))})`);
+  eq(c5c.options.maxBudgetUsd, 7, '其余三项退回档案(花费上限是档案里上次发送的 7,不是过期界面 A 的 3)');
 
   console.log(`PASS check-r151c-xs-audit(${checks} 项)`);
 } finally {

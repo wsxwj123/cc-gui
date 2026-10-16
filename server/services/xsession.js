@@ -1204,18 +1204,44 @@ export function noteXsInboundChanged(sessionId) {
 //   同一读数(存活进程 > 最近一次切档 > 发送档案)。
 // · 全局的(界面上对所有会话生效、只在浏览器本地、随每次发送带上):globalRead(全盘读取)、addDirs(附加目录)、maxBudgetUsd
 //   (花费上限)、keepAlive(会话常驻进程)、promptSuggestions(输入预测)、genui(genui 渲染)—— 取界面同步来的当前值
-//   (PUT /api/xsession/send-settings,只在内存);本进程还没收到时全盘读取按关、附加目录按空,其余四项退回档案里上次发送的值。
+//   (PUT /api/xsession/send-settings,只在内存;多个界面时的合并见下方 effectiveSendSettings);一个有效界面都没有时
+//   全盘读取按关、附加目录按空,其余四项退回档案里上次发送的值。
 // 请求体就是"此刻在该会话里手动发一条"会带的值、形态与界面发送时相同:目标有存活的常驻进程、且这些值与它起进程时一致(兼容键
 // 相同)时,chat.js 照常在现有进程里处理;为某一回合带着附加系统提示起的进程、或全局设置改过之后兼容键不同,chat.js 关旧开新,
 // 与用户此刻手动发一条的结果相同。
 export const XS_SEND_SETTING_KEYS = Object.freeze(['globalRead', 'addDirs', 'maxBudgetUsd', 'keepAlive', 'promptSuggestions', 'genui']);
-let sendSettings = null; // 界面最近一次同步的全局设置;null = 本进程还没收到(服务重启后也是 null)
-/** PUT /api/xsession/send-settings 校验通过后调用(v 已是合规形态,见 routes/xsession.js parseSendSettings)。 */
-export function setXsSendSettings(v) {
-  sendSettings = Object.freeze({ ...v, addDirs: Object.freeze([...v.addDirs]) });
+// 多个界面同时打开时按界面实例(uiId,每次打开页面随机生成)分开记,合起来取最窄(接口"复审之后的补充约定"第 2 条)。
+// 界面打开期间每 5 分钟重同步一次;10 分钟没再同步的界面不算有效。只在内存,服务重启后全部作废(界面重连时会强制重同步)。
+export const XS_UI_STALE_MS = 10 * 60_000;
+export const XS_UI_MAX = 32; // 条目上限(防刷爆):满了先清过期的,仍满就淘汰最久没同步的那个
+const uiSendSettings = new Map(); // uiId → { v, at };按同步先后排,最后一条是最近一次同步的
+/** PUT /api/xsession/send-settings 校验通过后调用(uiId 与 v 已是合规形态,见 routes/xsession.js)。 */
+export function setXsSendSettings(uiId, v) {
+  const now = Date.now();
+  uiSendSettings.delete(uiId);
+  if (uiSendSettings.size >= XS_UI_MAX) {
+    for (const [id, e] of uiSendSettings) if (!(now - e.at < XS_UI_STALE_MS)) uiSendSettings.delete(id);
+  }
+  while (uiSendSettings.size >= XS_UI_MAX) uiSendSettings.delete(uiSendSettings.keys().next().value);
+  uiSendSettings.set(uiId, { v: Object.freeze({ ...v, addDirs: Object.freeze([...v.addDirs]) }), at: now });
+}
+// 此刻有效的界面合起来的值(按此刻的 Date.now() 判有效):全盘读取全部为开才开;附加目录取交集(按最近一次同步那份的顺序);
+// 花费上限取最小,null(不限)算最宽;常驻进程、输入预测、生图界面取最近一次同步的。一个有效的都没有 → null。
+function effectiveSendSettings() {
+  const now = Date.now();
+  const live = [...uiSendSettings.values()].filter((e) => now - e.at < XS_UI_STALE_MS).map((e) => e.v);
+  if (!live.length) return null;
+  const latest = live[live.length - 1];
+  const budgets = live.map((v) => v.maxBudgetUsd).filter((b) => b !== null);
+  return {
+    globalRead: live.every((v) => v.globalRead === true),
+    addDirs: latest.addDirs.filter((d) => live.every((v) => v.addDirs.includes(d))),
+    maxBudgetUsd: budgets.length ? Math.min(...budgets) : null,
+    keepAlive: latest.keepAlive, promptSuggestions: latest.promptSuggestions, genui: latest.genui,
+  };
 }
 function autoTurnBody(replay, sessionId, targetMode) {
-  const g = sendSettings ?? {
+  const g = effectiveSendSettings() ?? {
     globalRead: false, addDirs: [],
     maxBudgetUsd: replay.maxBudgetUsd, keepAlive: replay.keepAlive, promptSuggestions: replay.promptSuggestions, genui: replay.genui,
   };

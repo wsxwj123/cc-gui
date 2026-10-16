@@ -67,7 +67,12 @@ routes['GET /api/xsession/messages'] = (u) => ({ status: 200, body: { messages: 
 routes['GET /api/xsession/sessions'] = (u) => ({ status: 200, body: { sessions: (u.searchParams.get('ids') || '').split(',').filter((id) => id === A).map((sessionId) => ({ sessionId, inbound: serverInbound, hasProfile: true })) } });
 routes['GET /api/agents/active'] = () => ({ status: 200, body: { agents: [] } });
 
+// 记下 startXsession 挂的定时重同步(只登记、不改行为;⑦ 里手动触发它,不用真等 5 分钟)
+const intervals = [];
+const realSetInterval = globalThis.setInterval;
+globalThis.setInterval = (fn, ms, ...rest) => { const h = realSetInterval(fn, ms, ...rest); intervals.push({ fn, ms }); return h; };
 const stop = xs.startXsession();
+globalThis.setInterval = realSetInterval;
 await settle();
 assert.equal(useXsStore.getState().enabled, true, '前置:开着');
 assert.equal(useXsStore.getState().autoUsed, 3, 'GET config 的 autoBudget.used 进了 store');
@@ -264,7 +269,9 @@ assert.equal(useXsStore.getState().autoPaused, false);
   xs.handleXsWsEvent({ type: 'xs:config', enabled: true, autoPaused: false });
   await settle();
   assert.equal(count(SS), n0 + 1, '开关打开:同步一次');
-  assert.deepEqual(lastBody(SS), { globalRead: true, addDirs: [], maxBudgetUsd: null, keepAlive: true, promptSuggestions: 'auto', genui: true }, '请求体 = 当前全局设置(默认值,形态同发送 /api/chat)');
+  const { uiId, ...first } = lastBody(SS);
+  assert.match(uiId, /^[A-Za-z0-9_-]{8,64}$/, '请求体带界面实例标识 uiId(8–64 个字母、数字、- 或 _)');
+  assert.deepEqual(first, { globalRead: true, addDirs: [], maxBudgetUsd: null, keepAlive: true, promptSuggestions: 'auto', genui: true }, '其余 = 当前全局设置(默认值,形态同发送 /api/chat)');
   const st = useStore.getState();
   st.setGlobalRead(false); st.setAddDirs(['/r151c/extra']); st.setMaxBudgetUsd('2.5');
   await sleep(350); await settle();
@@ -278,12 +285,21 @@ assert.equal(useXsStore.getState().autoPaused, false);
   fire('cgui:ws-reconnected');
   await settle(); await sleep(20); await settle();
   assert.equal(count(SS), n0 + 3, '断线重连:强制重发一次(服务端那份只在内存)');
+  const resync = intervals.filter((t) => t.ms === 5 * 60_000);
+  assert.equal(resync.length, 1, '页面打开期间挂了一个每 5 分钟的重同步');
+  resync[0].fn();
+  await settle(); await sleep(20); await settle();
+  assert.equal(count(SS), n0 + 4, '5 分钟到:值没变也重发一次');
+  assert.equal(lastBody(SS).uiId, uiId, '同一页面的 uiId 不变');
   cfg.enabled = false;
   xs.handleXsWsEvent({ type: 'xs:config', enabled: false });
   await settle();
   st.setGlobalRead(true);
   await sleep(350); await settle();
-  assert.equal(count(SS), n0 + 3, '总开关关着:不发');
+  assert.equal(count(SS), n0 + 4, '总开关关着:不发');
+  resync[0].fn();
+  await settle(); await sleep(20); await settle();
+  assert.equal(count(SS), n0 + 4, '总开关关着:5 分钟到也不发');
   console.log('✓ ⑦ 全局设置同步给服务端');
 }
 

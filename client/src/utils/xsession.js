@@ -19,7 +19,8 @@
 //   · WS xs:turn(服务端为某会话开始了自动处理的回合):只当"立刻探测一次后台运行"的触发器,各窗格按自己的会话认领。
 //   · 断线重连后重取 config、正显示的接收设置与卡片(loadXsConfig)。
 //   · 审计 I1:随每次发送带上的全局设置(全盘读取、附加目录、花费上限、常驻进程、输入预测、genui 渲染)只在本浏览器里,自动处理
-//     起进程要用"此刻的设置" —— 总开关开着时,启动 / 开关打开 / 断线重连、以及这几项变化时同步给服务端(syncXsSendSettings)。
+//     起进程要用"此刻的设置" —— 总开关开着时,启动 / 开关打开 / 断线重连、以及这几项变化时同步给服务端(syncXsSendSettings),
+//     页面打开期间另每 5 分钟重同步一次;请求体带本页面的界面实例标识 uiId(服务端按它分开记,多个界面同时打开时取最窄)。
 import { create } from 'zustand';
 import { useStore } from '../stores/sessionStore.js';
 import { setXsDockExtra } from './attention.js';
@@ -412,7 +413,15 @@ export function xsSendSettingsOf(s) {
     genui: s.genuiRender !== false,
   };
 }
-// 串行发送(后发的一定读到最新值、最后到服务端);force 用于启动 / 开关打开 / 重连(服务端那份可能已随重启丢失)。
+// 本页面的界面实例标识:每次打开页面随机生成(8–64 个字母、数字、- 或 _)。不用 crypto.randomUUID —— 局域网 http 访问不是
+// 安全上下文,没有它;getRandomValues 不受这个限制。
+const XS_UI_ID = (() => {
+  const bytes = new Uint8Array(16);
+  try { globalThis.crypto.getRandomValues(bytes); } catch { for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256); }
+  return `ui-${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+})();
+const XS_SEND_SETTINGS_RESYNC_MS = 5 * 60_000; // 服务端 10 分钟没收到某个界面的值就不再算它
+// 串行发送(后发的一定读到最新值、最后到服务端);force 用于启动 / 开关打开 / 重连(服务端那份可能已随重启丢失)与每 5 分钟的重同步。
 // 失败不提示:服务端没收到时自动处理按最窄范围起进程,下一次变化或重连再同步。
 let sendSettingsChain = Promise.resolve();
 let sentSettingsKey = null;
@@ -422,7 +431,7 @@ export function syncXsSendSettings(force = false) {
     const v = xsSendSettingsOf(useStore.getState());
     const key = JSON.stringify(v);
     if (!force && key === sentSettingsKey) return;
-    const r = await xsRequest('PUT', '/api/xsession/send-settings', v);
+    const r = await xsRequest('PUT', '/api/xsession/send-settings', { uiId: XS_UI_ID, ...v });
     sentSettingsKey = r.ok ? key : null;
   });
   return sendSettingsChain;
@@ -446,10 +455,12 @@ export function startXsession() {
     clearTimeout(settingsTimer);
     settingsTimer = setTimeout(() => { settingsTimer = null; void syncXsSendSettings(); }, 300);
   });
+  const resyncTimer = setInterval(() => { void syncXsSendSettings(true); }, XS_SEND_SETTINGS_RESYNC_MS);
   return () => {
     unsubscribe();
     unsubSettings();
     clearTimeout(settingsTimer);
+    clearInterval(resyncTimer);
     window.removeEventListener('cgui:ws-reconnected', onReconnect);
   };
 }
