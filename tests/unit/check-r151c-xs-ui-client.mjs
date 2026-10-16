@@ -6,6 +6,7 @@
 //   ④ P22:点【处理】一条 queued 的消息 → 当场认领(服务端此刻起不再自动处理它);凭据只在内存,不进 opts / 排队 / localStorage;
 //      真正发出时用这张凭据、不再认领;认领 409 → 不发;撤回后作废
 //   ⑤ 卡片文案:AI 发来的来源带目录名;连锁第 N 次
+//   ⑦ 审计 I1:随每次发送带上的全局设置同步给服务端(开关打开 / 重连强制发、变化合并 300 毫秒后发、值没变不发、关着不发)
 // node tests/unit/check-r151c-xs-ui-client.mjs
 import assert from 'node:assert/strict';
 
@@ -252,6 +253,38 @@ assert.equal(useXsStore.getState().autoPaused, false);
   assert.equal(count('GET /api/agents/active'), n0, '关着不为 xs:turn 探测');
   assert.deepEqual(await xs.setXsInbound(A, 'auto'), { ok: false, error: '' }, '关着不发改接收设置的请求');
   console.log('✓ ⑥ 总开关关:新事件不收敛、不请求');
+}
+
+// ── ⑦ 审计 I1:全局设置同步给服务端 ─────────────────────────────────────────────────
+{
+  const SS = 'PUT /api/xsession/send-settings';
+  routes[SS] = () => ({ status: 200, body: { ok: true } });
+  const n0 = count(SS);
+  cfg.enabled = true;
+  xs.handleXsWsEvent({ type: 'xs:config', enabled: true, autoPaused: false });
+  await settle();
+  assert.equal(count(SS), n0 + 1, '开关打开:同步一次');
+  assert.deepEqual(lastBody(SS), { globalRead: true, addDirs: [], maxBudgetUsd: null, keepAlive: true, promptSuggestions: 'auto', genui: true }, '请求体 = 当前全局设置(默认值,形态同发送 /api/chat)');
+  const st = useStore.getState();
+  st.setGlobalRead(false); st.setAddDirs(['/r151c/extra']); st.setMaxBudgetUsd('2.5');
+  await sleep(350); await settle();
+  assert.equal(count(SS), n0 + 2, '连续改三项:合并成一次');
+  const b = lastBody(SS);
+  assert.deepEqual([b.globalRead, b.addDirs, b.maxBudgetUsd], [false, ['/r151c/extra'], 2.5], '带最新值');
+  st.setAddDirs(['/r151c/extra']);
+  useStore.setState({ xsUnrelatedProbe: 1 });
+  await sleep(350); await settle();
+  assert.equal(count(SS), n0 + 2, '值没变、改的是别的字段:不发');
+  fire('cgui:ws-reconnected');
+  await settle(); await sleep(20); await settle();
+  assert.equal(count(SS), n0 + 3, '断线重连:强制重发一次(服务端那份只在内存)');
+  cfg.enabled = false;
+  xs.handleXsWsEvent({ type: 'xs:config', enabled: false });
+  await settle();
+  st.setGlobalRead(true);
+  await sleep(350); await settle();
+  assert.equal(count(SS), n0 + 3, '总开关关着:不发');
+  console.log('✓ ⑦ 全局设置同步给服务端');
 }
 
 stop();

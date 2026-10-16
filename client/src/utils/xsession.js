@@ -18,6 +18,8 @@
 //     sessionId 收敛。inboundError[sid]:改接收设置失败的提示(会话头下方显示)。
 //   · WS xs:turn(服务端为某会话开始了自动处理的回合):只当"立刻探测一次后台运行"的触发器,各窗格按自己的会话认领。
 //   · 断线重连后重取 config、正显示的接收设置与卡片(loadXsConfig)。
+//   · 审计 I1:随每次发送带上的全局设置(全盘读取、附加目录、花费上限、常驻进程、输入预测、genui 渲染)只在本浏览器里,自动处理
+//     起进程要用"此刻的设置" —— 总开关开着时,启动 / 开关打开 / 断线重连、以及这几项变化时同步给服务端(syncXsSendSettings)。
 import { create } from 'zustand';
 import { useStore } from '../stores/sessionStore.js';
 import { setXsDockExtra } from './attention.js';
@@ -85,6 +87,7 @@ function applyEnabled(on) {
     return;
   }
   useXsStore.setState({ enabled: true });
+  void syncXsSendSettings(true);
   void refreshPending();
   for (const sid of watched.keys()) void refreshInbox(sid);
   for (const sid of watchedInbound.keys()) void refreshInbound(sid);
@@ -120,6 +123,7 @@ export async function loadXsConfig({ reconcile = true } = {}) {
   const was = useXsStore.getState().enabled;
   applyEnabled(r.body.enabled);
   if (r.body.enabled && was && reconcile) {
+    void syncXsSendSettings(true); // 服务端可能重启过(这份值只在它内存里)
     void refreshPending();
     for (const sid of watched.keys()) void refreshInbox(sid);
     for (const sid of watchedInbound.keys()) void refreshInbound(sid);
@@ -394,6 +398,36 @@ export function handleXsWsEvent(data) {
   if (data.type === 'xs:turn') fetchAgentsActiveFresh().catch(() => {});
 }
 
+// 全局设置的当前值 → PUT /api/xsession/send-settings 的请求体。形态与 App.jsx 发送 /api/chat 时带的一致(服务端据此拼自动处理的
+// 请求体,常驻进程能不能复用看兼容键,形态不同会白白冷启)。
+const XS_SEND_SETTING_FIELDS = ['globalRead', 'addDirs', 'maxBudgetUsd', 'persistentChat', 'promptSuggestions', 'genuiRender'];
+export function xsSendSettingsOf(s) {
+  const ps = s.promptSuggestions;
+  return {
+    globalRead: s.globalRead !== false,
+    addDirs: Array.isArray(s.addDirs) ? s.addDirs.filter((d) => typeof d === 'string' && d) : [],
+    maxBudgetUsd: Number.isFinite(s.maxBudgetUsd) && s.maxBudgetUsd > 0 ? s.maxBudgetUsd : null,
+    keepAlive: s.persistentChat !== false,
+    promptSuggestions: ps === true ? true : ps === false ? false : 'auto',
+    genui: s.genuiRender !== false,
+  };
+}
+// 串行发送(后发的一定读到最新值、最后到服务端);force 用于启动 / 开关打开 / 重连(服务端那份可能已随重启丢失)。
+// 失败不提示:服务端没收到时自动处理按最窄范围起进程,下一次变化或重连再同步。
+let sendSettingsChain = Promise.resolve();
+let sentSettingsKey = null;
+export function syncXsSendSettings(force = false) {
+  sendSettingsChain = sendSettingsChain.then(async () => {
+    if (!useXsStore.getState().enabled) return;
+    const v = xsSendSettingsOf(useStore.getState());
+    const key = JSON.stringify(v);
+    if (!force && key === sentSettingsKey) return;
+    const r = await xsRequest('PUT', '/api/xsession/send-settings', v);
+    sentSettingsKey = r.ok ? key : null;
+  });
+  return sendSettingsChain;
+}
+
 /**
  * App 挂载时调用一次:读总开关;WS 重连后再读一次并对账(断线期间的广播可能丢了);
  * Dock 角标跟着待处理总数走(总开关关着时为 0 = 与改动前相同)。
@@ -405,8 +439,17 @@ export function startXsession() {
   const unsubscribe = useXsStore.subscribe(syncDock);
   const onReconnect = () => { void loadXsConfig(); };
   window.addEventListener('cgui:ws-reconnected', onReconnect);
+  // 全局设置变化 → 同步(合并 300 毫秒内的连续改动,如花费上限逐字输入)
+  let settingsTimer = null;
+  const unsubSettings = useStore.subscribe((s, prev) => {
+    if (prev && XS_SEND_SETTING_FIELDS.every((k) => s[k] === prev[k])) return;
+    clearTimeout(settingsTimer);
+    settingsTimer = setTimeout(() => { settingsTimer = null; void syncXsSendSettings(); }, 300);
+  });
   return () => {
     unsubscribe();
+    unsubSettings();
+    clearTimeout(settingsTimer);
     window.removeEventListener('cgui:ws-reconnected', onReconnect);
   };
 }

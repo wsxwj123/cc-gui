@@ -1183,6 +1183,36 @@ export function noteXsInboundChanged(sessionId) {
   if (queuedHint.has(String(sessionId).toLowerCase())) scheduler.kick(sessionId);
 }
 
+// ── 自动处理回合用"此刻的设置"(接口"审计之后的补充约定"第 2、3 条;审计 I1)───────────────────────────────────────
+// 重放键分两类(按前端发送 /api/chat 时各键的来源核实,见 App.jsx sendMessage 与 sessionStore):
+// · 会话自己的:cwd(会话工作目录)、model(会话的模型)、effort(按会话记的思考强度)—— 取发送档案;permissionMode 用判定时的
+//   同一读数(存活进程 > 最近一次切档 > 发送档案)。
+// · 全局的(界面上对所有会话生效、只在浏览器本地、随每次发送带上):globalRead(全盘读取)、addDirs(附加目录)、maxBudgetUsd
+//   (花费上限)、keepAlive(会话常驻进程)、promptSuggestions(输入预测)、genui(genui 渲染)—— 取界面同步来的当前值
+//   (PUT /api/xsession/send-settings,只在内存);本进程还没收到时全盘读取按关、附加目录按空,其余四项退回档案里上次发送的值。
+// 请求体就是"此刻在该会话里手动发一条"会带的值、形态与界面发送时相同:目标有存活的常驻进程、且这些值与它起进程时一致(兼容键
+// 相同)时,chat.js 照常在现有进程里处理;为某一回合带着附加系统提示起的进程、或全局设置改过之后兼容键不同,chat.js 关旧开新,
+// 与用户此刻手动发一条的结果相同。
+export const XS_SEND_SETTING_KEYS = Object.freeze(['globalRead', 'addDirs', 'maxBudgetUsd', 'keepAlive', 'promptSuggestions', 'genui']);
+let sendSettings = null; // 界面最近一次同步的全局设置;null = 本进程还没收到(服务重启后也是 null)
+/** PUT /api/xsession/send-settings 校验通过后调用(v 已是合规形态,见 routes/xsession.js parseSendSettings)。 */
+export function setXsSendSettings(v) {
+  sendSettings = Object.freeze({ ...v, addDirs: Object.freeze([...v.addDirs]) });
+}
+function autoTurnBody(replay, sessionId, targetMode) {
+  const g = sendSettings ?? {
+    globalRead: false, addDirs: [],
+    maxBudgetUsd: replay.maxBudgetUsd, keepAlive: replay.keepAlive, promptSuggestions: replay.promptSuggestions, genui: replay.genui,
+  };
+  const picked = {
+    cwd: replay.cwd, model: replay.model, effort: replay.effort,
+    globalRead: g.globalRead, addDirs: g.addDirs.length ? [...g.addDirs] : null, maxBudgetUsd: g.maxBudgetUsd,
+    keepAlive: g.keepAlive, promptSuggestions: g.promptSuggestions, genui: g.genui,
+  };
+  // 值为 null 的键不带(同界面发送时的 undefined);档位用判定时的同一读数
+  return { ...Object.fromEntries(Object.entries(picked).filter(([, v]) => v !== null && v !== undefined)), sessionId, prompt: AUTO_PLACEHOLDER_PROMPT, permissionMode: targetMode };
+}
+
 // 事务提交之后:登记 inflight(信封、补发事件、30 分钟卡住提醒),再经内部入口起回合。
 function launchAuto(pick, key, budgetStamp) {
   const { m, text, prompt, targetMode, replay } = pick;
@@ -1198,11 +1228,10 @@ function launchAuto(pick, key, budgetStamp) {
     key, event, timer: null, stuckTimer, pid: null, sessionId, auto: true, chainId: m.chainId, hop: m.hop, prompt,
     startedAt: Date.now(), started: false, responded: null, ended: null, budgetStamp, cwd: replay.cwd,
   });
-  // 重放档案:去掉值为 null 的键,档位用判定时的同一读数
-  const body = { ...Object.fromEntries(Object.entries(replay).filter(([, v]) => v !== null)), sessionId, prompt: AUTO_PLACEHOLDER_PROMPT, permissionMode: targetMode };
   const begin = () => {
     let call;
-    try { call = startInternalTurn(body, { kind: 'xs-auto', messageId: m.id, key }); } catch (e) { call = Promise.reject(e); }
+    // 等过输入预测收尾之后再取"此刻的设置"
+    try { call = startInternalTurn(autoTurnBody(replay, sessionId, targetMode), { kind: 'xs-auto', messageId: m.id, key }); } catch (e) { call = Promise.reject(e); }
     call.then((res) => onAutoResponse(m.id, key, res), (e) => onAutoResponse(m.id, key, { status: 0, body: { error: e?.message || String(e) } }));
   };
   if (awaitingSuggestion(sessionId)) waitSuggestionSettled(sessionId).then(begin);

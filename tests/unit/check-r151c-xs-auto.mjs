@@ -120,7 +120,7 @@ const mk = (title) => {
   return sid;
 };
 async function userTurn(sid, mode = 'bypassPermissions', extra = {}) {
-  const r = await api('POST', '/chat', { sessionId: sid, prompt: 'r151c 用户回合', cwd: WORK, model: 'r151c-model', permissionMode: mode, keepAlive: true, ...extra });
+  const r = await api('POST', '/chat', { sessionId: sid, prompt: 'r151c 用户回合', cwd: WORK, model: 'r151c-model', permissionMode: mode, globalRead: false, keepAlive: true, ...extra });
   eq(r.status, 200, `前置:${TITLES.get(sid)} 的回合 200(${JSON.stringify(r.body).slice(0, 160)})`);
   return r.body.pid;
 }
@@ -147,6 +147,8 @@ try {
   await store.loadXsInbox();
   eq([(await msgById(OLD_Q)), (await msgById(OLD_P))].map((m) => [m.status, m.heldReason, m.turn]), [['pending', 'interrupted', undefined], ['pending', 'interrupted', undefined]], '上次进程留下的 queued / processing → pending / interrupted');
   eq([existsSync(oldCorrupt), existsSync(keptCorrupt)], [false, true], 'profiles.json 损坏留存:满 7 天删(按修改时间与文件名时刻较晚者),不满留着');
+  // 审计 I1:自动处理按界面同步来的全局设置起进程(没同步到时全盘读取按关);同步成与下面的用户回合一致,常驻进程照常复用
+  eq(await api('PUT', '/xsession/send-settings', { globalRead: false, addDirs: [], maxBudgetUsd: null, keepAlive: true, promptSuggestions: 'auto', genui: true }), { status: 200, body: { ok: true } }, '同步界面的全局设置(与用户回合一致)');
 
   // ── ② 自动投递 ──
   const S = mk('发送方 S'); const T1 = mk('目标 T1'); const T2 = mk('目标 T2'); const T3 = mk('目标 T3 接受编辑');

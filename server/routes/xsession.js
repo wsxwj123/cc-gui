@@ -11,6 +11,7 @@ import {
   XS_DISABLED_TEXT, XS_STORAGE_FAILED_TEXT, XsError, parseManualSend, sendManualMessages, parseListQuery, listInboxMessages,
   pendingSummary, claimMessage, releaseMessage, dismissMessage, syncXsRuntimeHooks, noteNativeGuardFailure, nativeGuardLastFailure,
   clearAllXsMessages, xsAutoState, resumeXsAuto, kickAllXsQueued, noteXsInboundChanged, profileCountsFor, setXsSessionRowsLoader,
+  XS_SEND_SETTING_KEYS, setXsSendSettings,
 } from '../services/xsession.js';
 import { assignShortIds, selectXsSessions } from '../services/xsession-resolve.js';
 import { resolveSessionTitle } from '../utils/session-title.js';
@@ -264,6 +265,32 @@ router.put('/xsession/sessions/:id/inbound', async (req, res) => {
   broadcast({ type: 'xs:inbound', sessionId: row.sessionId, mode });
   noteXsInboundChanged(row.sessionId);
   res.json({ ok: true, sessionId: row.sessionId, mode });
+});
+
+// ── PUT /api/xsession/send-settings(r151c 审计 I1;接口"审计之后的补充约定"第 3 条)──────────────────────────
+// 界面把随每次发送带上的全局设置的当前值同步过来(启动、总开关打开、断线重连、这几项变化时),自动处理按它起进程。
+// 只在服务端内存(重启后、收到之前按最窄范围,见 services/xsession.js autoTurnBody);不广播;受总开关闸门约束(关着 409)。
+// 六个键都要给、不能有别的键;形态与界面发送 /api/chat 时一致。不合规 → 400 XS_INVALID_INPUT(固定文案),内存不变。
+const SEND_SETTINGS_MAX_DIRS = 64;
+const SEND_SETTINGS_MAX_DIR_CHARS = 4096;
+const SEND_SETTINGS_MAX_BUDGET_USD = 1_000_000;
+export function parseSendSettings(b) {
+  if (!b || typeof b !== 'object' || Array.isArray(b)) return null;
+  const keys = Object.keys(b);
+  if (keys.length !== XS_SEND_SETTING_KEYS.length || !XS_SEND_SETTING_KEYS.every((k) => Object.hasOwn(b, k))) return null;
+  const { globalRead, addDirs, maxBudgetUsd, keepAlive, promptSuggestions, genui } = b;
+  if (typeof globalRead !== 'boolean' || typeof keepAlive !== 'boolean' || typeof genui !== 'boolean') return null;
+  if (promptSuggestions !== true && promptSuggestions !== false && promptSuggestions !== 'auto') return null;
+  if (maxBudgetUsd !== null && !(typeof maxBudgetUsd === 'number' && Number.isFinite(maxBudgetUsd) && maxBudgetUsd > 0 && maxBudgetUsd <= SEND_SETTINGS_MAX_BUDGET_USD)) return null;
+  if (!Array.isArray(addDirs) || addDirs.length > SEND_SETTINGS_MAX_DIRS
+    || !addDirs.every((d) => typeof d === 'string' && d.length > 0 && d.length <= SEND_SETTINGS_MAX_DIR_CHARS)) return null;
+  return { globalRead, addDirs: [...addDirs], maxBudgetUsd, keepAlive, promptSuggestions, genui };
+}
+router.put('/xsession/send-settings', (req, res) => {
+  const v = parseSendSettings(req.body);
+  if (!v) return xsError(res, 400, 'XS_INVALID_INPUT', '请求体须为 { globalRead, addDirs, maxBudgetUsd, keepAlive, promptSuggestions, genui }，六个键都要给，不能带其它键');
+  setXsSendSettings(v);
+  res.json({ ok: true });
 });
 
 // ── 转发、收件列表、认领 / 撤回 / 忽略、待处理计数(接口 X.3.1;业务在 services/xsession.js)──────────────

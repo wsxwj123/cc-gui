@@ -4,6 +4,9 @@
 //      旧档案里有这个键时读到即忽略;为带着它的那一回合起的进程不复用。
 //   ② 审计 S1:读档案快照与收件箱事务之间切了档 → 按最新档位判(存活进程 > 最近一次切档 > 发送档案);
 //      切档时偏好文件读不出 → 不再静默跳过,该会话按没有档案判(no-profile),下一次记录成功后恢复。
+//   ③ 审计 I1:目标没有存活进程时按"此刻的设置"起进程 —— 全局项取界面同步来的当前值(PUT /api/xsession/send-settings),
+//      没同步到时全盘读取按关、附加目录按空;关掉全盘读取、去掉附加目录后冷启的内部回合不带它们;有存活进程且设置相同时照常复用;
+//      同步接口的参数校验与固定文案。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身;临时 HOME;端口 6800–6899。
 // node tests/unit/check-r151c-xs-audit.mjs
 import assert from 'node:assert/strict';
@@ -134,8 +137,8 @@ try {
   ok(slotOf(TA)?.pid !== pidA, '为带附加系统提示那一回合起的进程不复用');
 
   // ── ② 审计 S1:最近一次切档排在档案之前;偏好读失败不再静默 ──
-  const offTurn = async (sid, mode) => { // 不保活的用户回合:跑完进程退出,之后没有存活槽
-    await userTurn(sid, mode, { keepAlive: false });
+  const offTurn = async (sid, mode, extra = {}) => { // 不保活的用户回合:跑完进程退出,之后没有存活槽
+    await userTurn(sid, mode, { keepAlive: false, ...extra });
     await waitFor(() => !slotOf(sid), `${TITLES.get(sid)} 的进程退出`, 20_000);
     await store.readXsProfiles(); // 同一条存储队列:返回时回合开始那次档案记录已经结束
   };
@@ -173,6 +176,58 @@ try {
   const rC2 = await send(sBy, [TC], 'R151C 记录成功之后');
   eq(rC2.results.map((x) => x.delivery), ['auto'], '下一次档案记录成功(内容没变也算)后恢复');
   await waitStatus((await lastTo(TC)).id, 'done', 15_000);
+
+  // ── ③ 审计 I1:没有存活进程时按此刻的设置起进程;有存活进程且设置相同时照常复用 ──
+  const EXTRA = join(TMP, 'extra');
+  mkdirSync(EXTRA, { recursive: true });
+  const dirsOf = (c) => c?.options?.additionalDirectories || [];
+  const wide = { globalRead: true, addDirs: [EXTRA], maxBudgetUsd: 5 };
+  // 3a) 服务端还没收到界面的设置:全盘读取按关、附加目录按空,其余全局项退回档案里上次发送的值
+  const TD = mk('目标 TD 没同步');
+  const n0 = calls.length;
+  await offTurn(TD, 'bypassPermissions', wide);
+  const userD = coldCallsFor(TD, n0)[0];
+  ok(dirsOf(userD).includes(HOME) && dirsOf(userD).includes(EXTRA), `前置:上次发送开着全盘读取、带附加目录(${JSON.stringify(dirsOf(userD))})`);
+  await setInbound([TD]);
+  const n1 = calls.length;
+  eq((await send(sBy, [TD], 'R151C 没同步')).results.map((x) => x.delivery), ['auto'], '没同步:照常 auto');
+  await waitStatus((await lastTo(TD)).id, 'done', 15_000);
+  const [autoD] = coldCallsFor(TD, n1);
+  ok(!!autoD && ![HOME, EXTRA, '/'].some((d) => dirsOf(autoD).includes(d)), `没同步到:全盘读取按关、附加目录按空(${JSON.stringify(dirsOf(autoD))})`);
+  eq(autoD.options.maxBudgetUsd, 5, '没同步到:花费上限退回档案里上次发送的值');
+  // 3b) 同步接口:六个键都要给、类型对、不能有别的键
+  const SEND_SETTINGS_ERR = '请求体须为 { globalRead, addDirs, maxBudgetUsd, keepAlive, promptSuggestions, genui }，六个键都要给，不能带其它键';
+  const narrow = { globalRead: false, addDirs: [], maxBudgetUsd: null, keepAlive: false, promptSuggestions: false, genui: true };
+  const { genui: _g, ...missing } = narrow;
+  for (const bad of [[], {}, missing, { ...narrow, extra: 1 }, { ...narrow, globalRead: 'false' }, { ...narrow, addDirs: [1] }, { ...narrow, addDirs: 'x' },
+    { ...narrow, addDirs: [''] }, { ...narrow, addDirs: ['x'.repeat(4097)] }, { ...narrow, addDirs: Array(65).fill('/x') }, { ...narrow, maxBudgetUsd: 0 },
+    { ...narrow, maxBudgetUsd: '5' }, { ...narrow, maxBudgetUsd: 2e6 }, { ...narrow, promptSuggestions: 'on' }, { ...narrow, keepAlive: null }]) {
+    const r = await api('PUT', '/xsession/send-settings', bad);
+    eq([r.status, r.body?.code, r.body?.error], [400, 'XS_INVALID_INPUT', SEND_SETTINGS_ERR], `不合规 → 400 固定文案(${JSON.stringify(bad).slice(0, 80)})`);
+  }
+  eq(await api('PUT', '/xsession/send-settings', { ...narrow, ...wide, promptSuggestions: 'auto' }), { status: 200, body: { ok: true } }, '合规 → 200 {ok:true}');
+  eq((await api('PUT', '/xsession/send-settings', narrow)).status, 200, '再同步一次:后到的为准');
+  // 3c) 关掉全盘读取、去掉附加目录、清空花费上限之后:冷启的内部回合不带它们
+  const TE = mk('目标 TE 同步后');
+  await offTurn(TE, 'bypassPermissions', wide);
+  await setInbound([TE]);
+  const n2 = calls.length;
+  eq((await send(sBy, [TE], 'R151C 同步后')).results.map((x) => x.delivery), ['auto'], '同步后:照常 auto');
+  await waitStatus((await lastTo(TE)).id, 'done', 15_000);
+  const [autoE] = coldCallsFor(TE, n2);
+  ok(!!autoE && ![HOME, EXTRA, '/'].some((d) => dirsOf(autoE).includes(d)), `关掉全盘读取、去掉附加目录后:冷启的内部回合不带它们(${JSON.stringify(dirsOf(autoE))})`);
+  ok(!autoE.options.maxBudgetUsd, '花费上限取界面当前值(已清空)');
+  // 3d) 有存活进程、设置与它起进程时相同:照常在现有进程里处理
+  const live = { globalRead: true, addDirs: [], maxBudgetUsd: null, keepAlive: true, promptSuggestions: false, genui: true };
+  eq((await api('PUT', '/xsession/send-settings', live)).status, 200, '前置:同步与下面用户回合相同的设置');
+  const TF = mk('目标 TF 有存活进程');
+  await profiled(TF, 'bypassPermissions', { globalRead: true, keepAlive: true, promptSuggestions: false, genui: true });
+  await setInbound([TF]);
+  const pidF = slotOf(TF).pid;
+  const n3 = calls.length;
+  eq((await send(sBy, [TF], 'R151C 有存活进程')).results.map((x) => x.delivery), ['auto'], '有存活进程:照常 auto');
+  await waitStatus((await lastTo(TF)).id, 'done', 15_000);
+  eq([coldCallsFor(TF, n3).length, slotOf(TF)?.pid], [0, pidF], '有存活进程:不冷启,在现有进程里处理(同一 pid)');
 
   console.log(`PASS check-r151c-xs-audit(${checks} 项)`);
 } finally {
