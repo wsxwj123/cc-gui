@@ -1570,7 +1570,8 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     // 三态解析后的**实际值**进键:'auto' 在第三方/官方下结论不同,存原值会让切 provider
     // 后复用到一个 promptSuggestions 与本次不符的常驻进程(query 级选项,起时定死)。
     suggest: resolvePromptSuggestions(promptSuggestions),
-    gr: globalRead !== false, dirs, settingsFp, permEpoch, disToolsMtime, projSettingsMtime, mcpStampMtime,
+    // 不带 / null 按关算:必须与冷启放开读取目录的 if (globalRead) 保持同一真值规则,否则 false 与省略互不复用、白白重启。
+    gr: !!globalRead, dirs, settingsFp, permEpoch, disToolsMtime, projSettingsMtime, mcpStampMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
     acw: acw ?? null, // 压缩窗口指纹(MCT 数值或 null):异窗模型切换必须冷启重算压缩线
     // r66:genui 教学段进没进系统提示。系统提示 spawn 时定死,不计入键则用户翻完
@@ -3451,7 +3452,7 @@ function stopTimeoutResult(pid, owner) {
 
 // 停止的实际动作(硬/选择性两条路径的时序与改动前逐字节一致)。flags = {hard, allTasks},
 // 只认显式 true(路由层已归一)。返回值 = 该请求的 JSON 响应体。
-function applyStop(slot, pid, flags) {
+export function applyStop(slot, pid, flags) { // export 仅为可单测(check-stop-timing-behavior.mjs)
   // SDK:interrupt 让当前回合优雅停;abort 兜底强停;close input 让 generator 收尾。
   // **不能 await interrupt**(用户实报"按停止后子代理继续跑到完"的根因):回合正在跑
   // 子代理时,CLI 对 interrupt 控制请求的响应可能等到子代理收尾才回,await 会把下面的

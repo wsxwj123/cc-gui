@@ -10,8 +10,8 @@
 //   ③ 工作流文本(标签/结果/报错)交给 markdown 渲染器 = 助手输出能注入界面。
 //
 // 口径:源码锁一律在【去注释后】的文本上做,否则实现方写一行注释就能骗过锁。
-// 逐字节锁用 `git show HEAD:<file>` 取基线,按 INTERFACE §C5 给的行区间截取参照文本,
-// 再断言当前文件里仍原样包含它(行号会随新增代码平移,内容不许动)。
+// 整文件逐字节锁(E1-13)用 `git show HEAD:<file>` 取基线。停止链路锁(E1-8)不按行号截取、也不比 HEAD:
+// 按路由注册定位区间,拿测试里写死的原文比对(行号会随新增代码平移,HEAD 基线一提交就自比自)。
 //
 // Run: node tests/unit/check-r114-locks.mjs
 import assert from 'node:assert/strict';
@@ -55,7 +55,6 @@ const stripComments = (s) => s
   .replace(/^[ \t]*\/\/[^\n]*\n?/gm, '')
   .replace(/^([^'"`/\n]*?)[ \t]+\/\/[^\n]*$/gm, '$1');
 const count = (s, needle) => s.split(needle).length - 1;
-const lines = (s, from, to) => s.split('\n').slice(from - 1, to).join('\n');
 
 const CHAT = read('server/routes/chat.js');
 const CHAT_C = stripComments(CHAT);
@@ -146,13 +145,74 @@ red('E1-7b 工作流进度行不得进 earlyLines', () => {
     '进度行进 earlyLines = 重连时把几十份历史进度表整包重放');
 });
 
-green('E1-8 chat.js 核心停止区间(HEAD:2228-2389)逐字节未改', () => {
-  const head = headOf('server/routes/chat.js');
-  assert.ok(head.length > 0, 'git show HEAD:server/routes/chat.js 取不到基线');
-  const ref = lines(head, 2228, 2389);
-  assert.ok(ref.length > 500, `基线区间只截到 ${ref.length} 字符,行号对不上`);
-  assert.ok(CHAT.includes(ref),
-    '/stop 与 /stop-task 全路径必须与 HEAD 逐字节相同(interrupt / 2s 窗 / abort / settled 判据一个字都不许动)');
+green('E1-8 chat.js 停止链路两段计时器逐字未改(按 /stop、/stop-task 路由锚点定位,不按行号)', () => {
+  // 旧写法按 HEAD:2228-2389 截取:R13 把 /stop 的动作搬进 applyStop 后行号一路平移,截到的早已是
+  // 冷启动 / 消息泵;且以 HEAD 为基线,一提交就是自己比自己。现在按路由注册找区间(/stop 注册 →
+  // /stop-task 内联处理器收尾的顶格 `});`,applyStop 在其中),锁 INTERFACE-r114 §C5 点名的四件事:
+  // interrupt 发出即走、2s/3s 窗、abort 兜底、settled 判据。它们都在 hard / 选择性两段计时器里,
+  // 两段各自整段逐字锁(只放过空白、注释和那行 console.warn 的措辞):段内插一行早退或改一个比较符
+  // 就能架空兜底,只锁几行关键语句挡不住。基线是下面的原文(与 r114 基线 17f1b400 逐字相同),不读 HEAD,
+  // 提交后照样生效;区间里两段计时器以外的代码(身份校验、R12 四档判定等)允许合法改动。
+  // 边界:文本锁防的是顺手改动。计时器段之前的语句(早退、提前改写 lastResultAt 等)或起别名再调用,
+  // 照样能架空它们 —— 要防这类只能靠行为测试(导出 applyStop + 假计时器)。
+  const routeAt = (re, what) => {
+    const hits = [...CHAT_C.matchAll(re)];
+    assert.equal(hits.length, 1, `${what}应恰好注册 1 处,实际 ${hits.length} 处 —— 区间定位失败`);
+    return hits[0].index;
+  };
+  const from = routeAt(/router\.post\(\s*['"]\/chat\/:pid\/stop['"]\s*,/g, '/stop 路由');
+  // /stop-task 须是内联处理器:改成具名函数后"其后第一个顶格 });"会滑到下一个路由,区间悄悄错位。
+  const taskAt = routeAt(/router\.post\(\s*['"]\/chat\/:pid\/stop-task['"]\s*,\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{/g,
+    '/stop-task 路由(内联处理器)');
+  assert.ok(taskAt > from, '/stop-task 应注册在 /stop 之后,区间定位失真');
+  const end = CHAT_C.indexOf('\n});', taskAt);
+  assert.ok(end > taskAt, '找不到 /stop-task 处理器收尾的顶格 });');
+  const flat = (s) => s.replace(/\s+/g, ' '); // 空白归一:缩进 / 换行不算改动
+  const seg = flat(CHAT_C.slice(from, end));
+  assert.ok(seg.length < 20000, `停止区间 ${seg.length} 字符,过大 = 定位失真`);
+
+  const LOG = Symbol('只放过措辞的日志行');
+  // 日志行插值只许 ${a.b} 这类纯读取,防借插值塞副作用
+  const LOG_RE = 'console\\.warn\\(`(?:[^`$]|\\$(?!\\{)|\\$\\{[\\w.]+\\})*`\\);';
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const timer = (stmts) => new RegExp(stmts.map((s) => (s === LOG ? LOG_RE : esc(s))).join(' ?'), 'g');
+  const INTERRUPT = 'try { slot.query?.interrupt?.()?.catch?.(() => {}); } catch {}'; // ① 发出即走:await 它 = abort 兜底被挡死
+  const SETTLED = 'const settled = slot.pumpEnded || (slot.lastResultAt && slot.lastResultAt >= stopAt);'; // ④
+  const ABORT = ['try { slot.abort?.abort(); } catch {}', 'try { slot.input?.close(); } catch {}']; // ③ 到点没 settled 就强停
+  const WINDOW = '}, hadTasks ? 3000 : 2000);'; // ② 窗长 2s,有在飞任务 3s
+  const HARD = timer([
+    INTERRUPT, 'const hardEpoch = slot.turnEpoch | 0;', 'slot.stopTimer = setTimeout(() => {',
+    'if ((slot.turnEpoch | 0) !== hardEpoch) return;', 'slot.stopTimer = null;',
+    SETTLED, 'const noLiveTasks = !slot.liveTasks || slot.liveTasks.size === 0;', 'if (settled && noLiveTasks) return;',
+    ...ABORT, WINDOW,
+  ]);
+  const SELECTIVE = timer([
+    INTERRUPT, 'const selEpoch = slot.turnEpoch | 0;', 'slot.stopTimer = setTimeout(() => {',
+    'if ((slot.turnEpoch | 0) !== selEpoch) return;', 'slot.stopTimer = null;',
+    SETTLED, 'let liveStoppable = 0;', 'let liveShell = 0;', 'let liveCrossEpoch = 0;',
+    'for (const t of (slot.liveTasks?.values() ?? [])) {', "if (t && t.kind === 'shell') { liveShell++; continue; }",
+    'if (t && (t.epoch | 0) === selEpoch) liveStoppable++;',
+    "else if (t && typeof t.epoch === 'number' && Date.now() - (t.createdAt || 0) < LIVE_TASK_FRESH_MS) liveCrossEpoch++;",
+    '}', 'if (settled && liveStoppable === 0) return;',
+    'if (shouldSuppressAbort({ liveShell, liveCrossEpoch, allTasks })) {', LOG, 'return;', '}',
+    ...ABORT, WINDOW,
+  ]);
+  for (const [re, path] of [[HARD, 'hard 路径'], [SELECTIVE, '选择性路径']]) {
+    if ((seg.match(re) || []).length === 1) continue;
+    assert.fail((flat(CHAT_C).match(re) || []).length
+      ? `${path}计时器段不在 /stop…/stop-task 区间里(内容没改,是被挪走了):同步更新本锁的区间锚点`
+      : `${path}计时器段被改了:interrupt → 2s/3s 计时器 → settled 判据 → abort 兜底,段内一个字都不许动`);
+  }
+  assert.equal(count(seg, 'const stopAt = Date.now();'), 1, 'settled 判据比的 stopAt 必须仍在停止时刻取');
+  assert.equal(count(seg, 'const { shellTasks, stoppableTasks, keptTasks } = partitionStopTasks(slot.liveTasks, slot.turnEpoch, allTasks);'), 1,
+    '任务分组是 hadTasks 与待停清单的来源,入参不许改');
+  assert.equal(count(seg, 'const hadTasks = shellTasks.length + stoppableTasks.length + keptTasks.length > 0;'), 1,
+    'hadTasks 决定 2s / 3s 窗长,口径不许改');
+  // 区间里不许再有别的 interrupt / 进程 abort 调用,也不许清任何计时器(await 写法、/stop-task 里新加的都算)。
+  assert.equal((seg.match(/\binterrupt\s*(?:\?\.)?\s*\(/g) || []).length, 2, '停止区间里 interrupt 调用多了或少了');
+  assert.equal((seg.match(/\bslot\.abort\s*\??\.\s*abort\s*(?:\?\.)?\s*\(/g) || []).length, 2,
+    '停止区间里出现了计时器之外的进程 abort(/stop-task 绝不 abort)');
+  assert.equal(/\bclear(?:Timeout|Interval)\s*\(/.test(seg), false, '停止区间里不许清计时器(会撤掉 abort 兜底)');
 });
 
 red('E1-9a server/utils/workflow-progress.js 导出 A1.1–A1.6 全部符号', () => {
