@@ -116,7 +116,8 @@ await check('K2', () => {
 });
 
 // ---- POST /api/chat:同一会话先发首条,等进程转空闲,再带同一 sessionId 发第二条;两条除 globalRead 外参数相同 ----
-const BODY = { prompt: 'globalread-compat-key 首条', cwd: WORK, keepAlive: true };
+// promptSuggestions: false 关掉服务端默认开启的"输入预测":不关时每个回合结束后要多等约 4 秒才转空闲,逼近 waitIdle 的 5 秒上限,慢机器上会误报"没有转入空闲";两条消息共用本常量,除 globalRead 外参数仍相同。
+const BODY = { prompt: 'globalread-compat-key 首条', cwd: WORK, keepAlive: true, promptSuggestions: false };
 /** 发一对消息;firstExtra / secondExtra 只放 globalRead(空对象 = 不带)。返回第二条应答、第二条新起的进程数、最新进程记录。 */
 async function sendPair(firstExtra, secondExtra) {
   const before = calls.length;
