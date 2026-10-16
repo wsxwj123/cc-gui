@@ -1,5 +1,6 @@
 // r151e 行为清单 C(10)、D(11):"按没有档案判"的标记与偏好文件读不出。
-// 10:偏好文件读不出期间 T 跑回合 → 按没有档案判(标记当时存不进偏好文件);恢复可读后什么都不做,服务要在 30 秒内自己补存,
+// 10:偏好文件读不出期间 T 跑回合 → 按没有档案判(标记当时存不进偏好文件)。读不出期间总开关按"关"读、跨会话接口回 409,
+//     所以那时不查会话列表;恢复可读后查一次(hasProfile:false),之后什么都不做,服务要在 30 秒内自己补存,
 //     所以等 40 秒再重启,T 仍按没有档案判。
 // 11:T 先处于"按没有档案判"且已跨重启保留(造法同 r151d 行为清单 4:只让发送档案写不进,T 跑回合,重启);去掉占位后,
 //     服务在偏好文件读不出时启动,恢复可读后 T 立刻跑一个回合(档案写成),等 40 秒再重启 → T 按正常档案判。
@@ -34,16 +35,16 @@ const hasProfileOf = async (inst, sid) => {
   return e ? e.hasProfile : `会话列表里没有这个会话(GET ${r.status}:${r.text.slice(0, 160)})`;
 };
 
-test('E10 标记没能存进偏好文件会补存:偏好文件读不出时 T 跑回合 → hasProfile:false;恢复可读后不做任何操作等 40 秒再重启 → hasProfile 仍 false,「放任」发送方发来消息 → pending / no-profile,不自动处理', async () => {
+test('E10 标记没能存进偏好文件会补存:偏好文件读不出时 T 跑回合(这时不查会话列表);恢复可读后 hasProfile:false;之后不做任何操作等 40 秒再重启 → hasProfile 仍 false,「放任」发送方发来消息 → pending / no-profile,不自动处理', async () => {
   const inst = await startInstanceP2('e10');
   let restore = null;
   try {
     const { T, S } = await profiledT(inst, 'e10');
     restore = makePrefsUnreadable(inst.home);
+    // 读不出期间总开关按"关"读,跨会话接口回 409 XS_DISABLED(已有约定),所以这时不查会话列表
     await turnWith(inst.c, T, { model: 'claude-opus-4-1', note: '偏好文件读不出' });
-    // 接口文件写在步骤里的中间观察;用软断言:这一步不符时照样记失败,但继续往下走到"补存"这条的结果断言
-    expect.soft(await hasProfileOf(inst, T.sid), '步骤中的观察:偏好文件读不出时 T 跑完回合 → 会话列表 T 的 hasProfile:false').toBe(false);
     restore();
+    expect(await hasProfileOf(inst, T.sid), '恢复可读后,会话列表 T 的 hasProfile 为 false').toBe(false);
     await sleep(40_000);
     await inst.restart();
 
