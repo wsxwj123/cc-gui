@@ -1507,7 +1507,8 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     // 三态解析后的**实际值**进键:'auto' 在第三方/官方下结论不同,存原值会让切 provider
     // 后复用到一个 promptSuggestions 与本次不符的常驻进程(query 级选项,起时定死)。
     suggest: resolvePromptSuggestions(promptSuggestions),
-    gr: globalRead !== false, dirs, settingsFp, permEpoch, disToolsMtime, projSettingsMtime, mcpStampMtime,
+    // 不带 / null 按关算:必须与冷启放开读取目录的 if (globalRead) 保持同一真值规则,否则 false 与省略互不复用、白白重启。
+    gr: !!globalRead, dirs, settingsFp, permEpoch, disToolsMtime, projSettingsMtime, mcpStampMtime,
     budget: maxBudgetUsd || null, // 花费上限变化不能复用旧进程(query 级选项,起时定死)
     acw: acw ?? null, // 压缩窗口指纹(MCT 数值或 null):异窗模型切换必须冷启重算压缩线
     // r66:genui 教学段进没进系统提示。系统提示 spawn 时定死,不计入键则用户翻完
