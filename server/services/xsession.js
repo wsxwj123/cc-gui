@@ -8,7 +8,7 @@
 // 依赖只朝一个方向:本模块经 chat.js 导出的窄接口挂钩子,chat.js 不认识本模块。
 import { randomUUID, timingSafeEqual } from 'crypto';
 import { access, readdir, readFile } from 'fs/promises';
-import { constants as fsConstants, readFileSync, statSync } from 'fs';
+import { constants as fsConstants, readFileSync, realpathSync, statSync } from 'fs';
 import { dirname, join, resolve, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
@@ -636,7 +636,7 @@ function profilePrefsUnreadable(sessionId, what) {
 
 // ~/.claude.json 的两项读数:登录账号(provider 指纹用)与哪些作用域配了同名 MCP 服务(免确认守卫用,见 shadowingXsServerScopes)。
 // 文件可能很大且 CLI 常写:按修改时间 + 大小缓存解析结果,只留这两项;另设最短间隔(XS_CLAUDE_JSON_MIN_MS)。
-const EMPTY_CLAUDE_JSON = Object.freeze({ key: null, accountId: '', userXs: false, localXsDirs: Object.freeze([]) });
+const EMPTY_CLAUDE_JSON = Object.freeze({ key: null, accountId: '', userXs: false, localXsDirs: Object.freeze([]), unreadable: false });
 let claudeJsonCache = EMPTY_CLAUDE_JSON;
 // 两次读 ~/.claude.json 的最短间隔(单调时钟,不受墙上时间平移影响)。CLI 每次启动 / 退出都会改写这个文件,按修改时间缓存
 // 几乎回回失效,每个回合开始记档案、每次判定、每次冷启都要整份重读重解析。间隔内直接用上次的读数,代价:换登录账号
@@ -653,8 +653,10 @@ function readClaudeJsonSync() {
     const st = statSync(file);
     const key = `${st.mtimeMs}:${st.size}`;
     if (claudeJsonCache.key !== key) {
-      let j = null;
-      try { j = JSON.parse(readFileSync(file, 'utf-8')); } catch { /* 读不到 / 损坏 → 全空 */ }
+      let j;
+      try { j = JSON.parse(readFileSync(file, 'utf-8')); } catch { j = undefined; }
+      // 读不出 / 损坏(审计 S2):登录账号按空(provider 指纹随之不同,档案判 profile-stale);同名服务按"有"(失败时不免确认)
+      if (j === undefined) { claudeJsonCache = { ...EMPTY_CLAUDE_JSON, key, unreadable: true }; return claudeJsonCache; }
       const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
       const root = obj(j);
       const id = obj(root.oauthAccount).accountUuid;
@@ -663,9 +665,10 @@ function readClaudeJsonSync() {
         key, accountId: typeof id === 'string' ? id : '',
         userXs: !!obj(root.mcpServers)[XS_TOOLS_SERVER],
         localXsDirs: Object.keys(projects).filter((k) => !!obj(obj(projects[k]).mcpServers)[XS_TOOLS_SERVER]),
+        unreadable: false,
       };
     }
-  } catch { claudeJsonCache = EMPTY_CLAUDE_JSON; }
+  } catch (e) { claudeJsonCache = e?.code === 'ENOENT' ? EMPTY_CLAUDE_JSON : { ...EMPTY_CLAUDE_JSON, unreadable: true }; } // 不存在 = 没配
   return claudeJsonCache;
 }
 /** GUI 起会话时 CLI 读的那份配置里的 provider 身份(与起进程同源,不读宿主进程环境变量)。凭据原文只留在内存里、不出本函数的调用方。 */
@@ -1368,14 +1371,36 @@ const senderOf = (view) => ({ sessionId: view.sessionId, runId: view.runId, turn
 // 外来那份独有的工具也以 mcp__ccgui-sessions__* 出现在工具表里。同名工具归哪一份是 CLI 没写明的行为,所以配了同名服务的
 // 会话不给免确认(list_sessions 按当前档位的规则),免得按工具名放行了外来工具。本地作用域(~/.claude.json 的 projects)
 // 按目录前缀认(Windows 上斜杠统一、不分大小写),项目作用域(.mcp.json)从工作目录逐级往上找:宁可多认,多认只是多一次确认。
-const normDir = (p) => (process.platform === 'win32' ? String(p).replace(/\\/g, '/').toLowerCase() : String(p)).replace(/\/+$/, '');
-function shadowingXsServerScopes(cwd) {
+// 本地级比较前两边都先转成真实路径(符号链接、. / ..),再统一分隔符;Windows 与 macOS 的默认文件系统不分大小写,按不分大小写比
+// (分大小写的卷上会多判"有同名",偏安全)。转不了(目录已不在)就按原样的绝对路径比。
+const realDirOf = (p) => { try { return realpathSync.native(p); } catch { return resolve(String(p)); } };
+const normDir = (p) => {
+  let s = String(p);
+  if (process.platform === 'win32') s = s.replace(/\\/g, '/');
+  if (process.platform === 'win32' || process.platform === 'darwin') s = s.toLowerCase();
+  return s.replace(/\/+$/, '');
+};
+// 企业托管的 MCP 配置(审计 S2):目录按平台固定,取法与本机 CLI 一致(macOS /Library/Application Support/ClaudeCode、
+// Windows C:\Program Files\ClaudeCode、其它 /etc/claude-code)。
+export const XS_MANAGED_MCP_PATH = join(process.platform === 'darwin' ? '/Library/Application Support/ClaudeCode'
+  : process.platform === 'win32' ? 'C:\\Program Files\\ClaudeCode' : '/etc/claude-code', 'managed-mcp.json');
+// 一份 MCP 配置文件里有没有同名服务:'no'(文件不存在或没配)| 'yes' | 'unreadable'(在、却读不出或解析不了 —— 按"有"算)。
+function mcpFileDeclaresXs(file) {
+  let raw;
+  try { raw = readFileSync(file, 'utf-8'); } catch (e) { return e?.code === 'ENOENT' || e?.code === 'ENOTDIR' ? 'no' : 'unreadable'; }
+  try { return JSON.parse(raw)?.mcpServers?.[XS_TOOLS_SERVER] ? 'yes' : 'no'; } catch { return 'unreadable'; }
+}
+/** 哪些作用域配了同名服务(给日志用的名字;空 = 没有)。managedPath 只为单测可换路径,产品调用一律用平台固定路径。 */
+export function shadowingXsServerScopes(cwd, { managedPath = XS_MANAGED_MCP_PATH } = {}) {
   const scopes = [];
+  const managed = mcpFileDeclaresXs(managedPath);
+  if (managed !== 'no') scopes.push(managed === 'yes' ? '企业托管' : '企业托管(managed-mcp.json 读不出,按有算)');
   const cj = readClaudeJsonSync();
+  if (cj.unreadable) scopes.push('用户 / 本地(~/.claude.json 读不出,按有算)');
   if (cj.userXs) scopes.push('用户');
   if (typeof cwd !== 'string' || !cwd) return scopes;
-  const here = normDir(cwd);
-  if (cj.localXsDirs.some((k) => { const d = normDir(k); return here === d || here.startsWith(`${d}/`); })) scopes.push('本地');
+  const here = normDir(realDirOf(cwd));
+  if (cj.localXsDirs.some((k) => { const d = normDir(realDirOf(k)); return here === d || here.startsWith(`${d}/`); })) scopes.push('本地');
   for (let dir = resolve(cwd), i = 0; i < 64; i += 1) {
     try { if (JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf-8'))?.mcpServers?.[XS_TOOLS_SERVER]) { scopes.push('项目'); break; } } catch { /* 没有 / 读不出 */ }
     const up = dirname(dir);

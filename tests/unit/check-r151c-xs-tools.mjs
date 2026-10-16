@@ -11,7 +11,7 @@
 //   ⑥ 用户 / 本地 / 项目配置里的同名服务:冷启时记一行日志;照样挂 GUI 的服务,但 list_sessions 不免确认(.mcp.json 往上逐级找)。
 // node tests/unit/check-r151c-xs-tools.mjs
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, realpathSync, utimesSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, realpathSync, utimesSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -278,7 +278,35 @@ try {
     eq(xs.xsSessionOptions(viewAt(join(WORK, 'pkg'))).autoAllow, [], '本地配置(~/.claude.json 的 projects[目录])里有同名服务 → 该目录及子目录不免确认');
     writeFileSync(CJ, JSON.stringify({ projects: { [`${WORK}-other`]: { mcpServers: SRV } }, mcpServers: { other: { command: 'echo' } } })); await pastInterval();
     eq(xs.xsSessionOptions(viewAt(WORK)).autoAllow, [LS], '前缀相似的别的目录、不同名的服务不算 → 照常免确认');
+    // 审计 S2:本地级两边都按真实路径比(符号链接),macOS / Windows 不分大小写
+    const LINK = join(TMP, 'work-link');
+    symlinkSync(WORK, LINK);
+    mkdirSync(join(WORK, 'pkg'), { recursive: true }); // 会话的工作目录是真实存在的目录
+    writeFileSync(CJ, JSON.stringify({ projects: { [LINK]: { mcpServers: SRV } } })); await pastInterval();
+    eq(xs.xsSessionOptions(viewAt(WORK)).autoAllow, [], '本地配置的键是指向工作目录的符号链接 → 也算同名,不免确认');
+    writeFileSync(CJ, JSON.stringify({ projects: { [WORK]: { mcpServers: SRV } } })); await pastInterval();
+    eq(xs.xsSessionOptions(viewAt(join(LINK, 'pkg'))).autoAllow, [], '工作目录经符号链接进来 → 也算同名,不免确认');
+    if (process.platform === 'darwin' || process.platform === 'win32') {
+      writeFileSync(CJ, JSON.stringify({ projects: { [WORK.toUpperCase()]: { mcpServers: SRV } } })); await pastInterval();
+      eq(xs.xsSessionOptions(viewAt(WORK)).autoAllow, [], '本地配置的键大小写不同 → 也算同名,不免确认');
+    }
+    // 审计 S2:~/.claude.json 解析失败 → 按"有同名"(失败时不免确认)
+    writeFileSync(CJ, '{broken'); await pastInterval();
+    eq(xs.xsSessionOptions(viewAt(WORK)).autoAllow, [], '~/.claude.json 解析失败 → 按有同名处理,不免确认');
+    rmSync(CJ, { force: true }); await pastInterval();
+    eq(xs.xsSessionOptions(viewAt(WORK)).autoAllow, [LS], '~/.claude.json 不存在 = 没配 → 照常免确认');
   } finally { writeFileSync(CJ, cj0); }
+  // 审计 S2:企业托管配置 managed-mcp.json(平台固定路径;单测经参数换成临时文件)
+  eq(xs.XS_MANAGED_MCP_PATH, join(process.platform === 'darwin' ? '/Library/Application Support/ClaudeCode' : process.platform === 'win32' ? 'C:\\Program Files\\ClaudeCode' : '/etc/claude-code', 'managed-mcp.json'), '托管配置路径按平台固定');
+  const MF = join(TMP, 'managed-mcp.json');
+  await pastInterval();
+  eq(xs.shadowingXsServerScopes(WORK, { managedPath: MF }), [], '托管配置不存在 → 不算');
+  writeFileSync(MF, JSON.stringify({ mcpServers: { other: { command: 'echo' } } }));
+  eq(xs.shadowingXsServerScopes(WORK, { managedPath: MF }), [], '托管配置里只有别的服务 → 不算');
+  writeFileSync(MF, JSON.stringify({ mcpServers: SRV }));
+  eq(xs.shadowingXsServerScopes(WORK, { managedPath: MF }), ['企业托管'], '托管配置里有同名服务 → 算');
+  writeFileSync(MF, '{broken');
+  eq(xs.shadowingXsServerScopes(WORK, { managedPath: MF }).length, 1, '托管配置读不出 → 按有算');
 
   await client.close().catch(() => {});
   console.log(`check-r151c-xs-tools: ${checks} 项全部通过`);
