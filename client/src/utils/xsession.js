@@ -400,13 +400,14 @@ export function handleXsWsEvent(data) {
 }
 
 // 全局设置的当前值 → PUT /api/xsession/send-settings 的请求体。形态与 App.jsx 发送 /api/chat 时带的一致(服务端据此拼自动处理的
-// 请求体,常驻进程能不能复用看兼容键,形态不同会白白冷启)。
+// 请求体,常驻进程能不能复用看兼容键,形态不同会白白冷启)。照当前值发送,不在前端截断或跳过:不合规的由服务端拒收,
+// 并清掉本界面之前同步的值。
 const XS_SEND_SETTING_FIELDS = ['globalRead', 'addDirs', 'maxBudgetUsd', 'persistentChat', 'promptSuggestions', 'genuiRender'];
 export function xsSendSettingsOf(s) {
   const ps = s.promptSuggestions;
   return {
     globalRead: s.globalRead !== false,
-    addDirs: Array.isArray(s.addDirs) ? s.addDirs.filter((d) => typeof d === 'string' && d) : [],
+    addDirs: Array.isArray(s.addDirs) ? [...s.addDirs] : [],
     maxBudgetUsd: Number.isFinite(s.maxBudgetUsd) && s.maxBudgetUsd > 0 ? s.maxBudgetUsd : null,
     keepAlive: s.persistentChat !== false,
     promptSuggestions: ps === true ? true : ps === false ? false : 'auto',
@@ -422,7 +423,8 @@ const XS_UI_ID = (() => {
 })();
 const XS_SEND_SETTINGS_RESYNC_MS = 5 * 60_000; // 服务端 10 分钟没收到某个界面的值就不再算它
 // 串行发送(后发的一定读到最新值、最后到服务端);force 用于启动 / 开关打开 / 重连(服务端那份可能已随重启丢失)与每 5 分钟的重同步。
-// 失败不提示:服务端没收到时自动处理按最窄范围起进程,下一次变化或重连再同步。
+// 失败不提示。被服务端拒收(400)时,它删掉本界面之前同步的值、按其余有效界面重算(一个都没有才按最窄:全盘读取关、附加目录空,
+// 其余三项退回发送档案);没送到(网络失败)时服务端仍按本界面上一次同步的值,10 分钟没再同步才不算。下一次变化、重连或 5 分钟到了再同步。
 let sendSettingsChain = Promise.resolve();
 let sentSettingsKey = null;
 export function syncXsSendSettings(force = false) {

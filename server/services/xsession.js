@@ -1225,6 +1225,10 @@ export function setXsSendSettings(uiId, v) {
   while (uiSendSettings.size >= XS_UI_MAX) uiSendSettings.delete(uiSendSettings.keys().next().value);
   uiSendSettings.set(uiId, { v: Object.freeze({ ...v, addDirs: Object.freeze([...v.addDirs]) }), at: now });
 }
+/** 同步被拒(请求体不合规、uiId 本身合规)时调用:删掉这个界面之前的记录,按其余有效界面重算(接口"复审之后的补充约定"第 3 条)。 */
+export function forgetXsSendSettings(uiId) {
+  uiSendSettings.delete(uiId);
+}
 // 此刻有效的界面合起来的值(按此刻的 Date.now() 判有效):全盘读取全部为开才开;附加目录取交集(按最近一次同步那份的顺序);
 // 花费上限取最小,null(不限)算最宽;常驻进程、输入预测、生图界面取最近一次同步的。一个有效的都没有 → null。
 function effectiveSendSettings() {

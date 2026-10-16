@@ -11,6 +11,7 @@
 //      落 class-mismatch;类别没变按新档位起;都不把判定时的旧档位写回(接口"复审之后的补充约定"第 1 条)。
 //   ⑤ 复审建议 1:同步请求带界面实例标识 uiId,按界面分开记、取最窄(全盘读取全开才开、附加目录交集、花费上限取小、其余取最近
 //      一次同步的);10 分钟没再同步的界面不算;没有有效界面时按最窄、其余退回档案(第 2 条)。
+//   ⑥ 复审建议 2:请求体不合规(400)时删掉该 uiId 之前的记录、按其余有效界面重算;uiId 本身不合规时不删任何记录(第 3 条)。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身;临时 HOME;端口 6800–6899。
 // node tests/unit/check-r151c-xs-audit.mjs
 import assert from 'node:assert/strict';
@@ -315,6 +316,27 @@ try {
   const c5c = await autoCold(TK, 'R151C 没有有效界面');
   eq(seen(c5c), [false, false, false, false], `没有有效界面:全盘读取按关、附加目录按空(不看档案里上次发送的;${JSON.stringify(dirsOf(c5c))})`);
   eq(c5c.options.maxBudgetUsd, 7, '其余三项退回档案(花费上限是档案里上次发送的 7,不是过期界面 A 的 3)');
+
+  // ── ⑥ 复审建议 2:同步被拒时清掉该界面的值(接口"复审之后的补充约定"第 3 条)──
+  const uiN = { globalRead: false, addDirs: [EXTRA2], maxBudgetUsd: 2, keepAlive: false, promptSuggestions: false, genui: true };
+  const uiW = { globalRead: true, addDirs: [EXTRA, EXTRA2], maxBudgetUsd: null, keepAlive: false, promptSuggestions: false, genui: true };
+  const put = (body) => api('PUT', '/xsession/send-settings', body);
+  eq([(await put({ uiId: U0, ...uiN })).status, (await put({ uiId: UB, ...uiW })).status], [200, 200], '前置:窄的界面 0 与宽的界面 B 都同步了');
+  // 6a) uiId 本身不合规:400,不删任何记录(界面 0 的窄值仍算数)
+  for (const uiId of [`${U0}\n`, ` ${U0}`, U0.slice(0, 7), [U0]]) {
+    eq((await put({ uiId, ...uiN, addDirs: Array(65).fill(EXTRA2) })).status, 400, `uiId 不合规 → 400(${JSON.stringify(uiId)})`);
+  }
+  const c6a = await autoCold(TK, 'R151C uiId 不合规之后');
+  eq([seen(c6a), c6a.options.maxBudgetUsd], [[false, false, true, false], 2], `uiId 不合规时不删记录:仍按两个界面取最窄(${JSON.stringify(dirsOf(c6a))})`);
+  // 6b) 界面 0 发来不合规的值(附加目录超 64 项;界面照原样发送)→ 400 并删掉界面 0 之前的记录 → 按界面 B 重算
+  const r6b = await put({ uiId: U0, ...uiN, addDirs: Array(65).fill(EXTRA2) });
+  eq([r6b.status, r6b.body?.code], [400, 'XS_INVALID_INPUT'], '界面 0 的值不合规 → 400');
+  const c6b = await autoCold(TK, 'R151C 界面 0 被拒之后');
+  eq([seen(c6b), c6b.options.maxBudgetUsd], [[true, true, true, false], undefined], `界面 0 被拒:删掉它之前的窄值,按界面 B 重算(${JSON.stringify(dirsOf(c6b))})`);
+  // 6c) 界面 B 也被拒(花费上限 0)→ 没有有效界面 → 按最窄
+  eq((await put({ uiId: UB, ...uiW, maxBudgetUsd: 0 })).status, 400, '界面 B 的值不合规 → 400');
+  const c6c = await autoCold(TK, 'R151C 两个界面都被拒之后');
+  eq(seen(c6c), [false, false, false, false], `都被拒、没有其它有效界面:全盘读取按关、附加目录按空(${JSON.stringify(dirsOf(c6c))})`);
 
   console.log(`PASS check-r151c-xs-audit(${checks} 项)`);
 } finally {

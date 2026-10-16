@@ -291,15 +291,19 @@ assert.equal(useXsStore.getState().autoPaused, false);
   await settle(); await sleep(20); await settle();
   assert.equal(count(SS), n0 + 4, '5 分钟到:值没变也重发一次');
   assert.equal(lastBody(SS).uiId, uiId, '同一页面的 uiId 不变');
+  st.setAddDirs([...Array.from({ length: 65 }, (_, i) => `/r151c/d${i}`), '']);
+  await sleep(350); await settle();
+  assert.equal(count(SS), n0 + 5, '附加目录变了:发');
+  assert.deepEqual([lastBody(SS).addDirs.length, lastBody(SS).addDirs.at(-1)], [66, ''], '照当前值原样发送:超 64 项、含空串也不在前端截断或跳过(由服务端拒收并清掉本界面的值)');
   cfg.enabled = false;
   xs.handleXsWsEvent({ type: 'xs:config', enabled: false });
   await settle();
   st.setGlobalRead(true);
   await sleep(350); await settle();
-  assert.equal(count(SS), n0 + 4, '总开关关着:不发');
+  assert.equal(count(SS), n0 + 5, '总开关关着:不发');
   resync[0].fn();
   await settle(); await sleep(20); await settle();
-  assert.equal(count(SS), n0 + 4, '总开关关着:5 分钟到也不发');
+  assert.equal(count(SS), n0 + 5, '总开关关着:5 分钟到也不发');
   console.log('✓ ⑦ 全局设置同步给服务端');
 }
 

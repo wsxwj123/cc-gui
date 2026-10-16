@@ -11,7 +11,7 @@ import {
   XS_DISABLED_TEXT, XS_STORAGE_FAILED_TEXT, XsError, parseManualSend, sendManualMessages, parseListQuery, listInboxMessages,
   pendingSummary, claimMessage, releaseMessage, dismissMessage, syncXsRuntimeHooks, noteNativeGuardFailure, nativeGuardLastFailure,
   clearAllXsMessages, xsAutoState, resumeXsAuto, kickAllXsQueued, noteXsInboundChanged, profileCountsFor, setXsSessionRowsLoader,
-  XS_SEND_SETTING_KEYS, setXsSendSettings,
+  XS_SEND_SETTING_KEYS, setXsSendSettings, forgetXsSendSettings,
 } from '../services/xsession.js';
 import { assignShortIds, selectXsSessions } from '../services/xsession-resolve.js';
 import { resolveSessionTitle } from '../utils/session-title.js';
@@ -272,7 +272,8 @@ router.put('/xsession/sessions/:id/inbound', async (req, res) => {
 // 自动处理按它起进程。请求体另带界面实例标识 uiId(8–64 个字母、数字、- 或 _),服务端按 uiId 分开记、多个界面时取最窄
 // (接口"复审之后的补充约定"第 2 条;合并与有效期见 services/xsession.js effectiveSendSettings)。只在服务端内存;不广播;
 // 受总开关闸门约束(关着 409)。uiId 加六个键都要给、不能有别的键;六个键的形态与界面发送 /api/chat 时一致。
-// 不合规 → 400 XS_INVALID_INPUT(固定文案)。
+// 不合规 → 400 XS_INVALID_INPUT(固定文案);uiId 本身合规时另删掉这个界面之前的记录、按其余有效界面重算(没有就按最窄;
+// 接口"复审之后的补充约定"第 3 条),uiId 不合规时不删任何记录。
 const SEND_SETTINGS_MAX_DIRS = 64;
 const SEND_SETTINGS_MAX_DIR_CHARS = 4096;
 const SEND_SETTINGS_MAX_BUDGET_USD = 1_000_000;
@@ -298,7 +299,10 @@ router.put('/xsession/send-settings', (req, res) => {
     const { uiId: _uiId, ...settings } = b;
     v = parseSendSettings(settings);
   }
-  if (!v) return xsError(res, 400, 'XS_INVALID_INPUT', SEND_SETTINGS_INVALID_TEXT);
+  if (!v) {
+    if (uiId) forgetXsSendSettings(uiId);
+    return xsError(res, 400, 'XS_INVALID_INPUT', SEND_SETTINGS_INVALID_TEXT);
+  }
   setXsSendSettings(uiId, v);
   res.json({ ok: true });
 });
