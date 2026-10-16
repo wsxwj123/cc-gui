@@ -3041,17 +3041,18 @@ router.get('/model-window', (req, res) => {
   res.json({ window: info.window, source: info.origin });
 });
 
-// r49b①:热切逐 slot 记结果。CLI 2.1.240 的 guardPermissionModeChange 会拒掉一部分切换
-// (auto 受模型门控、bypass 未带 dangerously-skip 启动),原来整段包在 `catch {}` 里吞掉,
-// 响应里成功与被拒长得一模一样 → 界面停在一个根本没生效的档上。被拒的 slot 一个字段都不改:
-// canUseTool 继续按【旧档】裁决,绝不按没生效的新档放行。
-// 纯逻辑,tests/unit/check-mode-switch-failure.mjs 真 import(mock slot.query,不打真实 CLI)。
 // r151d 判官 S2:正在进行的切档请求(会话 id 小写 → 个数),见 POST /chat/permission-mode。
 const permissionModeSwitching = new Map();
 /** 该会话有没有还没完成的切档请求(控制请求还没返回、新档位还没记下)。跨会话自动处理据此不起回合、退回排队。 */
 export function permissionModeSwitchPending(sessionId) {
   return typeof sessionId === 'string' && permissionModeSwitching.has(sessionId.toLowerCase());
 }
+
+// r49b①:热切逐 slot 记结果。CLI 2.1.240 的 guardPermissionModeChange 会拒掉一部分切换
+// (auto 受模型门控、bypass 未带 dangerously-skip 启动),原来整段包在 `catch {}` 里吞掉,
+// 响应里成功与被拒长得一模一样 → 界面停在一个根本没生效的档上。被拒的 slot 一个字段都不改:
+// canUseTool 继续按【旧档】裁决,绝不按没生效的新档放行。
+// 纯逻辑,tests/unit/check-mode-switch-failure.mjs 真 import(mock slot.query,不打真实 CLI)。
 export async function applyPermissionModeToSlots(procs, sessionId, mode) {
   const sdkMode = mode === 'plan' ? 'plan' : mode === 'auto' ? 'auto' : 'default';
   let attempted = 0;
