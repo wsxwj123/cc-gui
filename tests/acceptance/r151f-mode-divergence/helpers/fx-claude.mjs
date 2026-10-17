@@ -18,14 +18,19 @@
 //     模拟"自动档下,审核判为可以执行的命令由命令行直接执行(不再问宿主)"。进程认为的档位以启动参数 --permission-mode 为起点,
 //     每交给假 claude 一条切档请求就更新(被吞 / 被拒的不算)。
 //  6) 宿主答复 can_use_tool 为 allow 时,被问的工具若是 Write,这里把文件真的写出来(模拟命令行拿到许可后动手);假 claude 自己不写文件。
+//  7) bgtask/<会话id> = {pid?, toolUseId?, taskId?, description?}
+//     这个进程(pid 不给 = 谁先遇到谁发)在下一次吐出 result 之前,先吐一条后台任务开始的系统消息
+//     {type:"system", subtype:"task_started", task_id, tool_use_id, description, task_type:"local_bash", is_backgrounded:true, uuid, session_id}
+//     (格式见 SDK 公开类型 SDKTaskStartedMessage),之后不吐结束 —— 宿主据此认为这个进程还被后台命令吊着。一次性:发过就删掉控制文件。
 // 记录(都在 <CTL> 下,一行一条 JSON,带 at / t / pid / sid):
 //   r151f-switch.jsonl(每条切档请求怎么处理的:muted / rejected / delayed / delayed-passed / passed)、
-//   r151f-tools.jsonl(写出的文件)、r151f-exec.jsonl(定时命令:executed / skipped / failed)、r151f-exit.jsonl(客气退出:exit-requested / exit)。
+//   r151f-tools.jsonl(写出的文件)、r151f-exec.jsonl(定时命令:executed / skipped / failed)、r151f-exit.jsonl(客气退出:exit-requested / exit)、r151f-bgtask.jsonl(报过的后台任务开始)。
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { execFileSync, spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
+import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -58,6 +63,19 @@ if (interactive && sid) {
   const toHost = process.stdout.write.bind(process.stdout);
   const asked = new Map();
   let inflight = 0;   // 收到的用户消息数 - 已吐出的 result 数
+  const emitBgTask = () => {
+    const c = cfg('bgtask', sid);
+    if (!c || (c.pid !== undefined && c.pid !== null && c.pid !== process.pid)) return;
+    try { fs.unlinkSync(path.join(FX, 'bgtask', String(sid))); } catch { return; }   // 一次性:谁先删掉控制文件谁发
+    const msg = {
+      type: 'system', subtype: 'task_started',
+      task_id: c.taskId || `r151fbg${crypto.randomBytes(4).toString('hex')}`,
+      tool_use_id: c.toolUseId || `toolu_r151fbg${crypto.randomBytes(4).toString('hex')}`,
+      description: c.description || 'sleep 120', task_type: 'local_bash', is_backgrounded: true, uuid: crypto.randomUUID(), session_id: sid,
+    };
+    toHost(`${JSON.stringify(msg)}\n`);
+    log('r151f-bgtask.jsonl', { action: 'task_started', task_id: msg.task_id, tool_use_id: msg.tool_use_id });
+  };
 
   // 出站:记下假 claude 向宿主问过的 can_use_tool(request_id → request),宿主答 allow 时要用
   process.stdout.write = (chunk, ...rest) => {
@@ -67,7 +85,7 @@ if (interactive && sid) {
         let o = null;
         try { o = JSON.parse(line); } catch { o = null; }
         if (o && o.type === 'control_request' && o.request && o.request.subtype === 'can_use_tool') asked.set(o.request_id, o.request);
-        if (o && o.type === 'result') inflight = Math.max(0, inflight - 1);
+        if (o && o.type === 'result') { inflight = Math.max(0, inflight - 1); emitBgTask(); }
       }
     } catch { /* 忽略 */ }
     return toHost(chunk, ...rest);

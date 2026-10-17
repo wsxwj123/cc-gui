@@ -6,7 +6,7 @@
 //
 // 场景夹具(都在本套件 helpers/ 里,不改已有套件):
 //   fx-claude.mjs = 假 claude 外壳:让指定进程吞掉 / 压住 / 拒绝切档请求;让旧进程"被后台命令吊着"(被关 stdin 后先不退,可选同时无视 SIGTERM;SIGKILL 拦不住);
-//   "客气退出"(关 stdin)时先跑完手上的回合再退(真命令行的做法);到点由进程"直接执行"一条命令(自认为在 auto 档才执行);宿主答 allow 时把 Write 的文件真的写出来。
+//   "客气退出"(关 stdin)时先跑完手上的回合再退(真命令行的做法);可在指定回合里照 SDK 公开类型 SDKTaskStartedMessage 报一条后台任务开始(F07 用);到点由进程"直接执行"一条命令(自认为在 auto 档才执行);宿主答 allow 时把 Write 的文件真的写出来。
 //   "假模型压着这一回合" = 假 claude 脚本里的 waitFile 步骤(见一期假 claude)。
 //   "双进程"(2026-10-17 在当前代码上实测出的造法,与接口文件的差别见 helpers/f.mjs 的 prepareOld / swapIn):老进程回合后空闲 8 秒 → 改 settings.json →
 //   再发一条消息:宿主关老进程的 stdin、等它最多约 5 秒、起新进程跑这条;老进程被我们的外壳拦住不退(宿主之后约 6 秒发 SIGTERM、约 12 秒 SIGKILL,
@@ -25,7 +25,7 @@ import { permRequests, allowPerm } from '../r151d-xsession-hardening/helpers/d.m
 import {
   sleep, settle, procPids, turnsOf, lastTurnPid, switchMode, userTurn,
   newT, chatStart, writeHeldScript, writeFileScript, waitTurn, prepareOld, swapIn, thirdPartyAuto, senderSend, killPid, releaseAll, failedOf,
-  fxMute, fxDelayFirst, fxReject, fxHold, fxExec, switchLog, execLog,
+  fxMute, fxDelayFirst, fxReject, fxHold, fxExec, fxBgTask, switchLog, execLog, bgTaskLog,
 } from './helpers/f.mjs';
 
 test.describe.configure({ timeout: 300_000 });
@@ -318,16 +318,29 @@ test('F06b 行为6/错误契约 没有能接新消息的进程(只有在等退�
 
 // ============================ E. 复用时切档没回应 ============================
 
-test('F07 行为7 复用时切档没回应:空闲的「放任」旧进程被后台命令吊着、不回应切档,用户改用非放任档(规划)发一条 → 复用时切档 5 秒没回应,旧进程被中止、换新进程跑这条;结束新进程后,「放任」发送方的消息不自动处理(pending、class-mismatch)', async () => {
+test('F07 行为7 复用时切档没回应:空闲的「放任」旧进程被后台命令吊着(回合里报过后台任务开始、没报结束)、不回应切档,用户改用非放任档(规划)发一条 → 换新进程跑这条;结束新进程后,「放任」发送方的消息不自动处理(pending、class-mismatch)', async () => {
   needReal();
   const inst = await startInstanceP2('f07');
+  const run = uniq('');
   let T = null;
   try {
     await xs(inst.c, inst.home).on();
     T = newT(inst, 'f07');
-    const t1 = await userTurn(inst.c, T, { mode: 'bypassPermissions', note: 'F07 建立存活进程' });
-    expect(t1.status, `前置:T 在「放任」档跑一个回合(${String(t1.text).slice(0, 200)})`).toBe(200);
+    // "被它起的后台命令吊着":T 的上一回合里模型起了一个后台 shell 命令。真命令行此时会在输出里报一条后台任务开始的系统消息
+    // (格式见 SDK 公开类型 SDKTaskStartedMessage),任务结束前不再报结束,宿主据此认为这个进程还被后台命令吊着。
+    // 外壳 fx-claude.mjs 在这个回合吐 result 之前照这个格式吐一条 task_started,之后不吐结束;脚本里同时演一次 Bash 后台调用(同一个 tool_use_id)。
+    const bgId = `toolu_f07_bg_${run}`; const taskId = `f07task${run}`;
+    writeScript(`f07a${run}`, [
+      { toolUse: { id: bgId, name: 'Bash', input: { command: 'sleep 120', description: 'sleep 120', run_in_background: true } } },
+      { toolResult: { tool_use_id: bgId, content: `Command running in background with ID: ${taskId}` } },
+      { say: 'R151F f07 老进程的回合完(后台命令还在跑)' },
+    ], inst.ctl);
+    fxBgTask(inst.ctl, T.sid, { toolUseId: bgId, taskId, description: 'sleep 120' });
+    const t1 = await userTurn(inst.c, T, { mode: 'bypassPermissions', note: `F07 建立存活进程 R151S:f07a${run}` });
+    expect(t1.status, `前置:T 在「放任」档跑一个回合,回合里起后台命令(${String(t1.text).slice(0, 200)})`).toBe(200);
     const oldPid = lastTurnPid(inst.ctl, T.sid);
+    expect(bgTaskLog(inst.ctl, T.sid).filter((x) => x.pid === oldPid && x.action === 'task_started').length,
+      `夹具生效:进程 ${oldPid} 在回合里报了一条后台任务开始(记录:${JSON.stringify(bgTaskLog(inst.ctl, T.sid))})`).toBe(1);
     let pids = [];
     await waitFor(async () => { pids = await procPids(inst.c, T.sid); return pids.length === 1 && pids[0] === oldPid; }, 8_000, 200);
     expect(pids, `前置:进程列表里 T 恰有一个存活的空闲进程 ${oldPid}`).toEqual([oldPid]);
@@ -335,32 +348,28 @@ test('F07 行为7 复用时切档没回应:空闲的「放任」旧进程被后�
     await inboundOk(inst.c, T.sid, 'auto');
     const e = await entry(inst.c, T.sid);
     expect(e && e.hasProfile, `前置:T 有「放任」发送档案(${JSON.stringify(e)})`).toBe(true);
-    fxHold(inst.ctl, oldPid);   // 被它起的后台命令吊着:被客气要求退出(关 stdin)也不退;终止信号照常能结束它(中止它的办法是信号)
+    fxHold(inst.ctl, oldPid);   // 被后台命令吊着:被客气要求退出(关 stdin)也不退;终止信号照常能结束它(中止它的办法是信号)
     fxMute(inst.ctl, T.sid, oldPid);
 
-    // 与接口文件的差别 1:接口文件写"用户以逐步确认发"。当前代码上「放任」「接受编辑」是宿主层面的放行(进程都是以 --permission-mode default 起的,没给命令行发过切档),
-    // 从放任改发「逐步确认」时进程自己的档位没变,宿主不会去切档(实测:进程被原样复用、切档记录为空);「规划」是命令行层面的档位,改发它宿主才会对空闲进程发切档
-    // (实测:发出,5 秒没回应后关它的 stdin、另起新进程)。所以这里用户改发「规划」来触发复用时的切档;对跨会话判定没有影响:「规划」与「逐步确认」同属"非放任"一类。
+    // 用户改发非放任档。用「规划」而不是接口写的"逐步确认"的理由:当前代码上「放任」「接受编辑」是宿主层面的放行(进程都是以 --permission-mode default 起的,
+    // 没给命令行发过切档),从放任改发「逐步确认」时进程自己的档位没变,宿主不会去切档(实测:进程被原样复用、切档记录为空),"复用时切档没回应"就造不出来;
+    // 「规划」是命令行层面的档位,改发它宿主才会对空闲进程发切档。对跨会话判定没有影响:「规划」与「逐步确认」同属"非放任"一类。
     const u = await userTurn(inst.c, T, { mode: 'plan', note: 'F07 规划档的这一条', postMs: 40_000 });
     const turn = turnsOf(inst.ctl, T.sid).find((x) => String(x.text).includes(u.mark)) || null;
     expect(mutedCount(inst, T, oldPid), `夹具生效:旧进程 ${oldPid} 收到了复用时的切档请求、没有回应(切档记录:${JSON.stringify(switchLog(inst.ctl, T.sid))})`).toBeGreaterThan(0);
     const newPid = turn && turn.pid;
-    // 与接口文件的差别 2:当前代码上这条用例的清单断言(发送方消息 class-mismatch)本来就成立,不足以区分新旧;这里加一项行为 4 的直接观察:
-    // "复用时切档没回应 → 这个进程被中止"——新进程这一回合结束后(最多再看 3 秒),旧进程不应还在进程列表里(之前是让它自己退出,被吊着时一直留着)。
-    let listedAfterTurn = [];
-    await waitFor(async () => { listedAfterTurn = await procPids(inst.c, T.sid); return !listedAfterTurn.includes(oldPid); }, 3_000, 200);
-    // 新进程这一回合结束后,测试按进程列表里的 pid 结束新进程
-    if (newPid && newPid !== oldPid) killPid(newPid);
+    // 新进程这一回合结束后,测试按进程列表里的 pid 结束新进程(不对旧进程此刻是否还在做任何断言:修复后宿主对它的处置可能不同)
+    const listed = await procPids(inst.c, T.sid);
+    if (newPid && newPid !== oldPid && listed.includes(newPid)) killPid(newPid);
     await waitFor(async () => !(await procPids(inst.c, T.sid)).includes(newPid), 8_000, 200);
 
     const cross = await senderSend(inst, T, 'f07');
     expect({
       chat: u.status,
-      handledByNewProcess: Boolean(turn && newPid !== oldPid),
-      oldProcessAbortedByNowTurnEnded: !listedAfterTurn.includes(oldPid),
+      handledByNewPid: Boolean(turn && newPid !== oldPid),
       crossSession: cross.fin && { status: cross.fin.status, heldReason: cross.fin.heldReason },
-    }, `这一条的回合记录 ${JSON.stringify(turn)};这一回合结束后进程列表 ${JSON.stringify(listedAfterTurn)}(旧 ${oldPid});发送方的消息最后:${JSON.stringify(cross.fin)}`)
-      .toEqual({ chat: 200, handledByNewProcess: true, oldProcessAbortedByNowTurnEnded: true, crossSession: { status: 'pending', heldReason: 'class-mismatch' } });
+    }, `这一条的回合记录 ${JSON.stringify(turn)};新进程结束前进程列表 ${JSON.stringify(listed)}(旧 ${oldPid});发送方的消息最后:${JSON.stringify(cross.fin)}`)
+      .toEqual({ chat: 200, handledByNewPid: true, crossSession: { status: 'pending', heldReason: 'class-mismatch' } });
   } finally {
     if (T) releaseAll(inst, T.sid);
     await inst.stop();

@@ -30,8 +30,11 @@ export const fxHold = (ctl, pid, opts = {}) => fxPut(ctl, 'hold', pid, { at: Dat
 export const fxRelease = (ctl, pid) => fxPut(ctl, 'release', pid, { at: Date.now() });
 /** 到 runAt(毫秒时间戳),会话 sid 的进程 pid 若还活着且自认为是 auto 档,就直接执行 cmd。 */
 export const fxExec = (ctl, sid, { pid, runAt, cmd }) => fxPut(ctl, 'exec', sid, { pid, runAt, cmd });
+/** 会话 sid 的进程(pid 不给 = 谁先遇到谁发)在下一次吐出 result 之前,先报一条后台任务开始(之后不报结束):模拟"被它起的后台命令吊着"。一次性。 */
+export const fxBgTask = (ctl, sid, opts = {}) => fxPut(ctl, 'bgtask', sid, opts);
 /** 假 claude 外壳记下的切档请求处理 { at, t, pid, sid, mode, action }。 */
 export const switchLog = (ctl, sid) => jsonl(path.join(ctl, 'r151f-switch.jsonl')).filter((x) => !sid || x.sid === sid);
+export const bgTaskLog = (ctl, sid) => jsonl(path.join(ctl, 'r151f-bgtask.jsonl')).filter((x) => !sid || x.sid === sid);
 export const execLog = (ctl, sid) => jsonl(path.join(ctl, 'r151f-exec.jsonl')).filter((x) => !sid || x.sid === sid);
 export const exitLog = (ctl, sid) => jsonl(path.join(ctl, 'r151f-exit.jsonl')).filter((x) => !sid || x.sid === sid);
 /** 放行会话 sid 起过的所有进程(含 extraPids)的"推迟客气退出"。用例的 finally 里调用。 */
