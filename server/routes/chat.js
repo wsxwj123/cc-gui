@@ -572,6 +572,9 @@ export function getActiveChatProcesses() {
       awaitingSuggestion: !!slot.suggestWaitSince,
       suggestWaitSince: slot.suggestWaitSince || null, // 结果时刻(回合结束通知里按它算转空闲的时刻)
       guiMode: slot.guiMode || null,
+      // r151f:能接新回合(存活、不在关闭中、输入没关;判据同切档只发给的那类进程)。跨会话判定的"存活进程档位"只看 usable 的进程:
+      // 关闭中 / 输入已关的进程不跟随切档,它的 guiMode 可能是旧档位
+      usable: slotUsable(slot),
       turnEpoch: slot.turnEpoch | 0,
       liveTasks: slot.liveTasks instanceof Map ? slot.liveTasks.size : 0,
     });

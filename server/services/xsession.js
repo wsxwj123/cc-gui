@@ -939,10 +939,11 @@ function targetStuck(sessionId) {
   for (const f of inflight.values()) if (f.auto && sameId(f.sessionId, sessionId) && now - f.startedAt > XS_STUCK_MS) return true;
   return false;
 }
-// 存活槽的界面档位(有就优先于档案,方案 A5)。
+// 存活槽的界面档位(有就优先于档案,方案 A5)。r151f:只看能接新回合的进程(进程视图的 usable:存活、不在关闭中、输入没关)——
+// 关闭中 / 输入已关的进程不收切档请求、档位停在旧值(例如被后台命令吊着、在等退出的旧进程),都没有时按最近一次切档、再按档案。
 function liveGuiMode(sessionId) {
   let mode = null;
-  for (const p of getActiveChatProcesses()) if (sameId(p.sessionId, sessionId) && p.exitCode === null && p.guiMode) mode = p.guiMode;
+  for (const p of getActiveChatProcesses()) if (sameId(p.sessionId, sessionId) && p.usable && p.guiMode) mode = p.guiMode;
   return mode;
 }
 // 目标此刻的档位:存活槽的 > 最近一次切档 / 回合开始记的(latestGuiMode)> 档案的(接口"审计之后的补充约定"第 3 条)。
