@@ -457,15 +457,24 @@ test('E10 行为10 空闲进程带着活的后台命令、热切不回应被中�
     const p1 = await resident(inst, T, { mode: 'default', note: `E10 建立进程 ${run} R151S:e10a${run}` });
     await settle(8_000);
     expect(await procPids(inst.c, T.sid), '前置:T 恰有一个存活的空闲进程').toEqual([p1]);
-    // 旧进程:被后台命令吊着;被中止时先无视终止信号,2 秒后才真正退出(造"已发起中止、还会活一会儿"的窗口)。
-    fxHold(inst.ctl, p1, { signals: true, exitAfterMs: 2_000 });
+    // 旧进程:被后台命令吊着;被中止时先无视终止信号,1 秒后才真正退出(造"已发起中止、还会活一会儿"的窗口)。
+    // 取 1 秒是为了让它在宿主 4 秒等待上限内稳稳退掉,别和上限卡在同一时刻竞赛。
+    fxHold(inst.ctl, p1, { signals: true, exitAfterMs: 1_000 });
     fxMute(inst.ctl, T.sid, p1);
 
     // 热切不回应 → 5 秒后旧进程被中止。
     const hot = await chatStart(inst.c, T, { prompt: `R151G E10 热切这一条 ${run}`, mode: 'auto', postMs: 60_000 });
     expect(hot.status, `前置:发出要热切的这条消息(${String(hot.text).slice(0, 240)})`).toBe(200);
-    const goneAt = await pidGoneAt(p1, 25_000);
-    expect(goneAt, `旧进程 ${p1} 应在中止后被结束`).not.toBeNull();
+
+    // 旧进程"真正退出"的时刻取夹具自己的权威记录:退出前写下的 ev:"exit" 行的 t(毫秒)。
+    // pidGoneAt 只兜底确认"确实没了"(Boolean),不再参与时刻比较 —— 它每 50ms 才 kill(pid,0) 轮询一次,
+    // pid 从进程退出到 kill(0) 观察不到还有几毫秒延迟,拿它当退出时刻会把 3–5ms 的测量噪声误判成行为错误。
+    const gone = Boolean(await pidGoneAt(p1, 25_000));
+    const p1Exit = exitLog(inst.ctl, T.sid).filter((x) => x.pid === p1 && x.ev === 'exit').pop() || null;
+    const oldExitedAt = p1Exit ? Number(p1Exit.t) : null;
+    expect({ oldProcessGone: gone, oldExitRecorded: oldExitedAt !== null },
+      `旧进程 ${p1} 应在中止后自行退出并留下退出记录(退出记录:${JSON.stringify(exitLog(inst.ctl, T.sid).filter((x) => x.pid === p1).slice(-6))})`)
+      .toEqual({ oldProcessGone: true, oldExitRecorded: true });
 
     // 热切那条消息自己起的新进程:它的启动时刻也必须晚于旧进程退出时刻。
     const firstNew = await waitFor(() => spawnRecords(inst.ctl).find((x) => x.sid === T.sid && x.interactive && x.pid !== p1) || null, 30_000, 100);
@@ -478,11 +487,11 @@ test('E10 行为10 空闲进程带着活的后台命令、热切不回应被中�
     const newPid = turn && turn.pid;
     const newAt = newPid ? spawnAt(inst.ctl, newPid) : null;
     expect({
-      oldProcessGone: Boolean(goneAt),
+      oldProcessGone: gone && oldExitedAt !== null,
       newProcess: Boolean(newPid) && newPid !== p1,
-      firstNewProcessStartedAfterOldExited: firstNewAt !== null && goneAt !== null ? firstNewAt >= goneAt : null,
-      laterProcessStartedAfterOldExited: newAt !== null && goneAt !== null ? newAt >= goneAt : null,
-    }, `旧进程 ${p1} 退出于 ${goneAt};热切那条起的新进程 ${firstNew && firstNew.pid} 启动于 ${firstNewAt};之后那条的进程 ${newPid} 启动于 ${newAt};退出记录 ${JSON.stringify(exitLog(inst.ctl, T.sid).filter((x) => x.pid === p1).slice(-4))};回合记录 ${JSON.stringify(turn)}`)
+      firstNewProcessStartedAfterOldExited: firstNewAt !== null && oldExitedAt !== null ? firstNewAt >= oldExitedAt : null,
+      laterProcessStartedAfterOldExited: newAt !== null && oldExitedAt !== null ? newAt >= oldExitedAt : null,
+    }, `旧进程 ${p1} 退出于 ${oldExitedAt}(夹具退出记录;pidGoneAt 观察=${gone});热切那条起的新进程 ${firstNew && firstNew.pid} 启动于 ${firstNewAt};之后那条的进程 ${newPid} 启动于 ${newAt};退出记录 ${JSON.stringify(exitLog(inst.ctl, T.sid).filter((x) => x.pid === p1).slice(-6))};回合记录 ${JSON.stringify(turn)}`)
       .toEqual({ oldProcessGone: true, newProcess: true, firstNewProcessStartedAfterOldExited: true, laterProcessStartedAfterOldExited: true });
   } finally {
     if (T) releaseAll(inst, T.sid);
