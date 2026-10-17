@@ -185,8 +185,9 @@ async function replayPendingSync() {
 // VALID_PERMISSION_MODES);对 provider 无要求,恒显示。
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'];
 
-// A1:切档 POST 送达为止重试(仿 respondPermission:8s 短超时快失败,1s/2s/4s/8s 封顶
-// 递增间隔)。裁决单点化后这条 POST 是切档生效+服务端重裁 pending 的唯一通道,半死连接
+// A1:切档 POST 送达为止重试(仿 respondPermission:失败快退避,1s/2s/4s/8s 封顶递增间隔;
+// 单次请求超时 r151g 起为 30s —— 服务端最长要约 22s:复用热切 5 + 换模型 5 + 切档 10 +
+// 回 200 前等档案落盘 2,排在别的切档后面还会更长)。裁决单点化后这条 POST 是切档生效+服务端重裁 pending 的唯一通道,半死连接
 // 上 fire-and-forget 静默丢 = 切档不生效。
 // 防乱序:每会话【串行化】—— 同会话永远只有一条在途请求;在途未 settle 时连切档只更新
 // latestMode,在途 settle 后发现目标档已变再补发一次最新档。(cancelled 标志方案召不回
@@ -195,7 +196,7 @@ export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dont
 // settle 之后才发出,服务端按到达序处理即最终一致。)服务端对合法 body 只有三种终态:
 // 200(送达,或会话闲置本无进程可送)、400(参数非法)、409(CLI guard 全拒),重试只在
 // 网络失败时发生,必然收敛。
-// ponytail: 客户端 8s abort 后请求仍可能被服务端迟处理,残余乱序窗口极窄;真踩到再上服务端单调 seq。
+// ponytail: 客户端 30s abort 后请求仍可能被服务端迟处理,残余乱序窗口极窄;真踩到再上服务端单调 seq。
 // r49b①:prevMode = 本次 flight 发起【前】该会话的档位(undefined = 原本没有会话级档位)。
 // 服务端回 409(全部 slot 被 CLI guard 拒)时按它回滚,免得界面停在没生效的档上。
 const modePostFlights = new Map(); // sessionId → { latestMode, prevMode }
@@ -218,7 +219,9 @@ async function postPermissionMode(sessionId, mode, prevMode) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessionId, mode: target }),
-          signal: AbortSignal.timeout(8_000),
+          // r151g 项4:30s 比服务端最长的切档链路还宽(见上面的超时构成),让服务端的 409(含 CLI
+          // 原文 / "切档请求超时")能送到界面,由既有回滚/提示逻辑显示,而不是 8s 就放弃重发。
+          signal: AbortSignal.timeout(30_000),
         });
         // r49b①:服务端不再对切档失败谎报 200。409 = 该会话所有在跑进程都被 CLI 的
         // guardPermissionModeChange 拒了(auto 受模型门控、bypass 未带 dangerously-skip
