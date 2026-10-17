@@ -2114,6 +2114,10 @@ export function isSelfAbortError(err, signal) {
   return err?.name === 'AbortError';
 }
 
+// GUI 六档 → SDK 三值:plan / auto 有专属值,其余(含 dontAsk)落 default,放行与弹窗由 canUseTool 按 guiMode 裁决。
+// 单一定义:spawn、切档热切、r151g 消息档位覆盖三处共用,别各写一套。
+const sdkModeForGuiMode = (guiMode) => (guiMode === 'plan' ? 'plan' : guiMode === 'auto' ? 'auto' : 'default');
+
 // POST /api/chat 主流程(原 handler 原样下移;所有锁定行为的时序不变)。
 async function handleChatPost(req, res) {
   // R13 输入闸门:非法输入一律 {ok:false,code,error} 且【不起任何 CLI、不回 pid】。
@@ -2237,7 +2241,7 @@ async function handleChatPost(req, res) {
   // 按 slot.guiMode 决定(集中分级,复刻旧 hook 的语义)。
   // r151g 项2:本条请求最终生效的两层档位。切档代数比对命中时会被改成"那次切档之后界面所示的档位"
   // (见 applyModeGeneration);请求里带进来的档位只当作"进来那一刻的界面档位"。
-  let sdkPermMode = chosenMode === 'plan' ? 'plan' : chosenMode === 'auto' ? 'auto' : 'default';
+  let sdkPermMode = sdkModeForGuiMode(chosenMode);
   // r151c:回合开始通知的 params(只在挂接了回合钩子时由 notifyTurnStart 调用构造)。请求原值,没带为 null;model 是解析后的。
   const turnParams = () => ({
     body: {
@@ -2260,7 +2264,7 @@ async function handleChatPost(req, res) {
     if (!st || st.gen === modeGenAtEntry || !st.confirmedMode) return;
     if (!VALID_PERMISSION_MODES.has(st.confirmedMode)) return;
     chosenMode = st.confirmedMode;
-    sdkPermMode = chosenMode === 'plan' ? 'plan' : chosenMode === 'auto' ? 'auto' : 'default';
+    sdkPermMode = sdkModeForGuiMode(chosenMode);
     autoGate.downgraded = null;
     downgradeFields = {};
   };
@@ -3308,7 +3312,7 @@ function abortUnswitchedSlot(slot) {
 // 被明确拒绝的:有进程切成(接口回 200)时同样中止,一个都没切成(接口回 409、界面回滚)时照旧保留、一个字段都不改(r49b①)。
 // 中止在返回之前发起(进程退出可以稍后完成)。
 export async function applyPermissionModeToSlots(procs, sessionId, mode, { timeoutMs = PERMISSION_MODE_SWITCH_TIMEOUT_MS } = {}) {
-  const sdkMode = mode === 'plan' ? 'plan' : mode === 'auto' ? 'auto' : 'default';
+  const sdkMode = sdkModeForGuiMode(mode);
   // r151f 修法 5:各可用进程同时发、同时等(多个进程都不回应时超时不再逐个累加);结果仍按进程顺序逐个记
   const targets = [...procs.values()].filter((slot) => slot.sessionId === sessionId && slot.query && slotUsable(slot));
   const errors = await Promise.all(targets.map(async (slot) => {
