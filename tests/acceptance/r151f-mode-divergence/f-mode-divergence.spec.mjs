@@ -77,7 +77,7 @@ test('F01 行为1 双进程·新进程不回应切档(放任→逐步确认):20 
   }
 });
 
-test('F02 行为2 第三方 provider「自动」档、双进程,新进程不回应切档(自动→逐步确认):409;之后等 20 秒,切档 12 秒后本该由新进程直接执行的命令没有执行(副作用没出现)', async () => {
+test('F02 行为2 第三方 provider「自动」档、双进程,新进程不回应切档(自动→逐步确认):409;一直等到切档后 24 秒,切档 16 秒后本该由新进程直接执行的命令没有执行(副作用没出现)', async () => {
   const inst = await startInstanceP2('f02');
   const run = uniq('');
   const marker = path.join(inst.root, `f02-effect-${run}.txt`);
@@ -91,14 +91,16 @@ test('F02 行为2 第三方 provider「自动」档、双进程,新进程不回�
     const spawned = spawnRecords(inst.ctl).filter((r) => r.sid === T.sid && r.interactive).map((r) => [r.pid, r.mode]);
     expect(spawned, '前置:T 的两个进程都按「自动」档起(第三方 provider 的「自动」档已开)').toEqual([[oldPid, 'auto'], [newPid, 'auto']]);
     fxMute(inst.ctl, T.sid, newPid);
-    // 假模型安排:切档 12 秒后,新进程执行一条(命中危险命令规则、审核判为可以执行的)命令;只要新进程还活着且自认为在「自动」档,它就直接执行
-    fxExec(inst.ctl, T.sid, { pid: newPid, runAt: Date.now() + 12_000, cmd: `touch '${marker}'` });
+    // 假模型安排:切档 16 秒后(晚于 10 秒超时,再加约 2 秒中止收尾:SDK 先断开通信、约 2 秒后才结束进程),新进程执行一条(命中危险命令规则、审核判为可以执行的)命令;
+    // 只要新进程还活着且自认为在「自动」档,它就直接执行。以切档发出的时刻为 0 秒:16 秒执行,一直等到 24 秒再看副作用有没有出现。
+    const switchAt = Date.now();
+    fxExec(inst.ctl, T.sid, { pid: newPid, runAt: switchAt + 16_000, cmd: `touch '${marker}'` });
 
     const sw = await switchMode(inst.c, T.sid, 'default', 25_000);
-    await sleep(20_000);
+    await sleep(Math.max(0, switchAt + 24_000 - Date.now()));
     expect(mutedCount(inst, T, newPid), `夹具生效:新进程 ${newPid} 收到了切档请求、没有回应`).toBeGreaterThan(0);
     expect({ status: sw.status, commandExecuted: fs.existsSync(marker) },
-      `切档应答原文:${String(sw.text).slice(0, 300)};用时 ${sw.elapsed}ms;定时命令记录 ${JSON.stringify(execLog(inst.ctl, T.sid))}(只有新进程活到 12 秒后且自认为在「自动」档才会执行)`)
+      `切档应答原文:${String(sw.text).slice(0, 300)};用时 ${sw.elapsed}ms;检查时刻在切档后 ${Date.now() - switchAt}ms;定时命令记录 ${JSON.stringify(execLog(inst.ctl, T.sid))}(只有新进程活到 16 秒后且自认为在「自动」档才会执行)`)
       .toEqual({ status: 409, commandExecuted: false });
   } finally {
     if (T) releaseAll(inst, T.sid);
