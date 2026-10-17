@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { readFile, writeFile, mkdir, rename, appendFile } from 'fs/promises';
+import { readFile, writeFile, mkdir, rename, appendFile, unlink } from 'fs/promises';
 import { readFileSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { homedir } from 'os';
@@ -109,8 +109,15 @@ let tmpSeq = 0;
 async function savePrefs(obj) {
   await mkdir(dirname(PREFS_PATH), { recursive: true });
   const tmp = `${PREFS_PATH}.tmp.${process.pid}.${tmpSeq++}`;
-  await writeFile(tmp, JSON.stringify(obj, null, 2));
-  await rename(tmp, PREFS_PATH);
+  try {
+    await writeFile(tmp, JSON.stringify(obj, null, 2));
+    await rename(tmp, PREFS_PATH);
+  } catch (e) {
+    // r151e 判官建议 1:最后一步覆盖原文件失败(Windows 上原文件被其它程序占用时 rename 抛 EPERM / EBUSY)或临时文件没写完 → 先删掉
+    // 本次的临时文件再把原错误抛回;否则恢复定时器每次重试都留下一个 prefs.json.tmp.*。删不掉(例如根本没建成)只忽略,不掩盖原错误。
+    await unlink(tmp).catch(() => {});
+    throw e;
+  }
 }
 // 写串行化:所有 prefs 写都是 read-merge-write,并发(手机+桌面同时 PUT)会互相覆盖
 // 丢一路。模块级 promise 链把「load→merge→save」整段排队,同一时刻只有一段在跑。

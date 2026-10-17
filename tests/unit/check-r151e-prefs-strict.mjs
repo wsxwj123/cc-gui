@@ -11,7 +11,7 @@
 // 临时 HOME(POSIX 权限模拟读不出);端口 6880–6899。
 // node tests/unit/check-r151e-prefs-strict.mjs
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, chmodSync, realpathSync, unlinkSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, chmodSync, realpathSync, unlinkSync, statSync, renameSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -184,6 +184,30 @@ try {
   const rU = await unreadable(() => addProject());
   eq(rU.status, 200, '偏好文件读不出:添加项目照常成功');
   ok(bytes().equals(before3), '偏好文件读不出:移出隐藏这一步跳过,文件逐字节不变');
+
+  // ── 判官建议 1:最后一步覆盖原文件(rename)失败 → 删掉本次写的临时文件、原错误抛回调用方,原文件不变 ──
+  // 读那一步读到的是正常内容;改完之后、落盘之前,把偏好文件挪开、原位置换成一个非空目录:rename 覆盖不了非空目录而失败
+  // (Windows 上原文件被其它程序占用时 rename 同样失败)。
+  seed();
+  const original = bytes();
+  const ASIDE = join(GUI_DIR, 'r151e-prefs-aside');
+  const OCCUPANT = join(PREFS, 'occupant');
+  const tmpFiles = () => readdirSync(GUI_DIR).filter((n) => n.startsWith('prefs.json.tmp'));
+  const tmpBefore = tmpFiles();
+  const errRename = await rejects(prefsMod.updatePrefs((p) => {
+    p.hiddenProjects = ['p9'];
+    renameSync(PREFS, ASIDE);
+    mkdirSync(PREFS);
+    writeFileSync(OCCUPANT, 'R151E 占位');
+  }));
+  try {
+    ok(errRename && ['EISDIR', 'ENOTEMPTY', 'EEXIST', 'EPERM'].includes(errRename.code), `rename 失败:原错误抛回调用方(${errRename?.code} ${errRename?.message})`);
+    eq(tmpFiles().filter((n) => !tmpBefore.includes(n)), [], 'rename 失败:本次写的临时文件不残留');
+    ok(readFileSync(OCCUPANT, 'utf8') === 'R151E 占位' && readdirSync(PREFS).length === 1, 'rename 失败:目标位置上的东西没被动过');
+  } finally {
+    unlinkSync(OCCUPANT); rmdirSync(PREFS); renameSync(ASIDE, PREFS);
+  }
+  ok(bytes().equals(original), 'rename 失败:原文件逐字节不变(改动没有落到任何地方)');
 
   if (failures.length) {
     console.error(`FAIL check-r151e-prefs-strict:${failures.length}/${checks} 项\n- ${failures.join('\n- ')}`);
