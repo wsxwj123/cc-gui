@@ -2510,14 +2510,28 @@ async function handleChatPost(req, res) {
     // 可恢复)。铁律:误杀不可恢复 > 双 resume 竞争 —— 一旦发现活 shell 立即跳出,既不白等也不
     // abort,退回改动前"旧进程为 shell 保活、与新 --resume 并存"的孤儿存活行为。判据与选择性
     // 停止路径一致:t.kind === 'shell'。
+    // r151g 项5 例外:槽已经发起中止(复用热切超时 / 切档超时 → abort 信号已拉响)时,上面的前提
+    // 不成立 —— 它本来就要死了,不应该再把它当"一直活着、误杀不可恢复"。这时照常等它退出,新进程
+    // 才不会在它约 2 秒的收尾期里对同一会话 --resume(双 resume 抢同一 jsonl)。仍受下面原有 4 秒
+    // deadline 与之后的强制兜底约束;没被中止、带活后台命令的槽保持原样(不等、不杀)。
     const slotHasLiveShell = (s) => [...(s?.liveTasks?.values() ?? [])].some(t => t && t.kind === 'shell');
+    const keepWaitingLiveShell = (s) => slotHasLiveShell(s) && !s?.abort?.signal?.aborted;
+    // r151g 项5:已发起中止、带着活后台命令的槽,进程可能比流晚退 —— SDK 中止后先结束生成器(pumpEnded),
+    // CLI 进程还被后台命令吊着(实测 SIGTERM 后再拖 2 秒)。这种槽要等满原有 4 秒上限,别在它还没退出时
+    // 就起新进程抢同一 jsonl;到点仍有它就照旧走下面的强制兜底(再 abort / 关输入都是幂等的)。
+    let abortedLiveShell = null;
     while ((lingering = tearingDown()) && Date.now() < deadline) {
-      if (slotHasLiveShell(lingering)) { lingering = null; break; } // 保活:不等不杀,容忍双 resume
+      if (keepWaitingLiveShell(lingering)) { lingering = null; break; } // 保活且没被中止:不等不杀,容忍双 resume
+      if (slotHasLiveShell(lingering) && lingering.abort?.signal?.aborted) abortedLiveShell = lingering;
       await new Promise((r) => setTimeout(r, 50));
     }
+    if (abortedLiveShell) {
+      while (Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+      if (!lingering) lingering = abortedLiveShell;
+    }
     if (lingering) {
-      // 走到这里 lingering 必无活 shell(有 shell 已上面 break 清空),是正在停止/被弃用的进程,
-      // 强制 abort 是正确兜底,避免同 sid 双 --resume 抢会话锁。
+      // 走到这里 lingering 要么没有活 shell,要么是已发起中止、等满 4 秒仍没退出的(不再受"活 shell
+      // 误杀"保护),都是正在停止/被弃用的进程;强制 abort 是正确兜底,避免同 sid 双 --resume 抢会话锁。
       lingering.closing = true;
       // r151c 旁路 (b):被后到的请求中止的回合按"收到停止请求"结束(回合结束通知报 stopped,而不是 failed)
       if (lingering.runtimeTurn) lingering.runtimeTurn.stopRequested = true;
