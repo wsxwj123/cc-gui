@@ -9,7 +9,7 @@
 //
 // 这里锁真函数 applyPermissionModeToSlots(mock slot.query,不打真实 CLI):
 //   ① 全拒 → delivered 0 / failed 带 CLI 原文;被拒 slot 的档位字段一个都不许改;
-//   ② 部分成功 → 成功的 slot 字段落位、失败的进 failed;
+//   ② 部分成功 → 成功的 slot 字段落位、失败的进 failed;r151f:回 200 时被拒的可用进程被中止(failed 那一项带 aborted:true),档位字段仍不改;
 //   ③ 无匹配 slot(会话闲置)→ attempted 0(与"被拒"区分:它不是失败);
 //   ④ 已退出 / 无 query 的 slot 跳过;
 //   ⑤ sdkMode 映射仍只特判 plan/auto(dontAsk/bypass 不透传,批O 红线)。
@@ -51,7 +51,7 @@ const rejecting = (over = {}) => slot({
 // ② 部分成功:成功的落位、失败的进 failed
 {
   const okSlot = slot();
-  const badSlot = rejecting({ sessionId: 'sid-a' });
+  const badSlot = rejecting({ sessionId: 'sid-a', abort: new AbortController() });
   const procs = new Map([[1, okSlot], [2, badSlot], [3, slot({ sessionId: 'other' })]]);
   const r = await applyPermissionModeToSlots(procs, 'sid-a', 'plan');
   assert.equal(r.attempted, 2, '②只统计本会话的 slot');
@@ -60,6 +60,10 @@ const rejecting = (over = {}) => slot({
   assert.equal(okSlot.guiMode, 'plan', '②成功的 slot 写 GUI 档位');
   assert.equal(okSlot.sdkMode, 'plan', '②成功的 slot 写 SDK 档位');
   assert.equal(badSlot.guiMode, 'default', '②失败的 slot 保持旧档');
+  assert.equal(badSlot.sdkMode, 'default', '②失败的 slot 的 SDK 档位同样不改');
+  // r151f:接口回 200(有进程切成)时,被拒的进程与界面不一致 → 中止它(置关闭中、中止 SDK),failed 那一项带 aborted:true
+  assert.deepEqual([badSlot.closing, badSlot.abort.signal.aborted, r.failed[0].aborted], [true, true, true], '②回 200 时被拒的 slot 被中止,failed 带 aborted');
+  assert.ok(!okSlot.closing, '②成功的 slot 照常可用');
 }
 
 // ③ 会话没有在跑的进程:attempted 0 —— 这是"无需送达",不是失败(前端据此收敛,不许重试)

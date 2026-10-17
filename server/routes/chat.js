@@ -3073,31 +3073,42 @@ export function permissionModeSwitchPending(sessionId) {
   return typeof sessionId === 'string' && permissionModeSwitching.has(sessionId.toLowerCase());
 }
 
+// r151f:能接新回合的进程 = 存活、不在关闭中、输入没关。切档只发给它们、只按它们计 attempted / delivered;进程视图的 usable 与
+// 跨会话判定的"存活进程档位"用同一判据。关闭中、输入已关的进程不收切档请求、不计数、档位字段不动:它们不再接新回合,手上通常
+// 也没有回合;输入关了控制请求本就送不到(取代 r151d 的"输入已关只改本地档位、算收下"—— 那会造出本地档位与命令行档位对不上的进程)。
+function slotUsable(slot) {
+  return slot.exitCode === null && !slot.pumpEnded && !slot.closing && !slot.input?.isClosed?.();
+}
+
+// r151f:中止没切成的可用进程(切档请求没回应,或接口回 200 时被命令行明确拒绝)—— 不让"界面档位与命令行档位对不上"的进程继续跑。
+// 它不回应控制请求,停止请求也送不到,所以不发 interrupt 再等,直接走强制中止(同冷启前清理收尾中旧进程的那段):置关闭中、本回合按
+// "收到停止请求"结束、中止 SDK(结束手上的回合、进程退出,连带它起的后台命令与子代理)、关输入。不能只关输入让它跑完手上的回合:
+// 进程出过结果后关输入,控制通道当场断开,这一回合剩下的放行请求、PreToolUse 回调的答复都送不回去。
+function abortUnswitchedSlot(slot) {
+  slot.closing = true;
+  if (slot.runtimeTurn) slot.runtimeTurn.stopRequested = true;
+  try { slot.abort?.abort(); } catch {}
+  try { slot.input?.close(); } catch {}
+}
+
 // r49b①:热切逐 slot 记结果。CLI 2.1.240 的 guardPermissionModeChange 会拒掉一部分切换
 // (auto 受模型门控、bypass 未带 dangerously-skip 启动),原来整段包在 `catch {}` 里吞掉,
 // 响应里成功与被拒长得一模一样 → 界面停在一个根本没生效的档上。被拒的 slot 一个字段都不改:
 // canUseTool 继续按【旧档】裁决,绝不按没生效的新档放行。
 // 纯逻辑,tests/unit/check-mode-switch-failure.mjs 真 import(mock slot.query,不打真实 CLI)。
 // r151e ④:每个进程的控制请求限时 timeoutMs(默认 PERMISSION_MODE_SWITCH_TIMEOUT_MS;参数只为单测注入)。
+// r151f:只发给可用进程(slotUsable)。没回应的一律中止(failed 那一项带 aborted: true),档位字段不改(撤掉 r151e 判官修复的回写);
+// 被明确拒绝的:有进程切成(接口回 200)时同样中止,一个都没切成(接口回 409、界面回滚)时照旧保留、一个字段都不改(r49b①)。
+// 中止在返回之前发起(进程退出可以稍后完成)。
 export async function applyPermissionModeToSlots(procs, sessionId, mode, { timeoutMs = PERMISSION_MODE_SWITCH_TIMEOUT_MS } = {}) {
   const sdkMode = mode === 'plan' ? 'plan' : mode === 'auto' ? 'auto' : 'default';
   let attempted = 0;
   let delivered = 0;
   const failed = [];
-  const timedOut = [];
+  const refused = []; // 被命令行明确拒绝的 { slot, item }:按整体结果定去留,见循环后
   for (const slot of procs.values()) {
-    if (slot.sessionId !== sessionId || slot.exitCode !== null || !slot.query) continue;
+    if (slot.sessionId !== sessionId || !slot.query || !slotUsable(slot)) continue;
     attempted++;
-    // r151d:输入流已关的进程(被要求退出、不再承载新回合:设置变了被关掉的常驻进程、不保活回合结束后正在退出的进程等)
-    // 收不到控制请求 —— setPermissionMode 只会挂到它退出后以失败收场,这期间本请求一直不回,最后还把这次切档报成 409,
-    // 而同会话新起的进程(例如跨会话自动处理等它退出后冷启的)在此之前看不到这次切档。只改本地档位(canUseTool 按它裁决:
-    // 它若因后台任务多活一阵,之后的工具调用按新档位判),算作已收下;SDK 层档位(sdkMode)改不了,保持原样。
-    if (slot.input?.isClosed?.()) {
-      slot.guiMode = mode;
-      slot.permissionMode = mode;
-      delivered++;
-      continue;
-    }
     try {
       await withControlTimeout(slot.query.setPermissionMode(sdkMode), timeoutMs, '切档请求');
       slot.guiMode = mode;
@@ -3105,25 +3116,21 @@ export async function applyPermissionModeToSlots(procs, sessionId, mode, { timeo
       slot.sdkMode = sdkMode; // #26:常驻复用的 plan 热切判据与此保持同步
       delivered++;
     } catch (e) {
-      failed.push({ sessionId: slot.sessionId, error: e?.message || String(e) });
-      // r151e ④:超时 = 这个进程没收下。照复用块热切失败的写法置关闭中、关掉输入:跑完手上的回合就退出,不再接新回合(复用块与
-      // 引导都跳过关闭中的槽,下一条消息换新进程)。档位字段这里先不改(晚到的结果也改不了:上面的赋值只在按时兑现时才跑),
-      // 循环结束后按整体结果定,见下。CLI 明确拒绝(不是超时)的照旧只记 failed,档位不改,进程照常可用。
+      const item = { sessionId: slot.sessionId, error: e?.message || String(e) };
+      failed.push(item);
+      // 超时 = 结果不明(命令行可能在超时之后才切过去),档位字段不改(晚到的结果也改不了:上面的赋值只在按时兑现时才跑),中止它
       if (e?.controlTimeout) {
-        slot.closing = true;
-        try { slot.input?.close(); } catch {}
-        timedOut.push(slot);
+        abortUnswitchedSlot(slot);
+        item.aborted = true;
+      } else {
+        refused.push({ slot, item });
       }
     }
   }
-  // r151e 判官重要 1:有进程收下(delivered>0 → 接口回 200,界面显示新档位,最新档位也记成新档位)时,超时的进程也改成新档位 ——
-  // 否则它带着旧的、可能更宽的档位跑完手上的回合(canUseTool 按它裁决),跨会话判定"存活进程的档位优先"也会取到它,按旧档位判成
-  // 同类并以旧档位冷启自动回合。做法同上面输入已关的进程:只改本地档位,SDK 层档位(sdkMode)不动。一个都没收下(接口回 409、
-  // 界面回滚)时照旧不改,与回滚后的档位一致。
   if (delivered > 0) {
-    for (const slot of timedOut) {
-      slot.guiMode = mode;
-      slot.permissionMode = mode;
+    for (const { slot, item } of refused) {
+      abortUnswitchedSlot(slot);
+      item.aborted = true;
     }
   }
   return { attempted, delivered, failed };
@@ -3180,7 +3187,7 @@ router.post('/chat/permission-mode', async (req, res) => {
     } catch {}
   }
   // 有进程却一个都没收下 = 切档失败,如实回 409 带 CLI 原文(前端据此回滚档位并显示原因);
-  // attempted 0(会话闲置)不是失败,照常 200。
+  // attempted 0(会话闲置,或只剩关闭中 / 输入已关的进程,r151f)不是失败,照常 200。
   if (attempted > 0 && delivered === 0) {
     return res.status(409).json({
       ok: false, attempted, delivered: 0, failed,

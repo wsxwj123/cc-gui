@@ -249,7 +249,7 @@ try {
     ok(Date.now() - t4 < 1_500, `超时之后就返回(${Date.now() - t4}ms)`);
     eq([r4.attempted, r4.delivered, r4.failed.length], [2, 0, 2], '超时与拒绝都计入 failed(接口据此回 409)');
     ok(/超时/.test(r4.failed[0].error), `超时的原因写明(${r4.failed[0].error})`);
-    eq([hung.closing, hung.input.isClosed()], [true, true], '超时的进程:置关闭中、关掉输入(跑完手上的回合就退出,不再接新回合)');
+    eq([hung.closing, hung.input.isClosed()], [true, true], '超时的进程:置关闭中、关掉输入(r151f 起改为中止,不再接新回合,见 4c)');
     eq([hung.guiMode, hung.permissionMode, hung.sdkMode], ['bypassPermissions', 'bypassPermissions', 'default'], '超时的进程档位字段不改');
     eq([!!refused.closing, refused.input.isClosed()], [false, false], 'CLI 明确拒绝的进程照常可用');
     lateAnswer();
@@ -275,9 +275,10 @@ try {
     ok(took >= 4_800 && took < 12_000, `热切等满 5 秒放弃复用(实际 ${took}ms)`);
     eq(calls.at(-1).options.permissionMode, 'plan', '新进程按新档位冷启');
   }
-  // 4c) 判官重要 1:切档部分成功 —— 同一会话一个输入已关的进程(r151d:只改本地档位,算收下)+ 一个不回应切档请求的进程(超时),切窄。
-  //     有进程收下(delivered>0,接口回 200)时,超时的进程也改成新档位(guiMode / permissionMode;canUseTool 与跨会话判定的"存活进程档位"
-  //     都读它),sdkMode 不动、晚到的结果也不改它;照旧置关闭中、关掉输入。只有一个不回应的进程(一个都没收下,接口回 409)时档位字段照旧不改。
+  // 4c) 判官重要 1 的场景,按 r151f 新约定:同一会话一个输入已关的进程 + 一个切成的 + 一个不回应切档请求的(超时),切窄。
+  //     r151f 修法 1:输入已关的进程不收切档请求、不计数、档位字段不动(不再"只改本地档位、算收下");
+  //     r151f 修法 2/3:撤掉回写 —— 有进程切成(接口回 200)时,超时的进程档位字段也不改,改为中止它(failed 那一项带 aborted:true);
+  //     只有一个不回应的进程(接口回 409)时同样中止、档位不变。
   //     (超时时长经参数注入。真实进程表里造不出"输入已关的进程与新进程并存":冷启会等旧进程退出、4 秒后中止它,除非它有后台 shell 保活,
   //     SDK 替身发不出后台 shell 任务,所以这里用纯逻辑。)
   {
@@ -285,20 +286,22 @@ try {
     const base = { sessionId: 'sid-r151e-4c', exitCode: null, guiMode: 'bypassPermissions', permissionMode: 'bypassPermissions', sdkMode: 'default' };
     let late = null;
     const closedIn = { ...base, input: mkInput(true), query: { setPermissionMode: async () => { throw new Error('输入已关的进程不该收到控制请求'); } } };
-    const hung = { ...base, input: mkInput(), query: { setPermissionMode: () => new Promise((r) => { late = r; }) } };
-    const r4d = await chat.applyPermissionModeToSlots(new Map([[1, closedIn], [2, hung]]), 'sid-r151e-4c', 'plan', { timeoutMs: 200 });
-    eq([r4d.attempted, r4d.delivered, r4d.failed.length], [2, 1, 1], '一个收下、一个超时 → delivered>0(接口回 200)');
-    eq([closedIn.guiMode, closedIn.permissionMode, closedIn.sdkMode], ['plan', 'plan', 'default'], '输入已关的进程只改本地档位(r151d)');
-    eq([hung.guiMode, hung.permissionMode, hung.sdkMode], ['plan', 'plan', 'default'], '超时的进程也改成新档位,sdkMode 不动');
-    eq([hung.closing, hung.input.isClosed()], [true, true], '超时的进程照旧置关闭中、关掉输入');
+    const fine = { ...base, input: mkInput(), query: { setPermissionMode: async () => {} } };
+    const hung = { ...base, input: mkInput(), abort: new AbortController(), query: { setPermissionMode: () => new Promise((r) => { late = r; }) } };
+    const r4d = await chat.applyPermissionModeToSlots(new Map([[1, closedIn], [2, fine], [3, hung]]), 'sid-r151e-4c', 'plan', { timeoutMs: 200 });
+    eq([r4d.attempted, r4d.delivered, r4d.failed.length], [2, 1, 1], '只数可用进程:一个切成、一个超时 → delivered>0(接口回 200);输入已关的不计数');
+    eq([closedIn.guiMode, closedIn.permissionMode, closedIn.sdkMode], ['bypassPermissions', 'bypassPermissions', 'default'], '输入已关的进程档位字段不动(r151f:不再只改本地档位)');
+    eq([fine.guiMode, fine.permissionMode, fine.sdkMode], ['plan', 'plan', 'plan'], '按时回应的照常切过去');
+    eq([hung.guiMode, hung.permissionMode, hung.sdkMode], ['bypassPermissions', 'bypassPermissions', 'default'], '超时的进程档位字段不改(回写已撤)');
+    eq([hung.closing, hung.abort.signal.aborted, hung.input.isClosed(), r4d.failed[0].aborted], [true, true, true, true], '超时的进程被中止(置关闭中、中止 SDK、关输入),failed 带 aborted');
     late();
     await sleep(50);
-    eq(hung.sdkMode, 'default', '超时之后才到的结果不改 sdkMode');
-    const lone = { ...base, input: mkInput(), query: { setPermissionMode: () => new Promise(() => {}) } };
+    eq([hung.guiMode, hung.sdkMode], ['bypassPermissions', 'default'], '超时之后才到的结果不改档位字段');
+    const lone = { ...base, input: mkInput(), abort: new AbortController(), query: { setPermissionMode: () => new Promise(() => {}) } };
     const r4e = await chat.applyPermissionModeToSlots(new Map([[3, lone]]), 'sid-r151e-4c', 'plan', { timeoutMs: 200 });
     eq([r4e.attempted, r4e.delivered], [1, 0], '只有一个不回应的进程 → delivered 0(接口回 409)');
     eq([lone.guiMode, lone.permissionMode, lone.sdkMode], ['bypassPermissions', 'bypassPermissions', 'default'], '一个都没收下:档位不变');
-    eq([lone.closing, lone.input.isClosed()], [true, true], '照旧置关闭中、关掉输入');
+    eq([lone.closing, lone.abort.signal.aborted, lone.input.isClosed(), r4e.failed[0].aborted], [true, true, true, true], '同样中止(置关闭中、中止 SDK、关输入),failed 带 aborted');
   }
 
   // ── 主会话裁定:启动时偏好文件读不出、跳过了启用时刻补记(一期升级用户:总开关开着却没有启用时刻),恢复可读后恢复定时器补跑一次 ──
