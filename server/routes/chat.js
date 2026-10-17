@@ -3084,6 +3084,7 @@ export async function applyPermissionModeToSlots(procs, sessionId, mode, { timeo
   let attempted = 0;
   let delivered = 0;
   const failed = [];
+  const timedOut = [];
   for (const slot of procs.values()) {
     if (slot.sessionId !== sessionId || slot.exitCode !== null || !slot.query) continue;
     attempted++;
@@ -3106,12 +3107,23 @@ export async function applyPermissionModeToSlots(procs, sessionId, mode, { timeo
     } catch (e) {
       failed.push({ sessionId: slot.sessionId, error: e?.message || String(e) });
       // r151e ④:超时 = 这个进程没收下。照复用块热切失败的写法置关闭中、关掉输入:跑完手上的回合就退出,不再接新回合(复用块与
-      // 引导都跳过关闭中的槽,下一条消息换新进程)。档位字段一个不改,晚到的结果也改不了(上面的赋值只在按时兑现时才跑),
-      // 不会与界面回滚后的档位不一致。CLI 明确拒绝(不是超时)的照旧只记 failed,进程照常可用。
+      // 引导都跳过关闭中的槽,下一条消息换新进程)。档位字段这里先不改(晚到的结果也改不了:上面的赋值只在按时兑现时才跑),
+      // 循环结束后按整体结果定,见下。CLI 明确拒绝(不是超时)的照旧只记 failed,档位不改,进程照常可用。
       if (e?.controlTimeout) {
         slot.closing = true;
         try { slot.input?.close(); } catch {}
+        timedOut.push(slot);
       }
+    }
+  }
+  // r151e 判官重要 1:有进程收下(delivered>0 → 接口回 200,界面显示新档位,最新档位也记成新档位)时,超时的进程也改成新档位 ——
+  // 否则它带着旧的、可能更宽的档位跑完手上的回合(canUseTool 按它裁决),跨会话判定"存活进程的档位优先"也会取到它,按旧档位判成
+  // 同类并以旧档位冷启自动回合。做法同上面输入已关的进程:只改本地档位,SDK 层档位(sdkMode)不动。一个都没收下(接口回 409、
+  // 界面回滚)时照旧不改,与回滚后的档位一致。
+  if (delivered > 0) {
+    for (const slot of timedOut) {
+      slot.guiMode = mode;
+      slot.permissionMode = mode;
     }
   }
   return { attempted, delivered, failed };

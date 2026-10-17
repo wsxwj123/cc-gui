@@ -275,6 +275,31 @@ try {
     ok(took >= 4_800 && took < 12_000, `热切等满 5 秒放弃复用(实际 ${took}ms)`);
     eq(calls.at(-1).options.permissionMode, 'plan', '新进程按新档位冷启');
   }
+  // 4c) 判官重要 1:切档部分成功 —— 同一会话一个输入已关的进程(r151d:只改本地档位,算收下)+ 一个不回应切档请求的进程(超时),切窄。
+  //     有进程收下(delivered>0,接口回 200)时,超时的进程也改成新档位(guiMode / permissionMode;canUseTool 与跨会话判定的"存活进程档位"
+  //     都读它),sdkMode 不动、晚到的结果也不改它;照旧置关闭中、关掉输入。只有一个不回应的进程(一个都没收下,接口回 409)时档位字段照旧不改。
+  //     (超时时长经参数注入。真实进程表里造不出"输入已关的进程与新进程并存":冷启会等旧进程退出、4 秒后中止它,除非它有后台 shell 保活,
+  //     SDK 替身发不出后台 shell 任务,所以这里用纯逻辑。)
+  {
+    const mkInput = (closed = false) => ({ close() { closed = true; }, isClosed: () => closed });
+    const base = { sessionId: 'sid-r151e-4c', exitCode: null, guiMode: 'bypassPermissions', permissionMode: 'bypassPermissions', sdkMode: 'default' };
+    let late = null;
+    const closedIn = { ...base, input: mkInput(true), query: { setPermissionMode: async () => { throw new Error('输入已关的进程不该收到控制请求'); } } };
+    const hung = { ...base, input: mkInput(), query: { setPermissionMode: () => new Promise((r) => { late = r; }) } };
+    const r4d = await chat.applyPermissionModeToSlots(new Map([[1, closedIn], [2, hung]]), 'sid-r151e-4c', 'plan', { timeoutMs: 200 });
+    eq([r4d.attempted, r4d.delivered, r4d.failed.length], [2, 1, 1], '一个收下、一个超时 → delivered>0(接口回 200)');
+    eq([closedIn.guiMode, closedIn.permissionMode, closedIn.sdkMode], ['plan', 'plan', 'default'], '输入已关的进程只改本地档位(r151d)');
+    eq([hung.guiMode, hung.permissionMode, hung.sdkMode], ['plan', 'plan', 'default'], '超时的进程也改成新档位,sdkMode 不动');
+    eq([hung.closing, hung.input.isClosed()], [true, true], '超时的进程照旧置关闭中、关掉输入');
+    late();
+    await sleep(50);
+    eq(hung.sdkMode, 'default', '超时之后才到的结果不改 sdkMode');
+    const lone = { ...base, input: mkInput(), query: { setPermissionMode: () => new Promise(() => {}) } };
+    const r4e = await chat.applyPermissionModeToSlots(new Map([[3, lone]]), 'sid-r151e-4c', 'plan', { timeoutMs: 200 });
+    eq([r4e.attempted, r4e.delivered], [1, 0], '只有一个不回应的进程 → delivered 0(接口回 409)');
+    eq([lone.guiMode, lone.permissionMode, lone.sdkMode], ['bypassPermissions', 'bypassPermissions', 'default'], '一个都没收下:档位不变');
+    eq([lone.closing, lone.input.isClosed()], [true, true], '照旧置关闭中、关掉输入');
+  }
 
   // ── 主会话裁定:启动时偏好文件读不出、跳过了启用时刻补记(一期升级用户:总开关开着却没有启用时刻),恢复可读后恢复定时器补跑一次 ──
   // (放在最后:补记的启用时刻是"此刻",之前记的档案都不再算数)
