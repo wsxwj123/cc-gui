@@ -205,34 +205,33 @@ async function idleResident(sid, mode) {
   } finally { ctl.setPermissionMode = null; gate.open(); }
 }
 
-// 2c) 复用常驻进程时的热切与切档请求共用一把锁:切档请求的控制请求被压住时,复用热切排队;轮到它后 5 秒没回应 → 中止旧进程,
-//     这条消息由新进程处理
+// 2c) 复用派发与切档请求共用一把锁:切档请求的控制请求被压住时进来说的消息排在锁后(它自己的热切控制请求不发);
+//     切档完成后按那次切档的确认档位复用原进程(r151g 项2:消息进来之后完成的切档说了算,不再用消息里的档位热切)。
+//     r151g 前这里断言"热切排队 → 5 秒没回应 → 中止旧进程、换新进程";r151g 起这条消息会先用切档的确认档位,
+//     plan 热切不再发生(热切超时中止的覆盖仍在 check-r151e-xs-recovery 4b 与本轮验收 E10)。
 {
-  const T = mkSession('r151f 2c 复用热切排队与中止');
+  const T = mkSession('r151f 2c 复用派发排队与切档对齐');
   const { pid: oldPid, record: oldRec } = await idleResident(T, 'default');
   const asked = []; const firstAsked = deferred(); const gate = deferred();
   ctl.setPermissionMode = (record, m) => {
     if (record !== oldRec) return null;
     asked.push(m);
     if (asked.length === 1) { firstAsked.open(); return gate.p; }
-    return new Promise(() => {}); // 复用热切:不回应
+    return null;
   };
   try {
     const sw = api('POST', '/chat/permission-mode', { sessionId: T, mode: 'acceptEdits' });
     await Promise.race([firstAsked.p, sleep(5_000).then(() => { throw new Error('等不到:切档请求的控制请求'); })]);
-    const t0 = Date.now();
     const turn = chatTurn(T, 'plan');
     await sleep(400);
-    eq(asked, ['default'], '2c 切档请求没完成时,复用热切排队:它的控制请求还没发');
+    eq(asked, ['default'], '2c 切档请求没完成时,复用派发排队:它自己的热切控制请求还没发');
     gate.open();
     eq((await sw).status, 200, '2c 切档请求照常 200');
     const r = await turn;
-    const took = Date.now() - t0;
     eq(r.status, 200, `2c 这条消息照常 200(${JSON.stringify(r.body).slice(0, 120)})`);
-    ok(r.body.pid !== oldPid, '2c 换了新进程处理');
-    eq(asked, ['default', 'plan'], '2c 轮到复用热切后才发它的控制请求');
-    ok(took >= 4_800 && took < 12_000, `2c 热切等满 5 秒放弃复用(实际 ${took}ms)`);
-    eq(oldRec.options.abortController.signal.aborted, true, '2c 热切没回应的旧进程被中止(不再只关输入、带着旧档位留着)');
+    eq(r.body.pid, oldPid, '2c 切档完成后复用原进程(按那次切档的确认档位,不再用消息里的档位热切)');
+    eq([slotOf(T).guiMode, asked], ['acceptEdits', ['default']], '2c 两层档位是切档的确认档位,没有额外的热切控制请求');
+    eq(oldRec.options.abortController.signal.aborted, false, '2c 旧进程没有被中止');
   } finally { ctl.setPermissionMode = null; gate.open(); }
 }
 
