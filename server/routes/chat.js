@@ -2293,16 +2293,27 @@ async function handleChatPost(req, res) {
       s.turnEpoch = (s.turnEpoch | 0) + 1;
       // SDK 层档位不一致(plan/auto/default 三种可能)→ 热切;失败、或 REUSE_HOT_SWITCH_TIMEOUT_MS(与下面 setModel 同为 5 秒)内
       // 没回应(r151e ④:之前没有超时,进程活着却不回应时用户发的这条消息一直挂着)→ 放弃复用关旧开新。
+      // r151f 修法 3/5:与 POST /chat/permission-mode 共用按会话的锁(按发起顺序逐个执行);5 秒没回应 → 中止旧进程(它被后台命令
+      // 保活时不再带着旧档位一直留着);明确失败照旧置关闭中、关输入(回合间空闲,手上没有回合)。中止 / 关闭在锁内做完才放下一个。
       if (sdkPermMode !== s.sdkMode) {
-        try {
-          await withControlTimeout(s.query.setPermissionMode(sdkPermMode), REUSE_HOT_SWITCH_TIMEOUT_MS, '切档请求');
-          s.sdkMode = sdkPermMode;
-        } catch {
-          // 热切失败 / 超时 → 放弃复用,关旧开新(超时后晚到的结果不改 sdkMode:赋值只在按时兑现时才跑)
-          s.closing = true;
-          try { s.input.close(); } catch {}
-          break;
-        }
+        const switched = await withSessionModeLock(sessionId, async () => {
+          if (!slotUsable(s)) return false; // 排队期间被切档请求中止 / 置关闭中:不复用(下面冷启前会等它退出)
+          if (sdkPermMode === s.sdkMode) return true; // 排队期间别的切档已把它切到要的档位
+          try {
+            await withControlTimeout(s.query.setPermissionMode(sdkPermMode), REUSE_HOT_SWITCH_TIMEOUT_MS, '切档请求');
+            s.sdkMode = sdkPermMode;
+            return true;
+          } catch (e) {
+            // 放弃复用,关旧开新(超时后晚到的结果不改 sdkMode:赋值只在按时兑现时才跑)
+            if (e?.controlTimeout) abortUnswitchedSlot(s);
+            else {
+              s.closing = true;
+              try { s.input.close(); } catch {}
+            }
+            return false;
+          }
+        });
+        if (!switched) break;
       }
       // R8-4:模型不一致 → setModel 热切(spike-a 实测 2.1.227:回合间调用生效,切换后
       // CLI 补发新 init,同 session_id,SSE 照常透传、客户端 init 幂等)。compatKey 已
@@ -3066,6 +3077,24 @@ async function withControlTimeout(promise, ms, what) {
     clearTimeout(timer);
   }
 }
+// r151f 修法 5:同一会话的切档请求(POST /chat/permission-mode)与复用常驻进程时的热切档位共用一把按会话的锁,按发起顺序逐个执行
+// (会话 id 小写 → 队尾)。否则先发的请求晚完成时,会把进程档位与最近一次切档改回旧请求的档位。不跳过被后来请求取代的请求:
+// 每个都如实执行、如实应答;没回应的进程会被中止,排在后面的不会再等它。fn 在锁内跑完(含它的中止)才轮到下一个。
+const modeSwitchQueues = new Map();
+async function withSessionModeLock(sessionId, fn) {
+  const key = String(sessionId).toLowerCase();
+  const prev = modeSwitchQueues.get(key) || Promise.resolve();
+  let release;
+  const mine = new Promise((r) => { release = r; }); // 只会兑现、不会拒绝:前一个出错也不卡住后面的
+  modeSwitchQueues.set(key, mine);
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    release();
+    if (modeSwitchQueues.get(key) === mine) modeSwitchQueues.delete(key);
+  }
+}
 // r151d 判官 S2:正在进行的切档请求(会话 id 小写 → 个数),见 POST /chat/permission-mode。
 const permissionModeSwitching = new Map();
 /** 该会话有没有还没完成的切档请求(控制请求还没返回、新档位还没记下)。跨会话自动处理据此不起回合、退回排队。 */
@@ -3102,38 +3131,42 @@ function abortUnswitchedSlot(slot) {
 // 中止在返回之前发起(进程退出可以稍后完成)。
 export async function applyPermissionModeToSlots(procs, sessionId, mode, { timeoutMs = PERMISSION_MODE_SWITCH_TIMEOUT_MS } = {}) {
   const sdkMode = mode === 'plan' ? 'plan' : mode === 'auto' ? 'auto' : 'default';
-  let attempted = 0;
-  let delivered = 0;
-  const failed = [];
-  const refused = []; // 被命令行明确拒绝的 { slot, item }:按整体结果定去留,见循环后
-  for (const slot of procs.values()) {
-    if (slot.sessionId !== sessionId || !slot.query || !slotUsable(slot)) continue;
-    attempted++;
+  // r151f 修法 5:各可用进程同时发、同时等(多个进程都不回应时超时不再逐个累加);结果仍按进程顺序逐个记
+  const targets = [...procs.values()].filter((slot) => slot.sessionId === sessionId && slot.query && slotUsable(slot));
+  const errors = await Promise.all(targets.map(async (slot) => {
     try {
       await withControlTimeout(slot.query.setPermissionMode(sdkMode), timeoutMs, '切档请求');
       slot.guiMode = mode;
       slot.permissionMode = mode;
       slot.sdkMode = sdkMode; // #26:常驻复用的 plan 热切判据与此保持同步
-      delivered++;
+      return null;
     } catch (e) {
-      const item = { sessionId: slot.sessionId, error: e?.message || String(e) };
-      failed.push(item);
-      // 超时 = 结果不明(命令行可能在超时之后才切过去),档位字段不改(晚到的结果也改不了:上面的赋值只在按时兑现时才跑),中止它
-      if (e?.controlTimeout) {
-        abortUnswitchedSlot(slot);
-        item.aborted = true;
-      } else {
-        refused.push({ slot, item });
-      }
+      return e || new Error('切档请求失败');
     }
-  }
+  }));
+  let delivered = 0;
+  const failed = [];
+  const refused = []; // 被命令行明确拒绝的 { slot, item }:按整体结果定去留,见下
+  targets.forEach((slot, i) => {
+    const e = errors[i];
+    if (!e) { delivered++; return; }
+    const item = { sessionId: slot.sessionId, error: e?.message || String(e) };
+    failed.push(item);
+    // 超时 = 结果不明(命令行可能在超时之后才切过去),档位字段不改(晚到的结果也改不了:上面的赋值只在按时兑现时才跑),中止它
+    if (e?.controlTimeout) {
+      abortUnswitchedSlot(slot);
+      item.aborted = true;
+    } else {
+      refused.push({ slot, item });
+    }
+  });
   if (delivered > 0) {
     for (const { slot, item } of refused) {
       abortUnswitchedSlot(slot);
       item.aborted = true;
     }
   }
-  return { attempted, delivered, failed };
+  return { attempted: targets.length, delivered, failed };
 }
 
 // r49b②:init 回报的生效档位 vs GUI 请求档。GUI 六档 → SDK 三值本就是多对一
@@ -3164,8 +3197,13 @@ router.post('/chat/permission-mode', async (req, res) => {
   }
   // r151d 判官 S2:从这里起到新档位记下(下面同步调的 modeChange 通知)之前算"切档进行中" —— 控制请求往返期间槽与最近一次切档
   // 都还是旧档位,跨会话自动处理的起回合前核对若照常通过,回合会落在切档之后的档位上(放宽方向即绕过类别规则)。核对据此退回排队。
+  // r151f 修法 5:标记在排队之前就置上(覆盖排队时间);同一会话的切档按发起顺序逐个执行,锁一直拿到应答发出(客户端按发起顺序收到结果)。
   const switchKey = String(sessionId).toLowerCase();
   permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
+  await withSessionModeLock(sessionId, () => respondPermissionModeSwitch(res, sessionId, mode, switchKey));
+});
+
+async function respondPermissionModeSwitch(res, sessionId, mode, switchKey) {
   let applied;
   try {
     applied = await applyPermissionModeToSlots(activeProcesses, sessionId, mode);
@@ -3208,7 +3246,7 @@ router.post('/chat/permission-mode', async (req, res) => {
     clearTimeout(waitTimer);
   }
   res.json({ ok: true, attempted, delivered, failed });
-});
+}
 
 // ── 引导注入(无打断 steering)────────────────────────────────────────────────
 // 「忙」的判据:复用块(:1107)那一行【只把 s.idle 取反】,其余存活条件逐字照抄。

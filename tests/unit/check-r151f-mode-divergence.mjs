@@ -3,21 +3,31 @@
 //   ① 修法 1–3(切档接口 applyPermissionModeToSlots):只给可用进程(存活、不在关闭中、输入没关)发切档请求、只按它们计数,
 //      没有可用进程 → attempted 0;没回应的中止(failed 那一项带 aborted:true),档位字段不改(撤掉 r151e 判官修复的回写);
 //      回 200 时被命令行明确拒绝的也中止,回 409 时被拒的照旧保留、一个字段都不改(r49b①)。
+//   ② 修法 3 后半 + 修法 5:一次请求里各可用进程同时发、同时等;同一会话的切档请求与复用热切共用按会话的锁、按发起顺序逐个执行,
+//      "切档进行中"标记覆盖排队时间;复用热切 5 秒没回应 → 中止旧进程,明确失败照旧置关闭中、关输入。端口 6820–6869。
 // SDK 用 helpers/r151b-sdk-stub.mjs 替身;临时 HOME。
 // node tests/unit/check-r151f-mode-divergence.mjs
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import net from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { registerR151bSdkStub } from './helpers/r151b-sdk-stub.mjs';
 
 const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'cgui-r151f-unit-')));
-const HOME = join(TMP, 'home');
-mkdirSync(join(HOME, '.claude'), { recursive: true });
+const HOME = join(TMP, 'home'); const BIN = join(TMP, 'bin'); const WORK = join(TMP, 'work');
+for (const d of [join(HOME, '.claude', 'sessions'), BIN, WORK]) mkdirSync(d, { recursive: true });
 process.env.HOME = HOME; process.env.USERPROFILE = HOME; process.env.CGUI_DISABLE_FILE_WATCHER = '1';
 for (const k of Object.keys(process.env)) if (/^ANTHROPIC_/.test(k)) delete process.env[k];
+writeFileSync(join(BIN, 'claude'), '#!/bin/sh\ncase "$1" in\n  --version) echo "2.1.296 (Claude Code)";;\n  --help) echo "Usage: claude [options]";;\nesac\nexit 0\n');
+chmodSync(join(BIN, 'claude'), 0o755);
+process.env.PATH = `${BIN}:/usr/bin:/bin`;
 registerR151bSdkStub();
-globalThis.__r151bSdkControl = {};
+const ctl = (globalThis.__r151bSdkControl = {});
+const calls = (globalThis.__r151bSdkCalls ||= []);
+ctl.reply = () => 'ok';
+const { default: express } = await import('express');
 const chat = await import('../../server/routes/chat.js');
 
 const eq = (a, b, msg) => assert.deepEqual(a, b, msg);
@@ -110,6 +120,133 @@ setInterval(() => {}, 1_000);
     eq(killed(bad), [false, false, false, false], '1e 回 409 时被拒的照旧保留');
     eq([fields(hung), fields(bad)], [untouched, untouched], '1e 两个的档位字段都不改');
   }
+}
+
+// ── ② 并发发送、按会话串行、复用热切没回应就中止 ──
+// 2a) 一次请求里多个可用进程都不回应:同时发、同时等,总用时约一个超时(不逐个累加);failed 仍按进程顺序逐个记
+{
+  const SID = 'sid-r151f-2a';
+  const mkInput = () => { let closed = false; return { close() { closed = true; }, isClosed: () => closed }; };
+  const hung = (tag) => ({ tag, sessionId: SID, exitCode: null, guiMode: 'default', permissionMode: 'default', sdkMode: 'default', input: mkInput(), abort: new AbortController(), query: { setPermissionMode: () => new Promise(() => {}) } });
+  const slots = [hung('a'), hung('b'), hung('c')];
+  const t0 = Date.now();
+  const r = await chat.applyPermissionModeToSlots(new Map(slots.map((x, i) => [i, x])), SID, 'plan', { timeoutMs: 300 });
+  const took = Date.now() - t0;
+  ok(took < 600, `2a 三个进程都不回应:同时等,总用时约一个超时(实际 ${took}ms,逐个累加会是 900ms 以上)`);
+  eq([r.attempted, r.delivered, r.failed.map((f) => f.aborted)], [3, 0, [true, true, true]], '2a 三个都没回应:都计入 failed、都带 aborted');
+  eq(slots.map((x) => x.abort.signal.aborted), [true, true, true], '2a 三个都被中止');
+}
+
+// 服务端部分:真路由 + SDK 替身
+const deferred = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+async function waitFor(pred, what, ms = 10_000) {
+  for (const t = Date.now(); Date.now() - t < ms;) { const v = await pred(); if (v) return v; await sleep(25); }
+  throw new Error(`等不到:${what}`);
+}
+async function freePort() {
+  for (let p = 6869; p >= 6820; p--) {
+    const free = await new Promise((r) => { const sv = net.createServer().once('error', () => r(false)).once('listening', () => sv.close(() => r(true))).listen(p, '127.0.0.1'); });
+    if (free) return p;
+  }
+  throw new Error('6820-6869 没有空闲端口');
+}
+const app = express();
+app.use(express.json());
+app.use('/api', chat.default);
+const port = await freePort();
+await new Promise((r) => { const sv = app.listen(port, '127.0.0.1', () => r(sv)); });
+const api = async (method, path, body) => {
+  const r = await fetch(`http://127.0.0.1:${port}/api${path}`, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+const PROJ_DIR = join(HOME, '.claude', 'projects', '-tmp-r151f-unit');
+mkdirSync(PROJ_DIR, { recursive: true });
+const mkSession = (title) => {
+  const sid = randomUUID();
+  writeFileSync(join(PROJ_DIR, `${sid}.jsonl`), `${JSON.stringify({ type: 'user', uuid: `${sid.slice(0, 8)}-u`, sessionId: sid, message: { role: 'user', content: title } })}\n`);
+  return sid;
+};
+const LIVE = { globalRead: true, keepAlive: true, promptSuggestions: false, genui: true };
+const chatTurn = (sid, mode) => api('POST', '/chat', { sessionId: sid, prompt: 'r151f 用户回合', cwd: WORK, model: 'r151f-model', permissionMode: mode, ...LIVE });
+const slotOf = (sid) => chat.getActiveChatProcesses().filter((p) => p.sessionId === sid && p.exitCode === null).at(-1) || null;
+const recordOf = (sid) => calls.filter((c) => c.options.resume === sid || c.options.sessionId === sid).at(-1) || null;
+async function idleResident(sid, mode) {
+  const r = await chatTurn(sid, mode);
+  eq(r.status, 200, `前置:回合 200(${JSON.stringify(r.body).slice(0, 160)})`);
+  await waitFor(() => slotOf(sid) && slotOf(sid).idle, '回合结束、进程转空闲');
+  return { pid: r.body.pid, record: recordOf(sid) };
+}
+
+// 2b) 同一会话两次切档:第一次的控制请求被压住时,第二次排队(控制请求不发)、"切档进行中"一直为真;按发起顺序执行、按发起顺序应答,
+//     最后发起的那次说了算
+{
+  const T = mkSession('r151f 2b 连续切档');
+  await idleResident(T, 'default');
+  const asked = []; const firstAsked = deferred(); const gate = deferred();
+  ctl.setPermissionMode = (record, m) => {
+    if (record.options.resume !== T && record.options.sessionId !== T) return null;
+    asked.push(m);
+    if (asked.length === 1) { firstAsked.open(); return gate.p; }
+    return null;
+  };
+  try {
+    const done = [];
+    const a = api('POST', '/chat/permission-mode', { sessionId: T, mode: 'bypassPermissions' }).then((r) => { done.push('a'); return r; });
+    await Promise.race([firstAsked.p, sleep(5_000).then(() => { throw new Error('等不到:第一次切档的控制请求'); })]);
+    const b = api('POST', '/chat/permission-mode', { sessionId: T, mode: 'plan' }).then((r) => { done.push('b'); return r; });
+    await sleep(400);
+    eq(asked, ['default'], '2b 第一次切档没完成时,第二次排队:它的控制请求还没发');
+    eq(chat.permissionModeSwitchPending(T), true, '2b 排队期间"切档进行中"为真');
+    gate.open();
+    const [ra, rb] = await Promise.all([a, b]);
+    eq([ra.status, rb.status, done], [200, 200, ['a', 'b']], '2b 两次都回 200,先发起的先应答');
+    eq(asked, ['default', 'plan'], '2b 控制请求按发起顺序逐个发');
+    eq([slotOf(T).guiMode, chat.permissionModeSwitchPending(T)], ['plan', false], '2b 最后发起的那次说了算;都完成后"切档进行中"清掉');
+  } finally { ctl.setPermissionMode = null; gate.open(); }
+}
+
+// 2c) 复用常驻进程时的热切与切档请求共用一把锁:切档请求的控制请求被压住时,复用热切排队;轮到它后 5 秒没回应 → 中止旧进程,
+//     这条消息由新进程处理
+{
+  const T = mkSession('r151f 2c 复用热切排队与中止');
+  const { pid: oldPid, record: oldRec } = await idleResident(T, 'default');
+  const asked = []; const firstAsked = deferred(); const gate = deferred();
+  ctl.setPermissionMode = (record, m) => {
+    if (record !== oldRec) return null;
+    asked.push(m);
+    if (asked.length === 1) { firstAsked.open(); return gate.p; }
+    return new Promise(() => {}); // 复用热切:不回应
+  };
+  try {
+    const sw = api('POST', '/chat/permission-mode', { sessionId: T, mode: 'acceptEdits' });
+    await Promise.race([firstAsked.p, sleep(5_000).then(() => { throw new Error('等不到:切档请求的控制请求'); })]);
+    const t0 = Date.now();
+    const turn = chatTurn(T, 'plan');
+    await sleep(400);
+    eq(asked, ['default'], '2c 切档请求没完成时,复用热切排队:它的控制请求还没发');
+    gate.open();
+    eq((await sw).status, 200, '2c 切档请求照常 200');
+    const r = await turn;
+    const took = Date.now() - t0;
+    eq(r.status, 200, `2c 这条消息照常 200(${JSON.stringify(r.body).slice(0, 120)})`);
+    ok(r.body.pid !== oldPid, '2c 换了新进程处理');
+    eq(asked, ['default', 'plan'], '2c 轮到复用热切后才发它的控制请求');
+    ok(took >= 4_800 && took < 12_000, `2c 热切等满 5 秒放弃复用(实际 ${took}ms)`);
+    eq(oldRec.options.abortController.signal.aborted, true, '2c 热切没回应的旧进程被中止(不再只关输入、带着旧档位留着)');
+  } finally { ctl.setPermissionMode = null; gate.open(); }
+}
+
+// 2d) 复用热切被明确拒绝:照旧置关闭中、关输入(回合间空闲,手上没有回合),不中止;这条消息由新进程处理
+{
+  const T = mkSession('r151f 2d 复用热切被拒');
+  const { pid: oldPid, record: oldRec } = await idleResident(T, 'default');
+  ctl.setPermissionMode = (record) => (record === oldRec ? Promise.reject(new Error('Cannot set permission mode to plan')) : null);
+  try {
+    const r = await chatTurn(T, 'plan');
+    eq([r.status, r.body.pid !== oldPid], [200, true], '2d 换新进程处理这条消息');
+    await waitFor(() => oldRec.inputEnded, '2d 旧进程的输入被关');
+    eq(oldRec.options.abortController.signal.aborted, false, '2d 明确被拒不中止(只关输入)');
+  } finally { ctl.setPermissionMode = null; }
 }
 
 console.log('✓ check-r151f-mode-divergence 全部通过');
