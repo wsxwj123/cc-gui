@@ -2517,6 +2517,10 @@ async function handleChatPost(req, res) {
     dropTurnRecord(turnRecord);
     return res.status(recheckOut.reject.status).json(recheckOut.reject.body);
   }
+  // r151g 项2:等旧进程退出的这几秒让出过事件循环 —— 建 slot 之前按会话的切档代数再比对一次(从这里到
+  // activeProcesses.set 之间没有 await)。代数变了且拿到确认档位 → 用"那次切档之后界面所示的档位"起
+  // 回合(并跳过本条请求的 auto 降级);拿不到确认档位就保持请求档位,不覆盖。
+  applyModeGeneration();
 
   const procId = 'sdk-' + (++sdkCounter);
   const abort = new AbortController();
@@ -2561,7 +2565,8 @@ async function handleChatPost(req, res) {
     // 更新)。compatKey 已不含 model,复用对账全靠它。
     currentModel: model,
     promptPreview: turnPreview,
-    permissionMode: permissionMode || 'default',
+    // r151g 项2:用生效后的界面档位(chosenMode 可能已被切档代数比对改过),与 guiMode 同一口径。
+    permissionMode: chosenMode,
     guiMode: chosenMode,
     autoDowngrade: autoGate.downgraded,   // r151a:服务端门控降级,init 到达时补发一条带 reason 的 mode_mismatch
     // r151a:本进程连的是不是第三方端点(T-Y10 两条收紧的前置条件)。provider 一变 settings 指纹就变,不会复用到这个槽。
