@@ -2221,6 +2221,14 @@ async function handleChatPost(req, res) {
     res.json = (payload) => { turnRecord.firstResponse = { status: res.statusCode, body: payload }; return sendJson(payload); };
   }
 
+  // r151g 项3:同一会话有槽正被别的请求占着(选中到消息推进进程之间)→ 新的 /chat 直接 409 CHAT_SESSION_BUSY,
+  // 不推进那个进程、不另起进程。用户消息与跨会话内部回合都算(内部回合由既有调度退回排队、之后重判);
+  // 放在入口钩子之后、复用扫描之前(冷启路径建 slot 之前还会再查一次)。
+  if (sessionId && sessionSlotReserved(sessionId)) {
+    dropTurnRecord(turnRecord);
+    return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+  }
+
   let chosenMode = (permissionMode && VALID_PERMISSION_MODES.has(permissionMode))
     ? permissionMode : 'default';
   // SDK permissionMode:plan 用 'plan'(让模型产出计划并经 canUseTool 弹 ExitPlanMode);
@@ -2323,6 +2331,12 @@ async function handleChatPost(req, res) {
       // 复用路径的所有出口都在下面 finally 里按令牌比对清掉,不会清掉别人的占位。
       const reserveToken = `chat-${++chatReserveSeq}`;
       s.reservedBy = reserveToken;
+      // r151g 项3:用户消息复用派发(选中到消息推进进程)期间也算"切档进行中",让跨会话内部回合的入口
+      // 核对退回排队,不会在这期间在这个进程上起回合(与切档请求共用同一个计数)。跨会话内部回合自己的
+      // 派发不加(不然它自己的入口核对会被自己挡住)。
+      const switchKey = String(sessionId).toLowerCase();
+      const markSwitching = !internal;
+      if (markSwitching) permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
       let reuseOutcome = 'stale';
       try {
         // r151g 项1:锁范围扩到"选中槽之后的整段派发" —— 热切档位 → 入口核对 → 重置回合状态 →
@@ -2455,6 +2469,11 @@ async function handleChatPost(req, res) {
       } finally {
         // 占位按令牌比对清掉:只清自己的,不清别人的。复用失败要冷启时,这里先放锁/清位,
         // 下面的冷启路径再按自己的判据做事。
+        if (markSwitching) {
+          const left = (permissionModeSwitching.get(switchKey) || 1) - 1;
+          if (left > 0) permissionModeSwitching.set(switchKey, left);
+          else permissionModeSwitching.delete(switchKey);
+        }
         if (s.reservedBy === reserveToken) s.reservedBy = null;
       }
       if (reuseOutcome === 'handled') return;
@@ -2516,6 +2535,11 @@ async function handleChatPost(req, res) {
   if (recheckOut) {
     dropTurnRecord(turnRecord);
     return res.status(recheckOut.reject.status).json(recheckOut.reject.body);
+  }
+  // r151g 项3:等旧进程退出的这几秒里,同一会话可能有别的请求选中了槽(占位)→ 同样 409,不另起进程。
+  if (sessionId && sessionSlotReserved(sessionId)) {
+    dropTurnRecord(turnRecord);
+    return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
   }
   // r151g 项2:等旧进程退出的这几秒让出过事件循环 —— 建 slot 之前按会话的切档代数再比对一次(从这里到
   // activeProcesses.set 之间没有 await)。代数变了且拿到确认档位 → 用"那次切档之后界面所示的档位"起
@@ -3234,6 +3258,15 @@ function finishSessionModeSwitch(sessionId, switchKey, confirmedMode) {
 // (每请求唯一令牌),复用路径所有出口按令牌清掉;同会话的新 /chat 请求(用户消息与跨会话内部回合都算)
 // 直接回 409 CHAT_SESSION_BUSY,不推进那个进程、不另起进程。占位是内部字段,不进 /api/processes。
 let chatReserveSeq = 0;
+
+/** 该会话有没有正被请求占着的槽(占位令牌)。同会话新的 /chat 请求据此直接 409。 */
+function sessionSlotReserved(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return false;
+  for (const s of activeProcesses.values()) {
+    if (s.sessionId === sessionId && s.reservedBy) return true;
+  }
+  return false;
+}
 
 // r151f:中止没切成的可用进程(切档请求没回应,或接口回 200 时被命令行明确拒绝)—— 不让"界面档位与命令行档位对不上"的进程继续跑。
 // 它不回应控制请求,停止请求也送不到,所以不发 interrupt 再等,直接走强制中止(同冷启前清理收尾中旧进程的那段):置关闭中、本回合按
