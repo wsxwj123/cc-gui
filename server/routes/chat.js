@@ -2535,6 +2535,8 @@ async function handleChatPost(req, res) {
       lingering.closing = true;
       // r151c 旁路 (b):被后到的请求中止的回合按"收到停止请求"结束(回合结束通知报 stopped,而不是 failed)
       if (lingering.runtimeTurn) lingering.runtimeTurn.stopRequested = true;
+      // r151g 项6:回合记录同样记成已停止(两套记录都要置,终态才一致)
+      if (lingering.turnRecord) lingering.turnRecord.stopRequested = true;
       try { lingering.abort?.abort(); } catch {}
       try { lingering.input?.close(); } catch {}
       const hardDeadline = Date.now() + 1000;
@@ -3289,6 +3291,9 @@ function sessionSlotReserved(sessionId) {
 function abortUnswitchedSlot(slot) {
   slot.closing = true;
   if (slot.runtimeTurn) slot.runtimeTurn.stopRequested = true;
+  // r151g 项6:回合记录也要记成"已停止"(settleSlotTurn 按 rec.stopRequested 定终态)。只置 runtimeTurn
+  // 会让被中止的回合被记成 completed,与停止接口不一致、同 clientTurnId 重发的回执也报 completed。
+  if (slot.turnRecord) slot.turnRecord.stopRequested = true;
   try { slot.abort?.abort(); } catch {}
   try { slot.input?.close(); } catch {}
 }
