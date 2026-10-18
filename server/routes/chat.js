@@ -572,6 +572,9 @@ export function getActiveChatProcesses() {
       awaitingSuggestion: !!slot.suggestWaitSince,
       suggestWaitSince: slot.suggestWaitSince || null, // 结果时刻(回合结束通知里按它算转空闲的时刻)
       guiMode: slot.guiMode || null,
+      // r151f:能接新回合(存活、不在关闭中、输入没关;判据同切档只发给的那类进程)。跨会话判定的"存活进程档位"只看 usable 的进程:
+      // 关闭中 / 输入已关的进程不跟随切档,它的 guiMode 可能是旧档位
+      usable: slotUsable(slot),
       turnEpoch: slot.turnEpoch | 0,
       liveTasks: slot.liveTasks instanceof Map ? slot.liveTasks.size : 0,
     });
@@ -1104,7 +1107,8 @@ const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolU
  *   (本文件不认识任何工具名;撤掉挂接点即不再放行;没经它挂上工具的槽一概不放行)。抛错、返回 Promise 或形状不对 → 什么都不挂,
  *   记一行日志。挂着它时复用兼容键多一项 xs:1(开关翻转后该会话下一条消息换新进程)。
  * · modeChange({ sessionId, mode })(r151c):POST /chat/permission-mode 回 200 时通知(生效或会话没有进程);409 不调。
- *   同步通知,返回值忽略,抛错只记日志。
+ *   同步调用,抛错只记日志。r151e:返回 Promise 时(跨会话:新档位写进发送档案),接口等它兑现再回 200,最多等
+ *   MODE_CHANGE_PERSIST_WAIT_MS;超时照常回 200,它在后台继续;拒绝只记日志。其它返回值忽略。
  * · sessionBound(info)(r151c):新会话的回合拿到会话 id(收到 CLI 的 init)时通知,只认本槽当前那一回合、且它还没报结束;
  *   info 同 turnEnd 的公共部分(带 sessionId,无 outcome)。同步通知,返回值忽略,抛错只记日志;没挂接 = 不调。
  */
@@ -1129,14 +1133,18 @@ export function deliverRunEvent(pid, event) {
   return true;
 }
 
+// 返回钩子的返回值;是 Promise 时换成"拒绝只记日志、兑现为 undefined"的那一个(调用方可以等它也可以不管,都不会有未处理的拒绝)。
 function callRuntimeHook(name, arg) {
   const fn = runtimeHooks[name];
-  if (!fn) return;
+  if (!fn) return undefined;
   const warn = (e) => console.warn(`[r151b] 钩子 ${name} 出错:${e?.message || e}`);
   try {
     const r = fn(arg);
-    if (r && typeof r.then === 'function') r.then(null, warn);
-  } catch (e) { warn(e); }
+    return r && typeof r.then === 'function' ? r.then(null, warn) : r;
+  } catch (e) {
+    warn(e);
+    return undefined;
+  }
 }
 const runtimeTurnInfo = (slot, pid) => ({
   pid, runId: slot.runId || pid, sessionId: slot.sessionId || null, draftId: slot.draftId || null,
@@ -2106,6 +2114,10 @@ export function isSelfAbortError(err, signal) {
   return err?.name === 'AbortError';
 }
 
+// GUI 六档 → SDK 三值:plan / auto 有专属值,其余(含 dontAsk)落 default,放行与弹窗由 canUseTool 按 guiMode 裁决。
+// 单一定义:spawn、切档热切、r151g 消息档位覆盖三处共用,别各写一套。
+const sdkModeForGuiMode = (guiMode) => (guiMode === 'plan' ? 'plan' : guiMode === 'auto' ? 'auto' : 'default');
+
 // POST /api/chat 主流程(原 handler 原样下移;所有锁定行为的时序不变)。
 async function handleChatPost(req, res) {
   // R13 输入闸门:非法输入一律 {ok:false,code,error} 且【不起任何 CLI、不回 pid】。
@@ -2124,6 +2136,10 @@ async function handleChatPost(req, res) {
     maxBudgetUsd,
     genui,
   } = req.body;
+  // r151g 项2:记下这条请求进入时的"切档代数"(拿到 sessionId 之后、任何 await 之前)。入口钩子 / 换默认模型
+  // 都要 await,这期间同一会话的切档可能完成 —— 之后的复用 / 冷启两处拿它比对,决定要不要改用那次切档
+  // 之后界面所示的档位(见 applyModeGeneration)。
+  const modeGenAtEntry = sessionModeGeneration(sessionId);
   // 花费上限(美元):>0 才生效。SDK 透传 CLI --max-budget-usd,进程累计花费达到
   // 上限时本轮停止并返回 result subtype=error_max_budget_usd(前端有专门提示)。
   const budgetUsd = Number(maxBudgetUsd);
@@ -2135,7 +2151,7 @@ async function handleChatPost(req, res) {
     ? gateAutoPermissionMode('auto', { official: settingsProviderIsOfficial(), enabled: readThirdPartyAutoSync() })
     : { mode: requestedPermissionMode, downgraded: null };
   const permissionMode = autoGate.mode;
-  const downgradeFields = autoGate.downgraded ? { permissionModeDowngraded: autoGate.downgraded } : {};
+  let downgradeFields = autoGate.downgraded ? { permissionModeDowngraded: autoGate.downgraded } : {};
 
   const model = requestedModel || await getDefaultModel();
   // DO NOT normalize cwd here. Claude CLI hashes the EXACT cwd string to
@@ -2189,6 +2205,15 @@ async function handleChatPost(req, res) {
     }
   }
 
+  // r151g 安全复审(建议 4):占位 409 前移到入口钩子之前。点跨会话卡片的消息会先经入口钩子 redeemClaim
+  // 消耗一次性凭据;若 409 还在钩子之后,凭据已被消耗而本应答又不会 requeue,卡片只能等 60 秒兜底结算。
+  // 这里先判一次(此时 turnRecord 可能为 null,dropTurnRecord 已能处理);下面入口钩子之后与冷启前原有
+  // 两道检查保留作竞态兜底 —— 钩子 await、等旧进程退出的这几秒里都可能才出现占位。
+  if (sessionId && sessionSlotReserved(sessionId)) {
+    dropTurnRecord(turnRecord);
+    return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+  }
+
   // r151b X.1.9:/chat 路由入口改写位(没挂接 = 跳过,不多 await)。拒绝 → 撤掉本回合记录、回它给的应答、不起进程;
   // 改写 → 本回合推给模型的内容换成它给的(R13 指纹仍按请求原文算,同 clientTurnId 重发照旧命中上面的记录)。
   // r151c:经 startInternalTurn 起的回合 = 调用方给的对象;HTTP 请求恒为 null(Symbol 键,请求里带不进来)。
@@ -2209,13 +2234,24 @@ async function handleChatPost(req, res) {
     res.json = (payload) => { turnRecord.firstResponse = { status: res.statusCode, body: payload }; return sendJson(payload); };
   }
 
-  const chosenMode = (permissionMode && VALID_PERMISSION_MODES.has(permissionMode))
+  // r151g 项3:同一会话有槽正被别的请求占着(选中到消息推进进程之间)→ 新的 /chat 直接 409 CHAT_SESSION_BUSY,
+  // 不推进那个进程、不另起进程。用户消息与跨会话内部回合都算(内部回合由既有调度退回排队、之后重判);
+  // 放在入口钩子之后、复用扫描之前(冷启路径建 slot 之前还会再查一次)。入口处已先判过同一道(建议 4,
+  // 避免钩子先消耗卡片凭据);这里兜住钩子 await 期间新出现的占位。
+  if (sessionId && sessionSlotReserved(sessionId)) {
+    dropTurnRecord(turnRecord);
+    return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+  }
+
+  let chosenMode = (permissionMode && VALID_PERMISSION_MODES.has(permissionMode))
     ? permissionMode : 'default';
   // SDK permissionMode:plan 用 'plan'(让模型产出计划并经 canUseTool 弹 ExitPlanMode);
   // auto 用 'auto'(P2.2:分类器在 CLI/SDK 内部,GUI 模拟不了,必须原样透传让原生分类器接管);
   // GUI 的 default/acceptEdits/bypassPermissions 一律用 SDK 'default',放行/弹窗由 canUseTool
   // 按 slot.guiMode 决定(集中分级,复刻旧 hook 的语义)。
-  const sdkPermMode = chosenMode === 'plan' ? 'plan' : chosenMode === 'auto' ? 'auto' : 'default';
+  // r151g 项2:本条请求最终生效的两层档位。切档代数比对命中时会被改成"那次切档之后界面所示的档位"
+  // (见 applyModeGeneration);请求里带进来的档位只当作"进来那一刻的界面档位"。
+  let sdkPermMode = sdkModeForGuiMode(chosenMode);
   // r151c:回合开始通知的 params(只在挂接了回合钩子时由 notifyTurnStart 调用构造)。请求原值,没带为 null;model 是解析后的。
   const turnParams = () => ({
     body: {
@@ -2225,6 +2261,23 @@ async function handleChatPost(req, res) {
     },
     guiMode: chosenMode,
   });
+
+  // r151g 项2:这条消息进来之后、它的进程拿到档位之前,同一会话只要有切档完成(回 200 或 409 都算),
+  // 这一回合就改按"那次切档之后界面所示的档位"跑,不按这条消息带进来的乐观档位。
+  //   · 只在拿到确认档位时覆盖;没拿到(切档时没有能接新消息的进程,例如冷启等旧进程退出的这段)
+  //     保持请求档位 —— 那种情况切档接口本身回 attempted 0,界面档位就是请求档位。
+  //   · 覆盖后本条请求的 auto 降级不再适用:界面档位已经由那次切档决定,别把旧降级再报给客户端。
+  // 复用路径在锁内、热切之前调;冷启路径在建 slot 之前调(两处之后都有一段同步区,见各自注释)。
+  const applyModeGeneration = () => {
+    if (!sessionId) return;
+    const st = sessionModeGenerations.get(sessionModeStateKey(sessionId));
+    if (!st || st.gen === modeGenAtEntry || !st.confirmedMode) return;
+    if (!VALID_PERMISSION_MODES.has(st.confirmedMode)) return;
+    chosenMode = st.confirmedMode;
+    sdkPermMode = sdkModeForGuiMode(chosenMode);
+    autoGate.downgraded = null;
+    downgradeFields = {};
+  };
 
   // additionalDirectories = SDK 的文件访问沙箱边界。越界访问现经 canUseTool 第三参的
   // blockedPath 透出 → makeCanUseTool 弹"越界访问"卡,用户可仅本次放行或授权目录
@@ -2273,6 +2326,7 @@ async function handleChatPost(req, res) {
   });
   if (sessionId) {
     for (const [alivePid, s] of activeProcesses) {
+      if (s.reservedBy) continue; // r151g 项3:已被别的请求选中、正在派发 —— 占位期间既不算空闲,也不许再选
       if (!s.idle || s.closing || s.pumpEnded || s.exitCode !== null || s.sessionId !== sessionId) continue;
       if (!wantKeepAlive || s.compatKey !== reuseKey) {
         s.closing = true;
@@ -2286,91 +2340,158 @@ async function handleChatPost(req, res) {
       // "idle slot 无 pending stopTimer"这条隐性不变式。
       if (s.stopTimer) { clearTimeout(s.stopTimer); s.stopTimer = null; }
       s.turnEpoch = (s.turnEpoch | 0) + 1;
-      // SDK 层档位不一致(plan/auto/default 三种可能)→ 热切;失败放弃复用关旧开新。
-      if (sdkPermMode !== s.sdkMode) {
-        try {
-          await s.query.setPermissionMode(sdkPermMode);
-          s.sdkMode = sdkPermMode;
-        } catch {
-          // 热切失败 → 放弃复用,关旧开新
-          s.closing = true;
-          try { s.input.close(); } catch {}
-          break;
+      // r151g 项3:选中即占位 —— 同步打上本请求唯一的令牌(在任何 await 之前)。占位覆盖"选中槽到
+      // 消息推进进程"这一段:别的请求不选它(上面那行),同会话的新请求直接 409(见入口处与冷启前)。
+      // 复用路径的所有出口都在下面 finally 里按令牌比对清掉,不会清掉别人的占位。
+      const reserveToken = `chat-${++chatReserveSeq}`;
+      s.reservedBy = reserveToken;
+      // r151g 项3:用户消息复用派发(选中到消息推进进程)期间也算"切档进行中",让跨会话内部回合的入口
+      // 核对退回排队,不会在这期间在这个进程上起回合(与切档请求共用同一个计数)。跨会话内部回合自己的
+      // 派发不加(不然它自己的入口核对会被自己挡住)。
+      const switchKey = String(sessionId).toLowerCase();
+      const markSwitching = !internal;
+      if (markSwitching) permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
+      let reuseOutcome = 'stale';
+      try {
+        // r151g 项1:锁范围扩到"选中槽之后的整段派发" —— 热切档位 → 入口核对 → 重置回合状态 →
+        // 写两层档位 → 回合开始通知 → 推消息 → 绑回合记录(换模型本身放在取锁之前,理由见下)。此前锁只包
+        // 热切,换模型最长 5 秒在锁外、写档位也在锁外:这期间完成的一次切档会被随后写回的本地档位覆盖成
+        // 消息里的旧档位,命令行一侧却停在新档位 → 这一回合两层对不上(放任方向 = 少弹确认卡)。
+        // 现在"写档位 → 推消息"整段在锁内,且换模型完成后先经过锁内的切档代数比对(item 2),不会再把
+        // 切档结果覆盖掉。锁内不等需要同一把锁的东西(入口核对是同步的);res.json 在锁内发,放锁时回合
+        // 已经开始,排队在后的切档请求作用到"正在跑的这一回合"上,两层一起变。复用失败要冷启的,先放锁。
+        // 换模型为什么在取锁之前:它最长 5 秒。若包进锁,换模型期间到达的切档请求要等这条消息推进进程
+        // 之后才生效,这一回合的首张确认卡在切档生效前就已裁决(实测只差 2–3ms)→ 与接口"这一回合按切档
+        // 后的档位运行"不符。放在锁外,切档请求能先拿到锁把两层档位切好;随后锁内的代数比对(item 2)采用
+        // 那次切档的确认档位,不会再写回消息里的旧档位。
+        // R8-4:模型不一致 → setModel 热切(spike-a 实测 2.1.227:回合间调用生效,切换后
+        // CLI 补发新 init,同 session_id,SSE 照常透传、客户端 init 幂等)。compatKey 已
+        // 不含 model,仅换模型不再整进程重建(保住温 MCP)。守卫与 setPermissionMode 同款:
+        // 失败/超时(5s)/await 期间 epoch 被推进或 slot 被置 closing → 放弃复用关旧开新,
+        // 绝不悬空、绝不带错模型继续(冷启路径 options.model 恒正确)。
+        let reuseGo = true;
+        if (model !== s.currentModel) {
+          const epochAtSwitch = s.turnEpoch | 0;
+          let switchTimer = null;
+          try {
+            await Promise.race([
+              s.query.setModel(model),
+              new Promise((_, reject) => {
+                switchTimer = setTimeout(() => reject(new Error('setModel 超时')), 5000);
+                switchTimer.unref?.();
+              }),
+            ]);
+            if ((s.turnEpoch | 0) !== epochAtSwitch || s.closing) throw new Error('setModel 期间回合已被推进');
+            s.currentModel = model;
+            s.model = model; // 进程面板/复用响应展示的模型同步对齐
+          } catch {
+            s.closing = true;
+            try { s.input.close(); } catch {}
+            reuseGo = false;
+          } finally {
+            if (switchTimer) clearTimeout(switchTimer);
+          }
         }
-      }
-      // R8-4:模型不一致 → setModel 热切(spike-a 实测 2.1.227:回合间调用生效,切换后
-      // CLI 补发新 init,同 session_id,SSE 照常透传、客户端 init 幂等)。compatKey 已
-      // 不含 model,仅换模型不再整进程重建(保住温 MCP)。守卫与 setPermissionMode 同款:
-      // 失败/超时(5s)/await 期间 epoch 被推进或 slot 被置 closing → 放弃复用关旧开新,
-      // 绝不悬空、绝不带错模型继续(冷启路径 options.model 恒正确)。
-      if (model !== s.currentModel) {
-        const epochAtSwitch = s.turnEpoch | 0;
-        let switchTimer = null;
-        try {
-          await Promise.race([
-            s.query.setModel(model),
-            new Promise((_, reject) => {
-              switchTimer = setTimeout(() => reject(new Error('setModel 超时')), 5000);
-              switchTimer.unref?.();
-            }),
-          ]);
-          if ((s.turnEpoch | 0) !== epochAtSwitch || s.closing) throw new Error('setModel 期间回合已被推进');
-          s.currentModel = model;
-          s.model = model; // 进程面板/复用响应展示的模型同步对齐
-        } catch {
-          s.closing = true;
-          try { s.input.close(); } catch {}
-          break;
-        } finally {
-          if (switchTimer) clearTimeout(switchTimer);
+        // r151d 入口复核(锁外先行):换模型期间切档请求可能正在飞(它持着会话锁),排在锁后再核对会让
+        // 跨会话内部回合一直挂在"处理中"等它完成。这里先同步核对一次:正在切档 / 档位已变 → 立即退回
+        // 排队、关掉这个常驻进程,不必等锁。锁内还有一次最终核对(万一核对之后、拿到锁之前又来了切档)。
+        if (reuseGo) {
+          const earlyRecheck = runEntryRecheck(entry);
+          if (earlyRecheck) {
+            s.closing = true;
+            try { s.input.close(); } catch {}
+            dropTurnRecord(turnRecord);
+            res.status(earlyRecheck.reject.status).json(earlyRecheck.reject.body);
+            reuseOutcome = 'handled';
+            reuseGo = false;
+          }
         }
+        if (reuseGo) reuseOutcome = await withSessionModeLock(sessionId, async () => {
+          // r151g 项2:锁内、热切之前比对切档代数 —— 排队 / 换模型期间完成的那次切档在这里生效
+          // (用它的确认档位重算两层档位,并跳过本条请求的 auto 降级)。
+          applyModeGeneration();
+          // 排队期间被切档请求中止 / 置关闭中:不复用(下面冷启前会等它退出)。原先这条判据只在要
+          // 热切时看;现在整段都在锁内,档位已经一致时也必须看 —— 否则会复用刚被切档超时中止的进程。
+          if (!slotUsable(s)) return 'stale';
+          // SDK 层档位不一致(plan/auto/default 三种可能)→ 热切;失败、或 REUSE_HOT_SWITCH_TIMEOUT_MS(与下面 setModel 同为 5 秒)内
+          // 没回应(r151e ④:之前没有超时,进程活着却不回应时用户发的这条消息一直挂着)→ 放弃复用关旧开新。
+          // r151f 修法 3/5:与 POST /chat/permission-mode 共用按会话的锁(按发起顺序逐个执行);5 秒没回应 → 中止旧进程(它被后台命令
+          // 保活时不再带着旧档位一直留着);明确失败照旧置关闭中、关输入(回合间空闲,手上没有回合)。中止 / 关闭在锁内做完才放下一个。
+          if (sdkPermMode !== s.sdkMode) {
+            try {
+              await withControlTimeout(s.query.setPermissionMode(sdkPermMode), REUSE_HOT_SWITCH_TIMEOUT_MS, '切档请求');
+              s.sdkMode = sdkPermMode;
+            } catch (e) {
+              // 放弃复用,关旧开新(超时后晚到的结果不改 sdkMode:赋值只在按时兑现时才跑)
+              if (e?.controlTimeout) abortUnswitchedSlot(s);
+              else {
+                s.closing = true;
+                try { s.input.close(); } catch {}
+              }
+              return 'stale';
+            }
+          }
+          // r151d:上面的热切让出过事件循环,入口钩子要求的话在置档之前再核对一次(跨会话自动处理:这期间切了档就不起回合、
+          // 退回排队重判)。不通过 → 不复用、把这个常驻进程关掉(热切已动过它的档位 / 模型,下一回合冷启),回入口钩子给的应答。
+          const reuseRecheck = runEntryRecheck(entry);
+          if (reuseRecheck) {
+            s.closing = true;
+            try { s.input.close(); } catch {}
+            dropTurnRecord(turnRecord);
+            res.status(reuseRecheck.reject.status).json(reuseRecheck.reject.body);
+            return 'handled';
+          }
+          // 重置回合级状态(新回合从干净缓冲开始;上一回合内容客户端已消费或以 jsonl 为准)
+          s.idle = false;
+          s.earlyLines = [];
+          // R13:事件环形窗随回合清空(seq 计数不重置) —— 同一个 pid 复用开新回合时,旧回合的
+          // 事件(含它的终态)对这次运行已经作废:留着会让带游标的重连重放上一回合的 done,
+          // 连接立刻被自己的旧终态关掉,新回合的正文再也进不来。seq 继续单调,老游标不会跳号。
+          s.eventLog = [];
+          s.earlyOverflowed = false;   // r68:溢出标记随缓冲一起归零,别让上一回合的旧账压死新回合
+          s.completeNotified = false;
+          s.turnSubagentSeen = false;
+          s.revived = false;
+          s.startedAt = Date.now();
+          s.finishedAt = null;
+          // H2:上一回合停止链路的残留不得毒化本回合(stopTimer clear + turnEpoch 推进已前移到
+          // await 之前)。① 清 lastResultAt(否则新回合 stop 的 settled 判据读到旧 result 时间);
+          // ② liveTasks 跨回合保留:条目由 task_started/notification 自维护增删,跨回合仍存活的后台
+          // 子代理也在其中——若按"非 shell 即陈旧"清掉,本回合选择性 /stop 与 stop-task 就停不到
+          // 上个回合遗留的活任务(调研 R2)。漏网条目(通知丢失)留着无害:stopTask 幂等 no-op。
+          s.lastResultAt = null;
+          s.lastResultError = false; // R13:同上,上一回合的终态标记不能毒化本回合的结算
+          // R13:复用已有进程 = 它早就初始化过(消息是推进活进程),不算"等初始化";顺手回收
+          // 上一回合可能还挂着的超时表,别让它迟到时把新回合误判成超时。
+          if (s.startupTimer) { clearTimeout(s.startupTimer); s.startupTimer = null; }
+          s.turnSawLine = true;
+          s.startTimedOut = false;
+          s.promptPreview = turnPreview;
+          s.guiMode = chosenMode;
+          s.permissionMode = chosenMode;
+          // r151a:服务端门控降级 —— 复用的进程不会再发 init,降级信号在本回合开头直接补发。
+          if (autoGate.downgraded) deliverModeMismatch(s, autoGate.downgraded);
+          notifyTurnStart(s, alivePid, true, turnTag, undefined, turnParams); // r151b:回合开始(没挂接 = 跳过)
+          s.input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
+          // R13:复用同一进程开新回合 —— 记录绑到本回合的 turnEpoch 上(旧回合的记录早已
+          // 在它自己的收尾点结算,pid→record 的映射换成这一回合,停止才不会停错回合)。
+          if (turnRecord) bindTurnRecord(turnRecord, alivePid, s);
+          if (turnRecord && autoGate.downgraded) turnRecord.permissionModeDowngraded = autoGate.downgraded;
+          res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running', ...downgradeFields });
+          return 'handled';
+        });
+      } finally {
+        // 占位按令牌比对清掉:只清自己的,不清别人的。复用失败要冷启时,这里先放锁/清位,
+        // 下面的冷启路径再按自己的判据做事。
+        if (markSwitching) {
+          const left = (permissionModeSwitching.get(switchKey) || 1) - 1;
+          if (left > 0) permissionModeSwitching.set(switchKey, left);
+          else permissionModeSwitching.delete(switchKey);
+        }
+        if (s.reservedBy === reserveToken) s.reservedBy = null;
       }
-      // r151d:上面的热切让出过事件循环,入口钩子要求的话在置档之前再核对一次(跨会话自动处理:这期间切了档就不起回合、
-      // 退回排队重判)。不通过 → 不复用、把这个常驻进程关掉(热切已动过它的档位 / 模型,下一回合冷启),回入口钩子给的应答。
-      const reuseRecheck = runEntryRecheck(entry);
-      if (reuseRecheck) {
-        s.closing = true;
-        try { s.input.close(); } catch {}
-        dropTurnRecord(turnRecord);
-        return res.status(reuseRecheck.reject.status).json(reuseRecheck.reject.body);
-      }
-      // 重置回合级状态(新回合从干净缓冲开始;上一回合内容客户端已消费或以 jsonl 为准)
-      s.idle = false;
-      s.earlyLines = [];
-      // R13:事件环形窗随回合清空(seq 计数不重置) —— 同一个 pid 复用开新回合时,旧回合的
-      // 事件(含它的终态)对这次运行已经作废:留着会让带游标的重连重放上一回合的 done,
-      // 连接立刻被自己的旧终态关掉,新回合的正文再也进不来。seq 继续单调,老游标不会跳号。
-      s.eventLog = [];
-      s.earlyOverflowed = false;   // r68:溢出标记随缓冲一起归零,别让上一回合的旧账压死新回合
-      s.completeNotified = false;
-      s.turnSubagentSeen = false;
-      s.revived = false;
-      s.startedAt = Date.now();
-      s.finishedAt = null;
-      // H2:上一回合停止链路的残留不得毒化本回合(stopTimer clear + turnEpoch 推进已前移到
-      // await 之前)。① 清 lastResultAt(否则新回合 stop 的 settled 判据读到旧 result 时间);
-      // ② liveTasks 跨回合保留:条目由 task_started/notification 自维护增删,跨回合仍存活的后台
-      // 子代理也在其中——若按"非 shell 即陈旧"清掉,本回合选择性 /stop 与 stop-task 就停不到
-      // 上个回合遗留的活任务(调研 R2)。漏网条目(通知丢失)留着无害:stopTask 幂等 no-op。
-      s.lastResultAt = null;
-      s.lastResultError = false; // R13:同上,上一回合的终态标记不能毒化本回合的结算
-      // R13:复用已有进程 = 它早就初始化过(消息是推进活进程),不算"等初始化";顺手回收
-      // 上一回合可能还挂着的超时表,别让它迟到时把新回合误判成超时。
-      if (s.startupTimer) { clearTimeout(s.startupTimer); s.startupTimer = null; }
-      s.turnSawLine = true;
-      s.startTimedOut = false;
-      s.promptPreview = turnPreview;
-      s.guiMode = chosenMode;
-      s.permissionMode = chosenMode;
-      // r151a:服务端门控降级 —— 复用的进程不会再发 init,降级信号在本回合开头直接补发。
-      if (autoGate.downgraded) deliverModeMismatch(s, autoGate.downgraded);
-      notifyTurnStart(s, alivePid, true, turnTag, undefined, turnParams); // r151b:回合开始(没挂接 = 跳过)
-      s.input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
-      // R13:复用同一进程开新回合 —— 记录绑到本回合的 turnEpoch 上(旧回合的记录早已
-      // 在它自己的收尾点结算,pid→record 的映射换成这一回合,停止才不会停错回合)。
-      if (turnRecord) bindTurnRecord(turnRecord, alivePid, s);
-      if (turnRecord && autoGate.downgraded) turnRecord.permissionModeDowngraded = autoGate.downgraded;
-      return res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running', ...downgradeFields });
+      if (reuseOutcome === 'handled') return;
+      break; // 复用失败(热切失败 / 排队期间被切档中止):放锁后走冷启
     }
   }
 
@@ -2403,17 +2524,48 @@ async function handleChatPost(req, res) {
     // 可恢复)。铁律:误杀不可恢复 > 双 resume 竞争 —— 一旦发现活 shell 立即跳出,既不白等也不
     // abort,退回改动前"旧进程为 shell 保活、与新 --resume 并存"的孤儿存活行为。判据与选择性
     // 停止路径一致:t.kind === 'shell'。
+    // r151g 项5 例外:槽已经发起中止(复用热切超时 / 切档超时 → abort 信号已拉响)时,上面的前提
+    // 不成立 —— 它本来就要死了,不应该再把它当"一直活着、误杀不可恢复"。这时照常等它退出,新进程
+    // 才不会在它约 2 秒的收尾期里对同一会话 --resume(双 resume 抢同一 jsonl)。仍受下面原有 4 秒
+    // deadline 与之后的强制兜底约束;没被中止、带活后台命令的槽保持原样(不等、不杀)。
     const slotHasLiveShell = (s) => [...(s?.liveTasks?.values() ?? [])].some(t => t && t.kind === 'shell');
+    const keepWaitingLiveShell = (s) => slotHasLiveShell(s) && !s?.abort?.signal?.aborted;
+    // r151g 项5:已发起中止、带着活后台命令的槽,进程可能比流晚退 —— SDK 中止后先结束生成器(pumpEnded),
+    // CLI 进程还被后台命令吊着(实测 SIGTERM 后再拖 2 秒)。这种槽要等它退出(仍受原有 4 秒上限),别在
+    // 它还没退出时就起新进程抢同一 jsonl;到点仍有它就照旧走下面的强制兜底(再 abort / 关输入都是幂等的)。
+    let abortedLiveShell = null;
     while ((lingering = tearingDown()) && Date.now() < deadline) {
-      if (slotHasLiveShell(lingering)) { lingering = null; break; } // 保活:不等不杀,容忍双 resume
+      if (keepWaitingLiveShell(lingering)) { lingering = null; break; } // 保活且没被中止:不等不杀,容忍双 resume
+      if (slotHasLiveShell(lingering) && lingering.abort?.signal?.aborted) abortedLiveShell = lingering;
       await new Promise((r) => setTimeout(r, 50));
     }
+    if (abortedLiveShell) {
+      // r151g 安全复审(建议 5):不再无条件等满 4 秒,但必须区分"泵收尾"与"进程真退"。
+      // finishSlot 在生成器结束时就置 pumpEnded 并把 exitCode 补成 0 —— 对带活后台命令的槽,这两个
+      // 信号都早于 CLI 进程真正退出(实测 SIGTERM 后再拖 1–2 秒),拿它们当退出判据会在旧进程还活着
+      // 时起新 --resume(E10 验收锁这条)。这类槽没有可观察的进程退出句柄,只能按原有 4 秒上限兜;
+      // 没有活后台命令的槽:泵一收尾/exitCode 一落就立即退出,不再白等满 4 秒。
+      if (slotHasLiveShell(abortedLiveShell)) {
+        while (Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+        if (!lingering) lingering = abortedLiveShell;
+      } else {
+        const settled = () => abortedLiveShell.pumpEnded || abortedLiveShell.exitCode !== null;
+        while (!settled() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+        if (!settled() && !lingering) lingering = abortedLiveShell;
+      }
+    }
+    // r151g 安全复审(建议 5):deadline 边界上 lingering 仍可能"带活 shell 且未发起中止"(第一段循环恰好
+    // 超时)。铁律不变:误杀不可恢复 > 双 resume 竞争 —— 不杀它,按"被后台命令吊着、与新进程并存"处理。
+    if (lingering && slotHasLiveShell(lingering) && !lingering.abort?.signal?.aborted) lingering = null;
     if (lingering) {
-      // 走到这里 lingering 必无活 shell(有 shell 已上面 break 清空),是正在停止/被弃用的进程,
-      // 强制 abort 是正确兜底,避免同 sid 双 --resume 抢会话锁。
+      // 走到这里 lingering 已经过活 shell 保护:要么没有活 shell,要么活 shell 但已发起中止、等满 4 秒
+      // 仍未退出(未中止的活 shell 已在上面置 null 跳过);都是正在停止/被弃用的进程,强制 abort 是正确
+      // 兜底,避免同 sid 双 --resume 抢会话锁。
       lingering.closing = true;
       // r151c 旁路 (b):被后到的请求中止的回合按"收到停止请求"结束(回合结束通知报 stopped,而不是 failed)
       if (lingering.runtimeTurn) lingering.runtimeTurn.stopRequested = true;
+      // r151g 项6:回合记录同样记成已停止(两套记录都要置,终态才一致)
+      if (lingering.turnRecord) lingering.turnRecord.stopRequested = true;
       try { lingering.abort?.abort(); } catch {}
       try { lingering.input?.close(); } catch {}
       const hardDeadline = Date.now() + 1000;
@@ -2429,6 +2581,15 @@ async function handleChatPost(req, res) {
     dropTurnRecord(turnRecord);
     return res.status(recheckOut.reject.status).json(recheckOut.reject.body);
   }
+  // r151g 项3:等旧进程退出的这几秒里,同一会话可能有别的请求选中了槽(占位)→ 同样 409,不另起进程。
+  if (sessionId && sessionSlotReserved(sessionId)) {
+    dropTurnRecord(turnRecord);
+    return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+  }
+  // r151g 项2:等旧进程退出的这几秒让出过事件循环 —— 建 slot 之前按会话的切档代数再比对一次(从这里到
+  // activeProcesses.set 之间没有 await)。代数变了且拿到确认档位 → 用"那次切档之后界面所示的档位"起
+  // 回合(并跳过本条请求的 auto 降级);拿不到确认档位就保持请求档位,不覆盖。
+  applyModeGeneration();
 
   const procId = 'sdk-' + (++sdkCounter);
   const abort = new AbortController();
@@ -2473,7 +2634,8 @@ async function handleChatPost(req, res) {
     // 更新)。compatKey 已不含 model,复用对账全靠它。
     currentModel: model,
     promptPreview: turnPreview,
-    permissionMode: permissionMode || 'default',
+    // r151g 项2:用生效后的界面档位(chosenMode 可能已被切档代数比对改过),与 guiMode 同一口径。
+    permissionMode: chosenMode,
     guiMode: chosenMode,
     autoDowngrade: autoGate.downgraded,   // r151a:服务端门控降级,init 到达时补发一条带 reason 的 mode_mismatch
     // r151a:本进程连的是不是第三方端点(T-Y10 两条收紧的前置条件)。provider 一变 settings 指纹就变,不会复用到这个槽。
@@ -3041,6 +3203,43 @@ router.get('/model-window', (req, res) => {
   res.json({ window: info.window, source: info.origin });
 });
 
+// r151e(主会话裁定):切档接口回 200 之前等 modeChange 钩子(新档位写进跨会话发送档案)的最长时间。
+export const MODE_CHANGE_PERSIST_WAIT_MS = 2000;
+// r151e ④:切档控制请求(setPermissionMode)的超时。进程活着却一直不回应时,切档接口不再一直挂着(这期间"切档进行中"标记不清,
+// 该会话的跨会话自动处理一直排着);复用块里的热切档位与同处 setModel 统一为 5 秒(用户发的消息不再一直挂着)。
+export const PERMISSION_MODE_SWITCH_TIMEOUT_MS = 10_000;
+const REUSE_HOT_SWITCH_TIMEOUT_MS = 5000;
+// 控制请求限时:ms 内没回应 → 抛带 controlTimeout 的错误。晚到的结果被丢掉(调用方只在按时兑现后才改字段);晚到的拒绝已被
+// race 接住,不会成为未处理的拒绝。
+async function withControlTimeout(promise, ms, what) {
+  let timer = null;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error(`${what}超时(${ms / 1000} 秒内没有回应)`), { controlTimeout: true })), ms);
+      timer.unref?.();
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+// r151f 修法 5:同一会话的切档请求(POST /chat/permission-mode)与复用常驻进程时的热切档位共用一把按会话的锁,按发起顺序逐个执行
+// (会话 id 小写 → 队尾)。否则先发的请求晚完成时,会把进程档位与最近一次切档改回旧请求的档位。不跳过被后来请求取代的请求:
+// 每个都如实执行、如实应答;没回应的进程会被中止,排在后面的不会再等它。fn 在锁内跑完(含它的中止)才轮到下一个。
+const modeSwitchQueues = new Map();
+async function withSessionModeLock(sessionId, fn) {
+  const key = String(sessionId).toLowerCase();
+  const prev = modeSwitchQueues.get(key) || Promise.resolve();
+  let release;
+  const mine = new Promise((r) => { release = r; }); // 只会兑现、不会拒绝:前一个出错也不卡住后面的
+  modeSwitchQueues.set(key, mine);
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    release();
+    if (modeSwitchQueues.get(key) === mine) modeSwitchQueues.delete(key);
+  }
+}
 // r151d 判官 S2:正在进行的切档请求(会话 id 小写 → 个数),见 POST /chat/permission-mode。
 const permissionModeSwitching = new Map();
 /** 该会话有没有还没完成的切档请求(控制请求还没返回、新档位还没记下)。跨会话自动处理据此不起回合、退回排队。 */
@@ -3048,40 +3247,153 @@ export function permissionModeSwitchPending(sessionId) {
   return typeof sessionId === 'string' && permissionModeSwitching.has(sessionId.toLowerCase());
 }
 
+// r151f:能接新回合的进程 = 存活、不在关闭中、输入没关。切档只发给它们、只按它们计 attempted / delivered;进程视图的 usable 与
+// 跨会话判定的"存活进程档位"用同一判据。关闭中、输入已关的进程不收切档请求、不计数、档位字段不动:它们不再接新回合,手上通常
+// 也没有回合;输入关了控制请求本就送不到(取代 r151d 的"输入已关只改本地档位、算收下"—— 那会造出本地档位与命令行档位对不上的进程)。
+function slotUsable(slot) {
+  return slot.exitCode === null && !slot.pumpEnded && !slot.closing && !slot.input?.isClosed?.();
+}
+
+// ── r151g 项2:按会话记"切档代数 + 确认档位" ─────────────────────────────────────────────
+// 一条消息进来时记下当时的代数(handleChatPost 的 modeGenAtEntry);切档请求完成时(200 或 409 都算)
+// 代数 +1 并记下"确认档位":200 → 新档位;409 → 进锁时快照的旧档位(界面回滚后仍是它);快照为 null
+// (切档时没有能接新消息的进程)时不覆盖已有确认档位。消息在复用 / 冷启两处比对:代数变了、且拿到了
+// 确认档位,就改用它重算两层档位 —— 消息已发出,直接按界面所示档位跑,不让客户端重发(守住 clientTurnId
+// 幂等)。状态只放在 chat.js(不依赖 xsession 模块,避免成环);不依赖跨会话总开关。
+// r151g 判官建议:这张表按会话累积、没有别的清理时机,长跑会一直涨 → 加与项目既有表(xsession 的 LATEST_MODES_MAX /
+// TURN_CHAINS_MAX)同口径的 1024 上限。写入时"重新排到最后 + 满了先删最久没动的"(LRU)。
+// 窄复审(如实记):条目被淘汰后该会话代数回到 0,正好在派发窗口内的消息看不到"进入之后完成的切档",退回按消息自带
+// 的档位跑。在"界面先乐观切到宽档 + 切档 409 回滚"这条路径上,消息带的恰是那个乐观宽档 —— 所以它极端情况下可能比
+// 界面宽,不是"只会更窄、不覆盖"。本轮保留这个低风险残余,不做 sessionLiveGuiMode 回退:要触发它,攻击者得先写入
+// 1024 条形状合法的假会话 id,且正好撞上目标会话的派发窗口;而本地回环客户端本来就能直接请求宽档,拿不到额外权限。
+const SESSION_MODE_GEN_MAX = 1024;
+const sessionModeGenerations = new Map(); // 会话 id(小写)→ { gen, confirmedMode }
+const sessionModeStateKey = (sessionId) => String(sessionId).toLowerCase();
+
+/** 该会话此刻的切档代数(没有记录 = 0)。 */
+function sessionModeGeneration(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return 0;
+  const st = sessionModeGenerations.get(sessionModeStateKey(sessionId));
+  return st ? st.gen : 0;
+}
+
+/** 该会话"能接新消息的进程"此刻的界面档位(取最后一个,同 xsession 的 liveGuiMode 口径);没有就 null。 */
+function sessionLiveGuiMode(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return null;
+  const key = sessionModeStateKey(sessionId);
+  let mode = null;
+  for (const s of activeProcesses.values()) {
+    if (String(s.sessionId || '').toLowerCase() !== key) continue;
+    if (!slotUsable(s) || !s.guiMode) continue;
+    mode = s.guiMode;
+  }
+  return mode;
+}
+
+/**
+ * 一次切档请求完成:清"切档进行中"标记;形状合法的会话再代数 +1、记确认档位。之间没有 await(调用方保证
+ * 同步调用),所以排在后面的消息不会读到"代数变了但确认档位还是旧的"这类中间态。
+ */
+function finishSessionModeSwitch(sessionId, switchKey, confirmedMode) {
+  // r151g 安全复审(重要 1):代数表只收形状合法的会话 id。这张表按会话长期累积,而 `/chat/permission-mode`
+  // 走全局 25MB 解析器、回环免密,原来把任意 sessionId 小写后直接当长期键 → 连发 1024 个不同的大字符串
+  // 就能常驻放大内存(上限只限条数不限字节),还能把目标会话条目挤出 LRU。
+  // 真实会话 id 恒为 uuid(isSessionIdShape 只放行 36 位 uuid 字符);形状不合法的 id 不是真实会话,不记代数。
+  // 不改接口行为:这类请求照旧回 200(只是没有代数可记),既有"非 UUID 也会 200"的单测不变。LRU 淘汰保留。
+  // 计数与写表无关:无论 id 形状是否合法都要清,不能漏(漏了该会话的"切档进行中"标记会永远非零)。
+  // 先清计数,再决定写不写代数表。
+  const left = (permissionModeSwitching.get(switchKey) || 1) - 1;
+  if (left > 0) permissionModeSwitching.set(switchKey, left);
+  else permissionModeSwitching.delete(switchKey);
+  if (typeof sessionId === 'string' && isSessionIdShape(sessionId)) {
+    const key = sessionModeStateKey(sessionId);
+    const st = sessionModeGenerations.get(key) || { gen: 0, confirmedMode: null };
+    st.gen += 1;
+    if (typeof confirmedMode === 'string' && VALID_PERMISSION_MODES.has(confirmedMode)) st.confirmedMode = confirmedMode;
+    sessionModeGenerations.delete(key); // 重新排到最后:满了先淘汰最久没动的(见 SESSION_MODE_GEN_MAX)
+    if (sessionModeGenerations.size >= SESSION_MODE_GEN_MAX) sessionModeGenerations.delete(sessionModeGenerations.keys().next().value);
+    sessionModeGenerations.set(key, st);
+  }
+}
+
+// ── r151g 项3:复用槽占位 ────────────────────────────────────────────────────────────────
+// 选中空闲槽到"消息推进进程"之间,别的请求不能选中它、也不能把它当空闲:选中时同步写 reservedBy
+// (每请求唯一令牌),复用路径所有出口按令牌清掉;同会话的新 /chat 请求(用户消息与跨会话内部回合都算)
+// 直接回 409 CHAT_SESSION_BUSY,不推进那个进程、不另起进程。占位是内部字段,不进 /api/processes。
+let chatReserveSeq = 0;
+
+/** 该会话有没有正被请求占着的槽(占位令牌)。同会话新的 /chat 请求据此直接 409。 */
+function sessionSlotReserved(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return false;
+  // r151g 判官建议:与代数表 / 锁键同口径,两侧都先小写再比(只统一大小写,命中占位仍直接 409,不放宽)。
+  const key = sessionModeStateKey(sessionId);
+  for (const s of activeProcesses.values()) {
+    if (String(s.sessionId || '').toLowerCase() === key && s.reservedBy) return true;
+  }
+  return false;
+}
+
+// r151f:中止没切成的可用进程(切档请求没回应,或接口回 200 时被命令行明确拒绝)—— 不让"界面档位与命令行档位对不上"的进程继续跑。
+// 它不回应控制请求,停止请求也送不到,所以不发 interrupt 再等,直接走强制中止(同冷启前清理收尾中旧进程的那段):置关闭中、本回合按
+// "收到停止请求"结束、中止 SDK(结束手上的回合、进程退出,连带它起的后台命令与子代理)、关输入。不能只关输入让它跑完手上的回合:
+// 进程出过结果后关输入,控制通道当场断开,这一回合剩下的放行请求、PreToolUse 回调的答复都送不回去。
+function abortUnswitchedSlot(slot) {
+  slot.closing = true;
+  if (slot.runtimeTurn) slot.runtimeTurn.stopRequested = true;
+  // r151g 项6:回合记录也要记成"已停止"(settleSlotTurn 按 rec.stopRequested 定终态)。只置 runtimeTurn
+  // 会让被中止的回合被记成 completed,与停止接口不一致、同 clientTurnId 重发的回执也报 completed。
+  if (slot.turnRecord) slot.turnRecord.stopRequested = true;
+  try { slot.abort?.abort(); } catch {}
+  try { slot.input?.close(); } catch {}
+}
+
 // r49b①:热切逐 slot 记结果。CLI 2.1.240 的 guardPermissionModeChange 会拒掉一部分切换
 // (auto 受模型门控、bypass 未带 dangerously-skip 启动),原来整段包在 `catch {}` 里吞掉,
 // 响应里成功与被拒长得一模一样 → 界面停在一个根本没生效的档上。被拒的 slot 一个字段都不改:
 // canUseTool 继续按【旧档】裁决,绝不按没生效的新档放行。
 // 纯逻辑,tests/unit/check-mode-switch-failure.mjs 真 import(mock slot.query,不打真实 CLI)。
-export async function applyPermissionModeToSlots(procs, sessionId, mode) {
-  const sdkMode = mode === 'plan' ? 'plan' : mode === 'auto' ? 'auto' : 'default';
-  let attempted = 0;
-  let delivered = 0;
-  const failed = [];
-  for (const slot of procs.values()) {
-    if (slot.sessionId !== sessionId || slot.exitCode !== null || !slot.query) continue;
-    attempted++;
-    // r151d:输入流已关的进程(被要求退出、不再承载新回合:设置变了被关掉的常驻进程、不保活回合结束后正在退出的进程等)
-    // 收不到控制请求 —— setPermissionMode 只会挂到它退出后以失败收场,这期间本请求一直不回,最后还把这次切档报成 409,
-    // 而同会话新起的进程(例如跨会话自动处理等它退出后冷启的)在此之前看不到这次切档。只改本地档位(canUseTool 按它裁决:
-    // 它若因后台任务多活一阵,之后的工具调用按新档位判),算作已收下;SDK 层档位(sdkMode)改不了,保持原样。
-    if (slot.input?.isClosed?.()) {
-      slot.guiMode = mode;
-      slot.permissionMode = mode;
-      delivered++;
-      continue;
-    }
+// r151e ④:每个进程的控制请求限时 timeoutMs(默认 PERMISSION_MODE_SWITCH_TIMEOUT_MS;参数只为单测注入)。
+// r151f:只发给可用进程(slotUsable)。没回应的一律中止(failed 那一项带 aborted: true),档位字段不改(撤掉 r151e 判官修复的回写);
+// 被明确拒绝的:有进程切成(接口回 200)时同样中止,一个都没切成(接口回 409、界面回滚)时照旧保留、一个字段都不改(r49b①)。
+// 中止在返回之前发起(进程退出可以稍后完成)。
+export async function applyPermissionModeToSlots(procs, sessionId, mode, { timeoutMs = PERMISSION_MODE_SWITCH_TIMEOUT_MS } = {}) {
+  const sdkMode = sdkModeForGuiMode(mode);
+  // r151f 修法 5:各可用进程同时发、同时等(多个进程都不回应时超时不再逐个累加);结果仍按进程顺序逐个记
+  const targets = [...procs.values()].filter((slot) => slot.sessionId === sessionId && slot.query && slotUsable(slot));
+  const errors = await Promise.all(targets.map(async (slot) => {
     try {
-      await slot.query.setPermissionMode(sdkMode);
+      await withControlTimeout(slot.query.setPermissionMode(sdkMode), timeoutMs, '切档请求');
       slot.guiMode = mode;
       slot.permissionMode = mode;
       slot.sdkMode = sdkMode; // #26:常驻复用的 plan 热切判据与此保持同步
-      delivered++;
+      return null;
     } catch (e) {
-      failed.push({ sessionId: slot.sessionId, error: e?.message || String(e) });
+      return e || new Error('切档请求失败');
+    }
+  }));
+  let delivered = 0;
+  const failed = [];
+  const refused = []; // 被命令行明确拒绝的 { slot, item }:按整体结果定去留,见下
+  targets.forEach((slot, i) => {
+    const e = errors[i];
+    if (!e) { delivered++; return; }
+    const item = { sessionId: slot.sessionId, error: e?.message || String(e) };
+    failed.push(item);
+    // 超时 = 结果不明(命令行可能在超时之后才切过去),档位字段不改(晚到的结果也改不了:上面的赋值只在按时兑现时才跑),中止它
+    if (e?.controlTimeout) {
+      abortUnswitchedSlot(slot);
+      item.aborted = true;
+    } else {
+      refused.push({ slot, item });
+    }
+  });
+  if (delivered > 0) {
+    for (const { slot, item } of refused) {
+      abortUnswitchedSlot(slot);
+      item.aborted = true;
     }
   }
-  return { attempted, delivered, failed };
+  return { attempted: targets.length, delivered, failed };
 }
 
 // r49b②:init 回报的生效档位 vs GUI 请求档。GUI 六档 → SDK 三值本就是多对一
@@ -3112,15 +3424,24 @@ router.post('/chat/permission-mode', async (req, res) => {
   }
   // r151d 判官 S2:从这里起到新档位记下(下面同步调的 modeChange 通知)之前算"切档进行中" —— 控制请求往返期间槽与最近一次切档
   // 都还是旧档位,跨会话自动处理的起回合前核对若照常通过,回合会落在切档之后的档位上(放宽方向即绕过类别规则)。核对据此退回排队。
+  // r151f 修法 5:标记在排队之前就置上(覆盖排队时间);同一会话的切档按发起顺序逐个执行,锁一直拿到应答发出(客户端按发起顺序收到结果)。
   const switchKey = String(sessionId).toLowerCase();
   permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
-  let applied;
+  await withSessionModeLock(sessionId, () => respondPermissionModeSwitch(res, sessionId, mode, switchKey));
+});
+
+async function respondPermissionModeSwitch(res, sessionId, mode, switchKey) {
+  // r151g 项2:进锁后、开始前快照"此刻界面档位"(能接新消息的进程的 guiMode,取最后一个)。409 = 界面回滚到
+  // 这个旧档位,确认档位就记它;快照为 null(切档时没有能接新消息的进程)时不覆盖已有确认档位。
+  const beforeMode = sessionLiveGuiMode(sessionId);
+  let applied = null;
   try {
     applied = await applyPermissionModeToSlots(activeProcesses, sessionId, mode);
-  } finally { // 之后到 modeChange 通知之间没有 await:清掉标记与记下新档位之间不会插进别的核对
-    const left = (permissionModeSwitching.get(switchKey) || 1) - 1;
-    if (left > 0) permissionModeSwitching.set(switchKey, left);
-    else permissionModeSwitching.delete(switchKey);
+  } finally {
+    // r151g 项2:完成时(200 或 409 都算)同步记:代数 +1、确认档位、清"切档进行中"标记。三者之间没有 await,
+    // 所以之后到达的消息不会读到"代数变了但确认档位还是旧的"这类中间态。
+    const allFailed = !!applied && applied.attempted > 0 && applied.delivered === 0;
+    finishSessionModeSwitch(sessionId, switchKey, applied ? (allFailed ? beforeMode : mode) : null);
   }
   const { attempted, delivered, failed } = applied;
   // A1 切档重裁:对该会话已 pending 的卡按【新档】重新自动裁决(判定与 canUseTool 共用
@@ -3135,16 +3456,28 @@ router.post('/chat/permission-mode', async (req, res) => {
     } catch {}
   }
   // 有进程却一个都没收下 = 切档失败,如实回 409 带 CLI 原文(前端据此回滚档位并显示原因);
-  // attempted 0(会话闲置)不是失败,照常 200。
+  // attempted 0(会话闲置,或只剩关闭中 / 输入已关的进程,r151f)不是失败,照常 200。
   if (attempted > 0 && delivered === 0) {
     return res.status(409).json({
       ok: false, attempted, delivered: 0, failed,
       error: failed[0]?.error || '权限档位切换被 CLI 拒绝',
     });
   }
-  callRuntimeHook('modeChange', { sessionId, mode }); // r151c:切档生效(或会话没有进程)时通知(没挂接 = 跳过)
+  // r151c:切档生效(或会话没有进程)时通知(没挂接 = 跳过)。钩子在返回之前已同步记下最新档位、踢过调度器 —— 从上面清掉
+  // "切档进行中"标记到这里没有 await(判官 S2)。
+  const persisted = callRuntimeHook('modeChange', { sessionId, mode });
+  // r151e(主会话裁定):等新档位写进发送档案再回 200,最多 MODE_CHANGE_PERSIST_WAIT_MS —— 否则回 200 后立即重启服务时,盘上还是
+  // 切档前(可能更宽)的档位。超时照常回 200,写入在后台继续(写失败照旧打标记);persisted 不会拒绝(见 callRuntimeHook)。
+  if (persisted && typeof persisted.then === 'function') {
+    let waitTimer = null;
+    await Promise.race([persisted, new Promise((resolve) => {
+      waitTimer = setTimeout(resolve, MODE_CHANGE_PERSIST_WAIT_MS);
+      waitTimer.unref?.();
+    })]);
+    clearTimeout(waitTimer);
+  }
   res.json({ ok: true, attempted, delivered, failed });
-});
+}
 
 // ── 引导注入(无打断 steering)────────────────────────────────────────────────
 // 「忙」的判据:复用块(:1107)那一行【只把 s.idle 取反】,其余存活条件逐字照抄。

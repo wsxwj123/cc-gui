@@ -13,7 +13,7 @@ import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/o
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
 import { isOfficialAnthropic, isClaudeModel, readClaudeSettingsForWrite } from '../services/model-resolver.js';
 import { applyCatalogPrefill, catalogPrefillEntry } from '../utils/model-capabilities.js';
-import { updatePrefs, loadPrefs, readThirdPartyAutoSync } from './prefs.js';
+import { updatePrefs, loadPrefs, readThirdPartyAutoSync, unhideProjectInPrefs } from './prefs.js';
 import { broadcast } from '../broadcast.js';
 import {
   buildAutoAuditStatus, isUnusableAuditor, normalizeAuditModelName, hasAnyTier, auditModelOverrideEntry,
@@ -87,12 +87,6 @@ export async function deleteAvatarFile(avatar) {
 }
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
-// Shared prefs (hidden-projects list lives here). Adding a project must un-hide
-// its hash SERVER-SIDE: the lossy CLI hash can collide with a previously-hidden
-// sibling, and relying on the client to un-hide fails if the client runs a stale
-// bundle or the persist races a reload — the folder then re-hides on next fetch
-// and "vanishes" again. Doing it here makes an explicit add always win.
-const PREFS_PATH = join(homedir(), '.claude-gui', 'prefs.json');
 // Remembers which OpenAI-format provider is active so the proxy upstream can be
 // re-established after a server restart (only the provider id — never the key).
 const OPENAI_ACTIVE_PATH = join(homedir(), '.claude-gui', 'openai-active.json');
@@ -960,13 +954,15 @@ router.put('/settings', async (req, res) => {
       } catch { /* best-effort — sidecar is an optimization, not required */ }
       // Un-hide server-side: an explicitly added folder MUST be visible, even if
       // its (lossy) hash was hidden before or collides with a hidden sibling.
+      // Relying on the client to un-hide fails if it runs a stale bundle or the
+      // persist races a reload — the folder then re-hides on next fetch.
+      // r151e ⑥:走偏好模块的写队列 + 严格读 + 原子写(之前在这里直接 readFile / writeFile prefs.json)。
+      // 偏好文件读不出 / 写不进只记日志,添加项目照旧成功。
       try {
-        const prefs = JSON.parse(await readFile(PREFS_PATH, 'utf-8'));
-        if (Array.isArray(prefs.hiddenProjects) && prefs.hiddenProjects.includes(addedHash)) {
-          prefs.hiddenProjects = prefs.hiddenProjects.filter((h) => h !== addedHash);
-          await writeFile(PREFS_PATH, JSON.stringify(prefs, null, 2));
-        }
-      } catch { /* no prefs file or unparseable — nothing to un-hide */ }
+        await unhideProjectInPrefs(addedHash);
+      } catch (e) {
+        console.warn(`[settings] 添加项目时未能把它移出隐藏列表(偏好文件读不出或写不进):${e?.code || e?.message || e}`);
+      }
     }
 
     let current = {};

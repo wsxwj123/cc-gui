@@ -71,9 +71,12 @@ try {
   // ── 源码锁 ────────────────────────────────────────────────────────────
   const chat = readFileSync(join(root, 'server/routes/chat.js'), 'utf8');
   assert.ok(/VALID_PERMISSION_MODES = new Set\(\[[^\]]*'dontAsk'/.test(chat), '服务端档位白名单必须收 dontAsk');
-  // 透传红线:两处 sdkMode 映射都只认 plan/auto,dontAsk 必须落 'default'(canUseTool 照常被调)。
+  // 透传红线:sdkMode 映射只认 plan/auto,dontAsk 必须落 'default'(canUseTool 照常被调)。
+  // 收紧重复定义风险:映射只许定义一处,spawn / 切档热切 / 消息档位覆盖三个调用点都必须走它。
   const maps = chat.match(/=== 'plan' \? 'plan' : \w+ === 'auto' \? 'auto' : 'default'/g) || [];
-  assert.equal(maps.length, 2, 'sdkMode 映射(spawn + 热切)必须仍是两处、且只特判 plan/auto');
+  assert.equal(maps.length, 1, 'sdkMode 映射只许有一处定义(spawn / 热切 / r151g 消息档位覆盖三处共用)');
+  const uses = chat.match(/sdkModeForGuiMode\(/g) || [];
+  assert.equal(uses.length, 3, 'spawn / 切档热切 / 消息档位覆盖三处都必须走同一个映射');
   // 代码里出现 'dontAsk' 的地方只许是:档位白名单、autoDecide 的分支判断、注释。
   // 任何"把它塞进 SDK 选项"的写法(permissionMode: … dontAsk / sdkPermMode = 'dontAsk')都不行。
   assert.ok(!/permissionMode:[^\n]*dontAsk|sdk\w*Mode\s*=\s*[^\n]*'dontAsk'/.test(chat),

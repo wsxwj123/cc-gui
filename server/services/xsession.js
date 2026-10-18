@@ -619,6 +619,9 @@ const turnRecords = new Map(); // `${runId}:${turnEpoch}` → { sessionId(回合
 // 被杀毒 / 备份软件占着)时记为"名单还没读到",每次判定前(profileCountsFor)再读,读到之前所有会话一律按没有档案判;落盘时先并进
 // 盘上已有的名单(减去本进程清掉的)再写,本进程没读到的标记不会被它的写入删掉。
 // 判官 S3:某次落盘失败后,之后每次有会话被标记(含同一会话再次写失败)都重试落盘,直到成功一次。
+// r151e ③:落盘失败后另由恢复定时器(runXsRecovery)在偏好文件恢复后补存,不靠下一次标记。
+// r151e ⑤:名单读到的那一刻(profileWriteFailedReady,恢复定时器也经它读),本进程在读到之前清掉的会话若还在盘上的名单里,立即排一次
+// 落盘把它们删掉 —— 否则这次读到之后再没有标记变化时,重启后又按没有档案判,直到它再成功写一次档案(偏紧,但不该发生)。
 const profileWriteFailed = new Set(); // 会话 id(小写);按加入先后排
 const profileWriteFailedCleared = new Set(); // 本进程清掉、还没确认已从偏好文件里删掉的(读到 / 落盘时从盘上的名单里减去)
 let profileWriteFailedLoaded = false; // 偏好文件里的名单读到过没有(文件不存在也算读到)
@@ -632,6 +635,7 @@ function profileWriteFailedReady() {
   for (const k of ids) if (!profileWriteFailedCleared.has(k)) profileWriteFailed.add(k);
   for (const k of mine) { profileWriteFailed.delete(k); profileWriteFailed.add(k); } // 本进程标记的排在后面(更近)
   profileWriteFailedLoaded = true;
+  if (ids.some((k) => profileWriteFailedCleared.has(k) && !profileWriteFailed.has(k))) persistProfileWriteFailed(); // ⑤ 不会拒绝;失败交给恢复定时器
   return true;
 }
 function markProfileWriteFailed(sessionId) {
@@ -649,12 +653,13 @@ function clearProfileWriteFailed(sessionId) {
   if (had) persistProfileWriteFailed();
 }
 let profileFailPersistQueued = false;
+let profileFailPersistRun = Promise.resolve(true); // 最近一次排下的落盘:兑现为是否写成
 function persistProfileWriteFailed() {
-  if (profileFailPersistQueued) return; // 已排着一次:那次写入时取的是当时内存里的最新集合
+  if (profileFailPersistQueued) return profileFailPersistRun; // 已排着一次:那次写入时取的是当时内存里的最新集合
   profileFailPersistQueued = true;
   let ran = false;
   let applied = [];
-  updatePrefsStrict((p) => {
+  profileFailPersistRun = updatePrefsStrict((p) => {
     ran = true;
     profileFailPersistQueued = false;
     applied = [...profileWriteFailedCleared];
@@ -664,12 +669,20 @@ function persistProfileWriteFailed() {
     else delete p.xsProfileWriteFailed;
   }).then(() => {
     profileFailPersistFailed = false;
+    xsRecoveryCorrupt = false;
     for (const k of applied) if (!profileWriteFailed.has(k)) profileWriteFailedCleared.delete(k); // 已从偏好文件里删掉
+    return true;
   }, (e) => {
     if (!ran) profileFailPersistQueued = false; // 读盘就失败了(没走到 mutator)
+    // r151e ③:交给恢复定时器重试(不再只等下一次有会话被标记,否则偏好文件恢复后一直没有新标记时重启就丢了)。日志只在首次失败时
+    // 记一行。偏好文件内容坏了时一直抛 PREFS_UNREADABLE(后台不替用户重建坏文件),按最长间隔安静地重试。
+    xsRecoveryCorrupt = e?.code === 'PREFS_UNREADABLE';
+    if (!profileFailPersistFailed) noteXsRecoveryFailure(`档案写失败标记未能写进偏好文件(本进程内照旧按没有档案判,偏好文件恢复后自动补存):${e?.code || e?.message || e}`);
     profileFailPersistFailed = true;
-    console.warn(`[xsession] 档案写失败标记未能写进偏好文件(本进程内照旧按没有档案判,下次有会话被标记时重试):${e?.code || e?.message || e}`);
+    startXsRecovery();
+    return false;
   });
+  return profileFailPersistRun;
 }
 // 最新档位(审计 S1;接口"审计之后的补充约定"第 3 条:存活进程 > 最近一次切档 > 发送档案):切档钩子与回合开始钩子里同步记
 // (在任何读盘、写盘之前),判定时排在存活槽之后、档案之前。档案经存储队列异步落盘,而 evaluateSession / sendAiMessages 先读档案
@@ -828,8 +841,13 @@ async function xsModeChange({ sessionId, mode } = {}) {
   noteLatestMode(sessionId, mode);
   if (queuedHint.has(sessionId.toLowerCase())) scheduler.kick(sessionId); // 判官 S2:切档期间退回排队的按新档位重判
   const prefs = readXsPrefsDetailedSync();
-  if (prefs.readFailed) return profilePrefsUnreadable(sessionId, '切档');
-  if (!prefs.enabled) return;
+  // r151e ①(主会话裁定 B,2026-10-17):偏好文件在、却读不出时不知道总开关开没开,照旧先打写失败标记(审计 S1:该会话按没有档案判,
+  // 在任何 await 之前),同时照样把新档位写进该会话已有的档案(同下:只改两处档位,不改记录时刻,不新建档案)—— 标记若在重启前
+  // 没能存进偏好文件,重启后也按新档位判;总开关实际关着、或启用时刻更晚时,这份档案照旧不算数。写成了也不清标记(偏安全)。
+  if (prefs.readFailed) {
+    markProfileWriteFailed(sessionId);
+    console.warn(`[xsession] 会话 ${sessionId} 切档时偏好文件读不出:新档位照写进已有档案,该会话先按没有档案判(直到下次记录成功)`);
+  } else if (!prefs.enabled) return;
   try {
     await mutateXsProfiles((d) => {
       for (const [k, p] of Object.entries(d.sessions)) {
@@ -838,7 +856,7 @@ async function xsModeChange({ sessionId, mode } = {}) {
         p.judge.mode = mode;
       }
     });
-    clearProfileWriteFailed(sessionId);
+    if (!prefs.readFailed) clearProfileWriteFailed(sessionId);
   } catch (e) {
     markProfileWriteFailed(sessionId); // 盘上仍是切档前的档位:不能再按它判同类、重放
     console.warn(`[xsession] 会话 ${sessionId} 的档案档位未能落盘(按没有档案判,直到下次记录成功):${e?.cause?.code || e?.code || e?.message || e}`);
@@ -921,10 +939,11 @@ function targetStuck(sessionId) {
   for (const f of inflight.values()) if (f.auto && sameId(f.sessionId, sessionId) && now - f.startedAt > XS_STUCK_MS) return true;
   return false;
 }
-// 存活槽的界面档位(有就优先于档案,方案 A5)。
+// 存活槽的界面档位(有就优先于档案,方案 A5)。r151f:只看能接新回合的进程(进程视图的 usable:存活、不在关闭中、输入没关)——
+// 关闭中 / 输入已关的进程不收切档请求、档位停在旧值(例如被后台命令吊着、在等退出的旧进程),都没有时按最近一次切档、再按档案。
 function liveGuiMode(sessionId) {
   let mode = null;
-  for (const p of getActiveChatProcesses()) if (sameId(p.sessionId, sessionId) && p.exitCode === null && p.guiMode) mode = p.guiMode;
+  for (const p of getActiveChatProcesses()) if (sameId(p.sessionId, sessionId) && p.usable && p.guiMode) mode = p.guiMode;
   return mode;
 }
 // 目标此刻的档位:存活槽的 > 最近一次切档 / 回合开始记的(latestGuiMode)> 档案的(接口"审计之后的补充约定"第 3 条)。
@@ -1613,10 +1632,76 @@ export function syncXsRuntimeHooks(enabled) {
 export function installXsessionRuntime() {
   // r151d:写失败标记跨重启保留。偏好文件在、却读不出 → 记为"名单还没读到",判定前再读,读到之前一律按没有档案判(判官 R1)
   profileWriteFailedLoaded = false;
-  if (!profileWriteFailedReady()) console.warn('[xsession] 启动时偏好文件读不出,档案写失败名单还没读到:读到之前所有会话按没有档案判');
+  const listReady = profileWriteFailedReady();
   if (!unhookEntry) unhookEntry = registerSessionRuntimeHooks({ chatEntry: xsChatEntry });
-  syncXsRuntimeHooks(readXsEnabledSync());
+  // r151e ①:偏好文件在、却读不出(Windows 上被杀毒 / 备份软件占着)不能当"总开关关着"不挂钩子 —— 之后能读了也没人补挂,
+  // 这期间的切档与回合都记不下,盘上更宽的旧档案照旧算数。按开着挂上全部跨会话钩子(切档钩子与回合钩子逐次处理"读不出"),
+  // 恢复定时器在能读之后按实际总开关挂或撤。
+  const prefs = readXsPrefsDetailedSync();
+  xsRecoveryHooks = prefs.readFailed;
+  syncXsRuntimeHooks(prefs.readFailed || prefs.enabled);
+  if (prefs.readFailed || !listReady) {
+    noteXsRecoveryFailure('启动时偏好文件读不出:跨会话钩子先按总开关开着挂上,档案写失败名单读到之前所有会话按没有档案判;恢复可读后自动按实际设置补上');
+    startXsRecovery();
+  }
   backfillXsEnabledAt();
+}
+
+// ── r151e ①③⑤:恢复定时器 ──
+// 触发:启动时偏好文件读不出(installXsessionRuntime),或档案写失败名单落盘失败(persistProfileWriteFailed)。按逐步拉长的间隔重读
+// 偏好文件,读到之后:按实际总开关挂或撤钩子(只在启动时读不出、钩子按开着挂的那种;撤走 syncXsRuntimeHooks(false) 的现有路径,
+// 在途回合结算完再撤回合钩子),同时补跑启动时跳过的那次启用时刻补记(backfillXsEnabledAt)→ 读入写失败名单(本进程在读到之前
+// 清掉的若还在盘上,排一次落盘,⑤)→ 排着的、上次落盘失败的补落盘 → 全部完成就停。最长间隔 20 秒:偏好文件恢复后 30 秒内补上;
+// 偏好文件内容坏了时落盘一直抛 PREFS_UNREADABLE,按最长间隔重试。定时器 unref,不拖住进程退出。日志只在首次失败与恢复时各记一行。
+export const XS_RECOVERY_DELAYS_MS = Object.freeze([1000, 2000, 4000, 8000, 15_000, 20_000]);
+let xsRecoveryTimer = null;
+let xsRecoveryRunning = false;
+let xsRecoveryStep = 0;
+let xsRecoveryHooks = false; // 钩子是按"开着"挂的(启动时读不出):能读之后按实际总开关重定
+let xsRecoveryCorrupt = false; // 上一次名单落盘因偏好文件内容坏了失败:按最长间隔重试
+let xsRecoveryNoted = false; // 这一轮已记过失败日志:恢复时记一行
+function noteXsRecoveryFailure(text) {
+  xsRecoveryNoted = true;
+  console.warn(`[xsession] ${text}`);
+}
+function startXsRecovery() {
+  if (xsRecoveryTimer || xsRecoveryRunning) return; // 已排着 / 正在跑:由它接着重试
+  xsRecoveryStep = 0;
+  scheduleXsRecovery();
+}
+function scheduleXsRecovery() {
+  const last = XS_RECOVERY_DELAYS_MS.length - 1;
+  const ms = XS_RECOVERY_DELAYS_MS[xsRecoveryCorrupt ? last : Math.min(xsRecoveryStep, last)];
+  xsRecoveryStep += 1;
+  xsRecoveryTimer = setTimeout(runXsRecovery, ms);
+  xsRecoveryTimer.unref?.();
+}
+async function runXsRecovery() {
+  xsRecoveryTimer = null;
+  xsRecoveryRunning = true;
+  let done = false;
+  try {
+    const prefs = readXsPrefsDetailedSync();
+    if (prefs.readFailed) return;
+    if (xsRecoveryHooks) {
+      xsRecoveryHooks = false;
+      syncXsRuntimeHooks(prefs.enabled);
+      backfillXsEnabledAt(); // 启动时读不出跳过的那次补记启用时刻(一期升级用户;已有合法启用时刻时什么都不写)
+    }
+    if (!profileWriteFailedReady()) return; // 读到名单时若要补删本进程清掉的标记,这里已排下一次落盘(⑤)
+    // 排着的(含上一行刚排的)等它写完;上次落盘失败的补落盘。写不成就按间隔再来(失败路径已记日志)。
+    if ((profileFailPersistQueued || profileFailPersistFailed) && !(await persistProfileWriteFailed())) return;
+    done = true;
+  } catch (e) {
+    if (!xsRecoveryNoted) noteXsRecoveryFailure(`恢复定时器出错,稍后重试:${e?.message || e}`);
+  } finally {
+    xsRecoveryRunning = false;
+    if (!done) scheduleXsRecovery();
+    else if (xsRecoveryNoted) {
+      xsRecoveryNoted = false;
+      console.warn('[xsession] 偏好文件已恢复可读:跨会话钩子与档案写失败名单已按偏好文件补上');
+    }
+  }
 }
 
 // 主会话裁定(2026-10-15):总开关开着、却没有(合法的)启用时刻 = 一期升级上来的用户 → 启动时补记一次。一期从未写过档案,

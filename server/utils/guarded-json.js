@@ -134,7 +134,8 @@ async function createBackup(file, raw) {
 }
 
 // 同一文件的备份动作串行化:10 路并发首读只建 1 份(B3-7);链上后来的调用看到前者已记的状态直接复用。
-function ensureBackup(file, raw) {
+// r151e:prefs.js 的写入路径严格读也用它备份坏掉的 prefs.json(返回备份路径;失败抛错)。
+export function ensureBackup(file, raw) {
   const hash = sha256(raw);
   const prev = backupInflight.get(file);
   const run = (prev ? prev.catch(() => null) : Promise.resolve()).then(async () => {

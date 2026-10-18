@@ -1,12 +1,13 @@
 import { Router } from 'express';
-import { readFile, writeFile, mkdir, rename, appendFile } from 'fs/promises';
+import { readFile, writeFile, mkdir, rename, appendFile, unlink } from 'fs/promises';
 import { readFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, basename } from 'path';
 import { homedir } from 'os';
 import { renameSession } from '@anthropic-ai/claude-agent-sdk';
 import { broadcast } from '../broadcast.js';
 import { findSessionFile, isSessionIdShape } from '../services/session-reader.js';
 import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../session-sync.js';
+import { ensureBackup } from '../utils/guarded-json.js';
 
 // Server-side preferences that must be SHARED across devices (phone + Mac).
 // Today this is just the hidden-projects list: it used to live in each
@@ -17,6 +18,8 @@ import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../sessio
 const router = Router();
 const PREFS_PATH = join(homedir(), '.claude-gui', 'prefs.json');
 
+// 只读接口用:读不出 / 损坏回 {}(各 GET 回默认值)。写入路径("读 → 改 → 写")一律用 loadPrefsForWrite,
+// 否则读失败当成空、写回时把其它偏好整份抹掉(r151e ②)。
 export async function loadPrefs() {
   try { return JSON.parse(await readFile(PREFS_PATH, 'utf-8')); }
   catch { return {}; }
@@ -106,8 +109,15 @@ let tmpSeq = 0;
 async function savePrefs(obj) {
   await mkdir(dirname(PREFS_PATH), { recursive: true });
   const tmp = `${PREFS_PATH}.tmp.${process.pid}.${tmpSeq++}`;
-  await writeFile(tmp, JSON.stringify(obj, null, 2));
-  await rename(tmp, PREFS_PATH);
+  try {
+    await writeFile(tmp, JSON.stringify(obj, null, 2));
+    await rename(tmp, PREFS_PATH);
+  } catch (e) {
+    // r151e 判官建议 1:最后一步覆盖原文件失败(Windows 上原文件被其它程序占用时 rename 抛 EPERM / EBUSY)或临时文件没写完 → 先删掉
+    // 本次的临时文件再把原错误抛回;否则恢复定时器每次重试都留下一个 prefs.json.tmp.*。删不掉(例如根本没建成)只忽略,不掩盖原错误。
+    await unlink(tmp).catch(() => {});
+    throw e;
+  }
 }
 // 写串行化:所有 prefs 写都是 read-merge-write,并发(手机+桌面同时 PUT)会互相覆盖
 // 丢一路。模块级 promise 链把「load→merge→save」整段排队,同一时刻只有一段在跑。
@@ -119,31 +129,72 @@ function withPrefsQueue(task) {
   return run;
 }
 
+// r151e ②:写入路径的严格读,只在写队列里调用(同一时刻只有一段"读 → 改 → 写"在跑):
+// · 文件不存在 → {}(照旧新建);
+// · 文件在、却读不出(EACCES / EBUSY / EPERM …,Windows 上被杀毒 / 备份软件占着)→ 原样抛错:整次放弃、不写盘,调用方回它已有的
+//   写失败响应。之前 loadPrefs 回 {},写回时把其它偏好整份抹掉;
+// · 内容不是合法的 JSON 对象(截断的 JSON、[]、null、数字…)→ 隔 PREFS_REREAD_DELAY_MS 重读一次(别的程序可能正写到一半);
+//   仍然不对:rebuildCorrupt 为真时把原字节原样另存为同目录 prefs.json.corrupt-<毫秒时刻>(guarded-json 的 ensureBackup:临时文件 +
+//   独占落名,同一份坏内容只备份一次),按 {} 返回(用户卡点 A 选"备份后从空白重建");备份失败按读不出抛错。rebuildCorrupt 为假时
+//   抛 PREFS_UNREADABLE,不备份、不写。
+// 开头的 UTF-8 BOM 先剥掉再解析(同 guarded-json r128:记事本 / PowerShell 存出的合法文件不算坏,写回时不带 BOM)。
+const PREFS_REREAD_DELAY_MS = 100;
+async function readPrefsBytes() {
+  try { return await readFile(PREFS_PATH); } catch (e) {
+    if (e?.code === 'ENOENT') return null;
+    throw e;
+  }
+}
+function parsePrefsObject(raw) {
+  try {
+    const v = JSON.parse(raw.toString('utf-8').replace(/^\uFEFF/, ''));
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
+  } catch { return null; }
+}
+async function loadPrefsForWrite({ rebuildCorrupt = true } = {}) {
+  let raw = await readPrefsBytes();
+  if (raw === null) return {};
+  let prefs = parsePrefsObject(raw);
+  if (prefs) return prefs;
+  await new Promise((r) => setTimeout(r, PREFS_REREAD_DELAY_MS));
+  raw = await readPrefsBytes();
+  if (raw === null) return {};
+  prefs = parsePrefsObject(raw);
+  if (prefs) return prefs;
+  if (!rebuildCorrupt) throw Object.assign(new Error('偏好文件的内容不是 JSON 对象'), { code: 'PREFS_UNREADABLE' });
+  const backup = await ensureBackup(PREFS_PATH, raw);
+  console.warn(`[prefs] prefs.json 不是合法的 JSON 对象:原内容已另存为 ${basename(backup)},本次写入从空白重建`);
+  return {};
+}
+
 // r26-C6:prefs 共享写函数。其它 route(如 version-check 的 writeUpdateChannel)的 prefs 写
 // 统一走这里 —— withPrefsQueue 串行化(与本文件所有 PUT 同一条队列,并发 read-merge-write
 // 不互踩)+ savePrefs 原子写(tmp+rename)。签名契约见 PLAN C-C6:PKG-6 按 updatePrefs(mutator)
 // 逐字消费。mutator 直接改传入的 prefs 对象,改完由这里统一落盘;mutator 抛错不会断队列链
 // (withPrefsQueue 已兜),错误原样抛回调用方。
-export async function updatePrefs(mutator) {
+// r151e ②:与 r151d 的 updatePrefsStrict 合成同一个严格版本(读法见 loadPrefsForWrite):偏好文件在、却读不出时整次放弃、抛回调用方,
+// 不再拿空对象整份覆盖;内容坏了先备份再从空白重建。
+export async function updatePrefs(mutator, { rebuildCorrupt = true } = {}) {
   return withPrefsQueue(async () => {
-    const p = await loadPrefs();
+    const p = await loadPrefsForWrite({ rebuildCorrupt });
     await mutator(p);
     await savePrefs(p);
   });
 }
-// r151d 判官 R1:同 updatePrefs(同一条写队列、原子写),但偏好文件在、却读不出或解析不了(或不是对象)时整次放弃、把错误抛回
-// 调用方,不拿空对象整份覆盖它 —— updatePrefs 的 loadPrefs 读失败回 {},写回会把其它键连同 mutator 要合并的盘上内容一起抹掉。
-// 文件不存在按 {} 写。用于 mutator 要以盘上已有内容为准做合并的写入(档案写失败名单)。
-export async function updatePrefsStrict(mutator) {
+// 档案写失败名单(services/xsession.js,回合钩子里自动写)用的名字:同 updatePrefs,只是内容坏了时不重建、抛 PREFS_UNREADABLE
+// (沿用 r151d:后台自动写入不替用户重建坏文件,见单测 check-r151d-xs-hardening 3e),落盘失败由调用方记日志、之后重试。
+export const updatePrefsStrict = (mutator) => updatePrefs(mutator, { rebuildCorrupt: false });
+
+// r151e ⑥:添加项目时把它的 hash 移出隐藏列表(settings.js 的 PUT /settings {_addProject})。之前那边直接 readFile + writeFile,
+// 绕过写队列(与队列里的写入互相覆盖)、也不是原子写(写到一半崩溃留下坏文件)。现在同一条写队列、同一套严格读、原子写;
+// 只有真的移出了条目才写盘。返回是否移出了;读不出 / 写不进时抛错(调用方只记日志,添加项目照旧成功)。
+export async function unhideProjectInPrefs(hash) {
   return withPrefsQueue(async () => {
-    let p;
-    try { p = JSON.parse(await readFile(PREFS_PATH, 'utf-8')); } catch (e) {
-      if (e?.code !== 'ENOENT') throw e;
-      p = {};
-    }
-    if (!p || typeof p !== 'object' || Array.isArray(p)) throw Object.assign(new Error('偏好文件的内容不是对象'), { code: 'PREFS_UNREADABLE' });
-    await mutator(p);
-    await savePrefs(p);
+    const prefs = await loadPrefsForWrite();
+    if (!Array.isArray(prefs.hiddenProjects) || !prefs.hiddenProjects.includes(hash)) return false;
+    prefs.hiddenProjects = prefs.hiddenProjects.filter((h) => h !== hash);
+    await savePrefs(prefs);
+    return true;
   });
 }
 
@@ -153,7 +204,7 @@ export async function updatePrefsStrict(mutator) {
 export async function removeSessionFromPrefs(sessionId) {
   if (typeof sessionId !== 'string' || !sessionId) return;
   await withPrefsQueue(async () => {
-    const prefs = await loadPrefs();
+    const prefs = await loadPrefsForWrite();
     const changed = { context1m: false, autoTitles: false, customTitles: false };
     for (const key of ['context1m', 'autoTitles', 'customTitles']) {
       const m = prefs[key];
@@ -218,7 +269,7 @@ router.put('/prefs/hidden-projects', async (req, res) => {
   }
   try {
     await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
+      const prefs = await loadPrefsForWrite();
       prefs.hiddenProjects = hidden;
       await savePrefs(prefs);
     });
@@ -336,7 +387,7 @@ router.put('/prefs/release-notes-seen', async (req, res) => {
   }
   try {
     await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
+      const prefs = await loadPrefsForWrite();
       prefs.releaseNotesSeen = version;
       await savePrefs(prefs);
     });
@@ -352,7 +403,7 @@ router.put('/prefs/hidden-providers', async (req, res) => {
   }
   try {
     await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
+      const prefs = await loadPrefsForWrite();
       prefs.hiddenProviders = hidden;
       await savePrefs(prefs);
     });
@@ -407,7 +458,7 @@ router.put('/prefs/custom-titles', async (req, res) => {
   }
   try {
     const map = await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
+      const prefs = await loadPrefsForWrite();
       const m = (prefs.customTitles && typeof prefs.customTitles === 'object') ? prefs.customTitles : {};
       const trimmed = (title || '').trim();
       if (trimmed) m[sessionId] = trimmed;
@@ -443,7 +494,7 @@ router.put('/prefs/auto-titles', async (req, res) => {
   }
   try {
     const map = await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
+      const prefs = await loadPrefsForWrite();
       const m = (prefs.autoTitles && typeof prefs.autoTitles === 'object') ? prefs.autoTitles : {};
       const trimmed = (title || '').trim();
       if (trimmed) m[sessionId] = trimmed;
@@ -480,7 +531,7 @@ router.put('/prefs/context-1m', async (req, res) => {
   }
   try {
     const map = await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
+      const prefs = await loadPrefsForWrite();
       let m = (prefs.context1m && typeof prefs.context1m === 'object') ? prefs.context1m : {};
       if (clear) m = {};
       else if (on) m[sessionId] = true;
@@ -512,7 +563,7 @@ router.get('/prefs/session-sync', async (_req, res) => {
 router.put('/prefs/session-sync', async (req, res) => {
   try {
     const out = await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
+      const prefs = await loadPrefsForWrite();
       const r = applySessionSyncPut(prefs.sessionSync, req.body);
       if (r.error) return r;
       if (r.changed) {
@@ -547,7 +598,7 @@ router.put('/prefs/display-name', async (req, res) => {
   const name = [...displayName.trim()].slice(0, 20).join('');
   try {
     await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
+      const prefs = await loadPrefsForWrite();
       if (name) prefs.displayName = name;
       else delete prefs.displayName;
       await savePrefs(prefs);
@@ -585,7 +636,7 @@ router.put('/prefs/sidebar-view', async (req, res) => {
   }
   try {
     const view = await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
+      const prefs = await loadPrefsForWrite();
       const next = normalizeSidebarView({ ...normalizeSidebarView(prefs.sidebarView), ...patch });
       prefs.sidebarView = next;
       await savePrefs(prefs);
@@ -617,7 +668,7 @@ router.put('/prefs/pinned', async (req, res) => {
   }
   try {
     const p = await withPrefsQueue(async () => {
-      const prefs = await loadPrefs();
+      const prefs = await loadPrefsForWrite();
       const cur = (prefs.pinned && typeof prefs.pinned === 'object') ? prefs.pinned : {};
       const key = kind === 'project' ? 'projects' : 'sessions';
       const list = new Set(Array.isArray(cur[key]) ? cur[key] : []);
