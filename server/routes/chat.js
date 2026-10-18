@@ -2205,6 +2205,15 @@ async function handleChatPost(req, res) {
     }
   }
 
+  // r151g 安全复审(建议 4):占位 409 前移到入口钩子之前。点跨会话卡片的消息会先经入口钩子 redeemClaim
+  // 消耗一次性凭据;若 409 还在钩子之后,凭据已被消耗而本应答又不会 requeue,卡片只能等 60 秒兜底结算。
+  // 这里先判一次(此时 turnRecord 可能为 null,dropTurnRecord 已能处理);下面入口钩子之后与冷启前原有
+  // 两道检查保留作竞态兜底 —— 钩子 await、等旧进程退出的这几秒里都可能才出现占位。
+  if (sessionId && sessionSlotReserved(sessionId)) {
+    dropTurnRecord(turnRecord);
+    return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+  }
+
   // r151b X.1.9:/chat 路由入口改写位(没挂接 = 跳过,不多 await)。拒绝 → 撤掉本回合记录、回它给的应答、不起进程;
   // 改写 → 本回合推给模型的内容换成它给的(R13 指纹仍按请求原文算,同 clientTurnId 重发照旧命中上面的记录)。
   // r151c:经 startInternalTurn 起的回合 = 调用方给的对象;HTTP 请求恒为 null(Symbol 键,请求里带不进来)。
@@ -2227,7 +2236,8 @@ async function handleChatPost(req, res) {
 
   // r151g 项3:同一会话有槽正被别的请求占着(选中到消息推进进程之间)→ 新的 /chat 直接 409 CHAT_SESSION_BUSY,
   // 不推进那个进程、不另起进程。用户消息与跨会话内部回合都算(内部回合由既有调度退回排队、之后重判);
-  // 放在入口钩子之后、复用扫描之前(冷启路径建 slot 之前还会再查一次)。
+  // 放在入口钩子之后、复用扫描之前(冷启路径建 slot 之前还会再查一次)。入口处已先判过同一道(建议 4,
+  // 避免钩子先消耗卡片凭据);这里兜住钩子 await 期间新出现的占位。
   if (sessionId && sessionSlotReserved(sessionId)) {
     dropTurnRecord(turnRecord);
     return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
@@ -2521,8 +2531,8 @@ async function handleChatPost(req, res) {
     const slotHasLiveShell = (s) => [...(s?.liveTasks?.values() ?? [])].some(t => t && t.kind === 'shell');
     const keepWaitingLiveShell = (s) => slotHasLiveShell(s) && !s?.abort?.signal?.aborted;
     // r151g 项5:已发起中止、带着活后台命令的槽,进程可能比流晚退 —— SDK 中止后先结束生成器(pumpEnded),
-    // CLI 进程还被后台命令吊着(实测 SIGTERM 后再拖 2 秒)。这种槽要等满原有 4 秒上限,别在它还没退出时
-    // 就起新进程抢同一 jsonl;到点仍有它就照旧走下面的强制兜底(再 abort / 关输入都是幂等的)。
+    // CLI 进程还被后台命令吊着(实测 SIGTERM 后再拖 2 秒)。这种槽要等它退出(仍受原有 4 秒上限),别在
+    // 它还没退出时就起新进程抢同一 jsonl;到点仍有它就照旧走下面的强制兜底(再 abort / 关输入都是幂等的)。
     let abortedLiveShell = null;
     while ((lingering = tearingDown()) && Date.now() < deadline) {
       if (keepWaitingLiveShell(lingering)) { lingering = null; break; } // 保活且没被中止:不等不杀,容忍双 resume
@@ -2530,12 +2540,27 @@ async function handleChatPost(req, res) {
       await new Promise((r) => setTimeout(r, 50));
     }
     if (abortedLiveShell) {
-      while (Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
-      if (!lingering) lingering = abortedLiveShell;
+      // r151g 安全复审(建议 5):不再无条件等满 4 秒,但必须区分"泵收尾"与"进程真退"。
+      // finishSlot 在生成器结束时就置 pumpEnded 并把 exitCode 补成 0 —— 对带活后台命令的槽,这两个
+      // 信号都早于 CLI 进程真正退出(实测 SIGTERM 后再拖 1–2 秒),拿它们当退出判据会在旧进程还活着
+      // 时起新 --resume(E10 验收锁这条)。这类槽没有可观察的进程退出句柄,只能按原有 4 秒上限兜;
+      // 没有活后台命令的槽:泵一收尾/exitCode 一落就立即退出,不再白等满 4 秒。
+      if (slotHasLiveShell(abortedLiveShell)) {
+        while (Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+        if (!lingering) lingering = abortedLiveShell;
+      } else {
+        const settled = () => abortedLiveShell.pumpEnded || abortedLiveShell.exitCode !== null;
+        while (!settled() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+        if (!settled() && !lingering) lingering = abortedLiveShell;
+      }
     }
+    // r151g 安全复审(建议 5):deadline 边界上 lingering 仍可能"带活 shell 且未发起中止"(第一段循环恰好
+    // 超时)。铁律不变:误杀不可恢复 > 双 resume 竞争 —— 不杀它,按"被后台命令吊着、与新进程并存"处理。
+    if (lingering && slotHasLiveShell(lingering) && !lingering.abort?.signal?.aborted) lingering = null;
     if (lingering) {
-      // 走到这里 lingering 要么没有活 shell,要么是已发起中止、等满 4 秒仍没退出的(不再受"活 shell
-      // 误杀"保护),都是正在停止/被弃用的进程;强制 abort 是正确兜底,避免同 sid 双 --resume 抢会话锁。
+      // 走到这里 lingering 已经过活 shell 保护:要么没有活 shell,要么活 shell 但已发起中止、等满 4 秒
+      // 仍未退出(未中止的活 shell 已在上面置 null 跳过);都是正在停止/被弃用的进程,强制 abort 是正确
+      // 兜底,避免同 sid 双 --resume 抢会话锁。
       lingering.closing = true;
       // r151c 旁路 (b):被后到的请求中止的回合按"收到停止请求"结束(回合结束通知报 stopped,而不是 failed)
       if (lingering.runtimeTurn) lingering.runtimeTurn.stopRequested = true;
@@ -3264,20 +3289,29 @@ function sessionLiveGuiMode(sessionId) {
 }
 
 /**
- * 一次切档请求完成:代数 +1、记确认档位、清"切档进行中"标记。三件事之间没有 await(调用方保证同步调用),
- * 所以排在后面的消息不会读到"代数变了但确认档位还是旧的"这类中间态。
+ * 一次切档请求完成:清"切档进行中"标记;形状合法的会话再代数 +1、记确认档位。之间没有 await(调用方保证
+ * 同步调用),所以排在后面的消息不会读到"代数变了但确认档位还是旧的"这类中间态。
  */
 function finishSessionModeSwitch(sessionId, switchKey, confirmedMode) {
-  const key = sessionModeStateKey(sessionId);
-  const st = sessionModeGenerations.get(key) || { gen: 0, confirmedMode: null };
-  st.gen += 1;
-  if (typeof confirmedMode === 'string' && VALID_PERMISSION_MODES.has(confirmedMode)) st.confirmedMode = confirmedMode;
-  sessionModeGenerations.delete(key); // 重新排到最后:满了先淘汰最久没动的(见 SESSION_MODE_GEN_MAX)
-  if (sessionModeGenerations.size >= SESSION_MODE_GEN_MAX) sessionModeGenerations.delete(sessionModeGenerations.keys().next().value);
-  sessionModeGenerations.set(key, st);
+  // r151g 安全复审(重要 1):代数表只收形状合法的会话 id。这张表按会话长期累积,而 `/chat/permission-mode`
+  // 走全局 25MB 解析器、回环免密,原来把任意 sessionId 小写后直接当长期键 → 连发 1024 个不同的大字符串
+  // 就能常驻放大内存(上限只限条数不限字节),还能把目标会话条目挤出 LRU。
+  // 真实会话 id 恒为 uuid(isSessionIdShape 只放行 36 位 uuid 字符);形状不合法的 id 不是真实会话,不记代数。
+  // 不改接口行为:这类请求照旧回 200(只是没有代数可记),既有"非 UUID 也会 200"的单测不变。LRU 淘汰保留。
+  // 计数与写表无关:无论 id 形状是否合法都要清,不能漏(漏了该会话的"切档进行中"标记会永远非零)。
+  // 先清计数,再决定写不写代数表。
   const left = (permissionModeSwitching.get(switchKey) || 1) - 1;
   if (left > 0) permissionModeSwitching.set(switchKey, left);
   else permissionModeSwitching.delete(switchKey);
+  if (typeof sessionId === 'string' && isSessionIdShape(sessionId)) {
+    const key = sessionModeStateKey(sessionId);
+    const st = sessionModeGenerations.get(key) || { gen: 0, confirmedMode: null };
+    st.gen += 1;
+    if (typeof confirmedMode === 'string' && VALID_PERMISSION_MODES.has(confirmedMode)) st.confirmedMode = confirmedMode;
+    sessionModeGenerations.delete(key); // 重新排到最后:满了先淘汰最久没动的(见 SESSION_MODE_GEN_MAX)
+    if (sessionModeGenerations.size >= SESSION_MODE_GEN_MAX) sessionModeGenerations.delete(sessionModeGenerations.keys().next().value);
+    sessionModeGenerations.set(key, st);
+  }
 }
 
 // ── r151g 项3:复用槽占位 ────────────────────────────────────────────────────────────────
