@@ -3282,8 +3282,10 @@ let chatReserveSeq = 0;
 /** 该会话有没有正被请求占着的槽(占位令牌)。同会话新的 /chat 请求据此直接 409。 */
 function sessionSlotReserved(sessionId) {
   if (typeof sessionId !== 'string' || !sessionId) return false;
+  // r151g 判官建议:与代数表 / 锁键同口径,两侧都先小写再比(只统一大小写,命中占位仍直接 409,不放宽)。
+  const key = sessionModeStateKey(sessionId);
   for (const s of activeProcesses.values()) {
-    if (s.sessionId === sessionId && s.reservedBy) return true;
+    if (String(s.sessionId || '').toLowerCase() === key && s.reservedBy) return true;
   }
   return false;
 }
