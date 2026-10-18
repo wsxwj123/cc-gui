@@ -4,9 +4,15 @@
 // liveTasks 永久留一条本 epoch 活条目 → busyNonShell 恒 true → 看门狗永不触发 →
 // done 永不发 → isStreaming 永久 true,输入框永久卡"停止"。这是唯一能把状态机
 // 真正卡死的路径(其余"卡住"多是主回合确实还没结束,显示是对的)。
+// r151h 前提变化:CLI 新版后台工作 pending 时会话不空闲、可长时间无输出,旧前提
+// "shell 永不计入看门狗忙判据"已不成立。hasFreshNonShellTask 仍只统计非 shell(语义
+// 不变,供其它判据用);看门狗改用 busyLive = busyNonShell || hasFreshShellTask(新鲜 shell
+// 算忙,陈旧 shell 仍不算 —— 防终态通知丢失的残留永久解除看门狗)。
 // 直接 import chat.js 的真函数(非复刻)。
 import assert from 'node:assert/strict';
-import { hasFreshNonShellTask, hasCurrentEpochNonShellTask, reconcileLiveTasks } from '../../server/routes/chat.js';
+import {
+  hasFreshNonShellTask, hasFreshShellTask, hasCurrentEpochNonShellTask, reconcileLiveTasks, resolveStallMs,
+} from '../../server/routes/chat.js';
 
 const FRESH = 30 * 60 * 1000;
 const now = 1_000_000_000;
@@ -21,9 +27,10 @@ const old = (ms) => now - ms;
   // ② 本回合且新鲜 → 算忙,看门狗不动它(真在跑的子代理不能被误杀)
   assert.equal(hasFreshNonShellTask(new Map([['t', { kind: 'subagent', epoch: 3, createdAt: old(60_000) }]]), now, FRESH),
     true, '新鲜的非 shell 任务仍算忙');
-  // ③ shell 永不计入(后台 bash 不阻塞主控,原语义)
+  // ③ shell 不计入 hasFreshNonShellTask(其 kind 语义不变;看门狗的 shell 豁免见下方
+  //    hasFreshShellTask 用例,组合判据才是看门狗真正用的忙碌口径)
   assert.equal(hasFreshNonShellTask(new Map([['t', { kind: 'shell', epoch: 3, createdAt: now }]]), now, FRESH),
-    false, 'shell 条目不计入 busyNonShell');
+    false, 'shell 条目不计入 hasFreshNonShellTask(kind 语义不变)');
   // ④ 跨回合但新鲜的 teammate 仍算忙(两支合并不得把它误杀 —— abort 会连坐杀宿主进程)
   assert.equal(hasFreshNonShellTask(new Map([['t', { kind: 'subagent', epoch: 1, createdAt: old(60_000) }]]), now, FRESH),
     true, '跨回合但新鲜的后台子代理仍算忙');
@@ -35,6 +42,58 @@ const old = (ms) => now - ms;
   assert.equal(hasFreshNonShellTask(null, now, FRESH), false, '无 liveTasks 不炸');
   assert.equal(hasFreshNonShellTask(new Map([['t', { kind: 'subagent', createdAt: Date.now() }]])), true,
     'now/freshMs 缺省 = Date.now()/30min,默认参数不能把判据废掉');
+}
+
+// ── r151h:新鲜后台 shell 任务也解除看门狗(强拆进程会连坐杀后台命令) ──────
+{
+  // ① 新鲜 shell → 算忙:CLI 新版后台工作 pending 时会话不空闲、可长时间无输出,
+  //    看门狗若 5 分钟拆进程,进程里的后台命令会被连带杀掉且不可恢复。
+  assert.equal(hasFreshShellTask(new Map([['t', { kind: 'shell', epoch: 3, createdAt: old(60_000) }]]), now, FRESH),
+    true, '新鲜 shell 任务算忙(看门狗不拆进程)');
+  // ② 陈旧 shell → 不算忙:终态通知丢失的残留不能永久解除看门狗
+  assert.equal(hasFreshShellTask(new Map([['t', { kind: 'shell', epoch: 3, createdAt: old(40 * 60 * 1000) }]]), now, FRESH),
+    false, '陈旧 shell 条目不解除看门狗');
+  // ③ 边界:年龄 = 窗长算陈旧(与 `<` 判据逐字一致,同 hasFreshNonShellTask)
+  assert.equal(hasFreshShellTask(new Map([['t', { kind: 'shell', createdAt: old(FRESH) }]]), now, FRESH),
+    false, 'shell 年龄 = 窗长算陈旧');
+  // ④ 只有 shell 算 shell;subagent / unknown 不算
+  assert.equal(hasFreshShellTask(new Map([['t', { kind: 'subagent', createdAt: now }]]), now, FRESH),
+    false, 'subagent 不算 shell');
+  assert.equal(hasFreshShellTask(new Map([['t', { kind: 'unknown', createdAt: now }]]), now, FRESH),
+    false, 'unknown 不算 shell');
+  // ⑤ 健壮性:空表 / null / null 条目 / 缺 createdAt(按 0 算陈旧)都不炸
+  assert.equal(hasFreshShellTask(new Map(), now, FRESH), false, '空表不算忙');
+  assert.equal(hasFreshShellTask(null, now, FRESH), false, '无 liveTasks 不炸');
+  assert.equal(hasFreshShellTask(new Map([['t', null]]), now, FRESH), false, 'null 条目不炸');
+  assert.equal(hasFreshShellTask(new Map([['t', { kind: 'shell' }]]), now, FRESH),
+    false, '缺 createdAt 按 0 算陈旧,不算忙');
+  // ⑥ 默认参数可用(now/freshMs 缺省 = Date.now()/30min)
+  assert.equal(hasFreshShellTask(new Map([['t', { kind: 'shell', createdAt: Date.now() }]])), true,
+    '默认参数不能把 shell 判据废掉');
+  // ⑦ 组合判据(busyLive)逐条对照:非 shell 新鲜任务或新鲜 shell 任务才算忙
+  const busyLive = (liveTasks) => hasFreshNonShellTask(liveTasks, now, FRESH)
+    || hasFreshShellTask(liveTasks, now, FRESH);
+  assert.equal(busyLive(new Map([['t', { kind: 'shell', createdAt: now }]])), true,
+    '组合判据:新鲜 shell 算忙');
+  assert.equal(busyLive(new Map([['t', { kind: 'shell', createdAt: old(FRESH) }]])), false,
+    '组合判据:陈旧 shell 不豁免');
+  assert.equal(busyLive(new Map([['t', { kind: 'subagent', createdAt: now }]])), true,
+    '组合判据:新鲜非 shell 仍算忙(原有防误杀语义不变)');
+}
+
+// ── r151h:CGUI_STALL_MS 阈值解析(默认 300000,合法正整数且 ≥1000) ─────────
+{
+  assert.equal(resolveStallMs(undefined), 300_000, '缺省回默认 300000');
+  assert.equal(resolveStallMs(null), 300_000, 'null 回默认 300000');
+  assert.equal(resolveStallMs(''), 300_000, '空串回默认 300000');
+  assert.equal(resolveStallMs('abc'), 300_000, '非数字回默认 300000');
+  assert.equal(resolveStallMs('999'), 300_000, '小于下限 1000 回默认 300000');
+  assert.equal(resolveStallMs('1000'), 1000, '下限 1000 生效');
+  assert.equal(resolveStallMs('1500'), 1500, '合法值生效');
+  assert.equal(resolveStallMs('1.5'), 300_000, '非整数回默认 300000');
+  assert.equal(resolveStallMs('0'), 300_000, '0 回默认 300000');
+  assert.equal(resolveStallMs('-1500'), 300_000, '负数回默认 300000');
+  assert.equal(resolveStallMs(300_000), 300_000, '数字 300000 原样生效');
 }
 
 {
@@ -100,10 +159,28 @@ const old = (ms) => now - ms;
     '不得再出现"epoch 支无年龄上限"的旧判据');
   assert.equal(src.match(/const LIVE_TASK_FRESH_MS = 30 \* 60 \* 1000;/g)?.length, 1,
     'LIVE_TASK_FRESH_MS 保持 30 分钟 —— A3 不得趁机调小,那会成倍放大误杀真长任务的概率');
-  // 看门狗触发条件的其余部分(idle / turnSubagentSeen / revived)未动
-  assert.ok(/if \(!slot\.idle && \(slot\.turnSubagentSeen \|\| slot\.revived\) && !busyNonShell\)/.test(src),
+  // r151h:新鲜后台 shell 任务也豁免看门狗(CLI 新版后台工作 pending 时会话不空闲)
+  assert.ok(/export function hasFreshShellTask\(liveTasks, now = Date\.now\(\), freshMs = LIVE_TASK_FRESH_MS\)/.test(src),
+    '必须导出 hasFreshShellTask(纯函数,供看门狗与单测使用)');
+  assert.ok(/t\.kind === 'shell' && now - \(t\.createdAt \|\| 0\) < freshMs/.test(src),
+    'hasFreshShellTask 必须只认 kind=shell 且年龄 < freshMs');
+  assert.ok(/t\.kind !== 'shell' && now - \(t\.createdAt \|\| 0\) < freshMs/.test(src),
+    'hasFreshNonShellTask 的 kind 语义不得被改(shell 仍不计入该判据)');
+  assert.ok(/const busyLive = busyNonShell \|\| hasFreshShellTask\(slot\.liveTasks, now, LIVE_TASK_FRESH_MS\);/.test(src),
+    '看门狗忙判据必须并入新鲜 shell:busyLive = busyNonShell || hasFreshShellTask(...)');
+  // 看门狗触发条件的其余部分(idle / turnSubagentSeen / revived)未动,忙判据改用 busyLive
+  assert.ok(/if \(!slot\.idle && \(slot\.turnSubagentSeen \|\| slot\.revived\) && !busyLive\)/.test(src),
     '看门狗触发条件的其余三项不得被顺手改掉');
-  assert.ok(/const STALL_MS = 300_000;/.test(src), '静默阈值 300s 不得改');
+  // r151h:STALL_MS 启动时读 CGUI_STALL_MS(通用可调阈值,缺省/非法 = 300000)
+  assert.ok(/const STALL_MS = resolveStallMs\(process\.env\.CGUI_STALL_MS\);/.test(src),
+    'STALL_MS 必须在启动时读取 CGUI_STALL_MS,不得写死');
+  assert.ok(/const STALL_MS_DEFAULT = 300_000;/.test(src), '静默阈值默认必须是 300000');
+  assert.ok(/Number\.isInteger\(ms\) && ms >= 1000 \? ms : STALL_MS_DEFAULT/.test(src),
+    'CGUI_STALL_MS 只接受合法正整数且 ≥1000,其余回落默认 300000');
+  assert.ok(!/const STALL_MS = \d/.test(src), 'STALL_MS 不得被改回裸数字');
+  assert.equal(src.match(/\b300_000\b/g)?.length, 1,
+    '默认阈值只保留一个 300_000(不得另写裸 300000 之外的阈值)');
+  assert.ok(/\}, STALL_MS\);/.test(src), '看门狗定时器必须使用 STALL_MS');
 }
 
-console.log('✓ check-stall-watchdog: 年龄上限 9 断言 + level 续命 + R1 降级三态 + 源码守卫 全过');
+console.log('✓ check-stall-watchdog: 年龄上限 9 断言 + level 续命 + R1 降级三态 + 新鲜 shell 豁免(busyLive) + CGUI_STALL_MS 解析 + 源码守卫 全过');
