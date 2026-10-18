@@ -566,3 +566,120 @@ test('F12 行为12 常驻进程跑着带 clientTurnId 的回合,随后改动让�
     await inst.stop();
   }
 });
+
+// ============================ G. 判官后补的行为(证据缺口两条) ============================
+
+test('G13 同会话并发用户消息 → 409 CHAT_SESSION_BUSY:复用空闲进程、换模型压住 4 秒期间再发一条普通消息,第二条被拒;该会话仍只有原来那个进程、第二条没有自己的回合,第一条照常 200 并跑完', async () => {
+  const inst = await startInst('g13');
+  const run = uniq('');
+  let T = null;
+  try {
+    T = newT(inst, 'g13');
+    const p1 = await resident(inst, T, { mode: 'default', model: 'r151-chat', note: `G13 第一回合 ${run}` });
+    await settle(8_000);
+    expect(await procPids(inst.c, T.sid), '前置:T 恰有一个回合间空闲的常驻进程').toEqual([p1]);
+    fxModelDelayFirst(inst.ctl, T.sid, p1, 4_000);
+    const held = writeHeldScript(inst, `g13held${run}`);
+    let firstDone = false;
+    const firstP = chatStart(inst.c, T, { prompt: `R151G G13 第一条 ${run} R151S:${held.name}`, mode: 'default', model: 'r151-reasoner', postMs: 45_000 })
+      .then((r) => { firstDone = true; return r; });
+    const delayed = await waitFor(() => modelLog(inst.ctl, T.sid).find((x) => x.action === 'delayed'), 10_000, 50);
+    expect(delayed, `夹具生效:换模型请求被压住(换模型记录:${JSON.stringify(modelLog(inst.ctl, T.sid))})`).toBeTruthy();
+
+    // 压住的 4 秒窗口内,对同一会话再发一条普通消息:应被 409 拒掉 —— 不挤进同一个进程,也不另起进程。
+    const second = await chatStart(inst.c, T, { prompt: `R151G G13 第二条 ${run}`, mode: 'default', postMs: 12_000 });
+    const firstWasPending = !firstDone;
+    const pidsDuringWindow = await procPids(inst.c, T.sid);
+
+    const firstStart = await firstP;
+    expect(firstStart.status, `前置:第一条照常 200(${String(firstStart.text).slice(0, 240)})`).toBe(200);
+    const streamP = readStream(firstStart.body.pid, { timeoutMs: 60_000, base: inst.c.base });
+    held.release();
+    const evs = await streamP;
+    await sleep(1_000);
+    const firstTurn = turnsOf(inst.ctl, T.sid).find((x) => String(x.text).includes(`G13 第一条 ${run}`)) || null;
+    const secondTurn = turnsOf(inst.ctl, T.sid).find((x) => String(x.text).includes(`G13 第二条 ${run}`)) || null;
+    const pidsAfter = await procPids(inst.c, T.sid);
+    expect({
+      firstWasPendingWhenSecondSent: firstWasPending,
+      secondStatus: second.status,
+      secondOk: second.body && second.body.ok,
+      secondCode: second.body && second.body.code,
+      secondError: second.body && second.body.error,
+      firstStatus: firstStart.status,
+      firstTurnOnOriginalProcess: firstTurn ? firstTurn.pid === p1 : null,
+      firstTurnRanToEnd: evs.some((e) => e && (e.type === 'result' || e.type === 'done')),
+      secondHasNoTurnOfItsOwn: secondTurn === null,
+      pidsDuringWindow,
+      pidsAfter,
+    }, `第二条应答原文:${String(second.text).slice(0, 300)};第一条应答原文:${String(firstStart.text).slice(0, 200)};原进程 ${p1};窗口内进程列表 ${JSON.stringify(pidsDuringWindow)};结束后 ${JSON.stringify(pidsAfter)};第一条回合 ${JSON.stringify(firstTurn)};第二条回合 ${JSON.stringify(secondTurn)};事件类型 ${JSON.stringify(evs.map((e) => e && e.type))};换模型记录 ${JSON.stringify(modelLog(inst.ctl, T.sid))}`)
+      .toEqual({
+        firstWasPendingWhenSecondSent: true,
+        secondStatus: 409,
+        secondOk: false,
+        secondCode: 'CHAT_SESSION_BUSY',
+        secondError: '会话正在运行',
+        firstStatus: 200,
+        firstTurnOnOriginalProcess: true,
+        firstTurnRanToEnd: true,
+        secondHasNoTurnOfItsOwn: true,
+        pidsDuringWindow: [p1],
+        pidsAfter: [p1],
+      });
+  } finally {
+    if (T) releaseAll(inst, T.sid);
+    await inst.stop();
+  }
+});
+
+test('G14 行为1 的 permissionMode 直接观测:复用「放任」空闲进程、换模型压住 4 秒期间切到逐步确认(回 200),这一回合开始时 /api/agents/active 里该会话 chat-process 的 permissionMode 是 "default",不是消息里的 "bypassPermissions"', async () => {
+  const inst = await startInst('g14');
+  const run = uniq('');
+  let T = null;
+  try {
+    T = newT(inst, 'g14');
+    const p1 = await resident(inst, T, { mode: 'bypassPermissions', model: 'r151-chat', note: `G14 第一回合 ${run}` });
+    await settle(8_000);
+    expect(await procPids(inst.c, T.sid), '前置:T 恰有一个回合间空闲的「放任」进程').toEqual([p1]);
+    fxModelDelayFirst(inst.ctl, T.sid, p1, 4_000);
+    const held = writeHeldScript(inst, `g14held${run}`);
+    const chatP = chatStart(inst.c, T, { prompt: `R151G G14 第一条 ${run} R151S:${held.name}`, mode: 'bypassPermissions', model: 'r151-reasoner', postMs: 45_000 });
+    const delayed = await waitFor(() => modelLog(inst.ctl, T.sid).find((x) => x.action === 'delayed'), 10_000, 50);
+    expect(delayed, `夹具生效:换模型请求被压住(换模型记录:${JSON.stringify(modelLog(inst.ctl, T.sid))})`).toBeTruthy();
+
+    const sw = await switchMode(inst.c, T.sid, 'default', 25_000);
+    const start = await chatP;
+    expect(start.status, `前置:发出这条带「放任」、换模型的消息(${String(start.text).slice(0, 240)})`).toBe(200);
+    const turn = await waitTurn(inst, T, `G14 第一条 ${run}`);
+    expect(turn, `前置:这一回合真的开始了(回合记录:${JSON.stringify(turnsOf(inst.ctl, T.sid).slice(-3))})`).toBeTruthy();
+
+    // 端点条目可能比回合记录晚一拍出现:最多轮询 5 秒。
+    const entry = await waitFor(async () => {
+      const r = await inst.c.get('/api/agents/active');
+      const list = r.body && Array.isArray(r.body.agents) ? r.body.agents : [];
+      return list.find((x) => x && x.kind === 'chat-process' && x.sessionId === T.sid) || null;
+    }, 5_000, 100);
+    const pids = await procPids(inst.c, T.sid);
+    expect({
+      switchStatus: sw.status,
+      switchWithin20s: sw.elapsed <= 20_000,
+      firstStatus: start.status,
+      turnOnOriginalProcess: turn ? turn.pid === p1 : null,
+      activeEntryFound: Boolean(entry),
+      activePermissionMode: entry && entry.permissionMode,
+      pids,
+    }, `切档应答原文:${String(sw.text).slice(0, 300)};用时 ${sw.elapsed}ms;active 条目 ${JSON.stringify(entry)};原进程 ${p1};进程列表 ${JSON.stringify(pids)};这一回合 ${JSON.stringify(turn)}`)
+      .toEqual({
+        switchStatus: 200,
+        switchWithin20s: true,
+        firstStatus: 200,
+        turnOnOriginalProcess: true,
+        activeEntryFound: true,
+        activePermissionMode: 'default',
+        pids: [p1],
+      });
+  } finally {
+    if (T) releaseAll(inst, T.sid);
+    await inst.stop();
+  }
+});
