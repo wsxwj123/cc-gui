@@ -3261,9 +3261,11 @@ function slotUsable(slot) {
 // 确认档位,就改用它重算两层档位 —— 消息已发出,直接按界面所示档位跑,不让客户端重发(守住 clientTurnId
 // 幂等)。状态只放在 chat.js(不依赖 xsession 模块,避免成环);不依赖跨会话总开关。
 // r151g 判官建议:这张表按会话累积、没有别的清理时机,长跑会一直涨 → 加与项目既有表(xsession 的 LATEST_MODES_MAX /
-// TURN_CHAINS_MAX)同口径的 1024 上限。写入时"重新排到最后 + 满了先删最久没动的"(LRU)。条目被淘汰后该会话的代数
-// 回到 0:极少数正好在派发中的消息会因此看不到"进入之后完成的切档",继续按消息自己带的档位跑 —— 方向是不覆盖、
-// 按消息档位走,不是放宽,可以接受。
+// TURN_CHAINS_MAX)同口径的 1024 上限。写入时"重新排到最后 + 满了先删最久没动的"(LRU)。
+// 窄复审(如实记):条目被淘汰后该会话代数回到 0,正好在派发窗口内的消息看不到"进入之后完成的切档",退回按消息自带
+// 的档位跑。在"界面先乐观切到宽档 + 切档 409 回滚"这条路径上,消息带的恰是那个乐观宽档 —— 所以它极端情况下可能比
+// 界面宽,不是"只会更窄、不覆盖"。本轮保留这个低风险残余,不做 sessionLiveGuiMode 回退:要触发它,攻击者得先写入
+// 1024 条形状合法的假会话 id,且正好撞上目标会话的派发窗口;而本地回环客户端本来就能直接请求宽档,拿不到额外权限。
 const SESSION_MODE_GEN_MAX = 1024;
 const sessionModeGenerations = new Map(); // 会话 id(小写)→ { gen, confirmedMode }
 const sessionModeStateKey = (sessionId) => String(sessionId).toLowerCase();

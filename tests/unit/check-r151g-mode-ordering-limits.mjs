@@ -46,6 +46,10 @@ function functionBody(name) {
   assert.ok(writeAt >= 0, '找不到写代数表的锚点');
   assert.ok(clearAt < writeAt, '必须始终先清计数(形状不合法也不能漏),再按形状决定写不写代数表');
   assert.ok(shapeAt < writeAt, '写表必须在 isSessionIdShape 判真之后');
+  // 窄复审(补锚):清计数必须无条件发生在 isSessionIdShape 分支之外 —— 只锁 clearAt < writeAt / shapeAt < writeAt
+  // 不够:把清计数整体挪进 `if (isSessionIdShape(...))` 分支里时,三条既有锚仍全绿,但形状不合法的 id 永远清不掉
+  // 自己的"切档进行中"标记 → 该会话的跨会话回合永远退回排队。故直接锚定 clearAt < shapeAt。
+  assert.ok(clearAt < shapeAt, '清计数必须在 isSessionIdShape 判定之前(不能挪进形状分支,否则不合法 id 的"切档进行中"永久非零)');
   assert.ok(/SESSION_MODE_GEN_MAX/.test(body), 'LRU 淘汰逻辑应保留');
 }
 
