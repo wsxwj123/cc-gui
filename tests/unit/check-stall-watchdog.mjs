@@ -81,7 +81,7 @@ const old = (ms) => now - ms;
     '组合判据:新鲜非 shell 仍算忙(原有防误杀语义不变)');
 }
 
-// ── r151h:CGUI_STALL_MS 阈值解析(默认 300000,合法正整数且 ≥1000) ─────────
+// ── r151h:CGUI_STALL_MS 阈值解析(默认 300000,合法正整数且 1000..2147483647) ─
 {
   assert.equal(resolveStallMs(undefined), 300_000, '缺省回默认 300000');
   assert.equal(resolveStallMs(null), 300_000, 'null 回默认 300000');
@@ -94,6 +94,11 @@ const old = (ms) => now - ms;
   assert.equal(resolveStallMs('0'), 300_000, '0 回默认 300000');
   assert.equal(resolveStallMs('-1500'), 300_000, '负数回默认 300000');
   assert.equal(resolveStallMs(300_000), 300_000, '数字 300000 原样生效');
+  // 上限 = 2^31-1(Node setTimeout 的 delay 上限):超过它的值 Node 会按 1ms 处理,
+  // 定时器立刻触发 → 看门狗立刻 abort 拆进程,所以必须夹到上限并回落默认。
+  assert.equal(resolveStallMs('2147483647'), 2_147_483_647, '上限 2147483647 采用');
+  assert.equal(resolveStallMs('2147483648'), 300_000, '超上限 2147483648 回默认 300000');
+  assert.equal(resolveStallMs('1000000000000000'), 300_000, '超大值(1e15)回默认 300000');
 }
 
 {
@@ -175,8 +180,8 @@ const old = (ms) => now - ms;
   assert.ok(/const STALL_MS = resolveStallMs\(process\.env\.CGUI_STALL_MS\);/.test(src),
     'STALL_MS 必须在启动时读取 CGUI_STALL_MS,不得写死');
   assert.ok(/const STALL_MS_DEFAULT = 300_000;/.test(src), '静默阈值默认必须是 300000');
-  assert.ok(/Number\.isInteger\(ms\) && ms >= 1000 \? ms : STALL_MS_DEFAULT/.test(src),
-    'CGUI_STALL_MS 只接受合法正整数且 ≥1000,其余回落默认 300000');
+  assert.ok(/Number\.isInteger\(ms\) && ms >= 1000 && ms <= 2_147_483_647 \? ms : STALL_MS_DEFAULT/.test(src),
+    'CGUI_STALL_MS 只接受 1000..2147483647(Node setTimeout 上限)的整数,其余回落默认 300000');
   assert.ok(!/const STALL_MS = \d/.test(src), 'STALL_MS 不得被改回裸数字');
   assert.equal(src.match(/\b300_000\b/g)?.length, 1,
     '默认阈值只保留一个 300_000(不得另写裸 300000 之外的阈值)');

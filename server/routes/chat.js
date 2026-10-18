@@ -639,12 +639,14 @@ const KEEPALIVE_IDLE_MS = 15 * 60 * 1000;
 const LIVE_TASK_FRESH_MS = 30 * 60 * 1000;
 
 // 静默看门狗阈值(毫秒),默认 300000(5 分钟)。CGUI_STALL_MS 仅供联调/验收按需
-// 调小阈值(合法正整数且 ≥1000);服务启动时读取一次,缺省/非法值回默认 300000,
-// 默认行为不变。这是通用可调阈值,不是测试专用分支。
+// 调小阈值(合法正整数且 1000 ≤ ms ≤ 2147483647);服务启动时读取一次,缺省/非法值回
+// 默认 300000,默认行为不变。这是通用可调阈值,不是测试专用分支。
+// 上限 2147483647 = 2^31-1,即 Node setTimeout 的 delay 上限:超过它 Node 会按 1ms
+// 处理,定时器立刻触发,看门狗会在回合刚起时就把进程 abort 掉,所以必须夹上限。
 const STALL_MS_DEFAULT = 300_000;
 export function resolveStallMs(raw) {
   const ms = Number(raw);
-  return Number.isInteger(ms) && ms >= 1000 ? ms : STALL_MS_DEFAULT;
+  return Number.isInteger(ms) && ms >= 1000 && ms <= 2_147_483_647 ? ms : STALL_MS_DEFAULT;
 }
 const STALL_MS = resolveStallMs(process.env.CGUI_STALL_MS);
 
