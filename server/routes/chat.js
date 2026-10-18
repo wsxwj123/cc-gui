@@ -385,7 +385,7 @@ const activeProcesses = new Map();
 // liveTasks 里,若照样归入 keptTasks,idle 分支会认为"没有可停对象"直接 no-op、活跃分支的
 // abort 兜底被 shouldSuppressAbort 永久抑制 → 停止彻底失效。故年龄 ≥ LIVE_TASK_FRESH_MS
 // 的跨回合条目按陈旧处理归入可停(与本函数"宁可多停,不让停止静默失效"的原则一致;判据与
-// idleReclaim / 看门狗 busyNonShell 同款)。
+// idleReclaim / 看门狗 busyLive(非 shell / shell 两支)同款)。
 export function partitionStopTasks(liveTasks, turnEpoch, allTasks, now = Date.now()) {
   const shellTasks = [];
   const stoppableTasks = [];
@@ -491,6 +491,17 @@ export function rememberFinishedTask(slot, toolUseId, status) {
 export function hasFreshNonShellTask(liveTasks, now = Date.now(), freshMs = LIVE_TASK_FRESH_MS) {
   return [...(liveTasks?.values() ?? [])]
     .some((t) => t && t.kind !== 'shell' && now - (t.createdAt || 0) < freshMs);
+}
+
+// 静默看门狗的"还有新鲜后台 shell 任务在跑"判据(纯函数,单测同上)。
+// CLI 新版在后台工作 pending 时会话不空闲、可以长时间没有任何输出(模型在等后台任务),
+// 旧前提"shell 后台任务不阻塞主控、回合会自己结束"已不成立。看门狗到点是强拆进程,
+// 连带杀掉进程里的后台命令且不可恢复;为保证"误杀不可恢复",新鲜 shell 一律豁免。
+// 年龄上限仍沿用 LIVE_TASK_FRESH_MS:终态通知丢失的陈旧条目不再豁免,否则残留一条就
+// 永久解除看门狗。hasFreshNonShellTask 的 kind 语义不变(仍只统计非 shell,供其它判据用)。
+export function hasFreshShellTask(liveTasks, now = Date.now(), freshMs = LIVE_TASK_FRESH_MS) {
+  return [...(liveTasks?.values() ?? [])]
+    .some((t) => t && t.kind === 'shell' && now - (t.createdAt || 0) < freshMs);
 }
 
 // level 信号不新鲜时的降级判据(审查 R1)= 修前那支"本回合条目无限期豁免"。
@@ -619,13 +630,23 @@ let sdkCounter = 0;
 // 常驻收益(免冷启/免 MCP 重启/前缀稳定)集中在活跃对话内,挂太久只是白占内存。
 const KEEPALIVE_IDLE_MS = 15 * 60 * 1000;
 
-// liveTasks 条目的"新鲜度"窗口:看门狗 busyNonShell 与 idleReclaim 豁免共用。
-// 超过窗长的条目视为陈旧(终态通知丢失的残留),不再阻塞看门狗/回收;窗内的
+// liveTasks 条目的"新鲜度"窗口:看门狗 busyLive(非 shell / shell 两支)与 idleReclaim
+// 豁免共用。超过窗长的条目视为陈旧(终态通知丢失的残留),不再阻塞看门狗/回收;窗内的
 // 跨回合活任务(teammate 等)仍算活,避免看门狗 abort 宿主进程连坐杀 teammate。
 // 天花板:真活超过 30 分钟的任务可能被误判陈旧 —— 看门狗可能在其仍跑时 finalize
 // 本回合、idle 回收可能杀掉其宿主进程(丢完成通知)。可接受的折中:通知丢失的
 // 陈旧条目会让 5 分钟兜底永不触发/常驻进程永不回收,危害更大。
 const LIVE_TASK_FRESH_MS = 30 * 60 * 1000;
+
+// 静默看门狗阈值(毫秒),默认 300000(5 分钟)。CGUI_STALL_MS 仅供联调/验收按需
+// 调小阈值(合法正整数且 ≥1000);服务启动时读取一次,缺省/非法值回默认 300000,
+// 默认行为不变。这是通用可调阈值,不是测试专用分支。
+const STALL_MS_DEFAULT = 300_000;
+export function resolveStallMs(raw) {
+  const ms = Number(raw);
+  return Number.isInteger(ms) && ms >= 1000 ? ms : STALL_MS_DEFAULT;
+}
+const STALL_MS = resolveStallMs(process.env.CGUI_STALL_MS);
 
 // ── F2:cron(/loop)保活 ──────────────────────────────────────────────────────
 // cron 调度器活在 CLI 子进程内部(print.ts 的 createCronScheduler,1s tick),CronCreate
@@ -2900,12 +2921,13 @@ async function handleChatPost(req, res) {
   };
   // #13 静默看门狗:部分第三方主控模型拿到子代理 tool_result 后,上游既不续写也不发
   // 终态 result → 生成器永久阻塞、回合永不收尾、输入框恒灰(官方无此病)。条件极窄:
-  // 静默超 STALL_MS 且【本回合起过子代理 + 当前无在跑的非 shell 任务 + 尚未收尾】才
+  // 静默超 STALL_MS 且【本回合起过子代理/续跑 + 当前没有任何新鲜活任务 + 尚未收尾】才
   // 主动 finalize 解锁;任何消息到达即重置。正常流(消息间隔远小于阈值)与真在跑的
-  // 子代理(liveTasks 门)都不会触发;shell 后台任务不阻塞主控,不计入等待。
-  // 阈值 300s:第三方 TTFT 常态 60-90s,大上下文/限流重试可更久,180s 只有 2-3x 余量
-  // 会误杀"慢但正常"的请求(判官缺陷2)——砍在生成中途会丢实时答案。300s 给足余量。
-  const STALL_MS = 300_000;
+  // 任务(liveTasks 门)都不会触发。
+  // 旧注释称"shell 后台任务不阻塞主控,不计入等待",该前提在 CLI 新版已不成立:后台工作
+  // pending 时会话不空闲、可以长时间无输出(模型在等后台任务)。看门狗到点是强拆进程,
+  // 会连带杀掉后台命令且不可恢复 —— 故新鲜 shell 任务也一律豁免(见 busyLive)。
+  // 阈值默认 300s;CGUI_STALL_MS 仅供联调/验收调小(启动时读取,见 STALL_MS 常量注释)。
   let stallTimer = null;
   const armStall = () => {
     clearTimeout(stallTimer);
@@ -2922,9 +2944,15 @@ async function handleChatPost(req, res) {
       const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS)
         || (now - (slot.lastLevelAt || 0) >= LIVE_TASK_FRESH_MS
           && hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch));
+      // 忙判据 = 非 shell 任务(含 R1 降级支) || 新鲜 shell 任务。旧前提"shell 不阻塞
+      // 主控"已被 CLI 新版推翻:后台工作 pending 时会话不空闲、可长时间无输出;触发看门狗
+      // 就强拆进程,连坐杀后台命令且不可恢复 → 新鲜 shell 一律豁免。仍沿用
+      // LIVE_TASK_FRESH_MS 年龄上限:终态通知丢失的陈旧条目照旧不算忙,防止残留一条就
+      // 永久解除看门狗(宁漏标不误杀,但不能让陈旧残留把兜底废掉)。
+      const busyLive = busyNonShell || hasFreshShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS);
       // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
       // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
-      if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyNonShell) {
+      if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyLive) {
         // stall_notice:客户端专用渲染分支(中性系统提示 turn,非红色错误)。原用 type:stderr
         // 但客户端 SSE 分发根本不渲染 stderr = 提示白发(判官缺陷3)。
         const stallText = slot.turnSubagentSeen
@@ -3007,7 +3035,8 @@ async function handleChatPost(req, res) {
               : (m.subagent_type ? 'subagent' : 'unknown');
             // epoch=创建时回合世代:优雅判据只数本回合任务,跨回合保留的活条目由 stopTask
             // 全量扇出+notification 收尾负责,陈旧(通知丢失)条目不致毒化 abort 判据(判官 R)。
-            // createdAt:看门狗 busyNonShell 与 idleReclaim 的"新鲜度"判据(见 LIVE_TASK_FRESH_MS)。
+            // createdAt:看门狗 busyLive(非 shell / shell 两支)与 idleReclaim 的"新鲜度"判据
+            // (见 LIVE_TASK_FRESH_MS)。
             slot.liveTasks.set(m.task_id, { toolUseId: m.tool_use_id || null, kind, epoch: slot.turnEpoch | 0, createdAt: Date.now() });
           }
           else if (m.subtype === 'task_notification') {
