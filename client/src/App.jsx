@@ -3165,9 +3165,13 @@ function DenialNotice({ denial }) {
   if (kind !== 'other') {
     const reason = denial.reason || '';
     return (
-      <div data-testid="denial-notice" data-denial-kind={kind} className="max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2">
+      <div data-testid="denial-notice" data-denial-kind={kind} className={kind === 'unavailable'
+        // 审核没给结论时整行居中:这类提示是"环境问题"而不是工具调用的正文,居中最易读;
+        // blocked(审核判定为拦)仍左对齐,保持与工具结果同列的阅读位置。
+        ? 'max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start justify-center gap-2'
+        : 'max-w-[var(--content-max)] mx-auto px-4 py-1.5 flex items-start gap-2'}>
         <Shield size={11} className="shrink-0 mt-0.5 text-ink-faint" />
-        <div className="min-w-0 text-[11px] font-body leading-snug">
+        <div className={kind === 'unavailable' ? 'min-w-0 text-[11px] font-body leading-snug text-center' : 'min-w-0 text-[11px] font-body leading-snug'}>
           {kind === 'blocked'
             ? <><span className="text-ink-muted">已拒绝 {tool}（自动档审核）</span>{reason && <span className="text-ink-faint">：{reason}</span>}</>
             : <span className="text-ink-muted">未执行 {tool}：审核模型没有给出结论（{reason}）。这不是对该操作安全性的判定。</span>}
