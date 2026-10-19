@@ -26,7 +26,7 @@ import { SERVER_EPOCH } from '../utils/server-epoch.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
 import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCache } from '../utils/prompt-cache-env.js';
 import {
-  autoModeServerInjection, gateAutoPermissionMode, thirdPartyAutoPreToolUse, thirdPartyAutoAskOutput, thirdPartyAutoMustPrompt,
+  autoModeServerInjection, autoModeModelInjection, gateAutoPermissionMode, thirdPartyAutoPreToolUse, thirdPartyAutoAskOutput, thirdPartyAutoMustPrompt,
 } from '../services/auto-audit.js';
 import { readThirdPartyAutoSync } from './prefs.js';
 
@@ -1597,7 +1597,7 @@ function readSettingsSplit() {
   return settingsSplitCache;
 }
 
-export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, globalRead, dirs, maxBudgetUsd, acw, genui, ams }) { // export 仅为可单测
+export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSuggestions, globalRead, dirs, maxBudgetUsd, acw, genui, ams, amm }) { // export 仅为可单测
   const { nonPerm, perm } = readSettingsSplit();
   if (lastPermFp === null) lastPermFp = perm;              // 首次调用建基线,不推进代数
   else if (perm !== lastPermFp) {
@@ -1648,6 +1648,9 @@ export function chatCompatKey({ workingDir, effort, appendSystemPrompt, promptSu
     // r151a:进程环境里注入的 CLAUDE_CODE_AUTO_MODE_SERVER(spawn 时定死)。只在注入时出现 ——
     // 官方 / 第三方 auto 总开关关时键与改动前逐字相同;开关翻转后该会话下一条消息换新进程。
     ...(ams ? { ams } : {}),
+    // r151j:进程环境里注入的分类器(审核)模型(spawn 时定死)。只在注入时出现 —— 没注入时键与
+    // 改动前逐字相同;审核模型改了,下一条消息换新进程,否则旧进程会继续用旧审核模型。
+    ...(amm ? { amm } : {}),
     // r151c:挂着 sessionOptions(跨会话总开关开)时冷启的进程带会话工具 —— 只在挂着时出现,关时键与改动前逐字相同;
     // 开关翻转后该会话下一条消息换新进程(带不带工具在 spawn 时定死)。
     ...(runtimeHooks.sessionOptions ? { xs: 1 } : {}),
@@ -2361,6 +2364,7 @@ async function handleChatPost(req, res) {
     maxBudgetUsd: budget,
     acw: acwSettings?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? null,
     ams: childEnv.CLAUDE_CODE_AUTO_MODE_SERVER ?? null,
+    amm: childEnv.CLAUDE_CODE_AUTO_MODE_MODEL ?? null,
     genui,
   });
   if (sessionId) {
@@ -4667,6 +4671,12 @@ export function cleanChildEnv() {
     // 同样必须在 strip 之后(宿主自己的同名键先被剥掉)。开关关 = 不注入 = 与改动前相同。
     const ams = autoModeServerInjection(se, readThirdPartyAutoSync());
     if (ams !== null) out.CLAUDE_CODE_AUTO_MODE_SERVER = ams;
+    // r151j:同一个第三方 auto 开关下,把「审核模型」(settings.json 的 sonnet 档)显式作为 CLI 的
+    // 分类器模型传下去(CLAUDE_CODE_AUTO_MODE_MODEL)。不靠 CLI 版本默认解析 —— 不同版本的分类器
+    // 默认模型不同(2.1.302 = claude-sonnet-5,另一台机器解析到 claude-opus-4-6[1m] → 第三方 400
+    // → 全部工具调用被拒)。规则见 autoModeModelInjection;同样必须在 strip 之后(宿主同名键先剥掉)。
+    const amm = autoModeModelInjection(se, readThirdPartyAutoSync());
+    if (amm !== null) out.CLAUDE_CODE_AUTO_MODE_MODEL = amm;
   } catch {}
   return out;
 }

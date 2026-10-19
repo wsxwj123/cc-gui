@@ -22,6 +22,27 @@ export function autoModeServerInjection(settingsEnv, enabled) {
   return '0';
 }
 
+// 会话进程环境里要不要注入 CLAUDE_CODE_AUTO_MODE_MODEL(返回要注入的模型名,或 null = 不注入)。
+// CLI 的「自动」档分类器(审核)模型可以用 CLAUDE_CODE_AUTO_MODE_MODEL 显式指定 —— 本机真 CLI
+// (2.1.302)探针验证:设了它,分类器请求就带该 model(无视 tier 映射);不设时分类器默认按
+// sonnet 档解析(该版本默认 claude-sonnet-5)。但不同 CLI 版本默认解析不同(另一台机器出现过
+// claude-opus-4-6[1m] 被拿去当分类器模型 → 第三方 provider 回 400 → 所有工具调用被拒),
+// 只靠 sonnet 档映射不足以保证生效。所以第三方下由 GUI 把「审核模型」(= sonnet 档)显式传下去:
+//   settings.json 的 env.ANTHROPIC_BASE_URL 是非官方地址 + 第三方 auto 总开关开 + env 里没写过该键
+//   → env.ANTHROPIC_DEFAULT_SONNET_MODEL(非空字符串);其余一律 null(官方 / 开关关 = 与改动前相同;
+//   用户在 settings.json 显式写了该键就由它自己生效,不覆盖)。
+// 官方判据与 autoModeServerInjection 同源(isOfficialAnthropic)。注入值来自用户设置的模型名,
+// 不是任意环境输入。若 CLI 版本不认该变量,最坏情况与改动前相同(回落 sonnet 档/默认),不制造新故障。
+export function autoModeModelInjection(settingsEnv, enabled) {
+  if (enabled !== true) return null;
+  if (!settingsEnv || typeof settingsEnv !== 'object' || Array.isArray(settingsEnv)) return null;
+  const base = settingsEnv.ANTHROPIC_BASE_URL;
+  if (typeof base !== 'string' || !base || isOfficialAnthropic(base)) return null;
+  if (hasOwn(settingsEnv, 'CLAUDE_CODE_AUTO_MODE_MODEL')) return null;
+  const sonnet = settingsEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
+  return typeof sonnet === 'string' && sonnet ? sonnet : null;
+}
+
 // 不能当审核模型的型号:CLI 遇到它们会无视设置、改用内置默认(调研 Y §1)。
 // 规则:转小写后等于或以这两个前缀开头(前缀匹配,所以带日期 / [1m] 的变体同样算)。
 const UNUSABLE_AUDITOR_PREFIXES = ['claude-sonnet-5-5', 'claude-opus-5-5'];

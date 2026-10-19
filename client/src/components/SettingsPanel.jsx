@@ -3030,7 +3030,7 @@ function ThirdPartyAutoSection() {
         {status && !official && status.enabled === true && status.auditModelSource === 'default' && status.auditModel && (
           <div data-testid="auto-audit-model-unset" className="text-[10.5px] text-amber-700 font-body">{`尚未选择审核模型，当前使用该 provider 的默认模型 ${status.auditModel}。`}</div>
         )}
-        <div data-testid="auto-audit-alias-note" className="text-[10.5px] text-ink-faint font-body">审核模型与 sonnet 档共用同一设置：以 sonnet 别名发起的调用（例如指定 sonnet 的子代理）也使用它。</div>
+        <div data-testid="auto-audit-alias-note" className="text-[10.5px] text-ink-faint font-body">审核模型存在 sonnet 档，并会作为分类器模型显式传给命令行；旧版命令行不认该变量时按 sonnet 档解析。</div>
         <div data-testid="auto-audit-model-hint" className="text-[10.5px] text-ink-faint font-body">审核请求限定了很短的输出长度。把推理型模型设为审核模型时，它可能在限定长度内给不出结论，导致重复请求并拒绝操作。</div>
         {note && <div className="text-[10.5px] text-amber-700 font-body">{note}</div>}
         {err && <div className="text-[11px] text-error font-body">{err}</div>}
