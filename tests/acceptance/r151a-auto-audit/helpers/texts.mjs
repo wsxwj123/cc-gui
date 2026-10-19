@@ -35,7 +35,7 @@ export const UI = {
   ],
   FOLLOW_DEFAULT: '跟随默认模型',
   UNUSABLE_MARK: '不可用作审核模型',
-  ALIAS_NOTE: '审核模型与 sonnet 档共用同一设置：以 sonnet 别名发起的调用（例如指定 sonnet 的子代理）也使用它。',
+  ALIAS_NOTE: '审核模型存在 sonnet 档，并会作为分类器模型显式传给命令行；旧版命令行不认该变量时按 sonnet 档解析。',
   modelUnset: (name) => `尚未选择审核模型，当前使用该 provider 的默认模型 ${name}。`,
   MODEL_HINT: '审核请求限定了很短的输出长度。把推理型模型设为审核模型时，它可能在限定长度内给不出结论，导致重复请求并拒绝操作。',
   RESET_BTN: '清除不可用标记',
