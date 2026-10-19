@@ -384,8 +384,8 @@ const activeProcesses = new Map();
 // now:陈旧判据的时基(默认取当前时刻,单测可注入)。终态通知丢失的残留条目会永远留在
 // liveTasks 里,若照样归入 keptTasks,idle 分支会认为"没有可停对象"直接 no-op、活跃分支的
 // abort 兜底被 shouldSuppressAbort 永久抑制 → 停止彻底失效。故年龄 ≥ LIVE_TASK_FRESH_MS
-// 的跨回合条目按陈旧处理归入可停(与本函数"宁可多停,不让停止静默失效"的原则一致;判据与
-// idleReclaim / 看门狗 busyLive(非 shell / shell 两支)同款)。
+// 的跨回合条目按陈旧处理归入可停(与本函数"宁可多停,不让停止静默失效"的原则一致;跨回合
+// 条目只可能是非 shell,窗口与看门狗非 shell 支同款 LIVE_TASK_FRESH_MS)。
 export function partitionStopTasks(liveTasks, turnEpoch, allTasks, now = Date.now()) {
   const shellTasks = [];
   const stoppableTasks = [];
@@ -494,14 +494,21 @@ export function hasFreshNonShellTask(liveTasks, now = Date.now(), freshMs = LIVE
 }
 
 // 静默看门狗的"还有新鲜后台 shell 任务在跑"判据(纯函数,单测同上)。
-// CLI 新版在后台工作 pending 时会话不空闲、可以长时间没有任何输出(模型在等后台任务),
-// 旧前提"shell 后台任务不阻塞主控、回合会自己结束"已不成立。看门狗到点是强拆进程,
-// 连带杀掉进程里的后台命令且不可恢复;为保证"误杀不可恢复",新鲜 shell 一律豁免。
-// 年龄上限仍沿用 LIVE_TASK_FRESH_MS:终态通知丢失的陈旧条目不再豁免,否则残留一条就
-// 永久解除看门狗。hasFreshNonShellTask 的 kind 语义不变(仍只统计非 shell,供其它判据用)。
-export function hasFreshShellTask(liveTasks, now = Date.now(), freshMs = LIVE_TASK_FRESH_MS) {
+// 窗口用 SHELL_TASK_FRESH_MS(理由见该常量注释):CLI 新版后台工作 pending 时会话不空闲、
+// 可长时间没有输出,看门狗到点强拆进程会连坐杀掉后台命令且不可恢复 → 新鲜 shell 一律豁免;
+// 陈旧条目照旧不豁免,防止残留一条就永久解除看门狗。
+export function hasFreshShellTask(liveTasks, now = Date.now(), freshMs = SHELL_TASK_FRESH_MS) {
   return [...(liveTasks?.values() ?? [])]
     .some((t) => t && t.kind === 'shell' && now - (t.createdAt || 0) < freshMs);
+}
+
+// idleReclaim 的"还有活任务"判据:按 kind 分窗 —— shell 用 SHELL_TASK_FRESH_MS,其它 kind
+// 用 LIVE_TASK_FRESH_MS(窗口理由见常量注释)。纯函数,单测同上。
+export function hasFreshLiveTask(liveTasks, now = Date.now(), freshMsByKind) {
+  const shellMs = freshMsByKind?.shell ?? SHELL_TASK_FRESH_MS;
+  const otherMs = freshMsByKind?.other ?? LIVE_TASK_FRESH_MS;
+  return [...(liveTasks?.values() ?? [])]
+    .some((t) => t && now - (t.createdAt || 0) < (t.kind === 'shell' ? shellMs : otherMs));
 }
 
 // level 信号不新鲜时的降级判据(审查 R1)= 修前那支"本回合条目无限期豁免"。
@@ -517,6 +524,13 @@ export function hasFreshShellTask(liveTasks, now = Date.now(), freshMs = LIVE_TA
 export function hasCurrentEpochNonShellTask(liveTasks, epoch) {
   return [...(liveTasks?.values() ?? [])]
     .some((t) => t && t.kind !== 'shell' && (t.epoch | 0) === (epoch | 0));
+}
+
+// R1 降级支的 shell 侧判据:判据与 hasCurrentEpochNonShellTask 同款(kind==='shell' 且 epoch
+// 相等),只在 level 信号陈旧时用。与长子代理对齐,方向仍是"宁漏标不误杀"。
+export function hasCurrentEpochShellTask(liveTasks, epoch) {
+  return [...(liveTasks?.values() ?? [])]
+    .some((t) => t && t.kind === 'shell' && (t.epoch | 0) === (epoch | 0));
 }
 
 // ── F1:CLI init 事件上报的权威命令/技能表 ─────────────────────────────────────
@@ -630,13 +644,17 @@ let sdkCounter = 0;
 // 常驻收益(免冷启/免 MCP 重启/前缀稳定)集中在活跃对话内,挂太久只是白占内存。
 const KEEPALIVE_IDLE_MS = 15 * 60 * 1000;
 
-// liveTasks 条目的"新鲜度"窗口:看门狗 busyLive(非 shell / shell 两支)与 idleReclaim
-// 豁免共用。超过窗长的条目视为陈旧(终态通知丢失的残留),不再阻塞看门狗/回收;窗内的
-// 跨回合活任务(teammate 等)仍算活,避免看门狗 abort 宿主进程连坐杀 teammate。
-// 天花板:真活超过 30 分钟的任务可能被误判陈旧 —— 看门狗可能在其仍跑时 finalize
-// 本回合、idle 回收可能杀掉其宿主进程(丢完成通知)。可接受的折中:通知丢失的
-// 陈旧条目会让 5 分钟兜底永不触发/常驻进程永不回收,危害更大。
+// liveTasks 条目的"新鲜度"窗口(权威说明;helper/看门狗/idleReclaim/task_started 处只引用)。
+// 超过窗长的条目视为陈旧(终态通知丢失的残留),不再阻塞看门狗/回收;窗内的跨回合活任务
+// (teammate 等)仍算活,避免看门狗 abort 宿主进程连坐杀 teammate。
+// 非 shell 仍 30 分钟:真活超窗的子代理可能被误判陈旧(丢完成通知),可接受的折中 ——
+// 陈旧残留会让 5 分钟兜底永不触发/常驻进程永不回收,危害更大。
 const LIVE_TASK_FRESH_MS = 30 * 60 * 1000;
+// shell 单独 2 小时:后台命令的实际寿命常超过 30 分钟(实测 Bash timeout 见过 3600000ms),
+// 30 分钟窗口 = 40 分钟后台任务的实际寿命上限,会被看门狗/idle 回收误拆。2 小时覆盖
+// 40–60 分钟的后台全量回归,同时保留总上限:陈旧 shell 条目超过 2 小时仍会被回收处理,
+// 不是无限豁免。
+export const SHELL_TASK_FRESH_MS = 2 * 60 * 60 * 1000;
 
 // 静默看门狗阈值(毫秒),默认 300000(5 分钟)。CGUI_STALL_MS 仅供联调/验收按需
 // 调小阈值(合法正整数且 1000 ≤ ms ≤ 2147483647);服务启动时读取一次,缺省/非法值回
@@ -2898,12 +2916,9 @@ async function handleChatPost(req, res) {
       // idle 回收豁免:带活任务(不分 kind——后台化子代理同样不该被 idle 回收误杀)的进程
       // 到点不关,重新武装同时长再等;任务全完成(liveTasks 清空)后下一轮到点正常回收。
       const idleReclaim = () => {
-        // 只豁免【年龄 < LIVE_TASK_FRESH_MS】的条目:终态通知丢失的陈旧条目不再永久
-        // 阻回收(此前 liveTasks.size>0 恒豁免,残留一条就永不回收)。天花板见常量注释。
+        // 豁免 = 有新鲜活任务(shell 2h / 其它 30min,见常量注释);陈旧残留不再永久阻回收。
         const now = Date.now();
-        const hasFreshTask = [...(slot.liveTasks?.values() ?? [])]
-          .some((t) => t && now - (t.createdAt || 0) < LIVE_TASK_FRESH_MS);
-        if (hasFreshTask) {
+        if (hasFreshLiveTask(slot.liveTasks, now)) {
           slot.idleTimer = setTimeout(idleReclaim, KEEPALIVE_IDLE_MS);
           return;
         }
@@ -2934,32 +2949,29 @@ async function handleChatPost(req, res) {
   const armStall = () => {
     clearTimeout(stallTimer);
     stallTimer = setTimeout(() => {
-      // busyNonShell 只统计【年龄 < LIVE_TASK_FRESH_MS】的非 shell 任务(判据见
-      // hasFreshNonShellTask 注释):原来的 `epoch === turnEpoch` 一支没有年龄上限,
-      // 本回合子代理丢一条终态通知就把 5 分钟兜底永久解除。跨回合仍活着的 teammate
-      // 在窗内照样算忙,看门狗不会 abort 宿主进程连坐杀它(权衡见常量注释)。
-      // 降级守卫(审查 R1):严判据的续命全靠 level 信号刷新 createdAt,而它是【成员变化才发】
-      // 的边沿信号、不是心跳。故判据取【时效】:最近一个 LIVE_TASK_FRESH_MS 窗内没有任何
-      // level 信号确认过(旧版 CLI 恒 0 / 单个子代理独自长跑期间无任务起停)就回落修前的宽
-      // 判据,否则真活的长任务会被 abort 连坐杀掉 —— 看门狗到点是强拆进程,误杀不可恢复。
+      // 降级守卫(审查 R1):level 信号是【成员变化才发】的边沿信号、不是心跳,旧版 CLI 恒 0,
+      // 单个子代理独自长跑期间也可能一条都不来。最近一个 LIVE_TASK_FRESH_MS 窗内没有任何
+      // 确认就回落宽判据:本回合的【非 shell 或 shell】条目都算忙。shell 侧与长子代理对齐,
+      // 方向是"宁漏标不误杀"(强拆进程不可恢复)。
       const now = Date.now();
       const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS)
         || (now - (slot.lastLevelAt || 0) >= LIVE_TASK_FRESH_MS
-          && hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch));
-      // 忙判据 = 非 shell 任务(含 R1 降级支) || 新鲜 shell 任务。旧前提"shell 不阻塞
-      // 主控"已被 CLI 新版推翻:后台工作 pending 时会话不空闲、可长时间无输出;触发看门狗
-      // 就强拆进程,连坐杀后台命令且不可恢复 → 新鲜 shell 一律豁免。仍沿用
-      // LIVE_TASK_FRESH_MS 年龄上限:终态通知丢失的陈旧条目照旧不算忙,防止残留一条就
-      // 永久解除看门狗(宁漏标不误杀,但不能让陈旧残留把兜底废掉)。
-      const busyLive = busyNonShell || hasFreshShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS);
+          && (hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch)
+            || hasCurrentEpochShellTask(slot.liveTasks, slot.turnEpoch)));
+      // 忙判据 = 非 shell(含 R1 降级支) || 新鲜 shell。窗口与理由见常量注释。
+      const busyLive = busyNonShell || hasFreshShellTask(slot.liveTasks, now);
       // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
       // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
       if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyLive) {
         // stall_notice:客户端专用渲染分支(中性系统提示 turn,非红色错误)。原用 type:stderr
         // 但客户端 SSE 分发根本不渲染 stderr = 提示白发(判官缺陷3)。
+        // 文案里的分钟数随运行时阈值生成(默认 300000 → "5 分钟"逐字不变)。下限 5 分钟:
+        // 用户可见文案只按分钟量级展示,联调/验收把阈值调到分钟级以下时仍显示默认口径,
+        // 不出现浮点/0 分钟/误导性的"1 分钟"。
+        const stallMinutes = Math.max(5, Math.round(STALL_MS / 60000));
         const stallText = slot.turnSubagentSeen
-          ? '子代理已全部结束,但上游超过 5 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。'
-          : '上游超过 5 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。';
+          ? `子代理已全部结束,但上游超过 ${stallMinutes} 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`
+          : `上游超过 ${stallMinutes} 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`;
         deliverLine(slot, JSON.stringify({ type: 'stall_notice', text: stallText }));
         // 【必须强制拆进程,不能走 idle 复用】(判官缺陷1):卡死场景下 CLI 子进程正阻塞在
         // 死掉的上游请求上,不是健康空闲。若只 finalize 转 idle,同会话 15 分钟内下一条消息
@@ -3037,8 +3049,8 @@ async function handleChatPost(req, res) {
               : (m.subagent_type ? 'subagent' : 'unknown');
             // epoch=创建时回合世代:优雅判据只数本回合任务,跨回合保留的活条目由 stopTask
             // 全量扇出+notification 收尾负责,陈旧(通知丢失)条目不致毒化 abort 判据(判官 R)。
-            // createdAt:看门狗 busyLive(非 shell / shell 两支)与 idleReclaim 的"新鲜度"判据
-            // (见 LIVE_TASK_FRESH_MS)。
+            // createdAt:看门狗 busyLive 与 idleReclaim 的新鲜度判据(窗口见
+            // LIVE_TASK_FRESH_MS / SHELL_TASK_FRESH_MS 常量注释)。
             slot.liveTasks.set(m.task_id, { toolUseId: m.tool_use_id || null, kind, epoch: slot.turnEpoch | 0, createdAt: Date.now() });
           }
           else if (m.subtype === 'task_notification') {
