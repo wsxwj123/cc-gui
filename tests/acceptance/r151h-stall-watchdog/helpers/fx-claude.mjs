@@ -35,11 +35,16 @@
 //     后台 shell 任务开始(形状同 8,固定 task_type:"local_bash"),之后保持静默不吐 result(脚本用 waitFile 吊住回合)。
 //     notifyAfterMs 给了(毫秒,≥0)就在开始之后这么久再吐一条该任务的 task_notification 终态(默认 completed)——用来造
 //     "后台任务在静默窗口内结束"。一次性:发过 task_started 就删掉控制文件。
+// 10) levelonly/<会话id> = {pid?, taskId?, runId?, description?}(r151i 新增)
+//     这个进程(pid 不给 = 谁先遇到谁发)在**同一个回合里第一次吐出带 Task 工具调用的 assistant 消息之后立刻**只吐一条
+//     level 信号(不吐 task_started):
+//     {type:"system", subtype:"background_tasks_changed", tasks:[{task_id, run_id?, task_type:"local_bash", description}], uuid, session_id}
+//     之后保持静默不吐 result(脚本用 waitFile 吊住回合)。一次性:发过就删掉控制文件。
 // 记录(都在 <CTL> 下,一行一条 JSON,带 at / t / pid / sid):
 //   r151f-switch.jsonl(每条切档请求怎么处理的:muted / rejected / delayed / delayed-passed / passed)、
 //   r151g-model.jsonl(每条换模型请求怎么处理的:muted / delayed / delayed-passed / passed)、
 //   r151f-tools.jsonl(写出的文件)、r151f-exec.jsonl(定时命令:executed / skipped / failed)、r151f-exit.jsonl(客气退出:exit-requested / exit)、r151f-bgtask.jsonl(报过的后台任务开始)、
-//   r151h-bgtask.jsonl(r151h 的 task_started / task_notification)。
+//   r151h-bgtask.jsonl(r151h 的 task_started / task_notification;r151i 的 background_tasks_changed)。
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -126,6 +131,25 @@ if (interactive && sid) {
       }, after);
     }
   };
+  // r151i:level-only 模式。同一个回合里第一次吐出带 Task 工具调用的 assistant 消息之后,只报一条
+  // system/background_tasks_changed(tasks 里是 local_bash),不报 task_started。之后由脚本 waitFile 保持静默。
+  let levelOnlyFired = false;
+  const emitLevelOnly = () => {
+    if (levelOnlyFired) return;
+    const c = (() => { try { return JSON.parse(fs.readFileSync(path.join(FXH, 'levelonly', String(sid)), 'utf8')); } catch { return null; } })();
+    if (!c || (c.pid !== undefined && c.pid !== null && c.pid !== process.pid)) return;
+    try { fs.unlinkSync(path.join(FXH, 'levelonly', String(sid))); } catch { return; }   // 一次性:谁先删掉控制文件谁发
+    levelOnlyFired = true;
+    const task = {
+      task_id: c.taskId || `r151hlvl${crypto.randomBytes(4).toString('hex')}`,
+      task_type: 'local_bash',
+      description: c.description || 'sleep 120',
+    };
+    if (c.runId !== undefined && c.runId !== null) task.run_id = c.runId;
+    const msg = { type: 'system', subtype: 'background_tasks_changed', tasks: [task], uuid: crypto.randomUUID(), session_id: sid };
+    toHost(`${JSON.stringify(msg)}\n`);
+    log('r151h-bgtask.jsonl', { action: 'background_tasks_changed', task_id: task.task_id, task_type: task.task_type });
+  };
 
   // 出站:记下假 claude 向宿主问过的 can_use_tool(request_id → request),宿主答 allow 时要用
   process.stdout.write = (chunk, ...rest) => {
@@ -142,7 +166,7 @@ if (interactive && sid) {
       }
     } catch { /* 忽略 */ }
     const ret = toHost(chunk, ...rest);
-    if (sawTaskToolUse) emitBgStart();
+    if (sawTaskToolUse) { emitBgStart(); emitLevelOnly(); }
     return ret;
   };
 

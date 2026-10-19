@@ -44,7 +44,17 @@ export function armBgStart(ctl, sid, opts = {}) {
   fs.mkdirSync(d, { recursive: true });
   fs.writeFileSync(path.join(d, String(sid)), JSON.stringify(opts));
 }
-/** fx-claude 记下的 r151h 后台任务事件 { action: task_started | task_notification, task_id, tool_use_id, status? }。 */
+/**
+ * r151i level-only 模式:第一次吐出带 Task 工具调用的 assistant 消息之后,只报一条 level 信号
+ * system/background_tasks_changed(tasks:[{ task_id, run_id?, task_type:"local_bash", description }]),
+ * **不报** task_started。opts = { pid?, taskId?, runId?, description? }。
+ */
+export function armLevelOnly(ctl, sid, opts = {}) {
+  const d = path.join(ctl, 'r151h', 'levelonly');
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, String(sid)), JSON.stringify(opts));
+}
+/** fx-claude 记下的 r151h/r151i 后台任务事件 { action: task_started | task_notification | background_tasks_changed, task_id, ... }。 */
 export const bgStartLog = (ctl, sid) => jsonl(path.join(ctl, 'r151h-bgtask.jsonl')).filter((x) => !sid || x.sid === sid);
 
 // ---------------- SSE:实时收集一个 chat 的事件 ----------------

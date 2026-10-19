@@ -2,7 +2,7 @@
 # r151h 静默看门狗与后台任务 —— 验收,一条命令:
 #   tests/acceptance/r151h-stall-watchdog/run.sh                 # 全量
 #   tests/acceptance/r151h-stall-watchdog/run.sh -g 'H01'        # 额外参数原样转给 playwright
-# 结构照 r151g run.sh,但四条用例各起一次性实例(临时 HOME、自挑端口、用例自己 stop),
+# 结构照 r151g run.sh,但七条用例各起一次性实例(临时 HOME、自挑端口、用例自己 stop),
 # 不需要共享实例和 dev server。假模型接口用 r151c 的 mock-p2.mjs(本套件全部走假 CLI,
 # 实际不会有模型请求;保留它只为垫片里的真 CLI 车道仍然指向本地假接口,不会连真实 provider)。
 # 端口只在 6700–6999 里挑空闲的,硬拒 6677 / 6689 / 6710。收尾只按自己记录 / 本套件夹具记录里的 pid 收进程。
