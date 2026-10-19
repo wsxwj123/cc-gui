@@ -278,6 +278,41 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.425</b>(2026-10-19)· 修复 4 条 · 优化 1 条</summary>
+
+**修复**
+
+<details><summary>后台任务不再被误判卡死</summary>
+
+后台命令(比如跑几十分钟的全量回归)在 2 小时内都算「还在跑」,静默看门狗和空闲回收不会再把它们当陈旧任务拆掉;任务结束后照常回收。
+
+</details>
+
+<details><summary>「自动」档审核模型按你选的那个发</summary>
+
+第三方 provider 下,自动档会用你设置的审核模型;以前某些命令行版本会拿内置的 opus 模型去请求,第三方返回错误后所有工具调用都被拒。审核模型改了会换新会话进程。
+
+</details>
+
+<details><summary>审核失败提示居中显示</summary>
+
+「未执行某某:审核模型没有给出结论」改为整行居中,不再和工具结果挤在左侧。
+
+</details>
+
+<details><summary>卡死提示的文案跟着实际阈值走</summary>
+
+提示里的「超过 N 分钟」按运行时阈值生成,默认仍是「5 分钟」。
+
+</details>
+
+**优化**
+
+- 设置里对审核模型的说明改为如实描述:审核模型会显式传给命令行;旧版命令行不识别时,按 sonnet 档解析。
+
+</details>
+
+<details>
 <summary><b>v0.2.424</b>(2026-10-19)· 修复 2 条</summary>
 
 **修复**
