@@ -384,14 +384,18 @@ const activeProcesses = new Map();
 // now:陈旧判据的时基(默认取当前时刻,单测可注入)。终态通知丢失的残留条目会永远留在
 // liveTasks 里,若照样归入 keptTasks,idle 分支会认为"没有可停对象"直接 no-op、活跃分支的
 // abort 兜底被 shouldSuppressAbort 永久抑制 → 停止彻底失效。故年龄 ≥ LIVE_TASK_FRESH_MS
-// 的跨回合条目按陈旧处理归入可停(与本函数"宁可多停,不让停止静默失效"的原则一致;跨回合
-// 条目只可能是非 shell,窗口与看门狗非 shell 支同款 LIVE_TASK_FRESH_MS)。
+// 的跨回合【非 shell】条目按陈旧处理归入可停(与本函数"宁可多停,不让停止静默失效"的原则
+// 一致;窗口与看门狗非 shell 支同款 LIVE_TASK_FRESH_MS)。
+// shell 不看年龄也不看 epoch,一律先归 shellTasks(选择性停止刻意保留,误杀不可恢复)——
+// 这就是下面 keptTasks 里"跨回合条目只可能是非 shell"的原因;它与看门狗 2h 新鲜度窗口是
+// 两套口径,后者只管看门狗/idleReclaim,不影响停止路径的保留决策。
 export function partitionStopTasks(liveTasks, turnEpoch, allTasks, now = Date.now()) {
   const shellTasks = [];
   const stoppableTasks = [];
   const keptTasks = [];
   const epoch = turnEpoch | 0;
   for (const [tid, t] of (liveTasks || [])) {
+    // shell 先分流:停止链路一律保留(不辨年龄/epoch),故不会进入下面的跨回合 keptTasks。
     if (t && t.kind === 'shell') { shellTasks.push(tid); continue; }
     // 只有【明确带 epoch 且不等于本回合 且条目仍新鲜】才保留;空条目/缺 epoch/陈旧条目保持
     // 旧行为归入可停,宁可多停一个来路不明的条目,也不让停止对第三方 provider 静默失效。
@@ -526,13 +530,6 @@ export function hasCurrentEpochNonShellTask(liveTasks, epoch) {
     .some((t) => t && t.kind !== 'shell' && (t.epoch | 0) === (epoch | 0));
 }
 
-// R1 降级支的 shell 侧判据:判据与 hasCurrentEpochNonShellTask 同款(kind==='shell' 且 epoch
-// 相等),只在 level 信号陈旧时用。与长子代理对齐,方向仍是"宁漏标不误杀"。
-export function hasCurrentEpochShellTask(liveTasks, epoch) {
-  return [...(liveTasks?.values() ?? [])]
-    .some((t) => t && t.kind === 'shell' && (t.epoch | 0) === (epoch | 0));
-}
-
 // ── F1:CLI init 事件上报的权威命令/技能表 ─────────────────────────────────────
 // /api/slash-commands 靠扫三处磁盘枚举,而 CLI 的内置 skill(/loop 等)打包在二进制里、
 // 磁盘上没有对应目录 → 用户敲 "/" 永远看不到它们(#11 的全部根因)。init 事件的
@@ -652,8 +649,9 @@ const KEEPALIVE_IDLE_MS = 15 * 60 * 1000;
 const LIVE_TASK_FRESH_MS = 30 * 60 * 1000;
 // shell 单独 2 小时:后台命令的实际寿命常超过 30 分钟(实测 Bash timeout 见过 3600000ms),
 // 30 分钟窗口 = 40 分钟后台任务的实际寿命上限,会被看门狗/idle 回收误拆。2 小时覆盖
-// 40–60 分钟的后台全量回归,同时保留总上限:陈旧 shell 条目超过 2 小时仍会被回收处理,
-// 不是无限豁免。
+// 40–60 分钟的后台全量回归。这是 shell 唯一的豁免窗口,看门狗 R1 降级支刻意不含 shell →
+// 超过 2 小时的 shell 条目在看门狗与 idleReclaim 两条线上都不再算活,2h 是真正的总上限,
+// 不是无限豁免(R1 不得绕过)。
 export const SHELL_TASK_FRESH_MS = 2 * 60 * 60 * 1000;
 
 // 静默看门狗阈值(毫秒),默认 300000(5 分钟)。CGUI_STALL_MS 仅供联调/验收按需
@@ -2710,8 +2708,8 @@ async function handleChatPost(req, res) {
     // shell 直接判据,此集合是双保险(第三方/旧版 CLI 缺 task_type 时按 tool_use_id 反查)。
     bgBashToolIds: new Set(),
     // 批A level 信号(background_tasks_changed)。lastLevelAt:最近一次收到该信号的时刻 ——
-    // 看门狗据此在严/宽判据间切换(见 hasCurrentEpochNonShellTask);0 = 从没收到过(旧版
-    // CLI 不发)。lastLevelSig:上次广播的存活集签名,用于去重。都随进程重建而重置,
+    // 看门狗 R1 降级支据此切换(仅非 shell,见 hasCurrentEpochNonShellTask);0 = 从没收到过
+    // (旧版 CLI 不发)。lastLevelSig:上次广播的存活集签名,用于去重。都随进程重建而重置,
     // 这就是"进程重启重置空集"的落点。
     lastLevelAt: 0,
     lastLevelSig: null,
@@ -2913,10 +2911,11 @@ async function handleChatPost(req, res) {
       slot.finishedAt = Date.now();
       deliverLine(slot, JSON.stringify({ type: 'done', exitCode: 0 }));
       if (slot.idleTimer) clearTimeout(slot.idleTimer);
-      // idle 回收豁免:带活任务(不分 kind——后台化子代理同样不该被 idle 回收误杀)的进程
-      // 到点不关,重新武装同时长再等;任务全完成(liveTasks 清空)后下一轮到点正常回收。
+      // idle 回收豁免:带【新鲜】活任务(shell 2h / 其它 30min,按 kind 分窗)的进程到点不关,
+      // 重新武装同时长再等;任务完成/过期(liveTasks 清空或无新鲜条目)后下一轮到点正常回收。
+      // 后台化子代理同样适用 —— 分的是窗口,不是豁免对象。
       const idleReclaim = () => {
-        // 豁免 = 有新鲜活任务(shell 2h / 其它 30min,见常量注释);陈旧残留不再永久阻回收。
+        // 判据与窗口见 hasFreshLiveTask / 常量注释。
         const now = Date.now();
         if (hasFreshLiveTask(slot.liveTasks, now)) {
           slot.idleTimer = setTimeout(idleReclaim, KEEPALIVE_IDLE_MS);
@@ -2951,14 +2950,16 @@ async function handleChatPost(req, res) {
     stallTimer = setTimeout(() => {
       // 降级守卫(审查 R1):level 信号是【成员变化才发】的边沿信号、不是心跳,旧版 CLI 恒 0,
       // 单个子代理独自长跑期间也可能一条都不来。最近一个 LIVE_TASK_FRESH_MS 窗内没有任何
-      // 确认就回落宽判据:本回合的【非 shell 或 shell】条目都算忙。shell 侧与长子代理对齐,
-      // 方向是"宁漏标不误杀"(强拆进程不可恢复)。
+      // 确认就回落宽判据:本回合的【非 shell】条目算忙。shell 刻意不在此支 —— 否则本回合
+      // shell 只要 epoch 匹配就无限期豁免,2h 窗口会被绕过、看门狗/回收彻底失效(见常量注释)。
+      // 方向是"宁漏标不误杀",但豁免必须有上限。
       const now = Date.now();
       const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS)
         || (now - (slot.lastLevelAt || 0) >= LIVE_TASK_FRESH_MS
-          && (hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch)
-            || hasCurrentEpochShellTask(slot.liveTasks, slot.turnEpoch)));
-      // 忙判据 = 非 shell(含 R1 降级支) || 新鲜 shell。窗口与理由见常量注释。
+          && hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch));
+      // 忙判据 = 非 shell(新鲜 + R1 降级支,该支只覆盖非 shell) || 新鲜 shell。shell 的豁免
+      // 只由 hasFreshShellTask 的 2h 窗口提供 → 2h 是 shell 的真总上限,R1 不能绕过。
+      // 窗口与理由见常量注释。
       const busyLive = busyNonShell || hasFreshShellTask(slot.liveTasks, now);
       // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
       // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
@@ -3049,8 +3050,8 @@ async function handleChatPost(req, res) {
               : (m.subagent_type ? 'subagent' : 'unknown');
             // epoch=创建时回合世代:优雅判据只数本回合任务,跨回合保留的活条目由 stopTask
             // 全量扇出+notification 收尾负责,陈旧(通知丢失)条目不致毒化 abort 判据(判官 R)。
-            // createdAt:看门狗 busyLive 与 idleReclaim 的新鲜度判据(窗口见
-            // LIVE_TASK_FRESH_MS / SHELL_TASK_FRESH_MS 常量注释)。
+            // createdAt:看门狗 busyLive(非 shell 新鲜度 + shell 2h 窗口)与 idleReclaim
+            // 的新鲜度判据(窗口见 LIVE_TASK_FRESH_MS / SHELL_TASK_FRESH_MS 常量注释)。
             slot.liveTasks.set(m.task_id, { toolUseId: m.tool_use_id || null, kind, epoch: slot.turnEpoch | 0, createdAt: Date.now() });
           }
           else if (m.subtype === 'task_notification') {
@@ -3091,7 +3092,7 @@ async function handleChatPost(req, res) {
         // 【只喂簿记与 UI】:绝不用它驱动 finalize()/abort()/input.close()/stopTimer,
         // 停止链路的既有时序一个字不动。
         else if (m.type === 'system' && m.subtype === 'background_tasks_changed' && Array.isArray(m.tasks)) {
-          slot.lastLevelAt = Date.now(); // 看门狗据此在严/宽判据间切换(见 hasCurrentEpochNonShellTask)
+          slot.lastLevelAt = Date.now(); // 看门狗 R1 降级支据此切换(仅非 shell,见 hasCurrentEpochNonShellTask)
           const { settled, added, liveIds } = reconcileLiveTasks(
             slot.liveTasks, m.tasks, Date.now(), LEVEL_GRACE_MS, slot.turnEpoch | 0);
           broadcastLiveTasks(slot, liveIds, settled, added);
@@ -4004,6 +4005,9 @@ export function applyStop(slot, pid, flags) { // export 仅为可单测(check-st
     // 非 shell —— shell 是被刻意保留的,不算"没停净"。顺手修 HEAD bug:回合已 result、
     // 4s 关流去抖窗内、只剩 shell 活任务时,旧判据 liveTasks.size===0 恒 false → 超窗
     // abort 误杀训练;新判据 shell 不计入,settled 即优雅退。
+    // liveShell 不辨年龄(与看门狗/idleReclaim 的 2h 新鲜度窗口是两套口径):停止路径只问
+    // "进程里还有没有 shell 条目",有就绝不 abort —— abort 杀整个 CLI 进程,而终态通知丢
+    // 失的陈旧条目无法证明命令已结束,误判代价不可恢复;2h 上限只约束看门狗/idleReclaim。
     const settled = slot.pumpEnded || (slot.lastResultAt && slot.lastResultAt >= stopAt);
     let liveStoppable = 0;
     let liveShell = 0;

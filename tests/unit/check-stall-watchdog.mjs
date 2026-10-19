@@ -8,11 +8,13 @@
 // "shell 永不计入看门狗忙判据"已不成立。hasFreshNonShellTask 仍只统计非 shell(语义
 // 不变,供其它判据用);看门狗改用 busyLive = busyNonShell || hasFreshShellTask(新鲜 shell
 // 算忙,陈旧 shell 仍不算 —— 防终态通知丢失的残留永久解除看门狗)。
+// r151i 判官整改:shell 的豁免只由 hasFreshShellTask 的 2h 窗口提供,R1 降级支只覆盖
+// 非 shell;超过 2h 的 shell 即使 level 信号陈旧也不再算忙 → 2h 是真总上限。
 // 直接 import chat.js 的真函数(非复刻)。
 import assert from 'node:assert/strict';
 import {
   hasFreshNonShellTask, hasFreshShellTask, hasFreshLiveTask, hasCurrentEpochNonShellTask,
-  hasCurrentEpochShellTask, reconcileLiveTasks, resolveStallMs, SHELL_TASK_FRESH_MS,
+  reconcileLiveTasks, resolveStallMs, SHELL_TASK_FRESH_MS,
 } from '../../server/routes/chat.js';
 
 const FRESH = 30 * 60 * 1000;
@@ -213,34 +215,24 @@ const old = (ms) => now - ms;
   assert.equal(hasCurrentEpochNonShellTask(null, 0), false, '无 liveTasks 不炸');
 }
 
-// ── r151i:R1 降级支纳入 shell(不再只保护长子代理) ─────────────────────────
-// 旧版 CLI / level 信号陈旧时,同回合的长 shell 条目也应算忙。方向与长子代理一致:
-// 宁可漏标,不误杀(看门狗触发即强拆进程,后台命令连坐死且不可恢复)。
+// ── r151i 判官整改:R1 降级支不含 shell,2h 是 shell 的真总上限 ─────────────
+// 判官意见:此前 R1 降级支把【本回合任意年龄的 shell】也算忙 —— lastLevelAt 只在
+// background_tasks_changed 时刷新(后台任务起/止各一次),长 shell 超过 30 分钟后 R1 生效、
+// 超过 2h 仍不触发看门狗 → 真卡死被永久放过,等于给 shell 无限豁免(回到 #13 输入框永久
+// 卡"停止"的老 bug)。修法:把 shell 从 R1 降级支移除,shell 的豁免只由 hasFreshShellTask
+// 的 2h 窗口提供,于是 2h 成为真正的总上限。
 {
-  // ① 纯函数本身:同 epoch shell true / 非 shell false / 跨 epoch false / 缺 epoch 按 0 / null 不炸
-  assert.equal(hasCurrentEpochShellTask(new Map([['t', { kind: 'shell', epoch: 3 }]]), 3), true,
-    '同回合 shell 命中降级支');
-  assert.equal(hasCurrentEpochShellTask(new Map([['t', { kind: 'subagent', epoch: 3 }]]), 3), false,
-    '非 shell 不计入 hasCurrentEpochShellTask');
-  assert.equal(hasCurrentEpochShellTask(new Map([['t', { kind: 'shell', epoch: 1 }]]), 3), false,
-    '跨回合 shell 不进降级豁免');
-  assert.equal(hasCurrentEpochShellTask(new Map([['t', { kind: 'shell' }]]), 0), true,
-    '缺 epoch 按 0 算(与 `|0` 口径一致)');
-  assert.equal(hasCurrentEpochShellTask(new Map([['t', null]]), 0), false, 'null 条目不炸');
-  assert.equal(hasCurrentEpochShellTask(null, 0), false, '无 liveTasks 不炸');
-
-  // ② 生产组合式:严判据 || (level 信号超窗 && (非 shell || shell))
-  const shellLive = new Map([['t', { kind: 'shell', epoch: 3, createdAt: old(SHELL_FRESH + 60_000) }]]);
-  const busy = (lastLevelAt) => hasFreshNonShellTask(shellLive, now, FRESH)
-    || (now - (lastLevelAt || 0) >= FRESH
-      && (hasCurrentEpochNonShellTask(shellLive, 3) || hasCurrentEpochShellTask(shellLive, 3)));
-  // 旧版 CLI 恒 0:同回合 shell 即使超出 2h 新鲜窗,降级支仍算忙
-  assert.equal(busy(0), true, '旧版 CLI 无 level 信号 → 同回合 shell 也回落宽判据(修前只保护非 shell)');
-  // level 信号新鲜 → 严判据,超出 2h 的 shell 不再豁免
-  assert.equal(busy(old(60_000)), false, 'level 信号新鲜 → 严判据,陈旧 shell 不解除看门狗');
-  // 跨回合的 shell 不进降级支(否则看门狗被上一回合残留永久解除)
-  const prevShell = new Map([['t', { kind: 'shell', epoch: 1, createdAt: old(SHELL_FRESH + 60_000) }]]);
-  assert.equal(hasCurrentEpochShellTask(prevShell, 3), false, '跨回合 shell 不抑制看门狗');
+  // 生产组合式(与 chat.js 的 busyLive 同构):严判据 || R1(仅非 shell) || 新鲜 shell
+  const busyLive = (live, lastLevelAt) => hasFreshNonShellTask(live, now, FRESH)
+    || (now - (lastLevelAt || 0) >= FRESH && hasCurrentEpochNonShellTask(live, 3))
+    || hasFreshShellTask(live, now);
+  // ① 2h 后的同回合 shell:即使 level 信号陈旧(lastLevelAt=0,R1 会触发),也不再算忙 →
+  //    看门狗可正常触发。修前此处为 true(R1 含 shell → 本回合 shell 无限豁免)。
+  assert.equal(busyLive(new Map([['t', { kind: 'shell', epoch: 3, createdAt: old(SHELL_FRESH + 60_000) }]]), 0),
+    false, '超过 2h 的 shell 不再计入看门狗忙判据(level 信号陈旧也不能豁免)');
+  // ② 对照:2h 窗口内的 shell 仍算忙(40 分钟用例 H05 不回归)
+  assert.equal(busyLive(new Map([['t', { kind: 'shell', epoch: 3, createdAt: old(40 * 60 * 1000) }]]), 0),
+    true, '2h 窗口内的 shell 仍算忙(40 分钟场景不回归)');
 }
 
 // ── 源码守卫:判据不得被改回去 ──────────────────────────────────────
@@ -250,8 +242,10 @@ const old = (ms) => now - ms;
   const { dirname, join } = await import('node:path');
   const src = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'server', 'routes', 'chat.js'), 'utf8');
-  assert.ok(/const busyNonShell = hasFreshNonShellTask\(slot\.liveTasks, now, LIVE_TASK_FRESH_MS\)\s*\n\s*\|\| \(now - \(slot\.lastLevelAt \|\| 0\) >= LIVE_TASK_FRESH_MS\s*\n\s*&& \(hasCurrentEpochNonShellTask\(slot\.liveTasks, slot\.turnEpoch\)\s*\n\s*\|\| hasCurrentEpochShellTask\(slot\.liveTasks, slot\.turnEpoch\)\)\);/.test(src),
-    '看门狗判据 = 严判据 || 降级守卫(R1,含 shell);降级条件必须是【时效】,只判"收到过"覆盖不到独自长跑的子代理');
+  assert.ok(/const busyNonShell = hasFreshNonShellTask\(slot\.liveTasks, now, LIVE_TASK_FRESH_MS\)\s*\n\s*\|\| \(now - \(slot\.lastLevelAt \|\| 0\) >= LIVE_TASK_FRESH_MS\s*\n\s*&& hasCurrentEpochNonShellTask\(slot\.liveTasks, slot\.turnEpoch\)\);/.test(src),
+    '看门狗判据 = 严判据 || 降级守卫(R1,仅非 shell);降级条件必须是【时效】,只判"收到过"覆盖不到独自长跑的子代理');
+  assert.ok(!/hasCurrentEpochShellTask/.test(src),
+    'R1 降级支不得再含 shell 判据(否则本回合 shell 可无限期豁免,绕过 2h 总上限)');
   assert.ok(/slot\.lastLevelAt = Date\.now\(\);/.test(src), 'level 分支必须刷新 lastLevelAt');
   assert.ok(/lastLevelAt: 0,/.test(src), 'slot 字面量必须声明 lastLevelAt(0 = 从没收到过 → 宽判据)');
   assert.ok(!/sawLevel/.test(src), '旧的 sawLevel 一次性开关必须删干净,不留双份判据');
@@ -297,11 +291,9 @@ const old = (ms) => now - ms;
     'idleReclaim 的"有活任务"判据必须用分窗函数');
   assert.ok(!/const hasFreshTask = \[\.\.\.\(slot\.liveTasks\?\.values\(\) \?\? \[\]\)\]/.test(src),
     'idleReclaim 不得退回塞内联新鲜度扫描(step 1.3)');
-  // r151i:R1 降级支的 shell 侧纯函数
-  assert.ok(/export function hasCurrentEpochShellTask\(liveTasks, epoch\)/.test(src),
-    '必须导出 hasCurrentEpochShellTask(供 R1 降级支与单测使用)');
-  assert.ok(/t\.kind === 'shell' && \(t\.epoch \| 0\) === \(epoch \| 0\)/.test(src),
-    'hasCurrentEpochShellTask 必须只认 kind=shell 且 epoch 相等');
+  // r151i 判官整改:R1 组合式只含非 shell,shell 判据必须删干净(不得留双份口径)
+  assert.ok(/t\.kind !== 'shell' && \(t\.epoch \| 0\) === \(epoch \| 0\)/.test(src),
+    'R1 降级判据只覆盖非 shell(kind !== shell)');
   // r151i:stall_notice 文案按 STALL_MS 生成分钟数(默认 300000 → 仍是 5 分钟,逐字不变)
   // 下限 5 分钟:锁定验收在 CGUI_STALL_MS=1500 下仍断言"5 分钟"开头;下限是通用显示口径,
   // 不是测试特判(≥5 分钟的阈值仍随 STALL_MS 变化,如 600000 → 10 分钟)。
@@ -318,4 +310,4 @@ const old = (ms) => now - ms;
     'stall_notice 不得再硬编码"5 分钟"(文案必须随阈值变化)');
 }
 
-console.log('✓ check-stall-watchdog: 年龄上限 9 断言 + level 续命 + R1 降级三态(含 shell) + shell 2h 窗口 + idleReclaim 分窗 + 新鲜 shell 豁免(busyLive) + CGUI_STALL_MS 解析 + stall 文案随阈值 + 源码守卫 全过');
+console.log('✓ check-stall-watchdog: 年龄上限 9 断言 + level 续命 + R1 降级三态(仅非 shell) + 2h 后 shell 不豁免 + shell 2h 窗口 + idleReclaim 分窗 + 新鲜 shell 豁免(busyLive) + CGUI_STALL_MS 解析 + stall 文案随阈值 + 源码守卫 全过');
