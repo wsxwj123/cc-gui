@@ -278,7 +278,26 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.423</b>(2026-10-18)· 修复 4 条 · 优化 1 条</summary>
+<summary><b>v0.2.424</b>(2026-10-19)· 修复 2 条</summary>
+
+**修复**
+
+<details><summary>长时间后台任务不再被误当成卡死</summary>
+
+后台命令(比如跑 40 分钟的全量回归)在 2 小时内都算「还在跑」,静默看门狗和空闲回收不会再把它当陈旧任务拆掉;后台任务结束后照常回收。
+
+</details>
+
+<details><summary>卡死提示的文案跟着实际阈值走</summary>
+
+提示里的「超过 N 分钟」按运行时阈值生成,默认仍是「5 分钟」。
+
+</details>
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.423">v0.2.423</a></b>(2026-10-18)· 修复 4 条 · 优化 1 条</summary>
 
 **修复**
 
