@@ -122,7 +122,8 @@ try {
   const A = uuid(1); const B = uuid(2); const C = uuid(3);
   const badPrefs = JSON.stringify({ xsEnabled: 'true', xsAutoPaused: 'yes', xsEnabledAt: 'not a date', xsInbound: { [A]: 'auto', 'bad id': 'auto', [B]: 'card', [C]: true } });
   writeFileSync(PREFS, badPrefs);
-  eq(readXsPrefsSync(), { enabled: false, enabledAt: null, inbound: { [A]: 'auto' }, autoPaused: false }, '非法值按默认、只留合法条目');
+  // r151k:xsInbound 同时保留 auto 与 card(显式 card 不再靠删键表示);非法 mode / 非 id 键仍丢掉。
+  eq(readXsPrefsSync(), { enabled: false, enabledAt: null, inbound: { [A]: 'auto', [B]: 'card' }, autoPaused: false }, '非法值按默认、auto / card 都保留');
   eq(readFileSync(PREFS, 'utf8'), badPrefs, '读时不改写文件');
   for (const v of [[], 'x', 1, null]) { writeFileSync(PREFS, JSON.stringify({ xsInbound: v })); eq(readXsPrefsSync().inbound, {}, `xsInbound=${JSON.stringify(v)} → {}`); }
   writeFileSync(PREFS, JSON.stringify({ xsEnabled: true, xsAutoPaused: true, xsEnabledAt: '2026-10-15T00:00:00.000Z' }));

@@ -12,7 +12,7 @@ import { constants as fsConstants, readFileSync, realpathSync, statSync } from '
 import { dirname, join, resolve, posix as posixPath, win32 as win32Path } from 'path';
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
-import { XS_PROFILE_WRITE_FAILED_MAX, normalizeXsProfileWriteFailed, readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, readXsProfileWriteFailedSync, updatePrefs, updatePrefsStrict } from '../routes/prefs.js';
+import { XS_PROFILE_WRITE_FAILED_MAX, inboundModeOf, normalizeXsProfileWriteFailed, readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, readXsProfileWriteFailedSync, updatePrefs, updatePrefsStrict } from '../routes/prefs.js';
 import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, permissionModeSwitchPending, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
@@ -962,7 +962,8 @@ function fingerprintOrNull(salt) {
 // (latestGuiMode)> 档案的(接口"审计之后的补充约定"第 3 条)。
 // 档案写失败过的会话整条按没有档案判(hasProfile 为 false → no-profile,见 profileCountsFor)。
 function targetFacts(sessionId, prefs, profiles, fp) {
-  const inbound = Object.keys(prefs.inbound).some((k) => sameId(k, sessionId)) ? 'auto' : 'card';
+  // r151k:显式 card 才 card;没设置(以及显式 auto)一律 auto —— 映射口径统一走 inboundModeOf。
+  const inbound = inboundModeOf(prefs.inbound, sessionId);
   const profile = profileIn(profiles, sessionId);
   return {
     inbound,
@@ -1056,7 +1057,7 @@ export async function listAiSessions({ sender, query } = {}, rows) {
   const selfId = selfRow ? selfRow.sessionId : sender.sessionId;
   const shortIds = assignShortIds([...all.map((r) => r.sessionId), ...(selfRow ? [] : [selfId])]);
   const inbound = readXsPrefsSync().inbound;
-  const inboundOf = (id) => (Object.keys(inbound).some((k) => sameId(k, id)) ? 'auto' : 'card');
+  const inboundOf = (id) => inboundModeOf(inbound, id);
   const picked = selectXsSessions(all.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), { query: query ?? '', limit: AI_LIST_MAX + 1, exclude: selfId });
   return {
     self: { id: shortIds.get(selfId), name: normalizeXsSourceName(selfRow?.title) },

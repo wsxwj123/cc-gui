@@ -70,9 +70,24 @@ export function normalizeXsPrefs(prefs) {
   const inbound = {};
   const raw = p.xsInbound;
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    for (const [id, mode] of Object.entries(raw)) if (mode === 'auto' && isSessionIdShape(id)) inbound[id] = 'auto';
+    for (const [id, mode] of Object.entries(raw)) {
+      if ((mode === 'auto' || mode === 'card') && isSessionIdShape(id)) inbound[id] = mode;
+    }
   }
   return { enabled: p.xsEnabled === true, enabledAt: at, inbound, autoPaused: p.xsAutoPaused === true };
+}
+/**
+ * r151k:会话的接收设置最终值。显式 "card" → card;其余(显式 "auto" 与没设置)→ auto。
+ * 这是「GUI 跨会话入站默认自动处理」的唯一映射口径:列表、单条、list_sessions、自动处理判定
+ * 全部走这里,避免各处各写一份 ? 'auto' : 'card' 后漂移。会话 id 不分大小写。
+ */
+export function inboundModeOf(inbound, sessionId) {
+  if (!inbound || typeof inbound !== 'object' || typeof sessionId !== 'string' || !sessionId) return 'auto';
+  const id = sessionId.toLowerCase();
+  for (const [k, mode] of Object.entries(inbound)) {
+    if (String(k).toLowerCase() === id) return mode === 'card' ? 'card' : 'auto';
+  }
+  return 'auto';
 }
 export function readXsPrefsSync() {
   const { readFailed: _readFailed, ...prefs } = readXsPrefsDetailedSync();
@@ -245,7 +260,7 @@ export async function removeSessionFromPrefs(sessionId) {
         }
       }
     }
-    // r151c:跨会话接收设置(xsInbound,只记"自动处理"的会话)随会话删除清掉;id 不分大小写。不广播(会话已不在)。
+    // r151c:跨会话接收设置(xsInbound,auto / card 都记)随会话删除清掉;id 不分大小写。不广播(会话已不在)。
     let xsInboundChanged = false;
     const inbound = prefs.xsInbound;
     if (inbound && typeof inbound === 'object' && !Array.isArray(inbound)) {

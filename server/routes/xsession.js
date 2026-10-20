@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import { broadcast } from '../broadcast.js';
 import { isAuthorized } from '../services/auth.js';
-import { loadPrefs, readXsEnabledSync, readXsPrefsSync, updatePrefs } from './prefs.js';
+import { inboundModeOf, loadPrefs, readXsEnabledSync, readXsPrefsSync, updatePrefs } from './prefs.js';
 import { getActiveChatProcesses } from './chat.js';
 import { listProjects, listSessions, isSessionIdShape } from '../services/session-reader.js';
 import { XS_LIMITS, XsStorageError, countUnfinishedXsMessages, pendingCountsBySession, readXsProfiles } from '../services/xsession-store.js';
@@ -216,9 +216,9 @@ router.get('/xsession/sessions', async (req, res) => {
     return xsError(res, 500, 'XS_LIST_FAILED', '读取会话列表失败');
   }
   const shortIds = assignShortIds(rows.map((r) => r.sessionId)); // 冲突按全部会话判,筛选之前算
-  // r151c:inbound(接收设置,xsInbound 里记为 auto 的才是 auto)、hasProfile(有本次启用之后记录的发送档案;不看 provider 是否已换)
+  // r151k:inbound(接收设置)默认自动处理 —— 显式 card 才 card,其余(显式 auto / 没设置)都 auto;
+  // hasProfile(有本次启用之后记录的发送档案;不看 provider 是否已换)
   const prefs = readXsPrefsSync();
-  const inboundIds = new Set(Object.keys(prefs.inbound).map((k) => k.toLowerCase()));
   let profiled = new Set();
   try {
     const { sessions: profiles } = await readXsProfiles();
@@ -227,14 +227,15 @@ router.get('/xsession/sessions', async (req, res) => {
   const sessions = selectXsSessions(rows.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), opts)
     .map(({ sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity }) => ({
       sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity,
-      inbound: inboundIds.has(sessionId.toLowerCase()) ? 'auto' : 'card', hasProfile: profiled.has(sessionId.toLowerCase()),
+      inbound: inboundModeOf(prefs.inbound, sessionId), hasProfile: profiled.has(sessionId.toLowerCase()),
     }));
   res.json({ sessions });
 });
 
 // PUT /api/xsession/sessions/:id/inbound { mode:'card'|'auto' } —— 接收设置。判定顺序(接口 r151c §4 错误总表):总开关关 → 409
 // (前缀闸门)→ id 形状 / 请求体 / mode → 400 → 会话不在会话列表的认定里 → 404 → 读会话列表失败 → 500 XS_LIST_FAILED →
-// 写偏好失败 → 500 STORAGE_WRITE_FAILED;失败时设置不变、不广播。auto 写键、card 删键(会话 id 不分大小写)。
+// 写偏好失败 → 500 STORAGE_WRITE_FAILED;失败时设置不变、不广播。r151k:auto 与 card 都写键(不再用删键表示 card),
+// 这样「显式等你确认」与「没设置(默认自动处理)」可区分;会话 id 不分大小写。
 // 成功:广播 xs:inbound,改成 card 时该会话排着的消息立即重判(落 target-card)。
 const INBOUND_MODES = new Set(['card', 'auto']);
 router.put('/xsession/sessions/:id/inbound', async (req, res) => {
@@ -255,9 +256,8 @@ router.put('/xsession/sessions/:id/inbound', async (req, res) => {
     await updatePrefs((prefs) => {
       const inbound = prefs.xsInbound && typeof prefs.xsInbound === 'object' && !Array.isArray(prefs.xsInbound) ? prefs.xsInbound : {};
       for (const k of Object.keys(inbound)) if (k.toLowerCase() === row.sessionId.toLowerCase()) delete inbound[k];
-      if (mode === 'auto') inbound[row.sessionId] = 'auto';
-      if (Object.keys(inbound).length) prefs.xsInbound = inbound;
-      else delete prefs.xsInbound;
+      inbound[row.sessionId] = mode;
+      prefs.xsInbound = inbound;
     });
   } catch {
     return xsError(res, 500, 'STORAGE_WRITE_FAILED', STORAGE_FAILED_TEXT);

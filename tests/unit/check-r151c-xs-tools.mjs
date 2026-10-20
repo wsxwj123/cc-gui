@@ -163,7 +163,7 @@ try {
   // ── ③ list_sessions ──
   const rows = await xsRoutes.loadSessionRows();
   const rowOf = (sid) => rows.find((r) => r.sessionId === sid);
-  prefs.xsInbound = { [OTHERS[0].toUpperCase()]: 'auto' }; savePrefs();
+  prefs.xsInbound = { [OTHERS[0].toUpperCase()]: 'auto', [OTHERS[1].toUpperCase()]: 'card' }; savePrefs();
   const L = parse(await h.list_sessions({}));
   eq([L.isError, L.keys, Object.keys(L.json).sort()], [false, ['content'], ['self', 'sessions', 'truncated']], 'list:成功不带 isError,键为 self/sessions/truncated');
   const ref = (await api('GET', `/xsession/sessions?exclude=${A}&limit=30`)).body.sessions;
@@ -171,10 +171,13 @@ try {
   eq(L.json.sessions.map((s) => s.id), ref.map((s) => s.shortId), '不含自己、按最近活动倒序、30 项(与会话列表同口径)');
   eq(L.json.sessions.length, 30, '最多 30 项');
   eq(L.json.truncated, true, '超过 30 个 → truncated');
-  eq(L.json.sessions[0], { id: ref[0].shortId, name: normalizeXsSourceName(ref[0].title), project: ref[0].project, state: ref[0].state, inbound: 'card' }, '单项字段');
+  // r151k:未显式设置 inbound 的会话默认 auto(不再是 card);显式 card 仍是 card。
+  eq(L.json.sessions[0], { id: ref[0].shortId, name: normalizeXsSourceName(ref[0].title), project: ref[0].project, state: ref[0].state, inbound: 'auto' }, '单项字段(未设置 → auto)');
   const dirty = L.json.sessions.find((s) => s.id === ref.find((x) => x.sessionId === DIRTY)?.shortId);
   ok(dirty && dirty.name === normalizeXsSourceName(rowOf(DIRTY).title) && !/["<>\u0000-\u001f]/.test(dirty.name), `标题按来源名规则清洗(${dirty?.name})`);
   eq(L.json.sessions.find((s) => s.name === 'R151C 工具 0')?.inbound, 'auto', 'inbound:接收设置为自动处理的是 auto(id 不分大小写)');
+  eq(L.json.sessions.find((s) => s.name === 'R151C 工具 1')?.inbound, 'card', 'inbound:显式 card 仍是 card(未设置与显式 card 可区分)');
+  prefs.xsInbound = { [OTHERS[0].toUpperCase()]: 'auto' }; savePrefs(); // 恢复:后续发送用例按默认 auto 走
   const Q = parse(await h.list_sessions({ query: 'r151c 工具 1' })).json;
   eq(Q.sessions.map((s) => s.name).sort(), ['R151C 工具 1', ...Array.from({ length: 10 }, (_, i) => `R151C 工具 1${i}`)].sort(), 'query:标题不分大小写的子串');
   eq(Q.truncated, false, 'query 后不足 30 → truncated:false');

@@ -130,7 +130,8 @@ async function profiled(sid, mode = 'bypassPermissions', cwd = WORK) {
   await waitIdle(sid);
   await waitFor(async () => (await store.readXsProfiles()).sessions[sid], `${TITLES.get(sid)} 的档案`);
 }
-const setInbound = (ids, mode = 'auto') => prefsMod.updatePrefs((p) => { p.xsInbound = { ...(p.xsInbound || {}) }; for (const id of ids) { if (mode === 'auto') p.xsInbound[id] = 'auto'; else delete p.xsInbound[id]; } });
+// r151k:显式 card 也写键(不再用删键表示 card)—— 删键现在是"没设置 → 默认自动处理"。
+const setInbound = (ids, mode = 'auto') => prefsMod.updatePrefs((p) => { p.xsInbound = { ...(p.xsInbound || {}) }; for (const id of ids) p.xsInbound[id] = mode; });
 const senderOf = (sid, guiMode) => { const s = slotOf(sid); return { sessionId: sid, runId: s.pid, turnEpoch: s.turnEpoch, guiMode }; };
 const send = (sender, to, message) => xs.sendAiMessages({ sender, to, message }, ROWS);
 const fromSession = (sid) => async () => (await all()).filter((m) => m.from?.kind === 'session' && m.to.sessionId === sid);
@@ -342,6 +343,7 @@ try {
 
   // ── ⑦ 上限与输入校验(目标都是"等你确认",只落卡片)──
   const C = Array.from({ length: 9 }, (_, i) => mk(`卡片 C${i + 1}`));
+  await setInbound(C, 'card'); // r151k:未设置现在默认自动处理,这里显式设成 card 才有"只落卡片"的前提
   const R16 = { sessionId: S, runId: 'r16', turnEpoch: 0, guiMode: 'bypassPermissions' };
   const n0 = (await all()).length;
   await rejects(send(R16, C, 'x'), 'XS_TOO_MANY_TARGETS', '去重后 9 个目标');

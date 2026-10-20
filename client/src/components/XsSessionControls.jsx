@@ -33,7 +33,8 @@ export const XsInboundSelect = React.memo(function XsInboundSelect({ sessionId =
     <label className="inline-flex items-center gap-1 px-1.5 text-[11px] text-ink-muted font-body whitespace-nowrap"
       title="这个会话收到其它会话发来的消息时怎么处理">
       <span>收到跨会话消息时：</span>
-      <select data-testid="xs-inbound-select" value={mode || 'card'} disabled={!mode} onChange={onChange}
+      {/* r151k:服务端默认自动处理(未显式设置 → auto)。取到值前下拉是禁用态,这里只是占位。 */}
+      <select data-testid="xs-inbound-select" value={mode || 'auto'} disabled={!mode} onChange={onChange}
         className="px-1.5 py-0.5 rounded-md bg-canvas border border-canvas-deep text-[11px] text-ink font-body disabled:opacity-50 disabled:cursor-not-allowed">
         <option value="card">等你确认</option>
         <option value="auto">自动处理</option>
