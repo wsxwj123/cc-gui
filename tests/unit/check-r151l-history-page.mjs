@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // r151l 历史消息分页 —— 纯函数单测。
 // 服务端:sliceMessagesForPage(窗口/游标/hasMore/total)、parseHistoryPaging(query 校验)。
-// 客户端:historyFetchLimit、mergeRefreshedMessages、prependOlderMessages、trimRecentMessages。
+// 客户端:historyFetchLimit、mergeRefreshedMessages、prependOlderMessages、trimRecentMessages,
+//        以及请求代号 nextHistoryRequestSeq / isHistoryRequestCurrent(判官建议 D)。
 // Run: node tests/unit/check-r151l-history-page.mjs
 // 变异哨兵:before 不按 total 钳 → t2 红;空窗口 beforeCursor 写成 0 → t3 红;不传 limit 切片 → t1 红。
 import assert from 'node:assert/strict';
@@ -11,7 +12,9 @@ import {
   HISTORY_PAGE_SIZE,
   historyFetchLimit,
   historyMessageKey,
+  isHistoryRequestCurrent,
   mergeRefreshedMessages,
+  nextHistoryRequestSeq,
   prependOlderMessages,
   trimRecentMessages,
 } from '../../client/src/utils/historyPaging.js';
@@ -222,6 +225,21 @@ const idx = (list) => list.map((m) => m.i);
   const custom = trimRecentMessages(seq(10), 4);
   assert.deepEqual(custom.messages.map((m) => m.i), [6, 7, 8, 9]);
   assert.equal(custom.dropped, 6);
+}
+
+// ── t9 请求代号:每 tab 递增,旧号作废(判官建议 D)──────────────────────────
+{
+  const a = nextHistoryRequestSeq([0, 0, 0, 0, 0, 0], 2);
+  assert.deepEqual(a, { seqs: [0, 0, 1, 0, 0, 0], seq: 1 });
+  const b = nextHistoryRequestSeq(a.seqs, 2);
+  assert.deepEqual(b, { seqs: [0, 0, 2, 0, 0, 0], seq: 2 });
+  assert.deepEqual(a.seqs, [0, 0, 1, 0, 0, 0], '不原地修改入参');
+  assert.equal(isHistoryRequestCurrent(b.seqs, 2, 2), true);
+  assert.equal(isHistoryRequestCurrent(b.seqs, 2, 1), false, '旧代号必须作废');
+  assert.equal(isHistoryRequestCurrent(b.seqs, 3, 7), false, '别的 tab 不共用代号');
+  assert.equal(isHistoryRequestCurrent(undefined, 0, 1), false, '缺 state 时保守判过期');
+  const fresh = nextHistoryRequestSeq(undefined, 0);
+  assert.deepEqual(fresh, { seqs: [1], seq: 1 });
 }
 
 console.log('check-r151l-history-page: all passed');

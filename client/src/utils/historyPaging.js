@@ -77,3 +77,23 @@ export function trimRecentMessages(messages, max = HISTORY_LOADED_MAX) {
   if (list.length <= cap) return { messages: list, dropped: 0 };
   return { messages: list.slice(list.length - cap), dropped: list.length - cap };
 }
+
+/**
+ * r151l 判官修正:每 tab 单调递增的**历史请求代号**。fetchMessages / loadOlderMessages
+ * 发请求前各取一个新号;响应落地时号变了(期间有更新的一次请求 / 切走再切回)整条丢弃。
+ * 只按 sessionId 守卫不够:同会话切走再回来时 sessionId 又相等,旧响应会把新列表覆盖掉。
+ * 返回 { seqs, seq };seqs 是新数组(不原地改 state 里的旧数组)。
+ */
+export function nextHistoryRequestSeq(seqs, tab) {
+  const idx = Number.isInteger(tab) && tab >= 0 && tab <= 5 ? tab : 0;
+  const arr = Array.isArray(seqs) ? [...seqs] : [];
+  const seq = (Number.isFinite(arr[idx]) ? arr[idx] : 0) + 1;
+  arr[idx] = seq;
+  return { seqs: arr, seq };
+}
+
+/** 这个响应对应的请求代号是否仍是最新一次(不是 → 丢弃,不写列表/分页账)。 */
+export function isHistoryRequestCurrent(seqs, tab, seq) {
+  const idx = Number.isInteger(tab) && tab >= 0 && tab <= 5 ? tab : 0;
+  return Array.isArray(seqs) && seqs[idx] === seq;
+}

@@ -121,7 +121,7 @@ import { SkinSection } from './components/SkinPanel.jsx';
 import { ProviderPriceEditor } from './components/ProviderPriceEditor.jsx';
 import { BUILTIN_PROVIDERS, findBuiltin, presetSuggestion } from './utils/builtinProviders.js';
 import { quotaValueText } from './utils/quotaFormat.js';
-import { computeCostForMessage, displayUsd, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
+import { aggregateHistoryCost, computeCostForMessage, displayUsd, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, createQueueId } from './utils/steerQueue.js';
@@ -3896,6 +3896,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 整会话用量聚合(服务端随 /messages 端点算好,keyed by sessionId)。取到则顶部
   // 用量条不再对全量历史消息逐帧 reduce。map 里的对象引用稳定,null 兜底不造新引用。
   const serverUsageTotals = useStore((s) => (selectedSession?.sessionId && s.usageTotalsBySession[selectedSession.sessionId]) || null);
+  // r151l 判官修正:整会话**全量**统计(工具调用数/曾用模型/按模型用量),同一响应到达。
+  // 会话徽章、弹层、手机条必须用它,不能对已加载的 120 条窗口另算一份。
+  const serverHistoryStats = useStore((s) => (selectedSession?.sessionId && s.historyStatsBySession?.[selectedSession.sessionId]) || null);
   // r151l:本窗格的历史分页账。账必须属于当前会话才可信(setPaneSession 换会话会清空)。
   const tabHistoryPaging = useStore((s) => s.historyPagingByTab?.[tabIndex] || null);
   const pagingForHere = tabHistoryPaging && tabHistoryPaging.sessionId === selectedSession?.sessionId
@@ -9019,18 +9022,45 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // redirects (Claude → DeepSeek/MiMo) get the right backend price table.
     // 逐条走 computeCostForMessage(带 usageCalls → 分时段模型按每次调用自己的时刻判档);
     // 金额先归一到展示口径再相加 —— 官方 CNY 报价是原币种数字,不同币种的数字不能直接相加。
-    const cost = all.reduce((acc, m) => {
+    const sumCost = (list) => list.reduce((acc, m) => {
       if (m.usage && (m.model || currentProvider?.model)) {
         const c = computeCostForMessage(m, currentProvider);
         if (c) acc += displayUsd(c.totalUsd, c.currency);
       }
       return acc;
     }, 0);
-    const tools = all.reduce((acc, m) => acc + (m.toolCalls?.length || 0), 0);
-    const modelList = [...new Set(all.filter((m) => m.model).map((m) => m.model))];
-    return { totalCostUsd: cost, toolCallCount: tools, models: modelList };
+    const sumTools = (list) => list.reduce((acc, m) => acc + (m.toolCalls?.length || 0), 0);
+    // r151l 判官修正:有服务端全量统计就按全量算费用/工具数/模型(含未落盘的直播条目),
+    // 不再只统计已加载的 120 条窗口 —— 否则同一张弹层里 token 是全量、费用是窗口。
+    // 没有 historyStats(旧服务端 / 加载失败)时保持旧口径回退到已加载窗口。
+    const hasFullStats = !!serverHistoryStats
+      && Array.isArray(serverHistoryStats.usageByModel)
+      && Array.isArray(serverHistoryStats.models);
+    if (hasFullStats) {
+      const fullCost = aggregateHistoryCost(serverHistoryStats.usageByModel, currentProvider);
+      // 本回合已落盘但被 streamHistCutoff 从 finalizedMessages 里藏起来的条目:它们**已经在**
+      // 服务端全量统计里,而屏幕上画的是 renderChat 的直播副本 —— 先减掉再叠加直播,避免
+      // 流式期间费用/工具数被算两遍。messages 与 historyStats 来自同一份响应快照。
+      const shownKeys = new Set(finalizedMessages.map((m) => historyMessageKey(m)));
+      const hiddenPersisted = messages.filter((m) => !shownKeys.has(historyMessageKey(m)));
+      const liveModels = renderChat.filter((m) => m.model).map((m) => m.model);
+      return {
+        totalCostUsd: Math.max(0, (fullCost.usd || 0) - sumCost(hiddenPersisted)) + sumCost(renderChat),
+        toolCallCount: Math.max(0, (serverHistoryStats.totalToolCalls || 0) - sumTools(hiddenPersisted)) + sumTools(renderChat),
+        models: [...new Set([
+          ...serverHistoryStats.models,
+          ...hiddenPersisted.filter((m) => m.model).map((m) => m.model),
+          ...liveModels,
+        ])],
+      };
+    }
+    return {
+      totalCostUsd: sumCost(all),
+      toolCallCount: sumTools(all),
+      models: [...new Set(all.filter((m) => m.model).map((m) => m.model))],
+    };
     // 依赖里的 pricingVersion 是"查价数据变了"的信号,函数体里不读它。
-  }, [finalizedMessages, renderChat, currentProvider, pricingVersion]);
+  }, [finalizedMessages, renderChat, messages, currentProvider, pricingVersion, serverHistoryStats]);
 
   // r148 P6:传给输入框的回调稳定下来(输入框已记忆化;每次渲染新建的内联函数会让记忆化白做)。
   // 同样必须在提前 return 之前。
@@ -9137,9 +9167,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     cache_creation_input_tokens: totalTokens.cacheCreation || 0,
   });
   const cacheHitPct = sessionCache.hitPct;
+  // r151l 判官修正:统计范围必须可见 —— token 走服务端全量(usageTotals),费用/工具数/模型
+  // 现在也走服务端 historyStats(全量);旧服务端没有 historyStats 时如实标注"仅已加载"。
+  const historyLoadedCount = messages.length;
+  const historyTotalCount = Number.isInteger(serverHistoryStats?.total)
+    ? serverHistoryStats.total
+    : (Number.isInteger(pagingForHere?.total) ? pagingForHere.total : historyLoadedCount);
+  const statsScopeLabel = serverHistoryStats
+    ? `统计范围:全量 ${historyTotalCount} 条消息(服务端聚合,与是否分页无关)`
+    : `统计范围:仅已加载的最近 ${historyLoadedCount} 条消息(服务端未返回全量统计)`;
   const usageDetailTitle = `输入 ${totalTokens.input.toLocaleString()} · 输出 ${totalTokens.output.toLocaleString()} · 缓存命中 ${totalTokens.cacheRead.toLocaleString()} · 缓存写入 ${(totalTokens.cacheCreation || 0).toLocaleString()}
 总 token = 四项之和;命中率 = 缓存命中 / (输入 + 缓存命中 + 缓存写入)
-未命中(按未命中价计费的提示 token)= 输入 + 缓存写入 = ${sessionCache.miss.toLocaleString()}`;
+未命中(按未命中价计费的提示 token)= 输入 + 缓存写入 = ${sessionCache.miss.toLocaleString()}
+${statsScopeLabel}`;
   // r148 P6:费用 / 工具调用数 / 模型集合已挪到上面 hook 区的 sessionSummary(记忆化),这里只取结果。
   const { totalCostUsd, toolCallCount, models } = sessionSummary;
 
@@ -9249,6 +9289,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     turnCacheHitPct: turnCache.hitPct, turnCacheTotal: turnCache.total, turnCacheRead: turnCache.read,
     sessionCacheMiss: sessionCache.miss, sessionCacheTotal: sessionCache.total,
     bareAliasWindowUnknown, winSource,
+    // r151l 判官修正:弹层里明确写统计范围(全量 / 仅已加载),费用与工具数不再和 token 打架。
+    statsScopeLabel, statsFull: !!serverHistoryStats,
+    statsLoaded: historyLoadedCount, statsTotal: historyTotalCount,
+  };
+  // r151l 判官修正:窗内检索与回合进度条只能覆盖**已加载**的消息/回合。范围必须可见,
+  // 且范围提示里可一键补加载更早消息(加载后检索自动重跑、进度条自动扩到更早回合)。
+  const historyScope = {
+    loaded: historyLoadedCount,
+    total: historyTotalCount,
+    hasMore: canLoadOlder,
+    capped: historyCapped,
+    loading: loadingOlder,
+    onLoadOlder: handleLoadOlder,
   };
 
   return (
@@ -9274,14 +9327,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       )}
       {/* 窗内检索浮层(Cmd/Ctrl+F)+ 右侧回合进度条(子代理视图打开时不显示)。 */}
       {!showAgentView && searchOpen && (
-        <ChatSearch containerRef={containerRef} onClose={() => {
+        <ChatSearch containerRef={containerRef} scope={historyScope} onClose={() => {
           // 关检索 = 裁剪恢复(视口上方整批卸载)→ 先记下变化前的高度,靠差值把位置搬回去。
           captureMountBeforeRef.current?.();
           setSearchOpen(false);
         }} />
       )}
       {!showAgentView && (
-        <TurnScrubber containerRef={containerRef} turns={userTurns} onNavigate={markScrollReading} onJumpToTurn={jumpToTurn} />
+        <TurnScrubber containerRef={containerRef} turns={userTurns} scope={historyScope} onNavigate={markScrollReading} onJumpToTurn={jumpToTurn} />
       )}
       {/* 旁问浮窗:右下角浮动小窗,把本会话 /btw 线程聚合成连续对话。z-46 高于子代理面板
           (z-40)故与之共存;suppressed=hasPendingInteraction 时让路授权/问题卡(收成浮标)。 */}
@@ -9308,7 +9361,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               <span className="text-[10px] text-ink-faint font-mono flex items-center gap-1 shrink-0 whitespace-nowrap">
                 <Hash size={10} />{selectedSession.sessionId?.slice(0, 8) || '新会话'}
               </span>
-              <span className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">{messages.length + chatMessages.filter((m) => m.type !== 'btw').length} 条消息</span>
+              {/* r151l 判官建议 C:显示服务端全量 total(旧服务端/未加载完时回落已加载数),
+                  否则 300 条会话只加载 120 条会写成「120 条消息」。 */}
+              <span data-cgui="message-count"
+                title={historyTotalCount > historyLoadedCount
+                  ? `已加载 ${historyLoadedCount} 条，共 ${historyTotalCount} 条`
+                  : undefined}
+                className="text-[10px] text-ink-faint font-mono shrink-0 whitespace-nowrap">
+                {historyTotalCount + chatMessages.filter((m) => m.type !== 'btw').length} 条消息
+              </span>
               {/* r98:标题行直接给本轮(最近一次 API 调用)命中率;会话累计仍在徽章弹层。 */}
               {/* R24 口径名:顶部 = 最近一次 API 调用的「最近API命中率」;整轮口径见轮末徽章,
                   会话累计见用量面板与上下文徽章弹层。三处名字不得混用。 */}
@@ -9418,7 +9479,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           {/* R24:三处口径名固定 —— 手机条上「会话累计命中率」+「最近API命中率」。 */}
           <span className="text-ink-ghost" title={usageDetailTitle}>会话累计命中率 {formatHitPctOrDash(cacheHitPct, sessionCache.total)}</span>
           <span className="text-ink" title="最近API命中率（最近一次 API 调用）；前一项为会话累计">最近API命中率 {formatHitPctOrDash(turnCache.hitPct, turnCache.total)}</span>
-          {totalCostUsd > 0 && <span className="text-accent/80">· {formatCost(totalCostUsd)}</span>}
+          {totalCostUsd > 0 && (
+            <span className="text-accent/80" title={`按各模型官网价估算的累计费用。
+${statsScopeLabel}`}>· {formatCost(totalCostUsd)}</span>
+          )}
         </div>
       )}
 
@@ -10454,11 +10518,20 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
             <span className="text-ink-faint w-14 shrink-0">累计 token</span>
             <span className="font-mono text-ink-muted">{(info.totalAllTokens || 0).toLocaleString()}</span>
             {info.totalCostUsd > 0 && (
-              <span className="font-mono text-accent/80" title="按各模型官网价估算的累计费用（人民币，按 1 USD ≈ 7.2 CNY 换算）。套餐制模型（Claude 官方订阅、Kimi Code 会员套餐）不按 token 计费，不计入此数。若模型经中转站接入，实际单价以服务商为准。">
+              <span className="font-mono text-accent/80" title={`按各模型官网价估算的累计费用（人民币，按 1 USD ≈ 7.2 CNY 换算）。套餐制模型（Claude 官方订阅、Kimi Code 会员套餐）不按 token 计费，不计入此数。若模型经中转站接入，实际单价以服务商为准。
+${info.statsScopeLabel || ''}`}>
                 · {formatCost(info.totalCostUsd)}
               </span>
             )}
           </div>
+          {/* r151l 判官修正:费用/工具数/模型与 token 同一统计范围,范围写在弹层里(全量/仅已加载)。 */}
+          {info.statsScopeLabel && (
+            <div data-cgui="badge-stats-scope"
+              className={`text-[9px] leading-snug font-body ${info.statsFull ? 'text-ink-ghost' : 'text-amber-700'}`}
+              title={info.statsScopeLabel}>
+              {info.statsScopeLabel}
+            </div>
+          )}
           {info.cacheRead > 0 && (
             <div className="flex items-center gap-2 text-[11px] font-body" title={info.usageDetailTitle}>
               <span className="text-ink-faint w-14 shrink-0">缓存命中</span>

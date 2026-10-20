@@ -22,13 +22,14 @@ import { turnWaveWidth, layoutCompactPositions, distortPositions, buildTurnIndex
 const SHOW_DELAY = 220;
 const HIDE_DELAY = 120;
 const FISHEYE = { factor: 3 }; // sigma 缺省 = 3×平均间距(distortPositions 内部)
-export default function TurnScrubber({ containerRef, turns, onNavigate, onJumpToTurn }) {
+export default function TurnScrubber({ containerRef, turns, onNavigate, onJumpToTurn, scope = null }) {
   const rootRef = useRef(null);                // 本组件根,取其 offsetParent 作定位基准
   const [box, setBox] = useState(null);        // { top, height } 相对根
   const [pointerY, setPointerY] = useState(null);
   const [activeIdx, setActiveIdx] = useState(null); // 解算出的最近回合索引(hover/键盘共用)
   const activeIdxRef = useRef(null);                // rAF 回调里的同步判重(不吃 setState 时序)
   const [tipIdx, setTipIdx] = useState(null);
+  const [olderLoading, setOlderLoading] = useState(false);
   const showTimer = useRef(0);
   const hideTimer = useRef(0);
   const pointerFrame = useRef(0);
@@ -123,6 +124,15 @@ export default function TurnScrubber({ containerRef, turns, onNavigate, onJumpTo
     requestAnimationFrame(tryScroll);
   };
 
+  // r151l 判官修正:进度条的 turns 只是**已加载**的回合;范围提示里可一键补加载更早消息,
+  // 加载后 turns 变长、进度条自动覆盖更早回合(先加载再点即可跳旧回合)。
+  const loadOlder = async (e) => {
+    e?.stopPropagation?.();
+    if (olderLoading || !scope?.hasMore || typeof scope.onLoadOlder !== 'function') return;
+    setOlderLoading(true);
+    try { await scope.onLoadOlder(); } catch { /* 失败保持原范围,按钮恢复可点 */ } finally { setOlderLoading(false); }
+  };
+
   // 索引变化 → 武装 tooltip(首次入场延迟 SHOW_DELAY;tooltip 已可见则即时跟随)。
   const armTip = (i) => {
     clearTimeout(hideTimer.current);
@@ -213,6 +223,21 @@ export default function TurnScrubber({ containerRef, turns, onNavigate, onJumpTo
       {/* r13-p2-14 标定探针:与刻度同一定位通道(translateY 布局px),零视觉、零事件 */}
       <i ref={probe0Ref} aria-hidden="true" style={{ position: 'absolute', top: 0, right: 0, width: 1, height: 1, transform: 'translateY(0px)', pointerEvents: 'none', opacity: 0 }} />
       <i ref={probeNRef} aria-hidden="true" style={{ position: 'absolute', top: 0, right: 0, width: 1, height: 1, transform: `translateY(${PROBE_SPAN}px)`, pointerEvents: 'none', opacity: 0 }} />
+      {/* r151l 判官修正:进度条只覆盖已加载窗口,范围必须可见;点这里补加载更早消息,
+          加载后 turns 变长,旧回合也能点了。capped(2000 条上限)时只标范围不给按钮。 */}
+      {scope && scope.total > scope.loaded && (
+        <button
+          type="button"
+          data-cgui="scrubber-scope"
+          onClick={loadOlder}
+          disabled={!scope.hasMore || olderLoading}
+          style={{ position: 'absolute', right: 24, top: 0, width: 'max-content', maxWidth: 220 }}
+          className="glass-popover rounded px-1.5 py-0.5 text-[9px] leading-snug font-mono text-ink-faint whitespace-nowrap cursor-pointer hover:text-ink disabled:cursor-default"
+          title={`右侧进度条只包含已加载的 ${scope.loaded}/${scope.total} 条消息（更早回合尚未加载）。${scope.hasMore ? '点此补加载一页更早消息；加载后进度条会覆盖更早的回合。' : '已达到加载上限。'}`}
+        >
+          进度范围 {scope.loaded}/{scope.total}{olderLoading ? ' · 加载中…' : (scope.hasMore ? ' · 加载更早' : ' · 已到上限')}
+        </button>
+      )}
       {positions.map((n, i) => {
         const t = turns[i];
         // positions 与 turns 同帧派生(turns.length),但守卫保留:极端时序下 turns[i]
@@ -250,6 +275,7 @@ export default function TurnScrubber({ containerRef, turns, onNavigate, onJumpTo
         >
           <div className="text-[10px] text-ink-faint font-mono mb-0.5 flex items-center gap-1.5">
             <span>回合 {tipIdx + 1}</span>
+            {scope && scope.total > scope.loaded && <span className="text-ink-ghost">· 进度范围 {scope.loaded}/{scope.total} 条</span>}
           </div>
           <div className="text-[12px] text-ink leading-snug font-body" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
             {(turns[tipIdx].text || '(空消息)').slice(0, 200)}

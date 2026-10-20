@@ -13,10 +13,11 @@ const HL = 'cgui-search';
 const HL_ACTIVE = 'cgui-search-active';
 const supportsHighlight = typeof CSS !== 'undefined' && CSS.highlights && typeof Highlight !== 'undefined';
 
-export default function ChatSearch({ containerRef, onClose }) {
+export default function ChatSearch({ containerRef, onClose, scope = null }) {
   const [query, setQuery] = useState('');
   const [count, setCount] = useState(0);
   const [active, setActive] = useState(0); // 1-based;0 = 无
+  const [olderLoading, setOlderLoading] = useState(false);
   const activeRef = useRef(0);              // 与 active 同步,供 go() 计算下一项(不在 setState updater 里做副作用)
   const inputRef = useRef(null);
   const rangesRef = useRef([]);
@@ -112,19 +113,46 @@ export default function ChatSearch({ containerRef, onClose }) {
   }, [scrollRangeIntoView]);
   paintActiveRef.current = paintActive;
 
-  // query 变化 → 重算
-  useEffect(() => {
-    const q = query.trim();
+  // 重算命中。keepActive=true 用于「补加载更早消息后」:尽量留在原来的第 N 条命中,
+  // 不把用户正在看的那条重置成第一条。
+  const runSearch = useCallback((rawQuery, { keepActive = false } = {}) => {
+    const q = rawQuery.trim();
     clearHighlights();
     if (!q) { rangesRef.current = []; setCount(0); setActive(0); return; }
     const ranges = buildRanges(q);
     rangesRef.current = ranges;
     setCount(ranges.length);
-    const first = ranges.length ? 1 : 0;
-    activeRef.current = first;
-    setActive(first);
-    paintActive(ranges, first);
-  }, [query, buildRanges, paintActive, clearHighlights]);
+    const idx = keepActive && ranges.length
+      ? Math.min(Math.max(1, activeRef.current || 1), ranges.length)
+      : (ranges.length ? 1 : 0);
+    activeRef.current = idx;
+    setActive(idx);
+    if (idx) paintActive(ranges, idx);
+  }, [buildRanges, paintActive, clearHighlights]);
+
+  // query 变化 → 重算
+  useEffect(() => { runSearch(query); }, [query, runSearch]);
+
+  // 已加载条数变多(点「加载更早」/静默刷新追加)→ 等 React 提交完 DOM 再重跑一次,
+  // 不重置当前命中序号。这样旧消息补进来后立刻可搜,不必改一个字再敲一遍。
+  const loadedCount = scope?.loaded ?? 0;
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  const prevLoadedRef = useRef(loadedCount);
+  useEffect(() => {
+    if (prevLoadedRef.current === loadedCount) return;
+    const grew = loadedCount > prevLoadedRef.current;
+    prevLoadedRef.current = loadedCount;
+    if (grew) runSearch(queryRef.current, { keepActive: true });
+  }, [loadedCount, runSearch]);
+
+  // r151l 判官修正:检索只扫 DOM(= 只覆盖已加载消息)。有更早消息未加载时,范围可见,
+  // 且一键补加载;加载落地后由上方的 loadedCount effect 重跑检索。
+  const loadOlder = async () => {
+    if (olderLoading || !scope?.hasMore || typeof scope.onLoadOlder !== 'function') return;
+    setOlderLoading(true);
+    try { await scope.onLoadOlder(); } catch { /* 失败保持原范围,按钮恢复可点 */ } finally { setOlderLoading(false); }
+  };
 
   const go = useCallback((dir) => {
     const n = rangesRef.current.length;
@@ -166,23 +194,45 @@ export default function ChatSearch({ containerRef, onClose }) {
     <div
       data-cgui="chat-search"
       data-cgui-search-ui
-      className="absolute top-3 right-8 left-3 md:left-auto z-50 flex items-center gap-1.5 glass-popover rounded-lg pl-3 pr-1.5 py-1.5 shadow-popover animate-fade-in max-w-[calc(var(--app-w,100vw)-2.75rem)]"
+      className="absolute top-3 right-8 left-3 md:left-auto z-50 flex flex-col items-stretch glass-popover rounded-lg pl-3 pr-1.5 py-1.5 shadow-popover animate-fade-in max-w-[calc(var(--app-w,100vw)-2.75rem)]"
     >
-      <input
-        ref={inputRef}
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        onKeyDown={onKeyDown}
-        placeholder="窗内检索…"
-        className="bg-transparent outline-none text-[13px] text-ink font-body w-44 min-w-0 flex-1 md:flex-none placeholder:text-ink-ghost"
-      />
-      <span className="text-[11px] text-ink-faint font-mono tabular-nums min-w-[42px] text-right">
-        {count ? `${active}/${count}` : (query.trim() ? '0' : '')}
-      </span>
-      <button onClick={() => go(-1)} disabled={!count} className="p-1 rounded hover:bg-canvas-deep/50 disabled:opacity-30 text-ink-soft" title="上一个 (Shift+Enter)"><ChevronUp size={15} /></button>
-      <button onClick={() => go(1)} disabled={!count} className="p-1 rounded hover:bg-canvas-deep/50 disabled:opacity-30 text-ink-soft" title="下一个 (Enter)"><ChevronDown size={15} /></button>
-      <button onClick={onClose} className="p-1 rounded hover:bg-canvas-deep/50 text-ink-soft" title="关闭 (Esc)"><X size={15} /></button>
-      {!supportsHighlight && <span className="text-[10px] text-warning ml-1" title="当前 webview 不支持高亮,仅滚动定位">⚠</span>}
+      <div className="flex items-center gap-1.5">
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="窗内检索…"
+          className="bg-transparent outline-none text-[13px] text-ink font-body w-44 min-w-0 flex-1 md:flex-none placeholder:text-ink-ghost"
+        />
+        <span className="text-[11px] text-ink-faint font-mono tabular-nums min-w-[42px] text-right">
+          {count ? `${active}/${count}` : (query.trim() ? '0' : '')}
+        </span>
+        <button onClick={() => go(-1)} disabled={!count} className="p-1 rounded hover:bg-canvas-deep/50 disabled:opacity-30 text-ink-soft" title="上一个 (Shift+Enter)"><ChevronUp size={15} /></button>
+        <button onClick={() => go(1)} disabled={!count} className="p-1 rounded hover:bg-canvas-deep/50 disabled:opacity-30 text-ink-soft" title="下一个 (Enter)"><ChevronDown size={15} /></button>
+        <button onClick={onClose} className="p-1 rounded hover:bg-canvas-deep/50 text-ink-soft" title="关闭 (Esc)"><X size={15} /></button>
+        {!supportsHighlight && <span className="text-[10px] text-warning ml-1" title="当前 webview 不支持高亮,仅滚动定位">⚠</span>}
+      </div>
+      {/* r151l 判官修正:检索只覆盖已加载的 DOM;范围与补加载入口必须可见,
+          否则 300+ 条会话里搜不到旧消息时用户无从知道原因。 */}
+      {scope && scope.total > scope.loaded && (
+        <div data-cgui="chat-search-scope"
+          className="flex items-center gap-2 border-t border-black/5 mt-1 pt-1 pr-2 text-[9px] leading-snug font-body text-ink-faint min-w-0">
+          <span className="shrink-0" title="窗内检索只扫描已挂载的消息行;更早的消息尚未加载">
+            搜索范围：已加载 {scope.loaded}/{scope.total} 条
+          </span>
+          {query.trim() && count === 0 && (
+            <span className="text-amber-700 shrink-0">{scope.hasMore ? '更早消息尚未加载' : '已到加载上限'}</span>
+          )}
+          {scope.hasMore && (
+            <button type="button" onClick={loadOlder} disabled={olderLoading}
+              className="ml-auto shrink-0 text-accent hover:underline disabled:opacity-50 disabled:no-underline"
+              title="从服务端补加载一页更早的消息;加载完成后会自动重新检索">
+              {olderLoading ? '加载中…' : '加载更早'}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

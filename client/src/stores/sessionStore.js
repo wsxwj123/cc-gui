@@ -16,7 +16,9 @@ import {
   HISTORY_PAGE_SIZE,
   historyFetchLimit,
   historyMessageKey,
+  isHistoryRequestCurrent,
   mergeRefreshedMessages,
+  nextHistoryRequestSeq,
   prependOlderMessages,
   trimRecentMessages,
 } from '../utils/historyPaging.js';
@@ -721,12 +723,20 @@ export const useStore = create((set, get) => ({
   // 切会话只换 paneSessions、fetch 异步回来前 paneMessages 仍是上个会话的 —— 渲染层
   // 据此标记同步判定"这份历史属于当前会话吗",不属于就当空数组,零窗口期。
   paneMessagesSid: [null, null, null, null, null, null],
-  // r151l:每个窗格的历史分页账 { sessionId, hasMore, beforeCursor, loaded, loading, capped }。
+  // r151l:每个窗格的历史分页账 { sessionId, hasMore, beforeCursor, loaded, total, loading, capped }。
   // 只在 sessionId 与窗格当前会话一致时可信;切会话/关窗格时清空(setPaneSession / closePane)。
   historyPagingByTab: [null, null, null, null, null, null],
+  // r151l 判官修正:每个窗格单调递增的历史请求代号(见 utils/historyPaging.js 的
+  // nextHistoryRequestSeq)。同会话切走再回/并发静默刷新时,旧响应靠它作废;
+  // 只按 sessionId 守卫挡不住"切走又回来"。
+  historyReqSeqByTab: [0, 0, 0, 0, 0, 0],
   // 整会话用量聚合(keyed by sessionId,服务端随 /messages 端点返回)。按 sessionId
   // 而非 pane 索引存放 —— 分屏关窗/换绑不需要 splice 同步,同会话多窗格天然共享。
   usageTotalsBySession: {},
+  // r151l 判官修正:整会话的**全量**统计(工具数/模型/按模型用量),同样随 /messages 返回。
+  // 会话徽章/弹层/手机条不再对已加载窗口做 reduce —— 300+ 条会话只加载 120 条时,
+  // 费用/工具数/模型也必须是全量,和 token 同一范围。
+  historyStatsBySession: {},
   // Stable per-pane identity tokens. SplitMain keys each SessionDetail by these
   // (not by position), so closePane's left-shift keeps every surviving pane's
   // React instance — and its live streaming state — paired with its session.
@@ -2540,17 +2550,30 @@ export const useStore = create((set, get) => ({
     const sameSession = !!pagingBefore && pagingBefore.sessionId === sessionId;
     // 首屏/换会话 = 120;同一会话的刷新至少把已加载的都取回来,避免"刷新后退回 120"。
     const requestLimit = historyFetchLimit(sameSession ? pagingBefore.loaded : 0);
+    // r151l 判官修正:发请求前领一个本 tab 的请求代号。响应落地时代号变了 = 期间有更新
+    // 的一次请求(含"切走再切回"后重新拉取)→ 整条丢弃,不覆盖新列表/新分页账。
+    const req = nextHistoryRequestSeq(get().historyReqSeqByTab, tab);
+    set({ historyReqSeqByTab: req.seqs });
     if (!silent) set({ loading: true, error: null });
     try {
       const res = await fetch(
         `/api/sessions/${sessionId}/messages?projectHash=${encodeURIComponent(projectHash)}&limit=${requestLimit}`
       );
+      // 更新的一次请求已在飞 → 这条是过期响应:不写列表、不碰 loading(由最新那条收尾)。
+      if (!isHistoryRequestCurrent(get().historyReqSeqByTab, tab, req.seq)) return false;
       // A missing / just-trimmed jsonl (404) or a server error must NOT blank the
       // pane: in split view a sibling pane showing the same reset session would
       // also re-fetch and go empty ("该会话没有可显示的消息" everywhere). Keep
       // whatever is there — a genuinely empty session still returns 200 + [].
-      if (!res.ok) { if (!silent) set({ loading: false }); return false; }
+      if (!res.ok) {
+        // 最新请求即使是静默刷新,也要收掉可能由它顶替掉的首屏 loading。
+        if (!silent) set({ loading: false });
+        else if (tab === 0 && get().loading) set({ loading: false });
+        return false;
+      }
       const data = await res.json();
+      // res.json() 也是异步的:解析期间可能又起了新请求,落地前再核对一次代号。
+      if (!isHistoryRequestCurrent(get().historyReqSeqByTab, tab, req.seq)) return false;
       // 端点现返回 { messages, usageTotals };兼容旧的裸数组形态(升级过渡期)。
       const messages = Array.isArray(data) ? data : (Array.isArray(data?.messages) ? data.messages : []);
       // 乱序守卫:响应落地时该 pane 已切走(sessionId 不再是发起时的)→ 整条丢弃,
@@ -2593,26 +2616,40 @@ export const useStore = create((set, get) => ({
         hasMore: start > 0,
         beforeCursor: start,
         loaded: trimmed.messages.length,
+        // 判官建议 C:头部「N 条消息」/检索范围用服务端全量 total(旧服务端回落已加载数)。
+        total: Number.isInteger(data?.total) ? data.total : (start + trimmed.messages.length),
         loading: false,
         capped: start > 0 && (!!pagingNow?.capped || trimmed.dropped > 0
           || trimmed.messages.length >= HISTORY_LOADED_MAX),
       });
-      // 服务端算好的整会话用量聚合,SessionDetail 顶部用量条直接取用,
+      // 服务端算好的整会话用量聚合 + 全量统计,SessionDetail 顶部用量条/会话徽章直接取用,
       // 避免前端对几千条历史消息每帧全量 reduce。分页不影响口径(服务端按全文件算)。
-      if (data && !Array.isArray(data) && data.usageTotals) {
-        set((s) => ({ usageTotalsBySession: { ...s.usageTotalsBySession, [sessionId]: data.usageTotals } }));
+      if (data && !Array.isArray(data)) {
+        if (data.usageTotals) {
+          set((s) => ({ usageTotalsBySession: { ...s.usageTotalsBySession, [sessionId]: data.usageTotals } }));
+        }
+        if (data.historyStats) {
+          set((s) => ({ historyStatsBySession: { ...s.historyStatsBySession, [sessionId]: data.historyStats } }));
+        }
       }
+      // 最新请求收尾:静默刷新也可能顶替了在飞的首屏请求,不能把 loading 永远留着。
       if (!silent) set({ loading: false });
+      else if (tab === 0 && get().loading) set({ loading: false });
       return true;
     } catch (err) {
       // Network/parse failure — keep existing messages rather than blanking.
+      // 过期响应(期间已有更新请求)连错误态都不写,交给最新那条。
+      if (!isHistoryRequestCurrent(get().historyReqSeqByTab, tab, req.seq)) return false;
       if (!silent) set({ error: err.message, loading: false });
+      else if (tab === 0 && get().loading) set({ loading: false });
       return false;
     }
   },
 
   // r151l:顶部「加载更早的消息」—— 用当前游标再取一页,前插去重,更新游标/hasMore/loaded。
   // 加载中防重复;capped(已到 2000 上限)后不再请求。
+  // 判官建议 D:同样领请求代号;空页/异常分支只用**当前**分页账清 loading,不再拿发起时的
+  // 旧账覆盖(期间可能已被静默刷新改过游标/总数),代号变了就整条丢弃。
   loadOlderMessages: async (sessionId, projectHash, opts = {}) => {
     const tab = Number.isInteger(opts.tab) && opts.tab >= 0 && opts.tab <= 5 ? opts.tab : 0;
     const st = get();
@@ -2621,10 +2658,14 @@ export const useStore = create((set, get) => ({
     if (st.paneSessions[tab]?.sessionId !== sessionId) return false;
     const cursor = Number.isInteger(paging.beforeCursor) ? paging.beforeCursor : null;
     if (cursor === null || cursor <= 0) return false;
+    const req = nextHistoryRequestSeq(get().historyReqSeqByTab, tab);
+    set({ historyReqSeqByTab: req.seqs });
     get().setHistoryPaging(tab, { ...paging, loading: true });
+    const stillCurrent = () => isHistoryRequestCurrent(get().historyReqSeqByTab, tab, req.seq);
     const fail = () => {
+      // 期间切了会话/账被清掉/有更新的请求 → 不要用旧账覆盖新会话的状态。
+      if (!stillCurrent()) return false;
       const cur = get().historyPagingByTab?.[tab];
-      // 期间切了会话/账被清掉 → 不要用旧账覆盖新会话的状态。
       if (cur && cur.sessionId === sessionId) get().setHistoryPaging(tab, { ...cur, loading: false });
       return false;
     };
@@ -2634,11 +2675,18 @@ export const useStore = create((set, get) => ({
       );
       if (!res.ok) return fail();
       const data = await res.json();
-      if (get().paneSessions[tab]?.sessionId !== sessionId) return fail();
+      if (get().paneSessions[tab]?.sessionId !== sessionId || !stillCurrent()) return fail();
       const page = Array.isArray(data) ? data : (Array.isArray(data?.messages) ? data.messages : []);
       if (!page.length) {
         // before>0 却拿到空窗口 = 服务端没有更早内容了(文件被裁剪等),别让按钮永远转。
-        get().setHistoryPaging(tab, { ...paging, loading: false, hasMore: false });
+        // 只改**当前**账,且只在游标还是发起时那个(期间刷新改过 → 不替它判"没有更早")。
+        const cur = get().historyPagingByTab?.[tab];
+        if (!cur || cur.sessionId !== sessionId) return false;
+        if ((Number.isInteger(cur.beforeCursor) ? cur.beforeCursor : null) !== cursor) {
+          get().setHistoryPaging(tab, { ...cur, loading: false });
+          return false;
+        }
+        get().setHistoryPaging(tab, { ...cur, loading: false, hasMore: false });
         return false;
       }
       const now = get();
@@ -2651,18 +2699,27 @@ export const useStore = create((set, get) => ({
         : Math.max(0, cursor - page.length);
       const trimmed = trimRecentMessages(withOlder, HISTORY_LOADED_MAX);
       const start = Math.max(0, pageStart + trimmed.dropped);
+      const curPaging = now.historyPagingByTab?.[tab];
       get().setPaneMessages(tab, trimmed.messages, sessionId);
       get().setHistoryPaging(tab, {
         sessionId,
         hasMore: start > 0,
         beforeCursor: start,
         loaded: trimmed.messages.length,
+        total: Number.isInteger(data?.total)
+          ? data.total
+          : (Number.isInteger(curPaging?.total) ? curPaging.total : (start + trimmed.messages.length)),
         loading: false,
-        capped: start > 0 && (!!paging.capped || trimmed.dropped > 0
+        capped: start > 0 && (!!curPaging?.capped || trimmed.dropped > 0
           || trimmed.messages.length >= HISTORY_LOADED_MAX),
       });
-      if (data && !Array.isArray(data) && data.usageTotals) {
-        set((s) => ({ usageTotalsBySession: { ...s.usageTotalsBySession, [sessionId]: data.usageTotals } }));
+      if (data && !Array.isArray(data)) {
+        if (data.usageTotals) {
+          set((s) => ({ usageTotalsBySession: { ...s.usageTotalsBySession, [sessionId]: data.usageTotals } }));
+        }
+        if (data.historyStats) {
+          set((s) => ({ historyStatsBySession: { ...s.historyStatsBySession, [sessionId]: data.historyStats } }));
+        }
       }
       return true;
     } catch {
