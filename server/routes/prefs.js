@@ -41,12 +41,27 @@ export function readXsEnabledSync() {
   catch { return false; }
 }
 
+// r151k:会话常驻的空闲回收时长(keepAliveIdle,默认 1h)。'never' = 不自动回收进程。
+// 同步读是因为 chat.js 的 finalize / idleReclaim 都在同步路径上现读(用户中途改设置要生效);
+// 文件不存在、损坏、键缺失或值不在枚举里 → '1h';只读,不改写文件。
+export const KEEP_ALIVE_IDLE_VALUES = Object.freeze(['15m', '30m', '1h', '2h', '4h', 'never']);
+export const KEEP_ALIVE_IDLE_DEFAULT = '1h';
+export function normalizeKeepAliveIdle(v) {
+  return typeof v === 'string' && KEEP_ALIVE_IDLE_VALUES.includes(v) ? v : KEEP_ALIVE_IDLE_DEFAULT;
+}
+export function readKeepAliveIdleSync() {
+  try { return normalizeKeepAliveIdle(JSON.parse(readFileSync(PREFS_PATH, 'utf-8'))?.keepAliveIdle); }
+  catch { return KEEP_ALIVE_IDLE_DEFAULT; }
+}
+
 /**
  * r151c:跨会话的全部偏好键,一次读文件(接口 X.3.5 的读取规则;读到非法值不报错、不改写文件):
  * · enabled    —— xsEnabled === true(同 readXsEnabledSync);
  * · enabledAt  —— xsEnabledAt(内部键:xsEnabled 由关变开的同一次写入里记的 ISO 时刻);不是能解析成时刻的字符串 → null
  *                 (此时所有发送档案都不认);
- * · inbound    —— xsInbound,只留键是会话 id 形状、值是 "auto" 的条目;不是对象 → {};
+ * · inbound    —— xsInbound,只留键是会话 id 形状、值是 "auto" 或 "card" 的条目;不是对象 → {}。
+ *                 r151k:显式 "card" 也保留(不再靠删键表示 card),这样才能区分「显式等你确认」与
+ *                 「没设置(默认自动处理)」;映射见 inboundModeOf。
  * · autoPaused —— xsAutoPaused === true。
  */
 export function normalizeXsPrefs(prefs) {
@@ -314,6 +329,30 @@ router.put('/prefs/third-party-auto', async (req, res) => {
   }
   broadcast({ type: 'third-party-auto', enabled });
   res.json({ ok: true, enabled });
+});
+
+// r151k:会话常驻的空闲回收时长(设置页「会话常驻」区)。GET 现读(默认 1h);PUT 只收枚举值,
+// 非法值 400 + 稳定 code 且不改盘;成功走 updatePrefs(串行 + 原子写,与其它偏好同一条写队列)。
+// 路由挂在 prefs router 里,随 /api 挂载早于 SPA 兜底(同本文件其余 /prefs 路由)。
+router.get('/prefs/keep-alive-idle', (_req, res) => {
+  res.json({ ok: true, value: readKeepAliveIdleSync() });
+});
+router.put('/prefs/keep-alive-idle', async (req, res) => {
+  const body = req.body;
+  const value = body && typeof body === 'object' && !Array.isArray(body) ? body.value : undefined;
+  if (!KEEP_ALIVE_IDLE_VALUES.includes(value)) {
+    return res.status(400).json({
+      ok: false,
+      code: 'KEEP_ALIVE_IDLE_INVALID',
+      error: `value 必须是 ${KEEP_ALIVE_IDLE_VALUES.join(' / ')} 之一`,
+    });
+  }
+  try {
+    await updatePrefs((prefs) => { prefs.keepAliveIdle = value; });
+  } catch {
+    return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
+  }
+  res.json({ ok: true, value });
 });
 
 // P1: 关闭行为(ask|minimize|quit)。独立文件 ~/.claude-gui/close-behavior.json —

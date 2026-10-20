@@ -28,7 +28,7 @@ import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCach
 import {
   autoModeServerInjection, autoModeModelInjection, gateAutoPermissionMode, thirdPartyAutoPreToolUse, thirdPartyAutoAskOutput, thirdPartyAutoMustPrompt,
 } from '../services/auto-audit.js';
-import { readThirdPartyAutoSync } from './prefs.js';
+import { readKeepAliveIdleSync, readThirdPartyAutoSync } from './prefs.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
@@ -639,7 +639,32 @@ let sdkCounter = 0;
 
 // #26 会话常驻:回合结束后进程保活等待下一条消息的空闲上限。到点关闭回收 ——
 // 常驻收益(免冷启/免 MCP 重启/前缀稳定)集中在活跃对话内,挂太久只是白占内存。
-const KEEPALIVE_IDLE_MS = 15 * 60 * 1000;
+// r151k 起时长由设置 keepAliveIdle 决定(15m/30m/1h/2h/4h/never,默认 1h),不再写死 15 分钟。
+// 这个常量只作为历史兜底值保留(避免别处引用炸);实际计时一律走 resolveKeepAliveIdleMs。
+export const KEEPALIVE_IDLE_MS = 15 * 60 * 1000;
+// 设置值 → 毫秒。与 routes/prefs.js 的 KEEP_ALIVE_IDLE_VALUES 一一对应;'never' 在解析函数里单独处理。
+const KEEP_ALIVE_IDLE_MS_BY_SETTING = Object.freeze({
+  '15m': 15 * 60 * 1000,
+  '30m': 30 * 60 * 1000,
+  '1h': 60 * 60 * 1000,
+  '2h': 2 * 60 * 60 * 1000,
+  '4h': 4 * 60 * 60 * 1000,
+});
+/**
+ * r151k:把设置值解析成 idleTimer 的毫秒数。纯函数,供单测(chat.js 真 import)。
+ * · 'never' → null:不武装 idleTimer,进程保持到 app 退出 / 显式停止 / 删除等既有清理;
+ * · 否则 CGUI_KEEPALIVE_IDLE_MS 是合法整数 ≥1000 时优先用它 —— 与 CGUI_STALL_MS 同类的
+ *   通用可调窗口(联调/验收把小时级回收缩到秒级),不是测试专用分支;'never' 必须压过它;
+ * · 其余按枚举映射;设置缺省/非法时回 1h(调用方 readKeepAliveIdleSync 已归一,这里再兜一层)。
+ * 不夹 Node setTimeout 上限:生产枚举最大 4h,测试窗口按需给;超出 2^31-1 的极端值由调用方
+ * 自己承担(Node 会按 1ms 处理),不给设置枚举开口子。
+ */
+export function resolveKeepAliveIdleMs(setting, envRaw) {
+  if (setting === 'never') return null;
+  const envMs = Number(envRaw);
+  if (Number.isInteger(envMs) && envMs >= 1000) return envMs;
+  return KEEP_ALIVE_IDLE_MS_BY_SETTING[setting] ?? KEEP_ALIVE_IDLE_MS_BY_SETTING['1h'];
+}
 
 // liveTasks 条目的"新鲜度"窗口(权威说明;helper/看门狗/idleReclaim/task_started 处只引用)。
 // 超过窗长的条目视为陈旧(终态通知丢失的残留),不再阻塞看门狗/回收;窗内的跨回合活任务
@@ -2915,26 +2940,34 @@ async function handleChatPost(req, res) {
       slot.finishedAt = Date.now();
       deliverLine(slot, JSON.stringify({ type: 'done', exitCode: 0 }));
       if (slot.idleTimer) clearTimeout(slot.idleTimer);
+      // r151k:每次武装/重武装都现读设置 —— 用户改了 keepAliveIdle,下一次重武装就按新时长;
+      // 'never' 解析成 null:不武装定时器(已武装的到点也不再重排,直接停)。
+      // CGUI_KEEPALIVE_IDLE_MS 是通用可调窗口(同 CGUI_STALL_MS),验收把小时级回收缩到秒级。
+      const idleMsNow = () => resolveKeepAliveIdleMs(readKeepAliveIdleSync(), process.env.CGUI_KEEPALIVE_IDLE_MS);
       // idle 回收豁免:带【新鲜】活任务(shell 2h / 其它 30min,按 kind 分窗)的进程到点不关,
       // 重新武装同时长再等;任务完成/过期(liveTasks 清空或无新鲜条目)后下一轮到点正常回收。
       // 后台化子代理同样适用 —— 分的是窗口,不是豁免对象。
       const idleReclaim = () => {
         // 判据与窗口见 hasFreshLiveTask / 常量注释。
         const now = Date.now();
+        const idleMs = idleMsNow();
+        if (idleMs === null) { slot.idleTimer = null; return; } // 用户中途改成 never:不再自动关
         if (hasFreshLiveTask(slot.liveTasks, now)) {
-          slot.idleTimer = setTimeout(idleReclaim, KEEPALIVE_IDLE_MS);
+          slot.idleTimer = setTimeout(idleReclaim, idleMs);
           return;
         }
         // F2 cron 豁免:本会话建过 cron 且保活未到期 → 再等一轮(上限 2h / 最多 3 个 slot,
         // 见 CRON_HOLD_MS)。回收这个进程 = 连带杀死进程内的 cron 调度器,循环静默停。
         if (shouldHoldForCron(slot, activeProcesses.values(), now, CRON_HOLD_MAX_SLOTS)) {
-          slot.idleTimer = setTimeout(idleReclaim, KEEPALIVE_IDLE_MS);
+          slot.idleTimer = setTimeout(idleReclaim, idleMs);
           return;
         }
         slot.closing = true;
         try { input.close(); } catch {}
       };
-      slot.idleTimer = setTimeout(idleReclaim, KEEPALIVE_IDLE_MS);
+      const idleMs = idleMsNow();
+      if (idleMs !== null) slot.idleTimer = setTimeout(idleReclaim, idleMs);
+      else slot.idleTimer = null;
     } else {
       try { input.close(); } catch {}
     }

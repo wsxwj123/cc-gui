@@ -53,7 +53,7 @@ const SETTINGS_INDEX = [
   { id: 'set-genui', tab: 'general', title: '生成式界面（cgui-ui）', keys: 'genui cgui-ui dsh-ui 生成式 界面 组件 渲染 图表 表单 技能 skill' },
   // r122:过程块自动折叠开关,同样落 general(设置面板打开时的默认 tab),搜索「折叠」可直达。
   { id: 'set-auto-fold', tab: 'general', title: '过程块自动折叠', keys: '折叠 过程 思考 工具 展开 收起 条带 fold' },
-  { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存' },
+  { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存 空闲 回收 idle keepalive' },
   { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入 自动 第三方 费用' },
   { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
   { id: 'set-restore-last', tab: 'session', title: '启动时恢复上次会话', keys: '启动 恢复 上次 会话 Home 首页 restore' },
@@ -2175,20 +2175,63 @@ function EnvEditor({ env, onEnvPatch, saving }) {
 // 会话常驻进程(#26):回合结束后 CLI 进程保活,同会话下一条消息直接复用 —— 免掉每回合
 // 冷启动(claude 二进制 + 配置 + 全部 MCP server,实测约 5 秒)。模型/思考强度/provider
 // 等任何配置变化都会自动重开新进程,行为与关闭时一致。
+// r151k:空闲回收时长可设置(keepAliveIdle,服务端 prefs;默认 1h,'never' = 不自动回收)。
+const KEEP_ALIVE_IDLE_OPTIONS = [
+  ['15m', '15 分钟'], ['30m', '30 分钟'], ['1h', '1 小时'], ['2h', '2 小时'], ['4h', '4 小时'], ['never', '不回收'],
+];
+const keepAliveIdleLabel = (v) => KEEP_ALIVE_IDLE_OPTIONS.find(([k]) => k === v)?.[1] || '1 小时';
 function PersistentChatToggle() {
   const on = useStore((s) => s.persistentChat);
   const setOn = useStore((s) => s.setPersistentChat);
+  const [idle, setIdle] = useState(null); // null = 还没取到;取到前下拉显示默认
+  const [savingIdle, setSavingIdle] = useState(false);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/prefs/keep-alive-idle')
+      .then((r) => r.json())
+      .then((b) => { if (alive && b && b.ok && typeof b.value === 'string') setIdle(b.value); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const changeIdle = async (e) => {
+    const value = e.target.value;
+    if (savingIdle || value === (idle || '1h')) return;
+    setErr(''); setSavingIdle(true);
+    try {
+      const r = await fetch('/api/prefs/keep-alive-idle', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value }),
+      });
+      const body = await r.json().catch(() => null);
+      if (!r.ok || !body?.ok) throw new Error(body?.error || '保存失败，请重试');
+      setIdle(body.value);
+    } catch (e2) {
+      setErr(e2?.message || '保存失败，请重试');
+    } finally { setSavingIdle(false); }
+  };
+  const shownIdle = idle || '1h';
   return (
-    <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
-      <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">会话常驻进程<EffectBadge level="immediate" /></div>
-        <div className="text-[10.5px] text-ink-faint font-body">回合结束后保留 CLI 进程,同一会话的下一条消息直接复用,省掉每回合的进程冷启动与 MCP 重启(约 5 秒),响应更快、第三方缓存更稳。切换模型/思考强度/provider 时自动重开进程。空闲 15 分钟自动回收</div>
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg">
+      <div className="px-3 py-2.5 flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">会话常驻进程<EffectBadge level="immediate" /></div>
+          <div className="text-[10.5px] text-ink-faint font-body">回合结束后保留 CLI 进程,同一会话的下一条消息直接复用,省掉每回合的进程冷启动与 MCP 重启(约 5 秒),响应更快、第三方缓存更稳。切换模型/思考强度/provider 时自动重开进程。空闲超过【{keepAliveIdleLabel(shownIdle)}】自动回收。</div>
+        </div>
+        <button onClick={() => setOn(!on)}
+          className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
+          title={on ? '已开启' : '已关闭'}>
+          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+        </button>
       </div>
-      <button onClick={() => setOn(!on)}
-        className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
-        title={on ? '已开启' : '已关闭'}>
-        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
-      </button>
+      <div className="px-3 pb-2.5 flex items-center gap-2">
+        <span className="text-[11px] text-ink font-body shrink-0">空闲回收</span>
+        <select data-testid="keep-alive-idle-select" value={shownIdle} onChange={changeIdle} disabled={savingIdle}
+          className="px-1.5 py-0.5 rounded-md bg-canvas border border-canvas-deep text-[11px] text-ink font-body disabled:opacity-50 disabled:cursor-not-allowed">
+          {KEEP_ALIVE_IDLE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </select>
+        <span className="text-[10.5px] text-ink-faint font-body min-w-0">不回收时进程会一直常驻，每个会话约占 100–300MB（含 MCP），内存占用会上升。</span>
+      </div>
+      {err && <div className="px-3 pb-2 text-[11px] text-error font-body">{err}</div>}
     </div>
   );
 }
