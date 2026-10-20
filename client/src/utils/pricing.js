@@ -1449,6 +1449,15 @@ function historyUsageRow(row) {
  *   · 分时段模型按服务端分好的峰/谷桶各算一次(代表时刻写死在 pricing-rules);
  *   · 套餐/订阅档不进金额(aggregateCost 给 subscription),与 computeCostForMessage 返回 null 一致。
  * 返回 { usd, partial }:usd=0 表示没有可计价的行(不是"免费"),partial=有维度算不出。
+ *
+ * 【口径说明(窄复审②,选处理方式①:标成估算,不逐条重算)】本函数是"当前价目表 + 固定
+ * 代表时刻"的估算,与逐条历史计价**不保证逐位相等**:
+ *   · 跨价目生效日:旧调用按现行价目算(如 DeepSeek 峰谷价 2026-08-17 才生效);
+ *   · 长提示分档:按模型汇总后没有单次提示量,只能按基础档;
+ *   · TTL 分项:同模型混有/无 5m/1h 分项时,整行写费可能被判未知(逐条只丢无分项那条);
+ *   · 子代理口径:token(usageTotals)含 sidechain 用量,费用只聚合主文件消息。
+ * 因此 UI 必须把费用标成「估算」并写清上述口径(文案统一在 utils/historyStatsScope.js 的
+ * HISTORY_COST_ESTIMATE_NOTE),不能只在注释里说明。
  */
 export function aggregateHistoryCost(usageByModel, provider) {
   const rows = Array.isArray(usageByModel) ? usageByModel : [];

@@ -63,6 +63,7 @@ import { TurnBubble, StripRoundContext } from './components/TurnBubble.jsx';
 import { stripSummary } from './utils/streamStatus.js';
 import { initialSpan, extendUp, needsExtend, sliceRows } from './utils/mountWindow.js';
 import { historyMessageKey } from './utils/historyPaging.js';
+import { HISTORY_COST_ESTIMATE_NOTE, hasFullHistoryStats, historyStatsScopeLabel } from './utils/historyStatsScope.js';
 import { ReleaseNotesModal } from './components/ReleaseNotesModal.jsx';
 import { shouldShow as shouldShowReleaseNotes, hasReleaseNotes, loadVersionNotes, fetchLastSeen, markSeen } from './utils/releaseNotes.js';
 import TurnScrubber from './components/TurnScrubber.jsx';
@@ -9015,6 +9016,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const pricingVersion = useSyncExternalStore(subscribePricingVersion, getPricingVersion, getPricingVersion);
   // r148 P8:启动时的价目加载延后了;这一格只要开着一条会话(要显示金额)就立刻确保有价目,不等启动闸。
   useEffect(() => { if (selectedSession?.sessionId) ensurePricingCatalog(); }, [selectedSession?.sessionId]);
+  // r151l 窄复审②:费用计算与「全量 / 仅已加载」标签必须同一个判据(utils/historyStatsScope.js),
+  // 不能再各判各的 —— 否则 historyStats 字段异常时会"标全量、按窗口算"。
+  const statsFull = hasFullHistoryStats(serverHistoryStats);
   const sessionSummary = useMemo(() => {
     const all = [...finalizedMessages, ...renderChat];
     // Sum per-message cost. Skipping models we don't have prices for. Uses
@@ -9033,10 +9037,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r151l 判官修正:有服务端全量统计就按全量算费用/工具数/模型(含未落盘的直播条目),
     // 不再只统计已加载的 120 条窗口 —— 否则同一张弹层里 token 是全量、费用是窗口。
     // 没有 historyStats(旧服务端 / 加载失败)时保持旧口径回退到已加载窗口。
-    const hasFullStats = !!serverHistoryStats
-      && Array.isArray(serverHistoryStats.usageByModel)
-      && Array.isArray(serverHistoryStats.models);
-    if (hasFullStats) {
+    // 窄复审②:判据统一走 hasFullHistoryStats(与下面的范围标签同一个函数)。
+    if (statsFull) {
       const fullCost = aggregateHistoryCost(serverHistoryStats.usageByModel, currentProvider);
       // 本回合已落盘但被 streamHistCutoff 从 finalizedMessages 里藏起来的条目:它们**已经在**
       // 服务端全量统计里,而屏幕上画的是 renderChat 的直播副本 —— 先减掉再叠加直播,避免
@@ -9060,7 +9062,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       models: [...new Set(all.filter((m) => m.model).map((m) => m.model))],
     };
     // 依赖里的 pricingVersion 是"查价数据变了"的信号,函数体里不读它。
-  }, [finalizedMessages, renderChat, messages, currentProvider, pricingVersion, serverHistoryStats]);
+  }, [finalizedMessages, renderChat, messages, currentProvider, pricingVersion, serverHistoryStats, statsFull]);
 
   // r148 P6:传给输入框的回调稳定下来(输入框已记忆化;每次渲染新建的内联函数会让记忆化白做)。
   // 同样必须在提前 return 之前。
@@ -9169,13 +9171,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const cacheHitPct = sessionCache.hitPct;
   // r151l 判官修正:统计范围必须可见 —— token 走服务端全量(usageTotals),费用/工具数/模型
   // 现在也走服务端 historyStats(全量);旧服务端没有 historyStats 时如实标注"仅已加载"。
+  // 窄复审②:标签判据与费用计算统一(historyStatsScope.js 的 hasFullHistoryStats),
+  // historyStats 存在但缺 usageByModel/models 时同样标"仅已加载",不再按 `!!stats` 误标全量。
   const historyLoadedCount = messages.length;
   const historyTotalCount = Number.isInteger(serverHistoryStats?.total)
     ? serverHistoryStats.total
     : (Number.isInteger(pagingForHere?.total) ? pagingForHere.total : historyLoadedCount);
-  const statsScopeLabel = serverHistoryStats
-    ? `统计范围:全量 ${historyTotalCount} 条消息(服务端聚合,与是否分页无关)`
-    : `统计范围:仅已加载的最近 ${historyLoadedCount} 条消息(服务端未返回全量统计)`;
+  const statsScopeLabel = historyStatsScopeLabel(serverHistoryStats, historyLoadedCount, historyTotalCount);
   const usageDetailTitle = `输入 ${totalTokens.input.toLocaleString()} · 输出 ${totalTokens.output.toLocaleString()} · 缓存命中 ${totalTokens.cacheRead.toLocaleString()} · 缓存写入 ${(totalTokens.cacheCreation || 0).toLocaleString()}
 总 token = 四项之和;命中率 = 缓存命中 / (输入 + 缓存命中 + 缓存写入)
 未命中(按未命中价计费的提示 token)= 输入 + 缓存写入 = ${sessionCache.miss.toLocaleString()}
@@ -9290,7 +9292,8 @@ ${statsScopeLabel}`;
     sessionCacheMiss: sessionCache.miss, sessionCacheTotal: sessionCache.total,
     bareAliasWindowUnknown, winSource,
     // r151l 判官修正:弹层里明确写统计范围(全量 / 仅已加载),费用与工具数不再和 token 打架。
-    statsScopeLabel, statsFull: !!serverHistoryStats,
+    // 窄复审②:statsFull 与费用计算同一判据(hasFullHistoryStats)。
+    statsScopeLabel, statsFull,
     statsLoaded: historyLoadedCount, statsTotal: historyTotalCount,
   };
   // r151l 判官修正:窗内检索与回合进度条只能覆盖**已加载**的消息/回合。范围必须可见,
@@ -9460,30 +9463,40 @@ ${statsScopeLabel}`;
           block above is skipped on phones (!mobileChrome), so surface the key
           numbers here — same data the desktop header shows beside the title. */}
       {mobileChrome && (headerModel || contextTokens > 0 || totalCostUsd > 0) && (
-        <div className="glass-bar shrink-0 px-3 py-1.5 flex items-center gap-x-2 gap-y-1 flex-wrap text-[10px] font-mono border-b border-canvas-deep/40 relative z-30">
-          {headerModel && <ModelBadge model={headerModel} compact />}
-          {contextTokens > 0 && (
-            <ContextBreakdownButton
-              contextTokens={contextTokens}
-              contextWindow={contextWindow}
-              contextPct={contextPct}
-              fmtTok={fmtTok}
-              winLabel={winLabel}
-              sessionId={selectedSession.sessionId}
-              projectHash={selectedSession.projectHash}
-              cwd={selectedSession.projectPath}
-              model={currentModel}
-            />
-          )}
-          <span className="text-ink-faint" title={usageDetailTitle}>{totalAllTokens.toLocaleString()} tok</span>
-          {/* R24:三处口径名固定 —— 手机条上「会话累计命中率」+「最近API命中率」。 */}
-          <span className="text-ink-ghost" title={usageDetailTitle}>会话累计命中率 {formatHitPctOrDash(cacheHitPct, sessionCache.total)}</span>
-          <span className="text-ink" title="最近API命中率（最近一次 API 调用）；前一项为会话累计">最近API命中率 {formatHitPctOrDash(turnCache.hitPct, turnCache.total)}</span>
+        <>
+          <div className="glass-bar shrink-0 px-3 py-1.5 flex items-center gap-x-2 gap-y-1 flex-wrap text-[10px] font-mono border-b border-canvas-deep/40 relative z-30">
+            {headerModel && <ModelBadge model={headerModel} compact />}
+            {contextTokens > 0 && (
+              <ContextBreakdownButton
+                contextTokens={contextTokens}
+                contextWindow={contextWindow}
+                contextPct={contextPct}
+                fmtTok={fmtTok}
+                winLabel={winLabel}
+                sessionId={selectedSession.sessionId}
+                projectHash={selectedSession.projectHash}
+                cwd={selectedSession.projectPath}
+                model={currentModel}
+              />
+            )}
+            <span className="text-ink-faint" title={usageDetailTitle}>{totalAllTokens.toLocaleString()} tok</span>
+            {/* R24:三处口径名固定 —— 手机条上「会话累计命中率」+「最近API命中率」。 */}
+            <span className="text-ink-ghost" title={usageDetailTitle}>会话累计命中率 {formatHitPctOrDash(cacheHitPct, sessionCache.total)}</span>
+            <span className="text-ink" title="最近API命中率（最近一次 API 调用）；前一项为会话累计">最近API命中率 {formatHitPctOrDash(turnCache.hitPct, turnCache.total)}</span>
+            {totalCostUsd > 0 && (
+              <span className="text-accent/80" title={`${statsScopeLabel}
+${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
+            )}
+          </div>
+          {/* r151l 窄复审②:手机上 title 提示看不到 → 费用口径必须有一行可见文字:
+              估算依据(当前价目表)+ 已知偏差来源(跨生效日/分档/TTL 分项)+ 子代理口径差异。 */}
           {totalCostUsd > 0 && (
-            <span className="text-accent/80" title={`按各模型官网价估算的累计费用。
-${statsScopeLabel}`}>· {formatCost(totalCostUsd)}</span>
+            <div data-cgui="mobile-cost-note"
+              className="shrink-0 px-3 pb-1 text-[9px] leading-snug text-ink-ghost font-body border-b border-canvas-deep/40 relative z-30">
+              {statsScopeLabel}。{HISTORY_COST_ESTIMATE_NOTE}
+            </div>
           )}
-        </div>
+        </>
       )}
 
       {/* P2.5 横幅单条化(降级预案:三横幅保持独立组件,只做同帧单显仲裁)——
@@ -10518,8 +10531,9 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
             <span className="text-ink-faint w-14 shrink-0">累计 token</span>
             <span className="font-mono text-ink-muted">{(info.totalAllTokens || 0).toLocaleString()}</span>
             {info.totalCostUsd > 0 && (
-              <span className="font-mono text-accent/80" title={`按各模型官网价估算的累计费用（人民币，按 1 USD ≈ 7.2 CNY 换算）。套餐制模型（Claude 官方订阅、Kimi Code 会员套餐）不按 token 计费，不计入此数。若模型经中转站接入，实际单价以服务商为准。
-${info.statsScopeLabel || ''}`}>
+              <span className="font-mono text-accent/80" title={`按各模型官网价估算的累计费用(人民币,按 1 USD ≈ 7.2 CNY 换算)。套餐制模型(Claude 官方订阅、Kimi Code 会员套餐)不按 token 计费,不计入此数。若模型经中转站接入,实际单价以服务商为准。
+${info.statsScopeLabel || ''}
+${HISTORY_COST_ESTIMATE_NOTE}`}>
                 · {formatCost(info.totalCostUsd)}
               </span>
             )}
@@ -10530,6 +10544,15 @@ ${info.statsScopeLabel || ''}`}>
               className={`text-[9px] leading-snug font-body ${info.statsFull ? 'text-ink-ghost' : 'text-amber-700'}`}
               title={info.statsScopeLabel}>
               {info.statsScopeLabel}
+            </div>
+          )}
+          {/* r151l 窄复审②:全量费用是"当前价目表 + 固定代表时刻"的估算,不是逐条历史重算 ——
+              跨价目生效日/长提示分档/TTL 分项缺失会有偏差;token 含子代理用量、费用只算主文件。 */}
+          {info.totalCostUsd > 0 && (
+            <div data-cgui="badge-cost-scope"
+              className="text-[9px] leading-snug font-body text-ink-ghost"
+              title={HISTORY_COST_ESTIMATE_NOTE}>
+              {HISTORY_COST_ESTIMATE_NOTE}
             </div>
           )}
           {info.cacheRead > 0 && (

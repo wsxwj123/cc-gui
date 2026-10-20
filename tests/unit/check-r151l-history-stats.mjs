@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // r151l 判官修正 —— 会话**全量**历史统计(historyStats)单测。
 //
-// 覆盖三件事:
+// 覆盖四件事:
 //   1. buildHistoryStats(messages) 纯函数:工具数/模型去重/按模型 + 峰谷时段的用量汇总,
 //      与客户端逐条口径一致(usageCalls 优先、无明细回落到整条 usage、非法用量不并入);
 //   2. aggregateHistoryCost(usageByModel, provider) 与逐条 computeCostForMessage 求和相等
 //      (含分时段模型与两档 TTL 缓存写);
-//   3. /messages?limit=2 的响应里 historyStats 仍是全量(与窗口无关)。
+//   3. /messages?limit=2 的响应里 historyStats 仍是全量(与窗口无关);
+//   4. 统计口径标签与费用同一判据 + 费用估算说明写清偏差来源(窄复审②)。
 // Run: node tests/unit/check-r151l-history-stats.mjs
 // 变异哨兵:把 historyStats 放在切窗之后算 → t3 红;按模型汇总丢掉 byPeriod → t2 分时段金额
 // 不等;aggregateCost 不读 cacheWrite5m/1h → t2 的 Claude 写费变「未知」。
@@ -25,6 +26,7 @@ globalThis.localStorage = { getItem: () => null, setItem: () => {} };
 const { buildHistoryStats } = await import('../../server/utils/history-stats.js');
 const { setPricingCatalog } = await import('../../client/src/utils/pricingCatalog.js');
 const { aggregateHistoryCost, computeCostForMessage, displayUsd } = await import('../../client/src/utils/pricing.js');
+const { HISTORY_COST_ESTIMATE_NOTE, hasFullHistoryStats, historyStatsScopeLabel } = await import('../../client/src/utils/historyStatsScope.js');
 
 const fixture = JSON.parse(readFileSync(join(root, 'tests/unit/fixtures/pricing-catalog-fixture.json'), 'utf8'));
 setPricingCatalog(fixture);
@@ -208,4 +210,32 @@ const usage = (o = {}) => ({
 }
 
 // ── t4 请求代号:见 tests/unit/check-r151l-history-page.mjs(客户端分页纯逻辑)──
+
+// ── t5 统计口径:label 与费用用同一个判据(窄复审②)──────────────────────────
+{
+  // 正常全量统计 → 全量口径可算费用,标签也必须说全量。
+  const full = { total: 300, models: ['m'], usageByModel: [{ model: 'm' }] };
+  assert.equal(hasFullHistoryStats(full), true);
+  assert.match(historyStatsScopeLabel(full, 120, 300), /统计范围:全量 300 条消息/);
+
+  // historyStats 存在但字段异常:费用会回退到已加载窗口 → 标签必须同步标"仅已加载",
+  // 不能因为 `!!serverHistoryStats` 为真就误标全量(两套判据的原始 bug)。
+  const noUsage = { total: 300, models: ['m'] };
+  assert.equal(hasFullHistoryStats(noUsage), false, '缺 usageByModel → 费用不可按全量算');
+  assert.equal(hasFullHistoryStats({ total: 300, usageByModel: [] }), false, '缺 models → 同上');
+  assert.equal(hasFullHistoryStats({ total: 300, models: [], usageByModel: {} }), false, 'usageByModel 非数组 → 同上');
+  assert.equal(hasFullHistoryStats(null), false);
+  assert.equal(hasFullHistoryStats(undefined), false);
+  assert.match(historyStatsScopeLabel(noUsage, 120, 300), /统计范围:仅已加载的最近 120 条消息/);
+  assert.match(historyStatsScopeLabel(null, 120, 300), /仅已加载/);
+  // 全量统计但 total 缺失 → 条数回落到已加载,不显示 NaN。
+  assert.match(historyStatsScopeLabel({ models: [], usageByModel: [] }, 120, undefined), /全量 120 条/);
+
+  // 费用估算口径必须写清三类偏差来源 + 子代理口径差异(弹层/手机条直接显示这句)。
+  assert.match(HISTORY_COST_ESTIMATE_NOTE, /估算/, '必须明说是估算');
+  assert.match(HISTORY_COST_ESTIMATE_NOTE, /价目/, '必须提跨价目生效日');
+  assert.match(HISTORY_COST_ESTIMATE_NOTE, /分档|TTL/, '必须提分档/TTL 分项缺失');
+  assert.match(HISTORY_COST_ESTIMATE_NOTE, /子代理/, '必须提子代理口径差异');
+}
+
 console.log('check-r151l-history-stats: all passed');
