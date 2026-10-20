@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // R12(服务端一半)读代理历史:GET /api/sessions/:sessionId/messages 的响应合同。
-//   ① 唯一根 schema {messages,usageTotals,owner,view} —— 一个键都不多、一个都不少;
+//   ① 根 schema = R12 四键 {messages,usageTotals,owner,view} + r151l 分页三字段
+//      {hasMore,beforeCursor,total} —— 一个键都不多、一个都不少;
 //   ② 子代理转写按落盘位置解析出真实母归属(parentSessionId = 上级目录名,
 //      toolUseId = 同目录 <agent>.meta.json),view.kind='agent',
 //      view.blocks 按原顺序(prompt/thinking/tool_use/text;CLI 写的空 thinking 不留块);
@@ -89,11 +90,18 @@ const check = async (name, fn) => {
   catch (e) { failed++; console.log(`  ✗ ${name}\n      ${String(e && e.message || e).split('\n').slice(0, 4).join('\n      ')}`); }
 };
 
-// ①② 子代理:四键 schema + 母归属 + 原序块
+// ①② 子代理:R12 四键 + r151l 分页三字段 + 母归属 + 原序块
 const agentHistory = await get(AGENT, HASH_A);
-await check('子代理历史 200 且恰好四个根键', () => {
+await check('子代理历史 200 且根键 = R12 四键 + r151l 分页三字段', () => {
   assert.equal(agentHistory.status, 200);
-  assert.deepEqual(Object.keys(agentHistory.body).sort(), ['messages', 'owner', 'usageTotals', 'view']);
+  assert.deepEqual(
+    Object.keys(agentHistory.body).sort(),
+    ['beforeCursor', 'hasMore', 'messages', 'owner', 'total', 'usageTotals', 'view'],
+  );
+  // 不带 limit = 全量语义(旧调用兼容)。
+  assert.equal(agentHistory.body.hasMore, false);
+  assert.equal(agentHistory.body.beforeCursor, 0);
+  assert.equal(agentHistory.body.total, agentHistory.body.messages.length);
 });
 await check('owner 带出真实母 sessionId 与 toolUseId', () => {
   assert.equal(agentHistory.body.owner.sessionId, AGENT);
@@ -122,7 +130,10 @@ await check('messages/usageTotals 既有字段原样保留', () => {
 const plainHistory = await get(PLAIN, HASH_A);
 await check('普通会话:owner 母身份为 null,view.kind=session 且 blocks 为空', () => {
   assert.equal(plainHistory.status, 200);
-  assert.deepEqual(Object.keys(plainHistory.body).sort(), ['messages', 'owner', 'usageTotals', 'view']);
+  assert.deepEqual(
+    Object.keys(plainHistory.body).sort(),
+    ['beforeCursor', 'hasMore', 'messages', 'owner', 'total', 'usageTotals', 'view'],
+  );
   assert.equal(plainHistory.body.owner.parentSessionId, null);
   assert.equal(plainHistory.body.owner.toolUseId, null);
   assert.equal(plainHistory.body.view.kind, 'session');
