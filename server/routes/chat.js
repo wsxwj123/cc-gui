@@ -10,7 +10,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { query, AbortError } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel, isOfficialAnthropic } from '../services/model-resolver.js';
 import { findSessionFile, readSessionTitles, findAgentRunEvidence, isSessionIdShape, AGENT_TERMINAL_STATUSES, readSubagentUsageForToolUse } from '../services/session-reader.js';
-import { dropPendingForSession, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
+import { dropPendingForSession, pendingUserCardCount, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
 import { resolveClaude, resolveSdkClaude, logSdkClaudeOnce } from '../utils/claude-resolver.js';
@@ -2968,6 +2968,17 @@ async function handleChatPost(req, res) {
       // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
       // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
       if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyLive) {
+        // r151k:本会话还有卡在等用户回答(权限卡 / AskUserQuestion / ExitPlanMode /
+        // elicitation / dialog 共用 pending 表)→ 这是「等用户」不是「上游卡死」:
+        // 不 abort、不发 stall_notice,重新武装等下一窗。用户答复后卡从表里删掉,
+        // 下一轮看门狗恢复原判定;阈值与文案均不变(K2 相邻回归)。
+        // closeTimer 在挂 = 已经收到 result、正在等 4s 去抖收尾(子代理回合):回合逻辑上
+        // 已经结束,abort 只会拆掉一个马上要 finalize 的进程;默认 5 分钟阈值下永远碰不到,
+        // 但验收把阈值缩到 1.5s 时会先于 4s 去抖触发,必须让路。
+        if (pendingUserCardCount(slot.sessionId) > 0 || closeTimer) {
+          armStall();
+          return;
+        }
         // stall_notice:客户端专用渲染分支(中性系统提示 turn,非红色错误)。原用 type:stderr
         // 但客户端 SSE 分发根本不渲染 stderr = 提示白发(判官缺陷3)。
         // 文案里的分钟数随运行时阈值生成(默认 300000 → "5 分钟"逐字不变)。下限 5 分钟:

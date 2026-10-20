@@ -172,6 +172,30 @@ export function requestPermission({ toolName, toolInput, sessionId, cwd, blocked
   });
 }
 
+/**
+ * r151k:统计某会话还有多少张「等用户回答」的卡(权限卡 / AskUserQuestion / ExitPlanMode /
+ * elicitation / dialog 都在同一张 pending 表里,所以不按 toolName 挑,整表按会话数)。
+ * 纯函数单独导出,供单测注入假表;看门狗用它决定「卡还挂着 = 用户在答,不是上游卡死」。
+ * 会话 id 不分大小写(与列表接口同口径);没 settle 的才算(表里正常只有未 settle 的条目,
+ * 这里仍显式判,防 settle 与 delete 之间的窗口)。
+ */
+export function countPendingForSession(pendingMap, sessionId) {
+  if (!(pendingMap instanceof Map) || typeof sessionId !== 'string' || !sessionId) return 0;
+  const id = sessionId.toLowerCase();
+  let n = 0;
+  for (const slot of pendingMap.values()) {
+    if (!slot || slot.settled) continue;
+    const sid = slot.request?.sessionId;
+    if (typeof sid === 'string' && sid.toLowerCase() === id) n += 1;
+  }
+  return n;
+}
+
+/** 真实 pending 表上的 r151k 计数(chat.js 看门狗用;表是模块内部,外部只能读这个结果)。 */
+export function pendingUserCardCount(sessionId) {
+  return countPendingForSession(pending, sessionId);
+}
+
 // Safety-net sweep: a held request whose socket never fires 'close' (CLI wedged
 // without exiting) would otherwise pin its entry — and its held HTTP socket —
 // forever. Drop anything older than 15 min. Normal requests resolve in seconds.
