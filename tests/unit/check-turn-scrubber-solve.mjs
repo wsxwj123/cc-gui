@@ -78,7 +78,9 @@ const approx = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
 {
   const src = readFileSync(new URL('../../client/src/components/TurnScrubber.jsx', import.meta.url), 'utf8');
   assert.doesNotMatch(src, /shouldRenderTick|decimationStep/, 't4: 抽稀已废弃,全量渲染');
-  assert.doesNotMatch(src, /<button/, 't4: 刻度不再是 button 热区');
+  // r151l:范围补加载按钮是进度条上唯一的 button;刻度热区仍是容器,不得用 button。
+  assert.equal((src.match(/<button/g) || []).length, 1, 't4: 唯一 button 是范围补加载按钮');
+  assert.match(src, /data-cgui="scrubber-scope"/, 't4: button 必须是范围补加载入口');
   assert.doesNotMatch(src, /onMouseEnter/, 't4: 不再按刻度 mouseenter 命中');
   assert.match(src, /layoutCompactPositions\(turns\.length/, 't4: 等距紧凑基线');
   assert.match(src, /distortPositions\(base, next, FISHEYE\)/, 't4: 解算走变形后坐标(与渲染同一输入)');

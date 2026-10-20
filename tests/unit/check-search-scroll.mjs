@@ -45,7 +45,8 @@ const rect = (top, h = 20) => ({ top, bottom: top + h, width: 120, height: h });
   assert.ok(src.includes('paintActive(rangesRef.current, next, { center: true })'), 'go(上一条/下一条/Enter)必须传 center: true');
   assert.ok(src.includes('scrollRangeIntoView(a, { center });'), 'center 一路传到滚动决策');
   assert.ok(src.includes('{ allowExpand: false, center }'), '折起段展开后的隔帧重试带着 center');
-  assert.ok(src.includes('paintActive(ranges, first);'), '输入触发(首条命中)不传 center —— 仍走"不盲跳"');
+  assert.match(src, /paintActive\(ranges, idx\);/, '输入触发(首条命中)不传 center —— 仍走"不盲跳"');
+  assert.doesNotMatch(src, /paintActive\(ranges, idx,\s*\{/, '输入触发不得请求 center');
 }
 
 console.log('check-search-scroll: all passed');
