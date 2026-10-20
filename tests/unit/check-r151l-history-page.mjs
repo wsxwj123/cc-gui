@@ -2,7 +2,8 @@
 // r151l 历史消息分页 —— 纯函数单测。
 // 服务端:sliceMessagesForPage(窗口/游标/hasMore/total)、parseHistoryPaging(query 校验)。
 // 客户端:historyFetchLimit、mergeRefreshedMessages、prependOlderMessages、trimRecentMessages,
-//        以及请求代号 nextHistoryRequestSeq / isHistoryRequestCurrent(判官建议 D)。
+//        以及请求代号 nextHistoryRequestSeq / resetHistoryRequestSeq / isHistoryRequestCurrent
+//        (窄复审①:按 (sessionId, tab, lane) 分账,refresh 与 older 互不作废)。
 // Run: node tests/unit/check-r151l-history-page.mjs
 // 变异哨兵:before 不按 total 钳 → t2 红;空窗口 beforeCursor 写成 0 → t3 红;不传 limit 切片 → t1 红。
 import assert from 'node:assert/strict';
@@ -16,6 +17,7 @@ import {
   mergeRefreshedMessages,
   nextHistoryRequestSeq,
   prependOlderMessages,
+  resetHistoryRequestSeq,
   trimRecentMessages,
 } from '../../client/src/utils/historyPaging.js';
 
@@ -227,19 +229,52 @@ const idx = (list) => list.map((m) => m.i);
   assert.equal(custom.dropped, 6);
 }
 
-// ── t9 请求代号:每 tab 递增,旧号作废(判官建议 D)──────────────────────────
+// ── t9 请求代号:按 (sessionId, tab, lane) 分账,refresh/older 互不作废(窄复审①)──
 {
-  const a = nextHistoryRequestSeq([0, 0, 0, 0, 0, 0], 2);
-  assert.deepEqual(a, { seqs: [0, 0, 1, 0, 0, 0], seq: 1 });
-  const b = nextHistoryRequestSeq(a.seqs, 2);
-  assert.deepEqual(b, { seqs: [0, 0, 2, 0, 0, 0], seq: 2 });
-  assert.deepEqual(a.seqs, [0, 0, 1, 0, 0, 0], '不原地修改入参');
-  assert.equal(isHistoryRequestCurrent(b.seqs, 2, 2), true);
-  assert.equal(isHistoryRequestCurrent(b.seqs, 2, 1), false, '旧代号必须作废');
-  assert.equal(isHistoryRequestCurrent(b.seqs, 3, 7), false, '别的 tab 不共用代号');
-  assert.equal(isHistoryRequestCurrent(undefined, 0, 1), false, '缺 state 时保守判过期');
-  const fresh = nextHistoryRequestSeq(undefined, 0);
-  assert.deepEqual(fresh, { seqs: [1], seq: 1 });
+  const fresh = nextHistoryRequestSeq(undefined, 0, 's1');
+  assert.deepEqual(fresh.seqs[0], { sessionId: 's1', refresh: 1, older: 0 }, '缺 state 时从 0 起');
+  assert.equal(fresh.seq, 1);
+
+  const a = nextHistoryRequestSeq([], 2, 's1', 'refresh');
+  assert.deepEqual(a.seqs[2], { sessionId: 's1', refresh: 1, older: 0 });
+  const b = nextHistoryRequestSeq(a.seqs, 2, 's1', 'refresh');
+  assert.deepEqual(b.seqs[2], { sessionId: 's1', refresh: 2, older: 0 });
+  assert.deepEqual(a.seqs[2], { sessionId: 's1', refresh: 1, older: 0 }, '不原地修改入参');
+  assert.equal(isHistoryRequestCurrent(b.seqs, 2, 's1', 'refresh', 2), true);
+  assert.equal(isHistoryRequestCurrent(b.seqs, 2, 's1', 'refresh', 1), false, '旧代号必须作废');
+
+  // refresh 与 older 是两条独立递增线:互不作废(原实现共用一条号 → 静默刷新会丢 loadOlder)。
+  const o1 = nextHistoryRequestSeq(b.seqs, 2, 's1', 'older');
+  assert.equal(o1.seq, 1, 'older 自己从 1 起');
+  assert.equal(isHistoryRequestCurrent(o1.seqs, 2, 's1', 'refresh', 2), true, '加载更早不得作废刷新');
+  assert.equal(isHistoryRequestCurrent(o1.seqs, 2, 's1', 'older', 1), true);
+  const r3 = nextHistoryRequestSeq(o1.seqs, 2, 's1', 'refresh');
+  assert.equal(isHistoryRequestCurrent(r3.seqs, 2, 's1', 'older', 1), true, '刷新不得作废加载更早');
+  assert.equal(isHistoryRequestCurrent(r3.seqs, 2, 's1', 'refresh', 2), false);
+
+  // 别的 tab / 别的会话不共用代号。
+  const otherTab = nextHistoryRequestSeq(r3.seqs, 3, 's1', 'refresh');
+  assert.equal(otherTab.seq, 1, '别的 tab 从 0 起');
+  assert.equal(isHistoryRequestCurrent(otherTab.seqs, 2, 's1', 'refresh', 3), true, '别的 tab 不影响本 tab');
+  assert.equal(isHistoryRequestCurrent(otherTab.seqs, 3, 's1', 'refresh', 1), true);
+  const otherSess = nextHistoryRequestSeq(otherTab.seqs, 2, 's2', 'refresh');
+  assert.equal(isHistoryRequestCurrent(otherSess.seqs, 2, 's1', 'refresh', 3), false, '换会话后旧号作废');
+  assert.equal(otherSess.seq, 4, '计数器只增不减:切回同一会话的新号必然大于旧号(不撞号)');
+
+  // reset(切会话/清窗格):sessionId 置空 → 在飞响应立即过期,计数器保留。
+  const reset = resetHistoryRequestSeq(otherSess.seqs, 2);
+  assert.equal(reset[2].sessionId, null);
+  assert.equal(reset[2].refresh, 4, 'reset 不归零计数器');
+  assert.equal(reset[2].older, 1, 'older 线同样保留');
+  assert.equal(isHistoryRequestCurrent(reset, 2, 's1', 'refresh', 4), false, '切走后旧响应立即判过期');
+  assert.deepEqual(reset[1], otherSess.seqs[1], '别的 tab 不受影响');
+  const back = nextHistoryRequestSeq(reset, 2, 's2', 'refresh');
+  assert.equal(back.seq, 5, '切回原会话:新号 > 旧号,旧响应仍过期');
+  assert.equal(isHistoryRequestCurrent(back.seqs, 2, 's2', 'refresh', 4), false);
+  // tab 越界按 0 处理。
+  assert.deepEqual(nextHistoryRequestSeq(undefined, 9, 's3', 'older').seqs[0],
+    { sessionId: 's3', refresh: 0, older: 1 });
+  assert.equal(isHistoryRequestCurrent(undefined, 0, 's1', 'refresh', 1), false, '缺 state 时保守判过期');
 }
 
 console.log('check-r151l-history-page: all passed');

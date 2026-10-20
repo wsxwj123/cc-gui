@@ -78,22 +78,53 @@ export function trimRecentMessages(messages, max = HISTORY_LOADED_MAX) {
   return { messages: list.slice(list.length - cap), dropped: list.length - cap };
 }
 
+const historyTabIndex = (tab) => (Number.isInteger(tab) && tab >= 0 && tab <= 5 ? tab : 0);
+
 /**
- * r151l 判官修正:每 tab 单调递增的**历史请求代号**。fetchMessages / loadOlderMessages
- * 发请求前各取一个新号;响应落地时号变了(期间有更新的一次请求 / 切走再切回)整条丢弃。
- * 只按 sessionId 守卫不够:同会话切走再回来时 sessionId 又相等,旧响应会把新列表覆盖掉。
+ * r151l 判官修正(窄复审①):历史请求代号按 **(sessionId, tab, lane)** 分账。
+ *   · lane='refresh'(fetchMessages)/ 'older'(loadOlderMessages)各一条独立递增线 ——
+ *     静默刷新不再把在飞的「加载更早」判过期,反之亦然(原来共用一个号会互相作废);
+ *   · 记录里带 sessionId:换会话后旧会话的号自然失效;
+ *   · 计数器**只增不减**(reset 也不归零):切走再切回同一会话、关窗再开时,新号必然
+ *     大于旧号 —— 若按键归零,切回后第一次请求会和当年在飞的旧号撞上。
  * 返回 { seqs, seq };seqs 是新数组(不原地改 state 里的旧数组)。
  */
-export function nextHistoryRequestSeq(seqs, tab) {
-  const idx = Number.isInteger(tab) && tab >= 0 && tab <= 5 ? tab : 0;
+export function nextHistoryRequestSeq(seqs, tab, sessionId, lane = 'refresh') {
+  const idx = historyTabIndex(tab);
   const arr = Array.isArray(seqs) ? [...seqs] : [];
-  const seq = (Number.isFinite(arr[idx]) ? arr[idx] : 0) + 1;
-  arr[idx] = seq;
+  const prev = arr[idx] && typeof arr[idx] === 'object' ? arr[idx] : null;
+  const key = lane === 'older' ? 'older' : 'refresh';
+  const seq = (Number.isFinite(prev?.[key]) ? prev[key] : 0) + 1;
+  arr[idx] = {
+    sessionId: sessionId || null,
+    refresh: Number.isFinite(prev?.refresh) ? prev.refresh : 0,
+    older: Number.isFinite(prev?.older) ? prev.older : 0,
+    [key]: seq,
+  };
   return { seqs: arr, seq };
 }
 
-/** 这个响应对应的请求代号是否仍是最新一次(不是 → 丢弃,不写列表/分页账)。 */
-export function isHistoryRequestCurrent(seqs, tab, seq) {
-  const idx = Number.isInteger(tab) && tab >= 0 && tab <= 5 ? tab : 0;
-  return Array.isArray(seqs) && seqs[idx] === seq;
+/**
+ * 切会话 / 换 pane 会话 / 清空窗格:作废该 tab 的**两条**代号线。
+ * sessionId 置 null(在飞响应立即判过期),计数器保留(见 nextHistoryRequestSeq 的注释)。
+ */
+export function resetHistoryRequestSeq(seqs, tab) {
+  const idx = historyTabIndex(tab);
+  const arr = Array.isArray(seqs) ? [...seqs] : [];
+  const prev = arr[idx] && typeof arr[idx] === 'object' ? arr[idx] : null;
+  arr[idx] = {
+    sessionId: null,
+    refresh: Number.isFinite(prev?.refresh) ? prev.refresh : 0,
+    older: Number.isFinite(prev?.older) ? prev.older : 0,
+  };
+  return arr;
+}
+
+/** 这个响应对应的请求代号是否仍是该 (tab, session, lane) 最新一次(不是 → 丢弃)。 */
+export function isHistoryRequestCurrent(seqs, tab, sessionId, lane, seq) {
+  const idx = historyTabIndex(tab);
+  const rec = Array.isArray(seqs) ? seqs[idx] : null;
+  if (!rec || typeof rec !== 'object' || rec.sessionId !== (sessionId || null)) return false;
+  const key = lane === 'older' ? 'older' : 'refresh';
+  return rec[key] === seq;
 }

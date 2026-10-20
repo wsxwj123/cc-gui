@@ -20,6 +20,7 @@ import {
   mergeRefreshedMessages,
   nextHistoryRequestSeq,
   prependOlderMessages,
+  resetHistoryRequestSeq,
   trimRecentMessages,
 } from '../utils/historyPaging.js';
 
@@ -726,10 +727,10 @@ export const useStore = create((set, get) => ({
   // r151l:每个窗格的历史分页账 { sessionId, hasMore, beforeCursor, loaded, total, loading, capped }。
   // 只在 sessionId 与窗格当前会话一致时可信;切会话/关窗格时清空(setPaneSession / closePane)。
   historyPagingByTab: [null, null, null, null, null, null],
-  // r151l 判官修正:每个窗格单调递增的历史请求代号(见 utils/historyPaging.js 的
-  // nextHistoryRequestSeq)。同会话切走再回/并发静默刷新时,旧响应靠它作废;
-  // 只按 sessionId 守卫挡不住"切走又回来"。
-  historyReqSeqByTab: [0, 0, 0, 0, 0, 0],
+  // r151l 判官修正(窄复审①细化为按 (sessionId, tab, lane) 分账):每窗格一条 refresh
+  // (fetchMessages)+ 一条 older(loadOlderMessages)请求代号,互不作废;切会话/换 pane
+  // 会话时 resetHistoryRequestSeq 统一作废。见 utils/historyPaging.js 的 nextHistoryRequestSeq。
+  historyReqSeqByTab: [null, null, null, null, null, null],
   // 整会话用量聚合(keyed by sessionId,服务端随 /messages 端点返回)。按 sessionId
   // 而非 pane 索引存放 —— 分屏关窗/换绑不需要 splice 同步,同会话多窗格天然共享。
   usageTotalsBySession: {},
@@ -1418,10 +1419,15 @@ export const useStore = create((set, get) => ({
     // 否则"切到别的会话"代际不变 = 该身份失去意义。
     const cur = get();
     const panes = [...(cur.paneSessions || [])];
+    const prevSid = panes[0]?.sessionId || null;
     panes[0] = session;
     const patch = { selectedSession: session, paneSessions: panes };
     const gens = rotatedGenerations(cur, 0, session);
     if (gens) patch.paneGenerations = gens;
+    // r151l 窄复审①:换会话 → tab0 正在飞的历史请求全部作废(与 setPaneSession 同款)。
+    if (prevSid !== (session?.sessionId || null)) {
+      patch.historyReqSeqByTab = resetHistoryRequestSeq(cur.historyReqSeqByTab, 0);
+    }
     set(patch);
     writeLs('cgui-selected-session', session);
     writeLs('cgui-pane-sessions', panes);
@@ -1624,7 +1630,7 @@ export const useStore = create((set, get) => ({
       gens[0] = freshGeneration(); // 空窗格 = 新一轮绑定
       const paging = [...(cur.historyPagingByTab || [])];
       paging[0] = null;
-      set({ paneSessions: next, paneMessages: nextMsgs, paneMessagesSid: nextSids, paneIds: ids, paneGenerations: gens, historyPagingByTab: paging, selectedSession: null, messages: [] });
+      set({ paneSessions: next, paneMessages: nextMsgs, paneMessagesSid: nextSids, paneIds: ids, paneGenerations: gens, historyPagingByTab: paging, historyReqSeqByTab: resetHistoryRequestSeq(cur.historyReqSeqByTab, 0), selectedSession: null, messages: [] });
       writeLs('cgui-selected-session', null);
       writeLs('cgui-pane-sessions', next);
       get().reclaimOrphanClaimDrafts(); // ②旧 pane id 已被换掉,回收指向它的 claim 槽
@@ -1665,6 +1671,8 @@ export const useStore = create((set, get) => ({
       paneIds: ids,
       paneGenerations: gens,
       historyPagingByTab: paging,
+      // 窄复审①:被关掉的那格在飞请求作废(计数器保留,切回同一会话不撞号)。
+      historyReqSeqByTab: resetHistoryRequestSeq(cur.historyReqSeqByTab, i),
       activeTabIndex: newActive,
       // pane 0 changed if we removed pane 0 — keep legacy mirrors current.
       selectedSession: sessions[0],
@@ -1697,6 +1705,8 @@ export const useStore = create((set, get) => ({
       const paging = [...(cur.historyPagingByTab || [])];
       paging[idx] = null;
       patch.historyPagingByTab = paging;
+      // 窄复审①:换 pane 会话 → 该窗格 refresh/older 两条请求线一起作废(计数器保留)。
+      patch.historyReqSeqByTab = resetHistoryRequestSeq(cur.historyReqSeqByTab, idx);
     }
     if (idx === 0) {
       patch.selectedSession = session;
@@ -1718,6 +1728,8 @@ export const useStore = create((set, get) => ({
       const paging = [...(get().historyPagingByTab || [])];
       paging[idx] = null;
       patch.historyPagingByTab = paging;
+      // 窄复审①:归属清空 = 身份已换 → 该窗格在飞的历史请求作废(计数器保留)。
+      patch.historyReqSeqByTab = resetHistoryRequestSeq(get().historyReqSeqByTab, idx);
     }
     if (idx === 0) patch.messages = arr[0];
     set(patch);
@@ -2546,21 +2558,38 @@ export const useStore = create((set, get) => ({
     // the whole-screen loader.
     const tab = Number.isInteger(opts.tab) && opts.tab >= 0 && opts.tab <= 5 ? opts.tab : 0;
     const silent = !!opts.silent || tab !== 0;
+    // r151l 窄复审①:先确认本窗格仍绑定这个会话,再领请求代号。切走后迟到的调用(例如
+    // 回滚在 stillHere() 之前发出的旧 sid fetch)若也领号,会把新会话在飞的有效请求判过期
+    // —— 新响应被丢、旧响应又被 pane 守卫丢掉 → tab0 可能永久转圈。不匹配就直接返回,不领号。
+    if (!sessionId || get().paneSessions[tab]?.sessionId !== sessionId) return false;
     const pagingBefore = get().historyPagingByTab?.[tab] || null;
     const sameSession = !!pagingBefore && pagingBefore.sessionId === sessionId;
     // 首屏/换会话 = 120;同一会话的刷新至少把已加载的都取回来,避免"刷新后退回 120"。
     const requestLimit = historyFetchLimit(sameSession ? pagingBefore.loaded : 0);
-    // r151l 判官修正:发请求前领一个本 tab 的请求代号。响应落地时代号变了 = 期间有更新
-    // 的一次请求(含"切走再切回"后重新拉取)→ 整条丢弃,不覆盖新列表/新分页账。
-    const req = nextHistoryRequestSeq(get().historyReqSeqByTab, tab);
+    // r151l 判官修正:发请求前领一个本 (sessionId, tab, lane) 的请求代号。响应落地时代号
+    // 变了(期间有更新的一次**同 lane** 请求 / 切会话) → 整条丢弃,不覆盖新列表/新分页账。
+    // 窄复审①:refresh 与 loadOlderMessages 各用一条独立代号 —— 静默刷新在飞时点「加载
+    // 更早」不会再被刷新作废(反之亦然);只有切会话才统一作废(resetHistoryRequestSeq)。
+    const req = nextHistoryRequestSeq(get().historyReqSeqByTab, tab, sessionId, 'refresh');
     set({ historyReqSeqByTab: req.seqs });
     if (!silent) set({ loading: true, error: null });
+    // 代号 + 窗格归属一起复核:代号按 (sessionId, tab, lane) 分账,换会话立即失效;
+    // 窗格守卫再兜一层"切走又切回"的窗口期。
+    const stillCurrent = () => isHistoryRequestCurrent(get().historyReqSeqByTab, tab, sessionId, 'refresh', req.seq)
+      && get().paneSessions[tab]?.sessionId === sessionId;
+    // 过期响应:不写列表、不碰分页账。非静默请求若窗格已切走,它点亮的全局 loading 要收掉
+    // (新窗格若是草稿/空窗格不会再发请求,没人会替它收;新会话自己在飞时会在落地时收尾);
+    // 同一会话被更新请求顶替时留给新请求。
+    const abandon = () => {
+      if (!silent && get().paneSessions[tab]?.sessionId !== sessionId) set({ loading: false });
+      return false;
+    };
     try {
       const res = await fetch(
         `/api/sessions/${sessionId}/messages?projectHash=${encodeURIComponent(projectHash)}&limit=${requestLimit}`
       );
       // 更新的一次请求已在飞 → 这条是过期响应:不写列表、不碰 loading(由最新那条收尾)。
-      if (!isHistoryRequestCurrent(get().historyReqSeqByTab, tab, req.seq)) return false;
+      if (!stillCurrent()) return abandon();
       // A missing / just-trimmed jsonl (404) or a server error must NOT blank the
       // pane: in split view a sibling pane showing the same reset session would
       // also re-fetch and go empty ("该会话没有可显示的消息" everywhere). Keep
@@ -2572,13 +2601,10 @@ export const useStore = create((set, get) => ({
         return false;
       }
       const data = await res.json();
-      // res.json() 也是异步的:解析期间可能又起了新请求,落地前再核对一次代号。
-      if (!isHistoryRequestCurrent(get().historyReqSeqByTab, tab, req.seq)) return false;
+      // res.json() 也是异步的:解析期间可能又起了新请求 / 切了会话,落地前再核对一次。
+      if (!stillCurrent()) return abandon();
       // 端点现返回 { messages, usageTotals };兼容旧的裸数组形态(升级过渡期)。
       const messages = Array.isArray(data) ? data : (Array.isArray(data?.messages) ? data.messages : []);
-      // 乱序守卫:响应落地时该 pane 已切走(sessionId 不再是发起时的)→ 整条丢弃,
-      // 防慢响应覆盖新会话的消息/归属标记造成永久空白。所有调用点发起时两者相等。
-      if (get().paneSessions[tab]?.sessionId !== sessionId) { if (!silent) set({ loading: false }); return false; }
       const now = get();
       const owned = now.paneMessagesSid[tab] === sessionId && Array.isArray(now.paneMessages[tab])
         ? now.paneMessages[tab] : [];
@@ -2618,7 +2644,9 @@ export const useStore = create((set, get) => ({
         loaded: trimmed.messages.length,
         // 判官建议 C:头部「N 条消息」/检索范围用服务端全量 total(旧服务端回落已加载数)。
         total: Number.isInteger(data?.total) ? data.total : (start + trimmed.messages.length),
-        loading: false,
+        // 窄复审①:刷新与「加载更早」互不作废 —— 刷新落地时若加载更早仍在飞,别把它的
+        // loading 抹掉(否则按钮白点消失、可重复点击);它自己的响应会写最终账。
+        loading: !!pagingNow?.loading,
         capped: start > 0 && (!!pagingNow?.capped || trimmed.dropped > 0
           || trimmed.messages.length >= HISTORY_LOADED_MAX),
       });
@@ -2638,8 +2666,8 @@ export const useStore = create((set, get) => ({
       return true;
     } catch (err) {
       // Network/parse failure — keep existing messages rather than blanking.
-      // 过期响应(期间已有更新请求)连错误态都不写,交给最新那条。
-      if (!isHistoryRequestCurrent(get().historyReqSeqByTab, tab, req.seq)) return false;
+      // 过期响应(期间已有更新请求 / 切了会话)连错误态都不写,交给最新那条。
+      if (!stillCurrent()) return abandon();
       if (!silent) set({ error: err.message, loading: false });
       else if (tab === 0 && get().loading) set({ loading: false });
       return false;
@@ -2650,6 +2678,8 @@ export const useStore = create((set, get) => ({
   // 加载中防重复;capped(已到 2000 上限)后不再请求。
   // 判官建议 D:同样领请求代号;空页/异常分支只用**当前**分页账清 loading,不再拿发起时的
   // 旧账覆盖(期间可能已被静默刷新改过游标/总数),代号变了就整条丢弃。
+  // 窄复审①:代号按 (sessionId, tab, 'older') 单独分账 —— 静默刷新在飞不再作废本请求,
+  // 反之亦然;只有切会话/清空窗格才统一作废(resetHistoryRequestSeq)。
   loadOlderMessages: async (sessionId, projectHash, opts = {}) => {
     const tab = Number.isInteger(opts.tab) && opts.tab >= 0 && opts.tab <= 5 ? opts.tab : 0;
     const st = get();
@@ -2658,15 +2688,21 @@ export const useStore = create((set, get) => ({
     if (st.paneSessions[tab]?.sessionId !== sessionId) return false;
     const cursor = Number.isInteger(paging.beforeCursor) ? paging.beforeCursor : null;
     if (cursor === null || cursor <= 0) return false;
-    const req = nextHistoryRequestSeq(get().historyReqSeqByTab, tab);
+    const req = nextHistoryRequestSeq(get().historyReqSeqByTab, tab, sessionId, 'older');
     set({ historyReqSeqByTab: req.seqs });
     get().setHistoryPaging(tab, { ...paging, loading: true });
-    const stillCurrent = () => isHistoryRequestCurrent(get().historyReqSeqByTab, tab, req.seq);
+    const stillCurrent = () => isHistoryRequestCurrent(get().historyReqSeqByTab, tab, sessionId, 'older', req.seq)
+      && get().paneSessions[tab]?.sessionId === sessionId;
     const fail = () => {
-      // 期间切了会话/账被清掉/有更新的请求 → 不要用旧账覆盖新会话的状态。
-      if (!stillCurrent()) return false;
+      // 期间切了会话/账被清掉 → 不要用旧账覆盖新会话的状态。
       const cur = get().historyPagingByTab?.[tab];
-      if (cur && cur.sessionId === sessionId) get().setHistoryPaging(tab, { ...cur, loading: false });
+      if (!cur || cur.sessionId !== sessionId) return false;
+      const curCursor = Number.isInteger(cur.beforeCursor) ? cur.beforeCursor : null;
+      // 自己的号仍最新 → 自己收尾;号已过期(切走再切回/窗格重置)时,只有当前账仍是发起时
+      // 这一页(cursor 相同)才清 loading。否则账已被更新一次加载改写,不能替它清。
+      if (stillCurrent() || curCursor === cursor) {
+        if (cur.loading) get().setHistoryPaging(tab, { ...cur, loading: false });
+      }
       return false;
     };
     try {
@@ -2675,11 +2711,12 @@ export const useStore = create((set, get) => ({
       );
       if (!res.ok) return fail();
       const data = await res.json();
-      if (get().paneSessions[tab]?.sessionId !== sessionId || !stillCurrent()) return fail();
+      if (!stillCurrent()) return fail();
       const page = Array.isArray(data) ? data : (Array.isArray(data?.messages) ? data.messages : []);
       if (!page.length) {
         // before>0 却拿到空窗口 = 服务端没有更早内容了(文件被裁剪等),别让按钮永远转。
         // 只改**当前**账,且只在游标还是发起时那个(期间刷新改过 → 不替它判"没有更早")。
+        if (!stillCurrent()) return fail();
         const cur = get().historyPagingByTab?.[tab];
         if (!cur || cur.sessionId !== sessionId) return false;
         if ((Number.isInteger(cur.beforeCursor) ? cur.beforeCursor : null) !== cursor) {
