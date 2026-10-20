@@ -2215,7 +2215,7 @@ function PersistentChatToggle() {
       <div className="px-3 py-2.5 flex items-center gap-3">
         <div className="min-w-0 flex-1">
           <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">会话常驻进程<EffectBadge level="immediate" /></div>
-          <div className="text-[10.5px] text-ink-faint font-body">回合结束后保留 CLI 进程,同一会话的下一条消息直接复用,省掉每回合的进程冷启动与 MCP 重启(约 5 秒),响应更快、第三方缓存更稳。切换模型/思考强度/provider 时自动重开进程。空闲超过【{keepAliveIdleLabel(shownIdle)}】自动回收。</div>
+          <div className="text-[10.5px] text-ink-faint font-body">回合结束后保留 CLI 进程,同一会话的下一条消息直接复用,省掉每回合的进程冷启动与 MCP 重启(约 5 秒),响应更快、第三方缓存更稳。切换模型/思考强度/provider 时自动重开进程。{shownIdle === 'never' ? '空闲时不自动回收进程。' : `空闲超过 ${keepAliveIdleLabel(shownIdle)} 自动回收。`}</div>
         </div>
         <button onClick={() => setOn(!on)}
           className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
