@@ -4,7 +4,7 @@
 import { test, expect } from '@playwright/test';
 import { seedSession, uniq, makeWorkspace, realCliPath } from '../r151b-xsession-p1/helpers/fixtures.mjs';
 import { xs, shared, cleanName, waitFor } from '../r151b-xsession-p1/helpers/api.mjs';
-import { SM, LS, NOTE, SEND_NOTICE, ALL, laneReq, aiCalls, resultJson, entry, msgs, startInstanceP2, touchMock } from './helpers/p2.mjs';
+import { SM, LS, NOTE, SEND_NOTICE, ALL, laneReq, aiCalls, resultJson, entry, msgs, inboundOk, startInstanceP2, touchMock } from './helpers/p2.mjs';
 
 test.describe.configure({ timeout: 360_000 });
 test.beforeEach(() => { test.skip(!realCliPath(), '本机没有真 claude CLI'); });
@@ -32,7 +32,7 @@ test('P07 AI 调 list_sessions(非放任档)→ 不弹权限卡;返回 {self,ses
     expect(all.sessions.map((s) => s.id), '不含自己、按最近活动倒序、30 项(与会话列表同口径)').toEqual(ref.map((s) => s.shortId));
     expect(all.sessions.map((s) => s.id)).not.toContain(A.shortId);
     expect(all.truncated, '超过 30 个 → truncated:true').toBe(true);
-    expect(all.sessions[0], '单项字段').toEqual({ id: ref[0].shortId, name: cleanName(ref[0].title), project: ref[0].project, state: ref[0].state, inbound: 'card' });
+    expect(all.sessions[0], '单项字段(inbound 没设置 → 默认 auto)').toEqual({ id: ref[0].shortId, name: cleanName(ref[0].title), project: ref[0].project, state: ref[0].state, inbound: 'auto' });
     const d = all.sessions.find((s) => s.id === (ref.find((x) => x.sessionId === dirty.sid) || {}).shortId);
     expect(d && d.name, '标题里的引号、尖括号、控制字符按来源名规则清洗').toBe(cleanName(dirty.title));
     const q = r.results[1].json;
@@ -125,6 +125,8 @@ test('P16 同一会话写两次(短 id / 去空白的标题 / 完整 id)只发�
   await api.on();
   const run = uniq('');
   const B = seedSession(`p16-b-${run}`, { title: `R151C p16 ${run}` });
+  // r151k:入站默认已是自动处理;这里显式落 card,保留「发给等你确认的会话 → delivery:"card" / NOTE.card」这条覆盖。
+  await inboundOk(shared, B.sid, 'card');
   const cwd = makeWorkspace(`real-p16-${run}`);
   const r = await aiCalls(shared, { cwd, steps: [
     { name: SM, input: { to: [B.sid.slice(0, 8), `  ${B.title}  `, B.sid, B.title.toUpperCase(), B.sid.slice(0, 7)], message: `R151C p16 ${run}` } },

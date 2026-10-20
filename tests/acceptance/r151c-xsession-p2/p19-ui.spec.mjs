@@ -6,7 +6,7 @@ import { xs, shared, waitFor, inputRecords, spawnRecords, turnRecords, writeScri
 import { boot, openSessionBySearch, openSessionSettings, recordRequests } from '../r151b-xsession-p1/helpers/ui.mjs';
 import {
   SM, NOTE, SEND_NOTICE, QUEUED_REASON, BANNER_TEXT, INBOUND_CONFIRM, aiCalls, resultJson, blast, inboundOk, entry, msgs, waitMsg, profileTurn, wsT,
-  openMoreMenu, chooseInbound,
+  openMoreMenu, chooseInbound, inboundValue,
 } from './helpers/p2.mjs';
 
 test.describe.configure({ timeout: 360_000 });
@@ -35,6 +35,8 @@ test('P08 AI 调 send_message 发给"等你确认"的会话 → delivery:"card";
   await api.on();
   const run = uniq('');
   const B = seedSession(`p08-b-${run}`, { title: `R151C p08 目标 ${run}` });
+  // r151k:入站默认已是自动处理;这里显式落 card,保留「发给等你确认的会话 → delivery:"card" / NOTE.card」这条覆盖。
+  await inboundOk(shared, B.sid, 'card');
   const cwd = makeWorkspace(`real-p08-${run}`);
   const r = await aiCalls(shared, { cwd, steps: [{ name: SM, input: { to: [B.title], message: `R151C p08 正文 ${run}` } }] });
   const j = resultJson(r, 0, 1);
@@ -77,18 +79,30 @@ test('P19 未暂停时设置块显示"过去 10 分钟自动处理 n / 20";触�
   await expect(section.getByTestId('xsession-auto-budget')).toHaveText('过去 10 分钟自动处理 0 / 20', { timeout: 10_000 });
 });
 
-test('P20 "更多"菜单 xs-inbound-select 选"自动处理" → 先出 xs-inbound-confirm(文案逐字),取消保持原值、确认才生效;不追溯已有卡片;改回"等你确认"后排队中的消息转卡片 target-card', async ({ page }) => {
+test('P20 "更多"菜单:没设置时默认"自动处理"(选中同值不弹确认);显式设"等你确认"后选"自动处理" → 先出 xs-inbound-confirm(文案逐字),取消保持原值、确认才生效;不追溯已有卡片;改回"等你确认"后排队中的消息转卡片 target-card', async ({ page }) => {
   await api.on();
   const run = uniq('');
   const B = seedSession(`p20-b-${run}`, { title: `R151C p20 ${run}` });
   await profileTurn(shared, B, 'bypassPermissions');
-  const [m0] = await api.send(null, [B.sid], `R151C p20 已有卡片 ${run}`);
   const puts = recordRequests(page, `/api/xsession/sessions/${B.sid}/inbound`);
   await boot(page);
   await openSessionBySearch(page, B.title, B.reply);
   expect(await openMoreMenu(page), '"更多"菜单里有 xs-inbound-select').toBe(true);
-  await chooseInbound(page, '自动处理');
+  const select = page.getByTestId('xs-inbound-select').first();
   const confirm = page.getByTestId('xs-inbound-confirm');
+  await expect(select, '接收设置取到值后下拉可用').toBeEnabled({ timeout: 10_000 });
+  expect(await inboundValue(page), '没设置 → 下拉显示默认"自动处理"').toBe('自动处理');
+  await chooseInbound(page, '自动处理'); // 与当前值相同:不弹确认,也不发请求
+  await expect(confirm, '已是自动处理时再选同值 → 不弹确认').toHaveCount(0);
+  expect(puts.filter((x) => x.method === 'PUT'), '同值选择不发请求').toEqual([]);
+
+  // 显式落 card,才走得到"选自动处理 → 先确认";已有卡片也在这之后发,保持原覆盖。
+  await inboundOk(shared, B.sid, 'card');
+  if (!(await select.isVisible().catch(() => false))) await openMoreMenu(page);
+  await expect.poll(() => inboundValue(page), { timeout: 10_000, message: '显式 card 后下拉显示"等你确认"' }).toBe('等你确认');
+  const [m0] = await api.send(null, [B.sid], `R151C p20 已有卡片 ${run}`);
+  if (!(await select.isVisible().catch(() => false))) await openMoreMenu(page);
+  await chooseInbound(page, '自动处理');
   await expect(confirm, '先出确认框').toBeVisible({ timeout: 10_000 });
   expect(norm(await confirm.innerText()), '确认框文案逐字').toContain(INBOUND_CONFIRM);
   const cancel = confirm.getByRole('button', { name: '取消', exact: true });

@@ -112,7 +112,7 @@ test('P03 PUT config {autoPaused:false} → 200 {ok,enabled,autoPaused:false} �
   } finally { if (unlock) unlock(); ws.close(); await inst.stop(); }
 });
 
-test('P05 PUT …/sessions/:id/inbound {mode} → 200 {ok,sessionId,mode} 并广播 xs:inbound,会话列表 inbound 随之变化(auto 写键、card 删键);400 → 404 → 500 XS_LIST_FAILED / STORAGE_WRITE_FAILED 按序,设置不变不广播', async () => {
+test('P05 PUT …/sessions/:id/inbound {mode} → 200 {ok,sessionId,mode} 并广播 xs:inbound,会话列表 inbound 随之变化(没设置默认 auto,显式 auto / card 都写键);400 → 404 → 500 XS_LIST_FAILED / STORAGE_WRITE_FAILED 按序,设置不变不广播', async () => {
   const inst = await startInstanceP2('p05');
   const ws = await wsT(inst.base);
   const projects = path.join(claudeDir(inst.home), 'projects');
@@ -121,7 +121,7 @@ test('P05 PUT …/sessions/:id/inbound {mode} → 200 {ok,sessionId,mode} 并广
     const c = inst.c;
     const B = seedSession(`p05-b-${uniq('')}`, { home: inst.home });
     expect((await c.put('/api/xsession/config', { enabled: true })).status, '前置:打开开关').toBe(200);
-    expect((await entry(c, B.sid)).inbound, '默认 card').toBe('card');
+    expect((await entry(c, B.sid)).inbound, '没设置 → 默认 auto').toBe('auto');
     const r = await setInbound(c, B.sid, 'auto');
     expect([r.status, r.body], `改成 auto(${r.text.slice(0, 200)})`).toEqual([200, { ok: true, sessionId: B.sid, mode: 'auto' }]);
     const ev = await ws.waitFor((m) => m.type === 'xs:inbound' && m.sessionId === B.sid);
@@ -131,7 +131,7 @@ test('P05 PUT …/sessions/:id/inbound {mode} → 200 {ok,sessionId,mode} 并广
     const r2 = await setInbound(c, B.sid, 'card');
     expect([r2.status, r2.body]).toEqual([200, { ok: true, sessionId: B.sid, mode: 'card' }]);
     expect((await entry(c, B.sid)).inbound).toBe('card');
-    expect(Object.keys(readJson(prefsPath(inst.home)).xsInbound || {}), 'card 删键').not.toContain(B.sid);
+    expect((readJson(prefsPath(inst.home)).xsInbound || {})[B.sid], 'card 写键').toBe('card');
 
     const n0 = ws.msgs.length;
     const ghost = newSid();
@@ -162,7 +162,8 @@ test('P06 会话开始过一个回合后 → 会话列表 hasProfile:true;会话
     expect((await entry(c, B.sid)).hasProfile, '还没开始过回合 → false').toBe(false);
     await profileTurn(c, B);
     await expect.poll(async () => (await entry(c, B.sid) || {}).hasProfile, { timeout: 10_000, message: '开始过一个回合 → true' }).toBe(true);
-    expect((await setInbound(c, B.sid, 'auto')).status, '前置:设为自动处理').toBe(200);
+    expect((await setInbound(c, B.sid, 'card')).status, '前置:显式设为等你确认(默认 auto,只有显式 card 才落键)').toBe(200);
+    expect((readJson(prefsPath(inst.home)).xsInbound || {})[B.sid], '前置:显式 card 已写进 xsInbound').toBe('card');
 
     const del = await c.call('DELETE', `/api/sessions/${B.sid}?projectHash=${encodeURIComponent(encodeProjectDir(B.cwd))}`);
     expect(del.status, `前置:删除会话(${del.text.slice(0, 200)})`).toBeLessThan(300);
@@ -171,6 +172,6 @@ test('P06 会话开始过一个回合后 → 会话列表 hasProfile:true;会话
     expect(String(readText(path.join(xsDir(inst.home), 'profiles.json')) || ''), '档案已清除').not.toContain(B.sid);
     seedSession(`p06-b2-${uniq('')}`, { home: inst.home, sid: B.sid, cwd: B.cwd });
     const again = await entry(c, B.sid);
-    expect.soft(again && { inbound: again.inbound, hasProfile: again.hasProfile }, '同一 id 重新落盘后是全新的接收设置与档案').toEqual({ inbound: 'card', hasProfile: false });
+    expect.soft(again && { inbound: again.inbound, hasProfile: again.hasProfile }, '删除后设置被清除,同一 id 重新落盘 → 接收设置回到默认 auto、档案为全新').toEqual({ inbound: 'auto', hasProfile: false });
   } finally { await inst.stop(); }
 });
