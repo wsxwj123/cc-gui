@@ -31,6 +31,7 @@ import {
 } from '../services/session-reader.js';
 import { claudeSpawn, cleanChildEnv, getActiveChatProcesses } from './chat.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
+import { parseHistoryPaging } from '../utils/history-pagination.js';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 import { broadcast } from '../broadcast.js';
 import { mergeDraftBindingsBestEffort } from '../services/draft-session-bindings.js';
@@ -448,6 +449,8 @@ router.get('/sessions/:sessionId', async (req, res) => {
 // 带真实 parentSessionId+toolUseId,普通会话两者为 null);view.kind 区分会话/子代理,子代理
 // 的有序展示块在 view.blocks。子代理身份与请求的 projectHash 对不上 = 409(归属不可靠),
 // 身份哪里都找不到 = 404,读超时 = 504(照旧不写任何东西)。
+// r151l:可选 query `limit`(1..2000)与 `before`(非负整数)只切窗口;不传 limit = 全量。
+// 响应追加 hasMore/beforeCursor/total,usageTotals 仍按全文件计算。
 const HISTORY_READ_TIMEOUT_MS = 15_000;
 router.get('/sessions/:sessionId/messages', async (req, res) => {
   let timer;
@@ -459,8 +462,17 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
     if (!safeId(projectHash) || !safeId(req.params.sessionId)) {
       return res.status(400).json({ ok: false, code: 'HISTORY_INVALID_INPUT', error: 'invalid projectHash or sessionId' });
     }
+    // r151l:分页参数只在这里校验一次(纯函数可单测);before>total 不算非法,由切片按
+    // total 处理。非法值在起读盘之前就拒绝,不白读整份 jsonl。
+    const paging = parseHistoryPaging(req.query);
+    if (!paging.ok) {
+      return res.status(400).json({ ok: false, code: 'HISTORY_INVALID_INPUT', error: paging.error });
+    }
     const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ timedOut: true }), HISTORY_READ_TIMEOUT_MS); });
-    const result = await Promise.race([getSessionMessages(req.params.sessionId, projectHash), timeout]);
+    const result = await Promise.race([
+      getSessionMessages(req.params.sessionId, projectHash, { limit: paging.limit, before: paging.before }),
+      timeout,
+    ]);
     if (result?.timedOut) {
       return res.status(504).json({ ok: false, code: 'HISTORY_READ_TIMEOUT', error: '读取会话历史超时' });
     }

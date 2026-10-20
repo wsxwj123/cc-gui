@@ -13,6 +13,7 @@ import {
 
 export { isApprovedPlanToolCall };
 import { parseJsonl, readJsonlEdges, streamJsonl } from '../utils/jsonl-parser.js';
+import { sliceMessagesForPage } from '../utils/history-pagination.js';
 import { parseWorkflowLaunchText, parseWorkflowTranscriptDir } from '../utils/workflow-progress.js';
 import { scanProfile, PROFILE_VERSION } from './session-profile.js';
 import { getEntry, getRawEntry, putEntry, ensureProjectLoaded, noteScan } from './session-index.js';
@@ -1744,7 +1745,7 @@ function attachSubagentUsage(messages, agents, workflowCalls) {
 }
 
 
-export async function getSessionMessages(sessionId, projectHash) {
+export async function getSessionMessages(sessionId, projectHash, paging = {}) {
   const loc = await locateSessionFile(sessionId, projectHash);
   if (!loc) return { notFound: true };
   if (loc.conflict) return { conflict: true };
@@ -2094,7 +2095,19 @@ export async function getSessionMessages(sessionId, projectHash) {
   const view = loc.parentSessionId
     ? { kind: 'agent', blocks: agentViewBlocks(finalMessages) }
     : { kind: 'session', blocks: [] };
-  return { messages: finalMessages, usageTotals, owner, view };
+  // r151l:分页窗口在**完整 messages 与 usageTotals 都算完之后**才切 —— usageTotals
+  // 始终按全文件口径,与是否分页无关;不传 paging(旧调用)时返回全量,新增字段按全量语义
+  // (hasMore=false / beforeCursor=0 / total=len)。
+  const page = sliceMessagesForPage(finalMessages, paging);
+  return {
+    messages: page.messages,
+    usageTotals,
+    owner,
+    view,
+    hasMore: page.hasMore,
+    beforeCursor: page.beforeCursor,
+    total: page.total,
+  };
 }
 
 // R12:子代理的终态词汇(与 SDK 的 task_notification.status 及 GUI 的终态判据同一套)。
