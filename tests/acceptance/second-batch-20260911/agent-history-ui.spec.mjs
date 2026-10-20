@@ -155,7 +155,13 @@ test('SB-T48 代理历史 HTTP：唯一根 schema，owner 带母身份，view.bl
   const history = await readMessages(request, baseURL, agent.agentSessionId, agent.parentProjectHash);
 
   expect(history.status, `agent history body: ${JSON.stringify(history.body)?.slice(0, 200)}`).toBe(200);
-  expect(Object.keys(history.body).sort(), 'agent history keeps the one documented root schema').toEqual(['messages', 'owner', 'usageTotals', 'view']);
+  // r151l 只追加分页/统计字段：原四键（messages/owner/usageTotals/view）仍在，根 schema 兼容。
+  expect(Object.keys(history.body).sort(), 'agent history keeps the one documented root schema').toEqual([
+    'beforeCursor', 'hasMore', 'historyStats', 'messages', 'owner', 'total', 'usageTotals', 'view',
+  ]);
+  expect(typeof history.body.hasMore, 'agent history hasMore is boolean').toBe('boolean');
+  expect(typeof history.body.total, 'agent history total is a number').toBe('number');
+  expect(typeof history.body.historyStats, 'agent history historyStats is an object').toBe('object');
   expect(history.body.owner.parentSessionId).toBe(agent.parentSessionId);
   expect(history.body.owner.toolUseId).toBe(agent.toolUseId);
   expect(history.body.view.kind, 'an agent history must be marked as the agent view kind').toBe('agent');

@@ -170,12 +170,24 @@ test('PA-412 GET /api/usage：byPeriod 对每一行都产出三个桶（不按�
 // GET /api/sessions/:id/messages：usageCalls（契约 §3.4、§10.1）与错误契约
 // ---------------------------------------------------------------------------
 
-test('PA-413 messages：顶层键仍恰为 4 个（回归安全线，本次只追加字段）', async ({ request }) => {
+test('PA-413 messages：顶层键 = 原 4 键 + 分页/统计追加字段（回归安全线）', async ({ request }) => {
   const { baseURL } = getRuntime();
   const fixture = transcripts();
   const result = await readMessages(request, baseURL, fixture.sessionId, fixture.projectHash);
   expect(result.status).toBe(200);
-  expect(Object.keys(result.body).sort()).toEqual(['messages', 'owner', 'usageTotals', 'view']);
+  // r151l 只追加字段：既有四键（messages/owner/usageTotals/view）一字不少。
+  expect(Object.keys(result.body).sort()).toEqual([
+    'beforeCursor', 'hasMore', 'historyStats', 'messages', 'owner', 'total', 'usageTotals', 'view',
+  ]);
+  // 追加字段的形状：分页三字段 + 全量统计对象（存在且类型可消费）。
+  expect(typeof result.body.hasMore, 'hasMore 是布尔').toBe('boolean');
+  expect(
+    result.body.beforeCursor === null || typeof result.body.beforeCursor === 'number',
+    'beforeCursor 是 number|null',
+  ).toBe(true);
+  expect(typeof result.body.total, 'total 是数字').toBe('number');
+  expect(typeof result.body.historyStats, 'historyStats 是对象').toBe('object');
+  expect(typeof result.body.historyStats.total, 'historyStats.total 是数字').toBe('number');
 });
 
 /** 有真实用量的回合：契约 §3.4 要求这类 turn 带 usageCalls（无 usage 的回合允许没有）。 */
