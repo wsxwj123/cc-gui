@@ -1371,6 +1371,14 @@ export function aggregateCost(model, tokens, provider) {
   const asUsage = (bucket) => ({
     input_tokens: bucket.input, output_tokens: bucket.output,
     cache_read_input_tokens: bucket.cacheRead, cache_creation_input_tokens: bucket.cacheWrite || 0,
+    // r151l 判官修正:按模型汇总行也带两档 TTL 分项(服务端 historyStats / 将来的用量行)。
+    // 不带分项时行为与旧版逐字一致(computeCost 走"单一写价"分支)。
+    ...(typeof bucket.cacheWrite5m === 'number' || typeof bucket.cacheWrite1h === 'number'
+      ? { cache_creation: {
+          ephemeral_5m_input_tokens: bucket.cacheWrite5m || 0,
+          ephemeral_1h_input_tokens: bucket.cacheWrite1h || 0,
+        } }
+      : {}),
   });
   // 分时段模型:面板拿到的是按模型汇总的 token(没有时间)。按桶各算一次,时点用规则模块里
   // 写死的代表时刻(不读「现在」,否则同一份数据每次打开金额都变)。
@@ -1407,6 +1415,55 @@ export function aggregateCost(model, tokens, provider) {
 function firstCurrency(model, provider) {
   const price = resolvePrice(model, { at: AGGREGATE_PERIOD_AT.peak, provider, promptTokens: null });
   return price.ok ? price.currency : null;
+}
+
+/** 服务端 historyStats.usageByModel 的一行 → aggregateCost 认识的 tokens 形状(纯映射,不改数)。 */
+function historyUsageRow(row) {
+  const bucket = (b) => ({
+    input: b?.input || 0,
+    output: b?.output || 0,
+    cacheRead: b?.cacheRead || 0,
+    cacheWrite: b?.cacheCreation || 0,
+    cacheWrite5m: typeof b?.cacheCreation5m === 'number' ? b.cacheCreation5m : undefined,
+    cacheWrite1h: typeof b?.cacheCreation1h === 'number' ? b.cacheCreation1h : undefined,
+    calls: b?.apiCalls || 0,
+  });
+  return {
+    ...bucket(row),
+    ...(row?.byPeriod
+      ? {
+          byPeriod: {
+            peak: bucket(row.byPeriod.peak),
+            offPeak: bucket(row.byPeriod.offPeak),
+            unknown: bucket(row.byPeriod.unknown),
+          },
+        }
+      : {}),
+  };
+}
+
+/**
+ * r151l 判官修正:会话**全量**费用 —— 服务端 historyStats.usageByModel(按模型 + 时段聚合)
+ * 走与用量面板同一个 aggregateCost 出口。与逐条消息求和同口径:
+ *   · 单价×token 线性 → 先按模型汇总再乘价 = 逐条算再相加(同币种先归一再相加);
+ *   · 分时段模型按服务端分好的峰/谷桶各算一次(代表时刻写死在 pricing-rules);
+ *   · 套餐/订阅档不进金额(aggregateCost 给 subscription),与 computeCostForMessage 返回 null 一致。
+ * 返回 { usd, partial }:usd=0 表示没有可计价的行(不是"免费"),partial=有维度算不出。
+ */
+export function aggregateHistoryCost(usageByModel, provider) {
+  const rows = Array.isArray(usageByModel) ? usageByModel : [];
+  let usd = 0;
+  let priced = 0;
+  let partial = false;
+  for (const row of rows) {
+    if (!row || typeof row.model !== 'string' || !row.model) continue;
+    const c = aggregateCost(row.model, historyUsageRow(row), provider);
+    if (c.usd == null) continue;
+    usd += displayUsd(c.usd, c.currency);
+    priced += 1;
+    if (c.partial) partial = true;
+  }
+  return { usd: priced ? usd : 0, partial };
 }
 
 /**

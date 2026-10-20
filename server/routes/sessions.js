@@ -451,6 +451,8 @@ router.get('/sessions/:sessionId', async (req, res) => {
 // 身份哪里都找不到 = 404,读超时 = 504(照旧不写任何东西)。
 // r151l:可选 query `limit`(1..2000)与 `before`(非负整数)只切窗口;不传 limit = 全量。
 // 响应追加 hasMore/beforeCursor/total,usageTotals 仍按全文件计算。
+// r151l 判官修正:响应再追加 historyStats(全量工具调用数/模型/按模型分时段用量),
+// 与分页窗口无关 —— 客户端会话徽章的费用/工具数/曾用模型据此按全量显示。
 const HISTORY_READ_TIMEOUT_MS = 15_000;
 router.get('/sessions/:sessionId/messages', async (req, res) => {
   let timer;

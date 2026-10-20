@@ -14,6 +14,7 @@ import {
 export { isApprovedPlanToolCall };
 import { parseJsonl, readJsonlEdges, streamJsonl } from '../utils/jsonl-parser.js';
 import { sliceMessagesForPage } from '../utils/history-pagination.js';
+import { buildHistoryStats } from '../utils/history-stats.js';
 import { parseWorkflowLaunchText, parseWorkflowTranscriptDir } from '../utils/workflow-progress.js';
 import { scanProfile, PROFILE_VERSION } from './session-profile.js';
 import { getEntry, getRawEntry, putEntry, ensureProjectLoaded, noteScan } from './session-index.js';
@@ -2099,9 +2100,14 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
   // 始终按全文件口径,与是否分页无关;不传 paging(旧调用)时返回全量,新增字段按全量语义
   // (hasMore=false / beforeCursor=0 / total=len)。
   const page = sliceMessagesForPage(finalMessages, paging);
+  // r151l 判官修正:会话徽章/弹层/手机条的费用、工具数、曾用模型必须按**全量**统计,
+  // 不能只算已加载窗口(否则同一张弹层里 token 是全量、费用是窗口,数字互相矛盾)。
+  // 与 usageTotals 一样在切窗前算,不受是否分页影响;不传 paging 的旧调用也随时带。
+  const historyStats = buildHistoryStats(finalMessages);
   return {
     messages: page.messages,
     usageTotals,
+    historyStats,
     owner,
     view,
     hasMore: page.hasMore,
