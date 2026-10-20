@@ -2594,7 +2594,8 @@ export const useStore = create((set, get) => ({
         beforeCursor: start,
         loaded: trimmed.messages.length,
         loading: false,
-        capped: !!pagingNow?.capped || trimmed.dropped > 0,
+        capped: start > 0 && (!!pagingNow?.capped || trimmed.dropped > 0
+          || trimmed.messages.length >= HISTORY_LOADED_MAX),
       });
       // 服务端算好的整会话用量聚合,SessionDetail 顶部用量条直接取用,
       // 避免前端对几千条历史消息每帧全量 reduce。分页不影响口径(服务端按全文件算)。
@@ -2657,7 +2658,8 @@ export const useStore = create((set, get) => ({
         beforeCursor: start,
         loaded: trimmed.messages.length,
         loading: false,
-        capped: !!paging.capped || trimmed.dropped > 0,
+        capped: start > 0 && (!!paging.capped || trimmed.dropped > 0
+          || trimmed.messages.length >= HISTORY_LOADED_MAX),
       });
       if (data && !Array.isArray(data) && data.usageTotals) {
         set((s) => ({ usageTotalsBySession: { ...s.usageTotalsBySession, [sessionId]: data.usageTotals } }));
