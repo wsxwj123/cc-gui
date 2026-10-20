@@ -278,7 +278,34 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.425</b>(2026-10-19)· 修复 4 条 · 优化 1 条</summary>
+<summary><b>v0.2.426</b>(2026-10-20)· 修复 2 条 · 优化 1 条</summary>
+
+**修复**
+
+<details><summary>提问卡不再被误判卡死</summary>
+
+权限卡/提问卡/计划确认卡在等你回答时,静默看门狗不会再把进程拆掉。之前等超过 5 分钟会被当成上游卡死中断,模型看到的是「用户拒绝」。
+
+</details>
+
+<details><summary>会话不会再因为长时间不说话而「下线」</summary>
+
+新增「会话常驻」空闲回收设置(15 分钟 / 30 分钟 / 1 小时 / 2 小时 / 4 小时 / 不回收,默认 1 小时)。设成「不回收」时会话一直在线,原生跨会话随时可达;代价是每个空闲会话常驻约 100–300MB 内存。
+
+</details>
+
+**优化**
+
+<details><summary>跨会话收到消息默认自动处理</summary>
+
+打开跨会话总开关后,没单独设置过的会话收到消息会直接开始处理(可在会话里改回「先收卡片」)。
+
+</details>
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.425">v0.2.425</a></b>(2026-10-19)· 修复 4 条 · 优化 1 条</summary>
 
 **修复**
 
