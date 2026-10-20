@@ -2,8 +2,9 @@
 // r151l 历史消息分页 —— 纯函数单测。
 // 服务端:sliceMessagesForPage(窗口/游标/hasMore/total)、parseHistoryPaging(query 校验)。
 // 客户端:historyFetchLimit、mergeRefreshedMessages、prependOlderMessages、trimRecentMessages,
-//        以及请求代号 nextHistoryRequestSeq / resetHistoryRequestSeq / isHistoryRequestCurrent
-//        (窄复审①:按 (sessionId, tab, lane) 分账,refresh 与 older 互不作废)。
+//        请求代号 nextHistoryRequestSeq / resetHistoryRequestSeq / isHistoryRequestCurrent
+//        (窄复审①:按 (sessionId, tab, lane) 分账,refresh 与 older 互不作废),
+//        以及分页账继承 resolveHistoryPagingFlags(窄复审②:loading/capped 只在同会话时保留)。
 // Run: node tests/unit/check-r151l-history-page.mjs
 // 变异哨兵:before 不按 total 钳 → t2 红;空窗口 beforeCursor 写成 0 → t3 红;不传 limit 切片 → t1 红。
 import assert from 'node:assert/strict';
@@ -18,6 +19,7 @@ import {
   nextHistoryRequestSeq,
   prependOlderMessages,
   resetHistoryRequestSeq,
+  resolveHistoryPagingFlags,
   trimRecentMessages,
 } from '../../client/src/utils/historyPaging.js';
 
@@ -261,20 +263,50 @@ const idx = (list) => list.map((m) => m.i);
   assert.equal(isHistoryRequestCurrent(otherSess.seqs, 2, 's1', 'refresh', 3), false, '换会话后旧号作废');
   assert.equal(otherSess.seq, 4, '计数器只增不减:切回同一会话的新号必然大于旧号(不撞号)');
 
-  // reset(切会话/清窗格):sessionId 置空 → 在飞响应立即过期,计数器保留。
+  // reset(切会话/清窗格):sessionId 置空 → 在飞响应立即过期;两条计数器都 +1
+  // (窄复审②:切回同一会话时 refresh 会把 sessionId 写回来,旧 older 号若不变会"复活")。
   const reset = resetHistoryRequestSeq(otherSess.seqs, 2);
   assert.equal(reset[2].sessionId, null);
-  assert.equal(reset[2].refresh, 4, 'reset 不归零计数器');
-  assert.equal(reset[2].older, 1, 'older 线同样保留');
+  assert.equal(reset[2].refresh, 5, 'reset 递增 refresh 计数器(不归零)');
+  assert.equal(reset[2].older, 2, 'reset 递增 older 计数器');
   assert.equal(isHistoryRequestCurrent(reset, 2, 's1', 'refresh', 4), false, '切走后旧响应立即判过期');
   assert.deepEqual(reset[1], otherSess.seqs[1], '别的 tab 不受影响');
   const back = nextHistoryRequestSeq(reset, 2, 's2', 'refresh');
-  assert.equal(back.seq, 5, '切回原会话:新号 > 旧号,旧响应仍过期');
+  assert.equal(back.seq, 6, '切回原会话:新号 > 旧号,旧响应仍过期');
   assert.equal(isHistoryRequestCurrent(back.seqs, 2, 's2', 'refresh', 4), false);
+  // 窄复审②回归哨兵:切走再切回**同一会话**,旧 older 响应不能因 refresh 写回 sessionId
+  // 而重新被认作最新(旧实现 reset 保留 older 号 → 这里会误判 current,旧页拼回 = 分页空洞)。
+  const inFlightOlder = nextHistoryRequestSeq(back.seqs, 4, 'sA', 'older');
+  assert.equal(inFlightOlder.seq, 1);
+  const away = resetHistoryRequestSeq(inFlightOlder.seqs, 4);
+  const backRefresh = nextHistoryRequestSeq(away, 4, 'sA', 'refresh');
+  assert.equal(backRefresh.seqs[4].sessionId, 'sA', '切回后 refresh 重新写回 sessionId');
+  assert.equal(isHistoryRequestCurrent(backRefresh.seqs, 4, 'sA', 'older', inFlightOlder.seq), false,
+    '切换前在飞的旧 older 响应必须仍判过期(不能靠 sessionId 撞回而复活)');
+  // 新请求领号也不会与旧响应撞号。
+  assert.equal(backRefresh.seqs[4].older, inFlightOlder.seq + 1, '切回后存储的 older 号 = 旧号 + 1');
   // tab 越界按 0 处理。
   assert.deepEqual(nextHistoryRequestSeq(undefined, 9, 's3', 'older').seqs[0],
     { sessionId: 's3', refresh: 0, older: 1 });
   assert.equal(isHistoryRequestCurrent(undefined, 0, 's1', 'refresh', 1), false, '缺 state 时保守判过期');
+}
+
+// ── t10 分页账继承:loading/capped 只在同会话时保留(窄复审②)───────────────
+{
+  const aPaging = { sessionId: 'sA', loading: true, capped: true };
+  assert.deepEqual(resolveHistoryPagingFlags(aPaging, 'sA'), { loading: true, capped: true },
+    '同会话:在飞的 loading / capped 原样保留');
+  assert.deepEqual(resolveHistoryPagingFlags(aPaging, 'sA', { capped: true }), { loading: true, capped: true });
+  assert.deepEqual(resolveHistoryPagingFlags(aPaging, 'sB'), { loading: false, capped: false },
+    '换会话:绝不能把 A 的 loading/capped 抄进 B 的新账');
+  assert.equal(resolveHistoryPagingFlags(aPaging, 'sB', { capped: true }).capped, true,
+    'capped 由本次响应自己算出(修剪/触顶)时照旧生效');
+  assert.deepEqual(resolveHistoryPagingFlags(null, 'sA'), { loading: false, capped: false });
+  assert.deepEqual(resolveHistoryPagingFlags(undefined, 'sA', { capped: false }), { loading: false, capped: false });
+  assert.deepEqual(resolveHistoryPagingFlags({ sessionId: 'sA', loading: false, capped: false }, 'sA'),
+    { loading: false, capped: false }, '同会话但没在飞 → 不凭空造 loading');
+  assert.deepEqual(resolveHistoryPagingFlags({ sessionId: 'sB', loading: true }, 'sA', { capped: true }),
+    { loading: false, capped: true }, '别会话的 loading 不继承,但本次 capped 保留');
 }
 
 console.log('check-r151l-history-page: all passed');

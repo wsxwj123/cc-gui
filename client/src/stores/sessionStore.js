@@ -21,6 +21,7 @@ import {
   nextHistoryRequestSeq,
   prependOlderMessages,
   resetHistoryRequestSeq,
+  resolveHistoryPagingFlags,
   trimRecentMessages,
 } from '../utils/historyPaging.js';
 
@@ -2635,6 +2636,13 @@ export const useStore = create((set, get) => ({
       }
       const trimmed = trimRecentMessages(merged, HISTORY_LOADED_MAX);
       const start = Math.max(0, baseStart + trimmed.dropped);
+      // 窄复审②:loading/capped 只在旧账属于**本次响应的会话**时才继承。侧栏切会话
+      // (setSelectedSession)不清 historyPagingByTab,别的会话的账还留在该 tab 上;不加限定
+      // 就会把 A 的 loading:true 抄进 B 的新账 → B 的「加载更早」永久禁用(loadOlderMessages
+      // 见 loading 早退,刷新也只会一遍遍抄这个 true)。capped 同理不能跨会话漏。
+      const pagingFlags = resolveHistoryPagingFlags(pagingNow, sessionId, {
+        capped: trimmed.dropped > 0 || trimmed.messages.length >= HISTORY_LOADED_MAX,
+      });
       get().setPaneMessages(tab, trimmed.messages, sessionId);
       get().setHistoryPaging(tab, {
         sessionId,
@@ -2646,9 +2654,8 @@ export const useStore = create((set, get) => ({
         total: Number.isInteger(data?.total) ? data.total : (start + trimmed.messages.length),
         // 窄复审①:刷新与「加载更早」互不作废 —— 刷新落地时若加载更早仍在飞,别把它的
         // loading 抹掉(否则按钮白点消失、可重复点击);它自己的响应会写最终账。
-        loading: !!pagingNow?.loading,
-        capped: start > 0 && (!!pagingNow?.capped || trimmed.dropped > 0
-          || trimmed.messages.length >= HISTORY_LOADED_MAX),
+        loading: pagingFlags.loading,
+        capped: start > 0 && pagingFlags.capped,
       });
       // 服务端算好的整会话用量聚合 + 全量统计,SessionDetail 顶部用量条/会话徽章直接取用,
       // 避免前端对几千条历史消息每帧全量 reduce。分页不影响口径(服务端按全文件算)。

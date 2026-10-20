@@ -85,7 +85,7 @@ const historyTabIndex = (tab) => (Number.isInteger(tab) && tab >= 0 && tab <= 5 
  *   · lane='refresh'(fetchMessages)/ 'older'(loadOlderMessages)各一条独立递增线 ——
  *     静默刷新不再把在飞的「加载更早」判过期,反之亦然(原来共用一个号会互相作废);
  *   · 记录里带 sessionId:换会话后旧会话的号自然失效;
- *   · 计数器**只增不减**(reset 也不归零):切走再切回同一会话、关窗再开时,新号必然
+ *   · 计数器**只增不减**(reset 也 +1,不归零):切走再切回同一会话、关窗再开时,新号必然
  *     大于旧号 —— 若按键归零,切回后第一次请求会和当年在飞的旧号撞上。
  * 返回 { seqs, seq };seqs 是新数组(不原地改 state 里的旧数组)。
  */
@@ -106,7 +106,12 @@ export function nextHistoryRequestSeq(seqs, tab, sessionId, lane = 'refresh') {
 
 /**
  * 切会话 / 换 pane 会话 / 清空窗格:作废该 tab 的**两条**代号线。
- * sessionId 置 null(在飞响应立即判过期),计数器保留(见 nextHistoryRequestSeq 的注释)。
+ * sessionId 置 null(在飞响应立即判过期),计数器**递增**而不是原样保留:
+ *   · refresh 线:切回同一会话时 fetchMessages 才领新号,递增保证新号大于在飞的旧号;
+ *   · older 线:切回时可能**没有新的**「加载更早」请求 —— 若旧号仍等于存储值,
+ *     只清 sessionId 的 reset 会被切回后的 refresh 写回(重新写回旧 sessionId)而"复活",
+ *     迟到的旧页被当成最新拼回列表(可能造成分页空洞)。递增后旧号必然对不上。
+ * 见 tests/unit/check-r151l-history-page.mjs 的 t9。
  */
 export function resetHistoryRequestSeq(seqs, tab) {
   const idx = historyTabIndex(tab);
@@ -114,10 +119,27 @@ export function resetHistoryRequestSeq(seqs, tab) {
   const prev = arr[idx] && typeof arr[idx] === 'object' ? arr[idx] : null;
   arr[idx] = {
     sessionId: null,
-    refresh: Number.isFinite(prev?.refresh) ? prev.refresh : 0,
-    older: Number.isFinite(prev?.older) ? prev.older : 0,
+    refresh: (Number.isFinite(prev?.refresh) ? prev.refresh : 0) + 1,
+    older: (Number.isFinite(prev?.older) ? prev.older : 0) + 1,
   };
   return arr;
+}
+
+/**
+ * 分页账落盘时要继承的 loading / capped:
+ * 只有账属于**本次响应的会话**才沿用旧账的在飞标记;账属于别的会话时一律用新值。
+ * 侧栏切会话(setSelectedSession)不清理 historyPagingByTab,若不加会话限定,会把 A 的
+ * loading:true 抄进 B 的新账,B 的「加载更早」就会永久禁用(loadOlderMessages 见
+ * paging.loading 早退,后续刷新也只是把 loading 再抄一遍);capped 同理会把 A 的
+ * 2000 条上限漏给 B。
+ */
+export function resolveHistoryPagingFlags(pagingNow, sessionId, opts = {}) {
+  const sameSession = !!pagingNow && typeof pagingNow === 'object'
+    && pagingNow.sessionId === sessionId;
+  return {
+    loading: !!(sameSession && pagingNow.loading),
+    capped: !!opts.capped || !!(sameSession && pagingNow.capped),
+  };
 }
 
 /** 这个响应对应的请求代号是否仍是该 (tab, session, lane) 最新一次(不是 → 丢弃)。 */
