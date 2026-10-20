@@ -27,6 +27,9 @@ const isSessionUuid = (v) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-
 // 渐进挂载:默认挂最近多少条消息行(向上滚一批批补)。K=30 时长会话常驻 ≈2.9k 节点
 // (实测成本 ≈9µs/节点 → 26ms/格,门槛 150ms),留足余量。
 const MOUNT_WINDOW_K = 30;
+// r151l:已加载 ≤400 条时整段挂载,不做 30 行裁剪 —— 分页首屏的 120 条必须全在 DOM 里。
+// 只有用户连续「加载更早」超过 400 条才回到"最近 30 行 + 滚到顶补齐",防 DOM 无限膨胀。
+const MOUNT_FULL_MAX = 400;
 // CQ-15:被用户停止的 chat 进程 pid,跨所有 SessionDetail 实例(分屏多 pane)共享。
 // 原来是每个 pane 私有的 useRef(new Set()),pane A 停的 pid,pane B 的 backgroundPid 轮询
 // 感知不到 → 可能把 B 自己仍在跑的进程当成「需要 reattach」,reattach 的 finally 又清空 B
@@ -59,6 +62,7 @@ import { GenuiActionProvider, useGenuiActionCapability } from './genui/host/acti
 import { TurnBubble, StripRoundContext } from './components/TurnBubble.jsx';
 import { stripSummary } from './utils/streamStatus.js';
 import { initialSpan, extendUp, needsExtend, sliceRows } from './utils/mountWindow.js';
+import { historyMessageKey } from './utils/historyPaging.js';
 import { ReleaseNotesModal } from './components/ReleaseNotesModal.jsx';
 import { shouldShow as shouldShowReleaseNotes, hasReleaseNotes, loadVersionNotes, fetchLastSeen, markSeen } from './utils/releaseNotes.js';
 import TurnScrubber from './components/TurnScrubber.jsx';
@@ -3892,6 +3896,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 整会话用量聚合(服务端随 /messages 端点算好,keyed by sessionId)。取到则顶部
   // 用量条不再对全量历史消息逐帧 reduce。map 里的对象引用稳定,null 兜底不造新引用。
   const serverUsageTotals = useStore((s) => (selectedSession?.sessionId && s.usageTotalsBySession[selectedSession.sessionId]) || null);
+  // r151l:本窗格的历史分页账。账必须属于当前会话才可信(setPaneSession 换会话会清空)。
+  const tabHistoryPaging = useStore((s) => s.historyPagingByTab?.[tabIndex] || null);
+  const pagingForHere = tabHistoryPaging && tabHistoryPaging.sessionId === selectedSession?.sessionId
+    ? tabHistoryPaging : null;
+  const canLoadOlder = !!pagingForHere?.hasMore && !pagingForHere?.capped;
+  const loadingOlder = !!pagingForHere?.loading;
+  const historyCapped = !!pagingForHere?.capped;
   // #9/AZ6 子代理会话窗口:每个 pane 读自己 tab 的 viewing id(原 viewingAgentId 是
   // 全局单值 → 分屏下 A 的子代理会同时显示在 B 窗格)。per-tab 天然隔离,不再按
   // sessionId 匹配。点 A 的子代理只替换 A 窗格,点 A 母会话标题(返回)恢复 A 会话。
@@ -3995,6 +4006,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // ref 化是为了让更早注册的 effect(会话内检索的 Cmd+F / cgui:open-search 监听)也能调用它。
   const mountCompRef = useRef(null);
   const captureMountBeforeRef = useRef(() => {});
+  // r151l:「加载更早」前插会整批加在视口上方 —— 点之前记几何,新列表提交后按差值搬回。
+  const prependCompRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
   // AZ3:用户是否主动滚离底部(自动吸底的权威闸门)。原本吸底只看几何阈值 → 流式
   // 内容增长 + setAutoScroll 异步,导致"刚上滚就被弹回 + 边界抖动闪烁"。改用 ref
@@ -4674,6 +4687,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     });
   }, []);
 
+  // r151l:顶部「加载更早的消息」。前插会把整批行加在视口上方;先记 scrollHeight,等新列表
+  // 提交后由下面的 useLayoutEffect 按差值把 scrollTop 搬回(只接管"全部挂载"的情形;
+  // >400 条的渐进挂载有自己的一套锚定)。
+  const handleLoadOlder = useCallback(async () => {
+    const sel = getLocalSession();
+    const tabNow = paneIndexNow();
+    if (!sel?.sessionId || !sel?.projectHash || tabNow < 0) return false;
+    const el = containerRef.current;
+    const beforeMsgs = getLocalMessages();
+    const beforeLen = beforeMsgs.length;
+    if (el) {
+      prependCompRef.current = {
+        h: el.scrollHeight,
+        top: el.scrollTop,
+        len: beforeLen,
+        firstKey: beforeLen ? historyMessageKey(beforeMsgs[0]) : null,
+      };
+    }
+    const ok = await useStore.getState().loadOlderMessages(sel.sessionId, sel.projectHash, { tab: tabNow });
+    // 没有新增(失败/全部重复/已到上限)→ 丢掉快照,免得下一次正常增长误触发补偿。
+    if (!ok || getLocalMessages().length <= beforeLen) prependCompRef.current = null;
+    return ok;
+  }, [getLocalMessages, getLocalSession, paneIndexNow]);
+
   useEffect(() => {
     if (!paneIsActive || showAgentView) return undefined;
     const onReadingKey = (event) => {
@@ -4717,8 +4754,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const [mountFrom, setMountFrom] = useState(null);   // null = 跟随默认窗(最近 K 行)
   // 搜索打开时暂停裁剪(用户已拍板):全历史可搜,语义与今天一致;关闭即恢复。
   const mountWindowEnabled = !searchOpen;
+  // r151l:≤400 条(分页首屏 + 前几页)全部挂载;>400 才启用既有的渐进挂载。
   const mountBaseFrom = useMemo(
-    () => initialSpan(finalizedMessages.length, MOUNT_WINDOW_K).from,
+    () => (finalizedMessages.length <= MOUNT_FULL_MAX
+      ? 0
+      : initialSpan(finalizedMessages.length, MOUNT_WINDOW_K).from),
     [finalizedMessages.length],
   );
   const mountFromResolved = mountWindowEnabled
@@ -4823,6 +4863,25 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     });
     if (Math.abs(target - el.scrollTop) >= 1) writeProgrammaticScroll(el, target, 'restore');
   }, [mountFromResolved, writeProgrammaticScroll]);
+  // r151l:点过「加载更早」后,列表长度真正增长的那次提交里把视口搬回原位。
+  // >400 条的渐进挂载由上面那套锚定接管(这里直接丢弃快照,避免双重补偿)。
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    const prev = prependCompRef.current;
+    if (!prev) return;
+    if (finalizedMessages.length <= prev.len) { prependCompRef.current = null; return; }
+    const firstKeyNow = finalizedMessages.length ? historyMessageKey(finalizedMessages[0]) : null;
+    // 只是尾部追加(首条没变)不是前插,别把视口往下搬。
+    if (firstKeyNow === prev.firstKey) { prependCompRef.current = null; return; }
+    prependCompRef.current = null;
+    if (!el || mountFromResolved > 0) return;
+    const delta = el.scrollHeight - prev.h;
+    if (Math.abs(delta) < 1) return;
+    const target = clampScrollTop({
+      scrollTop: prev.top + delta, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight,
+    });
+    if (Math.abs(target - el.scrollTop) >= 1) writeProgrammaticScroll(el, target, 'restore');
+  }, [finalizedMessages.length, mountFromResolved, writeProgrammaticScroll]);
   // 每次提交后记下 (会话, 总行数, 上沿),供下一次 render 判断"这次上沿为什么挪了"(见上方判据)。
   // 无依赖数组 = 每次提交都跑,只写三个 ref,不读 DOM。
   useLayoutEffect(() => {
@@ -9524,6 +9583,26 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             </div>
           ) : (
             <>
+              {/* r151l:服务端还有更早历史时的入口。与下面"本地渐进挂载"提示是两回事:
+                  那条说的是"全量已在内存、只是没挂 DOM",这条说的是"磁盘里还有没取回来的"。 */}
+              {(canLoadOlder || loadingOlder) && (
+                <div data-history-load-older className="px-6 pt-3 pb-1 text-center">
+                  <button
+                    type="button"
+                    onClick={handleLoadOlder}
+                    disabled={loadingOlder}
+                    className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] font-body text-ink-muted hover:text-ink disabled:opacity-50 disabled:cursor-default"
+                    title="从磁盘再取一页更早的历史消息"
+                  >
+                    {loadingOlder ? '正在加载更早的消息…' : '加载更早的消息'}
+                  </button>
+                </div>
+              )}
+              {historyCapped && (
+                <div data-history-cap className="px-6 py-2 text-center text-[11px] text-ink-faint font-body select-none">
+                  已保留最近 2000 条消息，更旧的内容不再加载
+                </div>
+              )}
               {/* 渐进挂载:被裁掉的行在这里留**一行提示**(不带 data-turn-uuid —— 它不是一轮,
                   也不冒充高度占位)。它同时是"该补齐了"的可视提示:内容加在视口上方时,
                   锚定 effect 会把用户眼睛盯着的那一行搬回原位(§H.5)。 */}
