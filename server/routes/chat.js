@@ -721,14 +721,16 @@ export function resolveStallMs(raw) {
 }
 const STALL_MS = resolveStallMs(process.env.CGUI_STALL_MS);
 
-// stall_notice 文案(纯函数,export 仅为可单测)。分钟数随运行时阈值生成(默认 300000 → "5 分钟"逐字不变)。
-// 下限 5 分钟:用户可见文案只按分钟量级展示,联调/验收把阈值调到分钟级以下时仍显示默认口径,
-// 不出现浮点/0 分钟/误导性的"1 分钟"。
+// stall_notice 文案(纯函数,export 仅为可单测)。时长按运行时阈值如实写:≥1 分钟写四舍五入的分钟数
+// (默认 300000 → "5 分钟"逐字不变),不到 1 分钟写四舍五入的秒数(CGUI_STALL_MS=2000 → "2 秒")。
+// 旧版下限写死 5 分钟,阈值调到分钟级以下时提示与实际等待时长不符。秒数至少 1,不出现"0 秒"。
 export function buildStallNoticeText(stallMs, subagentSeen) {
-  const stallMinutes = Math.max(5, Math.round(stallMs / 60000));
+  const duration = stallMs >= 60_000
+    ? `${Math.round(stallMs / 60_000)} 分钟`
+    : `${Math.max(1, Math.round(stallMs / 1000))} 秒`;
   return subagentSeen
-    ? `子代理已全部结束,但上游超过 ${stallMinutes} 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`
-    : `上游超过 ${stallMinutes} 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`;
+    ? `子代理已全部结束,但上游超过 ${duration}无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`
+    : `上游超过 ${duration}无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`;
 }
 
 // ── F2:cron(/loop)保活 ──────────────────────────────────────────────────────

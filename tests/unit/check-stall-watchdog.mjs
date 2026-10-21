@@ -293,7 +293,11 @@ const old = (ms) => now - ms;
   assert.equal(buildStallNoticeText(300_000, false), `上游超过 5 ${tail}`, '默认阈值文案逐字不变');
   assert.equal(buildStallNoticeText(300_000, true), `子代理已全部结束,但上游超过 5 ${tail}`, '带子代理前缀的默认文案逐字不变');
   assert.equal(buildStallNoticeText(600_000, false), `上游超过 10 ${tail}`, '分钟数随阈值变化(600000 → 10 分钟)');
-  assert.equal(buildStallNoticeText(1500, false), `上游超过 5 ${tail}`, '分钟级以下仍按 5 分钟显示(现行口径)');
+  const secTail = tail.replace(/^分钟/, '秒');
+  assert.equal(buildStallNoticeText(1500, false), `上游超过 2 ${secTail}`, '不到 1 分钟写四舍五入的秒数(1500 → 2 秒)');
+  assert.equal(buildStallNoticeText(2000, true), `子代理已全部结束,但上游超过 2 ${secTail}`, '秒数文案带子代理前缀');
+  assert.equal(buildStallNoticeText(60_000, false), `上游超过 1 ${tail}`, '满 1 分钟起写分钟数');
+  assert.equal(buildStallNoticeText(90_000, false), `上游超过 2 ${tail}`, '分钟数四舍五入(90000 → 2 分钟)');
 
   // ④ 接线锚(宽松,只查生产代码调用了被测函数 / 读了变量,不锁写法)
   const { readFileSync } = await import('node:fs');
