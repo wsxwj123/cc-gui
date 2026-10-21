@@ -3,7 +3,7 @@
 //   normalizeXsPrefs:xsInbound 同时保留 'auto' 与 'card'(仍只收会话 id 形状的键),并给出 inboundDefault;
 //   inboundDefaultOf:xsInboundDefault('auto'|'card',不合法按没有)> 开过总开关(有 xsEnabledAt 键或总开关开着)→ card > auto;
 //   inboundModeOf:列表 / 单条 / list_sessions / 自动处理判定共用的唯一映射口径(不分大小写;没设置 → 传入的默认,漏传按 card);
-//   readXsPrefsSync 端到端:显式 card 与未设置可区分,非法值按默认(未设置)。
+//   readXsPrefsSync 端到端:显式 card 与未设置可区分,非法值按默认(未设置);偏好文件读失败时默认一律 card。
 // node tests/unit/check-r151k-inbound-default.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
@@ -18,7 +18,7 @@ process.env.HOME = HOME;
 process.env.USERPROFILE = HOME;
 mkdirSync(GUI_DIR, { recursive: true });
 
-const { normalizeXsPrefs, inboundModeOf, inboundDefaultOf, readXsPrefsSync } = await import('../../server/routes/prefs.js');
+const { normalizeXsPrefs, inboundModeOf, inboundDefaultOf, readXsPrefsSync, readXsPrefsDetailedSync } = await import('../../server/routes/prefs.js');
 
 let checks = 0;
 const eq = (got, want, label) => { assert.deepEqual(got, want, label); checks += 1; };
@@ -115,6 +115,16 @@ try {
     const q = readXsPrefsSync();
     eq(inboundModeOf(q.inbound, C, q.inboundDefault), 'auto', '新用户(第一次打开时记了 xsInboundDefault=auto):C 没设置 → auto');
     eq(inboundModeOf(q.inbound, B, q.inboundDefault), 'card', '新用户:显式 card 照旧');
+  }
+
+  // ── ④ r151q:偏好文件在、却解析不了(例如写到一半)→ 没单独设置过的会话一律 card,不是 auto ───────────────
+  {
+    writeFileSync(PREFS, '{"xsEnabled": true, "xsInboundDefault": "auto", "xsInbound": {');
+    const d = readXsPrefsDetailedSync();
+    eq([d.readFailed, d.inboundDefault], [true, 'card'], '读失败 → readFailed 且默认 card(即使文件里半截写着 auto)');
+    eq(inboundModeOf(d.inbound, C, d.inboundDefault), 'card', '读失败时没设置的会话 → card');
+    const s = readXsPrefsSync();
+    eq([s.inboundDefault, 'readFailed' in s], ['card', false], 'readXsPrefsSync(列表、list_sessions 用的)同样 card,不带 readFailed');
   }
 
   console.log(`✓ r151k 入站默认单测全部通过(${checks} 项断言)`);

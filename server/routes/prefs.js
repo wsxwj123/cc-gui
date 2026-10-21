@@ -151,7 +151,11 @@ export function readXsPrefsDetailedSync() {
   let prefs = null;
   let readFailed = false;
   try { prefs = JSON.parse(readFileSync(PREFS_PATH, 'utf-8')); } catch (e) { readFailed = e?.code !== 'ENOENT'; }
-  return { ...normalizeXsPrefs(prefs), readFailed };
+  const normalized = normalizeXsPrefs(prefs);
+  // r151q:读不出时 normalizeXsPrefs(null) 会按"没开过总开关"给 'auto',读失败的这一会儿列表与 list_sessions 就显示成自动处理。
+  // 没单独设置过的会话的默认值是权限类设置,出错时落在更严的一档:读失败一律 'card'(readXsPrefsSync 也经这里)。
+  if (readFailed) normalized.inboundDefault = 'card';
+  return { ...normalized, readFailed };
 }
 // 原子写:先写临时文件再 rename(rename 同目录原子)。此前 writeFile 直写,进程崩溃/
 // 断电写一半 → JSON 损坏 → loadPrefs 回落 {} → 下一次任何 PUT 把整份 prefs 静默重置。
