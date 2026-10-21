@@ -20,6 +20,7 @@ import { normalizeContextOverflow } from './openai-proxy.js';
 import { isCountTokensRequest, estimateInputTokens, parseUpstreamCountTokens, COUNT_TOKENS_UPSTREAM_TIMEOUT_MS, recordCountTokensOutcome } from '../utils/context-tokens.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 import { normalizeUserIdInBody } from '../utils/user-id-normalize.js';
+import { resolveFallbackModel, noteModelFallback } from '../utils/model-fallback.js';
 
 // Fixed loopback port (distinct from openai-proxy's 8788) so the URL written into
 // settings.json survives watchdog restarts. Ephemeral fallback if it's taken.
@@ -32,9 +33,24 @@ let server = null;
 let boundPort = 0;
 
 export function setAnthropicUpstream(next) {
-  upstream = next && next.baseURL && next.authToken
-    ? { baseURL: String(next.baseURL).replace(/\/+$/, ''), authToken: String(next.authToken) }
-    : null;
+  if (!(next && next.baseURL && next.authToken)) {
+    upstream = null;
+    return upstream;
+  }
+  // r151m:model/defaultModel 是 claude 名兜底映射的目标模型(接口文件里叫 model;
+  // 新调用点传 defaultModel),models 是当前 provider 的模型列表。
+  const defaultModel = next.defaultModel
+    ? String(next.defaultModel)
+    : (next.model ? String(next.model) : '');
+  upstream = {
+    baseURL: String(next.baseURL).replace(/\/+$/, ''),
+    authToken: String(next.authToken),
+    model: defaultModel,
+    defaultModel,
+    models: Array.isArray(next.models)
+      ? next.models.filter((m) => typeof m === 'string' && m.length > 0)
+      : [],
+  };
   return upstream;
 }
 
@@ -256,6 +272,22 @@ export function normalizeMessagesForCompat(body) {
   return Buffer.from(JSON.stringify(parsed));
 }
 
+// r151m:claude 名兜底映射。只在真的发生映射时重新序列化,未映射请求逐字节不动
+// (保证既有 normalize/user_id 的「无改动就不重写 body」性质不被本功能破坏)。
+// 响应透传不在此处理:Anthropic 形态上游会看到映射后的模型,响应里的 model 因此是
+// 上游模型名(与 OpenAI 代理回译路径不同,见验收报告偏差说明)。
+function applyModelFallbackToBody(body, up) {
+  let parsed;
+  try { parsed = JSON.parse(body.toString('utf-8')); } catch { return body; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return body;
+  const requested = parsed.model;
+  const effective = resolveFallbackModel(requested, up);
+  if (effective === requested) return body;
+  noteModelFallback(requested, effective);
+  parsed.model = effective;
+  return Buffer.from(JSON.stringify(parsed));
+}
+
 async function handle(req, clientRes) {
   // 快照 upstream:整个请求生命周期只用这一份。否则回合在途(await fetch 前后)时
   // 用户切 provider 改了模块级 upstream → 同一请求可能被发到新 baseURL / 注入新 token。
@@ -312,6 +344,9 @@ async function handle(req, clientRes) {
 
   // 仅对 /v1/messages 做规范化(其他端点不动)
   if (body && req.url && req.url.includes('/v1/messages') && req.method === 'POST') {
+    // r151m:转发前把 body.model 按当前 provider 的 models/defaultModel 兜底映射,
+    // 与下面两个 normalize 同段处理(只改写上游请求体,响应仍透传)。
+    body = applyModelFallbackToBody(body, up);
     body = normalizeMessagesForCompat(body);
     // r89-A5:归一 metadata.user_id 里每会话都变的 session_id —— DeepSeek 拿 user_id 整串
     // 做 KVCache 隔离键,不归一则每个新会话的系统提示+工具前缀都从零缓存(V3 实测)。

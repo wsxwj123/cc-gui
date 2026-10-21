@@ -17,6 +17,7 @@ import { lookupModelCapabilities, EFFORT_IDS } from '../utils/model-capabilities
 import { lookupVisionCapability } from '../utils/vision-capability.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 import { normalizeOpenAIUsage } from '../utils/openai-usage.js';
+import { resolveFallbackModel, noteModelFallback } from '../utils/model-fallback.js';
 import { recordUsageIssue } from './usage-issue-log.js';
 
 // R22/R24:上游 usage 无效/自相矛盾时,把结论(含原始数字)记进服务端自有存储。
@@ -58,12 +59,21 @@ export function setOpenAIUpstream(next) {
     upstream = null;
     return upstream;
   }
+  // r151m:defaultModel 是「claude 名兜底映射」的目标模型(接口文件里叫 model);
+  // 两种写法都收,defaultModel 优先。models 是当前 provider 的模型列表。
+  const defaultModel = next.defaultModel
+    ? String(next.defaultModel)
+    : (next.model ? String(next.model) : '');
   upstream = {
     baseURL: String(next.baseURL).replace(/\/+$/, ''),
     apiKey: next.apiKey ? String(next.apiKey) : '',
     // model 供 upstreamNoVision 判定 opencode+deepseek 场景剥图;不带 model 的旧调用
     // (baseURL+apiKey)仍工作,model 为空、行为不变。
-    model: next.model ? String(next.model) : '',
+    model: defaultModel,
+    defaultModel,
+    models: Array.isArray(next.models)
+      ? next.models.filter((m) => typeof m === 'string' && m.length > 0)
+      : [],
   };
   return upstream;
 }
@@ -747,7 +757,17 @@ async function handle(req, clientRes) {
   try { body = JSON.parse(await readBody(req)); }
   catch { clientRes.writeHead(400); clientRes.end('bad json'); return; }
 
-  const oaReq = buildOpenAIRequest(body);
+  // r151m:转发前按当前 provider 的 models/defaultModel 兜底映射 claude 名。映射只作用于
+  // 发往上游的请求(含 vision 判定 / reasoning_effort 等一切上游决策);响应侧继续用客户端
+  // 原始 body.model,CLI 看到的模型名不因映射而改变。
+  const requestedModel = body?.model;
+  const effectiveModel = resolveFallbackModel(requestedModel, up);
+  if (effectiveModel !== requestedModel) {
+    noteModelFallback(requestedModel, effectiveModel);
+  }
+  const upstreamBody = effectiveModel === requestedModel ? body : { ...body, model: effectiveModel };
+
+  const oaReq = buildOpenAIRequest(upstreamBody);
   const wantStream = oaReq.stream;
   const url = up.baseURL + '/chat/completions';
 
