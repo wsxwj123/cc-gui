@@ -82,15 +82,17 @@ export function normalizeXsPrefs(prefs) {
 /**
  * r151q:没单独设置过的会话的接收设置默认值('auto' | 'card')。
  * · 偏好 xsInboundDefault 是 'auto' / 'card' → 用它;其它值按没有这个键处理;
- * · 没有时:有 xsEnabledAt 键(开过总开关:r151c 起由关变开时写、关开关不删;键在但值不是合法时刻也算,偏保守)
- *   → 'card',否则 → 'auto'。一期升级上来的用户(总开关开着、没有启用时刻)由启动时的 backfillXsEnabledAt 补记。
+ * · 没有时:开过总开关 → 'card',否则 → 'auto'。"开过" = 有 xsEnabledAt 键(r151c 起由关变开时写、关开关不删;
+ *   键在但值不是合法时刻也算,偏保守),或总开关此刻开着(xsEnabled === true)。后者覆盖一期升级上来的用户
+ *   (总开关开着、没有启用时刻):启动时的 backfillXsEnabledAt 补记完成前、或补记写盘失败时,也落在卡片 ——
+ *   权限类默认值出错时要落在更严的一档。新用户第一次打开总开关时同一次写入记了 xsInboundDefault:'auto',不受影响。
  * 0.2.426 起曾把所有人的默认改成自动处理,这里让以前开过总开关的用户回到更保守的卡片;不会让任何会话从卡片变成自动。
  * 新用户:第一次打开总开关的那次写入同时写 xsInboundDefault:'auto'(见 routes/xsession.js),所以仍默认自动处理。
  */
 export function inboundDefaultOf(prefs) {
   const p = prefs && typeof prefs === 'object' && !Array.isArray(prefs) ? prefs : {};
   if (p.xsInboundDefault === 'auto' || p.xsInboundDefault === 'card') return p.xsInboundDefault;
-  return p.xsEnabledAt !== undefined ? 'card' : 'auto';
+  return p.xsEnabledAt !== undefined || p.xsEnabled === true ? 'card' : 'auto';
 }
 /**
  * 会话的接收设置最终值:显式 'card' / 'auto' 照用;没设置(或值不合法)→ defaultMode。

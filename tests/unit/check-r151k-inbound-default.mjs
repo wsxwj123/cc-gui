@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // r151k ③ / r151q 第 6 项:GUI 跨会话入站的默认值。
 //   normalizeXsPrefs:xsInbound 同时保留 'auto' 与 'card'(仍只收会话 id 形状的键),并给出 inboundDefault;
-//   inboundDefaultOf:xsInboundDefault('auto'|'card',不合法按没有)> 开过总开关(有 xsEnabledAt 键)→ card > auto;
+//   inboundDefaultOf:xsInboundDefault('auto'|'card',不合法按没有)> 开过总开关(有 xsEnabledAt 键或总开关开着)→ card > auto;
 //   inboundModeOf:列表 / 单条 / list_sessions / 自动处理判定共用的唯一映射口径(不分大小写;没设置 → 传入的默认,漏传按 card);
 //   readXsPrefsSync 端到端:显式 card 与未设置可区分,非法值按默认(未设置)。
 // node tests/unit/check-r151k-inbound-default.mjs
@@ -84,7 +84,8 @@ try {
       [{ xsEnabledAt: AT }, 'card', '有 xsEnabledAt(开过)→ card'],
       [{ xsEnabled: false, xsEnabledAt: AT }, 'card', '开过又关了 → card'],
       [{ xsEnabledAt: null }, 'card', 'xsEnabledAt 键在、值不合法 → 仍算开过(偏保守)'],
-      [{ xsEnabled: true }, 'auto', '只看 xsEnabledAt:总开关开着但没记启用时刻 → auto(一期升级用户靠启动补记)'],
+      [{ xsEnabled: true }, 'card', '总开关开着但没记启用时刻(一期升级用户,补记前/补记失败)→ 也算开过 → card'],
+      [{ xsEnabled: false }, 'auto', '总开关关着、从没记过启用时刻 → auto'],
       [{ xsInboundDefault: 'auto', xsEnabled: true, xsEnabledAt: AT }, 'auto', '显式 xsInboundDefault=auto → auto'],
       [{ xsInboundDefault: 'card' }, 'card', '显式 xsInboundDefault=card → card'],
       [{ xsInboundDefault: 'bogus' }, 'auto', 'xsInboundDefault 不合法按没有:没开过 → auto'],

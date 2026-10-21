@@ -157,7 +157,7 @@ try {
     eq(ids(r).slice(0, 7), [S1.sid, S2.sid, S3.sid, S4.sid, S5.sid, C1.sid, C2.sid], '按最近活动倒序');
     const by = Object.fromEntries(r.body.sessions.map((s) => [s.sessionId, s]));
     eq(by[S1.sid], { sessionId: S1.sid, shortId: S1.sid.slice(0, 8), title: '最新的会话 Alpha', project: basename(S1.cwd), projectHash: S1.cwd.replace(/[^A-Za-z0-9]/g, '-'), state: 'stopped', pending: 0,
-      lastActivity: new Date(base - 60_000).toISOString(), inbound: 'auto', hasProfile: false }, '单项字段齐(r151k:未设置 inbound 默认 auto;done 不算待处理)');
+      lastActivity: new Date(base - 60_000).toISOString(), inbound: 'card', hasProfile: false }, '单项字段齐(r151q:总开关开着、没有 xsInboundDefault → 未设置的 inbound 默认 card;done 不算待处理)');
     eq([by[S2.sid].title, by[S3.sid].title, by[S4.sid].title, by[S5.sid].title], ['手改标题', 'prefs 手改', 'prefs 自动', '只有首条提问'], '标题按既有优先级(prefs 里的非字符串忽略)');
     eq([by[S2.sid].pending, by[C1.sid].pending, by[C2.sid].pending], [3, 1, 1], 'pending 只数 status=pending(上次进程遗留的 claimed 已退回 pending)');
     const store = await import('../../server/services/xsession-store.js');
