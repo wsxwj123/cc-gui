@@ -278,6 +278,21 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.430</b>(2026-10-21)· 修复 2 条</summary>
+
+**修复**
+
+<details><summary>新版 CLI 下跨会话工具不显示</summary>
+
+CLI 2.1.306 默认把 MCP 工具藏到工具搜索后面,导致 GUI 的跨会话工具(列出/给其它会话发消息)从模型工具表里消失。现在挂载这类会话工具时,只对本次会话的 CLI 进程关闭工具搜索并等待 MCP 连上,工具重新直接可见。
+
+</details>
+
+- 同步把 Agent SDK 升级到 0.3.306,与 CLI 2.1.306 对齐。
+
+</details>
+
+<details>
 <summary><b>v0.2.429</b>(2026-10-21)· 修复 1 条</summary>
 
 **修复**
