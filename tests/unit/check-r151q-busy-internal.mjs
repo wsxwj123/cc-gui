@@ -5,6 +5,7 @@
 //   ④ 内部回合结果已出、只差输入预测(收尾窗最长约 4 秒)不算在跑:用户 /chat 等它收尾;到点仍没收尾 → 409,不强制中止它。
 //   ⑤ 内部回合收尾(转空闲)后主 agent 复活续跑:仍算内部回合在跑 → 用户 /chat 立即 409,不中止它;
 //   ⑥ 用户自己的回合复活续跑:不当成内部回合 → 后到的用户消息不 409,照旧打断它起回合。
+//   ⑤b/⑥b 同 ⑤/⑥,但不保活(keepAlive: false):收尾只关输入、不转空闲,续跑照样按本回合来源算(跨会话回合 409 不中止,用户回合照旧可打断)。
 //   ⑦ "用户在等"在长的内部回合里先过期:回合收尾时从收尾时刻重新计 60 秒,下一条内部回合 409(退回排队)。
 // node tests/unit/check-r151q-busy-internal.mjs
 import assert from 'node:assert/strict';
@@ -153,6 +154,7 @@ try {
     return (async function* () {
       await g.revive.p;
       yield { type: 'assistant', parent_tool_use_id: null, message: { id: `msg_r151q_${text}`, type: 'message', role: 'assistant', model: 'r151q-model', content: [{ type: 'text', text: '续跑' }], stop_reason: 'end_turn', stop_sequence: null, usage: USAGE } };
+      g.pulled = true; // 消息泵处理完这条续跑正文、来拉下一条了(不保活时槽一直不空闲,看不出"复活",用它判)
       await g.finish.p;
       yield { type: 'result', subtype: 'success', is_error: false, duration_ms: 1, duration_api_ms: 1, num_turns: 1, result: '续跑完', total_cost_usd: 0, permission_denials: [], modelUsage: {}, usage: USAGE };
     })();
@@ -195,6 +197,46 @@ try {
   eq(user8.status, 200, '用户回合续跑不算跨会话回合:新消息不 409,照旧打断它起回合');
   eq(userWaitingOnSession(S5), false, '没记"用户在等"');
   await waitFor(() => snap(user8.body.pid)?.idle, '新的用户回合收尾');
+  // ⑤b 同 ⑤,但不保活(界面关掉"会话常驻进程",请求体 keepAlive: false):收尾只关输入、槽不转空闲,复活分支不触发;
+  //    主 agent 续跑照样仍算跨会话回合在跑 → 用户 /chat 立即 409,不中止它
+  const NK = (extra) => BODY({ keepAlive: false, ...extra });
+  const S7 = uuid(7);
+  const nk = await startInternalTurn(NK({ sessionId: S7, prompt: 'auto REVIVE nokeep' }), INTERNAL);
+  eq(nk.status, 200, '不保活的跨会话回合起来了');
+  const nkPid = nk.body.pid;
+  await waitFor(() => gates.has('auto REVIVE nokeep') && ends.some((e) => e.pid === nkPid), '不保活的跨会话回合(中间结果)收尾');
+  eq([snap(nkPid)?.idle, snap(nkPid)?.usable], [false, false], '不保活:收尾只关输入、不转空闲');
+  gates.get('auto REVIVE nokeep').revive.open();
+  await waitFor(() => gates.get('auto REVIVE nokeep').pulled, '主 agent 续跑(续跑正文已进消息泵)');
+  const user11 = await api('/chat', NK({ sessionId: S7, prompt: 'user while revived auto nokeep' }));
+  eq([user11.status, user11.body.code], [409, 'CHAT_SESSION_BUSY'], '不保活时续跑的跨会话回合 → 用户 /chat 409 CHAT_SESSION_BUSY');
+  ok(user11.ms < 1500, `立即回(${user11.ms}ms),不进 4 秒等待`);
+  eq(snap(nkPid)?.busy, true, '跨会话回合没被中止(仍在续跑)');
+  gates.get('auto REVIVE nokeep').finish.open();
+  await waitFor(() => snap(nkPid)?.busy === false, '续跑完、进程收尾');
+  eq(ends.filter((e) => e.pid === nkPid).map((e) => e.outcome), ['completed'], '回合结束只报一次,按完成结束');
+  const user12 = await api('/chat', NK({ sessionId: S7, prompt: 'user after revived auto nokeep' }));
+  eq(user12.status, 200, '续跑收尾后用户消息照常起回合');
+  await waitFor(() => snap(user12.body.pid)?.busy === false, '用户回合收尾');
+  // ⑥b 同 ⑥,但不保活:用户自己的回合续跑仍按用户回合算 → 后到的用户消息不 409,照旧打断它(10 倍速,同 ⑥)
+  const S8 = uuid(8);
+  const un = await api('/chat', NK({ sessionId: S8, prompt: 'user REVIVE nokeep' }));
+  eq(un.status, 200, '不保活的用户回合起来了');
+  const unPid = un.body.pid;
+  await waitFor(() => gates.has('user REVIVE nokeep') && ends.some((e) => e.pid === unPid), '不保活的用户回合(中间结果)收尾');
+  gates.get('user REVIVE nokeep').revive.open();
+  await waitFor(() => gates.get('user REVIVE nokeep').pulled, '用户回合续跑');
+  const r2 = realNow();
+  let user13;
+  try {
+    Date.now = () => r2 + (realNow() - r2) * 10;
+    user13 = await api('/chat', NK({ sessionId: S8, prompt: 'user again nokeep' }));
+  } finally {
+    Date.now = realNow;
+  }
+  eq(user13.status, 200, '不保活时用户回合续跑不算跨会话回合:新消息不 409,照旧打断它起回合');
+  eq([snap(unPid)?.busy, userWaitingOnSession(S8)], [false, false], '续跑的用户回合被打断;没记"用户在等"');
+  await waitFor(() => snap(user13.body.pid)?.busy === false, '新的用户回合收尾');
   delete ctl.afterResult;
 
   // ── ⑦ "用户在等"在长的跨会话回合里先过期:回合收尾时从此刻重新计 60 秒,下一条跨会话消息不抢在用户消息前面 ──────

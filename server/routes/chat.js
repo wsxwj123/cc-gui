@@ -2020,6 +2020,9 @@ function settleSlotTurn(slot, fallback = 'completed') {
     const renewUserWaiting = !!slot.internalTurn && !!slot.userWaitedDuringTurn;
     slot.internalTurn = false;
     slot.userWaitedDuringTurn = false;
+    // 本回合已收尾(开回合时清):此后主 agent 再出顶层内容 = 续跑的还是这一回合,消息泵据此按 turnSource 写回上面两项。
+    // 不看是否空闲 —— 不保活(keepAlive=false)时收尾只关输入、槽不转空闲,续跑走不到复活分支。
+    slot.turnSettled = true;
     if (renewUserWaiting) noteUserWaiting(slot.sessionId);
     notifyTurnEnd(slot, slot.runId); // r151b:回合结束通知(没挂接 = 跳过;回合收尾与进程收尾都经过这里)
   }
@@ -2626,6 +2629,7 @@ async function handleChatPost(req, res) {
           // r151q 第 9 项 (a)/(c):本回合是不是内部回合(跨会话自动处理)记在槽上;起的是用户回合就清掉"用户在等"。
           s.internalTurn = !!internal;
           s.turnSource = internal ? 'internal' : 'user';
+          s.turnSettled = false; // 新回合开始:上一回合的"已收尾"作废(否则本回合第一条内容会被当成续跑再写一遍标记)
           // 跨会话回合开始时"用户在等"还没到期(钩子 await 等让出期间用户被 409)= 这一回合里用户等过,收尾时要续期
           s.userWaitedDuringTurn = !!internal && userWaitingOnSession(sessionId);
           if (!internal) clearUserWaiting(sessionId);
@@ -2853,6 +2857,8 @@ async function handleChatPost(req, res) {
     internalTurn: !!internal,
     // 本回合来源('internal' = 跨会话自动处理 / 'user'),只在开回合时写:回合收尾后主 agent 复活续跑,据此把 internalTurn 写回。
     turnSource: internal ? 'internal' : 'user',
+    // 本回合已收尾、主 agent 随后可能续跑(settleSlotTurn 置上,开回合时清;消息泵见到续跑内容时据此写回 internalTurn)
+    turnSettled: false,
     // 跨会话回合里有没有用户消息被 409 过(收尾时据此给"用户在等"续期,见 settleSlotTurn);冷启占位期被拒的,开回合时标记还没到期。
     userWaitedDuringTurn: !!internal && userWaitingOnSession(sessionId),
   };
@@ -3266,15 +3272,21 @@ async function handleChatPost(req, res) {
         // 只认主 agent 顶层内容(parent_tool_use_id 空);后台子代理自身消息(带该字段)不触发,保住
         // keepalive 语义与 deep-research(backgroundify 子代理)不回归;result/system/rate_limit_event
         // 是终态/纯信息不触发。续跑回合自己的 result 到来照常 finalize→done→再 idle,每轮自愈。
-        if (slot.idle && !m.parent_tool_use_id
-            && m.type !== 'result' && m.type !== 'system' && m.type !== 'rate_limit_event' && m.type !== 'prompt_suggestion') {
+        const mainAgentContent = !m.parent_tool_use_id
+          && m.type !== 'result' && m.type !== 'system' && m.type !== 'rate_limit_event' && m.type !== 'prompt_suggestion';
+        // r151q 第 9 项:续跑的还是收尾前那一回合 —— 它是跨会话回合,就把收尾时清掉的标记写回(用户消息照旧 409、不中止它);
+        // 用户自己的回合续跑仍按用户回合算(用户新消息照旧可以打断它)。按"本回合已收尾"判、不看是否空闲:不保活时收尾只关输入、
+        // 不转空闲,下面的复活分支不触发,续跑照样要写回。只在真有续跑内容时写回 ——"关输入到进程退出"那段不算在跑。
+        // 写回一次就清掉 turnSettled:续跑期间用户被 409 时置上的 userWaitedDuringTurn 不能被后续消息重算覆盖。
+        if (slot.turnSettled && mainAgentContent) {
+          slot.turnSettled = false;
+          slot.internalTurn = slot.turnSource === 'internal';
+          slot.userWaitedDuringTurn = slot.internalTurn && userWaitingOnSession(slot.sessionId); // 收尾时续过期的,续跑这段同样算
+        }
+        if (slot.idle && mainAgentContent) {
           slot.idle = false;
           slot.revived = true; // 看门狗判据(无子代理续跑也纳入 5 分钟静默兜底)
           reviveSlotTurn(slot); // R13:回合还在跑,别让停止入口拿早前那次 finalize 的"completed"打发
-          // r151q 第 9 项:续跑的还是收尾前那一回合 —— 它是跨会话回合,就把收尾时清掉的标记写回(用户消息照旧 409、不中止它);
-          // 用户自己的回合续跑仍按用户回合算(用户新消息照旧可以打断它)。
-          slot.internalTurn = slot.turnSource === 'internal';
-          slot.userWaitedDuringTurn = slot.internalTurn && userWaitingOnSession(slot.sessionId); // 收尾时续过期的,续跑这段同样算
           if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
           // 复活=主 agent 续跑,则之前被 4s 去抖过早缓冲进 earlyLines 的 done 是错的:若 SSE 在
           // finalize 前已断(WebView 空闲掐断/切窗格),done 落 earlyLines,reattach 回放到它会
