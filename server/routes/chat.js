@@ -530,6 +530,29 @@ export function hasCurrentEpochNonShellTask(liveTasks, epoch) {
     .some((t) => t && t.kind !== 'shell' && (t.epoch | 0) === (epoch | 0));
 }
 
+// 静默看门狗的忙判据(纯函数,export 仅为可单测;只读 slot 的 liveTasks / lastLevelAt / turnEpoch)。
+// 降级守卫(审查 R1):level 信号是【成员变化才发】的边沿信号、不是心跳,旧版 CLI 恒 0,
+// 单个子代理独自长跑期间也可能一条都不来。最近一个 LIVE_TASK_FRESH_MS 窗内没有任何
+// 确认就回落宽判据:本回合的【非 shell】条目算忙。shell 刻意不在此支 —— 否则本回合
+// shell 只要 epoch 匹配就无限期豁免,2h 窗口会被绕过、看门狗/回收彻底失效(见常量注释)。
+// 方向是"宁漏标不误杀",但豁免必须有上限。
+// 忙判据 = 非 shell(新鲜 + R1 降级支,该支只覆盖非 shell) || 新鲜 shell。shell 的豁免
+// 只由 hasFreshShellTask 的 2h 窗口提供 → 2h 是 shell 的真总上限,R1 不能绕过。
+export function stallWatchdogBusy(slot, now = Date.now()) {
+  const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS)
+    || (now - (slot.lastLevelAt || 0) >= LIVE_TASK_FRESH_MS
+      && hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch));
+  return busyNonShell || hasFreshShellTask(slot.liveTasks, now);
+}
+
+// 静默看门狗到点时该不该收尾(纯函数,export 仅为可单测):还没空闲 + 本回合起过子代理或经复活守卫
+// 续跑 + 没有任何新鲜活任务。判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫
+// 翻回活跃,turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
+// "还有卡在等用户回答""已在 4s 去抖收尾"两种让路情况依赖模块状态,由调用方另判。
+export function shouldStallWatchdogFire(slot, now = Date.now()) {
+  return !slot.idle && !!(slot.turnSubagentSeen || slot.revived) && !stallWatchdogBusy(slot, now);
+}
+
 // ── F1:CLI init 事件上报的权威命令/技能表 ─────────────────────────────────────
 // /api/slash-commands 靠扫三处磁盘枚举,而 CLI 的内置 skill(/loop 等)打包在二进制里、
 // 磁盘上没有对应目录 → 用户敲 "/" 永远看不到它们(#11 的全部根因)。init 事件的
@@ -690,6 +713,16 @@ export function resolveStallMs(raw) {
   return Number.isInteger(ms) && ms >= 1000 && ms <= 2_147_483_647 ? ms : STALL_MS_DEFAULT;
 }
 const STALL_MS = resolveStallMs(process.env.CGUI_STALL_MS);
+
+// stall_notice 文案(纯函数,export 仅为可单测)。分钟数随运行时阈值生成(默认 300000 → "5 分钟"逐字不变)。
+// 下限 5 分钟:用户可见文案只按分钟量级展示,联调/验收把阈值调到分钟级以下时仍显示默认口径,
+// 不出现浮点/0 分钟/误导性的"1 分钟"。
+export function buildStallNoticeText(stallMs, subagentSeen) {
+  const stallMinutes = Math.max(5, Math.round(stallMs / 60000));
+  return subagentSeen
+    ? `子代理已全部结束,但上游超过 ${stallMinutes} 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`
+    : `上游超过 ${stallMinutes} 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`;
+}
 
 // ── F2:cron(/loop)保活 ──────────────────────────────────────────────────────
 // cron 调度器活在 CLI 子进程内部(print.ts 的 createCronScheduler,1s tick),CronCreate
@@ -2431,7 +2464,7 @@ async function handleChatPost(req, res) {
       // 派发不加(不然它自己的入口核对会被自己挡住)。
       const switchKey = String(sessionId).toLowerCase();
       const markSwitching = !internal;
-      if (markSwitching) permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
+      if (markSwitching) beginSessionModeSwitch(switchKey);
       let reuseOutcome = 'stale';
       try {
         // r151g 项1:锁范围扩到"选中槽之后的整段派发" —— 热切档位 → 入口核对 → 重置回合状态 →
@@ -2998,22 +3031,8 @@ async function handleChatPost(req, res) {
   const armStall = () => {
     clearTimeout(stallTimer);
     stallTimer = setTimeout(() => {
-      // 降级守卫(审查 R1):level 信号是【成员变化才发】的边沿信号、不是心跳,旧版 CLI 恒 0,
-      // 单个子代理独自长跑期间也可能一条都不来。最近一个 LIVE_TASK_FRESH_MS 窗内没有任何
-      // 确认就回落宽判据:本回合的【非 shell】条目算忙。shell 刻意不在此支 —— 否则本回合
-      // shell 只要 epoch 匹配就无限期豁免,2h 窗口会被绕过、看门狗/回收彻底失效(见常量注释)。
-      // 方向是"宁漏标不误杀",但豁免必须有上限。
-      const now = Date.now();
-      const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS)
-        || (now - (slot.lastLevelAt || 0) >= LIVE_TASK_FRESH_MS
-          && hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch));
-      // 忙判据 = 非 shell(新鲜 + R1 降级支,该支只覆盖非 shell) || 新鲜 shell。shell 的豁免
-      // 只由 hasFreshShellTask 的 2h 窗口提供 → 2h 是 shell 的真总上限,R1 不能绕过。
-      // 窗口与理由见常量注释。
-      const busyLive = busyNonShell || hasFreshShellTask(slot.liveTasks, now);
-      // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
-      // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
-      if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyLive) {
+      // 判据(忙判据 + R1 降级守卫 + revived)见 shouldStallWatchdogFire / stallWatchdogBusy 的注释。
+      if (shouldStallWatchdogFire(slot, Date.now())) {
         // r151k:本会话还有卡在等用户回答(权限卡 / AskUserQuestion / ExitPlanMode /
         // elicitation / dialog 共用 pending 表)→ 这是「等用户」不是「上游卡死」:
         // 不 abort、不发 stall_notice,重新武装等下一窗。用户答复后卡从表里删掉,
@@ -3026,14 +3045,8 @@ async function handleChatPost(req, res) {
           return;
         }
         // stall_notice:客户端专用渲染分支(中性系统提示 turn,非红色错误)。原用 type:stderr
-        // 但客户端 SSE 分发根本不渲染 stderr = 提示白发(判官缺陷3)。
-        // 文案里的分钟数随运行时阈值生成(默认 300000 → "5 分钟"逐字不变)。下限 5 分钟:
-        // 用户可见文案只按分钟量级展示,联调/验收把阈值调到分钟级以下时仍显示默认口径,
-        // 不出现浮点/0 分钟/误导性的"1 分钟"。
-        const stallMinutes = Math.max(5, Math.round(STALL_MS / 60000));
-        const stallText = slot.turnSubagentSeen
-          ? `子代理已全部结束,但上游超过 ${stallMinutes} 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`
-          : `上游超过 ${stallMinutes} 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`;
+        // 但客户端 SSE 分发根本不渲染 stderr = 提示白发(判官缺陷3)。文案见 buildStallNoticeText。
+        const stallText = buildStallNoticeText(STALL_MS, slot.turnSubagentSeen);
         deliverLine(slot, JSON.stringify({ type: 'stall_notice', text: stallText }));
         // 【必须强制拆进程,不能走 idle 复用】(判官缺陷1):卡死场景下 CLI 子进程正阻塞在
         // 死掉的上游请求上,不是健康空闲。若只 finalize 转 idle,同会话 15 分钟内下一条消息
@@ -3351,6 +3364,10 @@ const permissionModeSwitching = new Map();
 export function permissionModeSwitchPending(sessionId) {
   return typeof sessionId === 'string' && permissionModeSwitching.has(sessionId.toLowerCase());
 }
+/** 记一次"切档进行中"(键 = 会话 id 小写,个数 +1);减一见 finishSessionModeSwitch 与复用派发的 finally。export 仅为可单测。 */
+export function beginSessionModeSwitch(switchKey) {
+  permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
+}
 
 // r151f:能接新回合的进程 = 存活、不在关闭中、输入没关。切档只发给它们、只按它们计 attempted / delivered;进程视图的 usable 与
 // 跨会话判定的"存活进程档位"用同一判据。关闭中、输入已关的进程不收切档请求、不计数、档位字段不动:它们不再接新回合,手上通常
@@ -3376,7 +3393,7 @@ const sessionModeGenerations = new Map(); // 会话 id(小写)→ { gen, confirm
 const sessionModeStateKey = (sessionId) => String(sessionId).toLowerCase();
 
 /** 该会话此刻的切档代数(没有记录 = 0)。 */
-function sessionModeGeneration(sessionId) {
+export function sessionModeGeneration(sessionId) { // export 仅为可单测
   if (typeof sessionId !== 'string' || !sessionId) return 0;
   const st = sessionModeGenerations.get(sessionModeStateKey(sessionId));
   return st ? st.gen : 0;
@@ -3399,7 +3416,7 @@ function sessionLiveGuiMode(sessionId) {
  * 一次切档请求完成:清"切档进行中"标记;形状合法的会话再代数 +1、记确认档位。之间没有 await(调用方保证
  * 同步调用),所以排在后面的消息不会读到"代数变了但确认档位还是旧的"这类中间态。
  */
-function finishSessionModeSwitch(sessionId, switchKey, confirmedMode) {
+export function finishSessionModeSwitch(sessionId, switchKey, confirmedMode) { // export 仅为可单测
   // r151g 安全复审(重要 1):代数表只收形状合法的会话 id。这张表按会话长期累积,而 `/chat/permission-mode`
   // 走全局 25MB 解析器、回环免密,原来把任意 sessionId 小写后直接当长期键 → 连发 1024 个不同的大字符串
   // 就能常驻放大内存(上限只限条数不限字节),还能把目标会话条目挤出 LRU。
@@ -3531,7 +3548,7 @@ router.post('/chat/permission-mode', async (req, res) => {
   // 都还是旧档位,跨会话自动处理的起回合前核对若照常通过,回合会落在切档之后的档位上(放宽方向即绕过类别规则)。核对据此退回排队。
   // r151f 修法 5:标记在排队之前就置上(覆盖排队时间);同一会话的切档按发起顺序逐个执行,锁一直拿到应答发出(客户端按发起顺序收到结果)。
   const switchKey = String(sessionId).toLowerCase();
-  permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
+  beginSessionModeSwitch(switchKey);
   await withSessionModeLock(sessionId, () => respondPermissionModeSwitch(res, sessionId, mode, switchKey));
 });
 
