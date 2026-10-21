@@ -2568,6 +2568,10 @@ async function handleChatPost(req, res) {
           // 排队期间被切档请求中止 / 置关闭中:不复用(下面冷启前会等它退出)。原先这条判据只在要
           // 热切时看;现在整段都在锁内,档位已经一致时也必须看 —— 否则会复用刚被切档超时中止的进程。
           if (!slotUsable(s)) return 'stale';
+          // r151q 安全复审(建议 A):选中空闲槽之后,换模型、等锁都让出过事件循环,这期间主 agent 可能复活续跑(跨会话回合复活时
+          // 写回 internalTurn)。槽已不空闲 = 它手上又有回合了:不复用 —— 不把用户消息推进别人的回合,也不把它的标记改成这条请求的;
+          // 转冷启路径按那里的判据处理(对方是跨会话回合 → 409 不中止;是用户自己的回合 → 照旧走原有的打断逻辑)。
+          if (!s.idle) return 'stale';
           // SDK 层档位不一致(plan/auto/default 三种可能)→ 热切;失败、或 REUSE_HOT_SWITCH_TIMEOUT_MS(与下面 setModel 同为 5 秒)内
           // 没回应(r151e ④:之前没有超时,进程活着却不回应时用户发的这条消息一直挂着)→ 放弃复用关旧开新。
           // r151f 修法 3/5:与 POST /chat/permission-mode 共用按会话的锁(按发起顺序逐个执行);5 秒没回应 → 中止旧进程(它被后台命令
@@ -2586,6 +2590,7 @@ async function handleChatPost(req, res) {
               return 'stale';
             }
           }
+          if (!s.idle) return 'stale'; // 热切档同样让出过事件循环,期间复活续跑的照上处理(同上)
           // r151d:上面的热切让出过事件循环,入口钩子要求的话在置档之前再核对一次(跨会话自动处理:这期间切了档就不起回合、
           // 退回排队重判)。不通过 → 不复用、把这个常驻进程关掉(热切已动过它的档位 / 模型,下一回合冷启),回入口钩子给的应答。
           const reuseRecheck = runEntryRecheck(entry);

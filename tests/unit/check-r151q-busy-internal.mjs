@@ -5,6 +5,7 @@
 //   ④ 内部回合结果已出、只差输入预测(收尾窗最长约 4 秒)不算在跑:用户 /chat 等它收尾;到点仍没收尾 → 409,不强制中止它。
 //   ⑤ 内部回合收尾(转空闲)后主 agent 复活续跑:仍算内部回合在跑 → 用户 /chat 立即 409,不中止它;
 //   ⑥ 用户自己的回合复活续跑:不当成内部回合 → 后到的用户消息不 409,照旧打断它起回合。
+//   ⑧ 复用路径的竞态:用户消息选中空闲槽后、推进进程前(换模型 / 热切档让出事件循环),跨会话回合复活续跑 → 不复用,409,不中止它。
 //   ⑤b/⑥b 同 ⑤/⑥,但不保活(keepAlive: false):收尾只关输入、不转空闲,续跑照样按本回合来源算(跨会话回合 409 不中止,用户回合照旧可打断)。
 //   ⑦ "用户在等"在长的内部回合里先过期:回合收尾时从收尾时刻重新计 60 秒,下一条内部回合 409(退回排队)。
 // node tests/unit/check-r151q-busy-internal.mjs
@@ -149,7 +150,7 @@ try {
   ctl.afterResult = (record) => {
     const text = String(record.inputs.at(-1)?.message?.content);
     if (!text.includes('REVIVE')) return null;
-    const g = { revive: gate(), finish: gate() };
+    const g = { revive: gate(), finish: gate(), record }; // record:桩收到过的输入(⑧ 据此确认用户消息没推进这个进程)
     gates.set(text, g);
     return (async function* () {
       await g.revive.p;
@@ -237,6 +238,37 @@ try {
   eq(user13.status, 200, '不保活时用户回合续跑不算跨会话回合:新消息不 409,照旧打断它起回合');
   eq([snap(unPid)?.busy, userWaitingOnSession(S8)], [false, false], '续跑的用户回合被打断;没记"用户在等"');
   await waitFor(() => snap(user13.body.pid)?.busy === false, '新的用户回合收尾');
+  // ⑧ 复用路径的竞态:用户消息选中空闲槽之后、推进进程之前(换模型、热切档都会让出事件循环),跨会话回合复活续跑 →
+  //    不复用这个槽,转冷启路径判定:409,不把用户消息推进跨会话回合,也不中止它。两个让出点各测一次。
+  for (const [n, how] of [[9, 'model'], [10, 'mode']]) {
+    const S = uuid(n);
+    const prompt = `auto REVIVE race-${how}`;
+    const key = how === 'model' ? 'setModel' : 'setPermissionMode';
+    const ar = await startInternalTurn(BODY({ sessionId: S, prompt }), INTERNAL);
+    eq(ar.status, 200, `[${how}] 跨会话回合起来了`);
+    const arPid = ar.body.pid;
+    await waitFor(() => snap(arPid)?.idle && gates.has(prompt), `[${how}] 跨会话回合(中间结果)收尾、转空闲`);
+    const prevHook = ctl[key];
+    let release; let called = false;
+    const held = new Promise((r) => { release = r; });
+    ctl[key] = () => { called = true; return held; };
+    try {
+      const pending = api('/chat', BODY({ sessionId: S, prompt: `user race ${how}`, ...(how === 'model' ? { model: 'r151q-model-b' } : { permissionMode: 'plan' }) }));
+      await waitFor(() => called, `[${how}] 用户消息选中了空闲槽,${how === 'model' ? '换模型' : '热切档'}挂着`);
+      gates.get(prompt).revive.open();
+      await waitFor(() => gates.get(prompt).pulled, `[${how}] 跨会话回合复活续跑`);
+      release();
+      const res = await pending;
+      eq([res.status, res.body.code], [409, 'CHAT_SESSION_BUSY'], `[${how}] 槽已复活:不复用,转冷启判定 → 409 CHAT_SESSION_BUSY`);
+      eq(snap(arPid)?.busy, true, `[${how}] 跨会话回合没被中止(仍在续跑)`);
+    } finally {
+      release();
+      ctl[key] = prevHook;
+    }
+    gates.get(prompt).finish.open();
+    await waitFor(() => snap(arPid)?.idle, `[${how}] 续跑完再次收尾`);
+    eq(gates.get(prompt).record.inputs.length, 1, `[${how}] 用户消息没推进跨会话回合(进程只收到过它自己那条)`);
+  }
   delete ctl.afterResult;
 
   // ── ⑦ "用户在等"在长的跨会话回合里先过期:回合收尾时从此刻重新计 60 秒,下一条跨会话消息不抢在用户消息前面 ──────
