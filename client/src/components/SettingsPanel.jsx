@@ -2824,6 +2824,9 @@ const XSESSION_NOTICE = '开启后，会话里的 AI 可以给本机 CC-GUI 的�
 // r151d:本机回环请求免鉴权是既有设计 —— 本机其它程序,以及能执行命令的会话(「放任」档等),都能经本地接口改跨会话设置、
 // 各会话的接收方式、暂停状态与同步的全局设置。总开关开着时写明(接口 r151d 行为清单第 6 条,文案逐字)。
 const XSESSION_LOCAL_API_NOTE = '本机其它程序，以及「放任」档会话里的 AI，都能通过本地接口修改这里的设置和各会话的接收方式。';
+// r151q:挂跨会话工具的会话进程会整体关闭工具搜索(r151c:CLI 2.1.306 默认把 MCP 工具藏进工具搜索,
+// 不关就看不到跨会话工具)。代价写在开关旁、开关前就能看到:所有 MCP 工具的说明都进上下文,提示变长。
+const XSESSION_TOOLSEARCH_NOTE = '开启后，挂着跨会话工具的会话进程会关闭工具搜索：所有 MCP 工具的说明都会放进上下文，提示会变长。';
 const XSESSION_CONFIG_REFRESH_MS = 60_000;
 function fmtXsGuardTime(iso) {
   const t = Date.parse(iso);
@@ -2879,6 +2882,7 @@ function XsessionSettingsSection() {
         <div className="min-w-0 flex-1">
           <div className="text-xs text-ink font-body font-medium">跨会话消息</div>
           <div data-testid="xsession-notice" className="text-[10.5px] text-ink-faint font-body">{XSESSION_NOTICE}</div>
+          <div data-testid="xsession-toolsearch-note" className="text-[10.5px] text-ink-faint font-body">{XSESSION_TOOLSEARCH_NOTE}</div>
         </div>
         <button data-testid="xsession-toggle" role="switch" aria-checked={enabled} onClick={toggle} disabled={busy}
           className={`shrink-0 w-9 h-5 rounded-full transition-colors relative disabled:opacity-50 disabled:cursor-not-allowed ${enabled ? 'bg-accent' : 'bg-ink-faint/30'}`}
