@@ -23,7 +23,9 @@ export default defineConfig({
     baseURL: process.env.R151N_UI_BASE || undefined,
     viewport: { width: 1440, height: 900 },
     actionTimeout: 15_000,
-    navigationTimeout: 40_000,
+    // 首次访问 dev server 要冷编译整棵模块图(含 500KB 的 App.jsx),机器忙时可能超过 40s;
+    // 给足冷启动余量,失败仍是真失败(用例自身条件等待,不用固定 sleep)。
+    navigationTimeout: 60_000,
     screenshot: 'only-on-failure',
     video: 'off',
     trace: 'off',
