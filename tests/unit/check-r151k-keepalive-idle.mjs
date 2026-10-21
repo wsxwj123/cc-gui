@@ -60,6 +60,10 @@ try {
   eq(resolveKeepAliveIdleMs('1h', 'Infinity'), MS['1h'], 'Infinity 非法 → 设置值');
   eq(resolveKeepAliveIdleMs('1h', '0'), MS['1h'], '0 非法 → 设置值');
   eq(resolveKeepAliveIdleMs('1h', '2147483647'), 2147483647, 'Node 定时器上限内照用');
+  // r151q 第 7 项:超出 Node 定时器上限(2^31-1)当没设 —— 否则 Node 按 1ms 触发,回合一结束进程就被回收
+  eq(resolveKeepAliveIdleMs('1h', '2147483648'), MS['1h'], '超上限 2147483648 当没设 → 设置值');
+  eq(resolveKeepAliveIdleMs('2h', '99999999999'), MS['2h'], '超上限 99999999999 当没设 → 设置值');
+  eq(resolveKeepAliveIdleMs('never', '99999999999'), null, 'never 仍压过一切');
 
   // ── ② 同步读取 ──────────────────────────────────────────────────────────────
   eq(normalizeKeepAliveIdle('30m'), '30m', '归一:合法值原样');

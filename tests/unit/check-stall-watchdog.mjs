@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import {
   hasFreshNonShellTask, hasFreshShellTask, hasFreshLiveTask, hasCurrentEpochNonShellTask,
-  reconcileLiveTasks, resolveStallMs, SHELL_TASK_FRESH_MS,
+  reconcileLiveTasks, resolveStallMs, parseEnvMs, SHELL_TASK_FRESH_MS,
   stallWatchdogBusy, shouldStallWatchdogFire, buildStallNoticeText,
 } from '../../server/routes/chat.js';
 
@@ -169,6 +169,12 @@ const old = (ms) => now - ms;
   assert.equal(resolveStallMs('2147483647'), 2_147_483_647, '上限 2147483647 采用');
   assert.equal(resolveStallMs('2147483648'), 300_000, '超上限 2147483648 回默认 300000');
   assert.equal(resolveStallMs('1000000000000000'), 300_000, '超大值(1e15)回默认 300000');
+  // r151q 第 7 项:CGUI_STALL_MS 与 CGUI_KEEPALIVE_IDLE_MS 共用 parseEnvMs(合法 → 原值,其余 → null = 当没设)
+  assert.equal(parseEnvMs('2000'), 2000, '合法值原样');
+  assert.equal(parseEnvMs(2_147_483_647), 2_147_483_647, '上限照用');
+  for (const bad of ['2147483648', '99999999999', '999', '1.5', '-1500', '', 'abc', undefined, null]) {
+    assert.equal(parseEnvMs(bad), null, `${JSON.stringify(bad)} 当没设`);
+  }
 }
 
 {

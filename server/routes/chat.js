@@ -674,18 +674,28 @@ const KEEP_ALIVE_IDLE_MS_BY_SETTING = Object.freeze({
   '4h': 4 * 60 * 60 * 1000,
 });
 /**
+ * 毫秒类环境变量(CGUI_STALL_MS、CGUI_KEEPALIVE_IDLE_MS)共用的解析。纯函数,export 仅为可单测。
+ * 整数且 1000 ≤ ms ≤ 2147483647 才算设了,返回该值;否则返回 null = 当没设,调用方按默认 / 用户设置。
+ * 上限 2147483647 = 2^31-1,即 Node setTimeout 的 delay 上限:超过它 Node 会按 1ms 处理、定时器立刻
+ * 触发 —— 看门狗会在回合刚起时就拆进程,常驻进程会在回合一结束就被回收。
+ */
+export function parseEnvMs(raw) {
+  const ms = Number(raw);
+  return Number.isInteger(ms) && ms >= 1000 && ms <= 2_147_483_647 ? ms : null;
+}
+
+/**
  * r151k:把设置值解析成 idleTimer 的毫秒数。纯函数,供单测(chat.js 真 import)。
  * · 'never' → null:不武装 idleTimer,进程保持到 app 退出 / 显式停止 / 删除等既有清理;
- * · 否则 CGUI_KEEPALIVE_IDLE_MS 是合法整数 ≥1000 时优先用它 —— 与 CGUI_STALL_MS 同类的
- *   通用可调窗口(联调/验收把小时级回收缩到秒级),不是测试专用分支;'never' 必须压过它;
+ * · 否则 CGUI_KEEPALIVE_IDLE_MS 合法(见 parseEnvMs:整数且 1000..2147483647)时优先用它 —— 与
+ *   CGUI_STALL_MS 同类的通用可调窗口(联调/验收把小时级回收缩到秒级),不是测试专用分支;
+ *   'never' 必须压过它;超出上限等非法值当没设,按用户设置走;
  * · 其余按枚举映射;设置缺省/非法时回 1h(调用方 readKeepAliveIdleSync 已归一,这里再兜一层)。
- * 不夹 Node setTimeout 上限:生产枚举最大 4h,测试窗口按需给;超出 2^31-1 的极端值由调用方
- * 自己承担(Node 会按 1ms 处理),不给设置枚举开口子。
  */
 export function resolveKeepAliveIdleMs(setting, envRaw) {
   if (setting === 'never') return null;
-  const envMs = Number(envRaw);
-  if (Number.isInteger(envMs) && envMs >= 1000) return envMs;
+  const envMs = parseEnvMs(envRaw);
+  if (envMs !== null) return envMs;
   return KEEP_ALIVE_IDLE_MS_BY_SETTING[setting] ?? KEEP_ALIVE_IDLE_MS_BY_SETTING['1h'];
 }
 
@@ -703,14 +713,11 @@ const LIVE_TASK_FRESH_MS = 30 * 60 * 1000;
 export const SHELL_TASK_FRESH_MS = 2 * 60 * 60 * 1000;
 
 // 静默看门狗阈值(毫秒),默认 300000(5 分钟)。CGUI_STALL_MS 仅供联调/验收按需
-// 调小阈值(合法正整数且 1000 ≤ ms ≤ 2147483647);服务启动时读取一次,缺省/非法值回
-// 默认 300000,默认行为不变。这是通用可调阈值,不是测试专用分支。
-// 上限 2147483647 = 2^31-1,即 Node setTimeout 的 delay 上限:超过它 Node 会按 1ms
-// 处理,定时器立刻触发,看门狗会在回合刚起时就把进程 abort 掉,所以必须夹上限。
+// 调小阈值(合法与否见 parseEnvMs:整数且 1000 ≤ ms ≤ 2147483647,上限理由同);服务启动时
+// 读取一次,缺省/非法值回默认 300000,默认行为不变。这是通用可调阈值,不是测试专用分支。
 const STALL_MS_DEFAULT = 300_000;
 export function resolveStallMs(raw) {
-  const ms = Number(raw);
-  return Number.isInteger(ms) && ms >= 1000 && ms <= 2_147_483_647 ? ms : STALL_MS_DEFAULT;
+  return parseEnvMs(raw) ?? STALL_MS_DEFAULT;
 }
 const STALL_MS = resolveStallMs(process.env.CGUI_STALL_MS);
 
