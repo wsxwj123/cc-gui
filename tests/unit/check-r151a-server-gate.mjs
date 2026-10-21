@@ -4,6 +4,7 @@
 //   其它情况与改动前相同(隔离 HOME,直接挂 chat 路由,不起会话进程)。/api/chat 的降级由验收 D 组覆盖。
 // node tests/unit/check-r151a-server-gate.mjs
 import assert from 'node:assert/strict';
+import { listenInRange } from './helpers/listen-in-range.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,7 +34,7 @@ const { default: chatRouter } = await import('../../server/routes/chat.js');
 const app = express();
 app.use(express.json());
 app.use('/api', chatRouter);
-const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const server = await listenInRange(app); // 端口在 6900–6999 里挑空闲的,被占就换(不用系统分配的随机口)
 const base = `http://127.0.0.1:${server.address().port}`;
 const SETTINGS = join(home, '.claude', 'settings.json');
 const PREFS = join(home, '.claude-gui', 'prefs.json');

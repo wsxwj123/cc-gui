@@ -4,6 +4,7 @@
 // 其它 provider 的覆盖设置全丢)。以守卫的判定为准:可写 → 200,且其它 provider 的设置原样保留。
 // node tests/unit/check-r151a-overrides-bom.mjs
 import assert from 'node:assert/strict';
+import { listenInRange } from './helpers/listen-in-range.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,7 +27,7 @@ const { default: settingsRouter } = await import('../../server/routes/settings.j
 const app = express();
 app.use(express.json());
 app.use('/api', settingsRouter);
-const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const server = await listenInRange(app); // 端口在 6900–6999 里挑空闲的,被占就换(不用系统分配的随机口)
 const base = `http://127.0.0.1:${server.address().port}`;
 const put = async (p, body) => { const r = await fetch(base + p, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); let j = null; try { j = await r.json(); } catch { /* */ } return { status: r.status, body: j }; };
 
