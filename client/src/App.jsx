@@ -5,6 +5,9 @@ import { createPortal } from 'react-dom';
 // #185 (Maximum update depth exceeded) caused by returning fresh `[]` on
 // every selector call. Any selector with `|| []` fallback must point here.
 const EMPTY_ARRAY = Object.freeze([]);
+// r151q 第 9 项:发送被 409 CHAT_SESSION_BUSY 退回队列时的提示与重试间隔(两次尝试至少隔这么久)。
+const SESSION_BUSY_QUEUED_NOTICE = '会话正在处理跨会话消息，这条已排队，空闲后自动发送；要立刻发送，先点停止。';
+const BUSY_RETRY_GAP_MS = 2000;
 // 已尝试过自动生成标题的 sessionId(无论成功失败),防止失败时每轮重复 spawn 标题进程。
 const titleAttempted = new Set();
 // R8-5:已就 MCP 状态提示过的进程 pid。按 slot 生命周期去重:同一常驻进程的重复 init
@@ -169,7 +172,7 @@ import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
-import { dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
+import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
 import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
@@ -5782,6 +5785,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 按最新状态刷新卡片(可撤回或已退回),给一行提示,不画错误回合;走既有 finally 收尾。
       if (opts.xsProcess && (!res.ok || !respJson.pid)) {
         setProviderSwitchNotice({ text: xsClaimNotSent(opts.xsProcess, respJson) });
+        return;
+      }
+      // r151q 第 9 项:会话正被跨会话回合占着(服务端立即回 409 CHAT_SESSION_BUSY,不中止那个回合)= 这条没发出去。
+      // 不画错误气泡、撤掉乐观气泡;原文、附件、选项放回【发送时那个会话】(闭包里的 sessionQueueKey,不是此刻选中的会话)
+      // 队列的最前面,与其它排队消息一样落盘;BUSY_RETRY_GAP_MS 之内不再试(firstDrainableIndex 把关)。之后由既有排空再发:
+      // 服务端报该会话没有在跑的回合时轮询排空,或本窗格接回的那条流收尾时排空;再 409 就照此继续排队。点卡片发出的那条上面已返回。
+      if (res.status === 409 && respJson.code === 'CHAT_SESSION_BUSY') {
+        const retryOpts = { ...opts, busyRequeued: true }; // 标记:这条已被 409 退回过(之后出队重试再被退回,回到最前)
+        delete retryOpts.onEnqueueFailure; delete retryOpts.onQueued; delete retryOpts.fromComposer;
+        if (retryOpts.meta) retryOpts.meta = attachmentMetaForPersistence(retryOpts.meta);
+        // 出队重试的那条回到最前;新发的这条若队首已有被退回、等着重发的消息,排在它们后面(不越过先被退回的)。
+        const requeued = useStore.getState().requeueMessageFront(sessionQueueKey, {
+          text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts: retryOpts, busyRetryAt: Date.now() + BUSY_RETRY_GAP_MS,
+        }, { afterBusy: !opts.busyRequeued });
+        if (!requeued) {
+          // 存不进队列(本地存储满):乐观气泡留着(原文还在屏上),明说没发出、要手动重发 —— 不静默丢。
+          throw new Error('会话正忙，这条消息没能放回待发队列（本地存储已满），没有发出；请稍后手动重发。');
+        }
+        if (userMsgUuid) {
+          setChatMessages((prev) => prev.filter((m) => m.uuid !== userMsgUuid));
+          dropStashedUserBubble(sessionQueueKey, userMsgUuid); // 切走时被暂存的那份也撤掉,切回时不补回
+        }
+        if (paneStillOn(sessionQueueKey)) setProviderSwitchNotice({ text: SESSION_BUSY_QUEUED_NOTICE, ownerKey: sessionQueueKey });
+        else leaveSessionNotice(sessionQueueKey, SESSION_BUSY_QUEUED_NOTICE);
         return;
       }
       // R13 身份冲突(409):本条请求不属于当前服务实例/与既有回合参数不符/已过期 ——
