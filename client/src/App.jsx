@@ -170,6 +170,7 @@ import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/X
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
+import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
@@ -4507,10 +4508,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     [finalizedMessages],
   );
   // 上屏/统计统一认这一份(renderChat = 已过 ownerKey 门控的 visibleChat 再做身份减法)。
-  const renderChat = useMemo(
-    () => visibleChat.filter((m) => !localTurnTakenOver(m, renderedTurnIdentity)),
-    [visibleChat, renderedTurnIdentity],
-  );
+  // 渲染层兜底(用户实报:自己发的消息反复出现在最新位置,切会话恢复):流式状态卡住时
+  // 对账 effect 会跳过,本地乐观气泡留在末尾;这里在历史已推进(同文本之后已有内容)时隐藏
+  // 本地副本,历史那份仍在,不会少画。纯函数单测 check-user-echo-dedupe。
+  const renderChat = useMemo(() => {
+    const kept = visibleChat.filter((m) => !localTurnTakenOver(m, renderedTurnIdentity));
+    return dropStaleUserEchoes(kept, finalizedMessages, msgTextOf);
+  }, [visibleChat, renderedTurnIdentity, finalizedMessages]);
   // Transient toast for "auto-stripped thinking blocks after provider switch".
   // { text, expires } — set by handleSend's pre-flight check, auto-cleared.
   const [providerSwitchNotice, setProviderSwitchNotice] = useState(null);

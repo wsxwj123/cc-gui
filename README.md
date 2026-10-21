@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.432</b>(2026-10-21)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>自己发的消息反复出现在最新位置</summary>
+
+流式状态卡住时,本地的“已发送”气泡不会被历史对账清掉,而历史里其实已经落盘并继续往后推进,于是同一句话在列表末尾重画。现在只要历史里同一句话之后已有内容,就隐藏本地那份,改用历史那份;切换会话不再是唯一解法。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.431</b>(2026-10-21)· 修复 1 条</summary>
 
 **修复**
