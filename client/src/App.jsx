@@ -1549,7 +1549,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   // 唯一窗格时(单屏 或 dock 单显聚焦窗格)用单屏那套填满样式 + 不渲分屏头/手柄。
   const soloPane = panes.length === 1;
   return (
-    <div ref={rowRef} data-testid="pane-split" className="flex-1 flex min-w-0 overflow-x-auto">
+    <div ref={rowRef} data-testid="pane-split" data-pane-count={panes.length} className="flex-1 flex min-w-0 overflow-x-auto">
       {panes.map((i) => {
         const focused = activeTabIndex === i;
         const paneSession = paneSessions && paneSessions[i];

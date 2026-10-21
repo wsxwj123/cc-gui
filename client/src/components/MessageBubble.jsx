@@ -585,7 +585,7 @@ export function MessageBubble({ message, onRollback, onFork }) {
               {onFork && (
                 <button onClick={() => onFork(message.uuid)} title="从这条消息分叉出一条新线(只保留到此为止的上下文,丢弃其后对话,原会话不动)"
                   className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-ink-faint hover:text-accent hover:bg-canvas-warm transition-colors">
-                  <GitBranch size={11} /><span className="hidden md:inline">分叉</span>
+                  <GitBranch size={11} /><span className="cgui-action-label hidden md:inline">分叉</span>
                 </button>
               )}
               <CopyButton text={message.text} />

@@ -1,4 +1,10 @@
 @import "tailwindcss";
+/* 分屏多个窗格时,消息操作按钮只留图标:窗格窄,中文标签会被压成竖排(用户实报)。
+   单屏/手机保持原样(手机由标签自身的 hidden md:inline 已隐藏)。 */
+[data-testid="pane-split"][data-pane-count]:not([data-pane-count="1"]) .cgui-action-label {
+  display: none;
+}
+
 /* genui 的 --dsw-* 别名层(PLAN r64 §1.6)。必须在 :root 上、必须先于业务样式导入。 */
 @import "./genui/host/genui-tokens.css";
 

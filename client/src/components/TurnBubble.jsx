@@ -1026,7 +1026,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                 title="回滚到这条 AI 回复之前,让 AI 重新生成(包括重新调工具)"
               >
                 <RotateCcw size={11} />
-                <span className="hidden md:inline">重做</span>
+                <span className="cgui-action-label hidden md:inline">重做</span>
               </button>
             )}
             <CopyButton text={fullText} />
@@ -1039,7 +1039,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
                 title="从这条回复分叉出一条新线(只保留到此为止的上下文,丢弃其后对话,原会话不动)"
               >
                 <GitBranch size={11} />
-                <span className="hidden md:inline">分叉</span>
+                <span className="cgui-action-label hidden md:inline">分叉</span>
               </button>
             )}
           </div>
