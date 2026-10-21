@@ -1525,7 +1525,9 @@ async function switchToOpenAIUpstream(up, requestedModel, res) {
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
   // r145 F3:settings.json 落盘成功之后才切上游 —— 写盘失败时上游保持切换前的值(此前先切上游再写盘,
   // 写失败接口回 500,对话却已发往新的那家)。与上面的 writeFile 之间没有 await,不存在可观察的中间态。
-  setOpenAIUpstream({ baseURL: up.baseURL, apiKey: up.apiKey, model });
+  // r151m:models + defaultModel 供代理做 claude 名兜底映射(hook/bot 硬编码 claude 名时
+  // 换成当前 provider 的真实模型),不再只靠 ANTHROPIC_MODEL 环境变量。
+  setOpenAIUpstream({ baseURL: up.baseURL, apiKey: up.apiKey, model, models: up.models, defaultModel: model });
   await ensureOnboardingFlag(); // 第三方无需登录:跳过终端首次向导(新机地区屏蔽根治)
   // Remember the active provider id (not the key) for restart recovery. Also
   // persist the provider's FULL model list + name so model-resolver can offer
@@ -1610,7 +1612,8 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   await backupSettings(ts);
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
   // r145 F3:落盘成功之后才切上游(同 switchToOpenAIUpstream):写盘失败时上游保持切换前的值。
-  setAnthropicUpstream({ baseURL: up.baseURL, authToken: up.authToken });
+  // r151m:同上,anthropic 透传路径也带 models + defaultModel(映射目标 = chosen)。
+  setAnthropicUpstream({ baseURL: up.baseURL, authToken: up.authToken, models: up.models, defaultModel: chosen });
   await ensureOnboardingFlag(); // 第三方无需登录:跳过终端首次向导(新机地区屏蔽根治)
   // Persist the active marker (id/name/baseURL/model/models — NEVER the token).
   try {
@@ -2897,7 +2900,8 @@ export async function restoreOpenAIProvider() {
   }
   if (!upstream) return;
   await startOpenAIProxy();
-  setOpenAIUpstream({ baseURL: upstream.baseURL, apiKey: upstream.apiKey, model: active.model });
+  // r151m:重启恢复时 marker 里已持久化 models/model,原样交给代理做兜底映射目标。
+  setOpenAIUpstream({ baseURL: upstream.baseURL, apiKey: upstream.apiKey, model: active.model, models: active.models, defaultModel: active.model });
 }
 
 // Boot-time twin of restoreOpenAIProvider for the Anthropic passthrough proxy.
@@ -2907,9 +2911,11 @@ export async function restoreAnthropicProvider() {
   try { active = JSON.parse(await readFile(ANTHROPIC_ACTIVE_PATH, 'utf-8')); } catch { return; }
   if (!active?.providerId) return;
   // Only restore if settings.json still points at the loopback proxy.
+  let settingsModel = '';
   try {
     const cur = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8'));
     if (!String(cur?.env?.ANTHROPIC_BASE_URL || '').includes('127.0.0.1')) return;
+    settingsModel = String(cur?.env?.ANTHROPIC_MODEL || '');
   } catch { return; }
   let baseURL = active.baseURL || '';
   let authToken = '';
@@ -2928,7 +2934,10 @@ export async function restoreAnthropicProvider() {
   }
   if (!baseURL || !authToken) return;
   await startAnthropicProxy();
-  setAnthropicUpstream({ baseURL, authToken });
+  // r151m:marker 的 model/models 是兜底映射来源;marker 无 model 时退回 settings.json
+  // 的 ANTHROPIC_MODEL(GUI 切 provider 时写进去,daemon 也从这里读)。
+  const defaultModel = active.model || settingsModel;
+  setAnthropicUpstream({ baseURL, authToken, models: active.models, defaultModel });
 }
 
 export default router;
