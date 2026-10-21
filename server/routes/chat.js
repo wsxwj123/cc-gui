@@ -1309,8 +1309,10 @@ export function applySessionOptions(slot, options) { // export 仅为可单测
       //   · MCP_CONNECTION_NONBLOCKING=false:CLI 等 MCP server 连上再发首个请求,避免第一条消息先带占位/缺工具、
       //     连上后工具表再变形(进程内 server 连接是瞬时的,代价可忽略)。
       // 第三方 provider 的全局策略原本就把这两个键写成 false(utils/prompt-cache-env.js);这里只是把同一结论限定到
-      // 挂着进程内工具的这一次 spawn,其余 env 原样保留。
-      options.env = { ...(options.env || {}), ENABLE_TOOL_SEARCH: 'false', MCP_CONNECTION_NONBLOCKING: 'false' };
+      // 挂着进程内工具的这一次 spawn,其余 env 原样保留。代价:该进程所有 MCP 工具的说明都进上下文,提示变长。
+      // options.env 缺失时以 cleanChildEnv() 为底(与正常起进程同一个构造函数):SDK 的 env 是"整体替换",
+      // 只写这两个键会让子进程丢掉 PATH / HOME 等;也不能用 process.env,那会带上宿主的 ANTHROPIC_* 等应剥掉的键。
+      options.env = { ...(options.env || cleanChildEnv()), ENABLE_TOOL_SEARCH: 'false', MCP_CONNECTION_NONBLOCKING: 'false' };
     }
     if (autoAllow?.length) slot.sessionAutoAllow = { names: new Set(autoAllow), hook: fn };
   } catch (e) {
