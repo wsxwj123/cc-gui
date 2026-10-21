@@ -1295,7 +1295,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   // 更新说明这类浮层**在内容区里居中**(而不是按整个窗口居中 —— 有会话列表/右侧面板时会看着压一边)。
   //
   // 三条硬约束(来自独立盲审 M1–M3,别改回去):
-  // ① 基准元素必须是**内容区**(SplitMain 根节点 [data-testid="pane-split"]),不是侧栏内层 div ——
+  // ① 基准元素必须是**内容区**(SplitMain 根节点 [data-cgui-pane-split]),不是侧栏内层 div ——
   //    挂错会让 left/width 算成侧栏的量、浮层盒宽塌成 0;
   // ② 依赖必须跟着布局变(isMobile/sidebarCollapsed/sidebarWidth/rightPanel/rightPanelWidth/panelWidth),
   //    且元素可能不在首帧存在(空则等下一帧),否则"收起时挂载"会永远量不到、"开→收"会留脏值;
@@ -1331,7 +1331,8 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
       s.setProperty('--content-w', Math.round(el.offsetWidth) + 'px');
     };
     const attach = () => {
-      el = document.querySelector('[data-testid="pane-split"]');
+      // 挂专用属性而不是 data-testid:测试标记改名不该让浮层定位失效。
+      el = document.querySelector('[data-cgui-pane-split]');
       if (!el) { raf = requestAnimationFrame(attach); return; }   // 首帧可能还没挂上
       measure();
       ro = new ResizeObserver(measure);
@@ -1554,7 +1555,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   // 唯一窗格时(单屏 或 dock 单显聚焦窗格)用单屏那套填满样式 + 不渲分屏头/手柄。
   const soloPane = panes.length === 1;
   return (
-    <div ref={rowRef} data-testid="pane-split" data-pane-count={panes.length} className="flex-1 flex min-w-0 overflow-x-auto">
+    <div ref={rowRef} data-testid="pane-split" data-cgui-pane-split="" data-pane-count={panes.length} className="flex-1 flex min-w-0 overflow-x-auto">
       {panes.map((i) => {
         const focused = activeTabIndex === i;
         const paneSession = paneSessions && paneSessions[i];
