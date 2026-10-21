@@ -29,7 +29,8 @@ chmodSync(join(BIN, 'claude'), 0o755);
 process.env.PATH = `${BIN}:/usr/bin:/bin`;
 const PREFS = join(HOME, '.claude-gui', 'prefs.json');
 const ENABLED_AT = new Date(Date.now() - 60_000).toISOString();
-let prefs = { xsEnabled: true, xsEnabledAt: ENABLED_AT, customTitles: {} };
+// r151q:新用户第一次经接口打开总开关时会同时写 xsInboundDefault:'auto';本单测按新用户形态(没单独设置的会话 → auto)。
+let prefs = { xsEnabled: true, xsEnabledAt: ENABLED_AT, xsInboundDefault: 'auto', customTitles: {} };
 const savePrefs = () => writeFileSync(PREFS, JSON.stringify(prefs));
 
 // ── 会话:自己 A + 31 个按时间排开的 + 标题带引号 / 尖括号 / 控制字符的 + 两个重名 + 一个待处理已满 50 的 ──

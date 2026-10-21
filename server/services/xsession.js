@@ -962,8 +962,8 @@ function fingerprintOrNull(salt) {
 // (latestGuiMode)> 档案的(接口"审计之后的补充约定"第 3 条)。
 // 档案写失败过的会话整条按没有档案判(hasProfile 为 false → no-profile,见 profileCountsFor)。
 function targetFacts(sessionId, prefs, profiles, fp) {
-  // r151k:显式 card 才 card;没设置(以及显式 auto)一律 auto —— 映射口径统一走 inboundModeOf。
-  const inbound = inboundModeOf(prefs.inbound, sessionId);
+  // 显式值照用,没设置按偏好的入站默认(r151q)—— 映射口径统一走 inboundModeOf。
+  const inbound = inboundModeOf(prefs.inbound, sessionId, prefs.inboundDefault);
   const profile = profileIn(profiles, sessionId);
   return {
     inbound,
@@ -1056,8 +1056,8 @@ export async function listAiSessions({ sender, query } = {}, rows) {
   const selfRow = all.find((r) => sameId(r.sessionId, sender.sessionId)) || null;
   const selfId = selfRow ? selfRow.sessionId : sender.sessionId;
   const shortIds = assignShortIds([...all.map((r) => r.sessionId), ...(selfRow ? [] : [selfId])]);
-  const inbound = readXsPrefsSync().inbound;
-  const inboundOf = (id) => inboundModeOf(inbound, id);
+  const xsPrefs = readXsPrefsSync();
+  const inboundOf = (id) => inboundModeOf(xsPrefs.inbound, id, xsPrefs.inboundDefault);
   const picked = selectXsSessions(all.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), { query: query ?? '', limit: AI_LIST_MAX + 1, exclude: selfId });
   return {
     self: { id: shortIds.get(selfId), name: normalizeXsSourceName(selfRow?.title) },

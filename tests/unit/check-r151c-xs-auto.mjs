@@ -35,7 +35,9 @@ const PREFS = join(HOME, '.claude-gui', 'prefs.json');
 const prefsFile = () => JSON.parse(readFileSync(PREFS, 'utf8'));
 
 // ── ① 的预置:一期升级上来(开着、没有启用时刻);上次进程留下的 queued / processing;两个档案损坏留存 ──
-writeFileSync(PREFS, JSON.stringify({ xsEnabled: true, other: 1 }));
+// r151q:带 xsInboundDefault:'auto'(新用户首开时的形态)—— 没有它时,补记 xsEnabledAt 后没单独设置的会话默认 card,
+// 本单测要测的自动处理就不会发生。补记启用时刻只看 xsEnabled / xsEnabledAt,不受这个键影响。
+writeFileSync(PREFS, JSON.stringify({ xsEnabled: true, xsInboundDefault: 'auto', other: 1 }));
 const OLD_Q = randomUUID(); const OLD_P = randomUUID(); const T_OLD = randomUUID();
 const oldMsg = (id, status, extra) => ({ id, createdAt: new Date().toISOString(), status, chainId: randomUUID(), hop: 1, from: { kind: 'session', sessionId: randomUUID(), title: 'x', mode: 'default' }, to: { sessionId: T_OLD, title: 't' }, bodyBytes: 1, via: null, heldReason: null, ...extra });
 writeFileSync(join(XS_DIR, 'messages.json'), JSON.stringify({ version: 1, messages: [oldMsg(OLD_Q, 'queued'), oldMsg(OLD_P, 'processing', { via: 'auto', turn: { key: 'k' } })] }));

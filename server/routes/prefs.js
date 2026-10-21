@@ -74,20 +74,38 @@ export function normalizeXsPrefs(prefs) {
       if ((mode === 'auto' || mode === 'card') && isSessionIdShape(id)) inbound[id] = mode;
     }
   }
-  return { enabled: p.xsEnabled === true, enabledAt: at, inbound, autoPaused: p.xsAutoPaused === true };
+  return {
+    enabled: p.xsEnabled === true, enabledAt: at, inbound, autoPaused: p.xsAutoPaused === true,
+    inboundDefault: inboundDefaultOf(p),
+  };
 }
 /**
- * r151k:会话的接收设置最终值。显式 "card" → card;其余(显式 "auto" 与没设置)→ auto。
- * 这是「GUI 跨会话入站默认自动处理」的唯一映射口径:列表、单条、list_sessions、自动处理判定
- * 全部走这里,避免各处各写一份 ? 'auto' : 'card' 后漂移。会话 id 不分大小写。
+ * r151q:没单独设置过的会话的接收设置默认值('auto' | 'card')。
+ * · 偏好 xsInboundDefault 是 'auto' / 'card' → 用它;其它值按没有这个键处理;
+ * · 没有时:有 xsEnabledAt 键(开过总开关:r151c 起由关变开时写、关开关不删;键在但值不是合法时刻也算,偏保守)
+ *   → 'card',否则 → 'auto'。一期升级上来的用户(总开关开着、没有启用时刻)由启动时的 backfillXsEnabledAt 补记。
+ * 0.2.426 起曾把所有人的默认改成自动处理,这里让以前开过总开关的用户回到更保守的卡片;不会让任何会话从卡片变成自动。
+ * 新用户:第一次打开总开关的那次写入同时写 xsInboundDefault:'auto'(见 routes/xsession.js),所以仍默认自动处理。
  */
-export function inboundModeOf(inbound, sessionId) {
-  if (!inbound || typeof inbound !== 'object' || typeof sessionId !== 'string' || !sessionId) return 'auto';
+export function inboundDefaultOf(prefs) {
+  const p = prefs && typeof prefs === 'object' && !Array.isArray(prefs) ? prefs : {};
+  if (p.xsInboundDefault === 'auto' || p.xsInboundDefault === 'card') return p.xsInboundDefault;
+  return p.xsEnabledAt !== undefined ? 'card' : 'auto';
+}
+/**
+ * 会话的接收设置最终值:显式 'card' / 'auto' 照用;没设置(或值不合法)→ defaultMode。
+ * defaultMode 由调用方传 normalizeXsPrefs 结果里的 inboundDefault;缺省或不合法按 'card'(漏传只会更保守,不会放宽成自动)。
+ * 这是跨会话入站的唯一映射口径:列表、单条、list_sessions、自动处理判定全部走这里,避免各处各写一份后漂移。
+ * 会话 id 不分大小写。
+ */
+export function inboundModeOf(inbound, sessionId, defaultMode) {
+  const fallback = defaultMode === 'auto' ? 'auto' : 'card';
+  if (!inbound || typeof inbound !== 'object' || typeof sessionId !== 'string' || !sessionId) return fallback;
   const id = sessionId.toLowerCase();
   for (const [k, mode] of Object.entries(inbound)) {
-    if (String(k).toLowerCase() === id) return mode === 'card' ? 'card' : 'auto';
+    if (String(k).toLowerCase() === id) return mode === 'card' || mode === 'auto' ? mode : fallback;
   }
-  return 'auto';
+  return fallback;
 }
 export function readXsPrefsSync() {
   const { readFailed: _readFailed, ...prefs } = readXsPrefsDetailedSync();
