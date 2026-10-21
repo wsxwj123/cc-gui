@@ -2,6 +2,7 @@
 //   ① 内部回合在跑 → 用户 /chat 立即 409 CHAT_SESSION_BUSY,内部回合不被中止;该会话记"用户在等",期间新的内部回合 409;
 //   ② 内部回合冷启时还在等旧进程退出(占位期)→ 用户 /chat 同样立即 409,不等待、不中止;旧进程退出后内部回合照常起来;
 //   ③ 用户回合开始 → "用户在等"清掉;用户自己的回合仍可被后到的用户消息打断(原语义不变,只抽查 200)。
+//   ④ 内部回合结果已出、只差输入预测(收尾窗最长约 4 秒)不算在跑:用户 /chat 等它收尾;到点仍没收尾 → 409,不强制中止它。
 // node tests/unit/check-r151q-busy-internal.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync } from 'node:fs';
@@ -108,6 +109,32 @@ try {
   const user4 = await api('/chat', BODY({ sessionId: S2, prompt: 'user after cold', effort: 'high' }));
   eq(user4.status, 200, '内部回合跑完后用户消息照常起回合');
   eq(userWaitingOnSession(S2), false, '用户回合开始 → "用户在等"清掉');
+
+  // ── ④ 只差输入预测的收尾窗:用户请求先等,到点仍没收尾 → 409,不中止 ─────────────────────────────
+  // 收尾窗是真定时器(结果后 4 秒),用户请求的等待上限按 Date.now 算:发请求期间把 Date.now 调成 10 倍速,
+  // 等待上限约 0.4 秒就到点,而收尾窗离结束还有 3 秒多 —— "到点仍未收尾"是确定的,不靠赛跑。
+  const S3 = uuid(3);
+  const tail = await startInternalTurn(BODY({ sessionId: S3, prompt: 'auto tail', promptSuggestions: true }), INTERNAL);
+  eq(tail.status, 200, '内部回合起来了(开着输入预测)');
+  const tailPid = tail.body.pid;
+  await waitFor(() => snap(tailPid)?.awaitingSuggestion, '内部回合结果已出、只差输入预测');
+  eq(snap(tailPid).busy, true, '收尾窗里槽仍是 busy(只是跨会话判定按空闲算)');
+  const realNow = Date.now;
+  const r0 = realNow();
+  let user5;
+  try {
+    Date.now = () => r0 + (realNow() - r0) * 10;
+    user5 = await api('/chat', BODY({ sessionId: S3, prompt: 'user during suggestion tail' }));
+  } finally {
+    Date.now = realNow;
+  }
+  const waitedMs = realNow() - r0;
+  eq([user5.status, user5.body.ok, user5.body.code], [409, false, 'CHAT_SESSION_BUSY'], '到点仍没收尾 → 409 CHAT_SESSION_BUSY');
+  ok(waitedMs >= 300, `先等了收尾窗(实际 ${waitedMs}ms),不是立即拒`);
+  eq([snap(tailPid)?.busy, snap(tailPid)?.awaitingSuggestion], [true, true], '内部回合没被中止(仍在收尾窗里)');
+  eq(userWaitingOnSession(S3), true, '这次 409 同样记"用户在等"');
+  await waitFor(() => snap(tailPid)?.idle, '收尾窗到点,内部回合正常收尾', 15000);
+  eq(ends.filter((e) => e.pid === tailPid).map((e) => e.outcome), ['completed'], '内部回合按完成结束,不是被停止');
   console.log(`PASS check-r151q-busy-internal(${checks} 项)`);
 } finally {
   unhook?.();
