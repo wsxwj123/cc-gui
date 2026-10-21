@@ -72,6 +72,7 @@ import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './components/MultiSelect.jsx';
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
 import { applyProgrammaticText } from './utils/inputUndo.js';
+import { repairMojibake, insertTextAtCaret } from './utils/mojibake.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
@@ -2471,7 +2472,14 @@ function HomeState({ tabIndex = 0 }) {
                   if (f) { uploadHomeAttachment(f); handledFile = true; }
                 }
               }
-              if (handledFile) e.preventDefault();
+              if (handledFile) { e.preventDefault(); return; }
+              // 终端/日志里复制来的 UTF-8 乱码在粘贴时还原(同会话输入框)。
+              const raw = e.clipboardData.getData('text/plain');
+              const fixed = repairMojibake(raw);
+              if (fixed !== raw) {
+                e.preventDefault();
+                insertTextAtCaret(e.currentTarget, fixed);
+              }
             }}
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {

@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.429</b>(2026-10-21)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>粘贴乱码自动还原</summary>
+
+从终端/日志复制来的文本如果出现「UTF-8 字节被当成 MacRoman 解码」的乱码(例如 `✻` 变成 `‚úª`、中文变成 `ÂΩìÂâç...`),粘进输入框时会自动还原成正常中文;正常中文、英文、法文等文本原样粘贴,不会改动。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.428</b>(2026-10-21)· 优化 2 条 · 修复 1 条</summary>
 
 **优化**

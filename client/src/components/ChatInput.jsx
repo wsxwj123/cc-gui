@@ -1,3 +1,4 @@
+import { repairMojibake, insertTextAtCaret } from '../utils/mojibake.js';
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Loader2, Square, Gauge, ChevronDown, X, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, MessagesSquare, Sparkles, ArrowDownToLine, Zap, BellOff } from './Icon.jsx';
 import { useStore, PERMISSION_MODES, openPaneSessionKeys } from '../stores/sessionStore.js';
@@ -648,7 +649,15 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
         if (f) { uploadAttachment(f); handledFile = true; }
       }
     }
-    if (handledFile) e.preventDefault();
+    if (handledFile) { e.preventDefault(); return; }
+    // 终端/日志里复制来的 UTF-8 乱码(被当成 MacRoman/CP1252 解码)在粘贴时还原;
+    // 检测不确定就原样放行(见 utils/mojibake.js)。
+    const raw = e.clipboardData.getData('text/plain');
+    const fixed = repairMojibake(raw);
+    if (fixed !== raw) {
+      e.preventDefault();
+      insertTextAtCaret(e.currentTarget, fixed);
+    }
   };
 
   const handleDrop = (e) => {
