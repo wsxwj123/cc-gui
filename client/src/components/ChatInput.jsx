@@ -1,6 +1,6 @@
-import { repairMojibake, insertTextAtCaret } from '../utils/mojibake.js';
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Loader2, Square, Gauge, ChevronDown, X, Paperclip, Shield, ShieldOff, ClipboardList, Check, Pencil, Smartphone, MessagesSquare, Sparkles, ArrowDownToLine, Zap, BellOff } from './Icon.jsx';
+import { repairMojibake, insertTextAtCaret } from '../utils/mojibake.js';
 import { useStore, PERMISSION_MODES, openPaneSessionKeys } from '../stores/sessionStore.js';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { XsInbox } from './XsInbox.jsx';

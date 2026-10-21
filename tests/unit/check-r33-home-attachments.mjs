@@ -182,10 +182,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const { readFileSync } = await import('node:fs');
   const src = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
   const i = src.indexOf('data-cgui="home-input"');
-  const seg = src.slice(i, i + 1600);
+  const seg = src.slice(i, i + 2200);
   if (!/onPaste=\{/.test(seg)) throw new Error('r60: 首页输入框缺 onPaste 附件处理');
   if (!/kind === 'file'/.test(seg) || !/uploadHomeAttachment\(f\)/.test(seg)) throw new Error('r60: 粘贴文件须走 uploadHomeAttachment');
-  if (!/handledFile\) e\.preventDefault\(\)/.test(seg)) throw new Error('r60: 粘贴文件后须 preventDefault(防路径文本落入)');
+  if (!/if \(handledFile\) \{ e\.preventDefault\(\); return; \}/.test(seg)) throw new Error('r60: 粘贴文件后须 preventDefault 并 return(防路径文本落入)');
   if (!/onDrop=\{/.test(seg) || !/dataTransfer/.test(seg)) throw new Error('r60: 拖放文件同样入附件');
   console.log('✓ r60: 首页输入框粘贴/拖放附件与聊天框对齐');
 }

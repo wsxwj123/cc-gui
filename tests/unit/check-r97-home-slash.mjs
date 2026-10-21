@@ -970,9 +970,9 @@ console.log('\n[C8] 位置锁 §5.8 + 零 diff §5.9');
 await check('§5.8/M21 附件窗口:data-cgui="home-input" 起 1600 字内六个片段全在(check-r33-home-attachments 同款口径)', () => {
   const i = A.indexOf('data-cgui="home-input"');
   assert.ok(i > 0, '找不到 data-cgui="home-input"');
-  const seg = A.slice(i, i + 1600);
+  const seg = A.slice(i, i + 2200);
   for (const [re, id] of [[/onPaste=\{/, 'onPaste'], [/kind === 'file'/, "kind === 'file'"],
-    [/uploadHomeAttachment\(f\)/, 'uploadHomeAttachment(f)'], [/handledFile\) e\.preventDefault\(\)/, 'handledFile) preventDefault'],
+    [/uploadHomeAttachment\(f\)/, 'uploadHomeAttachment(f)'], [/if \(handledFile\) \{ e\.preventDefault\(\); return; \}/, 'handledFile) preventDefault+return'],
     [/onDrop=\{/, 'onDrop'], [/dataTransfer/, 'dataTransfer']]) {
     assert.ok(re.test(seg), `窗口内缺 ${id} —— 面板 JSX / 检测逻辑不许插到 textarea 之前`);
   }

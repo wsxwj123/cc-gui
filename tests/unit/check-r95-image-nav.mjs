@@ -423,12 +423,12 @@ console.log('\n[B] 源码锁 3.4 零 diff 文件');
 check('3.4/E9 tests/acceptance/** 本轮零改动(server/routes/image.js 已移出该锁)', () => {
   let base = '';
   try {
-    base = execFileSync('git', ['merge-base', 'HEAD', 'master'], { cwd: root, encoding: 'utf8' }).trim();
+    base = execFileSync('git', ['merge-base', 'HEAD', 'master'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
   } catch (e) {
     console.log('    (跳过:git 不可用 —', String(e.message).split('\n')[0], ')');
     return;
   }
-  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
   // 【2026-09-10 首批开发修订】与 check-r94-panel §7.9 同款收窄:本批新增了整套锁定验收套件
   // tests/acceptance/first-batch-20260910/(基线提交上还不存在),那是合法产物。零 diff 锁的
   // 本意"既有锁定验收一行都不许动"不变 —— 修改/删除照旧零容忍,只有全新条目可以新增。
@@ -465,7 +465,8 @@ check('3.4/E9 tests/acceptance/** 本轮零改动(server/routes/image.js 已移�
     git('diff', '--name-only', '--diff-filter=A', base, '--', 'tests/acceptance'), // 已入库的新增
     git('ls-files', '--others', '--exclude-standard', '--', 'tests/acceptance'),    // 尚未入库的新增
   ].join('\n');
-  for (const file of added.split('\n').filter(Boolean)) {
+  // 忽略测试运行产物(.artifacts):它们是套件运行时生成的输出,不是往锁定套件里新增的源码。
+  for (const file of added.split('\n').filter(Boolean).filter((f) => !f.includes('/.artifacts/'))) {
     assert.ok(!existingTopLevel.has(file.split('/')[2]),
       `不许往既有锁定套件里新增文件(只有全新条目可以):${file}`);
   }

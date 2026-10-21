@@ -377,12 +377,12 @@ console.log('\n[A] §7.9 零 diff 文件');
 check('§7.9 tests/acceptance/** 、PROJECT.md、client/src/utils/imageEntry.js 本轮零改动', () => {
   let base = '';
   try {
-    base = execFileSync('git', ['merge-base', 'HEAD', 'master'], { cwd: root, encoding: 'utf8' }).trim();
+    base = execFileSync('git', ['merge-base', 'HEAD', 'master'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
   } catch (e) {
     console.log('    (跳过:git 不可用 —', String(e.message).split('\n')[0], ')');
     return;
   }
-  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
   // 【2026-09-10 首批开发修订】基线仍是 merge-base master,但本批【新增了整套锁定验收套件】
   // tests/acceptance/first-batch-20260910/ —— 它在基线提交上还不存在,是合法产物,不是
   // "改了锁定验收"。零 diff 锁的本意是【既有的锁定验收一行都不许动】,故按改动类型收窄:
@@ -426,7 +426,8 @@ check('§7.9 tests/acceptance/** 、PROJECT.md、client/src/utils/imageEntry.js 
     git('diff', '--name-only', '--diff-filter=A', base, '--', 'tests/acceptance'), // 已入库的新增
     git('ls-files', '--others', '--exclude-standard', '--', 'tests/acceptance'),    // 尚未入库的新增
   ].join('\n');
-  for (const file of added.split('\n').filter(Boolean)) {
+  // 忽略测试运行产物(.artifacts):它们是套件运行时生成的输出,不是往锁定套件里新增的源码。
+  for (const file of added.split('\n').filter(Boolean).filter((f) => !f.includes('/.artifacts/'))) {
     assert.ok(!existingTopLevel.has(file.split('/')[2]),
       `不许往既有锁定套件里新增文件(只有全新条目可以):${file}`);
   }
