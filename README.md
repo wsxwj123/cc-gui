@@ -278,6 +278,29 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.428</b>(2026-10-21)· 优化 2 条 · 修复 1 条</summary>
+
+**优化**
+
+<details><summary>第三方 provider 的模型名兜底</summary>
+
+切到 Cmdcode、DeepSeek 等非 Claude 模型 provider 后,插件、hook、旧脚本里硬编码的 `claude-*` 模型名会被本地代理自动换成当前正在使用的模型再转发,不再被上游以 400 拒绝;provider 模型列表里已有的模型、以及显式选择的名字不会被改写。
+
+</details>
+
+<details><summary>分屏操作按钮只留图标</summary>
+
+分屏 2 个以上窗格时,消息操作区只显示图标,不再把「重做/分叉」文字挤成竖排;单屏与手机保持原样。
+
+</details>
+
+**修复**
+
+- 常驻代理 daemon 与 GUI 使用同一映射目标,并同步最新代理代码;需要重启常驻代理后生效。
+
+</details>
+
+<details>
 <summary><b>v0.2.427</b>(2026-10-20)· 优化 4 条 · 修复 1 条</summary>
 
 **优化**
