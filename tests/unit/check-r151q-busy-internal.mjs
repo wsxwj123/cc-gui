@@ -5,6 +5,7 @@
 //   ④ 内部回合结果已出、只差输入预测(收尾窗最长约 4 秒)不算在跑:用户 /chat 等它收尾;到点仍没收尾 → 409,不强制中止它。
 //   ⑤ 内部回合收尾(转空闲)后主 agent 复活续跑:仍算内部回合在跑 → 用户 /chat 立即 409,不中止它;
 //   ⑥ 用户自己的回合复活续跑:不当成内部回合 → 后到的用户消息不 409,照旧打断它起回合。
+//   ⑦ "用户在等"在长的内部回合里先过期:回合收尾时从收尾时刻重新计 60 秒,下一条内部回合 409(退回排队)。
 // node tests/unit/check-r151q-busy-internal.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync } from 'node:fs';
@@ -195,6 +196,39 @@ try {
   eq(userWaitingOnSession(S5), false, '没记"用户在等"');
   await waitFor(() => snap(user8.body.pid)?.idle, '新的用户回合收尾');
   delete ctl.afterResult;
+
+  // ── ⑦ "用户在等"在长的跨会话回合里先过期:回合收尾时从此刻重新计 60 秒,下一条跨会话消息不抢在用户消息前面 ──────
+  // 回合跑多久按时钟:409 之后把 Date.now 拨快 61 秒(标记按 Date.now 判到期),再放回合跑完。
+  const S6 = uuid(6);
+  let finishLong;
+  const longGate = new Promise((r) => { finishLong = r; });
+  const prevReply = ctl.reply;
+  ctl.reply = (input) => (String(input?.message?.content).includes('LONG') ? longGate.then(() => 'ok') : prevReply(input));
+  const lg = await startInternalTurn(BODY({ sessionId: S6, prompt: 'auto LONG' }), INTERNAL);
+  eq(lg.status, 200, '长的跨会话回合起来了');
+  const lgPid = lg.body.pid;
+  await waitFor(() => snap(lgPid)?.busy, '长的跨会话回合在跑');
+  const user9 = await api('/chat', BODY({ sessionId: S6, prompt: 'user while long auto' }));
+  eq([user9.status, userWaitingOnSession(S6)], [409, true], '用户 /chat 409,记"用户在等"');
+  try {
+    Date.now = () => realNow() + 61_000;
+    eq(userWaitingOnSession(S6), false, '回合跑过 60 秒:标记先过期了');
+    finishLong();
+    await waitFor(() => snap(lgPid)?.idle, '长的跨会话回合收尾');
+    eq(userWaitingOnSession(S6), true, '收尾时这一回合里用户等过(标记已过期)→ 从此刻重新计时');
+    const auto3 = await startInternalTurn(BODY({ sessionId: S6, prompt: 'auto next' }), INTERNAL);
+    eq([auto3.status, auto3.body.code], [409, 'CHAT_SESSION_BUSY'], '下一条跨会话消息退回排队,不抢在用户消息前面');
+    Date.now = () => realNow() + 61_000 + 55_000;
+    eq(userWaitingOnSession(S6), true, '续期按收尾时刻算(55 秒后仍在)');
+    Date.now = () => realNow() + 61_000 + 62_000;
+    eq(userWaitingOnSession(S6), false, '续的是 60 秒,不是一直挂着(62 秒后到期)');
+  } finally {
+    Date.now = realNow;
+    ctl.reply = prevReply;
+  }
+  const user10 = await api('/chat', BODY({ sessionId: S6, prompt: 'user after long auto' }));
+  eq(user10.status, 200, '用户消息照常起回合');
+  await waitFor(() => snap(user10.body.pid)?.idle, '用户回合收尾');
   console.log(`PASS check-r151q-busy-internal(${checks} 项)`);
 } finally {
   unhook?.();

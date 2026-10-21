@@ -2015,7 +2015,12 @@ function settleSlotTurn(slot, fallback = 'completed') {
   if (slot) {
     // r151q 第 9 项 (a):回合收尾就清"本回合是跨会话自动处理"(先清再报结束通知)。不放进 notifyTurnEnd:回合结束通知每回合
     // 只报一次,主 agent 复活续跑(标记按 turnSource 写回)那段的收尾不再报,放在那里就清不掉了。
+    // (c):跨会话回合里有用户消息被 409 过(userWaitedDuringTurn,含"用户在等"已在长回合里过期的)→ 从此刻重新计 60 秒。
+    // 赶在回合结束通知之前(跨会话调度据此投下一条),下一条跨会话消息才不会抢在那条用户消息前面。
+    const renewUserWaiting = !!slot.internalTurn && !!slot.userWaitedDuringTurn;
     slot.internalTurn = false;
+    slot.userWaitedDuringTurn = false;
+    if (renewUserWaiting) noteUserWaiting(slot.sessionId);
     notifyTurnEnd(slot, slot.runId); // r151b:回合结束通知(没挂接 = 跳过;回合收尾与进程收尾都经过这里)
   }
   const rec = slot?.turnRecord;
@@ -2621,6 +2626,8 @@ async function handleChatPost(req, res) {
           // r151q 第 9 项 (a)/(c):本回合是不是内部回合(跨会话自动处理)记在槽上;起的是用户回合就清掉"用户在等"。
           s.internalTurn = !!internal;
           s.turnSource = internal ? 'internal' : 'user';
+          // 跨会话回合开始时"用户在等"还没到期(钩子 await 等让出期间用户被 409)= 这一回合里用户等过,收尾时要续期
+          s.userWaitedDuringTurn = !!internal && userWaitingOnSession(sessionId);
           if (!internal) clearUserWaiting(sessionId);
           notifyTurnStart(s, alivePid, true, turnTag, undefined, turnParams); // r151b:回合开始(没挂接 = 跳过)
           s.input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
@@ -2846,6 +2853,8 @@ async function handleChatPost(req, res) {
     internalTurn: !!internal,
     // 本回合来源('internal' = 跨会话自动处理 / 'user'),只在开回合时写:回合收尾后主 agent 复活续跑,据此把 internalTurn 写回。
     turnSource: internal ? 'internal' : 'user',
+    // 跨会话回合里有没有用户消息被 409 过(收尾时据此给"用户在等"续期,见 settleSlotTurn);冷启占位期被拒的,开回合时标记还没到期。
+    userWaitedDuringTurn: !!internal && userWaitingOnSession(sessionId),
   };
   activeProcesses.set(procId, slot);
   // r151q 第 9 项:槽已登记(上面到这里没有 await),内部回合的占住由槽接替,撤掉冷启占位;起的是用户回合就清掉"用户在等"。
@@ -3265,6 +3274,7 @@ async function handleChatPost(req, res) {
           // r151q 第 9 项:续跑的还是收尾前那一回合 —— 它是跨会话回合,就把收尾时清掉的标记写回(用户消息照旧 409、不中止它);
           // 用户自己的回合续跑仍按用户回合算(用户新消息照旧可以打断它)。
           slot.internalTurn = slot.turnSource === 'internal';
+          slot.userWaitedDuringTurn = slot.internalTurn && userWaitingOnSession(slot.sessionId); // 收尾时续过期的,续跑这段同样算
           if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
           // 复活=主 agent 续跑,则之前被 4s 去抖过早缓冲进 earlyLines 的 done 是错的:若 SSE 在
           // finalize 前已断(WebView 空闲掐断/切窗格),done 落 earlyLines,reattach 回放到它会
@@ -3537,14 +3547,20 @@ function sessionHeldByInternalTurn(sessionId) {
   return false;
 }
 // 用户消息被 409 CHAT_SESSION_BUSY 后,该会话"用户在等" 60 秒:期间跨会话调度不在它上面起新的自动回合(防止连续的跨会话
-// 消息每次都先抢到空闲的会话、用户消息一直发不出去)。该会话起了用户回合,或到期,就清掉。只在内存(重启即无,不影响正确性)。
+// 消息每次都先抢到空闲的会话、用户消息一直发不出去)。该会话起了用户回合,或到期,就清掉;跨会话回合收尾时,这一回合里用户等过的
+// (含已过期的)从收尾时刻重新计 60 秒。只在内存(重启即无,不影响正确性)。
 const USER_WAITING_MS = 60_000;
 const userWaitingSessions = new Map(); // 会话 id 小写 → 到期时刻
 function noteUserWaiting(sessionId) {
   if (typeof sessionId !== 'string' || !sessionId) return;
   const now = Date.now();
   for (const [key, until] of userWaitingSessions) if (until <= now) userWaitingSessions.delete(key); // 顺手清过期的,表不累积
-  userWaitingSessions.set(sessionModeStateKey(sessionId), now + USER_WAITING_MS);
+  const key = sessionModeStateKey(sessionId);
+  userWaitingSessions.set(key, now + USER_WAITING_MS);
+  // 正占着该会话的跨会话回合记下"这一回合里用户等过":回合跑过 60 秒、标记先过期了,收尾时也要重新计时(见 settleSlotTurn)
+  for (const s of activeProcesses.values()) {
+    if (s.internalTurn && String(s.sessionId || '').toLowerCase() === key) s.userWaitedDuringTurn = true;
+  }
 }
 function clearUserWaiting(sessionId) {
   if (typeof sessionId === 'string' && sessionId) userWaitingSessions.delete(sessionModeStateKey(sessionId));
