@@ -35,32 +35,41 @@ function isProtectedName(protectedNames, name) {
   return Array.isArray(protectedNames) && protectedNames.includes(name);
 }
 
+// 这个名字发往当前上游时会不会被原样放行(规则 2、4 与 r151q 的保护名单例外)。请求名和映射目标过的是同一道门:
+// 映射目标若自己都过不了门(例如不卖 claude 的 provider 下 settings 残留的 claude 名),映射过去照样 400。
+function passesGate(name, list, protectedNames) {
+  if (list.includes(name)) return true; // 规则 2
+  if (!CLAUDE_MODEL_RE.test(name)) return true; // 规则 4
+  return isProtectedName(protectedNames, name) && list.some((m) => CLAUDE_MODEL_RE.test(m));
+}
+
 /**
  * 按接口第 2 节规则 1–4 推导实际发往上游的模型名。入参只读,不改调用方对象。
  *
  * 1. 请求 model 缺失/空/非字符串 → 原样返回;
  * 2. models 列表里显式包含请求 model → 原样返回(规则 2 优先于规则 3);
- * 3. claude 名且不在列表 → settingsTarget,其次 defaultModel,再次 models[0],都缺失则原样;
+ * 3. claude 名且不在列表 → settingsTarget 里第一个过得了同一道门的候选,其次 defaultModel,再次 models[0],都缺失则原样;
  *    例外(r151q):列表里本来就有 claude 名(这家卖 claude)且请求名在 protectedNames 里 → 原样。
  *    列表里没有 claude 名时 protectedNames 不起作用(残留的 claude 名照旧映射,与改动前相同)。
+ *    候选过门与请求名同一套判定:不卖 claude 时,不在列表的 claude 名候选被跳过(否则会映射成自己、上游 400);
+ *    defaultModel / models[0] 是 setter 给的值,不再过门(与改动前相同)。
  * 4. 其它名字 → 原样返回。
  *
  * @param {unknown} requested 客户端请求体里的 model
  * @param {{ models?: unknown, defaultModel?: unknown, settingsTarget?: unknown, protectedNames?: Set<string>|string[] }} [opts]
- *   当前 provider 的模型列表与默认模型(setter 给的);settingsTarget / protectedNames 来自用户级 settings(见 readModelSettings)
+ *   当前 provider 的模型列表与默认模型(setter 给的);settingsTarget(单个名字,或按优先级排好的候选数组)/
+ *   protectedNames 来自用户级 settings(见 readModelSettings)
  * @returns {unknown} effectiveModel(未映射时与 requested 逐值相同)
  */
 export function resolveFallbackModel(requested, { models, defaultModel, settingsTarget, protectedNames } = {}) {
   if (!isNonEmptyString(requested)) return requested; // 规则 1
   const list = cleanModelList(models);
-  if (list.includes(requested)) return requested; // 规则 2
-  if (!CLAUDE_MODEL_RE.test(requested)) return requested; // 规则 4
-  if (isProtectedName(protectedNames, requested) && list.some((m) => CLAUDE_MODEL_RE.test(m))) return requested;
-  // 规则 3:settings 的主模型 > defaultModel > models[0];都没有就原样(不凭空猜)。
-  let fallback = '';
-  if (isNonEmptyString(settingsTarget)) fallback = settingsTarget;
-  else if (isNonEmptyString(defaultModel)) fallback = defaultModel;
-  else if (list.length > 0) fallback = list[0];
+  if (passesGate(requested, list, protectedNames)) return requested; // 规则 2、4 与保护名单例外
+  // 规则 3:settings 里第一个过得了门的候选 > defaultModel > models[0];都没有就原样(不凭空猜)。
+  const candidates = (Array.isArray(settingsTarget) ? settingsTarget : [settingsTarget]).filter(isNonEmptyString);
+  let fallback = candidates.find((name) => passesGate(name, list, protectedNames)) || '';
+  if (!fallback && isNonEmptyString(defaultModel)) fallback = defaultModel;
+  else if (!fallback && list.length > 0) fallback = list[0];
   return fallback || requested;
 }
 
@@ -75,8 +84,10 @@ export function normalizeModelName(v) {
 }
 
 /**
- * 从已解析的 settings 对象推出 { target, protectedNames }(纯函数,export 仅为可单测)。
- *   target         映射目标:env.ANTHROPIC_MODEL,其次顶层 model(规范化后;是 CLI 别名的跳过);都没有 → ''
+ * 从已解析的 settings 对象推出 { target, targets, protectedNames }(纯函数,export 仅为可单测)。
+ *   targets        映射目标候选,按优先级:env.ANTHROPIC_MODEL,其次顶层 model(规范化后;是 CLI 别名的跳过、重复的只留一个)。
+ *                  哪个能用要看当前 provider 的列表,在 resolveFallbackModel 里定。
+ *   target         targets[0],没有 → ''
  *   protectedNames env 里所有以 _MODEL 结尾的键的值 + 顶层 model,规范化后的集合
  */
 export function modelSettingsFrom(settings) {
@@ -93,7 +104,8 @@ export function modelSettingsFrom(settings) {
     const name = normalizeModelName(v);
     return name && !CLI_MODEL_ALIASES.has(name.toLowerCase()) ? name : '';
   };
-  return { target: asTarget(env.ANTHROPIC_MODEL) || asTarget(s.model), protectedNames };
+  const targets = [...new Set([asTarget(env.ANTHROPIC_MODEL), asTarget(s.model)].filter(Boolean))];
+  return { target: targets[0] || '', targets, protectedNames };
 }
 
 // 上一次成功读到的结果(按文件路径 + mtime/size 缓存);读失败不缓存,下次照样重读。
@@ -170,7 +182,7 @@ export function resolveUpstreamModel(requested, up, opts) {
   return resolveFallbackModel(requested, {
     models,
     defaultModel,
-    settingsTarget: snap ? snap.target : '',
+    settingsTarget: snap ? snap.targets : '',
     protectedNames: snap ? snap.protectedNames : undefined,
   });
 }

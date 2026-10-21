@@ -43,6 +43,27 @@ try {
   assert.equal(resolveFallbackModel('claude-sonnet-4-6', { models: ['m1'], defaultModel: 'm1', settingsTarget: '' }), 'm1', 'settings 没目标 → setter');
   assert.equal(resolveFallbackModel('claude-sonnet-4-6', { models: ['m1'], settingsTarget: 7 }), 'm1', '目标不是字符串 → models[0]');
 
+  // ── 2b. 映射目标过同一道门:不卖 claude 时,settings 残留的 claude 名候选跳过、取下一项;都不行 → setter 给的值 ──
+  const noClaude = ['m1', 'm2'];
+  const residue = modelSettingsFrom({ env: { ANTHROPIC_MODEL: 'claude-opus-4-7' }, model: 'm2' });
+  assert.deepEqual(residue.targets, ['claude-opus-4-7', 'm2'], '候选按优先级:env.ANTHROPIC_MODEL,其次顶层 model');
+  assert.equal(residue.target, 'claude-opus-4-7', 'target = 第一个候选');
+  assert.deepEqual(modelSettingsFrom({ env: { ANTHROPIC_MODEL: 'm1[1m]' }, model: 'm1' }).targets, ['m1'], '重复候选只留一个');
+  const viaSettings = (requested, models, cfg, defaultModel) => resolveFallbackModel(requested, {
+    models, defaultModel, settingsTarget: cfg.targets, protectedNames: cfg.protectedNames,
+  });
+  assert.equal(viaSettings('claude-opus-4-7', noClaude, residue, 'm1'), 'm2', '残留 claude 名不当目标(不映射成自己)→ 顶层 model');
+  assert.equal(viaSettings('claude-sonnet-4-6', noClaude, residue, 'm1'), 'm2', '别的 claude 名也不映射到残留名');
+  const allClaude = modelSettingsFrom({ env: { ANTHROPIC_MODEL: 'claude-opus-4-7[1m]' }, model: 'claude-sonnet-4-6' });
+  assert.equal(viaSettings('claude-opus-4-7', noClaude, allClaude, 'm1'), 'm1', '候选都是残留 claude 名 → setter 的 defaultModel(与改动前相同)');
+  assert.equal(viaSettings('claude-haiku-4-5', noClaude, allClaude, undefined), 'm1', '没有 defaultModel → models[0]');
+  assert.equal(resolveFallbackModel('claude-opus-4-7', { models: noClaude, defaultModel: 'm1', settingsTarget: 'claude-opus-4-7' }), 'm1', '单个字符串目标同样过门');
+  assert.equal(resolveFallbackModel('claude-haiku-4-5', { models: [], settingsTarget: 'claude-opus-4-7' }), 'claude-haiku-4-5', '列表空、没有 setter 值 → 原样,不改成过不了门的名字');
+  assert.equal(resolveFallbackModel('claude-sonnet-4-6', { models: noClaude, defaultModel: 'm1', settingsTarget: ['m9'] }), 'm9', '非 claude 名的目标不在列表也照用(与改动前相同)');
+  assert.equal(viaSettings('claude-sonnet-4-6', sells, modelSettingsFrom({ env: { ANTHROPIC_MODEL: 'claude-opus-4-7' } }), 'm1'), 'claude-opus-4-7', '列表里有的 claude 名能当目标');
+  assert.equal(viaSettings('claude-sonnet-4-6', sells, modelSettingsFrom({ env: { ANTHROPIC_MODEL: 'claude-opus-4-8' } }), 'm1'), 'claude-opus-4-8',
+    '卖 claude:配置过的主模型本身会被原样放行,也就能当目标');
+
   // ── 3. 读 settings:文件不存在、缓存、刚改过不信缓存、失败沿用且不缓存失败、日志不带内容、BOM、从没成功过 ──
   const f = join(root, 'settings.json');
   assert.equal(readModelSettings({ file: f, logger }), null, '文件不存在 → null(退回 setter)');
@@ -84,6 +105,12 @@ try {
   assert.equal(logs.length, before, '不需要映射时不读 settings');
   assert.equal(resolveUpstreamModel('claude-sonnet-4-6', up, { file: join(root, 'none.json'), logger }), 'm1', '没有 settings → setter 目标');
   assert.equal(resolveUpstreamModel('claude-sonnet-4-6', null, { file: join(root, 'none.json'), logger }), 'claude-sonnet-4-6', '没有上游快照 → 原样');
+  // 复查发现的场景:不卖 claude 的 provider,settings 主模型残留成 claude 名 → 落到 setter 的默认模型,而不是映射成自己
+  const r = join(root, 'residue.json');
+  writeFileSync(r, JSON.stringify({ env: { ANTHROPIC_MODEL: 'claude-opus-4-7[1m]' } }));
+  const upNoClaude = { models: ['m1', 'm2'], defaultModel: 'm1' };
+  assert.equal(resolveUpstreamModel('claude-opus-4-7', upNoClaude, { file: r, logger }), 'm1', '残留主模型 = 请求名 → setter 的默认模型');
+  assert.equal(resolveUpstreamModel('claude-sonnet-4-6', upNoClaude, { file: r, logger }), 'm1', '其它 claude 名 → setter 的默认模型');
   console.log('PASS check-r151q-model-fallback-settings');
 } finally {
   rmSync(root, { recursive: true, force: true }); // 只清本测试自己 mkdtemp 出来的目录
