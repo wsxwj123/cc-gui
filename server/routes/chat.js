@@ -1167,6 +1167,7 @@ const runtimeHooks = { chatEntry: null, turnStart: null, turnEnd: null, preToolU
  *   抛错都按没挂接处理(既有判定照常);2 秒没给结果按"检查失效"处理(既有判定照常,记下时刻,见 preToolUseGuardTimeoutAt)。
  * · sessionOptions(view) → null | { mcpServers?, autoAllow? }(r151c,必须同步返回):冷启建 options 时调用。view 是本槽的只读窄视图
  *   (sessionId、runId、turnEpoch、guiMode、cwd 的 getter,取的是调用那一刻的值)。mcpServers(对象)并进 options.mcpServers;
+ *   挂上 mcpServers 时本进程 env 另置 ENABLE_TOOL_SEARCH=false / MCP_CONNECTION_NONBLOCKING=false(见 applySessionOptions);
  *   autoAllow(完整工具名的字符串数组)记在本槽:canUseTool 在既有判定之前,只在"名单含此名且挂上它的那个挂接点仍在位"时放行
  *   (本文件不认识任何工具名;撤掉挂接点即不再放行;没经它挂上工具的槽一概不放行)。抛错、返回 Promise 或形状不对 → 什么都不挂,
  *   记一行日志。挂着它时复用兼容键多一项 xs:1(开关翻转后该会话下一条消息换新进程)。
@@ -1241,7 +1242,7 @@ export function notifyTurnStart(slot, pid, reused, tag, req, makeParams) {
 export const TURN_PARAM_KEYS = Object.freeze(['cwd', 'model', 'effort', 'addDirs', 'permissionMode', 'globalRead', 'appendSystemPrompt', 'promptSuggestions', 'keepAlive', 'maxBudgetUsd', 'genui']);
 
 // r151c:冷启建 options 时调 sessionOptions 挂接点(没挂接 = 跳过)。见 registerSessionRuntimeHooks 的说明;整体兜住,出错只是不挂。
-function applySessionOptions(slot, options) {
+export function applySessionOptions(slot, options) { // export 仅为可单测
   const fn = runtimeHooks.sessionOptions;
   if (!fn) return;
   const view = Object.freeze({
@@ -1258,7 +1259,19 @@ function applySessionOptions(slot, options) {
     const { mcpServers, autoAllow } = out;
     if (mcpServers !== undefined && (!mcpServers || typeof mcpServers !== 'object' || Array.isArray(mcpServers))) throw new Error('mcpServers 必须是对象');
     if (autoAllow !== undefined && (!Array.isArray(autoAllow) || !autoAllow.every((n) => typeof n === 'string' && n))) throw new Error('autoAllow 必须是工具名数组');
-    if (mcpServers) options.mcpServers = { ...(options.mcpServers || {}), ...mcpServers };
+    if (mcpServers) {
+      options.mcpServers = { ...(options.mcpServers || {}), ...mcpServers };
+      // CLI 2.1.x 默认开启工具搜索,把 MCP 工具推迟到 ToolSearch 后面(首屏工具表只剩 DeferredToolPlaceholder);
+      // 进程内会话工具必须在第一条请求的工具表里,模型才能直接调用。SDK 的 alwaysLoad 元数据在 SDK 0.3.306 + CLI
+      // 2.1.306 下实测仍不足(P01:开启跨会话后同会话下一条消息的工具表依旧没有 mcp__ccgui-sessions__*)。
+      // 这两个键只写本次 spawn 的 options.env,不改 ~/.claude/settings.json、不改全局/用户偏好:
+      //   · ENABLE_TOOL_SEARCH=false:本进程关掉工具搜索,不做 deferred loading;
+      //   · MCP_CONNECTION_NONBLOCKING=false:CLI 等 MCP server 连上再发首个请求,避免第一条消息先带占位/缺工具、
+      //     连上后工具表再变形(进程内 server 连接是瞬时的,代价可忽略)。
+      // 第三方 provider 的全局策略原本就把这两个键写成 false(utils/prompt-cache-env.js);这里只是把同一结论限定到
+      // 挂着进程内工具的这一次 spawn,其余 env 原样保留。
+      options.env = { ...(options.env || {}), ENABLE_TOOL_SEARCH: 'false', MCP_CONNECTION_NONBLOCKING: 'false' };
+    }
     if (autoAllow?.length) slot.sessionAutoAllow = { names: new Set(autoAllow), hook: fn };
   } catch (e) {
     console.warn(`[r151c] sessionOptions 挂接点出错,本进程不挂会话工具:${e?.message || e}`);
