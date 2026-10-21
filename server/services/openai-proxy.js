@@ -59,23 +59,31 @@ export function setOpenAIUpstream(next) {
     upstream = null;
     return upstream;
   }
-  // r151m:defaultModel 是「claude 名兜底映射」的目标模型(接口文件里叫 model);
-  // 两种写法都收,defaultModel 优先。models 是当前 provider 的模型列表。
+  // r151m:两个字段各司其职,不再互相覆盖:
+  //   model        —— provider 当前模型,供 upstreamNoVision 判定视觉能力(请求无 model 时兜底);
+  //   defaultModel —— 「claude 名兜底映射」的目标模型(接口文件里叫 model)。
+  // 兼容只传其中一个的旧调用点:缺哪边就用另一边补;baseURL+apiKey 的旧调用仍得空串。
+  const model = next.model
+    ? String(next.model)
+    : (next.defaultModel ? String(next.defaultModel) : '');
   const defaultModel = next.defaultModel
     ? String(next.defaultModel)
-    : (next.model ? String(next.model) : '');
+    : model;
   upstream = {
     baseURL: String(next.baseURL).replace(/\/+$/, ''),
     apiKey: next.apiKey ? String(next.apiKey) : '',
-    // model 供 upstreamNoVision 判定 opencode+deepseek 场景剥图;不带 model 的旧调用
-    // (baseURL+apiKey)仍工作,model 为空、行为不变。
-    model: defaultModel,
+    model,
     defaultModel,
     models: Array.isArray(next.models)
       ? next.models.filter((m) => typeof m === 'string' && m.length > 0)
       : [],
   };
   return upstream;
+}
+
+// 只读快照,仅供单测断言 setter 的 model/defaultModel 分离;产品路径不调用。
+export function getOpenAIUpstreamForTest() {
+  return upstream ? { ...upstream, models: [...upstream.models] } : null;
 }
 
 export function getProxyPort() {

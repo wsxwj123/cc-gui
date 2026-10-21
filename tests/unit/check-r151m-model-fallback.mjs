@@ -4,18 +4,26 @@
 //     models[0] 回落、两者都缺、非 claude 名、大小写/下划线形态、纯函数不改入参。
 //   - noteModelFallback:同组合只记一次、不同组合各记一次、未映射不记、可注入 logger、
 //     默认 console.warn 路径、日志只含模型名不含 key/token 字样。
+//   - setOpenAIUpstream:model(视觉回退)与 defaultModel(映射目标)分开存,不再互相覆盖;
+//     只传一边时另一边兜底;upstreamNoVision 读 model 而非 defaultModel;测试快照是副本。
 // 变异哨兵(每条都实际验证过红):
 //   S1 去掉规则 2(models.includes 提前返回)→ t2b 红
 //   S2 去掉 defaultModel 优先、恒用 models[0] → t3a 红
 //   S3 去掉 models[0] 回落 → t3c 红
 //   S4 去掉 CLAUDE_MODEL_RE 的 i 标志 → t4a 红
 //   S5 去掉 noteModelFallback 的 loggedPairs 去重 → t5a 红
+//   S6 setter 里 model 又写成 defaultModel(旧 bug)→ t9a 红
 import assert from 'node:assert/strict';
 import {
   resolveFallbackModel,
   noteModelFallback,
   resetModelFallbackLogState,
 } from '../../server/utils/model-fallback.js';
+import {
+  setOpenAIUpstream,
+  getOpenAIUpstreamForTest,
+  upstreamNoVision,
+} from '../../server/services/openai-proxy.js';
 
 const DEFAULT = 'deepseek/x';
 const LIST = [DEFAULT, 'deepseek/v3'];
@@ -125,6 +133,49 @@ const LIST = [DEFAULT, 'deepseek/v3'];
   }
   assert.equal(captured.length, 1, 't8c: console.warn 只收到一条');
   assert.ok(captured[0].includes('claude-log-once-unit') && captured[0].includes(DEFAULT), 't8d: 捕获行含两个模型名');
+}
+
+// ── t9 setOpenAIUpstream:model(视觉回退)与 defaultModel(映射目标)分开存 ──
+{
+  const base = { baseURL: 'https://relay.example.com/v1/', apiKey: 'unit-test-key' };
+
+  setOpenAIUpstream({ ...base, model: 'vision-model', defaultModel: 'map-target', models: ['map-target', 7, '', 'vision-model'] });
+  let up = getOpenAIUpstreamForTest();
+  assert.equal(up.model, 'vision-model', 't9a: model 保留传入值,不被 defaultModel 覆盖');
+  assert.equal(up.defaultModel, 'map-target', 't9b: defaultModel 优先取传入的 defaultModel');
+  assert.deepEqual(up.models, ['map-target', 'vision-model'], 't9c: models 过滤非字符串/空串');
+  assert.equal(up.baseURL, 'https://relay.example.com/v1', 't9d: baseURL 去尾斜杠');
+
+  // 只传 model(旧调用点)→ defaultModel 兜底
+  setOpenAIUpstream({ ...base, model: 'only-model' });
+  up = getOpenAIUpstreamForTest();
+  assert.equal(up.model, 'only-model', 't9e: 只传 model 时 model 保留');
+  assert.equal(up.defaultModel, 'only-model', 't9f: 只传 model 时 defaultModel 兜底');
+
+  // 只传 defaultModel → model 兜底(视觉回退不因此丢值)
+  setOpenAIUpstream({ ...base, defaultModel: 'only-default' });
+  up = getOpenAIUpstreamForTest();
+  assert.equal(up.model, 'only-default', 't9g: 只传 defaultModel 时 model 兜底');
+  assert.equal(up.defaultModel, 'only-default', 't9h: 只传 defaultModel 时 defaultModel 保留');
+
+  // 视觉回退必须读 model:两个模型视觉能力相反,defaultModel 固定为有视觉的 gpt-4o
+  setOpenAIUpstream({ ...base, model: 'deepseek-v4-flash-vision-exp', defaultModel: 'gpt-4o', models: ['gpt-4o'] });
+  assert.equal(upstreamNoVision(), false, 't9i: upstreamNoVision 按 model(有视觉)判,不按 defaultModel');
+  setOpenAIUpstream({ ...base, model: 'deepseek-v4-pro', defaultModel: 'gpt-4o', models: ['gpt-4o'] });
+  assert.equal(upstreamNoVision(), true, 't9j: upstreamNoVision 按 model(无视觉)判,不被 defaultModel 的有视觉覆盖');
+
+  // 快照是副本:改返回值不影响代理内部状态
+  const snap = getOpenAIUpstreamForTest();
+  snap.model = 'tampered';
+  snap.defaultModel = 'tampered';
+  snap.models.push('injected');
+  up = getOpenAIUpstreamForTest();
+  assert.equal(up.model, 'deepseek-v4-pro', 't9k: 改快照 model 不影响内部');
+  assert.equal(up.defaultModel, 'gpt-4o', 't9l: 改快照 defaultModel 不影响内部');
+  assert.deepEqual(up.models, ['gpt-4o'], 't9m: 改快照 models 不影响内部');
+
+  assert.equal(setOpenAIUpstream(null), null, 't9n: 传 null 清空上游');
+  assert.equal(getOpenAIUpstreamForTest(), null, 't9o: 清空后快照为 null');
 }
 
 console.log('check-r151m-model-fallback: all assertions passed');

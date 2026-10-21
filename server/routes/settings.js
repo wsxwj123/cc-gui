@@ -1612,8 +1612,9 @@ async function switchToAnthropicUpstream(up, requestedModel, res) {
   await backupSettings(ts);
   await writeFile(SETTINGS_PATH, JSON.stringify(next, null, 2));
   // r145 F3:落盘成功之后才切上游(同 switchToOpenAIUpstream):写盘失败时上游保持切换前的值。
-  // r151m:同上,anthropic 透传路径也带 models + defaultModel(映射目标 = chosen)。
-  setAnthropicUpstream({ baseURL: up.baseURL, authToken: up.authToken, models: up.models, defaultModel: chosen });
+  // r151m:同上,anthropic 透传路径也带 models + model/defaultModel(映射目标 = chosen);
+  // model 与 defaultModel 同值分开传,与 openai 路径同口径。
+  setAnthropicUpstream({ baseURL: up.baseURL, authToken: up.authToken, models: up.models, model: chosen, defaultModel: chosen });
   await ensureOnboardingFlag(); // 第三方无需登录:跳过终端首次向导(新机地区屏蔽根治)
   // Persist the active marker (id/name/baseURL/model/models — NEVER the token).
   try {
@@ -2884,9 +2885,11 @@ export async function restoreOpenAIProvider() {
   if (!active?.providerId) return;
   // Only restore if settings.json actually still points at the proxy — the user
   // may have switched back to a claude provider since.
+  let settingsModel = '';
   try {
     const cur = JSON.parse(await readFile(SETTINGS_PATH, 'utf-8'));
     if (!String(cur?.env?.ANTHROPIC_BASE_URL || '').includes('127.0.0.1')) return;
+    settingsModel = String(cur?.env?.ANTHROPIC_MODEL || '');
   } catch { return; }
   const oaRows = await ccSwitchQuery(
     "SELECT id, name, settings_config FROM providers WHERE app_type IN ('codex','opencode')"
@@ -2900,8 +2903,12 @@ export async function restoreOpenAIProvider() {
   }
   if (!upstream) return;
   await startOpenAIProxy();
-  // r151m:重启恢复时 marker 里已持久化 models/model,原样交给代理做兜底映射目标。
-  setOpenAIUpstream({ baseURL: upstream.baseURL, apiKey: upstream.apiKey, model: active.model, models: active.models, defaultModel: active.model });
+  // r151m:统一映射目标(与 GUI 切换、daemon 8798/8799 同序同值):
+  // settings.env.ANTHROPIC_MODEL → marker.model → marker.defaultModel → models[0]。
+  // 优先 settings:半损/legacy marker 缺 model 时不会落到 models[0],与 CLI 实际在用的模型一致。
+  const target = settingsModel || active.model || active.defaultModel || (active.models || [])[0] || '';
+  // model 供 upstreamNoVision 视觉回退(请求体无 model 时),defaultModel 是映射目标;两者分开传。
+  setOpenAIUpstream({ baseURL: upstream.baseURL, apiKey: upstream.apiKey, model: target, defaultModel: target, models: active.models });
 }
 
 // Boot-time twin of restoreOpenAIProvider for the Anthropic passthrough proxy.
@@ -2934,10 +2941,11 @@ export async function restoreAnthropicProvider() {
   }
   if (!baseURL || !authToken) return;
   await startAnthropicProxy();
-  // r151m:marker 的 model/models 是兜底映射来源;marker 无 model 时退回 settings.json
-  // 的 ANTHROPIC_MODEL(GUI 切 provider 时写进去,daemon 也从这里读)。
-  const defaultModel = active.model || settingsModel;
-  setAnthropicUpstream({ baseURL, authToken, models: active.models, defaultModel });
+  // r151m:统一映射目标(与 GUI 切换、daemon 8798/8799 同序同值):
+  // settings.env.ANTHROPIC_MODEL → marker.model → marker.defaultModel → models[0]。
+  // 优先 settings:半损/legacy marker 缺 model 时不会落到 models[0],与 CLI 实际在用的模型一致。
+  const target = settingsModel || active.model || active.defaultModel || (active.models || [])[0] || '';
+  setAnthropicUpstream({ baseURL, authToken, models: active.models, model: target, defaultModel: target });
 }
 
 export default router;
