@@ -61,7 +61,7 @@ assert.equal(hasAnyTier({ opus: 'x' }), true);
 {
   const base = { enabled: true, providerId: 'p', models: ['a', 'claude-sonnet-5-5', 'a', ''], settingsSonnet: 'a', sonnetTierSet: true };
   assert.deepEqual(buildAutoAuditStatus({ ...base, official: false }),
-    { official: false, enabled: true, providerId: 'p', auditModel: 'a', auditModelSource: 'tier', models: ['a', 'claude-sonnet-5-5'], unusable: ['claude-sonnet-5-5'] });
+    { official: false, enabled: true, providerId: 'p', auditModel: 'a', auditModelSource: 'tier', auditModelUnusable: false, models: ['a', 'claude-sonnet-5-5'], unusable: ['claude-sonnet-5-5'] });
   assert.equal(buildAutoAuditStatus({ ...base, official: false, sonnetTierSet: false }).auditModelSource, 'default');
   const off = buildAutoAuditStatus({ ...base, official: true });
   assert.equal(off.auditModel, null); assert.equal(off.auditModelSource, null); assert.deepEqual(off.models, []);
@@ -69,6 +69,13 @@ assert.equal(hasAnyTier({ opus: 'x' }), true);
   assert.equal(unk.providerId, null); assert.deepEqual(unk.models, []); assert.equal(unk.auditModelSource, 'default');
   const none = buildAutoAuditStatus({ ...base, official: false, settingsSonnet: undefined });
   assert.equal(none.auditModel, null); assert.equal(none.auditModelSource, null);
+  // r151q:auditModelUnusable 只按解析出的审核模型名判,认不出 provider(providerId null、models 为空)也照样判
+  for (const [sonnet, want] of [['claude-sonnet-5-5', true], ['Claude-Opus-5-5[1m]', true], ['r151q-audit', false], ['claude-sonnet-5', false]]) {
+    assert.equal(buildAutoAuditStatus({ ...base, official: false, settingsSonnet: sonnet }).auditModelUnusable, want, `auditModelUnusable:${sonnet}`);
+    assert.equal(buildAutoAuditStatus({ ...base, official: false, providerId: null, settingsSonnet: sonnet }).auditModelUnusable, want, `auditModelUnusable(认不出 provider):${sonnet}`);
+  }
+  assert.equal(buildAutoAuditStatus({ ...base, official: true, settingsSonnet: 'claude-sonnet-5-5' }).auditModelUnusable, false, '官方端点不判');
+  assert.equal(none.auditModelUnusable, false, '没有审核模型 → false');
 }
 
 // ── 6. computeAutoAuditStatus(隔离 HOME)──
@@ -87,11 +94,11 @@ const thirdParty = (sonnet = 'b') => write(SETTINGS, { env: { ANTHROPIC_BASE_URL
 
 // 没有 settings.json、没有当前 provider 记录 → 官方、认不出
 rmSync(SETTINGS, { force: true }); setActive(null); setOverrides({});
-assert.deepEqual(await computeAutoAuditStatus(), { official: true, enabled: false, providerId: null, auditModel: null, auditModelSource: null, models: [], unusable: [] });
+assert.deepEqual(await computeAutoAuditStatus(), { official: true, enabled: false, providerId: null, auditModel: null, auditModelSource: null, auditModelUnusable: false, models: [], unusable: [] });
 
 // 第三方 + provider 自带 sonnet 档 → tier
 thirdParty(); setActive('tp1');
-assert.deepEqual(await computeAutoAuditStatus(), { official: false, enabled: false, providerId: 'tp1', auditModel: 'b', auditModelSource: 'tier', models: ['a', 'b'], unusable: [] });
+assert.deepEqual(await computeAutoAuditStatus(), { official: false, enabled: false, providerId: 'tp1', auditModel: 'b', auditModelSource: 'tier', auditModelUnusable: false, models: ['a', 'b'], unusable: [] });
 // 覆盖层 {} → 压住自带档位 → default
 setOverrides({ tp1: { tierModels: {} } });
 assert.equal((await computeAutoAuditStatus()).auditModelSource, 'default');
@@ -109,12 +116,12 @@ setOverrides({});
 // openai 协议 provider:unusable 按规则列出;总开关开 → enabled
 write(join(GUI, 'prefs.json'), { thirdPartyAuto: true });
 thirdParty('c'); setActive('tp2');
-assert.deepEqual(await computeAutoAuditStatus(), { official: false, enabled: true, providerId: 'tp2', auditModel: 'c', auditModelSource: 'default', models: ['c', 'claude-opus-5-5'], unusable: ['claude-opus-5-5'] });
+assert.deepEqual(await computeAutoAuditStatus(), { official: false, enabled: true, providerId: 'tp2', auditModel: 'c', auditModelSource: 'default', auditModelUnusable: false, models: ['c', 'claude-opus-5-5'], unusable: ['claude-opus-5-5'] });
 write(join(GUI, 'prefs.json'), {});
 
 // 官方:内置官方 id + 官方 settings → providerId 是它;官方地址的自定义 provider 同样算官方
 write(SETTINGS, { env: {} }); setActive('builtin-official');
-assert.deepEqual(await computeAutoAuditStatus(), { official: true, enabled: false, providerId: 'builtin-official', auditModel: null, auditModelSource: null, models: [], unusable: [] });
+assert.deepEqual(await computeAutoAuditStatus(), { official: true, enabled: false, providerId: 'builtin-official', auditModel: null, auditModelSource: null, auditModelUnusable: false, models: [], unusable: [] });
 write(SETTINGS, { env: { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' } }); setActive('off1');
 assert.equal((await computeAutoAuditStatus()).providerId, 'off1');
 
@@ -125,7 +132,7 @@ write(SETTINGS, { env: {} }); setActive('tp1');
 assert.equal((await computeAutoAuditStatus()).providerId, null);
 // 记录指向已删的 provider → 认不出;settings 里的 sonnet 仍如实报(来源 default)
 thirdParty('b'); setActive('gone');
-assert.deepEqual(await computeAutoAuditStatus(), { official: false, enabled: false, providerId: null, auditModel: 'b', auditModelSource: 'default', models: [], unusable: [] });
+assert.deepEqual(await computeAutoAuditStatus(), { official: false, enabled: false, providerId: null, auditModel: 'b', auditModelSource: 'default', auditModelUnusable: false, models: [], unusable: [] });
 // settings.json 损坏 → 认不出,official 按读不出 = 官方(与服务端门控同判据)
 write(SETTINGS, '{ "env": { 损坏'); setActive('tp1');
 const broken = await computeAutoAuditStatus();

@@ -76,6 +76,10 @@ try {
     ['sonnet 空串', { ANTHROPIC_BASE_URL: TP, ANTHROPIC_DEFAULT_SONNET_MODEL: '' }, true, null],
     ['sonnet 不是字符串', { ANTHROPIC_BASE_URL: TP, ANTHROPIC_DEFAULT_SONNET_MODEL: 42 }, true, null],
     ['没有 sonnet', { ANTHROPIC_BASE_URL: TP }, true, null],
+    // r151q:sonnet 档在不可用名单里不注入(CLI 2.1.306 实测会改用内置 claude-sonnet-5)
+    ['sonnet 是 claude-sonnet-5-5', { ANTHROPIC_BASE_URL: TP, ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-5-5' }, true, null],
+    ['sonnet 是 Claude-Opus-5-5[1m]', { ANTHROPIC_BASE_URL: TP, ANTHROPIC_DEFAULT_SONNET_MODEL: 'Claude-Opus-5-5[1m]' }, true, null],
+    ['sonnet 是 claude-sonnet-5(不在名单)', { ANTHROPIC_BASE_URL: TP, ANTHROPIC_DEFAULT_SONNET_MODEL: 'claude-sonnet-5' }, true, 'claude-sonnet-5'],
     ['env 已写分类器模型 "user-pick"',
       { ANTHROPIC_BASE_URL: TP, ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-flash', CLAUDE_CODE_AUTO_MODE_MODEL: 'user-pick' }, true, null],
     ['env 已写分类器模型空串',

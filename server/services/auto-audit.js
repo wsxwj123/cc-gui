@@ -33,6 +33,8 @@ export function autoModeServerInjection(settingsEnv, enabled) {
 //   用户在 settings.json 显式写了该键就由它自己生效,不覆盖)。
 // 官方判据与 autoModeServerInjection 同源(isOfficialAnthropic)。注入值来自用户设置的模型名,
 // 不是任意环境输入。若 CLI 版本不认该变量,最坏情况与改动前相同(回落 sonnet 档/默认),不制造新故障。
+// r151q:sonnet 档在不可用名单里(isUnusableAuditor)就不注入 —— 实测显式传这类名字 CLI 照样改用内置
+// claude-sonnet-5,注入只会让人误以为它在审核;不注入与 CLI 实际行为一致,只减少注入、不新增。
 export function autoModeModelInjection(settingsEnv, enabled) {
   if (enabled !== true) return null;
   if (!settingsEnv || typeof settingsEnv !== 'object' || Array.isArray(settingsEnv)) return null;
@@ -40,11 +42,13 @@ export function autoModeModelInjection(settingsEnv, enabled) {
   if (typeof base !== 'string' || !base || isOfficialAnthropic(base)) return null;
   if (hasOwn(settingsEnv, 'CLAUDE_CODE_AUTO_MODE_MODEL')) return null;
   const sonnet = settingsEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
-  return typeof sonnet === 'string' && sonnet ? sonnet : null;
+  return typeof sonnet === 'string' && sonnet && !isUnusableAuditor(sonnet) ? sonnet : null;
 }
 
 // 不能当审核模型的型号:CLI 遇到它们会无视设置、改用内置默认(调研 Y §1)。
 // 规则:转小写后等于或以这两个前缀开头(前缀匹配,所以带日期 / [1m] 的变体同样算)。
+// 名单对应 CLI 2.1.306 的实测(.devflow/probe-r151q-audit-model.txt:显式传这两个名字,CLI 改用内置
+// claude-sonnet-5);升级 CLI 时要重新实测,名单可能需要增删。
 const UNUSABLE_AUDITOR_PREFIXES = ['claude-sonnet-5-5', 'claude-opus-5-5'];
 export function isUnusableAuditor(name) {
   if (typeof name !== 'string') return false;
@@ -104,6 +108,9 @@ export function buildAutoAuditStatus({ official, enabled, providerId, models, se
     auditModelSource: auditModel === null ? null : (id && sonnetTierSet ? 'tier' : 'default'),
     models: list,
     unusable: list.filter(isUnusableAuditor),
+    // r151q:当前审核模型(解析出的名字)在不可用名单里 → true。只看名字,不依赖能不能认出 provider
+    // (providerId 为 null 时 models 为空,但 settings 里的 sonnet 档照样会被 CLI 换掉)。官方端点 auditModel 为 null → false。
+    auditModelUnusable: auditModel !== null && isUnusableAuditor(auditModel),
   };
 }
 
