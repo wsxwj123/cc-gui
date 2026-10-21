@@ -129,7 +129,7 @@ try {
   for (const v of [[], 'x', 1, null]) { writeFileSync(PREFS, JSON.stringify({ xsInbound: v })); eq(readXsPrefsSync().inbound, {}, `xsInbound=${JSON.stringify(v)} → {}`); }
   writeFileSync(PREFS, JSON.stringify({ xsEnabled: true, xsAutoPaused: true, xsEnabledAt: '2026-10-15T00:00:00.000Z' }));
   eq(readXsPrefsSync(), { enabled: true, enabledAt: '2026-10-15T00:00:00.000Z', inbound: {}, autoPaused: true, inboundDefault: 'card' }, '合法值原样');
-  writeFileSync(PREFS, '{broken'); eq(readXsPrefsSync(), { enabled: false, enabledAt: null, inbound: {}, autoPaused: false, inboundDefault: 'auto' }, '损坏按默认');
+  writeFileSync(PREFS, '{broken'); eq(readXsPrefsSync(), { enabled: false, enabledAt: null, inbound: {}, autoPaused: false, inboundDefault: 'card' }, '损坏按默认(入站默认:读失败按卡片)');
   writeFileSync(PREFS, '{}');
 
   // ── ③ 总开关关 ──────────────────────────────────────────────────────────────────────
