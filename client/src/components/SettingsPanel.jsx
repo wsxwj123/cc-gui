@@ -3073,6 +3073,14 @@ function ThirdPartyAutoSection() {
         {status && !official && status.enabled === true && status.auditModelSource === 'default' && status.auditModel && (
           <div data-testid="auto-audit-model-unset" className="text-[10.5px] text-amber-700 font-body">{`尚未选择审核模型，当前使用该 provider 的默认模型 ${status.auditModel}。`}</div>
         )}
+        {/* r151q:当前审核模型在不可用名单里(第三方,服务端判定)。这时服务端不再注入它,命令行改用内置名,
+            经本地代理又被映射成主模型 —— 实际是主模型在审核,必须说清楚并引导改选。 */}
+        {status && !official && status.auditModelUnusable === true && (
+          <div data-testid="auto-audit-model-unusable" className="text-[10.5px] text-amber-700 font-body"
+            title={status.auditModel ? `当前审核模型:${status.auditModel}` : undefined}>
+            该型号不能作为审核模型：命令行会改用内置的 claude-sonnet-5，经本地代理转成当前主模型来审核。建议改选列表里的其它模型。
+          </div>
+        )}
         <div data-testid="auto-audit-alias-note" className="text-[10.5px] text-ink-faint font-body">审核模型存在 sonnet 档，并会作为分类器模型显式传给命令行；旧版命令行不认该变量时按 sonnet 档解析。</div>
         <div data-testid="auto-audit-model-hint" className="text-[10.5px] text-ink-faint font-body">审核请求限定了很短的输出长度。把推理型模型设为审核模型时，它可能在限定长度内给不出结论，导致重复请求并拒绝操作。</div>
         {note && <div className="text-[10.5px] text-amber-700 font-body">{note}</div>}
