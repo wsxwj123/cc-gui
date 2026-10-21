@@ -20,7 +20,7 @@ import { normalizeContextOverflow } from './openai-proxy.js';
 import { isCountTokensRequest, estimateInputTokens, parseUpstreamCountTokens, COUNT_TOKENS_UPSTREAM_TIMEOUT_MS, recordCountTokensOutcome } from '../utils/context-tokens.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 import { normalizeUserIdInBody } from '../utils/user-id-normalize.js';
-import { resolveFallbackModel, noteModelFallback } from '../utils/model-fallback.js';
+import { resolveUpstreamModel, noteModelFallback } from '../utils/model-fallback.js';
 
 // Fixed loopback port (distinct from openai-proxy's 8788) so the URL written into
 // settings.json survives watchdog restarts. Ephemeral fallback if it's taken.
@@ -281,7 +281,7 @@ function applyModelFallbackToBody(body, up) {
   try { parsed = JSON.parse(body.toString('utf-8')); } catch { return body; }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return body;
   const requested = parsed.model;
-  const effective = resolveFallbackModel(requested, up);
+  const effective = resolveUpstreamModel(requested, up); // r151q:目标与保护名单跟随用户级 settings
   if (effective === requested) return body;
   noteModelFallback(requested, effective);
   parsed.model = effective;
