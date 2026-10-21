@@ -101,6 +101,10 @@ router.put('/xsession/config', async (req, res) => {
           if (prefs.xsEnabledAt === undefined && prefs.xsInboundDefault === undefined) prefs.xsInboundDefault = 'auto';
           prefs.xsEnabledAt = new Date().toISOString();
         }
+        // r151q:由开变关的同一次写入里,缺 xsEnabledAt 就补记"开过"。一期升级上来的老用户(总开关开着、没有启用时刻)
+        // 若启动补记(services/xsession.js backfillXsEnabledAt)没落盘就关掉,不补的话再打开会被当成新用户、入站默认写成 auto。
+        // 补记的时刻不影响档案:下次打开时上面会覆盖成新的启用时刻,档案仍只认那之后记录的。
+        if (!body.enabled && was && prefs.xsEnabledAt === undefined) prefs.xsEnabledAt = new Date().toISOString();
         prefs.xsEnabled = body.enabled;
       }
       if (resume) delete prefs.xsAutoPaused;
