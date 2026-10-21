@@ -99,4 +99,18 @@ const toMojibake = (s, dec = mac) => {
   assert.equal(insertTextAtCaret(el, 42), false);
 }
 
+// t11 还原后不含中文、但含符号/全角标点(用户 18:48 实报样本):也应还原
+{
+  const raw = '✻ API error · Retrying in 0s · attempt 1/10';
+  const moj = toMojibake(raw);
+  assert.equal(repairMojibake(moj), raw, '无中文的符号/标点乱码也应还原');
+  assert.equal(repairMojibake('‚úª'), '✻', '单个符号也应还原');
+}
+
+// t12 还原后只有 Latin-1 外文(法/德等)→ 不改,避免误伤
+{
+  const s = toMojibake('café');
+  assert.equal(repairMojibake(s), s, '外文乱码串不被改');
+}
+
 console.log('check-mojibake-repair: all passed');

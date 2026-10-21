@@ -278,6 +278,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.431</b>(2026-10-21)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>粘贴乱码还原补漏</summary>
+
+之前只识别「还原后含中文」的乱码;像 `‚úª API error ¬∑ Retrying in 0s` 这种只含符号/全角标点、不含中文的乱码会被漏掉。现在还原后出现任何非 Latin-1 字符(中文、✻、·、全角标点等)都会还原;正常外文/英文仍原样不动。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.430</b>(2026-10-21)· 修复 2 条</summary>
 
 **修复**

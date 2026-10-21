@@ -5,8 +5,7 @@
 // 就返回还原后的文本;否则原样返回(宁可不改,不能把正常外文改坏)。
 //
 // 能力边界(故意不修,别当 bug):只覆盖"UTF-8 字节被单字节解码"这一类;若文本已经含
-// U+FFFD(信息已丢)、被双重编码、或原文是日文假名/韩文/俄文等(还原后不含中文,无法
-// 与正常外文区分),都不会动。
+// U+FFFD(信息已丢)、被双重编码、或原文不是 UTF-8 被单字节解码这类形态,都不会动。
 //
 // 只在浏览器/Node 都可用:TextDecoder 支持 'macintosh' 与 'windows-1252'。
 const SINGLE_BYTE_LABELS = ['macintosh', 'windows-1252'];
@@ -50,7 +49,9 @@ function tryRepair(s, label) {
   let out;
   try { out = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bytes)); } catch { return null; }
   if (!out || out.includes('\ufffd')) return null;
-  if (!/[\u3400-\u9fff\uf900-\ufaff]/.test(out)) return null; // 还原后必须有中文才可信
+  // 还原后必须出现「超出 Latin-1 的字符」才可信:中文、全角标点、✻/“”/… 这类符号都算;
+  // 纯 ASCII 不可能是这种乱码的还原结果;纯 Latin-1 外文(法/德等)宁可放过,避免改坏。
+  if (!/[\u0100-\uffff]/.test(out)) return null;
   if (out.length > s.length) return null;
   return out;
 }
