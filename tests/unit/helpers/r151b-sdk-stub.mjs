@@ -85,6 +85,18 @@ export function query({ prompt, options = {} } = {}) {
         num_turns: 1, result: 'R151B-STUB-REPLY', total_cost_usd: 0, permission_denials: [], modelUsage: {},
         usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
       };
+      // r151q:afterResult(record) → 可选,返回异步可迭代对象(或 null):结果之后不等新输入就接着吐的事件(各自补上 session_id/uuid),
+      // 模拟回合收尾后主 agent 复活续跑;被 abort 时立即结束。没设 = 原行为。
+      const extra = typeof ctl?.afterResult === 'function' ? ctl.afterResult(record) : null;
+      if (extra) {
+        const it = extra[Symbol.asyncIterator]();
+        for (;;) {
+          const step = await Promise.race([it.next(), aborted]);
+          if (step.done) break;
+          yield { ...base(), ...step.value };
+        }
+        if (signal?.aborted) return;
+      }
     }
   }
   const generator = run();

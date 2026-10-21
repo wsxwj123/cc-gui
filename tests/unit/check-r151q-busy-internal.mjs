@@ -3,6 +3,8 @@
 //   ② 内部回合冷启时还在等旧进程退出(占位期)→ 用户 /chat 同样立即 409,不等待、不中止;旧进程退出后内部回合照常起来;
 //   ③ 用户回合开始 → "用户在等"清掉;用户自己的回合仍可被后到的用户消息打断(原语义不变,只抽查 200)。
 //   ④ 内部回合结果已出、只差输入预测(收尾窗最长约 4 秒)不算在跑:用户 /chat 等它收尾;到点仍没收尾 → 409,不强制中止它。
+//   ⑤ 内部回合收尾(转空闲)后主 agent 复活续跑:仍算内部回合在跑 → 用户 /chat 立即 409,不中止它;
+//   ⑥ 用户自己的回合复活续跑:不当成内部回合 → 后到的用户消息不 409,照旧打断它起回合。
 // node tests/unit/check-r151q-busy-internal.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync } from 'node:fs';
@@ -135,6 +137,64 @@ try {
   eq(userWaitingOnSession(S3), true, '这次 409 同样记"用户在等"');
   await waitFor(() => snap(tailPid)?.idle, '收尾窗到点,内部回合正常收尾', 15000);
   eq(ends.filter((e) => e.pid === tailPid).map((e) => e.outcome), ['completed'], '内部回合按完成结束,不是被停止');
+
+  // ── ⑤/⑥ 回合收尾(转空闲)后主 agent 复活续跑 ─────────────────────────────────────────────────────
+  // 子代理回合的中间结果被 4 秒去抖当成回合结束收尾,随后主 agent 接着出内容 → 槽复活续跑(同一回合)。
+  // 桩:提示里带 REVIVE 的输入,结果之后先停住;开第一道闸吐一条主 agent 正文(复活),开第二道闸吐续跑的结果。
+  const gates = new Map(); // 提示原文 → { revive, finish }
+  const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+  const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  ctl.afterResult = (record) => {
+    const text = String(record.inputs.at(-1)?.message?.content);
+    if (!text.includes('REVIVE')) return null;
+    const g = { revive: gate(), finish: gate() };
+    gates.set(text, g);
+    return (async function* () {
+      await g.revive.p;
+      yield { type: 'assistant', parent_tool_use_id: null, message: { id: `msg_r151q_${text}`, type: 'message', role: 'assistant', model: 'r151q-model', content: [{ type: 'text', text: '续跑' }], stop_reason: 'end_turn', stop_sequence: null, usage: USAGE } };
+      await g.finish.p;
+      yield { type: 'result', subtype: 'success', is_error: false, duration_ms: 1, duration_api_ms: 1, num_turns: 1, result: '续跑完', total_cost_usd: 0, permission_denials: [], modelUsage: {}, usage: USAGE };
+    })();
+  };
+  // ⑤ 跨会话回合复活续跑 → 仍算跨会话回合在跑:用户 /chat 立即 409,不中止它
+  const S4 = uuid(4);
+  const rv = await startInternalTurn(BODY({ sessionId: S4, prompt: 'auto REVIVE' }), INTERNAL);
+  eq(rv.status, 200, '跨会话回合起来了');
+  const rvPid = rv.body.pid;
+  await waitFor(() => snap(rvPid)?.idle && gates.has('auto REVIVE'), '跨会话回合(中间结果)收尾、转空闲');
+  eq(ends.filter((e) => e.pid === rvPid).length, 1, '收尾时报过一次回合结束');
+  gates.get('auto REVIVE').revive.open();
+  await waitFor(() => snap(rvPid)?.busy, '主 agent 复活续跑');
+  const user6 = await api('/chat', BODY({ sessionId: S4, prompt: 'user while revived auto' }));
+  eq([user6.status, user6.body.code], [409, 'CHAT_SESSION_BUSY'], '复活续跑的跨会话回合 → 用户 /chat 409 CHAT_SESSION_BUSY');
+  ok(user6.ms < 1500, `立即回(${user6.ms}ms),不进 4 秒等待`);
+  eq(snap(rvPid)?.busy, true, '跨会话回合没被中止(仍在续跑)');
+  eq(userWaitingOnSession(S4), true, '这次 409 同样记"用户在等"');
+  gates.get('auto REVIVE').finish.open();
+  await waitFor(() => snap(rvPid)?.idle, '续跑完再次收尾');
+  const user7 = await api('/chat', BODY({ sessionId: S4, prompt: 'user after revived auto' }));
+  eq(user7.status, 200, '续跑收尾后用户消息照常起回合');
+  await waitFor(() => snap(user7.body.pid)?.idle, '用户回合收尾');
+  // ⑥ 用户自己的回合复活续跑 → 不当成跨会话回合:后到的用户消息不 409,照旧打断它(冷启前等 4 秒按 Date.now 算,10 倍速)
+  const S5 = uuid(5);
+  const ur = await api('/chat', BODY({ sessionId: S5, prompt: 'user REVIVE' }));
+  eq(ur.status, 200, '用户回合起来了');
+  const urPid = ur.body.pid;
+  await waitFor(() => snap(urPid)?.idle && gates.has('user REVIVE'), '用户回合(中间结果)收尾、转空闲');
+  gates.get('user REVIVE').revive.open();
+  await waitFor(() => snap(urPid)?.busy, '用户回合复活续跑');
+  const r1 = realNow();
+  let user8;
+  try {
+    Date.now = () => r1 + (realNow() - r1) * 10;
+    user8 = await api('/chat', BODY({ sessionId: S5, prompt: 'user again' }));
+  } finally {
+    Date.now = realNow;
+  }
+  eq(user8.status, 200, '用户回合续跑不算跨会话回合:新消息不 409,照旧打断它起回合');
+  eq(userWaitingOnSession(S5), false, '没记"用户在等"');
+  await waitFor(() => snap(user8.body.pid)?.idle, '新的用户回合收尾');
+  delete ctl.afterResult;
   console.log(`PASS check-r151q-busy-internal(${checks} 项)`);
 } finally {
   unhook?.();

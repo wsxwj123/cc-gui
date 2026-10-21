@@ -1339,7 +1339,6 @@ function notifyTurnEnd(slot, pid) {
   const rt = slot.runtimeTurn;
   if (!rt || rt.ended || rt.epoch !== (slot.turnEpoch | 0)) return;
   rt.ended = true;
-  slot.internalTurn = false; // r151q 第 9 项 (a):回合结束,"本回合是跨会话自动处理"的标记随之清掉
   const outcome = rt.stopRequested ? 'stopped' : (slot.lastResultAt == null || slot.lastResultError) ? 'failed' : 'completed';
   // 摘要只给入口钩子改写过的回合(带 tag = 跨会话兑换回合)算:其它回合没人用它,不必对外部错误文本跑脱敏(审计 I2)
   const errorSummary = outcome === 'failed' && rt.tag !== undefined ? runtimeTurnErrorSummary(slot, rt.startSeq | 0) : null;
@@ -2013,7 +2012,12 @@ export function settleTurnRecord(record, status) {
 // 回合收尾/进程收尾的统一入口:只对"本 slot 当前那一回合"生效。已请求停止的回合,无论
 // 因 interrupt 结束还是自然结束,对调用方的语义都是"被停掉的"。
 function settleSlotTurn(slot, fallback = 'completed') {
-  if (slot) notifyTurnEnd(slot, slot.runId); // r151b:回合结束通知(没挂接 = 跳过;回合收尾与进程收尾都经过这里)
+  if (slot) {
+    // r151q 第 9 项 (a):回合收尾就清"本回合是跨会话自动处理"(先清再报结束通知)。不放进 notifyTurnEnd:回合结束通知每回合
+    // 只报一次,主 agent 复活续跑(标记按 turnSource 写回)那段的收尾不再报,放在那里就清不掉了。
+    slot.internalTurn = false;
+    notifyTurnEnd(slot, slot.runId); // r151b:回合结束通知(没挂接 = 跳过;回合收尾与进程收尾都经过这里)
+  }
   const rec = slot?.turnRecord;
   if (!rec || rec.settledAt) return;
   settleTurnRecord(rec, rec.stopRequested ? 'stopped' : fallback);
@@ -2616,6 +2620,7 @@ async function handleChatPost(req, res) {
           if (autoGate.downgraded) deliverModeMismatch(s, autoGate.downgraded);
           // r151q 第 9 项 (a)/(c):本回合是不是内部回合(跨会话自动处理)记在槽上;起的是用户回合就清掉"用户在等"。
           s.internalTurn = !!internal;
+          s.turnSource = internal ? 'internal' : 'user';
           if (!internal) clearUserWaiting(sessionId);
           notifyTurnStart(s, alivePid, true, turnTag, undefined, turnParams); // r151b:回合开始(没挂接 = 跳过)
           s.input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
@@ -2837,8 +2842,10 @@ async function handleChatPost(req, res) {
     cronPendingDelete: false,
     // 同一 slot 内的 steer 本地接纳回执。随 slot 完整 dispose 释放；不做 TTL/跨进程复用。
     steerReceipts: new Map(),
-    // r151q 第 9 项 (a):本回合是不是内部回合(跨会话自动处理)。复用开新回合时重写,回合结束通知时清掉。
+    // r151q 第 9 项 (a):本回合是不是内部回合(跨会话自动处理)且还在跑。复用开新回合时重写,回合收尾时清掉。
     internalTurn: !!internal,
+    // 本回合来源('internal' = 跨会话自动处理 / 'user'),只在开回合时写:回合收尾后主 agent 复活续跑,据此把 internalTurn 写回。
+    turnSource: internal ? 'internal' : 'user',
   };
   activeProcesses.set(procId, slot);
   // r151q 第 9 项:槽已登记(上面到这里没有 await),内部回合的占住由槽接替,撤掉冷启占位;起的是用户回合就清掉"用户在等"。
@@ -3255,6 +3262,9 @@ async function handleChatPost(req, res) {
           slot.idle = false;
           slot.revived = true; // 看门狗判据(无子代理续跑也纳入 5 分钟静默兜底)
           reviveSlotTurn(slot); // R13:回合还在跑,别让停止入口拿早前那次 finalize 的"completed"打发
+          // r151q 第 9 项:续跑的还是收尾前那一回合 —— 它是跨会话回合,就把收尾时清掉的标记写回(用户消息照旧 409、不中止它);
+          // 用户自己的回合续跑仍按用户回合算(用户新消息照旧可以打断它)。
+          slot.internalTurn = slot.turnSource === 'internal';
           if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
           // 复活=主 agent 续跑,则之前被 4s 去抖过早缓冲进 earlyLines 的 done 是错的:若 SSE 在
           // finalize 前已断(WebView 空闲掐断/切窗格),done 落 earlyLines,reattach 回放到它会
@@ -3504,7 +3514,7 @@ function sessionSlotReserved(sessionId) {
 
 // ── r151q 第 9 项:跨会话内部回合占住会话 / "用户在等" ─────────────────────────────────────────
 // 用户消息绝不能中止正在跑的跨会话内部回合:内部回合占着会话时,用户的 /chat 立即 409 CHAT_SESSION_BUSY(客户端排队、
-// 等会话空闲再发)。"占着" = 槽上的当前回合是内部回合且在跑(internalTurn,回合开始时写、回合结束通知时清),或内部回合
+// 等会话空闲再发)。"占着" = 槽上的当前回合是内部回合且在跑(internalTurn,回合开始时写、回合收尾时清、复活续跑时按本回合来源写回),或内部回合
 // 冷启时还在等旧进程退出、自己的槽还没登记(下面这张占位表;槽登记后立即撤掉,请求结束时兜底再撤一次)。
 const internalColdStarts = new Map(); // 会话 id 小写 → 占位的请求对象(只撤自己登记的那条)
 function holdInternalColdStart(req, sessionId) {
