@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { readFile, writeFile, mkdir, rename, appendFile, unlink } from 'fs/promises';
-import { readFileSync } from 'fs';
+import { readFileSync, statSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { homedir } from 'os';
 import { renameSession } from '@anthropic-ai/claude-agent-sdk';
@@ -49,9 +49,59 @@ export const KEEP_ALIVE_IDLE_DEFAULT = '1h';
 export function normalizeKeepAliveIdle(v) {
   return typeof v === 'string' && KEEP_ALIVE_IDLE_VALUES.includes(v) ? v : KEEP_ALIVE_IDLE_DEFAULT;
 }
+// r151s:读法同 readPrefsObjectSync(剥 BOM、读不出/坏文件写一行警告且同一种失败只写一次)。
 export function readKeepAliveIdleSync() {
-  try { return normalizeKeepAliveIdle(JSON.parse(readFileSync(PREFS_PATH, 'utf-8'))?.keepAliveIdle); }
-  catch { return KEEP_ALIVE_IDLE_DEFAULT; }
+  return normalizeKeepAliveIdle(readPrefsObjectSync()?.keepAliveIdle);
+}
+
+// r151s:静默看门狗的等待时长(stallTimeout,默认 5m;'never' = 到点只提示、不结束回合,仍按 5 分钟计时,毫秒映射见 chat.js 的
+// resolveStallMs)。看门狗每收到一条上游消息都重新计时并现读这个设置,所以读取带缓存:偏好文件的修改时间、大小(外加 inode)都没变
+// 就复用上次结果;本模块自己写盘(savePrefs)后清掉缓存。文件不存在、损坏、键缺失或值不在枚举里 → '5m';只读,不改写文件。
+export const STALL_TIMEOUT_VALUES = Object.freeze(['5m', '10m', '20m', 'never']);
+export const STALL_TIMEOUT_DEFAULT = '5m';
+export function normalizeStallTimeout(v) {
+  return typeof v === 'string' && STALL_TIMEOUT_VALUES.includes(v) ? v : STALL_TIMEOUT_DEFAULT;
+}
+let stallTimeoutCache = null; // { sig, value }
+export function readStallTimeoutSync() {
+  let sig = null; // null = 这次不缓存(stat 本身失败且不是"文件不存在",交给下面的读取去报)
+  try {
+    const st = statSync(PREFS_PATH);
+    sig = `${st.mtimeMs}:${st.size}:${st.ino}`;
+  } catch (e) {
+    if (e?.code === 'ENOENT') sig = 'missing';
+  }
+  if (sig !== null && stallTimeoutCache?.sig === sig) return stallTimeoutCache.value;
+  const value = normalizeStallTimeout(readPrefsObjectSync()?.stallTimeout);
+  stallTimeoutCache = sig === null ? null : { sig, value };
+  return value;
+}
+
+// r151s:「空闲回收」「静默超时」两个同步读取共用的读文件 + 解析。开头的 UTF-8 BOM 先剥掉再解析(同 parsePrefsObject:记事本 /
+// PowerShell 存出的合法文件不算坏)。文件不存在 → {};读不出、或内容不是 JSON 对象 → null(调用方回各自的默认值),并写一行警告。
+// 警告只写失败种类,不带文件内容(JSON.parse 的报错原文会引用内容片段);同一种失败只写一次,读成功或文件消失后清零,之后再坏会重新
+// 提示 —— 看门狗每条上游消息都会读,坏文件不能每次刷一行。
+let lastPrefsSyncFailure = null;
+function warnPrefsSyncFailure(kind, what) {
+  if (lastPrefsSyncFailure === kind) return;
+  lastPrefsSyncFailure = kind;
+  console.warn(`[prefs] prefs.json ${what},空闲回收、静默超时按默认值处理(同样的问题不再重复提示)`);
+}
+function readPrefsObjectSync() {
+  let text;
+  try { text = readFileSync(PREFS_PATH, 'utf-8'); } catch (e) {
+    if (e?.code === 'ENOENT') { lastPrefsSyncFailure = null; return {}; }
+    warnPrefsSyncFailure(`read:${e?.code || 'unknown'}`, `读取失败(${e?.code || '未知错误'})`);
+    return null;
+  }
+  let v = null;
+  try { v = JSON.parse(text.replace(/^\uFEFF/, '')); } catch { v = null; }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) {
+    warnPrefsSyncFailure('invalid', '不是合法的 JSON 对象');
+    return null;
+  }
+  lastPrefsSyncFailure = null;
+  return v;
 }
 
 /**
@@ -166,6 +216,7 @@ async function savePrefs(obj) {
   try {
     await writeFile(tmp, JSON.stringify(obj, null, 2));
     await rename(tmp, PREFS_PATH);
+    stallTimeoutCache = null; // r151s:自己刚写过,不靠修改时间判断(时间精度粗的文件系统上同大小的连续两次写会被当成没变)
   } catch (e) {
     // r151e 判官建议 1:最后一步覆盖原文件失败(Windows 上原文件被其它程序占用时 rename 抛 EPERM / EBUSY)或临时文件没写完 → 先删掉
     // 本次的临时文件再把原错误抛回;否则恢复定时器每次重试都留下一个 prefs.json.tmp.*。删不掉(例如根本没建成)只忽略,不掩盖原错误。
@@ -388,6 +439,29 @@ router.put('/prefs/keep-alive-idle', async (req, res) => {
   }
   try {
     await updatePrefs((prefs) => { prefs.keepAliveIdle = value; });
+  } catch {
+    return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
+  }
+  res.json({ ok: true, value });
+});
+
+// r151s:静默看门狗的等待时长(设置页「会话」tab「静默超时」)。写法同 keep-alive-idle:GET 现读(默认 5m);PUT 只收枚举值,
+// 非法值 400 + 稳定 code 且不改盘;成功走 updatePrefs(串行 + 原子写,与其它偏好同一条写队列)。
+router.get('/prefs/stall-timeout', (_req, res) => {
+  res.json({ ok: true, value: readStallTimeoutSync() });
+});
+router.put('/prefs/stall-timeout', async (req, res) => {
+  const body = req.body;
+  const value = body && typeof body === 'object' && !Array.isArray(body) ? body.value : undefined;
+  if (!STALL_TIMEOUT_VALUES.includes(value)) {
+    return res.status(400).json({
+      ok: false,
+      code: 'STALL_TIMEOUT_INVALID',
+      error: `value 必须是 ${STALL_TIMEOUT_VALUES.join(' / ')} 之一`,
+    });
+  }
+  try {
+    await updatePrefs((prefs) => { prefs.stallTimeout = value; });
   } catch {
     return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
   }
