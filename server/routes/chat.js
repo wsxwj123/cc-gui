@@ -2636,6 +2636,7 @@ async function handleChatPost(req, res) {
           s.internalTurn = !!internal;
           s.turnSource = internal ? 'internal' : 'user';
           s.turnSettled = false; // 新回合开始:上一回合的"已收尾"作废(否则本回合第一条内容会被当成续跑再写一遍标记)
+          s.turnStopRequested = false; // 上一回合收到的停止请求不算到这一回合头上
           // 跨会话回合开始时"用户在等"还没到期(钩子 await 等让出期间用户被 409)= 这一回合里用户等过,收尾时要续期
           s.userWaitedDuringTurn = !!internal && userWaitingOnSession(sessionId);
           if (!internal) clearUserWaiting(sessionId);
@@ -2865,6 +2866,8 @@ async function handleChatPost(req, res) {
     turnSource: internal ? 'internal' : 'user',
     // 本回合已收尾、主 agent 随后可能续跑(settleSlotTurn 置上,开回合时清;消息泵见到续跑内容时据此写回 internalTurn)
     turnSettled: false,
+    // 本回合收到过停止请求(applyStop 置上,开回合时清;回合钩子没挂接、没有 runtimeTurn 时也有):续跑时据此不写回 internalTurn
+    turnStopRequested: false,
     // 跨会话回合里有没有用户消息被 409 过(收尾时据此给"用户在等"续期,见 settleSlotTurn);冷启占位期被拒的,开回合时标记还没到期。
     userWaitedDuringTurn: !!internal && userWaitingOnSession(sessionId),
   };
@@ -3284,7 +3287,9 @@ async function handleChatPost(req, res) {
         // 用户自己的回合续跑仍按用户回合算(用户新消息照旧可以打断它)。按"本回合已收尾"判、不看是否空闲:不保活时收尾只关输入、
         // 不转空闲,下面的复活分支不触发,续跑照样要写回。只在真有续跑内容时写回 ——"关输入到进程退出"那段不算在跑。
         // 写回一次就清掉 turnSettled:续跑期间用户被 409 时置上的 userWaitedDuringTurn 不能被后续消息重算覆盖。
-        if (slot.turnSettled && mainAgentContent) {
+        // 本回合收到过停止请求(turnStopRequested)就不写回:interrupt 不杀 shell 后台任务,任务完成通知会唤醒命令行接着跑,
+        // 这段不再按跨会话回合挡住用户(用户回合续跑本来就不写成跨会话回合,不受影响)。
+        if (slot.turnSettled && mainAgentContent && !slot.turnStopRequested) {
           slot.turnSettled = false;
           slot.internalTurn = slot.turnSource === 'internal';
           slot.userWaitedDuringTurn = slot.internalTurn && userWaitingOnSession(slot.sessionId); // 收尾时续过期的,续跑这段同样算
@@ -4131,6 +4136,7 @@ export function applyStop(slot, pid, flags) { // export 仅为可单测(check-st
   // 共用 stdin 通道,立即关会把刚发的 interrupt 请求截断。
   // express.json 全局挂载:无 body → {} → hard=false,老调用方向后兼容(选择性)。
   if (slot.runtimeTurn) slot.runtimeTurn.stopRequested = true; // r151b:回合结束通知报 stopped 用(没挂接时没有 runtimeTurn)
+  slot.turnStopRequested = true; // r151q:同一件事记在槽上(没挂接也有),续跑时据此不再按跨会话回合挡用户
   const hard = flags.hard === true;
   // A1:allTasks=true 只由「停止后台 N」总闸传(用户显式"停掉所有后台"),保持全量语义;
   // 主停止键 / Esc 不传 → 只停本回合派出的任务,跨回合后台子代理保留。
