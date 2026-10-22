@@ -4053,6 +4053,11 @@ router.get('/chat/:pid/stream', (req, res) => {
 
   // 泵已结束但 done 没缓冲到(竞态兜底):补发一个。
   if (!closed && slot.pumpEnded) emitPumpEndedDone(slot, onLine);
+  // r151t:槽处于回合间空闲(会话常驻进程已收尾、在等下一条消息)同样没有回合可接 —— 那一回合的 done 已发给当时的流,
+  // 或这条流是按比实际状态旧的轮询快照接上来的;不补就一直挂着(界面卡在 Writing / Connecting)。做法同上一行。
+  // slot.idle 只在收尾的常驻分支置真(finishSlot 会清掉,与 pumpEnded 互斥);复用常驻进程开新回合时
+  // POST /api/chat 返回前已把槽标为忙,正常发送后接流不受影响。上一行补过 done 时 closed 已为真,不会补两次。
+  if (!closed && slot.idle) emitPumpEndedDone(slot, onLine);
 
   if (!closed) {
     // SSE 心跳:大会话首 token 前可能 20s+,空闲连接会被网络/WebView 掐断造成假"无返回"。
