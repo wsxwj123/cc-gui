@@ -51,7 +51,7 @@ export function normalizeKeepAliveIdle(v) {
 }
 // r151s:读法同 readPrefsObjectSync(剥 BOM、读不出/坏文件写一行警告且同一种失败只写一次)。
 export function readKeepAliveIdleSync() {
-  return normalizeKeepAliveIdle(readPrefsObjectSync()?.keepAliveIdle);
+  return normalizeKeepAliveIdle(readPrefsObjectSync().prefs?.keepAliveIdle);
 }
 
 // r151s:静默看门狗的等待时长(stallTimeout,默认 5m;'never' = 到点只提示、不结束回合,仍按 5 分钟计时,毫秒映射见 chat.js 的
@@ -72,13 +72,17 @@ export function readStallTimeoutSync() {
     if (e?.code === 'ENOENT') sig = 'missing';
   }
   if (sig !== null && stallTimeoutCache?.sig === sig) return stallTimeoutCache.value;
-  const value = normalizeStallTimeout(readPrefsObjectSync()?.stallTimeout);
-  stallTimeoutCache = sig === null ? null : { sig, value };
+  const { prefs, readFailed } = readPrefsObjectSync();
+  const value = normalizeStallTimeout(prefs?.stallTimeout);
+  // 读不出(文件在、却被杀软 / 同步盘 / 编辑器占着,或没权限、句柄用尽)多半是瞬时的:这次回默认值但不缓存 —— 否则占用解除后
+  // 文件特征没变,用户设的值会一直被无视,直到文件下次改写或重启。坏 JSON 照常缓存,免得每条上游消息都重读一遍坏文件。
+  stallTimeoutCache = sig === null || readFailed ? null : { sig, value };
   return value;
 }
 
 // r151s:「空闲回收」「静默超时」两个同步读取共用的读文件 + 解析。开头的 UTF-8 BOM 先剥掉再解析(同 parsePrefsObject:记事本 /
-// PowerShell 存出的合法文件不算坏)。文件不存在 → {};读不出、或内容不是 JSON 对象 → null(调用方回各自的默认值),并写一行警告。
+// PowerShell 存出的合法文件不算坏)。返回 { prefs, readFailed }:文件不存在 → prefs 为 {};读不出、或内容不是 JSON 对象 → prefs 为
+// null(调用方回各自的默认值),并写一行警告;readFailed 只在"文件在、却读不出"时为真(调用方据此不缓存这次结果)。
 // 警告只写失败种类,不带文件内容(JSON.parse 的报错原文会引用内容片段);同一种失败只写一次,读成功或文件消失后清零,之后再坏会重新
 // 提示 —— 看门狗每条上游消息都会读,坏文件不能每次刷一行。
 let lastPrefsSyncFailure = null;
@@ -90,18 +94,18 @@ function warnPrefsSyncFailure(kind, what) {
 function readPrefsObjectSync() {
   let text;
   try { text = readFileSync(PREFS_PATH, 'utf-8'); } catch (e) {
-    if (e?.code === 'ENOENT') { lastPrefsSyncFailure = null; return {}; }
+    if (e?.code === 'ENOENT') { lastPrefsSyncFailure = null; return { prefs: {}, readFailed: false }; }
     warnPrefsSyncFailure(`read:${e?.code || 'unknown'}`, `读取失败(${e?.code || '未知错误'})`);
-    return null;
+    return { prefs: null, readFailed: true };
   }
   let v = null;
   try { v = JSON.parse(text.replace(/^\uFEFF/, '')); } catch { v = null; }
   if (!v || typeof v !== 'object' || Array.isArray(v)) {
     warnPrefsSyncFailure('invalid', '不是合法的 JSON 对象');
-    return null;
+    return { prefs: null, readFailed: false };
   }
   lastPrefsSyncFailure = null;
-  return v;
+  return { prefs: v, readFailed: false };
 }
 
 /**
