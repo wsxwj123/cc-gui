@@ -56,6 +56,29 @@ function maybeBroadcastTurnComplete(slot, line) {
   } catch {}
 }
 
+// r151t:这条消息是否说明"主 agent 正在跑回合"(白名单)。消息泵三处共用:已收尾的槽复活、跨会话回合收尾后的标记写回、
+// 收尾等待窗(子代理去抖 / 输入预测)内取消并重新计时。为什么用白名单:命令行在回合 result 之后还会吐信息事件 ——
+// 带 uuid 的用户消息(引导、跨会话投递)在它所在回合的 result 之后吐 command_lifecycle completed,另有 tool_use_summary、
+// auth_status 等,旧黑名单把它们当成续跑,槽被假复活、再也等不到 result,流永不收到 done。
+// 只认主 agent 顶层消息(parent_tool_use_id 为空;后台子代理自己的消息不算)。算:assistant、user(工具结果 / 消息回放)、
+// stream_event、tool_progress、state 为 started 的 command_lifecycle(排队的消息轮到了,命令行开始处理它)。
+// 其余一律不算:result、system 全部子类型、rate_limit_event、prompt_suggestion、command_lifecycle 的 queued / completed、
+// tool_use_summary、auth_status、conversation_reset、keep_alive,以及任何未列出的类型。(export 仅为可单测。)
+export function isMainAgentTurnActivity(m) {
+  if (!m || m.parent_tool_use_id) return false;
+  switch (m.type) {
+    case 'assistant':
+    case 'user':
+    case 'stream_event':
+    case 'tool_progress':
+      return true;
+    case 'command_lifecycle':
+      return m.state === 'started';
+    default:
+      return false;
+  }
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const router = Router();
@@ -3298,22 +3321,23 @@ async function handleChatPost(req, res) {
         // 可达 60-90s 远超 4s 窗)。把 idle 的 slot 标回活跃 → /agents/active 不再报 idle → 前端
         // backgroundPid 轮询重新发现 → auto-reattach 重开 SSE 回放 earlyLines,续跑正文重现。
         // 只认主 agent 顶层内容(parent_tool_use_id 空);后台子代理自身消息(带该字段)不触发,保住
-        // keepalive 语义与 deep-research(backgroundify 子代理)不回归;result/system/rate_limit_event
-        // 是终态/纯信息不触发。续跑回合自己的 result 到来照常 finalize→done→再 idle,每轮自愈。
-        const mainAgentContent = !m.parent_tool_use_id
-          && m.type !== 'result' && m.type !== 'system' && m.type !== 'rate_limit_event' && m.type !== 'prompt_suggestion';
+        // keepalive 语义与 deep-research(backgroundify 子代理)不回归;result 之后的终态/纯信息事件不触发。
+        // 续跑回合自己的 result 到来照常 finalize→done→再 idle,每轮自愈。
+        // r151t:判据改为白名单 isMainAgentTurnActivity(见其注释),这里与下面的标记写回、收尾等待窗的
+        // 取消并重新计时共用这一个结果 —— 原黑名单把 result 之后的 command_lifecycle completed 等信息事件当成续跑。
+        const mainAgentTurnActivity = isMainAgentTurnActivity(m);
         // r151q 第 9 项:续跑的还是收尾前那一回合 —— 它是跨会话回合,就把收尾时清掉的标记写回(用户消息照旧 409、不中止它);
         // 用户自己的回合续跑仍按用户回合算(用户新消息照旧可以打断它)。按"本回合已收尾"判、不看是否空闲:不保活时收尾只关输入、
         // 不转空闲,下面的复活分支不触发,续跑照样要写回。只在真有续跑内容时写回 ——"关输入到进程退出"那段不算在跑。
         // 写回一次就清掉 turnSettled:续跑期间用户被 409 时置上的 userWaitedDuringTurn 不能被后续消息重算覆盖。
         // 本回合收到过停止请求(turnStopRequested)就不写回:interrupt 不杀 shell 后台任务,任务完成通知会唤醒命令行接着跑,
         // 这段不再按跨会话回合挡住用户(用户回合续跑本来就不写成跨会话回合,不受影响)。
-        if (slot.turnSettled && mainAgentContent && !slot.turnStopRequested) {
+        if (slot.turnSettled && mainAgentTurnActivity && !slot.turnStopRequested) {
           slot.turnSettled = false;
           slot.internalTurn = slot.turnSource === 'internal';
           slot.userWaitedDuringTurn = slot.internalTurn && userWaitingOnSession(slot.sessionId); // 收尾时续过期的,续跑这段同样算
         }
-        if (slot.idle && mainAgentContent) {
+        if (slot.idle && mainAgentTurnActivity) {
           slot.idle = false;
           slot.revived = true; // 看门狗判据(无子代理续跑也纳入 5 分钟静默兜底)
           reviveSlotTurn(slot); // R13:回合还在跑,别让停止入口拿早前那次 finalize 的"completed"打发
@@ -3351,9 +3375,11 @@ async function handleChatPost(req, res) {
           // 建议是本回合最后一条消息:result 已到(closeTimer 在挂)就立即收尾,
           // 不能走下面的 cancelClose 分支——那会把关闭取消掉、进程挂死等不到下一条。
           if (closeTimer) finalize();
-        } else if (closeTimer && !m.parent_tool_use_id && m.type !== 'rate_limit_event' && m.type !== 'system') {
-          // result 之后又来事件 → 那个 result 不是最终的,等主回合续跑静默满 4s 才收摊。
-          // !m.parent_tool_use_id 守卫(与上方复活守卫对称):主回合派出的 run_in_background
+        } else if (closeTimer && mainAgentTurnActivity) {
+          // result 之后又来主回合活动 → 那个 result 不是最终的,等主回合续跑静默满 4s 才收摊。
+          // r151t:判据与上方复活守卫共用 isMainAgentTurnActivity(白名单),下面两段豁免都包含在内;
+          // command_lifecycle queued / completed、tool_use_summary、auth_status、未知类型等信息事件同样不再推迟收尾。
+          // parent_tool_use_id 守卫(与上方复活守卫对称):主回合派出的 run_in_background
           // 后台子代理自己的事件(带该字段)不碰收摊计时器——否则子代理在 4s 窗内一吐字就把
           // 收摊取消,而主回合已结束、唯一重武装点(下一个 result)永不到来 → done 永不发、
           // slot 恒非 idle、前端发送按钮卡停止、新消息卡队列(实测:后台子代理窗内 2 条
@@ -3366,7 +3392,7 @@ async function handleChatPost(req, res) {
           // 取消后尾部去抖重武装(非永久取消):经守卫过滤后进得来这里的只剩主回合顶层续跑
           // 事件,续跑输出静默满原窗口即收摊(复用 result 分支算好的 closeDelayMs,窗口值
           // 由 result 分支单点决定);closeDelayMs 为 0(无子代理无 suggest 本不挂窗)
-          // 防御性兜底 4s。teammate/任何未预见事件类型最多推迟收摊,不会再造成永久挂死。
+          // 防御性兜底 4s。未列入白名单的事件类型不再推迟收摊。
           cancelClose();
           slot.suggestWaitSince = 0; // r151c:续跑了,那个结果不是最终的
           closeTimer = setTimeout(() => finalize(), closeDelayMs || 4000);
