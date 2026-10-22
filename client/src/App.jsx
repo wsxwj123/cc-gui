@@ -7141,16 +7141,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               : '';
             // r10-10:官方订阅未登录/登录过期 → 错误行下补登录指引(与切官方预检横幅同一文案)。
             const loginHint = matchOfficialLoginError(msg) ? `\n\n> ${OFFICIAL_LOGIN_HINT}。` : '';
+            // r151r:官方以签名不通过拒收其他模型留下的思考段落(Invalid `signature` in `thinking`
+            // block;反引号可有可无)。清理卡只删空段落帮不上 → 不挂卡,报错原文后补一行出路
+            // (文本层,同 loginHint)。
+            const signatureHint = /invalid\W+signature\W+in\W+thinking\W+block/i.test(msg)
+              ? '\n\n> 会话历史里有其他模型留下的思考内容，当前接口不接受。切回原来的 provider,在此会话执行 /compact 后再切回;或新开会话。'
+              : '';
             setChatMessages((prev) => [...prev, {
               uuid: 'chat-error-' + Date.now(),
               type: 'turn',
               ownerKey: streamSid || sessionQueueKey,
               timestamp: new Date().toISOString(),
               model: streamingModel,
-              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}${loginHint}`],
+              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}${loginHint}${signatureHint}`],
               thinking: [],
               toolCalls: [],
-              blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}${loginHint}` }],
+              blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}${loginHint}${signatureHint}` }],
               usage: null,
               // r99:内容审核那支放最前 —— 短语最特异,且与另两支判据在真实输入上互斥
               // ("Content Exists Risk" 不含 api key / 空内容块字样)。
@@ -9803,6 +9809,10 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                                   ? `检测到历史含官方不接受的空内容块(空text ${rep.emptyText || 0} 处/空thinking ${rep.emptyThinking || 0} 处)`
                                   : '检测到历史可能含官方不接受的空内容块';
                               })()}
+                            </div>
+                            {/* r151r:清理只删空段落;不空的第三方思考段落不带官方签名,清理后仍可能被拒 → 固定给出路。 */}
+                            <div className="text-[12px] text-ink-muted font-body mb-1.5 leading-relaxed">
+                              清理只删除空段落。清理后仍被拒：切回原来的 provider,在此会话执行 /compact 后再切回;或新开会话。
                             </div>
                             <button
                               onClick={() => setRepairModal({ sessionId: selectedSession.sessionId, projectHash: selectedSession.projectHash })}
