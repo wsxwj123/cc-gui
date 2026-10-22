@@ -1027,9 +1027,12 @@ function writeStampedLine(slot, line, wfProgressMsg) {
   }
 }
 
-// r10-12 仪表化:官方 400 "text content blocks must be non-empty" 检测(export 仅为可单测)。
+// r10-12 仪表化:官方 400 拒收历史空内容块的检测(export 仅为可单测)。两种文案:
+// 空 text 块 "text content blocks must be non-empty";空/纯空白 thinking 块(r151r)
+// "each thinking block must contain non-whitespace thinking"。
+// 与前端 client/src/App.jsx 的 isOfficialEmptyBlock 同判据,改一处必须同步另一处。
 export function matchOfficialEmptyBlockError(text) {
-  return /text content blocks must be non-empty|must be non-empty/i.test(String(text || ''));
+  return /must be non-empty|non-whitespace thinking/i.test(String(text || ''));
 }
 // 命中时对该会话 jsonl 跑 repairOfficialCompat 的只读体检(dry-run:纯函数不写盘),
 // 日志记一行结构化摘要(只数字无内容),并把 repairHint 发给前端:deliverLine(SSE 在线

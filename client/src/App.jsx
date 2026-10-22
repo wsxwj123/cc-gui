@@ -7120,8 +7120,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 给错误块挂「检查 Provider 设置」动作(渲染在 visibleChat 的 turn 分支)。
             const isAuthError = /\b401\b|unauthorized|authenticat|api[ -_]?key|x-api-key/i.test(msg);
             // r10-12:官方拒收历史空内容块(旧第三方会话切官方 400)→ 挂一键清理行动卡。
-            // 与服务端 matchOfficialEmptyBlockError 同判据;统计数字由 repair-hint 事件补充。
-            const isOfficialEmptyBlock = /text content blocks must be non-empty|must be non-empty/i.test(msg);
+            // 两种文案:空 text 块 "text content blocks must be non-empty";空/纯空白 thinking 块
+            // (r151r)"each thinking block must contain non-whitespace thinking"。
+            // 与服务端 server/routes/chat.js 的 matchOfficialEmptyBlockError 同判据,改一处必须同步
+            // 另一处;统计数字由 repair-hint 事件补充。
+            const isOfficialEmptyBlock = /must be non-empty|non-whitespace thinking/i.test(msg);
             // r99:服务商内容审核拒绝(DeepSeek「400 Content Exists Risk」)。污染内容留在
             // 上下文里则之后每一轮都被同样拒绝 → 给气泡挂"回退到污染源之前"的动作。
             // 只喂已提取的错误文案 msg,不喂用户消息/模型正文。
@@ -7138,16 +7141,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               : '';
             // r10-10:官方订阅未登录/登录过期 → 错误行下补登录指引(与切官方预检横幅同一文案)。
             const loginHint = matchOfficialLoginError(msg) ? `\n\n> ${OFFICIAL_LOGIN_HINT}。` : '';
+            // r151r:官方以签名不通过拒收其他模型留下的思考段落(Invalid `signature` in `thinking`
+            // block;反引号可有可无)。清理卡只删空段落帮不上 → 不挂卡,报错原文后补一行出路
+            // (文本层,同 loginHint)。
+            const signatureHint = /invalid\W+signature\W+in\W+thinking\W+block/i.test(msg)
+              ? '\n\n> 会话历史里有其他模型留下的思考内容，当前接口不接受。切回原来的 provider,在此会话执行 /compact 后再切回;或新开会话。'
+              : '';
             setChatMessages((prev) => [...prev, {
               uuid: 'chat-error-' + Date.now(),
               type: 'turn',
               ownerKey: streamSid || sessionQueueKey,
               timestamp: new Date().toISOString(),
               model: streamingModel,
-              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}${loginHint}`],
+              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}${loginHint}${signatureHint}`],
               thinking: [],
               toolCalls: [],
-              blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}${loginHint}` }],
+              blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}${loginHint}${signatureHint}` }],
               usage: null,
               // r99:内容审核那支放最前 —— 短语最特异,且与另两支判据在真实输入上互斥
               // ("Content Exists Risk" 不含 api key / 空内容块字样)。
@@ -9800,6 +9809,10 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                                   ? `检测到历史含官方不接受的空内容块(空text ${rep.emptyText || 0} 处/空thinking ${rep.emptyThinking || 0} 处)`
                                   : '检测到历史可能含官方不接受的空内容块';
                               })()}
+                            </div>
+                            {/* r151r:清理只删空段落;不空的第三方思考段落不带官方签名,清理后仍可能被拒 → 固定给出路。 */}
+                            <div className="text-[12px] text-ink-muted font-body mb-1.5 leading-relaxed">
+                              清理只删除空段落。清理后仍被拒：切回原来的 provider,在此会话执行 /compact 后再切回;或新开会话。
                             </div>
                             <button
                               onClick={() => setRepairModal({ sessionId: selectedSession.sessionId, projectHash: selectedSession.projectHash })}

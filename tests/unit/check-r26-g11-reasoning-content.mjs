@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // r26-G11:openai-proxy 响应方向必须翻译 delta.reasoning_content → anthropic
 // thinking 流(修前无分支,deepseek-reasoner 的思考内容在响应流里被静默丢弃)。
-// 真 HTTP 端到端:本地上游桩(按请求分流 SSE/JSON)→ openai proxy。两者都取 OS 临时口。
+// 真 HTTP 端到端:本地上游桩(按请求分流 SSE/JSON)→ openai proxy。两者都在 6900–6999 里取空闲口
+// (helpers/listen-in-range.mjs;单测不许用 listen(0) 的系统随机口)。
 // 哨兵:S1 删掉 reasoning_content 分支 → t1/t2/t3 全红;S2 thinking/text 不互斥
 //       (交错时后到的 thinking 插进已开 text 块或不关旧块)→ t3 顺序断言红。
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
+import { listenInRange } from './helpers/listen-in-range.mjs';
 
 const { startOpenAIProxy, setOpenAIUpstream } = await import('../../server/services/openai-proxy.js');
 
@@ -39,11 +41,16 @@ const upstream = http.createServer((req, res) => {
     res.end(SSE_BODY);
   });
 });
-await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+await listenInRange(upstream);
 
 setOpenAIUpstream({ baseURL: `http://127.0.0.1:${upstream.address().port}/v1`, apiKey: 'test', model: 'deepseek-reasoner-x' });
-const proxyPort = await startOpenAIProxy(0);
-assert.ok(proxyPort > 0, 'proxy 起得来(端口由 OS 分配)');
+// startOpenAIProxy 只收端口号:先用探测口在 6900–6999 里拿到一个空闲端口、放掉,再交给它。
+// 它遇到 EADDRINUSE 会退回系统随机口 → 返回值必须等于要的口,否则立刻失败(不在随机口上跑用例)。
+const probe = await listenInRange(http.createServer());
+const wantPort = probe.address().port;
+await new Promise((r) => probe.close(r));
+const proxyPort = await startOpenAIProxy(wantPort);
+assert.equal(proxyPort, wantPort, 'proxy 起在 6900–6999 的空闲端口上');
 
 const postMessages = (body) => fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
   method: 'POST',
@@ -116,4 +123,4 @@ const parseSSE = (text) => {
 }
 
 console.log('check-r26-g11-reasoning-content: all passed');
-process.exit(0); // proxy/upstream 无 stop 导出,进程退出即释放临时口
+process.exit(0); // proxy/upstream 无 stop 导出,进程退出即释放端口

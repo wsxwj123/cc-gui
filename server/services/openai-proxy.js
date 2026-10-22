@@ -491,6 +491,13 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   // subsequent indices keyed by the OpenAI tool_call index.
   let textOpen = false;
   let thinkingOpen = false; // r26-G11:thinking 块(上游 reasoning_content 翻译而来)
+  // r151r:纯空白思考不开块。官方接口以 "each thinking block must contain non-whitespace
+  // thinking" 拒收纯空白 thinking 块,而命令行会把这里发出的块原样写进会话记录。
+  // 没有打开的 thinking 块时,思考片段先进这个缓冲;出现第一个非空白字符才开块,缓冲
+  // (含前导空白)一并发出。开块前遇到正文、新的工具调用或流结束(即会关闭该 thinking
+  // 块的时机)时缓冲仍全是空白 → 丢弃。块序号只在真正开块时分配,所以仍从 0 连续。
+  // 不变式:缓冲非空时一定没有打开的 thinking 块,且缓冲内容全是空白。
+  let pendingThinking = '';
   let nextIndex = 0;
   const toolBlocks = new Map(); // openaiToolIndex → { anthropicIndex, id, name, jsonBuf }
   let finishReason = null;
@@ -549,12 +556,19 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
     // 没有分支被静默丢弃 → 翻成 anthropic thinking 流(thinking_delta,与 anthropic
     // 路 thinking 块输出形态对齐)。放在 content 分支前:reasoning 正常先于正文到达。
     if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length) {
-      const idx = ensureThinkingBlock();
-      sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: idx,
-        delta: { type: 'thinking_delta', thinking: delta.reasoning_content } });
+      ensureStarted(); // 与改前同一时机发 message_start(纯空白片段也算上游已开始输出)
+      pendingThinking += delta.reasoning_content;
+      // 按不变式,缓冲里此前全是空白:只需看新片段有没有非空白字符(/\S/ 与 trim() 同一空白集)
+      if (thinkingOpen !== false || /\S/.test(delta.reasoning_content)) {
+        const idx = ensureThinkingBlock();
+        sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: idx,
+          delta: { type: 'thinking_delta', thinking: pendingThinking } });
+        pendingThinking = '';
+      }
     }
 
     if (typeof delta.content === 'string' && delta.content.length) {
+      pendingThinking = ''; // 正文开始:还没开块的纯空白思考丢弃
       const idx = ensureTextBlock();
       sse(clientRes, 'content_block_delta', { type: 'content_block_delta', index: idx,
         delta: { type: 'text_delta', text: delta.content } });
@@ -569,6 +583,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
           ensureStarted();
           closeTextBlock();
           closeThinkingBlock(); // G11:工具块前思考块也要闭合(块序合法)
+          pendingThinking = ''; // r151r:工具调用开始,还没开块的纯空白思考丢弃
           const aIdx = nextIndex++;
           entry = {
             anthropicIndex: aIdx,
@@ -621,6 +636,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
     ensureStarted(); // 空但成功的流:仍补出合法(空)的 anthropic 收尾
     closeTextBlock();
     closeThinkingBlock();
+    pendingThinking = ''; // r151r:流结束时仍未开块的纯空白思考不发出
     for (const entry of toolBlocks.values()) {
       let input = {};
       try { input = JSON.parse(entry.jsonBuf || '{}'); } catch {}
