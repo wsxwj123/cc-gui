@@ -23,20 +23,53 @@ Everything the `claude` CLI can do, made visual — plus shell-only conveniences
 - Collapsible tool-call cards (Bash, Read, Edit, Web, Task, Skill…) with diffs; subagent runs visualized
 - **Plan-review & question cards** — approve plans or pick options graphically (`ExitPlanMode` / `AskUserQuestion`)
 - `@` reference picker (insert a file, or pull another session's summary in), slash-command completion (built-in + project-level), input prediction, message queue / stop / recall, WeChat-style compact chat mode
+- The new-session box on the home page has the same abilities as the in-session box, including `/` commands and `@` file references
+- When the upstream returns `400 Content Exists Risk` (DeepSeek's content moderation), the error bubble explains it and offers two actions: roll back to before that tool output and continue, or start a new session
+- **Cross-session messages** — sessions can message each other and hand off tasks (the model sends them with a dedicated tool); incoming messages can wait as a card or be handled automatically; forward button, inbox and sidebar hints; off by default, and fully inert while the master switch is off
+- **Long sessions load on demand** — only the latest 120 messages load at first, "Load earlier" fetches more (up to the latest 2000); cost, tool counts and model stats still cover the whole session
+- **Paste-mojibake repair** — text copied from a terminal or log where UTF-8 was shown as MacRoman / CP1252 (e.g. `‚úª`) is restored when pasted; normal foreign text and Mac Option-key symbols are left alone. Mojibake that already contains Chinese characters (UTF-8 shown as GBK) is not covered
+- When the official API rejects a session because its history contains empty blocks (common after a third-party provider), the error bubble offers "Check & clean": back up the original file, then remove the empty blocks
 
 **Models & providers**
 - Switch model & thinking effort per pane; switch provider (official subscription + many third-party relays: DeepSeek, Qwen, Kimi, GLM, Grok, OpenAI-compatible, …)
 - Manage custom providers (add/edit, fetch model list, test connection); 1M-context default; live context-usage badge
+- Thinking-effort levels follow a per-model measured table; for model ids not in the table, the base name (trailing segment removed) is used, and the effort menu says which base name was used
+- The context badge's denominator prefers the window set in the GUI; its popover shows where the denominator came from (manual / measured / rule table / linked / reported by the CLI)
+- Under a third-party provider, `claude-*` model names hard-coded in plugins, hooks and old scripts are swapped by the local proxy for the model in use, so the upstream no longer rejects them with 400
+
+**Cache hits**
+- Settings → cache optimization (static system-prompt snapshot, ToolSearch off, blocking MCP connection) is on by default for third-party providers; both the Anthropic-compatible and OpenAI-compatible paths measure above 97% hit rate from turn 2
+- The session title row, the phone top bar and the end of each reply show this turn's hit rate; the context-badge popover shows the average
 
 **Permissions & planning**
-- Four permission modes (default / acceptEdits / plan / bypass), switchable mid-run; graphical permission cards; a permission-rules page
+- Six permission modes (default / acceptEdits / plan / auto / don't-disturb / bypass), switchable mid-run; graphical permission cards; a permission-rules page
+- **Auto mode** — a reviewer model checks each tool call: safe ones run, uncertain ones ask you. Works directly with the official provider; for third-party providers turn it on in Settings → Permissions (you can pick the reviewer model), and dangerous commands still require confirmation
+- **Don't-disturb mode** — read-only actions and MCP tools you ticked for auto-run go ahead; everything else is refused without a prompt
+- Permission cards show why they were raised; refused actions leave a note in the message stream (tool and reason)
+- **MCP form cards** — when an MCP server asks for input, a form pops up (text / choice / toggle / number) and the answer is passed back as is
+- **Refusal retry cards** — when the model refuses, choose "retry with a fallback model" or "edit the prompt"
 
 **MCP & plugins**
 - Manage MCP servers (add, ping, OAuth login, enable/disable, edit) with **per-tool enable/disable + tool listing**
 - One-click official plugin install (enable/disable/update/remove), auto-synced to your agents
+- **Computer use** — a bundled MCP that gives sessions screenshots, mouse, keyboard and window info (macOS / Windows), with per-app grants; see [docs/computer-use.md](docs/computer-use.md)
 
 **Skills**
 - Skills marketplace (multiple sources) and import from any GitHub / Gitee repo; local add / archive / delete
+
+**Image generation**
+- Image providers are configured separately from text providers, stored in `~/.claude-gui/image-providers.json`, **never written to `settings.json`**
+- Three upstream styles: OpenAI image API, Gemini image API, and relays that return images through a chat API
+- Each image provider has its own endpoint, key, model, size and save folder; the save folder must be an existing, writable absolute path
+- Images are saved to that folder and previewed in the app; reveal the file in the system file manager
+- **Midjourney layer** — stylize / chaos / seed / raw / draft / reference weights compile into `--flag`s at the end of the prompt, shown per selected version; supports the apimart and midjourney-proxy protocols; image prompts, character references and style references are sent with the request; ←/→ switch between finished images in the upscale view; HD option on 8.x
+
+**Skins**
+- Import a zip / `.cguiskin` pack, or paste `skin.json` text; delete any time
+- Two tiers: **T1 declarative** — only `skin.json` and image assets (41 variables such as colors, radii, shadows, plus light/dark backgrounds); **T2** may include scripts, statically checked before loading
+- Skins target UI elements through `data-cgui` semantic anchors (first batch of 40, promised stable across versions, not tied to refactor-prone class names)
+- **Copy an AI prompt** from the panel: it lists the variables, icon names and anchors, so an AI can produce a skin pack directly
+- Safety limits: symlinks, hard links and path traversal are refused before unpacking; entry count and size are capped; SVGs are cleaned by allow-list (no `script`, no external links); script skins load only after a deny-list static check
 
 **Files & code**
 - File browser (browse / edit / delete-with-undo / open-with-default-app; **PDF & HTML preview**)
@@ -44,18 +77,33 @@ Everything the `claude` CLI can do, made visual — plus shell-only conveniences
 
 **Sessions**
 - Pinned / titled / archived session list, auto titles, session fork, targeted compaction & trim, per-turn spend cap
+- Custom titles are written into the session record, so the `claude --resume` picker in a terminal shows them too
+- **Goal (`/goal`) status** — the session header shows "goal in progress"; auto-continue and goal completion leave marks in the message stream
+- Scheduled tasks (`/loop`) are in the command list; sessions that created one keep their process alive instead of being reclaimed when idle
+- **Persistent session process** — the CLI process stays after a turn, so the next message in that session reuses it (saves about 5 s of cold start); idle reclaim is configurable (15 min to 4 h, or never)
+- **Silence timeout** — when a turn that used subagents gets no upstream output for a long time after they finish (seen with some third-party providers), it either ends the turn or only shows a notice, as set (5 / 10 / 20 min, or notice only)
 
 **Monitoring & usage**
 - Monitor panel (in-turn Tasks / background tasks / background agents / `claude` processes), usage stats & `/insights` reports, process panel
+- **Why it's waiting** — when a background agent is blocked, the panel shows the kind of wait (permission / input / dialog / sandbox / teammate) and what it needs
+- **Background-agent permission answers** — pick a permission mode when dispatching; with per-item confirmation, the agent's permission requests arrive as cards and it continues after you answer
+- **Live subagent text** — subagents' thinking and replies stream into the monitor panel; long tasks get an AI progress summary
+
+**Waiting alerts**
+- System notifications when the window isn't in front (permission requests, background agents waiting), with de-duplication and a rate cap; can be turned off in settings
+- Dock badge and window-title count (only items waiting for you)
 
 **Remote**
 - Reach it from your phone over a private network (Tailscale, etc.) with an access password; take over a session from your phone
 
 **Updates & environment**
 - GUI self-update with live progress; update / install / switch the Claude CLI from the GUI; environment checks (node / claude / python / uv / git)
+- On Windows, an npm-installed `claude` is a batch shim; the app resolves it to the real executable inside the package before running it
+- When an MCP command is not on PATH, common install folders are searched (`%USERPROFILE%\.local\bin`, `%APPDATA%\npm`, Python `Scripts`, …); if it still isn't found, the command name is reported with a hint to enter an absolute path
 
 **Look & feel**
 - Guided tour, custom backgrounds & themes (light / dark and more), font scaling, prompt templates
+- **Display name** — the name used in the home-page greeting ("Good afternoon, Alex"). Up to 20 characters; empty shows the default text; stored on the server and shared by all devices
 
 ---
 
