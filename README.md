@@ -278,7 +278,7 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.433</b>(2026-10-22)· 修复 10 条 · 说明 1 条</summary>
+<summary><b>v0.2.433</b>(2026-10-22)· 修复 12 条 · 说明 1 条</summary>
 
 **修复**
 
@@ -337,6 +337,18 @@ Mac 用 Option 键打出的符号对(如 `∆µ = 5 kJ`、`≈∞`)、正常外�
 </details>
 
 - `CGUI_KEEPALIVE_IDLE_MS` 只在 1000–2147483647 之间的整数毫秒时生效,超出范围按没设处理。之前设得过大时会被按 1 毫秒触发,回合一结束常驻进程就被回收。
+
+<details><summary>切回官方后因空思考段落被拒时也给清理入口</summary>
+
+第三方会话切回官方订阅后,官方以 `each thinking block must contain non-whitespace thinking` 拒收时,错误气泡下同样出现「体检与清理(自动备份原文件)…」,可删掉历史里空的和只有空白的思考段落(此前只认 `text content blocks must be non-empty`)。清理卡多一行说明:清理只删除空段落,清理后仍被拒,就切回原来的 provider,在此会话执行 `/compact` 后再切回,或新开会话。报错是 `Invalid signature in thinking block`(历史里有其他模型留下的思考内容,官方不接受)时,错误气泡里在报错下面给出同样的做法,不出现清理卡。
+
+</details>
+
+<details><summary>OpenAI 协议的第三方 provider 不再留下纯空白思考段落</summary>
+
+经本地代理转换的 OpenAI 协议 provider(如 OpenRouter 上的 DeepSeek)流式回复时,整段思考只有空格、换行时不再生成思考段落,会话记录里不再积累这类官方不接受的空段落;有内容的思考照常逐字保留(包括开头的空白)。Anthropic 协议上游自己返回的空思考段落仍原样保留,切回官方被拒时用清理卡删除。
+
+</details>
 
 **说明**
 
