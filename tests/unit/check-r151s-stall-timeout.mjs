@@ -7,7 +7,7 @@
 // · 两个读取共用的警告:坏文件写一行含 prefs.json 的警告且不带文件内容;同一种失败不重复写;读成功后清零,再坏重新提示一次;
 //   读不出(这里用"prefs.json 是个目录"造 EISDIR)算另一种失败。
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, utimesSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -116,6 +116,30 @@ try {
   setPrefs(raw);
   eq(readStallTimeoutSync(), '20m', '合法值读取');
   eq(readFileSync(PREFS, 'utf8'), raw, '读时不改写偏好文件');
+
+  // ── ⑦ 读不出不缓存、坏 JSON 照常缓存 ────────────────────────────────────────
+  //    文件在、stat 成功但读取失败(Windows 上被杀软 / 同步盘 / 编辑器占用的 EBUSY、EPERM,这里用去掉读权限的 EACCES 代替):
+  //    这次回默认值但不写缓存;恢复可读后文件特征(修改时间、大小、inode,chmod 都不改)没变,也要重新读到文件里的值。
+  //    修前:读不出那次把 5m 连同文件特征缓存住,恢复后一直回 5m。
+  const BAD_SAME_SIZE = '{"stallTimeout":"10m" '; // 坏 JSON(少右括号),与下面的合法内容同大小
+  const GOOD_SAME_SIZE = '{"stallTimeout":"10m"}';
+  eq(Buffer.byteLength(BAD_SAME_SIZE), Buffer.byteLength(GOOD_SAME_SIZE), '前置:两份内容同大小');
+  setPrefs(BAD_SAME_SIZE);
+  eq(readStallTimeoutSync(), '5m', '坏 JSON → 5m');
+  setPrefs(GOOD_SAME_SIZE, { keepTime: true });
+  eq(readStallTimeoutSync(), '5m', '坏 JSON 照常缓存:文件特征没变就不重读');
+  setPrefs({ stallTimeout: '20m' });
+  chmodSync(PREFS, 0o000);
+  let unreadable = false;
+  try { readFileSync(PREFS); } catch { unreadable = true; }
+  if (!unreadable) {
+    chmodSync(PREFS, 0o644);
+    console.log('  (跳过「读不出后恢复」:去掉读权限后当前用户仍能读文件,常见于以 root 运行或文件系统不认权限位,前提不成立)');
+  } else {
+    eq(readStallTimeoutSync(), '5m', '读不出(EACCES)→ 这次回 5m');
+    chmodSync(PREFS, 0o644);
+    eq(readStallTimeoutSync(), '20m', '恢复可读后文件特征没变,也能重新读到文件里的 20m(读不出那次没写缓存)');
+  }
 
   console.log(`✓ r151s stallTimeout 单测全部通过(${checks} 项断言)`);
 } finally {
