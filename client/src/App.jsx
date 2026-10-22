@@ -7120,8 +7120,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 给错误块挂「检查 Provider 设置」动作(渲染在 visibleChat 的 turn 分支)。
             const isAuthError = /\b401\b|unauthorized|authenticat|api[ -_]?key|x-api-key/i.test(msg);
             // r10-12:官方拒收历史空内容块(旧第三方会话切官方 400)→ 挂一键清理行动卡。
-            // 与服务端 matchOfficialEmptyBlockError 同判据;统计数字由 repair-hint 事件补充。
-            const isOfficialEmptyBlock = /text content blocks must be non-empty|must be non-empty/i.test(msg);
+            // 两种文案:空 text 块 "text content blocks must be non-empty";空/纯空白 thinking 块
+            // (r151r)"each thinking block must contain non-whitespace thinking"。
+            // 与服务端 server/routes/chat.js 的 matchOfficialEmptyBlockError 同判据,改一处必须同步
+            // 另一处;统计数字由 repair-hint 事件补充。
+            const isOfficialEmptyBlock = /must be non-empty|non-whitespace thinking/i.test(msg);
             // r99:服务商内容审核拒绝(DeepSeek「400 Content Exists Risk」)。污染内容留在
             // 上下文里则之后每一轮都被同样拒绝 → 给气泡挂"回退到污染源之前"的动作。
             // 只喂已提取的错误文案 msg,不喂用户消息/模型正文。
