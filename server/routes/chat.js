@@ -31,8 +31,9 @@ import {
 import { readKeepAliveIdleSync, readStallTimeoutSync, readThirdPartyAutoSync } from './prefs.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
-// 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
-// stdout 路径(spawn 早期缓冲 / attached 实时 / detached 缓冲)都喂到这里。
+// 切会话 effect),完成信号唯一可靠的来源是服务端。每次收尾(给流发 done、会话转空闲)
+// 只广播一次:completeNotified 在复用常驻进程开新回合、已收尾的槽被续跑复活(r151t)时清零;
+// 三条 stdout 路径(spawn 早期缓冲 / attached 实时 / detached 缓冲)都喂到这里。
 // 客户端(useWebSocket)收到后:非当前聚焦会话 → 顶部悬浮提醒。
 function maybeBroadcastTurnComplete(slot, line) {
   if (slot.completeNotified) return;
@@ -3341,6 +3342,11 @@ async function handleChatPost(req, res) {
           slot.idle = false;
           slot.revived = true; // 看门狗判据(无子代理续跑也纳入 5 分钟静默兜底)
           reviveSlotTurn(slot); // R13:回合还在跑,别让停止入口拿早前那次 finalize 的"completed"打发
+          // r151t:回合完成广播按"每次收尾(给流发 done、会话转空闲)一次"。上一段收尾已广播过,复活的这一段(引导排成的回合、
+          // 命令行自己续跑、子代理去抖后的续跑)收尾时照常再广播一次,前端据它作废切走时存的直播快照、发完成提醒、刷新侧栏。
+          // 还在收尾等待窗里就续上的走不到这里(没转空闲),与前一段合并成一次收尾、一次广播。
+          // 运行时钩子 turnEnd"每回合至多一次"由 runtimeTurn.ended 管,不受这里影响。
+          slot.completeNotified = false;
           if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
           // 复活=主 agent 续跑,则之前被 4s 去抖过早缓冲进 earlyLines 的 done 是错的:若 SSE 在
           // finalize 前已断(WebView 空闲掐断/切窗格),done 落 earlyLines,reattach 回放到它会
