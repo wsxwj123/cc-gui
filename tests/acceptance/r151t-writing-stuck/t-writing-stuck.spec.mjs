@@ -209,11 +209,11 @@ test('T06 CGUI_STALL_MS=3000,按第 1 条场景结束后再等 6 秒:任何流�
   });
 });
 
-test('T07 (乙)第二回合进行中调用停止接口,命令行随后吐 result 与 completed:2 秒内报 idle,流收到 done 并被关闭;再调引导 → 409', async () => {
+test('T07 (回归)按(乙)另起的第二回合进行中接一条流、再调用停止接口,命令行随后吐 result 与 completed:这条流 2 秒内收到 done 并被关闭;2 秒内 agents/active 的 status 为 done 或 idle;再调引导 → 409', async () => {
   await withInst('t07', {}, async (inst, track) => {
     const ses = newSession(inst, 's7');
     const { s1 } = await startSeparate(ses, track, 'T07', { gate: false, endText: null });
-    const s2 = track(ses.stream());   // 第二回合进行中接上的流:它一定是回合进行中接的,done 不可能早于"第二回合在跑"
+    const s2 = track(ses.stream());   // 第二回合进行中接上的流(第 7 条的流判定以它为准):它一定是回合进行中接的,done 不可能早于"第二回合在跑"
     expect(await s2.ready, '第二回合进行中接流应 200').toBe(200);
     const stop = await ses.stop();
     expect(stop.status, `前置:第二回合进行中调用停止接口应 200(应答原文:${String(stop.text).slice(0, 240)})`).toBe(200);
@@ -221,12 +221,27 @@ test('T07 (乙)第二回合进行中调用停止接口,命令行随后吐 result
     const r2 = await ses.waitResult(2, 8_000);
     const cmp = await ses.waitEmit((e) => isLife('completed')(e) && ses.results().length === 2, 5_000);
     expect(r2 && cmp, `夹具生效:停止之后命令行吐出了第二个 result 与 completed(假命令行进程 ${ses.fakePid()} 活着:${isAlive(ses.fakePid())};记录 ${JSON.stringify(ses.emits().map((e) => `${e.ev}/${e.sub || ''}`))})`).toBeTruthy();
-    // 状态判定用软断言:接口文件写"2 秒内报 idle";实测修复前停止并收尾后 status 是 'done'(有没有 completed 都一样,与本轮要修的毛病无关,见报告)。
-    // 用 soft 让下面"流收到 done 并关闭""再引导 409"照常判定,不被它挡住;接口文件若改口(如认 done),只改这一处。
-    const idle = await waitIdle(ses, { settleFrom: cmp.t + 200, by: cmp.t + LIM });
-    expect.soft(idle.ok, `停止并收尾后:应在 ${LIM}ms 内报 idle(最后一次采样 ${JSON.stringify(idle.last)};${await ses.diag()})`).toBe(true);
-    await expectDoneClosedBy(s1, cmp.t, '发送时开的流');
-    await expectDoneClosedBy(s2, cmp.t, '第二回合进行中接上的流');
+    // 状态判定(接口文件第 7 条修订版):停止并收尾后 2 秒内 agents/active 不再把该会话报成在跑 —— status 是 'done' 或 'idle' 二者之一
+    // (没有后台任务时停止会让常驻进程退出,现有行为报 done;这条是修复前就应通过的回归,不再要求 idle)。
+    // 采样法同 waitIdle:completed 吐出 200ms 后起每 60ms 采一次,连续 ≥120ms 都是 done / idle 才算稳定(防 result 与 completed 之间的瞬时值误判);采到 LIM(2000ms + 300ms 轮询误差)为止。
+    // 用 soft 让下面"流收到 done 并关闭""再引导 409"照常判定,不被它挡住。
+    const NOT_RUNNING = ['done', 'idle'];
+    const timeline = []; let streakFrom = null; let measured;
+    for (;;) {
+      measured = await ses.status();
+      const dt = Date.now() - cmp.t;
+      const tail = timeline[timeline.length - 1];
+      if (tail && tail.s === measured) tail.to = dt; else timeline.push({ s: measured, from: dt, to: dt });
+      if (dt >= 200 && NOT_RUNNING.includes(measured)) {
+        if (streakFrom === null) streakFrom = dt;
+        if (dt - streakFrom >= 120) break;   // 稳定的 done / idle:measured 就是它
+      } else streakFrom = null;
+      if (dt >= LIM) break;   // 到线了还没稳定:measured 是线上最后一次采样
+      await sleep(60);
+    }
+    expect.soft(NOT_RUNNING, `停止并收尾后 ${LIM}ms 内 agents/active 的 status 应为 done 或 idle,实测 ${JSON.stringify(measured)}(采样时间线,毫秒相对 completed 吐出时刻:${JSON.stringify(timeline)};${await ses.diag()})`).toContain(measured);
+    await expectDoneClosedBy(s2, cmp.t, '第二回合进行中接上的流');   // 第 7 条:这条流 2 秒内收到 done 并被服务端关闭
+    await expectDoneClosedBy(s1, cmp.t, '发送时开的流');   // 保留的判定
     expect409(await ses.steer('T07 停止后的引导'), '停止并收尾后');
   });
 });
