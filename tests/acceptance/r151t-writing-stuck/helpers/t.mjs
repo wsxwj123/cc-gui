@@ -127,7 +127,10 @@ export function newSession(inst, name) {
   ses.script = (key, def) => inst.writeScript(`${name}-${key}`, def);
   ses.release = (n) => inst.release(ses.f(n));
   ses.send = async (label, key) => {
-    const r = await http(inst.base, 'POST', '/api/chat', { sessionId: sid, cwd, permissionMode: 'default', prompt: `${label}${key ? ` ${ses.mark(key)}` : ''}` }, 30_000);
+    // 接口文件"测试环境约定":输入预测一律关闭。不带 promptSuggestions:false 时服务端按官方渠道默认打开,
+    // 每个回合 result 之后都要多等约 4 秒,所有"2 秒内"的时序都会变。本套件所有 POST /api/chat 都经这一个入口发。
+    const body = { sessionId: sid, cwd, permissionMode: 'default', promptSuggestions: false, prompt: `${label}${key ? ` ${ses.mark(key)}` : ''}` };
+    const r = await http(inst.base, 'POST', '/api/chat', body, 30_000);
     if (r.body && r.body.pid) ses.pid = r.body.pid;
     return r;
   };
