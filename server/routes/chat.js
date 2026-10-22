@@ -2033,9 +2033,10 @@ function settleSlotTurn(slot, fallback = 'completed') {
 
 // 主 agent 续跑(4s 去抖把回合提前转 idle,随后又被复活)期间回合没结束:把已结算的记录
 // 翻回活跃,否则停止入口会拿"completed"打发掉一个正在跑的回合。
+// 只认槽上当前这一回合的记录(世代对得上):跨会话回合复用进程时没有自己的记录,turnRecord 还是上一条用户回合的,那一回合早已结束。
 function reviveSlotTurn(slot) {
   const rec = slot?.turnRecord;
-  if (!rec || !rec.settledAt || rec.stopRequested) return;
+  if (!rec || !rec.settledAt || rec.stopRequested || (rec.turnEpoch | 0) !== (slot.turnEpoch | 0)) return;
   rec.settledAt = null;
   rec.status = 'running';
 }
@@ -4036,7 +4037,7 @@ router.get('/chat/:pid/stream', (req, res) => {
 router.post('/chat/:pid/stop', async (req, res) => {
   const pid = req.params.pid;
   const slot = activeProcesses.get(pid) || null;
-  const record = turnByPid.get(pid) || null;
+  const record = stopTargetRecord(turnByPid.get(pid) || null, slot);
   // 从未存在或保留期后:没有可停的对象。有记录但进程已退净的,pin 到记录上走终态回执。
   if (!slot && !record) return res.status(404).json(RUN_NOT_FOUND_BODY);
   // express.json 全局挂载:无 body → {} → 全默认(选择性),老调用方向后兼容。
@@ -4051,6 +4052,15 @@ router.post('/chat/:pid/stop', async (req, res) => {
   if (!slot) return res.status(404).json(RUN_NOT_FOUND_BODY);
   return res.json(applyStop(slot, pid, { hard, allTasks }));
 });
+
+// r151q 第 9 项(安全复审):跨会话回合不带 clientTurnId,复用常驻进程时没有自己的记录,pid 上挂的还是上一条用户回合
+// 留下的(已结束,保留 24 小时)—— 拿它核对,停止只会回那条旧回合的终态,跨会话回合照跑。只在槽上当前回合是跨会话回合、
+// 查到的记录又不是这一回合(世代对不上,判法同 turnLiveStatus)时,按"没有记录"处理:身份按槽核对(会话 id / draft 身份,
+// 不接受 clientTurnId),直接停,那条旧记录不动。当前回合是用户回合时原样返回记录(以记录为权威的核对与 RUN_STALE 不变)。
+function stopTargetRecord(record, slot) {
+  if (!record || !slot?.internalTurn) return record;
+  return (slot.turnEpoch | 0) === (record.turnEpoch | 0) ? record : null;
+}
 
 // R13:停止请求里的期望身份(两者都不给 = 老调用方,走原路径)。owner 只接受字符串 ——
 // 身份就是"会话 id 或 draft 身份"这一个字符串,不多形态解析。
