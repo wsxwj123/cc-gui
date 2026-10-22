@@ -28,7 +28,7 @@ import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCach
 import {
   autoModeServerInjection, autoModeModelInjection, gateAutoPermissionMode, thirdPartyAutoPreToolUse, thirdPartyAutoAskOutput, thirdPartyAutoMustPrompt,
 } from '../services/auto-audit.js';
-import { readKeepAliveIdleSync, readThirdPartyAutoSync } from './prefs.js';
+import { readKeepAliveIdleSync, readStallTimeoutSync, readThirdPartyAutoSync } from './prefs.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每个进程只广播一次;三条
@@ -712,25 +712,33 @@ const LIVE_TASK_FRESH_MS = 30 * 60 * 1000;
 // 不是无限豁免(R1 不得绕过)。
 export const SHELL_TASK_FRESH_MS = 2 * 60 * 60 * 1000;
 
-// 静默看门狗阈值(毫秒),默认 300000(5 分钟)。CGUI_STALL_MS 仅供联调/验收按需
-// 调小阈值(合法与否见 parseEnvMs:整数且 1000 ≤ ms ≤ 2147483647,上限理由同);服务启动时
-// 读取一次,缺省/非法值回默认 300000,默认行为不变。这是通用可调阈值,不是测试专用分支。
+// 静默看门狗的等待时长(毫秒)。r151s 起由设置 stallTimeout 决定(routes/prefs.js 的 STALL_TIMEOUT_VALUES,默认 5m),
+// 每次开始计时现算(纯函数,export 仅为可单测):
+// · CGUI_STALL_MS 合法(见 parseEnvMs:整数且 1000 ≤ ms ≤ 2147483647,上限理由同)时用它 —— 联调/验收按需调小的通用窗口,
+//   不是测试专用分支;服务启动时读取一次(同改动前);
+// · 否则按设置映射;'never'(到点只提示、不结束回合)仍按 5 分钟计时;设置缺省/非法回 5 分钟(readStallTimeoutSync 已归一,这里再兜一层)。
+// 返回值就是定时器时长本身,不要换算:旧验收套件的夹具按"定时器时长恰为 300000"识别默认阈值。
+const STALL_MS_BY_SETTING = new Map([['5m', 300_000], ['10m', 600_000], ['20m', 1_200_000], ['never', 300_000]]);
 const STALL_MS_DEFAULT = 300_000;
-export function resolveStallMs(raw) {
-  return parseEnvMs(raw) ?? STALL_MS_DEFAULT;
+export function resolveStallMs(setting, envRaw) {
+  return parseEnvMs(envRaw) ?? STALL_MS_BY_SETTING.get(setting) ?? STALL_MS_DEFAULT;
 }
-const STALL_MS = resolveStallMs(process.env.CGUI_STALL_MS);
+const STALL_MS_ENV_RAW = process.env.CGUI_STALL_MS;
 
-// stall_notice 文案(纯函数,export 仅为可单测)。时长按运行时阈值如实写:≥1 分钟写四舍五入的分钟数
-// (默认 300000 → "5 分钟"逐字不变),不到 1 分钟写四舍五入的秒数(CGUI_STALL_MS=2000 → "2 秒")。
-// 旧版下限写死 5 分钟,阈值调到分钟级以下时提示与实际等待时长不符。秒数至少 1,不出现"0 秒"。
-export function buildStallNoticeText(stallMs, subagentSeen) {
+// stall_notice 文案(纯函数,export 仅为可单测)。时长按这次实际等待的毫秒数如实写:≥1 分钟写四舍五入的分钟数
+// (默认 300000 → "5 分钟"),不到 1 分钟写四舍五入的秒数(CGUI_STALL_MS=2000 → "2 秒")。秒数至少 1,不出现"0 秒"。
+// endTurn 为假(设置「只提示，不结束」)时写只提示版:不说已结束本回合,提示需要时可点停止。两版末尾都指向设置入口。
+const STALL_NOTICE_SETTING_TAIL = '时长可在 设置 → 会话 → 静默超时 中修改。';
+export function buildStallNoticeText(stallMs, subagentSeen, { endTurn = true } = {}) {
   const duration = stallMs >= 60_000
     ? `${Math.round(stallMs / 60_000)} 分钟`
     : `${Math.max(1, Math.round(stallMs / 1000))} 秒`;
-  return subagentSeen
-    ? `子代理已全部结束,但上游超过 ${duration}无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`
-    : `上游超过 ${duration}无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`;
+  const head = subagentSeen
+    ? `子代理已全部结束,但上游超过 ${duration}无后续输出`
+    : `上游超过 ${duration}无后续输出`;
+  return endTurn
+    ? `${head},已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。${STALL_NOTICE_SETTING_TAIL}`
+    : `${head}(部分第三方 provider 偶发)。按设置不自动结束本回合,需要时可点停止。${STALL_NOTICE_SETTING_TAIL}`;
 }
 
 // ── F2:cron(/loop)保活 ──────────────────────────────────────────────────────
@@ -3101,16 +3109,19 @@ async function handleChatPost(req, res) {
   };
   // #13 静默看门狗:部分第三方主控模型拿到子代理 tool_result 后,上游既不续写也不发
   // 终态 result → 生成器永久阻塞、回合永不收尾、输入框恒灰(官方无此病)。条件极窄:
-  // 静默超 STALL_MS 且【本回合起过子代理/续跑 + 当前没有任何新鲜活任务 + 尚未收尾】才
+  // 静默超过设定时长且【本回合起过子代理/续跑 + 当前没有任何新鲜活任务 + 尚未收尾】才
   // 主动 finalize 解锁;任何消息到达即重置。正常流(消息间隔远小于阈值)与真在跑的
   // 任务(liveTasks 门)都不会触发。
   // 旧注释称"shell 后台任务不阻塞主控,不计入等待",该前提在 CLI 新版已不成立:后台工作
   // pending 时会话不空闲、可以长时间无输出(模型在等后台任务)。看门狗到点是强拆进程,
   // 会连带杀掉后台命令且不可恢复 —— 故新鲜 shell 任务也一律豁免(见 busyLive)。
-  // 阈值默认 300s;CGUI_STALL_MS 仅供联调/验收调小(启动时读取,见 STALL_MS 常量注释)。
+  // r151s:时长按设置 stallTimeout 每次开始计时现算(见 resolveStallMs;CGUI_STALL_MS 合法时优先),正在计时的那一段不按新设置
+  // 补算。到点时再读一次设置:是 'never' → 只发提示、不结束回合、不动进程,也不再重新计时(同一段静默只提示一次;上游再来消息由
+  // 下面的消息循环重新计时);其余照旧结束回合。触发条件与让路(等卡、收尾去抖)两种动作完全相同。
   let stallTimer = null;
   const armStall = () => {
     clearTimeout(stallTimer);
+    const stallMs = resolveStallMs(readStallTimeoutSync(), STALL_MS_ENV_RAW);
     stallTimer = setTimeout(() => {
       // 判据(忙判据 + R1 降级守卫 + revived)见 shouldStallWatchdogFire / stallWatchdogBusy 的注释。
       if (shouldStallWatchdogFire(slot, Date.now())) {
@@ -3127,7 +3138,12 @@ async function handleChatPost(req, res) {
         }
         // stall_notice:客户端专用渲染分支(中性系统提示 turn,非红色错误)。原用 type:stderr
         // 但客户端 SSE 分发根本不渲染 stderr = 提示白发(判官缺陷3)。文案见 buildStallNoticeText。
-        const stallText = buildStallNoticeText(STALL_MS, slot.turnSubagentSeen);
+        if (readStallTimeoutSync() === 'never') {
+          const hintText = buildStallNoticeText(stallMs, slot.turnSubagentSeen, { endTurn: false });
+          deliverLine(slot, JSON.stringify({ type: 'stall_notice', text: hintText }));
+          return;
+        }
+        const stallText = buildStallNoticeText(stallMs, slot.turnSubagentSeen);
         deliverLine(slot, JSON.stringify({ type: 'stall_notice', text: stallText }));
         // 【必须强制拆进程,不能走 idle 复用】(判官缺陷1):卡死场景下 CLI 子进程正阻塞在
         // 死掉的上游请求上,不是健康空闲。若只 finalize 转 idle,同会话 15 分钟内下一条消息
@@ -3140,7 +3156,7 @@ async function handleChatPost(req, res) {
       } else if (!slot.idle) {
         armStall(); // 子代理仍在跑等条件不满足:继续观察下一窗
       }
-    }, STALL_MS);
+    }, stallMs);
   };
   (async () => {
     try {

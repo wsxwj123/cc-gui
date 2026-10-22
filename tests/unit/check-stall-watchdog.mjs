@@ -152,23 +152,36 @@ const old = (ms) => now - ms;
 }
 
 // ── r151h:CGUI_STALL_MS 阈值解析(默认 300000,合法正整数且 1000..2147483647) ─
+// r151s:签名改为 resolveStallMs(setting, envRaw);下面这组只看环境变量,setting 缺省 = 默认 5m。
 {
-  assert.equal(resolveStallMs(undefined), 300_000, '缺省回默认 300000');
-  assert.equal(resolveStallMs(null), 300_000, 'null 回默认 300000');
-  assert.equal(resolveStallMs(''), 300_000, '空串回默认 300000');
-  assert.equal(resolveStallMs('abc'), 300_000, '非数字回默认 300000');
-  assert.equal(resolveStallMs('999'), 300_000, '小于下限 1000 回默认 300000');
-  assert.equal(resolveStallMs('1000'), 1000, '下限 1000 生效');
-  assert.equal(resolveStallMs('1500'), 1500, '合法值生效');
-  assert.equal(resolveStallMs('1.5'), 300_000, '非整数回默认 300000');
-  assert.equal(resolveStallMs('0'), 300_000, '0 回默认 300000');
-  assert.equal(resolveStallMs('-1500'), 300_000, '负数回默认 300000');
-  assert.equal(resolveStallMs(300_000), 300_000, '数字 300000 原样生效');
+  assert.equal(resolveStallMs(undefined, undefined), 300_000, '缺省回默认 300000');
+  assert.equal(resolveStallMs(undefined, null), 300_000, 'null 回默认 300000');
+  assert.equal(resolveStallMs(undefined, ''), 300_000, '空串回默认 300000');
+  assert.equal(resolveStallMs(undefined, 'abc'), 300_000, '非数字回默认 300000');
+  assert.equal(resolveStallMs(undefined, '999'), 300_000, '小于下限 1000 回默认 300000');
+  assert.equal(resolveStallMs(undefined, '1000'), 1000, '下限 1000 生效');
+  assert.equal(resolveStallMs(undefined, '1500'), 1500, '合法值生效');
+  assert.equal(resolveStallMs(undefined, '1.5'), 300_000, '非整数回默认 300000');
+  assert.equal(resolveStallMs(undefined, '0'), 300_000, '0 回默认 300000');
+  assert.equal(resolveStallMs(undefined, '-1500'), 300_000, '负数回默认 300000');
+  assert.equal(resolveStallMs(undefined, 300_000), 300_000, '数字 300000 原样生效');
   // 上限 = 2^31-1(Node setTimeout 的 delay 上限):超过它的值 Node 会按 1ms 处理,
   // 定时器立刻触发 → 看门狗立刻 abort 拆进程,所以必须夹到上限并回落默认。
-  assert.equal(resolveStallMs('2147483647'), 2_147_483_647, '上限 2147483647 采用');
-  assert.equal(resolveStallMs('2147483648'), 300_000, '超上限 2147483648 回默认 300000');
-  assert.equal(resolveStallMs('1000000000000000'), 300_000, '超大值(1e15)回默认 300000');
+  assert.equal(resolveStallMs(undefined, '2147483647'), 2_147_483_647, '上限 2147483647 采用');
+  assert.equal(resolveStallMs(undefined, '2147483648'), 300_000, '超上限 2147483648 回默认 300000');
+  assert.equal(resolveStallMs(undefined, '1000000000000000'), 300_000, '超大值(1e15)回默认 300000');
+  // r151s:设置映射(定时器时长就是这个毫秒数本身,旧套件夹具按"恰为 300000"识别默认档)
+  assert.equal(resolveStallMs('5m'), 300_000, '5m → 300000');
+  assert.equal(resolveStallMs('10m'), 600_000, '10m → 600000');
+  assert.equal(resolveStallMs('20m'), 1_200_000, '20m → 1200000');
+  assert.equal(resolveStallMs('never'), 300_000, 'never(只提示)仍按 5 分钟计时');
+  for (const bad of [undefined, null, '', 'bogus', '15m', 'constructor', '__proto__', 'toString', 10]) {
+    assert.equal(resolveStallMs(bad), 300_000, `设置非法(${String(bad)})回 300000`);
+  }
+  assert.equal(resolveStallMs('20m', '2000'), 2000, 'CGUI_STALL_MS 合法时压过设置');
+  assert.equal(resolveStallMs('never', '2000'), 2000, 'never 也用 CGUI_STALL_MS 的时长(到点动作仍看设置)');
+  assert.equal(resolveStallMs('10m', '999'), 600_000, 'CGUI_STALL_MS 非法时按设置');
+  assert.equal(resolveStallMs('10m', '2147483648'), 600_000, 'CGUI_STALL_MS 超上限时按设置');
   // r151q 第 7 项:CGUI_STALL_MS 与 CGUI_KEEPALIVE_IDLE_MS 共用 parseEnvMs(合法 → 原值,其余 → null = 当没设)
   assert.equal(parseEnvMs('2000'), 2000, '合法值原样');
   assert.equal(parseEnvMs(2_147_483_647), 2_147_483_647, '上限照用');
@@ -288,8 +301,10 @@ const old = (ms) => now - ms;
   assert.equal(shouldStallWatchdogFire(slotOf([staleSub], { idle: false, turnSubagentSeen: true, lastLevelAt: old(60_000) }), now), true,
     'level 信号新鲜时,本回合陈旧条目挡不住看门狗');
 
-  // ③ 文案:默认 300000 → "5 分钟"逐字不变;分钟数随阈值变化;带子代理前缀的版本只多前缀
-  const tail = '分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。';
+  // ③ 文案:默认 300000 → "5 分钟";分钟数随阈值变化;带子代理前缀的版本只多前缀。
+  //    r151s:结束版末尾多一句设置入口;只提示版(endTurn:false)不说已结束本回合,同样以设置入口结尾。
+  const SETTING_TAIL = '时长可在 设置 → 会话 → 静默超时 中修改。';
+  const tail = `分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。${SETTING_TAIL}`;
   assert.equal(buildStallNoticeText(300_000, false), `上游超过 5 ${tail}`, '默认阈值文案逐字不变');
   assert.equal(buildStallNoticeText(300_000, true), `子代理已全部结束,但上游超过 5 ${tail}`, '带子代理前缀的默认文案逐字不变');
   assert.equal(buildStallNoticeText(600_000, false), `上游超过 10 ${tail}`, '分钟数随阈值变化(600000 → 10 分钟)');
@@ -298,6 +313,12 @@ const old = (ms) => now - ms;
   assert.equal(buildStallNoticeText(2000, true), `子代理已全部结束,但上游超过 2 ${secTail}`, '秒数文案带子代理前缀');
   assert.equal(buildStallNoticeText(60_000, false), `上游超过 1 ${tail}`, '满 1 分钟起写分钟数');
   assert.equal(buildStallNoticeText(90_000, false), `上游超过 2 ${tail}`, '分钟数四舍五入(90000 → 2 分钟)');
+  assert.equal(buildStallNoticeText(300_000, true, { endTurn: true }), `子代理已全部结束,但上游超过 5 ${tail}`, '显式 endTurn:true 同默认');
+  const hintTail = `无后续输出(部分第三方 provider 偶发)。按设置不自动结束本回合,需要时可点停止。${SETTING_TAIL}`;
+  assert.equal(buildStallNoticeText(300_000, true, { endTurn: false }), `子代理已全部结束,但上游超过 5 分钟${hintTail}`, '只提示版(起过子代理)');
+  assert.equal(buildStallNoticeText(1_200_000, false, { endTurn: false }), `上游超过 20 分钟${hintTail}`, '只提示版(续跑)换开头');
+  assert.equal(buildStallNoticeText(2000, false, { endTurn: false }), `上游超过 2 秒${hintTail}`, '只提示版秒数写法同结束版');
+  assert.ok(!buildStallNoticeText(600_000, true, { endTurn: false }).includes('已结束本回合'), '只提示版不含"已结束本回合"');
 
   // ④ 接线锚(宽松,只查生产代码调用了被测函数 / 读了变量,不锁写法)
   const { readFileSync } = await import('node:fs');
@@ -306,11 +327,13 @@ const old = (ms) => now - ms;
   const src = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'server', 'routes', 'chat.js'), 'utf8');
   assert.ok(/(?<!function )shouldStallWatchdogFire\(slot\b/.test(src), '看门狗定时器必须调用 shouldStallWatchdogFire 判定(不算函数定义本身)');
-  assert.ok(/buildStallNoticeText\(STALL_MS\b/.test(src), 'stall_notice 文案必须按 STALL_MS 由 buildStallNoticeText 生成');
-  assert.ok(/\}, STALL_MS\);/.test(src), '看门狗定时器必须使用 STALL_MS');
-  assert.ok(/resolveStallMs\(process\.env\.CGUI_STALL_MS\)/.test(src), 'STALL_MS 必须在启动时读取 CGUI_STALL_MS');
+  assert.ok(/buildStallNoticeText\(stallMs\b/.test(src), 'stall_notice 文案必须按这次实际等待的 stallMs 由 buildStallNoticeText 生成');
+  assert.ok(/\}, stallMs\);/.test(src), '看门狗定时器必须使用 stallMs');
+  assert.ok(/resolveStallMs\(readStallTimeoutSync\(\)/.test(src), 'r151s:每次开始计时按设置 stallTimeout 现算时长');
+  assert.ok(/process\.env\.CGUI_STALL_MS\b/.test(src), 'CGUI_STALL_MS 仍然读取');
+  assert.ok(/readStallTimeoutSync\(\) === 'never'/.test(src), 'r151s:到点再读一次设置,never 走只提示');
   assert.ok(/hasFreshLiveTask\(slot\.liveTasks\b/.test(src), 'idleReclaim 的"有活任务"判据必须用分窗函数');
   assert.ok(/slot\.lastLevelAt = Date\.now\(\)/.test(src), 'level 分支必须刷新 lastLevelAt(R1 降级支据此切换)');
 }
 
-console.log('✓ check-stall-watchdog: 年龄上限 9 断言 + level 续命 + R1 降级三态(仅非 shell) + 2h 后 shell 不豁免 + shell 2h 窗口 + idleReclaim 分窗 + 新鲜 shell 豁免(busyLive) + CGUI_STALL_MS 解析 + 组合忙判据/触发条件/文案(真函数) + 接线锚 全过');
+console.log('✓ check-stall-watchdog: 年龄上限 9 断言 + level 续命 + R1 降级三态(仅非 shell) + 2h 后 shell 不豁免 + shell 2h 窗口 + idleReclaim 分窗 + 新鲜 shell 豁免(busyLive) + CGUI_STALL_MS 解析 + 设置映射(r151s) + 组合忙判据/触发条件/文案两版(真函数) + 接线锚 全过');

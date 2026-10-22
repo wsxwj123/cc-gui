@@ -54,6 +54,7 @@ const SETTINGS_INDEX = [
   // r122:过程块自动折叠开关,同样落 general(设置面板打开时的默认 tab),搜索「折叠」可直达。
   { id: 'set-auto-fold', tab: 'general', title: '过程块自动折叠', keys: '折叠 过程 思考 工具 展开 收起 条带 fold' },
   { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存 空闲 回收 idle keepalive' },
+  { id: 'set-stall-timeout', tab: 'session', title: '静默超时', keys: '静默 超时 看门狗 stall timeout watchdog 上游 无输出 卡住 子代理 结束 回合 提示' },
   { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入 自动 第三方 费用' },
   { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
   { id: 'set-restore-last', tab: 'session', title: '启动时恢复上次会话', keys: '启动 恢复 上次 会话 Home 首页 restore' },
@@ -2236,6 +2237,55 @@ function PersistentChatToggle() {
   );
 }
 
+// r151s:静默超时(stallTimeout,服务端 prefs;默认 5m)。起过子代理或续跑的回合,上游超过设定时长没有任何输出时,服务端到点
+// 结束本回合;'never' = 到点(5 分钟)只发一条提示、不结束回合。交互同「空闲回收」:取到值前显示默认,保存中禁用,
+// 失败显示错误、下拉保持原值(受控 select 的 value 没被改)。
+const STALL_TIMEOUT_OPTIONS = [['5m', '5 分钟'], ['10m', '10 分钟'], ['20m', '20 分钟'], ['never', '只提示，不结束']];
+function StallTimeoutSelect() {
+  const [value, setValue] = useState(null); // null = 还没取到;取到前下拉显示默认
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/prefs/stall-timeout')
+      .then((r) => r.json())
+      .then((b) => { if (alive && b && b.ok && typeof b.value === 'string') setValue(b.value); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const shown = value || '5m';
+  const change = async (e) => {
+    const next = e.target.value;
+    if (saving || next === shown) return;
+    setErr(''); setSaving(true);
+    try {
+      const r = await fetch('/api/prefs/stall-timeout', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: next }),
+      });
+      const body = await r.json().catch(() => null);
+      if (!r.ok || !body?.ok) throw new Error(body?.error || '保存失败，请重试');
+      setValue(body.value);
+    } catch (e2) {
+      setErr(e2?.message || '保存失败，请重试');
+    } finally { setSaving(false); }
+  };
+  return (
+    <div className="bg-canvas-warm border border-canvas-deep rounded-lg">
+      <div className="px-3 py-2.5 flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5">静默超时<EffectBadge level="immediate" /></div>
+          <div className="text-[10.5px] text-ink-faint font-body">起过子代理或续跑的回合，上游超过设定时长没有任何输出时触发；有后台任务在跑、或有卡片等你回答时不触发。{shown === 'never' ? '到点（5 分钟）只发一条提示、不结束回合，卡住的回合需要手动点停止。' : '到点结束本回合并重置连接，已有内容保留。'}</div>
+        </div>
+        <select data-testid="stall-timeout-select" value={shown} onChange={change} disabled={saving}
+          className="shrink-0 px-1.5 py-0.5 rounded-md bg-canvas border border-canvas-deep text-[11px] text-ink font-body disabled:opacity-50 disabled:cursor-not-allowed">
+          {STALL_TIMEOUT_OPTIONS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+        </select>
+      </div>
+      {err && <div className="px-3 pb-2 text-[11px] text-error font-body">{err}</div>}
+    </div>
+  );
+}
+
 // 花费上限(SDK maxBudgetUsd,单位美元)。>0 时随每次发送传给 CLI:进程累计花费达到
 // 上限即停止本轮并提示。开启会话常驻时按同一常驻进程的多个回合累计;进程重开后重新计。
 // 置空 = 不限制(默认)。
@@ -2934,6 +2984,7 @@ function SessionTab({ settings, onSave, onEnvPatch, saving }) {
   return (
     <div className="space-y-3">
       <div id="set-persistent-chat"><PersistentChatToggle /></div>
+      <div id="set-stall-timeout"><StallTimeoutSelect /></div>
       <div id="set-prompt-suggestions"><PromptSuggestionsToggle /></div>
       <div id="set-worktree-visibility"><WorktreeVisibilityToggle /></div>
       <div id="set-restore-last"><RestoreLastSessionToggle /></div>
