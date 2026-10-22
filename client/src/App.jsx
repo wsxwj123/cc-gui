@@ -6931,9 +6931,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               }
             }
           }
-          // #13 看门狗提示:服务端 stall-watchdog 收尾回合时发的中性系统提示(上游长时间
-          // 无输出被主动收尾)。渲染成普通提示 turn(⏸ 前缀),不走红色错误分支不吓人;
-          // 随后的 done 事件正常收尾本轮。
+          // #13 看门狗提示:服务端 stall-watchdog 到点时发的中性系统提示(上游长时间无输出)。
+          // 渲染成普通提示 turn(⏸ 前缀),不走红色错误分支不吓人。分两种(r151s,设置「静默超时」):
+          // 结束版 —— 服务端已结束本回合,随后的 done 事件正常收尾本轮;
+          // 只提示版(选「只提示，不结束」)—— 之后没有 done,回合继续,停止按钮照旧可用。
           if (event.type === 'stall_notice') {
             setChatMessages((prev) => [...prev, {
               uuid: 'stall-' + Date.now(),
