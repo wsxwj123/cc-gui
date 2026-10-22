@@ -22,10 +22,16 @@ test('Q25 CHANGELOG 有本轮一节;0.2.431 / 0.2.428 的过头说法已改正;�
   const releaseItems = (v) => { try { return JSON.parse(read('client', 'src', 'generated', 'release-notes', `${v}.json`)).groups.flatMap((g) => g.items); } catch { return []; } };
   const readmeBlock = (v) => { const i = readme.indexOf(`<summary><b>v${v}</b>`); if (i < 0) return ''; const j = readme.indexOf('<summary><b>v', i + 10); return readme.slice(i, j < 0 ? i + 8000 : j); };
 
-  expect.soft(newer(top.version, '0.2.432'), `CHANGELOG 最上面一节应是比 0.2.432 更新的本轮一节(现在最上面是 ${top.version})`).toBe(true);
-  const bullets = top.body.split('\n').filter((l) => /^- /.test(l));
+  expect.soft(newer(top.version, '0.2.432'), `CHANGELOG 最上面一节应比 0.2.432 更新(现在最上面是 ${top.version})`).toBe(true);
+  const bullets = top.body.split('\n').filter((l) => /^- /.test(l)); // 最上面一节的条数,下面与应用内更新说明的条数对账用
+  // "本轮"固定指 0.2.433:按版本号找这一节,不把最上面一节当本轮(之后更新的版本加到最上面也不影响);找不到该节则失败
+  const ROUND = '0.2.433';
+  const roundSec = secs.find((s) => s.version === ROUND);
+  expect.soft(roundSec !== undefined, `CHANGELOG 里应有 ${ROUND} 这一节(最近几节:${secs.slice(0, 5).map((s) => s.version).join('、') || '无'})`).toBe(true);
+  const roundBody = roundSec ? roundSec.body : '';
+  const roundBullets = roundBody.split('\n').filter((l) => /^- /.test(l));
   const topics = [/粘贴|乱码/, /费用|计价/, /模型名|映射|代理/, /跨会话|入站|等你确认|待处理/, /静默|看门狗/, /审核模型/, /电脑操控|[Nn]ode/];
-  expect.soft({ bullets: bullets.length >= 3, topicsCovered: topics.filter((re) => re.test(top.body)).length >= 3 }, `本轮一节应至少 3 条、且覆盖 7 类改动里的至少 3 类(现有 ${bullets.length} 条)`).toEqual({ bullets: true, topicsCovered: true });
+  expect.soft({ bullets: roundBullets.length >= 3, topicsCovered: topics.filter((re) => re.test(roundBody)).length >= 3 }, `${ROUND} 一节应至少 3 条、且覆盖 7 类改动里的至少 3 类(现有 ${roundBullets.length} 条)`).toEqual({ bullets: true, topicsCovered: true });
 
   for (const [v, olds] of Object.entries(OLD)) {
     for (const [label, text] of [['CHANGELOG', section(v)], ['应用内更新说明', releaseItems(v).join('\n')], ['README 更新记录', readmeBlock(v)]]) {
@@ -37,8 +43,8 @@ test('Q25 CHANGELOG 有本轮一节;0.2.431 / 0.2.428 的过头说法已改正;�
   let index = []; try { index = JSON.parse(read('client', 'src', 'generated', 'release-notes', 'index.json')); } catch { index = []; }
   expect.soft(index[0] && index[0].version, '应用内更新说明的索引第一项应是 CHANGELOG 最上面一节').toBe(top.version);
   const items = releaseItems(top.version);
-  expect.soft(items.length, `release-notes/${top.version}.json 的条数应与 CHANGELOG 本轮一节的条数一致`).toBe(bullets.length);
-  expect.soft(items.filter((it) => !norm(top.body).includes(norm(it))), '应用内更新说明的每一条都应出自 CHANGELOG 本轮一节').toEqual([]);
+  expect.soft(items.length, `release-notes/${top.version}.json 的条数应与 CHANGELOG 最上面一节的条数一致`).toBe(bullets.length);
+  expect.soft(items.filter((it) => !norm(top.body).includes(norm(it))), '应用内更新说明的每一条都应出自 CHANGELOG 最上面一节').toEqual([]);
   const rb = norm(readmeBlock(top.version));
   const missing = items.filter((it) => { const m = it.match(/^\*\*(.+?)\*\*[:：]?([\s\S]*)$/); const [t, b] = m ? [m[1], m[2]] : [it, '']; return !(rb.includes(norm(t)) && rb.includes(norm(b))); });
   expect.soft(rb.length > 0 && missing.length === 0, `README 更新记录里应有 v${top.version} 的每一条(缺:${JSON.stringify(missing).slice(0, 400)})`).toBe(true);
