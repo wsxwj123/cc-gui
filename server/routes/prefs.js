@@ -66,11 +66,10 @@ let stallTimeoutCache = null; // { sig, value }
 export function readStallTimeoutSync() {
   let sig = null; // null = 这次不缓存(stat 本身失败且不是"文件不存在",交给下面的读取去报)
   try {
-    const st = statSync(PREFS_PATH);
-    sig = `${st.mtimeMs}:${st.size}:${st.ino}`;
-  } catch (e) {
-    if (e?.code === 'ENOENT') sig = 'missing';
-  }
+    // 没设过设置时文件常年不存在:throwIfNoEntry:false 让 stat 直接回 undefined,不必每条上游消息都抛一次异常
+    const st = statSync(PREFS_PATH, { throwIfNoEntry: false });
+    sig = st ? `${st.mtimeMs}:${st.size}:${st.ino}` : 'missing';
+  } catch { /* 其它 stat 失败:sig 留 null */ }
   if (sig !== null && stallTimeoutCache?.sig === sig) return stallTimeoutCache.value;
   const { prefs, readFailed } = readPrefsObjectSync();
   const value = normalizeStallTimeout(prefs?.stallTimeout);
