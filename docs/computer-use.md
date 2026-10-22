@@ -121,7 +121,7 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `claude mcp list` 显示 Failed to connect | node 路径失效（升级后路径变了） | 面板卸载→重装（会取当前 node 绝对路径） |
+| `claude mcp list` 显示 Failed to connect，或卡片提示「已注册的 node 路径不存在」 | 注册的 node 路径失效（升级 node 并清理旧版后，带版本号的路径就没了） | 面板卸载→重装。0.2.433 起，后端的 node 在带版本号的目录里（如 Homebrew 的 Cellar）、而 PATH 上的 `node` 指向同一个文件时，安装改注册 PATH 上不带版本号的路径（如 `/opt/homebrew/bin/node`），之后升级 node 不再失效；nvm 这类只有带版本号路径的安装仍注册版本路径，卸载该版本后要重装 |
 | 截图报 `CU_SCREEN_SCOPE_REQUIRED` | 没有授权主屏全部可见内容 | `POST /api/computer-use/grants {"screenScope":true}`（当前只能走接口，图形界面没有该入口），这是独立于按应用授权的边界 |
 | window_list 空 / 动作报 `CU_APP_NOT_ALLOWED` | 目标应用没授权 | `POST /api/computer-use/grants {"bundleId":"…","granted":true}`（当前只能走接口，图形界面没有该入口） |
 | 动作报 `CU_STALE_SNAPSHOT` | 截图被更新覆盖/来自别的会话 | 重新 `screenshot` 再操作 |
