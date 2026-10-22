@@ -442,7 +442,9 @@ router.put('/prefs/keep-alive-idle', async (req, res) => {
   }
   try {
     await updatePrefs((prefs) => { prefs.keepAliveIdle = value; });
-  } catch {
+  } catch (e) {
+    // 只记错误码(如 EACCES),不记路径和文件内容;返回给前端的内容不变
+    console.warn(`[prefs] 保存「空闲回收」设置失败(${typeof e?.code === 'string' ? e.code : '未知错误'})`);
     return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
   }
   res.json({ ok: true, value });
@@ -465,7 +467,9 @@ router.put('/prefs/stall-timeout', async (req, res) => {
   }
   try {
     await updatePrefs((prefs) => { prefs.stallTimeout = value; });
-  } catch {
+  } catch (e) {
+    // 只记错误码(如 EACCES),不记路径和文件内容;返回给前端的内容不变
+    console.warn(`[prefs] 保存「静默超时」设置失败(${typeof e?.code === 'string' ? e.code : '未知错误'})`);
     return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
   }
   res.json({ ok: true, value });
