@@ -3,6 +3,7 @@
 // 不 import 产品内部模块;代理实现只在公开入口后面被调用。
 import http from 'node:http';
 import net from 'node:net';
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import util from 'node:util';
@@ -185,6 +186,32 @@ export async function startFakeUpstream({ port, shape }) {
   };
 }
 
+// 家目录隔离守卫(r151q)。代理在"claude 名不在模型列表里"时会读家目录下的 .claude/settings.json 决定映射目标,
+// 所以用例进程的 HOME(Windows 还有 USERPROFILE)必须指到临时目录:既不能等于真实家目录,
+// 也不能没设(没设时 os.homedir() 会回落到真实家目录)。返回 null = 通过;返回字符串 = 拒绝原因。
+function canonicalPath(p) {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+export function homeIsolationProblem(env = process.env) {
+  const realHome = canonicalPath(os.userInfo().homedir);
+  const keys = process.platform === 'win32' ? ['HOME', 'USERPROFILE'] : ['HOME'];
+  for (const key of keys) {
+    const value = env[key];
+    if (!value) {
+      return `拒绝运行:${key} 没有设置(会回落到真实家目录 ${realHome});请用 ${key}=<临时目录> 启动`;
+    }
+    if (canonicalPath(value) === realHome) {
+      return `拒绝运行:${key} 指向真实家目录 ${realHome};请用 ${key}=<临时目录> 启动`;
+    }
+  }
+  return null;
+}
+
 const modules = new Map();
 async function loadProxyModule(kind) {
   if (!modules.has(kind)) {
@@ -267,6 +294,9 @@ function recordPorts(ctx, pairs) {
 // 每个用例进程一个 context:同一形态的代理/假上游只起一次,set*Upstream 每次重设。
 // 代理没有公开 close 入口,所以靠用例进程退出收端口;run.sh 只按记录 pid 收进程。
 export async function createContext({ caseId, artifactDir }) {
+  // 守卫:case.mjs 被单独直跑(node case.mjs N)时也要过这一关,HOME 没指到临时目录就不跑用例。
+  const homeProblem = homeIsolationProblem();
+  if (homeProblem) throw new Error(homeProblem);
   const used = new Set();
   const base = PORT_MIN + (((caseId - 1) * 8) % (PORT_MAX - PORT_MIN + 1));
 

@@ -6,6 +6,7 @@
 //   前端:两处白名单分支(实时 / 挂载补拉)共用 sessionWhitelistAllows,遇 mustPrompt 不放行。
 // node tests/unit/check-r151a-mustprompt.mjs
 import assert from 'node:assert/strict';
+import { listenInRange } from './helpers/listen-in-range.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -45,7 +46,7 @@ await check('thirdPartyAutoMustPrompt:第三方 + auto 才为 true', () => {
 const app = express();
 app.use(express.json());
 app.use('/api', permRouter);
-const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const server = await listenInRange(app); // 端口在 6900–6999 里挑空闲的,被占就换(不用系统分配的随机口)
 const pendingItems = async () => (await (await fetch(`http://127.0.0.1:${server.address().port}/api/permissions/pending`)).json()).items;
 const tick = () => new Promise((r) => setTimeout(r, 30));
 async function ask(slot, toolName, input, toolUseID) {

@@ -25,33 +25,60 @@ const app = read('client/src/App.jsx');
 const lineOf = (idx) => app.slice(0, idx).split('\n').length;
 // 会话组件里第一处提前 return(没有选中会话 → 首页 / 空态)。hook 只能出现在它之前。
 const earlyReturn = app.indexOf('return homeView({ hasSession: false, projectCount })');
-// 逐条查价的那一处(会话汇总的费用)
-const costAt = app.indexOf('computeCostForMessage(m, currentProvider)');
+// 逐条查价的汇总:r151q 起提成模块级函数 sumMessagesCostUsd(与回复气泡同一算法)。会话组件分两份调用它:
+// 已落盘列表单独记忆(流式时不跟着重算),直播部分在汇总的记忆里叠加。
+const costFnAt = app.indexOf('function sumMessagesCostUsd(');
+const perMessageCalls = [...app.matchAll(/computeCostForMessage\(/g)].map((m) => m.index);
+const costCalls = [...app.matchAll(/(?<!function )sumMessagesCostUsd\(/g)].map((m) => m.index);
+const finalizedAt = app.indexOf('sumMessagesCostUsd(finalizedMessages, currentProvider)');
+const liveCalls = costCalls.filter((i) => i !== finalizedAt);
+
+// 包住位置 at 的那个 useMemo:取 at 前最近的 useMemo(,往后找它的依赖数组(函数体是 {…} 或单个表达式都认)。
+// 依赖数组在 at 之后才算包住;否则返回 null —— at 处是每次渲染都跑的普通计算。
+const memoAround = (at) => {
+  const memoAt = app.lastIndexOf('useMemo(', at);
+  if (memoAt < 0) return null;
+  const deps = /[)}]\s*,\s*\[([^\]]*)\]\s*,?\s*\)/.exec(app.slice(memoAt, memoAt + 6000));
+  if (!deps || memoAt + deps.index < at) return null;
+  const name = /const\s+(\w+)\s*=\s*(?:React\.)?$/.exec(app.slice(Math.max(0, memoAt - 80), memoAt));
+  return { name: name && name[1], body: app.slice(memoAt, memoAt + deps.index), deps: deps[1] };
+};
 
 await check('锚点都在(源码改名时这条先红,提示更新锚点)', async () => {
   assert.ok(earlyReturn > 0, '找不到会话组件的提前 return');
-  assert.ok(costAt > 0, '找不到逐条查价的汇总');
-  assert.equal(app.indexOf('computeCostForMessage(m, currentProvider)', costAt + 1), -1, '逐条查价的汇总应只有一处');
+  assert.ok(costFnAt > 0, '找不到逐条查价的汇总(函数 sumMessagesCostUsd)');
+  // 逐条查价只此一处:会话费用都经这个函数,别处不许另写一份逐条查价
+  assert.equal(perMessageCalls.length, 1, `逐条查价(computeCostForMessage 调用)应只有一处,现在 ${perMessageCalls.length} 处`);
+  assert.ok(perMessageCalls[0] > costFnAt && perMessageCalls[0] < app.indexOf('\n}\n', costFnAt), '逐条查价不在 sumMessagesCostUsd 函数体里');
+  assert.ok(finalizedAt > 0, '找不到已落盘列表的逐条查价 sumMessagesCostUsd(finalizedMessages, currentProvider)');
+  assert.equal(app.indexOf('sumMessagesCostUsd(finalizedMessages, currentProvider)', finalizedAt + 1), -1, '已落盘列表的逐条查价应只有一处');
+  assert.ok(liveCalls.length > 0, '找不到直播部分的逐条查价(汇总里叠加的那份)');
 });
 
 await check('① 费用汇总挪到了提前 return 之前(hook 区)—— 之后的位置不能用 useMemo', async () => {
-  assert.ok(costAt < earlyReturn, `逐条查价在第 ${lineOf(costAt)} 行,提前 return 在第 ${lineOf(earlyReturn)} 行`);
+  const after = costCalls.filter((i) => i > earlyReturn);
+  assert.equal(after.length, 0, `逐条查价在第 ${after.map(lineOf).join('、')} 行,提前 return 在第 ${lineOf(earlyReturn)} 行`);
 });
 
 await check('① 费用 / 工具数 / 模型集合 包在 useMemo 里,依赖是消息列表与 provider', async () => {
-  const before = app.slice(Math.max(0, costAt - 1500), costAt);
-  const memoAt = before.lastIndexOf('useMemo(');
-  assert.ok(memoAt >= 0, '逐条查价前面没有 useMemo(');
-  // 从这个 useMemo( 起到它的依赖数组为止
-  const start = Math.max(0, costAt - 1500) + memoAt;
-  const tail = app.slice(start, start + 4000);
-  const deps = tail.match(/\},\s*\[([^\]]*)\]\s*\)/);
-  assert.ok(deps, '找不到这个 useMemo 的依赖数组');
-  assert.match(deps[1], /currentProvider/, `依赖里应有 provider:[${deps[1]}]`);
-  assert.match(deps[1], /Messages|renderChat/, `依赖里应有消息列表:[${deps[1]}]`);
-  const body = tail.slice(0, tail.indexOf(deps[0]));
-  assert.match(body, /toolCalls\?\.length/, '工具数应在同一个记忆化里');
-  assert.match(body, /new Set\(/, '模型集合应在同一个记忆化里');
+  for (const at of costCalls) assert.ok(memoAround(at), `第 ${lineOf(at)} 行的逐条查价不在 useMemo 里(每次渲染都重算)`);
+  // 已落盘列表单独记忆:只随列表、provider、价目版本变;直播部分变了不该把整份历史重新查价
+  const finalized = memoAround(finalizedAt);
+  assert.ok(finalized.name, '已落盘部分的 useMemo 没有赋给变量');
+  assert.match(finalized.deps, /\bfinalizedMessages\b/, `已落盘部分的依赖里应有消息列表:[${finalized.deps}]`);
+  assert.match(finalized.deps, /\bcurrentProvider\b/, `已落盘部分的依赖里应有 provider:[${finalized.deps}]`);
+  assert.match(finalized.deps, /\bpricingVersion\b/, `已落盘部分的依赖里应有价目版本:[${finalized.deps}]`);
+  assert.doesNotMatch(finalized.deps, /\brenderChat\b/, `已落盘部分不该随直播部分重算:[${finalized.deps}]`);
+  // 汇总:费用 = 已落盘的缓存 + 直播部分;工具数、模型集合在同一个记忆里
+  const summary = memoAround(liveCalls[0]);
+  const usesCache = new RegExp(`\\b${finalized.name}\\b`);
+  assert.match(summary.deps, /\bcurrentProvider\b/, `依赖里应有 provider:[${summary.deps}]`);
+  assert.match(summary.deps, /Messages|renderChat/, `依赖里应有消息列表:[${summary.deps}]`);
+  assert.match(summary.deps, /\bpricingVersion\b/, `依赖里应有价目版本:[${summary.deps}]`);
+  assert.match(summary.body, usesCache, `汇总没用已落盘部分的缓存 ${finalized.name}`);
+  assert.match(summary.deps, usesCache, `依赖里应有 ${finalized.name}:[${summary.deps}]`);
+  assert.match(summary.body, /toolCalls\?\.length/, '工具数应在同一个记忆化里');
+  assert.match(summary.body, /new Set\(/, '模型集合应在同一个记忆化里');
 });
 
 await check('② 输入框以记忆化组件导出', async () => {

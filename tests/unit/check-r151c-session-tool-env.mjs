@@ -2,7 +2,7 @@
 // r151c 进程内会话工具:applySessionOptions 在挂 mcpServers 时给本次 CLI spawn 的 env 关掉工具搜索。
 // 覆盖:① 没有 sessionOptions 挂接 → 不动 env、不挂 mcpServers;② 挂接返回 null / 只有 autoAllow → 不动 env;
 // ③ 挂上 mcpServers → ENABLE_TOOL_SEARCH / MCP_CONNECTION_NONBLOCKING 均为 'false',其它 env 与已有 mcpServers 原样保留;
-// ④ options.env 不存在时也只补这两个键;⑤ 形状不合法 → 不挂、env 不变。
+// ④ options.env 不存在时以 cleanChildEnv() 为底再补这两个键(r151q 第 5 项);⑤ 形状不合法 → 不挂、env 不变。
 // SDK 用 r151b 替身(不真起进程/不连网);临时 HOME,避免读本机偏好。
 // node tests/unit/check-r151c-session-tool-env.mjs
 import assert from 'node:assert/strict';
@@ -21,7 +21,7 @@ process.env.CGUI_DISABLE_FILE_WATCHER = '1';
 for (const k of Object.keys(process.env)) if (/^ANTHROPIC_/.test(k)) delete process.env[k];
 
 registerR151bSdkStub();
-const { applySessionOptions, registerSessionRuntimeHooks } = await import('../../server/routes/chat.js');
+const { applySessionOptions, registerSessionRuntimeHooks, cleanChildEnv } = await import('../../server/routes/chat.js');
 
 let checks = 0;
 const eq = (a, b, m) => { assert.deepEqual(a, b, m); checks++; };
@@ -77,13 +77,23 @@ try {
     unhook(); unhook = null;
   }
 
-  // ④ 连 options.env 都没有(冷启正常路径一定有,这里只锁兜底行为)
+  // ④ 连 options.env 都没有(冷启正常路径一定有,这里只锁兜底):以 cleanChildEnv() 为底再补两个键。
+  //    SDK 的 env 是"整体替换",只写两个键会让子进程丢掉 PATH / HOME 等(r151q 第 5 项)。
   {
+    process.env.R151Q_PROBE = 'from-process-env';
+    process.env.ANTHROPIC_BASE_URL = 'http://r151q-should-be-stripped.invalid';
     unhook = registerSessionRuntimeHooks({ sessionOptions: () => ({ mcpServers: { s: { type: 'sdk' } } }) });
     const opts = {};
     applySessionOptions({}, opts);
-    eq([opts.env.ENABLE_TOOL_SEARCH, opts.env.MCP_CONNECTION_NONBLOCKING], ['false', 'false'], '没有 env:只补这两个键');
-    eq(Object.keys(opts.env).sort(), ['ENABLE_TOOL_SEARCH', 'MCP_CONNECTION_NONBLOCKING'], '没有 env:不夹带其它键');
+    eq([opts.env.ENABLE_TOOL_SEARCH, opts.env.MCP_CONNECTION_NONBLOCKING], ['false', 'false'], '没有 env:两个键照补');
+    eq(opts.env.PATH, process.env.PATH, '没有 env:PATH 保留(子进程能找到命令)');
+    eq(opts.env.HOME, HOME, '没有 env:HOME 保留');
+    eq(opts.env.R151Q_PROBE, 'from-process-env', '没有 env:进程自身的普通变量保留');
+    ok(!('ANTHROPIC_BASE_URL' in opts.env), '没有 env:与正常起进程同口径,剥掉继承的 ANTHROPIC_*(不是直接用 process.env)');
+    const strip2 = (env) => { const o = { ...env }; delete o.ENABLE_TOOL_SEARCH; delete o.MCP_CONNECTION_NONBLOCKING; return o; };
+    eq(strip2(opts.env), strip2(cleanChildEnv()), '没有 env:除这两个键外与 cleanChildEnv() 完全一致');
+    delete process.env.R151Q_PROBE;
+    delete process.env.ANTHROPIC_BASE_URL;
     unhook(); unhook = null;
   }
 

@@ -530,6 +530,29 @@ export function hasCurrentEpochNonShellTask(liveTasks, epoch) {
     .some((t) => t && t.kind !== 'shell' && (t.epoch | 0) === (epoch | 0));
 }
 
+// 静默看门狗的忙判据(纯函数,export 仅为可单测;只读 slot 的 liveTasks / lastLevelAt / turnEpoch)。
+// 降级守卫(审查 R1):level 信号是【成员变化才发】的边沿信号、不是心跳,旧版 CLI 恒 0,
+// 单个子代理独自长跑期间也可能一条都不来。最近一个 LIVE_TASK_FRESH_MS 窗内没有任何
+// 确认就回落宽判据:本回合的【非 shell】条目算忙。shell 刻意不在此支 —— 否则本回合
+// shell 只要 epoch 匹配就无限期豁免,2h 窗口会被绕过、看门狗/回收彻底失效(见常量注释)。
+// 方向是"宁漏标不误杀",但豁免必须有上限。
+// 忙判据 = 非 shell(新鲜 + R1 降级支,该支只覆盖非 shell) || 新鲜 shell。shell 的豁免
+// 只由 hasFreshShellTask 的 2h 窗口提供 → 2h 是 shell 的真总上限,R1 不能绕过。
+export function stallWatchdogBusy(slot, now = Date.now()) {
+  const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS)
+    || (now - (slot.lastLevelAt || 0) >= LIVE_TASK_FRESH_MS
+      && hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch));
+  return busyNonShell || hasFreshShellTask(slot.liveTasks, now);
+}
+
+// 静默看门狗到点时该不该收尾(纯函数,export 仅为可单测):还没空闲 + 本回合起过子代理或经复活守卫
+// 续跑 + 没有任何新鲜活任务。判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫
+// 翻回活跃,turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
+// "还有卡在等用户回答""已在 4s 去抖收尾"两种让路情况依赖模块状态,由调用方另判。
+export function shouldStallWatchdogFire(slot, now = Date.now()) {
+  return !slot.idle && !!(slot.turnSubagentSeen || slot.revived) && !stallWatchdogBusy(slot, now);
+}
+
 // ── F1:CLI init 事件上报的权威命令/技能表 ─────────────────────────────────────
 // /api/slash-commands 靠扫三处磁盘枚举,而 CLI 的内置 skill(/loop 等)打包在二进制里、
 // 磁盘上没有对应目录 → 用户敲 "/" 永远看不到它们(#11 的全部根因)。init 事件的
@@ -651,18 +674,28 @@ const KEEP_ALIVE_IDLE_MS_BY_SETTING = Object.freeze({
   '4h': 4 * 60 * 60 * 1000,
 });
 /**
+ * 毫秒类环境变量(CGUI_STALL_MS、CGUI_KEEPALIVE_IDLE_MS)共用的解析。纯函数,export 仅为可单测。
+ * 整数且 1000 ≤ ms ≤ 2147483647 才算设了,返回该值;否则返回 null = 当没设,调用方按默认 / 用户设置。
+ * 上限 2147483647 = 2^31-1,即 Node setTimeout 的 delay 上限:超过它 Node 会按 1ms 处理、定时器立刻
+ * 触发 —— 看门狗会在回合刚起时就拆进程,常驻进程会在回合一结束就被回收。
+ */
+export function parseEnvMs(raw) {
+  const ms = Number(raw);
+  return Number.isInteger(ms) && ms >= 1000 && ms <= 2_147_483_647 ? ms : null;
+}
+
+/**
  * r151k:把设置值解析成 idleTimer 的毫秒数。纯函数,供单测(chat.js 真 import)。
  * · 'never' → null:不武装 idleTimer,进程保持到 app 退出 / 显式停止 / 删除等既有清理;
- * · 否则 CGUI_KEEPALIVE_IDLE_MS 是合法整数 ≥1000 时优先用它 —— 与 CGUI_STALL_MS 同类的
- *   通用可调窗口(联调/验收把小时级回收缩到秒级),不是测试专用分支;'never' 必须压过它;
+ * · 否则 CGUI_KEEPALIVE_IDLE_MS 合法(见 parseEnvMs:整数且 1000..2147483647)时优先用它 —— 与
+ *   CGUI_STALL_MS 同类的通用可调窗口(联调/验收把小时级回收缩到秒级),不是测试专用分支;
+ *   'never' 必须压过它;超出上限等非法值当没设,按用户设置走;
  * · 其余按枚举映射;设置缺省/非法时回 1h(调用方 readKeepAliveIdleSync 已归一,这里再兜一层)。
- * 不夹 Node setTimeout 上限:生产枚举最大 4h,测试窗口按需给;超出 2^31-1 的极端值由调用方
- * 自己承担(Node 会按 1ms 处理),不给设置枚举开口子。
  */
 export function resolveKeepAliveIdleMs(setting, envRaw) {
   if (setting === 'never') return null;
-  const envMs = Number(envRaw);
-  if (Number.isInteger(envMs) && envMs >= 1000) return envMs;
+  const envMs = parseEnvMs(envRaw);
+  if (envMs !== null) return envMs;
   return KEEP_ALIVE_IDLE_MS_BY_SETTING[setting] ?? KEEP_ALIVE_IDLE_MS_BY_SETTING['1h'];
 }
 
@@ -680,16 +713,25 @@ const LIVE_TASK_FRESH_MS = 30 * 60 * 1000;
 export const SHELL_TASK_FRESH_MS = 2 * 60 * 60 * 1000;
 
 // 静默看门狗阈值(毫秒),默认 300000(5 分钟)。CGUI_STALL_MS 仅供联调/验收按需
-// 调小阈值(合法正整数且 1000 ≤ ms ≤ 2147483647);服务启动时读取一次,缺省/非法值回
-// 默认 300000,默认行为不变。这是通用可调阈值,不是测试专用分支。
-// 上限 2147483647 = 2^31-1,即 Node setTimeout 的 delay 上限:超过它 Node 会按 1ms
-// 处理,定时器立刻触发,看门狗会在回合刚起时就把进程 abort 掉,所以必须夹上限。
+// 调小阈值(合法与否见 parseEnvMs:整数且 1000 ≤ ms ≤ 2147483647,上限理由同);服务启动时
+// 读取一次,缺省/非法值回默认 300000,默认行为不变。这是通用可调阈值,不是测试专用分支。
 const STALL_MS_DEFAULT = 300_000;
 export function resolveStallMs(raw) {
-  const ms = Number(raw);
-  return Number.isInteger(ms) && ms >= 1000 && ms <= 2_147_483_647 ? ms : STALL_MS_DEFAULT;
+  return parseEnvMs(raw) ?? STALL_MS_DEFAULT;
 }
 const STALL_MS = resolveStallMs(process.env.CGUI_STALL_MS);
+
+// stall_notice 文案(纯函数,export 仅为可单测)。时长按运行时阈值如实写:≥1 分钟写四舍五入的分钟数
+// (默认 300000 → "5 分钟"逐字不变),不到 1 分钟写四舍五入的秒数(CGUI_STALL_MS=2000 → "2 秒")。
+// 旧版下限写死 5 分钟,阈值调到分钟级以下时提示与实际等待时长不符。秒数至少 1,不出现"0 秒"。
+export function buildStallNoticeText(stallMs, subagentSeen) {
+  const duration = stallMs >= 60_000
+    ? `${Math.round(stallMs / 60_000)} 分钟`
+    : `${Math.max(1, Math.round(stallMs / 1000))} 秒`;
+  return subagentSeen
+    ? `子代理已全部结束,但上游超过 ${duration}无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`
+    : `上游超过 ${duration}无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`;
+}
 
 // ── F2:cron(/loop)保活 ──────────────────────────────────────────────────────
 // cron 调度器活在 CLI 子进程内部(print.ts 的 createCronScheduler,1s tick),CronCreate
@@ -1269,8 +1311,10 @@ export function applySessionOptions(slot, options) { // export 仅为可单测
       //   · MCP_CONNECTION_NONBLOCKING=false:CLI 等 MCP server 连上再发首个请求,避免第一条消息先带占位/缺工具、
       //     连上后工具表再变形(进程内 server 连接是瞬时的,代价可忽略)。
       // 第三方 provider 的全局策略原本就把这两个键写成 false(utils/prompt-cache-env.js);这里只是把同一结论限定到
-      // 挂着进程内工具的这一次 spawn,其余 env 原样保留。
-      options.env = { ...(options.env || {}), ENABLE_TOOL_SEARCH: 'false', MCP_CONNECTION_NONBLOCKING: 'false' };
+      // 挂着进程内工具的这一次 spawn,其余 env 原样保留。代价:该进程所有 MCP 工具的说明都进上下文,提示变长。
+      // options.env 缺失时以 cleanChildEnv() 为底(与正常起进程同一个构造函数):SDK 的 env 是"整体替换",
+      // 只写这两个键会让子进程丢掉 PATH / HOME 等;也不能用 process.env,那会带上宿主的 ANTHROPIC_* 等应剥掉的键。
+      options.env = { ...(options.env || cleanChildEnv()), ENABLE_TOOL_SEARCH: 'false', MCP_CONNECTION_NONBLOCKING: 'false' };
     }
     if (autoAllow?.length) slot.sessionAutoAllow = { names: new Set(autoAllow), hook: fn };
   } catch (e) {
@@ -1968,7 +2012,20 @@ export function settleTurnRecord(record, status) {
 // 回合收尾/进程收尾的统一入口:只对"本 slot 当前那一回合"生效。已请求停止的回合,无论
 // 因 interrupt 结束还是自然结束,对调用方的语义都是"被停掉的"。
 function settleSlotTurn(slot, fallback = 'completed') {
-  if (slot) notifyTurnEnd(slot, slot.runId); // r151b:回合结束通知(没挂接 = 跳过;回合收尾与进程收尾都经过这里)
+  if (slot) {
+    // r151q 第 9 项 (a):回合收尾就清"本回合是跨会话自动处理"(先清再报结束通知)。不放进 notifyTurnEnd:回合结束通知每回合
+    // 只报一次,主 agent 复活续跑(标记按 turnSource 写回)那段的收尾不再报,放在那里就清不掉了。
+    // (c):跨会话回合里有用户消息被 409 过(userWaitedDuringTurn,含"用户在等"已在长回合里过期的)→ 从此刻重新计 60 秒。
+    // 赶在回合结束通知之前(跨会话调度据此投下一条),下一条跨会话消息才不会抢在那条用户消息前面。
+    const renewUserWaiting = !!slot.internalTurn && !!slot.userWaitedDuringTurn;
+    slot.internalTurn = false;
+    slot.userWaitedDuringTurn = false;
+    // 本回合已收尾(开回合时清):此后主 agent 再出顶层内容 = 续跑的还是这一回合,消息泵据此按 turnSource 写回上面两项。
+    // 不看是否空闲 —— 不保活(keepAlive=false)时收尾只关输入、槽不转空闲,续跑走不到复活分支。
+    slot.turnSettled = true;
+    if (renewUserWaiting) noteUserWaiting(slot.sessionId);
+    notifyTurnEnd(slot, slot.runId); // r151b:回合结束通知(没挂接 = 跳过;回合收尾与进程收尾都经过这里)
+  }
   const rec = slot?.turnRecord;
   if (!rec || rec.settledAt) return;
   settleTurnRecord(rec, rec.stopRequested ? 'stopped' : fallback);
@@ -1976,9 +2033,10 @@ function settleSlotTurn(slot, fallback = 'completed') {
 
 // 主 agent 续跑(4s 去抖把回合提前转 idle,随后又被复活)期间回合没结束:把已结算的记录
 // 翻回活跃,否则停止入口会拿"completed"打发掉一个正在跑的回合。
+// 只认槽上当前这一回合的记录(世代对得上):跨会话回合复用进程时没有自己的记录,turnRecord 还是上一条用户回合的,那一回合早已结束。
 function reviveSlotTurn(slot) {
   const rec = slot?.turnRecord;
-  if (!rec || !rec.settledAt || rec.stopRequested) return;
+  if (!rec || !rec.settledAt || rec.stopRequested || (rec.turnEpoch | 0) !== (slot.turnEpoch | 0)) return;
   rec.settledAt = null;
   rec.status = 'running';
 }
@@ -2124,14 +2182,20 @@ async function chatRoute(req, res) {
   // (GUI 现状 / bot)直接进,不吃任何新语义。
   const turnId = typeof req.body?.clientTurnId === 'string' && CLIENT_TURN_RE.test(req.body.clientTurnId)
     ? req.body.clientTurnId : null;
-  // r151b:挂接了回合结束钩子时,本请求开始过、却在请求期间就被撤下的回合(进程没起来)补报一次结束。没挂接走下面原路。
-  if (runtimeHooks.turnEnd) {
-    try {
-      return await (turnId ? withTurnLock(`${turnPrincipal(req)}|${turnId}`, () => handleChatPost(req, res)) : handleChatPost(req, res));
-    } finally { settleTurnStartedByRequest(req); }
+  try {
+    // r151b:挂接了回合结束钩子时,本请求开始过、却在请求期间就被撤下的回合(进程没起来)补报一次结束。没挂接走下面原路。
+    if (runtimeHooks.turnEnd) {
+      try {
+        return await (turnId ? withTurnLock(`${turnPrincipal(req)}|${turnId}`, () => handleChatPost(req, res)) : handleChatPost(req, res));
+      } finally { settleTurnStartedByRequest(req); }
+    }
+    if (!turnId) return await handleChatPost(req, res);
+    return await withTurnLock(`${turnPrincipal(req)}|${turnId}`, () => handleChatPost(req, res));
+  } finally {
+    // r151q 第 9 项:内部回合的冷启占位正常在槽登记时 / 各个拒绝出口撤掉;主流程中途抛错时在这里兜底,
+    // 不让一条泄漏的占位把该会话的用户消息一直挡在 409 上。
+    releaseInternalColdStart(req);
   }
-  if (!turnId) return handleChatPost(req, res);
-  return withTurnLock(`${turnPrincipal(req)}|${turnId}`, () => handleChatPost(req, res));
 }
 router.post('/chat', chatRoute);
 
@@ -2289,15 +2353,27 @@ async function handleChatPost(req, res) {
   // 消耗一次性凭据;若 409 还在钩子之后,凭据已被消耗而本应答又不会 requeue,卡片只能等 60 秒兜底结算。
   // 这里先判一次(此时 turnRecord 可能为 null,dropTurnRecord 已能处理);下面入口钩子之后与冷启前原有
   // 两道检查保留作竞态兜底 —— 钩子 await、等旧进程退出的这几秒里都可能才出现占位。
-  if (sessionId && sessionSlotReserved(sessionId)) {
+  // r151c:经 startInternalTurn 起的回合 = 调用方给的对象;HTTP 请求恒为 null(Symbol 键,请求里带不进来)。
+  const internal = req[INTERNAL_TURN] ?? null;
+  // r151q 第 9 项:本请求所有 409 CHAT_SESSION_BUSY 的统一出口。用户请求(非内部回合)被拒时给该会话记"用户在等",
+  // 期间跨会话调度不在它上面起新的自动回合(见 noteUserWaiting);内部回合的冷启占位(若已登记)一并撤掉。
+  const rejectSessionBusy = () => {
+    releaseInternalColdStart(req);
+    if (!internal && sessionId) noteUserWaiting(sessionId);
     dropTurnRecord(turnRecord);
     return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+  };
+  if (sessionId && sessionSlotReserved(sessionId)) {
+    return rejectSessionBusy();
   }
+  // r151q 第 9 项 (b):用户消息遇到同会话正被跨会话内部回合占着(在跑,或冷启时还在等旧进程退出)→ 立即 409,
+  // 不等待、不中止它。用户自己的回合不在此列(用户新消息照旧可以打断用户自己卡住的回合,见冷启前的等待循环)。
+  if (sessionId && !internal && sessionHeldByInternalTurn(sessionId)) return rejectSessionBusy();
+  // r151q 第 9 项 (c):用户在等的这段时间,内部回合退回排队(跨会话调度本身已按"目标忙"不投,这里兜住竞态)。
+  if (sessionId && internal && userWaitingOnSession(sessionId)) return rejectSessionBusy();
 
   // r151b X.1.9:/chat 路由入口改写位(没挂接 = 跳过,不多 await)。拒绝 → 撤掉本回合记录、回它给的应答、不起进程;
   // 改写 → 本回合推给模型的内容换成它给的(R13 指纹仍按请求原文算,同 clientTurnId 重发照旧命中上面的记录)。
-  // r151c:经 startInternalTurn 起的回合 = 调用方给的对象;HTTP 请求恒为 null(Symbol 键,请求里带不进来)。
-  const internal = req[INTERNAL_TURN] ?? null;
   const entry = runtimeHooks.chatEntry
     ? await runChatEntryHook({ body: req.body, sessionId: sessionId || null, clientTurnId, principal, internal })
     : null;
@@ -2317,10 +2393,9 @@ async function handleChatPost(req, res) {
   // r151g 项3:同一会话有槽正被别的请求占着(选中到消息推进进程之间)→ 新的 /chat 直接 409 CHAT_SESSION_BUSY,
   // 不推进那个进程、不另起进程。用户消息与跨会话内部回合都算(内部回合由既有调度退回排队、之后重判);
   // 放在入口钩子之后、复用扫描之前(冷启路径建 slot 之前还会再查一次)。入口处已先判过同一道(建议 4,
-  // 避免钩子先消耗卡片凭据);这里兜住钩子 await 期间新出现的占位。
-  if (sessionId && sessionSlotReserved(sessionId)) {
-    dropTurnRecord(turnRecord);
-    return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+  // 避免钩子先消耗卡片凭据);这里兜住钩子 await 期间新出现的占位(r151q:含跨会话内部回合新占住会话)。
+  if (sessionId && (sessionSlotReserved(sessionId) || (!internal && sessionHeldByInternalTurn(sessionId)))) {
+    return rejectSessionBusy();
   }
 
   let chosenMode = (permissionMode && VALID_PERMISSION_MODES.has(permissionMode))
@@ -2431,7 +2506,7 @@ async function handleChatPost(req, res) {
       // 派发不加(不然它自己的入口核对会被自己挡住)。
       const switchKey = String(sessionId).toLowerCase();
       const markSwitching = !internal;
-      if (markSwitching) permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
+      if (markSwitching) beginSessionModeSwitch(switchKey);
       let reuseOutcome = 'stale';
       try {
         // r151g 项1:锁范围扩到"选中槽之后的整段派发" —— 热切档位 → 入口核对 → 重置回合状态 →
@@ -2494,6 +2569,10 @@ async function handleChatPost(req, res) {
           // 排队期间被切档请求中止 / 置关闭中:不复用(下面冷启前会等它退出)。原先这条判据只在要
           // 热切时看;现在整段都在锁内,档位已经一致时也必须看 —— 否则会复用刚被切档超时中止的进程。
           if (!slotUsable(s)) return 'stale';
+          // r151q 安全复审(建议 A):选中空闲槽之后,换模型、等锁都让出过事件循环,这期间主 agent 可能复活续跑(跨会话回合复活时
+          // 写回 internalTurn)。槽已不空闲 = 它手上又有回合了:不复用 —— 不把用户消息推进别人的回合,也不把它的标记改成这条请求的;
+          // 转冷启路径按那里的判据处理(对方是跨会话回合 → 409 不中止;是用户自己的回合 → 照旧走原有的打断逻辑)。
+          if (!s.idle) return 'stale';
           // SDK 层档位不一致(plan/auto/default 三种可能)→ 热切;失败、或 REUSE_HOT_SWITCH_TIMEOUT_MS(与下面 setModel 同为 5 秒)内
           // 没回应(r151e ④:之前没有超时,进程活着却不回应时用户发的这条消息一直挂着)→ 放弃复用关旧开新。
           // r151f 修法 3/5:与 POST /chat/permission-mode 共用按会话的锁(按发起顺序逐个执行);5 秒没回应 → 中止旧进程(它被后台命令
@@ -2512,6 +2591,7 @@ async function handleChatPost(req, res) {
               return 'stale';
             }
           }
+          if (!s.idle) return 'stale'; // 热切档同样让出过事件循环,期间复活续跑的照上处理(同上)
           // r151d:上面的热切让出过事件循环,入口钩子要求的话在置档之前再核对一次(跨会话自动处理:这期间切了档就不起回合、
           // 退回排队重判)。不通过 → 不复用、把这个常驻进程关掉(热切已动过它的档位 / 模型,下一回合冷启),回入口钩子给的应答。
           const reuseRecheck = runEntryRecheck(entry);
@@ -2552,6 +2632,14 @@ async function handleChatPost(req, res) {
           s.permissionMode = chosenMode;
           // r151a:服务端门控降级 —— 复用的进程不会再发 init,降级信号在本回合开头直接补发。
           if (autoGate.downgraded) deliverModeMismatch(s, autoGate.downgraded);
+          // r151q 第 9 项 (a)/(c):本回合是不是内部回合(跨会话自动处理)记在槽上;起的是用户回合就清掉"用户在等"。
+          s.internalTurn = !!internal;
+          s.turnSource = internal ? 'internal' : 'user';
+          s.turnSettled = false; // 新回合开始:上一回合的"已收尾"作废(否则本回合第一条内容会被当成续跑再写一遍标记)
+          s.turnStopRequested = false; // 上一回合收到的停止请求不算到这一回合头上
+          // 跨会话回合开始时"用户在等"还没到期(钩子 await 等让出期间用户被 409)= 这一回合里用户等过,收尾时要续期
+          s.userWaitedDuringTurn = !!internal && userWaitingOnSession(sessionId);
+          if (!internal) clearUserWaiting(sessionId);
           notifyTurnStart(s, alivePid, true, turnTag, undefined, turnParams); // r151b:回合开始(没挂接 = 跳过)
           s.input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
           // R13:复用同一进程开新回合 —— 记录绑到本回合的 turnEpoch 上(旧回合的记录早已
@@ -2586,10 +2674,13 @@ async function handleChatPost(req, res) {
   if (sessionId) {
     // r151c 旁路 (a):内部起的回合(跨会话自动处理)遇到同会话正在跑的回合 → 立即 409,不等待、不中止它(自动处理永远不打断用户的回合)。
     // 带了 clientTurnId 的话撤掉本回合记录(同 id 可重试,与入口钩子拒绝同一处理)。
-    if (internal && findBusySlot(activeProcesses, sessionId)) {
-      dropTurnRecord(turnRecord);
-      return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
-    }
+    // r151q 第 9 项:反过来,用户请求遇到同会话正被内部回合占着 → 同样立即 409(不进下面的等待、更不中止它)。
+    // 等待期间对方才占住会话的情形,循环里与强制中止之前各再判一次(heldByOther)。
+    const heldByOther = () => (internal ? !!findBusySlot(activeProcesses, sessionId) : sessionHeldByInternalTurn(sessionId));
+    if (heldByOther()) return rejectSessionBusy();
+    // r151q 第 9 项:内部回合从这里起算占住会话 —— 等旧进程退出的这几秒还没有自己的槽,用冷启占位顶上
+    // (槽登记之后由槽上的 internalTurn 接替,见下方 activeProcesses.set 之后)。
+    if (internal) holdInternalColdStart(req, sessionId);
     const tearingDown = () => {
       for (const s of activeProcesses.values()) {
         if (s.sessionId !== sessionId) continue;
@@ -2616,6 +2707,7 @@ async function handleChatPost(req, res) {
     // 它还没退出时就起新进程抢同一 jsonl;到点仍有它就照旧走下面的强制兜底(再 abort / 关输入都是幂等的)。
     let abortedLiveShell = null;
     while ((lingering = tearingDown()) && Date.now() < deadline) {
+      if (heldByOther()) return rejectSessionBusy(); // r151q 第 9 项:等待期间对方占住了会话 → 让出,不中止它
       if (keepWaitingLiveShell(lingering)) { lingering = null; break; } // 保活且没被中止:不等不杀,容忍双 resume
       if (slotHasLiveShell(lingering) && lingering.abort?.signal?.aborted) abortedLiveShell = lingering;
       await new Promise((r) => setTimeout(r, 50));
@@ -2638,6 +2730,10 @@ async function handleChatPost(req, res) {
     // r151g 安全复审(建议 5):deadline 边界上 lingering 仍可能"带活 shell 且未发起中止"(第一段循环恰好
     // 超时)。铁律不变:误杀不可恢复 > 双 resume 竞争 —— 不杀它,按"被后台命令吊着、与新进程并存"处理。
     if (lingering && slotHasLiveShell(lingering) && !lingering.abort?.signal?.aborted) lingering = null;
+    // r151q 第 9 项:强制中止之前最后核对一次 —— 绝不中止对方(用户请求不中止内部回合,含它只差输入预测的收尾窗;
+    // 内部回合不中止用户回合)。要中止的正是内部回合自己的槽、又还没进入关闭 → 让出(409),不中止。
+    const abortForbidden = heldByOther() || (!internal && !!lingering?.internalTurn && !lingering.closing);
+    if (lingering && abortForbidden) return rejectSessionBusy();
     if (lingering) {
       // 走到这里 lingering 已经过活 shell 保护:要么没有活 shell,要么活 shell 但已发起中止、等满 4 秒
       // 仍未退出(未中止的活 shell 已在上面置 null 跳过);都是正在停止/被弃用的进程,强制 abort 是正确
@@ -2659,13 +2755,15 @@ async function handleChatPost(req, res) {
   // 不起回合、退回排队重判)。从这里到下面回合开始通知之间没有 await:通过了,回合就按此刻的档位开始。
   const recheckOut = runEntryRecheck(entry);
   if (recheckOut) {
+    releaseInternalColdStart(req);
     dropTurnRecord(turnRecord);
     return res.status(recheckOut.reject.status).json(recheckOut.reject.body);
   }
   // r151g 项3:等旧进程退出的这几秒里,同一会话可能有别的请求选中了槽(占位)→ 同样 409,不另起进程。
-  if (sessionId && sessionSlotReserved(sessionId)) {
-    dropTurnRecord(turnRecord);
-    return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+  // r151q 第 9 项:强制中止之后那 1 秒里对方才占住会话的,同样让出(用户请求让内部回合,内部回合让用户回合)。
+  if (sessionId && (sessionSlotReserved(sessionId)
+    || (internal ? findBusySlot(activeProcesses, sessionId) : sessionHeldByInternalTurn(sessionId)))) {
+    return rejectSessionBusy();
   }
   // r151g 项2:等旧进程退出的这几秒让出过事件循环 —— 建 slot 之前按会话的切档代数再比对一次(从这里到
   // activeProcesses.set 之间没有 await)。代数变了且拿到确认档位 → 用"那次切档之后界面所示的档位"起
@@ -2762,8 +2860,21 @@ async function handleChatPost(req, res) {
     cronPendingDelete: false,
     // 同一 slot 内的 steer 本地接纳回执。随 slot 完整 dispose 释放；不做 TTL/跨进程复用。
     steerReceipts: new Map(),
+    // r151q 第 9 项 (a):本回合是不是内部回合(跨会话自动处理)且还在跑。复用开新回合时重写,回合收尾时清掉。
+    internalTurn: !!internal,
+    // 本回合来源('internal' = 跨会话自动处理 / 'user'),只在开回合时写:回合收尾后主 agent 复活续跑,据此把 internalTurn 写回。
+    turnSource: internal ? 'internal' : 'user',
+    // 本回合已收尾、主 agent 随后可能续跑(settleSlotTurn 置上,开回合时清;消息泵见到续跑内容时据此写回 internalTurn)
+    turnSettled: false,
+    // 本回合收到过停止请求(applyStop 置上,开回合时清;回合钩子没挂接、没有 runtimeTurn 时也有):续跑时据此不写回 internalTurn
+    turnStopRequested: false,
+    // 跨会话回合里有没有用户消息被 409 过(收尾时据此给"用户在等"续期,见 settleSlotTurn);冷启占位期被拒的,开回合时标记还没到期。
+    userWaitedDuringTurn: !!internal && userWaitingOnSession(sessionId),
   };
   activeProcesses.set(procId, slot);
+  // r151q 第 9 项:槽已登记(上面到这里没有 await),内部回合的占住由槽接替,撤掉冷启占位;起的是用户回合就清掉"用户在等"。
+  releaseInternalColdStart(req);
+  if (!internal) clearUserWaiting(sessionId);
   slot.nulWatcher = startWinNulWatcher(workingDir);
   if (turnRecord) bindTurnRecord(turnRecord, procId, slot); // R13:本回合的权威身份就此落位
   armTurnStartup(slot); // R13:冷启路径才等初始化(复用路径上面已置 turnSawLine=true)
@@ -2998,22 +3109,8 @@ async function handleChatPost(req, res) {
   const armStall = () => {
     clearTimeout(stallTimer);
     stallTimer = setTimeout(() => {
-      // 降级守卫(审查 R1):level 信号是【成员变化才发】的边沿信号、不是心跳,旧版 CLI 恒 0,
-      // 单个子代理独自长跑期间也可能一条都不来。最近一个 LIVE_TASK_FRESH_MS 窗内没有任何
-      // 确认就回落宽判据:本回合的【非 shell】条目算忙。shell 刻意不在此支 —— 否则本回合
-      // shell 只要 epoch 匹配就无限期豁免,2h 窗口会被绕过、看门狗/回收彻底失效(见常量注释)。
-      // 方向是"宁漏标不误杀",但豁免必须有上限。
-      const now = Date.now();
-      const busyNonShell = hasFreshNonShellTask(slot.liveTasks, now, LIVE_TASK_FRESH_MS)
-        || (now - (slot.lastLevelAt || 0) >= LIVE_TASK_FRESH_MS
-          && hasCurrentEpochNonShellTask(slot.liveTasks, slot.turnEpoch));
-      // 忙判据 = 非 shell(新鲜 + R1 降级支,该支只覆盖非 shell) || 新鲜 shell。shell 的豁免
-      // 只由 hasFreshShellTask 的 2h 窗口提供 → 2h 是 shell 的真总上限,R1 不能绕过。
-      // 窗口与理由见常量注释。
-      const busyLive = busyNonShell || hasFreshShellTask(slot.liveTasks, now);
-      // 判据含 revived:无子代理回合的续跑(auto-compact 后续写等)经复活守卫翻回活跃,
-      // turnSubagentSeen 仍是 false,不设 revived 分支这类续跑卡死永无看门狗兜底(判官 S2)。
-      if (!slot.idle && (slot.turnSubagentSeen || slot.revived) && !busyLive) {
+      // 判据(忙判据 + R1 降级守卫 + revived)见 shouldStallWatchdogFire / stallWatchdogBusy 的注释。
+      if (shouldStallWatchdogFire(slot, Date.now())) {
         // r151k:本会话还有卡在等用户回答(权限卡 / AskUserQuestion / ExitPlanMode /
         // elicitation / dialog 共用 pending 表)→ 这是「等用户」不是「上游卡死」:
         // 不 abort、不发 stall_notice,重新武装等下一窗。用户答复后卡从表里删掉,
@@ -3026,14 +3123,8 @@ async function handleChatPost(req, res) {
           return;
         }
         // stall_notice:客户端专用渲染分支(中性系统提示 turn,非红色错误)。原用 type:stderr
-        // 但客户端 SSE 分发根本不渲染 stderr = 提示白发(判官缺陷3)。
-        // 文案里的分钟数随运行时阈值生成(默认 300000 → "5 分钟"逐字不变)。下限 5 分钟:
-        // 用户可见文案只按分钟量级展示,联调/验收把阈值调到分钟级以下时仍显示默认口径,
-        // 不出现浮点/0 分钟/误导性的"1 分钟"。
-        const stallMinutes = Math.max(5, Math.round(STALL_MS / 60000));
-        const stallText = slot.turnSubagentSeen
-          ? `子代理已全部结束,但上游超过 ${stallMinutes} 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`
-          : `上游超过 ${stallMinutes} 分钟无后续输出,已结束本回合并重置连接(部分第三方 provider 偶发)。已有内容完好,直接重发或继续即可。`;
+        // 但客户端 SSE 分发根本不渲染 stderr = 提示白发(判官缺陷3)。文案见 buildStallNoticeText。
+        const stallText = buildStallNoticeText(STALL_MS, slot.turnSubagentSeen);
         deliverLine(slot, JSON.stringify({ type: 'stall_notice', text: stallText }));
         // 【必须强制拆进程,不能走 idle 复用】(判官缺陷1):卡死场景下 CLI 子进程正阻塞在
         // 死掉的上游请求上,不是健康空闲。若只 finalize 转 idle,同会话 15 分钟内下一条消息
@@ -3190,8 +3281,20 @@ async function handleChatPost(req, res) {
         // 只认主 agent 顶层内容(parent_tool_use_id 空);后台子代理自身消息(带该字段)不触发,保住
         // keepalive 语义与 deep-research(backgroundify 子代理)不回归;result/system/rate_limit_event
         // 是终态/纯信息不触发。续跑回合自己的 result 到来照常 finalize→done→再 idle,每轮自愈。
-        if (slot.idle && !m.parent_tool_use_id
-            && m.type !== 'result' && m.type !== 'system' && m.type !== 'rate_limit_event' && m.type !== 'prompt_suggestion') {
+        const mainAgentContent = !m.parent_tool_use_id
+          && m.type !== 'result' && m.type !== 'system' && m.type !== 'rate_limit_event' && m.type !== 'prompt_suggestion';
+        // r151q 第 9 项:续跑的还是收尾前那一回合 —— 它是跨会话回合,就把收尾时清掉的标记写回(用户消息照旧 409、不中止它);
+        // 用户自己的回合续跑仍按用户回合算(用户新消息照旧可以打断它)。按"本回合已收尾"判、不看是否空闲:不保活时收尾只关输入、
+        // 不转空闲,下面的复活分支不触发,续跑照样要写回。只在真有续跑内容时写回 ——"关输入到进程退出"那段不算在跑。
+        // 写回一次就清掉 turnSettled:续跑期间用户被 409 时置上的 userWaitedDuringTurn 不能被后续消息重算覆盖。
+        // 本回合收到过停止请求(turnStopRequested)就不写回:interrupt 不杀 shell 后台任务,任务完成通知会唤醒命令行接着跑,
+        // 这段不再按跨会话回合挡住用户(用户回合续跑本来就不写成跨会话回合,不受影响)。
+        if (slot.turnSettled && mainAgentContent && !slot.turnStopRequested) {
+          slot.turnSettled = false;
+          slot.internalTurn = slot.turnSource === 'internal';
+          slot.userWaitedDuringTurn = slot.internalTurn && userWaitingOnSession(slot.sessionId); // 收尾时续过期的,续跑这段同样算
+        }
+        if (slot.idle && mainAgentContent) {
           slot.idle = false;
           slot.revived = true; // 看门狗判据(无子代理续跑也纳入 5 分钟静默兜底)
           reviveSlotTurn(slot); // R13:回合还在跑,别让停止入口拿早前那次 finalize 的"completed"打发
@@ -3351,6 +3454,10 @@ const permissionModeSwitching = new Map();
 export function permissionModeSwitchPending(sessionId) {
   return typeof sessionId === 'string' && permissionModeSwitching.has(sessionId.toLowerCase());
 }
+/** 记一次"切档进行中"(键 = 会话 id 小写,个数 +1);减一见 finishSessionModeSwitch 与复用派发的 finally。export 仅为可单测。 */
+export function beginSessionModeSwitch(switchKey) {
+  permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
+}
 
 // r151f:能接新回合的进程 = 存活、不在关闭中、输入没关。切档只发给它们、只按它们计 attempted / delivered;进程视图的 usable 与
 // 跨会话判定的"存活进程档位"用同一判据。关闭中、输入已关的进程不收切档请求、不计数、档位字段不动:它们不再接新回合,手上通常
@@ -3376,7 +3483,7 @@ const sessionModeGenerations = new Map(); // 会话 id(小写)→ { gen, confirm
 const sessionModeStateKey = (sessionId) => String(sessionId).toLowerCase();
 
 /** 该会话此刻的切档代数(没有记录 = 0)。 */
-function sessionModeGeneration(sessionId) {
+export function sessionModeGeneration(sessionId) { // export 仅为可单测
   if (typeof sessionId !== 'string' || !sessionId) return 0;
   const st = sessionModeGenerations.get(sessionModeStateKey(sessionId));
   return st ? st.gen : 0;
@@ -3399,7 +3506,7 @@ function sessionLiveGuiMode(sessionId) {
  * 一次切档请求完成:清"切档进行中"标记;形状合法的会话再代数 +1、记确认档位。之间没有 await(调用方保证
  * 同步调用),所以排在后面的消息不会读到"代数变了但确认档位还是旧的"这类中间态。
  */
-function finishSessionModeSwitch(sessionId, switchKey, confirmedMode) {
+export function finishSessionModeSwitch(sessionId, switchKey, confirmedMode) { // export 仅为可单测
   // r151g 安全复审(重要 1):代数表只收形状合法的会话 id。这张表按会话长期累积,而 `/chat/permission-mode`
   // 走全局 25MB 解析器、回环免密,原来把任意 sessionId 小写后直接当长期键 → 连发 1024 个不同的大字符串
   // 就能常驻放大内存(上限只限条数不限字节),还能把目标会话条目挤出 LRU。
@@ -3435,6 +3542,60 @@ function sessionSlotReserved(sessionId) {
   for (const s of activeProcesses.values()) {
     if (String(s.sessionId || '').toLowerCase() === key && s.reservedBy) return true;
   }
+  return false;
+}
+
+// ── r151q 第 9 项:跨会话内部回合占住会话 / "用户在等" ─────────────────────────────────────────
+// 用户消息绝不能中止正在跑的跨会话内部回合:内部回合占着会话时,用户的 /chat 立即 409 CHAT_SESSION_BUSY(客户端排队、
+// 等会话空闲再发)。"占着" = 槽上的当前回合是内部回合且在跑(internalTurn,回合开始时写、回合收尾时清、复活续跑时按本回合来源写回),或内部回合
+// 冷启时还在等旧进程退出、自己的槽还没登记(下面这张占位表;槽登记后立即撤掉,请求结束时兜底再撤一次)。
+const internalColdStarts = new Map(); // 会话 id 小写 → 占位的请求对象(只撤自己登记的那条)
+function holdInternalColdStart(req, sessionId) {
+  if (typeof sessionId === 'string' && sessionId) internalColdStarts.set(sessionModeStateKey(sessionId), req);
+}
+function releaseInternalColdStart(req) {
+  for (const [key, owner] of internalColdStarts) if (owner === req) internalColdStarts.delete(key);
+}
+/** 该会话此刻是不是被跨会话内部回合占着(在跑,或冷启占位中)。 */
+function sessionHeldByInternalTurn(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return false;
+  const key = sessionModeStateKey(sessionId);
+  if (internalColdStarts.has(key)) return true;
+  for (const s of activeProcesses.values()) {
+    if (String(s.sessionId || '').toLowerCase() !== key || !s.internalTurn) continue;
+    // 结果已出、只差输入预测的收尾窗(suggestWaitSince)不算在跑 —— 与跨会话调度的"目标忙"同口径;用户请求照旧等它收尾
+    // (冷启前的等待循环),但到点也不会强制中止它(见那里的 abortForbidden)。
+    if (!s.idle && !s.closing && !s.pumpEnded && s.exitCode === null && s.input && !s.suggestWaitSince) return true;
+  }
+  return false;
+}
+// 用户消息被 409 CHAT_SESSION_BUSY 后,该会话"用户在等" 60 秒:期间跨会话调度不在它上面起新的自动回合(防止连续的跨会话
+// 消息每次都先抢到空闲的会话、用户消息一直发不出去)。该会话起了用户回合,或到期,就清掉;跨会话回合收尾时,这一回合里用户等过的
+// (含已过期的)从收尾时刻重新计 60 秒。只在内存(重启即无,不影响正确性)。
+const USER_WAITING_MS = 60_000;
+const userWaitingSessions = new Map(); // 会话 id 小写 → 到期时刻
+function noteUserWaiting(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return;
+  const now = Date.now();
+  for (const [key, until] of userWaitingSessions) if (until <= now) userWaitingSessions.delete(key); // 顺手清过期的,表不累积
+  const key = sessionModeStateKey(sessionId);
+  userWaitingSessions.set(key, now + USER_WAITING_MS);
+  // 正占着该会话的跨会话回合记下"这一回合里用户等过":回合跑过 60 秒、标记先过期了,收尾时也要重新计时(见 settleSlotTurn)
+  for (const s of activeProcesses.values()) {
+    if (s.internalTurn && String(s.sessionId || '').toLowerCase() === key) s.userWaitedDuringTurn = true;
+  }
+}
+function clearUserWaiting(sessionId) {
+  if (typeof sessionId === 'string' && sessionId) userWaitingSessions.delete(sessionModeStateKey(sessionId));
+}
+/** 该会话是不是有用户消息在等(被 409 后 60 秒内、还没起用户回合)。跨会话调度据此不投、退回排队。 */
+export function userWaitingOnSession(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return false;
+  const key = sessionModeStateKey(sessionId);
+  const until = userWaitingSessions.get(key);
+  if (until === undefined) return false;
+  if (until > Date.now()) return true;
+  userWaitingSessions.delete(key);
   return false;
 }
 
@@ -3531,7 +3692,7 @@ router.post('/chat/permission-mode', async (req, res) => {
   // 都还是旧档位,跨会话自动处理的起回合前核对若照常通过,回合会落在切档之后的档位上(放宽方向即绕过类别规则)。核对据此退回排队。
   // r151f 修法 5:标记在排队之前就置上(覆盖排队时间);同一会话的切档按发起顺序逐个执行,锁一直拿到应答发出(客户端按发起顺序收到结果)。
   const switchKey = String(sessionId).toLowerCase();
-  permissionModeSwitching.set(switchKey, (permissionModeSwitching.get(switchKey) || 0) + 1);
+  beginSessionModeSwitch(switchKey);
   await withSessionModeLock(sessionId, () => respondPermissionModeSwitch(res, sessionId, mode, switchKey));
 });
 
@@ -3881,7 +4042,7 @@ router.get('/chat/:pid/stream', (req, res) => {
 router.post('/chat/:pid/stop', async (req, res) => {
   const pid = req.params.pid;
   const slot = activeProcesses.get(pid) || null;
-  const record = turnByPid.get(pid) || null;
+  const record = stopTargetRecord(turnByPid.get(pid) || null, slot);
   // 从未存在或保留期后:没有可停的对象。有记录但进程已退净的,pin 到记录上走终态回执。
   if (!slot && !record) return res.status(404).json(RUN_NOT_FOUND_BODY);
   // express.json 全局挂载:无 body → {} → 全默认(选择性),老调用方向后兼容。
@@ -3896,6 +4057,15 @@ router.post('/chat/:pid/stop', async (req, res) => {
   if (!slot) return res.status(404).json(RUN_NOT_FOUND_BODY);
   return res.json(applyStop(slot, pid, { hard, allTasks }));
 });
+
+// r151q 第 9 项(安全复审):跨会话回合不带 clientTurnId,复用常驻进程时没有自己的记录,pid 上挂的还是上一条用户回合
+// 留下的(已结束,保留 24 小时)—— 拿它核对,停止只会回那条旧回合的终态,跨会话回合照跑。只在槽上当前回合是跨会话回合、
+// 查到的记录又不是这一回合(世代对不上,判法同 turnLiveStatus)时,按"没有记录"处理:身份按槽核对(会话 id / draft 身份,
+// 不接受 clientTurnId),直接停,那条旧记录不动。当前回合是用户回合时原样返回记录(以记录为权威的核对与 RUN_STALE 不变)。
+function stopTargetRecord(record, slot) {
+  if (!record || !slot?.internalTurn) return record;
+  return (slot.turnEpoch | 0) === (record.turnEpoch | 0) ? record : null;
+}
 
 // R13:停止请求里的期望身份(两者都不给 = 老调用方,走原路径)。owner 只接受字符串 ——
 // 身份就是"会话 id 或 draft 身份"这一个字符串,不多形态解析。
@@ -3966,6 +4136,7 @@ export function applyStop(slot, pid, flags) { // export 仅为可单测(check-st
   // 共用 stdin 通道,立即关会把刚发的 interrupt 请求截断。
   // express.json 全局挂载:无 body → {} → hard=false,老调用方向后兼容(选择性)。
   if (slot.runtimeTurn) slot.runtimeTurn.stopRequested = true; // r151b:回合结束通知报 stopped 用(没挂接时没有 runtimeTurn)
+  slot.turnStopRequested = true; // r151q:同一件事记在槽上(没挂接也有),续跑时据此不再按跨会话回合挡用户
   const hard = flags.hard === true;
   // A1:allTasks=true 只由「停止后台 N」总闸传(用户显式"停掉所有后台"),保持全量语义;
   // 主停止键 / Esc 不传 → 只停本回合派出的任务,跨回合后台子代理保留。

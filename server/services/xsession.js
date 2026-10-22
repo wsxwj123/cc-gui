@@ -13,7 +13,7 @@ import { dirname, join, resolve, posix as posixPath, win32 as win32Path } from '
 import { homedir } from 'os';
 import { broadcast } from '../broadcast.js';
 import { XS_PROFILE_WRITE_FAILED_MAX, inboundModeOf, normalizeXsProfileWriteFailed, readXsEnabledSync, readXsPrefsSync, readXsPrefsDetailedSync, readXsProfileWriteFailedSync, updatePrefs, updatePrefsStrict } from '../routes/prefs.js';
-import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, permissionModeSwitchPending, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError } from '../routes/chat.js';
+import { registerSessionRuntimeHooks, deliverRunEvent, getActiveChatProcesses, permissionModeSwitchPending, preToolUseGuardTimeoutAt, startInternalTurn, summarizeTurnError, userWaitingOnSession } from '../routes/chat.js';
 import { findSessionFile, isSessionIdShape } from './session-reader.js';
 import { XS_LIMITS, XS_STATUSES, XsStorageError, clearXsInbox, isOpenStatus, listXsMessages, mutateXsInbox, readXsBody } from './xsession-store.js';
 import { XS_PROFILE_MODES, XS_PROFILE_REPLAY_KEYS, dropXsProfile, mutateXsProfiles, readXsProfiles } from './xsession-store.js';
@@ -915,6 +915,9 @@ function dropInflight(id, key) {
 function targetBusy(sessionId, includeSettling) {
   if (includeSettling && scheduler.settling(sessionId)) return true;
   if (permissionModeSwitchPending(sessionId)) return true; // 判官 S2:切档还没完成也算忙(不投;完成后按新档位重判)
+  // r151q 第 9 项 (c):用户消息刚被 409(会话正被跨会话回合占着)、还在等着发 —— 60 秒内或用户回合开始之前不起新的自动回合
+  // (消息保持 queued;用户回合结束后照常按"转空闲"评估,到期未发则由忙时复查接上)。
+  if (userWaitingOnSession(sessionId)) return true;
   const procs = getActiveChatProcesses().filter((p) => sameId(p.sessionId, sessionId));
   const resultOut = procs.some((p) => p.busy && p.awaitingSuggestion);
   for (const f of inflight.values()) if (sameId(f.sessionId, sessionId) && !(resultOut && f.started)) return true;
@@ -962,8 +965,8 @@ function fingerprintOrNull(salt) {
 // (latestGuiMode)> 档案的(接口"审计之后的补充约定"第 3 条)。
 // 档案写失败过的会话整条按没有档案判(hasProfile 为 false → no-profile,见 profileCountsFor)。
 function targetFacts(sessionId, prefs, profiles, fp) {
-  // r151k:显式 card 才 card;没设置(以及显式 auto)一律 auto —— 映射口径统一走 inboundModeOf。
-  const inbound = inboundModeOf(prefs.inbound, sessionId);
+  // 显式值照用,没设置按偏好的入站默认(r151q)—— 映射口径统一走 inboundModeOf。
+  const inbound = inboundModeOf(prefs.inbound, sessionId, prefs.inboundDefault);
   const profile = profileIn(profiles, sessionId);
   return {
     inbound,
@@ -1056,8 +1059,8 @@ export async function listAiSessions({ sender, query } = {}, rows) {
   const selfRow = all.find((r) => sameId(r.sessionId, sender.sessionId)) || null;
   const selfId = selfRow ? selfRow.sessionId : sender.sessionId;
   const shortIds = assignShortIds([...all.map((r) => r.sessionId), ...(selfRow ? [] : [selfId])]);
-  const inbound = readXsPrefsSync().inbound;
-  const inboundOf = (id) => inboundModeOf(inbound, id);
+  const xsPrefs = readXsPrefsSync();
+  const inboundOf = (id) => inboundModeOf(xsPrefs.inbound, id, xsPrefs.inboundDefault);
   const picked = selectXsSessions(all.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), { query: query ?? '', limit: AI_LIST_MAX + 1, exclude: selfId });
   return {
     self: { id: shortIds.get(selfId), name: normalizeXsSourceName(selfRow?.title) },

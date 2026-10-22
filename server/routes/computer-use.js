@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { spawn } from 'child_process';
+import { existsSync, realpathSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { homedir } from 'os';
-import { join, dirname } from 'path';
+import { join, dirname, isAbsolute, delimiter, sep } from 'path';
 import { fileURLToPath } from 'url';
 import {
   GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, VENV_PY, capabilityReport, depsStampFor, ensureRuntime,
@@ -46,11 +47,37 @@ const HELPER = join(CU_DIR, IS_WIN ? 'cu_helper_windows.py' : 'cu_helper.py');
 const SUPPORTED = process.platform === 'darwin' || IS_WIN;
 const UNSUPPORTED_REASON = 'computer use 的执行层目前只在 macOS 与 Windows 上提供;当前平台没有实现';
 
-async function registered() {
+// 只读 ~/.claude.json 里 ccgui-computer-use 的注册。registeredNodeMissing(r151q 第 15 项):已注册、注册命令是
+// 绝对路径、而该路径不存在 → true(典型:注册的是带版本号的 node,升级 node 并清理旧版后 MCP 起不来,面板却仍显示已安装)。
+// 命令不是绝对路径时交给 PATH 解析,判断不了,按 false。读不出 / 解析失败 → 两者都 false(与改动前 registered 同口径)。
+async function registration() {
   try {
     const j = JSON.parse(await readFile(join(homedir(), '.claude.json'), 'utf-8'));
-    return !!(j.mcpServers || {})['ccgui-computer-use'];
-  } catch { return false; }
+    const entry = (j.mcpServers || {})['ccgui-computer-use'];
+    if (!entry) return { registered: false, registeredNodeMissing: false };
+    const cmd = typeof entry.command === 'string' ? entry.command : '';
+    return { registered: true, registeredNodeMissing: isAbsolute(cmd) && !existsSync(cmd) };
+  } catch { return { registered: false, registeredNodeMissing: false }; }
+}
+
+// r151q 第 15 项:状态接口给 CLI 注册 MCP 用的 node 路径。process.execPath 是 node 解析过链接的真实路径,Homebrew 下
+// 形如 /opt/homebrew/Cellar/node/25.9.0_1/bin/node —— 原样写进 ~/.claude.json 后,brew upgrade node 并清理旧版就失效。
+// 后端的 node 在带版本号的目录里、而 PATH 上同名 node 的真实路径与它相同时,改用 PATH 上那个稳定路径(升级后跟着指向新版,
+// 仍是同一个 node 起的后端 → 同款 ABI);PATH 上只有带版本号的同一路径(nvm 这类)或找不到 → 照旧给 execPath。
+// Windows 原样返回(没有 Homebrew 式稳定链接,输出保持不变)。纯函数(只读文件系统),export 仅为可单测。
+const VERSION_SEGMENT = /^v?\d+\.\d+(?:\.\d+)?(?:[._+-][0-9A-Za-z.]+)?$/;
+const inVersionedDir = (p) => dirname(p).split(sep).some((seg) => VERSION_SEGMENT.test(seg));
+export function stableNodePath(execPath, envPath, platform = process.platform) {
+  if (platform === 'win32' || typeof execPath !== 'string' || !isAbsolute(execPath) || !inVersionedDir(execPath)) return execPath;
+  let real;
+  try { real = realpathSync(execPath); } catch { return execPath; }
+  for (const dir of String(envPath || '').split(delimiter)) {
+    if (!dir || !isAbsolute(dir)) continue; // 相对 PATH 项随工作目录变,不算稳定
+    const candidate = join(dir, 'node');
+    if (inVersionedDir(candidate)) continue;
+    try { if (realpathSync(candidate) === real) return candidate; } catch { /* 不存在 / 断链:看下一个 */ }
+  }
+  return execPath;
 }
 
 // 只读 helper 调用(照 doctor 的门体例,但超时按子命令实测值收紧):
@@ -173,11 +200,12 @@ router.get('/computer-use/status', async (req, res) => {
     path: CU_DIR,               // 旧客户端读的字段:computer use 资产目录
     mcpPath: MCP_SERVER,
     helperPath: HELPER,
-    nodePath: process.execPath, // GUI 后端自己跑在哪个 node,CLI spawn MCP 就用哪个(同款 ABI/同款 PATH 逻辑)
+    // GUI 后端自己跑在哪个 node,CLI spawn MCP 就用哪个(同款 ABI/同款 PATH 逻辑);带版本号的安装给 PATH 上的稳定路径
+    nodePath: stableNodePath(process.execPath, process.env.PATH),
     runtimeDir: RUNTIME_DIR,
     shotsDir: SHOT_DIR,
     grantsPath: GRANTS_FILE,
-    registered: await registered(),
+    ...(await registration()), // registered + registeredNodeMissing
     runtimeReady: runtimeReady(),
     capabilities,
     lockscreen,

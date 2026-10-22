@@ -63,10 +63,13 @@ const firstNonKeptIndex = (list) => {
 };
 
 // FIFO 只看（跳过 kept 后的）队首。任何 unresolved 条目都是 barrier，绝不能越过它发送后项。
-export function firstDrainableIndex(list) {
+// r151q 第 9 项:被 409 CHAT_SESSION_BUSY 退回队首的条目带 busyRetryAt(下次最早可发的时刻),没到点前队首不可排空
+// (两次尝试至少隔 2 秒;也不越过它先发后项)。所有排空(流收尾 / 轮询)都经 shiftMessage → 这里,一处生效。
+export function firstDrainableIndex(list, now = Date.now()) {
   const i = firstNonKeptIndex(list);
   if (i < 0) return -1;
   const head = list[i];
+  if (Number(head?.busyRetryAt) > now) return -1;
   return head?.text && !isSteerBarrier(head) ? i : -1;
 }
 

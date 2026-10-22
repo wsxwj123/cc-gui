@@ -2320,6 +2320,24 @@ export const useStore = create((set, get) => ({
     if (!found || !persistQueueSnapshot(nextQueue, true)) return s;
     return { messageQueue: nextQueue };
   }),
+  // r151q 第 9 项:发出去被服务端回 409 CHAT_SESSION_BUSY(会话正被跨会话回合占着)的消息放回【发送时那个会话】队列的最前面,
+  // 与其它排队消息一样先落盘核验再提交内存态;busyRetryAt 之前不排空(见 utils/steerQueue.js firstDrainableIndex)。
+  // afterBusy:排在队首那一串同样被退回、等着重发的条目(带 busyRetryAt)之后 —— 新发的消息不越过先被退回的;
+  // 不给(出队重试又被退回的那条)= 放回最前。返回入队的条目;存不进(配额满 / 禁写)返回 null,调用方不得当成已排队。
+  requeueMessageFront: (sessionKey, msg, { afterBusy = false } = {}) => {
+    const queued = { ...msg, queueId: msg?.queueId || createQueueId('queue') };
+    let persisted = false;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      let at = 0;
+      if (afterBusy) while (at < list.length && list[at]?.busyRetryAt) at += 1;
+      const nextQueue = { ...s.messageQueue, [sessionKey]: [...list.slice(0, at), queued, ...list.slice(at)] };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      persisted = true;
+      return { messageQueue: nextQueue };
+    });
+    return persisted ? queued : null;
+  },
   shiftMessage: (sessionKey) => {
     // 原子 pop(#7):取 head 与写回 rest 必须在同一次 setState 里 —— 先 getState 再
     // setState 的两步写法下,并发调用方(流收尾 drain / ⚡引导)会各读到同一个 head,

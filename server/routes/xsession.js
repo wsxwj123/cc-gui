@@ -95,7 +95,16 @@ router.put('/xsession/config', async (req, res) => {
     await updatePrefs((prefs) => {
       const was = prefs.xsEnabled === true;
       if (typeof body.enabled === 'boolean') {
-        if (body.enabled && !was) prefs.xsEnabledAt = new Date().toISOString();
+        if (body.enabled && !was) {
+          // r151q:之前既没开过总开关、也没定过入站默认 = 新用户第一次打开 → 同一次写入里记 xsInboundDefault:'auto'
+          // (新用户默认自动处理);开过的老用户不写,没单独设置的会话保持卡片(见 prefs.js inboundDefaultOf)。
+          if (prefs.xsEnabledAt === undefined && prefs.xsInboundDefault === undefined) prefs.xsInboundDefault = 'auto';
+          prefs.xsEnabledAt = new Date().toISOString();
+        }
+        // r151q:由开变关的同一次写入里,缺 xsEnabledAt 就补记"开过"。一期升级上来的老用户(总开关开着、没有启用时刻)
+        // 若启动补记(services/xsession.js backfillXsEnabledAt)没落盘就关掉,不补的话再打开会被当成新用户、入站默认写成 auto。
+        // 补记的时刻不影响档案:下次打开时上面会覆盖成新的启用时刻,档案仍只认那之后记录的。
+        if (!body.enabled && was && prefs.xsEnabledAt === undefined) prefs.xsEnabledAt = new Date().toISOString();
         prefs.xsEnabled = body.enabled;
       }
       if (resume) delete prefs.xsAutoPaused;
@@ -216,7 +225,7 @@ router.get('/xsession/sessions', async (req, res) => {
     return xsError(res, 500, 'XS_LIST_FAILED', '读取会话列表失败');
   }
   const shortIds = assignShortIds(rows.map((r) => r.sessionId)); // 冲突按全部会话判,筛选之前算
-  // r151k:inbound(接收设置)默认自动处理 —— 显式 card 才 card,其余(显式 auto / 没设置)都 auto;
+  // inbound(接收设置):显式值照用,没设置按偏好的入站默认(r151q,见 prefs.js inboundDefaultOf / inboundModeOf);
   // hasProfile(有本次启用之后记录的发送档案;不看 provider 是否已换)
   const prefs = readXsPrefsSync();
   let profiled = new Set();
@@ -227,7 +236,7 @@ router.get('/xsession/sessions', async (req, res) => {
   const sessions = selectXsSessions(rows.map((r) => ({ ...r, shortId: shortIds.get(r.sessionId) })), opts)
     .map(({ sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity }) => ({
       sessionId, shortId, title, project, projectHash, state, pending: n, lastActivity,
-      inbound: inboundModeOf(prefs.inbound, sessionId), hasProfile: profiled.has(sessionId.toLowerCase()),
+      inbound: inboundModeOf(prefs.inbound, sessionId, prefs.inboundDefault), hasProfile: profiled.has(sessionId.toLowerCase()),
     }));
   res.json({ sessions });
 });

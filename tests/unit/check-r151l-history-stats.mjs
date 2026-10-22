@@ -12,6 +12,7 @@
 // 变异哨兵:把 historyStats 放在切窗之后算 → t3 红;按模型汇总丢掉 byPeriod → t2 分时段金额
 // 不等;aggregateCost 不读 cacheWrite5m/1h → t2 的 Claude 写费变「未知」。
 import assert from 'node:assert/strict';
+import { listenInRange } from './helpers/listen-in-range.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -178,8 +179,7 @@ const usage = (o = {}) => ({
   const app = express();
   app.use(express.json());
   app.use('/api', sessionRoutes);
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
+  const server = await listenInRange(app); // 端口在 6900–6999 里挑空闲的,被占就换(不用系统分配的随机口)
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
     const res = await fetch(`${base}/api/sessions/${encodeURIComponent(SID)}/messages?projectHash=${encodeURIComponent(HASH)}&limit=2`);

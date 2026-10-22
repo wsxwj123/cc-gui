@@ -25,7 +25,10 @@ test.describe.configure({ timeout: 120_000 });
 const STALL_MS = 1500;
 const SILENCE_MS = 5_000;
 const THRESHOLD = { CGUI_STALL_MS: String(STALL_MS) };
-const STALL_HEAD = '上游超过 5 分钟无后续输出';
+// 提示的固定部分是「上游超过 <时长>无后续输出」。时长按实际阈值写(默认阈值写 "5 分钟",不到 1 分钟写秒,
+// 如 1500ms 写 "2 秒"),具体格式归 r151q-review-fixes 的 Q15 验;本套件只验看门狗有没有在该触发时触发、
+// 提示有没有出现,所以时长这一段只要求非空,不绑定具体值。
+const STALL_HEAD_RE = /上游超过\s*(\S.*?)\s*无后续输出/;
 
 /**
  * 起一次性实例并发出这一条消息,返回 { inst, T, pid, cliPid, stream }。
@@ -148,8 +151,8 @@ test('H02 行为2 只有 Task 子代理、没有后台 shell 任务,静默超过
     expect(notices.length, `应收到 1 条 stall_notice(实际 ${notices.length} 条;SSE 事件:${JSON.stringify(s.stream.events.map((e) => ({ type: e.type, text: e.text })).slice(-20))})`)
       .toBeGreaterThanOrEqual(1);
     for (const n of notices) {
-      expect(stallText(n), `stall_notice 的文案应含固定开头("${STALL_HEAD}"):${JSON.stringify(stallText(n))}`)
-        .toContain(STALL_HEAD);
+      expect(stallText(n), `stall_notice 的文案应含固定部分「上游超过 <时长> 无后续输出」(时长非空即可,不限定具体值):${JSON.stringify(stallText(n))}`)
+        .toMatch(STALL_HEAD_RE);
     }
     const gone = await waitFor(async () => {
       const pids = await procPids(s.inst.c, s.T.sid);
@@ -217,8 +220,8 @@ test('H04 行为4 后台 shell 任务在静默窗口内报 completed 后再静�
     expect(notices.length, `应收到 1 条 stall_notice(实际 ${notices.length} 条;SSE 事件:${JSON.stringify(s.stream.events.map((e) => ({ type: e.type, text: e.text })).slice(-20))})`)
       .toBeGreaterThanOrEqual(1);
     for (const n of notices) {
-      expect(stallText(n), `stall_notice 的文案应含固定开头("${STALL_HEAD}"):${JSON.stringify(stallText(n))}`)
-        .toContain(STALL_HEAD);
+      expect(stallText(n), `stall_notice 的文案应含固定部分「上游超过 <时长> 无后续输出」(时长非空即可,不限定具体值):${JSON.stringify(stallText(n))}`)
+        .toMatch(STALL_HEAD_RE);
     }
     const gone = await waitFor(async () => {
       const pids = await procPids(s.inst.c, s.T.sid);
@@ -294,8 +297,8 @@ test('H06 行为6 一次性实例 CGUI_STALL_MS=1500 且不加载阈值垫片,�
     expect(notices.length, `不加载阈值垫片时,设了 CGUI_STALL_MS=1500 也应在 5 秒内收到 1 条 stall_notice(实际 ${notices.length} 条;SSE 事件:${JSON.stringify(s.stream.events.map((e) => ({ type: e.type, text: e.text })).slice(-20))})`)
       .toBeGreaterThanOrEqual(1);
     for (const n of notices) {
-      expect(stallText(n), `stall_notice 的文案应含固定开头("${STALL_HEAD}"):${JSON.stringify(stallText(n))}`)
-        .toContain(STALL_HEAD);
+      expect(stallText(n), `stall_notice 的文案应含固定部分「上游超过 <时长> 无后续输出」(时长非空即可,不限定具体值):${JSON.stringify(stallText(n))}`)
+        .toMatch(STALL_HEAD_RE);
     }
     const gone = await waitFor(async () => {
       const pids = await procPids(s.inst.c, s.T.sid);

@@ -162,6 +162,14 @@ function ComputerUseCard({ onChanged }) {
           {note.text}
         </div>
       )}
+      {/* r151q:注册命令里写的是安装当时的 node 绝对路径(Homebrew 下带版本号),升级并清理旧版 node 后
+          该路径消失,MCP 起不来,但注册项还在 —— 状态接口给 registeredNodeMissing,这里明确提示怎么修。 */}
+      {st.registered && st.registeredNodeMissing === true && (
+        <div data-testid="cu-node-missing"
+          className="mt-2 text-[10.5px] font-body leading-snug border rounded px-2 py-1.5 text-amber-700 border-amber-500/30 bg-amber-500/10">
+          已注册的 node 路径不存在(可能升级过 node),请卸载后重新安装。
+        </div>
+      )}
       {st.registered && <CuGrants runtimeReady={st.runtimeReady} appIdKind={st.appIdKind || 'bundleId'} />}
       {err && <div className="mt-2 text-[10.5px] text-error font-body">{err}</div>}
       {doctor && (

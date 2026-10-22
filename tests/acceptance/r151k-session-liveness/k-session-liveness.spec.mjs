@@ -25,7 +25,7 @@ const STALL_MS = 1500;
 const SILENCE_MS = 5_000;
 const THRESHOLD = { CGUI_STALL_MS: String(STALL_MS) };
 const IDLE_ENV = { CGUI_KEEPALIVE_IDLE_MS: '1500' };
-const STALL_HEAD = '上游超过 5 分钟无后续输出';
+const STALL_HEAD = /上游超过\s*(\S.*?)\s*无后续输出/; // 时长按实际阈值写(满 1 分钟写分钟、不满写秒),格式归 r151q Q15 验,这里不绑定时长
 const eventDigest = (events) => JSON.stringify(events.map((e) => ({ type: e.type, subtype: e.subtype, text: e.text })).slice(-20));
 
 // ============================ K1 必修:提问卡等待期间看门狗不动手 ============================
@@ -115,7 +115,7 @@ test('K2 行为2 只有 Task 子代理、没有提问卡,上游静默超过 1500
     const notices = stallNotices(s.stream.events);
     expect(notices.length, `应收到 1 条 stall_notice(实际 ${notices.length} 条;SSE 事件:${eventDigest(s.stream.events)})`).toBeGreaterThanOrEqual(1);
     for (const n of notices) {
-      expect(stallText(n), `stall_notice 的文案应含固定开头("${STALL_HEAD}"):${JSON.stringify(stallText(n))}`).toContain(STALL_HEAD);
+      expect(stallText(n), `stall_notice 的文案应含固定句式("上游超过 <时长> 无后续输出",时长格式归 r151q Q15 验,这里不绑定):${JSON.stringify(stallText(n))}`).toMatch(STALL_HEAD);
     }
     const gone = await waitFor(async () => {
       const pids = await procPids(inst.c, T.sid);

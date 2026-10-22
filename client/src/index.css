@@ -1,7 +1,8 @@
 @import "tailwindcss";
 /* 分屏多个窗格时,消息操作按钮只留图标:窗格窄,中文标签会被压成竖排(用户实报)。
-   单屏/手机保持原样(手机由标签自身的 hidden md:inline 已隐藏)。 */
-[data-testid="pane-split"][data-pane-count]:not([data-pane-count="1"]) .cgui-action-label {
+   单屏/手机保持原样(手机由标签自身的 hidden md:inline 已隐藏)。
+   选择器挂 SplitMain 根节点专用的 data-cgui-pane-split,不挂 data-testid(那是给测试的,改名不能影响样式)。 */
+[data-cgui-pane-split][data-pane-count]:not([data-pane-count="1"]) .cgui-action-label {
   display: none;
 }
 

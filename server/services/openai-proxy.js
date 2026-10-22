@@ -17,7 +17,7 @@ import { lookupModelCapabilities, EFFORT_IDS } from '../utils/model-capabilities
 import { lookupVisionCapability } from '../utils/vision-capability.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 import { normalizeOpenAIUsage } from '../utils/openai-usage.js';
-import { resolveFallbackModel, noteModelFallback } from '../utils/model-fallback.js';
+import { resolveUpstreamModel, noteModelFallback } from '../utils/model-fallback.js';
 import { recordUsageIssue } from './usage-issue-log.js';
 
 // R22/R24:上游 usage 无效/自相矛盾时,把结论(含原始数字)记进服务端自有存储。
@@ -769,7 +769,7 @@ async function handle(req, clientRes) {
   // 发往上游的请求(含 vision 判定 / reasoning_effort 等一切上游决策);响应侧继续用客户端
   // 原始 body.model,CLI 看到的模型名不因映射而改变。
   const requestedModel = body?.model;
-  const effectiveModel = resolveFallbackModel(requestedModel, up);
+  const effectiveModel = resolveUpstreamModel(requestedModel, up); // r151q:目标与保护名单跟随用户级 settings
   if (effectiveModel !== requestedModel) {
     noteModelFallback(requestedModel, effectiveModel);
   }

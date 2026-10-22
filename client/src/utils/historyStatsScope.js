@@ -41,5 +41,8 @@ export function historyStatsScopeLabel(stats, loaded, total) {
  *   · TTL 分项缺失:同模型混有/无 5m/1h 分项时,整行写费可能被判未知(逐条只丢无分项那条);
  *   · 子代理口径:token(usageTotals)含 sidechain/子代理记录,费用只聚合主文件消息。
  * 这句必须显示在费用旁边,不能只在代码注释里。
+ *
+ * r151q:只在走全量汇总时显示(本窗格还有更早消息没加载)。全部已加载时 App.jsx 改按逐条消息计价
+ * (与回复气泡同一算法),上面这些偏差都不存在,页面文字和金额悬停提示里都不再挂这句。
  */
 export const HISTORY_COST_ESTIMATE_NOTE = '费用按当前价目表估算;跨价目生效日、分档/TTL 分项缺失时可能偏差。用量含子代理记录,费用按主文件消息聚合,口径略有差异。';

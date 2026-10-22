@@ -51,6 +51,14 @@ export function migrateUserStash(fromKey, toKey) {
   stashUserBubbles(toKey, entries);
 }
 
+/** 撤掉某会话暂存里的一条(按 uuid;r151q:发送被 409 退回队列的那条乐观气泡,不能在切回时被补回来)。 */
+export function dropStashedUserBubble(key, uuid) {
+  const entries = key && uuid ? stash.get(key) : null;
+  if (!entries?.length) return;
+  const rest = entries.filter((m) => m?.uuid !== uuid);
+  if (rest.length) stash.set(key, rest); else stash.delete(key);
+}
+
 /** 丢弃某会话的暂存(回滚把尾部从 jsonl 裁掉后,暂存副本已不代表现实)。 */
 export function dropUserStash(key) {
   if (key) stash.delete(key);

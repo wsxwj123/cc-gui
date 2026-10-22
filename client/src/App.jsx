@@ -5,6 +5,9 @@ import { createPortal } from 'react-dom';
 // #185 (Maximum update depth exceeded) caused by returning fresh `[]` on
 // every selector call. Any selector with `|| []` fallback must point here.
 const EMPTY_ARRAY = Object.freeze([]);
+// r151q 第 9 项:发送被 409 CHAT_SESSION_BUSY 退回队列时的提示与重试间隔(两次尝试至少隔这么久)。
+const SESSION_BUSY_QUEUED_NOTICE = '会话正在处理跨会话消息，这条已排队，空闲后自动发送；要立刻发送，先点停止。';
+const BUSY_RETRY_GAP_MS = 2000;
 // 已尝试过自动生成标题的 sessionId(无论成功失败),防止失败时每轮重复 spawn 标题进程。
 const titleAttempted = new Set();
 // R8-5:已就 MCP 状态提示过的进程 pid。按 slot 生命周期去重:同一常驻进程的重复 init
@@ -169,7 +172,7 @@ import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
-import { dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
+import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
 import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
@@ -1292,7 +1295,7 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
   // 更新说明这类浮层**在内容区里居中**(而不是按整个窗口居中 —— 有会话列表/右侧面板时会看着压一边)。
   //
   // 三条硬约束(来自独立盲审 M1–M3,别改回去):
-  // ① 基准元素必须是**内容区**(SplitMain 根节点 [data-testid="pane-split"]),不是侧栏内层 div ——
+  // ① 基准元素必须是**内容区**(SplitMain 根节点 [data-cgui-pane-split]),不是侧栏内层 div ——
   //    挂错会让 left/width 算成侧栏的量、浮层盒宽塌成 0;
   // ② 依赖必须跟着布局变(isMobile/sidebarCollapsed/sidebarWidth/rightPanel/rightPanelWidth/panelWidth),
   //    且元素可能不在首帧存在(空则等下一帧),否则"收起时挂载"会永远量不到、"开→收"会留脏值;
@@ -1328,7 +1331,8 @@ function MainLayout({ sidebarCollapsed, selectedProject, rightPanel, setRightPan
       s.setProperty('--content-w', Math.round(el.offsetWidth) + 'px');
     };
     const attach = () => {
-      el = document.querySelector('[data-testid="pane-split"]');
+      // 挂专用属性而不是 data-testid:测试标记改名不该让浮层定位失效。
+      el = document.querySelector('[data-cgui-pane-split]');
       if (!el) { raf = requestAnimationFrame(attach); return; }   // 首帧可能还没挂上
       measure();
       ro = new ResizeObserver(measure);
@@ -1551,7 +1555,7 @@ function SplitMain({ activeTabIndex, setActiveTabIndex }) {
   // 唯一窗格时(单屏 或 dock 单显聚焦窗格)用单屏那套填满样式 + 不渲分屏头/手柄。
   const soloPane = panes.length === 1;
   return (
-    <div ref={rowRef} data-testid="pane-split" data-pane-count={panes.length} className="flex-1 flex min-w-0 overflow-x-auto">
+    <div ref={rowRef} data-testid="pane-split" data-cgui-pane-split="" data-pane-count={panes.length} className="flex-1 flex min-w-0 overflow-x-auto">
       {panes.map((i) => {
         const focused = activeTabIndex === i;
         const paneSession = paneSessions && paneSessions[i];
@@ -3713,6 +3717,20 @@ function makePersistedIndex(persisted) {
   };
 }
 
+// 逐条消息计价求和,与回复气泡同一算法:computeCostForMessage 带 usageCalls → 长上下文分档、
+// 分时段模型都按每次调用自己的提示量和时刻判。金额先归一到展示口径再相加 —— 官方 CNY 报价是
+// 原币种数字,不同币种的数字不能直接相加。没有价目的模型跳过。
+function sumMessagesCostUsd(list, provider) {
+  let total = 0;
+  for (const m of list) {
+    if (m.usage && (m.model || provider?.model)) {
+      const c = computeCostForMessage(m, provider);
+      if (c) total += displayUsd(c.totalUsd, c.currency);
+    }
+  }
+  return total;
+}
+
 const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileChrome = false }) {
   // Split-mode tab routing: when tabIndex===1 we render the SECOND pane and
   // read from secondary{Session,Messages} + write back via setSecondarySession
@@ -5782,6 +5800,30 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 按最新状态刷新卡片(可撤回或已退回),给一行提示,不画错误回合;走既有 finally 收尾。
       if (opts.xsProcess && (!res.ok || !respJson.pid)) {
         setProviderSwitchNotice({ text: xsClaimNotSent(opts.xsProcess, respJson) });
+        return;
+      }
+      // r151q 第 9 项:会话正被跨会话回合占着(服务端立即回 409 CHAT_SESSION_BUSY,不中止那个回合)= 这条没发出去。
+      // 不画错误气泡、撤掉乐观气泡;原文、附件、选项放回【发送时那个会话】(闭包里的 sessionQueueKey,不是此刻选中的会话)
+      // 队列的最前面,与其它排队消息一样落盘;BUSY_RETRY_GAP_MS 之内不再试(firstDrainableIndex 把关)。之后由既有排空再发:
+      // 服务端报该会话没有在跑的回合时轮询排空,或本窗格接回的那条流收尾时排空;再 409 就照此继续排队。点卡片发出的那条上面已返回。
+      if (res.status === 409 && respJson.code === 'CHAT_SESSION_BUSY') {
+        const retryOpts = { ...opts, busyRequeued: true }; // 标记:这条已被 409 退回过(之后出队重试再被退回,回到最前)
+        delete retryOpts.onEnqueueFailure; delete retryOpts.onQueued; delete retryOpts.fromComposer;
+        if (retryOpts.meta) retryOpts.meta = attachmentMetaForPersistence(retryOpts.meta);
+        // 出队重试的那条回到最前;新发的这条若队首已有被退回、等着重发的消息,排在它们后面(不越过先被退回的)。
+        const requeued = useStore.getState().requeueMessageFront(sessionQueueKey, {
+          text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts: retryOpts, busyRetryAt: Date.now() + BUSY_RETRY_GAP_MS,
+        }, { afterBusy: !opts.busyRequeued });
+        if (!requeued) {
+          // 存不进队列(本地存储满):乐观气泡留着(原文还在屏上),明说没发出、要手动重发 —— 不静默丢。
+          throw new Error('会话正忙，这条消息没能放回待发队列（本地存储已满），没有发出；请稍后手动重发。');
+        }
+        if (userMsgUuid) {
+          setChatMessages((prev) => prev.filter((m) => m.uuid !== userMsgUuid));
+          dropStashedUserBubble(sessionQueueKey, userMsgUuid); // 切走时被暂存的那份也撤掉,切回时不补回
+        }
+        if (paneStillOn(sessionQueueKey)) setProviderSwitchNotice({ text: SESSION_BUSY_QUEUED_NOTICE, ownerKey: sessionQueueKey });
+        else leaveSessionNotice(sessionQueueKey, SESSION_BUSY_QUEUED_NOTICE);
         return;
       }
       // R13 身份冲突(409):本条请求不属于当前服务实例/与既有回合参数不符/已过期 ——
@@ -9031,35 +9073,39 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // r151l 窄复审②:费用计算与「全量 / 仅已加载」标签必须同一个判据(utils/historyStatsScope.js),
   // 不能再各判各的 —— 否则 historyStats 字段异常时会"标全量、按窗口算"。
   const statsFull = hasFullHistoryStats(serverHistoryStats);
+  // r151q:本窗格分页账显示"没有更早消息"(全部已加载)时,费用按逐条消息计价 —— 与回复气泡同一算法,
+  // 头部金额 = 各气泡金额之和,不是估算,也不显示估算说明;还有更早消息没加载时才走全量汇总估算(带说明)。
+  // 两条路径都只算主文件消息;翻到最后一页时数字可能小幅变化、说明消失,这是预期。没有本会话的分页账时按"没加载全"。
+  const costByMessage = pagingForHere?.hasMore === false;
+  // 已落盘列表的逐条费用单独记忆:只随列表、provider(cc switch 改道要换价目表)、价目版本变;
+  // 流式时下面只叠加直播部分,不在每个 token 上把整份历史重新查价。
+  // 依赖里的 pricingVersion 是"查价数据变了"的信号,函数体里不读它。
+  const finalizedCostUsd = useMemo(
+    () => sumMessagesCostUsd(finalizedMessages, currentProvider),
+    [finalizedMessages, currentProvider, pricingVersion],
+  );
   const sessionSummary = useMemo(() => {
     const all = [...finalizedMessages, ...renderChat];
-    // Sum per-message cost. Skipping models we don't have prices for. Uses
-    // currentProvider (subscribed above, before early returns) so cc switch
-    // redirects (Claude → DeepSeek/MiMo) get the right backend price table.
-    // 逐条走 computeCostForMessage(带 usageCalls → 分时段模型按每次调用自己的时刻判档);
-    // 金额先归一到展示口径再相加 —— 官方 CNY 报价是原币种数字,不同币种的数字不能直接相加。
-    const sumCost = (list) => list.reduce((acc, m) => {
-      if (m.usage && (m.model || currentProvider?.model)) {
-        const c = computeCostForMessage(m, currentProvider);
-        if (c) acc += displayUsd(c.totalUsd, c.currency);
-      }
-      return acc;
-    }, 0);
+    const liveCostUsd = sumMessagesCostUsd(renderChat, currentProvider);
     const sumTools = (list) => list.reduce((acc, m) => acc + (m.toolCalls?.length || 0), 0);
     // r151l 判官修正:有服务端全量统计就按全量算费用/工具数/模型(含未落盘的直播条目),
     // 不再只统计已加载的 120 条窗口 —— 否则同一张弹层里 token 是全量、费用是窗口。
     // 没有 historyStats(旧服务端 / 加载失败)时保持旧口径回退到已加载窗口。
     // 窄复审②:判据统一走 hasFullHistoryStats(与下面的范围标签同一个函数)。
     if (statsFull) {
-      const fullCost = aggregateHistoryCost(serverHistoryStats.usageByModel, currentProvider);
       // 本回合已落盘但被 streamHistCutoff 从 finalizedMessages 里藏起来的条目:它们**已经在**
       // 服务端全量统计里,而屏幕上画的是 renderChat 的直播副本 —— 先减掉再叠加直播,避免
       // 流式期间费用/工具数被算两遍。messages 与 historyStats 来自同一份响应快照。
       const shownKeys = new Set(finalizedMessages.map((m) => historyMessageKey(m)));
       const hiddenPersisted = messages.filter((m) => !shownKeys.has(historyMessageKey(m)));
       const liveModels = renderChat.filter((m) => m.model).map((m) => m.model);
+      // r151q:全部已加载 → 逐条计价(已落盘部分取上面的缓存);否则全量汇总估算(减掉被藏起来的再叠加直播)。
+      const totalCostUsd = costByMessage
+        ? finalizedCostUsd + liveCostUsd
+        : Math.max(0, (aggregateHistoryCost(serverHistoryStats.usageByModel, currentProvider).usd || 0)
+          - sumMessagesCostUsd(hiddenPersisted, currentProvider)) + liveCostUsd;
       return {
-        totalCostUsd: Math.max(0, (fullCost.usd || 0) - sumCost(hiddenPersisted)) + sumCost(renderChat),
+        totalCostUsd,
         toolCallCount: Math.max(0, (serverHistoryStats.totalToolCalls || 0) - sumTools(hiddenPersisted)) + sumTools(renderChat),
         models: [...new Set([
           ...serverHistoryStats.models,
@@ -9069,12 +9115,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       };
     }
     return {
-      totalCostUsd: sumCost(all),
+      totalCostUsd: finalizedCostUsd + liveCostUsd,
       toolCallCount: sumTools(all),
       models: [...new Set(all.filter((m) => m.model).map((m) => m.model))],
     };
     // 依赖里的 pricingVersion 是"查价数据变了"的信号,函数体里不读它。
-  }, [finalizedMessages, renderChat, messages, currentProvider, pricingVersion, serverHistoryStats, statsFull]);
+  }, [finalizedMessages, renderChat, messages, currentProvider, pricingVersion, serverHistoryStats, statsFull, costByMessage, finalizedCostUsd]);
 
   // r148 P6:传给输入框的回调稳定下来(输入框已记忆化;每次渲染新建的内联函数会让记忆化白做)。
   // 同样必须在提前 return 之前。
@@ -9307,6 +9353,8 @@ ${statsScopeLabel}`;
     // 窄复审②:statsFull 与费用计算同一判据(hasFullHistoryStats)。
     statsScopeLabel, statsFull,
     statsLoaded: historyLoadedCount, statsTotal: historyTotalCount,
+    // r151q:全部已加载时费用是逐条计价,弹层不再挂"按当前价目表估算"的说明。
+    costByMessage,
   };
   // r151l 判官修正:窗内检索与回合进度条只能覆盖**已加载**的消息/回合。范围必须可见,
   // 且范围提示里可一键补加载更早消息(加载后检索自动重跑、进度条自动扩到更早回合)。
@@ -9496,7 +9544,7 @@ ${statsScopeLabel}`;
             <span className="text-ink-ghost" title={usageDetailTitle}>会话累计命中率 {formatHitPctOrDash(cacheHitPct, sessionCache.total)}</span>
             <span className="text-ink" title="最近API命中率（最近一次 API 调用）；前一项为会话累计">最近API命中率 {formatHitPctOrDash(turnCache.hitPct, turnCache.total)}</span>
             {totalCostUsd > 0 && (
-              <span className="text-accent/80" title={`${statsScopeLabel}
+              <span className="text-accent/80" title={costByMessage ? statsScopeLabel : `${statsScopeLabel}
 ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
             )}
           </div>
@@ -9505,7 +9553,7 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
           {totalCostUsd > 0 && (
             <div data-cgui="mobile-cost-note"
               className="shrink-0 px-3 pb-1 text-[9px] leading-snug text-ink-ghost font-body border-b border-canvas-deep/40 relative z-30">
-              {statsScopeLabel}。{HISTORY_COST_ESTIMATE_NOTE}
+              {statsScopeLabel}。{!costByMessage && HISTORY_COST_ESTIMATE_NOTE}
             </div>
           )}
         </>
@@ -10544,8 +10592,8 @@ function ContextBreakdownButton({ contextTokens, contextWindow, contextPct, fmtT
             <span className="font-mono text-ink-muted">{(info.totalAllTokens || 0).toLocaleString()}</span>
             {info.totalCostUsd > 0 && (
               <span className="font-mono text-accent/80" title={`按各模型官网价估算的累计费用(人民币,按 1 USD ≈ 7.2 CNY 换算)。套餐制模型(Claude 官方订阅、Kimi Code 会员套餐)不按 token 计费,不计入此数。若模型经中转站接入,实际单价以服务商为准。
-${info.statsScopeLabel || ''}
-${HISTORY_COST_ESTIMATE_NOTE}`}>
+${info.statsScopeLabel || ''}${info.costByMessage ? '' : `
+${HISTORY_COST_ESTIMATE_NOTE}`}`}>
                 · {formatCost(info.totalCostUsd)}
               </span>
             )}
@@ -10559,8 +10607,9 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>
             </div>
           )}
           {/* r151l 窄复审②:全量费用是"当前价目表 + 固定代表时刻"的估算,不是逐条历史重算 ——
-              跨价目生效日/长提示分档/TTL 分项缺失会有偏差;token 含子代理用量、费用只算主文件。 */}
-          {info.totalCostUsd > 0 && (
+              跨价目生效日/长提示分档/TTL 分项缺失会有偏差;token 含子代理用量、费用只算主文件。
+              r151q:全部已加载时费用按逐条计价(与气泡一致),这句说明不成立,不显示。 */}
+          {info.totalCostUsd > 0 && !info.costByMessage && (
             <div data-cgui="badge-cost-scope"
               className="text-[9px] leading-snug font-body text-ink-ghost"
               title={HISTORY_COST_ESTIMATE_NOTE}>
