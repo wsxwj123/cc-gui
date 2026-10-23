@@ -3078,6 +3078,9 @@ async function handleChatPost(req, res) {
   // 同时修好 CG-2(非规划模式"子代理后再要授权"也是同一根因)。
   let closeTimer = null;
   let closeDelayMs = 0; // 本回合 result 分支算出的关流延迟,收摊重武装时复用同一窗口
+  // r151u:"取消并重新计时"挂上的那个收尾计时器。closeTimer 仍是它 = 收尾窗已被续跑重新计时过,这时到的输入建议属于更早那个
+  // result(续跑还在进行),不触发收尾;result 分支挂上新计时器后两者自然不相等,建议到达照常立即收尾。
+  let rearmedCloseTimer = null;
   let lastResultLine = null;
   // r151c:slot.suggestWaitSince = 本回合结果已出、收尾窗只为等输入预测时的结果时刻(result 分支置上);续跑或收尾报完回合结束即清
   const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
@@ -3380,7 +3383,10 @@ async function handleChatPost(req, res) {
         } else if (m.type === 'prompt_suggestion') {
           // 建议是本回合最后一条消息:result 已到(closeTimer 在挂)就立即收尾,
           // 不能走下面的 cancelClose 分支——那会把关闭取消掉、进程挂死等不到下一条。
-          if (closeTimer) finalize();
+          // r151u:只认 result 分支挂上的计时器。已被续跑重新计时过(仍是 rearmedCloseTimer)的,这条建议属于更早那个 result,
+          // 照常转发(上面 deliverLine 已发)、不收尾,由续跑静默满窗或续跑自己的 result 收尾。不能用 suggestWaitSince 判:
+          // 子代理回合开着预测时它是 0,但建议到达仍应立即收尾。
+          if (closeTimer && closeTimer !== rearmedCloseTimer) finalize();
         } else if (closeTimer && mainAgentTurnActivity) {
           // result 之后又来主回合活动 → 那个 result 不是最终的,等主回合续跑静默满 4s 才收摊。
           // r151t:判据与上方复活守卫共用 isMainAgentTurnActivity(白名单),下面两段豁免都包含在内;
@@ -3408,6 +3414,7 @@ async function handleChatPost(req, res) {
           const queuedTurnStarted = m.type === 'command_lifecycle' && m.state === 'started';
           if (!queuedTurnStarted) {
             closeTimer = setTimeout(() => finalize(), closeDelayMs || 4000);
+            rearmedCloseTimer = closeTimer;
           }
         }
       }
