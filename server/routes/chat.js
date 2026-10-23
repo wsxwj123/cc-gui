@@ -3078,6 +3078,9 @@ async function handleChatPost(req, res) {
   // 同时修好 CG-2(非规划模式"子代理后再要授权"也是同一根因)。
   let closeTimer = null;
   let closeDelayMs = 0; // 本回合 result 分支算出的关流延迟,收摊重武装时复用同一窗口
+  // r151u:"取消并重新计时"挂上的那个收尾计时器。closeTimer 仍是它 = 收尾窗已被续跑重新计时过,这时到的输入建议属于更早那个
+  // result(续跑还在进行),不触发收尾;result 分支挂上新计时器后两者自然不相等,建议到达照常立即收尾。
+  let rearmedCloseTimer = null;
   let lastResultLine = null;
   // r151c:slot.suggestWaitSince = 本回合结果已出、收尾窗只为等输入预测时的结果时刻(result 分支置上);续跑或收尾报完回合结束即清
   const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
@@ -3380,7 +3383,10 @@ async function handleChatPost(req, res) {
         } else if (m.type === 'prompt_suggestion') {
           // 建议是本回合最后一条消息:result 已到(closeTimer 在挂)就立即收尾,
           // 不能走下面的 cancelClose 分支——那会把关闭取消掉、进程挂死等不到下一条。
-          if (closeTimer) finalize();
+          // r151u:只认 result 分支挂上的计时器。已被续跑重新计时过(仍是 rearmedCloseTimer)的,这条建议属于更早那个 result,
+          // 照常转发(上面 deliverLine 已发)、不收尾,由续跑静默满窗或续跑自己的 result 收尾。不能用 suggestWaitSince 判:
+          // 子代理回合开着预测时它是 0,但建议到达仍应立即收尾。
+          if (closeTimer && closeTimer !== rearmedCloseTimer) finalize();
         } else if (closeTimer && mainAgentTurnActivity) {
           // result 之后又来主回合活动 → 那个 result 不是最终的,等主回合续跑静默满 4s 才收摊。
           // r151t:判据与上方复活守卫共用 isMainAgentTurnActivity(白名单),下面两段豁免都包含在内;
@@ -3401,7 +3407,15 @@ async function handleChatPost(req, res) {
           // 防御性兜底 4s。未列入白名单的事件类型不再推迟收摊。
           cancelClose();
           slot.suggestWaitSince = 0; // r151c:续跑了,那个结果不是最终的
-          closeTimer = setTimeout(() => finalize(), closeDelayMs || 4000);
+          // r151u:command_lifecycle started = 命令行开始处理排队的消息(引导排成的回合),是一个新回合,必以它自己的 result
+          // 结束,由 result 分支照常决定收尾(立即 / 4 秒窗)。所以只取消、不重新计时:按"静默满窗即收摊"计时的话,新回合等首字、
+          // 跑耗时工具都会静默超过 4 秒,被提前收尾(流收到 done、会话报空闲),而回合还在跑。
+          // 其余主回合活动(assistant / user / stream_event / tool_progress)照旧取消并重新计时。
+          const queuedTurnStarted = m.type === 'command_lifecycle' && m.state === 'started';
+          if (!queuedTurnStarted) {
+            closeTimer = setTimeout(() => finalize(), closeDelayMs || 4000);
+            rearmedCloseTimer = closeTimer;
+          }
         }
       }
     } catch (e) {

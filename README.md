@@ -287,7 +287,7 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.435">v0.2.435</a></b>(2026-10-23)· 修复 2 条</summary>
+<summary><b>v0.2.435</b>(2026-10-23)· 修复 2 条</summary>
 
 **修复**
 
