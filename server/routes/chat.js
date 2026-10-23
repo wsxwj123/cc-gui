@@ -3401,7 +3401,14 @@ async function handleChatPost(req, res) {
           // 防御性兜底 4s。未列入白名单的事件类型不再推迟收摊。
           cancelClose();
           slot.suggestWaitSince = 0; // r151c:续跑了,那个结果不是最终的
-          closeTimer = setTimeout(() => finalize(), closeDelayMs || 4000);
+          // r151u:command_lifecycle started = 命令行开始处理排队的消息(引导排成的回合),是一个新回合,必以它自己的 result
+          // 结束,由 result 分支照常决定收尾(立即 / 4 秒窗)。所以只取消、不重新计时:按"静默满窗即收摊"计时的话,新回合等首字、
+          // 跑耗时工具都会静默超过 4 秒,被提前收尾(流收到 done、会话报空闲),而回合还在跑。
+          // 其余主回合活动(assistant / user / stream_event / tool_progress)照旧取消并重新计时。
+          const queuedTurnStarted = m.type === 'command_lifecycle' && m.state === 'started';
+          if (!queuedTurnStarted) {
+            closeTimer = setTimeout(() => finalize(), closeDelayMs || 4000);
+          }
         }
       }
     } catch (e) {
