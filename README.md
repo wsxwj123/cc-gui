@@ -287,7 +287,22 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.434</b>(2026-10-22)· 新增 1 条 · 修复 1 条</summary>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.435">v0.2.435</a></b>(2026-10-23)· 修复 2 条</summary>
+
+**修复**
+
+<details><summary>回合结束后界面不再一直显示 Writing / Connecting</summary>
+
+开着会话常驻进程时，回合进行中又发了消息(引导)、或命令行自己接着跑了一段，回合实际结束后，流式状态行(如「Writing 9m19s」)不再一直计时，切走再切回也不再挂着;此时会话按空闲处理，再引导会提示没有进行中的回合，静默看门狗也不再把这个空闲的进程当成卡住而中止。回合已结束时打开这个会话，接流立即收尾。命令行自己接着跑的那一段结束时，同样发完成提醒、刷新侧栏。
+
+</details>
+
+- 已知限制：开着输入预测(官方渠道默认开)时，引导另起的那一回合进行中切回该会话，仍可能提前显示为已结束;之后会话报成在跑时界面会自动重新接上。
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.434">v0.2.434</a></b>(2026-10-22)· 新增 1 条 · 修复 1 条</summary>
 
 **新增**
 
