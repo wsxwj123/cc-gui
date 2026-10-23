@@ -13,25 +13,27 @@ const kinds = (ses) => JSON.stringify(ses.emits().map((e) => `${e.ev}/${e.sub ||
 const firstTurn = (ses, ...mid) => [{ say: 'A-1' }, ...mid, { waitFile: ses.f('holdA') }, { say: 'A-2' }];   // 第一回合:A-1 →(派子代理)→ 等 holdA → A-2
 const suggestions = (ses) => ses.emits().filter(isEv('prompt_suggestion'));
 
-test('U01 开预测、无子代理,(乙)第二回合 started 后静默 6 秒:期间不报 idle;发送时开的流与静默中途接的流在第二个 result 前都没收到 done、收到 B-1/B-2;result 后 3.5–6 秒两条流收到 done 并被关闭,随后 2 秒内 idle', async () => {
+test('U01 开预测、无子代理,(乙)第二回合 started 后静默 6 秒:期间不报 idle;约 5 秒时客户端先断开发送时开的流(断开前没收到 done)、再接一条不带游标的新流;新流在第二个 result 前没收到 done、收到 B-1/B-2;result 后 3.5–6 秒新流收到 done 并被关闭,随后 2 秒内 idle', async () => {
   await withInst('u01', async (inst, track) => {
     const ses = newSession(inst, 'u01');
     const { s1, started } = await startSeparate(ses, track, 'U01', true, firstTurn(ses), { steps: [{ sleep: 6_000 }, { say: 'B-1' }, { say: 'B-2' }] });
     const sampling = sampleUntilResult(ses, 2, started.t, started.t + 20_000);
     await sleepUntil(started.t + 5_000);
-    const s2 = track(ses.stream());   // started 后约 5 秒(静默期间)接的流,不带游标
-    expect.soft(await s2.ready, '静默期间接流应 200').toBe(200);
+    // started 后约 5 秒(静默期间):同一会话同时只认一条流,所以先由客户端断开发送时开的流、再接新流(等同界面上切走再切回);任何时刻都没有两条流同时连着
+    const s1DoneBeforeAbort = s1.doneEvent();   // 断开前一刻,发送时开的流是否已收到 done
+    s1.abort();
+    await Promise.race([s1.run, sleep(1_000)]);   // 等客户端这一侧确实断干净了再接新流
+    const s2 = track(ses.stream());   // 不带游标的新流
+    expect.soft(await s2.ready, '切回时接新流应 200').toBe(200);
     const samples = await sampling;
     const r2 = ses.results()[1];
     expect(r2, `夹具生效:第二回合吐出了自己的 result(${kinds(ses)})`).toBeTruthy();
     expectNotIdleDuring(samples, started.t, r2.t, 'started 到第二个 result 之间');
-    expectNoDoneBefore(s1, r2.t, '发送时开的流');
-    expectNoDoneBefore(s2, r2.t, '静默中途接上的流');
-    await expectDoneWithin(s1, r2.t, ...NORMAL_WIN, '发送时开的流');
-    await expectDoneWithin(s2, r2.t, ...NORMAL_WIN, '静默中途接上的流');
-    expectTexts(s1, ['B-1', 'B-2'], '发送时开的流');
-    expectTexts(s2, ['B-1', 'B-2'], '静默中途接上的流');
-    await expectIdleBy(ses, Math.max(r2.t, s1.doneAt() || 0, s2.doneAt() || 0), '两条流都收到 done 之后');
+    expect.soft(s1DoneBeforeAbort, `发送时开的流:被客户端断开之前不应收到 done(${s1.summary()})`).toBeNull();
+    expectNoDoneBefore(s2, r2.t, '切回后接的新流');
+    await expectDoneWithin(s2, r2.t, ...NORMAL_WIN, '切回后接的新流');
+    expectTexts(s2, ['B-1', 'B-2'], '切回后接的新流');
+    await expectIdleBy(ses, Math.max(r2.t, s2.doneAt() || 0), '新流收到 done 之后');
   });
 });
 
