@@ -5195,7 +5195,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // "会话忙不忙"(下面那道门读 streamingRef/backgroundPidRef),两者并不等价。
     const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta, onEnqueueFailure, onQueued } = opts;
     // 自动标题的素材(下面每一处 POST /api/chat/title 的触发条件与 firstUser 都用它,不直接用 prompt):
-    // 点卡片处理跨会话消息时 prompt 只是占位,不能拿去起标题;其余发送它就是 prompt。
+    // 隐藏发送(点卡片处理跨会话消息、工具重做、队列隐藏条目及它们的自动重发)不是用户写的话,不拿去起标题;用户手打的它就是 prompt。
     const autoTitlePrompt = xsAutoTitlePrompt(prompt, opts);
     // Intercept the /remote-control (alias /rc) command. It CANNOT be sent
     // through `claude -p` — slash commands are interactive-only and the CLI
