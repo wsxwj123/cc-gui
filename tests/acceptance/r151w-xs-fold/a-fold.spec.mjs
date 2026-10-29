@@ -205,10 +205,14 @@ test('A9 无换行的长单段正文也折叠:两行预览、标题行是 BUTTON
   await expect(bodyEl, '收件箱正文节点应存在').toBeVisible();
   const folded = await styleOf(bodyEl);
   // 折叠态的两种等价判据(INTERFACE A2):line-clamp 计算值为 2,或高度 ≤ 2 行高度 + 容差。
+  // 这里就是「只显示两行」的唯一断言,下面的像素高度独立上界已删除,理由见下。
   expect.soft(folded.clamp === '2' || folded.height <= 2 * folded.lineHeight + 2,
     `长单段折叠态应只显示两行(实测 -webkit-line-clamp=${JSON.stringify(folded.clamp)},正文高 ${Math.round(folded.height)}px / 行高 ${Math.round(folded.lineHeight)}px;`
     + '无换行的长单段被当成 1 行 → 不折叠,整段铺开)').toBe(true);
-  expect.soft(folded.height, `折叠态正文高度应有上界(≤ 2 行,实测 ${Math.round(folded.height)}px / 行高 ${Math.round(folded.lineHeight)}px)`).toBeLessThanOrEqual(2 * folded.lineHeight + 2);
+  // 注意:不要再加「folded.height ≤ 2 × lineHeight + 2」这种纯像素上界。getBoundingClientRect() 返回的是
+  // 乘过 UI 缩放(--ui-zoom,默认 1.2)的视觉像素,而 getComputedStyle().lineHeight 是未缩放的计算值,
+  // 两者口径不同 → 正确实现(两行 + 省略号 + toggle)恒被判红(实测 48.75 = 40.625 × 1.2 > 42.625)。
+  // 「两行」由上面那条 clamp/高度二选一覆盖;收起态由本用例末尾的 again.clamp 断言覆盖。
   const cardFacts = await styleOf(card);
   expect.soft(cardFacts.height, `折叠行整体高度应有上界(≤180,实测 ${Math.round(cardFacts.height)}px)`).toBeLessThanOrEqual(180);
 
