@@ -136,6 +136,59 @@ export async function waitBodyHidden(row, bodyTestId, what = '正文') {
     { timeout: 5_000, message: `${what}应在收起后消失(节点不在 DOM 或可见高度 0)` }).toBe(false);
 }
 
+/**
+ * 展开态「正文水平居中」的实现无关判据(2026-10-29 用户补充要求:折叠行展开后的正文也要居中显示)。
+ * 只看视觉结果,不认 CSS 写法:把正文里每一行文本的可见矩形,换算成相对**正文内容框**
+ * (content box,扣掉 border/padding)的左右留白;没占满整行的行,左右留白应基本相等(容差 2px),
+ * 且至少有一行两侧留白都 ≥4px(证明真的有可见的居中留白)。
+ * 左对齐时短行的左侧留白恒 ≈0、右侧留白几十像素,左右差远超容差 → 与居中的区分非常开;
+ * 而 text-align:center 与「用 flex 把内容块 / 每一行居中」两种实现都能通过,不会绑死写法。
+ * 返回 { inDom, centered, textAlign, contentWidth, narrowLines, lines } 供断言与失败信息复用。
+ * 注意:夹具应包含**不同长度的短行** —— 只把容器整体居中、文字仍左对齐的实现会让短行贴着内容框左边。
+ */
+export const textCenterFacts = (row, bodyTestId) => row.evaluate((el, tid) => {
+  const b = el.querySelector(`[data-testid="${tid}"]`);
+  if (!b) return { inDom: false, centered: false, textAlign: null, contentWidth: 0, narrowLines: 0, lines: [] };
+  const cs = getComputedStyle(b);
+  const num = (v) => parseFloat(v) || 0;
+  const box = b.getBoundingClientRect();
+  const contentLeft = box.left + num(cs.borderLeftWidth) + num(cs.paddingLeft);
+  const contentRight = box.right - num(cs.borderRightWidth) - num(cs.paddingRight);
+  const contentWidth = Math.max(0, contentRight - contentLeft);
+  const lines = [];
+  const walker = document.createTreeWalker(b, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const data = n.data || '';
+    let offset = 0;
+    // 按换行符切源文本行:pre-wrap 下每个 \n 结束一个行盒,逐行量才能看出「短行有没有居中」。
+    for (const seg of data.split('\n')) {
+      const start = offset;
+      offset += seg.length + 1; // +1 跳过分隔用的换行符
+      if (!seg.trim()) continue;
+      const range = document.createRange();
+      range.setStart(n, start);
+      range.setEnd(n, start + seg.length);
+      for (const r of range.getClientRects()) {
+        if (r.width < 1 || r.height < 1) continue;
+        lines.push({ width: r.width, left: r.left - contentLeft, right: contentRight - r.right });
+      }
+    }
+  }
+  // 只对「没有占满整行」的行判左右留白:满宽行两侧都 ≈0,不携带对齐信息。
+  const narrow = lines.filter((x) => x.width < contentWidth - 4);
+  const TOL = 2;
+  const balanced = narrow.every((x) => Math.abs(x.left - x.right) <= TOL);
+  const hasVisibleGutter = narrow.some((x) => Math.min(x.left, x.right) >= 4);
+  return {
+    inDom: true,
+    centered: contentWidth > 0 && narrow.length > 0 && balanced && hasVisibleGutter,
+    textAlign: cs.textAlign,
+    contentWidth,
+    narrowLines: narrow.length,
+    lines: lines.map((x) => ({ width: Math.round(x.width), left: Math.round(x.left), right: Math.round(x.right) })),
+  };
+}, bodyTestId);
+
 /** soft 断言:折叠态「有正文就有展开入口」,提示文案是「展开全文」;返回提示节点。 */
 export async function expectExpandEntry(row, expandTestId, what = '正文') {
   const el = row.getByTestId(expandTestId);

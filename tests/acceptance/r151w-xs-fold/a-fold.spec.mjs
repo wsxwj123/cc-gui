@@ -7,7 +7,7 @@ import { test, expect } from '@playwright/test';
 import {
   api, boot, openSessionBySearch, seedPair, sendInbox, cardOf, styleOf, uniq,
   seedPeerHistory, seedSendHistory, setPanes, fillPane,
-  EXPAND, COLLAPSE, bodyFacts, expectFolded, waitBodyShown, waitBodyHidden, expectExpandEntry,
+  EXPAND, COLLAPSE, bodyFacts, textCenterFacts, expectFolded, waitBodyShown, waitBodyHidden, expectExpandEntry,
 } from './helpers/w.mjs';
 
 test.describe.configure({ timeout: 240_000 });
@@ -346,6 +346,49 @@ test('A10 宽度变化不改变折叠形态:开分屏后同一行仍无正文预
   await toggle.click();
   await waitBodyHidden(card, 'xs-card-body', '收起后的正文');
   await expect(toggle, '再点标题行应收起').toHaveAttribute('aria-expanded', 'false');
+});
+
+// ---------------- 用户 2026-10-29 补充要求:折叠行展开后的正文也要水平居中 ----------------
+// 判据(实现无关,见 helpers/w.mjs 的 textCenterFacts):展开后每一行没占满正文宽度的文本,
+// 在正文内容框里的左右留白应基本相等(容差 2px);左对齐时短行左侧留白恒 ≈0,一眼分开。
+// 夹具刻意用三种不同长度的短行:只把容器整体居中、文字仍左对齐的实现,短行会贴着内容框左边,同样过不了。
+test('A11 展开后正文水平居中:每行左右留白相等(不是靠左),且正文完整、可再收起', async ({ page }) => {
+  const pair = seedPair('a11');
+  const lines = [
+    `${pair.m} 第一行`,
+    `${pair.m} 第二行还有更多一些文字内容`,
+    `${pair.m} 第三行中等长度`,
+  ];
+  const msg = await sendInbox(pair.A, pair.B, lines.join('\n'));
+  await openTarget(page, pair);
+  const card = cardOf(page, msg.id);
+  await expect(card, '前置:目标会话有 1 张待处理卡片').toBeVisible({ timeout: 15_000 });
+
+  // 折叠态不显示正文(统一口径不变)
+  await expectFolded(card, 'xs-card-body', '居中用例的收件箱正文');
+  const toggle = card.getByTestId('xs-card-toggle');
+  await expect(toggle, '前置:标题行展开控件存在').toBeVisible({ timeout: 5_000 });
+  await toggle.click();
+  const bodyEl = await waitBodyShown(card, 'xs-card-body', '展开后的收件箱正文');
+
+  // ① 展开后正文完整(三行都在,不删内容)
+  for (const line of lines) {
+    await expect.soft(bodyEl, `展开后正文完整(含「${line}」)`).toContainText(line);
+  }
+
+  // ② 红点断言:展开后的正文水平居中
+  const c = await textCenterFacts(card, 'xs-card-body');
+  expect.soft(c.inDom, '展开后应能读到正文节点(居中判据依赖它)').toBe(true);
+  expect.soft(c.narrowLines,
+    `前置:应至少有一行没占满正文宽度(实测各行 [宽,左留白,右留白] = ${JSON.stringify(c.lines)})`).toBeGreaterThan(0);
+  expect.soft(c.centered,
+    `展开后正文应水平居中:每行左右留白应基本相等(实测 textAlign=${c.textAlign},内容宽 ${Math.round(c.contentWidth)}px, `
+    + `各行 [宽,左留白,右留白] = ${JSON.stringify(c.lines)};左对齐时短行左侧留白为 0、右侧留白几十像素)`).toBe(true);
+
+  // ③ 保留「可再收起」:再点标题行,正文消失、aria 回到 false
+  await toggle.click();
+  await waitBodyHidden(card, 'xs-card-body', '收起后的居中用例正文');
+  await expect.soft(toggle, '收起后 aria-expanded=false').toHaveAttribute('aria-expanded', 'false');
 });
 
 // 判官可选缺口 S3:分屏把同一会话挂两份时,同一条消息会有两份 DOM。
