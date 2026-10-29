@@ -1,4 +1,5 @@
 // B 组:收件箱(输入框上方)折叠行(B1–B9 + 多消息 42vh 内滚)。依据 INTERFACE 第 2 节。
+// r151y:B5 改写 —— 「放任」档也折叠(用户 2026-10-29 修订,覆盖旧审计 S6 的全文展示约定)。
 // 夹具:POST /api/xsession/messages 造 pending;claim 造 claimed;目标会话忙时投递造 queued;
 // 点【处理】+ 假 CLI 脚本停住造 processing。
 import { test, expect } from '@playwright/test';
@@ -6,6 +7,7 @@ import {
   api, boot, openSessionBySearch, seedPair, sendInbox, cardOf, inbox, styleOf, waitStatus,
   writeScript, touchCtl, uniq, turnRecords, waitFor, recordRequests, sendPrompt, ALL,
   shared, realCliPath, profileTurn, inboundOk, aiCalls, makeWorkspace, SM, msgsOf, bodyFacts,
+  textCenterFacts, expectFolded, waitBodyShown, waitBodyHidden, expectExpandEntry, EXPAND, COLLAPSE,
 } from './helpers/w.mjs';
 
 test.describe.configure({ timeout: 180_000 });
@@ -198,7 +200,12 @@ test('B4 折叠态点【处理】仍走原链路:一次带 xsMessageId 的 POST 
   await expect(card, '卡片随后消失').toHaveCount(0, { timeout: 20_000 });
 });
 
-test('B5 「放任」档正文不折叠:全文展示、有可见正文、没有展开控件', async ({ page }) => {
+// r151y(用户 2026-10-29 修订):旧审计 S6「放任档(bypassPermissions)全文展示、不折叠」作废。
+// 「放任」只决定点【处理】后工具要不要经确认,不改变呈现 —— 放任档与其它档一样折叠:
+// 折叠态只有标题行 + 状态 +「展开全文」,正文不显示;展开才看到完整正文(且居中);再收起消失;
+// 【处理】/【忽略】留在折叠态、仍可见可点。旧的放任档行为(整段铺开、没有展开入口、标题行退化成 div)
+// 在本用例里逐条写成反例断言 —— 放任档若哪天被回退成「全文展示」,这里立刻红。
+test('B5 「放任」档也折叠:折叠态无正文、有「展开全文」、标题行是 BUTTON;展开看全文并居中;收起消失;处理/忽略折叠态可点', async ({ page }) => {
   const pair = seedPair('b5');
   await boot(page);
   await openSessionBySearch(page, pair.B.title, pair.B.reply);
@@ -211,17 +218,58 @@ test('B5 「放任」档正文不折叠:全文展示、有可见正文、没有�
   await opt.click();
   await expect.poll(async () => sel.innerText(), { timeout: 10_000, message: '前置:已切到放任' }).toContain('放任');
 
+  // 10 行正文:放任档下也必须是折叠态,正文一个字都不显示
   const msg = await sendInbox(pair.A, pair.B, body10(pair.m));
   const card = cardOf(page, msg.id);
-  await expect(card).toBeVisible({ timeout: 15_000 });
-  // 放任档(noFold)不受第 9 节影响:正文整段可见、没有展开控件
-  const bodyEl = card.getByTestId('xs-card-body');
-  const f = await bodyFacts(card, 'xs-card-body');
-  expect.soft(f.shown, `放任档正文应可见(实测可见高 ${Math.round(f.height)}px)`).toBe(true);
-  expect.soft(f.scrollHeight, `放任档正文不应被裁(scrollHeight ${f.scrollHeight} / clientHeight ${f.clientHeight})`).toBeLessThanOrEqual(f.clientHeight + 2);
-  expect.soft(await card.getByTestId('xs-card-expand').count(), '放任档没有展开控件').toBe(0);
-  expect.soft(await card.getByTestId('xs-card-toggle').evaluate((el) => el.tagName), '放任档标题行不是可点的 BUTTON').not.toBe('BUTTON');
-  await expect.soft(bodyEl, '放任档正文整段可见').toContainText(`${pair.m} 第10行`);
+  await expect(card, '前置:放任档下待处理卡片存在').toBeVisible({ timeout: 15_000 });
+
+  // ① 折叠态:正文不显示(统一口径:不在 DOM 或可见高度 0),有「展开全文」,标题行是 BUTTON
+  const folded = await expectFolded(card, 'xs-card-body', '放任档折叠态正文');
+  expect.soft(folded.text.includes(`${pair.m} 第1行`),
+    '反例:放任档折叠态不应把正文原文留在可见正文节点里(旧行为:整段铺开)').toBe(false);
+  const expand = await expectExpandEntry(card, 'xs-card-expand', '放任档正文');
+  const toggle = card.getByTestId('xs-card-toggle');
+  await expect(toggle, '前置:折叠态标题行控件存在').toBeVisible({ timeout: 5_000 });
+  expect.soft(await toggle.evaluate((el) => el.tagName),
+    '反例:放任档标题行也应是可点的 BUTTON(旧行为:不折叠 → 退化成不可点的 div)').toBe('BUTTON');
+  await expect.soft(toggle, '折叠态 aria-expanded=false').toHaveAttribute('aria-expanded', 'false');
+
+  // ② 动作留在折叠态:【处理】/【忽略】都可见可点
+  const proc = card.getByTestId('xs-card-process');
+  const dismiss = card.getByTestId('xs-card-dismiss');
+  await expect.soft(proc, '折叠态【处理】可见').toBeVisible();
+  await expect.soft(dismiss, '折叠态【忽略】可见').toBeVisible();
+  expect.soft(await proc.isEnabled(), '折叠态【处理】可点').toBe(true);
+  expect.soft(await dismiss.isEnabled(), '折叠态【忽略】可点').toBe(true);
+
+  // ③ 展开:正文完整(含第 1 行与第 10 行)、不裁切、水平居中
+  await toggle.click();
+  const bodyEl = await waitBodyShown(card, 'xs-card-body', '放任档展开后的正文');
+  for (const line of [1, 2, 5, 10]) {
+    await expect.soft(bodyEl, `展开后正文完整(含第 ${line} 行)`).toContainText(`${pair.m} 第${line}行`);
+  }
+  const opened = await bodyFacts(card, 'xs-card-body');
+  expect.soft(opened.scrollHeight, `展开后正文不应被裁(scrollHeight ${opened.scrollHeight} / clientHeight ${opened.clientHeight})`).toBeLessThanOrEqual(opened.clientHeight + 2);
+  await expect.soft(toggle, '展开后 aria-expanded=true').toHaveAttribute('aria-expanded', 'true');
+  await expect.soft(expand, `展开后提示变成「${COLLAPSE}」`).toHaveText(COLLAPSE);
+  const c = await textCenterFacts(card, 'xs-card-body');
+  expect.soft(c.inDom, '展开后应能读到正文节点(居中判据依赖它)').toBe(true);
+  expect.soft(c.narrowLines,
+    `前置:应至少有一行没占满正文宽度(实测各行 [宽,左留白,右留白] = ${JSON.stringify(c.lines)})`).toBeGreaterThan(0);
+  expect.soft(c.centered,
+    `展开后正文应水平居中:每行左右留白应基本相等(实测 textAlign=${c.textAlign},内容宽 ${Math.round(c.contentWidth)}px, `
+    + `各行 [宽,左留白,右留白] = ${JSON.stringify(c.lines)};左对齐时短行左侧留白为 0、右侧留白几十像素)`).toBe(true);
+  // 展开态动作仍可点(动作行在正文之前,不被正文推走)
+  await expect.soft(proc, '展开态【处理】仍可见').toBeVisible();
+  expect.soft(await proc.isEnabled(), '展开态【处理】仍可点').toBe(true);
+
+  // ④ 再收起:正文消失,回到「展开全文」,动作还在
+  await toggle.click();
+  await waitBodyHidden(card, 'xs-card-body', '收起后的放任档正文');
+  await expect.soft(toggle, '收起后 aria-expanded=false').toHaveAttribute('aria-expanded', 'false');
+  await expect.soft(expand, `收起后提示回到「${EXPAND}」`).toHaveText(EXPAND);
+  await expect.soft(proc, '收起后【处理】仍可见').toBeVisible();
+  expect.soft(await dismiss.isEnabled(), '收起后【忽略】仍可点').toBe(true);
 });
 
 test('B6 【忽略】后行消失,接口状态为 dismissed', async ({ page }) => {
