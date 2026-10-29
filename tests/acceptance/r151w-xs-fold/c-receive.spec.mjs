@@ -173,3 +173,41 @@ test('C4 同一条不重复:回合中直播一条(data-via=card),刷新后历史
   await expect(rows, '刷新后同一条正文只显示 1 行').toHaveCount(1, { timeout: 20_000 });
   await expect.soft(rows.first(), '刷新后历史里的来源是 data-via="gui"').toHaveAttribute('data-via', 'gui');
 });
+
+// 判官补充轮(2026-10-29):接收行也必须覆盖「没有换行的长单段」——历史 peer 行的正文经常是一整段话,
+// 按容器宽度折成 >2 行但 split('\n') 只有 1 行,旧实现会当成短正文 → 整段铺开、没有 toggle。
+test('C4b 无换行长单段的接收行同样折叠:两行预览、可展开看全文、再收起', async ({ page }) => {
+  const pair = seedPair('c4b');
+  const tail = `TAIL-${pair.m.slice(-8)}`;
+  const seg = `${pair.m} 这是另一段没有换行的长正文，用于验证历史接收行按容器宽度折行后仍然只保留两行预览。`;
+  const body = Array.from({ length: 7 }, () => seg).join('') + ` ${tail}`;
+  expect.soft(body, '前置:接收行正文是一整段、不含换行').not.toContain('\n');
+  expect.soft(body.length, `前置:正文约 350–450 字(实测 ${body.length} 字),应折成 >2 行`).toBeGreaterThanOrEqual(300);
+
+  const hist = seedPeerHistory('c4b', [{ from: `gui:${pair.A.sid}`, name: `用户转发自 ${pair.A.title}`, body }]);
+  await boot(page);
+  await openSessionBySearch(page, hist.title, `${hist.title} 回复`);
+  const row = page.locator('[data-testid="peer-message"]').filter({ hasText: tail }).first();
+  await expect(row, '历史接收行应显示').toBeVisible({ timeout: 15_000 });
+
+  const bodyEl = row.getByTestId('peer-message-body');
+  const folded = await styleOf(bodyEl);
+  expect.soft(folded.clamp === '2' || folded.height <= 2 * folded.lineHeight + 2,
+    `长单段接收行折叠态应只显示两行(实测 -webkit-line-clamp=${JSON.stringify(folded.clamp)},正文高 ${Math.round(folded.height)}px / 行高 ${Math.round(folded.lineHeight)}px)`).toBe(true);
+
+  const toggle = row.getByTestId('peer-message-toggle');
+  await expect(toggle, '前置:接收行标题行展开控件存在').toBeVisible({ timeout: 5_000 });
+  expect.soft(await toggle.evaluate((el) => el.tagName), '长单段接收行的标题行应是 BUTTON(能点开),不是不可点的 div').toBe('BUTTON');
+  await expect.soft(toggle, '折叠态 aria-expanded=false').toHaveAttribute('aria-expanded', 'false');
+
+  await toggle.click();
+  await expect.poll(async () => (await styleOf(bodyEl)).height, { timeout: 5_000, message: '长单段接收行点标题行后正文应变高(当前实现不会展开)' }).toBeGreaterThan(folded.height + 30);
+  const opened = await styleOf(bodyEl);
+  expect.soft(opened.clamp, '展开后 -webkit-line-clamp 应为 none').toBe('none');
+  expect.soft(opened.scrollHeight, `展开后接收行正文不应被裁掉(scrollHeight ${opened.scrollHeight} / clientHeight ${opened.clientHeight})`).toBeLessThanOrEqual(opened.clientHeight + 2);
+  await expect.soft(toggle, '展开后 aria-expanded=true').toHaveAttribute('aria-expanded', 'true');
+  await expect.soft(bodyEl, '展开后能读到正文末尾标记').toContainText(tail);
+
+  await toggle.click();
+  await expect(toggle, '再点标题行应收起').toHaveAttribute('aria-expanded', 'false');
+});

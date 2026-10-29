@@ -175,11 +175,16 @@ test('D8 原生被引导拒绝 → 恰好一条「原生发送被拒」行(data-
   const pair = seedPair('d8');
   const id = `toolu_${uniq('d8').toLowerCase()}`;
   const addr = 'uds:/tmp/r151w-d8.sock';
+  // 判官补强:拒绝原因在真链路上是一整段(没有换行)的说明文字。补足长度、用长单段夹具,
+  // 让「按容器宽度折行后超过两行」不依赖视口宽度(只有 1–2 行时,修好折叠判定也不该折叠,用例会随窗口宽度飘)。
+  const tail = `TAIL-${pair.m.slice(-8)}`;
+  const reason = `${REFUSAL_P2} 补充说明：这个会话由 CC-GUI 接管，原生 SendMessage 不会把消息投递给它，也不会出现在对方的收件箱里；请改用 mcp__ccgui-sessions__send_message，并在 to 里填写目标会话 id，跨会话发送才能被接收方看到。 ${tail}`;
+  expect.soft(reason, '前置:拒绝原因是一整段、不含换行').not.toContain('\n');
   await openSender(page, pair);
   await runSend(page, pair, 'd8', {
     id,
     input: { to: addr, recipient: addr, recipient_kind: 'session', summary: 'R151W D8', message: `${pair.m} 被拒正文` },
-    resultText: REFUSAL_P2,
+    resultText: reason,
     isError: true,
   });
   const row = rowById(page, id);
@@ -195,11 +200,17 @@ test('D8 原生被引导拒绝 → 恰好一条「原生发送被拒」行(data-
   expect.soft(status, `状态行应提示改用跨会话工具(实测「${status}」)`).toContain('请改用跨会话工具');
   const bodyEl = row.getByTestId('xs-send-body');
   const f = await styleOf(bodyEl);
-  expect.soft(f.clamp === '2' || f.height <= 4 * f.lineHeight, '被拒原因折叠显示前两行').toBe(true);
-  if (await row.getByTestId('xs-send-toggle').count()) {
-    await row.getByTestId('xs-send-toggle').click();
-    await expect.soft(bodyEl, '展开后是完整拒绝原因').toContainText('这个会话由 CC-GUI 管理');
-  }
+  expect.soft(f.clamp === '2' || f.height <= 2 * f.lineHeight + 2, `被拒原因折叠显示前两行(实测 clamp=${JSON.stringify(f.clamp)},高 ${Math.round(f.height)}px / 行高 ${Math.round(f.lineHeight)}px)`).toBe(true);
+
+  // 判官补强:被拒原因是长单段 → 这一行必须可展开(不能是「有正文却没有 toggle」的死行),原来的条件式断言会漏掉这种。
+  const toggle = row.getByTestId('xs-send-toggle');
+  await expect(toggle, '被拒原因是长单段 → 必须可展开(toggle 存在)').toBeVisible({ timeout: 4_000 });
+  expect.soft(await toggle.evaluate((el) => el.tagName), '被拒行的标题行应是 BUTTON').toBe('BUTTON');
+  await expect.soft(toggle, '折叠态 aria-expanded=false').toHaveAttribute('aria-expanded', 'false');
+  await toggle.click();
+  await expect(toggle, '展开后 aria-expanded=true').toHaveAttribute('aria-expanded', 'true');
+  await expect.soft(bodyEl, '展开后是完整拒绝原因').toContainText('这个会话由 CC-GUI 管理');
+  await expect.soft(bodyEl, '展开后能读到拒绝原因末尾').toContainText(tail);
 });
 
 test('D8b 原生其它失败(非引导拒绝 / 非会话目标)→ 不出现发送行', async ({ page }) => {

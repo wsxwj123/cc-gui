@@ -13,6 +13,36 @@ test.beforeEach(async () => { await api.on(); });
 
 const body10 = (m) => Array.from({ length: 10 }, (_, i) => `${m} 第${i + 1}行`).join('\n');
 
+// 不用 Playwright isVisible(它只看元素自身有没有盒子,不管是否被滚动容器裁掉):
+// 把按钮 rect 与「最近的滚动祖先 ∩ 视口」求交,要求按钮整体落在收件箱可视区内。
+// 这是判官补强的 B2 断言:收件箱展开后正文变长、容器只有 42vh,【处理】不能被推/裁到看不见。
+async function visibleInScroller(loc) {
+  return loc.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    let scroller = el.parentElement;
+    while (scroller && !/auto|scroll/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+    const sr = (scroller || document.documentElement).getBoundingClientRect();
+    const vh = window.innerHeight;
+    const vw = window.innerWidth;
+    const box = {
+      top: Math.max(sr.top, 0),
+      bottom: Math.min(sr.bottom, vh),
+      left: Math.max(sr.left, 0),
+      right: Math.min(sr.right, vw),
+    };
+    const overlapW = Math.max(0, Math.min(r.right, box.right) - Math.max(r.left, box.left));
+    const overlapH = Math.max(0, Math.min(r.bottom, box.bottom) - Math.max(r.top, box.top));
+    const area = Math.max(1, r.width * r.height);
+    return {
+      ratio: (overlapW * overlapH) / area,
+      rect: { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right) },
+      box: { tag: scroller ? scroller.tagName : 'viewport', testid: scroller ? scroller.getAttribute('data-testid') : null, ...Object.fromEntries(Object.entries(box).map(([k, v]) => [k, Math.round(v)])) },
+      scrollTop: scroller ? Math.round(scroller.scrollTop) : null,
+      inViewport: r.top >= -1 && r.bottom <= vh + 1 && r.left >= -1 && r.right <= vw + 1,
+    };
+  });
+}
+
 async function openB(page, pair) {
   await boot(page);
   await openSessionBySearch(page, pair.B.title, pair.B.reply);
@@ -55,6 +85,12 @@ test('B2 展开动作行不移动:动作行相对标题行的位置不变(≤2px
   expect.soft(Math.abs(rel1 - rel0), `展开前后【处理】相对标题行的位移应 ≤2px(实测 ${rel0.toFixed(1)} → ${rel1.toFixed(1)})`).toBeLessThanOrEqual(2);
   expect.soft(await proc.isVisible(), '展开后【处理】仍可见').toBe(true);
   expect.soft(await proc.isEnabled(), '展开后【处理】仍可点').toBe(true);
+
+  // 判官补强:上面的「相对标题行不动」近乎恒真(DOM 顺序固定)。再量一次真实可视性——
+  // 【处理】的 rect 必须整体落在最近滚动容器(收件箱 42vh 内滚)与视口的交集里。
+  const vis = await visibleInScroller(proc);
+  expect.soft(vis.ratio, `展开后【处理】应完整落在收件箱滚动容器可视区内(实测覆盖 ${(vis.ratio * 100).toFixed(1)}%,按钮 rect=${JSON.stringify(vis.rect)},可视区=${JSON.stringify(vis.box)},scrollTop=${vis.scrollTop})`).toBeGreaterThanOrEqual(0.98);
+  expect.soft(vis.inViewport, `展开后【处理】应在视口内(按钮 rect=${JSON.stringify(vis.rect)})`).toBe(true);
 
   // 再收起:动作行相对标题行仍不动,且按钮仍可点
   await toggle.click();

@@ -10,6 +10,12 @@ test.describe.configure({ timeout: 180_000 });
 test.beforeEach(async () => { await api.on(); });
 
 const body10 = (m) => Array.from({ length: 10 }, (_, i) => `${m} 第${i + 1}行 —— 这是一段用来占满折叠预览的正文内容`).join('\n');
+// 无换行的长单段正文:按容器宽度会自动折成 >2 行,但 split('\n') 只有 1 行。
+// 判官缺口:既有夹具都是显式 10 行,长单段会绕过「超过两行才折叠」的判定 → 不折叠、也没有 toggle。
+const longPara = (m, tail = '', repeats = 7) => {
+  const seg = `${m} 这是一段没有换行的长正文，用于验证按容器宽度自动折行后仍然只显示两行预览。`;
+  return Array.from({ length: repeats }, () => seg).join('') + (tail ? ` ${tail}` : '');
+};
 
 async function openTarget(page, pair) {
   await boot(page);
@@ -178,4 +184,66 @@ test('A8 正文按纯文本渲染,不解析 markdown(收件箱与接收行都保
   await expect.soft(rb, '接收行正文保留 markdown 原文').toContainText('**加粗**');
   const rParsed = await rb.evaluate((el) => ['strong', 'h1', 'a', 'code', 'em'].map((t) => el.querySelectorAll(t).length));
   expect.soft(rParsed, `接收行正文不应解析出 markdown 元素(实测 ${JSON.stringify(rParsed)})`).toEqual([0, 0, 0, 0, 0]);
+});
+
+// 判官补充轮(2026-10-29):既有夹具全是显式换行的 10 行正文,「没有换行的长单段」会绕过折叠判定。
+// 真实场景里跨会话消息经常就是一整段话(模型输出里没有 \n),按容器宽度折成 >2 行,用户看到的是整段铺开、没有 toggle。
+// 契约依据:A1/A2/A3 对「正文超过两行」的要求不区分换行与否。
+test('A9 无换行的长单段正文也折叠:两行预览、标题行是 BUTTON、可展开看全文、再收起', async ({ page }) => {
+  const pair = seedPair('a9');
+  const tail = `TAIL-${pair.m.slice(-8)}`;
+  const body = longPara(pair.m, tail);
+  expect.soft(body, '前置:正文是一整段、不含换行').not.toContain('\n');
+  expect.soft(body.length, `前置:正文约 350–450 字(实测 ${body.length} 字),在 1280 宽下应折成 >2 行`).toBeGreaterThanOrEqual(300);
+
+  const msg = await sendInbox(pair.A, pair.B, body);
+  await openTarget(page, pair);
+  const card = cardOf(page, msg.id);
+  await expect(card, '前置:目标会话有 1 张待处理卡片').toBeVisible({ timeout: 15_000 });
+
+  const bodyEl = card.getByTestId('xs-card-body');
+  await expect(bodyEl, '收件箱正文节点应存在').toBeVisible();
+  const folded = await styleOf(bodyEl);
+  // 折叠态的两种等价判据(INTERFACE A2):line-clamp 计算值为 2,或高度 ≤ 2 行高度 + 容差。
+  expect.soft(folded.clamp === '2' || folded.height <= 2 * folded.lineHeight + 2,
+    `长单段折叠态应只显示两行(实测 -webkit-line-clamp=${JSON.stringify(folded.clamp)},正文高 ${Math.round(folded.height)}px / 行高 ${Math.round(folded.lineHeight)}px;`
+    + '无换行的长单段被当成 1 行 → 不折叠,整段铺开)').toBe(true);
+  expect.soft(folded.height, `折叠态正文高度应有上界(≤ 2 行,实测 ${Math.round(folded.height)}px / 行高 ${Math.round(folded.lineHeight)}px)`).toBeLessThanOrEqual(2 * folded.lineHeight + 2);
+  const cardFacts = await styleOf(card);
+  expect.soft(cardFacts.height, `折叠行整体高度应有上界(≤180,实测 ${Math.round(cardFacts.height)}px)`).toBeLessThanOrEqual(180);
+
+  const toggle = card.getByTestId('xs-card-toggle');
+  await expect(toggle, '前置:标题行展开控件存在').toBeVisible({ timeout: 5_000 });
+  expect.soft(await toggle.evaluate((el) => el.tagName), '长单段正文的标题行应是 BUTTON(能点开),不是不可点的 div').toBe('BUTTON');
+  await expect.soft(toggle, '折叠态 aria-expanded=false').toHaveAttribute('aria-expanded', 'false');
+
+  // 展开:正文显著变高、clamp 放开、不裁切,末尾标记真的落在正文节点的可视矩形里
+  await toggle.click();
+  await expect.poll(async () => (await styleOf(bodyEl)).height, { timeout: 5_000, message: '长单段点标题行后正文应变高(当前实现不会展开)' }).toBeGreaterThan(folded.height + 30);
+  const opened = await styleOf(bodyEl);
+  expect.soft(opened.clamp, '展开后 -webkit-line-clamp 应为 none').toBe('none');
+  expect.soft(opened.scrollHeight, `展开后正文不应被裁掉(scrollHeight ${opened.scrollHeight} / clientHeight ${opened.clientHeight})`).toBeLessThanOrEqual(opened.clientHeight + 2);
+  await expect.soft(toggle, '展开后 aria-expanded=true').toHaveAttribute('aria-expanded', 'true');
+  const tailRange = await bodyEl.evaluate((el, t) => {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const i = n.data.indexOf(t);
+      if (i < 0) continue;
+      const range = document.createRange();
+      range.setStart(n, i);
+      range.setEnd(n, i + t.length);
+      const tr = range.getBoundingClientRect();
+      const br = el.getBoundingClientRect();
+      return { top: tr.top, bottom: tr.bottom, within: tr.top >= br.top - 1 && tr.bottom <= br.bottom + 1 };
+    }
+    return null;
+  }, tail);
+  expect.soft(tailRange && tailRange.within, `展开后正文末尾应在正文节点的可视范围内(实测 ${JSON.stringify(tailRange)})`).toBe(true);
+
+  // 再收起:回到两行预览
+  await toggle.click();
+  await expect(toggle, '再点标题行应收起').toHaveAttribute('aria-expanded', 'false');
+  const again = await styleOf(bodyEl);
+  expect.soft(again.clamp === '2' || again.height <= 2 * again.lineHeight + 2,
+    `收起后应回到两行(实测 -webkit-line-clamp=${JSON.stringify(again.clamp)},正文高 ${Math.round(again.height)}px / 行高 ${Math.round(again.lineHeight)}px)`).toBe(true);
 });
