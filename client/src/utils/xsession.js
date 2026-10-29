@@ -1023,10 +1023,8 @@ function guiSendNotice(tc, resultText) {
   const title = targets.length === 1
     ? (name ? `已发送给 ${name}` : '已发送跨会话消息')
     : `已发送给 ${targets.length} 个会话`;
-  // r152w:用户要求折叠行只显示「已发送给 xxx + 展开」—— 服务端 note(如"对方将立即开始处理")
-  // 不再占状态行,单目标时降到展开后的元信息里;状态行只留失败数。
-  const singleNote = targets.length === 1 ? (targets[0].note || '') : '';
-  const status = [fail.length ? `${fail.length} 个失败` : ''].filter(Boolean).join(' · ');
+  const base = targets.length === 1 ? (targets[0].note || '') : `共 ${targets.length} 个会话`;
+  const status = [base, fail.length ? `${fail.length} 个失败` : ''].filter(Boolean).join(' · ');
   const deliveries = new Set(targets.map((t) => t.delivery).filter(Boolean));
   const delivery = targets.length === 1
     ? (targets[0].delivery || 'unknown')
@@ -1034,7 +1032,7 @@ function guiSendNotice(tc, resultText) {
   const metaLines = (targets.length + fail.length) > 1 ? [
     ...targets.map((t) => `${t.name || t.to || '未知会话'} · ${deliveryLabel(t.delivery)}${t.note ? ` · ${t.note}` : ''}`),
     ...fail.map((r) => `${(typeof r.name === 'string' && r.name) || (typeof r.to === 'string' && r.to) || '未知会话'} · 失败：${firstText(r.error, r.message, r.code, '未知错误')}`),
-  ] : (singleNote ? [singleNote] : []);
+  ] : [];
   return {
     toolUseId: tc.id,
     channel: 'gui',

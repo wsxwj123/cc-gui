@@ -4,7 +4,7 @@
 // 点它等于点整行,读屏不会念两遍;不可折叠时标题行退化成 <div>(不留死按钮)。
 // 纯展示:不读 store、不发请求。正文是另一个模型的输出(不可信),一律纯文本 pre-wrap,不解析 markdown。
 // DOM 顺序固定「标题行 → 动作行(有则)→ 正文」:动作贴着标题行,正文再长也推不走【处理】/【忽略】。
-import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import React, { useId, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from './Icon.jsx';
 
 const FOLD_LINES = 2;
@@ -24,7 +24,6 @@ const SEP = 'flex-1 h-px bg-canvas-deep/70 min-w-[10px]';
  * @param {boolean} noFold 不折叠(「放任」档):全文展示、没有展开控件、标题行不是按钮
  * @param {ReactNode} actions 动作行(仅收件箱):原因 + 处理 / 撤回 / 忽略
  * @param {ReactNode} meta 展开后的元信息(仅发送行):每目标一行
- * @param {string} resetKey 状态标识变化时自动收起(收件箱卡片传 message.status)
  */
 export const XsNoticeRow = React.memo(function XsNoticeRow({
   testId,
@@ -48,11 +47,8 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
   innerClassName = '',
   bodyClassName = '',
   animate = false,
-  resetKey = null,
 }) {
   const [expanded, setExpanded] = useState(false);
-  // r152w:状态一变(处理/撤回成功后 pending→claimed→…)就自动收起,不再停在展开态。
-  useEffect(() => { setExpanded(false); }, [resetKey]);
   const [overflow, setOverflow] = useState(false);
   const bodyRef = useRef(null);
   const uid = useId();
@@ -143,10 +139,7 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
           <div data-testid={toggleTestId} className="w-full flex items-center gap-3 py-1.5 text-left">{head}</div>
         )}
         {/* 动作行在正文之前:展开时按钮不随正文长度移动(收件箱区自身还有 42vh 内滚) */}
-        {actions && (
-          <div className="flex items-center gap-2 min-w-0 flex-wrap px-1 pb-1"
-            onClickCapture={() => setExpanded(false)}>{actions}</div>
-        )}
+        {actions && <div className="flex items-center gap-2 min-w-0 flex-wrap px-1 pb-1">{actions}</div>}
         <div ref={bodyRef} id={bodyId} data-testid={bodyTestId}
           className={`mt-1 text-[12.5px] leading-relaxed text-ink font-body whitespace-pre-wrap break-words ${bodyClassName}`}
           style={clamped ? CLAMP_STYLE : undefined}>

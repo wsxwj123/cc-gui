@@ -125,15 +125,12 @@ try {
   eq(g1.channel, 'gui', '通道 gui');
   eq(g1.rejected, false, '不是被拒');
   eq(g1.title, `已发送给 ${B.title}`, '标题「已发送给 <目标名>」');
-  // r152w:折叠行只显示「已发送给 xxx + 展开」;note 降到展开后的元信息,不再占状态行
-  eq(g1.status, '', '单目标成功:状态行不再带服务端 note');
-  eq(g1.metaLines.length, 1, '单目标:note 进展开后的元信息');
-  eq(g1.metaLines[0], '等待你确认后处理', '元信息保留服务端 note');
+  eq(g1.status, '等待你确认后处理', '状态用服务端 note');
   eq(g1.body, '第一行\n第二行', '正文 = 调用参数里的正文');
   eq(g1.delivery, 'card', '单目标 delivery');
   eq(g1.okCount, 1, 'ok-count 1');
   eq(g1.failCount, 0, 'fail-count 0');
-  ok(g1.metaLines[0].includes('等待你确认后处理'), '元信息 = 服务端 note');
+  eq(g1.metaLines.length, 0, '单目标不出元信息(否则短正文也会多出展开控件)');
   console.log('✓ GUI 成功:1 条、channel=gui、标题/状态/正文/delivery 正确');
 
   // ── GUI 通道:一次多目标 = 一行 ──

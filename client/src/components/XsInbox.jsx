@@ -72,7 +72,6 @@ const XsCard = React.memo(function XsCard({ message, noFold = false, onProcess, 
       title={title}
       body={body || '（正文不可用）'}
       noFold={noFold}
-      resetKey={status}
       actions={actions}
       animate
     />
