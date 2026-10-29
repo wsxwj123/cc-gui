@@ -110,7 +110,7 @@ test('E4 375px 窄屏不横向溢出,【处理】【忽略】仍可见可点', a
 
 test('E5 分屏互不影响:左窗格展开,右窗格仍收起,两边高度/滚动互不改变', async ({ page }) => {
   const pair = seedPair('e5');
-  // 卡片必须可折叠:正文 > 2 行时标题行才是带 aria-expanded 的 <button>(1 行正文按契约 A5 不可折叠,没有 toggle)。
+  // 卡片必须可折叠:有正文(哪怕 1 行)就有展开控件;这里用 5 行正文,左右两格各自展开互不影响。
   const body5 = (m) => Array.from({ length: 5 }, (_, i) => `${m} 第${i + 1}行`).join('\n');
   const ma = await sendInbox(pair.A, pair.B, body5(`${pair.m} 给 B 的卡片`));
   const mb = await sendInbox(pair.B, pair.A, body5(`${pair.m} 给 A 的卡片`));

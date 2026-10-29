@@ -62,9 +62,7 @@ export const sendRows = (page) => page.getByTestId('xs-send-notice');
 export const styleOf = (loc) => loc.evaluate((el) => {
   const s = getComputedStyle(el);
   const r = el.getBoundingClientRect();
-  const lh = parseFloat(s.lineHeight);
   return {
-    clamp: s.webkitLineClamp || s.getPropertyValue('-webkit-line-clamp') || '',
     height: r.height,
     width: r.width,
     top: r.top,
@@ -76,7 +74,6 @@ export const styleOf = (loc) => loc.evaluate((el) => {
     overflowY: s.overflowY,
     boxShadow: s.boxShadow,
     fontSize: parseFloat(s.fontSize),
-    lineHeight: Number.isFinite(lh) ? lh : parseFloat(s.fontSize) * 1.5,
     outlineStyle: s.outlineStyle,
     outlineWidth: s.outlineWidth,
     disabled: Boolean(el.disabled),
@@ -88,6 +85,66 @@ export const styleOf = (loc) => loc.evaluate((el) => {
 
 export const pageHeight = (page) => page.evaluate(() => window.innerHeight);
 export const pageWidth = (page) => page.evaluate(() => window.innerWidth);
+
+// ---------------- 折叠态「正文不显示」的统一口径(INTERFACE 第 9 节) ----------------
+// 用户 2026-10-29 21:20 修订:折叠态只显示标题行 + 状态 + 「展开全文」,正文不显示;
+// 有正文(哪怕 1 行)就有展开入口;展开才显示完整正文。三处(收件箱 / 接收 / 发送)统一。
+// 口径(全套件只用这一条,不再有「两行预览 / line-clamp / 高度 ≤ 2 行」):
+//   正文节点**不在 DOM**,或存在但**可见高度为 0**(display:none / 高度 0 / visibility:hidden)。
+// 这样既允许实现「折叠时干脆不渲染」,也允许「渲染但收起」,两种实现同一条断言都能过。
+export const BODY = { inbox: 'xs-card-body', receive: 'peer-message-body', send: 'xs-send-body' };
+export const EXPAND_TESTID = { inbox: 'xs-card-expand', receive: 'peer-message-expand', send: 'xs-send-expand' };
+
+/** 读一行里正文节点的可观察事实(不在 DOM 也返回结构化结果,不抛错)。 */
+export const bodyFacts = (row, bodyTestId) => row.evaluate((el, tid) => {
+  const n = el.querySelector(`[data-testid="${tid}"]`);
+  if (!n) return { inDom: false, shown: false, height: 0, width: 0, display: null, visibility: null, text: '', scrollHeight: 0, clientHeight: 0 };
+  const s = getComputedStyle(n);
+  const r = n.getBoundingClientRect();
+  return {
+    inDom: true,
+    shown: r.height >= 1 && s.display !== 'none' && s.visibility !== 'hidden',
+    height: r.height,
+    width: r.width,
+    display: s.display,
+    visibility: s.visibility,
+    text: n.textContent || '',
+    scrollHeight: n.scrollHeight,
+    clientHeight: n.clientHeight,
+  };
+}, bodyTestId);
+
+const brief = (f) => `{ 在DOM: ${f.inDom}, 可见高: ${Math.round(f.height)}px, display: ${f.display}, visibility: ${f.visibility} }`;
+
+/** soft 断言:折叠态正文不显示(统一口径);返回可观察事实供后续断言复用。 */
+export async function expectFolded(row, bodyTestId, what = '正文') {
+  const f = await bodyFacts(row, bodyTestId);
+  expect.soft(f.shown, `${what}在折叠态不应显示(统一口径:节点不在 DOM 或可见高度为 0;实测 ${brief(f)})`).toBe(false);
+  return f;
+}
+
+/** 硬等:正文显示出来(展开后的状态切换),返回正文 locator。 */
+export async function waitBodyShown(row, bodyTestId, what = '正文') {
+  await expect.poll(async () => (await bodyFacts(row, bodyTestId)).shown,
+    { timeout: 5_000, message: `${what}应在展开后出现(可见)` }).toBe(true);
+  return row.getByTestId(bodyTestId);
+}
+
+/** 硬等:正文不再显示(收起后的状态切换)。 */
+export async function waitBodyHidden(row, bodyTestId, what = '正文') {
+  await expect.poll(async () => (await bodyFacts(row, bodyTestId)).shown,
+    { timeout: 5_000, message: `${what}应在收起后消失(节点不在 DOM 或可见高度 0)` }).toBe(false);
+}
+
+/** soft 断言:折叠态「有正文就有展开入口」,提示文案是「展开全文」;返回提示节点。 */
+export async function expectExpandEntry(row, expandTestId, what = '正文') {
+  const el = row.getByTestId(expandTestId);
+  const n = await el.count();
+  expect.soft(n, `有${what}就应有展开入口 [data-testid="${expandTestId}"](哪怕只有 1 行)`).toBeGreaterThan(0);
+  if (n === 0) return el;
+  await expect.soft(el.first(), `展开提示文案应是「${EXPAND}」`).toHaveText(EXPAND);
+  return el;
+}
 
 /**
  * 在页面上发一条消息,让假 CLI 照 steps 演(消息里带 R151S:<脚本名>)。

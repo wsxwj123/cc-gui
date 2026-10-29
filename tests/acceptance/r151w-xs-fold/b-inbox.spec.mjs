@@ -5,7 +5,7 @@ import { test, expect } from '@playwright/test';
 import {
   api, boot, openSessionBySearch, seedPair, sendInbox, cardOf, inbox, styleOf, waitStatus,
   writeScript, touchCtl, uniq, turnRecords, waitFor, recordRequests, sendPrompt, ALL,
-  shared, realCliPath, profileTurn, inboundOk, aiCalls, makeWorkspace, SM, msgsOf,
+  shared, realCliPath, profileTurn, inboundOk, aiCalls, makeWorkspace, SM, msgsOf, bodyFacts,
 } from './helpers/w.mjs';
 
 test.describe.configure({ timeout: 180_000 });
@@ -198,7 +198,7 @@ test('B4 折叠态点【处理】仍走原链路:一次带 xsMessageId 的 POST 
   await expect(card, '卡片随后消失').toHaveCount(0, { timeout: 20_000 });
 });
 
-test('B5 「放任」档正文不折叠:全文展示、line-clamp 为 none、没有展开控件', async ({ page }) => {
+test('B5 「放任」档正文不折叠:全文展示、有可见正文、没有展开控件', async ({ page }) => {
   const pair = seedPair('b5');
   await boot(page);
   await openSessionBySearch(page, pair.B.title, pair.B.reply);
@@ -214,10 +214,13 @@ test('B5 「放任」档正文不折叠:全文展示、line-clamp 为 none、没
   const msg = await sendInbox(pair.A, pair.B, body10(pair.m));
   const card = cardOf(page, msg.id);
   await expect(card).toBeVisible({ timeout: 15_000 });
+  // 放任档(noFold)不受第 9 节影响:正文整段可见、没有展开控件
   const bodyEl = card.getByTestId('xs-card-body');
-  const f = await styleOf(bodyEl);
-  expect.soft(f.clamp, `放任档正文不应折叠(-webkit-line-clamp=${JSON.stringify(f.clamp)})`).toBe('none');
+  const f = await bodyFacts(card, 'xs-card-body');
+  expect.soft(f.shown, `放任档正文应可见(实测可见高 ${Math.round(f.height)}px)`).toBe(true);
+  expect.soft(f.scrollHeight, `放任档正文不应被裁(scrollHeight ${f.scrollHeight} / clientHeight ${f.clientHeight})`).toBeLessThanOrEqual(f.clientHeight + 2);
   expect.soft(await card.getByTestId('xs-card-expand').count(), '放任档没有展开控件').toBe(0);
+  expect.soft(await card.getByTestId('xs-card-toggle').evaluate((el) => el.tagName), '放任档标题行不是可点的 BUTTON').not.toBe('BUTTON');
   await expect.soft(bodyEl, '放任档正文整段可见').toContainText(`${pair.m} 第10行`);
 });
 

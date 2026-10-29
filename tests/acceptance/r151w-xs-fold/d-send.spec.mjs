@@ -6,6 +6,7 @@ import {
   api, boot, openSessionBySearch, seedPair, sendInbox, cardOf, styleOf, sendRows, uniq, seedSession,
   liveTurn, waitTurnDone, guiResult, guiSendSteps, TOOL_GUI, TOOL_NATIVE, REFUSAL_P2,
   seedSendHistory, toggleChatMode, waitStatus, msgsOf,
+  writeScript, touchCtl, sendPrompt, bodyFacts, expectFolded, expectExpandEntry, waitBodyShown, waitBodyHidden,
 } from './helpers/w.mjs';
 
 test.describe.configure({ timeout: 240_000 });
@@ -27,7 +28,7 @@ async function runSend(page, pair, tag, { id, input, resultText, isError = false
   return say;
 }
 
-test('D1 GUI 通道成功:发送方出现恰好 1 条折叠行,属性/标题/两行预览正确,且在该轮内', async ({ page }) => {
+test('D1 GUI 通道成功:发送方出现恰好 1 条折叠行,属性/标题正确、折叠态只有标题+状态+展开、且在该轮内', async ({ page }) => {
   const pair = seedPair('d1');
   const id = `toolu_${uniq('d1').toLowerCase()}`;
   const body = body5(pair.m);
@@ -44,14 +45,15 @@ test('D1 GUI 通道成功:发送方出现恰好 1 条折叠行,属性/标题/两
   const title = row.getByTestId('xs-send-title');
   await expect.soft(title, '标题以「已发送给 」开头').toContainText('已发送给 ');
   await expect.soft(title, '标题含目标会话名').toContainText(pair.B.title);
-  const bodyEl = row.getByTestId('xs-send-body');
-  const f = await styleOf(bodyEl);
-  expect.soft(f.clamp === '2' || f.height <= 4 * f.lineHeight, `发送行折叠显示正文前两行(clamp=${JSON.stringify(f.clamp)}, h=${Math.round(f.height)})`).toBe(true);
+  // 第 9 节:折叠态只有标题行 + 状态 + 展开全文,正文不显示;有正文就有展开入口
+  await expect.soft(row.getByTestId('xs-send-status'), '折叠态状态行可见').toBeVisible();
+  await expectFolded(row, 'xs-send-body', '发送行正文');
+  await expectExpandEntry(row, 'xs-send-expand', '发送行正文');
   const inTurn = await page.locator('[data-turn-uuid]').filter({ has: row }).filter({ hasText: say }).count();
   expect.soft(inTurn, '发送行应在该轮 [data-turn-uuid] 内').toBeGreaterThan(0);
 });
 
-test('D2 点发送行标题行展开可看原文(5 行),再点收起,aria-expanded 跟着变', async ({ page }) => {
+test('D2 点发送行标题行展开可看原文(5 行),再点收起正文消失,aria-expanded 跟着变', async ({ page }) => {
   const pair = seedPair('d2');
   const id = `toolu_${uniq('d2').toLowerCase()}`;
   const body = body5(pair.m);
@@ -61,12 +63,14 @@ test('D2 点发送行标题行展开可看原文(5 行),再点收起,aria-expand
   await expect(row).toHaveCount(1, { timeout: 10_000 });
   const toggle = row.getByTestId('xs-send-toggle');
   await expect(toggle, '前置:发送行标题行展开控件存在').toBeVisible({ timeout: 5_000 });
-  const bodyEl = row.getByTestId('xs-send-body');
+  await expectFolded(row, 'xs-send-body', '发送行正文');
   await expect.soft(toggle).toHaveAttribute('aria-expanded', 'false');
   await toggle.click();
+  const bodyEl = await waitBodyShown(row, 'xs-send-body', '展开后的发送行正文');
   await expect.soft(bodyEl, '展开后 5 行正文全部可见').toContainText(`${pair.m} 第5行`);
   await expect.soft(toggle).toHaveAttribute('aria-expanded', 'true');
   await toggle.click();
+  await waitBodyHidden(row, 'xs-send-body', '收起后的发送行正文');
   await expect.soft(toggle).toHaveAttribute('aria-expanded', 'false');
 });
 
@@ -175,8 +179,8 @@ test('D8 原生被引导拒绝 → 恰好一条「原生发送被拒」行(data-
   const pair = seedPair('d8');
   const id = `toolu_${uniq('d8').toLowerCase()}`;
   const addr = 'uds:/tmp/r151w-d8.sock';
-  // 判官补强:拒绝原因在真链路上是一整段(没有换行)的说明文字。补足长度、用长单段夹具,
-  // 让「按容器宽度折行后超过两行」不依赖视口宽度(只有 1–2 行时,修好折叠判定也不该折叠,用例会随窗口宽度飘)。
+  // 判官补强:拒绝原因在真链路上是一整段(没有换行)的说明文字。用长单段夹具,
+  // 证明「有正文(哪怕只有一段、没有换行)就有展开入口、展开后是完整原因」。
   const tail = `TAIL-${pair.m.slice(-8)}`;
   const reason = `${REFUSAL_P2} 补充说明：这个会话由 CC-GUI 接管，原生 SendMessage 不会把消息投递给它，也不会出现在对方的收件箱里；请改用 mcp__ccgui-sessions__send_message，并在 to 里填写目标会话 id，跨会话发送才能被接收方看到。 ${tail}`;
   expect.soft(reason, '前置:拒绝原因是一整段、不含换行').not.toContain('\n');
@@ -198,9 +202,9 @@ test('D8 原生被引导拒绝 → 恰好一条「原生发送被拒」行(data-
   expect.soft(await title.innerText(), '被拒行不能写「已发送」').not.toContain('已发送');
   const status = await row.getByTestId('xs-send-status').innerText();
   expect.soft(status, `状态行应提示改用跨会话工具(实测「${status}」)`).toContain('请改用跨会话工具');
-  const bodyEl = row.getByTestId('xs-send-body');
-  const f = await styleOf(bodyEl);
-  expect.soft(f.clamp === '2' || f.height <= 2 * f.lineHeight + 2, `被拒原因折叠显示前两行(实测 clamp=${JSON.stringify(f.clamp)},高 ${Math.round(f.height)}px / 行高 ${Math.round(f.lineHeight)}px)`).toBe(true);
+  // 第 9 节:折叠态不显示正文;有正文(这条是长单段拒绝原因)就有展开入口
+  await expectFolded(row, 'xs-send-body', '被拒行正文');
+  const expand = await expectExpandEntry(row, 'xs-send-expand', '被拒行正文');
 
   // 判官补强:被拒原因是长单段 → 这一行必须可展开(不能是「有正文却没有 toggle」的死行),原来的条件式断言会漏掉这种。
   const toggle = row.getByTestId('xs-send-toggle');
@@ -209,6 +213,8 @@ test('D8 原生被引导拒绝 → 恰好一条「原生发送被拒」行(data-
   await expect.soft(toggle, '折叠态 aria-expanded=false').toHaveAttribute('aria-expanded', 'false');
   await toggle.click();
   await expect(toggle, '展开后 aria-expanded=true').toHaveAttribute('aria-expanded', 'true');
+  const bodyEl = await waitBodyShown(row, 'xs-send-body', '展开后的被拒原因');
+  await expect.soft(expand, '展开后提示变成「收起」').toHaveText('收起');
   await expect.soft(bodyEl, '展开后是完整拒绝原因').toContainText('这个会话由 CC-GUI 管理');
   await expect.soft(bodyEl, '展开后能读到拒绝原因末尾').toContainText(tail);
 });
@@ -276,7 +282,11 @@ test('D10 纯历史刷新后仍显示:预置 tool_use + tool_result 的 jsonl,�
   const row = rowById(page, id);
   await expect(row, '纯历史里的发送行应显示').toHaveCount(1, { timeout: 15_000 });
   await expect.soft(row.getByTestId('xs-send-title')).toContainText(pair.B.title);
-  const bodyEl = row.getByTestId('xs-send-body');
+  // 第 9 节:折叠态不显示正文 → 先展开再核对落盘的历史正文
+  await expectFolded(row, 'xs-send-body', '历史发送行正文');
+  await expectExpandEntry(row, 'xs-send-expand', '历史发送行正文');
+  await row.getByTestId('xs-send-toggle').click();
+  const bodyEl = await waitBodyShown(row, 'xs-send-body', '展开后的历史发送行正文');
   await expect.soft(bodyEl).toContainText(`${pair.m} D10 历史正文`);
 
   await page.reload({ waitUntil: 'domcontentloaded' });
@@ -343,4 +353,61 @@ test('D14 聊天模式开 / 关各跑一轮,发送行都直接可见(不需要�
   await runSend(page, pair, 'd14b', { id: id2, input: { to: [pair.B.sid], message: `${pair.m} 普通模式正文` }, resultText: guiResult({ targets: [pair.B] }) });
   await expect(rowById(page, id2), '关掉聊天模式后发送行仍直接可见').toBeVisible({ timeout: 10_000 });
   expect.soft(await sendRows(page).count(), '两种模式各一条').toBe(2);
+});
+
+// 用户 2026-10-29 21:20 修订带出的边界:发送提示是**已经发生的发送结果**,不是流式内容 ——
+// 它不应该像助手回复那样一段段追加;tool_result 到达后这条提示就是最终形态,
+// 后续流式输出(同一回合继续说话)不能改变它的标题 / 状态 / 正文。
+// 夹具:假 CLI 在 tool_result 之后用 waitFile 把回合挂住(仍处于流式),再放行让它继续说完。
+test('D15 发送提示是静态结果:tool_result 到达后,后续流式输出不改变这一行', async ({ page }) => {
+  const pair = seedPair('d15');
+  const id = `toolu_${uniq('d15').toLowerCase()}`;
+  const say = `${pair.m} d15 收尾`;
+  const script = `d15-hold-${uniq('')}`;
+  const go = `d15-go-${uniq('')}`;
+  const body = Array.from({ length: 6 }, (_, i) => `${pair.m} 第${i + 1}行`).join('\n');
+  writeScript(script, [
+    { toolUse: { id, name: TOOL_GUI, input: { to: [pair.B.sid], message: body } } },
+    { toolResult: { tool_use_id: id, content: [{ type: 'text', text: guiResult({ targets: [pair.B] }) }], is_error: false } },
+    { waitFile: go },
+    { say },
+  ]);
+  await openSender(page, pair);
+  await sendPrompt(page, `${pair.m} d15 R151S:${script}`);
+
+  const row = rowById(page, id);
+  await expect(row, '发送提示应在 tool_result 到达后出现(不必等回合结束)').toHaveCount(1, { timeout: 20_000 });
+  // 前置:回合被 waitFile 挂住 = 仍在流式;收尾那句话还没出现
+  await expect.poll(async () => page.getByText(say).count(), { timeout: 5_000, message: '前置:收尾文字还没出现(回合仍在流里)' }).toBe(0);
+
+  // 折叠态:这一行也只有标题 + 状态 + 展开全文
+  await expectFolded(row, 'xs-send-body', '发送行正文');
+  await expectExpandEntry(row, 'xs-send-expand', '发送行正文');
+
+  /** 读这一行的完整快照;若期间被重渲染收起正文,先自行展开再读(只影响读数)。 */
+  const snapshot = async (label) => {
+    if (!(await bodyFacts(row, 'xs-send-body')).shown) await row.getByTestId('xs-send-toggle').click();
+    const bodyEl = await waitBodyShown(row, 'xs-send-body', `${label}的正文`);
+    return {
+      text: (await row.innerText()).replace(/\s+/g, ' ').trim(),
+      title: (await row.getByTestId('xs-send-title').innerText()).trim(),
+      status: (await row.getByTestId('xs-send-status').innerText()).replace(/\s+/g, ' ').trim(),
+      attrs: [await row.getAttribute('data-channel'), await row.getAttribute('data-ok-count'), await row.getAttribute('data-fail-count'), await row.getAttribute('data-delivery')],
+      body: (await bodyEl.innerText()).replace(/\s+/g, ' ').trim(),
+    };
+  };
+
+  const during = await snapshot('流式中');
+  expect.soft(during.body, 'tool_result 到达时正文就是完整正文,不是半截(流式追加会在这里露馅)')
+    .toBe(body.replace(/\s+/g, ' ').trim());
+
+  // 放行:同一回合继续说一句(流式输出继续),发送提示不应有任何变化
+  touchCtl(go);
+  await expect(page.getByText(say).first(), '前置:回合收尾文字出现').toBeVisible({ timeout: 30_000 });
+  const afterSay = await snapshot('收尾文字出现后');
+  expect.soft(afterSay, `收尾文字出现后发送提示不应变化(流式中 ${JSON.stringify(during)} / 之后 ${JSON.stringify(afterSay)})`).toEqual(during);
+
+  await waitTurnDone(page);
+  const ended = await snapshot('回合结束后');
+  expect.soft(ended, `回合结束后发送提示也不应变化(流式中 ${JSON.stringify(during)} / 结束 ${JSON.stringify(ended)})`).toEqual(during);
 });
