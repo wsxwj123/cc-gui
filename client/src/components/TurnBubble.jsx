@@ -2,8 +2,10 @@ import React, { useState, useRef, useEffect, useContext, useMemo } from 'react';
 import {
   Brain, Copy, Check, ChevronDown, ChevronRight,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
-  Globe, Edit3, Loader2, RotateCcw, Bot, GitBranch
+  Globe, Edit3, Loader2, RotateCcw, Bot, GitBranch, Send, ShieldAlert
 } from './Icon.jsx';
+import { XsNoticeRow } from './XsNoticeRow.jsx';
+import { useXsStore, xsSendNotices, rememberXsSendReceipts } from '../utils/xsession.js';
 import { ModelBadge, ProviderAvatar, AssistantName } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { cacheHitPct, formatHitPct } from '../utils/cacheStats.js';
@@ -880,7 +882,7 @@ function UsageDisplay({ message }) {
 // making the whole UI (provider & model menus included) feel laggy. `turn` comes
 // from the persisted `messages` array which is referentially stable while a NEW
 // turn streams into separate state, so memo lets the old turns skip re-render.
-function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
+function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hiddenSendNotices = null }) {
   const [showThinking, setShowThinking] = useState(false);
   const chatMode = useStore((s) => s.chatMode);
   const [chatExpanded, setChatExpanded] = useState(false);
@@ -982,6 +984,16 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
     [turn.subUsage, provider],
   );
   const subagentCostHistory = !/^(streaming|chat-)/.test(turn.uuid || '');
+  // r151w 发送提示:从本回合的工具调用派生(GUI / 原生两条通道 + 原生被引导拒绝)。
+  // receipts:已经观察到的回执(CLI 记录里没写出 tool_result 时补上,回合从直播副本换成历史副本后不消失)。
+  // hiddenSendNotices:更早的一轮画过同一个 tool_use_id → 这一轮不再画(同一条只出现一次)。
+  const sendReceipts = useXsStore((s) => s.sendReceipts);
+  const sendNotices = useMemo(
+    () => xsSendNotices(turn, { receipts: sendReceipts, hidden: hiddenSendNotices }),
+    [turn, sendReceipts, hiddenSendNotices],
+  );
+  // 观察到的回执记进 store(只存成功 / 原生被拒);内容没变时内部不写,不会自激。
+  useEffect(() => { rememberXsSendReceipts(sendNotices); }, [sendNotices]);
   // provider 引用变化(切 provider)会重算索引,故把 context 值也钉成稳定身份:
   // 上下文一变,树内所有卡片(含 React.memo 的 WorkflowCard)都会跟着重渲,
   // 流式期间每来一个 token 重渲一遍整批卡片正是历史上卡顿的老路。
@@ -1169,6 +1181,41 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive }) {
           )}
         </div>
       </div>
+      {/* r151w 发送提示:本回合里的跨会话发送(以及原生被引导拒绝)。挂在内容列之后、工具折叠之外 ——
+          聊天模式把过程折成「执行了 N 步操作」、条带默认收起,都不能把这条吞掉。同一 tool_use_id 只画一次
+          (派生自回合自己的工具调用,直播 / 落盘副本 / 历史三态共用同一个回合对象)。 */}
+      {sendNotices.length > 0 && (
+        <div className="max-w-[var(--content-max)] mx-auto space-y-1 mt-1">          {sendNotices.map((n) => (
+            <XsNoticeRow
+              key={n.toolUseId}
+              testId="xs-send-notice"
+              rootProps={{
+                'data-channel': n.channel,
+                'data-tool-use-id': n.toolUseId,
+                'data-rejected': n.rejected ? '1' : undefined,
+                'data-ok-count': String(n.okCount),
+                'data-fail-count': String(n.failCount),
+                'data-delivery': n.delivery,
+              }}
+              direction="out"
+              idSeed={n.toolUseId}
+              toggleTestId="xs-send-toggle"
+              bodyTestId="xs-send-body"
+              expandTestId="xs-send-expand"
+              metaTestId="xs-send-meta"
+              titleTestId="xs-send-title"
+              statusTestId="xs-send-status"
+              icon={n.rejected
+                ? <ShieldAlert size={12} className="shrink-0 text-amber-600" />
+                : <Send size={12} className="shrink-0 text-accent" />}
+              title={n.title}
+              status={n.status}
+              body={n.body}
+              meta={n.metaLines.length ? n.metaLines.map((line, i) => <div key={i}>{line}</div>) : null}
+            />
+          ))}
+        </div>
+      )}
     </div>
     </SubagentCostContext.Provider>
     </TaskOwnerContext.Provider>

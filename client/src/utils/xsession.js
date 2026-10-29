@@ -56,6 +56,10 @@ export const useXsStore = create(() => ({
   autoLimit: 20,
   inboundBySession: EMPTY_MAP, // { [sessionId]: 'card' | 'auto' }(取到过的才有)
   inboundError: EMPTY_MAP, // { [sessionId]: 提示文案 }
+  // r151w 发送回执:tool_use_id → 派生出来的发送行。CLI 的会话记录里不一定写出 tool_result(被中断、
+  // 或 provider/垫片只发流事件),回合从直播副本换成历史副本后那条回执就没了 —— 这里按 tool_use_id 记住
+  // 已经观察到的回执,历史副本缺结果时补上。只存"成功的发送 / 原生被拒",失败本来就不出回执。
+  sendReceipts: EMPTY_MAP,
 }));
 
 // ── 接口调用(不抛错;网络失败 status 为 0) ─────────────────────────────────────
@@ -756,7 +760,10 @@ export function peerVia(m) {
 export function peerFromLabel(m) {
   const name = m && typeof m.fromName === 'string' && m.fromName.trim() ? m.fromName : '';
   if (!name) return '来自另一个会话';
-  return m.from === 'gui:user' ? name : `来自 ${name}`; // 手动转发的来源名本身就是"用户转发自 <标题>"
+  // 手动转发的来源名本身就是"用户转发自 <标题>":再套一层"来自"会变成"来自 用户转发自 …"。
+  // r151w:历史条目里 from 是 gui:<会话id>(不是 gui:user)时也会带这种名字,一并认。
+  if (name.startsWith('用户转发自')) return name;
+  return m.from === 'gui:user' ? name : `来自 ${name}`;
 }
 export function peerFromSession(m) {
   if (m && isXsId(m.fromSessionId)) return m.fromSessionId;
@@ -929,6 +936,263 @@ export function placeAnchoredPeers(list, chat) {
     out.push(m);
   }
   return placed.size ? { list: out, placed } : { list, placed: EMPTY_SET };
+}
+
+// ── 发送行(r151w:从本回合自己的工具调用派生,不改服务端) ────────────────────────────
+// 两条通道:①GUI `mcp__ccgui-sessions__send_message`(结果 JSON { results:[{ to, ok, name, delivery, note }] });
+// ②CLI 原生 `SendMessage`(只认会话目标;结果 JSON { success:true })。另外把「原生被引导拒绝」单独成一类
+// (用户 2026-10-29 决定):isError 且正文含 NATIVE_GUARD_REASON 的稳定片段 —— 让用户一眼看出没发出去。
+// 派生只在回合对象上做(回合是直播 / 落盘副本 / 历史三态的唯一真相源),一条 tool_use_id 天然只画一次。
+export const XS_SEND_TOOL_GUI = 'mcp__ccgui-sessions__send_message';
+export const XS_SEND_TOOL_NATIVE = 'SendMessage';
+export const XS_SEND_BODY_MISSING = '（正文未记录）';
+export const XS_SEND_REJECT_TITLE = '原生发送被拒';
+export const XS_SEND_REJECT_STATUS = '请改用跨会话工具';
+// 引导拒绝的稳定特征串(NATIVE_GUARD_REASON 是服务端常量,这里只锁两段不会随措辞微调而消失的片段)
+export const XS_SEND_GUARD_MARKS = ['这个会话由 CC-GUI 管理', 'mcp__ccgui-sessions__send_message'];
+
+const firstText = (...vals) => {
+  for (const v of vals) if (typeof v === 'string' && v.trim()) return v;
+  return '';
+};
+const DELIVERY_LABEL = { card: '等你确认', queued: '排队', auto: '自动处理' };
+const deliveryLabel = (d) => DELIVERY_LABEL[d] || String(d || '未知');
+
+/** tool_result 的正文(历史里是 normalized 字符串,流里可能还是 [{type:'text',text}] 数组)。 */
+export function xsToolResultText(result) {
+  if (!result || typeof result !== 'object') return '';
+  const content = result.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((b) => (b && typeof b === 'object' && typeof b.text === 'string' ? b.text : (typeof b === 'string' ? b : '')))
+      .filter(Boolean).join('\n');
+  }
+  if (content && typeof content === 'object' && typeof content.text === 'string') return content.text;
+  return content == null ? '' : String(content);
+}
+
+// JSON 宽松解析:CLI 有时在 JSON 前后包一层文字,截第一个 { 到最后一个 } 再试
+function parseLooseJson(text) {
+  const s = String(text || '').trim();
+  if (!s) return null;
+  try { return JSON.parse(s); } catch { /* 下面按括号截取再试 */ }
+  const a = s.indexOf('{');
+  const b = s.lastIndexOf('}');
+  if (a >= 0 && b > a) { try { return JSON.parse(s.slice(a, b + 1)); } catch { /* 放弃 */ } }
+  return null;
+}
+
+// 本回合里的工具调用:优先 blocks(有序),没有的旧历史补 toolCalls;两处按同一个 id 去重
+// (同一个 id 出现两次时,后出现的带结果、先出现的没结果 → 用带结果的那份,别漏画)
+function turnToolCalls(turn) {
+  const out = [];
+  const at = new Map();
+  const push = (tc) => {
+    if (!tc || typeof tc !== 'object') return;
+    const id = typeof tc.id === 'string' ? tc.id : '';
+    if (!id) return;
+    if (at.has(id)) {
+      const i = at.get(id);
+      if (!(out[i].result && typeof out[i].result === 'object') && tc.result) out[i] = tc;
+      return;
+    }
+    at.set(id, out.length);
+    out.push(tc);
+  };
+  const blocks = turn && Array.isArray(turn.blocks) ? turn.blocks : [];
+  for (const b of blocks) if (b && b.type === 'tool_use' && b.toolCall) push(b.toolCall);
+  const calls = turn && Array.isArray(turn.toolCalls) ? turn.toolCalls : [];
+  for (const tc of calls) push(tc);
+  return out;
+}
+
+function guiSendNotice(tc, resultText) {
+  const parsed = parseLooseJson(resultText);
+  const all = parsed && Array.isArray(parsed.results) ? parsed.results.filter((r) => r && typeof r === 'object') : [];
+  const ok = all.filter((r) => r.ok === true);
+  if (!ok.length) return null; // 一项都没成功 → 不画(错误留在工具卡)
+  const fail = all.filter((r) => r.ok === false);
+  const targets = ok.map((r) => ({
+    name: typeof r.name === 'string' ? r.name : '',
+    to: typeof r.to === 'string' ? r.to : '',
+    ok: true,
+    delivery: typeof r.delivery === 'string' ? r.delivery : '',
+    note: typeof r.note === 'string' ? r.note : '',
+  }));
+  const name = targets.length === 1 ? targets[0].name : '';
+  const title = targets.length === 1
+    ? (name ? `已发送给 ${name}` : '已发送跨会话消息')
+    : `已发送给 ${targets.length} 个会话`;
+  const base = targets.length === 1 ? (targets[0].note || '') : `共 ${targets.length} 个会话`;
+  const status = [base, fail.length ? `${fail.length} 个失败` : ''].filter(Boolean).join(' · ');
+  const deliveries = new Set(targets.map((t) => t.delivery).filter(Boolean));
+  const delivery = targets.length === 1
+    ? (targets[0].delivery || 'unknown')
+    : (deliveries.size === 1 ? [...deliveries][0] : 'mixed');
+  const metaLines = (targets.length + fail.length) > 1 ? [
+    ...targets.map((t) => `${t.name || t.to || '未知会话'} · ${deliveryLabel(t.delivery)}${t.note ? ` · ${t.note}` : ''}`),
+    ...fail.map((r) => `${(typeof r.name === 'string' && r.name) || (typeof r.to === 'string' && r.to) || '未知会话'} · 失败：${firstText(r.error, r.message, r.code, '未知错误')}`),
+  ] : [];
+  return {
+    toolUseId: tc.id,
+    channel: 'gui',
+    rejected: false,
+    title,
+    status,
+    body: firstText(tc.input && tc.input.message) || XS_SEND_BODY_MISSING,
+    delivery,
+    okCount: targets.length,
+    failCount: fail.length,
+    targets,
+    metaLines,
+  };
+}
+
+function nativeTargetOf(input) {
+  return firstText(input && input.recipient, input && input.to);
+}
+
+function isSessionTarget(input) {
+  if (!input || typeof input !== 'object') return false;
+  if (input.recipient_kind === 'session') return true;
+  return /^uds:/i.test(nativeTargetOf(input));
+}
+
+function nativeSendNotice(tc, resultText) {
+  if (!isSessionTarget(tc.input)) return null; // 发给子代理 / 队友(name / agent)不算跨会话
+  const input = tc.input || {};
+  const parsed = parseLooseJson(resultText);
+  const ok = parsed ? parsed.success === true : /"success"\s*:\s*true/.test(resultText);
+  if (!ok) return null;
+  const addr = nativeTargetOf(input);
+  const summary = firstText(input.summary);
+  const status = [`发给 ${addr || '（目标未记录）'}`, summary ? `主题：${summary}` : ''].filter(Boolean).join(' · ');
+  return {
+    toolUseId: tc.id,
+    channel: 'native',
+    rejected: false,
+    title: '已发送跨会话消息',
+    status,
+    body: firstText(input.message, input.prompt, input.content) || XS_SEND_BODY_MISSING,
+    delivery: 'native',
+    okCount: 1,
+    failCount: 0,
+    targets: [{ name: '', to: addr, ok: true, delivery: 'native', note: summary }],
+    metaLines: [],
+  };
+}
+
+function nativeRejectNotice(tc, resultText) {
+  if (!resultText || !XS_SEND_GUARD_MARKS.some((m) => resultText.includes(m))) return null;
+  return {
+    toolUseId: tc.id,
+    channel: 'native',
+    rejected: true,
+    title: XS_SEND_REJECT_TITLE,
+    status: XS_SEND_REJECT_STATUS,
+    body: resultText,
+    delivery: 'native',
+    okCount: 0,
+    failCount: 0,
+    targets: [],
+    metaLines: [],
+  };
+}
+
+/** 本回合里所有"发送类"工具调用的 tool_use_id(按出现顺序、已按 _retryTrimToolId 截断)。供跨回合去重。 */
+export function xsSendToolIds(turn) {
+  if (!turn || typeof turn !== 'object') return EMPTY_LIST;
+  let calls = turnToolCalls(turn);
+  const trimId = turn._retryTrimToolId;
+  if (trimId) {
+    const cut = calls.findIndex((tc) => tc.id === trimId);
+    if (cut >= 0) calls = calls.slice(0, cut);
+  }
+  const ids = calls.filter((tc) => tc.name === XS_SEND_TOOL_GUI || tc.name === XS_SEND_TOOL_NATIVE).map((tc) => tc.id);
+  return ids.length ? ids : EMPTY_LIST;
+}
+
+/**
+ * 回合 → 发送行(纯函数:不读 store,回执缓存由调用方作为 receipts 显式传入)。顺序 = 工具出现顺序;
+ * 同一 tool_use_id 只出一条。被「重做此工具」截断(_retryTrimToolId)的工具及其之后一律不画。
+ * hidden:跨回合去重 —— 这个 tool_use_id 已经被更早的一轮画过(同一 id 出现在两条回合里,如历史夹具 + 直播副本)。
+ * receipts:tool_use_id → 已观察到的回执。会话记录里没写出 tool_result 时用它补(否则刷新/换历史副本后行会凭空消失)。
+ * 返回 [{ toolUseId, channel:'gui'|'native', rejected, title, status, body, delivery, okCount, failCount, targets, metaLines }]
+ * 空结果返回冻结的 EMPTY_LIST(引用稳定,不白触发下游 memo)。
+ */
+export function xsSendNotices(turn, opts = {}) {
+  if (!turn || typeof turn !== 'object') return EMPTY_LIST;
+  const receipts = opts && opts.receipts ? opts.receipts : null;
+  const hidden = opts && opts.hidden ? opts.hidden : null;
+  let calls = turnToolCalls(turn);
+  const trimId = turn._retryTrimToolId;
+  if (trimId) {
+    const cut = calls.findIndex((tc) => tc.id === trimId);
+    if (cut >= 0) calls = calls.slice(0, cut);
+  }
+  const out = [];
+  for (const tc of calls) {
+    const name = tc.name;
+    if (name !== XS_SEND_TOOL_GUI && name !== XS_SEND_TOOL_NATIVE) continue;
+    if (hidden && hidden.has(tc.id)) continue; // 更早的一轮已经画过同一条
+    const result = tc.result;
+    // 合成终态(finalizedMessages 给"未回执的 tool_use"补的中断态:content 空、isError 假、synthetic/interrupted 标记)
+    // 不是真回执 —— 当成"没有结果",交给回执缓存,别把「已发送」误判成失败 / 空白。
+    const synthetic = !!result && (result.synthetic === true || result.interrupted === true);
+    if (!result || typeof result !== 'object' || synthetic) {
+      // 没有结果(进行中 / 记录里没写出):有已观察到的回执就补上,否则不画
+      const cached = receipts ? receipts[tc.id] : null;
+      if (cached) out.push(cached);
+      continue;
+    }
+    const text = xsToolResultText(result);
+    const isError = result.isError === true;
+    // 通道判定看"结果/入参的形状",不只认工具名:GUI 通道的结果是 { results:[…] },原生通道是
+    // { success:true } 或一条拒绝原因。两条通道的入参也可能混用(垫片 / 旧版本的记录),
+    // 按形状判能同时覆盖;名字只用来筛"是不是发送类工具",免得扫描整轮所有工具。
+    let notice = null;
+    if (isError) {
+      // 失败:只认「原生引导拒绝」这一种(正文含 NATIVE_GUARD_REASON 的稳定片段);其余留在工具卡
+      notice = nativeRejectNotice(tc, text);
+    } else {
+      notice = guiSendNotice(tc, text); // ①GUI:results 里至少一项 ok
+      if (!notice) notice = nativeSendNotice(tc, text); // ②原生:会话目标 + success:true
+    }
+    if (notice) out.push(notice);
+  }
+  return out.length ? out : EMPTY_LIST;
+}
+
+const SEND_RECEIPT_LIMIT = 200;
+const sameReceipt = (a, b) => !!a && !!b
+  && a.title === b.title && a.status === b.status && a.body === b.body
+  && a.channel === b.channel && a.rejected === b.rejected
+  && a.okCount === b.okCount && a.failCount === b.failCount
+  && a.delivery === b.delivery;
+
+/**
+ * 记下已经观察到的发送回执(tool_use_id → 行)。只在内容真的变了时写 store,避免无谓重渲。
+ * 为什么需要:CLI 的会话记录里不一定写 tool_result —— 回合从直播副本换成历史副本后,直播里看到的那条
+ * 「已发送」就没有数据来源了。回执属于"已经发生的事",按 tool_use_id 记住最稳(同一 id 天然幂等)。
+ */
+export function rememberXsSendReceipts(notices) {
+  if (!Array.isArray(notices) || notices.length === 0) return;
+  const cur = useXsStore.getState().sendReceipts;
+  let next = null;
+  for (const n of notices) {
+    const id = n && typeof n.toolUseId === 'string' ? n.toolUseId : '';
+    if (!id || sameReceipt(cur[id], n)) continue;
+    if (!next) next = { ...cur };
+    next[id] = n;
+  }
+  if (!next) return;
+  const keys = Object.keys(next);
+  if (keys.length > SEND_RECEIPT_LIMIT) {
+    const trimmed = {};
+    for (const k of keys.slice(keys.length - SEND_RECEIPT_LIMIT)) trimmed[k] = next[k];
+    next = trimmed;
+  }
+  useXsStore.setState({ sendReceipts: next });
 }
 
 // ── 订阅(选择器的默认值都是模块级常量:返回新引用会触发 React #185 整页白屏) ─────────────

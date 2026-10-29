@@ -167,7 +167,7 @@ import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
 import { escRoute, idleEscAction, escYieldCardId, isEditableTarget } from './utils/escAction.js';
 import { isImeKeydown, isImeReactKeydown } from './utils/imeGuard.js';
 import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils/attention.js';
-import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAutoRetrySkipped, keepLivePeer, anchorLivePeers, placeAnchoredPeers, mergeLivePeersIntoHistory, peerFromXsEvent, peerFromResultEvent, useXsSessionPending } from './utils/xsession.js';
+import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAutoRetrySkipped, keepLivePeer, anchorLivePeers, placeAnchoredPeers, mergeLivePeersIntoHistory, peerFromXsEvent, peerFromResultEvent, useXsSessionPending, xsSendToolIds, xsSendNotices, rememberXsSendReceipts } from './utils/xsession.js';
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import { notifyWaiting } from './utils/desktopNotify.js';
@@ -3287,7 +3287,9 @@ function ModeMismatchNotice({ notice, permKey }) {
 // streamingText(不动 messages),memo 命中 → 2万节点的历史列表在每个 token 不再
 // 重渲染;点功能按钮使 SessionDetail 重渲时同样跳过(根治"流式时/点按钮全局卡、
 // 分屏等 A 回复时 B 卡")。前提:传入回调必须引用稳定(见 stableRetry*/stableRollback)。
-const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onRetryTool, onRollback, onFork, retryActiveUuid }) {
+// r151w:hiddenSendIds = { [turn uuid]: Set<tool_use_id> } —— 同一个 tool_use_id 只让最早那一轮画发送行
+// (历史夹具 + 直播落盘副本可能各带一份)。引用由渲染层 useMemo 稳定,不额外打穿本组件的 memo。
+const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onRetryTool, onRollback, onFork, retryActiveUuid, hiddenSendIds = null }) {
   // BK-6:此前每行内联 `(toolCall) => onRetryTool(msg, toolCall)` 每次渲染新建箭头
   // 函数 → TurnBubble(自身 React.memo)的 onRetryTool prop 身份每次变 → memo 失效,
   // retryActiveUuid 一变(进/出"重做"态)就整表 2万节点重渲。改为按 msg.uuid 记忆化:
@@ -3319,7 +3321,8 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
         : msg.type === 'denial'
         ? <DenialNotice denial={msg} />
         : msg.type === 'turn'
-        ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} onFork={onFork} retryActive={retryActiveUuid === msg.uuid} />
+        ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} onFork={onFork} retryActive={retryActiveUuid === msg.uuid}
+            hiddenSendNotices={(hiddenSendIds && msg.uuid && hiddenSendIds.get(msg.uuid)) || null} />
         : <MessageBubble message={{ ...msg, role: msg.type }}
             // R36:并入消息也能回退 —— 折叠形态在磁盘上是一条 attachment{queued_command}
             // 记录,它自带 uuid,trim 按任意记录 uuid 定位(真机核对:preview 报
@@ -4817,6 +4820,37 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   );
   // r151b:回合落盘后历史里没有对应条目的直播来源气泡,按锚点插回它触发的那个回复之前;没有时原引用。
   const peerPlacement = useMemo(() => placeAnchoredPeers(peerMerge.list, visibleChat), [peerMerge, visibleChat]);
+  // r151w 发送行去重:同一个 tool_use_id 可能同时出现在两条回合里(历史夹具 + 直播落盘副本 / 同一条记录被
+  // 重放),按消息顺序只让**最早**那一轮画。perTurn 给历史列表用(uuid → 该轮要跳过的 id),seen 累积到
+  // 直播/本地副本那一侧(它们排在历史之后)。纯读,不写状态。
+  const sendNoticeSeen = useMemo(() => {
+    const perTurn = new Map();
+    const seen = new Set();
+    for (const m of peerPlacement.list) {
+      if (!m || m.type !== 'turn') continue;
+      const ids = xsSendToolIds(m);
+      if (!ids.length) continue;
+      const dup = ids.filter((id) => seen.has(id));
+      for (const id of ids) seen.add(id);
+      if (dup.length && m.uuid) perTurn.set(m.uuid, new Set(dup));
+    }
+    return { perTurn, seen };
+  }, [peerPlacement.list]);
+  // r151w:直播 / 本地副本按同一条规则去重 —— 历史里已经画过的 tool_use_id 在本地副本里不再画;
+  // 本地副本之间同样只让最早那一轮画。
+  const liveSendHidden = useMemo(() => {
+    const seen = new Set(sendNoticeSeen.seen);
+    const map = new Map();
+    for (const m of renderChat) {
+      if (!m || m.type !== 'turn') continue;
+      const ids = xsSendToolIds(m);
+      if (!ids.length) continue;
+      const dup = ids.filter((id) => seen.has(id));
+      for (const id of ids) seen.add(id);
+      if (dup.length && m.uuid) map.set(m.uuid, new Set(dup));
+    }
+    return map;
+  }, [renderChat, sendNoticeSeen]);
   // 挂载集合变化(补齐 / 搜索开关 / 跳转)会整批挂上或卸掉视口**上方**的行 —— 文档总高变了
   // 而 scrollTop 不变,视野就被顶走。变化前记下"视口最上方那一行 + 行内偏移",变化后在同一
   // 次 layout 提交里搬回原位:比按比例准,且不用任何高度估算。
@@ -6927,6 +6961,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     isError: block.is_error || false,
                   }};
                   scheduleStreamCommit(SC_TOOLS);
+                  // r151w:发送类工具的回执在结果到达的这一刻就记下。CLI 的会话记录里不一定写 tool_result
+                  // (被中断,或 provider/垫片只发流事件),回合从直播副本换成历史副本后,那条「已发送」
+                  // 折叠行不能凭空消失 —— 回执属于"已经发生的事",按 tool_use_id 记住最稳。
+                  try { rememberXsSendReceipts(xsSendNotices({ toolCalls: [currentToolCalls[idx]] })); } catch { /* 推导失败不影响回合 */ }
                 }
               }
             }
@@ -9768,6 +9806,7 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                 onRollback={stableRollback}
                 onFork={forkCurrentSession}
                 retryActiveUuid={retryActiveUuid}
+                hiddenSendIds={sendNoticeSeen.perTurn}
               />
               {/* btw 旁问不再进主流内联渲染 —— 改由右下角 BtwWindow 浮窗聚合成连续线程。 */}
               {renderChat.filter((msg) => msg.type !== 'btw' && !peerPlacement.placed.has(msg.uuid) && !peerMerge.taken?.has(msg.uuid)).map((msg, i) => (
@@ -9786,7 +9825,8 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                     ? <ModeMismatchNotice notice={msg} permKey={sessionQueueKey} />
                     : msg.type === 'turn'
                     ? <>
-                        <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid} />
+                        <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid}
+                          hiddenSendNotices={liveSendHidden.get(msg.uuid) || null} />
                         {/* 鉴权类错误 turn 的动作链接:打开顶栏 Provider 弹层核对 key/渠道
                             (cgui:open-provider → 顶栏 ProviderSwitcher 单实例)。
                             手机布局无该弹层(走 MobileMenu Provider 分页),隐藏按钮避免死点。 */}

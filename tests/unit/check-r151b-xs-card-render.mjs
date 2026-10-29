@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // r151b 审计后修复:卡片区真组件渲染(esbuild 打包 + react-dom/server,同 check-r151b-baseline-ui 的做法)。
-//   · S6:目标会话(本窗格会话)在「放任」档时,卡片正文不折叠、没有【展开】;其它档超 8 行照常折叠。
+//   · S6:目标会话(本窗格会话)在「放任」档时,卡片正文不折叠、没有【展开】;其它档超两行照常折叠。
 //         经 ChatInput 渲染,按本会话的权限档(permissionModeBySession)决定,不在测试里直接塞 noFold。
 //   · F1:"处理这条消息"已排在前端队列里时,卡片原因为"已排队，当前回合结束后处理",【处理】不可点,【忽略】可点。
+//   · r151w:卡片改成与 TaskNoticeRow 同款的居中折叠行 —— 两行预览(line-clamp:2)、标题行是唯一的展开控件
+//         (button + aria-expanded/aria-controls)、动作行在标题与正文之间(展开时按钮不被正文推走)。
 // 无 client/node_modules(裸检出)时明确跳过并打印,不静默转绿。
 // node tests/unit/check-r151b-xs-card-render.mjs
 import assert from 'node:assert/strict';
@@ -106,15 +108,28 @@ try {
   // ── S6 ──
   for (const mode of ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk']) {
     const html = renderFor(mode);
-    assert.match(bodyTag(html), /-webkit-line-clamp:8/, `${mode} 档:超 8 行折叠`);
+    assert.match(bodyTag(html), /-webkit-line-clamp:2/, `${mode} 档:超两行折叠`);
     assert.ok(html.includes('data-testid="xs-card-expand"'), `${mode} 档:有【展开】`);
+    // r151w 折叠行契约:根是通用折叠行、标题行是唯一的可展开控件(button + aria),正文在动作行之后
+    assert.match(html, /data-testid="xs-card"[^>]*data-cgui="xs-notice"/, `${mode} 档:根是通用折叠行`);
+    assert.match(html, /<button[^>]*data-testid="xs-card-toggle"[^>]*aria-expanded="false"[^>]*aria-controls="[^"]*xs-card-body/, `${mode} 档:标题行是可展开按钮且带 aria-expanded/aria-controls(默认收起)`);
+    const idxToggle = html.indexOf('data-testid="xs-card-toggle"');
+    const idxReason = html.indexOf('data-testid="xs-card-reason"');
+    const idxBody = html.indexOf('data-testid="xs-card-body"');
+    assert.ok(idxToggle >= 0 && idxToggle < idxReason && idxReason < idxBody, `${mode} 档:DOM 顺序为 标题行 → 动作行 → 正文(展开时按钮不被正文推走)`);
+    // 展开提示在标题行按钮内部(整行只有一个交互控件,读屏不会念两遍)
+    const toggleOpen = html.slice(idxToggle, html.indexOf('</button>', idxToggle));
+    assert.ok(toggleOpen.includes('data-testid="xs-card-expand"'), `${mode} 档:展开提示在标题行按钮内部`);
   }
   const bypass = renderFor('bypassPermissions');
   assert.ok(bodyTag(bypass), '前提:卡片渲染出来了');
   assert.doesNotMatch(bodyTag(bypass), /line-clamp/, '「放任」档:正文不折叠');
   assert.ok(!bypass.includes('data-testid="xs-card-expand"'), '「放任」档:没有【展开】(已是全文)');
   assert.ok(bypass.includes('第 12 行'), '正文全文在');
-  console.log('✓ S6:「放任」档卡片正文不折叠,其余五档超 8 行照常折叠');
+  // 「放任」档标题行不是按钮、不带 aria-expanded(不留下点了没变化的死按钮)
+  const bypassToggle = (bypass.match(/<[a-z]+[^>]*data-testid="xs-card-toggle"[^>]*>/) || [''])[0];
+  assert.ok(bypassToggle && !/^<button/.test(bypassToggle) && !/aria-expanded/.test(bypassToggle), '「放任」档:标题行不是按钮、不带 aria-expanded');
+  console.log('✓ S6:「放任」档卡片正文不折叠,其余五档超两行照常折叠(两行预览 + 标题行展开控件)');
 
   // ── F1 卡片排队态 ──
   let html = renderFor('default');
