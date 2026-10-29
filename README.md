@@ -287,7 +287,24 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b>v0.2.436</b>(2026-10-24)· 修复 2 条</summary>
+<summary><b>v0.2.437</b>(2026-10-29)· 改进 3 条</summary>
+
+**改进**
+
+<details><summary>跨会话消息改成居中折叠行</summary>
+
+收件箱待处理卡片、对话流里的接收消息、发送提示（GUI 的 send_message 与 CLI 原生 SendMessage）统一成“两侧分隔线 + 居中标题 + 两行正文预览”的行，点击展开全文；处理/撤回/忽略在折叠态就能点。
+
+</details>
+
+- 原生 SendMessage 发给本 GUI 另一会话被引导拒绝时，发送方显示一条「原生发送被拒」折叠行，点开看完整原因。
+
+- 长单段、分屏/拖窗变窄、两行带尾随换行等边界都能正确折叠与展开；分屏同一消息的正文节点 id 不再重复。
+
+</details>
+
+<details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.436">v0.2.436</a></b>(2026-10-24)· 修复 2 条</summary>
 
 **修复**
 
