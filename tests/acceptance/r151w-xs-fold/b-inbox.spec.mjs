@@ -7,13 +7,18 @@ import {
   api, boot, openSessionBySearch, seedPair, sendInbox, cardOf, inbox, styleOf, waitStatus,
   writeScript, touchCtl, uniq, turnRecords, waitFor, recordRequests, sendPrompt, ALL,
   shared, realCliPath, profileTurn, inboundOk, aiCalls, makeWorkspace, SM, msgsOf, bodyFacts,
-  textCenterFacts, expectFolded, waitBodyShown, waitBodyHidden, expectExpandEntry, EXPAND, COLLAPSE,
+  textJustifyFacts, justifyVerdict, expectFolded, waitBodyShown, waitBodyHidden, expectExpandEntry, EXPAND, COLLAPSE,
 } from './helpers/w.mjs';
 
 test.describe.configure({ timeout: 180_000 });
 test.beforeEach(async () => { await api.on(); });
 
 const body10 = (m) => Array.from({ length: 10 }, (_, i) => `${m} 第${i + 1}行`).join('\n');
+
+// B5 专用长正文:每段都够长,展开后在窄块里必然折行 —— 只有折行才有「非末行」,
+// 两端对齐的「非末行铺满块宽」才判得出来(全是一行一段的短夹具只有末行,判据会空转)。
+const B5_SENT = '这一行故意写得长一些，好让展开后的正文在窄块里折成好几行，非末行才检查得到两端对齐；';
+const bodyB5 = (m) => Array.from({ length: 6 }, (_, i) => `${m} 第${i + 1}段 ${B5_SENT.repeat(2)}`).join('\n');
 
 // 不用 Playwright isVisible(它只看元素自身有没有盒子,不管是否被滚动容器裁掉):
 // 把按钮 rect 与「最近的滚动祖先 ∩ 视口」求交,要求按钮整体落在收件箱可视区内。
@@ -202,10 +207,13 @@ test('B4 折叠态点【处理】仍走原链路:一次带 xsMessageId 的 POST 
 
 // r151y(用户 2026-10-29 修订):旧审计 S6「放任档(bypassPermissions)全文展示、不折叠」作废。
 // 「放任」只决定点【处理】后工具要不要经确认,不改变呈现 —— 放任档与其它档一样折叠:
-// 折叠态只有标题行 + 状态 +「展开全文」,正文不显示;展开才看到完整正文(且居中);再收起消失;
+// 折叠态只有标题行 + 状态 +「展开全文」,正文不显示;展开才看到完整正文(窄块、块居中、两端对齐);再收起消失;
 // 【处理】/【忽略】留在折叠态、仍可见可点。旧的放任档行为(整段铺开、没有展开入口、标题行退化成 div)
 // 在本用例里逐条写成反例断言 —— 放任档若哪天被回退成「全文展示」,这里立刻红。
-test('B5 「放任」档也折叠:折叠态无正文、有「展开全文」、标题行是 BUTTON;展开看全文并居中;收起消失;处理/忽略折叠态可点', async ({ page }) => {
+// r151z:B5 的展开版式断言从旧口径 textCenterFacts(每行文字各自居中)迁移到新口径
+// textJustifyFacts + justifyVerdict(窄块 ≤92% 行宽、块左右留白差 ≤2px、块内 justify、非末行铺满块宽),
+// 与 A11 用同一套判据、同一份阈值;放任档语义不变,只换展开态的版式判据。
+test('B5 「放任」档也折叠:折叠态无正文、有「展开全文」、标题行是 BUTTON;展开看全文且窄块两端对齐;收起消失;处理/忽略折叠态可点', async ({ page }) => {
   const pair = seedPair('b5');
   await boot(page);
   await openSessionBySearch(page, pair.B.title, pair.B.reply);
@@ -218,14 +226,14 @@ test('B5 「放任」档也折叠:折叠态无正文、有「展开全文」、�
   await opt.click();
   await expect.poll(async () => sel.innerText(), { timeout: 10_000, message: '前置:已切到放任' }).toContain('放任');
 
-  // 10 行正文:放任档下也必须是折叠态,正文一个字都不显示
-  const msg = await sendInbox(pair.A, pair.B, body10(pair.m));
+  // 长正文(6 段、段段折行):放任档下也必须是折叠态,正文一个字都不显示
+  const msg = await sendInbox(pair.A, pair.B, bodyB5(pair.m));
   const card = cardOf(page, msg.id);
   await expect(card, '前置:放任档下待处理卡片存在').toBeVisible({ timeout: 15_000 });
 
   // ① 折叠态:正文不显示(统一口径:不在 DOM 或可见高度 0),有「展开全文」,标题行是 BUTTON
   const folded = await expectFolded(card, 'xs-card-body', '放任档折叠态正文');
-  expect.soft(folded.text.includes(`${pair.m} 第1行`),
+  expect.soft(folded.text.includes(`${pair.m} 第1段`),
     '反例:放任档折叠态不应把正文原文留在可见正文节点里(旧行为:整段铺开)').toBe(false);
   const expand = await expectExpandEntry(card, 'xs-card-expand', '放任档正文');
   const toggle = card.getByTestId('xs-card-toggle');
@@ -242,23 +250,20 @@ test('B5 「放任」档也折叠:折叠态无正文、有「展开全文」、�
   expect.soft(await proc.isEnabled(), '折叠态【处理】可点').toBe(true);
   expect.soft(await dismiss.isEnabled(), '折叠态【忽略】可点').toBe(true);
 
-  // ③ 展开:正文完整(含第 1 行与第 10 行)、不裁切、水平居中
+  // ③ 展开:正文完整(含第 1 段与第 6 段)、不裁切、版式是窄块两端对齐
   await toggle.click();
   const bodyEl = await waitBodyShown(card, 'xs-card-body', '放任档展开后的正文');
-  for (const line of [1, 2, 5, 10]) {
-    await expect.soft(bodyEl, `展开后正文完整(含第 ${line} 行)`).toContainText(`${pair.m} 第${line}行`);
+  for (const seg of [1, 2, 5, 6]) {
+    await expect.soft(bodyEl, `展开后正文完整(含第 ${seg} 段)`).toContainText(`${pair.m} 第${seg}段`);
   }
   const opened = await bodyFacts(card, 'xs-card-body');
   expect.soft(opened.scrollHeight, `展开后正文不应被裁(scrollHeight ${opened.scrollHeight} / clientHeight ${opened.clientHeight})`).toBeLessThanOrEqual(opened.clientHeight + 2);
   await expect.soft(toggle, '展开后 aria-expanded=true').toHaveAttribute('aria-expanded', 'true');
   await expect.soft(expand, `展开后提示变成「${COLLAPSE}」`).toHaveText(COLLAPSE);
-  const c = await textCenterFacts(card, 'xs-card-body');
-  expect.soft(c.inDom, '展开后应能读到正文节点(居中判据依赖它)').toBe(true);
-  expect.soft(c.narrowLines,
-    `前置:应至少有一行没占满正文宽度(实测各行 [宽,左留白,右留白] = ${JSON.stringify(c.lines)})`).toBeGreaterThan(0);
-  expect.soft(c.centered,
-    `展开后正文应水平居中:每行左右留白应基本相等(实测 textAlign=${c.textAlign},内容宽 ${Math.round(c.contentWidth)}px, `
-    + `各行 [宽,左留白,右留白] = ${JSON.stringify(c.lines)};左对齐时短行左侧留白为 0、右侧留白几十像素)`).toBe(true);
+  // 版式判据(与 A11 同一套):窄块、块居中、块内 justify、非末行铺满。逐条 check 的失败信息自带实测值。
+  const f = await textJustifyFacts(card, 'xs-card-body');
+  const v = justifyVerdict(f);
+  for (const c of v.checks) expect.soft(c.ok, `展开后版式 [${c.id}] ${c.detail}`).toBe(true);
   // 展开态动作仍可点(动作行在正文之前,不被正文推走)
   await expect.soft(proc, '展开态【处理】仍可见').toBeVisible();
   expect.soft(await proc.isEnabled(), '展开态【处理】仍可点').toBe(true);
