@@ -35,7 +35,7 @@ test('B1 折叠态动作始终可见可点:处理 / 忽略 / 原因 / 来源都�
   expect.soft(await card.getByTestId('xs-card-dismiss').isEnabled(), '【忽略】可点').toBe(true);
 });
 
-test('B2 展开动作行不移动:展开前后【处理】的 y 变化 ≤2px,展开后仍可点', async ({ page }) => {
+test('B2 展开动作行不移动:动作行相对标题行的位置不变(≤2px),展开后仍可点', async ({ page }) => {
   const pair = seedPair('b2');
   const msg = await sendInbox(pair.A, pair.B, body10(pair.m));
   await openB(page, pair);
@@ -44,12 +44,25 @@ test('B2 展开动作行不移动:展开前后【处理】的 y 变化 ≤2px,�
   const proc = card.getByTestId('xs-card-process');
   const toggle = card.getByTestId('xs-card-toggle');
   await expect(toggle, '前置:标题行展开控件存在').toBeVisible({ timeout: 5_000 });
-  const y0 = (await styleOf(proc)).top;
+  // 收件箱在输入框上方、输入区底部锚定:展开正文必然把整块收件箱往上推(视口绝对 y 会变),
+  // 契约要的是「按钮不被正文推走」——DOM 顺序固定「标题行 → 动作行 → 正文」,
+  // 所以量动作行相对标题行(展开控件)的 rect 差值,展开前后应不变。
+  const rel0 = (await styleOf(proc)).top - (await styleOf(toggle)).top;
   await toggle.click();
-  await page.waitForTimeout(400);
-  const y1 = (await styleOf(proc)).top;
-  expect.soft(Math.abs(y1 - y0), `展开前后【处理】的 y 应基本不动(实测 ${y0.toFixed(1)} → ${y1.toFixed(1)})`).toBeLessThanOrEqual(2);
+  await expect(toggle, '前置:点标题行后确实展开').toHaveAttribute('aria-expanded', 'true');
+  await page.waitForTimeout(200);
+  const rel1 = (await styleOf(proc)).top - (await styleOf(toggle)).top;
+  expect.soft(Math.abs(rel1 - rel0), `展开前后【处理】相对标题行的位移应 ≤2px(实测 ${rel0.toFixed(1)} → ${rel1.toFixed(1)})`).toBeLessThanOrEqual(2);
+  expect.soft(await proc.isVisible(), '展开后【处理】仍可见').toBe(true);
   expect.soft(await proc.isEnabled(), '展开后【处理】仍可点').toBe(true);
+
+  // 再收起:动作行相对标题行仍不动,且按钮仍可点
+  await toggle.click();
+  await expect(toggle, '再点标题行收起').toHaveAttribute('aria-expanded', 'false');
+  await page.waitForTimeout(200);
+  const rel2 = (await styleOf(proc)).top - (await styleOf(toggle)).top;
+  expect.soft(Math.abs(rel2 - rel0), `收起前后【处理】相对标题行的位移应 ≤2px(实测 ${rel0.toFixed(1)} → ${rel2.toFixed(1)})`).toBeLessThanOrEqual(2);
+  expect.soft(await proc.isEnabled(), '收起后【处理】仍可点').toBe(true);
 });
 
 test('B3a 按钮可用性与改动前一致:pending / claimed 两种状态', async ({ page }) => {

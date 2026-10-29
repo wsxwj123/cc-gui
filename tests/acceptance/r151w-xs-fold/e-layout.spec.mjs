@@ -110,8 +110,10 @@ test('E4 375px 窄屏不横向溢出,【处理】【忽略】仍可见可点', a
 
 test('E5 分屏互不影响:左窗格展开,右窗格仍收起,两边高度/滚动互不改变', async ({ page }) => {
   const pair = seedPair('e5');
-  const ma = await sendInbox(pair.A, pair.B, `${pair.m} 给 B 的卡片`);
-  const mb = await sendInbox(pair.B, pair.A, `${pair.m} 给 A 的卡片`);
+  // 卡片必须可折叠:正文 > 2 行时标题行才是带 aria-expanded 的 <button>(1 行正文按契约 A5 不可折叠,没有 toggle)。
+  const body5 = (m) => Array.from({ length: 5 }, (_, i) => `${m} 第${i + 1}行`).join('\n');
+  const ma = await sendInbox(pair.A, pair.B, body5(`${pair.m} 给 B 的卡片`));
+  const mb = await sendInbox(pair.B, pair.A, body5(`${pair.m} 给 A 的卡片`));
   await boot(page);
   await openSessionBySearch(page, pair.A.title, pair.A.reply);
   await setPanes(page, 2);
@@ -126,14 +128,33 @@ test('E5 分屏互不影响:左窗格展开,右窗格仍收起,两边高度/滚�
   await expect(cardB, '右窗格有 B 的收件箱行').toBeVisible({ timeout: 15_000 });
 
   const toggleA = cardA.getByTestId('xs-card-toggle');
-  await expect(toggleA, '前置:左窗格的标题行展开控件存在').toBeVisible({ timeout: 5_000 });
-  const rightH0 = (await styleOf(cardB)).height;
-  await toggleA.click();
-  await expect.soft(toggleA, '左窗格已展开').toHaveAttribute('aria-expanded', 'true');
   const toggleB = cardB.getByTestId('xs-card-toggle');
+  await expect(toggleA, '前置:左窗格标题行可展开(折叠态)').toHaveAttribute('aria-expanded', 'false', { timeout: 5_000 });
+  await expect(toggleB, '前置:右窗格标题行可展开(折叠态)').toHaveAttribute('aria-expanded', 'false');
+
+  const rightFacts = () => pane2.evaluate((el) => ({ h: el.getBoundingClientRect().height, scrollTop: el.scrollTop }));
+  const leftH0 = (await styleOf(cardA)).height;
+  const rightH0 = (await styleOf(cardB)).height;
+  const pane0 = await rightFacts();
+
+  await toggleA.click();
+  await expect(toggleA, '左窗格已展开').toHaveAttribute('aria-expanded', 'true');
   await expect.soft(toggleB, '右窗格仍收起').toHaveAttribute('aria-expanded', 'false');
+  const leftH1 = (await styleOf(cardA)).height;
   const rightH1 = (await styleOf(cardB)).height;
-  expect.soft(Math.abs(rightH1 - rightH0), `右窗格高度不应被左窗格影响(${rightH0.toFixed(0)} → ${rightH1.toFixed(0)})`).toBeLessThanOrEqual(2);
+  const pane1After = await rightFacts();
+  expect.soft(leftH1, `左窗格该行应真的展开(高度 ${leftH0.toFixed(0)} → ${leftH1.toFixed(0)})`).toBeGreaterThan(leftH0 + 10);
+  expect.soft(Math.abs(rightH1 - rightH0), `右窗格该行高度不应被左窗格影响(${rightH0.toFixed(0)} → ${rightH1.toFixed(0)})`).toBeLessThanOrEqual(2);
+  expect.soft(Math.abs(pane1After.h - pane0.h), `右窗格高度不应变(${pane0.h.toFixed(0)} → ${pane1After.h.toFixed(0)})`).toBeLessThanOrEqual(2);
+  expect.soft(pane1After.scrollTop, '右窗格滚动位置不应变').toBe(pane0.scrollTop);
+
+  // 再收起:左窗格回到折叠高度,右窗格依旧不动
+  await toggleA.click();
+  await expect(toggleA, '左窗格已收起').toHaveAttribute('aria-expanded', 'false');
+  const leftH2 = (await styleOf(cardA)).height;
+  const rightH2 = (await styleOf(cardB)).height;
+  expect.soft(Math.abs(leftH2 - leftH0), `左窗格收起后应回到折叠高度(${leftH0.toFixed(0)} → ${leftH2.toFixed(0)})`).toBeLessThanOrEqual(2);
+  expect.soft(Math.abs(rightH2 - rightH0), `右窗格该行高度在左窗格收起后也不应变(${rightH0.toFixed(0)} → ${rightH2.toFixed(0)})`).toBeLessThanOrEqual(2);
 });
 
 test('E6 空态不渲染任何东西:xs-inbox / xs-send-notice / peer-message 都是 0', async ({ page }) => {
