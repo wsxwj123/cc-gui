@@ -137,7 +137,9 @@ export async function waitBodyHidden(row, bodyTestId, what = '正文') {
 }
 
 /**
- * 展开态「正文水平居中」的实现无关判据(2026-10-29 用户补充要求:折叠行展开后的正文也要居中显示)。
+ * 旧口径(r151x,2026-10-29 21:20):「正文水平居中」= 每行没占满宽度的文字左右留白相等。
+ * 用户 2026-10-29 修正版式后此口径作废:新口径是「窄块 + 块居中 + 块内两端对齐」,见下方 textJustifyFacts。
+ * 这个函数暂时只留给 B5 用(不属于本轮的改动范围;B5 仍断言每行居中,产品按新口径改后会红,需另行迁移)。
  * 只看视觉结果,不认 CSS 写法:把正文里每一行文本的可见矩形,换算成相对**正文内容框**
  * (content box,扣掉 border/padding)的左右留白;没占满整行的行,左右留白应基本相等(容差 2px),
  * 且至少有一行两侧留白都 ≥4px(证明真的有可见的居中留白)。
@@ -188,6 +190,205 @@ export const textCenterFacts = (row, bodyTestId) => row.evaluate((el, tid) => {
     lines: lines.map((x) => ({ width: Math.round(x.width), left: Math.round(x.left), right: Math.round(x.right) })),
   };
 }, bodyTestId);
+
+// ---------------- r151z:展开正文「窄块 + 两端对齐 + 块居中」判据 ----------------
+// 用户 2026-10-29 修正:不是每行文字各自居中,而是正文内容块**比该行内容窄、整体水平居中**,
+// 块内文字**两端对齐**(text-align: justify)。旧口径 textCenterFacts(每行左右留白相等)作废。
+//
+// 判据(实现无关,只看布局结果;阈值集中在 JUSTIFY):
+//   ① visible:正文节点在 DOM 且可见(展开态);
+//   ② justify:正文节点本身或任一直含文字的内层容器,生效的 computed text-align 含 justify;
+//   ③ narrow :块宽 ≤ 行内容宽 × 0.92 —— 相对阈值,不写死 px;1280 与分屏窄窗格都成立,块与行同宽(比值 100%)直接红;
+//   ④ centered:块左留白与右留白差 ≤ 2px(块在行内容框里水平居中,不是贴左/贴右);
+//   ⑤ wrap   :正文折成 ≥2 行,才有「非末行」可判;
+//   ⑥ fill   :每个非末行的文字 Range 宽度 ≥ 块内容宽 - 8px(justify 把非末行拉到块宽;末行不强制)。
+//
+// 为什么能区分「每行文字居中」和「窄块 + 两端对齐」:
+//   - 每行居中(text-align:center):② 红(computed 是 center,不是 justify);而且居中的文字 Range
+//     并不铺满块宽 → ⑥ 红。两条互相独立,不会因为「看起来左右对称」就混过去。
+//   - 正文块与行同宽:③ 红(比值 ≈100%),即使 text-align 写成 justify 也红 —— 那只是整行两端对齐,不是窄块。
+//   - 窄块但贴左/贴右:④ 红(左右留白差 = 行宽-块宽)。
+//   - 只有当「窄块 + 块居中 + 块内 justify + 非末行铺满」同时成立才全绿。
+// 判据自检:justifyProbeFacts() 在页面里现搭 4 个探针(正例 / 每行居中 / 与行同宽 / 窄块贴左),用同一份
+// 测量与判定代码量,证明三个反例都被判红、正例判绿 —— 判据不是空转,也不是永远红。
+export const JUSTIFY = { MAX_BLOCK_RATIO: 0.92, GAP_TOL: 2, FILL_TOL: 8 };
+const JUSTIFY_MEASURE = '__r151zJustifyMeasure';
+
+/** 把测量函数装到页面 window 上(真实行与反例探针共用同一份代码;幂等)。 */
+async function installJustifyMeasure(page) {
+  await page.evaluate((key) => {
+    if (window[key]) return;
+    window[key] = (rowEl, bodyEl) => {
+      const num = (v) => parseFloat(v) || 0;
+      const text = (el) => String(el.textContent || '').replace(/\s+/g, ' ').trim();
+      const contentBox = (el) => {
+        const s = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        const left = r.left + num(s.borderLeftWidth) + num(s.paddingLeft);
+        const right = r.right - num(s.borderRightWidth) - num(s.paddingRight);
+        return { left, right, width: Math.max(0, right - left) };
+      };
+      const bodyStyle = getComputedStyle(bodyEl);
+      const bodyRect = bodyEl.getBoundingClientRect();
+      const shown = bodyRect.height >= 1 && bodyStyle.display !== 'none' && bodyStyle.visibility !== 'hidden';
+
+      // 「正文内容块」:正文节点本身;若它只包着「装全部文字」的唯一块级子容器(max-width / justify 放内层),就下钻。
+      const allText = text(bodyEl);
+      let block = bodyEl;
+      for (;;) {
+        const kids = Array.from(block.children);
+        if (kids.length !== 1) break;
+        const kid = kids[0];
+        if (!/^(block|flow-root|flex|grid|list-item)$/.test(getComputedStyle(kid).display)) break;
+        if (!allText || text(kid) !== allText) break;
+        block = kid;
+      }
+
+      const row = contentBox(rowEl);
+      const blockRect = block.getBoundingClientRect();
+      const blockContent = contentBox(block);
+      const leftGap = blockRect.left - row.left;
+      const rightGap = row.right - blockRect.right;
+
+      // 生效的文字对齐:块本身 + 任何直接含文字的子孙(justify 落在内层容器上也算)。
+      const aligns = [];
+      const addAlign = (el) => {
+        const a = getComputedStyle(el).textAlign || '';
+        if (!aligns.includes(a)) aligns.push(a);
+      };
+      addAlign(block);
+      for (const el of block.querySelectorAll('*')) {
+        if (Array.from(el.childNodes).some((n) => n.nodeType === 3 && String(n.data || '').trim())) addAlign(el);
+      }
+
+      // 逐行量文字 Range:正文是 pre-wrap 纯文本,\n 结束一个行盒 → 每段最后一个 rect 是该段末行(justify 不拉末行)。
+      const lines = [];
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        const data = String(n.data || '');
+        if (!data.trim()) continue;
+        let offset = 0;
+        for (const seg of data.split('\n')) {
+          const start = offset;
+          offset += seg.length + 1;
+          if (!seg.trim()) continue;
+          const range = document.createRange();
+          range.setStart(n, start);
+          range.setEnd(n, start + seg.length);
+          const rects = Array.from(range.getClientRects()).filter((r) => r.width >= 1 && r.height >= 1);
+          rects.forEach((r, i) => lines.push({ width: r.width, last: i === rects.length - 1 }));
+        }
+      }
+      const nonLast = lines.filter((x) => !x.last);
+      return {
+        inDom: true,
+        shown,
+        bodyHeight: bodyRect.height,
+        rowWidth: row.width,
+        blockWidth: blockRect.width,
+        widthRatio: row.width > 0 ? blockRect.width / row.width : 0,
+        leftGap,
+        rightGap,
+        gapDiff: Math.abs(leftGap - rightGap),
+        blockContentWidth: blockContent.width,
+        textAlign: getComputedStyle(block).textAlign,
+        innerAligns: aligns,
+        justify: aligns.includes('justify'),
+        lineCount: lines.length,
+        nonLastCount: nonLast.length,
+        nonLastWidths: nonLast.map((x) => x.width),
+        lastWidths: lines.filter((x) => x.last).map((x) => x.width),
+        lines: lines.slice(0, 12).map((x) => ({ w: Math.round(x.width), last: x.last })),
+      };
+    };
+  }, JUSTIFY_MEASURE);
+}
+
+/** 读展开态正文的「窄块 / 两端对齐 / 块居中」可观察事实(不判定,判定见 justifyVerdict)。 */
+export async function textJustifyFacts(row, bodyTestId) {
+  await installJustifyMeasure(row.page());
+  return row.evaluate((rowEl, { tid, key }) => {
+    const b = rowEl.querySelector(`[data-testid="${tid}"]`);
+    if (!b) {
+      return {
+        inDom: false, shown: false, bodyHeight: 0, rowWidth: 0, blockWidth: 0, widthRatio: 0,
+        leftGap: 0, rightGap: 0, gapDiff: 0, blockContentWidth: 0,
+        textAlign: null, innerAligns: [], justify: false,
+        lineCount: 0, nonLastCount: 0, nonLastWidths: [], lastWidths: [], lines: [],
+      };
+    }
+    return window[key](rowEl, b);
+  }, { tid: bodyTestId, key: JUSTIFY_MEASURE });
+}
+
+/**
+ * 纯判定:把 textJustifyFacts 的事实换算成逐条 check(id/ok/detail),阈值只在这里定义。
+ * 返回 { ok, checks };调用方逐条 soft 断言,失败信息自带实测值(= 红点)。
+ */
+export function justifyVerdict(f) {
+  const facts = f || {};
+  const checks = [];
+  const add = (id, ok, detail) => checks.push({ id, ok: Boolean(ok), detail });
+  add('visible', facts.inDom && facts.shown,
+    `正文节点应在展开态可见(实测 inDom=${Boolean(facts.inDom)},可见高 ${Math.round(facts.bodyHeight || 0)}px)`);
+  add('justify', facts.justify,
+    `块内文字应两端对齐:生效的 text-align 应含 justify(实测 block=${facts.textAlign},内层=[${(facts.innerAligns || []).join(', ')}])`);
+  add('narrow', facts.rowWidth > 0 && facts.widthRatio <= JUSTIFY.MAX_BLOCK_RATIO,
+    `正文块应明显窄于该行内容宽(实测 块 ${Math.round(facts.blockWidth || 0)}px / 行内容 ${Math.round(facts.rowWidth || 0)}px = `
+    + `${((facts.widthRatio || 0) * 100).toFixed(1)}%,要求 ≤${(JUSTIFY.MAX_BLOCK_RATIO * 100).toFixed(0)}%;与行同宽 = 比值 100%)`);
+  add('centered', facts.inDom && facts.gapDiff <= JUSTIFY.GAP_TOL,
+    `正文块应在行内容框里水平居中(实测 左留白 ${Math.round(facts.leftGap || 0)}px / 右留白 ${Math.round(facts.rightGap || 0)}px,`
+    + `差 ${Math.round(facts.gapDiff || 0)}px,要求 ≤${JUSTIFY.GAP_TOL}px)`);
+  add('wrap', facts.nonLastCount >= 1,
+    `正文应折成多行,才有「非末行」可判两端对齐(实测 共 ${facts.lineCount || 0} 行,非末行 ${facts.nonLastCount || 0} 行)`);
+  const short = (facts.nonLastWidths || []).filter((w) => w < (facts.blockContentWidth || 0) - JUSTIFY.FILL_TOL);
+  add('fill', facts.nonLastCount >= 1 && short.length === 0,
+    `非末行文字应铺满正文块宽度(块内容宽 ${Math.round(facts.blockContentWidth || 0)}px,`
+    + `${short.length}/${facts.nonLastCount || 0} 行短于 内容宽-${JUSTIFY.FILL_TOL}px`
+    + `${short.length ? `,最窄 ${Math.round(Math.min(...short))}px` : ''})`);
+  return { ok: checks.every((x) => x.ok), checks };
+}
+
+/**
+ * 判据自检:在页面里现搭 4 个探针,用与真实行完全相同的测量(installJustifyMeasure)去量。
+ *   good                     窄块(300/452)+ 块居中 + justify   → 应绿
+ *   perLineCentered          与行同宽 + text-align:center        → 应红(每行文字居中)
+ *   fullWidthJustify         与行同宽 + justify                  → 应红(整行两端对齐,不是窄块)
+ *   narrowJustifyNotCentered 窄块 + justify + 贴左               → 应红(块没有水平居中)
+ */
+export async function justifyProbeFacts(page) {
+  await installJustifyMeasure(page);
+  return page.evaluate((key) => {
+    const measure = window[key];
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:-10000px;top:0;width:480px;';
+    // 必须挂进文档:脱离文档的节点没有布局,量出来全是 0(探针会假红)
+    document.body.appendChild(host);
+    const make = (style, bodyText) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'width:480px;box-sizing:border-box;padding:10px 14px;';
+      const body = document.createElement('div');
+      body.style.cssText = `box-sizing:border-box;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word;${style}`;
+      body.textContent = bodyText;
+      row.appendChild(body);
+      host.appendChild(row);
+      return { row, body };
+    };
+    const probeText = '两端对齐的判据必须能区分窄块和整行：文字被拉到正文块两端时，每个非末行都会铺满这一块的宽度，末行保持原样。'
+      + '只看每一行有没有居中是不够的，整行居中同样可以让每行看起来对称，却不会把文字拉到正文块的两端；'
+      + '而只有整体居中的窄块，才需要单独确认块的位置，以及块内文字确实两端对齐。';
+    const cases = {
+      good: make('width:300px;margin:0 auto;text-align:justify;', probeText),
+      perLineCentered: make('width:100%;text-align:center;', probeText),
+      fullWidthJustify: make('width:100%;text-align:justify;', probeText),
+      narrowJustifyNotCentered: make('width:300px;margin:0;text-align:justify;', probeText),
+    };
+    const out = {};
+    for (const [name, one] of Object.entries(cases)) out[name] = measure(one.row, one.body);
+    host.remove();
+    return out;
+  }, JUSTIFY_MEASURE);
+}
 
 /** soft 断言:折叠态「有正文就有展开入口」,提示文案是「展开全文」;返回提示节点。 */
 export async function expectExpandEntry(row, expandTestId, what = '正文') {
