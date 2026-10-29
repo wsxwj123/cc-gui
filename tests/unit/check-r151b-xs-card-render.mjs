@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // r151b 审计后修复:卡片区真组件渲染(esbuild 打包 + react-dom/server,同 check-r151b-baseline-ui 的做法)。
-//   · S6:目标会话(本窗格会话)在「放任」档时,卡片正文不折叠、没有【展开】;其它档超两行照常折叠。
-//         经 ChatInput 渲染,按本会话的权限档(permissionModeBySession)决定,不在测试里直接塞 noFold。
+//   · S6 r151y:权限档不再影响卡片呈现 —— 「放任」档与其它档一致:折叠、有【展开全文】,
+//         展开后才显示（居中）完整正文,再点收起。经 ChatInput 按 permissionModeBySession 渲染。
 //   · F1:"处理这条消息"已排在前端队列里时,卡片原因为"已排队，当前回合结束后处理",【处理】不可点,【忽略】可点。
 //   · r151w/r151x:卡片是与 TaskNoticeRow 同款的居中折叠行 —— 折叠态只有标题行 + 展开(不渲染正文节点),
 //         标题行是唯一的展开控件(button + aria-expanded/aria-controls)、动作行紧跟标题行(展开时按钮不被正文推走)。
@@ -59,11 +59,14 @@ async function loadRenderer() {
     "import React from 'react';",
     "import { renderToStaticMarkup } from 'react-dom/server';",
     `import { ChatInput } from ${src('components/ChatInput.jsx')};`,
+    `import { XsNoticeRow } from ${src('components/XsNoticeRow.jsx')};`,
     `import { useStore } from ${src('stores/sessionStore.js')};`,
     `import { useXsStore, XS_PROMPT_PLACEHOLDER } from ${src('utils/xsession.js')};`,
     'export { useStore, useXsStore, XS_PROMPT_PLACEHOLDER };',
     'const noop = () => {};',
     'export const renderInput = (props) => renderToStaticMarkup(React.createElement(ChatInput, { onSend: noop, onStop: noop, ...props }));',
+    'export const renderRow = (props) => renderToStaticMarkup(React.createElement(XsNoticeRow, props));',
+    'export { React };',
   ].join('\n'));
   const rawPlugin = {
     name: 'r151b-raw',
@@ -131,7 +134,7 @@ try {
     assert.equal(inner.trim(), '', `${label}:折叠态正文容器里不留原文`);
     assert.match(markup, /<span hidden="" aria-hidden="true">/, `${label}:原文有不进无障碍树的不可见副本(行内文本匹配用)`);
   };
-  for (const mode of ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk']) {
+  for (const mode of ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']) {
     const html = renderFor(mode);
     const markup = cardMarkup(html, M1);
     assert.ok(markup, `${mode} 档:卡片渲染出来了`);
@@ -175,18 +178,40 @@ try {
   assert.ok(!/^<button/.test(toggleTag(emptyMarkup)) && !/aria-expanded/.test(toggleTag(emptyMarkup)),
     '空正文:标题行不是按钮、不带 aria-expanded');
   console.log('✓ 空正文:占位可见、不可展开、标题行不是按钮');
+  // ── S6 r151y:放任档不再例外 —— 与其它档同一折叠契约 ──
   const bypass = renderFor('bypassPermissions');
-  assert.ok(bodyTag(bypass), '前提:「放任」档卡片正文渲染出来了');
-  assert.doesNotMatch(bodyTag(bypass), /hidden=""/, '「放任」档:正文容器可见');
-  assert.doesNotMatch(bodyTag(bypass), /line-clamp/, '「放任」档:正文不折叠');
-  const bypassOneLineBody = (bypass.slice(bypass.indexOf(`data-message-id="${M2}"`)).match(/<div[^>]*data-testid="xs-card-body"[^>]*>/) || [''])[0];
-  assert.doesNotMatch(bypassOneLineBody, /line-clamp/, '「放任」档:长单段正文也不折叠');
-  assert.ok(!bypass.includes('data-testid="xs-card-expand"'), '「放任」档:没有【展开】(已是全文)');
-  assert.ok(bypass.includes('第 12 行'), '正文全文在');
-  // 「放任」档标题行不是按钮、不带 aria-expanded(不留点了没变化的死按钮)
-  const bypassToggle = (bypass.match(/<[a-z]+[^>]*data-testid="xs-card-toggle"[^>]*>/) || [''])[0];
-  assert.ok(bypassToggle && !/^<button/.test(bypassToggle) && !/aria-expanded/.test(bypassToggle), '「放任」档:标题行不是按钮、不带 aria-expanded');
-  console.log('✓ S6:「放任」档正文全文展示、无展开控件;其余档折叠态只有标题行 + 展开');
+  const bypassMarkup = cardMarkup(bypass, M1);
+  assert.ok(bypassMarkup, '前提:「放任」档卡片渲染出来了');
+  assertFoldedBody(bypassMarkup, '「放任」档');
+  assert.ok(bypassMarkup.includes('第 1 行'), '「放任」档:原文仍在行内(只是不可见)');
+  assert.ok(!/-webkit-line-clamp/.test(bypass), '「放任」档:不靠 line-clamp');
+  assert.ok(bypassMarkup.includes('data-testid="xs-card-expand"'), '「放任」档:有【展开】');
+  const bypassToggle = toggleTag(bypassMarkup);
+  assert.match(bypassToggle, /^<button/, '「放任」档:标题行是可展开 BUTTON');
+  assert.match(bypassToggle, /aria-expanded="false"/, '「放任」档:默认收起');
+  const bypassToggleOpen = bypassMarkup.slice(bypassMarkup.indexOf('data-testid="xs-card-toggle"'), bypassMarkup.indexOf('</button>', bypassMarkup.indexOf('data-testid="xs-card-toggle"')));
+  assert.ok(bypassToggleOpen.includes('展开全文'), '「放任」档:折叠态提示「展开全文」');
+  // 展开态(直接渲染折叠行并把初始 expanded 置 true):完整正文可见、居中、控件变「收起」。
+  // 交互点击(展开→收起)由验收 B5 覆盖;这里锁住展开后的 DOM 形状。
+  const forceExpanded = (fn) => {
+    const orig = r.React.useState;
+    r.React.useState = (init) => orig(true);
+    try { return fn(); } finally { r.React.useState = orig; }
+  };
+  const expandedHtml = forceExpanded(() => r.renderRow({
+    testId: 'xs-card', rootProps: { 'data-message-id': M1, 'data-status': 'pending' }, idSeed: M1,
+    toggleTestId: 'xs-card-toggle', bodyTestId: 'xs-card-body', expandTestId: 'xs-card-expand',
+    body: LONG, bodyPlaceholder: '（正文不可用）', actions: null,
+  }));
+  const [expandedTag, expandedInner] = bodyDiv(expandedHtml);
+  assert.ok(expandedTag && !/hidden=""/.test(expandedTag), '「放任」档展开后:正文容器可见');
+  assert.ok(expandedInner.includes('第 12 行'), '「放任」档展开后:显示完整正文');
+  assert.match(expandedTag, /text-align:center/, '「放任」档展开后:正文水平居中');
+  assert.ok(!/<span hidden="" aria-hidden="true">/.test(expandedHtml), '「放任」档展开后:不再需要不可见原文副本');
+  const expandedToggle = toggleTag(expandedHtml);
+  assert.match(expandedToggle, /aria-expanded="true"/, '「放任」档展开后:aria-expanded=true');
+  assert.ok(expandedHtml.includes('收起'), '「放任」档展开后:控件变「收起」(可收起)');
+  console.log('✓ S6 r151y:「放任」档与其它档一致:折叠 + 【展开全文】,展开后全文居中、可收起');
 
   // ── F1 卡片排队态 ──
   let html = renderFor('default');

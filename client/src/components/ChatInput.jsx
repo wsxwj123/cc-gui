@@ -976,8 +976,8 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
         }}
       />
       {/* r151b:跨会话消息卡片区(与权限卡同在输入框上方);总开关关 / 没有消息时不渲染任何东西。
-          本会话在「放任」档时卡片正文不折叠(审计 S6:处理后不经确认就执行,藏在折叠里的内容要先看得见) */}
-      <XsInbox sessionId={sessionId} onSend={onSend} noFold={permissionMode === 'bypassPermissions'} />
+          折叠行为与权限档无关(r151y):「放任」档也折叠、也走【展开全文】,旧的 noFold 例外已移除。 */}
+      <XsInbox sessionId={sessionId} onSend={onSend} />
       {editingResend && (
         <div className="px-6 pt-3">
           <div className="max-w-[var(--content-max)] mx-auto flex items-center justify-between gap-3 rounded-lg border border-accent/30 bg-accent/8 px-3 py-2 text-[12px] text-accent font-body">

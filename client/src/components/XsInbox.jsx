@@ -5,6 +5,7 @@
 // r151w/r151x:卡片不再是浮起的大块,改用与 TaskNoticeRow 同款的居中折叠行(XsNoticeRow):
 // 折叠态只有标题行 + 状态 + 展开全文(不显示正文),展开后才显示完整正文并居中;
 // 动作行(处理 / 撤回 / 忽略)留在折叠行里、紧贴标题行,收起状态也能直接点。
+// r151y:「放任」档不再例外 —— 所有权限档都折叠,正文不摊开(旧的 noFold / 审计 S6 约定作废)。
 import React, { useEffect, useRef, useState } from 'react';
 import { CornerLeftUp } from './Icon.jsx';
 import { XsNoticeRow } from './XsNoticeRow.jsx';
@@ -28,8 +29,7 @@ function formatArrival(iso) {
   return d.toDateString() === now.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 }
 
-// noFold:目标会话(本窗格会话)在「放任」档 —— 点【处理】后工具不经确认直接执行,正文整段摊开、不给折叠(审计 S6)
-const XsCard = React.memo(function XsCard({ message, noFold = false, onProcess, onRelease, onDismiss }) {
+const XsCard = React.memo(function XsCard({ message, onProcess, onRelease, onDismiss }) {
   const busy = useXsBusy(message.id);
   // 会话正忙时点过【处理】:"处理这条消息"已排在前端队列里(消息在服务端仍是 pending),轮到它时才认领
   const queuedHere = useXsQueuedHere(message.id);
@@ -73,15 +73,15 @@ const XsCard = React.memo(function XsCard({ message, noFold = false, onProcess, 
       title={title}
       body={body}
       bodyPlaceholder="（正文不可用）"
-      noFold={noFold}
       actions={actions}
       animate
     />
   );
 });
 
-/** sessionId = 本窗格当前会话;onSend = 本窗格的既有发送入口(App.jsx handleSend,经 ChatInput 透传);noFold = 本会话在「放任」档。 */
-export const XsInbox = React.memo(function XsInbox({ sessionId = null, onSend, noFold = false }) {
+/** sessionId = 本窗格当前会话;onSend = 本窗格的既有发送入口(App.jsx handleSend,经 ChatInput 透传)。
+ *  卡片折叠行为与权限档无关(r151y):「放任」档同样折叠、有展开。 */
+export const XsInbox = React.memo(function XsInbox({ sessionId = null, onSend }) {
   const enabled = useXsEnabled();
   const messages = useXsInbox(sessionId);
   const [error, setError] = useState('');
@@ -119,7 +119,7 @@ export const XsInbox = React.memo(function XsInbox({ sessionId = null, onSend, n
       {error && <div className="text-[11px] text-amber-700 font-body px-1">{error}</div>}
       <div className="space-y-1 max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] overflow-y-auto">
         {messages.map((m) => (
-          <XsCard key={m.id} message={m} noFold={noFold} onProcess={onProcess} onRelease={onRelease} onDismiss={onDismiss} />
+          <XsCard key={m.id} message={m} onProcess={onProcess} onRelease={onRelease} onDismiss={onDismiss} />
         ))}
       </div>
     </div>

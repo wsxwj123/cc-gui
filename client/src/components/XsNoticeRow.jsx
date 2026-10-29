@@ -9,6 +9,8 @@
 // 不可折叠时标题行退化成 <div>(不留死按钮)。纯展示:不读 store、不发请求。
 // 正文是另一个模型的输出(不可信),一律纯文本 pre-wrap,不解析 markdown。
 // DOM 顺序固定「标题行 → 动作行(有则)→ 正文」:动作贴着标题行,正文再长也推不走【处理】/【忽略】。
+// r151y(用户 2026-10-29):**所有权限档一致** —— 「放任」档也不再把正文摊开,收件箱卡片同样折叠、同样有展开。
+// 旧的 noFold / 审计 S6「放任档全文展示」约定作废,组件不再区分权限档。
 import React, { useId, useState } from 'react';
 import { ChevronDown, ChevronRight } from './Icon.jsx';
 
@@ -27,7 +29,6 @@ const CENTERED = { textAlign: 'center' };
  * @param {ReactNode} status 状态行内容(可空:只有展开提示)
  * @param {string} body 真实正文(可为空;调用方不要再塞占位文案,占位走 bodyPlaceholder)
  * @param {string} bodyPlaceholder 正文缺失时的占位文案(不算正文,不触发展开)
- * @param {boolean} noFold 不折叠(「放任」档):全文展示、没有展开控件、标题行不是按钮
  * @param {ReactNode} actions 动作行(仅收件箱):原因 + 处理 / 撤回 / 忽略
  * @param {ReactNode} meta 展开后的元信息(仅发送行):每目标一行
  */
@@ -47,7 +48,6 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
   status = null,
   body = '',
   bodyPlaceholder = '',
-  noFold = false,
   actions = null,
   meta = null,
   className = '',
@@ -61,9 +61,9 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
   const placeholder = typeof bodyPlaceholder === 'string' ? bodyPlaceholder : '';
   const hasBody = text.trim() !== '';
   // 可折叠 = 有真实正文(1 行也算)或有展开后才看得到的元信息。占位文案不算正文。
-  const foldable = !noFold && (hasBody || Boolean(meta));
+  const foldable = hasBody || Boolean(meta);
   // 折叠态有正文时正文容器隐藏且为空;无正文时正文位显示占位(唯一的折叠态可见情况)。
-  const bodyShown = noFold || expanded || !hasBody;
+  const bodyShown = expanded || !hasBody;
   // 正文节点 id 用 useId 派生:分屏里同一条消息会在两个窗格各挂一份,旧的「testid + 消息 id」
   // 会让两处 id 相同、aria-controls 指向同一个节点。useId 每个实例唯一;data-testid 保持不变。
   const bodyId = `${bodyTestId || 'xs-notice-body'}-${idSeed || testId || 'row'}-${uid}`;
@@ -114,7 +114,7 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
         )}
         <div id={bodyId} data-testid={bodyTestId} hidden={!bodyShown}
           className={`mt-1 text-[12.5px] leading-relaxed text-ink font-body whitespace-pre-wrap break-words ${bodyClassName}`}
-          style={expanded && !noFold ? CENTERED : undefined}>
+          style={expanded ? CENTERED : undefined}>
           {bodyShown ? (hasBody ? text : placeholder) : null}
         </div>
         {meta && expanded && (
