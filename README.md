@@ -287,6 +287,25 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.439</b>(2026-10-30)· 改进 2 条</summary>
+
+**改进**
+
+<details><summary>「放任」权限档下的收件箱卡片也折叠</summary>
+
+不再因为放任档而整段摊开正文;折叠态只显示标题、状态与「展开全文」,点开看全文,处理/撤回/忽略仍可直接点。
+
+</details>
+
+<details><summary>展开后的正文版式</summary>
+
+正文块比普通消息窄、整体水平居中,块内文字两端对齐(不是逐行文字居中);换行保留,长段落更好读。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.438</b>(2026-10-29)· 改进 2 条</summary>
 
 **改进**
