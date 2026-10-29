@@ -89,14 +89,19 @@ if (!r) {
 const B = 'bbbbbbbb-0000-4000-8000-00000000000b';
 const M1 = '11111111-0000-4000-8000-000000000001';
 const LONG = Array.from({ length: 12 }, (_, i) => `第 ${i + 1} 行`).join('\n');
+// r151w 判官整改:一整段没有换行的长正文。SSR 没有布局,算不出「按宽度折成几行」,
+// 但折叠态必须**无条件**先按两行 clamp —— 旧实现要等 foldable 才 clamp,客户端于是永远量不到溢出。
+const LONG_ONE_LINE = '这是一整段没有换行的长正文，用来验证折叠态会先按两行夹住，再由布局测量决定是否可展开。'.repeat(8);
+const M2 = '22222222-0000-4000-8000-000000000002';
 const card = { id: M1, createdAt: '2026-10-15T01:00:00.000Z', status: 'pending', chainId: M1, hop: 1,
   from: { kind: 'user', sessionId: null, title: '' }, to: { sessionId: B, title: '乙' },
   body: LONG, bodyBytes: 60, via: null, heldReason: 'target-card', heldText: '等待你确认后处理' };
+const cardOneLine = { ...card, id: M2, chainId: M2, body: LONG_ONE_LINE, bodyBytes: Buffer.byteLength(LONG_ONE_LINE) };
 const origError = console.error;
 console.error = (...a) => { if (!String(a[0] || '').includes('useLayoutEffect')) origError(...a); }; // SSR 对 useLayoutEffect 的固定告警
 // zustand 在服务端渲染时读 getInitialState()(不是 getState()):测试里两份一起写,渲染才看得到这里摆的状态
 const put = (store, patch) => { Object.assign(store.getInitialState(), patch); store.setState(patch); };
-put(r.useXsStore, { enabled: true, inbox: { [B]: [card] } });
+put(r.useXsStore, { enabled: true, inbox: { [B]: [card, cardOneLine] } });
 const renderFor = (mode) => {
   put(r.useStore, { permissionModeBySession: { ...(r.useStore.getState().permissionModeBySession || {}), [B]: mode } });
   return r.renderInput({ sessionId: B, permKey: B });
@@ -121,9 +126,20 @@ try {
     const toggleOpen = html.slice(idxToggle, html.indexOf('</button>', idxToggle));
     assert.ok(toggleOpen.includes('data-testid="xs-card-expand"'), `${mode} 档:展开提示在标题行按钮内部`);
   }
+  // 判官整改轮:长单段(无换行)在折叠态也必须先 clamp —— SSR 能验的就是「clamp 已加上」。
+  // 旧实现要 foldable 才加 clamp,而 foldable 依赖 overflow,overflow 又只能在 clamp 后的节点上量到;
+  // 于是长单段永远是「1 行、不折叠」。是否出展开控件由客户端的布局测量决定(验收 A9/C4b/D8 覆盖)。
+  const oneLineHtml = renderFor('default');
+  const oneLineStart = oneLineHtml.indexOf(`data-message-id="${M2}"`);
+  assert.ok(oneLineStart >= 0, '前提:长单段卡片渲染出来了');
+  const oneLineBody = (oneLineHtml.slice(oneLineStart).match(/<div[^>]*data-testid="xs-card-body"[^>]*>/) || [''])[0];
+  assert.match(oneLineBody, /-webkit-line-clamp:2/, '长单段(无换行)折叠态也要先按两行 clamp(否则客户端量不出自动折行)');
+  console.log('✓ 长单段:无换行正文在折叠态同样先按两行 clamp');
   const bypass = renderFor('bypassPermissions');
   assert.ok(bodyTag(bypass), '前提:卡片渲染出来了');
   assert.doesNotMatch(bodyTag(bypass), /line-clamp/, '「放任」档:正文不折叠');
+  const bypassOneLineBody = (bypass.slice(bypass.indexOf(`data-message-id="${M2}"`)).match(/<div[^>]*data-testid="xs-card-body"[^>]*>/) || [''])[0];
+  assert.doesNotMatch(bypassOneLineBody, /line-clamp/, '「放任」档:长单段正文也不折叠');
   assert.ok(!bypass.includes('data-testid="xs-card-expand"'), '「放任」档:没有【展开】(已是全文)');
   assert.ok(bypass.includes('第 12 行'), '正文全文在');
   // 「放任」档标题行不是按钮、不带 aria-expanded(不留下点了没变化的死按钮)

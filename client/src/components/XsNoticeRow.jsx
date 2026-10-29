@@ -4,7 +4,7 @@
 // 点它等于点整行,读屏不会念两遍;不可折叠时标题行退化成 <div>(不留死按钮)。
 // 纯展示:不读 store、不发请求。正文是另一个模型的输出(不可信),一律纯文本 pre-wrap,不解析 markdown。
 // DOM 顺序固定「标题行 → 动作行(有则)→ 正文」:动作贴着标题行,正文再长也推不走【处理】/【忽略】。
-import React, { useLayoutEffect, useRef, useState } from 'react';
+import React, { useId, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from './Icon.jsx';
 
 const FOLD_LINES = 2;
@@ -51,19 +51,26 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
   const [expanded, setExpanded] = useState(false);
   const [overflow, setOverflow] = useState(false);
   const bodyRef = useRef(null);
+  const uid = useId();
   const text = typeof body === 'string' ? body : '';
   const lineCount = text ? text.split('\n').length : 0;
-  // 可折叠 = 有展开后才看得到的元信息,或正文超过两行,或确实被两行截断(长行自动折行也算)。
-  // 展开态不测量:去掉 clamp 后 scrollHeight 恒等于 clientHeight,会把 overflow 误判成 false。
+  // 折叠态(未展开、也不是「放任」档)**一律**先按两行 clamp —— 只有先夹住,才能量出
+  // 「一整段没有换行、按容器宽度折成 >2 行」的情况;否则未 clamp 的节点里 scrollHeight 恒等于
+  // clientHeight,overflow 永远是 false,长单段被当成 1 行而不折叠。1 行正文夹两行没有视觉影响。
+  const clamped = !noFold && !expanded;
+  // 可折叠 = 有展开后才看得到的元信息,或换行数超过两行,或夹两行后确实被截(长单段自动折行也算)。
   const foldable = !noFold && (Boolean(meta) || lineCount > FOLD_LINES || overflow);
   useLayoutEffect(() => {
     const el = bodyRef.current;
+    // 展开态 / 「放任」档没有 clamp,量不出真实内容高度;这时**不要**把 overflow 清零,
+    // 否则展开一次(或切一次权限档)就把 toggle 弄丢,收起后也回不来。
     if (!el || noFold || expanded) return;
     const next = el.scrollHeight > el.clientHeight + 1;
     setOverflow((prev) => (prev === next ? prev : next));
   }, [text, noFold, expanded]);
-  const clamped = foldable && !expanded;
-  const bodyId = `${bodyTestId || 'xs-notice-body'}-${idSeed || testId || 'row'}`;
+  // 正文节点 id 用 useId 派生:分屏里同一条消息会在两个窗格各挂一份,旧的「testid + 消息 id」
+  // 会让两处 id 相同、aria-controls 指向同一个节点。useId 每个实例唯一;data-testid 保持不变。
+  const bodyId = `${bodyTestId || 'xs-notice-body'}-${idSeed || testId || 'row'}-${uid}`;
 
   const head = (
     <>

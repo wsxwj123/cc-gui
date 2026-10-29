@@ -102,6 +102,20 @@ const guiResult = (results, notice = '发送后不会同步收到回复。') => 
 const one = (calls, extra) => xsSendNotices(turnOf(calls, extra));
 
 try {
+  // ── 拒绝特征串交叉锁:客户端靠 XS_SEND_GUARD_MARKS 认「原生引导拒绝」,服务端一改文案这里就该红 ──
+  // 不 import 服务端模块(它会拉起整个 xsession 运行时),只从源码读 NATIVE_GUARD_REASON 的字面值。
+  const serverXs = readFileSync(join(root, 'server/services/xsession.js'), 'utf8');
+  const guardDecl = serverXs.match(/export const NATIVE_GUARD_REASON\s*=\s*(['"])([\s\S]*?)\1\s*;/);
+  ok(guardDecl, 'server/services/xsession.js 里应能找到 NATIVE_GUARD_REASON 常量');
+  const guardReason = guardDecl[2];
+  ok(M.XS_SEND_GUARD_MARKS.length > 0, '客户端 XS_SEND_GUARD_MARKS 不应为空');
+  for (const mark of M.XS_SEND_GUARD_MARKS) {
+    ok(typeof mark === 'string' && mark.length > 0, '拒绝特征串应为非空字符串');
+    ok(guardReason.includes(mark),
+      `客户端拒绝特征串「${mark}」必须包含在服务端 NATIVE_GUARD_REASON 里(服务端改文案时这条单测应变红)`);
+  }
+  console.log(`✓ 拒绝特征串交叉锁:${M.XS_SEND_GUARD_MARKS.length} 个客户端特征串都包含在服务端 NATIVE_GUARD_REASON 里`);
+
   // ── GUI 通道:1 个成功目标 ──
   let list = one([call('toolu_g1', GUI, { to: [B_SID], message: '第一行\n第二行' },
     guiResult([{ to: B_SID, ok: true, id: B_SID.slice(0, 8), name: B.title, delivery: 'card', note: '等待你确认后处理' }]))]);
