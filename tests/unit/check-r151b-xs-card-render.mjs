@@ -93,15 +93,19 @@ const LONG = Array.from({ length: 12 }, (_, i) => `第 ${i + 1} 行`).join('\n')
 // 但折叠态必须**无条件**先按两行 clamp —— 旧实现要等 foldable 才 clamp,客户端于是永远量不到溢出。
 const LONG_ONE_LINE = '这是一整段没有换行的长正文，用来验证折叠态会先按两行夹住，再由布局测量决定是否可展开。'.repeat(8);
 const M2 = '22222222-0000-4000-8000-000000000002';
+// r151w 判官小项 S6:两行正文 + 尾随换行。数行数时若不先去掉一个尾随换行会算成 3 行 → 出展开入口,
+// 但展开后高度不变(尾随换行不占行),成了点了没反应的死 toggle。
+const M3 = '33333333-0000-4000-8000-000000000003';
 const card = { id: M1, createdAt: '2026-10-15T01:00:00.000Z', status: 'pending', chainId: M1, hop: 1,
   from: { kind: 'user', sessionId: null, title: '' }, to: { sessionId: B, title: '乙' },
   body: LONG, bodyBytes: 60, via: null, heldReason: 'target-card', heldText: '等待你确认后处理' };
 const cardOneLine = { ...card, id: M2, chainId: M2, body: LONG_ONE_LINE, bodyBytes: Buffer.byteLength(LONG_ONE_LINE) };
+const cardTrailingNewline = { ...card, id: M3, chainId: M3, body: '第一行\n第二行\n', bodyBytes: 0 };
 const origError = console.error;
 console.error = (...a) => { if (!String(a[0] || '').includes('useLayoutEffect')) origError(...a); }; // SSR 对 useLayoutEffect 的固定告警
 // zustand 在服务端渲染时读 getInitialState()(不是 getState()):测试里两份一起写,渲染才看得到这里摆的状态
 const put = (store, patch) => { Object.assign(store.getInitialState(), patch); store.setState(patch); };
-put(r.useXsStore, { enabled: true, inbox: { [B]: [card, cardOneLine] } });
+put(r.useXsStore, { enabled: true, inbox: { [B]: [card, cardOneLine, cardTrailingNewline] } });
 const renderFor = (mode) => {
   put(r.useStore, { permissionModeBySession: { ...(r.useStore.getState().permissionModeBySession || {}), [B]: mode } });
   return r.renderInput({ sessionId: B, permKey: B });
@@ -135,6 +139,18 @@ try {
   const oneLineBody = (oneLineHtml.slice(oneLineStart).match(/<div[^>]*data-testid="xs-card-body"[^>]*>/) || [''])[0];
   assert.match(oneLineBody, /-webkit-line-clamp:2/, '长单段(无换行)折叠态也要先按两行 clamp(否则客户端量不出自动折行)');
   console.log('✓ 长单段:无换行正文在折叠态同样先按两行 clamp');
+  // 判官小项 S6:尾随换行不算一行 —— 两行正文 + 结尾换行必须仍判成「放得下」(标题行是 DIV、没有【展开】)。
+  // 旧实现数出 3 行 → 出展开入口,点开后正文高度不变,是点了没反应的死 toggle。
+  const tnStart = oneLineHtml.indexOf(`data-message-id="${M3}"`);
+  assert.ok(tnStart >= 0, '前提:两行 + 尾随换行的卡片渲染出来了');
+  const tnMarkup = oneLineHtml.slice(tnStart);
+  const tnBody = (tnMarkup.match(/<div[^>]*data-testid="xs-card-body"[^>]*>/) || [''])[0];
+  assert.match(tnBody, /-webkit-line-clamp:2/, '两行 + 尾随换行:仍是两行预览');
+  const tnToggle = (tnMarkup.match(/<[a-z]+[^>]*data-testid="xs-card-toggle"[^>]*>/) || [''])[0];
+  assert.ok(tnToggle && !/^<button/.test(tnToggle) && !/aria-expanded/.test(tnToggle),
+    '两行 + 尾随换行:不应判成可折叠(否则展开后高度不变,变成死 toggle)');
+  assert.ok(!tnMarkup.includes('data-testid="xs-card-expand"'), '两行 + 尾随换行:没有【展开】');
+  console.log('✓ 尾随换行:两行 + 结尾换行不产生死 toggle');
   const bypass = renderFor('bypassPermissions');
   assert.ok(bodyTag(bypass), '前提:卡片渲染出来了');
   assert.doesNotMatch(bodyTag(bypass), /line-clamp/, '「放任」档:正文不折叠');

@@ -53,7 +53,9 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
   const bodyRef = useRef(null);
   const uid = useId();
   const text = typeof body === 'string' ? body : '';
-  const lineCount = text ? text.split('\n').length : 0;
+  // 数行数先去掉**一个**尾随换行:否则「两行 + 结尾换行」会被数成 3 行、判定可折叠,
+  // 点开后正文高度没变(尾随换行不占行),变成点了没反应的死 toggle。
+  const lineCount = text ? text.replace(/\n$/, '').split('\n').length : 0;
   // 折叠态(未展开、也不是「放任」档)**一律**先按两行 clamp —— 只有先夹住,才能量出
   // 「一整段没有换行、按容器宽度折成 >2 行」的情况;否则未 clamp 的节点里 scrollHeight 恒等于
   // clientHeight,overflow 永远是 false,长单段被当成 1 行而不折叠。1 行正文夹两行没有视觉影响。
@@ -64,9 +66,38 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
     const el = bodyRef.current;
     // 展开态 / 「放任」档没有 clamp,量不出真实内容高度;这时**不要**把 overflow 清零,
     // 否则展开一次(或切一次权限档)就把 toggle 弄丢,收起后也回不来。
-    if (!el || noFold || expanded) return;
-    const next = el.scrollHeight > el.clientHeight + 1;
-    setOverflow((prev) => (prev === next ? prev : next));
+    if (!el || noFold || expanded) return undefined;
+    let alive = true;
+    // 每次测量只在判定翻转时 set:ResizeObserver 的回调里同步改 state 会再次触发回调,
+    // 值没变还 set 就可能在「量 → 渲染 → 量」之间空转。
+    const measure = () => {
+      if (!alive || !bodyRef.current) return;
+      const next = el.scrollHeight > el.clientHeight + 1;
+      setOverflow((prev) => (prev === next ? prev : next));
+    };
+    measure();
+    // 折叠判定不能只在挂载 / 展开 / 文本变化时量一次:开分屏、拖窗、收侧栏都会让同一份正文变窄,
+    // 原本两行放得下的段落折成三四行后仍被判成「放得下」→ 两行被裁住却没有展开入口(P1)。
+    // 观察正文节点自己的尺寸:宽度一变就重量(高度由 clamp 固定,宽度变化正是折行发生的地方)。
+    let ro = null;
+    if (typeof ResizeObserver === 'function') {
+      ro = new ResizeObserver(measure);
+      ro.observe(el);
+    } else if (typeof window !== 'undefined') {
+      // 老环境没有 ResizeObserver:退化成窗口 resize(分屏 / 收侧栏这类不触发窗口 resize 的变化就测不到,
+      // 属于已知降级,不静默跳过挂载时的首次测量)。
+      window.addEventListener('resize', measure);
+    }
+    // 字体晚加载会改变行高与折行:就绪后再量一次。卸载(或依赖变化重建)后不再 set。
+    const fontsReady = typeof document !== 'undefined' && document.fonts ? document.fonts.ready : null;
+    if (fontsReady && typeof fontsReady.then === 'function') {
+      fontsReady.then(() => { if (alive) measure(); }).catch(() => {});
+    }
+    return () => {
+      alive = false;
+      if (ro) ro.disconnect();
+      if (typeof window !== 'undefined') window.removeEventListener('resize', measure);
+    };
   }, [text, noFold, expanded]);
   // 正文节点 id 用 useId 派生:分屏里同一条消息会在两个窗格各挂一份,旧的「testid + 消息 id」
   // 会让两处 id 相同、aria-controls 指向同一个节点。useId 每个实例唯一;data-testid 保持不变。
