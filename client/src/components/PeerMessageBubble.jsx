@@ -2,7 +2,7 @@
 // 直播 result.origin(CLI 原生通道)三处是同一个元素;字段口径与标签规则在 utils/xsession.js。
 // 正文是另一个会话的模型输出(不可信):按纯文本显示,不渲染 markdown。没有回滚 / 分叉入口(它不是用户提问)。
 // 不看总开关:它描述已经发生过的事(X.3.7)。
-// r151w:改成与收件箱 / 发送提示同款的居中折叠行(XsNoticeRow),正文默认两行预览,点标题行展开全文。
+// r151w/r151x:改成与收件箱 / 发送提示同款的居中折叠行(XsNoticeRow):折叠态只看标题 + 展开,展开后正文居中。
 import React from 'react';
 import { CornerLeftUp } from './Icon.jsx';
 import { XsNoticeRow } from './XsNoticeRow.jsx';
@@ -59,7 +59,8 @@ export const PeerMessageBubble = React.memo(function PeerMessageBubble({ message
       icon={<CornerLeftUp size={12} className="shrink-0 text-accent" />}
       title={title}
       status={status}
-      body={body ?? PEER_BODY_MISSING}
+      body={body || ''}
+      bodyPlaceholder={PEER_BODY_MISSING}
       className="px-6 py-2"
       innerClassName="max-w-[var(--content-max)] mx-auto"
       animate

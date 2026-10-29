@@ -5,7 +5,7 @@ import {
   Globe, Edit3, Loader2, RotateCcw, Bot, GitBranch, Send, ShieldAlert
 } from './Icon.jsx';
 import { XsNoticeRow } from './XsNoticeRow.jsx';
-import { useXsStore, xsSendNotices, rememberXsSendReceipts } from '../utils/xsession.js';
+import { useXsStore, xsSendNotices, rememberXsSendReceipts, XS_SEND_BODY_MISSING } from '../utils/xsession.js';
 import { ModelBadge, ProviderAvatar, AssistantName } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { cacheHitPct, formatHitPct } from '../utils/cacheStats.js';
@@ -1210,7 +1210,8 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
                 : <Send size={12} className="shrink-0 text-accent" />}
               title={n.title}
               status={n.status}
-              body={n.body}
+              body={n.bodyMissing ? '' : n.body}
+              bodyPlaceholder={n.bodyMissing ? XS_SEND_BODY_MISSING : ''}
               meta={n.metaLines.length ? n.metaLines.map((line, i) => <div key={i}>{line}</div>) : null}
             />
           ))}

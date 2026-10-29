@@ -2,7 +2,8 @@
 // 数据与动作全在 utils/xsession.js;这里只渲染。总开关关着、没有会话、没有待处理或处理中的消息时整块不渲染
 // (输入框在这些情况下与改动前逐字相同,见 tests/unit/check-r151b-baseline-ui.mjs)。
 // 外层容器照权限卡(PermissionPrompt)的同一写法,与它同在输入框上方。
-// r151w:卡片不再是浮起的大块,改用与 TaskNoticeRow 同款的居中折叠行(XsNoticeRow),正文两行预览;
+// r151w/r151x:卡片不再是浮起的大块,改用与 TaskNoticeRow 同款的居中折叠行(XsNoticeRow):
+// 折叠态只有标题行 + 状态 + 展开全文(不显示正文),展开后才显示完整正文并居中;
 // 动作行(处理 / 撤回 / 忽略)留在折叠行里、紧贴标题行,收起状态也能直接点。
 import React, { useEffect, useRef, useState } from 'react';
 import { CornerLeftUp } from './Icon.jsx';
@@ -70,7 +71,8 @@ const XsCard = React.memo(function XsCard({ message, noFold = false, onProcess, 
       expandTestId="xs-card-expand"
       icon={<CornerLeftUp size={12} className="shrink-0 text-accent" />}
       title={title}
-      body={body || '（正文不可用）'}
+      body={body}
+      bodyPlaceholder="（正文不可用）"
       noFold={noFold}
       actions={actions}
       animate

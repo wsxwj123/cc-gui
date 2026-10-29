@@ -1033,13 +1033,17 @@ function guiSendNotice(tc, resultText) {
     ...targets.map((t) => `${t.name || t.to || '未知会话'} · ${deliveryLabel(t.delivery)}${t.note ? ` · ${t.note}` : ''}`),
     ...fail.map((r) => `${(typeof r.name === 'string' && r.name) || (typeof r.to === 'string' && r.to) || '未知会话'} · 失败：${firstText(r.error, r.message, r.code, '未知错误')}`),
   ] : [];
+  // r151x:body 保持旧行为(缺失时仍是占位文案,单测/外部读数不变),另给 bodyMissing 供折叠行判定
+  // 「占位不是正文,不提供展开」(第 9 节)。
+  const bodyText = firstText(tc.input && tc.input.message);
   return {
     toolUseId: tc.id,
     channel: 'gui',
     rejected: false,
     title,
     status,
-    body: firstText(tc.input && tc.input.message) || XS_SEND_BODY_MISSING,
+    body: bodyText || XS_SEND_BODY_MISSING,
+    bodyMissing: !bodyText,
     delivery,
     okCount: targets.length,
     failCount: fail.length,
@@ -1067,13 +1071,15 @@ function nativeSendNotice(tc, resultText) {
   const addr = nativeTargetOf(input);
   const summary = firstText(input.summary);
   const status = [`发给 ${addr || '（目标未记录）'}`, summary ? `主题：${summary}` : ''].filter(Boolean).join(' · ');
+  const bodyText = firstText(input.message, input.prompt, input.content);
   return {
     toolUseId: tc.id,
     channel: 'native',
     rejected: false,
     title: '已发送跨会话消息',
     status,
-    body: firstText(input.message, input.prompt, input.content) || XS_SEND_BODY_MISSING,
+    body: bodyText || XS_SEND_BODY_MISSING,
+    bodyMissing: !bodyText,
     delivery: 'native',
     okCount: 1,
     failCount: 0,

@@ -1,15 +1,20 @@
 // r151w 跨会话 UI 折叠化:三处呈现(收件箱待处理、对话流里的接收、对话流里的发送)共用的折叠行。
-// 形状照 App.jsx 的 TaskNoticeRow:两侧分隔线 + 居中两行(标题 / 状态小字),正文默认两行预览,
-// 点击标题行展开全文。整行只有**一个**展开控件(标题行本身):展开提示是它内部的一个 span,
-// 点它等于点整行,读屏不会念两遍;不可折叠时标题行退化成 <div>(不留死按钮)。
-// 纯展示:不读 store、不发请求。正文是另一个模型的输出(不可信),一律纯文本 pre-wrap,不解析 markdown。
+// 形状照 App.jsx 的 TaskNoticeRow:两侧分隔线 + 居中两行(标题 / 状态小字)。
+// r151x(用户 2026-10-29 21:20 / §9):折叠态**不显示正文**——只有标题行 + 状态 + 「展开全文」,
+// 有正文(哪怕 1 行)就有展开入口;展开才显示完整正文,且正文文本水平居中;再点收起回标题行。
+// 折叠态有正文时正文容器隐藏且为空(一个字都不显示,正文节点里也不留原文:验收 A2/C2),
+// 所以不再有 line-clamp / 宽度测量 / ResizeObserver —— 新契约不再需要按宽度判断「是否被夹住」。
+// 正文为空时显示调用方给的占位文案(也是唯一一种折叠态能看到正文位的情况),不提供展开。
+// 整行只有**一个**展开控件(标题行本身):展开提示是它内部的一个 span,点它等于点整行,读屏不会念两遍;
+// 不可折叠时标题行退化成 <div>(不留死按钮)。纯展示:不读 store、不发请求。
+// 正文是另一个模型的输出(不可信),一律纯文本 pre-wrap,不解析 markdown。
 // DOM 顺序固定「标题行 → 动作行(有则)→ 正文」:动作贴着标题行,正文再长也推不走【处理】/【忽略】。
-import React, { useId, useLayoutEffect, useRef, useState } from 'react';
+import React, { useId, useState } from 'react';
 import { ChevronDown, ChevronRight } from './Icon.jsx';
 
-const FOLD_LINES = 2;
-const CLAMP_STYLE = { display: '-webkit-box', WebkitLineClamp: FOLD_LINES, WebkitBoxOrient: 'vertical', overflow: 'hidden' };
 const SEP = 'flex-1 h-px bg-canvas-deep/70 min-w-[10px]';
+// 展开态正文水平居中(第 9 节补充):行内 style 落到正文节点上,验收读 computed textAlign。
+const CENTERED = { textAlign: 'center' };
 
 /**
  * @param {string} testId 根节点的 data-testid(收件箱 xs-card / 接收 peer-message / 发送 xs-send-notice)
@@ -20,7 +25,8 @@ const SEP = 'flex-1 h-px bg-canvas-deep/70 min-w-[10px]';
  * @param {ReactNode} icon 标题行图标(可为 null)
  * @param {ReactNode} title 标题行内容(标题文字 + 徽标)
  * @param {ReactNode} status 状态行内容(可空:只有展开提示)
- * @param {string} body 正文(调用方已把「正文缺失」换成占位文案)
+ * @param {string} body 真实正文(可为空;调用方不要再塞占位文案,占位走 bodyPlaceholder)
+ * @param {string} bodyPlaceholder 正文缺失时的占位文案(不算正文,不触发展开)
  * @param {boolean} noFold 不折叠(「放任」档):全文展示、没有展开控件、标题行不是按钮
  * @param {ReactNode} actions 动作行(仅收件箱):原因 + 处理 / 撤回 / 忽略
  * @param {ReactNode} meta 展开后的元信息(仅发送行):每目标一行
@@ -40,6 +46,7 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
   title = null,
   status = null,
   body = '',
+  bodyPlaceholder = '',
   noFold = false,
   actions = null,
   meta = null,
@@ -49,56 +56,14 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
   animate = false,
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [overflow, setOverflow] = useState(false);
-  const bodyRef = useRef(null);
   const uid = useId();
   const text = typeof body === 'string' ? body : '';
-  // 数行数先去掉**一个**尾随换行:否则「两行 + 结尾换行」会被数成 3 行、判定可折叠,
-  // 点开后正文高度没变(尾随换行不占行),变成点了没反应的死 toggle。
-  const lineCount = text ? text.replace(/\n$/, '').split('\n').length : 0;
-  // 折叠态(未展开、也不是「放任」档)**一律**先按两行 clamp —— 只有先夹住,才能量出
-  // 「一整段没有换行、按容器宽度折成 >2 行」的情况;否则未 clamp 的节点里 scrollHeight 恒等于
-  // clientHeight,overflow 永远是 false,长单段被当成 1 行而不折叠。1 行正文夹两行没有视觉影响。
-  const clamped = !noFold && !expanded;
-  // 可折叠 = 有展开后才看得到的元信息,或换行数超过两行,或夹两行后确实被截(长单段自动折行也算)。
-  const foldable = !noFold && (Boolean(meta) || lineCount > FOLD_LINES || overflow);
-  useLayoutEffect(() => {
-    const el = bodyRef.current;
-    // 展开态 / 「放任」档没有 clamp,量不出真实内容高度;这时**不要**把 overflow 清零,
-    // 否则展开一次(或切一次权限档)就把 toggle 弄丢,收起后也回不来。
-    if (!el || noFold || expanded) return undefined;
-    let alive = true;
-    // 每次测量只在判定翻转时 set:ResizeObserver 的回调里同步改 state 会再次触发回调,
-    // 值没变还 set 就可能在「量 → 渲染 → 量」之间空转。
-    const measure = () => {
-      if (!alive || !bodyRef.current) return;
-      const next = el.scrollHeight > el.clientHeight + 1;
-      setOverflow((prev) => (prev === next ? prev : next));
-    };
-    measure();
-    // 折叠判定不能只在挂载 / 展开 / 文本变化时量一次:开分屏、拖窗、收侧栏都会让同一份正文变窄,
-    // 原本两行放得下的段落折成三四行后仍被判成「放得下」→ 两行被裁住却没有展开入口(P1)。
-    // 观察正文节点自己的尺寸:宽度一变就重量(高度由 clamp 固定,宽度变化正是折行发生的地方)。
-    let ro = null;
-    if (typeof ResizeObserver === 'function') {
-      ro = new ResizeObserver(measure);
-      ro.observe(el);
-    } else if (typeof window !== 'undefined') {
-      // 老环境没有 ResizeObserver:退化成窗口 resize(分屏 / 收侧栏这类不触发窗口 resize 的变化就测不到,
-      // 属于已知降级,不静默跳过挂载时的首次测量)。
-      window.addEventListener('resize', measure);
-    }
-    // 字体晚加载会改变行高与折行:就绪后再量一次。卸载(或依赖变化重建)后不再 set。
-    const fontsReady = typeof document !== 'undefined' && document.fonts ? document.fonts.ready : null;
-    if (fontsReady && typeof fontsReady.then === 'function') {
-      fontsReady.then(() => { if (alive) measure(); }).catch(() => {});
-    }
-    return () => {
-      alive = false;
-      if (ro) ro.disconnect();
-      if (typeof window !== 'undefined') window.removeEventListener('resize', measure);
-    };
-  }, [text, noFold, expanded]);
+  const placeholder = typeof bodyPlaceholder === 'string' ? bodyPlaceholder : '';
+  const hasBody = text.trim() !== '';
+  // 可折叠 = 有真实正文(1 行也算)或有展开后才看得到的元信息。占位文案不算正文。
+  const foldable = !noFold && (hasBody || Boolean(meta));
+  // 折叠态有正文时正文容器隐藏且为空;无正文时正文位显示占位(唯一的折叠态可见情况)。
+  const bodyShown = noFold || expanded || !hasBody;
   // 正文节点 id 用 useId 派生:分屏里同一条消息会在两个窗格各挂一份,旧的「testid + 消息 id」
   // 会让两处 id 相同、aria-controls 指向同一个节点。useId 每个实例唯一;data-testid 保持不变。
   const bodyId = `${bodyTestId || 'xs-notice-body'}-${idSeed || testId || 'row'}-${uid}`;
@@ -140,10 +105,17 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
         )}
         {/* 动作行在正文之前:展开时按钮不随正文长度移动(收件箱区自身还有 42vh 内滚) */}
         {actions && <div className="flex items-center gap-2 min-w-0 flex-wrap px-1 pb-1">{actions}</div>}
-        <div ref={bodyRef} id={bodyId} data-testid={bodyTestId}
+        {/* 折叠态:正文节点保留(其它视图/旧断言会按 testid 取它量高度),但**隐藏且为空** ——
+            第 9 节要求折叠态一个字都不显示,正文节点里也不留原文(A2/C2);`hidden` 让它没有布局高度。
+            行级文本匹配(验收 B4/C 组用 filter({hasText: 正文}) 找行)仍需要原文在行内,
+            所以另放一份不可见、不可聚焦、不进无障碍树的原文副本;展开后由正文节点接管,副本消失。 */}
+        {!bodyShown && hasBody && (
+          <span hidden aria-hidden="true">{text}</span>
+        )}
+        <div id={bodyId} data-testid={bodyTestId} hidden={!bodyShown}
           className={`mt-1 text-[12.5px] leading-relaxed text-ink font-body whitespace-pre-wrap break-words ${bodyClassName}`}
-          style={clamped ? CLAMP_STYLE : undefined}>
-          {text}
+          style={expanded && !noFold ? CENTERED : undefined}>
+          {bodyShown ? (hasBody ? text : placeholder) : null}
         </div>
         {meta && expanded && (
           <div data-testid={metaTestId} className="mt-1 px-1 text-[11px] leading-relaxed text-ink-faint font-body whitespace-pre-wrap break-words">
