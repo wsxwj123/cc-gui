@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // r151b 审计后修复:卡片区真组件渲染(esbuild 打包 + react-dom/server,同 check-r151b-baseline-ui 的做法)。
-//   · S6 r151y:权限档不再影响卡片呈现 —— 「放任」档与其它档一致:折叠、有【展开全文】,
-//         展开后才显示（居中）完整正文,再点收起。经 ChatInput 按 permissionModeBySession 渲染。
+//   · S6 r151y/r151z:权限档不再影响卡片呈现 —— 「放任」档与其它档一致:折叠、有【展开全文】,
+//         展开后正文是窄块居中 + 块内两端对齐,再点收起。经 ChatInput 按 permissionModeBySession 渲染。
 //   · F1:"处理这条消息"已排在前端队列里时,卡片原因为"已排队，当前回合结束后处理",【处理】不可点,【忽略】可点。
 //   · r151w/r151x:卡片是与 TaskNoticeRow 同款的居中折叠行 —— 折叠态只有标题行 + 展开(不渲染正文节点),
 //         标题行是唯一的展开控件(button + aria-expanded/aria-controls)、动作行紧跟标题行(展开时按钮不被正文推走)。
@@ -191,7 +191,7 @@ try {
   assert.match(bypassToggle, /aria-expanded="false"/, '「放任」档:默认收起');
   const bypassToggleOpen = bypassMarkup.slice(bypassMarkup.indexOf('data-testid="xs-card-toggle"'), bypassMarkup.indexOf('</button>', bypassMarkup.indexOf('data-testid="xs-card-toggle"')));
   assert.ok(bypassToggleOpen.includes('展开全文'), '「放任」档:折叠态提示「展开全文」');
-  // 展开态(直接渲染折叠行并把初始 expanded 置 true):完整正文可见、居中、控件变「收起」。
+  // 展开态(直接渲染折叠行并把初始 expanded 置 true):完整正文可见、是窄块居中 + 块内两端对齐、控件变「收起」。
   // 交互点击(展开→收起)由验收 B5 覆盖;这里锁住展开后的 DOM 形状。
   const forceExpanded = (fn) => {
     const orig = r.React.useState;
@@ -206,12 +206,21 @@ try {
   const [expandedTag, expandedInner] = bodyDiv(expandedHtml);
   assert.ok(expandedTag && !/hidden=""/.test(expandedTag), '「放任」档展开后:正文容器可见');
   assert.ok(expandedInner.includes('第 12 行'), '「放任」档展开后:显示完整正文');
-  assert.match(expandedTag, /text-align:center/, '「放任」档展开后:正文水平居中');
+  // r151z(用户 2026-10-30 修正):旧「每行文字居中」作废 —— 正文块 ≤ 行内容宽 92%(SSR 用 82%)、
+  // 块整体水平居中(margin auto),块内 text-align:justify。SSR 只有 DOM 形状,实际像素判据由验收 A11/B5 覆盖。
+  assert.match(expandedTag, /max-width:82%/, '「放任」档展开后:正文块是窄块(max-width:82%)');
+  assert.match(expandedTag, /margin-left:auto/, '「放任」档展开后:正文块左边距 auto(块整体居中)');
+  assert.match(expandedTag, /margin-right:auto/, '「放任」档展开后:正文块右边距 auto(块整体居中)');
+  assert.match(expandedTag, /text-align:justify/, '「放任」档展开后:块内文字两端对齐(不是 text-align:center)');
+  assert.ok(!/text-align:center/.test(expandedTag), '「放任」档展开后:不再用每行文字居中(text-align:center)');
   assert.ok(!/<span hidden="" aria-hidden="true">/.test(expandedHtml), '「放任」档展开后:不再需要不可见原文副本');
   const expandedToggle = toggleTag(expandedHtml);
+  // 只有正文块变窄:标题行(唯一展开控件)与动作行仍是整行,不能被一起收窄。
+  assert.ok(!/max-width:82%/.test(expandedToggle), '「放任」档展开后:标题行不跟着变窄');
+  assert.ok(!/text-align:justify/.test(expandedToggle), '「放任」档展开后:标题行不被两端对齐');
   assert.match(expandedToggle, /aria-expanded="true"/, '「放任」档展开后:aria-expanded=true');
   assert.ok(expandedHtml.includes('收起'), '「放任」档展开后:控件变「收起」(可收起)');
-  console.log('✓ S6 r151y:「放任」档与其它档一致:折叠 + 【展开全文】,展开后全文居中、可收起');
+  console.log('✓ S6 r151y/r151z:「放任」档与其它档一致:折叠 + 【展开全文】,展开后正文窄块居中 + 两端对齐、可收起');
 
   // ── F1 卡片排队态 ──
   let html = renderFor('default');

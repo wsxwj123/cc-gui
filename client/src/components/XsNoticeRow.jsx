@@ -1,7 +1,9 @@
 // r151w 跨会话 UI 折叠化:三处呈现(收件箱待处理、对话流里的接收、对话流里的发送)共用的折叠行。
 // 形状照 App.jsx 的 TaskNoticeRow:两侧分隔线 + 居中两行(标题 / 状态小字)。
 // r151x(用户 2026-10-29 21:20 / §9):折叠态**不显示正文**——只有标题行 + 状态 + 「展开全文」,
-// 有正文(哪怕 1 行)就有展开入口;展开才显示完整正文,且正文文本水平居中;再点收起回标题行。
+// 有正文(哪怕 1 行)就有展开入口;展开才显示完整正文;再点收起回标题行。
+// r151z(用户 2026-10-30 修正):展开正文**不是每行文字各自居中**,而是正文块明显窄于该行、整体水平居中,
+// 块内文字两端对齐(justify);标题 / 状态 / 动作仍占整行,只有正文块变窄。
 // 折叠态有正文时正文容器隐藏且为空(一个字都不显示,正文节点里也不留原文:验收 A2/C2),
 // 所以不再有 line-clamp / 宽度测量 / ResizeObserver —— 新契约不再需要按宽度判断「是否被夹住」。
 // 正文为空时显示调用方给的占位文案(也是唯一一种折叠态能看到正文位的情况),不提供展开。
@@ -15,8 +17,10 @@ import React, { useId, useState } from 'react';
 import { ChevronDown, ChevronRight } from './Icon.jsx';
 
 const SEP = 'flex-1 h-px bg-canvas-deep/70 min-w-[10px]';
-// 展开态正文水平居中(第 9 节补充):行内 style 落到正文节点上,验收读 computed textAlign。
-const CENTERED = { textAlign: 'center' };
+// 展开态正文:行内 style 落到正文节点上(验收读 computed text-align / 块宽与左右留白)。
+// 块宽上限 82% 是相对正文容器宽度的约束(≈行内容宽),保证验收的「块宽 ≤ 行内容宽 × 0.92」;
+// margin auto 让这一块整体水平居中,text-align:justify 让块内非末行铺满块宽;末行按 justify 默认不拉伸。
+const JUSTIFIED_BLOCK = { maxWidth: '82%', marginLeft: 'auto', marginRight: 'auto', textAlign: 'justify' };
 
 /**
  * @param {string} testId 根节点的 data-testid(收件箱 xs-card / 接收 peer-message / 发送 xs-send-notice)
@@ -114,7 +118,7 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
         )}
         <div id={bodyId} data-testid={bodyTestId} hidden={!bodyShown}
           className={`mt-1 text-[12.5px] leading-relaxed text-ink font-body whitespace-pre-wrap break-words ${bodyClassName}`}
-          style={expanded ? CENTERED : undefined}>
+          style={expanded ? JUSTIFIED_BLOCK : undefined}>
           {bodyShown ? (hasBody ? text : placeholder) : null}
         </div>
         {meta && expanded && (

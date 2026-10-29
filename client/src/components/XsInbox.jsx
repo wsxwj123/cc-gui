@@ -3,7 +3,7 @@
 // (输入框在这些情况下与改动前逐字相同,见 tests/unit/check-r151b-baseline-ui.mjs)。
 // 外层容器照权限卡(PermissionPrompt)的同一写法,与它同在输入框上方。
 // r151w/r151x:卡片不再是浮起的大块,改用与 TaskNoticeRow 同款的居中折叠行(XsNoticeRow):
-// 折叠态只有标题行 + 状态 + 展开全文(不显示正文),展开后才显示完整正文并居中;
+// 折叠态只有标题行 + 状态 + 展开全文(不显示正文),展开后才显示完整正文(窄块居中 + 块内两端对齐);
 // 动作行(处理 / 撤回 / 忽略)留在折叠行里、紧贴标题行,收起状态也能直接点。
 // r151y:「放任」档不再例外 —— 所有权限档都折叠,正文不摊开(旧的 noFold / 审计 S6 约定作废)。
 import React, { useEffect, useRef, useState } from 'react';

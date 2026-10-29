@@ -2,7 +2,8 @@
 // 直播 result.origin(CLI 原生通道)三处是同一个元素;字段口径与标签规则在 utils/xsession.js。
 // 正文是另一个会话的模型输出(不可信):按纯文本显示,不渲染 markdown。没有回滚 / 分叉入口(它不是用户提问)。
 // 不看总开关:它描述已经发生过的事(X.3.7)。
-// r151w/r151x:改成与收件箱 / 发送提示同款的居中折叠行(XsNoticeRow):折叠态只看标题 + 展开,展开后正文居中。
+// r151w/r151x/r151z:改成与收件箱 / 发送提示同款的居中折叠行(XsNoticeRow):折叠态只看标题 + 展开,
+// 展开后正文是一块比行窄、整体居中、块内两端对齐的窄块(不是每行文字各自居中)。
 import React from 'react';
 import { CornerLeftUp } from './Icon.jsx';
 import { XsNoticeRow } from './XsNoticeRow.jsx';
