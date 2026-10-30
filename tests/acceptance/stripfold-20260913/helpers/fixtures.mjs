@@ -64,8 +64,8 @@ export const A = {
   /** 被折块数 M：group 段里的过程块（3 思考 + 4 工具）。 */
   steps: 7,
   segments: ['group', 'text', 'group', 'text'],
-  /** 摘要行逐字（INTERFACE §I.0 末尾那句）。 */
-  headText: '思考与工具调用 · 9 轮 7 步 · 改完了，跑一遍测试确认没有回归。',
+  /** 摘要行逐字。〈r152a〉末尾改为“最新工具调用的标题”：每轮最后一个工具是 Grep(pattern=ROOT=，无 description) → 「搜索 ROOT=」。 */
+  headText: '思考与工具调用 · 9 轮 7 步 · 搜索 ROOT=',
   /** 只折 group 段 → 收起态下带 hidden 的段数。 */
   foldableCount: 2,
 };
