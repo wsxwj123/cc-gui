@@ -22,7 +22,13 @@ import crypto from 'node:crypto';
 
 const CTL = process.env.CGUI_FAKE_CLAUDE_DIR || path.join(process.env.HOME || '.', 'fake-claude');
 const argv = process.argv.slice(2);
-const argOf = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
+// 参数值两种写法都认：`--resume <id>`（分开）与 `--resume=<id>`（带等号；服务端实际用的是这种）。
+const argOf = (n) => {
+  const i = argv.indexOf(n);
+  if (i >= 0) return argv[i + 1];
+  const eq = argv.find((a) => a.startsWith(`${n}=`));
+  return eq === undefined ? undefined : eq.slice(n.length + 1);
+};
 
 // 版本/帮助探测要立刻答完并退出（留着挂住会把 CLI 探测拖到超时）。
 if (argv.includes('--version') || argv.includes('-v')) { console.log('99.0.0 (Claude Code)'); process.exit(0); }
@@ -33,6 +39,8 @@ const cwd = process.cwd();
 // GUI 会另起一个 CLI（cwd 形如 /tmp/cgui-title-*）只为给新会话起标题：它不该吃场景事件、也不该往转写里落盘
 // （落盘会在侧栏多出一个名叫 cgui-title-* 的“项目”，把夹具项目挤掉）。
 const TITLE_GEN = /cgui-title-/.test(cwd);
+// 诊断：每次启动落一行（argv / 取到的会话 id / cwd），放在 CTL 目录之外，不会被各用例的 resetCtl 清掉。
+try { fs.appendFileSync(path.join(path.dirname(CTL), 'fake-claude-spawn.jsonl'), `${JSON.stringify({ argv, sid, cwd, titleGen: TITLE_GEN })}\n`); } catch { /* 忽略 */ }
 const PROJ = path.join(process.env.HOME || '.', '.claude', 'projects', cwd.replace(/[/\\]/g, '-'));
 const TRANSCRIPT = path.join(PROJ, `${sid}.jsonl`);
 const MODEL = 'claude-sonnet-4-6';
