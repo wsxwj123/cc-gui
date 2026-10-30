@@ -183,7 +183,10 @@ export function stripSummary(blocks, usageCalls) {
 //      Read 读取 / Edit、MultiEdit 编辑 / Write 新建 <文件名>;Grep 搜索、Glob 查找文件 <pattern>;
 //      WebFetch 抓取 <url>;WebSearch 搜索网页 <query>
 //   ③ 其它工具:入参 summary,再 title
-// 取到后与思考尾句同一套清洗(cleanTailText:剥成对记号 → 空白折叠 → 按码点截到 60 + …)。
+// 清洗按来源分两类(两类都按码点截到 60 + …):
+//   说明性文字(① description、③ summary / title)是模型写的句子,走思考尾句那套 cleanTailText
+//   (剥成对记号 → 空白折叠);其余(命令首行、文件名、pattern、url、query 与拼好的"动词 + 对象")
+//   是内容本身,星号 / 反引号 / 下划线都有含义(`src/**/*.test.*`、echo `date`),只折叠空白、不去记号。
 // 取不到真标题 → null,由调用方决定沿用上一个工具的标题还是退回工具名(toolDisplayName)。
 // 标题在渲染路径上,不许抛:入参不是对象 / 字段不是字符串 / 无原型对象一律当"取不到"。
 const TOOL_TITLE_MAX = 60;
@@ -200,14 +203,16 @@ function pathBaseName(p) {
   return parts.length ? parts[parts.length - 1] : null;
 }
 
+// 返回 { text, prose } 或 null:prose = 说明性文字(决定清洗时去不去成对记号,见上)。
 function rawToolTitle(name, input) {
   const description = nonBlankString(input.description);
-  if (description) return description;
-  const verbObject = (verb, object) => (object ? `${verb} ${object}` : null);
+  if (description) return { text: description, prose: true };
+  const literal = (text) => (text ? { text, prose: false } : null);
+  const verbObject = (verb, object) => literal(object ? `${verb} ${object}` : null);
   switch (name) {
     case 'Bash': {
       const command = nonBlankString(input.command);
-      return command ? command.split(/[\r\n]+/).map((l) => l.trim()).find(Boolean) || null : null;
+      return literal(command ? command.split(/[\r\n]+/).map((l) => l.trim()).find(Boolean) || null : null);
     }
     case 'Read': return verbObject('读取', pathBaseName(input.file_path));
     case 'Edit':
@@ -217,8 +222,23 @@ function rawToolTitle(name, input) {
     case 'Glob': return verbObject('查找文件', nonBlankString(input.pattern));
     case 'WebFetch': return verbObject('抓取', nonBlankString(input.url));
     case 'WebSearch': return verbObject('搜索网页', nonBlankString(input.query));
-    default: return nonBlankString(input.summary) || nonBlankString(input.title);
+    default: {
+      const text = nonBlankString(input.summary) || nonBlankString(input.title);
+      return text ? { text, prose: true } : null;
+    }
   }
+}
+
+// 非说明性文字的清洗:String 转换不抛 → 连续空白折叠成一个空格 → trim → 按码点截到 max + …;
+// 不去任何记号(与 cleanTailText 的区别只在这一点)。清洗后为空 → null。
+function cleanLiteralText(src, max) {
+  if (src == null) return null;
+  let raw;
+  try { raw = String(src); } catch { return null; }
+  const flat = raw.replace(/\s+/g, ' ').trim();
+  if (!flat) return null;
+  const cps = Array.from(flat);
+  return cps.length > max ? cps.slice(0, max).join('') + '…' : flat;
 }
 
 export function toolTitle(toolCall) {
@@ -227,7 +247,8 @@ export function toolTitle(toolCall) {
     const input = toolCall.input;
     if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
     const raw = rawToolTitle(typeof toolCall.name === 'string' ? toolCall.name : '', input);
-    return raw ? cleanTailText(raw, TOOL_TITLE_MAX) : null;
+    if (!raw) return null;
+    return raw.prose ? cleanTailText(raw.text, TOOL_TITLE_MAX) : cleanLiteralText(raw.text, TOOL_TITLE_MAX);
   } catch {
     return null;
   }

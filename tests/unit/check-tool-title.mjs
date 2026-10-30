@@ -3,6 +3,8 @@
 // + stripSummary 的 doneTitle / liveTitle(收官与直播两种选法、入参未到沿用、整轮多段拼接)。纯函数,零 DOM。
 // 变异哨兵:description 不再优先 → p1 红;截断上限改回 40 → c3 红;直播改成"恒取最后一个" → s3 红;
 // 入参未到不再沿用上一个 → s5 红;Task 卡也参与选取 → s2 红;思考尾句上限跟着变 → s8 红。
+// r152a 修订:非说明性文字(命令首行 / 文件名 / pattern / url / query)也去记号 → l1 / l2 红;
+// 说明性文字(description、其它工具的 summary / title)不再去记号 → m1–m5 红。
 import assert from 'node:assert/strict';
 import { toolTitle, stripSummary } from '../../client/src/utils/streamStatus.js';
 
@@ -57,6 +59,31 @@ eq(toolTitle(tc('Bash', { description: `${D60}X` })), `${D60}…`, 'c3 61 个码
 eq(toolTitle(tc('Bash', { description: `${'x'.repeat(59)}🙂${'y'.repeat(5)}` })), `${'x'.repeat(59)}🙂…`, 'c4 按码点截,不劈开 emoji');
 eq(toolTitle(tc('Grep', { pattern: 'a\nb' })), '搜索 a b', 'c5 模板拼出的标题同样清洗');
 eq(toolTitle(tc('Bash', { description: '<script>x</script>' })), '<script>x</script>', 'c6 HTML 字符原样当文字');
+
+// ── l 非说明性文字:记号原样保留,只折叠空白 + 按码点截 60 ──
+eq(toolTitle(tc('Glob', { pattern: 'src/**/*.test.*' })), '查找文件 src/**/*.test.*', 'l1 Glob 通配里的星号原样');
+eq(toolTitle(tc('Grep', { pattern: 'function.*foo.*' })), '搜索 function.*foo.*', 'l1 Grep 正则里的 .* 原样');
+eq(toolTitle(tc('Bash', { command: 'find . -name "*.js" -o -name "*.ts"' })), 'find . -name "*.js" -o -name "*.ts"', 'l1 命令首行里的星号原样');
+eq(toolTitle(tc('Bash', { command: 'echo `date` and `whoami`' })), 'echo `date` and `whoami`', 'l1 命令首行里的反引号原样');
+eq(toolTitle(tc('Read', { file_path: '/p/__init__.py' })), '读取 __init__.py', 'l2 文件名里的下划线原样');
+eq(toolTitle(tc('Write', { file_path: '/p/~~old~~.md' })), '新建 ~~old~~.md', 'l2 文件名里的波浪线原样');
+eq(toolTitle(tc('WebSearch', { query: '**bold** _x_ `y`' })), '搜索网页 **bold** _x_ `y`', 'l2 query 里的成对记号也原样');
+eq(toolTitle(tc('WebFetch', { url: 'https://e.com/a_b_c/*x*' })), '抓取 https://e.com/a_b_c/*x*', 'l2 url 原样');
+eq(toolTitle(tc('Bash', { command: '  ls \t  -la   \t /tmp  \nnext' })), 'ls -la /tmp', 'l3 命令首行里多个空白 / 制表符折叠成一个空格');
+eq(toolTitle(tc('Grep', { pattern: 'a\t\t  *b*' })), '搜索 a *b*', 'l3 pattern 里的制表符折叠、星号原样');
+{
+  const C70 = `${'*'.repeat(10)}${'x'.repeat(60)}`;
+  eq(toolTitle(tc('Bash', { command: C70 })), `${'*'.repeat(10)}${'x'.repeat(50)}…`, 'l4 非说明性文字超过 60 码点 → 前 60 + …(星号原样计入)');
+  eq(toolTitle(tc('Glob', { pattern: 'y'.repeat(60) })), `查找文件 ${'y'.repeat(55)}…`, 'l4 拼上动词前缀后整串按 60 截');
+  eq(toolTitle(tc('Bash', { command: `${'x'.repeat(59)}🙂${'y'.repeat(5)}` })), `${'x'.repeat(59)}🙂…`, 'l4 按码点截,不劈开 emoji');
+}
+
+// ── m 说明性文字仍去成对记号 ──
+eq(toolTitle(tc('Bash', { command: 'ls *.md', description: '跑 **粗** 与 `码`' })), '跑 粗 与 码', 'm1 description 去成对记号');
+eq(toolTitle(tc('Read', { file_path: '/a/b.md', description: '读 `b.md` 的 _说明_' })), '读 b.md 的 说明', 'm2 非 Bash 的 description 同样去记号');
+eq(toolTitle(tc('CustomTool', { summary: '**摘要** 里 `码` 与 ~~删~~' })), '摘要 里 码 与 删', 'm3 其它工具 summary 去成对记号');
+eq(toolTitle(tc('CustomTool', { title: '_标题_ 与 *强*' })), '标题 与 强', 'm4 其它工具 title 去成对记号');
+eq(toolTitle(tc('mcp__srv__x', { summary: '`a` 与 **b**' })), 'a 与 b', 'm5 MCP 工具的 summary 也是说明性文字');
 
 // ── b 坏入参不抛,退回 null / 工具名 ──
 for (const bad of [null, undefined, 0, 'Bash', [], Object.create(null)]) {
