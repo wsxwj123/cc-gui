@@ -42,12 +42,14 @@ const USER_TEXT = '帮我看看登录页为什么白屏';
   assert.equal(xsAutoTitlePrompt(XS_PROMPT_PLACEHOLDER, { xsProcess: PROC }), '', '不靠 hiddenUserMessage 判定');
   // 字段残缺(不会发出,见 check-r151b-xs-claim-late):prompt 仍是占位,同样不当标题素材
   assert.equal(xsAutoTitlePrompt(XS_PROMPT_PLACEHOLDER, { hiddenUserMessage: true, xsProcess: { messageId: MID } }), '');
-  // 普通发送(含别的隐藏消息):原样返回,行为与改动前相同
+  // r151v:别的隐藏消息(这里是工具重做的 opts 形态)同样不当标题素材
+  assert.equal(xsAutoTitlePrompt(USER_TEXT, { hiddenUserMessage: true, appendSystemPrompt: 'x' }), '', '隐藏消息(工具重做的 opts 形态)返回空');
+  // 普通发送:原样返回,行为与改动前相同
   for (const opts of [undefined, {}, { meta: { displayText: USER_TEXT } }, { steer: true }, { reattachPid: 4321 },
-    { hiddenUserMessage: true, appendSystemPrompt: 'x' }, { xsProcess: null }]) {
+    { xsProcess: null }]) {
     assert.equal(xsAutoTitlePrompt(USER_TEXT, opts), USER_TEXT, `普通发送 opts=${JSON.stringify(opts)}`);
   }
-  console.log('✓ xsAutoTitlePrompt:带 xsProcess(点卡片处理)返回空,其余原样返回 prompt');
+  console.log('✓ xsAutoTitlePrompt:带 xsProcess(点卡片处理)或 hiddenUserMessage(隐藏发送)返回空,其余原样返回 prompt');
 }
 
 // ── 2. 前端所有自动标题触发都经同一个判定 ──
