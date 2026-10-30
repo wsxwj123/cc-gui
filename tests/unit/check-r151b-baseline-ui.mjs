@@ -104,7 +104,8 @@ const EXPECTED = {
   // r151n:操作行「重做/分叉」标签新增 cgui-action-label class(分屏图标化的 CSS 钩子),纯 class 增加,
   // 文本/testid/cgui 不变;r151n 锁定验收 S1 覆盖真实渲染行为。
   'turn-text': { testids: [], cgui: [], len: 3522, sha: '30729ccab5f6205c' },
-  'turn-tool': { testids: [], cgui: [], len: 5735, sha: 'f3d5082ad132818d' },
+  // r152a 重录:折叠条头行末尾加了最新工具标题(` · 读取 a.txt`,+11 字符),其余逐字不变。
+  'turn-tool': { testids: [], cgui: [], len: 5746, sha: '2d665a4332de5bc0' },
   'input-idle': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'send-btn'], len: 3333, sha: '7e99c29e2c559931' },
   'input-streaming': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'queue-btn', 'stop-btn'], len: 4099, sha: '992c6c419dcae4ff' },
   sidebar: { testids: ['session-actions-btn'], cgui: ['add-project-btn', 'new-session-btn', 'project-row', 'session-actions', 'session-row', 'sidebar', 'sidebar-search'], len: 8338, sha: '71538d6ce1e7c510' },

@@ -36,6 +36,7 @@ import { Linkify } from '../utils/linkify.jsx';
 import { ToolResultImages } from './tools/ToolResultImages.jsx';
 import { usePricingVersion } from '../hooks/usePricingVersion.js';
 import { XsForwardButton } from './XsForwardDialog.jsx';
+import { ElapsedTime } from './LoadingBits.jsx';
 
 // Tools that get their own bespoke inline card (rendered in chronological order
 // inside the turn). Anything not in this set falls through to ToolCallsGroup,
@@ -581,6 +582,9 @@ export const StripAutoContext = React.createContext(false);      // true = 本�
 export const StripHeadlessContext = React.createContext(false);  // true = 不渲染摘要行(⚡并入的非首段)
 export const StripSummaryContext = React.createContext(null);    // 整轮摘要覆盖(⚡在途,首段用)
 export const StripUsageCallsContext = React.createContext(null); // 本轮 usageCalls(直播期恒 null)
+// r152a:本回合起流时刻(折叠条右侧的整回合用时)。只有正在生成的回合给值,其余(历史轮、
+// 子代理窗口)都是 null → 不挂计时器、不显示用时。
+export const StripStartedAtContext = React.createContext(null);
 
 // ─── CoworkBlocks:母会话 + 子代理共用的有序 blocks 渲染(单一渲染路径)──
 // 非聊天模式 → cowork 分组折叠(WorkGroup);聊天模式 → 维持现状(思考小折叠 +
@@ -606,6 +610,7 @@ export function CoworkBlocks({
   const stripHeadless = useContext(StripHeadlessContext);
   const injectedSummary = useContext(StripSummaryContext);
   const usageCalls = useContext(StripUsageCallsContext);
+  const stripStartedAt = useContext(StripStartedAtContext);
   // 点开工作流内层助手:卡片只负责水合并回调,落到哪个窗格由这里定(与 TaskCard 的
   // openAgentView 同款,取渲染所在/焦点 pane)——卡片自己读 activeTabIndex 会分屏串扰。
   const openWfAgent = (key) => { const st = useStore.getState(); st.setViewingAgent(st.activeTabIndex, key); };
@@ -692,10 +697,13 @@ export function CoworkBlocks({
   // 自动态 = 异常收尾整轮展开 ∨ 正在生成 ∨ 开关关闭(r122 起默认关 → 已结束的回合也保持展开);
   // 用户手动点过摘要行(stripOpen 非 null)则以手动为准,只影响本轮。
   const open = stripOpen === null ? (stripAutoCtx || isLive || !autoFold) : stripOpen;
+  // 末尾(r152a):可折段里有工具 → 最新工具调用的标题(生成中 / 已结束两种口径,见 stripSummary);
+  // 一个工具都没有 → 仍是思考预览。
+  const headTail = (isLive ? summary.liveTitle : summary.doneTitle) ?? summary.tail;
   const headText = [
     '思考与工具调用',
     summary.rounds == null ? `${summary.steps} 步` : `${summary.rounds} 轮 ${summary.steps} 步`,
-    ...(summary.tail ? [summary.tail] : []),
+    ...(headTail ? [headTail] : []),
   ].join(' · ');
   const out = segments.map((seg) => {
     const foldable = isFoldableSegment(seg);
@@ -764,6 +772,7 @@ export function CoworkBlocks({
         <button
           type="button"
           data-strip="head"
+          data-strip-live={isLive ? 'true' : undefined}
           aria-expanded={open ? 'true' : 'false'}
           title="展开/收起这一轮的过程"
           onClick={() => setStripOpen(!open)}
@@ -772,8 +781,14 @@ export function CoworkBlocks({
           {open
             ? <ChevronDown size={13} className="text-ink-faint shrink-0" />
             : <ChevronRight size={13} className="text-ink-faint shrink-0" />}
-          <Wrench size={13} className="text-ink-muted shrink-0" />
+          {/* r152a:生成中扳手换成 4 点动画、右侧挂整回合用时;回合结束两者都撤掉(历史轮不挂定时器)。 */}
+          {isLive
+            ? <span data-strip-dots className="strip-live-dots text-accent shrink-0" aria-hidden="true"><span /><span /><span /><span /></span>
+            : <Wrench size={13} className="text-ink-muted shrink-0" />}
           <span className="text-xs text-ink-soft font-body truncate min-w-0">{headText}</span>
+          {isLive && stripStartedAt ? (
+            <span data-strip-elapsed className="ml-auto shrink-0 text-xs"><ElapsedTime startedAt={stripStartedAt} /></span>
+          ) : null}
         </button>
       )}
       {out}{trailing}
@@ -1086,6 +1101,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
               <StripHeadlessContext.Provider value={!!round.headless}>
               <StripSummaryContext.Provider value={round.summary || null}>
               <StripUsageCallsContext.Provider value={Array.isArray(turn.usageCalls) ? turn.usageCalls : null}>
+              <StripStartedAtContext.Provider value={isLiveStream ? (turn.startedAt ?? null) : null}>
               <CoworkBlocks
                 blocks={renderBlocks}
                 isLive={isLiveStream}
@@ -1097,6 +1113,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
                 chatFoldBar={chatFoldBar}
                 chatUnfoldBar={chatUnfoldBar}
               />
+              </StripStartedAtContext.Provider>
               </StripUsageCallsContext.Provider>
               </StripSummaryContext.Provider>
               </StripHeadlessContext.Provider>

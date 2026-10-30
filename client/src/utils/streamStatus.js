@@ -150,21 +150,128 @@ export function isFoldableSegment(seg) {
 //           task/workflow/skill/skilldoc 段里的块不计入 —— 它们不参与折叠,计进去会让
 //           "展开后能看到的东西"与这个数字对不上账。
 //   tail  : 位置判据取的末句(见下),取不到 → null
+//   doneTitle / liveTitle(r152a):可折段里「最新工具调用」的标题,回合已结束 / 回合在生成两种
+//           口径(见 latestToolTitles);可折段里一个工具都没有 → 都是 null(调用方回落 tail)。
 export function stripSummary(blocks, usageCalls) {
   const list = Array.isArray(blocks) ? blocks : [];
   let steps = 0;
+  const foldedCalls = []; // 可折段里的工具调用,按出现顺序(只用来选「最新工具标题」,不影响 steps)
   for (const seg of groupCoworkBlocks(list)) {
     if (!isFoldableSegment(seg)) continue;
     for (const b of seg.items) {
       if (b?.type === 'thinking' && b.content) steps += 1;
-      else if (b?.type === 'tool_use' && b.toolCall) steps += 1;
+      else if (b?.type === 'tool_use' && b.toolCall) {
+        steps += 1;
+        foldedCalls.push(b.toolCall);
+      }
     }
   }
+  const { doneTitle, liveTitle } = latestToolTitles(foldedCalls);
   return {
     rounds: Array.isArray(usageCalls) ? usageCalls.length : null,
     steps,
     tail: stripSummaryTail(list),
+    doneTitle,
+    liveTitle,
   };
+}
+
+// ── r152a 折叠条末尾的「最新工具调用标题」(纯函数,零 DOM)──────────────
+// 标题规则(按序取第一个非空):
+//   ① 入参 description(字符串、去空白后非空;任何工具有就用它)
+//   ② 按工具名的"动词 + 对象"模板,用词与展开卡片一致:Bash 取 command 第一个非空行;
+//      Read 读取 / Edit、MultiEdit 编辑 / Write 新建 <文件名>;Grep 搜索、Glob 查找文件 <pattern>;
+//      WebFetch 抓取 <url>;WebSearch 搜索网页 <query>
+//   ③ 其它工具:入参 summary,再 title
+// 取到后与思考尾句同一套清洗(cleanTailText:剥成对记号 → 空白折叠 → 按码点截到 60 + …)。
+// 取不到真标题 → null,由调用方决定沿用上一个工具的标题还是退回工具名(toolDisplayName)。
+// 标题在渲染路径上,不许抛:入参不是对象 / 字段不是字符串 / 无原型对象一律当"取不到"。
+const TOOL_TITLE_MAX = 60;
+
+function nonBlankString(v) {
+  return typeof v === 'string' && v.trim() ? v : null;
+}
+
+// 路径最后一段:按 / 与 \ 两种分隔符切(Windows 路径);末尾带分隔符时取上一段。
+function pathBaseName(p) {
+  const s = nonBlankString(p);
+  if (!s) return null;
+  const parts = s.split(/[/\\]+/).filter((x) => x.trim());
+  return parts.length ? parts[parts.length - 1] : null;
+}
+
+function rawToolTitle(name, input) {
+  const description = nonBlankString(input.description);
+  if (description) return description;
+  const verbObject = (verb, object) => (object ? `${verb} ${object}` : null);
+  switch (name) {
+    case 'Bash': {
+      const command = nonBlankString(input.command);
+      return command ? command.split(/[\r\n]+/).map((l) => l.trim()).find(Boolean) || null : null;
+    }
+    case 'Read': return verbObject('读取', pathBaseName(input.file_path));
+    case 'Edit':
+    case 'MultiEdit': return verbObject('编辑', pathBaseName(input.file_path));
+    case 'Write': return verbObject('新建', pathBaseName(input.file_path));
+    case 'Grep': return verbObject('搜索', nonBlankString(input.pattern));
+    case 'Glob': return verbObject('查找文件', nonBlankString(input.pattern));
+    case 'WebFetch': return verbObject('抓取', nonBlankString(input.url));
+    case 'WebSearch': return verbObject('搜索网页', nonBlankString(input.query));
+    default: return nonBlankString(input.summary) || nonBlankString(input.title);
+  }
+}
+
+export function toolTitle(toolCall) {
+  try {
+    if (!toolCall || typeof toolCall !== 'object') return null;
+    const input = toolCall.input;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+    const raw = rawToolTitle(typeof toolCall.name === 'string' ? toolCall.name : '', input);
+    return raw ? cleanTailText(raw, TOOL_TITLE_MAX) : null;
+  } catch {
+    return null;
+  }
+}
+
+// 工具原名;MCP 工具(mcp__服务名__工具名)取最后一段。没有名字 → null。
+function toolDisplayName(toolCall) {
+  const name = typeof toolCall?.name === 'string' ? toolCall.name.trim() : '';
+  if (!name) return null;
+  return name.startsWith('mcp__') ? (name.split('__').pop() || name) : name;
+}
+
+const titleOrName = (toolCall) => toolTitle(toolCall) ?? toolDisplayName(toolCall);
+
+// 入参还没到:直播时 content_block_start 先放 input:{},入参 JSON 流完整才换成真对象。
+// 「还是空的、也还没有结果」= 这个工具刚开始,标题还定不下来。
+function isInputPending(toolCall) {
+  if (toolCall?.result != null) return false;
+  const input = toolCall?.input;
+  if (input == null || input === '') return true;
+  if (typeof input !== 'object') return false;
+  try { return Object.keys(input).length === 0; } catch { return false; }
+}
+
+// 「最新」怎么选(calls = 可折段里的工具调用,按出现顺序):
+//   doneTitle(回合已结束):最后一个工具;最后一块是思考也一样,不切回思考预览。
+//   liveTitle(回合在生成):最后一个还没结果的工具(并行时 = 还在跑的最后一个);都有结果时同 doneTitle。
+//     它的入参还没到 → 不拿它,沿用它之前最近一个入参已到的工具;之前一个都没有就用它的工具名。
+//     入参传完后它自己的标题立刻顶上(避免"上一个标题 → 工具名 → 新标题"闪一下)。
+function latestToolTitles(calls) {
+  if (!calls.length) return { doneTitle: null, liveTitle: null };
+  const doneTitle = titleOrName(calls[calls.length - 1]);
+  let running = -1;
+  for (let i = calls.length - 1; i >= 0; i -= 1) {
+    if (calls[i]?.result == null) { running = i; break; }
+  }
+  if (running < 0) return { doneTitle, liveTitle: doneTitle };
+  if (!isInputPending(calls[running])) return { doneTitle, liveTitle: titleOrName(calls[running]) };
+  for (let i = running - 1; i >= 0; i -= 1) {
+    if (isInputPending(calls[i])) continue;
+    const title = titleOrName(calls[i]);
+    if (title) return { doneTitle, liveTitle: title };
+  }
+  return { doneTitle, liveTitle: toolDisplayName(calls[running]) };
 }
 
 // 尾段取值:**恒取最后一条思考**(不看最后一块是什么)。
@@ -181,11 +288,13 @@ function stripSummaryTail(list) {
 }
 
 // 清洗四步(顺序固定):非字符串先转(第三方 provider 会落盘怪块)→ **剥配对的行内标记**
-// → 空白折叠成单个空格 → trim → 按 Unicode 码点截断到 40(不得劈开代理对),超出补一个 `…`。
+// → 空白折叠成单个空格 → trim → 按 Unicode 码点截断到 max(不得劈开代理对),超出补一个 `…`。
+// max:思考尾句 40(默认,与改动前一致)、工具标题 60(r152a,TOOL_TITLE_MAX)。
 // 剥在截断**之前**:配对跨越 40 码点边界时,先截会让开记号留在行上、闭记号被切掉。
 // 只剥配对的强调/删除线/行内码,零散的单个记号一律不碰(见 stripPairedMarkers);
 // 与 thinkingSummary 的"全字符类扫射"口径**故意不同**,别复用也别改 thinkingSummary。
-function cleanTailText(src) {
+const THINK_TAIL_MAX = 40;
+function cleanTailText(src, max = THINK_TAIL_MAX) {
   if (src == null) return null;
   // String(src) 对 Object.create(null) 这类无原生 toString 的对象会抛 —— 摘要在渲染路径上,
   // 抛出去就是整列表白屏。取不到就当作没有尾段。
@@ -194,7 +303,7 @@ function cleanTailText(src) {
   const flat = stripPairedMarkers(raw).replace(/\s+/g, ' ').trim();
   if (!flat) return null;
   const cps = Array.from(flat);
-  return cps.length > 40 ? cps.slice(0, 40).join('') + '…' : flat;
+  return cps.length > max ? cps.slice(0, max).join('') + '…' : flat;
 }
 
 // 只剥**成对**的行内标记:`**粗**` / `__粗__` / `~~删~~` / `` `码` `` / `*强*` / `_强_`。
