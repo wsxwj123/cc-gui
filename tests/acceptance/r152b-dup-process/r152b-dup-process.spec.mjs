@@ -137,9 +137,9 @@ test('B7 行为7 延后配置的同时请求里模型不同、权限档不同:�
   try {
     T = newT(inst, 'b7');
     const { r1, p1 } = await idleProcess(inst, T, { tag: 'b7', run, bg: 'bash', effort: 'low', mode: 'default', model: 'r151-chat', holdOld: true });
-    const { r2, marker } = await sendSecond(inst, T, { tag: 'b7', run, effort: 'high', mode: 'bypassPermissions', model: 'r151-reasoner' });
+    const { r2, marker } = await sendSecond(inst, T, { tag: 'b7', run, effort: 'high', mode: 'plan', model: 'r151-reasoner' });
     const modelHot = () => modelLog(inst.ctl, T.sid).some((x) => x.pid === p1 && x.model === 'r151-reasoner' && x.action === 'passed');
-    const modeHot = () => switchLog(inst.ctl, T.sid).some((x) => x.pid === p1 && x.mode === 'bypassPermissions' && x.action === 'passed');
+    const modeHot = () => switchLog(inst.ctl, T.sid).some((x) => x.pid === p1 && x.mode === 'plan' && x.action === 'passed');
     await waitFor(() => modelHot() && modeHot(), 8_000, 100);
     const facts = await observeSameProcess(inst, T, { p1, r1, r2, marker });
     expect({ ...facts, modelHotSwitchedOnOriginal: modelHot(), modeHotSwitchedOnOriginal: modeHot() },
