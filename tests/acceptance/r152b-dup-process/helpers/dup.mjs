@@ -176,3 +176,14 @@ export function addDenyRuleExternally(home, rule) {
   const now = JSON.parse(text);
   return { otherKeysUnchanged: withoutPermissions(now) === before, denyRules: now.permissions.deny, text };
 }
+
+/** 外部直接改设置文件(B12):只新增 / 改一个无关的顶层键(默认 theme),permissions 和其余键一字不改。返回 { changedKeys, permissionsUntouched, text }。 */
+export function touchSettingsNonPermission(home, key = 'theme', value = 'dark') {
+  const f = settingsFile(home);
+  const before = JSON.parse(fs.readFileSync(f, 'utf8'));
+  fs.writeFileSync(f, JSON.stringify({ ...before, [key]: value }, null, 2));
+  const text = fs.readFileSync(f, 'utf8');
+  const now = JSON.parse(text);
+  const changedKeys = [...new Set([...Object.keys(before), ...Object.keys(now)])].filter((k) => JSON.stringify(before[k]) !== JSON.stringify(now[k])).sort();
+  return { changedKeys, permissionsUntouched: JSON.stringify(before.permissions) === JSON.stringify(now.permissions), text };
+}

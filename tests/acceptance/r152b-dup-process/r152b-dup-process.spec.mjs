@@ -1,6 +1,6 @@
-// r152b 后台任务没结束时配置变化不另起新进程 —— 验收。依据 .devflow/r152b-dup-process-接口.md 的"行为清单"(11 条),
-// 用例 B1–B11 与行为号一一对应(行为 9 是界面用例,拆成 B9a "应答带 configDeferred:true → 出现提示行" 与 B9b "应答没有该字段 → 不出现" 两条)。
-//   修复前预期:B1 B2 B3 B7 B9a 红(沿用原进程 / configDeferred / 提示行没出现);B4 B5 B6 B8 B9b B10 B11 绿(回归守卫;B11 在含"只比工作目录"实现的版本上应红)。
+// r152b 后台任务没结束时配置变化不另起新进程 —— 验收。依据 .devflow/r152b-dup-process-接口.md 的"行为清单"(12 条),
+// 用例 B1–B12 与行为号一一对应(行为 9 是界面用例,拆成 B9a "应答带 configDeferred:true → 出现提示行" 与 B9b "应答没有该字段 → 不出现" 两条)。
+//   修复前预期:B1 B2 B3 B7 B9a B12 红(沿用原进程 / configDeferred / 提示行没出现);B4 B5 B6 B8 B9b B10 B11 绿(回归守卫;B11 在含"只比工作目录"实现的版本上应红)。
 // 场景:T 的第一回合(effort low)里起一个后台命令 / 后台子代理且不报它结束 → 回合结束、空闲 8 秒 → 再发一条(换 effort 等)。
 // B1/B2/B3/B7/B10 的旧进程用夹具 hold 造成"被后台任务吊着、关输入也不退"(真命令行手上有活的后台任务时就是这样),所以修复前会看到同一会话两个进程。
 // 每条后端用例一个一次性实例(临时 HOME、自挑端口、用例自己 stop);界面用例用 run.sh 起的共享实例 + dev server。
@@ -14,7 +14,7 @@ import { sleep, settle, newT, chatStart, writeHeldScript, modelLog, switchLog, r
 import {
   idleProcess, sendSecond, fxBgEnd, bgEndLog, alive, observeSameProcess, sameProcessExpected,
   observeReplaced, replacedExpected, observeNotReused, notReusedExpected, lastActiveJson,
-  seedSettingsWithAllow, addDenyRuleExternally,
+  seedSettingsWithAllow, addDenyRuleExternally, touchSettingsNonPermission,
 } from './helpers/dup.mjs';
 
 test.describe.configure({ timeout: 360_000 });
@@ -215,6 +215,27 @@ test('B11 (回归)行为11 延后的条件都满足(空闲进程带着活的后�
     const facts = await observeNotReused(inst, T, { p1, r1, r2, marker, cwd2: T.cwd });
     // 旧进程因后台命令继续活着是已知现状:这里不断言它退没退、进程数是几。
     expect(facts, `原进程 ${p1};外部新加的 deny 规则 ${rule};${raw(r2)}`).toEqual(notReusedExpected());
+  } finally {
+    if (T) releaseAll(inst, T.sid);
+    await inst.stop();
+  }
+});
+
+test('B12 行为12 空闲进程带着活的后台命令,但请求之前设置文件被外部改了一个无关的顶层键(theme)、请求本身与第一条配置一致:仍沿用原进程——应答 reused:true + configDeferred:true,进程号不变,进程数仍为 1,这条消息由原进程处理', async () => {
+  const inst = await startInst('b12');
+  const run = uniq('');
+  let T = null;
+  try {
+    T = newT(inst, 'b12');
+    seedSettingsWithAllow(inst.home);   // 同 B11:第一回合之前就是一份有内容的设置文件
+    const { r1, p1 } = await idleProcess(inst, T, { tag: 'b12', run, bg: 'bash', effort: 'low', holdOld: true });
+    // 空闲后外部直接改设置文件:只新增一个无关的顶层键 theme,permissions 和其余键一字不改。
+    const edit = touchSettingsNonPermission(inst.home, 'theme', 'dark');
+    expect({ changedKeys: edit.changedKeys, permissionsUntouched: edit.permissionsUntouched }, `前置:外部只改了一个无关的顶层键 theme(设置文件现状 ${edit.text.replace(/\s+/g, ' ')})`)
+      .toEqual({ changedKeys: ['theme'], permissionsUntouched: true });
+    const { r2, marker } = await sendSecond(inst, T, { tag: 'b12', run, effort: 'low' });   // 请求本身与第一条配置一致
+    const facts = await observeSameProcess(inst, T, { p1, r1, r2, marker });
+    expect(facts, `原进程 ${p1};外部只改了 theme;${raw(r2)}`).toEqual(sameProcessExpected(p1, true));
   } finally {
     if (T) releaseAll(inst, T.sid);
     await inst.stop();
