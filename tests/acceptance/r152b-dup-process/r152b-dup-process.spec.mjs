@@ -1,6 +1,6 @@
-// r152b 后台任务没结束时配置变化不另起新进程 —— 验收。依据 .devflow/r152b-dup-process-接口.md 的"行为清单"(10 条),
-// 用例 B1–B10 与行为号一一对应(行为 9 是界面用例,拆成 B9a "应答带 configDeferred:true → 出现提示行" 与 B9b "应答没有该字段 → 不出现" 两条)。
-//   修复前预期:B1 B2 B3 B7 B9a 红(沿用原进程 / configDeferred / 提示行没出现);B4 B5 B6 B8 B9b B10 绿(回归守卫)。
+// r152b 后台任务没结束时配置变化不另起新进程 —— 验收。依据 .devflow/r152b-dup-process-接口.md 的"行为清单"(11 条),
+// 用例 B1–B11 与行为号一一对应(行为 9 是界面用例,拆成 B9a "应答带 configDeferred:true → 出现提示行" 与 B9b "应答没有该字段 → 不出现" 两条)。
+//   修复前预期:B1 B2 B3 B7 B9a 红(沿用原进程 / configDeferred / 提示行没出现);B4 B5 B6 B8 B9b B10 B11 绿(回归守卫;B11 在含"只比工作目录"实现的版本上应红)。
 // 场景:T 的第一回合(effort low)里起一个后台命令 / 后台子代理且不报它结束 → 回合结束、空闲 8 秒 → 再发一条(换 effort 等)。
 // B1/B2/B3/B7/B10 的旧进程用夹具 hold 造成"被后台任务吊着、关输入也不退"(真命令行手上有活的后台任务时就是这样),所以修复前会看到同一会话两个进程。
 // 每条后端用例一个一次性实例(临时 HOME、自挑端口、用例自己 stop);界面用例用 run.sh 起的共享实例 + dev server。
@@ -14,6 +14,7 @@ import { sleep, settle, newT, chatStart, writeHeldScript, modelLog, switchLog, r
 import {
   idleProcess, sendSecond, fxBgEnd, bgEndLog, alive, observeSameProcess, sameProcessExpected,
   observeReplaced, replacedExpected, observeNotReused, notReusedExpected, lastActiveJson,
+  seedSettingsWithAllow, addDenyRuleExternally,
 } from './helpers/dup.mjs';
 
 test.describe.configure({ timeout: 360_000 });
@@ -191,6 +192,29 @@ test('B10 (回归)行为10 延后的条件都满足(空闲进程带着活的后�
     const facts = await observeNotReused(inst, T, { p1, r1, r2, marker, cwd2 });
     // 旧进程因后台命令继续活着是已知现状(本轮不处理):这里不断言它退没退、进程数是几。
     expect(facts, `原进程 ${p1};原工作目录 ${T.cwd};新工作目录 ${cwd2};${raw(r2)}`).toEqual(notReusedExpected());
+  } finally {
+    if (T) releaseAll(inst, T.sid);
+    await inst.stop();
+  }
+});
+
+test('B11 (回归)行为11 延后的条件都满足(空闲进程带着活的后台命令),但请求之前设置文件的权限里被外部新加了一条 deny 规则、请求本身与第一条配置一致:不沿用——关旧开新,应答进程号变了、reused 不为 true、没有 configDeferred', async () => {
+  const inst = await startInst('b11');
+  const run = uniq('');
+  let T = null;
+  try {
+    T = newT(inst, 'b11');
+    seedSettingsWithAllow(inst.home);   // 第一回合之前就是一份有内容的设置文件(permissions 里已有一条 allow)
+    const { r1, p1 } = await idleProcess(inst, T, { tag: 'b11', run, bg: 'bash', effort: 'low', holdOld: true });
+    // 空闲后外部直接改设置文件:只在 permissions 里追加一条 deny,其余键一字不改(配置文件指纹不变,只有"外部权限改动"变了)。
+    const rule = 'Bash(rm -rf /tmp/r152b-nothing:*)';
+    const edit = addDenyRuleExternally(inst.home, rule);
+    expect({ otherKeysUnchanged: edit.otherKeysUnchanged, denyRules: edit.denyRules }, `前置:外部只在 permissions 里追加了一条 deny(设置文件现状 ${edit.text.replace(/\s+/g, ' ')})`)
+      .toEqual({ otherKeysUnchanged: true, denyRules: [rule] });
+    const { r2, marker } = await sendSecond(inst, T, { tag: 'b11', run, effort: 'low' });   // 请求本身与第一条配置一致
+    const facts = await observeNotReused(inst, T, { p1, r1, r2, marker, cwd2: T.cwd });
+    // 旧进程因后台命令继续活着是已知现状:这里不断言它退没退、进程数是几。
+    expect(facts, `原进程 ${p1};外部新加的 deny 规则 ${rule};${raw(r2)}`).toEqual(notReusedExpected());
   } finally {
     if (T) releaseAll(inst, T.sid);
     await inst.stop();

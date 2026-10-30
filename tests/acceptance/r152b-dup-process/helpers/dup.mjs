@@ -146,3 +146,33 @@ export async function observeNotReused(inst, T, { p1, r1, r2, marker, cwd2 }) {
 export const notReusedExpected = () => ({
   status: 200, reusedIsNotTrue: true, noConfigDeferredKey: true, responsePidChanged: true, turnRanOnNewProcess: true, newProcessStartedInRequestedCwd: true,
 });
+
+// ---------------- 外部改设置文件(B11)----------------
+/** 一次性实例 HOME 下 Claude 配置目录里的 settings.json(服务端起的命令行读的就是它)。 */
+const settingsFile = (home) => path.join(home, '.claude', 'settings.json');
+const withoutPermissions = (o) => JSON.stringify(Object.fromEntries(Object.entries(o).filter(([k]) => k !== 'permissions')));
+/** 第一回合之前:保证设置文件是一份有内容的文件——保留现有键,permissions.allow 里放一条 allow。返回写入后的文件文本。 */
+export function seedSettingsWithAllow(home, rule = 'Bash(echo r152b-allow:*)') {
+  const f = settingsFile(home);
+  let o = {};
+  try { o = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { o = {}; }
+  const perms = { ...(o.permissions || {}) };
+  perms.allow = [...(Array.isArray(perms.allow) ? perms.allow : []), rule];
+  o.permissions = perms;
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify(o, null, 2));
+  return fs.readFileSync(f, 'utf8');
+}
+/** 外部直接改设置文件(不是 GUI 的「始终允许」写入):只在 permissions 里追加一条 deny 规则,其余键不动。返回 { otherKeysUnchanged, denyRules, text }。 */
+export function addDenyRuleExternally(home, rule) {
+  const f = settingsFile(home);
+  const o = JSON.parse(fs.readFileSync(f, 'utf8'));
+  const before = withoutPermissions(o);
+  const perms = { ...(o.permissions || {}) };
+  perms.deny = [...(Array.isArray(perms.deny) ? perms.deny : []), rule];
+  o.permissions = perms;
+  fs.writeFileSync(f, JSON.stringify(o, null, 2));
+  const text = fs.readFileSync(f, 'utf8');
+  const now = JSON.parse(text);
+  return { otherKeysUnchanged: withoutPermissions(now) === before, denyRules: now.permissions.deny, text };
+}
