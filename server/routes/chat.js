@@ -539,6 +539,30 @@ export function hasFreshLiveTask(liveTasks, now = Date.now(), freshMsByKind) {
     .some((t) => t && now - (t.createdAt || 0) < (t.kind === 'shell' ? shellMs : otherMs));
 }
 
+// r152b:复用块对"同会话一个空闲进程"的判定(纯函数,export 仅为可单测)。
+//   'reuse' 兼容键一致且会话常驻开 → 照常复用;'close' → 关旧开新;
+//   'defer' 它手上还有新鲜的活后台任务(判据同 idleReclaim 的 hasFreshLiveTask),且两个兼容键不同的字段全在
+//   DEFERRABLE_KEY_FIELDS 里(或键相同、只是会话常驻关)→ 沿用它(模型、权限档照常热切),这些差异延后到它退出后生效。
+// 为什么沿用:命令行有后台任务时输入关了也不退出,还会自己起回合;冷启前的等待又对带活后台命令的旧进程放行 →
+// 关旧开新 = 同一会话两个进程同时写同一份记录(r152b 实报)。
+// 白名单只放偏好类(滞后可以接受)。其余字段是护栏与正确性(cwd、acw、permEpoch、禁用工具 / 项目设置 / MCP 戳、
+// 读取范围、花费上限、审核模型、xs,以及将来新增的任何字段),一律关旧开新:外部权限改动在常驻进程里滞后且无
+// 上界(见 chatCompatKey 注释),压缩窗口不一致会让旧压缩线按错的模型窗口算。键解析不出 / 不是对象同样关旧开新。
+const DEFERRABLE_KEY_FIELDS = new Set(['effort', 'append', 'suggest', 'genui', 'settingsFp']);
+export function decideIdleSlotReuse({ slotCompatKey, reuseKey, wantKeepAlive, liveTasks, now = Date.now() }) {
+  if (wantKeepAlive && slotCompatKey === reuseKey) return 'reuse';
+  if (!hasFreshLiveTask(liveTasks, now)) return 'close';
+  let slotKey, wantKey;
+  try { slotKey = JSON.parse(slotCompatKey); wantKey = JSON.parse(reuseKey); } catch { return 'close'; }
+  const isKeyObject = (k) => !!k && typeof k === 'object' && !Array.isArray(k);
+  if (!isKeyObject(slotKey) || !isKeyObject(wantKey)) return 'close';
+  for (const field of new Set([...Object.keys(slotKey), ...Object.keys(wantKey)])) {
+    // 缺失与有值算不同(JSON.stringify(undefined) 是 undefined,与任何有值的结果都不等)
+    if (JSON.stringify(slotKey[field]) !== JSON.stringify(wantKey[field]) && !DEFERRABLE_KEY_FIELDS.has(field)) return 'close';
+  }
+  return 'defer';
+}
+
 // level 信号不新鲜时的降级判据(审查 R1)= 修前那支"本回合条目无限期豁免"。
 // 上面的年龄上限之所以敢做,前提是 level 信号会持续确认真活任务并刷新 createdAt。但该信号
 // 是【成员变化才发】的边沿信号,不是心跳,前提在两种情况下不成立:
@@ -2499,6 +2523,7 @@ async function handleChatPost(req, res) {
   // ~5s)且上游看到稳定连接/前缀(第三方缓存友好)。plan 档位差异经 setPermissionMode
   // 热切(与 /chat/permission-mode 同机制);其余任何差异 → 关旧进程走全新冷启,行为
   // 与逐回合冷启完全一致。keepAlive===false(GUI 开关关掉)时同样只关不复用。
+  // r152b 例外:手上有新鲜活后台任务、且差异只在偏好类字段的空闲进程不关、沿用,应答带 configDeferred(见 decideIdleSlotReuse)。
   const wantKeepAlive = keepAlive !== false;
   // 压缩联动产物在此算一次:指纹进 compatKey、spawn 块复用同一对象写临时 --settings 文件
   // (同一次计算 = 指纹与实际写入值恒一致,也不为每请求多做一遍文件 IO)。
@@ -2519,11 +2544,14 @@ async function handleChatPost(req, res) {
     for (const [alivePid, s] of activeProcesses) {
       if (s.reservedBy) continue; // r151g 项3:已被别的请求选中、正在派发 —— 占位期间既不算空闲,也不许再选
       if (!s.idle || s.closing || s.pumpEnded || s.exitCode !== null || s.sessionId !== sessionId) continue;
-      if (!wantKeepAlive || s.compatKey !== reuseKey) {
+      const reuseMode = decideIdleSlotReuse({ slotCompatKey: s.compatKey, reuseKey, wantKeepAlive, liveTasks: s.liveTasks });
+      if (reuseMode === 'close') {
         s.closing = true;
         try { s.input.close(); } catch {}
         continue;
       }
+      // r152b:'defer' = 配置不一致但沿用这个进程(兼容键不改写:后台任务结束后的下一条照旧关旧开新)。
+      const configDeferred = reuseMode === 'defer';
       if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
       // epoch 门控前移到任何 await 之前:await setPermissionMode 让出事件循环期间,上一回合
       // 停止链路武装但没 clear 掉的旧 stopTimer 兜底回调可能溜进来,以旧 epoch 匹配成功 →
@@ -2681,7 +2709,7 @@ async function handleChatPost(req, res) {
           // 在它自己的收尾点结算,pid→record 的映射换成这一回合,停止才不会停错回合)。
           if (turnRecord) bindTurnRecord(turnRecord, alivePid, s);
           if (turnRecord && autoGate.downgraded) turnRecord.permissionModeDowngraded = autoGate.downgraded;
-          res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running', ...downgradeFields });
+          res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running', ...downgradeFields, ...(configDeferred ? { configDeferred: true } : {}) });
           return 'handled';
         });
       } finally {
