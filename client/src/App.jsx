@@ -9108,6 +9108,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 thinking: first && streamingThinking ? [streamingThinking] : [],
                 toolCalls: first ? streamingToolCalls.map((tc) => ({ ...tc, category: 'call' })) : [],
                 blocks: seg.blocks,
+                // r152a:折叠条右侧的整回合用时,与橙色状态行同一起点(ref 不进 useMemo 依赖:
+                // 它在发送时就已写好,块一到这里就会重算)。
+                startedAt: streamStartRef.current,
                 usage: null,
                 // 已完成的子代理各自那条金额(键 = toolUseId,见 liveSubUsageTurn)。
                 subUsage: liveSubUsageTurn,

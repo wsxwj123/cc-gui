@@ -214,14 +214,16 @@ test('SF-108 摘要尾句的清洗与取值（emoji 截断 / 空白折叠 / 只�
 
   // ⑤ 恒取最后一条思考（位置判据废除）：最后一块是**工具**时，尾段照样取那条思考
   const toolLastRow = rows.filter({ hasText: C.toolLastDoneText }).first();
-  expect((await stripSnapshot(toolLastRow)).headText, '最后一块既不是正文也不是思考时，尾段仍取最后一条思考')
-    .toBe(summaryHead(3, 2, C.toolLastThink));
+  // 〈r152a〉该轮含通用工具 Read(/tmp/sf-fixture/b.txt)：末尾改为最新工具调用的标题「读取 b.txt」（原：最后一条思考）
+  expect((await stripSnapshot(toolLastRow)).headText, '该轮有通用工具：末尾是最新工具调用的标题')
+    .toBe(summaryHead(3, 2, '读取 b.txt'));
 
   // ⑥ 取不到思考 → 省略尾段（**不回落取正文**：旧口径的"取最后一条正文"已废除）。
   //    这一轮 = [正文, 工具]：正文段照常可见，但摘要行不得把那句正文当尾句（那是逐字重复的来源）。
   const noThinkRow = rows.filter({ hasText: C.onlyTextTail }).first();
-  expect((await stripSnapshot(noThinkRow)).headText, '没有思考时省略尾段，不许回落取正文')
-    .toBe(summaryHead(2, 1, null));
+  // 〈r152a〉该轮含通用工具 Read(/tmp/sf-fixture/a.txt)：不再省略尾段，末尾是「读取 a.txt」；仍不许回落取正文
+  expect((await stripSnapshot(noThinkRow)).headText, '没有思考但有通用工具：末尾是工具标题，不许回落取正文')
+    .toBe(summaryHead(2, 1, '读取 a.txt'));
 });
 
 test('SF-109 无可折块的轮：state=none、不渲染摘要行、正文照常', async ({ page }) => {

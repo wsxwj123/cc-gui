@@ -136,8 +136,9 @@ const tail = (s) => s.tail;
   const snapshot = JSON.stringify(blocks);
   stripSummary(blocks, null);
   assert.equal(JSON.stringify(blocks), snapshot, 'stripSummary 不得修改入参');
-  assert.deepEqual(stripSummary(null, null), { rounds: null, steps: 0, tail: null }, 'blocks=null 回落空值,不抛');
-  assert.deepEqual(stripSummary(undefined, undefined), { rounds: null, steps: 0, tail: null }, 'blocks=undefined 同理');
+  // r152a:返回值多了 doneTitle / liveTitle 两个键(没有工具 → 都是 null)。
+  assert.deepEqual(stripSummary(null, null), { rounds: null, steps: 0, tail: null, doneTitle: null, liveTitle: null }, 'blocks=null 回落空值,不抛');
+  assert.deepEqual(stripSummary(undefined, undefined), { rounds: null, steps: 0, tail: null, doneTitle: null, liveTitle: null }, 'blocks=undefined 同理');
 }
 
 // ── t6 与 groupCoworkBlocks 的段划分对齐(步数 == 可折段内 items 数)──
