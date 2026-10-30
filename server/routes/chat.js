@@ -539,6 +539,23 @@ export function hasFreshLiveTask(liveTasks, now = Date.now(), freshMsByKind) {
     .some((t) => t && now - (t.createdAt || 0) < (t.kind === 'shell' ? shellMs : otherMs));
 }
 
+// r152b:复用块对"同会话一个空闲进程"的判定(纯函数,export 仅为可单测)。
+//   'reuse' 兼容键一致且会话常驻开 → 照常复用;'close' → 关旧开新;
+//   'defer' 兼容键不一致(或会话常驻关),但它手上还有新鲜的活后台任务(后台命令 / 后台子代理,判据同
+//   idleReclaim 的 hasFreshLiveTask)→ 沿用它(模型、权限档照常热切),热切不了的配置差异延后到它退出后生效。
+// 为什么不关:命令行有后台任务时输入关了也不退出,后台任务一有动静还会自己起回合;冷启前的等待又对带活
+// 后台命令的旧进程放行 → 关旧开新 = 同一会话两个进程同时写同一份记录、各按各的配置跑(r152b 实报)。
+// 例外:兼容键里的工作目录与本次请求的不同(会话换了 worktree 绑定)不延后 —— 沿用会让这条消息在旧目录里
+// 干活;键解析不出按不同处理(保守)。登记陈旧(终态通知丢了)过了新鲜度窗口不再算活,恢复关旧开新。
+export function decideIdleSlotReuse({ slotCompatKey, reuseKey, wantKeepAlive, liveTasks, workingDir, now = Date.now() }) {
+  if (wantKeepAlive && slotCompatKey === reuseKey) return 'reuse';
+  if (!hasFreshLiveTask(liveTasks, now)) return 'close';
+  let keyCwd;
+  try { keyCwd = JSON.parse(slotCompatKey)?.cwd; } catch { return 'close'; }
+  if (typeof keyCwd !== 'string' || keyCwd !== workingDir) return 'close';
+  return 'defer';
+}
+
 // level 信号不新鲜时的降级判据(审查 R1)= 修前那支"本回合条目无限期豁免"。
 // 上面的年龄上限之所以敢做,前提是 level 信号会持续确认真活任务并刷新 createdAt。但该信号
 // 是【成员变化才发】的边沿信号,不是心跳,前提在两种情况下不成立:
@@ -2499,6 +2516,7 @@ async function handleChatPost(req, res) {
   // ~5s)且上游看到稳定连接/前缀(第三方缓存友好)。plan 档位差异经 setPermissionMode
   // 热切(与 /chat/permission-mode 同机制);其余任何差异 → 关旧进程走全新冷启,行为
   // 与逐回合冷启完全一致。keepAlive===false(GUI 开关关掉)时同样只关不复用。
+  // r152b 例外:手上有新鲜活后台任务的空闲进程不关、沿用,应答带 configDeferred(见 decideIdleSlotReuse)。
   const wantKeepAlive = keepAlive !== false;
   // 压缩联动产物在此算一次:指纹进 compatKey、spawn 块复用同一对象写临时 --settings 文件
   // (同一次计算 = 指纹与实际写入值恒一致,也不为每请求多做一遍文件 IO)。
@@ -2519,11 +2537,14 @@ async function handleChatPost(req, res) {
     for (const [alivePid, s] of activeProcesses) {
       if (s.reservedBy) continue; // r151g 项3:已被别的请求选中、正在派发 —— 占位期间既不算空闲,也不许再选
       if (!s.idle || s.closing || s.pumpEnded || s.exitCode !== null || s.sessionId !== sessionId) continue;
-      if (!wantKeepAlive || s.compatKey !== reuseKey) {
+      const reuseMode = decideIdleSlotReuse({ slotCompatKey: s.compatKey, reuseKey, wantKeepAlive, liveTasks: s.liveTasks, workingDir });
+      if (reuseMode === 'close') {
         s.closing = true;
         try { s.input.close(); } catch {}
         continue;
       }
+      // r152b:'defer' = 配置不一致但沿用这个进程(兼容键不改写:后台任务结束后的下一条照旧关旧开新)。
+      const configDeferred = reuseMode === 'defer';
       if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
       // epoch 门控前移到任何 await 之前:await setPermissionMode 让出事件循环期间,上一回合
       // 停止链路武装但没 clear 掉的旧 stopTimer 兜底回调可能溜进来,以旧 epoch 匹配成功 →
@@ -2681,7 +2702,7 @@ async function handleChatPost(req, res) {
           // 在它自己的收尾点结算,pid→record 的映射换成这一回合,停止才不会停错回合)。
           if (turnRecord) bindTurnRecord(turnRecord, alivePid, s);
           if (turnRecord && autoGate.downgraded) turnRecord.permissionModeDowngraded = autoGate.downgraded;
-          res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running', ...downgradeFields });
+          res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running', ...downgradeFields, ...(configDeferred ? { configDeferred: true } : {}) });
           return 'handled';
         });
       } finally {

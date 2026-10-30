@@ -7,6 +7,8 @@ import { createPortal } from 'react-dom';
 const EMPTY_ARRAY = Object.freeze([]);
 // r151q 第 9 项:发送被 409 CHAT_SESSION_BUSY 退回队列时的提示与重试间隔(两次尝试至少隔这么久)。
 const SESSION_BUSY_QUEUED_NOTICE = '会话正在处理跨会话消息，这条已排队，空闲后自动发送；要立刻发送，先点停止。';
+// r152b:发送应答带 configDeferred:true(会话的空闲进程还带着后台任务,配置不一致也沿用它、不另起进程)时的提示。
+const CONFIG_DEFERRED_NOTICE = '这个会话还有后台任务在运行，设置改动（思考强度、配置文件、供应商等）要等后台任务结束后才生效，本条消息沿用已有进程。';
 const BUSY_RETRY_GAP_MS = 2000;
 // 已尝试过自动生成标题的 sessionId(无论成功失败),防止失败时每轮重复 spawn 标题进程。
 const titleAttempted = new Set();
@@ -5878,6 +5880,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // streaming a non-existent pid — that would hang forever as a stuck
       // "connecting" with no reply (the catch below renders the message).
       if (!res.ok || !respJson.pid) throw new Error(respJson.error || `发送失败 (${res.status})`);
+      // r152b:服务端沿用了带着后台任务的旧进程、配置改动延后生效 → 给发送时那个会话一行提示
+      // (窗格还在它上面就直接显示,已切走就留言,切回时显示;写法同 SESSION_BUSY_QUEUED_NOTICE)。没有该字段不提示。
+      if (respJson.configDeferred === true) {
+        if (paneStillOn(sessionQueueKey)) setProviderSwitchNotice({ text: CONFIG_DEFERRED_NOTICE, ownerKey: sessionQueueKey });
+        else leaveSessionNotice(sessionQueueKey, CONFIG_DEFERRED_NOTICE);
+      }
       // r140(C1 步骤③)孤儿流复判:本 pane 在 POST 窗口里已经切走 ⇒ 这条流不属于本窗格了。
       // 从这里直接 return,一并跳过下面五处认领:pid / activeProcRef(否则在 B 按停止会停到 A)、
       // activeProcOwnerRef、liveChatPid(否则 B 的 ⚡ 误报可点)、streamingModel(否则 B 的流式气泡
