@@ -66,7 +66,7 @@ test('B3 行为3 同 B1 但请求里 keepAlive:false(界面「会话常驻」关
     const { r1, p1 } = await idleProcess(inst, T, { tag: 'b3', run, bg: 'bash', effort: 'low', holdOld: true });
     // 第二回合压住不结束:会话常驻关时,回合一结束进程是否被收掉不是本条要验的;压住它才能在"回合进行中"稳定地看进程数与进程号。
     held = writeHeldScript(inst, `b3held${run}`);
-    const { r2, marker } = await sendSecond(inst, T, { tag: 'b3', run, effort: 'high', extra: { keepAlive: false }, scriptName: held.name });
+    const { r2, marker } = await sendSecond(inst, T, { tag: 'b3', run, effort: 'low', extra: { keepAlive: false }, scriptName: held.name }); // effort 与第一条相同(都是 low):这条和第一条只差 keepAlive:false
     const facts = await observeSameProcess(inst, T, { p1, r1, r2, marker });
     expect(facts, `原进程 ${p1};${raw(r2)}`).toEqual(sameProcessExpected(p1, true));
   } finally {
