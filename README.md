@@ -287,6 +287,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.440</b>(2026-10-30)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>隐藏消息不再被拿去起会话标题</summary>
+
+没有模型标题的会话(第三方渠道常见)里,工具重做后自动发出的「继续」、排队的隐藏消息以及它们的自动重发,回合结束时不再被当成第一条消息去生成标题,会话标题不会被改成与你无关的内容;自己输入的消息照常生成标题。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.439</b>(2026-10-30)· 改进 2 条</summary>
 
 **改进**
