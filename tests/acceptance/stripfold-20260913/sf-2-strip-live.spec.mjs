@@ -37,9 +37,11 @@ test('SF-201 流式形态：一开始就是展开的条带，摘要行是内容�
   expect(snap.headCount, '流式期恰好一条摘要行').toBe(1);
   expect(snap.headIndex, '摘要行恒为条带内容区的第一个子元素').toBe(0);
   expect(snap.headAria).toBe('true');
-  expect(snap.headText.startsWith('思考与工具调用 · '), `摘要行前缀：${snap.headText}`).toBe(true);
-  // 直播期没有 usageCalls → 不显示「N 轮」，也不许出现任何估算的轮数（PLAN §14.6 定死）
-  expect(snap.headText.includes('轮'), `直播期不得出现「N 轮」：${snap.headText}`).toBe(false);
+  // 〈r152c〉前缀与计数挪进悬停提示（title 属性），折叠条文字只剩标题
+  expect(snap.headTitle.startsWith('思考与工具调用 · '), `悬停提示前缀：${snap.headTitle}`).toBe(true);
+  // 直播期没有 usageCalls → 不显示「N 轮」，也不许出现任何估算的轮数（PLAN §14.6 定死）；轮数读条带根的 data-strip-rounds（空串）
+  expect(snap.rounds ?? '', `直播期 data-strip-rounds 应为空串：${snap.rounds}`).toBe('');
+  expect(/\d+ 轮/.test(snap.headTitle), `直播期悬停提示不得出现「N 轮」：${snap.headTitle}`).toBe(false);
   // 同一时刻整页只有这一轮 → 只允许一条摘要行
   expect(await page.locator('[data-strip="head"]').count(), '一轮只有一条摘要行').toBe(1);
   releaseRound();
@@ -75,8 +77,10 @@ test('SF-202 收官：原地收起成一行，补上「N 轮」，段序与正�
   const doneTexts = await root.locator('[data-strip-item="text"]').evaluateAll((els) => els.map((e) => (e.textContent || '').trim()));
   expect(doneTexts, '正文段文字不得因收官而变化').toEqual(liveTexts);
   // 收官换成持久化轮之后补上「N 轮」（usageCalls 只在落盘后才有）
-  expect(done.headText.includes('轮'), `收官后摘要行应当出现「N 轮」：${done.headText}`).toBe(true);
-  expect(done.headText.startsWith('思考与工具调用 · 5 轮 '), `夹具这一轮 5 次 API 调用：${done.headText}`).toBe(true);
+  // 〈r152c〉N 轮 M 步 在悬停提示与条带根的 data-strip-rounds 里（折叠条文字只剩标题）
+  expect(/\d+ 轮/.test(done.headTitle), `收官后悬停提示应当出现「N 轮」：${done.headTitle}`).toBe(true);
+  expect(done.rounds, `夹具这一轮 5 次 API 调用：data-strip-rounds=${done.rounds}`).toBe('5');
+  expect(done.headTitle.startsWith('思考与工具调用 · 5 轮 '), `夹具这一轮 5 次 API 调用：${done.headTitle}`).toBe(true);
 });
 
 test('SF-203 用户中断：这一轮必须保持展开（口径 2），且停一会儿还是展开', async ({ page }) => {

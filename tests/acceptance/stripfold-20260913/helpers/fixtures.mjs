@@ -65,7 +65,10 @@ export const A = {
   steps: 7,
   segments: ['group', 'text', 'group', 'text'],
   /** 摘要行逐字。〈r152a〉末尾改为“最新工具调用的标题”：每轮最后一个工具是 Grep(pattern=ROOT=，无 description) → 「搜索 ROOT=」。 */
-  headText: '思考与工具调用 · 9 轮 7 步 · 搜索 ROOT=',
+  // 〈r152c〉折叠条只剩标题：前缀与「9 轮 7 步」挪进悬停提示（title 属性）；N / M 读条带根的 data-strip-rounds / -steps。
+  headText: '搜索 ROOT=',
+  /** 〈r152c〉折叠条悬停提示逐字（夹具 A 每轮 9 轮 7 步）。 */
+  headHover: '思考与工具调用 · 9 轮 7 步 · 展开/收起这一轮的过程',
   /** 只折 group 段 → 收起态下带 hidden 的段数。 */
   foldableCount: 2,
 };

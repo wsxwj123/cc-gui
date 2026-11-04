@@ -45,8 +45,8 @@ test('SF-402 命中摘要行自己的文字：要能命中，且不上跳', asyn
   await page.waitForTimeout(300);
   const before = await box.evaluate((el) => el.scrollTop);
 
-  // 摘要行的前缀文字是新引入的可见文字（J4 的改写版：不是"过程内容可搜"）
-  await runSearch(page, '思考与工具调用');
+  // 〈r152c〉前缀「思考与工具调用」已挪进悬停提示（不参与搜索）；折叠条里可见的是标题文字，改搜它（J4 的改写版：不是"过程内容可搜"）
+  await runSearch(page, A.headText);
   const hits = await searchHits(page);
   console.log('[SF-402] 命中 =', JSON.stringify(hits));
   expect(hits && hits.total, '摘要行文字必须可被搜索命中').toBeGreaterThanOrEqual(1);
