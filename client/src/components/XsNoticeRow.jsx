@@ -115,9 +115,10 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
         )}
       </>
     );
-    // 标题行宽度夹在 [min(100%,12rem), 100% − 动作段 12rem − 间距] 之间:宽屏时长标题先省略、不换行;
-    // 行宽不足约 25rem(上限小于下限,下限生效)时整段放不下,动作段 wrap 到第二行。
-    const compactToggleClass = 'min-w-[min(100%,12rem)] max-w-[calc(100%-12.75rem)] flex items-center gap-1.5 py-1 text-left font-body';
+    // 宽度按 flex 比例分配:标题行 flex:3 1 12rem,动作段 flex:1 1 12rem。
+    // 是否换行只看两个 12rem 基准 + 间距(0.75rem)放不放得下,与内容宽度无关(长标题在宽屏仍同一行,先省略);
+    // 同一行时两段按 3:1 分剩余宽度;换行后(分屏 / 窄屏)标题行独占一整行,由 flex-grow 撑满,来源名不被无谓截断。
+    const compactToggleClass = 'min-w-0 flex-[3_1_12rem] flex items-center gap-1.5 py-1 text-left font-body';
     return (
       <div data-testid={testId} data-cgui="xs-notice" data-direction={direction} {...rootProps}
         className={`${animate ? 'animate-fade-up ' : ''}${className}`}>
@@ -134,6 +135,8 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
             )}
             {actions && <div className="flex-[1_1_12rem] flex items-center gap-2 min-w-0 py-0.5">{actions}</div>}
           </div>
+          {/* 下面「不可见原文副本 / 正文 / 元信息」与默认分支的对应块保持一致(A2 / C2:折叠态正文容器
+              hidden 且为空 + 不可见原文副本),改一边要同步另一边。 */}
           {!bodyShown && hasBody && (
             <span hidden aria-hidden="true">{text}</span>
           )}
