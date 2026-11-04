@@ -175,3 +175,176 @@ test('F4 封顶 20%:N=12(每条 4 行)收件箱 ≤ 20vh+16px,内部滚动容器
   }
   expect.soft(h, `N=12 消息区高度应 ≥ 基线 ${f0(baseH)}px 的 58%(${f0(baseH * 0.58)}px)(实测 ${f0(h)}px = ${f0((h / baseH) * 100)}%;旧口径约 28%)`).toBeGreaterThanOrEqual(baseH * 0.58);
 });
+
+// ---------------- F5–F8 ----------------
+
+// F5 滚到底(回归保护:封顶之后最后一张卡仍够得着、【忽略】仍可点)
+test('F5 滚到底:N=12 把卡片区滚到底后最后一张卡完整可见、【忽略】可点;点击后该卡消失、12 → 11、接口状态 dismissed', async ({ page }) => {
+  const pair = seedPair('f5');
+  await seedN(pair, 12);
+  await openWithCards(page, pair, 12);
+  await settle(page);
+  const sc0 = await scrollerFacts(page, { toBottom: true });
+  expect(sc0.found, '前置:N=12 时卡片区内部应有可滚动容器').toBe(true);
+  await settle(page);
+  const sc = await scrollerFacts(page);
+  expect.soft(sc.scrollTop + sc.clientHeight, `前置:容器应已滚到底(scrollTop ${f0(sc.scrollTop)} + clientHeight ${sc.clientHeight} ≥ scrollHeight ${sc.scrollHeight} - 3)`).toBeGreaterThanOrEqual(sc.scrollHeight - 3);
+
+  const lastCard = inbox(page).locator('[data-testid="xs-card"]').last();
+  const lastId = await lastCard.getAttribute('data-message-id');
+  const dismiss = lastCard.getByTestId('xs-card-dismiss');
+  const cb = await styleOf(lastCard);
+  const db = await styleOf(dismiss);
+  const view = `容器可视区 top=${f0(sc.top)} bottom=${f0(sc.bottom)}`;
+  expect.soft(inside(cb, sc), `最后一张卡应完整落在卡片区可视范围内(卡 top=${f0(cb.top)} bottom=${f0(cb.bottom)};${view})`).toBe(true);
+  expect.soft(inside(db, sc), `最后一张卡的【忽略】应完整落在卡片区可视范围内(按钮 top=${f0(db.top)} bottom=${f0(db.bottom)};${view})`).toBe(true);
+  expect.soft(await dismiss.isEnabled(), '最后一张卡的【忽略】应可用').toBe(true);
+
+  await dismiss.click();
+  await expect(cardOf(page, lastId), '点【忽略】后最后一张卡应消失').toHaveCount(0, { timeout: 15_000 });
+  await expect(inbox(page).locator('[data-testid="xs-card"]'), '卡数应 12 → 11').toHaveCount(11, { timeout: 15_000 });
+  const m = await waitStatus(pair.B.sid, lastId, 'dismissed', 15_000);
+  expect(m && m.status, '接口里该消息状态应为 dismissed').toBe('dismissed');
+  const rest = (await msgsOf(pair.B.sid)).filter((x) => x.id !== lastId);
+  expect.soft(rest.length, '其余消息仍是 11 条').toBe(11);
+  expect.soft(rest.filter((x) => x.status === 'pending').length, '反向:其余 11 条仍是 pending,没被一并忽略').toBe(11);
+});
+
+// F6 展开不挪按钮(回归保护)
+test('F6 展开不挪按钮:N=1 点标题行展开后正文在标题行下方、【处理】位置变化 ≤ 2px;再收起卡高回到展开前 ±2px、正文隐藏', async ({ page }) => {
+  const pair = seedPair('f6');
+  const [id] = await seedN(pair, 1);
+  await openWithCards(page, pair, 1);
+  const card = cardOf(page, id);
+  const toggle = card.getByTestId('xs-card-toggle');
+  const proc = card.getByTestId('xs-card-process');
+  await expect(toggle, '前置:折叠态').toHaveAttribute('aria-expanded', 'false');
+  await settle(page);
+  const card0 = await styleOf(card);
+  const proc0 = await styleOf(proc);
+  const head0 = await styleOf(toggle);
+
+  await toggle.click();
+  await expect(toggle, '前置:点标题行后确实展开').toHaveAttribute('aria-expanded', 'true');
+  await waitBodyShown(card, 'xs-card-body', '展开后的正文');
+  await settle(page);
+  const head1 = await styleOf(toggle);
+  const body1 = await styleOf(card.getByTestId('xs-card-body'));
+  const proc1 = await styleOf(proc);
+  expect.soft(body1.top, `展开后正文应在标题行下方:正文 top ≥ 标题行 bottom - 2(实测 正文 top=${f0(body1.top)} / 标题行 bottom=${f0(head1.bottom)})`).toBeGreaterThanOrEqual(head1.bottom - 2);
+  expect.soft(Math.abs(proc1.left - proc0.left), `展开前后【处理】left 变化应 ≤ 2px(实测 ${f0(proc0.left)} → ${f0(proc1.left)})`).toBeLessThanOrEqual(2);
+  // 诊断(不是断言):同时给出"相对标题行"的位移 —— b-inbox 的 B2 用的是这个口径;收件箱在输入框上方底部锚定,展开会整块上移
+  const rel0 = proc0.top - head0.top;
+  const rel1 = proc1.top - head1.top;
+  expect.soft(Math.abs(proc1.top - proc0.top), `展开前后【处理】top 变化应 ≤ 2px(实测 ${f0(proc0.top)} → ${f0(proc1.top)};诊断:标题行 top ${f0(head0.top)} → ${f0(head1.top)},【处理】相对标题行 ${f0(rel0)} → ${f0(rel1)})`).toBeLessThanOrEqual(2);
+
+  await toggle.click();
+  await expect(toggle, '前置:再点标题行后收起').toHaveAttribute('aria-expanded', 'false');
+  await waitBodyHidden(card, 'xs-card-body', '收起后的正文');
+  await settle(page);
+  const card2 = await styleOf(card);
+  expect.soft(Math.abs(card2.height - card0.height), `收起后卡高应回到展开前 ±2px(实测 ${f0(card0.height)} → ${f0(card2.height)})`).toBeLessThanOrEqual(2);
+});
+
+/** 不真点,只做可点性检查(可见 / 稳定 / 可用 / 没被别的元素盖住);可点返回 null,否则返回原因首行。 */
+async function clickError(loc) {
+  try { await loc.click({ trial: true, timeout: 4_000 }); return null; } catch (e) { return String((e && e.message) || e).split('\n')[0]; }
+}
+
+// F7 窄屏
+test('F7 窄屏 375×812:N=3 无横向滚动,每张卡 right ≤ 376 且 ≤ 110px,【处理】【忽略】落在卡内且可点,收件箱 ≤ 20vh+16px', async ({ page }) => {
+  const pair = seedPair('f7');
+  const ids = await seedN(pair, 3);
+  await openWithCards(page, pair, 3); // 先桌面宽度打开(375px 下侧栏收起,不能用侧栏搜索),再缩窄屏,做法同 e-layout 的 E4
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.waitForTimeout(800);
+  await expect(inbox(page).locator('[data-testid="xs-card"]'), '前置:窄屏下仍是 3 张卡').toHaveCount(3, { timeout: 15_000 });
+  await settle(page);
+  const o = await overflowX(page);
+  expect(o.innerWidth, '前置:视口宽应为 375').toBe(375);
+  const vh = await pageHeight(page);
+  expect.soft(o.scrollWidth, `页面不应出现横向滚动(document.scrollWidth ${o.scrollWidth} / innerWidth ${o.innerWidth})`).toBeLessThanOrEqual(o.innerWidth + 1);
+  const ib = await styleOf(inbox(page));
+  expect.soft(ib.height, `窄屏 N=3 收件箱区域高度应 ≤ 视口高 20% + 16px(${f0(vh * 0.2 + 16)}px)(实测 ${f0(ib.height)}px / 视口 ${vh}px)`).toBeLessThanOrEqual(vh * 0.2 + 16);
+  for (let i = 0; i < ids.length; i += 1) {
+    const card = cardOf(page, ids[i]);
+    await card.scrollIntoViewIfNeeded(); // 区域封顶后后面的卡要滚进来才点得到
+    const proc = card.getByTestId('xs-card-process');
+    const dis = card.getByTestId('xs-card-dismiss');
+    const cb = await styleOf(card);
+    const pb = await styleOf(proc);
+    const db = await styleOf(dis);
+    const n = `第 ${i + 1} 张卡`;
+    expect.soft(cb.right, `${n} right 应 ≤ 376(实测 ${f0(cb.right)})`).toBeLessThanOrEqual(376);
+    expect.soft(cb.height, `${n}高度应 ≤ 110px(允许回落成两行)(实测 ${f0(cb.height)}px)`).toBeLessThanOrEqual(110);
+    expect.soft(inside(pb, cb), `${n}的【处理】应完整落在卡内(按钮 l=${f0(pb.left)} r=${f0(pb.right)} t=${f0(pb.top)} b=${f0(pb.bottom)};卡 l=${f0(cb.left)} r=${f0(cb.right)} t=${f0(cb.top)} b=${f0(cb.bottom)})`).toBe(true);
+    expect.soft(inside(db, cb), `${n}的【忽略】应完整落在卡内(按钮 l=${f0(db.left)} r=${f0(db.right)} t=${f0(db.top)} b=${f0(db.bottom)};卡 l=${f0(cb.left)} r=${f0(cb.right)} t=${f0(cb.top)} b=${f0(cb.bottom)})`).toBe(true);
+    expect.soft(await clickError(proc), `${n}的【处理】应可点(可见/可用/没被遮挡)`).toBeNull();
+    expect.soft(await clickError(dis), `${n}的【忽略】应可点(可见/可用/没被遮挡)`).toBeNull();
+  }
+});
+
+const BTN = { 'xs-card-process': '【处理】', 'xs-card-release': '【撤回】', 'xs-card-dismiss': '【忽略】' };
+
+/** 各状态一行:卡高 ≤ 56;原因文字可见且单行(≤ 28px);给定的每个按钮都与来源标题同一行(垂直中心差 ≤ 8px)。 */
+async function expectOneLine(card, state, buttonIds) {
+  const cb = await styleOf(card);
+  const from = await styleOf(card.getByTestId('xs-card-from'));
+  expect.soft(cb.height, `${state}:卡高度应 ≤ 56px(实测 ${f0(cb.height)}px)`).toBeLessThanOrEqual(56);
+  const reasonLoc = card.getByTestId('xs-card-reason');
+  await expect.soft(reasonLoc, `${state}:原因文字应可见`).toBeVisible();
+  if (await reasonLoc.count()) {
+    const rb = await styleOf(reasonLoc);
+    expect.soft(rb.height, `${state}:原因文字应单行,高度 ≤ 28px(实测 ${f0(rb.height)}px)`).toBeLessThanOrEqual(28);
+  }
+  for (const id of buttonIds) {
+    const loc = card.getByTestId(id);
+    const n = await loc.count();
+    expect.soft(n, `${state}:应有${BTN[id]}`).toBe(1);
+    if (n !== 1) continue;
+    const dy = Math.abs(midY(await styleOf(loc)) - midY(from));
+    expect.soft(dy, `${state}:${BTN[id]}与来源标题应在同一行,垂直中心差 ≤ 8px(实测 ${f0(dy)}px)`).toBeLessThanOrEqual(8);
+  }
+}
+
+// F8 各状态一行
+test('F8 各状态一行(pending / claimed):卡 ≤ 56px,原因文字可见且单行,按钮与来源标题同一行;claimed 有【撤回】', async ({ page }) => {
+  const pair = seedPair('f8');
+  const mp = await sendInbox(pair.A, pair.B, `${pair.m} F8 pending 一条\n第二行`);
+  const mc = await sendInbox(pair.A, pair.B, `${pair.m} F8 claimed 一条\n第二行`);
+  await openWithCards(page, pair, 2);
+  await api.claimOk(mc.id);
+  await expect(cardOf(page, mc.id), '前置:第二条已进入 claimed').toHaveAttribute('data-status', 'claimed', { timeout: 10_000 });
+  await expect(cardOf(page, mp.id), '前置:第一条仍是 pending').toHaveAttribute('data-status', 'pending');
+  await settle(page);
+  await expectOneLine(cardOf(page, mp.id), 'pending', ['xs-card-process', 'xs-card-dismiss']);
+  await expectOneLine(cardOf(page, mc.id), 'claimed', ['xs-card-process', 'xs-card-release', 'xs-card-dismiss']);
+});
+
+// F8 的 queued 部分:只有目标会话正在运行时由 AI 通道投递才会产生 queued,需要真 CLI(造法照 B3q)
+test('F8q 各状态一行(queued):卡 ≤ 56px,原因文字(排队说明)可见且单行,【处理】【忽略】与来源标题同一行', async ({ page }) => {
+  test.skip(!realCliPath(), '本机没有真 claude CLI:queued 只由 AI 的 send_message 在目标正在运行时产生');
+  const pair = seedPair('f8q');
+  await profileTurn(shared, pair.B, 'bypassPermissions');
+  await inboundOk(shared, pair.B.sid, 'auto');
+  await boot(page);
+  await openSessionBySearch(page, pair.B.title, pair.B.reply);
+  const go = `f8q-go-${uniq('')}`;
+  writeScript(`f8q-hold-${pair.m}`, [{ waitFile: go }, { waitFile: go }, { say: `${pair.m} 忙完了` }]);
+  const busyRes = await shared.post('/api/chat', { sessionId: pair.B.sid, cwd: pair.B.cwd, prompt: `${pair.m} 忙 R151S:f8q-hold-${pair.m}`, permissionMode: 'bypassPermissions' });
+  expect(busyRes.status, '前置:目标开始一个会忙住的回合').toBe(200);
+  expect(await waitFor(() => turnRecords().some((t) => t.sid === pair.B.sid && t.text.includes(`f8q-hold-${pair.m}`)), 15_000), '前置:目标会话正在跑').toBeTruthy();
+  try {
+    const r = await aiCalls(shared, { cwd: makeWorkspace(`real-f8q-${uniq('')}`), steps: [{ name: SM, input: { to: [pair.B.sid], message: `${pair.m} queued 一条` } }] });
+    expect(r.results.length, '前置:真 CLI 拿到一次工具结果').toBe(1);
+    expect(r.results[0].json && r.results[0].json.results && r.results[0].json.results[0] && r.results[0].json.results[0].delivery, '前置:目标正忙 → queued').toBe('queued');
+    const q = await waitFor(async () => (await msgsOf(pair.B.sid)).find((x) => x.from && x.from.kind === 'session' && String(x.body || '').includes('queued 一条')), 20_000);
+    expect(q, '前置:queued 消息已投递').toBeTruthy();
+    const card = cardOf(page, q.id);
+    await expect(card, '前置:卡片已出现且状态为 queued').toHaveAttribute('data-status', 'queued', { timeout: 15_000 });
+    await settle(page);
+    await expectOneLine(card, 'queued', ['xs-card-process', 'xs-card-dismiss']);
+  } finally {
+    touchCtl(go);
+  }
+});
