@@ -11,7 +11,7 @@ import { test, expect } from '@playwright/test';
 import {
   api, boot, openSessionBySearch, seedPair, sendInbox, cardOf, inbox, styleOf, pageHeight, overflowX,
   waitBodyShown, waitBodyHidden, waitStatus, msgsOf, writeScript, touchCtl, uniq, turnRecords, waitFor,
-  shared, realCliPath, profileTurn, inboundOk, aiCalls, makeWorkspace, SM,
+  shared, realCliPath, profileTurn, inboundOk, aiCalls, makeWorkspace, SM, setPanes, fillPane,
 } from './helpers/w.mjs';
 
 test.describe.configure({ timeout: 240_000 });
@@ -53,13 +53,13 @@ const layoutSnap = (page) => page.evaluate(() => {
   };
 });
 
-/** 淡入动画:先等 800ms,再轮询到连续两次快照相同(最多再等约 4 秒)。 */
-async function settle(page) {
+/** 淡入动画:先等 800ms,再轮询到连续两次快照相同(最多再等约 4 秒)。read 默认读单窗格快照,分屏用例传自己的读取函数。 */
+async function settle(page, read = () => layoutSnap(page)) {
   await page.waitForTimeout(800);
-  let prev = JSON.stringify(await layoutSnap(page));
+  let prev = JSON.stringify(await read());
   for (let i = 0; i < 25; i += 1) {
     await page.waitForTimeout(150);
-    const cur = JSON.stringify(await layoutSnap(page));
+    const cur = JSON.stringify(await read());
     if (cur === prev) return;
     prev = cur;
   }
@@ -350,5 +350,89 @@ test('F8q 各状态一行(queued):卡 ≤ 56px,原因文字(排队说明)可见�
     await expectOneLine(card, 'queued', ['xs-card-process', 'xs-card-dismiss']);
   } finally {
     touchCtl(go);
+  }
+});
+
+// ---------------- F9–F10(2026-11-04 补测分屏后追加) ----------------
+
+/** 分屏稳定判据:全部窗格、卡、标题行、来源标题的盒子(取整到 0.1px)。 */
+const paneSnap = (page) => page.evaluate(() => {
+  const box = (el) => {
+    const r = el.getBoundingClientRect();
+    return [r.top, r.bottom, r.left, r.right].map((v) => Math.round(v * 10) / 10);
+  };
+  const all = (sel) => [...document.querySelectorAll(sel)].map(box);
+  return {
+    panes: all('[data-testid="pane"]'),
+    cards: all('[data-testid="xs-card"]'),
+    toggles: all('[data-testid="xs-card-toggle"]'),
+    froms: all('[data-testid="xs-card-from"]'),
+  };
+});
+
+// F9 分屏不无谓截断来源名(造数与开窗格照 e-layout 的 E5:左窗格 A 收 3 条来自 B,右窗格 B 收 3 条来自 A)
+test('F9 分屏不无谓截断来源名:两窗格各 3 张折叠卡,凡回落成两行的标题行 ≥ 卡宽 85%,每张卡来源标题可视宽度 ≥ 200px', async ({ page }) => {
+  const pair = seedPair('f9');
+  const toA = []; // 发给 A(来自 B)→ 左窗格
+  const toB = []; // 发给 B(来自 A)→ 右窗格
+  for (let i = 0; i < 3; i += 1) {
+    toB.push((await sendInbox(pair.A, pair.B, bodyOf(pair.m, i))).id);
+    toA.push((await sendInbox(pair.B, pair.A, bodyOf(pair.m, i))).id);
+  }
+  await boot(page);
+  await openSessionBySearch(page, pair.A.title, pair.A.reply);
+  await setPanes(page, 2);
+  await fillPane(page, 2, pair.B.title);
+  const panes = page.locator('[data-testid="pane"]');
+  await expect(panes, '前置:共 2 个窗格').toHaveCount(2, { timeout: 15_000 });
+  const sides = [
+    { name: '左窗格(A 收件)', pane: panes.nth(0), ids: toA },
+    { name: '右窗格(B 收件)', pane: panes.nth(1), ids: toB },
+  ];
+  for (const s of sides) {
+    await expect(s.pane.locator('[data-testid="xs-card"]'), `前置:${s.name}应有 3 张卡`).toHaveCount(3, { timeout: 20_000 });
+  }
+  await settle(page, () => paneSnap(page));
+
+  const modes = [];
+  for (const s of sides) {
+    const pb = await styleOf(s.pane);
+    const expanded = await s.pane.getByTestId('xs-card-toggle').evaluateAll((els) => els.map((e) => e.getAttribute('aria-expanded')));
+    expect.soft(expanded, `前置:${s.name}三张卡都是折叠态`).toEqual(['false', 'false', 'false']);
+    for (let i = 0; i < s.ids.length; i += 1) {
+      const card = s.pane.locator(`[data-testid="xs-card"][data-message-id="${s.ids[i]}"]`);
+      await expect(card, `前置:${s.name}第 ${i + 1} 张卡(消息 ${s.ids[i].slice(0, 8)})存在`).toBeVisible({ timeout: 10_000 });
+      const cb = await styleOf(card);
+      const tg = await styleOf(card.getByTestId('xs-card-toggle'));
+      const from = await styleOf(card.getByTestId('xs-card-from'));
+      const proc = await styleOf(card.getByTestId('xs-card-process'));
+      const dy = Math.abs(midY(proc) - midY(from));
+      const twoRows = dy > 8; // 【处理】与来源标题不在同一行 = 卡片回落成了两行
+      modes.push(`${s.name.slice(0, 3)}#${i + 1}:${twoRows ? '两行' : '一行'}`);
+      const who = `${s.name}第 ${i + 1} 张卡`;
+      const diag = `窗格宽 ${f0(pb.width)}px / 卡宽 ${f0(cb.width)}px / 标题行宽 ${f0(tg.width)}px(占卡宽 ${f0((tg.width / cb.width) * 100)}%) / 来源标题宽 ${f0(from.width)}px / 【处理】与来源标题中心差 ${f0(dy)}px`;
+      if (twoRows) {
+        expect.soft(tg.width, `① ${who}回落成了两行,标题行应独占一整行:宽度 ≥ 卡宽 85%(${f0(cb.width * 0.85)}px)(${diag})`).toBeGreaterThanOrEqual(cb.width * 0.85);
+      }
+      expect.soft(from.width, `② ${who}来源标题可视宽度应 ≥ 200px(${diag})`).toBeGreaterThanOrEqual(200);
+    }
+  }
+  test.info().annotations.push({ type: 'note', description: `F9 各卡版式:${modes.join(' ')}` });
+});
+
+// F10 悬停看全文(原生 title 提示在无头浏览器里看不到,只能断言属性)
+test('F10 悬停看全文:N=1 时来源标题与原因文字各带非空 title,且等于各自的文字内容(去首尾空白)', async ({ page }) => {
+  const pair = seedPair('f10');
+  const [id] = await seedN(pair, 1);
+  await openWithCards(page, pair, 1);
+  const card = cardOf(page, id);
+  await settle(page);
+  for (const [tid, label] of [['xs-card-from', '来源标题'], ['xs-card-reason', '原因文字']]) {
+    const f = await card.getByTestId(tid).evaluate((el) => ({ title: el.getAttribute('title'), text: (el.textContent || '').trim() }));
+    const seen = `title=${JSON.stringify(f.title)} / 文字=${JSON.stringify(f.text)}`;
+    expect.soft(f.text.length, `前置:${label}(${tid})本身应有文字内容(${seen})`).toBeGreaterThan(0);
+    const hasTitle = f.title !== null && f.title.trim() !== '';
+    expect.soft(hasTitle, `${label}(${tid})应带非空的 title 属性(实测 ${seen})`).toBe(true);
+    if (hasTitle) expect.soft(f.title.trim(), `${label}(${tid})的 title 应等于其文字内容(去首尾空白)(实测 ${seen})`).toBe(f.text);
   }
 });
