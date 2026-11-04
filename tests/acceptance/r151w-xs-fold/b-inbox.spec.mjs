@@ -1,4 +1,5 @@
-// B 组:收件箱(输入框上方)折叠行(B1–B9 + 多消息 42vh 内滚)。依据 INTERFACE 第 2 节。
+// B 组:收件箱(输入框上方)折叠行(B1–B9 + 多消息 20vh 内滚)。依据 INTERFACE 第 2 节。
+// r152d:B10 的封顶口径由 42vh 改为 20vh(卡片区压缩;新口径的其余用例见 f-compact-inbox.spec.mjs)。
 // r151y:B5 改写 —— 「放任」档也折叠(用户 2026-10-29 修订,覆盖旧审计 S6 的全文展示约定)。
 // 夹具:POST /api/xsession/messages 造 pending;claim 造 claimed;目标会话忙时投递造 queued;
 // 点【处理】+ 假 CLI 脚本停住造 processing。
@@ -323,7 +324,7 @@ test('B9 多条消息按到达顺序堆叠:3 行、顺序 = 接口返回顺序�
   expect(nested, '卡片不互相嵌套').toBe(0);
 });
 
-test('B10 多消息时收件箱在 42vh 内滚动,不把窗口顶爆', async ({ page }) => {
+test('B10 多消息时收件箱在 20vh 内滚动,不把窗口顶爆', async ({ page }) => {
   const pair = seedPair('b10');
   for (let i = 0; i < 12; i += 1) await api.send(pair.A.sid, [pair.B.sid], `${pair.m} 第${i + 1}条\n第二行\n第三行\n第四行`);
   await openB(page, pair);
@@ -341,7 +342,7 @@ test('B10 多消息时收件箱在 42vh 内滚动,不把窗口顶爆', async ({ 
     }
     return { height: r.height, vh: window.innerHeight, scroller };
   });
-  expect.soft(f.height, `收件箱区域高度应 ≤ 42vh(实测 ${f.height.toFixed(0)}px / 视口 ${f.vh}px)`).toBeLessThanOrEqual(f.vh * 0.42 + 40);
+  expect.soft(f.height, `收件箱区域高度应 ≤ 20vh + 16px(实测 ${f.height.toFixed(0)}px / 视口 ${f.vh}px)`).toBeLessThanOrEqual(f.vh * 0.20 + 16);
   expect.soft(f.scroller, '内容溢出时应收件箱内部滚动(附近应有 overflow auto/scroll 且 scrollHeight > clientHeight 的容器)').not.toBeNull();
-  if (f.scroller) expect.soft(f.scroller.h, `滚动容器高度应 ≤ 42vh(实测 ${f.scroller.h}px / 视口 ${f.vh}px)`).toBeLessThanOrEqual(f.vh * 0.42 + 40);
+  if (f.scroller) expect.soft(f.scroller.h, `滚动容器高度应 ≤ 20vh + 4px(实测 ${f.scroller.h}px / 视口 ${f.vh}px)`).toBeLessThanOrEqual(f.vh * 0.20 + 4);
 });
