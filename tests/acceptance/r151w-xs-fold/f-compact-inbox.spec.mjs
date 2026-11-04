@@ -184,13 +184,16 @@ test('F5 滚到底:N=12 把卡片区滚到底后最后一张卡完整可见、�
   await seedN(pair, 12);
   await openWithCards(page, pair, 12);
   await settle(page);
-  const sc0 = await scrollerFacts(page, { toBottom: true });
-  expect(sc0.found, '前置:N=12 时卡片区内部应有可滚动容器').toBe(true);
+  const lastCard = inbox(page).locator('[data-testid="xs-card"]').last();
+  const top0 = await scrollerFacts(page);
+  expect(top0.found, '前置:N=12 时卡片区内部应有可滚动容器').toBe(true);
+  // 区分力前置:没滚动时最后一张卡够不着,"滚到底"这条才有意义(否则整条会空转成恒绿)
+  expect.soft(inside(await styleOf(lastCard), top0), `前置:滚动前最后一张卡应在卡片区可视范围之外(容器 scrollTop=${f0(top0.scrollTop)})`).toBe(false);
+  await scrollerFacts(page, { toBottom: true });
   await settle(page);
   const sc = await scrollerFacts(page);
   expect.soft(sc.scrollTop + sc.clientHeight, `前置:容器应已滚到底(scrollTop ${f0(sc.scrollTop)} + clientHeight ${sc.clientHeight} ≥ scrollHeight ${sc.scrollHeight} - 3)`).toBeGreaterThanOrEqual(sc.scrollHeight - 3);
 
-  const lastCard = inbox(page).locator('[data-testid="xs-card"]').last();
   const lastId = await lastCard.getAttribute('data-message-id');
   const dismiss = lastCard.getByTestId('xs-card-dismiss');
   const cb = await styleOf(lastCard);
