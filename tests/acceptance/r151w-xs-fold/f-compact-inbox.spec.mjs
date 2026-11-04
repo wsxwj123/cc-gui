@@ -214,7 +214,7 @@ test('F5 滚到底:N=12 把卡片区滚到底后最后一张卡完整可见、�
 });
 
 // F6 展开不挪按钮(回归保护)
-test('F6 展开不挪按钮:N=1 点标题行展开后正文在标题行下方、【处理】位置变化 ≤ 2px;再收起卡高回到展开前 ±2px、正文隐藏', async ({ page }) => {
+test('F6 展开不挪按钮:N=1 点标题行展开后正文在标题行下方、【处理】left 不变且相对标题行的位移变化 ≤ 2px;再收起卡高回到展开前 ±2px、正文隐藏', async ({ page }) => {
   const pair = seedPair('f6');
   const [id] = await seedN(pair, 1);
   await openWithCards(page, pair, 1);
@@ -236,10 +236,11 @@ test('F6 展开不挪按钮:N=1 点标题行展开后正文在标题行下方、
   const proc1 = await styleOf(proc);
   expect.soft(body1.top, `展开后正文应在标题行下方:正文 top ≥ 标题行 bottom - 2(实测 正文 top=${f0(body1.top)} / 标题行 bottom=${f0(head1.bottom)})`).toBeGreaterThanOrEqual(head1.bottom - 2);
   expect.soft(Math.abs(proc1.left - proc0.left), `展开前后【处理】left 变化应 ≤ 2px(实测 ${f0(proc0.left)} → ${f0(proc1.left)})`).toBeLessThanOrEqual(2);
-  // 诊断(不是断言):同时给出"相对标题行"的位移 —— b-inbox 的 B2 用的是这个口径;收件箱在输入框上方底部锚定,展开会整块上移
+  // 口径 = b-inbox 的 B2:【处理】相对标题行的位移。收件箱贴着输入框上方、底部锚定,展开变高只能整块上移,
+  // 所以绝对 top 一定会变(r152d 主会话修订:接口文件第 4 节 F6 原写成绝对位置,是接口写错,已改成相对标题行)。
   const rel0 = proc0.top - head0.top;
   const rel1 = proc1.top - head1.top;
-  expect.soft(Math.abs(proc1.top - proc0.top), `展开前后【处理】top 变化应 ≤ 2px(实测 ${f0(proc0.top)} → ${f0(proc1.top)};诊断:标题行 top ${f0(head0.top)} → ${f0(head1.top)},【处理】相对标题行 ${f0(rel0)} → ${f0(rel1)})`).toBeLessThanOrEqual(2);
+  expect.soft(Math.abs(rel1 - rel0), `展开前后【处理】相对标题行的位移变化应 ≤ 2px(实测 ${f0(rel0)} → ${f0(rel1)};绝对 top ${f0(proc0.top)} → ${f0(proc1.top)} 随整块上移,不作判据;标题行 top ${f0(head0.top)} → ${f0(head1.top)})`).toBeLessThanOrEqual(2);
 
   await toggle.click();
   await expect(toggle, '前置:再点标题行后收起').toHaveAttribute('aria-expanded', 'false');

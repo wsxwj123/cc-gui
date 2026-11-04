@@ -23,7 +23,7 @@ const bodyB5 = (m) => Array.from({ length: 6 }, (_, i) => `${m} 第${i + 1}段 $
 
 // 不用 Playwright isVisible(它只看元素自身有没有盒子,不管是否被滚动容器裁掉):
 // 把按钮 rect 与「最近的滚动祖先 ∩ 视口」求交,要求按钮整体落在收件箱可视区内。
-// 这是判官补强的 B2 断言:收件箱展开后正文变长、容器只有 42vh,【处理】不能被推/裁到看不见。
+// 这是判官补强的 B2 断言:收件箱展开后正文变长、容器上限只有 20vh(r152d 起;此前 42vh),【处理】不能被推/裁到看不见。
 async function visibleInScroller(loc) {
   return loc.evaluate((el) => {
     const r = el.getBoundingClientRect();
@@ -95,7 +95,7 @@ test('B2 展开动作行不移动:动作行相对标题行的位置不变(≤2px
   expect.soft(await proc.isEnabled(), '展开后【处理】仍可点').toBe(true);
 
   // 判官补强:上面的「相对标题行不动」近乎恒真(DOM 顺序固定)。再量一次真实可视性——
-  // 【处理】的 rect 必须整体落在最近滚动容器(收件箱 42vh 内滚)与视口的交集里。
+  // 【处理】的 rect 必须整体落在最近滚动容器(收件箱 20vh 内滚)与视口的交集里。
   const vis = await visibleInScroller(proc);
   expect.soft(vis.ratio, `展开后【处理】应完整落在收件箱滚动容器可视区内(实测覆盖 ${(vis.ratio * 100).toFixed(1)}%,按钮 rect=${JSON.stringify(vis.rect)},可视区=${JSON.stringify(vis.box)},scrollTop=${vis.scrollTop})`).toBeGreaterThanOrEqual(0.98);
   expect.soft(vis.inViewport, `展开后【处理】应在视口内(按钮 rect=${JSON.stringify(vis.rect)})`).toBe(true);
