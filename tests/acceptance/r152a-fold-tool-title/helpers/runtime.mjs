@@ -139,7 +139,7 @@ export async function stripSnapshot(scope) {
     rounds: await root.first().getAttribute('data-strip-rounds'),
     steps: await root.first().getAttribute('data-strip-steps'),
     headCount: await head.count(),
-    headText: (await head.count()) ? (await head.first().textContent() || '').trim() : null,
+    headText: (await head.count()) ? (await head.first().textContent() || '').trim() : null, // r152c 起 = 折叠条整体文字 = 标题（取不到标题时回落成「[N 轮 ]M 步」）
     headAria: (await head.count()) ? await head.first().getAttribute('aria-expanded') : null,
     headTitle: (await head.count()) ? await head.first().getAttribute('title') : null,
     headHeight: (await head.count()) ? (await head.first().boundingBox())?.height ?? 0 : 0,
@@ -358,21 +358,25 @@ export async function waitStripState(page, root, want, timeout = 30_000) {
 export const headOf = (scope) => scope.locator('[data-strip="head"]').first();
 
 /**
- * 折叠条文案的拆解：先把右侧用时 [data-strip-elapsed] 与 4 点动画 [data-strip-dots] 摘掉（它们是文案之外的装饰），
- * 再按「思考与工具调用 · [N 轮 ]M 步[ · 末尾]」切开。tail === null 表示没有末尾段。
+ * 折叠条文案的拆解（r152c 起）：折叠条的可见文字只剩标题——[data-strip-title] 恰 1 个，
+ * 除它与右侧用时 [data-strip-elapsed]（以及点阵 [data-strip-dots]）之外，折叠条里没有任何其它文字。
+ * tail = 标题文字（原来是「思考与工具调用 · [N 轮 ]M 步 · 」后面的末尾段；N / M 现在读条带根的 data-strip-rounds / -steps
+ * 或折叠条的 title 属性）；matched = 结构合规（标题恰 1 个且无其它文字）；没有 [data-strip-title] 时 tail === null。
  */
 export async function headParts(head) {
-  const text = await head.evaluate((el) => {
+  const r = await head.evaluate((el) => {
+    const titles = el.querySelectorAll('[data-strip-title]');
     const c = el.cloneNode(true);
     c.querySelectorAll('[data-strip-elapsed],[data-strip-dots]').forEach((n) => n.remove());
-    return (c.textContent || '').trim();
+    const text = (c.textContent || '').trim();
+    c.querySelectorAll('[data-strip-title]').forEach((n) => n.remove());
+    return { titleCount: titles.length, title: titles.length === 1 ? (titles[0].textContent || '').trim() : null, text, rest: (c.textContent || '').trim() };
   });
-  const m = text.match(/^思考与工具调用 · (?:(\d+) 轮 )?(\d+) 步(?: · ([\s\S]*))?$/);
-  return { text, matched: !!m, rounds: m ? (m[1] ?? null) : null, steps: m ? m[2] : null, tail: m ? (m[3] ?? null) : null };
+  return { text: r.text, matched: r.titleCount === 1 && r.rest === '', titleCount: r.titleCount, rest: r.rest, tail: r.title };
 }
 export async function tailOf(head) { return (await headParts(head)).tail; }
 
-/** 轮询到折叠条末尾 === want；失败信息里带着实际读到的整句文案。 */
+/** 轮询到折叠条标题（r152c 前叫“末尾”）=== want；失败信息里带着实际读到的整句文案。 */
 export async function expectTail(head, want, message, timeout = 20_000) {
   await expect.poll(async () => await tailOf(head), { timeout, message }).toBe(want);
 }

@@ -1,4 +1,4 @@
-// r152a-fold-tool-title：折叠条末尾 = 最新工具调用的标题；直播期 4 点动画 + 用时。
+// r152a-fold-tool-title：折叠条文字 = 最新工具调用的标题（r152c 起折叠条只剩标题，前缀与计数挪进悬停提示）；直播期点阵动画 + 用时。
 // 判据全部来自 .devflow/r152a-fold-tool-title-接口.md 的「行为清单」与「错误契约」，只看页面上用户能看到的东西：
 //   [data-strip="head"] 的文字 / aria-expanded / [data-strip-live] / [data-strip-dots] / [data-strip-elapsed] / [data-strip-item][hidden]。
 // 命名：Bn 对应行为清单第 n 条；B11 对应错误契约。
@@ -27,8 +27,8 @@ async function expectHistoryTail(page, round, label) {
   await expect(row, `${label}：按收官正文「${round.anchor}」应能找到这一轮`).toHaveCount(1);
   await expect(headOf(row), `${label}：这一轮应有折叠条`).toHaveCount(1);
   const parts = await headParts(headOf(row));
-  expect.soft(parts.matched, `${label}：折叠条应形如「思考与工具调用 · [N 轮 ]M 步[ · 末尾]」，实际「${parts.text}」`).toBe(true);
-  expect.soft(parts.tail, `${label}：折叠条末尾（整句「${parts.text}」）`).toBe(round.expect);
+  expect.soft(parts.matched, `${label}：折叠条应只有标题（[data-strip-title] 恰 1 个，除标题与用时外无其它文字），实际「${parts.text}」`).toBe(true);
+  expect.soft(parts.tail, `${label}：折叠条标题（整句「${parts.text}」）`).toBe(round.expect);
 }
 
 test('B1 历史回合：Bash 带 description → 末尾是 description（清洗：空白折叠 / 成对记号 / 60 字符截断），不是思考', async ({ page }) => {
@@ -62,8 +62,8 @@ test('B4 历史回合：思考、Bash、思考、Read、思考（最后一块是
   const rows = turnRows(page);
   await expect(rows).toHaveCount(9, { timeout: 20_000 });
   const parts = await headParts(headOf(rows.last())); // M9 排在会话最后，且没有收官正文
-  expect(parts.matched, `折叠条应形如「思考与工具调用 · …」，实际「${parts.text}」`).toBe(true);
-  expect(parts.tail, `最后一块是思考时末尾也取最后一个工具（不是甲 / 不是任何思考）；整句「${parts.text}」`).toBe(MISC.b4lastThink.expect);
+  expect(parts.matched, `折叠条应只有标题（[data-strip-title] 恰 1 个，除标题与用时外无其它文字），实际「${parts.text}」`).toBe(true);
+  expect(parts.tail, `最后一块是思考时标题也取最后一个工具（不是甲 / 不是任何思考）；整句「${parts.text}」`).toBe(MISC.b4lastThink.expect);
 });
 
 test('B5 历史回合：纯思考保持思考预览；子代理卡不参与（卡后有 Bash 取它，卡后没有取卡前的）', async ({ page }) => {
@@ -264,7 +264,7 @@ test('B11 错误契约：工具入参异常（不是对象 / 字段类型不对 
     const row = turnRows(page).filter({ hasText: round.anchor }).first();
     await expect(headOf(row), `B11 ${round.label}：这一轮应有折叠条`).toHaveCount(1);
     const parts = await headParts(headOf(row));
-    expect.soft(round.expectAny, `B11 ${round.label}：折叠条末尾应在合规取值内（整句「${parts.text}」，实际末尾 ${JSON.stringify(parts.tail)}）`)
+    expect.soft(round.expectAny, `B11 ${round.label}：折叠条标题应在合规取值内（整句「${parts.text}」，实际标题 ${JSON.stringify(parts.tail)}）`)
       .toContain(parts.tail);
   }
   expect(await page.evaluate(() => window.__r152a_xss), 'description 里的 <script> 只能当文字，不能被执行').toBeUndefined();
