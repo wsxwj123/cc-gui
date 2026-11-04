@@ -699,12 +699,11 @@ export function CoworkBlocks({
   const open = stripOpen === null ? (stripAutoCtx || isLive || !autoFold) : stripOpen;
   // 末尾(r152a):可折段里有工具 → 最新工具调用的标题(生成中 / 已结束两种口径,见 stripSummary);
   // 一个工具都没有 → 仍是思考预览。
-  const headTail = (isLive ? summary.liveTitle : summary.doneTitle) ?? summary.tail;
-  const headText = [
-    '思考与工具调用',
-    summary.rounds == null ? `${summary.steps} 步` : `${summary.rounds} 轮 ${summary.steps} 步`,
-    ...(headTail ? [headTail] : []),
-  ].join(' · ');
+  // r152c:折叠条可见文字只剩标题(向桌面版靠拢);取不到标题才回落计数;前缀与计数挪进悬停提示。
+  const headTitle = (isLive ? summary.liveTitle : summary.doneTitle) ?? summary.tail;
+  const headCount = summary.rounds == null ? `${summary.steps} 步` : `${summary.rounds} 轮 ${summary.steps} 步`;
+  const headText = headTitle || headCount;
+  const headHint = `思考与工具调用 · ${headCount} · 展开/收起这一轮的过程`;
   const out = segments.map((seg) => {
     const foldable = isFoldableSegment(seg);
     const body = (() => {
@@ -774,21 +773,27 @@ export function CoworkBlocks({
           data-strip="head"
           data-strip-live={isLive ? 'true' : undefined}
           aria-expanded={open ? 'true' : 'false'}
-          title="展开/收起这一轮的过程"
+          title={headHint}
           onClick={() => setStripOpen(!open)}
-          className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 border-l-2 border-canvas-deep/40 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left"
+          className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-md transition-colors text-left"
         >
-          {open
-            ? <ChevronDown size={13} className="text-ink-faint shrink-0" />
-            : <ChevronRight size={13} className="text-ink-faint shrink-0" />}
-          {/* r152a:生成中扳手换成 4 点动画、右侧挂整回合用时;回合结束两者都撤掉(历史轮不挂定时器)。 */}
+          {/* r152c:子元素顺序固定 = 左图标 → 标题 → [用时,仅生成中] → 三角(最后一个)。
+              生成中左图标是 2×2 点阵、右侧挂整回合用时;回合结束两者都撤掉(历史轮不挂定时器)。 */}
           {isLive
             ? <span data-strip-dots className="strip-live-dots text-accent shrink-0" aria-hidden="true"><span /><span /><span /><span /></span>
             : <Wrench size={13} className="text-ink-muted shrink-0" />}
-          <span className="text-xs text-ink-soft font-body truncate min-w-0">{headText}</span>
+          <span data-strip-title className="min-w-0 flex-1 truncate text-xs text-ink-soft font-body">{headText}</span>
           {isLive && stripStartedAt ? (
-            <span data-strip-elapsed className="ml-auto shrink-0 text-xs"><ElapsedTime startedAt={stripStartedAt} /></span>
+            <span data-strip-elapsed className="shrink-0 text-xs"><ElapsedTime startedAt={stripStartedAt} /></span>
           ) : null}
+          <span
+            data-strip-caret
+            data-open={open ? 'true' : 'false'}
+            aria-hidden="true"
+            className={`shrink-0 inline-flex items-center justify-center text-ink-faint transition-transform duration-150 ${open ? 'rotate-90' : ''}`}
+          >
+            <svg width="9" height="9" viewBox="0 0 10 10" fill="currentColor" focusable="false"><path d="M3 1.5 L8 5 L3 8.5 Z" /></svg>
+          </span>
         </button>
       )}
       {out}{trailing}

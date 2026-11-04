@@ -31,6 +31,16 @@ export const SESSIONS = {
   // B9 / B10 各用一条自己的“有一个历史回合”的会话来续写直播回合（侧栏“新建会话”那条路在本实例里不稳：标题生成会往侧栏塞临时项目）
   l9: { sid: 'a1520006-0000-4000-8000-0000000000a6', marker: 'R152AMARKLIVENINE' },
   l10: { sid: 'a1520007-0000-4000-8000-0000000000a7', marker: 'R152AMARKLIVETEN' },
+  // ── r152c-head-desktop 追加（只增不改）──
+  // ch = 只读的历史回合会话（C1/C2/C3/C11 与各用例的历史回合部分共用，用例不往里写）；
+  // cl4…cl10 = 各直播用例各自的会话（直播回合会往转写里追加，所以每条直播用例独占一条，互不共用）。
+  ch: { sid: 'a1520101-0000-4000-8000-0000000000c1', marker: 'R152CMARKHIST' },
+  cl4: { sid: 'a1520104-0000-4000-8000-0000000000c4', marker: 'R152CMARKLIVEFOUR' },
+  cl5: { sid: 'a1520105-0000-4000-8000-0000000000c5', marker: 'R152CMARKLIVEFIVE' },
+  cl7: { sid: 'a1520107-0000-4000-8000-0000000000c7', marker: 'R152CMARKLIVESEVEN' },
+  cl8: { sid: 'a1520108-0000-4000-8000-0000000000c8', marker: 'R152CMARKLIVEEIGHT' },
+  cl9: { sid: 'a1520109-0000-4000-8000-0000000000c9', marker: 'R152CMARKLIVENINE' },
+  cl10: { sid: 'a1520110-0000-4000-8000-0000000000ca', marker: 'R152CMARKLIVETEN2' },
 };
 
 // 块构造：th 思考 / tx 正文 / tl 工具（input 原样写进转写，异常形态也照写）
@@ -113,6 +123,22 @@ export const HIST_ROWS = [
   withEnd('H1', [th('H1 思考。'), tl('Bash', { command: 'ls', description: '历史回合甲' })], '历史回合甲'),
   withEnd('H2', [th('H2 思考。'), tl('Bash', { command: 'ls', description: '历史回合乙' })], '历史回合乙'),
 ];
+
+// ── r152c-head-desktop 追加（只增不改）：会话 ch 的各轮 ─────────────────────────────
+// c1a/c1b/c1c：有通用工具（Bash 带 description，含清洗）；c2：整轮只有思考；c3：唯一的思考块是纯空白；
+// c11long/c11short：超长标题 vs 短标题（同页比较折叠条高度）。标题清洗后最多 60 个字符 + …，普通汉字 60 个只有约 700–820px，
+// 放得进 1600 宽窗口的折叠条（约 1060px）；所以长标题用三倍长破折号 ⸻（U+2E3B，宽 3em）：90 个清洗成 60 个 + …，
+// 在 WebKit 里实测约 1900–2200px，两档窗口都放不下。
+export const C_ROWS = {
+  c1a: withEnd('C1a', [th('C1a 思考内容不该出现在折叠条里。'), tl('Bash', { command: 'ls', description: '整理工作区里的临时文件' })], '整理工作区里的临时文件'),
+  c1b: withEnd('C1b', [th('C1b 思考内容。'), tl('Bash', { command: 'ls', description: '运行 `npm test` 并检查输出' })], '运行 npm test 并检查输出'),
+  c1c: withEnd('C1c', [th('C1c 思考内容。'), tl('Bash', { command: 'ls', description: '\n  先看  \n 一眼\t现场  \n' })], '先看 一眼 现场'),
+  c2: withEnd('C2', [th('C2 第一条思考：不该出现在折叠条里。'), th(LONG_THINK)], `${cp(LONG_THINK, 40)}…`),
+  c3: withEnd('C3', [th('   \n\t  ')], null),
+  c11long: withEnd('C11L', [th('C11L 思考。'), tl('Bash', { command: 'ls', description: '⸻'.repeat(90) })], `${'⸻'.repeat(60)}…`),
+  c11short: withEnd('C11S', [th('C11S 思考。'), tl('Bash', { command: 'ls', description: '短标题' })], '短标题'),
+};
+const C_HIST_ROWS = Object.values(C_ROWS);
 
 // ── 记录构造（形状同 stripfold 夹具）────────────────────────────────────────
 const ISO = (min, sec = 0) => new Date(Date.UTC(2026, 9, 30, 9, min, sec)).toISOString();
@@ -199,6 +225,10 @@ export function ensureFixtures() {
   writeSession('h', HIST_ROWS);
   writeSession('l9', [withEnd('L9', [th('L9 思考。'), tl('Bash', { command: 'ls', description: 'L9 历史回合' })], 'L9 历史回合')]);
   writeSession('l10', [withEnd('L10', [th('L10 思考。'), tl('Bash', { command: 'ls', description: 'L10 历史回合' })], 'L10 历史回合')]);
+  writeSession('ch', C_HIST_ROWS);
+  for (const k of ['cl4', 'cl5', 'cl7', 'cl8', 'cl9', 'cl10']) {
+    writeSession(k, [withEnd(`CL${k}`, [th(`${k} 思考。`), tl('Bash', { command: 'ls', description: `${k} 历史回合` })], `${k} 历史回合`)]);
+  }
   const manifest = {
     dataRoot: dataRoot(), home: homeDir(), workspace: workspaceDir(), fakebin: fakebinDir(), fakeCtl: fakeCtlDir(),
     sessions: Object.fromEntries(Object.entries(SESSIONS).map(([k, v]) => [k, v.sid])),

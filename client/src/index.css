@@ -1551,23 +1551,27 @@ header [data-tour="remote-control"] {
   .tc-agent-dots span { animation: none; opacity: 0.6; }
 }
 
-/* ── 折叠条头行(r152a):回合生成中扳手位的 4 点跳动 ──
-   照 .tc-agent-dots 改成 4 个点;颜色取 currentColor;reduced-motion 静止半透明 */
+/* ── 折叠条头行(r152c):回合生成中左图标位的 2×2 点阵 ──
+   向桌面版靠拢:桌面版实测(渲染值)点 4.5px、中心距 9.5px、容器 14px;本应用 <html> 带字号缩放
+   zoom(默认约 1.2),所以布局值取 点 4px、间隙 4px(中心距 8px、容器 12px),渲染后约 4.8/9.6/14.4。
+   DOM 顺序 左上/右上/左下/右下(grid 自然排布),按视觉顺时针依次亮:左上 0 → 右上 .15s → 右下 .3s → 左下 .45s。
+   颜色取 currentColor;reduced-motion 静止半透明 */
 .strip-live-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+  display: inline-grid;
+  grid-template-columns: repeat(2, 4px);
+  grid-auto-rows: 4px;
+  gap: 4px;
 }
 .strip-live-dots span {
-  width: 3.5px;
-  height: 3.5px;
+  width: 4px;
+  height: 4px;
   border-radius: 999px;
   background: currentColor;
   animation: stripLiveDot 1.2s ease-in-out infinite;
 }
 .strip-live-dots span:nth-child(2) { animation-delay: 0.15s; }
-.strip-live-dots span:nth-child(3) { animation-delay: 0.3s; }
-.strip-live-dots span:nth-child(4) { animation-delay: 0.45s; }
+.strip-live-dots span:nth-child(4) { animation-delay: 0.3s; }
+.strip-live-dots span:nth-child(3) { animation-delay: 0.45s; }
 @keyframes stripLiveDot {
   0%, 100% { opacity: 0.25; transform: scale(0.8); }
   40%      { opacity: 1;    transform: scale(1);   }

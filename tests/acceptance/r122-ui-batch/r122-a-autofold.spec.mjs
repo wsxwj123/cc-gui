@@ -296,13 +296,13 @@ async function startHeldRound(page, session, tag, extra) {
   return root;
 }
 
-/** 回合正常结束并已换成落盘的那一轮(摘要行补上「N 轮」即为已换)。 */
+/** 回合正常结束并已换成落盘的那一轮(条带根的 data-strip-rounds 由空串变成纯数字即为已换;折叠条文字自 r152c 起只剩标题,不再含「N 轮」)。 */
 async function finishRound(page, root) {
   releaseRound();
   await waitRoundIdle(page);
-  await expect.poll(async () => (await root.locator('[data-strip="head"]').first().textContent().catch(() => '')) || '', {
-    timeout: 40_000, message: '回合结束后摘要行应补上「N 轮」(= 已换成落盘的那一轮)',
-  }).toMatch(/\d+\s*轮/);
+  await expect.poll(async () => (await root.getAttribute('data-strip-rounds', { timeout: 2_000 }).catch(() => null)) ?? '', {
+    timeout: 40_000, message: '回合结束后条带根的 data-strip-rounds 应从空串变成数字 N(= 已换成落盘的那一轮)',
+  }).toMatch(/^\d+$/);
 }
 
 test('A9 正在生成·开关开启:回合进行中 state=open', async ({ page }) => {

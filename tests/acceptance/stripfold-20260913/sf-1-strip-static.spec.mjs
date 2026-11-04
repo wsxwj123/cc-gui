@@ -11,7 +11,8 @@ import {
 
 test.beforeEach(async ({ page }) => { await primeOverlays(page); });
 
-const HEAD_TITLE = '展开/收起这一轮的过程';
+// 〈r152c〉悬停提示 =「思考与工具调用 · N 轮 M 步 · 展开/收起这一轮的过程」（夹具 A：9 轮 7 步）；原来只有后半句。
+const HEAD_TITLE = A.headHover;
 
 /**
  * SF-100 · 夹具自检（**不是被测功能的判据**）。
@@ -48,7 +49,7 @@ test('SF-101 收官态结构：每轮 1 条条带、默认收起、头行是按�
   }
 });
 
-test('SF-102 摘要行文案逐字：N 轮 M 步 + 尾句', async ({ page }) => {
+test('SF-102 摘要行文案逐字：折叠条只剩标题（尾句），N 轮 M 步在条带根的 data-strip-*', async ({ page }) => {
   await openApp(page);
   await openSessionByMarker(page, MARKER_A);
   const rows = turnRows(page);
@@ -56,7 +57,7 @@ test('SF-102 摘要行文案逐字：N 轮 M 步 + 尾句', async ({ page }) => 
 
   for (let i = 0; i < A.rounds; i += 1) {
     const snap = await stripSnapshot(rows.nth(i));
-    expect(snap.headText, `第 ${i + 1} 轮摘要行必须逐字相等（夹具 A：9 轮 7 步 末句）`).toBe(A.headText);
+    expect(snap.headText, `第 ${i + 1} 轮折叠条文字必须逐字相等（夹具 A：只剩末句标题；9 轮 7 步在悬停提示与 data-strip-*）`).toBe(A.headText);
     expect(snap.steps, 'data-strip-steps 是该轮被折块数').toBe(String(A.steps));
     expect(snap.rounds, 'data-strip-rounds 是 usageCalls 条数').toBe(String(A.callsPerRound));
   }
@@ -163,8 +164,10 @@ test('SF-107 折叠范围只含 group 段：Workflow / Task 卡在收起态仍�
   }
 });
 
-/** §C.1 的 F1/F2 形态（本夹具每轮都有 usageCalls → 「N 轮 M 步」；尾段没有时不带第三段）。 */
-const summaryHead = (rounds, steps, tail) => `思考与工具调用 · ${rounds} 轮 ${steps} 步${tail ? ` · ${tail}` : ''}`;
+/** 〈r152c〉折叠条可见文字 = 标题；取不到标题时回落成计数文字「N 轮 M 步」。N / M 另在悬停提示里核对（headHover）。 */
+const summaryHead = (rounds, steps, tail) => (tail || `${rounds} 轮 ${steps} 步`);
+/** 〈r152c〉折叠条悬停提示：前缀与计数挪到这里。 */
+const headHover = (rounds, steps) => `思考与工具调用 · ${rounds} 轮 ${steps} 步 · 展开/收起这一轮的过程`;
 
 /**
  * SF-108 摘要尾句的清洗与取值。
@@ -185,7 +188,7 @@ test('SF-108 摘要尾句的清洗与取值（emoji 截断 / 空白折叠 / 只�
   const emojiRow = rows.filter({ hasText: '图看完了。' }).first();
   const emojiHead = (await stripSnapshot(emojiRow)).headText;
   expect(emojiHead, 'emoji 尾段应当是 40 个码点 + 省略号').toContain(C.emojiTail);
-  const emojiTail = emojiHead.slice(emojiHead.lastIndexOf(' · ') + 3);
+  const emojiTail = emojiHead; // 〈r152c〉折叠条文字只剩标题，不再有「 · 」分隔的前缀
   expect([...emojiTail].length, '尾段按 Unicode 码点算应当是 41 个字符（40 + …）').toBe(41);
 
   // ② 换行 + 缩进 → 空白折叠成单个空格
@@ -224,6 +227,11 @@ test('SF-108 摘要尾句的清洗与取值（emoji 截断 / 空白折叠 / 只�
   // 〈r152a〉该轮含通用工具 Read(/tmp/sf-fixture/a.txt)：不再省略尾段，末尾是「读取 a.txt」；仍不许回落取正文
   expect((await stripSnapshot(noThinkRow)).headText, '没有思考但有通用工具：末尾是工具标题，不许回落取正文')
     .toBe(summaryHead(2, 1, '读取 a.txt'));
+
+  // 〈r152c〉N 轮 M 步 不再在折叠条文字里：改在悬停提示（title）里逐字核对（原先随整句文案一起被 toBe 核对）
+  for (const [row, r, st] of [[mdRow, 2, 1], [scatteredRow, 2, 1], [identRow, 2, 1], [unclosedRow, 2, 1], [toolLastRow, 3, 2], [noThinkRow, 2, 1]]) {
+    expect((await stripSnapshot(row)).headTitle, `悬停提示应带 ${r} 轮 ${st} 步`).toBe(headHover(r, st));
+  }
 });
 
 test('SF-109 无可折块的轮：state=none、不渲染摘要行、正文照常', async ({ page }) => {
