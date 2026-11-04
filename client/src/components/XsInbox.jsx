@@ -5,6 +5,7 @@
 // r151w/r151x:卡片不再是浮起的大块,改用与 TaskNoticeRow 同款的居中折叠行(XsNoticeRow):
 // 折叠态只有标题行 + 状态 + 展开全文(不显示正文),展开后才显示完整正文(窄块居中 + 块内两端对齐);
 // 动作行(处理 / 撤回 / 忽略)留在折叠行里、紧贴标题行,收起状态也能直接点。
+// r152d:收件箱改用 XsNoticeRow 的 compact 一行版式(标题 / 展开 / 原因 / 按钮同一行,窄屏回落两行),区域上限 20% 视口高。
 // r151y:「放任」档不再例外 —— 所有权限档都折叠,正文不摊开(旧的 noFold / 审计 S6 约定作废)。
 import React, { useEffect, useRef, useState } from 'react';
 import { CornerLeftUp } from './Icon.jsx';
@@ -75,6 +76,7 @@ const XsCard = React.memo(function XsCard({ message, onProcess, onRelease, onDis
       bodyPlaceholder="（正文不可用）"
       actions={actions}
       animate
+      compact
     />
   );
 });
@@ -117,7 +119,8 @@ export const XsInbox = React.memo(function XsInbox({ sessionId = null, onSend })
   return (
     <div data-testid="xs-inbox" data-cgui="xs-inbox" className="px-6 pb-2 space-y-1 max-w-[var(--content-max)] mx-auto w-full">
       {error && <div className="text-[11px] text-amber-700 font-body px-1">{error}</div>}
-      <div className="space-y-1 max-h-[min(42vh,calc(var(--app-h,100dvh)*0.42))] overflow-y-auto">
+      {/* r152d:上限 20% 视口高(原 42% 实测把消息区挤到 28%),超出内部滚动 */}
+      <div className="space-y-1 max-h-[min(20vh,calc(var(--app-h,100dvh)*0.20))] overflow-y-auto">
         {messages.map((m) => (
           <XsCard key={m.id} message={m} onProcess={onProcess} onRelease={onRelease} onDismiss={onDismiss} />
         ))}

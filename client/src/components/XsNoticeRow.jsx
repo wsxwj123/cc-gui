@@ -35,6 +35,10 @@ const JUSTIFIED_BLOCK = { maxWidth: '82%', marginLeft: 'auto', marginRight: 'aut
  * @param {string} bodyPlaceholder 正文缺失时的占位文案(不算正文,不触发展开)
  * @param {ReactNode} actions 动作行(仅收件箱):原因 + 处理 / 撤回 / 忽略
  * @param {ReactNode} meta 展开后的元信息(仅发送行):每目标一行
+ * @param {boolean} compact r152d:只由收件箱传入。折叠态压成一行 ——
+ *        [标题行按钮:箭头 + 标题 + 状态 + 展开][动作:原因(flex-1 单行省略)+ 按钮靠右],左对齐、无两侧分隔线;
+ *        窄屏放不下时 flex-wrap 回落两行。「展开全文」/「收起」宽度差由原因那段吸收,按钮位置不漂。
+ *        默认关:关着时 DOM / class 与 r151w 版逐字一致(接收行、发送行版式不动)。
  */
 export const XsNoticeRow = React.memo(function XsNoticeRow({
   testId,
@@ -58,6 +62,7 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
   innerClassName = '',
   bodyClassName = '',
   animate = false,
+  compact = false,
 }) {
   const [expanded, setExpanded] = useState(false);
   const uid = useId();
@@ -94,6 +99,59 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
     </>
   );
 
+  if (compact) {
+    // r152d 收件箱一行版式:左对齐、无分隔线;标题行按钮可收缩(来源标题省略),动作段 flex-1 吸收
+    // 「展开全文」/「收起」的宽度差,按钮恒靠右;放不下(窄屏 / 长标题)时 wrap 成两行。
+    const compactHead = (
+      <>
+        {foldable && (expanded ? <ChevronDown size={10} className="shrink-0 text-ink-faint" /> : <ChevronRight size={10} className="shrink-0 text-ink-faint" />)}
+        {icon}
+        <span data-testid={titleTestId} className="min-w-0 flex items-center gap-1.5 text-[12px] font-medium leading-tight text-ink-soft">{title}</span>
+        {status != null && status !== '' && (
+          <span data-testid={statusTestId} className="truncate min-w-0 text-[10.5px] text-ink-faint">{status}</span>
+        )}
+        {foldable && (
+          <span data-testid={expandTestId} className="shrink-0 text-[10.5px] text-accent">{expanded ? '收起' : '展开全文'}</span>
+        )}
+      </>
+    );
+    // 标题行宽度夹在 [min(100%,12rem), 100% − 动作段 12rem − 间距] 之间:宽屏时长标题先省略、不换行;
+    // 行宽不足约 25rem(上限小于下限,下限生效)时整段放不下,动作段 wrap 到第二行。
+    const compactToggleClass = 'min-w-[min(100%,12rem)] max-w-[calc(100%-12.75rem)] flex items-center gap-1.5 py-1 text-left font-body';
+    return (
+      <div data-testid={testId} data-cgui="xs-notice" data-direction={direction} {...rootProps}
+        className={`${animate ? 'animate-fade-up ' : ''}${className}`}>
+        <div className={innerClassName}>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 min-w-0 rounded-md bg-canvas-deep/25 px-2">
+            {foldable ? (
+              <button type="button" data-testid={toggleTestId} aria-expanded={expanded} aria-controls={bodyId}
+                onClick={() => setExpanded((v) => !v)}
+                className={`${compactToggleClass} cursor-pointer`}>
+                {compactHead}
+              </button>
+            ) : (
+              <div data-testid={toggleTestId} className={compactToggleClass}>{compactHead}</div>
+            )}
+            {actions && <div className="flex-[1_1_12rem] flex items-center gap-2 min-w-0 py-0.5">{actions}</div>}
+          </div>
+          {!bodyShown && hasBody && (
+            <span hidden aria-hidden="true">{text}</span>
+          )}
+          <div id={bodyId} data-testid={bodyTestId} hidden={!bodyShown}
+            className={`mt-1 text-[12.5px] leading-relaxed text-ink font-body whitespace-pre-wrap break-words ${bodyClassName}`}
+            style={expanded ? JUSTIFIED_BLOCK : undefined}>
+            {bodyShown ? (hasBody ? text : placeholder) : null}
+          </div>
+          {meta && expanded && (
+            <div data-testid={metaTestId} className="mt-1 px-1 text-[11px] leading-relaxed text-ink-faint font-body whitespace-pre-wrap break-words">
+              {meta}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div data-testid={testId} data-cgui="xs-notice" data-direction={direction} {...rootProps}
       className={`${animate ? 'animate-fade-up ' : ''}${className}`}>
@@ -107,7 +165,7 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
         ) : (
           <div data-testid={toggleTestId} className="w-full flex items-center gap-3 py-1.5 text-left">{head}</div>
         )}
-        {/* 动作行在正文之前:展开时按钮不随正文长度移动(收件箱区自身还有 42vh 内滚) */}
+        {/* 动作行在正文之前:展开时按钮不随正文长度移动(收件箱走上面的 compact 分支,区域另有 20vh 内滚) */}
         {actions && <div className="flex items-center gap-2 min-w-0 flex-wrap px-1 pb-1">{actions}</div>}
         {/* 折叠态:正文节点保留(其它视图/旧断言会按 testid 取它量高度),但**隐藏且为空** ——
             第 9 节要求折叠态一个字都不显示,正文节点里也不留原文(A2/C2);`hidden` 让它没有布局高度。
