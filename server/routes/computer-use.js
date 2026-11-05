@@ -362,10 +362,19 @@ router.get('/computer-use/grants', (req, res) => {
   });
 });
 
-/** 审计日志里的 id:JSON 转义 + 截断,防换行 / 控制符伪造日志行。 */
-function auditId(value) {
+/**
+ * 审计日志里的请求体值:永不抛错。字符串 JSON 转义 + 截断到 200 字符(防换行 / 控制符伪造日志行、防灌日志);
+ * 对象类只记类型标签——对象可能带非函数的 toString(如 {"toString":1}),String() 会抛 TypeError。
+ * JSON.stringify 不转义 U+2028 / U+2029,这里补上,保证整行不被行分隔符拆开。
+ */
+function auditValue(value) {
   if (value === undefined || value === null) return '-';
-  return JSON.stringify(String(value).slice(0, 200));
+  if (typeof value === 'string') {
+    return JSON.stringify(value.slice(0, 200)).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  }
+  if (typeof value === 'boolean' || typeof value === 'number') return String(value);
+  if (Array.isArray(value)) return '[array]';
+  return `[${typeof value}]`;
 }
 
 // r154:授权写入口。判定先后固定:参数校验(400,先于凭证;参数形状不是敏感信息)→ 凭证 → 禁止名单 → 写入,
@@ -376,8 +385,11 @@ router.post('/computer-use/grants', (req, res) => {
   const { bundleId, name, granted, screenScope } = req.body || {};
   const positive = (bundleId !== undefined && granted !== false) || screenScope === true;
   const audit = (outcome, credential) => {
-    console.warn('[cu-grants] %s %s credential=%s bundleId=%s screenScope=%s', positive ? 'grant' : 'revoke',
-      outcome, credential ? 'yes' : 'no', auditId(bundleId), screenScope === undefined ? '-' : String(screenScope));
+    // 审计日志本身出错(格式化 / 输出流异常)只吞掉:不能因为记日志把请求变成 500。
+    try {
+      console.warn('[cu-grants] %s %s credential=%s bundleId=%s screenScope=%s', positive ? 'grant' : 'revoke',
+        outcome, credential ? 'yes' : 'no', auditValue(bundleId), auditValue(screenScope));
+    } catch { /* 见上 */ }
   };
   const invalid = (error) => {
     audit('rejected:CU_INVALID_ARGUMENT', false);
