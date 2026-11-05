@@ -139,6 +139,85 @@ export function isLocalReq(req) {
   if (host && !LOCAL_HOSTNAMES.has(host)) return false;
   return true;
 }
+
+// ── 浏览器来源(Origin)校验(r155)─────────────────────────────────────────────
+// 规则:来源站点(主机名+端口)必须等于本次访问的站点(Host)。旧实现只比主机名,本机
+// 别的端口上的网页(localhost:任意端口)就和本应用自己的页面一样能连 WS、开终端、读接口。
+// 另有一对"浏览器自证":浏览器自报 same-site/cross-site 一律拒;自报 same-origin 且是
+// 本机请求、来源是本机名,放行开发代理形态(Vite 的 /api 字符串代理会把 Host 改写成后端)。
+// 判定顺序固定,命中即返回;rule 名进日志,便于定位误杀。
+const HOST_HEADER_RE = /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:\d{1,5})?$/;
+const DEFAULT_PORTS = { 'http:': '80', 'https:': '443' };
+
+// Origin → { scheme, hostname, port };非标准写法(null、非 http(s)、尾斜杠、大写等
+// 序列化后与原文不一致的)一律 null。端口缺省按协议补全。
+function parseOriginSite(origin) {
+  if (typeof origin !== 'string') return null;
+  let u;
+  try { u = new URL(origin); } catch { return null; }
+  if (!DEFAULT_PORTS[u.protocol]) return null;
+  if (u.origin !== origin) return null;
+  return {
+    scheme: u.protocol,
+    hostname: u.hostname.toLowerCase().replace(/^\[|\]$/g, ''),
+    port: u.port || DEFAULT_PORTS[u.protocol],
+  };
+}
+
+// Host 头 → { hostname, port };端口缺省按 Origin 的协议补全(https://x 与 Host x 视为同站)。
+// 先过严格格式,再交给 URL 归一化(端口前导零、IPv6 写法),URL 解析失败按缺 Host 处理。
+function parseHostSite(hostHeader, scheme) {
+  if (typeof hostHeader !== 'string' || !HOST_HEADER_RE.test(hostHeader)) return null;
+  let u;
+  try { u = new URL(`${scheme}//${hostHeader}`); } catch { return null; }
+  return {
+    hostname: u.hostname.toLowerCase().replace(/^\[|\]$/g, ''),
+    port: u.port || DEFAULT_PORTS[scheme],
+  };
+}
+
+function secFetchSiteTokens(req) {
+  const raw = req?.headers?.['sec-fetch-site'];
+  if (raw === undefined || raw === null) return [];
+  return [].concat(raw).join(',').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+// ctx.isAllowedHostname(h) → bool:Host 白名单(回环/局域网/隧道名),由调用方注入,每次现读。
+// ctx.getLanHostnames() → string[]:只在第 6 条且来源不是本机名时才调用(枚举网卡有开销)。
+// 缺参数直接抛错 —— 宁可请求失败(调用方按拒绝处理),不能悄悄放行。
+export function checkBrowserOrigin(origin, req, ctx) {
+  const { isAllowedHostname, getLanHostnames } = ctx || {};
+  if (typeof isAllowedHostname !== 'function' || typeof getLanHostnames !== 'function') {
+    throw new TypeError('checkBrowserOrigin: ctx.isAllowedHostname and ctx.getLanHostnames must be functions');
+  }
+  // 1. 无 Origin:非浏览器客户端或浏览器同源 GET;密码闸照常兜底。
+  if (origin === undefined || origin === '') return { ok: true, rule: 'no-origin' };
+  // 2. 非法/非标准写法。
+  const site = parseOriginSite(origin);
+  if (!site) return { ok: false, rule: 'bad-origin' };
+  // 3. 浏览器自己说不是同源(页面脚本改不了这个头)→ 拒,哪怕站点文本相同(跨协议同默认端口)。
+  const sfs = secFetchSiteTokens(req);
+  if (sfs.includes('same-site') || sfs.includes('cross-site')) return { ok: false, rule: 'sfs-veto' };
+  // 4. 没有 Host 无从比较站点 → 拒(HTTP/1.0、原始 WS 升级可以不带 Host)。
+  const hostSite = parseHostSite(req?.headers?.host, site.scheme);
+  if (!hostSite) return { ok: false, rule: 'no-host' };
+  // 5. 站点一致:主机名还须在 Host 白名单里(函数自包含,不依赖调用方先过 Host 门)。
+  if (hostSite.hostname === site.hostname && hostSite.port === site.port) {
+    return isAllowedHostname(site.hostname)
+      ? { ok: true, rule: 'same-site' }
+      : { ok: false, rule: 'hostname-not-allowed' };
+  }
+  // 6. 开发代理形态:Host 被本机代理改写。只认浏览器精确小写的 same-origin + 本机请求
+  //    (回环、无 CF 标记、Host 是本机名)+ 来源是本机名;名单不含隧道名。
+  if (req?.headers?.['sec-fetch-site'] === 'same-origin' && isLocalReq(req)) {
+    if (LOCAL_HOSTNAMES.has(site.hostname) || getLanHostnames().includes(site.hostname)) {
+      return { ok: true, rule: 'proxied-same-origin' };
+    }
+  }
+  // 7. 其余(本机别的端口且浏览器没带 Sec-Fetch-Site、别名跨站等)。
+  return { ok: false, rule: 'site-mismatch' };
+}
+
 export function parseCookies(req) {
   const raw = req?.headers?.cookie || '';
   const out = {};

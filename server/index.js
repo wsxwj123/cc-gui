@@ -54,7 +54,7 @@ import { installXsessionRuntime } from './services/xsession.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, setDefaultRandomPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
-  requestHostname, getTunnelHostname,
+  requestHostname, getTunnelHostname, checkBrowserOrigin,
 } from './services/auth.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { readStats as readSessionIndexStats } from './services/session-index.js';
@@ -222,18 +222,6 @@ if (HOST === '0.0.0.0' && !hasPassword()) {
 // can flip the binding at runtime (设置→网络 的局域网开关,无需重启进程)。
 let lanMode = HOST === '0.0.0.0';
 
-function isAllowedBrowserOrigin(origin, req = null) {
-  if (!origin) return true;
-  try {
-    const { hostname } = new URL(origin);
-    const host = requestHostname(req);
-    if (host && hostname === host) return true;
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return true;
-    if (lanMode && lanIps().includes(hostname)) return true;
-  } catch {}
-  return false;
-}
-
 const app = express();
 // ── DNS-rebinding 防护:Host 头白名单(必须在所有中间件/路由最前)──────────────
 // 根因:isLocalReq 只看 socket 是不是回环、CORS 用"Origin==自身 Host"自指判定,
@@ -245,14 +233,35 @@ const app = express();
 // 的 Host 一定落在白名单外 → 403。
 // 放行无 Host 头(非浏览器/健康探测)与端口无关(只比主机名)。
 // 隧道域名放行只开门不减免密码:isLocalReq 的 CF 标记+Host 双否决保证隧道流量仍要密码。
-function isAllowedHost(req) {
-  const h = requestHostname(req);
-  if (!h) return true; // 无 Host 头:非浏览器客户端,socket/密码层继续兜底
+// 主机名白名单(Host 门与来源校验共用);lanMode 与隧道名每次调用现读。
+function isAllowedHostname(h) {
   if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return true;
   if (lanMode && lanIps().includes(h)) return true;
   const t = getTunnelHostname(); // 每请求现读,配置生效免重启;未配置/非法 → '' 不放行
   if (t && h === t) return true;
   return false;
+}
+function isAllowedHost(req) {
+  const h = requestHostname(req);
+  if (!h) return true; // 无 Host 头:非浏览器客户端,socket/密码层继续兜底
+  return isAllowedHostname(h);
+}
+// 浏览器来源校验(checkBrowserOrigin)的上下文。lanMode 在箭头函数里现读:运行时切局域网立即生效。
+const originGateCtx = { isAllowedHostname, getLanHostnames: () => (lanMode ? lanIps() : []) };
+// 拒绝日志的字段值:一律 JSON 引号 + 截断,客户端填的空格/换行/`rule=` 伪造不出新字段。
+function logValue(v) {
+  if (v === undefined || v === null || v === '') return 'null';
+  return JSON.stringify(String(v).slice(0, 200));
+}
+const CROSS_ORIGIN_BLOCKED = 'Cross-origin request blocked by cc-gui';
+// 来源校验抛任何异常都按拒绝处理(rule=internal-error),不放行、不冒成未捕获异常。
+function checkOriginSafe(origin, req) {
+  try { return checkBrowserOrigin(origin, req, originGateCtx); }
+  catch (e) {
+    // 只记内部错误信息(如枚举网卡失败),不记请求里任何客户端可控的内容;记日志本身出错也不能抛。
+    try { console.warn('[origin-gate] internal error, request rejected: %s', logValue(e?.message)); } catch {}
+    return { ok: false, rule: 'internal-error' };
+  }
 }
 app.use((req, res, next) => {
   if (isAllowedHost(req)) return next();
@@ -277,17 +286,22 @@ app.use((req, res, next) => {
   if (scheme !== 'http') return next();
   res.redirect(301, `https://${req.headers.host}${req.originalUrl}`);
 });
-// Same-origin only: in prod the SPA is served from this same port; in dev Vite
-// proxies /api + /ws server-side. So the only legitimate browser origins are
-// localhost/127.0.0.1. Reject everything else to blunt drive-by cross-origin
-// requests from arbitrary web pages the user may have open.
+// 浏览器来源校验(r155,规则见 services/auth.js 的 checkBrowserOrigin):带 Origin 的请求,
+// 来源站点(主机名+端口)必须等于本次访问的 Host 站点 —— 本机别的端口上的网页一律拒。
+// 唯一例外是开发代理形态(Vite 的 /api 字符串代理把 Host 改写成后端地址):浏览器自报
+// Sec-Fetch-Site 恰为 same-origin、请求来自本机(回环、无 CF 标记、Host 是本机名)、
+// 来源主机名是本机名(局域网模式再加本机局域网 IP)时放行。浏览器自报 same-site/cross-site
+// 一律拒。没有 Origin 的请求(CLI、MCP、浏览器同源 GET)放行,由密码闸兜底。
+// 被拒 → 403 JSON(/api 与非 /api 路径同形,见下方两个错误处理器),路由不执行。
 app.use(cors((req, cb) => cb(null, {
   origin: (origin, originCb) => {
-    if (isAllowedBrowserOrigin(origin, req)) return originCb(null, true);
+    const verdict = checkOriginSafe(origin, req);
+    if (verdict.ok) return originCb(null, true);
     // 拒了要留痕:曾因 403 不记来源,把 7 月的旧拦截噪音误当成隧道故障排查半天。
-    console.warn('[cors] blocked origin=%s host=%s path=%s', origin, requestHostname(req) || '(无)', req.originalUrl);
-    const err = new Error('Cross-origin request blocked by cc-gui');
-    err.status = 403; // surfaced as a clean 403 by the error handler below
+    console.warn(`[cors] blocked origin=${logValue(origin)} host=${logValue(requestHostname(req))} path=${logValue(req.originalUrl)} sfs=${logValue(req.headers['sec-fetch-site'])} rule=${verdict.rule} rawHost=${logValue(req.headers.host)}`);
+    const err = new Error(CROSS_ORIGIN_BLOCKED);
+    err.status = 403; // surfaced as a clean 403 by the error handlers below
+    err.cguiOriginBlocked = true; // 非 /api 路径的全局错误处理器只认这个标记
     return originCb(err);
   },
 })));
@@ -875,6 +889,12 @@ app.use('/api', (err, req, res, next) => {
   const status = err?.status || 500;
   res.status(status).json({ error: err?.message || 'internal error' });
 });
+// 非 /api 路径被来源校验拒绝:同样回 403 JSON。否则落到 Express 默认错误页(带堆栈和本机
+// 绝对路径的 HTML)。只认 cors 回调打的标记,其余错误原样交给后续处理。
+app.use((err, req, res, next) => {
+  if (!err?.cguiOriginBlocked || res.headersSent) return next(err);
+  res.status(403).json({ error: CROSS_ORIGIN_BLOCKED });
+});
 
 // Serve static frontend in production.
 // IMPORTANT: index.html must NEVER be cached — its inline <script src> points
@@ -934,7 +954,19 @@ const wss = new WebSocketServer({
   verifyClient: (info) => {
     // WS 升级不经 express 中间件,须自带 DNS-rebinding 的 Host 白名单(同 HTTP 层)。
     if (!isAllowedHost(info.req)) { console.warn('[ws] blocked host=%s', requestHostname(info.req) || '(无)'); return false; }
-    if (!isAllowedBrowserOrigin(info.origin || info.req?.headers?.origin, info.req)) { console.warn('[ws] blocked origin=%s host=%s', info.origin || info.req?.headers?.origin, requestHostname(info.req) || '(无)'); return false; }
+    // 来源校验(同 HTTP 的 cors 门)。整段包 try:verifyClient 里的同步异常会冒到 'upgrade'
+    // 事件成未捕获异常,任何意外一律按拒绝处理。
+    try {
+      const origin = info.origin || info.req?.headers?.origin;
+      const verdict = checkOriginSafe(origin, info.req);
+      if (!verdict.ok) {
+        console.warn(`[ws] blocked origin=${logValue(origin)} host=${logValue(requestHostname(info.req))} sfs=${logValue(info.req?.headers?.['sec-fetch-site'])} rule=${verdict.rule} rawHost=${logValue(info.req?.headers?.host)}`);
+        return false;
+      }
+    } catch {
+      try { console.warn('[ws] blocked origin=null host=null sfs=null rule=internal-error rawHost=null'); } catch {}
+      return false;
+    }
     if (!hasPassword()) return true;
     if (isLocalReq(info.req)) return true;
     return verifyToken(parseCookies(info.req).cgui_token);

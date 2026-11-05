@@ -377,8 +377,10 @@ function auditValue(value) {
 
 // r154:授权写入口。判定先后固定:参数校验(400,先于凭证;参数形状不是敏感信息)→ 凭证 → 禁止名单 → 写入,
 // 后三步在 setGrant 里一次完成(失败零副作用)。凭证只挡"盲打"(不知道凭证的本机脚本、照旧文档敲的 curl、
-// 来自其他网站域名的网页);不挡本机任意端口上的网页(Origin 判断只比主机名不比端口、且放行无 Origin 的请求,
-// WS 同一条连接本就能开内置终端)、主动连 WS 的本机进程、直接改 grants.json 的进程,威胁模型见 computer-use/grant-token.js。
+// 来自其他网站域名或本机别的端口的网页,后者自 r155 起 WS 握手即被来源校验拒绝);不挡主动连 WS 的本机进程、
+// 直接改 grants.json 的进程、本机上把请求原样转给后台的代理(经过它的网页与后台同站,WS 同一条连接本就能开
+// 内置终端)、后台读文件接口同源下发的可执行内容(如 SVG,其中脚本以后台页面身份运行,同样能取得凭证;
+// 已知问题,另立项处理),威胁模型见 computer-use/grant-token.js。
 // 每次变更(成功与被拒)记一行审计日志,**不记凭证值**。
 router.post('/computer-use/grants', (req, res) => {
   const { bundleId, name, granted, screenScope } = req.body || {};
