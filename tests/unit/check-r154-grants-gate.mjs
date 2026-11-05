@@ -120,4 +120,102 @@ process.stdout.write(JSON.stringify(out));
   });
 }
 
+// ── G4-G7:setGrant 凭证门禁恒开 ───────────────────────────────────────────
+{
+  const SCRIPT = `
+import fs from 'node:fs';
+import { join } from 'node:path';
+fs.mkdirSync(join(process.env.CU_TEST_HOME, '.claude-gui', 'cu-runtime'), { recursive: true });
+const cu = await import(process.env.R154_CU);
+const bytes = () => (fs.existsSync(cu.GRANTS_FILE) ? fs.readFileSync(cu.GRANTS_FILE).toString('base64') : null);
+const attempt = (change, opts) => {
+  const before = bytes();
+  try {
+    const next = opts === undefined ? cu.setGrant(change) : cu.setGrant(change, opts);
+    return { ok: true, apps: Object.keys(next.apps), screenScope: next.screenScope.granted, unchanged: before === bytes() };
+  } catch (e) {
+    return { ok: false, code: e && e.code, unchanged: before === bytes() };
+  }
+};
+const out = {};
+out.underHome = cu.GRANTS_FILE.startsWith(process.env.CU_TEST_HOME);
+out.seed = attempt({ bundleId: 'com.apple.Preview' }, { panelCredential: true });
+out.noOpts = attempt({ bundleId: 'com.apple.TextEdit' });
+out.noOptsScope = attempt({ screenScope: true });
+out.withTrue = attempt({ bundleId: 'com.apple.TextEdit' }, { panelCredential: true });
+out.strTrue = attempt({ bundleId: 'com.apple.Notes' }, { panelCredential: 'true' });
+out.numOne = attempt({ bundleId: 'com.apple.Notes' }, { panelCredential: 1 });
+out.revoke = attempt({ bundleId: 'com.apple.Preview', granted: false });
+out.finalApps = Object.keys(cu.readGrants().apps);
+process.stdout.write(JSON.stringify(out));
+`;
+  const r = runIsolated(SCRIPT);
+  const out = r.out;
+
+  await report.check('G4', '不传选项的正向 setGrant({bundleId}) / setGrant({screenScope:true}) 抛 CU_GRANT_FORBIDDEN,授权文件字节不变', 'red', () => {
+    assert.ok(out, `子进程没有输出可解析 JSON(${diag(r)})`);
+    assert.equal(out.underHome, true, '授权文件不在假家目录下,拒绝继续');
+    assert.equal(out.seed.ok, true, `播种失败:${JSON.stringify(out.seed)}`);
+    for (const [tag, c] of [['bundleId', out.noOpts], ['screenScope', out.noOptsScope]]) {
+      assert.equal(c.ok, false, `${tag}:不传凭证的正向授权居然成功了`);
+      assert.equal(c.code, 'CU_GRANT_FORBIDDEN', `${tag}:错误码 ${c.code}`);
+      assert.equal(c.unchanged, true, `${tag}:被拒后授权文件字节变了`);
+    }
+  });
+
+  await report.check('G5', '不传选项的纯撤销成功(降权免凭证)', 'green', () => {
+    assert.ok(out, `子进程没有输出可解析 JSON(${diag(r)})`);
+    assert.equal(out.revoke.ok, true, `撤销失败:${JSON.stringify(out.revoke)}`);
+    assert.ok(!out.revoke.apps.includes('com.apple.Preview'), '撤销后仍在授权表里');
+  });
+
+  await report.check('G6', '{ panelCredential: true } 的正向授权成功', 'green', () => {
+    assert.ok(out, `子进程没有输出可解析 JSON(${diag(r)})`);
+    assert.equal(out.withTrue.ok, true, `带凭证授权失败:${JSON.stringify(out.withTrue)}`);
+    assert.ok(out.withTrue.apps.includes('com.apple.TextEdit'));
+    assert.deepEqual(out.finalApps, ['com.apple.TextEdit']);
+  });
+
+  await report.check('G7', "{ panelCredential: 'true' } 与 { panelCredential: 1 } 被拒(严格等于 true 才算),授权文件不变", 'red', () => {
+    assert.ok(out, `子进程没有输出可解析 JSON(${diag(r)})`);
+    for (const [tag, c] of [["'true'", out.strTrue], ['1', out.numOne]]) {
+      assert.equal(c.ok, false, `panelCredential=${tag} 居然放行了`);
+      assert.equal(c.code, 'CU_GRANT_FORBIDDEN', `panelCredential=${tag}:错误码 ${c.code}`);
+      assert.equal(c.unchanged, true, `panelCredential=${tag}:被拒后授权文件字节变了`);
+    }
+  });
+}
+
+// ── G8:静态守卫:server/ 下每个 setGrant( 调用都显式传 panelCredential ──────────
+await report.check('G8', 'server/ 下除定义处外,每个 setGrant( 调用的参数里都出现 panelCredential', 'green', () => {
+  const files = [];
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (ent.name === 'node_modules' || ent.name.startsWith('.')) continue;
+      const p = join(dir, ent.name);
+      if (ent.isDirectory()) walk(p);
+      else if (/\.(c|m)?jsx?$/.test(ent.name)) files.push(p);
+    }
+  };
+  walk(join(ROOT, 'server'));
+  let calls = 0;
+  for (const file of files) {
+    const src = fs.readFileSync(file, 'utf8');
+    for (const m of src.matchAll(/\bsetGrant\s*\(/g)) {
+      if (/function\s+$/.test(src.slice(Math.max(0, m.index - 20), m.index))) continue; // 定义处
+      // 按括号配对取出整段实参(实参里的字符串不含括号,够用)
+      let depth = 0, i = m.index + m[0].length - 1;
+      for (; i < src.length; i += 1) {
+        if (src[i] === '(') depth += 1;
+        else if (src[i] === ')' && --depth === 0) break;
+      }
+      const args = src.slice(m.index, i + 1);
+      calls += 1;
+      const line = src.slice(0, m.index).split('\n').length;
+      assert.ok(args.includes('panelCredential'), `${file.slice(ROOT.length + 1)}:${line} 的 setGrant 调用没传 panelCredential`);
+    }
+  }
+  assert.ok(calls >= 1, '一个 setGrant 调用都没扫到,扫描本身失效');
+});
+
 process.exit(report.finish());

@@ -416,7 +416,7 @@ router.post('/computer-use/grants', (req, res) => {
       name: typeof name === 'string' ? name : null,
       granted: granted !== false,
       screenScope: screenScope === undefined ? null : screenScope,
-    }, { requireCredential: true, panelCredential: credential });
+    }, { panelCredential: credential });
   } catch (e) {
     const code = e?.code;
     if (code === 'CU_GRANT_FORBIDDEN' || code === 'CU_APP_FORBIDDEN') {

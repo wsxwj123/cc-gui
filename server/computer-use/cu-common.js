@@ -433,8 +433,9 @@ export const GRANT_FORBIDDEN_MESSAGE = '新增授权需要来自 CC-GUI「桌面
  * 顺序固定(r154):校验 → 纯计算新授权集(不写盘)→ 凭证门禁 → 禁止名单 → 一次性原子写盘。
  * 任何一步抛错都发生在写盘之前,所以"撤销 + 授权"的混合请求被拒时零副作用。
  *
- * 凭证门禁只在 requireCredential 时生效(由 HTTP 路由显式开启);进程内直接调用(单测播种、
- * 内部代码)不经 HTTP,不在"盲写"威胁面内。需要凭证 = 本次含正向意图(给了 bundleId 且未撤销;
+ * 凭证门禁恒开:任何调用方(HTTP 路由、内部代码、单测播种)要扩大授权都必须显式传
+ * panelCredential: true(严格等于 true),忘传即被拒——新增调用方不会静默绕过凭证。
+ * 需要凭证 = 本次含正向意图(给了 bundleId 且未撤销;
  * 或 screenScope 为 true)**或**新集比旧集大——两者取或,不靠枚举字段组合,未知字段绕不过。
  * 凭证检查先于名单检查:没凭证的调用方探不到名单内容。纯撤销不要凭证也不查名单:降权永远安全,
  * 也让旧版遗留的禁止类别条目能被撤掉。
@@ -444,7 +445,7 @@ export const GRANT_FORBIDDEN_MESSAGE = '新增授权需要来自 CC-GUI「桌面
  */
 export function setGrant(
   { bundleId = null, name = null, granted = true, screenScope = null } = {},
-  { requireCredential = false, panelCredential = false } = {},
+  { panelCredential = false } = {},
 ) {
   let appId = null;
   if (bundleId !== null && bundleId !== undefined && bundleId !== '') {
@@ -478,7 +479,7 @@ export function setGrant(
   const grows = Object.keys(next.apps).some((k) => !currentKeys.has(normalizeAppId(k)))
     || (!screenScopeGranted(current) && screenScopeGranted(next));
   const needsCredential = grantingApp || screenScope === true || grows;
-  if (requireCredential && needsCredential && panelCredential !== true) {
+  if (needsCredential && panelCredential !== true) {
     throw grantError('CU_GRANT_FORBIDDEN', GRANT_FORBIDDEN_MESSAGE);
   }
   if (grantingApp) {
