@@ -9,12 +9,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_SRC = path.join(HERE, '..', '..', 'client', 'src');
 const TOKEN_MODULE = path.join(CLIENT_SRC, 'utils', 'cuGrantToken.js');
-const { setCuGrantToken, getCuGrantToken } = await import(TOKEN_MODULE);
+const { setCuGrantToken, getCuGrantToken } = await import(pathToFileURL(TOKEN_MODULE).href);
 
 let n = 0;
 const ok = (label) => { n += 1; console.log(`  ✓ ${label}`); };

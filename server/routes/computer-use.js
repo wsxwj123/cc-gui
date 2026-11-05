@@ -20,7 +20,7 @@ import { grantTokenMatches } from '../computer-use/grant-token.js';
 //   POST /api/computer-use/doctor   → 跑 helper doctor,回屏幕读取/辅助功能/运行时/各应用授权
 //   POST /api/computer-use/prepare  → Windows 的「准备环境」:建运行时 + 跑 UIA 可用性探测 + 写缓存
 //   GET  /api/computer-use/grants   → 当前授权(按应用 + 主屏范围)
-//   POST /api/computer-use/grants   → 用户显式启用/撤销(撤销立即使后续动作 CU_APP_NOT_ALLOWED)
+//   POST /api/computer-use/grants   → 授权需面板凭证,禁止操控名单里的应用会被拒;撤销立即使后续动作 CU_APP_NOT_ALLOWED
 //   GET  /api/computer-use/apps     → 只读:「常规应用」的身份名单,给面板选授权对象
 //   GET  /api/computer-use/app-info → 只读:一个 bundleId(exe 路径)是否已安装
 // 客户端(MCPPanel 安装卡)拿 status 里的 nodePath+mcpPath 拼 commandLine 去调通用端点。

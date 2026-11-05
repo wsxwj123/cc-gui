@@ -616,7 +616,7 @@ async function resolveTarget(target) {
   const actual = forbiddenAppReason(win.bundleId);
   if (actual) return { ok: false, code: 'CU_APP_NOT_ALLOWED', detail: forbiddenActionDetail(actual) };
   if (!appGranted(grants, win.bundleId)) return { ok: false, code: 'CU_APP_NOT_ALLOWED' };
-  return { ok: true, window: win, grants };
+  return { ok: true, window: win };
 }
 
 // ── 快照 ────────────────────────────────────────────────────────────────
@@ -979,7 +979,7 @@ async function prepareCoordAction(args, target, actionId, pairs) {
   }
   if (snap.deferredError) return { receipt: fail(snap.deferredError, { actionId }) };
   if (!snap.mapping) return { receipt: fail('CU_SCREENSHOT_REQUIRED', { actionId }) };
-  return { snap: snap.mapping, window: resolved.window, grants: resolved.grants };
+  return { snap: snap.mapping, window: resolved.window };
 }
 
 function targetDescriptor(window) {
