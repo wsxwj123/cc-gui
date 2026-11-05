@@ -792,7 +792,11 @@ function launchInTerminal(cmd, title, proxyUrl = null) {
   } else if (process.platform === 'win32') {
     const file = join(tmpdir(), `${stamp}.bat`);
     const proxyLine = proxyUrl ? `set HTTP_PROXY=${proxyUrl}\r\nset HTTPS_PROXY=${proxyUrl}\r\necho (代理: ${proxyUrl})\r\n` : '';
-    writeFileSync(file, `@echo off\r\necho ▶ ${title}\r\n${proxyLine}${cmd}\r\necho.\r\necho ===== 完成,按任意键关闭 =====\r\npause >nul\r\n`);
+    // .bat 是 UTF-8 无 BOM,cmd 却按控制台代码页读(简体中文是 GBK),不切代码页的话
+    // 中文提示和用户目录里的中文路径都会被读错。chcp 必须紧跟 @echo off、排在任何非 ASCII
+    // 行之前;文件不能加 BOM(加了第一行 @echo off 会报错)。代码页只作用于 start 开出的
+    // 这个独立窗口,关了就失效,无需恢复。
+    writeFileSync(file, `@echo off\r\nchcp 65001 >nul\r\necho ▶ ${title}\r\n${proxyLine}${cmd}\r\necho.\r\necho ===== 完成,按任意键关闭 =====\r\npause >nul\r\n`);
     // start '' <file> — 空标题占位,避免把文件路径当成窗口标题
     spawn('cmd', ['/c', 'start', '', file], { detached: true, stdio: 'ignore', windowsHide: false, env }).unref();
   } else {
