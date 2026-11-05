@@ -4,8 +4,10 @@
 // 在连接建立后对该连接单发给面板;面板发授权类请求时放进请求头 X-CGUI-Grant-Token 回传。
 //
 // 威胁模型(与 routes/permissions.js 的 r26-H1 nonce 同口径):防**盲打**——不知道凭证的本机脚本、
-// 模型照旧文档敲出的 curl、网页 CSRF。**不防**主动连 WS 的本机进程(WS 本就能开内置终端)和
-// 直接改 grants.json 的进程;后者由 forbidden-apps.js 的底线缓解。
+// 模型照旧文档敲出的 curl、来自**其他网站域名**的网页。**不防**:①本机任意端口上的网页(index.js 的
+// isAllowedBrowserOrigin 只比 Origin 的主机名不比端口,且放行无 Origin 的请求,所以它们能连 WS 拿到凭证,
+// 而同一条 WS 本就能开内置终端);②主动连 WS 的本机进程;③直接改 grants.json 的进程(由
+// forbidden-apps.js 的底线缓解)。
 // 与 H1 nonce 不同:nonce 绑定单个待决请求、随请求生灭;凭证要在面板整个生命周期可用,按进程常驻。
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 
