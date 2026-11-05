@@ -396,12 +396,21 @@ async function mapLimit(items, limit, fn) {
  * 严禁触碰真实 ~/.claude/projects);生产调用一律缺省。
  * 注意:顶层 readdir 的 EACCES/EPERM 不上捞兜住——原样抛给路由层,由 /projects
  * 路由经 isAccessDenied 分类成 403(sessions.js,与 r17-4 契约同构)。
+ * 目录不存在(ENOENT)= 全新环境还没跑过 Claude Code、还没有任何项目,返回 [] 而不是报错
+ * (否则首启 /api/projects 回 500)。只吞 ENOENT:它是唯一表示"本来就没有"的正常状态;
+ * EACCES/EPERM、ENOTDIR 等是真故障或配置问题,吞成 [] 会把"读不到"伪装成"没有项目"。
  */
 // r146c:推断项目真实路径时最多往回看几个会话文件(最新的取不到 cwd 才继续;画像有落盘缓存)。
 const CWD_PROBE_MAX = 10;
 
 export async function listProjects(projectsDir = PROJECTS_DIR) {
-  const entries = await readdir(projectsDir, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await readdir(projectsDir, { withFileTypes: true });
+  } catch (err) {
+    if (err?.code === 'ENOENT') return [];
+    throw err;
+  }
   const projects = [];
 
   for (const entry of entries) {
