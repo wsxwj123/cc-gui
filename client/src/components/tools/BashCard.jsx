@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Terminal, ChevronDown, ChevronRight, Loader2 } from '../Icon.jsx';
+import { Terminal, ChevronDown, ChevronRight } from '../Icon.jsx';
 import { Linkify } from '../../utils/linkify.jsx';
 import { ToolResultImages } from './ToolResultImages.jsx';
 
@@ -25,7 +25,7 @@ export function BashCard({ toolCall }) {
         <Terminal size={12} className="text-green-400 shrink-0" />
         <span className="text-green-400 font-mono text-[11px] shrink-0">$</span>
         <code className="text-gray-100 font-mono text-[11.5px] truncate flex-1">{cmd || '(empty)'}</code>
-        {!result && <Loader2 size={11} className="text-gray-400 animate-spin shrink-0" />}
+        {!result && <span className="mini-spin" aria-hidden="true" />}
         {result && (
           isError
             ? <span className="text-red-400 text-[10px] shrink-0">错误</span>

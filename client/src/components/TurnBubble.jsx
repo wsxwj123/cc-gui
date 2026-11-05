@@ -153,7 +153,7 @@ function McpToolCard({ toolCall }) {
         <span className="font-mono text-[11px] text-ink-muted truncate flex-1">{shortName}</span>
         {serverName && <span className="text-[10px] text-ink-faint shrink-0">{serverName}</span>}
         {running
-          ? <Loader2 size={11} className="text-ink-faint animate-spin shrink-0" />
+          ? <span className="mini-spin" aria-hidden="true" />
           : result?.isError
             ? <span className="text-red-400 text-[10px] shrink-0">错误</span>
             : <Check size={11} className="text-green-400 shrink-0" />}
@@ -321,6 +321,16 @@ function planDenyState(toolCall) {
   return /^\s*用户取消计划/.test(text) ? 'cancelled' : 'refining';
 }
 
+// r154:展开后工具条目的状态(data-entry-state),与 ToolCallRow 的 hasError 同口径 ——
+// 已回答的提问 / 已批准的计划 / 计划被拒(修改或取消)虽然 isError,但属正常流程,不算出错。
+function entryStateOf(toolCall) {
+  const r = toolCall?.result;
+  if (!r) return 'running';
+  if (r.interrupted) return 'stopped';
+  if (r.isError && !isAskAnswered(toolCall) && !isPlanApproved(toolCall) && !planDenyState(toolCall)) return 'error';
+  return 'done';
+}
+
 // ─── Single Tool Call Row ──────────────────────────────────────
 function ToolCallRow({ toolCall, onRetryTool }) {
   const [expanded, setExpanded] = useState(false);
@@ -365,7 +375,7 @@ function ToolCallRow({ toolCall, onRetryTool }) {
               <span className="text-[10px] text-success">✓</span>
             )
           ) : (
-            <Loader2 size={10} className="text-ink-faint animate-spin" />
+            <span className="mini-spin" aria-hidden="true" />
           )}
         </button>
 
@@ -502,7 +512,8 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
 // ─── Cowork WorkGroup (一段正文之前的思考+工具打包折叠)──────────
 // 折叠内部按时序混排:思考段折成一行(ThinkingFold,与工具行同规则默认收起),工具卡
 // 复用 renderRichToolCard/ToolCallRow。活跃段默认展开随流刷新,正文落地后收起。
-function WorkGroup({ items, expanded, onToggle, onRetryTool }) {
+// liveBlock = 生成中整轮 blocks 的最后一块(否则 null):只有它是思考时,那块思考才标"进行中"。
+function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null }) {
   const toolN = items.reduce((n, b) => n + (b.type === 'tool_use' ? 1 : 0), 0);
   const hasThinking = items.some((b) => b.type === 'thinking');
   const parts = [];
@@ -527,12 +538,17 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool }) {
         <div className="pl-3 pr-2 pt-1 pb-2 space-y-2 animate-fade-in">
           {items.map((b, i) => {
             // 思考链与工具行一致:默认折叠一行,点击展开(用户要求)。
-            if (b.type === 'thinking') return <ThinkingFold key={`th-${i}`} content={b.content} />;
+            if (b.type === 'thinking') return <ThinkingFold key={`th-${i}`} content={b.content} live={b === liveBlock} />;
             const tc = b.toolCall;
             const rich = renderRichToolCard(tc);
-            return rich
-              ? <ToolCallWithRetry key={tc.id || `t-${i}`} toolCall={tc} onRetryTool={onRetryTool}>{rich}</ToolCallWithRetry>
-              : <ToolCallRow key={tc.id || `t-${i}`} toolCall={tc} onRetryTool={onRetryTool} />;
+            // r154:每个工具条目包一层带 data-entry-state 的真实元素(运行中的小圆环在它里面)
+            return (
+              <div key={tc.id || `t-${i}`} data-entry-state={entryStateOf(tc)}>
+                {rich
+                  ? <ToolCallWithRetry toolCall={tc} onRetryTool={onRetryTool}>{rich}</ToolCallWithRetry>
+                  : <ToolCallRow toolCall={tc} onRetryTool={onRetryTool} />}
+              </div>
+            );
           })}
         </div>
       )}
@@ -545,19 +561,20 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool }) {
 // 思考走的也是这里(streamingBlocks → CoworkBlocks),同样默认折叠,折叠头 label 随内容更新。
 // 展开态放在这个叶子组件内部而非父级:父级不因某块展开而整树重渲,也不会给上层
 // React.memo(MessageList / TurnBubble) 传新身份 prop 打穿记忆化。
-function ThinkingFold({ content }) {
+// live:生成中、且这块思考是整轮最后一块(后面还没出现正文 / 工具)→ 脑图标缓慢呼吸。
+function ThinkingFold({ content, live = false }) {
   const [open, setOpen] = useState(false);
   // 第三方 provider 落盘非标准 thinking 块时 content 可能是对象,直接渲染会白屏(判官 B#5)。
   // 守卫收在组件内 = 两个渲染点(WorkGroup / 聊天模式)一次覆盖。
   const text = typeof content === 'string' ? content : JSON.stringify(content);
   return (
-    <div className="mb-1">
+    <div className="mb-1" data-entry-live={live ? 'true' : undefined}>
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body w-full text-left"
       >
         <ChevronRight size={11} className={`transition-transform shrink-0 ${open ? 'rotate-90' : ''}`} />
-        <Brain size={12} className="shrink-0" />
+        <Brain size={12} className={`shrink-0 ${live ? 'entry-live' : ''}`} />
         <span className="truncate">{thinkingLabel(text)}</span>
       </button>
       {open && (
@@ -639,7 +656,7 @@ export function CoworkBlocks({
       }
       if (b.type === 'thinking' && b.content) {
         flushBucket(i);
-        out.push(<ThinkingFold key={`b-${i}`} content={b.content} />);
+        out.push(<ThinkingFold key={`b-${i}`} content={b.content} live={isLive && i === list.length - 1} />);
         return;
       }
       if (b.type === 'tool_use' && b.toolCall) {
@@ -741,6 +758,7 @@ export function CoworkBlocks({
               expanded={expanded}
               onToggle={() => setOverride((p) => { const n = new Map(p); n.set(seg.key, !expanded); return n; })}
               onRetryTool={onRetryTool}
+              liveBlock={isLive ? list[list.length - 1] || null : null}
             />
           );
         }

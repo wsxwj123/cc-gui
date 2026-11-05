@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, ChevronDown, ChevronRight, Loader2, FileText } from '../Icon.jsx';
+import { Search, ChevronDown, ChevronRight, FileText } from '../Icon.jsx';
 import { ToolResultImages } from './ToolResultImages.jsx';
 
 // Combined renderer for Grep + Glob. Input shape:
@@ -33,7 +33,7 @@ export function GrepGlobCard({ toolCall }) {
         <Search size={12} className="text-indigo-600 shrink-0" />
         <span className="text-xs font-mono text-ink-soft shrink-0">{name}</span>
         <code className="text-[11px] text-ink truncate flex-1 bg-canvas-deep/40 px-1.5 py-0.5 rounded">{pattern || '(empty)'}</code>
-        {!result && <Loader2 size={11} className="text-ink-faint animate-spin shrink-0" />}
+        {!result && <span className="mini-spin" aria-hidden="true" />}
         {result && (isError
           ? <span className="text-error text-[10px] shrink-0">错误</span>
           : <span className="text-ink-faint text-[10px] shrink-0">{lines.length} 行</span>)}
