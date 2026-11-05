@@ -9,6 +9,7 @@ import {
   LIVE, IND, SUBVIEW, stopBtn, openAllGates, startRound, endRound, liveSnap, expectOneLine, expectPhase, noObject,
   parseElapsed, watchElapsed, layoutFacts, bannedWordsOnPage, indicatorColor, accentRgb, setAccent, dotsMotion, distinct,
   measureDisplacement, shineSnap, isSolidText, loopingAnimations, openStripEntries, entryStates, agentCardFacts,
+  installLineObserver, lineLog, stoppingRecords,
 } from './helpers/live.mjs';
 
 // 用例失败时直播回合会停在半路（假命令行在等放行文件）：把所有闸门都放了，让它自己收尾，别拖累下一条。
@@ -65,6 +66,9 @@ test('L2 版式顺序、用时格式（Ns → Nm Ns、每秒走一次）、stopp
     key: 'l2',
     scenario: { events: [{ kind: 'thinking', text: 'L2 思考内容。' }, { kind: 'text', text: 'R154-L2-MARK 正文' }] },
   });
+  // 「停止中」只存在一瞬间（点停止 → 流被中断 → 回合一两百毫秒内收尾 → 状态行整行卸载），轮询抓不住：
+  // 点停止之前先在页内装好观察器，回合收尾后再读它记下的快照。
+  await installLineObserver(page);
   await expectOneLine(page);
   const s = await liveSnap(page);
   expect(s.order, '状态行子节点应按 指示器 → 用时 → 分隔符 → 状态词 的顺序各出现一次').toEqual(STATE_ORDER);
@@ -87,9 +91,9 @@ test('L2 版式顺序、用时格式（Ns → Nm Ns、每秒走一次）、stopp
   expect(Math.abs(parseElapsed(m.elapsed) - (Date.now() - sentAt) / 1000), '1 分钟后用时仍应从发出消息起算（相差不超过 4 秒）').toBeLessThanOrEqual(4);
 
   await stopBtn(page).click();
-  await expectPhase(page, 'stopping', { timeout: 10_000 });
-  await expect(page.locator(LIVE), 'stopping 时状态行根节点应带 role="status"').toHaveAttribute('role', 'status');
   await endRound(page);
+  const stopping = stoppingRecords(await lineLog(page)); // 一条 stopping 都没有 → 直接失败："没有观察到 stopping 阶段"
+  expect(stopping.filter((r) => r.role !== 'status'), 'stopping 时状态行根节点应带 role="status"（下列 stopping 快照没带）').toEqual([]);
 });
 
 test('L3 思考 / 输出 / 连接中三种状态词与 data-live-phase，且页面里没有英文循环词', async ({ page }) => {
@@ -208,16 +212,18 @@ test('L5 stopping（点停止后）与 compacting 状态词', async ({ page }) =
     ] },
     text: '请开始第二轮',
   });
+  // 「停止中」只存在一瞬间（点停止 → 流被中断 → 回合一两百毫秒内收尾 → 状态行整行卸载），轮询抓不住：
+  // 点停止之前先在页内装好观察器（上面又导航过一次，旧观察器已随旧文档消失，必须重装），回合收尾后再读它记下的快照。
+  await installLineObserver(page);
   await expectOneLine(page);
   await expectPhase(page, 'tool');
   await stopBtn(page).click();
-  await expectPhase(page, 'stopping', { timeout: 10_000 });
-  const s = await liveSnap(page);
-  expect(s.text, 'stopping：状态词应恰为「停止中」').toBe('停止中');
-  expect(s.verb, 'stopping：[data-live-verb] 应为「停止中」').toBe('停止中');
-  expect(noObject(s), 'stopping：不应有 object').toBe(true);
   await endRound(page);
   await expect.poll(async () => (await liveSnap(page)).count, { timeout: 15_000, message: '点停止并放行后：回合最终结束，状态行消失' }).toBe(0);
+  const stopping = stoppingRecords(await lineLog(page)); // 一条 stopping 都没有 → 直接失败："没有观察到 stopping 阶段"
+  expect(stopping.filter((r) => r.text !== '停止中').map((r) => r.text), 'stopping：状态词应恰为「停止中」（下列 stopping 快照的状态词不是）').toEqual([]);
+  expect(stopping.filter((r) => r.verb !== '停止中').map((r) => r.verb), 'stopping：[data-live-verb] 应为「停止中」（下列 stopping 快照的 verb 不是）').toEqual([]);
+  expect(stopping.filter((r) => r.hasObject === true).map((r) => r.object), 'stopping：不应有 object（下列 stopping 快照里出现了 [data-live-object]）').toEqual([]);
 });
 
 test('L6 指示器：颜色跟主题强调色、data-style / data-speed、在动、减弱动画下静止', async ({ page }) => {
@@ -389,12 +395,18 @@ test('L10 展开后的条目：工具条目 running→done（含 error）、思�
   });
   await expect(page.locator('[data-strip="head"][data-strip-live="true"]'), '前置自证：生成中的过程条应画出来').toHaveCount(1, { timeout: 40_000 });
   await page.waitForTimeout(1500);
-  const opened = await openStripEntries(page);
+  // 夹具里有一条历史回合：它的过程条同样是 [data-strip-root]、同样有「思考 · N 次工具调用」组，条目也带 data-entry-state。
+  // 这里只数本回合的：本回合的过程条 = 含 live 头行的那个 [data-strip-root]。趁回合还在生成中先按序号把它钉住，
+  // 之后点开过程组 / 数条目 / 查动画 / 查 data-entry-live 都限定在它里面（回合结束后 live 标记会消失，不能再靠它去找）。
+  const rootIdx = await page.locator('[data-strip-root]').evaluateAll((els) => els.findIndex((e) => !!e.querySelector('[data-strip="head"][data-strip-live="true"]')));
+  expect(rootIdx, '前置自证：应能找到含 live 头行的本回合过程条 [data-strip-root]').toBeGreaterThanOrEqual(0);
+  const scope = page.locator('[data-strip-root]').nth(rootIdx);
+  const opened = await openStripEntries(page, '[data-entry-state]', 6_000, scope);
   expect(opened, '展开过程条后：应有带 data-entry-state 的工具条目').toBe(true);
-  await expect.poll(() => entryStates(page), { timeout: 10_000, message: '三个工具条目的状态应依次是 running / done / error（甲没结果、乙有结果、丙出错）' }).toEqual(['running', 'done', 'error']);
+  await expect.poll(() => entryStates(page, scope), { timeout: 10_000, message: '本回合三个工具条目的状态应依次是 running / done / error（甲没结果、乙有结果、丙出错）' }).toEqual(['running', 'done', 'error']);
 
   // running 条目里有循环动画（强调色小圆环）；done / error 没有；减弱动画下 running 也没有
-  const entries = page.locator('[data-entry-state]');
+  const entries = scope.locator('[data-entry-state]');
   expect.soft((await loopingAnimations(entries.nth(0))).length, 'running 条目里应有循环动画（强调色小圆环，动画名非 none）').toBeGreaterThan(0);
   expect.soft(await loopingAnimations(entries.nth(1)), 'done 条目里不应有循环动画').toEqual([]);
   expect.soft(await loopingAnimations(entries.nth(2)), 'error 条目里不应有循环动画').toEqual([]);
@@ -404,11 +416,11 @@ test('L10 展开后的条目：工具条目 running→done（含 error）、思�
   await page.emulateMedia({ reducedMotion: 'no-preference' });
 
   // 思考条目：最新一块思考（它后面没有别的块）才带 data-entry-live="true"
-  await expect.poll(async () => await page.locator('[data-entry-live]').count(), { timeout: 10_000, message: '最新一块思考后面还没有别的块：data-entry-live 应恰 1 个' }).toBe(1);
-  expect.soft(await page.locator('[data-entry-live]:not([data-entry-live="true"])').count(), '只有最新思考块带该属性，且值为 true；其它思考条目不带').toBe(0);
-  const liveAfterTools = await page.evaluate(() => {
-    const live = document.querySelector('[data-entry-live]');
-    const tools = [...document.querySelectorAll('[data-entry-state]')];
+  await expect.poll(async () => await scope.locator('[data-entry-live]').count(), { timeout: 10_000, message: '本回合过程条里：最新一块思考后面还没有别的块，data-entry-live 应恰 1 个' }).toBe(1);
+  expect.soft(await scope.locator('[data-entry-live]:not([data-entry-live="true"])').count(), '只有最新思考块带该属性，且值为 true；其它思考条目不带').toBe(0);
+  const liveAfterTools = await scope.evaluate((root) => {
+    const live = root.querySelector('[data-entry-live]');
+    const tools = [...root.querySelectorAll('[data-entry-state]')];
     const last = tools[tools.length - 1];
     return !!(live && last && (last.compareDocumentPosition(live) & Node.DOCUMENT_POSITION_FOLLOWING));
   });
@@ -425,11 +437,11 @@ test('L10 展开后的条目：工具条目 running→done（含 error）、思�
 
   // 思考二后面出现正文 → 它不再是最新一块
   touchCtl('g1');
-  await expect.poll(async () => await page.locator('[data-entry-live]').count(), { timeout: 15_000, message: '思考后面出现别的块之后：data-entry-live 应为 0 个' }).toBe(0);
+  await expect.poll(async () => await scope.locator('[data-entry-live]').count(), { timeout: 15_000, message: '本回合过程条里：思考后面出现别的块之后，data-entry-live 应为 0 个' }).toBe(0);
   // 甲拿到结果 → running → done
   touchCtl('d1');
-  await openStripEntries(page);
-  await expect.poll(() => entryStates(page), { timeout: 15_000, message: '甲拿到结果后：三个条目应是 done / done / error' }).toEqual(['done', 'done', 'error']);
+  await openStripEntries(page, '[data-entry-state]', 6_000, scope);
+  await expect.poll(() => entryStates(page, scope), { timeout: 15_000, message: '甲拿到结果后：本回合三个条目应是 done / done / error' }).toEqual(['done', 'done', 'error']);
 });
 
 test('L11 子代理卡：运行中有九宫格 + 8 层边框光，结束 / 出错 / 停止后都没有，减弱动画下边框光隐藏', async ({ page }) => {

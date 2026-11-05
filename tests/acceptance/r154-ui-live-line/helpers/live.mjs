@@ -265,26 +265,32 @@ export async function loopingAnimations(locator, { visibleOnly = false } = {}) {
 }
 
 // ───────────────────────── 过程条 / 子代理卡 ─────────────────────────
-/** 保证直播过程条展开，并把默认收起的"思考 · N 次工具调用"组点开，直到 want 选择器有元素；返回是否出现。 */
-export async function openStripEntries(page, want = '[data-entry-state]', timeout = 6_000) {
-  const head = page.locator('[data-strip="head"][data-strip-live="true"]').first();
+/**
+ * 保证直播过程条展开，并把默认收起的"思考 · N 次工具调用"组点开，直到 want 选择器有元素；返回是否出现。
+ * scope（可选，一个 Locator，通常是本回合的 [data-strip-root]）：头行、条目、过程组都只在这棵子树里找；
+ * 不传 = 整页（既有行为）。夹具里有历史回合时必须传，否则会把历史回合的过程组一起点开，条目数就对不上。
+ */
+export async function openStripEntries(page, want = '[data-entry-state]', timeout = 6_000, scope = null) {
+  const within = (sel) => (scope ? scope.locator(sel) : page.locator(sel));
+  const head = (scope ? within('[data-strip="head"]') : page.locator('[data-strip="head"][data-strip-live="true"]')).first();
   if ((await head.count()) && (await head.getAttribute('aria-expanded')) === 'false') await head.click();
-  const has = async () => (await page.locator(want).count()) > 0;
+  const has = async () => (await within(want).count()) > 0;
   const t0 = Date.now();
   while (Date.now() - t0 < timeout) {
     if (await has()) return true;
     await page.waitForTimeout(200);
   }
-  const groups = page.locator('[data-strip-item="group"] > div > button');
+  const groups = within('[data-strip-item="group"] > div > button');
   const n = await groups.count();
   for (let i = 0; i < n; i += 1) await groups.nth(i).click().catch(() => {});
   await page.waitForTimeout(600);
   return await has();
 }
 
-/** 每个 [data-entry-state] 条目的状态，按 DOM 顺序。 */
-export async function entryStates(page) {
-  return await page.locator('[data-entry-state]').evaluateAll((els) => els.map((e) => e.getAttribute('data-entry-state')));
+/** 每个 [data-entry-state] 条目的状态，按 DOM 顺序。scope（可选 Locator）：只数这棵子树里的；不传 = 整页（既有行为）。 */
+export async function entryStates(page, scope = null) {
+  const entries = scope ? scope.locator('[data-entry-state]') : page.locator('[data-entry-state]');
+  return await entries.evaluateAll((els) => els.map((e) => e.getAttribute('data-entry-state')));
 }
 
 /** 子代理卡（按卡片标题文字定位）里的九宫格 / 边框光事实。 */
@@ -304,4 +310,60 @@ export async function agentCardFacts(page, title) {
       beamDisplay: beams.map((b) => getComputedStyle(b).display),
     };
   });
+}
+
+// ───────────────────────── 页内观察器：抓"只存在一瞬间"的阶段（如 stopping） ─────────────────────────
+/**
+ * 往页面里装一个 MutationObserver（观察 document.body；子树 / 子节点 / 属性 / 文字变动全开）。
+ * 每次回调读一次 document.querySelector('[data-live-line]')，把 { phase, role, text, verb, object, hasObject }
+ * 追加进 window.__r154Line；页面上没有该元素时不记。用来抓「停止中」这种只存在一两百毫秒、轮询抓不住的阶段：
+ * 点停止 → 流被中断 → 回合收尾 → 状态行整行卸载，轮询（100–1000 毫秒间隔）很可能一次都撞不上。
+ * 必须在点停止之前装；每次调用都会清空数组并换掉旧观察器。页面导航后是新文档，要重新装，别跨用例复用。
+ */
+export async function installLineObserver(page) {
+  await page.evaluate(() => {
+    if (window.__r154LineObs) window.__r154LineObs.disconnect();
+    window.__r154Line = [];
+    const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const obs = new MutationObserver(() => {
+      const el = document.querySelector('[data-live-line]');
+      if (!el) return;
+      const text = el.querySelector('[data-live-text]');
+      const verb = text ? text.querySelector('[data-live-verb]') : null;
+      const obj = el.querySelector('[data-live-object]');
+      window.__r154Line.push({
+        phase: el.getAttribute('data-live-phase'),
+        role: el.getAttribute('role'),
+        text: text ? norm(text.textContent) : null,
+        verb: verb ? norm(verb.textContent) : null,
+        object: obj ? norm(obj.textContent) : null,
+        hasObject: !!obj,
+      });
+    });
+    obs.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+    window.__r154LineObs = obs;
+  });
+}
+
+/** 读观察器到目前为止记下的全部快照（按时间顺序）；没装过观察器返回空数组。 */
+export async function lineLog(page) {
+  return await page.evaluate(() => (Array.isArray(window.__r154Line) ? window.__r154Line.slice() : []));
+}
+
+/** 快照里 data-live-phase 的变化轨迹，如 `text×58 → stopping×2`（连续相同的合并计数）；失败消息里用。 */
+export function phaseTrail(log) {
+  const runs = [];
+  for (const r of log) {
+    const last = runs[runs.length - 1];
+    if (last && last.phase === r.phase) last.n += 1; else runs.push({ phase: r.phase, n: 1 });
+  }
+  return runs.length ? runs.map((x) => `${x.phase}×${x.n}`).join(' → ') : '（观察器一条都没记到）';
+}
+
+/** 取出快照里 stopping 阶段的那些；一条都没有就直接断言失败（"没有观察到 stopping 阶段"）。 */
+export function stoppingRecords(log) {
+  const rows = log.filter((r) => r.phase === 'stopping');
+  expect(rows.length, `没有观察到 stopping 阶段：点停止之后底部状态行的 data-live-phase 始终没变成 stopping（页内观察器记到的阶段轨迹：${phaseTrail(log)}）`).toBeGreaterThan(0);
+  console.log(`[R154 观察器] 阶段轨迹：${phaseTrail(log)}（其中 stopping 快照 ${rows.length} 条）`); // 留一行痕迹，将来排查偶发时看得出抓到了几条
+  return rows;
 }
