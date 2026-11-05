@@ -458,7 +458,7 @@ export async function openFixtureSession(page, { baseURL } = {}) {
     await page.waitForLoadState('domcontentloaded');
   }
   await dismissTransientOverlays(page);
-  const search = page.getByRole('textbox', { name: /搜索项目/ }).first();
+  const search = page.getByRole('textbox', { name: /搜索工作区/ }).first();
   await search.fill(searchMarker);
   const result = page.getByRole('button', { name: new RegExp(escapeRegExp(searchMarker)) }).first();
   await expect(result, '侧栏搜索必须能命中本套件夹具会话').toBeVisible();

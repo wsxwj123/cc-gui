@@ -23,7 +23,7 @@ const hitRow = (page, mark) =>
 
 /** 打开一条历史会话(第一次必须走侧栏搜索,见 r148 helpers 的说明)。 */
 export async function openSessionBySearch(page, mark) {
-  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索项目/ });
+  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索工作区/ });
   await expect(async () => {
     await search.click();
     await search.fill(mark);

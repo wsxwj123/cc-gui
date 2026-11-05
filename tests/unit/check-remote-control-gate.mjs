@@ -56,7 +56,7 @@ async function post(body) {
   return out;
 }
 const gateMsg = (name) => `远程控制要求 ANTHROPIC_BASE_URL 指向 api.anthropic.com。当前 provider 为「${name}」，切回官方 Anthropic 后可开启。`;
-const CWD_MSG = 'cwd 不在家目录、也不在任何打开过的项目目录内';
+const CWD_MSG = 'cwd 不在家目录、也不在任何打开过的工作区目录内';
 
 // ── ① 第三方直连端点 → 拒绝,且报的是 provider 那条 ─────────────────────────
 writeJson(SETTINGS, { env: { ANTHROPIC_BASE_URL: 'https://api.deepseek.com', ANTHROPIC_MODEL: 'deepseek-chat' } });

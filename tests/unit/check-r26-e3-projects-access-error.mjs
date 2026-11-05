@@ -18,10 +18,10 @@ const block = src.match(/view\.groupMode !== 'single' && rows\.length === 0 && \
 assert.ok(block, 't2: 项目空态块应存在');
 assert.match(block[0], /!q && !hiddenOnly && projectsAccessError/, 't2: 拒访分支门控(搜索中/全隐藏不抢戏)');
 assert.match(block[0], /text-amber-700/, 't2: 拒访提示用琥珀色(与会话空态同一套)');
-assert.match(block[0], /没有找到项目/, 't2: 正常空态文案保留(未拒访时)');
+assert.match(block[0], /没有找到工作区/, 't2: 正常空态文案保留(未拒访时)');
 const errIdx = block[0].indexOf('projectsAccessError.hint');
-const okIdx = block[0].indexOf("'没有找到项目'");
-assert.ok(errIdx > -1 && okIdx > -1 && errIdx < okIdx, 't2: 拒访分支优先于「没有找到项目」(不许再伪装)');
+const okIdx = block[0].indexOf("'没有找到工作区'");
+assert.ok(errIdx > -1 && okIdx > -1 && errIdx < okIdx, 't2: 拒访分支优先于「没有找到工作区」(不许再伪装)');
 
 // t3 「打开系统设置」按钮按 canOpenSettings 门控(与 E2 同端点同口径)
 assert.match(block[0], /projectsAccessError\.canOpenSettings && \(/, 't3: 按钮按平台位门控');

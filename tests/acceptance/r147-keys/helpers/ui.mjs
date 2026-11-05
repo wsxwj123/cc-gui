@@ -53,7 +53,7 @@ const hitRow = (page, mark) =>
  *   ③ 收尾先硬断言搜索词被清空,失败才兜底 `fill('')` + annotation。**硬契约归 r143 的 S2 独占**。
  */
 export async function openSessionBySearch(page, mark) {
-  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索项目/ });
+  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索工作区/ });
   await expect(async () => {
     await search.click();
     await search.fill(mark);

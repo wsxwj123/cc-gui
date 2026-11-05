@@ -10,7 +10,7 @@ const src = readFileSync(new URL('../../client/src/components/UnifiedSidebar.jsx
 {
   assert.match(src, /有会话正在窗格中打开的项目不可隐藏/, 't1: 守卫注释在');
   assert.match(src, /\[\.\.\.\(st\.paneSessions \|\| \[\]\), st\.selectedSession\]\s*\n?\s*\.some\(\(s\) => s && s\.projectHash === hash\)/, 't1: 开着的窗格+选中会话都查 projectHash');
-  assert.match(src, /confirmDialog\('该项目有会话正在窗格中打开/, 't1: 弹窗提示文案');
+  assert.match(src, /confirmDialog\('该工作区有会话正在窗格中打开/, 't1: 弹窗提示文案');
 }
 
 // t2 行为模拟:守卫判据逻辑(抽离同形验证)

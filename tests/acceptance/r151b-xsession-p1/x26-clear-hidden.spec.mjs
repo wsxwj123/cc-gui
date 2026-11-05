@@ -18,7 +18,7 @@ const ALL = 'pending,queued,claimed,processing,done,dismissed';
 const CLEAR_WHILE_ENABLED = '请先关闭跨会话消息，或在卡片上逐条处理';
 const CONFIRM_TEXT = '清空后，这些消息和它们的正文都会删除，无法恢复。';
 const DELIVERED = '已送达，等待对方会话里确认处理';
-const HIDDEN_TEXT = '所在项目已隐藏';
+const HIDDEN_TEXT = '所在工作区已隐藏';
 const raw = (r) => `(应答原文:${String(r.text).slice(0, 300)})`;
 const noFiles = (tree) => tree === null || tree.length === 0;
 /** xsession 目录里属于"收件箱记录 / 正文 / 损坏留存"的文件(相对路径);目录不存在时为 []。 */
@@ -169,7 +169,7 @@ test('X26 清空残留:收件箱不存在时 stored 为 0 且不产生文件;开
   });
 });
 
-test('X27 转发目标的隐藏标注:目标所在项目不在侧栏(没开「在项目列表显示 worktree 项目」)时,目标项标题后有 xs-forward-target-hidden"所在项目已隐藏",照常可选可发送;打开这项显示后重新打开对话框,标注消失', async ({ page }) => {
+test('X27 转发目标的隐藏标注:目标所在项目不在侧栏(没开「在工作区列表显示 worktree 工作区」)时,目标项标题后有 xs-forward-target-hidden"所在工作区已隐藏",照常可选可发送;打开这项显示后重新打开对话框,标注消失', async ({ page }) => {
   const api = xs();
   await api.on();
   const mark = uniq('R151BX27');
@@ -190,7 +190,7 @@ test('X27 转发目标的隐藏标注:目标所在项目不在侧栏(没开「�
     await expect(item, '目标列表里有 T').toBeVisible({ timeout: 10_000 });
   };
 
-  await test.step('不开「显示 worktree 项目」(T 的项目不在侧栏):目标项标题后有标注"所在项目已隐藏";选中它照常能发', async () => {
+  await test.step('不开「显示 worktree 工作区」(T 的项目不在侧栏):目标项标题后有标注"所在工作区已隐藏";选中它照常能发', async () => {
     expect(await sidebar(page).getByText(tProj).count(), '前置:T 所在项目不在侧栏').toBe(0);
     await openDialog();
     await expect.soft(item.getByTestId('xs-forward-target-hidden'), '目标项里的隐藏标注').toHaveText(HIDDEN_TEXT);
@@ -215,17 +215,17 @@ test('X27 转发目标的隐藏标注:目标所在项目不在侧栏(没开「�
   const restore = await showWorktreeProjects(page);
   let restoreErr = null;
   try {
-    await test.step('打开「显示 worktree 项目」(T 的项目在侧栏)后重新打开对话框:标注消失', async () => {
+    await test.step('打开「显示 worktree 工作区」(T 的项目在侧栏)后重新打开对话框:标注消失', async () => {
       await expect(sidebar(page).getByText(tProj).first(), '前置:T 所在项目已在侧栏显示').toBeVisible({ timeout: 30_000 });
       await openDialog();
       await page.waitForTimeout(1_000);
       expect(await item.getByTestId('xs-forward-target-hidden').count(), '项目显示后没有隐藏标注').toBe(0);
-      expect(await item.innerText(), '目标项文字里没有"所在项目已隐藏"').not.toContain(HIDDEN_TEXT);
+      expect(await item.innerText(), '目标项文字里没有"所在工作区已隐藏"').not.toContain(HIDDEN_TEXT);
       await page.keyboard.press('Escape');
       await expect(dialog).toBeHidden({ timeout: 5_000 });
     });
   } finally {
     try { await restore(); } catch (e) { restoreErr = String((e && e.message) || e).slice(0, 300); }
   }
-  expect(restoreErr, '收尾:「在项目列表显示 worktree 项目」已拨回').toBeNull();
+  expect(restoreErr, '收尾:「在工作区列表显示 worktree 工作区」已拨回').toBeNull();
 });

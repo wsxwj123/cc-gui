@@ -63,7 +63,7 @@ test('P17 连锁:自动处理开始的回合里发出的消息 hop 加 1、chain
   } finally {
     try { await restoreWorktree(); } catch (e) { restoreErr = String((e && e.message) || e).slice(0, 300); }
   }
-  expect(restoreErr, '收尾:「在项目列表显示 worktree 项目」已拨回').toBeNull();
+  expect(restoreErr, '收尾:「在工作区列表显示 worktree 工作区」已拨回').toBeNull();
 
   const reset = await aiCalls(shared, { cwd: makeWorkspace(`real-p17a-${run}`), sid: A.sid, steps: [{ name: SM, input: { to: [B.sid], message: `R151C p17 用户发消息之后 ${run}` } }] });
   expect(sentTo(reset, B.sid).length, `前置:调用有结果 —— 这一轮里 A 发给 B 的工具结果恰好 1 条(本轮全部:${all(reset)})`).toBe(1);

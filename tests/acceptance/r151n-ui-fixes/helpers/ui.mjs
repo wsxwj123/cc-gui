@@ -23,7 +23,7 @@ const hitRow = (page, mark) =>
 
 /** 打开一条历史会话(走侧栏搜索)。mark = 消息正文里的唯一标记;replyText = 打开后应能看到的一段文字。 */
 export async function openSessionBySearch(page, mark, replyText) {
-  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索项目/ });
+  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索工作区/ });
   await expect(async () => {
     await search.click();
     await search.fill(mark);

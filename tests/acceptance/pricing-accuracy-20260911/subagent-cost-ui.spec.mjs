@@ -226,7 +226,7 @@ async function openApp(page) {
 /** 侧栏搜索 → 结果行：用户打开会话的走法（同 pricing-batch5 套件的既有取法）。 */
 async function openSession(page, marker) {
   await dismissOverlays(page);
-  const search = page.getByRole('textbox', { name: /搜索项目/ }).first();
+  const search = page.getByRole('textbox', { name: /搜索工作区/ }).first();
   await search.click({ timeout: 10_000 });
   await search.fill(marker);
   await page.waitForTimeout(1000);

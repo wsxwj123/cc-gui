@@ -251,7 +251,7 @@ test('PR-32 [R22] 历史回读与实时同口径：刷新页面重开会话后�
   const before = run.usageTotals;
   await page.reload();
   await page.waitForLoadState('domcontentloaded');
-  const search = page.getByRole('textbox', { name: /搜索项目/ }).first();
+  const search = page.getByRole('textbox', { name: /搜索工作区/ }).first();
   await clickThroughOverlays(page, search);
   await search.fill(run.marker);
   await page.waitForTimeout(1_500);

@@ -11,11 +11,11 @@ test('D2a 用量面板既有元素与文案不变:「价格与来源」「导出
   const outsideHome = await page.getByText(TEXT.stale, { exact: true }).evaluateAll((els) => els.filter((e) => !e.closest('[data-testid="home-usage"]') && e.getClientRects().length).length);
   expect(outsideHome, '面板自己的那句 stale 提示(不算首页的)').toBeGreaterThanOrEqual(1);
 });
-test('D3 零项目(EmptyState):不渲染 [data-cgui=home] 与 home-usage,显示「添加一个项目开始」', async ({ page }) => {
+test('D3 零项目(EmptyState):不渲染 [data-cgui=home] 与 home-usage,显示「添加一个工作区开始」', async ({ page }) => {
   await page.route((u) => u.pathname === '/api/projects', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }));
   await prime(page);
   await page.goto('/', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByText('添加一个项目开始').first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText('添加一个工作区开始').first()).toBeVisible({ timeout: 30_000 });
   await page.waitForTimeout(1500);
   await expect(home(page)).toHaveCount(0);
   await expect(usage(page)).toHaveCount(0);

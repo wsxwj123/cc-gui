@@ -22,7 +22,7 @@ const chat = readFileSync(new URL('../../client/src/components/ChatInput.jsx', i
 const projectBlock = app.slice(app.indexOf('data-testid="project-selector"'), app.indexOf('data-testid="home-send"'));
 assert.match(projectBlock, /aria-haspopup="listbox"/);
 assert.match(projectBlock, /aria-expanded=\{projOpen\}/);
-assert.match(projectBlock, /<div role="listbox" aria-label="选择项目"[^>]*>[\s\S]*?<button[\s\S]*?role="option"[\s\S]*?aria-selected=[\s\S]*?tabIndex=/,
+assert.match(projectBlock, /<div role="listbox" aria-label="选择工作区"[^>]*>[\s\S]*?<button[\s\S]*?role="option"[\s\S]*?aria-selected=[\s\S]*?tabIndex=/,
   '项目 option 由合法 listbox 持有并使用 roving tabindex');
 assert.match(projectBlock, /onKeyDown=\{onProjectListboxKeyDown\}/);
 

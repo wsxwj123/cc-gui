@@ -41,7 +41,7 @@ import { projectsAccessDeniedBody } from '../../server/routes/sessions.js';
   const body = projectsAccessDeniedBody();
   assert.equal(body.code, 'no-disk-access', 't2: code 逐字按契约');
   assert.ok(typeof body.hint === 'string' && body.hint.length > 0, 't2: hint 非空');
-  assert.match(body.hint, /项目文件本身没有丢失/, 't2: 明说数据没丢(用户第一反应是"被删了")');
+  assert.match(body.hint, /工作区文件本身没有丢失/, 't2: 明说数据没丢(用户第一反应是"被删了")');
   assert.ok('canOpenSettings' in body, 't2: canOpenSettings 键必须在');
   // canOpenSettings 字段有无按注入平台(与 E1/E6 共用夹具口径)
   assert.equal(projectsAccessDeniedBody('darwin').canOpenSettings, true, 't2: macOS 有系统设置面板可跳');

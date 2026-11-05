@@ -21,7 +21,7 @@ async function boot(page) {
 async function openHistory(page, marker) {
   // 夹具项目位于 git worktree 里,侧栏常规列表不列它(实测显示"没有找到项目",/api/projects 却有),
   // 所以走侧栏搜索进会话。实测首载时输入框焦点会被抢走,填完核对值,不对就重来。
-  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索项目/ });
+  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索工作区/ });
   const hit = page.getByRole('button', { name: new RegExp(marker) }).first();
   await expect(async () => {
     await search.click();

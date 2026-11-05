@@ -308,7 +308,7 @@ export async function openFixtureSession(page, section, { markerKey = 'sessionSe
   const projectName = requireUiString(section, 'projectName');
   await openAppHome(page);
   await dismissTransientOverlays(page);
-  const search = page.getByRole('textbox', { name: /搜索项目/ }).first();
+  const search = page.getByRole('textbox', { name: /搜索工作区/ }).first();
   await search.fill(marker);
   const result = page.getByRole('button', { name: new RegExp(escapeRegExp(marker)) }).first();
   await expect(result).toBeVisible();

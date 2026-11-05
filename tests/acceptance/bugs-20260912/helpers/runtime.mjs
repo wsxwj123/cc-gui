@@ -94,7 +94,7 @@ function escapeRegExp(value) {
 /** 用侧栏搜索打开夹具会话（marker 必须写在会话内容里，见 fixtures.mjs）。 */
 export async function openSession(page, marker) {
   await dismissOverlays(page);
-  const search = page.getByRole('textbox', { name: /搜索项目/ }).first();
+  const search = page.getByRole('textbox', { name: /搜索工作区/ }).first();
   await search.fill(marker);
   const result = page.getByRole('button', { name: new RegExp(escapeRegExp(marker)) }).first();
   await expect(result).toBeVisible({ timeout: 20_000 });
