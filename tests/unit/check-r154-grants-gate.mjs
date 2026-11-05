@@ -127,6 +127,11 @@ import fs from 'node:fs';
 import { join } from 'node:path';
 fs.mkdirSync(join(process.env.CU_TEST_HOME, '.claude-gui', 'cu-runtime'), { recursive: true });
 const cu = await import(process.env.R154_CU);
+// 第一次写盘之前先自检:授权文件必须落在假家目录下,否则立刻退出(预加载万一失效,绝不去写真实 ~/.claude-gui)。
+if (!cu.GRANTS_FILE.startsWith(process.env.CU_TEST_HOME)) {
+  process.stdout.write(JSON.stringify({ underHome: false }));
+  process.exit(0);
+}
 const bytes = () => (fs.existsSync(cu.GRANTS_FILE) ? fs.readFileSync(cu.GRANTS_FILE).toString('base64') : null);
 const attempt = (change, opts) => {
   const before = bytes();
