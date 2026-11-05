@@ -499,6 +499,7 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
  * Returns the most-recently-modified session jsonl for a project (mirrors
  * `claude --continue` semantics). If projectHash is omitted, scans every
  * project and returns the globally newest session.
+ * 项目根不存在(全新环境)按没有任何会话处理 → 404。
  */
 router.get('/recent-session', async (req, res) => {
   try {
@@ -507,11 +508,23 @@ router.get('/recent-session', async (req, res) => {
       return res.status(400).json({ error: 'invalid projectHash' });
     }
     const projectsDir = join(homedir(), '.claude', 'projects');
-    const dirs = projectHash
-      ? [projectHash]
-      : (await readdir(projectsDir, { withFileTypes: true }))
-          .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
-          .map((e) => e.name);
+    let dirs;
+    if (projectHash) {
+      dirs = [projectHash];
+    } else {
+      // 用户从没跑过 Claude Code 时项目根还没创建 = 没有会话,不是故障 → dirs 为空,落到下面的 404。
+      // 只吞 ENOENT;EACCES/EPERM 等真故障原样抛给外层 catch 回 500。
+      let entries;
+      try {
+        entries = await readdir(projectsDir, { withFileTypes: true });
+      } catch (err) {
+        if (err?.code !== 'ENOENT') throw err;
+        entries = [];
+      }
+      dirs = entries
+        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+        .map((e) => e.name);
+    }
 
     let best = null;
     for (const hash of dirs) {

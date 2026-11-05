@@ -45,7 +45,15 @@ router.get('/search', async (req, res) => {
 
   try {
     const hidden = await loadHiddenProjects(); // r26-I3:隐藏项目整目录跳过(省 IO 且与点击入口同口径)
-    const projects = await readdir(PROJECTS_DIR, { withFileTypes: true });
+    // 全新环境(从没跑过 Claude Code)项目根还没创建 = 没有会话可搜,不是故障 → 空命中 200。
+    // 只吞 ENOENT;EACCES/EPERM 等真故障原样抛给下面的 catch 回 500。
+    let projects;
+    try {
+      projects = await readdir(PROJECTS_DIR, { withFileTypes: true });
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err;
+      projects = [];
+    }
     // Sort newest first to bias recency.
     const projectDirs = projects
       .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !hidden.has(e.name));
