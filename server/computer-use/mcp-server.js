@@ -34,9 +34,10 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import {
   GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, STAMP_FILE, VENV_PY,
-  appGranted, ensureRuntime as ensureRuntimeImpl, findPython3, normalizeAppId, readGrants,
+  appGranted, effectiveAppEntries, effectiveGrants, ensureRuntime as ensureRuntimeImpl, findPython3, normalizeAppId, readGrants,
   sameAppId, screenScopeGranted,
 } from './cu-common.js';
+import { forbiddenActionDetail, forbiddenAppReason, forbiddenCategoryLabels } from './forbidden-apps.js';
 
 const PLATFORM = platform();
 const IS_MAC = PLATFORM === 'darwin';
@@ -297,7 +298,8 @@ const DEFAULT_MESSAGES = {
   CU_INVALID_COORDINATE: '坐标不是原图内的合法整数像素;未投递。',
   CU_SCREENSHOT_REQUIRED: '没有可用的截图映射:请先对本实例调用 screenshot,或带上有效的 snapshotId。',
   CU_STALE_SNAPSHOT: 'snapshotId 已失效(被新截图取代、来自其他实例或文件已清理);请重新截图,不按新前台猜坐标。',
-  CU_APP_NOT_ALLOWED: '目标应用未被授权。请先通过 cc-gui 的 POST /api/computer-use/grants 接口授权该应用(按 bundleId)后重试;图形界面尚未提供授权入口。',
+  // 不教接口(r154):旧文案写着授权接口,"想把任务做完"的模型读到会自己去调接口给自己授权。
+  CU_APP_NOT_ALLOWED: `目标应用未被授权,或属于禁止操控的类别(${forbiddenCategoryLabels()})。请让用户在 CC-GUI 的「桌面操控」面板里授权;不要自行修改授权。`,
   CU_TARGET_NOT_FOUND: '找不到目标窗口(bundleId/pid/windowId 需来自 window_list 的已授权窗口)。',
   CU_TARGET_LOOKUP_FAILED: '窗口查询失败;未投递任何动作。',
   CU_PERMISSION_REQUIRED: '缺少系统权限(屏幕录制/辅助功能);未投递任何动作。',
@@ -594,6 +596,9 @@ function findTargetWindow(windows, target) {
 
 /** 目标解析:①授权 ②窗口查找。返回 {ok:true, window} 或失败码。 */
 async function resolveTarget(target) {
+  // 底线先于授权表(r154):声明的目标属禁止类别就直接拒,不读授权表、不查窗口。
+  const declared = forbiddenAppReason(target.bundleId);
+  if (declared) return { ok: false, code: 'CU_APP_NOT_ALLOWED', detail: forbiddenActionDetail(declared) };
   const grants = readGrants();
   const info = await appInstalled(target.bundleId);
   if (info.installed && !appGranted(grants, target.bundleId)) {
@@ -607,6 +612,9 @@ async function resolveTarget(target) {
   }
   const win = findTargetWindow(listing.windows, target);
   if (!win) return { ok: false, code: 'CU_TARGET_NOT_FOUND' };
+  // 再按窗口**真实** id 判一次(声明 id 与真实 id 由 findTargetWindow 要求相等,这里是纵深)
+  const actual = forbiddenAppReason(win.bundleId);
+  if (actual) return { ok: false, code: 'CU_APP_NOT_ALLOWED', detail: forbiddenActionDetail(actual) };
   if (!appGranted(grants, win.bundleId)) return { ok: false, code: 'CU_APP_NOT_ALLOWED' };
   return { ok: true, window: win, grants };
 }
@@ -1321,14 +1329,14 @@ function pruneShots() {
 }
 
 async function toolWindowList() {
-  const grants = readGrants();
+  const grants = effectiveGrants(readGrants());
   let listing;
   try {
     listing = await listWindows();
   } catch (error) {
     return { receipt: fail('CU_TARGET_LOOKUP_FAILED', { message: `窗口查询失败:${String(error.message).slice(0, 200)}` }) };
   }
-  const allowedList = Object.keys(grants.apps);
+  const allowedList = effectiveAppEntries(grants).map(([id]) => id);
   const allowed = new Set(allowedList.map((id) => normalizeAppId(id)));
   const windows = listing.windows.filter((w) => allowed.has(normalizeAppId(w.bundleId)));
   const front = listing.frontmost;
@@ -1355,8 +1363,8 @@ async function toolWindowList() {
 }
 
 async function toolCursor() {
-  const grants = readGrants();
-  const allow = Object.keys(grants.apps);
+  const grants = effectiveGrants(readGrants());
+  const allow = effectiveAppEntries(grants).map(([id]) => id);
   let r;
   try {
     r = await runHelper(['cursor', '--allow-bundle-ids', allow.join(',')], { timeoutMs: 15_000 });
@@ -1395,7 +1403,7 @@ async function toolDoctor() {
   } catch (error) {
     return { receipt: fail('CU_RUNTIME_UNAVAILABLE', { message: `自检失败:${String(error.message).slice(0, 200)}` }) };
   }
-  const grants = readGrants();
+  const grants = effectiveGrants(readGrants());
   // 口径与 GUI 侧 routes/computer-use.js 的 permissionStatus 一致:Windows 的"辅助功能"恒
   // not-applicable(没有 TCC 模型),不许因为"不是 ok"就报成 unverified —— 那会让面板与模型侧
   // 对同一台机器给出两个结论。not-applicable 只出现在 checks/permissions,不进 capabilities。
@@ -1407,7 +1415,7 @@ async function toolDoctor() {
     runtime: { status: 'available' },
     captureTest: { status: payload.capture_test || 'unknown', detail: payload.capture_test_detail || null },
   };
-  const apps = Object.entries(grants.apps).map(([bundleId, entry]) => ({
+  const apps = effectiveAppEntries(grants).map(([bundleId, entry]) => ({
     bundleId, name: entry.name || bundleId, granted: true, grantedAt: entry.grantedAt || null,
   }));
   const text = [

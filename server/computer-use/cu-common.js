@@ -416,6 +416,11 @@ export function effectiveGrants(grants, platformName = process.platform) {
   return out;
 }
 
+/** 有效授权的 [id, entry] 列表。消费者要遍历授权应用时用它,不直接取 `.apps` 的键。 */
+export function effectiveAppEntries(grants, platformName = process.platform) {
+  return Object.entries(effectiveGrants(grants, platformName).apps);
+}
+
 function grantError(code, message, extra = {}) {
   return Object.assign(new Error(message), { code, ...extra });
 }
