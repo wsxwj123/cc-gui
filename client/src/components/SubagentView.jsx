@@ -5,7 +5,8 @@ import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
 import { CoworkBlocks } from './TurnBubble.jsx';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
-import { LoadingMark, useCyclingVerb, ElapsedTime } from './LoadingBits.jsx';
+import { LiveStatusLine } from './LiveStatusLine.jsx';
+import { liveStatusLabel } from '../utils/liveStatus.js';
 import { stopNoOwnerNotice } from './tools/TaskCard.jsx';
 import { resolveOwnedAgent } from '../utils/agentOwner.js';
 import { AGENT_TERMINAL_STATUSES, agentSourceState, taskRunEvidence } from '../utils/agentView.js';
@@ -18,6 +19,15 @@ function fmtTok(n) {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 }
 
+// r154:子代理底部状态行的状态词。toolCalls 里最后一个没有 result 的 = 正在跑的工具;
+// 否则看 blocks 最后一块的类型(text → 正在输出,thinking → 正在思考),都没有走默认。
+function subagentLiveLabel(agent, blocks) {
+  const toolCalls = Array.isArray(agent?.toolCalls) ? agent.toolCalls : [];
+  const pendingTool = [...toolCalls].reverse().find((tc) => tc && !tc.result) || null;
+  const lastType = blocks.length ? blocks[blocks.length - 1]?.type : null;
+  return liveStatusLabel({ pendingTool, text: lastType === 'text', thinking: lastType === 'thinking' });
+}
+
 // #9/O4 子代理会话窗口:样式对齐正常会话(用户气泡在右、回复在左、思考/工具折叠),
 // 标题处「母会话标题 / 子代理名」层级面包屑,点母会话标题返回。
 // 数据来自 store.activeAgents[agentId](流式累积的 text/thinking/toolCalls)。
@@ -27,7 +37,6 @@ export function SubagentView({ agentId, paneId, tabIndex = 0, active = false, pa
   // 停止键也会停到源会话。归属不符时按"数据不可用"处理(走下面的 !agent 早退)。
   const agent = resolveOwnedAgent(useStore((s) => s.activeAgents[agentId]), parentSessionId);
   // hooks 必须在下面的早退 return 之前(rules-of-hooks)。
-  const verb = useCyclingVerb();
   const scrollRef = useRef(null);
   const followBottomRef = useRef(true);
   const lastScrollTopRef = useRef(0);
@@ -306,14 +315,11 @@ export function SubagentView({ agentId, paneId, tabIndex = 0, active = false, pa
                   <MarkdownRenderer content={typeof agent.result === 'string' ? agent.result : JSON.stringify(agent.result)} />
                 </div>
               ) : null}
-              {/* #2 底部加载动画+动态文本:与主会话流式状态行同款视觉物(LoadingMark+动态词+
-                  耗时,橙色 #D97757),取代原来的灰色"子代理运行中…"。 */}
+              {/* #2 底部状态行:与主会话同一个 LiveStatusLine(r154),状态词由该子代理自己的
+                  流式状态推出 —— 最后一个未返回的工具 > 最后一块是正文 / 思考 > 默认。 */}
               {working && (
-                <div className="flex items-center gap-2 mt-2 text-[13px] font-body animate-fade-in" style={{ color: '#D97757' }}>
-                  <span className="shrink-0 inline-flex items-center"><LoadingMark size={13} /></span>
-                  <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{verb}</span>
-                  <span style={{ color: '#D97757' }}>…</span>
-                  <ElapsedTime startedAt={agent.startedAt} className="ml-1" />
+                <div className="mt-2 animate-fade-in">
+                  <LiveStatusLine label={subagentLiveLabel(agent, blocks)} startedAt={agent.startedAt} />
                 </div>
               )}
             </div>

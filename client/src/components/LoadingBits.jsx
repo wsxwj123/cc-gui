@@ -3,15 +3,10 @@ import { useStore } from '../stores/sessionStore.js';
 import { orbitTicker } from '../utils/orbitTicker.js';
 import { DEFAULT_LOADING_STYLE } from '../utils/loadingPrefs.js';
 
-// 加载指示三件套(spinner/动态词/耗时),从 App.jsx 抽出共享:主会话流式状态行与
-// 子代理视图(SubagentView)用同一套视觉物,保证"子会话页面与主会话显示一致"(#2)。
+// 加载指示件(spinner / 耗时),从 App.jsx 抽出共享:底部状态行 LiveStatusLine(主会话与
+// 子代理视图共用)与主题「界面」页预览用同一套视觉物。状态词见 utils/liveStatus.js。
 
 export const SPINNER_FRAMES = ['✻', '✶', '✷', '✸', '✹', '✺'];
-export const THINKING_VERBS = [
-  'Frolicking', 'Pondering', 'Brewing', 'Cogitating', 'Mulling',
-  'Conjuring', 'Crafting', 'Weaving', 'Synthesizing', 'Noodling',
-  'Spelunking', 'Marinating', 'Percolating', 'Ruminating',
-];
 
 // markProps 展开到最外层元素上(调用方可挂 data-* 锚点);className / style 与组件自己的合并。
 function mergeMarkProps(markProps, className, style) {
@@ -72,15 +67,6 @@ export function LoadingMark({ size = 20, variant = null, markProps = null }) {
   return (
     <span {...mergeMarkProps(mp, `loading-mark loading-${style}`, { width: size, height: size })}><span /></span>
   );
-}
-
-export function useCyclingVerb() {
-  const [i, setI] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length));
-  useEffect(() => {
-    const id = setInterval(() => setI((x) => (x + 1) % THINKING_VERBS.length), 3000);
-    return () => clearInterval(id);
-  }, []);
-  return THINKING_VERBS[i];
 }
 
 // CJ-4:流式/思考/connecting 时的实时耗时计数,每秒跳一次。startedAt=本回合发起时间戳。
