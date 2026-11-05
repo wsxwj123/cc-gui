@@ -438,6 +438,30 @@ export function normalizeAppId(id, platformName = process.platform) {
   return text.toLowerCase();
 }
 
+export const APP_ID_MAX_LENGTH = 200;
+
+/**
+ * 授权 id 写入前的校验 + 规范化 → { ok:true, id } | { ok:false, error }。
+ * 为什么要严:授权 id 会被逗号拼接后传给 helper 的 `--allow-bundle-ids`,含逗号的 id 会被拆成
+ * 额外的 id;控制符 / 零宽 / 格式字符(Unicode Cc、Cf、行段分隔符)能让一个 id 看起来和名单里
+ * 的不一样、从而躲过禁止名单比较。macOS 的 bundleId 另有字符集白名单;Windows 是 exe 路径,
+ * 不套字符集(路径里合法有空格、括号、非 ASCII 字符)。
+ */
+export function normalizeAppIdForGrant(id, platformName = process.platform) {
+  if (typeof id !== 'string') return { ok: false, error: 'bundleId 必须是非空字符串。' };
+  const text = id.trim().normalize('NFC');
+  if (!text) return { ok: false, error: 'bundleId 必须是非空字符串。' };
+  if (text.length > APP_ID_MAX_LENGTH) return { ok: false, error: `bundleId 不能超过 ${APP_ID_MAX_LENGTH} 个字符。` };
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(text)) {
+    return { ok: false, error: 'bundleId 不能含控制符、零宽或格式字符。' };
+  }
+  if (text.includes(',')) return { ok: false, error: 'bundleId 不能含逗号。' };
+  if (platformName !== 'win32' && !/^[A-Za-z0-9._-]+$/.test(text)) {
+    return { ok: false, error: 'bundleId 只能含字母、数字、点、下划线和连字符。' };
+  }
+  return { ok: true, id: text };
+}
+
 /** 两个应用身份是不是同一个(平台口径见 normalizeAppId)。 */
 export function sameAppId(a, b, platformName = process.platform) {
   const na = normalizeAppId(a, platformName);
