@@ -4,7 +4,8 @@
 // data-testid / role / 公开文案 —— 不注入测试专用属性、不读产品内部 state。
 import { expect } from '@playwright/test';
 import { dismissOverlays, openPanel } from '../../bugs-20260912/helpers/runtime.mjs';
-import { EnvironmentBlocked, uiBase, api } from './harness.mjs';
+import { EnvironmentBlocked, uiBase, api, apiBase } from './harness.mjs';
+import { GRANT_TOKEN_HEADER, getGrantToken } from './grant-token.mjs';
 
 /**
  * 打开「应用授权」区块并返回它的 locator。
@@ -85,9 +86,16 @@ export async function grantedFromServer() {
   return (r.body?.apps || []).map((a) => a.bundleId);
 }
 
-/** 直接经产品端点安排授权状态(等价于"用户在别处操作过"),界面随后按服务端真值重绘。 */
+/**
+ * 直接经产品端点安排授权状态(等价于"用户在别处操作过"),界面随后按服务端真值重绘。
+ * r154 起,"新增/开启类"写入(带 bundleId 且 granted 不是 false,或 screenScope:true)服务端要面板凭证
+ * (请求头 X-CGUI-Grant-Token,取法见 grant-token.mjs;取不到会抛 EnvironmentBlocked 并带原因);
+ * 纯撤销(granted:false / screenScope:false)不要凭证,这里也就不去取。
+ */
 export async function setGrantViaApi(payload) {
-  const r = await api('/api/computer-use/grants', { method: 'POST', body: payload });
+  const positive = (payload?.bundleId !== undefined && payload.granted !== false) || payload?.screenScope === true;
+  const headers = positive ? { [GRANT_TOKEN_HEADER]: await getGrantToken(apiBase()) } : undefined;
+  const r = await api('/api/computer-use/grants', { method: 'POST', body: payload, headers });
   if (r.status !== 200 || r.body?.ok !== true) throw new EnvironmentBlocked(`POST /grants 失败(HTTP ${r.status}):${r.text?.slice(0, 120)}`);
   return r.body;
 }

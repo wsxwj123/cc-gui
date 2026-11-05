@@ -17,6 +17,7 @@ import path from 'node:path';
 import { userInfo } from 'node:os';
 import { artifacts, api, startInstance, stopInstance, sleep, EnvironmentBlocked, worktree } from './helpers/harness.mjs';
 import { expandCandidates, openCuGrants } from './helpers/ui.mjs';
+import { GRANT_TOKEN_HEADER, getGrantToken } from './helpers/grant-token.mjs';
 
 const brokenRoot = path.join(artifacts, 'broken');
 const brokenServer = path.join(brokenRoot, 'server');
@@ -194,7 +195,13 @@ test('CG-R11 面板处于「运行时未就绪」态:候选区如实说未就绪
   clearControlledVenv();
   await page.route('**/api/computer-use/**', async (route) => {
     const url = new URL(route.request().url());
-    const response = await route.fetch({ url: `${inst.base}${url.pathname}${url.search}` });
+    // r154:面板请求头里带的 X-CGUI-Grant-Token 是隔离实例的凭证,而受控实例是另一个进程、凭证不同,
+    // 原样转发手填授权会被 403(CU_GRANT_FORBIDDEN)。所以面板带了这个头才换成受控实例自己的凭证;
+    // 面板没带就保持没带 —— 不替它补,补了会掩盖"面板没拿到凭证"这类产品问题。
+    const headers = { ...route.request().headers() };
+    const tokenHeader = GRANT_TOKEN_HEADER.toLowerCase(); // request.headers() 的键全是小写
+    if (tokenHeader in headers) headers[tokenHeader] = await getGrantToken(inst.base);
+    const response = await route.fetch({ url: `${inst.base}${url.pathname}${url.search}`, headers });
     await route.fulfill({ response });
   });
   await openCuGrants(page);
