@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { orbitTicker } from '../utils/orbitTicker.js';
+import { DEFAULT_LOADING_STYLE } from '../utils/loadingPrefs.js';
 
 // 加载指示三件套(spinner/动态词/耗时),从 App.jsx 抽出共享:主会话流式状态行与
 // 子代理视图(SubagentView)用同一套视觉物,保证"子会话页面与主会话显示一致"(#2)。
@@ -62,7 +63,7 @@ export function Orbit({ n = 3, size = 20, markProps = null }) {
 }
 
 export function LoadingMark({ size = 20, variant = null, markProps = null }) {
-  const chosen = useStore((s) => s.loadingStyle) || 'cli';
+  const chosen = useStore((s) => s.loadingStyle) || DEFAULT_LOADING_STYLE;
   const style = variant || chosen;
   // 每个分支的最外层都带 data-style = 当前样式 id,供外层识别
   const mp = { ...(markProps || {}), 'data-style': style };

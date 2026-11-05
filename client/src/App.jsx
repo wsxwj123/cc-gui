@@ -75,6 +75,7 @@ import { ReleaseNotesModal } from './components/ReleaseNotesModal.jsx';
 import { shouldShow as shouldShowReleaseNotes, hasReleaseNotes, loadVersionNotes, fetchLastSeen, markSeen } from './utils/releaseNotes.js';
 import TurnScrubber from './components/TurnScrubber.jsx';
 import { LoadingMark, useCyclingVerb, ElapsedTime } from './components/LoadingBits.jsx';
+import { DEFAULT_LOADING_STYLE } from './utils/loadingPrefs.js';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './components/MultiSelect.jsx';
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
@@ -775,9 +776,16 @@ function ChatModeToggle() {
 
 // 加载动画选择网格:每格实时跑对应动画,点击即选(存 store.loadingStyle)。
 // 独立组件而非内联,避免主题弹窗其它交互(选色)时重渲整片动画网格。
+// r154:三体 / 四体旋转的转速,存 store.loadingSpeed(localStorage cgui-loading-speed)
+const LOADING_SPEED_OPTIONS = [
+  { id: 'slow', label: '慢' }, { id: 'normal', label: '标准' }, { id: 'fast', label: '快' },
+];
+
 function LoadingStylePicker() {
-  const loadingStyle = useStore((s) => s.loadingStyle) || 'cli';
+  const loadingStyle = useStore((s) => s.loadingStyle) || DEFAULT_LOADING_STYLE;
   const setLoadingStyle = useStore((s) => s.setLoadingStyle);
+  const loadingSpeed = useStore((s) => s.loadingSpeed) || 'slow';
+  const setLoadingSpeed = useStore((s) => s.setLoadingSpeed);
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
@@ -785,15 +793,30 @@ function LoadingStylePicker() {
         <span className="text-[11px] text-ink font-body font-medium">加载动画</span>
         <span className="ml-auto text-[9px] text-ink-faint font-body">AI 思考时的指示样式</span>
       </div>
-      <div className="grid grid-cols-4 gap-1.5 max-h-[220px] overflow-y-auto pr-0.5">
+      <div role="radiogroup" aria-label="加载动画样式" className="grid grid-cols-4 gap-1.5 max-h-[220px] overflow-y-auto pr-0.5">
         {LOADING_OPTIONS.map((opt) => {
           const active = loadingStyle === opt.id;
           return (
             <button key={opt.id} onClick={() => setLoadingStyle(opt.id)} title={opt.label}
+              role="radio" aria-checked={active ? 'true' : 'false'} data-loading-option={opt.id}
               className={`flex flex-col items-center gap-1 px-1 py-2 rounded-lg border transition-all hover:bg-canvas-warm ${active ? 'border-accent ring-1 ring-accent/40 bg-accent/8' : 'border-canvas-deep'}`}>
-              <span className="h-6 flex items-center justify-center"><LoadingMark size={20} variant={opt.id} /></span>
+              <span className="h-6 flex items-center justify-center text-accent"><LoadingMark size={20} variant={opt.id} /></span>
               <span className="text-[8.5px] text-ink-faint font-body leading-none truncate max-w-full">{opt.label}</span>
             </button>
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-2 pt-1">
+        <span className="text-[11px] text-ink font-body font-medium">转速</span>
+        <span className="ml-auto text-[9px] text-ink-faint font-body">三体旋转、四体旋转的速度</span>
+      </div>
+      <div role="radiogroup" aria-label="加载动画转速" className="grid grid-cols-3 gap-1.5">
+        {LOADING_SPEED_OPTIONS.map((opt) => {
+          const active = loadingSpeed === opt.id;
+          return (
+            <button key={opt.id} onClick={() => setLoadingSpeed(opt.id)}
+              role="radio" aria-checked={active ? 'true' : 'false'} data-loading-speed={opt.id}
+              className={`px-1 py-1.5 rounded-lg border text-[11px] font-body transition-all hover:bg-canvas-warm ${active ? 'border-accent ring-1 ring-accent/40 bg-accent/8 text-ink' : 'border-canvas-deep text-ink-muted'}`}>{opt.label}</button>
           );
         })}
       </div>
@@ -2612,9 +2635,11 @@ function HomeState({ tabIndex = 0 }) {
 // frames every ~100ms, paired with a verb that changes every ~3s.
 
 // Loading 动画样式库(选项 id 对应 index.css 的 .loading-<id>,移植自 clawd-station)。
-// 'cli' = 原 ASCII spinner,保持默认外观不变。主题弹窗里选,存 store.loadingStyle。
+// orbit3 / orbit4 = 三体 / 四体旋转(JS 驱动,见 utils/orbitTicker.js;没选过的人默认 orbit3);
+// 'cli' = 原 ASCII spinner。主题弹窗里选,存 store.loadingStyle。
 export const LOADING_OPTIONS = [
-  { id: 'cli', label: 'CLI(默认)' },
+  { id: 'orbit3', label: '三体旋转' }, { id: 'orbit4', label: '四体旋转' },
+  { id: 'cli', label: 'CLI ✻' },
   { id: 'ring', label: 'Ring' }, { id: 'ring-dual', label: 'Dual Ring' },
   { id: 'ring-dash', label: 'Dash Ring' }, { id: 'ring-thin', label: 'Thin Ring' },
   { id: 'ring-bold', label: 'Bold Ring' }, { id: 'ring-reverse', label: 'Reverse' },
