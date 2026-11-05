@@ -6,7 +6,7 @@ import { test, expect } from '@playwright/test';
 import { SESSIONS, TITLE_ROWS, TOOL_ROWS, ERROR_ROWS, MISC, HIST_ROWS, LONG_TITLE } from './helpers/fixtures.mjs';
 import {
   primeOverlays, openApp, openSessionByMarker, newSessionInFixtureProject, turnRows, stripSnapshot, stripRootOf,
-  headOf, headParts, expectTail, parseElapsed, cpHead, elapsedText, collectPageErrors, sendMessage, sendInOpenSession,
+  headOf, headParts, expectTail, parseElapsed, cpHead, collectPageErrors, sendMessage, sendInOpenSession,
   waitRoundIdle, writeScenario, releaseRound, touchCtl, resetCtl, scrollBox,
 } from './helpers/runtime.mjs';
 
@@ -136,14 +136,17 @@ test('B7 历史回合：点击折叠条展开再收起 → aria-expanded 与各�
   expect(closed.headText, '收起后折叠条文案与展开前完全相同').toBe(before.headText);
 });
 
-/** 全页范围内：4 点动画 / 用时 / 直播标记各有几个（历史回合应一个都没有）。 */
+/** 全页范围内：头行 4 点动画 / 用时（r154 R3 起头行不再有，恒为 0）、直播标记、底部状态行各有几个（历史回合应一个都没有）。 */
 const liveMarks = async (scope) => ({
   dots: await scope.locator('[data-strip-dots]').count(),
   elapsed: await scope.locator('[data-strip-elapsed]').count(),
   live: await scope.locator('[data-strip-live]').count(),
+  line: await scope.locator('[data-live-line]').count(),
 });
 
-test('B8 直播回合：折叠条带直播标记 + 4 点动画 + 每秒增加的用时，结束后消失；同页历史回合从头到尾没有', async ({ page }) => {
+// r154 R3 换锚：点阵动画与用时从折叠条头行挪到了页面底部的状态行 [data-live-line]（[data-live-elapsed]）；
+// 本条守护的意图不变——直播标记只属于正在生成的这一轮、用时每秒走、结束后全部消失、历史回合没有——只是判据换到新位置。
+test('B8 直播回合：折叠条带直播标记，头行没有 4 点动画与用时（r154 R3 起挪到底部状态行），状态行的用时每秒增加；结束后直播标记与状态行消失；同页历史回合从头到尾没有', async ({ page }) => {
   const LIVE = 'R152A-B8 直播正文。';
   writeScenario({
     events: [
@@ -156,32 +159,35 @@ test('B8 直播回合：折叠条带直播标记 + 4 点动画 + 每秒增加的
   await openApp(page);
   await openSessionByMarker(page, SESSIONS.h.marker);
   await expect(turnRows(page)).toHaveCount(HIST_ROWS.length, { timeout: 20_000 });
-  expect(await liveMarks(page.locator('body')), '发消息之前：历史回合没有任何直播标记').toEqual({ dots: 0, elapsed: 0, live: 0 });
+  expect(await liveMarks(page.locator('body')), '发消息之前：历史回合没有任何直播标记，也没有底部状态行').toEqual({ dots: 0, elapsed: 0, live: 0, line: 0 });
 
   await sendInOpenSession(page, 'B8 跑一轮');
   const root = stripRootOf(page, LIVE);
   await expect(root, '正在生成的回合应画出折叠条').toHaveCount(1, { timeout: 40_000 });
   const head = headOf(root);
   await expect(head, '生成中折叠条带 data-strip-live="true"').toHaveAttribute('data-strip-live', 'true');
-  await expect(head.locator('[data-strip-dots]'), '折叠条里恰有 1 个 4 点动画').toHaveCount(1);
-  expect(await head.locator('[data-strip-dots] > *').count(), '4 点动画含 4 个子元素').toBe(4);
-  await expect(head.locator('[data-strip-elapsed]'), '折叠条里恰有 1 个用时').toHaveCount(1);
-  const t0 = await elapsedText(head);
-  expect(t0, '用时文字形如 12s 或 2m 22s').toMatch(/^(\d+m )?\d+s$/);
+  await expect(head.locator('[data-strip-dots]'), 'r154 起折叠条头行里不再有 4 点动画').toHaveCount(0);
+  await expect(head.locator('[data-strip-elapsed]'), 'r154 起折叠条头行里不再有用时').toHaveCount(0);
+  const lineElapsed = page.locator('[data-live-line] [data-live-elapsed]');
+  await expect(page.locator('[data-live-line]'), '整页恰有 1 个底部状态行').toHaveCount(1);
+  const readLineElapsed = async () => ((await lineElapsed.first().textContent()) || '').trim();
+  const t0 = await readLineElapsed();
+  expect(t0, '状态行用时文字形如 12s 或 2m 22s').toMatch(/^(\d+m )?\d+s$/);
   const s0 = parseElapsed(t0);
-  await expect.poll(async () => parseElapsed(await elapsedText(head)), { timeout: 10_000, message: `用时应每秒增加（起点 ${t0}）` })
+  await expect.poll(async () => parseElapsed(await readLineElapsed()), { timeout: 10_000, message: `状态行用时应每秒增加（起点 ${t0}）` })
     .toBeGreaterThan(s0);
-  expect(await liveMarks(page.locator('body')), '整页只有正在生成的这一条带直播标记').toEqual({ dots: 1, elapsed: 1, live: 1 });
+  expect(await liveMarks(page.locator('body')), '整页只有正在生成的这一条带直播标记；头行无点阵与用时；底部状态行恰 1 个')
+    .toEqual({ dots: 0, elapsed: 0, live: 1, line: 1 });
   for (const h of HIST_ROWS) {
     const histRow = turnRows(page).filter({ hasText: h.anchor }).first();
-    expect(await liveMarks(histRow), `生成中：历史回合 ${h.key} 不得有 4 点动画 / 用时 / 直播标记`).toEqual({ dots: 0, elapsed: 0, live: 0 });
+    expect(await liveMarks(histRow), `生成中：历史回合 ${h.key} 不得有 4 点动画 / 用时 / 直播标记 / 状态行`).toEqual({ dots: 0, elapsed: 0, live: 0, line: 0 });
   }
 
   releaseRound();
   await waitRoundIdle(page);
   await expectTail(headOf(stripRootOf(page, LIVE)), 'B8 直播工具标题', '回合结束后：末尾是最后一个工具的标题');
-  await expect.poll(async () => await liveMarks(page.locator('body')), { timeout: 15_000, message: '回合结束后：4 点动画、用时、直播标记全部消失' })
-    .toEqual({ dots: 0, elapsed: 0, live: 0 });
+  await expect.poll(async () => await liveMarks(page.locator('body')), { timeout: 15_000, message: '回合结束后：直播标记与底部状态行全部消失（头行本来就没有点阵与用时）' })
+    .toEqual({ dots: 0, elapsed: 0, live: 0, line: 0 });
 });
 
 test('B9 直播回合：最新工具 = 最后一个还没结果的；都有结果取最后一个（甲有结果乙在跑→乙；乙回结果→乙；丙在跑→丙；丁已回→仍丙；丙回→丁）', async ({ page }) => {
