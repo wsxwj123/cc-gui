@@ -22,7 +22,7 @@
 
 ## 授权模型（按应用 + 主屏范围）
 
-> **当前授权入口**：图形界面尚未提供授权面板（卡片上只有安装/卸载/环境自检），按应用与主屏截图授权只能用下面的 HTTP 接口 `POST /api/computer-use/grants` 完成。下面的「面板勾选」一律指**设计意图**，界面上还没有这个入口。
+> **授权入口**：工具（MCP）面板 → 「桌面操控(computer use)」卡片里的「应用授权」区块。按应用授权在这里逐个点「授权」（或手填 bundleId）；「允许主屏全部可见内容」在同一区块单独开启，开启前会弹确认框。授权类写入需要面板持有的确认凭证，所以只能在面板里做；命令行只能**撤销**（见下）。
 
 | 授权 | 作用 | 未授权的后果 |
 |---|---|---|
@@ -32,20 +32,35 @@
 按应用授权**不隐含**全屏授权；授权只覆盖普通桌面访问，不涉及锁屏、安装或其他应用。
 
 ```sh
-# 授权的 HTTP 面(当前唯一入口:图形界面尚未提供授权面板;curl 手工完成即可)
+# 只读查询
 curl -s localhost:6677/api/computer-use/status          # 能力/锁屏状态/运行时
 curl -s -X POST localhost:6677/api/computer-use/doctor -d '{}'   # 屏幕读取/辅助功能/运行时/各应用授权
 curl -s localhost:6677/api/computer-use/grants          # 当前授权
+# 撤销(不需要凭证,立即生效;新增授权与开启主屏范围请在面板里做)
 curl -s -X POST localhost:6677/api/computer-use/grants \
-  -H 'content-type: application/json' \
-  -d '{"bundleId":"com.apple.TextEdit","name":"文本编辑","granted":true}'   # 启用
+  -H 'content-type: application/json' -d '{"bundleId":"com.apple.TextEdit","granted":false}'  # 撤销某个应用(立即生效)
 curl -s -X POST localhost:6677/api/computer-use/grants \
-  -H 'content-type: application/json' -d '{"bundleId":"com.apple.TextEdit","granted":false}'  # 撤销(立即生效)
-curl -s -X POST localhost:6677/api/computer-use/grants \
-  -H 'content-type: application/json' -d '{"screenScope":true}'  # 允许主屏全部可见内容(false 即撤销)
+  -H 'content-type: application/json' -d '{"screenScope":false}'  # 撤销主屏全部可见内容(立即生效)
 ```
 
+命令行发的新增授权（`granted` 不为 `false` 的应用、`screenScope:true`）会被拒：403 `CU_GRANT_FORBIDDEN`，授权表不变；一个请求里同时带撤销和新增时整体拒绝，撤销部分也不生效。撤销方向不设门槛，出问题时可以随时从命令行撤权。
+
 授权落在 `~/.claude-gui/cu-runtime/grants.json`（GUI 后端与 MCP 进程共用同一份；文件按登录用户家目录解析，`$HOME` 不同的启动方式不会各读各的）。**恢复/吊销一次`GET status`就会反映**；MCP 每次动作前重读，所以撤销对正在跑的会话立即生效，已投递动作报 unknown。
+
+## 禁止操控名单
+
+下面四类应用**无论是否授权都不能被操控**：面板与接口拒绝授权（403 `CU_APP_FORBIDDEN`）；授权文件里即使有它们，动作也被拒（`CU_APP_NOT_ALLOWED`，`detail` 说明属于禁止类别）、`window_list` 也不列它们的窗口，`GET /grants` 与 `doctor` 的应用列表不含它们。匹配不区分大小写。
+
+| 类别 | 示例（macOS bundleId） | 为什么 |
+|---|---|---|
+| 终端类 | `com.apple.Terminal`、`com.googlecode.iterm2`、Warp、Ghostty、Alacritty、kitty、WezTerm 等 | 操控终端等于执行任意命令 |
+| CC-GUI 自身 | `com.claudegui.desktop` 及以 `com.claudegui.desktop.` 开头的变体 | 可以借面板批准权限、改授权、开内置终端 |
+| 系统设置与脚本自动化工具 | `com.apple.systempreferences`、`com.apple.ScriptEditor2`、Automator、快捷指令 | 可以改系统权限或运行脚本 |
+| 钥匙串与密码管理器 | `com.apple.keychainaccess`、密码 App、`com.1password.1password`、Bitwarden、KeePassXC 等 | 直接暴露凭证 |
+
+- 这是**已知高危的下限,不是边界,名单不穷举**：不在名单里的应用不代表安全（见「已知边界」里的残余风险）。
+- 旧版授权过这些应用的，本版起不再生效；服务启动时会从授权表里移除这些条目，并在服务日志里记一行。
+- Windows 上按 exe 文件名匹配同样四类（未在 Windows 真机验证）。
 
 ## 工具清单（模型可见）
 
@@ -106,6 +121,11 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 | 锁屏（R19） | 需要已验证的授权组件接口，当前无公开可复用入口 | `status.lockscreen.state` 只会是 `disabled`/`unverified`，不代表已支持 |
 | 停止操控 / 用户接管 | 需要图形界面的入口，尚未提供 | 契约里的 `CU_INTERRUPTED` 路径暂不可达，`actionId` 登记表可查历史 |
 | 执行中撤权 | 界面上按动作粒度取消是设计意图，该入口尚未提供 | 撤销后**下一个**动作立即 `CU_APP_NOT_ALLOWED`；已投递动作不回滚 |
+| 已授权的浏览器里能再开 CC-GUI 网页版 | 浏览器能打开本机的 CC-GUI 页面，网页版自带面板、权限批准按钮和内置终端；浏览器又是最常被授权的一类 | 残余风险，不在禁止名单的防线内；授权浏览器前请知悉 |
+| IDE 带集成终端 | VS Code、JetBrains、Xcode 等有合法的自动化场景，没有硬拒绝 | 残余风险；授权 IDE 等于让模型能碰到它的终端 |
+| 启动器 / 文件管理器能间接起终端 | Finder、Spotlight、Explorer 可以打开 `.command` 文件或输入 `cmd` 启动终端 | 残余风险；名单只拦对终端本身的操控 |
+| 开主屏范围后全屏截图会拍到终端 / 密码管理器窗口 | 主屏截图按屏幕取像素，不按应用排除窗口 | 只读不操控，但内容会进入模型上下文；不需要时关闭「允许主屏全部可见内容」 |
+| 直接改授权文件、连后台的同用户进程不在防线内 | 授权文件与后台连接对同一登录用户的进程都可达；面板凭证只挡不知道凭证的盲写（旧文档里的 curl、网页跨站请求） | 禁止名单在读取侧仍生效：文件被改，名单内的应用照样被拒；名单外的应用无法防 |
 | Windows 后台覆盖不到 Chromium/Electron 的一部分界面 | 渲染器默认不打 accessibility 树；UIA 客户端接入会触发按需开启但**有延迟** | `capabilities.backgroundClick/Type.coverage='partial'`；首次可能失败，**重试一次**通常就好；`--force-renderer-accessibility=off` 或企业策略禁用时拿不到 |
 | Windows 后台覆盖不到 Java/自绘界面/安全桌面 | 没有元素树（Java 需 Java Access Bridge；UAC/锁屏是独立桌面） | 明确报 `CU_BACKGROUND_UNSUPPORTED`，**不会**偷偷改成全局点击 |
 | Windows 上没有 `comtypes`（装不上/`comtypes.gen` 不可写） | UIA 接口靠它运行时生成 | 自动降级：点击/输入仍可用，但只走消息投递（`coverage='narrow'`、`inputMode='background-message-only'`）；自检里 `uia` 一项会报不可用 |
@@ -122,8 +142,9 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `claude mcp list` 显示 Failed to connect，或卡片提示「已注册的 node 路径不存在」 | 注册的 node 路径失效（升级 node 并清理旧版后，带版本号的路径就没了） | 面板卸载→重装。0.2.433 起(仅 macOS / Linux),后端的 node 在带版本号的目录里（如 Homebrew 的 Cellar）、而 PATH 上的 `node` 指向同一个文件时，安装改注册 PATH 上不带版本号的路径（如 `/opt/homebrew/bin/node`），之后升级 node 不再失效；nvm 这类只有带版本号路径的安装仍注册版本路径，卸载该版本后要重装。Windows 仍注册当前 node 的实际路径(nvm-windows 卸载该版本后同样要重装) |
-| 截图报 `CU_SCREEN_SCOPE_REQUIRED` | 没有授权主屏全部可见内容 | `POST /api/computer-use/grants {"screenScope":true}`（当前只能走接口，图形界面没有该入口），这是独立于按应用授权的边界 |
-| window_list 空 / 动作报 `CU_APP_NOT_ALLOWED` | 目标应用没授权 | `POST /api/computer-use/grants {"bundleId":"…","granted":true}`（当前只能走接口，图形界面没有该入口） |
+| 截图报 `CU_SCREEN_SCOPE_REQUIRED` | 没有授权主屏全部可见内容 | 在面板「应用授权」区块里开启「允许主屏全部可见内容」，这是独立于按应用授权的边界 |
+| window_list 空 / 动作报 `CU_APP_NOT_ALLOWED` | 目标应用没授权，或属于禁止操控的类别 | 在面板「应用授权」区块里授权该应用；`detail` 说明属于禁止类别时无法授权（见「禁止操控名单」） |
+| 面板里点授权提示「尚未连上后台」或要求刷新页面 / 重启应用 | 面板还没拿到确认凭证（刚打开、后台刚重启） | 稍等几秒重试；仍不行就刷新页面或重启应用 |
 | 动作报 `CU_STALE_SNAPSHOT` | 截图被更新覆盖/来自别的会话 | 重新 `screenshot` 再操作 |
 | 点击无反应 | 无辅助功能权限，或该 App 不吃后台事件 | 自检看 accessibility；确有必要再 `foreground:true`（会打断用户） |
 | 工具报 `CU_SCREENSHOT_REQUIRED` | 坐标工具前没截图 | 先 screenshot |
