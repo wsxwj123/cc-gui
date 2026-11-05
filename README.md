@@ -287,6 +287,25 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.445</b>(2026-11-05)· 优化 2 条</summary>
+
+**优化**
+
+<details><summary>界面里的「项目」统一改称「工作区」</summary>
+
+侧栏标题、搜索框提示、添加与操作按钮、空状态、各处提示和设置项里原来写「项目」的地方，现在都写「工作区」。只改了显示的文字，功能、操作方式、快捷键和已有数据都不变。
+
+</details>
+
+<details><summary>升级内置的 Claude Agent SDK(0.3.306 → 0.3.318)</summary>
+
+应用与 Claude 命令行通信的组件更新到最新版，现有功能的行为不变。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.444</b>(2026-11-04)· 优化 2 条</summary>
 
 **优化**
