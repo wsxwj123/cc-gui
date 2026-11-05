@@ -6,6 +6,7 @@ import { dropStreamSnapshot } from '../utils/reattach.js';
 import { sessionWhitelistAllows } from '../utils/sessionAllow.js';
 import { getSkinState, deactivateSkin } from '../utils/skins.js';
 import { handleXsWsEvent } from '../utils/xsession.js';
+import { setCuGrantToken } from '../utils/cuGrantToken.js';
 
 // G3:危险命令启发式 —— 删除类 + 网络/装包 + sudo。命中即强制弹窗,不被任何自动放行豁免。
 // 【权威判定在服务端 server/routes/chat.js 的 DANGEROUS_BASH】(canUseTool 内强拦,
@@ -282,6 +283,10 @@ export function useWebSocket() {
               break;
             case 'permission:resolved':
               useStore.getState().removePendingPermission(data.id);
+              break;
+            case 'cu:grant-token':
+              // r154:电脑操控面板凭证(连接建立时对本连接单发一次;重连收到新值直接覆盖)。只放内存。
+              setCuGrantToken(data.token);
               break;
             case 'custom-titles':
               // Another device renamed a session. Adopt the server's full map

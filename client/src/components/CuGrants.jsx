@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
+import { getCuGrantToken } from '../utils/cuGrantToken.js';
 
 // computer use「按应用授权」区块(INTERFACE §D)。挂在 MCPPanel 的桌面操控卡里,
 // 仅当 MCP 已注册时渲染。
@@ -33,6 +34,9 @@ const SCOPE_DESC = '开启后模型可截取整块屏幕的画面（含未授权
 const SCOPE_CONFIRM = '开启「允许主屏全部可见内容」后，模型可以截取整块屏幕的画面（包括未授权应用里显示的内容），也可以按屏幕坐标定位。这是独立于按应用授权的更高权限，随时可以关闭。';
 // 授权对下一个 MCP 动作立即生效,但模型上下文里可能已有一条"未授权"的结论 —— 提示人让它重试,不自动往会话注入任何东西。
 const HINT_RETRY = '授权已更新。模型若刚刚得到「未授权」的结论，请让它重试一次；授权对下一个动作立即生效。';
+// r154:授权类写入需要 WS 下发的面板凭证;凭证未到(WS 尚未连上)时不发请求。
+const NOT_CONNECTED = '尚未连上后台，请稍后重试。';
+const HINT_TOKEN_STALE = '如果你正在面板里操作仍看到本提示，请刷新页面或重启应用。';
 
 // ── 文案按"应用身份"切(§4.3)──────────────────────────────────────────
 // macOS 的应用身份是 bundleId(com.apple.TextEdit),Windows 是 exe 绝对路径(C:\…\notepad.exe)。
@@ -103,14 +107,28 @@ export function CuGrants({ runtimeReady, appIdKind = 'bundleId' }) {
 
   const postGrant = async (payload, scope) => {
     if (writing) return false;
+    // r154:正向意图(授权应用 / 开启主屏范围)服务端要求面板凭证;纯撤销不需要,取不到凭证也照常发
+    // (撤销方向永远安全,且保留出事时的撤权路径)。
+    const token = getCuGrantToken();
+    const positive = (payload.bundleId && payload.granted !== false) || payload.screenScope === true;
+    if (positive && !token) {
+      setRowErr({ scope, message: NOT_CONNECTED }); setHint('');
+      return false; // 不发请求:没有凭证必然 403,发了也只是多一次失败
+    }
     setWriting(scope); setRowErr(null); setHint('');
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['X-CGUI-Grant-Token'] = token;
       const r = await fetch('/api/computer-use/grants', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers,
         body: JSON.stringify(payload),
       });
       const d = await r.json().catch(() => null);
-      if (!r.ok || !d || d.ok === false) throw new Error(d?.error || `HTTP ${r.status}`);
+      if (!r.ok || !d || d.ok === false) {
+        const msg = d?.error || `HTTP ${r.status}`;
+        // 面板持有的凭证与服务端不一致(多半是服务重启而页面没重连上):提示刷新/重启
+        throw new Error(d?.code === 'CU_GRANT_FORBIDDEN' ? `${msg}${HINT_TOKEN_STALE}` : msg);
+      }
       setGrants({ screenScope: d.screenScope, apps: Array.isArray(d.apps) ? d.apps : [] });
       if (payload.granted === true || payload.screenScope === true) setHint(HINT_RETRY);
       return true;
