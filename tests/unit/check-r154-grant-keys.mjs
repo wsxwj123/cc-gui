@@ -7,6 +7,7 @@
 //   K3 手写进 grants.json 的脏键:__proto__ 不换原型、保留名 / 含逗号的键被丢弃、前导空格被规范化、name 被截断。
 //   K4 setGrant 写入超长 name 后文件里 name ≤ 200。
 //   K5 effectiveGrants(readGrants()) 不改变 apps 的原型。
+//   K6 safeLogString:输出无裸换行 / 行分隔符、长度有界。
 //
 // 做法:全部在子进程里跑,子进程用 q8-helpers/cu-preload.mjs 把家目录指到临时目录,第一次写盘前先自检
 // 授权文件落在假家目录,否则立即退出;不起端口,绝不碰真 ~/.claude-gui。
@@ -83,6 +84,15 @@ out.effProtoOk = Object.getPrototypeOf(eff.apps) === Object.prototype && Object.
 cu.setGrant({ bundleId: 'com.apple.TextEdit', name: 'T'.repeat(5000) }, { panelCredential: true });
 const file = JSON.parse(fs.readFileSync(cu.GRANTS_FILE, 'utf8'));
 out.writtenNameLen = file.apps['com.apple.TextEdit'] ? file.apps['com.apple.TextEdit'].name.length : -1;
+
+// K6:safeLogString(行分隔符用 fromCharCode 构造,源码里不放真实字符)
+const LS = String.fromCharCode(0x2028), PS = String.fromCharCode(0x2029);
+const bare = new RegExp('[\\\\n\\\\r' + LS + PS + ']');
+out.safeLog = ['a\\nb\\rc' + LS + 'd' + PS + 'e', (LS + PS + '\\n').repeat(100), 'x'.repeat(1024 * 1024)].map((s) => {
+  const v = cu.safeLogString(s);
+  return { bare: bare.test(v), len: v.length };
+});
+out.safeLogRoundTrip = JSON.parse(cu.safeLogString('q' + LS + 'w' + PS)) === 'q' + LS + 'w' + PS;
 process.stdout.write(JSON.stringify(out));
 `;
 
@@ -121,6 +131,16 @@ await report.check('K4', 'setGrant 写入 5000 字符的 name 后,文件里 name
 await report.check('K5', 'effectiveGrants(readGrants()) 不改变 apps 的原型', 'green', () => {
   ready();
   assert.equal(out.effProtoOk, true);
+});
+
+await report.check('K6', 'safeLogString:含 \\n \\r U+2028 U+2029 与 1MB 的输入,输出无裸行分隔符、长度有界、可原样还原', 'red', () => {
+  ready();
+  assert.equal(out.safeLog.length, 3);
+  for (const [i, c] of out.safeLog.entries()) {
+    assert.equal(c.bare, false, `第 ${i} 个输入的输出含裸换行 / 行分隔符`);
+    assert.ok(c.len <= 200 * 6 + 2, `第 ${i} 个输入的输出长 ${c.len}`);
+  }
+  assert.equal(out.safeLogRoundTrip, true, '转义后 JSON.parse 不能还原原文');
 });
 
 process.exit(report.finish());

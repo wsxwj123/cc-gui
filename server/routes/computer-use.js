@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import {
   GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, VENV_PY, capabilityReport, depsStampFor, effectiveAppEntries,
   effectiveGrants, ensureRuntime, findPython3, inputModeFor, normalizeAppId, normalizeAppIdForGrant,
-  pyDepsFor, readGrants, readUiaCapability, runtimeReady, screenScopeGranted, setGrant, writeStampFile,
+  pyDepsFor, readGrants, readUiaCapability, runtimeReady, safeLogString, screenScopeGranted, setGrant, writeStampFile,
   writeUiaCapability,
 } from '../computer-use/cu-common.js';
 import { grantTokenMatches } from '../computer-use/grant-token.js';
@@ -369,9 +369,7 @@ router.get('/computer-use/grants', (req, res) => {
  */
 function auditValue(value) {
   if (value === undefined || value === null) return '-';
-  if (typeof value === 'string') {
-    return JSON.stringify(value.slice(0, 200)).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
-  }
+  if (typeof value === 'string') return safeLogString(value);
   if (typeof value === 'boolean' || typeof value === 'number') return String(value);
   if (Array.isArray(value)) return '[array]';
   return `[${typeof value}]`;

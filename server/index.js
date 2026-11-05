@@ -22,7 +22,7 @@ import mcpRoutes from './routes/mcp.js';
 import terminalRoutes, { handleTerminalMessage, handleTerminalClose, handleTerminalInvalidJson } from './routes/terminal.js';
 import computerUseRoutes from './routes/computer-use.js';
 import { getGrantToken } from './computer-use/grant-token.js';
-import { pruneForbiddenGrants } from './computer-use/cu-common.js';
+import { pruneForbiddenGrants, safeLogString } from './computer-use/cu-common.js';
 import forkRoutes from './routes/fork.js';
 import fileChangesRoutes from './routes/file-changes.js';
 import searchRoutes from './routes/search.js';
@@ -1117,7 +1117,7 @@ async function relisten(newHost) {
 try {
   const removedGrants = pruneForbiddenGrants();
   if (removedGrants.length) {
-    console.warn('[cu-grants] 启动清理:已从授权表移除禁止操控类别的应用 %s', removedGrants.map((id) => JSON.stringify(String(id).slice(0, 200))).join(', '));
+    console.warn('[cu-grants] 启动清理:已从授权表移除禁止操控类别的应用 %s', removedGrants.map((id) => safeLogString(id)).join(', '));
   }
 } catch (e) { console.error('[cu-grants] 启动清理失败(已忽略):', e?.message || e); }
 

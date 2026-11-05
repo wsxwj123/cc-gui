@@ -405,6 +405,18 @@ function normalizeGrants(raw) {
 
 export const APP_NAME_MAX_LENGTH = 200;
 
+// 行 / 段分隔符(U+2028 / U+2029)用 fromCharCode 构造,源码里不出现这两个字符本身。
+const LINE_SEPARATORS = new RegExp(`[${String.fromCharCode(0x2028, 0x2029)}]`, 'g');
+
+/**
+ * 字符串进日志前的统一处理:截断到 200 字符 + JSON 转义(换行 / 控制符不能拆出伪造的日志行、防灌日志)。
+ * JSON.stringify 不转义 U+2028 / U+2029,这里补上,保证整行不被行分隔符拆开。返回带引号的 JSON 字符串。
+ */
+export function safeLogString(value) {
+  return JSON.stringify(String(value).slice(0, 200))
+    .replace(LINE_SEPARATORS, (c) => `\\u${c.charCodeAt(0).toString(16)}`);
+}
+
 /** 授权条目的显示名:字符串截到上限(不留半个代理对),非字符串回退成 id。 */
 function grantName(name, fallbackId) {
   const text = typeof name === 'string' ? name : fallbackId;
