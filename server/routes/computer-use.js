@@ -6,10 +6,12 @@ import { homedir } from 'os';
 import { join, dirname, isAbsolute, delimiter, sep } from 'path';
 import { fileURLToPath } from 'url';
 import {
-  GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, VENV_PY, capabilityReport, depsStampFor, ensureRuntime,
-  findPython3, inputModeFor, normalizeAppId, pyDepsFor, readGrants, readUiaCapability, runtimeReady,
-  screenScopeGranted, setGrant, writeStampFile, writeUiaCapability,
+  GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, VENV_PY, capabilityReport, depsStampFor, effectiveAppEntries,
+  effectiveGrants, ensureRuntime, findPython3, inputModeFor, normalizeAppId, normalizeAppIdForGrant,
+  pyDepsFor, readGrants, readUiaCapability, runtimeReady, screenScopeGranted, setGrant, writeStampFile,
+  writeUiaCapability,
 } from '../computer-use/cu-common.js';
+import { grantTokenMatches } from '../computer-use/grant-token.js';
 
 // computer use(cc-gui 桌面操控)的 GUI 侧管理端点。
 // 安装/卸载/开关本体不在这里:注册走通用 POST/DELETE /api/mcp(claude mcp add -s user,
@@ -252,8 +254,8 @@ router.post('/computer-use/prepare', async (req, res) => {
 });
 
 router.post('/computer-use/doctor', async (req, res) => {
-  const grants = readGrants();
-  const apps = Object.entries(grants.apps).map(([bundleId, entry]) => ({
+  const grants = effectiveGrants(readGrants());
+  const apps = effectiveAppEntries(grants).map(([bundleId, entry]) => ({
     bundleId, id: bundleId, name: entry.name || bundleId, granted: true, allowed: true,
     grantedAt: entry.grantedAt || null,
   }));
@@ -350,40 +352,75 @@ router.post('/computer-use/doctor', async (req, res) => {
 });
 
 router.get('/computer-use/grants', (req, res) => {
-  const grants = readGrants();
+  const grants = effectiveGrants(readGrants());
   res.json({
     screenScope: grants.screenScope,
-    apps: Object.entries(grants.apps).map(([bundleId, entry]) => ({
+    apps: effectiveAppEntries(grants).map(([bundleId, entry]) => ({
       bundleId, name: entry.name || bundleId, granted: true, grantedAt: entry.grantedAt || null,
     })),
     grantsPath: GRANTS_FILE,
   });
 });
 
+/** 审计日志里的 id:JSON 转义 + 截断,防换行 / 控制符伪造日志行。 */
+function auditId(value) {
+  if (value === undefined || value === null) return '-';
+  return JSON.stringify(String(value).slice(0, 200));
+}
+
+// r154:授权写入口。判定先后固定:参数校验(400,先于凭证;参数形状不是敏感信息)→ 凭证 → 禁止名单 → 写入,
+// 后三步在 setGrant 里一次完成(失败零副作用)。凭证只挡"盲打"(不知道凭证的本机脚本、照旧文档敲的 curl、
+// 网页 CSRF),不挡主动连 WS 的本机进程,威胁模型见 computer-use/grant-token.js。
+// 每次变更(成功与被拒)记一行审计日志,**不记凭证值**。
 router.post('/computer-use/grants', (req, res) => {
   const { bundleId, name, granted, screenScope } = req.body || {};
-  if (bundleId !== undefined && (typeof bundleId !== 'string' || bundleId.length === 0 || bundleId.length > 200)) {
-    return res.status(400).json({ ok: false, code: 'CU_INVALID_ARGUMENT', error: 'bundleId 必须是非空字符串。' });
+  const positive = (bundleId !== undefined && granted !== false) || screenScope === true;
+  const audit = (outcome, credential) => {
+    console.warn('[cu-grants] %s %s credential=%s bundleId=%s screenScope=%s', positive ? 'grant' : 'revoke',
+      outcome, credential ? 'yes' : 'no', auditId(bundleId), screenScope === undefined ? '-' : String(screenScope));
+  };
+  const invalid = (error) => {
+    audit('rejected:CU_INVALID_ARGUMENT', false);
+    return res.status(400).json({ ok: false, code: 'CU_INVALID_ARGUMENT', error });
+  };
+  let appId = null;
+  if (bundleId !== undefined) {
+    const checked = normalizeAppIdForGrant(bundleId);
+    if (!checked.ok) return invalid(checked.error);
+    appId = checked.id;
   }
-  if (granted !== undefined && typeof granted !== 'boolean') {
-    return res.status(400).json({ ok: false, code: 'CU_INVALID_ARGUMENT', error: 'granted 必须是布尔值。' });
+  if (granted !== undefined && typeof granted !== 'boolean') return invalid('granted 必须是布尔值。');
+  if (screenScope !== undefined && typeof screenScope !== 'boolean') return invalid('screenScope 必须是布尔值。');
+  if (bundleId === undefined && screenScope === undefined) return invalid('至少要给 bundleId 或 screenScope。');
+
+  // 只认单值字符串。Node 会把同名自定义头用 ", " 拼成一个字符串,拼出来的值不可能等于凭证;
+  // 数组 / 非字符串(防御其他适配层)一律当缺失。
+  const header = req.headers['x-cgui-grant-token'];
+  const credential = typeof header === 'string' && grantTokenMatches(header);
+  let next;
+  try {
+    next = setGrant({
+      bundleId: appId,
+      name: typeof name === 'string' ? name : null,
+      granted: granted !== false,
+      screenScope: screenScope === undefined ? null : screenScope,
+    }, { requireCredential: true, panelCredential: credential });
+  } catch (e) {
+    const code = e?.code;
+    if (code === 'CU_GRANT_FORBIDDEN' || code === 'CU_APP_FORBIDDEN') {
+      audit(`rejected:${code}`, credential);
+      return res.status(403).json({ ok: false, code, error: e.message });
+    }
+    if (code === 'CU_INVALID_ARGUMENT') return invalid(e.message);
+    audit('rejected:CU_WRITE_FAILED', credential);
+    console.error('[cu-grants] 写授权文件失败:', e?.message || e);
+    return res.status(500).json({ ok: false, code: 'CU_WRITE_FAILED', error: '写授权文件失败。' });
   }
-  if (screenScope !== undefined && typeof screenScope !== 'boolean') {
-    return res.status(400).json({ ok: false, code: 'CU_INVALID_ARGUMENT', error: 'screenScope 必须是布尔值。' });
-  }
-  if (bundleId === undefined && screenScope === undefined) {
-    return res.status(400).json({ ok: false, code: 'CU_INVALID_ARGUMENT', error: '至少要给 bundleId 或 screenScope。' });
-  }
-  const next = setGrant({
-    bundleId: bundleId || null,
-    name: typeof name === 'string' ? name : null,
-    granted: granted !== false,
-    screenScope: screenScope === undefined ? null : screenScope,
-  });
+  audit('ok', credential);
   res.json({
     ok: true,
     screenScope: next.screenScope,
-    apps: Object.entries(next.apps).map(([id, entry]) => ({
+    apps: effectiveAppEntries(next).map(([id, entry]) => ({
       bundleId: id, name: entry.name || id, granted: true, grantedAt: entry.grantedAt || null,
     })),
   });
@@ -393,7 +430,7 @@ router.post('/computer-use/grants', (req, res) => {
 // 失败与 doctor 同体例:HTTP 恒 200 + 稳定 code(报告,不是失败请求);绝不建 venv、不写文件(I4)。
 router.get('/computer-use/apps', async (req, res) => {
   // B5:请求开始时刻的一次读取。比较口径与 appGranted 一致(Windows 上 exe 路径大小写/分隔符归一化)
-  const grantedIds = new Set(Object.keys(readGrants().apps).map((id) => normalizeAppId(id)));
+  const grantedIds = new Set(effectiveAppEntries(readGrants()).map(([id]) => normalizeAppId(id)));
   const r = await runHelper(['apps']);
   const failure = helperFailure(r, ['apps']);
   if (failure) return res.json({ ok: false, ...failure, apps: [] });

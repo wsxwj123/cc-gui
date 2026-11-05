@@ -21,6 +21,8 @@ import promptTemplateRoutes from './routes/prompt-templates.js';
 import mcpRoutes from './routes/mcp.js';
 import terminalRoutes, { handleTerminalMessage, handleTerminalClose, handleTerminalInvalidJson } from './routes/terminal.js';
 import computerUseRoutes from './routes/computer-use.js';
+import { getGrantToken } from './computer-use/grant-token.js';
+import { pruneForbiddenGrants } from './computer-use/cu-common.js';
 import forkRoutes from './routes/fork.js';
 import fileChangesRoutes from './routes/file-changes.js';
 import searchRoutes from './routes/search.js';
@@ -944,6 +946,11 @@ wss.on('connection', (ws) => {
   clients.add(ws);
   ws.on('close', () => clients.delete(ws));
   ws.on('error', () => clients.delete(ws));
+  // r154:电脑操控授权的面板凭证,只对**该连接**单发一次(不广播)。握手阶段的 Host / Origin /
+  // 密码闸早于 connection 事件,被拒的客户端收不到。发送失败(连接已关)静默忽略。
+  try {
+    ws.send(JSON.stringify({ type: 'cu:grant-token', token: getGrantToken() }), () => {});
+  } catch { /* 连接已不可写:无其他副作用 */ }
   // 客户端应用层心跳:回 pong 供对端确认链路存活。Tailscale/手机网络的"半死连接"
   // 不触发 close 事件,客户端靠"发 ping 后收不到任何消息"判死并重连(useWebSocket)。
   ws.on('message', (buf) => {
@@ -1104,6 +1111,15 @@ async function relisten(newHost) {
     }
   } catch { /* tmpdir 不可读等,静默 */ }
 })();
+
+// r154:启动时一次性把授权表里属禁止类别的旧条目移除(读取时仍经 effectiveGrants 过滤,双保险)。
+// 放在 listen 之前:第一个请求到达时授权文件已是清理后的状态。失败只打日志,不影响服务。
+try {
+  const removedGrants = pruneForbiddenGrants();
+  if (removedGrants.length) {
+    console.warn('[cu-grants] 启动清理:已从授权表移除禁止操控类别的应用 %s', removedGrants.map((id) => JSON.stringify(String(id).slice(0, 200))).join(', '));
+  }
+} catch (e) { console.error('[cu-grants] 启动清理失败(已忽略):', e?.message || e); }
 
 server.listen(PORT, HOST, () => {
   // R20:官方价目目录装载磁盘缓存并在过期/首次时后台预热一次(应用关闭时不承诺定时更新)。

@@ -133,5 +133,21 @@ check('EG-1', 'effectiveGrants 去掉禁止类别、不改原对象;appGranted �
   assert.deepEqual(effectiveGrants(null).apps, {});
 });
 
+// T1(前半):授权表的唯一读取出口。除 cu-common.js 外,不许直接遍历 / 取键 `<x>.apps`——
+// 下一个新消费者不经 effectiveGrants / effectiveAppEntries 就过不了这条。
+// (T1 后半"全仓不再提 POST /api/computer-use/grants"依赖文档改写,由后续批次补。)
+check('T1-1', '源码扫描:computer-use 目录与路由里除 cu-common.js 外无 Object.keys/entries/values(<x>.apps)', () => {
+  const dir = join(ROOT, 'server', 'computer-use');
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.js') && f !== 'cu-common.js').map((f) => join(dir, f));
+  files.push(join(ROOT, 'server', 'routes', 'computer-use.js'));
+  const offenders = [];
+  for (const file of files) {
+    fs.readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+      if (/Object\.(keys|entries|values)\([^)]*\.apps\b/.test(line)) offenders.push(`${file}:${i + 1}`);
+    });
+  }
+  assert.deepEqual(offenders, [], `直接读授权表 .apps 的位置:${offenders.join(', ')}`);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
