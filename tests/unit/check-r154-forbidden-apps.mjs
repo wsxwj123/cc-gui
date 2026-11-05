@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import {
   FORBIDDEN_CATEGORIES, forbiddenAppReason, forbiddenCategoryLabels,
 } from '../../server/computer-use/forbidden-apps.js';
-import { normalizeAppIdForGrant } from '../../server/computer-use/cu-common.js';
+import { appGranted, effectiveGrants, normalizeAppIdForGrant } from '../../server/computer-use/cu-common.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 let passed = 0;
@@ -107,6 +107,30 @@ check('ID-2', 'normalizeAppIdForGrant:非法输入拒绝', () => {
     assert.equal(typeof r.error, 'string');
   }
   assert.equal(normalizeAppIdForGrant('a'.repeat(200), 'darwin').ok, true, '200 字符恰好允许');
+});
+
+check('EG-1', 'effectiveGrants 去掉禁止类别、不改原对象;appGranted 对禁止类别恒 false', () => {
+  const grants = {
+    version: 1, screenScope: { granted: true, grantedAt: 't' },
+    apps: {
+      'com.apple.Terminal': { name: 'Terminal', grantedAt: 't' },
+      'com.claudegui.desktop.ds': { name: 'DS', grantedAt: 't' },
+      'com.apple.TextEdit': { name: 'TextEdit', grantedAt: 't' },
+    },
+  };
+  const eff = effectiveGrants(grants, 'darwin');
+  assert.deepEqual(Object.keys(eff.apps), ['com.apple.TextEdit']);
+  assert.equal(eff.screenScope.granted, true);
+  assert.equal(Object.keys(grants.apps).length, 3, '原对象不变');
+  assert.equal(appGranted(grants, 'com.apple.Terminal', 'darwin'), false);
+  assert.equal(appGranted(grants, 'COM.APPLE.TERMINAL', 'darwin'), false);
+  assert.equal(appGranted(grants, 'com.claudegui.desktop.ds', 'darwin'), false);
+  assert.equal(appGranted(grants, 'com.apple.TextEdit', 'darwin'), true);
+  const win = { apps: { 'C:\\Windows\\System32\\cmd.exe': {}, 'C:\\Windows\\System32\\notepad.exe': {} } };
+  assert.deepEqual(Object.keys(effectiveGrants(win, 'win32').apps), ['C:\\Windows\\System32\\notepad.exe']);
+  assert.equal(appGranted(win, 'c:/windows/system32/CMD.exe', 'win32'), false);
+  assert.equal(appGranted(win, 'c:/windows/system32/notepad.exe', 'win32'), true);
+  assert.deepEqual(effectiveGrants(null).apps, {});
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -13,6 +13,7 @@ import { spawn, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { homedir, userInfo } from 'os';
 import { join } from 'path';
+import { forbiddenAppReason, forbiddenGrantMessage } from './forbidden-apps.js';
 
 export const RUNTIME_DIR = cuRuntimeDir();
 export const SHOT_DIR = join(RUNTIME_DIR, 'shots');
@@ -235,7 +236,8 @@ export function writeUiaCapability({ uia, comtypes = null } = {}) {
 // ── 能力状态(合同第 9 段:不得含糊) ────────────────────────────────────
 // available / unsupported / unverified + reason(非 available 必须给 reason)。
 // 锁屏路径当前没有已验证的授权组件接口,只能 disabled/unverified。
-const SCREEN_SCOPE_REASON = '需要单独授权「允许主屏全部可见内容」后才允许主屏截图;当前只能通过 POST /api/computer-use/grants 设置 screenScope:true,图形界面尚未提供该入口';
+// 不教接口(r154):旧文案写着授权接口,模型读到会自己去调接口给自己授权。
+const SCREEN_SCOPE_REASON = '需要用户在 CC-GUI 的「桌面操控」面板里单独开启「允许主屏全部可见内容」后才允许主屏截图';
 const LOCKSCREEN_REASON = '锁屏持续/遮蔽显示器需要已验证的授权组件,当前无公开可复用接口;未证明前不声明可用';
 const SCREENSHOT_TARGET_REASON = '按应用/窗口截图尚未在真机验证;能力未证明前不返回前台其他应用的画面顶替';
 const LOCKSCREEN_DISABLED = {
@@ -399,8 +401,54 @@ export function writeGrants(next) {
   return readGrants();
 }
 
-/** 单次授权变更。bundleId=null 表示只改全屏范围。granted=false 即撤销。 */
-export function setGrant({ bundleId = null, name = null, granted = true, screenScope = null } = {}) {
+/**
+ * 有效授权:授权表去掉禁止类别后的副本。**授权表的唯一读取出口**——所有列表类消费者
+ * (window_list / cursor_position / doctor、路由 GET/POST /grants、POST /doctor)只经它读,
+ * 否则一处漏过滤就等于没有底线(tests/unit/check-r154-* 有源码扫描守着)。
+ */
+export function effectiveGrants(grants, platformName = process.platform) {
+  const out = { version: 1, screenScope: { granted: false, grantedAt: null }, apps: {} };
+  if (!grants || typeof grants !== 'object') return out;
+  if (grants.screenScope) out.screenScope = { ...grants.screenScope };
+  for (const [id, entry] of Object.entries(grants.apps || {})) {
+    if (!forbiddenAppReason(id, platformName)) out.apps[id] = { ...entry };
+  }
+  return out;
+}
+
+function grantError(code, message, extra = {}) {
+  return Object.assign(new Error(message), { code, ...extra });
+}
+
+export const GRANT_FORBIDDEN_MESSAGE = '新增授权需要来自 CC-GUI「桌面操控」面板的确认凭证。请让用户在面板里操作。';
+
+/**
+ * 单次授权变更。bundleId=null 表示只改全屏范围。granted=false 即撤销。
+ *
+ * 顺序固定(r154):校验 → 纯计算新授权集(不写盘)→ 凭证门禁 → 禁止名单 → 一次性原子写盘。
+ * 任何一步抛错都发生在写盘之前,所以"撤销 + 授权"的混合请求被拒时零副作用。
+ *
+ * 凭证门禁只在 requireCredential 时生效(由 HTTP 路由显式开启);进程内直接调用(单测播种、
+ * 内部代码)不经 HTTP,不在"盲写"威胁面内。需要凭证 = 本次含正向意图(给了 bundleId 且未撤销;
+ * 或 screenScope 为 true)**或**新集比旧集大——两者取或,不靠枚举字段组合,未知字段绕不过。
+ * 凭证检查先于名单检查:没凭证的调用方探不到名单内容。纯撤销不要凭证也不查名单:降权永远安全,
+ * 也让旧版遗留的禁止类别条目能被撤掉。
+ *
+ * 抛出的错误带 code:CU_INVALID_ARGUMENT / CU_GRANT_FORBIDDEN / CU_APP_FORBIDDEN。
+ * 返回有效授权(经 effectiveGrants)。
+ */
+export function setGrant(
+  { bundleId = null, name = null, granted = true, screenScope = null } = {},
+  { requireCredential = false, panelCredential = false } = {},
+) {
+  let appId = null;
+  if (bundleId !== null && bundleId !== undefined && bundleId !== '') {
+    const checked = normalizeAppIdForGrant(bundleId);
+    if (!checked.ok) throw grantError('CU_INVALID_ARGUMENT', checked.error);
+    appId = checked.id;
+  }
+  const grantingApp = appId !== null && granted !== false;
+
   const current = readGrants();
   const next = { ...current, apps: { ...current.apps }, screenScope: { ...current.screenScope } };
   if (screenScope !== null) {
@@ -408,19 +456,45 @@ export function setGrant({ bundleId = null, name = null, granted = true, screenS
       ? { granted: true, grantedAt: new Date().toISOString() }
       : { granted: false, grantedAt: null };
   }
-  if (bundleId) {
+  if (appId !== null) {
     // 归一化去重:同一应用换个大小写/斜杠再授权一次,应该覆盖原来那条而不是并存两条
     // (并存两条时 appGranted 仍能命中,但面板会显示重复行)。
-    const key = normalizeAppId(bundleId);
-    const existingKey = Object.keys(next.apps).find((k) => normalizeAppId(k) === key) || bundleId;
-    if (granted) {
-      next.apps[existingKey] = { name: name || current.apps[existingKey]?.name || bundleId,
+    const key = normalizeAppId(appId);
+    const existingKey = Object.keys(next.apps).find((k) => normalizeAppId(k) === key) || appId;
+    if (grantingApp) {
+      next.apps[existingKey] = { name: name || current.apps[existingKey]?.name || appId,
         grantedAt: new Date().toISOString() };
     } else {
       delete next.apps[existingKey];
     }
   }
-  return writeGrants(next);
+
+  const currentKeys = new Set(Object.keys(current.apps).map((k) => normalizeAppId(k)));
+  const grows = Object.keys(next.apps).some((k) => !currentKeys.has(normalizeAppId(k)))
+    || (!screenScopeGranted(current) && screenScopeGranted(next));
+  const needsCredential = grantingApp || screenScope === true || grows;
+  if (requireCredential && needsCredential && panelCredential !== true) {
+    throw grantError('CU_GRANT_FORBIDDEN', GRANT_FORBIDDEN_MESSAGE);
+  }
+  if (grantingApp) {
+    const reason = forbiddenAppReason(appId);
+    if (reason) throw grantError('CU_APP_FORBIDDEN', forbiddenGrantMessage(reason), { reason });
+  }
+  return effectiveGrants(writeGrants(next));
+}
+
+/**
+ * 启动时一次性清理:把授权表里属禁止类别的旧条目移除(原子写),返回被移除的 id 列表。
+ * 只移除命中名单的条目,其余原样保留;没有命中就不写盘。读取时仍经 effectiveGrants 过滤(双保险)。
+ */
+export function pruneForbiddenGrants(platformName = process.platform) {
+  const current = readGrants();
+  const removed = Object.keys(current.apps).filter((id) => forbiddenAppReason(id, platformName));
+  if (removed.length === 0) return [];
+  const next = { ...current, apps: { ...current.apps } };
+  for (const id of removed) delete next.apps[id];
+  writeGrants(next);
+  return removed;
 }
 
 /**
@@ -470,6 +544,8 @@ export function sameAppId(a, b, platformName = process.platform) {
 
 export function appGranted(grants, bundleId, platformName = process.platform) {
   if (!bundleId || !grants.apps) return false;
+  // 底线最先判(防御纵深):禁止类别即使在授权表里也不算已授权。
+  if (forbiddenAppReason(bundleId, platformName)) return false;
   if (grants.apps[bundleId]) return true;
   // 归一化兜底:授权表里存的可能是另一种大小写/分隔符写法(手填、旧数据、别的工具写入)。
   // platformName 是给纯函数测试注入用的(生产走默认 = 当前进程平台)。
