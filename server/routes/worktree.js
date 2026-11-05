@@ -350,7 +350,7 @@ export async function mergeWorktreeIntoMain(root, wtPath) {
   if (!targetBranch) throw fail('主工作树处于 detached HEAD,无法确定合并目标分支', 400);
   // 前置:主树必须干净(merge 会动主树工作区,脏树冲突时 abort 也救不回混杂改动)
   const st = await execFileP('git', ['-C', root, 'status', '--porcelain'], { timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
-  if (st.stdout.trim()) throw fail('主工作区有未提交改动,先提交或暂存后再合并', 409);
+  if (st.stdout.trim()) throw fail('主工作树有未提交改动,先提交或暂存后再合并', 409);
   // 该树自身脏 → 提示但不阻断(merge 只合 commit,未提交内容本来就不在合并范围)
   let warning = null;
   try {

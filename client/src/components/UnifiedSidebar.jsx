@@ -72,8 +72,8 @@ function ProjectRowMenu({ project, pinned, showArchived, hasArchiveToggle, archi
         ref={btnRef}
         onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
         className={`transition-opacity p-1 hover:bg-canvas-deep/60 rounded-md ${open ? 'opacity-100 bg-canvas-deep/60' : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'}`}
-        aria-label="项目操作"
-        title="项目操作"
+        aria-label="工作区操作"
+        title="工作区操作"
       >
         <MoreHorizontal size={13} className="text-ink-muted" />
       </button>
@@ -131,7 +131,7 @@ function SidebarViewMenu() {
       <AnchoredPopover anchorRef={btnRef} open={open} onRequestClose={() => setOpen(false)} drop="down" align="right" gap={4} clampSelector=".sidebar-flank" className="w-52 py-1">
         <div className={head}>分组方式</div>
         <button onClick={() => pick({ groupMode: 'project' })} className={item(view.groupMode === 'project')}>
-          {view.groupMode === 'project' ? <Check size={12} className="shrink-0" /> : <span className="w-3 shrink-0" />}按项目
+          {view.groupMode === 'project' ? <Check size={12} className="shrink-0" /> : <span className="w-3 shrink-0" />}按工作区
         </button>
         <button onClick={() => pick({ groupMode: 'single' })} className={item(view.groupMode === 'single')}>
           {view.groupMode === 'single' ? <Check size={12} className="shrink-0" /> : <span className="w-3 shrink-0" />}单列表(全部会话按时间)
@@ -147,7 +147,7 @@ function SidebarViewMenu() {
               disabled={!desktop}
               onClick={() => { if (desktop) pick({ sortMode: 'manual' }); }}
               className={item(view.sortMode === 'manual', !desktop)}
-              title={desktop ? '项目行出现拖拽柄,可拖动重排(置顶恒最前)' : '手动排序需在桌面端拖拽'}
+              title={desktop ? '工作区行出现拖拽柄,可拖动重排(置顶恒最前)' : '手动排序需在桌面端拖拽'}
             >
               {view.sortMode === 'manual' ? <Check size={12} className="shrink-0" /> : <span className="w-3 shrink-0" />}手动排序
               {!desktop && <span className="ml-auto text-[10px] text-ink-faint">桌面端拖拽</span>}
@@ -272,7 +272,7 @@ export function UnifiedSidebar() {
       const openHere = [...(st.paneSessions || []), st.selectedSession]
         .some((s) => s && s.projectHash === hash);
       if (openHere) {
-        confirmDialog('该项目有会话正在窗格中打开。请先把这些窗格关掉（或切换到别的会话），再隐藏该项目。', { confirmText: '知道了' });
+        confirmDialog('该工作区有会话正在窗格中打开。请先把这些窗格关掉（或切换到别的会话），再隐藏该工作区。', { confirmText: '知道了' });
         return;
       }
     }
@@ -783,7 +783,7 @@ export function UnifiedSidebar() {
       let data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
       if (data.needsCreate) {
-        const ok = await confirmDialog(`文件夹不存在：\n${data.addedPath}\n\n是否新建该文件夹并作为项目？`);
+        const ok = await confirmDialog(`文件夹不存在：\n${data.addedPath}\n\n是否新建该文件夹并作为工作区？`);
         if (!ok) { setAddDialogOpen(false); setAddPathInput(''); return; }
         r = await fetch('/api/settings', {
           method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -828,14 +828,14 @@ export function UnifiedSidebar() {
           sessionId: null,
           projectHash: data.addedHash || null,
           session: null,
-          title: '已添加项目',
+          title: '已添加工作区',
           suffix: '提示',
           summary: gitState === 'repoNoCommit'
-            ? '该目录所在的 git 仓库还没有任何提交。worktree 与回滚基线需要至少一个提交，项目栏横幅提供「创建基线提交」。'
+            ? '该目录所在的 git 仓库还没有任何提交。worktree 与回滚基线需要至少一个提交，侧栏横幅提供「创建基线提交」。'
             : gitState === 'notRepo'
-              ? '该文件夹不是 git 仓库。worktree 与回滚基线不可用，项目栏横幅提供「立即初始化」。'
+              ? '该文件夹不是 git 仓库。worktree 与回滚基线不可用，侧栏横幅提供「立即初始化」。'
               : gitState === 'legacy'
-                ? '该文件夹不是 git 仓库或没有提交，worktree 与回滚基线不可用，详见项目栏横幅。'
+                ? '该文件夹不是 git 仓库或没有提交，worktree 与回滚基线不可用，详见侧栏横幅。'
                 : `git 检查未能完成（${reasonText}），未能判断该文件夹是否为 git 仓库。导入不受影响。`,
           ts: Date.now(),
         });
@@ -856,7 +856,7 @@ export function UnifiedSidebar() {
     const isLocalHost = ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
     if (isTauri() || (isLocalHost && !isMobileLayout)) {
       try {
-        const data = await pickDirectory({ prompt: '选择项目目录', startDir: lastStart || undefined });
+        const data = await pickDirectory({ prompt: '选择工作区目录', startDir: lastStart || undefined });
         if (data.path === null) return;
         path = data.path;
       } catch {
@@ -1083,7 +1083,7 @@ export function UnifiedSidebar() {
     e?.stopPropagation();
     if (!tree?.path || !wtProject || tree.isMain) return;
     const mainTree = Array.isArray(worktreeList) ? worktreeList.find((t) => t.isMain) : null;
-    const msg = `把分支 ${tree.branch || '(detached)'} 合并到 ${mainTree?.branch || '主工作区当前分支'}？\n\n` +
+    const msg = `把分支 ${tree.branch || '(detached)'} 合并到 ${mainTree?.branch || '主工作树当前分支'}？\n\n` +
       `该分支相对${wtBaseLabel(tree)}领先 ${tree.aheadCount || 0} 个提交。合并在主工作树执行；若有冲突会自动取消,不留半合并状态。`;
     if (!(await confirmDialog(msg))) return;
     try {
@@ -1095,7 +1095,7 @@ export function UnifiedSidebar() {
       if (!r.ok || d.ok === false) {
         const conflicts = d.conflicts || [];
         const note = conflicts.length
-          ? `合并冲突（已自动取消合并，主工作区未留下半合并状态）。冲突文件：\n\n${conflicts.slice(0, 20).join('\n')}` +
+          ? `合并冲突（已自动取消合并，主工作树未留下半合并状态）。冲突文件：\n\n${conflicts.slice(0, 20).join('\n')}` +
             (conflicts.length > 20 ? `\n…共 ${conflicts.length} 个` : '') +
             '\n\n请到会话里手动处理这些冲突后再合并。'
           : `合并失败：${d.error || r.status}`;
@@ -1207,7 +1207,7 @@ export function UnifiedSidebar() {
       <div className="px-4 pt-4 pb-3">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[11px] font-medium uppercase tracking-widest text-ink-faint font-body">
-            项目
+            工作区
           </h2>
           <div className="flex items-center gap-0.5">
             <SidebarViewMenu />
@@ -1216,7 +1216,7 @@ export function UnifiedSidebar() {
               data-cgui="add-project-btn"
               data-tour="add-project"
               className="p-1 hover:bg-canvas-warm rounded transition-colors"
-              title="添加项目（系统文件选择器）"
+              title="添加工作区（系统文件选择器）"
             >
               <Plus size={14} className="text-ink-faint hover:text-accent" />
             </button>
@@ -1226,7 +1226,7 @@ export function UnifiedSidebar() {
           <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-ghost" />
           <input
             type="text"
-            placeholder="搜索项目 / 会话 / 消息 (≥2 字符)..."
+            placeholder="搜索工作区 / 会话 / 消息 (≥2 字符)..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             data-cgui="sidebar-search"
@@ -1285,7 +1285,7 @@ export function UnifiedSidebar() {
         {view.groupMode === 'single' && flatSessions.length === 0 && (
           // r24:平铺模式下"全部项目都被隐藏"是过滤生效后**新出现**的空态。兜底若还写
           // 「暂无会话」,又是一次"空列表骗人"(分组模式那边早有专门措辞,见下方 hiddenOnly)。
-          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{emptyHint(hiddenOnly ? '所有项目都已隐藏' : '暂无会话', flatAccessEntry)}</div>
+          <div className="px-3 py-2.5 text-[11px] text-ink-faint font-body">{emptyHint(hiddenOnly ? '所有工作区都已隐藏' : '暂无会话', flatAccessEntry)}</div>
         )}
         {view.groupMode !== 'single' && sortedRows.map((project) => {
           const hash = project.hash;
@@ -1349,7 +1349,7 @@ export function UnifiedSidebar() {
                       onClick={(e) => e.stopPropagation()}
                       className="hidden md:flex opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-md cursor-grab active:cursor-grabbing"
                       aria-label="拖拽排序"
-                      title="拖拽重排(置顶项目恒在最前)"
+                      title="拖拽重排(置顶工作区恒在最前)"
                     >
                       <GripVertical size={12} className="text-ink-faint" />
                     </button>
@@ -1425,7 +1425,7 @@ export function UnifiedSidebar() {
               </p>
             ) : (
               <p className="text-xs text-ink-faint font-body">
-                {q ? '没有匹配的项目' : hiddenOnly ? '所有项目都已隐藏' : '没有找到项目'}
+                {q ? '没有匹配的工作区' : hiddenOnly ? '所有工作区都已隐藏' : '没有找到工作区'}
               </p>
             )}
             {!q && !hiddenOnly && (
@@ -1433,7 +1433,7 @@ export function UnifiedSidebar() {
                 onClick={openAddProject}
                 className="mt-3 px-3 py-1.5 rounded-full bg-accent text-on-accent text-[12px] font-body"
               >
-                添加项目文件夹
+                添加工作区文件夹
               </button>
             )}
             {hiddenOnly && (
@@ -1441,7 +1441,7 @@ export function UnifiedSidebar() {
                 onClick={() => { const next = new Set(); setHidden(next); persistHidden(next); }}
                 className="mt-3 px-3 py-1.5 rounded-full bg-accent text-on-accent text-[12px] font-body"
               >
-                显示全部项目
+                显示全部工作区
               </button>
             )}
           </div>
@@ -1469,7 +1469,7 @@ export function UnifiedSidebar() {
         <div className="fixed inset-0 z-[80] bg-black/25 flex items-end md:items-center justify-center p-3">
           <div className="w-full max-w-md rounded-panel bg-canvas border border-canvas-deep shadow-popover overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-canvas-deep">
-              <div className="text-[15px] font-display font-semibold text-ink">添加项目</div>
+              <div className="text-[15px] font-display font-semibold text-ink">添加工作区</div>
               <button onClick={() => setAddDialogOpen(false)} className="p-1.5 rounded-lg hover:bg-canvas-warm">
                 <X size={16} className="text-ink-muted" />
               </button>
@@ -1481,7 +1481,7 @@ export function UnifiedSidebar() {
                 registerProjectPath(addPathInput);
               }}
             >
-              <label className="block text-[12px] text-ink-muted font-body mb-2">项目路径</label>
+              <label className="block text-[12px] text-ink-muted font-body mb-2">工作区路径</label>
               <input
                 autoFocus
                 value={addPathInput}
@@ -1673,7 +1673,7 @@ function WorktreePickerModal({
                 {!t.isMain && !t.prunable && t.aheadCount > 0 && (
                   <button
                     onClick={(e) => mergeWorktree(t, e)}
-                    title={`合并到 ${mainBranchName || '主工作区当前分支'}（相对${wtBaseLabel(t)}领先 ${t.aheadCount} 个提交）` + (t.behindCount > 0 ? `。该树落后${wtBaseLabel(t)} ${t.behindCount} 个提交,合并可能产生冲突` : '')}
+                    title={`合并到 ${mainBranchName || '主工作树当前分支'}（相对${wtBaseLabel(t)}领先 ${t.aheadCount} 个提交）` + (t.behindCount > 0 ? `。该树落后${wtBaseLabel(t)} ${t.behindCount} 个提交,合并可能产生冲突` : '')}
                     className="shrink-0 px-2 rounded-lg border border-canvas-deep text-ink-faint hover:text-accent hover:border-accent/40 hover:bg-canvas-warm transition-colors flex items-center"
                   >
                     <GitMerge size={13} />

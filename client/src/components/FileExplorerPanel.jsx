@@ -394,7 +394,7 @@ export function FileExplorerPanel() {
   if (!rootPath) {
     return (
       <div className="px-4 py-8 text-center text-[12px] text-ink-faint font-body">
-        请先选择一个会话或项目
+        请先选择一个会话或工作区
       </div>
     );
   }
@@ -467,7 +467,7 @@ export function FileExplorerPanel() {
         ))}
         {rootGone ? (
           <div className="px-4 py-8 text-center text-[12px] text-ink-faint font-body">
-            项目文件夹已删除。可在侧栏项目列表移除该条目。
+            工作区文件夹已删除。可在侧栏工作区列表移除该条目。
           </div>
         ) : (
         <TreeNode
@@ -519,12 +519,12 @@ export function FileExplorerPanel() {
                   const entry = ctxMenu.entry; setCtxMenu(null);
                   const { confirmDialog } = await import('../utils/confirmDialog.jsx');
                   const ok = await confirmDialog(
-                    `将永久删除整个项目文件夹及其全部内容:\n${entry.path}\n\n删除后 10 秒内可在顶部横条撤销;项目条目之后可在侧栏移除。`,
+                    `将永久删除整个工作区文件夹及其全部内容:\n${entry.path}\n\n删除后 10 秒内可在顶部横条撤销;工作区条目之后可在侧栏移除。`,
                     { danger: true, confirmText: '删除整个文件夹' });
                   if (ok) deletePath(entry);
                 }}
                 className="w-full text-left px-3 py-1.5 text-[12px] font-body text-red-600 hover:bg-red-500/10 flex items-center gap-2">
-                <Trash2 size={12} className="shrink-0" />删除项目文件夹…
+                <Trash2 size={12} className="shrink-0" />删除工作区文件夹…
               </button>
             ) : (
               <button onClick={() => deletePath(ctxMenu.entry)}

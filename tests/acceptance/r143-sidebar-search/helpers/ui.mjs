@@ -24,7 +24,7 @@ import path from 'node:path';
 import { live } from './fixtures.mjs';
 
 /** 侧栏搜索框(受控输入,data-cgui="sidebar-search")。 */
-export const searchInput = (page) => page.getByRole('complementary').getByRole('textbox', { name: /搜索项目/ });
+export const searchInput = (page) => page.getByRole('complementary').getByRole('textbox', { name: /搜索工作区/ });
 
 /**
  * 搜索结果行 —— **不是**"名字里含标记的第一个按钮"。

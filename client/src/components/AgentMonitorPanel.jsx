@@ -192,7 +192,7 @@ function BackgroundAgentsSection({ stoppingPid, onStop }) {
       <div className="flex items-center gap-1.5 mb-2">
         <input value={prompt} onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent?.isComposing && e.keyCode !== 229) dispatch(); }}
-          placeholder={selectedProject ? `派一个后台任务到 ${selectedProject.name || '当前项目'}` : '先在左侧选择项目'}
+          placeholder={selectedProject ? `派一个后台任务到 ${selectedProject.name || '当前工作区'}` : '先在左侧选择工作区'}
           disabled={!selectedProject || dispatching}
           className="flex-1 min-w-0 text-[11px] font-body bg-canvas-warm border border-canvas-deep rounded px-2 py-1.5 text-ink focus:border-accent outline-none" />
         <button onClick={dispatch} disabled={!prompt.trim() || !selectedProject || dispatching}

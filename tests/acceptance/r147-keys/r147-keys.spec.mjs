@@ -163,7 +163,7 @@ test('K4 worktree 弹窗:分支名输入框里按 Esc 只关弹窗,不停正在�
   const S = R147[5];
   await startLongTurn(page, S, 'R147 K4 worktree 弹窗:这一轮一直在跑。');
 
-  await page.locator('[data-cgui="sidebar"]').getByRole('button', { name: '项目操作' }).first().click();
+  await page.locator('[data-cgui="sidebar"]').getByRole('button', { name: '工作区操作' }).first().click();
   await page.locator('[data-cgui="new-worktree-btn"]').first().click();
   const input = page.getByPlaceholder('分支名 (如 feature-X)');
   await expect(input, 'worktree 弹窗应出现').toBeVisible({ timeout: 10_000 });

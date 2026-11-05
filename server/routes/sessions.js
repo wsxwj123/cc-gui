@@ -343,9 +343,9 @@ export function renderSegmentTranscript(parsedRecords, cap = 150 * 1024) {
  */
 export function projectsAccessDeniedBody(platform) {
   return {
-    error: '无法读取项目目录（系统拒绝访问）',
+    error: '无法读取工作区目录（系统拒绝访问）',
     code: 'no-disk-access',
-    hint: accessDeniedHint(platform) + '项目文件本身没有丢失。',
+    hint: accessDeniedHint(platform) + '工作区文件本身没有丢失。',
     canOpenSettings: canOpenAccessSettings(platform),
   };
 }
@@ -483,7 +483,7 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
     }
     if (result?.conflict) {
       // 子代理转写确实存在,但不在请求给的项目下 —— 归属不可靠,不能拿它当"这个项目的历史"渲染。
-      return res.status(409).json({ ok: false, code: 'AGENT_OWNER_UNRESOLVED', error: '子代理归属与请求的项目不一致' });
+      return res.status(409).json({ ok: false, code: 'AGENT_OWNER_UNRESOLVED', error: '子代理归属与请求的工作区不一致' });
     }
     res.json(result);
   } catch (err) {

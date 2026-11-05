@@ -23,7 +23,7 @@ const hitRow = (page, mark) =>
 
 /** 打开一条历史会话(走侧栏搜索)。mark = 标题里的唯一标记;replyText = 打开后应能看到的一段文字(确认已打开)。 */
 export async function openSessionBySearch(page, mark, replyText) {
-  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索项目/ });
+  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索工作区/ });
   await expect(async () => {
     await search.click();
     await search.fill(mark);
@@ -77,12 +77,12 @@ export function note(text) { test.info().annotations.push({ type: 'note', descri
 export async function showWorktreeProjects(page) {
   const state = /^已(开启|关闭)$/;
   // 同时含这一行文字和一个"已开启/已关闭"按钮的最内层元素 = 这一行;取行里的那个按钮
-  const row = page.locator('body *').filter({ hasText: /在项目列表显示\s*worktree\s*项目/i })
+  const row = page.locator('body *').filter({ hasText: /在工作区列表显示\s*worktree\s*工作区/i })
     .filter({ has: page.getByRole('button', { name: state }) }).last();
   const toggle = row.getByRole('button', { name: state });
   const isOn = async () => (await row.getByRole('button', { name: '已开启', exact: true }).count()) > 0;
   await openSessionSettings(page);
-  await expect(toggle, '前置:设置页「会话」分区里有「在项目列表显示 worktree 项目」开关').toBeVisible({ timeout: 10_000 });
+  await expect(toggle, '前置:设置页「会话」分区里有「在工作区列表显示 worktree 工作区」开关').toBeVisible({ timeout: 10_000 });
   const wasOn = await isOn();
   const restore = async () => {
     if (wasOn) return;
@@ -94,11 +94,11 @@ export async function showWorktreeProjects(page) {
     }
     await expect(toggle).toBeVisible({ timeout: 10_000 });
     if (await isOn()) await toggle.click();
-    await expect(toggle, '收尾:「在项目列表显示 worktree 项目」已拨回').toHaveAccessibleName('已关闭', { timeout: 10_000 });
+    await expect(toggle, '收尾:「在工作区列表显示 worktree 工作区」已拨回').toHaveAccessibleName('已关闭', { timeout: 10_000 });
   };
   if (!wasOn) await toggle.click();
   try {
-    await expect(toggle, '前置:「在项目列表显示 worktree 项目」已打开').toHaveAccessibleName('已开启', { timeout: 10_000 });
+    await expect(toggle, '前置:「在工作区列表显示 worktree 工作区」已打开').toHaveAccessibleName('已开启', { timeout: 10_000 });
   } catch (e) {
     await restore().catch(() => {});
     throw e;

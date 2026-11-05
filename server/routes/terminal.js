@@ -299,7 +299,7 @@ async function createTerminalLocked(ws, msg, id, attempt) {
       return termError(ws, id, 'TERM_INVALID_CWD', 'cwd 不是目录');
     }
     if (!(isPathInside(real, HOME) || isKnownClaudeWorkspace(real, resolve(msg.cwd)))) {
-      return termError(ws, id, 'TERM_FORBIDDEN_CWD', 'cwd 不在家目录、也不在任何打开过的项目目录内');
+      return termError(ws, id, 'TERM_FORBIDDEN_CWD', 'cwd 不在家目录、也不在任何打开过的工作区目录内');
     }
     dir = real;
   }

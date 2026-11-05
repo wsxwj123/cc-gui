@@ -85,7 +85,7 @@ export async function openApp(page) {
 /** 侧栏搜索 marker → 点结果行 → 夹具会话打开（同批套件验证过的走法）。 */
 export async function openSessionByMarker(page, marker) {
   await dismissOverlays(page);
-  const search = page.getByRole('textbox', { name: /搜索项目/ }).first();
+  const search = page.getByRole('textbox', { name: /搜索工作区/ }).first();
   await search.fill(marker);
   const result = page.getByRole('button', { name: new RegExp(marker) }).first();
   await expect(result, `侧栏搜不到夹具会话 ${marker} —— 夹具没落进这个实例的数据根`).toBeVisible({ timeout: 25_000 });

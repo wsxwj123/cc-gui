@@ -91,7 +91,7 @@ export async function safePath(p) {
     const lexical = resolve(p);
     // 工作区例外(任一形态命中即候选放行)。
     if (!isKnownClaudeWorkspace(real, lexical)) {
-      const err = new Error('路径不在家目录、也不在任何打开过的项目目录内'); err.status = 403; throw err;
+      const err = new Error('路径不在家目录、也不在任何打开过的工作区目录内'); err.status = 403; throw err;
     }
     // symlink 逃逸防护(与 resolveWorkspacePath line-96 一致,原 safePath 漏了):realpath 改写过
     // 路径(如工作区内 /proj/evil-link → /etc)时,只凭 lexical 命中工作区就放行会让 read/write/

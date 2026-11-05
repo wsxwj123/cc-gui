@@ -56,7 +56,7 @@ const SETTINGS_INDEX = [
   { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存 空闲 回收 idle keepalive' },
   { id: 'set-stall-timeout', tab: 'session', title: '静默超时', keys: '静默 超时 看门狗 stall timeout watchdog 上游 无输出 卡住 子代理 结束 回合 提示' },
   { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入 自动 第三方 费用' },
-  { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 项目', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
+  { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 工作区', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
   { id: 'set-restore-last', tab: 'session', title: '启动时恢复上次会话', keys: '启动 恢复 上次 会话 Home 首页 restore' },
   { id: 'set-max-budget', tab: 'session', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
   { id: 'set-prompt-snapshot', tab: 'session', title: '缓存优化', keys: '缓存 cache 前缀 动态 快照 snapshot 系统提示 carved slate toolsearch 工具搜索 mcp 阻塞 连接 nonblocking' },
@@ -2361,8 +2361,8 @@ function WorktreeVisibilityToggle() {
   return (
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
-        <div className="text-xs text-ink font-body font-medium">在项目列表显示 worktree 项目</div>
-        <div className="text-[10.5px] text-ink-faint font-body">worktree 是隔离工作树。跑过会话的 worktree 默认不进左侧项目列表,以免与主项目平级混排造成干扰;需要时打开此项显示。无论开关状态,worktree 都可从顶栏「文件」的 worktree 弹窗进入。</div>
+        <div className="text-xs text-ink font-body font-medium">在工作区列表显示 worktree 工作区</div>
+        <div className="text-[10.5px] text-ink-faint font-body">worktree 是隔离工作树。跑过会话的 worktree 默认不进左侧工作区列表,以免与主工作区平级混排造成干扰;需要时打开此项显示。无论开关状态,worktree 都可从顶栏「文件」的 worktree 弹窗进入。</div>
       </div>
       <button onClick={toggle}
         className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}
@@ -2386,7 +2386,7 @@ function RestoreLastSessionToggle() {
     <div className="bg-canvas-warm border border-canvas-deep rounded-lg px-3 py-2.5 flex items-center gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-xs text-ink font-body font-medium">启动时恢复上次会话</div>
-        <div className="text-[10.5px] text-ink-faint font-body">关闭(默认)时,启动/刷新进入 Home 首页(选择项目直接开新会话);打开后恢复旧行为,启动时回到上次打开的会话。下次启动生效。</div>
+        <div className="text-[10.5px] text-ink-faint font-body">关闭(默认)时,启动/刷新进入 Home 首页(选择工作区直接开新会话);打开后恢复旧行为,启动时回到上次打开的会话。下次启动生效。</div>
       </div>
       <button onClick={toggle}
         className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${on ? 'bg-accent' : 'bg-ink-faint/30'}`}

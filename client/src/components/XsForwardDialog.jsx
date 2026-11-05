@@ -190,7 +190,7 @@ function ForwardDialog({ initialBody, fromSessionId, onClose }) {
                       <span className="flex items-center gap-1.5 min-w-0">
                         <span className={`min-w-0 truncate text-[12px] font-body ${bad ? 'text-error' : 'text-ink'}`}>{s.title}</span>
                         {projHidden && (
-                          <span data-testid="xs-forward-target-hidden" className="shrink-0 text-[10.5px] text-ink-faint font-body">所在项目已隐藏</span>
+                          <span data-testid="xs-forward-target-hidden" className="shrink-0 text-[10.5px] text-ink-faint font-body">所在工作区已隐藏</span>
                         )}
                       </span>
                       <span className="block truncate text-[10.5px] text-ink-faint font-body">{s.project}</span>

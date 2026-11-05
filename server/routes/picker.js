@@ -18,7 +18,7 @@ const router = Router();
 router.post('/pick-directory', async (req, res) => {
   // Windows — PowerShell + .NET WinForms FolderBrowserDialog.
   if (platform() === 'win32') {
-    const promptText = String(req.body?.prompt || '选择项目目录');
+    const promptText = String(req.body?.prompt || '选择工作区目录');
     const startDirRaw = (req.body?.startDir && typeof req.body.startDir === 'string')
       ? req.body.startDir
       : `${homedir()}\\Desktop`;
@@ -66,7 +66,7 @@ router.post('/pick-directory', async (req, res) => {
     return res.status(501).json({ error: 'native picker only supported on macOS / Windows — paste an absolute path instead' });
   }
   try {
-    const promptText = String(req.body?.prompt || '选择项目目录');
+    const promptText = String(req.body?.prompt || '选择工作区目录');
     // Two practical issues with the previous one-line incantation:
     //
     // 1) `choose folder` without `default location` makes the OS remember

@@ -109,8 +109,11 @@ const EXPECTED = {
   'turn-tool': { testids: [], cgui: [], len: 5764, sha: 'd71ec8f8b84592a1' },
   'input-idle': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'send-btn'], len: 3333, sha: '7e99c29e2c559931' },
   'input-streaming': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'queue-btn', 'stop-btn'], len: 4099, sha: '992c6c419dcae4ff' },
-  sidebar: { testids: ['session-actions-btn'], cgui: ['add-project-btn', 'new-session-btn', 'project-row', 'session-actions', 'session-row', 'sidebar', 'sidebar-search'], len: 8338, sha: '71538d6ce1e7c510' },
-  'sidebar-collapsed': { testids: [], cgui: ['add-project-btn', 'new-session-btn', 'project-row', 'sidebar', 'sidebar-search'], len: 6049, sha: '63f8dca8e993e3de' },
+  // 界面「项目」→「工作区」改名重录(下面两个侧栏场景的渲染结果各含 7 处改名文字,每处多 1 个字):
+  // 把现渲染结果里的「工作区」还原成「项目」后,长度与指纹和改名前的旧基线逐字一致
+  // (sidebar 8338 / 71538d6ce1e7c510,sidebar-collapsed 6049 / 63f8dca8e993e3de),即只差改名;testid / cgui 集合不变。
+  sidebar: { testids: ['session-actions-btn'], cgui: ['add-project-btn', 'new-session-btn', 'project-row', 'session-actions', 'session-row', 'sidebar', 'sidebar-search'], len: 8345, sha: 'a9501a1cd3294f25' },
+  'sidebar-collapsed': { testids: [], cgui: ['add-project-btn', 'new-session-btn', 'project-row', 'sidebar', 'sidebar-search'], len: 6056, sha: '29550c243030ddf2' },
 };
 
 const renderer = await loadRenderer();

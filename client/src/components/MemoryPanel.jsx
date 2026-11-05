@@ -56,7 +56,7 @@ function ClaudeMdEditor({ cwd }) {
   const needsCwd = level === 'project' || level === 'local';
 
   const load = useCallback(async () => {
-    if (needsCwd && !cwd) { setData(null); setErr('请先在左侧选择一个项目'); return; }
+    if (needsCwd && !cwd) { setData(null); setErr('请先在左侧选择一个工作区'); return; }
     setLoading(true); setErr('');
     try {
       const qs = new URLSearchParams({ level, cwd: needsCwd ? cwd : '' });
@@ -149,7 +149,7 @@ function AutoMemoryTab({ cwd }) {
   useEffect(() => () => clearTimeout(savedTimerRef.current), []);
 
   const load = useCallback(async () => {
-    if (!cwd) { setEntries([]); setErr('请先在左侧选择一个项目'); return; }
+    if (!cwd) { setEntries([]); setErr('请先在左侧选择一个工作区'); return; }
     setLoading(true); setErr('');
     try {
       const r = await fetch(`/api/memory/entries?cwd=${encodeURIComponent(cwd)}`);
@@ -240,7 +240,7 @@ function AutoMemoryTab({ cwd }) {
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-canvas-deep shrink-0">
         <span className="text-[10px] text-ink-faint font-body flex-1">
-          Claude 自动记下的项目经验(每会话开头自动载入)。共 {entries.length} 条
+          Claude 自动记下的工作区经验(每会话开头自动载入)。共 {entries.length} 条
         </span>
         {entries.length > 0 && <SelModeToggle selMode={ms.selMode} onToggle={() => (ms.selMode ? ms.exit() : ms.enter())} size={12} />}
         <button onClick={load} disabled={loading} className="p-1 text-ink-faint hover:text-ink" title="重新加载">
@@ -253,7 +253,7 @@ function AutoMemoryTab({ cwd }) {
       <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-canvas-deep/50">
         {entries.length === 0 && !loading && (
           <div className="px-3 py-6 text-center text-[11px] text-ink-faint font-body">
-            该项目还没有自动记忆。Claude 会在对话中发现值得跨会话记住的经验时自动写入。
+            该工作区还没有自动记忆。Claude 会在对话中发现值得跨会话记住的经验时自动写入。
           </div>
         )}
         {entries.map((e) => (

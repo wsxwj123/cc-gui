@@ -21,7 +21,7 @@ assert.ok(!showAccessSettingsButton({ accessError: 'H', canOpenSettings: false }
 
 // t3 分组空态按当前组 hash 读;平铺空态有 flatAccessEntry 兜底
 assert.match(src, /emptyHint\(showArchived \? '没有已归档的会话' : '暂无会话,点行尾「\+」新建', errByProject\[hash\]\)/, 't3: 分组按组 hash 读');
-assert.match(src, /emptyHint\(hiddenOnly \? '所有项目都已隐藏' : '暂无会话', flatAccessEntry\)/, 't3: 平铺读可见项目首条错误');
+assert.match(src, /emptyHint\(hiddenOnly \? '所有工作区都已隐藏' : '暂无会话', flatAccessEntry\)/, 't3: 平铺读可见项目首条错误');
 
 // t4 隔离语义模拟(消费端视角):errByProject 里只有 A 的键 → B 组读出 undefined=正常
 {

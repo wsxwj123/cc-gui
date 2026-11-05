@@ -26,7 +26,7 @@ function stripTrailingSlash(p) {
   return trimmed;
 }
 
-export async function pickDirectory({ prompt = '选择项目目录', startDir } = {}) {
+export async function pickDirectory({ prompt = '选择工作区目录', startDir } = {}) {
   if (isTauri()) {
     try {
       const picked = await open({

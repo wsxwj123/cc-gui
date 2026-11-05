@@ -49,7 +49,7 @@ const hitRow = (page, mark) =>
  *      **兜底不算产品契约的守卫**:硬契约归 r143 的 S2 独占(TEST-PLAN §7-④)。
  */
 export async function openSessionBySearch(page, mark) {
-  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索项目/ });
+  const search = page.getByRole('complementary').getByRole('textbox', { name: /搜索工作区/ });
   await expect(async () => {
     await search.click();
     await search.fill(mark);

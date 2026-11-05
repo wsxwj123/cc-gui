@@ -50,7 +50,7 @@ test('X20 侧栏:会话行 xs-unread = 该会话待处理条数(0 不出现);项
     await projLabel.click();
     await expect.poll(() => badgeNear(page, 'xs-unread-project', projName), { timeout: 10_000, message: '再展开后项目汇总消失' }).toBeNull();
   } finally {
-    await restoreWorktree().catch((e) => note(`收尾:「在项目列表显示 worktree 项目」没能拨回:${String((e && e.message) || e).slice(0, 200)}`));
+    await restoreWorktree().catch((e) => note(`收尾:「在工作区列表显示 worktree 工作区」没能拨回:${String((e && e.message) || e).slice(0, 200)}`));
   }
 });
 

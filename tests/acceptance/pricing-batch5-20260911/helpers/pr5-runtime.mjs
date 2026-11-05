@@ -464,7 +464,7 @@ export async function openFixtureSession(page, section, { markerKey = 'sessionSe
   const marker = requireField(section, markerKey);
   await ensureAppLoaded(page);
   await dismissOverlays(page);
-  const search = page.getByRole('textbox', { name: /搜索项目/ }).first();
+  const search = page.getByRole('textbox', { name: /搜索工作区/ }).first();
   await clickThroughOverlays(page, search);
   await search.fill(marker);
   const row = page.getByRole('button', { name: new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) }).first();
