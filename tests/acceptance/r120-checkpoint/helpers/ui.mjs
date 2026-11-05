@@ -166,17 +166,30 @@ export async function openSessionBySearch(page, mark) {
 }
 
 /** 当前会话头部「更多会话操作」→「检查点」:打开 Checkpoint 时间线(单条明细在这里)。
- *  返回 true 表示时间线已打开(里面能看到会话头部那颗「清理全部」)。 */
+ *  返回 true 表示时间线已打开且已载入条目(能看到标题含「删除…回滚点」的按钮:头部「清理全部」或每行的删除图标)。
+ *
+ *  **幂等,按当前状态点**:「更多」和「检查点」都是开关,盲点一下会把已经开着的关掉(同 openPanelDock 的教训)。
+ *  删完一条回来重开时起点不固定:确认框是 body 上单独挂的根,434c13d45(r151c)起点它不再收起「更多」菜单,
+ *  但点「确定」那一击仍会收起时间线弹层 —— 这时「更多」还开着,再点它反而把菜单关掉、「检查点」也跟着消失。
+ *  起点 ① 时间线已开 → 不点(按当前可见内容直接返回,不再等条目重新载入);② 「更多」已开(「检查点」可见)→ 只点「检查点」;
+ *  ③ 都没开 → 先点「更多」再点「检查点」。 */
 export async function openCheckpointTimeline(page) {
-  const more = page.getByTitle(/更多会话操作/).first();
-  await more.waitFor({ state: 'visible', timeout: 30_000 });
-  await more.click({ force: true });
+  // "已载入条目"的标志:标题含「删除…回滚点」的按钮(「清理全部」与每行的删除图标都算),只在有条目时才画。
+  // "弹层是否开着"另认弹层头部的「新快照」键(开着就在,与条目有无无关)。它靠用户可见文案认,产品改了文案要同步这里。
+  const snapshotDeleteBtns = () => page.getByTitle(/删除.*回滚点/);
+  if (await page.getByRole('button', { name: /新快照|快照中/ }).first().isVisible().catch(() => false)) {
+    return (await snapshotDeleteBtns().count()) > 0;
+  }
   const item = page.getByRole('button', { name: /^检查点$/ }).first();
-  try { await item.waitFor({ state: 'visible', timeout: 8_000 }); } catch { return false; }
+  if (!(await item.isVisible().catch(() => false))) {
+    const more = page.getByTitle(/更多会话操作/).first();
+    await more.waitFor({ state: 'visible', timeout: 30_000 });
+    await more.click({ force: true });
+    try { await item.waitFor({ state: 'visible', timeout: 8_000 }); } catch { return false; }
+  }
   await item.click({ force: true });
   await page.waitForTimeout(1_200);
-  // 时间线开着的标志:里面能看到「删本会话全部回滚点」那颗(标题是"删除本会话的全部回滚点")。
-  return (await page.getByTitle(/删除.*回滚点/).count()) > 0;
+  return (await snapshotDeleteBtns().count()) > 0;
 }
 
 /** 检查点时间线是否已打开(判据同 openCheckpointTimeline 的返回值)。 */

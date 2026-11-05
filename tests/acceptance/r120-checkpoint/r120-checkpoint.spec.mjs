@@ -150,7 +150,8 @@ test.describe('r120 回滚点失控', () => {
     await expect.poll(() => shasOf(SID).length, { timeout: 15_000, message: '确认后磁盘上该少一条' })
       .toBe(beforeShas.length - 1);
     expect(firedAfterConfirm, '确认后应确实发出了删除请求').not.toHaveLength(0);
-    // 确认会把时间线收起(实测如此),要重新打开才数得到行 —— 顺带验证界面确实跟着少了这一条。
+    // 点「确定」那一击会把时间线弹层收起(实测如此),要重新打开才数得到行 —— 顺带验证界面确实跟着少了这一条。
+    // 此时「更多」菜单仍开着(434c13d45 起确认框不再收起它),所以重开不能盲点「更多」,辅助函数按当前状态点。
     await ui.openCheckpointTimeline(page);
     await expect.poll(async () => ui.singleSnapshotDeleteButtons(page).count(),
       { timeout: 15_000, message: '时间线里的行数也该同步少一条' }).toBe(rowCount - 1);

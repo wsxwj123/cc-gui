@@ -74,9 +74,12 @@ test('P15 send_message 整次失败(超 8 个目标 / 正文超 32768 字节 / �
       { name: SM, input: { to: T.slice(0, 8).map((t) => t.sid), message: ok } },
       { name: SM, input: { to: [B.sid], message: ok }, waitFile: off },
     ];
-    const k0 = laneReq('real').flatMap((q) => q.toolResults).length;
+    // 假接口每个请求里的 toolResults 是整段对话里累计的结果(第 n 个请求带着前 n-1 个),逐请求相加会重复计数:
+    // 第 5 个结果就凑够 11,总开关被提前关掉,后面几步变成 XS_DISABLED。数"已返回几个"必须按工具调用 id 去重。
+    const doneIds = () => new Set(laneReq('real').flatMap((q) => q.toolResults.map((t) => t.id)));
+    const k0 = doneIds().size;
     const p = aiCalls(c, { cwd, sid: A, steps, timeoutMs: 200_000 });
-    const reached = await waitFor(() => laneReq('real').flatMap((q) => q.toolResults).length - k0 >= 11, 150_000, 300);
+    const reached = await waitFor(() => doneIds().size - k0 >= 11, 150_000, 300);
     await api.off();
     touchMock(off);
     const r = await p;
