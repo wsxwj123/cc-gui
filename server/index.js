@@ -257,7 +257,11 @@ const CROSS_ORIGIN_BLOCKED = 'Cross-origin request blocked by cc-gui';
 // 来源校验抛任何异常都按拒绝处理(rule=internal-error),不放行、不冒成未捕获异常。
 function checkOriginSafe(origin, req) {
   try { return checkBrowserOrigin(origin, req, originGateCtx); }
-  catch { return { ok: false, rule: 'internal-error' }; }
+  catch (e) {
+    // 只记内部错误信息(如枚举网卡失败),不记请求里任何客户端可控的内容;记日志本身出错也不能抛。
+    try { console.warn('[origin-gate] internal error, request rejected: %s', logValue(e?.message)); } catch {}
+    return { ok: false, rule: 'internal-error' };
+  }
 }
 app.use((req, res, next) => {
   if (isAllowedHost(req)) return next();
