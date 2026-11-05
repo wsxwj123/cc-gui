@@ -287,6 +287,45 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.446">v0.2.446</a></b>(2026-11-05)· 新增 2 条 · 优化 3 条</summary>
+
+**新增**
+
+<details><summary>电脑操控新增「禁止操控」名单</summary>
+
+终端类应用(Terminal、iTerm2、Warp 等)、CC-GUI 自身、系统设置与脚本自动化工具、钥匙串与密码管理器这四类应用不能再被授权。模型对它们发的点击、输入等动作会被拒绝并说明原因,窗口列表里也不再显示这些应用的窗口。名单是已知高危应用的下限,不是边界,不在名单里的应用不代表安全;Windows 上按 exe 文件名匹配,尚未在 Windows 真机验证。详见 `docs/computer-use.md` 的「禁止操控名单」与「已知边界」。
+
+</details>
+
+<details><summary>新增授权必须经过「桌面操控」面板</summary>
+
+新增应用授权、打开主屏范围需要面板持有的确认凭证,模型或脚本照旧文档直接调接口授权会被拒绝(撤销授权不受影响)。面板没连上后台时,授权按钮会提示“尚未连上后台,请稍后重试”。凭证只能挡住不知道它的盲写;本机任意端口上的网页、主动连接后台的本机进程仍能取得凭证,不在这道防线内,见文档「已知边界」。
+
+</details>
+
+**优化**
+
+<details><summary>旧授权失效并在启动时清理</summary>
+
+之前授权过上述禁止类别应用的记录不再生效,服务启动时会从授权文件里移除并在服务日志里记一行。已经在运行的电脑操控进程要重启后才会应用新规则。
+
+</details>
+
+<details><summary>授权标识校验更严</summary>
+
+含逗号、控制符、零宽字符或 JavaScript 保留名称(如 `constructor`)的应用标识会被拒绝;读取授权文件时按同样规则丢弃不合规的条目,应用显示名最多保留 200 个字符。
+
+</details>
+
+<details><summary>授权变更写入服务日志</summary>
+
+每次新增或撤销授权(包括被拒绝的)在服务日志里记一行,不记录凭证。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.445</b>(2026-11-05)· 优化 2 条</summary>
 
 **优化**
