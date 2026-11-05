@@ -1527,28 +1527,37 @@ header [data-tour="remote-control"] {
    provider mark to fill its parent so avatars actually show on mobile. */
 .provider-mark svg { width: 100%; height: 100%; display: block; }
 
-/* ── 子代理卡片(TaskCard):运行中图标位的三点脉冲 ──
-   颜色取 currentColor(卡片上是 accent),幅度克制;reduced-motion 静止半透明 */
-.tc-agent-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+/* ── 子代理卡片(TaskCard)运行中:沿整圈边框的流光(r154,设计稿 v8 的 .beam)──
+   8 层同心描边(rect pathLength=100 的虚线段)叠成梭形:越靠中心越粗越亮、两头渐细渐隐,同步绕边一圈。
+   颜色取主题强调色;不依赖 mask / offset-path;减弱动画下整个隐藏。 */
+.agent-beam {
+  position: absolute; left: .75px; top: .75px;
+  width: calc(100% - 1.5px); height: calc(100% - 1.5px);
+  overflow: visible; pointer-events: none;
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--color-accent) 55%, transparent));
 }
-.tc-agent-dots span {
-  width: 3.5px;
-  height: 3.5px;
-  border-radius: 999px;
-  background: currentColor;
-  animation: tcAgentDot 1.2s ease-in-out infinite;
+.agent-beam rect {
+  fill: none; stroke: var(--color-accent); stroke-linecap: round;
+  animation-duration: 3.4s; animation-timing-function: linear; animation-iteration-count: infinite;
 }
-.tc-agent-dots span:nth-child(2) { animation-delay: 0.18s; }
-.tc-agent-dots span:nth-child(3) { animation-delay: 0.36s; }
-@keyframes tcAgentDot {
-  0%, 100% { opacity: 0.25; transform: scale(0.8); }
-  40%      { opacity: 1;    transform: scale(1);   }
-}
+.agent-beam .bl1 { stroke-width: 0.5; stroke-dasharray: 26 74; opacity: 0.12; animation-name: bm1; }
+.agent-beam .bl2 { stroke-width: 0.75; stroke-dasharray: 22 78; opacity: 0.18; animation-name: bm2; }
+.agent-beam .bl3 { stroke-width: 1; stroke-dasharray: 18 82; opacity: 0.26; animation-name: bm3; }
+.agent-beam .bl4 { stroke-width: 1.25; stroke-dasharray: 14 86; opacity: 0.36; animation-name: bm4; }
+.agent-beam .bl5 { stroke-width: 1.5; stroke-dasharray: 11 89; opacity: 0.48; animation-name: bm5; }
+.agent-beam .bl6 { stroke-width: 1.75; stroke-dasharray: 8 92; opacity: 0.62; animation-name: bm6; }
+.agent-beam .bl7 { stroke-width: 2; stroke-dasharray: 5 95; opacity: 0.8; animation-name: bm7; }
+.agent-beam .bl8 { stroke-width: 2.2; stroke-dasharray: 2.5 97.5; opacity: 1; animation-name: bm8; }
+@keyframes bm1 { from { stroke-dashoffset: 13; } to { stroke-dashoffset: -87; } }
+@keyframes bm2 { from { stroke-dashoffset: 11; } to { stroke-dashoffset: -89; } }
+@keyframes bm3 { from { stroke-dashoffset: 9; } to { stroke-dashoffset: -91; } }
+@keyframes bm4 { from { stroke-dashoffset: 7; } to { stroke-dashoffset: -93; } }
+@keyframes bm5 { from { stroke-dashoffset: 5.5; } to { stroke-dashoffset: -94.5; } }
+@keyframes bm6 { from { stroke-dashoffset: 4; } to { stroke-dashoffset: -96; } }
+@keyframes bm7 { from { stroke-dashoffset: 2.5; } to { stroke-dashoffset: -97.5; } }
+@keyframes bm8 { from { stroke-dashoffset: 1.25; } to { stroke-dashoffset: -98.75; } }
 @media (prefers-reduced-motion: reduce) {
-  .tc-agent-dots span { animation: none; opacity: 0.6; }
+  .agent-beam { display: none; }
 }
 
 /* ── Skill 调用横幅 ──────────────────────────────────────────────
