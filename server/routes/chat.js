@@ -2379,7 +2379,7 @@ async function handleChatPost(req, res) {
     return res.status(400).json({
       ok: false,
       code: 'CHAT_INVALID_CWD',
-      error: '工作目录不存在或无法访问，请在左侧选择一个有效的项目后重试。',
+      error: '工作目录不存在或无法访问，请在左侧选择一个有效的工作区后重试。',
     });
   }
 

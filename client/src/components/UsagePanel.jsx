@@ -950,7 +950,7 @@ export function UsagePanel() {
       {stats.byProject?.length > 0 && (
         <div>
           <h3 className="text-[10px] font-medium uppercase tracking-widest text-ink-faint font-body mb-3 flex items-center gap-1.5">
-            <FolderOpen size={11} />按项目
+            <FolderOpen size={11} />按工作区
           </h3>
           <div className="bg-canvas-warm border border-canvas-deep rounded-lg p-3">
             {(() => {

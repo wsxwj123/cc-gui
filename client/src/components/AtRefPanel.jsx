@@ -48,8 +48,8 @@ export function AtRefPanel({
       {!busy && items.length === 0 && (
         <div className="px-3 py-3 text-[11px] text-ink-faint font-body">
           {tab === 'files'
-            ? (cwd ? '没有匹配的文件' : '当前会话无项目目录')
-            : '本项目没有其它可引用的会话'}
+            ? (cwd ? '没有匹配的文件' : '当前会话无工作区目录')
+            : '本工作区没有其它可引用的会话'}
         </div>
       )}
       {!busy && tab === 'files' && files.map((f, i) => (

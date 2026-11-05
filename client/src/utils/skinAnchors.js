@@ -7,7 +7,7 @@ export const SKIN_ANCHORS = [
   // ── 布局骨架 ──
   { id: 'topbar', desc: '桌面顶栏(header)' },
   { id: 'topbar-mobile', desc: '手机顶栏(header)' },
-  { id: 'sidebar', desc: '左侧项目/会话面板根' },
+  { id: 'sidebar', desc: '左侧工作区/会话面板根' },
   { id: 'sidebar-search', desc: '侧栏搜索输入框' },
   // r143:侧栏搜索的出口与过滤态说明(死状态修复)。四个挂点同族,集中放在 sidebar-search 之后:
   // 清空出口两个(输入框里的 ×、说明行里的「清空」)、过滤态说明一行、全局搜索结果行一个。
@@ -18,12 +18,12 @@ export const SKIN_ANCHORS = [
   { id: 'panel-dock', desc: '右侧面板坞按钮组' },
   { id: 'artifact-dock', desc: '代码/预览停靠面板根' },
   // ── 项目/会话列表 ──
-  { id: 'project-row', desc: '项目行(项目页)' },
+  { id: 'project-row', desc: '工作区行(工作区页)' },
   { id: 'session-row', desc: '会话行' },
   { id: 'session-actions', desc: '会话行 hover 操作组' },
   // r13-①备案:drill-back(会话页「返回项目列表」行)随钻入两页退役而删除。
   // T2 皮肤若引用 [data-cgui="drill-back"] 只是选择器落空,不炸。
-  { id: 'add-project-btn', desc: '添加项目按钮' },
+  { id: 'add-project-btn', desc: '添加工作区按钮' },
   { id: 'new-session-btn', desc: '新建会话按钮' },
   { id: 'new-worktree-btn', desc: '新建 worktree 按钮' },
   // ── 输入区 ──

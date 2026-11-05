@@ -910,7 +910,7 @@ router.put('/settings', async (req, res) => {
           : addPath;
       // isAbsolute is platform-aware: accepts /unix and C:\windows paths alike.
       if (!isAbsolute(absPath)) {
-        return res.status(400).json({ error: '项目路径必须是绝对路径或 ~/ 开头' });
+        return res.status(400).json({ error: '工作区路径必须是绝对路径或 ~/ 开头' });
       }
       const clean = absPath.replace(/[/\\]+$/, '') || absPath;
       // If the target folder doesn't exist, don't silently register a phantom.

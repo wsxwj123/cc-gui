@@ -2081,11 +2081,11 @@ function EmptyState({ tabIndex = 0 }) {
           </>
         ) : (
           <>
-            <h3 className="text-[22px] font-display font-semibold text-ink mb-1.5 tracking-tight">添加一个项目开始</h3>
-            <p className="text-[13px] text-ink-muted font-body">选择一个本地文件夹作为项目，会话将在其中进行</p>
+            <h3 className="text-[22px] font-display font-semibold text-ink mb-1.5 tracking-tight">添加一个工作区开始</h3>
+            <p className="text-[13px] text-ink-muted font-body">选择一个本地文件夹作为工作区，会话将在其中进行</p>
             <button onClick={addProject}
               className="mt-5 px-4 py-2 rounded-full bg-accent text-on-accent text-[13px] font-body hover:bg-accent/90 transition-colors">
-              添加项目文件夹
+              添加工作区文件夹
             </button>
           </>
         )}
@@ -2497,11 +2497,11 @@ function HomeState({ tabIndex = 0 }) {
             }}
             rows={3}
             autoFocus
-            placeholder={project ? '输入消息，开始一个新会话…' : '先选择一个项目'}
+            placeholder={project ? '输入消息，开始一个新会话…' : '先选择一个工作区'}
             // 可访问名显式写全:Home 的输入框和会话内输入框是同一套能力(斜杠命令、
             // @文件、附件、Enter 发送),只说 "/ 打开命令" 这句提示——读屏/自动化按名字
             // 定位输入框时(与会话内同款名字)才找得到它。可见 placeholder 不动。
-            aria-label={project ? '输入消息，开始一个新会话… (/ 打开命令)' : '先选择一个项目'}
+            aria-label={project ? '输入消息，开始一个新会话… (/ 打开命令)' : '先选择一个工作区'}
             className="w-full bg-transparent px-3.5 pt-3 pb-1 text-[14px] text-ink font-body resize-none focus:outline-none placeholder-ink-ghost"
           />
           <div className="flex items-center gap-2 px-2 pb-2">
@@ -2530,20 +2530,20 @@ function HomeState({ tabIndex = 0 }) {
                   }
                 }}
                 className="flex w-full items-center gap-1.5 px-2 py-1 rounded-md border border-canvas-deep/70 hover:bg-canvas-warm text-[12px] text-ink-soft font-body min-w-0 transition-colors"
-                title={project ? formatPath(project.path) : '选择项目'}
+                title={project ? formatPath(project.path) : '选择工作区'}
               >
                 <FolderOpen size={12} className="text-ink-faint shrink-0" />
                 {/* r115:项目名是这一行里唯一该让步的元素(其余都是定宽控件)。原来只有一个
                     max-w-[220px] 上限,手机上 220px 仍然超过剩余空间 → 名字整条画出去、
                     盖住发送键。min-w-0 让它在 flex 里真的能被压缩,truncate 才会生效。 */}
-                <span className="truncate min-w-0 max-w-[220px]">{project ? formatPathShort(project.path) : '选择项目'}</span>
+                <span className="truncate min-w-0 max-w-[220px]">{project ? formatPathShort(project.path) : '选择工作区'}</span>
                 <ChevronDown size={11} className="text-ink-faint shrink-0" />
               </button>
               <AnchoredPopover anchorRef={projBtnRef} open={projOpen}
                 onRequestClose={(reason) => closeProjectListbox(reason === 'escape')}
                 drop="up" align="left"
                 className="w-72 max-w-[calc(var(--app-w,100vw)-1.5rem)] py-1 max-h-64 overflow-y-auto">
-                <div role="listbox" aria-label="选择项目" onKeyDown={onProjectListboxKeyDown}>
+                <div role="listbox" aria-label="选择工作区" onKeyDown={onProjectListboxKeyDown}>
                   {recent.map((p, index) => (
                     <button
                       key={p.hash}
@@ -2601,7 +2601,7 @@ function HomeState({ tabIndex = 0 }) {
             className={showUsage ? undefined : "glass-popover absolute top-full left-0 right-0 mt-2 max-h-80 overflow-y-auto z-30 animate-glass-rise"}
           />
         </div>
-        <div className="mt-3 text-[11.5px] text-ink-faint font-body">发送后在所选项目里创建新会话；历史会话在左侧列表。</div>
+        <div className="mt-3 text-[11.5px] text-ink-faint font-body">发送后在所选工作区里创建新会话；历史会话在左侧列表。</div>
       </div>
     </div>
   );
@@ -7203,7 +7203,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               ownerKey: streamSid || sessionQueueKey,
               timestamp: new Date().toISOString(),
               model: streamingModel,
-              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的项目目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}${loginHint}${signatureHint}`],
+              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的工作区目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}${loginHint}${signatureHint}`],
               thinking: [],
               toolCalls: [],
               blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}${loginHint}${signatureHint}` }],
@@ -8612,14 +8612,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 没有文件快照(非 git 项目 / 旧消息 / 快照丢失)不该让整个回退"没反应"——以前这里
       // alert + return,既不裁剪也不重发,用户关掉弹窗后什么都没发生。降级处理:跳过文件
       // 还原,继续裁剪会话并按 mode 重发 / 回填输入框,只用一条提示告知文件未动。
-      noteHere('未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。');
+      noteHere('未找到该消息的文件快照，已仅回退会话记录（工作区文件未改动）。');
     }
     if (shouldRestoreFiles && checkpointSha && sel?.sessionId && cwd) {
       // 还原失败最常见的就是这条消息发送前后没有任何被跟踪文件改动:shadow 仓库里
       // 那个 commit 是空树,`git checkout <sha> -- .` 报 pathspec 不匹配。这属于"本来
       // 就没文件要还原"而非真错,不该 alert+return 中断整个回退。降级:跳过文件还原,
       // 继续裁剪会话/重发,只用一条提示告知项目文件未动。
-      const softDegrade = () => noteHere('未找到该消息的文件快照，已仅回退会话记录（项目文件未改动）。');
+      const softDegrade = () => noteHere('未找到该消息的文件快照，已仅回退会话记录（工作区文件未改动）。');
       try {
         const r = await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
           method: 'POST',
@@ -9748,7 +9748,7 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                 setCtxOverflow(null);
               }}
               className="px-2.5 py-1 rounded text-[12px] font-medium text-red-700 border border-red-300 hover:bg-red-100"
-              title="在同项目新建一个空会话"
+              title="在同一工作区新建一个空会话"
             >新建会话</button>
             <span className="text-[11px] text-red-600/80">或：把鼠标悬停到较早的消息上 → 回滚，删除最旧的对话轮次后再继续。</span>
             <button onClick={() => setCtxOverflow(null)} className="ml-auto text-red-500 hover:text-red-700 text-[14px] leading-none px-1" title="关闭">×</button>
@@ -12243,7 +12243,7 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
 
   // 手机批#4:「模型」「Provider」两个入口合并为一个「Provider / 模型」页(双入口
   // 让人误以为两套状态)。'model' 路由随之删除,MobileModelPage 内嵌进合并页。
-  const TITLES = { history: '会话与项目', effort: '推理力度', provider: 'Provider / 模型', providermanage: '管理 Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
+  const TITLES = { history: '会话与工作区', effort: '推理力度', provider: 'Provider / 模型', providermanage: '管理 Provider', appearance: '外观', theme: '配色方案', readingfont: '对话正文字体' };
 
   return (
     <div className="flex flex-col h-full">
@@ -12270,7 +12270,7 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
           {page === 'root' && (
             <div className="py-1">
               <MobileMenuRow icon={SquarePen} label="新建会话" chevron={false} onClick={startNew} />
-              <MobileMenuRow icon={MessageSquare} label="会话与项目" onClick={() => push('history')} />
+              <MobileMenuRow icon={MessageSquare} label="会话与工作区" onClick={() => push('history')} />
               <div className="px-4 pt-3 pb-1 text-[11px] text-ink-faint uppercase tracking-wider font-body">当前会话</div>
               {/* 手机批#4:合并入口。值 = 解析后的实际发送模型(pin→全局默认),一眼
                   看到"已继承",不再显示成未选;当前 provider 在入口页内高亮置顶(375px
@@ -12451,10 +12451,10 @@ const SHORTCUT_GROUPS = [
     ['Cmd/Ctrl + Z', '撤销输入'],
     ['↑(输入框为空时)', '召回最近发送/入队的消息'],
     ['/', '打开命令面板(输入框内)'],
-    ['@', '引用项目文件 / 其它会话(输入框内)'],
+    ['@', '引用工作区文件 / 其它会话(输入框内)'],
   ]],
   ['会话', [
-    ['Cmd/Ctrl + N', '当前项目下新建会话'],
+    ['Cmd/Ctrl + N', '当前工作区下新建会话'],
     ['Cmd/Ctrl + ↑ / ↓', '切换到上/下一个会话(当前窗格)'],
     ['Cmd/Ctrl + F', '会话内检索(当前窗格)'],
     ['Esc（生成中）', '停止当前回合'],

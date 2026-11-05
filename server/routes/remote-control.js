@@ -140,7 +140,7 @@ router.post('/remote-control', async (req, res) => {
       // 永远匹配不上 `HOME + '/'` → 合法 cwd 也被拒的问题。
       // claude 用过的工作区($HOME 之外的项目盘,Windows 常见)同样放行,与文件浏览器同判据。
       if (!real || !(isPathInside(real, HOME) || isKnownClaudeWorkspace(real, resolve(cwd)))) {
-        throw new Error('cwd 不在家目录、也不在任何打开过的项目目录内');
+        throw new Error('cwd 不在家目录、也不在任何打开过的工作区目录内');
       }
       dir = real;
     }
