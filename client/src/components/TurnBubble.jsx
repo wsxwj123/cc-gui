@@ -36,7 +36,6 @@ import { Linkify } from '../utils/linkify.jsx';
 import { ToolResultImages } from './tools/ToolResultImages.jsx';
 import { usePricingVersion } from '../hooks/usePricingVersion.js';
 import { XsForwardButton } from './XsForwardDialog.jsx';
-import { ElapsedTime } from './LoadingBits.jsx';
 
 // Tools that get their own bespoke inline card (rendered in chronological order
 // inside the turn). Anything not in this set falls through to ToolCallsGroup,
@@ -582,8 +581,8 @@ export const StripAutoContext = React.createContext(false);      // true = 本�
 export const StripHeadlessContext = React.createContext(false);  // true = 不渲染摘要行(⚡并入的非首段)
 export const StripSummaryContext = React.createContext(null);    // 整轮摘要覆盖(⚡在途,首段用)
 export const StripUsageCallsContext = React.createContext(null); // 本轮 usageCalls(直播期恒 null)
-// r152a:本回合起流时刻(折叠条右侧的整回合用时)。只有正在生成的回合给值,其余(历史轮、
-// 子代理窗口)都是 null → 不挂计时器、不显示用时。
+// r152a:本回合起流时刻。只有正在生成的回合给值,其余(历史轮、子代理窗口)都是 null。
+// r154 起头行静态、不再读它(用时挪到底部状态行);导出与 Provider 保留,签名不变。
 export const StripStartedAtContext = React.createContext(null);
 
 // ─── CoworkBlocks:母会话 + 子代理共用的有序 blocks 渲染(单一渲染路径)──
@@ -610,7 +609,6 @@ export function CoworkBlocks({
   const stripHeadless = useContext(StripHeadlessContext);
   const injectedSummary = useContext(StripSummaryContext);
   const usageCalls = useContext(StripUsageCallsContext);
-  const stripStartedAt = useContext(StripStartedAtContext);
   // 点开工作流内层助手:卡片只负责水合并回调,落到哪个窗格由这里定(与 TaskCard 的
   // openAgentView 同款,取渲染所在/焦点 pane)——卡片自己读 activeTabIndex 会分屏串扰。
   const openWfAgent = (key) => { const st = useStore.getState(); st.setViewingAgent(st.activeTabIndex, key); };
@@ -777,15 +775,10 @@ export function CoworkBlocks({
           onClick={() => setStripOpen(!open)}
           className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-md transition-colors text-left"
         >
-          {/* r152c:子元素顺序固定 = 左图标 → 标题 → [用时,仅生成中] → 三角(最后一个)。
-              生成中左图标是 2×2 点阵、右侧挂整回合用时;回合结束两者都撤掉(历史轮不挂定时器)。 */}
-          {isLive
-            ? <span data-strip-dots className="strip-live-dots text-accent shrink-0" aria-hidden="true"><span /><span /><span /><span /></span>
-            : <Wrench size={13} className="text-ink-muted shrink-0" />}
+          {/* r154:头行静态,子元素顺序固定 = 左图标(扳手)→ 标题 → 三角(最后一个)。
+              生成中的动画、用时与状态词都在本回合最下面的底部状态行(LiveStatusLine),头行不挂计时器。 */}
+          <Wrench size={13} className="text-ink-muted shrink-0" />
           <span data-strip-title className="min-w-0 flex-1 truncate text-xs text-ink-soft font-body">{headText}</span>
-          {isLive && stripStartedAt ? (
-            <span data-strip-elapsed className="shrink-0 text-xs"><ElapsedTime startedAt={stripStartedAt} /></span>
-          ) : null}
           <span
             data-strip-caret
             data-open={open ? 'true' : 'false'}
