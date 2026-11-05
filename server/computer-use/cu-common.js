@@ -378,19 +378,46 @@ export function readGrants() {
   }
 }
 
+/**
+ * 读取侧也按写入规则校验键(r154 安全审计):grants.json 可能被手写 / 旧版 / 别的工具改过。
+ * - 键先过 normalizeAppIdForGrant:可修复的脏键(首尾空白、非 NFC)换成规范 id,同一规范 id 的
+ *   多个键以后出现的为准;不合法的(含逗号——授权 id 会被逗号拼接后交给 helper、控制符、保留名等)直接丢弃。
+ * - 保留名(__proto__ 等)由上一步拒掉,所以这里绝不会对 out.apps 做 __proto__ 赋值换掉原型。
+ * - name 截到 APP_NAME_MAX_LENGTH:MCP 每次动作都整份读这个文件。
+ */
 function normalizeGrants(raw) {
   const out = { version: 1, screenScope: { granted: false, grantedAt: null }, apps: {} };
   if (raw && typeof raw === 'object') {
     if (raw.screenScope && raw.screenScope.granted === true) {
       out.screenScope = { granted: true, grantedAt: raw.screenScope.grantedAt || null };
     }
-    for (const [bundleId, entry] of Object.entries(raw.apps || {})) {
-      if (!bundleId || typeof entry !== 'object' || entry === null) continue;
-      out.apps[bundleId] = { name: typeof entry.name === 'string' ? entry.name : bundleId,
-        grantedAt: entry.grantedAt || null };
+    const apps = raw.apps && typeof raw.apps === 'object' ? raw.apps : {};
+    for (const [rawKey, entry] of Object.entries(apps)) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const checked = normalizeAppIdForGrant(rawKey);
+      if (!checked.ok) continue;
+      const id = checked.id;
+      out.apps[id] = { name: grantName(entry.name, id), grantedAt: entry.grantedAt || null };
     }
   }
   return out;
+}
+
+export const APP_NAME_MAX_LENGTH = 200;
+
+/** 授权条目的显示名:字符串截到上限(不留半个代理对),非字符串回退成 id。 */
+function grantName(name, fallbackId) {
+  const text = typeof name === 'string' ? name : fallbackId;
+  if (text.length <= APP_NAME_MAX_LENGTH) return text;
+  let cut = text.slice(0, APP_NAME_MAX_LENGTH);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return cut;
+}
+
+/** 只认自有属性:授权表是普通对象,原型链上的 constructor / toString 等不能算作条目。 */
+function ownApp(apps, id) {
+  return apps && Object.prototype.hasOwnProperty.call(apps, id) ? apps[id] : undefined;
 }
 
 export function writeGrants(next) {
@@ -411,6 +438,8 @@ export function effectiveGrants(grants, platformName = process.platform) {
   if (!grants || typeof grants !== 'object') return out;
   if (grants.screenScope) out.screenScope = { ...grants.screenScope };
   for (const [id, entry] of Object.entries(grants.apps || {})) {
+    // 保留名(__proto__ 等)跳过:入参未必来自 readGrants,对 out.apps['__proto__'] 赋值会换掉原型。
+    if (RESERVED_APP_IDS.has(id)) continue;
     if (!forbiddenAppReason(id, platformName)) out.apps[id] = { ...entry };
   }
   return out;
@@ -468,7 +497,9 @@ export function setGrant(
     const key = normalizeAppId(appId);
     const existingKey = Object.keys(next.apps).find((k) => normalizeAppId(k) === key) || appId;
     if (grantingApp) {
-      next.apps[existingKey] = { name: name || current.apps[existingKey]?.name || appId,
+      const oldName = ownApp(current.apps, existingKey)?.name;
+      // 选取顺序同修前(name || 旧名 || id);非字符串由 grantName 回退成 id,字符串截到上限。
+      next.apps[existingKey] = { name: grantName(name || oldName || appId, appId),
         grantedAt: new Date().toISOString() };
     } else {
       delete next.apps[existingKey];
@@ -539,8 +570,15 @@ export function normalizeAppIdForGrant(id, platformName = process.platform) {
   if (platformName !== 'win32' && !/^[A-Za-z0-9._-]+$/.test(text)) {
     return { ok: false, error: 'bundleId 只能含字母、数字、点、下划线和连字符。' };
   }
+  if (RESERVED_APP_IDS.has(text)) return { ok: false, error: 'bundleId 不能使用保留名称。' };
   return { ok: true, id: text };
 }
+
+/**
+ * 保留名:Object.prototype 上的全部属性名(constructor、toString、__proto__ …)。授权表是普通对象,
+ * 用这些名字当键会和原型链混淆(`apps.constructor` 恒为真值、`apps.__proto__ = x` 换原型),两平台都拒。
+ */
+export const RESERVED_APP_IDS = new Set(Object.getOwnPropertyNames(Object.prototype));
 
 /** 两个应用身份是不是同一个(平台口径见 normalizeAppId)。 */
 export function sameAppId(a, b, platformName = process.platform) {
@@ -552,7 +590,7 @@ export function appGranted(grants, bundleId, platformName = process.platform) {
   if (!bundleId || !grants.apps) return false;
   // 底线最先判(防御纵深):禁止类别即使在授权表里也不算已授权。
   if (forbiddenAppReason(bundleId, platformName)) return false;
-  if (grants.apps[bundleId]) return true;
+  if (ownApp(grants.apps, bundleId)) return true;
   // 归一化兜底:授权表里存的可能是另一种大小写/分隔符写法(手填、旧数据、别的工具写入)。
   // platformName 是给纯函数测试注入用的(生产走默认 = 当前进程平台)。
   const key = normalizeAppId(bundleId, platformName);
