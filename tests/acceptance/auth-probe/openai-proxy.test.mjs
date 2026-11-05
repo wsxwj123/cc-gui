@@ -2,7 +2,7 @@
 // 只通过接口文件第 0 节的公开入口调用:startOpenAIProxy / setOpenAIUpstream + HTTP 口。
 // 运行: env -u http_proxy -u https_proxy node --test 'tests/acceptance/auth-probe/*.test.mjs'
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -233,4 +233,9 @@ suite.add('O11 探测回401但正文是纯文本/空/无error字段的JSON: 都�
 suite.finish(async () => {
   await upstream.close();
   await redirectTarget.close();
+  try {
+    rmdirSync(fakeHome); // 只删空目录,不递归;非空就留着
+  } catch {
+    // 忽略
+  }
 });
