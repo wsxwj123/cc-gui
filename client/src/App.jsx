@@ -2754,13 +2754,15 @@ function LastUpdateAgo({ getAt }) {
   return <span className="text-[12px] text-ink-faint shrink-0 tabular-nums">· 上次更新 {txt}</span>;
 }
 
-function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true, stopping = false }) {
+function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true, stopping = false, compacting = false }) {
   // 最后一个还没结果的工具调用(并行时取最后一个)
   const pendingTool = [...toolCalls].reverse().find((tc) => !tc.result) || null;
   // r119:stopping 优先 —— 用户已请求停止、本轮还没结束时如实显示「停止中」。
+  // r154:自动压缩进行中(liveStatus.compacting,来自 SDK 的 status:compacting 事件)次之,显示「正在压缩上下文」;
+  // 下面的「等待状态行(G)」仍说明原因并带进度条,两行并存。
   // r65:sawModelOutput 为 false(reattach 接管一个还没吐任何产出的回合)时显示「连接中」;
   // 首发路径默认 true,空窗期(工具结果全回、下一条整消息未到)显示「正在思考」,不隐藏整行。
-  const label = liveStatusLabel({ stopping, pendingTool, text: !!text, thinking: !!thinking, sawModelOutput });
+  const label = liveStatusLabel({ stopping, compacting, pendingTool, text: !!text, thinking: !!thinking, sawModelOutput });
   // 缩进 50px(34px 头像 + 16px gap)与气泡正文列对齐,渲染在气泡下方。
   return (
     <div className="px-6 -mt-2 pb-3 animate-fade-in">
@@ -9917,6 +9919,7 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                     toolCalls={streamingToolCalls}
                     streamStart={streamStartRef.current}
                     stopping={stopping}
+                    compacting={!!liveStatus?.compacting}
                   />
                 </>
               )}
@@ -9967,6 +9970,7 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                   lastUpdateAt={getHistFreshAt}
                   sawModelOutput={sawModelOutput}
                   stopping={stopping}
+                  compacting={!!liveStatus?.compacting}
                 />
               )}
               {/* 等待状态行(G):压缩中/API 重试/限流等待的明确说明。与 StreamingStatusLine
