@@ -2334,6 +2334,58 @@ header [data-tour="remote-control"] {
   .loading-mark, .loading-mark::before, .loading-mark::after, .loading-mark span { animation-duration: 4s !important; }
 }
 
+/* ── r154 R3:生成中的动画(设计稿 v8)───────────────────────────────
+ * 颜色一律取主题变量;系统开了减弱动画时全部静止 / 回纯色。 */
+
+/* 三体 / 四体旋转:点位由 utils/orbitTicker.js 每帧写 transform / opacity / z-index;
+ * 尺寸跟组件 style 传入的宽高走,半径由 ticker 按容器宽度算。颜色 = currentColor(外层给 text-accent)。 */
+.orbit-mark { display: inline-block; position: relative; flex: none; vertical-align: middle; }
+.orbit-mark i {
+  position: absolute; left: 50%; top: 50%;
+  width: 3.6px; height: 3.6px; margin: -1.8px 0 0 -1.8px;
+  border-radius: 50%; background: currentColor;
+  will-change: transform, opacity;
+}
+
+/* 状态词的连续流光(Claude 桌面版做法):3 秒一圈,15%–85% 才扫、首尾各停,120° 斜带自左向右;
+ * 高光 = 文字色掺 70% 白(只提亮,文字保持本色)。--live-shine-ink 可由外层覆盖基色。 */
+.live-shine {
+  --live-shine-peak: color-mix(in srgb, var(--live-shine-ink, currentColor) 30%, #fff);
+  background: linear-gradient(120deg, var(--live-shine-ink, currentColor) 37.5%, var(--live-shine-peak) 50%, var(--live-shine-ink, currentColor) 62.5%) 83.333% 0 / 400% 100% no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: liveShine 3s linear infinite;
+}
+@keyframes liveShine {
+  0% { background-position: 83.333% 0; }
+  15% { background-position: 83.333% 0; animation-timing-function: cubic-bezier(.714, .121, .211, .888); }
+  85%, 100% { background-position: 16.667% 0; }
+}
+@supports not (color: color-mix(in srgb, red, blue)) {
+  .live-shine { animation: none; background: none; -webkit-text-fill-color: currentColor; }
+}
+
+/* 展开后工具条目运行中的小圆环(12px,强调色)。先写不依赖 color-mix 的底色,不支持时退回透明底环。 */
+.mini-spin {
+  display: inline-block; flex: none;
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 1.6px solid transparent;
+  border-color: color-mix(in srgb, var(--color-accent) 28%, transparent);
+  border-top-color: var(--color-accent);
+  animation: miniSpin .8s linear infinite;
+}
+@keyframes miniSpin { to { transform: rotate(360deg); } }
+
+/* 最新一块思考的脑图标缓慢明暗呼吸:外层 .think-live 下的 .ti,或直接给图标加 .entry-live */
+.think-live .ti, .entry-live { animation: thinkPulse 1.8s ease-in-out infinite; }
+@keyframes thinkPulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .live-shine { animation: none; background: none; -webkit-text-fill-color: currentColor; }
+  .mini-spin, .think-live .ti, .entry-live { animation: none; }
+}
+
 /* ── 修正批#1b:composer 工具行自适应(container query) ─────────────
  * .cgui-composer-tools 是查询容器(inline-size 包含只影响宽度来源,高度仍由内容撑)。
  * 容器宽 < 400px(窄分屏格 / 手机 / 超大字号缩窄)时权限模式按钮自动藏文字只留图标
