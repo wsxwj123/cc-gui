@@ -1,8 +1,12 @@
-// r154:底部状态行的状态词(纯函数,零 React、零 DOM)。
-// 由现有流式状态推出 { phase, verb, object }:verb 是客观动词,object 是入参里最有辨识度的一项。
-// 文案约定:不随时间换俏皮词;verb / object 一律不带省略号「…」,object 只截前 50 个字符。
+// r154 / ui-live-line-v2:底部状态行的状态词(纯函数,零 React、零 DOM)。
+// 由现有流式状态推出 { phase, verb, object }。ui-live-line-v2 起只按「最后一块」判阶段:
+// 工具阶段直接显示该工具调用的标题(与折叠行同一个 toolTitle),不再加「运行 / 委派子代理」前缀;
+// 思考阶段显示「思考 · 一行预览」;正文才是「正在输出」。
+import { toolTitle, latestThinkingPreview, isInputPending } from './streamStatus.js';
 
-// 工具名 → 动词。没列出的工具走「调用 + 工具名」。
+// 工具名 → 动词。**只作回落**:取不到工具标题(description / 文件名 / pattern …)时,
+// 仍显示原来的动词短语(如 AskUserQuestion → 「等待你的回答」),不让底部行空着。
+// 没列出的工具走「调用 + 工具名」。
 export const TOOL_VERBS = Object.freeze({
   Read: '读取',
   Edit: '编辑',
@@ -84,6 +88,7 @@ function toolObject(name, input) {
   }
 }
 
+// 旧回落:动词 + 对象。只在 toolTitle 取不到标题时用。
 function toolLabel(tool) {
   const name = str(tool && tool.name).trim();
   const input = tool && tool.input;
@@ -98,23 +103,47 @@ function toolLabel(tool) {
   return { verb: '调用', object: clip(name) };
 }
 
+// 工具阶段:标题优先(与折叠行、头行同一个 toolTitle,单一来源),标题在 object 里、verb 留空
+// —— 底部行文字恰为标题,不带「运行 / 委派子代理」这类动词前缀。取不到标题才回落旧动词短语。
+// 入参还没到(input:{} / 空)时 toolTitle 必然取不到;此时用调用方算好的 pendingTitle
+// (折叠行同一个 latestToolTitles(...).liveTitle:沿用上一个入参已到的工具标题,都没有用工具名),
+// 避免每次工具刚开始都闪一下「运行 / 写入 / 委派子代理」。
+function pendingToolLabel(tool, pendingTitle) {
+  if (isInputPending(tool) && pendingTitle) return { verb: '', object: pendingTitle };
+  const title = toolTitle(tool);
+  if (title) return { verb: '', object: title };
+  return toolLabel(tool);
+}
+
 /**
- * 优先级:stopping > compacting > pendingTool > text > thinking > 其余。
- * pendingTool = 最后一个还没结果的工具调用 { name, input };没有时传 null。
+ * 优先级:stopping > compacting > pendingTool > lastType > 兼容布尔 > connecting。
+ * lastType = 生成中整轮 blocks 最后一块的类型('text' | 'thinking' | 'tool' | null),
+ * 见 streamStatus.tailBlockInfo(子代理视图与主会话共用)。
+ * lastThinkingText = 最后一块是思考时的内容,取一行预览(与折叠条末句同一套清洗)。
+ * text / thinking 两个布尔是旧调用点的兼容入口:没有 lastType 时才参与判断。
  */
 export function liveStatusLabel({
   stopping = false,
   compacting = false,
   pendingTool = null,
+  pendingTitle = null,
+  lastType = null,
+  lastThinkingText = '',
   text = false,
   thinking = false,
   sawModelOutput = true,
 } = {}) {
   if (stopping) return { phase: 'stopping', verb: '停止中', object: '' };
   if (compacting) return { phase: 'compacting', verb: '正在压缩上下文', object: '' };
-  if (pendingTool) return { phase: 'tool', ...toolLabel(pendingTool) };
-  if (text) return { phase: 'text', verb: '正在输出', object: '' };
-  if (thinking) return { phase: 'thinking', verb: '正在思考', object: '' };
+  if (pendingTool) return { phase: 'tool', ...pendingToolLabel(pendingTool, pendingTitle) };
+  const stage = lastType || (text ? 'text' : thinking ? 'thinking' : null);
+  if (stage === 'text') return { phase: 'text', verb: '正在输出', object: '' };
+  // thinking = 最后一块是思考;tool = 最后一块是工具但结果已回(空窗期,下一条消息未到)。
+  // 两种都显示「思考 · 预览」,预览取最后一条思考,取不到只写「思考」。
+  if (stage === 'thinking' || stage === 'tool') {
+    const preview = latestThinkingPreview(lastThinkingText);
+    return { phase: 'thinking', verb: '思考', object: preview || '' };
+  }
   if (sawModelOutput === false) return { phase: 'connecting', verb: '连接中', object: '' };
-  return { phase: 'thinking', verb: '正在思考', object: '' };
+  return { phase: 'thinking', verb: '思考', object: '' };
 }

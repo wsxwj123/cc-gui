@@ -29,8 +29,12 @@ test('SF-100 夹具自检：主夹具能打开、3 轮都在、每轮两段过�
   const body = page.locator('body');
   await expect(body).toContainText(A.midText);
   await expect(body).toContainText(A.finalText.slice(0, 40));
-  const groupLabels = await page.getByText('思考 · 2 次工具调用', { exact: true }).count();
-  expect(groupLabels, '主夹具每轮 2 个过程段折行（既有 WorkGroup 行为）').toBe(A.rounds * 2);
+  // 每组折行 =「<本组最后一次工具调用的标题> · N 次工具调用」：group1 最后一个工具是 Read，
+  // group2 最后一个是 Grep(pattern=ROOT=)。每组各 A.rounds 条。
+  const g1 = await page.getByText('读取 release.local.sh · 2 次工具调用', { exact: true }).count();
+  const g2 = await page.getByText('搜索 ROOT= · 2 次工具调用', { exact: true }).count();
+  expect(g1, '主夹具每轮第 1 个过程段折行（最后工具 Read 的标题）').toBe(A.rounds);
+  expect(g2, '主夹具每轮第 2 个过程段折行（最后工具 Grep 的标题）').toBe(A.rounds);
 });
 
 test('SF-101 收官态结构：每轮 1 条条带、默认收起、头行是按钮', async ({ page }) => {

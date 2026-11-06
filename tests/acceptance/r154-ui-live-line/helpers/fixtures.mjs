@@ -15,8 +15,9 @@ export function fakebinDir() { return suitePath('.artifacts', 'fakebin'); }
 export function fakeCtlDir() { return path.join(homeDir(), 'fake-claude'); }
 export function manifestPath() { return suitePath('.artifacts', 'fixture-manifest.json'); }
 
-// l1…l15 对应行为 L1…L15；每条各占一条会话（L5/L6/L7/L13/L14 在同一条会话里先后跑两轮，轮与轮之间有 resetCtl）。
-export const KEYS = Array.from({ length: 15 }, (_, i) => `l${i + 1}`);
+// l1…l15 对应行为 L1…L15；u1…u5 对应 ui-live-line-v2 的 U1–U5。
+// 每条各占一条会话（L5/L6/L7/L13/L14 在同一条会话里先后跑两轮，轮与轮之间有 resetCtl）。
+export const KEYS = [...Array.from({ length: 15 }, (_, i) => `l${i + 1}`), 'u1', 'u2', 'u3', 'u4', 'u5', 'u6'];
 export const SESSIONS = Object.fromEntries(KEYS.map((k, i) => [k, {
   sid: `a1540${String(i + 1).padStart(3, '0')}-0000-4000-8000-${String(i + 1).padStart(12, '0')}`,
   marker: `R154MARK${k.toUpperCase()}X`, // 以 X 收尾：R154MARKL1X 不会是 R154MARKL11X 的子串

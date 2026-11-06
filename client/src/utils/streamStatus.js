@@ -265,7 +265,8 @@ const titleOrName = (toolCall) => toolTitle(toolCall) ?? toolDisplayName(toolCal
 
 // 入参还没到:直播时 content_block_start 先放 input:{},入参 JSON 流完整才换成真对象。
 // 「还是空的、也还没有结果」= 这个工具刚开始,标题还定不下来。
-function isInputPending(toolCall) {
+// 导出供底部状态行复用(ui-live-line-v2 修正轮:入参未到时不回落动词短语)。
+export function isInputPending(toolCall) {
   if (toolCall?.result != null) return false;
   const input = toolCall?.input;
   if (input == null || input === '') return true;
@@ -278,7 +279,7 @@ function isInputPending(toolCall) {
 //   liveTitle(回合在生成):最后一个还没结果的工具(并行时 = 还在跑的最后一个);都有结果时同 doneTitle。
 //     它的入参还没到 → 不拿它,沿用它之前最近一个入参已到的工具;之前一个都没有就用它的工具名。
 //     入参传完后它自己的标题立刻顶上(避免"上一个标题 → 工具名 → 新标题"闪一下)。
-function latestToolTitles(calls) {
+export function latestToolTitles(calls) {
   if (!calls.length) return { doneTitle: null, liveTitle: null };
   const doneTitle = titleOrName(calls[calls.length - 1]);
   let running = -1;
@@ -315,7 +316,7 @@ function stripSummaryTail(list) {
 // 只剥配对的强调/删除线/行内码,零散的单个记号一律不碰(见 stripPairedMarkers);
 // 与 thinkingSummary 的"全字符类扫射"口径**故意不同**,别复用也别改 thinkingSummary。
 const THINK_TAIL_MAX = 40;
-function cleanTailText(src, max = THINK_TAIL_MAX) {
+export function cleanTailText(src, max = THINK_TAIL_MAX) {
   if (src == null) return null;
   // String(src) 对 Object.create(null) 这类无原生 toString 的对象会抛 —— 摘要在渲染路径上,
   // 抛出去就是整列表白屏。取不到就当作没有尾段。
@@ -341,4 +342,55 @@ function stripPairedMarkers(s) {
     .replace(/(^|[^\w~])~~([^\s~](?:[^~]*[^\s~])?)~~(?![\w~])/g, '$1$2')     // 删除线
     .replace(/(^|[^\w*])\*([^\s*](?:[^*]*[^\s*])?)\*(?![\w*])/g, '$1$2')     // 单字符强调
     .replace(/(^|[^\w_])_([^\s_](?:[^_]*[^\s_])?)_(?![\w_])/g, '$1$2');
+}
+
+// ── ui-live-line-v2:底部状态行只看「最后一块」────────────────────────
+// 入参 = 生成中整轮的 blocks(与 stripSummary 同一形状)。返回最后一块的类型与
+// 「最后一块是思考」时的内容(供状态行取一行预览)。多轮回合里整轮累计的 text
+// 不能代表此刻在做什么 —— 前面出现过正文不代表现在还在输出。
+// 空块(还没有 content / toolCall)跳过,避免 content_block_start 的空壳抢走判定。
+export function tailBlockInfo(blocks) {
+  const list = Array.isArray(blocks) ? blocks : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const b = list[i];
+    if (!b) continue;
+    if (b.type === 'text' && b.content) return { lastType: 'text', lastThinkingText: '' };
+    if (b.type === 'thinking' && b.content) return { lastType: 'thinking', lastThinkingText: b.content };
+    if (b.type === 'tool_use' && b.toolCall) return { lastType: 'tool', lastThinkingText: '' };
+  }
+  return { lastType: null, lastThinkingText: '' };
+}
+
+// ── ui-live-line-v2 修正轮:底部行的思考预览取「最新一句」──────────────────
+// 只处理尾部 600 个码元:流式时整段思考可能很长,每次渲染都全量扫是性能隐患,
+// 而用户要看的只是"此刻在想什么"(句子在尾部)。
+// 切段:换行、全角句末标点(。！？；)、以及后面跟空白或结尾的半角 . ! ? ;
+// (不拆 3.14 / a.b / example.com/x)。最后一段不足 6 个字符且前面还有段时取前一段,
+// 避免新一句刚开头时预览抖成一两个字。选中段再走 cleanTailText(与折叠条同一套清洗)。
+// 折叠行 WorkGroup 不走本函数(仍取最后一块思考的开头 40 字)。
+const THINKING_PREVIEW_WINDOW = 600;
+
+export function latestThinkingPreview(content) {
+  if (typeof content !== 'string' || !content) return null;
+  let tail = content;
+  if (content.length > THINKING_PREVIEW_WINDOW) {
+    const start = content.length - THINKING_PREVIEW_WINDOW;
+    tail = content.slice(start);
+    // 窗口起点落在代理对中间 → 丢掉被切断的那半个(否则预览开头是孤立代理)
+    const prev = content.charCodeAt(start - 1);
+    const first = content.charCodeAt(start);
+    if (prev >= 0xD800 && prev <= 0xDBFF && first >= 0xDC00 && first <= 0xDFFF) tail = tail.slice(1);
+  }
+  // 用捕获组切段:分隔符(句末标点 / 换行)拼回前一段,预览保留「最后一句」自己的标点。
+  const parts = tail.split(/(\r?\n|[。！？；]|[.!?;](?=\s|$))/);
+  let last = null;
+  let prevSeg = null;
+  for (let i = 0; i < parts.length; i += 2) {
+    const c = cleanTailText(parts[i] + (parts[i + 1] || ''));
+    if (!c) continue;
+    prevSeg = last;
+    last = c;
+  }
+  if (!last) return null;
+  return Array.from(last).length < 6 && prevSeg ? prevSeg : last;
 }

@@ -30,7 +30,7 @@ import { useStore, roundStripEnd } from '../stores/sessionStore.js';
 import { TASK_TOOL_NAMES, rebuildTodosFromTaskCalls } from '../utils/todos.js';
 import {
   formatInputPreview, thinkingLabel, groupCoworkBlocks, activeGroupKey,
-  stripSummary, isFoldableSegment, getSkillDocReadName,
+  stripSummary, isFoldableSegment, getSkillDocReadName, toolTitle, cleanTailText,
 } from '../utils/streamStatus.js';
 import { Linkify } from '../utils/linkify.jsx';
 import { ToolResultImages } from './tools/ToolResultImages.jsx';
@@ -516,10 +516,20 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
 function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null }) {
   const toolN = items.reduce((n, b) => n + (b.type === 'tool_use' ? 1 : 0), 0);
   const hasThinking = items.some((b) => b.type === 'thinking');
-  const parts = [];
-  if (hasThinking) parts.push('思考');
-  if (toolN > 0) parts.push(`${toolN} 次工具调用`);
-  const summary = parts.join(' · ') || '工作过程';
+  // ui-live-line-v2 折叠行文案:
+  //   含工具 →「<本组最后一次工具调用的标题> · N 次工具调用」(标题取不到只写「N 次工具调用」);
+  //   只有思考 →「思考 · <一行预览>」(取不到只写「思考」);都没有 →「工作过程」。
+  // 标题与末句预览都取 r152a / 折叠条同一套函数,不另写一套文案。
+  let summary = '工作过程';
+  if (toolN > 0) {
+    const lastTool = [...items].reverse().find((b) => b.type === 'tool_use')?.toolCall;
+    const title = toolTitle(lastTool);
+    summary = title ? `${title} · ${toolN} 次工具调用` : `${toolN} 次工具调用`;
+  } else if (hasThinking) {
+    const lastThinking = [...items].reverse().find((b) => b.type === 'thinking' && b.content)?.content;
+    const preview = cleanTailText(lastThinking);
+    summary = preview ? `思考 · ${preview}` : '思考';
+  }
   return (
     <div className="border-l-2 border-canvas-deep/40">
       <button

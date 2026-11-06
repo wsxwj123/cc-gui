@@ -7,6 +7,7 @@ import { CoworkBlocks } from './TurnBubble.jsx';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { LiveStatusLine } from './LiveStatusLine.jsx';
 import { liveStatusLabel } from '../utils/liveStatus.js';
+import { tailBlockInfo, latestToolTitles } from '../utils/streamStatus.js';
 import { stopNoOwnerNotice } from './tools/TaskCard.jsx';
 import { resolveOwnedAgent } from '../utils/agentOwner.js';
 import { AGENT_TERMINAL_STATUSES, agentSourceState, taskRunEvidence } from '../utils/agentView.js';
@@ -19,13 +20,16 @@ function fmtTok(n) {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 }
 
-// r154:子代理底部状态行的状态词。toolCalls 里最后一个没有 result 的 = 正在跑的工具;
-// 否则看 blocks 最后一块的类型(text → 正在输出,thinking → 正在思考),都没有走默认。
+// r154 / ui-live-line-v2:子代理底部状态行的状态词。toolCalls 里最后一个没有 result 的 = 正在跑的工具;
+// 否则看 blocks 最后一块的类型(text → 正在输出,thinking → 思考 + 预览,tool → 空窗期),
+// 与主会话共用同一个 liveStatusLabel / tailBlockInfo,不另写分支。
 function subagentLiveLabel(agent, blocks) {
   const toolCalls = Array.isArray(agent?.toolCalls) ? agent.toolCalls : [];
   const pendingTool = [...toolCalls].reverse().find((tc) => tc && !tc.result) || null;
-  const lastType = blocks.length ? blocks[blocks.length - 1]?.type : null;
-  return liveStatusLabel({ pendingTool, text: lastType === 'text', thinking: lastType === 'thinking' });
+  const { lastType, lastThinkingText } = tailBlockInfo(blocks);
+  // 与主会话同一份「入参未到 → 沿用折叠行标题」逻辑。
+  const pendingTitle = latestToolTitles(toolCalls).liveTitle;
+  return liveStatusLabel({ pendingTool, pendingTitle, lastType, lastThinkingText });
 }
 
 // #9/O4 子代理会话窗口:样式对齐正常会话(用户气泡在右、回复在左、思考/工具折叠),
