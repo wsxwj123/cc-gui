@@ -16,7 +16,7 @@
 // Bound to 127.0.0.1 only — no auth, never exposed.
 
 import http from 'node:http';
-import { normalizeContextOverflow } from './openai-proxy.js';
+import { normalizeContextOverflow, probeUpstreamAuth, noRetryHeadersFor, isConnectPhaseError } from './openai-proxy.js';
 import { isCountTokensRequest, estimateInputTokens, parseUpstreamCountTokens, COUNT_TOKENS_UPSTREAM_TIMEOUT_MS, recordCountTokensOutcome } from '../utils/context-tokens.js';
 import { collectRealToolResultIds } from '../utils/tool-result-reconcile.js';
 import { normalizeUserIdInBody } from '../utils/user-id-normalize.js';
@@ -380,6 +380,27 @@ async function handle(req, clientRes) {
     // 3xx 状态按原逻辑透传回 CLI,由 CLI 报错。
     upstreamResp = await fetch(url, { method: req.method, headers, body, signal: ac.signal, redirect: 'manual' });
   } catch (err) {
+    // auth-probe:仅 POST /v1/messages,已连上上游后的网络错误(如 DeepSeek 对错 Key 大请求直接重置连接)
+    // 用同一把 Key 向固定路径发一次最小探测;自身 90s 超时(AbortError)与连接阶段错误不探测。
+    // finally 照旧清 90s 计时器:主 fetch 已结束,探测期间到点 abort 无副作用。
+    if (req.method === 'POST' && req.url.split('?')[0] === '/v1/messages'
+      && err?.name !== 'AbortError' && !isConnectPhaseError(err)) {
+      // model 取最终发给上游的 body(已过模型兜底映射与规范化)。
+      let model;
+      try { const m = JSON.parse(String(body)).model; if (typeof m === 'string') model = m; } catch {}
+      const probeHeaders = {
+        'content-type': 'application/json',
+        'x-api-key': up.authToken,
+        'authorization': `Bearer ${up.authToken}`,
+        'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
+      };
+      const probe = await probeUpstreamAuth(up.baseURL + '/v1/messages', probeHeaders, model);
+      if (probe) {
+        clientRes.writeHead(probe.status, { 'Content-Type': probe.contentType || 'application/json', 'Cache-Control': 'no-cache', ...noRetryHeadersFor(probe.status) });
+        clientRes.end(probe.body);
+        return;
+      }
+    }
     clientRes.writeHead(502, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'upstream fetch failed: ' + err.message } }));
     return;
@@ -438,7 +459,8 @@ async function handle(req, clientRes) {
     return;
   }
 
-  clientRes.writeHead(upstreamResp.status, { 'Content-Type': ct, 'Cache-Control': 'no-cache' });
+  // 上游 HTTP 401/403 带 x-should-retry:false,CLI 不再白等重试(不可能成功的鉴权错误)。
+  clientRes.writeHead(upstreamResp.status, { 'Content-Type': ct, 'Cache-Control': 'no-cache', ...noRetryHeadersFor(upstreamResp.status) });
 
   if (!upstreamResp.body) { clientRes.end(); return; }
 
