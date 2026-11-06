@@ -67,7 +67,7 @@ import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { GenuiActionProvider, useGenuiActionCapability } from './genui/host/action-context.jsx';
 import { TurnBubble, StripRoundContext } from './components/TurnBubble.jsx';
-import { stripSummary } from './utils/streamStatus.js';
+import { stripSummary, tailBlockInfo } from './utils/streamStatus.js';
 import { initialSpan, extendUp, needsExtend, sliceRows } from './utils/mountWindow.js';
 import { historyMessageKey } from './utils/historyPaging.js';
 import { HISTORY_COST_ESTIMATE_NOTE, hasFullHistoryStats, historyStatsScopeLabel } from './utils/historyStatsScope.js';
@@ -2754,15 +2754,18 @@ function LastUpdateAgo({ getAt }) {
   return <span className="text-[12px] text-ink-faint shrink-0 tabular-nums">· 上次更新 {txt}</span>;
 }
 
-function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true, stopping = false, compacting = false }) {
+function StreamingStatusLine({ blocks = [], thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true, stopping = false, compacting = false }) {
   // 最后一个还没结果的工具调用(并行时取最后一个)
   const pendingTool = [...toolCalls].reverse().find((tc) => !tc.result) || null;
+  // ui-live-line-v2:阶段只看整轮 blocks 的最后一块 —— 前面出现过正文不代表现在还在输出
+  // (多轮回合里思考 / 调工具曾被整轮累计的 text 压成「正在输出」)。
+  const { lastType, lastThinkingText } = tailBlockInfo(blocks);
   // r119:stopping 优先 —— 用户已请求停止、本轮还没结束时如实显示「停止中」。
   // r154:自动压缩进行中(liveStatus.compacting,来自 SDK 的 status:compacting 事件)次之,显示「正在压缩上下文」;
   // 下面的「等待状态行(G)」仍说明原因并带进度条,两行并存。
   // r65:sawModelOutput 为 false(reattach 接管一个还没吐任何产出的回合)时显示「连接中」;
-  // 首发路径默认 true,空窗期(工具结果全回、下一条整消息未到)显示「正在思考」,不隐藏整行。
-  const label = liveStatusLabel({ stopping, compacting, pendingTool, text: !!text, thinking: !!thinking, sawModelOutput });
+  // 首发路径默认 true,空窗期(工具结果全回、下一条整消息未到)显示「思考」,不隐藏整行。
+  const label = liveStatusLabel({ stopping, compacting, pendingTool, lastType, lastThinkingText, text: !!text, thinking: !!thinking, sawModelOutput });
   // 缩进 50px(34px 头像 + 16px gap)与气泡正文列对齐,渲染在气泡下方。
   return (
     <div className="px-6 -mt-2 pb-3 animate-fade-in">
@@ -9914,6 +9917,7 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                       isStreaming/stopping 变,不能被正文记忆化拖住。 */}
                   {liveStreamBubble}
                   <StreamingStatusLine
+                    blocks={streamingBlocks}
                     thinking={streamingThinking}
                     text={streamingText}
                     toolCalls={streamingToolCalls}
@@ -9964,6 +9968,7 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                   (在做什么 + 已用时长),否则历史卡两次刷新之间界面完全静止,像卡死。 */}
               {liveVisible && isStreaming && reattachStream && (
                 <StreamingStatusLine
+                  blocks={streamingBlocks}
                   thinking={streamingThinking}
                   text={streamingText}
                   toolCalls={streamingToolCalls}

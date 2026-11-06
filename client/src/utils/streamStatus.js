@@ -315,7 +315,7 @@ function stripSummaryTail(list) {
 // 只剥配对的强调/删除线/行内码,零散的单个记号一律不碰(见 stripPairedMarkers);
 // 与 thinkingSummary 的"全字符类扫射"口径**故意不同**,别复用也别改 thinkingSummary。
 const THINK_TAIL_MAX = 40;
-function cleanTailText(src, max = THINK_TAIL_MAX) {
+export function cleanTailText(src, max = THINK_TAIL_MAX) {
   if (src == null) return null;
   // String(src) 对 Object.create(null) 这类无原生 toString 的对象会抛 —— 摘要在渲染路径上,
   // 抛出去就是整列表白屏。取不到就当作没有尾段。
@@ -341,4 +341,21 @@ function stripPairedMarkers(s) {
     .replace(/(^|[^\w~])~~([^\s~](?:[^~]*[^\s~])?)~~(?![\w~])/g, '$1$2')     // 删除线
     .replace(/(^|[^\w*])\*([^\s*](?:[^*]*[^\s*])?)\*(?![\w*])/g, '$1$2')     // 单字符强调
     .replace(/(^|[^\w_])_([^\s_](?:[^_]*[^\s_])?)_(?![\w_])/g, '$1$2');
+}
+
+// ── ui-live-line-v2:底部状态行只看「最后一块」────────────────────────
+// 入参 = 生成中整轮的 blocks(与 stripSummary 同一形状)。返回最后一块的类型与
+// 「最后一块是思考」时的内容(供状态行取一行预览)。多轮回合里整轮累计的 text
+// 不能代表此刻在做什么 —— 前面出现过正文不代表现在还在输出。
+// 空块(还没有 content / toolCall)跳过,避免 content_block_start 的空壳抢走判定。
+export function tailBlockInfo(blocks) {
+  const list = Array.isArray(blocks) ? blocks : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const b = list[i];
+    if (!b) continue;
+    if (b.type === 'text' && b.content) return { lastType: 'text', lastThinkingText: '' };
+    if (b.type === 'thinking' && b.content) return { lastType: 'thinking', lastThinkingText: b.content };
+    if (b.type === 'tool_use' && b.toolCall) return { lastType: 'tool', lastThinkingText: '' };
+  }
+  return { lastType: null, lastThinkingText: '' };
 }

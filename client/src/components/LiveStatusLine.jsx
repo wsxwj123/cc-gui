@@ -21,10 +21,13 @@ export function LiveStatusLine({ label, startedAt, className = '' }) {
         <ElapsedTime startedAt={startedAt} />
       </span>
       <span data-live-sep="" aria-hidden="true" className="shrink-0 text-ink-faint">·</span>
-      {/* textContent 必须恰为 verb 或 verb + ' ' + object:中间只有一个空格,不带省略号 */}
+      {/* textContent 必须恰为 verb、object 或 verb + 分隔 + object,不带省略号。
+          工具阶段 verb 为空、标题在 object 里 → 不渲染空 verb 节点,文字没有任何前导空格。
+          思考阶段是「思考 · 一行预览」,其余 verb + object(回落短语)仍用一个空格。 */}
       <span data-live-text="" className="live-shine min-w-0 truncate text-ink-soft">
-        <span data-live-verb="">{verb}</span>
-        {object ? <>{' '}<span data-live-object="" className="text-ink">{object}</span></> : null}
+        {verb ? <span data-live-verb="">{verb}</span> : null}
+        {verb && object ? (phase === 'thinking' ? ' · ' : ' ') : null}
+        {object ? <span data-live-object="" className="text-ink">{object}</span> : null}
       </span>
     </div>
   );
