@@ -48,7 +48,7 @@
 | D1 | 无 Origin、自报 same-site / cross-site 访问五个不同挂载点(health、auth-status、network、skins、读文件) | 全部 403;JSON;正文恰为 `{"error":"Cross-origin request blocked by cc-gui"}`;读文件的应答里没有 SVG 内容;无任何 Access-Control-Allow-* 头(network 的正文不打印) |
 | D2 | 自报取值的变体:Cross-Site、SAME-SITE、`same-origin, cross-site`、`none, same-site`、`cross-site `(尾随空格)、两行同名头(same-origin / same-site) | 全部 403 固定正文 |
 | D3 | 放行:自报 none、same-origin、不带该头、未知取值 bogus,访问 health 与读文件 | 全部 200;读文件正文等于 SVG 字节;日志里没有拒绝行 |
-| D4 | 自报 cross-site、无 Origin,不同的路径写法 | `/API/health`、`/Api/Health`、`/api/health/` 照样 403 固定正文;`/apix/health`、`//api/health`、`/api//health`、`/api%2Fhealth`、`/%61pi/health`、`/`、`/assets/x.js`、`/icons/a.png` 不是来源拒绝:不是 403、正文没有来源拒绝文案,且与"不带自报头"的对照请求状态码、类型都相同(没有前端构建时对照是 404;见下面"与接口文件的差异") |
+| D4 | 自报 cross-site、无 Origin,不同的路径写法 | `/API/health`、`/Api/Health`、`/api/health/`、`/api//health` 照样 403 固定正文;`/apix/health`、`//api/health`、`/api%2Fhealth`、`/%61pi/health`、`/`、`/assets/x.js`、`/icons/a.png` 不是来源拒绝:不是 403、正文没有来源拒绝文案,且与"不带自报头"的对照请求状态码、类型都相同(没有前端构建时对照是 404;见下面"与接口文件的差异") |
 | D5 | 带 Origin 的既有规则抽样:(a) 同站 Origin 无自报;(b) 同站 Origin + cross-site;(c) 另一个端口的 Origin | (a) 200 且回显 Access-Control-Allow-Origin;(b) 403 固定正文,日志 rule=sfs-veto;(c) 403 固定正文,日志 rule=site-mismatch;三次都不是 no-origin-sfs-veto |
 | D6 | K3 拒绝的日志整行 | 恰一行匹配 `[cors] blocked origin=null host="127.0.0.1" path="…probe=d6…" sfs="cross-site" rule=no-origin-sfs-veto rawHost="127.0.0.1:端口"`;再发 `Same-Site` 时 sfs 原样记成 `"Same-Site"` |
 | D7-chromium / D7-webkit | 真浏览器里,他端口网页(127.0.0.1:Q)与跨站别名网页(localhost:Q)各发 img、fetch(no-cors)、iframe、audio 四种请求去读后端的图片;同源页面发 img 与 fetch 作对照 | 8 个请求每个在日志里至少有一行 `origin=null … rule=no-origin-sfs-veto`(sfs 分别是 same-site 与 cross-site);img 的 onerror 触发;同源对照成功且日志里没有 no-origin-sfs-veto |
@@ -78,3 +78,12 @@
 - 读文件接口的 Range 支持(接口文件说明现状不支持,只验证 HEAD / Range 请求的头与 GET 一致,不验证 206)。
 - F1 只检查 `client/vite.config.js`、`client/package.json`、根 `package.json` 的 scripts;不检查其他启动脚本、环境变量(例如 `VITE_*` 或 CLI 之外的 host 设置)。
 - 其余 4xx/5xx 的响应头(错误应答是否也带 nosniff 接口文件没要求,不测)。
+
+## 主会话修订(2026-11-06,开发交卷后;原因都是接口文件写得不准,不是产品问题)
+
+- D4:接口文件把 `/api//health` 列成"不是来源拒绝"的对照。实测 `/api` 的挂载匹配也认 `/api//health`(余下的 `//health` 没有路由接),
+  K3 对它回 403。任务书对 K3 的口径是"对 `/api/*` 一律拒",这种写法属于被拒的一组,所以把它从对照里挪到"照样 403"的一组。`//api/health`(以双斜杠开头)不属于 `/api` 挂载,仍在对照里。
+- D7:拒绝日志的每个字段会被截到 200 字符(r155 定下的口径,接口文件漏写)。本工作树路径长,读文件地址有 241 字符,放在末尾的 `probe=<标签>` 被截没,8 个标签都匹配不到。
+  把 `probe` 标记移到查询串最前面;断言本身(每个标签至少一行 `origin=null … rule=no-origin-sfs-veto`、同源对照没有该规则的行)没有任何放松。
+- 以上修订的锁定前基线:原锁 tag 在 11befac53;修订后重锁。
+

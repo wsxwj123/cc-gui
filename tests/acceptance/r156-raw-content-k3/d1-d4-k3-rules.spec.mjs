@@ -59,7 +59,9 @@ test('D3 放行:none / same-origin / 不带该头 / 未知取值 都 200,读文�
 test('D4 路径范围与路由一致:大小写/尾斜杠写法照样拒;非 /api 路径与各种怪写法不是来源拒绝(与不带自报头的对照一致)', async () => {
   await withInstance({ label: 'd4' }, async (inst) => {
     const sfs = ['Sec-Fetch-Site: cross-site'];
-    for (const p of ['/API/health', '/Api/Health', '/api/health/']) {
+    // 主会话修订(r156):`/api//health` 也在 /api 的挂载范围里(挂载匹配只看前缀 /api/),虽然余下的 //health 没有路由接,
+    // 但任务书对 K3 的口径是"对 /api/* 一律拒",所以它属于被拒的一组,不再放在"不是来源拒绝"的对照里。
+    for (const p of ['/API/health', '/Api/Health', '/api/health/', '/api//health']) {
       expectBlocked(await rawGet(inst.port, p, sfs), `D4 ${p} + cross-site`);
     }
     // 其余写法路由不认作 /api,来源拒绝不得介入。接口文件按"隔离实例没有前端构建产物"写的是 404;
@@ -67,7 +69,7 @@ test('D4 路径范围与路由一致:大小写/尾斜杠写法照样拒;非 /api
     // 所以断言写成:不是 403、没有来源拒绝文案,并且与"不带自报头"的对照请求(来源拒绝完全不介入)状态码、类型都相同
     // ——没有前端构建时对照就是 404,这条同样强制 404;实际状态记进用例注解。
     const seen = [];
-    for (const p of ['/apix/health', '//api/health', '/api//health', '/api%2Fhealth', '/%61pi/health', '/', '/assets/x.js', '/icons/a.png']) {
+    for (const p of ['/apix/health', '//api/health', '/api%2Fhealth', '/%61pi/health', '/', '/assets/x.js', '/icons/a.png']) {
       const control = await rawGet(inst.port, p);
       const r = await rawGet(inst.port, p, sfs);
       seen.push(`${p}→${r.status}`);

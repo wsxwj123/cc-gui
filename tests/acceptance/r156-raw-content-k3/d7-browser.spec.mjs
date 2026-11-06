@@ -2,7 +2,7 @@
 // 他端口页 http://127.0.0.1:Q/(浏览器自报 same-site)与跨站别名页 http://localhost:Q/(自报 cross-site),各发 img / fetch(no-cors) / iframe / audio 四种请求。
 import { test, expect } from '@playwright/test';
 import { withInstance, waitLogSince } from './helpers/world.mjs';
-import { PNG, writeFixture, dl, rawUrl } from './helpers/fixtures.mjs';
+import { PNG, writeFixture, dl } from './helpers/fixtures.mjs';
 import { launchEngine, startStatic, fireCrossSite, pageImg, pageFetchStatus } from './helpers/browser.mjs';
 
 const KINDS = ['img', 'fetch', 'iframe', 'audio'];
@@ -14,6 +14,9 @@ for (const engine of ['chromium', 'webkit']) {
   test(`D7-${engine} 他站网页的 img / fetch(no-cors) / iframe / audio 都被后端拒绝,同源页面的 img 与 fetch 不受影响`, async () => {
     await withInstance({ label: `d7-${engine}` }, async (inst) => {
       const png = writeFixture(inst.home, dl('a.png'), PNG);
+      // 主会话修订(r156):拒绝日志里 path 字段会被截到 200 字符(与 r155 的拒绝日志同一口径);工作树路径一长,
+      // 放在 URL 末尾的 probe 标记就被截没。所以标记放在查询串最前面,不管路径多长都留得住。
+      const probeUrl = (label) => `${inst.base}/api/files/read?probe=${label}&raw=1&path=${encodeURIComponent(png)}`;
       const stat = await startStatic();
       const browser = await launchEngine(engine);
       const fired = {};
@@ -23,7 +26,7 @@ for (const engine of ['chromium', 'webkit']) {
           const ctx = await browser.newContext();
           const page = await ctx.newPage();
           await page.goto(`http://${host}:${stat.port}/`);
-          const u = (kind) => rawUrl(inst.base, png, `&probe=${tag}-${kind}`);
+          const u = (kind) => probeUrl(`${tag}-${kind}`);
           fired[tag] = await fireCrossSite(page, { img: u('img'), fetch: u('fetch'), iframe: u('iframe'), audio: u('audio') });
           await ctx.close();
         }
@@ -31,8 +34,8 @@ for (const engine of ['chromium', 'webkit']) {
         const page = await ctx.newPage();
         await page.goto(`${inst.base}/api/health`);
         ctl = {
-          img: await pageImg(page, rawUrl(inst.base, png, '&probe=ctl-img')),
-          fetch: await pageFetchStatus(page, rawUrl(inst.base, png, '&probe=ctl-fetch')),
+          img: await pageImg(page, probeUrl('ctl-img')),
+          fetch: await pageFetchStatus(page, probeUrl('ctl-fetch')),
         };
         await ctx.close();
       } finally {
