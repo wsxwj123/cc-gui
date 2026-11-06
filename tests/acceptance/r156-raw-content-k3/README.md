@@ -61,7 +61,7 @@
 - 绿(9 个):A6、C-chromium C-webkit C-pdf-chromium C-vite-chromium C-vite-webkit、D3 D5、F1。
 - 红的原因:raw=1 应答缺 nosniff 与 CSP sandbox(A 组,B 组里脚本因此会运行);无 Origin 的自报跨站请求仍被放行成 200、没有 no-origin-sfs-veto 日志(D1 D2 D4 D6 D7);
   WS 握手挂满 3 秒、日志出现 `[uncaughtException] Error: EACCES … network.json`(E1)。A5 只红在缺 nosniff,"没有 CSP"那半条本来就成立。
-- 修复后整套应全绿(这一点尚未验证,修复前只验证了上面的 14 红 9 绿)。
+- 修复后整套 23/23 全绿(主会话验证,约 43 秒;其中 D4、D7 经下面"主会话修订"两处期望修正后才绿)。修复前 14 红 9 绿见上。
 
 ## 与接口文件的差异(写明,不悄悄改)
 
