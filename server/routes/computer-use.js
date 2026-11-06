@@ -381,7 +381,7 @@ function auditValue(value) {
 // 直接改 grants.json 的进程、本机上把请求原样转给后台的代理(经过它的网页与后台同站,WS 同一条连接本就能开
 // 内置终端)。后台读文件接口同源下发的内容自 r156 起 nosniff 全部类型都带、CSP sandbox 除 PDF 外
 // 都带(PDF 只带 nosniff;带脚本 SVG 直接打开也不运行脚本);无 Origin 且浏览器自报 Sec-Fetch-Site 为
-// same-site/cross-site 的 /api/* 请求一律 403(K3,只对回环地址与 https 访问生效)。残余(WebKit PDF 插件请求报 none、用户亲手新标签打开聊天附件 SVG 的 blob
+// same-site/cross-site 的 /api/* 请求一律 403(K3,只对回环地址与 https 访问生效)。残余(WebKit 的 PDF 插件与下载链接的二次请求不带跨站标记、用户亲手新标签打开聊天附件 SVG 的 blob
 // 地址、Windows 真机与 Firefox 未测)与威胁模型见 computer-use/grant-token.js。
 // 每次变更(成功与被拒)记一行审计日志,**不记凭证值**。
 router.post('/computer-use/grants', (req, res) => {

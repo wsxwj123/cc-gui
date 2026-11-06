@@ -17,8 +17,9 @@
 // 另有 K3(services/auth.js 的 checkNoOriginFetchSite):不带 Origin、浏览器自报 Sec-Fetch-Site 为
 // same-site/cross-site 的 /api/* 请求(他站/他端口网页的导航、嵌入、图片加载)一律 403;
 // 浏览器只对回环地址与 https(隧道域名)发该头,手输地址/书签/别的应用点开的链接报 none 按设计不拦,经局域网
-// IP 的明文 HTTP、老浏览器不发该头,K3 不生效,只剩 sandbox 这道内容防线。残余:WebKit 的 PDF 插件加载请求
-// 自报 none(只能触发读不到结果的 GET);浏览器版里用户亲手对聊天附件 SVG 图选"在新标签页打开"时,脚本以
+// IP 的明文 HTTP、老浏览器不发该头,K3 不生效,只剩 sandbox 这道内容防线。残余:WebKit 的 PDF 插件加载请求、
+// 以及点击带 download 属性的链接时浏览器补发的第二次请求,在 macOS 的 WKWebView 里实测不带 Sec-Fetch-Site
+// (只能触发读不到结果的 GET,或把响应存成下载文件,不会作为页面运行);浏览器版里用户亲手对聊天附件 SVG 图选"在新标签页打开"时,脚本以
 // 页面来源运行(blob: 地址,响应头管不到);Windows 真机与 Firefox 未测。
 // 与 H1 nonce 不同:nonce 绑定单个待决请求、随请求生灭;凭证要在面板整个生命周期可用,按进程常驻。
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
