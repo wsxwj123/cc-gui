@@ -143,6 +143,22 @@ let w9err = null;
 try { CU.setGrant({ bundleId: A, foreground: true }, {}); } catch (e) { w9err = { code: e.code, message: e.message }; }
 out.w9 = w9err;
 
+// W13 自相矛盾的请求(撤销应用 + 开前台,带凭证):必须整条拒绝,不能吞掉撤销、反而把前台打开
+CU.setGrant({ bundleId: A, granted: true }, { panelCredential: true });
+before = bytes();
+out.w13 = await callPost({ bundleId: A, granted: false, foreground: true }, 'ok');
+out.w13.fileUnchanged = bytes() === before;
+let w13err = null;
+try { CU.setGrant({ bundleId: A, granted: false, foreground: true }, { panelCredential: true }); } catch (e) { w13err = { code: e.code }; }
+out.w13.direct = w13err;
+out.w13.directUnchanged = bytes() === before;
+out.w13.entryAfter = entry(A);
+
+// W14 撤销应用 + 显式 foreground:false:照旧撤销(新校验不能误伤)
+CU.setGrant({ bundleId: A, granted: true }, { panelCredential: true });
+out.w14 = await callPost({ bundleId: A, granted: false, foreground: false });
+out.w14.entry = entry(A);
+
 process.stdout.write(JSON.stringify(out) + '\\n');
 `;
 
@@ -211,6 +227,21 @@ report.check('C2-W8', '审计日志含 foreground=yes/no,且不含凭证值', 'r
 report.check('C2-W9', 'setGrant 内部路径不带 panelCredential 开前台 → CU_GRANT_FORBIDDEN', 'green', () => {
   assert.ok(out.w9, 'setGrant 没有抛错,内部调用方可以静默扩权');
   assert.equal(out.w9.code, 'CU_GRANT_FORBIDDEN', `错误码 ${out.w9.code}`);
+});
+
+report.check('C2-W13', '自相矛盾的请求(撤销应用 + 开前台):400 CU_INVALID_ARGUMENT,授权文件字节不变;setGrant 直调同样抛错', 'red', () => {
+  assert.ok(out, `子进程没有输出 JSON:${diag()}`);
+  assert.equal(out.w13.status, 400, `状态码 ${out.w13.status},应为 400(撤销被吞、前台被打开:${JSON.stringify(out.w13.entryAfter)})`);
+  assert.equal(out.w13.code, 'CU_INVALID_ARGUMENT', `错误码 ${out.w13.code}`);
+  assert.equal(out.w13.fileUnchanged, true, '被拒的请求不该改授权文件');
+  assert.ok(out.w13.direct, 'setGrant 直调没有抛错');
+  assert.equal(out.w13.direct.code, 'CU_INVALID_ARGUMENT', `直调错误码 ${out.w13.direct && out.w13.direct.code}`);
+  assert.equal(out.w13.directUnchanged, true, 'setGrant 直调被拒前不该写文件');
+});
+
+report.check('C2-W14', '撤销应用 + 显式 foreground:false:照旧撤销(新校验不误伤)', 'green', () => {
+  assert.equal(out.w14.status, 200, `状态码 ${out.w14.status}`);
+  assert.equal(out.w14.entry, null, `entry 还在:${JSON.stringify(out.w14.entry)}`);
 });
 
 // ── 客户端源码守卫(W10–W12)──────────────────────────────────────────────
