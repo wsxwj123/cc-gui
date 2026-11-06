@@ -53,8 +53,13 @@ async function openCardByText(page, text) {
   const head = page.locator('[data-strip="head"]').first();
   await expect(head).toBeVisible({ timeout: 15_000 });
   if ((await head.getAttribute('aria-expanded')) !== 'true') await head.click();
-  const header = page.locator('[data-strip-item="group"] button').filter({ hasText: text }).first();
-  if (!(await header.isVisible())) await page.getByRole('button', { name: /次工具调用/ }).first().click();
+  // r157:工作组头行也是 button、文字里带工具标题(「<标题> · N 次工具调用」),会抢先匹配——先把收起的组点开,再只在组内条目里找卡片头。
+  const groupHeads = page.locator('[data-work-group-state="closed"] [data-work-group-head]');
+  for (let n = await groupHeads.count(), i = 0; n > 0 && i < 10; n = await groupHeads.count(), i += 1) {
+    await groupHeads.first().click();
+    await page.waitForTimeout(200);
+  }
+  const header = page.locator('[data-entry-state] button').filter({ hasText: text }).first();
   await expect(header).toBeVisible({ timeout: 10_000 });
   const card = header.locator('xpath=..');
   // 卡片默认折叠。判据用"卡里有没有图",不用"下一个兄弟可见" —— Read 卡下面紧跟一行路径,恒可见。
@@ -108,6 +113,8 @@ test('UI-2 [R5 回复进行中] 卡片里的截图点击打开放大层,Esc 关�
     await expect(box).toBeVisible({ timeout: 15_000 });
     await box.fill('R116LIVE 请截屏');
     await box.press('Enter');
+    // r157:运行中最后一个工作组默认收起——先点开,卡片里的截图才画出来
+    await page.locator('[data-work-group-head]').last().click({ timeout: 30_000 });
     const liveImg = page.locator('img[alt*="结果"]').first();
     await expect(liveImg, '回复进行中卡片里应显示截图').toBeVisible({ timeout: 30_000 });
     await expect.poll(() => naturalSize(liveImg)).toBe(`${IMG.live.w}x${IMG.live.h}`);

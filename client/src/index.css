@@ -2322,9 +2322,13 @@ header [data-tour="remote-control"] {
 .orbit-mark { display: inline-block; position: relative; flex: none; vertical-align: middle; }
 .orbit-mark i {
   position: absolute; left: 50%; top: 50%;
-  width: 3.6px; height: 3.6px; margin: -1.8px 0 0 -1.8px;
+  /* 底座 18px、由 orbitTicker.js 的 DOT_K(DOT_VISUAL_PX / DOT_BASE_PX)缩回约 3.6px:WebKit 小盒子取整会压扁圆点。两处须同步改。 */
+  width: 18px; height: 18px; margin: -9px 0 0 -9px;
   border-radius: 50%; background: currentColor;
   will-change: transform, opacity;
+  /* 默认透明:Orbit 在 useEffect 里才摆位,挂载首帧点还没缩放,是 18px 的大圆叠在一起,不透明会闪一下。
+     orbitTicker.js 的 place() 每帧写内联 opacity,会覆盖这一条。 */
+  opacity: 0;
 }
 
 /* 状态词的连续流光(Claude 桌面版做法):3 秒一圈,15%–85% 才扫、首尾各停,120° 斜带自左向右;

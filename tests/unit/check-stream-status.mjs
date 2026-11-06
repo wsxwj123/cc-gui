@@ -56,10 +56,11 @@ assert.deepEqual(groupCoworkBlocks([]), [], '空 blocks → 空段');
   const segs = groupCoworkBlocks([txt('A'), think('b'), tool('Bash')]);
   assert.deepEqual(segs.map((s) => s.kind), ['text', 'group'], '末尾 group 也 flush');
 }
-// Task/Skill/清单 独立成段(不进 group);清单只作边界不成段
+// r157 起 Task/Agent 与普通工具一样进 group;Skill/Workflow/读技能文档仍独立成段(不进 group);清单只作边界不成段
 {
   const segs = groupCoworkBlocks([tool('Bash'), tool('Task'), tool('TaskCreate'), tool('Bash', 'b2')]);
-  assert.deepEqual(segs.map((s) => s.kind), ['group', 'task', 'group'], 'Task 独立成段、清单只作边界、其后工具另起 group');
+  assert.deepEqual(segs.map((s) => s.kind), ['group', 'group'], 'r157:Task 进 group、清单只作边界、其后工具另起 group');
+  assert.equal(segs[0].items.length, 2, 'r157:Task 与它前面的 Bash 在同一个 group');
 }
 // 空 content 的 text/thinking 被跳过(流式刚建块还没内容)
 {

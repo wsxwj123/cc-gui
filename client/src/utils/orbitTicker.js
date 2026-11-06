@@ -1,16 +1,23 @@
-// r154 / ui-live-line-v2:三体 / 四体旋转指示器的摆位公式与共享动画循环(零 React)。
-// ui-live-line-v2 起去掉仰俯(elev)与侧倾(roll)两项倾斜 —— 旧投影把圆压成了扁椭圆;
-// 现在点严格落在正圆上(半径恒为 1),只保留变速:过两个"水平"位置时快、到两侧时慢。
+// r154:三体 / 四体旋转指示器的摆位公式与共享动画循环(零 React)。
+// 公式照设计稿 v8 的 orbitPlace:圈水平放着,上下仰俯约 ±29°(过水平线时侧立成一条线);
+// 点绕圈整 360°,每个仰俯周期(3.4 秒)转两圈并与仰俯锁相,所以最高 / 最低点总是钝角三角形;
+// 过水平线时快、到最高 / 最低点时慢。
 // 全页面只有一个 requestAnimationFrame 循环:有实例登记才跑,登记清空就停;页面隐藏时暂停;
 // 系统要求减弱动画时只摆一次静止帧。
 
 const TAU = Math.PI * 2;
 const PERIOD_S = 3.4;
-export const STILL_T = 0.9; // 减弱动画时的静止帧:三点停在圆上一个非对称相位(不是水平 / 正中)
+export const STILL_T = 0.9; // 减弱动画时的静止帧:仰俯角接近最大,三个点成钝角三角形
 export const SPEED_FACTORS = Object.freeze({ slow: 0.7, normal: 1, fast: 1.4 });
 const DEFAULT_FACTOR = SPEED_FACTORS.slow;
 // 后台恢复或单帧卡顿时,不让相位一次跳太多
 const MAX_FRAME_S = 0.1;
+// 圆点底座:macOS WebKit 会把很小的盒子的宽、高分别取整到设备像素再画圆角,3.6px 的点会被压成横向椭圆;
+// 底座取 18px 后取整误差占比很小,再用 transform 的 scale 缩回同样的视觉大小(scale = 1 时约 3.6px)。
+// 必须与 index.css 里 .orbit-mark i 的宽高 / margin 同步改。
+const DOT_VISUAL_PX = 3.6;
+const DOT_BASE_PX = 18;
+const DOT_K = DOT_VISUAL_PX / DOT_BASE_PX;
 
 /** 时刻 t(秒)的各个相位角;单独导出便于单测验证单调性与圈数。 */
 export function orbitAngles(t) {
@@ -19,22 +26,30 @@ export function orbitAngles(t) {
   return {
     tau,
     th,
-    spin: 2 * th - Math.PI / 2, // 每个变速周期(3.4 秒)整两圈
+    elev: 0.5 * Math.sin(th), // 仰俯角 ±0.5 弧度
+    spin: 2 * th - Math.PI / 2, // 每个仰俯周期整两圈
+    roll: 0.12 * Math.sin(th + 0.9), // 轻微侧倾,形状不严格左右对称
   };
 }
 
-/** n 个点在时刻 t 的摆位;x、y 是正圆上的归一化坐标(调用方乘半径),z 是叠放顺序。 */
+/** n 个点在时刻 t 的摆位;x、y 是单位圆内的归一化坐标(调用方乘半径),z 是叠放顺序。 */
 export function orbitPlacement(n, t) {
-  const { spin } = orbitAngles(t);
+  const { elev, spin, roll } = orbitAngles(t);
+  const se = Math.sin(elev);
+  const ce = Math.cos(elev);
+  const sr = Math.sin(roll);
+  const cr = Math.cos(roll);
   const out = [];
   for (let k = 0; k < n; k++) {
     const a = spin + (TAU * k) / n;
-    const x = Math.cos(a);
-    const y = Math.sin(a); // z 朝向观察者 → 屏幕上就是 y
-    const d = Math.sin(a); // 深度(只影响点的大小 / 不透明度 / 叠放,不影响位置)
+    const x0 = Math.cos(a);
+    const z0 = Math.sin(a); // z 朝向观察者
+    const xs = x0;
+    const ys = z0 * se; // 俯视时近处的点落在下方
+    const d = z0 * ce; // 深度
     out.push({
-      x,
-      y,
+      x: xs * cr - ys * sr,
+      y: xs * sr + ys * cr,
       scale: 1 + 0.42 * d,
       opacity: 0.72 + (0.28 * (d + 1)) / 2,
       z: Math.round((d + 1) * 10),
@@ -58,7 +73,7 @@ function place(entry, t) {
     const kid = kids[k];
     if (!kid) continue;
     const p = pts[k];
-    kid.style.setProperty('transform', `translate(${(p.x * R).toFixed(2)}px,${(p.y * R).toFixed(2)}px) scale(${p.scale.toFixed(3)})`);
+    kid.style.setProperty('transform', `translate(${(p.x * R).toFixed(2)}px,${(p.y * R).toFixed(2)}px) scale(${(p.scale * DOT_K).toFixed(3)})`);
     kid.style.setProperty('opacity', p.opacity.toFixed(3));
     kid.style.zIndex = String(p.z);
   }

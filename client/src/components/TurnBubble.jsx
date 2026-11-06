@@ -32,6 +32,8 @@ import {
   formatInputPreview, thinkingLabel, groupCoworkBlocks, activeGroupKey,
   stripSummary, isFoldableSegment, getSkillDocReadName, toolTitle, cleanTailText,
 } from '../utils/streamStatus.js';
+import { isLiveLineHostedByGroup, liveLabelFromBlocks } from '../utils/liveStatus.js';
+import { LiveStatusLine } from './LiveStatusLine.jsx';
 import { Linkify } from '../utils/linkify.jsx';
 import { ToolResultImages } from './tools/ToolResultImages.jsx';
 import { usePricingVersion } from '../hooks/usePricingVersion.js';
@@ -513,8 +515,15 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
 // 折叠内部按时序混排:思考段折成一行(ThinkingFold,与工具行同规则默认收起),工具卡
 // 复用 renderRichToolCard/ToolCallRow。活跃段默认展开随流刷新,正文落地后收起。
 // liveBlock = 生成中整轮 blocks 的最后一块(否则 null):只有它是思考时,那块思考才标"进行中"。
-function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null }) {
+// r157:liveLabel 非空 = 这一组的头行承载实时状态行(由 isLiveLineHostedByGroup 判定,见 CoworkBlocks),
+// 头行换成 三角 + LiveStatusLine;startedAt = 回合起始时刻(与改动前底部行同一口径)。
+function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, liveLabel = null, startedAt = null }) {
   const toolN = items.reduce((n, b) => n + (b.type === 'tool_use' ? 1 : 0), 0);
+  // 出错计数与展开后条目的 data-entry-state 同一口径(entryStateOf):已答的提问、已批准的计划、
+  // 计划被拒(修改 / 取消)都不算错 —— 头行红点和展开后看到的条目状态不会对不上。
+  const errorCount = items.reduce((n, b) => (
+    n + (b.type === 'tool_use' && b.toolCall && entryStateOf(b.toolCall) === 'error' ? 1 : 0)
+  ), 0);
   const hasThinking = items.some((b) => b.type === 'thinking');
   // ui-live-line-v2 折叠行文案:
   //   含工具 →「<本组最后一次工具调用的标题> · N 次工具调用」(标题取不到只写「N 次工具调用」);
@@ -530,19 +539,44 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null })
     const preview = cleanTailText(lastThinking);
     summary = preview ? `思考 · ${preview}` : '思考';
   }
+  const hosting = !!liveLabel;
   return (
-    <div className="border-l-2 border-canvas-deep/40">
+    <div
+      className="border-l-2 border-canvas-deep/40"
+      data-work-group=""
+      data-work-group-state={expanded ? 'open' : 'closed'}
+      data-work-group-live={hosting ? 'true' : 'false'}
+    >
       <button
+        type="button"
+        data-work-group-head=""
+        aria-expanded={expanded ? 'true' : 'false'}
         onClick={onToggle}
-        className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left"
+        className="w-full min-w-0 flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left"
       >
         {expanded
           ? <ChevronDown size={13} className="text-ink-faint shrink-0" />
           : <ChevronRight size={13} className="text-ink-faint shrink-0" />}
-        {hasThinking
-          ? <Brain size={13} className="text-ink-muted shrink-0" />
-          : <Wrench size={13} className="text-ink-muted shrink-0" />}
-        <span className="text-xs text-ink-soft font-body">{summary}</span>
+        {hosting
+          ? <LiveStatusLine label={liveLabel} startedAt={startedAt} className="flex-1" />
+          : (
+            <>
+              {hasThinking
+                ? <Brain size={13} className="text-ink-muted shrink-0" />
+                : <Wrench size={13} className="text-ink-muted shrink-0" />}
+              <span className="min-w-0 truncate text-xs text-ink-soft font-body">{summary}</span>
+            </>
+          )}
+        {/* 出错标记:只有红点、不带文字(头行可见文字保持「标题 · N 次工具调用」),数目在悬停提示里 */}
+        {errorCount > 0 && (
+          <span
+            data-work-group-error=""
+            role="img"
+            aria-label={`${errorCount} 个工具调用出错`}
+            title={`${errorCount} 个工具调用出错`}
+            className="shrink-0 w-1.5 h-1.5 rounded-full bg-error"
+          />
+        )}
       </button>
       {expanded && (
         <div className="pl-3 pr-2 pt-1 pb-2 space-y-2 animate-fade-in">
@@ -611,6 +645,11 @@ export const StripUsageCallsContext = React.createContext(null); // 本轮 usage
 // r152a:本回合起流时刻。只有正在生成的回合给值,其余(历史轮、子代理窗口)都是 null。
 // r154 起头行静态、不再读它(用时挪到底部状态行);导出与 Provider 保留,签名不变。
 export const StripStartedAtContext = React.createContext(null);
+// r157:主会话流式气泡的「实时状态行宿主」开关。只有 App 在主会话流式气泡外包 Provider,
+// 值 = { stopping, compacting };其它地方(子代理窗口、历史轮)拿到默认 null → 行为与改动前完全一样。
+// 有值且本轮在生成时:工作组一律默认收起,最后一个组的头行是否承载状态行由 isLiveLineHostedByGroup 定。
+// 提问 / 计划 / 权限卡由输入框上方的 PermissionPrompt 画,不在组里,折叠不影响它们。
+export const LiveHostContext = React.createContext(null);
 
 // ─── CoworkBlocks:母会话 + 子代理共用的有序 blocks 渲染(单一渲染路径)──
 // 非聊天模式 → cowork 分组折叠(WorkGroup);聊天模式 → 维持现状(思考小折叠 +
@@ -636,6 +675,8 @@ export function CoworkBlocks({
   const stripHeadless = useContext(StripHeadlessContext);
   const injectedSummary = useContext(StripSummaryContext);
   const usageCalls = useContext(StripUsageCallsContext);
+  const liveHost = useContext(LiveHostContext);
+  const roundStartedAt = useContext(StripStartedAtContext);
   // 点开工作流内层助手:卡片只负责水合并回调,落到哪个窗格由这里定(与 TaskCard 的
   // openAgentView 同款,取渲染所在/焦点 pane)——卡片自己读 activeTabIndex 会分屏串扰。
   const openWfAgent = (key) => { const st = useStore.getState(); st.setViewingAgent(st.activeTabIndex, key); };
@@ -712,6 +753,12 @@ export function CoworkBlocks({
   // 非聊天模式:cowork 分组折叠。每段正文前连续的思考+通用工具打包成一个 WorkGroup。
   const segments = groupCoworkBlocks(list);
   const activeKey = activeGroupKey(segments, isLive);
+  // r157:主会话流式气泡(有 LiveHostContext)里活跃组默认收起,头行按唯一判定承载实时状态行;
+  // 没有该 context(子代理窗口)仍是活跃组默认展开、状态行在底部。
+  const hostMode = !!liveHost && isLive;
+  const hostLabel = hostMode && isLiveLineHostedByGroup({
+    blocks: list, stopping: !!liveHost.stopping, compacting: !!liveHost.compacting, chatMode,
+  }) ? liveLabelFromBlocks({ blocks: list, stopping: !!liveHost.stopping, compacting: !!liveHost.compacting }) : null;
   // 条带(§3.1/D.1):原 div.space-y-2 变成条带根,第一个子元素是摘要行,之后每个段包一层
   // 带 data-strip-item 的 div(唯一新增的包装层,所有段都包,便于测试数数目)。
   // 收起 = **只给可折段(group)带 hidden**(保留 DOM,只不参与布局);正文段与
@@ -761,14 +808,24 @@ export function CoworkBlocks({
             </ToolCallWithRetry>
           );
         case 'group': {
-          const expanded = override.has(seg.key) ? override.get(seg.key) : (seg.key === activeKey);
+          const autoOpen = hostMode ? false : (seg.key === activeKey);
+          const wantOpen = override.has(seg.key) ? override.get(seg.key) : autoOpen;
+          // 总摘要行收起时,承载状态行的组只剩头行(条目不画);点它的头行 = 展开过程条并展开该组。
+          const hostingThis = !!hostLabel && seg.key === activeKey;
+          const stripCollapsedHost = hostingThis && !open;
+          const expanded = wantOpen && !stripCollapsedHost;
           return (
             <WorkGroup
               items={seg.items}
               expanded={expanded}
-              onToggle={() => setOverride((p) => { const n = new Map(p); n.set(seg.key, !expanded); return n; })}
+              onToggle={() => {
+                if (stripCollapsedHost) setStripOpen(true);
+                setOverride((p) => { const n = new Map(p); n.set(seg.key, !expanded); return n; });
+              }}
               onRetryTool={onRetryTool}
               liveBlock={isLive ? list[list.length - 1] || null : null}
+              liveLabel={hostLabel && seg.key === activeKey ? hostLabel : null}
+              startedAt={roundStartedAt}
             />
           );
         }
@@ -777,7 +834,9 @@ export function CoworkBlocks({
       }
     })();
     return (
-      <div key={`seg-${seg.key}`} data-strip-item={seg.kind} hidden={(foldable && !open) || undefined}>
+      // r157:总摘要行收起时,承载着实时状态行的那一组不藏(底部行此时不画,藏了就整行消失);其它可折段照旧。
+      <div key={`seg-${seg.key}`} data-strip-item={seg.kind}
+        hidden={(foldable && !open && !(seg.kind === 'group' && hostLabel && seg.key === activeKey)) || undefined}>
         {body}
       </div>
     );

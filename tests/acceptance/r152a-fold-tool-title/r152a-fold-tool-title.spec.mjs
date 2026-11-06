@@ -66,13 +66,13 @@ test('B4 历史回合：思考、Bash、思考、Read、思考（最后一块是
   expect(parts.tail, `最后一块是思考时标题也取最后一个工具（不是甲 / 不是任何思考）；整句「${parts.text}」`).toBe(MISC.b4lastThink.expect);
 });
 
-test('B5 历史回合：纯思考保持思考预览；子代理卡不参与（卡后有 Bash 取它，卡后没有取卡前的）', async ({ page }) => {
+test('B5 历史回合：纯思考保持思考预览；子代理调用与普通工具一样按顺序取最新一个（r157 起进组：卡后有 Bash 取它，卡后没有就取子代理自己的标题）', async ({ page }) => {
   await openApp(page);
   await openSessionByMarker(page, SESSIONS.m.marker);
   await expect(turnRows(page)).toHaveCount(9, { timeout: 20_000 });
   await expectHistoryTail(page, MISC.b5thinkOnly, 'B5-1 整轮只有思考 → 仍是最后一条思考的前 40 个字 + …');
   await expectHistoryTail(page, MISC.b5cardThenBash, 'B5-2 Task 卡之后又有 Bash → 末尾是卡后的 Bash（不是卡的标题）');
-  await expectHistoryTail(page, MISC.b5cardLast, 'B5-3 Agent 卡之后没有通用工具、只有思考 → 末尾是卡前的 Bash');
+  await expectHistoryTail(page, MISC.b5cardLast, 'B5-3 Agent 卡之后没有通用工具、只有思考 → 末尾是该 Agent 自己的标题（r157 起它是组里最新的工具）');
 });
 
 test('B6 历史回合：标题很长 → 折叠条仍一行、900 / 1600 两种宽度页面都不出横向滚动，文字被省略号截断', async ({ page }) => {

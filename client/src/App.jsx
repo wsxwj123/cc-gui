@@ -66,7 +66,7 @@ import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { GenuiActionProvider, useGenuiActionCapability } from './genui/host/action-context.jsx';
-import { TurnBubble, StripRoundContext } from './components/TurnBubble.jsx';
+import { TurnBubble, StripRoundContext, LiveHostContext } from './components/TurnBubble.jsx';
 import { stripSummary, tailBlockInfo, latestToolTitles } from './utils/streamStatus.js';
 import { initialSpan, extendUp, needsExtend, sliceRows } from './utils/mountWindow.js';
 import { historyMessageKey } from './utils/historyPaging.js';
@@ -76,7 +76,7 @@ import { shouldShow as shouldShowReleaseNotes, hasReleaseNotes, loadVersionNotes
 import TurnScrubber from './components/TurnScrubber.jsx';
 import { LoadingMark } from './components/LoadingBits.jsx';
 import { LiveStatusLine } from './components/LiveStatusLine.jsx';
-import { liveStatusLabel } from './utils/liveStatus.js';
+import { liveStatusLabel, isLiveLineHostedByGroup } from './utils/liveStatus.js';
 import { DEFAULT_LOADING_STYLE } from './utils/loadingPrefs.js';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './components/MultiSelect.jsx';
@@ -9123,6 +9123,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }),
     [streamingBlocks, streamingText, streamingThinking, streamingToolCalls, liveSteerSegments, streamingModel, liveSubUsageTurn],
   );
+  // r157:流式气泡外的「实时状态行宿主」context(值变了只重渲订阅它的 CoworkBlocks,不打穿上面的记忆化)。
+  // 是否由工作组头行承载走唯一判定 isLiveLineHostedByGroup;blocks 取最后一段(新内容只追加到它,
+  // 也只有它是 'streaming' 哨兵 = isLive),与气泡里 CoworkBlocks 拿到的是同一份。
+  const liveChatMode = useStore((s) => s.chatMode);
+  const liveCompacting = !!liveStatus?.compacting;
+  const liveHostValue = useMemo(() => ({ stopping, compacting: liveCompacting }), [stopping, liveCompacting]);
+  const liveHostBlocks = liveSteerSegments ? (liveSteerSegments[liveSteerSegments.length - 1]?.blocks || []) : streamingBlocks;
+  const liveLineHosted = isLiveLineHostedByGroup({ blocks: liveHostBlocks, stopping, compacting: liveCompacting, chatMode: liveChatMode });
 
   // r148 P6:会话汇总(费用 / 工具调用数 / 用过的模型)记忆化 —— 只在消息列表、provider 或查价数据变了才重算。
   // 原来这三样在下面的提前 return 之后做普通计算:会话组件每渲染一次(流式时每帧一次)就把全部历史消息
@@ -9917,16 +9925,21 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                       其后的块开进新的回合容器;没有则是原来的单气泡。r119 起整块由 liveStreamBubble
                       记忆化(见组件顶层 useMemo 注释);下面的状态行必须留在外面 —— 它要跟着
                       isStreaming/stopping 变,不能被正文记忆化拖住。 */}
-                  {liveStreamBubble}
-                  <StreamingStatusLine
-                    blocks={streamingBlocks}
-                    thinking={streamingThinking}
-                    text={streamingText}
-                    toolCalls={streamingToolCalls}
-                    streamStart={streamStartRef.current}
-                    stopping={stopping}
-                    compacting={!!liveStatus?.compacting}
-                  />
+                  <LiveHostContext.Provider value={liveHostValue}>
+                    {liveStreamBubble}
+                  </LiveHostContext.Provider>
+                  {/* r157:状态行被最后一个工作组的头行承载时,底部不再另起一行 */}
+                  {!liveLineHosted && (
+                    <StreamingStatusLine
+                      blocks={streamingBlocks}
+                      thinking={streamingThinking}
+                      text={streamingText}
+                      toolCalls={streamingToolCalls}
+                      streamStart={streamStartRef.current}
+                      stopping={stopping}
+                      compacting={liveCompacting}
+                    />
+                  )}
                 </>
               )}
               {/* 兜底:流式气泡此刻没在画(后台态 / 切回重放 / 首字还没到)时,并入的消息

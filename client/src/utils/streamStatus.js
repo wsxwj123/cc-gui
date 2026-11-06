@@ -88,11 +88,9 @@ export function groupCoworkBlocks(blocks) {
       const tc = b.toolCall;
       // 任务清单工具:只作 group 边界,不成段(清单走输入框上方常驻面板)。
       if (TASK_TOOL_NAMES.has(tc.name)) { flush(); continue; }
-      if (tc.name === 'Task' || tc.name === 'Agent') {
-        flush();
-        segs.push({ kind: 'task', key: i, index: i, toolCall: tc });
-        continue;
-      }
+      // r157:子代理调用(Task / Agent)不再独立成段,与普通工具一样进工作组(组内展开时仍渲染
+      // 子代理卡,见 renderRichToolCard);计入 stripSummary 的 steps 与组头行「N 次工具调用」。
+      // 渲染侧的 kind:'task' 分支保留(无害),本函数不再产出它。
       // 工作流独立成段:它在聊天里要展开成阶段/助手视图。折进 group 折叠区 = 用户
       // 看不到这次跑到哪个阶段、哪些助手还在跑(一次工作流能派几十个)。
       if (tc.name === 'Workflow') {
@@ -137,8 +135,8 @@ export function activeGroupKey(segments, isLive) {
 }
 
 // ── 条带折叠(2026-09-13):可折段判据 + 摘要行取值(纯函数,零 DOM)──────────
-// 写死为 kind === 'group'(思考 + 通用工具)。**不是** kind !== 'text' ——
-// task/workflow/skill/skilldoc 段恒显不折(R114 的既有决策:工作流/子代理跑到哪一步必须看得见)。
+// 写死为 kind === 'group'(思考 + 通用工具;r157 起子代理调用也在 group 里)。**不是** kind !== 'text' ——
+// workflow/skill/skilldoc 段恒显不折(R114 的既有决策:工作流跑到哪一步必须看得见)。
 // 单独导出是为了语义显式 + 测试 + 将来放宽折叠范围只有一个改动点。
 export function isFoldableSegment(seg) {
   return seg?.kind === 'group';

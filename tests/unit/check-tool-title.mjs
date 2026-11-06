@@ -115,8 +115,9 @@ eq(sum([{ type: 'tool_use', toolCall: { id: 'x', input: {} } }]).doneTitle, null
 {
   const card = (name) => ({ type: 'tool_use', toolCall: tc(name, { subagent_type: 'fixer', description: '子代理卡标题' }, RES) });
   eq(sum([think('a'), tool('Bash', { description: '卡前' }), card('Task'), tool('Bash', { description: '卡后' })]).doneTitle, '卡后', 's2 卡后有 Bash → 卡后');
-  eq(sum([tool('Bash', { description: '卡前' }), card('Agent'), think('卡后只有思考')]).doneTitle, '卡前', 's2 卡后无通用工具 → 卡前的 Bash');
-  eq(sum([card('Task'), think('只有思考')]).doneTitle, null, 's2 只有子代理卡 → null');
+  // r157 起 Task/Agent 进 group:它就是组里最后一个工具,标题取它自己的 description
+  eq(sum([tool('Bash', { description: '卡前' }), card('Agent'), think('卡后只有思考')]).doneTitle, '子代理卡标题', 's2 r157:最后一个工具是子代理 → 取子代理标题');
+  eq(sum([card('Task'), think('只有思考')]).doneTitle, '子代理卡标题', 's2 r157:只有子代理 → 取子代理标题');
   eq(sum([tool('Skill', { skill: 'x', description: '技能' }), tool('TodoWrite', { todos: [] })]).doneTitle, null, 's2 Skill / Todo 不参与');
   eq(sum([tool('Read', { file_path: '/s/skills/demo/SKILL.md' })]).doneTitle, null, 's2 读 SKILL.md 不参与');
 }

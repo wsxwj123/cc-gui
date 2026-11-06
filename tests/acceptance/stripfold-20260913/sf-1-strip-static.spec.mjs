@@ -148,15 +148,13 @@ test('SF-106 展开记忆 = 不记忆：刷新重开同一会话后全部回到�
   }
 });
 
-test('SF-107 折叠范围只含 group 段：Workflow / Task 卡在收起态仍可见（R114 行为防线）', async ({ page }) => {
+test('SF-107 折叠范围只含 group 段：Workflow 卡在收起态仍可见（R114 行为防线）；r157 起 Task / Agent 进 group、不再单独成段', async ({ page }) => {
   await openApp(page);
   await openSessionByMarker(page, MARKER_C);
   const wfRow = turnRows(page).filter({ hasText: C.workflowLabel }).first();
-  const taskRow = turnRows(page).filter({ hasText: C.taskLabel }).first();
   await expect(wfRow).toHaveCount(1);
-  await expect(taskRow).toHaveCount(1);
 
-  for (const [label, row, kind] of [['Workflow', wfRow, 'workflow'], ['Task', taskRow, 'task']]) {
+  for (const [label, row, kind] of [['Workflow', wfRow, 'workflow']]) {
     const snap = await stripSnapshot(row);
     expect(snap.present, `${label} 那一轮应当有条带根`).toBe(true);
     expect(snap.kinds, `${label} 段的 kind 应当是 ${kind}`).toContain(kind);
@@ -166,6 +164,15 @@ test('SF-107 折叠范围只含 group 段：Workflow / Task 卡在收起态仍�
     const textLen = await row.locator(`[data-strip-item="${kind}"]`).first().evaluate((el) => (el.textContent || '').trim().length);
     expect(textLen, `${label} 卡里的文字必须还在`).toBeGreaterThan(0);
   }
+
+  // r157:用户要求运行中的思考 / 工具 / Agent 都折叠(同桌面版),Agent 调用进工作组——这一轮(夹具里 Task 描述「SF 夹具子代理」)
+  // 没有独立的 task 段,组头行写子代理的标题;原来「Task 卡收起态仍可见」的 R114 防线只保留给 Workflow。
+  const taskRow = turnRows(page).filter({ hasText: 'SF 夹具子代理' }).first();
+  await expect(taskRow, 'Task 那一轮的折叠行应带子代理标题').toHaveCount(1);
+  const taskSnap = await stripSnapshot(taskRow);
+  expect(taskSnap.present, 'Task 那一轮应当有条带根').toBe(true);
+  expect(taskSnap.kinds, 'r157 起 Task 不再单独成 task 段').not.toContain('task');
+  expect(taskSnap.kinds, 'Task 进了 group 段').toContain('group');
 });
 
 /** 〈r152c〉折叠条可见文字 = 标题；取不到标题时回落成计数文字「N 轮 M 步」。N / M 另在悬停提示里核对（headHover）。 */
