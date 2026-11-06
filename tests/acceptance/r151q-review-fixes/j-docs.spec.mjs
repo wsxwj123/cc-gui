@@ -20,7 +20,8 @@ test('Q25 CHANGELOG 有本轮一节;0.2.431 / 0.2.428 的过头说法已改正;�
   const top = secs[0] || { version: '0.0.0', body: '' };
   const section = (v) => (secs.find((s) => s.version === v) || { body: '' }).body;
   const releaseItems = (v) => { try { return JSON.parse(read('client', 'src', 'generated', 'release-notes', `${v}.json`)).groups.flatMap((g) => g.items); } catch { return []; } };
-  const readmeBlock = (v) => { const i = readme.indexOf(`<summary><b>v${v}</b>`); if (i < 0) return ''; const j = readme.indexOf('<summary><b>v', i + 10); return readme.slice(i, j < 0 ? i + 8000 : j); };
+  // 发版流程(--assume-tag)生成的最新一版标题带 <a> 链接:<summary><b><a href="…">v0.2.x</a></b>;没有 tag 的旧版不带。两种写法都要认,结束点取下一条 <summary><b>。
+  const readmeBlock = (v) => { const m = new RegExp(`<summary><b>(?:<a [^>]*>)?v${v.replace(/\./g, '\\.')}\\b`).exec(readme); if (!m) return ''; const i = m.index; const j = readme.indexOf('<summary><b>', i + 10); return readme.slice(i, j < 0 ? i + 8000 : j); };
 
   expect.soft(newer(top.version, '0.2.432'), `CHANGELOG 最上面一节应比 0.2.432 更新(现在最上面是 ${top.version})`).toBe(true);
   const bullets = top.body.split('\n').filter((l) => /^- /.test(l)); // 最上面一节的条数,下面与应用内更新说明的条数对账用
