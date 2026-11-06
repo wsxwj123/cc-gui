@@ -456,6 +456,51 @@ function errStatus(e) {
   return n >= 400 && n < 600 ? n : 502;
 }
 
+// auth-probe:主请求网络失败后用同一把 Key 发一次最小请求,判断是不是鉴权错误。
+// 典型场景:DeepSeek 对错 Key 的大请求直接重置连接(不回 401),CLI 只看到网络错误会重试 10 次。
+const AUTH_PROBE_TIMEOUT_MS = 8000;
+const AUTH_PROBE_MAX_BYTES = 64 * 1024;
+const AUTH_PROBE_MAX_TOKENS = 8; // 与 settings.js PROBE_MAX_TOKENS 同值同理由(中转要求 >2);不导出
+// 共用函数放在 openai-proxy.js 的原因:anthropic-proxy.js 已经依赖它;常驻 daemon 固化副本的依赖闭包只列这两个代理文件,新增文件会改变闭包。
+// 只在主请求已经网络失败后调用。返回 null = 探测失败或不是 401/403;
+// 否则 { status, contentType, body: Buffer(≤64KB) }。不记日志,吞掉所有错误。
+export async function probeUpstreamAuth(url, headers, model) {
+  const payload = { ...(model ? { model } : {}), max_tokens: AUTH_PROBE_MAX_TOKENS, messages: [{ role: 'user', content: 'ping' }] };
+  const ac = new AbortController();
+  // 计时器覆盖"等响应头 + 读正文"全程:正文卡住也在 8 秒内收场(回 502,不回半截 401)。
+  const timer = setTimeout(() => ac.abort(), AUTH_PROBE_TIMEOUT_MS);
+  try {
+    // redirect: 'manual':不跟随跳转,防 3xx 把带 Key 的探测引到别的主机。
+    const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload), signal: ac.signal, redirect: 'manual' });
+    // 非 401/403 取消未读正文,释放连接。
+    if (r.status !== 401 && r.status !== 403) { await r.body?.cancel().catch(() => {}); return null; }
+    const chunks = []; let total = 0;
+    if (r.body) {
+      const reader = r.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(Buffer.from(value)); total += value.byteLength;
+        if (total >= AUTH_PROBE_MAX_BYTES) { await reader.cancel().catch(() => {}); break; }
+      }
+    }
+    // 单块可能超过上限,拼接后再截断。
+    return { status: r.status, contentType: r.headers.get('content-type') || '', body: Buffer.concat(chunks).subarray(0, AUTH_PROBE_MAX_BYTES) };
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+// 401/403 给 CLI 加"别重试"(CLI 判状态码前先读 x-should-retry,否则 401 也重试 10 次);其余状态返回空对象。两个代理共 4 处调用。
+export function noRetryHeadersFor(status) {
+  return status === 401 || status === 403 ? { 'x-should-retry': 'false' } : {};
+}
+// 连接没建立 = 服务器没见过这个请求,不可能是它按 Key 判了错,不探测(也免得断网时每次白等 8 秒)。
+// export 仅供 anthropic-proxy.js 复用与 tests/unit 白盒单测,产品其它地方不调用。
+const CONNECT_PHASE_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'UND_ERR_CONNECT_TIMEOUT', 'EHOSTUNREACH', 'ENETUNREACH']);
+export function isConnectPhaseError(err) {
+  const codes = [err?.code, err?.cause?.code];
+  if (Array.isArray(err?.cause?.errors)) for (const e of err.cause.errors) codes.push(e?.code); // AggregateError:双栈连接失败
+  return codes.some((c) => CONNECT_PHASE_CODES.has(c));
+}
+
 function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   const msgId = 'msg_' + Math.random().toString(36).slice(2, 14);
   // 惰性 message_start:收到首个正常块才发。在此之前发现上游流内错误,可以改回非 200 +
@@ -816,6 +861,19 @@ async function handle(req, clientRes) {
   try {
     upstreamResp = await postUpstream(oaReq);
   } catch (err) {
+    // auth-probe:已连上上游后的网络错误(如 DeepSeek 对错 Key 大请求直接重置连接)用同一把 Key
+    // 发一次最小探测;自身 90s 超时(AbortError)与连接阶段错误不探测。探测得 401/403 才改回鉴权错误。
+    if (err?.name !== 'AbortError' && !isConnectPhaseError(err)) {
+      const probe = await probeUpstreamAuth(url, { 'Content-Type': 'application/json', Authorization: `Bearer ${up.apiKey}` }, oaReq.model);
+      if (probe) {
+        let msg = probe.body.toString('utf8');
+        try { const j = JSON.parse(msg); msg = rawErrMsg(j.error || j); } catch {}
+        if (!msg) msg = `upstream authentication failed (HTTP ${probe.status})`;
+        clientRes.writeHead(probe.status, { 'Content-Type': 'application/json', ...noRetryHeadersFor(probe.status) });
+        clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: String(msg).slice(0, 500) } }));
+        return;
+      }
+    }
     clientRes.writeHead(502, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'upstream fetch failed: ' + err.message } }));
     return;
