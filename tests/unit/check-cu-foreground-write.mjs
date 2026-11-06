@@ -244,6 +244,12 @@ report.check('C2-W14', '撤销应用 + 显式 foreground:false:照旧撤销(新�
   assert.equal(out.w14.entry, null, `entry 还在:${JSON.stringify(out.w14.entry)}`);
 });
 
+report.check('C2-W15', '只关前台的请求,审计日志标成撤销(revoke),不是授权(grant)', 'red', () => {
+  const log = (out.w4.warns || []).join('\n');
+  assert.match(log, /\[cu-grants\] revoke ok/, `只关前台被记成了授权:${log}`);
+  assert.ok(!/\[cu-grants\] grant /.test(log), `审计日志里出现了 grant:${log}`);
+});
+
 // ── 客户端源码守卫(W10–W12)──────────────────────────────────────────────
 const clientSrc = fs.readFileSync(CLIENT, 'utf8');
 

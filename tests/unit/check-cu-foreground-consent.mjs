@@ -7,7 +7,7 @@
 //
 // 跑法:node tests/unit/check-cu-foreground-consent.mjs
 import assert from 'node:assert/strict';
-import { makeReport } from './q8-helpers/report.mjs';
+import { makeReport, sleep, waitFor } from './q8-helpers/report.mjs';
 import { GRANTED, grantedWindow, makeFakeHome, startMcp, TARGET } from './q8-helpers/cu-harness.mjs';
 
 const report = makeReport('check-cu-foreground-consent');
@@ -155,6 +155,71 @@ const consentCode = (r) => r?.sc?.code === 'CU_FOREGROUND_CONSENT_REQUIRED';
     assert.notEqual(r1?.sc?.code, 'CU_FOREGROUND_CONSENT_REQUIRED', '省略 foreground 被当成前台请求');
     assert.notEqual(r2?.sc?.code, 'CU_FOREGROUND_CONSENT_REQUIRED', 'foreground:false 被当成前台请求');
     assert.ok(!methods.includes('global'), `后台路径出现全局投递:${JSON.stringify(methods)}`);
+  });
+}
+
+// ── 排队期间的复查(安全审计发现:闸门只在入队时查一次,动作排队等待期间授权变了照样执行)──
+// 做法:第一个后台动作(ax-key 假执行层睡 1.8 秒)占着队列,第二个 foreground:true 的动作
+// 入队时授权状态合规 → 过入队闸门排在后面;排队期间改授权表,再看第二个动作执行前有没有复查。
+const FRONTMOST_A = { pid: GRANTED.pid, name: GRANTED.name, bundleId: GRANTED.bundleId };
+const B_WIN = { id: 5002, pid: 4243, app: 'Other', bundleId: B, title: 'Other Doc', bounds: { x: 10, y: 20, w: 300, h: 200 }, displayId: 1 };
+const B_TARGET = { bundleId: B, pid: 4243, windowId: 5002 };
+const globalKeys = (fake) => fake.argv().filter((e) => e.subcmd === 'key'); // 前台(全局)按键才会调 key 子命令
+
+/** 先发一个慢的后台动作占住队列,等它真的开始执行,再发前台动作入队;
+ *  duringWait() 在两个动作都已就位后运行(改授权表);返回第二个动作的回执。 */
+async function queuedForegroundCall(fake, { target, actionId, duringWait }) {
+  return withMcp(fake, async (mcp) => {
+    const slow = mcp.call('key', { actionId: `${actionId}_slow`, target: TARGET, keys: 'a' }, 40_000);
+    await waitFor(() => fake.argv().some((e) => e.subcmd === 'ax-key'), { timeoutMs: 15_000 });
+    const fg = mcp.call('key', { actionId, target, keys: 'b', foreground: true }, 40_000);
+    await sleep(300); // 让前台动作过入队闸门、排到慢动作后面
+    duringWait();
+    await slow;
+    return fg;
+  });
+}
+
+// ── C2-T11 排队期间前台授权被撤销 → 已入队的前台动作执行前复查 ──
+{
+  const fake = fakeFor('t11-revoke-in-queue', { apps: [A], foreground: { [A]: FUTURE } }, {
+    windows: { reply: { ok: true, frontmost: FRONTMOST_A, windows: [grantedWindow()] } },
+    'ax-key': { sleepMs: 1800 },
+  });
+  const r = await queuedForegroundCall(fake, {
+    target: TARGET, actionId: 'c2_t11', duringWait: () => fake.setGrants({ apps: [A] }), // 用户在面板关掉前台授权,应用授权还在
+  });
+  report.check('C2-T11', '排队期间前台授权被撤销:已入队的前台动作执行前复查,CU_FOREGROUND_CONSENT_REQUIRED 且零投递', 'red', () => {
+    assert.equal(r?.sc?.code, 'CU_FOREGROUND_CONSENT_REQUIRED', `排队的前台动作没有被复查拦下:${r?.sc?.code}`);
+    assert.equal(globalKeys(fake).length, 0, `撤销后仍发生了全局按键投递:${JSON.stringify(globalKeys(fake))}`);
+  });
+}
+
+// ── C2-T12 入队时应用未授权(入队闸门不拦),排队期间只授权了应用、没开前台 → 执行前复查仍拒绝 ──
+{
+  const fake = fakeFor('t12-grant-app-in-queue', { apps: [A] }, {
+    windows: { reply: { ok: true, frontmost: { pid: 4243, name: 'Other', bundleId: B }, windows: [grantedWindow(), B_WIN] } },
+    'ax-key': { sleepMs: 1800 },
+  });
+  const r = await queuedForegroundCall(fake, {
+    target: B_TARGET, actionId: 'c2_t12', duringWait: () => fake.setGrants({ apps: [A, B] }), // 用户只授权了 B,没开前台
+  });
+  report.check('C2-T12', '入队时应用未授权、排队期间只授权应用:执行前复查,没有前台授权就拒绝且零投递', 'red', () => {
+    assert.equal(r?.sc?.code, 'CU_FOREGROUND_CONSENT_REQUIRED', `没开前台授权的应用被前台投递了:${r?.sc?.code}`);
+    assert.equal(globalKeys(fake).length, 0, `没有前台授权却发生了全局按键投递:${JSON.stringify(globalKeys(fake))}`);
+  });
+}
+
+// ── C2-T13 守卫:排队期间前台授权一直有效 → 已入队的前台动作照常执行(复查不误伤)──
+{
+  const fake = fakeFor('t13-valid-in-queue', { apps: [A], foreground: { [A]: FUTURE } }, {
+    windows: { reply: { ok: true, frontmost: FRONTMOST_A, windows: [grantedWindow()] } },
+    'ax-key': { sleepMs: 1200 },
+  });
+  const r = await queuedForegroundCall(fake, { target: TARGET, actionId: 'c2_t13', duringWait: () => {} });
+  report.check('C2-T13', '排队期间前台授权一直有效:已入队的前台动作照常执行', 'green', () => {
+    assert.notEqual(r?.sc?.code, 'CU_FOREGROUND_CONSENT_REQUIRED', '授权有效却被复查拒绝了');
+    assert.equal(globalKeys(fake).length, 1, `授权有效的排队前台动作没有执行:${JSON.stringify(globalKeys(fake))}`);
   });
 }
 

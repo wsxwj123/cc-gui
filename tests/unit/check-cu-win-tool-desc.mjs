@@ -86,4 +86,11 @@ await report.check('T5-06', 'win32 的前台工具描述:全局投递必须写�
   assert.deepEqual(bad, [], `这些工具的描述没说清"全局投递要显式同意":${bad.join(', ')}`);
 });
 
+// ── T5-07 win32 的前台工具描述必须写明用户在面板开启「允许前台操控」才放行(C2;修前红)──
+await report.check('T5-07', 'win32 的 7 个副作用工具描述:全局投递须用户在面板为该应用开启「允许前台操控」', 'red', () => {
+  const win = byName(mcp.buildTools('win32'));
+  const bad = SIDE_EFFECT.filter((name) => !/允许前台操控/.test(String(win[name].description || '')));
+  assert.deepEqual(bad, [], `这些工具的描述没写明前台操控要用户在面板授权:${bad.join(', ')}`);
+});
+
 process.exit(report.finish());
