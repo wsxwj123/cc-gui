@@ -53,9 +53,16 @@ export function makeFakeHome(name) {
   const api = {
     base, home, runtimeDir, shotDir: join(runtimeDir, 'shots'), grantsFile, stubLog, sigLog, scenarioFile,
     setScenario(obj) { fs.writeFileSync(scenarioFile, JSON.stringify(obj)); },
-    setGrants({ apps = [GRANTED.bundleId], screenScope = false } = {}) {
+    setGrants({ apps = [GRANTED.bundleId], screenScope = false, foreground = null, foregroundRaw = null } = {}) {
       const grants = { version: 1, screenScope: { granted: screenScope, grantedAt: screenScope ? new Date().toISOString() : null }, apps: {} };
-      for (const b of apps) grants.apps[b] = { name: b, grantedAt: new Date().toISOString() };
+      for (const b of apps) {
+        grants.apps[b] = { name: b, grantedAt: new Date().toISOString() };
+        // C2:foreground 按 id 给 expiresAt;foregroundRaw 直接塞任意形状(测非法值)
+        if (foreground && foreground[b]) {
+          grants.apps[b].foreground = { grantedAt: new Date().toISOString(), expiresAt: foreground[b] };
+        }
+        if (foregroundRaw && b in foregroundRaw) grants.apps[b].foreground = foregroundRaw[b];
+      }
       fs.writeFileSync(grantsFile, JSON.stringify(grants));
     },
     argv() {

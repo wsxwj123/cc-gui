@@ -19,7 +19,7 @@ const WIN_TARGET = { bundleId: GRANTED.bundleId, pid: GRANTED.pid, windowId: GRA
 
 function winFake(name, typeReplies) {
   const fake = makeWinHome(name);
-  fake.setGrants({ apps: [GRANTED.bundleId] });
+  fake.setGrants({ apps: [GRANTED.bundleId], foreground: { [GRANTED.bundleId]: new Date(Date.now() + 3600_000).toISOString() } });
   fake.setScenario({
     windows: { reply: { ok: true, frontmost: null, windows: [grantedWindow()] } },
     'uia-probe': { reply: { ok: true, uia: true, comtypes: '1.4.11' } },
@@ -123,7 +123,7 @@ function winFake(name, typeReplies) {
 {
   const macH = await import('./q8-helpers/cu-harness.mjs');
   const fake = macH.makeFakeHome('r142-mac-nosilent');
-  fake.setGrants({ apps: [macH.GRANTED.bundleId] });
+  fake.setGrants({ apps: [macH.GRANTED.bundleId], foreground: { [macH.GRANTED.bundleId]: new Date(Date.now() + 3600_000).toISOString() } });
   fake.setScenario({ windows: { reply: { ok: true, frontmost: null, windows: [macH.grantedWindow()] } } });
   const mac = await macH.startMcp(fake);
   const r = await mac.call('key', { actionId: 'r142_t7f', target: macH.TARGET, keys: 'a' }, 30_000).catch((e) => ({ error: e }));

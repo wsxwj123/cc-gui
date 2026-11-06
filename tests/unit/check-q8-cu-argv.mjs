@@ -17,7 +17,7 @@ import {
 
 const report = makeReport('check-q8-cu-argv');
 const fake = makeFakeHome('cu-argv');
-fake.setGrants({ apps: [GRANTED.bundleId], screenScope: false });
+fake.setGrants({ apps: [GRANTED.bundleId], screenScope: false, foreground: { [GRANTED.bundleId]: new Date(Date.now() + 3600_000).toISOString() } });
 const frontmostGranted = { pid: GRANTED.pid, name: GRANTED.name, bundleId: GRANTED.bundleId };
 const scenarioWith = (title, extra = {}) => ({
   windows: { reply: { ok: true, frontmost: frontmostGranted, windows: [grantedWindow(title)] } },

@@ -351,13 +351,23 @@ router.post('/computer-use/doctor', async (req, res) => {
   });
 });
 
+/** 授权条目的对外形状(GET/POST 共用)。foreground 只回显状态与到期时刻,倒计时由前端算。 */
+function appGrantView([id, entry]) {
+  const fg = entry.foreground;
+  return {
+    bundleId: id, name: entry.name || id, granted: true, grantedAt: entry.grantedAt || null,
+    foreground: {
+      granted: Boolean(fg && Number.isFinite(Date.parse(fg.expiresAt)) && Date.parse(fg.expiresAt) > Date.now()),
+      expiresAt: fg ? fg.expiresAt : null,
+    },
+  };
+}
+
 router.get('/computer-use/grants', (req, res) => {
   const grants = effectiveGrants(readGrants());
   res.json({
     screenScope: grants.screenScope,
-    apps: effectiveAppEntries(grants).map(([bundleId, entry]) => ({
-      bundleId, name: entry.name || bundleId, granted: true, grantedAt: entry.grantedAt || null,
-    })),
+    apps: effectiveAppEntries(grants).map(appGrantView),
     grantsPath: GRANTS_FILE,
   });
 });
@@ -385,13 +395,15 @@ function auditValue(value) {
 // 地址、Windows 真机与 Firefox 未测)与威胁模型见 computer-use/grant-token.js。
 // 每次变更(成功与被拒)记一行审计日志,**不记凭证值**。
 router.post('/computer-use/grants', (req, res) => {
-  const { bundleId, name, granted, screenScope } = req.body || {};
-  const positive = (bundleId !== undefined && granted !== false) || screenScope === true;
+  const { bundleId, name, granted, screenScope, foreground, foregroundMinutes } = req.body || {};
+  // 只用于审计日志的 grant / revoke 标签:只关前台({bundleId, foreground:false})是降权,标 revoke。
+  const positive = (bundleId !== undefined && granted !== false && foreground !== false) || screenScope === true || foreground === true;
   const audit = (outcome, credential) => {
     // 审计日志本身出错(格式化 / 输出流异常)只吞掉:不能因为记日志把请求变成 500。
     try {
-      console.warn('[cu-grants] %s %s credential=%s bundleId=%s screenScope=%s', positive ? 'grant' : 'revoke',
-        outcome, credential ? 'yes' : 'no', auditValue(bundleId), auditValue(screenScope));
+      console.warn('[cu-grants] %s %s credential=%s bundleId=%s screenScope=%s foreground=%s', positive ? 'grant' : 'revoke',
+        outcome, credential ? 'yes' : 'no', auditValue(bundleId), auditValue(screenScope),
+        foreground === true ? 'yes' : foreground === false ? 'no' : '-');
     } catch { /* 见上 */ }
   };
   const invalid = (error) => {
@@ -406,6 +418,7 @@ router.post('/computer-use/grants', (req, res) => {
   }
   if (granted !== undefined && typeof granted !== 'boolean') return invalid('granted 必须是布尔值。');
   if (screenScope !== undefined && typeof screenScope !== 'boolean') return invalid('screenScope 必须是布尔值。');
+  if (foreground !== undefined && typeof foreground !== 'boolean') return invalid('foreground 必须是布尔值。');
   if (bundleId === undefined && screenScope === undefined) return invalid('至少要给 bundleId 或 screenScope。');
 
   // 只认单值字符串。Node 会把同名自定义头用 ", " 拼成一个字符串,拼出来的值不可能等于凭证;
@@ -419,6 +432,8 @@ router.post('/computer-use/grants', (req, res) => {
       name: typeof name === 'string' ? name : null,
       granted: granted !== false,
       screenScope: screenScope === undefined ? null : screenScope,
+      foreground: foreground === undefined ? null : foreground,
+      foregroundMinutes,
     }, { panelCredential: credential });
   } catch (e) {
     const code = e?.code;
@@ -435,9 +450,7 @@ router.post('/computer-use/grants', (req, res) => {
   res.json({
     ok: true,
     screenScope: next.screenScope,
-    apps: effectiveAppEntries(next).map(([id, entry]) => ({
-      bundleId: id, name: entry.name || id, granted: true, grantedAt: entry.grantedAt || null,
-    })),
+    apps: effectiveAppEntries(next).map(appGrantView),
   });
 });
 

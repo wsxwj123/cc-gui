@@ -77,21 +77,21 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 | `type` | **默认零干扰** | 直接写入 `target` 窗口的文本元素并用读回原文验证；读不回 → `unknown` |
 | `key` | **默认零干扰** | 按 pid 定向按键（文字/方向键/回车/Tab/退格等），以目标光标/选择/文本状态验证 |
 
-**副作用工具必填**：`actionId`（1–64 位字母/数字/_/-，调用方生成）、`target:{bundleId,pid,windowId}`（来自 `window_list` 的已授权窗口）、`snapshotId`（坐标类）、`foreground`（只有显式 `true` 才允许全局事件）。同 `actionId` 同参数重试返回已有回执，不重新投递；异参 `CU_ACTION_CONFLICT`。
+**副作用工具必填**：`actionId`（1–64 位字母/数字/_/-，调用方生成）、`target:{bundleId,pid,windowId}`（来自 `window_list` 的已授权窗口）、`snapshotId`（坐标类）、`foreground`（只有显式 `true`，**且用户在「桌面操控 → 应用授权」里为该应用开启了「允许前台操控」**，才允许全局事件；否则返回 `CU_FOREGROUND_CONSENT_REQUIRED` 且零投递）。同 `actionId` 同参数重试返回已有回执，不重新投递；异参 `CU_ACTION_CONFLICT`。
 
 **坐标契约**：所有坐标 = 最近一次 `screenshot` 返回图像的像素坐标（左上 (0,0)），服务端按截图时记录的尺寸映射回屏幕逻辑坐标。合法性按**原图整数**先判（`0≤x<imgW`、`0≤y<imgH`，负/小数/非有限/越界都拒绝），换算一律服务端做。
 
-**错误码**（都在 `structuredContent.code`）：`CU_INVALID_ARGUMENT`、`CU_INVALID_COORDINATE`、`CU_SCREENSHOT_REQUIRED`、`CU_STALE_SNAPSHOT`、`CU_APP_NOT_ALLOWED`、`CU_TARGET_NOT_FOUND`、`CU_TARGET_LOOKUP_FAILED`、`CU_PERMISSION_REQUIRED`、`CU_DISPATCH_FAILED`、`CU_BACKGROUND_UNSUPPORTED`、`CU_TARGET_CHANGED`、`CU_SCREEN_SCOPE_REQUIRED`、`CU_INSTANCE_CHANGED`、`CU_ACTION_CONFLICT`、`CU_ACTION_NOT_FOUND`、`CU_ACTION_EXPIRED`、`CU_UNSUPPORTED_KEY`、`CU_BUSY`、`CU_TIMEOUT`，以及 Windows 阶梯新增的三个：`CU_INPUT_UNSUPPORTED`（后台输入通道不可用/执行层缺失，零投递）、`CU_UIA_BLOCKED`（UI Automation 元素或 pattern 不可达，可降级到消息投递）、`CU_UIPI_BLOCKED`（目标进程完整性级别更高，`SendInput` 被 UIPI 拦截）。
+**错误码**（都在 `structuredContent.code`）：`CU_INVALID_ARGUMENT`、`CU_INVALID_COORDINATE`、`CU_SCREENSHOT_REQUIRED`、`CU_STALE_SNAPSHOT`、`CU_APP_NOT_ALLOWED`、`CU_TARGET_NOT_FOUND`、`CU_TARGET_LOOKUP_FAILED`、`CU_PERMISSION_REQUIRED`、`CU_DISPATCH_FAILED`、`CU_FOREGROUND_CONSENT_REQUIRED`（前台操控没有用户授权）、`CU_BACKGROUND_UNSUPPORTED`、`CU_TARGET_CHANGED`、`CU_SCREEN_SCOPE_REQUIRED`、`CU_INSTANCE_CHANGED`、`CU_ACTION_CONFLICT`、`CU_ACTION_NOT_FOUND`、`CU_ACTION_EXPIRED`、`CU_UNSUPPORTED_KEY`、`CU_BUSY`、`CU_TIMEOUT`，以及 Windows 阶梯新增的三个：`CU_INPUT_UNSUPPORTED`（后台输入通道不可用/执行层缺失，零投递）、`CU_UIA_BLOCKED`（UI Automation 元素或 pattern 不可达，可降级到消息投递）、`CU_UIPI_BLOCKED`（目标进程完整性级别更高，`SendInput` 被 UIPI 拦截）。
 成功回执含 `ok/actionId/method/target/verification`；`method` 取值：`capture`（截图）、`passive`（被动查询）、`query`（action_status）、`background`/`foreground`（macOS 的定向/全局投递）、`uia`（Windows UI Automation 元素级）、`post-message`（Windows 消息投递）。`verification` 为 `not-applicable/dispatched/verified/unknown`，**unknown 一律不写"成功完成"**；Windows 的消息投递回执另带 `effect:{observed:'changed'|'unchanged', diffRatio}`，它只是**弱证据**。
 
 ## 【不抢前台】的工作规则（写给模型，也是排错依据）
 
 1. 截图/窗口/光标/doctor 完全被动。
 2. 所有动作先解析 `target` 当前是否仍是已授权窗口，再定向投递；找不到窗口 = `CU_TARGET_NOT_FOUND`，**不做任何全局回退**。
-3. 严禁用 AppleScript/shell 激活窗口来"绕路抢前台"；只有用户明确要求前台操作时才 `foreground:true`（且要求目标就是当面前台应用，否则 `CU_TARGET_CHANGED`）。
+3. 严禁用 AppleScript/shell 激活窗口来"绕路抢前台"；`foreground:true` 只有在用户在面板里为该应用开启「允许前台操控」（按应用、限时，默认 60 分钟）后才放行（且要求目标就是当面前台应用，否则 `CU_TARGET_CHANGED`）。没有这项授权时返回 `CU_FOREGROUND_CONSENT_REQUIRED`：模型应停下、请用户去面板开启，不得自己改成前台。
 4. `type`/`key` 带 `target` 时写的是目标窗口，不是"当前焦点窗口"——不会打进用户正在编辑的应用。
 5. 本机没有虚拟光标；后台通道 = 按进程号定向投递（`CGEventPostToPid`）+ AX 写值，不动真实光标；对不吃这类事件的应用（如部分 Chromium / Electron / Qt 应用）可能无效，此时只能 `foreground:true`（会移动真实鼠标，须用户同意）。
-6. **Windows 上没有 `CGEventPostToPid` 的等价物**，后台是**阶梯**：`--method uia`（UI Automation 元素级：`InvokePattern` 点按钮、`ValuePattern` 直写文本值并读回校验、`ScrollPattern` 滚动，不抢前台、不动光标）→ 只有拿到**明确的 COM 失败信号**时才降级到消息投递（`PostMessage` 直投 HWND；只对传统 Win32 控件有效，Chromium/UWP/Java/自绘界面基本无效，**且没有可靠的失败信号**）。两条都不通 → `CU_BACKGROUND_UNSUPPORTED` + 可行动指引（**用新的 actionId 重试并显式 `foreground:true`**），**绝不自动改成全局点击**。
+6. **Windows 上没有 `CGEventPostToPid` 的等价物**，后台是**阶梯**：`--method uia`（UI Automation 元素级：`InvokePattern` 点按钮、`ValuePattern` 直写文本值并读回校验、`ScrollPattern` 滚动，不抢前台、不动光标）→ 只有拿到**明确的 COM 失败信号**时才降级到消息投递（`PostMessage` 直投 HWND；只对传统 Win32 控件有效，Chromium/UWP/Java/自绘界面基本无效，**且没有可靠的失败信号**）。两条都不通 → `CU_BACKGROUND_UNSUPPORTED` + 可行动指引（**用户先在面板为该应用开启「允许前台操控」后，用新的 actionId 重试并显式 `foreground:true`**），**绝不自动改成全局点击**。
 7. Windows 上消息投递**永远不判硬失败**：截图 diff 在窗口被遮挡/最小化/在别的虚拟桌面时双向误判，所以 `unchanged` 也回成功回执 + `verification:unknown`，文案明说"无法据此判定投递失败"。
 8. `foreground:true` 在 Windows 上 = `SendInput` 全局投递（会移动真实光标，通常也会把目标窗口切到前台）；`SendInput` 返回值少于请求数会被判成 `CU_UIPI_BLOCKED`/`CU_DISPATCH_FAILED`（返回数相等只证明"入了队列"，不证明目标消费了它）。
 
@@ -127,6 +127,7 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 | 启动器 / 文件管理器能间接起终端 | Finder、Spotlight、Explorer 可以打开 `.command` 文件或输入 `cmd` 启动终端 | 残余风险；名单只拦对终端本身的操控 |
 | 开主屏范围后全屏截图会拍到终端 / 密码管理器窗口 | 主屏截图按屏幕取像素，不按应用排除窗口 | 只读不操控，但内容会进入模型上下文；不需要时关闭「允许主屏全部可见内容」 |
 | 直接改授权文件、连后台的同用户进程不在防线内 | 授权文件与后台连接对同一登录用户的进程都可达；面板凭证只挡不知道凭证的盲写（本机脚本、照旧文档敲的 curl、来自其他网站域名或本机别的端口的网页） | 禁止名单在读取侧仍生效：文件被改，名单内的应用照样被拒；名单外的应用无法防 |
+| 模型可经 Bash 直接调执行层绕过 MCP 的授权闸 | 模型在本机有 shell，可以直接运行 `cu_helper.py` 的子命令，不经过 MCP 的 actionId 登记与前台授权闸 | **既有边界，本任务不修**；威胁模型见 `computer-use/grant-token.js`。前台授权只约束走 MCP 的那条路 |
 | 本机转发代理等少数情形下网页仍能取得凭证 | 后台只放行来源与访问地址同站（主机名和端口都相同）的网页，唯一例外是开发模式下经本机开发服务器代理访问的页面（代理会把请求的 Host 改写成后台地址），此时改认浏览器自报的同源标记，并要求请求来自本机、页面主机名是本机名：本机别的端口上的网页（开发服务器、本地预览、不可信的静态页）连后台时会被拒绝，拿不到凭证；来自其他网站域名的网页、直接从磁盘打开的 `file://` 页面同样被拒绝。但本机上把请求原样转给后台的代理（其他项目的开发服务器代理、Jupyter 代理等）会让经过它的网页与后台同站，因而仍能连上后台并取得凭证，而同一条连接本来就能开内置终端。跨协议、默认端口、浏览器不带跨站标记的组合同理，只有后台或其前置代理监听 80/443 时才可能出现。另外，后台的读文件接口下发的内容（PDF 除外）现在带浏览器限制，浏览器即使直接打开其中的 SVG 也不运行脚本（在 Chromium、WebKit、macOS 的 WKWebView 实测）；PDF 为保证预览可用不带该限制，扩展名是 .pdf 但内容是 HTML 或 SVG 的文件，在 Chromium 新版与 WKWebView 里实测其中的脚本不会运行；带内置脚本的 PDF（试了自动打开链接、提交表单两种动作）实测没有借此向本机发出请求。其他网站或本机别的端口上的网页发起的导航、嵌入、图片加载等不带来源标记的跨站请求，现在对后台接口（`/api/*`）一律被拒，前提是浏览器对该访问地址自报跨站标记：只有回环地址和 https（隧道域名）会；用户手输地址、书签、拖进地址栏或从别的应用点开的链接，浏览器报“非网页发起”，按设计不拦；经局域网 IP 的明文 HTTP 访问、老浏览器不发这个标记，这条规则不生效，只剩上面的浏览器限制这道内容防线。应用自己的请求不受影响。仍未覆盖的情形：WebKit 的 PDF 插件加载请求，以及点击带下载属性的链接时浏览器补发的第二次请求，在 macOS 的 WKWebView 里实测不带来源标记（只能触发读不到结果的 GET，或把响应存成下载文件，不会作为页面运行）；浏览器版里用户亲手对聊天里用户附件的 SVG 图选“在新标签页打开”时，脚本以页面来源运行（该图是浏览器内存里的临时地址，响应头管不到）；Windows 真机与 Firefox 未测 | 残余风险，不在面板凭证的防线内；不要让本机的代理把不可信网页转发到后台 |
 | Windows 后台覆盖不到 Chromium/Electron 的一部分界面 | 渲染器默认不打 accessibility 树；UIA 客户端接入会触发按需开启但**有延迟** | `capabilities.backgroundClick/Type.coverage='partial'`；首次可能失败，**重试一次**通常就好；`--force-renderer-accessibility=off` 或企业策略禁用时拿不到 |
 | Windows 后台覆盖不到 Java/自绘界面/安全桌面 | 没有元素树（Java 需 Java Access Bridge；UAC/锁屏是独立桌面） | 明确报 `CU_BACKGROUND_UNSUPPORTED`，**不会**偷偷改成全局点击 |
@@ -148,11 +149,11 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 | window_list 空 / 动作报 `CU_APP_NOT_ALLOWED` | 目标应用没授权，或属于禁止操控的类别 | 在面板「应用授权」区块里授权该应用；`detail` 说明属于禁止类别时无法授权（见「禁止操控名单」） |
 | 面板里点授权提示「尚未连上后台」或要求刷新页面 / 重启应用 | 面板还没拿到确认凭证（刚打开、后台刚重启） | 稍等几秒重试；仍不行就刷新页面或重启应用 |
 | 动作报 `CU_STALE_SNAPSHOT` | 截图被更新覆盖/来自别的会话 | 重新 `screenshot` 再操作 |
-| 点击无反应 | 无辅助功能权限，或该 App 不吃后台事件 | 自检看 accessibility；确有必要再 `foreground:true`（会打断用户） |
+| 点击无反应 | 无辅助功能权限，或该 App 不吃后台事件 | 自检看 accessibility；确有必要时先请用户在面板为该应用开启「允许前台操控」，再用 `foreground:true`（会打断用户） |
 | 工具报 `CU_SCREENSHOT_REQUIRED` | 坐标工具前没截图 | 先 screenshot |
 | 坐标点偏 | 窗口移动/切换空间后用了旧截图 | 重新 screenshot 再算坐标 |
 | 首次调用卡 1-3 分钟 | 在建 venv 装依赖 | 等一次即可，之后秒回（Windows 可先点卡片上的「准备环境」） |
-| Windows：点击/输入报 `CU_BACKGROUND_UNSUPPORTED` | 目标没有 UIA 元素，也投不进窗口消息（自绘界面/Java/安全桌面） | 这是**设计内**的明确失败；确有必要时用**新的 actionId** 重试并显式 `foreground:true`（会移动真实光标、把目标切到前台） |
+| Windows：点击/输入报 `CU_BACKGROUND_UNSUPPORTED` | 目标没有 UIA 元素，也投不进窗口消息（自绘界面/Java/安全桌面） | 这是**设计内**的明确失败；确有必要时先请用户开启该应用的「允许前台操控」，再用**新的 actionId** 重试并显式 `foreground:true`（会移动真实光标、把目标切到前台） |
 | Windows：点击/输入报 `CU_UIPI_BLOCKED` | 目标以管理员身份运行，完整性级别更高 | 用管理员身份重试，或换一个同级别的目标；前置自检的 `integrityLevel` 会报本进程级别 |
 | Windows：Chrome/Edge 第一次后台失败、第二次成功 | 渲染器的 accessibility 树是按需开启的，生效有延迟 | 重试一次即可（**这是已知边界，不是 bug**） |
 | Windows：`inputMode` 停在 `none`、提示"点击与输入尚未提供" | 还没建立 UIA 可用性结论（缓存缺失） | 点卡片上的「准备环境」（或「环境自检」）跑一次探测；结论出来前本仓不声明输入可用 |
