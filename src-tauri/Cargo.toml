@@ -35,6 +35,11 @@ rfd = "0.15"
 # 权限见 capabilities/notification.json(生产 remote 上下文须列全端口)。发送方全在前端
 # (client/src/utils/desktopNotify.js),Rust 侧只挂插件。
 tauri-plugin-notification = "2"
+# 窗口状态:记住并恢复窗口大小 / 位置 / 最大化 / 全屏,更新重启后保持上次退出时的样子。
+# 只挂 Rust 侧(程序化创建 main 窗口,不经 JS),不对外暴露命令,故无需 capability。
+# 固定 2.4.1:2.5.0 起要求 tauri >= 2.12,会连带把 tauri 从 2.11.2 升上去;
+# 2.4.1 依赖 tauri ^2.8.2,与当前锁定的 2.11.2 兼容。
+tauri-plugin-window-state = "=2.4.1"
 
 [profile.release]
 codegen-units = 1

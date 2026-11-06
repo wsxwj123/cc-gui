@@ -21,10 +21,46 @@ use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_window_state::StateFlags;
 
 const BACKEND_HOST: &str = "127.0.0.1";
 const DEFAULT_BACKEND_PORT: u16 = 6677;
 const MAX_BACKEND_PORT: u16 = 6687;
+
+// ==== W: 窗口状态恢复的尺寸 / 位置防护 ====
+// 统一用物理像素(与 tauri 的 PhysicalSize / PhysicalPosition、monitor.size() 一致)。
+pub type PixelRect = (i32, i32, u32, u32);
+
+/// window-state 插件只应保存 / 恢复这四类状态。
+///
+/// 明确不带 VISIBLE / DECORATIONS:带 VISIBLE 会把"上次退出时窗口是否可见"也恢复,
+/// 异常退出(可见位为 false)会让下次启动窗口保持隐藏、用户以为没启动;装饰(标题栏)
+/// 由本应用固定,不应跟随旧状态文件。
+pub fn window_state_flags() -> StateFlags {
+    StateFlags::all()
+}
+
+/// 把恢复出来的窗口尺寸夹到 [min, max]。
+///
+/// 保存的是物理像素:跨 DPI / 换显示器重启时,旧的物理尺寸可能小于 min_inner_size,
+/// 也可能大于当前显示器(窗口超出屏幕)。max 为 None 时只保证不小于最小值。
+pub fn clamp_window_size(
+    size: (u32, u32),
+    min: (u32, u32),
+    max: Option<(u32, u32)>,
+) -> (u32, u32) {
+    size
+}
+
+/// 窗口矩形是否与任一显示器有交集(物理像素)。用于判断保存的位置是否落在已拔掉的显示器上。
+pub fn rect_intersects_monitors(rect: PixelRect, monitors: &[PixelRect]) -> bool {
+    true
+}
+
+/// 取与窗口矩形交集面积最大的显示器的尺寸;完全不重叠(屏外)返回 None。
+pub fn best_monitor_size(rect: PixelRect, monitors: &[PixelRect]) -> Option<(u32, u32)> {
+    None
+}
 
 // Holds the backend child IFF we spawned it (None when we reused an existing one).
 struct Backend(Mutex<Option<Child>>);
@@ -1386,4 +1422,101 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod window_state_tests {
+    use super::{
+        best_monitor_size, clamp_window_size, rect_intersects_monitors, window_state_flags,
+    };
+
+    #[test]
+    fn state_flags_exclude_visible_and_decorations() {
+        let f = window_state_flags();
+        assert!(f.contains(super::StateFlags::SIZE), "must save size");
+        assert!(f.contains(super::StateFlags::POSITION), "must save position");
+        assert!(f.contains(super::StateFlags::MAXIMIZED), "must save maximized");
+        assert!(f.contains(super::StateFlags::FULLSCREEN), "must save fullscreen");
+        // 核心防护:不带这两个位(带 VISIBLE 可能让下次启动窗口保持隐藏)
+        assert!(
+            !f.contains(super::StateFlags::VISIBLE),
+            "VISIBLE must NOT be restored (window could stay hidden)"
+        );
+        assert!(
+            !f.contains(super::StateFlags::DECORATIONS),
+            "DECORATIONS must NOT be restored (decorations are fixed by the app)"
+        );
+    }
+
+    #[test]
+    fn clamps_below_minimum_up_to_minimum() {
+        // 跨 DPI(2x→1x)后旧物理尺寸可能小于 min_inner_size(900×600 逻辑点)
+        assert_eq!(
+            clamp_window_size((800, 500), (900, 600), None),
+            (900, 600)
+        );
+        assert_eq!(
+            clamp_window_size((0, 0), (900, 600), None),
+            (900, 600)
+        );
+    }
+
+    #[test]
+    fn clamps_above_monitor_down_to_monitor() {
+        // 旧显示器更大 / DPI 变小:物理尺寸超过当前显示器就夹回屏内
+        assert_eq!(
+            clamp_window_size((2500, 1800), (900, 600), Some((1920, 1080))),
+            (1920, 1080)
+        );
+    }
+
+    #[test]
+    fn keeps_size_inside_bounds_unchanged() {
+        assert_eq!(
+            clamp_window_size((1200, 800), (900, 600), Some((1920, 1080))),
+            (1200, 800)
+        );
+    }
+
+    #[test]
+    fn minimum_wins_when_monitor_smaller_than_minimum() {
+        // 极小屏:min_inner_size 优先,不能出现比最小值还小的窗口
+        assert_eq!(
+            clamp_window_size((2000, 2000), (900, 600), Some((800, 500))),
+            (900, 600)
+        );
+    }
+
+    #[test]
+    fn detects_window_inside_or_partially_off_screen() {
+        let monitors = [(0, 0, 1920, 1080)];
+        // 完整在屏内
+        assert!(rect_intersects_monitors((100, 100, 800, 600), &monitors));
+        // 只有一部分在屏内也算可见
+        assert!(rect_intersects_monitors((-500, 100, 800, 600), &monitors));
+        // 完全在屏幕右侧外
+        assert!(!rect_intersects_monitors((2000, 100, 800, 600), &monitors));
+        // Windows 最小化时的 -32000 哨兵坐标(不该被恢复)
+        assert!(!rect_intersects_monitors((-32000, -32000, 800, 600), &monitors));
+        // 没有显示器信息时视为屏外(交给居中兜底)
+        assert!(!rect_intersects_monitors((100, 100, 800, 600), &[]));
+    }
+
+    #[test]
+    fn picks_monitor_with_largest_overlap() {
+        let monitors = [(0, 0, 1920, 1080), (1920, 0, 2560, 1440)];
+        // 完全落在第二块屏
+        assert_eq!(
+            best_monitor_size((2000, 100, 800, 600), &monitors),
+            Some((2560, 1440))
+        );
+        // 完全落在第一块屏
+        assert_eq!(
+            best_monitor_size((100, 100, 800, 600), &monitors),
+            Some((1920, 1080))
+        );
+        // 屏外 / 无显示器 → None
+        assert_eq!(best_monitor_size((9000, 100, 800, 600), &monitors), None);
+        assert_eq!(best_monitor_size((100, 100, 800, 600), &[]), None);
+    }
 }
