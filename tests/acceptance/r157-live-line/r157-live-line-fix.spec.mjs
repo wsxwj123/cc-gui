@@ -97,3 +97,20 @@ test('F3 运行中最后一组里有还没回答的 AskUserQuestion:该组同样
   await page.waitForTimeout(1000);
   expect((await gr(page)).state, '稳定 1 秒后仍应 closed').toBe('closed');
 });
+
+test('F4 收起整条过程条后承载状态行的组只剩头行(条目不可见);点这个头行会把过程条重新展开、该组展开', async ({ page }) => {
+  const DESC = 'F4 一直没返回的命令';
+  await startRound(page, { key: 'b16', scenario: { events: [{ kind: 'text', text: 'R157-F4-TEXT 先有一条正文。' }, bash(DESC, { pending: 'd1' })] } });
+  await waitLine(page, 'tool', DESC);
+  await expectLiveGroup(page, { phase: 'tool', text: DESC }); // 前置自证:最后一个工作组承载着状态行
+  const groupHead = () => page.locator('[data-work-group-head]').filter({ hasText: DESC }).last();
+  await groupHead().click({ timeout: 8_000 }); // 用户先把这一组点开
+  await expect.poll(async () => (await gr(page)).entriesShown, { timeout: 8_000, message: '前置自证:点开后组内条目应可见' }).toBeGreaterThan(0);
+  await liveStripHead(page).click({ timeout: 8_000 }); // 再收起整条过程条
+  await expect(liveStripHead(page), '前置自证:本回合总摘要行应已收起').toHaveAttribute('aria-expanded', 'false', { timeout: 8_000 });
+  await expect.poll(async () => (await gr(page)).entriesShown, { timeout: 8_000, message: '收起整条过程条后,承载状态行的组只剩头行,组内条目(运行中的小圆环等)不应可见' }).toBe(0);
+  expect((await lineFacts(page)).visible, '收起时承载状态行的头行仍应可见').toBe(true);
+  await groupHead().click({ timeout: 8_000 }); // 点这个头行
+  await expect(liveStripHead(page), '点承载状态行的组头行后过程条应重新展开').toHaveAttribute('aria-expanded', 'true', { timeout: 8_000 });
+  await expect.poll(async () => { const g = await gr(page); return [g.state, g.entriesShown > 0].join('|'); }, { timeout: 8_000, message: '点头行后该组应展开且条目可见' }).toBe('open|true');
+});

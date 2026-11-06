@@ -250,10 +250,11 @@ export function isSolidText(item) {
 /**
  * 子树里正在循环（animation-iteration-count 含 infinite）的 CSS 动画元素 + 所有 SMIL 动画元素的描述列表。
  * 一次性的入场动画（淡入等）不算"运行中的动画元素"。visibleOnly：只数当前看得见的元素。
+ * exclude（r157,可选 CSS 选择器）：落在该选择器匹配元素里面的动画不数(例如承载在工作组头行里的实时状态行自带的流光)。
  */
-export async function loopingAnimations(locator, { visibleOnly = false } = {}) {
-  return await locator.evaluate((root, onlyVisible) => {
-    const all = [root, ...root.querySelectorAll('*')];
+export async function loopingAnimations(locator, { visibleOnly = false, exclude = null } = {}) {
+  return await locator.evaluate((root, { onlyVisible, exclude: skip }) => {
+    const all = [root, ...root.querySelectorAll('*')].filter((el) => !(skip && el.closest(skip)));
     const vis = (el) => (typeof el.checkVisibility === 'function' ? el.checkVisibility() : el.getClientRects().length > 0);
     return all.filter((el) => {
       const cs = getComputedStyle(el);
@@ -261,7 +262,7 @@ export async function loopingAnimations(locator, { visibleOnly = false } = {}) {
       const smil = /^(animate|animatetransform|animatemotion|set)$/i.test(el.tagName);
       return (css || smil) && (!onlyVisible || vis(el));
     }).map((el) => `${el.tagName.toLowerCase()}${el.getAttribute('class') ? `.${String(el.getAttribute('class')).split(/\s+/)[0]}` : ''}|${getComputedStyle(el).animationName}`);
-  }, visibleOnly);
+  }, { onlyVisible: visibleOnly, exclude });
 }
 
 // ───────────────────────── 过程条 / 子代理卡 ─────────────────────────

@@ -432,7 +432,9 @@ test('L10 展开后的条目：工具条目 running→done（含 error）、思�
   const strip = page.locator('[data-strip-root]').filter({ has: liveHead });
   await liveHead.click();
   await expect(liveHead, '前置自证：点头行后应收起').toHaveAttribute('aria-expanded', 'false');
-  expect.soft(await loopingAnimations(strip, { visibleOnly: true }), '过程条收起时其中不应有任何可见的运行中动画').toEqual([]);
+  // r157:实时状态行挂在最后一个工作组的头行里,收起总摘要行后它按设计仍可见(见 r157 F1),它自带的流光不算「条目动画」;
+  // 条目(运行中的小圆环、思考图标的呼吸)收起后必须不可见——承载状态行的组此时只剩头行。
+  expect.soft(await loopingAnimations(strip, { visibleOnly: true, exclude: '[data-live-line]' }), '过程条收起时其中不应有任何可见的运行中动画（承载状态行的头行自带的流光除外）').toEqual([]);
   await liveHead.click();
   await expect(liveHead, '再点一次应展开').toHaveAttribute('aria-expanded', 'true');
 
