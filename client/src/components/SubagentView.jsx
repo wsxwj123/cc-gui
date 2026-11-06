@@ -7,7 +7,7 @@ import { CoworkBlocks } from './TurnBubble.jsx';
 import { PermissionPrompt } from './PermissionPrompt.jsx';
 import { LiveStatusLine } from './LiveStatusLine.jsx';
 import { liveStatusLabel } from '../utils/liveStatus.js';
-import { tailBlockInfo } from '../utils/streamStatus.js';
+import { tailBlockInfo, latestToolTitles } from '../utils/streamStatus.js';
 import { stopNoOwnerNotice } from './tools/TaskCard.jsx';
 import { resolveOwnedAgent } from '../utils/agentOwner.js';
 import { AGENT_TERMINAL_STATUSES, agentSourceState, taskRunEvidence } from '../utils/agentView.js';
@@ -27,7 +27,9 @@ function subagentLiveLabel(agent, blocks) {
   const toolCalls = Array.isArray(agent?.toolCalls) ? agent.toolCalls : [];
   const pendingTool = [...toolCalls].reverse().find((tc) => tc && !tc.result) || null;
   const { lastType, lastThinkingText } = tailBlockInfo(blocks);
-  return liveStatusLabel({ pendingTool, lastType, lastThinkingText });
+  // 与主会话同一份「入参未到 → 沿用折叠行标题」逻辑。
+  const pendingTitle = latestToolTitles(toolCalls).liveTitle;
+  return liveStatusLabel({ pendingTool, pendingTitle, lastType, lastThinkingText });
 }
 
 // #9/O4 子代理会话窗口:样式对齐正常会话(用户气泡在右、回复在左、思考/工具折叠),

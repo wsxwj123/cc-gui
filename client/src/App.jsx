@@ -67,7 +67,7 @@ import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { GenuiActionProvider, useGenuiActionCapability } from './genui/host/action-context.jsx';
 import { TurnBubble, StripRoundContext } from './components/TurnBubble.jsx';
-import { stripSummary, tailBlockInfo } from './utils/streamStatus.js';
+import { stripSummary, tailBlockInfo, latestToolTitles } from './utils/streamStatus.js';
 import { initialSpan, extendUp, needsExtend, sliceRows } from './utils/mountWindow.js';
 import { historyMessageKey } from './utils/historyPaging.js';
 import { HISTORY_COST_ESTIMATE_NOTE, hasFullHistoryStats, historyStatsScopeLabel } from './utils/historyStatsScope.js';
@@ -2760,12 +2760,14 @@ function StreamingStatusLine({ blocks = [], thinking, text, toolCalls, streamSta
   // ui-live-line-v2:阶段只看整轮 blocks 的最后一块 —— 前面出现过正文不代表现在还在输出
   // (多轮回合里思考 / 调工具曾被整轮累计的 text 压成「正在输出」)。
   const { lastType, lastThinkingText } = tailBlockInfo(blocks);
+  // 入参还没到时,底部行沿用折叠行同一个「最新工具标题」(不再是「运行 / 写入 / 委派子代理」)。
+  const pendingTitle = latestToolTitles(toolCalls).liveTitle;
   // r119:stopping 优先 —— 用户已请求停止、本轮还没结束时如实显示「停止中」。
   // r154:自动压缩进行中(liveStatus.compacting,来自 SDK 的 status:compacting 事件)次之,显示「正在压缩上下文」;
   // 下面的「等待状态行(G)」仍说明原因并带进度条,两行并存。
   // r65:sawModelOutput 为 false(reattach 接管一个还没吐任何产出的回合)时显示「连接中」;
   // 首发路径默认 true,空窗期(工具结果全回、下一条整消息未到)显示「思考」,不隐藏整行。
-  const label = liveStatusLabel({ stopping, compacting, pendingTool, lastType, lastThinkingText, text: !!text, thinking: !!thinking, sawModelOutput });
+  const label = liveStatusLabel({ stopping, compacting, pendingTool, pendingTitle, lastType, lastThinkingText, text: !!text, thinking: !!thinking, sawModelOutput });
   // 缩进 50px(34px 头像 + 16px gap)与气泡正文列对齐,渲染在气泡下方。
   return (
     <div className="px-6 -mt-2 pb-3 animate-fade-in">
