@@ -43,6 +43,11 @@ if [ "$PORT" = "6677" ] || [ "$PORT" = "6689" ]; then
   echo "拒绝使用用户实例端口 $PORT" >&2; exit 1
 fi
 
+# r154 后续(2026-11-06):每次运行前把上一轮的数据根改名挪开(不删),从干净的数据根起跑。
+# 旧根里每跑一轮都会多出一批 cgui-title-* 临时工作区,累积到几十个后把 fixture-workspace 挤出侧栏前几项,
+# newSessionInFixtureProject 在侧栏找不到夹具项目(实测 sf-2 六条因此红)。旧根留作 .prev-<时间>,在已忽略的 .artifacts 里,可随时手工清。
+if [ -d "$ROOT" ] && [ "${SF_KEEP_ROOT:-}" != "1" ]; then mv "$ROOT" "$ROOT.prev-$(date +%Y%m%d-%H%M%S)"; fi
+
 node "$SUITE/helpers/fixtures.mjs" >/dev/null
 
 mkdir -p "$ROOT/home/.claude" "$ROOT/home/.claude-gui" "$ROOT/fixture-workspace"
