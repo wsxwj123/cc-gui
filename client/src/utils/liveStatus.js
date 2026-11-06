@@ -2,7 +2,9 @@
 // 由现有流式状态推出 { phase, verb, object }。ui-live-line-v2 起只按「最后一块」判阶段:
 // 工具阶段直接显示该工具调用的标题(与折叠行同一个 toolTitle),不再加「运行 / 委派子代理」前缀;
 // 思考阶段显示「思考 · 一行预览」;正文才是「正在输出」。
-import { toolTitle, latestThinkingPreview, isInputPending } from './streamStatus.js';
+import {
+  toolTitle, latestThinkingPreview, isInputPending, tailBlockInfo, latestToolTitles, groupCoworkBlocks,
+} from './streamStatus.js';
 
 // 工具名 → 动词。**只作回落**:取不到工具标题(description / 文件名 / pattern …)时,
 // 仍显示原来的动词短语(如 AskUserQuestion → 「等待你的回答」),不让底部行空着。
@@ -146,4 +148,36 @@ export function liveStatusLabel({
   }
   if (sawModelOutput === false) return { phase: 'connecting', verb: '连接中', object: '' };
   return { phase: 'thinking', verb: '思考', object: '' };
+}
+
+// ── r157:状态行挂在工作组头行(纯函数,主会话底部行与 CoworkBlocks 头行共用)──────────
+// 入参只有整轮 blocks:pendingTool / pendingTitle 都从 blocks 里的 toolCall 取(工具结果会回写到
+// 对应块的 toolCall.result),两处用同一来源,避免「头行和底部同时有 / 同时没有」。
+function blockToolCalls(blocks) {
+  const list = Array.isArray(blocks) ? blocks : [];
+  const calls = [];
+  for (const b of list) if (b?.type === 'tool_use' && b.toolCall) calls.push(b.toolCall);
+  return calls;
+}
+
+export function liveLabelFromBlocks({ blocks = [], stopping = false, compacting = false } = {}) {
+  const calls = blockToolCalls(blocks);
+  let pendingTool = null;
+  for (let i = calls.length - 1; i >= 0; i -= 1) {
+    if (!calls[i].result) { pendingTool = calls[i]; break; }
+  }
+  const { lastType, lastThinkingText } = tailBlockInfo(blocks);
+  const pendingTitle = latestToolTitles(calls).liveTitle;
+  return liveStatusLabel({ stopping, compacting, pendingTool, pendingTitle, lastType, lastThinkingText });
+}
+
+// 「实时状态行是否由最后一个工作组的头行承载」—— **唯一判定**(App 的底部流式行与 CoworkBlocks 都调它)。
+// 规则:非聊天模式 ∧ 没在停止 ∧ 没在压缩 ∧ 最后一段(groupCoworkBlocks)是 group
+//       ∧ liveStatusLabel 的阶段是 tool 或 thinking(正文阶段回到底部「正在输出」)。
+export function isLiveLineHostedByGroup({ blocks = [], stopping = false, compacting = false, chatMode = false } = {}) {
+  if (chatMode || stopping || compacting) return false;
+  const segs = groupCoworkBlocks(blocks);
+  if (!segs.length || segs[segs.length - 1].kind !== 'group') return false;
+  const { phase } = liveLabelFromBlocks({ blocks, stopping, compacting });
+  return phase === 'tool' || phase === 'thinking';
 }
