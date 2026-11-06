@@ -108,22 +108,96 @@ impl AutosaveDebounce {
     /// 收到一次移动 / 缩放事件。恢复窗口状态期间不调度(返回 false),
     /// 其余情况记录时刻并返回 true(调用方据此保证一串事件只起一个等待线程)。
     pub fn note(&mut self, now_ms: u64, restoring: bool) -> bool {
-        let _ = (now_ms, restoring);
+        if restoring {
+            return false;
+        }
+        self.last_event_ms = Some(now_ms);
         true
     }
 
     /// 在 `now_ms` 时是否已满去抖间隔、可以落盘。
     pub fn is_due(&self, now_ms: u64, debounce_ms: u64) -> bool {
-        let _ = (now_ms, debounce_ms);
-        true
+        match self.last_event_ms {
+            Some(t) => now_ms.saturating_sub(t) >= debounce_ms,
+            None => false,
+        }
     }
 
     /// 落盘后复位。
-    pub fn clear(&mut self) {}
+    pub fn clear(&mut self) {
+        self.last_event_ms = None;
+    }
 
     /// 是否还有未落盘的改动。
     pub fn has_pending(&self) -> bool {
-        true
+        self.last_event_ms.is_some()
+    }
+}
+
+// 自动落盘去抖间隔:移动 / 缩放停下约 1.5 秒后落盘一次。
+const AUTOSAVE_DEBOUNCE_MS: u64 = 1_500;
+
+/// 全局去抖状态;AUTOSAVE_SCHEDULED 保证一串事件只起一个等待线程。
+static AUTOSAVE_DEBOUNCE: Mutex<AutosaveDebounce> = Mutex::new(AutosaveDebounce::new());
+static AUTOSAVE_SCHEDULED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 单调毫秒时钟(整个进程共用同一个起点,只为给去抖提供可注入的数值)。
+fn autosave_now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// 收到一次移动 / 缩放事件:记录时刻(尾沿去抖判定见 AutosaveDebounce),并保证一串事件
+/// 只起一个等待线程。恢复窗口状态期间不调度。
+///
+/// 这条自动落盘是不经过 RunEvent::Exit 的退出路径的唯一保险:Windows 自动更新安装器起
+/// 安装程序后直接 `std::process::exit(0)`;主线程调 `app.restart()` 时 Tauri 也不保证投递
+/// Exit 事件。正常退出(关闭 / Cmd+Q)仍以 CloseRequested / Exit 里的精确保存为准。
+fn note_autosave_event(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    let restoring = RESTORING_WINDOW_STATE.load(Ordering::Relaxed);
+    {
+        let mut debounce = AUTOSAVE_DEBOUNCE.lock().unwrap();
+        if !debounce.note(autosave_now_ms(), restoring) {
+            return;
+        }
+    }
+    if AUTOSAVE_SCHEDULED.swap(true, Ordering::AcqRel) {
+        return; // 本串事件已有等待线程
+    }
+    let app = app.clone();
+    std::thread::spawn(move || autosave_worker(app));
+}
+
+/// 等待线程:每 AUTOSAVE_DEBOUNCE_MS 醒一次,事件停下满去抖间隔才落盘;期间来了新事件
+/// 就继续等(尾沿),落盘后没有新事件才退出。
+fn autosave_worker(app: tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    loop {
+        std::thread::sleep(Duration::from_millis(AUTOSAVE_DEBOUNCE_MS));
+        // 恢复期间插件持有状态缓存锁,此时落盘只会白等,让过这一拍。
+        if RESTORING_WINDOW_STATE.load(Ordering::Relaxed) {
+            continue;
+        }
+        {
+            let mut debounce = AUTOSAVE_DEBOUNCE.lock().unwrap();
+            if !debounce.is_due(autosave_now_ms(), AUTOSAVE_DEBOUNCE_MS) {
+                continue;
+            }
+            debounce.clear();
+        }
+        let _ = app.save_window_state(window_state_flags());
+        // 与 note_autosave_event 的约定:持有状态锁时确认没有新事件、再释放“有等待线程”
+        // 标志,避免“事件刚记录、标志刚释放”之间漏掉最后一次落盘。
+        let debounce = AUTOSAVE_DEBOUNCE.lock().unwrap();
+        if debounce.has_pending() {
+            continue; // 落盘期间来了新事件,继续等
+        }
+        AUTOSAVE_SCHEDULED.store(false, Ordering::Release);
+        drop(debounce);
+        break;
     }
 }
 
@@ -134,33 +208,6 @@ impl AutosaveDebounce {
 ///  - 尺寸夹到 [min_inner_size(900×600 逻辑点), 窗口所在显示器的物理尺寸] —— 换 DPI /
 ///    换显示器后旧物理像素可能过小(小于最小值)或过大(超出屏幕);
 ///  - 位置不与任何显示器相交(显示器被拔掉)→ 居中。
-/// 移动 / 缩放后低频自动落盘(最多 2 秒一次)。
-///
-/// 覆盖不经过 RunEvent::Exit 的退出路径:Windows 自动更新安装器起安装程序后直接
-/// `std::process::exit(0)`;主线程调 `app.restart()` 时 Tauri 也不保证投递 Exit 事件。
-/// 正常退出(关闭 / Cmd+Q)仍以 CloseRequested / Exit 里的精确保存为准。
-fn autosave_window_state(app: &tauri::AppHandle) {
-    use std::sync::OnceLock;
-    // 恢复过程中插件持有状态缓存锁:此时若由 set_size/set_position 同步触发 Resized/Moved,
-    // 再进 save_window_state 取同一把锁会自锁。恢复期间一律跳过。
-    if RESTORING_WINDOW_STATE.load(std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
-    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    let last = LAST.get_or_init(|| Mutex::new(None));
-    let now = Instant::now();
-    {
-        let mut guard = last.lock().unwrap();
-        if let Some(t) = *guard {
-            if now.duration_since(t) < Duration::from_secs(2) {
-                return;
-            }
-        }
-        *guard = Some(now);
-    }
-    let _ = app.save_window_state(window_state_flags());
-}
-
 fn sanitize_restored_window(window: &tauri::WebviewWindow) {
     if window.is_minimized().unwrap_or(false) {
         let _ = window.unminimize();
@@ -1293,7 +1340,8 @@ pub fn run() {
                 }
             };
             // W: 恢复上次退出时的窗口大小 / 位置 / 最大化 / 全屏,再做几何兜底
-            // (跨 DPI、屏外、小于最小值都在这时校正),最后才显示,避免先默认尺寸再跳变。
+            // (跨 DPI、屏外、小于最小值都在这时校正)。窗口创建时本身已可见(没有用
+            // .visible(false)),这里只是让恢复 / 兜底赶在 show() 之前,缩短默认几何的可见时间。
             RESTORING_WINDOW_STATE.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = window.restore_state(window_state_flags());
             sanitize_restored_window(&window);
@@ -1558,7 +1606,7 @@ pub fn run() {
                 }
                 // W: 移动 / 缩放时低频自动落盘,覆盖不经过 Exit 的退出路径(见 autosave 注释)。
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
-                    autosave_window_state(window.app_handle());
+                    note_autosave_event(window.app_handle());
                 }
                 _ => {}
             }
