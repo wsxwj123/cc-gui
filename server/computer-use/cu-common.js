@@ -515,6 +515,8 @@ export function setGrant(
   }
   if (foreground === true) {
     if (appId === null) throw grantError('CU_INVALID_ARGUMENT', '开启前台操控必须给出 bundleId。');
+    // 自相矛盾:撤销应用与开前台不能在同一次提交里(否则撤销被吞、前台反被打开)。
+    if (granted === false) throw grantError('CU_INVALID_ARGUMENT', '撤销应用与开启前台不能同时提交。');
     if (!Number.isInteger(foregroundMinutes) || foregroundMinutes < 5 || foregroundMinutes > 240) {
       throw grantError('CU_INVALID_ARGUMENT', 'foregroundMinutes 必须是 5–240 的整数。');
     }
@@ -647,7 +649,8 @@ export function appEntry(grants, bundleId) {
   return hit ? grants.apps[hit] : null;
 }
 
-export function appGranted(grants, bundleId, platformName = process.platform) {  if (!bundleId || !grants.apps) return false;
+export function appGranted(grants, bundleId, platformName = process.platform) {
+  if (!bundleId || !grants.apps) return false;
   // 底线最先判(防御纵深):禁止类别即使在授权表里也不算已授权。
   if (forbiddenAppReason(bundleId, platformName)) return false;
   if (ownApp(grants.apps, bundleId)) return true;
