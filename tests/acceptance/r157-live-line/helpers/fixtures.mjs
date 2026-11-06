@@ -22,6 +22,16 @@ export const SESSIONS = Object.fromEntries(KEYS.map((k, i) => [k, {
   sid: `a1570${String(i + 1).padStart(3, '0')}-0000-4000-8000-${String(i + 1).padStart(12, '0')}`,
   marker: `R157MARK${k.toUpperCase()}X`, // 以 X 收尾：R157MARKB1X 不会是 R157MARKB11X 的子串
 }]));
+// r157 判官保留项:b16…b18 对应 r157-live-line-fix.spec.mjs 的 F1…F3(追加,写法同 b1…b15)。
+// 必须紧跟在 SESSIONS 之后:文件末尾「直接运行时建夹具」那段在模块顶层执行,放在它后面就赶不上。
+for (const n of [16, 17, 18]) {
+  const k = `b${n}`;
+  KEYS.push(k);
+  SESSIONS[k] = {
+    sid: `a1570${String(n).padStart(3, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`,
+    marker: `R157MARK${k.toUpperCase()}X`,
+  };
+}
 
 export const histAnchor = (key) => `R157-${key} 历史回合收尾。`;
 export const histTool = (key) => `${key} 历史回合工具`;
