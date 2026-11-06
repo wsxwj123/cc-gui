@@ -81,7 +81,7 @@
   },
   {
     "name": "left_click",
-    "description": "在 (x,y) 单击左键。默认后台定向投递到 target 窗口(不抢前台、不动用户光标);找不到窗口就是 CU_TARGET_NOT_FOUND,绝不退化成全局点击。只有 foreground:true 才走全局事件(会打断用户前台)。坐标一律使用【最近一次 screenshot 返回图像的像素坐标】,左上角为 (0,0);服务端自动映射为屏幕逻辑坐标。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
+    "description": "在 (x,y) 单击左键。默认后台定向投递到 target 窗口(不抢前台、不动用户光标);找不到窗口就是 CU_TARGET_NOT_FOUND,绝不退化成全局点击。只有 foreground:true 且用户已在面板为该应用开启「允许前台操控」时才走全局事件(会打断用户前台)。坐标一律使用【最近一次 screenshot 返回图像的像素坐标】,左上角为 (0,0);服务端自动映射为屏幕逻辑坐标。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -118,7 +118,7 @@
         },
         "foreground": {
           "type": "boolean",
-          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。只有用户已在「桌面操控 → 应用授权」面板为 target.bundleId 开启「允许前台操控」(限时)时才可能成功;否则返回 CU_FOREGROUND_CONSENT_REQUIRED 且零投递。"
         },
         "instanceId": {
           "type": "string",
@@ -180,7 +180,7 @@
         },
         "foreground": {
           "type": "boolean",
-          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。只有用户已在「桌面操控 → 应用授权」面板为 target.bundleId 开启「允许前台操控」(限时)时才可能成功;否则返回 CU_FOREGROUND_CONSENT_REQUIRED 且零投递。"
         },
         "instanceId": {
           "type": "string",
@@ -242,7 +242,7 @@
         },
         "foreground": {
           "type": "boolean",
-          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。只有用户已在「桌面操控 → 应用授权」面板为 target.bundleId 开启「允许前台操控」(限时)时才可能成功;否则返回 CU_FOREGROUND_CONSENT_REQUIRED 且零投递。"
         },
         "instanceId": {
           "type": "string",
@@ -267,7 +267,7 @@
   },
   {
     "name": "drag",
-    "description": "从 (x1,y1) 按住左键拖到 (x2,y2)。默认后台定向投递到 target;foreground:true 才走全局(影响前台)。坐标一律使用【最近一次 screenshot 返回图像的像素坐标】,左上角为 (0,0);服务端自动映射为屏幕逻辑坐标。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
+    "description": "从 (x1,y1) 按住左键拖到 (x2,y2)。默认后台定向投递到 target;foreground:true 且用户已在面板为该应用开启「允许前台操控」时才走全局(影响前台)。坐标一律使用【最近一次 screenshot 返回图像的像素坐标】,左上角为 (0,0);服务端自动映射为屏幕逻辑坐标。actionId 由调用方提供(1–64 位字母/数字/_/-),相同 actionId 同参数重试返回已有回执,异参 CU_ACTION_CONFLICT。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -304,7 +304,7 @@
         },
         "foreground": {
           "type": "boolean",
-          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。只有用户已在「桌面操控 → 应用授权」面板为 target.bundleId 开启「允许前台操控」(限时)时才可能成功;否则返回 CU_FOREGROUND_CONSENT_REQUIRED 且零投递。"
         },
         "instanceId": {
           "type": "string",
@@ -372,7 +372,7 @@
         },
         "foreground": {
           "type": "boolean",
-          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。只有用户已在「桌面操控 → 应用授权」面板为 target.bundleId 开启「允许前台操控」(限时)时才可能成功;否则返回 CU_FOREGROUND_CONSENT_REQUIRED 且零投递。"
         },
         "instanceId": {
           "type": "string",
@@ -444,7 +444,7 @@
         },
         "foreground": {
           "type": "boolean",
-          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。只有用户已在「桌面操控 → 应用授权」面板为 target.bundleId 开启「允许前台操控」(限时)时才可能成功;否则返回 CU_FOREGROUND_CONSENT_REQUIRED 且零投递。"
         },
         "instanceId": {
           "type": "string",
@@ -500,7 +500,7 @@
         },
         "foreground": {
           "type": "boolean",
-          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。"
+          "description": "只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。只有用户已在「桌面操控 → 应用授权」面板为 target.bundleId 开启「允许前台操控」(限时)时才可能成功;否则返回 CU_FOREGROUND_CONSENT_REQUIRED 且零投递。"
         },
         "instanceId": {
           "type": "string",

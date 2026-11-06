@@ -44,7 +44,7 @@ const CALLS = [
 
 async function withWinMcp(name, windowsReply, fn) {
   const fake = makeWinHome(name);
-  fake.setGrants({ apps: [GRANTED.bundleId] });
+  fake.setGrants({ apps: [GRANTED.bundleId], foreground: { [GRANTED.bundleId]: new Date(Date.now() + 3600_000).toISOString() } });
   fake.setScenario({ windows: { reply: windowsReply } });
   const mcp = await startWinMcp(fake);
   try {
@@ -126,7 +126,7 @@ async function runForeground(mcp, fake, tag) {
 {
   const macH = await import('./q8-helpers/cu-harness.mjs');
   const fake = macH.makeFakeHome('r142-mac-foreground');
-  fake.setGrants({ apps: [macH.GRANTED.bundleId] });
+  fake.setGrants({ apps: [macH.GRANTED.bundleId], foreground: { [macH.GRANTED.bundleId]: new Date(Date.now() + 3600_000).toISOString() } });
   fake.setScenario({
     windows: { reply: { ok: true, frontmost: { pid: macH.GRANTED.pid, name: macH.GRANTED.name, bundleId: macH.GRANTED.bundleId },
       windows: [macH.grantedWindow()] } },

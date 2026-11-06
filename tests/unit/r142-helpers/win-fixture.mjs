@@ -77,9 +77,14 @@ export function makeWinHome(name, { venvReady = true, stamp = 'match' } = {}) {
     base, home, runtimeDir, venvDir, venvPy: py, binDir, shotDir: join(runtimeDir, 'shots'),
     grantsFile, stubLog, sigLog, scenarioFile, beatDir, uiaCacheFile: join(runtimeDir, 'uia-capability.json'),
     setScenario(obj) { fs.writeFileSync(scenarioFile, JSON.stringify(obj)); },
-    setGrants({ apps = [GRANTED.bundleId], screenScope = true } = {}) {
+    setGrants({ apps = [GRANTED.bundleId], screenScope = true, foreground = null } = {}) {
       const grants = { version: 1, screenScope: { granted: screenScope, grantedAt: screenScope ? new Date().toISOString() : null }, apps: {} };
-      for (const b of apps) grants.apps[b] = { name: b, grantedAt: new Date().toISOString() };
+      for (const b of apps) {
+        grants.apps[b] = { name: b, grantedAt: new Date().toISOString() };
+        if (foreground && foreground[b]) {
+          grants.apps[b].foreground = { grantedAt: new Date().toISOString(), expiresAt: foreground[b] };
+        }
+      }
       fs.writeFileSync(grantsFile, JSON.stringify(grants));
     },
     log() {
