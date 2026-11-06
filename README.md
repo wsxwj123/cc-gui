@@ -287,7 +287,72 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.446">v0.2.446</a></b>(2026-11-05)· 新增 2 条 · 优化 3 条</summary>
+<summary><b>v0.2.447</b>(2026-11-06)· 新增 3 条 · 优化 3 条 · 修复 3 条</summary>
+
+**新增**
+
+<details><summary>生成中的状态行移到整条回复的最下面一行</summary>
+
+加载动画、已用时间和状态文字排成一行（例如「● 12s · 读取 App.jsx」）。状态文字改为中文（连接中、正在思考、正在输出、读取 / 编辑 / 运行 / 搜索 / 委派子代理 …、停止中、正在压缩上下文），不再显示原来的橙色英文循环词；自动压缩上下文时仍保留进度条。
+
+</details>
+
+<details><summary>新增「三体旋转」「四体旋转」两种加载动画和转速选项</summary>
+
+主题 → 界面页里排在最前面，转速分慢、标准、快（默认慢）。没存过选择的用户默认使用「三体旋转」，选过其它样式的用户保持不变；系统开启「减弱动态效果」时动画静止。
+
+</details>
+
+<details><summary>子代理卡片运行中显示九宫格图标和边框流光</summary>
+
+图标与侧栏会话行的运行图标同款，卡片边框一圈有流光；完成、出错或停止后消失，「减弱动态效果」下不显示流光。
+
+</details>
+
+**优化**
+
+<details><summary>折叠过程条的头行改为静态</summary>
+
+头行固定为扳手图标 + 最新工具标题 + 小三角，不再带点阵动画和用时；生成中的动画和用时看最下面一行。
+
+</details>
+
+<details><summary>展开过程条后每个条目显示各自的状态</summary>
+
+运行中的工具调用前是小圆环，最新一块思考有呼吸动画，完成、出错、已停止各有对应样式；收起时没有动画。
+
+</details>
+
+<details><summary>子代理视图底部的状态行与主界面一致</summary>
+
+同样显示动画、用时和中文状态词。
+
+</details>
+
+**修复**
+
+<details><summary>本机其它端口上的网页不再能连接后台</summary>
+
+后台只放行来源与访问地址同站（主机名和端口都相同）的网页，同一台电脑上其它端口的网页不能再连接后台 WebSocket、读取接口或取得「桌面操控」面板凭证；唯一例外是开发模式下经本机开发服务器访问的页面。后台同源下发可执行内容这一已知边界见 `docs/computer-use.md` 的「已知边界」。
+
+</details>
+
+<details><summary>Windows 安装与更新窗口里的中文不再乱码</summary>
+
+弹出的终端脚本开头设置 UTF-8 代码页（`chcp 65001`），窗口里的中文提示正常显示，路径含中文时也能找到文件。
+
+</details>
+
+<details><summary>全新环境首次启动不再报 500</summary>
+
+`~/.claude/projects` 目录还不存在时，`/api/search` 与 `/api/recent-session` 返回空结果，不再返回 500（`/api/projects` 的同类问题上一版已修）。
+
+</details>
+
+</details>
+
+<details>
+<summary><b>v0.2.446</b>(2026-11-05)· 新增 2 条 · 优化 3 条</summary>
 
 **新增**
 
