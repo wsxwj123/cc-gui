@@ -88,6 +88,20 @@ test('U2 思考中显示「思考 · 一行预览」；取不到预览只写「�
   expect(noObject(s), '无预览时没有 object').toBe(true);
 });
 
+test('U6 多句思考块：底部行取最新一句（不取整段开头）', async ({ page }) => {
+  const LONG_PREFIX = '先把入口和工作区结构逐个确认一遍，再决定改哪一处。';
+  await startRound(page, {
+    key: 'u6',
+    scenario: { events: [{ kind: 'thinking', text: `${LONG_PREFIX}入口找到了，下一步跑测试。` }] },
+  });
+  await expectOneLine(page);
+  await expectPhase(page, 'thinking');
+  await expect.poll(async () => (await rawLiveText(page)) ?? '', { timeout: 20_000, message: '多句思考：底部行应显示最后一句' }).toBe('思考 · 入口找到了，下一步跑测试。');
+  const s = await liveSnap(page);
+  expect(s.object, '预览不应是整段思考的开头').not.toBe(LONG_PREFIX);
+  expect(s.object, '预览也不应是整段截断').toBe('入口找到了，下一步跑测试。');
+});
+
 test('U3 多轮回合：前面出现过正文、最后一块是思考 / 工具时不得显示「正在输出」', async ({ page }) => {
   const TOOL_DESC = '最后一块是工具调用';
   await startRound(page, {

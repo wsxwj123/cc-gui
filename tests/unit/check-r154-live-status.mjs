@@ -17,6 +17,8 @@ import { makeReport } from './q8-helpers/report.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
 const { liveStatusLabel, TOOL_VERBS } = await import(pathToFileURL(join(ROOT, 'client', 'src', 'utils', 'liveStatus.js')).href);
+const streamStatus = await import(pathToFileURL(join(ROOT, 'client', 'src', 'utils', 'streamStatus.js')).href);
+const { latestThinkingPreview, latestToolTitles } = streamStatus;
 const report = makeReport('check-r154-live-status');
 const tool = (name, input) => liveStatusLabel({ pendingTool: { name, input } });
 
@@ -134,6 +136,88 @@ await report.check('S5', '空入参 / 非对象入参 / 缺字段时回落旧动
   assert.deepEqual(liveStatusLabel({ pendingTool: {} }), { phase: 'tool', verb: '调用', object: '' });
   assert.deepEqual(liveStatusLabel({ pendingTool: { name: null } }), { phase: 'tool', verb: '调用', object: '' });
   assert.deepEqual(liveStatusLabel({ pendingTool: { name: 'mcp__' } }), { phase: 'tool', verb: '调用', object: 'mcp__' });
+});
+
+await report.check('S6', 'latestThinkingPreview 取最新一句、只处理尾部、不拆小数 / 域名', 'red', () => {
+  assert.equal(typeof latestThinkingPreview, 'function', 'streamStatus.js 应导出 latestThinkingPreview');
+  // 非字符串 / 空 → null
+  for (const v of [undefined, null, '', 42, {}, []]) assert.equal(latestThinkingPreview(v), null);
+  // 多句 → 最后一句
+  assert.equal(latestThinkingPreview('先看 A。再看 B。最后一句 C。'), '最后一句 C');
+  // 换行也算分段
+  assert.equal(latestThinkingPreview('第一行内容\n第二行内容完整'), '第二行内容完整');
+  // 全角句末标点
+  for (const p of ['。', '！', '？', '；']) {
+    assert.equal(latestThinkingPreview(`前面一句${p}最后一句内容`), '最后一句内容', `全角 ${p}`);
+  }
+  // 半角句末标点只在后面跟空白或结尾时切
+  assert.equal(latestThinkingPreview('Done. Next step'), 'Next step');
+  assert.equal(latestThinkingPreview('What? 真的确定了吗'), '真的确定了吗');
+  assert.equal(latestThinkingPreview('End; next step'), 'next step');
+  assert.equal(latestThinkingPreview('末尾有点.'), '末尾有点');
+  // 小数 / 域名 / 文件名不被切开
+  assert.equal(latestThinkingPreview('圆周率是 3.14 左右'), '圆周率是 3.14 左右');
+  assert.equal(latestThinkingPreview('访问 example.com/x 看看'), '访问 example.com/x 看看');
+  assert.equal(latestThinkingPreview('打开 src/a.b.js 这个文件'), '打开 src/a.b.js 这个文件');
+  // 最后一句不足 6 个字符且前面还有段 → 取前一段
+  assert.equal(latestThinkingPreview('先做第一件事。好'), '先做第一件事');
+  assert.equal(latestThinkingPreview('长长的前一句。短'), '长长的前一句');
+  // 只有一句且很短 → 就取它
+  assert.equal(latestThinkingPreview('嗯好'), '嗯好');
+  // 超长思考只处理尾部:20 万字
+  const huge = `${'很长的思考内容。'.repeat(30000)}最后一句在尾部。`;
+  assert.ok(huge.length > 200000);
+  assert.equal(latestThinkingPreview(huge), '最后一句在尾部');
+  // 仅末尾 600 个码元参与切段:前缀里的句号不影响
+  const prefixed = `开头。${'x'.repeat(1000)}。尾巴句子在这里。`;
+  assert.equal(latestThinkingPreview(prefixed), '尾巴句子在这里');
+  // 窗口切在代理对中间时丢弃半个字符,不产生孤立代理
+  const emoji = `x${'😀'.repeat(400)}y`;
+  const cut = latestThinkingPreview(emoji);
+  assert.equal(typeof cut, 'string');
+  assert.ok(!/^[\uDC00-\uDFFF]/.test(cut), '预览不应以孤立的低代理开头');
+  assert.ok(!cut.includes('�'));
+});
+
+await report.check('S7', '工具入参未到时底部行沿用折叠行标题,不回落动词短语', 'red', () => {
+  assert.equal(typeof latestToolTitles, 'function', 'streamStatus.js 应导出 latestToolTitles');
+  // 入参未到(input:{}) + 上一条可用标题 → 用那个标题
+  assert.deepEqual(
+    liveStatusLabel({ pendingTool: { name: 'Bash', input: {} }, pendingTitle: '读取 a.txt' }),
+    { phase: 'tool', verb: '', object: '读取 a.txt' },
+  );
+  assert.deepEqual(
+    liveStatusLabel({ pendingTool: { name: 'Write', input: {} }, pendingTitle: '编辑 b.txt' }),
+    { phase: 'tool', verb: '', object: '编辑 b.txt' },
+  );
+  assert.deepEqual(
+    liveStatusLabel({ pendingTool: { name: 'Task', input: {} }, pendingTitle: 'Read' }),
+    { phase: 'tool', verb: '', object: 'Read' },
+  );
+  // 入参到齐后 → 立刻换成真标题(即便还传着旧 pendingTitle)
+  assert.deepEqual(
+    liveStatusLabel({ pendingTool: { name: 'Bash', input: { command: 'ls', description: '列目录' } }, pendingTitle: '读取 a.txt' }),
+    { phase: 'tool', verb: '', object: '列目录' },
+  );
+  // 入参已到、但取不到标题(TodoWrite)→ 照旧回落动词短语
+  assert.deepEqual(
+    liveStatusLabel({ pendingTool: { name: 'TodoWrite', input: { todos: [] } }, pendingTitle: 'TodoWrite' }),
+    { phase: 'tool', verb: '更新任务清单', object: '' },
+  );
+  // 折叠行同一个函数:最后一个未返回的工具入参未到 → 沿用它之前最近一个入参已到的工具标题
+  assert.deepEqual(
+    latestToolTitles([
+      { name: 'Read', input: { file_path: '/a/a.txt' }, result: {} },
+      { name: 'Bash', input: {} },
+    ]),
+    { doneTitle: 'Bash', liveTitle: '读取 a.txt' },
+  );
+  // 此前没有任何工具 → 工具名
+  assert.equal(latestToolTitles([{ name: 'Bash', input: {} }]).liveTitle, 'Bash');
+  // 入参已到的工具 → 它自己的标题
+  assert.equal(latestToolTitles([{ name: 'Bash', input: { command: 'ls', description: '列目录' }, result: null }]).liveTitle, '列目录');
+  // 都有结果 → doneTitle
+  assert.equal(latestToolTitles([{ name: 'TodoWrite', input: { todos: [] }, result: {} }]).liveTitle, 'TodoWrite');
 });
 
 process.exit(report.finish());
