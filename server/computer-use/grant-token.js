@@ -10,9 +10,9 @@
 // ③本机上把请求原样转给后台的代理(其他项目的开发服务器代理、Jupyter 代理等):经过它的网页与后台同站,
 // 仍能连 WS 拿到凭证,而同一条 WS 本就能开内置终端;跨协议 + 默认端口 + 浏览器不带跨站标记的组合同理,
 // 只有后台或其前置代理监听 80/443 时才可能出现;④后台读文件接口(/api/files/read?raw=1)同源下发的
-// 内容,r156 起的现状:PDF 以外一律带 `Content-Security-Policy: sandbox` + `X-Content-Type-Options: nosniff`,
-// 浏览器直接打开其中带脚本的 SVG 也不运行脚本(Chromium、WebKit、macOS WKWebView 实测);PDF 为保证预览
-// 不带 sandbox(只带 nosniff),扩展名 .pdf 而内容是 HTML/SVG 的文件在 Chromium 新版与 WKWebView 里实测
+// 内容,r156 起的现状:`X-Content-Type-Options: nosniff` 全部类型都带,`Content-Security-Policy: sandbox`
+// 除 PDF 外都带,浏览器直接打开其中带脚本的 SVG 也不运行脚本(Chromium、WebKit、macOS WKWebView 实测);
+// PDF 为保证预览不带 sandbox(只带 nosniff),扩展名 .pdf 而内容是 HTML/SVG 的文件在 Chromium 新版与 WKWebView 里实测
 // 其中脚本不运行;带内置脚本的 PDF(试了自动打开链接、提交表单两种动作)实测没有借此向本机发出请求。
 // 另有 K3(services/auth.js 的 checkNoOriginFetchSite):不带 Origin、浏览器自报 Sec-Fetch-Site 为
 // same-site/cross-site 的 /api/* 请求(他站/他端口网页的导航、嵌入、图片加载)一律 403;
