@@ -38,6 +38,14 @@ const HINT_RETRY = '授权已更新。模型若刚刚得到「未授权」的结
 const NOT_CONNECTED = '尚未连上后台，请稍后重试。';
 const HINT_TOKEN_STALE = '如果你正在面板里操作仍看到本提示，请刷新页面或重启应用。';
 
+// C2:前台操控授权(按应用、限时)。与上面的应用授权相互独立,默认关闭。
+const FG_LABEL = '允许前台操控';
+const FG_EXPIRED = '允许前台操控（已过期）';
+const FG_REMAIN = (mins) => `允许前台操控 · 还剩 ${mins} 分钟`;
+const FG_NOTE = '后台通道失败时才会用到；会移动真实鼠标并把目标窗口带到前台。';
+const FG_CONFIRM = (name) => `开启后 60 分钟内，模型可以在后台通道失败时用前台通道操控「${name}」：会移动真实鼠标、把目标窗口切到前台，可能打断你正在做的事。随时可以关闭，到点也会自动失效。`;
+const FG_DESC_SUFFIX = '「允许前台操控」与上面的应用授权相互独立，默认关闭。';
+
 // ── 文案按"应用身份"切(§4.3)──────────────────────────────────────────
 // macOS 的应用身份是 bundleId(com.apple.TextEdit),Windows 是 exe 绝对路径(C:\…\notepad.exe)。
 // 讲 Dock 图标、讲 bundleId 的措辞在 Windows 上是错的;`bundleId` 那一份**逐字不变**(mac 现状)。
@@ -110,7 +118,8 @@ export function CuGrants({ runtimeReady, appIdKind = 'bundleId' }) {
     // r154:正向意图(授权应用 / 开启主屏范围)服务端要求面板凭证;纯撤销不需要,取不到凭证也照常发
     // (撤销方向永远安全,且保留出事时的撤权路径)。
     const token = getCuGrantToken();
-    const positive = (payload.bundleId && payload.granted !== false) || payload.screenScope === true;
+    // C2:开前台也是扩权(要凭证);关前台是降权(不需要,保留撤权路径)。
+    const positive = payload.foreground === true || (payload.foreground !== false && ((payload.bundleId && payload.granted !== false) || payload.screenScope === true));
     if (positive && !token) {
       setRowErr({ scope, message: NOT_CONNECTED }); setHint('');
       return false; // 不发请求:没有凭证必然 403,发了也只是多一次失败
@@ -170,6 +179,28 @@ export function CuGrants({ runtimeReady, appIdKind = 'bundleId' }) {
     await postGrant({ screenScope: !scopeOn }, 'screen');
   };
 
+  // C2:前台操控授权。开:确认框 + 60 分钟;关:直接撤销,不加摩擦。
+  const toggleForeground = async (a) => {
+    if (writing) return;
+    if (a.foreground && a.foreground.granted === true) {
+      await postGrant({ bundleId: a.bundleId, foreground: false }, 'list');
+      return;
+    }
+    const msg = FG_CONFIRM(a.name || a.bundleId);
+    const ok = await confirmDialog(msg, { danger: true, confirmText: '允许', testId: 'cu-foreground-confirm' });
+    if (!ok) return;
+    await postGrant({ bundleId: a.bundleId, foreground: true, foregroundMinutes: 60 }, 'list');
+  };
+
+  const fgLabel = (a) => {
+    const fg = a.foreground || {};
+    if (fg.granted === true) {
+      const mins = Math.max(0, Math.ceil((Date.parse(fg.expiresAt) - Date.now()) / 60_000));
+      return FG_REMAIN(mins);
+    }
+    return fg.expiresAt ? FG_EXPIRED : FG_LABEL;
+  };
+
   const checkManual = async () => {
     const id = manualId.trim();
     if (!id || checking) return;
@@ -199,7 +230,7 @@ export function CuGrants({ runtimeReady, appIdKind = 'bundleId' }) {
           {ADD}
         </button>
       </div>
-      <div data-testid="cu-grants-desc" className="text-[10.5px] text-ink-faint font-body leading-snug mt-0.5">{W.desc}</div>
+      <div data-testid="cu-grants-desc" className="text-[10.5px] text-ink-faint font-body leading-snug mt-0.5">{W.desc}{FG_DESC_SUFFIX}</div>
 
       {grantErr && <div data-testid="cu-grants-error" className="text-[10.5px] text-error font-body leading-snug mt-1.5">{grantErr}</div>}
       <div data-testid="cu-grants-list" className="mt-1.5">
@@ -213,14 +244,23 @@ export function CuGrants({ runtimeReady, appIdKind = 'bundleId' }) {
             <span className="text-ink truncate">{a.name}</span>
             <span className="text-ink-faint font-mono truncate">{a.bundleId}</span>
             {a.grantedAt && <span className="text-ink-faint shrink-0">{new Date(a.grantedAt).toLocaleString()}</span>}
+            <button type="button" data-testid="cu-grant-foreground" data-bundle-id={a.bundleId} disabled={!!writing}
+              onClick={() => toggleForeground(a)}
+              className={`ml-auto px-2 py-0.5 rounded-md text-[10px] font-body transition-colors disabled:opacity-50 shrink-0 ${
+                a.foreground && a.foreground.granted ? 'text-accent bg-accent/10 hover:bg-accent/20' : 'text-ink-muted hover:bg-canvas border border-canvas-deep'}`}>
+              {fgLabel(a)}
+            </button>
             <button type="button" data-testid="cu-grant-revoke" data-bundle-id={a.bundleId} disabled={!!writing}
               onClick={() => postGrant({ bundleId: a.bundleId, granted: false }, 'list')}
-              className="ml-auto px-2 py-0.5 rounded-md text-[10px] text-error hover:bg-error/10 font-body transition-colors disabled:opacity-50 shrink-0">
+              className="px-2 py-0.5 rounded-md text-[10px] text-error hover:bg-error/10 font-body transition-colors disabled:opacity-50 shrink-0">
               {REVOKE}
             </button>
           </div>
         ))}
         {rowError('list')}
+        {rows.length > 0 && (
+          <div data-testid="cu-grant-foreground-note" className="text-[10.5px] text-ink-faint font-body leading-snug mt-1">{FG_NOTE}</div>
+        )}
       </div>
       {hint && <div data-testid="cu-grant-hint" className="text-[10.5px] text-ink-muted font-body leading-snug mt-1">{hint}</div>}
 

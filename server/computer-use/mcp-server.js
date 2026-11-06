@@ -34,7 +34,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import {
   GRANTS_FILE, RUNTIME_DIR, SHOT_DIR, STAMP_FILE, VENV_PY,
-  appGranted, effectiveAppEntries, effectiveGrants, ensureRuntime as ensureRuntimeImpl, findPython3, normalizeAppId, readGrants,
+  appEntry, appGranted, effectiveAppEntries, effectiveGrants, ensureRuntime as ensureRuntimeImpl, findPython3, foregroundGranted, normalizeAppId, readGrants,
   sameAppId, screenScopeGranted,
 } from './cu-common.js';
 import { forbiddenActionDetail, forbiddenAppReason, forbiddenCategoryLabels } from './forbidden-apps.js';
@@ -293,11 +293,23 @@ export function fail(code, { actionId, state: st = 'failed', message, extra = {}
   return { isError: true, content: [{ type: 'text', text }], structuredContent };
 }
 
+/** C2:前台授权缺失时给模型看的文案。只说事实与下一步,不教任何接口 / 文件路径。 */
+function foregroundConsentMessage(name, bundleId) {
+  const label = String(name || bundleId).slice(0, 200);
+  return `目标应用「${label}」（${bundleId}）还没有获得前台操控授权，本次**零投递**：用户的前台窗口和真实鼠标都没有被触碰。`
+    + '不要自己改用别的坐标、拆成多次点击或重复调用，也不要让用户自己操作。请**停下**，把下面这句原样告诉用户，然后等用户回复：\n'
+    + `「后台操控这个应用打不动了。请在 CC-GUI 的『桌面操控 → 应用授权』里，为『${label}』开启『允许前台操控』（会移动真实鼠标，默认 60 分钟有效）。开启后告诉我，我用新的 actionId 重试。」\n`
+    + '用户确认开启后，请用**新的 actionId** 重试同一个动作。';
+}
+
 const DEFAULT_MESSAGES = {
   CU_INVALID_ARGUMENT: '参数非法(见字段说明);未执行任何动作。',
   CU_INVALID_COORDINATE: '坐标不是原图内的合法整数像素;未投递。',
   CU_SCREENSHOT_REQUIRED: '没有可用的截图映射:请先对本实例调用 screenshot,或带上有效的 snapshotId。',
   CU_STALE_SNAPSHOT: 'snapshotId 已失效(被新截图取代、来自其他实例或文件已清理);请重新截图,不按新前台猜坐标。',
+  // C2:前台操控必须由用户在面板里按应用、限时授权。文案只引导"停下、找用户开开关",
+  // 不教任何接口 / 文件路径(防模型自己去给自己授权)。
+  CU_FOREGROUND_CONSENT_REQUIRED: foregroundConsentMessage('{name}', '{bundleId}'),
   // 不教接口(r154):旧文案写着授权接口,"想把任务做完"的模型读到会自己去调接口给自己授权。
   CU_APP_NOT_ALLOWED: `目标应用未被授权,或属于禁止操控的类别(${forbiddenCategoryLabels()})。请让用户在 CC-GUI 的「桌面操控」面板里授权;不要自行修改授权。`,
   CU_TARGET_NOT_FOUND: '找不到目标窗口(bundleId/pid/windowId 需来自 window_list 的已授权窗口)。',
@@ -311,8 +323,10 @@ const DEFAULT_MESSAGES = {
   CU_UIPI_BLOCKED: '目标进程的完整性级别高于本进程(UIPI),输入被系统拦截;已投递的部分不会生效,请以管理员身份重试本工具。',
   CU_BACKGROUND_UNSUPPORTED: IS_WIN
     ? '该目标没有可用的后台通道(UI Automation 元素不可达,消息投递也拿不到可投递的窗口);本平台不会自动改成全局点击。'
-      + '如需全局投递,请用【新的 actionId】重试并显式 foreground:true —— 那会移动真实光标、把目标窗口切到前台,可能打断你。'
-    : '该目标当前不接受后台输入,且本调用未显式要求前台;未动用户前台。',
+      + '不要自己改用前台;若用户已在「桌面操控 → 应用授权」里为该应用开启「允许前台操控」,可用【新的 actionId】重试并显式 foreground:true'
+      + '(会移动真实光标、把目标窗口切到前台,可能打断用户);否则请先停下,让用户去面板开启。'
+    : '该目标当前不接受后台输入,且本调用未显式要求前台;未动用户前台。'
+      + '不要自己改用前台;若用户已在「桌面操控 → 应用授权」里为该应用开启「允许前台操控」,可用新的 actionId 重试 foreground:true;否则请先停下,让用户去面板开启。',
   CU_TARGET_CHANGED: '目标与当前焦点不符;未动用户前台。',
   CU_SCREEN_SCOPE_REQUIRED: '需要用户独立勾选「允许主屏全部可见内容」;本次不返回任何屏幕像素。',
   CU_INSTANCE_CHANGED: 'instanceId 与本实例不符(旧进程/其他实例的请求);零投递。',
@@ -693,7 +707,9 @@ const commonActionProps = () => ({
   actionId: { type: 'string', description: ACTION_NOTE },
   target: targetSchema,
   snapshotId: { type: 'string', description: '截图身份(来自 screenshot 回执)。省略 = 用本实例最近一次有效截图。' },
-  foreground: { type: 'boolean', description: '只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。' },
+  foreground: { type: 'boolean', description: '只有显式 true 才允许全局事件(会影响用户前台);省略与 false 同义 = 后台定向投递。'
+    + '只有用户已在「桌面操控 → 应用授权」面板为 target.bundleId 开启「允许前台操控」(限时)时才可能成功;'
+    + '否则返回 CU_FOREGROUND_CONSENT_REQUIRED 且零投递。' },
   instanceId: { type: 'string', description: 'MCP 实例身份(initialize 回执的 instanceId)。' },
 });
 
@@ -744,7 +760,7 @@ const TOOLS = [
   },
   {
     name: 'left_click',
-    description: '在 (x,y) 单击左键。默认后台定向投递到 target 窗口(不抢前台、不动用户光标);找不到窗口就是 CU_TARGET_NOT_FOUND,绝不退化成全局点击。只有 foreground:true 才走全局事件(会打断用户前台)。'
+    description: '在 (x,y) 单击左键。默认后台定向投递到 target 窗口(不抢前台、不动用户光标);找不到窗口就是 CU_TARGET_NOT_FOUND,绝不退化成全局点击。只有 foreground:true 且用户已在面板为该应用开启「允许前台操控」时才走全局事件(会打断用户前台)。'
       + COORD_NOTE + ACTION_NOTE,
     inputSchema: { type: 'object', properties: { ...commonActionProps(), ...xyProps }, required: ['actionId', 'target', 'x', 'y'] },
   },
@@ -760,7 +776,7 @@ const TOOLS = [
   },
   {
     name: 'drag',
-    description: '从 (x1,y1) 按住左键拖到 (x2,y2)。默认后台定向投递到 target;foreground:true 才走全局(影响前台)。' + COORD_NOTE + ACTION_NOTE,
+    description: '从 (x1,y1) 按住左键拖到 (x2,y2)。默认后台定向投递到 target;foreground:true 且用户已在面板为该应用开启「允许前台操控」时才走全局(影响前台)。' + COORD_NOTE + ACTION_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -914,6 +930,20 @@ async function runAction(name, args, body) {
   }
   if (args.snapshotId !== undefined && (typeof args.snapshotId !== 'string' || args.snapshotId.length === 0)) {
     return fail('CU_INVALID_ARGUMENT', { actionId, message: 'snapshotId 必须是非空字符串;零投递。' });
+  }
+  // C2:前台操控必须由用户在面板里按应用、限时授权。放在登记之前:拒绝零投递、不占 actionId,
+  // 用户开启后用新 actionId 重试才能拿到新回执。应用未授权时不返回本码,交给现有
+  // CU_APP_NOT_ALLOWED 路径(不把前台开关暴露给无权应用)。
+  if (args.foreground === true) {
+    const grants = readGrants();
+    if (appGranted(grants, target.bundleId) && !foregroundGranted(grants, target.bundleId)) {
+      const entry = appEntry(grants, target.bundleId);
+      return fail('CU_FOREGROUND_CONSENT_REQUIRED', {
+        actionId,
+        message: foregroundConsentMessage(entry?.name || target.bundleId, target.bundleId),
+        extra: { target: { bundleId: target.bundleId, name: entry?.name || target.bundleId } },
+      });
+    }
   }
   // 阶段 A 的静态拒绝(§3.2 B-3 #1a):Windows 执行层不在位时,副作用工具在**登记之前**
   // 零投递地拒绝 —— 登记之后再拒会给模型一个"已登记但失败"的 actionId,重试还得换 id,

@@ -398,12 +398,24 @@ function normalizeGrants(raw) {
       if (!checked.ok) continue;
       const id = checked.id;
       out.apps[id] = { name: grantName(entry.name, id), grantedAt: entry.grantedAt || null };
+      const fg = normalizeForeground(entry.foreground);
+      if (fg) out.apps[id].foreground = fg;
     }
   }
   return out;
 }
 
 export const APP_NAME_MAX_LENGTH = 200;
+
+/**
+ * 前台授权的读侧校验(C2):只认 { grantedAt, expiresAt },expiresAt 必须能被 Date.parse;
+ * 形状非法就当没有这条授权(应用授权本身保留)。读侧也校验,因为 grants.json 可能被手写 / 旧版改过。
+ */
+function normalizeForeground(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (typeof raw.expiresAt !== 'string' || !Number.isFinite(Date.parse(raw.expiresAt))) return null;
+  return { grantedAt: typeof raw.grantedAt === 'string' ? raw.grantedAt : null, expiresAt: raw.expiresAt };
+}
 
 // 行 / 段分隔符(U+2028 / U+2029)用 fromCharCode 构造,源码里不出现这两个字符本身。
 const LINE_SEPARATORS = new RegExp(`[${String.fromCharCode(0x2028, 0x2029)}]`, 'g');
@@ -485,7 +497,7 @@ export const GRANT_FORBIDDEN_MESSAGE = '新增授权需要来自 CC-GUI「桌面
  * 返回有效授权(经 effectiveGrants)。
  */
 export function setGrant(
-  { bundleId = null, name = null, granted = true, screenScope = null } = {},
+  { bundleId = null, name = null, granted = true, screenScope = null, foreground = null, foregroundMinutes = 60 } = {},
   { panelCredential = false } = {},
 ) {
   let appId = null;
@@ -495,6 +507,18 @@ export function setGrant(
     appId = checked.id;
   }
   const grantingApp = appId !== null && granted !== false;
+  // 只关前台(foreground:false 且没说要撤销应用):不是扩权,也不该重写/删除应用条目。
+  const onlyForegroundOff = foreground === false && appId !== null;
+
+  if (foreground !== null && typeof foreground !== 'boolean') {
+    throw grantError('CU_INVALID_ARGUMENT', 'foreground 必须是布尔值或省略。');
+  }
+  if (foreground === true) {
+    if (appId === null) throw grantError('CU_INVALID_ARGUMENT', '开启前台操控必须给出 bundleId。');
+    if (!Number.isInteger(foregroundMinutes) || foregroundMinutes < 5 || foregroundMinutes > 240) {
+      throw grantError('CU_INVALID_ARGUMENT', 'foregroundMinutes 必须是 5–240 的整数。');
+    }
+  }
 
   const current = readGrants();
   const next = { ...current, apps: { ...current.apps }, screenScope: { ...current.screenScope } };
@@ -508,20 +532,35 @@ export function setGrant(
     // (并存两条时 appGranted 仍能命中,但面板会显示重复行)。
     const key = normalizeAppId(appId);
     const existingKey = Object.keys(next.apps).find((k) => normalizeAppId(k) === key) || appId;
-    if (grantingApp) {
-      const oldName = ownApp(current.apps, existingKey)?.name;
+    if (grantingApp && !onlyForegroundOff) {
+      const old = ownApp(current.apps, existingKey);
       // 选取顺序同修前(name || 旧名 || id);非字符串由 grantName 回退成 id,字符串截到上限。
-      next.apps[existingKey] = { name: grantName(name || oldName || appId, appId),
-        grantedAt: new Date().toISOString() };
-    } else {
+      // C2:重授应用时保留旧的前台授权字段(foreground === null 时"原样保留")。
+      next.apps[existingKey] = { name: grantName(name || old?.name || appId, appId),
+        grantedAt: new Date().toISOString(), ...(old && old.foreground ? { foreground: old.foreground } : {}) };
+    } else if (!grantingApp) {
       delete next.apps[existingKey];
+    }
+    // C2:前台授权是应用条目上的可选字段。true = 重开计时(应用必须已经授权,本次同时授予不算);
+    // false = 删除字段;null/省略 = 原样保留(重授应用、改名字不顺手清掉前台授权)。
+    if (foreground === true) {
+      if (!ownApp(current.apps, existingKey)) {
+        throw grantError('CU_INVALID_ARGUMENT', '开启前台操控前必须先授权该应用。');
+      }
+      next.apps[existingKey] = { ...next.apps[existingKey],
+        foreground: { grantedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + foregroundMinutes * 60_000).toISOString() } };
+    } else if (foreground === false && ownApp(next.apps, existingKey)) {
+      const copy = { ...next.apps[existingKey] };
+      delete copy.foreground;
+      next.apps[existingKey] = copy;
     }
   }
 
   const currentKeys = new Set(Object.keys(current.apps).map((k) => normalizeAppId(k)));
   const grows = Object.keys(next.apps).some((k) => !currentKeys.has(normalizeAppId(k)))
     || (!screenScopeGranted(current) && screenScopeGranted(next));
-  const needsCredential = grantingApp || screenScope === true || grows;
+  const needsCredential = (grantingApp && !onlyForegroundOff) || screenScope === true || grows || foreground === true;
   if (needsCredential && panelCredential !== true) {
     throw grantError('CU_GRANT_FORBIDDEN', GRANT_FORBIDDEN_MESSAGE);
   }
@@ -598,8 +637,17 @@ export function sameAppId(a, b, platformName = process.platform) {
   return na !== '' && na === normalizeAppId(b, platformName);
 }
 
-export function appGranted(grants, bundleId, platformName = process.platform) {
-  if (!bundleId || !grants.apps) return false;
+/** 按 id 取应用条目(含归一化兜底);授权表只经 cu-common 读,别处不许直接碰 .apps。 */
+export function appEntry(grants, bundleId) {
+  if (!grants || !grants.apps || !bundleId) return null;
+  if (ownApp(grants.apps, bundleId)) return grants.apps[bundleId];
+  const key = normalizeAppId(bundleId);
+  if (!key) return null;
+  const hit = Object.keys(grants.apps).find((k) => normalizeAppId(k) === key);
+  return hit ? grants.apps[hit] : null;
+}
+
+export function appGranted(grants, bundleId, platformName = process.platform) {  if (!bundleId || !grants.apps) return false;
   // 底线最先判(防御纵深):禁止类别即使在授权表里也不算已授权。
   if (forbiddenAppReason(bundleId, platformName)) return false;
   if (ownApp(grants.apps, bundleId)) return true;
@@ -612,6 +660,21 @@ export function appGranted(grants, bundleId, platformName = process.platform) {
 
 export function screenScopeGranted(grants) {
   return Boolean(grants.screenScope && grants.screenScope.granted === true);
+}
+
+/**
+ * 该应用是否有**未过期的前台授权**(C2)。应用本身必须已授权(禁止名单底线在 appGranted 里);
+ * 读时比较 expiresAt,过期即 false —— 不需要任何进程去清理。
+ * 纯函数,now 可注入便于单测;平台差异在 appGranted / normalizeAppId 内收口。
+ */
+export function foregroundGranted(grants, bundleId, { now = Date.now() } = {}) {
+  if (!grants || !bundleId || !appGranted(grants, bundleId)) return false;
+  const entry = ownApp(grants.apps, bundleId)
+    || Object.entries(grants.apps).find(([k]) => normalizeAppId(k) === normalizeAppId(bundleId))?.[1];
+  const fg = entry && entry.foreground;
+  if (!fg || typeof fg !== 'object') return false;
+  const expires = Date.parse(fg.expiresAt);
+  return Number.isFinite(expires) && expires > now;
 }
 
 export function runtimeReady() {
