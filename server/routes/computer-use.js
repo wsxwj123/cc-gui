@@ -379,8 +379,10 @@ function auditValue(value) {
 // 后三步在 setGrant 里一次完成(失败零副作用)。凭证只挡"盲打"(不知道凭证的本机脚本、照旧文档敲的 curl、
 // 来自其他网站域名或本机别的端口的网页,后者自 r155 起 WS 握手即被来源校验拒绝);不挡主动连 WS 的本机进程、
 // 直接改 grants.json 的进程、本机上把请求原样转给后台的代理(经过它的网页与后台同站,WS 同一条连接本就能开
-// 内置终端)、后台读文件接口同源下发的可执行内容(如 SVG,其中脚本以后台页面身份运行,同样能取得凭证;
-// 已知问题,另立项处理),威胁模型见 computer-use/grant-token.js。
+// 内置终端)。后台读文件接口同源下发的内容自 r156 起 PDF 以外带 CSP sandbox + nosniff(带脚本 SVG 直接打开
+// 也不运行脚本);无 Origin 且浏览器自报 Sec-Fetch-Site 为 same-site/cross-site 的 /api/* 请求一律 403(K3,
+// 只对回环地址与 https 访问生效)。残余(WebKit PDF 插件请求报 none、用户亲手新标签打开聊天附件 SVG 的 blob
+// 地址、Windows 真机与 Firefox 未测)与威胁模型见 computer-use/grant-token.js。
 // 每次变更(成功与被拒)记一行审计日志,**不记凭证值**。
 router.post('/computer-use/grants', (req, res) => {
   const { bundleId, name, granted, screenScope } = req.body || {};
