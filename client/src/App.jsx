@@ -9937,14 +9937,15 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
               {liveVisible && isStreaming && !reattachStream && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
                 // 头像位统一用官方 Claude logo(ProviderAvatar,与完成后气泡头像同一视觉物),
                 // 加载时 thinking 呼吸、完成静止 —— 一致不割裂(用户明确"用左上角 logo 做头像")。
-                // 右侧是共享的底部状态行(连接中 / 正在压缩上下文),与流式行互斥,同一时刻只有一个。
+                // 右侧是共享的底部状态行(连接中 / 正在压缩上下文 / 点停止后停止中),与流式行互斥,同一时刻只有一个;
+                // 词只从 liveStatusLabel 取(与流式行同一个选词函数、同一个 stopping 状态),这里不手写词表。
                 <div className="px-6 py-4 animate-fade-in">
                   <div className="max-w-[var(--content-max)] mx-auto flex items-start gap-4">
                     <ProviderAvatar model={streamingModel} size={34} thinking />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center min-h-[34px]">
                         <LiveStatusLine
-                          label={{ phase: compacting ? 'compacting' : 'connecting', verb: compacting ? '正在压缩上下文' : '连接中', object: '' }}
+                          label={liveStatusLabel({ stopping, compacting, sawModelOutput: false })}
                           startedAt={streamStartRef.current}
                         />
                       </div>
