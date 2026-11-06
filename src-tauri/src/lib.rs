@@ -20,11 +20,248 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
 
 const BACKEND_HOST: &str = "127.0.0.1";
 const DEFAULT_BACKEND_PORT: u16 = 6677;
 const MAX_BACKEND_PORT: u16 = 6687;
+
+// ==== W: 窗口状态恢复的尺寸 / 位置防护 ====
+// 统一用物理像素(与 tauri 的 PhysicalSize / PhysicalPosition、monitor.size() 一致)。
+pub type PixelRect = (i32, i32, u32, u32);
+
+/// 正在恢复窗口状态(插件恢复期间持有状态缓存锁,自动落盘必须让路,见 autosave)。
+static RESTORING_WINDOW_STATE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// window-state 插件只应保存 / 恢复这四类状态。
+///
+/// 明确不带 VISIBLE / DECORATIONS:带 VISIBLE 会把"上次退出时窗口是否可见"也恢复,
+/// 异常退出(可见位为 false)会让下次启动窗口保持隐藏、用户以为没启动;装饰(标题栏)
+/// 由本应用固定,不应跟随旧状态文件。
+pub fn window_state_flags() -> StateFlags {
+    StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED | StateFlags::FULLSCREEN
+}
+
+/// 把恢复出来的窗口尺寸夹到 [min, max]。
+///
+/// 保存的是物理像素:跨 DPI / 换显示器重启时,旧的物理尺寸可能小于 min_inner_size,
+/// 也可能大于当前显示器(窗口超出屏幕)。max 为 None 时只保证不小于最小值。
+pub fn clamp_window_size(
+    size: (u32, u32),
+    min: (u32, u32),
+    max: Option<(u32, u32)>,
+) -> (u32, u32) {
+    let w = size.0.max(min.0);
+    let h = size.1.max(min.1);
+    match max {
+        // max 比 min 还小时以 min 为准:窗口不允许小于 min_inner_size。
+        Some((mw, mh)) => (w.min(mw.max(min.0)), h.min(mh.max(min.1))),
+        None => (w, h),
+    }
+}
+
+/// 窗口矩形是否与任一显示器有交集(物理像素)。用于判断保存的位置是否落在已拔掉的显示器上。
+pub fn rect_intersects_monitors(rect: PixelRect, monitors: &[PixelRect]) -> bool {
+    monitors.iter().any(|m| overlap_area(rect, *m) > 0)
+}
+
+/// 取与窗口矩形交集面积最大的显示器的尺寸;完全不重叠(屏外)返回 None。
+pub fn best_monitor_size(rect: PixelRect, monitors: &[PixelRect]) -> Option<(u32, u32)> {
+    monitors
+        .iter()
+        .map(|m| (overlap_area(rect, *m), (m.2, m.3)))
+        .filter(|(area, _)| *area > 0)
+        .max_by_key(|(area, _)| *area)
+        .map(|(_, size)| size)
+}
+
+/// 两个矩形的交集面积(物理像素);不相交为 0。用 i64 防 i32 溢出(最小化哨兵坐标 -32000)。
+fn overlap_area(a: PixelRect, b: PixelRect) -> u64 {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    let left = (ax as i64).max(bx as i64);
+    let right = (ax as i64 + aw as i64).min(bx as i64 + bw as i64);
+    let top = (ay as i64).max(by as i64);
+    let bottom = (ay as i64 + ah as i64).min(by as i64 + bh as i64);
+    if right > left && bottom > top {
+        ((right - left) as u64) * ((bottom - top) as u64)
+    } else {
+        0
+    }
+}
+
+/// 移动 / 缩放自动落盘的尾沿去抖:事件持续到来时不断推迟,最后一次事件之后满
+/// `debounce_ms` 才到期;一串事件只该调度一个等待。时钟由调用方以毫秒传入,便于单测。
+#[derive(Debug, Default)]
+pub struct AutosaveDebounce {
+    /// 最后一次收到事件的时刻;None = 当前没有待落盘的改动。
+    last_event_ms: Option<u64>,
+}
+
+impl AutosaveDebounce {
+    pub const fn new() -> Self {
+        Self { last_event_ms: None }
+    }
+
+    /// 收到一次移动 / 缩放事件。恢复窗口状态期间不调度(返回 false),
+    /// 其余情况记录时刻并返回 true(调用方据此保证一串事件只起一个等待线程)。
+    pub fn note(&mut self, now_ms: u64, restoring: bool) -> bool {
+        if restoring {
+            return false;
+        }
+        self.last_event_ms = Some(now_ms);
+        true
+    }
+
+    /// 在 `now_ms` 时是否已满去抖间隔、可以落盘。
+    pub fn is_due(&self, now_ms: u64, debounce_ms: u64) -> bool {
+        match self.last_event_ms {
+            Some(t) => now_ms.saturating_sub(t) >= debounce_ms,
+            None => false,
+        }
+    }
+
+    /// 落盘后复位。
+    pub fn clear(&mut self) {
+        self.last_event_ms = None;
+    }
+
+    /// 是否还有未落盘的改动。
+    pub fn has_pending(&self) -> bool {
+        self.last_event_ms.is_some()
+    }
+}
+
+// 自动落盘去抖间隔:移动 / 缩放停下约 1.5 秒后落盘一次。
+const AUTOSAVE_DEBOUNCE_MS: u64 = 1_500;
+
+/// 全局去抖状态;AUTOSAVE_SCHEDULED 保证一串事件只起一个等待线程。
+static AUTOSAVE_DEBOUNCE: Mutex<AutosaveDebounce> = Mutex::new(AutosaveDebounce::new());
+static AUTOSAVE_SCHEDULED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 单调毫秒时钟(整个进程共用同一个起点,只为给去抖提供可注入的数值)。
+fn autosave_now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// 收到一次移动 / 缩放事件:记录时刻(尾沿去抖判定见 AutosaveDebounce),并保证一串事件
+/// 只起一个等待线程。恢复窗口状态期间不调度。
+///
+/// 这条自动落盘是不经过 RunEvent::Exit 的退出路径的唯一保险:Windows 自动更新安装器起
+/// 安装程序后直接 `std::process::exit(0)`;主线程调 `app.restart()` 时 Tauri 也不保证投递
+/// Exit 事件。正常退出(关闭 / Cmd+Q)仍以 CloseRequested / Exit 里的精确保存为准。
+fn note_autosave_event(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    let restoring = RESTORING_WINDOW_STATE.load(Ordering::Relaxed);
+    {
+        let mut debounce = AUTOSAVE_DEBOUNCE.lock().unwrap();
+        if !debounce.note(autosave_now_ms(), restoring) {
+            return;
+        }
+    }
+    if AUTOSAVE_SCHEDULED.swap(true, Ordering::AcqRel) {
+        return; // 本串事件已有等待线程
+    }
+    let app = app.clone();
+    std::thread::spawn(move || autosave_worker(app));
+}
+
+/// 等待线程:每 AUTOSAVE_DEBOUNCE_MS 醒一次,事件停下满去抖间隔才落盘;期间来了新事件
+/// 就继续等(尾沿),落盘后没有新事件才退出。本线程只负责计时和判定,真正的保存经
+/// run_on_main_thread 在主线程执行(原因见下方注释)。
+fn autosave_worker(app: tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    loop {
+        std::thread::sleep(Duration::from_millis(AUTOSAVE_DEBOUNCE_MS));
+        // 恢复期间插件持有状态缓存锁,此时落盘只会白等,让过这一拍。
+        if RESTORING_WINDOW_STATE.load(Ordering::Relaxed) {
+            continue;
+        }
+        {
+            let mut debounce = AUTOSAVE_DEBOUNCE.lock().unwrap();
+            if !debounce.is_due(autosave_now_ms(), AUTOSAVE_DEBOUNCE_MS) {
+                continue;
+            }
+            debounce.clear();
+        }
+        // 真正的保存必须派回主线程执行,不能在本(后台)线程里直接调:插件的 save_window_state
+        // 持着状态缓存锁(tauri-plugin-window-state 2.4.1 lib.rs 127 行)并在锁内调窗口取值函数,
+        // 取值函数在非主线程会阻塞等主线程回话;而插件自己的 Moved / Resized / CloseRequested
+        // 处理在主线程里阻塞拿同一把锁。后台线程正在保存时主线程恰好收到这类事件 → 两边互等,
+        // 界面冻住。run_on_main_thread 从后台线程调用时不等待执行完成。
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let _ = handle.save_window_state(window_state_flags());
+        });
+        // 与 note_autosave_event 的约定:持有状态锁时确认没有新事件、再释放“有等待线程”
+        // 标志,避免“事件刚记录、标志刚释放”之间漏掉最后一次落盘。
+        let debounce = AUTOSAVE_DEBOUNCE.lock().unwrap();
+        if debounce.has_pending() {
+            continue; // 落盘期间来了新事件,继续等
+        }
+        AUTOSAVE_SCHEDULED.store(false, Ordering::Release);
+        drop(debounce);
+        break;
+    }
+}
+
+/// 恢复后的几何兜底。插件只做"保存的位置是否与某块屏相交"这一项检查,没有尺寸 / 最小值 /
+/// DPI 防护,这里补上最小的一套:
+///  - 残留的最小化先取消(插件不保存最小化,但状态文件可能被手改 / 旧版本写过);
+///  - 最大化 / 全屏时尺寸位置由系统管理,不插手;
+///  - 尺寸夹到 [min_inner_size(900×600 逻辑点), 窗口所在显示器的物理尺寸] —— 换 DPI /
+///    换显示器后旧物理像素可能过小(小于最小值)或过大(超出屏幕);
+///  - 位置不与任何显示器相交(显示器被拔掉)→ 居中。
+fn sanitize_restored_window(window: &tauri::WebviewWindow) {
+    if window.is_minimized().unwrap_or(false) {
+        let _ = window.unminimize();
+    }
+    if window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
+        return;
+    }
+    let scale = window.scale_factor().unwrap_or(1.0).max(0.5);
+    let min = ((900.0 * scale).round() as u32, (600.0 * scale).round() as u32);
+    let monitors: Vec<PixelRect> = window
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| {
+            let p = m.position();
+            let s = m.size();
+            (p.x, p.y, s.width, s.height)
+        })
+        .collect();
+    let size = match window.inner_size() {
+        Ok(s) => (s.width, s.height),
+        Err(_) => return,
+    };
+    let position = window.outer_position().ok();
+    let rect = position.map(|p| (p.x, p.y, size.0, size.1));
+    // 上限取窗口实际所在显示器;完全屏外时退回主屏(随后会居中)。
+    let max = rect
+        .and_then(|r| best_monitor_size(r, &monitors))
+        .or_else(|| {
+            window
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|m| (m.size().width, m.size().height))
+        });
+    let clamped = clamp_window_size(size, min, max);
+    if clamped != size {
+        let _ = window.set_size(PhysicalSize::new(clamped.0, clamped.1));
+    }
+    if let Some(r) = rect {
+        if !rect_intersects_monitors(r, &monitors) {
+            let _ = window.center();
+        }
+    }
+}
 
 // Holds the backend child IFF we spawned it (None when we reused an existing one).
 struct Backend(Mutex<Option<Child>>);
@@ -147,6 +384,9 @@ fn restart_app(app: tauri::AppHandle) {
             }
         }
     }
+    // W: app.restart() 在主线程调用时不保证投递 RunEvent::Exit(自动更新"重启"会绕过
+    // 退出钩子),这里先显式落盘窗口状态,保证更新重启后几何一致。
+    let _ = app.save_window_state(window_state_flags());
     app.restart(); // Tauri: cleanup_before_exit + spawn 新实例 + exit;返回 !
 }
 
@@ -1013,6 +1253,15 @@ pub fn run() {
         // 桌面端只注册 notify/request_permission/is_permission_granted 三个命令,
         // 通知点击回调(onAction)在桌面端不存在 —— 前端不要接,聚焦靠 Dock 角标 + 应用内。
         .plugin(tauri_plugin_notification::init())
+        // W: 窗口状态(大小 / 位置 / 最大化 / 全屏)。还要恢复的状态位见 window_state_flags。
+        // main 是 setup 里程序化创建的,这里 skip_initial_state 关掉插件的自动恢复,
+        // 改为在 setup 创建窗口后显式 restore + 几何兜底(插件恢复完我们才好校正)。
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(window_state_flags())
+                .skip_initial_state("main")
+                .build(),
+        )
         // F1: 全局热键截图。插件在此挂载,具体快捷键在 setup 里按 ~/.claude-gui/hotkey.json 注册。
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // L1: 单例插件 — 双击 app 时不开新进程,把已有窗口前置聚焦,避免每次都开新窗口
@@ -1099,9 +1348,16 @@ pub fn run() {
                     return Err(e.into());
                 }
             };
+            // W: 恢复上次退出时的窗口大小 / 位置 / 最大化 / 全屏,再做几何兜底
+            // (跨 DPI、屏外、小于最小值都在这时校正)。窗口创建时本身已可见(没有用
+            // .visible(false)),这里只是让恢复 / 兜底赶在 show() 之前,缩短默认几何的可见时间。
+            RESTORING_WINDOW_STATE.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = window.restore_state(window_state_flags());
+            sanitize_restored_window(&window);
+            RESTORING_WINDOW_STATE.store(false, std::sync::atomic::Ordering::Relaxed);
             let _ = window.show();
             let _ = window.set_focus();
-            log_startup("[tauri] window shown on splash page");
+            log_startup("[tauri] window shown on splash page (state restored)");
             // 层级修复①:窗口可能晚于 app 激活。若用户启动瞬间点了别的 app,窗口首次
             // 显示会落在其它窗口后面。延迟 600ms 再 set_focus 一次,赢下启动激活竞态;
             // 间隔足够短,不算抢焦点。
@@ -1311,6 +1567,9 @@ pub fn run() {
             match event {
                 // P1: 点关闭按钮 → 按配置决定 最小化/退出/询问。
                 tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // W: 退出和最小化两条分支都先按当前几何落盘(此时窗口还没最小化,
+                    // update_state 不会把 -32000 之类的最小化坐标写进去)。取消关闭也无害。
+                    let _ = window.app_handle().save_window_state(window_state_flags());
                     let behavior = read_close_behavior();
                     match behavior.as_str() {
                         "minimize" => {
@@ -1354,6 +1613,10 @@ pub fn run() {
                         kill_port_tree(port);
                     }
                 }
+                // W: 移动 / 缩放时低频自动落盘,覆盖不经过 Exit 的退出路径(见 autosave 注释)。
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    note_autosave_event(window.app_handle());
+                }
                 _ => {}
             }
         })
@@ -1365,6 +1628,9 @@ pub fn run() {
         .run(|app_handle, event| {
             match event {
                 tauri::RunEvent::Exit => {
+                    // W: 所有退出路径(Cmd+Q、系统注销、退出分支)都会到这里,且此时窗口
+                    // 还没销毁,能读到真实几何。插件自身也在 Exit 保存一次,重复写无害。
+                    let _ = app_handle.save_window_state(window_state_flags());
                     if let Some(mut child) = app_handle.state::<Backend>().0.lock().unwrap().take() {
                         kill_backend_tree(&mut child);
                     }
@@ -1386,4 +1652,157 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod window_state_tests {
+    use super::{
+        best_monitor_size, clamp_window_size, rect_intersects_monitors, window_state_flags,
+    };
+
+    #[test]
+    fn state_flags_exclude_visible_and_decorations() {
+        let f = window_state_flags();
+        assert!(f.contains(super::StateFlags::SIZE), "must save size");
+        assert!(f.contains(super::StateFlags::POSITION), "must save position");
+        assert!(f.contains(super::StateFlags::MAXIMIZED), "must save maximized");
+        assert!(f.contains(super::StateFlags::FULLSCREEN), "must save fullscreen");
+        // 核心防护:不带这两个位(带 VISIBLE 可能让下次启动窗口保持隐藏)
+        assert!(
+            !f.contains(super::StateFlags::VISIBLE),
+            "VISIBLE must NOT be restored (window could stay hidden)"
+        );
+        assert!(
+            !f.contains(super::StateFlags::DECORATIONS),
+            "DECORATIONS must NOT be restored (decorations are fixed by the app)"
+        );
+    }
+
+    #[test]
+    fn clamps_below_minimum_up_to_minimum() {
+        // 跨 DPI(2x→1x)后旧物理尺寸可能小于 min_inner_size(900×600 逻辑点)
+        assert_eq!(
+            clamp_window_size((800, 500), (900, 600), None),
+            (900, 600)
+        );
+        assert_eq!(
+            clamp_window_size((0, 0), (900, 600), None),
+            (900, 600)
+        );
+    }
+
+    #[test]
+    fn clamps_above_monitor_down_to_monitor() {
+        // 旧显示器更大 / DPI 变小:物理尺寸超过当前显示器就夹回屏内
+        assert_eq!(
+            clamp_window_size((2500, 1800), (900, 600), Some((1920, 1080))),
+            (1920, 1080)
+        );
+    }
+
+    #[test]
+    fn keeps_size_inside_bounds_unchanged() {
+        assert_eq!(
+            clamp_window_size((1200, 800), (900, 600), Some((1920, 1080))),
+            (1200, 800)
+        );
+    }
+
+    #[test]
+    fn minimum_wins_when_monitor_smaller_than_minimum() {
+        // 极小屏:min_inner_size 优先,不能出现比最小值还小的窗口
+        assert_eq!(
+            clamp_window_size((2000, 2000), (900, 600), Some((800, 500))),
+            (900, 600)
+        );
+    }
+
+    #[test]
+    fn detects_window_inside_or_partially_off_screen() {
+        let monitors = [(0, 0, 1920, 1080)];
+        // 完整在屏内
+        assert!(rect_intersects_monitors((100, 100, 800, 600), &monitors));
+        // 只有一部分在屏内也算可见
+        assert!(rect_intersects_monitors((-500, 100, 800, 600), &monitors));
+        // 完全在屏幕右侧外
+        assert!(!rect_intersects_monitors((2000, 100, 800, 600), &monitors));
+        // Windows 最小化时的 -32000 哨兵坐标(不该被恢复)
+        assert!(!rect_intersects_monitors((-32000, -32000, 800, 600), &monitors));
+        // 没有显示器信息时视为屏外(交给居中兜底)
+        assert!(!rect_intersects_monitors((100, 100, 800, 600), &[]));
+    }
+
+    #[test]
+    fn picks_monitor_with_largest_overlap() {
+        let monitors = [(0, 0, 1920, 1080), (1920, 0, 2560, 1440)];
+        // 完全落在第二块屏
+        assert_eq!(
+            best_monitor_size((2000, 100, 800, 600), &monitors),
+            Some((2560, 1440))
+        );
+        // 完全落在第一块屏
+        assert_eq!(
+            best_monitor_size((100, 100, 800, 600), &monitors),
+            Some((1920, 1080))
+        );
+        // 屏外 / 无显示器 → None
+        assert_eq!(best_monitor_size((9000, 100, 800, 600), &monitors), None);
+        assert_eq!(best_monitor_size((100, 100, 800, 600), &[]), None);
+    }
+}
+
+#[cfg(test)]
+mod autosave_debounce_tests {
+    use super::AutosaveDebounce;
+
+    const DEBOUNCE_MS: u64 = 1_500;
+
+    // 一串移动 / 缩放事件期间不落盘:距最后一次事件不足 1.5 秒都不该到期。
+    #[test]
+    fn does_not_fire_during_burst() {
+        let mut d = AutosaveDebounce::new();
+        assert!(d.note(0, false));
+        assert!(!d.is_due(1_000, DEBOUNCE_MS), "拖动中(未满 1.5 秒)不应落盘");
+        assert!(d.note(1_200, false));
+        assert!(!d.is_due(2_000, DEBOUNCE_MS), "新事件应把到期时间推迟");
+    }
+
+    // 最后一个事件之后满 1.5 秒才该落盘(尾沿)。
+    #[test]
+    fn fires_after_last_event_plus_debounce() {
+        let mut d = AutosaveDebounce::new();
+        d.note(0, false);
+        assert!(!d.is_due(1_499, DEBOUNCE_MS), "差 1 毫秒不该落盘");
+        assert!(d.is_due(1_500, DEBOUNCE_MS), "最后一个事件满 1.5 秒应落盘");
+    }
+
+    // 新事件会推迟落盘(不是节流:不会因为“距上次落盘够久”就提前写)。
+    #[test]
+    fn new_event_postpones_deadline() {
+        let mut d = AutosaveDebounce::new();
+        d.note(0, false);
+        d.note(1_000, false);
+        assert!(!d.is_due(2_000, DEBOUNCE_MS));
+        assert!(d.is_due(2_500, DEBOUNCE_MS));
+    }
+
+    // 恢复窗口状态期间不调度(调用方也就不起等待线程)。
+    #[test]
+    fn skips_scheduling_while_restoring() {
+        let mut d = AutosaveDebounce::new();
+        assert!(!d.note(0, true), "恢复期间不调度");
+        assert!(!d.is_due(10_000, DEBOUNCE_MS), "未调度就不该到期");
+        assert!(!d.has_pending());
+    }
+
+    // 落盘后复位:没有新事件就不该再次到期。
+    #[test]
+    fn clear_resets_after_save() {
+        let mut d = AutosaveDebounce::new();
+        d.note(0, false);
+        assert!(d.is_due(1_500, DEBOUNCE_MS));
+        d.clear();
+        assert!(!d.is_due(10_000, DEBOUNCE_MS));
+        assert!(!d.has_pending());
+    }
 }
