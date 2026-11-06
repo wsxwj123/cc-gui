@@ -90,7 +90,7 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 2. 所有动作先解析 `target` 当前是否仍是已授权窗口，再定向投递；找不到窗口 = `CU_TARGET_NOT_FOUND`，**不做任何全局回退**。
 3. 严禁用 AppleScript/shell 激活窗口来"绕路抢前台"；只有用户明确要求前台操作时才 `foreground:true`（且要求目标就是当面前台应用，否则 `CU_TARGET_CHANGED`）。
 4. `type`/`key` 带 `target` 时写的是目标窗口，不是"当前焦点窗口"——不会打进用户正在编辑的应用。
-5. macOS 的"虚拟鼠标"（如 Codex 沙箱那类）在本机场景不存在——Codex 控制的是它自己的 VM 桌面；本机等价物就是按 pid 定向投递。
+5. 本机没有虚拟光标；后台通道 = 按进程号定向投递（`CGEventPostToPid`）+ AX 写值，不动真实光标；对不吃这类事件的应用（如部分 Chromium / Electron / Qt 应用）可能无效，此时只能 `foreground:true`（会移动真实鼠标，须用户同意）。
 6. **Windows 上没有 `CGEventPostToPid` 的等价物**，后台是**阶梯**：`--method uia`（UI Automation 元素级：`InvokePattern` 点按钮、`ValuePattern` 直写文本值并读回校验、`ScrollPattern` 滚动，不抢前台、不动光标）→ 只有拿到**明确的 COM 失败信号**时才降级到消息投递（`PostMessage` 直投 HWND；只对传统 Win32 控件有效，Chromium/UWP/Java/自绘界面基本无效，**且没有可靠的失败信号**）。两条都不通 → `CU_BACKGROUND_UNSUPPORTED` + 可行动指引（**用新的 actionId 重试并显式 `foreground:true`**），**绝不自动改成全局点击**。
 7. Windows 上消息投递**永远不判硬失败**：截图 diff 在窗口被遮挡/最小化/在别的虚拟桌面时双向误判，所以 `unchanged` 也回成功回执 + `verification:unknown`，文案明说"无法据此判定投递失败"。
 8. `foreground:true` 在 Windows 上 = `SendInput` 全局投递（会移动真实光标，通常也会把目标窗口切到前台）；`SendInput` 返回值少于请求数会被判成 `CU_UIPI_BLOCKED`/`CU_DISPATCH_FAILED`（返回数相等只证明"入了队列"，不证明目标消费了它）。
