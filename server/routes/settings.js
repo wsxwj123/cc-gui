@@ -1346,14 +1346,19 @@ async function handleProviderSwitch(req, res) {
       for (const k of Object.keys(env)) {
         if (/_MODEL$/.test(k) && !isClaudeModel(env[k])) { delete env[k]; delete env[k + '_NAME']; }
       }
-      // 主对话模型 env.ANTHROPIC_MODEL:显式 claude 选择优先;否则**官方默认 sonnet**。
-      // CQ-fix(用户报"官方默认变 haiku"):绝不拿 settings.json 的 `model` 字段兜底——那个
-      // 字段是 *子代理默认档*(cc CLI 写成 haiku 给 Task 用),把它当主对话模型 = 官方主 chat
-      // 变 haiku 的根因。已钉的 opus/sonnet 保留;未设 / 非 claude / 被钉成 haiku → 一律回 sonnet。
+      // 主对话模型 env.ANTHROPIC_MODEL 取值顺序(切回官方):
+      //   1. 请求里显式选的 Claude 模型;
+      //   2. env 里本来就有、且不是 haiku 的 Claude 模型(保留用户已钉的选择);
+      //   3. 顶层 `model` 是 Claude 且不是 haiku → 用它(用户的全局默认,如 opus);
+      //   4. 都没有 → 官方默认 sonnet。
+      // haiku 防线(用户报"官方默认变 haiku"):env 被钉成 haiku、或顶层 `model` 是
+      // haiku(含别名 "haiku")时都不采用 —— 顶层 `model` 是 cc 给子代理写的默认档,
+      // 直接拿来当主对话模型会让官方主 chat 变 haiku,所以只在非 haiku 时才兜底。
       if (model && isClaudeModel(model)) {
         env.ANTHROPIC_MODEL = model;
       } else if (!isClaudeModel(env.ANTHROPIC_MODEL) || /haiku/i.test(env.ANTHROPIC_MODEL || '')) {
-        env.ANTHROPIC_MODEL = 'claude-sonnet-4-6';
+        const fallback = isClaudeModel(current.model) && !/haiku/i.test(current.model) ? current.model : 'claude-sonnet-4-6';
+        env.ANTHROPIC_MODEL = fallback;
       }
       // r89:官方渠道下按类别关掉前缀缓存 env(并把 ENABLE_TOOL_SEARCH 还给用户原值)。
       await applyProviderPromptCache(env, false);
