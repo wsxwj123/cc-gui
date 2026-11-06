@@ -143,7 +143,7 @@ await report.check('S6', 'latestThinkingPreview 取最新一句、只处理尾�
   // 非字符串 / 空 → null
   for (const v of [undefined, null, '', 42, {}, []]) assert.equal(latestThinkingPreview(v), null);
   // 多句 → 最后一句
-  assert.equal(latestThinkingPreview('先看 A。再看 B。最后一句 C。'), '最后一句 C');
+  assert.equal(latestThinkingPreview('先看 A。再看 B。最后一句 C。'), '最后一句 C。');
   // 换行也算分段
   assert.equal(latestThinkingPreview('第一行内容\n第二行内容完整'), '第二行内容完整');
   // 全角句末标点
@@ -154,23 +154,23 @@ await report.check('S6', 'latestThinkingPreview 取最新一句、只处理尾�
   assert.equal(latestThinkingPreview('Done. Next step'), 'Next step');
   assert.equal(latestThinkingPreview('What? 真的确定了吗'), '真的确定了吗');
   assert.equal(latestThinkingPreview('End; next step'), 'next step');
-  assert.equal(latestThinkingPreview('末尾有点.'), '末尾有点');
+  assert.equal(latestThinkingPreview('末尾有点.'), '末尾有点.');
   // 小数 / 域名 / 文件名不被切开
   assert.equal(latestThinkingPreview('圆周率是 3.14 左右'), '圆周率是 3.14 左右');
   assert.equal(latestThinkingPreview('访问 example.com/x 看看'), '访问 example.com/x 看看');
   assert.equal(latestThinkingPreview('打开 src/a.b.js 这个文件'), '打开 src/a.b.js 这个文件');
   // 最后一句不足 6 个字符且前面还有段 → 取前一段
-  assert.equal(latestThinkingPreview('先做第一件事。好'), '先做第一件事');
-  assert.equal(latestThinkingPreview('长长的前一句。短'), '长长的前一句');
+  assert.equal(latestThinkingPreview('先做第一件事。好'), '先做第一件事。');
+  assert.equal(latestThinkingPreview('长长的前一句。短'), '长长的前一句。');
   // 只有一句且很短 → 就取它
   assert.equal(latestThinkingPreview('嗯好'), '嗯好');
   // 超长思考只处理尾部:20 万字
   const huge = `${'很长的思考内容。'.repeat(30000)}最后一句在尾部。`;
   assert.ok(huge.length > 200000);
-  assert.equal(latestThinkingPreview(huge), '最后一句在尾部');
+  assert.equal(latestThinkingPreview(huge), '最后一句在尾部。');
   // 仅末尾 600 个码元参与切段:前缀里的句号不影响
   const prefixed = `开头。${'x'.repeat(1000)}。尾巴句子在这里。`;
-  assert.equal(latestThinkingPreview(prefixed), '尾巴句子在这里');
+  assert.equal(latestThinkingPreview(prefixed), '尾巴句子在这里。');
   // 窗口切在代理对中间时丢弃半个字符,不产生孤立代理
   const emoji = `x${'😀'.repeat(400)}y`;
   const cut = latestThinkingPreview(emoji);

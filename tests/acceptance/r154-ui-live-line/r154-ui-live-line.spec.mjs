@@ -150,7 +150,8 @@ test('L4 工具状态词：工具标题（不带动词前缀）、取不到标�
     { name: 'Glob', input: { pattern: '**/*.md' }, text: '查找文件 **/*.md' },
     { name: 'WebFetch', input: { url: 'https://example.com/docs/x', prompt: 'p' }, text: '抓取 https://example.com/docs/x' },
     { name: 'WebSearch', input: { query: 'claude code hooks' }, text: '搜索网页 claude code hooks' },
-    { name: 'mcp__srv__do_thing', input: {}, text: '调用 do_thing' },
+    // 入参要给一个字段:空对象在流式语义里是"入参未到",那时底部行会沿用上一个工具的标题(新规则),不测这里。
+    { name: 'mcp__srv__do_thing', input: { query: 'q' }, text: '调用 do_thing' },
     { name: 'TodoWrite', input: { todos: [{ content: 'x', status: 'pending', activeForm: 'x' }] }, text: '更新任务清单' },
   ];
   await startRound(page, {
