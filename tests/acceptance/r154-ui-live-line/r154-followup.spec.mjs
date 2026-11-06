@@ -70,10 +70,15 @@ test('P2 占位阶段不点停止：data-live-phase=connecting、「连接中」
 });
 
 test('P1+P3 占位阶段点停止：观察到 stopping /「停止中」/ role=status、回合结束后 0 个，全程至多 1 个状态行', async ({ page }) => {
+  // 点停止要等"发消息的请求已返回"：前端在那个请求返回后才记下进程号，点得比它早就不会进「停止中」（只会直接中止），用例会偶发红。
+  // 监听必须在发消息之前挂上（startRound 里会点发送）。
+  const chatPosted = page.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/chat', { timeout: 40_000 });
   await startRound(page, { key: 'l3', scenario: PLACEHOLDER_SCENARIO, text: 'R154-FU P1 请开始' });
   await installCountObserver(page);
   await expectOneLine(page);
   await expectPhase(page, 'connecting');
+  await chatPosted;
+  await page.waitForTimeout(300); // 留给前端处理完返回的 JSON、记下进程号
   const pre = await liveSnap(page);
   expect(pre.verb, '前置自证：点停止之前占位行应显示「连接中」').toBe('连接中');
 
