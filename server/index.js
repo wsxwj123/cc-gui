@@ -54,7 +54,7 @@ import { installXsessionRuntime } from './services/xsession.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, setDefaultRandomPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
-  requestHostname, getTunnelHostname, checkBrowserOrigin,
+  requestHostname, getTunnelHostname, checkBrowserOrigin, checkNoOriginFetchSite,
 } from './services/auth.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { readStats as readSessionIndexStats } from './services/session-index.js';
@@ -291,7 +291,8 @@ app.use((req, res, next) => {
 // 唯一例外是开发代理形态(Vite 的 /api 字符串代理把 Host 改写成后端地址):浏览器自报
 // Sec-Fetch-Site 恰为 same-origin、请求来自本机(回环、无 CF 标记、Host 是本机名)、
 // 来源主机名是本机名(局域网模式再加本机局域网 IP)时放行。浏览器自报 same-site/cross-site
-// 一律拒。没有 Origin 的请求(CLI、MCP、浏览器同源 GET)放行,由密码闸兜底。
+// 一律拒。没有 Origin 的请求(CLI、MCP、浏览器同源 GET)放行,由密码闸兜底;/api 上无 Origin 但
+// 浏览器自报 same-site/cross-site 的,由下方 K3 门拒绝。
 // 被拒 → 403 JSON(/api 与非 /api 路径同形,见下方两个错误处理器),路由不执行。
 app.use(cors((req, cb) => cb(null, {
   origin: (origin, originCb) => {
@@ -305,6 +306,19 @@ app.use(cors((req, cb) => cb(null, {
     return originCb(err);
   },
 })));
+// K3(r156,规则见 services/auth.js 的 checkNoOriginFetchSite):没有 Origin 的 /api 请求,浏览器
+// 自报 same-site/cross-site 就拒(他站网页的导航、<img>/<iframe> 等嵌入不带 Origin,上面放行了)。
+// 路径范围靠 Express 的 /api 挂载匹配(大小写不敏感、容尾斜杠),与路由同一套规则,不手写正则。
+// 位置:来源校验之后、body 解析与密码闸之前,且早于第一个 /api 路由。拒绝走与上面同一个出口。
+app.use('/api', (req, res, next) => {
+  const verdict = checkNoOriginFetchSite(req);
+  if (verdict.ok) return next();
+  console.warn(`[cors] blocked origin=${logValue(req.headers.origin)} host=${logValue(requestHostname(req))} path=${logValue(req.originalUrl)} sfs=${logValue(req.headers['sec-fetch-site'])} rule=${verdict.rule} rawHost=${logValue(req.headers.host)}`);
+  const err = new Error(CROSS_ORIGIN_BLOCKED);
+  err.status = 403;
+  err.cguiOriginBlocked = true;
+  return next(err);
+});
 // Bumped from default 100kb to 25mb so dragged-in screenshots fit in the JSON body.
 // r43:皮肤文件夹导入把 30MB 目录 base64 进 JSON(≈40MB),必须让路给该路由自己挂的
 // 45mb 解析器(routes/skins-packs.js);全局限额对其余所有路径原样不动。
@@ -952,24 +966,28 @@ const wss = new WebSocketServer({
   server,
   path: '/ws',
   verifyClient: (info) => {
-    // WS 升级不经 express 中间件,须自带 DNS-rebinding 的 Host 白名单(同 HTTP 层)。
-    if (!isAllowedHost(info.req)) { console.warn('[ws] blocked host=%s', requestHostname(info.req) || '(无)'); return false; }
-    // 来源校验(同 HTTP 的 cors 门)。整段包 try:verifyClient 里的同步异常会冒到 'upgrade'
-    // 事件成未捕获异常,任何意外一律按拒绝处理。
+    // 整段(Host 门、来源校验、密码闸)包进同一个 try:verifyClient 里的同步异常会冒到 'upgrade'
+    // 事件成未捕获异常,握手既不拒也不放、客户端一直挂着(r156 实测:verifyToken → getSecret
+    // 写盘 EACCES)。任何意外一律按拒绝处理(401)。保持单参数同步返回布尔值的形式,try 才罩得住。
     try {
+      // WS 升级不经 express 中间件,须自带 DNS-rebinding 的 Host 白名单(同 HTTP 层)。
+      if (!isAllowedHost(info.req)) { console.warn('[ws] blocked host=%s', requestHostname(info.req) || '(无)'); return false; }
+      // 来源校验(同 HTTP 的 cors 门)。
       const origin = info.origin || info.req?.headers?.origin;
       const verdict = checkOriginSafe(origin, info.req);
       if (!verdict.ok) {
         console.warn(`[ws] blocked origin=${logValue(origin)} host=${logValue(requestHostname(info.req))} sfs=${logValue(info.req?.headers?.['sec-fetch-site'])} rule=${verdict.rule} rawHost=${logValue(info.req?.headers?.host)}`);
         return false;
       }
-    } catch {
+      if (!hasPassword()) return true;
+      if (isLocalReq(info.req)) return true;
+      return verifyToken(parseCookies(info.req).cgui_token);
+    } catch (e) {
       try { console.warn('[ws] blocked origin=null host=null sfs=null rule=internal-error rawHost=null'); } catch {}
+      // 另记一行异常原因(只记异常信息,不记请求里任何客户端可控的内容),便于查根因(如 EACCES)。
+      try { console.warn('[ws] internal error, handshake rejected: %s', logValue(e?.message)); } catch {}
       return false;
     }
-    if (!hasPassword()) return true;
-    if (isLocalReq(info.req)) return true;
-    return verifyToken(parseCookies(info.req).cgui_token);
   },
 });
 

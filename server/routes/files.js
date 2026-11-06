@@ -6,6 +6,7 @@ import { join, resolve, relative, extname, isAbsolute } from 'path';
 import { homedir, platform, tmpdir } from 'os';
 import { execFile } from 'child_process';
 import { isPathInside, isKnownClaudeWorkspace } from '../utils/safe-path.js';
+import { rawResponseSecurityHeaders } from '../utils/raw-response-headers.js';
 
 const router = Router();
 
@@ -242,9 +243,14 @@ router.get('/files/read', async (req, res) => {
       // 读打开成功才发响应头：打不开时还能回 500 JSON，而不是 200 空壳。
       stream.on('open', () => {
         if (res.headersSent || res.writableEnded) return;
-        res.setHeader('Content-Type', MIME[e] || 'application/octet-stream');
+        const contentType = MIME[e] || 'application/octet-stream';
+        res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Length', st.size);
         res.setHeader('Cache-Control', 'no-cache');
+        // r156:nosniff 全部类型;CSP sandbox 除 PDF 外全部类型(判据见 raw-response-headers.js)。
+        for (const [name, value] of Object.entries(rawResponseSecurityHeaders(contentType))) {
+          res.setHeader(name, value);
+        }
       });
       // Content-Length/200 一旦 flush 就不能改回 500：销毁连接，让客户端看到截断的
       // body + 中止的连接，而不是"静默不完整的 200"。

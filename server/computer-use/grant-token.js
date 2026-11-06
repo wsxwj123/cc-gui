@@ -10,8 +10,17 @@
 // ③本机上把请求原样转给后台的代理(其他项目的开发服务器代理、Jupyter 代理等):经过它的网页与后台同站,
 // 仍能连 WS 拿到凭证,而同一条 WS 本就能开内置终端;跨协议 + 默认端口 + 浏览器不带跨站标记的组合同理,
 // 只有后台或其前置代理监听 80/443 时才可能出现;④后台读文件接口(/api/files/read?raw=1)同源下发的
-// 可执行内容(例如 SVG):网页若能让这类文件落在本机磁盘上、再把浏览器导航到该接口地址,文件里的脚本
-// 就以后台页面身份运行,同样能连 WS 取得凭证(已知问题,另立项处理)。
+// 内容,r156 起的现状:`X-Content-Type-Options: nosniff` 全部类型都带,`Content-Security-Policy: sandbox`
+// 除 PDF 外都带,浏览器直接打开其中带脚本的 SVG 也不运行脚本(Chromium、WebKit、macOS WKWebView 实测);
+// PDF 为保证预览不带 sandbox(只带 nosniff),扩展名 .pdf 而内容是 HTML/SVG 的文件在 Chromium 新版与 WKWebView 里实测
+// 其中脚本不运行;带内置脚本的 PDF(试了自动打开链接、提交表单两种动作)实测没有借此向本机发出请求。
+// 另有 K3(services/auth.js 的 checkNoOriginFetchSite):不带 Origin、浏览器自报 Sec-Fetch-Site 为
+// same-site/cross-site 的 /api/* 请求(他站/他端口网页的导航、嵌入、图片加载)一律 403;
+// 浏览器只对回环地址与 https(隧道域名)发该头,手输地址/书签/别的应用点开的链接报 none 按设计不拦,经局域网
+// IP 的明文 HTTP、老浏览器不发该头,K3 不生效,只剩 sandbox 这道内容防线。残余:WebKit 的 PDF 插件加载请求、
+// 以及点击带 download 属性的链接时浏览器补发的第二次请求,在 macOS 的 WKWebView 里实测不带 Sec-Fetch-Site
+// (只能触发读不到结果的 GET,或把响应存成下载文件,不会作为页面运行);浏览器版里用户亲手对聊天附件 SVG 图选"在新标签页打开"时,脚本以
+// 页面来源运行(blob: 地址,响应头管不到);Windows 真机与 Firefox 未测。
 // 与 H1 nonce 不同:nonce 绑定单个待决请求、随请求生灭;凭证要在面板整个生命周期可用,按进程常驻。
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 

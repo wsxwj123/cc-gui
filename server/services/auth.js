@@ -218,6 +218,20 @@ export function checkBrowserOrigin(origin, req, ctx) {
   return { ok: false, rule: 'site-mismatch' };
 }
 
+// K3(r156):无 Origin 的请求,浏览器自报 same-site / cross-site 就拒。
+// 浏览器的顶层导航与 <img>/<iframe>/<audio>/<script> 等 no-cors GET 不带 Origin,checkBrowserOrigin
+// 第 1 条对它们一律放行;别的网站/别的端口的网页因此能让浏览器去请求后台。这类请求浏览器会自报
+// 跨站(页面脚本改不了这个头)。只给 /api 用(挂载与路径范围由调用方负责,保证与路由同一套匹配)。
+// 有非空 Origin 的请求不归这里管(交给 checkBrowserOrigin)。缺头、none、same-origin、未知值放行。
+// 局限:浏览器只对回环地址与 https 发该头;局域网 IP 明文 HTTP、老浏览器不发,本规则对其不生效。
+export function checkNoOriginFetchSite(req) {
+  const origin = req?.headers?.origin;
+  if (origin !== undefined && origin !== '') return { ok: true, rule: 'has-origin' };
+  const sfs = secFetchSiteTokens(req);
+  if (sfs.includes('same-site') || sfs.includes('cross-site')) return { ok: false, rule: 'no-origin-sfs-veto' };
+  return { ok: true, rule: 'no-origin' };
+}
+
 export function parseCookies(req) {
   const raw = req?.headers?.cookie || '';
   const out = {};
