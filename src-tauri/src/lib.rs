@@ -92,6 +92,41 @@ fn overlap_area(a: PixelRect, b: PixelRect) -> u64 {
     }
 }
 
+/// 移动 / 缩放自动落盘的尾沿去抖:事件持续到来时不断推迟,最后一次事件之后满
+/// `debounce_ms` 才到期;一串事件只该调度一个等待。时钟由调用方以毫秒传入,便于单测。
+#[derive(Debug, Default)]
+pub struct AutosaveDebounce {
+    /// 最后一次收到事件的时刻;None = 当前没有待落盘的改动。
+    last_event_ms: Option<u64>,
+}
+
+impl AutosaveDebounce {
+    pub const fn new() -> Self {
+        Self { last_event_ms: None }
+    }
+
+    /// 收到一次移动 / 缩放事件。恢复窗口状态期间不调度(返回 false),
+    /// 其余情况记录时刻并返回 true(调用方据此保证一串事件只起一个等待线程)。
+    pub fn note(&mut self, now_ms: u64, restoring: bool) -> bool {
+        let _ = (now_ms, restoring);
+        true
+    }
+
+    /// 在 `now_ms` 时是否已满去抖间隔、可以落盘。
+    pub fn is_due(&self, now_ms: u64, debounce_ms: u64) -> bool {
+        let _ = (now_ms, debounce_ms);
+        true
+    }
+
+    /// 落盘后复位。
+    pub fn clear(&mut self) {}
+
+    /// 是否还有未落盘的改动。
+    pub fn has_pending(&self) -> bool {
+        true
+    }
+}
+
 /// 恢复后的几何兜底。插件只做"保存的位置是否与某块屏相交"这一项检查,没有尺寸 / 最小值 /
 /// DPI 防护,这里补上最小的一套:
 ///  - 残留的最小化先取消(插件不保存最小化,但状态文件可能被手改 / 旧版本写过);
@@ -1656,5 +1691,61 @@ mod window_state_tests {
         // 屏外 / 无显示器 → None
         assert_eq!(best_monitor_size((9000, 100, 800, 600), &monitors), None);
         assert_eq!(best_monitor_size((100, 100, 800, 600), &[]), None);
+    }
+}
+
+#[cfg(test)]
+mod autosave_debounce_tests {
+    use super::AutosaveDebounce;
+
+    const DEBOUNCE_MS: u64 = 1_500;
+
+    // 一串移动 / 缩放事件期间不落盘:距最后一次事件不足 1.5 秒都不该到期。
+    #[test]
+    fn does_not_fire_during_burst() {
+        let mut d = AutosaveDebounce::new();
+        assert!(d.note(0, false));
+        assert!(!d.is_due(1_000, DEBOUNCE_MS), "拖动中(未满 1.5 秒)不应落盘");
+        assert!(d.note(1_200, false));
+        assert!(!d.is_due(2_000, DEBOUNCE_MS), "新事件应把到期时间推迟");
+    }
+
+    // 最后一个事件之后满 1.5 秒才该落盘(尾沿)。
+    #[test]
+    fn fires_after_last_event_plus_debounce() {
+        let mut d = AutosaveDebounce::new();
+        d.note(0, false);
+        assert!(!d.is_due(1_499, DEBOUNCE_MS), "差 1 毫秒不该落盘");
+        assert!(d.is_due(1_500, DEBOUNCE_MS), "最后一个事件满 1.5 秒应落盘");
+    }
+
+    // 新事件会推迟落盘(不是节流:不会因为“距上次落盘够久”就提前写)。
+    #[test]
+    fn new_event_postpones_deadline() {
+        let mut d = AutosaveDebounce::new();
+        d.note(0, false);
+        d.note(1_000, false);
+        assert!(!d.is_due(2_000, DEBOUNCE_MS));
+        assert!(d.is_due(2_500, DEBOUNCE_MS));
+    }
+
+    // 恢复窗口状态期间不调度(调用方也就不起等待线程)。
+    #[test]
+    fn skips_scheduling_while_restoring() {
+        let mut d = AutosaveDebounce::new();
+        assert!(!d.note(0, true), "恢复期间不调度");
+        assert!(!d.is_due(10_000, DEBOUNCE_MS), "未调度就不该到期");
+        assert!(!d.has_pending());
+    }
+
+    // 落盘后复位:没有新事件就不该再次到期。
+    #[test]
+    fn clear_resets_after_save() {
+        let mut d = AutosaveDebounce::new();
+        d.note(0, false);
+        assert!(d.is_due(1_500, DEBOUNCE_MS));
+        d.clear();
+        assert!(!d.is_due(10_000, DEBOUNCE_MS));
+        assert!(!d.has_pending());
     }
 }
