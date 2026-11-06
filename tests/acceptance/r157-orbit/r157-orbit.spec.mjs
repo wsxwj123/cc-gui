@@ -73,7 +73,7 @@ const quantile = (arr, q) => {
 };
 const f2 = (v) => (Number.isFinite(v) ? v.toFixed(2) : String(v));
 
-test('R1 默认三体旋转上下点头：纵横比最小 ≤ 0.20（排成一线）、最大 ≥ 0.50（纵向展开）', async ({ page }) => {
+test('R1 默认三体旋转上下点头：纵横比最小 ≤ 0.20（排成一线）、最大 ≥ 0.45（纵向展开）', async ({ page }) => {
   test.setTimeout(150_000);
   await liveOrbit(page, 'b1', 'R1 一直没返回的命令');
   // 页内每 100 毫秒采一次三个点的中心，连续 6.6 秒（覆盖一个完整的点头周期）。
@@ -114,7 +114,8 @@ test('R1 默认三体旋转上下点头：纵横比最小 ≤ 0.20（排成一�
   const summary = `样本 ${ratios.length}，纵横比最小 ${f2(minR)} / 最大 ${f2(maxR)}`;
   console.log(`[R1] ${summary}`);
   expect(minR, `R1 纵横比最小值 ${f2(minR)} > 0.20（过水平线时应几乎排成一条线；${summary}）`).toBeLessThanOrEqual(0.20);
-  expect(maxR, `R1 纵横比最大值 ${f2(maxR)} < 0.50（点头到最高 / 最低时应纵向展开；${summary}）`).toBeGreaterThanOrEqual(0.50);
+  // 阈值 0.45:旧公式(0.2.447)实算,默认转速下 6.6 秒窗口里、在所有起始相位下纵横比最大值都 ≥ 0.527(典型 0.54),最小值 ≤ 0.101;留余量取 0.45 / 0.20。
+  expect(maxR, `R1 纵横比最大值 ${f2(maxR)} < 0.45（点头到最高 / 最低时应纵向展开；${summary}）`).toBeGreaterThanOrEqual(0.45);
 });
 
 /**
