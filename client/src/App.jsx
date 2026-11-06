@@ -74,7 +74,10 @@ import { HISTORY_COST_ESTIMATE_NOTE, hasFullHistoryStats, historyStatsScopeLabel
 import { ReleaseNotesModal } from './components/ReleaseNotesModal.jsx';
 import { shouldShow as shouldShowReleaseNotes, hasReleaseNotes, loadVersionNotes, fetchLastSeen, markSeen } from './utils/releaseNotes.js';
 import TurnScrubber from './components/TurnScrubber.jsx';
-import { LoadingMark, useCyclingVerb, ElapsedTime } from './components/LoadingBits.jsx';
+import { LoadingMark } from './components/LoadingBits.jsx';
+import { LiveStatusLine } from './components/LiveStatusLine.jsx';
+import { liveStatusLabel } from './utils/liveStatus.js';
+import { DEFAULT_LOADING_STYLE } from './utils/loadingPrefs.js';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './components/MultiSelect.jsx';
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
@@ -775,9 +778,16 @@ function ChatModeToggle() {
 
 // 加载动画选择网格:每格实时跑对应动画,点击即选(存 store.loadingStyle)。
 // 独立组件而非内联,避免主题弹窗其它交互(选色)时重渲整片动画网格。
+// r154:三体 / 四体旋转的转速,存 store.loadingSpeed(localStorage cgui-loading-speed)
+const LOADING_SPEED_OPTIONS = [
+  { id: 'slow', label: '慢' }, { id: 'normal', label: '标准' }, { id: 'fast', label: '快' },
+];
+
 function LoadingStylePicker() {
-  const loadingStyle = useStore((s) => s.loadingStyle) || 'cli';
+  const loadingStyle = useStore((s) => s.loadingStyle) || DEFAULT_LOADING_STYLE;
   const setLoadingStyle = useStore((s) => s.setLoadingStyle);
+  const loadingSpeed = useStore((s) => s.loadingSpeed) || 'slow';
+  const setLoadingSpeed = useStore((s) => s.setLoadingSpeed);
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
@@ -785,15 +795,30 @@ function LoadingStylePicker() {
         <span className="text-[11px] text-ink font-body font-medium">加载动画</span>
         <span className="ml-auto text-[9px] text-ink-faint font-body">AI 思考时的指示样式</span>
       </div>
-      <div className="grid grid-cols-4 gap-1.5 max-h-[220px] overflow-y-auto pr-0.5">
+      <div role="radiogroup" aria-label="加载动画样式" className="grid grid-cols-4 gap-1.5 max-h-[220px] overflow-y-auto pr-0.5">
         {LOADING_OPTIONS.map((opt) => {
           const active = loadingStyle === opt.id;
           return (
             <button key={opt.id} onClick={() => setLoadingStyle(opt.id)} title={opt.label}
+              role="radio" aria-checked={active ? 'true' : 'false'} data-loading-option={opt.id}
               className={`flex flex-col items-center gap-1 px-1 py-2 rounded-lg border transition-all hover:bg-canvas-warm ${active ? 'border-accent ring-1 ring-accent/40 bg-accent/8' : 'border-canvas-deep'}`}>
-              <span className="h-6 flex items-center justify-center"><LoadingMark size={20} variant={opt.id} /></span>
+              <span className="h-6 flex items-center justify-center text-accent"><LoadingMark size={20} variant={opt.id} /></span>
               <span className="text-[8.5px] text-ink-faint font-body leading-none truncate max-w-full">{opt.label}</span>
             </button>
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-2 pt-1">
+        <span className="text-[11px] text-ink font-body font-medium">转速</span>
+        <span className="ml-auto text-[9px] text-ink-faint font-body">三体旋转、四体旋转的速度</span>
+      </div>
+      <div role="radiogroup" aria-label="加载动画转速" className="grid grid-cols-3 gap-1.5">
+        {LOADING_SPEED_OPTIONS.map((opt) => {
+          const active = loadingSpeed === opt.id;
+          return (
+            <button key={opt.id} onClick={() => setLoadingSpeed(opt.id)}
+              role="radio" aria-checked={active ? 'true' : 'false'} data-loading-speed={opt.id}
+              className={`px-1 py-1.5 rounded-lg border text-[11px] font-body transition-all hover:bg-canvas-warm ${active ? 'border-accent ring-1 ring-accent/40 bg-accent/8 text-ink' : 'border-canvas-deep text-ink-muted'}`}>{opt.label}</button>
           );
         })}
       </div>
@@ -2612,9 +2637,11 @@ function HomeState({ tabIndex = 0 }) {
 // frames every ~100ms, paired with a verb that changes every ~3s.
 
 // Loading 动画样式库(选项 id 对应 index.css 的 .loading-<id>,移植自 clawd-station)。
-// 'cli' = 原 ASCII spinner,保持默认外观不变。主题弹窗里选,存 store.loadingStyle。
+// orbit3 / orbit4 = 三体 / 四体旋转(JS 驱动,见 utils/orbitTicker.js;没选过的人默认 orbit3);
+// 'cli' = 原 ASCII spinner。主题弹窗里选,存 store.loadingStyle。
 export const LOADING_OPTIONS = [
-  { id: 'cli', label: 'CLI(默认)' },
+  { id: 'orbit3', label: '三体旋转' }, { id: 'orbit4', label: '四体旋转' },
+  { id: 'cli', label: 'CLI ✻' },
   { id: 'ring', label: 'Ring' }, { id: 'ring-dual', label: 'Dual Ring' },
   { id: 'ring-dash', label: 'Dash Ring' }, { id: 'ring-thin', label: 'Thin Ring' },
   { id: 'ring-bold', label: 'Bold Ring' }, { id: 'ring-reverse', label: 'Reverse' },
@@ -2706,9 +2733,8 @@ function CompactProgressBar() {
 }
 
 // ─── Streaming status line ─────────────────────────────────────
-// Inline status that mirrors the CLI's "✻ Frolicking…" prompt — spinner
-// char + verb + optional tool/phase detail. Updates live as the model
-// moves through phases inside one turn.
+// 生成中的底部状态行(r154):指示器 · 用时 · 状态词,永远是本回合最后一行。
+// 状态词由 liveStatusLabel 从流式状态推出(客观中文动词),版式见 components/LiveStatusLine.jsx。
 
 // reattach 状态行专用:「上次更新 N 秒前」。reattach 期间界面只有一行循环动词在动,
 // 用户分不出「在跑但 jsonl 还没写」和「已经卡死」—— 实测相邻 jsonl 记录间隔 p75=7.6s、
@@ -2728,51 +2754,20 @@ function LastUpdateAgo({ getAt }) {
   return <span className="text-[12px] text-ink-faint shrink-0 tabular-nums">· 上次更新 {txt}</span>;
 }
 
-function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true, stopping = false }) {
-  const verb = useCyclingVerb();
-  let label = null;
-  // Latest unresolved tool call (no result yet) → "Bash(ls)"
-  const pendingTool = [...toolCalls].reverse().find((tc) => !tc.result);
-  if (stopping) {
-    // r119:用户已请求停止、本轮还没结束 —— 如实显示"停止中",不再继续报"正在产出什么"
-    // (内容其实已经冻结了;继续显示 Writing/工具名就是用户说的"已经停了还显示运行中")。
-    label = '停止中';
-  } else if (pendingTool) {
-    const preview =
-      pendingTool.input?.command ||
-      pendingTool.input?.file_path?.split(/[/\\]+/).pop() ||
-      pendingTool.input?.pattern ||
-      pendingTool.input?.query || '';
-    const previewStr = String(preview).slice(0, 60);
-    label = `${pendingTool.name}${previewStr ? `(${previewStr})` : ''}`;
-  } else if (text) {
-    label = 'Writing';
-  } else if (thinking) {
-    label = verb;
-  } else {
-    // 不再 return null:不发 partial stream_event 的第三方(mimo/kimi/glm)只走整条
-    // assistant 消息路径,工具结果全回来后、下一条整消息到达前的空窗期 text/thinking/
-    // pendingTool 全空 → 原来这里隐藏整行,用户看到"橙色动态文本时有时无"(#10)。
-    // 官方靠 delta 立即填充故无感。回退显示动态词,与官方观感一致;回合结束(isStreaming
-    // false)整块卸载,不会滞留。
-    // r65:reattach 接管一个"还没吐任何产出"的回合(连接窗)时,这里若显示循环动词会
-    // 与"正在思考"同形、看不出还没连上。sawModelOutput 为 false(本流未见过任何
-    // content_block_start/delta/assistant 快照)时显示 Connecting;任一产出信号到达即落回
-    // 动词。仅 reattach 状态行传此标志,首发路径默认 true 维持原样。
-    label = sawModelOutput ? verb : 'Connecting';
-  }
-  // 统一动效(用户反馈"跳动动画→静态头像"割裂):动画载体收敛到回复气泡的
-  // ✻ 头像位(TurnBubble 的 ProviderAvatar thinking 态),状态行只保留纯文字,
+function StreamingStatusLine({ thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true, stopping = false, compacting = false }) {
+  // 最后一个还没结果的工具调用(并行时取最后一个)
+  const pendingTool = [...toolCalls].reverse().find((tc) => !tc.result) || null;
+  // r119:stopping 优先 —— 用户已请求停止、本轮还没结束时如实显示「停止中」。
+  // r154:自动压缩进行中(liveStatus.compacting,来自 SDK 的 status:compacting 事件)次之,显示「正在压缩上下文」;
+  // 下面的「等待状态行(G)」仍说明原因并带进度条,两行并存。
+  // r65:sawModelOutput 为 false(reattach 接管一个还没吐任何产出的回合)时显示「连接中」;
+  // 首发路径默认 true,空窗期(工具结果全回、下一条整消息未到)显示「正在思考」,不隐藏整行。
+  const label = liveStatusLabel({ stopping, compacting, pendingTool, text: !!text, thinking: !!thinking, sawModelOutput });
   // 缩进 50px(34px 头像 + 16px gap)与气泡正文列对齐,渲染在气泡下方。
   return (
-    <div className="px-6 -mt-2 pb-3 animate-fade-in" {...(stopping ? { role: 'status' } : {})}>
-      <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2 pl-[50px] text-[13px] text-ink-soft font-body" style={{ color: '#D97757' }}>
-        {/* 状态行指示器用主题选的加载动画(与下方 Connecting 行一致);LoadingMark 继承
-            currentColor,外层 style 已置橙 #D97757 —— cli 默认帧与其它 30 种样式同色。 */}
-        <span className="shrink-0 inline-flex items-center"><LoadingMark size={13} /></span>
-        <span className="font-mono truncate font-medium" style={{ color: '#D97757' }}>{label}</span>
-        <span style={{ color: '#D97757' }}>…</span>
-        <ElapsedTime startedAt={streamStart} className="ml-1" />
+    <div className="px-6 -mt-2 pb-3 animate-fade-in">
+      <div className="max-w-[var(--content-max)] mx-auto flex items-center gap-2 pl-[50px] min-w-0">
+        <LiveStatusLine label={label} startedAt={streamStart} className="min-w-0" />
         {/* 只有 reattach 分支传 lastUpdateAt(它那边没有流式气泡,唯一的活体指示就是这行) */}
         {lastUpdateAt && <LastUpdateAgo getAt={lastUpdateAt} />}
       </div>
@@ -9924,6 +9919,7 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                     toolCalls={streamingToolCalls}
                     streamStart={streamStartRef.current}
                     stopping={stopping}
+                    compacting={!!liveStatus?.compacting}
                   />
                 </>
               )}
@@ -9941,16 +9937,16 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
               {liveVisible && isStreaming && !reattachStream && !streamingText && !streamingThinking && streamingToolCalls.length === 0 && !streamingBlocks.some((b) => (b?.content?.length > 0) || b?.toolCall) && (
                 // 头像位统一用官方 Claude logo(ProviderAvatar,与完成后气泡头像同一视觉物),
                 // 加载时 thinking 呼吸、完成静止 —— 一致不割裂(用户明确"用左上角 logo 做头像")。
-                // 主题里选的加载动画作为状态行的小指示器(下面 Connecting 前),选择仍可见。
+                // 右侧是共享的底部状态行(连接中 / 正在压缩上下文),与流式行互斥,同一时刻只有一个。
                 <div className="px-6 py-4 animate-fade-in">
                   <div className="max-w-[var(--content-max)] mx-auto flex items-start gap-4">
                     <ProviderAvatar model={streamingModel} size={34} thinking />
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 min-h-[34px] text-[13px] font-body" style={{ color: '#D97757' }}>
-                        <LoadingMark size={15} />
-                        <span className="font-mono font-medium">{compacting ? 'Compacting' : 'Connecting'}</span>
-                        <span>…</span>
-                        <ElapsedTime startedAt={streamStartRef.current} className="ml-1" />
+                      <div className="flex items-center min-h-[34px]">
+                        <LiveStatusLine
+                          label={{ phase: compacting ? 'compacting' : 'connecting', verb: compacting ? '正在压缩上下文' : '连接中', object: '' }}
+                          startedAt={streamStartRef.current}
+                        />
                       </div>
                       {/* 压缩进行中:不确定态动画条(SDK 无真实百分比)。 */}
                       {compacting && <CompactProgressBar />}
@@ -9974,6 +9970,7 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                   lastUpdateAt={getHistFreshAt}
                   sawModelOutput={sawModelOutput}
                   stopping={stopping}
+                  compacting={!!liveStatus?.compacting}
                 />
               )}
               {/* 等待状态行(G):压缩中/API 重试/限流等待的明确说明。与 StreamingStatusLine

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileText, ChevronDown, ChevronRight, Loader2 } from '../Icon.jsx';
+import { FileText, ChevronDown, ChevronRight } from '../Icon.jsx';
 import { ToolResultImages } from './ToolResultImages.jsx';
 
 const PREVIEW_LINES = 10;
@@ -43,7 +43,7 @@ export function ReadCard({ toolCall }) {
         {rangeLabel && (
           <span className="text-[10px] text-ink-faint font-mono shrink-0">{rangeLabel}</span>
         )}
-        {!result && <Loader2 size={11} className="text-ink-faint animate-spin ml-auto shrink-0" />}
+        {!result && <span className="mini-spin ml-auto" aria-hidden="true" />}
         {result && (
           isError
             ? <span className="text-red-500 text-[10px] ml-auto shrink-0">错误</span>

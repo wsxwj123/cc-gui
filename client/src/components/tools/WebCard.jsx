@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Globe, ChevronDown, ChevronRight, Loader2, ExternalLink } from '../Icon.jsx';
+import { Globe, ChevronDown, ChevronRight, ExternalLink } from '../Icon.jsx';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { openExternalUrl } from '../../utils/openExternal.js';
 import { ToolResultImages } from './ToolResultImages.jsx';
@@ -41,7 +41,7 @@ export function WebCard({ toolCall }) {
             <ExternalLink size={11} />
           </span>
         )}
-        {!result && <Loader2 size={11} className="text-sky-500 animate-spin shrink-0" />}
+        {!result && <span className="mini-spin" aria-hidden="true" />}
         {result && (isError
           ? <span className="text-error text-[10px] shrink-0">错误</span>
           : <span className="text-success text-[10px] shrink-0">✓</span>)}

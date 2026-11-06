@@ -33,10 +33,13 @@ assert.equal(shouldShowBottomCopy({ bubbleH: NaN, viewH: 800 }), false, 'NaN →
 }
 
 // ── 2. 思考折叠:默认收起,且两个渲染点都走同一个折叠组件 ────────────
-assert.ok(/function ThinkingFold\(\{ content \}\)/.test(src),
-  'ThinkingFold 必须自管展开态(只收 content),展开态留在父级会让展开一块重渲整棵子树');
+// r154:另收一个只读的 live 标记(给「最新一块思考」打 data-entry-live),展开态仍然只能在组件自己里面。
+assert.ok(/function ThinkingFold\(\{ content(, live = false)? \}\)/.test(src),
+  'ThinkingFold 必须自管展开态(只收 content,r154 起另有只读的 live 标记),展开态留在父级会让展开一块重渲整棵子树');
 {
-  const body = src.slice(src.indexOf('function ThinkingFold('), src.indexOf('function ThinkingFold(') + 900);
+  // 取整个组件体(到函数结尾 "\n}\n"):r154 加了 live 标记后组件比原来写死的 900 字符窗口长,窗口按组件结尾算才不随字数漂移。
+  const start = src.indexOf('function ThinkingFold(');
+  const body = src.slice(start, src.indexOf('\n}\n', start) + 3);
   assert.ok(/const \[open, setOpen\] = useState\(false\)/.test(body), '思考块默认必须是折叠态(useState(false))');
   assert.ok(/setOpen\(\(v\) => !v\)/.test(body), '点击要能展开也能收起');
   assert.ok(/thinkingLabel\(text\)/.test(body), '折叠头显示首句摘要(流式时随内容更新)');

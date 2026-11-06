@@ -7,6 +7,7 @@ import { resolveOwnedAgent } from '../../utils/agentOwner.js';
 import { fetchAgentHistory, historyLegacyArrays, shouldApplyHistory, splitHistoryBlocks } from '../../utils/agentView.js';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
 import { SubagentCostContext, SubagentCostTag } from './SubagentCost.jsx';
+import { RunMatrixIcon } from '../RunMatrixIcon.jsx';
 
 // 卡片归属:这张 Task 卡渲染在【哪个会话】里(历史 turn 的 record.sessionId,
 // 由 TurnBubble 供给)。activeAgents 是按 tool_use.id 的全局表,而分支(fork)复制出的
@@ -33,6 +34,19 @@ export function stopNoOwnerNotice(procAlive) {
 //
 // `toolCall` here is the parent Task tool_use; toolCall.id matches the key
 // in store.activeAgents.
+
+// r154:子代理卡运行中沿整圈边框的流光。8 层同心描边(pathLength=100 的虚线段)叠成梭形:
+// 越靠中心越粗越亮、两头渐细渐隐,同步绕边一圈。样式见 index.css 的 .agent-beam;
+// 不依赖 mask / offset-path,减弱动画下整个隐藏。只在运行中渲染,结束即卸载。
+function AgentBeam() {
+  return (
+    <svg data-agent-beam="" className="agent-beam" aria-hidden="true" focusable="false">
+      {[1, 2, 3, 4, 5, 6, 7, 8].map((k) => (
+        <rect key={k} data-beam-layer="" className={`bl${k}`} width="100%" height="100%" rx="7.5" pathLength="100" />
+      ))}
+    </svg>
+  );
+}
 export function TaskCard({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
   // A 项:该子代理自己的费用(数值来自本回合 subUsage.agents[] 里 toolUseId 同名的那条)。
@@ -169,20 +183,21 @@ export function TaskCard({ toolCall }) {
   const childTools = agent?.toolCalls || [];
 
   // 重设计(用户反馈原 accent 描边 + 实色标签太丑):生产级克制 —— 极细中性
-  // 边框卡,去大色块;左侧图标位 = 运行中三点脉冲(accent)/ 结束后几何 agent
+  // 边框卡,去大色块;左侧图标位 = 运行中九宫格 + 沿边框一圈的流光(r154)/ 结束后几何 agent
   // 图标 + 状态角点(绿/红);代理类型用小号大写字距标签(ink-muted),任务描述
   // 正文色;展开箭头与子代理窗口入口悬停浮现(展开态与触屏常显)。
   // 命名 group/tc:TurnBubble 外层已有 group,避免嵌套 group 互相触发。
   return (
-    <div className="group/tc border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
+    <div className="group/tc relative border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
+      {isWorking && <AgentBeam />}
       <button
         onClick={() => setExpanded(!expanded)}
         className="w-full pl-3 pr-2 py-2 flex items-center gap-2.5 hover:bg-canvas-warm transition-colors text-left"
       >
-        {/* 图标位:运行中=三点脉冲;完成=绿色圆圈√;出错=红色圆圈×;已停止/中断=灰色断环 */}
+        {/* 图标位:运行中=九宫格追逐(与侧栏同款);完成=绿色圆圈√;出错=红色圆圈×;已停止/中断=灰色断环 */}
         <span className="relative shrink-0 w-5 h-5 flex items-center justify-center text-ink-muted">
           {isWorking ? (
-            <span className="tc-agent-dots text-accent" aria-label="运行中"><span /><span /><span /></span>
+            <span className="inline-flex" role="img" aria-label="运行中"><RunMatrixIcon size={13} /></span>
           ) : isError ? (
             <XCircle size={16} className="text-error" aria-label="子代理出错" />
           ) : isStopped ? (

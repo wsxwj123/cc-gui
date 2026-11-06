@@ -1527,57 +1527,37 @@ header [data-tour="remote-control"] {
    provider mark to fill its parent so avatars actually show on mobile. */
 .provider-mark svg { width: 100%; height: 100%; display: block; }
 
-/* ── 子代理卡片(TaskCard):运行中图标位的三点脉冲 ──
-   颜色取 currentColor(卡片上是 accent),幅度克制;reduced-motion 静止半透明 */
-.tc-agent-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
+/* ── 子代理卡片(TaskCard)运行中:沿整圈边框的流光(r154,设计稿 v8 的 .beam)──
+   8 层同心描边(rect pathLength=100 的虚线段)叠成梭形:越靠中心越粗越亮、两头渐细渐隐,同步绕边一圈。
+   颜色取主题强调色;不依赖 mask / offset-path;减弱动画下整个隐藏。 */
+.agent-beam {
+  position: absolute; left: .75px; top: .75px;
+  width: calc(100% - 1.5px); height: calc(100% - 1.5px);
+  overflow: visible; pointer-events: none;
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--color-accent) 55%, transparent));
 }
-.tc-agent-dots span {
-  width: 3.5px;
-  height: 3.5px;
-  border-radius: 999px;
-  background: currentColor;
-  animation: tcAgentDot 1.2s ease-in-out infinite;
+.agent-beam rect {
+  fill: none; stroke: var(--color-accent); stroke-linecap: round;
+  animation-duration: 3.4s; animation-timing-function: linear; animation-iteration-count: infinite;
 }
-.tc-agent-dots span:nth-child(2) { animation-delay: 0.18s; }
-.tc-agent-dots span:nth-child(3) { animation-delay: 0.36s; }
-@keyframes tcAgentDot {
-  0%, 100% { opacity: 0.25; transform: scale(0.8); }
-  40%      { opacity: 1;    transform: scale(1);   }
-}
+.agent-beam .bl1 { stroke-width: 0.5; stroke-dasharray: 26 74; opacity: 0.12; animation-name: bm1; }
+.agent-beam .bl2 { stroke-width: 0.75; stroke-dasharray: 22 78; opacity: 0.18; animation-name: bm2; }
+.agent-beam .bl3 { stroke-width: 1; stroke-dasharray: 18 82; opacity: 0.26; animation-name: bm3; }
+.agent-beam .bl4 { stroke-width: 1.25; stroke-dasharray: 14 86; opacity: 0.36; animation-name: bm4; }
+.agent-beam .bl5 { stroke-width: 1.5; stroke-dasharray: 11 89; opacity: 0.48; animation-name: bm5; }
+.agent-beam .bl6 { stroke-width: 1.75; stroke-dasharray: 8 92; opacity: 0.62; animation-name: bm6; }
+.agent-beam .bl7 { stroke-width: 2; stroke-dasharray: 5 95; opacity: 0.8; animation-name: bm7; }
+.agent-beam .bl8 { stroke-width: 2.2; stroke-dasharray: 2.5 97.5; opacity: 1; animation-name: bm8; }
+@keyframes bm1 { from { stroke-dashoffset: 13; } to { stroke-dashoffset: -87; } }
+@keyframes bm2 { from { stroke-dashoffset: 11; } to { stroke-dashoffset: -89; } }
+@keyframes bm3 { from { stroke-dashoffset: 9; } to { stroke-dashoffset: -91; } }
+@keyframes bm4 { from { stroke-dashoffset: 7; } to { stroke-dashoffset: -93; } }
+@keyframes bm5 { from { stroke-dashoffset: 5.5; } to { stroke-dashoffset: -94.5; } }
+@keyframes bm6 { from { stroke-dashoffset: 4; } to { stroke-dashoffset: -96; } }
+@keyframes bm7 { from { stroke-dashoffset: 2.5; } to { stroke-dashoffset: -97.5; } }
+@keyframes bm8 { from { stroke-dashoffset: 1.25; } to { stroke-dashoffset: -98.75; } }
 @media (prefers-reduced-motion: reduce) {
-  .tc-agent-dots span { animation: none; opacity: 0.6; }
-}
-
-/* ── 折叠条头行(r152c):回合生成中左图标位的 2×2 点阵 ──
-   向桌面版靠拢:桌面版实测(渲染值)点 4.5px、中心距 9.5px、容器 14px;本应用 <html> 带字号缩放
-   zoom(默认约 1.2),所以布局值取 点 4px、间隙 4px(中心距 8px、容器 12px),渲染后约 4.8/9.6/14.4。
-   DOM 顺序 左上/右上/左下/右下(grid 自然排布),按视觉顺时针依次亮:左上 0 → 右上 .15s → 右下 .3s → 左下 .45s。
-   颜色取 currentColor;reduced-motion 静止半透明 */
-.strip-live-dots {
-  display: inline-grid;
-  grid-template-columns: repeat(2, 4px);
-  grid-auto-rows: 4px;
-  gap: 4px;
-}
-.strip-live-dots span {
-  width: 4px;
-  height: 4px;
-  border-radius: 999px;
-  background: currentColor;
-  animation: stripLiveDot 1.2s ease-in-out infinite;
-}
-.strip-live-dots span:nth-child(2) { animation-delay: 0.15s; }
-.strip-live-dots span:nth-child(4) { animation-delay: 0.3s; }
-.strip-live-dots span:nth-child(3) { animation-delay: 0.45s; }
-@keyframes stripLiveDot {
-  0%, 100% { opacity: 0.25; transform: scale(0.8); }
-  40%      { opacity: 1;    transform: scale(1);   }
-}
-@media (prefers-reduced-motion: reduce) {
-  .strip-live-dots span { animation: none; opacity: 0.6; }
+  .agent-beam { display: none; }
 }
 
 /* ── Skill 调用横幅 ──────────────────────────────────────────────
@@ -2332,6 +2312,58 @@ header [data-tour="remote-control"] {
 
 @media (prefers-reduced-motion: reduce) {
   .loading-mark, .loading-mark::before, .loading-mark::after, .loading-mark span { animation-duration: 4s !important; }
+}
+
+/* ── r154 R3:生成中的动画(设计稿 v8)───────────────────────────────
+ * 颜色一律取主题变量;系统开了减弱动画时全部静止 / 回纯色。 */
+
+/* 三体 / 四体旋转:点位由 utils/orbitTicker.js 每帧写 transform / opacity / z-index;
+ * 尺寸跟组件 style 传入的宽高走,半径由 ticker 按容器宽度算。颜色 = currentColor(外层给 text-accent)。 */
+.orbit-mark { display: inline-block; position: relative; flex: none; vertical-align: middle; }
+.orbit-mark i {
+  position: absolute; left: 50%; top: 50%;
+  width: 3.6px; height: 3.6px; margin: -1.8px 0 0 -1.8px;
+  border-radius: 50%; background: currentColor;
+  will-change: transform, opacity;
+}
+
+/* 状态词的连续流光(Claude 桌面版做法):3 秒一圈,15%–85% 才扫、首尾各停,120° 斜带自左向右;
+ * 高光 = 文字色掺 70% 白(只提亮,文字保持本色)。--live-shine-ink 可由外层覆盖基色。 */
+.live-shine {
+  --live-shine-peak: color-mix(in srgb, var(--live-shine-ink, currentColor) 30%, #fff);
+  background: linear-gradient(120deg, var(--live-shine-ink, currentColor) 37.5%, var(--live-shine-peak) 50%, var(--live-shine-ink, currentColor) 62.5%) 83.333% 0 / 400% 100% no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: liveShine 3s linear infinite;
+}
+@keyframes liveShine {
+  0% { background-position: 83.333% 0; }
+  15% { background-position: 83.333% 0; animation-timing-function: cubic-bezier(.714, .121, .211, .888); }
+  85%, 100% { background-position: 16.667% 0; }
+}
+@supports not (color: color-mix(in srgb, red, blue)) {
+  .live-shine { animation: none; background: none; -webkit-text-fill-color: currentColor; }
+}
+
+/* 展开后工具条目运行中的小圆环(12px,强调色)。先写不依赖 color-mix 的底色,不支持时退回透明底环。 */
+.mini-spin {
+  display: inline-block; flex: none;
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 1.6px solid transparent;
+  border-color: color-mix(in srgb, var(--color-accent) 28%, transparent);
+  border-top-color: var(--color-accent);
+  animation: miniSpin .8s linear infinite;
+}
+@keyframes miniSpin { to { transform: rotate(360deg); } }
+
+/* 最新一块思考的脑图标缓慢明暗呼吸:外层 .think-live 下的 .ti,或直接给图标加 .entry-live */
+.think-live .ti, .entry-live { animation: thinkPulse 1.8s ease-in-out infinite; }
+@keyframes thinkPulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .live-shine { animation: none; background: none; -webkit-text-fill-color: currentColor; }
+  .mini-spin, .think-live .ti, .entry-live { animation: none; }
 }
 
 /* ── 修正批#1b:composer 工具行自适应(container query) ─────────────

@@ -176,7 +176,10 @@ function makeStream() {
   // 停止的即时反馈:按钮「停止中」+ 状态行「停止中」
   assert.ok(chatInput.includes('disabled={stopping}'), '停止键要在停止请求发出后立刻禁用');
   assert.ok(chatInput.includes("{stopping ? '停止中' : '停止'}"), '停止键文案要变成「停止中」');
-  assert.ok(app.includes("label = '停止中';"), '状态行要如实显示「停止中」');
+  // r154:状态词挪到 utils/liveStatus.js(stopping 优先级最高),App 的状态行把 stopping 传进去;原来的字面量赋值已不存在。
+  const liveStatusSrc = readFileSync(join(root, 'client/src/utils/liveStatus.js'), 'utf8');
+  assert.ok(app.includes('liveStatusLabel({ stopping,') && /if \(stopping\) return \{ phase: 'stopping', verb: '停止中'/.test(liveStatusSrc),
+    '状态行要如实显示「停止中」');
 }
 
 console.log('check-stream-commit-coalesce: 4 组断言全部通过');

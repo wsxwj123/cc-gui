@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileText, ChevronDown, ChevronRight, Loader2, FilePlus2 } from '../Icon.jsx';
+import { FileText, ChevronDown, ChevronRight, FilePlus2 } from '../Icon.jsx';
 import { DiffViewer } from '../DiffViewer.jsx';
 // r64 M3:原来的私有 unifiedDiff 提到 utils/ 共用(genui 的 diff 节点也要拼同一种文本)。
 import { unifiedDiff } from '../../utils/unifiedDiff.js';
@@ -59,7 +59,7 @@ export function EditDiffCard({ toolCall }) {
           {dels > 0 && <span className="text-red-500">−{dels}</span>}
           {adds > 0 && <span className="text-green-600">+{adds}</span>}
         </span>
-        {!result && <Loader2 size={11} className="text-ink-faint animate-spin shrink-0" />}
+        {!result && <span className="mini-spin" aria-hidden="true" />}
         {result && (isError
           ? <span className="text-red-500 text-[10px] shrink-0">错误</span>
           : <span className="text-success text-[10px] shrink-0">✓</span>)}
