@@ -809,12 +809,19 @@ export function CoworkBlocks({
           );
         case 'group': {
           const autoOpen = hostMode ? false : (seg.key === activeKey);
-          const expanded = override.has(seg.key) ? override.get(seg.key) : autoOpen;
+          const wantOpen = override.has(seg.key) ? override.get(seg.key) : autoOpen;
+          // 总摘要行收起时,承载状态行的组只剩头行(条目不画);点它的头行 = 展开过程条并展开该组。
+          const hostingThis = !!hostLabel && seg.key === activeKey;
+          const stripCollapsedHost = hostingThis && !open;
+          const expanded = wantOpen && !stripCollapsedHost;
           return (
             <WorkGroup
               items={seg.items}
               expanded={expanded}
-              onToggle={() => setOverride((p) => { const n = new Map(p); n.set(seg.key, !expanded); return n; })}
+              onToggle={() => {
+                if (stripCollapsedHost) setStripOpen(true);
+                setOverride((p) => { const n = new Map(p); n.set(seg.key, !expanded); return n; });
+              }}
               onRetryTool={onRetryTool}
               liveBlock={isLive ? list[list.length - 1] || null : null}
               liveLabel={hostLabel && seg.key === activeKey ? hostLabel : null}
