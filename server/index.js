@@ -54,7 +54,7 @@ import { installXsessionRuntime } from './services/xsession.js';
 import {
   authMiddleware, isLocalReq, isAuthorized, parseCookies, verifyToken,
   hasPassword, setPassword, setDefaultRandomPassword, clearPassword, verifyPassword, issueToken, updateConfig, loadConfig,
-  requestHostname, getTunnelHostname, checkBrowserOrigin,
+  requestHostname, getTunnelHostname, checkBrowserOrigin, checkNoOriginFetchSite,
 } from './services/auth.js';
 import { setupFileWatcher } from './services/file-watcher.js';
 import { readStats as readSessionIndexStats } from './services/session-index.js';
@@ -305,6 +305,19 @@ app.use(cors((req, cb) => cb(null, {
     return originCb(err);
   },
 })));
+// K3(r156,规则见 services/auth.js 的 checkNoOriginFetchSite):没有 Origin 的 /api 请求,浏览器
+// 自报 same-site/cross-site 就拒(他站网页的导航、<img>/<iframe> 等嵌入不带 Origin,上面放行了)。
+// 路径范围靠 Express 的 /api 挂载匹配(大小写不敏感、容尾斜杠),与路由同一套规则,不手写正则。
+// 位置:来源校验之后、body 解析与密码闸之前,且早于第一个 /api 路由。拒绝走与上面同一个出口。
+app.use('/api', (req, res, next) => {
+  const verdict = checkNoOriginFetchSite(req);
+  if (verdict.ok) return next();
+  console.warn(`[cors] blocked origin=${logValue(req.headers.origin)} host=${logValue(requestHostname(req))} path=${logValue(req.originalUrl)} sfs=${logValue(req.headers['sec-fetch-site'])} rule=${verdict.rule} rawHost=${logValue(req.headers.host)}`);
+  const err = new Error(CROSS_ORIGIN_BLOCKED);
+  err.status = 403;
+  err.cguiOriginBlocked = true;
+  return next(err);
+});
 // Bumped from default 100kb to 25mb so dragged-in screenshots fit in the JSON body.
 // r43:皮肤文件夹导入把 30MB 目录 base64 进 JSON(≈40MB),必须让路给该路由自己挂的
 // 45mb 解析器(routes/skins-packs.js);全局限额对其余所有路径原样不动。
