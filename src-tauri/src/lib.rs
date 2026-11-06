@@ -172,7 +172,8 @@ fn note_autosave_event(app: &tauri::AppHandle) {
 }
 
 /// 等待线程:每 AUTOSAVE_DEBOUNCE_MS 醒一次,事件停下满去抖间隔才落盘;期间来了新事件
-/// 就继续等(尾沿),落盘后没有新事件才退出。
+/// 就继续等(尾沿),落盘后没有新事件才退出。本线程只负责计时和判定,真正的保存经
+/// run_on_main_thread 在主线程执行(原因见下方注释)。
 fn autosave_worker(app: tauri::AppHandle) {
     use std::sync::atomic::Ordering;
     loop {
@@ -188,7 +189,15 @@ fn autosave_worker(app: tauri::AppHandle) {
             }
             debounce.clear();
         }
-        let _ = app.save_window_state(window_state_flags());
+        // 真正的保存必须派回主线程执行,不能在本(后台)线程里直接调:插件的 save_window_state
+        // 持着状态缓存锁(tauri-plugin-window-state 2.4.1 lib.rs 127 行)并在锁内调窗口取值函数,
+        // 取值函数在非主线程会阻塞等主线程回话;而插件自己的 Moved / Resized / CloseRequested
+        // 处理在主线程里阻塞拿同一把锁。后台线程正在保存时主线程恰好收到这类事件 → 两边互等,
+        // 界面冻住。run_on_main_thread 从后台线程调用时不等待执行完成。
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let _ = handle.save_window_state(window_state_flags());
+        });
         // 与 note_autosave_event 的约定:持有状态锁时确认没有新事件、再释放“有等待线程”
         // 标志,避免“事件刚记录、标志刚释放”之间漏掉最后一次落盘。
         let debounce = AUTOSAVE_DEBOUNCE.lock().unwrap();
