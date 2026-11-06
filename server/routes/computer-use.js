@@ -396,7 +396,8 @@ function auditValue(value) {
 // 每次变更(成功与被拒)记一行审计日志,**不记凭证值**。
 router.post('/computer-use/grants', (req, res) => {
   const { bundleId, name, granted, screenScope, foreground, foregroundMinutes } = req.body || {};
-  const positive = (bundleId !== undefined && granted !== false) || screenScope === true || foreground === true;
+  // 只用于审计日志的 grant / revoke 标签:只关前台({bundleId, foreground:false})是降权,标 revoke。
+  const positive = (bundleId !== undefined && granted !== false && foreground !== false) || screenScope === true || foreground === true;
   const audit = (outcome, credential) => {
     // 审计日志本身出错(格式化 / 输出流异常)只吞掉:不能因为记日志把请求变成 500。
     try {

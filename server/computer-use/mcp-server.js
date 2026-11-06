@@ -302,6 +302,26 @@ function foregroundConsentMessage(name, bundleId) {
     + '用户确认开启后，请用**新的 actionId** 重试同一个动作。';
 }
 
+/**
+ * C2:前台授权闸门。args.foreground === true、应用已授权、却没有未过期的前台授权 → 返回拒绝回执;
+ * 否则返回 null。应用没授权时不返回本码(交给 CU_APP_NOT_ALLOWED 路径,不把前台开关暴露给无权应用)。
+ * 查两次(安全审计发现单查一次不够):入队前查,快速失败、不占 actionId;**开始执行前再查**
+ * —— 动作可能在队列里等很久(队列最多 32 个、单个文字输入最长 155 秒),期间用户可能关掉前台授权、
+ * 授权到期,或刚刚才授权这个应用,一律以动作真正开始执行那一刻的授权为准。复查到真正投递之间还隔着
+ * 取窗口列表的几次调用(通常不到 1 秒),是已知残余(见 C2 方案第 11 节)。
+ */
+function foregroundConsentGate(args, target, actionId) {
+  if (args.foreground !== true) return null;
+  const grants = readGrants();
+  if (!appGranted(grants, target.bundleId) || foregroundGranted(grants, target.bundleId)) return null;
+  const entry = appEntry(grants, target.bundleId);
+  return fail('CU_FOREGROUND_CONSENT_REQUIRED', {
+    actionId,
+    message: foregroundConsentMessage(entry?.name || target.bundleId, target.bundleId),
+    extra: { target: { bundleId: target.bundleId, name: entry?.name || target.bundleId } },
+  });
+}
+
 const DEFAULT_MESSAGES = {
   CU_INVALID_ARGUMENT: '参数非法(见字段说明);未执行任何动作。',
   CU_INVALID_COORDINATE: '坐标不是原图内的合法整数像素;未投递。',
@@ -309,7 +329,8 @@ const DEFAULT_MESSAGES = {
   CU_STALE_SNAPSHOT: 'snapshotId 已失效(被新截图取代、来自其他实例或文件已清理);请重新截图,不按新前台猜坐标。',
   // C2:前台操控必须由用户在面板里按应用、限时授权。文案只引导"停下、找用户开开关",
   // 不教任何接口 / 文件路径(防模型自己去给自己授权)。
-  CU_FOREGROUND_CONSENT_REQUIRED: foregroundConsentMessage('{name}', '{bundleId}'),
+  // (实际返回时都由 foregroundConsentGate 带上具体应用名的文案;这里是不含占位符的兜底说明。)
+  CU_FOREGROUND_CONSENT_REQUIRED: '目标应用还没有获得前台操控授权，本次**零投递**。请**停下**，告诉用户在 CC-GUI 的『桌面操控 → 应用授权』里为该应用开启『允许前台操控』（会移动真实鼠标，默认 60 分钟有效），开启后用**新的 actionId** 重试。',
   // 不教接口(r154):旧文案写着授权接口,"想把任务做完"的模型读到会自己去调接口给自己授权。
   CU_APP_NOT_ALLOWED: `目标应用未被授权,或属于禁止操控的类别(${forbiddenCategoryLabels()})。请让用户在 CC-GUI 的「桌面操控」面板里授权;不要自行修改授权。`,
   CU_TARGET_NOT_FOUND: '找不到目标窗口(bundleId/pid/windowId 需来自 window_list 的已授权窗口)。',
@@ -829,7 +850,8 @@ const SIDE_EFFECT_TOOLS = new Set(['left_click', 'double_click', 'right_click', 
 const WIN_LADDER_NOTE = '【Windows 后台通道】先走 UI Automation 元素级操作(不抢前台、不动光标、可读回校验);'
   + '元素/pattern 不可达时才降级成窗口消息投递(PostMessage/直投,只对传统 Win32 控件有效,'
   + '浏览器/自绘界面覆盖不到,且没有可靠的失败信号)。两条都不通时明确报 CU_BACKGROUND_UNSUPPORTED,'
-  + '**绝不自动改成全局点击**。全局投递(SendInput)只在你显式同意(foreground:true)时才走:'
+  + '**绝不自动改成全局点击**。全局投递(SendInput)只在你显式传 foreground:true、且用户已在 CC-GUI 的「桌面操控 → 应用授权」里'
+  + '为该应用开启「允许前台操控」时才走(没开会返回 CU_FOREGROUND_CONSENT_REQUIRED,请停下让用户去开):'
   + '那会移动真实光标、把目标窗口切到前台。';
 
 const WIN_TOOL_DESCRIPTIONS = {
@@ -932,19 +954,9 @@ async function runAction(name, args, body) {
     return fail('CU_INVALID_ARGUMENT', { actionId, message: 'snapshotId 必须是非空字符串;零投递。' });
   }
   // C2:前台操控必须由用户在面板里按应用、限时授权。放在登记之前:拒绝零投递、不占 actionId,
-  // 用户开启后用新 actionId 重试才能拿到新回执。应用未授权时不返回本码,交给现有
-  // CU_APP_NOT_ALLOWED 路径(不把前台开关暴露给无权应用)。
-  if (args.foreground === true) {
-    const grants = readGrants();
-    if (appGranted(grants, target.bundleId) && !foregroundGranted(grants, target.bundleId)) {
-      const entry = appEntry(grants, target.bundleId);
-      return fail('CU_FOREGROUND_CONSENT_REQUIRED', {
-        actionId,
-        message: foregroundConsentMessage(entry?.name || target.bundleId, target.bundleId),
-        extra: { target: { bundleId: target.bundleId, name: entry?.name || target.bundleId } },
-      });
-    }
-  }
+  // 用户开启后用新 actionId 重试才能拿到新回执。开始执行前还会再查一次(见 foregroundConsentGate)。
+  const refusedAtEnqueue = foregroundConsentGate(args, target, actionId);
+  if (refusedAtEnqueue) return refusedAtEnqueue;
   // 阶段 A 的静态拒绝(§3.2 B-3 #1a):Windows 执行层不在位时,副作用工具在**登记之前**
   // 零投递地拒绝 —— 登记之后再拒会给模型一个"已登记但失败"的 actionId,重试还得换 id,
   // 而且降级链的结果依赖运行期(必须留在各 tool* body 内,见 #1b)。
@@ -972,7 +984,9 @@ async function runAction(name, args, body) {
       entry.status = 'running';
       let receipt;
       try {
-        receipt = await body({ target, foreground: args.foreground === true, actionId });
+        // 开始执行前复查前台授权:排队期间授权可能变了(关掉 / 到期 / 刚授权这个应用),以此刻为准。
+        receipt = foregroundConsentGate(args, target, actionId)
+          || await body({ target, foreground: args.foreground === true, actionId });
       } catch (error) {
         receipt = helperFailure(error, actionId);
       }
