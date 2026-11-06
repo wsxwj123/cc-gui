@@ -52,7 +52,7 @@ Everything the `claude` CLI can do, made visual — plus shell-only conveniences
 **MCP & plugins**
 - Manage MCP servers (add, ping, OAuth login, enable/disable, edit) with **per-tool enable/disable + tool listing**
 - One-click official plugin install (enable/disable/update/remove), auto-synced to your agents
-- **Computer use** — a bundled MCP that gives sessions screenshots, mouse, keyboard and window info (macOS / Windows), with per-app grants; see [docs/computer-use.md](docs/computer-use.md)
+- **Computer use** — a bundled MCP that gives sessions screenshots, mouse, keyboard and window info (macOS / Windows), with per-app grants (the foreground mode, which moves the real mouse, needs a separate time-limited opt-in per app); see [docs/computer-use.md](docs/computer-use.md)
 
 **Skills**
 - Skills marketplace (multiple sources) and import from any GitHub / Gitee repo; local add / archive / delete
@@ -92,6 +92,7 @@ Everything the `claude` CLI can do, made visual — plus shell-only conveniences
 **Waiting alerts**
 - System notifications when the window isn't in front (permission requests, background agents waiting), with de-duplication and a rate cap; can be turned off in settings
 - Dock badge and window-title count (only items waiting for you)
+- Window size, position and maximized / full-screen state are remembered across restarts
 
 **Remote**
 - Reach it from your phone over a private network (Tailscale, etc.) with an access password; take over a session from your phone

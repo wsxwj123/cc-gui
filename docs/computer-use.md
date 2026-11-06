@@ -22,30 +22,35 @@
 
 ## 授权模型（按应用 + 主屏范围）
 
-> **授权入口**：工具（MCP）面板 → 「桌面操控(computer use)」卡片里的「应用授权」区块。按应用授权在这里逐个点「授权」（或手填 bundleId）；「允许主屏全部可见内容」在同一区块单独开启，开启前会弹确认框。授权类写入需要面板持有的确认凭证，所以只能在面板里做；命令行只能**撤销**（见下）。
+> **授权入口**：工具（MCP）面板 → 「桌面操控(computer use)」卡片里的「应用授权」区块。按应用授权在这里逐个点「授权」（或手填 bundleId）；「允许主屏全部可见内容」在同一区块单独开启，开启前会弹确认框；已授权应用那一行的「允许前台操控」同样单独开启、开启前同样弹确认框（面板固定 60 分钟，到期自动失效）。授权类写入需要面板持有的确认凭证，所以只能在面板里做；命令行只能**撤销**（见下）。
 
 | 授权 | 作用 | 未授权的后果 |
 |---|---|---|
 | 按应用（bundleId） | 该应用进入 `window_list`；可以作为 target 被点击/输入 | 后续该应用的动作 `CU_APP_NOT_ALLOWED`；其他窗口连标题都不返回 |
 | 主屏全部可见内容（screenScope） | 允许主屏截图返回像素、允许 `cursor_position` 报屏幕坐标 | 主屏截图 `CU_SCREEN_SCOPE_REQUIRED` 且**零像素**；光标只报已授权窗口内的局部坐标 |
+| 前台操控（按应用、限时） | 允许该应用的显式 `foreground:true`：全局投递，会移动真实光标、可能把窗口切到前台；开启后默认 60 分钟，到期自动失效 | 带 `foreground:true` 的动作 `CU_FOREGROUND_CONSENT_REQUIRED`，零投递 |
 
-按应用授权**不隐含**全屏授权；授权只覆盖普通桌面访问，不涉及锁屏、安装或其他应用。
+按应用授权**不隐含**全屏授权，也**不隐含**前台操控；授权只覆盖普通桌面访问，不涉及锁屏、安装或其他应用。
 
 ```sh
 # 只读查询
 curl -s localhost:6677/api/computer-use/status          # 能力/锁屏状态/运行时
 curl -s -X POST localhost:6677/api/computer-use/doctor -d '{}'   # 屏幕读取/辅助功能/运行时/各应用授权
-curl -s localhost:6677/api/computer-use/grants          # 当前授权
-# 撤销(不需要凭证,立即生效;新增授权与开启主屏范围请在面板里做)
+curl -s localhost:6677/api/computer-use/grants          # 当前授权(每个应用带 foreground:{granted,expiresAt})
+# 撤销(不需要凭证,立即生效;新增授权、开启主屏范围与前台操控请在面板里做)
 curl -s -X POST localhost:6677/api/computer-use/grants \
   -H 'content-type: application/json' -d '{"bundleId":"com.apple.TextEdit","granted":false}'  # 撤销某个应用(立即生效)
+curl -s -X POST localhost:6677/api/computer-use/grants \
+  -H 'content-type: application/json' -d '{"bundleId":"com.apple.TextEdit","foreground":false}'  # 只关闭该应用的前台操控(应用授权保留,立即生效)
 curl -s -X POST localhost:6677/api/computer-use/grants \
   -H 'content-type: application/json' -d '{"screenScope":false}'  # 撤销主屏全部可见内容(立即生效)
 ```
 
-命令行发的新增授权（`granted` 不为 `false` 的应用、`screenScope:true`）会被拒：403 `CU_GRANT_FORBIDDEN`，授权表不变；一个请求里同时带撤销和新增时整体拒绝，撤销部分也不生效。撤销方向不设门槛，出问题时可以随时从命令行撤权。
+命令行发的新增授权（`granted` 不为 `false` 的应用、`screenScope:true`、`foreground:true`）会被拒：403 `CU_GRANT_FORBIDDEN`，授权表不变；一个请求里同时带撤销和新增时整体拒绝，撤销部分也不生效（`granted:false` 与 `foreground:true` 写在同一个请求里属于自相矛盾，400 `CU_INVALID_ARGUMENT`）。撤销方向不设门槛，出问题时可以随时从命令行撤权。
 
-授权落在 `~/.claude-gui/cu-runtime/grants.json`（GUI 后端与 MCP 进程共用同一份；文件按登录用户家目录解析，`$HOME` 不同的启动方式不会各读各的）。**恢复/吊销一次`GET status`就会反映**；MCP 每次动作前重读，所以撤销对正在跑的会话立即生效，已投递动作报 unknown。
+前台操控的字段：`foreground:true`（需要 `bundleId`，且该应用此前已经授权）开启，可附带 `foregroundMinutes`（5–240 的整数，默认 60；面板固定用 60）；`foreground:false` 只关前台、保留应用授权；撤销应用（`granted:false`）会连带清掉它的前台授权；重新授权应用不改动已有的前台授权。
+
+授权落在 `~/.claude-gui/cu-runtime/grants.json`（GUI 后端与 MCP 进程共用同一份；文件按登录用户家目录解析，`$HOME` 不同的启动方式不会各读各的）。**恢复/吊销一次`GET status`就会反映**；MCP 每次动作前重读，所以撤销对正在跑的会话立即生效，已投递动作报 unknown。前台授权的到期按 `expiresAt` 在每次读取时判断，不需要后台清理；MCP 在动作入队前和真正开始执行前各查一次，排队期间被关掉或到期的前台授权不会再放行。
 
 ## 禁止操控名单
 
@@ -121,13 +126,14 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 | 按应用/窗口截图 | 未在真机验证过保真路径 | `capabilities.screenshotTarget=unverified`，请求带 target 的截图明确拒绝，不拿前台别的应用画面顶替 |
 | 锁屏（R19） | 需要已验证的授权组件接口，当前无公开可复用入口 | `status.lockscreen.state` 只会是 `disabled`/`unverified`，不代表已支持 |
 | 停止操控 / 用户接管 | 需要图形界面的入口，尚未提供 | 契约里的 `CU_INTERRUPTED` 路径暂不可达，`actionId` 登记表可查历史 |
-| 执行中撤权 | 界面上按动作粒度取消是设计意图，该入口尚未提供 | 撤销后**下一个**动作立即 `CU_APP_NOT_ALLOWED`；已投递动作不回滚 |
+| 执行中撤权 | 界面上按动作粒度取消是设计意图，该入口尚未提供 | 撤销后**下一个**动作立即 `CU_APP_NOT_ALLOWED`（关闭前台操控同理：下一个带 `foreground:true` 的动作立即 `CU_FOREGROUND_CONSENT_REQUIRED`）；已投递动作不回滚 |
 | 已授权的浏览器里能再开 CC-GUI 网页版 | 浏览器能打开本机的 CC-GUI 页面，网页版自带面板、权限批准按钮和内置终端；浏览器又是最常被授权的一类 | 残余风险，不在禁止名单的防线内；授权浏览器前请知悉 |
 | IDE 带集成终端 | VS Code、JetBrains、Xcode 等有合法的自动化场景，没有硬拒绝 | 残余风险；授权 IDE 等于让模型能碰到它的终端 |
 | 启动器 / 文件管理器能间接起终端 | Finder、Spotlight、Explorer 可以打开 `.command` 文件或输入 `cmd` 启动终端 | 残余风险；名单只拦对终端本身的操控 |
 | 开主屏范围后全屏截图会拍到终端 / 密码管理器窗口 | 主屏截图按屏幕取像素，不按应用排除窗口 | 只读不操控，但内容会进入模型上下文；不需要时关闭「允许主屏全部可见内容」 |
-| 直接改授权文件、连后台的同用户进程不在防线内 | 授权文件与后台连接对同一登录用户的进程都可达；面板凭证只挡不知道凭证的盲写（本机脚本、照旧文档敲的 curl、来自其他网站域名或本机别的端口的网页） | 禁止名单在读取侧仍生效：文件被改，名单内的应用照样被拒；名单外的应用无法防 |
+| 直接改授权文件、连后台的同用户进程不在防线内 | 授权文件与后台连接对同一登录用户的进程都可达；面板凭证只挡不知道凭证的盲写（本机脚本、照旧文档敲的 curl、来自其他网站域名或本机别的端口的网页） | 禁止名单在读取侧仍生效：文件被改，名单内的应用照样被拒；名单外的应用无法防。前台授权的到期时间同理（手写一个更远的时间就等于续期） |
 | 模型可经 Bash 直接调执行层绕过 MCP 的授权闸 | 模型在本机有 shell，可以直接运行 `cu_helper.py` 的子命令，不经过 MCP 的 actionId 登记与前台授权闸 | **既有边界，本任务不修**；威胁模型见 `computer-use/grant-token.js`。前台授权只约束走 MCP 的那条路 |
+| 前台授权复查与真正投递之间有一个很短的窗口 | 动作开始执行前会再查一次前台授权，查完到真正投递之间还要取几次窗口列表（通常不到 1 秒） | 这段时间里被关掉或到期的前台授权，该次动作仍可能投递；下一个动作立即被拒 |
 | 本机转发代理等少数情形下网页仍能取得凭证 | 后台只放行来源与访问地址同站（主机名和端口都相同）的网页，唯一例外是开发模式下经本机开发服务器代理访问的页面（代理会把请求的 Host 改写成后台地址），此时改认浏览器自报的同源标记，并要求请求来自本机、页面主机名是本机名：本机别的端口上的网页（开发服务器、本地预览、不可信的静态页）连后台时会被拒绝，拿不到凭证；来自其他网站域名的网页、直接从磁盘打开的 `file://` 页面同样被拒绝。但本机上把请求原样转给后台的代理（其他项目的开发服务器代理、Jupyter 代理等）会让经过它的网页与后台同站，因而仍能连上后台并取得凭证，而同一条连接本来就能开内置终端。跨协议、默认端口、浏览器不带跨站标记的组合同理，只有后台或其前置代理监听 80/443 时才可能出现。另外，后台的读文件接口下发的内容（PDF 除外）现在带浏览器限制，浏览器即使直接打开其中的 SVG 也不运行脚本（在 Chromium、WebKit、macOS 的 WKWebView 实测）；PDF 为保证预览可用不带该限制，扩展名是 .pdf 但内容是 HTML 或 SVG 的文件，在 Chromium 新版与 WKWebView 里实测其中的脚本不会运行；带内置脚本的 PDF（试了自动打开链接、提交表单两种动作）实测没有借此向本机发出请求。其他网站或本机别的端口上的网页发起的导航、嵌入、图片加载等不带来源标记的跨站请求，现在对后台接口（`/api/*`）一律被拒，前提是浏览器对该访问地址自报跨站标记：只有回环地址和 https（隧道域名）会；用户手输地址、书签、拖进地址栏或从别的应用点开的链接，浏览器报“非网页发起”，按设计不拦；经局域网 IP 的明文 HTTP 访问、老浏览器不发这个标记，这条规则不生效，只剩上面的浏览器限制这道内容防线。应用自己的请求不受影响。仍未覆盖的情形：WebKit 的 PDF 插件加载请求，以及点击带下载属性的链接时浏览器补发的第二次请求，在 macOS 的 WKWebView 里实测不带来源标记（只能触发读不到结果的 GET，或把响应存成下载文件，不会作为页面运行）；浏览器版里用户亲手对聊天里用户附件的 SVG 图选“在新标签页打开”时，脚本以页面来源运行（该图是浏览器内存里的临时地址，响应头管不到）；Windows 真机与 Firefox 未测 | 残余风险，不在面板凭证的防线内；不要让本机的代理把不可信网页转发到后台 |
 | Windows 后台覆盖不到 Chromium/Electron 的一部分界面 | 渲染器默认不打 accessibility 树；UIA 客户端接入会触发按需开启但**有延迟** | `capabilities.backgroundClick/Type.coverage='partial'`；首次可能失败，**重试一次**通常就好；`--force-renderer-accessibility=off` 或企业策略禁用时拿不到 |
 | Windows 后台覆盖不到 Java/自绘界面/安全桌面 | 没有元素树（Java 需 Java Access Bridge；UAC/锁屏是独立桌面） | 明确报 `CU_BACKGROUND_UNSUPPORTED`，**不会**偷偷改成全局点击 |
