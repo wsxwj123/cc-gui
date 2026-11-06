@@ -309,6 +309,8 @@ function foregroundConsentMessage(name, bundleId) {
  * —— 动作可能在队列里等很久(队列最多 32 个、单个文字输入最长 155 秒),期间用户可能关掉前台授权、
  * 授权到期,或刚刚才授权这个应用,一律以动作真正开始执行那一刻的授权为准。复查到真正投递之间还隔着
  * 取窗口列表的几次调用(通常不到 1 秒),是已知残余(见 C2 方案第 11 节)。
+ * 前提(第二次安全复审记录):应用未授权时本函数放行,靠随后的 resolveTarget 用它读到的授权表做应用授权检查兜底
+ * (本函数返回到 resolveTarget 读授权表之间没有 await);往两者之间插入异步等待会在这里留下缝隙。
  */
 function foregroundConsentGate(args, target, actionId) {
   if (args.foreground !== true) return null;
