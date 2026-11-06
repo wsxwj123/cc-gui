@@ -20,8 +20,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_window_state::StateFlags;
+use tauri::{Emitter, Manager, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
 
 const BACKEND_HOST: &str = "127.0.0.1";
 const DEFAULT_BACKEND_PORT: u16 = 6677;
@@ -31,13 +31,17 @@ const MAX_BACKEND_PORT: u16 = 6687;
 // 统一用物理像素(与 tauri 的 PhysicalSize / PhysicalPosition、monitor.size() 一致)。
 pub type PixelRect = (i32, i32, u32, u32);
 
+/// 正在恢复窗口状态(插件恢复期间持有状态缓存锁,自动落盘必须让路,见 autosave)。
+static RESTORING_WINDOW_STATE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// window-state 插件只应保存 / 恢复这四类状态。
 ///
 /// 明确不带 VISIBLE / DECORATIONS:带 VISIBLE 会把"上次退出时窗口是否可见"也恢复,
 /// 异常退出(可见位为 false)会让下次启动窗口保持隐藏、用户以为没启动;装饰(标题栏)
 /// 由本应用固定,不应跟随旧状态文件。
 pub fn window_state_flags() -> StateFlags {
-    StateFlags::all()
+    StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED | StateFlags::FULLSCREEN
 }
 
 /// 把恢复出来的窗口尺寸夹到 [min, max]。
@@ -49,17 +53,123 @@ pub fn clamp_window_size(
     min: (u32, u32),
     max: Option<(u32, u32)>,
 ) -> (u32, u32) {
-    size
+    let w = size.0.max(min.0);
+    let h = size.1.max(min.1);
+    match max {
+        // max 比 min 还小时以 min 为准:窗口不允许小于 min_inner_size。
+        Some((mw, mh)) => (w.min(mw.max(min.0)), h.min(mh.max(min.1))),
+        None => (w, h),
+    }
 }
 
 /// 窗口矩形是否与任一显示器有交集(物理像素)。用于判断保存的位置是否落在已拔掉的显示器上。
 pub fn rect_intersects_monitors(rect: PixelRect, monitors: &[PixelRect]) -> bool {
-    true
+    monitors.iter().any(|m| overlap_area(rect, *m) > 0)
 }
 
 /// 取与窗口矩形交集面积最大的显示器的尺寸;完全不重叠(屏外)返回 None。
 pub fn best_monitor_size(rect: PixelRect, monitors: &[PixelRect]) -> Option<(u32, u32)> {
-    None
+    monitors
+        .iter()
+        .map(|m| (overlap_area(rect, *m), (m.2, m.3)))
+        .filter(|(area, _)| *area > 0)
+        .max_by_key(|(area, _)| *area)
+        .map(|(_, size)| size)
+}
+
+/// 两个矩形的交集面积(物理像素);不相交为 0。用 i64 防 i32 溢出(最小化哨兵坐标 -32000)。
+fn overlap_area(a: PixelRect, b: PixelRect) -> u64 {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    let left = (ax as i64).max(bx as i64);
+    let right = (ax as i64 + aw as i64).min(bx as i64 + bw as i64);
+    let top = (ay as i64).max(by as i64);
+    let bottom = (ay as i64 + ah as i64).min(by as i64 + bh as i64);
+    if right > left && bottom > top {
+        ((right - left) as u64) * ((bottom - top) as u64)
+    } else {
+        0
+    }
+}
+
+/// 恢复后的几何兜底。插件只做"保存的位置是否与某块屏相交"这一项检查,没有尺寸 / 最小值 /
+/// DPI 防护,这里补上最小的一套:
+///  - 残留的最小化先取消(插件不保存最小化,但状态文件可能被手改 / 旧版本写过);
+///  - 最大化 / 全屏时尺寸位置由系统管理,不插手;
+///  - 尺寸夹到 [min_inner_size(900×600 逻辑点), 窗口所在显示器的物理尺寸] —— 换 DPI /
+///    换显示器后旧物理像素可能过小(小于最小值)或过大(超出屏幕);
+///  - 位置不与任何显示器相交(显示器被拔掉)→ 居中。
+/// 移动 / 缩放后低频自动落盘(最多 2 秒一次)。
+///
+/// 覆盖不经过 RunEvent::Exit 的退出路径:Windows 自动更新安装器起安装程序后直接
+/// `std::process::exit(0)`;主线程调 `app.restart()` 时 Tauri 也不保证投递 Exit 事件。
+/// 正常退出(关闭 / Cmd+Q)仍以 CloseRequested / Exit 里的精确保存为准。
+fn autosave_window_state(app: &tauri::AppHandle) {
+    use std::sync::OnceLock;
+    // 恢复过程中插件持有状态缓存锁:此时若由 set_size/set_position 同步触发 Resized/Moved,
+    // 再进 save_window_state 取同一把锁会自锁。恢复期间一律跳过。
+    if RESTORING_WINDOW_STATE.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    let last = LAST.get_or_init(|| Mutex::new(None));
+    let now = Instant::now();
+    {
+        let mut guard = last.lock().unwrap();
+        if let Some(t) = *guard {
+            if now.duration_since(t) < Duration::from_secs(2) {
+                return;
+            }
+        }
+        *guard = Some(now);
+    }
+    let _ = app.save_window_state(window_state_flags());
+}
+
+fn sanitize_restored_window(window: &tauri::WebviewWindow) {
+    if window.is_minimized().unwrap_or(false) {
+        let _ = window.unminimize();
+    }
+    if window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
+        return;
+    }
+    let scale = window.scale_factor().unwrap_or(1.0).max(0.5);
+    let min = ((900.0 * scale).round() as u32, (600.0 * scale).round() as u32);
+    let monitors: Vec<PixelRect> = window
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| {
+            let p = m.position();
+            let s = m.size();
+            (p.x, p.y, s.width, s.height)
+        })
+        .collect();
+    let size = match window.inner_size() {
+        Ok(s) => (s.width, s.height),
+        Err(_) => return,
+    };
+    let position = window.outer_position().ok();
+    let rect = position.map(|p| (p.x, p.y, size.0, size.1));
+    // 上限取窗口实际所在显示器;完全屏外时退回主屏(随后会居中)。
+    let max = rect
+        .and_then(|r| best_monitor_size(r, &monitors))
+        .or_else(|| {
+            window
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|m| (m.size().width, m.size().height))
+        });
+    let clamped = clamp_window_size(size, min, max);
+    if clamped != size {
+        let _ = window.set_size(PhysicalSize::new(clamped.0, clamped.1));
+    }
+    if let Some(r) = rect {
+        if !rect_intersects_monitors(r, &monitors) {
+            let _ = window.center();
+        }
+    }
 }
 
 // Holds the backend child IFF we spawned it (None when we reused an existing one).
@@ -183,6 +293,9 @@ fn restart_app(app: tauri::AppHandle) {
             }
         }
     }
+    // W: app.restart() 在主线程调用时不保证投递 RunEvent::Exit(自动更新"重启"会绕过
+    // 退出钩子),这里先显式落盘窗口状态,保证更新重启后几何一致。
+    let _ = app.save_window_state(window_state_flags());
     app.restart(); // Tauri: cleanup_before_exit + spawn 新实例 + exit;返回 !
 }
 
@@ -1049,6 +1162,15 @@ pub fn run() {
         // 桌面端只注册 notify/request_permission/is_permission_granted 三个命令,
         // 通知点击回调(onAction)在桌面端不存在 —— 前端不要接,聚焦靠 Dock 角标 + 应用内。
         .plugin(tauri_plugin_notification::init())
+        // W: 窗口状态(大小 / 位置 / 最大化 / 全屏)。还要恢复的状态位见 window_state_flags。
+        // main 是 setup 里程序化创建的,这里 skip_initial_state 关掉插件的自动恢复,
+        // 改为在 setup 创建窗口后显式 restore + 几何兜底(插件恢复完我们才好校正)。
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(window_state_flags())
+                .skip_initial_state("main")
+                .build(),
+        )
         // F1: 全局热键截图。插件在此挂载,具体快捷键在 setup 里按 ~/.claude-gui/hotkey.json 注册。
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // L1: 单例插件 — 双击 app 时不开新进程,把已有窗口前置聚焦,避免每次都开新窗口
@@ -1135,9 +1257,15 @@ pub fn run() {
                     return Err(e.into());
                 }
             };
+            // W: 恢复上次退出时的窗口大小 / 位置 / 最大化 / 全屏,再做几何兜底
+            // (跨 DPI、屏外、小于最小值都在这时校正),最后才显示,避免先默认尺寸再跳变。
+            RESTORING_WINDOW_STATE.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = window.restore_state(window_state_flags());
+            sanitize_restored_window(&window);
+            RESTORING_WINDOW_STATE.store(false, std::sync::atomic::Ordering::Relaxed);
             let _ = window.show();
             let _ = window.set_focus();
-            log_startup("[tauri] window shown on splash page");
+            log_startup("[tauri] window shown on splash page (state restored)");
             // 层级修复①:窗口可能晚于 app 激活。若用户启动瞬间点了别的 app,窗口首次
             // 显示会落在其它窗口后面。延迟 600ms 再 set_focus 一次,赢下启动激活竞态;
             // 间隔足够短,不算抢焦点。
@@ -1347,6 +1475,9 @@ pub fn run() {
             match event {
                 // P1: 点关闭按钮 → 按配置决定 最小化/退出/询问。
                 tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // W: 退出和最小化两条分支都先按当前几何落盘(此时窗口还没最小化,
+                    // update_state 不会把 -32000 之类的最小化坐标写进去)。取消关闭也无害。
+                    let _ = window.app_handle().save_window_state(window_state_flags());
                     let behavior = read_close_behavior();
                     match behavior.as_str() {
                         "minimize" => {
@@ -1390,6 +1521,10 @@ pub fn run() {
                         kill_port_tree(port);
                     }
                 }
+                // W: 移动 / 缩放时低频自动落盘,覆盖不经过 Exit 的退出路径(见 autosave 注释)。
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    autosave_window_state(window.app_handle());
+                }
                 _ => {}
             }
         })
@@ -1401,6 +1536,9 @@ pub fn run() {
         .run(|app_handle, event| {
             match event {
                 tauri::RunEvent::Exit => {
+                    // W: 所有退出路径(Cmd+Q、系统注销、退出分支)都会到这里,且此时窗口
+                    // 还没销毁,能读到真实几何。插件自身也在 Exit 保存一次,重复写无害。
+                    let _ = app_handle.save_window_state(window_state_flags());
                     if let Some(mut child) = app_handle.state::<Backend>().0.lock().unwrap().take() {
                         kill_backend_tree(&mut child);
                     }
