@@ -519,11 +519,11 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
 // 头行换成 三角 + LiveStatusLine;startedAt = 回合起始时刻(与改动前底部行同一口径)。
 function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, liveLabel = null, startedAt = null }) {
   const toolN = items.reduce((n, b) => n + (b.type === 'tool_use' ? 1 : 0), 0);
-  // 出错计数口径同 ToolCallsGroup.errorCount(已答的提问、已批准的计划不算错)。
-  const errorCount = items.reduce((n, b) => {
-    const tc = b.type === 'tool_use' ? b.toolCall : null;
-    return n + (tc?.result?.isError && !isAskAnswered(tc) && !isPlanApproved(tc) ? 1 : 0);
-  }, 0);
+  // 出错计数与展开后条目的 data-entry-state 同一口径(entryStateOf):已答的提问、已批准的计划、
+  // 计划被拒(修改 / 取消)都不算错 —— 头行红点和展开后看到的条目状态不会对不上。
+  const errorCount = items.reduce((n, b) => (
+    n + (b.type === 'tool_use' && b.toolCall && entryStateOf(b.toolCall) === 'error' ? 1 : 0)
+  ), 0);
   const hasThinking = items.some((b) => b.type === 'thinking');
   // ui-live-line-v2 折叠行文案:
   //   含工具 →「<本组最后一次工具调用的标题> · N 次工具调用」(标题取不到只写「N 次工具调用」);
@@ -647,14 +647,9 @@ export const StripUsageCallsContext = React.createContext(null); // 本轮 usage
 export const StripStartedAtContext = React.createContext(null);
 // r157:主会话流式气泡的「实时状态行宿主」开关。只有 App 在主会话流式气泡外包 Provider,
 // 值 = { stopping, compacting };其它地方(子代理窗口、历史轮)拿到默认 null → 行为与改动前完全一样。
-// 有值且本轮在生成时:工作组默认收起,最后一个组的头行是否承载状态行由 isLiveLineHostedByGroup 定。
+// 有值且本轮在生成时:工作组一律默认收起,最后一个组的头行是否承载状态行由 isLiveLineHostedByGroup 定。
+// 提问 / 计划 / 权限卡由输入框上方的 PermissionPrompt 画,不在组里,折叠不影响它们。
 export const LiveHostContext = React.createContext(null);
-
-// 收起会把「需要用户操作」的卡片藏起来:组里有还没答的提问 / 还没批的计划时,该组默认展开。
-const NEEDS_USER_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
-function groupNeedsUser(items) {
-  return items.some((b) => b.type === 'tool_use' && NEEDS_USER_TOOLS.has(b.toolCall?.name) && !b.toolCall.result);
-}
 
 // ─── CoworkBlocks:母会话 + 子代理共用的有序 blocks 渲染(单一渲染路径)──
 // 非聊天模式 → cowork 分组折叠(WorkGroup);聊天模式 → 维持现状(思考小折叠 +
@@ -813,7 +808,7 @@ export function CoworkBlocks({
             </ToolCallWithRetry>
           );
         case 'group': {
-          const autoOpen = hostMode ? (seg.key === activeKey && groupNeedsUser(seg.items)) : (seg.key === activeKey);
+          const autoOpen = hostMode ? false : (seg.key === activeKey);
           const expanded = override.has(seg.key) ? override.get(seg.key) : autoOpen;
           return (
             <WorkGroup
@@ -832,7 +827,9 @@ export function CoworkBlocks({
       }
     })();
     return (
-      <div key={`seg-${seg.key}`} data-strip-item={seg.kind} hidden={(foldable && !open) || undefined}>
+      // r157:总摘要行收起时,承载着实时状态行的那一组不藏(底部行此时不画,藏了就整行消失);其它可折段照旧。
+      <div key={`seg-${seg.key}`} data-strip-item={seg.kind}
+        hidden={(foldable && !open && !(seg.kind === 'group' && hostLabel && seg.key === activeKey)) || undefined}>
         {body}
       </div>
     );
