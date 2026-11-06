@@ -99,6 +99,78 @@ const servers = [];
   assert.equal(j.error.message.length, 500, 'c: message 截到 500');
 }
 
+// d) 接线:主请求 fetch 抛错后,连接阶段错误与 AbortError 不探测,其它网络错误才探测(两个代理各测)。
+// 换掉 globalThis.fetch:发往代理自身(127.0.0.1:<代理端口>)的放行给真 fetch;其余视为发往上游,
+// 记进 calls 并按脚本抛错或返回合成 Response。上游地址 http://upstream.invalid,不发真实网络请求。
+{
+  const { startAnthropicProxy, setAnthropicUpstream } = await import('../../server/services/anthropic-proxy.js');
+  const upstreamBase = 'http://upstream.invalid';
+  const connectErr = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) });
+  const abortErr = () => new DOMException('This operation was aborted', 'AbortError');
+  const socketErr = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) });
+  const auth401 = () => new Response('{"error":{"message":"Authentication Fails"}}', { status: 401, headers: { 'content-type': 'application/json' } });
+  const minimalBody = JSON.stringify({ model: 'probe-model-1', max_tokens: 16, messages: [{ role: 'user', content: 'hi' }] });
+
+  const realFetch = globalThis.fetch;
+  // script[i] 决定第 i 次上游调用的结果:返回 Response 或抛错;脚本外的调用一律抛错(探测会得 null → 502)。
+  const runCase = async (proxyPort, { method = 'POST', urlPath = '/v1/messages' }, script) => {
+    const proxyPrefix = `http://127.0.0.1:${proxyPort}`;
+    const calls = [];
+    globalThis.fetch = async (input, init) => {
+      const target = typeof input === 'string' ? input : (input?.url ?? String(input));
+      if (target.startsWith(proxyPrefix)) return realFetch(input, init);
+      calls.push(target);
+      const step = script[calls.length - 1];
+      if (!step) throw new TypeError('unscripted upstream call: ' + target);
+      return step();
+    };
+    try {
+      const resp = await realFetch(proxyPrefix + urlPath, {
+        method,
+        headers: method === 'POST' ? { 'content-type': 'application/json' } : {},
+        body: method === 'POST' ? minimalBody : undefined,
+      });
+      const text = await resp.text();
+      return { status: resp.status, shouldRetry: resp.headers.get('x-should-retry'), text, calls };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  };
+  const throwing = (mk) => () => { throw mk(); };
+  const messageOf = (text) => { try { return JSON.parse(text)?.error?.message ?? ''; } catch { return ''; } };
+
+  const proxies = [];
+  setOpenAIUpstream({ baseURL: upstreamBase, apiKey: 'sk-unit-test-dummy' });
+  proxies.push({ name: 'openai', port: await startOpenAIProxy(0) }); // c) 已起过,返回同一实例端口
+  setAnthropicUpstream({ baseURL: upstreamBase, authToken: 'sk-unit-test-dummy' });
+  proxies.push({ name: 'anthropic', port: await startAnthropicProxy(0) });
+
+  for (const { name, port } of proxies) {
+    assert.ok(port > 0, `d/${name}: 代理应起在临时端口`);
+
+    const r1 = await runCase(port, {}, [throwing(connectErr)]);
+    assert.equal(r1.calls.length, 1, `d/${name}/连接阶段错误: 上游调用应恰为 1 次(不探测),实际 ${r1.calls.length}: ${r1.calls.join(', ')}`);
+    assert.equal(r1.status, 502, `d/${name}/连接阶段错误: 应回 502,实际 ${r1.status}`);
+    assert.ok(messageOf(r1.text).startsWith('upstream fetch failed'), `d/${name}/连接阶段错误: message 应以 upstream fetch failed 开头,实际 ${r1.text}`);
+
+    const r2 = await runCase(port, {}, [throwing(abortErr)]);
+    assert.equal(r2.calls.length, 1, `d/${name}/AbortError: 上游调用应恰为 1 次(不探测),实际 ${r2.calls.length}: ${r2.calls.join(', ')}`);
+    assert.equal(r2.status, 502, `d/${name}/AbortError: 应回 502,实际 ${r2.status}`);
+    assert.ok(messageOf(r2.text).startsWith('upstream fetch failed'), `d/${name}/AbortError: message 应以 upstream fetch failed 开头,实际 ${r2.text}`);
+
+    const r3 = await runCase(port, {}, [throwing(socketErr), auth401]);
+    assert.equal(r3.calls.length, 2, `d/${name}/UND_ERR_SOCKET: 上游调用应恰为 2 次(主请求+探测),实际 ${r3.calls.length}: ${r3.calls.join(', ')}`);
+    assert.equal(r3.status, 401, `d/${name}/UND_ERR_SOCKET: 探测得 401 应回 401,实际 ${r3.status} ${r3.text}`);
+    assert.equal(r3.shouldRetry, 'false', `d/${name}/UND_ERR_SOCKET: 应带 x-should-retry:false,实际 ${r3.shouldRetry}`);
+
+    if (name === 'anthropic') {
+      const r4 = await runCase(port, { method: 'GET', urlPath: '/v1/models' }, [throwing(socketErr)]);
+      assert.equal(r4.calls.length, 1, `d/anthropic/GET /v1/models: 非 POST /v1/messages 不探测,上游调用应恰为 1 次,实际 ${r4.calls.length}: ${r4.calls.join(', ')}`);
+      assert.equal(r4.status, 502, `d/anthropic/GET /v1/models: 应回 502,实际 ${r4.status}`);
+    }
+  }
+}
+
 for (const s of servers) s.closeAllConnections?.(), s.close();
 fs.rmSync(tmpHome, { recursive: true, force: true });
 console.log('check-auth-probe-connect-phase: all assertions passed');
