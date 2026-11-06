@@ -166,14 +166,14 @@ const r = runIsolated(SCRIPT);
 const out = r.out;
 const diag = () => `stdout=${r.stdout.slice(0, 300)} stderr=${r.stderr.slice(0, 600)}`;
 
-report.check('C2-W1', 'HTTP 越权:不带面板凭证开前台 → 403 CU_GRANT_FORBIDDEN,授权文件字节不变', 'green', () => {
+await report.check('C2-W1', 'HTTP 越权:不带面板凭证开前台 → 403 CU_GRANT_FORBIDDEN,授权文件字节不变', 'green', () => {
   assert.ok(out, `子进程没有输出 JSON:${diag()}`);
   assert.equal(out.w1.status, 403, `状态码 ${out.w1.status},应为 403`);
   assert.equal(out.w1.code, 'CU_GRANT_FORBIDDEN', `错误码 ${out.w1.code}`);
   assert.equal(out.w1.fileUnchanged, true, '被拒绝的请求改了 grants.json');
 });
 
-report.check('C2-W2', '带正确凭证开前台:200,写入 foreground.expiresAt ≈ now+60min,GET 回显 granted:true', 'red', () => {
+await report.check('C2-W2', '带正确凭证开前台:200,写入 foreground.expiresAt ≈ now+60min,GET 回显 granted:true', 'red', () => {
   assert.equal(out.w2.status, 200, `状态码 ${out.w2.status}`);
   const fg = out.w2.entry && out.w2.entry.foreground;
   assert.ok(fg && typeof fg.expiresAt === 'string', `文件里没有 foreground:${JSON.stringify(out.w2.entry)}`);
@@ -183,18 +183,18 @@ report.check('C2-W2', '带正确凭证开前台:200,写入 foreground.expiresAt 
     `GET 没有回显 foreground.granted:${JSON.stringify(out.w2.row)}`);
 });
 
-report.check('C2-W3', '对未授权应用开前台 → 400 CU_INVALID_ARGUMENT,文件不变', 'red', () => {
+await report.check('C2-W3', '对未授权应用开前台 → 400 CU_INVALID_ARGUMENT,文件不变', 'red', () => {
   assert.equal(out.w3.status, 400, `状态码 ${out.w3.status}`);
   assert.equal(out.w3.code, 'CU_INVALID_ARGUMENT', `错误码 ${out.w3.code}`);
   assert.equal(out.w3.fileUnchanged, true, '被拒绝的请求改了 grants.json');
 });
 
-report.check('C2-W4', 'foreground:false 不带凭证 → 200,字段被删', 'red', () => {
+await report.check('C2-W4', 'foreground:false 不带凭证 → 200,字段被删', 'red', () => {
   assert.equal(out.w4.status, 200, `状态码 ${out.w4.status}`);
   assert.ok(!(out.w4.entry && out.w4.entry.foreground), `字段还在:${JSON.stringify(out.w4.entry)}`);
 });
 
-report.check('C2-W5', 'foregroundMinutes 非法(0/-1/241/小数/字符串)→ 400;5 与 240 通过', 'red', () => {
+await report.check('C2-W5', 'foregroundMinutes 非法(0/-1/241/小数/字符串)→ 400;5 与 240 通过', 'red', () => {
   for (const x of out.w5) assert.equal(x.status, 400, `minutes=${JSON.stringify(x.minutes)} 得到 ${x.status},应为 400`);
   for (const x of out.w5ok) {
     assert.equal(x.status, 200, `minutes=${x.minutes} 被拒:${x.status}`);
@@ -204,19 +204,19 @@ report.check('C2-W5', 'foregroundMinutes 非法(0/-1/241/小数/字符串)→ 40
   }
 });
 
-report.check('C2-W6', '重授应用(不带 foreground)→ 原前台授权逐字保留', 'red', () => {
+await report.check('C2-W6', '重授应用(不带 foreground)→ 原前台授权逐字保留', 'red', () => {
   assert.equal(out.w6.status, 200, `状态码 ${out.w6.status}`);
   const now = out.w6.entry && out.w6.entry.foreground;
   assert.ok(now && now.expiresAt === out.w6.keep.expiresAt,
     `重授冲掉了前台授权:${JSON.stringify(out.w6.keep)} → ${JSON.stringify(now)}`);
 });
 
-report.check('C2-W7', '撤销应用 → 整条 entry 删除,前台授权一并消失', 'green', () => {
+await report.check('C2-W7', '撤销应用 → 整条 entry 删除,前台授权一并消失', 'green', () => {
   assert.equal(out.w7.status, 200, `状态码 ${out.w7.status}`);
   assert.equal(out.w7.entry, null, `entry 还在:${JSON.stringify(out.w7.entry)}`);
 });
 
-report.check('C2-W8', '审计日志含 foreground=yes/no,且不含凭证值', 'red', () => {
+await report.check('C2-W8', '审计日志含 foreground=yes/no,且不含凭证值', 'red', () => {
   const open = (out.w8.open || []).join('\n');
   const close = (out.w8.close || []).join('\n');
   assert.match(open, /foreground=yes/, `开前台日志没有 foreground=yes:${open}`);
@@ -224,12 +224,12 @@ report.check('C2-W8', '审计日志含 foreground=yes/no,且不含凭证值', 'r
   assert.ok(!open.includes(out.w8.token) && !close.includes(out.w8.token), '审计日志里出现了凭证原值');
 });
 
-report.check('C2-W9', 'setGrant 内部路径不带 panelCredential 开前台 → CU_GRANT_FORBIDDEN', 'green', () => {
+await report.check('C2-W9', 'setGrant 内部路径不带 panelCredential 开前台 → CU_GRANT_FORBIDDEN', 'green', () => {
   assert.ok(out.w9, 'setGrant 没有抛错,内部调用方可以静默扩权');
   assert.equal(out.w9.code, 'CU_GRANT_FORBIDDEN', `错误码 ${out.w9.code}`);
 });
 
-report.check('C2-W13', '自相矛盾的请求(撤销应用 + 开前台):400 CU_INVALID_ARGUMENT,授权文件字节不变;setGrant 直调同样抛错', 'red', () => {
+await report.check('C2-W13', '自相矛盾的请求(撤销应用 + 开前台):400 CU_INVALID_ARGUMENT,授权文件字节不变;setGrant 直调同样抛错', 'red', () => {
   assert.ok(out, `子进程没有输出 JSON:${diag()}`);
   assert.equal(out.w13.status, 400, `状态码 ${out.w13.status},应为 400(撤销被吞、前台被打开:${JSON.stringify(out.w13.entryAfter)})`);
   assert.equal(out.w13.code, 'CU_INVALID_ARGUMENT', `错误码 ${out.w13.code}`);
@@ -239,12 +239,12 @@ report.check('C2-W13', '自相矛盾的请求(撤销应用 + 开前台):400 CU_I
   assert.equal(out.w13.directUnchanged, true, 'setGrant 直调被拒前不该写文件');
 });
 
-report.check('C2-W14', '撤销应用 + 显式 foreground:false:照旧撤销(新校验不误伤)', 'green', () => {
+await report.check('C2-W14', '撤销应用 + 显式 foreground:false:照旧撤销(新校验不误伤)', 'green', () => {
   assert.equal(out.w14.status, 200, `状态码 ${out.w14.status}`);
   assert.equal(out.w14.entry, null, `entry 还在:${JSON.stringify(out.w14.entry)}`);
 });
 
-report.check('C2-W15', '只关前台的请求,审计日志标成撤销(revoke),不是授权(grant)', 'red', () => {
+await report.check('C2-W15', '只关前台的请求,审计日志标成撤销(revoke),不是授权(grant)', 'red', () => {
   const log = (out.w4.warns || []).join('\n');
   assert.match(log, /\[cu-grants\] revoke ok/, `只关前台被记成了授权:${log}`);
   assert.ok(!/\[cu-grants\] grant /.test(log), `审计日志里出现了 grant:${log}`);
@@ -253,17 +253,17 @@ report.check('C2-W15', '只关前台的请求,审计日志标成撤销(revoke),�
 // ── 客户端源码守卫(W10–W12)──────────────────────────────────────────────
 const clientSrc = fs.readFileSync(CLIENT, 'utf8');
 
-report.check('C2-W10', 'CuGrants 的 positive 判定包含 foreground === true(无凭证时不发请求)', 'red', () => {
+await report.check('C2-W10', 'CuGrants 的 positive 判定包含 foreground === true(无凭证时不发请求)', 'red', () => {
   assert.match(clientSrc, /positive\s*=[^\n]*foreground\s*===\s*true/,
     'postGrant 的 positive 判定没有把 foreground:true 算作正向意图');
 });
 
-report.check('C2-W11', '开启前台前必须 confirmDialog(testId: cu-foreground-confirm)', 'red', () => {
+await report.check('C2-W11', '开启前台前必须 confirmDialog(testId: cu-foreground-confirm)', 'red', () => {
   assert.match(clientSrc, /cu-foreground-confirm/, '没有前台授权的确认框 testId');
   assert.match(clientSrc, /confirmDialog\([^)]*cu-foreground-confirm/s, '确认框不是用 confirmDialog 打开的');
 });
 
-report.check('C2-W12', '成功后用响应整体覆盖(不做乐观更新),关闭路径不带凭证', 'red', () => {
+await report.check('C2-W12', '成功后用响应整体覆盖(不做乐观更新),关闭路径不带凭证', 'red', () => {
   assert.match(clientSrc, /setGrants\(\{\s*screenScope:\s*d\.screenScope/,
     '成功后没有用服务端响应覆盖本地状态(疑似乐观更新)');
   assert.match(clientSrc, /foreground:\s*false/, '没有关闭前台的路径');
