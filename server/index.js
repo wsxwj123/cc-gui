@@ -291,7 +291,8 @@ app.use((req, res, next) => {
 // 唯一例外是开发代理形态(Vite 的 /api 字符串代理把 Host 改写成后端地址):浏览器自报
 // Sec-Fetch-Site 恰为 same-origin、请求来自本机(回环、无 CF 标记、Host 是本机名)、
 // 来源主机名是本机名(局域网模式再加本机局域网 IP)时放行。浏览器自报 same-site/cross-site
-// 一律拒。没有 Origin 的请求(CLI、MCP、浏览器同源 GET)放行,由密码闸兜底。
+// 一律拒。没有 Origin 的请求(CLI、MCP、浏览器同源 GET)放行,由密码闸兜底;/api 上无 Origin 但
+// 浏览器自报 same-site/cross-site 的,由下方 K3 门拒绝。
 // 被拒 → 403 JSON(/api 与非 /api 路径同形,见下方两个错误处理器),路由不执行。
 app.use(cors((req, cb) => cb(null, {
   origin: (origin, originCb) => {
@@ -981,8 +982,10 @@ const wss = new WebSocketServer({
       if (!hasPassword()) return true;
       if (isLocalReq(info.req)) return true;
       return verifyToken(parseCookies(info.req).cgui_token);
-    } catch {
+    } catch (e) {
       try { console.warn('[ws] blocked origin=null host=null sfs=null rule=internal-error rawHost=null'); } catch {}
+      // 另记一行异常原因(只记异常信息,不记请求里任何客户端可控的内容),便于查根因(如 EACCES)。
+      try { console.warn('[ws] internal error, handshake rejected: %s', logValue(e?.message)); } catch {}
       return false;
     }
   },
