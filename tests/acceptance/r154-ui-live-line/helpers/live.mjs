@@ -295,7 +295,17 @@ export async function entryStates(page, scope = null) {
 
 /** 子代理卡（按卡片标题文字定位）里的九宫格 / 边框光事实。 */
 export async function agentCardFacts(page, title) {
-  const card = page.locator('[data-strip-item="task"]').filter({ hasText: title }).first();
+  // r157:子代理调用进了工作组(运行中默认收起),卡片在组内条目 [data-entry-state] 里;找不到就先把收起的组点开再找。
+  const find = () => page.locator('[data-entry-state]').filter({ hasText: title }).first();
+  let card = find();
+  if (!(await card.count())) {
+    const heads = page.locator('[data-work-group-state="closed"] [data-work-group-head]');
+    for (let n = await heads.count(), i = 0; n > 0 && i < 10; n = await heads.count(), i += 1) {
+      await heads.first().click().catch(() => {});
+      await page.waitForTimeout(200);
+    }
+    card = find();
+  }
   if (!(await card.count())) return { present: false };
   return await card.evaluate((el) => {
     const icons = [...el.querySelectorAll('[data-agent-icon="matrix"]')];

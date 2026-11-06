@@ -109,7 +109,7 @@ export const MISC = {
   b5cardLast: withEnd('M6', [
     tl('Bash', { command: 'ls', description: '卡片前的 Bash 乙' }), sub('Agent', 'R152A 子代理卡标题乙'),
     th('M6 卡片之后的思考不该成为末尾。'),
-  ], '卡片前的 Bash 乙'),
+  ], 'R152A 子代理卡标题乙'), // r157 起子代理调用进组,它就是组里最新的工具(原期望「卡片前的 Bash 乙」)
   b6long: withEnd('M7', [th('M7 思考。'), tl('Bash', { command: 'ls', description: LONG_TITLE })], `${cp(LONG_TITLE, 60)}…`),
   b7toggle: withEnd('M8', [th('M8 思考。'), tl('Bash', { command: 'ls', description: '展开收起用的标题' })], '展开收起用的标题'),
   b4lastThink: rd('M9', [
