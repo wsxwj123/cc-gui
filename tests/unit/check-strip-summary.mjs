@@ -106,8 +106,8 @@ const tail = (s) => s.tail;
   const s = stripSummary(blocks, null);
   assert.equal(s.steps, 4, '2 思考 + 2 通用工具 = 4 步');
   assert.equal(s.rounds, null, '没有 usageCalls → rounds 为 null(不显示「N 轮」)');
-  // Task/Workflow/Skill 段里的块**不计入**(它们不折,计进去会让"展开后看得见的东西"对不上账)
-  assert.equal(stripSummary([think('想'), tool('Task', 't1'), text('派完了')], null).steps, 1, 'Task 段的块不计入');
+  // Workflow/Skill 段里的块**不计入**(它们不折,计进去会让"展开后看得见的东西"对不上账);r157 起 Task/Agent 进 group,计入
+  assert.equal(stripSummary([think('想'), tool('Task', 't1'), text('派完了')], null).steps, 2, 'r157:Task 进 group → 思考 + 子代理 = 2 步'); 
   assert.equal(stripSummary([think('想'), tool('Workflow', 'w1'), text('跑完了')], null).steps, 1, 'Workflow 段的块不计入');
   assert.equal(stripSummary([think('想'), tool('Skill', 's1'), text('读完了')], null).steps, 1, 'Skill 段的块不计入');
   // 空 content 的思考 / 没有 toolCall 的工具块:跳过(groupCoworkBlocks 同款)
