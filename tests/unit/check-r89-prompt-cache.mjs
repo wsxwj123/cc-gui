@@ -99,7 +99,9 @@ check('A2-6 关闭时无备忘:只删快照键,不动 ENABLE_TOOL_SEARCH', () =>
 check('A1-4 五条 provider 切换路径逐点锁定第三方极性', () => {
   const CALL = 'await applyProviderPromptCache(';
   const EXPECT = [
-    { what: 'cc-switch 官方分支', marker: /env\.ANTHROPIC_MODEL = 'claude-sonnet-4-6'/, arg: '(env, false)' },
+    // 换锚(切回官方默认模型修复):官方分支原来直接写 env.ANTHROPIC_MODEL = 'claude-sonnet-4-6',现在先算 fallback
+    // (顶层 model 是 Claude 且非 haiku 时用它,否则 sonnet)再赋值;marker 仍是该分支里、调用点之前独有的那一行。
+    { what: 'cc-switch 官方分支', marker: /env\.ANTHROPIC_MODEL = fallback;/, arg: '(env, false)' },
     { what: '原生 claude 直写分支', marker: /const env = mergeProviderEnv\(current\.env, snapshot\.env \|\| \{\}\);/, arg: '(env, !!(snapBase && !isOfficialAnthropic(snapBase)))' },
     { what: 'switchToOpenAIUpstream', marker: /async function switchToOpenAIUpstream/, arg: '(env, true)' },
     { what: 'switchToAnthropicUpstream', marker: /async function switchToAnthropicUpstream/, arg: '(env, true)' },
