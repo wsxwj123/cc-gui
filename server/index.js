@@ -965,24 +965,26 @@ const wss = new WebSocketServer({
   server,
   path: '/ws',
   verifyClient: (info) => {
-    // WS 升级不经 express 中间件,须自带 DNS-rebinding 的 Host 白名单(同 HTTP 层)。
-    if (!isAllowedHost(info.req)) { console.warn('[ws] blocked host=%s', requestHostname(info.req) || '(无)'); return false; }
-    // 来源校验(同 HTTP 的 cors 门)。整段包 try:verifyClient 里的同步异常会冒到 'upgrade'
-    // 事件成未捕获异常,任何意外一律按拒绝处理。
+    // 整段(Host 门、来源校验、密码闸)包进同一个 try:verifyClient 里的同步异常会冒到 'upgrade'
+    // 事件成未捕获异常,握手既不拒也不放、客户端一直挂着(r156 实测:verifyToken → getSecret
+    // 写盘 EACCES)。任何意外一律按拒绝处理(401)。保持单参数同步返回布尔值的形式,try 才罩得住。
     try {
+      // WS 升级不经 express 中间件,须自带 DNS-rebinding 的 Host 白名单(同 HTTP 层)。
+      if (!isAllowedHost(info.req)) { console.warn('[ws] blocked host=%s', requestHostname(info.req) || '(无)'); return false; }
+      // 来源校验(同 HTTP 的 cors 门)。
       const origin = info.origin || info.req?.headers?.origin;
       const verdict = checkOriginSafe(origin, info.req);
       if (!verdict.ok) {
         console.warn(`[ws] blocked origin=${logValue(origin)} host=${logValue(requestHostname(info.req))} sfs=${logValue(info.req?.headers?.['sec-fetch-site'])} rule=${verdict.rule} rawHost=${logValue(info.req?.headers?.host)}`);
         return false;
       }
+      if (!hasPassword()) return true;
+      if (isLocalReq(info.req)) return true;
+      return verifyToken(parseCookies(info.req).cgui_token);
     } catch {
       try { console.warn('[ws] blocked origin=null host=null sfs=null rule=internal-error rawHost=null'); } catch {}
       return false;
     }
-    if (!hasPassword()) return true;
-    if (isLocalReq(info.req)) return true;
-    return verifyToken(parseCookies(info.req).cgui_token);
   },
 });
 
