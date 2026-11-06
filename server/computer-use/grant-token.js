@@ -12,9 +12,10 @@
 // 只有后台或其前置代理监听 80/443 时才可能出现;④后台读文件接口(/api/files/read?raw=1)同源下发的
 // 内容,r156 起的现状:PDF 以外一律带 `Content-Security-Policy: sandbox` + `X-Content-Type-Options: nosniff`,
 // 浏览器直接打开其中带脚本的 SVG 也不运行脚本(Chromium、WebKit、macOS WKWebView 实测);PDF 为保证预览
-// 不带 sandbox(只带 nosniff),扩展名 .pdf 而内容是 HTML/SVG 的文件、带内置脚本的 PDF 在 Chromium 新版与
-// WKWebView 里实测不执行脚本。另有 K3(services/auth.js 的 checkNoOriginFetchSite):不带 Origin、浏览器
-// 自报 Sec-Fetch-Site 为 same-site/cross-site 的 /api/* 请求(他站/他端口网页的导航、嵌入、图片加载)一律 403;
+// 不带 sandbox(只带 nosniff),扩展名 .pdf 而内容是 HTML/SVG 的文件在 Chromium 新版与 WKWebView 里实测
+// 其中脚本不运行;带内置脚本的 PDF(试了自动打开链接、提交表单两种动作)实测没有借此向本机发出请求。
+// 另有 K3(services/auth.js 的 checkNoOriginFetchSite):不带 Origin、浏览器自报 Sec-Fetch-Site 为
+// same-site/cross-site 的 /api/* 请求(他站/他端口网页的导航、嵌入、图片加载)一律 403;
 // 浏览器只对回环地址与 https(隧道域名)发该头,手输地址/书签/别的应用点开的链接报 none 按设计不拦,经局域网
 // IP 的明文 HTTP、老浏览器不发该头,K3 不生效,只剩 sandbox 这道内容防线。残余:WebKit 的 PDF 插件加载请求
 // 自报 none(只能触发读不到结果的 GET);浏览器版里用户亲手对聊天附件 SVG 图选"在新标签页打开"时,脚本以
