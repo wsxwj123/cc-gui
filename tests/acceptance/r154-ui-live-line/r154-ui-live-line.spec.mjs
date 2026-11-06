@@ -25,7 +25,7 @@ function markBlocked(what) {
 }
 
 const STATE_ORDER = ['data-live-indicator', 'data-live-elapsed', 'data-live-sep', 'data-live-text'];
-const PHASE_VERB = { connecting: '连接中', thinking: '正在思考', text: '正在输出', stopping: '停止中', compacting: '正在压缩上下文' };
+const PHASE_VERB = { connecting: '连接中', thinking: '思考', text: '正在输出', stopping: '停止中', compacting: '正在压缩上下文' };
 const TOOL_VERBS = ['读取', '编辑', '写入', '运行', '搜索', '查找', '抓取', '联网搜索', '委派子代理', '更新任务清单', '调用技能', '调用'];
 const thinkingOnly = (text) => ({ events: [{ kind: 'thinking', text }] });
 
@@ -120,8 +120,8 @@ test('L3 思考 / 输出 / 连接中三种状态词与 data-live-phase，且页�
   touchCtl('g1');
   await expectPhase(page, 'thinking');
   s = await liveSnap(page);
-  expect.soft(s.text, 'thinking：状态词应恰为「正在思考」').toBe('正在思考');
-  expect.soft(noObject(s), 'thinking：不应有 object').toBe(true);
+  expect.soft(s.text, 'thinking：状态词应恰为「思考 · 最新一句思考」').toBe('思考 · L3 思考内容。');
+  expect.soft(s.object, 'thinking：object 应是最新一句思考').toBe('L3 思考内容。');
   await scan('thinking');
 
   touchCtl('g2');
@@ -133,24 +133,25 @@ test('L3 思考 / 输出 / 连接中三种状态词与 data-live-phase，且页�
   expect(banned, '页面里不得出现英文循环词（Frolicking 等）或 Connecting / Writing / Compacting').toEqual([]);
 });
 
-test('L4 工具状态词：Read / Bash / Grep 等的 verb + object，并行取最后一个未返回的，没有 object 时只有 verb', async ({ page }) => {
-  const P50 = '0123456789'.repeat(6);
+test('L4 工具状态词：工具标题（不带动词前缀）、取不到标题回落动词短语、并行取最后一个未返回的', async ({ page }) => {
+  const P60 = '0123456789'.repeat(6);
   const CMD = `echo ${'abcdefghij'.repeat(8)}`;
-  const cut50 = (full) => (obj) => obj.startsWith(full.slice(0, 50)) && !obj.includes(full.slice(0, 51)) && obj.length <= 51; // 截 50 字符（可带 1 个省略号）
+  // 标题上限 60 个码点，超出补一个省略号（与 r152a 折叠行同一个 toolTitle）。
+  const clipTitle = (s) => { const cps = Array.from(s); return cps.length > 60 ? cps.slice(0, 60).join('') + '…' : s; };
   // 子代理（Task）放在第 1 个：它是"最后被检查"的那个，不必在链条中途等它的结果被页面认作"已返回"（子代理卡的收尾另有机制，见 L11）。
   const TOOLS = [
-    { name: 'Task', input: { subagent_type: 'general-purpose', description: 'L4 子代理委派', prompt: 'p' }, verb: '委派子代理', object: 'L4 子代理委派' },
-    { name: 'Read', input: { file_path: '/a/b/c.txt' }, verb: '读取', object: 'c.txt' },
-    { name: 'Bash', input: { command: 'echo hi', description: 'L4 带描述的命令' }, verb: '运行', object: 'L4 带描述的命令' },
-    { name: 'Bash', input: { command: CMD }, verb: '运行', object: cut50(CMD), shown: `命令前 50 字符 ${CMD.slice(0, 50)}` },
-    { name: 'Grep', input: { pattern: P50, path: '/p' }, verb: '搜索', object: cut50(P50), shown: `pattern 前 50 字符 ${P50.slice(0, 50)}` },
-    { name: 'Edit', input: { file_path: '/p/q/edit-me.js', old_string: 'a', new_string: 'b' }, verb: '编辑', object: 'edit-me.js' },
-    { name: 'Write', input: { file_path: '/p/q/new-file.md', content: 'x' }, verb: '写入', object: 'new-file.md' },
-    { name: 'Glob', input: { pattern: '**/*.md' }, verb: '查找', object: '**/*.md' },
-    { name: 'WebFetch', input: { url: 'https://example.com/docs/x', prompt: 'p' }, verb: '抓取', object: 'example.com' },
-    { name: 'WebSearch', input: { query: 'claude code hooks' }, verb: '联网搜索', object: 'claude code hooks' },
-    { name: 'mcp__srv__do_thing', input: {}, verb: '调用', object: 'do_thing' },
-    { name: 'TodoWrite', input: { todos: [{ content: 'x', status: 'pending', activeForm: 'x' }] }, verb: '更新任务清单', object: null },
+    { name: 'Task', input: { subagent_type: 'general-purpose', description: 'L4 子代理委派', prompt: 'p' }, text: 'L4 子代理委派' },
+    { name: 'Read', input: { file_path: '/a/b/c.txt' }, text: '读取 c.txt' },
+    { name: 'Bash', input: { command: 'echo hi', description: 'L4 带描述的命令' }, text: 'L4 带描述的命令' },
+    { name: 'Bash', input: { command: CMD }, text: clipTitle(CMD) },
+    { name: 'Grep', input: { pattern: P60, path: '/p' }, text: clipTitle(`搜索 ${P60}`) },
+    { name: 'Edit', input: { file_path: '/p/q/edit-me.js', old_string: 'a', new_string: 'b' }, text: '编辑 edit-me.js' },
+    { name: 'Write', input: { file_path: '/p/q/new-file.md', content: 'x' }, text: '新建 new-file.md' },
+    { name: 'Glob', input: { pattern: '**/*.md' }, text: '查找文件 **/*.md' },
+    { name: 'WebFetch', input: { url: 'https://example.com/docs/x', prompt: 'p' }, text: '抓取 https://example.com/docs/x' },
+    { name: 'WebSearch', input: { query: 'claude code hooks' }, text: '搜索网页 claude code hooks' },
+    { name: 'mcp__srv__do_thing', input: {}, text: '调用 do_thing' },
+    { name: 'TodoWrite', input: { todos: [{ content: 'x', status: 'pending', activeForm: 'x' }] }, text: '更新任务清单' },
   ];
   await startRound(page, {
     key: 'l4',
@@ -160,24 +161,23 @@ test('L4 工具状态词：Read / Bash / Grep 等的 verb + object，并行取�
     ] },
   });
   await expectOneLine(page);
-  const okObject = (t, snap) => (t.object === null ? noObject(snap) : (typeof t.object === 'function' ? t.object(snap.object || '') : snap.object === t.object));
+  // 状态词 = object（工具标题）或 verb + 空格 + object；不得有前导 / 尾随空格。
+  const consistent = (snap) => (snap.object ? (snap.verb ? `${snap.verb} ${snap.object}` : snap.object) : snap.verb);
   const problems = [];
   for (let i = TOOLS.length - 1; i >= 0; i -= 1) {
     const t = TOOLS[i];
     if (i < TOOLS.length - 1) touchCtl(`d${i + 2}`); // 放走后一个工具的结果 → 最后一个未返回的变成 i 号
-    const want = t.object === null ? t.verb : `${t.verb} ${typeof t.object === 'function' ? t.shown : t.object}`;
     let snap = {};
     const t0 = Date.now();
     while (Date.now() - t0 < 8_000) {
       snap = await liveSnap(page);
-      if (snap.phase === 'tool' && snap.verb === t.verb && okObject(t, snap)) break;
+      if (snap.phase === 'tool' && snap.text === t.text) break;
       await page.waitForTimeout(150);
     }
-    const good = snap.phase === 'tool' && snap.verb === t.verb && okObject(t, snap)
-      && (t.object === null ? snap.text === t.verb : snap.text === `${t.verb} ${snap.object}`);
-    if (!good) problems.push(`第 ${i + 1} 个工具 ${t.name}：期望 phase=tool、状态词「${want}」；实际 phase=${snap.phase}、状态词「${snap.text}」（verb=${snap.verb}，object=${snap.object}）`);
+    const good = snap.phase === 'tool' && snap.text === t.text && snap.text === consistent(snap);
+    if (!good) problems.push(`第 ${i + 1} 个工具 ${t.name}：期望 phase=tool、状态词「${t.text}」；实际 phase=${snap.phase}、状态词「${snap.text}」（verb=${snap.verb}，object=${snap.object}）`);
   }
-  expect(problems, '并行工具：每一步都应显示"最后一个未返回的工具"的 verb + object').toEqual([]);
+  expect(problems, '并行工具：每一步都应显示"最后一个未返回的工具"的标题').toEqual([]);
 });
 
 test('L5 stopping（点停止后）与 compacting 状态词', async ({ page }) => {
@@ -590,8 +590,12 @@ test('L15 子代理视图：底部同样有 [data-live-line]，版式与状态�
   expect(s.elapsed, '子代理视图的状态行：用时应是 Ns 或 Nm Ns 格式').toMatch(/^(\d+s|\d+m \d+s)$/);
   expect(Object.keys(PHASE_VERB).concat('tool'), `data-live-phase 应是约定取值之一（实际 ${s.phase}）`).toContain(s.phase);
   if (s.phase === 'tool') {
-    expect(TOOL_VERBS.some((v) => s.verb === v), `tool 阶段的 verb 应是约定的工具动词之一（实际 ${s.verb}）`).toBe(true);
-    expect(s.text, 'tool 阶段状态词 = verb + 空格 + object（无 object 时只有 verb）').toBe(noObject(s) ? s.verb : `${s.verb} ${s.object}`);
+    // 工具阶段：标题在 object 里（verb 为空）；取不到标题才回落动词短语（verb 非空、object 为空）。
+    expect(s.verb === null || s.verb === '' || TOOL_VERBS.includes(s.verb), `tool 阶段的 verb 应为空或约定的工具动词之一（实际 ${s.verb}）`).toBe(true);
+    expect(s.text, 'tool 阶段状态词 = object（工具标题）或 verb + 空格 + object').toBe(s.object ? (s.verb ? `${s.verb} ${s.object}` : s.object) : s.verb);
+  } else if (s.phase === 'thinking') {
+    expect(s.verb, 'thinking 阶段 verb 应为「思考」').toBe('思考');
+    expect(s.text, 'thinking 阶段状态词 =「思考」或「思考 · 预览」').toBe(s.object ? `思考 · ${s.object}` : '思考');
   } else {
     expect(s.text, `${s.phase} 阶段状态词应恰为「${PHASE_VERB[s.phase]}」`).toBe(PHASE_VERB[s.phase]);
     expect(noObject(s), `${s.phase} 阶段不应有 object`).toBe(true);

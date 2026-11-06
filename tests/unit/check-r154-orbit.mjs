@@ -3,9 +3,9 @@
 //
 // 锁的事:
 //   O1 n=3/4 一整个周期每帧结果有限,scale ∈ [0.58, 1.42],opacity ∈ [0.72, 1]。
-//   O2 仰俯角最大那一帧(th≈π/2),三个点构成钝角三角形,最大内角 95°–110°(设计稿约 100°)。
+//   O2 正圆(ui-live-line-v2):整圈采样各点到圆心距离最大偏差 < 2%,包围盒宽高比 1±0.03。
 //   O3 spin 随时间单调递增,一个周期(3.4 秒)正好两圈。
-//   O4 过水平线那一帧(th=0),三个点共线;y 的差只来自轻微侧倾(roll),近似相等。
+//   O4 任意相位三点都在单位圆上,过水平线不再共线(旧版仰俯/侧倾把圆压扁了)。
 //   O5 ticker:首个登记启动、最后一个注销停止、hidden 暂停与恢复、reduced 只摆一次静止帧、
 //      转速 0.7 / 1 / 1.4 生效(同样帧数 fast 位移大于 normal 大于 slow)。
 //
@@ -61,16 +61,22 @@ await report.check('O1', '一整个周期每帧有限,scale ∈ [0.58,1.42],opac
   assert.deepEqual(orbitPlacement(0, 1), []);
 });
 
-await report.check('O2', '仰俯角最大那一帧 n=3 是钝角三角形,最大内角 95°–110°', 'red', () => {
-  for (const th of [Math.PI / 2, -Math.PI / 2, (3 * Math.PI) / 2]) {
-    const t = tForTh(th);
-    assert.ok(Math.abs(orbitAngles(t).th - th) < 1e-6);
-    const deg = maxInteriorAngleDeg(orbitPlacement(3, t));
-    assert.ok(deg >= 95 && deg <= 110, `th=${th.toFixed(3)} 最大内角 ${deg.toFixed(1)}°`);
+await report.check('O2', '正圆:整圈各点到圆心距离最大偏差 < 2%,包围盒宽高比 1±0.03', 'red', () => {
+  for (const n of [3, 4]) {
+    const all = [];
+    for (let i = 0; i <= 600; i++) {
+      const t = (PERIOD * i) / 600;
+      all.push(...orbitPlacement(n, t));
+    }
+    const radii = all.map((p) => Math.hypot(p.x, p.y));
+    const dev = (Math.max(...radii) - Math.min(...radii)) / Math.max(...radii);
+    assert.ok(dev < 0.02, `n=${n} 半径最大偏差 ${(dev * 100).toFixed(2)}%`);
+    const xs = all.map((p) => p.x);
+    const ys = all.map((p) => p.y);
+    const w = Math.max(...xs) - Math.min(...xs);
+    const h = Math.max(...ys) - Math.min(...ys);
+    assert.ok(Math.abs(w / h - 1) < 0.03, `n=${n} 包围盒宽高比 ${(w / h).toFixed(3)}`);
   }
-  // 静止帧 t=0.9 也落在钝角三角形附近
-  const still = maxInteriorAngleDeg(orbitPlacement(3, STILL_T));
-  assert.ok(still > 90, `静止帧最大内角 ${still.toFixed(1)}°`);
 });
 
 await report.check('O3', 'spin 单调递增,一个周期 3.4 秒正好两圈', 'red', () => {
@@ -84,17 +90,15 @@ await report.check('O3', 'spin 单调递增,一个周期 3.4 秒正好两圈', '
   assert.ok(Math.abs(turns - 2) < 1e-9, `一周期圈数 ${turns}`);
 });
 
-await report.check('O4', '过水平线那一帧(th=0)三点共线、y 近似相等', 'red', () => {
-  const t = tForTh(0);
-  const p = orbitPlacement(3, t);
-  const cross = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[1].y - p[0].y) * (p[2].x - p[0].x);
-  assert.ok(Math.abs(cross) < 1e-6, `不共线 cross=${cross}`);
-  const ys = p.map((q) => q.y);
-  // 侧倾 roll=0.12·sin(0.9)≈0.094 弧度,y 的差 ≤ 2·sin(roll) ≈ 0.19(半径的比例)
-  assert.ok(Math.max(...ys) - Math.min(...ys) < 0.2, `y 差 ${Math.max(...ys) - Math.min(...ys)}`);
-  // 对比仰俯最大帧,y 的差明显更大
-  const q = orbitPlacement(3, tForTh(Math.PI / 2)).map((r) => r.y);
-  assert.ok(Math.max(...q) - Math.min(...q) > 0.5);
+await report.check('O4', '任意相位三点都在单位圆上,等边分布(y 不再被压扁),过水平线不共线', 'red', () => {
+  for (const th of [0, Math.PI / 2, -Math.PI / 2, STILL_T]) {
+    const p = orbitPlacement(3, tForTh(th));
+    for (const q of p) assert.ok(Math.abs(Math.hypot(q.x, q.y) - 1) < 1e-9, `th=${th} 半径 ${Math.hypot(q.x, q.y)}`);
+    const cross = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[1].y - p[0].y) * (p[2].x - p[0].x);
+    assert.ok(Math.abs(cross) > 0.1, `th=${th} 三点不应共线(cross=${cross})`);
+    const deg = maxInteriorAngleDeg(p);
+    assert.ok(Math.abs(deg - 60) < 1e-6, `th=${th} 正圆上三点应等边,最大内角 ${deg.toFixed(1)}°`);
+  }
 });
 
 // ---- 假环境 ----
