@@ -459,7 +459,8 @@ async function handle(req, clientRes) {
     return;
   }
 
-  clientRes.writeHead(upstreamResp.status, { 'Content-Type': ct, 'Cache-Control': 'no-cache' });
+  // 上游 HTTP 401/403 带 x-should-retry:false,CLI 不再白等重试(不可能成功的鉴权错误)。
+  clientRes.writeHead(upstreamResp.status, { 'Content-Type': ct, 'Cache-Control': 'no-cache', ...noRetryHeadersFor(upstreamResp.status) });
 
   if (!upstreamResp.body) { clientRes.end(); return; }
 

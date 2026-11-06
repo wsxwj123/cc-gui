@@ -900,7 +900,8 @@ async function handle(req, clientRes) {
     if (upstreamResp.status === 400 || upstreamResp.status === 413) {
       up_msg = normalizeContextOverflow(up_msg);
     }
-    clientRes.writeHead(upstreamResp.status, { 'Content-Type': 'application/json' });
+    // 上游 HTTP 401/403 带 x-should-retry:false,CLI 不再白等重试(不可能成功的鉴权错误)。
+    clientRes.writeHead(upstreamResp.status, { 'Content-Type': 'application/json', ...noRetryHeadersFor(upstreamResp.status) });
     clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: String(up_msg).slice(0, 500) } }));
     return;
   }
