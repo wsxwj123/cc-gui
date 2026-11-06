@@ -287,6 +287,67 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.449">v0.2.449</a></b>(2026-11-06)· 新增 2 条 · 优化 2 条 · 修复 2 条 · 提示 2 条</summary>
+
+**新增**
+
+<details><summary>记住窗口大小和位置</summary>
+
+关闭或重启后再打开，窗口回到上次的大小和位置，最大化、全屏状态也一并恢复；换了显示器或屏幕缩放不同时，窗口会被调整到屏幕以内、不小于最小尺寸，不会跑到屏幕外。应用内自动更新后重启同样保持上次的样子（移动或缩放停下约 1.5 秒后会自动保存一次）。状态文件是应用数据目录里的 `.window-state.json`（macOS 在 `~/Library/Application Support/com.claudegui.desktop/`，Windows 在 `%APPDATA%\com.claudegui.desktop\`），删掉它就回到默认大小。
+
+</details>
+
+<details><summary>「前台操控」改为由你按应用授权</summary>
+
+电脑操控里会移动真实鼠标、把目标窗口切到前台的「前台操控」，此前模型自己传参数就能用；现在必须由你在「桌面操控 → 应用授权」里为该应用单独打开「允许前台操控」（点开会有确认，开启后 60 分钟自动失效，随时可关）。没开时模型会收到明确提示并停下来等你，不会自己抢鼠标；已有的应用授权不会自动带上前台权限。
+
+</details>
+
+**优化**
+
+<details><summary>生成中的底部状态行更贴近当前动作</summary>
+
+思考阶段显示最新一句思考内容（原来是整段思考的开头，长思考时几乎不变）；工具刚开始、参数还没传完时，沿用上一个工具的标题，不再闪一下「运行 / 写入 / 委派子代理」。过程组的折叠行也改了文案：含工具的组显示「最新工具标题 · N 次工具调用」，只有思考的组显示「思考 · 一行预览」（原来都是「思考 · N 次工具调用」这类笼统说法）。
+
+</details>
+
+<details><summary>旋转加载动画的轨道改为正圆</summary>
+
+（原来是斜着的椭圆）。
+
+</details>
+
+**修复**
+
+<details><summary>多轮回合里底部状态行不再误显示「正在输出」</summary>
+
+前面出现过正文后，如果最后一块是思考或调工具，现在按最后一块显示「思考 · …」或工具标题。
+
+</details>
+
+<details><summary>切回官方 Provider 时，默认模型不再一律变成 sonnet</summary>
+
+从官方切到第三方、再切回官方后，settings.json 里的默认模型原来总被写成 claude-sonnet-4-6；现在优先沿用你在全局设置里选的 Claude 模型（不是 haiku 时），取不到才用 sonnet。
+
+</details>
+
+**提示**
+
+<details><summary>依赖模型自动抢前台的做法需要先授权</summary>
+
+如果某个应用的后台通道无效（部分 Chromium / Electron / Qt 应用），模型过去会自己改用前台；现在它会停下并请你去面板为该应用打开「允许前台操控」，打开后告诉模型重试即可。
+
+</details>
+
+<details><summary>macOS 的绿色按钮是系统「全屏」，不是「最大化」</summary>
+
+窗口记忆能恢复进全屏；退出全屏后的窗口大小可能是整屏大小（系统插件的已知限制）。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.448</b>(2026-11-06)· 修复 3 条 · 提示 2 条</summary>
 
 **修复**
