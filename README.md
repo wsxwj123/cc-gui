@@ -287,7 +287,20 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.449">v0.2.449</a></b>(2026-11-06)· 新增 2 条 · 优化 2 条 · 修复 2 条 · 提示 2 条</summary>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.450">v0.2.450</a></b>(2026-11-06)· 修复 1 条</summary>
+
+**修复**
+
+<details><summary>用户目录经过软链接时，分叉会话不再一直报「invalid projectHash」</summary>
+
+分叉（从某条消息起另开一个会话）要先确认会话目录在 `~/.claude/projects` 里面。原来拿“解析过软链接的真实路径”和“没解析过的项目目录路径”比较，用户目录本身经过软链接时（例如 macOS 的 `/var` 实际指向 `/private/var`，或把用户目录链接到别处），两边永远对不上，分叉恒返回 400。现在两边按同一基准比较；指向项目目录之外的软链接、不存在的目录、`..` 上跳仍然被拒绝。大多数人的用户目录是真实路径，不受影响。
+
+</details>
+
+</details>
+
+<details>
+<summary><b>v0.2.449</b>(2026-11-06)· 新增 2 条 · 优化 2 条 · 修复 2 条 · 提示 2 条</summary>
 
 **新增**
 
