@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Search, ChevronDown, ChevronRight, FileText } from '../Icon.jsx';
+import { Search, FileText } from '../Icon.jsx';
+import { ToolCardShell, cardStatusOf } from './ToolCardShell.jsx';
 import { ToolResultImages } from './ToolResultImages.jsx';
 
 // Combined renderer for Grep + Glob. Input shape:
@@ -22,45 +23,35 @@ export function GrepGlobCard({ toolCall }) {
   const hasMore = lines.length > PREVIEW;
 
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full px-3 py-2 flex items-center gap-2 bg-canvas-warm hover:bg-canvas-deep/40 transition-colors text-left"
-      >
-        {expanded
-          ? <ChevronDown size={12} className="text-ink-faint shrink-0" />
-          : <ChevronRight size={12} className="text-ink-faint shrink-0" />}
-        <Search size={12} className="text-indigo-600 shrink-0" />
-        <span className="text-xs font-mono text-ink-soft shrink-0">{name}</span>
-        <code className="text-[11px] text-ink truncate flex-1 bg-canvas-deep/40 px-1.5 py-0.5 rounded">{pattern || '(empty)'}</code>
-        {!result && <span className="mini-spin" aria-hidden="true" />}
-        {result && (isError
-          ? <span className="text-error text-[10px] shrink-0">错误</span>
-          : <span className="text-ink-faint text-[10px] shrink-0">{lines.length} 行</span>)}
-      </button>
-
+    <ToolCardShell
+      toolName={name}
+      status={cardStatusOf(result)}
+      Icon={Search}
+      title={pattern || '(empty)'}
+      titleMono
+      meta={result && !isError ? <span>{lines.length} 行</span> : null}
+      expanded={expanded}
+      onToggle={() => setExpanded(!expanded)}
+    >
       {(path || glob) && (
-        <div className="px-3 py-1 text-[10px] text-ink-faint font-mono border-b border-canvas-deep flex gap-2">
-          {path && <span>路径: {path}</span>}
-          {glob && <span>过滤: {glob}</span>}
+        <div className="tc-sub font-mono flex gap-2 min-w-0">
+          {path && <span className="truncate">路径: {path}</span>}
+          {glob && <span className="truncate">过滤: {glob}</span>}
         </div>
       )}
-
-      {expanded && result && (
+      {result && (
         <>
         <ToolResultImages images={result.images} name={toolCall.name || 'GrepGlobCard'} className="mb-2" />
-        <div className={`px-3 py-2 text-[11px] font-mono whitespace-pre-wrap leading-relaxed overflow-auto max-h-[600px] ${
-          isError ? 'bg-red-50 text-red-700' : 'bg-canvas-warm/40 text-ink-muted'
-        }`}>
+        <div className={`tc-block whitespace-pre-wrap max-h-[600px] ${isError ? 'tc-block-err' : ''}`}>
           {lines.map((l, i) => (
-            <div key={i} className="flex gap-2">
-              <FileText size={10} className="text-ink-ghost shrink-0 mt-0.5" />
+            <div key={i} className="flex gap-2 min-w-0">
+              <FileText size={10} className="text-ink-faint shrink-0 mt-1" />
               <span className="truncate">{l}</span>
             </div>
           ))}
         </div>
         </>
       )}
-    </div>
+    </ToolCardShell>
   );
 }

@@ -20,6 +20,7 @@ import { WorkflowCard } from './tools/WorkflowCard.jsx';
 import { GrepGlobCard } from './tools/GrepGlobCard.jsx';
 import { WebCard } from './tools/WebCard.jsx';
 import { SkillCard } from './tools/SkillCard.jsx';
+import { ToolCardShell } from './tools/ToolCardShell.jsx';
 import {
   computeCostForMessage, costUnavailableReason, costSourceLabel, costUnknownNote, COST_REASON_TEXT,
   formatCost, displayUsd, isPlanBilling, costTitle,
@@ -104,29 +105,23 @@ function InterruptedToolCard({ toolCall }) {
   const isWriteTool = toolCall.name === 'Edit' || toolCall.name === 'MultiEdit' || toolCall.name === 'Write';
   const preview = formatInputPreview(toolCall.input);
   return (
-    <div className="border border-canvas-sunken bg-canvas rounded-md overflow-hidden opacity-80">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-canvas-warm/60 transition-colors text-left"
-      >
-        <Icon size={12} className="text-ink-faint shrink-0" />
-        <span className="text-[11px] font-mono text-ink-muted truncate flex-1">{toolCall.name}</span>
-        {preview && (
-          <span className="text-[10px] text-ink-faint font-mono truncate max-w-[200px]">{preview}</span>
-        )}
-        <span className="text-[10px] text-ink-faint shrink-0">{isWriteTool ? '已停止（未应用）' : '已停止'}</span>
-      </button>
-      {expanded && (
-        <div className="border-t border-canvas-sunken p-2.5 animate-fade-in">
-          <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">
-            输入（工具被停止,无返回结果{isWriteTool ? ',改动未写入文件' : ''}）
-          </div>
-          <pre className="text-[11px] bg-canvas-warm rounded p-2 overflow-x-auto max-h-48 font-mono text-ink-muted">
-            {JSON.stringify(toolCall.input, null, 2)}
-          </pre>
-        </div>
-      )}
-    </div>
+    <ToolCardShell
+      toolName={toolCall.name}
+      status="stopped"
+      Icon={Icon}
+      title={preview}
+      titleMono
+      meta={<span>{isWriteTool ? '已停止（未应用）' : '已停止'}</span>}
+      expanded={expanded}
+      onToggle={() => setExpanded(!expanded)}
+    >
+      <div className="tc-label">
+        输入（工具被停止,无返回结果{isWriteTool ? ',改动未写入文件' : ''}）
+      </div>
+      <pre className="tc-block max-h-48">
+        {JSON.stringify(toolCall.input, null, 2)}
+      </pre>
+    </ToolCardShell>
   );
 }
 
@@ -146,33 +141,27 @@ function McpToolCard({ toolCall }) {
   const inputStr = toolCall.input && Object.keys(toolCall.input).length
     ? JSON.stringify(toolCall.input, null, 2) : '';
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden animate-fade-up">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full px-3 py-2 bg-canvas-warm flex items-center gap-2 hover:bg-canvas-deep/20 transition-colors text-left"
-      >
-        <Wrench size={12} className="text-ink-muted shrink-0" />
-        <span className="font-mono text-[11px] text-ink-muted truncate flex-1">{shortName}</span>
-        {serverName && <span className="text-[10px] text-ink-faint shrink-0">{serverName}</span>}
-        {running
-          ? <span className="mini-spin" aria-hidden="true" />
-          : result?.isError
-            ? <span className="text-red-400 text-[10px] shrink-0">错误</span>
-            : <Check size={11} className="text-green-400 shrink-0" />}
-      </button>
-      {expanded && (
-        <div className="border-t border-canvas-sunken p-2.5 space-y-2">
-          {inputStr && (
-            <pre className="text-[10px] bg-canvas-warm rounded p-2 overflow-x-auto max-h-32 font-mono text-ink-faint">{inputStr}</pre>
-          )}
-          {result?.content && (
-            <pre className="text-[11px] whitespace-pre-wrap break-all max-h-64 overflow-auto font-mono text-ink-muted"><Linkify text={result.content} /></pre>
-          )}
-          <ToolResultImages images={images} name={`${shortName} 结果`} />
-        </div>
-      )}
-
-    </div>
+    <ToolCardShell
+      toolName={toolCall.name}
+      label={serverName || 'mcp'}
+      status={running ? 'run' : result?.isError ? 'err' : 'ok'}
+      Icon={Wrench}
+      title={shortName}
+      titleMono
+      titleHint={toolCall.name}
+      expanded={expanded}
+      onToggle={() => setExpanded(!expanded)}
+    >
+      <div className="space-y-2">
+        {inputStr && (
+          <pre className="tc-block max-h-32">{inputStr}</pre>
+        )}
+        {result?.content && (
+          <pre className={`tc-block whitespace-pre-wrap break-all max-h-64 ${result.isError ? 'tc-block-err' : ''}`}><Linkify text={result.content} /></pre>
+        )}
+        <ToolResultImages images={images} name={`${shortName} 结果`} />
+      </div>
+    </ToolCardShell>
   );
 }
 
@@ -342,70 +331,55 @@ function ToolCallRow({ toolCall, onRetryTool }) {
   const planDeny = planDenyState(toolCall); // 'refining'(追加修改)| 'cancelled'(取消)| null
   const hasError = toolCall.result?.isError && !askAnswered && !planApproved && !planDeny;
   const preview = formatInputPreview(toolCall.input);
+  const status = !toolCall.result ? 'run'
+    : toolCall.result.interrupted ? 'stopped'
+      : hasError ? 'err' : 'ok';
+  let meta = null;
+  if (toolCall.result) {
+    if (hasError) meta = <span className="text-error">错误</span>;
+    // 停止补的合成终态:未回执工具被掐断,显示"已停止"而非绿勾冒充完成
+    else if (toolCall.result.interrupted) meta = <span>已停止</span>;
+    else if (planApproved) meta = <span className="text-success">✅ 计划已批准</span>;
+    else if (planDeny === 'refining') meta = <span className="text-accent">准备修改</span>;
+    else if (planDeny === 'cancelled') meta = <span>已取消</span>;
+    else if (askAnswered) meta = <span className="text-success">已答</span>;
+  }
 
   return (
     <ToolCallWithRetry toolCall={toolCall} onRetryTool={onRetryTool}>
-      <div className={`border rounded-md overflow-hidden ${hasError ? 'border-error/30 bg-error-subtle/40' : 'border-canvas-sunken bg-canvas'}`}>
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-canvas-warm/60 transition-colors text-left"
-        >
-          <Icon size={12} className="text-ink-muted shrink-0" />
-          <span className="text-[11px] font-mono text-ink-soft truncate flex-1">
-            {toolCall.name}
-          </span>
-          {preview && (
-            <span className="text-[10px] text-ink-faint font-mono truncate max-w-[200px]">
-              {preview}
-            </span>
-          )}
-          {toolCall.result ? (
-            hasError ? (
-              <span className="text-[10px] text-error">错误</span>
-            ) : toolCall.result.interrupted ? (
-              // 停止补的合成终态:未回执工具被掐断,显示"已停止"而非绿勾冒充完成
-              <span className="text-[10px] text-ink-faint">已停止</span>
-            ) : planApproved ? (
-              <span className="text-[10px] text-success">✅ 计划已批准</span>
-            ) : planDeny === 'refining' ? (
-              <span className="text-[10px] text-accent">准备修改</span>
-            ) : planDeny === 'cancelled' ? (
-              <span className="text-[10px] text-ink-faint">已取消</span>
-            ) : askAnswered ? (
-              <span className="text-[10px] text-success">已答</span>
-            ) : (
-              <span className="text-[10px] text-success">✓</span>
-            )
-          ) : (
-            <span className="mini-spin" aria-hidden="true" />
-          )}
-        </button>
-
-        {expanded && (
-          <div className="border-t border-canvas-sunken p-2.5 space-y-2 animate-fade-in">
-            <div>
-              <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">输入</div>
-              <pre className="text-[11px] bg-canvas-warm rounded p-2 overflow-x-auto max-h-32 font-mono text-ink-muted">
-                {JSON.stringify(toolCall.input, null, 2)}
-              </pre>
-            </div>
-            {toolCall.result && (
-              <div>
-                <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">
-                  结果 {hasError && <span className="text-error">错误</span>}
-                </div>
-                <pre className={`text-[11px] rounded p-2 overflow-x-auto max-h-48 font-mono ${hasError ? 'bg-error-subtle text-error' : 'bg-canvas-warm text-ink-muted'}`}>
-                  {typeof toolCall.result.content === 'string'
-                    ? toolCall.result.content.slice(0, 4000)
-                    : JSON.stringify(toolCall.result.content, null, 2)?.slice(0, 4000)}
-                </pre>
-                {/* r132:通用兜底卡也要出图(以前只有 MCP 卡出图,其它工具读到的图全丢) */}
-                <ToolResultImages images={toolCall.result.images} name={toolCall.name || '结果'} className="mt-2" />
-              </div>
-            )}
+      <ToolCardShell
+        toolName={toolCall.name}
+        status={status}
+        Icon={Icon}
+        title={preview}
+        titleMono
+        meta={meta}
+        expanded={expanded}
+        onToggle={() => setExpanded(!expanded)}
+      >
+        <div className="space-y-2 animate-fade-in">
+          <div>
+            <div className="tc-label">输入</div>
+            <pre className="tc-block max-h-32">
+              {JSON.stringify(toolCall.input, null, 2)}
+            </pre>
           </div>
-        )}
-      </div>
+          {toolCall.result && (
+            <div>
+              <div className="tc-label">
+                结果 {hasError && <span className="text-error">错误</span>}
+              </div>
+              <pre className={`tc-block max-h-48 ${hasError ? 'tc-block-err' : ''}`}>
+                {typeof toolCall.result.content === 'string'
+                  ? toolCall.result.content.slice(0, 4000)
+                  : JSON.stringify(toolCall.result.content, null, 2)?.slice(0, 4000)}
+              </pre>
+              {/* r132:通用兜底卡也要出图(以前只有 MCP 卡出图,其它工具读到的图全丢) */}
+              <ToolResultImages images={toolCall.result.images} name={toolCall.name || '结果'} className="mt-2" />
+            </div>
+          )}
+        </div>
+      </ToolCardShell>
     </ToolCallWithRetry>
   );
 }
