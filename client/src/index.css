@@ -2445,10 +2445,12 @@ header [data-tour="remote-control"] {
 }
 .tc-term-cmd:last-child { border-bottom: 0; }
 .tc-prompt { color: var(--color-ink-muted); user-select: none; flex: none; }
-.tc-term-cmd code { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-all; color: var(--color-ink-soft); }
+.tc-term-cmd code { flex: 1; min-width: 0; white-space: pre; overflow-x: auto; color: var(--color-ink-soft); }
 .tc-tok-cmd { color: var(--color-ink); font-weight: 600; }
 .tc-tok-arg { color: var(--color-ink-soft); }
-.tc-tok-num { color: var(--color-accent); }
+/* 数字与 --flag:强调色与正文色各半。纯强调色在部分主题对代码底不到 4.5:1
+   (默认深色的强调色是深灰 #52525B、暖色浅色是橙),混一半正文色保住色调又够清楚。 */
+.tc-tok-num { color: color-mix(in srgb, var(--color-accent) 50%, var(--color-ink)); }
 .tc-term-out {
   margin: 0; padding: 8px 10px; font: 11.5px/1.65 var(--font-mono); color: var(--color-ink-soft);
   white-space: pre-wrap; word-break: break-word; max-height: 210px; overflow: auto;
