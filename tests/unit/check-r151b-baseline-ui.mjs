@@ -113,7 +113,12 @@ const EXPECTED = {
   // 头行按钮加 type="button" / data-work-group-head / aria-expanded,按钮 class 加 min-w-0、摘要 span 加 min-w-0 truncate;
   // 共多 164 个字符(5775→5939)。已证明只差这些:把新渲染里的这三处原样还原后,长度 5775、指纹 6890473d8f573d63 与旧基线逐字相同;
   // 其余五个场景的长度与指纹都不变。r157 验收 B1–B15 覆盖真实渲染。
-  'turn-tool': { testids: [], cgui: [], len: 5939, sha: '0a00837208ab6311' },
+  // r158 重录(用户 2026-11-07 追加「所有折叠行都不要展开箭头」「折叠行和正文靠颜色区分」):
+  // 过程条摘要行去掉整个 data-strip-caret 实心三角 span(含 svg),工作组头去掉 Chevron svg;
+  // 两个头行按钮 class 加 cg-fold / cursor-pointer,内部图标与文字去掉 text-ink-soft / text-ink-muted(改继承 .cg-fold 淡色)。
+  // 渲染结果 5939→5313;testid / cgui 集合不变,其余五个场景的长度与指纹都不变。
+  // r158 验收 B4 / B16 与 r152c C5 / C6 / C10 / C11 覆盖真实渲染;源码锁见 check-r158-no-fold-arrows。
+  'turn-tool': { testids: [], cgui: [], len: 5313, sha: '4965e9385e3b6bd9' },
   'input-idle': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'send-btn'], len: 3333, sha: '7e99c29e2c559931' },
   'input-streaming': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'queue-btn', 'stop-btn'], len: 4099, sha: '992c6c419dcae4ff' },
   // 界面「项目」→「工作区」改名重录(下面两个侧栏场景的渲染结果各含 7 处改名文字,每处多 1 个字):
