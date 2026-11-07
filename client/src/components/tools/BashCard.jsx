@@ -5,7 +5,6 @@ import { ToolResultImages } from './ToolResultImages.jsx';
 import { ToolCardShell, cardStatusOf } from './ToolCardShell.jsx';
 import { ThemedCopyButton } from '../ThemedCopyButton.jsx';
 
-const MAX_OUTPUT_CHARS = 16000;
 const COMMAND_SEPARATORS = new Set(['|', '||', '&&', ';', '&']);
 
 // 命令三档着色:命令词(每段第一个词)ink 加粗 / 参数 ink-soft / 数字与 --flag accent。
@@ -79,7 +78,7 @@ export function BashCard({ toolCall }) {
         </div>
         {result && body.trim() !== '' && (
           <pre className="tc-term-out" data-term-out="">
-            <Linkify text={body.slice(0, MAX_OUTPUT_CHARS)} />
+            <Linkify text={body} />
           </pre>
         )}
         {result && (
