@@ -125,8 +125,10 @@
   --cg-add-2:   color-mix(in srgb, var(--color-success) 34%, transparent);
   --cg-del:     color-mix(in srgb, var(--color-error) 13%, transparent);
   --cg-del-2:   color-mix(in srgb, var(--color-error) 32%, transparent);
-  /* 折叠行文字色:比正文(ink-soft)淡,对画布仍 ≥ 4.5;悬停回到正文色 */
-  --cg-fold-fg:       color-mix(in srgb, var(--color-ink-muted) 80%, var(--color-ink-soft));
+  /* 折叠行文字色:比正文(ink-soft)淡,对画布仍 ≥ 4.5;悬停回到正文色。
+     70% 是按全部主题算过的:正文对比度 ≥ 4.8 的主题折叠行都 ≥ 4.5,七个常用主题与正文仍差 ≥ 3。
+     正文本身不到 4.8 的三个主题在下面单独覆写成与正文同色(tests/unit/check-r158-fold-contrast.mjs 锁) */
+  --cg-fold-fg:       color-mix(in srgb, var(--color-ink-muted) 70%, var(--color-ink-soft));
   --cg-fold-fg-hover: var(--color-ink-soft);
 }
 
@@ -2562,3 +2564,8 @@ header [data-tour="remote-control"] {
 .cg-fold:hover { color: var(--cg-fold-fg-hover); }
 /* 不可点的头行(如工作流卡头):只取淡色,悬停不变深,免得看着像能点 */
 .cg-fold-static { color: var(--cg-fold-fg); }
+/* 这三个主题的正文对画布的对比度本身就不到 4.8(solarized-light 4.13 / tokyonight-day 4.25 /
+   solarized-dark 4.75),折叠行再调淡就看不清了。优先保证看得清:折叠行与正文同色。 */
+:root[data-cgui-theme="solarized-light"],
+:root[data-cgui-theme="tokyonight-day"],
+:root[data-cgui-theme="solarized-dark"] { --cg-fold-fg: var(--color-ink-soft); }
