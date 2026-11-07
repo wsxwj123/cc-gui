@@ -68,6 +68,9 @@ for (const r of rules) {
   }
 }
 
+// 覆写里写到的主题必须真实存在(防拼错,或主题被删后覆写悬空)
+for (const n of overrides.keys()) assert.ok(themes.has(n), `--cg-fold-fg 覆写了不存在的主题 ${n}`);
+
 // ── 逐主题断言 ─────────────────────────────────────────────────────
 const TESTED = ['default-light', 'claude-warm', 'github-light', 'default-dark', 'github-dark', 'nord', 'claude-dark'];
 const problems = [];
@@ -79,6 +82,8 @@ for (const [name, v] of themes) {
   const f = contrast(fold, canvas);
   const tag = `${name}(折叠 ${f.toFixed(2)} / 正文 ${body.toFixed(2)})`;
   if (f > body + 0.01) problems.push(`${tag}:折叠行比正文还醒目`);
+  // 每个主题都有下限:正文 ≥ 4.5 的主题折叠行 ≥ 4.5;正文本身不到 4.5 的主题折叠行不许比正文更淡
+  if (f < Math.min(body, 4.5) - 0.01) problems.push(`${tag}:折叠行低于下限 ${(Math.min(body, 4.5) - 0.01).toFixed(2)}`);
   if (body >= 4.8 && f < 4.5) problems.push(`${tag}:正文 ≥ 4.8 的主题折叠行应 ≥ 4.5`);
   if (body >= 7.5 && body - f < 1.2) problems.push(`${tag}:正文 ≥ 7.5 的主题折叠行与正文应差 ≥ 1.2`);
   if (TESTED.includes(name) && (body - f < 3.0 || f < 4.5)) problems.push(`${tag}:测试主题要求差 ≥ 3.0 且折叠行 ≥ 4.5`);
