@@ -20,16 +20,23 @@ const md = read('client/src/components/MarkdownRenderer.jsx');
 // 都从 pre 子树找。类名随之按新结构锁。
 assert.ok(/export function CodeBlock\(\{ lang, code \}\)/.test(block),
   'CodeBlock 必须具名导出且签名不变(上游 advanced.tsx / fence-render.tsx 按 {code,lang} 调它)');
+// r158:代码块跟随主题 —— 暗色硬编码换成 index.css 的 .tc-code* 主题类,CollapsibleCode 传
+// tone="theme"(Artifact 代码视图不传,仍是深色)。结构不变:外层容器、工具条(语言 / 运行 / 复制)
+// 作为 header 进同一个 <pre>。类名按新写法逐字锁。
 for (const frag of [
   'className="relative group my-3"',
-  'className="flex items-center justify-between gap-2 shrink-0 px-3.5 py-1.5 bg-[#2b2722] border-b border-[#3a342b] whitespace-normal"',
-  'className="text-[11px] font-mono text-[#9a8e78]"',
+  'className="tc-code-bar"',
+  'className="tc-code-lang" data-code-lang=""',
   '{lang || \'code\'}',
-  '<CopyButton text={code} />',
-  'className="bg-[#211e19] border border-[#3a342b] text-[13px] leading-relaxed font-mono text-[#e8e2d6]"',
+  '{isRunnableLang(lang) && <RunButton code={code} />}',
+  '<CopyButton text={code} tone="theme" />',
+  'className="tc-code-run"',
+  '<CollapsibleCode code={code} header={header} tone="theme" />',
 ]) {
   assert.ok(block.includes(frag), `CodeBlock 渲染必须与新结构逐字一致,缺: ${frag}`);
 }
+assert.ok(!/#211e19|#2b2722|#3a342b|#e8e2d6|#9a8e78/i.test(block),
+  'CodeBlock 不许再留暗色硬编码(跟随主题的块全取 --cg-* 变量)');
 assert.ok(/<CollapsibleCode\b[\s\S]{0,300}?header=\{header\}/.test(block),
   '工具条必须以 header 传进 CollapsibleCode(否则又跑到 pre 外面,运行/复制句柄失效)');
 assert.ok(/<CollapsibleCode\b/.test(block), '长代码折叠仍走 ArtifactPreview 的 CollapsibleCode(防两处漂移)');
