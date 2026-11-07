@@ -51,7 +51,6 @@ const SETTINGS_INDEX = [
   // 要点一下才跳 tab,而"只加锚不改既有控件行为"是硬规矩(§9.3),所以让区块本来就在
   // 默认 tab 里,这条路径才无条件成立。
   { id: 'set-genui', tab: 'general', title: '生成式界面（cgui-ui）', keys: 'genui cgui-ui dsh-ui 生成式 界面 组件 渲染 图表 表单 技能 skill' },
-  // r122:过程块自动折叠开关,同样落 general(设置面板打开时的默认 tab),搜索「折叠」可直达。
   { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存 空闲 回收 idle keepalive' },
   { id: 'set-stall-timeout', tab: 'session', title: '静默超时', keys: '静默 超时 看门狗 stall timeout watchdog 上游 无输出 卡住 子代理 结束 回合 提示' },
   { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入 自动 第三方 费用' },

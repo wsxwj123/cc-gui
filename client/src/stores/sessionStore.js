@@ -966,9 +966,8 @@ export const useStore = create((set, get) => ({
     try { return localStorage.getItem('cgui-genui') !== '0'; } catch { return true; }
   })(),
 
-  // r122 过程块自动折叠开关(用户 2026-09-21:默认**不**折叠)。**只管本浏览器**一轮回答结束后
-  // 要不要把思考与工具调用自动收成一行摘要;键 cgui-auto-fold-process,'1' = 开,'0' / 没有键 = 关。
-  // 正在生成的回合与异常收尾的回合(StripAutoContext)始终展开,不受此项影响;聊天模式另一条路径,也不受影响。
+  // r122 过程块自动折叠开关的状态与键(cgui-auto-fold-process,'1' = 开,'0' / 没有键 = 关)。
+  // r159:总栏与设置里的开关显示已按用户要求去掉,这里按「后端接口留着」只作保留,没有界面消费者,不影响任何显示。
   autoFoldProcess: (() => {
     try { return localStorage.getItem('cgui-auto-fold-process') === '1'; } catch { return false; }
   })(),

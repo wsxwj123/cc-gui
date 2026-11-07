@@ -811,7 +811,7 @@ function LoadingStylePicker() {
       </div>
       <div className="flex items-center gap-2 pt-1">
         <span className="text-[11px] text-ink font-body font-medium">转速</span>
-        <span className="ml-auto text-[9px] text-ink-faint font-body">三体旋转、四体旋转的速度</span>
+        <span className="ml-auto text-[9px] text-ink-faint font-body">随机与旋转类动画的速度</span>
       </div>
       <div role="radiogroup" aria-label="加载动画转速" className="grid grid-cols-3 gap-1.5">
         {LOADING_SPEED_OPTIONS.map((opt) => {
