@@ -54,6 +54,36 @@ test('SF-103 正文全部可见（含中间插话），且文字用 textContent 
 });
 
 
+// r159 恢复:总栏与自动折叠去掉后过程块恒展开,原标题里的「收起态」没有对应状态,标题与一条断言文案去掉了这个词;
+// 其余断言(Workflow 段存在 / 不带 hidden / 占位可见 / 有字,Task 那一轮进 group、没有独立 task 段)与总栏无关,原样保留。
+// (起初整条退役,判官 2026-11-07 指出退役站不住,落盘回合的这两点没有别的覆盖。)
+test('SF-107 Workflow 卡占位可见且有字（R114 行为防线）；r157 起 Task / Agent 进 group、不再单独成段', async ({ page }) => {
+  await openApp(page);
+  await openSessionByMarker(page, MARKER_C);
+  const wfRow = turnRows(page).filter({ hasText: C.workflowLabel }).first();
+  await expect(wfRow).toHaveCount(1);
+
+  for (const [label, row, kind] of [['Workflow', wfRow, 'workflow']]) {
+    const snap = await stripSnapshot(row);
+    expect(snap.present, `${label} 那一轮应当有条带根`).toBe(true);
+    expect(snap.kinds, `${label} 段的 kind 应当是 ${kind}`).toContain(kind);
+    expect(snap.hiddenKinds, `${label} 段任何状态下都不得被折起来`).not.toContain(kind);
+    const box = await row.locator(`[data-strip-item="${kind}"]`).first().boundingBox();
+    expect(box && box.height > 0, `${label} 卡必须占位可见（height > 0）`).toBe(true);
+    const textLen = await row.locator(`[data-strip-item="${kind}"]`).first().evaluate((el) => (el.textContent || '').trim().length);
+    expect(textLen, `${label} 卡里的文字必须还在`).toBeGreaterThan(0);
+  }
+
+  // r157:用户要求运行中的思考 / 工具 / Agent 都折叠(同桌面版),Agent 调用进工作组——这一轮(夹具里 Task 描述「SF 夹具子代理」)
+  // 没有独立的 task 段,组头行写子代理的标题;原来「Task 卡收起态仍可见」的 R114 防线只保留给 Workflow。
+  const taskRow = turnRows(page).filter({ hasText: 'SF 夹具子代理' }).first();
+  await expect(taskRow, 'Task 那一轮的折叠行应带子代理标题').toHaveCount(1);
+  const taskSnap = await stripSnapshot(taskRow);
+  expect(taskSnap.present, 'Task 那一轮应当有条带根').toBe(true);
+  expect(taskSnap.kinds, 'r157 起 Task 不再单独成 task 段').not.toContain('task');
+  expect(taskSnap.kinds, 'Task 进了 group 段').toContain('group');
+});
+
 test('SF-109 无可折块的轮：state=none、不渲染摘要行、正文照常', async ({ page }) => {
   await openApp(page);
   await openSessionByMarker(page, MARKER_C);
