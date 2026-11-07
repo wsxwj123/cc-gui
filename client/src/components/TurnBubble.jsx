@@ -94,6 +94,15 @@ function InlineToolCard({ toolCall, onRetryTool }) {
 // CoworkBlocks:母/子共用的有序 blocks 渲染(§1.5 硬约束,单一渲染路径)。
 export { InlineToolCard, renderRichToolCard, ToolCallsGroup };
 
+// r158:卡头标题的参数预览。认得的字段(命令 / 文件名 / pattern / query)走 formatInputPreview;
+// 认不得的工具(NotebookEdit 等)退回紧凑 JSON,卡头不再是一片空白。只截前 200 字,标题本身单行省略。
+function cardTitlePreview(input) {
+  const known = formatInputPreview(input);
+  if (known) return known;
+  if (!input || typeof input !== 'object' || Object.keys(input).length === 0) return '';
+  try { return JSON.stringify(input).slice(0, 200); } catch { return ''; }
+}
+
 // 停止合成终态的统一降级卡(fable 判官严重项):合成 result 是 {isError:false,
 // interrupted:true},五张专用卡(Bash/EditDiff/Read/GrepGlob/Web)只有成功/失败两分支,
 // 会把"被停止"渲染成绿勾成功——EditDiffCard 最误导(未应用的 Edit 像已写入)。
@@ -103,7 +112,7 @@ function InterruptedToolCard({ toolCall }) {
   const Icon = getToolIcon(toolCall.name);
   // 写入类工具的中断态必须明确表达"未应用":改动没有写入文件。
   const isWriteTool = toolCall.name === 'Edit' || toolCall.name === 'MultiEdit' || toolCall.name === 'Write';
-  const preview = formatInputPreview(toolCall.input);
+  const preview = cardTitlePreview(toolCall.input);
   return (
     <ToolCardShell
       toolName={toolCall.name}
@@ -330,7 +339,7 @@ function ToolCallRow({ toolCall, onRetryTool }) {
   const planApproved = isPlanApproved(toolCall);
   const planDeny = planDenyState(toolCall); // 'refining'(追加修改)| 'cancelled'(取消)| null
   const hasError = toolCall.result?.isError && !askAnswered && !planApproved && !planDeny;
-  const preview = formatInputPreview(toolCall.input);
+  const preview = cardTitlePreview(toolCall.input);
   const status = !toolCall.result ? 'run'
     : toolCall.result.interrupted ? 'stopped'
       : hasError ? 'err' : 'ok';
