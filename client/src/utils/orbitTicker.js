@@ -1,9 +1,13 @@
 // r154:三体 / 四体旋转指示器的摆位公式与共享动画循环(零 React)。
+// r159:摆位改为按变体(orbitVariants.js 的 16 种)取公式;下面的 orbitAngles / orbitPlacement
+// 是默认变体 nod(上下点头)的旧接口,保留给旧引用与单测。
 // 公式照设计稿 v8 的 orbitPlace:圈水平放着,上下仰俯约 ±29°(过水平线时侧立成一条线);
 // 点绕圈整 360°,每个仰俯周期(3.4 秒)转两圈并与仰俯锁相,所以最高 / 最低点总是钝角三角形;
 // 过水平线时快、到最高 / 最低点时慢。
 // 全页面只有一个 requestAnimationFrame 循环:有实例登记才跑,登记清空就停;页面隐藏时暂停;
 // 系统要求减弱动画时只摆一次静止帧。
+
+import { ORBIT_VARIANTS, variantOf, dotPx, DOT_BASE_PX } from './orbitVariants.js';
 
 const TAU = Math.PI * 2;
 const PERIOD_S = 3.4;
@@ -12,12 +16,12 @@ export const SPEED_FACTORS = Object.freeze({ slow: 0.7, normal: 1, fast: 1.4 });
 const DEFAULT_FACTOR = SPEED_FACTORS.slow;
 // 后台恢复或单帧卡顿时,不让相位一次跳太多
 const MAX_FRAME_S = 0.1;
-// 圆点底座:macOS WebKit 会把很小的盒子的宽、高分别取整到设备像素再画圆角,3.6px 的点会被压成横向椭圆;
-// 底座取 18px 后取整误差占比很小,再用 transform 的 scale 缩回同样的视觉大小(scale = 1 时约 3.6px)。
-// 必须与 index.css 里 .orbit-mark i 的宽高 / margin 同步改。
-const DOT_VISUAL_PX = 3.6;
-const DOT_BASE_PX = 18;
-const DOT_K = DOT_VISUAL_PX / DOT_BASE_PX;
+// 圆点底座 18px(见 orbitVariants.js 的 DOT_BASE_PX),transform 的 scale = dotPx(d) / 18,
+// 直径在最远 1.6px 到最近 2.5px 之间变化。必须与 index.css 里 .orbit-mark i 的宽高 / margin 同步改。
+
+function variantFor(id, n) {
+  return variantOf(id) || ORBIT_VARIANTS[n === 4 ? 'orbit4' : 'orbit3'];
+}
 
 /** 时刻 t(秒)的各个相位角;单独导出便于单测验证单调性与圈数。 */
 export function orbitAngles(t) {
@@ -32,30 +36,26 @@ export function orbitAngles(t) {
   };
 }
 
-/** n 个点在时刻 t 的摆位;x、y 是单位圆内的归一化坐标(调用方乘半径),z 是叠放顺序。 */
-export function orbitPlacement(n, t) {
-  const { elev, spin, roll } = orbitAngles(t);
-  const se = Math.sin(elev);
-  const ce = Math.cos(elev);
-  const sr = Math.sin(roll);
-  const cr = Math.cos(roll);
+/** 变体 v 的 n 个点在时刻 t 的摆位:x、y 是归一化坐标(调用方乘半径),scale 是对 18px 底座的
+ *  transform 缩放(= dotPx(d) / 18),opacity 与 z(叠放顺序)都随深度走。 */
+function placeVariant(v, n, t) {
   const out = [];
   for (let k = 0; k < n; k++) {
-    const a = spin + (TAU * k) / n;
-    const x0 = Math.cos(a);
-    const z0 = Math.sin(a); // z 朝向观察者
-    const xs = x0;
-    const ys = z0 * se; // 俯视时近处的点落在下方
-    const d = z0 * ce; // 深度
-    out.push({
-      x: xs * cr - ys * sr,
-      y: xs * sr + ys * cr,
-      scale: 1 + 0.42 * d,
-      opacity: 0.72 + (0.28 * (d + 1)) / 2,
-      z: Math.round((d + 1) * 10),
-    });
+    const p = v.place(t, k, n);
+    const d = Math.max(-1, Math.min(1, p.d || 0));
+    const u = (d + 1) / 2;
+    out.push({ x: p.x, y: p.y, d, scale: dotPx(d) / DOT_BASE_PX, opacity: 0.72 + 0.28 * u, z: Math.round(u * 20) });
   }
   return out;
+}
+
+/** 默认变体 nod(上下点头)的 n 个点在时刻 t 的摆位(旧接口,保留)。 */
+export function orbitPlacement(n, t) {
+  return placeVariant(ORBIT_VARIANTS.orbit3, n, t);
+}
+
+function stillTimeOf(v) {
+  return v && Number.isFinite(v.stillT) ? v.stillT : STILL_T;
 }
 
 function speedFactor(el) {
@@ -68,12 +68,12 @@ function place(entry, t) {
   const w = el.clientWidth;
   if (w > 0) entry.R = Math.max(3.5, w / 2 - 2.2);
   const R = entry.R || 3.5;
-  const pts = orbitPlacement(entry.n, t);
+  const pts = placeVariant(entry.variant, entry.n, t);
   for (let k = 0; k < pts.length; k++) {
     const kid = kids[k];
     if (!kid) continue;
     const p = pts[k];
-    kid.style.setProperty('transform', `translate(${(p.x * R).toFixed(2)}px,${(p.y * R).toFixed(2)}px) scale(${(p.scale * DOT_K).toFixed(3)})`);
+    kid.style.setProperty('transform', `translate(${(p.x * R).toFixed(2)}px,${(p.y * R).toFixed(2)}px) scale(${p.scale.toFixed(3)})`);
     kid.style.setProperty('opacity', p.opacity.toFixed(3));
     kid.style.zIndex = String(p.z);
   }
@@ -83,7 +83,7 @@ function place(entry, t) {
  * 环境可注入(单测用假 raf):
  *   raf(cb) / caf(id):帧调度;hidden():页面是否隐藏;reduced():是否减弱动画;
  *   onVisibility(cb):订阅可见性变化,返回取消订阅函数。
- * register({ el, kids, n }) 返回注销函数。每个实例各自累积相位,转速每帧从 el.dataset.speed 读,
+ * register({ el, kids, n, variant }) 返回注销函数;variant 是 orbitVariants 的 id,缺省按 n 取 orbit3 / orbit4。每个实例各自累积相位,转速每帧从 el.dataset.speed 读,
  * 改转速不重建 DOM、不跳相位。
  */
 export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = () => false, onVisibility = null } = {}) {
@@ -99,7 +99,7 @@ export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = ()
   }
 
   function placeStill() {
-    for (const e of entries) if (e.el.isConnected !== false) place(e, STILL_T);
+    for (const e of entries) if (e.el.isConnected !== false) place(e, stillTimeOf(e.variant));
   }
 
   function frame(now) {
@@ -131,7 +131,10 @@ export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = ()
   function register(entry) {
     if (!entry || !entry.el) return () => {};
     const kids = Array.from(entry.kids || []);
-    const rec = { el: entry.el, kids, n: entry.n || kids.length, t: STILL_T, R: 0 };
+    const n = entry.n || kids.length;
+    const variant = variantFor(entry.variant, n);
+    // 相位从静止帧时刻起算:首帧、减弱动画与正常播放的起点一致
+    const rec = { el: entry.el, kids, n, variant, t: stillTimeOf(variant), R: 0 };
     entries.add(rec);
     // 先摆一帧,首帧前不出现叠在中心的一坨点
     place(rec, rec.t);

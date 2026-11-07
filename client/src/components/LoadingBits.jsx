@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { orbitTicker } from '../utils/orbitTicker.js';
+import { ORBIT_VARIANTS, variantOf } from '../utils/orbitVariants.js';
 import { DEFAULT_LOADING_STYLE } from '../utils/loadingPrefs.js';
 
 // 加载指示件(spinner / 耗时),从 App.jsx 抽出共享:底部状态行 LiveStatusLine(主会话与
@@ -34,21 +35,24 @@ export function CliSpinner({ size = 20, markProps = null }) {
 
 // r154:三体 / 四体旋转。点位由全局唯一的 orbitTicker 每帧写到 <i> 上(React 不管 <i> 的 style);
 // 转速只写进 data-speed,ticker 下一帧按新转速摆,不重建 DOM。
-export function Orbit({ n = 3, size = 20, markProps = null }) {
-  const count = n === 4 ? 4 : 3;
+// r159:variant = orbitVariants 的 16 种 id 之一(缺省按 n 取 orbit3 / orbit4),点数取自变体。
+export function Orbit({ n = 3, variant = null, size = 20, markProps = null }) {
+  const v = variantOf(variant) || ORBIT_VARIANTS[n === 4 ? 'orbit4' : 'orbit3'];
+  const count = v.n;
+  const variantId = v.id;
   const speed = useStore((s) => s.loadingSpeed) || 'slow';
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;
     if (!el) return undefined;
     const kids = Array.from(el.children);
-    return orbitTicker.register({ el, kids, n: kids.length });
-  }, [count]);
+    return orbitTicker.register({ el, kids, n: kids.length, variant: variantId });
+  }, [variantId]);
   return (
     <span
       {...mergeMarkProps(markProps, 'orbit-mark', { width: size, height: size })}
       ref={ref}
-      data-style={`orbit${count}`}
+      data-style={variantId}
       data-speed={speed}
       aria-hidden="true"
     >
@@ -62,7 +66,7 @@ export function LoadingMark({ size = 20, variant = null, markProps = null }) {
   const style = variant || chosen;
   // 每个分支的最外层都带 data-style = 当前样式 id,供外层识别
   const mp = { ...(markProps || {}), 'data-style': style };
-  if (style === 'orbit3' || style === 'orbit4') return <Orbit n={style === 'orbit4' ? 4 : 3} size={size} markProps={mp} />;
+  if (variantOf(style)) return <Orbit variant={style} size={size} markProps={mp} />;
   if (style === 'cli') return <CliSpinner size={size} markProps={mp} />;
   return (
     <span {...mergeMarkProps(mp, `loading-mark loading-${style}`, { width: size, height: size })}><span /></span>

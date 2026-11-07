@@ -2,7 +2,8 @@
 // r154 R3:三体 / 四体旋转的摆位公式 orbitPlacement 与共享动画循环 createOrbitTicker。
 //
 // 锁的事:
-//   O1 n=3/4 一整个周期每帧结果有限,scale ∈ [0.58, 1.42],opacity ∈ [0.72, 1]。
+//   O1 n=3/4 一整个周期每帧结果有限,scale(对 18px 底座的 transform 缩放)∈ [1.6/18, 2.5/18]
+//      (r159 新尺寸:最远 1.6px、最近 2.5px),opacity ∈ [0.72, 1]。
 //   O2 仰俯角最大那一帧(th≈π/2),三个点构成钝角三角形,最大内角 95°–110°(设计稿约 100°)。
 //   O3 spin 随时间单调递增,一个周期(3.4 秒)正好两圈。
 //   O4 过水平线那一帧(th=0),三个点共线;y 的差只来自轻微侧倾(roll),近似相等。
@@ -43,7 +44,7 @@ function maxInteriorAngleDeg(p) {
   return Math.max(ang(p[0], p[1], p[2]), ang(p[1], p[2], p[0]), ang(p[2], p[0], p[1]));
 }
 
-await report.check('O1', '一整个周期每帧有限,scale ∈ [0.58,1.42],opacity ∈ [0.72,1]', 'red', () => {
+await report.check('O1', '一整个周期每帧有限,scale ∈ [1.6/18, 2.5/18],opacity ∈ [0.72,1]', 'red', () => {
   for (const n of [3, 4]) {
     for (let i = 0; i <= 600; i++) {
       const t = (PERIOD * i) / 600;
@@ -51,7 +52,7 @@ await report.check('O1', '一整个周期每帧有限,scale ∈ [0.58,1.42],opac
       assert.equal(pts.length, n);
       for (const p of pts) {
         for (const k of ['x', 'y', 'scale', 'opacity', 'z']) assert.ok(Number.isFinite(p[k]), `n=${n} t=${t} ${k}=${p[k]}`);
-        assert.ok(p.scale >= 0.58 - EPS && p.scale <= 1.42 + EPS, `scale ${p.scale}`);
+        assert.ok(p.scale >= 1.6 / 18 - EPS && p.scale <= 2.5 / 18 + EPS, `scale ${p.scale}`);
         assert.ok(p.opacity >= 0.72 - EPS && p.opacity <= 1 + EPS, `opacity ${p.opacity}`);
         assert.ok(Math.hypot(p.x, p.y) <= 1 + EPS, '点应在单位圆内');
         assert.ok(Number.isInteger(p.z) && p.z >= 0 && p.z <= 20);
