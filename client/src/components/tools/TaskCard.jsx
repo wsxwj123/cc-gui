@@ -1,5 +1,5 @@
 import React, { useState, useContext } from 'react';
-import { ChevronDown, ChevronRight, Loader2, Maximize2, CheckCircle2, XCircle, CircleSlash, Square } from '../Icon.jsx';
+import { Loader2, Maximize2, CheckCircle2, XCircle, CircleSlash, Square } from '../Icon.jsx';
 import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
@@ -185,14 +185,16 @@ export function TaskCard({ toolCall }) {
   // 重设计(用户反馈原 accent 描边 + 实色标签太丑):生产级克制 —— 极细中性
   // 边框卡,去大色块;左侧图标位 = 运行中九宫格 + 沿边框一圈的流光(r154)/ 结束后几何 agent
   // 图标 + 状态角点(绿/红);代理类型用小号大写字距标签(ink-muted),任务描述
-  // 正文色;展开箭头与子代理窗口入口悬停浮现(展开态与触屏常显)。
+  // 折叠行淡色(.cg-fold);子代理窗口入口悬停浮现(展开态与触屏常显)。
   // 命名 group/tc:TurnBubble 外层已有 group,避免嵌套 group 互相触发。
   return (
     <div className="group/tc relative border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
       {isWorking && <AgentBeam />}
       <button
+        type="button"
         onClick={() => setExpanded(!expanded)}
-        className="w-full pl-3 pr-2 py-2 flex items-center gap-2.5 hover:bg-canvas-warm transition-colors text-left"
+        aria-expanded={expanded ? 'true' : 'false'}
+        className="cg-fold w-full pl-3 pr-2 py-2 flex items-center gap-2.5 hover:bg-canvas-warm text-left cursor-pointer"
       >
         {/* 图标位:运行中=九宫格追逐(与侧栏同款);完成=绿色圆圈√;出错=红色圆圈×;已停止/中断=灰色断环 */}
         <span className="relative shrink-0 w-5 h-5 flex items-center justify-center text-ink-muted">
@@ -211,11 +213,11 @@ export function TaskCard({ toolCall }) {
         </span>
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2 min-w-0">
-            <span className="text-[10px] uppercase tracking-[0.12em] text-ink-muted font-body shrink-0" title={`子代理: ${subagentType}`}>
+            <span className="text-[10px] uppercase tracking-[0.12em] font-body shrink-0" title={`子代理: ${subagentType}`}>
               {subagentType}
             </span>
             {agentModel && (
-              <span className="text-[9px] font-mono text-ink-faint truncate" title="该子代理实际使用的模型">
+              <span className="text-[9px] font-mono truncate" title="该子代理实际使用的模型">
                 {agentModel}
               </span>
             )}
@@ -229,7 +231,7 @@ export function TaskCard({ toolCall }) {
             )}
           </div>
           {description && (
-            <div className="text-[12px] text-ink font-body truncate mt-0.5">
+            <div className="text-[12px] font-body truncate mt-0.5">
               {description}
             </div>
           )}
@@ -247,7 +249,7 @@ export function TaskCard({ toolCall }) {
             <Square size={12} className="fill-current" />
           </span>
         )}
-        {/* 悬停浮现:子代理窗口入口(#9) + 展开箭头;触屏无 hover,常显淡态 */}
+        {/* 悬停浮现:子代理窗口入口(#9);r158 起卡头没有展开箭头。触屏无 hover,常显淡态 */}
         <span className={`shrink-0 flex items-center gap-0.5 transition-opacity ${expanded ? 'opacity-100' : 'opacity-0 group-hover/tc:opacity-100 max-md:opacity-60'}`}>
           <span
             role="button"
@@ -258,9 +260,6 @@ export function TaskCard({ toolCall }) {
           >
             <Maximize2 size={12} />
           </span>
-          {expanded
-            ? <ChevronDown size={13} className="text-ink-faint" />
-            : <ChevronRight size={13} className="text-ink-faint" />}
         </span>
       </button>
 
@@ -332,7 +331,7 @@ export function TaskCard({ toolCall }) {
                 Task 工具最终结果
               </summary>
               <pre className={`text-[11px] font-mono whitespace-pre-wrap mt-2 max-h-64 overflow-y-auto p-2 rounded ${
-                isError ? 'bg-red-50 text-red-700' : 'bg-canvas-warm text-ink-muted'
+                isError ? 'bg-error-subtle text-error' : 'bg-canvas-warm text-ink-muted'
               }`}>
                 {String(toolCall.result.content || '').slice(0, 8000)}
               </pre>
