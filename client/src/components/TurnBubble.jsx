@@ -495,7 +495,7 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
 // 复用 renderRichToolCard/ToolCallRow。活跃段默认展开随流刷新,正文落地后收起。
 // liveBlock = 生成中整轮 blocks 的最后一块(否则 null):只有它是思考时,那块思考才标"进行中"。
 // r157:liveLabel 非空 = 这一组的头行承载实时状态行(由 isLiveLineHostedByGroup 判定,见 CoworkBlocks),
-// 头行换成 三角 + LiveStatusLine;startedAt = 回合起始时刻(与改动前底部行同一口径)。
+// 头行只剩 LiveStatusLine(r158 起折叠行没有展开箭头,靠淡色区分);startedAt = 回合起始时刻(与改动前底部行同一口径)。
 function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, liveLabel = null, startedAt = null }) {
   const toolN = items.reduce((n, b) => n + (b.type === 'tool_use' ? 1 : 0), 0);
   // 出错计数与展开后条目的 data-entry-state 同一口径(entryStateOf):已答的提问、已批准的计划、
