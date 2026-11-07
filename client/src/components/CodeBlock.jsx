@@ -9,8 +9,9 @@ import { isRunnableLang, requestTerminalRun } from '../utils/terminalBus.js';
 // 组件 —— 留在原地就闭环成
 //   MarkdownRenderer → GenuiFence → fence-render.tsx → host/primitives.jsx → MarkdownRenderer
 // ESM 循环在 Vite/Rollup 下时灵时不灵,dev 不复现、压缩后才炸。抽出后环消失。
-// 行为与抽出前一字不变;折叠与复制按钮都复用 ArtifactPreview 的共用件
-// (artifact 代码视图同款,防两处漂移)。
+// 折叠与复制按钮都复用 ArtifactPreview 的共用件(artifact 代码视图同款,防两处漂移)。
+// r158:改传 tone="theme",底、边、工具条、按钮全取主题派生色(样式在 index.css 的 .tc-code*);
+// Artifact 代码视图不传 tone,仍是原来的深色。
 
 // ▶ 运行:把命令送进内置终端执行(bash/shell 类语言才显示)。首次使用必过确认门,
 // 可"本次会话记住";门与请求总线都在 utils/terminalBus.js(防其它入口绕过确认)。
@@ -25,7 +26,7 @@ function RunButton({ code }) {
     <button
       onClick={run}
       title="在内置终端中执行(真实执行,首次会先确认)"
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] text-[#9a8e78] hover:text-[#e8e2d6] hover:bg-white/5 transition-colors"
+      className="tc-code-run"
     >
       <Play size={11} /> 运行
     </button>
@@ -36,21 +37,16 @@ export function CodeBlock({ lang, code }) {
   // 工具条作为 header 传进 CollapsibleCode,落在同一个 <pre> 里(见该组件注释:黑盒契约的
   // 「代码块」就是 pre 元素,运行/复制都在它的子树内)。内边距随之落到代码层,工具条全宽贴顶。
   const header = (
-    <span className="flex items-center justify-between gap-2 shrink-0 px-3.5 py-1.5 bg-[#2b2722] border-b border-[#3a342b] whitespace-normal">
-      <span className="text-[11px] font-mono text-[#9a8e78]">{lang || 'code'}</span>
-      <span className="flex items-center gap-1.5">
-        {isRunnableLang(lang) && <RunButton code={code} />}
-        <CopyButton text={code} />
-      </span>
+    <span className="tc-code-bar">
+      <span className="tc-code-lang" data-code-lang="">{lang || 'code'}</span>
+      <span className="tc-code-sp" />
+      {isRunnableLang(lang) && <RunButton code={code} />}
+      <CopyButton text={code} tone="theme" />
     </span>
   );
   return (
     <div className="relative group my-3">
-      <CollapsibleCode
-        code={code}
-        header={header}
-        className="bg-[#211e19] border border-[#3a342b] text-[13px] leading-relaxed font-mono text-[#e8e2d6]"
-      />
+      <CollapsibleCode code={code} header={header} tone="theme" />
     </div>
   );
 }

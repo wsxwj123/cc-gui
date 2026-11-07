@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useContext, useMemo } from 'react';
 import {
-  Brain, Copy, Check, ChevronDown, ChevronRight,
+  Brain, Copy, Check,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
   Globe, Edit3, Loader2, RotateCcw, Bot, GitBranch, Send, ShieldAlert
 } from './Icon.jsx';
@@ -20,6 +20,7 @@ import { WorkflowCard } from './tools/WorkflowCard.jsx';
 import { GrepGlobCard } from './tools/GrepGlobCard.jsx';
 import { WebCard } from './tools/WebCard.jsx';
 import { SkillCard } from './tools/SkillCard.jsx';
+import { ToolCardShell } from './tools/ToolCardShell.jsx';
 import {
   computeCostForMessage, costUnavailableReason, costSourceLabel, costUnknownNote, COST_REASON_TEXT,
   formatCost, displayUsd, isPlanBilling, costTitle,
@@ -93,6 +94,15 @@ function InlineToolCard({ toolCall, onRetryTool }) {
 // CoworkBlocks:母/子共用的有序 blocks 渲染(§1.5 硬约束,单一渲染路径)。
 export { InlineToolCard, renderRichToolCard, ToolCallsGroup };
 
+// r158:卡头标题的参数预览。认得的字段(命令 / 文件名 / pattern / query)走 formatInputPreview;
+// 认不得的工具(NotebookEdit 等)退回紧凑 JSON,卡头不再是一片空白。只截前 200 字,标题本身单行省略。
+function cardTitlePreview(input) {
+  const known = formatInputPreview(input);
+  if (known) return known;
+  if (!input || typeof input !== 'object' || Object.keys(input).length === 0) return '';
+  try { return JSON.stringify(input).slice(0, 200); } catch { return ''; }
+}
+
 // 停止合成终态的统一降级卡(fable 判官严重项):合成 result 是 {isError:false,
 // interrupted:true},五张专用卡(Bash/EditDiff/Read/GrepGlob/Web)只有成功/失败两分支,
 // 会把"被停止"渲染成绿勾成功——EditDiffCard 最误导(未应用的 Edit 像已写入)。
@@ -102,31 +112,25 @@ function InterruptedToolCard({ toolCall }) {
   const Icon = getToolIcon(toolCall.name);
   // 写入类工具的中断态必须明确表达"未应用":改动没有写入文件。
   const isWriteTool = toolCall.name === 'Edit' || toolCall.name === 'MultiEdit' || toolCall.name === 'Write';
-  const preview = formatInputPreview(toolCall.input);
+  const preview = cardTitlePreview(toolCall.input);
   return (
-    <div className="border border-canvas-sunken bg-canvas rounded-md overflow-hidden opacity-80">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-canvas-warm/60 transition-colors text-left"
-      >
-        <Icon size={12} className="text-ink-faint shrink-0" />
-        <span className="text-[11px] font-mono text-ink-muted truncate flex-1">{toolCall.name}</span>
-        {preview && (
-          <span className="text-[10px] text-ink-faint font-mono truncate max-w-[200px]">{preview}</span>
-        )}
-        <span className="text-[10px] text-ink-faint shrink-0">{isWriteTool ? '已停止（未应用）' : '已停止'}</span>
-      </button>
-      {expanded && (
-        <div className="border-t border-canvas-sunken p-2.5 animate-fade-in">
-          <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">
-            输入（工具被停止,无返回结果{isWriteTool ? ',改动未写入文件' : ''}）
-          </div>
-          <pre className="text-[11px] bg-canvas-warm rounded p-2 overflow-x-auto max-h-48 font-mono text-ink-muted">
-            {JSON.stringify(toolCall.input, null, 2)}
-          </pre>
-        </div>
-      )}
-    </div>
+    <ToolCardShell
+      toolName={toolCall.name}
+      status="stopped"
+      Icon={Icon}
+      title={preview}
+      titleMono
+      meta={<span>{isWriteTool ? '已停止（未应用）' : '已停止'}</span>}
+      expanded={expanded}
+      onToggle={() => setExpanded(!expanded)}
+    >
+      <div className="tc-label">
+        输入（工具被停止,无返回结果{isWriteTool ? ',改动未写入文件' : ''}）
+      </div>
+      <pre className="tc-block max-h-48">
+        {JSON.stringify(toolCall.input, null, 2)}
+      </pre>
+    </ToolCardShell>
   );
 }
 
@@ -146,33 +150,27 @@ function McpToolCard({ toolCall }) {
   const inputStr = toolCall.input && Object.keys(toolCall.input).length
     ? JSON.stringify(toolCall.input, null, 2) : '';
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden animate-fade-up">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full px-3 py-2 bg-canvas-warm flex items-center gap-2 hover:bg-canvas-deep/20 transition-colors text-left"
-      >
-        <Wrench size={12} className="text-ink-muted shrink-0" />
-        <span className="font-mono text-[11px] text-ink-muted truncate flex-1">{shortName}</span>
-        {serverName && <span className="text-[10px] text-ink-faint shrink-0">{serverName}</span>}
-        {running
-          ? <span className="mini-spin" aria-hidden="true" />
-          : result?.isError
-            ? <span className="text-red-400 text-[10px] shrink-0">错误</span>
-            : <Check size={11} className="text-green-400 shrink-0" />}
-      </button>
-      {expanded && (
-        <div className="border-t border-canvas-sunken p-2.5 space-y-2">
-          {inputStr && (
-            <pre className="text-[10px] bg-canvas-warm rounded p-2 overflow-x-auto max-h-32 font-mono text-ink-faint">{inputStr}</pre>
-          )}
-          {result?.content && (
-            <pre className="text-[11px] whitespace-pre-wrap break-all max-h-64 overflow-auto font-mono text-ink-muted"><Linkify text={result.content} /></pre>
-          )}
-          <ToolResultImages images={images} name={`${shortName} 结果`} />
-        </div>
-      )}
-
-    </div>
+    <ToolCardShell
+      toolName={toolCall.name}
+      label={serverName || 'mcp'}
+      status={running ? 'run' : result?.isError ? 'err' : 'ok'}
+      Icon={Wrench}
+      title={shortName}
+      titleMono
+      titleHint={toolCall.name}
+      expanded={expanded}
+      onToggle={() => setExpanded(!expanded)}
+    >
+      <div className="space-y-2">
+        {inputStr && (
+          <pre className="tc-block max-h-32">{inputStr}</pre>
+        )}
+        {result?.content && (
+          <pre className={`tc-block whitespace-pre-wrap break-all max-h-64 ${result.isError ? 'tc-block-err' : ''}`}><Linkify text={result.content} /></pre>
+        )}
+        <ToolResultImages images={images} name={`${shortName} 结果`} />
+      </div>
+    </ToolCardShell>
   );
 }
 
@@ -208,14 +206,14 @@ function renderRichToolCard(toolCall) {
 
 // ─── Tool category config ──────────────────────────────────────
 const CATEGORY_CONFIG = {
-  // U9a:子代理派发(Task/Agent)是特殊调用,折叠条里单列紫色分组 + 头部徽章,
-  // 不再与普通工具混在 "调用" 里无从分辨。
+  // U9a:子代理派发(Task/Agent)是特殊调用,折叠条里单列强调色分组 + 头部徽章,
+  // 不再与普通工具混在 "调用" 里无从分辨。r158:色取主题强调色,不用固定紫色。
   agent: {
     label: '子代理',
     icon: Bot,
-    color: 'text-violet-600',
-    bg: 'bg-violet-50',
-    border: 'border-violet-200',
+    color: 'text-accent',
+    bg: 'bg-accent-subtle',
+    border: 'border-accent-muted',
   },
   skill: {
     label: '读取',
@@ -341,71 +339,56 @@ function ToolCallRow({ toolCall, onRetryTool }) {
   const planApproved = isPlanApproved(toolCall);
   const planDeny = planDenyState(toolCall); // 'refining'(追加修改)| 'cancelled'(取消)| null
   const hasError = toolCall.result?.isError && !askAnswered && !planApproved && !planDeny;
-  const preview = formatInputPreview(toolCall.input);
+  const preview = cardTitlePreview(toolCall.input);
+  const status = !toolCall.result ? 'run'
+    : toolCall.result.interrupted ? 'stopped'
+      : hasError ? 'err' : 'ok';
+  let meta = null;
+  if (toolCall.result) {
+    if (hasError) meta = <span className="text-error">错误</span>;
+    // 停止补的合成终态:未回执工具被掐断,显示"已停止"而非绿勾冒充完成
+    else if (toolCall.result.interrupted) meta = <span>已停止</span>;
+    else if (planApproved) meta = <span className="text-success">✅ 计划已批准</span>;
+    else if (planDeny === 'refining') meta = <span className="text-accent">准备修改</span>;
+    else if (planDeny === 'cancelled') meta = <span>已取消</span>;
+    else if (askAnswered) meta = <span className="text-success">已答</span>;
+  }
 
   return (
     <ToolCallWithRetry toolCall={toolCall} onRetryTool={onRetryTool}>
-      <div className={`border rounded-md overflow-hidden ${hasError ? 'border-error/30 bg-error-subtle/40' : 'border-canvas-sunken bg-canvas'}`}>
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-canvas-warm/60 transition-colors text-left"
-        >
-          <Icon size={12} className="text-ink-muted shrink-0" />
-          <span className="text-[11px] font-mono text-ink-soft truncate flex-1">
-            {toolCall.name}
-          </span>
-          {preview && (
-            <span className="text-[10px] text-ink-faint font-mono truncate max-w-[200px]">
-              {preview}
-            </span>
-          )}
-          {toolCall.result ? (
-            hasError ? (
-              <span className="text-[10px] text-error">错误</span>
-            ) : toolCall.result.interrupted ? (
-              // 停止补的合成终态:未回执工具被掐断,显示"已停止"而非绿勾冒充完成
-              <span className="text-[10px] text-ink-faint">已停止</span>
-            ) : planApproved ? (
-              <span className="text-[10px] text-success">✅ 计划已批准</span>
-            ) : planDeny === 'refining' ? (
-              <span className="text-[10px] text-accent">准备修改</span>
-            ) : planDeny === 'cancelled' ? (
-              <span className="text-[10px] text-ink-faint">已取消</span>
-            ) : askAnswered ? (
-              <span className="text-[10px] text-success">已答</span>
-            ) : (
-              <span className="text-[10px] text-success">✓</span>
-            )
-          ) : (
-            <span className="mini-spin" aria-hidden="true" />
-          )}
-        </button>
-
-        {expanded && (
-          <div className="border-t border-canvas-sunken p-2.5 space-y-2 animate-fade-in">
-            <div>
-              <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">输入</div>
-              <pre className="text-[11px] bg-canvas-warm rounded p-2 overflow-x-auto max-h-32 font-mono text-ink-muted">
-                {JSON.stringify(toolCall.input, null, 2)}
-              </pre>
-            </div>
-            {toolCall.result && (
-              <div>
-                <div className="text-[9px] uppercase tracking-wider text-ink-faint mb-1">
-                  结果 {hasError && <span className="text-error">错误</span>}
-                </div>
-                <pre className={`text-[11px] rounded p-2 overflow-x-auto max-h-48 font-mono ${hasError ? 'bg-error-subtle text-error' : 'bg-canvas-warm text-ink-muted'}`}>
-                  {typeof toolCall.result.content === 'string'
-                    ? toolCall.result.content.slice(0, 4000)
-                    : JSON.stringify(toolCall.result.content, null, 2)?.slice(0, 4000)}
-                </pre>
-                {/* r132:通用兜底卡也要出图(以前只有 MCP 卡出图,其它工具读到的图全丢) */}
-                <ToolResultImages images={toolCall.result.images} name={toolCall.name || '结果'} className="mt-2" />
-              </div>
-            )}
+      <ToolCardShell
+        toolName={toolCall.name}
+        status={status}
+        Icon={Icon}
+        title={preview}
+        titleMono
+        meta={meta}
+        expanded={expanded}
+        onToggle={() => setExpanded(!expanded)}
+      >
+        <div className="space-y-2 animate-fade-in">
+          <div>
+            <div className="tc-label">输入</div>
+            <pre className="tc-block max-h-32">
+              {JSON.stringify(toolCall.input, null, 2)}
+            </pre>
           </div>
-        )}
-      </div>
+          {toolCall.result && (
+            <div>
+              <div className="tc-label">
+                结果 {hasError && <span className="text-error">错误</span>}
+              </div>
+              <pre className={`tc-block max-h-48 ${hasError ? 'tc-block-err' : ''}`}>
+                {typeof toolCall.result.content === 'string'
+                  ? toolCall.result.content.slice(0, 4000)
+                  : JSON.stringify(toolCall.result.content, null, 2)?.slice(0, 4000)}
+              </pre>
+              {/* r132:通用兜底卡也要出图(以前只有 MCP 卡出图,其它工具读到的图全丢) */}
+              <ToolResultImages images={toolCall.result.images} name={toolCall.name || '结果'} className="mt-2" />
+            </div>
+          )}
+        </div>
+      </ToolCardShell>
     </ToolCallWithRetry>
   );
 }
@@ -448,22 +431,18 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
       {/* Header — always visible */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left"
+        aria-expanded={expanded ? 'true' : 'false'}
+        className="cg-fold w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left cursor-pointer"
       >
-        {expanded ? (
-          <ChevronDown size={13} className="text-ink-faint shrink-0" />
-        ) : (
-          <ChevronRight size={13} className="text-ink-faint shrink-0" />
-        )}
-        <Wrench size={13} className="text-ink-muted shrink-0" />
-        <span className="text-xs text-ink-soft font-body">
+        <Wrench size={13} className="shrink-0" />
+        <span className="text-xs font-body">
           {totalCalls} 次工具调用
         </span>
-        <span className="text-[10px] text-ink-faint font-mono">
+        <span className="text-[10px] font-mono">
           ({summaryParts.join(', ')})
         </span>
         {groups.agent.length > 0 && (
-          <span className="text-[10px] text-violet-700 bg-violet-50 border border-violet-200 rounded px-1.5 py-px font-mono flex items-center gap-1 shrink-0">
+          <span className="text-[10px] text-accent bg-accent-subtle border border-accent-muted rounded px-1.5 py-px font-mono flex items-center gap-1 shrink-0">
             <Bot size={10} /> 含 {groups.agent.length} 个子代理调用
           </span>
         )}
@@ -516,7 +495,7 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
 // 复用 renderRichToolCard/ToolCallRow。活跃段默认展开随流刷新,正文落地后收起。
 // liveBlock = 生成中整轮 blocks 的最后一块(否则 null):只有它是思考时,那块思考才标"进行中"。
 // r157:liveLabel 非空 = 这一组的头行承载实时状态行(由 isLiveLineHostedByGroup 判定,见 CoworkBlocks),
-// 头行换成 三角 + LiveStatusLine;startedAt = 回合起始时刻(与改动前底部行同一口径)。
+// 头行只剩 LiveStatusLine(r158 起折叠行没有展开箭头,靠淡色区分);startedAt = 回合起始时刻(与改动前底部行同一口径)。
 function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, liveLabel = null, startedAt = null }) {
   const toolN = items.reduce((n, b) => n + (b.type === 'tool_use' ? 1 : 0), 0);
   // 出错计数与展开后条目的 data-entry-state 同一口径(entryStateOf):已答的提问、已批准的计划、
@@ -552,19 +531,16 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, l
         data-work-group-head=""
         aria-expanded={expanded ? 'true' : 'false'}
         onClick={onToggle}
-        className="w-full min-w-0 flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left"
+        className="cg-fold w-full min-w-0 flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left cursor-pointer"
       >
-        {expanded
-          ? <ChevronDown size={13} className="text-ink-faint shrink-0" />
-          : <ChevronRight size={13} className="text-ink-faint shrink-0" />}
         {hosting
           ? <LiveStatusLine label={liveLabel} startedAt={startedAt} className="flex-1" />
           : (
             <>
               {hasThinking
-                ? <Brain size={13} className="text-ink-muted shrink-0" />
-                : <Wrench size={13} className="text-ink-muted shrink-0" />}
-              <span className="min-w-0 truncate text-xs text-ink-soft font-body">{summary}</span>
+                ? <Brain size={13} className="shrink-0" />
+                : <Wrench size={13} className="shrink-0" />}
+              <span className="min-w-0 truncate text-xs font-body">{summary}</span>
             </>
           )}
         {/* 出错标记:只有红点、不带文字(头行可见文字保持「标题 · N 次工具调用」),数目在悬停提示里 */}
@@ -601,7 +577,7 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, l
 }
 
 // 思考链折叠(自管展开态,WKWebView <summary> 坑规避)。与工具行同规则:默认折叠成
-// 一行(Chevron + Brain + 首句截断),点击展开/收起,展开态 max-h-64 内滚。流式在飞的
+// 一行(Brain + 首句截断,没有展开箭头),点击展开/收起,展开态 max-h-64 内滚。流式在飞的
 // 思考走的也是这里(streamingBlocks → CoworkBlocks),同样默认折叠,折叠头 label 随内容更新。
 // 展开态放在这个叶子组件内部而非父级:父级不因某块展开而整树重渲,也不会给上层
 // React.memo(MessageList / TurnBubble) 传新身份 prop 打穿记忆化。
@@ -615,9 +591,9 @@ function ThinkingFold({ content, live = false }) {
     <div className="mb-1" data-entry-live={live ? 'true' : undefined}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body w-full text-left"
+        aria-expanded={open ? 'true' : 'false'}
+        className="cg-fold flex items-center gap-1.5 text-[11px] cursor-pointer font-body w-full text-left"
       >
-        <ChevronRight size={11} className={`transition-transform shrink-0 ${open ? 'rotate-90' : ''}`} />
         <Brain size={12} className={`shrink-0 ${live ? 'entry-live' : ''}`} />
         <span className="truncate">{thinkingLabel(text)}</span>
       </button>
@@ -860,20 +836,12 @@ export function CoworkBlocks({
           aria-expanded={open ? 'true' : 'false'}
           title={headHint}
           onClick={() => setStripOpen(!open)}
-          className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-md transition-colors text-left"
+          className="cg-fold w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-md transition-colors text-left cursor-pointer"
         >
-          {/* r154:头行静态,子元素顺序固定 = 左图标(扳手)→ 标题 → 三角(最后一个)。
-              生成中的动画、用时与状态词都在本回合最下面的底部状态行(LiveStatusLine),头行不挂计时器。 */}
-          <Wrench size={13} className="text-ink-muted shrink-0" />
-          <span data-strip-title className="min-w-0 flex-1 truncate text-xs text-ink-soft font-body">{headText}</span>
-          <span
-            data-strip-caret
-            data-open={open ? 'true' : 'false'}
-            aria-hidden="true"
-            className={`shrink-0 inline-flex items-center justify-center text-ink-faint transition-transform duration-150 ${open ? 'rotate-90' : ''}`}
-          >
-            <svg width="9" height="9" viewBox="0 0 10 10" fill="currentColor" focusable="false"><path d="M3 1.5 L8 5 L3 8.5 Z" /></svg>
-          </span>
+          {/* r158:头行静态,子元素顺序固定 = 左图标(扳手)→ 标题;不再有展开三角,开合看 aria-expanded,
+              与正文靠 .cg-fold 的淡色区分。生成中的动画、用时与状态词都在本回合最下面的底部状态行(LiveStatusLine),头行不挂计时器。 */}
+          <Wrench size={13} className="shrink-0" />
+          <span data-strip-title className="min-w-0 flex-1 truncate text-xs font-body">{headText}</span>
         </button>
       )}
       {out}{trailing}
@@ -1015,18 +983,18 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
     measure();
     return () => ro.disconnect();
   }, []);
-  // 聊天模式:未展开时把思考/工具/子代理/skill 折叠成一行"思考并执行了 N 步操作 ›",
+  // 聊天模式:未展开时把思考/工具/子代理/skill 折叠成一行"思考并执行了 N 步操作"(r158 起不带箭头,靠淡色区分),
   // 点开还原完整过程;展开后给一行"收起过程"。两条在有序 blocks 与 legacy 路径共用。
   const chatFoldBar = (label) => (
-    <button key="chat-fold" onClick={() => setChatExpanded(true)}
-      className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body mt-1">
-      <ChevronRight size={11} /><span>{label}</span>
+    <button key="chat-fold" type="button" aria-expanded="false" onClick={() => setChatExpanded(true)}
+      className="cg-fold flex items-center gap-1.5 text-[11px] cursor-pointer font-body mt-1">
+      <span>{label}</span>
     </button>
   );
   const chatUnfoldBar = (
-    <button key="chat-unfold" onClick={() => setChatExpanded(false)}
-      className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body mt-1">
-      <ChevronDown size={11} /><span>收起过程</span>
+    <button key="chat-unfold" type="button" aria-expanded="true" onClick={() => setChatExpanded(false)}
+      className="cg-fold flex items-center gap-1.5 text-[11px] cursor-pointer font-body mt-1">
+      <span>收起过程</span>
     </button>
   );
 
@@ -1210,12 +1178,13 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
               {fullThinking && (
                 <div className="mb-3">
                   <button
+                    type="button"
                     onClick={() => setShowThinking(!showThinking)}
-                    className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted transition-colors font-body"
+                    aria-expanded={showThinking ? 'true' : 'false'}
+                    className="cg-fold flex items-center gap-1.5 text-[11px] cursor-pointer font-body"
                   >
                     <Brain size={12} className="shrink-0" />
                     <span className="truncate">{thinkingLabel(fullThinking)}</span>
-                    <span className="text-[10px] shrink-0">{showThinking ? '▾' : '▸'}</span>
                   </button>
                   {showThinking && (
                     <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">

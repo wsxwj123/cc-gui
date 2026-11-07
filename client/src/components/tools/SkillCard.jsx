@@ -78,7 +78,7 @@ export function SkillCard({ toolCall, nameOverride, subLabel, calls }) {
                     <div className="px-3 py-2 text-[11px] text-ink-faint bg-canvas-warm/40">已停止,无返回结果</div>
                   ) : (
                   <div className={`px-3 py-2 text-[11px] max-h-[600px] overflow-y-auto ${
-                    tcErr ? 'bg-red-50 text-red-700' : 'bg-canvas-warm/40 text-ink-muted'
+                    tcErr ? 'bg-error-subtle text-error' : 'bg-canvas-warm/40 text-ink-muted'
                   }`}>
                     <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1">结果{callCount ? `（第 ${idx + 1} 次）` : ''}</div>
                     {tcErr

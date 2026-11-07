@@ -3233,7 +3233,9 @@ function TaskNoticeRow({ notice }) {
       className="max-w-[var(--content-max)] mx-auto px-4 py-1.5">
       {/* 居中横幅:两侧分隔线 + 标题 + 状态小字,与 SkillCard 同款结构。点击切换展开 */}
       <button
+        type="button"
         onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded ? 'true' : 'false'}
         className="w-full flex items-center gap-3 py-1.5 text-left cursor-pointer"
         title={expanded ? '收起后台任务通知详情' : '展开后台任务通知详情'}
       >
@@ -3245,7 +3247,6 @@ function TaskNoticeRow({ notice }) {
             {notice.confirmed === false && <span className="text-amber-600">来源未确认</span>}
           </span>
           <span className="text-[10.5px] text-ink-faint font-body mt-0.5 flex items-center gap-1.5 min-w-0 max-w-full">
-            {expanded ? <ChevronDown size={10} className="shrink-0" /> : <ChevronRight size={10} className="shrink-0" />}
             <span className="truncate">{statusText || '查看详情'}</span>
           </span>
         </span>

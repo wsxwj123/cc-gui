@@ -14,7 +14,6 @@
 // r151y(用户 2026-10-29):**所有权限档一致** —— 「放任」档也不再把正文摊开,收件箱卡片同样折叠、同样有展开。
 // 旧的 noFold / 审计 S6「放任档全文展示」约定作废,组件不再区分权限档。
 import React, { useId, useState } from 'react';
-import { ChevronDown, ChevronRight } from './Icon.jsx';
 
 const SEP = 'flex-1 h-px bg-canvas-deep/70 min-w-[10px]';
 // 展开态正文:行内 style 落到正文节点上(验收读 computed text-align / 块宽与左右留白)。
@@ -86,7 +85,6 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
           <span data-testid={titleTestId} className="min-w-0 flex items-center gap-1.5">{title}</span>
         </span>
         <span className="text-[10.5px] text-ink-faint font-body mt-0.5 flex items-center gap-1.5 min-w-0 max-w-full">
-          {foldable && (expanded ? <ChevronDown size={10} className="shrink-0" /> : <ChevronRight size={10} className="shrink-0" />)}
           {status != null && status !== '' && (
             <span data-testid={statusTestId} className="truncate min-w-0">{status}</span>
           )}
@@ -104,7 +102,6 @@ export const XsNoticeRow = React.memo(function XsNoticeRow({
     // 「展开全文」/「收起」的宽度差,按钮恒靠右;放不下(窄屏 / 长标题)时 wrap 成两行。
     const compactHead = (
       <>
-        {foldable && (expanded ? <ChevronDown size={10} className="shrink-0 text-ink-faint" /> : <ChevronRight size={10} className="shrink-0 text-ink-faint" />)}
         {icon}
         <span data-testid={titleTestId} className="min-w-0 flex items-center gap-1.5 text-[12px] font-medium leading-tight text-ink-soft">{title}</span>
         {status != null && status !== '' && (

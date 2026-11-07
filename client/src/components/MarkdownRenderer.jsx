@@ -45,7 +45,7 @@ function renderCode({ children, className, node, dockKeyPrefix, isStreaming, ...
 
   return (
     <code
-      className="bg-canvas-warm border border-canvas-deep px-1.5 py-0.5 rounded text-[0.88em] font-mono text-accent"
+      className="md-inline-code font-mono"
       {...props}
     >
       {children}
@@ -100,19 +100,19 @@ const markdownComponents = {
 
   // ── Blockquote ────────────────────────────────────────────────
   blockquote: ({ children }) => (
-    <blockquote className="border-l-3 border-accent-muted pl-4 my-3 text-ink-muted italic bg-accent-subtle/30 py-2 pr-3 rounded-r-md">
+    <blockquote className="md-quote">
       {children}
     </blockquote>
   ),
 
   // ── Lists ─────────────────────────────────────────────────────
   ul: ({ children }) => (
-    <ul className="my-2 ml-1 space-y-1 list-disc list-outside marker:text-ink-ghost pl-5">
+    <ul className="my-2 ml-1 space-y-1 list-disc list-outside marker:text-ink-faint pl-5">
       {children}
     </ul>
   ),
   ol: ({ children }) => (
-    <ol className="my-2 ml-1 space-y-1 list-decimal list-outside marker:text-ink-ghost pl-5">
+    <ol className="my-2 ml-1 space-y-1 list-decimal list-outside marker:text-ink-faint pl-5">
       {children}
     </ol>
   ),
@@ -122,20 +122,20 @@ const markdownComponents = {
 
   // ── Table ─────────────────────────────────────────────────────
   table: ({ children }) => (
-    <div className="overflow-x-auto my-3 border border-canvas-deep rounded-lg">
-      <table className="w-full text-[13px] border-collapse">{children}</table>
+    <div className="md-table-wrap">
+      <table className="md-table">{children}</table>
     </div>
   ),
   thead: ({ children }) => (
-    <thead className="bg-canvas-warm">{children}</thead>
+    <thead>{children}</thead>
   ),
   th: ({ children }) => (
-    <th className="border-b border-canvas-deep px-3 py-2 text-left font-medium text-ink-soft">
+    <th className="md-th">
       {children}
     </th>
   ),
   td: ({ children }) => (
-    <td className="border-b border-canvas-deep/50 px-3 py-2 text-ink-muted">
+    <td className="md-td">
       {children}
     </td>
   ),

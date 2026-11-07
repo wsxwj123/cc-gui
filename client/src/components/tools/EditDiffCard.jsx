@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { FileText, ChevronDown, ChevronRight, FilePlus2 } from '../Icon.jsx';
+import { FileText, FilePlus2 } from '../Icon.jsx';
+import { ToolCardShell, cardStatusOf } from './ToolCardShell.jsx';
 import { DiffViewer } from '../DiffViewer.jsx';
 // r64 M3:原来的私有 unifiedDiff 提到 utils/ 共用(genui 的 diff 节点也要拼同一种文本)。
 import { unifiedDiff } from '../../utils/unifiedDiff.js';
@@ -44,44 +45,37 @@ export function EditDiffCard({ toolCall }) {
   const FileIcon = name === 'Write' ? FilePlus2 : FileText;
 
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full px-3 py-2 flex items-center gap-2 bg-canvas-warm hover:bg-canvas-deep/40 transition-colors text-left"
-      >
-        {expanded
-          ? <ChevronDown size={12} className="text-ink-faint shrink-0" />
-          : <ChevronRight size={12} className="text-ink-faint shrink-0" />}
-        <FileIcon size={12} className="text-accent shrink-0" />
-        <span className="text-xs font-mono text-ink-soft truncate">{fileName}</span>
-        <span className="text-[10px] text-ink-faint font-body shrink-0">{opLabel}</span>
-        <span className="ml-auto flex items-center gap-2 text-[10px] font-mono shrink-0">
-          {dels > 0 && <span className="text-red-500">−{dels}</span>}
-          {adds > 0 && <span className="text-green-600">+{adds}</span>}
-        </span>
-        {!result && <span className="mini-spin" aria-hidden="true" />}
-        {result && (isError
-          ? <span className="text-red-500 text-[10px] shrink-0">错误</span>
-          : <span className="text-success text-[10px] shrink-0">✓</span>)}
-      </button>
-
-      {expanded && (
-        <div className="border-t border-canvas-deep">
-          <div className="px-3 py-1 text-[9px] text-ink-ghost truncate font-mono">{filePath}</div>
-          {hunks.length === 0 ? (
-            <div className="px-3 py-2 text-[10px] text-ink-faint font-body">参数仍在传输…</div>
-          ) : hunks.map((hunk, hi) => (
-            <div key={hi} className={hi > 0 ? 'border-t border-canvas-deep' : ''}>
-              <DiffViewer diff={hunk.diff} maxHeight="max-h-64" />
-            </div>
+    <ToolCardShell
+      toolName={name}
+      status={cardStatusOf(result)}
+      Icon={FileIcon}
+      title={fileName || '(未命名文件)'}
+      titleMono
+      titleHint={filePath}
+      meta={(adds > 0 || dels > 0) ? (
+        <>
+          {adds > 0 && <span className="tc-add">+{adds}</span>}
+          {dels > 0 && <span className="tc-del">−{dels}</span>}
+        </>
+      ) : null}
+      expanded={expanded}
+      onToggle={() => setExpanded(!expanded)}
+    >
+      <div className="tc-sub font-mono truncate" title={filePath}>{opLabel} · {filePath}</div>
+      {hunks.length === 0 ? (
+        <div className="tc-sub">参数仍在传输…</div>
+      ) : (
+        <div className="space-y-2">
+          {hunks.map((hunk, hi) => (
+            <DiffViewer key={hi} diff={hunk.diff} maxHeight="max-h-64" />
           ))}
-          {isError && result?.content && (
-            <div className="border-t border-canvas-deep px-3 py-2 text-[11px] text-red-700 bg-red-50/50 font-mono whitespace-pre-wrap">
-              {String(result.content).slice(0, 800)}
-            </div>
-          )}
         </div>
       )}
-    </div>
+      {isError && result?.content && (
+        <pre className="tc-block tc-block-err whitespace-pre-wrap mt-2">
+          {String(result.content).slice(0, 800)}
+        </pre>
+      )}
+    </ToolCardShell>
   );
 }

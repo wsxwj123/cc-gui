@@ -1,58 +1,92 @@
 import React, { useState } from 'react';
-import { Terminal, ChevronDown, ChevronRight } from '../Icon.jsx';
+import { Terminal } from '../Icon.jsx';
 import { Linkify } from '../../utils/linkify.jsx';
 import { ToolResultImages } from './ToolResultImages.jsx';
+import { ToolCardShell, cardStatusOf } from './ToolCardShell.jsx';
+import { ThemedCopyButton } from '../ThemedCopyButton.jsx';
 
-const PREVIEW_LINES = 8;
+const COMMAND_SEPARATORS = new Set(['|', '||', '&&', ';', '&']);
+
+// 命令三档着色:命令词(每段第一个词)ink 加粗 / 参数 ink-soft / 数字与 --flag accent。
+// 只按空白切词,不做 shell 语法解析——着色是辅助阅读,切错也不影响命令原文。
+function CommandTokens({ command }) {
+  let expectCommandWord = true;
+  return command.split(/(\s+)/).map((token, i) => {
+    if (token === '' || /^\s+$/.test(token)) return token;
+    let className = 'tc-tok-arg';
+    if (COMMAND_SEPARATORS.has(token)) {
+      expectCommandWord = true;
+    } else if (expectCommandWord) {
+      className = 'tc-tok-cmd';
+      expectCommandWord = false;
+    } else if (/^--\S/.test(token) || /^-?\d+(\.\d+)?$/.test(token)) {
+      className = 'tc-tok-num';
+    }
+    return <span key={i} className={className}>{token}</span>;
+  });
+}
+
+// 失败结果以「Exit code N」开头时,把这一行拿出来写进状态条,输出区不再重复显示。
+function splitExitCode(output, isError) {
+  if (!isError) return { exitCode: null, body: output };
+  const m = /^Exit code (\d+)[^\S\n]*(?:\n|$)/.exec(output);
+  if (!m) return { exitCode: null, body: output };
+  return { exitCode: m[1], body: output.slice(m[0].length) };
+}
+
+function countLines(text) {
+  const trimmed = text.replace(/\n+$/, '');
+  return trimmed === '' ? 0 : trimmed.split('\n').length;
+}
 
 export function BashCard({ toolCall }) {
   const [expanded, setExpanded] = useState(false);
   const cmd = toolCall.input?.command || '';
   const desc = toolCall.input?.description || '';
   const result = toolCall.result;
-  const isError = result?.isError;
+  const isError = !!result?.isError;
   const output = typeof result?.content === 'string' ? result.content : '';
-  const lines = output.split('\n');
-  const hasMore = lines.length > PREVIEW_LINES;
-  const shown = expanded ? output.slice(0, 16000) : lines.slice(0, PREVIEW_LINES).join('\n');
+  const { exitCode, body } = splitExitCode(output, isError);
+  const lineCount = countLines(body);
+  const linesText = lineCount > 0 ? `输出 ${lineCount} 行` : '无输出';
+  let footText = '';
+  if (result) {
+    if (!isError) footText = lineCount > 0 ? `成功 · ${linesText}` : '无输出';
+    else footText = `${exitCode != null ? `退出码 ${exitCode}` : '失败'} · ${linesText}`;
+  }
 
   return (
-    <div className="border border-canvas-deep rounded-lg overflow-hidden animate-fade-up">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full px-3 py-2 bg-[#1e1e1e] flex items-center gap-2 hover:bg-[#262626] transition-colors text-left"
-      >
-        <Terminal size={12} className="text-green-400 shrink-0" />
-        <span className="text-green-400 font-mono text-[11px] shrink-0">$</span>
-        <code className="text-gray-100 font-mono text-[11.5px] truncate flex-1">{cmd || '(empty)'}</code>
-        {!result && <span className="mini-spin" aria-hidden="true" />}
-        {result && (
-          isError
-            ? <span className="text-red-400 text-[10px] shrink-0">错误</span>
-            : <span className="text-green-400 text-[10px] shrink-0">✓</span>
-        )}
-        {expanded
-          ? <ChevronDown size={12} className="text-gray-400 shrink-0" />
-          : <ChevronRight size={12} className="text-gray-400 shrink-0" />}
-      </button>
-
-      {desc && (
-        <div className="px-3 py-1 bg-canvas-warm text-[10px] text-ink-faint font-body border-b border-canvas-deep">
-          {desc}
-        </div>
-      )}
-
+    <ToolCardShell
+      toolName={toolCall.name || 'Bash'}
+      status={cardStatusOf(result)}
+      Icon={Terminal}
+      title={desc || cmd || '(empty)'}
+      titleMono={!desc}
+      titleHint={cmd}
+      expanded={expanded}
+      onToggle={() => setExpanded(!expanded)}
+    >
       {/* r132:工具结果里的图片(以前只有 MCP 卡出图) */}
-      {expanded && result && (
-        <ToolResultImages images={result.images} name={toolCall.name || 'Bash'} className="px-3 pb-2" />
+      {result && (
+        <ToolResultImages images={result.images} name={toolCall.name || 'Bash'} className="pb-2" />
       )}
-      {expanded && result && output && (
-        <pre className={`px-3 py-2 text-[11px] font-mono overflow-auto whitespace-pre-wrap leading-relaxed max-h-[600px] ${
-          isError ? 'bg-red-50 text-red-700' : 'bg-canvas-warm text-ink-muted'
-        }`}>
-          <Linkify text={output} />
-        </pre>
-      )}
-    </div>
+      <div className="tc-term">
+        <div className="tc-term-cmd" data-term-cmd="">
+          <span className="tc-prompt" aria-hidden="true">$</span>
+          <code>{cmd ? <CommandTokens command={cmd} /> : '(empty)'}</code>
+          {cmd && <ThemedCopyButton text={cmd} />}
+        </div>
+        {result && body.trim() !== '' && (
+          <pre className="tc-term-out" data-term-out="">
+            <Linkify text={body} />
+          </pre>
+        )}
+        {result && (
+          <div className="tc-term-foot" data-term-foot="" data-ok={isError ? 'false' : 'true'}>
+            {footText}
+          </div>
+        )}
+      </div>
+    </ToolCardShell>
   );
 }

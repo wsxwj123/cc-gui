@@ -114,6 +114,22 @@
      玻璃家族置 transparent 恢复透底。--surface-alpha(界面不透明度)仍生效:
      调低时底色补齐同步变透,全局背景图照常透出。 */
   --glass-underlay: color-mix(in srgb, var(--color-canvas) var(--surface-alpha), transparent);
+  /* r158:工具卡 / 代码块 / diff 的派生色。全部从主题基础色混出来,32 套主题自动跟随;
+     加 cg- 前缀防与皮肤 / 开发者样式重名。不写任何固定色相。 */
+  --cg-line:    color-mix(in srgb, var(--color-ink) 10%, transparent);
+  --cg-line-2:  color-mix(in srgb, var(--color-ink) 17%, transparent);
+  --cg-fill:    color-mix(in srgb, var(--color-ink) 4%,  transparent);
+  --cg-fill-2:  color-mix(in srgb, var(--color-ink) 8%,  transparent);
+  --cg-code-bg: color-mix(in srgb, var(--color-ink) 4.5%, var(--color-canvas));
+  --cg-add:     color-mix(in srgb, var(--color-success) 15%, transparent);
+  --cg-add-2:   color-mix(in srgb, var(--color-success) 34%, transparent);
+  --cg-del:     color-mix(in srgb, var(--color-error) 13%, transparent);
+  --cg-del-2:   color-mix(in srgb, var(--color-error) 32%, transparent);
+  /* 折叠行文字色:比正文(ink-soft)淡,对画布仍 ≥ 4.5;悬停回到正文色。
+     70% 是按全部主题算过的:正文对比度 ≥ 4.8 的主题折叠行都 ≥ 4.5,七个常用主题与正文仍差 ≥ 3。
+     正文本身不到 4.8 的三个主题在下面单独覆写成与正文同色(tests/unit/check-r158-fold-contrast.mjs 锁) */
+  --cg-fold-fg:       color-mix(in srgb, var(--color-ink-muted) 70%, var(--color-ink-soft));
+  --cg-fold-fg-hover: var(--color-ink-soft);
 }
 
 /* Dark tokens — packed into a mixin selector so they can be triggered by
@@ -1351,16 +1367,18 @@ header [data-tour="remote-control"] {
 /* 深色代码/终端块背景恒为深色(#211e19 / #1e1e1e 等,不随主题翻转)。全局 ::selection 的
    文字色在浅色模式下是深色 → 选中时深字撞深底看不清。对这类块强制高对比:半透明白高亮 +
    白字,两个模式都清晰。.markdown-content pre 是聊天代码块;.cgui-dark-select 供其它深底
-   块(Artifact 代码预览、Bash 输出等)复用加类即可。*/
-.markdown-content pre::selection,
-.markdown-content pre *::selection,
+   块(Artifact 代码预览、Bash 输出等)复用加类即可。
+   r158:跟随主题的围栏代码块(pre[data-code-tone="theme"])底色随主题,浅色主题下白字会看不见,
+   排除在外,用上面的主题默认选区色。*/
+.markdown-content pre:not([data-code-tone="theme"])::selection,
+.markdown-content pre:not([data-code-tone="theme"]) *::selection,
 .cgui-dark-select::selection,
 .cgui-dark-select *::selection {
   background: rgba(255, 255, 255, 0.30);
   color: #ffffff;
 }
-.markdown-content pre::-moz-selection,
-.markdown-content pre *::-moz-selection,
+.markdown-content pre:not([data-code-tone="theme"])::-moz-selection,
+.markdown-content pre:not([data-code-tone="theme"]) *::-moz-selection,
 .cgui-dark-select::-moz-selection,
 .cgui-dark-select *::-moz-selection {
   background: rgba(255, 255, 255, 0.30);
@@ -1603,15 +1621,33 @@ header [data-tour="remote-control"] {
 
 /* ── Markdown content ────────────────────────────────────────── */
 .markdown-content { line-height: 1.7; color: var(--color-ink-soft); }
+/* r158:行内代码淡底取主题派生色(深浅主题同一条规则,不再另写深色覆盖);文字色继承正文 */
 .markdown-content code {
-  background: rgba(0, 0, 0, 0.06);
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: 0.9em;
+  background: var(--cg-fill-2);
+  border-radius: 5px;
+  padding: .14em .4em;
+  font-size: 0.88em;
 }
-@media (prefers-color-scheme: dark) {
-  .markdown-content code { background: rgba(255, 255, 255, 0.10); }
+/* r158 引用块:不斜体,左竖线 + 淡底;文字 ink-soft(ink-muted 在 nord 上对比度不够) */
+.md-quote {
+  margin: 12px 0; padding: 7px 15px;
+  border-left: 3px solid var(--cg-line-2); border-radius: 0 9px 9px 0;
+  background: var(--cg-fill); color: var(--color-ink-soft); font-style: normal;
 }
+.md-quote > p { margin: 4px 0; }
+/* r158 表格:圆角外框(外层容器负责横向滚动与裁圆角)、表头淡底、表体偶数行淡底 */
+.md-table-wrap {
+  margin: 12px 0; max-width: 100%; overflow-x: auto;
+  border: 1px solid var(--cg-line); border-radius: 10px;
+}
+.md-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+.md-th {
+  padding: 8px 12px; text-align: left; font-weight: 600; color: var(--color-ink-soft);
+  background: var(--cg-fill); border-bottom: 1px solid var(--cg-line);
+}
+.md-td { padding: 8px 12px; color: var(--color-ink-soft); border-bottom: 1px solid var(--cg-line); }
+.md-table tbody tr:last-child > .md-td { border-bottom: 0; }
+.md-table tbody tr:nth-child(even) > .md-td { background: var(--cg-fill); }
 
 /* ── Pill / chip variants ────────────────────────────────────── */
 .chip {
@@ -2378,3 +2414,160 @@ header [data-tour="remote-control"] {
 @container (max-width: 400px) {
   .cgui-perm-label { display: none; }
 }
+
+/* ═══ r158:工具卡统一骨架(ToolCardShell)═══
+   只用 --cg-* 派生色与主题基础色;状态靠图标色与边:出错红边、已停止虚线边略淡。 */
+.tc-card {
+  border: 1px solid var(--cg-line); border-radius: 10px;
+  background: var(--color-canvas); overflow: hidden; min-width: 0;
+}
+.tc-card[data-status="err"] { border-color: color-mix(in srgb, var(--color-error) 38%, var(--cg-line)); }
+.tc-card[data-status="stopped"] { border-style: dashed; opacity: .86; }
+.tc-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
+  padding: 7px 11px; border: 0; background: transparent; text-align: left;
+  cursor: pointer; color: var(--cg-fold-fg); transition: background-color .15s, color .15s;
+}
+.tc-head:hover { background: var(--cg-fill); color: var(--cg-fold-fg-hover); }
+.tc-head:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+.tc-icon { flex: none; width: 14px; height: 14px; display: grid; place-items: center; color: var(--color-ink-faint); }
+.tc-card[data-status="ok"] .tc-icon { color: color-mix(in srgb, var(--color-success) 78%, var(--color-ink-faint)); }
+.tc-card[data-status="err"] .tc-icon { color: var(--color-error); }
+.tc-name {
+  flex: none; font: 500 10.5px/1 var(--font-mono); padding: 3px 6px; border-radius: 5px;
+  background: var(--cg-fill-2); color: inherit; white-space: nowrap;
+}
+.tc-title {
+  flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 12.5px; color: inherit;
+}
+.tc-title.tc-mono { font-family: var(--font-mono); font-size: 12px; }
+.tc-meta {
+  flex: none; display: flex; align-items: center; gap: 8px; white-space: nowrap;
+  font: 11px/1 var(--font-mono); color: inherit;
+}
+.tc-meta:empty { display: none; }
+.tc-add { color: var(--color-success); font-weight: 600; }
+.tc-del { color: var(--color-error); font-weight: 600; }
+.tc-body { padding: 0 11px 11px; min-width: 0; }
+.tc-sub { font-size: 10.5px; color: var(--color-ink-muted); margin-bottom: 6px; }
+.tc-block {
+  margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--cg-code-bg);
+  border: 1px solid var(--cg-line); font: 11.5px/1.6 var(--font-mono);
+  color: var(--color-ink-soft); overflow: auto;
+}
+.tc-block-err { border-color: color-mix(in srgb, var(--color-error) 38%, var(--cg-line)); color: var(--color-error); }
+.tc-label { font-size: 9.5px; letter-spacing: .06em; color: var(--color-ink-muted); margin-bottom: 4px; }
+
+/* 终端块(Bash) */
+.tc-term { border-radius: 9px; background: var(--cg-code-bg); border: 1px solid var(--cg-line); overflow: hidden; min-width: 0; }
+.tc-term-cmd {
+  display: flex; gap: 9px; align-items: flex-start; padding: 8px 10px;
+  font: 12px/1.6 var(--font-mono); border-bottom: 1px solid var(--cg-line); min-width: 0;
+}
+.tc-term-cmd:last-child { border-bottom: 0; }
+.tc-prompt { color: var(--color-ink-muted); user-select: none; flex: none; }
+.tc-term-cmd code { flex: 1; min-width: 0; white-space: pre; overflow-x: auto; color: var(--color-ink-soft); }
+.tc-tok-cmd { color: var(--color-ink); font-weight: 600; }
+.tc-tok-arg { color: var(--color-ink-soft); }
+/* 数字与 --flag:强调色与正文色各半。纯强调色在部分主题对代码底不到 4.5:1
+   (默认深色的强调色是深灰 #52525B、暖色浅色是橙),混一半正文色保住色调又够清楚。 */
+.tc-tok-num { color: color-mix(in srgb, var(--color-accent) 50%, var(--color-ink)); }
+.tc-term-out {
+  margin: 0; padding: 8px 10px; font: 11.5px/1.65 var(--font-mono); color: var(--color-ink-soft);
+  white-space: pre-wrap; word-break: break-word; max-height: 210px; overflow: auto;
+}
+.tc-term-foot {
+  display: flex; gap: 14px; padding: 5px 10px; border-top: 1px solid var(--cg-line);
+  font: 11px/1.3 var(--font-mono); color: var(--color-ink-muted);
+}
+/* 错误色混 30% 正文色:纯错误色小字在不少主题的代码底上不到 4.5:1(nord 等),混后仍明显偏红 */
+.tc-term-foot[data-ok="false"] { color: color-mix(in srgb, var(--color-error) 70%, var(--color-ink)); }
+.tc-copy {
+  margin-left: auto; flex: none; border: 0; background: transparent; color: var(--color-ink-muted);
+  font: 11px/1.4 var(--font-ui); padding: 1px 7px; border-radius: 6px; cursor: pointer;
+}
+.tc-copy:hover { background: var(--cg-fill-2); color: var(--color-ink); }
+.tc-copy[data-copied="true"] { color: var(--color-success); }
+
+/* r158 围栏代码块(CodeBlock → CollapsibleCode tone="theme"):工具条与代码同在一个 <pre> 里。
+   底取 --cg-code-bg、边取 --cg-line;代码字用 ink-soft(对代码底在各主题都 ≥ 4.5)。
+   块自己横向滚动,不撑宽页面。Artifact 的代码视图不走这里,仍是深色。 */
+.tc-code {
+  display: flex; flex-direction: column; overflow: hidden; margin: 0;
+  min-width: 0; max-width: 100%;
+  background: var(--cg-code-bg); border: 1px solid var(--cg-line); border-radius: 11px;
+  color: var(--color-ink-soft);
+}
+.tc-code.tc-code-folds { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.tc-code-bar {
+  display: flex; align-items: center; gap: 8px; flex: none; min-width: 0;
+  padding: 5px 8px 5px 12px; border-bottom: 1px solid var(--cg-line);
+  font: 12px/1.4 var(--font-ui); color: var(--color-ink-muted); white-space: normal;
+}
+.tc-code-lang {
+  font: 500 11px/1 var(--font-mono); padding: 3px 6px; border-radius: 5px;
+  background: var(--cg-fill-2); color: var(--color-ink-soft);
+}
+.tc-code-sp { flex: 1; }
+.tc-code-bar .tc-copy { margin-left: 0; }
+.tc-code-run {
+  display: inline-flex; align-items: center; gap: 4px; flex: none; border: 0; background: transparent;
+  color: var(--color-ink-muted); font: 11px/1.4 var(--font-ui); padding: 1px 7px; border-radius: 6px; cursor: pointer;
+  transition: color .15s, background-color .15s;
+}
+.tc-code-run:hover { background: var(--cg-fill-2); color: var(--color-ink); }
+/* 两个类叠加压过 .markdown-content code(行内代码的底色与内边距) */
+.tc-code > .tc-code-body {
+  display: block; margin: 0; padding: 12px 14px; min-width: 0;
+  overflow-x: auto; white-space: pre; tab-size: 4;
+  font: 12.5px/1.68 var(--font-mono); color: var(--color-ink-soft);
+  background: transparent; border-radius: 0;
+}
+/* 折叠按钮:底部「展开剩余 N 行 ▾ / 收起」接在块下沿;展开后右上角另有「收起 ▴」(避开工具条) */
+.tc-code-more {
+  display: block; width: 100%; padding: 6px; cursor: pointer;
+  border: 1px solid var(--cg-line); border-top: 0; border-radius: 0 0 11px 11px;
+  background: var(--cg-fill); color: var(--color-ink-muted);
+  font: 12px/1.4 var(--font-ui); transition: color .15s, background-color .15s;
+}
+.tc-code-more:hover { background: var(--cg-fill-2); color: var(--color-ink); }
+.tc-code-up {
+  position: absolute; top: 40px; right: 10px; z-index: 10; cursor: pointer;
+  border: 1px solid var(--cg-line); border-radius: 6px; padding: 1px 7px;
+  background: var(--cg-code-bg); color: var(--color-ink-muted);
+  font: 11px/1.4 var(--font-ui); transition: color .15s, background-color .15s;
+}
+.tc-code-up:hover { background: color-mix(in srgb, var(--color-ink) 8%, var(--cg-code-bg)); color: var(--color-ink); }
+
+/* Diff(DiffViewer:Edit 卡、文件改动面板、界面生成的 diff 共用) */
+.tc-diff { border: 1px solid var(--cg-line); border-radius: 9px; overflow: hidden; font: 11.5px/1.65 var(--font-mono); min-width: 0; }
+.tc-diff-file {
+  display: flex; align-items: center; gap: 10px; padding: 5px 10px; min-width: 0;
+  background: var(--cg-fill); border-bottom: 1px solid var(--cg-line); color: var(--color-ink-muted);
+}
+.tc-diff-file > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-diff-stat { margin-left: auto; flex: none; display: flex; gap: 6px; }
+.tc-diff-rows { overflow: auto; }
+.tc-diff-inner { display: grid; min-width: 100%; width: max-content; }
+.tc-dl { display: grid; grid-template-columns: 18px 1fr; align-items: start; color: var(--color-ink-soft); min-width: max-content; }
+.tc-dl[data-diff-line="add"] { background: var(--cg-add); }
+.tc-dl[data-diff-line="del"] { background: var(--cg-del); }
+.tc-sg { text-align: center; color: var(--color-ink-muted); user-select: none; }
+.tc-dl[data-diff-line="add"] .tc-sg { color: var(--color-success); }
+.tc-dl[data-diff-line="del"] .tc-sg { color: var(--color-error); }
+.tc-tx { padding-right: 10px; white-space: pre; }
+.tc-wd-add { background: var(--cg-add-2); color: inherit; border-radius: 3px; }
+.tc-wd-del { background: var(--cg-del-2); color: inherit; border-radius: 3px; }
+
+/* r158 折叠行(过程条摘要行、工作组头、思考折叠行、工具调用组头、聊天模式折叠条、子代理 / 工作流卡头行):
+   没有展开箭头,与正文靠颜色区分 —— 比正文淡、对比度仍 ≥ 4.5;悬停回到正文色。内部文字与非状态图标继承。 */
+.cg-fold { color: var(--cg-fold-fg); transition: color .15s, background-color .15s; }
+.cg-fold:hover { color: var(--cg-fold-fg-hover); }
+/* 不可点的头行(如工作流卡头):只取淡色,悬停不变深,免得看着像能点 */
+.cg-fold-static { color: var(--cg-fold-fg); }
+/* 这三个主题的正文对画布的对比度本身就不到 4.8(solarized-light 4.13 / tokyonight-day 4.25 /
+   solarized-dark 4.75),折叠行再调淡就看不清了。优先保证看得清:折叠行与正文同色。 */
+:root[data-cgui-theme="solarized-light"],
+:root[data-cgui-theme="tokyonight-day"],
+:root[data-cgui-theme="solarized-dark"] { --cg-fold-fg: var(--color-ink-soft); }
