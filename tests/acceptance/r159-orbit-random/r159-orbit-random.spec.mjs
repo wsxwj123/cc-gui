@@ -9,7 +9,7 @@ import { primeOverlays, openApp, openSessionByMarker, touchCtl } from './helpers
 import {
   ORBITS, ORBIT_IDS, IND, DOT_LO, DOT_HI, MAX_AT_LEAST, MIN_AT_MOST, norm, uniq, lsGet, bash, phaseEvents, openAllGates,
   prepareLive, sendRound, reloadApp, expectPhase, startSampler, stopSampler, playPhases,
-  openInterfaceTab, closeThemePopover, loadingGrid, openSettings, settingsSearch, sampleGrid,
+  openInterfaceTab, closeThemePopover, loadingGrid, openSettings, settingsSearch, sampleGrid, ZOOM_ONE, expectZoomOne,
 } from './helpers/ui.mjs';
 
 // 用例失败时直播回合会停在半路（假命令行在等放行文件）：把所有闸门都放了，让它自己收尾，别拖累下一条。
@@ -120,8 +120,9 @@ test('A4 生成中（思考 2.5 秒 → 调用一次工具并保持运行）：�
 // ───────────────────────── B 组：圆点大小 ─────────────────────────
 test('B1 设置 → 主题 → 界面 → 加载动画网格：16 种旋转动画逐个核对（选项格、标签、点数、圆点宽高范围与远近大小变化）', async ({ page }) => {
   test.setTimeout(150_000);
-  await primeOverlays(page);
+  await primeOverlays(page, ZOOM_ONE);
   await openApp(page);
+  await expectZoomOne(page);
   await openInterfaceTab(page);
   const problems = [];
 
@@ -153,10 +154,11 @@ test('B1 设置 → 主题 → 界面 → 加载动画网格：16 种旋转动�
 
 test('B2 状态行里 14px 指示器（一直停在思考阶段 12 秒）：所有圆点的宽、高读数都在 [1.45, 2.65]px 内', async ({ page }) => {
   test.setTimeout(120_000);
-  await prepareLive(page, { key: 'b2', scenario: { events: [{ kind: 'thinking', text: 'B2 思考。' }] } });
+  await prepareLive(page, { key: 'b2', presets: ZOOM_ONE, scenario: { events: [{ kind: 'thinking', text: 'B2 思考。' }] } });
   await sendRound(page);
   await expectPhase(page, 'thinking');
   await expect(page.locator(IND).first(), '前置：状态行里应有指示器').toBeVisible({ timeout: 15_000 });
+  await expectZoomOne(page);
   await startSampler(page, 100);
   await page.waitForTimeout(12_000);
   const samples = await stopSampler(page);
@@ -315,11 +317,12 @@ test('C4 随机模式：距上次抽取不满 1.5 秒时进入新阶段不换，
 });
 
 test('C5 减弱动画偏好下的随机模式：圆点是静止帧（1.5 秒内不动），任意两点中心距离 ≥ 3px，data-style 属于 16 个 id', async ({ page }) => {
-  await prepareLive(page, { key: 'c5', scenario: { events: [{ kind: 'thinking', text: 'C5 思考。' }] }, reducedMotion: true });
+  await prepareLive(page, { key: 'c5', presets: ZOOM_ONE, scenario: { events: [{ kind: 'thinking', text: 'C5 思考。' }] }, reducedMotion: true });
   expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), '前置：页面应处于"减弱动画"偏好').toBe(true);
   await sendRound(page);
   await expectPhase(page, 'thinking');
   await expect(page.locator(IND).first(), '前置：状态行里应有指示器').toBeVisible({ timeout: 15_000 });
+  await expectZoomOne(page);
   await startSampler(page, 100);
   await page.waitForTimeout(1600);
   const samples = await stopSampler(page);

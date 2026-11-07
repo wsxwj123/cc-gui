@@ -36,6 +36,13 @@ export const MIN_AT_MOST = 1.95;
 
 export const IND = '[data-live-line] [data-live-indicator]';
 
+/** 圆点大小 / 点距的判据口径是界面缩放 1.0(接口文件「圆点大小约定」);应用默认档「大」= 1.2,读数会被整体放大,所以这几条用例预置成 1。 */
+export const ZOOM_ONE = { 'cgui-ui-font-scale': '1' };
+export async function expectZoomOne(page) {
+  const z = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--ui-zoom').trim());
+  expect(z, '前置自证：界面缩放应为 1（口径见接口文件「圆点大小约定」；应用默认是 1.2，读数会被放大 1.2 倍）').toBe('1');
+}
+
 export const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
 export const uniq = (arr) => [...new Set(arr)];
 export const lsGet = (page, key) => page.evaluate((k) => localStorage.getItem(k), key);
