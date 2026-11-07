@@ -147,6 +147,20 @@ export function snapshotInPage() {
     };
     for (const e of texts(tb)) out.samples.push(sample('table', e));
   }
+  // r158 主会话修订（2026-11-07，用户：区分折叠行和正文的一个就是颜色）：折叠行文字（过程条标题 / 工作组头 / 思考折叠行）与正文段落文字各采一个样本，
+  // 卡头标题已在上面以 'title' 类采过。
+  const ownText = (root) => {
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = w.nextNode(); n; n = w.nextNode()) { const pe = n.parentElement; if (pe && n.nodeValue.trim() && rendered(pe)) return pe; }
+    return null;
+  };
+  const addFold = (cat, root) => { const e = root && rendered(root) ? ownText(root) : null; if (e) out.samples.push(sample(cat, e)); };
+  addFold('fold-strip', document.querySelector('[data-strip="head"]'));
+  addFold('fold-group', document.querySelector('[data-work-group-head]'));
+  // 注意排除工作组头本身：组里有思考时，头行的图标也是脑图标。
+  addFold('fold-think', [...document.querySelectorAll('[data-work-group-state="open"] button:not([data-work-group-head])')].find((b) => b.querySelector('svg[class*="brain" i]')));
+  const bodyP = [...document.querySelectorAll('.markdown-content p')].find((p) => rendered(p) && !p.closest('[data-tool-card]'));
+  if (bodyP) out.samples.push(sample('body', bodyP));
   return out;
 }
 
@@ -215,6 +229,33 @@ export function contrastProblems(snap, theme, cats) {
     if (r < 4.5) out.push(`${theme.key} ${s.cat}「${s.t}」(${s.d}) 对比度 ${r.toFixed(2)}（应 ≥ 4.5）`);
   }
   for (const c of cats) if (!seen[c]) out.push(`${theme.key}：页面上没采到「${c}」类文字样本（对应元素不存在或不可见）`);
+  return out;
+}
+
+/**
+ * B16（r158 主会话修订）：折叠行靠颜色和正文区分。折叠行文字（过程条摘要行标题 / 工作组头 / 思考折叠行 / 卡头标题）
+ * 对比度 ≥ 4.5（仍然看得清），且比正文段落文字的对比度低至少 3.0（比正文淡）。
+ */
+export function foldColorProblems(snap, theme) {
+  const canvas = canvasOf(snap);
+  const ratio = (s) => {
+    let bg = canvas;
+    for (const b of s.chain) { const c = parseColor(b); if (c.a >= 0.02) { bg = over(c, canvas); break; } }
+    return contrast(over(parseColor(s.fg), bg), bg);
+  };
+  const body = snap.samples.find((s) => s.cat === 'body');
+  if (!body) return [`${theme.key}：页面上没采到正文段落文字样本（.markdown-content p）`];
+  const rb = ratio(body);
+  const out = [];
+  for (const [cat, label] of [['fold-strip', '过程条摘要行标题'], ['fold-group', '工作组头文字'], ['fold-think', '思考折叠行文字'], ['title', '卡头标题']]) {
+    const ss = snap.samples.filter((s) => s.cat === cat);
+    if (ss.length === 0) { out.push(`${theme.key}：页面上没采到「${label}」样本（对应元素不存在或不可见）`); continue; }
+    for (const s of ss) {
+      const r = ratio(s);
+      if (r < 4.5) out.push(`${theme.key} ${label}「${s.t}」(${s.d}) 对比度 ${r.toFixed(2)}（应 ≥ 4.5）`);
+      if (rb - r < 3.0) out.push(`${theme.key} ${label}「${s.t}」(${s.d}) 对比度 ${r.toFixed(2)}，正文 ${rb.toFixed(2)}，相差 ${(rb - r).toFixed(2)}（折叠行应比正文淡，相差应 ≥ 3.0）`);
+    }
+  }
   return out;
 }
 

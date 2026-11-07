@@ -5,7 +5,7 @@
 import { test, expect } from '@playwright/test';
 import {
   THEMES, LIGHT, DARK, norm, textOf, copied, openFixture, openFull, releaseAll, expandAllGroups, expandAllCards, scrollToEnd, cardAt, openCard,
-  themeSnapshot, themeProblems, lumProblems, contrastProblems, cardRoots, mdRoots, parseColor, lum, over,
+  themeSnapshot, themeProblems, lumProblems, contrastProblems, foldColorProblems, cardRoots, mdRoots, parseColor, lum, over,
 } from './helpers/ui.mjs';
 import { PY_CODE, PY_LINES, BASH_LONG_LINE, GREP_MARKS, LONG_DESC, END_ANCHOR_X } from './helpers/fixtures.mjs';
 
@@ -52,6 +52,12 @@ test('B3 文字够清楚：七个主题里卡头标题、终端命令 / 输出�
   expect(problems, '各类文字与背景的对比度应 ≥ 4.5').toEqual([]);
 });
 
+test('B16 折叠行与正文靠颜色区分：七个主题里过程条标题 / 工作组头 / 思考折叠行 / 卡头标题的文字对比度 ≥ 4.5，且比正文段落文字低至少 3.0（折叠行比正文淡）', async ({ browser }) => {
+  test.setTimeout(COLOR_TIMEOUT);
+  const problems = await collect(browser, THEMES, (snap, theme) => foldColorProblems(snap, theme));
+  expect(problems, '折叠行文字应比正文淡且仍然清楚').toEqual([]);
+});
+
 const differs = (a, b) => ['r', 'g', 'b'].some((k) => Math.abs(a[k] - b[k]) >= 1) || Math.abs(a.a - b.a) >= 0.01;
 test('B12 Markdown 跟随主题：引用块非斜体且有左边框，表格圆角 + 斑马纹，行内代码有淡底且与正文同色；它们也满足亮度与对比度要求', async ({ browser }) => {
   test.setTimeout(COLOR_TIMEOUT);
@@ -87,9 +93,24 @@ const cardFacts = (page) => page.evaluate(() => [...document.querySelectorAll('[
   const head = q('[data-tool-card-head]'); const meta = q('[data-tool-card-meta]');
   const parts = ['[data-tool-card-icon]', '[data-tool-card-name]', '[data-tool-card-title]', '[data-tool-card-meta]'].map(q);
   const inOrder = parts.every(Boolean) && parts.every((e, i) => i === 0 || (parts[i - 1].compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
-  const chevrons = head && meta ? [...head.querySelectorAll('*')].filter((e) => (meta.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING) && !meta.contains(e)).length : 0;
-  return { tool: c.getAttribute('data-tool-name'), status: c.getAttribute('data-status'), head: !!head, inOrder, chevrons, name: t('[data-tool-card-name]'), title: t('[data-tool-card-title]'), meta: t('[data-tool-card-meta]') };
+  // r158 主会话修订（2026-11-07，用户：所有折叠行都不要展开箭头）：原判据“卡头末尾必须有三角”改为“卡头里没有任何展开箭头”。
+  const arrows = head ? [...head.querySelectorAll('svg')].filter((s) => /chevron|caret/i.test(s.getAttribute('class') || '')).length + (/[▸▾▴▶◂]/.test(head.textContent || '') ? 1 : 0) : 0;
+  return { tool: c.getAttribute('data-tool-name'), status: c.getAttribute('data-status'), head: !!head, inOrder, arrows, name: t('[data-tool-card-name]'), title: t('[data-tool-card-title]'), meta: t('[data-tool-card-meta]') };
 }));
+/** 回合里的折叠行（过程条摘要行 / 工作组头 / 思考折叠行 / 工具卡头）有没有展开箭头：只数 class 带 chevron / caret 的 svg 与 [data-strip-caret]。 */
+const foldArrows = (pg) => pg.evaluate(() => {
+  const bad = (s) => /chevron|caret/i.test(s.getAttribute('class') || '');
+  const turns = [...document.querySelectorAll('[data-turn-uuid]')];
+  return {
+    turns: turns.length,
+    strip: document.querySelectorAll('[data-strip="head"]').length,
+    groups: document.querySelectorAll('[data-work-group-head]').length,
+    // 思考折叠行 = 展开的工作组里、不是组头本身、带脑图标的按钮（组里有思考时组头图标也是脑图标，要排除）。
+    brains: document.querySelectorAll('[data-work-group-state="open"] button:not([data-work-group-head]) svg[class*="brain" i]').length,
+    chevrons: turns.flatMap((t) => [...t.querySelectorAll('svg')]).filter(bad).length,
+    carets: document.querySelectorAll('[data-strip-caret]').length,
+  };
+});
 /** 夹具序号 → 期望（小标签 / 标题 / 右侧信息的判据）。 */
 const WANT = {
   1: ['Bash', 'ok', 'Bash', (s) => s === '列出目录', (m) => m === ''],
@@ -422,20 +443,28 @@ test('E2 Edit 的参数还在传输（没有 old_string / new_string）：展开
 // ───────────────────────── B4 / B5 / B15：第 9 项（运行中）与第 10 项（被停止）分两个会话核对 ─────────────────────────
 // 实测现状：直播期间（f* 会话）会话里所有没有结果的工具都显示为运行中，包括历史回合里没有结果的第 10 项；
 // 空闲会话（h）里同样没有结果的工具显示为已停止。所以第 9 项到 f* 里核对，第 10 项到 h 里核对。
-test('B4 统一骨架：11 项各一张卡，卡头五件套齐全、各项内容与状态符合约定，点卡头 aria-expanded 切换且正文只在展开时存在', async ({ page }) => {
+test('B4 统一骨架：11 项各一张卡，卡头四件套齐全且没有展开箭头、各项内容与状态符合约定，点卡头 aria-expanded 切换且正文只在展开时存在；回合里所有折叠行都没有展开箭头', async ({ page }) => {
   await openFull(page, 'f4');
   await expect.poll(async () => await page.locator('[data-tool-card]').count(), { timeout: 10_000, message: NO_CARD }).toBe(11);
   const live = await cardFacts(page);
+  const liveFold = await foldArrows(page);
   await openFixture(page, 'h');
   await expect.poll(async () => await page.locator('[data-tool-card]').count(), { timeout: 10_000, message: `历史会话 h：${NO_CARD}` }).toBe(10);
   const hist = await cardFacts(page);
+  const histFold = await foldArrows(page);
   const problems = [];
+  for (const [label, a] of [['直播会话', liveFold], ['历史会话', histFold]]) {
+    if (a.strip < 1) problems.push(`${label}：找不到过程条摘要行 [data-strip="head"]（本判据的前提不成立）`);
+    if (a.groups < 1) problems.push(`${label}：找不到工作组头 [data-work-group-head]（本判据的前提不成立）`);
+    if (a.brains < 1) problems.push(`${label}：展开的工作组里找不到思考折叠行（脑图标），无法判断它有没有箭头（本判据的前提不成立）`);
+    if (a.chevrons !== 0 || a.carets !== 0) problems.push(`${label}：回合里还有展开箭头（chevron / caret 图标 ${a.chevrons} 个、[data-strip-caret] ${a.carets} 个）`);
+  }
   for (let n = 1; n <= 11; n += 1) {
     const f = n === 10 ? hist[8] : live[[0, 1, 2, 3, 4, 5, 6, 7, 10, 8, 9][n - 1]];
     const [tool, status, name, titleOk, metaOk] = WANT[n];
     if (f.tool !== tool) problems.push(`第 ${n} 项 data-tool-name=${f.tool}（应 ${tool}）`);
     if (f.status !== status) problems.push(`第 ${n} 项 data-status=${f.status}（应 ${status}）`);
-    if (!f.head || !f.inOrder || f.chevrons < 1) problems.push(`第 ${n} 项卡头五件套不全或次序不对（head=${f.head} 顺序=${f.inOrder} 三角个数=${f.chevrons}）`);
+    if (!f.head || !f.inOrder || f.arrows !== 0) problems.push(`第 ${n} 项卡头四件套不全、次序不对或还有展开箭头（head=${f.head} 顺序=${f.inOrder} 箭头个数=${f.arrows}）`);
     if (f.name !== name) problems.push(`第 ${n} 项小标签=「${f.name}」（应 ${name}）`);
     if (f.title === null || !titleOk(f.title)) problems.push(`第 ${n} 项标题=「${f.title}」不符`);
     if (f.meta === null || !metaOk(f.meta)) problems.push(`第 ${n} 项右侧信息=「${f.meta}」不符`);

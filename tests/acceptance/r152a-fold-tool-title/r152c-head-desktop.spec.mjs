@@ -1,6 +1,6 @@
 // r152c-head-desktop：折叠条改版后的外观（只看页面上用户看得见、量得到的东西）。
 // 判据全部来自 .devflow/r152c-head-desktop-接口.md 的「行为清单」；用例名 Cn 对应清单第 n 条。
-// 折叠条 = [data-strip="head"]；子元素从左到右：左图标 → [data-strip-title] → [用时 data-strip-elapsed，仅生成中] → [data-strip-caret]。
+// 折叠条 = [data-strip="head"]；子元素从左到右：左图标 → [data-strip-title]。（r158 起折叠行不再有展开箭头：没有 [data-strip-caret]，开合只靠整行可点 + aria-expanded；用时 r154 起在底部状态行。）
 // 几何一律用 getBoundingClientRect()，容差写在各用例里（取自接口文件，不放宽）。
 import { test, expect } from '@playwright/test';
 import { SESSIONS, C_ROWS, LONG_THINK } from './helpers/fixtures.mjs';
@@ -172,61 +172,55 @@ test('C4 悬停提示：历史回合带轮数、直播回合不带；展开 / �
     .toBe(`${PREFIX} · 2 步 · ${HOVER_TAIL}`);
 });
 
-// ───────────────────────── C5 / C6：三角 ─────────────────────────
-/** 三角位置的全部判据（历史回合与直播回合共用）。 */
-function expectCaretAtRight(s, label) {
-  expect.soft(s.caretCount, `${label}：折叠条里 [data-strip-caret] 应恰有 1 个，子元素 ${JSON.stringify(s.kids)}`).toBe(1);
-  expect.soft(s.caretIsLast, `${label}：三角应是折叠条的最后一个子元素，子元素 ${JSON.stringify(s.kids)}`).toBe(true);
-  expect.soft((s.caretText ?? 'x').trim(), `${label}：三角自己不含任何文字`).toBe('');
-  expect.soft(s.kids[0], `${label}：折叠条的第一个子元素不能是三角（最左没有箭头），子元素 ${JSON.stringify(s.kids)}`).not.toBe('caret');
-  expect.soft(s.kids.indexOf('title'), `${label}：标题紧跟在左图标后面（第 2 个子元素），子元素 ${JSON.stringify(s.kids)}`).toBe(1);
-  expect.soft(s.kids.indexOf('title') < s.kids.indexOf('caret'), `${label}：标题在三角左边，子元素 ${JSON.stringify(s.kids)}`).toBe(true);
-  expect.soft(s.headRight - (s.caretRight ?? -9999), `${label}：三角右缘距折叠条右缘应 ≤ 16px（折叠条右缘 ${s.headRight}，三角右缘 ${s.caretRight}）`)
-    .toBeLessThanOrEqual(16);
+// ───────────────────────── C5 / C6：折叠条没有展开箭头（r158 起）─────────────────────────
+// r152c 原判据是“最右一个实心三角、最左没有箭头”。r158（2026-11-07，用户：所有折叠行都不需要展开箭头，向桌面版靠拢）改为：
+// 折叠条里没有任何箭头——没有 [data-strip-caret]，没有 class 带 chevron / caret 的 svg，没有 ▸ ▾ ▴ 之类的箭头字符；
+// 开合只靠整行可点 + aria-expanded。子元素只剩 左图标 → 标题。
+/** 折叠条里“箭头”的全部判据（历史回合与直播回合共用）。 */
+const arrowsIn = (head) => head.evaluate((h) => ({
+  carets: h.querySelectorAll('[data-strip-caret]').length,
+  chevrons: [...h.querySelectorAll('svg')].filter((s) => /chevron|caret/i.test(s.getAttribute('class') || '')).length,
+  glyphs: /[▸▾▴▶◂]/.test(h.textContent || ''),
+}));
+const NO_ARROWS = { carets: 0, chevrons: 0, glyphs: false };
+function expectNoCaret(s, a, label) {
+  expect.soft(s.caretCount, `${label}：折叠条里不该再有 [data-strip-caret]，子元素 ${JSON.stringify(s.kids)}`).toBe(0);
+  expect.soft(a, `${label}：折叠条里不该有任何展开箭头（三角 / chevron 图标 / 箭头字符）`).toEqual(NO_ARROWS);
+  expect.soft(s.kids, `${label}：折叠条的子元素只有 左图标(svg) → 标题`).toEqual(['svg', 'title']);
 }
 
-test('C5 三角的位置：在折叠条最右（最后一个子元素、无文字），最左没有箭头，标题在三角左边；历史回合与直播回合都要满足', async ({ page }) => {
+test('C5 折叠条没有展开箭头：子元素只有 左图标 → 标题，没有三角 / chevron 图标 / 箭头字符；历史回合与直播回合都要满足', async ({ page }) => {
   test.setTimeout(150_000);
   await openApp(page);
   await openSessionByMarker(page, SESSIONS.ch.marker);
   const head = headOf(turnRows(page).filter({ hasText: C_ROWS.c1a.anchor }).first());
   await expect(head, '历史回合应有折叠条').toHaveCount(1, { timeout: 20_000 });
-  expectCaretAtRight(await readStructure(head), '历史回合');
+  expectNoCaret(await readStructure(head), await arrowsIn(head), '历史回合');
 
   const live = await startLive(page, 'cl5', 'C5');
-  await expect(live.head.locator('[data-strip-caret]'), '直播回合的折叠条也应有三角').toHaveCount(1);
-  expectCaretAtRight(await readStructure(live.head), '直播回合');
+  await expect(live.head.locator('[data-strip-caret]'), '直播回合的折叠条也没有三角').toHaveCount(0);
+  expectNoCaret(await readStructure(live.head), await arrowsIn(live.head), '直播回合');
 });
 
-test('C6 三角随开合变化：收起 false / false → 点击展开 true / true → 再点收起 false / false；两态画面不同、右缘位置相同（差 ≤ 1px）', async ({ page }) => {
+test('C6 开合只靠整行可点 + aria-expanded：收起 false → 点击展开 true → 再点收起 false；折叠条里始终没有箭头，标题左缘前后一致（差 ≤ 1px）', async ({ page }) => {
   await openApp(page);
   await openSessionByMarker(page, SESSIONS.ch.marker);
   const head = headOf(turnRows(page).filter({ hasText: C_ROWS.c1a.anchor }).first());
   await expect(head, '历史回合应有折叠条').toHaveCount(1, { timeout: 20_000 });
-  const caret = head.locator('[data-strip-caret]');
-  await expect(caret, '折叠条里应有 1 个三角').toHaveCount(1);
-  const state = async () => ({ open: await caret.getAttribute('data-open'), aria: await head.getAttribute('aria-expanded') });
-  const right = () => caret.evaluate((el) => el.getBoundingClientRect().right);
-  const settle = () => page.waitForTimeout(500); // 等三角的过渡动画落定再截图
+  await expect(head.locator('[data-strip-caret]'), '折叠条里没有三角').toHaveCount(0);
+  const titleLeft = () => head.locator('[data-strip-title]').evaluate((el) => el.getBoundingClientRect().left);
+  const left0 = await titleLeft();
 
-  expect.soft(await state(), '初始：历史回合默认收起').toEqual({ open: 'false', aria: 'false' });
-  const rightClosed0 = await right();
+  expect.soft(await head.getAttribute('aria-expanded'), '初始：历史回合默认收起').toBe('false');
+  expect.soft(await arrowsIn(head), '收起态：折叠条里没有任何箭头').toEqual(NO_ARROWS);
   await head.click();
   await expect(head, '点击折叠条展开').toHaveAttribute('aria-expanded', 'true');
-  await settle();
-  expect.soft(await state(), '点击后：展开').toEqual({ open: 'true', aria: 'true' });
-  const shotOpen = await caret.screenshot();
-  const rightOpen = await right();
+  expect.soft(await arrowsIn(head), '展开态：折叠条里仍没有任何箭头').toEqual(NO_ARROWS);
+  expect.soft(Math.abs((await titleLeft()) - left0), '展开态下标题左缘不动（差 ≤ 1px）').toBeLessThanOrEqual(1);
   await head.click();
   await expect(head, '再点一下收起').toHaveAttribute('aria-expanded', 'false');
-  await settle();
-  expect.soft(await state(), '再点后：收起').toEqual({ open: 'false', aria: 'false' });
-  const shotClosed = await caret.screenshot();
-  const rightClosed = await right();
-
-  expect.soft(Buffer.compare(shotOpen, shotClosed) !== 0, '展开与收起两态下三角的画面应不同（两张截图的字节不得相等）').toBe(true);
-  expect.soft(Math.abs(rightOpen - rightClosed), `展开 / 收起两态下三角右缘位置应相同（差 ≤ 1px；展开 ${rightOpen}，收起 ${rightClosed}）`).toBeLessThanOrEqual(1);
-  expect.soft(Math.abs(rightClosed0 - rightClosed), `点击往返之后三角右缘回到原位（差 ≤ 1px；初始 ${rightClosed0}，现在 ${rightClosed}）`).toBeLessThanOrEqual(1);
+  expect.soft(await arrowsIn(head), '再收起：折叠条里没有任何箭头').toEqual(NO_ARROWS);
+  expect.soft(Math.abs((await titleLeft()) - left0), '点击往返之后标题左缘回到原位（差 ≤ 1px）').toBeLessThanOrEqual(1);
 });
 
 // ───────────────────────── C7：没有左边线 ─────────────────────────
@@ -254,7 +248,7 @@ test('C7 没有左边线：折叠条 border-left-width 为 0px（历史 / 直播
 });
 
 // ───────────────────────── C8 / C9：直播回合头行是静态的（r154 R3 换锚） ─────────────────────────
-// r154 R3 起：直播回合的 2×2 点阵与用时都挪到了页面底部的状态行 [data-live-line]；头行恒为 静态扳手图标 → 标题 → 三角。
+// r154 R3 起：直播回合的 2×2 点阵与用时都挪到了页面底部的状态行 [data-live-line]；头行恒为 静态扳手图标 → 标题（r158 起没有三角）。
 // 原 C8（点阵几何）、C9（点阵动画顺序与减弱动态）的对象已不存在，按同一意图换成“头行静态”的等价判据；
 // 新行为的完整契约与底部状态行的断言在 tests/acceptance/r154-ui-live-line（L6 / L9）。
 test('C8 直播回合最左是静态小图标 svg：没有点阵与用时（r154 R3 起挪到底部状态行），图标 ≤ 16px 且在标题左边', async ({ page }) => {
@@ -296,19 +290,19 @@ const liveMarks = async (page) => ({
   live: await page.locator('[data-strip-live]').count(),
 });
 
-// r154 R3 换锚：原判据“标题 → 用时 → 三角”里的用时挪到了底部状态行，头行右侧只剩 标题 → 三角。
-test('C10 直播回合右侧布局：标题 → 三角（左到右），头行没有用时（r154 R3 起挪到底部状态行）；回合结束后直播标记消失，左图标仍是 svg，三角位置不变', async ({ page }) => {
+// r154 R3 换锚：用时挪到了底部状态行；r158 起折叠条里连三角也没有，右侧只剩标题。
+test('C10 直播回合右侧布局：折叠条里只有 左图标 → 标题，没有三角、没有用时；回合结束后直播标记消失，左图标仍是 svg，标题右缘位置不变', async ({ page }) => {
   const live = await startLive(page, 'cl10', 'C10');
   await expect(live.head.locator('[data-strip-elapsed]'), 'r154 起折叠条里不再有 [data-strip-elapsed]').toHaveCount(0);
+  await expect(live.head.locator('[data-strip-caret]'), 'r158 起折叠条里不再有 [data-strip-caret]').toHaveCount(0);
   const g = await readEdges(live.head);
   expect(g.title, '折叠条里应有 [data-strip-title]').not.toBeNull();
-  expect(g.caret, '折叠条里应有 [data-strip-caret]').not.toBeNull();
   expect.soft(g.elapsed, '直播回合折叠条里没有用时元素').toBeNull();
+  expect.soft(g.caret, '直播回合折叠条里没有三角元素').toBeNull();
   const f = (n) => Number(n).toFixed(2);
-  const dump = `折叠条 ${f(g.head.left)}–${f(g.head.right)}；标题 ${f(g.title.left)}–${f(g.title.right)}；三角 ${f(g.caret.left)}–${f(g.caret.right)}`;
-  expect.soft(g.caret.left, `三角在标题右边（三角左缘 ≥ 标题右缘 − 1px）；${dump}`).toBeGreaterThanOrEqual(g.title.right - 1);
-  expect.soft(g.caret.right, `三角右缘 ≤ 折叠条右缘（浮点噪声容 0.01px）；${dump}`).toBeLessThanOrEqual(g.head.right + 0.01);
-  const gapBefore = g.head.right - g.caret.right;
+  const dump = `折叠条 ${f(g.head.left)}–${f(g.head.right)}；标题 ${f(g.title.left)}–${f(g.title.right)}`;
+  expect.soft(g.title.right, `标题右缘 ≤ 折叠条右缘（浮点噪声容 0.01px）；${dump}`).toBeLessThanOrEqual(g.head.right + 0.01);
+  const gapBefore = g.head.right - g.title.right;
 
   releaseRound();
   await waitRoundIdle(page);
@@ -318,14 +312,14 @@ test('C10 直播回合右侧布局：标题 → 三角（左到右），头行�
   await expect(doneHead, '回合结束后折叠条仍在').toHaveCount(1);
   const s = await readStructure(doneHead);
   expect.soft(s.firstIsSvg, `回合结束后左图标应是 svg 小图标（不是点阵），子元素 ${JSON.stringify(s.kids)}`).toBe(true);
-  expect.soft(s.caretIsLast, `回合结束后三角仍是最后一个子元素，子元素 ${JSON.stringify(s.kids)}`).toBe(true);
-  expect.soft(s.kids.includes('elapsed') || s.kids.includes('dots'), `回合结束后折叠条里不再有用时 / 点阵，子元素 ${JSON.stringify(s.kids)}`).toBe(false);
-  const gapAfter = s.headRight - (s.caretRight ?? -9999);
-  expect.soft(Math.abs(gapAfter - gapBefore), `回合结束前后三角右缘位置不变（距折叠条右缘 ${f(gapBefore)} → ${f(gapAfter)}，差 ≤ 1px）`).toBeLessThanOrEqual(1);
+  expect.soft(s.kids, `回合结束后折叠条的子元素仍只有 左图标(svg) → 标题`).toEqual(['svg', 'title']);
+  const e2 = await readEdges(doneHead);
+  const gapAfter = e2.head.right - e2.title.right;
+  expect.soft(Math.abs(gapAfter - gapBefore), `回合结束前后标题右缘位置不变（距折叠条右缘 ${f(gapBefore)} → ${f(gapAfter)}，差 ≤ 1px）`).toBeLessThanOrEqual(1);
 });
 
 // ───────────────────────── C11：超长标题 ─────────────────────────
-test('C11 超长标题（900 / 1600 两档窗口）：标题自己被省略号截断，三角完整留在折叠条里，折叠条仍一行，页面无横向滚动', async ({ page }) => {
+test('C11 超长标题（900 / 1600 两档窗口）：标题自己被省略号截断并完整留在折叠条里（r158 起没有三角），折叠条仍一行，页面无横向滚动', async ({ page }) => {
   await openApp(page);
   await openSessionByMarker(page, SESSIONS.ch.marker);
   const longHead = headOf(turnRows(page).filter({ hasText: C_ROWS.c11long.anchor }).first());
@@ -344,9 +338,10 @@ test('C11 超长标题（900 / 1600 两档窗口）：标题自己被省略号�
         const c = h.querySelector('[data-strip-caret]');
         const hb = h.getBoundingClientRect();
         const cb = c ? c.getBoundingClientRect() : null;
+        const tb = t ? t.getBoundingClientRect() : null;
         return {
           headW: hb.width, headH: hb.height, headLeft: hb.left, headRight: hb.right,
-          title: t ? { ellipsis: getComputedStyle(t).textOverflow, over: t.scrollWidth - t.clientWidth, clientW: t.clientWidth, ws: getComputedStyle(t).whiteSpace } : null,
+          title: t ? { ellipsis: getComputedStyle(t).textOverflow, over: t.scrollWidth - t.clientWidth, clientW: t.clientWidth, ws: getComputedStyle(t).whiteSpace, left: tb.left, right: tb.right } : null,
           caret: cb ? { left: cb.left, right: cb.right } : null,
         };
       })),
@@ -360,11 +355,11 @@ test('C11 超长标题（900 / 1600 两档窗口）：标题自己被省略号�
     const m = seen[width];
     const at = `${width}px`;
     expect(m.title, `${at}：长标题的折叠条里应有 [data-strip-title]`).not.toBeNull();
-    expect(m.caret, `${at}：长标题的折叠条里应有 [data-strip-caret]`).not.toBeNull();
+    expect.soft(m.caret, `${at}：长标题的折叠条里没有 [data-strip-caret]（r158 起折叠条没有展开箭头）`).toBeNull();
     expect.soft(m.title.ellipsis, `${at}：[data-strip-title] 自己设了省略号（text-overflow: ellipsis）`).toBe('ellipsis');
     expect.soft(m.title.over, `${at}：[data-strip-title] 放不下，必须真被截断（scrollWidth − clientWidth > 0）`).toBeGreaterThan(0);
-    expect.soft(m.caret.left, `${at}：三角左缘 ≥ 折叠条左缘（三角完整留在折叠条里）`).toBeGreaterThanOrEqual(m.headLeft);
-    expect.soft(m.caret.right, `${at}：三角右缘 ≤ 折叠条右缘（三角完整留在折叠条里，浮点噪声容 0.01px）`).toBeLessThanOrEqual(m.headRight + 0.01);
+    expect.soft(m.title.left, `${at}：标题左缘 ≥ 折叠条左缘（标题完整留在折叠条里）`).toBeGreaterThanOrEqual(m.headLeft);
+    expect.soft(m.title.right, `${at}：标题右缘 ≤ 折叠条右缘（标题完整留在折叠条里，浮点噪声容 0.01px）`).toBeLessThanOrEqual(m.headRight + 0.01);
     expect.soft(Math.abs(m.headH - m.shortH), `${at}：长标题折叠条仍是一行（高度与短标题折叠条相差 ≤ 2px：${m.headH} vs ${m.shortH}）`).toBeLessThanOrEqual(2);
     expect.soft(m.docOver, `${at}：页面无横向滚动`).toBeLessThanOrEqual(1);
     expect.soft(m.boxOver, `${at}：消息区无横向滚动`).toBeLessThanOrEqual(1);

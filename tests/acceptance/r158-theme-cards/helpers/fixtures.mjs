@@ -84,7 +84,8 @@ export function itemsX() {
   ];
 }
 function turnFor(key) {
-  if (key === 'h' || /^f/.test(key)) return { items: items(), endText: END_TEXT };
+  // r158 主会话修订（折叠行去箭头）：主夹具的回合开头加一个思考块，让「思考折叠行」也在被检查的折叠行里。
+  if (key === 'h' || /^f/.test(key)) return { think: 'R158 思考一行预览。', items: items(), endText: END_TEXT };
   if (key === 'x') return { items: itemsX(), endText: END_ANCHOR_X };
   return { items: [], endText: `R158 ${key} 历史回合收尾。` };
 }
@@ -109,15 +110,17 @@ function writeSession(key) {
     message: { role: 'user', content: `${marker} 第 1 轮：历史` },
     uuid: `r158-u-${key}`, timestamp: ISO(0), permissionMode: 'default', promptSource: 'sdk',
   });
-  const blocks = [...turn.items.map((it) => ({ k: 'tool', ...it })), { k: 'text', text: turn.endText }];
+  const blocks = [...(turn.think ? [{ k: 'think', text: turn.think }] : []), ...turn.items.map((it) => ({ k: 'tool', ...it })), { k: 'text', text: turn.endText }];
   blocks.forEach((b, k) => {
     const id = `r158_${key}_${k}`;
-    const block = b.k === 'text' ? { type: 'text', text: b.text } : { type: 'tool_use', id: `toolu_${id}`, name: b.name, input: b.input };
+    const block = b.k === 'text' ? { type: 'text', text: b.text }
+      : b.k === 'think' ? { type: 'thinking', thinking: b.text, signature: 'r158-sig' }
+        : { type: 'tool_use', id: `toolu_${id}`, name: b.name, input: b.input };
     lines.push({
       ...base(sid, cwd),
       message: {
         model: 'claude-sonnet-4-6', id, type: 'message', role: 'assistant', content: [block],
-        stop_reason: b.k === 'tool' ? 'tool_use' : 'end_turn', stop_sequence: null, stop_details: null, usage: USAGE,
+        stop_reason: b.k === 'text' ? 'end_turn' : 'tool_use', stop_sequence: null, stop_details: null, usage: USAGE,
       },
       apiBlockIndex: 0, requestId: `req_${id}`, type: 'assistant', uuid: `r158-a-${id}`, timestamp: ISO(0, k + 1), effort: 'high',
     });
