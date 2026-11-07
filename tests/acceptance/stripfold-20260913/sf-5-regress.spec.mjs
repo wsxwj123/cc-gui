@@ -7,8 +7,7 @@ import fs from 'node:fs';
 import { test, expect } from '@playwright/test';
 import { MARKER_A, MARKER_C, MARKER_D, A, C } from './helpers/fixtures.mjs';
 import {
-  primeOverlays, openApp, openSessionByMarker, turnRows, scrubber, clickScrubberTick,
-  stripRootOf, stripSnapshot, allRows,
+  primeOverlays, openApp, openSessionByMarker, turnRows, scrubber, clickScrubberTick, stripSnapshot, allRows,
   resetCtl, writeScenario, releaseRound, waitRoundIdle,
 } from './helpers/runtime.mjs';
 
@@ -80,7 +79,7 @@ test('SF-502 导出 Markdown：内容来自数据，且不带渲染产物的文�
   expect(content, '不许把渲染出来的过程段标签写进导出文件（说明取值不是 DOM）').not.toContain(RENDER_ONLY);
 });
 
-test('SF-503 回滚/重做之后：剩下的轮不受任何残留标记影响，全部回到收起', async ({ page }) => {
+test('SF-503 回滚/重做之后：被重做的轮消失，剩下的轮照常留在消息流里且各有恰好一条条带根（r159：原「全部回到收起」判据随总栏退役）', async ({ page }) => {
   // 现场自带：不清掉上一组（SF-2xx）留在遥控目录里的 scenario.json，这条就跑在**别人的场景**里
   // ——全量跑拿到的是上一个用例遗留的"停在 result 之前"，--grep 单跑又没有，同一用例两种现场。
   // 重发的那一轮**必须留在直播态**（holdBeforeResult）：判据要排除的正是它，现场得真有它。
@@ -135,10 +134,7 @@ test('SF-503 回滚/重做之后：剩下的轮不受任何残留标记影响，
     await expect(row, '重做之外的轮必须照常留在消息流里').toHaveCount(1);
     const root = row.locator('[data-strip-root]');
     await expect(root, '每一轮恰好一条条带根（取值面要真的落在这一轮里）').toHaveCount(1);
-    await expect.poll(async () => await root.getAttribute('data-strip-state'), {
-      timeout: 10_000,
-      message: `回滚不该留下任何"异常收尾"痕迹把旧轮撑开（剩下的第 ${i + 1} 轮 ${uuid.slice(0, 8)}）`,
-    }).toBe('closed');
+    // r159：原来这里断言剩下的轮 data-strip-state 全等 closed（总栏已去掉，closed 不再存在，该断言作废）。
   }
 
   // 收尾：放行重发的那一轮，别把假 CLI 晾在那儿等 release（进程会一直挂着）。
@@ -162,8 +158,7 @@ test('SF-505 既有过程段自己还能展开（条带不许把段内的开合�
   await openApp(page);
   await openSessionByMarker(page, MARKER_C);
   const row = turnRows(page).filter({ hasText: C.workflowLabel }).first();
-  // 展开条带 → 段内的 WorkGroup 仍然可点、点开能看到工具卡
-  await row.locator('[data-strip="head"]').click();
+  // r159：总栏已去掉、过程块恒展开，不用再点摘要行；段内的 WorkGroup 仍然可点、点开能看到工具卡
   expect((await stripSnapshot(row)).state).toBe('open');
   const groupToggle = row.locator('[data-strip-item="group"]').first().getByRole('button').first();
   await groupToggle.click();

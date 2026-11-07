@@ -31,7 +31,7 @@ import { useStore, roundStripEnd } from '../stores/sessionStore.js';
 import { TASK_TOOL_NAMES, rebuildTodosFromTaskCalls } from '../utils/todos.js';
 import {
   formatInputPreview, thinkingLabel, groupCoworkBlocks, activeGroupKey,
-  stripSummary, isFoldableSegment, getSkillDocReadName, toolTitle, cleanTailText,
+  stripSummary, getSkillDocReadName, toolTitle, cleanTailText,
 } from '../utils/streamStatus.js';
 import { isLiveLineHostedByGroup, liveLabelFromBlocks } from '../utils/liveStatus.js';
 import { LiveStatusLine } from './LiveStatusLine.jsx';
@@ -609,8 +609,7 @@ function ThinkingFold({ content, live = false }) {
 // ─── 条带折叠(2026-09-13;r122 2026-09-21 起自动折叠改为可选、默认关)──────────
 // 一轮问答 = 一条条带:可折段(kind==='group')收起时只留一行摘要,正文段与
 // task/workflow/skill/skilldoc 段恒显不折(R114:工作流/子代理跑到哪一步必须看得见)。
-// 回合结束后要不要自动收起由设置「过程块自动折叠」(store autoFoldProcess)决定,默认不收;
-// 开关开启时行为与 2026-09-13 的原版一致。
+// r159(2026-11-07)起摘要行与「过程块自动折叠」开关都不再显示,整轮恒展开,只留各工作组自己的头行开合。
 // 用 context 而不是新 prop —— 红线 I2「既有导出签名零改动」:CoworkBlocks 的 props 是它
 // 对外签名的一部分,加参数即改签名;context 是既有代码里反复使用的旁路(TaskOwnerContext…)。
 export const StripRoundContext = React.createContext({ forceOpen: false, headless: false, summary: null });
@@ -637,18 +636,11 @@ export function CoworkBlocks({
   chatMode = false, chatExpanded = false, chatFoldBar = null, chatUnfoldBar = null,
 }) {
   const [override, setOverride] = useState(() => new Map());       // group key → 用户设定展开态
-  // 条带整体开合态(null = 跟随自动态)。组件局部、不持久、不上提:口径 6「不记忆」——
-  // 换会话/重开面板/换 worktree 绑定都会卸载本组件,自然回到默认态。
-  const [stripOpen, setStripOpen] = useState(null);
-  // r122:过程块自动折叠开关(设置 → 通用;默认关 = 不自动折叠)。订阅 store 的布尔值,不在渲染里读
-  // localStorage —— 拨动开关后已挂载的回合(未被手动点过的)立刻按新设置显示。hook 无条件调用,
-  // 聊天模式分支不用它(那条路径自己折成「执行了 N 步操作」,不受此开关影响)。
-  const autoFold = useStore((s) => s.autoFoldProcess);
+  // r159:总摘要行(扳手 + 最近工具标题)与「过程块自动折叠」开关都去掉了,过程块恒展开。
+  // store 的 autoFoldProcess 与 StripAutoContext / StripHeadlessContext 的导出、Provider 都保留(只是这里不再读)。
   // 工作流卡片的归属会话(与 TaskCard 同一把:fork 复制出的卡片共享 tool_use.id)。
   const ownerSid = useContext(TaskOwnerContext);
-  // 条带的三项输入(全是旁路 context,不改 props):
-  const stripAutoCtx = useContext(StripAutoContext);
-  const stripHeadless = useContext(StripHeadlessContext);
+  // 条带的输入(旁路 context,不改 props):
   const injectedSummary = useContext(StripSummaryContext);
   const usageCalls = useContext(StripUsageCallsContext);
   const liveHost = useContext(LiveHostContext);
@@ -735,25 +727,12 @@ export function CoworkBlocks({
   const hostLabel = hostMode && isLiveLineHostedByGroup({
     blocks: list, stopping: !!liveHost.stopping, compacting: !!liveHost.compacting, chatMode,
   }) ? liveLabelFromBlocks({ blocks: list, stopping: !!liveHost.stopping, compacting: !!liveHost.compacting }) : null;
-  // 条带(§3.1/D.1):原 div.space-y-2 变成条带根,第一个子元素是摘要行,之后每个段包一层
-  // 带 data-strip-item 的 div(唯一新增的包装层,所有段都包,便于测试数数目)。
-  // 收起 = **只给可折段(group)带 hidden**(保留 DOM,只不参与布局);正文段与
-  // task/workflow/skill/skilldoc 段任何状态下都不带。段序 = groupCoworkBlocks 的输出序,一个不重排。
-  // 摘要优先用上层注入的**整轮**数值(⚡并入切段时头行只画在首段,账要按整轮算)。
+  // 条带(§3.1/D.1):原 div.space-y-2 变成条带根,每个段包一层带 data-strip-item 的 div
+  // (便于测试数数目)。r159 起没有摘要行、整轮恒展开;段序 = groupCoworkBlocks 的输出序,一个不重排。
+  // 摘要只用来写根上的 data-strip-* 属性;优先用上层注入的**整轮**数值。
   const summary = injectedSummary || stripSummary(list, usageCalls);
   const hasFold = summary.steps > 0;
-  // 自动态 = 异常收尾整轮展开 ∨ 正在生成 ∨ 开关关闭(r122 起默认关 → 已结束的回合也保持展开);
-  // 用户手动点过摘要行(stripOpen 非 null)则以手动为准,只影响本轮。
-  const open = stripOpen === null ? (stripAutoCtx || isLive || !autoFold) : stripOpen;
-  // 末尾(r152a):可折段里有工具 → 最新工具调用的标题(生成中 / 已结束两种口径,见 stripSummary);
-  // 一个工具都没有 → 仍是思考预览。
-  // r152c:折叠条可见文字只剩标题(向桌面版靠拢);取不到标题才回落计数;前缀与计数挪进悬停提示。
-  const headTitle = (isLive ? summary.liveTitle : summary.doneTitle) ?? summary.tail;
-  const headCount = summary.rounds == null ? `${summary.steps} 步` : `${summary.rounds} 轮 ${summary.steps} 步`;
-  const headText = headTitle || headCount;
-  const headHint = `思考与工具调用 · ${headCount} · 展开/收起这一轮的过程`;
   const out = segments.map((seg) => {
-    const foldable = isFoldableSegment(seg);
     const body = (() => {
       switch (seg.kind) {
         case 'text':
@@ -786,16 +765,12 @@ export function CoworkBlocks({
         case 'group': {
           const autoOpen = hostMode ? false : (seg.key === activeKey);
           const wantOpen = override.has(seg.key) ? override.get(seg.key) : autoOpen;
-          // 总摘要行收起时,承载状态行的组只剩头行(条目不画);点它的头行 = 展开过程条并展开该组。
-          const hostingThis = !!hostLabel && seg.key === activeKey;
-          const stripCollapsedHost = hostingThis && !open;
-          const expanded = wantOpen && !stripCollapsedHost;
+          const expanded = wantOpen;
           return (
             <WorkGroup
               items={seg.items}
               expanded={expanded}
               onToggle={() => {
-                if (stripCollapsedHost) setStripOpen(true);
                 setOverride((p) => { const n = new Map(p); n.set(seg.key, !expanded); return n; });
               }}
               onRetryTool={onRetryTool}
@@ -810,9 +785,7 @@ export function CoworkBlocks({
       }
     })();
     return (
-      // r157:总摘要行收起时,承载着实时状态行的那一组不藏(底部行此时不画,藏了就整行消失);其它可折段照旧。
-      <div key={`seg-${seg.key}`} data-strip-item={seg.kind}
-        hidden={(foldable && !open && !(seg.kind === 'group' && hostLabel && seg.key === activeKey)) || undefined}>
+      <div key={`seg-${seg.key}`} data-strip-item={seg.kind}>
         {body}
       </div>
     );
@@ -821,29 +794,12 @@ export function CoworkBlocks({
   return (
     <div
       data-strip-root
-      data-strip-state={hasFold ? (open ? 'open' : 'closed') : 'none'}
+      data-strip-state={hasFold ? 'open' : 'none'}
       // 无 usageCalls 时写空串(而不是不写属性):"有属性但为空"与"没这功能"要能区分。
       data-strip-rounds={summary.rounds == null ? '' : String(summary.rounds)}
       data-strip-steps={String(summary.steps)}
       className="space-y-2"
     >
-      {/* 摘要行恒为内容区第一个子元素(不搬家:流式期与收官后都在这个位置)。 */}
-      {hasFold && !stripHeadless && (
-        <button
-          type="button"
-          data-strip="head"
-          data-strip-live={isLive ? 'true' : undefined}
-          aria-expanded={open ? 'true' : 'false'}
-          title={headHint}
-          onClick={() => setStripOpen(!open)}
-          className="cg-fold w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-md transition-colors text-left cursor-pointer"
-        >
-          {/* r158:头行静态,子元素顺序固定 = 左图标(扳手)→ 标题;不再有展开三角,开合看 aria-expanded,
-              与正文靠 .cg-fold 的淡色区分。生成中的动画、用时与状态词都在本回合最下面的底部状态行(LiveStatusLine),头行不挂计时器。 */}
-          <Wrench size={13} className="shrink-0" />
-          <span data-strip-title className="min-w-0 flex-1 truncate text-xs font-body">{headText}</span>
-        </button>
-      )}
       {out}{trailing}
     </div>
   );

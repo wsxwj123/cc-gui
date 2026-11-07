@@ -4,7 +4,7 @@
 //   · 只连 127.0.0.1 上的**本套件自己的**隔离实例；用户正在用的 6677 / 6689 一律拒。
 //   · 观测只用公开文案 / role / title / `data-*` 锚点。本套件依赖的锚点全部来自
 //     .devflow/INTERFACE-20260912-stripfold.md §D（`data-strip-root` / `data-strip-state` /
-//     `data-strip="head"` / `data-strip-item` / `data-strip-steps` / `data-strip-rounds` / `data-turn-placeholder`），
+//     `data-strip-item` / `data-strip-steps` / `data-strip-rounds` / `data-turn-placeholder`），
 //     以及仓内既有锚点（`[data-turn-uuid]`、消息滚动容器）。
 //   · 找不到东西时报"环境不成立"（EnvironmentBlocked），别报成产品缺陷。
 import fs from 'node:fs';
@@ -63,15 +63,13 @@ export async function dismissOverlays(page) {
 
 /**
  * 每次导航前预置"使用指引已看过"（一层与被测行为无关的整屏遮罩）。
- * 〈2026-09-21 r122〉同时预置「过程块自动折叠」开关为**开启**（localStorage `cgui-auto-fold-process`='1'，
- * INTERFACE-r122 A1 的公开契约）：r122 把默认改成"不自动折叠"，本套件验证的是折叠逻辑本身，
- * 所以在开关开启的前提下继续跑，用例与断言一字不动。
+ * 〈2026-11-07 r159〉原来这里还预置「过程块自动折叠」开关为开启（localStorage `cgui-auto-fold-process`='1'）；
+ * 该开关与总栏一起已去掉（旧键不再有任何效果），预置随之删除。
  */
 export async function primeOverlays(page) {
   await page.addInitScript(() => {
     try {
       localStorage.setItem('cgui-tour-seen', '1');
-      localStorage.setItem('cgui-auto-fold-process', '1');
     } catch { /* 忽略 */ }
   });
 }
@@ -122,39 +120,6 @@ export const stopButton = (page) => page.getByRole('button', { name: /停止|中
 // ───────────────────────── 观测面：条带（INTERFACE §D）─────────────────────
 export const turnRows = (page) => page.locator('[data-turn-uuid][data-turn-role="turn"]');
 export const allRows = (page) => page.locator('[data-turn-uuid]');
-
-/**
- * 一轮的"当前显示状态"快照（全部是公开锚点，不碰内部变量）。
- * 入参既可以是那一轮的行，也可以是条带根自身（流式气泡没有 data-turn-uuid，用根更省事）。
- */
-export async function stripSnapshot(scope) {
-  const isRoot = (await scope.getAttribute('data-strip-root').catch(() => null)) !== null;
-  const root = isRoot ? scope : scope.locator('[data-strip-root]');
-  if (!(await root.count())) return { present: false };
-  const head = root.locator('[data-strip="head"]');
-  const items = root.locator('[data-strip-item]');
-  return {
-    present: true,
-    state: await root.first().getAttribute('data-strip-state'),
-    rounds: await root.first().getAttribute('data-strip-rounds'),
-    steps: await root.first().getAttribute('data-strip-steps'),
-    headCount: await head.count(),
-    headText: (await head.count()) ? (await head.first().textContent() || '').trim() : null, // r152c 起 = 折叠条整体文字 = 标题（取不到标题时回落成「[N 轮 ]M 步」）
-    headAria: (await head.count()) ? await head.first().getAttribute('aria-expanded') : null,
-    headTitle: (await head.count()) ? await head.first().getAttribute('title') : null,
-    headHeight: (await head.count()) ? (await head.first().boundingBox())?.height ?? 0 : 0,
-    kinds: await items.evaluateAll((els) => els.map((el) => el.getAttribute('data-strip-item'))),
-    hiddenKinds: await items.evaluateAll((els) => els.filter((el) => el.hasAttribute('hidden'))
-      .map((el) => el.getAttribute('data-strip-item'))),
-    itemHeights: await items.evaluateAll((els) => els.map((el) => Math.round(el.getBoundingClientRect().height))),
-    itemTextLens: await items.evaluateAll((els) => els.map((el) => (el.textContent || '').trim().length)),
-    /** 头行在条带根里的子元素序号：判"头行恒为第一个子元素"（J5）。 */
-    headIndex: await root.first().evaluate((el) => {
-      const h = el.querySelector('[data-strip="head"]');
-      return h ? [...el.children].indexOf(h) : -1;
-    }),
-  };
-}
 
 /** 第 n 个 turn 行（1 基）。用具例只读，不做归因。 */
 export const turnRowAt = (page, n) => turnRows(page).nth(n - 1);
@@ -353,42 +318,10 @@ export async function waitStripState(page, root, want, timeout = 30_000) {
   }).toBe(want);
 }
 
-// ───────────────────────── r152a 新增观测面：折叠条末尾 / 直播标记 ─────────────────────────
-/** 折叠条按钮（一轮一条）。入参是那一轮的行或条带根。 */
-export const headOf = (scope) => scope.locator('[data-strip="head"]').first();
-
-/**
- * 折叠条文案的拆解（r152c 起）：折叠条的可见文字只剩标题——[data-strip-title] 恰 1 个，
- * 除它与右侧用时 [data-strip-elapsed]（以及点阵 [data-strip-dots]）之外，折叠条里没有任何其它文字。
- * tail = 标题文字（原来是「思考与工具调用 · [N 轮 ]M 步 · 」后面的末尾段；N / M 现在读条带根的 data-strip-rounds / -steps
- * 或折叠条的 title 属性）；matched = 结构合规（标题恰 1 个且无其它文字）；没有 [data-strip-title] 时 tail === null。
- */
-export async function headParts(head) {
-  const r = await head.evaluate((el) => {
-    const titles = el.querySelectorAll('[data-strip-title]');
-    const c = el.cloneNode(true);
-    c.querySelectorAll('[data-strip-elapsed],[data-strip-dots]').forEach((n) => n.remove());
-    const text = (c.textContent || '').trim();
-    c.querySelectorAll('[data-strip-title]').forEach((n) => n.remove());
-    return { titleCount: titles.length, title: titles.length === 1 ? (titles[0].textContent || '').trim() : null, text, rest: (c.textContent || '').trim() };
-  });
-  return { text: r.text, matched: r.titleCount === 1 && r.rest === '', titleCount: r.titleCount, rest: r.rest, tail: r.title };
-}
-export async function tailOf(head) { return (await headParts(head)).tail; }
-
-/** 轮询到折叠条标题（r152c 前叫“末尾”）=== want；失败信息里带着实际读到的整句文案。 */
-export async function expectTail(head, want, message, timeout = 20_000) {
-  await expect.poll(async () => await tailOf(head), { timeout, message }).toBe(want);
-}
-
 /** 用时文字 `12s` / `2m 22s` → 秒数；格式不符返回 null。 */
 export function parseElapsed(text) {
   const m = /^(?:(\d+)m )?(\d+)s$/.exec((text || '').trim());
   return m ? Number(m[1] || 0) * 60 + Number(m[2]) : null;
-}
-export async function elapsedText(head) {
-  const el = head.locator('[data-strip-elapsed]');
-  return (await el.count()) ? ((await el.first().textContent()) || '').trim() : null;
 }
 
 /** 前 n 个 Unicode 码点（与产品口径一致，不拆 emoji）。 */

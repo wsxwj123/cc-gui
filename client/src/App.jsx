@@ -78,6 +78,7 @@ import { LoadingMark } from './components/LoadingBits.jsx';
 import { LiveStatusLine } from './components/LiveStatusLine.jsx';
 import { liveStatusLabel, isLiveLineHostedByGroup } from './utils/liveStatus.js';
 import { DEFAULT_LOADING_STYLE } from './utils/loadingPrefs.js';
+import { ORBIT_VARIANTS, RANDOM_POOL } from './utils/orbitVariants.js';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './components/MultiSelect.jsx';
 import { pickDirectory, isTauri } from './utils/pickDirectory.js';
@@ -810,7 +811,7 @@ function LoadingStylePicker() {
       </div>
       <div className="flex items-center gap-2 pt-1">
         <span className="text-[11px] text-ink font-body font-medium">转速</span>
-        <span className="ml-auto text-[9px] text-ink-faint font-body">三体旋转、四体旋转的速度</span>
+        <span className="ml-auto text-[9px] text-ink-faint font-body">随机与旋转类动画的速度</span>
       </div>
       <div role="radiogroup" aria-label="加载动画转速" className="grid grid-cols-3 gap-1.5">
         {LOADING_SPEED_OPTIONS.map((opt) => {
@@ -2637,10 +2638,14 @@ function HomeState({ tabIndex = 0 }) {
 // frames every ~100ms, paired with a verb that changes every ~3s.
 
 // Loading 动画样式库(选项 id 对应 index.css 的 .loading-<id>,移植自 clawd-station)。
-// orbit3 / orbit4 = 三体 / 四体旋转(JS 驱动,见 utils/orbitTicker.js;没选过的人默认 orbit3);
-// 'cli' = 原 ASCII spinner。主题弹窗里选,存 store.loadingStyle。
+// r159:'random' = 每次进入思考 / 新工具调用时从 16 种旋转动画里换一个(没选过的人默认它);
+// 接着是 16 种旋转动画(JS 驱动,见 utils/orbitVariants.js / orbitTicker.js),orbit3 / orbit4 在前,
+// 其余 14 种按 RANDOM_POOL 的顺序,标签取自 ORBIT_VARIANTS;'cli' = 原 ASCII spinner。
+// 主题弹窗里选,存 store.loadingStyle。
 export const LOADING_OPTIONS = [
-  { id: 'orbit3', label: '三体旋转' }, { id: 'orbit4', label: '四体旋转' },
+  { id: 'random', label: '随机' },
+  { id: 'orbit3', label: ORBIT_VARIANTS.orbit3.label }, { id: 'orbit4', label: ORBIT_VARIANTS.orbit4.label },
+  ...RANDOM_POOL.filter((id) => id !== 'orbit3' && id !== 'orbit4').map((id) => ({ id, label: ORBIT_VARIANTS[id].label })),
   { id: 'cli', label: 'CLI ✻' },
   { id: 'ring', label: 'Ring' }, { id: 'ring-dual', label: 'Dual Ring' },
   { id: 'ring-dash', label: 'Dash Ring' }, { id: 'ring-thin', label: 'Thin Ring' },

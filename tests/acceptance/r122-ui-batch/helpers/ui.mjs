@@ -106,7 +106,6 @@ export async function openSessionBySearch(page, mark) {
   await page.waitForTimeout(400);
 }
 
-export const readFoldKey = (page) => page.evaluate((k) => localStorage.getItem(k), FOLD_KEY);
 
 // ---------------------------------------------------------------------------
 // 回合条带(INTERFACE A3 的既有锚点)
@@ -115,28 +114,6 @@ export const readFoldKey = (page) => page.evaluate((k) => localStorage.getItem(k
 /** 已落盘的助手轮行(流式气泡没有 data-turn-uuid)。 */
 export const turnRows = (page) => page.locator('[data-turn-uuid][data-turn-role="turn"]');
 /** 一轮的条带根(按"这一轮里那段唯一的文字"定位;直播期与收官后都适用)。 */
-export const stripRootOf = (page, text) => page.locator('[data-strip-root]').filter({ hasText: text }).first();
-
-/** 条带根的当前显示状态快照(全部是公开锚点)。 */
-export async function stripSnapshot(root) {
-  if (!(await root.count())) return { present: false };
-  return await root.first().evaluate((el) => {
-    const head = el.querySelector('[data-strip="head"]');
-    const groups = [...el.querySelectorAll('[data-strip-item="group"]')];
-    const texts = [...el.querySelectorAll('[data-strip-item="text"]')];
-    return {
-      present: true,
-      state: el.getAttribute('data-strip-state'),
-      headCount: el.querySelectorAll('[data-strip="head"]').length,
-      headAria: head ? head.getAttribute('aria-expanded') : null,
-      kinds: [...el.querySelectorAll('[data-strip-item]')].map((x) => x.getAttribute('data-strip-item')),
-      groupCount: groups.length,
-      groupHidden: groups.map((g) => g.hasAttribute('hidden')),
-      groupHeights: groups.map((g) => Math.round(g.getBoundingClientRect().height)),
-      textHidden: texts.map((t) => t.hasAttribute('hidden')),
-    };
-  });
-}
 
 /** 页面上所有条带根的状态,按出现顺序。 */
 export const allStripStates = (page) => page.locator('[data-strip-root]')
@@ -196,7 +173,6 @@ export async function routeJson(page, pathname, handler, { method } = {}) {
 // 设置面板(INTERFACE A2)
 // ---------------------------------------------------------------------------
 
-export const FOLD_BLOCK_ID = 'set-auto-fold';
 /** 既有的一个开关区块(「生成式界面渲染」),只用来**自证**下面这套开关读写手法对真实设置面板有效。 */
 export const EXISTING_SWITCH_BLOCK_ID = 'set-genui';
 
@@ -204,8 +180,6 @@ export const settingsSearch = (page) => page.getByPlaceholder(/搜索设置/).fi
 export const settingBlock = (page, id) => page.locator(`#${id}`);
 /** 区块里的开关控件:role=switch 或 checkbox(INTERFACE A2 两种都允许)。 */
 export const blockSwitch = (page, id) => settingBlock(page, id).locator('[role="switch"], input[type="checkbox"]').first();
-export const foldBlock = (page) => settingBlock(page, FOLD_BLOCK_ID);
-export const foldSwitch = (page) => blockSwitch(page, FOLD_BLOCK_ID);
 
 /** 打开设置面板(Cmd/Ctrl+0,顶栏「设置」按钮的提示里写明的直达键);落在默认页,不点任何页签。 */
 export async function openSettings(page) {
@@ -241,7 +215,6 @@ export async function blockSwitchChecked(page, id) {
     return typeof el.checked === 'boolean' ? el.checked : null;
   });
 }
-export const foldSwitchChecked = (page) => blockSwitchChecked(page, FOLD_BLOCK_ID);
 
 /** 像用户那样拨一下开关(控件本身不可见时点它的 label —— 自绘样式的 checkbox 常见)。 */
 export async function toggleBlockSwitch(page, id) {
@@ -254,7 +227,6 @@ export async function toggleBlockSwitch(page, id) {
   else await block.locator('label').first().click({ timeout: 5_000 });
   await page.waitForTimeout(250);
 }
-export const toggleFoldSwitch = (page) => toggleBlockSwitch(page, FOLD_BLOCK_ID);
 
 /**
  * 设置搜索的结果条目:探路实测现有形态是搜索框下面的一排按钮(每条 = 标签 + 所在页名)。

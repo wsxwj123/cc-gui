@@ -73,9 +73,8 @@ for (const rel of FILES) {
   ok('index.css:.cg-fold 与悬停色定义齐全');
 
   const tb = read('client/src/components/TurnBubble.jsx');
-  const head = tb.slice(tb.indexOf('data-strip="head"'), tb.indexOf('data-strip="head"') + 1200);
-  assert.match(head, /className="cg-fold /, '过程条摘要行带 cg-fold');
-  assert.ok(!/text-ink-(soft|muted|faint)/.test(head.slice(0, head.indexOf('</button>'))), '过程条摘要行内部不再自带 ink 色类(继承 cg-fold)');
+  // r159(用户 2026-11-07):过程条摘要行整个去掉了,源码里不再渲染 data-strip="head"。
+  assert.ok(!tb.includes('data-strip="head"'), '过程条摘要行已去掉(TurnBubble 不再渲染 data-strip="head")');
   const wg = tb.slice(tb.indexOf('data-work-group-head=""'), tb.indexOf('data-work-group-head=""') + 900);
   assert.match(wg, /cg-fold/, '工作组头带 cg-fold');
   const tf = tb.slice(tb.indexOf('function ThinkingFold('), tb.indexOf('function ThinkingFold(') + 1200);
@@ -83,7 +82,7 @@ for (const rel of FILES) {
   assert.match(tf, /aria-expanded=\{open \? 'true' : 'false'\}/, '思考折叠行带 aria-expanded');
   assert.match(tb, /key="chat-fold"[^>]*>[\s\S]{0,200}cg-fold/, '聊天模式「执行了 N 步操作」折叠条带 cg-fold');
   assert.match(tb, /key="chat-unfold"[^>]*>[\s\S]{0,200}cg-fold/, '聊天模式「收起过程」折叠条带 cg-fold');
-  ok('TurnBubble:摘要行 / 工作组头 / 思考折叠行 / 聊天折叠条都带 cg-fold');
+  ok('TurnBubble:摘要行已去掉;工作组头 / 思考折叠行 / 聊天折叠条都带 cg-fold');
 
   for (const rel of ['client/src/components/tools/TaskCard.jsx', 'client/src/components/tools/WorkflowCard.jsx']) {
     assert.match(read(rel), /cg-fold/, `${rel}:头行带 cg-fold`);

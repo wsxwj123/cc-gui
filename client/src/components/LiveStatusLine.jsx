@@ -7,6 +7,8 @@ export function LiveStatusLine({ label, startedAt, className = '' }) {
   const phase = label?.phase || 'thinking';
   const verb = label?.verb || '';
   const object = label?.object || '';
+  // r159:随机加载动画的重抽依据 —— 思考阶段恒为 thinking;工具阶段按工具标题区分每次调用;其它阶段 = phase
+  const rollKey = phase === 'thinking' ? 'thinking' : phase === 'tool' ? `tool:${object}` : phase;
   return (
     <div
       data-live-line=""
@@ -15,7 +17,7 @@ export function LiveStatusLine({ label, startedAt, className = '' }) {
       className={`flex items-center gap-2 min-w-0 text-[13px] font-body ${className}`}
     >
       <span className="shrink-0 inline-flex items-center text-accent">
-        <LoadingMark size={14} markProps={{ 'data-live-indicator': '' }} />
+        <LoadingMark size={14} phase={phase} rollKey={rollKey} rollScope={startedAt || null} markProps={{ 'data-live-indicator': '' }} />
       </span>
       <span data-live-elapsed="" className="shrink-0 inline-flex">
         <ElapsedTime startedAt={startedAt} />
