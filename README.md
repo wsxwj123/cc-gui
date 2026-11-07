@@ -288,7 +288,44 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
-<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.451">v0.2.451</a></b>(2026-11-07)· 优化 3 条 · 修复 1 条 · 提示 1 条</summary>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.452">v0.2.452</a></b>(2026-11-07)· 优化 4 条 · 提示 2 条</summary>
+
+**优化**
+
+<details><summary>工具卡统一外形，颜色跟随主题</summary>
+
+展开后的 Bash、Read、Edit / Write、Grep / Glob、网页、MCP 工具、已停止的调用和未知工具，现在是同一个外形（状态图标、工具名、标题、右侧信息）：出错是红边，已停止是虚线边，运行中是小转圈。浅色主题里不再有黑色的 Bash 头，深色主题里不再有浅粉、浅蓝的亮块。
+
+</details>
+
+<details><summary>Bash 展开是终端块，Diff 更清楚</summary>
+
+Bash 展开后依次是命令行（带复制）、输出区（最高约 210 像素，内部滚动）和底部状态条（「成功」或「退出码 N」，加输出行数）。Edit / Write 的 diff 改成整行红绿底、符号单独一列、同一行里改动的词再加深，卡头和文件头带增删统计（如 +2 −2）；文件改动面板和界面生成里的 diff 一起改版。
+
+</details>
+
+<details><summary>回答里的代码块和 Markdown 跟随主题</summary>
+
+代码块有语言标签、复制、运行（shell 类）和折叠；行内代码、引用块（不再斜体）、表格（圆角、隔行淡底）改用主题色；浅色底上选中代码也看得见。html / svg / mermaid 的预览块仍是深色预览窗。
+
+</details>
+
+<details><summary>所有折叠行不再有展开箭头，靠颜色和正文区分</summary>
+
+过程条、工作组、思考行、工具卡、子代理卡、工作流卡和各类通知行都去掉了箭头，整行仍可点；折叠行文字比正文淡，鼠标悬停时变回正文色。solarized-light、tokyonight-day、solarized-dark 三个主题的正文本身偏淡，折叠行与正文同色。
+
+</details>
+
+**提示**
+
+- 收起时，Read 的路径行、Grep 的路径和过滤行、网页卡的「指示」行不再常驻，展开后才显示；Bash 带说明时，收起态标题是说明，命令在展开后的终端块里。
+
+- Edit 卡头的数字顺序改为 `+N −M`；Read、Edit 的出错信息展开后才显示（收起时仍有红边和红色图标）；diff 的符号列不可选中，复制 diff 时不带加减号。
+
+</details>
+
+<details>
+<summary><b>v0.2.451</b>(2026-11-07)· 优化 3 条 · 修复 1 条 · 提示 1 条</summary>
 
 **优化**
 
