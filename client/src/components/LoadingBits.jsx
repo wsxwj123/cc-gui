@@ -71,7 +71,7 @@ function pickAndRemember(prevId) {
 
 // r159 D3b:按回合的抽取记忆(组件外)。状态行在工作组头行与底部之间换位置会卸载再挂载,
 // 靠这里沿用同一回合已抽到的 id。分屏里几栏可同时生成,每个回合(rollScope)分别保存,
-// 互不覆盖;最多保存 8 个回合,超出淘汰最久没用的。新回合避开最近一次抽到的 id。
+// 互不覆盖;最多保存 32 个回合,超出淘汰最久没用的。新回合避开最近一次抽到的 id。
 const scopedRolls = createScopedRollStore();
 function scopedRoll(scope, phase, key) {
   const res = scopedRolls.roll(scope, { phase, key, nowMs: Date.now() }, Math.random, lastPickedRandomId);
@@ -81,7 +81,8 @@ function scopedRoll(scope, phase, key) {
 
 // phase / rollKey:只有生成中的状态行传。样式为 random 时,挂载时抽一个具体动画;
 // 之后 phase / rollKey 变化按 shouldReroll 决定是否重抽(挂载那次算计时起点)。
-// rollScope(回合起点时间戳):给了就按回合记忆抽取,跨挂载连续;没给(子代理无起点、设置网格)按实例内抽取。
+// rollScope(回合起点时间戳):给了就按回合记忆抽取,跨挂载连续(子代理视图有自己的回合起点,各占一个槽);
+// 没给(设置网格这类没有回合起点的场合)按实例内抽取。
 export function LoadingMark({ size = 20, variant = null, markProps = null, phase = null, rollKey = null, rollScope = null }) {
   const chosen = useStore((s) => s.loadingStyle) || DEFAULT_LOADING_STYLE;
   const style = variant || chosen;
@@ -99,7 +100,7 @@ export function LoadingMark({ size = 20, variant = null, markProps = null, phase
     roll.phase = phase;
     roll.key = rollKey;
     if (isRandom && scoped) {
-      // 按回合记忆:挂载 / 阶段变化都走 nextRollState;同回合重新挂载不重抽
+      // 按回合记忆:挂载 / 阶段变化都经 scopedRolls(内部用 nextRollState 推进);同回合重新挂载不重抽
       const { id, mem } = scopedRoll(rollScope, phase, rollKey);
       roll.lastRollMs = mem.lastRollMs;
       if (id !== randomId) setRandomId(id);

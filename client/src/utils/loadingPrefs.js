@@ -1,5 +1,6 @@
 // r154:加载动画偏好(样式 + 转速)的默认值与 localStorage 读取(纯函数,storage 由调用方传入)。
-// r159:新增「随机」模式(样式 id = 'random')的两个纯函数:pickRandomStyle / shouldReroll。
+// r159:新增「随机」模式(样式 id = 'random')的纯函数:pickRandomStyle / shouldReroll,
+// 以及按回合记忆的 nextRollState / createScopedRollStore。
 import { RANDOM_POOL } from './orbitVariants.js';
 
 export const LOADING_SPEEDS = Object.freeze(['slow', 'normal', 'fast']);
@@ -79,7 +80,7 @@ export function nextRollState(mem, { scope, phase, key, nowMs }, rng = Math.rand
 // 每次读写把该 scope 挪到最近使用;超过 cap 淘汰最久没用的,被淘汰的 scope 再来按新回合处理。
 // 返回 { id, mem, rolled }。
 const NEW_ROUND_SCOPE = Object.freeze({}); // 占位 scope,不等于任何真实 scope
-export function createScopedRollStore(cap = 8) {
+export function createScopedRollStore(cap = 32) {
   const limit = Math.max(1, Math.floor(Number(cap)) || 1);
   const slots = new Map(); // scope → mem;Map 按插入顺序,最前面的是最久没用的
   return {

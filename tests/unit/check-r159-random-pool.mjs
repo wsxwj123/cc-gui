@@ -10,6 +10,12 @@
 //   R4 App.jsx 的 LOADING_OPTIONS:前 3 项 random / orbit3 / orbit4,前 17 项 = random + 16 个池内 id,
 //      其后接原有的 cli、ring(读源码文本,不 import JSX)。
 //   R5 nextRollState(D3b):新 scope 必抽且避开上一回合;同 scope 重新挂载、text 等阶段、不满 1.5 秒都不抽也不补抽。
+//   R6 createScopedRollStore:两个回合交替推进互不干扰(分屏几栏同时生成)。
+//   R7 同一回合内相邻两次抽取不同 id(固定 rng + 链式 200 次)。
+//   R8 容量上限淘汰最久没用的;被淘汰的回合再来按新回合处理。
+//   R9 新回合避开 avoidId;已有回合不受 avoidId 影响。
+//   R10 cap 边界(1;0 / 负数 / NaN / null 按 1;缺省 32)。
+//   R11 LoadingBits.jsx 接线:模块级 createScopedRollStore、不再有单槽 scopedRollMem(源码文本锁)。
 //
 // 跑法:node tests/unit/check-r159-random-pool.mjs
 import assert from 'node:assert/strict';
@@ -316,6 +322,33 @@ await report.check('R9', 'createScopedRollStore:新回合避开 avoidId,已有�
   const r0 = store.roll(1, { phase: 'thinking', key: 'thinking', nowMs: 0 }, rng);
   const r1 = store.roll(1, { phase: 'thinking', key: 'thinking', nowMs: 5000 }, rng, r0.id);
   assert.equal(r1.rolled, false); assert.equal(r1.id, r0.id);
+});
+
+await report.check('R10', 'createScopedRollStore:cap 边界(1;0 / 负数 / NaN / null 按 1;缺省 32)', 'red', () => {
+  const rng = seeded(1010);
+  const at = (nowMs) => ({ phase: 'thinking', key: 'thinking', nowMs });
+  for (const cap of [1, 0, -3, NaN, null]) {
+    const s = P.createScopedRollStore(cap);
+    s.roll('a', at(0), rng); s.roll('b', at(1), rng);
+    assert.equal(s.size, 1, `cap=${String(cap)}`);
+    // 只剩后来的 b;a 被淘汰,再来按新回合处理(即便是 text 阶段、不满 1.5 秒也必抽)
+    assert.equal(s.roll('a', { phase: 'text', key: 'text', nowMs: 2 }, rng).rolled, true, `cap=${String(cap)}`);
+  }
+  const d = P.createScopedRollStore();
+  for (let i = 0; i < 40; i += 1) d.roll(`s${i}`, at(i), rng);
+  assert.equal(d.size, 32);
+  // 最早的 8 个(s0~s7)被淘汰,后 32 个(s8~s39)还在
+  assert.equal(d.roll('s8', { phase: 'text', key: 'text', nowMs: 50 }, rng).rolled, false);
+  assert.equal(d.roll('s7', { phase: 'text', key: 'text', nowMs: 51 }, rng).rolled, true);
+});
+
+await report.check('R11', 'LoadingBits.jsx 接线:回合记忆走模块级 createScopedRollStore,不再有单槽(源码文本锁)', 'red', () => {
+  const src = readFileSync(join(ROOT, 'client', 'src', 'components', 'LoadingBits.jsx'), 'utf8');
+  assert.match(src, /import\s*\{[^}]*\bcreateScopedRollStore\b[^}]*\}\s*from\s*'\.\.\/utils\/loadingPrefs\.js'/);
+  // 行首无缩进 = 模块级(放进组件 / 函数里每个实例各一份,就退回「实例内记忆」,分屏与重新挂载都会失效)
+  assert.match(src, /^const scopedRolls = createScopedRollStore\(\);/m);
+  assert.match(src, /scopedRolls\.roll\(/);
+  assert.doesNotMatch(src, /scopedRollMem/);
 });
 
 process.exit(report.finish());
