@@ -345,3 +345,78 @@ test('C5 减弱动画偏好下的随机模式：圆点是静止帧（1.5 秒内�
   expect(maxMove, `静止帧：1.5 秒内每个点的中心位移应 ≤ 0.05px（实际最大 ${maxMove.toFixed(3)}px，动画 ${styles[0]}）`).toBeLessThanOrEqual(0.05);
   expect(minDist, `任意两个点的中心距离应 ≥ 3px（实际最小 ${minDist.toFixed(2)}px，动画 ${styles[0]}）`).toBeGreaterThanOrEqual(3);
 });
+
+// 主会话追加(2026-11-07):开发代理 D3 上报,生成中的状态行会在「连接中占位行(底部)→ 工作组头行 → 正文时回到底部」之间换位置,
+// 换位置 = 旧实例卸载、新实例挂载;挂载时若各自重新抽,接口「随机规则」里的「text 阶段不换」「不满 1.5 秒不换」就在真实流程里失效。
+// 夹具里 C3 / C4 只有思考 / 工具,状态行始终在组头,测不到这一点,所以补这一条(判据全部来自接口文件「随机规则」)。
+test('C6 随机模式：状态行换位置重新挂载（连接中占位行 → 工作组头行 → 正文时回到底部）时动画连续：连接中→思考不满 1.5 秒不换，进入工具（满 1.5 秒）换一次，正文阶段不换', async ({ page }) => {
+  test.setTimeout(120_000);
+  await prepareLive(page, {
+    key: 'c6',
+    scenario: {
+      events: [
+        { kind: 'wait', file: 'g0' },
+        { kind: 'thinking', text: 'C6 思考。' },
+        { kind: 'wait', file: 'g1' },
+        bash('C6 工具', { pending: 'd1' }),
+        { kind: 'wait', file: 'g2' },
+        { kind: 'text', text: 'C6 正文开始输出。' },
+      ],
+    },
+  });
+  await sendRound(page);
+  await startSampler(page, 100);
+  const hostedInGroup = () => page.evaluate(() => { const l = document.querySelector('[data-live-line]'); return l ? !!l.closest('[data-work-group-head]') : null; });
+
+  await expectPhase(page, 'connecting');
+  const hostConn = await hostedInGroup();
+  await page.waitForTimeout(900); // 连接中不满 1.5 秒
+  const t1 = Date.now(); touchCtl('g0');
+  await expectPhase(page, 'thinking');
+  await page.waitForTimeout(3000); // 思考持续 3 秒，越过 1.5 秒线
+  const hostThink = await hostedInGroup();
+  const t2 = Date.now(); touchCtl('g1');
+  await expectPhase(page, 'tool');
+  await page.waitForTimeout(3000);
+  const t3 = Date.now(); touchCtl('d1'); touchCtl('g2');
+  await expectPhase(page, 'text');
+  await page.waitForTimeout(1000);
+  const hostText = await hostedInGroup();
+  await page.waitForTimeout(2500);
+  const t4 = Date.now();
+  const samples = await stopSampler(page);
+
+  // 前置自证：这条用例确实让状态行换了位置（否则测不到"重新挂载"）
+  expect({ 连接中在组头: hostConn, 思考在组头: hostThink, 正文在组头: hostText }, '前置：连接中占位行在底部、思考阶段挂在工作组头行、正文阶段回到底部').toEqual({ 连接中在组头: false, 思考在组头: true, 正文在组头: false });
+  expect(uniq(samples.map((s) => s.mode)).filter((m) => m !== null), '前置：随机模式').toEqual(['random']);
+
+  const conn = samples.filter((s) => s.phase === 'connecting');
+  const connStyles = uniq(conn.map((s) => s.style));
+  expect(conn.length, '前置：连接中阶段应采到足够多的样本（≥ 5）').toBeGreaterThanOrEqual(5);
+  expect(connStyles.length === 1 && ORBIT_IDS.includes(connStyles[0]), `连接中占位行：读数应恒定且属于 16 个 id（实际 ${JSON.stringify(connStyles)}）`).toBe(true);
+
+  const th = within(samples, t1 + SETTLE, t2);
+  const thStyles = uniq(th.map((s) => s.style));
+  expect(th.length, '前置：思考阶段稳定窗口应采到足够多的样本（≥ 10）').toBeGreaterThanOrEqual(10);
+  expect(thStyles, `连接中→思考（占位行 → 工作组头行重新挂载，距上次抽取不满 1.5 秒）：读数应不变，仍是 ${connStyles[0]}（实际 ${JSON.stringify(thStyles)}）`).toEqual(connStyles);
+
+  const tl = within(samples, t2 + SETTLE, t3);
+  const tlStyles = uniq(tl.map((s) => s.style));
+  expect(tl.length, '前置：工具阶段稳定窗口应采到足够多的样本（≥ 10）').toBeGreaterThanOrEqual(10);
+  expect(tlStyles.length === 1 && tlStyles[0] !== thStyles[0] && ORBIT_IDS.includes(tlStyles[0]), `进入工具（距上次抽取已满 1.5 秒）：读数应换成另一个 id 并在阶段内保持（思考阶段 ${thStyles[0]}，工具阶段 ${JSON.stringify(tlStyles)}）`).toBe(true);
+
+  // 工具结果放行后到正文真正出现之间，状态行会先显示「思考」（模型还没吐正文）：按接口规则，从工具进入思考且距上次抽取已满 1.5 秒时本来就该换一次。
+  // 所以这里不拿「正文」去比「工具」，只要求「进入 text 阶段的那一刻不换」：正文阶段全程的读数 = 紧挨正文之前那个样本的读数。
+  const iText = samples.findIndex((s) => s.wall >= t3 && s.phase === 'text');
+  expect(iText, '前置：放行正文后应观察到 data-live-phase=text').toBeGreaterThan(0);
+  const pre = samples[iText - 1];
+  const tx = samples.slice(iText).filter((s) => s.wall < t4);
+  const txStyles = uniq(tx.map((s) => s.style));
+  expect(tx.length, '前置：正文阶段应采到足够多的样本（≥ 20）').toBeGreaterThanOrEqual(20);
+  expect(uniq(tx.map((s) => s.phase)), '前置：从第一个 text 样本起 data-live-phase 应一直是 text').toEqual(['text']);
+  // 变化序列（阶段:读数，连续相同的合并），写进失败信息和日志，方便看清到底在哪一步换了
+  const seq = [];
+  samples.filter((s) => s.wall >= t3 - 200).forEach((s) => { const k = `${s.phase}:${s.style}`; if (seq[seq.length - 1] !== k) seq.push(k); });
+  expect(txStyles, `工具→正文（工作组头行 → 底部重新挂载）：进入 text 阶段那一刻不换，正文阶段读数应恒等于紧挨之前的 ${pre.phase}:${pre.style}（实际 ${JSON.stringify(txStyles)}；放行后的变化序列 ${seq.join(' → ')}）`).toEqual([pre.style]);
+  console.log(`[R159 C6] 连接中=${connStyles[0]} 思考=${thStyles[0]} 工具=${tlStyles[0]} 放行后序列=${seq.join(' → ')}`);
+});

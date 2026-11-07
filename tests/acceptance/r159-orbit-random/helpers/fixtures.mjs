@@ -17,7 +17,7 @@ export function fakebinDir() { return suitePath('.artifacts', 'fakebin'); }
 export function fakeCtlDir() { return path.join(homeDir(), 'fake-claude'); }
 export function manifestPath() { return suitePath('.artifacts', 'fixture-manifest.json'); }
 
-export const KEYS = ['a1', 'a2', 'a4', 'b2', 'c1', 'c2', 'c3', 'c4', 'c5'];
+export const KEYS = ['a1', 'a2', 'a4', 'b2', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6'];
 export const SESSIONS = Object.fromEntries(KEYS.map((k, i) => [k, {
   sid: `a1590${String(i + 1).padStart(3, '0')}-0000-4000-8000-${String(i + 1).padStart(12, '0')}`,
   marker: `R159MARK${k.toUpperCase()}X`, // 以 X 收尾：不会是别的 marker 的子串
