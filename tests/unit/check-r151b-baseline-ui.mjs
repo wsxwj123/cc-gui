@@ -118,7 +118,11 @@ const EXPECTED = {
   // 两个头行按钮 class 加 cg-fold / cursor-pointer,内部图标与文字去掉 text-ink-soft / text-ink-muted(改继承 .cg-fold 淡色)。
   // 渲染结果 5939→5313;testid / cgui 集合不变,其余五个场景的长度与指纹都不变。
   // r158 验收 B4 / B16 与 r152c C5 / C6 / C10 / C11 覆盖真实渲染;源码锁见 check-r158-no-fold-arrows。
-  'turn-tool': { testids: [], cgui: [], len: 5313, sha: '4965e9385e3b6bd9' },
+  // r159 重录(用户 2026-11-07「回复最上面的工具调用总栏不需要了」):过程条摘要行 <button data-strip="head">…</button>
+  // 整个不再渲染。已证明只差这一处:用改动前的 TurnBubble.jsx 渲染同一场景(5313 / 4965e9385e3b6bd9),
+  // 把其中那个 757 字符的摘要行按钮原样删掉后,与新渲染结果逐字相同(4556 / 0b260df7978255d7);
+  // testid / cgui 集合不变,其余五个场景的长度与指纹都不变。r159 验收 A1–A4 覆盖真实渲染。
+  'turn-tool': { testids: [], cgui: [], len: 4556, sha: '0b260df7978255d7' },
   'input-idle': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'send-btn'], len: 3333, sha: '7e99c29e2c559931' },
   'input-streaming': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'queue-btn', 'stop-btn'], len: 4099, sha: '992c6c419dcae4ff' },
   // 界面「项目」→「工作区」改名重录(下面两个侧栏场景的渲染结果各含 7 处改名文字,每处多 1 个字):

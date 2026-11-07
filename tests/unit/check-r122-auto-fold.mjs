@@ -3,13 +3,11 @@
 //   t1 默认关:localStorage 干净时 autoFoldProcess=false,且只读不写;
 //   t2 setter 双写:store 与 localStorage['cgui-auto-fold-process'] 一起变('1' / '0');
 //   t3 持久化:预置 '1' 重新求值模块 → 开;'0' / 脏值 → 关(A1:只有 '1' 算开);
-//   t4 接线守卫:CoworkBlocks 用 store 布尔选择器订阅、open 自动态并上"开关关闭"、聊天模式分支不用它;
-//      设置面板有 #set-auto-fold 区块 + role=switch 控件 + SETTINGS_INDEX 登记(搜索"折叠"可达)。
+//   t4 (r159 起)反向守卫:CoworkBlocks 不再订阅开关,设置面板 / 搜索索引里没有 set-auto-fold。
 //
 // 变异哨兵(逐条验证过红):
 //   ① store 初值写成 !== '0'(缺省变开)→ t1 红;② setter 只 set 不写 localStorage → t2 红;
-//   ③ open 表达式退回 `stripAutoCtx || isLive`(开关失效)→ t4-b 红;
-//   ④ 渲染里直接读 localStorage 而不是订阅 store → t4-a 红;⑤ SETTINGS_INDEX 漏登记 → t4-d 红。
+//   (r159 前的 ③~⑤ 针对已删的接线,随 t4 改判作废。)
 // Run: node tests/unit/check-r122-auto-fold.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -55,33 +53,18 @@ const KEY = 'cgui-auto-fold-process';
   mem.delete(KEY);
 }
 
-// t4 接线守卫
+// t4(r159 改判,2026-11-07):用户要求去掉过程条摘要行与「过程块自动折叠」开关,只是前端不再显示,
+// store / localStorage 接口保留(上面 t1–t3 仍守着)。原 t4-a~e(CoworkBlocks 订阅 + 设置面板区块)作废,
+// 改成反向守卫:CoworkBlocks 不再读这个开关,设置面板与搜索索引里也没有这一项。
 {
   const turn = src('client/src/components/TurnBubble.jsx');
   const start = turn.indexOf('export function CoworkBlocks(');
   assert.ok(start > 0, 't4: 找得到 CoworkBlocks');
   const body = turn.slice(start, turn.indexOf('\n}\n', start));
-  // a. 订阅 store,不在渲染里读 localStorage
-  assert.ok(/useStore\(\(s\) => s\.autoFoldProcess\)/.test(body), 't4-a: CoworkBlocks 用 store 布尔选择器订阅 autoFoldProcess');
-  assert.ok(!/localStorage\.(getItem|setItem|removeItem)\(/.test(body), 't4-a: 渲染路径里不读写 localStorage(只认真实调用,注释里提到不算)');
-  // b. 自动态 = 异常收尾 ∨ 正在生成 ∨ 开关关闭;手动覆盖(stripOpen)仍优先
-  assert.ok(/const open = stripOpen === null \? \(stripAutoCtx \|\| isLive \|\| !autoFold\) : stripOpen;/.test(body),
-    't4-b: open 的自动态必须并上"开关关闭 → 展开",且手动态优先');
-  // c. 聊天模式分支不受开关影响:该分支(到 data-strip-state="off" 为止)不引用 autoFold
-  const chatBranch = body.slice(body.indexOf('if (chatMode) {'), body.indexOf('data-strip-state="off"'));
-  assert.ok(chatBranch.length > 0 && !/autoFold/.test(chatBranch), 't4-c: 聊天模式分支不用 autoFold(BRIEF R1-6)');
-
+  assert.ok(!/useStore\(\(s\) => s\.autoFoldProcess\)/.test(body), 't4-a: CoworkBlocks 不再订阅 autoFoldProcess');
   const panel = src('client/src/components/SettingsPanel.jsx');
-  // d. 搜索索引登记在 general(默认页),标题与关键词含「折叠」
-  assert.ok(/\{ id: 'set-auto-fold', tab: 'general', title: '过程块自动折叠', keys: '[^']*折叠[^']*' \}/.test(panel),
-    't4-d: SETTINGS_INDEX 登记 set-auto-fold 于 general,标题「过程块自动折叠」,关键词含「折叠」');
-  // e. 区块根节点 id + role=switch 控件(button,不用 input[type=checkbox])+ aria-checked 反映状态
-  assert.ok(/<div id="set-auto-fold"><AutoFoldSection \/><\/div>/.test(panel), 't4-e: GeneralTab 里有 id="set-auto-fold" 的区块');
-  const sec = panel.slice(panel.indexOf('function AutoFoldSection('), panel.indexOf('function GeneralTab('));
-  assert.ok(/useStore\(\(s\) => s\.autoFoldProcess\)/.test(sec) && /useStore\(\(s\) => s\.setAutoFoldProcess\)/.test(sec), 't4-e: 区块读写都走 store');
-  assert.ok(/<button[^>]*role="switch"[^>]*aria-checked=\{on\}/.test(sec), 't4-e: 开关是 role=switch 的 button,aria-checked 反映状态');
-  assert.ok(!/type="checkbox"/.test(sec), 't4-e: 不用 input[type=checkbox](面板 Esc 逻辑会截住它)');
-  assert.ok(/过程块自动折叠/.test(sec), 't4-e: 区块标题含「过程块自动折叠」');
+  assert.ok(!/set-auto-fold/.test(panel), 't4-b: 设置面板与 SETTINGS_INDEX 里没有 set-auto-fold');
+  assert.ok(!/function AutoFoldSection\(/.test(panel), 't4-b: AutoFoldSection 已删');
 }
 
 console.log('check-r122-auto-fold: all passed');
