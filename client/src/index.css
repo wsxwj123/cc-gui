@@ -2484,7 +2484,7 @@ header [data-tour="remote-control"] {
 .tc-term-foot[data-ok="false"] { color: var(--color-error); }
 .tc-copy {
   margin-left: auto; flex: none; border: 0; background: transparent; color: var(--color-ink-muted);
-  font: 11px/1.4 var(--font-body, inherit); padding: 1px 7px; border-radius: 6px; cursor: pointer;
+  font: 11px/1.4 var(--font-ui); padding: 1px 7px; border-radius: 6px; cursor: pointer;
 }
 .tc-copy:hover { background: var(--cg-fill-2); color: var(--color-ink); }
 .tc-copy[data-copied="true"] { color: var(--color-success); }
