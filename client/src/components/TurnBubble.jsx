@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useContext, useMemo } from 'react';
 import {
-  Brain, Copy, Check, ChevronDown, ChevronRight,
+  Brain, Copy, Check,
   Wrench, BookOpen, Pencil, Terminal, FileText, Search,
   Globe, Edit3, Loader2, RotateCcw, Bot, GitBranch, Send, ShieldAlert
 } from './Icon.jsx';
@@ -206,14 +206,14 @@ function renderRichToolCard(toolCall) {
 
 // ─── Tool category config ──────────────────────────────────────
 const CATEGORY_CONFIG = {
-  // U9a:子代理派发(Task/Agent)是特殊调用,折叠条里单列紫色分组 + 头部徽章,
-  // 不再与普通工具混在 "调用" 里无从分辨。
+  // U9a:子代理派发(Task/Agent)是特殊调用,折叠条里单列强调色分组 + 头部徽章,
+  // 不再与普通工具混在 "调用" 里无从分辨。r158:色取主题强调色,不用固定紫色。
   agent: {
     label: '子代理',
     icon: Bot,
-    color: 'text-violet-600',
-    bg: 'bg-violet-50',
-    border: 'border-violet-200',
+    color: 'text-accent',
+    bg: 'bg-accent-subtle',
+    border: 'border-accent-muted',
   },
   skill: {
     label: '读取',
@@ -431,22 +431,18 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
       {/* Header — always visible */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left"
+        aria-expanded={expanded ? 'true' : 'false'}
+        className="cg-fold w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left cursor-pointer"
       >
-        {expanded ? (
-          <ChevronDown size={13} className="text-ink-faint shrink-0" />
-        ) : (
-          <ChevronRight size={13} className="text-ink-faint shrink-0" />
-        )}
-        <Wrench size={13} className="text-ink-muted shrink-0" />
-        <span className="text-xs text-ink-soft font-body">
+        <Wrench size={13} className="shrink-0" />
+        <span className="text-xs font-body">
           {totalCalls} 次工具调用
         </span>
-        <span className="text-[10px] text-ink-faint font-mono">
+        <span className="text-[10px] font-mono">
           ({summaryParts.join(', ')})
         </span>
         {groups.agent.length > 0 && (
-          <span className="text-[10px] text-violet-700 bg-violet-50 border border-violet-200 rounded px-1.5 py-px font-mono flex items-center gap-1 shrink-0">
+          <span className="text-[10px] text-accent bg-accent-subtle border border-accent-muted rounded px-1.5 py-px font-mono flex items-center gap-1 shrink-0">
             <Bot size={10} /> 含 {groups.agent.length} 个子代理调用
           </span>
         )}
@@ -535,19 +531,16 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, l
         data-work-group-head=""
         aria-expanded={expanded ? 'true' : 'false'}
         onClick={onToggle}
-        className="w-full min-w-0 flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left"
+        className="cg-fold w-full min-w-0 flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left cursor-pointer"
       >
-        {expanded
-          ? <ChevronDown size={13} className="text-ink-faint shrink-0" />
-          : <ChevronRight size={13} className="text-ink-faint shrink-0" />}
         {hosting
           ? <LiveStatusLine label={liveLabel} startedAt={startedAt} className="flex-1" />
           : (
             <>
               {hasThinking
-                ? <Brain size={13} className="text-ink-muted shrink-0" />
-                : <Wrench size={13} className="text-ink-muted shrink-0" />}
-              <span className="min-w-0 truncate text-xs text-ink-soft font-body">{summary}</span>
+                ? <Brain size={13} className="shrink-0" />
+                : <Wrench size={13} className="shrink-0" />}
+              <span className="min-w-0 truncate text-xs font-body">{summary}</span>
             </>
           )}
         {/* 出错标记:只有红点、不带文字(头行可见文字保持「标题 · N 次工具调用」),数目在悬停提示里 */}
@@ -584,7 +577,7 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, l
 }
 
 // 思考链折叠(自管展开态,WKWebView <summary> 坑规避)。与工具行同规则:默认折叠成
-// 一行(Chevron + Brain + 首句截断),点击展开/收起,展开态 max-h-64 内滚。流式在飞的
+// 一行(Brain + 首句截断,没有展开箭头),点击展开/收起,展开态 max-h-64 内滚。流式在飞的
 // 思考走的也是这里(streamingBlocks → CoworkBlocks),同样默认折叠,折叠头 label 随内容更新。
 // 展开态放在这个叶子组件内部而非父级:父级不因某块展开而整树重渲,也不会给上层
 // React.memo(MessageList / TurnBubble) 传新身份 prop 打穿记忆化。
@@ -598,9 +591,9 @@ function ThinkingFold({ content, live = false }) {
     <div className="mb-1" data-entry-live={live ? 'true' : undefined}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body w-full text-left"
+        aria-expanded={open ? 'true' : 'false'}
+        className="cg-fold flex items-center gap-1.5 text-[11px] cursor-pointer font-body w-full text-left"
       >
-        <ChevronRight size={11} className={`transition-transform shrink-0 ${open ? 'rotate-90' : ''}`} />
         <Brain size={12} className={`shrink-0 ${live ? 'entry-live' : ''}`} />
         <span className="truncate">{thinkingLabel(text)}</span>
       </button>
@@ -843,20 +836,12 @@ export function CoworkBlocks({
           aria-expanded={open ? 'true' : 'false'}
           title={headHint}
           onClick={() => setStripOpen(!open)}
-          className="w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-md transition-colors text-left"
+          className="cg-fold w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-md transition-colors text-left cursor-pointer"
         >
-          {/* r154:头行静态,子元素顺序固定 = 左图标(扳手)→ 标题 → 三角(最后一个)。
-              生成中的动画、用时与状态词都在本回合最下面的底部状态行(LiveStatusLine),头行不挂计时器。 */}
-          <Wrench size={13} className="text-ink-muted shrink-0" />
-          <span data-strip-title className="min-w-0 flex-1 truncate text-xs text-ink-soft font-body">{headText}</span>
-          <span
-            data-strip-caret
-            data-open={open ? 'true' : 'false'}
-            aria-hidden="true"
-            className={`shrink-0 inline-flex items-center justify-center text-ink-faint transition-transform duration-150 ${open ? 'rotate-90' : ''}`}
-          >
-            <svg width="9" height="9" viewBox="0 0 10 10" fill="currentColor" focusable="false"><path d="M3 1.5 L8 5 L3 8.5 Z" /></svg>
-          </span>
+          {/* r158:头行静态,子元素顺序固定 = 左图标(扳手)→ 标题;不再有展开三角,开合看 aria-expanded,
+              与正文靠 .cg-fold 的淡色区分。生成中的动画、用时与状态词都在本回合最下面的底部状态行(LiveStatusLine),头行不挂计时器。 */}
+          <Wrench size={13} className="shrink-0" />
+          <span data-strip-title className="min-w-0 flex-1 truncate text-xs font-body">{headText}</span>
         </button>
       )}
       {out}{trailing}
@@ -1001,15 +986,15 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
   // 聊天模式:未展开时把思考/工具/子代理/skill 折叠成一行"思考并执行了 N 步操作 ›",
   // 点开还原完整过程;展开后给一行"收起过程"。两条在有序 blocks 与 legacy 路径共用。
   const chatFoldBar = (label) => (
-    <button key="chat-fold" onClick={() => setChatExpanded(true)}
-      className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body mt-1">
-      <ChevronRight size={11} /><span>{label}</span>
+    <button key="chat-fold" type="button" aria-expanded="false" onClick={() => setChatExpanded(true)}
+      className="cg-fold flex items-center gap-1.5 text-[11px] cursor-pointer font-body mt-1">
+      <span>{label}</span>
     </button>
   );
   const chatUnfoldBar = (
-    <button key="chat-unfold" onClick={() => setChatExpanded(false)}
-      className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted cursor-pointer font-body mt-1">
-      <ChevronDown size={11} /><span>收起过程</span>
+    <button key="chat-unfold" type="button" aria-expanded="true" onClick={() => setChatExpanded(false)}
+      className="cg-fold flex items-center gap-1.5 text-[11px] cursor-pointer font-body mt-1">
+      <span>收起过程</span>
     </button>
   );
 
@@ -1193,12 +1178,13 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
               {fullThinking && (
                 <div className="mb-3">
                   <button
+                    type="button"
                     onClick={() => setShowThinking(!showThinking)}
-                    className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted transition-colors font-body"
+                    aria-expanded={showThinking ? 'true' : 'false'}
+                    className="cg-fold flex items-center gap-1.5 text-[11px] cursor-pointer font-body"
                   >
                     <Brain size={12} className="shrink-0" />
                     <span className="truncate">{thinkingLabel(fullThinking)}</span>
-                    <span className="text-[10px] shrink-0">{showThinking ? '▾' : '▸'}</span>
                   </button>
                   {showThinking && (
                     <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">

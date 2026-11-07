@@ -2485,3 +2485,8 @@ header [data-tour="remote-control"] {
 .tc-tx { padding-right: 10px; white-space: pre; }
 .tc-wd-add { background: var(--cg-add-2); color: inherit; border-radius: 3px; }
 .tc-wd-del { background: var(--cg-del-2); color: inherit; border-radius: 3px; }
+
+/* r158 折叠行(过程条摘要行、工作组头、思考折叠行、工具调用组头、聊天模式折叠条、子代理 / 工作流卡头行):
+   没有展开箭头,与正文靠颜色区分 —— 比正文淡、对比度仍 ≥ 4.5;悬停回到正文色。内部文字与非状态图标继承。 */
+.cg-fold { color: var(--cg-fold-fg); transition: color .15s, background-color .15s; }
+.cg-fold:hover { color: var(--cg-fold-fg-hover); }
