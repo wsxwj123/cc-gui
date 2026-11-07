@@ -1,5 +1,5 @@
 import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, Layers, Loader2, Square } from '../Icon.jsx';
+import { Layers, Loader2, Square } from '../Icon.jsx';
 import { useStore } from '../../stores/sessionStore.js';
 import { resolveOwnedAgent } from '../../utils/agentOwner.js';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
@@ -23,9 +23,9 @@ import {
 // 中性样式,只换文案 —— 前两者在真实运行里极罕见,不值得各写一套配色。
 const STATE_META = {
   queued:  { label: '排队',   cls: 'text-ink-faint bg-canvas-warm border-canvas-deep' },
-  running: { label: '在跑',   cls: 'text-blue-700 bg-blue-50 border-blue-200' },
-  done:    { label: '完成',   cls: 'text-green-700 bg-green-50 border-green-200' },
-  error:   { label: '失败',   cls: 'text-red-700 bg-red-50 border-red-200' },
+  running: { label: '在跑',   cls: 'text-accent bg-accent-subtle border-accent-muted' },
+  done:    { label: '完成',   cls: 'text-success bg-success/10 border-success/30' },
+  error:   { label: '失败',   cls: 'text-error bg-error-subtle border-error/30' },
   cached:  { label: '完成(缓存命中)', cls: 'text-ink-muted bg-canvas-warm border-canvas-deep' },
   skipped: { label: '已跳过', cls: 'text-ink-muted bg-canvas-warm border-canvas-deep' },
   blocked: { label: '已拦截', cls: 'text-ink-muted bg-canvas-warm border-canvas-deep' },
@@ -100,7 +100,7 @@ function AgentRow({ entry, index, state, onOpen, compact }) {
     >
       <span className="shrink-0 w-3 flex items-center justify-center">
         {state === 'running'
-          ? <Loader2 size={10} className="text-blue-600 animate-spin" />
+          ? <Loader2 size={10} className="text-accent animate-spin" />
           : <span className={`w-1.5 h-1.5 rounded-full ${
               state === 'done' || state === 'cached' ? 'bg-success'
                 : state === 'error' ? 'bg-error'
@@ -277,18 +277,18 @@ function WorkflowCardImpl({ toolUseId, ownerSessionId = null, toolCall = null, f
   return (
     <div data-wf-card="" className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
       {/* 头:工作流名 · 整体状态 · 规模 · 停止整个工作流 */}
-      <div className={`${pad} py-2 flex items-start gap-2.5 bg-canvas-warm/60 border-b border-canvas-deep`}>
-        <span className="shrink-0 mt-px w-5 h-5 rounded-md bg-accent-subtle flex items-center justify-center text-ink-muted">
+      <div className={`cg-fold ${pad} py-2 flex items-start gap-2.5 bg-canvas-warm/60 border-b border-canvas-deep`}>
+        <span className="shrink-0 mt-px w-5 h-5 rounded-md bg-accent-subtle flex items-center justify-center">
           <Layers size={12} />
         </span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="text-[12px] text-ink font-body truncate" title={name}>{name}</span>
+            <span className="text-[12px] font-body truncate" title={name}>{name}</span>
             <Badge state={effStatus} label={RUN_LABEL[effStatus]} />
             {runActive && Number.isFinite(agent?.startedAt) && <ElapsedTime startedAt={agent.startedAt} />}
           </div>
           {(meta || subagentCost) && (
-            <div className="mt-0.5 flex items-center gap-2 min-w-0 text-[10px] text-ink-faint font-body">
+            <div className="mt-0.5 flex items-center gap-2 min-w-0 text-[10px] font-body">
               {meta && <span className="truncate" title={meta}>{meta}</span>}
               <SubagentCostTag
                 entry={costEntry}
@@ -312,7 +312,7 @@ function WorkflowCardImpl({ toolUseId, ownerSessionId = null, toolCall = null, f
       {/* 降级横幅:续跑覆盖 / 未留下阶段信息 / 未提供进度信息。启动窗内单独走骨架。 */}
       {pick.note && pick.note !== '正在启动…' && (
         <div className={`${pad} py-1.5 text-[10px] font-body border-b border-canvas-deep ${
-          pick.superseded ? 'bg-amber-50 text-amber-700' : 'bg-canvas-warm text-ink-muted'
+          pick.superseded ? 'bg-warning/10 text-warning' : 'bg-canvas-warm text-ink-muted'
         }`}>
           {pick.note}
         </div>
@@ -335,15 +335,16 @@ function WorkflowCardImpl({ toolUseId, ownerSessionId = null, toolCall = null, f
             return (
               <div key={g.key}>
                 <button
+                  type="button"
                   onClick={() => toggle(g.key, open)}
-                  className={`w-full ${pad} py-1.5 flex items-center gap-2 hover:bg-canvas-warm transition-colors text-left`}
+                  aria-expanded={open ? 'true' : 'false'}
+                  className={`cg-fold w-full ${pad} py-1.5 flex items-center gap-2 hover:bg-canvas-warm text-left cursor-pointer`}
                 >
-                  {open ? <ChevronDown size={11} className="shrink-0 text-ink-faint" /> : <ChevronRight size={11} className="shrink-0 text-ink-faint" />}
-                  <span className="shrink-0 w-4 text-center font-mono text-[10px] text-ink-faint tabular-nums">
+                  <span className="shrink-0 w-4 text-center font-mono text-[10px] tabular-nums">
                     {g.index == null ? '·' : g.index}
                   </span>
-                  <span className="flex-1 min-w-0 truncate text-[11px] text-ink font-body" title={g.title}>{clip(g.title, 80)}</span>
-                  <span className="shrink-0 font-mono text-[10px] text-ink-faint tabular-nums">
+                  <span className="flex-1 min-w-0 truncate text-[11px] font-body" title={g.title}>{clip(g.title, 80)}</span>
+                  <span className="shrink-0 font-mono text-[10px] tabular-nums">
                     {doneCount}/{g.agents.length}
                   </span>
                 </button>
@@ -397,7 +398,7 @@ function WorkflowCardImpl({ toolUseId, ownerSessionId = null, toolCall = null, f
       {(resultText || errorText) && (
         <div className={`${pad} py-2 border-t border-canvas-deep space-y-2`}>
           {errorText && (
-            <pre className="text-[11px] font-mono whitespace-pre-wrap p-2 rounded bg-red-50 text-red-700 max-h-48 overflow-y-auto">
+            <pre className="text-[11px] font-mono whitespace-pre-wrap p-2 rounded bg-error-subtle text-error max-h-48 overflow-y-auto">
               {errorText.slice(0, cap)}
             </pre>
           )}
