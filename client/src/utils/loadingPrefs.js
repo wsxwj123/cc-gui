@@ -55,3 +55,21 @@ export function shouldReroll({ prevPhase, prevKey, phase, key, nowMs, lastRollMs
   if (lastRollMs == null) return true;
   return nowMs - lastRollMs >= REROLL_MIN_GAP_MS;
 }
+
+// r159 D3b:按回合(scope)保持随机抽取的连续性。状态行在工作组头行与底部之间换位置会重新挂载,
+// 抽取记忆放在组件外,同一回合内重新挂载沿用已抽到的 id,阶段变化照 shouldReroll 判断。
+// mem = { scope, current, phase, key, lastRollMs } 或 null;返回新的 mem(不改入参)与要显示的 id。
+// scope 不同(新回合)或还没抽过 → 必抽,且避开上一回合最后那个;之后 phase / key 总更新为最近一次看到的。
+export function nextRollState(mem, { scope, phase, key, nowMs }, rng = Math.random) {
+  if (!mem || mem.scope !== scope || !mem.current) {
+    const id = pickRandomStyle(mem?.current ?? null, rng);
+    return { mem: { scope, current: id, phase, key, lastRollMs: nowMs }, id, rolled: true };
+  }
+  const rolled = shouldReroll({ prevPhase: mem.phase, prevKey: mem.key, phase, key, nowMs, lastRollMs: mem.lastRollMs });
+  const id = rolled ? pickRandomStyle(mem.current, rng) : mem.current;
+  return {
+    mem: { scope, current: id, phase, key, lastRollMs: rolled ? nowMs : mem.lastRollMs },
+    id,
+    rolled,
+  };
+}

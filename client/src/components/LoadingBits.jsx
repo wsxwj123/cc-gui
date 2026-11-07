@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { orbitTicker } from '../utils/orbitTicker.js';
 import { ORBIT_VARIANTS, variantOf } from '../utils/orbitVariants.js';
-import { DEFAULT_LOADING_STYLE, RANDOM_LOADING_STYLE, pickRandomStyle, shouldReroll } from '../utils/loadingPrefs.js';
+import { DEFAULT_LOADING_STYLE, RANDOM_LOADING_STYLE, pickRandomStyle, shouldReroll, nextRollState } from '../utils/loadingPrefs.js';
 
 // 加载指示件(spinner / 耗时),从 App.jsx 抽出共享:底部状态行 LiveStatusLine(主会话与
 // 子代理视图共用)与主题「界面」页预览用同一套视觉物。状态词见 utils/liveStatus.js。
@@ -69,13 +69,28 @@ function pickAndRemember(prevId) {
   return id;
 }
 
+// r159 D3b:按回合的抽取记忆(组件外,单个)。同一时间只有一个生成中的主会话状态行;
+// 它在工作组头行与底部之间换位置会卸载再挂载,靠这里沿用同一回合已抽到的 id。新 scope = 新回合。
+let scopedRollMem = null;
+function scopedRoll(scope, phase, key) {
+  const res = nextRollState(scopedRollMem, { scope, phase, key, nowMs: Date.now() });
+  scopedRollMem = res.mem;
+  lastPickedRandomId = res.id;
+  return res.id;
+}
+
 // phase / rollKey:只有生成中的状态行传。样式为 random 时,挂载时抽一个具体动画;
 // 之后 phase / rollKey 变化按 shouldReroll 决定是否重抽(挂载那次算计时起点)。
-export function LoadingMark({ size = 20, variant = null, markProps = null, phase = null, rollKey = null }) {
+// rollScope(回合起点时间戳):给了就按回合记忆抽取,跨挂载连续;没给(子代理无起点、设置网格)按实例内抽取。
+export function LoadingMark({ size = 20, variant = null, markProps = null, phase = null, rollKey = null, rollScope = null }) {
   const chosen = useStore((s) => s.loadingStyle) || DEFAULT_LOADING_STYLE;
   const style = variant || chosen;
   const isRandom = style === RANDOM_LOADING_STYLE;
-  const [randomId, setRandomId] = useState(() => (isRandom ? pickAndRemember(lastPickedRandomId) : null));
+  const scoped = rollScope != null;
+  const [randomId, setRandomId] = useState(() => {
+    if (!isRandom) return null;
+    return scoped ? scopedRoll(rollScope, phase, rollKey) : pickAndRemember(lastPickedRandomId);
+  });
   const rollRef = useRef({ phase, key: rollKey, lastRollMs: isRandom ? Date.now() : null });
   useEffect(() => {
     const roll = rollRef.current;
@@ -83,6 +98,13 @@ export function LoadingMark({ size = 20, variant = null, markProps = null, phase
     const prevKey = roll.key;
     roll.phase = phase;
     roll.key = rollKey;
+    if (isRandom && scoped) {
+      // 按回合记忆:挂载 / 阶段变化都走 nextRollState;同回合重新挂载不重抽
+      const id = scopedRoll(rollScope, phase, rollKey);
+      roll.lastRollMs = scopedRollMem.lastRollMs;
+      if (id !== randomId) setRandomId(id);
+      return;
+    }
     if (!isRandom) {
       // 离开随机:清掉旧抽取,下次切回随机时重新抽
       if (randomId != null) setRandomId(null);
@@ -100,7 +122,7 @@ export function LoadingMark({ size = 20, variant = null, markProps = null, phase
       setRandomId(pickAndRemember(randomId));
       roll.lastRollMs = nowMs;
     }
-  }, [isRandom, phase, rollKey, randomId]);
+  }, [isRandom, scoped, rollScope, phase, rollKey, randomId]);
   // 刚切到随机、effect 还没抽时沿用最近一次抽到的 id,避免空一帧
   const shown = isRandom ? (randomId || lastPickedRandomId || 'orbit3') : style;
   // 每个分支的最外层都带 data-style = 当前显示的具体样式 id,供外层识别;随机时另带 data-loading-mode

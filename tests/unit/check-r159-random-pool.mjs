@@ -9,6 +9,7 @@
 //      text / stopping / compacting / connecting、同阶段、tool 同 key、1499ms 都为 false;lastRollMs 为空视为可抽。
 //   R4 App.jsx 的 LOADING_OPTIONS:前 3 项 random / orbit3 / orbit4,前 17 项 = random + 16 个池内 id,
 //      其后接原有的 cli、ring(读源码文本,不 import JSX)。
+//   R5 nextRollState(D3b):新 scope 必抽且避开上一回合;同 scope 重新挂载、text 等阶段、不满 1.5 秒都不抽也不补抽。
 //
 // 跑法:node tests/unit/check-r159-random-pool.mjs
 import assert from 'node:assert/strict';
@@ -137,6 +138,80 @@ await report.check('R4', 'LOADING_OPTIONS 顺序:random、orbit3、orbit4、其�
   assert.equal(new Set(all).size, all.length, 'id 有重复');
   assert.ok(/\{\s*id:\s*'random',\s*label:\s*'随机'\s*\}/.test(body), 'random 的标签不是「随机」');
   assert.ok(body.includes('ORBIT_VARIANTS[id].label'), '其余 14 种的标签没有取自 ORBIT_VARIANTS');
+});
+
+await report.check('R5', 'nextRollState 按回合跨挂载连续(D3b)', 'red', () => {
+  const N = P.nextRollState;
+  const rng = seeded(159);
+  // 新 scope 第一次必抽,且不等于上一回合的 current;mem 为空也必抽
+  const r0 = N(null, { scope: 1000, phase: 'connecting', key: 'connecting', nowMs: 1000 }, rng);
+  assert.equal(r0.rolled, true);
+  assert.ok(EXPECTED_POOL.includes(r0.id));
+  assert.deepEqual(r0.mem, { scope: 1000, current: r0.id, phase: 'connecting', key: 'connecting', lastRollMs: 1000 });
+  for (const prev of EXPECTED_POOL) {
+    const old = { scope: 1, current: prev, phase: 'text', key: 'text', lastRollMs: 0 };
+    for (let i = 0; i < 50; i += 1) {
+      const r = N(old, { scope: 2, phase: 'connecting', key: 'connecting', nowMs: 10 }, rng);
+      assert.equal(r.rolled, true);
+      assert.notEqual(r.id, prev);
+      assert.equal(r.mem.scope, 2);
+      assert.equal(r.mem.lastRollMs, 10);
+    }
+  }
+  // current 为空视为没抽过
+  assert.equal(N({ scope: 1, current: null, phase: 'thinking', key: 'thinking', lastRollMs: 0 }, { scope: 1, phase: 'thinking', key: 'thinking', nowMs: 5 }, rng).rolled, true);
+  // 入参不被改写
+  const frozen = Object.freeze({ scope: 1, current: 'o3-v5', phase: 'thinking', key: 'thinking', lastRollMs: 0 });
+  N(frozen, { scope: 1, phase: 'tool', key: 'tool:A', nowMs: 5000 }, rng);
+
+  // 同 scope 同 phase 同 key → 不抽、id 不变(模拟重新挂载)
+  const m = { scope: 7, current: 'o4-diag', phase: 'thinking', key: 'thinking', lastRollMs: 0 };
+  for (const nowMs of [1, 1499, 1500, 99_999]) {
+    const r = N(m, { scope: 7, phase: 'thinking', key: 'thinking', nowMs }, rng);
+    assert.equal(r.rolled, false); assert.equal(r.id, 'o4-diag');
+    assert.equal(r.mem.lastRollMs, 0);
+  }
+  // text / stopping / compacting / connecting:从思考 / 工具切过来、在组头与底部之间重新挂载(新调用、同一 mem),都不抽
+  for (const phase of ['text', 'stopping', 'compacting', 'connecting']) {
+    for (const from of [m, { ...m, phase: 'tool', key: 'tool:A' }]) {
+      const a = N(from, { scope: 7, phase, key: phase, nowMs: 50_000 }, rng);
+      assert.equal(a.rolled, false, phase); assert.equal(a.id, 'o4-diag');
+      assert.equal(a.mem.phase, phase); assert.equal(a.mem.key, phase);
+      const b = N(a.mem, { scope: 7, phase, key: phase, nowMs: 60_000 }, rng);
+      assert.equal(b.rolled, false, phase); assert.equal(b.id, 'o4-diag');
+    }
+  }
+  // 连接中 → 思考:1499ms 不抽,1500ms 抽
+  const conn = { scope: 9, current: 'o3-adj', phase: 'connecting', key: 'connecting', lastRollMs: 10_000 };
+  const c1 = N(conn, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 11_499 }, rng);
+  assert.equal(c1.rolled, false); assert.equal(c1.id, 'o3-adj');
+  assert.equal(c1.mem.phase, 'thinking'); assert.equal(c1.mem.lastRollMs, 10_000);
+  const c2 = N(conn, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 11_500 }, rng);
+  assert.equal(c2.rolled, true); assert.notEqual(c2.id, 'o3-adj');
+  assert.equal(c2.mem.lastRollMs, 11_500); assert.equal(c2.mem.current, c2.id);
+
+  // thinking → tool → thinking,各自满 1.5 秒都抽,新 id 不等于旧 id
+  let s = c2.mem;
+  for (const [phase, key, nowMs] of [['tool', 'tool:Bash ls', 13_000], ['thinking', 'thinking', 14_500], ['tool', 'tool:Read a', 16_000]]) {
+    const r = N(s, { scope: 9, phase, key, nowMs }, rng);
+    assert.equal(r.rolled, true, `${phase}@${nowMs}`); assert.notEqual(r.id, s.current);
+    s = r.mem;
+  }
+  // tool 换 key:满 1.5 秒抽,不满不抽
+  const t1 = N(s, { scope: 9, phase: 'tool', key: 'tool:Edit b', nowMs: 17_500 }, rng);
+  assert.equal(t1.rolled, true); assert.notEqual(t1.id, s.current);
+  const t2 = N(t1.mem, { scope: 9, phase: 'tool', key: 'tool:Grep c', nowMs: 17_900 }, rng);
+  assert.equal(t2.rolled, false); assert.equal(t2.id, t1.id); assert.equal(t2.mem.key, 'tool:Grep c');
+  // 不满 1.5 秒进入的新阶段,之后同阶段内再来调用(phase / key 不变)也不补抽
+  for (const nowMs of [19_000, 25_000, 100_000]) {
+    const r = N(t2.mem, { scope: 9, phase: 'tool', key: 'tool:Grep c', nowMs }, rng);
+    assert.equal(r.rolled, false, String(nowMs)); assert.equal(r.id, t1.id);
+  }
+  const th = N(t1.mem, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 18_000 }, rng);
+  assert.equal(th.rolled, false);
+  assert.equal(N(th.mem, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 60_000 }, rng).rolled, false);
+  // 注入 rng 结果确定
+  assert.equal(N(null, { scope: 1, phase: 'thinking', key: 'thinking', nowMs: 0 }, () => 0).id, 'orbit3');
 });
 
 process.exit(report.finish());
