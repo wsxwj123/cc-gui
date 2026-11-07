@@ -55,6 +55,9 @@ export function ToolCardShell({
         </span>
         {headExtra}
         <span className="tc-meta" data-tool-card-meta="">{meta}</span>
+        {/* 出错只靠红边与图标色区分,读屏用户收起态听不出来:补一句视觉隐藏的「出错」。
+            不放进带 data-tool-card-* 钩子的元素(它们的文字被别处读取) */}
+        {status === 'err' && <span className="sr-only">出错</span>}
       </button>
       {expanded && (
         <div className="tc-body" data-tool-card-body="">

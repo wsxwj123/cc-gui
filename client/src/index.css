@@ -2429,7 +2429,7 @@ header [data-tour="remote-control"] {
   cursor: pointer; color: var(--cg-fold-fg); transition: background-color .15s, color .15s;
 }
 .tc-head:hover { background: var(--cg-fill); color: var(--cg-fold-fg-hover); }
-.tc-head:focus-visible { outline: 2px solid var(--color-accent-muted); outline-offset: -2px; }
+.tc-head:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
 .tc-icon { flex: none; width: 14px; height: 14px; display: grid; place-items: center; color: var(--color-ink-faint); }
 .tc-card[data-status="ok"] .tc-icon { color: color-mix(in srgb, var(--color-success) 78%, var(--color-ink-faint)); }
 .tc-card[data-status="err"] .tc-icon { color: var(--color-error); }
