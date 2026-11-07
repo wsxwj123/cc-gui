@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors, ChevronRight, AlertTriangle } from './Icon.jsx';
+import { User, Brain, Copy, Check, RotateCcw, Pencil, GitBranch, Archive, Scissors, AlertTriangle } from './Icon.jsx';
 import {
   computeCostForMessage, costUnavailableReason, costSourceLabel, costUnknownNote, COST_REASON_TEXT,
   formatCost, displayUsd, costTitle,
@@ -74,12 +74,13 @@ function GenuiActionFold({ text, messageId = null }) {
       <div className="max-w-[var(--content-max)] mx-auto flex flex-col items-end">
         <div data-testid="genui-action-message" className="max-w-[85%] flex flex-col items-end">
           <button
+            type="button"
             data-testid="genui-action-message-toggle"
+            aria-expanded={open ? 'true' : 'false'}
             onClick={() => setOpen((v) => !v)}
             title="模型生成的界面上的一次操作，已以你的名义发出这条消息。点击查看原文"
             className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent/12 text-accent text-[10px] font-body hover:bg-accent/20 transition-colors cursor-pointer max-w-full"
           >
-            <ChevronRight size={10} className={`transition-transform shrink-0 ${open ? 'rotate-90' : ''}`} />
             <span className="shrink-0">界面操作</span>
             <span className="font-mono truncate">{action || '(数据块无法解析)'}</span>
             {type && <span className="text-accent/70 shrink-0">· {type}</span>}
@@ -647,12 +648,13 @@ export function MessageBubble({ message, onRollback, onFork }) {
           {message.thinking && (
             <div className="mb-3">
               <button
+                type="button"
                 onClick={() => setShowThinking(!showThinking)}
-                className="flex items-center gap-1.5 text-[11px] text-ink-faint hover:text-ink-muted transition-colors font-body"
+                aria-expanded={showThinking ? 'true' : 'false'}
+                className="cg-fold flex items-center gap-1.5 text-[11px] cursor-pointer font-body"
               >
                 <Brain size={12} className="shrink-0" />
                 <span className="truncate">{thinkingLabel(message.thinking)}</span>
-                <span className="text-[10px] shrink-0">{showThinking ? '▾' : '▸'}</span>
               </button>
               {showThinking && (
                 <div className="thinking-block mt-2 p-4 rounded-lg text-xs text-ink-muted whitespace-pre-wrap max-h-64 overflow-y-auto font-body leading-relaxed">
