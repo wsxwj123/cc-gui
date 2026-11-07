@@ -277,7 +277,7 @@ function WorkflowCardImpl({ toolUseId, ownerSessionId = null, toolCall = null, f
   return (
     <div data-wf-card="" className="border border-canvas-deep rounded-lg overflow-hidden bg-canvas animate-fade-up">
       {/* 头:工作流名 · 整体状态 · 规模 · 停止整个工作流 */}
-      <div className={`cg-fold ${pad} py-2 flex items-start gap-2.5 bg-canvas-warm/60 border-b border-canvas-deep`}>
+      <div className={`cg-fold-static ${pad} py-2 flex items-start gap-2.5 bg-canvas-warm/60 border-b border-canvas-deep`}>
         <span className="shrink-0 mt-px w-5 h-5 rounded-md bg-accent-subtle flex items-center justify-center">
           <Layers size={12} />
         </span>

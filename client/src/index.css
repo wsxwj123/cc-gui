@@ -1619,15 +1619,33 @@ header [data-tour="remote-control"] {
 
 /* ── Markdown content ────────────────────────────────────────── */
 .markdown-content { line-height: 1.7; color: var(--color-ink-soft); }
+/* r158:行内代码淡底取主题派生色(深浅主题同一条规则,不再另写深色覆盖);文字色继承正文 */
 .markdown-content code {
-  background: rgba(0, 0, 0, 0.06);
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: 0.9em;
+  background: var(--cg-fill-2);
+  border-radius: 5px;
+  padding: .14em .4em;
+  font-size: 0.88em;
 }
-@media (prefers-color-scheme: dark) {
-  .markdown-content code { background: rgba(255, 255, 255, 0.10); }
+/* r158 引用块:不斜体,左竖线 + 淡底;文字 ink-soft(ink-muted 在 nord 上对比度不够) */
+.md-quote {
+  margin: 12px 0; padding: 7px 15px;
+  border-left: 3px solid var(--cg-line-2); border-radius: 0 9px 9px 0;
+  background: var(--cg-fill); color: var(--color-ink-soft); font-style: normal;
 }
+.md-quote > p { margin: 4px 0; }
+/* r158 表格:圆角外框(外层容器负责横向滚动与裁圆角)、表头淡底、表体偶数行淡底 */
+.md-table-wrap {
+  margin: 12px 0; max-width: 100%; overflow-x: auto;
+  border: 1px solid var(--cg-line); border-radius: 10px;
+}
+.md-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+.md-th {
+  padding: 8px 12px; text-align: left; font-weight: 600; color: var(--color-ink-soft);
+  background: var(--cg-fill); border-bottom: 1px solid var(--cg-line);
+}
+.md-td { padding: 8px 12px; color: var(--color-ink-soft); border-bottom: 1px solid var(--cg-line); }
+.md-table tbody tr:last-child > .md-td { border-bottom: 0; }
+.md-table tbody tr:nth-child(even) > .md-td { background: var(--cg-fill); }
 
 /* ── Pill / chip variants ────────────────────────────────────── */
 .chip {
@@ -2542,3 +2560,5 @@ header [data-tour="remote-control"] {
    没有展开箭头,与正文靠颜色区分 —— 比正文淡、对比度仍 ≥ 4.5;悬停回到正文色。内部文字与非状态图标继承。 */
 .cg-fold { color: var(--cg-fold-fg); transition: color .15s, background-color .15s; }
 .cg-fold:hover { color: var(--cg-fold-fg-hover); }
+/* 不可点的头行(如工作流卡头):只取淡色,悬停不变深,免得看着像能点 */
+.cg-fold-static { color: var(--cg-fold-fg); }
