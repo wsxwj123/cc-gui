@@ -983,7 +983,7 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
     measure();
     return () => ro.disconnect();
   }, []);
-  // 聊天模式:未展开时把思考/工具/子代理/skill 折叠成一行"思考并执行了 N 步操作 ›",
+  // 聊天模式:未展开时把思考/工具/子代理/skill 折叠成一行"思考并执行了 N 步操作"(r158 起不带箭头,靠淡色区分),
   // 点开还原完整过程;展开后给一行"收起过程"。两条在有序 blocks 与 legacy 路径共用。
   const chatFoldBar = (label) => (
     <button key="chat-fold" type="button" aria-expanded="false" onClick={() => setChatExpanded(true)}
