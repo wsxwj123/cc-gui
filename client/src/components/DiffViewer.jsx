@@ -68,24 +68,27 @@ export function DiffViewer({ diff, maxHeight = 'max-h-72' }) {
         )}
       </div>
       <div className={`tc-diff-rows ${maxHeight}`}>
-        {rows.map((row, i) => {
-          if (row.type === 'hunk') {
-            return <div key={i} className="px-2.5 py-px text-ink-muted whitespace-pre">{row.content}</div>;
-          }
-          const segments = words.get(i);
-          return (
-            <div key={i} className="tc-dl" data-diff-line={row.type}>
-              <span className="tc-sg" data-diff-sign="" aria-hidden="true">{SIGN[row.type]}</span>
-              <span className="tc-tx">
-                {segments
-                  ? segments.map((seg, k) => (seg.changed
-                    ? <span key={k} className={row.type === 'add' ? 'tc-wd-add' : 'tc-wd-del'} data-diff-word={row.type}>{seg.text}</span>
-                    : <React.Fragment key={k}>{seg.text}</React.Fragment>))
-                  : (row.content || ' ')}
-              </span>
-            </div>
-          );
-        })}
+        {/* 内层网格宽 = 最宽那一行(至少铺满容器):横向滚动时短行的红绿底也铺到最右 */}
+        <div className="tc-diff-inner">
+          {rows.map((row, i) => {
+            if (row.type === 'hunk') {
+              return <div key={i} className="px-2.5 py-px text-ink-muted whitespace-pre">{row.content}</div>;
+            }
+            const segments = words.get(i);
+            return (
+              <div key={i} className="tc-dl" data-diff-line={row.type}>
+                <span className="tc-sg" data-diff-sign="" aria-hidden="true">{SIGN[row.type]}</span>
+                <span className="tc-tx">
+                  {segments
+                    ? segments.map((seg, k) => (seg.changed
+                      ? <span key={k} className={row.type === 'add' ? 'tc-wd-add' : 'tc-wd-del'} data-diff-word={row.type}>{seg.text}</span>
+                      : <React.Fragment key={k}>{seg.text}</React.Fragment>))
+                    : (row.content || ' ')}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

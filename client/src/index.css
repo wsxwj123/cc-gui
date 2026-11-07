@@ -2549,6 +2549,7 @@ header [data-tour="remote-control"] {
 .tc-diff-file > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tc-diff-stat { margin-left: auto; flex: none; display: flex; gap: 6px; }
 .tc-diff-rows { overflow: auto; }
+.tc-diff-inner { display: grid; min-width: 100%; width: max-content; }
 .tc-dl { display: grid; grid-template-columns: 18px 1fr; align-items: start; color: var(--color-ink-soft); min-width: max-content; }
 .tc-dl[data-diff-line="add"] { background: var(--cg-add); }
 .tc-dl[data-diff-line="del"] { background: var(--cg-del); }
