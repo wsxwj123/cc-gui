@@ -73,3 +73,26 @@ export function nextRollState(mem, { scope, phase, key, nowMs }, rng = Math.rand
     rolled,
   };
 }
+
+// r159:按回合分别保存的抽取记忆。分屏里几栏可以同时在生成,每栏的回合(scope)各占一个槽,
+// 互不覆盖。roll(scope, …) 对已有的 scope 照 nextRollState 推进;新 scope 算新回合:必抽,且避开 avoidId。
+// 每次读写把该 scope 挪到最近使用;超过 cap 淘汰最久没用的,被淘汰的 scope 再来按新回合处理。
+// 返回 { id, mem, rolled }。
+const NEW_ROUND_SCOPE = Object.freeze({}); // 占位 scope,不等于任何真实 scope
+export function createScopedRollStore(cap = 8) {
+  const limit = Math.max(1, Math.floor(Number(cap)) || 1);
+  const slots = new Map(); // scope → mem;Map 按插入顺序,最前面的是最久没用的
+  return {
+    roll(scope, { phase, key, nowMs }, rng = Math.random, avoidId = null) {
+      const prev = slots.has(scope)
+        ? slots.get(scope)
+        : (avoidId ? { scope: NEW_ROUND_SCOPE, current: avoidId } : null);
+      const res = nextRollState(prev, { scope, phase, key, nowMs }, rng);
+      slots.delete(scope);
+      slots.set(scope, res.mem);
+      while (slots.size > limit) slots.delete(slots.keys().next().value);
+      return res;
+    },
+    get size() { return slots.size; },
+  };
+}

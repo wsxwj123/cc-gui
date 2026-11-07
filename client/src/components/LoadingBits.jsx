@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { orbitTicker } from '../utils/orbitTicker.js';
 import { ORBIT_VARIANTS, variantOf } from '../utils/orbitVariants.js';
-import { DEFAULT_LOADING_STYLE, RANDOM_LOADING_STYLE, pickRandomStyle, shouldReroll, nextRollState } from '../utils/loadingPrefs.js';
+import { DEFAULT_LOADING_STYLE, RANDOM_LOADING_STYLE, pickRandomStyle, shouldReroll, createScopedRollStore } from '../utils/loadingPrefs.js';
 
 // 加载指示件(spinner / 耗时),从 App.jsx 抽出共享:底部状态行 LiveStatusLine(主会话与
 // 子代理视图共用)与主题「界面」页预览用同一套视觉物。状态词见 utils/liveStatus.js。
@@ -69,14 +69,14 @@ function pickAndRemember(prevId) {
   return id;
 }
 
-// r159 D3b:按回合的抽取记忆(组件外,单个)。同一时间只有一个生成中的主会话状态行;
-// 它在工作组头行与底部之间换位置会卸载再挂载,靠这里沿用同一回合已抽到的 id。新 scope = 新回合。
-let scopedRollMem = null;
+// r159 D3b:按回合的抽取记忆(组件外)。状态行在工作组头行与底部之间换位置会卸载再挂载,
+// 靠这里沿用同一回合已抽到的 id。分屏里几栏可同时生成,每个回合(rollScope)分别保存,
+// 互不覆盖;最多保存 8 个回合,超出淘汰最久没用的。新回合避开最近一次抽到的 id。
+const scopedRolls = createScopedRollStore();
 function scopedRoll(scope, phase, key) {
-  const res = nextRollState(scopedRollMem, { scope, phase, key, nowMs: Date.now() });
-  scopedRollMem = res.mem;
+  const res = scopedRolls.roll(scope, { phase, key, nowMs: Date.now() }, Math.random, lastPickedRandomId);
   lastPickedRandomId = res.id;
-  return res.id;
+  return res;
 }
 
 // phase / rollKey:只有生成中的状态行传。样式为 random 时,挂载时抽一个具体动画;
@@ -89,7 +89,7 @@ export function LoadingMark({ size = 20, variant = null, markProps = null, phase
   const scoped = rollScope != null;
   const [randomId, setRandomId] = useState(() => {
     if (!isRandom) return null;
-    return scoped ? scopedRoll(rollScope, phase, rollKey) : pickAndRemember(lastPickedRandomId);
+    return scoped ? scopedRoll(rollScope, phase, rollKey).id : pickAndRemember(lastPickedRandomId);
   });
   const rollRef = useRef({ phase, key: rollKey, lastRollMs: isRandom ? Date.now() : null });
   useEffect(() => {
@@ -100,8 +100,8 @@ export function LoadingMark({ size = 20, variant = null, markProps = null, phase
     roll.key = rollKey;
     if (isRandom && scoped) {
       // 按回合记忆:挂载 / 阶段变化都走 nextRollState;同回合重新挂载不重抽
-      const id = scopedRoll(rollScope, phase, rollKey);
-      roll.lastRollMs = scopedRollMem.lastRollMs;
+      const { id, mem } = scopedRoll(rollScope, phase, rollKey);
+      roll.lastRollMs = mem.lastRollMs;
       if (id !== randomId) setRandomId(id);
       return;
     }
