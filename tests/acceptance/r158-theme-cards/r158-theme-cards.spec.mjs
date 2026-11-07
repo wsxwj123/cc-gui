@@ -301,7 +301,10 @@ test('B11 复制代码：折叠状态下点 python 围栏的「复制」，剪�
   const py = blockOf(page, 'python');
   await expect(py, 'python 围栏应是 pre[data-code-block]').toHaveCount(1, { timeout: 8_000 });
   expect(await visibleLines(py), '前置：处于折叠状态（只显示 5 行）').toBe(5);
-  const btn = py.locator('button', { hasText: /^\s*复制\s*$/ });
+  // r158 主会话修订：定位条件要同时认「复制」和「已复制」（同 B7 的写法）——Playwright 每次断言都会重新按这个条件找按钮，
+  // 只认「复制」的话，按钮一变成「已复制」就找不到它了，任何实现都过不了。
+  const btn = py.locator('button', { hasText: /^\s*(已)?复制\s*$/ });
+  await expect(btn, '点击前按钮文字应为「复制」').toHaveText(/^\s*复制\s*$/);
   await btn.click();
   await expect(btn, '点击后按钮文字短暂变为「已复制」').toHaveText(/^\s*已复制\s*$/, { timeout: 1_000 });
   const got = await copied(page);
