@@ -267,14 +267,13 @@ export async function loopingAnimations(locator, { visibleOnly = false, exclude 
 
 // ───────────────────────── 过程条 / 子代理卡 ─────────────────────────
 /**
- * 保证直播过程条展开，并把默认收起的"思考 · N 次工具调用"组点开，直到 want 选择器有元素；返回是否出现。
- * scope（可选，一个 Locator，通常是本回合的 [data-strip-root]）：头行、条目、过程组都只在这棵子树里找；
+ * 把默认收起的"思考 · N 次工具调用"组点开，直到 want 选择器有元素；返回是否出现。
+ * （r159 起「总栏」已去掉、过程块恒展开，不再有"先把总栏头行点开"这一步。）
+ * scope（可选，一个 Locator，通常是本回合的 [data-strip-root]）：条目、过程组都只在这棵子树里找；
  * 不传 = 整页（既有行为）。夹具里有历史回合时必须传，否则会把历史回合的过程组一起点开，条目数就对不上。
  */
 export async function openStripEntries(page, want = '[data-entry-state]', timeout = 6_000, scope = null) {
   const within = (sel) => (scope ? scope.locator(sel) : page.locator(sel));
-  const head = (scope ? within('[data-strip="head"]') : page.locator('[data-strip="head"][data-strip-live="true"]')).first();
-  if ((await head.count()) && (await head.getAttribute('aria-expanded')) === 'false') await head.click();
   const has = async () => (await within(want).count()) > 0;
   const t0 = Date.now();
   while (Date.now() - t0 < timeout) {

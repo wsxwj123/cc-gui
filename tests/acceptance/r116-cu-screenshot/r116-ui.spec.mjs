@@ -34,11 +34,10 @@ async function openHistory(page, marker) {
   await expect(page.locator('[data-turn-uuid]').first()).toBeVisible({ timeout: 30_000 });
 }
 
-/** 展开"思考与工具调用"条 → 工具组 → 第 i 张截图卡片,返回卡片元素。 */
+/** 展开工具组 → 第 i 张截图卡片,返回卡片元素。（r159 起没有「思考与工具调用」总栏，过程块恒展开。） */
 async function openShotCard(page, i) {
-  const head = page.locator('[data-strip="head"]').first();
-  await expect(head).toBeVisible({ timeout: 15_000 });
-  if ((await head.getAttribute('aria-expanded')) !== 'true') await head.click();
+  // r159：总栏已去掉、过程块恒展开，不再先点总栏头行；等工作组头行画出来，作为"会话已渲染"的前置。
+  await expect(page.locator('[data-work-group-head]').first()).toBeVisible({ timeout: 15_000 });
   const header = page.locator('[data-strip-item="group"] button').filter({ hasText: 'screenshot' }).nth(i);
   if (!(await header.isVisible())) await page.getByRole('button', { name: /次工具调用/ }).first().click();
   await expect(header).toBeVisible({ timeout: 10_000 });
@@ -50,9 +49,8 @@ async function openShotCard(page, i) {
 
 /** 按卡片头文字展开一张工具卡(与 openShotCard 同款,只是用文字定位而不是 screenshot 序数)。 */
 async function openCardByText(page, text) {
-  const head = page.locator('[data-strip="head"]').first();
-  await expect(head).toBeVisible({ timeout: 15_000 });
-  if ((await head.getAttribute('aria-expanded')) !== 'true') await head.click();
+  // r159：总栏已去掉、过程块恒展开，不再先点总栏头行；等工作组头行画出来，作为"会话已渲染"的前置。
+  await expect(page.locator('[data-work-group-head]').first()).toBeVisible({ timeout: 15_000 });
   // r157:工作组头行也是 button、文字里带工具标题(「<标题> · N 次工具调用」),会抢先匹配——先把收起的组点开,再只在组内条目里找卡片头。
   const groupHeads = page.locator('[data-work-group-state="closed"] [data-work-group-head]');
   for (let n = await groupHeads.count(), i = 0; n > 0 && i < 10; n = await groupHeads.count(), i += 1) {

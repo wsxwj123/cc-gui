@@ -52,7 +52,7 @@ test('B3 文字够清楚：七个主题里卡头标题、终端命令 / 输出�
   expect(problems, '各类文字与背景的对比度应 ≥ 4.5').toEqual([]);
 });
 
-test('B16 折叠行与正文靠颜色区分：七个主题里过程条标题 / 工作组头 / 思考折叠行 / 卡头标题的文字对比度 ≥ 4.5，且比正文段落文字低至少 3.0（折叠行比正文淡）', async ({ browser }) => {
+test('B16 折叠行与正文靠颜色区分：七个主题里工作组头 / 思考折叠行 / 卡头标题的文字对比度 ≥ 4.5，且比正文段落文字低至少 3.0（折叠行比正文淡）', async ({ browser }) => {
   test.setTimeout(COLOR_TIMEOUT);
   const problems = await collect(browser, THEMES, (snap, theme) => foldColorProblems(snap, theme));
   expect(problems, '折叠行文字应比正文淡且仍然清楚').toEqual([]);
@@ -97,13 +97,12 @@ const cardFacts = (page) => page.evaluate(() => [...document.querySelectorAll('[
   const arrows = head ? [...head.querySelectorAll('svg')].filter((s) => /chevron|caret/i.test(s.getAttribute('class') || '')).length + (/[▸▾▴▶◂]/.test(head.textContent || '') ? 1 : 0) : 0;
   return { tool: c.getAttribute('data-tool-name'), status: c.getAttribute('data-status'), head: !!head, inOrder, arrows, name: t('[data-tool-card-name]'), title: t('[data-tool-card-title]'), meta: t('[data-tool-card-meta]') };
 }));
-/** 回合里的折叠行（过程条摘要行 / 工作组头 / 思考折叠行 / 工具卡头）有没有展开箭头：只数 class 带 chevron / caret 的 svg 与 [data-strip-caret]。 */
+/** 回合里的折叠行（工作组头 / 思考折叠行 / 工具卡头）有没有展开箭头：只数 class 带 chevron / caret 的 svg 与 [data-strip-caret]。 */
 const foldArrows = (pg) => pg.evaluate(() => {
   const bad = (s) => /chevron|caret/i.test(s.getAttribute('class') || '');
   const turns = [...document.querySelectorAll('[data-turn-uuid]')];
   return {
     turns: turns.length,
-    strip: document.querySelectorAll('[data-strip="head"]').length,
     groups: document.querySelectorAll('[data-work-group-head]').length,
     // 思考折叠行 = 展开的工作组里、不是组头本身、带脑图标的按钮（组里有思考时组头图标也是脑图标，要排除）。
     brains: document.querySelectorAll('[data-work-group-state="open"] button:not([data-work-group-head]) svg[class*="brain" i]').length,
@@ -463,7 +462,6 @@ test('B4 统一骨架：11 项各一张卡，卡头四件套齐全且没有展�
   const histFold = await foldArrows(page);
   const problems = [];
   for (const [label, a] of [['直播会话', liveFold], ['历史会话', histFold]]) {
-    if (a.strip < 1) problems.push(`${label}：找不到过程条摘要行 [data-strip="head"]（本判据的前提不成立）`);
     if (a.groups < 1) problems.push(`${label}：找不到工作组头 [data-work-group-head]（本判据的前提不成立）`);
     if (a.brains < 1) problems.push(`${label}：展开的工作组里找不到思考折叠行（脑图标），无法判断它有没有箭头（本判据的前提不成立）`);
     if (a.chevrons !== 0 || a.carets !== 0) problems.push(`${label}：回合里还有展开箭头（chevron / caret 图标 ${a.chevrons} 个、[data-strip-caret] ${a.carets} 个）`);

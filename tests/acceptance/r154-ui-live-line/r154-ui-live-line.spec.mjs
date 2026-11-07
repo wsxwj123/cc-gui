@@ -1,7 +1,9 @@
-// r154-ui-live-line：生成中的底部状态行 / 指示器 / 文字流光 / 头行静态 / 展开条目 / 子代理卡 / 加载动画设置。
+// r154-ui-live-line：生成中的底部状态行 / 指示器 / 文字流光 / 展开条目 / 子代理卡 / 加载动画设置。
 // 判据全部来自 .devflow/r154-ui-live-line-接口.md 的「行为清单」L1–L15，只看页面上用户能看到的东西
 // （接口文件列出的 data-* 锚点、公开文案、role、计算样式）；不读源码、不读 React state。
 // 命名：Ln 对应接口文件行为清单第 n 条。
+// r159：L9（总栏头行静态）测的是已按用户要求去掉的「总栏」，已退役；L10 里点总栏的步骤改用工作组头行；L12 的默认样式 / 顺序按「随机」新默认改写；
+//       primeOverlays 默认预置 orbit3（L6 等按三体旋转写的判据不动）。
 import { test, expect } from '@playwright/test';
 import { SESSIONS } from './helpers/fixtures.mjs';
 import { touchCtl, primeOverlays, openApp } from './helpers/runtime.mjs';
@@ -335,51 +337,6 @@ test('L8 文字流光：只在状态词里、同一窗格最多 1 个、约 3 �
   await expect.poll(async () => (await shineSnap(page)).count, { timeout: 15_000, message: '回合结束后：带流光的元素应为 0 个' }).toBe(0);
 });
 
-test('L9 头行静态：生成中与结束后都没有点阵 / 用时，data-strip-live 随回合变化，点击展开收起不变', async ({ page }) => {
-  const MARK = 'R154-L9-MARK';
-  await startRound(page, {
-    key: 'l9',
-    scenario: { events: [
-      { kind: 'thinking', text: 'L9 思考。' },
-      { kind: 'tool', name: 'Bash', input: { command: 'ls', description: 'L9 最新工具标题' }, result: 'ok' },
-      { kind: 'text', text: `${MARK} 正文` },
-    ] },
-  });
-  const liveHead = page.locator('[data-strip="head"][data-strip-live="true"]');
-  await expect(liveHead, '生成中：头行应带 data-strip-live="true"（恰 1 个）').toHaveCount(1, { timeout: 40_000 });
-  await expect(page.getByText(MARK).first(), '前置自证：回合的正文应已画出来').toBeVisible({ timeout: 20_000 });
-  await page.waitForTimeout(1200);
-  const root = page.locator('[data-strip-root]').filter({ has: liveHead });
-  const head = page.locator('[data-strip-root]').filter({ hasText: MARK }).locator('[data-strip="head"]');
-
-  await expect.soft(liveHead.locator('[data-strip-dots]'), '生成中：头行里不应有点阵 [data-strip-dots]').toHaveCount(0, { timeout: 4_000 });
-  await expect.soft(liveHead.locator('[data-strip-elapsed]'), '生成中：头行里不应有用时 [data-strip-elapsed]').toHaveCount(0, { timeout: 4_000 });
-  expect.soft(await loopingAnimations(liveHead), '生成中：头行（含左图标）不应含任何运行中的动画元素').toEqual([]);
-  await expect.soft(liveHead.locator('[data-strip-title]'), '生成中：头行标题仍是最新工具调用的标题').toHaveText('L9 最新工具标题', { timeout: 4_000 });
-  expect.soft(await root.evaluate((el) => el.firstElementChild && el.firstElementChild.getAttribute('data-strip')), '头行仍应是过程条的第一个子元素').toBe('head');
-
-  // 点击展开 / 收起（生成中）
-  const a0 = await liveHead.getAttribute('aria-expanded');
-  const flip = (v) => (v === 'true' ? 'false' : 'true');
-  await liveHead.click();
-  await expect.soft(liveHead, '点头行后 aria-expanded 应翻转').toHaveAttribute('aria-expanded', flip(a0));
-  await liveHead.click();
-  await expect.soft(liveHead, '再点一次应翻回').toHaveAttribute('aria-expanded', a0);
-  expect.soft(await liveHead.locator('[data-strip-dots], [data-strip-elapsed]').count(), '点击展开收起之后头行仍不应有点阵 / 用时').toBe(0);
-  await expect.soft(liveHead, '点击展开收起不改变 data-strip-live="true"').toHaveCount(1);
-
-  await endRound(page);
-  await expect(head, '回合结束后头行仍在').toHaveCount(1, { timeout: 15_000 });
-  await expect.poll(async () => await head.evaluate((el) => el.hasAttribute('data-strip-live')), { timeout: 10_000, message: '回合结束后：头行的 data-strip-live 属性应不存在' }).toBe(false);
-  expect.soft(await head.locator('[data-strip-dots], [data-strip-elapsed]').count(), '回合结束后：头行没有点阵与用时').toBe(0);
-  const b0 = await head.getAttribute('aria-expanded');
-  await head.click();
-  await expect.soft(head, '回合结束后点头行：aria-expanded 应翻转').toHaveAttribute('aria-expanded', flip(b0));
-  await head.click();
-  await expect.soft(head, '回合结束后再点一次：应翻回').toHaveAttribute('aria-expanded', b0);
-  expect.soft(await head.evaluate((el) => el.hasAttribute('data-strip-live')), '点击展开收起不应让 data-strip-live 重新出现').toBe(false);
-});
-
 test('L10 展开后的条目：工具条目 running→done（含 error）、思考条目 data-entry-live 只给最新一块、收起时无可见动画', async ({ page }) => {
   test.setTimeout(180_000);
   await startRound(page, {
@@ -394,14 +351,14 @@ test('L10 展开后的条目：工具条目 running→done（含 error）、思�
       { kind: 'text', text: 'R154-L10-MARK 正文' },
     ] },
   });
-  await expect(page.locator('[data-strip="head"][data-strip-live="true"]'), '前置自证：生成中的过程条应画出来').toHaveCount(1, { timeout: 40_000 });
+  await expect(page.locator('[data-live-line]'), '前置自证：生成中的状态行应画出来').toHaveCount(1, { timeout: 40_000 });
   await page.waitForTimeout(1500);
   // 夹具里有一条历史回合：它的过程条同样是 [data-strip-root]、同样有「思考 · N 次工具调用」组，条目也带 data-entry-state。
-  // 这里只数本回合的：本回合的过程条 = 含 live 头行的那个 [data-strip-root]。趁回合还在生成中先按序号把它钉住，
-  // 之后点开过程组 / 数条目 / 查动画 / 查 data-entry-live 都限定在它里面（回合结束后 live 标记会消失，不能再靠它去找）。
-  const rootIdx = await page.locator('[data-strip-root]').evaluateAll((els) => els.findIndex((e) => !!e.querySelector('[data-strip="head"][data-strip-live="true"]')));
-  expect(rootIdx, '前置自证：应能找到含 live 头行的本回合过程条 [data-strip-root]').toBeGreaterThanOrEqual(0);
-  const scope = page.locator('[data-strip-root]').nth(rootIdx);
+  // 这里只数本回合的：本回合的过程条 = 页面上最后一个 [data-strip-root]（历史回合排在它前面；r159 起总栏头行没了，不能再靠 live 头行去认）。
+  // 趁回合还在生成中先按序号把它钉住，之后点开过程组 / 数条目 / 查动画 / 查 data-entry-live 都限定在它里面。
+  const rootCount = await page.locator('[data-strip-root]').count();
+  expect(rootCount, '前置自证：应有本回合的过程条 [data-strip-root]').toBeGreaterThanOrEqual(1);
+  const scope = page.locator('[data-strip-root]').nth(rootCount - 1);
   const opened = await openStripEntries(page, '[data-entry-state]', 6_000, scope);
   expect(opened, '展开过程条后：应有带 data-entry-state 的工具条目').toBe(true);
   await expect.poll(() => entryStates(page, scope), { timeout: 10_000, message: '本回合三个工具条目的状态应依次是 running / done / error（甲没结果、乙有结果、丙出错）' }).toEqual(['running', 'done', 'error']);
@@ -428,15 +385,15 @@ test('L10 展开后的条目：工具条目 running→done（含 error）、思�
   expect.soft(liveAfterTools, '带 data-entry-live 的应是排在最后一个工具条目之后的那块思考（最新一块）').toBe(true);
 
   // 收起时（条目 hidden）没有任何可见的运行中动画——此刻甲还没结果
-  const liveHead = page.locator('[data-strip="head"][data-strip-live="true"]');
-  const strip = page.locator('[data-strip-root]').filter({ has: liveHead });
-  await liveHead.click();
-  await expect(liveHead, '前置自证：点头行后应收起').toHaveAttribute('aria-expanded', 'false');
-  // r157:实时状态行挂在最后一个工作组的头行里,收起总摘要行后它按设计仍可见(见 r157 F1),它自带的流光不算「条目动画」;
+  // r159:总栏已去掉，收起 / 展开改用承载状态行的工作组自己的头行 [data-work-group-head]（本回合最后一个组）。
+  const groupHead = scope.locator('[data-work-group-head]').last();
+  if ((await groupHead.getAttribute('aria-expanded')) === 'true') await groupHead.click();
+  await expect(groupHead, '前置自证：收起承载状态行的工作组后头行应为 aria-expanded=false').toHaveAttribute('aria-expanded', 'false');
+  // r157:实时状态行挂在最后一个工作组的头行里,组收起后它按设计仍可见,它自带的流光不算「条目动画」;
   // 条目(运行中的小圆环、思考图标的呼吸)收起后必须不可见——承载状态行的组此时只剩头行。
-  expect.soft(await loopingAnimations(strip, { visibleOnly: true, exclude: '[data-live-line]' }), '过程条收起时其中不应有任何可见的运行中动画（承载状态行的头行自带的流光除外）').toEqual([]);
-  await liveHead.click();
-  await expect(liveHead, '再点一次应展开').toHaveAttribute('aria-expanded', 'true');
+  expect.soft(await loopingAnimations(scope, { visibleOnly: true, exclude: '[data-live-line]' }), '过程条收起时其中不应有任何可见的运行中动画（承载状态行的头行自带的流光除外）').toEqual([]);
+  await groupHead.click();
+  await expect(groupHead, '再点一次应展开').toHaveAttribute('aria-expanded', 'true');
 
   // 思考二后面出现正文 → 它不再是最新一块
   touchCtl('g1');
@@ -507,18 +464,20 @@ async function openInterfaceTab(page) {
 }
 const isSelected = (loc) => loc.evaluate((el) => el.getAttribute('aria-checked') === 'true' || el.getAttribute('data-selected') === 'true');
 
-test('L12 主题 →「界面」页：orbit3 / orbit4 在最前，全新存储时 orbit3 选中，转速三项默认「慢」选中', async ({ page }) => {
-  await primeOverlays(page);
+test('L12 主题 →「界面」页：random 第一、orbit3 / orbit4 紧随，全新存储时 random 选中，转速三项默认「慢」选中', async ({ page }) => {
+  await primeOverlays(page, { 'cgui-loading-style': null }); // r159：这条要的是全新存储——撤掉默认预置的 orbit3
   await openApp(page);
   await openInterfaceTab(page);
   const options = page.locator('[data-loading-option]');
   await expect(options.first(), '「界面」页应有加载动画选项 [data-loading-option]').toBeVisible({ timeout: 10_000 });
   const ids = await options.evaluateAll((els) => els.map((e) => e.getAttribute('data-loading-option')));
-  expect(ids.slice(0, 2).sort(), `orbit3 / orbit4 应排在所有选项最前（实际前两项 ${JSON.stringify(ids.slice(0, 2))}）`).toEqual(['orbit3', 'orbit4']);
+  // r159：网格最前面多了「随机」(random)，orbit3 / orbit4 紧随其后。
+  expect(ids[0], `random 应排在所有选项最前（实际第一项 ${JSON.stringify(ids[0])}）`).toBe('random');
+  expect(ids.slice(1, 3).sort(), `orbit3 / orbit4 应紧随 random 排在前面（实际第 2、3 项 ${JSON.stringify(ids.slice(1, 3))}）`).toEqual(['orbit3', 'orbit4']);
   await expect(page.locator('[data-loading-option="orbit3"]'), 'orbit3 的文字应含「三体旋转」').toContainText('三体旋转');
   await expect(page.locator('[data-loading-option="orbit4"]'), 'orbit4 的文字应含「四体旋转」').toContainText('四体旋转');
   await expect(page.locator('[data-loading-option="cli"]'), '既有选项 cli 仍在，文字含「CLI」').toContainText('CLI');
-  expect(await isSelected(page.locator('[data-loading-option="orbit3"]')), '全新存储时 orbit3 应是选中态（aria-checked 或 data-selected）').toBe(true);
+  expect(await isSelected(page.locator('[data-loading-option="random"]')), '全新存储时 random 应是选中态（aria-checked 或 data-selected）').toBe(true);
   expect(await isSelected(page.locator('[data-loading-option="cli"]')), '全新存储时 cli 不应是选中态').toBe(false);
 
   const group = page.locator('[role="radiogroup"]').filter({ has: page.locator('[data-loading-speed]') });

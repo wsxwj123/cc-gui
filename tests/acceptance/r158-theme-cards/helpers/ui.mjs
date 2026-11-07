@@ -147,7 +147,7 @@ export function snapshotInPage() {
     };
     for (const e of texts(tb)) out.samples.push(sample('table', e));
   }
-  // r158 主会话修订（2026-11-07，用户：区分折叠行和正文的一个就是颜色）：折叠行文字（过程条标题 / 工作组头 / 思考折叠行）与正文段落文字各采一个样本，
+  // r158 主会话修订（2026-11-07，用户：区分折叠行和正文的一个就是颜色）：折叠行文字（工作组头 / 思考折叠行）与正文段落文字各采一个样本，
   // 卡头标题已在上面以 'title' 类采过。
   const ownText = (root) => {
     const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -155,7 +155,6 @@ export function snapshotInPage() {
     return null;
   };
   const addFold = (cat, root) => { const e = root && rendered(root) ? ownText(root) : null; if (e) out.samples.push(sample(cat, e)); };
-  addFold('fold-strip', document.querySelector('[data-strip="head"]'));
   addFold('fold-group', document.querySelector('[data-work-group-head]'));
   // 注意排除工作组头本身：组里有思考时，头行的图标也是脑图标。
   addFold('fold-think', [...document.querySelectorAll('[data-work-group-state="open"] button:not([data-work-group-head])')].find((b) => b.querySelector('svg[class*="brain" i]')));
@@ -233,7 +232,7 @@ export function contrastProblems(snap, theme, cats) {
 }
 
 /**
- * B16（r158 主会话修订）：折叠行靠颜色和正文区分。折叠行文字（过程条摘要行标题 / 工作组头 / 思考折叠行 / 卡头标题）
+ * B16（r158 主会话修订）：折叠行靠颜色和正文区分。折叠行文字（工作组头 / 思考折叠行 / 卡头标题；r159 起总栏已去掉，不再采过程条摘要行）
  * 对比度 ≥ 4.5（仍然看得清），且比正文段落文字的对比度低至少 3.0（比正文淡）。
  */
 export function foldColorProblems(snap, theme) {
@@ -247,7 +246,7 @@ export function foldColorProblems(snap, theme) {
   if (!body) return [`${theme.key}：页面上没采到正文段落文字样本（.markdown-content p）`];
   const rb = ratio(body);
   const out = [];
-  for (const [cat, label] of [['fold-strip', '过程条摘要行标题'], ['fold-group', '工作组头文字'], ['fold-think', '思考折叠行文字'], ['title', '卡头标题']]) {
+  for (const [cat, label] of [['fold-group', '工作组头文字'], ['fold-think', '思考折叠行文字'], ['title', '卡头标题']]) {
     const ss = snap.samples.filter((s) => s.cat === cat);
     if (ss.length === 0) { out.push(`${theme.key}：页面上没采到「${label}」样本（对应元素不存在或不可见）`); continue; }
     for (const s of ss) {

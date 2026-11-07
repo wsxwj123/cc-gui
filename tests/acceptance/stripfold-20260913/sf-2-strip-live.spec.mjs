@@ -12,75 +12,11 @@ import {
 } from './helpers/runtime.mjs';
 
 const THINK = '先看一眼现场。';
-const THINK2 = '这一处改完再跑一遍。';
-const ANSWER_STREAM = 'SF-LIVE-A1 流式期的正文。';
 const BASH_INPUT = { command: 'ls -la /tmp/sf-fixture', description: '看现场' };
 
 test.beforeEach(async ({ page }) => {
   resetCtl();
   await primeOverlays(page);
-});
-
-test('SF-201 流式形态：一开始就是展开的条带，摘要行是内容区第一个子元素', async ({ page }) => {
-  writeScenario({
-    events: [{ kind: 'thinking', text: THINK }, { kind: 'tool', name: 'Bash', input: BASH_INPUT, result: 'ok' }, { kind: 'text', text: ANSWER_STREAM }],
-    holdBeforeResult: true,
-  });
-  await openApp(page);
-  const box = await newSessionInFixtureProject(page);
-  await sendMessage(box, 'SF-LIVE-A1 跑一轮');
-
-  const root = stripRootOf(page, ANSWER_STREAM);
-  await expect(root, '流式期就该有一条条带（一开始就是条带，不是收尾才合并）').toHaveCount(1, { timeout: 30_000 });
-  await waitStripState(page, root, 'open');
-  const snap = await stripSnapshot(root);
-  expect(snap.headCount, '流式期恰好一条摘要行').toBe(1);
-  expect(snap.headIndex, '摘要行恒为条带内容区的第一个子元素').toBe(0);
-  expect(snap.headAria).toBe('true');
-  // 〈r152c〉前缀与计数挪进悬停提示（title 属性），折叠条文字只剩标题
-  expect(snap.headTitle.startsWith('思考与工具调用 · '), `悬停提示前缀：${snap.headTitle}`).toBe(true);
-  // 直播期没有 usageCalls → 不显示「N 轮」，也不许出现任何估算的轮数（PLAN §14.6 定死）；轮数读条带根的 data-strip-rounds（空串）
-  expect(snap.rounds ?? '', `直播期 data-strip-rounds 应为空串：${snap.rounds}`).toBe('');
-  expect(/\d+ 轮/.test(snap.headTitle), `直播期悬停提示不得出现「N 轮」：${snap.headTitle}`).toBe(false);
-  // 同一时刻整页只有这一轮 → 只允许一条摘要行
-  expect(await page.locator('[data-strip="head"]').count(), '一轮只有一条摘要行').toBe(1);
-  releaseRound();
-  await waitRoundIdle(page);
-});
-
-test('SF-202 收官：原地收起成一行，补上「N 轮」，段序与正文不重排', async ({ page }) => {
-  writeScenario({
-    events: [
-      { kind: 'thinking', text: THINK }, { kind: 'tool', name: 'Bash', input: BASH_INPUT, result: 'ok' },
-      { kind: 'text', text: 'SF-LIVE-B1 中间那段正文。' },
-      { kind: 'thinking', text: THINK2 }, { kind: 'text', text: 'SF-LIVE-B2 我要收尾了。' },
-    ],
-    holdBeforeResult: true,
-  });
-  await openApp(page);
-  const box = await newSessionInFixtureProject(page);
-  await sendMessage(box, 'SF-LIVE-B 跑一轮');
-
-  const root = stripRootOf(page, 'SF-LIVE-B2 我要收尾了。');
-  await expect(root).toHaveCount(1, { timeout: 30_000 });
-  const live = await stripSnapshot(root);
-  const liveTexts = await root.locator('[data-strip-item="text"]').evaluateAll((els) => els.map((e) => (e.textContent || '').trim()));
-
-  releaseRound();
-  await waitRoundIdle(page);
-  await waitStripState(page, root, 'closed');
-  const done = await stripSnapshot(root);
-
-  expect(done.headIndex, '收官不得搬家：摘要行仍在第一个子元素位置').toBe(live.headIndex);
-  expect(done.kinds, '收官不得改结构：段序与段数不变').toEqual(live.kinds);
-  expect(Math.abs(done.headHeight - live.headHeight), '摘要行高度不变（仍是一行）').toBeLessThanOrEqual(2);
-  const doneTexts = await root.locator('[data-strip-item="text"]').evaluateAll((els) => els.map((e) => (e.textContent || '').trim()));
-  expect(doneTexts, '正文段文字不得因收官而变化').toEqual(liveTexts);
-  // 收官换成持久化轮之后补上「N 轮」（usageCalls 只在落盘后才有）
-  // 〈r152c〉N 轮 M 步 在悬停提示与条带根的 data-strip-rounds 里（折叠条文字只剩标题）
-  expect(/\d+ 轮/.test(done.headTitle), `收官后悬停提示应当出现「N 轮」：${done.headTitle}`).toBe(true);
-  expect(done.rounds, `夹具这一轮 5 次 API 调用：data-strip-rounds=${done.rounds}`).toBe('5');
-  expect(done.headTitle.startsWith('思考与工具调用 · 5 轮 '), `夹具这一轮 5 次 API 调用：${done.headTitle}`).toBe(true);
 });
 
 test('SF-203 用户中断：这一轮必须保持展开（口径 2），且停一会儿还是展开', async ({ page }) => {
@@ -191,30 +127,4 @@ test('SF-206 权限/确认类弹窗不被吞：收起态下发起授权，弹窗
   } else {
     test.info().annotations.push({ type: 'J16-partial', description: `授权弹窗可见且不在消息流里；输入区按钮 = ${JSON.stringify(domButtons)}，"点了能授权"这一半没覆盖` });
   }
-});
-
-test('SF-207 并入把一轮切段时，整轮只有一条摘要行（不是每段一条）', async ({ page }) => {
-  writeScenario({
-    events: [{ kind: 'thinking', text: THINK }, { kind: 'text', text: 'SF-LIVE-G1 切段用例的正文。' }],
-    holdBeforeResult: true,
-  });
-  await openApp(page);
-  const box = await newSessionInFixtureProject(page);
-  await sendMessage(box, 'SF-LIVE-G 第一句');
-  await expect(stripRootOf(page, 'SF-LIVE-G1 切段用例的正文。')).toHaveCount(1, { timeout: 30_000 });
-
-  // 回合进行中再发一条 → 走并入（切段）路径
-  await sendMessage(box, 'SF-LIVE-G 第二句：顺带把这个也改了');
-  await page.waitForTimeout(3_000);
-
-  const heads = await page.locator('[data-strip="head"]').count();
-  const roots = await page.locator('[data-strip-root]').count();
-  const states = await page.locator('[data-strip-root]').evaluateAll((els) => els.map((e) => e.getAttribute('data-strip-state')));
-  console.log('[SF-207] 切段现场：roots =', roots, 'heads =', heads, 'states =', JSON.stringify(states));
-  expect(heads, '一轮只能有一条摘要行（切段时每段一个 TurnBubble，但头行只画在首段）').toBe(1);
-  expect(states.every((s) => s === 'open'), '切段各段都应当展开（forceOpen）').toBe(true);
-  if (roots < 2) {
-    test.skip(true, 'ENVIRONMENT_BLOCKED: 这条隔离实例里没构造出并入切段（第二句没被接纳为并入），"整轮一条"没被真正压到');
-  }
-  releaseRound();
 });

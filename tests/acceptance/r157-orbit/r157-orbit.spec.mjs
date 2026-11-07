@@ -219,7 +219,7 @@ test.describe('2 倍屏', () => {
     expect(p90, `R2 圆度 90 分位 ${f2(p90)} > 1.14（${summary}）`).toBeLessThanOrEqual(1.14);
   });
 
-  test('R3 视觉大小不变：每个点的宽、高始终在 2.0px–5.3px', async ({ page }) => {
+  test('R3 视觉大小：每个点的宽、高始终在 1.45px–2.65px（r159 圆点变小：最前 2.5px / 最远 1.6px，±0.15 取整误差）', async ({ page }) => {
     test.setTimeout(150_000);
     await liveOrbit(page, 'b3', 'R3 一直没返回的命令');
     await setUiZoomOne(page);
@@ -236,8 +236,8 @@ test.describe('2 倍屏', () => {
     const summary = `帧 ${frames}，宽 ${f2(Math.min(...ws))}–${f2(Math.max(...ws))}px，高 ${f2(Math.min(...hs))}–${f2(Math.max(...hs))}px` + `，现场 ${await sceneFacts(page)}`;
     console.log(`[R3] ${summary}`);
     expect(frames, 'R3 采样帧数应 ≥ 40').toBeGreaterThanOrEqual(40);
-    expect(Math.min(...ws, ...hs), `R3 最小宽 / 高 < 2.0px（${summary}）`).toBeGreaterThanOrEqual(2.0);
-    expect(Math.max(...ws, ...hs), `R3 最大宽 / 高 > 5.3px（${summary}）`).toBeLessThanOrEqual(5.3);
+    expect(Math.min(...ws, ...hs), `R3 最小宽 / 高 < 1.45px（${summary}）`).toBeGreaterThanOrEqual(1.45);
+    expect(Math.max(...ws, ...hs), `R3 最大宽 / 高 > 2.65px（${summary}）`).toBeLessThanOrEqual(2.65);
   });
 });
 

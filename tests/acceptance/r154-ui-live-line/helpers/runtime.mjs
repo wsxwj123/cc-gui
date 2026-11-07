@@ -62,15 +62,17 @@ export async function dismissOverlays(page) {
  * 每次导航前预置"使用指引已看过"（一层与被测行为无关的整屏遮罩）。
  * presets：额外要写进 localStorage 的键值（如 `cgui-loading-style`）。addInitScript 按注册顺序在每次导航时执行，
  * 后注册的同名键覆盖先注册的 —— 同一页第二轮想换预置，再调一次即可。
- * 注意：这里**不**预置「过程块自动折叠」，用的是产品默认；需要展开 / 收起的用例自己点头行。
+ * 〈2026-11-07 r159〉默认合并 `cgui-loading-style: 'orbit3'`：产品的默认加载动画从三体旋转改成了「随机」（16 种里抽），
+ * 本套件的判据是按三体旋转写的，所以显式钉住 orbit3；调用者传的 presets 优先；某个键的值传 null = 不写这个键（要"全新存储"的用例用）。
+ * 注意：这里**不**预置「过程块自动折叠」（该开关 r159 起已去掉，旧键不再有任何效果）。
  */
 export async function primeOverlays(page, presets = {}) {
   await page.addInitScript((p) => {
     try {
       localStorage.setItem('cgui-tour-seen', '1');
-      for (const [k, v] of Object.entries(p)) localStorage.setItem(k, v);
+      for (const [k, v] of Object.entries(p)) { if (v !== null) localStorage.setItem(k, v); }
     } catch { /* 忽略 */ }
-  }, presets);
+  }, { 'cgui-loading-style': 'orbit3', ...presets });
 }
 
 export async function openApp(page) {

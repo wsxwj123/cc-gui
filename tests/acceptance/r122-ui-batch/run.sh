@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# r122 界面小改一批(过程块自动折叠开关 / 用量页「价格与来源」精简 / 订阅额度"未登录"提示 / 两家中转站预设),一条命令:
+# r122 界面小改一批(用量页「价格与来源」精简 / 订阅额度"未登录"提示 / 两家中转站预设;原「过程块自动折叠开关」A 组 r159 起已随总栏退役),一条命令:
 #   tests/acceptance/r122-ui-batch/run.sh                 # 全量
-#   tests/acceptance/r122-ui-batch/run.sh -g 'A4'         # 额外参数原样转给 playwright
+#   tests/acceptance/r122-ui-batch/run.sh -g 'B2'         # 额外参数原样转给 playwright
 #   R122_PROBE=1 tests/acceptance/r122-ui-batch/run.sh -g '探路'   # 只跑探路脚本(平时跳过)
 #   R122_PW_CONFIG=tests/acceptance/<旧套件>/playwright.config.mjs tests/acceptance/r122-ui-batch/run.sh -g 'PR-25'
 #        # 用本套件的隔离实例 + dev server 跑别的套件(同时导出 BASE_URL / WORKTREE);旧套件对齐验证用
