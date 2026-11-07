@@ -2,6 +2,7 @@ import React, { useState, useEffect, useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X, PanelRight, RefreshCw } from './Icon.jsx';
 import { copyText } from '../utils/clipboard.js';
+import { ThemedCopyButton } from './ThemedCopyButton.jsx';
 import { useStore } from '../stores/sessionStore.js';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
 import {
@@ -91,7 +92,15 @@ function useDebounced(value, delay) {
   return v;
 }
 
-export function CopyButton({ text }) {
+// r158:tone='dark'(默认)= Artifact 代码视图等深色外壳的现状写法,类名不动;
+// tone='theme' = 跟随主题的 Markdown 代码块,复用终端命令行同款的文字版复制按钮。
+// 分成两个组件而不是在一个组件里早退:早退会让 hooks 调用顺序随 tone 变。
+export function CopyButton({ text, tone = 'dark' }) {
+  if (tone === 'theme') return <ThemedCopyButton text={text} className="tc-copy tc-code-copy" />;
+  return <DarkCopyButton text={text} />;
+}
+
+function DarkCopyButton({ text }) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef(null);
   useEffect(() => () => clearTimeout(timerRef.current), []);
@@ -214,12 +223,21 @@ export function MermaidView({ code }) {
 // 长代码折叠:首 N 行 + "展开剩余/收起"(与 MarkdownRenderer 的 CodeBlock 同一套逻辑,
 // 抽此共用组件避免两处漂移)。className 传 <pre> 的完整样式(含深色底/边框);末行圆角由
 // collapsible 决定:可折叠时底部平接 toggle 按钮,不可折叠时收 rounded-b-lg。
-export function CollapsibleCode({ code, className = '', collapseAt = 5, header = null }) {
+export function CollapsibleCode({ code, className = '', collapseAt = 5, header = null, tone = 'dark' }) {
   const lines = code.split('\n');
   const collapsible = lines.length > collapseAt;
   const [expanded, setExpanded] = useState(false);
   const shown = collapsible && !expanded ? lines.slice(0, collapseAt).join('\n') : code;
   const toggle = () => setExpanded((e) => !e);
+  // r158:tone='theme' 给跟随主题的 Markdown 代码块用,样式类在 index.css 的 .tc-code*;
+  // 只有这一档的 <pre> 带 data-code-block / data-code-tone(验收按它取样,Artifact 的深色
+  // 代码视图不该混进去)。tone='dark'(默认)的类名与 DOM 一字不改。
+  const theme = tone === 'theme';
+  const preClass = theme
+    ? `tc-code ${collapsible ? 'tc-code-folds' : ''} ${className}`
+    : `${className} ${header ? 'flex flex-col overflow-hidden' : ''} ${collapsible ? '' : 'rounded-b-lg'}`;
+  const codeClass = theme ? 'tc-code-body' : (header ? 'block p-4 overflow-x-auto' : undefined);
+  const themeAttrs = theme ? { 'data-code-block': '', 'data-code-tone': 'theme' } : {};
   return (
     <>
       {/* 展开态在代码区顶部再挂一个「收起」:长代码不用翻到最下面才能收(底部那个保留)。
@@ -230,24 +248,28 @@ export function CollapsibleCode({ code, className = '', collapseAt = 5, header =
           <button
             onClick={toggle}
             title="收起代码"
-            className="absolute top-1.5 right-2 z-10 text-[10px] font-mono text-[#9a8e78] hover:text-[#cabba0] bg-[#2b2722]/90 border border-[#3a342b] rounded px-1.5 py-0.5 transition-colors"
+            className={theme
+              ? 'tc-code-up'
+              : 'absolute top-1.5 right-2 z-10 text-[10px] font-mono text-[#9a8e78] hover:text-[#cabba0] bg-[#2b2722]/90 border border-[#3a342b] rounded px-1.5 py-0.5 transition-colors'}
           >
             收起 ▴
           </button>
         )}
         {/* header 有值时「代码块」是同一个 <pre>:工具条(语言条/运行/复制)落在 pre 内部。
             黑盒契约里代码块就是 pre 元素,「运行」「复制」都从 pre 子树找;工具条用 span/button
-            这类 phrasing 元素,放进 <pre> 仍是合法 HTML。代码另起一层带 overflow-x-auto 的
+            这类 phrasing 元素,放进 <pre> 仍是合法 HTML。代码另起一层带横向滚动的
             <code>,保证横向滚动只滚代码、工具条不动。 */}
-        <pre className={`${className} ${header ? 'flex flex-col overflow-hidden' : ''} ${collapsible ? '' : 'rounded-b-lg'}`}>
+        <pre className={preClass} {...themeAttrs}>
           {header}
-          <code className={header ? 'block p-4 overflow-x-auto' : undefined}>{shown}</code>
+          <code className={codeClass}>{shown}</code>
         </pre>
       </div>
       {collapsible && (
         <button
           onClick={toggle}
-          className="w-full text-[11px] font-mono text-[#9a8e78] hover:text-[#cabba0] bg-[#2b2722] border border-[#3a342b] border-t-0 rounded-b-lg py-1 transition-colors"
+          className={theme
+            ? 'tc-code-more'
+            : 'w-full text-[11px] font-mono text-[#9a8e78] hover:text-[#cabba0] bg-[#2b2722] border border-[#3a342b] border-t-0 rounded-b-lg py-1 transition-colors'}
         >
           {expanded ? '收起' : `展开剩余 ${lines.length - collapseAt} 行 ▾`}
         </button>
