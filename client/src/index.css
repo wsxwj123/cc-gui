@@ -114,6 +114,20 @@
      玻璃家族置 transparent 恢复透底。--surface-alpha(界面不透明度)仍生效:
      调低时底色补齐同步变透,全局背景图照常透出。 */
   --glass-underlay: color-mix(in srgb, var(--color-canvas) var(--surface-alpha), transparent);
+  /* r158:工具卡 / 代码块 / diff 的派生色。全部从主题基础色混出来,32 套主题自动跟随;
+     加 cg- 前缀防与皮肤 / 开发者样式重名。不写任何固定色相。 */
+  --cg-line:    color-mix(in srgb, var(--color-ink) 10%, transparent);
+  --cg-line-2:  color-mix(in srgb, var(--color-ink) 17%, transparent);
+  --cg-fill:    color-mix(in srgb, var(--color-ink) 4%,  transparent);
+  --cg-fill-2:  color-mix(in srgb, var(--color-ink) 8%,  transparent);
+  --cg-code-bg: color-mix(in srgb, var(--color-ink) 4.5%, var(--color-canvas));
+  --cg-add:     color-mix(in srgb, var(--color-success) 15%, transparent);
+  --cg-add-2:   color-mix(in srgb, var(--color-success) 34%, transparent);
+  --cg-del:     color-mix(in srgb, var(--color-error) 13%, transparent);
+  --cg-del-2:   color-mix(in srgb, var(--color-error) 32%, transparent);
+  /* 折叠行文字色:比正文(ink-soft)淡,对画布仍 ≥ 4.5;悬停回到正文色 */
+  --cg-fold-fg:       color-mix(in srgb, var(--color-ink-muted) 80%, var(--color-ink-soft));
+  --cg-fold-fg-hover: var(--color-ink-soft);
 }
 
 /* Dark tokens — packed into a mixin selector so they can be triggered by
@@ -2378,3 +2392,94 @@ header [data-tour="remote-control"] {
 @container (max-width: 400px) {
   .cgui-perm-label { display: none; }
 }
+
+/* ═══ r158:工具卡统一骨架(ToolCardShell)═══
+   只用 --cg-* 派生色与主题基础色;状态靠图标色与边:出错红边、已停止虚线边略淡。 */
+.tc-card {
+  border: 1px solid var(--cg-line); border-radius: 10px;
+  background: var(--color-canvas); overflow: hidden; min-width: 0;
+}
+.tc-card[data-status="err"] { border-color: color-mix(in srgb, var(--color-error) 38%, var(--cg-line)); }
+.tc-card[data-status="stopped"] { border-style: dashed; opacity: .86; }
+.tc-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
+  padding: 7px 11px; border: 0; background: transparent; text-align: left;
+  cursor: pointer; color: var(--cg-fold-fg); transition: background-color .15s, color .15s;
+}
+.tc-head:hover { background: var(--cg-fill); color: var(--cg-fold-fg-hover); }
+.tc-head:focus-visible { outline: 2px solid var(--color-accent-muted); outline-offset: -2px; }
+.tc-icon { flex: none; width: 14px; height: 14px; display: grid; place-items: center; color: var(--color-ink-faint); }
+.tc-card[data-status="ok"] .tc-icon { color: color-mix(in srgb, var(--color-success) 78%, var(--color-ink-faint)); }
+.tc-card[data-status="err"] .tc-icon { color: var(--color-error); }
+.tc-name {
+  flex: none; font: 500 10.5px/1 var(--font-mono); padding: 3px 6px; border-radius: 5px;
+  background: var(--cg-fill-2); color: inherit; white-space: nowrap;
+}
+.tc-title {
+  flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 12.5px; color: inherit;
+}
+.tc-title.tc-mono { font-family: var(--font-mono); font-size: 12px; }
+.tc-meta {
+  flex: none; display: flex; align-items: center; gap: 8px; white-space: nowrap;
+  font: 11px/1 var(--font-mono); color: inherit;
+}
+.tc-meta:empty { display: none; }
+.tc-add { color: var(--color-success); font-weight: 600; }
+.tc-del { color: var(--color-error); font-weight: 600; }
+.tc-body { padding: 0 11px 11px; min-width: 0; }
+.tc-sub { font-size: 10.5px; color: var(--color-ink-muted); margin-bottom: 6px; }
+.tc-block {
+  margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--cg-code-bg);
+  border: 1px solid var(--cg-line); font: 11.5px/1.6 var(--font-mono);
+  color: var(--color-ink-soft); overflow: auto;
+}
+.tc-block-err { border-color: color-mix(in srgb, var(--color-error) 38%, var(--cg-line)); color: var(--color-error); }
+.tc-label { font-size: 9.5px; letter-spacing: .06em; color: var(--color-ink-muted); margin-bottom: 4px; }
+
+/* 终端块(Bash) */
+.tc-term { border-radius: 9px; background: var(--cg-code-bg); border: 1px solid var(--cg-line); overflow: hidden; min-width: 0; }
+.tc-term-cmd {
+  display: flex; gap: 9px; align-items: flex-start; padding: 8px 10px;
+  font: 12px/1.6 var(--font-mono); border-bottom: 1px solid var(--cg-line); min-width: 0;
+}
+.tc-term-cmd:last-child { border-bottom: 0; }
+.tc-prompt { color: var(--color-ink-muted); user-select: none; flex: none; }
+.tc-term-cmd code { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-all; color: var(--color-ink-soft); }
+.tc-tok-cmd { color: var(--color-ink); font-weight: 600; }
+.tc-tok-arg { color: var(--color-ink-soft); }
+.tc-tok-num { color: var(--color-accent); }
+.tc-term-out {
+  margin: 0; padding: 8px 10px; font: 11.5px/1.65 var(--font-mono); color: var(--color-ink-soft);
+  white-space: pre-wrap; word-break: break-word; max-height: 210px; overflow: auto;
+}
+.tc-term-foot {
+  display: flex; gap: 14px; padding: 5px 10px; border-top: 1px solid var(--cg-line);
+  font: 11px/1.3 var(--font-mono); color: var(--color-ink-muted);
+}
+.tc-term-foot[data-ok="false"] { color: var(--color-error); }
+.tc-copy {
+  margin-left: auto; flex: none; border: 0; background: transparent; color: var(--color-ink-muted);
+  font: 11px/1.4 var(--font-body, inherit); padding: 1px 7px; border-radius: 6px; cursor: pointer;
+}
+.tc-copy:hover { background: var(--cg-fill-2); color: var(--color-ink); }
+.tc-copy[data-copied="true"] { color: var(--color-success); }
+
+/* Diff(DiffViewer:Edit 卡、文件改动面板、界面生成的 diff 共用) */
+.tc-diff { border: 1px solid var(--cg-line); border-radius: 9px; overflow: hidden; font: 11.5px/1.65 var(--font-mono); min-width: 0; }
+.tc-diff-file {
+  display: flex; align-items: center; gap: 10px; padding: 5px 10px; min-width: 0;
+  background: var(--cg-fill); border-bottom: 1px solid var(--cg-line); color: var(--color-ink-muted);
+}
+.tc-diff-file > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-diff-stat { margin-left: auto; flex: none; display: flex; gap: 6px; }
+.tc-diff-rows { overflow: auto; }
+.tc-dl { display: grid; grid-template-columns: 18px 1fr; align-items: start; color: var(--color-ink-soft); min-width: max-content; }
+.tc-dl[data-diff-line="add"] { background: var(--cg-add); }
+.tc-dl[data-diff-line="del"] { background: var(--cg-del); }
+.tc-sg { text-align: center; color: var(--color-ink-muted); user-select: none; }
+.tc-dl[data-diff-line="add"] .tc-sg { color: var(--color-success); }
+.tc-dl[data-diff-line="del"] .tc-sg { color: var(--color-error); }
+.tc-tx { padding-right: 10px; white-space: pre; }
+.tc-wd-add { background: var(--cg-add-2); color: inherit; border-radius: 3px; }
+.tc-wd-del { background: var(--cg-del-2); color: inherit; border-radius: 3px; }
