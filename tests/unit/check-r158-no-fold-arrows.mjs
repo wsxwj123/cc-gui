@@ -8,6 +8,7 @@
 //   - 右侧各面板(子代理监控 / 待办 / 目标条 / MCP 等)的展开箭头
 //   - 「回到底部」按钮
 //   - 代码块里的文字按钮「展开剩余 N 行 ▾」「收起 ▴」(CodeBlock / CollapsibleCode / ArtifactPreview)
+//   - PermissionPrompt.jsx 里权限 / 计划 / 提问卡的「折叠正文」图标按钮与「其他参数 ▾」(待决卡片,不是聊天折叠行)
 // 所以 App.jsx 只截后台任务通知横幅 TaskNoticeRow 那一段来查。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -28,6 +29,12 @@ const FILES = [
   'client/src/components/ToolCallCard.jsx',
   'client/src/components/tools/TaskCard.jsx',
   'client/src/components/tools/WorkflowCard.jsx',
+  'client/src/components/tools/ToolCardShell.jsx',
+  'client/src/components/tools/BashCard.jsx',
+  'client/src/components/tools/ReadCard.jsx',
+  'client/src/components/tools/EditDiffCard.jsx',
+  'client/src/components/tools/GrepGlobCard.jsx',
+  'client/src/components/tools/WebCard.jsx',
   'client/src/components/XsNoticeRow.jsx',
 ];
 
