@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { orbitTicker } from '../utils/orbitTicker.js';
 import { ORBIT_VARIANTS, variantOf } from '../utils/orbitVariants.js';
-import { DEFAULT_LOADING_STYLE } from '../utils/loadingPrefs.js';
+import { DEFAULT_LOADING_STYLE, RANDOM_LOADING_STYLE, pickRandomStyle, shouldReroll } from '../utils/loadingPrefs.js';
 
 // 加载指示件(spinner / 耗时),从 App.jsx 抽出共享:底部状态行 LiveStatusLine(主会话与
 // 子代理视图共用)与主题「界面」页预览用同一套视觉物。状态词见 utils/liveStatus.js。
@@ -61,11 +61,54 @@ export function Orbit({ n = 3, variant = null, size = 20, markProps = null }) {
   );
 }
 
-export function LoadingMark({ size = 20, variant = null, markProps = null }) {
+// r159:随机模式最近一次抽到的具体 id(所有实例共用),新实例挂载时避开它,相邻两次不重样。
+let lastPickedRandomId = null;
+function pickAndRemember(prevId) {
+  const id = pickRandomStyle(prevId);
+  lastPickedRandomId = id;
+  return id;
+}
+
+// phase / rollKey:只有生成中的状态行传。样式为 random 时,挂载时抽一个具体动画;
+// 之后 phase / rollKey 变化按 shouldReroll 决定是否重抽(挂载那次算计时起点)。
+export function LoadingMark({ size = 20, variant = null, markProps = null, phase = null, rollKey = null }) {
   const chosen = useStore((s) => s.loadingStyle) || DEFAULT_LOADING_STYLE;
   const style = variant || chosen;
-  // 每个分支的最外层都带 data-style = 当前样式 id,供外层识别
-  const mp = { ...(markProps || {}), 'data-style': style };
+  const isRandom = style === RANDOM_LOADING_STYLE;
+  const [randomId, setRandomId] = useState(() => (isRandom ? pickAndRemember(lastPickedRandomId) : null));
+  const rollRef = useRef({ phase, key: rollKey, lastRollMs: isRandom ? Date.now() : null });
+  useEffect(() => {
+    const roll = rollRef.current;
+    const prevPhase = roll.phase;
+    const prevKey = roll.key;
+    roll.phase = phase;
+    roll.key = rollKey;
+    if (!isRandom) {
+      // 离开随机:清掉旧抽取,下次切回随机时重新抽
+      if (randomId != null) setRandomId(null);
+      roll.lastRollMs = null;
+      return;
+    }
+    const nowMs = Date.now();
+    if (randomId == null) {
+      // 设置里从别的样式切到随机
+      setRandomId(pickAndRemember(lastPickedRandomId));
+      roll.lastRollMs = nowMs;
+      return;
+    }
+    if (shouldReroll({ prevPhase, prevKey, phase, key: rollKey, nowMs, lastRollMs: roll.lastRollMs })) {
+      setRandomId(pickAndRemember(randomId));
+      roll.lastRollMs = nowMs;
+    }
+  }, [isRandom, phase, rollKey, randomId]);
+  // 刚切到随机、effect 还没抽时沿用最近一次抽到的 id,避免空一帧
+  const shown = isRandom ? (randomId || lastPickedRandomId || 'orbit3') : style;
+  // 每个分支的最外层都带 data-style = 当前显示的具体样式 id,供外层识别;随机时另带 data-loading-mode
+  const mp = { ...(markProps || {}), 'data-style': shown };
+  if (isRandom) {
+    mp['data-loading-mode'] = RANDOM_LOADING_STYLE;
+    return <Orbit key={shown} variant={shown} size={size} markProps={mp} />;
+  }
   if (variantOf(style)) return <Orbit variant={style} size={size} markProps={mp} />;
   if (style === 'cli') return <CliSpinner size={size} markProps={mp} />;
   return (
