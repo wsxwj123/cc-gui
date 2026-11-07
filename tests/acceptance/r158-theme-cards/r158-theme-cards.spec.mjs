@@ -380,6 +380,10 @@ test('B14 窄屏不撑破：375px 下页面无横向滚动，长代码行 / 长�
   await scrollToEnd(page);
   await page.setViewportSize(NARROW);
   await page.waitForTimeout(500);
+  // r158 主会话修订：应用从桌面宽度缩到手机宽度会重建界面，工作组与工具卡的展开状态随之丢失（现状行为，与本任务无关），缩窄后要重新展开。
+  await expandAllGroups(page);
+  await expandAllCards(page);
+  await scrollToEnd(page);
   const [sw, vw] = await pageWidths(page);
   if (sw > vw) problems.push(`主夹具：documentElement.scrollWidth ${sw} > 视口宽 ${vw}`);
   const sh = blockOf(page, 'bash');
@@ -398,6 +402,8 @@ test('B14 窄屏不撑破：375px 下页面无横向滚动，长代码行 / 长�
   await expandAllCards(page);
   await page.setViewportSize(NARROW);
   await page.waitForTimeout(500);
+  await expandAllGroups(page);
+  await expandAllCards(page);
   const [sw2, vw2] = await pageWidths(page);
   if (sw2 > vw2) problems.push(`附加夹具：documentElement.scrollWidth ${sw2} > 视口宽 ${vw2}`);
   const long = page.locator('[data-tool-card]').nth(2);
