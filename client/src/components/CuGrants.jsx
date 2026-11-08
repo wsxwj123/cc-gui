@@ -51,7 +51,7 @@ const FG_DESC_SUFFIX = '「允许前台操控」与上面的应用授权相互�
 // 讲 Dock 图标、讲 bundleId 的措辞在 Windows 上是错的;`bundleId` 那一份**逐字不变**(mac 现状)。
 const WORDS = {
   bundleId: { desc: DESC, empty: EMPTY, appsNote: APPS_NOTE, appsEmpty: APPS_EMPTY, appsUnavailable: APPS_UNAVAILABLE,
-    searchPlaceholder: SEARCH_PLACEHOLDER, manualTitle: MANUAL_TITLE,
+    searchPlaceholder: SEARCH_PLACEHOLDER, manualTitle: MANUAL_TITLE, manualPlaceholder: 'com.example.app',
     resultMissing: RESULT_MISSING, resultUnverified: RESULT_UNVERIFIED },
   exePath: {
     desc: '只有列在下面的应用才能被查询窗口、点击或输入。授权按 exe 路径逐个生效，撤销立即生效。',
@@ -61,6 +61,7 @@ const WORDS = {
     appsUnavailable: '运行时尚未就绪（点卡片上的「准备环境」完成准备）；可直接手动填写 exe 路径。',
     searchPlaceholder: '按名称或路径筛选',
     manualTitle: '手动填写 exe 路径',
+    manualPlaceholder: 'C:\\Program Files\\Example\\app.exe',
     resultMissing: '未在系统中找到该路径对应的可执行文件（可能路径有误）。',
     resultUnverified: '未校验：请先确认 exe 路径与目标应用一致。',
   },
@@ -324,7 +325,7 @@ export function CuGrants({ runtimeReady, appIdKind = 'bundleId' }) {
             <div className="flex items-center gap-1.5 mt-1">
               <input data-testid="cu-manual-input" value={manualId}
                 onChange={(e) => { setManualId(e.target.value); setCheck(null); setCheckErr(''); }}
-                placeholder="com.example.app"
+                placeholder={W.manualPlaceholder}
                 className="flex-1 min-w-0 bg-canvas border border-canvas-deep rounded-md px-2 py-1 text-[10.5px] text-ink font-mono outline-none focus:border-accent" />
               <button type="button" data-testid="cu-manual-check" onClick={checkManual} disabled={checking || !manualId.trim()}
                 className="px-2 py-1 rounded-md text-[10px] text-ink-muted hover:bg-canvas border border-canvas-deep font-body transition-colors disabled:opacity-50 shrink-0">
