@@ -12,7 +12,7 @@
 - **Windows 上电脑操控的「禁止操控名单」有一条已知限制**：名单在 Windows 上按 exe 文件名匹配，而商店风格应用（「设置」「计算器」等）的窗口由 `ApplicationFrameHost.exe` 托管，经典「控制面板」由 `explorer.exe` 托管，名单对这两类窗口可能不生效。请不要授权 `ApplicationFrameHost.exe` 或 `explorer.exe`。这条限制已写进「桌面操控」文档，授权面板里也加了提醒，等 Windows 真机确认后再改；macOS 不受影响。
 
 ### 优化
-- 「桌面操控」文档补了 Windows 上撤销授权的写法（用面板，或把请求体写进文件再用 `curl.exe` 发）；授权面板里「手动填写」输入框的示例文字，在 Windows 上改成 exe 路径的样子；Windows 的应用授权列表上方加了一句提示：不要授权 `ApplicationFrameHost.exe` 与 `explorer.exe`。
+- 「桌面操控」文档补了 Windows 上撤销授权的写法（用面板，或把请求体写进文件再用 `curl.exe` 发）；授权面板里「手动填写」输入框的示例文字，在 Windows 上改成 exe 路径的样子；Windows 上「添加应用」展开后的候选列表上方加了一句提示：不要授权 `ApplicationFrameHost.exe` 与 `explorer.exe`。
 
 ## 0.2.453 (2026-11-07)
 

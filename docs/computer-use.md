@@ -52,7 +52,7 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 curl.exe -s -X POST http://127.0.0.1:6677/api/computer-use/grants -H "content-type: application/json" -d "@revoke.json"
 ```
 
-`revoke.json` 的内容形如 `{"bundleId":"C:\\Windows\\System32\\notepad.exe","granted":false}`——Windows 上 `bundleId` 字段放 exe 绝对路径，JSON 里的反斜杠要写成 `\\`。`revoke.json` 必须是纯 ASCII 或不带 BOM 的 UTF-8 文本：PowerShell 5.1 用 `>`、`echo` 重定向写出的是 UTF-16，服务端读不了；cmd 的 `echo` 遇到中文路径会按系统代码页写出，也对不上；带 BOM 同样会解析失败。路径含中文或拿不准时，直接在面板里撤销。
+`revoke.json` 的内容形如 `{"bundleId":"C:\\Windows\\System32\\notepad.exe","granted":false}`——Windows 上 `bundleId` 字段放 exe 绝对路径，JSON 里的反斜杠要写成 `\\`。`revoke.json` 必须是纯 ASCII 或 UTF-8 文本（推荐不带 BOM）：PowerShell 5.1 用 `>`、`echo` 重定向写出的是 UTF-16，服务端读不了；cmd 的 `echo` 遇到中文路径会按系统代码页写出，也对不上。路径含中文或拿不准时，直接在面板里撤销。
 
 命令行发的新增授权（`granted` 不为 `false` 的应用、`screenScope:true`、`foreground:true`）会被拒：403 `CU_GRANT_FORBIDDEN`，授权表不变；一个请求里同时带撤销和新增时整体拒绝，撤销部分也不生效（`granted:false` 与 `foreground:true` 写在同一个请求里属于自相矛盾，400 `CU_INVALID_ARGUMENT`）。撤销方向不设门槛，出问题时可以随时从命令行撤权。
 

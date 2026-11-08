@@ -300,7 +300,7 @@ npm run tauri:build
 
 **优化**
 
-- 「桌面操控」文档补了 Windows 上撤销授权的写法（用面板，或把请求体写进文件再用 `curl.exe` 发）；授权面板里「手动填写」输入框的示例文字，在 Windows 上改成 exe 路径的样子；Windows 的应用授权列表上方加了一句提示：不要授权 `ApplicationFrameHost.exe` 与 `explorer.exe`。
+- 「桌面操控」文档补了 Windows 上撤销授权的写法（用面板，或把请求体写进文件再用 `curl.exe` 发）；授权面板里「手动填写」输入框的示例文字，在 Windows 上改成 exe 路径的样子；Windows 上「添加应用」展开后的候选列表上方加了一句提示：不要授权 `ApplicationFrameHost.exe` 与 `explorer.exe`。
 
 </details>
 
