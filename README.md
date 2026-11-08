@@ -294,7 +294,7 @@ npm run tauri:build
 
 <details><summary>Windows 上电脑操控的「禁止操控名单」有一条已知限制</summary>
 
-名单在 Windows 上按 exe 文件名匹配，而商店风格应用（「设置」「计算器」等）的窗口由 `ApplicationFrameHost.exe` 托管，经典「控制面板」由 `explorer.exe` 托管，名单对这两类窗口可能不生效。请不要授权 `ApplicationFrameHost.exe` 或 `explorer.exe`。这条限制已写进「桌面操控」文档和授权面板，等 Windows 真机确认后再改；macOS 不受影响。
+名单在 Windows 上按 exe 文件名匹配，而商店风格应用（「设置」「计算器」等）的窗口由 `ApplicationFrameHost.exe` 托管，经典「控制面板」由 `explorer.exe` 托管，名单对这两类窗口可能不生效。请不要授权 `ApplicationFrameHost.exe` 或 `explorer.exe`。这条限制已写进「桌面操控」文档，授权面板里也加了提醒，等 Windows 真机确认后再改；macOS 不受影响。
 
 </details>
 

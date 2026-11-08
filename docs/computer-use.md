@@ -52,7 +52,7 @@ curl -s -X POST localhost:6677/api/computer-use/grants \
 curl.exe -s -X POST http://127.0.0.1:6677/api/computer-use/grants -H "content-type: application/json" -d "@revoke.json"
 ```
 
-`revoke.json` 的内容形如 `{"bundleId":"C:\\Windows\\System32\\notepad.exe","granted":false}`——Windows 上 `bundleId` 字段放 exe 绝对路径，JSON 里的反斜杠要写成 `\\`。
+`revoke.json` 的内容形如 `{"bundleId":"C:\\Windows\\System32\\notepad.exe","granted":false}`——Windows 上 `bundleId` 字段放 exe 绝对路径，JSON 里的反斜杠要写成 `\\`。`revoke.json` 必须是纯 ASCII 或不带 BOM 的 UTF-8 文本：PowerShell 5.1 用 `>`、`echo` 重定向写出的是 UTF-16，服务端读不了；cmd 的 `echo` 遇到中文路径会按系统代码页写出，也对不上；带 BOM 同样会解析失败。路径含中文或拿不准时，直接在面板里撤销。
 
 命令行发的新增授权（`granted` 不为 `false` 的应用、`screenScope:true`、`foreground:true`）会被拒：403 `CU_GRANT_FORBIDDEN`，授权表不变；一个请求里同时带撤销和新增时整体拒绝，撤销部分也不生效（`granted:false` 与 `foreground:true` 写在同一个请求里属于自相矛盾，400 `CU_INVALID_ARGUMENT`）。撤销方向不设门槛，出问题时可以随时从命令行撤权。
 
@@ -73,9 +73,9 @@ curl.exe -s -X POST http://127.0.0.1:6677/api/computer-use/grants -H "content-ty
 
 - 这是**已知高危的下限,不是边界,名单不穷举**：不在名单里的应用不代表安全（见「已知边界」里的残余风险）。
 - 旧版授权过这些应用的，本版起不再生效；服务启动时会从授权表里移除这些条目，并在服务日志里记一行。
-- Windows 上按 exe 文件名（去掉 `.exe`、不区分大小写、`/` 与 `\` 等价）匹配同样四类，内置名单例如：终端类 `cmd`、`powershell`、`pwsh`、`windowsterminal`、`conhost`；CC-GUI 自身 `claude-gui`、`cc-gui`；系统设置与管理工具 `systemsettings`、`control`、`regedit`、`mmc`、`taskmgr`；密码管理器 `1password`、`bitwarden`、`keepassxc`。这些都未在 Windows 真机验证，CC-GUI 自身的 exe 文件名也没有在 Windows 产物上实测。
-- **Windows 上的已知限制：名单按 exe 文件名判，对「设置」「控制面板」这类窗口可能不生效。** Windows 商店风格（UWP / WinUI）应用的顶层窗口由 `ApplicationFrameHost.exe` 托管（「设置」「计算器」等），`window_list` 报出的身份可能是它，而不是名单里的 `systemsettings`；经典「控制面板」的窗口由 `explorer.exe` 托管，同理。所以在 Windows 上，本节开头的「无论是否授权都不能被操控」**不保证覆盖这两类窗口**。
-- **不要在 Windows 上授权 `ApplicationFrameHost.exe` 或 `explorer.exe`**：授权其中任何一个，等于放开它托管的全部窗口，包括「设置」和「控制面板」。需要操控某个商店风格应用时，先用 `window_list` 看它实际报的身份串，再决定要不要授权。待 Windows 真机确认「设置」窗口的身份串；若确实是 `ApplicationFrameHost.exe`，名单需要改成按窗口真实所属进程判断（待办）。
+- Windows 上按 exe 文件名（去掉 `.exe`、不区分大小写、`/` 与 `\` 等价）匹配同样四类，内置名单例如：终端类 `cmd`、`powershell`、`pwsh`、`windowsterminal`、`conhost`；CC-GUI 自身 `claude-gui`、`cc-gui`；系统设置与脚本自动化工具 `systemsettings`、`control`、`regedit`、`mmc`、`taskmgr`；密码管理器 `1password`、`bitwarden`、`keepassxc`。这些都未在 Windows 真机验证，CC-GUI 自身的 exe 文件名也没有在 Windows 产物上实测。
+- **Windows 上的已知限制：名单按 exe 文件名判，对「设置」「控制面板」这类窗口可能不生效。** Windows 商店风格（UWP）应用的顶层窗口由 `ApplicationFrameHost.exe` 托管（「设置」「计算器」等），按窗口取到的应用身份（授权与 `window_list` 用的就是这个）可能是它，而不是名单里的 `systemsettings`；经典「控制面板」的窗口由 `explorer.exe` 托管，同理。所以在 Windows 上，本节开头的「无论是否授权都不能被操控」**不保证覆盖这两类窗口**。
+- **不要在 Windows 上授权 `ApplicationFrameHost.exe` 或 `explorer.exe`**：授权 `ApplicationFrameHost.exe`，等于放开它托管的全部商店风格应用窗口（包括「设置」）；授权 `explorer.exe`，等于放开资源管理器窗口和经典「控制面板」。需要操控某个商店风格应用时，先在面板「添加应用」的候选列表里看它显示的 exe 路径（`window_list` 只列已授权应用，授权前看不到），再决定要不要授权。待 Windows 真机确认「设置」在候选列表里显示的路径；若确实是 `ApplicationFrameHost.exe`，名单需要改成按窗口真实所属进程判断（待办）。
 - 名单判定的对象是动作声明的目标与该目标的真实窗口。Windows 上显式 `foreground:true` 的全局投递，在取不到前台窗口信息时不做前台核验（见下文「Windows 的一条放宽」），事件会落到当时实际处于前台的窗口，该窗口可能是终端等名单内的应用；这种情况不在名单的防线内。
 
 ## 工具清单（模型可见）
