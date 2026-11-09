@@ -2,11 +2,14 @@
 // r154 R3:三体 / 四体旋转的摆位公式 orbitPlacement 与共享动画循环 createOrbitTicker。
 //
 // 锁的事:
-//   O1 n=3/4 一整个周期每帧结果有限,scale(对 18px 底座的 transform 缩放)∈ [1.6/18, 2.5/18]
-//      (r159 新尺寸:最远 1.6px、最近 2.5px),opacity ∈ [0.72, 1]。
-//   O2 仰俯角最大那一帧(th≈π/2),三个点构成钝角三角形,最大内角 95°–110°(设计稿约 100°)。
+//   O1 n=3/4 一整个周期每帧结果有限,scale(对 18px 底座的 transform 缩放)∈ [1.8/18, 2.3/18]
+//      (14px 基准指示器上最远 1.8px、最近 2.3px;r161 把前后差从 1.6 / 2.5 收窄),opacity ∈ [0.72, 1]。
+//   O2 仰俯角最大那一帧(th≈π/2),三个点构成钝角三角形,最大内角 95°–110°(设计稿约 100°);
+//      减弱动画的静止帧 STILL_T(0.85)恰在这一刻。
 //   O3 spin 随时间单调递增,一个周期(3.4 秒)正好两圈。
 //   O4 过水平线那一帧(th=0),三个点共线;y 的差只来自轻微侧倾(roll),近似相等。
+//   O7 r161 变速方向:展开(th=±π/2)时相位走得最快、排成一线(th=0、π)时最慢,快慢之比 ≥ 3;
+//      一整圈里最快的时刻仰俯角接近最大、最慢的时刻仰俯角接近 0。
 //   O5 ticker:首个登记启动、最后一个注销停止、hidden 暂停与恢复、reduced 只摆一次静止帧、
 //      转速 0.7 / 1 / 1.4 生效(同样帧数 fast 位移大于 normal 大于 slow)。
 //
@@ -44,7 +47,7 @@ function maxInteriorAngleDeg(p) {
   return Math.max(ang(p[0], p[1], p[2]), ang(p[1], p[2], p[0]), ang(p[2], p[0], p[1]));
 }
 
-await report.check('O1', '一整个周期每帧有限,scale ∈ [1.6/18, 2.5/18],opacity ∈ [0.72,1]', 'red', () => {
+await report.check('O1', '一整个周期每帧有限,scale ∈ [1.8/18, 2.3/18],opacity ∈ [0.72,1]', 'red', () => {
   for (const n of [3, 4]) {
     for (let i = 0; i <= 600; i++) {
       const t = (PERIOD * i) / 600;
@@ -52,7 +55,7 @@ await report.check('O1', '一整个周期每帧有限,scale ∈ [1.6/18, 2.5/18]
       assert.equal(pts.length, n);
       for (const p of pts) {
         for (const k of ['x', 'y', 'scale', 'opacity', 'z']) assert.ok(Number.isFinite(p[k]), `n=${n} t=${t} ${k}=${p[k]}`);
-        assert.ok(p.scale >= 1.6 / 18 - EPS && p.scale <= 2.5 / 18 + EPS, `scale ${p.scale}`);
+        assert.ok(p.scale >= 1.8 / 18 - EPS && p.scale <= 2.3 / 18 + EPS, `scale ${p.scale}`);
         assert.ok(p.opacity >= 0.72 - EPS && p.opacity <= 1 + EPS, `opacity ${p.opacity}`);
         assert.ok(Math.hypot(p.x, p.y) <= 1 + EPS, '点应在单位圆内');
         assert.ok(Number.isInteger(p.z) && p.z >= 0 && p.z <= 20);
@@ -69,9 +72,10 @@ await report.check('O2', '仰俯角最大那一帧 n=3 是钝角三角形,最大
     const deg = maxInteriorAngleDeg(orbitPlacement(3, t));
     assert.ok(deg >= 95 && deg <= 110, `th=${th.toFixed(3)} 最大内角 ${deg.toFixed(1)}°`);
   }
-  // 静止帧 t=0.9 也落在钝角三角形附近
+  // 静止帧 STILL_T(0.85 秒 = 3.4 / 4)正好是仰俯角最大那一刻:th = π/2,钝角三角形
+  assert.ok(Math.abs(orbitAngles(STILL_T).th - Math.PI / 2) < 1e-9, `静止帧 th=${orbitAngles(STILL_T).th}`);
   const still = maxInteriorAngleDeg(orbitPlacement(3, STILL_T));
-  assert.ok(still > 90, `静止帧最大内角 ${still.toFixed(1)}°`);
+  assert.ok(still >= 95 && still <= 110, `静止帧最大内角 ${still.toFixed(1)}°`);
 });
 
 await report.check('O3', 'spin 单调递增,一个周期 3.4 秒正好两圈', 'red', () => {
@@ -96,6 +100,26 @@ await report.check('O4', '过水平线那一帧(th=0)三点共线、y 近似相�
   // 对比仰俯最大帧,y 的差明显更大
   const q = orbitPlacement(3, tForTh(Math.PI / 2)).map((r) => r.y);
   assert.ok(Math.max(...q) - Math.min(...q) > 0.5);
+});
+
+await report.check('O7', 'r161 变速方向:展开时相位走得最快、排成一线时最慢(快慢之比 ≥ 3)', 'red', () => {
+  const rate = (t) => { const h = 1e-4; return (orbitAngles(t + h).th - orbitAngles(t - h).th) / (2 * h); }; // dth/dt
+  const mean = (2 * Math.PI) / PERIOD;
+  const open = [Math.PI / 2, (3 * Math.PI) / 2, -Math.PI / 2].map((th) => rate(tForTh(th)));
+  const line = [0, Math.PI].map((th) => rate(tForTh(th)));
+  assert.ok(Math.min(...open) > 1.5 * mean, `展开时相位速度 ${(Math.min(...open) / mean).toFixed(2)} 倍均速,应 > 1.5`);
+  assert.ok(Math.max(...line) < 0.5 * mean, `排成一线时相位速度 ${(Math.max(...line) / mean).toFixed(2)} 倍均速,应 < 0.5`);
+  assert.ok(Math.min(...open) / Math.max(...line) >= 3, `快慢之比 ${(Math.min(...open) / Math.max(...line)).toFixed(2)} 应 ≥ 3`);
+  // 整圈扫一遍:最快的时刻仰俯角接近最大,最慢的时刻仰俯角接近 0
+  let fastT = 0, slowT = 0, fastV = -Infinity, slowV = Infinity;
+  for (let i = 0; i < 3400; i++) {
+    const t = i / 1000 + 0.0005, v = rate(t);
+    if (v > fastV) { fastV = v; fastT = t; }
+    if (v < slowV) { slowV = v; slowT = t; }
+  }
+  const elevAt = (t) => Math.abs(orbitAngles(t).elev);
+  assert.ok(elevAt(fastT) > 0.49, `最快那一刻仰俯角 ${elevAt(fastT).toFixed(3)} 应接近最大 0.5`);
+  assert.ok(elevAt(slowT) < 0.02, `最慢那一刻仰俯角 ${elevAt(slowT).toFixed(3)} 应接近 0(排成一线)`);
 });
 
 // ---- 假环境 ----
@@ -191,7 +215,7 @@ await report.check('O5b', 'ticker:hidden 暂停,可见时恢复', 'red', () => {
   off(); offB();
 });
 
-await report.check('O5c', 'ticker:reduced 只摆一次静止帧(t=0.9),不跑循环', 'red', () => {
+await report.check('O5c', 'ticker:reduced 只摆一次静止帧(STILL_T),不跑循环', 'red', () => {
   const env = fakeEnv();
   env.isReduced = true;
   const tk = createOrbitTicker(env);

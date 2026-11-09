@@ -28,15 +28,16 @@ export const ORBITS = [
 ];
 export const ORBIT_IDS = ORBITS.map((o) => o.id);
 
-/** 「圆点大小约定」(r161 整体放大):动画以 14px 指示器为基准(最前 2.5px / 最远 1.6px),指示器宽 w 时整体乘 k = w / 14。
- *  宽高读数全程 ∈ [1.6k − 0.15, 2.5k + 0.15];12 秒窗口里最大 ≥ 2.5k − 0.3、最小 ≤ 1.6k + 0.35(偏移与放大前一致,没放松)。
+/** 「圆点大小约定」(r161 整体放大 + 收窄远近差):动画以 14px 指示器为基准(最前 2.3px / 最远 1.8px;r161 之前是 2.5 / 1.6),指示器宽 w 时整体乘 k = w / 14。
+ *  宽高读数全程 ∈ [1.8k − 0.15, 2.3k + 0.15];12 秒窗口里最大 ≥ 2.3k − 0.17、最小 ≤ 1.8k + 0.2
+ *  (k = 20/14 时折成的深度判据与收窄前几乎相同:最大要走到「前后差」的 76% 以上、最小要走到 28% 以下;收窄前是 77% / 27%,两头各差不到 1%)。
  *  口径是界面缩放 1.0;宽度本身由用例读指示器根元素的 getBoundingClientRect 自证。 */
 export const REF_PX = 14;
 export const LIVE_PX = 20; // 状态行指示器的宽(须与应用里 LIVE_INDICATOR_PX 一致)
 export const GRID_PX = 20; // 设置网格里指示器的宽
 export const dotBounds = (w) => {
   const k = w / REF_PX;
-  return { k, lo: 1.6 * k - 0.15, hi: 2.5 * k + 0.15, maxAtLeast: 2.5 * k - 0.3, minAtMost: 1.6 * k + 0.35 };
+  return { k, lo: 1.8 * k - 0.15, hi: 2.3 * k + 0.15, maxAtLeast: 2.3 * k - 0.17, minAtMost: 1.8 * k + 0.2 };
 };
 
 export const IND = '[data-live-line] [data-live-indicator]';

@@ -1,8 +1,8 @@
 // r159:16 种旋转加载动画的摆位公式(纯函数,不碰 DOM)。
 // 公式逐字移植自图鉴页 .devflow/r159-orbit-random/ref/gallery.template.html 的 <script>
-// (nod / v5 / v6 / tumble / breath / fig8 / diag / adj3 / adj4 / counter / binary),系数不改。
+// (nod / v5 / v6 / tumble / breath / fig8 / diag / adj3 / adj4 / counter / binary),系数不改(r161 只把 nod 的变速相位符号取反,见 nodAng)。
 // 每个 place(t, k, n) 返回 { x, y, d }:x、y 是以轨道半径为 1 的归一化坐标(调用方乘半径 R),
-// d ∈ [-1, 1] 是深度(1 = 离观察者最近)。圆点直径由 dotPx(d) 给出:在 14px 的基准指示器上最远 1.6px、最近 2.5px。
+// d ∈ [-1, 1] 是深度(1 = 离观察者最近)。圆点直径由 dotPx(d) 给出:在 14px 的基准指示器上最远 1.8px、最近 2.3px(r161 把前后差从 1.6 / 2.5 收窄)。
 // r161:整体放大——轨道半径与圆点直径都以 14px 基准指示器定义,实际指示器宽 w 时整体乘 k = w / ORBIT_REF_PX(orbitTicker.js)。
 
 const TAU = Math.PI * 2;
@@ -11,8 +11,8 @@ const PI = Math.PI;
 // 基准指示器:宽 14px、轨道半径 4.8px(= 14/2 − 2.2)。下面两个圆点直径是它上面的值,实际显示再乘 k。
 export const ORBIT_REF_PX = 14;
 export const ORBIT_REF_R = 4.8;
-export const FRONT_PX = 2.5; // 最前方圆点直径(基准指示器)
-export const BACK_PX = 1.6; // 最远圆点直径(基准指示器)
+export const FRONT_PX = 2.3; // 最前方圆点直径(基准指示器);r161:2.5 → 2.3,远近大小差收窄(最前 / 最远 = 1.28,原 1.56)
+export const BACK_PX = 1.8; // 最远圆点直径(基准指示器);r161:1.6 → 1.8,平均直径仍是 2.05 不变
 // 圆点底座:macOS WebKit 会把很小的盒子按设备像素取整再画圆角,两三像素的点会被压扁;
 // 底座取 18px,再用 transform 的 scale(dotPx / 18)缩到目标直径。须与 index.css 的 .orbit-mark i 同步。
 export const DOT_BASE_PX = 18;
@@ -28,10 +28,13 @@ export function dotPx(d) {
 }
 
 // ---- 轨道类 ----
-function nodAng(t) {
+// 上下点头(三体 / 四体旋转)的相位角。th 是仰俯相位,仰俯角 = 0.5·sin(th):th = 0、π 时轨道侧立、点排成一条线,th = ±π/2 时纵向展开最大。
+// r161:变速改为「展开时快、排成一线时慢」——dth/dtau = 1 − 0.6cos(2·tau) ≥ 0.4,tau = 0、π … 时取最小 0.4(一线),tau = π/2 … 时取最大 1.6(展开),恒单调;
+// 旧公式 th = tau + 0.3·sin(2·tau) 正好相反(一线时最快)。点绕圈的相位 spin = 2·th − π/2 与 th 锁相,每个点头周期(3.4 秒)整两圈。
+export function nodAng(t) {
   const tau = (TAU * t) / 3.4;
-  const th = tau + 0.3 * Math.sin(2 * tau);
-  return { elev: 0.5 * Math.sin(th), spin: 2 * th - PI / 2, roll: 0.12 * Math.sin(th + 0.9) };
+  const th = tau - 0.3 * Math.sin(2 * tau);
+  return { tau, th, elev: 0.5 * Math.sin(th), spin: 2 * th - PI / 2, roll: 0.12 * Math.sin(th + 0.9) };
 }
 function nod(t, k, n) {
   const g = nodAng(t);
@@ -168,13 +171,14 @@ function counter(t, k) {
 // ---- 变体表 ----
 // stillT:系统要求减弱动画时摆的静止帧时刻,在 0.1–10 秒里搜出的「两点最小中心距最大」的时刻;
 // 14px 指示器(R = 4.8)里两两中心距都 ≥ 3.5px,唯独双星互绕的同一对点被公式固定在 0.64R ≈ 3.07px。
-// 单测 tests/unit/check-r159-orbit-variants.mjs 按 ≥ 3px 核对。orbit3 / orbit4 沿用旧值 0.9。
+// 单测 tests/unit/check-r159-orbit-variants.mjs 按 ≥ 3px 核对。orbit3 / orbit4 取 0.85 = 3.4 / 4 秒:r161 改了点头的变速后,
+// 这一刻正好 tau = π/2、th = π/2(仰俯角最大),点对称地排成钝角三角形(三体)/ 菱形(四体);须与 orbitTicker.js 的 STILL_T 相同。
 function V(id, n, label, place, stillT) {
   return Object.freeze({ id, n, label, place, stillT });
 }
 export const ORBIT_VARIANTS = Object.freeze({
-  orbit3: V('orbit3', 3, '三体旋转', nod, 0.9),
-  orbit4: V('orbit4', 4, '四体旋转', nod, 0.9),
+  orbit3: V('orbit3', 3, '三体旋转', nod, 0.85),
+  orbit4: V('orbit4', 4, '四体旋转', nod, 0.85),
   'o3-v5': V('o3-v5', 3, '三体·摆动偏转', v5, 4.58),
   'o4-v5': V('o4-v5', 4, '四体·摆动偏转', v5, 4.9),
   'o3-v6': V('o3-v6', 3, '三体·忽停忽翻', v6, 9),

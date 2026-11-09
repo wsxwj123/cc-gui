@@ -3,38 +3,29 @@
 // 是默认变体 nod(上下点头)的旧接口,保留给旧引用与单测。
 // 公式照设计稿 v8 的 orbitPlace:圈水平放着,上下仰俯约 ±29°(过水平线时侧立成一条线);
 // 点绕圈整 360°,每个仰俯周期(3.4 秒)转两圈并与仰俯锁相,所以最高 / 最低点总是钝角三角形;
-// 过水平线时快、到最高 / 最低点时慢。
+// r161 起变速改为「展开(最高 / 最低点)时快、过水平线排成一条线时慢」(旧版相反),公式只在 orbitVariants.js 的 nodAng 一处。
 // 全页面只有一个 requestAnimationFrame 循环:有实例登记才跑,登记清空就停;页面隐藏时暂停;
 // 系统要求减弱动画时只摆一次静止帧。
 
-import { ORBIT_VARIANTS, variantOf, dotPx, DOT_BASE_PX, ORBIT_REF_PX, ORBIT_REF_R } from './orbitVariants.js';
+import { ORBIT_VARIANTS, variantOf, dotPx, nodAng, DOT_BASE_PX, ORBIT_REF_PX, ORBIT_REF_R } from './orbitVariants.js';
 
-const TAU = Math.PI * 2;
-const PERIOD_S = 3.4;
-export const STILL_T = 0.9; // 减弱动画时的静止帧:仰俯角接近最大,三个点成钝角三角形
+export const STILL_T = 0.85; // 减弱动画时的静止帧:= 3.4 / 4 秒,仰俯角恰为最大,三个点对称地成钝角三角形(须与 orbitVariants.js 里 orbit3 / orbit4 的 stillT 相同)
 export const SPEED_FACTORS = Object.freeze({ slow: 0.7, normal: 1, fast: 1.4 });
 const DEFAULT_FACTOR = SPEED_FACTORS.slow;
 // 后台恢复或单帧卡顿时,不让相位一次跳太多
 const MAX_FRAME_S = 0.1;
 // 圆点底座 18px(见 orbitVariants.js 的 DOT_BASE_PX),transform 的 scale = dotPx(d) · k / 18,
-// 14px 基准指示器上直径在最远 1.6px 到最近 2.5px 之间变化。必须与 index.css 里 .orbit-mark i 的宽高 / margin 同步改。
+// 14px 基准指示器上直径在最远 1.8px 到最近 2.3px 之间变化。必须与 index.css 里 .orbit-mark i 的宽高 / margin 同步改。
 // r161 整体放大:k = 指示器宽 / 14,轨道半径 = 4.8 · k,圆点直径 · k,指示器越大整个动画等比越大。
 
 function variantFor(id, n) {
   return variantOf(id) || ORBIT_VARIANTS[n === 4 ? 'orbit4' : 'orbit3'];
 }
 
-/** 时刻 t(秒)的各个相位角;单独导出便于单测验证单调性与圈数。 */
+/** 时刻 t(秒)的各个相位角{ tau, th, elev, spin, roll };单独导出便于单测验证单调性与圈数。
+ *  公式在 orbitVariants.js 的 nodAng(变速相位 th = tau − 0.3·sin(2·tau),恒单调;仰俯角 ±0.5 弧度;spin 每个仰俯周期整两圈;roll 是轻微侧倾)。 */
 export function orbitAngles(t) {
-  const tau = (TAU * t) / PERIOD_S;
-  const th = tau + 0.3 * Math.sin(2 * tau); // 变速相位;dth/dtau = 1 + 0.6cos(2tau) ≥ 0.4,恒单调
-  return {
-    tau,
-    th,
-    elev: 0.5 * Math.sin(th), // 仰俯角 ±0.5 弧度
-    spin: 2 * th - Math.PI / 2, // 每个仰俯周期整两圈
-    roll: 0.12 * Math.sin(th + 0.9), // 轻微侧倾,形状不严格左右对称
-  };
+  return nodAng(t);
 }
 
 /** 变体 v 的 n 个点在时刻 t 的摆位:x、y 是归一化坐标(调用方乘半径),scale 是对 18px 底座的

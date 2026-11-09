@@ -5,7 +5,7 @@
 //   V1 16 个变体的 id / 点数 / 中文标签;variantOf 找不到返回 null。
 //   V2 RANDOM_POOL 恰为这 16 个 id,顺序固定。
 //   V3 每个变体 0–20 秒(步长 0.02)x、y、d 全有限,|x|、|y| ≤ 1.6,d ∈ [-1, 1];同一 t 重复调用结果一致。
-//   V4 dotPx 全程 ∈ [1.6, 2.5],每个变体最大 ≥ 2.2、最小 ≤ 1.95(有远近大小变化);FRONT_PX / BACK_PX 常量。
+//   V4 dotPx 全程 ∈ [1.8, 2.3],每个变体最大 ≥ 2.13、最小 ≤ 1.99(有远近大小变化;与 r161 之前 [1.6, 2.5] 下的 2.2 / 1.95 是同一深度判据:深度 ≥ 1/3、≤ −2/9);FRONT_PX / BACK_PX 常量。
 //   V5 静止帧 stillT 时任意两点中心距(×R=4.8,14px 基准指示器)≥ 3px。
 //   V8 r161 整体放大:同一变体、同一时刻,指示器宽 w 时轨道半径与圆点缩放都是宽 14 时的 w / 14 倍。
 //   V6 八字轨道积分表首尾闭合(积分一整周期后回到起点,差 < 1e-3)。
@@ -86,24 +86,24 @@ await report.check('V3', '0–20 秒每帧有限、|x|,|y| ≤ 1.6、d ∈ [-1,1
   }
 });
 
-await report.check('V4', 'dotPx 全程 ∈ [1.6,2.5],每个变体最大 ≥ 2.2、最小 ≤ 1.95', 'red', () => {
-  assert.equal(FRONT_PX, 2.5);
-  assert.equal(BACK_PX, 1.6);
+await report.check('V4', 'dotPx 全程 ∈ [1.8,2.3],每个变体最大 ≥ 2.13、最小 ≤ 1.99', 'red', () => {
+  assert.equal(FRONT_PX, 2.3);
+  assert.equal(BACK_PX, 1.8);
   assert.equal(DOT_BASE_PX, 18);
-  assert.ok(Math.abs(dotPx(1) - 2.5) < EPS && Math.abs(dotPx(-1) - 1.6) < EPS);
-  assert.ok(Math.abs(dotPx(5) - 2.5) < EPS && Math.abs(dotPx(-5) - 1.6) < EPS, '超出 ±1 时夹住');
+  assert.ok(Math.abs(dotPx(1) - 2.3) < EPS && Math.abs(dotPx(-1) - 1.8) < EPS);
+  assert.ok(Math.abs(dotPx(5) - 2.3) < EPS && Math.abs(dotPx(-5) - 1.8) < EPS, '超出 ±1 时夹住');
   for (const id of RANDOM_POOL) {
     const v = ORBIT_VARIANTS[id];
     let lo = Infinity, hi = -Infinity;
     for (let i = 0; i <= 1000; i++) {
       for (const p of points(v, i * 0.02)) {
         const px = dotPx(p.d);
-        assert.ok(px >= 1.6 - EPS && px <= 2.5 + EPS, `${id} px=${px}`);
+        assert.ok(px >= 1.8 - EPS && px <= 2.3 + EPS, `${id} px=${px}`);
         lo = Math.min(lo, px); hi = Math.max(hi, px);
       }
     }
-    assert.ok(hi >= 2.2, `${id} 最大 ${hi.toFixed(3)}px`);
-    assert.ok(lo <= 1.95, `${id} 最小 ${lo.toFixed(3)}px`);
+    assert.ok(hi >= 2.13, `${id} 最大 ${hi.toFixed(3)}px`);
+    assert.ok(lo <= 1.99, `${id} 最小 ${lo.toFixed(3)}px`);
   }
 });
 
@@ -209,7 +209,7 @@ await report.check('V8', 'r161 整体放大:指示器宽 w 时,轨道半径与�
     }
     offBase();
   }
-  // 宽 20 的直径范围:最远 1.6 · k、最近 2.5 · k(k = 20/14)
+  // 宽 20 的直径范围:最远 BACK_PX · k、最近 FRONT_PX · k(k = 20/14)
   const k20 = 20 / 14;
   const mark = fakeMark(3, 'orbit3', 20);
   const off20 = tk.register(mark);

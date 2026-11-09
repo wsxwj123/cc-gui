@@ -10,7 +10,7 @@ import { bash, waitLine } from './helpers/wg.mjs';
 test.afterEach(async () => { try { openAllGates(); } catch { /* 忽略 */ } });
 
 const IND = '[data-live-line] [data-live-indicator]';
-// r161 整体放大:动画以 14px 指示器为基准(最前 2.5px / 最远 1.6px),状态行指示器宽 LIVE_PX 时整体乘 K = LIVE_PX / 14。
+// r161 整体放大 + 收窄远近差:动画以 14px 指示器为基准(最前 2.3px / 最远 1.8px;r161 之前是 2.5 / 1.6),状态行指示器宽 LIVE_PX 时整体乘 K = LIVE_PX / 14。
 const LIVE_PX = 20; // 须与应用里 LIVE_INDICATOR_PX 一致
 const K = LIVE_PX / 14;
 
@@ -222,7 +222,7 @@ test.describe('2 倍屏', () => {
     expect(p90, `R2 圆度 90 分位 ${f2(p90)} > 1.14（${summary}）`).toBeLessThanOrEqual(1.14);
   });
 
-  test('R3 视觉大小：每个点的宽、高始终在 [1.6K − 0.15, 2.5K + 0.15]px（r161 整体放大：K = 指示器宽 20 / 基准 14，即 2.14–3.72px；基准上最前 2.5px / 最远 1.6px，±0.15 取整误差）', async ({ page }) => {
+  test('R3 视觉大小：每个点的宽、高始终在 [1.8K − 0.15, 2.3K + 0.15]px（r161 整体放大：K = 指示器宽 20 / 基准 14，即 2.42–3.44px；基准上最前 2.3px / 最远 1.8px，±0.15 取整误差）', async ({ page }) => {
     test.setTimeout(150_000);
     await liveOrbit(page, 'b3', 'R3 一直没返回的命令');
     await setUiZoomOne(page);
@@ -241,8 +241,8 @@ test.describe('2 倍屏', () => {
     const summary = `帧 ${frames}，宽 ${f2(Math.min(...ws))}–${f2(Math.max(...ws))}px，高 ${f2(Math.min(...hs))}–${f2(Math.max(...hs))}px` + `，现场 ${await sceneFacts(page)}`;
     console.log(`[R3] ${summary}`);
     expect(frames, 'R3 采样帧数应 ≥ 40').toBeGreaterThanOrEqual(40);
-    expect(Math.min(...ws, ...hs), `R3 最小宽 / 高 < ${f2(1.6 * K - 0.15)}px（${summary}）`).toBeGreaterThanOrEqual(1.6 * K - 0.15);
-    expect(Math.max(...ws, ...hs), `R3 最大宽 / 高 > ${f2(2.5 * K + 0.15)}px（${summary}）`).toBeLessThanOrEqual(2.5 * K + 0.15);
+    expect(Math.min(...ws, ...hs), `R3 最小宽 / 高 < ${f2(1.8 * K - 0.15)}px（${summary}）`).toBeGreaterThanOrEqual(1.8 * K - 0.15);
+    expect(Math.max(...ws, ...hs), `R3 最大宽 / 高 > ${f2(2.3 * K + 0.15)}px（${summary}）`).toBeLessThanOrEqual(2.3 * K + 0.15);
   });
 });
 

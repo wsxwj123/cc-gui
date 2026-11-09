@@ -154,7 +154,7 @@ test('B1 设置 → 主题 → 界面 → 加载动画网格：16 种旋转动�
   expect(problems, `16 种旋转动画里不合格的项（共 ${problems.length} 条）`).toEqual([]);
 });
 
-test('B2 状态行里 20px 指示器（整体放大；一直停在思考阶段 12 秒）：所有圆点的宽、高读数都在按放大倍数折算的范围 [2.14, 3.72]px 内', async ({ page }) => {
+test('B2 状态行里 20px 指示器（整体放大；一直停在思考阶段 12 秒）：所有圆点的宽、高读数都在按放大倍数折算的范围 [2.42, 3.44]px 内', async ({ page }) => {
   test.setTimeout(120_000);
   await prepareLive(page, { key: 'b2', presets: ZOOM_ONE, scenario: { events: [{ kind: 'thinking', text: 'B2 思考。' }] } });
   await sendRound(page);
