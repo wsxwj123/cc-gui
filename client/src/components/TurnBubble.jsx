@@ -426,13 +426,15 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
   }
 
   // 同 TodoListCard:不自带 fade-up,避免固化重挂时重放入场动画导致闪烁。
+  // r162:去掉左侧灰条(对齐 Claude 桌面版:折叠行直接贴着正文左缘,层级靠展开内容的缩进表达);
+  // 头行用 -ml-1.5 + pl-1.5 把悬停底色向左多伸 6px,图标与正文左缘仍对齐。
   return (
-    <div className="border-l-2 border-canvas-deep/40">
+    <div>
       {/* Header — always visible */}
       <button
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded ? 'true' : 'false'}
-        className="cg-fold w-full flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left cursor-pointer"
+        className="cg-fold w-[calc(100%+0.375rem)] flex items-center gap-2 -ml-1.5 pl-1.5 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-md transition-colors text-left cursor-pointer"
       >
         <Wrench size={13} className="shrink-0" />
         <span className="text-xs font-body">
@@ -519,9 +521,10 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, l
     summary = preview ? `思考 · ${preview}` : '思考';
   }
   const hosting = !!liveLabel;
+  // r162:去掉左侧灰条(对齐 Claude 桌面版:折叠行直接贴着正文左缘,点一下展开);头行用 -ml-1.5 + pl-1.5
+  // 把悬停底色向左多伸 6px,图标与正文左缘仍对齐。展开后的条目保留 pl-3 缩进,层级靠缩进表达。
   return (
     <div
-      className="border-l-2 border-canvas-deep/40"
       data-work-group=""
       data-work-group-state={expanded ? 'open' : 'closed'}
       data-work-group-live={hosting ? 'true' : 'false'}
@@ -531,7 +534,7 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, l
         data-work-group-head=""
         aria-expanded={expanded ? 'true' : 'false'}
         onClick={onToggle}
-        className="cg-fold w-full min-w-0 flex items-center gap-2 pl-3 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-r-md transition-colors text-left cursor-pointer"
+        className="cg-fold w-[calc(100%+0.375rem)] min-w-0 flex items-center gap-2 -ml-1.5 pl-1.5 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-md transition-colors text-left cursor-pointer"
       >
         {hosting
           ? <LiveStatusLine label={liveLabel} startedAt={startedAt} className="flex-1" />

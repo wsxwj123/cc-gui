@@ -122,7 +122,12 @@ const EXPECTED = {
   // 整个不再渲染。已证明只差这一处:用改动前的 TurnBubble.jsx 渲染同一场景(5313 / 4965e9385e3b6bd9),
   // 把其中那个 757 字符的摘要行按钮原样删掉后,与新渲染结果逐字相同(4556 / 0b260df7978255d7);
   // testid / cgui 集合不变,其余五个场景的长度与指纹都不变。r159 验收 A1–A4 覆盖真实渲染。
-  'turn-tool': { testids: [], cgui: [], len: 4556, sha: '0b260df7978255d7' },
+  // r162 重录(用户 2026-11-09「折叠行左边的灰色竖条不要」):过程组(WorkGroup)根元素去掉 class="border-l-2 border-canvas-deep/40"
+  // (整条 class 属性不再渲染,少 41 个字符),头行按钮 class 的 w-full → w-[calc(100%+0.375rem)]、pl-3 pr-3 → -ml-1.5 pl-1.5 pr-3、
+  // rounded-r-md → rounded-md(多 25 个字符),渲染结果 4556→4540(净少 16)。已证明只差这两处:把新渲染里这两处原样还原后,
+  // 长度 4556、指纹 0b260df7978255d7 与旧基线逐字相同;testid / cgui 集合不变,其余五个场景的长度与指纹都不变。
+  // 源码锁见 check-r162-fold-no-bar,r162 验收 F1–F3(r157-live-line 套件)覆盖真实渲染。
+  'turn-tool': { testids: [], cgui: [], len: 4540, sha: '22baa50915ac3b7a' },
   'input-idle': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'send-btn'], len: 3333, sha: '7e99c29e2c559931' },
   'input-streaming': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'queue-btn', 'stop-btn'], len: 4099, sha: '992c6c419dcae4ff' },
   // 界面「项目」→「工作区」改名重录(下面两个侧栏场景的渲染结果各含 7 处改名文字,每处多 1 个字):
