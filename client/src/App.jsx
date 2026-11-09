@@ -14,10 +14,12 @@ const CONFIG_DEFERRED_NOTICE_MS = 15000;
 const BUSY_RETRY_GAP_MS = 2000;
 // 已尝试过自动生成标题的 sessionId(无论成功失败),防止失败时每轮重复 spawn 标题进程。
 const titleAttempted = new Set();
-// R8-5:已就 MCP 状态提示过的进程 pid。按 slot 生命周期去重:同一常驻进程的重复 init
-// (setModel 热切补发、reattach 回放 earlyLines)不重复提示;进程重建(新 pid)后 MCP
-// 会重连,状态可能已变,重新评估。模块级(非组件 state):分屏多 pane / 重挂载共享。
-const mcpNoticeSeenPids = new Set();
+// R8-5 / r163:MCP 状态提示的跨进程去重账本。同一个 server 同一种状态这次运行里只提示一次:
+// 同一常驻进程的重复 init(setModel 热切补发、reattach 回放 earlyLines)、以及进程重建(回滚 / 空闲回收 / 新会话,
+// 新 pid)后 MCP 重连又报同样的问题,都不重弹;状态变了 / 恢复后又坏才再提示(规则见 utils/mcpStatus.js)。
+// 此前按 pid 去重,新进程一律重评估,在 CLI 改成异步连 MCP(init 时多数 pending)后变成每个新进程都弹一长串黄字。
+// 模块级(非组件 state):分屏多 pane / 重挂载共享;只在内存,重开应用后第一次 init 会再提示一次。
+const mcpNoticeLedger = createMcpNoticeLedger();
 // Draft 会话唯一标识。draft key(r26-B5 起为 `draft-<projectHash>-<draftId>`,统一走
 // steerQueue.queueKeyFor)按项目+draftId 生成,同项目两个 draft 不再共享队列键。
 // 旧形态 `draft-<projectHash>` 按项目生成,同项目先后两个 draft
@@ -145,7 +147,7 @@ import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, m
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow, reconcileBadgeWindow, resolveTurnUsage } from './utils/contextWindow.js';
-import { extractMcpServerIssues, formatMcpServerNotice } from './utils/mcpStatus.js';
+import { createMcpNoticeLedger, formatMcpServerNotice } from './utils/mcpStatus.js';
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
 import { THEME_TABS, readThemeTab, writeThemeTab } from './utils/themeTabs.js';
@@ -6123,17 +6125,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
             streamSid = event.session_id; // 本次流归属的真 sid(draft 发起时在此确定)
             useStore.getState().clearSessionStopped?.(event.session_id); // draft 首发:真 sid 此刻才知道
-            // R8-5:MCP server 非 connected 状态提示(needs-auth/failed 等此前静默不可用,
-            // 用户只看到工具调不动)。多个合并成一条;字段缺失/空数组纯函数内静默;按 pid
-            // 去重(见 mcpNoticeSeenPids 注释),只在真提示过后记账 —— 首个 init 全 connected、
-            // setModel 补发的 init 才出问题的场景仍能提示到。
-            if (!mcpNoticeSeenPids.has(String(pid))) {
-              const mcpNotice = formatMcpServerNotice(extractMcpServerIssues(event.mcp_servers));
-              if (mcpNotice) {
-                mcpNoticeSeenPids.add(String(pid));
-                setProviderSwitchNotice({ text: mcpNotice });
-              }
-            }
+            // R8-5:MCP server 有问题(needs-auth/failed 等此前静默不可用,用户只看到工具调不动)时提示。
+            // 多个合并成一条;字段缺失/空数组纯函数内静默。r163:pending(正在连接)不算问题;
+            // 同一 server 同一状态按「账本」跨进程只提示一次(见 mcpNoticeLedger 注释),
+            // setModel 补发的 init、reattach 回放的 init、新进程的 init 报同样的问题都不重弹。
+            const mcpNotice = formatMcpServerNotice(mcpNoticeLedger.take(event.mcp_servers));
+            if (mcpNotice) setProviderSwitchNotice({ text: mcpNotice });
             // Record the provider this turn ran under so a later switch can strip
             // now-invalid thinking-block signatures. Model name can't tell a mimo
             // relay (claude-* names) from official, so we key off the live hint.

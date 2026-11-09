@@ -116,6 +116,9 @@ async function runRound(userText) {
   loadScenario();
   if (TITLE_GEN) scenario = {};
   const pendings = [];
+  // r163 扩展:{"initDelayMs":N} —— 模拟冷启动。真命令行实测(2.1.319,5 个插件 MCP + 若干钩子):发出消息后约 0.7 秒才落盘用户行 / 发 init,
+  // 首个字约 5.7 秒才到(温进程第二条只要 1.2 秒)。这里在落盘用户行与发 init 之前先等 N 毫秒。
+  if (scenario.initDelayMs) await sleep(scenario.initDelayMs);
   append({ type: 'summary', summary: String(userText || '').slice(0, 40) || '新会话', leafUuid: crypto.randomUUID() });
   append({
     parentUuid: null, isSidechain: false, promptId: 'sf-fake', type: 'user', isMeta: false,
@@ -123,7 +126,8 @@ async function runRound(userText) {
     uuid: crypto.randomUUID(), timestamp: stamp(), permissionMode: 'default', promptSource: 'sdk',
     userType: 'external', entrypoint: 'cli', cwd, sessionId: sid, version: '2.1.267', gitBranch: '',
   });
-  out({ type: 'system', subtype: 'init', session_id: sid, cwd, model: MODEL, tools: [], mcp_servers: [], permissionMode: 'default', uuid: crypto.randomUUID() });
+  // r163 扩展:{"mcpServers":[{"name":"x","status":"pending"},…]} —— init 里带的 MCP 状态(真命令行冷启动时 15 个里 13 个非 connected,多数是 pending)。
+  out({ type: 'system', subtype: 'init', session_id: sid, cwd, model: MODEL, tools: [], mcp_servers: Array.isArray(scenario.mcpServers) ? scenario.mcpServers : [], permissionMode: 'default', uuid: crypto.randomUUID() });
 
   const events = Array.isArray(scenario.events) ? scenario.events : [{ kind: 'text', text: '（假 CLI：未给 scenario，默认一轮正文）' }];
   let seq = 0;
