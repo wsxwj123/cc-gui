@@ -288,6 +288,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b>v0.2.456</b>(2026-11-09)· 优化 1 条</summary>
+
+**优化**
+
+<details><summary>聊天里的折叠行去掉左侧灰条</summary>
+
+「N 次工具调用」「思考」这类折叠行左边的灰色竖条去掉了，折叠行直接贴着正文左缘，样式对齐 Claude 桌面版；展开后的思考内容块左边的灰条也一并去掉。默认折叠、点一下展开、展开后条目缩进都不变。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.455</b>(2026-11-09)· 优化 3 条</summary>
 
 **优化**
