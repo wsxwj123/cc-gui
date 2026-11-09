@@ -28,11 +28,16 @@ export const ORBITS = [
 ];
 export const ORBIT_IDS = ORBITS.map((o) => o.id);
 
-/** 「圆点大小约定」：宽高读数全程 ∈ [1.45, 2.65]；12 秒窗口里最大 ≥ 2.2、最小 ≤ 1.95。 */
-export const DOT_LO = 1.45;
-export const DOT_HI = 2.65;
-export const MAX_AT_LEAST = 2.2;
-export const MIN_AT_MOST = 1.95;
+/** 「圆点大小约定」(r161 整体放大):动画以 14px 指示器为基准(最前 2.5px / 最远 1.6px),指示器宽 w 时整体乘 k = w / 14。
+ *  宽高读数全程 ∈ [1.6k − 0.15, 2.5k + 0.15];12 秒窗口里最大 ≥ 2.5k − 0.3、最小 ≤ 1.6k + 0.35(偏移与放大前一致,没放松)。
+ *  口径是界面缩放 1.0;宽度本身由用例读指示器根元素的 getBoundingClientRect 自证。 */
+export const REF_PX = 14;
+export const LIVE_PX = 20; // 状态行指示器的宽(须与应用里 LIVE_INDICATOR_PX 一致)
+export const GRID_PX = 20; // 设置网格里指示器的宽
+export const dotBounds = (w) => {
+  const k = w / REF_PX;
+  return { k, lo: 1.6 * k - 0.15, hi: 2.5 * k + 0.15, maxAtLeast: 2.5 * k - 0.3, minAtMost: 1.6 * k + 0.35 };
+};
 
 export const IND = '[data-live-line] [data-live-indicator]';
 
@@ -224,7 +229,7 @@ export async function openSettings(page) {
 export async function sampleGrid(page, ids, durationMs = 12_000, stepMs = 100) {
   return await page.evaluate(async ({ ids: list, durationMs: dur, stepMs: step, lo, hi }) => {
     const out = {};
-    for (const id of list) out[id] = { found: false, root: false, styleAttr: null, dotCount: 0, n: 0, min: null, max: null, bad: 0 };
+    for (const id of list) out[id] = { found: false, root: false, rootW: 0, styleAttr: null, dotCount: 0, n: 0, min: null, max: null, bad: 0 };
     const t0 = performance.now();
     for (;;) {
       for (const id of list) {
@@ -235,6 +240,7 @@ export async function sampleGrid(page, ids, durationMs = 12_000, stepMs = 100) {
         const root = cell.querySelector('[data-style]') || cell.querySelector('[data-live-indicator]');
         if (!root) continue;
         o.root = true;
+        o.rootW = root.getBoundingClientRect().width;
         o.styleAttr = root.getAttribute('data-style');
         const dots = [...root.children].filter((c) => c.tagName === 'I');
         o.dotCount = dots.length;
@@ -252,5 +258,5 @@ export async function sampleGrid(page, ids, durationMs = 12_000, stepMs = 100) {
       await new Promise((r) => setTimeout(r, step));
     }
     return out;
-  }, { ids, durationMs, stepMs, lo: DOT_LO, hi: DOT_HI });
+  }, { ids, durationMs, stepMs, lo: dotBounds(GRID_PX).lo, hi: dotBounds(GRID_PX).hi });
 }

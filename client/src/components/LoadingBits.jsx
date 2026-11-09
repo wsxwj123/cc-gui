@@ -4,6 +4,9 @@ import { orbitTicker } from '../utils/orbitTicker.js';
 import { ORBIT_VARIANTS, variantOf } from '../utils/orbitVariants.js';
 import { DEFAULT_LOADING_STYLE, RANDOM_LOADING_STYLE, pickRandomStyle, shouldReroll, createScopedRollStore } from '../utils/loadingPrefs.js';
 
+// r161:状态行里旋转指示器的宽(CSS px)。整个动画(轨道 + 圆点)以 14px 为基准等比放大,所以改这一个数就是整体放大 / 缩小。
+export const LIVE_INDICATOR_PX = 20;
+
 // 加载指示件(spinner / 耗时),从 App.jsx 抽出共享:底部状态行 LiveStatusLine(主会话与
 // 子代理视图共用)与主题「界面」页预览用同一套视觉物。状态词见 utils/liveStatus.js。
 

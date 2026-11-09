@@ -7,7 +7,7 @@ import { test, expect } from '@playwright/test';
 import { SESSIONS, END_ANCHOR } from './helpers/fixtures.mjs';
 import { primeOverlays, openApp, openSessionByMarker, touchCtl } from './helpers/runtime.mjs';
 import {
-  ORBITS, ORBIT_IDS, IND, DOT_LO, DOT_HI, MAX_AT_LEAST, MIN_AT_MOST, norm, uniq, lsGet, bash, phaseEvents, openAllGates,
+  ORBITS, ORBIT_IDS, IND, dotBounds, LIVE_PX, GRID_PX, norm, uniq, lsGet, bash, phaseEvents, openAllGates,
   prepareLive, sendRound, reloadApp, expectPhase, startSampler, stopSampler, playPhases,
   openInterfaceTab, closeThemePopover, loadingGrid, openSettings, settingsSearch, sampleGrid, ZOOM_ONE, expectZoomOne,
 } from './helpers/ui.mjs';
@@ -137,38 +137,43 @@ test('B1 设置 → 主题 → 界面 → 加载动画网格：16 种旋转动�
     if (others.length) problems.push(`${o.id}: 格内文字「${text}」还含了别的格的标签 ${JSON.stringify(others)}`);
   }
 
+  const b1 = dotBounds(GRID_PX);
   const sampled = await sampleGrid(page, ORBIT_IDS, 12_000, 100); // 16 格同一个 12 秒窗口、每 100 毫秒读一次
   for (const o of ORBITS) {
     const s = sampled[o.id];
     if (!s.found) continue; // 上面已记"选项格数量"
     if (!s.root) { problems.push(`${o.id}: 格内找不到指示器根元素（带 data-style 的元素）`); continue; }
     if (s.styleAttr !== o.id) problems.push(`${o.id}: 格内指示器 data-style=${s.styleAttr}（应等于 ${o.id}）`);
+    if (Math.abs(s.rootW - GRID_PX) > 0.5) problems.push(`${o.id}: 格内指示器宽 ${s.rootW.toFixed(2)}px（界面缩放 1.0 下应为 ${GRID_PX}px；圆点大小的判据按这个宽折算）`);
     if (s.dotCount !== o.dots) problems.push(`${o.id}: 圆点（指示器根元素的直接子元素 <i>）数量 ${s.dotCount}（应为 ${o.dots}）`);
     if (s.n === 0) { problems.push(`${o.id}: 12 秒内一个圆点读数都没读到`); continue; }
-    if (s.bad > 0) problems.push(`${o.id}: ${s.bad}/${s.n} 个宽高读数越出 [${DOT_LO}, ${DOT_HI}]px（最小 ${s.min.toFixed(2)}、最大 ${s.max.toFixed(2)}）`);
-    if (s.max < MAX_AT_LEAST) problems.push(`${o.id}: 12 秒内最大读数 ${s.max.toFixed(2)}px < ${MAX_AT_LEAST}px（没出现"最近"的大小）`);
-    if (s.min > MIN_AT_MOST) problems.push(`${o.id}: 12 秒内最小读数 ${s.min.toFixed(2)}px > ${MIN_AT_MOST}px（没出现"最远"的大小）`);
+    if (s.bad > 0) problems.push(`${o.id}: ${s.bad}/${s.n} 个宽高读数越出 [${b1.lo.toFixed(2)}, ${b1.hi.toFixed(2)}]px（最小 ${s.min.toFixed(2)}、最大 ${s.max.toFixed(2)}）`);
+    if (s.max < b1.maxAtLeast) problems.push(`${o.id}: 12 秒内最大读数 ${s.max.toFixed(2)}px < ${b1.maxAtLeast.toFixed(2)}px（没出现"最近"的大小）`);
+    if (s.min > b1.minAtMost) problems.push(`${o.id}: 12 秒内最小读数 ${s.min.toFixed(2)}px > ${b1.minAtMost.toFixed(2)}px（没出现"最远"的大小）`);
   }
   expect(problems, `16 种旋转动画里不合格的项（共 ${problems.length} 条）`).toEqual([]);
 });
 
-test('B2 状态行里 14px 指示器（一直停在思考阶段 12 秒）：所有圆点的宽、高读数都在 [1.45, 2.65]px 内', async ({ page }) => {
+test('B2 状态行里 20px 指示器（整体放大；一直停在思考阶段 12 秒）：所有圆点的宽、高读数都在按放大倍数折算的范围 [2.14, 3.72]px 内', async ({ page }) => {
   test.setTimeout(120_000);
   await prepareLive(page, { key: 'b2', presets: ZOOM_ONE, scenario: { events: [{ kind: 'thinking', text: 'B2 思考。' }] } });
   await sendRound(page);
   await expectPhase(page, 'thinking');
   await expect(page.locator(IND).first(), '前置：状态行里应有指示器').toBeVisible({ timeout: 15_000 });
   await expectZoomOne(page);
+  const indW = await page.locator(IND).first().evaluate((el) => el.getBoundingClientRect().width);
+  expect(Math.abs(indW - LIVE_PX), `前置自证：状态行指示器宽应为 ${LIVE_PX}px（界面缩放 1.0；实际 ${indW.toFixed(2)}px）——圆点大小的判据按这个宽折算`).toBeLessThanOrEqual(0.5);
+  const b2 = dotBounds(LIVE_PX);
   await startSampler(page, 100);
   await page.waitForTimeout(12_000);
   const samples = await stopSampler(page);
   expect(uniq(samples.map((s) => s.phase)), '前置：整个 12 秒观察窗口应一直停在 thinking 阶段（不切阶段、不触发抽取）').toEqual(['thinking']);
   const sizes = samples.flatMap((s) => s.dots.flatMap((d) => [d[0], d[1]]));
   expect(sizes.length, '前置：应读到足够多的圆点读数（≥ 3 个点 × 约 120 次采样 × 宽高）').toBeGreaterThanOrEqual(600);
-  const bad = sizes.filter((v) => v < DOT_LO || v > DOT_HI);
+  const bad = sizes.filter((v) => v < b2.lo || v > b2.hi);
   expect(
     bad.length,
-    `状态行指示器（当前动画 ${uniq(samples.map((s) => s.style)).join('/')}）：${bad.length}/${sizes.length} 个宽高读数越出 [${DOT_LO}, ${DOT_HI}]px（最小 ${Math.min(...sizes).toFixed(2)}、最大 ${Math.max(...sizes).toFixed(2)}）`,
+    `状态行指示器（当前动画 ${uniq(samples.map((s) => s.style)).join('/')}）：${bad.length}/${sizes.length} 个宽高读数越出 [${b2.lo.toFixed(2)}, ${b2.hi.toFixed(2)}]px（最小 ${Math.min(...sizes).toFixed(2)}、最大 ${Math.max(...sizes).toFixed(2)}）`,
   ).toBe(0);
 });
 
@@ -316,13 +321,15 @@ test('C4 随机模式：距上次抽取不满 1.5 秒时进入新阶段不换，
   console.log(`[R159 C4] id0=${id0} id1=${id1}`);
 });
 
-test('C5 减弱动画偏好下的随机模式：圆点是静止帧（1.5 秒内不动），任意两点中心距离 ≥ 3px，data-style 属于 16 个 id', async ({ page }) => {
+test('C5 减弱动画偏好下的随机模式：圆点是静止帧（1.5 秒内不动），任意两点中心距离 ≥ 3px × 整体放大倍数，data-style 属于 16 个 id', async ({ page }) => {
   await prepareLive(page, { key: 'c5', presets: ZOOM_ONE, scenario: { events: [{ kind: 'thinking', text: 'C5 思考。' }] }, reducedMotion: true });
   expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), '前置：页面应处于"减弱动画"偏好').toBe(true);
   await sendRound(page);
   await expectPhase(page, 'thinking');
   await expect(page.locator(IND).first(), '前置：状态行里应有指示器').toBeVisible({ timeout: 15_000 });
   await expectZoomOne(page);
+  const indW5 = await page.locator(IND).first().evaluate((el) => el.getBoundingClientRect().width);
+  expect(Math.abs(indW5 - LIVE_PX), `前置自证：状态行指示器宽应为 ${LIVE_PX}px（界面缩放 1.0；实际 ${indW5.toFixed(2)}px）`).toBeLessThanOrEqual(0.5);
   await startSampler(page, 100);
   await page.waitForTimeout(1600);
   const samples = await stopSampler(page);
@@ -343,7 +350,8 @@ test('C5 减弱动画偏好下的随机模式：圆点是静止帧（1.5 秒内�
     });
   }
   expect(maxMove, `静止帧：1.5 秒内每个点的中心位移应 ≤ 0.05px（实际最大 ${maxMove.toFixed(3)}px，动画 ${styles[0]}）`).toBeLessThanOrEqual(0.05);
-  expect(minDist, `任意两个点的中心距离应 ≥ 3px（实际最小 ${minDist.toFixed(2)}px，动画 ${styles[0]}）`).toBeGreaterThanOrEqual(3);
+  const minGap = 3 * dotBounds(LIVE_PX).k; // 放大前 ≥ 3px(14px 指示器),整体放大后按倍数折算
+  expect(minDist, `任意两个点的中心距离应 ≥ ${minGap.toFixed(2)}px（3px × 放大倍数 ${dotBounds(LIVE_PX).k.toFixed(3)}；实际最小 ${minDist.toFixed(2)}px，动画 ${styles[0]}）`).toBeGreaterThanOrEqual(minGap);
 });
 
 // 主会话追加(2026-11-07):开发代理 D3 上报,生成中的状态行会在「连接中占位行(底部)→ 工作组头行 → 正文时回到底部」之间换位置,

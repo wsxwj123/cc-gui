@@ -2358,7 +2358,7 @@ header [data-tour="remote-control"] {
 .orbit-mark { display: inline-block; position: relative; flex: none; vertical-align: middle; }
 .orbit-mark i {
   position: absolute; left: 50%; top: 50%;
-  /* 底座 18px、由 orbitTicker.js 按 transform scale = dotPx(d) / 18 缩到最远 1.6px、最近 2.5px(orbitVariants.js 的 BACK_PX / FRONT_PX):WebKit 小盒子取整会压扁圆点。两处须同步改。 */
+  /* 底座 18px、由 orbitTicker.js 按 transform scale = dotPx(d) / 18 缩到最远 1.6px、最近 2.5px 再乘整体放大倍数 k = 指示器宽 / 14(orbitVariants.js 的 BACK_PX / FRONT_PX):WebKit 小盒子取整会压扁圆点。两处须同步改。 */
   width: 18px; height: 18px; margin: -9px 0 0 -9px;
   border-radius: 50%; background: currentColor;
   will-change: transform, opacity;

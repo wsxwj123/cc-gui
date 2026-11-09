@@ -1,4 +1,4 @@
-import { LoadingMark, ElapsedTime } from './LoadingBits.jsx';
+import { LoadingMark, ElapsedTime, LIVE_INDICATOR_PX } from './LoadingBits.jsx';
 
 // r154:生成中的底部状态行(主会话流式行、连接 / 压缩占位、子代理视图三处共用)。
 // 版式固定为 指示器 · 用时 · 分隔点 · 状态词;label = liveStatusLabel 的返回 { phase, verb, object }。
@@ -17,7 +17,7 @@ export function LiveStatusLine({ label, startedAt, className = '' }) {
       className={`flex items-center gap-2 min-w-0 text-[13px] font-body ${className}`}
     >
       <span className="shrink-0 inline-flex items-center text-accent">
-        <LoadingMark size={14} phase={phase} rollKey={rollKey} rollScope={startedAt || null} markProps={{ 'data-live-indicator': '' }} />
+        <LoadingMark size={LIVE_INDICATOR_PX} phase={phase} rollKey={rollKey} rollScope={startedAt || null} markProps={{ 'data-live-indicator': '' }} />
       </span>
       <span data-live-elapsed="" className="shrink-0 inline-flex">
         <ElapsedTime startedAt={startedAt} />

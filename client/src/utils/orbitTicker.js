@@ -7,7 +7,7 @@
 // 全页面只有一个 requestAnimationFrame 循环:有实例登记才跑,登记清空就停;页面隐藏时暂停;
 // 系统要求减弱动画时只摆一次静止帧。
 
-import { ORBIT_VARIANTS, variantOf, dotPx, DOT_BASE_PX } from './orbitVariants.js';
+import { ORBIT_VARIANTS, variantOf, dotPx, DOT_BASE_PX, ORBIT_REF_PX, ORBIT_REF_R } from './orbitVariants.js';
 
 const TAU = Math.PI * 2;
 const PERIOD_S = 3.4;
@@ -16,8 +16,9 @@ export const SPEED_FACTORS = Object.freeze({ slow: 0.7, normal: 1, fast: 1.4 });
 const DEFAULT_FACTOR = SPEED_FACTORS.slow;
 // 后台恢复或单帧卡顿时,不让相位一次跳太多
 const MAX_FRAME_S = 0.1;
-// 圆点底座 18px(见 orbitVariants.js 的 DOT_BASE_PX),transform 的 scale = dotPx(d) / 18,
-// 直径在最远 1.6px 到最近 2.5px 之间变化。必须与 index.css 里 .orbit-mark i 的宽高 / margin 同步改。
+// 圆点底座 18px(见 orbitVariants.js 的 DOT_BASE_PX),transform 的 scale = dotPx(d) · k / 18,
+// 14px 基准指示器上直径在最远 1.6px 到最近 2.5px 之间变化。必须与 index.css 里 .orbit-mark i 的宽高 / margin 同步改。
+// r161 整体放大:k = 指示器宽 / 14,轨道半径 = 4.8 · k,圆点直径 · k,指示器越大整个动画等比越大。
 
 function variantFor(id, n) {
   return variantOf(id) || ORBIT_VARIANTS[n === 4 ? 'orbit4' : 'orbit3'];
@@ -37,14 +38,14 @@ export function orbitAngles(t) {
 }
 
 /** 变体 v 的 n 个点在时刻 t 的摆位:x、y 是归一化坐标(调用方乘半径),scale 是对 18px 底座的
- *  transform 缩放(= dotPx(d) / 18),opacity 与 z(叠放顺序)都随深度走。 */
-function placeVariant(v, n, t) {
+ *  transform 缩放(= dotPx(d) · mag / 18,mag 是整体放大倍数 k,缺省 1),opacity 与 z(叠放顺序)都随深度走。 */
+function placeVariant(v, n, t, mag = 1) {
   const out = [];
   for (let k = 0; k < n; k++) {
     const p = v.place(t, k, n);
     const d = Math.max(-1, Math.min(1, p.d || 0));
     const u = (d + 1) / 2;
-    out.push({ x: p.x, y: p.y, d, scale: dotPx(d) / DOT_BASE_PX, opacity: 0.72 + 0.28 * u, z: Math.round(u * 20) });
+    out.push({ x: p.x, y: p.y, d, scale: (dotPx(d) * mag) / DOT_BASE_PX, opacity: 0.72 + 0.28 * u, z: Math.round(u * 20) });
   }
   return out;
 }
@@ -66,9 +67,10 @@ function speedFactor(el) {
 function place(entry, t) {
   const { el, kids } = entry;
   const w = el.clientWidth;
-  if (w > 0) entry.R = Math.max(3.5, w / 2 - 2.2);
-  const R = entry.R || 3.5;
-  const pts = placeVariant(entry.variant, entry.n, t);
+  if (w > 0) entry.mag = w / ORBIT_REF_PX; // 整体放大倍数 k:指示器越宽,轨道与圆点等比越大(下面循环里的 k 是点序号,别混)
+  const mag = entry.mag || 1;
+  const R = ORBIT_REF_R * mag;
+  const pts = placeVariant(entry.variant, entry.n, t, mag);
   for (let k = 0; k < pts.length; k++) {
     const kid = kids[k];
     if (!kid) continue;
@@ -134,7 +136,7 @@ export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = ()
     const n = entry.n || kids.length;
     const variant = variantFor(entry.variant, n);
     // 相位从静止帧时刻起算:首帧、减弱动画与正常播放的起点一致
-    const rec = { el: entry.el, kids, n, variant, t: stillTimeOf(variant), R: 0 };
+    const rec = { el: entry.el, kids, n, variant, t: stillTimeOf(variant), mag: 0 };
     entries.add(rec);
     // 先摆一帧,首帧前不出现叠在中心的一坨点
     place(rec, rec.t);

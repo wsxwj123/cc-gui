@@ -10,6 +10,9 @@ import { bash, waitLine } from './helpers/wg.mjs';
 test.afterEach(async () => { try { openAllGates(); } catch { /* 忽略 */ } });
 
 const IND = '[data-live-line] [data-live-indicator]';
+// r161 整体放大:动画以 14px 指示器为基准(最前 2.5px / 最远 1.6px),状态行指示器宽 LIVE_PX 时整体乘 K = LIVE_PX / 14。
+const LIVE_PX = 20; // 须与应用里 LIVE_INDICATOR_PX 一致
+const K = LIVE_PX / 14;
 
 /** 造一个生成中的回合：一个带 description、一直不返回结果的 Bash 工具调用 → 状态行与指示器一直在。 */
 async function liveOrbit(page, key, desc) {
@@ -219,10 +222,12 @@ test.describe('2 倍屏', () => {
     expect(p90, `R2 圆度 90 分位 ${f2(p90)} > 1.14（${summary}）`).toBeLessThanOrEqual(1.14);
   });
 
-  test('R3 视觉大小：每个点的宽、高始终在 1.45px–2.65px（r159 圆点变小：最前 2.5px / 最远 1.6px，±0.15 取整误差）', async ({ page }) => {
+  test('R3 视觉大小：每个点的宽、高始终在 [1.6K − 0.15, 2.5K + 0.15]px（r161 整体放大：K = 指示器宽 20 / 基准 14，即 2.14–3.72px；基准上最前 2.5px / 最远 1.6px，±0.15 取整误差）', async ({ page }) => {
     test.setTimeout(150_000);
     await liveOrbit(page, 'b3', 'R3 一直没返回的命令');
     await setUiZoomOne(page);
+    const indW = await page.locator(IND).first().evaluate((el) => el.getBoundingClientRect().width);
+    expect(Math.abs(indW - LIVE_PX), `R3 前置自证：状态行指示器宽应为 ${LIVE_PX}px（界面缩放 1.0；实际 ${f2(indW)}px）——圆点大小的判据按这个宽折算`).toBeLessThanOrEqual(0.5);
     const ws = []; const hs = []; let frames = 0;
     for (let i = 0; i < 44; i += 1) {
       const t = Date.now();
@@ -236,12 +241,12 @@ test.describe('2 倍屏', () => {
     const summary = `帧 ${frames}，宽 ${f2(Math.min(...ws))}–${f2(Math.max(...ws))}px，高 ${f2(Math.min(...hs))}–${f2(Math.max(...hs))}px` + `，现场 ${await sceneFacts(page)}`;
     console.log(`[R3] ${summary}`);
     expect(frames, 'R3 采样帧数应 ≥ 40').toBeGreaterThanOrEqual(40);
-    expect(Math.min(...ws, ...hs), `R3 最小宽 / 高 < 1.45px（${summary}）`).toBeGreaterThanOrEqual(1.45);
-    expect(Math.max(...ws, ...hs), `R3 最大宽 / 高 > 2.65px（${summary}）`).toBeLessThanOrEqual(2.65);
+    expect(Math.min(...ws, ...hs), `R3 最小宽 / 高 < ${f2(1.6 * K - 0.15)}px（${summary}）`).toBeGreaterThanOrEqual(1.6 * K - 0.15);
+    expect(Math.max(...ws, ...hs), `R3 最大宽 / 高 > ${f2(2.5 * K + 0.15)}px（${summary}）`).toBeLessThanOrEqual(2.5 * K + 0.15);
   });
 });
 
-test('R4 减弱动画的静止帧：三个点中心两两距离都 ≥ 3px', async ({ page }) => {
+test('R4 减弱动画的静止帧：三个点中心两两距离都 ≥ 3px × 整体放大倍数 K', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await liveOrbit(page, 'b4', 'R4 一直没返回的命令');
   const rects = await dotRects(page);
@@ -249,5 +254,5 @@ test('R4 减弱动画的静止帧：三个点中心两两距离都 ≥ 3px', asy
   const d = [[0, 1], [0, 2], [1, 2]].map(([a, b]) => Math.hypot(rects[a].x - rects[b].x, rects[a].y - rects[b].y));
   const summary = `两两距离 ${d.map(f2).join(' / ')}px`;
   console.log(`[R4] ${summary}`);
-  expect(Math.min(...d), `R4 最小两两距离 < 3px（${summary}）`).toBeGreaterThanOrEqual(3);
+  expect(Math.min(...d), `R4 最小两两距离 < ${f2(3 * K)}px（3px × K = ${f2(K)}；${summary}）`).toBeGreaterThanOrEqual(3 * K);
 });

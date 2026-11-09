@@ -6,7 +6,8 @@
 //   V2 RANDOM_POOL 恰为这 16 个 id,顺序固定。
 //   V3 每个变体 0–20 秒(步长 0.02)x、y、d 全有限,|x|、|y| ≤ 1.6,d ∈ [-1, 1];同一 t 重复调用结果一致。
 //   V4 dotPx 全程 ∈ [1.6, 2.5],每个变体最大 ≥ 2.2、最小 ≤ 1.95(有远近大小变化);FRONT_PX / BACK_PX 常量。
-//   V5 静止帧 stillT 时任意两点中心距(×R=4.8,14px 指示器)≥ 3px。
+//   V5 静止帧 stillT 时任意两点中心距(×R=4.8,14px 基准指示器)≥ 3px。
+//   V8 r161 整体放大:同一变体、同一时刻,指示器宽 w 时轨道半径与圆点缩放都是宽 14 时的 w / 14 倍。
 //   V6 八字轨道积分表首尾闭合(积分一整周期后回到起点,差 < 1e-3)。
 //   V7 ticker:register 带 variant 时按该变体摆点(transform 的 scale = dotPx/18),减弱动画摆变体的 stillT;
 //      缺省 variant 按 n 取 orbit3 / orbit4。
@@ -24,7 +25,7 @@ const T = await import(pathToFileURL(join(ROOT, 'client', 'src', 'utils', 'orbit
 const { ORBIT_VARIANTS, RANDOM_POOL, variantOf, dotPx, FRONT_PX, BACK_PX, DOT_BASE_PX, fig8Table } = V;
 const report = makeReport('check-r159-orbit-variants');
 const EPS = 1e-9;
-const R14 = 4.8; // 14px 指示器的轨道半径 = max(3.5, 14/2 - 2.2)
+const R14 = 4.8; // 14px 基准指示器的轨道半径(r161 起 R = 4.8 · w / 14)
 
 const TABLE = [
   ['orbit3', 3, '三体旋转'], ['orbit4', 4, '四体旋转'],
@@ -183,6 +184,38 @@ await report.check('V7', 'ticker 按变体摆点,减弱动画用变体 stillT,�
   const p4 = ORBIT_VARIANTS.orbit4.place(T.STILL_T, 1, 4);
   assert.ok(Math.abs(parse(odd.kids[1]).x - p4.x * R14) < 0.01);
   offOdd();
+});
+
+await report.check('V8', 'r161 整体放大:指示器宽 w 时,轨道半径与圆点 scale 都是宽 14 时的 w/14 倍(位置、scale 同比,opacity / z 不变)', 'red', () => {
+  const env = fakeEnv();
+  env.isReduced = true; // 减弱动画:只摆静止帧,结果确定
+  const tk = T.createOrbitTicker(env);
+  for (const id of RANDOM_POOL) {
+    const v = ORBIT_VARIANTS[id];
+    const base = fakeMark(v.n, id, 14);
+    const offBase = tk.register(base);
+    for (const w of [20, 28, 40]) {
+      const k = w / 14;
+      const big = fakeMark(v.n, id, w);
+      const off = tk.register(big);
+      for (let j = 0; j < v.n; j++) {
+        const a = parse(base.kids[j]); const b = parse(big.kids[j]);
+        assert.ok(Math.abs(b.x - a.x * k) < 0.02 && Math.abs(b.y - a.y * k) < 0.02, `${id} w=${w} 点 ${j} 位置 ${b.x},${b.y} 应为 ${(a.x * k).toFixed(2)},${(a.y * k).toFixed(2)}`);
+        assert.ok(Math.abs(b.s - a.s * k) < 0.002, `${id} w=${w} 点 ${j} scale ${b.s} 应为 ${(a.s * k).toFixed(3)}`);
+        assert.equal(big.kids[j].style.opacity, base.kids[j].style.opacity, `${id} opacity 不随放大变`);
+        assert.equal(big.kids[j].style.zIndex, base.kids[j].style.zIndex, `${id} z 不随放大变`);
+      }
+      off();
+    }
+    offBase();
+  }
+  // 宽 20 的直径范围:最远 1.6 · k、最近 2.5 · k(k = 20/14)
+  const k20 = 20 / 14;
+  const mark = fakeMark(3, 'orbit3', 20);
+  const off20 = tk.register(mark);
+  const s = parse(mark.kids[0]).s * 18;
+  assert.ok(s >= BACK_PX * k20 - 0.01 && s <= FRONT_PX * k20 + 0.01, `宽 20 的圆点直径 ${s.toFixed(3)} 应 ∈ [${(BACK_PX * k20).toFixed(3)}, ${(FRONT_PX * k20).toFixed(3)}]`);
+  off20();
 });
 
 process.exit(report.finish());

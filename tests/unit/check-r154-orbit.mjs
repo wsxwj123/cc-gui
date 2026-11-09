@@ -156,11 +156,11 @@ await report.check('O5a', 'ticker:首个登记启动、最后一个注销停止,
   assert.equal(env.visCbs.size, 0, '清空后退订可见性');
   offB(); // 重复注销无副作用
   assert.equal(env.step(), 0);
-  // 半径:R = max(3.5, w/2 - 2.2);宽 0 时用 3.5
+  // 半径(r161 起等比放大):R = 4.8 · (w / 14);宽 0 时按 w = 14 算
   const big = fakeMark(3, 'normal', 40);
   const offBig = tk.register(big);
   const r = Math.max(...big.kids.map((k) => Math.hypot(...pos(k))));
-  assert.ok(r <= 40 / 2 - 2.2 + 0.02 && r > 10, `半径 ${r}`);
+  assert.ok(r <= (4.8 * 40) / 14 + 0.02 && r > 10, `半径 ${r}`);
   offBig();
 });
 
@@ -201,7 +201,7 @@ await report.check('O5c', 'ticker:reduced 只摆一次静止帧(t=0.9),不跑循
   assert.equal(env.queue.size, 0);
   const expect = orbitPlacement(3, STILL_T);
   const p = pos(a.kids[0]);
-  const R = 20 / 2 - 2.2;
+  const R = (4.8 * 20) / 14; // r161:轨道半径随指示器宽等比放大(基准 14px → 4.8)
   assert.ok(Math.abs(p[0] - expect[0].x * R) < 0.01 && Math.abs(p[1] - expect[0].y * R) < 0.01);
   // 运行中途切成减弱动画:摆静止帧并停下
   env.isReduced = false;

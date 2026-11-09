@@ -2,13 +2,17 @@
 // 公式逐字移植自图鉴页 .devflow/r159-orbit-random/ref/gallery.template.html 的 <script>
 // (nod / v5 / v6 / tumble / breath / fig8 / diag / adj3 / adj4 / counter / binary),系数不改。
 // 每个 place(t, k, n) 返回 { x, y, d }:x、y 是以轨道半径为 1 的归一化坐标(调用方乘半径 R),
-// d ∈ [-1, 1] 是深度(1 = 离观察者最近)。圆点直径由 dotPx(d) 给出:最远 1.6px、最近 2.5px。
+// d ∈ [-1, 1] 是深度(1 = 离观察者最近)。圆点直径由 dotPx(d) 给出:在 14px 的基准指示器上最远 1.6px、最近 2.5px。
+// r161:整体放大——轨道半径与圆点直径都以 14px 基准指示器定义,实际指示器宽 w 时整体乘 k = w / ORBIT_REF_PX(orbitTicker.js)。
 
 const TAU = Math.PI * 2;
 const PI = Math.PI;
 
-export const FRONT_PX = 2.5; // 最前方圆点直径
-export const BACK_PX = 1.6; // 最远圆点直径
+// 基准指示器:宽 14px、轨道半径 4.8px(= 14/2 − 2.2)。下面两个圆点直径是它上面的值,实际显示再乘 k。
+export const ORBIT_REF_PX = 14;
+export const ORBIT_REF_R = 4.8;
+export const FRONT_PX = 2.5; // 最前方圆点直径(基准指示器)
+export const BACK_PX = 1.6; // 最远圆点直径(基准指示器)
 // 圆点底座:macOS WebKit 会把很小的盒子按设备像素取整再画圆角,两三像素的点会被压扁;
 // 底座取 18px,再用 transform 的 scale(dotPx / 18)缩到目标直径。须与 index.css 的 .orbit-mark i 同步。
 export const DOT_BASE_PX = 18;
