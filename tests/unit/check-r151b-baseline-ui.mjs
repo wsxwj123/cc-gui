@@ -66,13 +66,15 @@ async function loadRenderer() {
   writeFileSync(entry, [
     "import React from 'react';",
     "import { renderToStaticMarkup } from 'react-dom/server';",
-    `import { TurnBubble } from ${src('components/TurnBubble.jsx')};`,
+    `import { TurnBubble, ToolCallsGroup } from ${src('components/TurnBubble.jsx')};`,
     `import { ChatInput } from ${src('components/ChatInput.jsx')};`,
     `import { UnifiedSidebar } from ${src('components/UnifiedSidebar.jsx')};`,
     `import { useStore } from ${src('stores/sessionStore.js')};`,
     'export { useStore };',
     'const noop = () => {};',
     'export const renderTurn = (turn) => renderToStaticMarkup(React.createElement(TurnBubble, { turn, onRetry: noop, onRetryTool: noop, onFork: noop }));',
+    // r162:聊天模式 / 旧形态数据下的工具分组(ToolCallsGroup)直接渲染,给「折叠行去灰条」补上这个组件的真渲染覆盖
+    'export const renderToolGroup = (toolCalls) => renderToStaticMarkup(React.createElement(ToolCallsGroup, { toolCalls, onRetryTool: noop }));',
     'export const renderInput = (props) => renderToStaticMarkup(React.createElement(ChatInput, { onSend: noop, onStop: noop, ...props }));',
     'export const renderSidebar = () => renderToStaticMarkup(React.createElement(UnifiedSidebar));',
   ].join('\n'));
@@ -128,6 +130,8 @@ const EXPECTED = {
   // 长度 4556、指纹 0b260df7978255d7 与旧基线逐字相同;testid / cgui 集合不变,其余五个场景的长度与指纹都不变。
   // 源码锁见 check-r162-fold-no-bar,r162 验收 F1–F3(r157-live-line 套件)覆盖真实渲染。
   'turn-tool': { testids: [], cgui: [], len: 4540, sha: '22baa50915ac3b7a' },
+  // r162 新增场景(没有旧基线可对照):工具分组 ToolCallsGroup 直接渲染一条通用工具调用;结构断言见场景代码(头行文字 / 无灰条 / 头行 class)。
+  'tool-group': { testids: [], cgui: [], len: 728, sha: '30588f04f8605ecb' },
   'input-idle': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'send-btn'], len: 3333, sha: '7e99c29e2c559931' },
   'input-streaming': { testids: ['permission-mode-selector'], cgui: ['attach-btn', 'composer', 'composer-input', 'mode-selector', 'queue-btn', 'stop-btn'], len: 4099, sha: '992c6c419dcae4ff' },
   // 界面「项目」→「工作区」改名重录(下面两个侧栏场景的渲染结果各含 7 处改名文字,每处多 1 个字):
@@ -143,7 +147,7 @@ if (!renderer) {
   process.exit(0);
 }
 try {
-  const { renderTurn, renderInput, renderSidebar, useStore } = renderer;
+  const { renderTurn, renderToolGroup, renderInput, renderSidebar, useStore } = renderer;
   const SID1 = 'a1a1a1a1-0000-4000-8000-0000000000a1';
   const SID2 = 'a2a2a2a2-0000-4000-8000-0000000000a2';
   const SID3 = 'a3a3a3a3-0000-4000-8000-0000000000a3';
@@ -174,6 +178,14 @@ try {
   });
   assert.ok(turnTool.includes('R151B 看过了'), '有序块的正文确实渲染出来了');
   record('turn-tool', turnTool);
+  // r162 新增场景:工具分组 ToolCallsGroup(聊天模式 / 旧形态数据里的折叠行)直接渲染。没有旧基线可对照,
+  // 所以除了记长度 / 指纹,还直接断言结构:头行文字、没有左侧灰条、头行带 -ml-1.5 pl-1.5。
+  const groupCall = { id: 'toolu_r162', name: 'mcp__r162__probe', category: 'call', input: { q: 1 }, result: { content: 'x' } };
+  const toolGroup = renderToolGroup([groupCall]);
+  assert.ok(toolGroup.includes('1 次工具调用'), 'ToolCallsGroup 的头行确实渲染出来了');
+  assert.ok(!toolGroup.includes('border-l-2'), 'r162:ToolCallsGroup 不再有左侧灰条(border-l-2)');
+  assert.ok(/-ml-1\.5\s+pl-1\.5/.test(toolGroup) && toolGroup.includes('rounded-md'), 'r162:ToolCallsGroup 头行应带 -ml-1.5 pl-1.5 与 rounded-md');
+  record('tool-group', toolGroup);
   // ② 输入框(卡片区的宿主):空闲、运行中
   record('input-idle', renderInput({ sessionId: SID1, permKey: SID1 }));
   record('input-streaming', renderInput({ sessionId: SID1, permKey: SID1, isStreaming: true }));

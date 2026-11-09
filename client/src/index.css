@@ -1472,13 +1472,11 @@ header [data-tour="remote-control"] {
 }
 
 /* ── Thinking block ──────────────────────────────────────────── */
+/* r162:去掉左侧 2px 灰条(及悬停变强调色的左边框),与折叠行去灰条一致、对齐 Claude 桌面版;底色渐变与圆角不动。 */
 .thinking-block {
   background: linear-gradient(135deg, var(--color-canvas-warm) 0%, transparent 100%);
-  border-left: 2px solid var(--color-ink-ghost);
   border-radius: var(--radius-md);
-  transition: border-color 0.2s ease;
 }
-.thinking-block:hover { border-left-color: var(--color-accent); }
 
 /* ════════════════════════════════════════════════════════════════
    Message bubbles — Claude rhythm
