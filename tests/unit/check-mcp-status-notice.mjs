@@ -3,7 +3,7 @@
 // R8-5(CLI 2.1.227):init 自带 mcp_servers:[{name,status}],当时实测只见 connected / needs-auth,
 //   「非 connected 都提示」没问题;此前这些 server 静默不可用,用户只看到工具调不动。
 // r163(CLI 2.1.319 实测,2026-11-09):MCP 连接改成全异步不阻塞启动,init 时 15 个里 13 个非 connected,
-//   其中 11 个只是 pending(正在连),2 个 needs-auth、1 个 failed。pending 连完自然变 connected,当问题报是误报,
+//   其中 10 个只是 pending(正在连),2 个 needs-auth、1 个 failed。pending 连完自然变 connected,当问题报是误报,
 //   而且每个新进程(回滚 / 空闲回收 / 新会话)都会重弹一遍。所以:
 //   ① pending / disabled 不算问题(connected 当然也不算),其余非 connected(needs-auth / failed / 未知新值)照旧提示;
 //   ② 同一个 server 同一种状态,这次运行里只提示一次(跨进程),状态变了 / 恢复后又坏才再提示。
@@ -37,10 +37,12 @@ assert.deepEqual(extractMcpServerIssues([{ name: 'a', status: 'pending' }, { nam
 assert.deepEqual(extractMcpServerIssues([{ name: 'a', status: 'disabled' }]), [], 'r163:disabled 是用户自己关的,不是问题');
 assert.deepEqual(extractMcpServerIssues([{ name: 'a', status: 'PENDING' }, { name: 'b', status: ' Connected ' }]), [], '状态值大小写 / 首尾空白不影响判定');
 assert.deepEqual(extractMcpServerIssues([{ name: 'a', status: 'error' }]).map((i) => i.status), ['error'], '未知的新状态值仍然提示(不吞)');
+assert.deepEqual(extractMcpServerIssues([{ name: 'a', status: '   ' }, { name: 'b', status: '' }]), [], '状态是空白 / 空串的项没法提示,跳过');
+assert.deepEqual(extractMcpServerIssues([{ name: 'a', status: 'needs-auth' }, { name: 'a', status: 'connected' }]), [], '同名出现两次以最后一次为准(脏数据防呆)');
 {
   const issues = extractMcpServerIssues(REAL_INIT);
   assert.deepEqual(issues.map((i) => `${i.name}:${i.status}`), ['biorender:needs-auth', 'synapse:needs-auth', 'benchling:failed'],
-    'r163:真实冷启动 init(15 个里 13 个非 connected)只剩 3 个真问题,11 个 pending 不报');
+    'r163:真实冷启动 init(15 个里 13 个非 connected)只剩 3 个真问题,10 个 pending 不报');
 }
 // 字段缺失/空数组/非数组 → 静默空(老 CLI 不带 mcp_servers 时零扰动)
 assert.deepEqual(extractMcpServerIssues(undefined), [], '字段缺失静默');
@@ -84,6 +86,30 @@ assert.equal(formatMcpServerNotice(undefined), null, '缺失 → null');
   // (benchling 此后一直是 needs-auth:fixture 的 init() 每次都把没覆盖的项还原成默认值,这里要显式带上,免得它「状态变回去」被当成新变化)
   assert.deepEqual(names(ledger.take(init({ benchling: 'needs-auth', synapse: 'connected' }))), [], '恢复 connected:不提示');
   assert.deepEqual(names(ledger.take(init({ benchling: 'needs-auth' }))), ['synapse:needs-auth'], '恢复后又 needs-auth:再提示(账本在 connected 时已划掉)');
+  // 状态值按「去空白、转小写」比较:Failed 与 failed 是同一个状态,不重提
+  assert.deepEqual(names(ledger.take(init({ benchling: 'Failed ', synapse: 'connected' }))), ['benchling:Failed '], 'needs-auth → Failed 是状态变了:提示(显示原值)');
+  assert.deepEqual(names(ledger.take(init({ benchling: 'failed', synapse: 'connected' }))), [], 'Failed 与 failed 是同一状态:不重提');
+  // disabled 也清账:被用户关掉再开、又坏,要再提示
+  assert.deepEqual(names(ledger.take(init({ benchling: 'disabled', synapse: 'connected' }))), [], 'disabled:不提示');
+  assert.deepEqual(names(ledger.take(init({ benchling: 'failed', synapse: 'connected' }))), ['benchling:failed'], 'disabled 清过账:再 failed 要再提示');
+  // 同一个 init 里同名出现两次:以最后一次为准,不会每个 init 来回重提
+  {
+    const L = createMcpNoticeLedger();
+    const dup = [{ name: 'x', status: 'needs-auth' }, { name: 'x', status: 'failed' }];
+    assert.deepEqual(names(L.take(dup)), ['x:failed'], '同名两次:取最后一次');
+    assert.deepEqual(names(L.take(dup)), [], '同样的脏 init 再来:不重提');
+  }
+  // record:false(窗口在后台、没人看到这条提示):照常给出,但不记账,下一次 init 再给
+  {
+    const L = createMcpNoticeLedger();
+    assert.deepEqual(names(L.take(init(), { record: false })), ['biorender:needs-auth', 'synapse:needs-auth', 'benchling:failed'], 'record:false 照常给出');
+    assert.deepEqual(names(L.take(init(), { record: false })), ['biorender:needs-auth', 'synapse:needs-auth', 'benchling:failed'], 'record:false 不记账:下次还给');
+    assert.deepEqual(names(L.take(init())), ['biorender:needs-auth', 'synapse:needs-auth', 'benchling:failed'], '这次给出并记账');
+    assert.deepEqual(names(L.take(init())), [], '记账之后不再给');
+    // 清账不受 record 影响
+    assert.deepEqual(names(L.take(init({ synapse: 'connected' }), { record: false })), [], 'connected:不提示');
+    assert.deepEqual(names(L.take(init())), ['synapse:needs-auth'], 'record:false 的那次 init 里 connected 照样清了账');
+  }
   // 脏数据不崩
   assert.deepEqual(ledger.take(undefined), [], '非数组 → 空');
   assert.deepEqual(ledger.take([null, { name: 'x' }, { status: 'failed' }]), [], '残缺项 → 空');
@@ -96,8 +122,8 @@ assert.equal(formatMcpServerNotice(undefined), null, '缺失 → null');
   const app = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'client', 'src', 'App.jsx'), 'utf8');
   assert.ok(/const mcpNoticeLedger = createMcpNoticeLedger\(\)/.test(app), 'App.jsx 应在模块级建一个账本(分屏 / 重挂载共享)');
-  assert.ok(/formatMcpServerNotice\(mcpNoticeLedger\.take\(event\.mcp_servers\)\)/.test(app),
-    'init 分支消费 event.mcp_servers 且走「账本 → 文案」两个纯函数');
+  assert.ok(/formatMcpServerNotice\(mcpNoticeLedger\.take\(event\.mcp_servers, \{ record: !document\.hidden \}\)\)/.test(app),
+    'init 分支消费 event.mcp_servers,走「账本 → 文案」两个纯函数,窗口在后台时不记账');
   assert.ok(!/mcpNoticeSeenPids/.test(app), '旧的按 pid 去重已去掉(换成跨进程的账本)');
 }
 

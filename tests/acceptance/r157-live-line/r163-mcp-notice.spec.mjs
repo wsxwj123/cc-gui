@@ -1,9 +1,9 @@
 // r163:新进程 init 里 MCP 服务器的黄字提示——只报真问题(needs-auth / failed),「正在连接(pending)」不报,
 // 同一服务器同一状态这次运行里只报一次(换会话 / 新进程不重弹),状态变了才再报。
-// 背景(2026-11-09 真命令行实测,CLI 2.1.319):MCP 连接全异步,冷启动 init 时 15 个里 13 个非 connected,11 个只是 pending;
+// 背景(2026-11-09 真命令行实测,CLI 2.1.319):MCP 连接全异步,冷启动 init 时 15 个里 13 个非 connected,10 个只是 pending;
 // 旧行为把它们全当问题、每个新进程弹一遍长黄字。
 // 只看页面上看得见的东西(黄字的文字、助手回复文字);假命令行在 init 里带 scenario.mcpServers(见 helpers/fake-claude.mjs 的 r163 扩展)。
-//   G1 一个新进程的 init:3 个真问题各出现在黄字里,11 个 pending 的名字一个都不出现;
+//   G1 一个新进程的 init:3 个真问题各出现在黄字里,10 个 pending 的名字一个都不出现;
 //   G2 同一页再换一个会话发消息(新进程、同样的 init):不再弹黄字;
 //   G3 之后某个服务器状态变了(failed → needs-auth):只弹变了的那一个;
 //   G4 init 里只有 pending(其余 connected):整条黄字都不弹。
@@ -11,7 +11,7 @@ import { test, expect } from '@playwright/test';
 import { SESSIONS } from './helpers/fixtures.mjs';
 import { primeOverlays, openApp, openSessionByMarker, sendInOpenSession, resetCtl, writeScenario, waitRoundIdle } from './helpers/runtime.mjs';
 
-const PENDING = ['pubmed', 'biorxiv', 'consensus', 'c-trials', 'chembl', 'wiley', 'ot', 'pdf', 'paper-search-mcp', 'deepseek-search', 'ot2'];
+const PENDING = ['pubmed', 'biorxiv', 'consensus', 'c-trials', 'chembl', 'wiley', 'ot', 'pdf', 'paper-search-mcp', 'deepseek-search']; // 真命令行实测:10 个 pending
 const mcp = ({ benchling = 'failed' } = {}) => [
   ...PENDING.map((n) => ({ name: `plugin:bio-research:${n}`, status: 'pending' })),
   { name: 'plugin:bio-research:biorender', status: 'needs-auth' },

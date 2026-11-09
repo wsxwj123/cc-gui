@@ -6129,7 +6129,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 多个合并成一条;字段缺失/空数组纯函数内静默。r163:pending(正在连接)不算问题;
             // 同一 server 同一状态按「账本」跨进程只提示一次(见 mcpNoticeLedger 注释),
             // setModel 补发的 init、reattach 回放的 init、新进程的 init 报同样的问题都不重弹。
-            const mcpNotice = formatMcpServerNotice(mcpNoticeLedger.take(event.mcp_servers));
+            // 窗口在后台(document.hidden)时这条提示没人看到:照常弹,但不记账,下一次 init 再给出来。
+            const mcpNotice = formatMcpServerNotice(mcpNoticeLedger.take(event.mcp_servers, { record: !document.hidden }));
             if (mcpNotice) setProviderSwitchNotice({ text: mcpNotice });
             // Record the provider this turn ran under so a later switch can strip
             // now-invalid thinking-block signatures. Model name can't tell a mimo
