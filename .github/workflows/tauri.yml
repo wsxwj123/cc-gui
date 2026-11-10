@@ -43,7 +43,8 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # 依赖一律从 npm 官方源下载:开发机的 npm 源是国内镜像(registry.npmmirror.com),两个锁文件里的下载地址因此全是镜像,
+      # 依赖一律从 npm 官方源下载:开发机的 npm 源是国内镜像(registry.npmmirror.com),锁文件里的下载地址因此几乎全是镜像
+      # (根 145 条镜像 + 10 条官方,client 476 条全是镜像),
       # GitHub 的构建机从那里下包常 503 / 504(v0.2.458 两次构建都卡死在这一步,各约 16 分钟,release / publish-npm 被跳过)。
       # NPM_CONFIG_REPLACE_REGISTRY_HOST=always:把锁文件里所有下载地址的主机换成上面的官方源;sha512 完整性校验照旧。
       # 前提是锁文件里只有官方源 / 镜像两种主机(没有 git 依赖、GitHub 压缩包),由 tests/unit/check-r166-ci-npm-official-registry.mjs 看守。
