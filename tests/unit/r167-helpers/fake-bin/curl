@@ -1,0 +1,111 @@
+#!/bin/bash
+# r167 测试用的假 curl:不碰网络,按「假世界」($WORLD 目录:config / start / now / puts.log …)回答。
+# 只认被测脚本会发的两种请求:GET 包页面(packument,带 --fail)与 PUT .../syncs。
+#   官方源(registry.npmjs.org):该包「可见」(UP_<key> 秒之后)才在 versions 表里有新版本;
+#   镜像(registry.npmmirror.com):在「官方源已可见之后」收到过一次成功的同步请求、且过了 MIRROR_DELAY 秒,才有新版本
+#     (官方源还没有时催的同步无效——真实镜像同步时拿不到那个版本)。
+# config 里的开关:UP_main / UP_darwin / UP_win32(秒或 never)、MIRROR_DELAY、MIRROR_PRE(开局镜像就有的包)、
+#   FAIL_FIRST(前 N 次请求超时)、PUT_FAIL_FIRST(前 N 次同步请求超时)、PUT_BAD_FIRST(之后再有 N 次同步请求收到错误响应体、curl 退出码仍为 0)、
+#   DECOY(官方源在可见前返回「只有 dist-tags / time 提到新版本」的包页面)、
+#   PRETTY(可见后的包页面带缩进)、MIRROR_404(镜像没有时按 404 处理)、WORLD_VER(版本号)。
+set -u
+method=GET
+url=""
+fail=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    --max-time|--connect-timeout|-m|-H|-o|-w|--retry) shift 2 ;;
+    -f|--fail) fail=1; shift ;;
+    http://*|https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+
+. "$WORLD/config"
+START=$(cat "$WORLD/start")
+NOW=$(cat "$WORLD/now")
+REL=$((NOW - START))
+V="${WORLD_VER:-0.2.458}"
+
+echo "$REL $method $url" >> "$WORLD/urls.log"
+n=$(cat "$WORLD/ncalls" 2>/dev/null || echo 0)
+echo $((n + 1)) > "$WORLD/ncalls"
+if [ "$n" -lt "${FAIL_FIRST:-0}" ]; then
+  echo "$REL FAIL-FIRST $method $url" >> "$WORLD/calls.log"
+  exit 28
+fi
+
+case "$url" in
+  *registry.npmjs.org*) reg=official ;;
+  *registry.npmmirror.com*) reg=mirror ;;
+  *) echo "$REL UNKNOWN-HOST $method $url" >> "$WORLD/calls.log"; exit 6 ;;
+esac
+rest="${url##*%2[fF]}"
+p="${rest%%/*}"
+case "$p" in
+  cc-gui) key=main ;;
+  cc-gui-darwin-arm64) key=darwin ;;
+  cc-gui-win32-x64) key=win32 ;;
+  *) echo "$REL UNKNOWN-PKG $method $url" >> "$WORLD/calls.log"; exit 6 ;;
+esac
+
+up_off=$(eval "echo \${UP_$key:-never}")
+up_visible=0
+if [ "$up_off" != never ] && [ "$REL" -ge "$up_off" ]; then up_visible=1; fi
+
+mirror_has() {
+  case " ${MIRROR_PRE:-} " in *" $1 "*) return 0 ;; esac
+  local off
+  off=$(eval "echo \${UP_$1:-never}")
+  [ -f "$WORLD/puts.log" ] || return 1
+  local t k st
+  while read -r t k st; do
+    [ "$k" = "$1" ] || continue
+    [ "$st" = ok ] || continue
+    [ "$off" != never ] || continue
+    [ "$t" -ge "$off" ] || continue
+    if [ "$REL" -ge $((t + ${MIRROR_DELAY:-240})) ]; then return 0; fi
+  done < "$WORLD/puts.log"
+  return 1
+}
+
+body_old()    { printf '{"name":"x","dist-tags":{"latest":"0.2.454"},"versions":{"0.2.453":{"version":"0.2.453"},"0.2.454":{"version":"0.2.454"}},"time":{"0.2.454":"2026-11-08T04:28:31.616Z"}}'; }
+body_decoy()  { printf '{"name":"x","dist-tags":{"latest":"%s"},"versions":{"0.2.454":{"version":"0.2.454","optionalDependencies":{"y":"%s"}}},"time":{"0.2.454":"2026-11-08T04:28:31.616Z","%s":"2026-11-10T04:57:16.000Z"}}' "$V" "$V" "$V"; }
+body_new()    { printf '{"name":"x","dist-tags":{"latest":"%s"},"versions":{"0.2.454":{"version":"0.2.454"},"%s":{"version":"%s"}},"time":{"%s":"2026-11-10T04:57:16.000Z"}}' "$V" "$V" "$V" "$V"; }
+body_pretty() { printf '{\n  "name": "x",\n  "dist-tags": {\n    "latest": "%s"\n  },\n  "versions": {\n    "0.2.454": {\n      "version": "0.2.454"\n    },\n    "%s": {\n      "version": "%s"\n    }\n  }\n}\n' "$V" "$V" "$V"; }
+body_visible() { if [ "${PRETTY:-0}" = 1 ]; then body_pretty; else body_new; fi; }
+
+if [ "$method" = PUT ]; then
+  m=$(cat "$WORLD/nputs" 2>/dev/null || echo 0)
+  echo $((m + 1)) > "$WORLD/nputs"
+  if [ "$m" -lt "${PUT_FAIL_FIRST:-0}" ]; then
+    echo "$REL $key fail" >> "$WORLD/puts.log"
+    exit 28
+  fi
+  if [ "$m" -lt $(( ${PUT_FAIL_FIRST:-0} + ${PUT_BAD_FIRST:-0} )) ]; then
+    # 收到的是错误响应(像 HTTP 5xx / 代理错误页):curl 本身退出码为 0(没加 --fail),但响应体不是成功体
+    echo "$REL $key bad" >> "$WORLD/puts.log"
+    printf '{"error":"bad gateway"}'
+    exit 0
+  fi
+  echo "$REL $key ok" >> "$WORLD/puts.log"
+  printf '{"ok":true,"id":"fake","type":"sync_package","state":"waiting"}'
+  exit 0
+fi
+
+echo "$REL GET $reg $key" >> "$WORLD/calls.log"
+if [ "$reg" = official ]; then
+  if [ "$up_visible" = 1 ]; then body_visible
+  elif [ "${DECOY:-0}" = 1 ]; then body_decoy
+  else body_old; fi
+  exit 0
+fi
+if mirror_has "$key"; then body_visible; exit 0; fi
+if [ "${MIRROR_404:-0}" = 1 ]; then
+  if [ "$fail" = 1 ]; then exit 22; fi
+  printf '{"error":"[NOT_FOUND] not found"}'
+  exit 0
+fi
+body_old
+exit 0

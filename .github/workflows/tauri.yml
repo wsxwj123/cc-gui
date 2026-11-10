@@ -316,15 +316,16 @@ jobs:
       # 必须用 PUT /-/package/<pkg>/syncs —— 这是 npmmirror 唯一的同步触发接口。
       # 曾经写成 GET 包元数据,实测完全不触发同步:v0.2.354 发布 8 小时后两个平台分包
       # 在 npmmirror 上仍是 404,Windows 用户走镜像源装只拿到主包,报"没找到当前平台的安装包"。
+      # r167:大分包在官方源上要 10–60 分钟才可见(0.2.454 晚 10 / 55 分钟,0.2.458 晚整整 60 分钟)。发布后立刻催同步,镜像只拿到
+      # 当时已可见的主包,两个平台分包缺失(0.2.458 就这样漏了,事后手动补同步才追平)。所以逻辑拆进 scripts/warm-npmmirror.sh:
+      # 每 60 秒一轮,对每个包先看镜像有没有;没有且官方源已有才催;催过 5 分钟没追上再催;三个包都追平才结束,上限 2 小时。
+      # 脚本会等很久:这个步骤让 publish-npm 任务(以及整次运行)晚结束,但 release 任务与它无依赖边,GitHub 发布页不受影响。
+      # 步骤上限 timeout-minutes 必须比脚本默认上限(7200 秒)多 10 分钟以上(单测 check-r167 看守)。
       # 预热失败不许把 job 弄红 —— 包已经发出去了,镜像迟早会同步。
       - name: Warm npmmirror
         if: steps.npmtoken.outputs.has == 'true'
         continue-on-error: true
-        run: |
-          for pkg in cc-gui cc-gui-darwin-arm64 cc-gui-win32-x64; do
-            echo -n "sync ${pkg}: "
-            curl -sS -X PUT --max-time 30 \
-              "https://registry.npmmirror.com/-/package/@wsxwj123%2F${pkg}/syncs" || true
-            echo
-          done
-          curl -sS -o /dev/null "https://registry.npmmirror.com/@wsxwj123%2fcc-gui"
+        timeout-minutes: 130
+        env:
+          NPMMIRROR_REGISTRY: https://registry.npmmirror.com
+        run: bash scripts/warm-npmmirror.sh

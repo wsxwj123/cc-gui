@@ -1,0 +1,14 @@
+#!/bin/bash
+# r167 测试用的假 sleep:不真睡,只把假时钟($WORLD/now)往前拨,并记一行。
+# 假时间越过 $WORLD/cap(上限)就判定被测脚本跑飞:写 runaway 标记并杀掉调用它的脚本(父进程),免得测试卡死。
+n="${1:-0}"
+now=$(cat "$WORLD/now")
+now=$((now + n))
+echo "$now" > "$WORLD/now"
+echo "$n" >> "$WORLD/sleeps.log"
+cap=$(cat "$WORLD/cap")
+if [ "$now" -gt "$cap" ]; then
+  echo RUNAWAY > "$WORLD/runaway"
+  kill -9 "$PPID"
+fi
+exit 0

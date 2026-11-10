@@ -1,0 +1,4 @@
+#!/bin/bash
+# r167 测试用的假 date:只接管 `date +%s`(返回假时钟 $WORLD/now),其它参数交给系统自带的 date。
+if [ "${1:-}" = "+%s" ]; then cat "$WORLD/now"; exit 0; fi
+command -p date "$@"
