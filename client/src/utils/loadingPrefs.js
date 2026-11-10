@@ -12,9 +12,11 @@ export const RANDOM_LOADING_STYLE = 'random';
 export const DEFAULT_LOADING_STYLE = RANDOM_LOADING_STYLE;
 export const LOADING_SPEED_KEY = 'cgui-loading-speed';
 export const LOADING_STYLE_KEY = 'cgui-loading-style';
-// r164:一次性重置的整数标记(档位)。localStorage 里没有、读不出整数、或小于 LOADING_STYLE_EPOCH → 重置一次并写下标记;
-// 达到档位 → 不动,之后用户在主题弹窗里选什么都保留。以后还想让所有人再重置一次:把 LOADING_STYLE_EPOCH +1。
-// (验收套件预置的标记是 999,所以不会被将来的加档顶掉。)
+// r164:一次性重置的整数标记(档位)。localStorage 里没有、开头读不出数字(Number.parseInt 取开头的整数,'1abc' 按 1 算)、
+// 或小于 LOADING_STYLE_EPOCH → 重置一次并写下标记;达到档位 → 不动,之后用户在主题弹窗里选什么都保留。
+// 以后还想让所有人再重置一次:把 LOADING_STYLE_EPOCH +1,并同步改 tests/acceptance/r159-orbit-random/r164-style-reset.spec.mjs
+// 里写死的标记值 '1'(U1 / U2 / U3 / U5 的期望与预置;验收按约定不 import 应用内部模块,所以不会自动跟着变)。
+// (r154-ui-live-line / r157-orbit 两个套件预置的标记是 999,不会被将来的加档顶掉。)
 export const LOADING_STYLE_EPOCH_KEY = 'cgui-loading-style-epoch';
 export const LOADING_STYLE_EPOCH = 1;
 

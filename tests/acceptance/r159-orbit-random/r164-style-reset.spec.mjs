@@ -6,6 +6,8 @@
 // 「旧版留下的存储」用 seedOnce 在这个标签页【第一次导航前】写入，刷新时不再写——
 // 这样刷新后看到的是应用自己留下的结果，和真实升级、再重启一次的过程一致。
 // （其它套件的 primeOverlays 每次导航都重写预置，不适合测这条。）
+// 升级标记的当前档位 '1' 在 U1 / U2 / U3 / U5 里是写死的（验收不 import 应用内部模块）：产品以后把
+// client/src/utils/loadingPrefs.js 的 LOADING_STYLE_EPOCH 加档时，这几处的 '1' 要同步改，否则会红。
 import { test, expect } from '@playwright/test';
 import { openApp } from './helpers/runtime.mjs';
 import {
