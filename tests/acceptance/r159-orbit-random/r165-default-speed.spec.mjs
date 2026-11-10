@@ -52,8 +52,10 @@ test('V1 旧版选过「慢」的人保持「慢」：存储里转速仍是 slow
 test('V2 全新环境（什么都没存过）：转速「标准」选中，「慢」「快」不选中', async ({ page }) => {
   await seedOnce(page, {});
   await openApp(page);
+  expect(await lsGet(page, SPEED), '应用自己不把默认转速写进存储：全新环境打开后 localStorage["cgui-loading-speed"] 仍应没有（null）').toBeNull();
   await openInterfaceTab(page);
   await expectSpeedChecked(page, 'normal', '全新环境');
+  expect(await lsGet(page, SPEED), '打开主题弹窗看一眼转速也不该写存储（只有点选才写）').toBeNull();
 });
 
 test('V3 存的转速不合法（turbo）：回落到默认「标准」选中', async ({ page }) => {

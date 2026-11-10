@@ -26,12 +26,15 @@ const report = makeReport('check-r165-default-speed');
 
 const STYLE = 'cgui-loading-style';
 const SPEED = 'cgui-loading-speed';
+// 带记录的假 storage:writes 按先后顺序记每次 setItem 的键。
 const mem = (init = {}) => {
   const data = { ...init };
+  const writes = [];
   return {
     data,
+    writes,
     getItem: (k) => (Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null),
-    setItem: (k, v) => { data[k] = String(v); },
+    setItem: (k, v) => { writes.push(k); data[k] = String(v); },
     removeItem: (k) => { delete data[k]; },
   };
 };
@@ -54,6 +57,8 @@ async function loadStore(initial) {
 await report.check('D2', '状态库:没存过 → normal;选过慢 / 快的保持;非法值 → normal;r164 重置不牵连转速', 'red', async () => {
   const fresh = await loadStore({});
   assert.equal(fresh.store.getState().loadingSpeed, 'normal', '没存过转速 → 标准');
+  assert.equal(fresh.storage.getItem(SPEED), null, '应用自己不把默认转速写进存储(没选过的人以后跟着默认走,将来再改默认才会生效)');
+  assert.ok(!fresh.storage.writes.includes(SPEED), '加载状态库期间不该写转速键');
   // 真 setter(它写的是调用那一刻的全局 localStorage,所以紧跟着 loadStore 用):用户改选后重开仍是改选的
   fresh.store.getState().setLoadingSpeed('fast');
   assert.equal(fresh.storage.data[SPEED], 'fast');
@@ -77,10 +82,10 @@ await report.check('D2', '状态库:没存过 → normal;选过慢 / 快的保�
 await report.check('D3', '兜底取同一个常量:源码里没有写死的 || \'slow\' 与 SPEED_FACTORS.slow 缺省', 'red', () => {
   const ticker = readFileSync(src('utils', 'orbitTicker.js'), 'utf8');
   assert.ok(!/DEFAULT_FACTOR\s*=\s*SPEED_FACTORS\.slow\b/.test(ticker), 'orbitTicker 的缺省因子不该写死 slow');
-  assert.ok(ticker.includes('DEFAULT_LOADING_SPEED'), 'orbitTicker 的缺省因子应取 DEFAULT_LOADING_SPEED');
+  assert.ok(/DEFAULT_FACTOR\s*=\s*SPEED_FACTORS\[DEFAULT_LOADING_SPEED\]/.test(ticker), 'orbitTicker 的缺省因子应是 SPEED_FACTORS[DEFAULT_LOADING_SPEED]');
   for (const [name, text] of [['App.jsx', readFileSync(src('App.jsx'), 'utf8')], ['LoadingBits.jsx', readFileSync(src('components', 'LoadingBits.jsx'), 'utf8')]]) {
-    assert.ok(!/loadingSpeed\)\s*\|\|\s*['"]slow['"]/.test(text), `${name}:读 store.loadingSpeed 之后的兜底不该写死 'slow'`);
-    assert.ok(text.includes('DEFAULT_LOADING_SPEED'), `${name}:兜底应取 DEFAULT_LOADING_SPEED`);
+    assert.ok(!/loadingSpeed\)\s*(\|\||\?\?)\s*['"]slow['"]/.test(text), `${name}:读 store.loadingSpeed 之后的兜底不该写死 'slow'(|| 与 ?? 两种写法都查)`);
+    assert.ok(/loadingSpeed\)\s*\|\|\s*DEFAULT_LOADING_SPEED\b/.test(text), `${name}:读 store.loadingSpeed 之后的兜底应是 || DEFAULT_LOADING_SPEED(不只是 import 了它)`);
   }
 });
 
