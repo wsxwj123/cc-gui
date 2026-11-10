@@ -288,6 +288,19 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.458">v0.2.458</a></b>(2026-11-10)· 提示 1 条</summary>
+
+**提示**
+
+<details><summary>加载动画升级后第一次打开会重置为「随机」</summary>
+
+不管之前在 设置 → 主题 → 界面 → 加载动画 里选过什么（三体旋转、四体旋转、CLI 等），更新后第一次打开都改成「随机」（每次进入思考、或开始一次新的工具调用时，从 16 种旋转动画里换一个）。这个重置只做一次：之后在加载动画里再选什么都会保留，转速也不受影响。不想用随机的，打开后重新选一次即可。
+
+</details>
+
+</details>
+
+<details>
 <summary><b>v0.2.457</b>(2026-11-10)· 修复 1 条</summary>
 
 **修复**
