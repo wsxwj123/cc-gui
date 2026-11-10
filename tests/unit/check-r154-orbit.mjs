@@ -11,7 +11,7 @@
 //   O7 r161 变速方向:展开(th=±π/2)时相位走得最快、排成一线(th=0、π)时最慢,快慢之比 ≥ 3;
 //      一整圈里最快的时刻仰俯角接近最大、最慢的时刻仰俯角接近 0。
 //   O5 ticker:首个登记启动、最后一个注销停止、hidden 暂停与恢复、reduced 只摆一次静止帧、
-//      转速 0.7 / 1 / 1.4 生效(同样帧数 fast 位移大于 normal 大于 slow)。
+//      转速 0.7 / 1 / 1.4 生效(同样帧数 fast 位移大于 normal 大于 slow);缺省 / 非法值按默认转速 normal(r165 起)。
 //
 // 跑法:node tests/unit/check-r154-orbit.mjs
 import assert from 'node:assert/strict';
@@ -241,7 +241,7 @@ await report.check('O5c', 'ticker:reduced 只摆一次静止帧(STILL_T),不跑�
   off(); offB();
 });
 
-await report.check('O5d', 'ticker:转速 slow 0.7 / normal 1 / fast 1.4(缺省按 slow)', 'red', () => {
+await report.check('O5d', 'ticker:转速 slow 0.7 / normal 1 / fast 1.4(缺省与非法值按默认 normal,r165 起;原按 slow)', 'red', () => {
   const env = fakeEnv();
   const tk = createOrbitTicker(env);
   const marks = { slow: fakeMark(3, 'slow'), normal: fakeMark(3, 'normal'), fast: fakeMark(3, 'fast'), none: fakeMark(3, null), bad: fakeMark(3, 'turbo') };
@@ -257,8 +257,8 @@ await report.check('O5d', 'ticker:转速 slow 0.7 / normal 1 / fast 1.4(缺省�
     }
   }
   assert.ok(travel.fast > travel.normal && travel.normal > travel.slow, JSON.stringify(travel));
-  assert.ok(Math.abs(travel.none - travel.slow) < 1e-6, '缺省按 slow');
-  assert.ok(Math.abs(travel.bad - travel.slow) < 1e-6, '非法值按 slow');
+  assert.ok(Math.abs(travel.none - travel.normal) < 1e-6, '缺省按 normal(默认转速)');
+  assert.ok(Math.abs(travel.bad - travel.normal) < 1e-6, '非法值按 normal(默认转速)');
   // 中途改转速:只改 dataset,下一帧生效,不跳相位
   const m = marks.slow;
   m.el.dataset.speed = 'fast';

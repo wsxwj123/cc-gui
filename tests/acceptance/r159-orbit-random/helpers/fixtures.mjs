@@ -18,7 +18,8 @@ export function fakeCtlDir() { return path.join(homeDir(), 'fake-claude'); }
 export function manifestPath() { return suitePath('.artifacts', 'fixture-manifest.json'); }
 
 // 〈2026-11-10 r164〉末尾追加 d1(r164-style-reset.spec.mjs 的直播用例专用);只在末尾加,前面各键的 sid 不变。
-export const KEYS = ['a1', 'a2', 'a4', 'b2', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'd1'];
+// 〈2026-11-10 r165〉再追加 d2(r165-default-speed.spec.mjs 的直播用例专用)。
+export const KEYS = ['a1', 'a2', 'a4', 'b2', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'd1', 'd2'];
 export const SESSIONS = Object.fromEntries(KEYS.map((k, i) => [k, {
   sid: `a1590${String(i + 1).padStart(3, '0')}-0000-4000-8000-${String(i + 1).padStart(12, '0')}`,
   marker: `R159MARK${k.toUpperCase()}X`, // 以 X 收尾：不会是别的 marker 的子串

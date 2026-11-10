@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { orbitTicker } from '../utils/orbitTicker.js';
 import { ORBIT_VARIANTS, variantOf } from '../utils/orbitVariants.js';
-import { DEFAULT_LOADING_STYLE, RANDOM_LOADING_STYLE, pickRandomStyle, shouldReroll, createScopedRollStore } from '../utils/loadingPrefs.js';
+import { DEFAULT_LOADING_STYLE, DEFAULT_LOADING_SPEED, RANDOM_LOADING_STYLE, pickRandomStyle, shouldReroll, createScopedRollStore } from '../utils/loadingPrefs.js';
 
 // r161:状态行里旋转指示器的宽(CSS px)。整个动画(轨道 + 圆点)以 14px 为基准等比放大,所以改这一个数就是整体放大 / 缩小。
 export const LIVE_INDICATOR_PX = 20;
@@ -43,7 +43,7 @@ export function Orbit({ n = 3, variant = null, size = 20, markProps = null }) {
   const v = variantOf(variant) || ORBIT_VARIANTS[n === 4 ? 'orbit4' : 'orbit3'];
   const count = v.n;
   const variantId = v.id;
-  const speed = useStore((s) => s.loadingSpeed) || 'slow';
+  const speed = useStore((s) => s.loadingSpeed) || DEFAULT_LOADING_SPEED;
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;

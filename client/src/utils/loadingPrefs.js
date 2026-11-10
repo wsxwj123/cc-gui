@@ -4,7 +4,10 @@
 import { RANDOM_POOL } from './orbitVariants.js';
 
 export const LOADING_SPEEDS = Object.freeze(['slow', 'normal', 'fast']);
-export const DEFAULT_LOADING_SPEED = 'slow';
+// r165:默认转速由 slow(慢)改为 normal(标准)。只影响没存过转速、或存的值不合法的人;存过 slow / normal / fast 的人原样不变。
+// 所有「没有转速时怎么办」的兜底都取这个常量(readLoadingSpeed、normalizeLoadingSpeed、转速选择器、Orbit、orbitTicker 的缺省因子),
+// 别再在别处写死 'slow'。
+export const DEFAULT_LOADING_SPEED = 'normal';
 // r159:默认改为随机。只影响 localStorage 里还没有 cgui-loading-style 的人;
 // 选过任何样式(包括 orbit3、cli)的人保持原值,readLoadingStyle 的读取行为不变。
 // r164:readLoadingStyle 仍然只读;升级后「第一次打开」把所有人重置为随机的动作在 resolveLoadingStyle 里(状态库初始化用它)。

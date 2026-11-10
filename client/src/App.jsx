@@ -79,7 +79,7 @@ import TurnScrubber from './components/TurnScrubber.jsx';
 import { LoadingMark } from './components/LoadingBits.jsx';
 import { LiveStatusLine } from './components/LiveStatusLine.jsx';
 import { liveStatusLabel, isLiveLineHostedByGroup } from './utils/liveStatus.js';
-import { DEFAULT_LOADING_STYLE } from './utils/loadingPrefs.js';
+import { DEFAULT_LOADING_STYLE, DEFAULT_LOADING_SPEED } from './utils/loadingPrefs.js';
 import { ORBIT_VARIANTS, RANDOM_POOL } from './utils/orbitVariants.js';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import { useMultiSelect, SelModeToggle, BatchBar, SelCheckbox } from './components/MultiSelect.jsx';
@@ -789,7 +789,7 @@ const LOADING_SPEED_OPTIONS = [
 function LoadingStylePicker() {
   const loadingStyle = useStore((s) => s.loadingStyle) || DEFAULT_LOADING_STYLE;
   const setLoadingStyle = useStore((s) => s.setLoadingStyle);
-  const loadingSpeed = useStore((s) => s.loadingSpeed) || 'slow';
+  const loadingSpeed = useStore((s) => s.loadingSpeed) || DEFAULT_LOADING_SPEED;
   const setLoadingSpeed = useStore((s) => s.setLoadingSpeed);
   return (
     <div className="space-y-1.5">

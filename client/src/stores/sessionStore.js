@@ -911,7 +911,7 @@ export const useStore = create((set, get) => ({
   // 'cli' = 原 ASCII 帧 spinner;其余对应 index.css 的 .loading-<id> 纯 CSS 动画(移植自 clawd-station)。
   // (访问 localStorage 本身在禁用存储时也会抛,所以包在 try 里)
   loadingStyle: (() => { try { return resolveLoadingStyle(localStorage); } catch { return resolveLoadingStyle(null); } })(),
-  // 三体 / 四体旋转的转速:slow | normal | fast,默认 slow,非法值回落 slow
+  // 旋转类加载动画的转速:slow | normal | fast,默认 normal(r165 起;原 slow),非法值回落默认;选过的人原样保留
   loadingSpeed: (() => { try { return readLoadingSpeed(localStorage); } catch { return readLoadingSpeed(null); } })(),
 
   // 对话区自定义背景(全局,localStorage 持久化)。null = 默认外观(完全维持现状)。

@@ -231,12 +231,13 @@ test('L5 stopping（点停止后）与 compacting 状态词', async ({ page }) =
 
 test('L6 指示器：颜色跟主题强调色、data-style / data-speed、在动、减弱动画下静止', async ({ page }) => {
   test.setTimeout(200_000);
-  await startRound(page, { key: 'l6', scenario: thinkingOnly('L6 思考。') });
+  // r165：要测「默认转速」本身，撤掉 helpers 默认钉住的 slow（null = 不写这个键）
+  await startRound(page, { key: 'l6', scenario: thinkingOnly('L6 思考。'), presets: { 'cgui-loading-speed': null } });
   await expectOneLine(page);
   const ind = page.locator(IND);
   await expect(ind, '状态行里应恰有 1 个指示器').toHaveCount(1);
   await expect(ind, '默认加载动画样式应是 orbit3').toHaveAttribute('data-style', 'orbit3');
-  await expect(ind, '默认转速应是 slow').toHaveAttribute('data-speed', 'slow');
+  await expect(ind, '默认转速应是 normal（r165 起；原 slow）').toHaveAttribute('data-speed', 'normal');
   expect(await ind.locator('i').count(), '三体旋转：指示器里应有 3 个 <i> 点').toBe(3);
 
   // 颜色跟主题强调色
@@ -464,8 +465,8 @@ async function openInterfaceTab(page) {
 }
 const isSelected = (loc) => loc.evaluate((el) => el.getAttribute('aria-checked') === 'true' || el.getAttribute('data-selected') === 'true');
 
-test('L12 主题 →「界面」页：random 第一、orbit3 / orbit4 紧随，全新存储时 random 选中，转速三项默认「慢」选中', async ({ page }) => {
-  await primeOverlays(page, { 'cgui-loading-style': null }); // r159：这条要的是全新存储——撤掉默认预置的 orbit3
+test('L12 主题 →「界面」页：random 第一、orbit3 / orbit4 紧随，全新存储时 random 选中，转速三项默认「标准」选中', async ({ page }) => {
+  await primeOverlays(page, { 'cgui-loading-style': null, 'cgui-loading-speed': null }); // r159：这条要的是全新存储——撤掉默认预置的 orbit3；r165：同样撤掉默认预置的 slow
   await openApp(page);
   await openInterfaceTab(page);
   const options = page.locator('[data-loading-option]');
@@ -486,10 +487,10 @@ test('L12 主题 →「界面」页：random 第一、orbit3 / orbit4 紧随，�
   expect(await radios.count(), '转速单选组里应有 3 个 role=radio').toBe(3);
   expect(await radios.evaluateAll((els) => els.map((e) => (e.textContent || '').trim())), '转速三项文字依次应是 慢 / 标准 / 快').toEqual(['慢', '标准', '快']);
   expect(await radios.evaluateAll((els) => els.map((e) => e.getAttribute('data-loading-speed'))), '转速三项锚点依次应是 slow / normal / fast').toEqual(['slow', 'normal', 'fast']);
-  expect(await radios.evaluateAll((els) => els.map((e) => e.getAttribute('aria-checked'))), '全新存储时转速「慢」应为 aria-checked=true，其余 false').toEqual(['true', 'false', 'false']);
+  expect(await radios.evaluateAll((els) => els.map((e) => e.getAttribute('aria-checked'))), '全新存储时转速「标准」应为 aria-checked=true，其余 false（r165 起；原默认「慢」）').toEqual(['false', 'true', 'false']);
 });
 
-test('L13 设置生效并持久化：点「快」、选 ring、非法转速回落 slow', async ({ page }) => {
+test('L13 设置生效并持久化：点「快」、选 ring、非法转速回落默认 normal', async ({ page }) => {
   test.setTimeout(200_000);
   await startRound(page, { key: 'l13', scenario: thinkingOnly('L13 思考。') });
   await expectOneLine(page);
@@ -507,13 +508,13 @@ test('L13 设置生效并持久化：点「快」、选 ring、非法转速回�
   await page.keyboard.press('Escape');
   await endRound(page);
 
-  // 非法转速回落 slow
+  // 非法转速回落默认（r165 起默认是 normal；原回落 slow）
   await startRound(page, {
     key: 'l13', scenario: thinkingOnly('L13 非法转速。'), text: '请开始第二轮',
     presets: { 'cgui-loading-style': 'orbit3', 'cgui-loading-speed': 'turbo' },
   });
   await expectOneLine(page);
-  await expect.poll(async () => (await liveSnap(page)).indicator?.speed ?? null, { timeout: 8_000, message: '非法 cgui-loading-speed=turbo 应回落为 slow（指示器 data-speed）' }).toBe('slow');
+  await expect.poll(async () => (await liveSnap(page)).indicator?.speed ?? null, { timeout: 8_000, message: '非法 cgui-loading-speed=turbo 应回落为默认 normal（指示器 data-speed）' }).toBe('normal');
 });
 
 test('L14 已经选过样式的人不被改：预置 ring / cli 后指示器 data-style 保持', async ({ page }) => {

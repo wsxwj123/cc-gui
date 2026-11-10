@@ -66,6 +66,8 @@ export async function dismissOverlays(page) {
  * 本套件的判据是按三体旋转写的，所以显式钉住 orbit3；调用者传的 presets 优先。
  * 〈2026-11-10 r164〉同时默认合并 `cgui-loading-style-epoch: '999'`：产品从 0.2.458 起，对「没有这个升级标记」的环境第一次打开时
  * 一次性把加载动画重置为随机；本套件钉住 orbit3，所以预置一个超大标记挡掉这次重置（≥ 产品当前档位就不动；以后再加档也挡得住）。
+ * 〈2026-11-10 r165〉再默认合并 `cgui-loading-speed: 'slow'`：产品的默认转速从「慢」改成了「标准」，本套件里按位移 / 形状读数的判据是按「慢」写的，
+ * 所以显式钉住 slow（调用者传的 presets 优先）。
  * 注意：这里**不**预置「过程块自动折叠」（该开关 r159 起已去掉，旧键不再有任何效果）。
  */
 export async function primeOverlays(page, presets = {}) {
@@ -74,7 +76,7 @@ export async function primeOverlays(page, presets = {}) {
       localStorage.setItem('cgui-tour-seen', '1');
       for (const [k, v] of Object.entries(p)) localStorage.setItem(k, v);
     } catch { /* 忽略 */ }
-  }, { 'cgui-loading-style': 'orbit3', 'cgui-loading-style-epoch': '999', ...presets });
+  }, { 'cgui-loading-style': 'orbit3', 'cgui-loading-style-epoch': '999', 'cgui-loading-speed': 'slow', ...presets });
 }
 
 export async function openApp(page) {

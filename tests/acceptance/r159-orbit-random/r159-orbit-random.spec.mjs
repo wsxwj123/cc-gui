@@ -178,7 +178,7 @@ test('B2 状态行里 20px 指示器（整体放大；一直停在思考阶段 1
 });
 
 // ───────────────────────── C 组：随机模式与设置 ─────────────────────────
-test('C1 全新环境：「随机」排第一并选中、orbit3 / orbit4 紧随，转速「慢」选中；生成中指示器是随机模式、转速慢', async ({ page }) => {
+test('C1 全新环境：「随机」排第一并选中、orbit3 / orbit4 紧随，转速「标准」选中；生成中指示器是随机模式、转速标准（r165 起默认转速由慢改成标准）', async ({ page }) => {
   await prepareLive(page, { key: 'c1', scenario: { events: [{ kind: 'thinking', text: 'C1 思考。' }] } });
   await openInterfaceTab(page);
   await expect.soft(loadingGrid(page), '「加载动画」网格 [role="radiogroup"][aria-label="加载动画样式"] 应有 1 个').toHaveCount(1);
@@ -202,14 +202,14 @@ test('C1 全新环境：「随机」排第一并选中、orbit3 / orbit4 紧随�
       expect.soft(ORBIT_IDS, `「随机」格里指示器的 data-style（${rStyle}）应是 16 个 id 之一`).toContain(rStyle);
     }
   }
-  await expect.soft(page.locator('[data-loading-speed="slow"]'), '转速「慢」[data-loading-speed="slow"] 应是选中态').toHaveAttribute('aria-checked', 'true');
+  await expect.soft(page.locator('[data-loading-speed="normal"]'), '转速「标准」[data-loading-speed="normal"] 应是选中态（r165 起；原默认「慢」）').toHaveAttribute('aria-checked', 'true');
 
   await closeThemePopover(page);
   await sendRound(page);
   const ind = page.locator(IND).first();
   await expect(ind, '生成中：状态行里应出现指示器').toBeVisible({ timeout: 30_000 });
   await expect.soft(ind, '生成中指示器的 data-loading-mode 应为 random').toHaveAttribute('data-loading-mode', 'random');
-  await expect.soft(ind, '生成中指示器的 data-speed 应为 slow').toHaveAttribute('data-speed', 'slow');
+  await expect.soft(ind, '生成中指示器的 data-speed 应为 normal（r165 起；原 slow）').toHaveAttribute('data-speed', 'normal');
   const style = await ind.getAttribute('data-style');
   expect.soft(ORBIT_IDS, `生成中指示器的 data-style（${style}）应是 16 个 id 之一`).toContain(style);
 });

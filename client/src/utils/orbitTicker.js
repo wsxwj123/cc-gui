@@ -8,10 +8,12 @@
 // 系统要求减弱动画时只摆一次静止帧。
 
 import { ORBIT_VARIANTS, variantOf, dotPx, nodAng, DOT_BASE_PX, ORBIT_REF_PX, ORBIT_REF_R } from './orbitVariants.js';
+import { DEFAULT_LOADING_SPEED } from './loadingPrefs.js';
 
 export const STILL_T = 0.85; // 减弱动画时的静止帧:= 3.4 / 4 秒,仰俯角恰为最大,三个点对称地成钝角三角形(须与 orbitVariants.js 里 orbit3 / orbit4 的 stillT 相同)
 export const SPEED_FACTORS = Object.freeze({ slow: 0.7, normal: 1, fast: 1.4 });
-const DEFAULT_FACTOR = SPEED_FACTORS.slow;
+// r165:指示器没带 data-speed、或值不合法时按默认转速那一档转(默认转速由慢改成标准;取 loadingPrefs.js 的常量,不在这里写死)
+const DEFAULT_FACTOR = SPEED_FACTORS[DEFAULT_LOADING_SPEED];
 // 后台恢复或单帧卡顿时,不让相位一次跳太多
 const MAX_FRAME_S = 0.1;
 // 圆点底座 18px(见 orbitVariants.js 的 DOT_BASE_PX),transform 的 scale = dotPx(d) · k / 18,
