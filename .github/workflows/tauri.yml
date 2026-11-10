@@ -43,12 +43,22 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # 依赖一律从 npm 官方源下载:开发机的 npm 源是国内镜像(registry.npmmirror.com),两个锁文件里的下载地址因此全是镜像,
+      # GitHub 的构建机从那里下包常 503 / 504(v0.2.458 两次构建都卡死在这一步,各约 16 分钟,release / publish-npm 被跳过)。
+      # NPM_CONFIG_REPLACE_REGISTRY_HOST=always:把锁文件里所有下载地址的主机换成上面的官方源;sha512 完整性校验照旧。
+      # 前提是锁文件里只有官方源 / 镜像两种主机(没有 git 依赖、GitHub 压缩包),由 tests/unit/check-r166-ci-npm-official-registry.mjs 看守。
       - name: Install root deps
         run: npm ci
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+          NPM_CONFIG_REPLACE_REGISTRY_HOST: always
 
       - name: Install client deps
         run: npm ci
         working-directory: client
+        env:
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+          NPM_CONFIG_REPLACE_REGISTRY_HOST: always
 
       # Build ONLY — no release inputs, so tauri-action just bundles per-OS
       # installers (dmg on macOS, nsis/msi on Windows; bundle.targets="all").
