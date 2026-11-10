@@ -64,6 +64,8 @@ export async function dismissOverlays(page) {
  * 后注册的同名键覆盖先注册的 —— 同一页第二轮想换预置，再调一次即可。
  * 〈2026-11-07 r159〉默认合并 `cgui-loading-style: 'orbit3'`：产品的默认加载动画从三体旋转改成了「随机」（16 种里抽），
  * 本套件的判据是按三体旋转写的，所以显式钉住 orbit3；调用者传的 presets 优先；某个键的值传 null = 不写这个键（要"全新存储"的用例用）。
+ * 〈2026-11-10 r164〉同时默认合并 `cgui-loading-style-epoch: '999'`：产品从 0.2.458 起，对「没有这个升级标记」的环境第一次打开时
+ * 一次性把加载动画重置为随机；本套件钉住 orbit3 等样式，所以预置一个超大标记挡掉这次重置（≥ 产品当前档位就不动；以后再加档也挡得住）。
  * 注意：这里**不**预置「过程块自动折叠」（该开关 r159 起已去掉，旧键不再有任何效果）。
  */
 export async function primeOverlays(page, presets = {}) {
@@ -72,7 +74,7 @@ export async function primeOverlays(page, presets = {}) {
       localStorage.setItem('cgui-tour-seen', '1');
       for (const [k, v] of Object.entries(p)) { if (v !== null) localStorage.setItem(k, v); }
     } catch { /* 忽略 */ }
-  }, { 'cgui-loading-style': 'orbit3', ...presets });
+  }, { 'cgui-loading-style': 'orbit3', 'cgui-loading-style-epoch': '999', ...presets });
 }
 
 export async function openApp(page) {

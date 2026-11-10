@@ -7,10 +7,16 @@ export const LOADING_SPEEDS = Object.freeze(['slow', 'normal', 'fast']);
 export const DEFAULT_LOADING_SPEED = 'slow';
 // r159:默认改为随机。只影响 localStorage 里还没有 cgui-loading-style 的人;
 // 选过任何样式(包括 orbit3、cli)的人保持原值,readLoadingStyle 的读取行为不变。
+// r164:readLoadingStyle 仍然只读;升级后「第一次打开」把所有人重置为随机的动作在 resolveLoadingStyle 里(状态库初始化用它)。
 export const RANDOM_LOADING_STYLE = 'random';
 export const DEFAULT_LOADING_STYLE = RANDOM_LOADING_STYLE;
 export const LOADING_SPEED_KEY = 'cgui-loading-speed';
 export const LOADING_STYLE_KEY = 'cgui-loading-style';
+// r164:一次性重置的整数标记(档位)。localStorage 里没有、读不出整数、或小于 LOADING_STYLE_EPOCH → 重置一次并写下标记;
+// 达到档位 → 不动,之后用户在主题弹窗里选什么都保留。以后还想让所有人再重置一次:把 LOADING_STYLE_EPOCH +1。
+// (验收套件预置的标记是 999,所以不会被将来的加档顶掉。)
+export const LOADING_STYLE_EPOCH_KEY = 'cgui-loading-style-epoch';
+export const LOADING_STYLE_EPOCH = 1;
 
 export function normalizeLoadingSpeed(v) {
   return LOADING_SPEEDS.includes(v) ? v : DEFAULT_LOADING_SPEED;
@@ -31,6 +37,25 @@ export function readLoadingStyle(storage) {
   } catch {
     return DEFAULT_LOADING_STYLE;
   }
+}
+
+// r164:启动时决定用哪个加载动画样式。标记不到档位 → 把样式写成 random、再写标记(先样式后标记:中途出事只会下次再重置一遍,
+// 不会漏掉),这一次返回 random;标记已到档位 → 等同 readLoadingStyle(用户选什么就是什么,一次都不写)。
+// 只动样式键,转速键不碰。storage 为空 / 读不了 / 写不进去都不抛错,这一次仍按 random。
+export function resolveLoadingStyle(storage) {
+  let stale = false;
+  try {
+    if (storage) {
+      const n = Number.parseInt(storage.getItem(LOADING_STYLE_EPOCH_KEY), 10);
+      stale = (Number.isFinite(n) ? n : 0) < LOADING_STYLE_EPOCH;
+    }
+  } catch {
+    return DEFAULT_LOADING_STYLE; // storage 读不了:readLoadingStyle 在这种情况下也回默认(random)
+  }
+  if (!stale) return readLoadingStyle(storage);
+  try { storage.setItem(LOADING_STYLE_KEY, RANDOM_LOADING_STYLE); } catch { /* 写不进去:这一次仍按随机 */ }
+  try { storage.setItem(LOADING_STYLE_EPOCH_KEY, String(LOADING_STYLE_EPOCH)); } catch { /* 同上 */ }
+  return RANDOM_LOADING_STYLE;
 }
 
 // r159:从 RANDOM_POOL 里挑一个具体动画 id。池大于 1 时绝不等于 prevId(prevId 为空或不在池里时任取)。

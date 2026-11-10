@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { nextDockCode } from '../utils/artifactDock.js';
 import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
-import { readLoadingStyle, readLoadingSpeed, normalizeLoadingSpeed } from '../utils/loadingPrefs.js';
+import { resolveLoadingStyle, readLoadingSpeed, normalizeLoadingSpeed } from '../utils/loadingPrefs.js';
 import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState, queueKeyFor, isDraftQueueKey, draftQueueProjectHash } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList, mergeHiddenOrder } from '../utils/projectPanel.js';
@@ -906,10 +906,11 @@ export const useStore = create((set, get) => ({
     return 1.2; // 默认"大"(用户偏好);仅当用户从未手动选过才生效
   })(),
 
-  // "AI 思考中"加载动画样式(主题弹窗可选)。没选过的人默认 orbit3(三体旋转);
+  // "AI 思考中"加载动画样式(主题弹窗可选)。默认 random(随机,r159 起);r164 起升级后第一次打开
+  // 把所有人(含选过别的)重置为 random 一次,之后用户选什么存什么(见 loadingPrefs.resolveLoadingStyle)。
   // 'cli' = 原 ASCII 帧 spinner;其余对应 index.css 的 .loading-<id> 纯 CSS 动画(移植自 clawd-station)。
   // (访问 localStorage 本身在禁用存储时也会抛,所以包在 try 里)
-  loadingStyle: (() => { try { return readLoadingStyle(localStorage); } catch { return readLoadingStyle(null); } })(),
+  loadingStyle: (() => { try { return resolveLoadingStyle(localStorage); } catch { return resolveLoadingStyle(null); } })(),
   // 三体 / 四体旋转的转速:slow | normal | fast,默认 slow,非法值回落 slow
   loadingSpeed: (() => { try { return readLoadingSpeed(localStorage); } catch { return readLoadingSpeed(null); } })(),
 
