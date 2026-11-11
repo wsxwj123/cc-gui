@@ -5,6 +5,12 @@
 
 export const HISTORY_LIMIT_MAX = 2000;
 
+// r168:带 limit 的单页序列化大小上限。截图 / 大工具输出多的会话,120 条就有上百 MB:
+// 后端光序列化就停住整个进程,传输与前端解析渲染也按这个量算。窗口从最新往前取,
+// 累计到下一条会超过它就停(至少给最新 1 条);按单条消息序列化后的 UTF-8 字节数算 ——
+// 中文正文按字符数算会少算到三分之一。
+export const HISTORY_PAGE_MAX_BYTES = 8 * 1024 * 1024;
+
 /** query 值 → 非负整数;小数/负数/科学计数法/空串/数组一律 null。 */
 function toInteger(value) {
   if (typeof value === 'number') return Number.isSafeInteger(value) ? value : null;
@@ -41,6 +47,7 @@ export function parseHistoryPaging(query = {}) {
  * 从全量 messages 里切出一页。
  * - limit 缺省 → 原样返回全量,hasMore=false,beforeCursor=0(旧调用语义)。
  * - limit 给了 → 窗口 [max(0,before-limit), min(before,total));before 缺省/超界按 total。
+ *   r168:窗口再按 HISTORY_PAGE_MAX_BYTES 从最新往前收窄(至少保留最右 1 条),条数可少于 limit。
  * - beforeCursor = 窗口第一条在**全量数组**里的下标(空窗口 null),可直接当下次的 before。
  * - hasMore = 窗口左侧还有更早消息。
  * 纯函数:不修改入参。
@@ -58,7 +65,16 @@ export function sliceMessagesForPage(messages, { limit, before } = {}) {
   }
   const rawEnd = before === undefined || before === null ? total : toInteger(before);
   const end = Math.max(0, Math.min(rawEnd === null ? total : rawEnd, total));
-  const start = Math.max(0, end - size);
+  const countStart = Math.max(0, end - size);
+  // 从最新往前逐条累计;只序列化到超限为止,超大会话也只多算约一页的量。
+  let start = end;
+  let pageBytes = 0;
+  while (start > countStart) {
+    const itemBytes = Buffer.byteLength(JSON.stringify(list[start - 1]) ?? '', 'utf8');
+    if (start < end && pageBytes + itemBytes > HISTORY_PAGE_MAX_BYTES) break;
+    pageBytes += itemBytes;
+    start -= 1;
+  }
   const window = start === 0 && end === total ? list : list.slice(start, end);
   return {
     messages: window,

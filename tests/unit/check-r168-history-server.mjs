@@ -44,4 +44,60 @@ try {
   unlinkSync(file);
 }
 
+// ── 单页大小上限(sliceMessagesForPage)─────────────────────────────────────
+const { HISTORY_PAGE_MAX_BYTES, sliceMessagesForPage } = await import('../../server/utils/history-pagination.js');
+const bytesOf = (m) => Buffer.byteLength(JSON.stringify(m), 'utf8');
+const pageBytes = (msgs) => msgs.reduce((sum, m) => sum + bytesOf(m), 0);
+assert.ok(HISTORY_PAGE_MAX_BYTES >= 7 * 1024 * 1024 && HISTORY_PAGE_MAX_BYTES <= 9 * 1024 * 1024, '上限约 8MB');
+
+// 普通会话:条数到 limit 为止,窗口与原来一致
+const small = Array.from({ length: 300 }, (_, i) => ({ uuid: `s${i}`, text: '短消息'.repeat(50) }));
+const sp = sliceMessagesForPage(small, { limit: 120 });
+assert.equal(sp.messages.length, 120);
+assert.equal(sp.beforeCursor, 180);
+assert.equal(sp.hasMore, true);
+assert.equal(sp.total, 300);
+
+// 大消息:从最新往前累计,下一条会超限就停;逐页翻完不重不漏,最后一页游标为 0
+const big = Array.from({ length: 30 }, (_, i) => ({ uuid: `b${i}`, out: 'y'.repeat(1_000_000) }));
+const first = sliceMessagesForPage(big, { limit: 120 });
+assert.equal(first.messages.length, 8, '每条约 1MB → 8 条');
+assert.ok(pageBytes(first.messages) <= HISTORY_PAGE_MAX_BYTES);
+assert.equal(first.messages.at(-1).uuid, 'b29', '含最新一条');
+assert.equal(first.beforeCursor, 22);
+assert.equal(first.hasMore, true);
+assert.equal(first.total, 30);
+const seen = [...first.messages];
+let cur = first;
+while (cur.hasMore) {
+  cur = sliceMessagesForPage(big, { limit: 120, before: cur.beforeCursor });
+  assert.ok(pageBytes(cur.messages) <= HISTORY_PAGE_MAX_BYTES);
+  assert.equal(cur.total, 30);
+  seen.unshift(...cur.messages);
+}
+assert.equal(cur.beforeCursor, 0);
+assert.deepEqual(seen.map((m) => m.uuid), big.map((m) => m.uuid), '拼起来等于全量、无重复');
+
+// 中文按 UTF-8 字节算(每字 3 字节):每条约 3MB → 2 条;按字符数算会给到 8 条
+const zh = Array.from({ length: 10 }, (_, i) => ({ uuid: `z${i}`, text: '中'.repeat(1_000_000) }));
+assert.equal(sliceMessagesForPage(zh, { limit: 120 }).messages.length, 2);
+
+// 最新一条自己就超限:至少给这 1 条;limit 仍是条数上限
+const huge = [...small.slice(0, 5), { uuid: 'h', out: 'z'.repeat(HISTORY_PAGE_MAX_BYTES + 10) }];
+const hp = sliceMessagesForPage(huge, { limit: 120 });
+assert.deepEqual(hp.messages.map((m) => m.uuid), ['h']);
+assert.equal(hp.beforeCursor, 5);
+assert.equal(hp.hasMore, true);
+assert.equal(sliceMessagesForPage(big, { limit: 3 }).messages.length, 3);
+
+// 不带 limit:全量,不受大小上限影响
+const fullPage = sliceMessagesForPage(big, {});
+assert.equal(fullPage.messages.length, 30);
+assert.equal(fullPage.hasMore, false);
+assert.equal(fullPage.beforeCursor, 0);
+
+// before=0 / 空列表:空窗口语义不变
+assert.deepEqual(sliceMessagesForPage(big, { limit: 120, before: 0 }), { messages: [], hasMore: false, beforeCursor: null, total: 30 });
+assert.deepEqual(sliceMessagesForPage([], { limit: 120 }), { messages: [], hasMore: false, beforeCursor: null, total: 0 });
+
 console.log('check-r168-history-server: OK');

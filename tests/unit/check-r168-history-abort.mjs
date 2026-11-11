@@ -154,4 +154,24 @@ calls.at(-1).respond(page('I', 1));
 assert.equal(await pI, false);
 assert.equal(await pI2, true);
 
+// 11) 服务端单页按大小截断后,刷新返回的窗口可能比已加载的小:
+//     有交集 → 保留已加载的旧前缀;无交集 → 以服务端为准,hasMore 正确
+st().setSelectedSession(sess('K'));
+const pK = st().fetchMessages('K', 'h');
+calls.at(-1).respond(page('K', 6, 10)); // [4,10)
+assert.equal(await pK, true);
+const pK2 = st().fetchMessages('K', 'h', { silent: true });
+calls.at(-1).respond(page('K', 2, 10)); // [8,10),与已加载的有交集
+assert.equal(await pK2, true);
+assert.deepEqual(st().paneMessages[0].map((m) => m.uuid), ['K-4', 'K-5', 'K-6', 'K-7', 'K-8', 'K-9'], '有交集:旧前缀保留');
+assert.equal(st().historyPagingByTab[0].beforeCursor, 4);
+assert.equal(st().historyPagingByTab[0].hasMore, true);
+const pK3 = st().fetchMessages('K', 'h', { silent: true });
+calls.at(-1).respond(page('K', 2, 30)); // [28,30),无交集
+assert.equal(await pK3, true);
+assert.deepEqual(st().paneMessages[0].map((m) => m.uuid), ['K-28', 'K-29'], '无交集:以服务端为准');
+assert.equal(st().historyPagingByTab[0].beforeCursor, 28);
+assert.equal(st().historyPagingByTab[0].hasMore, true);
+assert.equal(st().historyPagingByTab[0].total, 30);
+
 console.log('check-r168-history-abort: OK');
