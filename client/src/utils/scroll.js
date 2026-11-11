@@ -16,12 +16,23 @@ export function clampScrollTop({ scrollTop, scrollHeight, clientHeight, stickToB
   return Math.min(Math.max(0, scrollTop || 0), max);
 }
 
-// 流式跟底与用户阅读意图的最小判据。只要 scrollTop 真正向上移动，就立刻暂停跟底；
-// 不能等用户已经离底数百像素才上锁，否则每个 token 的吸底写入会和触控板争抢位置。
+// r169:scrollTop 往上挪了、但挪完离底仍 ≤ 这个容差 = 浏览器自己在保持贴底(消息区变高时把
+// scrollTop 钳到新上限、内容缩几个像素时跟着减小、滚动锚定补偿),视图还在最底部,不是用户离开了底部。
+// 实测(分屏右窗格发送瞬间):scrollTop 61368→61342 离底 −1,之后 61383→61382→… 离底始终 0。
+export const BOTTOM_TOLERANCE_PX = 2;
+function stillAtBottom(distFromBottom) {
+  return Number.isFinite(distFromBottom) && distFromBottom <= BOTTOM_TOLERANCE_PX;
+}
+
+// 流式跟底与用户阅读意图的最小判据。scrollTop 真正向上移动、且移动后离开了底部(离底 > 容差),
+// 就立刻暂停跟底；不能等用户已经离底数百像素才上锁，否则每个 token 的吸底写入会和触控板争抢位置。
 // 方向以 scrollTop 的实际变化为准，不依赖 wheel.deltaY（触控板/缩放下该值不可靠）。
-export function shouldPauseAutoScroll({ previousTop, currentTop }) {
+// 滚轮上滚 / PageUp / ↑ / Home / 按住滚动条这些明确的用户输入不走这里,由调用方直接进入"在看历史"。
+// 不传 distFromBottom(或非有限值)= 不知道离底多少,只看方向(旧口径)。
+export function shouldPauseAutoScroll({ previousTop, currentTop, distFromBottom }) {
   if (!Number.isFinite(previousTop) || !Number.isFinite(currentTop)) return false;
-  return currentTop < previousTop - 0.5;
+  if (!(currentTop < previousTop - 0.5)) return false;
+  return !stillAtBottom(distFromBottom);
 }
 
 export function beginScrollTransaction(kind, target, startedAt = performance.now()) {
@@ -33,6 +44,7 @@ export function advanceScrollTransaction(transaction, {
   currentTop,
   target = transaction?.target,
   now = performance.now(),
+  distFromBottom,
 } = {}) {
   if (!transaction?.active) return { transaction: null, handled: false, userMovedAway: false };
   if (now - transaction.startedAt > 1000) {
@@ -53,7 +65,8 @@ export function advanceScrollTransaction(transaction, {
       userMovedAway: false,
     };
   }
-  return { transaction: null, handled: false, userMovedAway: movement < -0.5 };
+  // 背离目标的上挪同样要"挪完离开了底部"才算用户上翻(与 shouldPauseAutoScroll 同一容差)。
+  return { transaction: null, handled: false, userMovedAway: movement < -0.5 && !stillAtBottom(distFromBottom) };
 }
 
 export function keyRequestsReading(key) {

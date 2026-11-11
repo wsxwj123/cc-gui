@@ -4985,7 +4985,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       captureMountBefore();
       setMountFrom(extendUp(mountFromResolved, MOUNT_WINDOW_K, finalizedMessages.length));
     }
-    const movedUp = shouldPauseAutoScroll({ previousTop: lastScrollTopRef.current, currentTop: scrollTop });
+    // r169:往上挪但挪完仍贴着底(≤2px)是浏览器钳位 / 锚定补偿,不是用户上翻 —— 离底距离一并交给判据。
+    const distFromBottom = scrollHeight - scrollTop - clientHeight;
+    const movedUp = shouldPauseAutoScroll({ previousTop: lastScrollTopRef.current, currentTop: scrollTop, distFromBottom });
     const previousTop = lastScrollTopRef.current;
     const dynamicTarget = scrollTransactionRef.current?.kind === 'follow'
       ? Math.max(0, scrollHeight - clientHeight)
@@ -4994,6 +4996,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       previousTop,
       currentTop: scrollTop,
       target: dynamicTarget,
+      distFromBottom,
     });
     scrollTransactionRef.current = transactionResult.transaction;
     lastScrollTopRef.current = scrollTop;
@@ -5003,7 +5006,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 用户向上滚的实际位移优先于尚未回弹的程序滚动标记。旧逻辑先吞掉程序事件，
     // 触控板恰好在这个窗口起手时，第一段上滚也被吞掉，下一 token 又把视口拉回底部。
     if (transactionResult.handled) return;
-    const distFromBottom = scrollHeight - scrollTop - clientHeight;
     const movedIntoReading = movedUp || transactionResult.userMovedAway;
     if (transactionResult.expired) userScrolledAwayRef.current = distFromBottom > 40;
     else if (movedIntoReading) userScrolledAwayRef.current = true;
