@@ -73,6 +73,13 @@ export function keyRequestsReading(key) {
   return key === 'PageUp' || key === 'ArrowUp' || key === 'Home';
 }
 
+// r169:「回到底部」按钮显隐 = 在看历史 且 真实离底 ≥ 120px。跟随中不显示(内容刚追加、还没吸底的
+// 那一瞬离底也会超过 120);在看历史时只翻上去一点点、之后回复把距离拉大,也要显示。
+export const RETURN_TO_BOTTOM_MIN_PX = 120;
+export function shouldShowReturnToBottom({ reading, distFromBottom }) {
+  return !!reading && Number.isFinite(distFromBottom) && distFromBottom >= RETURN_TO_BOTTOM_MIN_PX;
+}
+
 // 容器【宽度】变化(开/关右侧面板、拖分屏宽、关窗格)后消息会重排,总高随之变化。
 // Blink/Gecko 有 scroll anchoring 会自动补偿 scrollTop,WKWebView(Tauri 的 webview,
 // 以及 iOS/macOS Safari)没有 —— scrollTop 原地不动而内容整体位移,视口就可能停在两条

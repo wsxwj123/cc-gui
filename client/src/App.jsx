@@ -187,7 +187,7 @@ import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
-import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll } from './utils/scroll.js';
+import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll, shouldShowReturnToBottom } from './utils/scroll.js';
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
@@ -5011,7 +5011,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     else if (movedIntoReading) userScrolledAwayRef.current = true;
     // 向上位移立即上锁；贴底 <40 才解锁。保留迟滞只用于解锁，消除边界抖动。
     if (!transactionResult.expired && !movedIntoReading && distFromBottom < 40) userScrolledAwayRef.current = false;
-    setAutoScroll(distFromBottom < 120);  // 仅驱动「回到底部」按钮显隐
+    // 仅驱动「回到底部」按钮显隐:在看历史且离底 ≥ 120 才显示(r169,与下方内容 / 容器高度观察同一规则)
+    setAutoScroll(!shouldShowReturnToBottom({ reading: userScrolledAwayRef.current, distFromBottom }));
     if (scrollPersistKey) {
       try { localStorage.setItem(scrollPersistKey, String(scrollTop)); } catch {}
     }
@@ -5054,6 +5055,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     scrollRestoredRef.current = scrollOwnerKey;
   }, [messages.length, chatMessages.length, selectedSession?.sessionId, scrollOwnerKey, scrollPersistKey, writeProgrammaticScroll]);
 
+  // r169 修法 2:消息列表内容盒或容器的高度一变,按真实几何重算 —— 不在看历史就吸底;「回到底部」
+  // 按钮按真实离底距离显隐。按消息状态触发的吸底 effect 看不到不伴随状态变化的增长(回合结束后才
+  // 补出的复制按钮、用量行、图片解码、代码高亮),内容在视口下方变长也不产生滚动事件,两处都靠这里补上。
+  // 与吸底 effect 同一目标(底部),不会互相拉扯;在看历史时一律不写 scrollTop —— 「加载更早」前插
+  // 补偿、渐进挂载锚定、宽度等比搬迁、会话内检索跳转要么发生在"在看历史"期间,要么自己就是带目标的
+  // 程序滚动,都不受影响。隐藏窗格(高度 0)量不到几何,跳过。
+  const followLayoutChange = useCallback((node) => {
+    if (!node?.isConnected || !(node.clientHeight > 0)) return;
+    if (!userScrolledAwayRef.current) {
+      const target = Math.max(0, node.scrollHeight - node.clientHeight);
+      if (Math.abs(target - node.scrollTop) >= 1) writeProgrammaticScroll(node, target, 'follow');
+    }
+    setAutoScroll(!shouldShowReturnToBottom({
+      reading: userScrolledAwayRef.current,
+      distFromBottom: node.scrollHeight - node.scrollTop - node.clientHeight,
+    }));
+  }, [writeProgrammaticScroll]);
+
   // #4 关右侧面板(监控/文件/…)后会话区空白、往上滑才找得回内容。
   // 关面板 = 本容器变宽 → 每条消息重新折行变矮 → 全文总高缩短。Blink/Gecko 有 scroll
   // anchoring 会自动补偿 scrollTop(实测 Chrome 开面板 3248→3549、关回来 3549→3248),
@@ -5063,15 +5082,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // Safari 26 代 WebKit 已经实现(探测为 true,且卸载视口上方内容时它自己会改 scrollTop)。
   // 所以这条按**探测结果**走(见下方 nativeAnchor),不按"哪个引擎"猜。
   // 这里自己补一次锚定:只在【宽度】变化时按比例把位置搬过去。
-  // 高度变化(输入框长高/任务清单展开)一律不管 —— 那是既有吸底 effect 的职责,插手会打架。
+  // 高度变化(输入框长高/任务清单展开)不做等比搬迁:跟随中由 followLayoutChange 吸底(与吸底 effect
+  // 同一目标),在看历史时位置不动、只重算「回到底部」按钮(r169)。
   //
   // 必须走 callback ref 而不是 useEffect([]):SessionDetail 有 EmptyState / loading 两条
   // 早退分支,滚动容器会被销毁重建,一次性捕获的 useEffect 会把 ResizeObserver 留在已经
   // 脱离文档的旧节点上,从第一次切会话起整个修复失效。callback ref 每次挂载都重新接。
   const scrollRoRef = useRef(null);
+  const scrollContentObsRef = useRef(null);   // r169:内容盒观察的拆除函数(随容器重挂载重接)
   const setContainerRef = useCallback((node) => {
     containerRef.current = node;
     if (scrollRoRef.current) { scrollRoRef.current.disconnect(); scrollRoRef.current = null; }
+    if (scrollContentObsRef.current) { scrollContentObsRef.current(); scrollContentObsRef.current = null; }
     if (!node || typeof ResizeObserver === 'undefined') return;
     // 探测为真的引擎(Blink / WebView2,以及 2026-09-13 实测的 Safari 26 代 WebKit)已经把
     // scrollTop 精确补偿好了,用我们的等比近似值去覆写只会更差;探测为假(返回 false/undefined
@@ -5102,10 +5124,26 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
       }
       scrollMaxRef.current = Math.max(0, node.scrollHeight - node.clientHeight);
+      followLayoutChange(node);   // r169:容器高度变化(视口拉高、输入框伸缩、切窗格)同样按真实几何重算
     });
     ro.observe(node);
     scrollRoRef.current = ro;
-  }, [writeProgrammaticScroll]);
+    // r169 修法 2:内容盒高度观察。容器自己的 RO 只报容器盒子,看不到 scrollHeight 的变化;消息列表的
+    // 内容是容器的若干直接子元素(没有单一内容盒),所以逐个观察直接子元素,子元素的增删由
+    // MutationObserver 跟上 —— 不改 DOM 结构(选择器、offsetTop 口径、sticky 都不受影响)。
+    // 子元素被移除(如回合结束时流式气泡换成历史)不会有 RO 回调,由 MutationObserver 回调补一次重算。
+    const contentRo = new ResizeObserver(() => followLayoutChange(node));
+    for (const child of node.children) contentRo.observe(child);
+    const childMo = typeof MutationObserver === 'undefined' ? null : new MutationObserver((records) => {
+      for (const record of records) {
+        for (const added of record.addedNodes) if (added.nodeType === 1) contentRo.observe(added);
+        for (const removed of record.removedNodes) if (removed.nodeType === 1) contentRo.unobserve(removed);
+      }
+      followLayoutChange(node);
+    });
+    childMo?.observe(node, { childList: true });
+    scrollContentObsRef.current = () => { contentRo.disconnect(); childMo?.disconnect(); };
+  }, [writeProgrammaticScroll, followLayoutChange]);
 
   // Message queue plumbing (#3) — when user types during streaming, the message
   // is queued and dispatched after the current chat finishes. “⚡ 并入”只请求 priority-now，
