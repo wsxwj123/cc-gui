@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SCROLL_SAVED_AT_BOTTOM, parseSavedScroll, scrollStateToSave } from '../../client/src/utils/scroll.js';
+import { SCROLL_SAVED_AT_BOTTOM, parseSavedScroll, scrollStateToSave, scrollValueToWrite } from '../../client/src/utils/scroll.js';
 
 // ── 保存:跟随中 →「在底部」;在看历史 → 位置 ───────────────────────────────────────
 assert.equal(scrollStateToSave({ reading: false, scrollTop: 61383 }), SCROLL_SAVED_AT_BOTTOM,
@@ -47,6 +47,47 @@ assert.deepEqual(parseSavedScroll(scrollStateToSave({ reading: true, scrollTop: 
 }
 
 // ── 源码守卫 ─────────────────────────────────────────────────────────────────
+// ── 发版前补丁 2:没有键 = 跟随在底部,只在底部跟随过的会话不留键(不占共用的 localStorage 配额) ──────
+{
+  // 按 App.jsx 的口径模拟:恢复读取时播种基准(saved ?? 在底部),之后每个滚动事件经 scrollValueToWrite 决定写不写
+  const store = new Map();
+  let writes = 0;
+  const openSession = (key, legacyKey = null) => {
+    const saved = store.get(key) ?? (legacyKey ? store.get(legacyKey) : undefined) ?? null;
+    return { key, lastSaved: saved ?? SCROLL_SAVED_AT_BOTTOM };
+  };
+  const onScrollEvent = (s, reading, scrollTop) => {
+    const value = scrollValueToWrite({ lastSaved: s.lastSaved, reading, scrollTop });
+    if (value === null) return;
+    s.lastSaved = value;
+    store.set(s.key, value);
+    writes += 1;
+  };
+  // 从没手动滚过的会话:一路跟随(程序吸底产生的每个滚动事件)→ 一条都不写
+  const n = openSession('cgui-scroll-p1:N');
+  for (let top = 1000; top < 61000; top += 500) onScrollEvent(n, false, top);
+  assert.equal(store.has('cgui-scroll-p1:N'), false, '只在底部跟随过的会话不得留下键');
+  assert.equal(writes, 0);
+  // 同一会话:用户上翻 → 写位置(有键了);滚回底部 → 有键的照常更新成「在底部」;之后跟随不再写
+  onScrollEvent(n, true, 52000);
+  assert.equal(store.get('cgui-scroll-p1:N'), '52000');
+  onScrollEvent(n, false, 61383);
+  assert.equal(store.get('cgui-scroll-p1:N'), SCROLL_SAVED_AT_BOTTOM, '已经有键的,回到底部要更新成「在底部」');
+  for (let top = 61383; top < 62000; top += 100) onScrollEvent(n, false, top);
+  assert.equal(writes, 2, '跟随期间同值不重复写');
+  // 旧版本留下的数字(本窗格的键)→ 跟随时更新成「在底部」,不得留着旧位置
+  store.set('cgui-scroll-p1:A', '48000');
+  const a = openSession('cgui-scroll-p1:A');
+  onScrollEvent(a, false, 50000);
+  assert.equal(store.get('cgui-scroll-p1:A'), SCROLL_SAVED_AT_BOTTOM, '旧格式的键照现在的规则更新');
+  // 只有旧格式的会话键(按会话存、不分窗格)认不出时,本窗格没有键也算"已有键",照常写
+  store.set('cgui-scroll-B', 'garbage');
+  const b = openSession('cgui-scroll-p1:B', 'cgui-scroll-B');
+  onScrollEvent(b, false, 9000);
+  assert.equal(store.get('cgui-scroll-p1:B'), SCROLL_SAVED_AT_BOTTOM, '旧会话键存在时照常写');
+  assert.equal(store.get('cgui-scroll-B'), 'garbage', '旧会话键只读不写、不删');
+}
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
 const pStart = app.indexOf('const persistScrollState = (el) => {');
@@ -54,8 +95,9 @@ assert.ok(pStart > 0, '必须有统一的保存函数');
 const persist = app.slice(pStart, app.indexOf('const handleScroll = () => {', pStart));
 assert.ok(/scrollRestoredRef\.current !== scrollOwnerKey\) return;/.test(persist),
   '恢复读取之前不得写(切换途中的钳位 / 吸底事件会盖掉存着的位置)');
-assert.ok(/scrollStateToSave\(\{ reading: userScrolledAwayRef\.current, scrollTop: el\.scrollTop \}\)/.test(persist),
-  '按"是否在看历史"决定存「在底部」还是位置');
+assert.ok(/scrollValueToWrite\(\{\s*lastSaved: last\?\.key === scrollPersistKey \? last\.value : undefined,\s*reading: userScrolledAwayRef\.current,\s*scrollTop: el\.scrollTop,\s*\}\)/.test(persist)
+    && /if \(value === null\) return;/.test(persist),
+  '按"是否在看历史"决定存「在底部」还是位置,与存储里现有的值(没有键按「在底部」)相同就不写');
 assert.ok(/localStorage\.setItem\(scrollPersistKey, value\)/.test(persist));
 assert.ok(app.indexOf('const scrollRestoredRef = useRef(null);') < pStart, 'scrollRestoredRef 要在保存函数之前声明');
 assert.equal((app.match(/const scrollRestoredRef = useRef\(null\);/g) || []).length, 1, 'scrollRestoredRef 只声明一次');
@@ -76,5 +118,9 @@ assert.ok(/Math\.min\(Math\.max\(0, restore\.top\)/.test(restore) && /userScroll
 assert.ok(/ownSaved \?\? \(legacyKey \? localStorage\.getItem\(legacyKey\)/.test(restore) && !/localStorage\.setItem\(legacyKey/.test(app),
   '旧的只按会话存的键只读不写');
 assert.ok(!/localStorage\.removeItem\(scrollPersistKey/.test(app), '认不出的值也不清空');
+const seedIdx = restore.indexOf('persistedScrollRef.current = { key: scrollPersistKey, value: saved ?? SCROLL_SAVED_AT_BOTTOM };');
+assert.ok(seedIdx > 0 && seedIdx < restore.indexOf('if (restore) {'),
+  '恢复读取时就播种写入基准,且不论有没有可恢复的值:两个键都没有按「在底部」算');
+assert.ok(!/removeItem\([^)]*cgui-scroll/.test(app), '本次不新增删除 / 清理存储的代码');
 
 console.log('✓ check-r169-saved-scroll: 跟随中存「在底部」/ 看历史存位置 / 旧格式数字照常恢复');

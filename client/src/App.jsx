@@ -187,7 +187,7 @@ import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
-import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, parseSavedScroll, resizeScrollTop, scrollStateToSave, setIfChanged, shouldPauseAutoScroll, shouldShowReturnToBottom } from './utils/scroll.js';
+import { SCROLL_SAVED_AT_BOTTOM, advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, parseSavedScroll, resizeScrollTop, scrollValueToWrite, setIfChanged, shouldPauseAutoScroll, shouldShowReturnToBottom } from './utils/scroll.js';
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
@@ -4984,13 +4984,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // r169 修法 3:保存"跟随中"这个状态,而不是绝对位置 —— 跟随中存「在底部」,在看历史时存位置。
   // 程序滚动(吸底、前插补偿、挂载锚定)造成的位置变化同样记下(原来只在用户手动滚动时记,跟随时
   // 程序写的位置从不保存,切回来恢复的是过期位置)。本窗格切到这个会话后、恢复读取之前一律不写 ——
-  // 否则切换途中的钳位 / 吸底事件会盖掉这个会话存着的位置。与上次写入的值相同就不重复写。
+  // 否则切换途中的钳位 / 吸底事件会盖掉这个会话存着的位置。与存储里现有的值相同就不写;存储里还没有这个
+  // 会话的键(本窗格的、旧格式只按会话存的都没有)按「在底部」算 —— 只在底部跟随过的会话不留键(发版前补丁 2)。
+  // persistedScrollRef = 存储里这个键现在的值(恢复 effect 读取时播种,之后每次写入同步更新)。
   const persistedScrollRef = useRef(null);
   const persistScrollState = (el) => {
     if (!el || !scrollPersistKey || scrollRestoredRef.current !== scrollOwnerKey) return;
-    const value = scrollStateToSave({ reading: userScrolledAwayRef.current, scrollTop: el.scrollTop });
     const last = persistedScrollRef.current;
-    if (last && last.key === scrollPersistKey && last.value === value) return;
+    const value = scrollValueToWrite({
+      lastSaved: last?.key === scrollPersistKey ? last.value : undefined,
+      reading: userScrolledAwayRef.current,
+      scrollTop: el.scrollTop,
+    });
+    if (value === null) return;
     persistedScrollRef.current = { key: scrollPersistKey, value };
     try { localStorage.setItem(scrollPersistKey, value); } catch {}
   };
@@ -5055,11 +5061,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const saved = ownSaved ?? (legacyKey ? localStorage.getItem(legacyKey) : null);
     // r169:「在底部」→ 吸底并继续跟随;纯数字(含旧格式)→ 照旧恢复位置;认不出的值不恢复、不清空。
     const restore = parseSavedScroll(saved);
+    // 写入比较的基准 = 存储里这个会话现在的值;两个键都没有按「在底部」算(没有键 = 跟随在底部,见 persistScrollState)。
+    persistedScrollRef.current = { key: scrollPersistKey, value: saved ?? SCROLL_SAVED_AT_BOTTOM };
     if (restore) {
       if (ownSaved === null) {
         try { localStorage.setItem(scrollPersistKey, saved); } catch {}
       }
-      persistedScrollRef.current = { key: scrollPersistKey, value: saved };
       // Defer to next frame so DOM is laid out
       requestAnimationFrame(() => {
         if (el && restore.atBottom) {

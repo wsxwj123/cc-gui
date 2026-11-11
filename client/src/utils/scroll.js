@@ -97,6 +97,14 @@ export const SCROLL_SAVED_AT_BOTTOM = 'bottom';
 export function scrollStateToSave({ reading, scrollTop }) {
   return reading ? String(scrollTop) : SCROLL_SAVED_AT_BOTTOM;
 }
+// 这次要写什么(null = 不用写)。lastSaved = 存储里这个会话此刻的值;本窗格的键与旧格式只按会话存的键
+// 都不存在时,调用方按「在底部」传 —— 没有键本来就等于"跟随在底部"(恢复时什么都不做)。与它相同就不写:
+// 只在底部跟随过的会话因此不会留下键,不占整个应用共用的 localStorage 配额;已经有键的(上翻过、旧版本
+// 留下的)照常更新成「在底部」或新位置。
+export function scrollValueToWrite({ lastSaved, reading, scrollTop }) {
+  const value = scrollStateToSave({ reading, scrollTop });
+  return value === lastSaved ? null : value;
+}
 // 读:「在底部」→ { atBottom: true };纯数字(含旧版本存下的值)→ { atBottom: false, top };
 // 空值 / 认不出的值 → null(不恢复、不报错、不清空,留在默认的跟随底部)。
 export function parseSavedScroll(saved) {
