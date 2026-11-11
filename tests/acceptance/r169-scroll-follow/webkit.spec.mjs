@@ -21,9 +21,22 @@ async function startReplyInA(page, tag) {
 }
 const fmt = (n) => (typeof n === 'number' ? n.toFixed(0) : String(n));
 
-test('S03 单窗格：回复中切到 B、B 加载完再等 2 秒切回 A，2 秒内回到最底部并一直跟随', async ({ page }) => {
-  setDuration(45_000);
+test('S03 单窗格：回复中先翻上去再滚回底并跟随 5 秒，切到 B、B 加载完再等 2 秒切回 A，2 秒内回到最底部并一直跟随', async ({ page }) => {
+  setDuration(60_000);
   await startReplyInA(page, 'S03');
+  const up = await wheelUp(page, null, 600);
+  expect(up.moved, `前置：应往上翻 ≥600px，实测 ${fmt(up.moved)}px`).toBeGreaterThanOrEqual(600);
+  const bottom = await wheelToBottom(page, null, 15_000);
+  expect(bottom.dist, `前置：滚轮应能滚回最底部，实测离底 ${fmt(bottom.dist)}px`).toBeLessThanOrEqual(4);
+  // 滚回底部后不再碰滚动，继续跟随 ≥5 秒（内容继续变长）
+  const pre = [];
+  const shStart = bottom.sh;
+  const tf = Date.now();
+  while (Date.now() - tf < 5_500) { const m = await metrics(page, null); if (m && typeof m.dist === 'number') pre.push(m); await sleep(200); }
+  const preMed = median(pre.map((m) => m.dist));
+  const shEnd = pre.length ? pre[pre.length - 1].sh : shStart;
+  expect(preMed, `前置：滚回底部后的 5 秒应在跟随，离底中位数 ≤4px，实测 ${fmt(preMed)}px（${pre.map((m) => fmt(m.dist)).join(',')}）`).toBeLessThanOrEqual(4);
+  expect(shEnd, `前置：这 5 秒内容应继续变长，scrollHeight ${fmt(shStart)} → ${fmt(shEnd)}`).toBeGreaterThan(shStart);
   await clickRow(page, 'B');
   expect(await waitMarker(page, SESSIONS.B.end, 30_000), '前置：B 应加载出结束标记').not.toBeNull();
   await sleep(2_000);
@@ -39,13 +52,22 @@ test('S03 单窗格：回复中切到 B、B 加载完再等 2 秒切回 A，2 �
   expectFollowing(samples, 'S03 切回 A 的 2 秒之后');
 });
 
-test('S04 单窗格：发消息后不碰滚动，停止键消失后 3 秒离底距离 ≤4px', async ({ page }) => {
-  await startReplyInA(page, 'S04');
-  const samples = await watchUntilStopGone(page, null);
-  expect(samples[samples.length - 1].timedOut, 'S04 等停止键消失超时').toBeFalsy();
-  await sleep(3_000);
-  const m = await metricsOrFail(page, null);
-  expect(m.dist, `S04 停止键消失后 3 秒离底距离应 ≤4px，实测 ${fmt(m.dist)}px（scrollTop ${fmt(m.top)}，scrollHeight ${fmt(m.sh)}）`).toBeLessThanOrEqual(4);
+test('S04 单窗格：连续 3 轮发消息后不碰滚动，每一轮停止键消失后 3 秒离底距离都 ≤4px', async ({ page }) => {
+  await startReplyInA(page, 'S04-1');
+  const rounds = [];
+  for (let i = 1; i <= 3; i += 1) {
+    if (i > 1) await sendAndWaitRunning(page, null, `${SESSIONS.A.beg} S04-${i} 请开始一段长回复`);
+    const samples = await watchUntilStopGone(page, null);
+    const timedOut = !!samples[samples.length - 1].timedOut;
+    await sleep(3_000);
+    const m = await metricsOrFail(page, null);
+    rounds.push({ i, timedOut, dist: m.dist, top: m.top, sh: m.sh });
+    if (timedOut) break;
+  }
+  const detail = rounds.map((r) => `第${r.i}轮离底 ${fmt(r.dist)}px（scrollTop ${fmt(r.top)}，scrollHeight ${fmt(r.sh)}）`).join('；');
+  expect(rounds.some((r) => r.timedOut), `S04 等停止键消失超时；${detail}`).toBe(false);
+  expect(rounds.length, `S04 应完成 3 轮；${detail}`).toBe(3);
+  expect(Math.max(...rounds.map((r) => r.dist)), `S04 每一轮停止键消失后 3 秒离底距离都应 ≤4px；${detail}`).toBeLessThanOrEqual(4);
 });
 
 test('S05 单窗格：回复中往上翻 60–100px，回复把离底拉到 >200px 后 2 秒内出现「回到底部」按钮并一直可见，期间 scrollTop 不变', async ({ page }) => {
