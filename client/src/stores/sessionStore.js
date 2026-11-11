@@ -55,6 +55,15 @@ function endHistoryRequest(tab, lane, controller) {
   if (slot[lane]?.controller === controller) slot[lane] = null;
 }
 
+// 本窗格登记的那条刷新是否仍有效:没被取消、代号仍是最新、窗格仍停在它的会话上(与
+// fetchMessages 里 stillCurrent 同口径)。有效的那条落地或再被作废时,会自己收 tab 0 的 loading。
+function hasLiveHistoryRefresh(state, tab) {
+  const inFlight = historyInFlight[historyLaneTab(tab)].refresh;
+  return !!inFlight && !inFlight.controller.signal.aborted
+    && isHistoryRequestCurrent(state.historyReqSeqByTab, tab, inFlight.sessionId, 'refresh', inFlight.seq)
+    && state.paneSessions[tab]?.sessionId === inFlight.sessionId;
+}
+
 // 代号整格作废(resetHistoryRequestSeq)的同时取消该窗格两条线的在飞请求;下标口径与它一致。
 function invalidateHistoryRequests(seqs, tab) {
   const slot = historyInFlight[historyLaneTab(tab)];
@@ -2635,13 +2644,8 @@ export const useStore = create((set, get) => ({
     // r168:侧栏点击已拉一次、会话面板「切过来就加载」再拉一次 = 每次切换必有一条被作废的
     // 请求,后端工作量翻倍。opts.skipIfInFlight(只给切换那一刻用):本窗格本会话已有一条
     // 仍有效的刷新在路上就不再重复发。回合结束对账等刷新必须拿新数据,不传这个选项。
-    if (opts.skipIfInFlight) {
-      const inFlight = historyInFlight[tab].refresh;
-      if (inFlight && inFlight.sessionId === sessionId && !inFlight.controller.signal.aborted
-        && isHistoryRequestCurrent(get().historyReqSeqByTab, tab, sessionId, 'refresh', inFlight.seq)) {
-        return false;
-      }
-    }
+    // (上面已确认窗格停在本会话,窗格上仍有效的那条刷新必然就是本会话的。)
+    if (opts.skipIfInFlight && hasLiveHistoryRefresh(get(), tab)) return false;
     const pagingBefore = get().historyPagingByTab?.[tab] || null;
     const sameSession = !!pagingBefore && pagingBefore.sessionId === sessionId;
     // 首屏/换会话 = 120;同一会话的刷新至少把已加载的都取回来,避免"刷新后退回 120"。
@@ -2659,11 +2663,14 @@ export const useStore = create((set, get) => ({
     // 窗格守卫再兜一层"切走又切回"的窗口期。
     const stillCurrent = () => isHistoryRequestCurrent(get().historyReqSeqByTab, tab, sessionId, 'refresh', req.seq)
       && get().paneSessions[tab]?.sessionId === sessionId;
-    // 过期响应:不写列表、不碰分页账。非静默请求若窗格已切走,它点亮的全局 loading 要收掉
-    // (新窗格若是草稿/空窗格不会再发请求,没人会替它收;新会话自己在飞时会在落地时收尾);
-    // 同一会话被更新请求顶替时留给新请求。
+    // 过期响应:不写列表、不碰分页账。全局 loading(只属于 tab 0)的收尾:
+    // - 本窗格还有一条更新、仍然有效的刷新在路上(新会话的、或同会话顶替上来的)→ 留给它,
+    //   它落地或再被作废时按同一规则收尾。r168:切会话时旧请求被立即取消,若在这里先收掉,
+    //   新会话还在路上的那一段会按"没在加载、没有消息"闪出「该会话没有可显示的消息」。
+    // - 没有了(切到草稿 / 空窗格、没人再拉)→ 由这里收掉,不能永久转圈。静默请求也要按此收:
+    //   它可能正是被上一条托付了 loading 的那条"有效刷新"。
     const abandon = () => {
-      if (!silent && get().paneSessions[tab]?.sessionId !== sessionId) set({ loading: false });
+      if (tab === 0 && get().loading && !hasLiveHistoryRefresh(get(), 0)) set({ loading: false });
       return false;
     };
     try {

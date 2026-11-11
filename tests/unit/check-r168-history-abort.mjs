@@ -174,4 +174,58 @@ assert.equal(st().historyPagingByTab[0].beforeCursor, 28);
 assert.equal(st().historyPagingByTab[0].hasMore, true);
 assert.equal(st().historyPagingByTab[0].total, 30);
 
+// ── r168 打回:连点切会话闪「该会话没有可显示的消息」──────────────────────────
+// 12) 旧请求被取消时新会话的刷新还在路上 → loading 保持(tab 0 才有加载屏),由最后那条落地收尾
+assert.equal(st().loading, false);
+st().setSelectedSession(sess('L1'));
+const pL1 = st().fetchMessages('L1', 'h'); // 非静默,点亮 loading
+st().setSelectedSession(sess('L2')); // 侧栏点下一个:先选中……
+const pL2 = st().fetchMessages('L2', 'h'); // ……再拉(同 handleSelect)
+assert.equal(await pL1, false);
+assert.equal(st().loading, true, '新会话的刷新还在路上:被取消的旧请求不收 loading(否则闪空状态)');
+st().setSelectedSession(sess('L3'));
+const pL3 = st().fetchMessages('L3', 'h');
+assert.equal(await pL2, false);
+assert.equal(st().loading, true, '连点多次同样保持');
+calls.at(-1).respond(page('L3', 2));
+assert.equal(await pL3, true);
+assert.equal(st().loading, false, '最后点的会话落地后由它收尾');
+
+// 13) 同会话被新刷新顶替:loading 留给新的
+const pM1 = st().fetchMessages('L3', 'h');
+const pM2 = st().fetchMessages('L3', 'h');
+assert.equal(await pM1, false);
+assert.equal(st().loading, true, '同会话被顶替:loading 留给新请求');
+calls.at(-1).respond(page('L3', 2));
+assert.equal(await pM2, true);
+assert.equal(st().loading, false);
+
+// 14) 切到空窗格(不会再发请求)→ 被取消的请求自己收 loading,不永久转圈
+const pN = st().fetchMessages('L3', 'h');
+assert.equal(st().loading, true);
+st().setSelectedSession(null);
+assert.equal(await pN, false);
+assert.equal(st().loading, false, '切到空窗格:没人再拉,由被取消的请求收掉 loading');
+
+// 15) 托付链:非静默旧请求把 loading 留给新会话的静默刷新;那条静默刷新再因切到空窗格被取消 → 由它收掉
+st().setSelectedSession(sess('O1'));
+const pO1 = st().fetchMessages('O1', 'h');
+st().setSelectedSession(sess('O2'));
+const pO2 = st().fetchMessages('O2', 'h', { silent: true });
+assert.equal(await pO1, false);
+assert.equal(st().loading, true, '留给仍有效的静默刷新');
+st().setSelectedSession(null);
+assert.equal(await pO2, false);
+assert.equal(st().loading, false, '被托付的静默刷新作废且没人再拉 → 由它收掉');
+
+// 16) 过期的静默请求不误收:loading 正由一条有效的非静默刷新点亮
+st().setSelectedSession(sess('P1'));
+const pP0 = st().fetchMessages('P1', 'h', { silent: true });
+const pP1 = st().fetchMessages('P1', 'h'); // 顶替静默那条
+assert.equal(await pP0, false);
+assert.equal(st().loading, true, '过期静默请求不收有效请求点亮的 loading');
+calls.at(-1).respond(page('P1', 1));
+assert.equal(await pP1, true);
+assert.equal(st().loading, false);
+
 console.log('check-r168-history-abort: OK');
