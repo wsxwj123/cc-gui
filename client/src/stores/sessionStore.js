@@ -30,6 +30,48 @@ const recoverDraftSidecarsFromSessions = (sessions, projectHash) => (
   recoverAttachmentSidecarBindings(draftSidecarBindingsForSessions(sessions, projectHash))
 );
 
+// ── r168:历史请求作废即取消 ────────────────────────────────────────────────
+// 每窗格两条历史请求线(refresh = fetchMessages,older = loadOlderMessages)各自在飞请求的
+// 取消控制器,与请求代号同步作废:同线新请求领号时取消旧的;切会话 / 清空 / 关窗格
+// (invalidateHistoryRequests)时两条线一起取消。为什么必须取消:Chromium 内核里没读完的
+// 大响应会一直占着与后端的连接(同一后端最多 6 条),攒满后后续请求全部排队,会话区一直
+// 转圈;取消后后端也会因对方断开而提前停手。
+// 放模块级而不放 store:控制器不可序列化,增删也不该触发订阅者重渲染。
+const historyInFlight = Array.from({ length: 6 }, () => ({ refresh: null, older: null }));
+const historyLaneTab = (tab) => (Number.isInteger(tab) && tab >= 0 && tab <= 5 ? tab : 0);
+
+function beginHistoryRequest(tab, lane) {
+  const slot = historyInFlight[historyLaneTab(tab)];
+  slot[lane]?.controller.abort();
+  const controller = new AbortController();
+  slot[lane] = { controller };
+  return controller;
+}
+
+function endHistoryRequest(tab, lane, controller) {
+  const slot = historyInFlight[historyLaneTab(tab)];
+  if (slot[lane]?.controller === controller) slot[lane] = null;
+}
+
+// 代号整格作废(resetHistoryRequestSeq)的同时取消该窗格两条线的在飞请求;下标口径与它一致。
+function invalidateHistoryRequests(seqs, tab) {
+  const slot = historyInFlight[historyLaneTab(tab)];
+  for (const lane of ['refresh', 'older']) {
+    slot[lane]?.controller.abort();
+    slot[lane] = null;
+  }
+  return resetHistoryRequestSeq(seqs, tab);
+}
+
+// 判为过期 / 不再读取的响应:先取消响应体再放手,别让它占着连接直到整个响应传完。
+function discardHistoryResponse(res, controller) {
+  try {
+    const pending = res?.body?.cancel?.();
+    if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+  } catch { /* 响应体已被读取 / 锁定:没有可取消的 */ }
+  controller.abort();
+}
+
 // ── 启动期请求去重(只合并「同一时刻的同一读请求」,不是结果缓存)──────────────
 // 启动时 /api/projects 被两个调用点各拉一次(UnifiedSidebar 与 App),同一 hash 的
 // sessions 也有两个并发调用点(fetchSessions / fetchSessionsForPanel)—— 服务端要为此
@@ -1429,7 +1471,7 @@ export const useStore = create((set, get) => ({
     if (gens) patch.paneGenerations = gens;
     // r151l 窄复审①:换会话 → tab0 正在飞的历史请求全部作废(与 setPaneSession 同款)。
     if (prevSid !== (session?.sessionId || null)) {
-      patch.historyReqSeqByTab = resetHistoryRequestSeq(cur.historyReqSeqByTab, 0);
+      patch.historyReqSeqByTab = invalidateHistoryRequests(cur.historyReqSeqByTab, 0);
     }
     set(patch);
     writeLs('cgui-selected-session', session);
@@ -1633,7 +1675,7 @@ export const useStore = create((set, get) => ({
       gens[0] = freshGeneration(); // 空窗格 = 新一轮绑定
       const paging = [...(cur.historyPagingByTab || [])];
       paging[0] = null;
-      set({ paneSessions: next, paneMessages: nextMsgs, paneMessagesSid: nextSids, paneIds: ids, paneGenerations: gens, historyPagingByTab: paging, historyReqSeqByTab: resetHistoryRequestSeq(cur.historyReqSeqByTab, 0), selectedSession: null, messages: [] });
+      set({ paneSessions: next, paneMessages: nextMsgs, paneMessagesSid: nextSids, paneIds: ids, paneGenerations: gens, historyPagingByTab: paging, historyReqSeqByTab: invalidateHistoryRequests(cur.historyReqSeqByTab, 0), selectedSession: null, messages: [] });
       writeLs('cgui-selected-session', null);
       writeLs('cgui-pane-sessions', next);
       get().reclaimOrphanClaimDrafts(); // ②旧 pane id 已被换掉,回收指向它的 claim 槽
@@ -1675,7 +1717,7 @@ export const useStore = create((set, get) => ({
       paneGenerations: gens,
       historyPagingByTab: paging,
       // 窄复审①:被关掉的那格在飞请求作废(计数器保留,切回同一会话不撞号)。
-      historyReqSeqByTab: resetHistoryRequestSeq(cur.historyReqSeqByTab, i),
+      historyReqSeqByTab: invalidateHistoryRequests(cur.historyReqSeqByTab, i),
       activeTabIndex: newActive,
       // pane 0 changed if we removed pane 0 — keep legacy mirrors current.
       selectedSession: sessions[0],
@@ -1709,7 +1751,7 @@ export const useStore = create((set, get) => ({
       paging[idx] = null;
       patch.historyPagingByTab = paging;
       // 窄复审①:换 pane 会话 → 该窗格 refresh/older 两条请求线一起作废(计数器保留)。
-      patch.historyReqSeqByTab = resetHistoryRequestSeq(cur.historyReqSeqByTab, idx);
+      patch.historyReqSeqByTab = invalidateHistoryRequests(cur.historyReqSeqByTab, idx);
     }
     if (idx === 0) {
       patch.selectedSession = session;
@@ -1732,7 +1774,7 @@ export const useStore = create((set, get) => ({
       paging[idx] = null;
       patch.historyPagingByTab = paging;
       // 窄复审①:归属清空 = 身份已换 → 该窗格在飞的历史请求作废(计数器保留)。
-      patch.historyReqSeqByTab = resetHistoryRequestSeq(get().historyReqSeqByTab, idx);
+      patch.historyReqSeqByTab = invalidateHistoryRequests(get().historyReqSeqByTab, idx);
     }
     if (idx === 0) patch.messages = arr[0];
     set(patch);
@@ -2597,6 +2639,8 @@ export const useStore = create((set, get) => ({
     // 窄复审①:refresh 与 loadOlderMessages 各用一条独立代号 —— 静默刷新在飞时点「加载
     // 更早」不会再被刷新作废(反之亦然);只有切会话才统一作废(resetHistoryRequestSeq)。
     const req = nextHistoryRequestSeq(get().historyReqSeqByTab, tab, sessionId, 'refresh');
+    // r168:这次领号让同线旧请求作废 → 同时取消它(见 beginHistoryRequest)。
+    const ctrl = beginHistoryRequest(tab, 'refresh');
     set({ historyReqSeqByTab: req.seqs });
     if (!silent) set({ loading: true, error: null });
     // 代号 + 窗格归属一起复核:代号按 (sessionId, tab, lane) 分账,换会话立即失效;
@@ -2612,15 +2656,21 @@ export const useStore = create((set, get) => ({
     };
     try {
       const res = await fetch(
-        `/api/sessions/${sessionId}/messages?projectHash=${encodeURIComponent(projectHash)}&limit=${requestLimit}`
+        `/api/sessions/${sessionId}/messages?projectHash=${encodeURIComponent(projectHash)}&limit=${requestLimit}`,
+        { signal: ctrl.signal }
       );
       // 更新的一次请求已在飞 → 这条是过期响应:不写列表、不碰 loading(由最新那条收尾)。
-      if (!stillCurrent()) return abandon();
+      // r168:不读的响应体先取消,否则它占着连接直到整个响应传完。
+      if (!stillCurrent()) {
+        discardHistoryResponse(res, ctrl);
+        return abandon();
+      }
       // A missing / just-trimmed jsonl (404) or a server error must NOT blank the
       // pane: in split view a sibling pane showing the same reset session would
       // also re-fetch and go empty ("该会话没有可显示的消息" everywhere). Keep
       // whatever is there — a genuinely empty session still returns 200 + [].
       if (!res.ok) {
+        discardHistoryResponse(res, ctrl);
         // 最新请求即使是静默刷新,也要收掉可能由它顶替掉的首屏 loading。
         if (!silent) set({ loading: false });
         else if (tab === 0 && get().loading) set({ loading: false });
@@ -2699,10 +2749,13 @@ export const useStore = create((set, get) => ({
     } catch (err) {
       // Network/parse failure — keep existing messages rather than blanking.
       // 过期响应(期间已有更新请求 / 切了会话)连错误态都不写,交给最新那条。
-      if (!stillCurrent()) return abandon();
+      // r168:被取消(AbortError)只会发生在被顶替 / 切会话时,同样按过期收尾,不向用户报错。
+      if (ctrl.signal.aborted || !stillCurrent()) return abandon();
       if (!silent) set({ error: err.message, loading: false });
       else if (tab === 0 && get().loading) set({ loading: false });
       return false;
+    } finally {
+      endHistoryRequest(tab, 'refresh', ctrl);
     }
   },
 
@@ -2721,6 +2774,8 @@ export const useStore = create((set, get) => ({
     const cursor = Number.isInteger(paging.beforeCursor) ? paging.beforeCursor : null;
     if (cursor === null || cursor <= 0) return false;
     const req = nextHistoryRequestSeq(get().historyReqSeqByTab, tab, sessionId, 'older');
+    // r168:同线旧请求随领号作废并取消;切会话 / 清空时由 invalidateHistoryRequests 取消。
+    const ctrl = beginHistoryRequest(tab, 'older');
     set({ historyReqSeqByTab: req.seqs });
     get().setHistoryPaging(tab, { ...paging, loading: true });
     const stillCurrent = () => isHistoryRequestCurrent(get().historyReqSeqByTab, tab, sessionId, 'older', req.seq)
@@ -2739,9 +2794,14 @@ export const useStore = create((set, get) => ({
     };
     try {
       const res = await fetch(
-        `/api/sessions/${sessionId}/messages?projectHash=${encodeURIComponent(projectHash)}&limit=${HISTORY_PAGE_SIZE}&before=${cursor}`
+        `/api/sessions/${sessionId}/messages?projectHash=${encodeURIComponent(projectHash)}&limit=${HISTORY_PAGE_SIZE}&before=${cursor}`,
+        { signal: ctrl.signal }
       );
-      if (!res.ok) return fail();
+      // r168:过期(切走 / 被顶替)或失败的响应不读:先取消响应体,再按原规则收尾。
+      if (!stillCurrent() || !res.ok) {
+        discardHistoryResponse(res, ctrl);
+        return fail();
+      }
       const data = await res.json();
       if (!stillCurrent()) return fail();
       const page = Array.isArray(data) ? data : (Array.isArray(data?.messages) ? data.messages : []);
@@ -2792,7 +2852,10 @@ export const useStore = create((set, get) => ({
       }
       return true;
     } catch {
+      // 网络失败与 r168 的取消(AbortError,只在被顶替 / 切会话时发生)都走同一收尾。
       return fail();
+    } finally {
+      endHistoryRequest(tab, 'older', ctrl);
     }
   },
 
