@@ -10090,7 +10090,8 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
       {!autoScroll && (
         // 居中悬在消息区底沿 = 输入框正上方,由 wrapper 锚定,不再依赖输入框高度猜测
         <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20">
-          <button onClick={() => {
+          {/* r169:只有图标,读屏与测试都按名字找不到 —— 补无障碍名称(悬停提示同名,与子代理视图一致) */}
+          <button aria-label="回到底部" title="回到底部" onClick={() => {
               // Scroll ONLY the messages container — scrollIntoView would scroll
               // every scrollable ancestor (incl. the root flex), shoving the
               // header off-screen and leaving a blank gap at the bottom (#16).
