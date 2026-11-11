@@ -1760,7 +1760,12 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
   if (!loc) return { notFound: true };
   if (loc.conflict) return { conflict: true };
   const filePath = loc.filePath;
-  const rawRecords = await parseJsonl(filePath);
+  // r168:paging.signal = 请求方已断开(只有历史路由传)。读到一半就停(parseJsonl 以 AbortError
+  // 拒绝);刚好读完才断开的,也不再往下组装 —— 大会话的组装与全量统计同样要几百毫秒。
+  // 不传 signal(/api/session-ref 等)= 旧行为。
+  const signal = paging?.signal;
+  const rawRecords = await parseJsonl(filePath, { signal });
+  signal?.throwIfAborted();
   const records = dedupReplayedRecords(rawRecords);
   // L4/R07: 加载附件 sidecar,在 user 消息 push 时注入 attachments/displayText
   // (身份索引 messageId 优先,旧 textHash 兜底)。

@@ -8,14 +8,29 @@ import { createInterface } from 'readline';
  * @param {object} [options]
  * @param {number} [options.limit] - Max lines to read
  * @param {number} [options.skip] - Skip first N lines
+ * @param {AbortSignal} [options.signal] - r168:中止即停读、关文件,以 AbortError 拒绝(不给半截
+ *   结果,免得调用方当成完整文件);不传 = 旧行为逐字不变
  * @returns {Promise<object[]>}
  */
-export async function parseJsonl(filePath, { limit, skip } = {}) {
+export async function parseJsonl(filePath, { limit, skip, signal } = {}) {
   return new Promise((resolve, reject) => {
+    // r168:请求方在开读前就已断开 → 不开文件。
+    if (signal?.aborted) {
+      reject(readAbortedError());
+      return;
+    }
     const results = [];
     let lineNum = 0;
     const input = createReadStream(filePath, { encoding: 'utf-8' });
     const rl = createInterface({ input, crlfDelay: Infinity });
+    // r168:中止 = 关 readline(→ 下面 'close' 里销毁底层流);当前块里已缓冲的剩余行由
+    // aborted 挡掉(与 limit 早关同理,rl.close() 不打断正在派发的这一块)。
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      rl.close();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
     // rl.close() 只停 readline,不关底层 fd:limit 早关路径每调一次泄漏一个 fd
     // (实测 300 次早关 = 300 个常开 fd)。listProjects 每次请求要跑几百到几千次
     // (每个 jsonl 一次),不销毁必然 EMFILE。销毁若失败会在 rl 关闭后往 input 补发
@@ -24,6 +39,7 @@ export async function parseJsonl(filePath, { limit, skip } = {}) {
     input.on('error', () => {});
 
     rl.on('line', (line) => {
+      if (aborted) return;
       // rl.close() 不打断当前 chunk:readline 会把这一块里已缓冲的行继续同步派发,
       // 所以只靠 close() 的话 limit:10 实测会返回 329 条(一个 64KB 块的量)。
       // 必须显式挡住,否则 limit 只是"至少 n 条",调用方拿到的头部长度不可控。
@@ -42,11 +58,17 @@ export async function parseJsonl(filePath, { limit, skip } = {}) {
     });
 
     rl.on('close', () => {
+      signal?.removeEventListener('abort', onAbort);
       try { input.destroy(); } catch {}
-      resolve(results);
+      if (aborted) reject(readAbortedError());
+      else resolve(results);
     });
     rl.on('error', reject);
   });
+}
+
+function readAbortedError() {
+  return Object.assign(new Error('jsonl read aborted'), { name: 'AbortError', code: 'ABORT_ERR' });
 }
 
 /**
