@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RETURN_TO_BOTTOM_MIN_PX, shouldShowReturnToBottom } from '../../client/src/utils/scroll.js';
+import { RETURN_TO_BOTTOM_MIN_PX, setIfChanged, shouldShowReturnToBottom } from '../../client/src/utils/scroll.js';
 
 // ── 按钮显隐规则 ─────────────────────────────────────────────────────────────
 assert.equal(RETURN_TO_BOTTOM_MIN_PX, 120);
@@ -58,5 +58,29 @@ assert.ok(/setAutoScroll\(!shouldShowReturnToBottom\(\{ reading: userScrolledAwa
   'handleScroll 的按钮规则必须与观察器一致');
 assert.ok(!/setAutoScroll\(distFromBottom < 120\)/.test(app), '旧的纯距离按钮规则必须已替换');
 assert.ok(/if \(userScrolledAwayRef\.current\) return;  \/\/ AZ3:用户在看历史时不抢滚/.test(app), '按状态触发的吸底 effect 保留');
+
+// ── 发版前补丁 1:按钮显隐只在值变了才设(观察器几乎每帧回调,同值设置会让大组件白白多渲染) ──────
+{
+  const calls = [];
+  const lastRef = { current: true };            // 与 useState(true) 的初值一致
+  const setter = (v) => calls.push(v);
+  // 跟随中:观察器每帧都算出"不显示"(true)→ 一次都不设
+  for (let i = 0; i < 60; i++) assert.equal(setIfChanged(lastRef, setter, true), false);
+  assert.deepEqual(calls, [], '跟随期间同值不得反复设置');
+  // 用户上翻、离底拉大 → 设一次"显示";之后每帧同值不再设
+  assert.equal(setIfChanged(lastRef, setter, false), true);
+  for (let i = 0; i < 30; i++) setIfChanged(lastRef, setter, false);
+  assert.deepEqual(calls, [false], '值变了才设,且只设一次');
+  // 点「回到底部」→ 设回"不显示"
+  assert.equal(setIfChanged(lastRef, setter, true), true);
+  assert.deepEqual(calls, [false, true]);
+  assert.equal(lastRef.current, true, 'ref 记的是最后一次设的值');
+}
+assert.ok(/const \[autoScroll, setAutoScrollState\] = useState\(true\);/.test(app), 'React 原始 setter 改名,只留给守卫用');
+assert.ok(/const autoScrollSetRef = useRef\(true\);/.test(app), 'ref 初值与 useState 初值一致');
+assert.ok(/const setAutoScroll = useCallback\(\(next\) => \{ setIfChanged\(autoScrollSetRef, setAutoScrollState, next\); \}, \[\]\);/.test(app),
+  '所有 setAutoScroll 调用(handleScroll、观察器、按钮、恢复、发送)都经过同一个守卫');
+assert.equal((app.match(/setAutoScrollState\(/g) || []).length, 0, '不得绕过守卫直接调 React 原始 setter(否则 ref 与真实状态脱节)');
+assert.equal((app.match(/setAutoScrollState\b/g) || []).length, 2, '原始 setter 只出现在声明与守卫两处');
 
 console.log('✓ check-r169-content-follow: 内容 / 容器高度变化按真实几何跟随,按钮按真实离底显隐');

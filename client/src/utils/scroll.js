@@ -80,6 +80,16 @@ export function shouldShowReturnToBottom({ reading, distFromBottom }) {
   return !!reading && Number.isFinite(distFromBottom) && distFromBottom >= RETURN_TO_BOTTOM_MIN_PX;
 }
 
+// r169:只在值变了才转交给 setter。lastRef.current 记的是"最后一次设的值",所以同一个状态的所有设置
+// 都要经过它,否则记录与真实状态会脱节。返回这次是否真的设了。
+// 用途:「回到底部」显隐 —— 高度观察器的回调在流式输出期间几乎每帧都来,同值设置也可能让大组件多渲染一遍。
+export function setIfChanged(lastRef, setter, next) {
+  if (Object.is(lastRef.current, next)) return false;
+  lastRef.current = next;
+  setter(next);
+  return true;
+}
+
 // r169 修法 3:滚动位置按 窗格 + 会话 存在 localStorage(`cgui-scroll-<窗格>:<会话>`)。存的是"跟随中"
 // 这个状态而不是绝对位置:跟随中存「在底部」,切回来吸底并继续跟随(内容在离开期间变长了,旧的
 // 绝对位置早已不在底部);在看历史时存位置,写法与旧格式相同(纯数字字符串)。

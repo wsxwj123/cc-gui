@@ -187,7 +187,7 @@ import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
-import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, parseSavedScroll, resizeScrollTop, scrollStateToSave, shouldPauseAutoScroll, shouldShowReturnToBottom } from './utils/scroll.js';
+import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, parseSavedScroll, resizeScrollTop, scrollStateToSave, setIfChanged, shouldPauseAutoScroll, shouldShowReturnToBottom } from './utils/scroll.js';
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
@@ -4054,7 +4054,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const captureMountBeforeRef = useRef(() => {});
   // r151l:「加载更早」前插会整批加在视口上方 —— 点之前记几何,新列表提交后按差值搬回。
   const prependCompRef = useRef(null);
-  const [autoScroll, setAutoScroll] = useState(true);
+  const [autoScroll, setAutoScrollState] = useState(true);
+  // r169:「回到底部」显隐只在值变了才交给 React。内容 / 容器高度观察器的回调在流式输出期间几乎每帧都来,
+  // 这时组件常有待处理更新,同值设置也可能让这个几千行的组件多渲染一遍。ref 记"最后一次设的值"(不是最后
+  // 一次渲染的值),所以所有设置都走这一个入口 —— handleScroll、观察器、点按钮、恢复位置、发送都一样。
+  const autoScrollSetRef = useRef(true);
+  const setAutoScroll = useCallback((next) => { setIfChanged(autoScrollSetRef, setAutoScrollState, next); }, []);
   // AZ3:用户是否主动滚离底部(自动吸底的权威闸门)。原本吸底只看几何阈值 → 流式
   // 内容增长 + setAutoScroll 异步,导致"刚上滚就被弹回 + 边界抖动闪烁"。改用 ref
   // 意图锁(不触发渲染),带迟滞;autoScroll state 仅留给「回到底部」按钮显隐。
