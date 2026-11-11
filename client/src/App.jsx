@@ -4353,7 +4353,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (Array.isArray(have) && have.length > 0) return;
     }
     loadedSidRef.current = sid;
-    fetchMessagesForTab(sid, ph, { silent: true });
+    // r168:侧栏等入口"先选中再拉历史"时这次刷新已在路上,再拉一次只会把它作废、后端白做一遍;
+    // skipIfInFlight 让本窗格本会话已有有效刷新在路上时不重复发起(其余情况照常拉)。
+    fetchMessagesForTab(sid, ph, { silent: true, skipIfInFlight: true });
   }, [selectedSession?.sessionId, selectedSession?.projectHash, tabIndex, sessionQueueKey]);
 
   // I4/#6:切到【非当前流】的会话时,清掉上个会话遗留的即时上下文 usage,让上下文徽章

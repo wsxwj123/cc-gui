@@ -40,11 +40,13 @@ const recoverDraftSidecarsFromSessions = (sessions, projectHash) => (
 const historyInFlight = Array.from({ length: 6 }, () => ({ refresh: null, older: null }));
 const historyLaneTab = (tab) => (Number.isInteger(tab) && tab >= 0 && tab <= 5 ? tab : 0);
 
-function beginHistoryRequest(tab, lane) {
+// sessionId + seq 记下这条请求是谁:fetchMessages 的 skipIfInFlight 据此判断"本窗格本会话
+// 已有一条仍有效的刷新在路上"。
+function beginHistoryRequest(tab, lane, sessionId, seq) {
   const slot = historyInFlight[historyLaneTab(tab)];
   slot[lane]?.controller.abort();
   const controller = new AbortController();
-  slot[lane] = { controller };
+  slot[lane] = { controller, sessionId, seq };
   return controller;
 }
 
@@ -2630,6 +2632,16 @@ export const useStore = create((set, get) => ({
     // 回滚在 stillHere() 之前发出的旧 sid fetch)若也领号,会把新会话在飞的有效请求判过期
     // —— 新响应被丢、旧响应又被 pane 守卫丢掉 → tab0 可能永久转圈。不匹配就直接返回,不领号。
     if (!sessionId || get().paneSessions[tab]?.sessionId !== sessionId) return false;
+    // r168:侧栏点击已拉一次、会话面板「切过来就加载」再拉一次 = 每次切换必有一条被作废的
+    // 请求,后端工作量翻倍。opts.skipIfInFlight(只给切换那一刻用):本窗格本会话已有一条
+    // 仍有效的刷新在路上就不再重复发。回合结束对账等刷新必须拿新数据,不传这个选项。
+    if (opts.skipIfInFlight) {
+      const inFlight = historyInFlight[tab].refresh;
+      if (inFlight && inFlight.sessionId === sessionId && !inFlight.controller.signal.aborted
+        && isHistoryRequestCurrent(get().historyReqSeqByTab, tab, sessionId, 'refresh', inFlight.seq)) {
+        return false;
+      }
+    }
     const pagingBefore = get().historyPagingByTab?.[tab] || null;
     const sameSession = !!pagingBefore && pagingBefore.sessionId === sessionId;
     // 首屏/换会话 = 120;同一会话的刷新至少把已加载的都取回来,避免"刷新后退回 120"。
@@ -2640,7 +2652,7 @@ export const useStore = create((set, get) => ({
     // 更早」不会再被刷新作废(反之亦然);只有切会话才统一作废(resetHistoryRequestSeq)。
     const req = nextHistoryRequestSeq(get().historyReqSeqByTab, tab, sessionId, 'refresh');
     // r168:这次领号让同线旧请求作废 → 同时取消它(见 beginHistoryRequest)。
-    const ctrl = beginHistoryRequest(tab, 'refresh');
+    const ctrl = beginHistoryRequest(tab, 'refresh', sessionId, req.seq);
     set({ historyReqSeqByTab: req.seqs });
     if (!silent) set({ loading: true, error: null });
     // 代号 + 窗格归属一起复核:代号按 (sessionId, tab, lane) 分账,换会话立即失效;
@@ -2775,7 +2787,7 @@ export const useStore = create((set, get) => ({
     if (cursor === null || cursor <= 0) return false;
     const req = nextHistoryRequestSeq(get().historyReqSeqByTab, tab, sessionId, 'older');
     // r168:同线旧请求随领号作废并取消;切会话 / 清空时由 invalidateHistoryRequests 取消。
-    const ctrl = beginHistoryRequest(tab, 'older');
+    const ctrl = beginHistoryRequest(tab, 'older', sessionId, req.seq);
     set({ historyReqSeqByTab: req.seqs });
     get().setHistoryPaging(tab, { ...paging, loading: true });
     const stillCurrent = () => isHistoryRequestCurrent(get().historyReqSeqByTab, tab, sessionId, 'older', req.seq)

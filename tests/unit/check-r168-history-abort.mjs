@@ -115,4 +115,43 @@ assert.equal(await pFo, false);
 assert.equal(cFo.cancelled, 1, '过期的加载更早响应:返回前取消响应体');
 ignoreAbort = false;
 
+// 7) skipIfInFlight:本窗格本会话已有有效刷新在路上 → 不重复发、不顶替它
+st().setSelectedSession(sess('H'));
+const pH = st().fetchMessages('H', 'h');
+const cH = calls.at(-1);
+const before = calls.length;
+assert.equal(await st().fetchMessages('H', 'h', { silent: true, skipIfInFlight: true }), false);
+assert.equal(calls.length, before, '切过来就加载:同会话刷新已在路上 → 不再发第二次');
+assert.equal(cH.signal.aborted, false, '跳过时不取消在飞的那条');
+cH.respond(page('H', 2));
+assert.equal(await pH, true);
+assert.equal(st().paneMessagesSid[0], 'H', '在飞那条照常落地');
+
+// 8) 没有在飞刷新(上一条已落地)→ skipIfInFlight 照常发起
+const pH2 = st().fetchMessages('H', 'h', { silent: true, skipIfInFlight: true });
+assert.equal(calls.length, before + 1, '没有在飞的刷新 → 照常拉');
+calls.at(-1).respond(page('H', 2));
+assert.equal(await pH2, true);
+
+// 9) 不带 skipIfInFlight 的刷新(回合结束对账等)即使有在飞的也照常发起并顶替它
+const pH3 = st().fetchMessages('H', 'h', { silent: true });
+const cH3 = calls.at(-1);
+const pH4 = st().fetchMessages('H', 'h', { silent: true });
+assert.equal(cH3.signal.aborted, true, '普通刷新必须拿新数据:顶替并取消在飞的那条');
+calls.at(-1).respond(page('H', 3));
+assert.equal(await pH3, false);
+assert.equal(await pH4, true);
+
+// 10) 在飞的是别的窗格 / 已被切会话作废 → 不算"在路上"
+st().setSelectedSession(sess('I'));
+const pI = st().fetchMessages('I', 'h');
+st().setSelectedSession(sess('J'));
+st().setSelectedSession(sess('I')); // 切走又切回:I 的旧请求已随切会话取消
+const n10 = calls.length;
+const pI2 = st().fetchMessages('I', 'h', { silent: true, skipIfInFlight: true });
+assert.equal(calls.length, n10 + 1, '旧请求已作废 → 切回时照常重新拉');
+calls.at(-1).respond(page('I', 1));
+assert.equal(await pI, false);
+assert.equal(await pI2, true);
+
 console.log('check-r168-history-abort: OK');
