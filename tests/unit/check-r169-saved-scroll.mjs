@@ -7,7 +7,45 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SCROLL_SAVED_AT_BOTTOM, parseSavedScroll, scrollStateToSave, scrollValueToWrite } from '../../client/src/utils/scroll.js';
+import {
+  SCROLL_SAVED_AT_BOTTOM, parseSavedScroll, scrollPersistAllowed, scrollStateToSave, scrollValueToWrite,
+} from '../../client/src/utils/scroll.js';
+
+// ── 发版前补丁 3:恢复读取之前、恢复待决(已读取、位置等下一帧才写回)期间都不写存档 ─────────────
+{
+  const A = 'p1:A';
+  assert.equal(scrollPersistAllowed({ ownerKey: A, restoredOwner: A, restorePendingOwner: null }), true, '恢复完成后照常可写');
+  assert.equal(scrollPersistAllowed({ ownerKey: A, restoredOwner: A, restorePendingOwner: A }), false, '恢复待决期间不写');
+  assert.equal(scrollPersistAllowed({ ownerKey: A, restoredOwner: 'p1:B', restorePendingOwner: null }), false, '还没读取这个会话的存档前不写');
+  assert.equal(scrollPersistAllowed({ ownerKey: A, restoredOwner: A, restorePendingOwner: 'p1:B' }), true, '别的会话遗留的待决标记不挡当前会话');
+  assert.equal(scrollPersistAllowed({ ownerKey: null, restoredOwner: null, restorePendingOwner: null }), false);
+  // 复盘审查指出的时序:存着数字位置 → 恢复 effect 同步读取并置位 → 下一帧才写回位置;中间容器观察吸底
+  // 产生一个"没在看历史"的滚动事件。按 App.jsx 的口径模拟:这个事件不得把 '52000' 盖成「在底部」。
+  const key = `cgui-scroll-${A}`;
+  const store = new Map([[key, '52000']]);
+  let restoredOwner = null;
+  let pendingOwner = null;
+  let lastSaved;
+  const onScrollEvent = (reading, scrollTop) => {
+    if (!scrollPersistAllowed({ ownerKey: A, restoredOwner, restorePendingOwner: pendingOwner })) return;
+    const value = scrollValueToWrite({ lastSaved, reading, scrollTop });
+    if (value === null) return;
+    lastSaved = value;
+    store.set(key, value);
+  };
+  onScrollEvent(false, 61383);          // 刚切到 A、还没读取:切换途中的事件
+  assert.equal(store.get(key), '52000', '读取之前的事件不得写');
+  lastSaved = store.get(key) ?? SCROLL_SAVED_AT_BOTTOM;   // 恢复 effect 同步阶段:播种基准、进入待决、置位
+  pendingOwner = A;
+  restoredOwner = A;
+  onScrollEvent(false, 61383);          // 待决期间:容器观察吸底产生的滚动事件
+  assert.equal(store.get(key), '52000', '恢复待决期间的吸底事件不得把数字位置盖成「在底部」');
+  pendingOwner = null;                  // 下一帧:写回位置、置"在看历史"、解除待决
+  onScrollEvent(true, 52000);
+  assert.equal(store.get(key), '52000', '写回位置产生的事件与存档相同,不写');
+  onScrollEvent(true, 51000);
+  assert.equal(store.get(key), '51000', '恢复完成后照常写');
+}
 
 // ── 保存:跟随中 →「在底部」;在看历史 → 位置 ───────────────────────────────────────
 assert.equal(scrollStateToSave({ reading: false, scrollTop: 61383 }), SCROLL_SAVED_AT_BOTTOM,
@@ -93,8 +131,8 @@ const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
 const pStart = app.indexOf('const persistScrollState = (el) => {');
 assert.ok(pStart > 0, '必须有统一的保存函数');
 const persist = app.slice(pStart, app.indexOf('const handleScroll = () => {', pStart));
-assert.ok(/scrollRestoredRef\.current !== scrollOwnerKey\) return;/.test(persist),
-  '恢复读取之前不得写(切换途中的钳位 / 吸底事件会盖掉存着的位置)');
+assert.ok(/if \(!el \|\| !scrollPersistKey \|\| !scrollPersistAllowed\(\{\s*ownerKey: scrollOwnerKey,\s*restoredOwner: scrollRestoredRef\.current,\s*restorePendingOwner: scrollRestorePendingRef\.current,\s*\}\)\) return;/.test(persist),
+  '恢复读取之前、恢复待决期间都不得写(切换途中的钳位 / 吸底事件会盖掉存着的位置)');
 assert.ok(/scrollValueToWrite\(\{\s*lastSaved: last\?\.key === scrollPersistKey \? last\.value : undefined,\s*reading: userScrolledAwayRef\.current,\s*scrollTop: el\.scrollTop,\s*\}\)/.test(persist)
     && /if \(value === null\) return;/.test(persist),
   '按"是否在看历史"决定存「在底部」还是位置,与存储里现有的值(没有键按「在底部」)相同就不写');
@@ -122,5 +160,21 @@ const seedIdx = restore.indexOf('persistedScrollRef.current = { key: scrollPersi
 assert.ok(seedIdx > 0 && seedIdx < restore.indexOf('if (restore) {'),
   '恢复读取时就播种写入基准,且不论有没有可恢复的值:两个键都没有按「在底部」算');
 assert.ok(!/removeItem\([^)]*cgui-scroll/.test(app), '本次不新增删除 / 清理存储的代码');
+{
+  const ifIdx = restore.indexOf('if (restore) {');
+  const pendIdx = restore.indexOf('scrollRestorePendingRef.current = pendingOwner;');
+  const rafIdx = restore.indexOf('requestAnimationFrame(() => {');
+  const clearIdx = restore.indexOf('if (scrollRestorePendingRef.current === pendingOwner) scrollRestorePendingRef.current = null;');
+  assert.ok(ifIdx > 0 && ifIdx < pendIdx && pendIdx < rafIdx,
+    '只有存档可恢复时才进入待决,并且在排下一帧之前(没有存档的会话不进入待决,读取后照常可写)');
+  assert.ok(clearIdx > restore.indexOf("writeProgrammaticScroll(el, target, 'restore');")
+      && clearIdx > restore.indexOf('userScrolledAwayRef.current = away;')
+      && clearIdx > restore.indexOf('userScrolledAwayRef.current = false;'),
+    '位置与跟随状态都写回之后才解除待决(两个分支都覆盖)');
+  // 置位仍在同步阶段、rAF 之外:防止这一帧里重复读取,也让没有存档的会话读取后立即可写
+  assert.ok(/\}\);\s*\n\s*\}\s*\n\s*$/.test(restore) && app.startsWith('scrollRestoredRef.current = scrollOwnerKey;', rStart + restore.length),
+    'scrollRestoredRef 在 rAF 之外同步置位');
+  assert.equal((app.match(/scrollRestorePendingRef\.current = /g) || []).length, 2, '待决标记只在恢复 effect 里设、在 rAF 里清');
+}
 
 console.log('✓ check-r169-saved-scroll: 跟随中存「在底部」/ 看历史存位置 / 旧格式数字照常恢复');

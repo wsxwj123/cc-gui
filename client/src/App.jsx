@@ -187,7 +187,7 @@ import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
-import { SCROLL_SAVED_AT_BOTTOM, advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, parseSavedScroll, resizeScrollTop, scrollValueToWrite, setIfChanged, shouldPauseAutoScroll, shouldShowReturnToBottom } from './utils/scroll.js';
+import { SCROLL_SAVED_AT_BOTTOM, advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, parseSavedScroll, resizeScrollTop, scrollPersistAllowed, scrollValueToWrite, setIfChanged, shouldPauseAutoScroll, shouldShowReturnToBottom } from './utils/scroll.js';
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
@@ -4988,8 +4988,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 会话的键(本窗格的、旧格式只按会话存的都没有)按「在底部」算 —— 只在底部跟随过的会话不留键(发版前补丁 2)。
   // persistedScrollRef = 存储里这个键现在的值(恢复 effect 读取时播种,之后每次写入同步更新)。
   const persistedScrollRef = useRef(null);
+  // 恢复待决:已读取存档、要恢复的位置还没写回(等下一帧)期间 = 那个 scrollOwnerKey;写回后清空(发版前补丁 3)。
+  const scrollRestorePendingRef = useRef(null);
   const persistScrollState = (el) => {
-    if (!el || !scrollPersistKey || scrollRestoredRef.current !== scrollOwnerKey) return;
+    if (!el || !scrollPersistKey || !scrollPersistAllowed({
+      ownerKey: scrollOwnerKey,
+      restoredOwner: scrollRestoredRef.current,
+      restorePendingOwner: scrollRestorePendingRef.current,
+    })) return;
     const last = persistedScrollRef.current;
     const value = scrollValueToWrite({
       lastSaved: last?.key === scrollPersistKey ? last.value : undefined,
@@ -5067,6 +5073,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (ownSaved === null) {
         try { localStorage.setItem(scrollPersistKey, saved); } catch {}
       }
+      // 恢复待决:从这里到下一帧写回位置之前不写存档 —— 中间的滚动事件(如容器观察吸底)会用"没在看历史"
+      // 把存着的数字位置先盖成「在底部」。scrollRestoredRef 仍在下面同步置位,防止这一帧里重复读取。
+      const pendingOwner = scrollOwnerKey;
+      scrollRestorePendingRef.current = pendingOwner;
       // Defer to next frame so DOM is laid out
       requestAnimationFrame(() => {
         if (el && restore.atBottom) {
@@ -5081,6 +5091,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           userScrolledAwayRef.current = away;  // AZ3:恢复的位置若不在底部则保持暂停吸底
           setAutoScroll(!away);
         }
+        // 位置与跟随状态都已写回 → 解除待决。只解自己这一次的:期间换了会话、那个会话又进入待决的不动。
+        if (scrollRestorePendingRef.current === pendingOwner) scrollRestorePendingRef.current = null;
       });
     }
     scrollRestoredRef.current = scrollOwnerKey;

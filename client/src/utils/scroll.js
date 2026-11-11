@@ -101,6 +101,13 @@ export function scrollStateToSave({ reading, scrollTop }) {
 // 都不存在时,调用方按「在底部」传 —— 没有键本来就等于"跟随在底部"(恢复时什么都不做)。与它相同就不写:
 // 只在底部跟随过的会话因此不会留下键,不占整个应用共用的 localStorage 配额;已经有键的(上翻过、旧版本
 // 留下的)照常更新成「在底部」或新位置。
+// 此刻能不能写存档。两段不写:①本窗格刚切到这个会话、还没读取存档(restoredOwner 不是它);②已读取、
+// 要恢复的位置等下一帧才写回(restorePendingOwner 是它)。这两段里的滚动事件(切换途中的钳位、容器观察
+// 吸底)反映的不是这个会话的真实状态,会用"没在看历史"把存着的位置盖成「在底部」。别的会话遗留的
+// 待决标记不挡当前会话;没有存档可恢复的会话不会进入待决,读取后照常可写。
+export function scrollPersistAllowed({ ownerKey, restoredOwner, restorePendingOwner }) {
+  return !!ownerKey && restoredOwner === ownerKey && restorePendingOwner !== ownerKey;
+}
 export function scrollValueToWrite({ lastSaved, reading, scrollTop }) {
   const value = scrollStateToSave({ reading, scrollTop });
   return value === lastSaved ? null : value;
