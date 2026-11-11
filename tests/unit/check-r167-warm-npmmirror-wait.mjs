@@ -10,14 +10,16 @@
 // 锁的事:
 //   静态(读工作流与脚本)
 //     W1 工作流「Warm npmmirror」步骤:排在「Publish to npm」之后;if 守卫、continue-on-error: true 不变;run 调脚本;
-//        步骤级 env 给镜像地址;有 timeout-minutes。
+//        步骤级 env 给镜像地址;有 timeout-minutes。这些键都钉死在步骤级 8 空格缩进(缩进错了仍是合法 YAML,但会变成 env 变量、守卫悄悄失效)。
 //     W2 脚本存在、bash 开头、只用 bash 3.2 就有的写法(开发机 macOS 自带 3.2,单测要在它上面真跑;CI 的 ubuntu 是 bash 5)。
-//     W3 脚本默认总等待上限小于步骤 timeout-minutes(留 ≥ 10 分钟余量):否则步骤先被强杀,看不到脚本自己的超时说明。
+//     W3 脚本默认总等待上限:≥ 90 分钟(观测到的最长延迟是 60 分钟,太短会重演「还没等到就放弃」),且小于步骤
+//        timeout-minutes(留 ≥ 10 分钟余量):否则步骤先被强杀,看不到脚本自己的超时说明。
 //   行为(假 curl / sleep / date 搭「假世界」,假时钟,真跑脚本,不碰网络;假件在 tests/unit/r167-helpers/fake-bin)
-//     B1  分包 20 分半钟后才在官方源可见(不对齐轮询格点):此前一次都不催;一可见(下一轮)就催;镜像追平即停;不拖沓。
-//     B2  镜像慢(催后 13 分钟才追平):每个包隔 5 分钟补催一次,追平后不再催。
-//     B3  官方源始终没有:到上限放弃(退出非 0),一次都没催,报出缺哪些包。
-//     B4  只有主包可见:只催主包,分包不催;到上限放弃。
+//     B1  分包 20 分半钟后才在官方源可见(不对齐轮询格点):此前一次都不催;一可见(下一轮)就催;镜像追平即停;不拖沓;
+//         默认每轮间隔恰是 60 秒。
+//     B2  镜像慢(催后 13 分钟才追平):每个包恰好隔 300 秒补催一次,追平后不再催。
+//     B3  官方源始终没有:恰在上限那一轮放弃(退出非 0,不多等一轮),一次都没催,报出缺哪些包。
+//     B4  只有主包可见:只催主包,分包不催;恰在上限那一轮放弃。
 //     B5  镜像开局就有三个包:一次不催、不等待,立刻成功。
 //     B6  前几次请求超时:不中断,恢复后照常催、照常收尾。
 //     B7  催同步的请求本身失败(超时):不算催过,下一轮(≤ 1 个间隔)就重试。
@@ -25,8 +27,9 @@
 //         (真实网络实测发现:没加 --fail 时 HTTP 502 的 curl 退出码也是 0,只看退出码会把它记成「催过」,干等 5 分钟。)
 //     B8  包页面判据只认 versions 表:官方源 dist-tags / time 先提到新版本但 versions 里还没有,不算可见;带缩进的 JSON 也认。
 //     B9  镜像对没同步过的包返回 404:照常催、追平后成功。
-//     B10 参数错误(找不到 npm-packages.json / 包列表为空):立刻报错退出,不联网、不等待。
-//     B11 请求形态:PUT 用 %2F、包页面 GET 用 %2f(线上验证过的写法);默认地址正确;两个环境变量名脚本认。
+//     B10 参数错误(找不到 npm-packages.json / 包列表为空 / 没有 version 字段):立刻报错退出,不联网、不等待。
+//     B11 请求形态:PUT 用 %2F、包页面 GET 用 %2f(线上验证过的写法);默认地址正确;两个环境变量名脚本认;
+//         每个请求都带 --max-time(1~60 秒),不然一个挂住的连接会把步骤拖到被强杀。
 //
 // 跑法:node tests/unit/check-r167-warm-npmmirror-wait.mjs        (保留现场排查:R167_KEEP=1)
 import assert from 'node:assert/strict';
@@ -77,11 +80,12 @@ await report.check('W1', '工作流「Warm npmmirror」:排在发布之后,调�
   assert.ok(iPub >= 0, '应有「Publish to npm」步骤');
   assert.ok(iWarm > iPub, `「Warm npmmirror」应排在「Publish to npm」之后(下标 ${iWarm} vs ${iPub})`);
   const s = stripComments(npmSteps[iWarm]);
-  assert.ok(/^\s+if:\s*steps\.npmtoken\.outputs\.has == 'true'\s*$/m.test(s), '应保留 if: steps.npmtoken.outputs.has == \'true\' 守卫(没配令牌就跳过)');
-  assert.ok(/^\s+continue-on-error:\s*true\s*$/m.test(s), '必须 continue-on-error: true —— 包已经发出去了,镜像迟早会同步,预热失败不许弄红任务');
-  assert.ok(/^\s+run:\s*bash scripts\/warm-npmmirror\.sh\s*$/m.test(s), 'run 应是 `bash scripts/warm-npmmirror.sh`');
+  // 步骤级的键都是 8 空格缩进;缩进错了仍是合法 YAML(会变成 env 里的变量),但守卫 / 容错 / 超时就悄悄失效,所以钉死 8 空格
+  assert.ok(/^ {8}if:\s*steps\.npmtoken\.outputs\.has == 'true'\s*$/m.test(s), '应保留步骤级(8 空格缩进)的 if: steps.npmtoken.outputs.has == \'true\' 守卫(没配令牌就跳过)');
+  assert.ok(/^ {8}continue-on-error:\s*true\s*$/m.test(s), '必须有步骤级(8 空格缩进)的 continue-on-error: true —— 包已经发出去了,镜像迟早会同步,预热失败不许弄红任务');
+  assert.ok(/^ {8}run:\s*bash scripts\/warm-npmmirror\.sh\s*$/m.test(s), 'run 应是步骤级(8 空格缩进)的 `bash scripts/warm-npmmirror.sh`');
   assert.ok(/^ {8}env:\s*$/m.test(s) && /^ {10}NPMMIRROR_REGISTRY:\s*https:\/\/registry\.npmmirror\.com\s*$/m.test(s), '步骤级 env 里应给出 NPMMIRROR_REGISTRY: https://registry.npmmirror.com');
-  assert.ok(/^\s+timeout-minutes:\s*\d+\s*$/m.test(s), '应有 timeout-minutes(脚本要等很久,给它一个强杀兜底)');
+  assert.ok(/^ {8}timeout-minutes:\s*\d+\s*$/m.test(s), '应有步骤级(8 空格缩进)的 timeout-minutes(脚本要等很久,给它一个强杀兜底)');
 });
 
 await report.check('W2', '脚本 scripts/warm-npmmirror.sh:存在、bash 开头、只用 bash 3.2 就有的写法', 'red', () => {
@@ -100,13 +104,14 @@ await report.check('W2', '脚本 scripts/warm-npmmirror.sh:存在、bash 开头�
   for (const [re, what] of bash4) assert.ok(!re.test(body), `不该用 bash 4 才有的写法:${what}`);
 });
 
-await report.check('W3', '脚本默认总等待上限小于步骤 timeout-minutes(留 ≥ 10 分钟余量)', 'red', () => {
+await report.check('W3', '脚本默认总等待上限:≥ 90 分钟(观测到的最长延迟是 60 分钟),且小于步骤 timeout-minutes(留 ≥ 10 分钟余量)', 'red', () => {
   assert.ok(existsSync(SCRIPT), '缺少脚本 scripts/warm-npmmirror.sh');
   const t = read(SCRIPT);
   const m = t.match(/WARM_MAX_WAIT_S:-(\d+)/);
   assert.ok(m, '脚本里应有 WARM_MAX_WAIT_S 的默认值(${WARM_MAX_WAIT_S:-秒数})');
-  const tm = stripComments(warmStep() || '').match(/^\s+timeout-minutes:\s*(\d+)\s*$/m);
-  assert.ok(tm, '工作流「Warm npmmirror」步骤应有 timeout-minutes');
+  assert.ok(Number(m[1]) >= 5400, `脚本默认上限 ${m[1]} 秒太短:官方源上大分包最长观测到 60 分钟才可见(0.2.458),上限至少要 90 分钟(5400 秒),否则又会重演「还没等到就放弃」`);
+  const tm = stripComments(warmStep() || '').match(/^ {8}timeout-minutes:\s*(\d+)\s*$/m);
+  assert.ok(tm, '工作流「Warm npmmirror」步骤应有步骤级(8 空格缩进)的 timeout-minutes');
   assert.ok(Number(tm[1]) * 60 >= Number(m[1]) + 600, `步骤 timeout-minutes=${tm[1]} 分钟,脚本默认上限 ${m[1]} 秒:步骤上限应比脚本上限至少多 10 分钟,否则步骤先被强杀`);
 });
 
@@ -152,10 +157,11 @@ function runWarm(opts = {}) {
     });
     const file = (n) => (existsSync(join(world, n)) ? readFileSync(join(world, n), 'utf8') : '');
     const puts = file('puts.log').split('\n').filter(Boolean).map((l) => { const [t, key, status] = l.split(' '); return { t: Number(t), key, status }; });
-    const urls = file('urls.log').split('\n').filter(Boolean).map((l) => { const [t, method, url] = l.split(' '); return { t: Number(t), method, url }; });
+    const urls = file('urls.log').split('\n').filter(Boolean).map((l) => { const [t, method, url, mt] = l.split(' '); return { t: Number(t), method, url, maxtime: (mt || '').replace('maxtime=', '') }; });
+    const sleepList = file('sleeps.log').split('\n').filter(Boolean).map(Number);
     return {
       code: r.status, signal: r.signal, out: `${r.stdout || ''}${r.stderr || ''}`,
-      puts, urls, calls: file('calls.log').split('\n').filter(Boolean), sleeps: file('sleeps.log').split('\n').filter(Boolean).length,
+      puts, urls, calls: file('calls.log').split('\n').filter(Boolean), sleeps: sleepList.length, sleepList,
       elapsed: Number(file('now') || START) - START, runaway: existsSync(join(world, 'runaway')),
     };
   } finally {
@@ -185,6 +191,7 @@ await behavior('B1', '分包 20 分半钟后才在官方源可见:此前一次�
     const ps = putsOf(r, k);
     assert.ok(ps.every((p) => p.t < ps[0].t + 240), `${k} 镜像追平(首次催 +240 秒)之后还在催:${JSON.stringify(ps)}`);
   }
+  assert.ok(r.sleepList.length >= 20 && r.sleepList.every((n) => n === 60), `默认每轮间隔应恰是 60 秒(太短会对公开的 registry 刷请求,太长会拖沓);实际间隔 ${JSON.stringify([...new Set(r.sleepList)])}`);
   assert.ok(r.elapsed >= 1230 + 240 && r.elapsed <= 1230 + 240 + 120, `应在最后一个包追平(约 1500 秒)后 2 个间隔内收尾,实际总耗时 ${r.elapsed} 秒`);
 });
 
@@ -196,7 +203,8 @@ await behavior('B2', '镜像慢(催后 13 分钟才追平):每个包隔 5 分钟
     const ps = putsOf(r, k);
     assert.ok(ps.length >= 2, `${k} 应补催过(镜像 780 秒才追平),实际只催了 ${ps.length} 次`);
     noGapShorter(ps, 300, k);
-    for (let i = 1; i < ps.length; i += 1) assert.ok(ps[i].t - ps[i - 1].t <= 360, `${k}:补催太慢,相邻两次隔了 ${ps[i].t - ps[i - 1].t} 秒(应 ≤ 360)`);
+    // 假时钟是确定的、补催间隔 300 秒是轮询间隔 60 秒的整数倍:相邻两次催应恰好隔 300 秒(隔 360 说明边界判断多等了一轮)
+    for (let i = 1; i < ps.length; i += 1) assert.equal(ps[i].t - ps[i - 1].t, 300, `${k}:补催应恰好在 300 秒后的那一轮,相邻两次隔了 ${ps[i].t - ps[i - 1].t} 秒`);
     assert.ok(ps.every((p) => p.t < 780), `${k} 镜像追平(780 秒)之后还在催:${JSON.stringify(ps)}`);
   }
   assert.ok(r.elapsed >= 780 && r.elapsed <= 900, `应在镜像追平后 2 个间隔内收尾,实际总耗时 ${r.elapsed} 秒`);
@@ -207,7 +215,7 @@ await behavior('B3', '官方源始终没有:到上限放弃(退出非 0)、一�
   noRunaway(r);
   assert.notEqual(r.code, 0, `官方源一直没有,应以非 0 退出(让步骤显示警告),实际 ${r.code}`);
   assert.equal(r.puts.length, 0, `官方源没有的包不该催同步(催了也拿不到):${JSON.stringify(r.puts)}`);
-  assert.ok(r.elapsed >= 900 && r.elapsed <= 960, `应等满上限 900 秒再放弃,实际总耗时 ${r.elapsed} 秒`);
+  assert.equal(r.elapsed, 900, `应恰好在上限 900 秒那一轮放弃(刚好到上限就算到,不多等一轮;多等会是 960),实际总耗时 ${r.elapsed} 秒`);
   for (const p of PKGS) assert.ok(r.out.includes(p.name), `放弃时应报出缺的包 ${p.name};输出尾部:${tail(r.out)}`);
 });
 
@@ -217,7 +225,7 @@ await behavior('B4', '只有主包可见:只催主包,分包不催;到上限放�
   assert.notEqual(r.code, 0, `分包一直没有,应以非 0 退出,实际 ${r.code}`);
   assert.equal(putsOf(r, 'darwin').length + putsOf(r, 'win32').length, 0, `官方源没有的分包不该催:${JSON.stringify(r.puts)}`);
   assert.ok(putsOf(r, 'main').length >= 1, '主包可见,应催过');
-  assert.ok(r.elapsed >= 900 && r.elapsed <= 960, `应等满上限 900 秒再放弃,实际总耗时 ${r.elapsed} 秒`);
+  assert.equal(r.elapsed, 900, `应恰好在上限 900 秒那一轮放弃(不多等一轮),实际总耗时 ${r.elapsed} 秒`);
   assert.ok(r.out.includes('@wsxwj123/cc-gui-darwin-arm64') && r.out.includes('@wsxwj123/cc-gui-win32-x64'), `放弃时应报出缺的两个分包;输出尾部:${tail(r.out)}`);
 });
 
@@ -294,6 +302,13 @@ await behavior('B10', '参数错误(找不到 npm-packages.json / 包列表为�
   assert.notEqual(empty.code, 0, '包列表为空应以非 0 退出');
   assert.equal(empty.sleeps, 0, '包列表为空不该等待');
   assert.equal(empty.calls.length + empty.puts.length, 0, '包列表为空不该联网');
+  // 没有 version 字段:不能拿空版本号去轮询到上限(上限调小,免得跑偏时拖慢测试)
+  const noVer = runWarm({ packagesJson: { packages: PKGS.map((p) => ({ name: p.name, dir: `npm-dist/${p.key}` })) }, env: { WARM_MAX_WAIT_S: '900' } });
+  noRunaway(noVer);
+  assert.notEqual(noVer.code, 0, '缺 version 字段应以非 0 退出');
+  assert.ok(noVer.out.includes('npm-packages.json'), `报错应点名 npm-packages.json:${tail(noVer.out)}`);
+  assert.equal(noVer.sleeps, 0, '缺 version 字段不该等待');
+  assert.equal(noVer.urls.length, 0, '缺 version 字段不该联网');
 });
 
 await behavior('B11', '请求形态:催同步的 PUT 用 %2F、查包页面的 GET 用 %2f(与线上验证过的写法一致);默认地址正确;环境变量名与工作流一致', () => {
@@ -308,6 +323,11 @@ await behavior('B11', '请求形态:催同步的 PUT 用 %2F、查包页面的 G
   for (const u of gets) assert.match(u.url, new RegExp(`^https://registry\\.(npmjs\\.org|npmmirror\\.com)/@wsxwj123%2f${PKG_RE}$`), `GET 地址形态不对:${u.url}`);
   assert.ok(gets.some((u) => u.url.startsWith('https://registry.npmjs.org/')), '应查官方源 https://registry.npmjs.org');
   assert.ok(gets.some((u) => u.url.startsWith('https://registry.npmmirror.com/')), '应查镜像 https://registry.npmmirror.com');
+  // 每个请求都要带 --max-time(1~60 秒):不带的话一个挂住的连接会把整个步骤拖到被强杀,看不到任何诊断输出
+  for (const u of r.urls) {
+    const mt = Number(u.maxtime);
+    assert.ok(Number.isFinite(mt) && mt >= 1 && mt <= 60, `请求必须带 --max-time(1~60 秒),这个请求是 ${u.method} ${u.url} maxtime=${u.maxtime}`);
+  }
   // 环境变量:工作流步骤 env 给的 NPMMIRROR_REGISTRY、以及 NPM_OFFICIAL_REGISTRY 要被脚本认
   const alt = runWarm({ up: { main: 0, darwin: 0, win32: 0 }, mirrorDelay: 240,
     env: { NPMMIRROR_REGISTRY: 'https://registry.npmmirror.com/alt', NPM_OFFICIAL_REGISTRY: 'https://registry.npmjs.org/alt' } });

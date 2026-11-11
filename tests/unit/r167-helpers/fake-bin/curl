@@ -12,10 +12,12 @@ set -u
 method=GET
 url=""
 fail=0
+maxtime=none
 while [ $# -gt 0 ]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
-    --max-time|--connect-timeout|-m|-H|-o|-w|--retry) shift 2 ;;
+    --max-time|-m) maxtime="$2"; shift 2 ;;
+    --connect-timeout|-H|-o|-w|--retry) shift 2 ;;
     -f|--fail) fail=1; shift ;;
     http://*|https://*) url="$1"; shift ;;
     *) shift ;;
@@ -28,7 +30,7 @@ NOW=$(cat "$WORLD/now")
 REL=$((NOW - START))
 V="${WORLD_VER:-0.2.458}"
 
-echo "$REL $method $url" >> "$WORLD/urls.log"
+echo "$REL $method $url maxtime=$maxtime" >> "$WORLD/urls.log"
 n=$(cat "$WORLD/ncalls" 2>/dev/null || echo 0)
 echo $((n + 1)) > "$WORLD/ncalls"
 if [ "$n" -lt "${FAIL_FIRST:-0}" ]; then
