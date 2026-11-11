@@ -24,6 +24,7 @@ test('B02 Chromium 回复进行中在 X、Y 之间来回点 8 次：每次切完
     await ensureRow(page, 'Y');
     await openAndWait(page, 'S2');
     await sendAndWaitRunning(page, 'S2', `${SESSIONS.S2.beg} B02 请开始一段长回复`);
+    await ensureRow(page, 'X'); // 打开 S 会收起 X 所在工作区：先展开（不计入下面的切换计时）
     const rs = await switchLoop(page, ['X', 'Y'], 8);
     const bad = rs.filter((r) => r.ms === null || r.ms > 10_000);
     expect(bad, `回复进行中 8 次切换都应在 10 秒内出现结束标记；实测：${describeSwitches(rs)}`).toEqual([]);

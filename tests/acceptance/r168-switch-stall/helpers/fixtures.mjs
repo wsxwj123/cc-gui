@@ -29,25 +29,25 @@ const defs = {
   P: { ws: 'shots', kind: 'shots', rounds: 70 },
   Q: { ws: 'shots', kind: 'shots', rounds: 70 },
   L: { ws: 'plain', kind: 'chat', rounds: 300 },
-  S2: { ws: 'plain', kind: 'small', rounds: 3 },
-  S4: { ws: 'plain', kind: 'small', rounds: 3 },
-  S5: { ws: 'plain', kind: 'small', rounds: 3 },
-  S10: { ws: 'plain', kind: 'small', rounds: 3 },
-  S14: { ws: 'plain', kind: 'small', rounds: 3 },
-  T14: { ws: 'plain', kind: 'small', rounds: 3 },
+  S2: { ws: 'big', kind: 'small', rounds: 3 },
+  S4: { ws: 'big', kind: 'small', rounds: 3 },
+  S5: { ws: 'shots', kind: 'small', rounds: 3 },
+  S10: { ws: 'big', kind: 'small', rounds: 3 },
+  S14: { ws: 'big', kind: 'small', rounds: 3 },
+  T14: { ws: 'big', kind: 'small', rounds: 3 },
 };
 export const KEYS = Object.keys(defs);
 export const SESSIONS = Object.fromEntries(KEYS.map((k, i) => [k, {
   key: k,
   ...defs[k],
-  sid: `a1680${String(i + 1).padStart(3, '0')}-0000-4000-8000-${String(i + 1).padStart(12, '0')}`,
-  beg: `R168BEG${k}Z`,
-  end: `R168END${k}Z`,
+  sid: `a1681${String(i + 1).padStart(3, '0')}-0000-4000-8000-${String(i + 1).padStart(12, '0')}`,
+  beg: `R168v2BEG${k}Z`,
+  end: `R168v2END${k}Z`,
   wsName: WS[defs[k].ws],
   projectHash: encodeProjectDir(workspaceDir(defs[k].ws)),
 }]));
 
-const GEN_VERSION = 'v1';
+const GEN_VERSION = 'v2';
 const USAGE = { input_tokens: 120, output_tokens: 34, cache_read_input_tokens: 5120, cache_creation_input_tokens: 340 };
 const T0 = Date.UTC(2026, 10, 7, 9, 0, 0);
 const iso = (sec) => new Date(T0 + sec * 1000).toISOString();

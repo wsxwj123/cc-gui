@@ -173,12 +173,18 @@ export async function focusPane(page, i) {
 /** 记下发往 /api/sessions/<sid>/messages 的请求。 */
 export function watchHistory(page) {
   const list = [];
+  const byReq = new Map();
   page.on('request', (req) => {
     try {
       const u = new URL(req.url());
+      if (!u.pathname.includes('/messages')) return; // 路径里含 /messages 的全部记下，不按 URL 去重
       const m = /^\/api\/sessions\/([^/]+)\/messages$/.exec(u.pathname);
-      if (m) list.push({ sid: decodeURIComponent(m[1]), url: req.url(), at: Date.now() });
+      const rec = { sid: m ? decodeURIComponent(m[1]) : null, method: req.method(), url: req.url(), at: Date.now(), end: 'pending' };
+      byReq.set(req, rec);
+      list.push(rec);
     } catch { /* 非 http */ }
   });
+  page.on('requestfinished', (req) => { const r = byReq.get(req); if (r) r.end = `finished +${Date.now() - r.at}ms`; });
+  page.on('requestfailed', (req) => { const r = byReq.get(req); if (r) r.end = `failed(${req.failure() && req.failure().errorText}) +${Date.now() - r.at}ms`; });
   return list;
 }

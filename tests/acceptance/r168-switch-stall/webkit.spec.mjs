@@ -18,17 +18,26 @@ test('B10 回复进行中切走再切回：10 秒内停止键重新出现，3 �
     await openAndWait(page, 'S10');
     await sendAndWaitRunning(page, 'S10', `${SESSIONS.S10.beg} ${userMark} 请开始一段长回复`);
     await sleep(2_000);
-    await switchLoop(page, ['X', 'Y', 'X'], 3, { pause: 800 });
+    await ensureRow(page, 'X'); // 打开 S 会收起 X 所在工作区：先展开（不计入下面的切换计时）
+    const sw =await switchLoop(page, ['X', 'Y', 'X'], 3, { pause: 800 });
+    const swBad = sw.filter((r) => r.ms === null || r.ms > 10_000);
+    expect(swBad, `回复进行中的三次切换都应在 10 秒内出现目标结束标记；实测：${describeSwitches(sw)}`).toEqual([]);
     await ensureRow(page, 'S10'); // 跨工作区：先展开 S 所在工作区
     const tBack = Date.now();
     await clickRow(page, 'S10');
     await expect(stopBtn(page), '切回 S 后 10 秒内停止键应重新出现').toBeVisible({ timeout: 10_000 });
     const backMs = Date.now() - tBack;
-    const c0 = await countMatches(page, /R168T\d{5}/);
+    // 用页面上出现过的最大增量词编号衡量"回复变长"（重新渲染时重复/折叠会让出现次数忽多忽少，最大编号只增不减）
+    const maxTok = () => page.evaluate(() => {
+      const el = document.querySelector('[data-cgui="message-list"]');
+      const all = el ? ((el.textContent || '').match(/R168T(\d{5})/g) || []) : [];
+      return all.reduce((m, s) => Math.max(m, Number(s.slice(5))), 0);
+    });
+    const c0 = await maxTok();
     let c1 = c0;
     const t1 = Date.now();
-    while (Date.now() - t1 < 3_000 && c1 <= c0) { await sleep(250); c1 = await countMatches(page, /R168T\d{5}/); }
-    expect(c1, `停止键重现（${backMs}ms）后 3 秒内回复正文应继续变长：${c0} -> ${c1} 个增量词`).toBeGreaterThan(c0);
+    while (Date.now() - t1 < 3_000 && c1 <= c0) { await sleep(250); c1 = await maxTok(); }
+    expect(c1, `停止键重现（${backMs}ms）后 3 秒内回复正文应继续变长：最大增量词编号 ${c0} -> ${c1}`).toBeGreaterThan(c0);
     const userCount = await countMatches(page, new RegExp(userMark, 'g'));
     expect(userCount, `S 里的用户消息应只显示 1 次，实测 ${userCount} 次`).toBe(1);
   } finally {
@@ -90,15 +99,23 @@ test('B14 分屏：左窗格开 X，右窗格在 S、T 间来回切 4 次：左�
   await boot(page);
   await ensureRow(page, 'S14');
   await ensureRow(page, 'T14');
+  const snap = (label) => page.evaluate(([lab, marks]) => `${lab}: ` + JSON.stringify([...document.querySelectorAll('[data-testid="pane"]')].map((el) => marks.filter((m) => (el.textContent || '').includes(m)))), [label, [SESSIONS.X.end, SESSIONS.S14.end, SESSIONS.T14.end]]);
   await openAndWait(page, 'X');
+  console.log(await snap('B14 X 打开后'));
   await setPaneCount(page, 2);
+  console.log(await snap('B14 分屏=2 后'));
   await ensureRow(page, 'S14'); // 跨工作区：X 在另一个工作区，先展开 S、T 所在工作区
+  console.log(await snap('B14 展开工作区后'));
   await focusPane(page, 1);
+  console.log(await snap('B14 点右窗格后'));
   await clickRow(page, 'S14');
+  await sleep(1_500);
+  console.log(await snap('B14 点 S14 后 1.5 秒'));
   const first = await waitMarker(page, SESSIONS.S14.end, 10_000, (p, m) => markerInPane(p, 1, m));
   expect(first, '前置：右窗格应在 10 秒内显示 S 的结束标记').not.toBeNull();
   const rs = [];
   const leftGone = [];
+  const facts = [];
   for (let i = 0; i < 4; i += 1) {
     const key = i % 2 === 0 ? 'T14' : 'S14';
     await focusPane(page, 1);
@@ -107,9 +124,11 @@ test('B14 分屏：左窗格开 X，右窗格在 S、T 间来回切 4 次：左�
     const ms = await waitMarker(page, SESSIONS[key].end, 10_000, (p, m) => markerInPane(p, 1, m));
     rs.push({ i: i + 1, key, ms: ms === null ? null : Date.now() - t0 });
     if (!(await markerInPane(page, 0, SESSIONS.X.end))) leftGone.push(i + 1);
+    const paneFacts = await page.evaluate((marks) => [...document.querySelectorAll('[data-testid="pane"]')].map((el) => marks.filter((m) => (el.textContent || '').includes(m))), [SESSIONS.X.end, SESSIONS.S14.end, SESSIONS.T14.end]);
+    facts.push(`#${i + 1}->${key}: 各窗格含的结束标记=${JSON.stringify(paneFacts)}`);
     await sleep(1_000);
   }
-  expect(leftGone, `左窗格 X 的结束标记应始终在（消失的切换序号：${leftGone.join(',')}）`).toEqual([]);
+  expect(leftGone, `左窗格 X 的结束标记应始终在（消失的切换序号：${leftGone.join(',')}）；窗格内容：${facts.join(' ; ')}；右窗格切换耗时：${JSON.stringify(rs)}`).toEqual([]);
   const bad = rs.filter((r) => r.ms === null);
   expect(bad, `右窗格每次切换 10 秒内应显示目标结束标记；实测 ${JSON.stringify(rs)}`).toEqual([]);
 });

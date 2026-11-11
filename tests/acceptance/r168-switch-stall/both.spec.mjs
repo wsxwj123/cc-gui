@@ -18,8 +18,12 @@ test('B04 从侧栏切到没打开过的 X：从点击到结束标记出现后�
   const ms = await waitMarker(page, SESSIONS.X.end, 60_000);
   expect(ms, 'X 的结束标记应在 60 秒内出现').not.toBeNull();
   await sleep(2_000);
-  const mine = reqs.filter((r) => r.sid === SESSIONS.X.sid && r.at >= tClick);
-  expect(mine.length, `点击 X 后对 X 的 GET /api/sessions/<X>/messages 应恰好 1 次；实测 ${mine.length} 次：${mine.map((r) => r.url.replace(/^.*\/api/, '/api')).join(' | ')}`).toBe(1);
+  const win = reqs.filter((r) => r.at >= tClick);
+  const dump = reqs.map((r) => `  ${r.at - tClick >= 0 ? '+' : ''}${r.at - tClick}ms ${r.method} ${r.url} -> ${r.end}${r.at >= tClick ? '' : '  (点击之前，不在窗口内)'}`).join('\n');
+  console.log(`[B04 ${test.info().project.name}] 点击后窗口内路径含 /messages 的请求共 ${win.length} 条（含他会话）：\n${dump}`);
+  test.info().annotations.push({ type: 'messages-requests', description: dump });
+  const mine = win.filter((r) => r.sid === SESSIONS.X.sid);
+  expect(mine.length, `点击 X 后对 X 的 GET /api/sessions/<X>/messages 应恰好 1 次；实测 ${mine.length} 次。窗口内全部 /messages 请求：\n${dump}`).toBe(1);
 });
 
 test('B05 回复进行中在 P、Q 之间每 700 毫秒交替点 12 次（不等加载）：最后一次点击后 10 秒内最后点的会话结束标记出现', async ({ page }) => {
