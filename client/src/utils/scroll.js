@@ -80,6 +80,22 @@ export function shouldShowReturnToBottom({ reading, distFromBottom }) {
   return !!reading && Number.isFinite(distFromBottom) && distFromBottom >= RETURN_TO_BOTTOM_MIN_PX;
 }
 
+// r169 修法 3:滚动位置按 窗格 + 会话 存在 localStorage(`cgui-scroll-<窗格>:<会话>`)。存的是"跟随中"
+// 这个状态而不是绝对位置:跟随中存「在底部」,切回来吸底并继续跟随(内容在离开期间变长了,旧的
+// 绝对位置早已不在底部);在看历史时存位置,写法与旧格式相同(纯数字字符串)。
+export const SCROLL_SAVED_AT_BOTTOM = 'bottom';
+export function scrollStateToSave({ reading, scrollTop }) {
+  return reading ? String(scrollTop) : SCROLL_SAVED_AT_BOTTOM;
+}
+// 读:「在底部」→ { atBottom: true };纯数字(含旧版本存下的值)→ { atBottom: false, top };
+// 空值 / 认不出的值 → null(不恢复、不报错、不清空,留在默认的跟随底部)。
+export function parseSavedScroll(saved) {
+  if (saved === SCROLL_SAVED_AT_BOTTOM) return { atBottom: true };
+  if (typeof saved !== 'string' || saved.trim() === '') return null;
+  const top = Number(saved);
+  return Number.isFinite(top) ? { atBottom: false, top } : null;
+}
+
 // 容器【宽度】变化(开/关右侧面板、拖分屏宽、关窗格)后消息会重排,总高随之变化。
 // Blink/Gecko 有 scroll anchoring 会自动补偿 scrollTop,WKWebView(Tauri 的 webview,
 // 以及 iOS/macOS Safari)没有 —— scrollTop 原地不动而内容整体位移,视口就可能停在两条

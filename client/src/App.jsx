@@ -187,7 +187,7 @@ import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
-import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, resizeScrollTop, shouldPauseAutoScroll, shouldShowReturnToBottom } from './utils/scroll.js';
+import { advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, parseSavedScroll, resizeScrollTop, scrollStateToSave, shouldPauseAutoScroll, shouldShowReturnToBottom } from './utils/scroll.js';
 import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
@@ -4974,6 +4974,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // Persist scroll position per session so refresh keeps the user where they
   // were (not at top, not at bottom — wherever they were reading).
   const scrollPersistKey = scrollOwnerKey ? `cgui-scroll-${scrollOwnerKey}` : null;
+  // 本窗格这个会话的恢复已读取过(值 = scrollOwnerKey)。见下方恢复 effect。
+  const scrollRestoredRef = useRef(null);
+  // r169 修法 3:保存"跟随中"这个状态,而不是绝对位置 —— 跟随中存「在底部」,在看历史时存位置。
+  // 程序滚动(吸底、前插补偿、挂载锚定)造成的位置变化同样记下(原来只在用户手动滚动时记,跟随时
+  // 程序写的位置从不保存,切回来恢复的是过期位置)。本窗格切到这个会话后、恢复读取之前一律不写 ——
+  // 否则切换途中的钳位 / 吸底事件会盖掉这个会话存着的位置。与上次写入的值相同就不重复写。
+  const persistedScrollRef = useRef(null);
+  const persistScrollState = (el) => {
+    if (!el || !scrollPersistKey || scrollRestoredRef.current !== scrollOwnerKey) return;
+    const value = scrollStateToSave({ reading: userScrolledAwayRef.current, scrollTop: el.scrollTop });
+    const last = persistedScrollRef.current;
+    if (last && last.key === scrollPersistKey && last.value === value) return;
+    persistedScrollRef.current = { key: scrollPersistKey, value };
+    try { localStorage.setItem(scrollPersistKey, value); } catch {}
+  };
 
   const handleScroll = () => {
     if (!containerRef.current) return;
@@ -5005,7 +5020,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     scrollMaxRef.current = Math.max(0, scrollHeight - clientHeight);
     // 用户向上滚的实际位移优先于尚未回弹的程序滚动标记。旧逻辑先吞掉程序事件，
     // 触控板恰好在这个窗口起手时，第一段上滚也被吞掉，下一 token 又把视口拉回底部。
-    if (transactionResult.handled) return;
+    if (transactionResult.handled) { persistScrollState(containerRef.current); return; }
     const movedIntoReading = movedUp || transactionResult.userMovedAway;
     if (transactionResult.expired) userScrolledAwayRef.current = distFromBottom > 40;
     else if (movedIntoReading) userScrolledAwayRef.current = true;
@@ -5013,9 +5028,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!transactionResult.expired && !movedIntoReading && distFromBottom < 40) userScrolledAwayRef.current = false;
     // 仅驱动「回到底部」按钮显隐:在看历史且离底 ≥ 120 才显示(r169,与下方内容 / 容器高度观察同一规则)
     setAutoScroll(!shouldShowReturnToBottom({ reading: userScrolledAwayRef.current, distFromBottom }));
-    if (scrollPersistKey) {
-      try { localStorage.setItem(scrollPersistKey, String(scrollTop)); } catch {}
-    }
+    persistScrollState(containerRef.current);
   };
   const handleScrollWheel = (event) => { if (event.deltaY < 0) markScrollReading(); };
   const handleScrollPointer = (event) => {
@@ -5026,7 +5039,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // Restore the saved scroll position when messages first load (or session changes).
   // Only runs once per "session messages loaded" — autoScroll/streaming effect
   // handles live updates without overwriting the restored position.
-  const scrollRestoredRef = useRef(null);
   useEffect(() => {
     const el = containerRef.current;
     if (!el || !scrollPersistKey) return;
@@ -5036,15 +5048,22 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const legacyKey = selectedSession?.sessionId ? `cgui-scroll-${selectedSession.sessionId}` : null;
     const ownSaved = localStorage.getItem(scrollPersistKey);
     const saved = ownSaved ?? (legacyKey ? localStorage.getItem(legacyKey) : null);
-    if (saved !== null) {
-      const top = Number(saved);
+    // r169:「在底部」→ 吸底并继续跟随;纯数字(含旧格式)→ 照旧恢复位置;认不出的值不恢复、不清空。
+    const restore = parseSavedScroll(saved);
+    if (restore) {
       if (ownSaved === null) {
         try { localStorage.setItem(scrollPersistKey, saved); } catch {}
       }
+      persistedScrollRef.current = { key: scrollPersistKey, value: saved };
       // Defer to next frame so DOM is laid out
       requestAnimationFrame(() => {
-        if (el) {
-          const target = Math.min(Math.max(0, top), Math.max(0, el.scrollHeight - el.clientHeight));
+        if (el && restore.atBottom) {
+          // 离开时停在底部跟随 → 回来吸底并继续跟随(离开期间内容变长了,不能按旧的绝对位置放)
+          writeProgrammaticScroll(el, Math.max(0, el.scrollHeight - el.clientHeight), 'follow');
+          userScrolledAwayRef.current = false;
+          setAutoScroll(true);
+        } else if (el) {
+          const target = Math.min(Math.max(0, restore.top), Math.max(0, el.scrollHeight - el.clientHeight));
           writeProgrammaticScroll(el, target, 'restore');
           const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 120;
           userScrolledAwayRef.current = away;  // AZ3:恢复的位置若不在底部则保持暂停吸底
