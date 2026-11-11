@@ -16,12 +16,23 @@ export function clampScrollTop({ scrollTop, scrollHeight, clientHeight, stickToB
   return Math.min(Math.max(0, scrollTop || 0), max);
 }
 
-// 流式跟底与用户阅读意图的最小判据。只要 scrollTop 真正向上移动，就立刻暂停跟底；
-// 不能等用户已经离底数百像素才上锁，否则每个 token 的吸底写入会和触控板争抢位置。
+// r169:scrollTop 往上挪了、但挪完离底仍 ≤ 这个容差 = 浏览器自己在保持贴底(消息区变高时把
+// scrollTop 钳到新上限、内容缩几个像素时跟着减小、滚动锚定补偿),视图还在最底部,不是用户离开了底部。
+// 实测(分屏右窗格发送瞬间):scrollTop 61368→61342 离底 −1,之后 61383→61382→… 离底始终 0。
+export const BOTTOM_TOLERANCE_PX = 2;
+function stillAtBottom(distFromBottom) {
+  return Number.isFinite(distFromBottom) && distFromBottom <= BOTTOM_TOLERANCE_PX;
+}
+
+// 流式跟底与用户阅读意图的最小判据。scrollTop 真正向上移动、且移动后离开了底部(离底 > 容差),
+// 就立刻暂停跟底；不能等用户已经离底数百像素才上锁，否则每个 token 的吸底写入会和触控板争抢位置。
 // 方向以 scrollTop 的实际变化为准，不依赖 wheel.deltaY（触控板/缩放下该值不可靠）。
-export function shouldPauseAutoScroll({ previousTop, currentTop }) {
+// 滚轮上滚 / PageUp / ↑ / Home / 按住滚动条这些明确的用户输入不走这里,由调用方直接进入"在看历史"。
+// 不传 distFromBottom(或非有限值)= 不知道离底多少,只看方向(旧口径)。
+export function shouldPauseAutoScroll({ previousTop, currentTop, distFromBottom }) {
   if (!Number.isFinite(previousTop) || !Number.isFinite(currentTop)) return false;
-  return currentTop < previousTop - 0.5;
+  if (!(currentTop < previousTop - 0.5)) return false;
+  return !stillAtBottom(distFromBottom);
 }
 
 export function beginScrollTransaction(kind, target, startedAt = performance.now()) {
@@ -33,6 +44,7 @@ export function advanceScrollTransaction(transaction, {
   currentTop,
   target = transaction?.target,
   now = performance.now(),
+  distFromBottom,
 } = {}) {
   if (!transaction?.active) return { transaction: null, handled: false, userMovedAway: false };
   if (now - transaction.startedAt > 1000) {
@@ -53,11 +65,60 @@ export function advanceScrollTransaction(transaction, {
       userMovedAway: false,
     };
   }
-  return { transaction: null, handled: false, userMovedAway: movement < -0.5 };
+  // 背离目标的上挪同样要"挪完离开了底部"才算用户上翻(与 shouldPauseAutoScroll 同一容差)。
+  return { transaction: null, handled: false, userMovedAway: movement < -0.5 && !stillAtBottom(distFromBottom) };
 }
 
 export function keyRequestsReading(key) {
   return key === 'PageUp' || key === 'ArrowUp' || key === 'Home';
+}
+
+// r169:「回到底部」按钮显隐 = 在看历史 且 真实离底 ≥ 120px。跟随中不显示(内容刚追加、还没吸底的
+// 那一瞬离底也会超过 120);在看历史时只翻上去一点点、之后回复把距离拉大,也要显示。
+export const RETURN_TO_BOTTOM_MIN_PX = 120;
+export function shouldShowReturnToBottom({ reading, distFromBottom }) {
+  return !!reading && Number.isFinite(distFromBottom) && distFromBottom >= RETURN_TO_BOTTOM_MIN_PX;
+}
+
+// r169:只在值变了才转交给 setter。lastRef.current 记的是"最后一次设的值",所以同一个状态的所有设置
+// 都要经过它,否则记录与真实状态会脱节。返回这次是否真的设了。
+// 用途:「回到底部」显隐 —— 高度观察器的回调在流式输出期间几乎每帧都来,同值设置也可能让大组件多渲染一遍。
+export function setIfChanged(lastRef, setter, next) {
+  if (Object.is(lastRef.current, next)) return false;
+  lastRef.current = next;
+  setter(next);
+  return true;
+}
+
+// r169 修法 3:滚动位置按 窗格 + 会话 存在 localStorage(`cgui-scroll-<窗格>:<会话>`)。存的是"跟随中"
+// 这个状态而不是绝对位置:跟随中存「在底部」,切回来吸底并继续跟随(内容在离开期间变长了,旧的
+// 绝对位置早已不在底部);在看历史时存位置,写法与旧格式相同(纯数字字符串)。
+export const SCROLL_SAVED_AT_BOTTOM = 'bottom';
+export function scrollStateToSave({ reading, scrollTop }) {
+  return reading ? String(scrollTop) : SCROLL_SAVED_AT_BOTTOM;
+}
+// 这次要写什么(null = 不用写)。lastSaved = 存储里这个会话此刻的值;本窗格的键与旧格式只按会话存的键
+// 都不存在时,调用方按「在底部」传 —— 没有键本来就等于"跟随在底部"(恢复时什么都不做)。与它相同就不写:
+// 只在底部跟随过的会话因此不会留下键,不占整个应用共用的 localStorage 配额;已经有键的(上翻过、旧版本
+// 留下的)照常更新成「在底部」或新位置。
+// 此刻能不能写存档。两段不写:①本窗格刚切到这个会话、还没读取存档(restoredOwner 不是它);②已读取、
+// 要恢复的位置等下一帧才写回(restorePendingOwner 是它)。这两段里的滚动事件(切换途中的钳位、容器观察
+// 吸底)反映的不是这个会话的真实状态,会用"没在看历史"把存着的位置盖成「在底部」。别的会话遗留的
+// 待决标记不挡当前会话;没有存档可恢复的会话不会进入待决,读取后照常可写。
+export function scrollPersistAllowed({ ownerKey, restoredOwner, restorePendingOwner }) {
+  return !!ownerKey && restoredOwner === ownerKey && restorePendingOwner !== ownerKey;
+}
+export function scrollValueToWrite({ lastSaved, reading, scrollTop }) {
+  const value = scrollStateToSave({ reading, scrollTop });
+  return value === lastSaved ? null : value;
+}
+// 读:「在底部」→ { atBottom: true };纯数字(含旧版本存下的值)→ { atBottom: false, top };
+// 空值 / 认不出的值 → null(不恢复、不报错、不清空,留在默认的跟随底部)。
+export function parseSavedScroll(saved) {
+  if (saved === SCROLL_SAVED_AT_BOTTOM) return { atBottom: true };
+  if (typeof saved !== 'string' || saved.trim() === '') return null;
+  const top = Number(saved);
+  return Number.isFinite(top) ? { atBottom: false, top } : null;
 }
 
 // 容器【宽度】变化(开/关右侧面板、拖分屏宽、关窗格)后消息会重排,总高随之变化。

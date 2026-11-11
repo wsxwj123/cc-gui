@@ -114,7 +114,9 @@ export function SubagentView({ agentId, paneId, tabIndex = 0, active = false, pa
     const el = scrollRef.current;
     if (!el) return;
     const previousTop = lastScrollTopRef.current;
-    const movedUp = shouldPauseAutoScroll({ previousTop, currentTop: el.scrollTop });
+    // r169:与 App.jsx 消息列表同一判据 —— 往上挪但挪完仍贴着底(浏览器钳位 / 锚定补偿)不算用户上翻。
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const movedUp = shouldPauseAutoScroll({ previousTop, currentTop: el.scrollTop, distFromBottom: distance });
     const target = scrollTransactionRef.current?.kind === 'follow'
       ? Math.max(0, el.scrollHeight - el.clientHeight)
       : scrollTransactionRef.current?.target;
@@ -122,10 +124,10 @@ export function SubagentView({ agentId, paneId, tabIndex = 0, active = false, pa
       previousTop,
       currentTop: el.scrollTop,
       target,
+      distFromBottom: distance,
     });
     scrollTransactionRef.current = result.transaction;
     lastScrollTopRef.current = el.scrollTop;
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (result.handled) return;
     if (result.expired) followBottomRef.current = distance <= 40;
     else if (movedUp || result.userMovedAway) followBottomRef.current = false;
