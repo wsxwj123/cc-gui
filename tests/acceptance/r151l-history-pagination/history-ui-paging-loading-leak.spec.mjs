@@ -23,6 +23,42 @@ test.describe.configure({ timeout: 240_000 });
 
 const UI_READY = () => Boolean(process.env.R151L_UI_BASE);
 
+/**
+ * 监听某会话「加载更早」(带 before)请求的最终去向。
+ * r168 起前端会在切会话时取消在飞的旧请求,所以"最后一次状态"有两种都算满足前提:
+ *   landed    —— 响应落地(之后必须被丢弃);
+ *   cancelled —— 请求失败 / 被中止(requestfailed)。
+ * 只记录事实,不对去向做取舍;后续的"不混入 / 不串 / 账从 120 重来"断言与去向无关,一条不放宽。
+ */
+function watchOlderOutcome(page, sid) {
+  const isOlder = (url) => {
+    try {
+      const u = new URL(url);
+      return u.pathname === messagesPath(sid) && u.searchParams.has('before');
+    } catch { return false; }
+  };
+  const state = { outcome: null, status: null, response: null, errorText: null };
+  let done = () => {};
+  const settled = new Promise((resolve) => { done = resolve; });
+  page.on('response', (res) => {
+    if (state.outcome || !isOlder(res.url())) return;
+    state.outcome = 'landed';
+    state.status = res.status();
+    state.response = res;
+    done(state);
+  });
+  page.on('requestfailed', (req) => {
+    if (state.outcome || !isOlder(req.url())) return;
+    state.outcome = 'cancelled';
+    state.errorText = req.failure()?.errorText ?? 'unknown';
+    done(state);
+  });
+  const describe = () => (state.outcome === 'landed'
+    ? `落地(HTTP ${state.status})`
+    : state.outcome === 'cancelled' ? `被取消(${state.errorText})` : '尚无结果');
+  return { state, settled, describe };
+}
+
 /** 打开会话后等该会话的第一条历史请求落地(与 B1–B6 同口径)。 */
 async function historyRequestsFor(page, reqs, sid) {
   await expect.poll(() => reqs.filter((r) => r.sid === sid).length, { timeout: 30_000 }).toBeGreaterThan(0);
@@ -92,16 +128,10 @@ test('B7 窄复审 切会话不泄漏 loading:A 的「加载更早」在飞时�
         await olderGate;
       }
     } catch { /* 非 HTTP 请求照常放行 */ }
-    await route.continue();
+    // 旧请求若已被前端取消,这里放行会报"请求已结束",属预期,不当作失败。
+    try { await route.continue(); } catch { /* 请求已被取消 */ }
   });
-  let staleLanded = false;
-  const staleResponseP = page.waitForResponse((res) => {
-    try {
-      const u = new URL(res.url());
-      return u.pathname === messagesPath(A.sid) && u.searchParams.has('before');
-    } catch { return false; }
-  }, { timeout: 60_000 });
-  staleResponseP.then(() => { staleLanded = true; }).catch(() => {});
+  const stale = watchOlderOutcome(page, A.sid);
   await loadOlderCandidates(page).first().dispatchEvent('click');
   await expect.poll(() => delayedSeen, { timeout: 15_000 }).toBe(true);
 
@@ -117,7 +147,8 @@ test('B7 窄复审 切会话不泄漏 loading:A 的「加载更早」在飞时�
       aLastLeak: await messageList(page).getByText(A.lastText).count(),
       aOldPageLeak: await messageList(page).getByText(A.texts[60]).count(),
       bLast: await messageList(page).getByText(B.lastText).count(),
-      aOlderStillHeld: !staleLanded,
+      aOlderNotLanded: stale.state.outcome !== 'landed',
+      aOlderOutcomeNow: stale.describe(),
     };
   } finally {
     releaseOlder();
@@ -132,9 +163,9 @@ test('B7 窄复审 切会话不泄漏 loading:A 的「加载更早」在飞时�
     aLastLeakIntoB: bFacts.aLastLeak,
     aOldPageLeakIntoB: bFacts.aOldPageLeak,
     bLastInB: bFacts.bLast,
-    aOlderStillHeldAtCheck: bFacts.aOlderStillHeld,
+    aOlderNotLandedAtCheck: bFacts.aOlderNotLanded,
     pageErrors,
-  }, `B 打开后:${bFacts.rows} 行;入口 ${entryDesc(bFacts.entry)};A 末条混入 ${bFacts.aLastLeak};A 旧页混入 ${bFacts.aOldPageLeak};B 末条命中 ${bFacts.bLast};A 旧响应仍在飞=${bFacts.aOlderStillHeld};页面错误 ${JSON.stringify(pageErrors)}`).toEqual({
+  }, `B 打开后:${bFacts.rows} 行;入口 ${entryDesc(bFacts.entry)};A 末条混入 ${bFacts.aLastLeak};A 旧页混入 ${bFacts.aOldPageLeak};B 末条命中 ${bFacts.bLast};A 旧请求此刻:${bFacts.aOlderOutcomeNow}(放行前不得已落地=${bFacts.aOlderNotLanded});页面错误 ${JSON.stringify(pageErrors)}`).toEqual({
     bRows: 60,
     bEntryCount: expect.any(Number),
     bEntryDisabled: bFacts.entry.count === 0 ? null : false,
@@ -143,14 +174,21 @@ test('B7 窄复审 切会话不泄漏 loading:A 的「加载更早」在飞时�
     aLastLeakIntoB: 0,
     aOldPageLeakIntoB: 0,
     bLastInB: 1,
-    aOlderStillHeldAtCheck: true,
+    aOlderNotLandedAtCheck: true,
     pageErrors: [],
   });
 
   // ── 放行 A 的旧响应:落地后 B 仍 60 行、无 loading 残留、不被混入 ─────────
-  const staleResponse = await staleResponseP;
-  const staleStatus = staleResponse.status();
-  const staleBody = await staleResponse.json().catch(() => null);
+  // 前提:A 的旧「加载更早」请求最终要么落地(之后被丢弃)要么被取消(失败/中止),两者都算。
+  await Promise.race([
+    stale.settled,
+    new Promise((r) => setTimeout(r, 30_000)),
+  ]);
+  const staleOutcome = stale.state.outcome;
+  const staleStatus = stale.state.status;
+  const staleBody = staleOutcome === 'landed' ? await stale.state.response.json().catch(() => null) : null;
+  console.log(`[r151l-B7] A 的旧「加载更早」请求最后:${stale.describe()}`);
+  expect(['landed', 'cancelled'], `A 的旧「加载更早」请求最后应是落地或被取消,实际:${stale.describe()}`).toContain(staleOutcome);
   await page.waitForTimeout(800);
   const bAfter = {
     rows: await messageRows(page).count(),
@@ -162,8 +200,7 @@ test('B7 窄复审 切会话不泄漏 loading:A 的「加载更早」在飞时�
   await page.unroute('**/api/sessions/*/messages*');
 
   expect({
-    staleStatus,
-    staleFetched: Array.isArray(staleBody?.messages) ? staleBody.messages.length : null,
+    staleOutcomeOk: staleOutcome === 'landed' ? (staleStatus === 200 && Array.isArray(staleBody?.messages) && staleBody.messages.length === 120) : staleOutcome === 'cancelled',
     bRows: bAfter.rows,
     bEntryCount: bAfter.entry.count,
     bEntryDisabled: bAfter.entry.count === 0 ? null : false,
@@ -173,9 +210,8 @@ test('B7 窄复审 切会话不泄漏 loading:A 的「加载更早」在飞时�
     aOldPageLeakIntoB: bAfter.aOldPageLeak,
     bLastInB: bAfter.bLast,
     pageErrors,
-  }, `A 旧「加载更早」应答落地(${staleStatus})后:B ${bAfter.rows} 行;入口 ${entryDesc(bAfter.entry)};A 末条混入 ${bAfter.aLastLeak};A 旧页混入 ${bAfter.aOldPageLeak};B 末条命中 ${bAfter.bLast};页面错误 ${JSON.stringify(pageErrors)}`).toEqual({
-    staleStatus: 200,
-    staleFetched: 120,
+  }, `A 旧「加载更早」请求最后:${stale.describe()}(落地须 200 且 120 条;取消则无应答)。之后:B ${bAfter.rows} 行;入口 ${entryDesc(bAfter.entry)};A 末条混入 ${bAfter.aLastLeak};A 旧页混入 ${bAfter.aOldPageLeak};B 末条命中 ${bAfter.bLast};页面错误 ${JSON.stringify(pageErrors)}`).toEqual({
+    staleOutcomeOk: true,
     bRows: 60,
     bEntryCount: expect.any(Number),
     bEntryDisabled: bAfter.entry.count === 0 ? null : false,

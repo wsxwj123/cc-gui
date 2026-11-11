@@ -14,6 +14,42 @@ test.describe.configure({ timeout: 240_000 });
 
 const UI_READY = () => Boolean(process.env.R151L_UI_BASE);
 
+/**
+ * 监听某会话「加载更早」(带 before)请求的最终去向。
+ * r168 起前端会在切会话时取消在飞的旧请求,所以"最后一次状态"有两种都算满足前提:
+ *   landed    —— 响应落地(之后必须被丢弃);
+ *   cancelled —— 请求失败 / 被中止(requestfailed)。
+ * 只记录事实,不对去向做取舍;后续的"不混入 / 不串 / 账从 120 重来"断言与去向无关,一条不放宽。
+ */
+function watchOlderOutcome(page, sid) {
+  const isOlder = (url) => {
+    try {
+      const u = new URL(url);
+      return u.pathname === messagesPath(sid) && u.searchParams.has('before');
+    } catch { return false; }
+  };
+  const state = { outcome: null, status: null, response: null, errorText: null };
+  let done = () => {};
+  const settled = new Promise((resolve) => { done = resolve; });
+  page.on('response', (res) => {
+    if (state.outcome || !isOlder(res.url())) return;
+    state.outcome = 'landed';
+    state.status = res.status();
+    state.response = res;
+    done(state);
+  });
+  page.on('requestfailed', (req) => {
+    if (state.outcome || !isOlder(req.url())) return;
+    state.outcome = 'cancelled';
+    state.errorText = req.failure()?.errorText ?? 'unknown';
+    done(state);
+  });
+  const describe = () => (state.outcome === 'landed'
+    ? `落地(HTTP ${state.status})`
+    : state.outcome === 'cancelled' ? `被取消(${state.errorText})` : '尚无结果');
+  return { state, settled, describe };
+}
+
 /** 打开会话后等该会话的第一条历史请求落地(与 B1–B4 同口径)。 */
 async function historyRequestsFor(page, reqs, sid) {
   await expect.poll(() => reqs.filter((r) => r.sid === sid).length, { timeout: 30_000 }).toBeGreaterThan(0);
@@ -217,22 +253,26 @@ test('B6 (可选)旧响应丢弃:加载更早的请求在飞时切到另一个�
       delayedSeen = true;
       await new Promise((r) => setTimeout(r, 2_500));
     }
-    await route.continue();
+    // 旧请求若已被前端取消,这里放行会报"请求已结束",属预期,不当作失败。
+    try { await route.continue(); } catch { /* 请求已被取消 */ }
   });
-  const staleResponseP = page.waitForResponse((res) => {
-    try {
-      const u = new URL(res.url());
-      return u.pathname === messagesPath(A.sid) && u.searchParams.has('before');
-    } catch { return false; }
-  }, { timeout: 30_000 });
+  const stale = watchOlderOutcome(page, A.sid);
   await entry.dispatchEvent('click');
   await expect.poll(() => delayedSeen, { timeout: 10_000 }).toBe(true);
 
   // 请求在飞时切到 B。
   await openSessionBySearch(page, B.firstText, B.lastText);
   await expect.poll(() => messageRows(page).count(), { timeout: 30_000 }).toBe(60);
-  const staleResponse = await staleResponseP;
-  expect(staleResponse.status(), `A 的旧「加载更早」应答应 200`).toBe(200);
+  // 前提:A 的旧「加载更早」请求最终要么落地(200)要么被取消(失败/中止),两者都算;之后的断言不区分。
+  await Promise.race([
+    stale.settled,
+    new Promise((r) => setTimeout(r, 30_000)),
+  ]);
+  console.log(`[r151l-B6] A 的旧「加载更早」请求最后:${stale.describe()}`);
+  expect(['landed', 'cancelled'], `A 的旧「加载更早」请求最后应是落地或被取消,实际:${stale.describe()}`).toContain(stale.state.outcome);
+  if (stale.state.outcome === 'landed') {
+    expect(stale.state.status, `A 的旧「加载更早」落地时应答应 200(最后:${stale.describe()})`).toBe(200);
+  }
   await page.waitForTimeout(800);
   const bRows = await messageRows(page).count();
   const aLastLeakIntoB = await messageList(page).getByText(A.lastText).count();
@@ -265,7 +305,7 @@ test('B6 (可选)旧响应丢弃:加载更早的请求在飞时切到另一个�
     bLeakIntoA,
     aLastInA,
     pageErrors,
-  }, `A 首屏 ${aInitialRows};切 B 后 ${bRows} 行(B 末条命中 ${bLastInB};A 末条混入 ${aLastLeakIntoB};A 旧页混入 ${aOldPageLeakIntoB});切回 A 请求 ${backReq?.url};A 行 ${aRows};入口候选 ${aEntry};B 末条混入 A ${bLeakIntoA};A 末条命中 ${aLastInA};页面错误 ${JSON.stringify(pageErrors)}`).toEqual({
+  }, `A 旧「加载更早」请求最后:${stale.describe()};A 首屏 ${aInitialRows};切 B 后 ${bRows} 行(B 末条命中 ${bLastInB};A 末条混入 ${aLastLeakIntoB};A 旧页混入 ${aOldPageLeakIntoB});切回 A 请求 ${backReq?.url};A 行 ${aRows};入口候选 ${aEntry};B 末条混入 A ${bLeakIntoA};A 末条命中 ${aLastInA};页面错误 ${JSON.stringify(pageErrors)}`).toEqual({
     aInitialRowsInRange: true,
     aInitialRows: expect.any(Number),
     bRowsAfterStale: 60,
