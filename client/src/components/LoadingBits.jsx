@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useStore } from '../stores/sessionStore.js';
 import { orbitTicker } from '../utils/orbitTicker.js';
 import { ORBIT_VARIANTS, variantOf } from '../utils/orbitVariants.js';
@@ -39,17 +39,29 @@ export function CliSpinner({ size = 20, markProps = null }) {
 // r154:三体 / 四体旋转。点位由全局唯一的 orbitTicker 每帧写到 <i> 上(React 不管 <i> 的 style);
 // 转速只写进 data-speed,ticker 下一帧按新转速摆,不重建 DOM。
 // r159:variant = orbitVariants 的 16 种 id 之一(缺省按 n 取 orbit3 / orbit4),点数取自变体。
-export function Orbit({ n = 3, variant = null, size = 20, markProps = null }) {
+// r172:换样式不再换 key 重建。<i> 圆点由 orbitTicker 建、增删(React 不渲染子元素),挂载时登记一次;
+// 之后 variant 变化走 orbitTicker.retarget:先聚拢到中心、换样式与点数、再展开(data-switch = in / out)。
+// handoffKey(只取挂载时的值):同一个 key 的指示器前后接力。状态行换位置时旧实例注销留下状态(样式、相位、过渡进度),
+// 新实例接着画:上一个显示的是别的样式 → 在新位置上做完整过渡(先旧样式聚拢、再展开成新样式);上一个过渡没做完 → 接着做完。
+// 用 useLayoutEffect:旧实例的注销(提交的变更阶段)先于新实例的登记(布局阶段);登记 / 换目标与 data-style 变化
+// 在同一次提交里落到页面,首帧就摆好位、带好过渡标记。
+export function Orbit({ n = 3, variant = null, size = 20, markProps = null, handoffKey = null }) {
   const v = variantOf(variant) || ORBIT_VARIANTS[n === 4 ? 'orbit4' : 'orbit3'];
-  const count = v.n;
   const variantId = v.id;
   const speed = useStore((s) => s.loadingSpeed) || DEFAULT_LOADING_SPEED;
   const ref = useRef(null);
-  useEffect(() => {
+  const mountRef = useRef({ variantId, n: v.n, handoffKey });
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return undefined;
-    const kids = Array.from(el.children);
-    return orbitTicker.register({ el, kids, n: kids.length, variant: variantId });
+    const m = mountRef.current;
+    // StrictMode 下这里会执行两遍(登记 → 注销 → 再登记):注销时留下的接力状态正好被第二次登记原样接回,
+    // 过渡进度不重置;<i> 沿用第一次补出来的
+    return orbitTicker.register({ el, n: m.n, variant: m.variantId, handoffKey: m.handoffKey });
+  }, []);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el) orbitTicker.retarget(el, variantId); // 与当前样式相同(含挂载时)= 什么都不做
   }, [variantId]);
   return (
     <span
@@ -58,9 +70,7 @@ export function Orbit({ n = 3, variant = null, size = 20, markProps = null }) {
       data-style={variantId}
       data-speed={speed}
       aria-hidden="true"
-    >
-      {Array.from({ length: count }, (_, k) => <i key={k} />)}
-    </span>
+    />
   );
 }
 
@@ -133,7 +143,9 @@ export function LoadingMark({ size = 20, variant = null, markProps = null, phase
   const mp = { ...(markProps || {}), 'data-style': shown };
   if (isRandom) {
     mp['data-loading-mode'] = RANDOM_LOADING_STYLE;
-    return <Orbit key={shown} variant={shown} size={size} markProps={mp} />;
+    // r172:不再换 key 重建;换样式由 Orbit 原位过渡
+    // r172:按回合接力(handoffKey = 回合起点):状态行换位置时新指示器接着上一个画,换了样式就在新位置上做完整过渡
+    return <Orbit variant={shown} size={size} markProps={mp} handoffKey={scoped ? rollScope : null} />;
   }
   if (variantOf(style)) return <Orbit variant={style} size={size} markProps={mp} />;
   if (style === 'cli') return <CliSpinner size={size} markProps={mp} />;

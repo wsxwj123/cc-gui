@@ -57,32 +57,131 @@ function speedFactor(el) {
   return Object.prototype.hasOwnProperty.call(SPEED_FACTORS, v) ? SPEED_FACTORS[v] : DEFAULT_FACTOR;
 }
 
+// r172:换样式的过渡(墙钟毫秒,不随转速档位变):先聚拢 1 秒(旧样式照转,圆点收向中心),到中心那一刻换成新样式
+// (点数也在这一刻变),再展开 1 秒。spread ∈ [0, 1] 是摆位时乘在轨道半径上的比例;聚拢期间远近大小差一并收掉。
+export const SWITCH_IN_MS = 1000;
+export const SWITCH_OUT_MS = 1000;
+// 聚拢到中心时所有圆点统一的不透明度(大小取深度 0 那一档)
+const MID_OPACITY = 0.86;
+// 接力状态最多保留多少个 handoffKey(与 loadingPrefs.js 按回合记忆的 32 个槽同量级;超出淘汰最早留下的)
+const HANDOFF_CAP = 32;
+
+function easeInOut(u) {
+  const x = u < 0 ? 0 : (u > 1 ? 1 : u);
+  return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+}
+
 function place(entry, t) {
   const { el, kids } = entry;
   const w = el.clientWidth;
   if (w > 0) entry.mag = w / ORBIT_REF_PX; // 整体放大倍数 k:指示器越宽,轨道与圆点等比越大(下面循环里的 k 是点序号,别混)
   const mag = entry.mag || 1;
   const R = ORBIT_REF_R * mag;
+  const s = entry.spread == null ? 1 : entry.spread;
+  const midScale = (dotPx(0) * mag) / DOT_BASE_PX;
   const pts = placeVariant(entry.variant, entry.n, t, mag);
   for (let k = 0; k < pts.length; k++) {
     const kid = kids[k];
     if (!kid) continue;
     const p = pts[k];
-    kid.style.setProperty('transform', `translate(${(p.x * R).toFixed(2)}px,${(p.y * R).toFixed(2)}px) scale(${p.scale.toFixed(3)})`);
-    kid.style.setProperty('opacity', p.opacity.toFixed(3));
+    // spread = 1(不在过渡中)时与旧版逐字相同
+    const x = s >= 1 ? p.x * R : p.x * R * s;
+    const y = s >= 1 ? p.y * R : p.y * R * s;
+    const scale = s >= 1 ? p.scale : midScale + (p.scale - midScale) * s;
+    const opacity = s >= 1 ? p.opacity : MID_OPACITY + (p.opacity - MID_OPACITY) * s;
+    kid.style.setProperty('transform', `translate(${x.toFixed(2)}px,${y.toFixed(2)}px) scale(${scale.toFixed(3)})`);
+    kid.style.setProperty('opacity', opacity.toFixed(3));
     kid.style.zIndex = String(p.z);
   }
+}
+
+// 过渡标记写在指示器根元素上:聚拢 in、展开 out、其余时候没有这个属性(React 不渲染它,不会被覆盖)
+function setSwitchAttr(el, value) {
+  if (!el) return;
+  if (typeof el.setAttribute === 'function' && typeof el.removeAttribute === 'function') {
+    if (value) el.setAttribute('data-switch', value);
+    else el.removeAttribute('data-switch');
+  } else if (el.dataset) {
+    if (value) el.dataset.switch = value;
+    else delete el.dataset.switch;
+  }
+}
+
+// <i> 的个数跟着当前样式的点数走:多了从末尾摘掉,少了在末尾补(补的点默认透明,同一帧里马上摆位)
+function syncKids(rec) {
+  const { el, kids } = rec;
+  const doc = el.ownerDocument;
+  while (kids.length < rec.n) {
+    if (!doc || typeof doc.createElement !== 'function' || typeof el.appendChild !== 'function') break;
+    const kid = doc.createElement('i');
+    el.appendChild(kid);
+    kids.push(kid);
+  }
+  while (kids.length > rec.n) {
+    const kid = kids.pop();
+    if (kid && kid.parentNode === el && typeof el.removeChild === 'function') el.removeChild(kid);
+  }
+}
+
+// 换成变体 v:点数在这一刻变,相位从新变体的静止帧时刻起算(此时圆点都在中心,看不出跳)
+function swapVariant(rec, v) {
+  if (!v || v === rec.variant) return;
+  rec.variant = v;
+  rec.n = v.n;
+  syncKids(rec);
+  rec.t = stillTimeOf(v);
+}
+
+// 按墙钟推进过渡;页面隐藏后回来、或卡了很久,一次推进到底,不会停在中间
+function advanceSwitch(rec, nowMs) {
+  for (;;) {
+    if (rec.sw === 'in') {
+      const p = (nowMs - rec.swStart) / SWITCH_IN_MS;
+      if (p < 1) { rec.spread = rec.fromSpread * (1 - easeInOut(p)); return; }
+      swapVariant(rec, rec.pending);
+      rec.pending = null;
+      rec.sw = 'out';
+      rec.swStart += SWITCH_IN_MS;
+      setSwitchAttr(rec.el, 'out');
+      continue;
+    }
+    if (rec.sw === 'out') {
+      const p = (nowMs - rec.swStart) / SWITCH_OUT_MS;
+      if (p < 1) { rec.spread = easeInOut(p); return; }
+      rec.sw = null;
+      setSwitchAttr(rec.el, null);
+    }
+    rec.spread = 1;
+    return;
+  }
+}
+
+// 立即结束过渡(减弱动画):还在聚拢的直接换成目标样式,标记去掉
+function finishSwitch(rec) {
+  if (rec.sw === 'in' && rec.pending) swapVariant(rec, rec.pending);
+  const had = rec.sw != null;
+  rec.sw = null;
+  rec.pending = null;
+  rec.spread = 1;
+  if (had) setSwitchAttr(rec.el, null);
+}
+
+function defaultClock() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
 }
 
 /**
  * 环境可注入(单测用假 raf):
  *   raf(cb) / caf(id):帧调度;hidden():页面是否隐藏;reduced():是否减弱动画;
- *   onVisibility(cb):订阅可见性变化,返回取消订阅函数。
- * register({ el, kids, n, variant }) 返回注销函数;variant 是 orbitVariants 的 id,缺省按 n 取 orbit3 / orbit4。每个实例各自累积相位,转速每帧从 el.dataset.speed 读,
+ *   onVisibility(cb):订阅可见性变化,返回取消订阅函数;clock():墙钟毫秒(换样式过渡用,缺省 performance.now)。
+ * register({ el, kids, n, variant, handoffKey }) 返回注销函数(kids 缺省取 el 现有的 <i>,不够的由 ticker 补;
+ *   handoffKey:同一个 key 的指示器前后接力 —— 注销时留下状态,下一个登记时接着画,换了样式就在新位置上做完整过渡);
+ * retarget(el, variant) 原位换样式(带聚拢 / 展开过渡);variant 是 orbitVariants 的 id,缺省按 n 取 orbit3 / orbit4。每个实例各自累积相位,转速每帧从 el.dataset.speed 读,
  * 改转速不重建 DOM、不跳相位。
  */
-export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = () => false, onVisibility = null } = {}) {
+export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = () => false, onVisibility = null, clock = defaultClock } = {}) {
   const entries = new Set();
+  const handoffs = new Map(); // r172:handoffKey → 上一个指示器注销时的状态(见 register)
   let rafId = null;
   let lastNow = null;
   let unsubscribeVisibility = null;
@@ -94,7 +193,10 @@ export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = ()
   }
 
   function placeStill() {
-    for (const e of entries) if (e.el.isConnected !== false) place(e, stillTimeOf(e.variant));
+    for (const e of entries) {
+      finishSwitch(e);
+      if (e.el.isConnected !== false) place(e, stillTimeOf(e.variant));
+    }
   }
 
   function frame(now) {
@@ -103,12 +205,45 @@ export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = ()
     if (reduced()) { placeStill(); lastNow = null; return; }
     const dt = lastNow == null ? 0 : Math.min(MAX_FRAME_S, Math.max(0, (now - lastNow) / 1000));
     lastNow = now;
+    const wall = clock();
     for (const e of entries) {
       if (e.el.isConnected === false) continue;
       e.t += dt * speedFactor(e.el);
+      // 先推进过渡(可能在这一刻换样式、t 重置为新样式的起点),再摆位
+      if (e.sw) advanceSwitch(e, wall);
       place(e, e.t);
     }
     rafId = raf(frame);
+  }
+
+  /** r172:原位换样式。旧样式照转并收向中心(data-switch=in),到中心换成 variantId 再展开(out)。
+   *  还在聚拢 → 只换目标;已经在展开 → 从当前位置重新聚拢再展开成最新的;减弱动画 → 直接换成新样式的静止帧。
+   *  el 没登记过 → 什么都不做,返回 false。 */
+  function retarget(el, variantId) {
+    let rec = null;
+    for (const e of entries) if (e.el === el) { rec = e; break; }
+    if (!rec) return false;
+    return retargetRec(rec, variantFor(variantId, rec.n));
+  }
+
+  function retargetRec(rec, v) {
+    if (reduced()) {
+      finishSwitch(rec);
+      swapVariant(rec, v);
+      place(rec, stillTimeOf(rec.variant));
+      return true;
+    }
+    const nowMs = clock();
+    if (rec.sw) advanceSwitch(rec, nowMs);
+    if (rec.sw === 'in') { rec.pending = v; return true; }
+    if (v === rec.variant) return true; // 不在过渡中 / 正在展开成的就是它:不用换
+    rec.fromSpread = rec.sw === 'out' ? rec.spread : 1;
+    rec.sw = 'in';
+    rec.swStart = nowMs;
+    rec.pending = v;
+    setSwitchAttr(rec.el, 'in');
+    ensureRunning();
+    return true;
   }
 
   function ensureRunning() {
@@ -125,18 +260,43 @@ export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = ()
 
   function register(entry) {
     if (!entry || !entry.el) return () => {};
-    const kids = Array.from(entry.kids || []);
-    const n = entry.n || kids.length;
-    const variant = variantFor(entry.variant, n);
+    // 没给 kids 时取根元素现有的 <i>(StrictMode 下第二次登记会沿用第一次补出来的点),个数不够由 syncKids 补齐
+    const kids = entry.kids
+      ? Array.from(entry.kids)
+      : Array.from(entry.el.children || []).filter((c) => !c.tagName || c.tagName === 'I');
+    const variant = variantFor(entry.variant, entry.n || kids.length);
+    const n = entry.n || kids.length || variant.n; // 没给点数、也还没有 <i>:按变体的点数补
+    const handoffKey = entry.handoffKey ?? null;
     // 相位从静止帧时刻起算:首帧、减弱动画与正常播放的起点一致
-    const rec = { el: entry.el, kids, n, variant, t: stillTimeOf(variant), mag: 0 };
+    const rec = { el: entry.el, kids, n, variant, t: stillTimeOf(variant), mag: 0, sw: null, swStart: 0, fromSpread: 1, pending: null, spread: 1 };
+    // r172:接力。同一个 handoffKey 的上一个指示器注销时留下了它的状态(样式、相位、过渡进度):
+    // 新指示器先原样接过来(画的是上一个的样式、过渡做到哪就从哪继续),再按 retarget 的规则换到自己要显示的样式 ——
+    // 上一个显示的是别的样式 → 在新位置上做完整过渡(先旧样式聚拢、再展开);上一个过渡没做完 → 接着做完。
+    const snap = handoffKey != null ? handoffs.get(handoffKey) : null;
+    if (snap) {
+      handoffs.delete(handoffKey);
+      Object.assign(rec, snap, { n: snap.variant.n });
+    }
+    syncKids(rec);
+    setSwitchAttr(rec.el, rec.sw);
     entries.add(rec);
+    if (snap) {
+      if (rec.sw) advanceSwitch(rec, clock());
+      retargetRec(rec, variant);
+    }
     // 先摆一帧,首帧前不出现叠在中心的一坨点
-    place(rec, rec.t);
+    if (reduced()) place(rec, stillTimeOf(rec.variant));
+    else place(rec, rec.t);
     if (!unsubscribeVisibility && onVisibility) unsubscribeVisibility = onVisibility(handleVisibility) || null;
     ensureRunning();
     return () => {
       if (!entries.delete(rec)) return;
+      if (handoffKey != null) {
+        // 留给同一 handoffKey 的下一个指示器(状态行换位置 / StrictMode 再登记);只保留最近 HANDOFF_CAP 个
+        handoffs.delete(handoffKey);
+        handoffs.set(handoffKey, { variant: rec.variant, t: rec.t, sw: rec.sw, swStart: rec.swStart, fromSpread: rec.fromSpread, pending: rec.pending, spread: rec.spread });
+        while (handoffs.size > HANDOFF_CAP) handoffs.delete(handoffs.keys().next().value);
+      }
       if (!entries.size) {
         stopLoop();
         if (unsubscribeVisibility) { unsubscribeVisibility(); unsubscribeVisibility = null; }
@@ -146,6 +306,7 @@ export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = ()
 
   return {
     register,
+    retarget,
     get size() { return entries.size; },
     get running() { return rafId != null; },
   };

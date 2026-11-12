@@ -2360,8 +2360,8 @@ header [data-tour="remote-control"] {
   width: 18px; height: 18px; margin: -9px 0 0 -9px;
   border-radius: 50%; background: currentColor;
   will-change: transform, opacity;
-  /* 默认透明:Orbit 在 useEffect 里才摆位,挂载首帧点还没缩放,是 18px 的大圆叠在一起,不透明会闪一下。
-     orbitTicker.js 的 place() 每帧写内联 opacity,会覆盖这一条。 */
+  /* 默认透明:<i> 由 orbitTicker.js 创建并摆位(r172 起不再由 React 渲染;Orbit 在 useLayoutEffect 里登记),
+     刚建出来、还没缩放的点是 18px 的大圆叠在一起,不透明会闪一下。place() 每帧写内联 opacity,会覆盖这一条。 */
   opacity: 0;
 }
 

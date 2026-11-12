@@ -75,9 +75,10 @@ export function pickRandomStyle(prevId, rng = Math.random) {
 }
 
 // r159:随机模式下状态行是否重抽。只在「进入」思考或工具阶段时换:
-// phase 变了,或工具阶段里换了一次新的工具调用(key 变了);并且距上次抽取满 1.5 秒。
-// text / stopping / compacting / connecting、同一阶段内部、不满 1.5 秒,一律不换(之后也不补换)。
-export const REROLL_MIN_GAP_MS = 1500;
+// phase 变了,或工具阶段里换了一次新的工具调用(key 变了);并且距上次抽取满 4 秒。
+// text / stopping / compacting / connecting、同一阶段内部、不满 4 秒,一律不换(之后也不补换)。
+// r172:1.5 秒 → 4 秒。换样式本身有 2 秒过渡(聚拢 1 秒 + 展开 1 秒,orbitTicker.js),间隔必须比它长,否则连续调用工具时圆点一直在过渡。
+export const REROLL_MIN_GAP_MS = 4000;
 const REROLL_PHASES = new Set(['thinking', 'tool']);
 export function shouldReroll({ prevPhase, prevKey, phase, key, nowMs, lastRollMs }) {
   if (!REROLL_PHASES.has(phase)) return false;
