@@ -7778,7 +7778,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const _fallbackSel = ownerSid ? null : getLocalSession();
       const finalizeSid = ownerSid || _fallbackSel?.sessionId || null;
       const finalizePh = (ownerSid ? streamOwnerPh : _fallbackSel?.projectHash) || '';
-      if (finalizeSid && finalizePh) {
+      // r177:让位的发送没读过这条流、回合也没结束 —— 不等落盘、不清本地条目、不对账并入队列(归重接的流收尾)。
+      if (!yieldedToReattach && finalizeSid && finalizePh) {
         // 同会话 stop→resend 守卫:本 finally 属于 turn-1,轮询期间(~2.4s)用户可能已对
         // 同一会话发出 turn-2。只认 handleSend 入口同步抢占的 generation；不能再看 pid，
         // 因为 turn-2 会先起流、写用户消息，再等 checkpoint/provider 和 /api/chat 返回 pid。
@@ -7970,7 +7971,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const _ownerKey = streamOwnerKeyRef.current;
         const titleSid = streamSid || ((_ownerKey && !_ownerKey.startsWith('draft-')) ? _ownerKey : null);
         const st = useStore.getState();
-        if (titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && autoTitlePrompt) {
+        // r177:让位的发送没有回复内容可用,不起标题(留给重接的流收尾时起)。
+        if (!yieldedToReattach && titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && autoTitlePrompt) {
           // 标记"已尝试"——无论成功失败都不再重试,避免 provider 失败时每轮 spawn。
           titleAttempted.add(titleSid);
           // 标题用【当前 provider 有效】的模型:本会话 pin 或当前选中模型,去掉 [1m]。
@@ -8035,7 +8037,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }, 50);
         }
       }
-      backgroundedRef.current = false;
+      // r177:让位时不复位 —— 这个标记此刻可能属于重接的那条流(用户把它转了后台)。
+      if (!yieldedToReattach) backgroundedRef.current = false;
       // 流归属 ref 生命周期收口:本流已结束,ref 不再代表任何在跑的流。不清会让非流式
       // 期间的读点(⚡/异步回调)拿到上一个流的会话 = 串扰。只清 ref 不动 streamOwnerKey
       // state —— state 驱动 liveVisible(CQ-5),此刻本地缓冲还没交还 jsonl,清了会让刚

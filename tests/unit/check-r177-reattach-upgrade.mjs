@@ -53,6 +53,28 @@ import { shouldYieldOrphanSend, shouldUpgradeReattachOnReplayComplete } from '..
   const iResend = fin.indexOf('handleSendRef.current?.(next.text');
   assert.ok(iDrain > 0 && iShift > iDrain && iResend > iShift, '队列排空(弹队首与再发送)整段在让位守卫之内');
   assert.equal(fin.split('shiftMessage(').length - 1, 1, '收尾里没有守卫外的弹队首');
+  // 让位的发送不做回合收尾:等落盘循环(含 reconcileSteeredQueue)、起标题、复位转后台标记
+  const iLoopGuard = fin.indexOf('if (!yieldedToReattach && finalizeSid && finalizePh) {');
+  assert.ok(iLoopGuard > 0, '等落盘 / 空回合循环整段在让位守卫之内');
+  const iReconcileDef = fin.indexOf('const reconcileSteeredQueue = ');
+  const iLoopFor = fin.indexOf('for (let i = 0; i < 12; i++) {');
+  assert.ok(iReconcileDef > iLoopGuard && iLoopFor > iLoopGuard, '对账函数与轮询循环都在守卫块里');
+  assert.equal(fin.split('if (finalizeSid && finalizePh) {').length - 1, 0, '不再有无让位守卫的循环入口');
+  const reconcileCalls = [...fin.matchAll(/reconcileSteeredQueue\(/g)].map((m) => m.index);
+  assert.ok(reconcileCalls.length >= 3 && reconcileCalls.every((i) => i > iLoopGuard && i < fin.indexOf('// BF-1:回合收尾清历史截断', iLoopGuard)),
+    '收尾里每一处 reconcileSteeredQueue 调用都在守卫块里');
+  assert.ok(/if \(!yieldedToReattach && titleSid && !titleAttempted\.has\(titleSid\)/.test(fin), '起标题在让位守卫之内');
+  assert.equal(fin.split("fetch('/api/chat/title'").length - 1, 1, '收尾里只有一处起标题请求');
+  assert.ok(/if \(!yieldedToReattach\) backgroundedRef\.current = false;/.test(fin), '复位转后台标记在让位守卫之内');
+  assert.equal(fin.split('backgroundedRef.current = false;').length - 1, 1, '收尾里没有守卫外的转后台复位');
+  // 配对计数:内层 finally 的减一不在任何让位守卫里
+  const decLine = 'finalizeInFlightRef.current = Math.max(0, finalizeInFlightRef.current - 1);';
+  const iDec = fin.indexOf(decLine);
+  assert.ok(iDec > 0, '配对计数减一仍在收尾里');
+  const lineStart = fin.lastIndexOf('\n', iDec);
+  assert.ok(!/yieldedToReattach/.test(fin.slice(lineStart, iDec)), '减一那行不带让位条件');
+  const innerFinally = fin.lastIndexOf('} finally {', iDec);
+  assert.ok(innerFinally > 0 && !/yieldedToReattach/.test(fin.slice(innerFinally, iDec)), '内层 finally 到减一之间没有让位守卫');
   assert.ok(/const paneSwitchCountAtSend = paneSwitchCountRef\.current;/.test(app), '发送开始时记下切换计数');
   const iPromo = app.indexOf('if (!isPromotion) {');
   const iInc = app.indexOf('paneSwitchCountRef.current += 1;');
