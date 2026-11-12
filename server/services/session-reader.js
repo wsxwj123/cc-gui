@@ -1770,6 +1770,8 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
   // L4/R07: 加载附件 sidecar,在 user 消息 push 时注入 attachments/displayText
   // (身份索引 messageId 优先,旧 textHash 兜底)。
   const attachmentsSidecar = await readAttachmentsSidecar(sessionId);
+  // r171:上面让出过执行权,期间断开或超时的,不再往下组装。
+  signal?.throwIfAborted();
 
   // Collect all tool results first, keyed by tool_use_id
   const toolResultMap = new Map();
@@ -2093,6 +2095,9 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
     const agents = await readSessionSubagentUsage(projectHash, sessionId);
     attachSubagentUsage(finalMessages, agents, workflowCalls);
   } catch { /* 子代理用量读不出来 = 这条会话没有金额可显示,历史照常返回 */ }
+  // r171:必须在上面吞异常的 try/catch 之外检查,否则中止会被吞掉;读子代理用量让出过执行权,
+  // 期间断开或超时的,不再做后面的切页(逐条算字节)与全量统计。
+  signal?.throwIfAborted();
   // 聚合用量(R22/R23):五类量 + 缓存写 TTL 分项 + 无效/冲突 code,归一规则只在
   // utils/usage-normalize.js 一处(顶层 creation 与 5m/1h 分项不重复相加)。
   // apiCalls = 去重后的底层 API 调用次数,供前端明细展示/排查。
