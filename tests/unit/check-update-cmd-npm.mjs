@@ -87,8 +87,8 @@ try {
 const WIN_NATIVE = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ProgressPreference='Continue'; Write-Host 'Installing Claude Code CLI (downloading from claude.ai)...'; irm https://claude.ai/install.ps1 | iex\"";
 const WIN_NATIVE_PROXY = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$p='http://127.0.0.1:7897'; [System.Net.WebRequest]::DefaultWebProxy=New-Object System.Net.WebProxy($p); $env:HTTP_PROXY=$p; $env:HTTPS_PROXY=$p; Write-Host ('(proxy: '+$p+')'); $ProgressPreference='Continue'; Write-Host 'Installing Claude Code CLI (downloading from claude.ai)...'; irm https://claude.ai/install.ps1 | iex\"";
 const NIX_NATIVE = "curl -fsSL https://claude.ai/install.sh | bash";
-const MAC_NPM = "PREFIX=\"$(npm prefix -g)\" && W=\"$PREFIX/lib/node_modules\" && { [ -d \"$W\" ] || W=\"$PREFIX/lib\"; } && { [ -d \"$W\" ] || W=\"$PREFIX\"; } && { [ -w \"$W\" ] || { PREFIX=\"$HOME/.npm-global\"; echo \"npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)\"; }; } && npm install -g --prefix \"$PREFIX\" @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code && { \"$PREFIX/bin/claude\" --version || { echo \"Claude Code 没有装完整:npm 没有运行它的安装后脚本,$PREFIX/bin/claude 不能运行(多半只是占位文件)。请执行下面这条命令重装:\"; echo \"npm install -g --prefix \\\"$PREFIX\\\" --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code\"; false; }; } && NPMBIN=\"$PREFIX/bin\" && { case \":$PATH:\" in *\":$NPMBIN:\"*) echo \"PATH 已包含 $NPMBIN\";; *) echo \"export PATH=\\\"$NPMBIN:\\$PATH\\\"\" >> $HOME/.zshrc && echo \"已把 $NPMBIN 写入 $HOME/.zshrc(新开终端生效)\";; esac; }";
-const LINUX_NPM = "PREFIX=\"$(npm prefix -g)\" && W=\"$PREFIX/lib/node_modules\" && { [ -d \"$W\" ] || W=\"$PREFIX/lib\"; } && { [ -d \"$W\" ] || W=\"$PREFIX\"; } && { [ -w \"$W\" ] || { PREFIX=\"$HOME/.npm-global\"; echo \"npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)\"; }; } && npm install -g --prefix \"$PREFIX\" @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code && { \"$PREFIX/bin/claude\" --version || { echo \"Claude Code 没有装完整:npm 没有运行它的安装后脚本,$PREFIX/bin/claude 不能运行(多半只是占位文件)。请执行下面这条命令重装:\"; echo \"npm install -g --prefix \\\"$PREFIX\\\" --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code\"; false; }; } && NPMBIN=\"$PREFIX/bin\" && { case \":$PATH:\" in *\":$NPMBIN:\"*) echo \"PATH 已包含 $NPMBIN\";; *) echo \"export PATH=\\\"$NPMBIN:\\$PATH\\\"\" >> $HOME/.bashrc && echo \"已把 $NPMBIN 写入 $HOME/.bashrc(新开终端生效)\";; esac; }";
+const MAC_NPM = "PREFIX=\"$(npm prefix -g)\" && W=\"$PREFIX/lib/node_modules\" && { [ -d \"$W\" ] || W=\"$PREFIX/lib\"; } && { [ -d \"$W\" ] || W=\"$PREFIX\"; } && { [ -w \"$W\" ] || { PREFIX=\"$HOME/.npm-global\"; echo \"npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)\"; }; } && npm install -g --prefix \"$PREFIX\" @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code && { \"$PREFIX/bin/claude\" --version || { echo \"Claude Code 没有装完整:npm 没有运行它的安装后脚本,$PREFIX/bin/claude 不能运行(多半只是占位文件)。请执行下面这条命令重装:\"; echo \"npm install -g --prefix \\\"$PREFIX\\\" --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code\"; echo \"如果 npm config get ignore-scripts 显示 true,请先执行 npm config delete ignore-scripts,再重装。\"; false; }; } && NPMBIN=\"$PREFIX/bin\" && { case \":$PATH:\" in *\":$NPMBIN:\"*) echo \"PATH 已包含 $NPMBIN\";; *) echo \"export PATH=\\\"$NPMBIN:\\$PATH\\\"\" >> $HOME/.zshrc && echo \"已把 $NPMBIN 写入 $HOME/.zshrc(新开终端生效)\";; esac; }";
+const LINUX_NPM = "PREFIX=\"$(npm prefix -g)\" && W=\"$PREFIX/lib/node_modules\" && { [ -d \"$W\" ] || W=\"$PREFIX/lib\"; } && { [ -d \"$W\" ] || W=\"$PREFIX\"; } && { [ -w \"$W\" ] || { PREFIX=\"$HOME/.npm-global\"; echo \"npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)\"; }; } && npm install -g --prefix \"$PREFIX\" @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code && { \"$PREFIX/bin/claude\" --version || { echo \"Claude Code 没有装完整:npm 没有运行它的安装后脚本,$PREFIX/bin/claude 不能运行(多半只是占位文件)。请执行下面这条命令重装:\"; echo \"npm install -g --prefix \\\"$PREFIX\\\" --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code\"; echo \"如果 npm config get ignore-scripts 显示 true,请先执行 npm config delete ignore-scripts,再重装。\"; false; }; } && NPMBIN=\"$PREFIX/bin\" && { case \":$PATH:\" in *\":$NPMBIN:\"*) echo \"PATH 已包含 $NPMBIN\";; *) echo \"export PATH=\\\"$NPMBIN:\\$PATH\\\"\" >> $HOME/.bashrc && echo \"已把 $NPMBIN 写入 $HOME/.bashrc(新开终端生效)\";; esac; }";
 
 try {
   setPlatform('win32');
@@ -112,8 +112,13 @@ try {
   const ccAt = winNpm.indexOf("Join-Path $p 'claude.cmd'", psStart);
   assert.ok(ccAt > psStart, `自检路径必须由 npm 前缀 $p 拼出(不能用裸 claude):${winNpm}`);
   assert.ok(winNpm.indexOf('--version', ccAt) > ccAt, `claude.cmd 之后必须带 --version 运行:${winNpm}`);
-  assert.ok(/if\(Test-Path \$c\)\{& \$c --version; \$ok=\(\$LASTEXITCODE -eq 0\)\}/.test(ps), `先 Test-Path 再按 $LASTEXITCODE 判断:${ps}`);
-  assert.ok(/if\(-not \$ok\)\{[^}]*not fully installed \(没有装完整\)[^}]*--allow-scripts=@anthropic-ai\/claude-code @anthropic-ai\/claude-code'; exit 1\}/.test(ps), `失败说明 + 补救命令 + exit 1:${ps}`);
+  assert.ok(/if\(Test-Path \$c\)\{\$v=& \$c --version; \$ok=\(\(\$LASTEXITCODE -eq 0\) -and \(\(\[string\]\$v\)\.Trim\(\) -ne ''\)\); Write-Host \$v\}/.test(ps), `先 Test-Path 再按 $LASTEXITCODE 且 --version 输出非空判断,输出仍显示给用户:${ps}`);
+  // 变异哨兵:去掉「输出非空」这道判据 → 红
+  assert.ok(/-and \(\(\[string\]\$v\)\.Trim\(\) -ne ''\)/.test(ps), `Windows 自检必须同时要求 --version 有非空输出:${ps}`);
+  assert.ok(/if\(-not \$ok\)\{[^}]*not fully installed \(没有装完整\)[^}]*--allow-scripts=@anthropic-ai\/claude-code @anthropic-ai\/claude-code'; Write-Host '[^']*ignore-scripts[^']*'; exit 1\}/.test(ps), `失败说明 + 补救命令 + ignore-scripts 提示 + exit 1:${ps}`);
+  // ignore-scripts 提示:Windows 段内用 npm.cmd(上面「不许裸 npm config」看守保持不变),其他平台写普通 npm
+  const winFail = ps.slice(ps.indexOf('if(-not $ok)'), ps.indexOf('exit 1'));
+  assert.ok(winFail.includes('ignore-scripts') && winFail.includes('npm.cmd config delete ignore-scripts'), `Windows 失败说明应提示 ignore-scripts 与删除命令:${winFail}`);
   assert.ok(ps.indexOf('exit 1') < ps.indexOf('SetEnvironmentVariable'), '自检在写 PATH 之前,失败不写 PATH');
   assert.equal((winNpm.match(/"/g) || []).length, 2, `整条命令只有包住 PowerShell 段的一对双引号:${winNpm}`);
   assert.ok(!/[%^!<>]|&&|\|\|/.test(ps), `PowerShell 段里不许出现 % ^ ! < > && ||:${ps}`);
@@ -133,6 +138,12 @@ try {
     assert.deepEqual(allowLists(invocation), ['@anthropic-ai/claude-code'], `r180 ${name}: npm install 调用里放行参数恰好一次且只放行 claude-code:${cmd}`);
     assert.deepEqual([...new Set(allowLists(cmd))], ['@anthropic-ai/claude-code'], `r180 ${name}: 整条命令里放行名单只有 claude-code:${cmd}`);
   }
+  // r180:其他平台失败说明同样提示 ignore-scripts;提示行在 bash 双引号里,不得含反引号 $ ! 双引号
+  const macInstall = fourCmds['mac install'];
+  const nixFail = macInstall.slice(macInstall.indexOf('没有装完整'), macInstall.indexOf('false; }; }'));
+  assert.ok(nixFail.includes('ignore-scripts') && nixFail.includes('npm config delete ignore-scripts'), `其他平台失败说明应提示 ignore-scripts 与删除命令:${nixFail}`);
+  const hintLine = (nixFail.match(/echo "([^"]*ignore-scripts[^"]*)"/) || [])[1];
+  assert.ok(hintLine && !/[`$!]/.test(hintLine), `ignore-scripts 提示行不得含反引号 $ !:${nixFail}`);
 
   // ── 回归锁:本轮不该动的路径逐字不变(值 = 修前实测输出) ──────────────
   assert.equal(installCmdFor(null, 'native'), WIN_NATIVE, 'win32 native 路径逐字不变');
