@@ -164,6 +164,7 @@ const envFor = (site, s, state) => ({
   hiddenUserMessage: hiddenOf(s.opts),
   autoTitlePrompt: evalExpr(need('defExpr').defExpr, { xsAutoTitlePrompt, prompt: s.prompt, opts: s.opts }),
   titleAttempted: new Set(),
+  yieldedToReattach: false, // 让位标记:正常发送恒为 false
   [site.sidVar]: SID, [site.stVar]: state || freshState(),
 });
 const fires = (site, s, state) => Boolean(evalExpr(site.cond, envFor(site, s, state)));
@@ -261,10 +262,14 @@ check('10 求值装置:条件原文能在替身环境求值,其余前提满足�
   assert.equal(hiddenOf({ hiddenUserMessage: true }), true, '带 hiddenUserMessage: true 时应为 true');
   for (const site of [siteSid, siteEnd]) {
     const env = (autoTitlePrompt, extra = {}) => ({
-      prompt: USER_TEXT, opts: {}, hiddenUserMessage: false, autoTitlePrompt, titleAttempted: new Set(),
+      prompt: USER_TEXT, opts: {}, hiddenUserMessage: false, autoTitlePrompt, titleAttempted: new Set(), yieldedToReattach: false,
       [site.sidVar]: SID, [site.stVar]: freshState(), ...extra,
     });
     assert.ok(evalExpr(site.cond, env(USER_TEXT)), `${site.label}:autoTitlePrompt 有内容、其余前提都满足时条件应成立`);
+    if (site === siteEnd) {
+      assert.match(site.cond, /\byieldedToReattach\b/, `${site.label}:触发条件应读让位标记 yieldedToReattach`);
+      assert.ok(!evalExpr(site.cond, env(USER_TEXT, { yieldedToReattach: true })), `${site.label}:让位的那次发送(yieldedToReattach 为 true)其余条件全满足也不应发起自动标题`);
+    }
     assert.ok(!evalExpr(site.cond, env('')), `${site.label}:autoTitlePrompt 为空串时条件应不成立`);
     assert.ok(!evalExpr(site.cond, env(USER_TEXT, { titleAttempted: new Set([SID]) })), `${site.label}:本会话已尝试过时条件应不成立(会话 id 变量 ${site.sidVar} 没接上)`);
     assert.equal(evalExpr(site.firstUser, env(USER_TEXT)), USER_TEXT, `${site.label}:firstUser 表达式应求值为 autoTitlePrompt`);
