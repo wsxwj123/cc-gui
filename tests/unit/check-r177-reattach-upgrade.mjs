@@ -33,9 +33,15 @@ import { shouldYieldOrphanSend, shouldUpgradeReattachOnReplayComplete } from '..
   assert.ok(iYield > 0 && iClaim > iYield, '让位判定在认领 pid 之前');
   const yieldCall = app.slice(iYield, iClaim);
   assert.ok(/switchCountNow: paneSwitchCountRef\.current/.test(yieldCall) && /isCurrentTurn: isCurrentTurn\(\)/.test(yieldCall)
-    && /paneOnOwner: queueKeyFor\(getLocalSession\(\)\) === sessionQueueKey/.test(yieldCall), '让位判定带上三个条件');
-  assert.ok(/\}\)\) \{ yieldedToReattach = true; return; \}\s*\n\s*pid = respJson\.pid;/.test(app), '让位走既有的 return,且 return 之前置上让位标记');
-  assert.equal((app.match(/yieldedToReattach = true;/g) || []).length, 1, '让位标记只有一个置位点');
+    && /paneOnOwner: (\w+),/.test(yieldCall), '让位判定带上三个条件');
+  // 「窗格此刻是否在发起会话」先算成局部常量:判据的 paneOnOwner 与让位标记的值用同一个常量
+  const ownerVar = yieldCall.match(/paneOnOwner: (\w+),/)[1];
+  const declRe = new RegExp(`const ${ownerVar} = queueKeyFor\\(getLocalSession\\(\\)\\) === sessionQueueKey;\\s*\\n\\s*if \\(shouldYieldOrphanSend\\(\\{`);
+  assert.ok(declRe.test(app), '局部常量就在让位判定之前、按「窗格当前会话 === 发起会话」算出');
+  const setRe = new RegExp(`\\}\\)\\) \\{ yieldedToReattach = ${ownerVar}; return; \\}\\s*\\n\\s*pid = respJson\\.pid;`);
+  assert.ok(setRe.test(app), '让位走既有的 return,return 之前用同一个局部常量置让位标记');
+  assert.equal((app.match(/(?<!let )yieldedToReattach = /g) || []).length, 1, '让位标记只有一个置位点');
+  assert.ok(!/yieldedToReattach = true/.test(app), '不再无条件置真(窗格切走未回的老路径收尾照旧)');
   assert.ok(/let yieldedToReattach = false;/.test(app), '让位标记是本次发送闭包里的变量,初值 false');
   // 收尾:队列排空与四处窗格级写入都在让位标记守卫之内
   const iFin = app.indexOf('const teardownMine = () => isCurrentTurn() && !streamingRef.current;');

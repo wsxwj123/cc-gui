@@ -5787,9 +5787,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r146 R2:本流是否真的接上过服务端的流(attach 2xx)。POST 窗口里就切走的流(下面
     // 「孤儿流复判」直接 return)一个字都没收过,不代表任何直播内容 —— 它不能写直播快照。
     let streamAttached = false;
-    // r177:本次(最初那次)发送在 POST 返回后让位给重接(见 shouldYieldOrphanSend)。收尾据它跳过
-    // 队列排空与几处不带回合守卫的窗格级写入 —— 「切回后、轮询还没重接」时本流仍是当前这一代,
-    // isCurrentTurn() 挡不住,只能靠这个标记。
+    // r177:本次(最初那次)发送在 POST 返回后让位给重接(见 shouldYieldOrphanSend),并且让位时
+    // 窗格已回到发起会话 —— 只有这种让位才置真。收尾据它跳过队列排空与几处不带回合守卫的窗格级
+    // 写入:「切回后、轮询还没重接」时本流仍是当前这一代,isCurrentTurn() 挡不住,只能靠这个标记。
+    // 窗格切走未回的让位(r140 老路径)不置:老路径的收尾清的是本次发送自己设的状态(例如本次设上的
+    // 「压缩中」),那时窗格上也没有重接的流在用它们,照老样子收尾才不会让这些状态一直挂着。
     let yieldedToReattach = false;
     // r146 R6:本次发送【实际用的】模型(下面发送块里从 store 现解析)。外层同名 currentModel 是
     // 渲染期快照,换模型只改 modelBySession、不会让 handleSend 重建 —— 1M 被拒的自动恢复与超窗
@@ -6023,12 +6025,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 走既有 finally:它已由 isCurrentTurn() 守好,不会污染新回合。
       // r177:再加两条同路退出 —— 发起之后窗格离开过这个会话(哪怕已切回),或自己已不是本窗格
       // 当前这一代流。此时页面已经/即将由轮询另接一条,这里再接就是两条连接互相顶替、状态归属错乱。
+      // 窗格此刻是否在发起会话上:既是判据之一,也决定让位时要不要置让位标记(见其声明处)。
+      const paneOnOwnerAtYield = queueKeyFor(getLocalSession()) === sessionQueueKey;
       if (shouldYieldOrphanSend({
-        paneOnOwner: queueKeyFor(getLocalSession()) === sessionQueueKey,
+        paneOnOwner: paneOnOwnerAtYield,
         switchCountAtSend: paneSwitchCountAtSend,
         switchCountNow: paneSwitchCountRef.current,
         isCurrentTurn: isCurrentTurn(),
-      })) { yieldedToReattach = true; return; }
+      })) { yieldedToReattach = paneOnOwnerAtYield; return; }
       pid = respJson.pid;
       activeProcRef.current = pid;
       // R13:本 pid 的期望身份 = 发起这条流的会话(sid 优先;draft 期是原始 draftId,
@@ -7971,7 +7975,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         const _ownerKey = streamOwnerKeyRef.current;
         const titleSid = streamSid || ((_ownerKey && !_ownerKey.startsWith('draft-')) ? _ownerKey : null);
         const st = useStore.getState();
-        // r177:让位的发送没有回复内容可用,不起标题(留给重接的流收尾时起)。
+        // r177:让位的发送没有回复内容可用,这次不起标题;这个会话下一次正常发完一轮时会补
+        // (重接的那次没有用户原文,不会起标题)。
         if (!yieldedToReattach && titleSid && !titleAttempted.has(titleSid) && !st.customTitles[titleSid] && !st.autoTitles[titleSid] && autoTitlePrompt) {
           // 标记"已尝试"——无论成功失败都不再重试,避免 provider 失败时每轮 spawn。
           titleAttempted.add(titleSid);
