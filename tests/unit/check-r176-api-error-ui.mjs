@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import {
   deriveApiErrorUi, deriveHistoryApiErrorUi, hintsAsQuoteSuffix, isApiErrorTurn,
-  ONE_M_HINT, LOGIN_HINT, SIGNATURE_HINT,
+  shouldSkipLocalErrorBlock, ONE_M_HINT, LOGIN_HINT, SIGNATURE_HINT,
 } from '../../client/src/utils/apiErrorActions.js';
 import { OFFICIAL_LOGIN_HINT } from '../../client/src/utils/officialAuth.js';
 
@@ -131,6 +131,32 @@ t('无标记的 <synthetic> 兜底只取最后一段文字', () => {
   assert.equal(deriveHistoryApiErrorUi([user('u', 'q'), m]), null);
   const m2 = { type: 'turn', uuid: 't2', model: '<synthetic>', text: ['正文', RISK] };
   assert.equal(deriveHistoryApiErrorUi([user('u', 'q'), m2]).action, 'content-risk');
+});
+
+// ── 报错分支要不要省掉本地 ❌ 块(shouldSkipLocalErrorBlock) ──
+const EXIT = 'Claude Code process exited with code 1';
+t('出现过合成报错、正文包含这次报错原文 → 省', () => {
+  assert.equal(shouldSkipLocalErrorBlock(`我先读一下配置。\n\n${AUTH}\n`, `  ${AUTH}  `, true), true);
+});
+t('出现过合成报错、这次报错原文不同 → 不省', () => {
+  assert.equal(shouldSkipLocalErrorBlock(`我先读一下配置。\n\n${AUTH}`, EXIT, true), false);
+  assert.equal(shouldSkipLocalErrorBlock(AUTH, EXIT, true), false);
+});
+t('没出现过合成报错、正文与报错原文完全相等 → 省', () => {
+  assert.equal(shouldSkipLocalErrorBlock(`\n${AUTH}  `, ` ${AUTH}`, false), true);
+});
+t('没出现过合成报错、正文只是包含报错原文 → 不省', () => {
+  assert.equal(shouldSkipLocalErrorBlock(`我先读一下配置。\n\n${AUTH}`, AUTH, false), false);
+});
+t('累积正文为空 → 不省', () => {
+  assert.equal(shouldSkipLocalErrorBlock('', AUTH, true), false);
+  assert.equal(shouldSkipLocalErrorBlock('   \n', AUTH, false), false);
+  assert.equal(shouldSkipLocalErrorBlock(null, AUTH, true), false);
+});
+t('报错原文去空白后为空 → 不省', () => {
+  assert.equal(shouldSkipLocalErrorBlock(AUTH, '   ', true), false);
+  assert.equal(shouldSkipLocalErrorBlock(AUTH, '', false), false);
+  assert.equal(shouldSkipLocalErrorBlock(AUTH, undefined, true), false);
 });
 
 console.log(`check-r176-api-error-ui: ${n} passed`);

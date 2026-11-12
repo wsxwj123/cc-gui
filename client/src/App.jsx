@@ -181,7 +181,7 @@ import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAut
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import ApiErrorActions from './components/ApiErrorActions.jsx';
-import { deriveApiErrorUi, deriveHistoryApiErrorUi, hintsAsQuoteSuffix } from './utils/apiErrorActions.js';
+import { deriveApiErrorUi, deriveHistoryApiErrorUi, hintsAsQuoteSuffix, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
@@ -7288,9 +7288,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // r176:命令行已把这条报错作为合成助手消息发过来(会落盘、循环后会 push 成本回合副本)
             // → 不再另加一块内容重复的 ❌ 块(报错原文出现两份,且收尾时它会被清掉,动作跟着消失)。
             // 动作与提示标在本回合副本上;副本被历史认领后,历史回合凭落盘的报错标记接着显示。
-            const _accTrim = String(accumulatedText || '').trim();
-            // 本回合副本要有正文才会 push(见循环后那段);没收到正文的照旧走本地 ❌ 块。
-            if (_accTrim && (sawApiErrorMessage || _accTrim === String(msg).trim())) {
+            // 判据见 shouldSkipLocalErrorBlock:只有这次的报错原文已在本回合正文里才省;
+            // 本回合副本要有正文才会 push(见循环后那段),没收到正文的照旧走本地 ❌ 块。
+            if (shouldSkipLocalErrorBlock(accumulatedText, msg, sawApiErrorMessage)) {
               sawApiErrorMessage = true;
               apiErrorUi = Number.isFinite(event.api_error_status)
                 ? deriveApiErrorUi(msg, { status: event.api_error_status })

@@ -47,6 +47,19 @@ export function hintsAsQuoteSuffix(hints) {
   return (hints || []).map((h) => `\n\n> ${h}`).join('');
 }
 
+// 报错分支要不要省掉本地 ❌ 块:只有这次的报错原文确实已在本回合累积正文里才省。
+//   - 本回合出现过命令行的合成报错消息:累积正文包含这次的报错原文 → 省;
+//     (同一回合后来又来一条原文不同的报错,例如进程异常退出,照旧画 ❌ 块,不被省掉)
+//   - 没出现过合成报错:累积正文与报错原文完全相等 → 省;
+//   - 累积正文为空或报错原文为空 → 不省(本回合副本要有正文才会 push)。
+// 两边都先去首尾空白。
+export function shouldSkipLocalErrorBlock(accText, errText, sawApiErrorMessage) {
+  const acc = String(accText || '').trim();
+  const err = String(errText || '').trim();
+  if (!acc || !err) return false;
+  return sawApiErrorMessage ? acc.includes(err) : acc === err;
+}
+
 // 历史回合是不是「接口报错消息」:有后端带出的 apiError 标记;没有标记的老会话文件按
 // model === '<synthetic>' 兜底。普通助手回合即使正文含 401 / api key 也不算。
 export function isApiErrorTurn(turn) {
