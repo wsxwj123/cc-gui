@@ -288,6 +288,51 @@ npm run tauri:build
 <!-- CHANGELOG:START -->
 
 <details>
+<summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.462">v0.2.462</a></b>(2026-11-12)· 修复 2 条 · 优化 3 条 · 提示 2 条</summary>
+
+**修复**
+
+<details><summary>接口报错后，「检查 Provider 设置」等按钮一闪就没了</summary>
+
+API Key 填错（401）、内容被上游拦截、会话里存在空内容块，这三种报错的消息下面本应有处理按钮（检查 Provider 设置 / 回退到上一条 / 清理会话），以前只出现一瞬间就消失，刷新或重开会话后也没有。现在按钮一直留在那条报错下面，刷新、重开会话后仍在。
+
+</details>
+
+<details><summary>npm 12 上点「npm 安装」，装出来的 Claude Code 不能用</summary>
+
+npm 12 默认不再运行安装包自带的安装后脚本，而 Claude Code 的 npm 包要靠它把真正的程序放到位。结果是安装窗口正常结束、环境检查却一直显示未安装。安装和用 npm 更新的命令现在会放行这一个包的安装后脚本（只放行它，不改你的 npm 配置）；npm 10、11 上照常可用。
+
+</details>
+
+**优化**
+
+<details><summary>用 npm 安装完会自检一次</summary>
+
+装完当场运行 `claude --version`，没装好时在窗口里说明原因、给出重装命令。
+
+</details>
+
+<details><summary>安装 / 更新窗口的最后一句不再一律写「完成」</summary>
+
+Windows 和 Linux 上改为「已结束」，成功还是失败看上面的输出。
+
+</details>
+
+<details><summary>皮肤可定位的界面元素清单补齐</summary>
+
+消息数、统计范围、费用范围、回合导航范围、会话内搜索范围等 7 处界面元素加入皮肤提示词里的清单；旧标记 `peer-message` 已随跨会话消息改版停用，改用 `xs-notice`。
+
+</details>
+
+**提示**
+
+- npm 11.16 起安装时会打印一段 `npm warn allow-scripts …` 警告，这是 npm 对 12 版变化的预告，不影响安装。
+
+- 报错下面的处理按钮只在会话最后一条消息是报错时显示。
+
+</details>
+
+<details>
 <summary><b><a href="https://github.com/wsxwj123/claude-gui/releases/tag/v0.2.461">v0.2.461</a></b>(2026-11-12)· 优化 2 条 · 修复 1 条 · 提示 1 条</summary>
 
 **优化**
