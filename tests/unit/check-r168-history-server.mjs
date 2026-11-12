@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // r168 白盒自检(后端):历史读取可在请求方断开时中途停下。
 //   - parseJsonl 不传 signal / 传了但没中止:结果与旧行为一致;
-//   - 开读前已中止:直接以 AbortError 拒绝;读到一半中止:以 AbortError 拒绝且提前结束。
+//   - 开读前已中止:直接以 AbortError 拒绝;读到一半中止:以 AbortError 拒绝且提前结束
+//     (r171:判据改成数实际解析的行数,不比耗时 —— 慢机器 / 高负载下耗时比例会误报)。
 import assert from 'node:assert/strict';
 import { unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,9 +15,7 @@ const pad = 'x'.repeat(4000);
 writeFileSync(file, `${Array.from({ length: LINES }, (_, i) => JSON.stringify({ i, pad })).join('\n')}\n`);
 try {
   // 不传 signal:逐字旧行为
-  const t0 = performance.now();
   const all = await parseJsonl(file);
-  const fullMs = performance.now() - t0;
   assert.equal(all.length, LINES);
   assert.equal(all[LINES - 1].i, LINES - 1);
 
@@ -31,15 +30,27 @@ try {
   pre.abort();
   await assert.rejects(parseJsonl(file, { signal: pre.signal }), { name: 'AbortError' });
 
-  // 读到一半中止 → 以 AbortError 拒绝(不给半截结果),且明显早于读完全量
+  // 读到一半中止 → 以 AbortError 拒绝(不给半截结果),且提前结束:包一层 JSON.parse 数解析行数,
+  // 解析到第 ABORT_AT 行时中止;之后最多再派发当前这一块里已缓冲的行(64KB / 每行约 4KB ≈ 16 行),
+  // 中止后解析的行数应远少于全量。只观察,不改解析结果。
+  const ABORT_AT = 200;
+  const realParse = JSON.parse;
+  let parsedLines = 0;
   const mid = new AbortController();
-  const t1 = performance.now();
-  const pending = parseJsonl(file, { signal: mid.signal });
-  setTimeout(() => mid.abort(), 5);
-  await assert.rejects(pending, { name: 'AbortError' });
-  const abortedMs = performance.now() - t1;
-  assert.ok(abortedMs < Math.max(fullMs * 0.6, 5 + 30),
-    `中止后应提前结束:中止用时 ${abortedMs.toFixed(1)}ms,读完全量 ${fullMs.toFixed(1)}ms`);
+  JSON.parse = function countingParse(text, ...rest) {
+    parsedLines += 1;
+    if (parsedLines === ABORT_AT) mid.abort();
+    return realParse.call(this, text, ...rest);
+  };
+  try {
+    await assert.rejects(parseJsonl(file, { signal: mid.signal }), { name: 'AbortError' });
+    // 多等几轮事件循环:读取若没真停,行数还会接着涨
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  } finally {
+    JSON.parse = realParse;
+  }
+  assert.ok(parsedLines >= ABORT_AT && parsedLines < ABORT_AT + 200,
+    `中止后应提前结束:共解析 ${parsedLines} 行(全量 ${LINES} 行,在第 ${ABORT_AT} 行中止)`);
 } finally {
   unlinkSync(file);
 }

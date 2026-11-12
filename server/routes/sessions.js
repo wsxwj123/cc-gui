@@ -460,9 +460,18 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
   // 否则用户连切时每次点击留下的请求在后端排成长队,最新那次排在最后。用 res 的 'close'
   // 判断:正常写完也会触发,靠 writableFinished 区分;req 的 'close' 在请求读完时就会触发,
   // 不能当"断开"用。挂监听前就已断开的(res.destroyed)同样算。
-  const disconnected = new AbortController();
+  // r171:"停止读取"信号 = 请求方断开 **或** 15 秒超时,任一发生就中止读取。以前超时只回 504、
+  // 不通知读取,后端仍在后台把整个文件读完、组装完才丢弃。两个标志区分是哪一种:断开 = 不写响应;
+  // 超时 = 回 504(写回内容与时机不变)。被中止的读取以 AbortError 拒绝,由 Promise.race /
+  // 下面的 catch 接住,不会成为未处理的拒绝。
+  const stopReading = new AbortController();
+  let disconnected = false;
+  let timedOut = false;
   const onResponseClose = () => {
-    if (!res.writableFinished) disconnected.abort();
+    if (!res.writableFinished) {
+      disconnected = true;
+      stopReading.abort();
+    }
   };
   res.on('close', onResponseClose);
   if (res.destroyed) onResponseClose();
@@ -480,18 +489,24 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
     if (!paging.ok) {
       return res.status(400).json({ ok: false, code: 'HISTORY_INVALID_INPUT', error: paging.error });
     }
-    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ timedOut: true }), HISTORY_READ_TIMEOUT_MS); });
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        resolve({ timedOut: true });
+        stopReading.abort();
+      }, HISTORY_READ_TIMEOUT_MS);
+    });
     const result = await Promise.race([
       getSessionMessages(req.params.sessionId, projectHash, {
         limit: paging.limit,
         before: paging.before,
-        signal: disconnected.signal,
+        signal: stopReading.signal,
       }),
       timeout,
     ]);
     // 对方已断开:结果没人收,不序列化写回(截图多的会话光序列化就会停住整个进程几百毫秒)。
-    if (disconnected.signal.aborted) return;
-    if (result?.timedOut) {
+    if (disconnected) return;
+    if (timedOut) {
       return res.status(504).json({ ok: false, code: 'HISTORY_READ_TIMEOUT', error: '读取会话历史超时' });
     }
     if (result?.notFound) {
@@ -504,7 +519,12 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
     res.json(result);
   } catch (err) {
     // r168:断开引起的中止不是故障,而且已经没人收回执。
-    if (disconnected.signal.aborted) return;
+    if (disconnected) return;
+    // r171:超时引起的中止照旧回 504(一般已由上面的 race 先回,这里兜住读取先拒绝的次序)。
+    if (timedOut) {
+      if (!res.headersSent) res.status(504).json({ ok: false, code: 'HISTORY_READ_TIMEOUT', error: '读取会话历史超时' });
+      return;
+    }
     // 失败信封只给稳定 code 与短句:ENOENT 这类异常曾把服务器绝对路径回给调用方。
     res.status(500).json({ ok: false, code: 'HISTORY_READ_FAILED', error: '读取会话历史失败' });
   } finally {
