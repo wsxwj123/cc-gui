@@ -282,6 +282,11 @@ check('M16 续跑指令不含「请重新执行」(那是工具重做原文案,�
 // ══════════════════════════════════════════════════════════════════════════
 const C = read('client/src/utils/contentRisk.js');
 const A = read('client/src/App.jsx');
+// r176:代码搬家,页面行为不变 —— 报错分支里的三条判据(及优先级)搬进 utils/apiErrorActions.js,
+// 渲染段里的三块动作界面(provider / repair-official / content-risk)搬进 components/ApiErrorActions.jsx。
+// 下面凡是原来对 App.jsx 报错分支 / 渲染段做的源码文字断言,都改指到这两个文件;App.jsx 只剩接线,另行钉住。
+const AE = read('client/src/utils/apiErrorActions.js');
+const AC = read('client/src/components/ApiErrorActions.jsx');
 
 // 「同块」口径:从标记起,到下一处 2 空格缩进的组件级 const/function/useEffect/return 为止
 // (useCallback 体内一律 ≥4 空格缩进),上限 6000 字符。红了先看是不是块切歪了。
@@ -330,44 +335,63 @@ check('M4 反向源码锁:未证实文案也不许出现在 App.jsx', () => {
 console.log('\n[B] 源码锁 §4.2 client/src/App.jsx —— 新增部分');
 check('§4.2 App.jsx 可读且非空', () => assert.ok(A.length > 0, '文件读不到或为空'));
 check("§4.2 从 './utils/contentRisk.js' import 且含三个函数名", () => {
+  // r176:classifyUpstreamRefusal 随判据搬进 utils/apiErrorActions.js(同目录,写 './contentRisk.js');
+  // App.jsx 仍从 './utils/contentRisk.js' import 另两个,并从 apiErrorActions.js 取 deriveApiErrorUi。
+  assert.ok(AE.length > 0, '读不到 client/src/utils/apiErrorActions.js');
   const m = A.match(/import\s*\{([\s\S]*?)\}\s*from\s*'\.\/utils\/contentRisk\.js'/);
   assert.ok(m, "找不到 from './utils/contentRisk.js' 的 import");
-  for (const n of ['classifyUpstreamRefusal', 'lastUserIndex', 'locateRiskAnchor']) {
-    assert.ok(m[1].includes(n), `import 名单缺 ${n}`);
+  for (const n of ['lastUserIndex', 'locateRiskAnchor']) {
+    assert.ok(m[1].includes(n), `App.jsx import 名单缺 ${n}`);
   }
+  const me = AE.match(/import\s*\{([\s\S]*?)\}\s*from\s*'\.\/contentRisk\.js'/);
+  assert.ok(me, "apiErrorActions.js 找不到 from './contentRisk.js' 的 import");
+  assert.ok(me[1].includes('classifyUpstreamRefusal'), 'apiErrorActions.js import 名单缺 classifyUpstreamRefusal');
+  assert.match(A, /import \{[^}]*\bderiveApiErrorUi\b[^}]*\} from '\.\/utils\/apiErrorActions\.js'/,
+    'App.jsx 必须从 apiErrorActions.js 取 deriveApiErrorUi(否则判据没人调用)');
 });
 check('§4.2 打标点:const risk = classifyUpstreamRefusal(msg)', () => {
-  assert.match(A, /const risk = classifyUpstreamRefusal\(msg\)/);
+  // 判据在 apiErrorActions.js(deriveApiErrorUi 内,入参已转成字符串 msg);App.jsx 报错分支只喂报错文案 msg。
+  assert.match(AE, /const risk = classifyUpstreamRefusal\(msg\)/);
+  assert.match(A, /const errUi = deriveApiErrorUi\(msg\)/, 'App.jsx 报错分支必须把报错文案 msg 交给 deriveApiErrorUi');
 });
 check("R5 打标:errorAction: 'content-risk'", () => {
-  assert.match(A, /errorAction: 'content-risk'/);
+  // 内容审核命中 → 动作取值 'content-risk'(apiErrorActions.js 的三元链第一支);
+  // App.jsx 把这个动作原样写进消息的 errorAction 字段。
+  assert.match(AE, /const action = risk \? 'content-risk'/);
+  assert.match(A, /\.\.\.\(errUi\.action \? \{ errorAction: errUi\.action \} : \{\}\)/);
 });
 check("§4.2 渲染:msg.errorAction === 'content-risk'", () => {
-  assert.match(A, /msg\.errorAction === 'content-risk'/);
+  // 渲染搬进 ApiErrorActions.jsx,按 action 判;App.jsx 把消息的 errorAction 原样当 action 传入。
+  assert.ok(AC.length > 0, '读不到 client/src/components/ApiErrorActions.jsx');
+  assert.match(AC, /action === 'content-risk'/);
+  assert.match(A, /<ApiErrorActions action=\{msg\.errorAction \|\| null\}/);
 });
 check('§4.2 两个新回调声明:runContentRiskRewind / newSessionWithLastUser', () => {
   assert.match(A, /const runContentRiskRewind = useCallback/);
   assert.match(A, /const newSessionWithLastUser = useCallback/);
 });
 check('R7/B3 主按钮文案逐字:回退到上一条工具输出之前并重发', () => {
-  assert.match(A, /回退到上一条工具输出之前并重发/);
+  assert.match(AC, /回退到上一条工具输出之前并重发/);
 });
 check('B4 退化按钮文案逐字:回退到上一条消息之前并重新编辑', () => {
-  assert.match(A, /回退到上一条消息之前并重新编辑/);
+  assert.match(AC, /回退到上一条消息之前并重新编辑/);
 });
 check('B12 次要按钮文案含「新开会话」', () => {
-  assert.match(A, /新开会话/);
+  // r176:次要按钮随动作界面搬进 ApiErrorActions.jsx,改在该文件里找
+  // (App.jsx 别处也有「新开会话」字样,留在 App.jsx 上会一直通过却守不到这个按钮)。
+  assert.match(AC, /新开会话/);
 });
 check('B2 提示文案含「内容审核」与「每一轮」', () => {
-  assert.match(A, /内容审核/);
-  assert.match(A, /每一轮/);
+  assert.match(AC, /内容审核/);
+  assert.match(AC, /每一轮/);
 });
 check('B2 提示文案客观陈述:附近无 emoji、无「一键 / 帮你 / 搞定」式措辞', () => {
   // 锚点用「每一轮」:改前全文件 0 次,是本轮提示文案独有的词;
   //「内容审核」改前也 0 次但改后多处复用(注释/确认框),窗口易串到别处。
-  const i = A.indexOf('每一轮');
+  // r176:提示文案搬进 ApiErrorActions.jsx,窗口取该文件里「每一轮」前后各 250 字符(口径不变)。
+  const i = AC.indexOf('每一轮');
   assert.ok(i > 0, '找不到提示文案');
-  const win = A.slice(Math.max(0, i - 250), i + 250);
+  const win = AC.slice(Math.max(0, i - 250), i + 250);
   assert.doesNotMatch(win, /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/u, '提示文案区出现 emoji');
   for (const w of ['一键', '帮你', '搞定']) {
     assert.ok(!win.includes(w), `提示文案区出现营销腔用词「${w}」`);
@@ -438,8 +462,19 @@ console.log('\n[B] 计数锁 §4.3(口径 = grep -o <literal> | wc -l)');
 const S = read('server/routes/sessions.js');
 const HO = read('client/src/utils/historyOps.js');
 const HH = read('server/routes/session-history.js');
-check('R6 App.jsx errorAction 恰 6 次(改前 4:只加"打标"与"渲染"各一处)', () => {
-  assert.strictEqual(countF(A, 'errorAction'), 6);
+// r176:原「App.jsx errorAction 恰 6 次」= 打标 3(content-risk / provider / repair-official 各一)+ 渲染 3(各一)。
+// 搬家后这 6 处拆成三份,逐份钉死,合计仍恰 6:
+//   打标 3 → apiErrorActions.js 的一条三元链(每个动作取值恰出现一次);
+//   渲染 3 → ApiErrorActions.jsx 的 action === '…'(每个动作取值恰出现一次);
+//   App.jsx 只剩接线,errorAction 字段恰 4 处:本地 ❌ 块写入 1、合成报错副本写入 1、渲染传参 2(action 与 hints 的守卫各一)。
+check('R6 errorAction 动作取值:打标 3 + 渲染 3 恰 6 处,App.jsx 接线恰 4 处', () => {
+  for (const v of ['content-risk', 'provider', 'repair-official']) {
+    assert.strictEqual(countF(AE, `? '${v}'`), 1, `apiErrorActions.js 里打标「${v}」应恰 1 处`);
+    assert.strictEqual(countF(AC, `action === '${v}'`), 1, `ApiErrorActions.jsx 里渲染「${v}」应恰 1 处`);
+  }
+  assert.strictEqual(count(AE, /\? '(?:content-risk|provider|repair-official)'/g), 3, '打标总数应恰 3');
+  assert.strictEqual(count(AC, /action === '(?:content-risk|provider|repair-official)'/g), 3, '渲染总数应恰 3');
+  assert.strictEqual(countF(A, 'errorAction'), 4, 'App.jsx 的 errorAction 应只剩 4 处接线');
 });
 check('M12 App.jsx trim-before-tool 恰 1 次(复用既有唯一调用点,不新写 fetch)', () => {
   assert.strictEqual(countF(A, 'trim-before-tool'), 1);
@@ -533,18 +568,24 @@ check('M18 handleRetryTool 停流三件套逐字仍在', () => {
   assert.match(A, /hard: true/);
   assert.match(A, /backgroundPidRef\.current = null/);
 });
+// r176:两个既有动作块搬进 ApiErrorActions.jsx,条件里的 msg.errorAction 变成 action、selectedSession?.sessionId
+// 变成 sessionId 属性;守卫的值由 App.jsx 的 apiErrorActionProps 传入,同处钉住,守卫语义不变。
+const iProps = A.indexOf('const apiErrorActionProps = {');
+const PROPS_BLK = iProps < 0 ? '' : A.slice(iProps, A.indexOf('\n  };', iProps) + 5);
 check("B16 既有 provider 错误块逐字仍在", () => {
-  assert.match(A, /msg\.errorAction === 'provider' && !mobileChrome/);
+  assert.match(AC, /action === 'provider' && !mobileChrome/);
+  assert.ok(PROPS_BLK.length > 0, '找不到 App.jsx 的 apiErrorActionProps');
+  assert.match(PROPS_BLK, /\n\s+mobileChrome,\n/, 'App.jsx 必须把 mobileChrome 原样传给 ApiErrorActions(手机布局隐藏按钮的依据)');
 });
 check('B18 既有 repair-official 错误块逐字仍在', () => {
-  assert.match(A, /msg\.errorAction === 'repair-official' && selectedSession\?\.sessionId/);
+  assert.match(AC, /action === 'repair-official' && sessionId/);
+  assert.ok(PROPS_BLK.length > 0, '找不到 App.jsx 的 apiErrorActionProps');
+  assert.match(PROPS_BLK, /sessionId: selectedSession\?\.sessionId \|\| null/, 'sessionId 必须来自当前选中会话');
 });
-check('M15 三元链其余两支仍在且相距 < 2000 字符(同一表达式的机械代理判据)', () => {
-  const a = A.indexOf('isAuthError ?');
-  const b = A.indexOf('isOfficialEmptyBlock ?');
-  assert.ok(a > -1, '缺 isAuthError ?');
-  assert.ok(b > -1, '缺 isOfficialEmptyBlock ?');
-  assert.ok(Math.abs(a - b) < 2000, `相距 ${Math.abs(a - b)} 字符,疑似被拆散;三元链顺序由判官人工核对`);
+check('M15 三元链三支在同一条表达式里,顺序 内容审核 > 鉴权 > 空内容块', () => {
+  // 原判据:isAuthError ? 与 isOfficialEmptyBlock ? 相距 < 2000 字符(机械代理,顺序靠人工核对)。
+  // 搬家后三支写在 apiErrorActions.js 的一行里,直接逐字钉整条表达式 —— 同一表达式、顺序、末尾兜底 null 一并锁死。
+  assert.match(AE, /const action = risk \? 'content-risk' : isAuth \? 'provider' : isEmptyBlock \? 'repair-official' : null;/);
 });
 check('§4.4 错误分支其它四条自愈判据逐字不变', () => {
   for (const re of [/usage credits required for 1m context/, /invalid signature in thinking/,

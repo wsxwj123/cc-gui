@@ -169,8 +169,8 @@ import {
 } from './components/Icon.jsx';
 import { buildFontEntries, groupFonts, detectFonts, platformCandidates, queryLocalFontFamilies } from './utils/systemFonts.js';
 import { copyText } from './utils/clipboard.js';
-import { OFFICIAL_LOGIN_HINT, matchOfficialLoginError, notifyOauthMissing } from './utils/officialAuth.js';
-import { classifyUpstreamRefusal, lastUserIndex, locateRiskAnchor, RISK_CONTINUE_PROMPT } from './utils/contentRisk.js';
+import { OFFICIAL_LOGIN_HINT, notifyOauthMissing } from './utils/officialAuth.js';
+import { lastUserIndex, locateRiskAnchor, RISK_CONTINUE_PROMPT } from './utils/contentRisk.js';
 import { effortCapsFor, effortAllowed, effortMemoryKey, effortSourceNote, useEffortFallback } from './utils/effortCaps.js';
 import { ProviderThinkingEditor } from './components/ProviderThinkingEditor.jsx';
 import { UnifiedSidebar } from './components/UnifiedSidebar.jsx';
@@ -180,6 +180,8 @@ import { waitingSessionKeys, countAttention, applyAttentionBadge } from './utils
 import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAutoRetrySkipped, keepLivePeer, anchorLivePeers, placeAnchoredPeers, mergeLivePeersIntoHistory, peerFromXsEvent, peerFromResultEvent, useXsSessionPending, xsSendToolIds, xsSendNotices, rememberXsSendReceipts } from './utils/xsession.js';
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
+import ApiErrorActions from './components/ApiErrorActions.jsx';
+import { deriveApiErrorUi, deriveHistoryApiErrorUi, hintsAsQuoteSuffix, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
@@ -5721,6 +5723,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let accumulatedThinking = '';
     let currentToolCalls = [];
     let orderedBlocks = [];  // [{ type, blockIndex, content?, toolCall? }, ...]
+    // r176:本回合命令行发过「接口报错」合成消息(is_api_error_message)。报错分支据此不再
+    // 另加一块重复的本地 ❌ 块,动作与提示改标在循环后 push 的本回合副本上。
+    let sawApiErrorMessage = false;
+    let apiErrorUi = null;   // deriveApiErrorUi 的结果,只在 sawApiErrorMessage 时有值
     // 本回合是否已由 stream_event partial 路径填过 orderedBlocks。整条消息型 provider
     // (不发 partial)要靠 assistant 快照按顺序补进 orderedBlocks —— 否则流式气泡只能走
     // legacy 三件套(块序丢失),条带会在收官那一刻凭空出现并整块重排(口径 3 落空)。
@@ -6884,6 +6890,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // r141:判据① 的 uuid 来源 —— 整条快照型 assistant 事件(真 CLI 实测:这条事件的
             // `uuid` 与写进 jsonl 的同一条记录逐字相同)。子代理的已在上面 `continue` 分流掉。
             if (event.uuid) roundUuidsRef.current.add(String(event.uuid));
+            if (event.is_api_error_message === true) sawApiErrorMessage = true;
             // r65:非 partial 的第三方(mimo 等)不发 delta,整条 assistant 快照即其全部产出;据此置位。
             markSawOutput();
             // 整条消息型 provider:把这一条快照**按到达顺序**也写进 orderedBlocks,让流式气泡
@@ -7271,54 +7278,39 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               sawError = true;
               break;
             }
-            // 鉴权类报错(401 / api key 无效等)大概率是 provider 的 key 配错/过期,
-            // 给错误块挂「检查 Provider 设置」动作(渲染在 visibleChat 的 turn 分支)。
-            const isAuthError = /\b401\b|unauthorized|authenticat|api[ -_]?key|x-api-key/i.test(msg);
-            // r10-12:官方拒收历史空内容块(旧第三方会话切官方 400)→ 挂一键清理行动卡。
-            // 两种文案:空 text 块 "text content blocks must be non-empty";空/纯空白 thinking 块
-            // (r151r)"each thinking block must contain non-whitespace thinking"。
-            // 与服务端 server/routes/chat.js 的 matchOfficialEmptyBlockError 同判据,改一处必须同步
-            // 另一处;统计数字由 repair-hint 事件补充。
-            const isOfficialEmptyBlock = /must be non-empty|non-whitespace thinking/i.test(msg);
-            // r99:服务商内容审核拒绝(DeepSeek「400 Content Exists Risk」)。污染内容留在
-            // 上下文里则之后每一轮都被同样拒绝 → 给气泡挂"回退到污染源之前"的动作。
+            // 该挂哪种动作、补哪几条提示:判据见 utils/apiErrorActions.js(原样搬自这里,不放宽)。
+            //   - 内容审核(r99,DeepSeek「400 Content Exists Risk」)> 鉴权(401 / api key 无效,
+            //     挂「检查 Provider 设置」)> 官方拒收历史空内容块(r10-12 / r151r,挂体检清理);
+            //   - 补充提示:1M 推断被拒(低危#4)、官方订阅未登录(r10-10)、签名不通过(r151r)。
             // 只喂已提取的错误文案 msg,不喂用户消息/模型正文。
-            const risk = classifyUpstreamRefusal(msg);
-            // 低危#4:1M 推断被拒的显式提示。6bfc207 对「单次 ctxUsage 超名义窗口」的
-            // 会话推断补 [1m] 发送;账户 1M 资格不足时该请求被 API 拒,落到这里显示裸
-            // 报错。上方 5127 已自动切回捕获两种已知文案;其余含 1M/长上下文关键词的
-            // 拒绝(第三方/新文案)补一行引导:关掉模型弹层的 1M 开关再重试。纯文案层,
-            // 不动重试逻辑。
-            // (?<![$￥]) 排除 "$1m budget" 这类金额文案的误命中(判官次要项)
-            const isOneMReject = /(?<![$￥])\b1m\b|\[1m\]|long context|context length|1000000|1,000,000/i.test(msg);
-            const oneMHint = isOneMReject
-              ? '\n\n> 该会话被识别为 1M 上下文；若账户不支持,请在模型弹层关闭 1M 后重试。'
-              : '';
-            // r10-10:官方订阅未登录/登录过期 → 错误行下补登录指引(与切官方预检横幅同一文案)。
-            const loginHint = matchOfficialLoginError(msg) ? `\n\n> ${OFFICIAL_LOGIN_HINT}。` : '';
-            // r151r:官方以签名不通过拒收其他模型留下的思考段落(Invalid `signature` in `thinking`
-            // block;反引号可有可无)。清理卡只删空段落帮不上 → 不挂卡,报错原文后补一行出路
-            // (文本层,同 loginHint)。
-            const signatureHint = /invalid\W+signature\W+in\W+thinking\W+block/i.test(msg)
-              ? '\n\n> 会话历史里有其他模型留下的思考内容，当前接口不接受。切回原来的 provider,在此会话执行 /compact 后再切回;或新开会话。'
-              : '';
-            setChatMessages((prev) => [...prev, {
-              uuid: 'chat-error-' + Date.now(),
-              type: 'turn',
-              ownerKey: streamSid || sessionQueueKey,
-              timestamp: new Date().toISOString(),
-              model: streamingModel,
-              text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的工作区目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${oneMHint}${loginHint}${signatureHint}`],
-              thinking: [],
-              toolCalls: [],
-              blocks: [{ type: 'text', content: `❌ **${msg}**${oneMHint}${loginHint}${signatureHint}` }],
-              usage: null,
-              // r99:内容审核那支放最前 —— 短语最特异,且与另两支判据在真实输入上互斥
-              // ("Content Exists Risk" 不含 api key / 空内容块字样)。
-              ...(risk ? { errorAction: 'content-risk' }
-                : isAuthError ? { errorAction: 'provider' }
-                : isOfficialEmptyBlock ? { errorAction: 'repair-official' } : {}),
-            }]);
+            // 本地 ❌ 块那条路只看文字(与改动前一致);合成报错那条路另带结束事件的状态码(与历史回合同口径)。
+            const errUi = deriveApiErrorUi(msg);
+            // r176:命令行已把这条报错作为合成助手消息发过来(会落盘、循环后会 push 成本回合副本)
+            // → 不再另加一块内容重复的 ❌ 块(报错原文出现两份,且收尾时它会被清掉,动作跟着消失)。
+            // 动作与提示标在本回合副本上;副本被历史认领后,历史回合凭落盘的报错标记接着显示。
+            // 判据见 shouldSkipLocalErrorBlock:只有这次的报错原文已在本回合正文里才省;
+            // 本回合副本要有正文才会 push(见循环后那段),没收到正文的照旧走本地 ❌ 块。
+            if (shouldSkipLocalErrorBlock(accumulatedText, msg, sawApiErrorMessage)) {
+              sawApiErrorMessage = true;
+              apiErrorUi = Number.isFinite(event.api_error_status)
+                ? deriveApiErrorUi(msg, { status: event.api_error_status })
+                : errUi;
+            } else {
+              const hintSuffix = hintsAsQuoteSuffix(errUi.hints);
+              setChatMessages((prev) => [...prev, {
+                uuid: 'chat-error-' + Date.now(),
+                type: 'turn',
+                ownerKey: streamSid || sessionQueueKey,
+                timestamp: new Date().toISOString(),
+                model: streamingModel,
+                text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的工作区目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${hintSuffix}`],
+                thinking: [],
+                toolCalls: [],
+                blocks: [{ type: 'text', content: `❌ **${msg}**${hintSuffix}` }],
+                usage: null,
+                ...(errUi.action ? { errorAction: errUi.action } : {}),
+              }]);
+            }
             // 条带折叠:报错的轮也要落一条窗口记录(与中断那条同款)。**不加"本轮没在跑就丢弃"
             // 的守卫** —— 7 个错误分支都是 `sawError = true; break`,循环退出后进不来,守卫是
             // 死代码;写坏一处还会吃掉 reattach 第二次 attach 的合法报错。这里只写不改别的。
@@ -7495,6 +7487,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           subUsage: liveSubUsageAgents(useStore.getState().liveSubUsage),
           // r141:副本身份(判据①②③,见 utils/turnIdentity.js;纯追加,不动 r140 的 ownerKey 行)
           srcUuids: [...roundUuidsRef.current], roundStartTs: streamStartRef.current,
+          // r176:本回合是命令行的合成报错 → 动作与补充提示标在这条副本上(不再另加 ❌ 块)。
+          ...(sawApiErrorMessage && apiErrorUi?.action ? { errorAction: apiErrorUi.action } : {}),
+          ...(sawApiErrorMessage && apiErrorUi?.hints?.length ? { errorHints: apiErrorUi.hints } : {}),
         }]);
         // M3(Q9)→T2 重构:完成悬浮提醒改由服务端 WS 'turn-complete' 广播驱动
         // (见 useWebSocket)。这里的流闭包在用户切走会话时会被切会话 effect
@@ -9139,6 +9134,26 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     return a && !a.carryText ? a : null;
   }, [messages, riskRewoundSids, selectedSession?.sessionId]);
 
+  // r176:接口报错下方动作区的共用参数(本地副本与历史回合各画一份,处理函数同一套)。
+  const apiErrorActionProps = {
+    mobileChrome,
+    sessionId: selectedSession?.sessionId || null,
+    projectHash: selectedSession?.projectHash,
+    repairReport: selectedSession?.sessionId ? (repairHints[selectedSession.sessionId]?.report || null) : null,
+    onOpenRepair: setRepairModal,
+    riskRewound: !!(selectedSession?.sessionId && riskRewoundSids[selectedSession.sessionId]),
+    contentRiskAnchor,
+    onContentRiskRewind: runContentRiskRewind,
+    onNewSessionWithLastUser: newSessionWithLastUser,
+  };
+  // r176:落盘的最后一个回合是接口报错(后端带出的 apiError 标记 / 老文件的 <synthetic> 兜底)→
+  // 在它下面接着显示动作。本地还有用户消息或回合副本时不派生:本回合的副本自己带动作
+  // (交接那一帧副本被认领、从 renderChat 消失,这里同一帧接上),新发的消息还没回复时旧报错不再挂。
+  const historyApiErrorUi = useMemo(() => {
+    if (renderChat.some((m) => m.type === 'user' || m.type === 'turn')) return null;
+    return deriveHistoryApiErrorUi(peerPlacement.list);
+  }, [renderChat, peerPlacement]);
+
   // /branch 分叉:从当前会话 fork 出一条新线,打开到本窗格,原会话不动。
   // 传 upToUuid(某条消息的 jsonl uuid)则【精确分叉】——新会话只保留到该消息所在回合
   // 为止的上下文,丢弃其后的对话,便于从中途换个方向重试。不传则整会话复制(在最后一条
@@ -9935,6 +9950,11 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                 retryActiveUuid={retryActiveUuid}
                 hiddenSendIds={sendNoticeSeen.perTurn}
               />
+              {historyApiErrorUi && (
+                <div key={`api-error-actions-${historyApiErrorUi.uuid || ''}`}>
+                  <ApiErrorActions action={historyApiErrorUi.action} hints={historyApiErrorUi.hints} {...apiErrorActionProps} />
+                </div>
+              )}
               {/* btw 旁问不再进主流内联渲染 —— 改由右下角 BtwWindow 浮窗聚合成连续线程。 */}
               {renderChat.filter((msg) => msg.type !== 'btw' && !peerPlacement.placed.has(msg.uuid) && !peerMerge.taken?.has(msg.uuid)).map((msg, i) => (
                 <div key={msg.uuid || i} data-turn-uuid={msg.uuid} data-turn-role={msg.type}>
@@ -9954,65 +9974,9 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                     ? <>
                         <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid}
                           hiddenSendNotices={liveSendHidden.get(msg.uuid) || null} />
-                        {/* 鉴权类错误 turn 的动作链接:打开顶栏 Provider 弹层核对 key/渠道
-                            (cgui:open-provider → 顶栏 ProviderSwitcher 单实例)。
-                            手机布局无该弹层(走 MobileMenu Provider 分页),隐藏按钮避免死点。 */}
-                        {msg.errorAction === 'provider' && !mobileChrome && (
-                          <div className="px-4 pb-2 -mt-1">
-                            <button
-                              onClick={() => window.dispatchEvent(new CustomEvent('cgui:open-provider'))}
-                              className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-accent font-body hover:border-accent/40 transition-colors">
-                              检查 Provider 设置
-                            </button>
-                          </div>
-                        )}
-                        {/* r10-12→r11-⑤:官方拒收历史空内容块 → 行动卡改为唤出居中体检模态
-                            (三态反馈全显式,统计数字持久于 localStorage,刷新后仍可唤出)。 */}
-                        {msg.errorAction === 'repair-official' && selectedSession?.sessionId && (
-                          <div className="px-4 pb-2 -mt-1">
-                            <div className="text-[12px] text-ink-muted font-body mb-1.5">
-                              {(() => {
-                                const rep = repairHints[selectedSession.sessionId]?.report;
-                                return rep
-                                  ? `检测到历史含官方不接受的空内容块(空text ${rep.emptyText || 0} 处/空thinking ${rep.emptyThinking || 0} 处)`
-                                  : '检测到历史可能含官方不接受的空内容块';
-                              })()}
-                            </div>
-                            {/* r151r:清理只删空段落;不空的第三方思考段落不带官方签名,清理后仍可能被拒 → 固定给出路。 */}
-                            <div className="text-[12px] text-ink-muted font-body mb-1.5 leading-relaxed">
-                              清理只删除空段落。清理后仍被拒：切回原来的 provider,在此会话执行 /compact 后再切回;或新开会话。
-                            </div>
-                            <button
-                              onClick={() => setRepairModal({ sessionId: selectedSession.sessionId, projectHash: selectedSession.projectHash })}
-                              className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-accent font-body hover:border-accent/40 transition-colors">
-                              体检与清理(自动备份原文件)…
-                            </button>
-                          </div>
-                        )}
-                        {/* r99:服务商内容审核拒绝(DeepSeek 400 Content Exists Risk)。被拒内容
-                            留在上下文里,之后每一轮都会被同样拒绝 → 必须把它从会话里移除。
-                            不加 mobileChrome 门控:手机同样需要这两个动作,且不依赖顶栏弹层。 */}
-                        {msg.errorAction === 'content-risk' && (
-                          <div className="px-4 pb-2 -mt-1">
-                            <div className="text-[12px] text-ink-muted font-body mb-1.5 leading-relaxed">
-                              该请求被服务商的内容审核拒绝，不是本机或 CLI 的故障。触发内容通常是最近一条工具输出或消息正文。
-                              该内容仍在会话上下文中，不移除则之后每一轮请求都会被同样拒绝。
-                              {selectedSession?.sessionId && riskRewoundSids[selectedSession.sessionId]
-                                && '本会话已自动回退过一次，再次被拒说明触发内容在更早的位置或在你自己的消息里；继续自动回退会覆盖上一次的备份，因此下面只提供改写消息与新开会话。'}
-                            </div>
-                            <div className="flex flex-wrap gap-2">
-                              <button
-                                onClick={runContentRiskRewind}
-                                className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-accent font-body hover:border-accent/40 transition-colors">
-                                {contentRiskAnchor ? '回退到上一条工具输出之前并重发' : '回退到上一条消息之前并重新编辑'}
-                              </button>
-                              <button
-                                onClick={newSessionWithLastUser}
-                                className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] text-ink-muted font-body hover:border-accent/40 transition-colors">
-                                新开会话(带上最后一条消息)
-                              </button>
-                            </div>
-                          </div>
+                        {/* r176:动作区与历史回合共用 ApiErrorActions(三种动作的处理函数不变)。 */}
+                        {(msg.errorAction || msg.errorHints) && (
+                          <ApiErrorActions action={msg.errorAction || null} hints={msg.errorHints || null} {...apiErrorActionProps} />
                         )}
                       </>
                     : <MessageBubble message={{ ...msg, role: msg.type }}
