@@ -5787,6 +5787,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r146 R2:本流是否真的接上过服务端的流(attach 2xx)。POST 窗口里就切走的流(下面
     // 「孤儿流复判」直接 return)一个字都没收过,不代表任何直播内容 —— 它不能写直播快照。
     let streamAttached = false;
+    // r177:本次(最初那次)发送在 POST 返回后让位给重接(见 shouldYieldOrphanSend)。收尾据它跳过
+    // 队列排空与几处不带回合守卫的窗格级写入 —— 「切回后、轮询还没重接」时本流仍是当前这一代,
+    // isCurrentTurn() 挡不住,只能靠这个标记。
+    let yieldedToReattach = false;
     // r146 R6:本次发送【实际用的】模型(下面发送块里从 store 现解析)。外层同名 currentModel 是
     // 渲染期快照,换模型只改 modelBySession、不会让 handleSend 重建 —— 1M 被拒的自动恢复与超窗
     // 横幅读它就会拿到换模型之前的旧值(恢复成旧模型、1M 判断错)。reattach 不走发送块,为 null 时回落。
@@ -6024,7 +6028,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         switchCountAtSend: paneSwitchCountAtSend,
         switchCountNow: paneSwitchCountRef.current,
         isCurrentTurn: isCurrentTurn(),
-      })) return;
+      })) { yieldedToReattach = true; return; }
       pid = respJson.pid;
       activeProcRef.current = pid;
       // R13:本 pid 的期望身份 = 发起这条流的会话(sid 优先;draft 期是原始 draftId,
@@ -7744,10 +7748,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       resetStreamCommit();
       // 重做工具的转圈指示器兜底:重跑流结束(成功/报错/零内容)一律关掉,
       // 避免重跑没产出内容时 effect 不触发 → 指示器一直转。
-      setRetryActiveUuid(null);
-      setCompacting(false);
-      setLiveStatus(null); // 等待状态(G):回合收尾一律清,不留残行
-      setAuditChecking([]); // r151a:审核进行中同样随回合收尾清掉
+      // r177:让位的发送不清 —— 重接的那条流正在用这几个窗格级状态,清掉会让等待状态行闪一下。
+      if (!yieldedToReattach) {
+        setRetryActiveUuid(null);
+        setCompacting(false);
+        setLiveStatus(null); // 等待状态(G):回合收尾一律清,不留残行
+        setAuditChecking([]); // r151a:审核进行中同样随回合收尾清掉
+      }
       // After the stream ends locally, hand the displayed history back to the
       // persisted jsonl. The catch: jsonl flushes the user prompt BEFORE the
       // assistant reply, and that flush races the stream's `result`. A single
@@ -8005,7 +8012,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 【本窗格当前会话】—— 流式中切走会话时弹 A 的队 + 发进 B = 跨会话消息泄漏(A 的
       // 排队消息进了 B,A 的队还少了一条)。owner ≠ 当前会话时整段跳过,留给该会话
       // reattach 流的收尾排空(AZ10 原设计)。
-      if (!backgroundedRef.current) {
+      // r177:让位的发送整段不排空(不弹队首、不调发送、不改队列):回合还在服务端跑、由重接的流
+      // 消费,它的收尾才是本回合真正的收尾,排空归它。这里弹出来再发,要么被重新入队排到队尾
+      // (顺序变),要么在轮询还没发现进程时被当成新回合发给还在忙的会话。
+      if (!backgroundedRef.current && !yieldedToReattach) {
         const _ls = getLocalSession();
         const curKey = queueKeyFor(_ls);
         const queueKey = streamSid || streamOwnerKeyRef.current || curKey;

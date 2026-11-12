@@ -34,7 +34,25 @@ import { shouldYieldOrphanSend, shouldUpgradeReattachOnReplayComplete } from '..
   const yieldCall = app.slice(iYield, iClaim);
   assert.ok(/switchCountNow: paneSwitchCountRef\.current/.test(yieldCall) && /isCurrentTurn: isCurrentTurn\(\)/.test(yieldCall)
     && /paneOnOwner: queueKeyFor\(getLocalSession\(\)\) === sessionQueueKey/.test(yieldCall), '让位判定带上三个条件');
-  assert.ok(/\}\)\) return;\s*\n\s*pid = respJson\.pid;/.test(app), '让位走既有的 return');
+  assert.ok(/\}\)\) \{ yieldedToReattach = true; return; \}\s*\n\s*pid = respJson\.pid;/.test(app), '让位走既有的 return,且 return 之前置上让位标记');
+  assert.equal((app.match(/yieldedToReattach = true;/g) || []).length, 1, '让位标记只有一个置位点');
+  assert.ok(/let yieldedToReattach = false;/.test(app), '让位标记是本次发送闭包里的变量,初值 false');
+  // 收尾:队列排空与四处窗格级写入都在让位标记守卫之内
+  const iFin = app.indexOf('const teardownMine = () => isCurrentTurn() && !streamingRef.current;');
+  assert.ok(iFin > iClaim, '定位到收尾段');
+  const fin = app.slice(iFin, app.indexOf('}, [selectedSession, selectedProject, streamingModel', iFin));
+  const iGuard4 = fin.indexOf('if (!yieldedToReattach) {');
+  assert.ok(iGuard4 > 0, '四处写入有让位守卫');
+  const guard4 = fin.slice(iGuard4, fin.indexOf('}', iGuard4));
+  for (const w of ['setRetryActiveUuid(null);', 'setCompacting(false);', 'setLiveStatus(null);', 'setAuditChecking([]);']) {
+    assert.ok(guard4.includes(w), `${w} 在让位守卫之内`);
+    assert.equal(fin.split(w).length - 1, 1, `收尾里 ${w} 只有守卫内这一处`);
+  }
+  const iDrain = fin.indexOf('if (!backgroundedRef.current && !yieldedToReattach) {');
+  const iShift = fin.indexOf('useStore.getState().shiftMessage(drainKey)');
+  const iResend = fin.indexOf('handleSendRef.current?.(next.text');
+  assert.ok(iDrain > 0 && iShift > iDrain && iResend > iShift, '队列排空(弹队首与再发送)整段在让位守卫之内');
+  assert.equal(fin.split('shiftMessage(').length - 1, 1, '收尾里没有守卫外的弹队首');
   assert.ok(/const paneSwitchCountAtSend = paneSwitchCountRef\.current;/.test(app), '发送开始时记下切换计数');
   const iPromo = app.indexOf('if (!isPromotion) {');
   const iInc = app.indexOf('paneSwitchCountRef.current += 1;');
