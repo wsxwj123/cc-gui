@@ -78,7 +78,11 @@ export function trimRecentMessages(messages, max = HISTORY_LOADED_MAX) {
   return { messages: list.slice(list.length - cap), dropped: list.length - cap };
 }
 
-const historyTabIndex = (tab) => (Number.isInteger(tab) && tab >= 0 && tab <= 5 ? tab : 0);
+// 历史请求按窗格分账的格数(分屏最多 6 个窗格)与窗格下标的夹取规则:认不出的下标一律落到 0 号。
+// 本文件的请求代号表与 sessionStore.js 的在飞请求表共用这一处 —— 以前各写一份,放宽窗格数时只改一处,
+// 多出来的窗格会在另一张表里被并到 0 号。
+export const HISTORY_PANE_SLOTS = 6;
+export const historyTabIndex = (tab) => (Number.isInteger(tab) && tab >= 0 && tab < HISTORY_PANE_SLOTS ? tab : 0);
 
 /**
  * r151l 判官修正(窄复审①):历史请求代号按 **(sessionId, tab, lane)** 分账。

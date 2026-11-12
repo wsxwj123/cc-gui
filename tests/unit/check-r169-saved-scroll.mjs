@@ -131,8 +131,15 @@ const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
 const pStart = app.indexOf('const persistScrollState = (el) => {');
 assert.ok(pStart > 0, '必须有统一的保存函数');
 const persist = app.slice(pStart, app.indexOf('const handleScroll = () => {', pStart));
-assert.ok(/if \(!el \|\| !scrollPersistKey \|\| !scrollPersistAllowed\(\{\s*ownerKey: scrollOwnerKey,\s*restoredOwner: scrollRestoredRef\.current,\s*restorePendingOwner: scrollRestorePendingRef\.current,\s*\}\)\) return;/.test(persist),
-  '恢复读取之前、恢复待决期间都不得写(切换途中的钳位 / 吸底事件会盖掉存着的位置)');
+{
+  // r173:只认"有这次判断、三个字段都传了、不允许时提前返回",不认字段顺序与换行写法(原来逐字匹配,调个顺序就误报)
+  const gate = /scrollPersistAllowed\(\{([\s\S]*?)\}\)/.exec(persist);
+  assert.ok(gate, '保存前必须经 scrollPersistAllowed 判断(恢复读取之前、恢复待决期间都不得写)');
+  for (const field of ['ownerKey: scrollOwnerKey', 'restoredOwner: scrollRestoredRef.current', 'restorePendingOwner: scrollRestorePendingRef.current']) {
+    assert.ok(gate[1].includes(field), `scrollPersistAllowed 必须传 ${field}(切换途中的钳位 / 吸底事件会盖掉存着的位置)`);
+  }
+  assert.ok(/!scrollPersistAllowed\(\{[\s\S]*?\}\)\)\s*return;/.test(persist), '不允许保存时必须提前返回');
+}
 assert.ok(/scrollValueToWrite\(\{\s*lastSaved: last\?\.key === scrollPersistKey \? last\.value : undefined,\s*reading: userScrolledAwayRef\.current,\s*scrollTop: el\.scrollTop,\s*\}\)/.test(persist)
     && /if \(value === null\) return;/.test(persist),
   '按"是否在看历史"决定存「在底部」还是位置,与存储里现有的值(没有键按「在底部」)相同就不写');
@@ -174,7 +181,10 @@ assert.ok(!/removeItem\([^)]*cgui-scroll/.test(app), '本次不新增删除 / �
   // 置位仍在同步阶段、rAF 之外:防止这一帧里重复读取,也让没有存档的会话读取后立即可写
   assert.ok(/\}\);\s*\n\s*\}\s*\n\s*$/.test(restore) && app.startsWith('scrollRestoredRef.current = scrollOwnerKey;', rStart + restore.length),
     'scrollRestoredRef 在 rAF 之外同步置位');
-  assert.equal((app.match(/scrollRestorePendingRef\.current = /g) || []).length, 2, '待决标记只在恢复 effect 里设、在 rAF 里清');
+  // r173:不认赋值个数(try/finally、分支里多清一次都是合理写法),只认"至少一设一清,而且都在恢复 effect 里,别处不得改它"
+  const effectEnd = rStart + restore.length;
+  const assigns = [...app.matchAll(/scrollRestorePendingRef\.current = /g)].map((m) => m.index);
+  assert.ok(assigns.length >= 2 && assigns.every((i) => i > rStart && i < effectEnd), '待决标记只在恢复 effect 里设与清');
 }
 
 console.log('✓ check-r169-saved-scroll: 跟随中存「在底部」/ 看历史存位置 / 旧格式数字照常恢复');

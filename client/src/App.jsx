@@ -5093,20 +5093,24 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       scrollRestorePendingRef.current = pendingOwner;
       // Defer to next frame so DOM is laid out
       requestAnimationFrame(() => {
-        if (el && restore.atBottom) {
-          // 离开时停在底部跟随 → 回来吸底并继续跟随(离开期间内容变长了,不能按旧的绝对位置放)
-          writeProgrammaticScroll(el, Math.max(0, el.scrollHeight - el.clientHeight), 'follow');
-          userScrolledAwayRef.current = false;
-          setAutoScroll(true);
-        } else if (el) {
-          const target = Math.min(Math.max(0, restore.top), Math.max(0, el.scrollHeight - el.clientHeight));
-          writeProgrammaticScroll(el, target, 'restore');
-          const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 120;
-          userScrolledAwayRef.current = away;  // AZ3:恢复的位置若不在底部则保持暂停吸底
-          setAutoScroll(!away);
+        try {
+          if (el && restore.atBottom) {
+            // 离开时停在底部跟随 → 回来吸底并继续跟随(离开期间内容变长了,不能按旧的绝对位置放)
+            writeProgrammaticScroll(el, Math.max(0, el.scrollHeight - el.clientHeight), 'follow');
+            userScrolledAwayRef.current = false;
+            setAutoScroll(true);
+          } else if (el) {
+            const target = Math.min(Math.max(0, restore.top), Math.max(0, el.scrollHeight - el.clientHeight));
+            writeProgrammaticScroll(el, target, 'restore');
+            const away = el.scrollHeight - el.scrollTop - el.clientHeight >= 120;
+            userScrolledAwayRef.current = away;  // AZ3:恢复的位置若不在底部则保持暂停吸底
+            setAutoScroll(!away);
+          }
+        } finally {
+          // 位置与跟随状态都已写回 → 解除待决。只解自己这一次的:期间换了会话、那个会话又进入待决的不动。
+          // 放在 finally(r173):上面万一抛错也要解除,否则这个会话的滚动位置在切走之前都不会再保存。
+          if (scrollRestorePendingRef.current === pendingOwner) scrollRestorePendingRef.current = null;
         }
-        // 位置与跟随状态都已写回 → 解除待决。只解自己这一次的:期间换了会话、那个会话又进入待决的不动。
-        if (scrollRestorePendingRef.current === pendingOwner) scrollRestorePendingRef.current = null;
       });
     }
     scrollRestoredRef.current = scrollOwnerKey;
