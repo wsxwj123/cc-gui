@@ -14,6 +14,9 @@ const root = fileURLToPath(new URL('../..', import.meta.url));
   // r13-①:drill-back 随钻入两页退役删除(skinAnchors.js 备案注释),40→39。
   assert.ok(SKIN_ANCHOR_IDS.length >= 39, `t1: 首批 ≥39(实际 ${SKIN_ANCHOR_IDS.length})`);
   assert.ok(!SKIN_ANCHOR_IDS.includes('drill-back'), 't1: drill-back 已按备案退役');
+  // r174:r151w 把跨会话三种行统一成一个折叠行,挂点 peer-message → xs-notice(skinAnchors.js 备案注释)。
+  assert.ok(!SKIN_ANCHOR_IDS.includes('peer-message'), 't1: peer-message 已按备案退役(并入 xs-notice)');
+  assert.ok(SKIN_ANCHOR_IDS.includes('xs-notice'), 't1: xs-notice(跨会话消息折叠行)在清单内');
   assert.equal(new Set(SKIN_ANCHOR_IDS).size, SKIN_ANCHOR_IDS.length, 't1: id 唯一');
   for (const a of SKIN_ANCHORS) {
     assert.match(a.id, /^[a-z][a-z0-9-]*$/, `t1: id 命名规范 ${a.id}`);
