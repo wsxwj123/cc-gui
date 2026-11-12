@@ -377,7 +377,9 @@ check('B4 退化按钮文案逐字:回退到上一条消息之前并重新编辑
   assert.match(AC, /回退到上一条消息之前并重新编辑/);
 });
 check('B12 次要按钮文案含「新开会话」', () => {
-  assert.match(A, /新开会话/);
+  // r176:次要按钮随动作界面搬进 ApiErrorActions.jsx,改在该文件里找
+  // (App.jsx 别处也有「新开会话」字样,留在 App.jsx 上会一直通过却守不到这个按钮)。
+  assert.match(AC, /新开会话/);
 });
 check('B2 提示文案含「内容审核」与「每一轮」', () => {
   assert.match(AC, /内容审核/);
