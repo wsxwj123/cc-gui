@@ -1,14 +1,15 @@
-// SF-3xx：渐进挂载（W-C）—— 默认只挂最近 K 行、向上补齐、几何全真、既有滚动机制不变。
+// SF-3xx：长会话打开后的几何与性能 —— 首屏全显示、吸底精确、回合导航跳远、重开恢复滚动位置、拖宽度性能、静置无抖动。
 //
-// 夹具 B = 320 轮（640 行左右）的长会话；"挂载了几行"用 `[data-turn-uuid]` 数。
-// 全量分母：打开窗内检索时按契约是**全量挂载**（INTERFACE §H.6），用它当分母，
-// 免得把"这个夹具一共几行"写死成常数。
+// 夹具 B = 320 轮（640 行左右）的长会话；首屏只加载最近 120 条，且这 120 条全部显示
+// （不再有"打开长会话默认只显示最近 30 行"的规则：回到底部 / 停在底部、已加载超过 400 条时才只保留最近一批，
+//  看历史期间已显示的消息不会被收起）。"挂载了几行"用 `[data-turn-uuid]` 数。
+// 原 SF-301 / SF-302 / SF-303 / SF-307 的前提是"默认只显示最近 30 行"，已不成立，已删除；
+// 对应行为由 r151l-history-pagination 的 B1 / B2 与 r170-loadolder-cliff 覆盖。
 import { test, expect } from '@playwright/test';
 import { MARKER_B, MARKER_A, A } from './helpers/fixtures.mjs';
 import {
   primeOverlays, openApp, openSessionByMarker, allRows, mountedRowCount, scrollBox, scrollMetrics,
-  scrollToBottom, scrollTo, userScroll, topVisibleRow, scrubber, clickScrubberTick, openSearch, closeSearch,
-  searchHits,
+  scrollToBottom, userScroll, scrubber, clickScrubberTick,
 } from './helpers/runtime.mjs';
 
 const LONG_TIMEOUT = 120_000;
@@ -21,70 +22,6 @@ async function openLongSession(page) {
   await expect.poll(async () => await mountedRowCount(page), { timeout: 60_000 }).toBeGreaterThan(3);
   await page.waitForTimeout(600);
 }
-
-/** 打开检索 → 数一次"全量"，关掉 → 回到裁剪态。分母来自产品自己的契约行为。 */
-async function fullRowCount(page) {
-  await openSearch(page);
-  const full = await expect.poll(async () => await mountedRowCount(page), { timeout: 60_000 }).toBeGreaterThan(3)
-    .then(async () => await mountedRowCount(page));
-  await closeSearch(page);
-  await page.waitForTimeout(500);
-  return full;
-}
-
-test('SF-301 默认只挂最近 K 行：不是把整个长会话都挂上', async ({ page }) => {
-  test.setTimeout(LONG_TIMEOUT);
-  await openLongSession(page);
-  const windowed = await mountedRowCount(page);
-  const full = await fullRowCount(page);
-  console.log(`[SF-301] 已挂载 ${windowed} 行 / 全量 ${full} 行`);
-  expect(full, '夹具 B 的行数应当足够多（否则这条没意义）').toBeGreaterThan(200);
-  expect(windowed, '默认应当只挂最近 K 行（K 默认 30，留一点余量）').toBeLessThanOrEqual(45);
-  expect(windowed, '裁剪必须真的生效：已挂行数要显著少于全量').toBeLessThan(full);
-});
-
-test('SF-302 向上滚到顶会补齐更早的行，顶部标记只是一行提示', async ({ page }) => {
-  test.setTimeout(LONG_TIMEOUT);
-  await openLongSession(page);
-  const before = await mountedRowCount(page);
-  await userScroll(page, -3000, { steps: 20 });
-  const after = await expect.poll(async () => await mountedRowCount(page), { timeout: 30_000 })
-    .toBeGreaterThan(before).then(async () => await mountedRowCount(page));
-  console.log(`[SF-302] 补齐：${before} → ${after} 行`);
-  expect(after, '滚到顶必须补齐更多行').toBeGreaterThan(before);
-
-  const box = await scrollBox(page);
-  const ph = box.locator('[data-turn-placeholder]');
-  if (await ph.count()) {
-    const info = await ph.first().evaluate((el) => ({ h: Math.round(el.getBoundingClientRect().height), text: (el.textContent || '').trim(), hasUuid: el.hasAttribute('data-turn-uuid') }));
-    console.log('[SF-302] 顶部标记 =', JSON.stringify(info));
-    expect(info.hasUuid, '顶部标记不得冒充一轮（不带 data-turn-uuid）').toBe(false);
-    expect(info.h, '顶部标记是"更早的 N 轮还没加载"这种一行提示，不是几百 px 的假高度占位').toBeLessThan(80);
-  }
-});
-
-test('SF-303 补齐时视口不跳：补进来的高度必须同帧写回 scrollTop', async ({ page }) => {
-  test.setTimeout(LONG_TIMEOUT);
-  await openLongSession(page);
-  // 判据取自契约本身（§5.1.5）：补齐把内容加在视口上方 → 同一个 layout 提交里
-  // scrollTop += (新 scrollHeight − 旧 scrollHeight)。没补偿的实现会停在 scrollTop≈0，
-  // 用户眼前的内容被整批新内容顶走。
-  const m0 = await scrollMetrics(page);
-  await scrollTo(page, 0);
-  await expect.poll(async () => await mountedRowCount(page), {
-    timeout: 30_000, message: '滚到顶之后没有补齐（行数没增加）',
-  }).toBeGreaterThan(m0.mountedRows);
-  const m1 = await scrollMetrics(page);
-  const delta = m1.scrollHeight - m0.scrollHeight;
-  console.log(`[SF-303] 补齐新增内容高 ${delta}px，scrollTop 0 → ${m1.scrollTop}`);
-  expect(delta, '补齐必须真的让文档变高').toBeGreaterThan(0);
-  expect(m1.scrollTop, '补齐后 scrollTop 必须被推高约等于新内容的高度（否则视口被顶走）')
-    .toBeGreaterThanOrEqual(delta - 2);
-
-  // 视口里仍然应当有已挂载的行（没被甩到空白处）
-  const top = await topVisibleRow(page);
-  expect(top, '补齐之后视口里还得有内容').not.toBeNull();
-});
 
 test('SF-304 滚到底：吸底精确 + 总高不漂移（几何是真的，不是估算）', async ({ page }) => {
   test.setTimeout(LONG_TIMEOUT);
@@ -114,7 +51,7 @@ test('SF-304 滚到底：吸底精确 + 总高不漂移（几何是真的，不�
   expect(Math.abs(gap), '最后一行底边与容器底误差 ≤8px').toBeLessThanOrEqual(8);
 });
 
-test('SF-305 回合导航跳远：不得静默无反应，且代价落表', async ({ page }) => {
+test('SF-305 回合导航跳远：不得静默无反应，目标是已加载范围内最早的一轮并进入视口', async ({ page }) => {
   test.setTimeout(LONG_TIMEOUT);
   await openLongSession(page);
   const bar = scrubber(page);
@@ -122,26 +59,30 @@ test('SF-305 回合导航跳远：不得静默无反应，且代价落表', asyn
   const valueBefore = await bar.getAttribute('aria-valuenow');
 
   await scrollToBottom(page);
+  // 目标 = 已加载范围内最早的一轮 = 页面上第一条消息行（首屏只加载最近 120 条，更早的「第 1 轮」不在页面上）。
+  const box = page.locator('[data-cgui="message-list"]').first();
+  const earliestUuid = await box.evaluate((el) => {
+    const row = el.querySelector('[data-turn-uuid]');
+    return row ? row.getAttribute('data-turn-uuid') : null;
+  });
+  expect(earliestUuid, '前置：页面上应有已加载的消息行').not.toBeNull();
   const t0 = Date.now();
-  await clickScrubberTick(page, 1, 320); // 最上面一档 = 最早那一轮
+  await clickScrubberTick(page, 1, 320); // 最上面一档 = 已加载范围内最早的那一轮
   const jumpMountMs = Date.now() - t0;
-  console.log(`[SF-305] 跳转前 ${valueBefore} → 触发跳转用了 ${jumpMountMs}ms`);
+  console.log(`[SF-305] 跳转前 ${valueBefore} → 触发跳转用了 ${jumpMountMs}ms；目标行 ${earliestUuid}`);
   test.info().annotations.push({ type: 'jumpMountMs', description: `${jumpMountMs}ms（夹具 B，320 轮）` });
 
-  await expect.poll(async () => await bar.getAttribute('aria-valuenow'), {
-    timeout: 30_000, message: '点最上面一档之后 navigation 没跳到第 1 回合',
-  }).toBe('1');
   // 目标轮必须真的进了视口（只改 aria 数字不算）。滚动可能是平滑动画，用轮询等它落位。
-  const probe = async () => await page.locator('[data-cgui="message-list"]').first().evaluate((el) => {
+  const probe = async () => await box.evaluate((el, uuid) => {
     const boxTop = el.getBoundingClientRect().top;
     const boxBottom = el.getBoundingClientRect().bottom;
-    const row = [...el.querySelectorAll('[data-turn-uuid]')].find((r) => (r.textContent || '').includes('第 1 轮：把这一段改一下'));
+    const row = [...el.querySelectorAll('[data-turn-uuid]')].find((r) => r.getAttribute('data-turn-uuid') === uuid);
     if (!row) return { mounted: false, inView: false };
     const r = row.getBoundingClientRect();
     return { mounted: true, inView: r.bottom > boxTop + 1 && r.top < boxBottom - 1 };
-  });
+  }, earliestUuid);
   await expect.poll(async () => (await probe()).inView, {
-    timeout: 20_000, message: '目标轮没有进入视口（跳转静默无反应）',
+    timeout: 20_000, message: '已加载范围内最早的一轮没有进入视口（跳转静默无反应）',
   }).toBe(true);
   console.log('[SF-305] 目标轮 =', JSON.stringify(await probe()));
 });
@@ -171,28 +112,7 @@ test('SF-306 重开会话：滚动位置恢复不报错、落在已挂范围内�
   expect(errors, `重开过程不许有未捕获异常：${errors.join(' | ')}`).toEqual([]);
 });
 
-test('SF-307 搜索打开时全量挂载，关闭后恢复裁剪且不丢位置', async ({ page }) => {
-  test.setTimeout(LONG_TIMEOUT);
-  await openLongSession(page);
-  const windowed = await mountedRowCount(page);
-
-  await openSearch(page);
-  const full = await expect.poll(async () => await mountedRowCount(page), { timeout: 60_000 })
-    .toBeGreaterThan(windowed).then(async () => await mountedRowCount(page));
-  const hits = await searchHits(page);
-  console.log(`[SF-307] 回收索：${windowed} → 全量 ${full} 行，命中 ${JSON.stringify(hits)}`);
-  const topBefore = await topVisibleRow(page);
-
-  await closeSearch(page);
-  await page.waitForTimeout(600);
-  const back = await mountedRowCount(page);
-  expect(back, '关掉检索要恢复裁剪').toBeLessThan(full);
-  const topAfter = await topVisibleRow(page);
-  expect(topAfter, '关掉检索后视口里还得有内容').not.toBeNull();
-  expect(topAfter.uuid, '关掉检索不该把视野甩到别处（误差 ≤1 行）').toBe(topBefore.uuid);
-});
-
-test('SF-308 性能：拖 60 格视口宽度，每格墙钟 ≤150ms、常驻节点 ≤10000（WebKit）', async ({ page }) => {
+test('SF-308 性能：拖 60 格视口宽度，每格墙钟 ≤150ms、常驻节点 ≤10000（WebKit）；帧中位只记录', async ({ page }) => {
   test.setTimeout(LONG_TIMEOUT * 3);
   await openLongSession(page);
 
@@ -229,10 +149,10 @@ test('SF-308 性能：拖 60 格视口宽度，每格墙钟 ≤150ms、常驻节
   });
   const perStep = Math.round((dragWallMs / STEPS) * 10) / 10;
   console.log(`[SF-308] 每格 ${perStep}ms｜帧中位 ${stats.frameMedian}ms｜P90 ${stats.frameP90}ms｜longtask 合计 ${stats.longtaskTotal}ms｜节点 ${stats.domNodes}｜已挂行 ${stats.mountedRows}`);
-  test.info().annotations.push({ type: 'perf', description: `每格 ${perStep}ms、节点 ${stats.domNodes}（夹具 B，WebKit）` });
+  test.info().annotations.push({ type: 'perf', description: `每格 ${perStep}ms、帧中位 ${stats.frameMedian}ms、节点 ${stats.domNodes}（夹具 B，WebKit）` });
 
   expect(perStep, '每格墙钟必须 ≤150ms（PLAN §10 J8）').toBeLessThanOrEqual(150);
-  expect(stats.frameMedian, '帧中位不得比现状（35ms）更差').toBeLessThanOrEqual(35);
+  // 帧中位不再判：原门槛「≤35ms」是按"只显示最近 30 行"定的；首屏改为全显示 120 行后行数翻了几倍，该门槛不再适用，只记录数值（见上面的日志与 annotation）。
   expect(stats.domNodes, '常驻 DOM 节点必须 ≤10000（现状 22043）').toBeLessThanOrEqual(10_000);
 });
 

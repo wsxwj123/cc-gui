@@ -70,7 +70,7 @@ import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { GenuiActionProvider, useGenuiActionCapability } from './genui/host/action-context.jsx';
 import { TurnBubble, StripRoundContext, LiveHostContext } from './components/TurnBubble.jsx';
 import { stripSummary, tailBlockInfo, latestToolTitles } from './utils/streamStatus.js';
-import { initialSpan, extendUp, needsExtend, sliceRows } from './utils/mountWindow.js';
+import { initialSpan, extendUp, needsExtend, sliceRows, resolveAutoFrom } from './utils/mountWindow.js';
 import { historyMessageKey } from './utils/historyPaging.js';
 import { HISTORY_COST_ESTIMATE_NOTE, hasFullHistoryStats, historyStatsScopeLabel } from './utils/historyStatsScope.js';
 import { ReleaseNotesModal } from './components/ReleaseNotesModal.jsx';
@@ -4818,8 +4818,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       : initialSpan(finalizedMessages.length, MOUNT_WINDOW_K).from),
     [finalizedMessages.length],
   );
+  // 上一次提交时的 (会话, 上沿);由下方"每次提交后记下"那个 layout effect 写入。
+  const mountFromRef = useRef(mountWindowEnabled ? mountBaseFrom : 0);
+  const mountOwnerRef = useRef(scrollOwnerKey);
+  // r170:用户在看历史(没在底部跟随)期间,自动上沿不前移 —— 取「按条数算的值」与「同一会话
+  // 上一次提交的上沿」中较小的。否则条数一过 400(连点「加载更早」/ 看历史时来新消息),上沿从 0
+  // 直接跳到「条数 − 30」,卸掉的正是眼前的内容。回到底部跟随后恢复按条数算(卸掉的行在视口上方很远处)。
+  // 切会话那一帧不拿上个会话的上沿。
+  const mountAutoFrom = resolveAutoFrom({
+    baseFrom: mountBaseFrom,
+    prevFrom: mountOwnerRef.current === scrollOwnerKey ? mountFromRef.current : null,
+    reading: userScrolledAwayRef.current,
+  });
   const mountFromResolved = mountWindowEnabled
-    ? (mountFrom == null ? mountBaseFrom : Math.max(0, Math.min(mountFrom, mountBaseFrom)))
+    ? (mountFrom == null ? mountAutoFrom : Math.max(0, Math.min(mountFrom, mountBaseFrom)))
     : 0;
   // 会话切换/换绑定 → 回到默认窗(与"恢复滚动位置"同一个 key:都是 per 会话的状态)。
   useEffect(() => { setMountFrom(null); }, [scrollOwnerKey]);
@@ -4897,9 +4909,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 内容时它自己会改 scrollTop;较老的 WKWebView 为 false),所以这条**不依赖任何"引擎认不认
   // overflow-anchor"的前提** —— 它算的是绝对目标值,引擎已补好时目标就等于当前位置(下面的 <1px
   // 早退直接返回),没补时才由我们写回。
+  // mountFromRef / mountOwnerRef 声明在上方 mountFromResolved 之前(r170 自动上沿要读它们)。
+  // r170 起看历史期间自动上沿不前移,这条路径只剩"上沿被手动钉住后仍可能前移"的少见情形,保留兜底。
   const mountLenRef = useRef(finalizedMessages.length);
-  const mountFromRef = useRef(mountFromResolved);
-  const mountOwnerRef = useRef(scrollOwnerKey);
   if (mountOwnerRef.current === scrollOwnerKey      // 切会话那一帧不许把上个会话的几何套过来
     && userScrolledAwayRef.current
     && finalizedMessages.length > mountLenRef.current
