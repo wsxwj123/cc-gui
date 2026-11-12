@@ -5,7 +5,7 @@
 //   R176AUTH  接口报错 401  authentication_failed
 //   R176RISK  接口报错 400  unknown        「Content Exists Risk」
 //   R176EMPTY 接口报错 400  unknown        「text content blocks must be non-empty」
-//   R176PRE   预检报错（只输出一个出错的结束事件，不产生助手消息，会话文件里不新增助手行）
+//   R176PRE   预检报错（只输出一个出错的结束事件，不产生助手消息；会话文件里什么都不写，连用户消息也不写）
 //
 // 「接口报错」形态（接口文件「测试环境约定」，2026-11-12 真实命令行 2.1.322 实录）：
 //   1. 先把那条助手消息追加进会话文件（与本回合用户消息同一个文件），再依次输出两个事件：
@@ -104,20 +104,24 @@ function apiErrorTranscriptLine(mode) {
 
 async function runRound(userText) {
   const mode = TITLE_GEN ? null : modeOf(userText);
-  append({ type: 'summary', summary: String(userText || '').slice(0, 40) || '新会话', leafUuid: crypto.randomUUID() });
-  const userUuid = crypto.randomUUID();
-  append({
-    parentUuid: lastUuid, promptId: 'r176-fake', type: 'user', isMeta: false,
-    message: { role: 'user', content: userText },
-    uuid: userUuid, timestamp: stamp(), permissionMode: 'default', promptSource: 'sdk', ...baseFields(),
-  });
-  lastUuid = userUuid;
+  // 预检报错:命令行在接收这条消息之前就失败了,会话文件里什么都不写,连这一回合的用户消息也不写
+  // (接口文件 2026-11-12 主会话修订)。其余形态照常先把用户消息落盘。
+  const preflight = Boolean(mode && mode.form === 'pre');
+  if (!preflight) {
+    append({ type: 'summary', summary: String(userText || '').slice(0, 40) || '新会话', leafUuid: crypto.randomUUID() });
+    const userUuid = crypto.randomUUID();
+    append({
+      parentUuid: lastUuid, promptId: 'r176-fake', type: 'user', isMeta: false,
+      message: { role: 'user', content: userText },
+      uuid: userUuid, timestamp: stamp(), permissionMode: 'default', promptSource: 'sdk', ...baseFields(),
+    });
+    lastUuid = userUuid;
+  }
   out({ type: 'system', subtype: 'init', session_id: sid, cwd, model: MODEL, tools: [], mcp_servers: [], permissionMode: 'default', uuid: crypto.randomUUID() });
   await sleep(TURN_DELAY_MS);
 
-  if (mode && mode.form === 'pre') {
-    // 严格按接口文件:只有 type / subtype / is_error / errors / session_id(外加 uuid)。
-    // 2026-11-12 试过再加 result / duration_ms / num_turns / usage:页面照样不画「❌」块(见报告「问题」第 1 条),所以不加。
+  if (preflight) {
+    // 只有 type / subtype / is_error / errors / session_id(外加 uuid),不产生助手消息。
     out({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [mode.text], session_id: sid, uuid: crypto.randomUUID() });
     return;
   }
