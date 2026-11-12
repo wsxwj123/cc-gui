@@ -67,7 +67,7 @@ Everything the `claude` CLI can do, made visual — plus shell-only conveniences
 **Skins**
 - Import a zip / `.cguiskin` pack, or paste `skin.json` text; delete any time
 - Two tiers: **T1 declarative** — only `skin.json` and image assets (41 variables such as colors, radii, shadows, plus light/dark backgrounds); **T2** may include scripts, statically checked before loading
-- Skins target UI elements through `data-cgui` semantic anchors (first batch of 40, promised stable across versions, not tied to refactor-prone class names)
+- Skins target UI elements through `data-cgui` semantic anchors (the list ships with the panel's AI prompt; promised stable across versions, not tied to refactor-prone class names)
 - **Copy an AI prompt** from the panel: it lists the variables, icon names and anchors, so an AI can produce a skin pack directly
 - Safety limits: symlinks, hard links and path traversal are refused before unpacking; entry count and size are capped; SVGs are cleaned by allow-list (no `script`, no external links); script skins load only after a deny-list static check
 
