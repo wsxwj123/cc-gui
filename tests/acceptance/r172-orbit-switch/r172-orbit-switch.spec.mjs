@@ -160,7 +160,12 @@ test('行为6 换位置的同时换样式（思考4.7秒→正文1秒→思考�
   expectNoPageErrors(r.errors);
 });
 
-test('行为7 最短间隔4秒：思考→工具甲（换）→2.5秒后工具乙：样式仍是甲时那个、没有过渡标记，直到这段结束都不补换', async ({ page }) => {
+// 主会话修订(2026-11-12):原时间线以为放行后立刻进入「工具乙」。实际播出来的阶段序列是
+//   工具甲 →(工具结果返回的那一刻)思考 →(约 2.6 秒后)工具乙,
+// 进入工具乙时距上次换样式已超过 4 秒,换样式是对的,原断言「一直不补换」不成立。
+// 改成观察「工具甲的结果返回后回到思考」这次阶段进入:它距换样式不满 4 秒,不该换;
+// 下一个工具的闸门先不放,让思考阶段一直持续到越过 4 秒线,确认也不补换。
+test('行为7 最短间隔4秒：思考→工具甲（换）→2.5秒后工具结果返回、状态行回到思考（不满4秒）：样式不变、没有过渡标记，越过4秒线也不补换', async ({ page }) => {
   const r = await retryClean(page, async () => {
     const errors = collectPageErrors(page);
     await prepareLive(page, {
@@ -181,10 +186,11 @@ test('行为7 最短间隔4秒：思考→工具甲（换）→2.5秒后工具�
     await page.waitForTimeout(4700);
     const tRelA = Date.now(); touchCtl('g1');
     await expectPhase(page, 'tool');
-    await page.waitForTimeout(2500); // 进入工具甲(换样式)后 2.5 秒进入工具乙
-    const tRelB = Date.now(); touchCtl('d1'); touchCtl('g2');
-    await page.waitForTimeout(4200); // 越过「距换样式 4 秒」那条线,确认不补换
+    await page.waitForTimeout(2500); // 进入工具甲(换样式)后 2.5 秒,工具甲的结果返回 → 状态行回到思考
+    const tRelB = Date.now(); touchCtl('d1'); // 只放工具甲的结果;g2(下一个工具)先不放,思考阶段一直持续
+    await page.waitForTimeout(2900); // 思考阶段持续到距换样式约 5.4 秒,越过 4 秒线
     const frames = await stopFrames(page);
+    openAllGates(); // 采样结束,把剩下的闸门放掉让回合收尾
     return { frames, errors, tRelA, tRelB, win: [tRelA - 300, frames[frames.length - 1].t] };
   });
   logSeq('行为7', r.frames);
@@ -193,13 +199,21 @@ test('行为7 最短间隔4秒：思考→工具甲（换）→2.5秒后工具�
   const id0 = f[before(r.tRelA)].style;
   const id1 = f[before(r.tRelB)].style;
   expect(id1, `前置:进入工具甲(思考已满 4 秒)应换样式(进入前 ${id0})`).not.toBe(id0);
-  expect(f.some((x) => x.t > r.tRelB && x.phase === 'tool'), '前置:放行后应观察到工具乙阶段').toBe(true);
-  const after = f.filter((x) => x.t >= r.tRelB && x.has);
-  expect(after.length, '前置:工具乙阶段应采到足够多的帧(≥ 150)').toBeGreaterThanOrEqual(150);
+  const iSwitch = f.findIndex((x) => x.t >= r.tRelA && x.has && x.style === id1);
+  const tSwitch = f[iSwitch].t;
+  const iThink = f.findIndex((x) => x.t >= r.tRelB && x.has && x.phase === 'thinking');
+  expect(iThink, '前置:工具甲的结果返回后,状态行应回到思考阶段(data-live-phase=thinking)').toBeGreaterThanOrEqual(0);
+  const enterGap = f[iThink].t - tSwitch;
+  expect(enterGap, `前置:回到思考的那一刻应距上次换样式不满 4 秒(实测 ${enterGap}ms)`).toBeLessThan(4000);
+  const after = f.filter((x, i) => i >= iThink && x.has);
+  expect(after.length, '前置:回到思考之后应采到足够多的帧(≥ 120)').toBeGreaterThanOrEqual(120);
+  expect([...new Set(after.map((x) => x.phase))], '前置:回到思考之后到采样结束应一直是思考阶段(没有再进入别的阶段)').toEqual(['thinking']);
+  const lastGap = after[after.length - 1].t - tSwitch;
+  expect(lastGap, `前置:采样应持续到距上次换样式 4.5 秒之后(实测 ${lastGap}ms),才能确认不补换`).toBeGreaterThanOrEqual(4500);
   const changed = after.filter((x) => x.style !== id1);
-  expect(changed.slice(0, 3).map((x) => `@乙放行后+${x.t - r.tRelB}ms ${x.phase}:${x.style}`), `进入工具乙(距换样式不满 4 秒)之后到结束,data-style 应始终是 ${id1}(不符 ${changed.length}/${after.length} 帧)`).toEqual([]);
+  expect(changed.slice(0, 3).map((x) => `@回到思考后+${x.t - f[iThink].t}ms ${x.phase}:${x.style}`), `回到思考(距换样式不满 4 秒)之后一直到越过 4 秒线,data-style 应始终是 ${id1}(不符 ${changed.length}/${after.length} 帧)`).toEqual([]);
   const marked = after.filter((x) => x.sw !== null);
-  expect(marked.slice(0, 3).map((x) => `@乙放行后+${x.t - r.tRelB}ms data-switch=${x.sw}`), `进入工具乙之后到结束,不应出现过渡标记(出现 ${marked.length}/${after.length} 帧)`).toEqual([]);
+  expect(marked.slice(0, 3).map((x) => `@回到思考后+${x.t - f[iThink].t}ms data-switch=${x.sw}`), `回到思考之后不应出现过渡标记(出现 ${marked.length}/${after.length} 帧)`).toEqual([]);
   expectNoPageErrors(r.errors);
 });
 
