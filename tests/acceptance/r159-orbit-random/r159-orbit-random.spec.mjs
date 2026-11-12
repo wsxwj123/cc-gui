@@ -254,7 +254,7 @@ test('C2 选定 orbit4 后各阶段（思考 → 工具 → 思考）都保持 o
 
 test('C3 随机模式连走 8 个阶段（思考、工具甲、思考、工具乙…）：阶段内读数不变、相邻阶段不同、至少 3 种、都属于 16 个 id、phase 与阶段一致', async ({ page }) => {
   test.setTimeout(180_000);
-  const T = 2700;
+  const T = 4700; // 每个阶段 ≥ 4.5 秒：每次进入新阶段都距上次换样式满 4 秒（r172 起最短间隔 4 秒）
   const phases = [
     { kind: 'think', ms: T }, { kind: 'tool', title: 'C3 工具甲', ms: T }, { kind: 'think', ms: T }, { kind: 'tool', title: 'C3 工具乙', ms: T },
     { kind: 'think', ms: T }, { kind: 'tool', title: 'C3 工具丙', ms: T }, { kind: 'think', ms: T }, { kind: 'tool', title: 'C3 工具丁', ms: T },
@@ -286,11 +286,11 @@ test('C3 随机模式连走 8 个阶段（思考、工具甲、思考、工具�
   expect(problems, `随机模式 8 个阶段（读数 ${readings.join(' → ')}）不合规的项`).toEqual([]);
 });
 
-test('C4 随机模式：距上次抽取不满 1.5 秒时进入新阶段不换，这个阶段内部之后也不补换', async ({ page }) => {
+test('C4 随机模式：距上次抽取不满 4 秒时进入新阶段不换，这个阶段内部之后也不补换', async ({ page }) => {
   test.setTimeout(150_000);
   const phases = [
-    { kind: 'think', ms: 2600 }, { kind: 'tool', title: 'C4 工具甲', ms: 300 }, { kind: 'tool', title: 'C4 工具乙', ms: 300 },
-    { kind: 'tool', title: 'C4 工具丙', ms: 300 }, { kind: 'think', ms: 3000 },
+    { kind: 'think', ms: 4700 }, { kind: 'tool', title: 'C4 工具甲', ms: 300 }, { kind: 'tool', title: 'C4 工具乙', ms: 300 },
+    { kind: 'tool', title: 'C4 工具丙', ms: 300 }, { kind: 'think', ms: 2500 },
   ];
   await prepareLive(page, { key: 'c4', scenario: { events: phaseEvents(phases) } });
   await sendRound(page);
@@ -302,10 +302,10 @@ test('C4 随机模式：距上次抽取不满 1.5 秒时进入新阶段不换，
   const iA = samples.findIndex((s) => s.wall >= starts[0] && s.phase === 'tool');
   expect(iA, '前置：应观察到进入工具阶段（data-live-phase=tool）').toBeGreaterThanOrEqual(0);
   const after = samples.slice(iA); // 从进入工具 A 起一直到最后那段思考结束
-  expect(after.length, '前置：进入工具 A 之后到结束应采到足够多的样本（0.9 秒工具段 + 3 秒思考 ≈ 39 个，要求 ≥ 25）').toBeGreaterThanOrEqual(25);
+  expect(after.length, '前置：进入工具 A 之后到结束应采到足够多的样本（0.9 秒工具段 + 2.5 秒思考 ≈ 34 个，要求 ≥ 25）').toBeGreaterThanOrEqual(25);
   const id1 = after[2].style; // 进入后 ≥ 200 毫秒的读数（前两个样本留给"phase 先变、data-style 晚一帧"的边界容差）
   expect(ORBIT_IDS, `进入工具 A 之后的读数 id1（${id1}）应是 16 个 id 之一`).toContain(id1);
-  expect(id1, `进入工具 A（距上次抽取 ≥ 1.5 秒）之后读数 id1 应与之前的 id0（${id0}）不同`).not.toBe(id0);
+  expect(id1, `进入工具 A（距上次抽取 ≥ 4 秒）之后读数 id1 应与之前的 id0（${id0}）不同`).not.toBe(id0);
 
   const changed = after.slice(2).filter((s) => s.style !== id1);
   expect(
@@ -315,7 +315,7 @@ test('C4 随机模式：距上次抽取不满 1.5 秒时进入新阶段不换，
   const early = after.slice(0, 2).filter((s) => s.style !== id0 && s.style !== id1);
   expect(early.map((s) => s.style), `进入工具 A 的头两个样本只能是 id0（${id0}）或 id1（${id1}）`).toEqual([]);
 
-  const tail = within(samples, starts[4] + SETTLE, ends[4]); // 最后那段思考（3 秒，跨过 1.5 秒线）
+  const tail = within(samples, starts[4] + SETTLE, ends[4]); // 最后那段思考（2.5 秒，仍在换样式后 4 秒以内）
   expect(tail.length, '前置：最后一段思考应采到足够多的样本（≥ 15）').toBeGreaterThanOrEqual(15);
   expect(uniq(tail.map((s) => s.phase)), '前置：最后一段应一直是 thinking 阶段').toEqual(['thinking']);
   console.log(`[R159 C4] id0=${id0} id1=${id1}`);
@@ -355,9 +355,9 @@ test('C5 减弱动画偏好下的随机模式：圆点是静止帧（1.5 秒内�
 });
 
 // 主会话追加(2026-11-07):开发代理 D3 上报,生成中的状态行会在「连接中占位行(底部)→ 工作组头行 → 正文时回到底部」之间换位置,
-// 换位置 = 旧实例卸载、新实例挂载;挂载时若各自重新抽,接口「随机规则」里的「text 阶段不换」「不满 1.5 秒不换」就在真实流程里失效。
+// 换位置 = 旧实例卸载、新实例挂载;挂载时若各自重新抽,接口「随机规则」里的「text 阶段不换」「不满 4 秒不换」就在真实流程里失效。
 // 夹具里 C3 / C4 只有思考 / 工具,状态行始终在组头,测不到这一点,所以补这一条(判据全部来自接口文件「随机规则」)。
-test('C6 随机模式：状态行换位置重新挂载（连接中占位行 → 工作组头行 → 正文时回到底部）时动画连续：连接中→思考不满 1.5 秒不换，进入工具（满 1.5 秒）换一次，正文阶段不换', async ({ page }) => {
+test('C6 随机模式：状态行换位置重新挂载（连接中占位行 → 工作组头行 → 正文时回到底部）时动画连续：连接中→思考不满 4 秒不换，进入工具（满 4 秒）换一次，正文阶段不换', async ({ page }) => {
   test.setTimeout(120_000);
   await prepareLive(page, {
     key: 'c6',
@@ -378,10 +378,10 @@ test('C6 随机模式：状态行换位置重新挂载（连接中占位行 → 
 
   await expectPhase(page, 'connecting');
   const hostConn = await hostedInGroup();
-  await page.waitForTimeout(900); // 连接中不满 1.5 秒
+  await page.waitForTimeout(900); // 连接中不满 4 秒
   const t1 = Date.now(); touchCtl('g0');
   await expectPhase(page, 'thinking');
-  await page.waitForTimeout(3000); // 思考持续 3 秒，越过 1.5 秒线
+  await page.waitForTimeout(4500); // 思考持续 4.5 秒，使进入工具那一刻距第一次抽样式已满 4 秒
   const hostThink = await hostedInGroup();
   const t2 = Date.now(); touchCtl('g1');
   await expectPhase(page, 'tool');
@@ -406,14 +406,14 @@ test('C6 随机模式：状态行换位置重新挂载（连接中占位行 → 
   const th = within(samples, t1 + SETTLE, t2);
   const thStyles = uniq(th.map((s) => s.style));
   expect(th.length, '前置：思考阶段稳定窗口应采到足够多的样本（≥ 10）').toBeGreaterThanOrEqual(10);
-  expect(thStyles, `连接中→思考（占位行 → 工作组头行重新挂载，距上次抽取不满 1.5 秒）：读数应不变，仍是 ${connStyles[0]}（实际 ${JSON.stringify(thStyles)}）`).toEqual(connStyles);
+  expect(thStyles, `连接中→思考（占位行 → 工作组头行重新挂载，距上次抽取不满 4 秒）：读数应不变，仍是 ${connStyles[0]}（实际 ${JSON.stringify(thStyles)}）`).toEqual(connStyles);
 
   const tl = within(samples, t2 + SETTLE, t3);
   const tlStyles = uniq(tl.map((s) => s.style));
   expect(tl.length, '前置：工具阶段稳定窗口应采到足够多的样本（≥ 10）').toBeGreaterThanOrEqual(10);
-  expect(tlStyles.length === 1 && tlStyles[0] !== thStyles[0] && ORBIT_IDS.includes(tlStyles[0]), `进入工具（距上次抽取已满 1.5 秒）：读数应换成另一个 id 并在阶段内保持（思考阶段 ${thStyles[0]}，工具阶段 ${JSON.stringify(tlStyles)}）`).toBe(true);
+  expect(tlStyles.length === 1 && tlStyles[0] !== thStyles[0] && ORBIT_IDS.includes(tlStyles[0]), `进入工具（距第一次抽样式已满 4 秒）：读数应换成另一个 id 并在阶段内保持（思考阶段 ${thStyles[0]}，工具阶段 ${JSON.stringify(tlStyles)}）`).toBe(true);
 
-  // 工具结果放行后到正文真正出现之间，状态行会先显示「思考」（模型还没吐正文）：按接口规则，从工具进入思考且距上次抽取已满 1.5 秒时本来就该换一次。
+  // 工具结果放行后到正文真正出现之间，状态行会先显示「思考」（模型还没吐正文）：按接口规则，从工具进入思考且距上次抽取已满 4 秒时本来就该换一次（本用例工具段只有 3 秒，这一步不满 4 秒，不会换）。
   // 所以这里不拿「正文」去比「工具」，只要求「进入 text 阶段的那一刻不换」：正文阶段全程的读数 = 紧挨正文之前那个样本的读数。
   const iText = samples.findIndex((s) => s.wall >= t3 && s.phase === 'text');
   expect(iText, '前置：放行正文后应观察到 data-live-phase=text').toBeGreaterThan(0);
