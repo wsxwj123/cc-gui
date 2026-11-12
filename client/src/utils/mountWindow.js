@@ -34,6 +34,20 @@ export function needsExtend({ scrollTop, padPx }) {
   return top <= pad;
 }
 
+/**
+ * 自动上沿(没有手动钉住 mountFrom 时)最终取哪个值(r170)。
+ * - baseFrom:按已加载条数算出的上沿(≤400 → 0;>400 → 条数 − K)。
+ * - prevFrom:同一会话上一次提交时的上沿;没有(首帧 / 刚切会话)传 null。
+ * - reading:用户正在看历史(没在底部跟随)。
+ * 规则:看历史期间上沿不前移 → 取 baseFrom 与 prevFrom 中较小的;其余情况按条数算。
+ * 理由:上沿前移会卸掉视口上方的行,用户停在窗口最上面几行时卸掉的正是眼前内容。
+ */
+export function resolveAutoFrom({ baseFrom, prevFrom, reading } = {}) {
+  const base = Number.isFinite(baseFrom) ? Math.max(0, Math.floor(baseFrom)) : 0;
+  if (!reading || !Number.isFinite(prevFrom)) return base;
+  return Math.min(base, Math.max(0, Math.floor(prevFrom)));
+}
+
 /** 取要渲染的那一段(不改入参;越界的 from/to 按 0..length 钳住)。 */
 export function sliceRows(rows, { from, to } = {}) {
   const list = Array.isArray(rows) ? rows : [];
