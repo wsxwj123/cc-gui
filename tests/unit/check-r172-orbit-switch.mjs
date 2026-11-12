@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// r172:随机模式换样式的过渡(orbitTicker 的 retarget / register enter)与按回合抽取的 switchedFrom / markShown。
+// r172:随机模式换样式的过渡(orbitTicker 的 retarget,以及状态行换位置时新旧指示器按 handoffKey 接力)与换样式的最短间隔。
 //
 // 锁的事:
 //   S1 原位换样式:data-switch 先 in(旧样式、旧点数、圆点按比例收向中心),1000ms 处换成新样式与点数并变 out,
@@ -8,10 +8,14 @@
 //   S3 过渡中再次换目标:还在聚拢 → 只换目标,时长不延长;已经在展开 → 从当前位置重新聚拢,再展开成最新的;不抛错、最终无标记。
 //   S4 减弱动画:retarget 直接换成新样式的静止帧,不出现 data-switch;过渡途中切到减弱动画 → 下一帧结束过渡。
 //   S5 页面隐藏后回来:一帧推进到底,不卡在过渡中间。
-//   S6 register enter:从中心展开(out),1000ms 后消失;减弱动画时不展开;不带 enter 时无标记。
-//   S7 <i> 个数:不给 kids 时 ticker 按点数补齐;StrictMode 式「登记 → 注销 → 再登记」沿用已有的点、不重复补。
-//   S8 loadingPrefs:REROLL_MIN_GAP_MS = 4000;store.roll 返回 switchedFrom(回合里显示过别的 id、这次给的不同),
-//      重复调用答案不变;markShown 之后同 id 不再算换;新回合 / 未显示过为 null。
+//   S1b 点数变少(4 点 → 3 点):多出来的 <i> 在到中心那一刻摘掉。
+//   S6 换位置的同时换样式(同一个 handoffKey 的旧指示器注销、新指示器登记):新指示器第一帧 in、画旧样式(旧点数、不在中心),
+//      1000ms 后 out 新点数,再 1000ms 后属性消失。
+//   S6b 换位置时上一个过渡没做完:新指示器按同一进度接着做完,不跳成新样式的正常形态。
+//   S6c 换位置但样式没换:不出现过渡,相位接着转;handoffKey 不同或没给时不接力。
+//   S7 StrictMode 式「登记 → 注销 → 再登记」:过渡进度不重置,沿用已有的 <i>、不重复补。
+//   S7b 减弱动画下换位置的同时换样式:直接显示新样式的静止帧,不出现 data-switch。
+//   S8 loadingPrefs:REROLL_MIN_GAP_MS = 4000。
 //
 // 跑法:node tests/unit/check-r172-orbit-switch.mjs
 import assert from 'node:assert/strict';
