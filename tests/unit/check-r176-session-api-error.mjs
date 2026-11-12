@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'cgui-r176-'));
-process.env.HOME = home;
+// Windows 上家目录取 USERPROFILE:两个一起设,否则会读写真实的 ~/.claude*(check-r49-test-home-isolation 看守)。
+process.env.HOME = home; process.env.USERPROFILE = home;
 const projectHash = '-tmp-r176-ws';
 const projDir = join(home, '.claude', 'projects', projectHash);
 mkdirSync(projDir, { recursive: true });
