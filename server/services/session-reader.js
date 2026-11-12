@@ -1984,6 +1984,18 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
       // /compact 摘要、错误占位写的不是真实模型,污染 turn.model 会被前端的
       // 历史模型回退当成可发送的模型(U1 家族 bug 的源头之一)。
       if (record.message?.model && !/^</.test(record.message.model)) currentTurn.model = record.message.model;
+      // r176:命令行把上游接口的报错写成一条合成助手消息(isApiErrorMessage / error /
+      // apiErrorStatus)。把这个标记带到回合上,界面凭它在落盘的报错下面接着显示动作
+      // (检查 Provider / 内容审核回退 / 体检与清理)。同一回合之后又来了正常的助手内容
+      // (报错后重试成功),标记作废。只多一个可选字段,上面的模型 / 用量口径不变。
+      if (record.isApiErrorMessage === true) {
+        currentTurn.apiError = {
+          status: Number.isFinite(record.apiErrorStatus) ? record.apiErrorStatus : null,
+          kind: typeof record.error === 'string' ? record.error : null,
+        };
+      } else if (currentTurn.apiError && content.length > 0) {
+        delete currentTurn.apiError;
+      }
       // W8:usage 按 message.id 去重收集(同一调用的流式分片只记一次),flush 时聚合。
       // 排除 sidechain / 子代理记录(parentToolUseId)——它们的 usage 不属于主回合。
       if (record.message?.usage && !record.isSidechain && !record.parentToolUseId) {
