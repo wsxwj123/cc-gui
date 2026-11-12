@@ -7,6 +7,7 @@ import { test, expect } from '@playwright/test';
 import { seedPair, writeScenario, resetStatus, readStatus, requestAbort } from './helpers/fixtures.mjs';
 import {
   openApp, reloadApp, openWorkspaceGroup, clickSession, openJia, sendText, stopBtn, composerBox, Watch, expectGrowth, uniqueTag,
+  trackChatRequests, enqueueText, readQueueTexts, queueOrder,
 } from './helpers/runtime.mjs';
 
 /** 每个用例现建一对全新的甲 / 乙(各自独有标记、独立工作区)+ 写场景 + 清状态文件。 */
@@ -299,4 +300,55 @@ test('S10 回合结束后的一致性,不切走(正文 400 片段版):片段数 
   const w2 = new Watch(page, ctx);
   const after = await w2.hold(3000);
   expect(after.n, `S10:刷新并点回会话甲后片段数应仍等于 400(不重复、不缺);实际 ${after.n}`).toBe(400);
+});
+
+// ───────────────────────── S11 ─────────────────────────
+test('S11 排队中的消息不被打乱:发 A 后入队 B、C,开口前切到乙再切回,直到 T0+10 秒排队项恒为 B、C,只有 A 一次发起对话,T0+6 秒内片段数 ≥ 20', async ({ page }) => {
+  const ctx = prepare();
+  const markers = { B: `QB${ctx.tag}`, C: `QC${ctx.tag}` };
+  const chat = trackChatRequests(page); // 从用例开始就数「发起对话」(POST /api/chat)
+  await openJia(page, ctx);
+  const w = new Watch(page, ctx);
+  const tSend = await sendMessage(page, `${ctx.jia.marker} 请连续输出 A`);
+  await waitUntilTime(page, tSend + 300);
+  await enqueueText(page, `${markers.B} 排队消息B`);
+  await enqueueText(page, `${markers.C} 排队消息C`);
+  const items = page.locator('[data-testid="queue-item"]');
+  await expect(items, 'S11:前置——入队两条后页面上应有两条排队项').toHaveCount(2, { timeout: 10_000 });
+  const before = queueOrder(await readQueueTexts(page), markers);
+  expect(before, `S11:前置——入队后排队项自上而下应是 B、C;实际 ${before}`).toBe('BC');
+  await clickSession(page, 'yi', ctx);
+  const tAway = Date.now();
+  await waitUntilTime(page, tAway + 2000);
+  const st = readStatus(ctx.workspaceName);
+  expect(st && st.openedAt, `S11:前置——点回会话甲时命令行应还没开口(状态文件 openedAt 应为空);实际 openedAt=${st && st.openedAt}`).toBeNull();
+  await clickSession(page, 'jia', ctx);
+  const tBack = Date.now();
+
+  // 点回之后一路观察到 T0+10 秒:每次读 排队项顺序 / 发起对话累计次数 / 页面片段数(间隔 ≤ 250 毫秒)。
+  const obs = [];
+  const giveUp = Date.now() + 40_000;
+  let t0 = null;
+  for (;;) {
+    const s = await w.snap();
+    const order = queueOrder(await readQueueTexts(page), markers);
+    obs.push({ t: Date.now(), order, chats: chat.count(), n: s.n });
+    if (s.openedAt != null) t0 = s.openedAt;
+    if ((t0 != null && Date.now() >= t0 + 10_000) || Date.now() > giveUp) break;
+    await page.waitForTimeout(100);
+  }
+  // 只打印不断言的诊断:点回后每 2 秒一行读数「排队项顺序/发起对话累计次数/页面片段数」。
+  const parts = [];
+  for (let k = 0; tBack + 2000 * k <= obs[obs.length - 1].t; k += 1) {
+    const o = obs.find((x) => x.t >= tBack + 2000 * k);
+    if (o) parts.push(`+${2 * k}s=${o.order || '无'}/${o.chats}/${o.n}`);
+  }
+  console.log(`[S11 诊断] 点回后每2秒 排队项顺序/发起对话累计次数/页面片段数(T0=${t0 == null ? '未开口' : `点回后${((t0 - tBack) / 1000).toFixed(1)}秒`}):${parts.join(' ')}`);
+
+  expect(t0, 'S11:夹具应开口').not.toBeNull();
+  const bad = obs.filter((o) => o.order !== 'BC');
+  expect(bad.length, `S11:点回会话甲后直到 T0+10 秒,每次读页面排队项都应恰好两条、顺序 B、C;${obs.length} 次读数里有 ${bad.length} 次不是,首个异常读数在点回后 ${bad[0] ? ((bad[0].t - tBack) / 1000).toFixed(1) : '-'} 秒,为「${bad[0] ? bad[0].order || '无排队项' : ''}」`).toBe(0);
+  expect(chat.count(), `S11:用例全程页面向后端发出的「发起对话」(POST /api/chat)请求应只有 A 那一次;实际 ${chat.count()} 次`).toBe(1);
+  const maxN = Math.max(...obs.filter((o) => o.t <= t0 + 6000).map((o) => o.n));
+  expect(maxN, `S11:T0 之后 6 秒内页面上的正文片段数应 ≥ 20;期间最大读数 ${maxN}`).toBeGreaterThanOrEqual(20);
 });

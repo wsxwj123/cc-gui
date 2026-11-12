@@ -5,7 +5,7 @@
 ## 怎么跑
 
 ```sh
-bash tests/acceptance/r177-stream-reattach/run-isolated.sh                     # 全量:WebKit 全部 S1~S10 + Chromium 的 S1/S2/S3
+bash tests/acceptance/r177-stream-reattach/run-isolated.sh                     # 全量:WebKit 全部 S1~S11 + Chromium 的 S1/S2/S3
 bash tests/acceptance/r177-stream-reattach/run-isolated.sh --project=webkit    # 只跑 WebKit
 bash tests/acceptance/r177-stream-reattach/run-isolated.sh --grep 'S6 '        # 额外参数原样转给 playwright
 R177_HOLD=1 bash tests/acceptance/r177-stream-reattach/run-isolated.sh         # 只起隔离实例不跑用例(调试用)
@@ -58,7 +58,7 @@ R177_HOLD=1 bash tests/acceptance/r177-stream-reattach/run-isolated.sh         #
 
 ## 用例
 
-S1~S10 与接口文件行为清单一一对应,用例名以编号开头。S5、S10 用 400 片段版(用例名里写明,期望值 400)。S1、S3 另有只打印不参与断言的诊断输出(`[S1 诊断]`、`[S3 诊断]`):S1 是 T0 起每 2 秒的「页面片段数/夹具已输出数」,读到 T0 后 24 秒;S3 是 N、切回后 2 秒时的页面片段数和夹具已输出数。
+S1~S11 与接口文件行为清单一一对应,用例名以编号开头。S11(只在 WebKit 跑)验排队中的消息不被打乱:会话甲发 A,发起请求发出 0.3 秒后依次点「入队」入 B、C(各带独有标记),开口前切到乙、2 秒后切回;从点回起到 T0+10 秒,每次读页面排队项都恰好两条且顺序 B、C,全程 `POST /api/chat` 只有 A 那一次,T0 后 6 秒内片段数 ≥ 20。另有只打印不断言的 `[S11 诊断]`:点回后每 2 秒的「排队项顺序/发起对话累计次数/页面片段数」。S5、S10 用 400 片段版(用例名里写明,期望值 400)。S1、S3 另有只打印不参与断言的诊断输出(`[S1 诊断]`、`[S3 诊断]`):S1 是 T0 起每 2 秒的「页面片段数/夹具已输出数」,读到 T0 后 24 秒;S3 是 N、切回后 2 秒时的页面片段数和夹具已输出数。
 
 ## 没覆盖
 

@@ -108,6 +108,39 @@ export async function sendText(page, text) {
   await box.press('Enter');
 }
 
+// ───────────────────────── 排队与请求计数(S11) ─────────────────────────
+/** 从现在起数页面向后端发出的「发起对话」请求(方法 POST、路径恰好 /api/chat)。返回 { count() }。 */
+export function trackChatRequests(page) {
+  let n = 0;
+  page.on('request', (r) => {
+    try { if (r.method() === 'POST' && new URL(r.url()).pathname === '/api/chat') n += 1; } catch { /* 非法 URL 忽略 */ }
+  });
+  return { count: () => n };
+}
+
+/** 在输入框填入文字并点「入队」按钮(回复进行中才有这个按钮)。 */
+export async function enqueueText(page, text) {
+  const box = composerBox(page).last();
+  await expect(box).toBeVisible({ timeout: 15_000 });
+  await box.fill(text);
+  const btn = page.locator('[data-cgui="queue-btn"]');
+  await expect(btn.first(), `填入「${text}」后应出现入队按钮`).toBeVisible({ timeout: 10_000 });
+  await btn.first().click();
+}
+
+/** 读页面上所有排队项([data-testid="queue-item"])自上而下的文字。 */
+export async function readQueueTexts(page) {
+  return await page.locator('[data-testid="queue-item"]').allInnerTexts();
+}
+
+/** 把排队项文字按独有标记换成 'B' / 'C'(都不含则 '?'),拼成一个串,如 "BC"。 */
+export function queueOrder(texts, markers) {
+  return texts.map((t) => {
+    const hit = Object.keys(markers).find((k) => t.includes(markers[k]));
+    return hit || '?';
+  }).join('');
+}
+
 // ───────────────────────── 页面观测 ─────────────────────────
 /** 读一次页面:正文片段数(消息区文字里 `片段\d{4}` 的出现个数)、停止键在不在、以及几组字样是否出现。 */
 async function readPage(page) {
