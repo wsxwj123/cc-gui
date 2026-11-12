@@ -183,7 +183,7 @@ import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/X
 import ApiErrorActions from './components/ApiErrorActions.jsx';
 import { deriveApiErrorUi, deriveHistoryApiErrorUi, hintsAsQuoteSuffix, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
-import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, takeStreamSnapshot } from './utils/reattach.js';
+import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
 import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
@@ -4195,6 +4195,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 每次真正进入发送/reattach 起流前同步递增。旧 finally 的异步轮询只认自己的 token，
   // 不再等 /api/chat 返回 pid 才判断新回合是否已经开始。
   const streamTurnTokenRef = useRef(0);
+  // r177:本窗格切会话的次数(切会话清理处递增,草稿升级成真会话不算)。发送开始时记下,
+  // POST 返回后对比 —— 变过就说明发起之后离开过这个会话,最初那次发送让位(见 shouldYieldOrphanSend)。
+  const paneSwitchCountRef = useRef(0);
   // attach 失败计数,{ pid, count }。**必须按 pid 记**:pid 变了就是另一个进程,旧账不算。
   // 也不能靠 backgroundPid 轮询来重试 —— 它每轮 setBackgroundPid(同一个 pid 字符串)被
   // Object.is 短路,auto-reattach 的 effect 根本不会重跑,计数永远到不了 3。重试由失败
@@ -5493,6 +5496,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 同步抢占；否则旧回合 finally 的落盘轮询会在本回合尚未拿到 pid 时误判为“没有新回合”。
     const streamTurnToken = ++streamTurnTokenRef.current;
     const isCurrentTurn = () => isCurrentStreamTurn(streamTurnTokenRef.current, streamTurnToken);
+    const paneSwitchCountAtSend = paneSwitchCountRef.current; // r177:POST 返回后的让位判据用
 
     const cwd = selectedSession?.projectPath || selectedProject?.path;
     // Note: previously this function had a blocking `confirm()` for git preflight.
@@ -5525,7 +5529,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 那边的 reattach 会把它改写成别的会话的起点。本流迟到的 finally 若再读它去写直播快照,
     // 别的会话的起点就成了本会话的历史截断口径(切回时已落盘的回复被整段藏掉、计时从别人的
     // 起点算 = 用户实报的「Connecting… 14m33s」)。快照一律用这个值。
-    const turnStreamStart = streamStartRef.current;
+    // r177:let —— 没有快照的重接收到 replay_complete 升级成种回档时,改成服务端给的回合开始时刻。
+    let turnStreamStart = streamStartRef.current;
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
@@ -6012,7 +6017,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 自行发现,切回时经 auto-reattach 续播。不写 backgroundPidRef:那会与 poll 的写点打架
       // (它每 1.5s 自己会发现),且该 ref 声明在 handleSend 之后(TDZ)。
       // 走既有 finally:它已由 isCurrentTurn() 守好,不会污染新回合。
-      if (queueKeyFor(getLocalSession()) !== sessionQueueKey) return;
+      // r177:再加两条同路退出 —— 发起之后窗格离开过这个会话(哪怕已切回),或自己已不是本窗格
+      // 当前这一代流。此时页面已经/即将由轮询另接一条,这里再接就是两条连接互相顶替、状态归属错乱。
+      if (shouldYieldOrphanSend({
+        paneOnOwner: queueKeyFor(getLocalSession()) === sessionQueueKey,
+        switchCountAtSend: paneSwitchCountAtSend,
+        switchCountNow: paneSwitchCountRef.current,
+        isCurrentTurn: isCurrentTurn(),
+      })) return;
       pid = respJson.pid;
       activeProcRef.current = pid;
       // R13:本 pid 的期望身份 = 发起这条流的会话(sid 优先;draft 期是原始 draftId,
@@ -6208,6 +6220,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               setReattachStream(true);
               setStreamHistCutoff(null);
               histFreshRef.current = { at: Date.now(), sig: null }; // 状态行的"上次更新"基准
+            }
+            continue;
+          }
+
+          // r177:服务端明说「本次重放从回合起点起完整」(本回合此前没有连接读过、缓冲没溢出过),
+          // 放在回放最前面。没有快照的重接据此升级成种回档(与上面 early_overflow 方向相反):本流
+          // 自己画直播气泡、历史按回合开始时刻截断(与正常发送同一口径)、计时起点改成回合开始时刻、
+          // 「已种回」置真(收尾时据它写直播快照)。正常发送的首次连接、有快照的重接一律忽略。
+          if (event.type === 'replay_complete') {
+            if (isCurrentTurn() && shouldUpgradeReattachOnReplayComplete({ isReattach: !!reattachPid, seeded, turnStartedAt: event.turnStartedAt })) {
+              seeded = true;
+              turnStreamStart = event.turnStartedAt;
+              streamStartRef.current = event.turnStartedAt;
+              setReattachStream(false);
+              setStreamHistCutoff({ sinceTs: event.turnStartedAt, keepUser: true });
             }
             continue;
           }
@@ -8457,6 +8484,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // Just forget the ref so we don't accidentally stop it later.
         const leavingOwnerKey = streamOwnerKeyRef.current; // r118:下面的用户气泡暂存要用(detach 不碰这个 ref)
         detachStream();
+        paneSwitchCountRef.current += 1; // r177:离开过当前会话(草稿升级不算),在飞的最初那次发送据此让位
         // #4:记录本会话 detach 时刻(按 sessionId 键,不跨会话共享)。切回后 reattach 用它做
         // sinceTs 截断,只藏"detach 之后落盘、且会被 earlyLines 重放"的内容;detach 之前已产出
         // 的助手回复(在 jsonl、不在 earlyLines 回放里)照常从历史显示,不再凭空消失。

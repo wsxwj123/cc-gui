@@ -245,7 +245,8 @@ check('App 位置:读应答之后、"发送失败即抛错"之后、"孤儿流�
   const respAt = at('const respJson = await res.json();');
   const throwAt = at('if (!res.ok || !respJson.pid) throw new Error(', respAt);
   const ifAt = at(IF_HEAD, respAt);
-  const orphanAt = at('if (queueKeyFor(getLocalSession()) !== sessionQueueKey) return;', respAt);
+  // r177:孤儿流复判改由 shouldYieldOrphanSend 判(原"窗格已切走"条件仍是其中一条,见 check-r177-reattach-upgrade)
+  const orphanAt = at('if (shouldYieldOrphanSend({', respAt);
   assert.ok(throwAt < ifAt && ifAt < orphanAt, `次序不对:抛错 ${throwAt} / 提示 ${ifAt} / 孤儿复判 ${orphanAt}`);
   assert.ok(orphanAt - respAt < 8000, '三处应在同一段应答处理里');
 });
