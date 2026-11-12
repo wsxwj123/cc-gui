@@ -32,9 +32,14 @@ test.afterEach(async () => {
   currentCtx = null;
 });
 
-/** 在当前会话发一条消息,返回发出的时刻。 */
+/** 在当前会话发一条消息,等到页面真的向后端发出「发起对话」的请求,返回请求发出的时刻。
+ *  原来返回的是点发送的时刻:机器一忙,0.6 秒后请求可能还没发出去,这时切走的就不是「等连接」的那一段
+ *  (消息会留到切回才发),S2 / S3 因此时红时绿。现在各用例里的「发出后 0.6 秒」都从请求发出算起。 */
 async function sendMessage(page, text) {
+  const isChatStart = (r) => r.method() === 'POST' && new URL(r.url()).pathname === '/api/chat';
+  const posted = page.waitForRequest(isChatStart, { timeout: 15_000 });
   await sendText(page, text);
+  await posted;
   return Date.now();
 }
 const waitUntilTime = async (page, tMs) => { const d = tMs - Date.now(); if (d > 0) await page.waitForTimeout(d); };
