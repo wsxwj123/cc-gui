@@ -116,6 +116,8 @@ async function runRound(userText) {
   await sleep(TURN_DELAY_MS);
 
   if (mode && mode.form === 'pre') {
+    // 严格按接口文件:只有 type / subtype / is_error / errors / session_id(外加 uuid)。
+    // 2026-11-12 试过再加 result / duration_ms / num_turns / usage:页面照样不画「❌」块(见报告「问题」第 1 条),所以不加。
     out({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [mode.text], session_id: sid, uuid: crypto.randomUUID() });
     return;
   }
