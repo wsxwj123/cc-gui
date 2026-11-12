@@ -58,7 +58,18 @@ t('拼到 ❌ 块的后缀与改动前逐字相同', () => {
 // ── 历史回合 ──
 const user = (uuid, text) => ({ type: 'user', uuid, text });
 const turn = (uuid, text, extra = {}) => ({ type: 'turn', uuid, text: [text], model: 'deepseek-flash', ...extra });
-const errTurn = (uuid, text, apiError) => turn(uuid, text, { model: '<synthetic>', ...(apiError ? { apiError } : {}) });
+// 后端带出的 apiError.text = 那条合成消息自己的原文(默认与回合正文相同)。
+const errTurn = (uuid, text, apiError) => turn(uuid, text, {
+  model: '<synthetic>', ...(apiError ? { apiError: { text, ...apiError } } : {}),
+});
+// 回合里先有正常正文、随后是接口报错(模型取正文那条的真模型)。
+const mixedTurn = (uuid, bodyText, errText, apiError) => ({
+  type: 'turn', uuid, model: 'deepseek-flash', text: [bodyText, errText],
+  blocks: [{ type: 'text', content: bodyText }, { type: 'text', content: errText }],
+  apiError: { text: errText, ...apiError },
+});
+const E500 = 'API Error: 500 Internal Server Error';
+const M500 = { status: 500, kind: 'server_error' };
 
 t('普通助手回合正文含 401 / api key 不派生', () => {
   assert.equal(isApiErrorTurn(turn('a', 'HTTP 401 means bad api key')), false);
@@ -92,5 +103,34 @@ t('只有 blocks 没有 text 的回合也能取到正文', () => {
   assert.equal(deriveHistoryApiErrorUi([m]).action, 'content-risk');
 });
 t('非数组输入 → null', () => assert.equal(deriveHistoryApiErrorUi(null), null));
+
+// ── 判据只看报错原文,不看同回合前面的正常正文 ──
+t('正文含 API key、随后 500 → 不派生', () => {
+  assert.equal(deriveHistoryApiErrorUi([user('u', '帮我看下配置'),
+    mixedTurn('t1', '我先读一下你的配置文件,里面的 API key 看起来没问题。', E500, M500)]), null);
+});
+t('正文含 must be non-empty、随后 500 → 不派生', () => {
+  assert.equal(deriveHistoryApiErrorUi([user('u', 'q'),
+    mixedTurn('t1', '日志里有一句 text content blocks must be non-empty。', E500, M500)]), null);
+});
+t('正文含 Content Exists Risk、随后 500 → 不派生', () => {
+  assert.equal(deriveHistoryApiErrorUi([user('u', 'q'),
+    mixedTurn('t1', '上次报的是 Content Exists Risk。', E500, M500)]), null);
+});
+t('正文在前、随后 401 → 仍派生 provider', () => {
+  const ui = deriveHistoryApiErrorUi([user('u', 'q'),
+    mixedTurn('t1', '我先读一下配置。', AUTH, { status: 401, kind: 'authentication_failed' })]);
+  assert.equal(ui.action, 'provider');
+});
+t('标记里没带原文时不回落到整回合文字(只剩结构化标记)', () => {
+  const m = { type: 'turn', uuid: 't1', model: 'x', text: ['正文提到 api key', E500], apiError: M500 };
+  assert.equal(deriveHistoryApiErrorUi([user('u', 'q'), m]), null);
+});
+t('无标记的 <synthetic> 兜底只取最后一段文字', () => {
+  const m = { type: 'turn', uuid: 't1', model: '<synthetic>', text: ['正文提到 api key', E500] };
+  assert.equal(deriveHistoryApiErrorUi([user('u', 'q'), m]), null);
+  const m2 = { type: 'turn', uuid: 't2', model: '<synthetic>', text: ['正文', RISK] };
+  assert.equal(deriveHistoryApiErrorUi([user('u', 'q'), m2]).action, 'content-risk');
+});
 
 console.log(`check-r176-api-error-ui: ${n} passed`);

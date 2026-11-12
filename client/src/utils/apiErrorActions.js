@@ -55,10 +55,22 @@ export function isApiErrorTurn(turn) {
   return turn.model === '<synthetic>';
 }
 
-function turnText(turn) {
-  if (Array.isArray(turn.text) && turn.text.length) return turn.text.join('\n');
+// 只取报错原文喂判据,不取整个回合的文字:同一回合前面可能有正常正文,里面的「API key」
+// 「must be non-empty」「Content Exists Risk」字样会让判据放宽(上游 500 误挂「检查 Provider
+// 设置」,误挂会改写会话文件的回退 / 清理入口)。
+//   - 有后端标记:用标记里带出的那条合成消息自己的原文(apiError.text);
+//   - 老会话文件无标记、按 <synthetic> 兜底:取回合最后一段文字。这条兜底到得了 ——
+//     session-reader 在合成消息是该回合第一条助手行时用它的 model 建回合(建回合那处不跳过
+//     「<」开头的模型名,只有后续的「last one wins」更新才跳过),所以 model 会是 <synthetic>;
+//     报错是回合最后写下的那一条,最后一段就是它。
+function errorTextOf(turn) {
+  if (turn.apiError && typeof turn.apiError === 'object') {
+    return typeof turn.apiError.text === 'string' ? turn.apiError.text : '';
+  }
+  if (Array.isArray(turn.text) && turn.text.length) return String(turn.text[turn.text.length - 1] || '');
   if (Array.isArray(turn.blocks)) {
-    return turn.blocks.filter((b) => b && b.type === 'text').map((b) => b.content || '').join('\n');
+    const texts = turn.blocks.filter((b) => b && b.type === 'text');
+    return texts.length ? String(texts[texts.length - 1].content || '') : '';
   }
   return '';
 }
@@ -74,7 +86,7 @@ export function deriveHistoryApiErrorUi(messages) {
     if (m.type === 'user') return null;
     if (m.type !== 'turn') continue;
     if (!isApiErrorTurn(m)) return null;
-    const ui = deriveApiErrorUi(turnText(m), m.apiError || null);
+    const ui = deriveApiErrorUi(errorTextOf(m), m.apiError || null);
     if (!ui.action && ui.hints.length === 0) return null;
     return { ...ui, uuid: m.uuid || null };
   }

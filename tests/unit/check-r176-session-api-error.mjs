@@ -43,7 +43,7 @@ try {
     const res = await getSessionMessages(sid, projectHash);
     const turns = turnsOf(res);
     assert.equal(turns.length, 1, '一个回合');
-    assert.deepEqual(turns[0].apiError, { status: 401, kind: 'authentication_failed' }, '回合带出接口报错标记');
+    assert.deepEqual(turns[0].apiError, { status: 401, kind: 'authentication_failed', text: errText }, '回合带出接口报错标记与原文');
     assert.deepEqual(turns[0].text, [errText], '报错原文原样在回合正文里');
     passed++;
   }
@@ -73,7 +73,41 @@ try {
       }),
     ]);
     const turns = turnsOf(await getSessionMessages(sid, projectHash));
-    assert.deepEqual(turns[0].apiError, { status: 400, kind: 'unknown' });
+    assert.deepEqual(turns[0].apiError, { status: 400, kind: 'unknown', text: 'API Error: 400 Content Exists Risk' });
+    passed++;
+  }
+
+  // 5. 同一回合先有正常正文、随后是接口报错 → apiError.text 只是报错那一条的原文
+  {
+    const sid = '55555555-5555-4555-8555-555555555555';
+    const body = '我先读一下你的配置文件,里面的 API key 看起来没问题。';
+    const err = 'API Error: 500 Internal Server Error';
+    write(sid, [
+      userLine(sid, 'u1', null, '帮我看下配置', '2026-11-12T00:00:00.000Z'),
+      assistantLine(sid, 'a1', 'u1', body, '2026-11-12T00:00:01.000Z'),
+      assistantLine(sid, 'a2', 'a1', err, '2026-11-12T00:00:02.000Z', '<synthetic>', {
+        isApiErrorMessage: true, error: 'server_error', apiErrorStatus: 500,
+      }),
+    ]);
+    const turns = turnsOf(await getSessionMessages(sid, projectHash));
+    assert.equal(turns.length, 1);
+    assert.deepEqual(turns[0].text, [body, err], '回合正文两段都在');
+    assert.deepEqual(turns[0].apiError, { status: 500, kind: 'server_error', text: err }, '带出的只是报错那一条的原文');
+    assert.equal(turns[0].model, 'deepseek-flash', '<synthetic> 不覆盖已有的真模型');
+    passed++;
+  }
+
+  // 6. 老会话文件(无 isApiErrorMessage)、合成消息是回合第一条助手行 → 回合 model 就是 <synthetic>
+  //    (前端无标记兜底能走到的依据:建回合那处不跳过「<」开头的模型名)
+  {
+    const sid = '66666666-6666-4666-8666-666666666666';
+    write(sid, [
+      userLine(sid, 'u1', null, '你好', '2026-11-12T00:00:00.000Z'),
+      assistantLine(sid, 'a1', 'u1', 'API Error: 400 Content Exists Risk', '2026-11-12T00:00:01.000Z', '<synthetic>'),
+    ]);
+    const turns = turnsOf(await getSessionMessages(sid, projectHash));
+    assert.equal(turns[0].model, '<synthetic>');
+    assert.equal('apiError' in turns[0], false);
     passed++;
   }
 
@@ -92,7 +126,7 @@ try {
     assert.equal('apiError' in turns[0], false, '后来成功的回合不再带报错标记');
     passed++;
   }
-  console.log(`check-r176-session-api-error: ${passed}/4 passed`);
+  console.log(`check-r176-session-api-error: ${passed}/6 passed`);
 } finally {
   rmSync(home, { recursive: true, force: true });
 }

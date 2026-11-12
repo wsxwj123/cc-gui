@@ -1989,9 +1989,12 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
       // (检查 Provider / 内容审核回退 / 体检与清理)。同一回合之后又来了正常的助手内容
       // (报错后重试成功),标记作废。只多一个可选字段,上面的模型 / 用量口径不变。
       if (record.isApiErrorMessage === true) {
+        // text = 这条合成消息自己的报错原文。界面只拿它判该挂哪种动作:同一回合前面可能有
+        // 正常正文(含「API key」「must be non-empty」之类字样),整回合文字会让判据放宽。
         currentTurn.apiError = {
           status: Number.isFinite(record.apiErrorStatus) ? record.apiErrorStatus : null,
           kind: typeof record.error === 'string' ? record.error : null,
+          text: textParts.map((c) => c.text || '').filter(Boolean).join('\n'),
         };
       } else if (currentTurn.apiError && content.length > 0) {
         delete currentTurn.apiError;
