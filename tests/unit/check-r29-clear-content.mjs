@@ -70,8 +70,9 @@ import { isResetBindingOrigin, isCliNoContentPlaceholder, isInitBindingOrigin } 
   const strip = app.indexOf('isCliNoContentPlaceholder(accumulatedText)');
   assert.ok(strip > 0, 't5: 占位串归空接线存在');
   // r176:归空与 ✅ 分支之间的「把本回合内容 push 成本地副本」那段多了三行(给副本带上报错动作),
-  // 原来的 2200 字符窗口够不到 ✅ 那一行了;窗口放到 2900,判据不变(两者仍须在同一段收尾代码里、且归空在前)。
-  const around = app.slice(strip - 300, strip + 2900);
+  // 原来的 2200 字符窗口够不到 ✅ 那一行了(实测两者相距 2362 字符);窗口放到 2500(向上取整到百位再加 100),
+  // 判据不变(两者仍须在同一段收尾代码里、且归空在前)。
+  const around = app.slice(strip - 300, strip + 2500);
   assert.match(around, /if \(isClear && isCliNoContentPlaceholder\(accumulatedText\)\) \{\s*accumulatedText = '';\s*\}/, 't5: isClear 门控下归空');
   assert.match(around, /isClear \? '✅ 会话已清空，请发送新的消息。'/, 't5: ✅「会话已清空」分支仍在(归空后才能到达)');
   // 归空必须先于「有内容」判定,否则占位串被当正常回复画气泡
