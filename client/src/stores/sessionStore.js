@@ -15,8 +15,10 @@ import { freeInputHistoryAndRetry } from '../utils/inputHistory.js';
 import {
   HISTORY_LOADED_MAX,
   HISTORY_PAGE_SIZE,
+  HISTORY_PANE_SLOTS,
   historyFetchLimit,
   historyMessageKey,
+  historyTabIndex,
   isHistoryRequestCurrent,
   mergeRefreshedMessages,
   nextHistoryRequestSeq,
@@ -37,13 +39,13 @@ const recoverDraftSidecarsFromSessions = (sessions, projectHash) => (
 // 大响应会一直占着与后端的连接(同一后端最多 6 条),攒满后后续请求全部排队,会话区一直
 // 转圈;取消后后端也会因对方断开而提前停手。
 // 放模块级而不放 store:控制器不可序列化,增删也不该触发订阅者重渲染。
-const historyInFlight = Array.from({ length: 6 }, () => ({ refresh: null, older: null }));
-const historyLaneTab = (tab) => (Number.isInteger(tab) && tab >= 0 && tab <= 5 ? tab : 0);
+// 格数与窗格下标的夹取规则取自 historyPaging.js(与请求代号表同一处定义)。
+const historyInFlight = Array.from({ length: HISTORY_PANE_SLOTS }, () => ({ refresh: null, older: null }));
 
 // sessionId + seq 记下这条请求是谁:fetchMessages 的 skipIfInFlight 据此判断"本窗格本会话
 // 已有一条仍有效的刷新在路上"。
 function beginHistoryRequest(tab, lane, sessionId, seq) {
-  const slot = historyInFlight[historyLaneTab(tab)];
+  const slot = historyInFlight[historyTabIndex(tab)];
   slot[lane]?.controller.abort();
   const controller = new AbortController();
   slot[lane] = { controller, sessionId, seq };
@@ -51,14 +53,14 @@ function beginHistoryRequest(tab, lane, sessionId, seq) {
 }
 
 function endHistoryRequest(tab, lane, controller) {
-  const slot = historyInFlight[historyLaneTab(tab)];
+  const slot = historyInFlight[historyTabIndex(tab)];
   if (slot[lane]?.controller === controller) slot[lane] = null;
 }
 
 // 本窗格登记的那条刷新是否仍有效:没被取消、代号仍是最新、窗格仍停在它的会话上(与
 // fetchMessages 里 stillCurrent 同口径)。有效的那条落地或再被作废时,会自己收 tab 0 的 loading。
 function hasLiveHistoryRefresh(state, tab) {
-  const inFlight = historyInFlight[historyLaneTab(tab)].refresh;
+  const inFlight = historyInFlight[historyTabIndex(tab)].refresh;
   return !!inFlight && !inFlight.controller.signal.aborted
     && isHistoryRequestCurrent(state.historyReqSeqByTab, tab, inFlight.sessionId, 'refresh', inFlight.seq)
     && state.paneSessions[tab]?.sessionId === inFlight.sessionId;
@@ -66,7 +68,7 @@ function hasLiveHistoryRefresh(state, tab) {
 
 // 代号整格作废(resetHistoryRequestSeq)的同时取消该窗格两条线的在飞请求;下标口径与它一致。
 function invalidateHistoryRequests(seqs, tab) {
-  const slot = historyInFlight[historyLaneTab(tab)];
+  const slot = historyInFlight[historyTabIndex(tab)];
   for (const lane of ['refresh', 'older']) {
     slot[lane]?.controller.abort();
     slot[lane] = null;
