@@ -63,6 +63,8 @@ export const SWITCH_IN_MS = 1000;
 export const SWITCH_OUT_MS = 1000;
 // 聚拢到中心时所有圆点统一的不透明度(大小取深度 0 那一档)
 const MID_OPACITY = 0.86;
+// 接力状态最多保留多少个 handoffKey(与 loadingPrefs.js 按回合记忆的 32 个槽同量级;超出淘汰最早留下的)
+const HANDOFF_CAP = 32;
 
 function easeInOut(u) {
   const x = u < 0 ? 0 : (u > 1 ? 1 : u);
@@ -172,12 +174,14 @@ function defaultClock() {
  * 环境可注入(单测用假 raf):
  *   raf(cb) / caf(id):帧调度;hidden():页面是否隐藏;reduced():是否减弱动画;
  *   onVisibility(cb):订阅可见性变化,返回取消订阅函数;clock():墙钟毫秒(换样式过渡用,缺省 performance.now)。
- * register({ el, kids, n, variant, enter }) 返回注销函数(kids 缺省取 el 现有的 <i>,不够的由 ticker 补;enter = 从中心展开出现);
+ * register({ el, kids, n, variant, handoffKey }) 返回注销函数(kids 缺省取 el 现有的 <i>,不够的由 ticker 补;
+ *   handoffKey:同一个 key 的指示器前后接力 —— 注销时留下状态,下一个登记时接着画,换了样式就在新位置上做完整过渡);
  * retarget(el, variant) 原位换样式(带聚拢 / 展开过渡);variant 是 orbitVariants 的 id,缺省按 n 取 orbit3 / orbit4。每个实例各自累积相位,转速每帧从 el.dataset.speed 读,
  * 改转速不重建 DOM、不跳相位。
  */
 export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = () => false, onVisibility = null, clock = defaultClock } = {}) {
   const entries = new Set();
+  const handoffs = new Map(); // r172:handoffKey → 上一个指示器注销时的状态(见 register)
   let rafId = null;
   let lastNow = null;
   let unsubscribeVisibility = null;
@@ -219,7 +223,10 @@ export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = ()
     let rec = null;
     for (const e of entries) if (e.el === el) { rec = e; break; }
     if (!rec) return false;
-    const v = variantFor(variantId, rec.n);
+    return retargetRec(rec, variantFor(variantId, rec.n));
+  }
+
+  function retargetRec(rec, v) {
     if (reduced()) {
       finishSwitch(rec);
       swapVariant(rec, v);
@@ -257,25 +264,39 @@ export function createOrbitTicker({ raf, caf, hidden = () => false, reduced = ()
     const kids = entry.kids
       ? Array.from(entry.kids)
       : Array.from(entry.el.children || []).filter((c) => !c.tagName || c.tagName === 'I');
-    const n = entry.n || kids.length;
-    const variant = variantFor(entry.variant, n);
+    const variant = variantFor(entry.variant, entry.n || kids.length);
+    const n = entry.n || kids.length || variant.n; // 没给点数、也还没有 <i>:按变体的点数补
+    const handoffKey = entry.handoffKey ?? null;
     // 相位从静止帧时刻起算:首帧、减弱动画与正常播放的起点一致
     const rec = { el: entry.el, kids, n, variant, t: stillTimeOf(variant), mag: 0, sw: null, swStart: 0, fromSpread: 1, pending: null, spread: 1 };
-    syncKids(rec);
-    // r172:enter = 这个实例是伴随换样式出现的(状态行换位置的同时换了样式):从中心展开,只做后半段。减弱动画时不做。
-    if (entry.enter && !reduced()) {
-      rec.sw = 'out';
-      rec.swStart = clock();
-      rec.spread = 0;
+    // r172:接力。同一个 handoffKey 的上一个指示器注销时留下了它的状态(样式、相位、过渡进度):
+    // 新指示器先原样接过来(画的是上一个的样式、过渡做到哪就从哪继续),再按 retarget 的规则换到自己要显示的样式 ——
+    // 上一个显示的是别的样式 → 在新位置上做完整过渡(先旧样式聚拢、再展开);上一个过渡没做完 → 接着做完。
+    const snap = handoffKey != null ? handoffs.get(handoffKey) : null;
+    if (snap) {
+      handoffs.delete(handoffKey);
+      Object.assign(rec, snap, { n: snap.variant.n });
     }
+    syncKids(rec);
     setSwitchAttr(rec.el, rec.sw);
     entries.add(rec);
+    if (snap) {
+      if (rec.sw) advanceSwitch(rec, clock());
+      retargetRec(rec, variant);
+    }
     // 先摆一帧,首帧前不出现叠在中心的一坨点
-    place(rec, rec.t);
+    if (reduced()) place(rec, stillTimeOf(rec.variant));
+    else place(rec, rec.t);
     if (!unsubscribeVisibility && onVisibility) unsubscribeVisibility = onVisibility(handleVisibility) || null;
     ensureRunning();
     return () => {
       if (!entries.delete(rec)) return;
+      if (handoffKey != null) {
+        // 留给同一 handoffKey 的下一个指示器(状态行换位置 / StrictMode 再登记);只保留最近 HANDOFF_CAP 个
+        handoffs.delete(handoffKey);
+        handoffs.set(handoffKey, { variant: rec.variant, t: rec.t, sw: rec.sw, swStart: rec.swStart, fromSpread: rec.fromSpread, pending: rec.pending, spread: rec.spread });
+        while (handoffs.size > HANDOFF_CAP) handoffs.delete(handoffs.keys().next().value);
+      }
       if (!entries.size) {
         stopLoop();
         if (unsubscribeVisibility) { unsubscribeVisibility(); unsubscribeVisibility = null; }

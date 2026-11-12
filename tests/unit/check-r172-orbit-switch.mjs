@@ -225,58 +225,124 @@ await report.check('S5', '页面隐藏后回来:一帧推进到底,不卡在过�
   assert.ok(maxR(el) > 3);
 });
 
-await report.check('S6', 'register enter:从中心展开 1000ms;减弱动画不展开;不带 enter 无标记', 'red', () => {
+// ---- r172 修订:状态行换位置时按 handoffKey 接力 ----
+// 旧指示器先转一会再注销,新指示器用同一个 key 登记
+function moveLine(env, tk, key, fromVariant, toVariant, { beforeMs = 320, retargetTo = null, afterRetargetMs = 0 } = {}) {
+  const oldEl = fakeRoot();
+  const off = tk.register({ el: oldEl, n: 0, variant: fromVariant, handoffKey: key });
+  for (let t = 0; t < beforeMs; t += 16) env.step(16);
+  if (retargetTo) { tk.retarget(oldEl, retargetTo); for (let t = 0; t < afterRetargetMs; t += 10) env.step(10); }
+  const oldState = { sw: sw(oldEl), n: oldEl.children.length, r: maxR(oldEl) };
+  off();
+  const el = fakeRoot();
+  const off2 = tk.register({ el, n: 0, variant: toVariant, handoffKey: key });
+  return { el, off: off2, oldState };
+}
+
+await report.check('S6', '换位置的同时换样式:新指示器第一帧 in、画旧样式(旧点数、不在中心),1000ms 后 out 新点数,再 1000ms 消失', 'red', () => {
   const env = fakeEnv();
   const tk = createOrbitTicker(env);
-  const el = fakeRoot();
-  tk.register({ el, n: 4, variant: 'o4-diag', enter: true });
-  assert.equal(sw(el), 'out', '第一帧起带 out');
-  assert.ok(maxR(el) <= 0.05, '圆点都在中心');
-  assert.ok(el.children.every((k) => Number(k.style.opacity) > 0), '已摆位、不透明');
+  const { el } = moveLine(env, tk, 'round-1', 'orbit3', 'orbit4');
+  assert.equal(sw(el), 'in', '第一帧起带 in');
+  assert.equal(el.children.length, 3, '画的是旧样式的点数');
+  assert.ok(maxR(el) >= 3, `第一帧圆点在旧样式的正常位置上(实测最远 ${maxR(el).toFixed(2)}px)`);
+  const tOut = runUntil(env, el, () => sw(el) === 'out', 5000, 10);
+  assert.ok(Math.abs(tOut - SWITCH_IN_MS) <= 10, `in ${tOut}`);
+  assert.equal(el.children.length, 4);
+  assert.ok(maxR(el) <= 0.05);
   const tEnd = runUntil(env, el, () => sw(el) === null, 5000, 10);
   assert.ok(Math.abs(tEnd - SWITCH_OUT_MS) <= 10, `out ${tEnd}`);
-  const env2 = fakeEnv(); env2.isReduced = true;
-  const el2 = fakeRoot();
-  createOrbitTicker(env2).register({ el: el2, n: 3, variant: 'orbit3', enter: true });
-  assert.equal(sw(el2), null);
-  assert.ok(maxR(el2) > 3);
-  const el3 = fakeRoot();
-  createOrbitTicker(fakeEnv()).register({ el: el3, n: 3, variant: 'orbit3' });
-  assert.equal(sw(el3), null);
+  for (let i = 0; i < 10; i++) env.step();
+  assert.ok(maxR(el) > 3);
 });
 
-await report.check('S7', 'StrictMode 式登记 → 注销 → 再登记:沿用已有 <i>,不重复补', 'red', () => {
+await report.check('S6b', '换位置时上一个过渡没做完:新指示器接着做完(同一进度),不跳成新样式正常形态', 'red', () => {
+  // 聚拢做到 400ms 时挪位置
   const env = fakeEnv();
   const tk = createOrbitTicker(env);
-  const el = fakeRoot();
-  const off = tk.register({ el, n: 4, variant: 'orbit4', enter: true });
-  off();
-  assert.equal(tk.size, 0);
-  tk.register({ el, n: 4, variant: 'orbit4', enter: true });
-  assert.equal(el.children.length, 4);
-  assert.equal(tk.size, 1);
-  assert.equal(sw(el), 'out');
+  const a = moveLine(env, tk, 'r-in', 'orbit3', 'orbit4', { retargetTo: 'orbit4', afterRetargetMs: 400 });
+  assert.equal(a.oldState.sw, 'in');
+  assert.equal(sw(a.el), 'in', '接着聚拢');
+  assert.equal(a.el.children.length, 3);
+  assert.ok(Math.abs(maxR(a.el) - a.oldState.r) < 0.6, `半径接得上(旧 ${a.oldState.r.toFixed(2)} 新 ${maxR(a.el).toFixed(2)})`);
+  const tOut = runUntil(env, a.el, () => sw(a.el) === 'out', 5000, 10);
+  assert.ok(Math.abs(400 + tOut - SWITCH_IN_MS) <= 20, `聚拢总长仍约 1000ms(实测 ${400 + tOut})`);
+  assert.equal(a.el.children.length, 4);
+  // 展开做到一半时挪位置(新指示器要显示的就是正在展开成的样式)
+  const env2 = fakeEnv();
+  const tk2 = createOrbitTicker(env2);
+  const b = moveLine(env2, tk2, 'r-out', 'orbit3', 'o4-diag', { retargetTo: 'o4-diag', afterRetargetMs: 1500 });
+  assert.equal(b.oldState.sw, 'out');
+  assert.equal(sw(b.el), 'out', '接着展开');
+  assert.equal(b.el.children.length, 4);
+  assert.ok(Math.abs(maxR(b.el) - b.oldState.r) < 0.6, `半径接得上(旧 ${b.oldState.r.toFixed(2)} 新 ${maxR(b.el).toFixed(2)})`);
+  const tEnd = runUntil(env2, b.el, () => sw(b.el) === null, 5000, 10);
+  assert.ok(Math.abs(1500 + tEnd - SWITCH_IN_MS - SWITCH_OUT_MS) <= 20, `总长仍约 2000ms(实测 ${1500 + tEnd})`);
+  // 展开中挪位置、且新指示器又换了样式:从当前半径重新聚拢
+  const env3 = fakeEnv();
+  const tk3 = createOrbitTicker(env3);
+  const c = moveLine(env3, tk3, 'r-out2', 'orbit3', 'orbit3', { retargetTo: 'o4-diag', afterRetargetMs: 1500 });
+  assert.equal(sw(c.el), 'in');
+  assert.ok(Math.abs(maxR(c.el) - c.oldState.r) < 0.6);
+  assert.ok(runUntil(env3, c.el, () => sw(c.el) === null, 5000, 10) > 0, '最终标记消失');
+  assert.equal(c.el.children.length, 3);
 });
 
-await report.check('S8', 'loadingPrefs:间隔 4000;switchedFrom / markShown', 'red', () => {
+await report.check('S6c', '换位置但样式没换:不出现过渡,相位接着转;不同 key / 不给 key 不接力', 'red', () => {
+  const env = fakeEnv();
+  const tk = createOrbitTicker(env);
+  const oldEl = fakeRoot();
+  const off = tk.register({ el: oldEl, n: 0, variant: 'orbit4', handoffKey: 'k' });
+  for (let i = 0; i < 20; i++) env.step();
+  const before = oldEl.children.map((k) => k.style.transform);
+  off();
+  const el = fakeRoot();
+  tk.register({ el, n: 0, variant: 'orbit4', handoffKey: 'k' });
+  assert.equal(sw(el), null);
+  assert.deepEqual(el.children.map((k) => k.style.transform), before, '接着上一个的相位画,不跳回起点');
+  const other = fakeRoot();
+  tk.register({ el: other, n: 0, variant: 'orbit3', handoffKey: 'other' });
+  assert.equal(sw(other), null);
+  const none = fakeRoot();
+  tk.register({ el: none, n: 0, variant: 'orbit3' });
+  assert.equal(sw(none), null);
+  assert.equal(none.children.length, 3);
+});
+
+await report.check('S7', 'StrictMode 式登记 → 注销 → 再登记:过渡进度不重置、沿用已有 <i>', 'red', () => {
+  const env = fakeEnv();
+  const tk = createOrbitTicker(env);
+  const { el, off } = moveLine(env, tk, 's', 'orbit3', 'orbit4');
+  for (let i = 0; i < 20; i++) env.step(10); // 200ms
+  off();
+  const kidsBefore = el.children.slice();
+  tk.register({ el, n: 4, variant: 'orbit4', handoffKey: 's' });
+  assert.equal(sw(el), 'in');
+  assert.deepEqual(el.children, kidsBefore, '沿用已有 <i>,不重复补');
+  assert.equal(tk.size, 1);
+  const tOut = runUntil(env, el, () => sw(el) === 'out', 5000, 10);
+  assert.ok(Math.abs(200 + tOut - SWITCH_IN_MS) <= 20, `进度不重置(实测 ${200 + tOut})`);
+});
+
+await report.check('S7b', '减弱动画:换位置的同时换样式直接显示新样式静止帧,无 data-switch', 'red', () => {
+  const env = fakeEnv();
+  const tk = createOrbitTicker(env);
+  const oldEl = fakeRoot();
+  const off = tk.register({ el: oldEl, n: 0, variant: 'orbit3', handoffKey: 'rm' });
+  env.step();
+  off();
+  env.isReduced = true;
+  const el = fakeRoot();
+  tk.register({ el, n: 0, variant: 'orbit4', handoffKey: 'rm' });
+  assert.equal(sw(el), null);
+  assert.equal(el.children.length, 4);
+  const snap = el.children.map((k) => k.style.transform);
+  for (let i = 0; i < 5; i++) env.step();
+  assert.deepEqual(el.children.map((k) => k.style.transform), snap);
+});
+
+await report.check('S8', 'loadingPrefs:换样式最短间隔 4000ms', 'red', () => {
   assert.equal(P.REROLL_MIN_GAP_MS, 4000);
-  const store = P.createScopedRollStore();
-  const r0 = store.roll('A', { phase: 'thinking', key: 'thinking', nowMs: 0 }, () => 0);
-  assert.equal(r0.switchedFrom, null, '回合第一次');
-  // 没有 markShown 时即使换了也不算(没显示过)
-  store.markShown('A', r0.id);
-  const r1 = store.roll('A', { phase: 'text', key: 'text', nowMs: 4500 }, () => 0);
-  assert.equal(r1.rolled, false); assert.equal(r1.switchedFrom, null, '换位置但没换样式');
-  const r2 = store.roll('A', { phase: 'thinking', key: 'thinking', nowMs: 5500 }, () => 0);
-  assert.equal(r2.rolled, true); assert.equal(r2.switchedFrom, r0.id, '换位置的同时换了样式');
-  // 同一次挂载重复调用(StrictMode):答案不变
-  const r3 = store.roll('A', { phase: 'thinking', key: 'thinking', nowMs: 5501 }, () => 0);
-  assert.equal(r3.rolled, false); assert.equal(r3.id, r2.id); assert.equal(r3.switchedFrom, r0.id);
-  store.markShown('A', r2.id);
-  assert.equal(store.roll('A', { phase: 'thinking', key: 'thinking', nowMs: 5600 }, () => 0).switchedFrom, null);
-  // 没抽过的回合 markShown 不记、不抛错
-  store.markShown('nope', 'orbit3');
-  assert.equal(store.roll('nope', { phase: 'thinking', key: 'thinking', nowMs: 0 }, () => 0).switchedFrom, null);
 });
 
 process.exit(report.finish());

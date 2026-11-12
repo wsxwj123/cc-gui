@@ -41,20 +41,23 @@ export function CliSpinner({ size = 20, markProps = null }) {
 // r159:variant = orbitVariants 的 16 种 id 之一(缺省按 n 取 orbit3 / orbit4),点数取自变体。
 // r172:换样式不再换 key 重建。<i> 圆点由 orbitTicker 建、增删(React 不渲染子元素),挂载时登记一次;
 // 之后 variant 变化走 orbitTicker.retarget:先聚拢到中心、换样式与点数、再展开(data-switch = in / out)。
-// enter:这个实例是伴随换样式出现的(状态行换位置的同时换了样式),从中心展开;只取挂载时的值。
-// 用 useLayoutEffect:登记 / 换目标与 data-style 变化在同一次提交里落到页面,首帧就摆好位、带好过渡标记。
-export function Orbit({ n = 3, variant = null, size = 20, markProps = null, enter = false }) {
+// handoffKey(只取挂载时的值):同一个 key 的指示器前后接力。状态行换位置时旧实例注销留下状态(样式、相位、过渡进度),
+// 新实例接着画:上一个显示的是别的样式 → 在新位置上做完整过渡(先旧样式聚拢、再展开成新样式);上一个过渡没做完 → 接着做完。
+// 用 useLayoutEffect:旧实例的注销(提交的变更阶段)先于新实例的登记(布局阶段);登记 / 换目标与 data-style 变化
+// 在同一次提交里落到页面,首帧就摆好位、带好过渡标记。
+export function Orbit({ n = 3, variant = null, size = 20, markProps = null, handoffKey = null }) {
   const v = variantOf(variant) || ORBIT_VARIANTS[n === 4 ? 'orbit4' : 'orbit3'];
   const variantId = v.id;
   const speed = useStore((s) => s.loadingSpeed) || DEFAULT_LOADING_SPEED;
   const ref = useRef(null);
-  const mountRef = useRef({ variantId, n: v.n, enter });
+  const mountRef = useRef({ variantId, n: v.n, handoffKey });
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return undefined;
     const m = mountRef.current;
-    // StrictMode 下这里会执行两遍(登记 → 注销 → 再登记):第二次沿用第一次补出来的 <i>,enter 取同一个挂载值
-    return orbitTicker.register({ el, n: m.n, variant: m.variantId, enter: m.enter });
+    // StrictMode 下这里会执行两遍(登记 → 注销 → 再登记):注销时留下的接力状态正好被第二次登记原样接回,
+    // 过渡进度不重置;<i> 沿用第一次补出来的
+    return orbitTicker.register({ el, n: m.n, variant: m.variantId, handoffKey: m.handoffKey });
   }, []);
   useLayoutEffect(() => {
     const el = ref.current;
@@ -98,15 +101,10 @@ export function LoadingMark({ size = 20, variant = null, markProps = null, phase
   const style = variant || chosen;
   const isRandom = style === RANDOM_LOADING_STYLE;
   const scoped = rollScope != null;
-  // r172:挂载时的抽取结果另带 enter —— 这个回合之前已有指示器显示过别的样式、这次挂载换了(状态行换位置的同时换样式),
-  // 新指示器从中心展开。scopedRolls 只在提交后由 markShown 更新「已显示」,所以初始化函数重复执行(StrictMode)答案不变。
-  const [mountRoll] = useState(() => {
-    if (!isRandom) return { id: null, enter: false };
-    if (!scoped) return { id: pickAndRemember(lastPickedRandomId), enter: false };
-    const res = scopedRoll(rollScope, phase, rollKey);
-    return { id: res.id, enter: res.switchedFrom != null };
+  const [randomId, setRandomId] = useState(() => {
+    if (!isRandom) return null;
+    return scoped ? scopedRoll(rollScope, phase, rollKey).id : pickAndRemember(lastPickedRandomId);
   });
-  const [randomId, setRandomId] = useState(mountRoll.id);
   const rollRef = useRef({ phase, key: rollKey, lastRollMs: isRandom ? Date.now() : null });
   useEffect(() => {
     const roll = rollRef.current;
@@ -141,16 +139,13 @@ export function LoadingMark({ size = 20, variant = null, markProps = null, phase
   }, [isRandom, scoped, rollScope, phase, rollKey, randomId]);
   // 刚切到随机、effect 还没抽时沿用最近一次抽到的 id,避免空一帧
   const shown = isRandom ? (randomId || lastPickedRandomId || 'orbit3') : style;
-  // r172:提交到页面后记下这个回合已显示的 id,供下一次挂载判断「换位置的同时换了样式」
-  useEffect(() => {
-    if (isRandom && scoped && randomId) scopedRolls.markShown(rollScope, randomId);
-  }, [isRandom, scoped, rollScope, randomId]);
   // 每个分支的最外层都带 data-style = 当前显示的具体样式 id,供外层识别;随机时另带 data-loading-mode
   const mp = { ...(markProps || {}), 'data-style': shown };
   if (isRandom) {
     mp['data-loading-mode'] = RANDOM_LOADING_STYLE;
     // r172:不再换 key 重建;换样式由 Orbit 原位过渡
-    return <Orbit variant={shown} size={size} markProps={mp} enter={mountRoll.enter} />;
+    // r172:按回合接力(handoffKey = 回合起点):状态行换位置时新指示器接着上一个画,换了样式就在新位置上做完整过渡
+    return <Orbit variant={shown} size={size} markProps={mp} handoffKey={scoped ? rollScope : null} />;
   }
   if (variantOf(style)) return <Orbit variant={style} size={size} markProps={mp} />;
   if (style === 'cli') return <CliSpinner size={size} markProps={mp} />;
