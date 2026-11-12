@@ -87,8 +87,8 @@ try {
 const WIN_NATIVE = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ProgressPreference='Continue'; Write-Host 'Installing Claude Code CLI (downloading from claude.ai)...'; irm https://claude.ai/install.ps1 | iex\"";
 const WIN_NATIVE_PROXY = "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$p='http://127.0.0.1:7897'; [System.Net.WebRequest]::DefaultWebProxy=New-Object System.Net.WebProxy($p); $env:HTTP_PROXY=$p; $env:HTTPS_PROXY=$p; Write-Host ('(proxy: '+$p+')'); $ProgressPreference='Continue'; Write-Host 'Installing Claude Code CLI (downloading from claude.ai)...'; irm https://claude.ai/install.ps1 | iex\"";
 const NIX_NATIVE = "curl -fsSL https://claude.ai/install.sh | bash";
-const MAC_NPM = "PREFIX=\"$(npm prefix -g)\" && W=\"$PREFIX/lib/node_modules\" && { [ -d \"$W\" ] || W=\"$PREFIX/lib\"; } && { [ -d \"$W\" ] || W=\"$PREFIX\"; } && { [ -w \"$W\" ] || { PREFIX=\"$HOME/.npm-global\"; echo \"npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)\"; }; } && npm install -g --prefix \"$PREFIX\" @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code && NPMBIN=\"$PREFIX/bin\" && { case \":$PATH:\" in *\":$NPMBIN:\"*) echo \"PATH 已包含 $NPMBIN\";; *) echo \"export PATH=\\\"$NPMBIN:\\$PATH\\\"\" >> $HOME/.zshrc && echo \"已把 $NPMBIN 写入 $HOME/.zshrc(新开终端生效)\";; esac; }";
-const LINUX_NPM = "PREFIX=\"$(npm prefix -g)\" && W=\"$PREFIX/lib/node_modules\" && { [ -d \"$W\" ] || W=\"$PREFIX/lib\"; } && { [ -d \"$W\" ] || W=\"$PREFIX\"; } && { [ -w \"$W\" ] || { PREFIX=\"$HOME/.npm-global\"; echo \"npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)\"; }; } && npm install -g --prefix \"$PREFIX\" @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code && NPMBIN=\"$PREFIX/bin\" && { case \":$PATH:\" in *\":$NPMBIN:\"*) echo \"PATH 已包含 $NPMBIN\";; *) echo \"export PATH=\\\"$NPMBIN:\\$PATH\\\"\" >> $HOME/.bashrc && echo \"已把 $NPMBIN 写入 $HOME/.bashrc(新开终端生效)\";; esac; }";
+const MAC_NPM = "PREFIX=\"$(npm prefix -g)\" && W=\"$PREFIX/lib/node_modules\" && { [ -d \"$W\" ] || W=\"$PREFIX/lib\"; } && { [ -d \"$W\" ] || W=\"$PREFIX\"; } && { [ -w \"$W\" ] || { PREFIX=\"$HOME/.npm-global\"; echo \"npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)\"; }; } && npm install -g --prefix \"$PREFIX\" @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code && { \"$PREFIX/bin/claude\" --version || { echo \"Claude Code 没有装完整:npm 没有运行它的安装后脚本,$PREFIX/bin/claude 不能运行(多半只是占位文件)。请执行下面这条命令重装:\"; echo \"npm install -g --prefix \\\"$PREFIX\\\" --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code\"; false; }; } && NPMBIN=\"$PREFIX/bin\" && { case \":$PATH:\" in *\":$NPMBIN:\"*) echo \"PATH 已包含 $NPMBIN\";; *) echo \"export PATH=\\\"$NPMBIN:\\$PATH\\\"\" >> $HOME/.zshrc && echo \"已把 $NPMBIN 写入 $HOME/.zshrc(新开终端生效)\";; esac; }";
+const LINUX_NPM = "PREFIX=\"$(npm prefix -g)\" && W=\"$PREFIX/lib/node_modules\" && { [ -d \"$W\" ] || W=\"$PREFIX/lib\"; } && { [ -d \"$W\" ] || W=\"$PREFIX\"; } && { [ -w \"$W\" ] || { PREFIX=\"$HOME/.npm-global\"; echo \"npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)\"; }; } && npm install -g --prefix \"$PREFIX\" @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code && { \"$PREFIX/bin/claude\" --version || { echo \"Claude Code 没有装完整:npm 没有运行它的安装后脚本,$PREFIX/bin/claude 不能运行(多半只是占位文件)。请执行下面这条命令重装:\"; echo \"npm install -g --prefix \\\"$PREFIX\\\" --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code\"; false; }; } && NPMBIN=\"$PREFIX/bin\" && { case \":$PATH:\" in *\":$NPMBIN:\"*) echo \"PATH 已包含 $NPMBIN\";; *) echo \"export PATH=\\\"$NPMBIN:\\$PATH\\\"\" >> $HOME/.bashrc && echo \"已把 $NPMBIN 写入 $HOME/.bashrc(新开终端生效)\";; esac; }";
 
 try {
   setPlatform('win32');
@@ -105,6 +105,18 @@ try {
   const ps = winNpm.slice(winNpm.indexOf('-Command "') + '-Command "'.length, winNpm.lastIndexOf('"'));
   assert.ok(ps.includes('npm.cmd config get prefix'), `内联 PowerShell 必须调 npm.cmd:${ps}`);
   assert.ok(!/(^|[^.\w])npm config/.test(ps), `内联 PowerShell 里不许出现裸 npm config(会命中 npm.ps1):${ps}`);
+
+  // ── r180:Windows 安装命令装后自检(PowerShell 段内用 npm 前缀下的 claude.cmd)──
+  // 变异哨兵:去掉 Test-Path → 「必须先 Test-Path」红;自检里引入双引号 → 引号计数红。
+  const psStart = winNpm.indexOf('powershell');
+  const ccAt = winNpm.indexOf("Join-Path $p 'claude.cmd'", psStart);
+  assert.ok(ccAt > psStart, `自检路径必须由 npm 前缀 $p 拼出(不能用裸 claude):${winNpm}`);
+  assert.ok(winNpm.indexOf('--version', ccAt) > ccAt, `claude.cmd 之后必须带 --version 运行:${winNpm}`);
+  assert.ok(/if\(Test-Path \$c\)\{& \$c --version; \$ok=\(\$LASTEXITCODE -eq 0\)\}/.test(ps), `先 Test-Path 再按 $LASTEXITCODE 判断:${ps}`);
+  assert.ok(/if\(-not \$ok\)\{[^}]*not fully installed \(没有装完整\)[^}]*--allow-scripts=@anthropic-ai\/claude-code @anthropic-ai\/claude-code'; exit 1\}/.test(ps), `失败说明 + 补救命令 + exit 1:${ps}`);
+  assert.ok(ps.indexOf('exit 1') < ps.indexOf('SetEnvironmentVariable'), '自检在写 PATH 之前,失败不写 PATH');
+  assert.equal((winNpm.match(/"/g) || []).length, 2, `整条命令只有包住 PowerShell 段的一对双引号:${winNpm}`);
+  assert.ok(!/[%^!<>]|&&|\|\|/.test(ps), `PowerShell 段里不许出现 % ^ ! < > && ||:${ps}`);
 
   // ── r180:四条 npm 命令(安装 / 更新 × Windows / 其他平台)都放行且只放行 claude-code ──
   // 变异哨兵:任一条去掉参数 → 计数 0 红;名单加别的包或 * → 名单相等断言红。

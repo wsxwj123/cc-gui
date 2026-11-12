@@ -618,7 +618,12 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
   // mac/linux 追加 export 行到 ~/.zshrc(darwin)/~/.bashrc。已包含则跳过,不重复写。
   if (method === 'npm') {
     if (process.platform === 'win32') {
-      const psAppend = `$p=(npm.cmd config get prefix).Trim(); $u=[Environment]::GetEnvironmentVariable('Path','User'); if(@(($u -split ';') | Where-Object {$_ -eq $p}).Count -eq 0){[Environment]::SetEnvironmentVariable('Path', ($u.TrimEnd(';')+';'+$p), 'User'); Write-Host ('npm bin dir written to user PATH: '+$p)} else {Write-Host 'user PATH already contains npm bin dir'}`;
+      // r180 装后自检:用 npm 前缀下的绝对路径(刚装完,本窗口 PATH 还没有 npm 目录,裸
+      // claude 找不到)。先 Test-Path:文件不存在时 & 只报非终止错误、$LASTEXITCODE 仍是上一条
+      // npm.cmd 的 0,会误判成功。失败说明以英文为主(控制台编码不可靠时仍可读);整段在
+      // .bat 一行的双引号里,新增内容不许出现双引号 / % / ^ / ! / && / || / | / < / >。
+      const psSelfCheck = `$c=Join-Path $p 'claude.cmd'; $ok=$false; if(Test-Path $c){& $c --version; $ok=($LASTEXITCODE -eq 0)}; if(-not $ok){Write-Host 'Claude Code is not fully installed (没有装完整): npm did not run its install script, so the installed claude is only a placeholder. Run this command to reinstall:'; Write-Host 'npm install -g ${NPM_ALLOW_CLAUDE_SCRIPTS} @anthropic-ai/claude-code'; exit 1}; `;
+      const psAppend = `$p=(npm.cmd config get prefix).Trim(); ${psSelfCheck}$u=[Environment]::GetEnvironmentVariable('Path','User'); if(@(($u -split ';') | Where-Object {$_ -eq $p}).Count -eq 0){[Environment]::SetEnvironmentVariable('Path', ($u.TrimEnd(';')+';'+$p), 'User'); Write-Host ('npm bin dir written to user PATH: '+$p)} else {Write-Host 'user PATH already contains npm bin dir'}`;
       // 关键:`call npm`——npm 是 npm.cmd(批处理),在 .bat 里不加 call 直调另一个 .cmd
       // 控制权不返回 → npm 装完后 `&& powershell`(写 PATH)、后续 pause 全被跳过,PATH
       // 写入根本没跑 → "装成功但检测不到"。加 call 让 npm.cmd 返回,链条才完整执行。
@@ -633,7 +638,11 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
     // (/usr/local/lib/node_modules)归 root,裸 `npm install -g` 必失败。检测实际写入目录
     // 不可写时改装到 ~/.npm-global(免 sudo;claude-resolver fixedCandidates 已含此落点,
     // rc 未生效前 GUI 也能找到)。W 逐级回退:node_modules 可能尚不存在。
-    return `PREFIX="$(npm prefix -g)" && W="$PREFIX/lib/node_modules" && { [ -d "$W" ] || W="$PREFIX/lib"; } && { [ -d "$W" ] || W="$PREFIX"; } && { [ -w "$W" ] || { PREFIX="$HOME/.npm-global"; echo "npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)"; }; } && npm install -g --prefix "$PREFIX" @anthropic-ai/claude-code ${NPM_ALLOW_CLAUDE_SCRIPTS} && NPMBIN="$PREFIX/bin" && { case ":$PATH:" in *":$NPMBIN:"*) echo "PATH 已包含 $NPMBIN";; *) echo "export PATH=\\"$NPMBIN:\\$PATH\\"" >> ${rc} && echo "已把 $NPMBIN 写入 ${rc}(新开终端生效)";; esac; }`;
+    // r180 装后自检:跑前缀下的 bin/claude(不是裸 claude,PATH 可能命中别的安装)。失败时
+    // 说明 + 补救命令后以 false 收尾(不用 exit:终端脚本里还要接着显示失败结语),&& 链
+    // 随之短路,不再写 PATH、不再说任何成功的话;npm 自己失败时同样不跑到这里。
+    const nixSelfCheck = `{ "$PREFIX/bin/claude" --version || { echo "Claude Code 没有装完整:npm 没有运行它的安装后脚本,$PREFIX/bin/claude 不能运行(多半只是占位文件)。请执行下面这条命令重装:"; echo "npm install -g --prefix \\"$PREFIX\\" ${NPM_ALLOW_CLAUDE_SCRIPTS} @anthropic-ai/claude-code"; false; }; }`;
+    return `PREFIX="$(npm prefix -g)" && W="$PREFIX/lib/node_modules" && { [ -d "$W" ] || W="$PREFIX/lib"; } && { [ -d "$W" ] || W="$PREFIX"; } && { [ -w "$W" ] || { PREFIX="$HOME/.npm-global"; echo "npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)"; }; } && npm install -g --prefix "$PREFIX" @anthropic-ai/claude-code ${NPM_ALLOW_CLAUDE_SCRIPTS} && ${nixSelfCheck} && NPMBIN="$PREFIX/bin" && { case ":$PATH:" in *":$NPMBIN:"*) echo "PATH 已包含 $NPMBIN";; *) echo "export PATH=\\"$NPMBIN:\\$PATH\\"" >> ${rc} && echo "已把 $NPMBIN 写入 ${rc}(新开终端生效)";; esac; }`;
   }
   if (process.platform === 'win32') {
     // O2: Windows 官方原生安装器(独立二进制,不需要 Node/npm,自动写 PATH)。
