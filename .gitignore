@@ -25,6 +25,10 @@ PROJECT.md
 *.local.md
 .devflow/
 .learnings/
+# 上面这些私有文件的备份(常带时间戳后缀)同样不进公开仓;
+# tests/unit/check-r175-no-private-tracked.mjs 按文件名形态看守已跟踪的文件。
+*.bak
+*.bak-*
 
 # python 字节码(computer-use helper)
 __pycache__/
