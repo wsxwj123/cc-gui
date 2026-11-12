@@ -41,6 +41,14 @@ export const SKIN_ANCHORS = [
   { id: 'provider-selector', desc: 'Provider 切换器' },
   // ── 会话头/徽章 ──
   { id: 'badge-context', desc: '上下文占用徽章' },
+  // r151l(r174 补记):长会话只先加载最近一段之后,凡是「只算已加载部分」或「费用是估算」的地方都加了一行
+  // 范围 / 口径说明。这几个挂点连同下面消息区的 scrubber-scope、chat-search-scope 共 6 个,0.2.433 起就在
+  // 页面上,当时没进本清单(check-skin-anchors 的「挂点不越清单」因此一直红),这里补齐。
+  // 它们都只在对应条件成立时出现;不出现时选择器落空,不炸。
+  { id: 'message-count', desc: '会话头信息行里的「N 条消息」计数(桌面)' },
+  { id: 'badge-stats-scope', desc: '上下文徽章弹层里的统计范围说明(全量 / 仅已加载的那一段)' },
+  { id: 'badge-cost-scope', desc: '上下文徽章弹层里的费用估算口径说明(费用为估算时出现)' },
+  { id: 'mobile-cost-note', desc: '手机顶部统计条下方的统计范围与费用口径说明(有费用时出现)' },
   { id: 'session-menu', desc: '会话 ⋮ 菜单按钮组' },
   { id: 'theme-btn', desc: '主题按钮(顶栏)' },
   { id: 'settings-btn', desc: '设置入口按钮' },
@@ -52,8 +60,13 @@ export const SKIN_ANCHORS = [
   // 形态被投影成同一行系统提示 —— 与 message-user/message-assistant 同级的消息行类型,
   // 永久留在历史里(不是转瞬即逝的提示)。通知行不存在时选择器落空不炸。
   { id: 'task-notice', desc: '后台任务通知行(CLI task-notification 信封投影成的系统提示行)' },
-  // r151b:跨会话消息的来源气泡(历史、点卡片处理、CLI 原生通道三处同一个元素),与 task-notice 同级的消息行类型。
-  { id: 'peer-message', desc: '跨会话消息来源气泡(另一个会话发来、交给本会话模型的那条消息)' },
+  // r151w(r174 补记):跨会话的三种行 —— 收件箱待处理卡片、对话流里收到的、对话流里发出的 —— 统一成同一个
+  // 折叠行,根节点一律挂 xs-notice,用 data-direction(in / out)区分收到与发出。r151w 改了挂点却没改本清单,
+  // 清单与页面因此不一致(check-skin-anchors 一直红),这里补齐。
+  // 备案:r151b 的 peer-message(接收行的来源气泡)随这次统一并入 xs-notice 而退役,该挂点自 0.2.454 起已不在
+  // 页面上。T2 皮肤若引用 [data-cgui="peer-message"] 只是选择器落空,不炸;改写成
+  // [data-cgui="xs-notice"][data-direction="in"]。
+  { id: 'xs-notice', desc: '跨会话消息折叠行(收件箱待处理卡片、对话流里收到的与发出的三处同一个元素;data-direction 为 in / out 区分收到与发出)' },
   // R42:轮末/消息用量行里的金额元素(两处渲染点 TurnBubble/MessageBubble 各一个),
   // 价格来源词挂在它的 title 上(窄面板下不再用行内文字占宽)。
   { id: 'usage-amount', desc: '用量行金额(悬停 title 首行 = 价格来源)' },
@@ -61,7 +74,10 @@ export const SKIN_ANCHORS = [
   // 本轮累计读取/整轮命中率)收在它的 title 上 —— 行内只留 输入/输出/金额。
   { id: 'usage-line', desc: '用量行行容器(悬停 title = token 明细:缓存命中/缓存写入/本轮累计读取/整轮命中率)' },
   { id: 'turn-scrubber', desc: '右缘回合刻度条' },
+  // r151l(r174 补记,来历见上面 badge-stats-scope 处的说明):消息没加载全时出现的两处范围提示。
+  { id: 'scrubber-scope', desc: '回合刻度条旁的「进度范围 已加载数/总数」按钮(消息没加载全时出现,点它加载更早的消息)' },
   { id: 'chat-search', desc: '会话内搜索条' },
+  { id: 'chat-search-scope', desc: '会话内搜索条下方的「搜索范围:已加载 N/总数」说明行(消息没加载全时出现)' },
   { id: 'todo-panel', desc: '待办清单面板' },
   { id: 'goal-bar', desc: 'goal 常驻条(composer 上方)' },
   { id: 'goal-edit', desc: 'goal 常驻条「编辑」按钮' },
