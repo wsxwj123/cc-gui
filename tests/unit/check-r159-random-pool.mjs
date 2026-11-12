@@ -5,11 +5,11 @@
 //   R1 默认样式 = random;随机池 = 16 个 id,且都是 ORBIT_VARIANTS 里的变体。
 //   R2 pickRandomStyle:池大于 1 时 2000 次抽取没有一次等于 prev;16 个 id 都抽到过;
 //      注入 rng 时结果确定;prev 为空(或不在池里)时 16 个都可能取到。
-//   R3 shouldReroll:只在进入 thinking / tool(phase 变了,或 tool 换了 key)且距上次 ≥ 1500ms 时为 true;
-//      text / stopping / compacting / connecting、同阶段、tool 同 key、1499ms 都为 false;lastRollMs 为空视为可抽。
+//   R3 shouldReroll:只在进入 thinking / tool(phase 变了,或 tool 换了 key)且距上次 ≥ 4000ms(r172 起;原 1500ms) 时为 true;
+//      text / stopping / compacting / connecting、同阶段、tool 同 key、3999ms 都为 false;lastRollMs 为空视为可抽。
 //   R4 App.jsx 的 LOADING_OPTIONS:前 3 项 random / orbit3 / orbit4,前 17 项 = random + 16 个池内 id,
 //      其后接原有的 cli、ring(读源码文本,不 import JSX)。
-//   R5 nextRollState(D3b):新 scope 必抽且避开上一回合;同 scope 重新挂载、text 等阶段、不满 1.5 秒都不抽也不补抽。
+//   R5 nextRollState(D3b):新 scope 必抽且避开上一回合;同 scope 重新挂载、text 等阶段、不满 4 秒都不抽也不补抽。
 //   R6 createScopedRollStore:两个回合交替推进互不干扰(分屏几栏同时生成)。
 //   R7 同一回合内相邻两次抽取不同 id(固定 rng + 链式 200 次)。
 //   R8 容量上限淘汰最久没用的;被淘汰的回合再来按新回合处理。
@@ -93,7 +93,7 @@ await report.check('R2', 'pickRandomStyle 不重复、覆盖全池、可注入 r
   }
 });
 
-await report.check('R3', 'shouldReroll 各分支与 1.5 秒边界', 'red', () => {
+await report.check('R3', 'shouldReroll 各分支与 4 秒边界(r172:1.5 秒改 4 秒)', 'red', () => {
   const base = { nowMs: 10_000, lastRollMs: 0 };
   const R = (o) => P.shouldReroll({ ...base, ...o });
   // 进入思考 / 进入工具
@@ -115,12 +115,12 @@ await report.check('R3', 'shouldReroll 各分支与 1.5 秒边界', 'red', () =>
   // lastRollMs 为空视为可抽
   assert.equal(P.shouldReroll({ prevPhase: 'text', prevKey: 'text', phase: 'thinking', key: 'thinking', nowMs: 5, lastRollMs: null }), true);
   assert.equal(P.shouldReroll({ prevPhase: 'text', prevKey: 'text', phase: 'thinking', key: 'thinking', nowMs: 5, lastRollMs: undefined }), true);
-  // 1499 / 1500 边界
+  // 3999 / 4000 边界
   const enter = { prevPhase: 'thinking', prevKey: 'thinking', phase: 'tool', key: 'tool:A' };
-  assert.equal(P.shouldReroll({ ...enter, nowMs: 11_499, lastRollMs: 10_000 }), false);
-  assert.equal(P.shouldReroll({ ...enter, nowMs: 11_500, lastRollMs: 10_000 }), true);
+  assert.equal(P.shouldReroll({ ...enter, nowMs: 13_999, lastRollMs: 10_000 }), false);
+  assert.equal(P.shouldReroll({ ...enter, nowMs: 14_000, lastRollMs: 10_000 }), true);
   assert.equal(P.shouldReroll({ ...enter, nowMs: 10_000, lastRollMs: 10_000 }), false);
-  assert.equal(P.REROLL_MIN_GAP_MS, 1500);
+  assert.equal(P.REROLL_MIN_GAP_MS, 4000);
 });
 
 await report.check('R4', 'LOADING_OPTIONS 顺序:random、orbit3、orbit4、其余 14 种、再接原有样式', 'red', () => {
@@ -172,7 +172,7 @@ await report.check('R5', 'nextRollState 按回合跨挂载连续(D3b)', 'red', (
 
   // 同 scope 同 phase 同 key → 不抽、id 不变(模拟重新挂载)
   const m = { scope: 7, current: 'o4-diag', phase: 'thinking', key: 'thinking', lastRollMs: 0 };
-  for (const nowMs of [1, 1499, 1500, 99_999]) {
+  for (const nowMs of [1, 3999, 4000, 99_999]) {
     const r = N(m, { scope: 7, phase: 'thinking', key: 'thinking', nowMs }, rng);
     assert.equal(r.rolled, false); assert.equal(r.id, 'o4-diag');
     assert.equal(r.mem.lastRollMs, 0);
@@ -187,33 +187,33 @@ await report.check('R5', 'nextRollState 按回合跨挂载连续(D3b)', 'red', (
       assert.equal(b.rolled, false, phase); assert.equal(b.id, 'o4-diag');
     }
   }
-  // 连接中 → 思考:1499ms 不抽,1500ms 抽
+  // 连接中 → 思考:3999ms 不抽,4000ms 抽
   const conn = { scope: 9, current: 'o3-adj', phase: 'connecting', key: 'connecting', lastRollMs: 10_000 };
-  const c1 = N(conn, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 11_499 }, rng);
+  const c1 = N(conn, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 13_999 }, rng);
   assert.equal(c1.rolled, false); assert.equal(c1.id, 'o3-adj');
   assert.equal(c1.mem.phase, 'thinking'); assert.equal(c1.mem.lastRollMs, 10_000);
-  const c2 = N(conn, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 11_500 }, rng);
+  const c2 = N(conn, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 14_000 }, rng);
   assert.equal(c2.rolled, true); assert.notEqual(c2.id, 'o3-adj');
-  assert.equal(c2.mem.lastRollMs, 11_500); assert.equal(c2.mem.current, c2.id);
+  assert.equal(c2.mem.lastRollMs, 14_000); assert.equal(c2.mem.current, c2.id);
 
-  // thinking → tool → thinking,各自满 1.5 秒都抽,新 id 不等于旧 id
+  // thinking → tool → thinking,各自满 4 秒都抽,新 id 不等于旧 id
   let s = c2.mem;
-  for (const [phase, key, nowMs] of [['tool', 'tool:Bash ls', 13_000], ['thinking', 'thinking', 14_500], ['tool', 'tool:Read a', 16_000]]) {
+  for (const [phase, key, nowMs] of [['tool', 'tool:Bash ls', 18_000], ['thinking', 'thinking', 22_000], ['tool', 'tool:Read a', 26_000]]) {
     const r = N(s, { scope: 9, phase, key, nowMs }, rng);
     assert.equal(r.rolled, true, `${phase}@${nowMs}`); assert.notEqual(r.id, s.current);
     s = r.mem;
   }
-  // tool 换 key:满 1.5 秒抽,不满不抽
-  const t1 = N(s, { scope: 9, phase: 'tool', key: 'tool:Edit b', nowMs: 17_500 }, rng);
+  // tool 换 key:满 4 秒抽,不满不抽
+  const t1 = N(s, { scope: 9, phase: 'tool', key: 'tool:Edit b', nowMs: 30_000 }, rng);
   assert.equal(t1.rolled, true); assert.notEqual(t1.id, s.current);
-  const t2 = N(t1.mem, { scope: 9, phase: 'tool', key: 'tool:Grep c', nowMs: 17_900 }, rng);
+  const t2 = N(t1.mem, { scope: 9, phase: 'tool', key: 'tool:Grep c', nowMs: 30_400 }, rng);
   assert.equal(t2.rolled, false); assert.equal(t2.id, t1.id); assert.equal(t2.mem.key, 'tool:Grep c');
-  // 不满 1.5 秒进入的新阶段,之后同阶段内再来调用(phase / key 不变)也不补抽
-  for (const nowMs of [19_000, 25_000, 100_000]) {
+  // 不满 4 秒进入的新阶段,之后同阶段内再来调用(phase / key 不变)也不补抽
+  for (const nowMs of [35_000, 40_000, 100_000]) {
     const r = N(t2.mem, { scope: 9, phase: 'tool', key: 'tool:Grep c', nowMs }, rng);
     assert.equal(r.rolled, false, String(nowMs)); assert.equal(r.id, t1.id);
   }
-  const th = N(t1.mem, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 18_000 }, rng);
+  const th = N(t1.mem, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 30_500 }, rng);
   assert.equal(th.rolled, false);
   assert.equal(N(th.mem, { scope: 9, phase: 'thinking', key: 'thinking', nowMs: 60_000 }, rng).rolled, false);
   // 注入 rng 结果确定
@@ -240,22 +240,22 @@ await report.check('R6', 'createScopedRollStore:两个回合交替推进互不�
   assert.equal(a1.rolled, false); assert.equal(a1.id, a0.id);
   const b1 = store.roll(B, { phase: 'text', key: 'text', nowMs: 2100 }, rng);
   assert.equal(b1.rolled, false); assert.equal(b1.id, b0.id);
-  // A 回到 thinking(满 1.5 秒):恰好换一次;B 读数不变
-  const a2 = store.roll(A, { phase: 'thinking', key: 'thinking', nowMs: 3000 }, rng);
+  // A 回到 thinking(满 4 秒):恰好换一次;B 读数不变
+  const a2 = store.roll(A, { phase: 'thinking', key: 'thinking', nowMs: 5000 }, rng);
   assert.equal(a2.rolled, true); assert.notEqual(a2.id, a0.id);
-  assert.equal(store.roll(B, { phase: 'text', key: 'text', nowMs: 3010 }, rng).id, b0.id);
+  assert.equal(store.roll(B, { phase: 'text', key: 'text', nowMs: 5010 }, rng).id, b0.id);
   // B 回到 thinking:只换 B
-  const b2 = store.roll(B, { phase: 'thinking', key: 'thinking', nowMs: 3200 }, rng);
+  const b2 = store.roll(B, { phase: 'thinking', key: 'thinking', nowMs: 5200 }, rng);
   assert.equal(b2.rolled, true); assert.notEqual(b2.id, b0.id);
-  assert.equal(store.roll(A, { phase: 'thinking', key: 'thinking', nowMs: 3300 }, rng).id, a2.id);
+  assert.equal(store.roll(A, { phase: 'thinking', key: 'thinking', nowMs: 5300 }, rng).id, a2.id);
   // A 紧接着进 tool(距上次 0.7 秒):不换,之后同阶段也不补换;B 的抽取不影响 A 的计时
-  const a3 = store.roll(A, { phase: 'tool', key: 'tool:Bash ls', nowMs: 3700 }, rng);
+  const a3 = store.roll(A, { phase: 'tool', key: 'tool:Bash ls', nowMs: 5700 }, rng);
   assert.equal(a3.rolled, false); assert.equal(a3.id, a2.id);
-  assert.equal(a3.mem.lastRollMs, 3000);
-  store.roll(B, { phase: 'tool', key: 'tool:Read x', nowMs: 4800 }, rng);
+  assert.equal(a3.mem.lastRollMs, 5000);
+  store.roll(B, { phase: 'tool', key: 'tool:Read x', nowMs: 6800 }, rng);
   const a4 = store.roll(A, { phase: 'tool', key: 'tool:Bash ls', nowMs: 9000 }, rng);
   assert.equal(a4.rolled, false); assert.equal(a4.id, a2.id);
-  // A 满 1.5 秒换新工具:换
+  // A 满 4 秒换新工具:换
   const a5 = store.roll(A, { phase: 'tool', key: 'tool:Edit y', nowMs: 9100 }, rng);
   assert.equal(a5.rolled, true); assert.notEqual(a5.id, a2.id);
 });
@@ -265,15 +265,15 @@ await report.check('R7', 'createScopedRollStore:相邻两次抽取不同 id(固�
   // rng 恒为 0:池去掉上一个后取第一个
   const r0 = store.roll(5, { phase: 'thinking', key: 'thinking', nowMs: 0 }, () => 0);
   assert.equal(r0.id, 'orbit3');
-  const r1 = store.roll(5, { phase: 'tool', key: 'tool:A', nowMs: 1500 }, () => 0);
+  const r1 = store.roll(5, { phase: 'tool', key: 'tool:A', nowMs: 4000 }, () => 0);
   assert.equal(r1.rolled, true); assert.equal(r1.id, 'orbit4');
-  const r2 = store.roll(5, { phase: 'thinking', key: 'thinking', nowMs: 3000 }, () => 0);
+  const r2 = store.roll(5, { phase: 'thinking', key: 'thinking', nowMs: 8000 }, () => 0);
   assert.equal(r2.rolled, true); assert.equal(r2.id, 'orbit3');
   // 链式 200 次满间隔进入新阶段:相邻都不同
   const rng = seeded(7007);
-  let prev = r2.id; let t = 3000;
+  let prev = r2.id; let t = 8000;
   for (let i = 0; i < 200; i += 1) {
-    t += 1500;
+    t += 4000;
     const phase = i % 2 ? 'thinking' : 'tool';
     const r = store.roll(5, { phase, key: phase === 'tool' ? `tool:${i}` : 'thinking', nowMs: t }, rng);
     assert.equal(r.rolled, true); assert.notEqual(r.id, prev); prev = r.id;

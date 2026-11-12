@@ -75,9 +75,10 @@ export function pickRandomStyle(prevId, rng = Math.random) {
 }
 
 // r159:随机模式下状态行是否重抽。只在「进入」思考或工具阶段时换:
-// phase 变了,或工具阶段里换了一次新的工具调用(key 变了);并且距上次抽取满 1.5 秒。
-// text / stopping / compacting / connecting、同一阶段内部、不满 1.5 秒,一律不换(之后也不补换)。
-export const REROLL_MIN_GAP_MS = 1500;
+// phase 变了,或工具阶段里换了一次新的工具调用(key 变了);并且距上次抽取满 4 秒。
+// text / stopping / compacting / connecting、同一阶段内部、不满 4 秒,一律不换(之后也不补换)。
+// r172:1.5 秒 → 4 秒。换样式本身有 2 秒过渡(聚拢 1 秒 + 展开 1 秒,orbitTicker.js),间隔必须比它长,否则连续调用工具时圆点一直在过渡。
+export const REROLL_MIN_GAP_MS = 4000;
 const REROLL_PHASES = new Set(['thinking', 'tool']);
 export function shouldReroll({ prevPhase, prevKey, phase, key, nowMs, lastRollMs }) {
   if (!REROLL_PHASES.has(phase)) return false;
@@ -91,17 +92,22 @@ export function shouldReroll({ prevPhase, prevKey, phase, key, nowMs, lastRollMs
 // 抽取记忆放在组件外,同一回合内重新挂载沿用已抽到的 id,阶段变化照 shouldReroll 判断。
 // mem = { scope, current, phase, key, lastRollMs } 或 null;返回新的 mem(不改入参)与要显示的 id。
 // scope 不同(新回合)或还没抽过 → 必抽,且避开上一回合最后那个;之后 phase / key 总更新为最近一次看到的。
+// r172:mem 里可带 shown = 这个回合里已经显示在屏幕上的 id(由 markShown 记,见 createScopedRollStore)。
+// 返回值另带 switchedFrom:回合里之前显示过、而这次给出的 id 和它不同 → 那个旧 id(调用方据此让新挂载的指示器从中心展开);
+// 回合里第一次 / 与已显示的相同 → null。只读 mem.shown、不在这里改它,所以同一次挂载重复调用(StrictMode)得到同一个答案。
 export function nextRollState(mem, { scope, phase, key, nowMs }, rng = Math.random) {
   if (!mem || mem.scope !== scope || !mem.current) {
     const id = pickRandomStyle(mem?.current ?? null, rng);
-    return { mem: { scope, current: id, phase, key, lastRollMs: nowMs }, id, rolled: true };
+    return { mem: { scope, current: id, phase, key, lastRollMs: nowMs }, id, rolled: true, switchedFrom: null };
   }
   const rolled = shouldReroll({ prevPhase: mem.phase, prevKey: mem.key, phase, key, nowMs, lastRollMs: mem.lastRollMs });
   const id = rolled ? pickRandomStyle(mem.current, rng) : mem.current;
+  const shown = mem.shown ?? null;
   return {
-    mem: { scope, current: id, phase, key, lastRollMs: rolled ? nowMs : mem.lastRollMs },
+    mem: { scope, current: id, phase, key, lastRollMs: rolled ? nowMs : mem.lastRollMs, ...(shown != null ? { shown } : {}) },
     id,
     rolled,
+    switchedFrom: shown != null && shown !== id ? shown : null,
   };
 }
 
@@ -123,6 +129,12 @@ export function createScopedRollStore(cap = 32) {
       slots.set(scope, res.mem);
       while (slots.size > limit) slots.delete(slots.keys().next().value);
       return res;
+    },
+    // r172:记下这个回合里已经显示在屏幕上的 id(指示器提交到页面后调用)。回合不在(没抽过 / 已淘汰)时不记。
+    markShown(scope, id) {
+      const mem = slots.get(scope);
+      if (!mem || !id || mem.shown === id) return;
+      slots.set(scope, { ...mem, shown: id });
     },
     get size() { return slots.size; },
   };
