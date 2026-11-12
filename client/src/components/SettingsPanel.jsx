@@ -1461,7 +1461,7 @@ function CcUpdater() {
     // native:官方安装器,自包含不依赖 node,从 claude.ai 拉。
     // isSwitch:已装状态下换一种安装方式(复用同一安装端点,以目标方式重装、接管 claude 命令)。
     const label = method === 'npm'
-      ? 'npm install -g @anthropic-ai/claude-code(需 Node ≥ 20)'
+      ? 'npm install -g @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code(需 Node ≥ 20)'
       : '官方安装器(irm claude.ai/install.ps1 | iex / curl claude.ai/install.sh | bash)';
     const msg = isSwitch
       ? `将打开终端以【${label}】重新安装 Claude Code,把安装方式从「${METHOD_LABEL[state.method] || state.method || '未知'}」切换为「${METHOD_LABEL[method]}」。\n安装需联网访问 npm / claude.ai —— 墙内请先开代理(Clash 等开启系统代理)。\n完成后回来点"检查更新"重新识别;若仍显示旧方式,是 PATH 里旧安装更靠前所致(旧的不会被自动删除)。确定继续?`

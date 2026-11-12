@@ -202,7 +202,7 @@ export default function EnvCheckPanel({ onDismiss, onRecheck, asModal = true }) 
                     // claude.ai 常被墙;npm 走 node、看得见进度、墙内更稳)。
                     ? <div className="shrink-0 flex items-center gap-1.5">
                         <button onClick={() => install('claude', 'npm')}
-                          title="npm install -g @anthropic-ai/claude-code(走 node,看得见进度;墙内更稳)"
+                          title="npm install -g @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code(走 node,看得见进度;墙内更稳)"
                           className="flex items-center gap-1 px-2.5 py-1 rounded text-[12px] font-medium text-on-accent bg-accent hover:bg-accent-hover">
                           <Download size={12} />npm 安装
                         </button>

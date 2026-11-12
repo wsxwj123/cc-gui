@@ -165,4 +165,19 @@ try {
   );
 }
 
+// ── r180:Windows 终端窗口结束语不分成败,不得声称「完成」;界面两处命令文字与实际一致 ──
+// 变异哨兵:结束语改回「完成」→ 两条断言都红;界面去掉放行参数 → 对应断言红。
+{
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const src = readFileSync(join(root, 'server', 'routes', 'version-check.js'), 'utf8');
+  const fn = src.slice(src.indexOf('function launchInTerminal'), src.indexOf('function launchInTerminal') + 2500);
+  assert.ok(fn.includes('echo ===== 已结束,按任意键关闭 =====\\r\\npause >nul'), 'Windows 终端结束语应为中性的「已结束」');
+  assert.ok(!src.includes('完成,按任意键关闭'), 'Windows 终端结束语不得再写「完成」(npm 失败时也会显示)');
+  const settings = readFileSync(join(root, 'client', 'src', 'components', 'SettingsPanel.jsx'), 'utf8');
+  const envCheck = readFileSync(join(root, 'client', 'src', 'components', 'EnvCheckPanel.jsx'), 'utf8');
+  const uiCmd = 'npm install -g @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code(';
+  assert.ok(settings.includes(`'${uiCmd}需 Node ≥ 20)'`), '设置页确认框里的 npm 命令文字应带放行参数');
+  assert.ok(envCheck.includes(`title="${uiCmd}走 node`), '环境检查面板 npm 安装提示应带放行参数');
+}
+
 console.log('✓ check-update-cmd-npm: npm 更新走 claude update + Win npm 安装绕开执行策略 全过');
