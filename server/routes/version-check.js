@@ -816,7 +816,7 @@ function launchInTerminal(cmd, title, proxyUrl = null) {
     spawn('cmd', ['/c', 'start', '', file], { detached: true, stdio: 'ignore', windowsHide: false, env }).unref();
   } else {
     const file = join(tmpdir(), `${stamp}.sh`);
-    writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\necho\nread -p "完成,回车关闭…"\n`, { mode: 0o755 });
+    writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\necho\nread -p "已结束,回车关闭…"\n`, { mode: 0o755 });
     // 常见终端模拟器逐个尝试(best-effort)
     const term = process.env.TERMINAL || 'x-terminal-emulator';
     spawn(term, ['-e', `bash "${file}"`], { detached: true, stdio: 'ignore', env }).unref();

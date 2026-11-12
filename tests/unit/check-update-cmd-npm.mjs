@@ -173,6 +173,9 @@ try {
   const fn = src.slice(src.indexOf('function launchInTerminal'), src.indexOf('function launchInTerminal') + 2500);
   assert.ok(fn.includes('echo ===== 已结束,按任意键关闭 =====\\r\\npause >nul'), 'Windows 终端结束语应为中性的「已结束」');
   assert.ok(!src.includes('完成,按任意键关闭'), 'Windows 终端结束语不得再写「完成」(npm 失败时也会显示)');
+  // Linux 终端窗口(写 .sh 的那支)同理:结束语中性,不写「完成」
+  assert.ok(src.includes('read -p "已结束,回车关闭…"'), 'Linux 终端结束语应为中性的「已结束」');
+  assert.ok(!src.includes('完成,回车关闭'), 'Linux 终端结束语不得再写「完成」(npm 失败时也会显示)');
   const settings = readFileSync(join(root, 'client', 'src', 'components', 'SettingsPanel.jsx'), 'utf8');
   const envCheck = readFileSync(join(root, 'client', 'src', 'components', 'EnvCheckPanel.jsx'), 'utf8');
   const uiCmd = 'npm install -g @anthropic-ai/claude-code --allow-scripts=@anthropic-ai/claude-code(';
