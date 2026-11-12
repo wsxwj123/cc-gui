@@ -7,6 +7,7 @@
 //   t4 并发互斥:另一路正占着某会话 → 本次跳过(skippedBusy),不重复调 gc
 //   t5 排程判定 checkpointSweepPlan:SWEEP=0 不排;延迟缺省 60000;非法/负数回落
 //   t6 真实 gcSession 集成(默认 gc + 默认 gitCount):真影子仓 5 条 + 1 条无 meta 的提交,maxCount=3 → 剩 3 条
+//      (这一段的时间以运行当时的真实时钟为基准,不用顶部写死的 NOW —— 真实 gcSession 只认真实时钟)
 //   t7 runStartupSweep 一次进程只跑一遍
 // Run: node tests/unit/check-checkpoint-sweep.mjs
 import assert from 'node:assert/strict';
@@ -192,19 +193,24 @@ const base = (root, rec, extra = {}) => ({
       git(['add', '-A']); git(['commit', '-q', '--allow-empty', '-m', `cp ${i}`]);
       shas.push(git(['rev-parse', 'HEAD']).trim());
     }
+    // 这一段的「现在」必须取真实时钟:默认 gc(真实 gcSession)判「超过保留期」用的是 Date.now(),
+    // 不吃 sweepAllSessions 的 now 注入。meta 的时间若按文件顶部写死的 NOW(2026-09-21)造,过了保留期
+    // (30 天)之后,登记的 3 条会被真实 gcSession 按过期一并收掉(回收 5 条而不是 3 条)——
+    // 2026-10-21 起这条因此一直红(r174 查明;把时钟拨回 2026-09-21 原写法全过)。
+    const T6_NOW = Date.now();
     // meta 只登记 3 条(条数按 meta 看没超),但影子仓里有 5 条 + 下面这 1 条 pre-restore 式的无 meta 提交 → 靠 gitCount 判超
     writeFileSync(join(wt, 'note.txt'), 'pre-restore\n'); git(['add', '-A']); git(['commit', '-q', '-m', 'pre-restore x']);
-    writeFileSync(join(gitDir, 'meta.json'), JSON.stringify({ entries: shas.slice(2).map((sha, i) => ({ sha, ts: NOW - HOUR + i, label: `#${i}` })) }));
-    const t = new Date(NOW - HOUR); utimesSync(join(gitDir, 'meta.json'), t, t);
+    writeFileSync(join(gitDir, 'meta.json'), JSON.stringify({ entries: shas.slice(2).map((sha, i) => ({ sha, ts: T6_NOW - HOUR + i, label: `#${i}` })) }));
+    const t = new Date(T6_NOW - HOUR); utimesSync(join(gitDir, 'meta.json'), t, t);
     const lines = [];
-    const sum = await sweepAllSessions({ root, now: NOW, idleMs: 600_000, maxCount: 3, maxAgeMs: 30 * DAY, maxTotalBytes: 100 * 1024 * 1024, pauseMs: 0, log: (l) => lines.push(l) });
+    const sum = await sweepAllSessions({ root, now: T6_NOW, idleMs: 600_000, maxCount: 3, maxAgeMs: 30 * DAY, maxTotalBytes: 100 * 1024 * 1024, pauseMs: 0, log: (l) => lines.push(l) });
     assert.equal(sum.gcCalls, 1, 't6: 真实 gcSession 被调了一次');
     assert.equal(sum.reclaimed, 3, 't6: 6 条(含 1 条无 meta 的)按 maxCount=3 回收 3 条');
     const left = execFileSync('git', ['--git-dir', gitDir, '-c', 'advice.graftFileDeprecated=false', 'log', '--format=%H'], { env, encoding: 'utf8' }).trim().split('\n');
     assert.equal(left.length, 3, 't6: 影子仓 git log 剩 3 条');
     assert.equal(left[0], git(['rev-parse', 'HEAD']).trim(), 't6: 最新一条(保底)仍在且是 HEAD');
     // 再扫一遍:已经在上限内 → 不再调 gc(R5-3 幂等)
-    const sum2 = await sweepAllSessions({ root, now: NOW, idleMs: 0, maxCount: 3, maxAgeMs: 30 * DAY, maxTotalBytes: 100 * 1024 * 1024, pauseMs: 0, log: () => {} });
+    const sum2 = await sweepAllSessions({ root, now: T6_NOW, idleMs: 0, maxCount: 3, maxAgeMs: 30 * DAY, maxTotalBytes: 100 * 1024 * 1024, pauseMs: 0, log: () => {} });
     assert.equal(sum2.gcCalls, 0, 't6: 收过一遍后再扫不再调 gc');
   }
 }
