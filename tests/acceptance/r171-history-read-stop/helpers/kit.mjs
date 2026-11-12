@@ -90,6 +90,11 @@ export async function startBackend(tag) {
     if (Date.now() - t0 > 40_000) { child.kill('SIGKILL'); throw new Error(`后端 40 秒没起来,看 ${errLog}`); }
     await sleep(300);
   }
+  // 后端启动 10 秒后会在后台把所有会话文件完整读一遍(用量统计的启动预热)。命名管道要是这时已经在,
+  // 也会被它打开来读、而且永远读不完 —— 历史读取那一头关了文件,写入方照样写得进去,收不到 EPIPE。
+  // 所以等后端启动满 12 秒(预热已扫过空目录)再把实例交给用例去建管道;用例期间不请求用量接口。
+  const settleMs = t0 + 12_000 - Date.now();
+  if (settleMs > 0) await sleep(settleMs);
 
   const inst = { base, home, root, port, pid: child.pid, errLog, outLog };
   inst.makeWorkspace = (name) => {
