@@ -44,13 +44,14 @@ try {
   setPlatform('darwin');
   {
     const cmd = updateCmdFor('npm-registry', '/x/claude');
-    assert.match(cmd, /npm install -g @anthropic-ai\/claude-code@latest/, 'C1: 仍走 npm 安装');
+    assert.match(cmd, /npm install -g @anthropic-ai\/claude-code@latest --allow-scripts=@anthropic-ai\/claude-code && /, 'C1: 仍走 npm 安装(r180:带放行参数)');
     assert.match(cmd, /"\$\(npm prefix -g\)\/bin\/claude" --version/, 'C1: 自检必须钉到 npm 前缀的新安装(假成功哨兵)');
   }
   setPlatform('win32');
   {
     const cmd = updateCmdFor('npm-registry', 'C:\\x\\claude.cmd');
     assert.match(cmd, /^call npm install -g/, 'C1: win 保持 call 前缀(.bat 调 .cmd 控制权)');
+    assert.match(cmd, /^call npm install -g @anthropic-ai\/claude-code@latest --allow-scripts=@anthropic-ai\/claude-code && /, 'C1: win 带放行参数(r180)');
     assert.match(cmd, /call claude --version/, 'C1: win 自检保持 call claude --version(跨渠道风险由前端弹窗兜)');
   }
   setPlatform(realPlatform);

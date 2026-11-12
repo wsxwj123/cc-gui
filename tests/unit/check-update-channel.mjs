@@ -34,7 +34,7 @@ import { UPDATE_CHANNELS, resolveUpdateMethod, effectiveChannel, updateCmdFor } 
 // t4 命令形态:npm 渠道必须真的走 npm 且装完自检版本(防只拉到引导壳)
 {
   const cmd = updateCmdFor('npm-registry', '/x/claude');
-  assert.match(cmd, /npm install -g @anthropic-ai\/claude-code@latest/, 't4: 真的走 npm');
+  assert.match(cmd, /npm install -g @anthropic-ai\/claude-code@latest --allow-scripts=@anthropic-ai\/claude-code && /, 't4: 真的走 npm,且放行 claude-code 的安装后脚本(r180:npm 12 默认拦)');
   // (r26-C1) 换锚:自检钉到 npm 前缀里的新安装(posix);win 分支仍为 call claude --version。
   assert.match(cmd, /("\$\(npm prefix -g\)\/bin\/claude"|call claude) --version/, 't4: 装完自检钉到刚装的安装(壳包不会自检通过)(r26-C1)');
   const native = updateCmdFor('native', '/x/claude');

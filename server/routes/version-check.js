@@ -553,6 +553,12 @@ export function pickChannelInstall(channel, installs, classify = classifyClaudeP
   return null;
 }
 
+// r180:npm 12 起默认不跑依赖的安装后脚本,而 Claude Code 的 npm 包(≥2.1.227)靠
+// postinstall 把平台分包里的真程序落到 bin/claude.exe,不放行就装出占位文件(退出码 0,
+// 运行报 native binary not installed)。全局安装没有项目 package.json 可写名单,只能在命令行
+// 放行;只放这一个包,不改用户 npm 配置。旧版 npm 不认此参数只告警,照常安装。
+const NPM_ALLOW_CLAUDE_SCRIPTS = '--allow-scripts=@anthropic-ai/claude-code';
+
 export function updateCmdFor(method, claudePath) { // export 仅为可单测
   switch (method) {
     // Y1:brew 渠道由社区维护、版本严重滞后(用户实测 latest 仅 1.5x,官方已 2.1.x),
@@ -576,8 +582,8 @@ export function updateCmdFor(method, claudePath) { // export 仅为可单测
       // Windows .bat 捕获 `npm prefix -g` 输出需 for /f,过于脆弱 —— Win 保持
       // call claude --version,跨渠道风险由前端 crossChannel 确认弹窗明示。
       const verify = process.platform === 'win32'
-        ? 'call npm install -g @anthropic-ai/claude-code@latest && call claude --version'
-        : 'npm install -g @anthropic-ai/claude-code@latest && "$(npm prefix -g)/bin/claude" --version';
+        ? `call npm install -g @anthropic-ai/claude-code@latest ${NPM_ALLOW_CLAUDE_SCRIPTS} && call claude --version`
+        : `npm install -g @anthropic-ai/claude-code@latest ${NPM_ALLOW_CLAUDE_SCRIPTS} && "$(npm prefix -g)/bin/claude" --version`;
       return verify;
     }
     case 'npm': {
@@ -612,7 +618,12 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
   // mac/linux 追加 export 行到 ~/.zshrc(darwin)/~/.bashrc。已包含则跳过,不重复写。
   if (method === 'npm') {
     if (process.platform === 'win32') {
-      const psAppend = `$p=(npm.cmd config get prefix).Trim(); $u=[Environment]::GetEnvironmentVariable('Path','User'); if(@(($u -split ';') | Where-Object {$_ -eq $p}).Count -eq 0){[Environment]::SetEnvironmentVariable('Path', ($u.TrimEnd(';')+';'+$p), 'User'); Write-Host ('npm bin dir written to user PATH: '+$p)} else {Write-Host 'user PATH already contains npm bin dir'}`;
+      // r180 装后自检:用 npm 前缀下的绝对路径(刚装完,本窗口 PATH 还没有 npm 目录,裸
+      // claude 找不到)。先 Test-Path:文件不存在时 & 只报非终止错误、$LASTEXITCODE 仍是上一条
+      // npm.cmd 的 0,会误判成功。失败说明以英文为主(控制台编码不可靠时仍可读);整段在
+      // .bat 一行的双引号里,新增内容不许出现双引号 / % / ^ / ! / && / || / | / < / >。
+      const psSelfCheck = `$c=Join-Path $p 'claude.cmd'; $ok=$false; if(Test-Path $c){$v=& $c --version; $ok=(($LASTEXITCODE -eq 0) -and (([string]$v).Trim() -ne '')); Write-Host $v}; if(-not $ok){Write-Host 'Claude Code is not fully installed (没有装完整): npm did not run its install script, so the installed claude is only a placeholder. Run this command to reinstall:'; Write-Host 'npm install -g ${NPM_ALLOW_CLAUDE_SCRIPTS} @anthropic-ai/claude-code'; Write-Host 'If npm.cmd config get ignore-scripts prints true, run npm.cmd config delete ignore-scripts first, then reinstall.'; exit 1}; `;
+      const psAppend = `$p=(npm.cmd config get prefix).Trim(); ${psSelfCheck}$u=[Environment]::GetEnvironmentVariable('Path','User'); if(@(($u -split ';') | Where-Object {$_ -eq $p}).Count -eq 0){[Environment]::SetEnvironmentVariable('Path', ($u.TrimEnd(';')+';'+$p), 'User'); Write-Host ('npm bin dir written to user PATH: '+$p)} else {Write-Host 'user PATH already contains npm bin dir'}`;
       // 关键:`call npm`——npm 是 npm.cmd(批处理),在 .bat 里不加 call 直调另一个 .cmd
       // 控制权不返回 → npm 装完后 `&& powershell`(写 PATH)、后续 pause 全被跳过,PATH
       // 写入根本没跑 → "装成功但检测不到"。加 call 让 npm.cmd 返回,链条才完整执行。
@@ -620,14 +631,18 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
       // npm.ps1(脚本文件),默认 Restricted 执行策略直接拦「无法加载文件 npm.ps1」→ npm
       // 装完了但 PATH 没写成(用户实机复现)。再补 -ExecutionPolicy Bypass 双保险(只作用
       // 于本进程,不改用户机器策略),与本函数 native 路径的写法对齐。
-      return `call npm install -g @anthropic-ai/claude-code && powershell -NoProfile -ExecutionPolicy Bypass -Command "${psAppend}"`;
+      return `call npm install -g @anthropic-ai/claude-code ${NPM_ALLOW_CLAUDE_SCRIPTS} && powershell -NoProfile -ExecutionPolicy Bypass -Command "${psAppend}"`;
     }
     const rc = process.platform === 'darwin' ? '$HOME/.zshrc' : '$HOME/.bashrc';
     // EACCES 根治(用户实报 permission denied):官方 pkg 装的 node,npm 全局目录
     // (/usr/local/lib/node_modules)归 root,裸 `npm install -g` 必失败。检测实际写入目录
     // 不可写时改装到 ~/.npm-global(免 sudo;claude-resolver fixedCandidates 已含此落点,
     // rc 未生效前 GUI 也能找到)。W 逐级回退:node_modules 可能尚不存在。
-    return `PREFIX="$(npm prefix -g)" && W="$PREFIX/lib/node_modules" && { [ -d "$W" ] || W="$PREFIX/lib"; } && { [ -d "$W" ] || W="$PREFIX"; } && { [ -w "$W" ] || { PREFIX="$HOME/.npm-global"; echo "npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)"; }; } && npm install -g --prefix "$PREFIX" @anthropic-ai/claude-code && NPMBIN="$PREFIX/bin" && { case ":$PATH:" in *":$NPMBIN:"*) echo "PATH 已包含 $NPMBIN";; *) echo "export PATH=\\"$NPMBIN:\\$PATH\\"" >> ${rc} && echo "已把 $NPMBIN 写入 ${rc}(新开终端生效)";; esac; }`;
+    // r180 装后自检:跑前缀下的 bin/claude(不是裸 claude,PATH 可能命中别的安装)。失败时
+    // 说明 + 补救命令后以 false 收尾(不用 exit:终端脚本里还要接着显示失败结语),&& 链
+    // 随之短路,不再写 PATH、不再说任何成功的话;npm 自己失败时同样不跑到这里。
+    const nixSelfCheck = `{ "$PREFIX/bin/claude" --version || { echo "Claude Code 没有装完整:npm 没有运行它的安装后脚本,$PREFIX/bin/claude 不能运行(多半只是占位文件)。请执行下面这条命令重装:"; echo "npm install -g --prefix \\"$PREFIX\\" ${NPM_ALLOW_CLAUDE_SCRIPTS} @anthropic-ai/claude-code"; echo "如果 npm config get ignore-scripts 显示 true,请先执行 npm config delete ignore-scripts,再重装。"; false; }; }`;
+    return `PREFIX="$(npm prefix -g)" && W="$PREFIX/lib/node_modules" && { [ -d "$W" ] || W="$PREFIX/lib"; } && { [ -d "$W" ] || W="$PREFIX"; } && { [ -w "$W" ] || { PREFIX="$HOME/.npm-global"; echo "npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)"; }; } && npm install -g --prefix "$PREFIX" @anthropic-ai/claude-code ${NPM_ALLOW_CLAUDE_SCRIPTS} && ${nixSelfCheck} && NPMBIN="$PREFIX/bin" && { case ":$PATH:" in *":$NPMBIN:"*) echo "PATH 已包含 $NPMBIN";; *) echo "export PATH=\\"$NPMBIN:\\$PATH\\"" >> ${rc} && echo "已把 $NPMBIN 写入 ${rc}(新开终端生效)";; esac; }`;
   }
   if (process.platform === 'win32') {
     // O2: Windows 官方原生安装器(独立二进制,不需要 Node/npm,自动写 PATH)。
@@ -796,12 +811,12 @@ function launchInTerminal(cmd, title, proxyUrl = null) {
     // 中文提示和用户目录里的中文路径都会被读错。chcp 必须紧跟 @echo off、排在任何非 ASCII
     // 行之前;文件不能加 BOM(加了第一行 @echo off 会报错)。代码页只作用于 start 开出的
     // 这个独立窗口,关了就失效,无需恢复。
-    writeFileSync(file, `@echo off\r\nchcp 65001 >nul\r\necho ▶ ${title}\r\n${proxyLine}${cmd}\r\necho.\r\necho ===== 完成,按任意键关闭 =====\r\npause >nul\r\n`);
+    writeFileSync(file, `@echo off\r\nchcp 65001 >nul\r\necho ▶ ${title}\r\n${proxyLine}${cmd}\r\necho.\r\necho ===== 已结束,按任意键关闭 =====\r\npause >nul\r\n`);
     // start '' <file> — 空标题占位,避免把文件路径当成窗口标题
     spawn('cmd', ['/c', 'start', '', file], { detached: true, stdio: 'ignore', windowsHide: false, env }).unref();
   } else {
     const file = join(tmpdir(), `${stamp}.sh`);
-    writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\necho\nread -p "完成,回车关闭…"\n`, { mode: 0o755 });
+    writeFileSync(file, `#!/bin/bash\necho "▶ ${title}"\n${cmd}\necho\nread -p "已结束,回车关闭…"\n`, { mode: 0o755 });
     // 常见终端模拟器逐个尝试(best-effort)
     const term = process.env.TERMINAL || 'x-terminal-emulator';
     spawn(term, ['-e', `bash "${file}"`], { detached: true, stdio: 'ignore', env }).unref();
