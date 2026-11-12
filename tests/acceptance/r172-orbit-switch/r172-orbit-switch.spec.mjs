@@ -108,7 +108,7 @@ test('行为5 过渡结束后恢复正常转动：标记消失后500ms内至少�
   expectNoPageErrors(r.errors);
 });
 
-test('行为6 换位置的同时换样式（思考4.7秒→正文1秒→思考）：新指示器样式不同、第一帧起带 out 且圆点都在中心、1000±200ms后消失、之后恢复转动', async ({ page }) => {
+test('行为6 换位置的同时换样式也走完整过渡（思考4.7秒→正文1秒→思考）：新指示器样式不同、第一帧起带 in 且画旧样式圆点（有圆点离中心≥3px）、in 1000±200ms→圆点聚拢到中心≤1px→out 1000±200ms（点数=新样式）→消失、之后恢复转动、全程同一个元素', async ({ page }) => {
   const r = await retryClean(page, async () => {
     const errors = collectPageErrors(page);
     await prepareLive(page, {
@@ -149,13 +149,35 @@ test('行为6 换位置的同时换样式（思考4.7秒→正文1秒→思考�
   expect(first.phase, '前置:新指示器出现时状态行应是 thinking 阶段').toBe('thinking');
   expect(first.style, `新出现的指示器 data-style 应与之前(${prevStyle})不同`).not.toBe(prevStyle);
   expect(ORBIT_IDS, '新 data-style 应是 16 个 id 之一').toContain(first.style);
-  expect(first.sw, `新指示器应从出现的第一帧起就带 data-switch="out"(实测 ${first.sw},样式 ${prevStyle} → ${first.style})`).toBe('out');
-  expect(maxDist(first), `第一帧所有圆点中心离指示器中心应 ≤ 1.5px(实测最远 ${maxDist(first).toFixed(2)}px)`).toBeLessThanOrEqual(1.5);
-  const jEnd = f.findIndex((x, i) => i > iNew && x.has && x.sw === null);
-  expect(jEnd, 'out 之后 data-switch 属性应消失').toBeGreaterThan(iNew);
-  const outMs = f[jEnd].t - first.t;
-  expect(Math.abs(outMs - 1000), `data-switch="out" 应从出现起持续 1000±200ms(实测 ${outMs}ms)`).toBeLessThanOrEqual(200);
-  expect(new Set(f.slice(iNew, jEnd + 1).map((x) => (x.has ? x.rid : 'gone'))).size, 'out 期间指示器应是同一个元素').toBe(1);
+  // 第一帧起就是聚拢(in),画的是旧样式的圆点,不是从中心开始
+  expect(first.sw, `新指示器应从出现的第一帧起就带 data-switch="in"(实测 ${first.sw},样式 ${prevStyle} → ${first.style})`).toBe('in');
+  expect(first.dots.length, `第一帧 <i> 个数应=旧样式 ${prevStyle} 的点数 ${DOTS_OF[prevStyle]}(实测 ${first.dots.length} 个)`).toBe(DOTS_OF[prevStyle]);
+  expect(maxDist(first), `第一帧至少有一个圆点离指示器中心 ≥ 3px(不是从中心开始;实测最远 ${maxDist(first).toFixed(2)}px)`).toBeGreaterThanOrEqual(3);
+  // in → out
+  const jOut = f.findIndex((x, i) => i > iNew && x.has && x.sw === 'out');
+  expect(jOut, 'data-switch 应从 in 变成 out(从未出现 out)').toBeGreaterThan(iNew);
+  const inFrames = f.slice(iNew, jOut);
+  const badIn = inFrames.filter((x) => !x.has || x.sw !== 'in' || x.dots.length !== DOTS_OF[prevStyle]);
+  expect(badIn.slice(0, 3).map((x) => `${x.sw}:${x.style}:${x.dots.length}点`), `in 期间每一帧应带 data-switch="in" 且 <i> 个数=旧样式 ${prevStyle} 的点数 ${DOTS_OF[prevStyle]}(不符 ${badIn.length}/${inFrames.length} 帧)`).toEqual([]);
+  const inMs = f[jOut].t - first.t;
+  expect(Math.abs(inMs - 1000), `data-switch="in" 应从出现起持续 1000±200ms(实测 ${inMs}ms)`).toBeLessThanOrEqual(200);
+  const lastIn = f[jOut - 1];
+  const firstOut = f[jOut];
+  const lastInDots = lastIn.dots.map(distOf);
+  const firstOutDots = firstOut.dots.map(distOf);
+  const pick = Math.max(...lastInDots) <= Math.max(...firstOutDots) ? lastInDots : firstOutDots;
+  expect(pick.length, '前置:所取那一帧应有圆点').toBeGreaterThan(0);
+  expect(Math.max(...pick), `in→out 交接那一帧所有圆点离指示器中心都应 ≤ 1px(in 末帧最远 ${Math.max(...lastInDots).toFixed(2)}px、out 首帧最远 ${Math.max(...firstOutDots).toFixed(2)}px)`).toBeLessThanOrEqual(1);
+  // out → 消失
+  const jEnd = f.findIndex((x, i) => i > jOut && x.has && x.sw === null);
+  expect(jEnd, 'out 之后 data-switch 属性应消失').toBeGreaterThan(jOut);
+  const outMs = f[jEnd].t - f[jOut].t;
+  expect(Math.abs(outMs - 1000), `data-switch="out" 应持续 1000±200ms(实测 ${outMs}ms)`).toBeLessThanOrEqual(200);
+  const outFrames = f.slice(jOut, jEnd);
+  const badOut = outFrames.filter((x) => !x.has || x.sw !== 'out' || x.dots.length !== DOTS_OF[first.style]);
+  expect(badOut.slice(0, 3).map((x) => `${x.sw}:${x.style}:${x.dots.length}点`), `out 期间每一帧应带 data-switch="out" 且 <i> 个数=新样式 ${first.style} 的点数 ${DOTS_OF[first.style]}(不符 ${badOut.length}/${outFrames.length} 帧)`).toEqual([]);
+  expect(new Set(f.slice(iNew, jEnd + 1).map((x) => (x.has ? x.rid : 'gone'))).size, '从出现到过渡结束新指示器应是同一个元素').toBe(1);
+  expect(f.slice(iNew, jEnd + 1).every((x) => x.style === first.style), `过渡期间 data-style 应恒为新样式 ${first.style}`).toBe(true);
   expectResumed(f, jEnd, '换位置换样式后');
   expectNoPageErrors(r.errors);
 });
