@@ -9,6 +9,11 @@ import path from 'node:path';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const A = readFileSync(path.join(ROOT, 'client/src/App.jsx'), 'utf8');
 const count = (s, re) => (s.match(re) || []).length;
+// r176:代码搬家,页面行为不变 —— 报错分支的三条判据(及优先级)搬进 utils/apiErrorActions.js,
+// 渲染段的三块动作界面搬进 components/ApiErrorActions.jsx;原来对 App.jsx 报错分支 / 渲染段的源码文字断言改指到这两个文件,
+// App.jsx 只剩接线,另行钉住。
+const AE = readFileSync(path.join(ROOT, 'client/src/utils/apiErrorActions.js'), 'utf8');
+const AC = readFileSync(path.join(ROOT, 'client/src/components/ApiErrorActions.jsx'), 'utf8');
 
 let pass = 0;
 const fails = [];
@@ -18,32 +23,47 @@ const t = (name, fn) => {
 
 // ---- §4.2 必须出现 ----
 t('4.2 import 纯函数模块', () => {
+  // classifyUpstreamRefusal 随判据搬进 apiErrorActions.js(同目录,写 './contentRisk.js');App.jsx 仍 import 另两个。
   assert.match(A, /from '\.\/utils\/contentRisk\.js'/);
   const line = A.split('\n').find((l) => l.includes("./utils/contentRisk.js"));
-  for (const n of ['classifyUpstreamRefusal', 'lastUserIndex', 'locateRiskAnchor']) {
+  for (const n of ['lastUserIndex', 'locateRiskAnchor']) {
     assert.ok(line.includes(n), `import 缺 ${n}`);
   }
+  const lineE = AE.split('\n').find((l) => l.includes("from './contentRisk.js'"));
+  assert.ok(lineE, "apiErrorActions.js 缺 from './contentRisk.js' 的 import");
+  assert.ok(lineE.includes('classifyUpstreamRefusal'), 'apiErrorActions.js import 缺 classifyUpstreamRefusal');
+  const lineD = A.split('\n').find((l) => l.includes("./utils/apiErrorActions.js"));
+  assert.ok(lineD && lineD.includes('deriveApiErrorUi'), 'App.jsx 必须从 apiErrorActions.js import deriveApiErrorUi');
 });
 t('4.2 错误分支打标', () => {
-  assert.match(A, /const risk = classifyUpstreamRefusal\(msg\)/);
-  assert.match(A, /errorAction: 'content-risk'/);
-  assert.match(A, /msg\.errorAction === 'content-risk'/);
+  // 判据与动作取值在 apiErrorActions.js;App.jsx 报错分支把 msg 交给它、把结果写进消息的 errorAction;
+  // 渲染在 ApiErrorActions.jsx,App.jsx 把消息的 errorAction 当 action 传入。
+  assert.match(AE, /const risk = classifyUpstreamRefusal\(msg\)/);
+  assert.match(AE, /const action = risk \? 'content-risk'/);
+  assert.match(AC, /action === 'content-risk'/);
+  assert.match(A, /const errUi = deriveApiErrorUi\(msg\)/);
+  assert.match(A, /errorAction: errUi\.action/);
+  assert.match(A, /<ApiErrorActions action=\{msg\.errorAction \|\| null\}/);
 });
 t('4.2 三元链里 content-risk 排在 isAuthError 之前(M15)', () => {
-  const i = A.indexOf("risk ? { errorAction: 'content-risk' }");
-  const j = A.indexOf('isAuthError ?');
-  assert.ok(i > 0 && j > 0 && i < j, `content-risk@${i} 必须排在 isAuthError@${j} 之前`);
+  // 原来比的是两个子串的先后;现在三支在 apiErrorActions.js 的同一行里,先逐字钉整条三元表达式,
+  // 再比 content-risk 与 provider 两支的位置(沿用原来「内容审核排在鉴权之前」的判法)。
+  assert.match(AE, /const action = risk \? 'content-risk' : isAuth \? 'provider' : isEmptyBlock \? 'repair-official' : null;/);
+  const i = AE.indexOf("risk ? 'content-risk'");
+  const j = AE.indexOf("isAuth ? 'provider'");
+  assert.ok(i > 0 && j > 0 && i < j, `content-risk@${i} 必须排在 isAuth ? 'provider'@${j} 之前`);
 });
 t('4.2 两个新回调存在', () => {
   assert.match(A, /const runContentRiskRewind = useCallback/);
   assert.match(A, /const newSessionWithLastUser = useCallback/);
 });
 t('4.2 按钮文案逐字 + 提示文案关键词', () => {
-  assert.match(A, /回退到上一条工具输出之前并重发/);
-  assert.match(A, /回退到上一条消息之前并重新编辑/);
-  assert.match(A, /新开会话/);
-  assert.match(A, /内容审核/);
-  assert.match(A, /每一轮/);
+  // 三块动作界面搬进 ApiErrorActions.jsx,文案逐字照旧,改在该文件里找。
+  assert.match(AC, /回退到上一条工具输出之前并重发/);
+  assert.match(AC, /回退到上一条消息之前并重新编辑/);
+  assert.match(AC, /新开会话/);
+  assert.match(AC, /内容审核/);
+  assert.match(AC, /每一轮/);
 });
 t('4.2 主动作走应用内确认框(danger)', () => {
   const blk = A.slice(A.indexOf('const runContentRiskRewind = useCallback'), A.indexOf('const newSessionWithLastUser = useCallback'));
@@ -148,8 +168,19 @@ t('4.2 全文件无原生弹窗调用(M14;Tauri 禁用 window.confirm/alert)', (
 });
 
 // ---- §4.3 计数锁 ----
+// r176:errorAction 原为 App.jsx 里恰 6 次(打标 3 + 渲染 3),搬家后拆成三份各自钉死(见下面单独的一条),
+// 不再放进这张「App.jsx 内出现次数」表。
+t('4.3 计数锁 errorAction:打标 3 + 渲染 3 恰 6 处,App.jsx 接线恰 4 处', () => {
+  for (const v of ['content-risk', 'provider', 'repair-official']) {
+    assert.equal(AE.split(`? '${v}'`).length - 1, 1, `apiErrorActions.js 里打标「${v}」应恰 1 处`);
+    assert.equal(AC.split(`action === '${v}'`).length - 1, 1, `ApiErrorActions.jsx 里渲染「${v}」应恰 1 处`);
+  }
+  assert.equal(count(AE, /\? '(?:content-risk|provider|repair-official)'/g), 3, '打标总数应恰 3');
+  assert.equal(count(AC, /action === '(?:content-risk|provider|repair-official)'/g), 3, '渲染总数应恰 3');
+  assert.equal(A.split('errorAction').length - 1, 4, 'App.jsx 的 errorAction 应只剩 4 处接线');
+});
 const COUNTS = [
-  ['errorAction', 6], ['trim-before-tool', 1], ['compact-segment', 2],
+  ['trim-before-tool', 1], ['compact-segment', 2],
   // r146b:composer-fill 5→6、newDraftId() 9→10(回退中途切走:留回原会话输入框 / 裁空会话记孤儿),其余不变。
   ['cgui:composer-fill', 6], ['newDraftId()', 10], ['handleRetryTool', 8],
 ];
@@ -196,8 +227,15 @@ t('4.4 停流三件套逐字仍在', () => {
   assert.match(A, /backgroundPidRef\.current = null/);
 });
 t('4.4 既有两个 errorAction 块逐字仍在', () => {
-  assert.match(A, /msg\.errorAction === 'provider' && !mobileChrome/);
-  assert.match(A, /msg\.errorAction === 'repair-official' && selectedSession\?\.sessionId/);
+  // 两块搬进 ApiErrorActions.jsx:msg.errorAction → action,selectedSession?.sessionId → sessionId 属性;
+  // 守卫的值由 App.jsx 的 apiErrorActionProps 传入,同处钉住。
+  const iP = A.indexOf('const apiErrorActionProps = {');
+  assert.ok(iP > 0, '找不到 App.jsx 的 apiErrorActionProps');
+  const propsBlk = A.slice(iP, A.indexOf('\n  };', iP) + 5);
+  assert.match(AC, /action === 'provider' && !mobileChrome/);
+  assert.match(propsBlk, /\n\s+mobileChrome,\n/);
+  assert.match(AC, /action === 'repair-official' && sessionId/);
+  assert.match(propsBlk, /sessionId: selectedSession\?\.sessionId \|\| null/);
 });
 t('4.4 错误分支其它自愈判据逐字不变', () => {
   assert.match(A, /usage credits required for 1m context/);
@@ -215,9 +253,26 @@ t('新回调声明在其引用的 ref 声明之后(防 TDZ 白屏)', () => {
   assert.ok(A.indexOf('const handleRollbackRef = useRef') < A.indexOf('const runContentRiskRewind = useCallback'));
 });
 t('渲染块引用的三个标识符都在同一组件内先声明', () => {
+  // r176:渲染块搬进 ApiErrorActions.jsx(这三个标识符变成它的 props,组件里不存在先后问题);
+  // App.jsx 里引用它们的地方换成 apiErrorActionProps 对象字面量 —— 对象在渲染期求值,等同原来的渲染块。
+  // 所以原判据(三个标识符先于渲染块声明)改成:三个标识符先于 apiErrorActionProps 声明、
+  // apiErrorActionProps 先于它的第一处 {...apiErrorActionProps} 使用、声明与使用之间没有跨出同一个组件函数。
+  const iProps = A.indexOf('const apiErrorActionProps = {');
+  const iUse = A.indexOf('{...apiErrorActionProps}');
+  assert.ok(iProps > 0, 'apiErrorActionProps 未声明');
+  assert.ok(iUse > iProps, 'apiErrorActionProps 必须先声明、后在渲染里使用');
+  const propsBlk = A.slice(iProps, A.indexOf('\n  };', iProps) + 5);
+  const wiring = {
+    runContentRiskRewind: /onContentRiskRewind: runContentRiskRewind,/,
+    newSessionWithLastUser: /onNewSessionWithLastUser: newSessionWithLastUser,/,
+    contentRiskAnchor: /\n\s+contentRiskAnchor,\n/,
+  };
   for (const id of ['runContentRiskRewind', 'newSessionWithLastUser', 'contentRiskAnchor']) {
-    assert.ok(A.indexOf(`const ${id} = `) < A.indexOf(`{contentRiskAnchor ? '回退到上一条工具输出之前并重发'`) || id !== 'contentRiskAnchor');
-    assert.ok(A.indexOf(`const ${id} = `) > 0, `${id} 未声明`);
+    const iDecl = A.indexOf(`const ${id} = `);
+    assert.ok(iDecl > 0, `${id} 未声明`);
+    assert.ok(iDecl < iProps, `${id} 必须先于 apiErrorActionProps 声明(否则渲染期 TDZ 白屏)`);
+    assert.match(propsBlk, wiring[id], `apiErrorActionProps 必须引用 ${id}`);
+    assert.ok(!/^(?:export default )?function [A-Z]\w*\s*\(/m.test(A.slice(iDecl, iUse)), `${id} 的声明与渲染使用之间跨出了组件`);
   }
 });
 
