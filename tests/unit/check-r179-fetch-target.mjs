@@ -179,6 +179,11 @@ const imageRouter = (await import('../../server/routes/image.js')).default;
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use('/api', imageRouter);
+// t14 用:文本路由 + 回 401 并在正文里回显收到的鉴权头的假上游
+const settingsRouter = (await import('../../server/routes/settings.js')).default;
+app.use('/api', settingsRouter);
+app.get('/leak-text/v1/models', (req, res) => res.status(401)
+  .json({ error: { message: `invalid key: ${req.headers.authorization || ''} ${req.headers['x-api-key'] || ''}` } }));
 const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
 const BASE = `http://127.0.0.1:${server.address().port}`;
 let failure = null;
@@ -197,6 +202,36 @@ try {
     assert.ok(saved, `t12: 列表里找得到刚保存的 ${id}`);
     assert.equal(normalizeSavedImageBaseURL(protocol, input), saved.baseURL, `t12: ${protocol} ${input} 与保存回显一致`);
     await fetch(`${BASE}/api/image-providers/${id}`, { method: 'DELETE' });
+  }
+
+  // t14 文本接口:带 id、自带 Key、上游 401 回显鉴权头 → 502,正文里自带 Key 被打码,也不含已保存的 Key
+  {
+    const STORED_TEXT_KEY = 'sk-r179-text-stored-aaaaaa111111';
+    const OWN_TEXT_KEY = 'sk-r179-text-own-bbbbbb222222';
+    const mk = await fetch(`${BASE}/api/custom-providers`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'r179-text', type: 'openai', baseURL: `${BASE}/stored-text/v1`, apiKey: STORED_TEXT_KEY, models: ['m'] }),
+    });
+    const mkText = await mk.text();
+    assert.equal(mk.status, 200, `t14: 建文本 provider(${mkText})`);
+    const { id } = JSON.parse(mkText);
+    assert.ok(id, 't14: 保存接口返回 id');
+
+    // 对照:假上游确实会把收到的 Key 原样回显(证明下面「不含」是打码的结果,不是上游没回显)
+    const raw = await (await fetch(`${BASE}/leak-text/v1/models`, { headers: { Authorization: `Bearer ${OWN_TEXT_KEY}` } })).text();
+    assert.ok(raw.includes(OWN_TEXT_KEY), 't14: 对照 —— 假上游正文回显了收到的 Key');
+
+    const r = await fetch(`${BASE}/api/custom-providers/fetch-models`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, type: 'openai', baseURL: `${BASE}/leak-text/v1`, apiKey: OWN_TEXT_KEY }),
+    });
+    const text = await r.text();
+    assert.equal(r.status, 502, `t14: 上游 401 → 502(${text})`);
+    assert.ok(text.includes('invalid key'), `t14: 报错正文来自上游回显那一条(${text})`);
+    assert.ok(!text.includes(OWN_TEXT_KEY), `t14: 正文不含自带的 Key(${text})`);
+    assert.ok(text.includes('***'), `t14: 正文含打码 ***(${text})`);
+    assert.ok(!text.includes(STORED_TEXT_KEY), 't14: 正文不含已保存的 Key');
+    await fetch(`${BASE}/api/custom-providers/${id}`, { method: 'DELETE' });
   }
 } catch (e) {
   failure = e;
