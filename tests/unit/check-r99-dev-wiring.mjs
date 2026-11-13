@@ -195,10 +195,12 @@ for (const [tok, want] of COUNTS) {
 // 0.2.393 = 63;r120 新增 2 处(大目录拍快照询问、清理回滚点的确认) = 65。
 // 2026-09-21 r126 新增 1 处(ProviderManager.removeCustom:删除自定义 provider 被服务端拒绝——如配置文件损坏
 // 409 CONFIG_CORRUPT——时显示原因,此前静默吞掉)= 66。
+// 2026-11-13 r179 新增 1 处(CustomProviderForm.fetchModels:获取模型被拒时原样显示后端说明——借已保存 Key 而
+// 地址改了,400 STORED_KEY_URL_MISMATCH;只带「确定」的说明提示,不是破坏性确认)= 67。
 // 以后再加弹窗会红,是设计意图——请复核该弹窗确有必要后同步本数字。
-t('4.3 confirmDialog 66(新增弹窗须复核并同步此数)', () => {
+t('4.3 confirmDialog 67(新增弹窗须复核并同步此数)', () => {
   const n = A.split('confirmDialog').length - 1;
-  assert.equal(n, 66, `实际 ${n}`);
+  assert.equal(n, 67, `实际 ${n}`);
 });
 // 注:INTERFACE §4.2 写「window.confirm 0 次」,但改前基线就有 1 次(2973 行的注释
 // "不用 window.confirm")。这里锁「调用点 0 次 + 注释仍在」,口径比字面锁更准。

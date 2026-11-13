@@ -486,9 +486,11 @@ check('M11 App.jsx compact-segment 恰 2 次(本轮一次都不调用压缩端�
 // 时问「切到该预设 / 保持不变」)→ 上限 61→62,下界不动。
 // 2026-09-21 r126:ProviderManager.removeCustom 新增 1 个确认框 —— 删除自定义 provider 被服务端拒绝(如配置文件损坏
 // → 409 CONFIG_CORRUPT)时把原因显示给用户,此前 .catch(() => {}) 静默吞掉 → 65→66。判据仍是恰等。
-check('§4.3 App.jsx confirmDialog 计数锁定为 66(r120 对齐真实值 65;2026-09-21 r126 +1;新增弹窗须复核并同步)', () => {
+// 2026-11-13 r179:CustomProviderForm.fetchModels 新增 1 个只带「确定」的说明提示 —— 编辑态借已保存 Key 而地址
+// 改了,后端拒绝(400 STORED_KEY_URL_MISMATCH)时原样显示后端那句固定文案;不是破坏性操作的确认 → 66→67。
+check('§4.3 App.jsx confirmDialog 计数锁定为 67(r120 对齐真实值 65;2026-09-21 r126 +1;2026-11-13 r179 +1;新增弹窗须复核并同步)', () => {
   const n = countF(A, 'confirmDialog');
-  assert.equal(n, 66, `实得 ${n} 次,应恰为 66`);
+  assert.equal(n, 67, `实得 ${n} 次,应恰为 67`);
 });
 // r146b:5 → 6(+1:回退中途切走,把本来要重发的内容留回原会话输入框,原会话正显示在别的窗格时立刻填入)。
 check('§4.3 App.jsx cgui:composer-fill 恰 6 次(改前 4:新开会话预填 +1;r146b 回退切走留回输入框 +1)', () => {
