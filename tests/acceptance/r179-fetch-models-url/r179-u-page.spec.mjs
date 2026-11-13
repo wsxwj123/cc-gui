@@ -60,9 +60,10 @@ test('U2 【复现】文本Provider编辑:改地址、Key留空,点「获取模�
   await expect(dlg, '提示框正文应含固定文案').toContainText(MSG, { timeout: 15_000 });
   const text = await dlg.innerText();
   expect(text, '提示框里不应有「常见原因」那一段').not.toContain('常见原因');
-  // 正文就是固定文案:除了它,只允许剩下既有的失败标题前缀「拉取模型失败：」与按钮文字(接口文件没写这个前缀要不要保留)
-  const rest = text.replace(MSG, '').replace(/拉取模型失败[：:]?/, '').replace(/取消|确定/g, '').trim();
-  expect(rest, '提示框里除固定文案外不应再有别的正文').toBe('');
+  expect(text, '提示框正文就是固定文案,不应带「拉取模型失败」前缀').not.toContain('拉取模型失败');
+  // 正文就是固定文案:去掉它与按钮文字(确定 / 取消)之后不应剩下任何东西
+  const rest = text.replace(MSG, '').replace(/取消|确定/g, '').trim();
+  expect(rest, '提示框里除固定文案与按钮文字外不应再有别的正文').toBe('');
   await page.waitForTimeout(500);
   expect(S.hits.length, '已保存那台应 0 次').toBe(0);
   expect(N.hits.length, '新地址那台应 0 次').toBe(0);

@@ -72,6 +72,8 @@ test('G2b 【守卫】已保存的值本身带结尾斜杠(直接改数据文件
 
 test('G2c 【守卫】mj-proxy 条目(贴的地址带 /mj)、Key没填、请求里仍带 /mj → 不拒绝,发往已保存地址', async () => {
   const { c, S, id } = await setupOpenai('g2c', { protocol: 'mj-proxy', pastedSuffix: '/mj' });
+  const listed = await c.req('GET', '/api/image-providers');
+  expect(findById(listed.json, id)?.baseURL, '前置:保存后地址应已剥掉 /mj,等于站点根').toBe(S.url);
   const r = await c.req('POST', IMAGE_FETCH, { id, protocol: 'mj-proxy', baseURL: `${S.url}/mj` });
   expect(r.status, r.text).toBe(200);
   expect(r.json.ok).toBe(true);
@@ -82,6 +84,16 @@ test('G2c 【守卫】mj-proxy 条目(贴的地址带 /mj)、Key没填、请求�
 test('G3 【复现】编辑态Key没填、地址不同 → 400 + needs_key + 固定文案,两台都0次,正文不含已保存Key', async () => {
   const { c, S, N, id } = await setupOpenai('g3');
   const r = await c.req('POST', IMAGE_FETCH, { id, protocol: 'openai', baseURL: `${N.url}/v1` });
+  expect(r.status, r.text).toBe(400);
+  expect(r.json).toEqual({ ok: false, type: 'needs_key', message: MSG });
+  expect(S.hits.length, '已保存那台应 0 次').toBe(0);
+  expect(N.hits.length, '新地址那台应 0 次').toBe(0);
+  expect(r.text).not.toContain(STORED_KEY);
+});
+
+test('G3b 【复现】编辑态apiKey传成数字、地址不同 → 当作Key没填:400 + needs_key + 固定文案,两台都0次,正文不含已保存Key', async () => {
+  const { c, S, N, id } = await setupOpenai('g3b');
+  const r = await c.req('POST', IMAGE_FETCH, { id, protocol: 'openai', baseURL: `${N.url}/v1`, apiKey: 12345 });
   expect(r.status, r.text).toBe(400);
   expect(r.json).toEqual({ ok: false, type: 'needs_key', message: MSG });
   expect(S.hits.length, '已保存那台应 0 次').toBe(0);

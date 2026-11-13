@@ -40,6 +40,7 @@ test('F2 【守卫】窗口数据只写进「探测的就是已保存地址」�
 
   const r1 = await c.req('POST', TEXT_FETCH, { id, type: 'openai', baseURL: newBase, apiKey: NEW_KEY });
   expect(r1.status, r1.text).toBe(200);
+  await sleep(400);   // 窗口数据在响应返回之后才写文件;两次写挨太近,第一次的错写会被第二次盖掉而漏检
   const r2 = await c.req('POST', TEXT_FETCH, { id, type: 'openai', baseURL: savedBase, apiKey: NEW_KEY });
   expect(r2.status, r2.text).toBe(200);
   expect(S.hits.length, '第二次(地址相同)应发往已保存那台').toBeGreaterThanOrEqual(1);
@@ -70,6 +71,15 @@ test('F3 【守卫】编辑态Key没填(空串 / 纯空格)、地址=已保存�
 test('F4a 【复现】编辑态Key没填、地址不同 → 400 + STORED_KEY_URL_MISMATCH + 固定文案,两台都0次', async () => {
   const { c, S, N, id, newBase } = await setup('f4a');
   const r = await c.req('POST', TEXT_FETCH, { id, type: 'openai', baseURL: newBase });
+  expect(r.status, r.text).toBe(400);
+  expect(r.json).toEqual({ error: MSG, code: 'STORED_KEY_URL_MISMATCH' });
+  expect(S.hits.length, '已保存那台应 0 次').toBe(0);
+  expect(N.hits.length, '新地址那台应 0 次').toBe(0);
+});
+
+test('F4c 【复现】编辑态apiKey传成数字、地址不同 → 当作Key没填:400 + STORED_KEY_URL_MISMATCH + 固定文案,两台都0次', async () => {
+  const { c, S, N, id, newBase } = await setup('f4c');
+  const r = await c.req('POST', TEXT_FETCH, { id, type: 'openai', baseURL: newBase, apiKey: 12345 });
   expect(r.status, r.text).toBe(400);
   expect(r.json).toEqual({ error: MSG, code: 'STORED_KEY_URL_MISMATCH' });
   expect(S.hits.length, '已保存那台应 0 次').toBe(0);
@@ -126,7 +136,7 @@ test('F8a 【复现】已保存那台回显鉴权头并报401;Key没填 → 响�
   const r = await c.req('POST', TEXT_FETCH, { id, type: 'openai', baseURL: savedBase });
   expect(S.hits.length, '前置:上游应真的收到过请求(才谈得上回显)').toBeGreaterThanOrEqual(1);
   expect(S.hits[0].auth, '前置:上游收到的是已保存的 Key').toBe(`Bearer ${STORED_KEY}`);
-  expect(r.status, r.text).toBe(401);
+  expect(r.status, r.text).toBe(502);
   expect(r.text, '响应正文不应含已保存的 Key').not.toContain(STORED_KEY);
   expect(r.text, '响应正文里的 Key 应被打码成 ***').toContain('***');
 });
