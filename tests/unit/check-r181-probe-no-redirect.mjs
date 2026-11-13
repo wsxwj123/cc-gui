@@ -189,4 +189,88 @@ for (const status of [307, 308]) {
   for (const k of ['auth', 'network', 'unsupported']) assert.equal(typeof hints[k], 'string', `i1: 原有 ${k} 一项还在`);
 }
 
+// ─────────── g1 / g2 生图 gemini 拉模型「换请求头重试」的两支(接口级) ───────────
+// 隔离:HOME/USERPROFILE 指向 mktemp 目录,import 路由前设好;假上游 A、B 都在本进程、只听 127.0.0.1。
+{
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const http = await import('node:http');
+  const TMP_HOME = mkdtempSync(join(tmpdir(), 'cgui-r181-home-'));
+  process.env.HOME = TMP_HOME;
+  process.env.USERPROFILE = TMP_HOME;
+
+  const listen = (handler) => new Promise((r) => { const s = http.createServer(handler); s.listen(0, '127.0.0.1', () => r(s)); });
+  const closeServer = async (s) => { s.closeAllConnections?.(); s.close(); await new Promise((r) => s.once('close', r)); };
+
+  // A 的行为由 mode 决定;逐次记录收到的路径与鉴权头
+  let mode = 'redirect';
+  const aHits = []; const bHits = [];
+  const B = await listen((req, res) => { bHits.push(req.url); res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"models":[]}'); });
+  const BPORT = B.address().port;
+  const A = await listen((req, res) => {
+    aHits.push({ path: req.url, auth: req.headers.authorization || '', xgoog: req.headers['x-goog-api-key'] || '' });
+    if (aHits.length === 1) { // 第一组请求头 → 401
+      res.writeHead(401, { 'content-type': 'application/json' }); res.end('{"error":{"message":"bad key"}}'); return;
+    }
+    if (mode === 'redirect') { // 换了请求头的第二次 → 302 到 B
+      res.writeHead(302, { location: `http://127.0.0.1:${BPORT}/v1beta/models` }); res.end(); return;
+    }
+    req.socket.destroy(); // 第二次请求直接掐断连接 → 那次请求抛异常
+  });
+  const APORT = A.address().port;
+
+  const express = (await import('express')).default;
+  const imageRouter = (await import('../../server/routes/image.js')).default;
+  const app = express();
+  app.use(express.json({ limit: '2mb' }));
+  app.use('/api', imageRouter);
+  const api = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const API = `http://127.0.0.1:${api.address().port}`;
+  const KEY = 'sk-r181-gemini-white-box';
+  const fetchModels = async () => {
+    const r = await fetch(`${API}/api/image-providers/fetch-models`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ protocol: 'gemini', baseURL: `http://127.0.0.1:${APORT}/v1beta`, apiKey: KEY }),
+    });
+    const text = await r.text();
+    let json = null; try { json = JSON.parse(text); } catch { json = null; }
+    return { status: r.status, text, json };
+  };
+
+  let failure = null;
+  try {
+    // g1 换头后的请求被拒 → redirect;B 0 次;A 恰好 2 次且两次鉴权头不同
+    {
+      mode = 'redirect'; aHits.length = 0; bHits.length = 0;
+      const out = await fetchModels();
+      assert.equal(out.json?.ok, false, `g1: 失败(${out.text})`);
+      assert.equal(out.json?.type, 'redirect', `g1: type 是 redirect(${out.text})`);
+      assert.ok(out.json.message.includes('重定向'), `g1: message 含「重定向」(${out.text})`);
+      assert.equal(bHits.length, 0, 'g1: B 收到 0 次');
+      assert.equal(aHits.length, 2, `g1: A 恰好 2 次(${JSON.stringify(aHits)})`);
+      assert.ok(aHits.every((h) => h.path === '/v1beta/models'), 'g1: 两次都是同一路径');
+      const sig = (h) => `${h.auth}|${h.xgoog}`;
+      assert.notEqual(sig(aHits[0]), sig(aHits[1]), 'g1: 两次的鉴权头不同');
+      assert.ok(!out.text.includes(KEY), 'g1: 响应不含 Key 原文');
+    }
+    // g2 换头请求抛异常 → 保留首次响应,按第一次的 401 报鉴权失败
+    {
+      mode = 'destroy'; aHits.length = 0; bHits.length = 0;
+      const out = await fetchModels();
+      assert.equal(aHits.length, 2, `g2: A 收到 2 次(第二次被掐断)(${JSON.stringify(aHits)})`);
+      assert.equal(out.json?.ok, false, `g2: 失败(${out.text})`);
+      assert.equal(out.json?.type, 'auth', `g2: type 是 auth,按首次 401 报(${out.text})`);
+      assert.ok(out.json.message.includes('鉴权失败'), `g2: message 含「鉴权失败」(${out.text})`);
+      assert.equal(bHits.length, 0, 'g2: B 收到 0 次');
+    }
+  } catch (e) {
+    failure = e;
+  } finally {
+    for (const s of [api, A, B]) await closeServer(s);
+    rmSync(TMP_HOME, { recursive: true, force: true });
+  }
+  if (failure) throw failure;
+}
+
 console.log('✓ check-r181-probe-no-redirect: 全部通过');
