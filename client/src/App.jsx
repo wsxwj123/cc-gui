@@ -182,7 +182,7 @@ import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import ApiErrorActions from './components/ApiErrorActions.jsx';
 import { deriveApiErrorUi, deriveHistoryApiErrorUi, hintsAsQuoteSuffix, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
-import { isLocalOnlyEntry } from './utils/localNotice.js';
+import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
@@ -5488,6 +5488,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       );
     }
 
+    // r178:本会话的键(队列键 + 真实 sessionId),撤上一轮本地提示时按它认归属。
+    const noticeOwnerKeys = [sessionQueueKey, selectedSession?.sessionId];
+    // r178:不画用户气泡的新回合(隐藏续跑消息:工具局部重做、计划执行等)同样撤掉上一轮的本地提示;
+    // 画气泡的发送在 pushBubble 里与气泡同一次更新撤。reattach 是接着同一回合,不撤。
+    if (!reattachPid && hiddenUserMessage) setChatMessages((prev) => dropLocalNoticesOf(prev, noticeOwnerKeys));
+
     // 只有真正开始新的空闲回合才恢复 following；忙碌 Enter 排队/并入不清阅读意图。
     if (!reattachPid) {
       userScrolledAwayRef.current = false;
@@ -5608,7 +5614,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         displayText: meta?.displayText,
       };
       if (!paneStillOn(bubbleOwnerKey)) { stashUserBubbles(bubbleOwnerKey, [bubble]); return; }
-      setChatMessages((prev) => [...prev, bubble]);
+      // r178:新一轮开始 → 撤掉本会话上一轮留下的本地提示(报错块 / 空回复提示 / 花费上限),
+      // 否则新回合存盘后旧提示排到新回合后面,连续报错时两块叠在一起。
+      setChatMessages((prev) => [...dropLocalNoticesOf(prev, noticeOwnerKeys), bubble]);
     };
     if (!deferBubbleForAsk) pushBubble();
     // L4:所有附件 sidecar 先进入持久 outbox，再尝试 POST。draft 先以会话 ownerKey

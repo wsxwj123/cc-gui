@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
-  isLocalNotice, isLocalOnlyEntry, LOCAL_NOTICE_KINDS,
+  isLocalNotice, isLocalOnlyEntry, LOCAL_NOTICE_KINDS, dropLocalNoticesOf,
 } from '../../client/src/utils/localNotice.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -72,6 +72,38 @@ t('本地提示条目不带 srcUuids / roundStartTs', () => {
       assert.ok(!/srcUuids|roundStartTs/.test(body), `${re.source} 不应带 srcUuids / roundStartTs`);
     }
   }
+});
+
+// ── 项 3:新一轮开始撤掉本会话上一轮的本地提示 ──
+const E = (ownerKey, kind = 'error') => ({ type: 'turn', localNotice: kind, ownerKey });
+t('dropLocalNoticesOf:只撤本会话的本地提示', () => {
+  const user = { type: 'user', ownerKey: 's1' };
+  const turn = { type: 'turn', ownerKey: 's1' };
+  const btw = { type: 'btw', ownerKey: 's1' };
+  const other = E('s2');
+  const list = [user, turn, btw, E('s1'), E('s1', 'empty'), E('s1', 'budget'), other];
+  assert.deepEqual(dropLocalNoticesOf(list, 's1'), [user, turn, btw, other]);
+});
+t('dropLocalNoticesOf:键数组(队列键 + 真实 sessionId)都认', () => {
+  const a = E('draft-x'); const b = E('sid-1'); const c = E('sid-2');
+  assert.deepEqual(dropLocalNoticesOf([a, b, c], ['draft-x', 'sid-1']), [c]);
+});
+t('dropLocalNoticesOf:没有可撤的 / 无有效键 → 原数组', () => {
+  const list = [{ type: 'user', ownerKey: 's1' }, E('s2')];
+  assert.equal(dropLocalNoticesOf(list, 's1'), list);
+  assert.equal(dropLocalNoticesOf(list, [null, undefined]), list);
+  assert.equal(dropLocalNoticesOf(list, null), list);
+  assert.equal(dropLocalNoticesOf([], 's1').length, 0);
+});
+t('App.jsx:pushBubble 与气泡同一次更新撤本地提示', () => {
+  assert.match(APP, /import \{[^}]*\bdropLocalNoticesOf\b[^}]*\} from '\.\/utils\/localNotice\.js';/);
+  assert.match(APP, /const noticeOwnerKeys = \[sessionQueueKey, selectedSession\?\.sessionId\];/);
+  assert.match(APP, /setChatMessages\(\(prev\) => \[\.\.\.dropLocalNoticesOf\(prev, noticeOwnerKeys\), bubble\]\);/);
+});
+t('App.jsx:不画气泡的新回合(隐藏续跑)也撤,reattach 不撤', () => {
+  assert.match(APP, /if \(!reattachPid && hiddenUserMessage\) setChatMessages\(\(prev\) => dropLocalNoticesOf\(prev, noticeOwnerKeys\)\);/);
+  // noticeOwnerKeys 必须在 pushBubble 定义之前声明
+  assert.ok(APP.indexOf('const noticeOwnerKeys =') < APP.indexOf('const pushBubble = () =>'));
 });
 
 console.log(`check-r178-local-notice: ${n} passed`);

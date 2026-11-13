@@ -22,10 +22,13 @@ export function isLocalOnlyEntry(m) {
   return m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || isLocalNotice(m);
 }
 
-// 同一会话新起一轮时撤掉上一轮遗留的本地提示(只撤归属 ownerKey 的;其它会话的不动)。
+// 同一会话新起一轮时撤掉上一轮遗留的本地提示(只撤归属本会话的;其它会话的不动)。
+// ownerKeys:一个键或键数组(本会话的队列键与真实 sessionId —— 本地提示的 ownerKey 取
+// streamSid || 队列键,draft 升级前后两种形态都可能出现)。空键忽略;没有有效键时什么都不撤。
 // 返回原数组表示没有可撤的。
-export function dropLocalNoticesOf(list, ownerKey) {
-  if (!Array.isArray(list) || !list.length || !ownerKey) return list;
-  const next = list.filter((m) => !(isLocalNotice(m) && m.ownerKey === ownerKey));
+export function dropLocalNoticesOf(list, ownerKeys) {
+  const keys = (Array.isArray(ownerKeys) ? ownerKeys : [ownerKeys]).filter(Boolean);
+  if (!Array.isArray(list) || !list.length || !keys.length) return list;
+  const next = list.filter((m) => !(isLocalNotice(m) && keys.includes(m.ownerKey)));
   return next.length === list.length ? list : next;
 }
