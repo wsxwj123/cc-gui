@@ -639,8 +639,34 @@ export function isStreamChunkShape(j) {
   return isPlainObject(j) && (Array.isArray(j.choices) || isPlainObject(j.usage));
 }
 
-function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
+// apiKey:摘要打码用;replayRaw:只有「错标 CT 的流式文本回放」那一支传,判成第 3 类时用整段原文做摘要。
+function streamOpenAIToAnthropic(upstreamRes, clientRes, model, apiKey, replayRaw) {
   const msgId = 'msg_' + Math.random().toString(36).slice(2, 14);
+  // r178b:还没往下发过任何东西时记三个标记,流结束时据此判断是不是「根本不是回复」。
+  //   sawData:见过 [DONE] 或认得的数据块(带 data: 前缀的与裸 JSON 行都算);
+  //   sawNonBlank:见过任何非空行;unrec:第一条不认识的内容(最多 65536 个码元)。
+  // 只更新标记,不改变任何行原有的处理。
+  let sawData = false;
+  let sawNonBlank = false;
+  let unrec = null;
+  const noteUnrec = (s) => { if (unrec === null) unrec = s.slice(0, SUMMARY_INPUT_MAX_UNITS); };
+  const noteShape = (j, text) => { if (isStreamChunkShape(j)) sawData = true; else noteUnrec(text); };
+  const noteLineFlags = (line) => {
+    if (!line) return;
+    sawNonBlank = true;
+    if (line.startsWith('data:')) {
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') { sawData = true; return; }
+      let j;
+      try { j = JSON.parse(payload); } catch { noteUnrec(payload); return; }
+      noteShape(j, payload);
+      return;
+    }
+    if (line[0] === ':' || /^(event|id|retry):/.test(line)) return; // SSE 字段行与注释(心跳)
+    let j;
+    try { j = JSON.parse(line); } catch { noteUnrec(line); return; }
+    noteShape(j, line);
+  };
   // 惰性 message_start:收到首个正常块才发。在此之前发现上游流内错误,可以改回非 200 +
   // anthropic 错误体(CLI 只在非 200 时透出上游 message);已发流则退化成 anthropic error 事件。
   let started = false;
@@ -799,6 +825,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
       buf = buf.slice(nl + 1);
       if (aborted) return;
       if (!line) continue;
+      if (!started) noteLineFlags(line);
       if (!line.startsWith('data:')) {
         // 兜底:CT 声明是 event-stream,却把裸 JSON 错误体当 body 发(某些中转站)。
         // 未发流时识别 .error → 回非 200。跨行 pretty-JSON 靠改动点 A 的 CT 检查拦下,这里只认单行。
@@ -816,6 +843,20 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
 
   upstreamRes.on('end', () => {
     if (aborted) return;
+    if (!started) {
+      // r178b:缓冲区里剩下的半行只拿来更新标记,不送进 handleChunk(与改前一样不处理它)。
+      noteLineFlags(buf.trim());
+      if (unrec !== null) {
+        aborted = true;
+        sendUnrecognized(clientRes, replayRaw != null ? replayRaw : unrec, apiKey);
+        return;
+      }
+      if (!sawData) {
+        aborted = true;
+        sendUnrecognized(clientRes, '', apiKey, sawNonBlank ? SUMMARY_NO_DATA_LINES : undefined);
+        return;
+      }
+    }
     ensureStarted(); // 空但成功的流:仍补出合法(空)的 anthropic 收尾
     closeTextBlock();
     closeThinkingBlock();
