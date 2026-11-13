@@ -166,12 +166,13 @@ test('F9 【守卫】带一个不存在的id + 地址 + Key → 按新建态处�
   expect(r.json.models).toEqual([NEW_MODEL.id]);
 });
 
-test('F10a 【守卫】已保存协议anthropic、Key没填、请求里type=openai → 按已保存协议:第一次请求带 x-api-key', async () => {
+test('F10a 【复现】已保存协议anthropic、Key没填、请求里type=openai → 按请求里的协议(r181 起):第一次请求带 Authorization: Bearer 已保存的Key,不带 x-api-key', async () => {
   const { c, S, id, savedBase } = await setup('f10a', { type: 'anthropic' });
   const r = await c.req('POST', TEXT_FETCH, { id, type: 'openai', baseURL: savedBase });
   expect(r.status, r.text).toBe(200);
   expect(S.hits.length, '已保存那台应收到请求').toBeGreaterThanOrEqual(1);
-  expect(S.hits[0].xkey, '第一次请求应带 x-api-key=已保存的 Key').toBe(STORED_KEY);
+  expect(S.hits[0].auth, '第一次请求应带 Authorization: Bearer <已保存的 Key>').toBe(`Bearer ${STORED_KEY}`);
+  expect(S.hits[0].xkey, '第一次请求不应带 x-api-key').toBe('');
 });
 
 test('F10b 【复现】已保存协议anthropic、Key非空、type=openai、地址不同 → 新地址那台只收到 Bearer,没有 x-api-key', async () => {
