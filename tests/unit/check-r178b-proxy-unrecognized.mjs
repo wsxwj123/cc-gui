@@ -33,7 +33,7 @@ assert.equal(summarizeUpstreamBody([1, 2]), '[1,2]', '数组按原文'); ok();
 assert.equal(summarizeUpstreamBody(''), '响应体为空'); ok();
 assert.equal(summarizeUpstreamBody('  \n\t '), '响应体为空'); ok();
 assert.equal(summarizeUpstreamBody('<html><body></body></html>'), '响应体没有可读文字'); ok();
-assert.equal(summarizeUpstreamBody('\u0001\u0002​'), '响应体没有可读文字'); ok();
+assert.equal(summarizeUpstreamBody('\u0001\u0002\u200B'), '响应体没有可读文字'); ok();
 
 // ── 去网页标签、script / style / 注释 ─────────────────────────────────────────
 assert.equal(summarizeUpstreamBody('<html><body><h1>504 Gateway Time-out</h1></body></html>'), '504 Gateway Time-out'); ok();
@@ -50,7 +50,7 @@ assert.equal(summarizeUpstreamBody('<p>保留</p><script>x'), '保留', '没有�
 assert.equal(summarizeUpstreamBody('upstream busy, please retry later'), 'upstream busy, please retry later', '纯文本原样'); ok();
 
 // ── 清理:控制字符、双向控制符、压空白 ──────────────────────────────────────────
-assert.equal(summarizeUpstreamBody('a\u0001b\u007Fc\u0085d‮e⁦f​g﻿h'), 'abcdefgh'); ok();
+assert.equal(summarizeUpstreamBody('a\u0001b\u007Fc\u0085d\u202Ee\u2066f\u200Bg\uFEFFh'), 'abcdefgh'); ok();
 assert.equal(summarizeUpstreamBody('  a \n\n\t b\r\n  c  '), 'a b c'); ok();
 
 // ── 截断到 300 个码点 ──────────────────────────────────────────────────────────
@@ -136,6 +136,23 @@ for (const [v, want] of [
   summarizeUpstreamBody(big3, KEY);
   ms = performance.now() - t0;
   assert.ok(ms < 200, `大量未闭合开始标记耗时 ${ms.toFixed(1)}ms`); ok();
+}
+
+// ── 看守:源码里不得出现零宽字符、双向控制符、BOM 的字面字符(一律写转义) ──────────
+{
+  const { readFileSync } = await import('node:fs');
+  const invisibleRanges = [[0x200B, 0x200F], [0x202A, 0x202E], [0x2066, 0x2069], [0xFEFF, 0xFEFF]];
+  for (const rel of ['../../server/services/openai-proxy.js', './check-r178b-proxy-unrecognized.mjs']) {
+    const src = readFileSync(new URL(rel, import.meta.url), 'utf8');
+    const hits = [];
+    let line = 1;
+    for (const ch of src) {
+      const cp = ch.codePointAt(0);
+      if (cp === 10) line++;
+      if (invisibleRanges.some(([a, b]) => cp >= a && cp <= b)) hits.push(`第 ${line} 行 U+${cp.toString(16).toUpperCase()}`);
+    }
+    assert.deepEqual(hits, [], `${rel} 里有看不见的字面字符,改用转义写法`); ok();
+  }
 }
 
 console.log(`check-r178b-proxy-unrecognized: ${n} 项通过`);
