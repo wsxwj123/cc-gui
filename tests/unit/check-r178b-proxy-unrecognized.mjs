@@ -1,0 +1,141 @@
+#!/usr/bin/env node
+// r178b:openai 协议代理里「上游按 200 返回了根本不是回复的东西」时用到的三个纯函数(白盒)。
+//   · summarizeUpstreamBody:字段取值顺序、去网页标签、清理控制字符、截断、限时。
+//   · maskSecret:Key 打码(靠前、跨截断点、中间夹控制字符、不足 8 个字符、多处重叠)。
+//   · isStreamChunkShape:流里「认得的数据块」。
+import assert from 'node:assert/strict';
+import { summarizeUpstreamBody, maskSecret, isStreamChunkShape } from '../../server/services/openai-proxy.js';
+
+const KEY = 'sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012'; // 32 个字符的假 Key
+assert.equal(KEY.length, 32);
+const noKeyRun = (s, label) => {
+  for (let i = 0; i + 8 <= KEY.length; i++) {
+    assert.ok(!s.includes(KEY.slice(i, i + 8)), `${label}:摘要里出现了 Key 的 8 字符片段 ${i}`);
+  }
+};
+let n = 0;
+const ok = () => { n++; };
+
+// ── 字段取值顺序与「不是字符串的跳过」 ─────────────────────────────────────────
+assert.equal(summarizeUpstreamBody({ error: 'E', msg: 'M', message: 'G', detail: 'D', error_msg: 'X' }), 'E'); ok();
+assert.equal(summarizeUpstreamBody({ error: { code: 1 }, msg: 'M', message: 'G' }), 'M', 'error 不是字符串时跳过'); ok();
+assert.equal(summarizeUpstreamBody({ msg: '   ', message: 'G', detail: 'D' }), 'G', '空白字符串跳过'); ok();
+assert.equal(summarizeUpstreamBody({ msg: 42, message: null, detail: 'D', error_msg: 'X' }), 'D'); ok();
+assert.equal(summarizeUpstreamBody({ msg: ['a'], error_msg: 'X' }), 'X'); ok();
+assert.equal(summarizeUpstreamBody({ code: 429 }), '{"code":429}', '都没有就用整段原文'); ok();
+assert.equal(summarizeUpstreamBody('{"code":429,"msg":"余额不足,请充值"}'), '余额不足,请充值', '字符串形式的 JSON 同样取字段'); ok();
+assert.equal(summarizeUpstreamBody('{"code":429}'), '{"code":429}'); ok();
+assert.equal(summarizeUpstreamBody('{"success":false,"message":"model not found: x"}'), 'model not found: x'); ok();
+assert.equal(summarizeUpstreamBody({ id: 'c1', choices: [] }), '{"id":"c1","choices":[]}'); ok();
+assert.equal(summarizeUpstreamBody([1, 2]), '[1,2]', '数组按原文'); ok();
+
+// ── 空与无文字 ────────────────────────────────────────────────────────────────
+assert.equal(summarizeUpstreamBody(''), '响应体为空'); ok();
+assert.equal(summarizeUpstreamBody('  \n\t '), '响应体为空'); ok();
+assert.equal(summarizeUpstreamBody('<html><body></body></html>'), '响应体没有可读文字'); ok();
+assert.equal(summarizeUpstreamBody('\u0001\u0002​'), '响应体没有可读文字'); ok();
+
+// ── 去网页标签、script / style / 注释 ─────────────────────────────────────────
+assert.equal(summarizeUpstreamBody('<html><body><h1>504 Gateway Time-out</h1></body></html>'), '504 Gateway Time-out'); ok();
+{
+  const s = summarizeUpstreamBody('<html><head><style>body{color:red}</style><SCRIPT type="x">alert("坏")</SCRIPT></head><body><!-- 注释 <b>x</b> --><p>网关&nbsp;错误</p></body></html>');
+  assert.equal(s, '网关 错误'); ok();
+}
+{
+  const s = summarizeUpstreamBody('<p>前</p><img src="data:image/png;base64,AAAA"> 网关错误 a < b > c');
+  assert.ok(!s.includes('<') && !s.includes('>'), `不含尖括号:${s}`);
+  assert.ok(s.includes('网关错误') && s.startsWith('前'), s); ok();
+}
+assert.equal(summarizeUpstreamBody('<p>保留</p><script>x'), '保留', '没有闭合的 script 删到末尾'); ok();
+assert.equal(summarizeUpstreamBody('upstream busy, please retry later'), 'upstream busy, please retry later', '纯文本原样'); ok();
+
+// ── 清理:控制字符、双向控制符、压空白 ──────────────────────────────────────────
+assert.equal(summarizeUpstreamBody('a\u0001b\u007Fc\u0085d‮e⁦f​g﻿h'), 'abcdefgh'); ok();
+assert.equal(summarizeUpstreamBody('  a \n\n\t b\r\n  c  '), 'a b c'); ok();
+
+// ── 截断到 300 个码点 ──────────────────────────────────────────────────────────
+{
+  const s = summarizeUpstreamBody('x'.repeat(5000));
+  assert.equal(Array.from(s).length, 301); assert.ok(s.endsWith('…')); ok();
+  const e = summarizeUpstreamBody('😀'.repeat(400));
+  assert.equal(Array.from(e).length, 301, '按码点数,不按码元'); assert.ok(e.endsWith('…')); ok();
+  assert.equal(summarizeUpstreamBody('y'.repeat(300)), 'y'.repeat(300), '恰好 300 不加省略号'); ok();
+}
+
+// ── Key 打码 ──────────────────────────────────────────────────────────────────
+{
+  const a = summarizeUpstreamBody('error for key ' + KEY + ' please check', KEY); // 靠前
+  assert.ok(a.includes('***'), a); noKeyRun(a, '靠前'); assert.equal(a, 'error for key *** please check'); ok();
+
+  const b = summarizeUpstreamBody('a'.repeat(290) + KEY + 'tail', KEY); // 跨截断点
+  noKeyRun(b, '跨截断点'); ok();
+  // 打码在截断之前:截断点前的 10 个 Key 字符也不会漏出来
+  const b2 = summarizeUpstreamBody('a'.repeat(290) + KEY + 'b'.repeat(300), KEY);
+  noKeyRun(b2, '跨截断点 2'); assert.ok(b2.includes('***')); ok();
+
+  const c = summarizeUpstreamBody('key=' + KEY.slice(0, 16) + '\u0001' + KEY.slice(16) + ' end', KEY); // 中间夹控制字符
+  assert.ok(c.includes('***'), c); noKeyRun(c, '夹控制字符'); assert.equal(c, 'key=*** end'); ok();
+
+  assert.equal(maskSecret('abc1234 abc1234', 'abc1234'), 'abc1234 abc1234', 'Key 不足 8 个字符不打码'); ok();
+  assert.equal(maskSecret('abc', ''), 'abc'); ok();
+  assert.equal(maskSecret('abc', undefined), 'abc'); ok();
+  // 多处重叠:Key 的两段重叠片段与多次出现
+  assert.equal(maskSecret('[' + KEY.slice(0, 12) + '][' + KEY.slice(5, 20) + ']' + KEY + KEY, KEY), '[***][***]***'); ok();
+  assert.equal(maskSecret('x' + KEY.slice(3, 10) + 'y', KEY), 'x' + KEY.slice(3, 10) + 'y', '7 个字符的片段不打码'); ok();
+  assert.equal(maskSecret('aaaaaaaaaaa', 'aaaaaaaa'), '***', '自重叠'); ok();
+  assert.equal(maskSecret(KEY.toLowerCase(), KEY), KEY.toLowerCase(), '区分大小写'); ok();
+}
+
+// ── isStreamChunkShape ────────────────────────────────────────────────────────
+for (const [v, want] of [
+  [{ choices: [] }, true],
+  [{ choices: [{ delta: {} }] }, true],
+  [{ choices: [{ code: 429 }] }, true],
+  [{ usage: { prompt_tokens: 1 } }, true],
+  [{ choices: [], usage: {} }, true],
+  [{ code: 429, msg: '余额不足' }, false],
+  [{ choices: null }, false],
+  [{ choices: {} }, false],
+  [{ usage: null }, false],
+  [{ usage: [] }, false],
+  [{ usage: 3 }, false],
+  [[], false],
+  [null, false],
+  [undefined, false],
+  ['{"choices":[]}', false],
+  [42, false],
+]) { assert.equal(isStreamChunkShape(v), want, JSON.stringify(v)); ok(); }
+
+// ── 限时:不得平方级 ──────────────────────────────────────────────────────────
+{
+  const big = '<a'.repeat(32768); // 65536 个码元,没有 >
+  assert.equal(big.length, 65536);
+  let t0 = performance.now();
+  const s1 = summarizeUpstreamBody(big, KEY);
+  let ms = performance.now() - t0;
+  assert.ok(ms < 200, `<a 重复耗时 ${ms.toFixed(1)}ms`);
+  // 没有一个完整标签,不像网页,按纯文本原样(截断到 300 码点)
+  assert.equal(s1, '<a'.repeat(150) + '…'); ok();
+
+  const bigHtml = '<p>' + '<a'.repeat(32766); // 像网页,标签正则在每个 <a 上都要尝试
+  t0 = performance.now();
+  const sh = summarizeUpstreamBody(bigHtml, KEY);
+  ms = performance.now() - t0;
+  assert.ok(ms < 200, `网页里 <a 重复耗时 ${ms.toFixed(1)}ms`);
+  assert.ok(!sh.includes('<') && !sh.includes('>'), '网页里剩下的尖括号换成空格'); ok();
+
+  const big2 = '<script' + 'x'.repeat(65529);
+  t0 = performance.now();
+  const s2 = summarizeUpstreamBody(big2, KEY);
+  ms = performance.now() - t0;
+  assert.ok(ms < 200, `只有 <script 耗时 ${ms.toFixed(1)}ms`);
+  assert.equal(s2, '响应体没有可读文字'); ok();
+
+  const big3 = '<!--'.repeat(20000) + '<script'.repeat(5000) + '<style'.repeat(5000);
+  t0 = performance.now();
+  summarizeUpstreamBody(big3, KEY);
+  ms = performance.now() - t0;
+  assert.ok(ms < 200, `大量未闭合开始标记耗时 ${ms.toFixed(1)}ms`); ok();
+}
+
+console.log(`check-r178b-proxy-unrecognized: ${n} 项通过`);

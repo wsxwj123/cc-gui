@@ -501,6 +501,144 @@ export function isConnectPhaseError(err) {
   return codes.some((c) => CONNECT_PHASE_CODES.has(c));
 }
 
+// ── r178b:上游按 200 返回了「根本不是回复」的东西(余额不足 JSON、网页错误页、纯文本……)时,
+// 把上游原文做成摘要放进报错。摘要一律按纯文本处理:清理 → 打码 → 截断(顺序固定,见下)。
+const UNRECOGNIZED_PREFIX = '上游返回了无法识别的响应(HTTP 200):';
+const UPSTREAM_MSG_FIELDS = ['error', 'msg', 'message', 'detail', 'error_msg'];
+const SUMMARY_INPUT_MAX_UNITS = 65536; // 开头先截前 65536 个 UTF-16 码元
+const SUMMARY_MAX_CODEPOINTS = 300;
+const SUMMARY_EMPTY = '响应体为空';
+const SUMMARY_NO_TEXT = '响应体没有可读文字';
+const SUMMARY_NO_DATA_LINES = '流里没有任何数据行';
+// 标签正则排除 `<`:每次尝试最多扫到下一个 `<` 或 `>` 就停,整体线性,不会平方级回溯。
+const HTML_TAG_RE = /<\/?[a-z!][^<>]*>/gi;
+const HTML_TAG_TEST_RE = /<\/?[a-z!][^<>]*>/i;
+const HTML_BLOCKS = [['<script', '</script'], ['<style', '</style'], ['<!--', '-->']];
+
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+// 只把 A-Z 变小写:与原文逐码元对齐(toLowerCase 对个别字符会改变长度,下标就对不上了)。
+function asciiLower(s) {
+  return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+// script / style / 注释整段删掉(用 indexOf 找开始与结束,线性);找不到结束就删到末尾。
+function removeHtmlBlocks(s) {
+  const lower = asciiLower(s);
+  const next = HTML_BLOCKS.map(([open]) => lower.indexOf(open));
+  let out = '';
+  let i = 0;
+  for (;;) {
+    let k = -1;
+    for (let b = 0; b < HTML_BLOCKS.length; b++) {
+      if (next[b] !== -1 && next[b] < i) next[b] = lower.indexOf(HTML_BLOCKS[b][0], i);
+      if (next[b] !== -1 && (k === -1 || next[b] < next[k])) k = b;
+    }
+    if (k === -1) { out += s.slice(i); break; }
+    const start = next[k];
+    out += s.slice(i, start) + ' ';
+    const [open, close] = HTML_BLOCKS[k];
+    const end = lower.indexOf(close, start + open.length);
+    if (end === -1) break;
+    const gt = close === '-->' ? end + close.length - 1 : lower.indexOf('>', end + close.length);
+    if (gt === -1) break;
+    i = gt + 1;
+  }
+  return out;
+}
+function stripHtml(s) {
+  return removeHtmlBlocks(s)
+    .replace(HTML_TAG_RE, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/[<>]/g, ' ');
+}
+function looksLikeHtml(s) {
+  if (HTML_TAG_TEST_RE.test(s)) return true;
+  const lower = asciiLower(s);
+  return HTML_BLOCKS.some(([open]) => lower.includes(open));
+}
+// 清理:常见空白控制符当空白;其余 C0 / C1 控制字符、DEL、零宽字符与双向控制符删掉;压空白、去首尾。
+function cleanPlainText(s) {
+  return s
+    .replace(/[\t\n\v\f\r]/g, ' ')
+    .replace(/[\u0000-\u001F\u007F-\u009F​-‏‪-‮⁦-⁩﻿]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Key 打码:Key 的每一个长度为 8 的片段,在文字里的所有出现位置都标记;每段连续被标记的文字换成 `***`。
+// 区分大小写;Key 少于 8 个字符时不打码。export 仅为可单测
+export function maskSecret(text, secret) {
+  const t = typeof text === 'string' ? text : String(text ?? '');
+  if (typeof secret !== 'string' || secret.length < 8 || !t) return t;
+  const marks = new Uint8Array(t.length);
+  let any = false;
+  const seen = new Set();
+  for (let i = 0; i + 8 <= secret.length; i++) {
+    const frag = secret.slice(i, i + 8);
+    if (seen.has(frag)) continue;
+    seen.add(frag);
+    for (let p = t.indexOf(frag); p !== -1; p = t.indexOf(frag, p + 1)) {
+      marks.fill(1, p, p + 8);
+      any = true;
+    }
+  }
+  if (!any) return t;
+  let out = '';
+  for (let i = 0; i < t.length;) {
+    if (marks[i]) {
+      while (i < t.length && marks[i]) i++;
+      out += '***';
+    } else {
+      const s = i;
+      while (i < t.length && !marks[i]) i++;
+      out += t.slice(s, i);
+    }
+  }
+  return out;
+}
+
+function pickUpstreamMsg(obj) {
+  for (const f of UPSTREAM_MSG_FIELDS) {
+    const v = obj[f];
+    if (typeof v === 'string' && v.trim()) return v;
+  }
+  return null;
+}
+
+// 上游原文 → 摘要(不带前缀)。调用方已经解析出 JSON 对象时直接传对象。export 仅为可单测
+export function summarizeUpstreamBody(textOrParsed, apiKey) {
+  let text;
+  if (textOrParsed !== null && typeof textOrParsed === 'object') {
+    const picked = isPlainObject(textOrParsed) ? pickUpstreamMsg(textOrParsed) : null;
+    if (picked !== null) text = picked;
+    else { try { text = JSON.stringify(textOrParsed); } catch { text = ''; } }
+  } else {
+    text = typeof textOrParsed === 'string' ? textOrParsed : String(textOrParsed ?? '');
+    const trimmed = text.trim();
+    if (!trimmed) return SUMMARY_EMPTY;
+    if (trimmed[0] === '{') {
+      try {
+        const j = JSON.parse(trimmed);
+        const picked = isPlainObject(j) ? pickUpstreamMsg(j) : null;
+        if (picked !== null) text = picked;
+      } catch {}
+    }
+  }
+  text = String(text ?? '').slice(0, SUMMARY_INPUT_MAX_UNITS);
+  if (looksLikeHtml(text)) text = stripHtml(text);
+  text = cleanPlainText(text);
+  if (!text) return SUMMARY_NO_TEXT;
+  text = maskSecret(text, apiKey);
+  const cps = Array.from(text);
+  return cps.length > SUMMARY_MAX_CODEPOINTS ? cps.slice(0, SUMMARY_MAX_CODEPOINTS).join('') + '…' : text;
+}
+
+// 流里「认得的数据块」:普通对象,并且 choices 是数组或 usage 是对象。export 仅为可单测
+export function isStreamChunkShape(j) {
+  return isPlainObject(j) && (Array.isArray(j.choices) || isPlainObject(j.usage));
+}
+
 function streamOpenAIToAnthropic(upstreamRes, clientRes, model) {
   const msgId = 'msg_' + Math.random().toString(36).slice(2, 14);
   // 惰性 message_start:收到首个正常块才发。在此之前发现上游流内错误,可以改回非 200 +
