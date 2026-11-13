@@ -136,8 +136,13 @@ try {
   eq(entries().at(-1)[1].sessionId, SID, '入口钩子拿到 sessionId');
   await waitFor(() => idleOf(pidA), '改写回合收尾');
   let evs = await readStream(pidA);
-  const typed = evs.filter((e) => e.type);
-  eq(typed[0].type, 'xs_message', '补的事件是本回合第一条');
+  const STREAM_NOTICES = new Set(['replay_complete', 'early_overflow']); // 相对这次连接的流级通知,不属于回合事件
+  const typedAll = evs.filter((e) => e.type);
+  const xsAt = typedAll.findIndex((e) => e.type === 'xs_message');
+  ok(xsAt >= 0, '读到了补的事件');
+  eq(typedAll.slice(0, xsAt).filter((e) => !STREAM_NOTICES.has(e.type)).map((e) => e.type), [], '补的事件之前只许有流级通知,不许有回合事件');
+  const typed = typedAll.filter((e) => !STREAM_NOTICES.has(e.type));
+  eq(typed[0].type, 'xs_message', '补的事件是本回合第一条(滤掉流级通知后)');
   eq([typed[0].id, typed[0].runId, typeof typed[0].seq], ['m1', pidA, 'number'], '补的事件盖了 runId + seq');
   ok(typed.findIndex((e) => e.type === 'system' && e.subtype === 'init') > 0, 'init 在补的事件之后');
   eq(delivered, [true], 'deliverRunEvent 返回 true');
@@ -157,8 +162,12 @@ try {
   eq([sA2.reused, sA2.tag.id, sA2.turnEpoch], [true, 'm2', 1], '复用回合开始的参数');
   eq(ends().filter((x) => x.pid === pidA)[1].outcome, 'completed', '复用回合 completed');
   await waitFor(() => idleOf(pidA), '复用回合收尾');
-  evs = (await readStream(pidA)).filter((e) => e.type);
-  eq(evs[0].type, 'xs_message', '复用回合:补的事件排在本回合输出之前');
+  const evsAll = (await readStream(pidA)).filter((e) => e.type);
+  const xsAt2 = evsAll.findIndex((e) => e.type === 'xs_message');
+  ok(xsAt2 >= 0, '复用回合:读到了补的事件');
+  eq(evsAll.slice(0, xsAt2).filter((e) => !STREAM_NOTICES.has(e.type)).map((e) => e.type), [], '复用回合:补的事件之前只许有流级通知,不许有回合事件');
+  evs = evsAll.filter((e) => !STREAM_NOTICES.has(e.type));
+  eq(evs[0].type, 'xs_message', '复用回合:补的事件排在本回合输出之前(滤掉流级通知后)');
   ok(evs.findIndex((e) => e.type === 'assistant') > 0, '复用回合:assistant 在补的事件之后');
 
   // ── ② 同 clientTurnId 改写后重发:命中既有幂等,钩子不再被调 ─────────────────────────────────

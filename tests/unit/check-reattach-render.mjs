@@ -98,8 +98,18 @@ import {
   );
   assert.doesNotMatch(src, /const newRoundStarted = \(\) => activeProcRef\.current != null/,
     'finally 不得再用 pid 判断新回合是否开始');
-  assert.equal((src.match(/setReattachStream\(false\)/g) || []).length, 1,
-    'reattachStream 只应有 finally 那一处复位:多一处裸复位就绕开回合守卫');
+  // r177 起 2 处:finally 复位 + replay_complete 升级种回档。后者必须同时受回合守卫与升级判据
+  // 约束(只有本回合、没有快照的重接才动),此外不许再有任何复位点。
+  assert.equal((src.match(/setReattachStream\(false\)/g) || []).length, 2,
+    'reattachStream 只应有 finally 与 replay_complete 升级两处复位:多一处裸复位就绕开回合守卫');
+  {
+    const evAt = src.indexOf("if (event.type === 'replay_complete') {");
+    const guardAt = src.indexOf('if (isCurrentTurn() && shouldUpgradeReattachOnReplayComplete({', evAt);
+    const resetAt = src.indexOf('setReattachStream(false);', evAt);
+    const endAt = src.indexOf('continue;', evAt);
+    assert.ok(evAt > 0 && guardAt > evAt && resetAt > guardAt && resetAt < endAt,
+      'replay_complete 分支里的复位必须在 isCurrentTurn() 与升级判据守卫之内');
+  }
   // r68 起 3 个,R13 起 4 个:起流置位 + finally 复位 + early_overflow 就地退回无快照
   // reattach + stream_gap 就地退回历史单一来源。
   // 第 3、4 处都只把标记置【真】(放弃种回/放弃直播气泡,回到"历史画、流只当刷新触发器"
@@ -107,8 +117,8 @@ import {
   // 由本块第一条断言钉住)。置真方向只会少画气泡,不会多画——安全方向。
   // 判据:stream_gap 是服务端明说的"本流实时记录已截断、随后关流",此刻再画自己那份
   // 累积文本就等于把截断前后的两段拼在一起显示,故就地退役直播气泡,改由历史恢复。
-  assert.equal((src.match(/setReattachStream\(/g) || []).length, 4,
-    'setReattachStream 只应有 4 个调用点(起流置位 + finally 复位 + 溢出退回 + gap 退回)');
+  assert.equal((src.match(/setReattachStream\(/g) || []).length, 5,
+    'setReattachStream 只应有 5 个调用点(起流置位 + finally 复位 + 溢出退回 + gap 退回 + r177 首读声明升级)');
   assert.match(src, /if \(histRefreshInFlight\) return;/,
     'reattach 历史刷新必须有 in-flight 去重,慢盘时别把 /messages 请求叠罗汉');
 }

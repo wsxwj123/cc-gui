@@ -2677,6 +2677,7 @@ async function handleChatPost(req, res) {
           s.turnSubagentSeen = false;
           s.revived = false;
           s.startedAt = Date.now();
+          s.turnUnread = true; // r177:新回合从干净缓冲开始,还没有连接读过(见 replayCompleteNotice)
           s.finishedAt = null;
           // H2:上一回合停止链路的残留不得毒化本回合(stopTimer clear + turnEpoch 推进已前移到
           // await 之前)。① 清 lastResultAt(否则新回合 stop 的 settled 判据读到旧 result 时间);
@@ -2883,6 +2884,7 @@ async function handleChatPost(req, res) {
     // r151a:本进程连的是不是第三方端点(T-Y10 两条收紧的前置条件)。provider 一变 settings 指纹就变,不会复用到这个槽。
     thirdPartyProvider: !settingsProviderIsOfficial(),
     startedAt: Date.now(),
+    turnUnread: true, // r177:本回合开始以来还没有连接读过事件(见 replayCompleteNotice)
     // #26 会话常驻状态
     idle: false,             // 回合间保活等待下一条消息
     closing: false,          // 收尾中(stop/删除/配置变化),finalize 不得转 idle
@@ -3372,6 +3374,7 @@ async function handleChatPost(req, res) {
         if (slot.idle && mainAgentTurnActivity) {
           slot.idle = false;
           slot.revived = true; // 看门狗判据(无子代理续跑也纳入 5 分钟静默兜底)
+          slot.turnUnread = false; // r177:续跑段的缓冲是否从回合起点起完整说不准,保守按"不声明"处理
           reviveSlotTurn(slot); // R13:回合还在跑,别让停止入口拿早前那次 finalize 的"completed"打发
           // r151t:回合完成广播按"每次收尾(给流发 done、会话转空闲)一次"。上一段收尾已广播过,复活的这一段(引导排成的回合、
           // 命令行自己续跑、子代理去抖后的续跑)收尾时照常再广播一次,前端据它作废切走时存的直播快照、发完成提醒、刷新侧栏。
@@ -4001,6 +4004,19 @@ export function stampStreamNotice(slot, line) {
   return stampRunEvent(slot, line, false);
 }
 
+// r177:回合开始以来还没有连接读过、缓冲也没溢出过 ⇒ 这次(无游标的)回放从回合起点起是完整的。
+// 回放之前先明说一声并带上回合开始时刻:没有直播快照可种回的重接(命令行开口前切走再切回)据此
+// 按正常发送的方式画直播气泡、按回合开始时刻截断历史。判据保守:标记不是明确的 true(回合起点
+// 没置位、复活续跑、任何一次接上过)、带游标重连、溢出过、拿不到开始时刻,一律不发(不发 = 页面
+// 维持降级显示)。返回通知行或 null;置"已读"由调用方在每次接上时做,与这里的判定无关。
+export function replayCompleteNotice(slot, afterSeq) {
+  if (!slot || afterSeq !== null) return null;
+  if (slot.turnUnread !== true) return null;
+  if (slot.earlyOverflowed) return null;
+  if (typeof slot.startedAt !== 'number' || !Number.isFinite(slot.startedAt)) return null;
+  return JSON.stringify({ type: 'replay_complete', turnStartedAt: slot.startedAt });
+}
+
 // 泵已收尾但那次 done 没进缓冲(竞态窗口):补一条终态;盖章同样交给 onLine 的唯一写出口。
 function emitPumpEndedDone(slot, onLine) {
   onLine(JSON.stringify({ type: 'done', exitCode: slot.exitCode ?? 0 }));
@@ -4088,7 +4104,12 @@ router.get('/chat/:pid/stream', (req, res) => {
     }
   };
 
+  // r177:先判(依赖"此前没人读过"与溢出标记的原值),再无条件置"已读" —— 任何一次接上之后,
+  // 下一个连接拿到的缓冲都不再是从回合起点起的全部内容。
+  const replayNotice = replayCompleteNotice(slot, cur.afterSeq);
+  slot.turnUnread = false;
   if (cur.afterSeq !== null) replayEventLog(slot, cur.afterSeq, onLine); else {
+    if (replayNotice) onLine(replayNotice);
     // r68:缓冲溢出过 ⇒ 本次回放不完整,回放【之前】先明说一声。客户端据此放弃"种回"
     // 渲染、退回历史单一来源(宁可空窗,也不把中段缺失的正文当完整的画出来)。
     if (slot.earlyOverflowed) { slot.earlyOverflowed = false; onLine(JSON.stringify({ type: 'early_overflow' })); }

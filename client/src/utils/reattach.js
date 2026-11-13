@@ -44,6 +44,36 @@ export function resolveStreamHistCutoff(isReattach, now, seededCutoff = null) {
   return seededCutoff || null;
 }
 
+/**
+ * r177 让位:最初那次发送在 POST /api/chat 返回后,还该不该认领进程、建连接。
+ * 三条任一成立就让位(走既有的孤儿流 return,不认领、不 attach):
+ *   ① 窗格此刻不在发起时的会话上(r140 原判据);
+ *   ② 发起之后窗格离开过这个会话(切会话计数变了,哪怕已经切回)—— 切走时的清理已把本窗格
+ *      标成「没有流」,再去接也接不回一致的状态,轮询随后还会另接一条,两条互相顶替;
+ *   ③ 自己已不是本窗格当前这一代流(切回后轮询的 reattach 已抢先起流)。
+ * 草稿升级成真会话那次选中变化不计入切换计数(调用方按 isPromotion 区分)。
+ * @param {{paneOnOwner:boolean, switchCountAtSend:number, switchCountNow:number, isCurrentTurn:boolean}} o
+ * @returns {boolean} true = 让位
+ */
+export function shouldYieldOrphanSend({ paneOnOwner, switchCountAtSend, switchCountNow, isCurrentTurn }) {
+  if (!paneOnOwner) return true;
+  if (switchCountAtSend !== switchCountNow) return true;
+  return !isCurrentTurn;
+}
+
+/**
+ * r177:流内收到服务端 replay_complete(本次重放从回合起点起完整 + 回合开始时刻)时,
+ * 本流要不要升级成「种回」档(自己画直播气泡、按回合开始时刻截断历史)。
+ * 只有「没有快照的重接」才升级:正常发送的首次连接也会收到这条,必须忽略;已种回的
+ * (有快照)理论上收不到,收到也忽略;开始时刻不是正的有限数就不升级(保守,维持降级显示)。
+ * @param {{isReattach:boolean, seeded:boolean, turnStartedAt:unknown}} o
+ * @returns {boolean}
+ */
+export function shouldUpgradeReattachOnReplayComplete({ isReattach, seeded, turnStartedAt }) {
+  if (!isReattach || seeded) return false;
+  return typeof turnStartedAt === 'number' && Number.isFinite(turnStartedAt) && turnStartedAt > 0;
+}
+
 // ── r68 直播快照:切走时存,切回时"种回" ──────────────────────────────
 // 修的是「流式中切走再切回,正文整段空窗几十秒(等落盘才一次性画出)」。切走时把本流
 // 已经流出的内容原样存下,切回的 reattach 以它为起点、把服务端重放的后续 delta 续挂

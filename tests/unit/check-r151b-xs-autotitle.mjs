@@ -87,14 +87,15 @@ const ifCondition = (at) => { // 包住这次 fetch 的 if (...) 的条件文本
   }
   throw new Error('条件括号不配对');
 };
-const envFor = (prompt, opts) => {
+const envFor = (prompt, opts, yieldedToReattach = false) => { // 让位标记:正常发送恒为 false
   const st = { customTitles: {}, autoTitles: {}, modelBySession: {}, currentModel: '' };
   return {
     prompt, opts, hiddenUserMessage: opts.hiddenUserMessage || false, // 与 handleSend 解构默认值一致
     autoTitlePrompt: evalExpr(def[1], { xsAutoTitlePrompt, prompt, opts }),
-    titleAttempted: new Set(), _st: st, st, _sid: SID, titleSid: SID,
+    titleAttempted: new Set(), _st: st, st, _sid: SID, titleSid: SID, yieldedToReattach,
   };
 };
+let yieldGated = 0;
 
 for (const at of fetchIdx) {
   const line = app.slice(0, at).split('\n').length;
@@ -111,7 +112,12 @@ for (const at of fetchIdx) {
   assert.ok(!evalExpr(cond, envFor(XS_PROMPT_PLACEHOLDER, CARD_OPTS)), `第 ${line} 行:点卡片处理不触发`);
   assert.ok(!evalExpr(cond, envFor(XS_PROMPT_PLACEHOLDER, { xsProcess: PROC })), `第 ${line} 行:去掉 hidden 也不触发`);
   assert.ok(!evalExpr(cond, envFor(XS_PROMPT_PLACEHOLDER, { ...CARD_OPTS, signatureRetry: true })), `第 ${line} 行:透传 opts 的重发不触发`);
+  if (/\byieldedToReattach\b/.test(cond)) { // 回合结束处的触发:让位的那次发送不起标题
+    yieldGated += 1;
+    assert.ok(!evalExpr(cond, envFor(USER_TEXT, {}, true)), `第 ${line} 行:让位的那次发送(yieldedToReattach 为 true)其余条件全满足也不触发`);
+  }
 }
+assert.ok(yieldGated >= 1, '至少一处自动标题触发条件读让位标记 yieldedToReattach');
 console.log(`✓ App.jsx ${fetchIdx.length} 处自动标题触发都读同一个 autoTitlePrompt:点卡片不触发,普通发送照常`);
 
 console.log('PASS check-r151b-xs-autotitle');

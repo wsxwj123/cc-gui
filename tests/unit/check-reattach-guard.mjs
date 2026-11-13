@@ -117,8 +117,9 @@ const PID = 'sdk-7';
     '横幅不得再直连轮询瞬时态(一次误判 done 就闪一下"后台工作中",语义正好反了)');
   assert.equal(BG_BANNER_DELAY_MS, 2000, '门槛取 2s:略大于 1.5s 轮询周期,盖住一轮自愈');
   // steer 已在 HTTP 前把队首持久化成 barrier，排空只需保留“转后台”互斥。
-  assert.match(src, /if \(!backgroundedRef\.current\) \{/,
-    '转后台期间仍不得排空；steer 由队首 barrier 防双发');
+  // r177:排空守卫多了一条"让位的发送不排空"(同一个 if),转后台互斥原样保留。
+  assert.match(src, /if \(!backgroundedRef\.current && !yieldedToReattach\) \{/,
+    '转后台期间仍不得排空；steer 由队首 barrier 防双发;让位的发送也不排空');
   assert.doesNotMatch(src, /acceleratingRef/, '不得退回跨条目共享的 accelerating 布尔锁');
   // r140(C5):断言跟着实现形态更新(不是放宽)—— 原来是"同步三元 pop",先 pop 后派发,那 50ms 里
   // 切走会把 A 的排队消息投给 B;现在是"同 key 才进分支 + 50ms 后复查 pane key + 再 pop"。
