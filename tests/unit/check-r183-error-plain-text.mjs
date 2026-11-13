@@ -2,7 +2,7 @@
 // 行为断言,不按源码文本计数。
 import assert from 'node:assert/strict';
 import {
-  errorTextIndexes, markErrorTextBlocks, LOCAL_ERROR_CAUSES_HINT,
+  errorTextIndexes, markErrorTextBlocks,
 } from '../../client/src/utils/apiErrorActions.js';
 
 let passed = 0;
@@ -61,11 +61,6 @@ t('没有 blocks:原样返回;legacy text 数组同口径', () => {
 t('非回合条目不算', () => {
   assert.equal(errorTextIndexes({ type: 'user', model: '<synthetic>' }, ['x']).size, 0);
   assert.equal(errorTextIndexes(null, ['x']).size, 0);
-});
-
-t('「常见原因」提示是纯文字,不含 Markdown 引用 / 列表写法', () => {
-  assert.match(LOCAL_ERROR_CAUSES_HINT, /^常见原因/);
-  assert.doesNotMatch(LOCAL_ERROR_CAUSES_HINT, /\n|^>|`/);
 });
 
 console.log(`check-r183-error-plain-text: ${passed} passed`);

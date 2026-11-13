@@ -181,7 +181,7 @@ import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAut
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import ApiErrorActions from './components/ApiErrorActions.jsx';
-import { deriveApiErrorUi, deriveHistoryApiErrorUi, LOCAL_ERROR_CAUSES_HINT, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
+import { deriveApiErrorUi, deriveHistoryApiErrorUi, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
 import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
@@ -7353,8 +7353,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             } else {
               // r183:报错原文与提示分开存 —— 原文进 errorText 块原样显示(不再嵌进 Markdown 加粗),
               // 提示走 errorHints 结构化渲染(不再用引用语法拼在正文后);text 与 blocks 同一份。
-              // 「常见原因」原先只在 text 里(画面不显示,但顶部复制按钮复制的是 text),保留为第一条提示。
-              const localHints = [LOCAL_ERROR_CAUSES_HINT, ...errUi.hints];
+              // 判据没有给出提示时不带 errorHints 字段(渲染处按有无该字段决定画不画提示区)。
               setChatMessages((prev) => [...prev, {
                 uuid: 'chat-error-' + Date.now(),
                 type: 'turn',
@@ -7368,7 +7367,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 blocks: [{ type: 'text', content: `❌ ${msg}`, errorText: true }],
                 usage: null,
                 ...(errUi.action ? { errorAction: errUi.action } : {}),
-                errorHints: localHints,
+                ...(errUi.hints.length ? { errorHints: errUi.hints } : {}),
               }]);
             }
             // 条带折叠:报错的轮也要落一条窗口记录(与中断那条同款)。**不加"本轮没在跑就丢弃"
