@@ -32,10 +32,10 @@ const EDE_TYPE_KEY = 'last_content_type=';
 const EDE_TYPE_WINDOW = 80;
 const EDE_NEXT_KEY_RE = /^[A-Za-z_]+=/;
 const EDE_TYPE_OK_RE = /^[A-Za-z0-9_-]{1,40}$/;
-// 返回类型名;没有该字段返回 '';被截断返回 null(按不合规处理)。
+// 返回类型名;没有该字段返回 undefined;被截断返回 null(按不合规处理)。
 function edeContentType(msg) {
   const at = msg.indexOf(EDE_TYPE_KEY);
-  if (at < 0) return '';
+  if (at < 0) return undefined;
   const rest = msg.slice(at + EDE_TYPE_KEY.length, at + EDE_TYPE_KEY.length + EDE_TYPE_WINDOW + 1);
   const nl = rest.indexOf('\n');
   const line = nl >= 0 ? rest.slice(0, nl) : rest;
@@ -53,10 +53,25 @@ export const EDE_EMPTY_HINT = '上游返回了内容为空的回复,命令行重
 export function edeUnknownTypeHint(type) {
   return `上游返回了命令行无法识别的内容类型(${type}),本轮结束。该 Provider 的返回格式与 Claude Code 不兼容,换模型或换 Provider。`;
 }
+// 有该字段、但类型名不合规或被截断时的说明(不带类型名,不拼原串)。
+export const EDE_UNKNOWN_HINT = '上游返回了命令行无法识别的内容,本轮结束。该 Provider 的返回格式与 Claude Code 不兼容,换模型或换 Provider。';
+const EDE_RESULT_KEY = 'result_type=assistant';
+// 子串查找:`result_type=assistant` 后面是空白或结尾才算(不用带回溯的正则)。
+function hasAssistantResultType(msg) {
+  for (let at = msg.indexOf(EDE_RESULT_KEY); at >= 0; at = msg.indexOf(EDE_RESULT_KEY, at + 1)) {
+    const next = msg.charAt(at + EDE_RESULT_KEY.length);
+    if (next === '' || /\s/.test(next)) return true;
+  }
+  return false;
+}
+// 只解释取样验证过的形态:[ede_diagnostic] + result_type=assistant + last_content_type 字段;
+// 其余形态不加说明,原文照显(不猜)。
 function edeHint(msg) {
-  if (!EDE_RE.test(msg)) return null;
+  if (!EDE_RE.test(msg) || !hasAssistantResultType(msg)) return null;
   const type = edeContentType(msg);
-  if (type === null || type === 'none' || !EDE_TYPE_OK_RE.test(type)) return EDE_EMPTY_HINT;
+  if (type === undefined) return null;
+  if (type === 'none') return EDE_EMPTY_HINT;
+  if (type === null || !EDE_TYPE_OK_RE.test(type)) return EDE_UNKNOWN_HINT;
   return edeUnknownTypeHint(type);
 }
 
