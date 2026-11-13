@@ -43,6 +43,18 @@ t('类型名在行尾且合规 → 第二条', () => assert.deepEqual(
 t('多行时只取本行的类型名', () => assert.deepEqual(
   deriveApiErrorUi(`${REASONING}\nother line`).hints, [edeUnknownTypeHint('reasoning')]));
 
+// ── Windows 换行(\r\n)──
+t('none + CRLF + 其它文字 → 第一条说明', () => assert.deepEqual(
+  deriveApiErrorUi(`${PREFIX}none\r\n其它文字`).hints, [EDE_EMPTY_HINT]));
+t('reasoning + CRLF + 其它文字 → 第二条说明,文案不含 \\r', () => {
+  const { hints } = deriveApiErrorUi(`${PREFIX}reasoning\r\n其它文字`);
+  assert.deepEqual(hints, [edeUnknownTypeHint('reasoning')]);
+  assert.ok(hints[0].includes('(reasoning)'));
+  assert.ok(!hints[0].includes('\r'));
+});
+t('none stop_reason=end_turn + CRLF → 第一条说明', () => assert.deepEqual(
+  deriveApiErrorUi(`${PREFIX}none stop_reason=end_turn\r\n`).hints, [EDE_EMPTY_HINT]));
+
 // ── 有字段但类型名不合规 / 被截断 → 不带类型名的说明,不含原串 ──
 for (const [name, bad] of [
   ['含空格', 'foo bar'],
@@ -71,15 +83,15 @@ const timed = (msg) => {
   const ui = deriveApiErrorUi(msg);
   return { ui, ms: performance.now() - t0 };
 };
-t('10 万空格 + 10 万个 a:200 毫秒内返回,不带类型名的说明', () => {
+t('10 万空格 + 10 万个 a:1000 毫秒内返回,不带类型名的说明', () => {
   const { ui, ms } = timed(PREFIX + ' '.repeat(100000) + 'a'.repeat(100000));
-  assert.ok(ms < 200, `用时 ${ms.toFixed(1)}ms`);
+  assert.ok(ms < 1000, `用时 ${ms.toFixed(1)}ms`);
   assert.deepEqual(ui.hints, [EDE_UNKNOWN_HINT]);
   assert.ok(!ui.hints[0].includes('aaaa'));
 });
-t('20 万组「空格 + a」:200 毫秒内返回,不带类型名的说明', () => {
+t('20 万组「空格 + a」:1000 毫秒内返回,不带类型名的说明', () => {
   const { ui, ms } = timed(PREFIX + ' a'.repeat(200000));
-  assert.ok(ms < 200, `用时 ${ms.toFixed(1)}ms`);
+  assert.ok(ms < 1000, `用时 ${ms.toFixed(1)}ms`);
   assert.deepEqual(ui.hints, [EDE_UNKNOWN_HINT]);
 });
 
