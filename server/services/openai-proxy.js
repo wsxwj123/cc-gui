@@ -959,7 +959,15 @@ async function respondOk(upstreamResp, wantStream, clientRes, model, apiKey) {
   // 行时把已缓冲文本回放给现有 SSE 转换链。
   // ponytail: 回放是整体缓冲,错标 CT 的上游丢增量流式;要保首字延迟再做首块嗅探。
   // r178b:非流式也先读成文本再解析(要拿得到原文做摘要);解析成功时结果与原来的 .json() 相同。
-  const txt = await upstreamResp.text().catch(() => '');
+  let readFailed = false;
+  const txt = await upstreamResp.text().catch(() => { readFailed = true; return ''; });
+  // 读响应体中途失败(连接中途断开)不属于三类中的任何一类:保持改之前的行为,回 200 空消息,
+  // 命令行会自动重试一次(中途断线是瞬时故障,也不能说成「响应体为空」)。
+  if (readFailed) {
+    clientRes.writeHead(200, { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify(openAIToAnthropicMessage({}, model)));
+    return;
+  }
   // 规则 1:空响应体 → 第 3 类
   if (!txt.trim()) { sendUnrecognized(clientRes, '', apiKey); return; }
   let j = null;

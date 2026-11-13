@@ -4,7 +4,23 @@
 //   · maskSecret:Key 打码(靠前、跨截断点、中间夹控制字符、不足 8 个字符、多处重叠)。
 //   · isStreamChunkShape:流里「认得的数据块」。
 import assert from 'node:assert/strict';
-import { summarizeUpstreamBody, maskSecret, isStreamChunkShape } from '../../server/services/openai-proxy.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import http from 'node:http';
+
+// 隔离:导入代理模块之前把 HOME / USERPROFILE 指到临时目录,清掉 ANTHROPIC_* 与代理环境变量
+const unitHome = fs.mkdtempSync(path.join(os.tmpdir(), 'r178b-unit-home-'));
+process.env.HOME = unitHome;
+process.env.USERPROFILE = unitHome;
+for (const name of Object.keys(process.env)) if (name.startsWith('ANTHROPIC_')) delete process.env[name];
+for (const name of ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) delete process.env[name];
+process.env.NO_PROXY = '127.0.0.1,localhost';
+process.env.no_proxy = '127.0.0.1,localhost';
+
+const {
+  summarizeUpstreamBody, maskSecret, isStreamChunkShape, startOpenAIProxy, setOpenAIUpstream,
+} = await import('../../server/services/openai-proxy.js');
 
 const KEY = 'sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012'; // 32 个字符的假 Key
 assert.equal(KEY.length, 32);
@@ -138,6 +154,37 @@ for (const [v, want] of [
   assert.ok(ms < 200, `大量未闭合开始标记耗时 ${ms.toFixed(1)}ms`); ok();
 }
 
+// ── 读上游响应体中途失败:保持改之前的行为(200 空消息,不带 x-should-retry) ─────────
+{
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': '1000' });
+      res.write('{"id":"c1","object":"chat.completion","ch');
+      setTimeout(() => res.socket.destroy(), 20);
+    });
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const upPort = upstream.address().port;
+  const proxyPort = await startOpenAIProxy(0);
+  setOpenAIUpstream({ baseURL: `http://127.0.0.1:${upPort}/v1`, apiKey: KEY, model: 'test-model' });
+  for (const stream of [false, true]) {
+    const r = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'k', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'test-model', max_tokens: 16, stream, messages: [{ role: 'user', content: '你好' }] }),
+    });
+    const label = `读失败(stream=${stream})`;
+    assert.equal(r.status, 200, `${label}:状态码`);
+    assert.equal(r.headers.get('x-should-retry'), null, `${label}:不带 x-should-retry`);
+    const body = await r.json();
+    assert.equal(body.type, 'message', `${label}:是消息`);
+    assert.deepEqual(body.content, [], `${label}:内容数组为空`);
+    ok();
+  }
+  await new Promise((r) => upstream.close(r));
+}
+
 // ── 看守:源码里不得出现零宽字符、双向控制符、BOM 的字面字符(一律写转义) ──────────
 {
   const { readFileSync } = await import('node:fs');
@@ -156,3 +203,4 @@ for (const [v, want] of [
 }
 
 console.log(`check-r178b-proxy-unrecognized: ${n} 项通过`);
+process.exit(0); // 代理没有停止用的导出,监听会让进程挂着
