@@ -13,6 +13,9 @@ import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/o
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
 import { isOfficialAnthropic, isClaudeModel, readClaudeSettingsForWrite } from '../services/model-resolver.js';
 import { applyCatalogPrefill, catalogPrefillEntry } from '../utils/model-capabilities.js';
+import { resolveFetchTarget, KEY_URL_MISMATCH_MSG } from '../utils/fetch-target.js';
+import { stripBaseURL } from '../utils/image-url.js';
+import { redactKey } from '../utils/image-protocols.js';
 import { updatePrefs, loadPrefs, readThirdPartyAutoSync, unhideProjectInPrefs } from './prefs.js';
 import { broadcast } from '../broadcast.js';
 import {
@@ -2551,29 +2554,36 @@ export async function readClaudeOAuthToken() {
 
 // POST /api/custom-providers/fetch-models { type, baseURL, apiKey, id? } — used by the
 // add-provider form (client supplies the key being entered).
-// 带 id(编辑态)时 apiKey 空则读存储 key 兜底 —— 编辑表单的 key 框留空=「不修改」(GET 从不回传
-// 明文 key),此前这里没有 test 端点那样的兜底 → 空 key 直发上游 → 401"API key 有问题",而测试
-// 连接(有兜底)却正常(用户实报的矛盾现象根因)。baseURL 同步兜底。
+// 带 id(编辑态)且条目存在时,取值规则见 server/utils/fetch-target.js(r179):Key 是谁的,
+// 地址、协议就跟谁走。
+//  - 借已保存的 Key(请求里 Key 不是非空字符串;编辑表单的 key 框留空 =「不修改」):地址、协议
+//    全部用已保存的值,发出去的地址恒为已保存原值;请求里带了地址且与已保存的不同(去首尾空白、
+//    去结尾斜杠后比较)→ 400 + STORED_KEY_URL_MISMATCH,不发上游请求 —— 否则 {id, baseURL:攻击者
+//    地址} 会让 server 把该 provider 的真实密钥发去攻击者端点。
+//  - 自带 Key:地址、协议先用请求里的,没带才用已保存的。
+//  - 不带 id / 条目不存在:按新建态,用请求里的值(现状)。
+// 窗口数据只在实际探测的就是已保存地址时才写进已保存条目;报错正文返回前把 Key 打码。
 router.post('/custom-providers/fetch-models', async (req, res) => {
+  let keyForRedact = '';
   try {
-    let { baseURL, apiKey, type } = req.body || {};
-    if (req.body?.id) {
-      const stored = (await readCustomProviders()).find((p) => p.id === req.body.id);
-      if (stored) {
-        if (!apiKey || !String(apiKey).trim()) apiKey = stored.apiKey;
-        // 用存储 key 时 baseURL 也强制取存储值:否则攻击者传 {id, baseURL:自己的服务器}
-        // 让 server 把该 provider 的真实密钥发去攻击者端点。key 与 baseURL 必须同源。
-        baseURL = stored.baseURL;
-        // r15-2:协议同样以存储值为准(与 baseURL 同源),表单还没保存的改动不影响预填口径。
-        type = stored.type || type;
-      }
-    }
+    const body = req.body || {};
+    const s = body.id ? (await readCustomProviders()).find((p) => p.id === body.id) || null : null;
+    const t = resolveFetchTarget(
+      s && { baseURL: s.baseURL, apiKey: s.apiKey, protocol: s.type },
+      { baseURL: body.baseURL, apiKey: body.apiKey, protocol: body.type },
+      stripBaseURL, // 与 PUT/POST 保存时同口径(trim + 去末尾斜杠)
+    );
+    if (t.reject) return res.status(400).json({ error: KEY_URL_MISMATCH_MSG, code: 'STORED_KEY_URL_MISMATCH' });
+    const { baseURL, apiKey } = t;
+    const type = t.protocol; // 变量名必须叫 type(check-model-capabilities t5 按源码钉 catalogPrefillEntry(mid, type))
+    keyForRedact = typeof apiKey === 'string' ? apiKey : '';
     let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(base.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
     // SSRF 守卫已在 probeUpstreamModels 内(覆盖全部调用点),此处不再重复。
     const probed = await probeUpstreamModels(baseURL, apiKey, { protocol: type === 'openai' ? 'openai' : 'anthropic' });
-    // 实抓到窗口且是已存 provider → 持久化 modelWindows(自动压缩联动的最权威数据源)。
-    if (req.body?.id && probed.windows) persistModelWindows(req.body.id, probed.windows);
+    // 实抓到窗口、是已存 provider、且探测的就是已保存地址 → 持久化 modelWindows(自动压缩联动的
+    // 最权威数据源)。打的是表单里还没保存的新地址时不写(用户可能取消编辑)。
+    if (s && t.sameAsStored && probed.windows) persistModelWindows(s.id, probed.windows);
     // r11-⑩:附目录预填(表单拉到列表即见预填,保存路径再兜一遍;用户声明由前端合并时优先)。
     const catalogMeta = {};
     for (const mid of probed.ids || []) {
@@ -2582,7 +2592,8 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
     }
     res.json({ models: probed.ids, windows: probed.windows || undefined, catalogMeta: Object.keys(catalogMeta).length ? catalogMeta : undefined });
   } catch (err) {
-    res.status(err.status || 502).json({ error: err.message });
+    // r179:probeUpstreamModels 会把上游正文原样拼进报错,上游回显 Key 时要先打码。
+    res.status(err.status || 502).json({ error: redactKey(err.message, keyForRedact) });
   }
 });
 

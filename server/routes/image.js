@@ -36,6 +36,8 @@ import { readJsonGuarded, assertWritable, corruptWarning, isConfigGuardError, se
 // multipart 预序列化),别把 FormData 直接交给它。
 import { fetch as undiciFetch, ProxyAgent } from 'undici';
 import { assertPublicBaseURL, probeUpstreamModels } from './settings.js';
+import { resolveFetchTarget, KEY_URL_MISMATCH_MSG } from '../utils/fetch-target.js';
+import { normalizeSavedImageBaseURL } from '../utils/image-url.js';
 
 const router = Router();
 
@@ -619,33 +621,44 @@ async function fetchGeminiModels(baseURL, apiKey, proxyUrl) {
  * POST /api/image-providers/fetch-models { id? | (baseURL, protocol), apiKey? }
  * → { ok:true, models:[id…] } / { ok:false, type:'auth'|'network'|'unsupported', message }
  *
- * 两态:
- *  - 带 id(编辑态):读存储 provider,**baseURL 强制取存储值**、协议同理;apiKey 取请求体
- *    非空值,否则用存储 key。请求体里的 baseURL 一律忽略 —— 否则 {id, baseURL:攻击者地址}
- *    会让服务端把该 provider 的真实密钥发去攻击者端点(key 与 baseURL 必须同源;
- *    与 settings.js 的 custom-providers/fetch-models 同口径)。
- *  - 不带 id(新建表单态):用表单值,SSRF 守卫在下游探测函数内。
+ * 取值规则见 server/utils/fetch-target.js(r179,与 settings.js 的 custom-providers/fetch-models
+ * 共用一份):Key 是谁的,地址、协议、代理就跟谁走。
+ *  - 带 id 且 Key 没填(借已保存的 Key):地址、协议、代理全部用已保存的值,发出去的地址恒为
+ *    stored.baseURL 原值;请求里带了地址且与已保存的不同(两边都按保存口径规范化后比较)→
+ *    400 needs_key,不发上游请求 —— 否则 {id, baseURL:攻击者地址} 会让服务端把该 provider 的
+ *    真实密钥发去攻击者端点。请求里的代理一律忽略、不校验。
+ *  - 带 id 且自带 Key:地址、协议、代理先用请求里的,没带才用已保存的;请求里带了代理就校验。
+ *  - 不带 id(新建表单态):用表单值,代理校验同保存路径,SSRF 守卫在下游探测函数内。
+ *  地址取自请求时(新建态、编辑态自带 Key),探测前先按保存口径规范化(剥接口尾段 / mj-proxy 剥 /mj)。
  * 出错信息透传前一律过 redactKey,响应任何路径都不含 apiKey。
  */
 router.post('/image-providers/fetch-models', async (req, res) => {
   let apiKeyForRedact = '';
   try {
-    let { baseURL, apiKey, protocol } = req.body || {};
-    // r56:代理与 baseURL 同口径 —— 编辑态用【存储值】,新建表单态才用请求体里的值
-    // (校验同保存路径:非 http(s)/带凭据一律拒,不给一个没验过的出口)。
-    let proxyUrl = '';
-    if (req.body?.id) {
-      const stored = (await readImageProviders()).find((p) => p.id === req.body.id);
+    const body = req.body || {};
+    let stored = null;
+    if (body.id) {
+      stored = (await readImageProviders()).find((p) => p.id === body.id);
       if (!stored) return res.status(404).json({ ok: false, type: 'unsupported', message: '未找到该生图 provider' });
-      if (!apiKey || !String(apiKey).trim()) apiKey = stored.apiKey;
-      baseURL = stored.baseURL; // ← 防密钥外传:请求体的 baseURL 一律忽略
-      protocol = stored.protocol || protocol;
-      proxyUrl = typeof stored.proxyUrl === 'string' ? stored.proxyUrl : '';
-    } else {
-      const pv = validateProxyUrl(req.body?.proxyUrl);
+    }
+    const t = resolveFetchTarget(
+      stored,
+      { baseURL: body.baseURL, apiKey: body.apiKey, protocol: body.protocol, proxyUrl: body.proxyUrl },
+      (u) => normalizeSavedImageBaseURL(stored?.protocol, u), // 两边都规范化;stored 为空时不会被调用
+    );
+    if (t.reject) return res.status(400).json({ ok: false, type: 'needs_key', message: KEY_URL_MISMATCH_MSG });
+    // r56:代理校验同保存路径(非 http(s)/带凭据一律拒,不给一个没验过的出口);来自已保存值的不再校验。
+    let proxyUrl = t.proxy.value || '';
+    if (t.proxy.from === 'request') {
+      const pv = validateProxyUrl(t.proxy.value);
       if (pv.error) return res.status(400).json({ ok: false, type: 'unsupported', message: pv.error });
       proxyUrl = pv.proxyUrl || '';
     }
+    const apiKey = t.apiKey;
+    const protocol = t.protocol;
+    // 借用那一支原样用 stored.baseURL(硬规则);地址取自请求的两支先按保存口径规范化。
+    const baseURL = t.borrowed ? t.baseURL
+      : (typeof t.baseURL === 'string' ? normalizeSavedImageBaseURL(protocol, t.baseURL) : t.baseURL);
     apiKeyForRedact = typeof apiKey === 'string' ? apiKey : '';
     if (typeof baseURL !== 'string' || !baseURL.trim()) {
       return res.status(400).json({ ok: false, type: 'unsupported', message: '请先填写接口地址（baseURL）' });

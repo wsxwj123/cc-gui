@@ -22,6 +22,14 @@ export function normalizeImageBaseURL(s) {
   return base.replace(ENDPOINT_TAILS, '').replace(/\/+$/, '');
 }
 
+/**
+ * r179:与 validateBody 保存时的地址规范化逐字同口径 —— mj-proxy 剥 /mj,其余剥接口尾段。
+ * 拉取模型比较「地址是否改了」、以及地址取自请求时探测前的整理都用它。只给后端用。
+ */
+export function normalizeSavedImageBaseURL(protocol, s) {
+  return protocol === 'mj-proxy' ? normalizeProxyBaseURL(s) : normalizeImageBaseURL(s);
+}
+
 /** 基址路径里是否已有「/v数字…」段(如 /v1、/v2、/v1beta)。只看路径,不看主机名(v2.example.com 不算)。 */
 export function hasVersionSegment(baseURL) {
   const s = stripBaseURL(baseURL);

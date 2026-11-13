@@ -365,7 +365,11 @@ if (failure) throw failure;
   assert.match(src, /if \(u\.username \|\| u\.password\) return \{ error: '代理地址不支持内嵌账号密码/,
     't3【禁凭据】:校验在服务端(前端提示只是说明)');
   assert.match(src, /proxyUrl: typeof p\.proxyUrl === 'string' \? p\.proxyUrl : ''/, 't3: publicView 回传 proxyUrl');
-  assert.match(src, /proxyUrl = typeof stored\.proxyUrl === 'string'/, 't3: 编辑态拉模型用【存储的】代理,不认请求体(同 baseURL 口径)');
+  // r179:取值规则(含「借存储 key 时用存储的代理、不认请求体」)搬进共用纯函数 server/utils/fetch-target.js;
+  // 这里改钉生图路由调用了它,行为由 r179 验收 G7 与 check-r179-fetch-target 的代理三态钉住。
+  assert.match(src, /import \{ resolveFetchTarget, KEY_URL_MISMATCH_MSG \} from '\.\.\/utils\/fetch-target\.js'/,
+    't3: 生图路由从共用模块导入拉模型取值规则');
+  assert.match(src, /const t = resolveFetchTarget\(\s*stored,/, 't3: 拉模型按 Key 归属取地址 / 代理(借存储 key 用存储的代理)');
   assert.match(src, /const packed = new Response\(spec\.form\);[\s\S]{0,200}packed\.arrayBuffer\(\)/,
     't3【multipart 不许退化】:undici 不认内建 FormData,必须先用 Node 自己的序列化器压成字节再发');
   assert.match(src, /headers: formType \? \{ \.\.\.headers, 'Content-Type': formType \} : headers/,

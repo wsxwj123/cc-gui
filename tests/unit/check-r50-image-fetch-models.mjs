@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // 单测:r50 生图 provider 的模型列表自动拉取(POST /api/image-providers/fetch-models)
-// + 尺寸候选选项化。核心牙是【防密钥外传】:id 态下 baseURL 必须强制取存储值,
+// + 尺寸候选选项化。核心牙是【防密钥外传】:借存储 key 时 baseURL 必须是存储值;请求地址不同就拒绝,
 // 否则 {id, baseURL:攻击者地址} 会让服务端把该 provider 的真实密钥发去攻击者端点。
+// (r179 起:id 态自带 key 时按请求里的地址拉取;借存储 key 而请求地址不同 → 400 needs_key。)
 // Run: node tests/unit/check-r50-image-fetch-models.mjs
 //
 // 隔离:HOME/USERPROFILE 指向 mktemp 目录(真实 ~/.claude-gui 一个字节不碰);
@@ -117,9 +118,11 @@ app.use('/api', imageRouter);
 // 假攻击者(另一个临时口):任何一次请求都算失守 —— 存储 key 绝不许发到请求体指定的地址。
 let evilHits = 0;
 let evilSawKey = false;
+let evilLastAuth = ''; // 最近一次请求的鉴权头(authorization + x-api-key)
 const evilServer = createServer((req, res) => {
   evilHits += 1;
   const seen = `${req.headers.authorization || ''}${req.headers['x-api-key'] || ''}`;
+  evilLastAuth = seen;
   if (seen.includes(KEY)) evilSawKey = true;
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ data: [{ id: 'attacker-model' }] }));
@@ -157,8 +160,9 @@ try {
     assert.ok(!r.text.includes(FORM_KEY), 't3.1: 响应体不回显 key');
   }
 
-  // 3.2【核心牙】id 态 + 请求体伪造 baseURL → 必须打存储的 baseURL,存储 key 绝不外发
+  // 3.2【核心牙】id 态 + 借存储 key + 请求体伪造 baseURL → 拒绝(400 needs_key),存储 key 绝不外发
   {
+    const { KEY_URL_MISMATCH_MSG } = await import('../../server/utils/fetch-target.js');
     const mk = await api('POST', '/api/image-providers', {
       name: '存储态', protocol: 'openai', baseURL: `${BASE}/stored/v1`,
       apiKey: KEY, model: 'm', savePath: SAVE_DIR,
@@ -166,21 +170,39 @@ try {
     assert.equal(mk.status, 200, `t3.2: 建 provider(${mk.text})`);
     const before = storedHits.length;
     const r = await fetchModels({ id: mk.json.id, baseURL: `${EVIL}/evil/v1`, protocol: 'openai' });
-    assert.equal(r.status, 200, `t3.2: 拉取应走存储 baseURL 并成功(${r.text})`);
-    assert.deepEqual(r.json.models, ['stored-model-a'], 't3.2: 拿到的是【存储 baseURL】那台的模型,不是攻击者的');
-    assert.equal(storedHits.length, before + 1, 't3.2: 请求打到存储 baseURL');
-    assert.ok(
-      storedHits.at(-1).auth.includes(KEY) || storedHits.at(-1).xkey.includes(KEY),
-      't3.2: 存储 key 发给存储 baseURL(编辑态留空 key = 用存储 key)',
-    );
-    assert.equal(evilHits, 0, 't3.2【防外传】:请求体里的 baseURL 一律忽略,攻击者端点一次都不许被打到');
+    assert.equal(r.status, 400, `t3.2: 借存储 key 且地址不同 → 400(${r.text})`);
+    assert.equal(r.json.ok, false, 't3.2: ok:false');
+    assert.equal(r.json.type, 'needs_key', 't3.2: type 为 needs_key');
+    assert.equal(r.json.message, KEY_URL_MISMATCH_MSG, 't3.2: message 为固定文案');
+    assert.equal(storedHits.length, before, 't3.2: 存储 baseURL 那台也 0 次(拒绝时不发任何上游请求)');
+    assert.equal(evilHits, 0, 't3.2【防外传】:攻击者端点一次都不许被打到');
     assert.equal(evilSawKey, false, 't3.2【防外传】:存储 key 绝不发往请求体指定的地址');
+    assert.ok(!r.text.includes(KEY), 't3.2: 拒绝响应不含存储 key');
 
     // 反向钉死:攻击者地址本身是可达的(回环放行)—— 上面 0 次不是被 SSRF 守卫顺手挡掉的
     const reach = await fetchModels({ baseURL: `${EVIL}/evil/v1`, apiKey: 'sk-form-typed-by-user', protocol: 'openai' });
-    assert.equal(reach.json?.ok, true, `t3.2: 该地址在表单态可达(证明 0 次是"强制存储 baseURL"挡的)(${reach.text})`);
+    assert.equal(reach.json?.ok, true, `t3.2: 该地址在表单态可达(证明 0 次是"借存储 key 时拒绝"挡的)(${reach.text})`);
     assert.equal(evilHits, 1, 't3.2: 只有用户自己在表单里填时才打过去');
     assert.equal(evilSawKey, false, 't3.2: 打过去带的是用户现填的 key,不是存储 key');
+
+    // 3.2b id 态 + 自带 key + 新地址 → 按请求地址拉取,只带用户现填的 key
+    const own = await fetchModels({ id: mk.json.id, baseURL: `${EVIL}/evil/v1`, apiKey: FORM_KEY, protocol: 'openai' });
+    assert.equal(own.json?.ok, true, `t3.2b: 自带 key 时按请求地址拉取(${own.text})`);
+    assert.equal(evilHits, 2, 't3.2b: 请求地址那台收到 1 次');
+    assert.equal(evilSawKey, false, 't3.2b: 自带 key 那一支绝不读存储 key');
+    assert.ok(evilLastAuth.includes(FORM_KEY), `t3.2b: 请求地址那台收到的就是用户现填的 key(实际鉴权头:${evilLastAuth})`);
+
+    // 3.2c id 态 + 借存储 key + 地址只差结尾斜杠 → 视为相同,发往存储 baseURL,带存储 key
+    const beforeC = storedHits.length;
+    const same = await fetchModels({ id: mk.json.id, baseURL: `${BASE}/stored/v1/`, protocol: 'openai' });
+    assert.equal(same.status, 200, `t3.2c: 地址相同 → 拉取成功(${same.text})`);
+    assert.deepEqual(same.json.models, ['stored-model-a'], 't3.2c: 拿到的是存储 baseURL 那台的模型');
+    assert.equal(storedHits.length, beforeC + 1, 't3.2c: 请求打到存储 baseURL');
+    assert.ok(
+      storedHits.at(-1).auth.includes(KEY) || storedHits.at(-1).xkey.includes(KEY),
+      't3.2c: 存储 key 发给存储 baseURL(编辑态留空 key = 用存储 key)',
+    );
+    assert.ok(!same.text.includes(KEY), 't3.2c: 响应不含存储 key');
     await api('DELETE', `/api/image-providers/${mk.json.id}`);
   }
 
