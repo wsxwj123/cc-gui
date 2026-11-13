@@ -71,7 +71,11 @@ assert.ok(/当前模型可能不支持自动档/.test(appSrc), '③请求 auto �
 assert.ok(/requested === 'auto'/.test(appSrc), '③该追加句只在请求 auto 时出现');
 // 提示行只活在本地(CLI 不把它写进 jsonl):回合落盘对账时必须与 btw/denial 一样被保留,
 // 否则它在回合结束那刻凭空消失。
-assert.equal((appSrc.match(/m\.type === 'btw' \|\| m\.type === 'denial' \|\| m\.type === 'mode-mismatch'/g) || []).length, 3,
-  '三处本地态过滤(两处 reconcile + 一处回合末清理)都要保留 mode-mismatch 行');
+// r178:三处的类型判断抽进 client/src/utils/localNotice.js 的 isLocalOnlyEntry,三处都调它。
+const localNoticeSrc = readFileSync(new URL('../../client/src/utils/localNotice.js', import.meta.url), 'utf8');
+assert.equal((localNoticeSrc.match(/m\.type === 'btw' \|\| m\.type === 'denial' \|\| m\.type === 'mode-mismatch'/g) || []).length, 1,
+  'isLocalOnlyEntry 要保留 mode-mismatch 行');
+assert.equal((appSrc.match(/isLocalOnlyEntry\(m\) \|\| keepLivePeer\(m, /g) || []).length, 3,
+  '三处本地态过滤(两处 reconcile + 一处回合末清理)都要保留 mode-mismatch 行(经 isLocalOnlyEntry)');
 
 console.log('✓ check-mode-mismatch: 六档×init 矩阵 / 边界 / 服务端对账 / 客户端提示与一键改用 全部通过');

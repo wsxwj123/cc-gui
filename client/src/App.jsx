@@ -5488,18 +5488,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       );
     }
 
-    // r178:本会话的键(队列键 + 真实 sessionId),撤上一轮本地提示时按它认归属。
-    const noticeOwnerKeys = [sessionQueueKey, selectedSession?.sessionId];
-    // r178:不画用户气泡的新回合(隐藏续跑消息:工具局部重做、计划执行等)同样撤掉上一轮的本地提示;
-    // 画气泡的发送在 pushBubble 里与气泡同一次更新撤。reattach 是接着同一回合,不撤。
-    if (!reattachPid && hiddenUserMessage) setChatMessages((prev) => dropLocalNoticesOf(prev, noticeOwnerKeys));
-
     // 只有真正开始新的空闲回合才恢复 following；忙碌 Enter 排队/并入不清阅读意图。
     if (!reattachPid) {
       userScrolledAwayRef.current = false;
       scrollTransactionRef.current = null;
       setAutoScroll(true);
     }
+
+    // r178:本会话的键(队列键 + 真实 sessionId),撤上一轮本地提示时按它认归属。
+    const noticeOwnerKeys = [sessionQueueKey, selectedSession?.sessionId];
+    // r178:不画用户气泡的新回合(隐藏续跑消息:工具局部重做、计划执行等)同样撤掉上一轮的本地提示;
+    // 画气泡的发送在 pushBubble 里与气泡同一次更新撤。reattach 是接着同一回合,不撤。
+    if (!reattachPid && hiddenUserMessage) setChatMessages((prev) => dropLocalNoticesOf(prev, noticeOwnerKeys));
 
     // 本次真正起流的 generation。必须在任何 await、updateStreaming(true) 和用户消息写入前
     // 同步抢占；否则旧回合 finally 的落盘轮询会在本回合尚未拿到 pid 时误判为“没有新回合”。
