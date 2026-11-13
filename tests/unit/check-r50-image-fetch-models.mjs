@@ -118,9 +118,11 @@ app.use('/api', imageRouter);
 // 假攻击者(另一个临时口):任何一次请求都算失守 —— 存储 key 绝不许发到请求体指定的地址。
 let evilHits = 0;
 let evilSawKey = false;
+let evilLastAuth = ''; // 最近一次请求的鉴权头(authorization + x-api-key)
 const evilServer = createServer((req, res) => {
   evilHits += 1;
   const seen = `${req.headers.authorization || ''}${req.headers['x-api-key'] || ''}`;
+  evilLastAuth = seen;
   if (seen.includes(KEY)) evilSawKey = true;
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ data: [{ id: 'attacker-model' }] }));
@@ -188,6 +190,7 @@ try {
     assert.equal(own.json?.ok, true, `t3.2b: 自带 key 时按请求地址拉取(${own.text})`);
     assert.equal(evilHits, 2, 't3.2b: 请求地址那台收到 1 次');
     assert.equal(evilSawKey, false, 't3.2b: 自带 key 那一支绝不读存储 key');
+    assert.ok(evilLastAuth.includes(FORM_KEY), `t3.2b: 请求地址那台收到的就是用户现填的 key(实际鉴权头:${evilLastAuth})`);
 
     // 3.2c id 态 + 借存储 key + 地址只差结尾斜杠 → 视为相同,发往存储 baseURL,带存储 key
     const beforeC = storedHits.length;
