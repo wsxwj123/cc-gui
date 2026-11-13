@@ -14,6 +14,7 @@ import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from
 import { isOfficialAnthropic, isClaudeModel, readClaudeSettingsForWrite } from '../services/model-resolver.js';
 import { applyCatalogPrefill, catalogPrefillEntry } from '../utils/model-capabilities.js';
 import { resolveFetchTarget, KEY_URL_MISMATCH_MSG } from '../utils/fetch-target.js';
+import { fetchFollowSameOriginOnce, redirectRefusedMessage } from '../utils/probe-fetch.js';
 import { stripBaseURL } from '../utils/image-url.js';
 import { redactKey } from '../utils/image-protocols.js';
 import { updatePrefs, loadPrefs, readThirdPartyAutoSync, unhideProjectInPrefs } from './prefs.js';
@@ -2339,8 +2340,9 @@ async function tryFetchModels(url, apiKey, { protocol = 'anthropic' } = {}) {
   for (const headers of headerSets) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 10000);
-    let r;
-    try { r = await fetch(url, { headers, signal: ctrl.signal }); }
+    // r181:不让底层自动跟随重定向(跨主机会把 x-api-key 带走、跳过内网守卫);同源最多跟 1 跳。
+    let got;
+    try { got = await fetchFollowSameOriginOnce(url, { headers, signal: ctrl.signal }); }
     catch (e) {
       clearTimeout(timer);
       if (e.name === 'AbortError') throw new Error('拉取超时(10s)');
@@ -2353,6 +2355,9 @@ async function tryFetchModels(url, apiKey, { protocol = 'anthropic' } = {}) {
       continue;
     }
     clearTimeout(timer);
+    // 跳转被拒:结束本候选,不换头重试(换头只会再得到同样的 3xx,白多一次带 Key 的请求)。
+    if (got.refused) return { status: got.refused.status, body: '', err: '', redirect: got.refused };
+    const r = got.response;
     if (r.ok) {
       const data = await r.json().catch(() => null);
       const arr = Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : []);
@@ -2481,15 +2486,21 @@ export async function probeUpstreamModels(baseURL, apiKey, { protocol = 'anthrop
     if (/(^|\.)openrouter\.ai$/i.test(new URL(b).host)) candidates.push('https://openrouter.ai/api/v1/models');
   } catch {}
 
-  let lastStatus = 0, lastBody = '', lastUrl = '', lastErr = '';
+  let lastStatus = 0, lastBody = '', lastUrl = '', lastErr = '', redirected = null;
   for (const url of [...new Set(candidates)]) {
     const res = await tryFetchModels(url, apiKey, { protocol }); // 超时直接向上抛
     if (res.ids) return res;                       // {ids, windows} 200(空数组也算成功,由前端提示手填)
     lastStatus = res.status; lastBody = res.body; lastUrl = url; lastErr = res.err || lastErr;
+    if (res.redirect) redirected = res.redirect;   // r181:有候选的跳转被拒(requestUrl 就是该候选地址)
   }
   // 区分鉴权失败 vs 没有 models 接口,后者明确引导手填(anthropic 中转常见)。
   if (lastStatus === 401 || lastStatus === 403) {
     throw new Error(`上游 ${lastUrl} 返回 ${lastStatus}(鉴权失败):请检查 API Key${lastBody ? `。${lastBody}` : ''}`);
+  }
+  // r181:候选的跳转被拒不能被说成「未提供模型列表接口」。结构化标记 type:'redirect' —— 生图路由凭它
+  // 归类,文本路由凭它给前端 code;按条目拉模型的路由只读 message。不带 .status(保持现有的状态码分流)。
+  if (redirected) {
+    throw Object.assign(new Error(redirectRefusedMessage(redirected)), { type: 'redirect' });
   }
   // r17-5:网络层就没通(status 0)时,别说成"该 provider 未提供模型列表接口" —— 那是
   // 误导:根本没到达对方。把真实成因(DNS/连接/TLS)原样给出来。
@@ -2576,6 +2587,8 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
     if (t.reject) return res.status(400).json({ error: KEY_URL_MISMATCH_MSG, code: 'STORED_KEY_URL_MISMATCH' });
     const { baseURL, apiKey } = t;
     const type = t.protocol; // 变量名必须叫 type(check-model-capabilities t5 按源码钉 catalogPrefillEntry(mid, type))
+    // r181:校验最终用的协议,不认识的不发请求(以前会被当成 anthropic 发出去)。
+    if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ error: 'type 必须是 openai 或 anthropic' });
     keyForRedact = typeof apiKey === 'string' ? apiKey : '';
     let base; try { base = new URL(baseURL); } catch { return res.status(400).json({ error: 'baseURL 非法' }); }
     if (!/^https?:$/.test(base.protocol)) return res.status(400).json({ error: 'baseURL 必须是 http(s)' });
@@ -2593,7 +2606,11 @@ router.post('/custom-providers/fetch-models', async (req, res) => {
     res.json({ models: probed.ids, windows: probed.windows || undefined, catalogMeta: Object.keys(catalogMeta).length ? catalogMeta : undefined });
   } catch (err) {
     // r179:probeUpstreamModels 会把上游正文原样拼进报错,上游回显 Key 时要先打码。
-    res.status(err.status || 502).json({ error: redactKey(err.message, keyForRedact) });
+    res.status(err.status || 502).json({
+      error: redactKey(err.message, keyForRedact),
+      // r181:跳转被拒 → 前端凭它不拼「常见原因 / 这很正常」那段说明。
+      ...(err.type === 'redirect' ? { code: 'UPSTREAM_REDIRECT' } : {}),
+    });
   }
 });
 
@@ -2619,8 +2636,11 @@ async function testProviderConnection({ type, baseURL, apiKey, model }) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 20000);
   try {
-    const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal });
+    // r181:同源最多跟 1 跳(POST 只跟 307 / 308,请求体是字符串可原样重发),跨源一律拒绝。
+    const got = await fetchFollowSameOriginOnce(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal });
     clearTimeout(timer);
+    if (got.refused) return { ok: false, status: got.refused.status, error: redirectRefusedMessage(got.refused) };
+    const r = got.response;
     if (r.ok) return { ok: true, status: r.status };
     const text = (await r.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 300);
     return { ok: false, status: r.status, error: text || `HTTP ${r.status}` };
