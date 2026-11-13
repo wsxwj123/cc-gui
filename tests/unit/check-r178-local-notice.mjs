@@ -1,0 +1,109 @@
+#!/usr/bin/env node
+// r178:本地提示(报错块 / 空回复提示 / 花费上限)不再被「整轮已存盘 → 整清」清掉。
+// 纯函数白盒(client/src/utils/localNotice.js)+ App.jsx 源码文本锁。
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import {
+  isLocalNotice, isLocalOnlyEntry, LOCAL_NOTICE_KINDS, dropLocalNoticesOf,
+} from '../../client/src/utils/localNotice.js';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const APP = readFileSync(path.join(here, '../../client/src/App.jsx'), 'utf8');
+
+let n = 0;
+const t = (name, fn) => {
+  try { fn(); n++; } catch (e) { console.error(`FAIL ${name}`); throw e; }
+};
+
+// ── isLocalNotice ──
+t('三种标记都认', () => {
+  assert.deepEqual(LOCAL_NOTICE_KINDS, ['error', 'empty', 'budget']);
+  for (const k of LOCAL_NOTICE_KINDS) assert.equal(isLocalNotice({ type: 'turn', localNotice: k }), true);
+});
+t('回合但无标记 → 否', () => assert.equal(isLocalNotice({ type: 'turn', text: ['❌ x'] }), false));
+t('未知标记 → 否', () => assert.equal(isLocalNotice({ type: 'turn', localNotice: 'other' }), false));
+t('非回合类带标记 → 否', () => assert.equal(isLocalNotice({ type: 'user', localNotice: 'error' }), false));
+t('空值 → 否', () => { assert.equal(isLocalNotice(null), false); assert.equal(isLocalNotice(undefined), false); });
+
+// ── isLocalOnlyEntry ──
+t('旁问 / 自动拒绝 / 模式提示 → 是', () => {
+  for (const type of ['btw', 'denial', 'mode-mismatch']) assert.equal(isLocalOnlyEntry({ type }), true);
+});
+t('本地提示 → 是', () => assert.equal(isLocalOnlyEntry({ type: 'turn', localNotice: 'empty' }), true));
+t('普通回合 / 用户消息 → 否', () => {
+  assert.equal(isLocalOnlyEntry({ type: 'turn' }), false);
+  assert.equal(isLocalOnlyEntry({ type: 'user', text: 'hi' }), false);
+});
+t('空值 → 否', () => assert.equal(isLocalOnlyEntry(null), false));
+
+// ── App.jsx 源码文本锁 ──
+const count = (re) => (APP.match(re) || []).length;
+t('从 localNotice.js 引入 isLocalOnlyEntry', () => {
+  assert.match(APP, /import \{[^}]*\bisLocalOnlyEntry\b[^}]*\} from '\.\/utils\/localNotice\.js';/);
+});
+t('三处整清都调用 isLocalOnlyEntry,旧的三连类型判断不再出现', () => {
+  // (b) 发送收尾「整轮已存盘」
+  assert.match(APP, /const localOnly = \(m\) => isLocalOnlyEntry\(m\) \|\| keepLivePeer\(m, getLocalMessages\(\)\);/);
+  // (c) 文件监听回调 / (d) 兜底去重 effect
+  assert.match(APP, /if \(lastUser && known\.has\(lastUser\)\) return prev\.filter\(\(m\) => isLocalOnlyEntry\(m\) \|\| keepLivePeer\(m, persisted\) \|\| \(m\.interrupted && !known\.has\(m\)\)\);/);
+  assert.match(APP, /if \(lastUser && known\.has\(lastUser\)\) return prev\.filter\(\(m\) => isLocalOnlyEntry\(m\) \|\| keepLivePeer\(m, messages\) \|\| \(m\.interrupted && !known\.has\(m\)\)\);/);
+  assert.equal(count(/m\.type === 'btw' \|\| m\.type === 'denial' \|\| m\.type === 'mode-mismatch'/g), 0);
+});
+t('(a) 空 / 报错回合那一支原样保留回合类条目', () => {
+  assert.match(APP, /prev\.filter\(\(m\) => m\.type === 'turn' \|\| !known\.has\(m\) \|\| keepLivePeer\(m, hist\)\)/);
+});
+t('四个打标点都带标记', () => {
+  assert.match(APP, /uuid: 'chat-budget-' \+ Date\.now\(\),\s*type: 'turn',\s*localNotice: 'budget',/);
+  assert.match(APP, /uuid: 'chat-empty-' \+ Date\.now\(\),\s*type: 'turn',\s*localNotice: 'empty',/);
+  const errs = APP.match(/uuid: 'chat-error-' \+ Date\.now\(\),\s*type: 'turn',\s*localNotice: 'error',/g) || [];
+  assert.equal(errs.length, 2);
+  assert.equal(count(/uuid: 'chat-error-' \+ Date\.now\(\)/g), 2, 'chat-error 打标点应恰好两处');
+});
+t('本地提示条目不带 srcUuids / roundStartTs', () => {
+  for (const re of [/uuid: 'chat-budget-'/, /uuid: 'chat-empty-'/, /uuid: 'chat-error-'/g]) {
+    const flags = re.flags.includes('g') ? re.flags : re.flags + 'g';
+    for (const m of APP.matchAll(new RegExp(re.source, flags))) {
+      // 取到该对象字面量结束(第一个 "}]" 或 "},\n" 之前的 1200 字内找)
+      const seg = APP.slice(m.index, m.index + 1200);
+      const end = seg.search(/\n\s*\}\]\);|\n\s*\},\s*\]\);/);
+      const body = end > 0 ? seg.slice(0, end) : seg;
+      assert.ok(!/srcUuids|roundStartTs/.test(body), `${re.source} 不应带 srcUuids / roundStartTs`);
+    }
+  }
+});
+
+// ── 项 3:新一轮开始撤掉本会话上一轮的本地提示 ──
+const E = (ownerKey, kind = 'error') => ({ type: 'turn', localNotice: kind, ownerKey });
+t('dropLocalNoticesOf:只撤本会话的本地提示', () => {
+  const user = { type: 'user', ownerKey: 's1' };
+  const turn = { type: 'turn', ownerKey: 's1' };
+  const btw = { type: 'btw', ownerKey: 's1' };
+  const other = E('s2');
+  const list = [user, turn, btw, E('s1'), E('s1', 'empty'), E('s1', 'budget'), other];
+  assert.deepEqual(dropLocalNoticesOf(list, 's1'), [user, turn, btw, other]);
+});
+t('dropLocalNoticesOf:键数组(队列键 + 真实 sessionId)都认', () => {
+  const a = E('draft-x'); const b = E('sid-1'); const c = E('sid-2');
+  assert.deepEqual(dropLocalNoticesOf([a, b, c], ['draft-x', 'sid-1']), [c]);
+});
+t('dropLocalNoticesOf:没有可撤的 / 无有效键 → 原数组', () => {
+  const list = [{ type: 'user', ownerKey: 's1' }, E('s2')];
+  assert.equal(dropLocalNoticesOf(list, 's1'), list);
+  assert.equal(dropLocalNoticesOf(list, [null, undefined]), list);
+  assert.equal(dropLocalNoticesOf(list, null), list);
+  assert.equal(dropLocalNoticesOf([], 's1').length, 0);
+});
+t('App.jsx:pushBubble 与气泡同一次更新撤本地提示', () => {
+  assert.match(APP, /import \{[^}]*\bdropLocalNoticesOf\b[^}]*\} from '\.\/utils\/localNotice\.js';/);
+  assert.match(APP, /const noticeOwnerKeys = \[sessionQueueKey, selectedSession\?\.sessionId\];/);
+  assert.match(APP, /setChatMessages\(\(prev\) => \[\.\.\.dropLocalNoticesOf\(prev, noticeOwnerKeys\), bubble\]\);/);
+});
+t('App.jsx:不画气泡的新回合(隐藏续跑)也撤,reattach 不撤', () => {
+  assert.match(APP, /if \(!reattachPid && hiddenUserMessage\) setChatMessages\(\(prev\) => dropLocalNoticesOf\(prev, noticeOwnerKeys\)\);/);
+  // noticeOwnerKeys 必须在 pushBubble 定义之前声明
+  assert.ok(APP.indexOf('const noticeOwnerKeys =') < APP.indexOf('const pushBubble = () =>'));
+});
+
+console.log(`check-r178-local-notice: ${n} passed`);

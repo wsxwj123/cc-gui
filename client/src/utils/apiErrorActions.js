@@ -21,6 +21,60 @@ export const ONE_M_HINT = '该会话被识别为 1M 上下文；若账户不支�
 export const SIGNATURE_HINT = '会话历史里有其他模型留下的思考内容，当前接口不接受。切回原来的 provider,在此会话执行 /compact 后再切回;或新开会话。';
 export const LOGIN_HINT = `${OFFICIAL_LOGIN_HINT}。`;
 
+// r178:命令行内部诊断串 `[ede_diagnostic] result_type=… last_content_type=… stop_reason=…` 的中文说明。
+// 类型名来自上游(外部数据),只接受 [A-Za-z0-9_-]{1,40},不合规就用通用说法,不把原串拼进文案。
+// 说明文字里不得出现诊断串的标记词本身(验收按它计数)。
+// 解析不在整段报错上跑正则(外部可控的超长输入会让带回溯的写法变成平方级):先截一个短窗口
+// —— `last_content_type=` 之后、第一个换行之前、最多 EDE_TYPE_WINDOW 个字符 —— 只在窗口里按空白
+// 切词,遇到下一个 `键=` 词为止;原值超出窗口(被截断、窗口里没遇到下一个键)按不合规处理。
+const EDE_RE = /\[ede_diagnostic\]/;
+const EDE_TYPE_KEY = 'last_content_type=';
+const EDE_TYPE_WINDOW = 80;
+const EDE_NEXT_KEY_RE = /^[A-Za-z_]+=/;
+const EDE_TYPE_OK_RE = /^[A-Za-z0-9_-]{1,40}$/;
+// 返回类型名;没有该字段返回 undefined;被截断返回 null(按不合规处理)。
+function edeContentType(msg) {
+  const at = msg.indexOf(EDE_TYPE_KEY);
+  if (at < 0) return undefined;
+  const rest = msg.slice(at + EDE_TYPE_KEY.length, at + EDE_TYPE_KEY.length + EDE_TYPE_WINDOW + 1);
+  const nl = rest.indexOf('\n');
+  const line = nl >= 0 ? rest.slice(0, nl) : rest;
+  const truncated = line.length > EDE_TYPE_WINDOW;
+  const win = truncated ? line.slice(0, EDE_TYPE_WINDOW) : line;
+  const parts = win.split(/(\s+)/); // 保留分隔的空白,值里的空白原样留下
+  let value = '';
+  for (let i = 0; i < parts.length; i += 2) {
+    if (i > 0 && EDE_NEXT_KEY_RE.test(parts[i])) return value.replace(/\s+$/, '');
+    value += parts[i] + (parts[i + 1] || '');
+  }
+  return truncated ? null : value.replace(/\s+$/, '');
+}
+export const EDE_EMPTY_HINT = '上游返回了内容为空的回复,命令行重试一次后仍为空,本轮结束。中转站出错但按成功返回时会这样(余额不足、限流、模型名不受支持等)。稍后重试,或换模型、换 Provider。';
+export function edeUnknownTypeHint(type) {
+  return `上游返回了命令行无法识别的内容类型(${type}),本轮结束。该 Provider 的返回格式与 Claude Code 不兼容,换模型或换 Provider。`;
+}
+// 有该字段、但类型名不合规或被截断时的说明(不带类型名,不拼原串)。
+export const EDE_UNKNOWN_HINT = '上游返回了命令行无法识别的内容,本轮结束。该 Provider 的返回格式与 Claude Code 不兼容,换模型或换 Provider。';
+const EDE_RESULT_KEY = 'result_type=assistant';
+// 子串查找:`result_type=assistant` 后面是空白或结尾才算(不用带回溯的正则)。
+function hasAssistantResultType(msg) {
+  for (let at = msg.indexOf(EDE_RESULT_KEY); at >= 0; at = msg.indexOf(EDE_RESULT_KEY, at + 1)) {
+    const next = msg.charAt(at + EDE_RESULT_KEY.length);
+    if (next === '' || /\s/.test(next)) return true;
+  }
+  return false;
+}
+// 只解释取样验证过的形态:[ede_diagnostic] + result_type=assistant + last_content_type 字段;
+// 其余形态不加说明,原文照显(不猜)。
+function edeHint(msg) {
+  if (!EDE_RE.test(msg) || !hasAssistantResultType(msg)) return null;
+  const type = edeContentType(msg);
+  if (type === undefined) return null;
+  if (type === 'none') return EDE_EMPTY_HINT;
+  if (type === null || !EDE_TYPE_OK_RE.test(type)) return EDE_UNKNOWN_HINT;
+  return edeUnknownTypeHint(type);
+}
+
 function markerSaysAuth(marker) {
   if (!marker || typeof marker !== 'object') return false;
   return marker.status === 401 || marker.status === 403 || marker.kind === 'authentication_failed';
@@ -28,7 +82,7 @@ function markerSaysAuth(marker) {
 
 // 输入:报错文字 + 可选结构化标记 { status, kind }。
 // 输出:{ action: 'content-risk' | 'provider' | 'repair-official' | null, hints: string[] }。
-// hints 的顺序固定为 1M、官方未登录、签名(与报错分支拼接顺序一致)。
+// hints 的顺序固定为 1M、官方未登录、签名(与报错分支拼接顺序一致),r178 的诊断串说明排在最后。
 export function deriveApiErrorUi(text, marker = null) {
   const msg = String(text || '');
   const risk = classifyUpstreamRefusal(msg);
@@ -39,6 +93,8 @@ export function deriveApiErrorUi(text, marker = null) {
   if (ONE_M_RE.test(msg)) hints.push(ONE_M_HINT);
   if (matchOfficialLoginError(msg)) hints.push(LOGIN_HINT);
   if (SIGNATURE_RE.test(msg)) hints.push(SIGNATURE_HINT);
+  const ede = edeHint(msg);
+  if (ede) hints.push(ede);
   return { action, hints };
 }
 

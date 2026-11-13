@@ -109,7 +109,10 @@ const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
   const land = app.indexOf('if (roundLanded(peeked, i))');
   assert.ok(land > 0, 'roundLanded 收尾分支必须还在');
   const landSeg = app.slice(land, land + 900);
-  assert.ok(/m\.type === 'btw' \|\| m\.type === 'denial'/.test(landSeg),
+  // r178:类型判断抽进 client/src/utils/localNotice.js 的 isLocalOnlyEntry,收尾分支调它。
+  const localNoticeSrc = readFileSync(join(root, 'client/src/utils/localNotice.js'), 'utf8');
+  assert.ok(/isLocalOnlyEntry\(m\)/.test(landSeg)
+      && /export function isLocalOnlyEntry[\s\S]{0,200}m\.type === 'btw' \|\| m\.type === 'denial'/.test(localNoticeSrc),
     "回合落盘整清时必须豁免 denial(与 btw 同因:只活在本地、无 jsonl 孪生)");
   // 两个渲染点必须对称(历史列表 memo 组件 + 流式列表),漏一处就是"有数据不显示"。
   assert.equal(app.split("msg.type === 'denial'").length - 1, 2,
