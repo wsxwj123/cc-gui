@@ -176,4 +176,17 @@ for (const status of [307, 308]) {
   }
 }
 
+// i1 生图面板的提示表:redirect 一项(否则重定向会落到「拉取失败（HTTP 502）」兜底)。
+// 把 FETCH_HINTS 这个对象字面量的「键: '值'」逐项解析成表,按表里的值断言(不求值源码)。
+{
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../../client/src/components/ImagePanel.jsx', import.meta.url), 'utf8');
+  const m = src.match(/const FETCH_HINTS = \{([\s\S]*?)\n\};/);
+  assert.ok(m, 'i1: ImagePanel.jsx 里找得到 FETCH_HINTS');
+  const hints = Object.fromEntries([...m[1].matchAll(/^\s*([\w-]+):\s*'([^']*)',/gm)].map((x) => [x[1], x[2]]));
+  assert.equal(hints.redirect, '上游要求跳转，已停止拉取。', 'i1: redirect 提示文字逐字');
+  assert.ok(!/改成|改填|最终地址/.test(hints.redirect), 'i1: 不引导改填跳转目标');
+  for (const k of ['auth', 'network', 'unsupported']) assert.equal(typeof hints[k], 'string', `i1: 原有 ${k} 一项还在`);
+}
+
 console.log('✓ check-r181-probe-no-redirect: 全部通过');

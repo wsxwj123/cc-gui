@@ -37,6 +37,7 @@ import { readJsonGuarded, assertWritable, corruptWarning, isConfigGuardError, se
 import { fetch as undiciFetch, ProxyAgent } from 'undici';
 import { assertPublicBaseURL, probeUpstreamModels } from './settings.js';
 import { resolveFetchTarget, KEY_URL_MISMATCH_MSG } from '../utils/fetch-target.js';
+import { fetchFollowSameOriginOnce, redirectRefusedMessage } from '../utils/probe-fetch.js';
 import { normalizeSavedImageBaseURL } from '../utils/image-url.js';
 
 const router = Router();
@@ -572,12 +573,13 @@ async function fetchGeminiModels(baseURL, apiKey, proxyUrl) {
   await assertPublicBaseURL(baseURL);
   const spec = geminiModelsRequest(baseURL, apiKey);
   // redirect:manual —— 请求带着 apiKey,跟随 3xx 会把密钥带到没验过的地址(同出图链路)。
-  const get = (headers) => undiciFetch(spec.url, {
-    headers, signal: AbortSignal.timeout(FETCH_MODELS_TIMEOUT_MS), redirect: 'manual',
-    ...dispatchOpts(proxyUrl),
-  });
-  let resp;
-  try { resp = await get(spec.headers); }
+  // r181:与文本拉模型同一条规则 —— 同源最多跟 1 跳,跨源一律拒绝(fetchFollowSameOriginOnce)。
+  // 两次请求共用同一个超时信号,总超时不变。
+  const get = (headers) => fetchFollowSameOriginOnce(spec.url, {
+    headers, signal: AbortSignal.timeout(FETCH_MODELS_TIMEOUT_MS), ...dispatchOpts(proxyUrl),
+  }, { fetchImpl: (u, init) => undiciFetch(u, { ...init, redirect: 'manual' }) });
+  let got;
+  try { got = await get(spec.headers); }
   catch (e) {
     const floor = nodeFloorHint(e);
     if (floor) throw new ModelsError('network', floor);
@@ -587,10 +589,18 @@ async function fetchGeminiModels(baseURL, apiKey, proxyUrl) {
       ? `拉取超时(${FETCH_MODELS_TIMEOUT_MS / 1000}s):${spec.url}`
       : `连不上 ${spec.url}${cause || e?.message ? `:${[e?.message, cause].filter(Boolean).join(' — ')}` : ''}`);
   }
+  if (got.refused) throw new ModelsError('redirect', redirectRefusedMessage(got.refused));
+  let resp = got.response;
   if (!resp.ok && (resp.status === 401 || resp.status === 403)) {
     // 判官r50:重试成功时消费掉首个 401/403 的响应体,及时释放连接(不等 GC)。
     const first = resp;
-    try { resp = await get(spec.altHeaders); await first.body?.cancel?.(); } catch { /* 保留首次响应 */ }
+    let alt = null;
+    try { alt = await get(spec.altHeaders); } catch { /* 保留首次响应 */ }
+    if (alt?.refused) {
+      await first.body?.cancel?.().catch(() => {});
+      throw new ModelsError('redirect', redirectRefusedMessage(alt.refused));
+    }
+    if (alt?.response) { resp = alt.response; await first.body?.cancel?.().catch(() => {}); }
   }
   // 读 body 一律走 readCapped:下游 host 是用户自填的,无界读 = 单进程后端 OOM(r26-J2 口径)。
   if (!resp.ok) {
@@ -619,11 +629,11 @@ async function fetchGeminiModels(baseURL, apiKey, proxyUrl) {
 
 /**
  * POST /api/image-providers/fetch-models { id? | (baseURL, protocol), apiKey? }
- * → { ok:true, models:[id…] } / { ok:false, type:'auth'|'network'|'unsupported', message }
+ * → { ok:true, models:[id…] } / { ok:false, type:'auth'|'network'|'unsupported'|'redirect'|'needs_key', message }
  *
  * 取值规则见 server/utils/fetch-target.js(r179,与 settings.js 的 custom-providers/fetch-models
- * 共用一份):Key 是谁的,地址、协议、代理就跟谁走。
- *  - 带 id 且 Key 没填(借已保存的 Key):地址、协议、代理全部用已保存的值,发出去的地址恒为
+ * 共用一份)。
+ *  - 带 id 且 Key 没填(借已保存的 Key):地址、代理用已保存的值,协议请求优先、没带才用已保存的(r181),发出去的地址恒为
  *    stored.baseURL 原值;请求里带了地址且与已保存的不同(两边都按保存口径规范化后比较)→
  *    400 needs_key,不发上游请求 —— 否则 {id, baseURL:攻击者地址} 会让服务端把该 provider 的
  *    真实密钥发去攻击者端点。请求里的代理一律忽略、不校验。
@@ -647,6 +657,10 @@ router.post('/image-providers/fetch-models', async (req, res) => {
       (u) => normalizeSavedImageBaseURL(stored?.protocol, u), // 两边都规范化;stored 为空时不会被调用
     );
     if (t.reject) return res.status(400).json({ ok: false, type: 'needs_key', message: KEY_URL_MISMATCH_MSG });
+    // r181:校验最终用的协议,不认识的不发请求(以前会被当成 openai 走通用探测)。
+    if (!IMAGE_PROTOCOLS.includes(t.protocol)) {
+      return res.status(400).json({ ok: false, type: 'unsupported', message: `协议必须是 ${IMAGE_PROTOCOLS.join(' / ')}` });
+    }
     // r56:代理校验同保存路径(非 http(s)/带凭据一律拒,不给一个没验过的出口);来自已保存值的不再校验。
     let proxyUrl = t.proxy.value || '';
     if (t.proxy.from === 'request') {
