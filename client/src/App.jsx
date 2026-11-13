@@ -11612,6 +11612,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
         body: JSON.stringify({ type, baseURL, apiKey, model, id: editing?.id }),
       });
       const d = await r.json();
+      // r181:借已保存 Key 而地址改了 —— 后端没发请求,给的是提示不是连接失败,原样显示。
+      if (d.code === 'STORED_KEY_URL_MISMATCH') { setTestResult({ ok: false, notice: true, error: d.error }); setBusy(''); return; }
       setTestResult(d.ok ? { ok: true, model } : { ok: false, error: d.error || `HTTP ${d.status || '错误'}` });
     } catch (e) { setTestResult({ ok: false, error: e.message }); }
     setBusy('');
@@ -11654,7 +11656,7 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       const d = await r.json();
       // r179:借已保存 Key 而地址改了 —— 后端拒绝并给出完整说明,原样显示(不拼「常见原因」)。
       if (!r.ok && d.code === 'STORED_KEY_URL_MISMATCH') { confirmDialog(d.error); setBusy(''); return; }
-      if (!r.ok) throw new Error(d.error || '拉取失败');
+      if (!r.ok) throw Object.assign(new Error(d.error || '拉取失败'), { code: d.code });
       if (!d.models?.length) confirmDialog('该端点未返回模型,请直接在下方「模型」框手填模型 ID 再保存。');
       else {
         // r52:拉取结果不再直灌进模型框(中转站目录动辄几百条,全量灌入等于把噪音当配置)。
@@ -11681,7 +11683,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       //   失败一般是 key 没填或填错 → 提示检查 key。
       // - anthropic 兼容:很多 Claude 协议中转(MiMo 等)只 forward /v1/messages,
       //   /v1/models 直接 404,属正常 → 提示手填即可。
-      const tail = type === 'openai'
+      // r181:上游跳转被拒(UPSTREAM_REDIRECT)时报错已说清原因,不再附下面这段说明(对它是误导)。
+      const tail = e.code === 'UPSTREAM_REDIRECT' ? '' : type === 'openai'
         ? '\n\nOpenAI 兼容端点通常 /v1/models 可用。常见原因:\n• 上面 API Key 没填或填错\n• 端点路径有出入(部分网关需要 /v1 后缀)\n• 网络/防火墙拦截\n也可直接在下方「模型」框手填模型 ID(每行一个)再保存。'
         : '\n\n很多 Claude 协议中转(如 MiMo 等)不提供 /v1/models 接口,这很正常。直接在下方「模型」框手填模型 ID(每行一个)再保存即可。';
       confirmDialog('拉取模型失败：' + e.message + tail);
@@ -12066,10 +12069,14 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
       {testResult && (
         <div className={`text-[11px] font-body rounded-lg px-3 py-2 border ${testResult.ok
           ? 'text-success border-success/30 bg-success/10'
-          : 'text-error border-error/30 bg-error/10'}`}>
+          : testResult.notice
+            ? 'text-warning border-warning/30 bg-warning/10'
+            : 'text-error border-error/30 bg-error/10'}`}>
           {testResult.ok
             ? `✓ 连接成功 —— 模型「${testResult.model}」可正常响应`
-            : <span className="break-all whitespace-pre-wrap">✗ 连接失败:{testResult.error}</span>}
+            : testResult.notice
+              ? <span className="break-all whitespace-pre-wrap">{testResult.error}</span>
+              : <span className="break-all whitespace-pre-wrap">✗ 连接失败:{testResult.error}</span>}
         </div>
       )}
       {/* r52:拉取结果的勾选弹窗,弹窗只是文本域的编辑器。r125:确认后以勾选为准写回模型框
