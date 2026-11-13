@@ -98,12 +98,6 @@ export function deriveApiErrorUi(text, marker = null) {
   return { action, hints };
 }
 
-// 原先拼到本地 ❌ 块正文后面的那段(每条前面空一行、以 "> " 引用)。r183 起 App.jsx 不再使用
-// (提示改走 errorHints 结构化渲染);tests/unit/check-r176-api-error-ui.mjs 仍钉着它的输出,保留。
-export function hintsAsQuoteSuffix(hints) {
-  return (hints || []).map((h) => `\n\n> ${h}`).join('');
-}
-
 // 报错分支要不要省掉本地 ❌ 块:只有这次的报错原文确实已在本回合累积正文里才省。
 //   - 本回合出现过命令行的合成报错消息:累积正文包含这次的报错原文 → 省;
 //     (同一回合后来又来一条原文不同的报错,例如进程异常退出,照旧画 ❌ 块,不被省掉)
