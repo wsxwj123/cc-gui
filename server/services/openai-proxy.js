@@ -634,7 +634,7 @@ export function summarizeUpstreamBody(textOrParsed, apiKey) {
   return cps.length > SUMMARY_MAX_CODEPOINTS ? cps.slice(0, SUMMARY_MAX_CODEPOINTS).join('') + '…' : text;
 }
 
-// 流判成第 3 类时摘要用哪一份原文:第一条不认识的内容(unrec)取得到字段就用它;
+// 流判成第 3 类时摘要用哪一份原文:累积的不认识的内容(unrec)取得到字段就用它;
 // 取不到才用回放那一支的整段原文(replayRaw)。export 仅为可单测
 export function pickUnrecognizedSource(unrec, replayRaw) {
   if (replayRaw == null) return unrec;
@@ -660,12 +660,21 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model, apiKey, replayRa
   const msgId = 'msg_' + Math.random().toString(36).slice(2, 14);
   // r178b:还没往下发过任何东西时记三个标记,流结束时据此判断是不是「根本不是回复」。
   //   sawData:见过 [DONE] 或认得的数据块(带 data: 前缀的与裸 JSON 行都算);
-  //   sawNonBlank:见过任何非空行;unrec:第一条不认识的内容(最多 65536 个码元)。
+  //   sawNonBlank:见过任何非空行;unrecParts:累积的不认识的内容(总量最多 65536 个码元)。
   // 只更新标记,不改变任何行原有的处理。
   let sawData = false;
   let sawNonBlank = false;
-  let unrec = null;
-  const noteUnrec = (s) => { if (unrec === null) unrec = s.slice(0, SUMMARY_INPUT_MAX_UNITS); };
+  // 不认识的内容全部累积(多行 JSON / 纯文本 / 网页只记第一行会丢掉上游原话):数组加计数,
+  // 流结束时 join 一次;总量(含换行分隔)到 65536 个码元后不再累积。不做逐行拼接再截断(平方级)。
+  const unrecParts = [];
+  let unrecUnits = 0;
+  const noteUnrec = (s) => {
+    const room = SUMMARY_INPUT_MAX_UNITS - unrecUnits;
+    if (room <= 0) return;
+    const piece = s.length > room ? s.slice(0, room) : s;
+    unrecParts.push(piece);
+    unrecUnits += piece.length + 1; // +1:join 时的换行
+  };
   const noteShape = (j, text) => { if (isStreamChunkShape(j)) sawData = true; else noteUnrec(text); };
   const noteLineFlags = (line) => {
     if (!line) return;
@@ -862,9 +871,9 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model, apiKey, replayRa
     if (!started) {
       // r178b:缓冲区里剩下的半行只拿来更新标记,不送进 handleChunk(与改前一样不处理它)。
       noteLineFlags(buf.trim());
-      if (unrec !== null) {
+      if (unrecParts.length > 0) {
         aborted = true;
-        sendUnrecognized(clientRes, pickUnrecognizedSource(unrec, replayRaw), apiKey);
+        sendUnrecognized(clientRes, pickUnrecognizedSource(unrecParts.join('\n'), replayRaw), apiKey);
         return;
       }
       if (!sawData) {

@@ -199,6 +199,52 @@ for (const [v, want] of [
   await new Promise((r) => upstream.close(r));
 }
 
+// ── 流那一支累积不认识的内容(多行非 SSE 正文不只剩第一行) ───────────────────────
+{
+  const PREFIX = '上游返回了无法识别的响应(HTTP 200):';
+  let cur = { ct: 'text/event-stream', body: '' };
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => { res.writeHead(200, { 'content-type': cur.ct }); res.end(cur.body); });
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const proxyPort = await startOpenAIProxy(0);
+  setOpenAIUpstream({ baseURL: `http://127.0.0.1:${upstream.address().port}/v1`, apiKey: KEY, model: 'test-model' });
+  const call = async (ct, body) => {
+    cur = { ct, body };
+    const t0 = performance.now();
+    const r = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'k', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'test-model', max_tokens: 16, stream: true, messages: [{ role: 'user', content: '你好' }] }),
+    });
+    const j = await r.json();
+    return { status: r.status, retry: r.headers.get('x-should-retry'), message: j?.error?.message ?? '', ms: performance.now() - t0 };
+  };
+  const ES = 'text/event-stream';
+  const is502 = (r, label) => {
+    assert.equal(r.status, 502, `${label}:状态码`);
+    assert.equal(r.retry, 'false', `${label}:x-should-retry`);
+    assert.ok(r.message.startsWith(PREFIX), `${label}:前缀,实际 ${r.message}`);
+  };
+  let r = await call(ES, '{\n  "code": 429,\n  "msg": "余额不足,请充值"\n}\n');
+  is502(r, 'D1 多行 JSON'); assert.equal(r.message, PREFIX + '余额不足,请充值'); ok();
+  r = await call(ES, 'upstream busy\ntry again later\n');
+  is502(r, 'D2 两行纯文本'); assert.ok(r.message.includes('upstream busy') && r.message.includes('try again later'), r.message); ok();
+  r = await call(ES, '<!DOCTYPE html>\n<html><body>\n<h1>504 Gateway Time-out</h1>\n</body></html>\n');
+  is502(r, 'D3 多行网页');
+  assert.ok(r.message.includes('504 Gateway Time-out') && !r.message.includes('<') && !r.message.includes('>'), r.message); ok();
+  r = await call(ES, 'data: {"code":429,"msg":"余额不足,请充值"}\n\n');
+  is502(r, 'D4a 单行数据'); assert.equal(r.message, PREFIX + '余额不足,请充值'); ok();
+  r = await call('text/plain', 'Error: quota exceeded\ndata: see the billing page\n');
+  is502(r, 'D4b 回放整段'); assert.ok(r.message.includes('Error: quota exceeded') && r.message.includes('data: see the billing page'), r.message); ok();
+  r = await call(ES, 'x\n'.repeat(30000));
+  is502(r, 'D5 三万行');
+  assert.ok(r.ms < 500, `D5 耗时 ${r.ms.toFixed(1)}ms`);
+  assert.ok(Array.from(r.message).length <= 330, `D5 长度 ${Array.from(r.message).length}`); ok();
+  await new Promise((res) => upstream.close(res));
+}
+
 // ── 看守:源码里不得出现零宽字符、双向控制符、BOM 的字面字符(一律写转义) ──────────
 {
   const { readFileSync } = await import('node:fs');
