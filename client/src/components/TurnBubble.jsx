@@ -1166,14 +1166,13 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
                   )}
                 </div>
               )}
+              {/* r183:有报错原文段时逐段渲染(报错原文原样显示,其余照旧 Markdown);没有时仍是整段一份。 */}
               {fullText && (legacyErrIdx && legacyErrIdx.size > 0
-                // r183:有报错原文段时逐段渲染:报错原文原样显示,其余照旧 Markdown。
-                ? turn.text.map((t, i) => (t
-                  ? (legacyErrIdx.has(i)
-                    ? <ErrorPlainText key={`lt-${i}`} text={t} />
-                    : <MarkdownRenderer key={`lt-${i}`} content={t} dockKeyPrefix={`${turn.uuid}:lt${i}`} isStreaming={isLiveStream} />)
-                  : null))
-                : <MarkdownRenderer content={fullText} dockKeyPrefix={turn.uuid} isStreaming={isLiveStream} />)}
+                ? turn.text.map((t, i) => ({ content: t, err: legacyErrIdx.has(i), key: `lt-${i}`, prefix: `${turn.uuid}:lt${i}` })).filter((p) => p.content)
+                : [{ content: fullText, err: false, key: 'lt', prefix: turn.uuid }]
+              ).map((p) => (p.err
+                ? <ErrorPlainText key={p.key} text={p.content} />
+                : <MarkdownRenderer key={p.key} content={p.content} dockKeyPrefix={p.prefix} isStreaming={isLiveStream} />))}
               {/* 任务清单只走输入框上方常驻面板,legacy 路径同样不再内联渲染(见上)。 */}
               {!(chatMode && !chatExpanded) && hasInlineCalls && (
                 <div className="mt-2 space-y-2">
