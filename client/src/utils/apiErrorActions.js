@@ -98,7 +98,12 @@ export function deriveApiErrorUi(text, marker = null) {
   return { action, hints };
 }
 
-// 报错分支里拼到本地 ❌ 块正文后面的那段(与改动前逐字相同:每条前面空一行、以 "> " 引用)。
+// r183:本地 ❌ 块原先只写在 text 字段里的「常见原因」(画面不显示,顶部复制按钮会复制出来)。
+// 报错原文改为原样显示、提示改走 errorHints 后,它作为本地 ❌ 块的第一条结构化提示保留。
+export const LOCAL_ERROR_CAUSES_HINT = '常见原因：session 不在当前 cwd 对应的工作区目录 → 新建会话;jsonl 被 trim 后损坏 → 新建会话;CLI 版本异常 → 终端跑 claude --help 验证。';
+
+// 原先拼到本地 ❌ 块正文后面的那段(每条前面空一行、以 "> " 引用)。r183 起 App.jsx 不再使用
+// (提示改走 errorHints 结构化渲染);tests/unit/check-r176-api-error-ui.mjs 仍钉着它的输出,保留。
 export function hintsAsQuoteSuffix(hints) {
   return (hints || []).map((h) => `\n\n> ${h}`).join('');
 }

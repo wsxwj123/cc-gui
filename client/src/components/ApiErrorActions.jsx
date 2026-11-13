@@ -3,8 +3,8 @@ import React from 'react';
 // r176:接口报错下方的动作区。本地副本(报错分支加的 ❌ 块 / 本回合合成报错的副本)与
 // 落盘的历史回合共用这一份界面;三种动作各自做的事由调用方传进来,这里只管画。
 //   action: 'provider' | 'repair-official' | 'content-risk' | null
-//   hints:  补充提示(1M / 官方未登录 / 签名),只给本回合合成报错与历史回合用;
-//           本地 ❌ 块的提示已经拼在正文里,不传。
+//   hints:  补充提示(1M / 官方未登录 / 签名 / 诊断串说明);r183 起本地 ❌ 块也走这里
+//           (另带「常见原因」一条),不再用引用语法拼在正文里。
 export default function ApiErrorActions({
   action,
   hints = null,

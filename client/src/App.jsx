@@ -181,7 +181,7 @@ import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAut
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import ApiErrorActions from './components/ApiErrorActions.jsx';
-import { deriveApiErrorUi, deriveHistoryApiErrorUi, hintsAsQuoteSuffix, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
+import { deriveApiErrorUi, deriveHistoryApiErrorUi, LOCAL_ERROR_CAUSES_HINT, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
 import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
@@ -7346,7 +7346,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 ? deriveApiErrorUi(msg, { status: event.api_error_status })
                 : errUi;
             } else {
-              const hintSuffix = hintsAsQuoteSuffix(errUi.hints);
+              // r183:报错原文与提示分开存 —— 原文进 errorText 块原样显示(不再嵌进 Markdown 加粗),
+              // 提示走 errorHints 结构化渲染(不再用引用语法拼在正文后);text 与 blocks 同一份。
+              // 「常见原因」原先只在 text 里(画面不显示,但顶部复制按钮复制的是 text),保留为第一条提示。
+              const localHints = [LOCAL_ERROR_CAUSES_HINT, ...errUi.hints];
               setChatMessages((prev) => [...prev, {
                 uuid: 'chat-error-' + Date.now(),
                 type: 'turn',
@@ -7354,12 +7357,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 ownerKey: streamSid || sessionQueueKey,
                 timestamp: new Date().toISOString(),
                 model: streamingModel,
-                text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的工作区目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${hintSuffix}`],
+                text: [`❌ ${msg}`],
                 thinking: [],
                 toolCalls: [],
-                blocks: [{ type: 'text', content: `❌ **${msg}**${hintSuffix}` }],
+                blocks: [{ type: 'text', content: `❌ ${msg}`, errorText: true }],
                 usage: null,
                 ...(errUi.action ? { errorAction: errUi.action } : {}),
+                errorHints: localHints,
               }]);
             }
             // 条带折叠:报错的轮也要落一条窗口记录(与中断那条同款)。**不加"本轮没在跑就丢弃"
@@ -7675,7 +7679,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           text: [`❌ ${err.message || '发送失败'}`],
           thinking: [],
           toolCalls: [],
-          blocks: [{ type: 'text', content: `❌ ${err.message || '发送失败'}` }],
+          // r183:发送失败的说明来自后端响应体,原样显示(errorText 块),不交给 Markdown。
+          blocks: [{ type: 'text', content: `❌ ${err.message || '发送失败'}`, errorText: true }],
           usage: null,
         }]);
         }
