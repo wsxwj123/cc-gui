@@ -396,14 +396,17 @@ function ProviderForm({ initial, onDone, onCancel }) {
     setForm((f) => ({ ...f, size: w && h ? `${w}:${h}` : '' }));
   };
 
-  // 拉模型:编辑态只传 id(服务端强制用存储的 baseURL 与密钥,请求体里的 baseURL 被忽略);
-  // 新建态传表单里的地址与密钥。密钥留空也发 —— 部分中转站的模型列表接口不鉴权。
+  // 拉模型(r179):两态都把表单里的地址与代理发过去,编辑态另带 id。取值只由服务端判断:
+  // 填了密钥 → 按表单里的地址 / 代理 / 协议拉取;密钥留空 → 用已保存的密钥,且只发往已保存的
+  // 地址(表单地址改过就被拒,提示区原样显示服务端那句话)。密钥留空也发 —— 部分中转站的模型
+  // 列表接口不鉴权。地址为空时按钮不可点;这里再挡一次,防止空地址被服务端当成「没带地址」。
   const loadModels = async () => {
+    if (!form.baseURL.trim()) { setModelsMsg('请先填写接口地址（baseURL）'); return; }
     setFetchingModels(true);
     setModelsMsg('');
     try {
-      // 新建态把表单里的代理一并发过去(编辑态服务端一律用存储值,与 baseURL 同口径)。
-      const body = form.id ? { id: form.id, protocol: form.protocol }
+      const body = form.id
+        ? { id: form.id, protocol: form.protocol, baseURL: form.baseURL.trim(), proxyUrl: (form.proxyUrl || '').trim() }
         : { baseURL: form.baseURL.trim(), protocol: form.protocol, proxyUrl: (form.proxyUrl || '').trim() };
       if (form.apiKey.trim()) body.apiKey = form.apiKey.trim();
       const r = await fetch('/api/image-providers/fetch-models', {
@@ -412,6 +415,8 @@ function ProviderForm({ initial, onDone, onCancel }) {
         body: JSON.stringify(body),
       });
       const d = await r.json().catch(() => ({}));
+      // 借已保存密钥而地址改了:服务端那句说明原样显示,不加任何前缀。
+      if (d.type === 'needs_key') { setModelsMsg(d.message); return; }
       if (!r.ok || !d.ok) {
         setModelsMsg(`${FETCH_HINTS[d.type] || `拉取失败（HTTP ${r.status}）。`}${d.message ? `\n${d.message}` : ''}`);
         return;
@@ -586,8 +591,8 @@ function ProviderForm({ initial, onDone, onCancel }) {
           <button
             type="button"
             onClick={loadModels}
-            disabled={fetchingModels || (!form.id && !form.baseURL.trim())}
-            title={!form.id && !form.baseURL.trim() ? '先填写接口地址（baseURL）' : form.id ? '使用已保存的接口地址与密钥拉取（表单中未保存的修改不生效）' : '按接口地址与密钥拉取可用模型'}
+            disabled={fetchingModels || !form.baseURL.trim()}
+            title={!form.baseURL.trim() ? '先填写接口地址（baseURL）' : form.id ? '按表单中的接口地址拉取；密钥留空时使用已保存的密钥，且只发往已保存的地址' : '按接口地址与密钥拉取可用模型'}
             className="shrink-0 px-2 rounded-md border border-canvas-deep text-[11.5px] text-ink-soft font-body hover:bg-canvas-deep/60 disabled:opacity-50 flex items-center gap-1"
           >
             {fetchingModels ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}拉取模型
