@@ -21,6 +21,24 @@ export const ONE_M_HINT = '该会话被识别为 1M 上下文；若账户不支�
 export const SIGNATURE_HINT = '会话历史里有其他模型留下的思考内容，当前接口不接受。切回原来的 provider,在此会话执行 /compact 后再切回;或新开会话。';
 export const LOGIN_HINT = `${OFFICIAL_LOGIN_HINT}。`;
 
+// r178:命令行内部诊断串 `[ede_diagnostic] result_type=… last_content_type=… stop_reason=…` 的中文说明。
+// 类型名来自上游(外部数据),只接受 [A-Za-z0-9_-]{1,40},不合规就用通用说法,不把原串拼进文案。
+// 说明文字里不得出现诊断串的标记词本身(验收按它计数)。
+const EDE_RE = /\[ede_diagnostic\]/;
+const EDE_TYPE_RE = /last_content_type=([^\n]*?)(?=\s+[A-Za-z_]+=|\s*(?:\n|$))/;
+const EDE_TYPE_OK_RE = /^[A-Za-z0-9_-]{1,40}$/;
+export const EDE_EMPTY_HINT = '上游返回了内容为空的回复,命令行重试一次后仍为空,本轮结束。中转站出错但按成功返回时会这样(余额不足、限流、模型名不受支持等)。稍后重试,或换模型、换 Provider。';
+export function edeUnknownTypeHint(type) {
+  return `上游返回了命令行无法识别的内容类型(${type}),本轮结束。该 Provider 的返回格式与 Claude Code 不兼容,换模型或换 Provider。`;
+}
+function edeHint(msg) {
+  if (!EDE_RE.test(msg)) return null;
+  const m = EDE_TYPE_RE.exec(msg);
+  const type = m ? m[1] : '';
+  if (type === 'none' || !EDE_TYPE_OK_RE.test(type)) return EDE_EMPTY_HINT;
+  return edeUnknownTypeHint(type);
+}
+
 function markerSaysAuth(marker) {
   if (!marker || typeof marker !== 'object') return false;
   return marker.status === 401 || marker.status === 403 || marker.kind === 'authentication_failed';
@@ -28,7 +46,7 @@ function markerSaysAuth(marker) {
 
 // 输入:报错文字 + 可选结构化标记 { status, kind }。
 // 输出:{ action: 'content-risk' | 'provider' | 'repair-official' | null, hints: string[] }。
-// hints 的顺序固定为 1M、官方未登录、签名(与报错分支拼接顺序一致)。
+// hints 的顺序固定为 1M、官方未登录、签名(与报错分支拼接顺序一致),r178 的诊断串说明排在最后。
 export function deriveApiErrorUi(text, marker = null) {
   const msg = String(text || '');
   const risk = classifyUpstreamRefusal(msg);
@@ -39,6 +57,8 @@ export function deriveApiErrorUi(text, marker = null) {
   if (ONE_M_RE.test(msg)) hints.push(ONE_M_HINT);
   if (matchOfficialLoginError(msg)) hints.push(LOGIN_HINT);
   if (SIGNATURE_RE.test(msg)) hints.push(SIGNATURE_HINT);
+  const ede = edeHint(msg);
+  if (ede) hints.push(ede);
   return { action, hints };
 }
 
