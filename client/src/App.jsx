@@ -6952,7 +6952,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   accumulatedText = accumulatedText ? `${accumulatedText}\n${block.text}` : block.text;
                   scheduleStreamCommit(SC_TEXT);
                 }
-                if (snapshotBuildsBlocks && block.text) snapshotBlocks.push({ type: 'text', content: block.text });
+                // r183:命令行的合成报错消息(is_api_error_message)的文字是上游报错原文 → 打标原样显示。
+                if (snapshotBuildsBlocks && block.text) {
+                  snapshotBlocks.push(event.is_api_error_message === true
+                    ? { type: 'text', content: block.text, errorText: true }
+                    : { type: 'text', content: block.text });
+                }
               }
               if (block.type === 'thinking') {
                 if (!accumulatedThinking || snapshotBuildsBlocks) {
