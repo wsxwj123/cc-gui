@@ -245,6 +245,16 @@ for (const [v, want] of [
   await new Promise((res) => upstream.close(res));
 }
 
+// ── 清理先于打码:Key 每 7 个字符夹一个控制字符(先打码后清理的实现在这条上会失败) ──
+{
+  const ctl = String.fromCodePoint(1);
+  let spaced = '';
+  for (let i = 0; i < KEY.length; i += 7) spaced += (i ? ctl : '') + KEY.slice(i, i + 7);
+  const s = summarizeUpstreamBody('token=' + spaced + ' end', KEY);
+  noKeyRun(s, '每 7 个字符夹控制字符');
+  assert.ok(s.includes('***'), `应含 ***,实际 ${s}`); ok();
+}
+
 // ── 看守:源码里不得出现零宽字符、双向控制符、BOM 的字面字符(一律写转义) ──────────
 {
   const { readFileSync } = await import('node:fs');
