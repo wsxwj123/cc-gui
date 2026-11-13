@@ -554,9 +554,10 @@ const FETCH_MODELS_TIMEOUT_MS = 10_000; // 与文本 provider 的拉取口径一
 // 超限一律按"读不了"处理,不把一坨大 body 读进单进程后端。
 const MAX_MODELS_BYTES = 2 * 1024 * 1024;
 
-// 失败三分类:auth(密钥不对)/ network(请求没到达对方)/ unsupported(该服务没有列表接口),
-// 前端据此给可行动文案。probeUpstreamModels 只抛中文 Error(红线:不改其本体),
-// 故按其固定措辞归类。
+// 失败四分类:auth(密钥不对)/ network(请求没到达对方)/ unsupported(该服务没有列表接口)/
+// redirect(上游要求跳转被拒,r181),前端据此给可行动文案。redirect 由抛出的错误自带类型标记
+// (gemini 走 ModelsError('redirect'),probeUpstreamModels 抛的 Error 带 type:'redirect'),
+// 不走按文字归类;其余三类仍按 probeUpstreamModels 中文报错的固定措辞归类(classifyModelsError)。
 class ModelsError extends Error {
   constructor(type, message) { super(message); this.type = type; }
 }
@@ -684,8 +685,8 @@ router.post('/image-providers/fetch-models', async (req, res) => {
     }
     // openai / chat 的 baseURL 语义与文本 provider 相同 → 复用同一条探测链路(候选 URL、
     // 双 header 轮询、SSRF 守卫都在里面);gemini 是另一套端点形态,单独走。
-    // ⚠️ 已知边界:probeUpstreamModels 在 settings.js 且与文本 provider 共用(其本体
-    // 有"一个字不改"的红线),故 openai/chat 的【拉模型】这一次请求仍是直连,不经代理;
+    // ⚠️ 已知边界:probeUpstreamModels 在 settings.js 且与文本 provider 共用(改它要回归
+    // 全部调用入口,见其上方注释),故 openai/chat 的【拉模型】这一次请求仍是直连,不经代理;
     // 生成与图片下载(真正会被墙掐断的两处)以及 gemini 拉模型都已过代理。
     const models = protocol === 'gemini'
       ? await fetchGeminiModels(baseURL, apiKey, proxyUrl)

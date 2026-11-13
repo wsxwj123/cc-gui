@@ -2468,7 +2468,12 @@ export async function assertQuotaPublicURL(quotaURL) {
 }
 
 // export 仅为复用:生图 provider(routes/image.js)的 openai/chat 协议与文本 provider
-// 的 baseURL 语义相同,拉模型走同一条探测链路。函数本体一个字不改。
+// 的 baseURL 语义相同,拉模型走同一条探测链路。
+// 边界(r181):重定向处理统一在 server/utils/probe-fetch.js(同源最多跟 1 跳、跨源拒绝)。
+// probeUpstreamModels / tryFetchModels 共 3 处调用:文本拉模型(custom-providers/fetch-models)、
+// 按已保存条目或当前 Provider 拉模型(provider/fetch-models)、生图拉模型(image-providers/fetch-models);
+// 测试连接(testProviderConnection)另有 1 处。改候选地址、请求头轮询、超时、窗口大小解析之前,
+// 要把这几个入口的验收全部回归。
 export async function probeUpstreamModels(baseURL, apiKey, { protocol = 'anthropic' } = {}) {
   // SSRF 守卫放在这里 = 所有调用点(fetch-models 请求值 / provider/fetch-models 存储
   // baseURL / active provider settings.json baseURL)一次全覆盖,不漏 sibling caller。
