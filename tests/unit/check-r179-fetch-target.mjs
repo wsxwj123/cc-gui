@@ -137,6 +137,18 @@ const STORED = Object.freeze({
   assert.equal(resolveFetchTarget(STORED, { apiKey: '', protocol: 'openai' }, strip).protocol, 'anthropic', 't11: 借用 → 已保存值');
 }
 
+// t13 源码:两个路由都从共用模块导入,文案只有一份
+{
+  const { readFileSync } = await import('node:fs');
+  const read = (p) => readFileSync(new URL(`../../${p}`, import.meta.url), 'utf8');
+  for (const p of ['server/routes/settings.js', 'server/routes/image.js']) {
+    const src = read(p);
+    assert.ok(!src.includes(KEY_URL_MISMATCH_MSG), `t13: ${p} 不另写文案字面量`);
+    assert.match(src, /import \{ resolveFetchTarget, KEY_URL_MISMATCH_MSG \} from '\.\.\/utils\/fetch-target\.js'/, `t13: ${p} 从 fetch-target.js 导入`);
+    assert.match(src, /resolveFetchTarget\(/, `t13: ${p} 调用 resolveFetchTarget`);
+  }
+}
+
 // ─────────── t12 normalizeSavedImageBaseURL:与保存接口回显逐字同口径 ───────────
 // 隔离:HOME/USERPROFILE 指向 mktemp 目录,import 路由前设好;保存不联网。
 const { mkdtempSync, rmSync } = await import('node:fs');
