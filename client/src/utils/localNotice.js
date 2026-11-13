@@ -3,14 +3,17 @@
 // 本地提示 = 页面自己画的回合类条目,命令行不把它写进会话文件(没有历史孪生):
 //   'error'  流里报错的本地 ❌ 块、发送失败的 ❌ 块;
 //   'empty'  provider 什么都没回时的 ⚠️ 提示;
-//   'budget' 花费上限提示。
+//   'budget' 花费上限提示;
+//   'stall'  r178c:静默超时结束了本回合时的提示(服务端事件带 ended:true;只提示、不结束
+//            的那种不打标,回合结束即过期,照旧被清);
+//   'done'   r178c:「会话已清空 / 上下文已压缩」完成提示。
 // 打标字段 localNotice。这类条目不得带 srcUuids / roundStartTs(localTurnTakenOver 会据此把它
 // 当成已被历史接管而藏掉)。
 //
 // 收尾 / 文件监听 / 兜底去重三处「整轮已存盘 → 整清本地副本」都按 isLocalOnlyEntry 保留,
 // 留到同一会话发下一条消息(由发送入口撤掉)或切会话 / 刷新为止。
 
-export const LOCAL_NOTICE_KINDS = ['error', 'empty', 'budget'];
+export const LOCAL_NOTICE_KINDS = ['error', 'empty', 'budget', 'stall', 'done'];
 
 export function isLocalNotice(m) {
   return !!m && m.type === 'turn' && LOCAL_NOTICE_KINDS.includes(m.localNotice);

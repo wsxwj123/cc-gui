@@ -7146,6 +7146,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             setChatMessages((prev) => [...prev, {
               uuid: 'stall-' + Date.now(),
               type: 'turn',
+              // r178c:结束版(服务端带 ended:true)是「这一轮为什么停了」的唯一说明,打标留住;
+              // 只提示版不打标,回合结束即过期,照旧被清(见 utils/localNotice.js)
+              ...(event.ended === true ? { localNotice: 'stall' } : {}),
               ownerKey: streamSid || sessionQueueKey,
               timestamp: new Date().toISOString(),
               model: streamingModel,
@@ -7552,6 +7555,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-cleared-' + Date.now(),
           type: 'turn',
+          localNotice: 'done', // r178c:本地提示,无历史孪生(见 utils/localNotice.js)
           ownerKey: streamSid || sessionQueueKey,
           timestamp: new Date().toISOString(),
           model: streamingModel,

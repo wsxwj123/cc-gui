@@ -332,6 +332,12 @@ const old = (ms) => now - ms;
   assert.ok(/resolveStallMs\(readStallTimeoutSync\(\)/.test(src), 'r151s:每次开始计时按设置 stallTimeout 现算时长');
   assert.ok(/process\.env\.CGUI_STALL_MS\b/.test(src), 'CGUI_STALL_MS 仍然读取');
   assert.ok(/readStallTimeoutSync\(\) === 'never'/.test(src), 'r151s:到点再读一次设置,never 走只提示');
+  // r178c:结束版 stall_notice 带 ended:true;只提示版不带
+  assert.ok(/type: 'stall_notice', text: stallText, ended: true \}/.test(src), 'r178c:结束版 stall_notice 事件带 ended:true');
+  const hintLine = (src.match(/[^\n]*type: 'stall_notice', text: hintText[^\n]*/) || [''])[0];
+  assert.ok(hintLine, 'r178c:只提示版 stall_notice 发送行存在');
+  assert.ok(!/ended/.test(hintLine), 'r178c:只提示版 stall_notice 事件不带 ended');
+  assert.equal((src.match(/ended: true/g) || []).length, 1, 'r178c:ended:true 只出现在结束版一处');
   assert.ok(/hasFreshLiveTask\(slot\.liveTasks\b/.test(src), 'idleReclaim 的"有活任务"判据必须用分窗函数');
   assert.ok(/slot\.lastLevelAt = Date\.now\(\)/.test(src), 'level 分支必须刷新 lastLevelAt(R1 降级支据此切换)');
 }
