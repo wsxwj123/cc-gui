@@ -3201,7 +3201,9 @@ async function handleChatPost(req, res) {
           return;
         }
         const stallText = buildStallNoticeText(stallMs, slot.turnSubagentSeen);
-        deliverLine(slot, JSON.stringify({ type: 'stall_notice', text: stallText }));
+        // r178c:结束版带 ended:true,客户端据此把这条提示标成本地提示、回合收尾后保留
+        // (只提示版不带:回合继续,结束后提示即过期,照旧被清)。
+        deliverLine(slot, JSON.stringify({ type: 'stall_notice', text: stallText, ended: true }));
         // 【必须强制拆进程,不能走 idle 复用】(判官缺陷1):卡死场景下 CLI 子进程正阻塞在
         // 死掉的上游请求上,不是健康空闲。若只 finalize 转 idle,同会话 15 分钟内下一条消息
         // 会复用这个僵尸(input.push 进挂住的进程、stdin 不被读、armStall 因 for await 不进
