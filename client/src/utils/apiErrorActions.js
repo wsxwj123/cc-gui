@@ -98,11 +98,6 @@ export function deriveApiErrorUi(text, marker = null) {
   return { action, hints };
 }
 
-// 报错分支里拼到本地 ❌ 块正文后面的那段(与改动前逐字相同:每条前面空一行、以 "> " 引用)。
-export function hintsAsQuoteSuffix(hints) {
-  return (hints || []).map((h) => `\n\n> ${h}`).join('');
-}
-
 // 报错分支要不要省掉本地 ❌ 块:只有这次的报错原文确实已在本回合累积正文里才省。
 //   - 本回合出现过命令行的合成报错消息:累积正文包含这次的报错原文 → 省;
 //     (同一回合后来又来一条原文不同的报错,例如进程异常退出,照旧画 ❌ 块,不被省掉)
@@ -142,6 +137,40 @@ function errorTextOf(turn) {
     return texts.length ? String(texts[texts.length - 1].content || '') : '';
   }
   return '';
+}
+
+// r183:回合里哪几段文字是报错原文(要原样显示,不交给 Markdown)。texts 是该回合的文字段数组。
+//   - 有后端标记:内容(去首尾空白)等于 apiError.text 的那几段;标记里没有原文 → 一段都不算;
+//   - 老会话文件无标记、按 <synthetic> 兜底:最后一段非空文字(与 errorTextOf 同口径);
+//   - 普通回合:一段都不算。
+// 返回下标集合。
+export function errorTextIndexes(turn, texts) {
+  const out = new Set();
+  if (!isApiErrorTurn(turn) || !Array.isArray(texts)) return out;
+  if (turn.apiError && typeof turn.apiError === 'object') {
+    const want = typeof turn.apiError.text === 'string' ? turn.apiError.text.trim() : '';
+    if (!want) return out;
+    texts.forEach((t, i) => { if (typeof t === 'string' && t.trim() === want) out.add(i); });
+    return out;
+  }
+  for (let i = texts.length - 1; i >= 0; i--) {
+    if (typeof texts[i] === 'string' && texts[i]) { out.add(i); break; }
+  }
+  return out;
+}
+
+// r183:给回合的 blocks 打上报错原文标记(errorText),供 TurnBubble 选择渲染方式。
+//   - 已有块带标记(本地 ❌ 块、流式时按 is_api_error_message 打的)→ 原样返回;
+//   - 否则按 errorTextIndexes 在 text 块里找(历史回合);找不到 → 原样返回(同一引用)。
+// 只加标记字段,不改 content,不增删块(正文指纹等按块内容算的判据输入不变)。
+export function markErrorTextBlocks(turn) {
+  const blocks = turn?.blocks;
+  if (!Array.isArray(blocks) || blocks.length === 0) return blocks;
+  if (blocks.some((b) => b && b.errorText)) return blocks;
+  const texts = blocks.map((b) => (b && b.type === 'text' ? String(b.content || '') : null));
+  const hit = errorTextIndexes(turn, texts);
+  if (hit.size === 0) return blocks;
+  return blocks.map((b, i) => (hit.has(i) ? { ...b, errorText: true } : b));
 }
 
 // 历史列表 → 最后一个回合要挂的动作与提示(没有则 null)。

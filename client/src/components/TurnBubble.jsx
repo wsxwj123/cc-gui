@@ -36,6 +36,8 @@ import {
 import { isLiveLineHostedByGroup, liveLabelFromBlocks } from '../utils/liveStatus.js';
 import { LiveStatusLine } from './LiveStatusLine.jsx';
 import { Linkify } from '../utils/linkify.jsx';
+import ErrorPlainText from './ErrorPlainText.jsx';
+import { errorTextIndexes, markErrorTextBlocks } from '../utils/apiErrorActions.js';
 import { ToolResultImages } from './tools/ToolResultImages.jsx';
 import { usePricingVersion } from '../hooks/usePricingVersion.js';
 import { XsForwardButton } from './XsForwardDialog.jsx';
@@ -667,7 +669,10 @@ export function CoworkBlocks({
     list.forEach((b, i) => {
       if (b.type === 'text' && b.content) {
         flushBucket(i);
-        out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} dockKeyPrefix={`${dockKeyPrefix}:${i}`} isStreaming={isLive} />);
+        // r183:报错原文块(errorText 标记)原样显示,不交给 Markdown。
+        out.push(b.errorText
+          ? <ErrorPlainText key={`b-${i}`} text={b.content} />
+          : <MarkdownRenderer key={`b-${i}`} content={b.content} dockKeyPrefix={`${dockKeyPrefix}:${i}`} isStreaming={isLive} />);
         return;
       }
       // 未展开:收起工具/子代理/skill(思考照常显示,清单不计)。工作流不在此列 ——
@@ -739,6 +744,8 @@ export function CoworkBlocks({
     const body = (() => {
       switch (seg.kind) {
         case 'text':
+          // r183:报错原文块(errorText 标记)原样显示,不交给 Markdown。seg.index 是它在 list 里的下标。
+          if (list[seg.index]?.errorText) return <ErrorPlainText text={seg.content} />;
           return <MarkdownRenderer content={seg.content} dockKeyPrefix={`${dockKeyPrefix}:${seg.index}`} isStreaming={isLive} />;
         case 'task':
           return (
@@ -967,6 +974,13 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
   // This is what makes the UI match the CLI: a "thinking" segment, then a Bash
   // call+result, then more reasoning text, then an Edit, then summary text.
   const hasOrderedBlocks = Array.isArray(turn.blocks) && turn.blocks.length > 0;
+  // r183:历史回合里命令行的合成报错消息 → 那段文字打上 errorText 标记,原样显示(判据见 apiErrorActions.js)。
+  const markedBlocks = useMemo(() => markErrorTextBlocks(turn), [turn]);
+  // legacy 路径(无 blocks)同口径:text 数组里哪几段是报错原文。
+  const legacyErrIdx = useMemo(
+    () => (hasOrderedBlocks || !Array.isArray(turn.text) ? null : errorTextIndexes(turn, turn.text)),
+    [turn, hasOrderedBlocks],
+  );
 
   // Legacy bucket path (kept for historical messages loaded from .jsonl which
   // don't have a blocks array — they get the old grouped-by-type layout).
@@ -1096,11 +1110,11 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
             // "重做此工具"乐观回退:截断到被点工具调用之前,该工具及之后不再渲染,
             // 并在原位显示"正在重做此工具…"。服务端 trim+refetch 后此标记消失。
             const trimId = turn._retryTrimToolId;
-            let renderBlocks = turn.blocks;
+            let renderBlocks = markedBlocks;
             let showRetrying = false;
             if (trimId) {
-              const cut = turn.blocks.findIndex((b) => b.type === 'tool_use' && b.toolCall?.id === trimId);
-              if (cut >= 0) { renderBlocks = turn.blocks.slice(0, cut); showRetrying = true; }
+              const cut = markedBlocks.findIndex((b) => b.type === 'tool_use' && b.toolCall?.id === trimId);
+              if (cut >= 0) { renderBlocks = markedBlocks.slice(0, cut); showRetrying = true; }
             }
             const trailing = (showRetrying && retryActive) ? (
               <div key="retrying" className="flex items-center gap-2 text-[12px] text-accent font-body px-1 py-1.5">
@@ -1152,7 +1166,13 @@ function TurnBubbleInner({ turn, onRetry, onRetryTool, onFork, retryActive, hidd
                   )}
                 </div>
               )}
-              {fullText && <MarkdownRenderer content={fullText} dockKeyPrefix={turn.uuid} isStreaming={isLiveStream} />}
+              {/* r183:有报错原文段时逐段渲染(报错原文原样显示,其余照旧 Markdown);没有时仍是整段一份。 */}
+              {fullText && (legacyErrIdx && legacyErrIdx.size > 0
+                ? turn.text.map((t, i) => ({ content: t, err: legacyErrIdx.has(i), key: `lt-${i}`, prefix: `${turn.uuid}:lt${i}` })).filter((p) => p.content)
+                : [{ content: fullText, err: false, key: 'lt', prefix: turn.uuid }]
+              ).map((p) => (p.err
+                ? <ErrorPlainText key={p.key} text={p.content} />
+                : <MarkdownRenderer key={p.key} content={p.content} dockKeyPrefix={p.prefix} isStreaming={isLiveStream} />))}
               {/* 任务清单只走输入框上方常驻面板,legacy 路径同样不再内联渲染(见上)。 */}
               {!(chatMode && !chatExpanded) && hasInlineCalls && (
                 <div className="mt-2 space-y-2">

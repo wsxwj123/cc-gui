@@ -3,7 +3,7 @@
 // 判据原样搬自 App.jsx 报错分支;本地副本与历史回合共用。白盒,直接 import 纯函数。
 import assert from 'node:assert/strict';
 import {
-  deriveApiErrorUi, deriveHistoryApiErrorUi, hintsAsQuoteSuffix, isApiErrorTurn,
+  deriveApiErrorUi, deriveHistoryApiErrorUi, isApiErrorTurn,
   shouldSkipLocalErrorBlock, ONE_M_HINT, LOGIN_HINT, SIGNATURE_HINT,
 } from '../../client/src/utils/apiErrorActions.js';
 import { OFFICIAL_LOGIN_HINT } from '../../client/src/utils/officialAuth.js';
@@ -46,13 +46,6 @@ t('签名提示', () => assert.deepEqual(deriveApiErrorUi('400 Invalid `signatur
 t('提示顺序 1M → 登录 → 签名', () => {
   const ui = deriveApiErrorUi('[1m] Not logged in invalid signature in thinking block');
   assert.deepEqual(ui.hints, [ONE_M_HINT, LOGIN_HINT, SIGNATURE_HINT]);
-});
-t('拼到 ❌ 块的后缀与改动前逐字相同', () => {
-  assert.equal(hintsAsQuoteSuffix([ONE_M_HINT]),
-    '\n\n> 该会话被识别为 1M 上下文；若账户不支持,请在模型弹层关闭 1M 后重试。');
-  assert.equal(hintsAsQuoteSuffix([SIGNATURE_HINT]),
-    '\n\n> 会话历史里有其他模型留下的思考内容，当前接口不接受。切回原来的 provider,在此会话执行 /compact 后再切回;或新开会话。');
-  assert.equal(hintsAsQuoteSuffix([]), '');
 });
 
 // ── 历史回合 ──

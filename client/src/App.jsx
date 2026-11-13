@@ -181,7 +181,7 @@ import { startXsession, claimXsForSend, xsAutoTitlePrompt, xsClaimNotSent, xsAut
 import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import ApiErrorActions from './components/ApiErrorActions.jsx';
-import { deriveApiErrorUi, deriveHistoryApiErrorUi, hintsAsQuoteSuffix, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
+import { deriveApiErrorUi, deriveHistoryApiErrorUi, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
 import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
@@ -6952,7 +6952,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   accumulatedText = accumulatedText ? `${accumulatedText}\n${block.text}` : block.text;
                   scheduleStreamCommit(SC_TEXT);
                 }
-                if (snapshotBuildsBlocks && block.text) snapshotBlocks.push({ type: 'text', content: block.text });
+                // r183:命令行的合成报错消息(is_api_error_message)的文字是上游报错原文 → 打标原样显示。
+                if (snapshotBuildsBlocks && block.text) {
+                  snapshotBlocks.push(event.is_api_error_message === true
+                    ? { type: 'text', content: block.text, errorText: true }
+                    : { type: 'text', content: block.text });
+                }
               }
               if (block.type === 'thinking') {
                 if (!accumulatedThinking || snapshotBuildsBlocks) {
@@ -7346,7 +7351,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 ? deriveApiErrorUi(msg, { status: event.api_error_status })
                 : errUi;
             } else {
-              const hintSuffix = hintsAsQuoteSuffix(errUi.hints);
+              // r183:报错原文与提示分开存 —— 原文进 errorText 块原样显示(不再嵌进 Markdown 加粗),
+              // 提示走 errorHints 结构化渲染(不再用引用语法拼在正文后);text 与 blocks 同一份。
+              // 判据没有给出提示时不带 errorHints 字段(渲染处按有无该字段决定画不画提示区)。
               setChatMessages((prev) => [...prev, {
                 uuid: 'chat-error-' + Date.now(),
                 type: 'turn',
@@ -7354,12 +7361,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 ownerKey: streamSid || sessionQueueKey,
                 timestamp: new Date().toISOString(),
                 model: streamingModel,
-                text: [`❌ **${msg}**\n\n常见原因：\n- session 不在当前 cwd 对应的工作区目录 → 新建会话\n- jsonl 被 trim 后损坏 → 新建会话\n- CLI 版本异常 → 终端跑 \`claude --help\` 验证${hintSuffix}`],
+                text: [`❌ ${msg}`],
                 thinking: [],
                 toolCalls: [],
-                blocks: [{ type: 'text', content: `❌ **${msg}**${hintSuffix}` }],
+                blocks: [{ type: 'text', content: `❌ ${msg}`, errorText: true }],
                 usage: null,
                 ...(errUi.action ? { errorAction: errUi.action } : {}),
+                ...(errUi.hints.length ? { errorHints: errUi.hints } : {}),
               }]);
             }
             // 条带折叠:报错的轮也要落一条窗口记录(与中断那条同款)。**不加"本轮没在跑就丢弃"
@@ -7675,7 +7683,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           text: [`❌ ${err.message || '发送失败'}`],
           thinking: [],
           toolCalls: [],
-          blocks: [{ type: 'text', content: `❌ ${err.message || '发送失败'}` }],
+          // r183:发送失败的说明来自后端响应体,原样显示(errorText 块),不交给 Markdown。
+          blocks: [{ type: 'text', content: `❌ ${err.message || '发送失败'}`, errorText: true }],
           usage: null,
         }]);
         }
