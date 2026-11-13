@@ -79,6 +79,32 @@ t('多行时只取本行的类型名', () => {
   assert.deepEqual(hints, [edeUnknownTypeHint('reasoning')]);
 });
 
+// ── 超长 / 外部可控输入:限定窗口,不出现平方级回溯 ──
+const PREFIX = '[ede_diagnostic] result_type=assistant last_content_type=';
+const timed = (msg) => {
+  const t0 = performance.now();
+  const ui = deriveApiErrorUi(msg);
+  return { ui, ms: performance.now() - t0 };
+};
+t('10 万空格 + 10 万个 a:200 毫秒内返回通用说明', () => {
+  const { ui, ms } = timed(PREFIX + ' '.repeat(100000) + 'a'.repeat(100000));
+  assert.ok(ms < 200, `用时 ${ms.toFixed(1)}ms`);
+  assert.deepEqual(ui.hints, [EDE_EMPTY_HINT]);
+});
+t('20 万组「空格 + a」:200 毫秒内返回通用说明', () => {
+  const { ui, ms } = timed(PREFIX + ' a'.repeat(200000));
+  assert.ok(ms < 200, `用时 ${ms.toFixed(1)}ms`);
+  assert.deepEqual(ui.hints, [EDE_EMPTY_HINT]);
+});
+t('类型名超出窗口(被截断)→ 通用说明', () => {
+  const { hints } = deriveApiErrorUi(PREFIX + 'a'.repeat(200));
+  assert.deepEqual(hints, [EDE_EMPTY_HINT]);
+});
+t('类型名在行尾(无后续字段)且合规 → 第二条', () => assert.deepEqual(
+  deriveApiErrorUi(PREFIX + 'reasoning').hints, [edeUnknownTypeHint('reasoning')]));
+t('类型名前有空白 → 通用说明', () => assert.deepEqual(
+  deriveApiErrorUi(PREFIX + ' reasoning stop_reason=end_turn').hints, [EDE_EMPTY_HINT]));
+
 // ── 说明文字不含标记词 ──
 t('说明文字不含 ede_diagnostic', () => {
   for (const h of [EDE_EMPTY_HINT, edeUnknownTypeHint('reasoning'), ...deriveApiErrorUi(NONE).hints, ...deriveApiErrorUi(REASONING).hints]) {
