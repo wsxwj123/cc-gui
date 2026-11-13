@@ -18,8 +18,8 @@ const t = (name, fn) => {
 };
 
 // ── isLocalNotice ──
-t('三种标记都认', () => {
-  assert.deepEqual(LOCAL_NOTICE_KINDS, ['error', 'empty', 'budget']);
+t('五种标记都认(r178c 加 stall / done)', () => {
+  assert.deepEqual(LOCAL_NOTICE_KINDS, ['error', 'empty', 'budget', 'stall', 'done']);
   for (const k of LOCAL_NOTICE_KINDS) assert.equal(isLocalNotice({ type: 'turn', localNotice: k }), true);
 });
 t('回合但无标记 → 否', () => assert.equal(isLocalNotice({ type: 'turn', text: ['❌ x'] }), false));
@@ -61,8 +61,24 @@ t('四个打标点都带标记', () => {
   assert.equal(errs.length, 2);
   assert.equal(count(/uuid: 'chat-error-' \+ Date\.now\(\)/g), 2, 'chat-error 打标点应恰好两处');
 });
+t('r178c:完成提示(chat-cleared-)打 done', () => {
+  assert.match(APP, /uuid: 'chat-cleared-' \+ Date\.now\(\),\s*type: 'turn',\s*localNotice: 'done',/);
+  assert.equal(count(/uuid: 'chat-cleared-' \+ Date\.now\(\)/g), 1);
+});
+t('r178c:静默超时提示只在 ended === true 时打 stall,只提示版不打标', () => {
+  const i = APP.indexOf("uuid: 'stall-' + Date.now(),");
+  assert.ok(i > 0, 'stall- 条目存在');
+  assert.equal(count(/uuid: 'stall-' \+ Date\.now\(\)/g), 1);
+  const seg = APP.slice(i, i + 1200);
+  const body = seg.slice(0, seg.search(/\n\s*\}\]\);/));
+  // 标记是条件展开,只在 ended === true 时出现
+  assert.match(body, /\.\.\.\(event\.ended === true \? \{ localNotice: 'stall' \} : \{\}\),/);
+  // 没有无条件的 localNotice 字段(只提示版不打标)
+  assert.equal((body.match(/localNotice:/g) || []).length, 1,'stall- 条目里 localNotice 只出现在条件展开里');
+  assert.ok(!/^\s*localNotice:/m.test(body), 'stall- 条目不得无条件打标');
+});
 t('本地提示条目不带 srcUuids / roundStartTs', () => {
-  for (const re of [/uuid: 'chat-budget-'/, /uuid: 'chat-empty-'/, /uuid: 'chat-error-'/g]) {
+  for (const re of [/uuid: 'chat-budget-'/, /uuid: 'chat-empty-'/, /uuid: 'chat-error-'/g, /uuid: 'chat-cleared-'/, /uuid: 'stall-'/]) {
     const flags = re.flags.includes('g') ? re.flags : re.flags + 'g';
     for (const m of APP.matchAll(new RegExp(re.source, flags))) {
       // 取到该对象字面量结束(第一个 "}]" 或 "},\n" 之前的 1200 字内找)
