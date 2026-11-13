@@ -56,6 +56,8 @@ export const SKIN_ANCHORS = [
   { id: 'message-list', desc: '消息滚动列表' },
   { id: 'message-user', desc: '用户消息气泡' },
   { id: 'message-assistant', desc: 'AI 回复气泡容器' },
+  // r183:报错原文(上游接口 / 命令行 / 发送失败给出的文字)按原样显示的那一段;没有报错时选择器落空。
+  { id: 'error-text', desc: '对话里报错原文那一段(原样显示,不按 Markdown 排版)' },
   // R10:CLI 后台任务通知(harness 喂给模型的 <task-notification> 信封)在转写里的两种落盘
   // 形态被投影成同一行系统提示 —— 与 message-user/message-assistant 同级的消息行类型,
   // 永久留在历史里(不是转瞬即逝的提示)。通知行不存在时选择器落空不炸。

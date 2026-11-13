@@ -36,6 +36,7 @@ import {
 import { isLiveLineHostedByGroup, liveLabelFromBlocks } from '../utils/liveStatus.js';
 import { LiveStatusLine } from './LiveStatusLine.jsx';
 import { Linkify } from '../utils/linkify.jsx';
+import ErrorPlainText from './ErrorPlainText.jsx';
 import { ToolResultImages } from './tools/ToolResultImages.jsx';
 import { usePricingVersion } from '../hooks/usePricingVersion.js';
 import { XsForwardButton } from './XsForwardDialog.jsx';
@@ -667,7 +668,10 @@ export function CoworkBlocks({
     list.forEach((b, i) => {
       if (b.type === 'text' && b.content) {
         flushBucket(i);
-        out.push(<MarkdownRenderer key={`b-${i}`} content={b.content} dockKeyPrefix={`${dockKeyPrefix}:${i}`} isStreaming={isLive} />);
+        // r183:报错原文块(errorText 标记)原样显示,不交给 Markdown。
+        out.push(b.errorText
+          ? <ErrorPlainText key={`b-${i}`} text={b.content} />
+          : <MarkdownRenderer key={`b-${i}`} content={b.content} dockKeyPrefix={`${dockKeyPrefix}:${i}`} isStreaming={isLive} />);
         return;
       }
       // 未展开:收起工具/子代理/skill(思考照常显示,清单不计)。工作流不在此列 ——
@@ -739,6 +743,8 @@ export function CoworkBlocks({
     const body = (() => {
       switch (seg.kind) {
         case 'text':
+          // r183:报错原文块(errorText 标记)原样显示,不交给 Markdown。seg.index 是它在 list 里的下标。
+          if (list[seg.index]?.errorText) return <ErrorPlainText text={seg.content} />;
           return <MarkdownRenderer content={seg.content} dockKeyPrefix={`${dockKeyPrefix}:${seg.index}`} isStreaming={isLive} />;
         case 'task':
           return (
