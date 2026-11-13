@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // 单测:r179 拉取模型的取值规则(server/utils/fetch-target.js 纯函数白盒)。
-// 规则:Key 是谁的,地址、协议、代理就跟谁走;借已保存 Key 时发出去的地址恒为 stored.baseURL 原值。
+// 规则:借已保存 Key 时地址、代理跟已保存的走,协议按请求(r181);借已保存 Key 时发出去的地址恒为 stored.baseURL 原值。
 // Run: node tests/unit/check-r179-fetch-target.mjs
 import assert from 'node:assert/strict';
 
-const { resolveFetchTarget, KEY_URL_MISMATCH_MSG } = await import('../../server/utils/fetch-target.js');
+const { resolveFetchTarget, KEY_URL_MISMATCH_MSG, KEY_URL_MISMATCH_TEST_MSG } = await import('../../server/utils/fetch-target.js');
 
 assert.equal(
   KEY_URL_MISMATCH_MSG,
@@ -32,14 +32,14 @@ const STORED = Object.freeze({
   assert.equal(t.sameAsStored, false);
 }
 
-// t2 借用且地址相同(去首尾空白 + 结尾斜杠):返回 stored.baseURL 原值与已保存的 Key / 协议 / 代理
+// t2 借用且地址相同(去首尾空白 + 结尾斜杠):返回 stored.baseURL 原值与已保存的 Key / 代理,协议按请求
 {
   const t = resolveFetchTarget(STORED, { baseURL: '  https://saved.example.com/v1/  ', apiKey: '', protocol: 'openai', proxyUrl: 'http://127.0.0.1:9999' }, strip);
   assert.equal(t.reject, false);
   assert.equal(t.borrowed, true);
   assert.equal(t.baseURL, STORED.baseURL, 't2: 发出去的是已保存地址原值');
   assert.equal(t.apiKey, STORED.apiKey);
-  assert.equal(t.protocol, 'anthropic', 't2: 借用时协议用已保存的');
+  assert.equal(t.protocol, 'openai', 't2: 借用时协议按请求(r181)');
   assert.deepEqual(t.proxy, { from: 'stored', value: STORED.proxyUrl }, 't2: 借用时代理用已保存的,忽略请求里的');
   assert.equal(t.sameAsStored, true);
 }
@@ -130,11 +130,12 @@ const STORED = Object.freeze({
     { from: 'stored', value: '' }, 't10: 借用、已保存没有代理 → 空串');
 }
 
-// t11 协议:借用时已保存值优先(已保存为空才用请求的)
+// t11 协议:借用时请求优先,请求没带才用已保存的(r181)
 {
   const noProto = { ...STORED, protocol: '' };
   assert.equal(resolveFetchTarget(noProto, { apiKey: '', protocol: 'openai' }, strip).protocol, 'openai', 't11: 已保存为空 → 请求值');
-  assert.equal(resolveFetchTarget(STORED, { apiKey: '', protocol: 'openai' }, strip).protocol, 'anthropic', 't11: 借用 → 已保存值');
+  assert.equal(resolveFetchTarget(STORED, { apiKey: '', protocol: 'openai' }, strip).protocol, 'openai', 't11: 借用 → 请求值');
+  assert.equal(resolveFetchTarget(STORED, { apiKey: '' }, strip).protocol, 'anthropic', 't11: 借用、请求没带 → 已保存值');
 }
 
 // t13 源码:两个路由都从共用模块导入,文案只有一份
@@ -144,7 +145,8 @@ const STORED = Object.freeze({
   for (const p of ['server/routes/settings.js', 'server/routes/image.js']) {
     const src = read(p);
     assert.ok(!src.includes(KEY_URL_MISMATCH_MSG), `t13: ${p} 不另写文案字面量`);
-    assert.match(src, /import \{ resolveFetchTarget, KEY_URL_MISMATCH_MSG \} from '\.\.\/utils\/fetch-target\.js'/, `t13: ${p} 从 fetch-target.js 导入`);
+    assert.ok(!src.includes(KEY_URL_MISMATCH_TEST_MSG), `t13: ${p} 不另写测试连接文案字面量`);
+    assert.match(src, /import \{ resolveFetchTarget, KEY_URL_MISMATCH_MSG(?:, \w+)* \} from '\.\.\/utils\/fetch-target\.js'/, `t13: ${p} 从 fetch-target.js 导入`);
     assert.match(src, /resolveFetchTarget\(/, `t13: ${p} 调用 resolveFetchTarget`);
   }
 }

@@ -13,7 +13,7 @@ import { startOpenAIProxy, setOpenAIUpstream, getProxyPort } from '../services/o
 import { startAnthropicProxy, setAnthropicUpstream, getAnthropicProxyPort } from '../services/anthropic-proxy.js';
 import { isOfficialAnthropic, isClaudeModel, readClaudeSettingsForWrite } from '../services/model-resolver.js';
 import { applyCatalogPrefill, catalogPrefillEntry } from '../utils/model-capabilities.js';
-import { resolveFetchTarget, KEY_URL_MISMATCH_MSG } from '../utils/fetch-target.js';
+import { resolveFetchTarget, KEY_URL_MISMATCH_MSG, KEY_URL_MISMATCH_TEST_MSG } from '../utils/fetch-target.js';
 import { fetchFollowSameOriginOnce, redirectRefusedMessage } from '../utils/probe-fetch.js';
 import { stripBaseURL } from '../utils/image-url.js';
 import { redactKey } from '../utils/image-protocols.js';
@@ -2565,10 +2565,9 @@ export async function readClaudeOAuthToken() {
 
 // POST /api/custom-providers/fetch-models { type, baseURL, apiKey, id? } — used by the
 // add-provider form (client supplies the key being entered).
-// 带 id(编辑态)且条目存在时,取值规则见 server/utils/fetch-target.js(r179):Key 是谁的,
-// 地址、协议就跟谁走。
-//  - 借已保存的 Key(请求里 Key 不是非空字符串;编辑表单的 key 框留空 =「不修改」):地址、协议
-//    全部用已保存的值,发出去的地址恒为已保存原值;请求里带了地址且与已保存的不同(去首尾空白、
+// 带 id(编辑态)且条目存在时,取值规则见 server/utils/fetch-target.js(r179 / r181)。
+//  - 借已保存的 Key(请求里 Key 不是非空字符串;编辑表单的 key 框留空 =「不修改」):地址用已保存的值,
+//    发出去的地址恒为已保存原值;协议请求优先、没带才用已保存的(r181);请求里带了地址且与已保存的不同(去首尾空白、
 //    去结尾斜杠后比较)→ 400 + STORED_KEY_URL_MISMATCH,不发上游请求 —— 否则 {id, baseURL:攻击者
 //    地址} 会让 server 把该 provider 的真实密钥发去攻击者端点。
 //  - 自带 Key:地址、协议先用请求里的,没带才用已保存的。
@@ -2651,31 +2650,34 @@ async function testProviderConnection({ type, baseURL, apiKey, model }) {
 }
 
 // POST /api/custom-providers/test { type, baseURL, apiKey, model, id? }
-// 编辑态前端不持有 key(apiKey 留空)→ 带 id 时按 id 读存储 key/baseURL 兜底。
+// 编辑态前端不持有 key(apiKey 留空)。r181:取值与拉模型同一条规则(server/utils/fetch-target.js):
+// 借已保存的 Key 时地址恒为已保存原值,请求里的地址与已保存的不同 → 400,不发请求;协议请求优先,
+// 没带才用已保存的。报错正文返回前把 Key 打码。
 router.post('/custom-providers/test', async (req, res) => {
+  let keyForRedact = '';
   try {
     const b = req.body || {};
-    let baseURL = b.baseURL, apiKey = b.apiKey, type = b.type;
-    if (b.id) {
-      // 编辑态:缺哪项就用存储值兜底(各维度独立 —— 之前只在 apiKey 空时才读 type/baseURL,
-      // 若前端只回传了 apiKey 会让 type/baseURL undefined → URL 拼错/走错协议)。
-      const stored = (await readCustomProviders()).find((p) => p.id === b.id);
-      if (stored) {
-        const usedStoredKey = !apiKey || !apiKey.trim();
-        if (usedStoredKey) apiKey = stored.apiKey;
-        // 用存储 key 时 baseURL 强制取存储值(防把密钥外传到攻击者 baseURL,同 fetch-models)。
-        baseURL = usedStoredKey ? stored.baseURL : (baseURL || stored.baseURL);
-        type = type || stored.type;
-      }
-    }
+    const s = b.id ? (await readCustomProviders()).find((p) => p.id === b.id) || null : null;
+    const t = resolveFetchTarget(
+      s && { baseURL: s.baseURL, apiKey: s.apiKey, protocol: s.type },
+      { baseURL: b.baseURL, apiKey: b.apiKey, protocol: b.type },
+      stripBaseURL, // 与 PUT/POST 保存时同口径(trim + 去末尾斜杠)
+    );
+    if (t.reject) return res.status(400).json({ ok: false, code: 'STORED_KEY_URL_MISMATCH', error: KEY_URL_MISMATCH_TEST_MSG });
+    const { baseURL, apiKey } = t;
+    const type = t.protocol;
+    if (type !== 'openai' && type !== 'anthropic') return res.status(400).json({ ok: false, error: 'type 必须是 openai 或 anthropic' });
+    keyForRedact = typeof apiKey === 'string' ? apiKey : '';
     if (!baseURL) return res.status(400).json({ ok: false, error: '缺少 Base URL' });
     if (!b.model) return res.status(400).json({ ok: false, error: '请先在「模型」框填一个模型 ID 再测试' });
     try { const u = new URL(baseURL); if (!/^https?:$/.test(u.protocol)) throw 0; }
     catch { return res.status(400).json({ ok: false, error: 'Base URL 必须是 http(s)' }); }
     // SSRF 守卫在 testProviderConnection 内(根因覆盖),此处不再重复。
-    res.json(await testProviderConnection({ type, baseURL, apiKey, model: b.model }));
+    const out = await testProviderConnection({ type, baseURL, apiKey, model: b.model });
+    if (out.error) out.error = redactKey(out.error, keyForRedact); // 上游正文回显 Key 时打码
+    res.json(out);
   } catch (err) {
-    res.status(err.status || 500).json({ ok: false, error: err.message });
+    res.status(err.status || 500).json({ ok: false, error: redactKey(err.message, keyForRedact) });
   }
 });
 
@@ -2807,12 +2809,14 @@ router.post('/provider/fetch-models', async (req, res) => {
       probed = await probeUpstreamModels(target.baseURL, target.apiKey, { protocol: target.protocol });
     } catch (e) {
       const status = e?.status === 400 ? 400 : 200;
-      if (status === 400) return res.status(400).json({ ok: false, code: 'MODELS_INVALID_INPUT', error: e.message });
+      // r181:报错会拼上游正文,上游回显 Key 时先打码。
+      const msg = redactKey(e.message, typeof target.apiKey === 'string' ? target.apiKey : '');
+      if (status === 400) return res.status(400).json({ ok: false, code: 'MODELS_INVALID_INPUT', error: msg });
       // 网络层/渠道失败:200 + 稳定 code(可重试的读取,不冒充"目录为空")。
       const code = /超时|timeout/i.test(e.message) ? 'MODELS_TIMEOUT' : 'MODELS_UNAVAILABLE';
       return res.json(modelsEnvelope({
         models: [], status: 'unavailable', source: MODELS_SOURCE_UPSTREAM,
-        code, note: `目录读取失败(${code}):${e.message}`,
+        code, note: `目录读取失败(${code}):${msg}`,
       }));
     }
     if (probed.windows) {
