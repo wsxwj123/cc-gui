@@ -182,6 +182,7 @@ import { PeerMessageBubble } from './components/PeerMessageBubble.jsx';
 import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/XsSessionControls.jsx';
 import ApiErrorActions from './components/ApiErrorActions.jsx';
 import { deriveApiErrorUi, deriveHistoryApiErrorUi, hintsAsQuoteSuffix, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
+import { isLocalOnlyEntry } from './utils/localNotice.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
@@ -4407,7 +4408,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // "末条用户消息已落盘"≠"整轮落盘",半截 assistant 可能没写进 jsonl,整清=丢内容;
         // 已落盘的(命中)照清防双渲染)。审计#7。
         // r151b:直播来源气泡同样只活在本地,历史里有了同一条才交给历史(keepLivePeer)。
-        if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || keepLivePeer(m, persisted) || (m.interrupted && !known.has(m)));
+        // r178:本地提示(报错块 / 空回复提示 / 花费上限)同样没有历史孪生,一并保留(isLocalOnlyEntry)。
+        if (lastUser && known.has(lastUser)) return prev.filter((m) => isLocalOnlyEntry(m) || keepLivePeer(m, persisted) || (m.interrupted && !known.has(m)));
         return prev.filter((m) => !known.has(m) || keepLivePeer(m, persisted));
       });
     };
@@ -4438,7 +4440,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const known = makePersistedIndex(messages);
       const lastUser = [...prev].reverse().find((m) => m.type === 'user');
       // 保留 btw / denial 与未落盘的停止半截回复(同上面 reconcile,审计#7)。
-      if (lastUser && known.has(lastUser)) return prev.filter((m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || keepLivePeer(m, messages) || (m.interrupted && !known.has(m)));
+      // r178:本地提示一并保留(isLocalOnlyEntry)。
+      if (lastUser && known.has(lastUser)) return prev.filter((m) => isLocalOnlyEntry(m) || keepLivePeer(m, messages) || (m.interrupted && !known.has(m)));
       const next = prev.filter((m) => !known.has(m) || keepLivePeer(m, messages));
       return next.length === prev.length ? prev : next;
     });
@@ -7167,6 +7170,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               setChatMessages((prev) => [...prev, {
                 uuid: 'chat-budget-' + Date.now(),
                 type: 'turn',
+                localNotice: 'budget', // r178:本地提示,无历史孪生(见 utils/localNotice.js)
                 ownerKey: streamSid || sessionQueueKey,
                 timestamp: new Date().toISOString(),
                 model: streamingModel,
@@ -7335,6 +7339,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               setChatMessages((prev) => [...prev, {
                 uuid: 'chat-error-' + Date.now(),
                 type: 'turn',
+                localNotice: 'error', // r178:本地提示,无历史孪生(见 utils/localNotice.js)
                 ownerKey: streamSid || sessionQueueKey,
                 timestamp: new Date().toISOString(),
                 model: streamingModel,
@@ -7565,6 +7570,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-empty-' + Date.now(),
           type: 'turn',
+          localNotice: 'empty', // r178:本地提示,无历史孪生(见 utils/localNotice.js)
           ownerKey: streamSid || sessionQueueKey,
           timestamp: new Date().toISOString(),
           model: streamingModel,
@@ -7650,6 +7656,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setChatMessages((prev) => [...prev, {
           uuid: 'chat-error-' + Date.now(),
           type: 'turn',
+          localNotice: 'error', // r178:本地提示,无历史孪生(见 utils/localNotice.js)
           ownerKey: streamSid || sessionQueueKey,
           timestamp: new Date().toISOString(),
           model: null,
@@ -7881,7 +7888,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             localCopiesCleared = true; // r119:见声明处 —— 之后不许再补本地副本
             setChatMessages((prev) => {
               if (!isCurrentTurn()) return prev; // await 期间开了新回合 → 不清在途消息
-              const localOnly = (m) => m.type === 'btw' || m.type === 'denial' || m.type === 'mode-mismatch' || keepLivePeer(m, getLocalMessages()); // r151b:直播来源气泡在历史有同一条之前保留
+              const localOnly = (m) => isLocalOnlyEntry(m) || keepLivePeer(m, getLocalMessages()); // r151b:直播来源气泡在历史有同一条之前保留;r178:本地提示同样保留
               return prev.some(localOnly) ? prev.filter(localOnly) : [];
             });
             // r151b:留下来的本回合来源气泡记下锚点(历史里本回合第一条回复),渲染时插回它之前
