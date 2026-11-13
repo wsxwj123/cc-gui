@@ -634,6 +634,22 @@ export function summarizeUpstreamBody(textOrParsed, apiKey) {
   return cps.length > SUMMARY_MAX_CODEPOINTS ? cps.slice(0, SUMMARY_MAX_CODEPOINTS).join('') + '…' : text;
 }
 
+// 流判成第 3 类时摘要用哪一份原文:第一条不认识的内容(unrec)取得到字段就用它;
+// 取不到才用回放那一支的整段原文(replayRaw)。export 仅为可单测
+export function pickUnrecognizedSource(unrec, replayRaw) {
+  if (replayRaw == null) return unrec;
+  if (typeof unrec === 'string') {
+    const t = unrec.trim();
+    if (t[0] === '{') {
+      try {
+        const j = JSON.parse(t);
+        if (isPlainObject(j) && pickUpstreamMsg(j) !== null) return unrec;
+      } catch {}
+    }
+  }
+  return replayRaw;
+}
+
 // 流里「认得的数据块」:普通对象,并且 choices 是数组或 usage 是对象。export 仅为可单测
 export function isStreamChunkShape(j) {
   return isPlainObject(j) && (Array.isArray(j.choices) || isPlainObject(j.usage));
@@ -848,7 +864,7 @@ function streamOpenAIToAnthropic(upstreamRes, clientRes, model, apiKey, replayRa
       noteLineFlags(buf.trim());
       if (unrec !== null) {
         aborted = true;
-        sendUnrecognized(clientRes, replayRaw != null ? replayRaw : unrec, apiKey);
+        sendUnrecognized(clientRes, pickUnrecognizedSource(unrec, replayRaw), apiKey);
         return;
       }
       if (!sawData) {

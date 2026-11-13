@@ -19,7 +19,7 @@ process.env.NO_PROXY = '127.0.0.1,localhost';
 process.env.no_proxy = '127.0.0.1,localhost';
 
 const {
-  summarizeUpstreamBody, maskSecret, isStreamChunkShape, startOpenAIProxy, setOpenAIUpstream,
+  summarizeUpstreamBody, maskSecret, isStreamChunkShape, pickUnrecognizedSource, startOpenAIProxy, setOpenAIUpstream,
 } = await import('../../server/services/openai-proxy.js');
 
 const KEY = 'sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012'; // 32 个字符的假 Key
@@ -152,6 +152,20 @@ for (const [v, want] of [
   summarizeUpstreamBody(big3, KEY);
   ms = performance.now() - t0;
   assert.ok(ms < 200, `大量未闭合开始标记耗时 ${ms.toFixed(1)}ms`); ok();
+}
+
+// ── pickUnrecognizedSource:回放那一支的摘要来源 ─────────────────────────────────
+{
+  const u1 = '{"code":429,"msg":"余额不足,请充值"}';
+  const raw1 = 'data: ' + u1 + '\n\n';
+  assert.equal(pickUnrecognizedSource(u1, raw1), u1, '1 unrec 取得到字段 → 用 unrec');
+  assert.equal(summarizeUpstreamBody(pickUnrecognizedSource(u1, raw1), KEY), '余额不足,请充值'); ok();
+  const raw2 = 'Error: quota exceeded\ndata: see the billing page\n';
+  assert.equal(pickUnrecognizedSource('Error: quota exceeded', raw2), raw2, '2 unrec 不是 JSON → 整段'); ok();
+  assert.equal(pickUnrecognizedSource('{"code":429}', 'RAW3'), 'RAW3', '3 没有可用字段 → 整段'); ok();
+  assert.equal(pickUnrecognizedSource('U4', undefined), 'U4', '4 replayRaw 为 undefined'); ok();
+  assert.equal(pickUnrecognizedSource('U4', null), 'U4', '4 replayRaw 为 null'); ok();
+  assert.equal(pickUnrecognizedSource('{"error":{"message":"x"}}', 'RAW5'), 'RAW5', '5 error 是对象 → 整段'); ok();
 }
 
 // ── 读上游响应体中途失败:保持改之前的行为(200 空消息,不带 x-should-retry) ─────────
