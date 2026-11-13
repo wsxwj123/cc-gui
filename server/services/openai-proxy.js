@@ -883,42 +883,71 @@ function openAIToAnthropicMessage(json, model) {
 // 上游 HTTP 200 时的统一收尾(流式/非流式共用,retry 成功路径也走这里)。
 // A:中转站常在 200 下返 JSON 错误体(Content-Type 非 event-stream)——不能当流处理,
 // 读 JSON 有 .error 则回非 200 anthropic 错误体(CLI 才透出上游 message);否则按非流式回复转换。
-async function respondOk(upstreamResp, wantStream, clientRes, model) {
+// r178b:第 3 类(根本不是回复)回 502 + 标准错误体 + 别重试;message = 固定前缀 + 上游原文摘要。
+// summaryOverride 给流里「只有注释、没有任何数据行」这类没有原文可摘的情形。
+// 兜底:响应头已经发出时只结束连接,记一条只写形态的日志(不写原文、不写 Key)。
+function sendUnrecognized(clientRes, raw, apiKey, summaryOverride) {
+  if (clientRes.headersSent) {
+    console.warn('[openai-proxy] upstream 200 unrecognized body after headers sent; connection closed');
+    try { clientRes.end(); } catch {}
+    return;
+  }
+  const summary = summaryOverride || summarizeUpstreamBody(raw, apiKey);
+  clientRes.writeHead(502, { 'Content-Type': 'application/json', 'x-should-retry': 'false' });
+  clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: UNRECOGNIZED_PREFIX + summary } }));
+}
+
+// 整段 JSON 是不是「回复的形状」:choices 非空数组,第一个元素是带 message 或 finish_reason 字段的对象。
+function isReplyShape(j) {
+  if (!isPlainObject(j) || !Array.isArray(j.choices) || j.choices.length === 0) return false;
+  const c0 = j.choices[0];
+  return isPlainObject(c0) && (Object.prototype.hasOwnProperty.call(c0, 'message') || Object.prototype.hasOwnProperty.call(c0, 'finish_reason'));
+}
+
+async function respondOk(upstreamResp, wantStream, clientRes, model, apiKey) {
   if (wantStream) {
     const ct = upstreamResp.headers.get('content-type') || '';
     if (/event-stream/i.test(ct)) {
-      streamOpenAIToAnthropic(streamFromWeb(upstreamResp.body), clientRes, model);
+      streamOpenAIToAnthropic(streamFromWeb(upstreamResp.body), clientRes, model, apiKey);
       return;
     }
-    // 判官项3:劣质中转常把真 SSE body 错标成 text/plain/缺失 CT——直接 .json() 必失败,
-    // 会回归成 200 空消息(旧代码不看 CT 逐行解析本可用)。先试 JSON(保住 A 的 200+error
-    // 归一化透传,即使 error 文案里恰好含 "data:" 也不会误判),解析失败且 body 有 data:
-    // 行时把已缓冲文本回放给现有 SSE 转换链。
-    // ponytail: 回放是整体缓冲,错标 CT 的上游丢增量流式;要保首字延迟再做首块嗅探。
-    const txt = await upstreamResp.text().catch(() => '');
-    let j = null;
-    try { j = JSON.parse(txt); } catch {}
-    if (!j && /(^|\n)\s*data:/.test(txt)) {
-      streamOpenAIToAnthropic(streamFromWeb(new Response(txt).body), clientRes, model);
-      return;
-    }
-    if (j && j.error) {
-      clientRes.writeHead(errStatus(j.error), { 'Content-Type': 'application/json' });
-      clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: errMsg(j.error) } }));
-      return;
-    }
+  }
+  // 判官项3:劣质中转常把真 SSE body 错标成 text/plain/缺失 CT——直接 .json() 必失败,
+  // 会回归成 200 空消息(旧代码不看 CT 逐行解析本可用)。先试 JSON(保住 A 的 200+error
+  // 归一化透传,即使 error 文案里恰好含 "data:" 也不会误判),解析失败且 body 有 data:
+  // 行时把已缓冲文本回放给现有 SSE 转换链。
+  // ponytail: 回放是整体缓冲,错标 CT 的上游丢增量流式;要保首字延迟再做首块嗅探。
+  // r178b:非流式也先读成文本再解析(要拿得到原文做摘要);解析成功时结果与原来的 .json() 相同。
+  const txt = await upstreamResp.text().catch(() => '');
+  // 规则 1:空响应体 → 第 3 类
+  if (!txt.trim()) { sendUnrecognized(clientRes, '', apiKey); return; }
+  let j = null;
+  try { j = JSON.parse(txt); } catch {}
+  // 规则 2:带真值 error → 既有错误处理(状态码按 errStatus,不加别重试)
+  if (j && j.error) { // 非流式同样可能是 200+error 体
+    clientRes.writeHead(errStatus(j.error), { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: errMsg(j.error) } }));
+    return;
+  }
+  // 规则 3:回复的形状 → 第 1 / 2 类,照旧转换
+  if (isReplyShape(j)) {
     clientRes.writeHead(200, { 'Content-Type': 'application/json' });
-    clientRes.end(JSON.stringify(openAIToAnthropicMessage(j || {}, model)));
+    clientRes.end(JSON.stringify(openAIToAnthropicMessage(j, model)));
     return;
   }
-  const json = await upstreamResp.json().catch(() => ({}));
-  if (json && json.error) { // 非流式同样可能是 200+error 体
-    clientRes.writeHead(errStatus(json.error), { 'Content-Type': 'application/json' });
-    clientRes.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: errMsg(json.error) } }));
+  if (!j && /(^|\n)\s*data:/.test(txt)) {
+    // 规则 4:流式请求 → 回放给流转换,整段原文作摘要来源
+    if (wantStream) {
+      streamOpenAIToAnthropic(streamFromWeb(new Response(txt).body), clientRes, model, apiKey, txt);
+      return;
+    }
+    // 规则 5:非流式请求收到流式文本 → 200 空消息(不做,保持现状)
+    clientRes.writeHead(200, { 'Content-Type': 'application/json' });
+    clientRes.end(JSON.stringify(openAIToAnthropicMessage({}, model)));
     return;
   }
-  clientRes.writeHead(200, { 'Content-Type': 'application/json' });
-  clientRes.end(JSON.stringify(openAIToAnthropicMessage(json, model)));
+  // 规则 6:其余全部 → 第 3 类;已解析出的 JSON 对象直接交给摘要
+  sendUnrecognized(clientRes, isPlainObject(j) ? j : txt, apiKey);
 }
 
 // ── proxy server ──────────────────────────────────────────────────────────
@@ -1025,7 +1054,7 @@ async function handle(req, clientRes) {
       try {
         upstreamResp = await postUpstream(retryReq);
         if (upstreamResp.ok) {
-          return respondOk(upstreamResp, wantStream, clientRes, body.model);
+          return respondOk(upstreamResp, wantStream, clientRes, body.model, up.apiKey);
         }
         txt = await upstreamResp.text().catch(() => txt);
       } catch {}
@@ -1044,7 +1073,7 @@ async function handle(req, clientRes) {
     return;
   }
 
-  return respondOk(upstreamResp, wantStream, clientRes, body.model);
+  return respondOk(upstreamResp, wantStream, clientRes, body.model, up.apiKey);
 }
 
 // Wrap a WHATWG ReadableStream in a minimal EventEmitter-like object exposing
