@@ -95,7 +95,8 @@ export async function openNewSession(page, ctx) {
   await expect(btn, '应有「新建会话」按钮').toBeVisible({ timeout: 15_000 });
   await btn.click();
   await expect(composerBox(page).last(), '点「新建会话」后应出现输入框').toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('[data-cgui="message-list"]'), '新会话里不应还留着种子会话的历史回复').not.toContainText('R178 历史回复', { timeout: 10_000 });
+  // 空会话里消息区可能根本没挂上,所以用「带历史回复的消息区个数 = 0」判断,不用 not.toContainText(元素不存在会报错)。
+  await expect(page.locator('[data-cgui="message-list"]').filter({ hasText: 'R178 历史回复' }), '新会话里不应还留着种子会话的历史回复').toHaveCount(0, { timeout: 10_000 });
 }
 
 export function composerBox(page) {
