@@ -137,4 +137,63 @@ const STORED = Object.freeze({
   assert.equal(resolveFetchTarget(STORED, { apiKey: '', protocol: 'openai' }, strip).protocol, 'anthropic', 't11: 借用 → 已保存值');
 }
 
+// ─────────── t12 normalizeSavedImageBaseURL:与保存接口回显逐字同口径 ───────────
+// 隔离:HOME/USERPROFILE 指向 mktemp 目录,import 路由前设好;保存不联网。
+const { mkdtempSync, rmSync } = await import('node:fs');
+const { tmpdir } = await import('node:os');
+const { join } = await import('node:path');
+const TMP_HOME = mkdtempSync(join(tmpdir(), 'cgui-r179-home-'));
+const SAVE_DIR = mkdtempSync(join(tmpdir(), 'cgui-r179-save-'));
+process.env.HOME = TMP_HOME;
+process.env.USERPROFILE = TMP_HOME;
+
+const { normalizeSavedImageBaseURL } = await import('../../server/utils/image-url.js');
+const SAMPLES = [
+  ['openai', 'http://127.0.0.1:6799/v1/images/generations/', 'http://127.0.0.1:6799/v1'],
+  ['openai', 'http://127.0.0.1:6799/v1/', 'http://127.0.0.1:6799/v1'],
+  ['openai', '  http://127.0.0.1:6799/v1/images/edits  ', 'http://127.0.0.1:6799/v1'],
+  ['chat', 'http://127.0.0.1:6799/v1/chat/completions', 'http://127.0.0.1:6799/v1'],
+  ['gemini', 'http://127.0.0.1:6799/v1beta/', 'http://127.0.0.1:6799/v1beta'],
+  ['mj-proxy', 'http://127.0.0.1:6799/mj/', 'http://127.0.0.1:6799'],
+  ['mj-proxy', 'http://127.0.0.1:6799/mj', 'http://127.0.0.1:6799'],
+];
+for (const [protocol, input, expected] of SAMPLES) {
+  assert.equal(normalizeSavedImageBaseURL(protocol, input), expected, `t12: ${protocol} ${input} → ${expected}`);
+}
+assert.equal(normalizeSavedImageBaseURL('openai', undefined), '', 't12: 非字符串回空串');
+
+const express = (await import('express')).default;
+const imageRouter = (await import('../../server/routes/image.js')).default;
+const app = express();
+app.use(express.json({ limit: '2mb' }));
+app.use('/api', imageRouter);
+const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+const BASE = `http://127.0.0.1:${server.address().port}`;
+let failure = null;
+try {
+  for (const [protocol, input] of SAMPLES) {
+    const r = await fetch(`${BASE}/api/image-providers`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: `r179-${protocol}`, protocol, baseURL: input, apiKey: 'sk-r179-sample-000000', model: 'm', savePath: SAVE_DIR }),
+    });
+    const text = await r.text();
+    assert.equal(r.status, 200, `t12: 保存 ${protocol} ${input}(${text})`);
+    const { id } = JSON.parse(text);
+    const list = await (await fetch(`${BASE}/api/image-providers`)).json();
+    const arr = Array.isArray(list) ? list : (list.providers || []);
+    const saved = arr.find((p) => p.id === id);
+    assert.ok(saved, `t12: 列表里找得到刚保存的 ${id}`);
+    assert.equal(normalizeSavedImageBaseURL(protocol, input), saved.baseURL, `t12: ${protocol} ${input} 与保存回显一致`);
+    await fetch(`${BASE}/api/image-providers/${id}`, { method: 'DELETE' });
+  }
+} catch (e) {
+  failure = e;
+} finally {
+  server.closeAllConnections?.();
+  server.close();
+  await new Promise((r) => server.once('close', r));
+  for (const d of [TMP_HOME, SAVE_DIR]) rmSync(d, { recursive: true, force: true });
+}
+if (failure) throw failure;
+
 console.log('✓ check-r179-fetch-target: 取值规则全部通过');
