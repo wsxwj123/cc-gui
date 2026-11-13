@@ -11652,6 +11652,8 @@ function CustomProviderForm({ onSaved, editing, onCancel, onDirtyChange, customC
         body: JSON.stringify({ type, baseURL, apiKey, ...(editing?.id ? { id: editing.id } : {}) }),
       });
       const d = await r.json();
+      // r179:借已保存 Key 而地址改了 —— 后端拒绝并给出完整说明,原样显示(不拼「常见原因」)。
+      if (!r.ok && d.code === 'STORED_KEY_URL_MISMATCH') { confirmDialog(d.error); setBusy(''); return; }
       if (!r.ok) throw new Error(d.error || '拉取失败');
       if (!d.models?.length) confirmDialog('该端点未返回模型,请直接在下方「模型」框手填模型 ID 再保存。');
       else {
