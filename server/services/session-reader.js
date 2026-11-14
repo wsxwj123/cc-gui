@@ -1960,13 +1960,19 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
       }
 
       // Walk content in ORDER, appending to both the flat arrays AND blocks.
+      // r183b:命令行的合成报错消息(isApiErrorMessage)拆出的文字块打 errorText 标记 ——
+      // 报错原文来自上游,界面据此原样显示、不交给 Markdown。标记落在块上,子代理视图把各回合
+      // 的块平铺之后也认得出;一条合成消息含多个文字块时每块都带。只多一个可选字段。
+      const isApiErrorRecord = record.isApiErrorMessage === true;
       for (const c of content) {
         if (c.type === 'thinking' && c.thinking) {
           currentTurn.thinking.push(c.thinking);
           currentTurn.blocks.push({ type: 'thinking', content: c.thinking });
         } else if (c.type === 'text' && c.text) {
           currentTurn.text.push(c.text);
-          currentTurn.blocks.push({ type: 'text', content: c.text });
+          currentTurn.blocks.push(isApiErrorRecord
+            ? { type: 'text', content: c.text, errorText: true }
+            : { type: 'text', content: c.text });
         } else if (c.type === 'tool_use') {
           const toolCall = {
             id: c.id,
