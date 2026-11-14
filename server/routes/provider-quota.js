@@ -5,6 +5,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { readCustomProviders, readActiveProviderId, assertPublicBaseURL, assertQuotaPublicURL } from './settings.js';
 import { readCapped } from '../utils/read-capped.js';
+import { parsePrefsJson } from '../utils/prefs-json.js';
 import {
   pickCandidates, authHeaders, probeQuota, computeAlert, normalizeThresholds, reasonNote,
   probeCodexQuota, noEndpointNote, customCandidateOf, customNote, parseQuota, checkQuotaConfig, pathHintsFor,
@@ -81,9 +82,9 @@ async function isOfficial() {
   } catch { return true; }
 }
 
-async function readThresholds() {
+export async function readThresholds() { // export 仅为可单测
   try {
-    const p = JSON.parse(await readFile(join(homedir(), '.claude-gui', 'prefs.json'), 'utf-8'));
+    const p = parsePrefsJson(await readFile(join(homedir(), '.claude-gui', 'prefs.json'), 'utf-8'));
     return normalizeThresholds(p?.quotaThresholds);
   } catch { return normalizeThresholds(null); }
 }

@@ -8,6 +8,7 @@ import { broadcast } from '../broadcast.js';
 import { findSessionFile, isSessionIdShape } from '../services/session-reader.js';
 import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../session-sync.js';
 import { ensureBackup } from '../utils/guarded-json.js';
+import { parsePrefsJson } from '../utils/prefs-json.js';
 
 // Server-side preferences that must be SHARED across devices (phone + Mac).
 // Today this is just the hidden-projects list: it used to live in each
@@ -21,7 +22,7 @@ const PREFS_PATH = join(homedir(), '.claude-gui', 'prefs.json');
 // 只读接口用:读不出 / 损坏回 {}(各 GET 回默认值)。写入路径("读 → 改 → 写")一律用 loadPrefsForWrite,
 // 否则读失败当成空、写回时把其它偏好整份抹掉(r151e ②)。
 export async function loadPrefs() {
-  try { return JSON.parse(await readFile(PREFS_PATH, 'utf-8')); }
+  try { return parsePrefsJson(await readFile(PREFS_PATH, 'utf-8')); }
   catch { return {}; }
 }
 
@@ -29,7 +30,7 @@ export async function loadPrefs() {
 // 同步是因为调用方都在同步路径上(cleanChildEnv、/chat 入口门控、审核状态组装)。
 // 文件不存在、损坏、键缺失或值不是布尔 true → false;只读,不改写文件。
 export function readThirdPartyAutoSync() {
-  try { return JSON.parse(readFileSync(PREFS_PATH, 'utf-8'))?.thirdPartyAuto === true; }
+  try { return parsePrefsJson(readFileSync(PREFS_PATH, 'utf-8'))?.thirdPartyAuto === true; }
   catch { return false; }
 }
 
@@ -37,7 +38,7 @@ export function readThirdPartyAutoSync() {
 // 文件不存在、损坏、键缺失或值不是布尔 true(含手写的 "true"、1)→ false;只读,不报错、不改写文件。
 // 同步是因为 /api/xsession/* 的开关闸门与 /chat 入口钩子都在请求路径上直接判。
 export function readXsEnabledSync() {
-  try { return JSON.parse(readFileSync(PREFS_PATH, 'utf-8'))?.xsEnabled === true; }
+  try { return parsePrefsJson(readFileSync(PREFS_PATH, 'utf-8'))?.xsEnabled === true; }
   catch { return false; }
 }
 
@@ -63,6 +64,7 @@ export function normalizeStallTimeout(v) {
   return typeof v === 'string' && STALL_TIMEOUT_VALUES.includes(v) ? v : STALL_TIMEOUT_DEFAULT;
 }
 let stallTimeoutCache = null; // { sig, value }
+let stallTimeoutLastGood = null; // r184:最近一次读成功(含文件不存在、坏 JSON)得到的值;null = 从没读成功过
 export function readStallTimeoutSync() {
   let sig = null; // null = 这次不缓存(stat 本身失败且不是"文件不存在",交给下面的读取去报)
   try {
@@ -72,10 +74,17 @@ export function readStallTimeoutSync() {
   } catch { /* 其它 stat 失败:sig 留 null */ }
   if (sig !== null && stallTimeoutCache?.sig === sig) return stallTimeoutCache.value;
   const { prefs, readFailed } = readPrefsObjectSync();
-  const value = normalizeStallTimeout(prefs?.stallTimeout);
-  // 读不出(文件在、却被杀软 / 同步盘 / 编辑器占着,或没权限、句柄用尽)多半是瞬时的:这次回默认值但不缓存 —— 否则占用解除后
+  // 读不出(文件在、却被杀软 / 同步盘 / 编辑器占着,或没权限、句柄用尽)多半是瞬时的:这次不缓存 —— 否则占用解除后
   // 文件特征没变,用户设的值会一直被无视,直到文件下次改写或重启。坏 JSON 照常缓存,免得每条上游消息都重读一遍坏文件。
-  stallTimeoutCache = sig === null || readFailed ? null : { sig, value };
+  // r184:读不出的这一次返回上一次读成功的结果(用户设了 20 分钟或「从不」时,不因为文件被占用的一瞬间回到 5 分钟把回合提前结束);
+  // 从没读成功过才回默认。「文件不存在」「坏 JSON」不算读不出,照旧回默认并记为最近一次结果。
+  if (readFailed) {
+    stallTimeoutCache = null;
+    return stallTimeoutLastGood ?? STALL_TIMEOUT_DEFAULT;
+  }
+  const value = normalizeStallTimeout(prefs?.stallTimeout);
+  stallTimeoutLastGood = value;
+  stallTimeoutCache = sig === null ? null : { sig, value };
   return value;
 }
 
@@ -98,7 +107,7 @@ function readPrefsObjectSync() {
     return { prefs: null, readFailed: true };
   }
   let v = null;
-  try { v = JSON.parse(text.replace(/^\uFEFF/, '')); } catch { v = null; }
+  try { v = parsePrefsJson(text); } catch { v = null; }
   if (!v || typeof v !== 'object' || Array.isArray(v)) {
     warnPrefsSyncFailure('invalid', '不是合法的 JSON 对象');
     return { prefs: null, readFailed: false };
@@ -255,7 +264,7 @@ async function readPrefsBytes() {
 }
 function parsePrefsObject(raw) {
   try {
-    const v = JSON.parse(raw.toString('utf-8').replace(/^\uFEFF/, ''));
+    const v = parsePrefsJson(raw);
     return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
   } catch { return null; }
 }

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { readFileSync, writeFileSync, existsSync, realpathSync, readdirSync } from 'fs';
 import { resolveClaudeAsync, listClaudeInstallsAsync, getClaudeOverride, setClaudeOverride, getClaudeOverrideRaw, pauseClaudeOverride, winLivePathDirsAsync, classifyShim, claudeExecSpec } from '../utils/claude-resolver.js';
 import { scanAllTools, nodeMeets, NODE_MIN_MAJOR, probeNpm } from '../utils/env-scanner.js';
+import { parsePrefsJson } from '../utils/prefs-json.js';
 import { gfetch } from '../utils/github-fetch.js'; // r14-1:GitHub 直连失败/限流自动走本机代理
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve, sep } from 'path';
@@ -479,7 +480,7 @@ export const UPDATE_CHANNELS = ['npm', 'native'];
 /** 返回用户显式选择的渠道;没选过返回 null(= 跟随安装方式)。 */
 export function readUpdateChannel() {
   try {
-    const v = JSON.parse(readFileSync(PREFS_FILE, 'utf-8'))?.updateChannel;
+    const v = parsePrefsJson(readFileSync(PREFS_FILE, 'utf-8'))?.updateChannel;
     return UPDATE_CHANNELS.includes(v) ? v : null;
   } catch { return null; }
 }
