@@ -173,6 +173,11 @@ export function markErrorTextBlocks(turn) {
   return blocks.map((b, i) => (hit.has(i) ? { ...b, errorText: true } : b));
 }
 
+// r183b:报错原文显示前的换行归一:\r\n 与单独的 \r 都变成 \n。null / undefined 按空串,其他转成字符串。
+export function normalizeErrorNewlines(text) {
+  return (text == null ? '' : String(text)).replace(/\r\n?/g, '\n');
+}
+
 // 历史列表 → 最后一个回合要挂的动作与提示(没有则 null)。
 // 只看会话里最后一条用户消息 / 回合:最后一条是用户消息(之后还没回复)或普通回合,都不派生;
 // 之前的报错回合一律不派生(之后对话成功了,旧报错下面不再挂按钮)。

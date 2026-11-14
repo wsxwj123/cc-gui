@@ -108,6 +108,32 @@ export function historyLegacyArrays(blocks) {
 }
 
 /**
+ * r183b:子代理正文 → 显示段。子代理卡片的「子代理回复」与监控面板的「回复」共用这一份。
+ *   返回 [{ errorText, content }]:errorText=true 的段是上游报错原文(原样显示),其余交给 Markdown。
+ *   - 块里没有带 errorText 的文字块 → 至多一段,内容 = agent.text.join('')(与改前交给 Markdown 的逐字相同);
+ *   - 有 → 按块的顺序走文字块:报错块各自成段,相邻的普通文字块(中间隔着思考 / 工具也算相邻,
+ *     与 text.join 同口径)拼成一段。实时(状态库的块)与读历史(后端块带标记)都走 agent.blocks。
+ */
+export function splitAgentReply(agent) {
+  const text = Array.isArray(agent?.text) ? agent.text : [];
+  const blocks = Array.isArray(agent?.blocks) ? agent.blocks : [];
+  if (!blocks.some((b) => b && b.type === 'text' && b.errorText)) {
+    const all = text.join('');
+    return all ? [{ errorText: false, content: all }] : [];
+  }
+  const out = [];
+  for (const b of blocks) {
+    if (!b || b.type !== 'text' || !b.content) continue;
+    const content = String(b.content);
+    const prev = out[out.length - 1];
+    if (b.errorText) out.push({ errorText: true, content });
+    else if (prev && !prev.errorText) prev.content += content;
+    else out.push({ errorText: false, content });
+  }
+  return out;
+}
+
+/**
  * 迟到历史响应能不能写进这条条目(丢弃判据)。要写的目标必须仍然是【我们水合的那条】:
  *   条目没了 / 被换成活流条目(自己会到) / 归属变成别的母会话 → 丢弃,不显示旧内容,
  *   也不把旧标题漏进新会话。
