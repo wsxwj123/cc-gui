@@ -146,6 +146,9 @@ test('PA-608 缓存回放：60s 内第二次请求应标 degraded 并带说明�
 });
 
 test('PA-609 智谱 CN：quota 与余额是两个独立候选，独立计成败（需真 key → 环境不成立）', async () => {
+  // r184b:原函数体第一行就无条件抛「环境受阻」(套件里没有任何探测真实密钥的环境变量,本机/回归里永远不具备),
+  // 所以跳过条件沿用同一判断 = 恒为真;写明原因,不再在回归里记成失败。以后接入真实密钥时,把条件换成对应的环境探测即可,下面原函数体照旧。
+  test.skip(true, '环境不成立:需要真实的智谱 CN(open.bigmodel.cn)密钥才能观察「余额候选失败不拖垮 quota 候选」,本套件无此密钥');
   throw new EnvironmentBlocked(
     '需要一把真实的智谱 CN（open.bigmodel.cn）密钥才能观察「余额候选失败不拖垮 quota 候选」；'
     + '契约 §10.4 也只公布了失败文案（{ok:false,official:false,reason,note}），候选清单本身没有对外可观察字段 —— 见 README',
@@ -153,6 +156,8 @@ test('PA-609 智谱 CN：quota 与余额是两个独立候选，独立计成败�
 });
 
 test('PA-610 凭证只发该 key 的域族（需抓包夹具 → 环境不成立）', async () => {
+  // r184b:同 PA-609,跳过条件沿用原来「无条件环境受阻」的判断(恒为真),原函数体保留。
+  test.skip(true, '环境不成立:需要能记录出站请求的抓包代理夹具才能证明「CN 族 key 不发 api.z.ai、Z.ai key 不发 CN 族」,本套件未搭');
   throw new EnvironmentBlocked(
     '要在出口侧证明「CN 族 key 不发 api.z.ai、Z.ai key 不发 CN 族」，需要一个能记录出站请求的代理夹具；'
     + '本套件未搭，见 README「Not preparable」',
