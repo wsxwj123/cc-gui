@@ -20,7 +20,8 @@ import { contextTimeoutBudget, latestCountTokensOutcome } from '../utils/context
 import { canonicalCwd } from '../utils/safe-path.js';
 import { GENUI_SECTION_TEXT } from '../utils/genui-section.js';
 import { projectWorkflowProgress } from '../utils/workflow-progress.js';
-import { broadcast, clients } from '../broadcast.js';
+import { broadcast, clients, broadcastSessionFileChange } from '../broadcast.js';
+import { watchNewSessionFile } from '../utils/new-session-file-watch.js';
 import { isLocalReq } from '../services/auth.js';
 import { SERVER_EPOCH } from '../utils/server-epoch.js';
 import { recordDraftSessionBinding } from '../services/draft-session-bindings.js';
@@ -1139,6 +1140,9 @@ function finishSlot(slot, procId) {
   slot.idle = false;
   if (slot.idleTimer) { clearTimeout(slot.idleTimer); slot.idleTimer = null; }
   if (slot.stopTimer) { clearTimeout(slot.stopTimer); slot.stopTimer = null; }
+  // r185:进程收尾(退出 / 出错 / 被停)= 不会再写这个会话文件了,停掉对新会话文件的检查,不留定时器。
+  slot.newSessionFileWatch?.stop();
+  slot.newSessionFileWatch = null;
   // R13:进程收尾 = 初始化窗口也结束了。还没开口就死掉的进程,让等着的 POST 立刻拿到
   // 504(而不是干等满 15 秒);已开口的回合不受影响。
   if (slot.startupTimer) { clearTimeout(slot.startupTimer); slot.startupTimer = null; }
@@ -3116,6 +3120,9 @@ async function handleChatPost(req, res) {
   const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
   const finalize = () => {
     cancelClose();
+    // r185:这一轮结束了,回合结束广播(下面 maybeBroadcastTurnComplete)接手刷新侧栏,不再盯新会话文件。
+    slot.newSessionFileWatch?.stop();
+    slot.newSessionFileWatch = null;
     // R13:本回合到此结束 —— 让等待该回合落地的停止入口拿到真实终态(被停 → stopped,
     // 正常收尾 → completed/failed)。主 agent 随后续跑会经 reviveSlotTurn 翻回活跃。
     settleSlotTurn(slot, slot.lastResultError ? 'failed' : 'completed');
@@ -3228,6 +3235,15 @@ async function handleChatPost(req, res) {
           slot.sessionId = m.session_id;
           adoptTurnSession(slot, m.session_id); // R13:draft 回合的 owner 换成真实 sid(同一回合)
           notifyTurnSessionBound(slot, procId); // r151c:拿到会话 id 即通知(跨会话的发送档案不等回合结束)
+          // r185:进这个分支 = 槽原本没有会话号 = 这一轮新建的会话。不监听会话目录时(装机版)命令行写出的
+          // 新会话文件没人通知,侧栏要等回合结束才刷出它 —— 盯着会话文件,够列会话门槛(≥3 行)就补发一次
+          // 与文件监听同型的广播。最多 30 秒;回合结束(finalize)、进程收尾(finishSlot)时停掉。
+          slot.newSessionFileWatch?.stop();
+          slot.newSessionFileWatch = watchNewSessionFile({
+            sessionId: m.session_id,
+            locate: findSessionFile,
+            onReady: (file) => broadcastSessionFileChange(file, 'add'),
+          });
           // draftId 由发起客户端生成，session_id 由 CLI init 权威给出。在 init 透传给
           // 客户端之前持久记录映射；这样 pane 已切走或整个 App 重启后，已有 sessions
           // 列表仍能把本地未绑定附件 outbox 迁到真实会话，不依赖 server slot 内存寿命。

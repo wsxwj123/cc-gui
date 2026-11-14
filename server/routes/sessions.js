@@ -33,7 +33,7 @@ import { claudeSpawn, cleanChildEnv, getActiveChatProcesses } from './chat.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { parseHistoryPaging } from '../utils/history-pagination.js';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
-import { broadcast } from '../broadcast.js';
+import { broadcastSessionFileChange } from '../broadcast.js';
 import { mergeDraftBindingsBestEffort } from '../services/draft-session-bindings.js';
 import { createAttachmentSidecarStore } from '../services/attachment-sidecar-store.js';
 
@@ -50,18 +50,9 @@ export function sessionFile(projectHash, sessionId) {
   return join(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`);
 }
 
-// 打包版 Tauri 后端禁用 chokidar watcher(CGUI_DISABLE_FILE_WATCHER=1)→ 改写 jsonl
-// 的端点自身不广播的话,其他客户端(手机/电脑多端)永远收不到"会话变了"的通知,停在
-// 旧画面。修法:写入点自己合成与原 watcher 同型的 file-change 广播(0ms,快于 watcher
-// 2.5s 轮询,且 dev/打包两形态都覆盖)。客户端判据只看字符串形态,不读文件——所以
-// DELETE/archive 后文件不存在也照发原 jsonl 路径。反斜杠统一成正斜杠:useWebSocket
-// 兼容 `\projects\`,但 SessionDetail 的 endsWith(`/${sid}.jsonl`) 只认正斜杠,原生
-// watcher 在 Windows 发反斜杠命中不了(既有缺陷),合成广播不复刻它。
-export function broadcastSessionFileChange(file, eventType = 'change') {
-  try {
-    broadcast({ type: 'file-change', eventType, path: String(file).replace(/\\/g, '/') });
-  } catch {}
-}
+// 合成 file-change 广播(说明见 ../broadcast.js)。r185 起本体在 broadcast.js(chat.js 也要用,
+// 从本文件引会和本文件对 chat.js 的 import 成环),这里原样转出,checkpoints / session-history 照旧从本文件引。
+export { broadcastSessionFileChange };
 
 export function hasRealConversationLine(lines) {
   for (const line of lines) {
