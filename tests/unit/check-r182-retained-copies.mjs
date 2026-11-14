@@ -322,5 +322,30 @@ t('6 回滚 / 清空会话清表,草稿转正式迁移', () => {
   assert.ok(/dropUserStash\(conversationResetFrom\);[^\n]*\n\s*dropRetained\(conversationResetFrom\);/.test(app), '/clear 轮换清表');
   assert.ok(/migrateUserStash\(_dk0, event\.session_id\);[^\n]*\n\s*migrateRetained\(_dk0, event\.session_id\);/.test(app), '草稿转正式迁移');
 });
+t('6 其余裁剪历史的路径也清表', () => {
+  // 检查点还原裁剪:裁剪成功后清
+  assert.ok(/trimOk = tr\.ok;[^\n]*\n[^\n]*\n\s*if \(tr\.ok\) dropRetained\(sessionId\);/.test(app), '检查点还原裁剪清表');
+  // 定向压缩(after):尾段被移除处清
+  const ca = app.indexOf("if (direction === 'after') {");
+  assert.ok(ca !== -1, '定向压缩 after 分支');
+  assert.ok(app.slice(ca, ca + 400).includes('dropRetained(k)'), '定向压缩 after 清表');
+  // 回滚期间切走(truncateUi 不执行)
+  const lv = app.indexOf('if (!stillHere()) {\n      // r182');
+  assert.ok(lv !== -1, '回滚切走分支');
+  assert.ok(app.slice(lv, app.indexOf('leaveForOwner(', lv)).includes('if (!trimFailed) for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetained(k);'), '回滚切走分支清表');
+  // 重做工具 / 内容审核回退:乐观截断与停流之前清
+  const rt = app.slice(app.indexOf('const handleRetryTool = useCallback('), app.indexOf("runHistoryOp(sel.sessionId, 'trim-before-tool'"));
+  const di = rt.indexOf('for (const k of new Set([rtKey, sel.sessionId].filter(Boolean))) dropRetained(k);');
+  assert.ok(di !== -1, '重做工具清表');
+  assert.ok(di < rt.indexOf('if (opts.contentRisk) {') && di < rt.indexOf('abortRef.current.abort()'), '清表在乐观截断与停流之前');
+});
+t('6 删除会话处清表(侧栏 reallyDelete 与卸载兜底)', () => {
+  const sb = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../client/src/components/UnifiedSidebar.jsx'), 'utf8');
+  assert.ok(sb.includes("import { dropRetained } from '../utils/retainedCopies.js';"));
+  const rd = sb.slice(sb.indexOf('const reallyDelete = async (session) => {'), sb.indexOf('const handleDelete = (session) => {'));
+  assert.ok(rd.indexOf('dropRetained(session.sessionId);') > rd.indexOf('if (!r.ok)'), 'DELETE 成功之后清表');
+  const fa = sb.slice(sb.indexOf('const flushAllPending = () => {'), sb.indexOf('const flushAllPending = () => {') + 800);
+  assert.ok(fa.includes('dropRetained(p.session.sessionId);'), '卸载兜底清表');
+});
 
 console.log(`check-r182-retained-copies: ${passed} 条通过`);

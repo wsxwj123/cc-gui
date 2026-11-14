@@ -365,6 +365,8 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
           // R25:裁剪必须走两步流(预览 → 带令牌提交);结果会话要新建时 sessionReset=true。
           const tr = await runHistoryOp(sessionId, 'trim', { projectHash, fromTimestamp: new Date(ts).toISOString() });
           trimOk = tr.ok;
+          // r182:会话裁到快照时刻之后的部分没了,留存副本所属的那一轮可能在其中 → 整表删并记墓碑(同 truncateUi)。
+          if (tr.ok) dropRetained(sessionId);
           if (tr.sessionReset) {
             // 扫全部 pane(不只 selectedSession=pane0 镜像):检查点按钮可能开在 1-5 号
             // pane,或同会话开多 pane。漏扫 → 那些 pane 留僵尸 sessionId,下次发送 CLI
@@ -8811,7 +8813,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // R25:摘要由服务端在预览阶段生成并绑定进预览令牌,提交只送令牌 —— 客户端不替换摘要。
         const r = await runHistoryOp(sel.sessionId, 'compact-segment', { projectHash, uuid: msg.uuid, direction, model: compactModel });
         if (!r.ok) { setProviderSwitchNotice({ text: '压缩失败:' + (r.error || r.status) + '(会话未改动)' }); return; }
-        if (direction === 'after') setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 尾段已被移除,清掉本地未落盘气泡(旁问除外)
+        if (direction === 'after') {
+          setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 尾段已被移除,清掉本地未落盘气泡(旁问除外)
+          // r182:锚点及之后被压成摘要,留存副本所属的那一轮可能在其中 → 整表删并记墓碑(同 truncateUi)。
+          for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetained(k);
+        }
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
         setProviderSwitchNotice({ text: direction === 'before' ? '已把此前对话压缩为摘要,上下文占用已降低。' : '已回退并把后续对话保留为摘要。' });
       } catch (e) {
@@ -8956,6 +8962,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     // r146 R3:裁剪期间切走 —— 磁盘已裁,窗格动作与重发全部放弃,本来要重发的内容留给本会话。
     if (!stillHere()) {
+      // r182:磁盘已裁,truncateUi 不会再执行 —— 本会话的留存副本在这里整表删并记墓碑(同 truncateUi)。
+      if (!trimFailed) for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetained(k);
       // 开始回退时本会话在跑的回合:按它自己的 pid 停掉(不碰窗格 ref),否则它继续往刚裁剪的记录里追加。
       if (startPid) {
         stoppedPidsRef.current.add(String(startPid));
@@ -9124,6 +9132,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 覆盖,重跑以流式气泡出现在同一位置 → 读起来是"该工具在原位重跑",而非新发消息。
     // r99:内容审核回退不走乐观截断 —— `_retryTrimToolId` 会让 TurnBubble 显示
     // "正在重做此工具…",而这条路径恰恰是"不重做"。改用一条横幅说明正在做什么。
+    // r182:该工具调用及之后都会被裁掉,留存副本所属的那一轮可能在其中 → 两种用法都整表删并记墓碑
+    // (同 truncateUi;在下面停流之前同步执行,被中断那条流迟到的写表会被墓碑拒收)。
+    for (const k of new Set([rtKey, sel.sessionId].filter(Boolean))) dropRetained(k);
     if (opts.contentRisk) {
       setProviderSwitchNotice({ text: '正在回退会话到该工具调用之前…' });
     } else {
