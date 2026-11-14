@@ -65,7 +65,10 @@ function rebuild() {
   }
   const pick = predicate => usable.find(predicate) || null;
 
-  const single = pick(item => item.assistantRecords === 1 && item.userRecords >= 1) || usable[0];
+  // 「单次调用」会话（PA-416 要求 turn 汇总 usage === 首条 usage）：数据根里有真实转写就用真实的；
+  // 新开的工作树里只有现场合成的子代理夹具（父会话有两次调用，汇总 = 两次之和），此时合成一份单次调用会话。
+  const single = pick(item => item.assistantRecords === 1 && item.userRecords >= 1)
+    || buildSingleCallSession(projectsRoot());
   const ttl = pick(item => item.ttlSplit > 0);
   const big = pick(item => item.bigInput > 0);
 
@@ -83,6 +86,18 @@ function rebuild() {
     },
     subagents,
   };
+}
+
+function buildSingleCallSession(root) {
+  const dirPath = path.join(root, SUBAGENT_PROJECT_HASH);
+  const sessionId = SESSIONS.single;
+  const records = [
+    userText({ sessionId, timestamp: at(0), text: 'PA fixture single-call session' }),
+    assistantText({ sessionId, timestamp: at(5), model: 'claude-opus-5', messageId: 'msg_pa_single_1', text: 'PA-SINGLE-DONE' }),
+  ];
+  fs.mkdirSync(dirPath, { recursive: true });
+  fs.writeFileSync(path.join(dirPath, `${sessionId}.jsonl`), `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+  return scanSession(dirPath, SUBAGENT_PROJECT_HASH, `${sessionId}.jsonl`);
 }
 
 function scanSession(dirPath, projectHash, name) {
@@ -174,6 +189,7 @@ const SESSIONS = {
   resume: 'a1000003-0000-4000-8000-000000000003',
   ambiguous: 'a1000004-0000-4000-8000-000000000004',
   background: 'a1000005-0000-4000-8000-000000000005',
+  single: 'a1000006-0000-4000-8000-000000000006',
 };
 // agent id 与 runId 都照真实形态写：转写文件名是 `agent-<16 位小写十六进制>`（本机 1513 份实测如此），
 // runId 是 `wf_<8 位十六进制>-<3 位>` —— 带别的字符的产品侧一律扫不到（本夹具首版用 `pa…` 就全军覆没）。

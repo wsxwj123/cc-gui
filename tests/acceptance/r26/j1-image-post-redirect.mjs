@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readdirSync } from 'node:fs';
-import { listenWithRetry, stopServer, makeTmpHome, makeTmpDir, cleanupDirs } from './lib.mjs';
+import { listenWithRetry, stopServer, makeTmpHome, makeTmpDir, cleanupDirs, sleep } from './lib.mjs';
 
 const TMP_HOME = makeTmpHome('j1');
 const SAVE_DIR = makeTmpDir('j1-save');
@@ -49,16 +49,31 @@ try {
     return { status: r.status, json: await r.json().catch(() => null) };
   };
 
+  // 出图已任务化:POST 过了前置校验就恒回 200 + { jobId },成败落在 /api/image/history 条目的
+  // status('done' / 'error')与 error 文字上。提交后轮询到终态,返回 { status, json }:
+  // status 是【任务终态】,不是 HTTP 码(写法同 tests/unit/check-r26-j1-image-post-redirect.mjs 的 gen())。
+  const gen = async (body) => {
+    const submit = await api('POST', '/api/image/generate', body);
+    if (submit.status !== 200 || !submit.json?.jobId) return submit;
+    for (let i = 0; i < 300; i++) {
+      const h = await api('GET', '/api/image/history');
+      const e = (h.json?.history || []).find((x) => x.id === submit.json.jobId);
+      if (e && e.status !== 'running') return { status: e.status, json: e };
+      await sleep(50);
+    }
+    throw new Error('出图任务 15s 内未落终态');
+  };
+
   const mk = await api('POST', '/api/image-providers', {
     name: '会 302 的上游', protocol: 'openai', baseURL: `${BASE}/up/v1`,
     apiKey: 'sk-test-j1', model: 'm', savePath: SAVE_DIR,
   });
   assert.equal(mk.status, 200, `J1 夹具:provider 建好(${JSON.stringify(mk.json)})`);
 
-  const g = await api('POST', '/api/image/generate', { providerId: mk.json.id, prompt: 'x' });
+  const g = await gen({ providerId: mk.json.id, prompt: 'x' });
 
   // 核心断言(修前必红):3xx 必须报错,且跳转目标零命中
-  assert.equal(g.status, 502, `J1: 上游 302 必须报错(实际 ${g.status} —— 重定向被静默跟随且出图"成功")`);
+  assert.equal(g.status, 'error', `J1: 上游 302 必须报错(实际任务终态 ${g.status} —— 重定向被静默跟随且出图"成功")`);
   assert.match(g.json?.error || '', /跳转|重定向|redirect|302/i,
     `J1: 报错必须点明是跳转(实际:${g.json?.error})`);
   assert.equal(targetHits, 0, `J1: 跳转目标被打了 ${targetHits} 次 —— redirect:'manual' 没生效`);
