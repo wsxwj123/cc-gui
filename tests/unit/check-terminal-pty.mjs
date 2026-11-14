@@ -41,7 +41,7 @@ const FAKE_HOME = realpathSync(mkdtempSync(join(tmpdir(), 'cgui-term-home-')));
 process.env.HOME = FAKE_HOME;
 process.env.USERPROFILE = FAKE_HOME;
 const CU_PRELOAD = new URL('./q8-helpers/cu-preload.mjs', import.meta.url).href;
-const isolatedEnv = (extra) => ({ ...process.env, HOME: FAKE_HOME, USERPROFILE: FAKE_HOME, CU_TEST_HOME: FAKE_HOME, ...extra });
+const isolatedEnv = (extra) => ({ ...process.env, HOME: FAKE_HOME, USERPROFILE: FAKE_HOME, CU_TEST_HOME: FAKE_HOME, DISABLE_AUTOUPDATER: '1', ...extra });
 const server = spawn('node', ['--import', CU_PRELOAD, 'server/index.js'], {
   env: isolatedEnv({ PORT: String(PORT), ZDOTDIR: ZDOT }),
   stdio: ['ignore', 'pipe', 'pipe'],
