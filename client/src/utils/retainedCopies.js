@@ -366,7 +366,7 @@ export function applyRetained(histList, entries, localList) {
     if (!entry?.turn) continue;
     const rel = relate(hist, entry);
     if (rel.mode === 'offscreen') continue;
-    if (rel.mode === 'covered'){ coveredIds.push(entry.id); continue; }
+    if (rel.mode === 'covered') { coveredIds.push(entry.id); continue; }
     if (rel.mode === 'unplaced') {
       const li = findLocalPrompt(local, entry);
       if (li !== -1) put(localInserts, li + 1, entry.turn);
