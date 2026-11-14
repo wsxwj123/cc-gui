@@ -3,7 +3,7 @@
 // 行为由场景文件 $CGUI_FAKE_CLAUDE_DIR/scenario.json 控制(每收到一条用户消息读一次):
 //   { "shapes": ["hold:30", "normal", ...] }   同一个工作区的第 N 条用户消息用第 N 个形态,超出列表用最后一个。
 // 形态:
-//   hold:<秒>       收到用户消息 → 先输出初始化事件(新会话号),随即把这条用户消息写进会话文件(会话文件在回合一开始就出现),
+//   hold:<秒>       收到用户消息 → 先输出初始化事件(新会话号),随即把回合开头的三行(两行 queue-operation + 这条用户消息的 user 记录)写进会话文件(会话文件在回合一开始就出现、至少 3 行),
 //                   然后保持这一轮不结束 <秒> 秒;到时输出一条正常助手消息(同时落盘)+ result:success。
 //                   期间收到停止(control_request interrupt)→ 输出 result:success(空)结束这一轮,进程继续等下一条消息。
 //   hold-die:<秒>   同 hold,但收到停止后不输出任何结束事件,直接退出进程(退出码 0)。
@@ -72,7 +72,9 @@ function writeStatusFile(patch) {
 
 let lastUuid = null;
 function transcriptUser(text) {
-  if (lastUuid === null && !argOf('--resume')) append({ type: 'summary', summary: String(text || '').slice(0, 40) || '新会话', leafUuid: crypto.randomUUID() });
+  // 照真实命令行(2.1.323 取样):回合一开始先写两行 queue-operation(入队带 content、出队不带),再写 user 记录,开头至少 3 行。
+  append({ type: 'queue-operation', operation: 'enqueue', timestamp: stamp(), sessionId: sid, content: String(text || '') });
+  append({ type: 'queue-operation', operation: 'dequeue', timestamp: stamp(), sessionId: sid });
   const uuid = crypto.randomUUID();
   append({
     parentUuid: lastUuid, promptId: 'r185-fake', type: 'user', isMeta: false,

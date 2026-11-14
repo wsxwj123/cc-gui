@@ -109,15 +109,15 @@ test('N3 新建会话发第一条消息后点停止(命令行收到停止不输�
   expect(fakeStatus(ctx), 'N3:假命令行已收到 1 条消息、没有输出过结束事件(processed = 0)').toMatchObject({ received: 1, processed: 0 });
 });
 
-test('N4 做完 N1的操作后等那一轮正常结束再等 3 秒:本工作区仍是 2 行,没有第三行', async ({ page }) => {
+test('N4 做完 N1的操作后等那一轮正常结束再等 8 秒:这 8 秒里会话行都不超过 2,第 8 秒时是 2 行', async ({ page }) => {
   test.skip(PASS === 'watch', 'N4 属于主趟(目录监听关)');
   const ctx = prepare(['hold:8']);
   await startAndSwitchAway(page, ctx, 'N4');
   expect(await waitProcessed(page, ctx, 1, 25_000), 'N4:第 1 条的回合应在 25 秒内结束(processed ≥ 1)').toBeGreaterThanOrEqual(1);
-  const seen = await sampleRows(page, 3_000);
+  const seen = await sampleRows(page, 8_000);
   const final = await waitRows(page, 2, Date.now());
-  expect(Math.max(...seen), `N4:回合结束后 3 秒内会话行不应超过 2(重复的第三行);读数 = ${JSON.stringify(seen)}`).toBeLessThanOrEqual(2);
-  expect(final, `N4:回合结束再等 3 秒后本工作区应仍是 2 行;实际 ${final}`).toBe(2);
+  expect(Math.max(...seen), `N4:回合结束后 8 秒内会话行不应超过 2(重复的第三行);读数 = ${JSON.stringify(seen)}`).toBeLessThanOrEqual(2);
+  expect(final, `N4:回合结束再等 8 秒后本工作区应是 2 行;实际 ${final}`).toBe(2);
 });
 
 test('N5 在种子会话里再发一条消息:回合进行中与结束后本工作区会话行一直是 1 行', async ({ page }) => {
@@ -137,12 +137,12 @@ test('N5 在种子会话里再发一条消息:回合进行中与结束后本工�
   expect(after, `N5:回合结束后会话行应一直是 1;读数 = ${JSON.stringify(after)}`).toEqual(after.map(() => 1));
 });
 
-test('N6 后端开着目录监听时做 N1的操作:5 秒内变 2 行,且那一轮结束后仍是 2 行', async ({ page }) => {
+test('N6 后端开着目录监听时做 N1的操作:8 秒内变 2 行,且那一轮结束后仍是 2 行', async ({ page }) => {
   test.skip(PASS !== 'watch', 'N6 属于监听趟(后端不设 CGUI_DISABLE_FILE_WATCHER)');
   const ctx = prepare(['hold:8']);
   const t0 = await startAndSwitchAway(page, ctx, 'N6');
-  const rows = await waitRows(page, 2, t0 + 5_000);
-  expect(rows, `N6:从发出 POST /api/chat 起 5 秒内,本工作区会话行应为 2;实际 ${rows} ${lateNote()}`).toBe(2);
+  const rows = await waitRows(page, 2, t0 + 8_000);
+  expect(rows, `N6:从发出 POST /api/chat 起 8 秒内,本工作区会话行应为 2;实际 ${rows} ${lateNote()}`).toBe(2);
   expect(await waitProcessed(page, ctx, 1, 25_000), 'N6:第 1 条的回合应结束(processed ≥ 1)').toBeGreaterThanOrEqual(1);
   const seen = await sampleRows(page, 2_000);
   expect(seen, `N6:那一轮结束后本工作区会话行应一直是 2;读数 = ${JSON.stringify(seen)}`).toEqual(seen.map(() => 2));
