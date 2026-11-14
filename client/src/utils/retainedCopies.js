@@ -187,14 +187,27 @@ function partsOf(turn) {
   return { text: fp(text), thinking: fp(thinking), ids };
 }
 
-// 本轮在历史里的范围:{ start, end, turnIdx } 或 null(历史里还认不出本轮)。
-// 认起点的顺序:记录编号 → 页面自己发出的提示词 → 时间。结束边界:起点之后第一条时间晚于停止时刻的
-// 提示词(打断标记、引导、早于停止时刻的条目都不算)。
+// 本轮在历史里的范围:{ start, end, turnIdx };{ offscreen: true }(本轮不在这段列表里 —— 列表只是历史的
+// 一段,只含更晚的轮次);null(历史里还认不出本轮,调用方放进本地段)。
+// 上界 end:列表里第一条时间晚于停止时刻的提示词(打断标记、引导、早于停止时刻的条目都不算;停止时刻为 0
+// 时不设上界)。列表可能已经含有停止之后才发生的更晚轮次,本轮只可能在 end 之前;结束边界也就是它。
+// 认起点的顺序:记录编号 → 页面自己发出的提示词 → 时间。
 export function locateRound(hist, entry) {
   const list = Array.isArray(hist) ? hist : EMPTY_RETAINED;
   if (!entry || !list.length) return null;
   const startTs = Number(entry.roundStartTs) || 0;
   const stopTs = Number(entry.stopTs) || 0;
+  const firstLaterPrompt = (from) => {
+    if (!stopTs) return list.length;
+    for (let k = from; k < list.length; k++) {
+      const m = list[k];
+      if (!isPromptLike(m)) continue;
+      const t = tsOf(m);
+      if (t != null && t > stopTs) return k;
+    }
+    return list.length;
+  };
+  let end = firstLaterPrompt(0);
   let start = -1;
   // 1. 编号锚定:从末尾往前找第一个编号在本流见过的回合,再往前并入时间不早于起流时刻的条目,
   //    碰到更早的条目或本轮提示词就停。
@@ -215,6 +228,7 @@ export function locateRound(hist, entry) {
     }
   }
   // 2. 提示词:全文相等且时间不早于发送时刻;碰到早于发送时刻的用户条目就停(不取上一轮)。
+  //    时间晚于停止时刻的用户条目跳过(连发两条相同提示词时,不认到下一轮那条上)。
   if (start === -1 && entry.prompt && entry.prompt.text) {
     const want = entry.prompt.text.trim();
     const sentTs = Number(entry.prompt.sentTs) || 0;
@@ -222,47 +236,42 @@ export function locateRound(hist, entry) {
       const m = list[i];
       if (m?.type !== 'user') continue;
       const t = tsOf(m);
+      if (stopTs && t != null && t > stopTs) continue;
       if (t != null && t < sentTs) break;
       if (isPromptLike(m) && textOfUser(m).trim() === want) { start = i + 1; break; }
     }
   }
-  // 3. 时间:第一个时间不早于起流时刻的回合;没有回合时,取起流之后、停止之前最后一条提示词。
-  //    (提示词对不上全文时——例如带附件——也走这一步;起流时刻是下界,不会取到上一轮。)
+  // 3. 时间(提示词对不上全文时——例如带附件——也走这一步):只看上界之前。firstIn = 第一条时间不早于
+  //    起流时刻的条目(时间为空的跳过),hasEarlier = 有没有早于起流时刻的条目。
+  //    - 有 firstIn:它不晚于停止时刻,或前面有更早的历史(紧跟着的晚于停止时刻的非提示词条目是本轮被打断后
+  //      才写盘的半截)→ 起点在它这里(它是提示词则在它之后);否则上界之前全是更晚的条目 → 不在这段列表里。
+  //    - 没有 firstIn、有更早的历史:后面有更晚的提示词 → 本轮在这段里没有记录,位置在那条提示词之前;
+  //      否则认不出(null,调用方放进本地段)。
+  //    - 都没有:后面有更晚的提示词 → 不在这段列表里;否则 null。
   if (start === -1 && startTs) {
-    for (let i = 0; i < list.length; i++) {
-      const m = list[i];
-      const t = tsOf(m);
-      if (m?.type === 'turn' && t != null && t >= startTs) {
-        let j = i - 1;
-        while (j >= 0) {
-          const tj = tsOf(list[j]);
-          if (tj == null || tj < startTs || isPromptLike(list[j])) break;
-          j -= 1;
-        }
-        start = j + 1;
-        break;
-      }
+    let firstIn = -1;
+    let hasEarlier = false;
+    for (let i = 0; i < end; i++) {
+      const t = tsOf(list[i]);
+      if (t == null) continue;
+      if (t < startTs) { hasEarlier = true; continue; }
+      if (firstIn === -1) firstIn = i;
     }
-    if (start === -1) {
-      for (let i = list.length - 1; i >= 0; i--) {
-        const m = list[i];
-        if (!isPromptLike(m)) continue;
-        const t = tsOf(m);
-        if (t == null) continue;
-        if (t > stopTs) continue;
-        if (t >= startTs) start = i + 1;
-        break;
-      }
+    if (firstIn !== -1) {
+      const tf = tsOf(list[firstIn]);
+      if (!stopTs || tf <= stopTs || hasEarlier) start = isPromptLike(list[firstIn]) ? firstIn + 1 : firstIn;
+      else return { offscreen: true };
+    } else if (hasEarlier) {
+      if (end < list.length) return { start: end, end, turnIdx: [] };
+      return null;
+    } else {
+      if (end < list.length) return { offscreen: true };
+      return null;
     }
   }
   if (start === -1) return null;
-  let end = list.length;
-  for (let k = start; k < list.length; k++) {
-    const m = list[k];
-    if (!isPromptLike(m)) continue;
-    const t = tsOf(m);
-    if (t != null && t > stopTs) { end = k; break; }
-  }
+  // 编号锚定在时间乱序时可能越过上界:此时退回从起点往后找结束边界。
+  if (start > end) end = firstLaterPrompt(start);
   const turnIdx = [];
   for (let k = start; k < end; k++) if (list[k]?.type === 'turn') turnIdx.push(k);
   return { start, end, turnIdx };
@@ -273,11 +282,13 @@ export function locateRound(hist, entry) {
 //   replace —— 本轮历史每一块都被副本包含(隐藏本轮历史回合,在第一个的位置整块画副本);
 //   append  —— 本轮在历史里还没有回合(副本插在结束边界处);
 //   split   —— 都不是(历史照画,副本只画没被包含的块,放在结束边界处);
-//   unplaced —— 历史里还认不出本轮(由调用方放进本地段,紧跟页面自己的那条提示词气泡)。
+//   unplaced —— 历史里还认不出本轮(由调用方放进本地段,紧跟页面自己的那条提示词气泡);
+//   offscreen —— 本轮不在这段列表里(列表只含更晚的轮次):这次不画,条目留在表里等列表重新包含本轮。
 // 不用长度容差:差一个字也不算包含。
 export function relate(hist, entry) {
   const loc = locateRound(hist, entry);
   if (!loc) return { mode: 'unplaced' };
+  if (loc.offscreen) return { mode: 'offscreen' };
   if (!loc.turnIdx.length) return { mode: 'append', ...loc, insertAt: loc.end };
   const h = { text: '', thinking: '', ids: new Set() };
   for (const i of loc.turnIdx) {
@@ -341,6 +352,7 @@ function spliceInserts(list, inserts, hidden) {
 
 // 把表里的条目叠加到历史段(histList)与本地段(localList)上。
 // 返回 { list, local, coveredIds };没有改动的一段返回传入的原引用。
+// offscreen 的条目跳过:不画、不进 coveredIds、不放本地段。
 export function applyRetained(histList, entries, localList) {
   if (!entries || !entries.length) return { list: histList, local: localList, coveredIds: EMPTY_RETAINED };
   const hist = Array.isArray(histList) ? histList : EMPTY_RETAINED;
@@ -353,7 +365,8 @@ export function applyRetained(histList, entries, localList) {
   for (const entry of entries) {
     if (!entry?.turn) continue;
     const rel = relate(hist, entry);
-    if (rel.mode === 'covered') { coveredIds.push(entry.id); continue; }
+    if (rel.mode === 'offscreen') continue;
+    if (rel.mode === 'covered'){ coveredIds.push(entry.id); continue; }
     if (rel.mode === 'unplaced') {
       const li = findLocalPrompt(local, entry);
       if (li !== -1) put(localInserts, li + 1, entry.turn);

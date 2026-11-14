@@ -5803,6 +5803,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 而块索引表与收尾三态都声明在 try 内 —— 各镜像一个引用出来供 finally 读,原声明不动。
     let blocksMirror = null;          // = 下面 try 里的 blocks(SDK content block index → 本地块)
     let streamEndMirror = null;       // = 'done' | 'takeover' | 'dropped';null = 本端 abort(切走/停止)
+    // r182:留存判据的输入(见 utils/retainedCopies.js retainKindOf)。sawTopResult = 最后一条顶层结束事件
+    // (result,成功或报错都算;子代理的不算)之后没有新的顶层内容 —— 结束事件之后同一条流里又续跑出新内容时
+    // 复位(那一段仍可能没写盘)。声明在 try 之外,catch 里的停止路径也要读它。
+    let sawTopResult = false;
     // r65:本流是否见过任何模型产出。本地闩住只翻一次 state,免每片 delta 重复 setState。
     let sawOutput = false;
     const markSawOutput = () => { if (!sawOutput) { sawOutput = true; setSawModelOutput(true); } };
@@ -6251,10 +6255,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // R13:服务端明确回过 stream_gap(游标超出保留窗)= 实时记录已截断,不走普通
       // 「空产出/掉线重连」判定,内容转历史恢复。
       let sawGap = false;
-      // r182:留存判据的输入(见 utils/retainedCopies.js retainKindOf)。sawTopResult = 见过命令行给这一轮的
-      // 顶层结束事件(result,成功或报错都算;子代理的不算);stallEnded = 后端因静默超时结束了这一轮;
-      // sawServerErrorEvent = 后端发过错误事件(进程非零退出等,不含 bad-line 噪声)。
-      let sawTopResult = false;
+      // r182:留存判据的另两个输入(sawTopResult 声明在 try 之外,见上)。stallEnded = 后端因静默超时结束了
+      // 这一轮;sawServerErrorEvent = 后端发过错误事件(进程非零退出等,不含 bad-line 噪声)。
       let stallEnded = false;
       let sawServerErrorEvent = false;
 
@@ -6276,7 +6278,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }
           let event;
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
-          // r182:放在所有分支之前记,后面任何 continue / break 都不会漏掉。
+          // r182:放在所有分支之前记,后面任何 continue / break 都不会漏掉。顶层新内容(整条消息或内容块
+          // 开始 / 增量)先复位,再看是不是顶层结束事件 —— 含义是「最后一条顶层结束事件之后没有新的顶层内容」。
+          if (!event.parent_tool_use_id && (event.type === 'assistant'
+            || (event.type === 'stream_event' && (event.event?.type === 'content_block_start' || event.event?.type === 'content_block_delta')))) sawTopResult = false;
           if (event.type === 'result' && !event.parent_tool_use_id) sawTopResult = true;
           if (event.type === 'error' && event.error !== 'bad-line') sawServerErrorEvent = true;
           if (event.type === 'stall_notice' && event.ended === true) stallEnded = true;
@@ -7602,6 +7607,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           sawTopResult, stallEnded, sawDone: sawDoneEvent, sawServerError: sawServerErrorEvent,
           reattach: !!reattachPid, sawTakeover, sawGap,
         });
+        // r176:本回合是命令行的合成报错 → 动作与补充提示标在这条副本上(不再另加 ❌ 块)。留存 / 推送两个分支共用。
+        const errorMarks = {
+          ...(sawApiErrorMessage && apiErrorUi?.action ? { errorAction: apiErrorUi.action } : {}),
+          ...(sawApiErrorMessage && apiErrorUi?.hints?.length ? { errorHints: apiErrorUi.hints } : {}),
+        };
         if (retainKind && (!reattachPid || seeded)) {
           // 静默超时 / 进程退出时常带着没回执的工具调用:像停止那条路径一样补终态,工具卡不再一直转圈。
           const retainedCalls = finalizePendingToolCalls(currentToolCalls, true);
@@ -7616,8 +7626,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             usage: resultUsage,
             costUsd: resultCostUsd,
             subUsage: liveSubUsageAgents(useStore.getState().liveSubUsage),
-            ...(sawApiErrorMessage && apiErrorUi?.action ? { errorAction: apiErrorUi.action } : {}),
-            ...(sawApiErrorMessage && apiErrorUi?.hints?.length ? { errorHints: apiErrorUi.hints } : {}),
+            ...errorMarks,
           });
         } else if (!reattachPid || seeded) setChatMessages((prev) => [...prev, {
           uuid: 'chat-assistant-' + Date.now(), type: 'turn',
@@ -7635,9 +7644,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           subUsage: liveSubUsageAgents(useStore.getState().liveSubUsage),
           // r141:副本身份(判据①②③,见 utils/turnIdentity.js;纯追加,不动 r140 的 ownerKey 行)
           srcUuids: [...roundUuidsRef.current], roundStartTs: streamStartRef.current,
-          // r176:本回合是命令行的合成报错 → 动作与补充提示标在这条副本上(不再另加 ❌ 块)。
-          ...(sawApiErrorMessage && apiErrorUi?.action ? { errorAction: apiErrorUi.action } : {}),
-          ...(sawApiErrorMessage && apiErrorUi?.hints?.length ? { errorHints: apiErrorUi.hints } : {}),
+          // r176:本回合是命令行的合成报错 → 动作与补充提示标在这条副本上(errorMarks,见上)。
+          ...errorMarks,
         }]);
         // M3(Q9)→T2 重构:完成悬浮提醒改由服务端 WS 'turn-complete' 广播驱动
         // (见 useWebSocket)。这里的流闭包在用户切走会话时会被切会话 effect
@@ -7742,7 +7750,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // chatMessages。表的通知在订阅方那里走 startTransition(挂载定稿 markdown 不挡「停止中」的
           // 反馈),与 finally 里撤掉直播气泡的那组低优先级更新同批提交 —— 不会一帧两份、也不会一帧空白。
           // 切走 / 转后台(killedRef 为假)回合还在跑,照旧推本地副本(不补编号)。
-          if (retainKindOf({ aborted: true, killed: killedRef.current })) {
+          if (retainKindOf({ aborted: true, killed: killedRef.current, sawTopResult })) {
             retainStreamCopy('stop', stoppedCopy);
           } else {
             // r119:这条推送会挂载一整套定稿 markdown(实测 1.5MB 正文 ≈ 1.3 秒),进 transition

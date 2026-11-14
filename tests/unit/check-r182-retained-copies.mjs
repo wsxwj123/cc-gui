@@ -222,6 +222,52 @@ t('4 连续两轮都没写盘:各自留在自己那一轮', () => {
   assert.deepEqual(v.list.map((m) => m.uuid), ['p1', 'chat-stopped-1', 'p2', 'chat-stopped-2']);
 });
 
+// ── 4b. 认轮次的上界(列表只是历史的一段 / 已含停止之后的更晚轮次)──────────────────────
+// 时间记号:t0(-5000)< 起流(0)≤ t1(10)< 停止(1000)< t3(3000)< t4(3100)
+const KEEP = { text: '继续', ms: 0 };
+t('4b 连发两条相同提示词:第 1 轮的条目不认到第 2 轮的提示词上,副本在两条提示词之间', () => {
+  const hist = [user('u1', '继续', 10), user('u2', '继续', 3000), turn('t2', 3100, { text: '第二轮' })];
+  const e1 = entry({ id: 'chat-stopped-k', text: chunks(1, 8), prompt: KEEP, srcUuids: ['zz'] });
+  const loc = locateRound(hist, e1);
+  assert.deepEqual([loc.start, loc.end, loc.turnIdx], [1, 1, []]);
+  const v = applyRetained(hist, [e1], []);
+  assert.deepEqual(v.list.map((m) => m.uuid), ['u1', 'chat-stopped-k', 'u2', 't2']);
+});
+t('4b 两轮都被强杀、提示词相同:各自落在自己那条提示词后面', () => {
+  const hist = [user('u1', '继续', 10), user('u2', '继续', 3000)];
+  const e1 = entry({ id: 'chat-stopped-1', text: chunks(1, 8), prompt: KEEP, startMs: 0, stopMs: 1000 });
+  const e2 = entry({ id: 'chat-stopped-2', text: chunks(9, 12), prompt: { text: '继续', ms: 2990 }, startMs: 2990, stopMs: 4000 });
+  const v = applyRetained(hist, [e1, e2], []);
+  assert.deepEqual(v.list.map((m) => m.uuid), ['u1', 'chat-stopped-1', 'u2', 'chat-stopped-2']);
+});
+t('4b 提示词全文对不上(带附件)后又发了一轮:副本在本轮提示词之后、下一轮提示词之前', () => {
+  const hist = [user('u1', '看看这张图', 10), user('u2', '下一轮', 3000), turn('t2', 3100, { text: '新' })];
+  const e1 = entry({ id: 'chat-stopped-a', text: chunks(1, 8), prompt: { text: '看看这张图 [附件]', ms: 0 } });
+  const v = applyRetained(hist, [e1], []);
+  assert.deepEqual(v.list.map((m) => m.uuid), ['u1', 'chat-stopped-a', 'u2', 't2']);
+});
+t('4b 列表只含更晚轮次 → offscreen;applyRetained 两段都返回原引用、coveredIds 为空', () => {
+  const e1 = entry({ id: 'chat-stopped-o', text: chunks(1, 8), prompt: P1 });
+  const histA = [user('u3', '下一轮', 3000), turn('t3', 3100, { text: '新' })];
+  const histB = [turn('t3', 3000, { text: '旧尾' }), user('u4', '再下一轮', 3100), turn('t4', 3200, { text: '新' })];
+  for (const hist of [histA, histB]) {
+    assert.equal(relate(hist, e1).mode, 'offscreen');
+    const local = [{ uuid: 'chat-user-x', type: 'user', text: '这一轮' }];
+    const v = applyRetained(hist, [e1], local);
+    assert.equal(v.list, hist); assert.equal(v.local, local); assert.deepEqual(v.coveredIds, []);
+  }
+});
+t('4b 没有提示词信息、本轮只有打断后才写盘的半截:起点是那条半截回合', () => {
+  const hist = [user('u0', 'a', -5000), turn('t0', -4000, { text: 'x' }), turn('half', 3000, { text: '半截' })];
+  const loc = locateRound(hist, entry({ text: '半截还有', srcUuids: ['zz'], startMs: 0 }));
+  assert.deepEqual([loc.start, loc.end, loc.turnIdx], [2, 3, [2]]);
+});
+t('4b 没有提示词信息、本轮在这段里没有记录、后面已有更晚轮次:副本插在更晚的提示词之前', () => {
+  const hist = [user('u0', 'a', -5000), turn('t0', -4000, { text: 'x' }), user('u3', '下一轮', 3000), turn('t3', 3100, { text: '新' })];
+  const v = applyRetained(hist, [entry({ id: 'chat-stopped-n', text: chunks(1, 8), startMs: 0 })], []);
+  assert.deepEqual(v.list.map((m) => m.uuid), ['u0', 't0', 'chat-stopped-n', 'u3', 't3']);
+});
+
 // ── 5. 表 ───────────────────────────────────────────────────────────────────
 __resetRetainedForTest();
 t('5 listRetained 只读不取走;空时返回同一个空数组常量', () => {
@@ -283,14 +329,26 @@ t('5 会话键上限:最多 8 个会话', () => {
 const app = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../client/src/App.jsx'), 'utf8');
 const count = (s) => app.split(s).length - 1;
 t('6 catch:用户停止时只写表,不再用 setChatMessages 推 chat-stopped-', () => {
-  const head = 'if (retainKindOf({ aborted: true, killed: killedRef.current })) {';
+  // 停止路径也看结束事件:回合已收到顶层结束事件、流还没收尾时点停止,不当成「没写盘」留存。
+  const head = 'if (retainKindOf({ aborted: true, killed: killedRef.current, sawTopResult })) {';
   const i = app.indexOf(head);
-  assert.ok(i !== -1, 'catch 里要用 retainKindOf 判停止');
+  assert.ok(i !== -1, 'catch 里要用 retainKindOf 判停止,且带上 sawTopResult');
   const branch = app.slice(i, app.indexOf('} else {', i));
   assert.ok(branch.includes("retainStreamCopy('stop', stoppedCopy)"), '停止分支写表');
   assert.ok(!branch.includes('setChatMessages'), '停止分支不许推 chatMessages');
   const elseBranch = app.slice(app.indexOf('} else {', i), app.indexOf('} else {', i) + 600);
   assert.ok(elseBranch.includes('localCopiesCleared ? prev : [...prev, stoppedCopy]'), '切走 / 转后台照旧推本地副本');
+});
+t('6 sawTopResult 声明在 try 之外(catch 可读),顶层新内容复位、顶层 result 置位', () => {
+  const decl = app.indexOf('let sawTopResult = false;');
+  assert.ok(decl !== -1 && count('let sawTopResult = false;') === 1, '只声明一处');
+  const mirror = app.indexOf("let streamEndMirror = null;");
+  assert.ok(mirror !== -1 && decl > mirror && decl - mirror < 600, '与 streamEndMirror 放在一处');
+  const setAt = app.indexOf("if (event.type === 'result' && !event.parent_tool_use_id) sawTopResult = true;");
+  assert.ok(setAt !== -1, '顶层 result 置位');
+  const pre = app.slice(setAt - 500, setAt);
+  assert.ok(pre.includes('sawTopResult = false;') && pre.includes("'content_block_start'") && pre.includes("'content_block_delta'") && pre.includes("event.type === 'assistant'"), '置位之前有顶层新内容复位');
+  assert.ok(retainKindOf({ aborted: true, killed: true, sawTopResult: true }) === null, '见过结束事件的停止不留存');
 });
 t('6 流收尾推副本处:先 retainKindOf,命中写表,否则走原来那一行推送', () => {
   const i = app.indexOf('const retainKind = retainKindOf({');
