@@ -3,6 +3,9 @@
 // 放进 client/src/utils/retainedCopies.js 的按会话表,渲染时按「本轮历史」叠加。这里直接 import 真模块,
 // 逐类钉住:留存范围(retainKindOf)、认轮次(locateRound)、覆盖关系(relate)、叠加(applyRetained)、表。
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   EMPTY_RETAINED, addRetained, applyRetained, dropRetained, listRetained, listRetainedFor, locateRound,
   makeRetainedEntry, migrateRetained, relate, removeRetained, retainKindOf, retainedVersion, subscribeRetained,
@@ -274,6 +277,50 @@ t('5 会话键上限:最多 8 个会话', () => {
   for (let i = 0; i < 10; i++) addRetained(`k${i}`, entry({ id: `chat-stopped-${i}` }));
   assert.equal(listRetained('k0'), EMPTY_RETAINED);
   assert.equal(listRetained('k9').length, 1);
+});
+
+// ── 6. 源码文本守卫(App.jsx 的接线)────────────────────────────────────────────
+const app = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../client/src/App.jsx'), 'utf8');
+const count = (s) => app.split(s).length - 1;
+t('6 catch:用户停止时只写表,不再用 setChatMessages 推 chat-stopped-', () => {
+  const head = 'if (retainKindOf({ aborted: true, killed: killedRef.current })) {';
+  const i = app.indexOf(head);
+  assert.ok(i !== -1, 'catch 里要用 retainKindOf 判停止');
+  const branch = app.slice(i, app.indexOf('} else {', i));
+  assert.ok(branch.includes("retainStreamCopy('stop', stoppedCopy)"), '停止分支写表');
+  assert.ok(!branch.includes('setChatMessages'), '停止分支不许推 chatMessages');
+  const elseBranch = app.slice(app.indexOf('} else {', i), app.indexOf('} else {', i) + 600);
+  assert.ok(elseBranch.includes('localCopiesCleared ? prev : [...prev, stoppedCopy]'), '切走 / 转后台照旧推本地副本');
+});
+t('6 流收尾推副本处:先 retainKindOf,命中写表,否则走原来那一行推送', () => {
+  const i = app.indexOf('const retainKind = retainKindOf({');
+  assert.ok(i !== -1);
+  const seg = app.slice(i, app.indexOf('} else if (!reattachPid || seeded) setChatMessages((prev) => [...prev, {', i));
+  assert.ok(seg.includes('if (retainKind && (!reattachPid || seeded)) {'), '写表只在原推送的同一条件下发生');
+  assert.ok(seg.includes('retainStreamCopy(retainKind,'), '命中写表');
+  assert.ok(seg.includes('finalizePendingToolCalls(currentToolCalls, true)'), '写表前给没回执的工具补终态');
+});
+t('6 全文件只有 retainKindOf 判断留存:写表只经 retainStreamCopy,它的两个调用点都跟在 retainKindOf 之后', () => {
+  assert.equal(count('addRetained('), 1, 'addRetained 只在 retainStreamCopy 里调用');
+  assert.equal(count('retainKindOf('), 2);
+  assert.equal(count('retainStreamCopy('), 2, '调用 2 处(停止 / 流收尾)');
+  assert.equal(count('const retainStreamCopy = '), 1);
+});
+t('6 写表的会话键取本流闭包里的值', () => {
+  assert.ok(app.includes('const retainStreamCopy = (kind, turnCopy) => addRetained(streamSid || sessionQueueKey, makeRetainedEntry({'));
+  assert.ok(app.includes('roundStartTs: turnStreamStart, stopTs: Date.now(),'));
+});
+t('6 表的通知走 startTransition;叠加在 mountedMessages / renderChat 上', () => {
+  assert.ok(app.includes('subscribeRetained(() => { startTransition(() => setRetainedTick(retainedVersion())); })'));
+  assert.ok(app.includes('applyRetained(mountedBase, retainedEntries, renderChatBase)'));
+  assert.ok(app.includes('const mountedMessages = retainedView.list;'));
+  assert.ok(app.includes('const renderChat = retainedView.local;'));
+});
+t('6 回滚 / 清空会话清表,草稿转正式迁移', () => {
+  const tu = app.slice(app.indexOf('const truncateUi = () => {'), app.indexOf('const truncateUi = () => {') + 600);
+  assert.ok(tu.includes('dropRetained(k)'), 'truncateUi 清表并记墓碑');
+  assert.ok(/dropUserStash\(conversationResetFrom\);[^\n]*\n\s*dropRetained\(conversationResetFrom\);/.test(app), '/clear 轮换清表');
+  assert.ok(/migrateUserStash\(_dk0, event\.session_id\);[^\n]*\n\s*migrateRetained\(_dk0, event\.session_id\);/.test(app), '草稿转正式迁移');
 });
 
 console.log(`check-r182-retained-copies: ${passed} 条通过`);

@@ -187,7 +187,7 @@ import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
-import { addRetained, applyRetained, listRetainedFor, makeRetainedEntry, removeRetained, retainKindOf, retainedVersion, subscribeRetained } from './utils/retainedCopies.js';
+import { addRetained, applyRetained, dropRetained, listRetainedFor, makeRetainedEntry, migrateRetained, removeRetained, retainKindOf, retainedVersion, subscribeRetained } from './utils/retainedCopies.js';
 import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
@@ -6326,6 +6326,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             setChatMessages([]);
             roundUuidsRef.current = new Set();   // r141:旧会话归档,它的 uuid 不得留到新会话
             dropUserStash(conversationResetFrom); // r118:旧会话归档,它的暂存气泡别在切回时被补回来
+            dropRetained(conversationResetFrom); // r182:旧会话归档,它的留存副本一并删
             continue;
           }
 
@@ -6421,6 +6422,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               {
                 const _dk0 = _draftOwnerKey;
                 migrateUserStash(_dk0, event.session_id); // r118:draft 键下的用户气泡暂存随同改键
+                migrateRetained(_dk0, event.session_id); // r182:draft 键下的留存副本随同改键
                 setChatMessages((prev) => (prev.some((m) => m.ownerKey === _dk0)
                   ? prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))
                   : prev));
@@ -8777,6 +8779,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const truncateUi = () => {
       // r118:回滚把尾部从 jsonl 裁掉了 —— 暂存里的副本已不代表现实,留着会在切回时被补回来。
       dropUserStash(queueKeyFor(sel));
+      // r182:回滚 / 编辑重发 → 留存副本整表删,并记墓碑。回合进行中回滚时,被中断那条流的 catch 在这里
+      // 之后才执行(abort 与本函数同一段同步代码),它写表时起流时刻早于墓碑,会被拒收。
+      for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetained(k);
       if (idxInStore !== -1) {
         setLocalMessages(messages.slice(0, idxInStore));
         setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 保留旁问气泡(本地注记)
