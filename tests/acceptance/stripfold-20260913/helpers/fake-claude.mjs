@@ -143,7 +143,9 @@ async function runRound(userText) {
 // 带「不保存会话」参数;命令行 -p 且不是流式输入)。真实命令行不会为它写会话文件,假命令行也不许写 ——
 // 否则后端会把这个临时目录当成多出来的工作区列进侧栏,整串连跑时把夹具工作区挤出前几项(SF-204 因此红)。
 // 认出之后:只回一个短标题,不吃场景、不写会话文件、不碰转写。普通回合(流式输入)的行为一个字不变。
-const TITLE_GEN = /cgui-title/.test(cwd) || (argv.includes('-p') && !argv.includes('--input-format'));
+// 只按工作目录认(起标题的调用一定在 cgui-title 目录下):这一套的假命令行另有一条「-p 带提示词、非流式就跑一轮」
+// 的分支(见下面的 printArg),不能把所有非流式调用都当成起标题,那会让那条分支变成走不到的死代码。
+const TITLE_GEN = /cgui-title/.test(cwd);
 if (TITLE_GEN) {
   if (argOf('--output-format') === 'stream-json') {
     out({ type: 'system', subtype: 'init', session_id: sid, cwd, model: MODEL, tools: [], mcp_servers: [], permissionMode: 'default', uuid: crypto.randomUUID() });
