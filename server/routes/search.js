@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { readdir, readFile } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
+import { parsePrefsJson } from '../utils/prefs-json.js';
 
 const router = Router();
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
@@ -15,7 +16,7 @@ const SNIPPET_RADIUS = 80;
 // 目录名即项目 hash,与 CLI 编码同规则)。读失败回落空集 = 不过滤,不阻断搜索。
 async function loadHiddenProjects() {
   try {
-    const prefs = JSON.parse(await readFile(PREFS_PATH, 'utf-8'));
+    const prefs = parsePrefsJson(await readFile(PREFS_PATH, 'utf-8'));
     return new Set(Array.isArray(prefs.hiddenProjects) ? prefs.hiddenProjects.filter((x) => typeof x === 'string') : []);
   } catch {
     return new Set();

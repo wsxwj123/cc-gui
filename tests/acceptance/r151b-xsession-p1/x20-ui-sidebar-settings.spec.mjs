@@ -15,7 +15,7 @@ const badgeNear = (page, id, label) => page.evaluate(([tid, text]) => {
   }
   return null;
 }, [id, label]);
-const NOTICE = '开启后，会话里的 AI 可以给本机 CC-GUI 的其它会话发消息，你也可以把回复转发给其它会话。收到的消息默认显示为卡片，确认后才处理；设为自动处理的会话会自行开始回合并消耗额度。AI 列出可发送的会话时，会话标题与目录名会随请求发给当前 provider。';
+const NOTICE = '开启后，会话里的 AI 可以给本机 CC-GUI 的其它会话发消息，你也可以把回复转发给其它会话。收到的消息按会话的接收方式处理：卡片方式在你确认后才处理；自动处理方式会自行开始回合并消耗额度。没有单独设置的会话使用默认接收方式；首次开启本功能时，默认接收方式是自动处理。AI 列出可发送的会话时，会话标题与目录名会随请求发给当前 provider。';
 
 test('X20 侧栏:会话行 xs-unread = 该会话待处理条数(0 不出现);项目折叠时 xs-unread-project = 该项目所有会话之和,展开或为 0 时不出现', async ({ page }) => {
   await api.on();

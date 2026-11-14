@@ -141,6 +141,10 @@ async function walkJsonl(dir, projectName, depth, out, sessionKey = null, inSuba
     if (!e.name.endsWith('.jsonl')) continue;
     try {
       const st = await stat(p);
+      // 只收普通文件:命名管道等名字以 .jsonl 结尾的特殊文件,读它会一直等不到结束,
+      // 让这次扫描(以及合流等它的所有用量请求)永远不返回。stat 跟随符号链接,
+      // 指向普通文件的符号链接照收。
+      if (!st.isFile()) continue;
       // depth 0 = 项目目录直属 = 一个会话;更深的是该会话的子代理 transcript,
       // 花的钱要算,但不能让 sessionCount 跟着虚高。
       out.push({

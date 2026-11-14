@@ -4,7 +4,7 @@
 // `claude --version` 走 PATH,native 安装用户命中旧 native 版 → 0 退出码假成功。
 // 验收点(PLAN C1):
 //   ①crossChannel 判据纯函数(isCrossChannel)四象限断言;
-//   ②npm-registry 命令串含 npm prefix -g(mac/linux 哨兵 —— 自检钉到刚装的安装);
+//   ②npm-registry 命令串含 npm config get prefix(mac/linux 哨兵 —— 自检钉到刚装的安装);
 //   ③native 渠道 + npm 安装【不】标 crossChannel(防误报哨兵);
 //   ④resolveUpdateMethod 跨渠道裸解析回 null,显式确认回执(allowCrossChannel)才放行;
 //   ⑤服务端双 POST 裸调用拒绝钉(409 / error 帧)+ 前端确认弹窗钉。
@@ -45,7 +45,7 @@ try {
   {
     const cmd = updateCmdFor('npm-registry', '/x/claude');
     assert.match(cmd, /npm install -g @anthropic-ai\/claude-code@latest --allow-scripts=@anthropic-ai\/claude-code && /, 'C1: 仍走 npm 安装(r180:带放行参数)');
-    assert.match(cmd, /"\$\(npm prefix -g\)\/bin\/claude" --version/, 'C1: 自检必须钉到 npm 前缀的新安装(假成功哨兵)');
+    assert.match(cmd, /"\$\(npm config get prefix\)\/bin\/claude" --version/, 'C1: 自检必须钉到 npm 前缀的新安装(假成功哨兵)');
   }
   setPlatform('win32');
   {
