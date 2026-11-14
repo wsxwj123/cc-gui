@@ -69,12 +69,17 @@ import { isResetBindingOrigin, isCliNoContentPlaceholder, isInitBindingOrigin } 
   const app = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
   const strip = app.indexOf('isCliNoContentPlaceholder(accumulatedText)');
   assert.ok(strip > 0, 't5: 占位串归空接线存在');
-  // r176:归空与 ✅ 分支之间的「把本回合内容 push 成本地副本」那段多了三行(给副本带上报错动作),
-  // 原来的 2200 字符窗口够不到 ✅ 那一行了(实测两者相距 2362 字符);窗口放到 2500(向上取整到百位再加 100),
-  // 判据不变(两者仍须在同一段收尾代码里、且归空在前)。
   const around = app.slice(strip - 300, strip + 2500);
   assert.match(around, /if \(isClear && isCliNoContentPlaceholder\(accumulatedText\)\) \{\s*accumulatedText = '';\s*\}/, 't5: isClear 门控下归空');
-  assert.match(around, /isClear \? '✅ 会话已清空，请发送新的消息。'/, 't5: ✅「会话已清空」分支仍在(归空后才能到达)');
+  // 2026-11-15(r182):原来在「归空往后固定字符数」的窗口里找 ✅ 那一行,两者之间每加一段收尾代码(r176 加报错
+  // 动作、r182 加留存分支)窗口就够不到,只能一再放大。改成不依赖字符距离:取归空到其后第一处
+  // `const okText = isClear` 之间的源码,判据不变 —— ✅ 分支在归空之后、两者仍在同一段收尾代码里(中间没有 catch)。
+  const okAt = app.indexOf('const okText = isClear', strip);
+  assert.ok(okAt > strip, 't5: 归空之后有 ✅ 分支判定(归空在前)');
+  const okLineEnd = app.indexOf('\n', okAt);
+  const okLine = app.slice(app.lastIndexOf('\n', okAt) + 1, okLineEnd === -1 ? app.length : okLineEnd);
+  assert.match(okLine, /isClear \? '✅ 会话已清空，请发送新的消息。'/, 't5: ✅「会话已清空」分支仍在(归空后才能到达)');
+  assert.ok(!app.slice(strip, okAt).includes('} catch ('), 't5: 归空与 ✅ 分支在同一段收尾代码里');
   // 归空必须先于「有内容」判定,否则占位串被当正常回复画气泡
   assert.ok(strip < app.indexOf("const okText = isClear"), 't5: 归空在 ✅ 分支判定之前');
 }

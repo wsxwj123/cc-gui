@@ -28,6 +28,7 @@ import {
   adoptFork, importGitState, GitInitBanner,
 } from '../App.jsx';
 import { removeInputHistory } from '../utils/inputHistory.js';
+import { dropRetained } from '../utils/retainedCopies.js';
 import { useXsProjectPendingMap, xsProjectPending } from '../utils/xsession.js';
 
 const EMPTY_ARRAY = Object.freeze([]);
@@ -594,6 +595,8 @@ export function UnifiedSidebar() {
       // 还活着,提前清会把它那轮的撑开态抹掉。撤回/重做等路径**不清**(INTERFACE §B.2:
       // 判据是时间窗,旧轮时间戳永远早于 since,不需要清理)。
       useStore.getState().clearRoundAbnormal?.(session.sessionId);
+      // r182:会话删了,它的留存副本一并删(放在 DELETE 成功之后:撤销窗口里会话还活着,副本要留着)。
+      dropRetained(session.sessionId);
       refreshProjectSessions(session.projectHash);
     } catch (err) {
       confirmDialog('删除失败：' + err.message);
@@ -666,6 +669,7 @@ export function UnifiedSidebar() {
       clearInterval(p.timer);
       useStore.getState().clearQueue?.(p.session.sessionId);
       removeInputHistory(localStorage, p.session.sessionId); // r149 S5:同 reallyDelete
+      dropRetained(p.session.sessionId); // r182:同 reallyDelete
       fetch(
         `/api/sessions/${p.session.sessionId}?projectHash=${encodeURIComponent(p.session.projectHash)}`,
         { method: 'DELETE', keepalive: true },

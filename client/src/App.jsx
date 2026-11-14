@@ -187,6 +187,7 @@ import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
+import { addRetained, applyRetained, dropRetained, listRetainedFor, makeRetainedEntry, migrateRetained, removeRetained, retainKindOf, retainedVersion, subscribeRetained } from './utils/retainedCopies.js';
 import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
@@ -364,6 +365,8 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
           // R25:裁剪必须走两步流(预览 → 带令牌提交);结果会话要新建时 sessionReset=true。
           const tr = await runHistoryOp(sessionId, 'trim', { projectHash, fromTimestamp: new Date(ts).toISOString() });
           trimOk = tr.ok;
+          // r182:会话裁到快照时刻之后的部分没了,留存副本所属的那一轮可能在其中 → 整表删并记墓碑(同 truncateUi)。
+          if (tr.ok) dropRetained(sessionId);
           if (tr.sessionReset) {
             // 扫全部 pane(不只 selectedSession=pane0 镜像):检查点按钮可能开在 1-5 号
             // pane,或同会话开多 pane。漏扫 → 那些 pane 留僵尸 sessionId,下次发送 CLI
@@ -4572,7 +4575,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 渲染层兜底(用户实报:自己发的消息反复出现在最新位置,切会话恢复):流式状态卡住时
   // 对账 effect 会跳过,本地乐观气泡留在末尾;这里在历史已推进(同文本之后已有内容)时隐藏
   // 本地副本,历史那份仍在,不会少画。纯函数单测 check-user-echo-dedupe。
-  const renderChat = useMemo(() => {
+  // r182:这是叠加留存副本之前的本地段;叠加后的 renderChat 定义在 mountedMessages 旁边。
+  const renderChatBase = useMemo(() => {
     const kept = visibleChat.filter((m) => !localTurnTakenOver(m, renderedTurnIdentity));
     return dropStaleUserEchoes(kept, finalizedMessages, msgTextOf);
   }, [visibleChat, renderedTurnIdentity, finalizedMessages]);
@@ -4858,10 +4862,39 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   useEffect(() => { setMountFrom(null); }, [scrollOwnerKey]);
   // 被裁的是**定稿消息**这一块(①);visibleChat 的本地条目与流式气泡永不裁 ——
   // 它们个数很少且是"当前正在发生的事"(INTERFACE §H.3)。
-  const mountedMessages = useMemo(() => {
+  const mountedBase = useMemo(() => {
     if (mountFromResolved <= 0) return finalizedMessages;   // 不裁时返回原引用(不打穿 MessageList 的 memo)
     return sliceRows(finalizedMessages, { from: mountFromResolved, to: finalizedMessages.length });
   }, [finalizedMessages, mountFromResolved]);
+  // r182:留存副本(没见到命令行结束信号就结束的回合,见 utils/retainedCopies.js)叠加到历史段与本地段上。
+  // 表是模块级的:切会话不清、分屏两格都读得到。表的变化经订阅进 startTransition —— 写表那一刻(停止 /
+  // 流收尾)与 finally 里「撤掉直播气泡 / 清流式缓冲」那组低优先级更新落在同一批,不会一帧两份或一帧空白,
+  // 挂载定稿 markdown 也不挡「停止中」的反馈。读表对同一组键同一个版本返回同一个引用,叠加没有改动时
+  // 返回原引用,不打穿 MessageList 的记忆化。r141 的身份闸门(renderedTurnIdentity)仍只看 finalizedMessages。
+  const [retainedTick, setRetainedTick] = useState(() => retainedVersion());
+  useEffect(() => {
+    const off = subscribeRetained(() => { startTransition(() => setRetainedTick(retainedVersion())); });
+    // 挂载到订阅之间若写过表,订阅收不到那次通知;订阅之后立刻补读一次版本号。
+    setRetainedTick(retainedVersion());
+    return off;
+  }, []);
+  const retainedSid = selectedSession?.sessionId || null;
+  const retainedEntries = useMemo(
+    () => listRetainedFor([sessionQueueKey, retainedSid]),
+    [retainedTick, sessionQueueKey, retainedSid], // retainedTick = 表的版本号,变了才重读
+
+  );
+  const retainedView = useMemo(
+    () => applyRetained(mountedBase, retainedEntries, renderChatBase),
+    [mountedBase, retainedEntries, renderChatBase],
+  );
+  const mountedMessages = retainedView.list;
+  const renderChat = retainedView.local;
+  // 本轮历史已把副本每一块都包含了 → 从表里删(在 effect 里删,不在渲染期改表)。
+  useEffect(() => {
+    if (!retainedView.coveredIds.length) return;
+    for (const k of new Set([sessionQueueKey, retainedSid].filter(Boolean))) removeRetained(k, retainedView.coveredIds);
+  }, [retainedView.coveredIds, sessionQueueKey, retainedSid]);
   // r151c 实点:回合进行中历史里已有与直播来源气泡是同一条的条目时只画一个 —— 历史那条留在原位、带直播的 via
   // (见 utils/xsession.js mergeLivePeersIntoHistory)。只在渲染层合并,不动 chatMessages(流式缓冲仍是真相源)。
   // 本回合的历史被截断时(正常发送 / 种回,同 visibleMessages 的条件)历史里不可能有本回合那条,不认领。
@@ -5553,6 +5586,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 起点算 = 用户实报的「Connecting… 14m33s」)。快照一律用这个值。
     // r177:let —— 没有快照的重接收到 replay_complete 升级成种回档时,改成服务端给的回合开始时刻。
     let turnStreamStart = streamStartRef.current;
+    // r182:写留存表(utils/retainedCopies.js)。会话键、起流时刻、提示词一律取本流闭包里的值,
+    // 不读「当前选中的会话」(写表时用户可能已切到别的会话)。提示词只在本流由页面发起时有。
+    const retainedPromptOfStream = () => (!reattachPid && userMsgUuid && typeof prompt === 'string'
+      ? { text: prompt, sentTs: Date.parse(userMsgTimestamp) || turnStreamStart, localUuid: userMsgUuid }
+      : null);
+    const retainStreamCopy = (kind, turnCopy) => addRetained(streamSid || sessionQueueKey, makeRetainedEntry({
+      kind, ownerKey: streamSid || sessionQueueKey, turn: turnCopy,
+      srcUuids: [...roundUuidsRef.current], roundStartTs: turnStreamStart, stopTs: Date.now(),
+      prompt: retainedPromptOfStream(),
+    }));
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
@@ -5765,6 +5808,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 而块索引表与收尾三态都声明在 try 内 —— 各镜像一个引用出来供 finally 读,原声明不动。
     let blocksMirror = null;          // = 下面 try 里的 blocks(SDK content block index → 本地块)
     let streamEndMirror = null;       // = 'done' | 'takeover' | 'dropped';null = 本端 abort(切走/停止)
+    // r182:留存判据的输入(见 utils/retainedCopies.js retainKindOf)。顶层结束事件 = result,成功或报错
+    // 都算,子代理的不算。sawTopResult = 这条流里见过顶层结束事件(只置真不复位;见过之后后端的 done 不算
+    // 进程退出)。endedClean = 最后一条顶层结束事件之后没有新的顶层内容 —— 结束事件之后同一条流里又续跑出
+    // 新内容时复位(那一段仍可能没写盘)。声明在 try 之外,catch 里的停止路径也要读。
+    let sawTopResult = false;
+    let endedClean = false;
     // r65:本流是否见过任何模型产出。本地闩住只翻一次 state,免每片 delta 重复 setState。
     let sawOutput = false;
     const markSawOutput = () => { if (!sawOutput) { sawOutput = true; setSawModelOutput(true); } };
@@ -6213,6 +6262,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // R13:服务端明确回过 stream_gap(游标超出保留窗)= 实时记录已截断,不走普通
       // 「空产出/掉线重连」判定,内容转历史恢复。
       let sawGap = false;
+      // r182:留存判据的另两个输入(sawTopResult 声明在 try 之外,见上)。stallEnded = 后端因静默超时结束了
+      // 这一轮;sawServerErrorEvent = 后端发过错误事件(进程非零退出等,不含 bad-line 噪声)。
+      let stallEnded = false;
+      let sawServerErrorEvent = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -6232,6 +6285,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }
           let event;
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
+          // r182:放在所有分支之前记,后面任何 continue / break 都不会漏掉。顶层新内容(整条消息或内容块
+          // 开始 / 增量)先复位 endedClean,再看是不是顶层结束事件(置 sawTopResult 与 endedClean)。
+          if (!event.parent_tool_use_id && (event.type === 'assistant'
+            || (event.type === 'stream_event' && (event.event?.type === 'content_block_start' || event.event?.type === 'content_block_delta')))) endedClean = false;
+          if (event.type === 'result' && !event.parent_tool_use_id) { sawTopResult = true; endedClean = true; }
+          if (event.type === 'error' && event.error !== 'bad-line') sawServerErrorEvent = true;
+          if (event.type === 'stall_notice' && event.ended === true) stallEnded = true;
 
           // R13:每帧都带本运行的 runId(SSE id 行是 `runId:seq`)。记下来发布到流动内容
           // 容器的 data-run-id —— "这一格现在看的是哪次运行"。同值 setState 会被 React
@@ -6280,6 +6340,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             setChatMessages([]);
             roundUuidsRef.current = new Set();   // r141:旧会话归档,它的 uuid 不得留到新会话
             dropUserStash(conversationResetFrom); // r118:旧会话归档,它的暂存气泡别在切回时被补回来
+            dropRetained(conversationResetFrom); // r182:旧会话归档,它的留存副本一并删
             continue;
           }
 
@@ -6375,6 +6436,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               {
                 const _dk0 = _draftOwnerKey;
                 migrateUserStash(_dk0, event.session_id); // r118:draft 键下的用户气泡暂存随同改键
+                migrateRetained(_dk0, event.session_id); // r182:draft 键下的留存副本随同改键
                 setChatMessages((prev) => (prev.some((m) => m.ownerKey === _dk0)
                   ? prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))
                   : prev));
@@ -7545,7 +7607,35 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // r68:种回的流不属于此列 —— 它的 accumulatedText 是【整回合】,与普通发送等价,
         // 该 push;不 push 会在 finalize 轮询落盘前闪一段空。收尾走的就是普通回合那条
         // finalize(roundLanded → 清本地 → 同帧清 cutoff),没有任何 seeded 专属分支。
-        if (!reattachPid || seeded) setChatMessages((prev) => [...prev, {
+        // r182:没见到命令行的结束事件就结束了(静默超时被结束 / 进程退出)→ 命令行可能没把这一轮写盘,
+        // 内容写进留存表(不进 chatMessages,收尾轮询的整清碰不到它)。判据只此一处(retainKindOf)。
+        // 表的通知在订阅方那里走 startTransition,与 finally 里撤掉直播气泡的那组低优先级更新同批提交。
+        const retainKind = retainKindOf({
+          sawTopResult, endedClean, stallEnded, sawDone: sawDoneEvent, sawServerError: sawServerErrorEvent,
+          reattach: !!reattachPid, sawTakeover, sawGap,
+        });
+        // r176:本回合是命令行的合成报错 → 动作与补充提示标在这条副本上(不再另加 ❌ 块)。留存 / 推送两个分支共用。
+        const errorMarks = {
+          ...(sawApiErrorMessage && apiErrorUi?.action ? { errorAction: apiErrorUi.action } : {}),
+          ...(sawApiErrorMessage && apiErrorUi?.hints?.length ? { errorHints: apiErrorUi.hints } : {}),
+        };
+        if (retainKind && (!reattachPid || seeded)) {
+          // 静默超时 / 进程退出时常带着没回执的工具调用:像停止那条路径一样补终态,工具卡不再一直转圈。
+          const retainedCalls = finalizePendingToolCalls(currentToolCalls, true);
+          retainStreamCopy(retainKind, {
+            uuid: 'chat-assistant-' + Date.now(), type: 'turn',
+            ownerKey: streamSid || sessionQueueKey,
+            timestamp: new Date().toISOString(), model: streamingModel,
+            text: accumulatedText ? [accumulatedText] : [],
+            thinking: accumulatedThinking ? [accumulatedThinking] : [],
+            toolCalls: retainedCalls.map((tc) => ({ ...tc, category: tc.category || 'call' })),
+            blocks: applyFinalizedToBlocks(orderedBlocks, retainedCalls),
+            usage: resultUsage,
+            costUsd: resultCostUsd,
+            subUsage: liveSubUsageAgents(useStore.getState().liveSubUsage),
+            ...errorMarks,
+          });
+        } else if (!reattachPid || seeded) setChatMessages((prev) => [...prev, {
           uuid: 'chat-assistant-' + Date.now(), type: 'turn',
           ownerKey: streamSid || sessionQueueKey,
           timestamp: new Date().toISOString(), model: streamingModel,
@@ -7561,9 +7651,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           subUsage: liveSubUsageAgents(useStore.getState().liveSubUsage),
           // r141:副本身份(判据①②③,见 utils/turnIdentity.js;纯追加,不动 r140 的 ownerKey 行)
           srcUuids: [...roundUuidsRef.current], roundStartTs: streamStartRef.current,
-          // r176:本回合是命令行的合成报错 → 动作与补充提示标在这条副本上(不再另加 ❌ 块)。
-          ...(sawApiErrorMessage && apiErrorUi?.action ? { errorAction: apiErrorUi.action } : {}),
-          ...(sawApiErrorMessage && apiErrorUi?.hints?.length ? { errorHints: apiErrorUi.hints } : {}),
+          // r176:本回合是命令行的合成报错 → 动作与补充提示标在这条副本上(errorMarks,见上)。
+          ...errorMarks,
         }]);
         // M3(Q9)→T2 重构:完成悬浮提醒改由服务端 WS 'turn-complete' 广播驱动
         // (见 useWebSocket)。这里的流闭包在用户切走会话时会被切会话 effect
@@ -7653,9 +7742,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // tool_use 进 orderedBlocks → TurnBubble 有 blocks 时只渲染 blocks,只 finalize
           // toolCalls 的话主路径卡片仍拿 result:null 永久转圈。
           const finalizedCalls = finalizePendingToolCalls(currentToolCalls, turnAborted);
-          // r119:这条推送会挂载一整套定稿 markdown(实测 1.5MB 正文 ≈ 1.3 秒),进 transition
-          // 让"停止中"的反馈先画出来(见 finally 里的长注释)。闩:历史已接管过本地副本就不再补。
-          startTransition(() => setChatMessages((prev) => (localCopiesCleared ? prev : [...prev, {
+          const stoppedCopy = {
             uuid: 'chat-stopped-' + Date.now(), type: 'turn',
             ownerKey: streamSid || sessionQueueKey,
             timestamp: new Date().toISOString(), model: streamingModel,
@@ -7665,7 +7752,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             blocks: applyFinalizedToBlocks(orderedBlocks, finalizedCalls),
             usage: null,
             interrupted: true,
-          }])));
+          };
+          // r182:用户停止(含编辑重发 / 加速)= 命令行可能被强行结束、一条都没写盘 → 写留存表,不进
+          // chatMessages。表的通知在订阅方那里走 startTransition(挂载定稿 markdown 不挡「停止中」的
+          // 反馈),与 finally 里撤掉直播气泡的那组低优先级更新同批提交 —— 不会一帧两份、也不会一帧空白。
+          // 切走 / 转后台(killedRef 为假)回合还在跑,照旧推本地副本(不补编号)。
+          if (retainKindOf({ aborted: true, killed: killedRef.current, endedClean })) {
+            retainStreamCopy('stop', stoppedCopy);
+          } else {
+            // r119:这条推送会挂载一整套定稿 markdown(实测 1.5MB 正文 ≈ 1.3 秒),进 transition
+            // 让"停止中"的反馈先画出来(见 finally 里的长注释)。闩:历史已接管过本地副本就不再补。
+            startTransition(() => setChatMessages((prev) => (localCopiesCleared ? prev : [...prev, stoppedCopy])));
+          }
         }
       } else if (!isNetworkDrop) {
         // P2.2 auto 档 spawn 失败回退:旧 SDK/CLI 不接受 permissionMode:'auto' 时
@@ -8698,6 +8796,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const truncateUi = () => {
       // r118:回滚把尾部从 jsonl 裁掉了 —— 暂存里的副本已不代表现实,留着会在切回时被补回来。
       dropUserStash(queueKeyFor(sel));
+      // r182:回滚 / 编辑重发 → 留存副本整表删,并记墓碑。回合进行中回滚时,被中断那条流的 catch 在这里
+      // 之后才执行(abort 与本函数同一段同步代码),它写表时起流时刻早于墓碑,会被拒收。
+      for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetained(k);
       if (idxInStore !== -1) {
         setLocalMessages(messages.slice(0, idxInStore));
         setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 保留旁问气泡(本地注记)
@@ -8727,7 +8828,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // R25:摘要由服务端在预览阶段生成并绑定进预览令牌,提交只送令牌 —— 客户端不替换摘要。
         const r = await runHistoryOp(sel.sessionId, 'compact-segment', { projectHash, uuid: msg.uuid, direction, model: compactModel });
         if (!r.ok) { setProviderSwitchNotice({ text: '压缩失败:' + (r.error || r.status) + '(会话未改动)' }); return; }
-        if (direction === 'after') setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 尾段已被移除,清掉本地未落盘气泡(旁问除外)
+        if (direction === 'after') {
+          setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 尾段已被移除,清掉本地未落盘气泡(旁问除外)
+          // r182:锚点及之后被压成摘要,留存副本所属的那一轮可能在其中 → 整表删并记墓碑(同 truncateUi)。
+          for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetained(k);
+        }
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
         setProviderSwitchNotice({ text: direction === 'before' ? '已把此前对话压缩为摘要,上下文占用已降低。' : '已回退并把后续对话保留为摘要。' });
       } catch (e) {
@@ -8872,6 +8977,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     // r146 R3:裁剪期间切走 —— 磁盘已裁,窗格动作与重发全部放弃,本来要重发的内容留给本会话。
     if (!stillHere()) {
+      // r182:磁盘已裁,truncateUi 不会再执行 —— 本会话的留存副本在这里整表删并记墓碑(同 truncateUi)。
+      if (!trimFailed) for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetained(k);
       // 开始回退时本会话在跑的回合:按它自己的 pid 停掉(不碰窗格 ref),否则它继续往刚裁剪的记录里追加。
       if (startPid) {
         stoppedPidsRef.current.add(String(startPid));
@@ -9040,6 +9147,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 覆盖,重跑以流式气泡出现在同一位置 → 读起来是"该工具在原位重跑",而非新发消息。
     // r99:内容审核回退不走乐观截断 —— `_retryTrimToolId` 会让 TurnBubble 显示
     // "正在重做此工具…",而这条路径恰恰是"不重做"。改用一条横幅说明正在做什么。
+    // r182:该工具调用及之后都会被裁掉,留存副本所属的那一轮可能在其中 → 两种用法都整表删并记墓碑
+    // (同 truncateUi;在下面停流之前同步执行,被中断那条流迟到的写表会被墓碑拒收)。
+    for (const k of new Set([rtKey, sel.sessionId].filter(Boolean))) dropRetained(k);
     if (opts.contentRisk) {
       setProviderSwitchNotice({ text: '正在回退会话到该工具调用之前…' });
     } else {
