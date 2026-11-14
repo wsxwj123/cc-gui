@@ -8,8 +8,9 @@ import { buildSubagentCostIndex } from '../utils/subagentCost.js';
 import { subscribeAgentsActive, fetchAgentsActiveFresh } from '../utils/agentsActivePoller.js';
 import {
   AGENT_TERMINAL_STATUSES, agentHydrationStatus, agentOpenFailureAction, buildAgentRows, fetchAgentHistory,
-  locateParentPane, shouldApplyHistory, splitHistoryBlocks,
+  locateParentPane, shouldApplyHistory, splitAgentReply, splitHistoryBlocks,
 } from '../utils/agentView.js';
+import ErrorPlainText from './ErrorPlainText.jsx';
 
 function fmtElapsed(ms) {
   if (!ms || ms < 0) return '—';
@@ -429,10 +430,11 @@ function AgentCard({ agent }) {
   // 本机正在跑的/刚水合的,还没配对到金额是常态(跑动中的子代理本来就没有)—— 故只在
   // 拿到金额时画金额,不画「未能计价」(那份数据要等这一轮落盘 + 历史刷新才有)。
   const costEntry = useContext(SubagentCostContext)?.index?.byToolUseId?.get(agent.id);
-  const text = agent.text ? agent.text.join('') : '';
+  // r183b:回复分段(与 TaskCard 共用):上游报错原文原样显示,其余正文照旧 Markdown。
+  const replySegments = splitAgentReply(agent);
   const thinking = agent.thinking ? agent.thinking.join('') : '';
   const tools = agent.toolCalls || [];
-  const hasDetail = text || thinking || tools.length > 0 || agent.result;
+  const hasDetail = replySegments.length > 0 || thinking || tools.length > 0 || agent.result;
   return (
     <div className="bg-canvas-warm border border-violet-200 rounded-lg overflow-hidden">
       <button
@@ -528,10 +530,14 @@ function AgentCard({ agent }) {
               ))}
             </div>
           )}
-          {text && (
+          {replySegments.length > 0 && (
             <div>
               <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1">回复</div>
-              <div className="text-ink"><MarkdownRenderer content={text} /></div>
+              <div className="text-ink">
+                {replySegments.map((seg, i) => (seg.errorText
+                  ? <ErrorPlainText key={`r-${i}`} text={seg.content} />
+                  : <MarkdownRenderer key={`r-${i}`} content={seg.content} />))}
+              </div>
             </div>
           )}
           {agent.result && (

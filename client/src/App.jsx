@@ -6910,9 +6910,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               const aStore = useStore.getState();
               const aid = event.parent_tool_use_id;
               reviveAgentIfTerminal(aStore, aid); // 唤醒后整条 assistant 消息到达,终态则复活为运行中
-              if (event.message.model) aStore.upsertAgent(aid, { model: event.message.model });
+              // r183b:合成报错消息的 `<synthetic>` 等伪模型名不记成子代理的模型;它的文字是上游报错原文,单独成块打标。
+              const isAgentApiError = event.is_api_error_message === true;
+              if (event.message.model && !/^</.test(event.message.model)) aStore.upsertAgent(aid, { model: event.message.model });
               for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
-                if (block.type === 'text' && block.text) aStore.appendAgentText(aid, block.text);
+                if (block.type === 'text' && block.text) (isAgentApiError ? aStore.appendAgentErrorText : aStore.appendAgentText)(aid, block.text);
                 else if (block.type === 'thinking' && block.thinking) aStore.appendAgentThinking(aid, block.thinking);
                 else if (block.type === 'tool_use') {
                   aStore.appendAgentTool(aid, { id: block.id, name: block.name, input: block.input || {}, result: null });

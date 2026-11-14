@@ -469,7 +469,7 @@ function rotatedGenerations(state, idx, next, prev = (state.paneSessions || [])[
 function appendAgentBlock(blocks, type, delta) {
   const arr = Array.isArray(blocks) ? blocks : [];
   const last = arr[arr.length - 1];
-  if (last && last.type === type) {
+  if (last && last.type === type && !last.errorText) {   // r183b:不并进报错原文块
     return [...arr.slice(0, -1), { ...last, content: (last.content || '') + delta }];
   }
   return [...arr, { type, content: delta }];
@@ -493,7 +493,7 @@ function applyAgentDeltaQueue() {
   agentDeltaQueue = [];
   useStore.setState((s) => {
     const work = new Map();   // id → { cur, text, thinking, blocks, ownLast } | null(没有这条记录:丢,与原来一致)
-    for (const { id, kind, delta } of queue) {
+    for (const { id, kind, delta, errorText } of queue) {
       let w = work.get(id);
       if (w === undefined) {
         const cur = s.activeAgents[id];
@@ -503,7 +503,12 @@ function applyAgentDeltaQueue() {
       if (!w) continue;
       (kind === 'text' ? w.text : w.thinking).push(delta);
       const last = w.blocks[w.blocks.length - 1];
-      if (last && last.type === kind) {
+      if (errorText) {
+        // r183b:子代理的合成报错消息(上游报错原文)单独成块并打标,不并进前面的正文块。
+        w.blocks.push({ type: kind, content: delta, errorText: true });
+        w.ownLast = true;
+      } else if (last && last.type === kind && !last.errorText) {
+        // 之后到来的普通文字也不并进报错块(上面的 !last.errorText)。
         // 末块同类型:并入。末块还是 store 里那个对象时先换成新对象,不原地改旧 state。
         if (w.ownLast) last.content += delta;
         else { w.blocks[w.blocks.length - 1] = { ...last, content: (last.content || '') + delta }; w.ownLast = true; }
@@ -2038,6 +2043,8 @@ export const useStore = create((set, get) => ({
     }));
   },
   appendAgentText: (id, delta) => { agentDeltaQueue.push({ id, kind: 'text', delta }); agentDeltaCommit.schedule(); },
+  // r183b:子代理的报错原文(合成报错消息的文字)。与 appendAgentText 同进一个队列保序,只是单独成块并打 errorText。
+  appendAgentErrorText: (id, text) => { agentDeltaQueue.push({ id, kind: 'text', delta: text, errorText: true }); agentDeltaCommit.schedule(); },
   appendAgentThinking: (id, delta) => { agentDeltaQueue.push({ id, kind: 'thinking', delta }); agentDeltaCommit.schedule(); },
   appendAgentTool: (id, tc) => {
     flushAgentDeltas();

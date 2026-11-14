@@ -4,7 +4,8 @@ import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
 import { resolveOwnedAgent } from '../../utils/agentOwner.js';
-import { fetchAgentHistory, historyLegacyArrays, shouldApplyHistory, splitHistoryBlocks } from '../../utils/agentView.js';
+import { fetchAgentHistory, historyLegacyArrays, shouldApplyHistory, splitAgentReply, splitHistoryBlocks } from '../../utils/agentView.js';
+import ErrorPlainText from '../ErrorPlainText.jsx';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
 import { SubagentCostContext, SubagentCostTag } from './SubagentCost.jsx';
 import { RunMatrixIcon } from '../RunMatrixIcon.jsx';
@@ -178,7 +179,8 @@ export function TaskCard({ toolCall }) {
     st.setViewingAgent(st.activeTabIndex, toolCall.id);  // AZ6:渲染所在/焦点 pane
   };
 
-  const textOut = agent ? agent.text.join('') : '';
+  // r183b:子代理回复分段 —— 上游报错原文(errorText)原样显示,其余正文照旧 Markdown(与监控面板共用)。
+  const replySegments = agent ? splitAgentReply(agent) : [];
   const thinkingOut = agent ? agent.thinking.join('') : '';
   const childTools = agent?.toolCalls || [];
 
@@ -314,13 +316,15 @@ export function TaskCard({ toolCall }) {
             </div>
           )}
 
-          {textOut && (
+          {replySegments.length > 0 && (
             <div className="px-3 py-2 border-b border-canvas-deep">
               <div className="text-[10px] text-ink-faint uppercase tracking-wider font-body mb-1">
                 子代理回复
               </div>
               <div className="text-[12px] text-ink font-body">
-                <MarkdownRenderer content={textOut} />
+                {replySegments.map((seg, i) => (seg.errorText
+                  ? <ErrorPlainText key={`r-${i}`} text={seg.content} />
+                  : <MarkdownRenderer key={`r-${i}`} content={seg.content} />))}
               </div>
             </div>
           )}
