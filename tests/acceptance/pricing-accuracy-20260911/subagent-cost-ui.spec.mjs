@@ -237,6 +237,19 @@ async function openSession(page, marker) {
   await expect(page.locator('[data-testid="pane"]').first(), '打开会话后必须有对话流窗格').toBeVisible();
 }
 
+/**
+ * r184b:界面早已把一轮里的工具调用默认收进折叠组（折叠头形如「<描述> · N 次工具调用」），
+ * 子代理卡片要先点开折叠头才进 DOM。本用例写于那次改版之前，所以断言前先点开含该锚点文字的折叠头。
+ * 只管「展开」，不改任何断言；没有这样的折叠头（已展开 / 无折叠组）就什么都不做。
+ */
+async function expandToolGroupFor(page, anchor) {
+  const head = page.locator('[data-testid="pane"] button').filter({ hasText: anchor }).filter({ hasText: '次工具调用' }).first();
+  if (await head.count()) {
+    await head.click();
+    await page.waitForTimeout(500);
+  }
+}
+
 /** 顶栏 → 监控（Subagent 监控）。 */
 async function openMonitor(page) {
   await dismissOverlays(page);
@@ -321,6 +334,7 @@ test('PA-514 前台子代理：对话流 Task 卡片与监控面板都显示金�
   await routeCatalog(page);
   await openApp(page);
   await openSession(page, 'PA-TASK');
+  await expandToolGroupFor(page, 'PA fixture task agent');
 
   // 对话流：Task 卡片上的金额（锚点 = 转写里的 agent 描述，只有那张卡片上有这串）
   await expect.poll(async () => (await moneyNearAnchor(page, { anchor: 'PA fixture task agent', scope: 'pane', boundToButton: true }))
@@ -340,12 +354,11 @@ test('PA-514 前台子代理：对话流 Task 卡片与监控面板都显示金�
 // ---------------------------------------------------------------------------
 // PA-515 后台子代理：金额只在监控面板显示（对话流那张卡片不得渲染金额）
 //
-// ⚠️ 本条按**需求书口径**断言，实测与产品行为冲突（对话流卡片仍渲染了金额）——
-// 契约 §10.3 的卡片规则本身**不区分**前台/后台（「该 toolUseId 名下 1 个 agent」→ 显示合计），
-// §10.6 #15 也写「每个子代理显示在各自位置：对话流 Task 卡片 + 监控面板」。
-// 因此这条红是「需求书 vs INTERFACE §10.3」的**口径冲突**，不是单纯的实现漏做：
-// 需协调者裁定是改产品、还是把「后台子代理」改成别的口径（例：若指的是 `claude --bg` 后台代理，
-// 它本来就没有对话流卡片，本条应删）。裁定前**不要**为了转绿而放宽这里的断言。
+// r184b 更新：产品现在就是按需求书口径做的 —— `client/src/components/tools/TaskCard.jsx` 第 56–60 行
+// 用 `toolCall.input.run_in_background === true` 判后台子代理，后台运行的子代理卡片有意不显示金额
+// （前台子代理才在卡片上经 SubagentCostTag 显示）。此前这里写的「需求书与契约 §10.3 口径冲突、待协调者裁定」
+// 已经过时。本条此前的红另有原因：界面把工具调用默认收进折叠组，卡片要先点开折叠头才进 DOM，
+// 所以用例在断言前先 expandToolGroupFor。断言本身没有改动。
 // ---------------------------------------------------------------------------
 
 test('PA-515 后台子代理（run_in_background: true）：金额只出现在监控面板，对话流卡片上不渲染金额', async ({ page, request }) => {
@@ -362,6 +375,7 @@ test('PA-515 后台子代理（run_in_background: true）：金额只出现在�
   await routeCatalog(page);
   await openApp(page);
   await openSession(page, 'PA-BG-HELLO');
+  await expandToolGroupFor(page, 'PA fixture background agent');
   await openMonitor(page);
 
   // 正面：监控面板上必须有这个数（需求书「后台子代理只在监控面板显示」）
