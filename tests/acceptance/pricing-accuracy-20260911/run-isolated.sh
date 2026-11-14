@@ -15,11 +15,24 @@ WORKTREE="$(cd "$SUITE/../../.." && pwd)"
 ROOT="$SUITE/.artifacts/runtime-data"
 PORT="${PA_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));p=s.getsockname()[1];s.close();print(p)')}"
 
-mkdir -p "$ROOT/home/.claude" "$ROOT/home/.claude-gui" "$ROOT/fixture-workspace"
+mkdir -p "$ROOT/home/.claude/projects" "$ROOT/home/.claude-gui" "$ROOT/fixture-workspace"
+
+# 夹具清单 fixture-manifest.local.json 被 .gitignore 忽略，新开的工作树里没有。
+# 生成脚本只读写本套件自己的数据根（.artifacts/runtime-data，现场合成会话），不碰真实家目录，所以缺清单时自动生成；
+# 生成失败（node 报错）就带着报错非零退出，不会悄悄跳过。
+if [ ! -f "$SUITE/fixture-manifest.local.json" ]; then
+  echo "[PA] 缺 fixture-manifest.local.json，自动生成：node $SUITE/helpers/pa-fixtures.mjs" >&2
+  node "$SUITE/helpers/pa-fixtures.mjs" >/dev/null \
+    || { echo "[PA] 夹具清单生成失败，请手动执行：node $SUITE/helpers/pa-fixtures.mjs" >&2; exit 1; }
+fi
+
+# 后端进程：HOME / USERPROFILE 指到数据根；预加载把 os.userInfo().homedir 也指过去（电脑操控相关代码不看 HOME）；
+# DISABLE_AUTOUPDATER=1：后端启动时会调本机真实命令行取帮助，别让它顺手自动更新。
 cd "$ROOT"
 env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_MODEL \
-  HOME="$ROOT/home" PORT="$PORT" CGUI_DISABLE_FILE_WATCHER=1 CGUI_ENABLE_LOCAL_ROUTES=1 CGUI_TAURI=1 \
-  nohup node "$WORKTREE/server/index.js" > "$ROOT/server.log" 2>&1 &
+  HOME="$ROOT/home" USERPROFILE="$ROOT/home" CU_TEST_HOME="$ROOT/home" DISABLE_AUTOUPDATER=1 \
+  PORT="$PORT" CGUI_DISABLE_FILE_WATCHER=1 CGUI_ENABLE_LOCAL_ROUTES=1 CGUI_TAURI=1 \
+  nohup node --import "$WORKTREE/tests/unit/q8-helpers/cu-preload.mjs" "$WORKTREE/server/index.js" > "$ROOT/server.log" 2>&1 &
 INSTANCE_PID=$!
 trap 'kill "$INSTANCE_PID" 2>/dev/null || true' EXIT
 
