@@ -6,6 +6,7 @@
 //   R5 守卫:后台任务通知之后的续跑段 → 续跑段那个回合;通知之后还没有助手内容 → null
 //   R6 守卫:流里见过的工具 id 这个回合一个都不含 → null;含 → uuid
 //   R7 守卫:停止中 / 压缩中 / 聊天模式 → null;前面看不见这一轮起点 → null
+//   R8 守卫:流里没见过工具 id 时,回合必须还有没返回的工具调用;都已返回(已结束的上一轮)→ null
 import assert from 'node:assert/strict';
 import { pickReattachHostTurn as pick } from '../../client/src/utils/reattachLiveHost.js';
 
@@ -29,7 +30,7 @@ ok(pick([user('u0'), running, user('u1')]) === null, '上一轮末段是挂着�
 
 console.log('R3');
 ok(pick([user('u0'), seed, user('u1'), running]) === 't-run', '这一轮的回合 → 它的 uuid');
-ok(pick([user('u1'), turn('t-th', [tool('b1', 'X', 'ok'), { type: 'thinking', content: '想一下' }])]) === 't-th', '末段工具组里最后是思考 → 承载');
+ok(pick([user('u1'), turn('t-th', [tool('b1', 'X', 'ok'), { type: 'thinking', content: '想一下' }])], { streamToolIds: ['b1'] }) === 't-th', '末段工具组里最后是思考(流里见过 b1)→ 承载');
 
 console.log('R4');
 ok(pick([user('u1'), turn('t-txt', [tool('c1', 'X', 'ok'), text('正在写')])]) === null, '最后一段是正文 → null');
@@ -44,6 +45,13 @@ ok(pick([user('u1'), running, notice]) === null, '通知之后还没有助手内
 console.log('R6');
 ok(pick([user('u1'), running], { streamToolIds: ['zz'] }) === null, '流里的工具 id 回合里一个都没有 → null');
 ok(pick([user('u1'), running], { streamToolIds: [undefined, 'a3'] }) === 't-run', '含流里的工具 id → uuid');
+
+console.log('R8');
+const doneTools = turn('t-done', [tool('e1', 'E-1', 'ok'), tool('e2', 'E-2', 'ok')]);
+ok(pick([user('u1'), doneTools]) === null, '流里没有工具 id、回合以工具组结尾且工具都已返回(上一轮已结束)→ null');
+ok(pick([user('u1'), turn('t-pend', [tool('f1', 'F-1', 'ok'), tool('f2', 'F-2')])]) === 't-pend', '流里没有工具 id、最后一个工具没返回 → uuid');
+ok(pick([user('u1'), doneTools], { streamToolIds: ['e2'] }) === 't-done', '流里有工具 id 且回合含它、工具都已返回 → 仍承载');
+ok(pick([user('u1'), turn('t-par', [tool('g1', 'G-1'), tool('g2', 'G-2', 'ok')])]) === 't-par', '并行两个工具一个没返回、流里没有工具 id → uuid');
 
 console.log('R7');
 ok(pick([user('u1'), running], { stopping: true }) === null, '停止中 → null');
