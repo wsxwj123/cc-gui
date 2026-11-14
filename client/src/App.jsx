@@ -187,6 +187,7 @@ import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
+import { addRetained, applyRetained, listRetainedFor, makeRetainedEntry, removeRetained, retainKindOf, retainedVersion, subscribeRetained } from './utils/retainedCopies.js';
 import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
@@ -4572,7 +4573,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 渲染层兜底(用户实报:自己发的消息反复出现在最新位置,切会话恢复):流式状态卡住时
   // 对账 effect 会跳过,本地乐观气泡留在末尾;这里在历史已推进(同文本之后已有内容)时隐藏
   // 本地副本,历史那份仍在,不会少画。纯函数单测 check-user-echo-dedupe。
-  const renderChat = useMemo(() => {
+  // r182:这是叠加留存副本之前的本地段;叠加后的 renderChat 定义在 mountedMessages 旁边。
+  const renderChatBase = useMemo(() => {
     const kept = visibleChat.filter((m) => !localTurnTakenOver(m, renderedTurnIdentity));
     return dropStaleUserEchoes(kept, finalizedMessages, msgTextOf);
   }, [visibleChat, renderedTurnIdentity, finalizedMessages]);
@@ -4858,10 +4860,34 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   useEffect(() => { setMountFrom(null); }, [scrollOwnerKey]);
   // 被裁的是**定稿消息**这一块(①);visibleChat 的本地条目与流式气泡永不裁 ——
   // 它们个数很少且是"当前正在发生的事"(INTERFACE §H.3)。
-  const mountedMessages = useMemo(() => {
+  const mountedBase = useMemo(() => {
     if (mountFromResolved <= 0) return finalizedMessages;   // 不裁时返回原引用(不打穿 MessageList 的 memo)
     return sliceRows(finalizedMessages, { from: mountFromResolved, to: finalizedMessages.length });
   }, [finalizedMessages, mountFromResolved]);
+  // r182:留存副本(没见到命令行结束信号就结束的回合,见 utils/retainedCopies.js)叠加到历史段与本地段上。
+  // 表是模块级的:切会话不清、分屏两格都读得到。表的变化经订阅进 startTransition —— 写表那一刻(停止 /
+  // 流收尾)与 finally 里「撤掉直播气泡 / 清流式缓冲」那组低优先级更新落在同一批,不会一帧两份或一帧空白,
+  // 挂载定稿 markdown 也不挡「停止中」的反馈。读表对同一组键同一个版本返回同一个引用,叠加没有改动时
+  // 返回原引用,不打穿 MessageList 的记忆化。r141 的身份闸门(renderedTurnIdentity)仍只看 finalizedMessages。
+  const [retainedTick, setRetainedTick] = useState(() => retainedVersion());
+  useEffect(() => subscribeRetained(() => { startTransition(() => setRetainedTick(retainedVersion())); }), []);
+  const retainedSid = selectedSession?.sessionId || null;
+  const retainedEntries = useMemo(
+    () => listRetainedFor([sessionQueueKey, retainedSid]),
+    [retainedTick, sessionQueueKey, retainedSid], // retainedTick = 表的版本号,变了才重读
+
+  );
+  const retainedView = useMemo(
+    () => applyRetained(mountedBase, retainedEntries, renderChatBase),
+    [mountedBase, retainedEntries, renderChatBase],
+  );
+  const mountedMessages = retainedView.list;
+  const renderChat = retainedView.local;
+  // 本轮历史已把副本每一块都包含了 → 从表里删(在 effect 里删,不在渲染期改表)。
+  useEffect(() => {
+    if (!retainedView.coveredIds.length) return;
+    for (const k of new Set([sessionQueueKey, retainedSid].filter(Boolean))) removeRetained(k, retainedView.coveredIds);
+  }, [retainedView.coveredIds, sessionQueueKey, retainedSid]);
   // r151c 实点:回合进行中历史里已有与直播来源气泡是同一条的条目时只画一个 —— 历史那条留在原位、带直播的 via
   // (见 utils/xsession.js mergeLivePeersIntoHistory)。只在渲染层合并,不动 chatMessages(流式缓冲仍是真相源)。
   // 本回合的历史被截断时(正常发送 / 种回,同 visibleMessages 的条件)历史里不可能有本回合那条,不认领。
@@ -5553,6 +5579,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 起点算 = 用户实报的「Connecting… 14m33s」)。快照一律用这个值。
     // r177:let —— 没有快照的重接收到 replay_complete 升级成种回档时,改成服务端给的回合开始时刻。
     let turnStreamStart = streamStartRef.current;
+    // r182:写留存表(utils/retainedCopies.js)。会话键、起流时刻、提示词一律取本流闭包里的值,
+    // 不读「当前选中的会话」(写表时用户可能已切到别的会话)。提示词只在本流由页面发起时有。
+    const retainedPromptOfStream = () => (!reattachPid && userMsgUuid && typeof prompt === 'string'
+      ? { text: prompt, sentTs: Date.parse(userMsgTimestamp) || turnStreamStart, localUuid: userMsgUuid }
+      : null);
+    const retainStreamCopy = (kind, turnCopy) => addRetained(streamSid || sessionQueueKey, makeRetainedEntry({
+      kind, ownerKey: streamSid || sessionQueueKey, turn: turnCopy,
+      srcUuids: [...roundUuidsRef.current], roundStartTs: turnStreamStart, stopTs: Date.now(),
+      prompt: retainedPromptOfStream(),
+    }));
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
     setStreamOwner(sessionQueueKey);
@@ -6213,6 +6249,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // R13:服务端明确回过 stream_gap(游标超出保留窗)= 实时记录已截断,不走普通
       // 「空产出/掉线重连」判定,内容转历史恢复。
       let sawGap = false;
+      // r182:留存判据的输入(见 utils/retainedCopies.js retainKindOf)。sawTopResult = 见过命令行给这一轮的
+      // 顶层结束事件(result,成功或报错都算;子代理的不算);stallEnded = 后端因静默超时结束了这一轮;
+      // sawServerErrorEvent = 后端发过错误事件(进程非零退出等,不含 bad-line 噪声)。
+      let sawTopResult = false;
+      let stallEnded = false;
+      let sawServerErrorEvent = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -6232,6 +6274,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           }
           let event;
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
+          // r182:放在所有分支之前记,后面任何 continue / break 都不会漏掉。
+          if (event.type === 'result' && !event.parent_tool_use_id) sawTopResult = true;
+          if (event.type === 'error' && event.error !== 'bad-line') sawServerErrorEvent = true;
+          if (event.type === 'stall_notice' && event.ended === true) stallEnded = true;
 
           // R13:每帧都带本运行的 runId(SSE id 行是 `runId:seq`)。记下来发布到流动内容
           // 容器的 data-run-id —— "这一格现在看的是哪次运行"。同值 setState 会被 React
@@ -7545,7 +7591,31 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // r68:种回的流不属于此列 —— 它的 accumulatedText 是【整回合】,与普通发送等价,
         // 该 push;不 push 会在 finalize 轮询落盘前闪一段空。收尾走的就是普通回合那条
         // finalize(roundLanded → 清本地 → 同帧清 cutoff),没有任何 seeded 专属分支。
-        if (!reattachPid || seeded) setChatMessages((prev) => [...prev, {
+        // r182:没见到命令行的结束事件就结束了(静默超时被结束 / 进程退出)→ 命令行可能没把这一轮写盘,
+        // 内容写进留存表(不进 chatMessages,收尾轮询的整清碰不到它)。判据只此一处(retainKindOf)。
+        // 表的通知在订阅方那里走 startTransition,与 finally 里撤掉直播气泡的那组低优先级更新同批提交。
+        const retainKind = retainKindOf({
+          sawTopResult, stallEnded, sawDone: sawDoneEvent, sawServerError: sawServerErrorEvent,
+          reattach: !!reattachPid, sawTakeover, sawGap,
+        });
+        if (retainKind && (!reattachPid || seeded)) {
+          // 静默超时 / 进程退出时常带着没回执的工具调用:像停止那条路径一样补终态,工具卡不再一直转圈。
+          const retainedCalls = finalizePendingToolCalls(currentToolCalls, true);
+          retainStreamCopy(retainKind, {
+            uuid: 'chat-assistant-' + Date.now(), type: 'turn',
+            ownerKey: streamSid || sessionQueueKey,
+            timestamp: new Date().toISOString(), model: streamingModel,
+            text: accumulatedText ? [accumulatedText] : [],
+            thinking: accumulatedThinking ? [accumulatedThinking] : [],
+            toolCalls: retainedCalls.map((tc) => ({ ...tc, category: tc.category || 'call' })),
+            blocks: applyFinalizedToBlocks(orderedBlocks, retainedCalls),
+            usage: resultUsage,
+            costUsd: resultCostUsd,
+            subUsage: liveSubUsageAgents(useStore.getState().liveSubUsage),
+            ...(sawApiErrorMessage && apiErrorUi?.action ? { errorAction: apiErrorUi.action } : {}),
+            ...(sawApiErrorMessage && apiErrorUi?.hints?.length ? { errorHints: apiErrorUi.hints } : {}),
+          });
+        } else if (!reattachPid || seeded) setChatMessages((prev) => [...prev, {
           uuid: 'chat-assistant-' + Date.now(), type: 'turn',
           ownerKey: streamSid || sessionQueueKey,
           timestamp: new Date().toISOString(), model: streamingModel,
@@ -7653,9 +7723,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // tool_use 进 orderedBlocks → TurnBubble 有 blocks 时只渲染 blocks,只 finalize
           // toolCalls 的话主路径卡片仍拿 result:null 永久转圈。
           const finalizedCalls = finalizePendingToolCalls(currentToolCalls, turnAborted);
-          // r119:这条推送会挂载一整套定稿 markdown(实测 1.5MB 正文 ≈ 1.3 秒),进 transition
-          // 让"停止中"的反馈先画出来(见 finally 里的长注释)。闩:历史已接管过本地副本就不再补。
-          startTransition(() => setChatMessages((prev) => (localCopiesCleared ? prev : [...prev, {
+          const stoppedCopy = {
             uuid: 'chat-stopped-' + Date.now(), type: 'turn',
             ownerKey: streamSid || sessionQueueKey,
             timestamp: new Date().toISOString(), model: streamingModel,
@@ -7665,7 +7733,18 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             blocks: applyFinalizedToBlocks(orderedBlocks, finalizedCalls),
             usage: null,
             interrupted: true,
-          }])));
+          };
+          // r182:用户停止(含编辑重发 / 加速)= 命令行可能被强行结束、一条都没写盘 → 写留存表,不进
+          // chatMessages。表的通知在订阅方那里走 startTransition(挂载定稿 markdown 不挡「停止中」的
+          // 反馈),与 finally 里撤掉直播气泡的那组低优先级更新同批提交 —— 不会一帧两份、也不会一帧空白。
+          // 切走 / 转后台(killedRef 为假)回合还在跑,照旧推本地副本(不补编号)。
+          if (retainKindOf({ aborted: true, killed: killedRef.current })) {
+            retainStreamCopy('stop', stoppedCopy);
+          } else {
+            // r119:这条推送会挂载一整套定稿 markdown(实测 1.5MB 正文 ≈ 1.3 秒),进 transition
+            // 让"停止中"的反馈先画出来(见 finally 里的长注释)。闩:历史已接管过本地副本就不再补。
+            startTransition(() => setChatMessages((prev) => (localCopiesCleared ? prev : [...prev, stoppedCopy])));
+          }
         }
       } else if (!isNetworkDrop) {
         // P2.2 auto 档 spawn 失败回退:旧 SDK/CLI 不接受 permissionMode:'auto' 时
