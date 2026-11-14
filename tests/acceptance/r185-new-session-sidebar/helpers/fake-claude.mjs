@@ -3,8 +3,8 @@
 // 行为由场景文件 $CGUI_FAKE_CLAUDE_DIR/scenario.json 控制(每收到一条用户消息读一次):
 //   { "shapes": ["hold:30", "normal", ...] }   同一个工作区的第 N 条用户消息用第 N 个形态,超出列表用最后一个。
 // 形态:
-//   hold:<秒>       收到用户消息 → 先输出初始化事件(新会话号),随即把回合开头的三行(两行 queue-operation + 这条用户消息的 user 记录)写进会话文件(会话文件在回合一开始就出现、至少 3 行),
-//                   然后保持这一轮不结束 <秒> 秒;到时输出一条正常助手消息(同时落盘)+ result:success。
+//   hold:<秒>       收到用户消息 → 先输出初始化事件(新会话号),过 fileDelayMs 毫秒(场景里的 fileDelayMs,默认 5000)再把回合开头的三行(两行 queue-operation + 这条用户消息的 user 记录)写进会话文件(至少 3 行),
+//                   写出那一刻把时间(Date.now())记进状态文件的 fileWrittenAt;这一轮从初始化事件起保持 <秒> 秒不结束;到时输出一条正常助手消息(同时落盘)+ result:success。
 //                   期间收到停止(control_request interrupt)→ 输出 result:success(空)结束这一轮,进程继续等下一条消息。
 //   hold-die:<秒>   同 hold,但收到停止后不输出任何结束事件,直接退出进程(退出码 0)。
 //   crash           输出初始化事件后立刻异常退出(退出码 1),不写会话文件。
@@ -106,6 +106,8 @@ function finishNormally() {
 }
 
 let hold = null; // { kind, timer } 保持中的一轮
+let pendingFile = null; // 等着写会话文件开头几行的定时器
+let flushFile = () => {};
 function runTitleRound() {
   emitInit();
   out({ type: 'assistant', session_id: sid, uuid: crypto.randomUUID(), parent_tool_use_id: null, message: { id: newMsgId(), role: 'assistant', model: MODEL, type: 'message', content: [{ type: 'text', text: '短标题' }], stop_reason: 'end_turn', usage: USAGE } });
@@ -120,11 +122,22 @@ function runRound(userText, shape) {
     return;
   }
   emitInit();
-  transcriptUser(userText); // 真实命令行:会话文件在回合一开始就出现
   if (kind === 'hold' || kind === 'hold-die') {
-    hold = { kind, timer: setTimeout(() => { hold = null; finishNormally(); }, Number(arg || 30) * 1000) };
+    // 模拟装了插件与钩子的用户环境:初始化事件之后过 fileDelayMs 毫秒才写会话文件开头 3 行,写出时把时刻记进状态文件 fileWrittenAt。
+    const delay = Number.isFinite(Number(readScenario().fileDelayMs)) ? Number(readScenario().fileDelayMs) : 5000;
+    const writeHead = () => {
+      if (!pendingFile) return;
+      clearTimeout(pendingFile);
+      pendingFile = null;
+      transcriptUser(userText);
+      writeStatusFile({ fileWrittenAt: Date.now() });
+    };
+    pendingFile = setTimeout(writeHead, delay);
+    flushFile = writeHead; // 回合比延迟还短时,结束前先补写,保证文件里有开头几行
+    hold = { kind, timer: setTimeout(() => { hold = null; flushFile(); finishNormally(); }, Number(arg || 30) * 1000) };
     return;
   }
+  transcriptUser(userText);
   finishNormally();
 }
 
@@ -141,6 +154,7 @@ function onInterrupt(requestId) {
   if (hold) {
     clearTimeout(hold.timer);
     hold = null;
+    flushFile();
     out({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response: {} } });
     emitSuccessResult('');
     writeStatusFile({ processed: readStatusFile().received });
