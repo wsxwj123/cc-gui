@@ -34,8 +34,16 @@ const base = `http://127.0.0.1:${PORT}`;
 // zsh 从 ZDOTDIR 找用户 rc(系统 /etc/zshenv、/etc/zshrc 照常读),空目录 = 不加载用户配置。
 // 产品按 process.env.SHELL 起 shell,这里不改 SHELL(只换 rc 的落点,shell 本身不变)。
 const ZDOT = mkdtempSync(join(tmpdir(), 'cgui-term-zdotdir-'));
-const server = spawn('node', ['server/index.js'], {
-  env: { ...process.env, PORT: String(PORT), ZDOTDIR: ZDOT },
+// 家目录隔离(r184b):后端不得读写真实的 ~/.claude-gui、~/.claude。HOME / USERPROFILE 指向临时家目录
+// (realpath 过,免得下面 4b / 9e 的"HOME 含符号链接"分支被无故触发);电脑操控相关代码不看 HOME、
+// 看 os.userInfo().homedir,所以后端进程再挂 cu-preload.mjs(读 CU_TEST_HOME)把它也指到同一处。
+const FAKE_HOME = realpathSync(mkdtempSync(join(tmpdir(), 'cgui-term-home-')));
+process.env.HOME = FAKE_HOME;
+process.env.USERPROFILE = FAKE_HOME;
+const CU_PRELOAD = new URL('./q8-helpers/cu-preload.mjs', import.meta.url).href;
+const isolatedEnv = (extra) => ({ ...process.env, HOME: FAKE_HOME, USERPROFILE: FAKE_HOME, CU_TEST_HOME: FAKE_HOME, ...extra });
+const server = spawn('node', ['--import', CU_PRELOAD, 'server/index.js'], {
+  env: isolatedEnv({ PORT: String(PORT), ZDOTDIR: ZDOT }),
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 server.stderr.on('data', (d) => process.stderr.write('[srv] ' + d));
@@ -372,8 +380,8 @@ await new Promise((r) => setTimeout(r, 300));
 //     重连回 TERM_EXPIRED(不是"不存在"),墓碑不提供重启,回收后不占存活名额
 {
   const PORT2 = await freePort();
-  const srv2 = spawn('node', ['server/index.js'], {
-    env: { ...process.env, PORT: String(PORT2), CCGUI_TERM_DETACH_MAX_MS: '1500', ZDOTDIR: ZDOT },
+  const srv2 = spawn('node', ['--import', CU_PRELOAD, 'server/index.js'], {
+    env: isolatedEnv({ PORT: String(PORT2), CCGUI_TERM_DETACH_MAX_MS: '1500', ZDOTDIR: ZDOT }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   srv2.stderr.on('data', () => {});
