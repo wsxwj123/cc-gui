@@ -8,7 +8,7 @@
 // 区分点:修前错误文案是「上游响应不是 JSON」(读完了才解析失败);修后必须是体积类错误。
 // Run: node tests/acceptance/r26/j2-image-response-cap.mjs
 import assert from 'node:assert/strict';
-import { listenWithRetry, stopServer, makeTmpHome, makeTmpDir, cleanupDirs } from './lib.mjs';
+import { listenWithRetry, stopServer, makeTmpHome, makeTmpDir, cleanupDirs, sleep } from './lib.mjs';
 
 const TMP_HOME = makeTmpHome('j2');
 const SAVE_DIR = makeTmpDir('j2-save');
@@ -48,16 +48,31 @@ try {
     return { status: r.status, json: await r.json().catch(() => null) };
   };
 
+  // 出图已任务化:POST 过了前置校验就恒回 200 + { jobId },成败落在 /api/image/history 条目的
+  // status('done' / 'error')与 error 文字上。提交后轮询到终态,返回 { status, json }:
+  // status 是【任务终态】,不是 HTTP 码(写法同 tests/unit/check-r26-j1-image-post-redirect.mjs 的 gen())。
+  const gen = async (body) => {
+    const submit = await api('POST', '/api/image/generate', body);
+    if (submit.status !== 200 || !submit.json?.jobId) return submit;
+    for (let i = 0; i < 300; i++) {
+      const h = await api('GET', '/api/image/history');
+      const e = (h.json?.history || []).find((x) => x.id === submit.json.jobId);
+      if (e && e.status !== 'running') return { status: e.status, json: e };
+      await sleep(50);
+    }
+    throw new Error('出图任务 15s 内未落终态');
+  };
+
   const mk = await api('POST', '/api/image-providers', {
     name: '回 100MB 的上游', protocol: 'openai', baseURL: `${BASE}/big/v1`,
     apiKey: 'sk-test-j2', model: 'm', savePath: SAVE_DIR,
   });
   assert.equal(mk.status, 200, 'J2 夹具:provider 建好');
 
-  const g = await api('POST', '/api/image/generate', { providerId: mk.json.id, prompt: 'x' });
+  const g = await gen({ providerId: mk.json.id, prompt: 'x' });
 
   // 核心断言(修前必红):必须是「体积过大」类错误,而不是读完后的「不是 JSON」
-  assert.equal(g.status, 502, `J2: 超大响应应 502(实际 ${g.status})`);
+  assert.equal(g.status, 'error', `J2: 超大响应任务终态应为 error(实际 ${g.status})`);
   const err = g.json?.error || '';
   assert.ok(!/不是 JSON/.test(err),
     `J2: 错误文案是「${err.slice(0, 40)}…」= 整个 100MB 已经被读进内存才解析失败 —— 无界读的 bug 形态`);
