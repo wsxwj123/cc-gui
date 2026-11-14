@@ -129,20 +129,24 @@ export function __resetRetainedForTest() {
 }
 
 // ── 留存范围(唯一定义)──────────────────────────────────────────────────────
-// 判据:页面有没有见到命令行给这一轮的顶层结束事件(result,不论成功还是报错)。
-// 见到了 → 命令行已正常收尾、整轮已写盘 → 不留存(null),走原来的路径。
-// 没见到就结束了 → 留存:用户停止 'stop'、静默超时被结束 'stall'、进程退出 / 被后端结束 'exit'。
+// 判据围绕命令行给这一轮的顶层结束事件(result,不论成功还是报错;子代理的不算),用两个标志:
+// - endedClean:最后一条顶层结束事件之后没有新的顶层内容 = 这一轮已完整结束、已写盘,任何情况下都不留存。
+// - sawTopResult:这条流里见过顶层结束事件(只置真,不复位)。见过之后后端发来的 done 不算「进程退出」:
+//   起过子代理或开了输入预测的回合,结束事件之后主回合可能续跑出内容;续跑的输出静默满收尾等待窗时,
+//   后端会先给这条流发 done,而回合其实还在跑、页面随后会重新接上(server/routes/chat.js 收尾等待窗的
+//   「取消并重新计时」)。这时当成进程退出留存,重新接上后同一段内容会画两遍。
+// 其余:用户停止 'stop'、静默超时被结束 'stall'、从没见过结束事件就收到 done / 后端错误 'exit'。
 // 「回合其实还在跑,只是本端流断了」(切走 / 转后台、传输掉线、被别的窗格接管、游标过旧、网络错、
 // 让位给重接)不留存。
 // 'exit' 只认从回合开头就接着的流(非重接):重接时缓冲可能溢出、看不全事件,确认不了「没有结束事件」,
 // 退回原来的推送。
 export function retainKindOf(flags = {}) {
   const f = flags || {};
-  if (f.sawTopResult) return null;
   if (f.yielded || f.sawGap || f.sawTakeover || f.networkDrop) return null;
+  if (f.endedClean) return null;
   if (f.aborted) return f.killed ? 'stop' : null;
   if (f.stallEnded) return 'stall';
-  if ((f.sawDone || f.sawServerError) && !f.reattach) return 'exit';
+  if ((f.sawDone || f.sawServerError) && !f.reattach && !f.sawTopResult) return 'exit';
   return null;
 }
 

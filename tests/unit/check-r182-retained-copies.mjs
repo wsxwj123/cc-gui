@@ -40,8 +40,12 @@ const entry = ({ id = 'chat-stopped-1', text = '', thinking = '', tools = [], sr
 });
 
 // ── 1. retainKindOf:前端流的每一种结束方式 ──────────────────────────────────────
-t('1 正常完成 → 不留', () => assert.equal(retainKindOf({ sawTopResult: true, sawDone: true }), null));
-t('1 命令行报错收尾(顶层 result is_error)→ 不留', () => assert.equal(retainKindOf({ sawTopResult: true, sawServerError: false }), null));
+t('1 正常完成 → 不留', () => assert.equal(retainKindOf({ sawTopResult: true, endedClean: true, sawDone: true }), null));
+t('1 命令行报错收尾(顶层 result is_error)→ 不留', () => assert.equal(retainKindOf({ sawTopResult: true, endedClean: true, sawServerError: false }), null));
+t('1 结束事件已到、流没收尾时用户停止 → 不留', () => assert.equal(retainKindOf({ aborted: true, killed: true, sawTopResult: true, endedClean: true }), null));
+t('1 结束事件之后续跑出新内容,用户停止 → stop', () => assert.equal(retainKindOf({ aborted: true, killed: true, sawTopResult: true, endedClean: false }), 'stop'));
+t('1 结束事件之后续跑,后端按静默满窗结束这条流(done)→ 不留', () => assert.equal(retainKindOf({ sawTopResult: true, endedClean: false, sawDone: true }), null));
+t('1 结束事件之后续跑,被静默超时结束 → stall', () => assert.equal(retainKindOf({ sawTopResult: true, endedClean: false, stallEnded: true }), 'stall'));
 t('1 用户停止 / 编辑重发 → stop', () => assert.equal(retainKindOf({ aborted: true, killed: true }), 'stop'));
 t('1 静默超时结束 → stall', () => assert.equal(retainKindOf({ stallEnded: true, sawDone: true }), 'stall'));
 t('1 重接流的静默超时结束 → stall', () => assert.equal(retainKindOf({ stallEnded: true, sawDone: true, reattach: true }), 'stall'));
@@ -55,9 +59,16 @@ t('1 游标过旧 → 不留', () => assert.equal(retainKindOf({ sawGap: true, s
 t('1 网络错 → 不留', () => assert.equal(retainKindOf({ networkDrop: true }), null));
 t('1 让位给重接 → 不留', () => assert.equal(retainKindOf({ yielded: true, aborted: true, killed: true }), null));
 t('1 正常完成 + 其它标志 → 按正常完成', () => {
-  assert.equal(retainKindOf({ sawTopResult: true, aborted: true, killed: true }), null);
-  assert.equal(retainKindOf({ sawTopResult: true, stallEnded: true, sawDone: true }), null);
-  assert.equal(retainKindOf({ sawTopResult: true, sawServerError: true }), null);
+  assert.equal(retainKindOf({ sawTopResult: true, endedClean: true, aborted: true, killed: true }), null);
+  assert.equal(retainKindOf({ sawTopResult: true, endedClean: true, stallEnded: true, sawDone: true }), null);
+  assert.equal(retainKindOf({ sawTopResult: true, endedClean: true, sawServerError: true }), null);
+});
+t('1 让出 / 游标过旧 / 被接管 / 网络掉线,与 killed、stallEnded、sawDone 组合 → 不留', () => {
+  for (const k of ['yielded', 'sawGap', 'sawTakeover', 'networkDrop']) {
+    for (const extra of [{ aborted: true, killed: true }, { stallEnded: true }, { sawDone: true }, { sawServerError: true }]) {
+      assert.equal(retainKindOf({ [k]: true, ...extra }), null, `${k} + ${JSON.stringify(extra)}`);
+    }
+  }
 });
 
 // ── 2. locateRound ──────────────────────────────────────────────────────────
@@ -330,25 +341,29 @@ const app = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../cl
 const count = (s) => app.split(s).length - 1;
 t('6 catch:用户停止时只写表,不再用 setChatMessages 推 chat-stopped-', () => {
   // 停止路径也看结束事件:回合已收到顶层结束事件、流还没收尾时点停止,不当成「没写盘」留存。
-  const head = 'if (retainKindOf({ aborted: true, killed: killedRef.current, sawTopResult })) {';
+  const head = 'if (retainKindOf({ aborted: true, killed: killedRef.current, endedClean })) {';
   const i = app.indexOf(head);
-  assert.ok(i !== -1, 'catch 里要用 retainKindOf 判停止,且带上 sawTopResult');
+  assert.ok(i !== -1, 'catch 里要用 retainKindOf 判停止,且带上 endedClean');
   const branch = app.slice(i, app.indexOf('} else {', i));
   assert.ok(branch.includes("retainStreamCopy('stop', stoppedCopy)"), '停止分支写表');
   assert.ok(!branch.includes('setChatMessages'), '停止分支不许推 chatMessages');
   const elseBranch = app.slice(app.indexOf('} else {', i), app.indexOf('} else {', i) + 600);
   assert.ok(elseBranch.includes('localCopiesCleared ? prev : [...prev, stoppedCopy]'), '切走 / 转后台照旧推本地副本');
 });
-t('6 sawTopResult 声明在 try 之外(catch 可读),顶层新内容复位、顶层 result 置位', () => {
+t('6 sawTopResult / endedClean 声明在 try 之外(catch 可读),顶层新内容只复位 endedClean、顶层 result 两个都置位', () => {
   const decl = app.indexOf('let sawTopResult = false;');
   assert.ok(decl !== -1 && count('let sawTopResult = false;') === 1, '只声明一处');
+  const decl2 = app.indexOf('let endedClean = false;');
+  assert.ok(decl2 !== -1 && count('let endedClean = false;') === 1, 'endedClean 只声明一处');
   const mirror = app.indexOf("let streamEndMirror = null;");
-  assert.ok(mirror !== -1 && decl > mirror && decl - mirror < 600, '与 streamEndMirror 放在一处');
-  const setAt = app.indexOf("if (event.type === 'result' && !event.parent_tool_use_id) sawTopResult = true;");
-  assert.ok(setAt !== -1, '顶层 result 置位');
+  assert.ok(mirror !== -1 && decl > mirror && decl - mirror < 800, '与 streamEndMirror 放在一处');
+  assert.ok(decl2 > mirror && decl2 - mirror < 800, 'endedClean 与 streamEndMirror 放在一处');
+  const setAt = app.indexOf("if (event.type === 'result' && !event.parent_tool_use_id) { sawTopResult = true; endedClean = true; }");
+  assert.ok(setAt !== -1, '顶层 result 置位两个标志');
   const pre = app.slice(setAt - 500, setAt);
-  assert.ok(pre.includes('sawTopResult = false;') && pre.includes("'content_block_start'") && pre.includes("'content_block_delta'") && pre.includes("event.type === 'assistant'"), '置位之前有顶层新内容复位');
-  assert.ok(retainKindOf({ aborted: true, killed: true, sawTopResult: true }) === null, '见过结束事件的停止不留存');
+  assert.ok(pre.includes('endedClean = false;') && pre.includes("'content_block_start'") && pre.includes("'content_block_delta'") && pre.includes("event.type === 'assistant'"), '置位之前有顶层新内容复位 endedClean');
+  assert.equal(count('sawTopResult = false;'), 1, 'sawTopResult 不复位(只有声明那一处)');
+  assert.ok(retainKindOf({ aborted: true, killed: true, sawTopResult: true, endedClean: true }) === null, '已完整结束的停止不留存');
 });
 t('6 流收尾推副本处:先 retainKindOf,命中写表,否则走原来那一行推送', () => {
   const i = app.indexOf('const retainKind = retainKindOf({');
@@ -369,7 +384,10 @@ t('6 写表的会话键取本流闭包里的值', () => {
   assert.ok(app.includes('roundStartTs: turnStreamStart, stopTs: Date.now(),'));
 });
 t('6 表的通知走 startTransition;叠加在 mountedMessages / renderChat 上', () => {
-  assert.ok(app.includes('subscribeRetained(() => { startTransition(() => setRetainedTick(retainedVersion())); })'));
+  assert.ok(app.includes('const off = subscribeRetained(() => { startTransition(() => setRetainedTick(retainedVersion())); });'));
+  const sub = app.indexOf('const off = subscribeRetained(');
+  const tail = app.slice(sub, sub + 400);
+  assert.ok(/setRetainedTick\(retainedVersion\(\)\);\s*return off;/.test(tail), '订阅之后补读一次版本号,再返回取消订阅');
   assert.ok(app.includes('applyRetained(mountedBase, retainedEntries, renderChatBase)'));
   assert.ok(app.includes('const mountedMessages = retainedView.list;'));
   assert.ok(app.includes('const renderChat = retainedView.local;'));

@@ -4872,7 +4872,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 挂载定稿 markdown 也不挡「停止中」的反馈。读表对同一组键同一个版本返回同一个引用,叠加没有改动时
   // 返回原引用,不打穿 MessageList 的记忆化。r141 的身份闸门(renderedTurnIdentity)仍只看 finalizedMessages。
   const [retainedTick, setRetainedTick] = useState(() => retainedVersion());
-  useEffect(() => subscribeRetained(() => { startTransition(() => setRetainedTick(retainedVersion())); }), []);
+  useEffect(() => {
+    const off = subscribeRetained(() => { startTransition(() => setRetainedTick(retainedVersion())); });
+    // 挂载到订阅之间若写过表,订阅收不到那次通知;订阅之后立刻补读一次版本号。
+    setRetainedTick(retainedVersion());
+    return off;
+  }, []);
   const retainedSid = selectedSession?.sessionId || null;
   const retainedEntries = useMemo(
     () => listRetainedFor([sessionQueueKey, retainedSid]),
@@ -5803,10 +5808,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 而块索引表与收尾三态都声明在 try 内 —— 各镜像一个引用出来供 finally 读,原声明不动。
     let blocksMirror = null;          // = 下面 try 里的 blocks(SDK content block index → 本地块)
     let streamEndMirror = null;       // = 'done' | 'takeover' | 'dropped';null = 本端 abort(切走/停止)
-    // r182:留存判据的输入(见 utils/retainedCopies.js retainKindOf)。sawTopResult = 最后一条顶层结束事件
-    // (result,成功或报错都算;子代理的不算)之后没有新的顶层内容 —— 结束事件之后同一条流里又续跑出新内容时
-    // 复位(那一段仍可能没写盘)。声明在 try 之外,catch 里的停止路径也要读它。
+    // r182:留存判据的输入(见 utils/retainedCopies.js retainKindOf)。顶层结束事件 = result,成功或报错
+    // 都算,子代理的不算。sawTopResult = 这条流里见过顶层结束事件(只置真不复位;见过之后后端的 done 不算
+    // 进程退出)。endedClean = 最后一条顶层结束事件之后没有新的顶层内容 —— 结束事件之后同一条流里又续跑出
+    // 新内容时复位(那一段仍可能没写盘)。声明在 try 之外,catch 里的停止路径也要读。
     let sawTopResult = false;
+    let endedClean = false;
     // r65:本流是否见过任何模型产出。本地闩住只翻一次 state,免每片 delta 重复 setState。
     let sawOutput = false;
     const markSawOutput = () => { if (!sawOutput) { sawOutput = true; setSawModelOutput(true); } };
@@ -6279,10 +6286,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           let event;
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
           // r182:放在所有分支之前记,后面任何 continue / break 都不会漏掉。顶层新内容(整条消息或内容块
-          // 开始 / 增量)先复位,再看是不是顶层结束事件 —— 含义是「最后一条顶层结束事件之后没有新的顶层内容」。
+          // 开始 / 增量)先复位 endedClean,再看是不是顶层结束事件(置 sawTopResult 与 endedClean)。
           if (!event.parent_tool_use_id && (event.type === 'assistant'
-            || (event.type === 'stream_event' && (event.event?.type === 'content_block_start' || event.event?.type === 'content_block_delta')))) sawTopResult = false;
-          if (event.type === 'result' && !event.parent_tool_use_id) sawTopResult = true;
+            || (event.type === 'stream_event' && (event.event?.type === 'content_block_start' || event.event?.type === 'content_block_delta')))) endedClean = false;
+          if (event.type === 'result' && !event.parent_tool_use_id) { sawTopResult = true; endedClean = true; }
           if (event.type === 'error' && event.error !== 'bad-line') sawServerErrorEvent = true;
           if (event.type === 'stall_notice' && event.ended === true) stallEnded = true;
 
@@ -7604,7 +7611,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 内容写进留存表(不进 chatMessages,收尾轮询的整清碰不到它)。判据只此一处(retainKindOf)。
         // 表的通知在订阅方那里走 startTransition,与 finally 里撤掉直播气泡的那组低优先级更新同批提交。
         const retainKind = retainKindOf({
-          sawTopResult, stallEnded, sawDone: sawDoneEvent, sawServerError: sawServerErrorEvent,
+          sawTopResult, endedClean, stallEnded, sawDone: sawDoneEvent, sawServerError: sawServerErrorEvent,
           reattach: !!reattachPid, sawTakeover, sawGap,
         });
         // r176:本回合是命令行的合成报错 → 动作与补充提示标在这条副本上(不再另加 ❌ 块)。留存 / 推送两个分支共用。
@@ -7750,7 +7757,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // chatMessages。表的通知在订阅方那里走 startTransition(挂载定稿 markdown 不挡「停止中」的
           // 反馈),与 finally 里撤掉直播气泡的那组低优先级更新同批提交 —— 不会一帧两份、也不会一帧空白。
           // 切走 / 转后台(killedRef 为假)回合还在跑,照旧推本地副本(不补编号)。
-          if (retainKindOf({ aborted: true, killed: killedRef.current, sawTopResult })) {
+          if (retainKindOf({ aborted: true, killed: killedRef.current, endedClean })) {
             retainStreamCopy('stop', stoppedCopy);
           } else {
             // r119:这条推送会挂载一整套定稿 markdown(实测 1.5MB 正文 ≈ 1.3 秒),进 transition
