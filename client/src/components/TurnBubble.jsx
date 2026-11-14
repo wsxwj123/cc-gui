@@ -500,7 +500,8 @@ function ToolCallsGroup({ toolCalls, onRetryTool }) {
 // liveBlock = 生成中整轮 blocks 的最后一块(否则 null):只有它是思考时,那块思考才标"进行中"。
 // r157:liveLabel 非空 = 这一组的头行承载实时状态行(由 isLiveLineHostedByGroup 判定,见 CoworkBlocks),
 // 头行只剩 LiveStatusLine(r158 起折叠行没有展开箭头,靠淡色区分);startedAt = 回合起始时刻(与改动前底部行同一口径)。
-function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, liveLabel = null, startedAt = null }) {
+// r186:liveExtra = 承载时跟在状态行后面的附加内容(重接时的「上次更新 N 秒前」),其余情形为 null。
+function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, liveLabel = null, liveExtra = null, startedAt = null }) {
   const toolN = items.reduce((n, b) => n + (b.type === 'tool_use' ? 1 : 0), 0);
   // 出错计数与展开后条目的 data-entry-state 同一口径(entryStateOf):已答的提问、已批准的计划、
   // 计划被拒(修改 / 取消)都不算错 —— 头行红点和展开后看到的条目状态不会对不上。
@@ -539,7 +540,9 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, l
         className="cg-fold w-[calc(100%+0.375rem)] min-w-0 flex items-center gap-2 -ml-1.5 pl-1.5 pr-3 py-1.5 hover:bg-canvas-warm/40 rounded-md transition-colors text-left cursor-pointer"
       >
         {hosting
-          ? <LiveStatusLine label={liveLabel} startedAt={startedAt} className="flex-1" />
+          ? (liveExtra
+            ? <><LiveStatusLine label={liveLabel} startedAt={startedAt} className="min-w-0" />{liveExtra}<span className="flex-1" /></>
+            : <LiveStatusLine label={liveLabel} startedAt={startedAt} className="flex-1" />)
           : (
             <>
               {hasThinking
@@ -629,6 +632,8 @@ export const StripStartedAtContext = React.createContext(null);
 // 值 = { stopping, compacting };其它地方(子代理窗口、历史轮)拿到默认 null → 行为与改动前完全一样。
 // 有值且本轮在生成时:工作组一律默认收起,最后一个组的头行是否承载状态行由 isLiveLineHostedByGroup 定。
 // 提问 / 计划 / 权限卡由输入框上方的 PermissionPrompt 画,不在组里,折叠不影响它们。
+// r186:重接(历史回合画在跑的那一轮)时,App 只给那一个历史回合包 { reattach: true, stopping, compacting,
+// label, startedAt, headExtra };label / startedAt / headExtra 可缺省(缺省 = 按本组 blocks 取词、本回合起点、无附加)。
 export const LiveHostContext = React.createContext(null);
 
 // ─── CoworkBlocks:母会话 + 子代理共用的有序 blocks 渲染(单一渲染路径)──
@@ -728,13 +733,18 @@ export function CoworkBlocks({
 
   // 非聊天模式:cowork 分组折叠。每段正文前连续的思考+通用工具打包成一个 WorkGroup。
   const segments = groupCoworkBlocks(list);
-  const activeKey = activeGroupKey(segments, isLive);
+  // r186:重新接上一条在跑的回合、内容由历史回合画时,App 只给「正在跑的那一轮」的历史回合包一层
+  // reattach:true 的宿主值 —— 它按「正在生成」对待头行承载(isLive 本身不变:正文 / 思考的流式样式不动)。
+  const reattachHost = !!liveHost?.reattach;
+  const hostLive = isLive || reattachHost;
+  const activeKey = activeGroupKey(segments, hostLive);
   // r157:主会话流式气泡(有 LiveHostContext)里活跃组默认收起,头行按唯一判定承载实时状态行;
   // 没有该 context(子代理窗口)仍是活跃组默认展开、状态行在底部。
-  const hostMode = !!liveHost && isLive;
+  const hostMode = !!liveHost && hostLive;
+  // 宿主值带 label(r186 重接:词取自重新接上的流,与原来底部那行同源)时用它,否则按本组 blocks 取词。
   const hostLabel = hostMode && isLiveLineHostedByGroup({
     blocks: list, stopping: !!liveHost.stopping, compacting: !!liveHost.compacting, chatMode,
-  }) ? liveLabelFromBlocks({ blocks: list, stopping: !!liveHost.stopping, compacting: !!liveHost.compacting }) : null;
+  }) ? (liveHost.label || liveLabelFromBlocks({ blocks: list, stopping: !!liveHost.stopping, compacting: !!liveHost.compacting })) : null;
   // 条带(§3.1/D.1):原 div.space-y-2 变成条带根,每个段包一层带 data-strip-item 的 div
   // (便于测试数数目)。r159 起没有摘要行、整轮恒展开;段序 = groupCoworkBlocks 的输出序,一个不重排。
   // 摘要只用来写根上的 data-strip-* 属性;优先用上层注入的**整轮**数值。
@@ -786,7 +796,8 @@ export function CoworkBlocks({
               onRetryTool={onRetryTool}
               liveBlock={isLive ? list[list.length - 1] || null : null}
               liveLabel={hostLabel && seg.key === activeKey ? hostLabel : null}
-              startedAt={roundStartedAt}
+              liveExtra={hostLabel && seg.key === activeKey ? (liveHost.headExtra || null) : null}
+              startedAt={liveHost?.startedAt ?? roundStartedAt}
             />
           );
         }

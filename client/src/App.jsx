@@ -79,6 +79,7 @@ import TurnScrubber from './components/TurnScrubber.jsx';
 import { LoadingMark } from './components/LoadingBits.jsx';
 import { LiveStatusLine } from './components/LiveStatusLine.jsx';
 import { liveStatusLabel, isLiveLineHostedByGroup } from './utils/liveStatus.js';
+import { pickReattachHostTurn } from './utils/reattachLiveHost.js';
 import { DEFAULT_LOADING_STYLE, DEFAULT_LOADING_SPEED } from './utils/loadingPrefs.js';
 import { ORBIT_VARIANTS, RANDOM_POOL } from './utils/orbitVariants.js';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
@@ -2764,7 +2765,8 @@ function LastUpdateAgo({ getAt }) {
   return <span className="text-[12px] text-ink-faint shrink-0 tabular-nums">· 上次更新 {txt}</span>;
 }
 
-function StreamingStatusLine({ blocks = [], thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true, stopping = false, compacting = false }) {
+// r186:状态词的取法单独成函数 —— 底部状态行与「重接时由历史回合头行承载」共用这一份(同源同词)。
+function streamingLineLabel({ blocks = [], thinking, text, toolCalls = [], sawModelOutput = true, stopping = false, compacting = false }) {
   // 最后一个还没结果的工具调用(并行时取最后一个)
   const pendingTool = [...toolCalls].reverse().find((tc) => !tc.result) || null;
   // ui-live-line-v2:阶段只看整轮 blocks 的最后一块 —— 前面出现过正文不代表现在还在输出
@@ -2777,7 +2779,11 @@ function StreamingStatusLine({ blocks = [], thinking, text, toolCalls, streamSta
   // 下面的「等待状态行(G)」仍说明原因并带进度条,两行并存。
   // r65:sawModelOutput 为 false(reattach 接管一个还没吐任何产出的回合)时显示「连接中」;
   // 首发路径默认 true,空窗期(工具结果全回、下一条整消息未到)显示「思考」,不隐藏整行。
-  const label = liveStatusLabel({ stopping, compacting, pendingTool, pendingTitle, lastType, lastThinkingText, text: !!text, thinking: !!thinking, sawModelOutput });
+  return liveStatusLabel({ stopping, compacting, pendingTool, pendingTitle, lastType, lastThinkingText, text: !!text, thinking: !!thinking, sawModelOutput });
+}
+
+function StreamingStatusLine({ blocks = [], thinking, text, toolCalls, streamStart, lastUpdateAt = null, sawModelOutput = true, stopping = false, compacting = false }) {
+  const label = streamingLineLabel({ blocks, thinking, text, toolCalls, sawModelOutput, stopping, compacting });
   // 缩进 50px(34px 头像 + 16px gap)与气泡正文列对齐,渲染在气泡下方。
   return (
     <div className="px-6 -mt-2 pb-3 animate-fade-in">
@@ -3304,7 +3310,9 @@ function ModeMismatchNotice({ notice, permKey }) {
 // 分屏等 A 回复时 B 卡")。前提:传入回调必须引用稳定(见 stableRetry*/stableRollback)。
 // r151w:hiddenSendIds = { [turn uuid]: Set<tool_use_id> } —— 同一个 tool_use_id 只让最早那一轮画发送行
 // (历史夹具 + 直播落盘副本可能各带一份)。引用由渲染层 useMemo 稳定,不额外打穿本组件的 memo。
-const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onRetryTool, onRollback, onFork, retryActiveUuid, hiddenSendIds = null }) {
+// r186:liveHostUuid / liveHostValue —— 重接时「正在跑的那一轮」的历史回合 uuid 与宿主值(见 utils/reattachLiveHost.js);
+// 只给那一个 TurnBubble 包 LiveHostContext,其余回合不订阅、不重渲。平时都是 null。
+const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onRetryTool, onRollback, onFork, retryActiveUuid, hiddenSendIds = null, liveHostUuid = null, liveHostValue = null }) {
   // BK-6:此前每行内联 `(toolCall) => onRetryTool(msg, toolCall)` 每次渲染新建箭头
   // 函数 → TurnBubble(自身 React.memo)的 onRetryTool prop 身份每次变 → memo 失效,
   // retryActiveUuid 一变(进/出"重做"态)就整表 2万节点重渲。改为按 msg.uuid 记忆化:
@@ -3336,8 +3344,13 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
         : msg.type === 'denial'
         ? <DenialNotice denial={msg} />
         : msg.type === 'turn'
-        ? <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} onFork={onFork} retryActive={retryActiveUuid === msg.uuid}
-            hiddenSendNotices={(hiddenSendIds && msg.uuid && hiddenSendIds.get(msg.uuid)) || null} />
+        // Provider 恒在(值平时为 null = 与默认值相同):承载开始 / 结束时只是值变,TurnBubble 不重挂。
+        ? (
+          <LiveHostContext.Provider value={liveHostUuid && msg.uuid === liveHostUuid ? liveHostValue : null}>
+            <TurnBubble turn={msg} onRetry={onRetryTurn} onRetryTool={getToolCb(msg)} onFork={onFork} retryActive={retryActiveUuid === msg.uuid}
+              hiddenSendNotices={(hiddenSendIds && msg.uuid && hiddenSendIds.get(msg.uuid)) || null} />
+          </LiveHostContext.Provider>
+        )
         : <MessageBubble message={{ ...msg, role: msg.type }}
             // R36:并入消息也能回退 —— 折叠形态在磁盘上是一条 attachment{queued_command}
             // 记录,它自带 uuid,trim 按任意记录 uuid 定位(真机核对:preview 报
@@ -9327,6 +9340,32 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const liveHostValue = useMemo(() => ({ stopping, compacting: liveCompacting }), [stopping, liveCompacting]);
   const liveHostBlocks = liveSteerSegments ? (liveSteerSegments[liveSteerSegments.length - 1]?.blocks || []) : streamingBlocks;
   const liveLineHosted = isLiveLineHostedByGroup({ blocks: liveHostBlocks, stopping, compacting: liveCompacting, chatMode: liveChatMode });
+  // r186:重接(reattachStream:历史回合画在跑的那一轮)时,找出那一轮在历史里的回合,由它最后一个工作组的头行
+  // 承载实时状态行(判定见 utils/reattachLiveHost.js,认不准返回 null = 退回底部独立状态行)。
+  // 条目顺序与页面一致:MessageList 的历史在前,下面 renderChat 里实际画出来的本地条目在后。
+  const reattachHostUuid = useMemo(() => {
+    if (!(liveVisible && isStreaming && reattachStream)) return null;
+    const shownLocal = renderChat.filter((m) => m.type !== 'btw' && !peerPlacement.placed.has(m.uuid) && !peerMerge.taken?.has(m.uuid));
+    return pickReattachHostTurn([...peerPlacement.list, ...shownLocal], {
+      streamToolIds: streamingToolCalls.map((tc) => tc?.id),
+      stopping, compacting: liveCompacting, chatMode: liveChatMode,
+    });
+  }, [liveVisible, isStreaming, reattachStream, renderChat, peerPlacement, peerMerge, streamingToolCalls, stopping, liveCompacting, liveChatMode]);
+  // 词取自重新接上的流(与原来底部那行同源同函数);流里还什么都没有(「连接中」)时不给词,
+  // 由头行按历史里这一组的 blocks 取词 —— 历史已经证明这一轮有产出,头行写「连接中」不对。
+  const reattachLabel = reattachHostUuid ? streamingLineLabel({
+    blocks: streamingBlocks, thinking: streamingThinking, text: streamingText, toolCalls: streamingToolCalls,
+    sawModelOutput, stopping, compacting: liveCompacting,
+  }) : null;
+  const reattachLabelUse = reattachLabel && reattachLabel.phase !== 'connecting' ? reattachLabel : null;
+  const reattachLabelKey = reattachLabelUse ? `${reattachLabelUse.phase}\u0000${reattachLabelUse.verb}\u0000${reattachLabelUse.object || ''}` : '';
+  const reattachHeadExtra = useMemo(() => <LastUpdateAgo getAt={getHistFreshAt} />, [getHistFreshAt]);
+  const reattachStartedAt = streamStartRef.current;
+  // 值只在词 / 停止 / 压缩 / 起点变化时换身份:MessageList 是 memo 的,流式每帧不打穿它。
+  const reattachHostValue = useMemo(() => (reattachHostUuid ? {
+    reattach: true, stopping, compacting: liveCompacting,
+    label: reattachLabelUse, startedAt: reattachStartedAt, headExtra: reattachHeadExtra,
+  } : null), [reattachHostUuid, stopping, liveCompacting, reattachLabelKey, reattachStartedAt, reattachHeadExtra]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // r148 P6:会话汇总(费用 / 工具调用数 / 用过的模型)记忆化 —— 只在消息列表、provider 或查价数据变了才重算。
   // 原来这三样在下面的提前 return 之后做普通计算:会话组件每渲染一次(流式时每帧一次)就把全部历史消息
@@ -10025,6 +10064,8 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                 onFork={forkCurrentSession}
                 retryActiveUuid={retryActiveUuid}
                 hiddenSendIds={sendNoticeSeen.perTurn}
+                liveHostUuid={reattachHostUuid}
+                liveHostValue={reattachHostValue}
               />
               {historyApiErrorUi && (
                 <div key={`api-error-actions-${historyApiErrorUi.uuid || ''}`}>
@@ -10048,8 +10089,11 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                     ? <ModeMismatchNotice notice={msg} permKey={sessionQueueKey} />
                     : msg.type === 'turn'
                     ? <>
-                        <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid}
-                          hiddenSendNotices={liveSendHidden.get(msg.uuid) || null} />
+                        {/* r186:同 MessageList —— Provider 恒在,只有重接时那一轮的回合拿到宿主值 */}
+                        <LiveHostContext.Provider value={reattachHostUuid && msg.uuid === reattachHostUuid ? reattachHostValue : null}>
+                          <TurnBubble turn={msg} onRetry={handleRetryTurn} onRetryTool={(toolCall) => handleRetryTool(msg, toolCall)} retryActive={retryActiveUuid === msg.uuid}
+                            hiddenSendNotices={liveSendHidden.get(msg.uuid) || null} />
+                        </LiveHostContext.Provider>
                         {/* r176:动作区与历史回合共用 ApiErrorActions(三种动作的处理函数不变)。 */}
                         {(msg.errorAction || msg.errorHints) && (
                           <ApiErrorActions action={msg.errorAction || null} hints={msg.errorHints || null} {...apiErrorActionProps} />
@@ -10125,8 +10169,9 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                 </div>
               )}
               {/* reattach 唯一的活体指示:气泡与 Connecting 都关掉了,只留这一行状态
-                  (在做什么 + 已用时长),否则历史卡两次刷新之间界面完全静止,像卡死。 */}
-              {liveVisible && isStreaming && reattachStream && (
+                  (在做什么 + 已用时长),否则历史卡两次刷新之间界面完全静止,像卡死。
+                  r186:那一轮在历史里的回合最后一个工作组头行承载了状态行时,这里不再另起一行。 */}
+              {liveVisible && isStreaming && reattachStream && !reattachHostUuid && (
                 <StreamingStatusLine
                   blocks={streamingBlocks}
                   thinking={streamingThinking}
