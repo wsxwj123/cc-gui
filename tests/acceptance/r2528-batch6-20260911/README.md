@@ -27,6 +27,11 @@ BASE_URL=http://127.0.0.1:57280 WORKTREE="$PWD" \
 `POST /api/chat` 现建（会起一次本地 CLI 回合，隔离实例上 provider 是自建代理/桩，不产生模型输出）。
 不设它时这些用例报 `ENVIRONMENT_BLOCKED`，不算通过。
 
+**本套件没有一条命令的运行脚本**（需要人工备好夹具，没法全自动起）。启动前三件事：
+1. 把 `fixture-manifest.example.json` 复制成同目录的 `fixture-manifest.local.json`（被 `.gitignore` 忽略，新开的工作树里没有）并按「夹具」一节填值；
+2. 起一个隔离实例并记下端口（起法参照 `tests/acceptance/pricing-accuracy-20260911/run-isolated.sh` 的后端段：HOME / USERPROFILE / `CU_TEST_HOME` 指向临时目录，`--import tests/unit/q8-helpers/cu-preload.mjs`，`DISABLE_AUTOUPDATER=1`，端口避开 6677 / 6689 / 6710 / 8788 / 8789 / 8798 / 8799）；
+3. 用上面「全量」命令跑，`BASE_URL` 填第 2 步的端口。本套件未在新开的工作树里实跑过，上述步骤是按现有 helper 与配置整理的，首次使用以实际报错为准。
+
 ## 环境守卫
 
 | 变量 | 作用 | 不设时的行为 |
