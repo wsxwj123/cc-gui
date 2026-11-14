@@ -583,7 +583,7 @@ export function updateCmdFor(method, claudePath) { // export 仅为可单测
       // call claude --version,跨渠道风险由前端 crossChannel 确认弹窗明示。
       const verify = process.platform === 'win32'
         ? `call npm install -g @anthropic-ai/claude-code@latest ${NPM_ALLOW_CLAUDE_SCRIPTS} && call claude --version`
-        : `npm install -g @anthropic-ai/claude-code@latest ${NPM_ALLOW_CLAUDE_SCRIPTS} && "$(npm prefix -g)/bin/claude" --version`;
+        : `npm install -g @anthropic-ai/claude-code@latest ${NPM_ALLOW_CLAUDE_SCRIPTS} && "$(npm config get prefix)/bin/claude" --version`;
       return verify;
     }
     case 'npm': {
@@ -634,6 +634,9 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
       return `call npm install -g @anthropic-ai/claude-code ${NPM_ALLOW_CLAUDE_SCRIPTS} && powershell -NoProfile -ExecutionPolicy Bypass -Command "${psAppend}"`;
     }
     const rc = process.platform === 'darwin' ? '$HOME/.zshrc' : '$HOME/.bashrc';
+    // 重定向目标必须在双引号里:家目录带空格时 `>> $HOME/.zshrc` 被 bash 判为
+    // ambiguous redirect,整条 && 链失败、PATH 写不进去。取全局目录用 `npm config get prefix`
+    // (`npm prefix -g` 在部分 npm 版本打印的是当前目录,见 server/index.js 同类注释)。
     // EACCES 根治(用户实报 permission denied):官方 pkg 装的 node,npm 全局目录
     // (/usr/local/lib/node_modules)归 root,裸 `npm install -g` 必失败。检测实际写入目录
     // 不可写时改装到 ~/.npm-global(免 sudo;claude-resolver fixedCandidates 已含此落点,
@@ -642,7 +645,7 @@ export function installCmdFor(proxyUrl = null, method = 'native') { // export �
     // 说明 + 补救命令后以 false 收尾(不用 exit:终端脚本里还要接着显示失败结语),&& 链
     // 随之短路,不再写 PATH、不再说任何成功的话;npm 自己失败时同样不跑到这里。
     const nixSelfCheck = `{ "$PREFIX/bin/claude" --version || { echo "Claude Code 没有装完整:npm 没有运行它的安装后脚本,$PREFIX/bin/claude 不能运行(多半只是占位文件)。请执行下面这条命令重装:"; echo "npm install -g --prefix \\"$PREFIX\\" ${NPM_ALLOW_CLAUDE_SCRIPTS} @anthropic-ai/claude-code"; echo "如果 npm config get ignore-scripts 显示 true,请先执行 npm config delete ignore-scripts,再重装。"; false; }; }`;
-    return `PREFIX="$(npm prefix -g)" && W="$PREFIX/lib/node_modules" && { [ -d "$W" ] || W="$PREFIX/lib"; } && { [ -d "$W" ] || W="$PREFIX"; } && { [ -w "$W" ] || { PREFIX="$HOME/.npm-global"; echo "npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)"; }; } && npm install -g --prefix "$PREFIX" @anthropic-ai/claude-code ${NPM_ALLOW_CLAUDE_SCRIPTS} && ${nixSelfCheck} && NPMBIN="$PREFIX/bin" && { case ":$PATH:" in *":$NPMBIN:"*) echo "PATH 已包含 $NPMBIN";; *) echo "export PATH=\\"$NPMBIN:\\$PATH\\"" >> ${rc} && echo "已把 $NPMBIN 写入 ${rc}(新开终端生效)";; esac; }`;
+    return `PREFIX="$(npm config get prefix)" && W="$PREFIX/lib/node_modules" && { [ -d "$W" ] || W="$PREFIX/lib"; } && { [ -d "$W" ] || W="$PREFIX"; } && { [ -w "$W" ] || { PREFIX="$HOME/.npm-global"; echo "npm 全局目录 $W 无写权限(permission denied 根因),改装到 $PREFIX(免 sudo)"; }; } && npm install -g --prefix "$PREFIX" @anthropic-ai/claude-code ${NPM_ALLOW_CLAUDE_SCRIPTS} && ${nixSelfCheck} && NPMBIN="$PREFIX/bin" && { case ":$PATH:" in *":$NPMBIN:"*) echo "PATH 已包含 $NPMBIN";; *) echo "export PATH=\\"$NPMBIN:\\$PATH\\"" >> "${rc}" && echo "已把 $NPMBIN 写入 ${rc}(新开终端生效)";; esac; }`;
   }
   if (process.platform === 'win32') {
     // O2: Windows 官方原生安装器(独立二进制,不需要 Node/npm,自动写 PATH)。
