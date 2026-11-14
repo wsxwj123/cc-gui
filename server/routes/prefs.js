@@ -202,7 +202,7 @@ export function normalizeXsProfileWriteFailed(prefs) {
 export function readXsProfileWriteFailedSync() {
   let prefs = null;
   let readFailed = false;
-  try { prefs = JSON.parse(readFileSync(PREFS_PATH, 'utf-8')); } catch (e) { readFailed = e?.code !== 'ENOENT'; }
+  try { prefs = parsePrefsJson(readFileSync(PREFS_PATH, 'utf-8')); } catch (e) { readFailed = e?.code !== 'ENOENT'; }
   return { ids: normalizeXsProfileWriteFailed(prefs), readFailed };
 }
 /**
@@ -212,7 +212,7 @@ export function readXsProfileWriteFailedSync() {
 export function readXsPrefsDetailedSync() {
   let prefs = null;
   let readFailed = false;
-  try { prefs = JSON.parse(readFileSync(PREFS_PATH, 'utf-8')); } catch (e) { readFailed = e?.code !== 'ENOENT'; }
+  try { prefs = parsePrefsJson(readFileSync(PREFS_PATH, 'utf-8')); } catch (e) { readFailed = e?.code !== 'ENOENT'; }
   const normalized = normalizeXsPrefs(prefs);
   // r151q:读不出时 normalizeXsPrefs(null) 会按"没开过总开关"给 'auto',读失败的这一会儿列表与 list_sessions 就显示成自动处理。
   // 没单独设置过的会话的默认值是权限类设置,出错时落在更严的一档:读失败一律 'card'(readXsPrefsSync 也经这里)。

@@ -5,5 +5,5 @@
 // 「读不出回默认」口径处理。不引用 routes 下任何模块(避免循环引用)。
 export function parsePrefsJson(raw) {
   const text = Buffer.isBuffer(raw) ? raw.toString('utf-8') : String(raw);
-  return JSON.parse(text.replace(/^﻿/, ''));
+  return JSON.parse(text.replace(/^\uFEFF/, ''));
 }
