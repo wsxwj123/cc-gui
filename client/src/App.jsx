@@ -187,7 +187,7 @@ import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
-import { addRetained, applyRetained, dropRetained, listRetainedFor, makeRetainedEntry, migrateRetained, removeRetained, retainKindOf, retainedVersion, subscribeRetained } from './utils/retainedCopies.js';
+import { addRetained, applyRetained, cutTsOf, dropRetained, dropRetainedSince, listRetainedFor, makeRetainedEntry, migrateRetained, removeRetained, retainKindOf, retainedVersion, subscribeRetained } from './utils/retainedCopies.js';
 import { dropStaleUserEchoes } from './utils/userEcho.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
@@ -365,8 +365,8 @@ function CheckpointButton({ sessionId, cwd, projectHash, onRestored, openSignal 
           // R25:裁剪必须走两步流(预览 → 带令牌提交);结果会话要新建时 sessionReset=true。
           const tr = await runHistoryOp(sessionId, 'trim', { projectHash, fromTimestamp: new Date(ts).toISOString() });
           trimOk = tr.ok;
-          // r182:会话裁到快照时刻之后的部分没了,留存副本所属的那一轮可能在其中 → 整表删并记墓碑(同 truncateUi)。
-          if (tr.ok) dropRetained(sessionId);
+          // r182 / r188:会话裁到快照时刻之后的部分没了 → 只删停止时刻不早于快照时刻的留存副本并记墓碑(同 truncateUi)。
+          if (tr.ok) dropRetainedSince(sessionId, cutTsOf(new Date(ts).getTime()));
           if (tr.sessionReset) {
             // 扫全部 pane(不只 selectedSession=pane0 镜像):检查点按钮可能开在 1-5 号
             // pane,或同会话开多 pane。漏扫 → 那些 pane 留僵尸 sessionId,下次发送 CLI
@@ -8706,6 +8706,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 中途切走也不停在"文件已回退、历史没裁"的半截;只在做完之后才判断窗格动作做不做。
     // 开始那一刻本会话在跑的进程记下来(窗格级 ref 切走后就属于别的会话了),切走时按它停。
     const startPid = activeProcRef.current || backgroundPidRef.current;
+    // r188:回滚类操作删留存副本的截断点 = 被回退那条消息的时间戳(取不到为 NaN → 整表删)。
+    const rbCutTs = cutTsOf(msg?.timestamp);
     // 磁盘侧的提示:仍在本会话 → 立刻显示;已切走 → 攒着,随留给本会话的提示一起给出(不挂到别的会话上)。
     const diskNotes = [];
     const noteHere = (text) => { if (stillHere()) setProviderSwitchNotice({ text }); else diskNotes.push(text); };
@@ -8797,9 +8799,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const truncateUi = () => {
       // r118:回滚把尾部从 jsonl 裁掉了 —— 暂存里的副本已不代表现实,留着会在切回时被补回来。
       dropUserStash(queueKeyFor(sel));
-      // r182:回滚 / 编辑重发 → 留存副本整表删,并记墓碑。回合进行中回滚时,被中断那条流的 catch 在这里
-      // 之后才执行(abort 与本函数同一段同步代码),它写表时起流时刻早于墓碑,会被拒收。
-      for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetained(k);
+      // r182 / r188:回滚 / 编辑重发 → 只删停止时刻不早于被回退那条消息的留存副本(更早轮次留下的不动),
+      // 并记墓碑。回合进行中回滚时,被中止那条流的半截已在等停止期间进表(停止时刻晚于截断点),在这里删掉;
+      // 它若迟到才写表,起流时刻早于墓碑,会被拒收。
+      for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetainedSince(k, rbCutTs);
       if (idxInStore !== -1) {
         setLocalMessages(messages.slice(0, idxInStore));
         setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 保留旁问气泡(本地注记)
@@ -8831,8 +8834,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         if (!r.ok) { setProviderSwitchNotice({ text: '压缩失败:' + (r.error || r.status) + '(会话未改动)' }); return; }
         if (direction === 'after') {
           setChatMessages((prev) => prev.filter((m) => m.type === 'btw')); // 尾段已被移除,清掉本地未落盘气泡(旁问除外)
-          // r182:锚点及之后被压成摘要,留存副本所属的那一轮可能在其中 → 整表删并记墓碑(同 truncateUi)。
-          for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetained(k);
+          // r182 / r188:锚点及之后被压成摘要 → 只删停止时刻不早于锚点的留存副本并记墓碑(同 truncateUi)。
+          for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetainedSince(k, rbCutTs);
         }
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
         setProviderSwitchNotice({ text: direction === 'before' ? '已把此前对话压缩为摘要,上下文占用已降低。' : '已回退并把后续对话保留为摘要。' });
@@ -8978,8 +8981,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     // r146 R3:裁剪期间切走 —— 磁盘已裁,窗格动作与重发全部放弃,本来要重发的内容留给本会话。
     if (!stillHere()) {
-      // r182:磁盘已裁,truncateUi 不会再执行 —— 本会话的留存副本在这里整表删并记墓碑(同 truncateUi)。
-      if (!trimFailed) for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetained(k);
+      // r182 / r188:磁盘已裁,truncateUi 不会再执行 —— 本会话的留存副本在这里按截断点删并记墓碑(同 truncateUi)。
+      if (!trimFailed) for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetainedSince(k, rbCutTs);
       // 开始回退时本会话在跑的回合:按它自己的 pid 停掉(不碰窗格 ref),否则它继续往刚裁剪的记录里追加。
       if (startPid) {
         stoppedPidsRef.current.add(String(startPid));
@@ -9148,9 +9151,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 覆盖,重跑以流式气泡出现在同一位置 → 读起来是"该工具在原位重跑",而非新发消息。
     // r99:内容审核回退不走乐观截断 —— `_retryTrimToolId` 会让 TurnBubble 显示
     // "正在重做此工具…",而这条路径恰恰是"不重做"。改用一条横幅说明正在做什么。
-    // r182:该工具调用及之后都会被裁掉,留存副本所属的那一轮可能在其中 → 两种用法都整表删并记墓碑
-    // (同 truncateUi;在下面停流之前同步执行,被中断那条流迟到的写表会被墓碑拒收)。
-    for (const k of new Set([rtKey, sel.sessionId].filter(Boolean))) dropRetained(k);
+    // r182 / r188:该工具调用及之后都会被裁掉 → 留存副本只删停止时刻不早于该工具所在回合的(取不到回合时间
+    // 则整表删),并记墓碑。删在裁剪成功之后(下面 IIFE 里):裁剪失败时会话文件没动,删掉的内容就回不来了。
+    const rtCutTs = cutTsOf(turn.timestamp);
     if (opts.contentRisk) {
       setProviderSwitchNotice({ text: '正在回退会话到该工具调用之前…' });
     } else {
@@ -9209,6 +9212,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
         const tr = await runHistoryOp(sel.sessionId, 'trim-before-tool', { projectHash, toolUseId: toolCall.id });
         if (!tr.ok) throw new Error(tr.error || tr.status);
+        // r188:裁剪成功才删留存副本(只删停止时刻不早于截断点的)。磁盘已裁,与窗格是否还在本会话无关,
+        // 所以放在切走复查之前。被这次操作中止的那条流的半截在等停止期间已进表,在这里一并删掉。
+        for (const k of new Set([rtKey, sel.sessionId].filter(Boolean))) dropRetainedSince(k, rtCutTs);
         // r146 R3 同族:等停止 / 裁剪期间切走了 —— 后续窗格动作与重跑一律放弃(重跑会发进别的会话)。
         if (!paneStillOn(rtKey)) return;
         // r99b(Windows 审查中-1):截断真正成功后才通知调用方 —— Windows 上 rename 覆盖被

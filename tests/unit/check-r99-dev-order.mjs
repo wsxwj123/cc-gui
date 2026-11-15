@@ -36,12 +36,15 @@ const PARAMS = [
   // 不放松:替身恒答"仍在本会话",下面的顺序断言一字未动(不注入 = 真实源码必抛 "paneStillOn is
   // not defined",用例会以"环境不成立"收场)。
   'paneStillOn', 'rtKey',
+  // r188:「重做此工具」的留存清表挪到裁剪成功之后(按截断点删)。替身只记录调用,用来断言它排在裁剪
+  // 成功之后、裁剪失败时不调用。
+  'dropRetainedSince', 'rtCutTs',
 ];
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const run = new AsyncFunction(...PARAMS, BODY);
 
 // 桩:只记录调用,不做任何真实 IO。
-function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = {} } = {}) {
+function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = {}, trimFails = false } = {}) {
   const calls = [];
   const sent = [];
   const fetchMock = (url, init) => {
@@ -74,10 +77,13 @@ function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = 
     // 同时证明这次裁剪确实经统一入口,不是又冒出一条自拼 fetch 的旁路)。
     runHistoryOp: async (sessionId, op, params = {}) => {
       calls.push(`runHistoryOp:${op}${params.toolUseId ? ':' + params.toolUseId : ''}`);
+      if (trimFails) return { ok: false, status: 500, code: 'WRITE_FAILED', error: 'boom' };
       return { ok: true, status: 200, data: {} };
     },
     paneStillOn: () => true,
     rtKey: 'sess-1',
+    dropRetainedSince: (k, cut) => { calls.push(`dropRetainedSince:${k}:${cut}`); },
+    rtCutTs: 12345,
   };
   return { calls, sent, ctx, go: () => run(...PARAMS.map((p) => ctx[p])) };
 }
@@ -128,7 +134,24 @@ await t('③ 顺序全景:stop → trim → refetch → resend', async () => {
   }
 });
 
-// ── ② 哨兵:两条路径各发什么 ─────────────────────────────────────
+// ── r188:留存清表只在裁剪成功之后 ─────────────────────────────────────
+await t('r188 裁剪成功后才按截断点清表(排在裁剪之后、重发之前)', async () => {
+  const h = harness();
+  await h.go();
+  const d = idx(h.calls, 'dropRetainedSince:');
+  assert.ok(d > idx(h.calls, 'trim-before-tool'), `清表必须在裁剪之后:${h.calls.join(' → ')}`);
+  assert.ok(d < idx(h.calls, 'resend'), `清表在重发之前:${h.calls.join(' → ')}`);
+  assert.ok(h.calls.includes('dropRetainedSince:sess-1:12345'), '按截断点删');
+});
+await t('r188 裁剪失败时不清表、不重发', async () => {
+  const h = harness({ trimFails: true });
+  await h.go();
+  assert.equal(idx(h.calls, 'dropRetainedSince:'), -1, `裁剪失败不许清表:${h.calls.join(' → ')}`);
+  assert.equal(idx(h.calls, 'resend'), -1, '裁剪失败不许重发');
+  assert.ok(idx(h.calls, 'confirmDialog:') >= 0, '裁剪失败要提示');
+});
+
+// ── ② 哨兵:两条路径各发什么─────────────────────────────────────
 await t('② 既有「工具重做」仍发带 tool= 的重试哨兵(逐字不变)', async () => {
   const h = harness();
   await h.go();
