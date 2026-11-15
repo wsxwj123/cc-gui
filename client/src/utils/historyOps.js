@@ -74,6 +74,8 @@ const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 // (等停止 5 秒 + 裁剪重试 6 秒)。
 export const ROLLBACK_STOPPING_NOTICE = '正在停止当前回合，停止后执行回退。';
 export const ROLLBACK_STOPPING_NOTICE_MS = 12000;
+// r188b:同一会话已有一次回退在进行(等停止落地、裁剪重试的几秒里)时,再来的回滚类操作不执行,给这条提示。
+export const ROLLBACK_BUSY_NOTICE = '回退正在进行，这次操作没有执行。';
 
 /**
  * 「回退进行中」标记({ key:发起回退的会话键 })是否作用于 key 这个会话。标记挂在窗格上,但等待期间
