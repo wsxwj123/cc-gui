@@ -81,6 +81,10 @@ check('判据: 无入参 → 假', shouldSendHomeFirstNow() === false);
   const assignAt = app.indexOf('useEffect(() => { handleSendRef.current = handleSend; }, [handleSend]);');
   const effectAt = app.indexOf('shouldSendHomeFirstNow({');
   check('源码: 首发副作用声明在 handleSendRef 赋值之后', assignAt > 0 && effectAt > assignAt);
+  // 订正:还要在处理会话切换的副作用([selectedSession])之后 —— 否则换上草稿那次提交里,
+  // 切换处理会清掉首发刚起的流状态与气泡、把切换计数加一,第一轮回复不实时显示。
+  const switchEffectAt = app.indexOf('}, [selectedSession]);');
+  check('源码: 首发副作用声明在处理会话切换的副作用之后', switchEffectAt > 0 && effectAt > switchEffectAt);
   const drainAt = app.indexOf('drainScheduled = true;');
   const timerAt = app.indexOf('setTimeout(() => {', drainAt);
   const fiftyAt = app.indexOf('}, 50);', timerAt);
