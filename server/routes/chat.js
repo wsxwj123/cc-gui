@@ -4035,7 +4035,7 @@ export function replayCompleteNotice(slot, afterSeq) {
   return JSON.stringify({ type: 'replay_complete', turnStartedAt: slot.startedAt });
 }
 
-// r191:在环形窗里从后往前找"正在写、还没结束的顶层内容块"的 content_block_start,返回它的 seq。
+// r191:在环形窗里从后往前找"正在写、还没结束的顶层内容块"的 content_block_start,返回 { seq, index }。
 // 只看顶层(parent_tool_use_id 为空);先遇到顶层 message_stop / result,或先遇到 content_block_stop
 // 再遇到同 index 的 content_block_start ⇒ 没有正在写的块,返回 null。行是已盖章字符串:先子串粗筛,
 // 命中才解析;解析失败的行跳过。
@@ -4054,25 +4054,36 @@ export function findOpenTopBlockSeq(eventLog) {
     const e = o.event;
     if (e.type === 'message_stop') return null;
     if (e.type === 'content_block_stop') { closed.add(e.index); continue; }
-    if (e.type === 'content_block_start') return closed.has(e.index) ? null : ev.seq;
+    if (e.type === 'content_block_start') return closed.has(e.index) ? null : { seq: ev.seq, index: e.index };
   }
   return null;
 }
 
-// r191:无游标接流带 openBlock=1、且这次没有 replay_complete 时,回放起点 = 正在写的顶层块的开头与
-// earlyLines 第一条已编号行两者较小的一个;都没有 ⇒ null(不走新分支,按原路径回放 earlyLines)。
-export function openBlockReplayFrom(slot, afterSeq, replayNotice, openBlockParam) {
-  if (openBlockParam !== '1' || !slot || afterSeq !== null || replayNotice) return null;
-  const openSeq = findOpenTopBlockSeq(slot.eventLog);
-  let earlySeq = null;
+// r191:无游标接流带 openBlock=1、且这次没有 replay_complete 时,在原样回放 earlyLines 之前要先补的行:
+// 正在写的那一个顶层块已被上一个连接读走的部分 —— eventLog 里 seq ∈ [块开头, earlyLines 第一条已编号行) 的
+// 这个块自己的 content_block_start 与同 index 的顶层 content_block_delta。范围里别的事件(子代理事件、通知、
+// 结束标记、别的块)一律不要:它们已被上一个连接处理过。没有正在写的块、或它的开头本来就在缓冲里 ⇒ []。
+export function openBlockPrefixLines(slot, afterSeq, replayNotice, openBlockParam) {
+  if (openBlockParam !== '1' || !slot || afterSeq !== null || replayNotice) return [];
+  const open = findOpenTopBlockSeq(slot.eventLog);
+  if (!open) return [];
+  let until = Infinity;
   for (const l of (slot.earlyLines || [])) {
     const m = typeof l === 'string' ? STAMP_TAIL_RE.exec(l) : null;
-    if (m) { earlySeq = Number(m[2]); break; }
+    if (m) { until = Number(m[2]); break; }
   }
-  if (openSeq === null && earlySeq === null) return null;
-  if (openSeq === null) return earlySeq;
-  if (earlySeq === null) return openSeq;
-  return Math.min(openSeq, earlySeq);
+  if (open.seq >= until) return [];
+  const out = [];
+  for (const ev of (slot.eventLog || [])) {
+    if (!ev || ev.seq < open.seq || ev.seq >= until) continue;
+    const line = typeof ev.line === 'string' ? ev.line : '';
+    if (ev.seq === open.seq) { out.push(line); continue; }
+    if (!line.includes('"content_block_delta"')) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (o?.type === 'stream_event' && !o.parent_tool_use_id && o.event?.type === 'content_block_delta' && o.event.index === open.index) out.push(line);
+  }
+  return out;
 }
 
 // 泵已收尾但那次 done 没进缓冲(竞态窗口):补一条终态;盖章同样交给 onLine 的唯一写出口。
@@ -4165,21 +4176,18 @@ router.get('/chat/:pid/stream', (req, res) => {
   // r177:先判(依赖"此前没人读过"与溢出标记的原值),再无条件置"已读" —— 任何一次接上之后,
   // 下一个连接拿到的缓冲都不再是从回合起点起的全部内容。
   const replayNotice = replayCompleteNotice(slot, cur.afterSeq);
-  // r191:没有直播快照的重接带 openBlock=1 —— 从正在写的那一段的开头起回放(见 openBlockReplayFrom)。
-  const openFrom = openBlockReplayFrom(slot, cur.afterSeq, replayNotice, req.query?.openBlock);
+  // r191:没有直播快照的重接带 openBlock=1 —— 先补正在写的那一块已被读走的开头与增量(见 openBlockPrefixLines)。
+  const openPrefix = openBlockPrefixLines(slot, cur.afterSeq, replayNotice, req.query?.openBlock);
   slot.turnUnread = false;
   if (cur.afterSeq !== null) replayEventLog(slot, cur.afterSeq, onLine); else {
     if (replayNotice) onLine(replayNotice);
     // r68:缓冲溢出过 ⇒ 本次回放不完整,回放【之前】先明说一声。客户端据此放弃"种回"
     // 渲染、退回历史单一来源(宁可空窗,也不把中段缺失的正文当完整的画出来)。
     if (slot.earlyOverflowed) { slot.earlyOverflowed = false; onLine(JSON.stringify({ type: 'early_overflow' })); }
-    if (openFrom !== null) {
-      // 环形窗与 earlyLines 同源:从起点起回放环形窗即已覆盖 earlyLines,下面照常清空缓冲。
-      for (const ev of (slot.eventLog || [])) { if (closed) break; if (ev.seq >= openFrom) onLine(ev.line); }
-    } else {
-      // 回放断连/未 attach 期间缓冲的行(可能含已缓冲的 done → onLine 里收尾)。
-      for (const l of slot.earlyLines) { if (!closed) onLine(l); }
-    }
+    // r191:前缀只含正在写的那一块自己的内容事件,结束标记进不来;之后照旧原样回放缓冲。
+    for (const l of openPrefix) { if (!closed) onLine(l); }
+    // 回放断连/未 attach 期间缓冲的行(可能含已缓冲的 done → onLine 里收尾)。
+    for (const l of slot.earlyLines) { if (!closed) onLine(l); }
   }
   for (const e of slot.earlyErrors) onLine(JSON.stringify({ type: 'error', error: e }));
   slot.earlyLines.length = 0;
