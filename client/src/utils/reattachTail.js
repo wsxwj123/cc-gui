@@ -25,6 +25,20 @@ const userTextOf = (m) => (Array.isArray(m?.text) ? m.text.join('') : String(m?.
 const isInterruptEntry = (m) => m?.type === 'user' && /^\s*\[Request interrupted/.test(userTextOf(m));
 const isPromptEntry = (m) => m?.type === 'user' && !m.steered && !isInterruptEntry(m);
 
+/**
+ * 历史列表里最后一条提示词(用户条目、不是引导、不是打断提示)的时间(毫秒);没有、或时间解析不出来 → 0。
+ * 重接的流写留存表时用它作本轮起点:本轮回合条目的时间是回合第一条记录的时间,早于重接那一刻。
+ */
+export function lastPromptTs(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (!isPromptEntry(list[i])) continue;
+    const t = list[i]?.timestamp ? Date.parse(list[i].timestamp) : NaN;
+    return Number.isFinite(t) ? t : 0;
+  }
+  return 0;
+}
+
 /** 历史里打断提示条目(用户类型、文字以 `[Request interrupted` 开头)的条数。 */
 export function countInterruptEntries(messages) {
   let n = 0;

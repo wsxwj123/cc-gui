@@ -4,8 +4,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   makeReattachTail, tailMarkBlockDone, tailAssignUuid, tailMarkSnapshot, tailMarkEnded, tailMarkSettled,
-  tailHistoryIndex, visibleTailBlocks, histTailSig, tailReadBack, countInterruptEntries,
+  tailHistoryIndex, visibleTailBlocks, histTailSig, tailReadBack, countInterruptEntries, lastPromptTs,
 } from '../../client/src/utils/reattachTail.js';
+import { relate, makeRetainedEntry } from '../../client/src/utils/retainedCopies.js';
 
 let passed = 0;
 const ok = (name, fn) => { fn(); passed++; console.log('  ok', name); };
@@ -185,6 +186,54 @@ ok('源码:回放不完整关尾巴;读回保证跟着流的形态;只在用户�
   const pRetain = src.indexOf("retainStreamCopy('stop'", pEnd);
   const pSettled = src.indexOf('tailMarkSettled', pEnd);
   assert.ok(pRetain > pEnd && pSettled > pRetain, '读不回来写留存表在标 settled 之前');
+});
+
+ok('lastPromptTs:最后一条提示词的时间;引导、打断提示不算;没有 / 非数组 → 0', () => {
+  const iso = (ms) => new Date(ms).toISOString();
+  const H = [
+    { type: 'user', text: 'first', timestamp: iso(1000) },
+    turn('r1', [{ type: 'text', content: 'a' }]),
+    { type: 'user', text: 'second', timestamp: iso(5000) },
+    { type: 'user', text: 'steer', steered: true, timestamp: iso(7000) },
+    { type: 'user', text: '[Request interrupted by user]', timestamp: iso(9000) },
+  ];
+  assert.equal(lastPromptTs(H), 5000);
+  assert.equal(lastPromptTs([{ type: 'user', text: '[Request interrupted by user]', timestamp: iso(1) }, turn('x', [])]), 0, '没有提示词');
+  assert.equal(lastPromptTs([{ type: 'user', text: 'p', timestamp: 'bad' }]), 0, '时间解析不出来');
+  assert.equal(lastPromptTs(null), 0);
+  assert.equal(lastPromptTs('x'), 0);
+});
+
+ok('留存条目按本轮提示词时间定位(relate / makeRetainedEntry 真函数)', () => {
+  const T0 = Date.parse('2026-11-16T10:00:00.000Z');
+  const iso = (ms) => new Date(ms).toISOString();
+  const hist = (turnText) => [
+    { type: 'user', uuid: 'p0', text: 'go', timestamp: iso(T0) },
+    turn('r1', [{ type: 'text', content: 'P0 text' }, { type: 'text', content: turnText }]).valueOf(),
+    { type: 'user', uuid: 'i1', text: '[Request interrupted by user]', timestamp: iso(T0 + 60000) },
+  ].map((m, i) => (i === 1 ? { ...m, timestamp: iso(T0 + 1000) } : m));
+  const entry = (startTs) => makeRetainedEntry({
+    kind: 'stop', ownerKey: 's1', srcUuids: [], roundStartTs: startTs, stopTs: T0 + 50000, prompt: null,
+    turn: { uuid: 'chat-stopped-1', type: 'turn', text: [P1_PART], thinking: [], toolCalls: [], blocks: [{ type: 'text', content: P1_PART }] },
+  });
+  // ① 起点 = 本轮提示词时间,历史本轮回合已含副本正文 → covered
+  assert.equal(relate(hist(P1_PART + ' R191-P1-STOPPED'), entry(T0)).mode, 'covered');
+  // ② 起点同上,历史本轮回合没有这段 → 不是 covered,要画的内容里有这一块
+  const r2 = relate(hist('别的内容'), entry(T0));
+  assert.notEqual(r2.mode, 'covered');
+  const drawn = r2.mode === 'split' ? r2.rest.blocks : entry(T0).turn.blocks;
+  assert.ok(['split', 'append'].includes(r2.mode) && drawn.some((b) => b.content === P1_PART), `要画这一块(${r2.mode})`);
+  // ③ 对照:起点 = 重接时刻(晚于本轮回合条目),起点被认到打断提示上,拿不到本轮回合去比 → 不是 covered(要改的原因)
+  assert.notEqual(relate(hist(P1_PART + ' R191-P1-STOPPED'), entry(T0 + 30000)).mode, 'covered', '起流时刻作起点时认不出已写盘');
+});
+
+ok('源码:读不回来写留存表时按本轮提示词时间定位、srcUuids 为空', () => {
+  const src = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
+  const p = src.indexOf("retainStreamCopy('stop', {\n            uuid: 'chat-stopped-' + Date.now()");
+  assert.ok(p > 0, '第三处调用');
+  const call = src.slice(p, src.indexOf('});', src.indexOf('interrupted: true', p)) + 3);
+  assert.ok(call.includes('srcUuids: []'), 'srcUuids 空');
+  assert.ok(call.includes('roundStartTs: lastPromptTs(getLocalMessages()) || turnStreamStart'), '起点取本轮提示词时间');
 });
 
 ok('签名与索引的边界', () => {

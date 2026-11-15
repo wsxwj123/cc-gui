@@ -69,7 +69,7 @@ import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { GenuiActionProvider, useGenuiActionCapability } from './genui/host/action-context.jsx';
 import { TurnBubble, StripRoundContext, LiveHostContext } from './components/TurnBubble.jsx';
-import { makeReattachTail, tailMarkBlockDone, tailAssignUuid, tailMarkSnapshot, tailMarkEnded, tailMarkSettled, tailReadBack, visibleTailBlocks } from './utils/reattachTail.js';
+import { makeReattachTail, tailMarkBlockDone, tailAssignUuid, tailMarkSnapshot, tailMarkEnded, tailMarkSettled, tailReadBack, visibleTailBlocks, lastPromptTs } from './utils/reattachTail.js';
 import { stripSummary, tailBlockInfo, latestToolTitles } from './utils/streamStatus.js';
 import { initialSpan, extendUp, needsExtend, sliceRows, resolveAutoFrom } from './utils/mountWindow.js';
 import { historyMessageKey } from './utils/historyPaging.js';
@@ -5610,10 +5610,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const retainedPromptOfStream = () => (!reattachPid && userMsgUuid && typeof prompt === 'string'
       ? { text: prompt, sentTs: Date.parse(userMsgTimestamp) || turnStreamStart, localUuid: userMsgUuid }
       : null);
-    const retainStreamCopy = (kind, turnCopy) => addRetained(streamSid || sessionQueueKey, makeRetainedEntry({
+    // r191:可选的 over 只覆盖 srcUuids / roundStartTs(重接的流按本轮提示词时间定位);不传时逐字照旧。
+    const retainStreamCopy = (kind, turnCopy, over = null) => addRetained(streamSid || sessionQueueKey, makeRetainedEntry({
       kind, ownerKey: streamSid || sessionQueueKey, turn: turnCopy,
       srcUuids: [...roundUuidsRef.current], roundStartTs: turnStreamStart, stopTs: Date.now(),
       prompt: retainedPromptOfStream(),
+      ...(over && Array.isArray(over.srcUuids) ? { srcUuids: over.srcUuids } : {}),
+      ...(over && Number.isFinite(over.roundStartTs) ? { roundStartTs: over.roundStartTs } : {}),
     }));
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
@@ -8131,6 +8134,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             blocks: keepBlocks,
             usage: null,
             interrupted: true,
+          }, {
+            // 重接不复位 roundUuidsRef(可能是更早回合的编号);起流时刻是重接那一刻,晚于本轮回合条目 ——
+            // 改按本轮提示词时间定位(此处已判过仍是本会话、本回合,读到的是本会话的历史)。
+            srcUuids: [],
+            roundStartTs: lastPromptTs(getLocalMessages()) || turnStreamStart,
           });
           tailRetained = true;
         }
