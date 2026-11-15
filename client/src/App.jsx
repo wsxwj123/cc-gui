@@ -90,7 +90,7 @@ import { repairMojibake, insertTextAtCaret } from './utils/mojibake.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
-import { runHistoryOp } from './utils/historyOps.js';
+import { runHistoryOp, runHistoryOpSettled, stopTurnAndWait } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
 import { isThirdPartyProvider } from './utils/autoAudit.js';
 import { saveOutcome } from './utils/saveOutcome.js';
@@ -4278,6 +4278,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // poll 会把它误判成「后台运行中」并闪黄条,甚至触发 auto-reattach 重连。记下已停的
   // pid,poll 与 reattach 都跳过它。CQ-15:指向模块级共享集合,使分屏各 pane 互相感知停止。
   const stoppedPidsRef = useRef(stoppedChatPids);
+  // r188:窗格级「回退进行中」标记(回滚 / 重做此工具从停回合到重发真正发出或放弃的这段时间,值是发起方的
+  // 令牌对象,空 = 没有)。期间流收尾与后台轮询的排空不弹不发,普通发送进排队 —— 否则等停止、等裁剪的
+  // 几秒里,被中止那条流的收尾会把排队消息发出去,或用户新发的一条直接起一轮,抢在裁剪与重发之前。
+  // 清它的地方:resendReplacing 真正发出或放弃时;发起方没交给 resendReplacing 的所有出口(finally)。
+  const rollbackBusyRef = useRef(null);
   // 引导消息的流式切口必须在所有发送入口之前声明：队列按钮与 Cmd/Ctrl+Enter 共用。
   const steerAnchorRef = useRef({});
   const streamingBlocksRef = useRef(EMPTY_ARRAY);
@@ -4727,6 +4732,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               if (finalizeInFlightRef.current > 0) return; // C1:这 50ms 里有流开始收尾 → 让它自己排空
               const s2 = getLocalSession();
               if (queueKeyFor(s2) !== drainKey) return;
+              // r188:回退进行中(被停下的进程已从列表消失,但裁剪与重发还没完成)→ 不弹不发;
+              // 标记清掉后的下一轮轮询(或重发那一轮的收尾)再排空。
+              if (rollbackBusyRef.current) return;
               const q = useStore.getState().shiftMessage(drainKey);
               if (q?.text) handleSendRef.current?.(q.text, q.opts || (q.hidden ? { hiddenUserMessage: true } : {}));
             }, 50);
@@ -5481,7 +5489,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 一条用户消息之后、悬在流式块上方 = 错序。故默认退回排队,注入改为【显式动作】——
     // 队列条目上的「⚡ 并入」按钮(handleAccelerate)。
     // forceSend(回滚/重做的重发 = 有意打断替换)照旧连这道门都不进。
-    if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current)) {
+    // r188:回退进行中(停回合、等裁剪的那几秒)普通发送同样进排队,由重发那一轮的收尾排空。
+    if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current || rollbackBusyRef.current)) {
       const queuedAt = Date.now();
       const queueOpts = { ...opts };
       delete queueOpts.onEnqueueFailure; delete queueOpts.onQueued; delete queueOpts.fromComposer;
@@ -8177,6 +8186,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // 就【不弹不发】,消息留在原队列里,交给该会话下一次进入或流收尾的排空。
           setTimeout(() => {
             if (queueKeyFor(getLocalSession()) !== drainKey) return;
+            // r188:回退进行中(这条流正是被回退中止的那条)→ 不弹不发,留给重发那一轮的收尾排空。
+            if (rollbackBusyRef.current) return;
             const next = useStore.getState().shiftMessage(drainKey);
             // 透传入队时的 opts(尤其 hiddenUserMessage)——否则计划执行这种隐藏续跑消息
             // 出队重发时会变成可见的用户气泡(#5)。
@@ -8239,14 +8250,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const ownerKey = queueKeyFor(getLocalSession());
     const onAbandon = resendAbandonRef.current;
     resendAbandonRef.current = null;
+    // r188:调用方交过来的「回退进行中」标记 —— 重发真正发出或放弃时清掉(只清自己接手的那一个)。
+    const busy = rollbackBusyRef.current;
+    const releaseBusy = () => { if (busy && rollbackBusyRef.current === busy) rollbackBusyRef.current = null; };
     const deadline = Date.now() + 4000;
     const tick = () => {
-      if (!paneStillOn(ownerKey)) { onAbandon?.(); return; }
+      if (!paneStillOn(ownerKey)) { releaseBusy(); onAbandon?.(); return; }
       if (Date.now() < deadline && (streamingRef.current || backgroundPidRef.current)) {
         setTimeout(tick, 100);
         return;
       }
-      handleSendRef.current?.(text, { ...opts, forceSend: true });
+      try {
+        handleSendRef.current?.(text, { ...opts, forceSend: true });
+      } finally { releaseBusy(); }
     };
     setTimeout(tick, 50);
   }, [getLocalSession, paneStillOn]);
@@ -8726,6 +8742,27 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     //     首页「未发出的消息」,提示挂在用户此刻所在的窗格上(带该窗格的会话键,换会话即隐藏);
     //   · 否则内容进本会话输入框草稿(已有草稿就追加在后面,整串 / 结尾相同才算已在),提示按会话键留言,
     //     回到本会话时显示。本会话若正显示在别的窗格,两件事立刻生效(事件)。
+    // 把本来要重发的内容放进本会话输入框草稿(已有草稿就追加在后面,整串 / 结尾相同才算已在),返回按结果措辞的
+    // 一句说明。leaveForOwner 与 r188 的「裁剪最终失败、不重发」共用。
+    const placeBackForOwner = () => {
+      const { prompt: left } = pendingResend();
+      let outcome = 'none';
+      if (left && rbKey) {
+        try {
+          const dk = `cgui-draft:${rbKey}`;
+          const merged = mergeDraftText(localStorage.getItem(dk) || '', left);
+          outcome = merged.outcome;
+          localStorage.setItem(dk, merged.next);
+          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: merged.next, targetKey: rbKey } }));
+        } catch { outcome = 'failed'; }
+      }
+      return {
+        placed: '要重发的内容已放回输入框，确认后再发送。',
+        appended: '要重发的内容已追加到输入框原有内容之后，确认后再发送。',
+        same: '要重发的内容已在输入框里，确认后再发送。',
+        failed: `要重发的内容没能放回输入框（本地存储写入失败），原文：${left.slice(0, 200)}${left.length > 200 ? '…' : ''}`,
+      }[outcome] || '';
+    };
     const leaveForOwner = ({ notes = [], trimOk = true, wiped = false } = {}) => {
       const { prompt: left, meta: leftMeta } = pendingResend();
       if (wiped) {
@@ -8739,22 +8776,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         showNoticeHere(['另一个会话的回退已完成：会话记录已清空，原定的重发没有发出。', where, ...notes].join(''));
         return;
       }
-      let outcome = 'none';
-      if (left && rbKey) {
-        try {
-          const dk = `cgui-draft:${rbKey}`;
-          const merged = mergeDraftText(localStorage.getItem(dk) || '', left);
-          outcome = merged.outcome;
-          localStorage.setItem(dk, merged.next);
-          window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: merged.next, targetKey: rbKey } }));
-        } catch { outcome = 'failed'; }
-      }
-      const where = {
-        placed: '要重发的内容已放回输入框，确认后再发送。',
-        appended: '要重发的内容已追加到输入框原有内容之后，确认后再发送。',
-        same: '要重发的内容已在输入框里，确认后再发送。',
-        failed: `要重发的内容没能放回输入框（本地存储写入失败），原文：${left.slice(0, 200)}${left.length > 200 ? '…' : ''}`,
-      }[outcome] || '';
+      const where = placeBackForOwner();
       leaveSessionNotice(rbKey, [
         trimOk ? '回退过程中切换了会话：会话记录已回退，原定的重发没有发出。'
           : '回退过程中切换了会话：会话记录裁剪失败（磁盘历史未改动），原定的重发没有发出。',
@@ -8903,9 +8925,45 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       return;
     }
 
+    // r188 修法 A:回合在跑时先停、等它停稳,再动磁盘(还原文件与裁剪)。后端在回合进行中一律拒绝裁剪
+    // (SESSION_RUNNING),原来先裁后停 → 裁剪必失败、旧消息留着、重发接在后面。进入这里时窗格一定还在本会话
+    // (前面没有等待点),在跑的进程就是开始那一刻记下的 startPid;等待之后不再读窗格 ref。
+    // 从这里起挂上窗格级「回退进行中」标记(排空不弹不发、普通发送进排队),交给 resendReplacing 之前的所有
+    // 出口都在下面的 finally 里清掉。(为了局部改动,try 块内的原有代码沿用原缩进。)
+    const rbBusy = {};
+    rollbackBusyRef.current = rbBusy;
+    let rbHandedOff = false;
+    try {
+    // ① 中止本地流、记进「已停进程」、清后台标记(原来在裁剪之后做的那几件,提前到这里),发带身份的硬停并等回话。
+    //    Bug8 原注释要点仍成立:被杀 pid 必须记进 stoppedPidsRef(否则轮询把刚杀的进程当「后台还在跑」);
+    //    backgroundPidRef 同步清(state 有一帧延迟);转后台形态也要真发停止。
+    const _rbPid = startPid;
+    const _rbOwner = _rbPid ? resolveStopOwner({
+      pid: _rbPid,
+      recordedPid: activeProcOwnerRef.current?.pid,
+      recordedOwner: activeProcOwnerRef.current?.owner,
+      backgroundPid: backgroundPidRef.current,
+      currentSessionId: sel?.sessionId,
+    }) : null;
+    killedRef.current = true; // 编辑重发=停当前回合 → finally 收后台化子代理;被中止的半截照常进留存表
+    if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
+    if (_rbPid) stoppedPidsRef.current.add(String(_rbPid));
+    activeProcRef.current = null;
+    setBackgroundPid(null);
+    backgroundPidRef.current = null; // state 要下一帧才同步,先同步清
+    if (_rbPid) {
+      setProviderSwitchNotice({ text: '正在停止当前回合，停止后执行回退。' });
+      // 带身份时后端停下后等回合记录结算才回话;最多等 5 秒,更晚由下面裁剪的重试接着等。
+      await stopTurnAndWait({ pid: _rbPid, owner: _rbOwner });
+    }
+
     // 1) git restore only for modes that explicitly include files.
     const shouldRestoreFiles = mode === 'both' || mode === 'edit';
     const checkpointSha = shouldRestoreFiles && sel?.sessionId && cwd ? await resolveCheckpointSha() : null;
+    // r188:文件侧的实际结果(裁剪最终失败时据此措辞,不说「会话已回退」):null 没动文件这一步 /
+    // 'restored' 已还原 / 'partial' 可能部分还原 / 'untouched' 没有快照、工作区未改动。
+    let rbFileOutcome = null;
+    if (shouldRestoreFiles && !checkpointSha) rbFileOutcome = 'untouched';
     if (shouldRestoreFiles && !checkpointSha && !softFiles) {
       // 没有文件快照(非 git 项目 / 旧消息 / 快照丢失)不该让整个回退"没反应"——以前这里
       // alert + return,既不裁剪也不重发,用户关掉弹窗后什么都没发生。降级处理:跳过文件
@@ -8917,18 +8975,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 那个 commit 是空树,`git checkout <sha> -- .` 报 pathspec 不匹配。这属于"本来
       // 就没文件要还原"而非真错,不该 alert+return 中断整个回退。降级:跳过文件还原,
       // 继续裁剪会话/重发,只用一条提示告知项目文件未动。
-      const softDegrade = () => noteHere('未找到该消息的文件快照，已仅回退会话记录（工作区文件未改动）。');
+      const softDegrade = () => { rbFileOutcome = 'untouched'; noteHere('未找到该消息的文件快照，已仅回退会话记录（工作区文件未改动）。'); };
       try {
         const r = await fetch(`/api/checkpoints/${sel.sessionId}/restore`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sha: checkpointSha, cwd }),
         });
+        if (r.ok) rbFileOutcome = 'restored';
         if (!r.ok) {
           // empty_checkpoint(快照本来就没文件)才说"文件未改动";restore_failed
           // (超时把 checkout 杀在半路等)可能已部分还原,如实提示别撒谎。
           const d = await r.json().catch(() => ({}));
           if (d.code === 'restore_failed') {
+            rbFileOutcome = 'partial';
             noteHere('文件还原过程出错，工作区可能已部分还原，请检查改动（会话已回退）。');
           } else softDegrade();
         }
@@ -8949,7 +9009,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         ? { projectHash, uuid: msg.uuid }
         : { projectHash, fromTimestamp: msg.timestamp };
       try {
-        const tr = await runHistoryOp(sel.sessionId, 'trim', body);
+        // r188:遇 SESSION_RUNNING / SESSION_CHANGED 重新预览再提交(最多约 6 秒)—— 刚停下的回合还在收尾窗里、
+        // 或进程退出时又追加了一笔收尾记录。不以「本窗格发过停止」为前提。
+        const tr = await runHistoryOpSettled(sel.sessionId, 'trim', body);
         if (!tr.ok) trimFailed = true;
         // If trim wiped the session (no real messages would remain), we must
         // drop the sessionId locally — otherwise the next /api/chat would
@@ -8983,46 +9045,28 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (!stillHere()) {
       // r182 / r188:磁盘已裁,truncateUi 不会再执行 —— 本会话的留存副本在这里按截断点删并记墓碑(同 truncateUi)。
       if (!trimFailed) for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetainedSince(k, rbCutTs);
-      // 开始回退时本会话在跑的回合:按它自己的 pid 停掉(不碰窗格 ref),否则它继续往刚裁剪的记录里追加。
-      if (startPid) {
-        stoppedPidsRef.current.add(String(startPid));
-        fetch(`/api/chat/${startPid}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
-      }
+      // 开始回退时本会话在跑的回合,r188 起已在破坏性阶段开头按 startPid 停过并等过回话,这里不再重复发停止。
       // 会话被裁空(wipedAway)→ 侧栏不再列出它、回不去:内容进首页「未发出的消息」(见 leaveForOwner)。
       leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, wiped: wipedAway });
       return;
     }
     // trim 失败(磁盘 jsonl 没裁)但 UI 已裁+即将重发 → 重发会落在未裁历史上、且
     // step5 refetch 把旧消息全拉回。如实告知,不再静默(对齐 CheckpointsPanel)。
-    if (trimFailed && !sessionWasReset) {
-      setProviderSwitchNotice({ text: '会话记录裁剪失败,回退可能不完整(磁盘历史未改动),建议新建会话继续。' });
+    // r188:裁剪最终失败(仍在本会话)→ 不重发(重发会接在没裁掉的旧消息后面)、不截界面(被停下的那一轮
+    // 留在屏幕上的内容不清);本来要发的内容放回本会话输入框,提示按文件侧与记录侧的实际结果措辞。
+    // (原来是照样重发并提示「建议新建会话继续」;2026-11-15 用户确认改成这样。)
+    if (trimFailed) {
+      const where = placeBackForOwner();
+      const fileNote = {
+        restored: '工作区文件已还原到这条消息发送前的状态。',
+        partial: '文件还原过程出错，工作区可能已部分还原，请检查改动。',
+        untouched: '工作区文件未改动。',
+      }[rbFileOutcome] || '';
+      setProviderSwitchNotice({ text: ['会话记录裁剪失败，会话记录没有改动，原定的重发没有发出。', where, fileNote].filter(Boolean).join('') });
+      return;
     }
 
-    // 3) abort any in-flight stream from this session so the resend doesn't
-    //    collide with it.
-    killedRef.current = true; // 编辑重发=停当前回合(POST /stop)→ finally 收后台化子代理
-    if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
-    // Bug8:与 handleStop(:6660/:6683)对称的两件事,回滚这条路一直漏做 ——
-    // ① 被杀的 pid 记进 stoppedPidsRef:服务端优雅窗 2~3s 内它仍 stoppable,不记的话
-    //    1.5s 的轮询会把刚杀掉的进程当"后台还在跑" → backgroundPid 被置成死 pid → 重发
-    //    撞门变排队 + auto-reattach 去连一个死进程(用户报的"多一条一模一样的"主推手);
-    // ② setBackgroundPid(null) 立即清本地标记,不等下一轮(那一轮还会误报)。
-    // ③ 后台态也要【真的发 /stop】(判官重要-2):只记账不发停,旧回合在新回合的
-    //    tearingDown 4s 强杀之前会继续往刚裁剪过的 jsonl 追加(裁剪被部分复写);带活
-    //    shell 时 tearingDown 更是直接放行不杀 = 旧进程与新 --resume 并存双写。
-    // 前台流与转后台两种形态都要记;pid 取 ref 而非 state(state 有一帧延迟)。
-    const _rbPid = activeProcRef.current || backgroundPidRef.current;
-    if (_rbPid) stoppedPidsRef.current.add(String(_rbPid));
-    if (activeProcRef.current) {
-      // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。
-      fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
-      activeProcRef.current = null;
-    } else if (backgroundPidRef.current) {
-      // 同款请求形状,fire-and-forget(绝不 await:控制类调用要留超时兜底权给轮询)。
-      fetch(`/api/chat/${backgroundPidRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {});
-    }
-    setBackgroundPid(null);
-    backgroundPidRef.current = null; // state 要下一帧才同步,重发在 50ms 后落地,先同步清
+    // 3) 在跑的回合已在破坏性阶段开头停下(r188);这里只清本窗格的流式显示。
     updateStreaming(false);
     setStreamingText('');
     setStreamingThinking('');
@@ -9054,6 +9098,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     if (resendPrompt && handleSendRef.current) {
       // r146c:等停止落地(≤4s)期间切走 → resendReplacing 放弃重发时调这个善后(一次性登记、一次性取走)。
       resendAbandonRef.current = () => leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, wiped: sessionWasReset });
+      // r188:「回退进行中」标记交给 resendReplacing,由它在重发真正发出或放弃时清。
+      rbHandedOff = true;
       // Bug8:走 resendReplacing —— forceSend 绕过入队门 + 发前轮询本地 ref 等停止落地(≤4s)。
       if (typeof resendText === 'object' && resendText) {
         resendReplacing(resendText.prompt || resendPrompt, resendText.options || {});
@@ -9073,6 +9119,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
         resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {});
       }
+    }
+    } finally {
+      // r188:没交给 resendReplacing 的所有出口(切走放弃、裁剪失败、edit 模式、没有可重发的内容、抛错)清标记。
+      if (!rbHandedOff && rollbackBusyRef.current === rbBusy) rollbackBusyRef.current = null;
     }
   }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession, resendReplacing, paneStillOn]);
   useEffect(() => { handleRollbackRef.current = handleRollback; }, [handleRollback]);
@@ -9185,32 +9235,42 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       '```',
     ].join('\n');
     (async () => {
+      // r188:「回退进行中」标记(见 rollbackBusyRef 定义处):交给 resendReplacing 之前的所有出口在 finally 里清。
+      const rtBusy = {};
+      rollbackBusyRef.current = rtBusy;
+      let rtHandedOff = false;
       try {
         // 顺序红线(r99-③):**先停在飞回合,再改会话文件**。反过来的话,被截断的 jsonl
         // 会被仍在跑的进程继续追加(它内存里还是旧上下文)—— 刚裁掉的内容原样写回,
-        // 用户点了回退却发现污染还在。停止是 fire-and-forget + 超时兜底(控制类调用
-        // 绝不无限等,memory: 停止链路 await interrupt 会挡住兜底)。
+        // 用户点了回退却发现污染还在。等停止有超时兜底(控制类调用绝不无限等,
+        // memory: 停止链路 await interrupt 会挡住兜底)。
+        // r188:停止带上能证明的回合身份(与 handleStop 同一个 resolveStopOwner),后端停下后等回合记录结算
+        // 才回话 —— 原来不带身份,后端受理就回话,页面紧接着裁剪,回合记录没结算 → 必被 SESSION_RUNNING 拒绝。
+        // 进程号与身份在中止本地流之前、本函数开始的同步段里取(等待之后不再读窗格 ref)。
+        const _rtPid = activeProcRef.current || backgroundPidRef.current;
+        const _rtOwner = _rtPid ? resolveStopOwner({
+          pid: _rtPid,
+          recordedPid: activeProcOwnerRef.current?.pid,
+          recordedOwner: activeProcOwnerRef.current?.owner,
+          backgroundPid: backgroundPidRef.current,
+          currentSessionId: sel.sessionId,
+        }) : null;
         killedRef.current = true; // 编辑重发(trim 分支)=停当前回合(POST /stop)→ finally 收后台化子代理
         if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
         // Bug8 同批(调研点名:同一个病换个入口):被杀 pid 记账 + 后台态真发 /stop +
         // 立即清后台标记,三件事与 handleRollback / handleStop 同款。
-        const _rtPid = activeProcRef.current || backgroundPidRef.current;
         if (_rtPid) stoppedPidsRef.current.add(String(_rtPid));
-        const _rtStops = [];
-        if (activeProcRef.current) {
-          // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。
-          _rtStops.push(fetch(`/api/chat/${activeProcRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {}));
-          activeProcRef.current = null;
-        } else if (backgroundPidRef.current) {
-          _rtStops.push(fetch(`/api/chat/${backgroundPidRef.current}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hard: true }) }).catch(() => {}));
-        }
+        activeProcRef.current = null;
         setBackgroundPid(null);
         backgroundPidRef.current = null;
-        if (_rtStops.length) {
-          await Promise.race([Promise.all(_rtStops), new Promise((r) => setTimeout(r, 2000))]);
+        if (_rtPid) {
+          setProviderSwitchNotice({ text: '正在停止当前回合，停止后执行回退。' });
+          // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。最多等 5 秒。
+          await stopTurnAndWait({ pid: _rtPid, owner: _rtOwner, fetchImpl: fetch });
         }
 
-        const tr = await runHistoryOp(sel.sessionId, 'trim-before-tool', { projectHash, toolUseId: toolCall.id });
+        // r188:遇 SESSION_RUNNING / SESSION_CHANGED 重新预览再提交(最多约 6 秒)。
+        const tr = await runHistoryOpSettled(sel.sessionId, 'trim-before-tool', { projectHash, toolUseId: toolCall.id }, { runOp: runHistoryOp });
         if (!tr.ok) throw new Error(tr.error || tr.status);
         // r188:裁剪成功才删留存副本(只删停止时刻不早于截断点的)。磁盘已裁,与窗格是否还在本会话无关,
         // 所以放在切走复查之前。被这次操作中止的那条流的半截在等停止期间已进表,在这里一并删掉。
@@ -9235,6 +9295,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 隐藏哪些消息由服务端 session-reader 的标签白名单决定(本轮服务端零 diff),
         // 去掉它这条消息刷新后会变成一个用户看不懂的可见气泡。
         // ponytail: 标签名沿用既有白名单;要换成语义中立的标签得先改 session-reader。
+        rtHandedOff = true; // r188:标记交给 resendReplacing,由它在重发发出或放弃时清
         resendReplacing(
           opts.continuePrompt
             ? `<cgui-tool-retry>${opts.continuePrompt}</cgui-tool-retry>`
@@ -9246,6 +9307,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setRetryActiveUuid(null);  // 关指示器,避免失败后一直转
         // 乐观截断已改了显示;失败则刷新回真实状态,避免停在半截视图。
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
+      } finally {
+        if (!rtHandedOff && rollbackBusyRef.current === rtBusy) rollbackBusyRef.current = null;
       }
     })();
   }, [getLocalSession, fetchMessagesForTab, getLocalMessages, setLocalMessages, resendReplacing, paneStillOn]);

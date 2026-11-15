@@ -510,7 +510,7 @@ check('§4.3 App.jsx handleRetryTool 恰 8 次(改前 7:新增一次 Ref 调用)
 // 且提交前必写备份。口径不变(仍是"r99 回退链路不得自己拼会话端点"),不再钉当时的
 // 出现次数与所在文件 —— 计数器只对"当时那一瞬间的源码形状"成立,重构一次即假红。
 check('§4.3 App.jsx 不裸 fetch 历史改写端点:一律经统一入口 utils/historyOps.js(R25 接线契约)', () => {
-  assert.match(A, /import \{ runHistoryOp \} from '\.\/utils\/historyOps\.js'/,
+  assert.match(A, /import \{ runHistoryOp(?:, [A-Za-z]+)* \} from '\.\/utils\/historyOps\.js'/,
     'App.jsx 必须从统一入口调历史操作');
   assert.strictEqual(
     count(A, /fetch\(`\/api\/sessions\/\$\{[^}]*\}\/(?:trim|compact-segment|trim-before-tool|strip-thinking)/g), 0,
@@ -528,7 +528,7 @@ check('M19 历史改写只剩统一引擎:五个 op 都在,且客户端调用的
     assert.match(HH, new RegExp(`'?${op}'?:\\s*\\{`), `引擎缺 op:${op}`);
   }
   // 端到端契约:App.jsx 里出现的每个 op 名,服务端必须有同名实现(改名只改一边 = 调用必 404)
-  const used = new Set([...A.matchAll(/runHistoryOp\(\s*[^,]+,\s*'([a-z-]+)'/g)].map((m) => m[1]));
+  const used = new Set([...A.matchAll(/runHistoryOp(?:Settled)?\(\s*[^,]+,\s*'([a-z-]+)'/g)].map((m) => m[1]));
   assert.ok(used.size >= 3, `App.jsx 里只找到 ${used.size} 个 runHistoryOp 调用点,可疑`);
   for (const op of used) {
     assert.match(HH, new RegExp(`'?${op}'?:\\s*\\{`), `App.jsx 调用 ${op},服务端引擎没有同名 op`);
@@ -567,7 +567,9 @@ check('M18 handleRetryTool 乐观截断仍在(_retryTrimToolId ≥2 次 + setRet
 });
 check('M18 handleRetryTool 停流三件套逐字仍在', () => {
   assert.match(A, /stoppedPidsRef\.current\.add\(String\(_rtPid\)\)/);
-  assert.match(A, /hard: true/);
+  // r188:hard 停止的请求体挪进 utils/historyOps.js 的 stopTurnAndWait;App 里钉按 _rtPid 调它。
+  assert.match(A, /await stopTurnAndWait\(\{ pid: _rtPid, owner: _rtOwner, fetchImpl: fetch \}\)/);
+  assert.match(readFileSync(new URL('../../client/src/utils/historyOps.js', import.meta.url), 'utf8'), /owner \? \{ hard: true, owner \} : \{ hard: true \}/);
   assert.match(A, /backgroundPidRef\.current = null/);
 });
 // r176:两个既有动作块搬进 ApiErrorActions.jsx,条件里的 msg.errorAction 变成 action、selectedSession?.sessionId

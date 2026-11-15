@@ -39,16 +39,28 @@ const PARAMS = [
   // r188:「重做此工具」的留存清表挪到裁剪成功之后(按截断点删)。替身只记录调用,用来断言它排在裁剪
   // 成功之后、裁剪失败时不调用。
   'dropRetainedSince', 'rtCutTs',
+  // r188:先停、等它停稳、再裁。等停止与裁剪重试是 utils/historyOps.js 里的两个纯函数,注入的是【真实实现】
+  // (停止走上面的 mock fetch、裁剪走 runHistoryOp 替身),身份取法注入真实的 resolveStopOwner;
+  // 「回退进行中」标记与提示只是 ref / setter 替身。
+  'resolveStopOwner', 'activeProcOwnerRef', 'stopTurnAndWait', 'runHistoryOpSettled',
+  'rollbackBusyRef', 'setProviderSwitchNotice',
 ];
+const { stopTurnAndWait, runHistoryOpSettled } = await import('../../client/src/utils/historyOps.js');
+const { resolveStopOwner } = await import('../../client/src/utils/sessionFlowIdentity.js');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const run = new AsyncFunction(...PARAMS, BODY);
 
 // 桩:只记录调用,不做任何真实 IO。
-function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = {}, trimFails = false } = {}) {
+function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = {}, trimFails = false, trimRunningTimes = 0, owner = null, paneStays = true } = {}) {
   const calls = [];
   const sent = [];
+  const stopBodies = [];
+  const busySeen = [];
+  let trimTries = 0;
+  const rollbackBusyRef = { current: null };
   const fetchMock = (url, init) => {
     calls.push(String(url));
+    if (String(url).includes('/stop')) { stopBodies.push(JSON.parse(init?.body || '{}')); busySeen.push(rollbackBusyRef.current != null); }
     if (String(url).includes('/stop') && stopHangs) return new Promise(() => {}); // 永不 resolve
     return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
   };
@@ -70,22 +82,30 @@ function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = 
     setStreamingText: noop, setStreamingThinking: noop,
     setStreamingToolCalls: noop, setStreamingBlocks: noop, setStreamHistCutoff: noop,
     fetchMessagesForTab: async () => { calls.push('refetch'); },
-    resendReplacing: (text, o) => { calls.push('resend'); sent.push({ text, o }); },
+    resendReplacing: (text, o) => { calls.push('resend'); sent.push({ text, o, busyAtResend: rollbackBusyRef.current != null }); },
     confirmDialog: (m) => { calls.push('confirmDialog:' + m); },
     setRetryActiveUuid: noop,
     // R25 的统一入口替身:记 `runHistoryOp:<op>`(下面的 idx 用 includes 找 'trim-before-tool',
     // 同时证明这次裁剪确实经统一入口,不是又冒出一条自拼 fetch 的旁路)。
     runHistoryOp: async (sessionId, op, params = {}) => {
       calls.push(`runHistoryOp:${op}${params.toolUseId ? ':' + params.toolUseId : ''}`);
+      busySeen.push(rollbackBusyRef.current != null);
+      trimTries += 1;
+      if (trimTries <= trimRunningTimes) return { ok: false, status: 409, code: 'SESSION_RUNNING', error: 'running' };
       if (trimFails) return { ok: false, status: 500, code: 'WRITE_FAILED', error: 'boom' };
       return { ok: true, status: 200, data: {} };
     },
-    paneStillOn: () => true,
+    paneStillOn: () => paneStays,
     rtKey: 'sess-1',
     dropRetainedSince: (k, cut) => { calls.push(`dropRetainedSince:${k}:${cut}`); },
     rtCutTs: 12345,
+    resolveStopOwner,
+    activeProcOwnerRef: { current: owner ? { pid: activePid, owner } : null },
+    stopTurnAndWait, runHistoryOpSettled,
+    rollbackBusyRef,
+    setProviderSwitchNotice: noop,
   };
-  return { calls, sent, ctx, go: () => run(...PARAMS.map((p) => ctx[p])) };
+  return { calls, sent, ctx, stopBodies, busySeen, rollbackBusyRef, trimTries: () => trimTries, go: () => run(...PARAMS.map((p) => ctx[p])) };
 }
 
 const idx = (calls, needle) => calls.findIndex((c) => c.includes(needle));
@@ -149,6 +169,53 @@ await t('r188 裁剪失败时不清表、不重发', async () => {
   assert.equal(idx(h.calls, 'dropRetainedSince:'), -1, `裁剪失败不许清表:${h.calls.join(' → ')}`);
   assert.equal(idx(h.calls, 'resend'), -1, '裁剪失败不许重发');
   assert.ok(idx(h.calls, 'confirmDialog:') >= 0, '裁剪失败要提示');
+});
+
+await t('r188 回合进行中重做:停止带能证明的身份与 hard,裁剪被 SESSION_RUNNING 拒绝两次后重试成功并重发', async () => {
+  const h = harness({ owner: 'sess-1', trimRunningTimes: 2 });
+  await h.go();
+  assert.deepEqual(h.stopBodies, [{ hard: true, owner: 'sess-1' }], '停止请求体');
+  assert.equal(h.trimTries(), 3, '裁剪应重试到成功');
+  assert.equal(h.sent.length, 1, '重试成功后重发');
+  assert.ok(idx(h.calls, 'dropRetainedSince:') > 0, '重试成功后清表');
+});
+await t('r188 给不出身份时停止不带 owner', async () => {
+  const h = harness();
+  await h.go();
+  assert.deepEqual(h.stopBodies, [{ hard: true }]);
+});
+await t('r188 裁剪一直被 SESSION_RUNNING 拒绝:约 6 秒后放弃,不清表、不重发', async () => {
+  const h = harness({ trimRunningTimes: 1000 });
+  const t0 = Date.now();
+  await h.go();
+  const dt = Date.now() - t0;
+  assert.ok(dt >= 5000 && dt < 7000, `重试上限约 6 秒,实际 ${dt}ms`);
+  assert.equal(idx(h.calls, 'dropRetainedSince:'), -1);
+  assert.equal(h.sent.length, 0);
+});
+await t('r188 「回退进行中」标记:停止与裁剪期间挂着,交给重发时仍挂着(由 resendReplacing 清)', async () => {
+  const h = harness();
+  await h.go();
+  assert.ok(h.busySeen.length >= 2 && h.busySeen.every(Boolean), `等待期间标记必须挂着:${h.busySeen}`);
+  assert.equal(h.sent[0].busyAtResend, true);
+});
+await t('r188 「回退进行中」标记:裁剪失败 / 切走放弃 / 抛错的出口都清掉', async () => {
+  for (const o of [{ trimFails: true }, { paneStays: false }]) {
+    const h = harness(o);
+    await h.go();
+    assert.equal(h.rollbackBusyRef.current, null, `出口 ${JSON.stringify(o)} 没清标记`);
+  }
+  const h = harness();
+  h.ctx.runHistoryOp = async () => { throw new Error('net'); };
+  await h.go();
+  assert.equal(h.rollbackBusyRef.current, null, '抛错出口没清标记');
+});
+await t('r188 别人挂的标记不被这次的出口清掉', async () => {
+  const h = harness({ trimFails: true });
+  const other = {};
+  h.ctx.runHistoryOp = async () => { h.rollbackBusyRef.current = other; return { ok: false, code: 'X' }; };
+  await h.go();
+  assert.equal(h.rollbackBusyRef.current, other);
 });
 
 // ── ② 哨兵:两条路径各发什么─────────────────────────────────────
