@@ -6287,6 +6287,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
           // r182:放在所有分支之前记,后面任何 continue / break 都不会漏掉。顶层新内容(整条消息或内容块
           // 开始 / 增量)先复位 endedClean,再看是不是顶层结束事件(置 sawTopResult 与 endedClean)。
+          // 上面的去重与解析失败的 continue 排在这两行之前:被跳过的重复行早先已经走过这里,不影响结果。
           if (!event.parent_tool_use_id && (event.type === 'assistant'
             || (event.type === 'stream_event' && (event.event?.type === 'content_block_start' || event.event?.type === 'content_block_delta')))) endedClean = false;
           if (event.type === 'result' && !event.parent_tool_use_id) { sawTopResult = true; endedClean = true; }
@@ -9472,6 +9473,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const reattachHeadExtra = useMemo(() => <LastUpdateAgo getAt={getHistFreshAt} />, [getHistFreshAt]);
   const reattachStartedAt = streamStartRef.current;
   // 值只在词 / 停止 / 压缩 / 起点变化时换身份:MessageList 是 memo 的,流式每帧不打穿它。
+  // 依赖里用拼出来的词键 reattachLabelKey 代替 reattachLabelUse 对象:streamingLineLabel 每次渲染都返回新对象,
+  // 直接放对象会让这个 useMemo 每帧都换身份;词键只在阶段 / 动词 / 对象文字真的变了才变。
   const reattachHostValue = useMemo(() => (reattachHostUuid ? {
     reattach: true, stopping, compacting: liveCompacting,
     label: reattachLabelUse, startedAt: reattachStartedAt, headExtra: reattachHeadExtra,
