@@ -85,7 +85,8 @@ function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = 
     setStreamingText: noop, setStreamingThinking: noop,
     setStreamingToolCalls: noop, setStreamingBlocks: noop, setStreamHistCutoff: noop,
     fetchMessagesForTab: async () => { calls.push('refetch'); },
-    resendReplacing: (text, o) => { calls.push('resend'); sent.push({ text, o, busyAtResend: rollbackBusyRef.current != null, busyKey: rollbackBusyRef.current?.key }); },
+    // r188b:resendReplacing 第三个参数 = 调用方自己的「回退进行中」标记(它只清这一个)。
+    resendReplacing: (text, o, b) => { calls.push('resend'); sent.push({ text, o, busyAtResend: rollbackBusyRef.current != null, busyKey: rollbackBusyRef.current?.key, busyArgIsOwn: b != null && b === rollbackBusyRef.current }); },
     confirmDialog: (m) => { calls.push('confirmDialog:' + m); },
     setRetryActiveUuid: noop,
     // R25 的统一入口替身:记 `runHistoryOp:<op>`(下面的 idx 用 includes 找 'trim-before-tool',
@@ -204,6 +205,7 @@ await t('r188 「回退进行中」标记:停止与裁剪期间挂着,交给重�
   assert.ok(h.busySeen.length >= 2 && h.busySeen.every(Boolean), `等待期间标记必须挂着:${h.busySeen}`);
   assert.equal(h.sent[0].busyAtResend, true);
   assert.equal(h.sent[0].busyKey, 'sess-1', '标记带发起重做的会话键(rtKey)');
+  assert.equal(h.sent[0].busyArgIsOwn, true, 'r188b:把这次自己挂的标记对象传给 resendReplacing');
 });
 await t('r188 「回退进行中」标记:裁剪失败 / 切走放弃 / 抛错的出口都清掉', async () => {
   for (const o of [{ trimFails: true }, { paneStays: false }]) {
@@ -227,7 +229,7 @@ await t('r188 别人挂的标记不被这次的出口清掉', async () => {
 await t('r188b 「正在停止」提示:按常量文本与 12 秒时长显示,裁剪成功后撤掉', async () => {
   const h = harness();
   await h.go();
-  assert.deepEqual(h.notice.log[0], { text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS });
+  assert.deepEqual(h.notice.log[0], { text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS, ownerKey: 'sess-1' });
   assert.ok(ROLLBACK_STOPPING_NOTICE_MS >= 11000, '时长要盖住等停止 5 秒 + 裁剪重试 6 秒');
   assert.equal(h.notice.cur, null, '成功后应已撤掉');
 });

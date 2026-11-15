@@ -186,12 +186,100 @@ await t('3 标记按会话生效:属于会话甲时,乙的发送与排空不受�
 
 await t('3 「正在停止」提示:两处显示都用常量 + 时长,回滚成功截界面后与切走分支、重做裁剪成功后按文本撤', async () => {
   assert.ok(!A.includes("'正在停止当前回合"), '提示文本不许再写成字面量');
-  const show = A.split('setProviderSwitchNotice({ text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS });').length - 1;
-  assert.equal(show, 2);
+  // r188b:两处显示都带发起回退的会话键(回退用 rbKey、重做此工具用 rtKey),不带键的旧写法不许再出现。
+  const show = (s) => A.split(`setProviderSwitchNotice({ text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS${s} });`).length - 1;
+  assert.equal(show(', ownerKey: rbKey'), 1);
+  assert.equal(show(', ownerKey: rtKey'), 1);
+  assert.equal(show(''), 0, '「正在停止」提示必须带会话键');
   const CLR = 'setProviderSwitchNotice((cur) => (cur?.text === ROLLBACK_STOPPING_NOTICE ? null : cur));';
   assert.equal(A.split(CLR).length - 1, 3);
   const iT = RB.indexOf('    truncateUi();\n');
   assert.ok(iT > 0 && RB.indexOf(CLR, iT) - iT < 200, '截界面之后紧跟着撤');
+});
+
+// ── 4. r188b 重入守卫(页面用例只有 B6「连点两次仅回退消息」;下面守没有页面用例的路径)──────────
+const { ROLLBACK_BUSY_NOTICE } = await import('../../client/src/utils/historyOps.js');
+const RT = A.slice(A.indexOf('const handleRetryTool = useCallback'), A.indexOf('const handleRetryToolRef'));
+const RS4 = A.slice(A.indexOf('const resendReplacing = useCallback'), A.indexOf('// Auto-reattach:'));
+const cutGuard = (src, head) => {
+  const s = src.indexOf(head);
+  assert.ok(s > 0, `找不到守卫:${head}`);
+  const e = src.indexOf('      return;\n    }\n', s);
+  assert.ok(e > s);
+  return { start: s, code: src.slice(s, e + '      return;\n    }\n'.length) };
+};
+const RBG = cutGuard(RB, 'if (rollbackBusyFor(rollbackBusyRef.current, rbKey)');
+const RTG = cutGuard(RT, 'if (rollbackBusyFor(rollbackBusyRef.current, rtKey)');
+// 抠出回退函数里的守卫真跑:返回 'pass' = 没拦、往下走;返回 undefined = 拦下。
+const runRbGuard = new Function('rollbackBusyFor', 'rollbackBusyRef', 'rbKey', 'mode', 'resendText', 'placeBackForOwner', 'setProviderSwitchNotice', 'ROLLBACK_BUSY_NOTICE',
+  RBG.code + "\nreturn 'pass';");
+const rbCase = ({ busyKey = 'k', mode, resendText = null }) => {
+  const log = { placed: 0, notices: [] };
+  const ref = { current: busyKey ? { key: busyKey } : null };
+  const r = runRbGuard(rollbackBusyFor, ref, 'k', mode, resendText,
+    () => { log.placed += 1; return '要重发的内容已放回输入框，确认后再发送。'; },
+    (n) => log.notices.push(n), ROLLBACK_BUSY_NOTICE);
+  return { blocked: r !== 'pass', ...log, refAfter: ref.current };
+};
+await t('4 编辑重发的发出被拦:新内容放回输入框,提示带会话键并接上放回结果;标记不动', async () => {
+  const c = rbCase({ mode: 'both', resendText: { prompt: '新写的内容', options: {} } });
+  assert.equal(c.blocked, true);
+  assert.equal(c.placed, 1);
+  assert.deepEqual(c.notices, [{ text: ROLLBACK_BUSY_NOTICE + '要重发的内容已放回输入框，确认后再发送。', ownerKey: 'k' }]);
+  assert.deepEqual(c.refAfter, { key: 'k' });
+});
+await t('4 其它被拦的操作(仅回退 / 消息和文件 / 重做回复 / 只还原文件 / 两种定向压缩)不往输入框放东西', async () => {
+  for (const mode of ['message', 'both', 'files', 'summarize-before', 'summarize-after']) {
+    const c = rbCase({ mode });
+    assert.equal(c.blocked, true, mode);
+    assert.equal(c.placed, 0, mode);
+    assert.deepEqual(c.notices, [{ text: ROLLBACK_BUSY_NOTICE, ownerKey: 'k' }], mode);
+  }
+});
+await t('4 不误拦:编辑后重发的回填、没有回退在进行、别的会话在回退', async () => {
+  assert.equal(rbCase({ mode: 'edit' }).blocked, false, 'edit 回填不拦');
+  for (const mode of ['message', 'both', 'files', 'summarize-before']) {
+    assert.equal(rbCase({ busyKey: null, mode }).blocked, false, mode);
+    assert.equal(rbCase({ busyKey: 'other', mode }).blocked, false, mode);
+  }
+  assert.equal(rbCase({ mode: 'edit', resendText: { prompt: 'x' } }).blocked, true, 'edit 带着新内容 = 发出,要拦');
+});
+await t('4 回退函数的守卫排在定向压缩 / 只还原文件的确认框与挂标记之前、放回输入框那一段之后', async () => {
+  assert.ok(RB.indexOf('const placeBackForOwner = () => {') < RBG.start);
+  for (const mark of ["if (mode === 'summarize-before' || mode === 'summarize-after') {", "if (mode === 'files') {", "if (mode === 'edit' && (composerText || hasAttach)) {", 'rollbackBusyRef.current = rbBusy;', 'killedRef.current = true;']) {
+    const i = RB.indexOf(mark);
+    assert.ok(i > RBG.start, `守卫应在「${mark}」之前`);
+  }
+  assert.ok(!/await|confirmDialog|killedRef|abortRef|rollbackBusyRef\.current =/.test(RBG.code), '被拦下的这一次不等待、不弹框、不碰窗格状态与标记');
+});
+await t('4 重做此工具:守卫在乐观截断与一切副作用之前,被拦时只给带键提示', async () => {
+  for (const mark of ['const projectHash =', 'setProviderSwitchNotice({ text: \'正在回退会话', 'setLocalMessages(', 'setRetryActiveUuid(turn.uuid)', '(async () => {', 'rollbackBusyRef.current = rtBusy;']) {
+    const i = RT.indexOf(mark);
+    assert.ok(i > RTG.start, `守卫应在「${mark}」之前`);
+  }
+  assert.ok(!/onTrimmed|await|killedRef|abortRef|rollbackBusyRef\.current =/.test(RTG.code));
+  const run = new Function('rollbackBusyFor', 'rollbackBusyRef', 'rtKey', 'setProviderSwitchNotice', 'ROLLBACK_BUSY_NOTICE', RTG.code + "\nreturn 'pass';");
+  const n = [];
+  assert.equal(run(rollbackBusyFor, { current: { key: 'k' } }, 'k', (x) => n.push(x), ROLLBACK_BUSY_NOTICE), undefined);
+  assert.deepEqual(n, [{ text: ROLLBACK_BUSY_NOTICE, ownerKey: 'k' }]);
+  assert.equal(run(rollbackBusyFor, { current: null }, 'k', (x) => n.push(x), ROLLBACK_BUSY_NOTICE), 'pass');
+  assert.equal(run(rollbackBusyFor, { current: { key: 'other' } }, 'k', (x) => n.push(x), ROLLBACK_BUSY_NOTICE), 'pass');
+});
+await t('4 重发函数只清调用方传入的那个标记:标记是参数,不在被调用时读槽;三个调用点各传自己的', async () => {
+  assert.match(RS4, /const resendReplacing = useCallback\(\(text, opts = \{\}, busy = null\) => \{/);
+  assert.ok(!RS4.includes('= rollbackBusyRef.current;'), '不许再在被调用时读槽当自己的标记');
+  const line = RS4.match(/const releaseBusy = [^\n]*/)[0];
+  const rel = new Function('busy', 'rollbackBusyRef', `${line}\nreleaseBusy();`);
+  const mine = { key: 'k' }; const second = { key: 'k' };
+  const ref = { current: second };
+  rel(mine, ref);
+  assert.equal(ref.current, second, '槽里已是第二次的标记:第一次的重发不得清掉它');
+  rel(second, ref);
+  assert.equal(ref.current, null);
+  ref.current = mine; rel(null, ref);
+  assert.equal(ref.current, mine, '没传标记时什么都不清');
+  assert.equal(RB.split(', rbBusy);').length - 1, 2, '回退函数两处调用都传 rbBusy');
+  assert.match(RT, /\{ appendSystemPrompt, hiddenUserMessage: true \},\n\s*rtBusy,\n\s*\);/);
 });
 
 console.log(`\n[check-r188-rollback-flow] ${passed} passed, ${fails.length} failed`);

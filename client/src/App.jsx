@@ -90,7 +90,7 @@ import { repairMojibake, insertTextAtCaret } from './utils/mojibake.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
-import { runHistoryOp, runHistoryOpSettled, stopTurnAndWait, rollbackBusyFor, ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS } from './utils/historyOps.js';
+import { runHistoryOp, runHistoryOpSettled, stopTurnAndWait, rollbackBusyFor, ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS, ROLLBACK_BUSY_NOTICE } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
 import { isThirdPartyProvider } from './utils/autoAudit.js';
 import { saveOutcome } from './utils/saveOutcome.js';
@@ -8252,12 +8252,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // r146c:调用方登记的"放弃重发时的善后"(回退把本来要重发的内容留回原会话)。resendReplacing 一被调用
   // 就取走并清空,一次一对,不跨调用残留;工具重做不登记(它的续跑是隐藏消息,没有可留回的文字)。
   const resendAbandonRef = useRef(null);
-  const resendReplacing = useCallback((text, opts = {}) => {
+  const resendReplacing = useCallback((text, opts = {}, busy = null) => {
     const ownerKey = queueKeyFor(getLocalSession());
     const onAbandon = resendAbandonRef.current;
     resendAbandonRef.current = null;
     // r188:调用方交过来的「回退进行中」标记 —— 重发真正发出或放弃时清掉(只清自己接手的那一个)。
-    const busy = rollbackBusyRef.current;
+    // r188b:标记由调用方作为第三个参数传入(不再在被调用时读窗格上的槽:槽可能已被同会话的另一次回退覆盖)。
     const releaseBusy = () => { if (busy && rollbackBusyRef.current === busy) rollbackBusyRef.current = null; };
     const deadline = Date.now() + 4000;
     const tick = () => {
@@ -8791,6 +8791,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       ].filter(Boolean).join(''));
       window.dispatchEvent(new CustomEvent('cgui:session-notice', { detail: { key: rbKey } }));
     };
+    // r188b:重入守卫。本会话已有一次回退在进行(等停止落地的几秒里)时,再来的回滚类操作一律不执行:不挂标记、
+    // 不停流、不碰窗格状态,也排在各分支的确认框与等待点之前,只给一条带本会话键的提示。只回填输入框的
+    // 「编辑后重发」(edit 且没带要发出的新内容)不动任何东西,不拦;带着新内容的发出被拦时(输入框此刻已清空),
+    // 把新内容放回本会话输入框,不恢复待回退状态;其余被拦的操作不往输入框放任何东西。
+    if (rollbackBusyFor(rollbackBusyRef.current, rbKey) && !(mode === 'edit' && !resendText)) {
+      const where = resendText ? placeBackForOwner() : '';
+      setProviderSwitchNotice({ text: [ROLLBACK_BUSY_NOTICE, where].filter(Boolean).join(''), ownerKey: rbKey });
+      return;
+    }
     // 会话优先于全局项目:setSelectedProject 支持"浏览别的项目、右侧会话不动",
     // 且 worktree 会话的 projectPath 与主项目不同。取全局项目会把 A 会话的快照写进
     // B 目录、trim 用错 hash(对齐 handleSend/FileReviewPanel 的会话优先口径)。
@@ -8958,7 +8967,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     setBackgroundPid(null);
     backgroundPidRef.current = null; // state 要下一帧才同步,先同步清
     if (_rbPid) {
-      setProviderSwitchNotice({ text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS });
+      setProviderSwitchNotice({ text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS, ownerKey: rbKey });
       // 带身份时后端停下后等回合记录结算才回话;最多等 5 秒,更晚由下面裁剪的重试接着等。
       await stopTurnAndWait({ pid: _rbPid, owner: _rbOwner });
     }
@@ -9113,7 +9122,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       rbHandedOff = true;
       // Bug8:走 resendReplacing —— forceSend 绕过入队门 + 发前轮询本地 ref 等停止落地(≤4s)。
       if (typeof resendText === 'object' && resendText) {
-        resendReplacing(resendText.prompt || resendPrompt, resendText.options || {});
+        resendReplacing(resendText.prompt || resendPrompt, resendText.options || {}, rbBusy);
       } else {
         if (resendMeta?.attachments?.length) {
           // r63-根因C:附件本体在 tmp 有 7 天 TTL(upload.js sweep),旧消息的文件可能已被清理。
@@ -9128,7 +9137,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             }
           }).catch(() => {});
         }
-        resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {});
+        resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {}, rbBusy);
       }
     }
     } finally {
@@ -9200,6 +9209,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     const sel = getLocalSession();
     const rtKey = queueKeyFor(sel); // r146:发起重做的会话键(异步落地前复查用)
+    // r188b:重入守卫(与回退函数里的同一条):本会话已有一次回退在进行时不执行,排在乐观截断与一切副作用之前;
+    // 不挂标记、不停流、不碰窗格状态、不通知调用方裁剪成功,只给一条带本会话键的提示。
+    if (rollbackBusyFor(rollbackBusyRef.current, rtKey)) {
+      setProviderSwitchNotice({ text: ROLLBACK_BUSY_NOTICE, ownerKey: rtKey });
+      return;
+    }
     const projectHash = sel?.projectHash || useStore.getState().selectedProject?.hash;
     if (!sel?.sessionId || !projectHash) {
       confirmDialog('缺少 sessionId 或 projectHash，无法局部重做工具');
@@ -9275,7 +9290,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setBackgroundPid(null);
         backgroundPidRef.current = null;
         if (_rtPid) {
-          setProviderSwitchNotice({ text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS });
+          setProviderSwitchNotice({ text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS, ownerKey: rtKey });
           // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。最多等 5 秒。
           await stopTurnAndWait({ pid: _rtPid, owner: _rtOwner, fetchImpl: fetch });
         }
@@ -9314,6 +9329,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             ? `<cgui-tool-retry>${opts.continuePrompt}</cgui-tool-retry>`
             : `<cgui-tool-retry tool="${toolCall.name}">继续</cgui-tool-retry>`,
           { appendSystemPrompt, hiddenUserMessage: true },
+          rtBusy,
         );
       } catch (err) {
         confirmDialog(opts.contentRisk ? '回退失败：' + err.message : '工具局部重做失败：' + err.message);

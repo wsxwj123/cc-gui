@@ -297,6 +297,24 @@ export function startSampler(page, prompts, t0 = Date.now()) {
   return { samples, stop: async () => { running = false; await loop; } };
 }
 
+/** 后台每 250 毫秒读一次「输入框的值」和「整个页面的可见文字(body.innerText,含消息区之外的提示条)」,直到 stop();读数带 dt(距 t0 毫秒)。读不到输入框的那一次 value 为 null。 */
+export function startFieldSampler(page, t0 = Date.now()) {
+  const samples = [];
+  let running = true;
+  const loop = (async () => {
+    while (running) {
+      try {
+        const value = await composerBox(page).last().inputValue({ timeout: 1000 }).catch(() => null);
+        const body = await page.evaluate(() => document.body.innerText);
+        const t = Date.now();
+        samples.push({ t, dt: t - t0, value, body });
+      } catch { /* 页面正在跳转 / 关闭:忽略这一次 */ }
+      await page.waitForTimeout(250);
+    }
+  })();
+  return { samples, stop: async () => { running = false; await loop; } };
+}
+
 /** 切走再切回:点乙,停 1.5 秒,点回甲,等 5 秒后读一次。 */
 export async function switchAwayAndBack(page, ctx, prompts) {
   await clickSession(page, 'yi', ctx);

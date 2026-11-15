@@ -27,11 +27,11 @@ const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
     'r63: 重发守卫必须判 resendPrompt(= msg.text,含 @path)。旧守卫判剥附件后的文本,纯附件消息 displayText 为空 → 整条被裁掉后什么都不发',
   );
   assert.ok(
-    resendSection.includes('resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {})'),
+    resendSection.includes('resendReplacing(resendText || resendPrompt, resendMeta ? { meta: resendMeta } : {}, rbBusy)'),
     'r63: 自动重发必须补传 { meta: resendMeta },否则新气泡无附件卡片、sidecar 不落盘',
   );
   assert.ok(
-    resendSection.includes('resendReplacing(resendText.prompt || resendPrompt, resendText.options || {})'),
+    resendSection.includes('resendReplacing(resendText.prompt || resendPrompt, resendText.options || {}, rbBusy)'),
     'r63: 带 resendText 对象的分支(编辑重发落地)保持透传 resendText.options,不得被本修复改形',
   );
   // 三个入口(仅回退消息/回退消息和文件/重做整轮)汇流到同一段,不允许在旧变量上重发。
