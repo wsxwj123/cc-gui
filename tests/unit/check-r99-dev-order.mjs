@@ -44,8 +44,10 @@ const PARAMS = [
   // 「回退进行中」标记与提示只是 ref / setter 替身。
   'resolveStopOwner', 'activeProcOwnerRef', 'stopTurnAndWait', 'runHistoryOpSettled',
   'rollbackBusyRef', 'setProviderSwitchNotice',
+  // r188b:「正在停止」提示的文本与显示时长常量(注入真实值),成功后按文本比较撤掉。
+  'ROLLBACK_STOPPING_NOTICE', 'ROLLBACK_STOPPING_NOTICE_MS',
 ];
-const { stopTurnAndWait, runHistoryOpSettled } = await import('../../client/src/utils/historyOps.js');
+const { stopTurnAndWait, runHistoryOpSettled, ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS } = await import('../../client/src/utils/historyOps.js');
 const { resolveStopOwner } = await import('../../client/src/utils/sessionFlowIdentity.js');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const run = new AsyncFunction(...PARAMS, BODY);
@@ -58,6 +60,7 @@ function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = 
   const busySeen = [];
   let trimTries = 0;
   const rollbackBusyRef = { current: null };
+  const notice = { cur: null, log: [] };
   const fetchMock = (url, init) => {
     calls.push(String(url));
     if (String(url).includes('/stop')) { stopBodies.push(JSON.parse(init?.body || '{}')); busySeen.push(rollbackBusyRef.current != null); }
@@ -82,7 +85,7 @@ function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = 
     setStreamingText: noop, setStreamingThinking: noop,
     setStreamingToolCalls: noop, setStreamingBlocks: noop, setStreamHistCutoff: noop,
     fetchMessagesForTab: async () => { calls.push('refetch'); },
-    resendReplacing: (text, o) => { calls.push('resend'); sent.push({ text, o, busyAtResend: rollbackBusyRef.current != null }); },
+    resendReplacing: (text, o) => { calls.push('resend'); sent.push({ text, o, busyAtResend: rollbackBusyRef.current != null, busyKey: rollbackBusyRef.current?.key }); },
     confirmDialog: (m) => { calls.push('confirmDialog:' + m); },
     setRetryActiveUuid: noop,
     // R25 的统一入口替身:记 `runHistoryOp:<op>`(下面的 idx 用 includes 找 'trim-before-tool',
@@ -103,9 +106,11 @@ function harness({ activePid = 'pid-1', bgPid = null, stopHangs = false, opts = 
     activeProcOwnerRef: { current: owner ? { pid: activePid, owner } : null },
     stopTurnAndWait, runHistoryOpSettled,
     rollbackBusyRef,
-    setProviderSwitchNotice: noop,
+    // 替身模拟单槽提示:传对象直接设,传函数按当前值求新值。
+    setProviderSwitchNotice: (v) => { notice.cur = typeof v === 'function' ? v(notice.cur) : v; notice.log.push(notice.cur); },
+    ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS,
   };
-  return { calls, sent, ctx, stopBodies, busySeen, rollbackBusyRef, trimTries: () => trimTries, go: () => run(...PARAMS.map((p) => ctx[p])) };
+  return { calls, sent, ctx, notice, stopBodies, busySeen, rollbackBusyRef, trimTries: () => trimTries, go: () => run(...PARAMS.map((p) => ctx[p])) };
 }
 
 const idx = (calls, needle) => calls.findIndex((c) => c.includes(needle));
@@ -198,6 +203,7 @@ await t('r188 「回退进行中」标记:停止与裁剪期间挂着,交给重�
   await h.go();
   assert.ok(h.busySeen.length >= 2 && h.busySeen.every(Boolean), `等待期间标记必须挂着:${h.busySeen}`);
   assert.equal(h.sent[0].busyAtResend, true);
+  assert.equal(h.sent[0].busyKey, 'sess-1', '标记带发起重做的会话键(rtKey)');
 });
 await t('r188 「回退进行中」标记:裁剪失败 / 切走放弃 / 抛错的出口都清掉', async () => {
   for (const o of [{ trimFails: true }, { paneStays: false }]) {
@@ -212,10 +218,29 @@ await t('r188 「回退进行中」标记:裁剪失败 / 切走放弃 / 抛错�
 });
 await t('r188 别人挂的标记不被这次的出口清掉', async () => {
   const h = harness({ trimFails: true });
-  const other = {};
+  const other = { key: 'sess-other' };
   h.ctx.runHistoryOp = async () => { h.rollbackBusyRef.current = other; return { ok: false, code: 'X' }; };
   await h.go();
   assert.equal(h.rollbackBusyRef.current, other);
+});
+
+await t('r188b 「正在停止」提示:按常量文本与 12 秒时长显示,裁剪成功后撤掉', async () => {
+  const h = harness();
+  await h.go();
+  assert.deepEqual(h.notice.log[0], { text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS });
+  assert.ok(ROLLBACK_STOPPING_NOTICE_MS >= 11000, '时长要盖住等停止 5 秒 + 裁剪重试 6 秒');
+  assert.equal(h.notice.cur, null, '成功后应已撤掉');
+});
+await t('r188b 撤提示时只撤它自己:当前显示的是别的提示就不动', async () => {
+  const h = harness();
+  h.ctx.runHistoryOp = async () => { h.notice.cur = { text: '别的提示' }; return { ok: true, status: 200, data: {} }; };
+  await h.go();
+  assert.deepEqual(h.notice.cur, { text: '别的提示' });
+});
+await t('r188b 没有在跑进程:不显示「正在停止」提示', async () => {
+  const h = harness({ activePid: null, bgPid: null });
+  await h.go();
+  assert.ok(!h.notice.log.some((n) => n?.text === ROLLBACK_STOPPING_NOTICE));
 });
 
 // ── ② 哨兵:两条路径各发什么─────────────────────────────────────

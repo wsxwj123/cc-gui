@@ -113,7 +113,7 @@ t('①b 裁剪走统一入口(R25 接线契约:客户端只走"预览→提交"�
   assert.match(body, /const tr = await runHistoryOpSettled\(sel\.sessionId, 'trim-before-tool', \{[^\n]*\{ runOp: runHistoryOp \}\);/,
     '裁剪必须经 utils/historyOps.js 的统一入口');
   assert.equal(count(body, /fetch\(`\/api\/sessions\//g), 0, '不许自拼历史端点(会跳过预览令牌/备份)');
-  assert.match(A, /import \{ runHistoryOp(?:, [A-Za-z]+)* \} from '\.\/utils\/historyOps\.js'/);
+  assert.match(A, /import \{ runHistoryOp(?:, [A-Za-z_]+)* \} from '\.\/utils\/historyOps\.js'/);
 });
 t('①b 按钮判据与退化条件对齐:有后续用户消息 / 已回退过 → 不给自动回退', () => {
   const memo = A.slice(A.indexOf('const contentRiskAnchor = useMemo'), A.indexOf('// /branch 分叉'));

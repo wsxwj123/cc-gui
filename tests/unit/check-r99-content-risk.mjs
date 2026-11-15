@@ -510,7 +510,7 @@ check('§4.3 App.jsx handleRetryTool 恰 8 次(改前 7:新增一次 Ref 调用)
 // 且提交前必写备份。口径不变(仍是"r99 回退链路不得自己拼会话端点"),不再钉当时的
 // 出现次数与所在文件 —— 计数器只对"当时那一瞬间的源码形状"成立,重构一次即假红。
 check('§4.3 App.jsx 不裸 fetch 历史改写端点:一律经统一入口 utils/historyOps.js(R25 接线契约)', () => {
-  assert.match(A, /import \{ runHistoryOp(?:, [A-Za-z]+)* \} from '\.\/utils\/historyOps\.js'/,
+  assert.match(A, /import \{ runHistoryOp(?:, [A-Za-z_]+)* \} from '\.\/utils\/historyOps\.js'/,
     'App.jsx 必须从统一入口调历史操作');
   assert.strictEqual(
     count(A, /fetch\(`\/api\/sessions\/\$\{[^}]*\}\/(?:trim|compact-segment|trim-before-tool|strip-thinking)/g), 0,

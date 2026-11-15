@@ -156,8 +156,12 @@ await t('3 回滚裁剪最终失败:不重发、不截界面,内容放回输入�
   assert.ok(!A.includes("text: '会话记录裁剪失败,回退可能不完整"), '旧的「照样重发」提示已去掉');
 });
 await t('3 「回退进行中」标记:入队门、流收尾排空、后台轮询排空三处都看它;回滚各出口清', async () => {
-  assert.match(A, /!opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current \|\| rollbackBusyRef\.current\)/);
-  const drains = [...A.matchAll(/if \(rollbackBusyRef\.current\) return;\n\s*const (?:next|q) = useStore\.getState\(\)\.shiftMessage\(drainKey\);/g)];
+  assert.match(A, /!opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current \|\| rollbackBusyFor\(rollbackBusyRef\.current, sessionQueueKey\)\)/);
+  assert.ok(!/if \(rollbackBusyRef\.current\) return;/.test(A), '排空不许只看标记在不在(要按会话键)');
+  assert.match(RB, /const rbBusy = \{ key: rbKey \};/);
+  assert.match(RB, /rbKey = draftKey;[^\n]*\n\s*rbBusy\.key = draftKey;/, '会话被裁空转草稿时标记跟着换键');
+  assert.match(A, /const rtBusy = \{ key: rtKey \};/);
+  const drains = [...A.matchAll(/if \(rollbackBusyFor\(rollbackBusyRef\.current, drainKey\)\) return;\n\s*const (?:next|q) = useStore\.getState\(\)\.shiftMessage\(drainKey\);/g)];
   assert.equal(drains.length, 2, '两处排空都要在弹队之前看标记');
   assert.match(RB, /rollbackBusyRef\.current = rbBusy;\n\s*let rbHandedOff = false;\n\s*try \{/);
   assert.match(RB, /\} finally \{\n[^\n]*\n\s*if \(!rbHandedOff && rollbackBusyRef\.current === rbBusy\) rollbackBusyRef\.current = null;/);
@@ -165,6 +169,29 @@ await t('3 「回退进行中」标记:入队门、流收尾排空、后台轮�
   const RS = A.slice(A.indexOf('const resendReplacing = useCallback'), A.indexOf('// Auto-reattach:'));
   assert.match(RS, /if \(!paneStillOn\(ownerKey\)\) \{ releaseBusy\(\); onAbandon\?\.\(\); return; \}/, '放弃时清');
   assert.match(RS, /try \{\n\s*handleSendRef\.current\?\.\(text, \{ \.\.\.opts, forceSend: true \}\);\n\s*\} finally \{ releaseBusy\(\); \}/, '发出时清');
+});
+
+const { rollbackBusyFor } = await import('../../client/src/utils/historyOps.js');
+await t('3 标记按会话生效:属于会话甲时,乙的发送与排空不受影响,甲自己的受影响', async () => {
+  const busy = { key: 'sess-A' };
+  assert.equal(rollbackBusyFor(busy, 'sess-A'), true);
+  assert.equal(rollbackBusyFor(busy, 'sess-B'), false);
+  assert.equal(rollbackBusyFor(null, 'sess-A'), false);
+  assert.equal(rollbackBusyFor(busy, null), false);
+  assert.equal(rollbackBusyFor({}, 'sess-A'), false, '没有键的标记不作用于任何会话');
+  busy.key = 'draft-X'; // 会话被裁空转草稿,同一个对象换键
+  assert.equal(rollbackBusyFor(busy, 'sess-A'), false);
+  assert.equal(rollbackBusyFor(busy, 'draft-X'), true);
+});
+
+await t('3 「正在停止」提示:两处显示都用常量 + 时长,回滚成功截界面后与切走分支、重做裁剪成功后按文本撤', async () => {
+  assert.ok(!A.includes("'正在停止当前回合"), '提示文本不许再写成字面量');
+  const show = A.split('setProviderSwitchNotice({ text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS });').length - 1;
+  assert.equal(show, 2);
+  const CLR = 'setProviderSwitchNotice((cur) => (cur?.text === ROLLBACK_STOPPING_NOTICE ? null : cur));';
+  assert.equal(A.split(CLR).length - 1, 3);
+  const iT = RB.indexOf('    truncateUi();\n');
+  assert.ok(iT > 0 && RB.indexOf(CLR, iT) - iT < 200, '截界面之后紧跟着撤');
 });
 
 console.log(`\n[check-r188-rollback-flow] ${passed} passed, ${fails.length} failed`);

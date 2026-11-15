@@ -70,6 +70,19 @@ export const TRIM_RETRY_INTERVAL_MS = 400;
 
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 等停止期间的提示。两个发起点与「回退完成后撤掉它」的比较共用这一个常量;显示时长要盖住最长等待
+// (等停止 5 秒 + 裁剪重试 6 秒)。
+export const ROLLBACK_STOPPING_NOTICE = '正在停止当前回合，停止后执行回退。';
+export const ROLLBACK_STOPPING_NOTICE_MS = 12000;
+
+/**
+ * 「回退进行中」标记({ key:发起回退的会话键 })是否作用于 key 这个会话。标记挂在窗格上,但等待期间
+ * 窗格可能已切到别的会话:只有键相同的会话的发送与排空才受它影响。
+ */
+export function rollbackBusyFor(busy, key) {
+  return !!busy && !!key && busy.key === key;
+}
+
 /**
  * 发停止请求并等它回话,最多等 maxWaitMs(绝不无限等控制类调用;回话更晚也不要紧,裁剪重试会接着等)。
  * 带 owner 时后端走「停下后等回合记录结算再回话」那条路;owner 只传能证明属于这个 pid 的身份

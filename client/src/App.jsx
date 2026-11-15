@@ -90,7 +90,7 @@ import { repairMojibake, insertTextAtCaret } from './utils/mojibake.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
-import { runHistoryOp, runHistoryOpSettled, stopTurnAndWait } from './utils/historyOps.js';
+import { runHistoryOp, runHistoryOpSettled, stopTurnAndWait, rollbackBusyFor, ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
 import { isThirdPartyProvider } from './utils/autoAudit.js';
 import { saveOutcome } from './utils/saveOutcome.js';
@@ -4278,8 +4278,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // poll 会把它误判成「后台运行中」并闪黄条,甚至触发 auto-reattach 重连。记下已停的
   // pid,poll 与 reattach 都跳过它。CQ-15:指向模块级共享集合,使分屏各 pane 互相感知停止。
   const stoppedPidsRef = useRef(stoppedChatPids);
-  // r188:窗格级「回退进行中」标记(回滚 / 重做此工具从停回合到重发真正发出或放弃的这段时间,值是发起方的
-  // 令牌对象,空 = 没有)。期间流收尾与后台轮询的排空不弹不发,普通发送进排队 —— 否则等停止、等裁剪的
+  // r188:「回退进行中」标记(回滚 / 重做此工具从停回合到重发真正发出或放弃的这段时间,值是发起方的
+  // 令牌对象 { key:发起回退的会话键 },空 = 没有)。ref 挂在窗格上,但只对键相同的会话生效(rollbackBusyFor):
+  // 等待期间窗格切到别的会话时,那个会话的发送与排空不受影响。期间流收尾与后台轮询的排空不弹不发,普通发送进排队 —— 否则等停止、等裁剪的
   // 几秒里,被中止那条流的收尾会把排队消息发出去,或用户新发的一条直接起一轮,抢在裁剪与重发之前。
   // 清它的地方:resendReplacing 真正发出或放弃时;发起方没交给 resendReplacing 的所有出口(finally)。
   const rollbackBusyRef = useRef(null);
@@ -4734,7 +4735,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               if (queueKeyFor(s2) !== drainKey) return;
               // r188:回退进行中(被停下的进程已从列表消失,但裁剪与重发还没完成)→ 不弹不发;
               // 标记清掉后的下一轮轮询(或重发那一轮的收尾)再排空。
-              if (rollbackBusyRef.current) return;
+              if (rollbackBusyFor(rollbackBusyRef.current, drainKey)) return;
               const q = useStore.getState().shiftMessage(drainKey);
               if (q?.text) handleSendRef.current?.(q.text, q.opts || (q.hidden ? { hiddenUserMessage: true } : {}));
             }, 50);
@@ -5490,7 +5491,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 队列条目上的「⚡ 并入」按钮(handleAccelerate)。
     // forceSend(回滚/重做的重发 = 有意打断替换)照旧连这道门都不进。
     // r188:回退进行中(停回合、等裁剪的那几秒)普通发送同样进排队,由重发那一轮的收尾排空。
-    if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current || rollbackBusyRef.current)) {
+    if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current || rollbackBusyFor(rollbackBusyRef.current, sessionQueueKey))) {
       const queuedAt = Date.now();
       const queueOpts = { ...opts };
       delete queueOpts.onEnqueueFailure; delete queueOpts.onQueued; delete queueOpts.fromComposer;
@@ -8187,7 +8188,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           setTimeout(() => {
             if (queueKeyFor(getLocalSession()) !== drainKey) return;
             // r188:回退进行中(这条流正是被回退中止的那条)→ 不弹不发,留给重发那一轮的收尾排空。
-            if (rollbackBusyRef.current) return;
+            if (rollbackBusyFor(rollbackBusyRef.current, drainKey)) return;
             const next = useStore.getState().shiftMessage(drainKey);
             // 透传入队时的 opts(尤其 hiddenUserMessage)——否则计划执行这种隐藏续跑消息
             // 出队重发时会变成可见的用户气泡(#5)。
@@ -8930,7 +8931,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // (前面没有等待点),在跑的进程就是开始那一刻记下的 startPid;等待之后不再读窗格 ref。
     // 从这里起挂上窗格级「回退进行中」标记(排空不弹不发、普通发送进排队),交给 resendReplacing 之前的所有
     // 出口都在下面的 finally 里清掉。(为了局部改动,try 块内的原有代码沿用原缩进。)
-    const rbBusy = {};
+    const rbBusy = { key: rbKey }; // 只对发起回退的会话生效(会话被裁空转草稿时下面同步换键)
     rollbackBusyRef.current = rbBusy;
     let rbHandedOff = false;
     try {
@@ -8952,7 +8953,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     setBackgroundPid(null);
     backgroundPidRef.current = null; // state 要下一帧才同步,先同步清
     if (_rbPid) {
-      setProviderSwitchNotice({ text: '正在停止当前回合，停止后执行回退。' });
+      setProviderSwitchNotice({ text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS });
       // 带身份时后端停下后等回合记录结算才回话;最多等 5 秒,更晚由下面裁剪的重试接着等。
       await stopTurnAndWait({ pid: _rbPid, owner: _rbOwner });
     }
@@ -9038,6 +9039,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             draftId: _nd,
           });
           rbKey = draftKey; // 窗格现在是这条新 draft,后续复查认它
+          rbBusy.key = draftKey; // r188:「回退进行中」标记跟着换到新草稿键(同一个对象,清标记的身份比较不变)
         }
       } catch { trimFailed = true; }
     }
@@ -9047,6 +9049,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (!trimFailed) for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetainedSince(k, rbCutTs);
       // 开始回退时本会话在跑的回合,r188 起已在破坏性阶段开头按 startPid 停过并等过回话,这里不再重复发停止。
       // 会话被裁空(wipedAway)→ 侧栏不再列出它、回不去:内容进首页「未发出的消息」(见 leaveForOwner)。
+      // r188:「正在停止」提示挂在窗格上,窗格已换了会话 —— 仍是它时撤掉,别让它留在别的会话上。
+      setProviderSwitchNotice((cur) => (cur?.text === ROLLBACK_STOPPING_NOTICE ? null : cur));
       leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, wiped: wipedAway });
       return;
     }
@@ -9076,6 +9080,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
 
     // 4) trim UI
     truncateUi();
+    // r188:回退已完成,撤掉「正在停止」那条提示(只在当前显示的仍是它时撤,文件侧的提示不动)。
+    setProviderSwitchNotice((cur) => (cur?.text === ROLLBACK_STOPPING_NOTICE ? null : cur));
 
     // 5) Re-fetch the (now-trimmed) message list so the UI mirrors disk —
     //    avoids any drift between in-memory slice and what the CLI will see.
@@ -9236,7 +9242,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     ].join('\n');
     (async () => {
       // r188:「回退进行中」标记(见 rollbackBusyRef 定义处):交给 resendReplacing 之前的所有出口在 finally 里清。
-      const rtBusy = {};
+      const rtBusy = { key: rtKey }; // 只对发起重做的会话生效
       rollbackBusyRef.current = rtBusy;
       let rtHandedOff = false;
       try {
@@ -9264,7 +9270,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setBackgroundPid(null);
         backgroundPidRef.current = null;
         if (_rtPid) {
-          setProviderSwitchNotice({ text: '正在停止当前回合，停止后执行回退。' });
+          setProviderSwitchNotice({ text: ROLLBACK_STOPPING_NOTICE, ttlMs: ROLLBACK_STOPPING_NOTICE_MS });
           // 编辑重发=全杀(hard):进程内存上下文与改写后的 jsonl 已分叉,留活任务会答非所问。最多等 5 秒。
           await stopTurnAndWait({ pid: _rtPid, owner: _rtOwner, fetchImpl: fetch });
         }
@@ -9275,6 +9281,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // r188:裁剪成功才删留存副本(只删停止时刻不早于截断点的)。磁盘已裁,与窗格是否还在本会话无关,
         // 所以放在切走复查之前。被这次操作中止的那条流的半截在等停止期间已进表,在这里一并删掉。
         for (const k of new Set([rtKey, sel.sessionId].filter(Boolean))) dropRetainedSince(k, rtCutTs);
+        // r188:裁剪已成功(乐观截断早已画好),撤掉「正在停止」提示 —— 只在当前显示的仍是它时撤。
+        setProviderSwitchNotice((cur) => (cur?.text === ROLLBACK_STOPPING_NOTICE ? null : cur));
         // r146 R3 同族:等停止 / 裁剪期间切走了 —— 后续窗格动作与重跑一律放弃(重跑会发进别的会话)。
         if (!paneStillOn(rtKey)) return;
         // r99b(Windows 审查中-1):截断真正成功后才通知调用方 —— Windows 上 rename 覆盖被
