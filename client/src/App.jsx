@@ -4475,9 +4475,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 只是【用户自己那条消息】—— 它有两个可渲染来源(本地气泡 / 历史回显),必须有且只有一个在画。
   // 撤除是安全的:本地气泡一走,visibleMessages 的既有判据(本地已无同文本气泡 → 历史必须接棒)
   // 就把历史那条放出来了,不会两个来源同时缺席(R68/R37 同一条口径)。
+  // r189:messages 只是最后一页,另把它和「左边还有没有更早的页」一并交给暂存判结清(判据见
+  // localUserStash.js 的 settledByWindow);否则孪生在窗口外的旧消息会被当成没存盘、补回到末尾。
+  // 分页账不属于本会话时 pagingForHere 为空,按没有更早的页算。
+  const stashWindowHasMore = !!pagingForHere?.hasMore;
   useEffect(() => {
     if (!sessionQueueKey) return;
-    const { pending, persisted } = takePendingUserBubbles(sessionQueueKey, makePersistedIndex(messages));
+    const { pending, persisted } = takePendingUserBubbles(sessionQueueKey, makePersistedIndex(messages),
+      { messages, hasMore: stashWindowHasMore });
     if (!pending.length && !persisted.length) return;
     setChatMessages((prev) => {
       let next = prev;
@@ -4493,7 +4498,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       if (!add.length) return next;
       return [...next, ...add];
     });
-  }, [messages, sessionQueueKey]);
+  }, [messages, sessionQueueKey, stashWindowHasMore]);
 
   // BF-1:渲染用的历史列表。活跃流归属本会话且截断点存在时,过滤掉本回合的半成品条目;
   // 其余情况原样返回 messages(同一引用,不打穿 MessageList 的 memo)。useMemo 依赖里
