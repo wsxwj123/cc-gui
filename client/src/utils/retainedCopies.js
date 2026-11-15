@@ -3,7 +3,7 @@
 // 路径都会把它一起清掉),单独放在这张按会话存的表里;渲染时按「本轮历史」叠加到历史段上。
 //
 // 只在三种情况下清:本轮历史已经把它每一块都包含了(渲染算出 covered 后由调用方删);回滚 / 编辑重发
-// (dropRetained,同时记墓碑);会话被清空(dropRetained)。表在内存里,刷新页面后不在(已知局限)。
+// (dropRetainedSince,只删停止时刻不早于截断点的,同时记墓碑);会话被清空(dropRetained)。表在内存里,刷新页面后不在(已知局限)。
 //
 // 纯模块,不依赖 React。表的读取对同一组键、同一个版本返回同一个引用(空时返回同一个空数组常量),
 // 叠加函数在没有改动时返回传入的原列表引用 —— 两者都是为了不打穿渲染层的记忆化。
@@ -118,6 +118,38 @@ export function dropRetained(key, at = Date.now()) {
   table.delete(key);
   notify();
   return true;
+}
+
+// r188:回滚类操作只删「停止时刻不早于截断点」的条目(stopTs >= cutTs),更早轮次留下的不动。
+// 一轮停下之后才能发下一条:更早轮次的停止时刻一定早于截断点那条消息的时间,被回退的轮次与更晚的轮次
+// 一定不早于它。cutTs 不是有效数字(取不到截断点)时等同 dropRetained(整表删)。停止时刻无效的条目按
+// 「可能在被回退的范围里」处理,一并删。
+// 墓碑仍记「这次回退发生的时刻」(at),不记 cutTs:墓碑要拦的是被这次回退中断的那条流迟到的写入,
+// 它的起流时刻晚于截断点,按 cutTs 记反而拦不住。表里已有的更早条目不经过写入,不受墓碑影响。
+export function dropRetainedSince(key, cutTs, at = Date.now()) {
+  if (!key) return false;
+  if (typeof cutTs !== 'number' || !Number.isFinite(cutTs)) return dropRetained(key, at);
+  tombstones.delete(key);
+  tombstones.set(key, Math.max(Number(at) || Date.now(), 0));
+  while (tombstones.size > MAX_TOMBSTONES) tombstones.delete(tombstones.keys().next().value);
+  const cur = table.get(key);
+  if (!cur) return false;
+  const next = cur.filter((e) => {
+    const s = Number(e.stopTs);
+    return Number.isFinite(s) && s < cutTs;
+  });
+  if (next.length === cur.length) return false;
+  if (next.length) table.set(key, Object.freeze(next));
+  else table.delete(key);
+  notify();
+  return true;
+}
+
+// 回滚类调用点取截断点时间:消息 / 回合的时间戳(ISO 串或毫秒数);取不到返回 NaN(dropRetainedSince 据此整表删)。
+export function cutTsOf(ts) {
+  if (typeof ts === 'number') return Number.isFinite(ts) ? ts : NaN;
+  if (typeof ts === 'string' && ts) return Date.parse(ts);
+  return NaN;
 }
 
 // 只给测试用:清空模块状态。
