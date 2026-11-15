@@ -117,6 +117,7 @@ export function historyLegacyArrays(blocks) {
 export function splitAgentReply(agent) {
   const text = Array.isArray(agent?.text) ? agent.text : [];
   const blocks = Array.isArray(agent?.blocks) ? agent.blocks : [];
+  // 前提:有报错块时只按块走、不看正文数组 agent.text;成立的前提是带报错块的条目,正文都在块里。
   if (!blocks.some((b) => b && b.type === 'text' && b.errorText)) {
     const all = text.join('');
     return all ? [{ errorText: false, content: all }] : [];

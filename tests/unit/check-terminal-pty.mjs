@@ -437,6 +437,13 @@ await new Promise((r) => setTimeout(r, 300));
 
 // 9d) 同 id 两帧并发 restart:只允许开出一个 generation(旧实现两帧都在 await spawnPty 前通过
 //     检查 → 双 spawn,先注册的 PTY 成孤儿:不计 active、killAll 杀不到、输出无处去)
+//     后端(server/routes/terminal.js)对第二帧有两种都正确的处理,判据按「开出了几个不同的终端」数:
+//     ①第一帧还在创建中(withIdGate 持着同 id 的闸)→ 第二帧撞闸被拒,回 term-error(TERM_OPEN_CONFLICT),
+//       term-opened 回执只有 1 条;
+//     ②第一帧已创建完 → restartTerminalLocked 的「同连接重复 restart:返回它已经创建的新项(幂等)」分支
+//       再回一条 term-opened,generation 与 pid 都与第一条相同(9b 段断言的就是这条规则)。
+//     所以回执 1 条或 2 条都接受,但不同的 generation、不同的 pid 都必须恰好 1 个;旧毛病(两帧都去创建)
+//     会出现两个不同的 pid / generation。
 {
   const wsR = await connect();
   const fr = [];
@@ -459,7 +466,12 @@ await new Promise((r) => setTimeout(r, 300));
   rawSend(wsR, { type: 'term-restart', id: 't4', generation: o4.generation });
   await new Promise((r) => setTimeout(r, 2500));
   const opened4 = fr.slice(mark4).filter((m) => m.type === 'term-opened' && m.id === 't4');
-  if (opened4.length !== 1) fail(`同 id 并发 restart 只应开出 1 个 generation,实为 ${opened4.length} 个(pid=${opened4.map((m) => m.pid).join(',')});多出来的那个 PTY 无人登记`);
+  if (opened4.length < 1) fail('同 id 并发 restart 后没有收到任何 term-opened 回执');
+  const gens4 = new Set(opened4.map((m) => m.generation));
+  const pids4 = new Set(opened4.map((m) => m.pid));
+  if (gens4.size !== 1 || pids4.size !== 1) {
+    fail(`同 id 并发 restart 只应开出 1 个不同的终端,实为 ${gens4.size} 个不同的 generation(${[...gens4].join(',')})、${pids4.size} 个不同的 pid(${[...pids4].join(',')}),回执 ${opened4.length} 条;多出来的那个 PTY 无人登记`);
+  }
   if ((await status()).active !== 1) fail(`并发 restart 后应只多 1 个存活 shell(active=1),实为 ${(await status()).active}`);
   rawSend(wsR, { type: 'term-close', id: 't4', generation: opened4[0].generation });
   await waitR((m) => m.type === 'term-closed' && m.id === 't4', 't4 关闭');

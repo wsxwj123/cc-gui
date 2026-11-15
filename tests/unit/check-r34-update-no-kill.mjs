@@ -33,7 +33,9 @@ async function closedPort() {
   return port;
 }
 
-const NPM_CMD = 'npm install -g @anthropic-ai/claude-code@latest && "$(npm prefix -g)/bin/claude" --version';
+// 出处:server/routes/version-check.js 的 updateCmdFor('npm-registry') 非 Windows 那一行(含 NPM_ALLOW_CLAUDE_SCRIPTS
+// 拼出来的结果);那边改了这里要跟着逐字同步。
+const NPM_CMD = 'npm install -g @anthropic-ai/claude-code@latest --allow-scripts=@anthropic-ai/claude-code && "$(npm config get prefix)/bin/claude" --version';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let liveServer = null;
