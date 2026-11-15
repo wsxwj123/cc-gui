@@ -166,10 +166,23 @@ test('B7 [相邻回归] 在 B1 的结果上反复点「加载更早」直到 M1 
   await switchBackAndSettle(page, s, last);
 
   const scope = scrubberScope(page);
-  const loadedOf = async () => (await scope.count()) ? Number(/(\d+)\s*\/\s*\d+/.exec(await scope.first().innerText())?.[1] ?? 0) : Infinity;
-  for (let i = 0; i < 8 && (await scope.count()); i += 1) {
+  // 「在不在」和「文字是什么」在页面里同一刻读完,避免两步之间按钮消失导致读文字一直等到超时;按钮不在 = 全部已加载 = Infinity
+  const loadedOf = () => page.evaluate(() => {
+    const el = document.querySelector('[data-cgui="scrubber-scope"]');
+    if (!el) return Infinity;
+    return Number(/(\d+)\s*\/\s*\d+/.exec(el.innerText || '')?.[1] ?? 0);
+  });
+  // 点击同样在页面里一步完成:按钮已不在则返回 false,不会等按钮出现
+  const clickScope = () => page.evaluate(() => {
+    const el = document.querySelector('[data-cgui="scrubber-scope"]');
+    if (!el) return false;
+    el.click();
+    return true;
+  });
+  for (let i = 0; i < 8; i += 1) {
     const before = await loadedOf();
-    await scope.first().click();
+    if (before === Infinity) break;
+    if (!(await clickScope())) break;
     await expect.poll(loadedOf, { message: `点「加载更早」后已加载数应增加(点前 ${before})`, timeout: 20_000 }).toBeGreaterThan(before);
     await page.waitForTimeout(500);
   }
