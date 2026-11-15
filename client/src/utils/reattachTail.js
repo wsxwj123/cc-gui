@@ -105,9 +105,18 @@ export function tailMarkSettled(tail) {
   return { ...tail, settled: true };
 }
 
-/** 历史索引:全部回合的 uuid;本轮(最后一条提示词之后)各正文 / 思考块的指纹。 */
+// 尾巴每一帧都重新判断;历史列表只在真被重拉时换引用 —— 按引用缓存,同一份历史只建一次索引。
+const historyIndexCache = new WeakMap();
+
+/** 历史索引:全部回合的 uuid;本轮(最后一条提示词之后)各正文 / 思考块的指纹。同一个数组引用返回同一个对象。 */
 export function tailHistoryIndex(messages) {
-  const list = Array.isArray(messages) ? messages : [];
+  if (!Array.isArray(messages)) return buildHistoryIndex([]);
+  let idx = historyIndexCache.get(messages);
+  if (!idx) { idx = buildHistoryIndex(messages); historyIndexCache.set(messages, idx); }
+  return idx;
+}
+
+function buildHistoryIndex(list) {
   const uuids = new Set();
   const fps = new Set();
   let roundStart = 0;

@@ -129,9 +129,62 @@ ok('非用户停止(被结束 / 出错):历史末条签名变了就算读回', (
 ok('源码:收尾轮询与渲染期退场共用 tailReadBack', () => {
   const src = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
   assert.ok(src.includes('!tailReadBack(tailEnd, getLocalMessages())'), '轮询用同一判据');
-  assert.ok(src.includes('tailMarkEnded(makeReattachTail(null), orderedBlocks, getLocalMessages(), endedClean, turnAborted)'), '收尾记录带用户停止标记');
+  assert.ok(src.includes('tailMarkEnded(makeReattachTail(null), tailLive ? orderedBlocks : [], getLocalMessages(), endedClean, turnAborted)'), '收尾记录带用户停止标记');
   const mod = readFileSync(new URL('../../client/src/utils/reattachTail.js', import.meta.url), 'utf8');
   assert.ok(mod.includes('if (tailReadBack(tail, messages)) return [];'), '渲染期整条退场用同一判据');
+});
+
+ok('尾巴已关:收尾记录定格空数组,读回判据照常可用', () => {
+  const Hs = [...H0, { type: 'user', text: '[Request interrupted by user]' }];
+  const a = tailMarkEnded(makeReattachTail(null), [], Hs, false, true);
+  assert.deepEqual(a.blocks, []);
+  assert.equal(tailReadBack(a, [...Hs, turn('r8', [{ type: 'text', content: 'x' }])]), false, '用户停止:历史变了但没有新打断提示');
+  assert.equal(tailReadBack(a, [...Hs, { type: 'user', text: '[Request interrupted by user]' }]), true, '新打断提示:读回');
+  const b = tailMarkEnded(makeReattachTail(null), [], H0, false, false);
+  assert.equal(tailReadBack(b, [...H0]), false);
+  assert.equal(tailReadBack(b, [...H0, user('z')]), true, '其余:末条签名变了');
+});
+
+ok('visibleTailBlocks(收尾记录, null, 历史):meta 为空时按指纹去掉历史已有的块', () => {
+  const rec = tailMarkEnded(makeReattachTail(null), [{ type: 'text', content: 'P0 text' }, { type: 'tool_use', toolCall: { id: 'q' } }, { type: 'text', content: P1_PART }], H0, false, true);
+  assert.deepEqual(rec.meta, {});
+  assert.deepEqual(visibleTailBlocks(rec, null, H0).map((b) => b.content), [P1_PART], '历史已有的 P0 去掉,留下没有的');
+});
+
+ok('tailHistoryIndex 按列表引用缓存', () => {
+  const H = [...H0];
+  const a = tailHistoryIndex(H);
+  assert.equal(tailHistoryIndex(H), a, '同一引用 → 同一对象');
+  const H2 = [...H0, turn('r9', [{ type: 'text', content: 'new' }])];
+  const b = tailHistoryIndex(H2);
+  assert.notEqual(b, a);
+  assert.ok(b.fps.has('text:new') && !a.fps.has('text:new'), '新数组是新结果');
+  assert.equal(tailHistoryIndex(null).uuids.size, 0, '非数组不缓存、照常返回空索引');
+});
+
+ok('源码:回放不完整关尾巴;读回保证跟着流的形态;只在用户停止时多读;读不回来写留存表', () => {
+  const src = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
+  const bodyOf = (head) => {
+    const i = src.indexOf(head);
+    assert.ok(i > 0, head);
+    const j = src.indexOf('\n          }\n', i);
+    return src.slice(i, j);
+  };
+  for (const head of ["if (event.type === 'early_overflow') {", "if (event.type === 'stream_gap') {"]) {
+    const body = bodyOf(head);
+    assert.ok(body.includes('tailLive = false;'), `${head} 关掉尾巴`);
+    assert.ok(body.includes('setReattachTail((t) => (t && t.tok === tailToken ? null : t));'), `${head} 置空本流尾巴`);
+  }
+  const waitLine = src.split('\n').find((l) => l.includes('i < 11 && !tailReadBack(tailEnd, getLocalMessages())'));
+  assert.ok(waitLine, '等读回的条件');
+  assert.ok(!waitLine.includes('tailLive'), '不再以 tailLive 为条件');
+  assert.ok(waitLine.includes('tailEnd.aborted'), '只在用户停止时多读');
+  assert.ok(src.includes('const tailEnd = unseededReattach() ?'), '生成 tailEnd 的条件');
+  assert.ok(src.includes('&& !unseededReattach()) {\n          producedReply = true;'), '停止分支不推本地副本用同一个量');
+  const pEnd = src.indexOf('const tailEnd = unseededReattach() ?');
+  const pRetain = src.indexOf("retainStreamCopy('stop'", pEnd);
+  const pSettled = src.indexOf('tailMarkSettled', pEnd);
+  assert.ok(pRetain > pEnd && pSettled > pRetain, '读不回来写留存表在标 settled 之前');
 });
 
 ok('签名与索引的边界', () => {
