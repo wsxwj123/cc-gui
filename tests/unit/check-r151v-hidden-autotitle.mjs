@@ -283,7 +283,9 @@ check('11 前提:工具重做调用点经 resendReplacing 发出,opts 带 hidden
   if (!retryCalls.length) fail('找不到', `文本含 cgui-tool-retry 的 resendReplacing(…) 调用(resendReplacing 调用共 ${calls.length} 处)`);
   for (const { i, args } of retryCalls) {
     const line = lineOf(i);
-    if (args.length !== 2) fail('次数不对', `第 ${line} 行 resendReplacing 实参应 2 个(文本、opts),实际 ${args.length} 个`);
+    // r188b:第三个实参 = 调用方自己的「回退进行中」标记(resendReplacing 只清这一个)。
+    if (args.length !== 3) fail('次数不对', `第 ${line} 行 resendReplacing 实参应 3 个(文本、opts、调用方自己的标记),实际 ${args.length} 个`);
+    assert.equal(args[2].trim(), 'rtBusy', `第 ${line} 行:第三个实参应是工具重做自己挂的标记 rtBusy`);
     const textFor = (continuePrompt) => evalExpr(args[0], { opts: { continuePrompt }, toolCall: { name: 'Bash' } });
     assert.equal(textFor(undefined), RETRY_TEXT, `第 ${line} 行:不带续跑指令时文本应是 ${RETRY_TEXT}`);
     assert.equal(textFor('换个方式继续'), RETRY_CONTINUE_TEXT, `第 ${line} 行:带续跑指令时文本应是 ${RETRY_CONTINUE_TEXT}`);
@@ -294,7 +296,7 @@ check('11 前提:工具重做调用点经 resendReplacing 发出,opts 带 hidden
 });
 
 check('11 前提:resendReplacing 以 { ...opts, forceSend: true } 调 handleSendRef.current,文本与 opts 原样透传', () => {
-  const RR_HEAD = 'const resendReplacing = useCallback((text, opts = {}) => {';
+  const RR_HEAD = 'const resendReplacing = useCallback((text, opts = {}, busy = null) => {'; // r188b:第三个参数接调用方的标记
   const { start, end } = callbackSpan(RR_HEAD, 'resendReplacing');
   const bodyFrom = start + RR_HEAD.length;
   const body = app.slice(bodyFrom, end);
