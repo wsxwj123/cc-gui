@@ -110,10 +110,10 @@ t('①b 同会话只自动回退一次,标记 keyed by sessionId(分屏不串)',
 });
 t('①b 裁剪走统一入口(R25 接线契约:客户端只走"预览→提交"两步,不自拼端点)', () => {
   const body = A.slice(A.indexOf('const handleRetryTool = useCallback'), A.indexOf('const handleRetryToolRef = useRef'));
-  assert.match(body, /const tr = await runHistoryOp\(sel\.sessionId, 'trim-before-tool', \{/,
+  assert.match(body, /const tr = await runHistoryOpSettled\(sel\.sessionId, 'trim-before-tool', \{[^\n]*\{ runOp: runHistoryOp \}\);/,
     '裁剪必须经 utils/historyOps.js 的统一入口');
   assert.equal(count(body, /fetch\(`\/api\/sessions\//g), 0, '不许自拼历史端点(会跳过预览令牌/备份)');
-  assert.match(A, /import \{ runHistoryOp \} from '\.\/utils\/historyOps\.js'/);
+  assert.match(A, /import \{ runHistoryOp(?:, [A-Za-z_]+)* \} from '\.\/utils\/historyOps\.js'/);
 });
 t('①b 按钮判据与退化条件对齐:有后续用户消息 / 已回退过 → 不给自动回退', () => {
   const memo = A.slice(A.indexOf('const contentRiskAnchor = useMemo'), A.indexOf('// /branch 分叉'));
@@ -136,12 +136,15 @@ t('② continuePrompt 顶掉续跑指令且不注入 tool= 哨兵', () => {
 // ---- 判官 ③:先停后 trim ----
 t('③ 停止在飞回合早于截断会话文件,且停止有超时兜底', () => {
   const body = A.slice(A.indexOf('const handleRetryTool = useCallback'), A.indexOf('const handleRetryTurnRef = useRef'));
-  const stopIdx = body.indexOf('/stop`');
-  const trimIdx = body.indexOf('trim-before-tool');
+  // r188:停止请求与等待挪进 utils/historyOps.js 的 stopTurnAndWait(带身份、等回话、Promise.race 超时兜底);
+  // 这里钉 App 里 await 它早于裁剪,超时兜底钉在 historyOps 里。
+  const stopIdx = body.indexOf('await stopTurnAndWait(');
+  const trimIdx = body.indexOf("'trim-before-tool'");
   assert.ok(stopIdx > 0 && trimIdx > 0, '两处调用都要在');
   assert.ok(stopIdx < trimIdx, `stop@${stopIdx} 必须早于 trim@${trimIdx}`);
-  assert.match(body, /await Promise\.race\(\[Promise\.all\(_rtStops\), new Promise\(\(r\) => setTimeout\(r, \d+\)\)\]\)/);
-  assert.ok(body.indexOf('_rtStops') < trimIdx, '等待停止落地必须发生在截断之前');
+  const HO2 = readFileSync(new URL('../../client/src/utils/historyOps.js', import.meta.url), 'utf8');
+  assert.match(HO2, /await Promise\.race\(\[req, new Promise\(\(r\) => \{ timer = setTimeout\(r, maxWaitMs\); \}\)\]\);/);
+  assert.match(HO2, /export const STOP_WAIT_MAX_MS = \d{4};/, '等停止上限是秒级常量');
 });
 t('4.2 退化路径复用既有「重新编辑」', () => {
   assert.match(A, /handleRollbackRef\.current\?\.\([^)]*\{ mode: 'edit' \}/);
@@ -225,7 +228,9 @@ t('4.4 乐观截断仍在', () => {
 });
 t('4.4 停流三件套逐字仍在', () => {
   assert.match(A, /stoppedPidsRef\.current\.add\(String\(_rtPid\)\)/);
-  assert.match(A, /hard: true/);
+  // r188:hard 停止的请求体挪进 utils/historyOps.js 的 stopTurnAndWait;App 里钉按 _rtPid 调它。
+  assert.match(A, /await stopTurnAndWait\(\{ pid: _rtPid, owner: _rtOwner, fetchImpl: fetch \}\)/);
+  assert.match(readFileSync(new URL('../../client/src/utils/historyOps.js', import.meta.url), 'utf8'), /owner \? \{ hard: true, owner \} : \{ hard: true \}/);
   assert.match(A, /backgroundPidRef\.current = null/);
 });
 t('4.4 既有两个 errorAction 块逐字仍在', () => {

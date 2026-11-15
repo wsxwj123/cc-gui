@@ -60,6 +60,67 @@ export async function runHistoryOp(sessionId, op, params = {}) {
   return { ok: true, status: submit.status, data, preview: preview.body, sessionReset: data.resultSessionId === null };
 }
 
+// ── r188:回滚类操作「先停、等它停稳、再动磁盘」的两个小步骤(不依赖组件状态,便于单测)──────────
+// 后端在回合进行中一律拒绝裁剪(409 SESSION_RUNNING);回合停下后进程退出时可能再追加一笔收尾记录,
+// 预览与提交之间文件变了会回 409 SESSION_CHANGED。这两种重新预览再提交即可,其它失败不重试。
+export const TRIM_RETRY_CODES = Object.freeze(['SESSION_RUNNING', 'SESSION_CHANGED']);
+export const STOP_WAIT_MAX_MS = 5000;
+export const TRIM_RETRY_MAX_MS = 6000;
+export const TRIM_RETRY_INTERVAL_MS = 400;
+
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 等停止期间的提示。两个发起点与「回退完成后撤掉它」的比较共用这一个常量;显示时长要盖住最长等待
+// (等停止 5 秒 + 裁剪重试 6 秒)。
+export const ROLLBACK_STOPPING_NOTICE = '正在停止当前回合，停止后执行回退。';
+export const ROLLBACK_STOPPING_NOTICE_MS = 12000;
+
+/**
+ * 「回退进行中」标记({ key:发起回退的会话键 })是否作用于 key 这个会话。标记挂在窗格上,但等待期间
+ * 窗格可能已切到别的会话:只有键相同的会话的发送与排空才受它影响。
+ */
+export function rollbackBusyFor(busy, key) {
+  return !!busy && !!key && busy.key === key;
+}
+
+/**
+ * 发停止请求并等它回话,最多等 maxWaitMs(绝不无限等控制类调用;回话更晚也不要紧,裁剪重试会接着等)。
+ * 带 owner 时后端走「停下后等回合记录结算再回话」那条路;owner 只传能证明属于这个 pid 的身份
+ * (resolveStopOwner 给出的),给不出就不带。身份不符后端回 409 且不停,此时补发一次不带身份的。
+ * 返回 { sent, replied }。pid 为空时什么都不发、不等。
+ */
+export async function stopTurnAndWait({ pid, owner = null, fetchImpl, maxWaitMs = STOP_WAIT_MAX_MS } = {}) {
+  if (!pid) return { sent: false, replied: false };
+  const doFetch = fetchImpl || ((...a) => fetch(...a));
+  const url = `/api/chat/${pid}/stop`;
+  const init = (body) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let replied = false;
+  const req = Promise.resolve()
+    .then(() => doFetch(url, init(owner ? { hard: true, owner } : { hard: true })))
+    .then((r) => (owner && r && r.status === 409 ? doFetch(url, init({ hard: true })) : r))
+    .then(() => { replied = true; }, () => { replied = true; });
+  let timer = null;
+  await Promise.race([req, new Promise((r) => { timer = setTimeout(r, maxWaitMs); })]);
+  if (timer) clearTimeout(timer);
+  return { sent: true, replied };
+}
+
+/**
+ * 跑一次历史操作;遇 SESSION_RUNNING / SESSION_CHANGED 时隔 intervalMs 重新预览再提交,
+ * 从第一次尝试起最多 maxMs。其它失败与成功都立即返回(runOp 抛出的异常照原样抛出)。
+ */
+export async function runHistoryOpSettled(sessionId, op, params = {}, {
+  runOp = runHistoryOp, maxMs = TRIM_RETRY_MAX_MS, intervalMs = TRIM_RETRY_INTERVAL_MS, now = () => Date.now(),
+} = {}) {
+  const t0 = now();
+  for (;;) {
+    const r = await runOp(sessionId, op, params);
+    if (r?.ok || !TRIM_RETRY_CODES.includes(r?.code)) return r;
+    if (now() - t0 + intervalMs > maxMs) return r;
+    await sleepMs(intervalMs);
+  }
+}
+
 /**
  * 在系统文件管理器中定位备份副本(只读,无副作用)。
  * 路径由服务端按 backupRef 取,客户端不传路径;失败返回 {status, body},由调用点显示。

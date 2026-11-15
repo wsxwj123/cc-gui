@@ -63,8 +63,9 @@ assert.match(app, /const homeDraftArgs = \{[\s\S]*?sessionKey: queueKeyFor\(_hom
   'Home 必须把带 draftId 的 queueKeyFor(draft) 收敛进原子编排参数');
 assert.match(app, /enqueueHomeDraft\(homeDraftArgs\)/,
   '普通 Home 发送必须走原子编排入口');
-assert.match(app, /if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current\)\) \{/,
-  '入队门必须豁免 forceSend(回滚/重做重发绝不入队)');
+// r188:门里多了「回退进行中」标记(等停止、等裁剪期间普通发送进排队);forceSend 豁免不变。
+assert.match(app, /if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current \|\| rollbackBusyFor\(rollbackBusyRef\.current, sessionQueueKey\)\)\) \{/,
+  '入队门必须豁免 forceSend(回滚/重做重发绝不入队),并在【本会话】回退进行中让普通发送进排队');
 // 守卫2:重发通道恒 forceSend
 const resendBlock = app.slice(app.indexOf('const resendReplacing = useCallback'), app.indexOf('// Auto-reattach:'));
 assert.ok(resendBlock.length > 0, 'resendReplacing 不见了(重构后同步本守卫)');
@@ -78,8 +79,16 @@ assert.match(rollbackBlock, /stoppedPidsRef\.current\.add\(String\(_rbPid\)\);/,
   '回滚必须把被杀 pid 记进 stoppedPidsRef(否则轮询复活死 pid→重发被门进队列)');
 // r146b:2 → 3。第三处是"回退中途切走"那支:按回退开始那一刻记下的 pid 停掉原会话在跑的回合
 // (切走后窗格 ref 已属于别的会话,不能再用),免得它往刚裁剪的记录里继续追加。前两处原样保留。
-assert.equal((rollbackBlock.match(/JSON\.stringify\(\{ hard: true \}\)/g) || []).length, 3,
-  '前台流与转后台两种形态都必须真发 hard /stop(另加切走那支按原 pid 停)');
+// r188:停止挪到破坏性阶段开头、改为「按开始那一刻的 pid 发带身份的 hard 停止并等回话」(utils/historyOps.js 的
+// stopTurnAndWait,前台流与转后台两种形态同一个 pid 变量);切走那支不再重复发停止。原来数 3 处字面
+// hard:true,现改为钉:按 startPid 停、调用在裁剪之前、请求体恒带 hard:true。
+assert.match(rollbackBlock, /const _rbPid = startPid;/, '回滚按开始那一刻记下的 pid 停(前台流或转后台)');
+const _stopAt = rollbackBlock.indexOf('await stopTurnAndWait({ pid: _rbPid, owner: _rbOwner });');
+assert.ok(_stopAt !== -1, '回滚必须真发停止并等回话');
+assert.ok(_stopAt < rollbackBlock.indexOf("runHistoryOpSettled(sel.sessionId, 'trim', body)"), '先停后裁');
+const ops = readFileSync(new URL('../../client/src/utils/historyOps.js', import.meta.url), 'utf8');
+const stopFn = ops.slice(ops.indexOf('export async function stopTurnAndWait'), ops.indexOf('export async function runHistoryOpSettled'));
+assert.match(stopFn, /owner \? \{ hard: true, owner \} : \{ hard: true \}/, '停止请求体恒带 hard:true');
 assert.match(rollbackBlock, /backgroundPidRef\.current = null;/,
   '回滚必须同步清 backgroundPidRef(state 有一帧延迟)');
 
