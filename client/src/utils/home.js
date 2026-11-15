@@ -105,13 +105,27 @@ export function buildHomeDraft(project, draftId) {
 
 // 首页首条必须先成为可恢复的队列信封，成功后才允许 pane 换绑；quota 失败返回 null，
 // pane 与附件编辑态都保持原位。store 由调用方注入，顺序与失败短路可直接白盒验证。
+// r190:信封带「首发」标记 opts.homeFirst —— 窗格挂上草稿时由 App.jsx 的首发副作用立即发出,
+// 不等后台状态轮询 + 50ms 定时器(那段时间里切走,草稿没有侧栏入口,队列就没人排空了)。
 export function enqueueHomeDraft({ store, sessionKey, envelope, tabIndex, draft }) {
   if (!store || !sessionKey || !draft || !envelope) return null;
-  const queued = store.enqueueMessage(sessionKey, envelope);
+  const markedEnvelope = { ...envelope, opts: { ...(envelope.opts || {}), homeFirst: true } };
+  const queued = store.enqueueMessage(sessionKey, markedEnvelope);
   if (!queued) return null;
   store.setPaneSession(tabIndex, draft);
   store.setPaneMessages(tabIndex, []);
   return queued;
+}
+
+/**
+ * r190:窗格换上草稿时,该不该立即发出队首那条首页首发消息。
+ * 只在「草稿(有 draftId、无 sessionId)+ 队首是带 homeFirst 标记的可见文字消息 +
+ * 无本地流 / 无后台进程 / 无流在收尾 / 不在回退等待」时为真;其余情形交给轮询排空兜底。
+ */
+export function shouldSendHomeFirstNow({ session, head, streaming, backgroundPid, finalizing, rollbackBusy } = {}) {
+  if (!session?.draftId || session?.sessionId) return false;
+  if (!head?.text || head.hidden || head.opts?.homeFirst !== true) return false;
+  return !streaming && !backgroundPid && !finalizing && !rollbackBusy;
 }
 
 export function homeDraftFromOrphan(item) {

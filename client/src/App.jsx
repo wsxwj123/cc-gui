@@ -152,7 +152,7 @@ import { createMcpNoticeLedger, formatMcpServerNotice } from './utils/mcpStatus.
 import { classifyRepairOutcome, classifyCheckOutcome, upsertRepairHint, removeRepairHint, loadRepairHints, persistRepairHints } from './utils/repairFlow.js';
 import { autoCompactTransition } from './utils/compactStatus.js';
 import { THEME_TABS, readThemeTab, writeThemeTab } from './utils/themeTabs.js';
-import { homeView, pickHomeProject, buildHomeDraft, enqueueHomeDraft, enqueueRestoredHomeDraft, homeDraftFromOrphan, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects, paneMountsSessionDetail } from './utils/home.js';
+import { homeView, pickHomeProject, buildHomeDraft, enqueueHomeDraft, enqueueRestoredHomeDraft, homeDraftFromOrphan, homeGreetingParts, readHomeCustom, readHiddenHashes, visibleHomeProjects, paneMountsSessionDetail, shouldSendHomeFirstNow } from './utils/home.js';
 import { subscribeSkin, getSkinVersion, getSkinState, reconcileSkinOnBoot, watchThemeForSkin } from './utils/skins.js';
 import { resolveSessionDot, completionTracker, subscribeDots, getDotsVersion, RUN_MATRIX_CELLS, runCellDelayMs } from './utils/sessionDots.js';
 import { seedNewSessionDefaults } from './components/UnifiedSidebar.jsx';
@@ -8227,6 +8227,34 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // Ref to handleSend so the finally-block drain doesn't form a circular closure dep.
   const handleSendRef = useRef(null);
   useEffect(() => { handleSendRef.current = handleSend; }, [handleSend]);
+
+  // r190:新会话首页的第一条消息在草稿挂上窗格时立即发出。首页 submit 只是把它存进草稿的待发
+  // 队列再换窗格;原来真正发出要等后台状态轮询(上面 subscribeAgentsActive 那段)返回 + 50ms
+  // 定时器。这之间切走,定时器复查不在本会话就把消息留在队列里 —— 而草稿没有侧栏入口、回不来,
+  // 队列再没人排空,要到下次启动才变成「未发出的排队消息」。所以首发不能依赖轮询。
+  // 必须声明在给 handleSendRef 赋值的副作用之后:同一次提交里它先跑,这里拿到的是本次渲染
+  // (草稿)的发送函数。取出与调用在同一段同步代码里完成,不设定时器、不等请求;轮询排空
+  // 保持原样当兜底,两边共用 shiftMessage,同一条只会被取出一次。
+  // 判据口径与轮询排空一致:本地流、后台进程、流在收尾、回退等待任一成立都不发。
+  const homeFirstDraftId = selectedSession?.draftId;
+  useEffect(() => {
+    if (!homeFirstDraftId) return;
+    const paneSession = getLocalSession();
+    if (paneSession?.draftId !== homeFirstDraftId) return;
+    const draftKey = queueKeyFor(paneSession);
+    const head = (useStore.getState().messageQueue[draftKey] || [])[0];
+    const sendNow = shouldSendHomeFirstNow({
+      session: paneSession,
+      head,
+      streaming: streamingRef.current,
+      backgroundPid: backgroundPidRef.current,
+      finalizing: finalizeInFlightRef.current > 0,
+      rollbackBusy: rollbackBusyFor(rollbackBusyRef.current, draftKey),
+    });
+    if (!sendNow) return;
+    const q = useStore.getState().shiftMessage(draftKey);
+    if (q?.text) handleSendRef.current?.(q.text, q.opts || {});
+  }, [homeFirstDraftId]);
 
   // genui action 回路(PLAN §1.3.2):本窗格的发送能力,挂在下面的窗格根上。
   // 必须声明在 handleSendRef **之后** —— 它是 const,提前引用就是 TDZ 白屏
