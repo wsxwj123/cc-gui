@@ -7,6 +7,7 @@ import { seedPair, writeScenario, resetStatus, readStatus, requestAbort } from '
 import {
   openJia, clickSession, sendMessage, stopBtn, composerBox, readView, waitView, observe, series, uniqueTag, syntheticReconcile, setStallTimeout,
 } from './helpers/runtime.mjs';
+import { observeRelaunch, switchAwayAndBack, expectFiveFragments, countOf } from './helpers/rollback.mjs';
 
 // 监听页面的未捕获错误(pageerror),出现即失败。
 const test = base.extend({
@@ -129,7 +130,8 @@ test('K5 【复现】前一轮已写盘结束、这一轮强杀形停在 5 片�
 });
 
 // ───────────────────────── K6 ─────────────────────────
-test('K6 【复现】强杀形回合进行中「编辑后重发」并发出新内容:回滚后新一轮进行期间整个消息区片段数不超过 5,期末 5、每个编号恰好 1 次、「重发轮。」恰好 1 次、第 1 轮提示词不在页面上', async ({ page }) => {
+test('K6 【复现】强杀形回合进行中「编辑后重发」并发出新内容:新一轮进行期间整个消息区片段数不超过 5,期末 5、每个编号恰好 1 次、「重发轮。」恰好 1 次、第 1 条提示词 0 次、第 2 条恰好 1 次,切走再切回后仍如此', async ({ page }) => {
+  test.setTimeout(150_000);
   const ctx = prepare();
   await openJia(page, ctx);
   const oldPrompt = promptOf('K6', 'a');
@@ -148,34 +150,23 @@ test('K6 【复现】强杀形回合进行中「编辑后重发」并发出新�
   writeScenario({ chunkCount: 5, chunkIntervalMs: 1500, textPrefix: '重发轮。' });
   const t0 = Date.now();
   await sendMessage(page, newPrompt);
-  // 从发送后 2 秒起,一直观察到停止键消失(见过停止键之后)后 6 秒。
-  const wait = 2000 - (Date.now() - t0);
-  if (wait > 0) await page.waitForTimeout(wait);
-  const samples = [];
-  let seenStop = false;
-  let doneAt = null;
-  for (;;) {
-    const v = await readView(page, prompts);
-    v.dt = v.t - t0;
-    samples.push(v);
-    if (v.stop) seenStop = true;
-    if (doneAt == null && seenStop && !v.stop) doneAt = v.t;
-    if (doneAt != null && v.t - doneAt >= 6000) break;
-    if (v.t - t0 > 60_000) break;
-    await page.waitForTimeout(250);
-  }
+  // 观察窗口:从消息区第一次出现「重发轮。」起,每 250 毫秒读一次,直到新一轮结束(见过停止键之后停止键消失)后 6 秒。
+  const { appearMs, samples, doneAt } = await observeRelaunch(page, prompts, t0);
+  expect(appearMs, `K6:「重发轮。」应在发送后 40 秒内出现;最后一次读到整个消息区片段数 ${samples[samples.length - 1].total}`).not.toBeNull();
   expect(doneAt, `K6:新一轮应在 60 秒内结束(停止键出现后又消失);各次读数(整个消息区片段数) = ${series(samples, 0, (s) => s.total)}`).not.toBeNull();
-  const totals = samples.map((s) => s.total);
-  expect(Math.max(...totals), `K6:每次读数整个消息区的片段数都不应超过 5;各次读数 = ${series(samples, 0, (s) => s.total)}`).toBeLessThanOrEqual(5);
+  const totalSeries = series(samples, 0, (s) => s.total);
+  expect(Math.max(...samples.map((s) => s.total)), `K6:观察窗口内每次读数整个消息区的片段数都不应超过 5;各次读数 = ${totalSeries}`).toBeLessThanOrEqual(5);
   const end = samples[samples.length - 1];
-  expect(end.total, `K6:期末整个消息区片段数应为 5;各次读数 = ${series(samples, 0, (s) => s.total)}`).toBe(5);
-  const ids = {};
-  for (const x of end.text.match(/片段\d{4}/g) || []) ids[x] = (ids[x] || 0) + 1;
-  expect(Object.keys(ids).length, `K6:期末应有 5 个不同编号;实际 ${JSON.stringify(ids)}`).toBe(5);
-  expect(Math.max(0, ...Object.values(ids)), `K6:期末每个编号恰好 1 次;实际 ${JSON.stringify(ids)}`).toBe(1);
-  expect(end.text.split('重发轮。').length - 1, 'K6:「重发轮。」在整个消息区出现的次数').toBe(1);
-  // 「第 1 轮那句提示词不在页面文字里」这条断言已去掉(2026-11-15,用例说明同步修订):回合进行中回滚时,
-  // 后端因为该会话有回合在跑而拒绝裁剪会话记录,旧提示词本来就会留下——那是另一个问题,不归这一项。
+  expect(end.total, `K6:期末整个消息区片段数应为 5;各次读数 = ${totalSeries}`).toBe(5);
+  expectFiveFragments(end, 'K6 期末');
+  expect(countOf(end.text, oldPrompt), 'K6:期末第 1 条提示词在消息区出现的次数').toBe(0);
+  expect(countOf(end.text, newPrompt), 'K6:期末第 2 条提示词在消息区出现的次数').toBe(1);
+  expect(appearMs, 'K6:从点发送到「重发轮。」出现的毫秒数应不超过 20000').toBeLessThanOrEqual(20_000);
+  // 切走再切回。
+  const back = await switchAwayAndBack(page, ctx, prompts);
+  expect(countOf(back.text, oldPrompt), 'K6:切走再切回后第 1 条提示词出现的次数').toBe(0);
+  expect(countOf(back.text, newPrompt), 'K6:切走再切回后第 2 条提示词出现的次数').toBe(1);
+  expect(back.total, 'K6:切走再切回后整个消息区片段总数').toBe(5);
 });
 
 // ───────────────────────── K9 ─────────────────────────
