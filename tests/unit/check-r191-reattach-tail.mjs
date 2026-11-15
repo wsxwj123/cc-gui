@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   makeReattachTail, tailMarkBlockDone, tailAssignUuid, tailMarkSnapshot, tailMarkEnded, tailMarkSettled,
-  tailHistoryIndex, visibleTailBlocks, histTailSig,
+  tailHistoryIndex, visibleTailBlocks, histTailSig, tailReadBack, countInterruptEntries,
 } from '../../client/src/utils/reattachTail.js';
 
 let passed = 0;
@@ -94,6 +94,44 @@ ok('收尾:干净结束且收尾后历史应用过 → 退场;settled → 退场
   const u = tailMarkSettled(tailMarkEnded(makeReattachTail('s1'), [{ type: 'text', content: 'q' }], H0, false));
   assert.equal(visibleTailBlocks(u, [], H0).length, 0);
   assert.equal(tailMarkSettled(makeReattachTail('s1')).settled, false, '没收尾不能 settled');
+});
+
+ok('用户停止:历史先变(没有新的打断提示)不算读回、尾巴还在;出现打断提示才算读回、尾巴退场', () => {
+  const Hs = [...H0, { type: 'user', uuid: 'i-old', text: '[Request interrupted by user]' }, user('go2'), turn('r5', [{ type: 'text', content: 'P0 text' }])];
+  const t = tailMarkEnded(makeReattachTail('s1'), [{ type: 'text', content: P1_PART }], Hs, false, true);
+  assert.equal(t.aborted, true);
+  assert.equal(t.endInterrupts, 1, '收尾时已有的旧打断提示计入基线');
+  // 停止前发出的刷新晚到:带回更早写盘的一段,签名变了但没有新的打断提示
+  const Hlate = [...Hs.slice(0, -1), turn('r5', [{ type: 'text', content: 'P0 text' }, { type: 'tool_use', toolCall: { id: 't9' } }])];
+  assert.notEqual(histTailSig(Hlate), histTailSig(Hs));
+  assert.equal(tailReadBack(t, Hlate), false, '只是历史变了:不算读回');
+  assert.deepEqual(visibleTailBlocks(t, [], Hlate).map((b) => b.content), [P1_PART], '尾巴还在');
+  // 编号 / 正文比对命中的块照常不画
+  const Hpart = [...Hlate.slice(0, -1), turn('r5', [{ type: 'text', content: 'P0 text' }, { type: 'text', content: P1_PART }])];
+  assert.equal(visibleTailBlocks(t, [], Hpart).length, 0, '逐块规则照常');
+  // 命令行写下半截与打断提示
+  const Hdone = [...Hpart, { type: 'user', uuid: 'i-new', text: ['[Request interrupted by user]'] }];
+  assert.equal(countInterruptEntries(Hdone), 2);
+  assert.equal(tailReadBack(t, Hdone), true, '新的打断提示:算读回');
+  assert.equal(visibleTailBlocks(tailMarkEnded(makeReattachTail('s1'), [{ type: 'text', content: 'zz' }], Hs, false, true), [], Hdone).length, 0, '尾巴整条退场');
+});
+
+ok('非用户停止(被结束 / 出错):历史末条签名变了就算读回', () => {
+  const t = tailMarkEnded(makeReattachTail('s1'), [{ type: 'text', content: 'zz' }], H0, false, false);
+  assert.equal(tailReadBack(t, [...H0]), false, '内容没变');
+  const H1 = [...H0, turn('r7', [{ type: 'text', content: 'yy' }])];
+  assert.equal(tailReadBack(t, H1), true);
+  assert.equal(visibleTailBlocks(t, [], H1).length, 0);
+  assert.equal(tailReadBack(makeReattachTail('s1'), H1), false, '没收尾:不算');
+  assert.equal(tailReadBack(null, H1), false);
+});
+
+ok('源码:收尾轮询与渲染期退场共用 tailReadBack', () => {
+  const src = readFileSync(new URL('../../client/src/App.jsx', import.meta.url), 'utf8');
+  assert.ok(src.includes('!tailReadBack(tailEnd, getLocalMessages())'), '轮询用同一判据');
+  assert.ok(src.includes('tailMarkEnded(makeReattachTail(null), orderedBlocks, getLocalMessages(), endedClean, turnAborted)'), '收尾记录带用户停止标记');
+  const mod = readFileSync(new URL('../../client/src/utils/reattachTail.js', import.meta.url), 'utf8');
+  assert.ok(mod.includes('if (tailReadBack(tail, messages)) return [];'), '渲染期整条退场用同一判据');
 });
 
 ok('签名与索引的边界', () => {

@@ -9,7 +9,8 @@
 //     还没有编号的块上(tailAssignUuid)。历史回合只带第一条记录的 uuid,所以编号命中任一回合 uuid,
 //     或这一块的正文指纹(去空白)与本轮历史里同类块相同,都算「历史里已经有了」。
 //   · 记不上编号的块:写完、并且此后历史刷新应用过一次(列表引用变了),就不再画。
-//   · 本流收尾后:历史相对收尾时刻确实变了(末条签名不同),或回合是干净结束的并且收尾后历史应用过,
+//   · 本流收尾后:最终写盘的内容读回来了(tailReadBack:用户停止看新的打断提示,其余看末条签名变了),
+//     或回合是干净结束的并且收尾后历史应用过,
 //     或收尾的重读已经结束(settled),整条尾巴退场。
 // 退场在渲染期计算(visibleTailBlocks),历史换上新内容与尾巴消失在同一帧。
 
@@ -20,8 +21,16 @@ function blockFp(type, content) {
   return fp ? `${type}:${fp}` : '';
 }
 
-const isPromptEntry = (m) => m?.type === 'user' && !m.steered
-  && !/^\s*\[Request interrupted/.test(Array.isArray(m.text) ? m.text.join('') : String(m.text || ''));
+const userTextOf = (m) => (Array.isArray(m?.text) ? m.text.join('') : String(m?.text || ''));
+const isInterruptEntry = (m) => m?.type === 'user' && /^\s*\[Request interrupted/.test(userTextOf(m));
+const isPromptEntry = (m) => m?.type === 'user' && !m.steered && !isInterruptEntry(m);
+
+/** 历史里打断提示条目(用户类型、文字以 `[Request interrupted` 开头)的条数。 */
+export function countInterruptEntries(messages) {
+  let n = 0;
+  for (const m of (Array.isArray(messages) ? messages : [])) if (isInterruptEntry(m)) n += 1;
+  return n;
+}
 
 /** 新的尾巴状态。owner = 本流归属的会话键(闭包里的值,不读当前选中的会话)。 */
 export function makeReattachTail(owner) {
@@ -66,10 +75,28 @@ export function histTailSig(messages) {
   return `${list.length}|${m.type || ''}|${m.uuid || ''}|${blocks.length}|${blockLen}|${text.length}`;
 }
 
-/** 本流收尾:定格块内容(收尾会清掉直播缓冲),记下收尾时刻的历史签名与引用。 */
-export function tailMarkEnded(tail, blocks, histRef, endClean) {
+/**
+ * 本流收尾:定格块内容(收尾会清掉直播缓冲),记下收尾时刻的历史签名、引用与打断提示条数。
+ * aborted = 用户点了停止(命令行会把半截与打断提示写进会话文件)。
+ */
+export function tailMarkEnded(tail, blocks, histRef, endClean, aborted = false) {
   if (!tail || tail.ended) return tail;
-  return { ...tail, ended: true, blocks: Array.isArray(blocks) ? blocks.slice() : [], endSig: histTailSig(histRef), endMsgs: histRef, endClean: !!endClean };
+  return {
+    ...tail, ended: true, blocks: Array.isArray(blocks) ? blocks.slice() : [],
+    endSig: histTailSig(histRef), endMsgs: histRef, endClean: !!endClean,
+    aborted: !!aborted, endInterrupts: countInterruptEntries(histRef),
+  };
+}
+
+/**
+ * 收尾之后「命令行最终写盘的内容读回来了」—— 收尾的重读轮询与渲染期整条退场共用这一个判据。
+ * 用户停止:历史里打断提示的条数比收尾时多了(只是历史变了不算:停止前发出的刷新可能晚到,带回的是更早写盘的一段)。
+ * 被后端结束 / 出错:历史末条签名相对收尾时变了。
+ */
+export function tailReadBack(tail, messages) {
+  if (!tail || !tail.ended) return false;
+  if (tail.aborted) return countInterruptEntries(messages) > (tail.endInterrupts || 0);
+  return histTailSig(messages) !== tail.endSig;
 }
 
 /** 收尾的重读结束(读到了变化或到了次数上限)。 */
@@ -105,7 +132,7 @@ export function visibleTailBlocks(tail, liveBlocks, messages) {
   if (!tail) return [];
   if (tail.ended) {
     if (tail.settled) return [];
-    if (histTailSig(messages) !== tail.endSig) return [];
+    if (tailReadBack(tail, messages)) return [];
     if (tail.endClean && messages !== tail.endMsgs) return [];
   }
   const blocks = tail.ended ? (tail.blocks || []) : (Array.isArray(liveBlocks) ? liveBlocks : []);

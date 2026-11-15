@@ -69,7 +69,7 @@ import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { GenuiActionProvider, useGenuiActionCapability } from './genui/host/action-context.jsx';
 import { TurnBubble, StripRoundContext, LiveHostContext } from './components/TurnBubble.jsx';
-import { makeReattachTail, tailMarkBlockDone, tailAssignUuid, tailMarkSnapshot, tailMarkEnded, tailMarkSettled, visibleTailBlocks, histTailSig } from './utils/reattachTail.js';
+import { makeReattachTail, tailMarkBlockDone, tailAssignUuid, tailMarkSnapshot, tailMarkEnded, tailMarkSettled, tailReadBack, visibleTailBlocks } from './utils/reattachTail.js';
 import { stripSummary, tailBlockInfo, latestToolTitles } from './utils/streamStatus.js';
 import { initialSpan, extendUp, needsExtend, sliceRows, resolveAutoFrom } from './utils/mountWindow.js';
 import { historyMessageKey } from './utils/historyPaging.js';
@@ -7858,7 +7858,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 审查视线,也会碰到明令不许动的 F1 drain 本体(:5946-5956)。
       try {
       // r191:本流收尾 —— 尾巴定格内容(下面会清直播缓冲),记下此刻的历史;退场在渲染期判断。
-      if (tailLive) { const _h = getLocalMessages(); const _b = orderedBlocks; const _clean = endedClean; tailUpd((t) => tailMarkEnded(t, _b, _h, _clean)); }
+      // tailEnd 同时是收尾重读轮询的判据输入(tailReadBack),与渲染期退场用同一份收尾记录。
+      const tailEnd = tailLive ? tailMarkEnded(makeReattachTail(null), orderedBlocks, getLocalMessages(), endedClean, turnAborted) : null;
+      if (tailEnd) tailUpd((t) => tailMarkEnded(t, tailEnd.blocks, tailEnd.endMsgs, tailEnd.endClean, tailEnd.aborted));
       // 停止/断流兜底:本回合派出的子代理若仍在运行态(中断后 tool_result 永不到达,
       // 状态没人更新),统一标 stopped —— 否则卡片/监控永远转圈"运行中"(用户实报
       // "停止后子代理还在跑"的 UI 侧成因;进程侧由 stop 端点的 abort 兜底真杀)。
@@ -8022,8 +8024,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           return ptext.includes(tail);
         };
         let lastPeeked = null; // 最后一次 peek 到的持久化(循环耗尽时的兜底判定用它,比 store 副本新)
-        // r191:无快照重接收尾时历史的末条签名 —— 空回合那一支据它判断「命令行最终写盘的内容读回来没有」。
-        const finalizeTailSig = tailLive ? histTailSig(getLocalMessages()) : null;
         for (let i = 0; i < 12; i++) {
           // Bail if the user navigated THIS pane to another session mid-finalize:
           // otherwise we'd fetch the old session into the now-current tab and clear
@@ -8053,9 +8053,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 弱口径会把同前缀的旧消息当成"这条已落盘",把刚发出的气泡整条清掉,而历史
             // 那份可能还没进本地 store 或正被截断挡着 → 卡片凭空消失(R37)。
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
-            // r191:无快照重接被停止 / 被结束 / 出错(没见到干净的结束事件):读到历史相对收尾时确实变了为止,
-            // 到轮询次数上限还没变就按现状结束。正常发送的空回合 / 出错回合 tailLive 为假,只读一次,行为不变。
-            if (tailLive && !endedClean && i < 11 && histTailSig(getLocalMessages()) === finalizeTailSig) {
+            // r191:无快照重接被停止 / 被结束 / 出错(没见到干净的结束事件):读到命令行最终写盘的内容为止
+            // (tailReadBack,与渲染期尾巴退场同一判据),到轮询次数上限还没读回就按现状结束。
+            // 正常发送的空回合 / 出错回合 tailLive 为假,只读一次,行为不变。
+            if (tailLive && tailEnd && !endedClean && i < 11 && !tailReadBack(tailEnd, getLocalMessages())) {
               await new Promise((r) => setTimeout(r, 200));
               continue;
             }
