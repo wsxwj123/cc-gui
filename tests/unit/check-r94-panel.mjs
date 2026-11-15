@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { commitOwnChanges } from './helpers/commit-own-changes.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const read = (p) => { try { return readFileSync(join(root, p), 'utf8'); } catch { return ''; } };
@@ -406,10 +407,9 @@ check('§7.9 tests/acceptance/** 、PROJECT.md、client/src/utils/imageEntry.js 
   for (const sha of git('rev-list', '--reverse', `${base}..HEAD`).split('\n').filter(Boolean)) {
     const touchedLocked = [];
     const touchedProduct = [];
-    // 与第一父比(合并提交也按第一父);--name-status 一行 = 状态 \t 路径[\t 新路径](R/C 带两个路径)
-    for (const line of git('diff', '--name-status', `${sha}^`, sha).split('\n').filter(Boolean)) {
-      const [status, ...paths] = line.split('\t');
-      const kind = status[0];
+    // 只算这个提交自己改的(r189):普通提交 = 与唯一父提交的差;合并提交只算相对每个父提交都变了的路径。
+    // 按第一父比会把「主分支并进任务分支」时主分支那一侧的改动全算到合并提交头上,误报混改。
+    for (const { kind, paths } of commitOwnChanges(git, sha)) {
       if (/^[MDRT]$/.test(kind) && baselineAcceptance.has(paths[0])) touchedLocked.push(paths[0]);
       for (const p of paths) if (isProduct(p)) touchedProduct.push(p);
     }
