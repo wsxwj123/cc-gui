@@ -8,6 +8,7 @@ import { seedPair, writeScenario, resetStatus, readStatus, requestAbort } from '
 import {
   openJia, clickSession, sendMessage, stopBtn, composerBox, readView, waitView, observe, series, uniqueTag, syntheticReconcile, setStallTimeout,
   RELAUNCH_SCENARIO, countOf, pickRollbackItem, editAndResendFill, observeRelaunch, startSampler, switchAwayAndBack, expectFiveFragments,
+  startFieldSampler,
 } from './helpers/runtime.mjs';
 
 // 监听页面的未捕获错误(pageerror),出现即失败。
@@ -424,4 +425,43 @@ test('B5 【守卫】回合已自然结束后「编辑后重发」并发出新�
   expect(countOf(end.text, prompts[0]), 'B5:期末第 1 条提示词在消息区出现的次数').toBe(0);
   expect(countOf(end.text, prompts[1]), 'B5:期末第 2 条提示词在消息区出现的次数').toBe(1);
   expectFiveFragments(end, 'B5 期末', { withRelaunch: false });
+});
+
+// ───────────────────────── B6 ─────────────────────────
+test('B6 【复现】强杀形回合进行中连点两次「仅回退消息」:期末这条提示词恰好 1 次、片段 5、每个编号恰好 1 次、「重发轮。」恰好 1 次;第二次点下去起每次读数输入框都为空、整个页面可见文字都没有「裁剪失败」', async ({ page }) => {
+  test.setTimeout(150_000);
+  const ctx = prepare();
+  await openJia(page, ctx);
+  const prompt = promptOf('B6', 'a');
+  const prompts = [prompt];
+  await turn(page, { ...KILLED }, prompt);
+  await waitFragments(page, prompts, 0, 40, 'B6');
+  // 新一轮的场景要在第一次点「仅回退消息」之前写好(页面等这一轮停稳后把原文重新发出)。
+  writeScenario({ ...RELAUNCH_SCENARIO });
+  await pickRollbackItem(page, prompt, /仅回退消息/, 'B6 第一次');
+  const t1 = Date.now();
+  // 第二次点击;「从第二次点下去起」另外每 250 毫秒读输入框的值与整个页面的可见文字。
+  const fields = startFieldSampler(page, Date.now());
+  let appearMs; let samples; let doneAt; let gapMs;
+  try {
+    await pickRollbackItem(page, prompt, /仅回退消息/, 'B6 第二次');
+    gapMs = Date.now() - t1;
+    ({ appearMs, samples, doneAt } = await observeRelaunch(page, prompts, t1));
+  } finally {
+    await fields.stop();
+  }
+  expect(gapMs, `B6 前提:第二次点下去距第一次点下去应不超过 3000 毫秒;实际 ${gapMs} 毫秒`).toBeLessThanOrEqual(3000);
+  const f = fields.samples;
+  expect(f.length, 'B6:应有第二次点击之后的输入框 / 页面文字读数').toBeGreaterThan(0);
+  const values = f.filter((s) => s.value !== null);
+  expect(values.length, 'B6:应读到输入框的值').toBeGreaterThan(0);
+  const dirty = values.filter((s) => s.value !== '');
+  expect(dirty.length, `B6:第二次点下去起每次读数输入框都应为空;非空的读数 = ${JSON.stringify(dirty.slice(0, 3).map((s) => ({ dt: s.dt, value: s.value.slice(0, 60) })))}(共 ${dirty.length}/${values.length} 次)`).toBe(0);
+  const failed = f.filter((s) => s.body.includes('裁剪失败'));
+  expect(failed.length, `B6:第二次点下去起整个页面的可见文字都不应出现「裁剪失败」;出现的读数共 ${failed.length}/${f.length} 次,首次在 ${failed.length ? failed[0].dt : '-'} 毫秒`).toBe(0);
+  expect(appearMs, `B6:「重发轮。」应在第一次点击后 40 秒内出现;最后一次读到整个消息区片段数 ${samples[samples.length - 1].total}`).not.toBeNull();
+  expect(doneAt, `B6:新一轮应在 60 秒内结束;各次读数(整个消息区片段数) = ${series(samples, 0, (s) => s.total)}`).not.toBeNull();
+  const end = samples[samples.length - 1];
+  expect(countOf(end.text, prompt), 'B6:期末这条提示词在消息区出现的次数').toBe(1);
+  expectFiveFragments(end, 'B6 期末');
 });
