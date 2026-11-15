@@ -7781,7 +7781,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 已停止),而不是连同用户消息一起丢弃——以前这里静默清空,用户辛苦看到的半截
         // 回复+工具调用全没了,只剩刚发的消息(#6)。producedReply=true 让 finally 的
         // 落盘轮询把它当正常产出处理(jsonl 若已写入半截会 refetch 覆盖,否则保留本地副本)。
-        if (accumulatedText || accumulatedThinking || currentToolCalls.length > 0) {
+        // r191:无快照的重接不推 / 不留存本地副本(与正常收尾那条一致):它累积到的只是重放起点之后的内容,
+        // 由尾巴显示,收尾的重读把命令行写盘的那份读回来;推了就是同一段画两遍。
+        if ((accumulatedText || accumulatedThinking || currentToolCalls.length > 0) && (!reattachPid || seeded)) {
           producedReply = true;
           // 停止时给未回执的普通工具补合成终态,Skill/Bash/Read 等卡片不再永久转圈
           // (Task/Agent 状态由 activeAgents 驱动,合成 result 对其无害)。gate=turnAborted。
@@ -8020,6 +8022,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           return ptext.includes(tail);
         };
         let lastPeeked = null; // 最后一次 peek 到的持久化(循环耗尽时的兜底判定用它,比 store 副本新)
+        // r191:无快照重接收尾时历史的末条签名 —— 空回合那一支据它判断「命令行最终写盘的内容读回来没有」。
+        const finalizeTailSig = tailLive ? histTailSig(getLocalMessages()) : null;
         for (let i = 0; i < 12; i++) {
           // Bail if the user navigated THIS pane to another session mid-finalize:
           // otherwise we'd fetch the old session into the now-current tab and clear
@@ -8049,6 +8053,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 弱口径会把同前缀的旧消息当成"这条已落盘",把刚发出的气泡整条清掉,而历史
             // 那份可能还没进本地 store 或正被截断挡着 → 卡片凭空消失(R37)。
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
+            // r191:无快照重接被停止 / 被结束 / 出错(没见到干净的结束事件):读到历史相对收尾时确实变了为止,
+            // 到轮询次数上限还没变就按现状结束。正常发送的空回合 / 出错回合 tailLive 为假,只读一次,行为不变。
+            if (tailLive && !endedClean && i < 11 && histTailSig(getLocalMessages()) === finalizeTailSig) {
+              await new Promise((r) => setTimeout(r, 200));
+              continue;
+            }
             const known = makePersistedIndex(getLocalMessages());
             if (isCurrentTurn()) reconcileSteeredQueue(getLocalMessages()); // 已注入条目的落地判定
             localCopiesCleared = true; // r119:见声明处 —— 之后不许再补本地副本
