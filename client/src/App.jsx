@@ -6173,7 +6173,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           handleSendRef.current?.(null, { reattachPid: pid });
         }, 1500);
       };
-      const streamRes = await fetch(`/api/chat/${pid}/stream`, { signal: controller.signal });
+      // r191:没有快照的重接带 openBlock=1 —— 服务端从正在写的那一段的开头起回放(有快照的重接已种回前半截,不带)。
+      const streamRes = await fetch(`/api/chat/${pid}/stream${reattachPid && !seeded ? '?openBlock=1' : ''}`, { signal: controller.signal });
       if (!streamRes.ok) {
         // 非 2xx(409「已被占用」已由服务端改成新连接接管,这里是防御):响应体是 JSON 不是
         // SSE,下面的逐行解析一条 `data: ` 都匹配不到 → 循环空转一圈即结束、不抛错 → 本窗格
