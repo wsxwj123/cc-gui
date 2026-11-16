@@ -58,10 +58,18 @@ const cardsLoc = (page) => page.locator('[data-testid="attachment-item"]:not([da
 const pencilOf = (item) => item.locator('button[title="取出到输入框重新编辑"]');
 const COMPOSER_SEL = 'textarea[data-cgui="composer-input"]';
 
-/** 往输入框添加一张图片,等附件卡片数变成 expectCards。 */
+/**
+ * 往输入框添加一张图片,等附件卡片数变成 expectCards,再等这张图上传完成。
+ * 卡片在开始上传时就出现;上传完成之前按回车不会发出(锁定核查时机器忙,第 5 条就卡在这里),
+ * 所以要等到这张图自己的卡片里出现加载成功的图片(刚上传的图页面留有预览,改动前后都会显示)。
+ */
 async function addImage(page, image, expectCards) {
   await page.locator('[data-cgui="composer"] input[type=file]').setInputFiles({ name: image.name, mimeType: 'image/png', buffer: image.buf });
   await expect(cardsLoc(page), `添加 ${image.name} 后附件卡片数应为 ${expectCards}`).toHaveCount(expectCards, { timeout: 20_000 });
+  await expect.poll(() => page.evaluate((name) => Array.from(document.querySelectorAll('[data-testid="attachment-item"]'))
+    .filter((c) => !c.closest('[data-testid="queue-item"]'))
+    .some((c) => { const img = c.querySelector('img'); return Boolean(img) && img.alt === name && img.complete && img.naturalWidth > 0; }), image.name),
+  { message: `${image.name} 应上传完成(它的卡片里出现加载成功的图片)`, timeout: 30_000 }).toBe(true);
 }
 
 /** 回合进行中:写长回合场景,发一条开场消息,等停止键出现。 */
