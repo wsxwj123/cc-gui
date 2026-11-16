@@ -54,6 +54,7 @@ const SETTINGS_INDEX = [
   { id: 'set-persistent-chat', tab: 'session', title: '会话常驻进程', keys: '常驻 复用 冷启动 进程 persistent 缓存 空闲 回收 idle keepalive' },
   { id: 'set-stall-timeout', tab: 'session', title: '静默超时', keys: '静默 超时 看门狗 stall timeout watchdog 上游 无输出 卡住 子代理 结束 回合 提示' },
   { id: 'set-prompt-suggestions', tab: 'session', title: '输入预测', keys: '预测 建议 suggestion 输入 自动 第三方 费用' },
+  { id: 'set-image-inline', tab: 'session', title: '发送时直接带上图片', keys: '图片 附件 看不到图 没有图片 截图 上传 发送 256KB image attachment inline' },
   { id: 'set-worktree-visibility', tab: 'session', title: '显示 worktree 工作区', keys: 'worktree 工作树 项目 列表 隐藏 显示 分支' },
   { id: 'set-restore-last', tab: 'session', title: '启动时恢复上次会话', keys: '启动 恢复 上次 会话 Home 首页 restore' },
   { id: 'set-max-budget', tab: 'session', title: '对话花费上限', keys: '花费 预算 budget 成本 上限 美元' },
@@ -2956,6 +2957,7 @@ function SessionTab({ settings, onSave, onEnvPatch, saving }) {
       <div id="set-persistent-chat"><PersistentChatToggle /></div>
       <div id="set-stall-timeout"><StallTimeoutSelect /></div>
       <div id="set-prompt-suggestions"><PromptSuggestionsToggle /></div>
+      <div id="set-image-inline"><ImageInlineSection /></div>
       <div id="set-worktree-visibility"><WorktreeVisibilityToggle /></div>
       <div id="set-restore-last"><RestoreLastSessionToggle /></div>
       <div id="set-max-budget"><MaxBudgetInput /></div>
@@ -2996,6 +2998,73 @@ const PERMISSION_GROUPS = [
   ['ask', '询问', '命中规则时必弹窗确认（优先于允许规则）'],
   ['deny', '拒绝', '命中规则的调用直接拒绝（最高优先级，任何允许规则无法覆盖）'],
 ];
+
+// r193:「发送时直接带上图片」(默认开)。真相在服务端偏好文件:GET /api/prefs/image-inline 读,
+// PUT 写(写入后服务端广播 image-inline,经 useWebSocket 转成 cgui:image-inline 窗口事件,别的窗口改了这里跟着变)。
+// 控件写法照 ThirdPartyAutoSection:role=switch 的 button;点一下先改显示再保存,失败恢复原值并说明。
+function ImageInlineSection() {
+  const [enabled, setEnabled] = useState(true);
+  const [pending, setPending] = useState(false);
+  const [err, setErr] = useState('');
+  // 用户点过或收到广播之后,还没回来的那次初始 GET 不再覆盖显示。
+  const touchedRef = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch('/api/prefs/image-inline');
+        const body = await r.json().catch(() => null);
+        if (alive && !touchedRef.current && r.ok && typeof body?.enabled === 'boolean') setEnabled(body.enabled);
+      } catch {}
+    })();
+    const onChange = (e) => {
+      const v = e?.detail?.enabled;
+      if (typeof v !== 'boolean') return;
+      touchedRef.current = true;
+      setEnabled(v);
+    };
+    window.addEventListener('cgui:image-inline', onChange);
+    return () => { alive = false; window.removeEventListener('cgui:image-inline', onChange); };
+  }, []);
+  const toggle = async () => {
+    if (pending) return;
+    const prev = enabled;
+    const next = !prev;
+    touchedRef.current = true;
+    setErr(''); setEnabled(next); setPending(true);
+    try {
+      const r = await fetch('/api/prefs/image-inline', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: next }) });
+      const body = await r.json().catch(() => null);
+      if (!r.ok || !body?.ok) throw new Error(body?.error || '保存失败，请重试');
+      setEnabled(body.enabled === true);
+    } catch (e) {
+      setEnabled(prev);
+      setErr(`未能保存，开关已恢复原状：${e?.message || '保存失败，请重试'}`);
+    } finally { setPending(false); }
+  };
+  return (
+    <div data-testid="image-inline-section" className="bg-canvas-warm border border-canvas-deep rounded-lg">
+      <div className="px-3 py-2.5 flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-ink font-body font-medium flex items-center gap-1.5"><span>发送时直接带上图片</span><EffectBadge level="immediate" /></div>
+          <div className="text-[10.5px] text-ink-faint font-body">开启时（默认），发送带图片的消息，应用把图片本身直接交给 Claude Code，模型能不能看到图片不再取决于图片大小（单张或一条消息合计上限 20MB）。</div>
+        </div>
+        <button data-testid="image-inline-toggle" role="switch" aria-checked={enabled} onClick={toggle} aria-label="发送时直接带上图片"
+          className={`shrink-0 w-9 h-5 rounded-full transition-colors relative ${enabled ? 'bg-accent' : 'bg-ink-faint/30'}`}
+          title={enabled ? '已开启' : '已关闭'}>
+          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${enabled ? 'left-[18px]' : 'left-0.5'}`} />
+        </button>
+      </div>
+      <div className="px-3 pb-3 space-y-2">
+        <div data-testid="image-inline-notice" className="text-[10.5px] text-ink-muted font-body leading-relaxed space-y-0.5">
+          <div>关闭后回到原来的做法：只把图片的文件路径交给 Claude Code，超过 256KB 的图片它不会直接交给模型。改动立即生效，不用重启。</div>
+          <div>已经发出的图片会留在所在的会话里。会话因为图片太多或某张图片而每次发送都报错时，回退到带图的那条消息之前，或者新开一个会话。</div>
+        </div>
+        {err && <div data-testid="image-inline-error" className="text-[11px] text-error font-body">{err}</div>}
+      </div>
+    </div>
+  );
+}
 
 // r151a 功能 Y(INTERFACE Y.3.4 设置页):第三方 provider 的「自动」档 —— 总开关、告知、审核模型(= 该 provider 的
 // sonnet 档)、清除本地"不可用"标记。状态取 store 的 autoAuditStatus(GET /api/auto-audit/status,WS 广播刷新)。
