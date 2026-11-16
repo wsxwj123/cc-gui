@@ -9792,7 +9792,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const item = messageQueue[i];
     if (!item) return;
     useStore.getState().removeFromQueue(sessionQueueKey, i);
-    window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: item.text, targetKey: sessionQueueKey } }));
+    // r192:附件还原成卡片(不再是文字里的「@路径」),追加在输入框已挂的附件后面。
+    const restored = homeDraftFromOrphan(item);
+    const detail = { text: restored.text, targetKey: sessionQueueKey };
+    if (restored.attachments.length) {
+      detail.attachments = restored.attachments;
+      detail.appendAttachments = true;
+    }
+    window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail }));
   }, [messageQueue, sessionQueueKey]);
   const openBtw = useCallback(() => setBtwToggleSignal((n) => n + 1), []);
 

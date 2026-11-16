@@ -6,24 +6,54 @@
 // 同时锁住 7342b29 本来修好的三条路径不回归(空文本 ↑↓ / 单行非空 ↑ / 历史中编辑后 ↑)。
 // 路径 6/7 是 #15:历史里翻出 `/compact` 之类后 ↑↓ 卡死(canUseHistory 写死 `/` 排除 +
 // 斜杠菜单抢箭头),判据统一改成"浏览态 historyCursor>=0 优先于 / 排除"。
-// 无框架,纯 assert;复刻组件内那段键盘逻辑(见 ChatInput.jsx:721-763)。
+// r192 起放行条件改按光标所在的【显示行】判断:行的部分直接调用组件用的纯函数
+// caretLineAllowsHistory(client/src/utils/caretLines.js),不再复刻;页面上量行的那一步
+// (measureCaretLines)在这里用 linesFor() 按「手动换行 + 固定列宽自动折行」模拟。
+// 其余按键顺序(召回待发、菜单、早退)仍按组件写法复刻。无框架,纯 assert。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { caretLineAllowsHistory } from '../../client/src/utils/caretLines.js';
+
+// —— 模拟量行:wrap 为每个显示行最多容纳的字符数(不给 = 不自动折行)。
+// 断点上的位置算下一行(与任务文件「已知边界」一致)。返回 { onFirstLine, onLastLine } ——
+function linesFor(text, selStart, selEnd, wrap = Infinity) {
+  const lineOf = (pos) => {
+    let line = 0;
+    let lineStart = 0;
+    for (const part of text.split('\n')) {
+      const end = lineStart + part.length;
+      if (pos <= end) return line + (Number.isFinite(wrap) ? Math.floor((pos - lineStart) / wrap) : 0);
+      line += Number.isFinite(wrap) ? Math.max(1, Math.ceil(part.length / wrap)) : 1;
+      lineStart = end + 1;
+    }
+    return line;
+  };
+  return { onFirstLine: lineOf(selStart) === lineOf(0), onLastLine: lineOf(selEnd) === lineOf(text.length) };
+}
 
 // —— 复刻:一次按键作用于 { text, cursor, draft } 状态,返回新状态 + 是否吞键 ——
-function keyDown(state, key, history, { selectionStart = null, showCommands = false } = {}) {
+// selectionStart / selectionEnd 不给 = 光标在末尾;lines 不给 = 用 linesFor 按 wrap 模拟;
+// lines: null = 量不出来(走保守判据)。
+function keyDown(state, key, history, {
+  selectionStart = null, selectionEnd = null, showCommands = false, wrap = Infinity, lines,
+  queueRecall = false, atPanelOpen = false, composing = false, modifier = false,
+} = {}) {
   const { text, cursor, draft } = state;
-  const pos = selectionStart == null ? text.length : selectionStart;
-  const atStart = pos === 0;
-  const atEnd = pos === text.length;
+  const selStart = selectionStart == null ? text.length : selectionStart;
+  const selEnd = selectionEnd == null ? selStart : selectionEnd;
+  if (composing) return { ...state, prevented: false, ignored: true };           // 函数顶部 IME 早退
+  if (atPanelOpen && (key === 'ArrowUp' || key === 'ArrowDown')) return { ...state, prevented: true, menu: true };
   // 斜杠菜单开着时只在【非浏览历史】(cursor<0)消费箭头(ChatInput.jsx:696/:704)
   if (showCommands && (key === 'ArrowUp' || key === 'ArrowDown') && cursor < 0) {
     return { ...state, prevented: true, menu: true };
   }
+  if (key === 'ArrowUp' && !modifier && text.trim() === '' && queueRecall) return { ...state, prevented: true, recalled: true };
+  if (modifier) return { ...state, prevented: false };
+  const measured = lines === undefined ? linesFor(text, selStart, selEnd, wrap) : lines;
   const canUseHistory = (!text.startsWith('/') || cursor >= 0)
-    && (text.trim() === '' || cursor >= 0 || !text.includes('\n') || (key === 'ArrowUp' ? atStart : atEnd));
+    && caretLineAllowsHistory({ key, lines: measured, selectionStart: selStart, selectionEnd: selEnd, textLength: text.length });
   if (!canUseHistory) return { ...state, prevented: false };
   // 本次修复:↓ 在未浏览历史时不吞键,让光标正常下移
   if (key === 'ArrowDown' && cursor < 0) return { ...state, prevented: false };
@@ -151,6 +181,84 @@ const S0 = { text: '', cursor: -1, draft: '' };
   // 补全后必须退出浏览态:否则紧接着按 ↑ 会继续翻历史,把刚补全的命令覆盖掉。
   const sc = src.slice(src.indexOf('const selectCommand ='), src.indexOf('// ── @ 引用选择器'));
   assert.ok(/setHistoryCursor\(-1\)/.test(sc), 'selectCommand 必须 setHistoryCursor(-1) 退出历史浏览态');
+  // r192:放行条件 = 原样保留的 `/` 段 && 按显示行判断的纯函数;旧的「没有换行就一律放行」不得回来
+  const arrowBlock = kd.slice(kd.indexOf("if ((e.key === 'ArrowUp' || e.key === 'ArrowDown')"), kd.indexOf('if (canUseHistory)'));
+  assert.ok(/const canUseHistory = \(!text\.startsWith\('\/'\) \|\| historyCursor >= 0\) && caretLineAllowsHistory\(\{/.test(arrowBlock),
+    'canUseHistory 必须是「/ 段 && caretLineAllowsHistory(...)」');
+  assert.ok(arrowBlock.includes('measureCaretLines(el)'), '行信息必须由 measureCaretLines 从输入框量出');
+  assert.ok(/selectionStart: el \? el\.selectionStart/.test(arrowBlock) && /selectionEnd: el \? el\.selectionEnd/.test(arrowBlock),
+    '保守判据要拿选区起点(上键)与选区终点(下键)');
+  assert.ok(!arrowBlock.includes("!text.includes('\\n')"), '旧的「没有换行符就一律翻历史」不得回来');
+  assert.ok(/if \(e\.key === 'ArrowDown' && historyCursor < 0\) return;/.test(kd), '↓ 未浏览历史早退原样保留');
+}
+
+// ── r192 路径表(任务文件 B 项「进入路径」逐行)───────────────────────
+{
+  const H = ['M2 第一行\nM2 第二行\nM2 第三行', 'M1'];
+  // 行 1:文本为空 + 有待发消息 → ↑ 召回待发;↓ 不处理
+  assert.equal(keyDown(S0, 'ArrowUp', H, { queueRecall: true }).recalled, true, '空文本有待发:↑ 召回待发');
+  assert.equal(keyDown(S0, 'ArrowDown', H, { queueRecall: true }).prevented, false, '空文本有待发:↓ 不处理');
+  // 行 2:文本为空 + 没有待发 → ↑ 翻上一条;↓ 未浏览不处理
+  assert.equal(keyDown(S0, 'ArrowUp', H).cursor, 0, '空文本:↑ 翻上一条');
+  assert.equal(keyDown(S0, 'ArrowDown', H).prevented, false, '空文本未浏览:↓ 不处理');
+  // 行 3:一个显示行 → ↑ 翻上一条(先存草稿),光标在哪都一样;↓ 浏览中翻下一条、未浏览不处理
+  const one = { text: 'K 单行', cursor: -1, draft: '' };
+  const oneUp = keyDown(one, 'ArrowUp', H, { selectionStart: 2 });
+  assert.equal(oneUp.cursor, 0, '单行光标在中间:↑ 也翻');
+  assert.equal(oneUp.draft, 'K 单行', '进历史前存草稿');
+  assert.equal(keyDown(one, 'ArrowDown', H, { selectionStart: 0 }).prevented, false, '单行未浏览:↓ 不处理');
+  // 行 4–6:多个显示行(翻出的 M2,三行)
+  const m2 = { text: H[0], cursor: 0, draft: '' };
+  const a = 'M2 第一行'.length;
+  const b = 'M2 第二行'.length;
+  const endUp = keyDown(m2, 'ArrowUp', H);                                  // 光标在末尾(第三行)
+  assert.equal(endUp.prevented, false, '多行光标在最后一行:↑ 不拦,光标上移(修前直接翻到 M1)');
+  assert.equal(keyDown(m2, 'ArrowUp', H, { selectionStart: a + 1 + 2 }).prevented, false, '光标在第二行:↑ 不拦');
+  const topUp = keyDown(m2, 'ArrowUp', H, { selectionStart: 3 });
+  assert.equal(topUp.text, 'M1', '光标在第一行:↑ 翻上一条');
+  assert.equal(keyDown(m2, 'ArrowDown', H, { selectionStart: 0 }).prevented, false, '光标在第一行:↓ 不拦,光标下移(修前直接退出历史)');
+  assert.equal(keyDown(m2, 'ArrowDown', H, { selectionStart: a + 1 + b }).prevented, false, '第二行末尾:↓ 不拦');
+  const lastDown = keyDown(m2, 'ArrowDown', H, { selectionStart: a + 1 + b + 1 });
+  assert.equal(lastDown.cursor, -1, '光标在最后一行且浏览中:↓ 翻下一条(到底回草稿)');
+  const typedMulti = { text: 'x\ny', cursor: -1, draft: '' };
+  assert.equal(keyDown(typedMulti, 'ArrowDown', H).prevented, false, '最后一行但未浏览:↓ 不处理');
+  // 选区:↑ 看起点,↓ 看终点
+  assert.equal(keyDown(m2, 'ArrowUp', H, { selectionStart: 1, selectionEnd: H[0].length }).text, 'M1', '选区起点在第一行:↑ 翻');
+  assert.equal(keyDown(m2, 'ArrowDown', H, { selectionStart: 1, selectionEnd: H[0].length }).cursor, -1, '选区终点在最后一行:↓ 翻');
+  assert.equal(keyDown(m2, 'ArrowDown', H, { selectionStart: 1, selectionEnd: a + 2 }).prevented, false, '选区终点在第二行:↓ 不拦');
+  // 自动折行:600 字没有换行,按 100 列折成 6 行
+  const longText = 'word '.repeat(120);
+  const long = { text: longText, cursor: -1, draft: '' };
+  assert.equal(keyDown(long, 'ArrowUp', H, { wrap: 100 }).prevented, false, '自动折行、光标在末尾:↑ 不拦(修前直接进历史)');
+  assert.equal(keyDown(long, 'ArrowUp', H, { wrap: 100, selectionStart: 50 }).cursor, 0, '自动折行、光标在第一行:↑ 翻');
+  assert.equal(keyDown(long, 'ArrowUp', H, { wrap: 100, selectionStart: 100 }).prevented, false, '断点位置算下一行(已知边界)');
+  // 行 7:手打「/」开头 → 不翻(已由路径 5 覆盖);行 8:翻出的「/」开头多行条目按行规则
+  const slashItem = { text: '/compact\n说明', cursor: 0, draft: '' };
+  assert.equal(keyDown(slashItem, 'ArrowUp', ['/compact\n说明', 'M1']).prevented, false, '翻出的 / 多行条目、光标在末行:↑ 不拦');
+  assert.equal(keyDown(slashItem, 'ArrowUp', ['/compact\n说明', 'M1'], { selectionStart: 0 }).text, 'M1', '翻出的 / 条目、光标在首行:↑ 翻');
+  // 行 9:@ 面板 / 斜杠菜单(未浏览)开着 → 归面板
+  assert.equal(keyDown(one, 'ArrowUp', H, { atPanelOpen: true }).menu, true, '@ 面板开着:箭头归面板');
+  // 行 10:输入法合成中 → 不处理;行 11:带修饰键 → 不处理
+  assert.equal(keyDown(S0, 'ArrowUp', H, { composing: true }).ignored, true, '输入法合成中不处理');
+  const mod = keyDown(S0, 'ArrowUp', H, { modifier: true });
+  assert.equal(mod.prevented, false, '带修饰键不处理');
+  assert.equal(mod.cursor, -1, '带修饰键不进历史');
+}
+
+// ── r192 纯函数本身:量不出行时的保守判据 ─────────────────────────────
+{
+  const f = (key, selectionStart, selectionEnd, textLength, lines = null) => caretLineAllowsHistory({ key, lines, selectionStart, selectionEnd, textLength });
+  assert.equal(f('ArrowUp', 0, 0, 10), true, '量不出:↑ 光标在最开头才放行');
+  assert.equal(f('ArrowUp', 3, 3, 10), false, '量不出:↑ 不在最开头不放行');
+  assert.equal(f('ArrowUp', 0, 10, 10), true, '量不出:↑ 看选区起点');
+  assert.equal(f('ArrowDown', 10, 10, 10), true, '量不出:↓ 光标在最末尾才放行');
+  assert.equal(f('ArrowDown', 0, 3, 10), false, '量不出:↓ 看选区终点');
+  assert.equal(f('ArrowDown', 0, 0, 0), true, '量不出 + 空文本:↓ 放行');
+  assert.equal(f('ArrowUp', 5, 5, 10, { onFirstLine: true, onLastLine: false }), true, '有行信息:↑ 看 onFirstLine');
+  assert.equal(f('ArrowDown', 5, 5, 10, { onFirstLine: true, onLastLine: false }), false, '有行信息:↓ 看 onLastLine');
+  assert.equal(f('Enter', 0, 0, 0, { onFirstLine: true, onLastLine: true }), false, '其它键不放行');
+  // 量不出行时组件走保守判据:翻出的多行条目光标在末尾,↑ 不翻
+  assert.equal(keyDown({ text: 'a\nb', cursor: 0, draft: '' }, 'ArrowUp', HIST, { lines: null }).prevented, false, '量不出 + 光标在末尾:↑ 不翻');
 }
 
 // ── 补全后 ↑ 不再覆盖:复刻"选中命令 → cursor 复位 → ↑ 走菜单而非历史" ────
@@ -162,4 +270,4 @@ const S0 = { text: '', cursor: -1, draft: '' };
     '补全后 ↑ 归斜杠菜单,不得继续翻历史覆盖补全文本');
 }
 
-console.log('✓ check-input-history-nav: 7 条路径 + 源码守卫全过');
+console.log('✓ check-input-history-nav: 7 条路径 + 源码守卫 + r192 显示行路径表与纯函数全过');
