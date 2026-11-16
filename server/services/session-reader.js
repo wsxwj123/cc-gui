@@ -2060,7 +2060,13 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
       // 只认 queued_command:queue-operation 的 dequeue 之后必跟一条真 user 行,给它合成
       // 就是同一句话画两遍。record 自带 uuid,天然参与上面的 uuid 去重(resume 重放安全)。
       const a = record.attachment;
-      const prompt = typeof a.prompt === 'string' ? a.prompt : '';
+      // r193:带图并入时 CLI 落的 prompt 是数组(文字块 + 图片块,S9)。与用户行同一口径只取文字块拼接,
+      // 图片块不进文字(也就不把 base64 带进页面数据);不认这种形态时这条并入消息整条消失(S14)。
+      const prompt = typeof a.prompt === 'string'
+        ? a.prompt
+        : Array.isArray(a.prompt)
+          ? a.prompt.filter((c) => c && c.type === 'text' && typeof c.text === 'string').map((c) => c.text).join('\n')
+          : '';
       // R10:同一份通知信封折叠进本回合时,CLI 落的是 queued_command(commandMode=
       // 'task-notification',无 source_uuid)。真人工并入是 commandMode='prompt' 且带
       // source_uuid —— 协议字段说了算,不靠"缺 source_uuid"或"包含标签"猜。
