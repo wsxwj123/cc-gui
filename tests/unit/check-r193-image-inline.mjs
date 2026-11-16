@@ -10,7 +10,7 @@ import { deflateSync, crc32 as zlibCrc32 } from 'node:zlib';
 import { randomBytes } from 'node:crypto';
 import {
   inlineImageAttachments, isImageCandidatePath, sniffImageMediaType, imageStructureOk,
-  IMAGE_INLINE_ERROR, IMAGE_INLINE_MAX_BYTES, IMAGE_INLINE_MAX_IMAGES,
+  IMAGE_INLINE_ERROR, IMAGE_INLINE_MAX_BYTES, IMAGE_INLINE_MAX_IMAGES, IMAGE_INLINE_MAX_TOTAL_BYTES,
 } from '../../server/utils/image-attach-inline.js';
 import { isInsideUploadDir, isPathInsideWith, UPLOAD_DIR } from '../../server/utils/safe-path.js';
 import { formatAttachmentPrompt } from '../../server/utils/attachment-prompt-format.js';
@@ -49,13 +49,15 @@ function makePng(width = 1, height = 1, random = false) {
     pngChunk('IHDR', ihdr), pngChunk('IDAT', deflateSync(Buffer.concat(rows))), pngChunk('IEND', Buffer.alloc(0)),
   ]);
 }
-// GIF / WebP 用公开的 1×1 最小文件;JPEG 只造结构检查要看的头尾(结构检查不解码像素)。
+// GIF / WebP 用公开的 1×1 最小文件;JPEG 只造结构检查要走的段:SOI、APP0、SOS、扫描数据、EOI(不解码像素)。
 const GIF = Buffer.from('R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==', 'base64');
 const WEBP = Buffer.from('UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==', 'base64');
-const JPEG = Buffer.concat([
+const JPEG_HEAD = Buffer.concat([
   Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]), Buffer.from('JFIF\0', 'latin1'),
-  Buffer.from([1, 1, 0, 0, 1, 0, 1, 0, 0]), randomBytes(40), Buffer.from([0xFF, 0xD9]),
+  Buffer.from([1, 1, 0, 0, 1, 0, 1, 0, 0]),
 ]);
+const JPEG_SOS = Buffer.from([0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+const JPEG = Buffer.concat([JPEG_HEAD, JPEG_SOS, Buffer.alloc(40, 0x5A), Buffer.from([0xFF, 0xD9])]);
 const PNG = makePng(4, 3, true);
 
 async function put(dir, name, data) { const p = join(dir, name); await writeFile(p, data); return p; }
@@ -147,14 +149,18 @@ check('图与文档混合:文字块里文档的路径行还在,只有图片块',
 });
 
 // ---- 坏图与格式 ----
-check('损坏:PNG 文件头完好后面乱码 / 截断 / IEND 后有尾巴;其他三种结构不对', async () => {
+check('损坏:PNG 文件头完好后面乱码 / 截断;JPEG 截断 / 段头改乱 / 段长越界;其他两种结构不对', async () => {
   const big = makePng(64, 64, true);
   const garbled = Buffer.concat([big.subarray(0, 64), randomBytes(big.length - 64)]);
+  const badSegHead = Buffer.from(JPEG); badSegHead[JPEG_HEAD.length] = 0x12; // SOS 段头的 FF 被改掉
+  const badSegLen = Buffer.from(JPEG); badSegLen.writeUInt16BE(0xFFF0, 4); // APP0 段长越过文件尾
   const cases = [
     ['garbled.png', garbled],
     ['trunc.png', PNG.subarray(0, PNG.length - 5)],
-    ['tail.png', Buffer.concat([PNG, Buffer.from('xx')])],
     ['trunc.jpg', JPEG.subarray(0, JPEG.length - 1)],
+    ['seghead.jpg', badSegHead],
+    ['seglen.jpg', badSegLen],
+    ['nosos.jpg', Buffer.concat([JPEG_HEAD, Buffer.from([0xFF, 0xD9])])],
     ['trunc.gif', GIF.subarray(0, GIF.length - 1)],
     ['bad.webp', Buffer.concat([WEBP, Buffer.from([0, 0])])],
   ];
@@ -168,6 +174,29 @@ check('损坏:PNG 文件头完好后面乱码 / 截断 / IEND 后有尾巴;其�
   assert.equal(imageStructureOk(PNG, 'image/png'), true);
   const flipped = Buffer.from(PNG); flipped[20] ^= 1;
   assert.equal(imageStructureOk(flipped, 'image/png'), false);
+});
+
+check('放宽:结束标记后带尾随数据的 JPEG / PNG、带填充字节的 WebP、段前填充 FF 的 JPEG 都通过', async () => {
+  const webpPadded = Buffer.from(WEBP);
+  webpPadded.writeUInt32LE(webpPadded.readUInt32LE(4) - 1, 4); // 记的长度比实际少 1 = 奇数长度的填充字节
+  const fillFf = Buffer.concat([JPEG.subarray(0, 2), Buffer.from([0xFF]), JPEG.subarray(2)]);
+  const cases = [
+    ['tail.png', Buffer.concat([PNG, Buffer.from('trailing-data')]), 'image/png'],
+    ['tail.jpg', Buffer.concat([JPEG, Buffer.from('Exif-like trailer \xff\xd8 more', 'latin1')]), 'image/jpeg'],
+    ['pad.webp', webpPadded, 'image/webp'],
+    ['fill.jpg', fillFf, 'image/jpeg'],
+  ];
+  const paths = [];
+  for (const [name, data] of cases) paths.push(await put(up, name, data));
+  const r = await inlineImageAttachments(promptWith(paths), opts());
+  assert.deepEqual(r.imageAttach, { inlined: cases.length, skipped: [] });
+  cases.forEach(([, data, mediaType], i) => {
+    assert.equal(r.content[i + 1].source.media_type, mediaType);
+    assert.equal(r.content[i + 1].source.data, data.toString('base64'));
+  });
+  // 少 2 个字节仍不行(只容一个填充字节)
+  const webpShort = Buffer.from(WEBP); webpShort.writeUInt32LE(webpShort.readUInt32LE(4) - 2, 4);
+  assert.equal(imageStructureOk(webpShort, 'image/webp'), false);
 });
 
 check('heic / 认不出的内容 / 空文件 → unsupported', async () => {
@@ -191,6 +220,34 @@ check('超过大小上限(注入小上限):读内容之前拒绝', async () => {
   assert.equal(reads, 0, '超限不读内容');
   const ok = await inlineImageAttachments(promptWith([p]), opts({ maxBytes: PNG.length }));
   assert.equal(ok.imageAttach.inlined, 1, '等于上限照带');
+});
+
+check('合计大小上限(注入小上限):超出的那张 too-large 且不读内容,后面放得下的照带', async () => {
+  assert.equal(IMAGE_INLINE_MAX_TOTAL_BYTES, 20 * 1024 * 1024);
+  const small = makePng(1, 1);
+  const a = await put(up, 'sum-a.png', PNG);
+  const b = await put(up, 'sum-b.png', PNG); // a + b 超合计
+  const c = await put(up, 'sum-c.png', small); // a + c 放得下
+  const opened = [];
+  const fsImpl = {
+    open: async (file, flags) => {
+      const h = await fsOpen(file, flags); const read = h.read.bind(h);
+      h.read = (...x) => { opened.push(path.basename(file)); return read(...x); };
+      return h;
+    },
+  };
+  const limit = PNG.length + small.length;
+  const r = await inlineImageAttachments(promptWith([a, b, c]), opts({ fsImpl, maxTotalBytes: limit }));
+  assert.deepEqual(r.imageAttach, { inlined: 2, skipped: [{ name: 'sum-b.png', reason: 'too-large' }] });
+  assert.equal(r.content.length, 3);
+  assert.equal(r.content[2].source.data, small.toString('base64'));
+  assert.ok(!opened.includes('sum-b.png'), '超合计的那张不读内容');
+  // 恰好等于合计上限照带;前面带不上的不占合计
+  const exact = await inlineImageAttachments(promptWith([a, c]), opts({ maxTotalBytes: limit }));
+  assert.equal(exact.imageAttach.inlined, 2);
+  const gone = join(up, 'sum-gone.png');
+  const r2 = await inlineImageAttachments(promptWith([gone, a]), opts({ maxTotalBytes: PNG.length }));
+  assert.deepEqual(r2.imageAttach, { inlined: 1, skipped: [{ name: 'sum-gone.png', reason: 'missing' }] });
 });
 
 check('超过张数上限(注入小上限):前 N 张照带,其余 too-many', async () => {

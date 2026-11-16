@@ -13,6 +13,8 @@ import { parseAttachmentPrompt } from './attachment-prompt-format.js';
 import { UPLOAD_DIR, realpathNative, isPathInsideWith } from './safe-path.js';
 
 export const IMAGE_INLINE_MAX_BYTES = 20 * 1024 * 1024; // S12:19.8MB 原图命令行能处理,更大的没测
+// 一条消息里已带上图片的合计字节上限;实测过的最大一行是单张 19.8MB(S12),更大的合计量没验证,不放行。
+export const IMAGE_INLINE_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 export const IMAGE_INLINE_MAX_IMAGES = 20;
 export const IMAGE_INLINE_ERROR = 'IMAGE_INLINE_FAILED';
 
@@ -72,19 +74,51 @@ function pngStructureOk(buf) {
     first = false;
     if (crc32(buf, offset + 4, dataEnd) !== buf.readUInt32BE(dataEnd)) return false;
     offset = dataEnd + 4;
-    if (type === 'IEND') return offset === buf.length; // IEND 必须是最后一块
+    // 走到 IEND 且之前各块 CRC 都对就算通过;IEND 后面的多余字节不算损坏(能正常显示的图常见)。
+    if (type === 'IEND') return true;
   }
   return false;
 }
 
-/** 结构检查(方案第 2 节第 4 条)。mediaType 来自 sniffImageMediaType。 */
+// JPEG:从文件头逐段走到「开始扫描」(DA),之后能找到 FFD9 才算通过。
+// 不要求以 FFD9 结尾:手机照片常在结束标记后附带别的数据。
+function jpegStructureOk(buf) {
+  const n = buf.length;
+  let offset = 2; // 跳过 SOI(FFD8)
+  while (offset + 1 < n) {
+    if (buf[offset] !== 0xFF) return false; // 段头不是 FF
+    const marker = buf[offset + 1];
+    if (marker === 0xFF) { offset += 1; continue; } // 段前填充的 FF
+    // 不带段长的独立标记:TEM、RST0–7;段头区出现 SOI / EOI 视为损坏
+    if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { offset += 2; continue; }
+    if (marker === 0xD8 || marker === 0xD9) return false;
+    if (offset + 4 > n) return false;
+    const segmentLength = buf.readUInt16BE(offset + 2);
+    const segmentEnd = offset + 2 + segmentLength;
+    if (segmentLength < 2 || segmentEnd > n) return false; // 段长越界
+    if (marker === 0xDA) {
+      for (let i = segmentEnd; i + 1 < n; i += 1) {
+        if (buf[i] === 0xFF && buf[i + 1] === 0xD9) return true;
+      }
+      return false;
+    }
+    offset = segmentEnd;
+  }
+  return false;
+}
+
+/** 结构检查(方案第 2 节第 4 条,按主会话修订放宽)。mediaType 来自 sniffImageMediaType。 */
 export function imageStructureOk(buf, mediaType) {
   const n = buf.length;
   switch (mediaType) {
     case 'image/png': return pngStructureOk(buf);
-    case 'image/jpeg': return n >= 4 && buf[n - 2] === 0xFF && buf[n - 1] === 0xD9;
+    case 'image/jpeg': return jpegStructureOk(buf);
     case 'image/gif': return n > 6 && buf[n - 1] === 0x3B;
-    case 'image/webp': return n >= 12 && buf.readUInt32LE(4) + 8 === n;
+    case 'image/webp': {
+      if (n < 12) return false;
+      const declared = buf.readUInt32LE(4) + 8;
+      return declared === n || declared === n - 1; // 奇数长度时末尾多一个填充字节
+    }
     default: return false;
   }
 }
@@ -141,7 +175,8 @@ async function readCandidate(submitted, ctx) {
     try {
       stats = await handle.stat();
       if (!stats.isFile()) return { reason: 'unreadable' };
-      if (stats.size > ctx.maxBytes) return { reason: 'too-large' };
+      // 单张超限,或已带上的加这一张超过一条消息的合计上限:不读内容(后面更小的还能带)
+      if (stats.size > ctx.maxBytes || ctx.totalBytes + stats.size > ctx.maxTotalBytes) return { reason: 'too-large' };
       data = await readHandleFully(handle, stats.size);
     } catch {
       return { reason: 'unreadable' };
@@ -149,7 +184,7 @@ async function readCandidate(submitted, ctx) {
     const mediaType = sniffImageMediaType(data);
     if (!mediaType) return { reason: 'unsupported' };
     if (!imageStructureOk(data, mediaType)) return { reason: 'damaged' };
-    return { block: { type: 'image', source: { type: 'base64', media_type: mediaType, data: data.toString('base64') } } };
+    return { bytes: data.length, block: { type: 'image', source: { type: 'base64', media_type: mediaType, data: data.toString('base64') } } };
   } finally {
     await handle.close().catch(() => {});
   }
@@ -166,6 +201,7 @@ async function readCandidate(submitted, ctx) {
  * @param {Function} [options.realpathFn] 默认 fs.realpath.native;上传目录与候选路径共用
  * @param {string} [options.platform] 默认 process.platform;win32 不加 O_NOFOLLOW
  * @param {number} [options.maxBytes] 单张上限,默认 20MB
+ * @param {number} [options.maxTotalBytes] 一条消息里已带上图片的合计字节上限,默认 20MB
  * @param {number} [options.maxImages] 一条最多张数,默认 20
  * @returns {Promise<{ content: string | Array<object>, imageAttach: { inlined: number, skipped: Array<{ name: string, reason: string }> } | undefined, error?: string }>}
  */
@@ -179,6 +215,7 @@ export async function inlineImageAttachments(prompt, options = {}) {
     realpathFn = realpathNative,
     platform = process.platform,
     maxBytes = IMAGE_INLINE_MAX_BYTES,
+    maxTotalBytes = IMAGE_INLINE_MAX_TOTAL_BYTES,
     maxImages = IMAGE_INLINE_MAX_IMAGES,
   } = options || {};
   if (!enabled || typeof prompt !== 'string') return passthrough;
@@ -190,7 +227,8 @@ export async function inlineImageAttachments(prompt, options = {}) {
 
     const noFollow = platform !== 'win32' && fsConstants.O_NOFOLLOW ? fsConstants.O_NOFOLLOW : 0;
     const ctx = {
-      fsImpl, pathModule, realpathFn, uploadDir, maxBytes,
+      fsImpl, pathModule, realpathFn, uploadDir, maxBytes, maxTotalBytes,
+      totalBytes: 0,
       openFlags: fsConstants.O_RDONLY | noFollow,
       uploadReal: await callAsync(realpathFn, uploadDir).catch(() => null),
     };
@@ -200,7 +238,7 @@ export async function inlineImageAttachments(prompt, options = {}) {
       const name = lastSegment(submitted);
       if (blocks.length >= maxImages) { skipped.push({ name, reason: 'too-many' }); continue; }
       const result = await readCandidate(submitted, ctx);
-      if (result.block) blocks.push(result.block);
+      if (result.block) { blocks.push(result.block); ctx.totalBytes += result.bytes; }
       else skipped.push({ name, reason: result.reason });
     }
     return {
