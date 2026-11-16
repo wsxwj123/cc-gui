@@ -1,4 +1,5 @@
 import { queueKeyFor } from './steerQueue.js';
+import { formatAttachmentPrompt } from '../../../server/utils/attachment-prompt-format.js';
 
 function filePreviewDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -131,10 +132,8 @@ export function buildAttachmentMessage(text, attachments) {
   if (attachmentBlockReason(attachments)) return null;
   const ready = (Array.isArray(attachments) ? attachments : []).filter((item) => item?.path);
   if (!trimmed && ready.length === 0) return null;
-  const attachmentRefs = ready.length
-    ? `\n\n附件:\n${ready.map((item) => `@${item.path}`).join('\n')}`
-    : '';
-  const prompt = (trimmed || '请查看这些附件') + attachmentRefs;
+  // r193:附件段格式只在 server/utils/attachment-prompt-format.js 定义一处,后端按同一格式解析。
+  const prompt = formatAttachmentPrompt(trimmed, ready.map((item) => item.path));
   const meta = ready.length ? {
     attachments: ready.map((item) => ({
       kind: item.kind,
