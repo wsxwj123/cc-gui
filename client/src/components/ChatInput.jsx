@@ -25,6 +25,7 @@ import { readInputHistory, saveInputHistoryEntry } from '../utils/inputHistory.j
 import {
   isThirdPartyProvider, officialAutoKey, thirdPartyAutoKey, autoUnavailableKeyFor, THIRD_PARTY_AUTO_DESC, auditModelLineText,
 } from '../utils/autoAudit.js';
+import { measureCaretLines, caretLineAllowsHistory } from '../utils/caretLines.js';
 
 // Permission mode metadata — mirrors `claude --permission-mode <choice>`。
 // P2.1:文案对齐官方六档语义(RESEARCH-mode-semantics §④b);bypass 中文名保持「放任」。
@@ -904,15 +905,21 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
 
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
       const el = textareaRef.current;
-      const atStart = !el || el.selectionStart === 0;
-      const atEnd = !el || el.selectionStart === el.value.length;
-      // 单行文本恒放行 ↑↓ 历史导航(对齐 Claude Code CLI 原生行编辑);多行保留 atStart/atEnd
-      // 门槛防劫持光标跨行移动。旧条件下单行非空+光标在行尾时 ↑ 是死键(用户实报):浏览历史中
-      // 编辑召回条目(如退格)会把 historyCursor 重置为 -1,此时回不到历史。单行放行后 ↑ 进导航
-      // 前会把当前文本存进 draftBeforeHistoryRef(下方),按 ↓ 到底可找回。
+      // r192:按光标所在的【显示行】判断(手动换行与自动折行都算行):上键看选区起点是否在第一行,
+      // 下键看选区终点是否在最后一行;不在就不拦,交给浏览器移动光标。只有一行(含空文本)时两个
+      // 条件天然成立,单行一按就翻(保住 2026-07-22「单行行尾按上键没反应」的修复);进历史前
+      // 会把当前文本存进 draftBeforeHistoryRef(下方),按 ↓ 到底可找回。量不出行时退回保守判据
+      // (上键要在最开头、下键要在最末尾)。
       // `/` 排除只针对【手打斜杠命令】(那时 cursor=-1,箭头归斜杠菜单);已经在翻历史时
       // (cursor>=0)翻出的 `/compact` 之类不算手打,否则历史里一有 / 开头条目就卡死翻不过去。
-      const canUseHistory = (!text.startsWith('/') || historyCursor >= 0) && (text.trim() === '' || historyCursor >= 0 || !text.includes('\n') || (e.key === 'ArrowUp' ? atStart : atEnd));
+      const caretLines = measureCaretLines(el);
+      const canUseHistory = (!text.startsWith('/') || historyCursor >= 0) && caretLineAllowsHistory({
+        key: e.key,
+        lines: caretLines,
+        selectionStart: el ? el.selectionStart : 0,
+        selectionEnd: el ? el.selectionEnd : text.length,
+        textLength: el ? el.value.length : text.length,
+      });
       if (canUseHistory) {
         const history = readHistory();
         // ↓ 只在【正在浏览历史】(historyCursor>=0)时有意义:cursor=-1 时按 ↓ 无历史可回退,
