@@ -46,6 +46,24 @@ export function isImageCandidatePath(submitted) {
   return dot > 0 && IMAGE_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
 }
 
+/**
+ * 去掉开头空白后以「/」开头 = 斜杠命令(技能、自定义命令)。数组写法下命令行不再展开它们(S16),
+ * 所以这类消息一律不改写,保持原字符串让命令行照常展开(S15)。
+ */
+export function isSlashCommandPrompt(prompt) {
+  return typeof prompt === 'string' && prompt.trimStart().startsWith('/');
+}
+
+/**
+ * 同步判断这条消息有没有要读的图(不读文件、不读偏好):是字符串、不是斜杠命令、末尾附件段里至少有一个图片候选。
+ * 为假时调用方不必等待,直接发原字符串。
+ */
+export function promptHasImageCandidates(prompt) {
+  if (typeof prompt !== 'string' || isSlashCommandPrompt(prompt)) return false;
+  const parsed = parseAttachmentPrompt(prompt);
+  return !!parsed && parsed.paths.some(isImageCandidatePath);
+}
+
 // ---- 格式识别与结构检查(不解码像素,只在已读入的缓冲区上做下标访问) ----
 
 let crcTable = null;
@@ -232,7 +250,7 @@ export async function inlineImageAttachments(prompt, options = {}) {
     maxTotalBytes = IMAGE_INLINE_MAX_TOTAL_BYTES,
     maxImages = IMAGE_INLINE_MAX_IMAGES,
   } = options || {};
-  if (!enabled || typeof prompt !== 'string') return passthrough;
+  if (!enabled || typeof prompt !== 'string' || isSlashCommandPrompt(prompt)) return passthrough;
   try {
     const parsed = parseAttachmentPrompt(prompt);
     if (!parsed) return passthrough;

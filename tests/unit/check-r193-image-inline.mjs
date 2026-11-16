@@ -10,6 +10,7 @@ import { deflateSync, crc32 as zlibCrc32 } from 'node:zlib';
 import { randomBytes } from 'node:crypto';
 import {
   inlineImageAttachments, isImageCandidatePath, sniffImageMediaType, imageStructureOk,
+  promptHasImageCandidates, isSlashCommandPrompt,
   IMAGE_INLINE_ERROR, IMAGE_INLINE_MAX_BYTES, IMAGE_INLINE_MAX_IMAGES, IMAGE_INLINE_MAX_TOTAL_BYTES,
 } from '../../server/utils/image-attach-inline.js';
 import { isInsideUploadDir, isPathInsideWith, UPLOAD_DIR } from '../../server/utils/safe-path.js';
@@ -109,6 +110,33 @@ check('只有文档类附件:原样返回,imageAttach undefined,不读文件', a
   const r = await inlineImageAttachments(prompt, opts({ fsImpl }));
   assert.deepEqual(r, { content: prompt, imageAttach: undefined });
   assert.equal(opened, 0);
+});
+
+check('promptHasImageCandidates:同步判断有没有要读的图(不碰文件)', () => {
+  assert.equal(promptHasImageCandidates(promptWith(['/u/a.png'])), true);
+  assert.equal(promptHasImageCandidates(promptWith(['/u/a.txt', '/u/b.PDF'])), false, '只有文档类');
+  assert.equal(promptHasImageCandidates('普通消息 /u/a.png'), false, '没有附件段');
+  assert.equal(promptHasImageCandidates(promptWith(['/u/a.png'], '/skill 看图')), false, '斜杠命令');
+  assert.equal(promptHasImageCandidates(promptWith(['/u/a.png'], ' \n\t/cmd')), false, '开头空白后是斜杠命令');
+  assert.equal(promptHasImageCandidates(promptWith(['/u/a.png'], '看 a/b 这张')), true, '正文中间有 /');
+  assert.equal(promptHasImageCandidates([{ type: 'text', text: 'x' }]), false);
+  assert.equal(isSlashCommandPrompt('  /x'), true);
+  assert.equal(isSlashCommandPrompt('x /y'), false);
+});
+
+check('斜杠命令 + 附件段带大图:原字符串、没有 imageAttach、不读文件;正文中间有 / 照常改写', async () => {
+  const big = await put(up, 'slash-big.png', makePng(200, 200, true));
+  let opened = 0;
+  const fsImpl = { open: (...a) => { opened += 1; return fsOpen(...a); } };
+  for (const text of ['/skill 看这张', '  /skill 看这张', '\n\n/cmd']) {
+    const prompt = promptWith([big], text);
+    const r = await inlineImageAttachments(prompt, opts({ fsImpl }));
+    assert.deepEqual(r, { content: prompt, imageAttach: undefined }, JSON.stringify(text));
+  }
+  assert.equal(opened, 0, '斜杠命令不读文件');
+  const normal = await inlineImageAttachments(promptWith([big], '看 a/b 这张'), opts({ fsImpl }));
+  assert.equal(normal.imageAttach.inlined, 1);
+  assert.equal(opened, 1);
 });
 
 // ---- 四种格式 ----

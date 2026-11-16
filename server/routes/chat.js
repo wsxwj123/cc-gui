@@ -30,7 +30,7 @@ import {
   autoModeServerInjection, autoModeModelInjection, gateAutoPermissionMode, thirdPartyAutoPreToolUse, thirdPartyAutoAskOutput, thirdPartyAutoMustPrompt,
 } from '../services/auto-audit.js';
 import { readKeepAliveIdleSync, readStallTimeoutSync, readThirdPartyAutoSync, readImageInlineSync } from './prefs.js';
-import { inlineImageAttachments, imageInlineAllowed, IMAGE_INLINE_ERROR } from '../utils/image-attach-inline.js';
+import { inlineImageAttachments, imageInlineAllowed, promptHasImageCandidates, IMAGE_INLINE_ERROR } from '../utils/image-attach-inline.js';
 import { upstreamNoVision } from '../services/openai-proxy.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
@@ -2328,18 +2328,28 @@ export function isSelfAbortError(err, signal) {
 const sdkModeForGuiMode = (guiMode) => (guiMode === 'plan' ? 'plan' : guiMode === 'auto' ? 'auto' : 'default');
 
 // r193:交给命令行之前,把附件段里上传目录内的图片读成图片块(server/utils/image-attach-inline.js)。
-// 不改写(原字符串,与改动前逐字相同):CGUI_IMAGE_INLINE=0、设置开关关、能判定当前模型不支持看图、改写出错。
-// 返回 { content, imageAttachFields }:content 只用于写进命令行标准输入;imageAttachFields 展开进成功应答
+// 分两步,让不读图的消息不多出任何等待(调用处只在 plan.read 为真时才 await 读图,否则直接用 plan):
+//   planTurnContent —— 同步判断要不要读图。顺序:不是斜杠命令且附件段里有图片候选(都不成立时连偏好文件都不读)
+//     → CGUI_IMAGE_INLINE=0 / 设置开关 / 模型能不能看图(imageInlineAllowed)。不读图 → 原字符串、没有 imageAttach;
+//   readTurnImages —— 真正读图组装;出错退回原字符串。
+// 结果 { content, imageAttachFields }:content 只用于写进命令行标准输入;imageAttachFields 展开进成功应答
 // (没有 imageAttach 时是 {},应答与改动前相同)。日志只记错误标记,不带路径与图片数据。
-async function prepareTurnContent(prompt, model) {
+// getModel 是函数:只有前面几层都通过、要查能不能看图时才求值。
+export function planTurnContent(prompt, getModel, { envValue = process.env.CGUI_IMAGE_INLINE, readPref = readImageInlineSync, noVision = upstreamNoVision } = {}) {
   const text = String(prompt);
+  const passthrough = { read: false, text, content: text, imageAttachFields: {} };
   try {
-    const allowed = imageInlineAllowed({
-      envValue: process.env.CGUI_IMAGE_INLINE,
-      readPref: readImageInlineSync,
-      noVision: () => upstreamNoVision(model),
-    });
-    if (!allowed) return { content: text, imageAttachFields: {} };
+    if (!promptHasImageCandidates(text)) return passthrough;
+    const allowed = imageInlineAllowed({ envValue, readPref, noVision: () => noVision(getModel()) });
+    return allowed ? { read: true, text } : passthrough;
+  } catch {
+    console.warn(`[image-inline] 读图判断失败,按原文发送(${IMAGE_INLINE_ERROR})`);
+    return passthrough;
+  }
+}
+
+async function readTurnImages(text) {
+  try {
     const out = await inlineImageAttachments(text);
     if (out.error) {
       console.warn(`[image-inline] 读图失败,按原文发送(${out.error})`);
@@ -2479,7 +2489,9 @@ async function handleChatPost(req, res) {
   const turnPreview = entry ? REWRITTEN_TURN_PREVIEW : String(prompt).slice(0, 80);
   // r193:改写只影响写进命令行标准输入的内容;校验、指纹、预览、日志仍用原字符串。读文件是异步的,
   // 放在入口钩子之后、下面那道占位复查之前(复查兜住这段 await 期间新出现的占位),之后的复用 / 冷启同步段不再等它。
-  const { content: turnContent, imageAttachFields } = await prepareTurnContent(turnPrompt, model);
+  // 不读图(绝大多数消息)时不 await:执行顺序与改动前相同,不多一个让出点。
+  const turnPlan = planTurnContent(turnPrompt, () => model);
+  const { content: turnContent, imageAttachFields } = turnPlan.read ? await readTurnImages(turnPlan.text) : turnPlan;
   if (entry && turnRecord) {
     // 记下本请求的应答(只有改写过的回合才记;见上方命中处)
     const sendJson = res.json.bind(res);
@@ -3967,23 +3979,25 @@ export function acceptSteer(procs, request) {
 
 // 独立路由(照 /chat/permission-mode 形态:按 sessionId 找 slot → 直接对 slot 动作),
 // 完全绕开 POST /chat 的复用块与 tearingDown 等待/强杀段 —— 那两段一个字不动。
-// r193:改成异步 —— 先校验,再读图组装,组装完之后才由 acceptSteer 现场判断回合还忙不忙并推进
-// (等待期间回合结束了就照常回 409,页面按现有逻辑转入待发)。回执比对仍用原字符串。
+// r193:要读图时改成「先校验,再读图组装,组装完之后才由 acceptSteer 现场判断回合还忙不忙并推进」
+// (等待期间回合结束了就照常回 409,页面按现有逻辑转入待发)。不读图时不 await,与改动前一样同步走完。
+// 回执比对仍用原字符串。
 router.post('/chat/steer', async (req, res) => {
   const request = validateSteerRequest(req.body);
   if (!request) {
     return res.status(400).json({ ok: false, code: 'invalid-steer-request', error: '并入请求参数无效' });
   }
-  const { content, imageAttachFields } = await prepareTurnContent(request.content, steerModelFor(req.body, request.sessionId));
+  const plan = planTurnContent(request.content, () => steerModelFor(req.body, request.sessionId, activeProcesses));
+  const { content, imageAttachFields } = plan.read ? await readTurnImages(plan.text) : plan;
   const result = acceptSteer(activeProcesses, { ...request, pushContent: content });
   res.status(result.status).json(result.status === 200 ? { ...result.body, ...imageAttachFields } : result.body);
 });
 
 // 并入时判断「能不能看图」用的模型:请求里带了就用它,否则用这个会话正在跑的进程的模型;都没有交给
 // upstreamNoVision 用中转站当前的默认模型。
-function steerModelFor(body, sessionId) {
+function steerModelFor(body, sessionId, procs) {
   if (typeof body?.model === 'string' && body.model.trim()) return body.model;
-  for (const slot of activeProcesses.values()) {
+  for (const slot of procs.values()) {
     if (slot?.sessionId === sessionId && slot.model) return slot.model;
   }
   return undefined;

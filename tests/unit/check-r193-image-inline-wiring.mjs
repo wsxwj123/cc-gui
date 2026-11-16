@@ -17,7 +17,7 @@ process.env.HOME = HOME; process.env.USERPROFILE = HOME; process.env.CGUI_DISABL
 
 const prefsMod = await import('../../server/routes/prefs.js');
 const { imageInlineAllowed } = await import('../../server/utils/image-attach-inline.js');
-const { acceptSteer } = await import('../../server/routes/chat.js');
+const { acceptSteer, planTurnContent } = await import('../../server/routes/chat.js');
 
 let passed = 0;
 const failures = [];
@@ -132,10 +132,40 @@ await check('接入点(源码):两处写入标准输入用改写后的内容,成
   assert.equal((src.match(/content: String\(turnPrompt\)/g) || []).length, 0);
   assert.equal((src.match(/role: 'user', content: turnContent \}/g) || []).length, 2);
   assert.equal((src.match(/\.\.\.imageAttachFields \}\);/g) || []).length, 2);
+  // 两条路径都是「同步判断 → 只有要读图才 await」,不读图时没有让出点
+  assert.equal((src.match(/\.read \? await readTurnImages\(/g) || []).length, 2, '两处都是条件等待');
+  assert.equal((src.match(/await prepareTurnContent|await planTurnContent/g) || []).length, 0, '没有无条件的等待');
   const steer = src.slice(src.indexOf("router.post('/chat/steer'"));
-  const prep = steer.indexOf('await prepareTurnContent(request.content');
-  const accept = steer.indexOf('acceptSteer(activeProcesses');
+  const prep = steer.indexOf('await readTurnImages(');
+  const accept = steer.indexOf('acceptSteer(');
   assert.ok(prep > 0 && accept > prep, '先组装,后 acceptSteer');
+});
+
+await check('planTurnContent:不是斜杠命令且有图片候选才往下判断;不读图时原字符串、没有 imageAttach', () => {
+  const T = 'T\n\n附件:\n@/up/a.png';
+  const calls = [];
+  const deps = (over = {}) => ({
+    envValue: undefined,
+    readPref: () => { calls.push('pref'); return true; },
+    noVision: (m) => { calls.push(`vision:${m}`); return false; },
+    ...over,
+  });
+  const getModel = () => { calls.push('model'); return 'm-1'; };
+  const pass = (text) => ({ read: false, text, content: text, imageAttachFields: {} });
+  for (const text of ['普通消息', 'T\n\n附件:\n@/up/a.txt', '/skill 看图\n\n附件:\n@/up/a.png', '  \n /cmd\n\n附件:\n@/up/a.png']) {
+    calls.length = 0;
+    assert.deepEqual(planTurnContent(text, getModel, deps()), pass(text), text);
+    assert.deepEqual(calls, [], '不读偏好、不查模型');
+  }
+  calls.length = 0;
+  assert.deepEqual(planTurnContent(T, getModel, deps()), { read: true, text: T });
+  assert.deepEqual(calls, ['pref', 'model', 'vision:m-1']);
+  assert.deepEqual(planTurnContent('看 a/b 这张\n\n附件:\n@/up/a.png', getModel, deps()).read, true, '正文中间有 / 照常读');
+  assert.deepEqual(planTurnContent(T, getModel, deps({ envValue: '0' })), pass(T));
+  assert.deepEqual(planTurnContent(T, getModel, deps({ readPref: () => false })), pass(T));
+  assert.deepEqual(planTurnContent(T, getModel, deps({ noVision: () => true })), pass(T));
+  // 判断里抛异常 → 原字符串
+  assert.deepEqual(planTurnContent(T, getModel, deps({ readPref: () => { throw new Error('x'); } })), pass(T));
 });
 
 rmSync(TMP, { recursive: true, force: true }); // 只删本测试自建的临时目录
