@@ -18,6 +18,20 @@ export const IMAGE_INLINE_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 export const IMAGE_INLINE_MAX_IMAGES = 20;
 export const IMAGE_INLINE_ERROR = 'IMAGE_INLINE_FAILED';
 
+/**
+ * 这一次发送要不要做改写(方案第 2 节第 6 条、第 5 节)。三层,按顺序短路,任一层关就不改写:
+ *   1. 环境变量 CGUI_IMAGE_INLINE=0(强制关,优先于设置);
+ *   2. 设置里的开关(readPref() 返回 false);
+ *   3. 能判定当前模型不支持看图(noVision() 返回 true)。
+ * readPref / noVision 是函数:前一层已关时不再读偏好文件、不再查能力表。
+ */
+export function imageInlineAllowed({ envValue, readPref, noVision }) {
+  if (typeof envValue === 'string' && envValue.trim() === '0') return false;
+  if (!readPref()) return false;
+  if (noVision()) return false;
+  return true;
+}
+
 // 按扩展名分「图片候选」与文档类;文档类不读、不进 skipped(方案第 2 节第 3 条)。
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'heif', 'bmp', 'tif', 'tiff', 'avif']);
 

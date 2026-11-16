@@ -34,6 +34,13 @@ export function readThirdPartyAutoSync() {
   catch { return false; }
 }
 
+// r193:「发送时直接带上图片」开关 imageInline(默认开)的同步读取。/chat 与 /chat/steer 每次发送现读,改了立刻生效。
+// 只有盘上明确写着布尔 false 才算关;文件不存在、损坏、键缺失或其它值 → true(默认开)。只读,不改写文件。
+export function readImageInlineSync() {
+  try { return parsePrefsJson(readFileSync(PREFS_PATH, 'utf-8'))?.imageInline !== false; }
+  catch { return true; }
+}
+
 // r151b:跨会话消息总开关 xsEnabled(默认关,接口 X.3.5)的同步读取,同 readThirdPartyAutoSync 的口径:
 // 文件不存在、损坏、键缺失或值不是布尔 true(含手写的 "true"、1)→ false;只读,不报错、不改写文件。
 // 同步是因为 /api/xsession/* 的开关闸门与 /chat 入口钩子都在请求路径上直接判。
@@ -430,6 +437,26 @@ router.put('/prefs/third-party-auto', async (req, res) => {
     return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
   }
   broadcast({ type: 'third-party-auto', enabled });
+  res.json({ ok: true, enabled });
+});
+
+// r193:「发送时直接带上图片」开关(默认开)。关 = 发给命令行的内容与改动前逐字相同。
+// 读走同步 readImageInlineSync(与发送时同一个读取点);写走 updatePrefs(串行 + 原子写)。
+router.get('/prefs/image-inline', (_req, res) => {
+  res.json({ enabled: readImageInlineSync() });
+});
+router.put('/prefs/image-inline', async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.enabled !== 'boolean') {
+    return res.status(400).json({ ok: false, code: 'INVALID_INPUT', error: 'enabled 必须是布尔值' });
+  }
+  const { enabled } = body;
+  try {
+    await updatePrefs((prefs) => { prefs.imageInline = enabled; });
+  } catch {
+    return res.status(500).json({ ok: false, code: 'STORAGE_WRITE_FAILED', error: '保存失败，请重试' });
+  }
+  broadcast({ type: 'image-inline', enabled });
   res.json({ ok: true, enabled });
 });
 
