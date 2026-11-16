@@ -1031,7 +1031,7 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
           attachments={attachments}
           onRemove={removeAttachment}
           onRetry={(attachment) => uploadAttachment(attachment.file, attachment.id)}
-          onPreview={(attachment) => setZoomImage({ src: attachment.preview, name: attachment.name, path: attachment.path })}
+          onPreview={(attachment, displaySrc) => setZoomImage({ src: displaySrc || attachment.preview, name: attachment.name, path: attachment.path })}
         />
         {attachmentError && (
           <div data-testid="attachment-error" role="alert" className="mb-2 px-2 text-[11px] text-error font-body leading-snug">
