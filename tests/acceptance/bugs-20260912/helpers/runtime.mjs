@@ -81,6 +81,10 @@ export async function clickThroughOverlays(page, target, { attempts = 4, timeout
 }
 
 export async function openApp(page) {
+  // 预置「使用指引已看过」(与较新的套件一致)。原来靠 dismissOverlays 点「跳过」关指引;产品后来改成
+  // 指引结束时把面板坞那一排按钮收起,于是指引晚几秒弹出时,点「跳过」会把刚展开的按钮排收掉,
+  // 后面的 openPanel 点不到按钮(T-303 每次都失败、T-301 偶尔失败的原因,2026-11-16 探针取证)。
+  await page.addInitScript(() => { try { localStorage.setItem('cgui-tour-seen', '1'); } catch { /* 忽略 */ } });
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await dismissOverlays(page);
   // 顶栏就绪 = 应用挂上了（下面这些钩子与文案都是产品公开契约）。
