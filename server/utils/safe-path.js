@@ -1,6 +1,6 @@
-import { homedir } from 'os';
-import { isAbsolute, relative, resolve, join, dirname, basename } from 'path';
-import { readdirSync, realpathSync } from 'fs';
+import { homedir, tmpdir } from 'os';
+import nodePath, { isAbsolute, relative, resolve, join, dirname, basename } from 'path';
+import { readdirSync, realpathSync, realpath as fsRealpath } from 'fs';
 
 /**
  * r26-B4:cwd 归一化比对(/context 409 归属判定用)。收敛不放宽:
@@ -25,10 +25,43 @@ export function canonicalCwd(p, platform = process.platform) {
 }
 
 export function isPathInside(child, parent) {
-  const base = resolve(parent);
-  const target = resolve(child);
-  const rel = relative(base, target);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  return isPathInsideWith(nodePath, child, parent);
+}
+
+// 同 isPathInside,路径模块可注入(单测在 macOS 上用 path.win32 模拟 Windows;
+// win32 的 path.relative 比较本来就不区分大小写,另一个盘上的路径得到绝对路径 → 判为不在)。
+export function isPathInsideWith(pathModule, child, parent) {
+  const base = pathModule.resolve(parent);
+  const target = pathModule.resolve(child);
+  const rel = pathModule.relative(base, target);
+  return rel === '' || (!rel.startsWith('..') && !pathModule.isAbsolute(rel));
+}
+
+// r193:上传附件目录(与 upload.js / screenshot.js 同一个)。
+export const UPLOAD_DIR = join(tmpdir(), 'cgui-attachments');
+
+// 真实路径:用 fs.realpath.native(Windows 上会展开 8.3 短名;fs.realpath 的 JS 实现不展开)。
+// 上传目录与被判定的路径必须用同一个函数取,两边形态才一致。
+export function realpathNative(p) {
+  return new Promise((resolvePromise, reject) => {
+    fsRealpath.native(p, (err, real) => (err ? reject(err) : resolvePromise(real)));
+  });
+}
+
+/**
+ * r193:真实路径 realTarget 是否在上传目录内。上传目录本身也取真实路径再比
+ * (macOS 的 /var 是 /private/var 的符号链接;Windows 的 tmpdir 可能是短名),
+ * 比较走 path.relative 而不是字符串前缀。上传目录取不到真实路径(还不存在等)→ false。
+ * realTarget 必须是调用方已经用同一个 realpathFn 取过的真实路径。
+ */
+export async function isInsideUploadDir(realTarget, {
+  uploadDir = UPLOAD_DIR,
+  pathModule = nodePath,
+  realpathFn = realpathNative,
+} = {}) {
+  if (typeof realTarget !== 'string' || !realTarget) return false;
+  const uploadReal = await Promise.resolve().then(() => realpathFn(uploadDir)).catch(() => null);
+  return !!uploadReal && isPathInsideWith(pathModule, realTarget, uploadReal);
 }
 
 // "已知 claude 工作区"判定:给定路径(或其任一祖先)按 CLI 同款 dash 编码
