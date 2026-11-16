@@ -3982,16 +3982,29 @@ export function acceptSteer(procs, request) {
 // r193:要读图时改成「先校验,再读图组装,组装完之后才由 acceptSteer 现场判断回合还忙不忙并推进」
 // (等待期间回合结束了就照常回 409,页面按现有逻辑转入待发)。不读图时不 await,与改动前一样同步走完。
 // 回执比对仍用原字符串。
-router.post('/chat/steer', async (req, res) => {
-  const request = validateSteerRequest(req.body);
-  if (!request) {
-    return res.status(400).json({ ok: false, code: 'invalid-steer-request', error: '并入请求参数无效' });
+// 处理器是 async:意外异常不再由框架回 500,而会变成没人处理的拒绝、请求悬着。整体兜底 ——
+// 还没发出应答就回与 acceptSteer 推送失败时相同的 500(页面按「结果不明」处理,用同一标识重试、回执去重)。
+// export 仅为可单测(procs 可注入)。
+export async function handleSteerPost(req, res, procs = activeProcesses) {
+  try {
+    const request = validateSteerRequest(req.body);
+    if (!request) {
+      return res.status(400).json({ ok: false, code: 'invalid-steer-request', error: '并入请求参数无效' });
+    }
+    const plan = planTurnContent(request.content, () => steerModelFor(req.body, request.sessionId, procs));
+    const { content, imageAttachFields } = plan.read ? await readTurnImages(plan.text) : plan;
+    const result = acceptSteer(procs, { ...request, pushContent: content });
+    res.status(result.status).json(result.status === 200 ? { ...result.body, ...imageAttachFields } : result.body);
+  } catch {
+    console.warn('[steer] 并入处理异常,回结果不明');
+    if (!res.headersSent) {
+      try {
+        res.status(500).json({ ok: false, code: 'steer-acceptance-unknown', error: '并入结果无法确认' });
+      } catch { /* 连应答都写不出(连接已断)—— 没有别的可做 */ }
+    }
   }
-  const plan = planTurnContent(request.content, () => steerModelFor(req.body, request.sessionId, activeProcesses));
-  const { content, imageAttachFields } = plan.read ? await readTurnImages(plan.text) : plan;
-  const result = acceptSteer(activeProcesses, { ...request, pushContent: content });
-  res.status(result.status).json(result.status === 200 ? { ...result.body, ...imageAttachFields } : result.body);
-});
+}
+router.post('/chat/steer', (req, res) => handleSteerPost(req, res));
 
 // 并入时判断「能不能看图」用的模型:请求里带了就用它,否则用这个会话正在跑的进程的模型;都没有交给
 // upstreamNoVision 用中转站当前的默认模型。

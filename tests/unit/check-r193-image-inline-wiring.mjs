@@ -17,7 +17,7 @@ process.env.HOME = HOME; process.env.USERPROFILE = HOME; process.env.CGUI_DISABL
 
 const prefsMod = await import('../../server/routes/prefs.js');
 const { imageInlineAllowed } = await import('../../server/utils/image-attach-inline.js');
-const { acceptSteer, planTurnContent } = await import('../../server/routes/chat.js');
+const { acceptSteer, planTurnContent, handleSteerPost } = await import('../../server/routes/chat.js');
 
 let passed = 0;
 const failures = [];
@@ -135,10 +135,48 @@ await check('接入点(源码):两处写入标准输入用改写后的内容,成
   // 两条路径都是「同步判断 → 只有要读图才 await」,不读图时没有让出点
   assert.equal((src.match(/\.read \? await readTurnImages\(/g) || []).length, 2, '两处都是条件等待');
   assert.equal((src.match(/await prepareTurnContent|await planTurnContent/g) || []).length, 0, '没有无条件的等待');
-  const steer = src.slice(src.indexOf("router.post('/chat/steer'"));
+  const steer = src.slice(src.indexOf('export async function handleSteerPost('));
   const prep = steer.indexOf('await readTurnImages(');
   const accept = steer.indexOf('acceptSteer(');
   assert.ok(prep > 0 && accept > prep, '先组装,后 acceptSteer');
+});
+
+await check('并入处理器兜底:意外异常且没应答过 → 500 steer-acceptance-unknown;已应答过不再写;正常路径不变', async () => {
+  const mkRes = () => ({
+    statusCode: 200, payload: undefined, headersSent: false, writes: 0,
+    status(code) { this.statusCode = code; return this; },
+    json(p) { this.writes += 1; this.payload = p; this.headersSent = true; return this; },
+  });
+  const body = { sessionId: 's-2', uuid: 'steer-b2', content: '并入一句' };
+  // 进程表一遍历就抛 → 走兜底
+  const exploding = { [Symbol.iterator]() { throw new Error('boom'); }, values() { throw new Error('boom'); } };
+  const r1 = mkRes();
+  await handleSteerPost({ body }, r1, exploding);
+  assert.equal(r1.statusCode, 500);
+  assert.deepEqual(r1.payload, { ok: false, code: 'steer-acceptance-unknown', error: '并入结果无法确认' });
+  // 已经发出过应答之后才抛 → 不再写第二次,也不把异常抛给调用方
+  const r2 = mkRes();
+  r2.status = function status() { throw new Error('late'); };
+  r2.headersSent = true;
+  await handleSteerPost({ body }, r2, new Map());
+  assert.equal(r2.writes, 0);
+  // 应答本身写不出 → 处理器仍正常返回(不变成没人处理的拒绝)
+  const r3 = mkRes();
+  r3.json = () => { throw new Error('socket gone'); };
+  await handleSteerPost({ body }, r3, exploding);
+  // 正常路径:参数不合规 400;没有回合 409;有忙回合 200 且没有 imageAttach(纯文字)
+  const r4 = mkRes();
+  await handleSteerPost({ body: { sessionId: 's-2' } }, r4, new Map());
+  assert.equal(r4.statusCode, 400);
+  const r5 = mkRes();
+  await handleSteerPost({ body }, r5, new Map());
+  assert.equal(r5.statusCode, 409);
+  const pushed = [];
+  const busy = new Map([[202, { sessionId: 's-2', idle: false, closing: false, pumpEnded: false, exitCode: null, input: { push: (m) => { pushed.push(m); return true; } } }]]);
+  const r6 = mkRes();
+  await handleSteerPost({ body }, r6, busy);
+  assert.deepEqual(r6.payload, { ok: true, accepted: true, duplicate: false, pid: '202' });
+  assert.equal(pushed[0].message.content, '并入一句');
 });
 
 await check('planTurnContent:不是斜杠命令且有图片候选才往下判断;不读图时原字符串、没有 imageAttach', () => {
