@@ -375,14 +375,24 @@ t('6 流收尾推副本处:先 retainKindOf,命中写表,否则走原来那一�
   assert.ok(seg.includes('retainStreamCopy(retainKind,'), '命中写表');
   assert.ok(seg.includes('finalizePendingToolCalls(currentToolCalls, true)'), '写表前给没回执的工具补终态');
 });
-t('6 全文件只有 retainKindOf 判断留存:写表只经 retainStreamCopy,它的两个调用点都跟在 retainKindOf 之后', () => {
+t('6 全文件只有 retainKindOf 判断留存:写表只经 retainStreamCopy,它的三个调用点都跟在 retainKindOf 之后', () => {
   assert.equal(count('addRetained('), 1, 'addRetained 只在 retainStreamCopy 里调用');
-  assert.equal(count('retainKindOf('), 2);
-  assert.equal(count('retainStreamCopy('), 2, '调用 2 处(停止 / 流收尾)');
+  // 三处:停止分支(stoppedCopy)/ 流收尾(retainKind)/ r191 没有快照的重接被用户停止、读满也没读回时写尾巴
+  assert.equal(count('retainKindOf('), 3);
+  assert.equal(count('retainStreamCopy('), 3, '调用 3 处(停止 / 流收尾 / r191 重接停止读不回)');
   assert.equal(count('const retainStreamCopy = '), 1);
 });
+t('6 r191 第三处:收尾轮询之后、给尾巴标 settled 之前,读不回且 retainKindOf 判为留存才写', () => {
+  const pLoopEnd = app.indexOf('reconcileSteeredQueue(lastPeeked || getLocalMessages());');
+  const pThird = app.indexOf("retainStreamCopy('stop', {\n            uuid: 'chat-stopped-' + Date.now()", pLoopEnd);
+  const pSettled = app.indexOf('tailMarkSettled', pLoopEnd);
+  assert.ok(pLoopEnd > 0 && pThird > pLoopEnd && pSettled > pThird, '轮询之后、标 settled 之前');
+  const cond = app.slice(app.lastIndexOf('if (tailLive && tailEnd?.aborted', pThird), pThird);
+  assert.ok(cond.includes('!tailReadBack(tailEnd, getLocalMessages())'), '条件里有 tailReadBack(');
+  assert.ok(cond.includes('retainKindOf({ aborted: true, killed: turnAborted, endedClean })'), '条件里用同一个留存判据');
+});
 t('6 写表的会话键取本流闭包里的值', () => {
-  assert.ok(app.includes('const retainStreamCopy = (kind, turnCopy) => addRetained(streamSid || sessionQueueKey, makeRetainedEntry({'));
+  assert.ok(app.includes('const retainStreamCopy = (kind, turnCopy, over = null) => addRetained(streamSid || sessionQueueKey, makeRetainedEntry({'));
   assert.ok(app.includes('roundStartTs: turnStreamStart, stopTs: Date.now(),'));
 });
 t('6 表的通知走 startTransition;叠加在 mountedMessages / renderChat 上', () => {

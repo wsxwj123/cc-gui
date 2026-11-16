@@ -69,6 +69,7 @@ import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
 import { GenuiActionProvider, useGenuiActionCapability } from './genui/host/action-context.jsx';
 import { TurnBubble, StripRoundContext, LiveHostContext } from './components/TurnBubble.jsx';
+import { makeReattachTail, tailMarkBlockDone, tailAssignUuid, tailMarkSnapshot, tailMarkEnded, tailMarkSettled, tailReadBack, visibleTailBlocks, lastPromptTs } from './utils/reattachTail.js';
 import { stripSummary, tailBlockInfo, latestToolTitles } from './utils/streamStatus.js';
 import { initialSpan, extendUp, needsExtend, sliceRows, resolveAutoFrom } from './utils/mountWindow.js';
 import { historyMessageKey } from './utils/historyPaging.js';
@@ -4191,6 +4192,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 自己的流式气泡/Connecting 占位 —— 内容由历史卡(jsonl)单一来源负责,重放事件只当
   // 刷新触发器。口径与理由见 utils/reattach.js。
   const [reattachStream, setReattachStream] = useState(false);
+  // r191:无快照重接的「尾巴」(本流完整收到、历史里还没有的正文 / 思考块),见 utils/reattachTail.js。
+  // 按本窗格存;owner = 发起这条流时的会话键,渲染只在 owner 等于本窗格当前会话时画。
+  const [reattachTail, setReattachTail] = useState(null);
   // r65:本流(本回合)是否观察到过任何模型产出(content_block_start / 任意
   // content_block_delta 含孤儿 / assistant 快照)。仅供 reattach 状态行区分"接管旧进程但
   // 确实还一无所有"(连接窗 → Connecting)与"内容正在流"(→ 循环动词/正文)。message_start
@@ -5606,10 +5610,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const retainedPromptOfStream = () => (!reattachPid && userMsgUuid && typeof prompt === 'string'
       ? { text: prompt, sentTs: Date.parse(userMsgTimestamp) || turnStreamStart, localUuid: userMsgUuid }
       : null);
-    const retainStreamCopy = (kind, turnCopy) => addRetained(streamSid || sessionQueueKey, makeRetainedEntry({
+    // r191:可选的 over 只覆盖 srcUuids / roundStartTs(重接的流按本轮提示词时间定位);不传时逐字照旧。
+    const retainStreamCopy = (kind, turnCopy, over = null) => addRetained(streamSid || sessionQueueKey, makeRetainedEntry({
       kind, ownerKey: streamSid || sessionQueueKey, turn: turnCopy,
       srcUuids: [...roundUuidsRef.current], roundStartTs: turnStreamStart, stopTs: Date.now(),
       prompt: retainedPromptOfStream(),
+      ...(over && Array.isArray(over.srcUuids) ? { srcUuids: over.srcUuids } : {}),
+      ...(over && Number.isFinite(over.roundStartTs) ? { roundStartTs: over.roundStartTs } : {}),
     }));
     updateStreaming(true);
     // I4:本次流的归属会话(draft 时是 draft-key,init 收到真 id 后会在下面升级)。
@@ -5626,6 +5633,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r68:命中快照 ⇒ 本流按【普通发送】渲染(自己画气泡 + 按 sinceTs 截断历史),
     // reattachStream 只留给"无快照的 reattach"那条退化路径。
     setReattachStream(!!reattachPid && !seeded);
+    // r191:尾巴的状态按「本流闭包 + 窗格」存:令牌认本流,异步回调里不读当前选中的会话。
+    const tailToken = {};
+    let tailLive = !!reattachPid && !seeded;
+    setReattachTail(tailLive ? { ...makeReattachTail(sessionQueueKey), tok: tailToken } : null);
+    const tailUpd = (fn) => { if (tailLive) setReattachTail((t) => (t && t.tok === tailToken ? fn(t) : t)); };
+    // r191:此刻是不是没有快照的重接(seeded 会被 replay_complete 升级 / early_overflow 降级改写)。停止时
+    // 「不推本地副本」与收尾的「保证读回」共用这一个判据 —— 跟着流的形态走,不跟着画不画尾巴走。
+    const unseededReattach = () => !!reattachPid && !seeded;
     setStreamHistCutoff(resolveStreamHistCutoff(!!reattachPid, Date.now(), seed?.cutoff));
     setCompacting(isCompact);
     // 种回:首帧就带上切走前已流出的全部内容,不闪空(缓冲闭包侧的同款恢复见下方 try 内)。
@@ -6173,7 +6188,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           handleSendRef.current?.(null, { reattachPid: pid });
         }, 1500);
       };
-      const streamRes = await fetch(`/api/chat/${pid}/stream`, { signal: controller.signal });
+      // r191:没有快照的重接带 openBlock=1 —— 服务端从正在写的那一段的开头起回放(有快照的重接已种回前半截,不带)。
+      const streamRes = await fetch(`/api/chat/${pid}/stream${reattachPid && !seeded ? '?openBlock=1' : ''}`, { signal: controller.signal });
       if (!streamRes.ok) {
         // 非 2xx(409「已被占用」已由服务端改成新连接接管,这里是防御):响应体是 JSON 不是
         // SSE,下面的逐行解析一条 `data: ` 都匹配不到 → 循环空转一圈即结束、不抛错 → 本窗格
@@ -6258,6 +6274,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             .finally(() => { histRefreshInFlight = false; noteHistApplied(); });
         } catch { histRefreshInFlight = false; }
       };
+      // r191:没有快照的重接起流即重读一次历史 —— 后台续跑那条路页面手里的历史是旧的(欠账 R186-3)。
+      if (reattachPid && !seeded) refreshHistIfDue(true);
       const isDuplicate = (line) => {
         if (recentLines.includes(line)) return true;
         recentLines.push(line);
@@ -6329,6 +6347,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               setStreamHistCutoff(null);
               histFreshRef.current = { at: Date.now(), sig: null }; // 状态行的"上次更新"基准
             }
+            // r191:回放不完整 —— 累积到的正文可能中段少字、甚至把后一段的增量接到前一段上,不画尾巴(有没有快照都关)
+            tailLive = false;
+            setReattachTail((t) => (t && t.tok === tailToken ? null : t));
             continue;
           }
 
@@ -6339,6 +6360,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (event.type === 'replay_complete') {
             if (isCurrentTurn() && shouldUpgradeReattachOnReplayComplete({ isReattach: !!reattachPid, seeded, turnStartedAt: event.turnStartedAt })) {
               seeded = true;
+              // r191:升级后本流自己画直播气泡,不再画尾巴
+              tailLive = false;
+              setReattachTail((t) => (t && t.tok === tailToken ? null : t));
               turnStreamStart = event.turnStartedAt;
               streamStartRef.current = event.turnStartedAt;
               setReattachStream(false);
@@ -6985,6 +7009,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                   }
                 } catch {}
               }
+            } else if (ev.type === 'content_block_stop') {
+              // r191:主回合的块写完了。无快照重接里给尾巴记上「这一块写完了」,正文 / 思考块写完时强制刷新一次历史。
+              const block = blocks[ev.index];
+              if (block && block.orderIdx != null && (block.type === 'text' || block.type === 'thinking')) {
+                if (tailLive) { const _h = getLocalMessages(); const _oi = block.orderIdx; tailUpd((t) => tailMarkBlockDone(t, _oi, _h)); }
+                refreshHistIfDue(true);
+              }
             }
             continue;
           }
@@ -7038,6 +7069,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 原来的 backfill 角色,行为与改动前一致)。
             const snapshotBuildsBlocks = !partialBlocksSeen;
             const snapshotBlocks = [];
+            const tailSnapFrom = orderedBlocks.length; // r191:整条快照型事件补进来的块从这里起
             for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
               if (block.type === 'text') {
                 // Only replace if we haven't been streaming this block already.
@@ -7108,6 +7140,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             if (snapshotBlocks.length) {
               orderedBlocks = orderedBlocks.concat(snapshotBlocks);
               scheduleStreamCommit(SC_BLOCKS);
+            }
+            // r191:这条事件的 uuid = 会话文件里那条记录的编号。增量模式记到最早一个已写完、还没编号的块;
+            // 快照模式补进来的块一到就算写完,编号就是它。
+            if (tailLive) {
+              const _u = event.uuid ? String(event.uuid) : null;
+              const _h = getLocalMessages();
+              const _to = orderedBlocks.length;
+              tailUpd((t) => (snapshotBuildsBlocks ? tailMarkSnapshot(t, tailSnapFrom, _to, _u, _h) : tailAssignUuid(t, _u)));
             }
             if (event.message.model) setStreamingModel(event.message.model);
           }
@@ -7566,6 +7606,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             setStreamHistCutoff(null); // 截断口径作废:历史是唯一展示来源
             histFreshRef.current = { at: Date.now(), sig: null };
             refreshHistIfDue(true);    // 立刻按完整历史恢复
+            // r191:实时记录已截断,不画尾巴
+            tailLive = false;
+            setReattachTail((t) => (t && t.tok === tailToken ? null : t));
             continue;
           }
           if (event.type === 'done') { sawDoneEvent = true; setStreamConnNotice(null); break; }
@@ -7750,7 +7793,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 已停止),而不是连同用户消息一起丢弃——以前这里静默清空,用户辛苦看到的半截
         // 回复+工具调用全没了,只剩刚发的消息(#6)。producedReply=true 让 finally 的
         // 落盘轮询把它当正常产出处理(jsonl 若已写入半截会 refetch 覆盖,否则保留本地副本)。
-        if (accumulatedText || accumulatedThinking || currentToolCalls.length > 0) {
+        // r191:无快照的重接不推 / 不留存本地副本(与正常收尾那条一致):它累积到的只是重放起点之后的内容,
+        // 由尾巴显示,收尾的重读把命令行写盘的那份读回来;推了就是同一段画两遍。
+        if ((accumulatedText || accumulatedThinking || currentToolCalls.length > 0) && !unseededReattach()) {
           producedReply = true;
           // 停止时给未回执的普通工具补合成终态,Skill/Bash/Read 等卡片不再永久转圈
           // (Task/Agent 状态由 activeAgents 驱动,合成 result 对其无害)。gate=turnAborted。
@@ -7824,6 +7869,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 排空就永久哑掉。下面的收尾体【沿用原缩进不动】:重排 280 行只为对齐空白,既会淹没
       // 审查视线,也会碰到明令不许动的 F1 drain 本体(:5946-5956)。
       try {
+      // r191:本流收尾 —— 尾巴定格内容(下面会清直播缓冲),记下此刻的历史;退场在渲染期判断。
+      // tailEnd 同时是收尾重读轮询的判据输入(tailReadBack),与渲染期退场用同一份收尾记录。
+      // 尾巴已关掉的流照样生成(读回判据要用收尾时的历史签名、打断提示条数、是不是用户停止),只是不定格内容。
+      const tailEnd = unseededReattach() ? tailMarkEnded(makeReattachTail(null), tailLive ? orderedBlocks : [], getLocalMessages(), endedClean, turnAborted) : null;
+      if (tailEnd && tailLive) tailUpd((t) => tailMarkEnded(t, tailEnd.blocks, tailEnd.endMsgs, tailEnd.endClean, tailEnd.aborted));
       // 停止/断流兜底:本回合派出的子代理若仍在运行态(中断后 tool_result 永不到达,
       // 状态没人更新),统一标 stopped —— 否则卡片/监控永远转圈"运行中"(用户实报
       // "停止后子代理还在跑"的 UI 侧成因;进程侧由 stop 端点的 abort 兜底真杀)。
@@ -8016,6 +8066,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // 弱口径会把同前缀的旧消息当成"这条已落盘",把刚发出的气泡整条清掉,而历史
             // 那份可能还没进本地 store 或正被截断挡着 → 卡片凭空消失(R37)。
             try { await fetchMessagesForTab(finalizeSid, finalizePh, { silent: true }); } catch {}
+            // r191:无快照重接被用户停止(命令行会把半截与打断提示写盘):读到命令行最终写盘的内容为止
+            // (tailReadBack,与渲染期尾巴退场同一判据),到轮询次数上限还没读回就按现状结束。
+            // 被结束 / 出错 / 切走 / 转后台 / 掉线,以及正常发送的空回合 / 出错回合(tailEnd 为空):只读一次,行为不变。
+            if (tailEnd && tailEnd.aborted && !endedClean && i < 11 && !tailReadBack(tailEnd, getLocalMessages())) {
+              await new Promise((r) => setTimeout(r, 200));
+              continue;
+            }
             const known = makePersistedIndex(getLocalMessages());
             if (isCurrentTurn()) reconcileSteeredQueue(getLocalMessages()); // 已注入条目的落地判定
             localCopiesCleared = true; // r119:见声明处 —— 之后不许再补本地副本
@@ -8056,6 +8113,40 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         if (isCurrentTurn() && getLocalSession()?.sessionId === finalizeSid) {
           reconcileSteeredQueue(lastPeeked || getLocalMessages());
         }
+      }
+      // r191:用户停止、读满了也没读回打断提示(命令行没把半截写盘,多半被强行结束):尾巴此刻还该显示的块
+      // 写进 r182 留存表(只含正文 / 思考块,ownerKey 用本流自己的)。留存表的通知在订阅方走 startTransition,
+      // 这次的 settled 也放进 transition,两者同批提交:不先空白一帧,也不一帧两份。
+      let tailRetained = false;
+      if (tailLive && tailEnd?.aborted && getLocalSession()?.sessionId === finalizeSid && isCurrentTurn()
+        && !tailReadBack(tailEnd, getLocalMessages()) && retainKindOf({ aborted: true, killed: turnAborted, endedClean })) {
+        const keepBlocks = visibleTailBlocks(tailEnd, null, getLocalMessages()).map((b) => ({ type: b.type, content: b.content }));
+        if (keepBlocks.length) {
+          const keepText = keepBlocks.filter((b) => b.type === 'text').map((b) => b.content).join('');
+          const keepThinking = keepBlocks.filter((b) => b.type === 'thinking').map((b) => b.content).join('');
+          retainStreamCopy('stop', {
+            uuid: 'chat-stopped-' + Date.now(), type: 'turn',
+            ownerKey: streamSid || sessionQueueKey,
+            timestamp: new Date().toISOString(), model: streamingModel,
+            text: keepText ? [keepText] : [],
+            thinking: keepThinking ? [keepThinking] : [],
+            toolCalls: [],
+            blocks: keepBlocks,
+            usage: null,
+            interrupted: true,
+          }, {
+            // 重接不复位 roundUuidsRef(可能是更早回合的编号);起流时刻是重接那一刻,晚于本轮回合条目 ——
+            // 改按本轮提示词时间定位(此处已判过仍是本会话、本回合,读到的是本会话的历史)。
+            srcUuids: [],
+            roundStartTs: lastPromptTs(getLocalMessages()) || turnStreamStart,
+          });
+          tailRetained = true;
+        }
+      }
+      // r191:收尾的重读结束(读到变化 / 到了次数上限 / 切走),尾巴按现状退场。
+      if (tailLive) {
+        if (tailRetained) startTransition(() => tailUpd(tailMarkSettled));
+        else tailUpd(tailMarkSettled);
       }
       // BF-1:回合收尾清历史截断,历史渲染交还 jsonl。放在 finalize 循环之后:break 与
       // 此处同一同步续体,React 合批 —— 与循环内 setChatMessages([]) 同帧提交,不会闪现
@@ -9533,6 +9624,25 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // steer 气泡用 ref 取最新渲染函数,避免闭包过期。
   const renderSteerBubbleRef = useRef(renderSteerBubble);
   renderSteerBubbleRef.current = renderSteerBubble;
+  // r191:重接尾巴。独立小组件、不并进历史回合(历史列表不随流逐帧重渲);退场在渲染期算,
+  // 与历史换上新内容同一帧。headless:与那一轮接着往下写,不另起摘要行。
+  const reattachTailView = useMemo(() => {
+    if (!reattachTail || reattachTail.owner !== sessionQueueKey) return null;
+    const vis = visibleTailBlocks(reattachTail, streamingBlocks, messages);
+    if (!vis.length) return null;
+    return (
+      <div data-turn-role="reattach-tail">
+        <StripRoundContext.Provider value={{ forceOpen: true, headless: true, summary: null }}>
+          <TurnBubble turn={{
+            uuid: 'reattach-tail', type: 'turn', timestamp: new Date().toISOString(), model: streamingModel,
+            text: [], thinking: [], toolCalls: [],
+            blocks: vis.map((b) => ({ type: b.type, content: b.content })),
+            usage: null,
+          }} />
+        </StripRoundContext.Provider>
+      </div>
+    );
+  }, [reattachTail, streamingBlocks, messages, sessionQueueKey, streamingModel]);
   const liveStreamBubble = useMemo(
     () => (liveSteerSegments || [{ blocks: streamingBlocks, steer: null }]).map((seg, si, segs) => {
       const first = si === 0;
@@ -10379,6 +10489,8 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                   也必须看得见 —— chip 区已经不再显示它,这里不画就等于用户说的话凭空消失。
                   画在流末;回合收尾后由 jsonl 给出真实位置(persisted 去重接管)。 */}
               {!liveTurnVisible && liveSteerItems.map(renderSteerBubble)}
+              {/* r191:无快照重接的尾巴 —— 正在跑的那一轮接着往下写的正文 / 思考,画在底部状态行之上 */}
+              {!liveTurnVisible && reattachTailView}
               {/* Connecting 占位:仅在「没有任何可见内容」时显示(空占位 block 不算)。
                   之前误用 streamingBlocks.length===0,而 content_block_start 一开始就
                   push 空 block→占位符消失但内容又没来→空白无动画(回归)。改用 .some
