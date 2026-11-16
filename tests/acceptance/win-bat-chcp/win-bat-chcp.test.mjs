@@ -32,7 +32,7 @@ const TEST_TIMEOUT_MS = 60_000;
 
 const CHCP_LINE = 'chcp 65001 >nul\r\n';
 const BAT_HEAD = `@echo off\r\n${CHCP_LINE}`;
-const BAT_TAIL = 'echo.\r\necho ===== 完成,按任意键关闭 =====\r\npause >nul\r\n';
+const BAT_TAIL = 'echo.\r\necho ===== 已结束,按任意键关闭 =====\r\npause >nul\r\n';
 const WINGET_NOTICE = 'echo winget 不可用,正在打开官方下载页...';
 const NODE_INSTALL_COMMAND =
   'where winget >nul 2>nul & if errorlevel 1 ( echo winget 不可用,正在打开官方下载页... & start "" "https://nodejs.org/en/download/" ) else ( winget install -e --id OpenJS.NodeJS.LTS )';
