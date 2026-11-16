@@ -7,8 +7,10 @@
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { test as base, expect } from '@playwright/test';
-import { seedPair, writeScenario, resetStatus, readStatus, requestAbort } from './helpers/fixtures.mjs';
-import { openJia, sendMessage, stopBtn, composerBox, uniqueTag } from './helpers/runtime.mjs';
+import { seedPair, writeScenario, resetStatus, readStatus, requestAbort, projectDir } from './helpers/fixtures.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { openJia, sendMessage, stopBtn, composerBox, uniqueTag, pickRollbackItem } from './helpers/runtime.mjs';
 
 // 监听页面的未捕获错误(pageerror),出现即失败。
 const test = base.extend({
@@ -303,4 +305,100 @@ test('Q10 【相邻回归】单行草稿 K 光标在末尾按上键翻到 M2,再
   await box.press('ArrowDown');
   await expect.poll(async () => labelOf((await readBox(page)).value, { K, M1: h.M1, M2: h.M2 }), { ...POLL, message: 'Q10 下键后(应回到 K)' })
     .toBe('K');
+});
+
+// ───────────────────────── 编辑已发出的消息一组(Q11–Q12) ─────────────────────────
+/** 没有回合在进行:发一条「文字 T + 大图」的消息并等这一轮结束,再多等 1 秒让消息列表稳定。 */
+async function sendWithBigImageAndFinish(page, ctx, T, imageName) {
+  await openJia(page, ctx);
+  writeScenario({ chunkCount: 3, chunkIntervalMs: 50 });
+  await addImage(page, bigImage(imageName), 1);
+  const box = composerBox(page);
+  await box.fill(T);
+  await box.focus();
+  await box.press('Enter');
+  await expect(stopBtn(page), 'Q11/Q12:发出带大图的消息后停止键应出现').toBeVisible({ timeout: 30_000 });
+  await expect(stopBtn(page), 'Q11/Q12:带大图的这一轮应在 40 秒内结束').toBeHidden({ timeout: 40_000 });
+  await expect(page.locator('[data-cgui="message-user"]').filter({ hasText: T }).first(), 'Q11/Q12:对话里应有文字为 T 的用户消息').toBeVisible({ timeout: 15_000 });
+  await page.waitForTimeout(1000); // 回合刚结束时消息列表会重排,等它稳定
+}
+
+/** 对 T 那条消息点「编辑后重发」,等输入框的值变成 T。 */
+async function editAndResend(page, T, what) {
+  await pickRollbackItem(page, T, /编辑后重发/, what);
+  await expect(composerBox(page), `${what}:点「编辑后重发」后输入框应变成原来的文字`).toHaveValue(T, { timeout: 20_000 });
+}
+
+test('Q11 【复现】对已发出的带大图消息点「编辑后重发」:输入框恰好是原文、恰好 1 张图片卡片且图片加载成功', async ({ page }) => {
+  const ctx = prepare();
+  const T = `T11-${uniqueTag()}`;
+  await sendWithBigImageAndFinish(page, ctx, T, 'r192-q11.png');
+  await editAndResend(page, T, 'Q11');
+  await expect.poll(async () => { const s = await readComposerState(page); return { value: s.value, cards: s.cards }; },
+    { ...POLL, message: 'Q11:点「编辑后重发」后的读数(输入框文字 / 卡片及图片是否加载成功)' })
+    .toEqual({ value: T, cards: [{ loaded: true }] });
+});
+
+/** 读对话里文字含 T2 的用户消息卡的数量与其中各图片(alt、是否加载成功),以及文字含 T 的用户消息卡数量。 */
+function readConversation(page, T, T2) {
+  return page.evaluate(({ t, t2 }) => {
+    const cards = Array.from(document.querySelectorAll('[data-cgui="message-list"] [data-cgui="message-user"]'));
+    const newCards = cards.filter((c) => (c.innerText || '').includes(t2));
+    const imgs = newCards.length ? Array.from(newCards[0].querySelectorAll('img')).map((i) => ({ alt: i.getAttribute('alt'), loaded: i.complete && i.naturalWidth > 0 })) : [];
+    imgs.sort((a, b) => String(a.alt).localeCompare(String(b.alt)));
+    return { newCards: newCards.length, imgs, oldCards: cards.filter((c) => (c.innerText || '').includes(t)).length };
+  }, { t: T, t2: T2 });
+}
+
+/** 读本用例工作区会话记录文件里、正文含 T2 的最后一条用户行的正文;读不到返回 null。 */
+function lastUserContentWith(ctx, T2) {
+  let found = null;
+  let files = [];
+  try { files = fs.readdirSync(projectDir(ctx.tag)).filter((f) => f.endsWith('.jsonl')).sort(); } catch { return null; }
+  for (const f of files) {
+    let raw = '';
+    try { raw = fs.readFileSync(path.join(projectDir(ctx.tag), f), 'utf8'); } catch { continue; }
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      let o = null;
+      try { o = JSON.parse(line); } catch { continue; }
+      if (!o || o.type !== 'user' || !o.message) continue;
+      const c = typeof o.message.content === 'string' ? o.message.content : '';
+      if (c.includes(T2)) found = c;
+    }
+  }
+  return found;
+}
+
+test('Q12 【相邻回归】编辑后重发时再加一张小图并改文字发出:新消息里 2 张图都显示、原消息被裁掉、命令行收到的消息里两个图片路径各出现 1 次', async ({ page }) => {
+  const ctx = prepare();
+  const u = uniqueTag();
+  const T = `Q12orig-${u}`;
+  const T2 = `Q12new-${uniqueTag()}`;
+  expect(T2.includes(T), 'T2 不应包含 T').toBe(false);
+  const bigName = 'r192-q12-big.png';
+  const smallName = 'r192-q12-small.png';
+  await sendWithBigImageAndFinish(page, ctx, T, bigName);
+  await editAndResend(page, T, 'Q12');
+  await expect.poll(async () => (await readComposerState(page)).cards.length, { ...POLL, message: 'Q12:取回后输入框上方应有 1 张卡片' }).toBe(1);
+  await addImage(page, smallImage(smallName), 2);
+  writeScenario({ chunkCount: 3, chunkIntervalMs: 50 });
+  const box = composerBox(page);
+  await box.fill(T2);
+  await box.focus();
+  await box.press('Enter');
+  await expect(page.locator('[data-cgui="message-list"] [data-cgui="message-user"]').filter({ hasText: T2 }).first(), 'Q12:发出后对话里应出现文字为 T2 的新消息卡').toBeVisible({ timeout: 30_000 });
+  await expect(stopBtn(page), 'Q12:新一轮开始后停止键应出现').toBeVisible({ timeout: 30_000 });
+  await expect(stopBtn(page), 'Q12:新一轮应在 40 秒内结束').toBeHidden({ timeout: 40_000 });
+  await expect.poll(() => readConversation(page, T, T2), { ...POLL, message: 'Q12:对话里的读数(T2 消息卡数 / 其中图片的 alt 与加载情况 / 含 T 的用户消息卡数)' })
+    .toEqual({ newCards: 1, imgs: [{ alt: bigName, loaded: true }, { alt: smallName, loaded: true }], oldCards: 0 });
+  // 命令行收到的原文:「文字 + 空行 + 附件: + 每行一个 @路径」,两个路径各出现 1 次。
+  let content = null;
+  await expect.poll(() => { content = lastUserContentWith(ctx, T2); return content !== null; }, { ...POLL, message: 'Q12:会话记录文件里应能读到含 T2 的用户行' }).toBe(true);
+  const paths = content.split('\n').filter((l) => l.startsWith('@')).map((l) => l.slice(1).trim());
+  expect(paths.length, `Q12:命令行收到的消息里应恰好 2 个「@路径」行;原文 = ${JSON.stringify(content)}`).toBe(2);
+  expect(new Set(paths).size, `Q12:两个路径应互不相同;实际 ${JSON.stringify(paths)}`).toBe(2);
+  for (const p of paths) {
+    expect(content.split(p).length - 1, `Q12:路径 ${p} 在命令行收到的原文里应恰好出现 1 次`).toBe(1);
+  }
 });

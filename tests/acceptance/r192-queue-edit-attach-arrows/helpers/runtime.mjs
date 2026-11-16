@@ -104,3 +104,33 @@ export async function sendMessage(page, text) {
 }
 
 export function uniqueTag(prefix = '') { return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`; }
+
+/** 对某条用户消息卡打开「回滚 / 重新编辑」菜单并点指定菜单项(itemName 为菜单项可见文字的正则)。取自 r182 套件的同名函数。 */
+export async function pickRollbackItem(page, prompt, itemName, what) {
+  const card = page.locator('[data-cgui="message-user"]').filter({ hasText: prompt }).first();
+  await expect(card, `${what}:这条用户消息卡应带 data-message-id(最多等 5 秒)`).toHaveAttribute('data-message-id', /.+/, { timeout: 5_000 });
+  // 回合刚结束的头一两秒,消息列表会重排、用户消息卡可能被重新挂载,刚打开的菜单会跟着消失。
+  // 所以「悬停 → 点菜单键 → 点菜单项」整组重来:每步短超时,点不到就从悬停重新开始;菜单项一点成功立刻返回(不会点两次)。
+  const STEP_MS = 1_200;
+  const TOTAL_MS = 8_000;
+  const start = Date.now();
+  let attempt = 0;
+  let lastStep = '悬停用户消息卡';
+  let lastErr = '';
+  while (Date.now() - start < TOTAL_MS) {
+    attempt += 1;
+    try {
+      lastStep = '悬停用户消息卡';
+      await card.hover({ timeout: STEP_MS });
+      lastStep = '点「回滚 / 重新编辑」';
+      await card.getByTitle('回滚 / 重新编辑').click({ timeout: STEP_MS });
+      lastStep = `点菜单项 ${itemName}`;
+      await page.getByRole('button', { name: itemName }).click({ timeout: STEP_MS });
+      return;
+    } catch (e) {
+      lastErr = String(e && e.message ? e.message : e).split('\n')[0];
+      await page.waitForTimeout(150);
+    }
+  }
+  throw new Error(`${what}:${TOTAL_MS} 毫秒内共尝试 ${attempt} 次仍没点到菜单项 ${itemName};最后一次(第 ${attempt} 次)卡在「${lastStep}」:${lastErr}`);
+}
