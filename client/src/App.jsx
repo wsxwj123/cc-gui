@@ -142,7 +142,7 @@ import { aggregateHistoryCost, computeCostForMessage, displayUsd, formatCost, se
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, createQueueId } from './utils/steerQueue.js';
-import { leaveSessionNotice, mergeDraftText, takeSessionNotice } from './utils/sessionNotice.js';
+import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';
 import { imageAttachNoticeText } from './utils/imageAttachNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
 import { localTurnTakenOver, makeTurnIdentityIndex } from './utils/turnIdentity.js';   // r141 渲染期身份闸门
@@ -6500,6 +6500,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 setChatMessages((prev) => (prev.some((m) => m.ownerKey === _dk0)
                   ? prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))
                   : prev));
+                // r193 F1:提示条按所属会话同批改挂(如首条消息「有 N 张图没能带上」),否则会话键换成真 sid
+                // 后渲染层按 ownerKey 对不上把它藏掉。只看 ownerKey;无所属 / 属于别的会话的原样不动。
+                setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _dk0, event.session_id));
                 try {
                   const _dv = localStorage.getItem(`cgui-draft:${_dk0}`);
                   if (_dv) { localStorage.setItem(`cgui-draft:${event.session_id}`, _dv); localStorage.removeItem(`cgui-draft:${_dk0}`); }
@@ -6532,6 +6535,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 const _next = migrateDraftQueue(useStore.getState().messageQueue, _dk, event.session_id);
                 if (_next) useStore.setState({ messageQueue: _next });
               } catch {}
+              // r193 F1:窗格已切走时留给草稿键的留言(leaveSessionNotice)改挂到真 sid,切回这个会话时取得到;
+              // 切走前挂在本窗格、所属草稿键的提示条同样改挂(selIsOrigin=true 时上面已改挂,这里 no-op)。
+              {
+                const _nk = queueKeyFor(selectedSession);
+                migrateSessionNotice(_nk, event.session_id);
+                if (!selIsOrigin) setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _nk, event.session_id));
+              }
               // 输入历史同迁(用户已切走时 selIsOrigin=false,上面 origin 块不执行,在此兜底):
               // draft 期历史存旧键,不迁则首条历史滞留旧键且污染该项目下一个 draft。取发起时闭包
               // selectedSession(sel 是当前选中,用户已切走时会错迁别的项目)。selIsOrigin=true 时旧键已删,此处幂等 no-op。

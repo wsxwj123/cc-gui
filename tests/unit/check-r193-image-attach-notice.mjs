@@ -80,5 +80,58 @@ check('App.jsx:发送应答与并入应答两处都接入,用带会话键的提�
   assert.ok(!/alert\(|confirmDialog|toast/i.test(body), '不用系统弹窗');
 });
 
+// ── F1:新会话拿到正式编号时,提示与留言按所属会话改挂 ──
+const { migrateNoticeOwner, migrateSessionNotice, leaveSessionNotice, takeSessionNotice } = await import('../../client/src/utils/sessionNotice.js');
+
+check('F1 migrateNoticeOwner:只按 ownerKey 改挂,其余字段原样;无所属 / 属于别的会话原样返回同一引用', () => {
+  const n = { text: 'x', ownerKey: 'draft-h-1', ttlMs: 15000 };
+  assert.deepEqual(migrateNoticeOwner(n, 'draft-h-1', 'sid-1'), { text: 'x', ownerKey: 'sid-1', ttlMs: 15000 });
+  assert.equal(n.ownerKey, 'draft-h-1', '不改原对象');
+  const other = { text: 'y', ownerKey: 'sid-9' };
+  assert.equal(migrateNoticeOwner(other, 'draft-h-1', 'sid-1'), other);
+  const none = { text: 'z' };
+  assert.equal(migrateNoticeOwner(none, 'draft-h-1', 'sid-1'), none);
+  assert.equal(migrateNoticeOwner(null, 'draft-h-1', 'sid-1'), null);
+  const sticky = { text: 'w', ownerKey: 'draft-h-1', sticky: true };
+  assert.deepEqual(migrateNoticeOwner(sticky, 'draft-h-1', 'sid-1'), { text: 'w', ownerKey: 'sid-1', sticky: true });
+});
+
+check('F1 migrateSessionNotice:留言从草稿键搬到正式键,旧键清空;正式键已有留言时接在后面、同句不重复', () => {
+  leaveSessionNotice('draft-f1-a', '甲');
+  migrateSessionNotice('draft-f1-a', 'sid-f1-a');
+  assert.equal(takeSessionNotice('draft-f1-a'), null);
+  assert.equal(takeSessionNotice('sid-f1-a'), '甲');
+  leaveSessionNotice('sid-f1-b', '旧');
+  leaveSessionNotice('draft-f1-b', '新');
+  migrateSessionNotice('draft-f1-b', 'sid-f1-b');
+  assert.equal(takeSessionNotice('sid-f1-b'), '旧 新');
+  leaveSessionNotice('sid-f1-c', '同');
+  leaveSessionNotice('draft-f1-c', '同');
+  migrateSessionNotice('draft-f1-c', 'sid-f1-c');
+  assert.equal(takeSessionNotice('sid-f1-c'), '同');
+  migrateSessionNotice('draft-f1-none', 'sid-f1-d'); // 没有留言:不做事
+  assert.equal(takeSessionNotice('sid-f1-d'), null);
+  leaveSessionNotice('k-same', '自');
+  migrateSessionNotice('k-same', 'k-same');
+  assert.equal(takeSessionNotice('k-same'), '自');
+});
+
+check('F1 App.jsx:流开头草稿键改挂本地条目处同批改挂提示条;startedAsDraft 兜底处改挂留言', () => {
+  const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
+  assert.ok(app.includes("import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';"));
+  const relabel = app.indexOf('prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))');
+  assert.ok(relabel > 0, '找不到本地条目改挂那一段');
+  const near = app.slice(relabel, relabel + 600);
+  assert.ok(near.includes('setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _dk0, event.session_id));'), '提示条与本地条目同批改挂');
+  const q = app.indexOf('migrateDraftQueue(useStore.getState().messageQueue, _dk, event.session_id);');
+  assert.ok(q > relabel, '找不到 startedAsDraft 里的队列迁移');
+  const after = app.slice(q, q + 900);
+  assert.ok(after.includes('const _nk = queueKeyFor(selectedSession);'), '用发起时闭包里的草稿键');
+  assert.ok(after.includes('migrateSessionNotice(_nk, event.session_id);'), '留言改挂');
+  assert.ok(after.includes('if (!selIsOrigin) setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _nk, event.session_id));'), '已切走时提示条也改挂');
+  assert.equal(app.split('migrateSessionNotice(').length - 1, 1, 'App.jsx 只有一处调用 migrateSessionNotice');
+  assert.equal(app.split('migrateNoticeOwner(prev').length - 1, 2, 'App.jsx 只有两处改挂提示条');
+});
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);
