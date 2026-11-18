@@ -8,13 +8,14 @@ import { TaskOwnerContext } from './TaskCard.jsx';
 import { useStore } from '../../stores/sessionStore.js';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
 import {
-  isMovedToBackground, parseBackgroundDeadline, buttonMoveDialogText,
+  isMovedToBackground, parseBackgroundDeadline, buttonMoveDialogText, canMoveToBackground,
   MOVE_TO_BG_HINT, LONG_FG_TIMEOUT_MS, longTimeoutConfirmText,
 } from '../../utils/movedToBackground.js';
 
-// r198:「移到后台」按钮(卡头右侧)。只转这一条(请求带 toolUseId);前台时限超过 30 分钟的先确认。点击期间禁用,
-// 结果按归一表弹框(转成了不弹,卡片自己会变)。在卡头 <button> 里,所以写成 role=button 的 span 并拦住冒泡(不开合卡片)。
-function MoveToBgButton({ toolCall, sessionId }) {
+// r198:「移到后台」按钮。只转这一条(请求带 toolUseId);前台时限超过 30 分钟的先确认。点击期间禁用,结果按归一表
+// 弹框(转成了不弹,卡片自己会变)。挂在卡头 / 工作组头行的 <button> 里,所以写成 role=button 的 span 并拦住冒泡
+// (不开合卡片或工作组)。工作组收起时由头行挂(TurnBubble 的 WorkGroup),展开后由命令卡片自己挂,同一时刻只有一个。
+export function MoveToBgButton({ toolCall, sessionId }) {
   const [busy, setBusy] = useState(false);
   const run = async (e) => {
     e.stopPropagation();
@@ -94,7 +95,7 @@ export function BashCard({ toolCall }) {
   // 「移到后台」按钮:前台任务表里有这条、还没出结果、卡片属主与任务所属会话一致(分支复制出的卡片不显示)。
   const ownerSid = useContext(TaskOwnerContext);
   const fgEntry = useStore((s) => s.fgTasks[toolCall.id]);
-  const showMoveBtn = !!fgEntry && !result && (!ownerSid || !fgEntry.sessionId || fgEntry.sessionId === ownerSid);
+  const showMoveBtn = canMoveToBackground(toolCall, fgEntry, ownerSid);
   const isError = !!result?.isError;
   const output = typeof result?.content === 'string' ? result.content : '';
   const { exitCode, body } = splitExitCode(output, isError);

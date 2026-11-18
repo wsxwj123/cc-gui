@@ -75,6 +75,29 @@ function rejectedWords(error) {
   return String(error || '').replace(/^命令行拒绝转到后台:/, '');
 }
 
+// 「移到后台」按钮给不给这条调用:Bash、还没出结果、前台任务表里有它(fgEntry = store.fgTasks[toolCall.id]),
+// 且卡片属主(TaskOwnerContext)与任务所属会话一致 —— 分支复制出的卡片与源会话共用 tool_use_id,属主对不上不给。
+export function canMoveToBackground(toolCall, fgEntry, ownerSid) {
+  if (!toolCall || toolCall.name !== 'Bash' || toolCall.result || !fgEntry) return false;
+  return !ownerSid || !fgEntry.sessionId || fgEntry.sessionId === ownerSid;
+}
+
+// 工作组(收起时)头行上的按钮对着谁:组里最后一条可以转后台的调用;没有回 null。
+export function foregroundMoveTarget(items, fgTasks, ownerSid) {
+  const list = Array.isArray(items) ? items : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const tc = list[i] && list[i].type === 'tool_use' ? list[i].toolCall : null;
+    const entry = tc && fgTasks ? fgTasks[tc.id] : null;
+    if (canMoveToBackground(tc, entry, ownerSid)) return { toolCall: tc, sessionId: entry.sessionId || ownerSid || null };
+  }
+  return null;
+}
+
+// 组里有没有被转到后台的命令(这样的组默认展开,让「已移到后台运行 · 任务 …」那一行看得见)。
+export function hasMovedCommand(items) {
+  return (Array.isArray(items) ? items : []).some((b) => b && b.type === 'tool_use' && isMovedToBackground(b.toolCall && b.toolCall.result));
+}
+
 // 按钮的悬停说明与超长前台时限的确认文案。
 export const MOVE_TO_BG_HINT = '移到后台:命令继续在后台运行,模型接着往下走;命令结束后会自动通知模型。移到后台的命令运行满命令行规定的时限(目前约 30 分钟)会被停止。';
 export const LONG_FG_TIMEOUT_MS = 1_800_000;

@@ -10,7 +10,8 @@ import { ModelBadge, ProviderAvatar, AssistantName } from './ModelBadge.jsx';
 import { MarkdownRenderer } from './MarkdownRenderer.jsx';
 import { cacheHitPct, formatHitPct } from '../utils/cacheStats.js';
 import { GenuiActionProvider } from '../genui/host/action-context.jsx';
-import { BashCard } from './tools/BashCard.jsx';
+import { BashCard, MoveToBgButton } from './tools/BashCard.jsx';
+import { foregroundMoveTarget, hasMovedCommand } from '../utils/movedToBackground.js';
 import { EditDiffCard } from './tools/EditDiffCard.jsx';
 import { ReadCard } from './tools/ReadCard.jsx';
 import { TaskCard, TaskOwnerContext } from './tools/TaskCard.jsx';
@@ -524,6 +525,10 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, l
     summary = preview ? `思考 · ${preview}` : '思考';
   }
   const hosting = !!liveLabel;
+  // r198:收起时卡片看不见,组里仍在前台运行的 Bash 命令的「移到后台」按钮挂在头行;展开后由命令卡片自己挂(同一时刻只有一个)。
+  const ownerSid = useContext(TaskOwnerContext);
+  const fgTasks = useStore((s) => s.fgTasks);
+  const moveTarget = expanded ? null : foregroundMoveTarget(items, fgTasks, ownerSid);
   // r162:去掉左侧灰条(对齐 Claude 桌面版:折叠行直接贴着正文左缘,点一下展开);头行用 -ml-1.5 + pl-1.5
   // 把悬停底色向左多伸 6px,图标与正文左缘仍对齐。展开后的条目保留 pl-3 缩进,层级靠缩进表达。
   return (
@@ -551,6 +556,7 @@ function WorkGroup({ items, expanded, onToggle, onRetryTool, liveBlock = null, l
               <span className="min-w-0 truncate text-xs font-body">{summary}</span>
             </>
           )}
+        {moveTarget && <MoveToBgButton toolCall={moveTarget.toolCall} sessionId={moveTarget.sessionId} />}
         {/* 出错标记:只有红点、不带文字(头行可见文字保持「标题 · N 次工具调用」),数目在悬停提示里 */}
         {errorCount > 0 && (
           <span
@@ -783,7 +789,8 @@ export function CoworkBlocks({
             </ToolCallWithRetry>
           );
         case 'group': {
-          const autoOpen = hostMode ? false : (seg.key === activeKey);
+          // r198:组里有被转到后台的命令时默认展开(直播与回看一致):它还在后台跑,「已移到后台运行 · 任务 …」要看得见。
+          const autoOpen = hasMovedCommand(seg.items) || (hostMode ? false : (seg.key === activeKey));
           const wantOpen = override.has(seg.key) ? override.get(seg.key) : autoOpen;
           const expanded = wantOpen;
           return (
