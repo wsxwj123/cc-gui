@@ -230,7 +230,7 @@ function finishInterrupted() {
   }
   out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } });
   append({ ...base(), type: 'user', uuid: crypto.randomUUID(), parentUuid: null, message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } });
-  out({ type: 'result', subtype: 'error_during_execution', is_error: true, result: '', duration_ms: 100, num_turns: 1, total_cost_usd: 0, usage: USAGE });
+  out({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use'], result: '', duration_ms: 100, num_turns: 1, total_cost_usd: 0, usage: USAGE });
 }
 
 async function userTurn(userText) {
