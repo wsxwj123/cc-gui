@@ -346,6 +346,20 @@ await check('回合结束 / 换了世代 / 已按停止 / 跨会话回合:待移
   assert.equal(s4.query.calls.length, 0, '跨会话回合不转');
 });
 
+console.log('\n五c、停止之后命令行自己续跑的一段(C8)');
+await check('活动段编号 = 回合代数.复活次数;停止时记下被停的那一段,命令行续跑后编号越过它', async () => {
+  assert.equal(chat.activitySegment({ turnEpoch: 2, reviveSeq: 3 }), '2.3');
+  assert.equal(chat.activitySegment({}), '0.0');
+  const s = slotOf({ turnEpoch: 1, reviveSeq: 2, query: { interrupt() { return Promise.resolve(); }, stopTask() { return Promise.resolve(); } } });
+  s.liveTasks.set('a', { toolUseId: 'toolu_K', kind: 'shell', epoch: 1, createdAt: Date.now() });
+  chat.applyStop(s, 'sdk-1', {});
+  clearTimeout(s.stopTimer);
+  assert.equal(s.stoppedSegment, '1.2');
+  assert.equal(s.closing, false, '留着被转走的命令,进程不关');
+  s.reviveSeq = 3;   // 消息泵的复活守卫:命令行自己续跑
+  assert.notEqual(chat.activitySegment(s), s.stoppedSegment);
+});
+
 console.log('\n六、读历史:工具结果上的 movedToBackground');
 await check('会话文件里被转走那条(toolUseResult 带 backgroundedByUser / timedOutAfterMs)→ movedToBackground + bgTaskId;其余结果不多键', async () => {
   const HASH = '-tmp-r198-proj';

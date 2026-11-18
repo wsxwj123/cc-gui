@@ -255,6 +255,9 @@ router.get('/agents/active', async (req, res) => {
       ...(p.fgTasks ? { fgTasks: p.fgTasks } : {}),
       ...(p.xsTurn ? { xsTurn: true } : {}),
       ...(p.movedTasks ? { movedTasks: p.movedTasks } : {}),
+      // r198:活动段编号与被用户停止的那一段(chat.js activitySegment)。页面的停止闩锁据此判断"被停的那一段过去了没有"。
+      ...(typeof p.segment === 'string' ? { segment: p.segment } : {}),
+      ...(p.stoppedSegment ? { stoppedSegment: p.stoppedSegment } : {}),
     });
     seenPids.add(Number(p.pid));
     if (p.sessionId) seenSessionIds.add(p.sessionId);

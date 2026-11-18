@@ -189,7 +189,7 @@ import { deriveApiErrorUi, deriveHistoryApiErrorUi, shouldSkipLocalErrorBlock } 
 import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
 import { isChatStartTimeoutResponse, isChatStartTimeoutEvent, makeChatStartTimeoutNotice, appendChatStartTimeoutNotice } from './utils/chatStartTimeout.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
-import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
+import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, isStoppedSegment, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
 import { addRetained, applyRetained, cutTsOf, dropRetained, dropRetainedSince, listRetainedFor, makeRetainedEntry, migrateRetained, removeRetained, retainKindOf, retainedVersion, subscribeRetained } from './utils/retainedCopies.js';
 import { dropStaleUserEchoes } from './utils/userEcho.js';
@@ -4716,7 +4716,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             && (pollSid ? a.sessionId === pollSid : (a.draftId && a.draftId === pollDraftId))
             && a.stoppable === true
             && a.status !== 'idle' // #26:常驻进程回合间保活 ≠ 后台在跑,不出横幅
-            && !stoppedPidsRef.current.has(String(a.pid))
+            // r198:只跳过"被停的那一段";命令行之后自己续跑的一段(通知回合)照常当作后台在跑
+            && !isStoppedSegment(a, stoppedPidsRef.current)
         );
         // Only show "background working" if we're NOT actively streaming
         // locally — otherwise the local stream UI is already showing it.

@@ -117,5 +117,21 @@ check('ownedMovedEntry / movedIdsKey:只认 moved:true 且属主一致的记录;
   assert.equal(movedIdsKey(null, ['a'], 'S1'), '');
 });
 
+// ---- C8:停止闩锁只挡"被停的那一段"(client/src/utils/reattach.js) ----
+const { isStoppedSegment } = await import('../../client/src/utils/reattach.js');
+check('isStoppedSegment:只跳过被停的那一段;编号越过后解除并删掉进程号;服务端没处理到停止 / 旧服务端照旧跳过', () => {
+  const set = new Set(['sdk-1', 'sdk-2', 'sdk-3']);
+  assert.equal(isStoppedSegment({ pid: 'sdk-9', segment: '0.0' }, set), false, '没停过的进程不跳过');
+  assert.equal(isStoppedSegment({ pid: 'sdk-1', segment: '0.0', stoppedSegment: '0.0' }, set), true, '还是被停的那一段');
+  assert.equal(isStoppedSegment({ pid: 'sdk-1', segment: '0.0' }, set), true, '服务端还没处理到停止');
+  assert.equal(isStoppedSegment({ pid: 'sdk-2' }, set), true, '旧服务端没有这两个字段');
+  assert.equal(set.has('sdk-1'), true);
+  assert.equal(isStoppedSegment({ pid: 'sdk-1', segment: '0.1', stoppedSegment: '0.0' }, set), false, '命令行自己续跑的下一段');
+  assert.equal(set.has('sdk-1'), false, '解除后从集合里删掉');
+  assert.equal(isStoppedSegment({ pid: 'sdk-1', segment: '0.0', stoppedSegment: '0.0' }, set), false, '删掉之后不再跳过');
+  assert.equal(isStoppedSegment({ pid: 'sdk-3', segment: '1.0', stoppedSegment: '0.0' }, set), false, '复用进程开了新回合');
+  assert.equal(isStoppedSegment({ pid: 'sdk-2', segment: '0.0' }, null), false);
+});
+
 console.log(`\nr198 页面工具函数单测:${PASS} 通过,${FAILS} 失败`);
 process.exit(FAILS ? 1 : 0);

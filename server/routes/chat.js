@@ -675,9 +675,19 @@ export function getActiveChatProcesses() {
       liveTasks: slot.liveTasks instanceof Map ? slot.liveTasks.size : 0,
       // r198:fgTasks / xsTurn / movedTasks,只在有值时出现(见 liveTurnSnapshot)
       ...liveTurnSnapshot(slot),
+      // r198:活动段编号与被用户停止的那一段(见 activitySegment)。页面停止闩锁:编号越过被停的那一段才重新接流。
+      segment: activitySegment(slot),
+      ...(slot.stoppedSegment ? { stoppedSegment: slot.stoppedSegment } : {}),
     });
   }
   return out;
+}
+
+// r198:常驻进程上的"一段活动"编号 = 回合代数.复活次数。复用进程开新回合时回合代数加一(复用块),命令行自己续跑
+// (空闲槽被消息泵的复活守卫翻回活跃,如后台命令跑完的通知回合)时复活次数加一 —— 同一个进程号上,被用户停止的
+// 那一段与之后命令行自己起的一段编号不同。纯函数(单测 check-r198-background-tasks)。
+export function activitySegment(slot) {
+  return `${slot?.turnEpoch | 0}.${slot?.reviveSeq | 0}`;
 }
 
 const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -3443,6 +3453,9 @@ async function handleChatPost(req, res) {
         if (slot.idle && mainAgentTurnActivity) {
           slot.idle = false;
           slot.revived = true; // 看门狗判据(无子代理续跑也纳入 5 分钟静默兜底)
+          // r198:命令行自己续跑 = 新的一段活动(回合代数不变,复活次数加一,见 activitySegment)。被用户停止过的
+          // 那一段已经收尾,页面据此解除对这个进程号的停止闩锁、照常接流(后台命令跑完的通知回合)。
+          slot.reviveSeq = (slot.reviveSeq | 0) + 1;
           slot.turnUnread = false; // r177:续跑段的缓冲是否从回合起点起完整说不准,保守按"不声明"处理
           reviveSlotTurn(slot); // R13:回合还在跑,别让停止入口拿早前那次 finalize 的"completed"打发
           // r151t:回合完成广播按"每次收尾(给流发 done、会话转空闲)一次"。上一段收尾已广播过,复活的这一段(引导排成的回合、
@@ -3506,6 +3519,10 @@ async function handleChatPost(req, res) {
           // 由 result 分支单点决定);closeDelayMs 为 0(无子代理无 suggest 本不挂窗)
           // 防御性兜底 4s。未列入白名单的事件类型不再推迟收摊。
           cancelClose();
+          // r198:被用户停止的那一轮已经出了最终结果(停止后命令行回的中断结果),收尾等待窗里又来的主回合活动是命令行
+          // 自己续跑的下一段(如后台命令跑完的通知回合),不是被停那一轮的延续 —— 记成新的一段活动(与上面复活守卫同一个
+          // 计数,每次停止只记一次),页面据此解除停止闩锁、照常接流。没停止过的回合不受影响。
+          if (slot.turnStopRequested && slot.stoppedSegment === activitySegment(slot)) slot.reviveSeq = (slot.reviveSeq | 0) + 1;
           slot.suggestWaitSince = 0; // r151c:续跑了,那个结果不是最终的
           // r151u:command_lifecycle started = 命令行开始处理排队的消息(引导排成的回合),是一个新回合,必以它自己的 result
           // 结束,由 result 分支照常决定收尾(立即 / 4 秒窗)。所以只取消、不重新计时:按"静默满窗即收摊"计时的话,新回合等首字、
@@ -4662,6 +4679,7 @@ export function applyStop(slot, pid, flags) { // export 仅为可单测(check-st
   // express.json 全局挂载:无 body → {} → hard=false,老调用方向后兼容(选择性)。
   if (slot.runtimeTurn) slot.runtimeTurn.stopRequested = true; // r151b:回合结束通知报 stopped 用(没挂接时没有 runtimeTurn)
   slot.turnStopRequested = true; // r151q:同一件事记在槽上(没挂接也有),续跑时据此不再按跨会话回合挡用户
+  slot.stoppedSegment = activitySegment(slot); // r198:被停的是哪一段活动(/agents/active 下发,页面的停止闩锁据此解除)
   const hard = flags.hard === true;
   // A1:allTasks=true 只由「停止后台 N」总闸传(用户显式"停掉所有后台"),保持全量语义;
   // 主停止键 / Esc 不传 → 只停本回合派出的任务,跨回合后台子代理保留。
