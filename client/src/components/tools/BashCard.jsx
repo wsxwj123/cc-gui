@@ -1,9 +1,52 @@
-import React, { useState } from 'react';
-import { Terminal } from '../Icon.jsx';
+import React, { useContext, useState } from 'react';
+import { Terminal, Layers } from '../Icon.jsx';
 import { Linkify } from '../../utils/linkify.jsx';
 import { ToolResultImages } from './ToolResultImages.jsx';
 import { ToolCardShell, cardStatusOf } from './ToolCardShell.jsx';
 import { ThemedCopyButton } from '../ThemedCopyButton.jsx';
+import { TaskOwnerContext } from './TaskCard.jsx';
+import { useStore } from '../../stores/sessionStore.js';
+import { confirmDialog } from '../../utils/confirmDialog.jsx';
+import {
+  isMovedToBackground, parseBackgroundDeadline, buttonMoveDialogText,
+  MOVE_TO_BG_HINT, LONG_FG_TIMEOUT_MS, longTimeoutConfirmText,
+} from '../../utils/movedToBackground.js';
+
+// r198:「移到后台」按钮(卡头右侧)。只转这一条(请求带 toolUseId);前台时限超过 30 分钟的先确认。点击期间禁用,
+// 结果按归一表弹框(转成了不弹,卡片自己会变)。在卡头 <button> 里,所以写成 role=button 的 span 并拦住冒泡(不开合卡片)。
+function MoveToBgButton({ toolCall, sessionId }) {
+  const [busy, setBusy] = useState(false);
+  const run = async (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (busy) return;
+    const timeoutMs = toolCall.input?.timeout;
+    if (typeof timeoutMs === 'number' && timeoutMs > LONG_FG_TIMEOUT_MS) {
+      if (!(await confirmDialog(longTimeoutConfirmText(timeoutMs)))) return;
+    }
+    setBusy(true);
+    let result = null;
+    try { result = await useStore.getState().moveToBackground(sessionId, toolCall.id); }
+    finally { setBusy(false); }   // 先恢复可点,再弹框(弹框不挡按钮状态)
+    const text = buttonMoveDialogText(result);
+    if (text) void confirmDialog(text);
+  };
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      aria-label="移到后台"
+      aria-disabled={busy ? 'true' : undefined}
+      title={MOVE_TO_BG_HINT}
+      data-cgui="move-to-bg-btn"
+      onClick={run}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') run(e); }}
+      className={`shrink-0 inline-flex items-center justify-center w-5 h-5 rounded text-ink-muted hover:text-ink hover:bg-canvas-warm transition-colors ${busy ? 'opacity-50 cursor-wait' : 'cursor-pointer'}`}
+    >
+      <Layers size={12} />
+    </span>
+  );
+}
 
 const COMMAND_SEPARATORS = new Set(['|', '||', '&&', ';', '&']);
 
@@ -40,17 +83,28 @@ function countLines(text) {
 }
 
 export function BashCard({ toolCall }) {
-  const [expanded, setExpanded] = useState(false);
   const cmd = toolCall.input?.command || '';
   const desc = toolCall.input?.description || '';
   const result = toolCall.result;
+  // r198:被转到后台的前台命令(结构化字段判定,直播与回看历史同一口径):卡头写「已移到后台」,底栏写任务编号与
+  // 能从原句读到的后台时限,不出现「成功」;默认展开(底栏就是这张卡要交代的事),用户手动开合以手动为准。
+  const moved = isMovedToBackground(result);
+  const [expandedByUser, setExpanded] = useState(null);
+  const expanded = expandedByUser ?? moved;
+  // 「移到后台」按钮:前台任务表里有这条、还没出结果、卡片属主与任务所属会话一致(分支复制出的卡片不显示)。
+  const ownerSid = useContext(TaskOwnerContext);
+  const fgEntry = useStore((s) => s.fgTasks[toolCall.id]);
+  const showMoveBtn = !!fgEntry && !result && (!ownerSid || !fgEntry.sessionId || fgEntry.sessionId === ownerSid);
   const isError = !!result?.isError;
   const output = typeof result?.content === 'string' ? result.content : '';
   const { exitCode, body } = splitExitCode(output, isError);
   const lineCount = countLines(body);
   const linesText = lineCount > 0 ? `输出 ${lineCount} 行` : '无输出';
   let footText = '';
-  if (result) {
+  if (result && moved) {
+    const deadline = parseBackgroundDeadline(output);
+    footText = `已移到后台运行${result.bgTaskId ? ` · 任务 ${result.bgTaskId}` : ''}${deadline ? ` · 后台最长 ${deadline},到点由命令行停止` : ''}`;
+  } else if (result) {
     if (!isError) footText = lineCount > 0 ? `成功 · ${linesText}` : '无输出';
     else footText = `${exitCode != null ? `退出码 ${exitCode}` : '失败'} · ${linesText}`;
   }
@@ -63,6 +117,8 @@ export function BashCard({ toolCall }) {
       title={desc || cmd || '(empty)'}
       titleMono={!desc}
       titleHint={cmd}
+      meta={moved ? '已移到后台' : null}
+      headExtra={showMoveBtn ? <MoveToBgButton toolCall={toolCall} sessionId={fgEntry.sessionId || ownerSid} /> : null}
       expanded={expanded}
       onToggle={() => setExpanded(!expanded)}
     >
