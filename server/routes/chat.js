@@ -3453,10 +3453,10 @@ async function handleChatPost(req, res) {
         if (slot.idle && mainAgentTurnActivity) {
           slot.idle = false;
           slot.revived = true; // 看门狗判据(无子代理续跑也纳入 5 分钟静默兜底)
+          slot.turnUnread = false; // r177:续跑段的缓冲是否从回合起点起完整说不准,保守按"不声明"处理
           // r198:命令行自己续跑 = 新的一段活动(回合代数不变,复活次数加一,见 activitySegment)。被用户停止过的
           // 那一段已经收尾,页面据此解除对这个进程号的停止闩锁、照常接流(后台命令跑完的通知回合)。
           slot.reviveSeq = (slot.reviveSeq | 0) + 1;
-          slot.turnUnread = false; // r177:续跑段的缓冲是否从回合起点起完整说不准,保守按"不声明"处理
           reviveSlotTurn(slot); // R13:回合还在跑,别让停止入口拿早前那次 finalize 的"completed"打发
           // r151t:回合完成广播按"每次收尾(给流发 done、会话转空闲)一次"。上一段收尾已广播过,复活的这一段(引导排成的回合、
           // 命令行自己续跑、子代理去抖后的续跑)收尾时照常再广播一次,前端据它作废切走时存的直播快照、发完成提醒、刷新侧栏。
