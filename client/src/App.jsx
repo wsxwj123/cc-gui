@@ -186,6 +186,7 @@ import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/X
 import ApiErrorActions from './components/ApiErrorActions.jsx';
 import { deriveApiErrorUi, deriveHistoryApiErrorUi, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
 import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
+import { isChatStartTimeoutResponse, isChatStartTimeoutEvent, makeChatStartTimeoutNotice, appendChatStartTimeoutNotice } from './utils/chatStartTimeout.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
@@ -6081,9 +6082,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }),
       });
       const respJson = await res.json();
+      // r197:初始化超时(504 CHAT_START_TIMEOUT 且带 pid,见 utils/chatStartTimeout.js)= 命令行进程没被结束,这一轮可能还在跑。
+      // 不当发送失败(点卡片那条与普通发送一样):不抛错、不画 ❌ 回合,往下照常认领 pid、接这一轮的流,提示在认领处画;
+      // 排队的消息由这条流收尾时的既有排空发出(这一轮真正结束:结果到达 / 进程退出 / 静默超时被结束 / 用户点停止)。
+      const startTimedOut = isChatStartTimeoutResponse(res.status, respJson);
       // r151b:点卡片发出的这条被拒(400 / 409 凭据无效、409 开关已关、500 入口出错、回合身份冲突)= 没发出:
       // 按最新状态刷新卡片(可撤回或已退回),给一行提示,不画错误回合;走既有 finally 收尾。
-      if (opts.xsProcess && (!res.ok || !respJson.pid)) {
+      if (opts.xsProcess && !startTimedOut && (!res.ok || !respJson.pid)) {
         setProviderSwitchNotice({ text: xsClaimNotSent(opts.xsProcess, respJson) });
         return;
       }
@@ -6128,7 +6133,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // Surface server rejections (e.g. invalid project dir → 400) instead of
       // streaming a non-existent pid — that would hang forever as a stuck
       // "connecting" with no reply (the catch below renders the message).
-      if (!res.ok || !respJson.pid) throw new Error(respJson.error || `发送失败 (${res.status})`);
+      if (startTimedOut) {
+        // r197:初始化超时不抛错(见上面 startTimedOut 处):往下照常认领 pid、接流。
+      } else if (!res.ok || !respJson.pid) throw new Error(respJson.error || `发送失败 (${res.status})`);
       // r152b:服务端沿用了带着后台任务的旧进程、配置改动延后生效 → 给发送时那个会话一行提示
       // (窗格还在它上面就直接显示,已切走就留言,切回时显示;写法同 SESSION_BUSY_QUEUED_NOTICE)。没有该字段不提示。
       if (respJson.configDeferred === true) {
@@ -6163,6 +6170,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       activeProcOwnerRef.current = { pid: String(pid), owner: sid || selectedSession?.draftId || null };
       setLiveChatPid(String(pid)); // ⚡ 可用性:slot 已建立,connecting 窗口到此结束
       setStreamingModel(respJson.model);
+      // r197:初始化超时的提示画在认领之后 —— 只在本窗格接这条流时画;让位的那条(上面 return 了)由重新接上的流
+      // 回放到同一判决时画。按 pid 去重:接流后流里回放 / 再报的同一判决不画第二条。
+      if (startTimedOut) {
+        setChatMessages((prev) => appendChatStartTimeoutNotice(prev, makeChatStartTimeoutNotice({
+          pid, text: respJson.error, ownerKey: streamSid || sessionQueueKey, model: respJson.model,
+        })));
+      }
       }
 
       const controller = new AbortController();
@@ -6344,7 +6358,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           if (!event.parent_tool_use_id && (event.type === 'assistant'
             || (event.type === 'stream_event' && (event.event?.type === 'content_block_start' || event.event?.type === 'content_block_delta')))) endedClean = false;
           if (event.type === 'result' && !event.parent_tool_use_id) { sawTopResult = true; endedClean = true; }
-          if (event.type === 'error' && event.error !== 'bad-line') sawServerErrorEvent = true;
+          // r197:初始化超时那条不算(进程没被结束、这一轮还在跑,见下面错误分支里的处理)。
+          if (event.type === 'error' && event.error !== 'bad-line' && !isChatStartTimeoutEvent(event)) sawServerErrorEvent = true;
           if (event.type === 'stall_notice' && event.ended === true) stallEnded = true;
 
           // R13:每帧都带本运行的 runId(SSE id 行是 `runId:seq`)。记下来发布到流动内容
@@ -7342,6 +7357,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // {type:'error',error:'bad-line'}。这类是良性噪声,绝不能当致命错误弹❌+break
             // 中止整轮(否则后续有效事件含 result 全丢,进程其实还在跑)。直接跳过。
             if (event.error === 'bad-line') continue;
+            // r197:初始化超时(后端到点经流再报的同一判决;进缓冲,第一次接流时回放)不是这一轮的终点 —— 进程没被结束,
+            // 内容可能稍后到达。不当致命错误(不画 ❌、不 break,流照常读到这一轮真正结束,排队消息由收尾的排空发出);
+            // 提示同一轮只画一次:按 pid 去重(发送应答那处可能已画;重新接上的流回放到它时同样不再画)。
+            if (isChatStartTimeoutEvent(event)) {
+              setChatMessages((prev) => appendChatStartTimeoutNotice(prev, makeChatStartTimeoutNotice({
+                pid, text: event.error, ownerKey: streamSid || sessionQueueKey, model: streamingModel,
+              })));
+              continue;
+            }
             // 花费上限(设置→对话花费上限):进程累计花费达到 maxBudgetUsd 时 CLI 返回
             // error_max_budget_usd。给出明确提示而非通用报错;不自动重试(重试会立即再超)。
             if (event.subtype === 'error_max_budget_usd') {
