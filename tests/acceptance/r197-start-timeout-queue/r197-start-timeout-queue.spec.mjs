@@ -159,7 +159,7 @@ test('G3 [复现] 同一会话连做 3 轮(G1+G2):每一轮都满足 G1、G2,上
   }
 });
 
-test('G4 [复现] 超时后用户点停止:这一轮停下(停止键消失),超时那句话仍是 1 次', async ({ page }) => {
+test('G4 [复现] 超时后用户点停止:点之前 T2 没发、停止键在;点之后这一轮停下(停止键消失),超时那句话不重复', async ({ page }) => {
   const A = S(3);
   const t1 = msg('G4', 'T1'); const t2 = msg('G4', 'T2');
   await openSessionBySearch(page, A.mark);
@@ -169,11 +169,15 @@ test('G4 [复现] 超时后用户点停止:这一轮停下(停止键消失),超�
   await sendHeldTurn(page, chat, t1, t2);
   await awaitStartTimeout(page, chat, t1, 'G4:');
   await page.waitForTimeout(1_000);
-  expect((await probe(page, t2)).stops, 'G4:点停止之前停止键应在').toBeGreaterThanOrEqual(1);
-  autoRun(CTL, A.sid);   // 停止后如果 T2 被重新发出,那一轮自己跑完,不影响"停止键消失"的判断
+  const before = await probe(page, t2);
+  expect(before.stops, 'G4:点停止之前停止键应在').toBeGreaterThanOrEqual(1);
+  expect(before.queue, 'G4:点停止之前 T2 应仍在排队栏').toBe(1);
+  expect(chat.postsWith(t2).length, 'G4:点停止之前不该已发出含 T2 的 POST').toBe(0);
+  autoRun(CTL, A.sid);   // 停止后如果 T2 被发出,那一轮自己跑完,不影响"停止键消失"的判断
   await stopButton(page).first().click();
   await waitStopGone(page, 15_000, 'G4:点停止后');
-  expect(await phraseCount(page), 'G4:停止键消失的那一刻,超时那句话应恰好 1 次').toBe(1);
+  // 主会话修订(2026-11-18):不再断言"停止键消失那一刻那句话恰好 1 次"——停止后 T2 按现有规则可能被发出,
+  // 而同一会话发下一条消息时,页面会撤掉上一轮留下的提示(见接口文件),那时这句话为 0 是正常的。
   const after = await sampleFor(page, 3_000, t2);
   expect(after.filter((s) => s.phrase > 1).map((s) => s.phrase), `G4:停止后超时那句话不应重复出现;采样 ${JSON.stringify(after.map((s) => s.phrase))}`).toEqual([]);
   const rec = await readPhraseRecorder(page);
