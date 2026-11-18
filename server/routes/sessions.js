@@ -31,6 +31,7 @@ import {
 } from '../services/session-reader.js';
 import { claudeSpawn, cleanChildEnv, getActiveChatProcesses } from './chat.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
+import { sessionTitleLinesAfter } from '../utils/session-title-carry.js';
 import { parseHistoryPaging } from '../utils/history-pagination.js';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 import { broadcastSessionFileChange } from '../broadcast.js';
@@ -156,6 +157,14 @@ export function trimJsonlBeforeTool(raw, toolUseId) {
     }
 
     keptLines.push(line);
+  }
+
+  if (found) {
+    // 截掉段里的标题类记录(改名 / 自动名 / 标签)按组取最新一条原样补回末尾,落在救回的
+    // tool_result 之后(理由见 session-title-carry.js)。扫描起点 = 锚点行的 0 基下标、含该行:
+    // 锚点是 assistant 记录,本身不会被选中,含不含结果一样,写成「从截断下标起」与另两处一致。
+    // 返回的 removedFromLine / totalLines / keptAssistantBlocks 仍描述截断位置,不受补回影响。
+    for (const titleLine of sessionTitleLinesAfter(lines, removedFromLine)) keptLines.push(titleLine);
   }
 
   return { found, keptLines, removedFromLine, totalLines: lines.length, keptAssistantBlocks };
@@ -292,7 +301,13 @@ export function compactSegmentJsonl(raw, anchorUuid, direction, summaryContent) 
       timestamp: now,
       uuid: summaryUuid,
     };
-    return { ok: true, summaryUuid, lines: [...keptLines, JSON.stringify(summary)] };
+    // 截掉段(锚点起、含锚点;锚点是用户消息,不会被选中)里的标题类记录按组取最新一条,
+    // 原样接在摘要之后(命令行自己压缩后也把会话级记录补写在摘要之后;理由见 session-title-carry.js)。
+    return {
+      ok: true,
+      summaryUuid,
+      lines: [...keptLines, JSON.stringify(summary), ...sessionTitleLinesAfter(lines, anchorIdx)],
+    };
   }
 
   return { ok: false, error: 'direction 必须是 before 或 after' };

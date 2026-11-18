@@ -308,6 +308,7 @@ const SESSIONS_DIR = join(CLAUDE_DIR, 'sessions');
 // 会让自动标题覆盖用户手改。GUI 的优先级链靠区分两者(见 client/src/utils/sessionTitle.js)。
 // customTitle 为空串 = 用户清空了自定义标题(SDK 的 renameSession 拒绝空标题,清空由
 // prefs.js 自己追加空行表达),按"无"处理。
+// 回退时补回标题行的认法在 server/utils/session-title-carry.js,改这里时一起看。
 function takeTitleLine(raw, acc) {
   if (!raw.includes('"custom-title"') && !raw.includes('"ai-title"')) return;
   try {
