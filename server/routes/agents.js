@@ -250,6 +250,11 @@ router.get('/agents/active', async (req, res) => {
       // r151c:回合代数(常驻进程每开一个新回合加一)。前端按 pid#turnEpoch 认"同一进程上的新回合",
       // 紧跟在上一回合之后开始、轮询看不到中间空闲时也能重新接流(client/src/utils/reattach.js)。
       turnEpoch: p.turnEpoch | 0,
+      // r198:转到后台的三项(chat.js liveTurnSnapshot),只在有值时出现。页面据此在切回 / 刷新后重建
+      // 「移到后台」按钮(fgTasks)与进程面板里被转走的命令(movedTasks)。
+      ...(p.fgTasks ? { fgTasks: p.fgTasks } : {}),
+      ...(p.xsTurn ? { xsTurn: true } : {}),
+      ...(p.movedTasks ? { movedTasks: p.movedTasks } : {}),
     });
     seenPids.add(Number(p.pid));
     if (p.sessionId) seenSessionIds.add(p.sessionId);

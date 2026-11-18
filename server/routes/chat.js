@@ -9,7 +9,7 @@ import { homedir, tmpdir } from 'node:os';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { query, AbortError } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultModel, isOfficialAnthropic } from '../services/model-resolver.js';
-import { findSessionFile, readSessionTitles, findAgentRunEvidence, isSessionIdShape, AGENT_TERMINAL_STATUSES, readSubagentUsageForToolUse } from '../services/session-reader.js';
+import { findSessionFile, readSessionTitles, findAgentRunEvidence, isSessionIdShape, AGENT_TERMINAL_STATUSES, readSubagentUsageForToolUse, isMovedToBackgroundResult } from '../services/session-reader.js';
 import { dropPendingForSession, pendingUserCardCount, requestElicitation, requestPermission, requestUserDialog, resolvePendingForSession } from './permissions.js';
 import { buildAlwaysAllowUpdates, buildDirAuthUpdates } from '../utils/permission-rules.js';
 import { stripInheritedProviderEnv } from '../utils/provider-env.js';
@@ -673,6 +673,8 @@ export function getActiveChatProcesses() {
       usable: slotUsable(slot),
       turnEpoch: slot.turnEpoch | 0,
       liveTasks: slot.liveTasks instanceof Map ? slot.liveTasks.size : 0,
+      // r198:fgTasks / xsTurn / movedTasks,只在有值时出现(见 liveTurnSnapshot)
+      ...liveTurnSnapshot(slot),
     });
   }
   return out;
@@ -3171,6 +3173,7 @@ async function handleChatPost(req, res) {
     // R13:本回合到此结束 —— 让等待该回合落地的停止入口拿到真实终态(被停 → stopped,
     // 正常收尾 → completed/failed)。主 agent 随后续跑会经 reviveSlotTurn 翻回活跃。
     settleSlotTurn(slot, slot.lastResultError ? 'failed' : 'completed');
+    resetBackgroundTurnState(slot); // r198:这一轮结束 = 没有挡在前台的调用了:清未出结果的调用、待移,前台标记归零
     slot.suggestWaitSince = 0; // r151c:回合结束通知已带着它报出(结束时刻按结果时刻算),此后不再是"只差输入预测"
     // 回合优雅收尾:上一个 stop 武装的 abort 兜底不再需要,清掉防其误伤后续复用回合。
     if (slot.stopTimer) { clearTimeout(slot.stopTimer); slot.stopTimer = null; }
@@ -3388,6 +3391,9 @@ async function handleChatPost(req, res) {
             slot.liveTasks, m.tasks, Date.now(), LEVEL_GRACE_MS, slot.turnEpoch | 0);
           broadcastLiveTasks(slot, liveIds, settled, added);
         }
+        // r198:转到后台的簿记(前台标记、本回合未出结果的调用、待移、被转走命令的输出路径)。放在上面的任务簿记之后:
+        // task_started 的条目已由上面建好,这里只往条目上补字段。只写簿记 + 不等待的转后台请求;异常吞掉只记日志,不打断消息泵。
+        try { applyBackgroundSignals(slot, m); } catch (e) { console.warn('[bg] 转到后台簿记异常:', e?.message || e); }
         deliverLine(slot, line);
         // r49b②:CLI 在 init 里自报本进程的生效档位。与本 slot 的 GUI 请求档对账,不一致
         // (guard 拒了 auto/plan)就补发一条系统行让界面当场现形——此前这种降级悄无声息,
@@ -4005,6 +4011,237 @@ export async function handleSteerPost(req, res, procs = activeProcesses) {
   }
 }
 router.post('/chat/steer', (req, res) => handleSteerPost(req, res));
+
+// ── r198 转到后台(回合进行中把前台命令转到后台,等同终端里的 Ctrl+B)───────────────────────
+// 用的是 SDK 的 Query.backgroundTasks(toolUseId):被挡住的工具调用马上拿到「在后台运行」的结果,这一轮接着走,
+// 任务跑完命令行发 task_notification 并自动起一轮通知模型。只按 tool_use_id 调(不带参数时命令行回 {}、SDK 映射成
+// true,登记前调用其实什么都没转,实验 P),多个目标并发调,总时限 5 秒。
+// 簿记(都在槽上,消息泵里同步维护,见 applyBackgroundSignals):
+//   liveTasks 条目补 fg(task_started 的 is_backgrounded === false)/ parentTaskId / description / timeoutMs /
+//     movedAt(被转到后台的时刻)/ outputPath(从被转走那条工具结果的原句里取);
+//   openCalls:本回合主线程已发出、还没出结果的工具调用 toolUseId → { epoch, timeoutMs }(不按工具名过滤,
+//     只排除 run_in_background 的);
+//   pendingMove:{ epoch, ids } —— 「全部」请求到达时还没登记的调用,一登记就转走。
+// 停止规则不变:被转走的 Bash 仍是 kind 'shell',选择性停止保留它(实验 B:转走后 interrupt 不杀它)。
+export const LONG_FG_TIMEOUT_MS = 1_800_000;   // 前台时限超过它的命令,「全部」模式不转(后台时限约 30 分钟)
+export const BG_MOVE_TOTAL_TIMEOUT_MS = 5_000;
+const BG_TOOL_USE_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+export function validateBackgroundRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  if (typeof body.sessionId !== 'string') return null;
+  const sessionId = body.sessionId.trim();
+  if (!STEER_SESSION_RE.test(sessionId)) return null;
+  let toolUseId = null;
+  if (body.toolUseId !== undefined) {
+    if (typeof body.toolUseId !== 'string') return null;
+    toolUseId = body.toolUseId.trim();
+    if (!BG_TOOL_USE_RE.test(toolUseId)) return null;
+  }
+  return { sessionId, toolUseId };
+}
+
+// 当前回合绑着跨会话消息(回合开始时绑的 tag,见 xsession.js)且还没结束。这种回合不转后台:命令被转走后这一轮
+// 很快结束,消息会被结算成"已完成",而命令行随后自己起的通知回合没有 tag,结果回不到那条消息。
+export function isXsBoundTurn(slot) {
+  const rt = slot?.runtimeTurn;
+  return !!(rt && !rt.ended && rt.tag && typeof rt.tag === 'object' && rt.tag.xsMessageId);
+}
+
+// 这一轮收到了停止请求、还没收尾。收尾之后(turnSettled)命令行自己续跑的通知回合不算"正在停止"。
+export function isTurnStopping(slot) {
+  return !!(slot && slot.turnStopRequested && !slot.turnSettled);
+}
+
+const timeoutOf = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const isLongTimeout = (ms) => typeof ms === 'number' && ms > LONG_FG_TIMEOUT_MS;
+
+// 「全部」模式的目标。targets:主线程(无 parentTaskId)仍在前台、前台时限不超长的已登记任务;pending:本世代还没登记、
+// 没出结果、时限不超长的调用;skipped:时限超长的(登记与否都算)。纯函数。
+export function planBackgroundTargets(liveTasks, openCalls, epoch) {
+  const targets = [];
+  const pending = [];
+  const skipped = [];
+  const registered = new Set();
+  for (const t of (liveTasks instanceof Map ? liveTasks.values() : [])) {
+    if (!t || typeof t.toolUseId !== 'string' || !t.toolUseId) continue;
+    registered.add(t.toolUseId);
+    if (t.fg !== true || t.parentTaskId) continue;
+    const ms = timeoutOf(t.timeoutMs) ?? timeoutOf(openCalls?.get?.(t.toolUseId)?.timeoutMs);
+    if (isLongTimeout(ms)) { skipped.push({ toolUseId: t.toolUseId, reason: 'LONG_TIMEOUT' }); continue; }
+    targets.push(t.toolUseId);
+  }
+  for (const [id, c] of (openCalls instanceof Map ? openCalls : [])) {
+    if (registered.has(id) || !c || (c.epoch | 0) !== (epoch | 0)) continue;
+    if (isLongTimeout(c.timeoutMs)) { skipped.push({ toolUseId: id, reason: 'LONG_TIMEOUT' }); continue; }
+    pending.push(id);
+  }
+  return { targets, pending, skipped };
+}
+
+// 给轮询用(/agents/active):进程活着才报;都只在有值时出现。
+//   fgTasks:主线程里仍在前台的任务(回合进行中才有);xsTurn:当前回合绑着跨会话消息;
+//   movedTasks:被转到后台、还活着的任务(进程面板据此在切回 / 刷新后补列)。
+export function liveTurnSnapshot(slot) {
+  const out = {};
+  if (!slot || slot.exitCode !== null || slot.pumpEnded) return out;
+  const fgTasks = [];
+  const movedTasks = [];
+  for (const [taskId, t] of (slot.liveTasks instanceof Map ? slot.liveTasks : [])) {
+    if (!t || typeof t.toolUseId !== 'string' || !t.toolUseId) continue;
+    if (t.fg === true && !t.parentTaskId && !slot.idle) fgTasks.push(t.toolUseId);
+    if (t.movedAt) movedTasks.push({ toolUseId: t.toolUseId, taskId, outputPath: t.outputPath || null, description: t.description || '' });
+  }
+  if (fgTasks.length) out.fgTasks = fgTasks;
+  if (isXsBoundTurn(slot)) out.xsTurn = true;
+  if (movedTasks.length) out.movedTasks = movedTasks;
+  return out;
+}
+
+// 被转走那条工具结果的原句:「… Output is being written to: <路径> If it is still running after 30m …」。
+// 取法与页面(App.jsx 后台任务那条)同一条正则:非贪婪匹配到第一个 .output,路径可以含空格。
+export function bgOutputPathOf(text) {
+  const m = typeof text === 'string' ? /written to:\s*(.+?\.output)/.exec(text) : null;
+  return m ? m[1] : null;
+}
+const toolResultTextOf = (content) => (typeof content === 'string' ? content
+  : (Array.isArray(content) ? content.map((b) => (b && typeof b.text === 'string' ? b.text : '')).join('\n') : ''));
+
+function markBackgrounded(t, now) {
+  if (!t || t.fg !== true) return;
+  t.fg = false;
+  if (!t.movedAt) t.movedAt = now;
+}
+
+// 消息泵每条消息调一次(在 liveTasks 簿记之后)。只改簿记;唯一的外部动作是待移命中时不等待地调一次 backgroundTasks。
+export function applyBackgroundSignals(slot, m, now = Date.now()) {
+  if (!slot || !m || typeof m !== 'object') return;
+  if (!(slot.openCalls instanceof Map)) slot.openCalls = new Map();
+  const live = slot.liveTasks instanceof Map ? slot.liveTasks : null;
+  const epoch = slot.turnEpoch | 0;
+  if (m.type === 'assistant' && !m.parent_tool_use_id && Array.isArray(m.message?.content)) {
+    for (const b of m.message.content) {
+      if (b?.type !== 'tool_use' || typeof b.id !== 'string' || !b.id) continue;
+      if (b.input?.run_in_background === true) continue;
+      slot.openCalls.set(b.id, { epoch, timeoutMs: timeoutOf(b.input?.timeout) });
+    }
+    return;
+  }
+  if (m.type === 'user' && !m.parent_tool_use_id && Array.isArray(m.message?.content)) {
+    const results = m.message.content.filter((b) => b?.type === 'tool_result' && typeof b.tool_use_id === 'string');
+    for (const b of results) {
+      slot.openCalls.delete(b.tool_use_id);
+      if (live) for (const t of live.values()) if (t && t.toolUseId === b.tool_use_id) t.fg = false; // 出了结果 = 不再挡在前台
+    }
+    // tool_use_result 是整条消息的;只有一个工具结果时才能确定它属于谁
+    if (results.length === 1 && live && isMovedToBackgroundResult(m.tool_use_result)) {
+      const b = results[0];
+      const byTask = typeof m.tool_use_result.backgroundTaskId === 'string' ? live.get(m.tool_use_result.backgroundTaskId) : null;
+      const t = (byTask && byTask.toolUseId === b.tool_use_id) ? byTask
+        : [...live.values()].find((x) => x && x.toolUseId === b.tool_use_id);
+      if (t) {
+        if (!t.movedAt) t.movedAt = now;
+        const p = bgOutputPathOf(toolResultTextOf(b.content));
+        if (p) t.outputPath = p;
+      }
+    }
+    return;
+  }
+  if (m.type !== 'system' || !live) return;
+  if (m.subtype === 'task_started' && m.task_id) {
+    const t = live.get(m.task_id);
+    if (!t) return;
+    t.fg = m.is_backgrounded === false;   // 字段缺失(旧命令行)按"不是前台"处理,转后台不生效
+    t.parentTaskId = m.parent_task_id || null;
+    if (typeof m.description === 'string') t.description = m.description;
+    t.timeoutMs = timeoutOf(m.tool_use_id ? slot.openCalls.get(m.tool_use_id)?.timeoutMs : null);
+    return;
+  }
+  if (m.subtype === 'task_updated' && m.task_id && m.patch?.is_backgrounded === true) {
+    markBackgrounded(live.get(m.task_id), now);
+    return;
+  }
+  if (m.subtype === 'background_tasks_changed' && Array.isArray(m.tasks)) {
+    // 存活集只含后台任务:在集内的前台条目 = 已经被转到后台
+    for (const x of m.tasks) if (x && x.task_id) markBackgrounded(live.get(x.task_id), now);
+  }
+}
+
+// 回合收尾:没有挡在前台的调用了。
+export function resetBackgroundTurnState(slot) {
+  if (!slot) return;
+  if (slot.openCalls instanceof Map) slot.openCalls.clear();
+  slot.pendingMove = null;
+  if (slot.liveTasks instanceof Map) for (const t of slot.liveTasks.values()) if (t && t.fg) t.fg = false;
+}
+
+// 对 targets 并发调 backgroundTasks,总时限 totalMs。每个目标的结局:ok(moved 为命令行回的布尔)/ error / timeout。
+export async function moveTargetsToBackground(query, targets, totalMs = BG_MOVE_TOTAL_TIMEOUT_MS) {
+  const results = targets.map(() => ({ state: 'timeout' }));
+  const calls = targets.map((id, i) => {
+    let p;
+    try { p = Promise.resolve(query.backgroundTasks(id)); } catch (e) { p = Promise.reject(e); }
+    return p.then((v) => { results[i] = { state: 'ok', moved: v === true }; }, (e) => { results[i] = { state: 'error', error: e }; });
+  });
+  let timer = null;
+  const deadline = new Promise((resolve) => { timer = setTimeout(resolve, totalMs); });
+  await Promise.race([Promise.allSettled(calls), deadline]);
+  clearTimeout(timer);
+  return targets.map((id, i) => ({ id, ...results[i] }));
+}
+
+const BG_NO_ACTIVE_BODY = Object.freeze({ ok: false, code: 'BG_NO_ACTIVE_TURN', error: '这个会话当前没有正在运行的回合' });
+
+// POST /api/chat/background-tasks。先判先回:参数 → 有没有在跑的回合 → 跨会话回合 → 正在停止 → 算目标 → 调 SDK。
+// 只做「前台 → 后台」:从不 interrupt / abort / 关输入,不动 turnEpoch / stopTimer / closing。export 仅为可单测(procs 可注入)。
+export async function handleBackgroundTasksPost(req, res, procs = activeProcesses) {
+  try {
+    const request = validateBackgroundRequest(req.body);
+    if (!request) return res.status(400).json({ ok: false, code: 'BG_INVALID_INPUT', error: '转到后台的请求参数无效' });
+    const hit = findBusySlot(procs, request.sessionId);
+    if (!hit) return res.status(409).json({ ...BG_NO_ACTIVE_BODY });
+    const { slot } = hit;
+    const pid = String(hit.pid);
+    if (isXsBoundTurn(slot)) return res.status(409).json({ ok: false, code: 'BG_XS_TURN', error: '这一轮在处理跨会话消息,不能移到后台' });
+    if (isTurnStopping(slot)) return res.status(409).json({ ok: false, code: 'BG_STOPPING', error: '这一轮正在停止' });
+    const query = slot.query;
+    // 进程还在冷启(query 没建好):不可能有前台任务,按"没东西可转"回
+    if (!query || typeof query.backgroundTasks !== 'function') return res.json({ ok: true, pid, moved: [], pending: [], skipped: [] });
+    let targets;
+    let pending = [];
+    let skipped = [];
+    if (request.toolUseId) {
+      targets = [request.toolUseId];   // 按钮那一路:只转这一条,不套长时限保护(页面已确认过),不产生待移
+    } else {
+      ({ targets, pending, skipped } = planBackgroundTargets(slot.liveTasks, slot.openCalls, slot.turnEpoch | 0));
+    }
+    if (!targets.length) return res.json({ ok: true, pid, moved: [], pending, skipped });
+    const outcomes = await moveTargetsToBackground(query, targets, BG_MOVE_TOTAL_TIMEOUT_MS);
+    const moved = outcomes.filter((o) => o.state === 'ok' && o.moved).map((o) => o.id);
+    const now = Date.now();
+    for (const id of moved) {
+      for (const t of (slot.liveTasks instanceof Map ? slot.liveTasks.values() : [])) if (t && t.toolUseId === id) markBackgrounded(t, now);
+    }
+    if (outcomes.some((o) => o.state === 'timeout')) {
+      return res.status(504).json({ ok: false, code: 'BG_TIMEOUT', error: '5 秒内没有收到命令行确认,结果未知', moved, pending, skipped });
+    }
+    const failed = outcomes.find((o) => o.state === 'error');
+    if (failed) {
+      const after = findBusySlot(procs, request.sessionId);
+      const closedMsg = /Query closed/i.test(String(failed.error?.message || ''));
+      if (closedMsg || !after || after.slot !== slot) return res.status(409).json({ ...BG_NO_ACTIVE_BODY });
+      const said = String(failed.error?.message || failed.error || '').slice(0, 200);
+      return res.status(409).json({ ok: false, code: 'BG_REJECTED', error: `命令行拒绝转到后台:${said}`, moved, pending, skipped });
+    }
+    return res.json({ ok: true, pid, moved, pending, skipped });
+  } catch (e) {
+    console.warn('[bg] 转到后台处理异常:', e?.message || e);
+    if (!res.headersSent) {
+      try { res.status(500).json({ ok: false, code: 'BG_INTERNAL', error: '转到后台处理异常,结果未知' }); } catch { /* 连接已断 */ }
+    }
+  }
+}
+router.post('/chat/background-tasks', (req, res) => handleBackgroundTasksPost(req, res));
 
 // 并入时判断「能不能看图」用的模型:请求里带了就用它,否则用这个会话正在跑的进程的模型;都没有交给
 // upstreamNoVision 用中转站当前的默认模型。
