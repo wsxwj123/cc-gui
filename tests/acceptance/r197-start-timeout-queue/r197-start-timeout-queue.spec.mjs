@@ -137,7 +137,7 @@ test('G2 [复现] 放开命令行后:回复显示在会话里、这一轮结束�
   expect(rec.max, 'G2:全程页面上超时那句话同时出现的次数最大值应为 1').toBe(1);
 });
 
-test('G3 [复现] 同一会话连做 3 轮(G1+G2):每一轮都满足 G1、G2,上一轮的命令行进程还在', async ({ page }) => {
+test('G3 [复现] 同一会话连做 3 轮(G1+G2):每一轮重新拉起命令行进程并初始化超时,每一轮都满足 G1、G2', async ({ page }) => {
   test.setTimeout(480_000);
   const A = S(2);
   await openSessionBySearch(page, A.mark);
@@ -147,7 +147,14 @@ test('G3 [复现] 同一会话连做 3 轮(G1+G2):每一轮都满足 G1、G2,上
     const t1 = msg(`G3r${i + 1}`, 'T1'); const t2 = msg(`G3r${i + 1}`, 'T2');
     resetTurnFiles(CTL, A.sid);
     holdOnce(CTL, A.sid);
-    if (i > 0) expect(pidAlive(runPid(CTL, A.sid)), `${label}上一轮留下的命令行进程应还活着(用例前提)`).toBe(true);
+    // 主会话修订(2026-11-18):会话的命令行进程还常驻着时,后端把新消息直接交给它、立刻回 200,不走初始化等待,
+    // 不可能出现初始化超时。所以每轮开始前先结束上一轮留下的进程,让这一轮重新拉起、被按住、超时(超时后这一轮的进程还在)。
+    if (i > 0) {
+      const prev = runPid(CTL, A.sid);
+      if (prev && pidAlive(prev)) { try { process.kill(Number(prev), 'SIGTERM'); } catch { /* 已经不在 */ } }
+      await until(() => !(prev && pidAlive(prev)), { timeout: 10_000, message: `${label}上一轮留下的命令行进程应已结束` });
+      await page.waitForTimeout(2_000);
+    }
     // 主会话修订(2026-11-18):超时提示和其它报错一样留在对话里,同一会话前几轮的会留着;按「这一轮开始前的条数 + 1」核对。
     const want = (await phraseCount(page)) + 1;
     await sendHeldTurn(page, chat, t1, t2);
