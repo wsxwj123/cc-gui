@@ -3,9 +3,9 @@ import { readdir, stat, lstat, readFile, realpath, writeFile, rm, unlink } from 
 import { createReadStream, watch as fsWatch } from 'fs';
 import { broadcast } from '../broadcast.js';
 import { join, resolve, relative, extname, isAbsolute } from 'path';
-import { homedir, platform, tmpdir } from 'os';
+import { homedir, platform } from 'os';
 import { execFile } from 'child_process';
-import { isPathInside, isKnownClaudeWorkspace } from '../utils/safe-path.js';
+import { isPathInside, isKnownClaudeWorkspace, isInsideUploadDir } from '../utils/safe-path.js';
 import { rawResponseSecurityHeaders } from '../utils/raw-response-headers.js';
 
 const router = Router();
@@ -61,14 +61,9 @@ const SKIP_EXACT = new Set(['.DS_Store']);
 // 只能回退到 raw 原图入口,于是真实拖进来的图刷新后永久「图片不可用」(只剩 name/path)。
 // 这里只放行【这一个本服务自己写的目录】,不是整个 tmpdir;/tmp/cgui-r08-outside-* 之类
 // 仍然 403。匹配用 realpath 后的 real(见下),目录里预埋的 symlink 指向外面照样被拒。
-const UPLOAD_DIR = join(tmpdir(), 'cgui-attachments');
-// 懒解析 + 不复用失败:macOS /var 是 /private/var 的符号链接,两种形态都要认。
-let uploadDirReal = null;
-async function isInsideUploadDir(real) {
-  if (isPathInside(real, UPLOAD_DIR)) return true;
-  if (!uploadDirReal) uploadDirReal = await realpath(UPLOAD_DIR).catch(() => null);
-  return !!uploadDirReal && isPathInside(real, uploadDirReal);
-}
+// r193:判定挪到 utils/safe-path.js 的 isInsideUploadDir:先和上传目录原写法比,不中再和它的
+// 真实路径比(macOS /var → /private/var、Windows 短名),按 path.relative 比较。发送时读图
+// (utils/image-attach-inline.js)另有一套先按字面判断的流程,不调用这个函数。
 
 /**
  * Resolve+validate a user-provided path. Must be ABSOLUTE and resolve

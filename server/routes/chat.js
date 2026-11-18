@@ -29,7 +29,9 @@ import { cliSupportsFlag, cliSupportsSnapshotFlag, snapshotFlagOn, primeHelpCach
 import {
   autoModeServerInjection, autoModeModelInjection, gateAutoPermissionMode, thirdPartyAutoPreToolUse, thirdPartyAutoAskOutput, thirdPartyAutoMustPrompt,
 } from '../services/auto-audit.js';
-import { readKeepAliveIdleSync, readStallTimeoutSync, readThirdPartyAutoSync } from './prefs.js';
+import { readKeepAliveIdleSync, readStallTimeoutSync, readThirdPartyAutoSync, readImageInlineSync } from './prefs.js';
+import { inlineImageAttachments, imageInlineAllowed, promptHasImageCandidates, IMAGE_INLINE_ERROR } from '../utils/image-attach-inline.js';
+import { upstreamNoVision } from '../services/openai-proxy.js';
 
 // T2: 回合完成 WS 通知。前端切走会话时 SSE fetch 已被 abort(I4 渲染隔离的
 // 切会话 effect),完成信号唯一可靠的来源是服务端。每次收尾(给流发 done、会话转空闲)
@@ -2325,6 +2327,44 @@ export function isSelfAbortError(err, signal) {
 // 单一定义:spawn、切档热切、r151g 消息档位覆盖三处共用,别各写一套。
 const sdkModeForGuiMode = (guiMode) => (guiMode === 'plan' ? 'plan' : guiMode === 'auto' ? 'auto' : 'default');
 
+// r193:交给命令行之前,把附件段里上传目录内的图片读成图片块(server/utils/image-attach-inline.js)。
+// 分两步,让不读图的消息不多出任何等待(调用处只在 plan.read 为真时才 await 读图,否则直接用 plan):
+//   planTurnContent —— 同步判断要不要读图。顺序:不是斜杠命令且附件段里有图片候选(都不成立时连偏好文件都不读)
+//     → CGUI_IMAGE_INLINE=0 / 设置开关 / 模型能不能看图(imageInlineAllowed)。不读图 → 原字符串、没有 imageAttach;
+//   readTurnImages —— 真正读图组装;出错退回原字符串。
+// 结果 { content, imageAttachFields }:content 只用于写进命令行标准输入;imageAttachFields 展开进成功应答
+// (没有 imageAttach 时是 {},应答与改动前相同)。日志只记错误标记,不带路径与图片数据。
+// getModel 是函数:只有前面几层都通过、要查能不能看图时才求值。
+export function planTurnContent(prompt, getModel, { envValue = process.env.CGUI_IMAGE_INLINE, readPref = readImageInlineSync, noVision = upstreamNoVision } = {}) {
+  const text = String(prompt);
+  const passthrough = { read: false, text, content: text, imageAttachFields: {} };
+  try {
+    if (!promptHasImageCandidates(text)) return passthrough;
+    const allowed = imageInlineAllowed({ envValue, readPref, noVision: () => noVision(getModel()) });
+    return allowed ? { read: true, text } : passthrough;
+  } catch {
+    console.warn(`[image-inline] 读图判断失败,按原文发送(${IMAGE_INLINE_ERROR})`);
+    return passthrough;
+  }
+}
+
+async function readTurnImages(text) {
+  try {
+    const out = await inlineImageAttachments(text);
+    if (out.error) {
+      console.warn(`[image-inline] 读图失败,按原文发送(${out.error})`);
+      return { content: text, imageAttachFields: {} };
+    }
+    return {
+      content: Array.isArray(out.content) ? out.content : text,
+      imageAttachFields: out.imageAttach ? { imageAttach: out.imageAttach } : {},
+    };
+  } catch {
+    console.warn(`[image-inline] 读图失败,按原文发送(${IMAGE_INLINE_ERROR})`);
+    return { content: text, imageAttachFields: {} };
+  }
+}
+
 // POST /api/chat 主流程(原 handler 原样下移;所有锁定行为的时序不变)。
 async function handleChatPost(req, res) {
   // R13 输入闸门:非法输入一律 {ok:false,code,error} 且【不起任何 CLI、不回 pid】。
@@ -2447,6 +2487,11 @@ async function handleChatPost(req, res) {
   const turnPrompt = entry ? entry.prompt : prompt;
   const turnTag = entry ? entry.tag : undefined;
   const turnPreview = entry ? REWRITTEN_TURN_PREVIEW : String(prompt).slice(0, 80);
+  // r193:改写只影响写进命令行标准输入的内容;校验、指纹、预览、日志仍用原字符串。读文件是异步的,
+  // 放在入口钩子之后、下面那道占位复查之前(复查兜住这段 await 期间新出现的占位),之后的复用 / 冷启同步段不再等它。
+  // 不读图(绝大多数消息)时不 await:执行顺序与改动前相同,不多一个让出点。
+  const turnPlan = planTurnContent(turnPrompt, () => model);
+  const { content: turnContent, imageAttachFields } = turnPlan.read ? await readTurnImages(turnPlan.text) : turnPlan;
   if (entry && turnRecord) {
     // 记下本请求的应答(只有改写过的回合才记;见上方命中处)
     const sendJson = res.json.bind(res);
@@ -2709,12 +2754,12 @@ async function handleChatPost(req, res) {
           s.userWaitedDuringTurn = !!internal && userWaitingOnSession(sessionId);
           if (!internal) clearUserWaiting(sessionId);
           notifyTurnStart(s, alivePid, true, turnTag, undefined, turnParams); // r151b:回合开始(没挂接 = 跳过)
-          s.input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
+          s.input.push({ type: 'user', message: { role: 'user', content: turnContent } });
           // R13:复用同一进程开新回合 —— 记录绑到本回合的 turnEpoch 上(旧回合的记录早已
           // 在它自己的收尾点结算,pid→record 的映射换成这一回合,停止才不会停错回合)。
           if (turnRecord) bindTurnRecord(turnRecord, alivePid, s);
           if (turnRecord && autoGate.downgraded) turnRecord.permissionModeDowngraded = autoGate.downgraded;
-          res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running', ...downgradeFields, ...(configDeferred ? { configDeferred: true } : {}) });
+          res.json({ ok: true, pid: alivePid, model: s.model, reused: true, runId: alivePid, delivered: true, status: 'running', ...downgradeFields, ...(configDeferred ? { configDeferred: true } : {}), ...imageAttachFields });
           return 'handled';
         });
       } finally {
@@ -2950,7 +2995,7 @@ async function handleChatPost(req, res) {
   notifyTurnStart(slot, procId, false, turnTag, req, turnParams); // r151b:回合开始(没挂接 = 跳过)
 
   // 首条用户消息(streaming-input);保持 input 打开作 control 通道。
-  input.push({ type: 'user', message: { role: 'user', content: String(turnPrompt) } });
+  input.push({ type: 'user', message: { role: 'user', content: turnContent } });
 
   const appendText = composeAppendSystemPrompt(appendSystemPrompt);
   const fullAppend = composeGenuiAppend(appendText, genui);
@@ -3510,7 +3555,7 @@ async function handleChatPost(req, res) {
   // R13:连同运行身份与送达状态一起回 —— 客户端据此对账"这次 prompt 到底送出去了没有",
   // 响应丢失时用同一 clientTurnId 重发即可拿回同一个 pid(命中分支),不必新造 id 再发。
   if (turnRecord && autoGate.downgraded) turnRecord.permissionModeDowngraded = autoGate.downgraded;
-  res.json({ ok: true, pid: procId, model, runId: procId, delivered: true, status: 'running', ...downgradeFields });
+  res.json({ ok: true, pid: procId, model, runId: procId, delivered: true, status: 'running', ...downgradeFields, ...imageAttachFields });
 }
 
 
@@ -3914,7 +3959,8 @@ export function acceptSteer(procs, request) {
   }
   const msg = {
     type: 'user',
-    message: { role: 'user', content: request.content },
+    // r193:pushContent 是改写后的内容(带图片块的数组);回执仍按原字符串 request.content 记与比对。
+    message: { role: 'user', content: request.pushContent ?? request.content },
     parent_tool_use_id: null,
     // ⑤不传 priority(见 findBusySlot 上方注释):实测默认档即"同回合工具边界折叠"。
     uuid: request.uuid,
@@ -3933,14 +3979,42 @@ export function acceptSteer(procs, request) {
 
 // 独立路由(照 /chat/permission-mode 形态:按 sessionId 找 slot → 直接对 slot 动作),
 // 完全绕开 POST /chat 的复用块与 tearingDown 等待/强杀段 —— 那两段一个字不动。
-router.post('/chat/steer', (req, res) => {
-  const request = validateSteerRequest(req.body);
-  if (!request) {
-    return res.status(400).json({ ok: false, code: 'invalid-steer-request', error: '并入请求参数无效' });
+// r193:要读图时改成「先校验,再读图组装,组装完之后才由 acceptSteer 现场判断回合还忙不忙并推进」
+// (等待期间回合结束了就照常回 409,页面按现有逻辑转入待发)。不读图时不 await,与改动前一样同步走完。
+// 回执比对仍用原字符串。
+// 处理器是 async:意外异常不再由框架回 500,而会变成没人处理的拒绝、请求悬着。整体兜底 ——
+// 还没发出应答就回与 acceptSteer 推送失败时相同的 500(页面按「结果不明」处理,用同一标识重试、回执去重)。
+// export 仅为可单测(procs 可注入)。
+export async function handleSteerPost(req, res, procs = activeProcesses) {
+  try {
+    const request = validateSteerRequest(req.body);
+    if (!request) {
+      return res.status(400).json({ ok: false, code: 'invalid-steer-request', error: '并入请求参数无效' });
+    }
+    const plan = planTurnContent(request.content, () => steerModelFor(req.body, request.sessionId, procs));
+    const { content, imageAttachFields } = plan.read ? await readTurnImages(plan.text) : plan;
+    const result = acceptSteer(procs, { ...request, pushContent: content });
+    res.status(result.status).json(result.status === 200 ? { ...result.body, ...imageAttachFields } : result.body);
+  } catch {
+    console.warn('[steer] 并入处理异常,回结果不明');
+    if (!res.headersSent) {
+      try {
+        res.status(500).json({ ok: false, code: 'steer-acceptance-unknown', error: '并入结果无法确认' });
+      } catch { /* 连应答都写不出(连接已断)—— 没有别的可做 */ }
+    }
   }
-  const result = acceptSteer(activeProcesses, request);
-  res.status(result.status).json(result.body);
-});
+}
+router.post('/chat/steer', (req, res) => handleSteerPost(req, res));
+
+// 并入时判断「能不能看图」用的模型:请求里带了就用它,否则用这个会话正在跑的进程的模型;都没有交给
+// upstreamNoVision 用中转站当前的默认模型。
+function steerModelFor(body, sessionId, procs) {
+  if (typeof body?.model === 'string' && body.model.trim()) return body.model;
+  for (const slot of procs.values()) {
+    if (slot?.sessionId === sessionId && slot.model) return slot.model;
+  }
+  return undefined;
+}
 
 
 // ── SSE 接管协议(修「关窗格后重开会话历史空」)────────────────────────────────

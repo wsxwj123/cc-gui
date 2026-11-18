@@ -142,7 +142,8 @@ import { aggregateHistoryCost, computeCostForMessage, displayUsd, formatCost, se
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, createQueueId } from './utils/steerQueue.js';
-import { leaveSessionNotice, mergeDraftText, takeSessionNotice } from './utils/sessionNotice.js';
+import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';
+import { imageAttachNoticeText } from './utils/imageAttachNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
 import { localTurnTakenOver, makeTurnIdentityIndex } from './utils/turnIdentity.js';   // r141 渲染期身份闸门
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
@@ -4654,6 +4655,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     window.addEventListener('cgui:session-notice', onNotice);
     return () => window.removeEventListener('cgui:session-notice', onNotice);
   }, [sessionQueueKey]);
+  // r193:发送 / 并入的应答带 imageAttach 时,按 utils/imageAttachNotice.js 得出提示句,只给 ownerKey 那个会话:
+  // 窗格还在它上面就显示(与已有的同会话提示接在一起,不顶掉),已切走就留言、切回时显示。
+  const showImageAttachNotice = useCallback((ownerKey, imageAttach) => {
+    const text = imageAttachNoticeText(imageAttach);
+    if (!text || !ownerKey) return;
+    if (paneStillOn(ownerKey)) {
+      setProviderSwitchNotice((cur) => (cur && cur.ownerKey === ownerKey && cur.text && !cur.text.includes(text)
+        ? { ...cur, text: `${cur.text} ${text}`, ...(cur.sticky ? {} : { ttlMs: CONFIG_DEFERRED_NOTICE_MS }) }
+        : { text, ownerKey, ttlMs: CONFIG_DEFERRED_NOTICE_MS }));
+    } else {
+      const prev = takeSessionNotice(ownerKey);
+      leaveSessionNotice(ownerKey, prev ? `${prev} ${text}` : text);
+    }
+  }, [paneStillOn]);
   const reportAttachmentSidecarResult = useCallback((result) => {
     const text = attachmentSidecarNotice(result);
     if (text) setProviderSwitchNotice({ text });
@@ -5398,6 +5413,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             payload: { messageId: steerId, text: body, attachments: meta.attachments, displayText: meta.displayText || '' },
           }).then(reportAttachmentSidecarResult);
         }
+        // r193:并入的这条有没能带上的图 → 提示给这条并入所在的会话(真会话的键就是 sessionId)。
+        showImageAttachNotice(sessionId, response.imageAttach);
         return { outcome: 'accepted', pid: response.pid, duplicate: response.duplicate === true };
       }
       const explicit = (r.status === 400 && ['invalid-steer-request', 'malformed-json'].includes(response?.code))
@@ -5405,7 +5422,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         || (r.status === 413 && response?.code === 'request-too-large');
       return { outcome: explicit ? 'explicit-reject' : 'ambiguous', code: response?.code };
     } catch { return { outcome: 'ambiguous' }; }
-  }, [reportAttachmentSidecarResult]);
+  }, [reportAttachmentSidecarResult, showImageAttachNotice]);
   const steerCurrentTurnRef = useRef(null);
   useEffect(() => { steerCurrentTurnRef.current = steerCurrentTurn; }, [steerCurrentTurn]);
 
@@ -6118,6 +6135,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         if (paneStillOn(sessionQueueKey)) setProviderSwitchNotice({ text: CONFIG_DEFERRED_NOTICE, ownerKey: sessionQueueKey, ttlMs: CONFIG_DEFERRED_NOTICE_MS });
         else leaveSessionNotice(sessionQueueKey, CONFIG_DEFERRED_NOTICE);
       }
+      // r193:应答里的 imageAttach 有没能带上的图 → 给发送时那个会话一句提示(不进会话记录)。
+      // 与上面那句同一次出现时接在它后面,不顶掉它。
+      showImageAttachNotice(sessionQueueKey, respJson.imageAttach);
       // r140(C1 步骤③)孤儿流复判:本 pane 在 POST 窗口里已经切走 ⇒ 这条流不属于本窗格了。
       // 从这里直接 return,一并跳过下面五处认领:pid / activeProcRef(否则在 B 按停止会停到 A)、
       // activeProcOwnerRef、liveChatPid(否则 B 的 ⚡ 误报可点)、streamingModel(否则 B 的流式气泡
@@ -6480,6 +6500,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 setChatMessages((prev) => (prev.some((m) => m.ownerKey === _dk0)
                   ? prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))
                   : prev));
+                // r193 F1:提示条按所属会话同批改挂(如首条消息「有 N 张图没能带上」),否则会话键换成真 sid
+                // 后渲染层按 ownerKey 对不上把它藏掉。只看 ownerKey;无所属 / 属于别的会话的原样不动。
+                setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _dk0, event.session_id));
                 try {
                   const _dv = localStorage.getItem(`cgui-draft:${_dk0}`);
                   if (_dv) { localStorage.setItem(`cgui-draft:${event.session_id}`, _dv); localStorage.removeItem(`cgui-draft:${_dk0}`); }
@@ -6512,6 +6535,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 const _next = migrateDraftQueue(useStore.getState().messageQueue, _dk, event.session_id);
                 if (_next) useStore.setState({ messageQueue: _next });
               } catch {}
+              // r193 F1:窗格已切走时留给草稿键的留言(leaveSessionNotice)改挂到真 sid,切回这个会话时取得到;
+              // 切走前挂在本窗格、所属草稿键的提示条同样改挂(selIsOrigin=true 时上面已改挂,这里 no-op)。
+              {
+                const _nk = queueKeyFor(selectedSession);
+                migrateSessionNotice(_nk, event.session_id);
+                if (!selIsOrigin) setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _nk, event.session_id));
+              }
               // 输入历史同迁(用户已切走时 selIsOrigin=false,上面 origin 块不执行,在此兜底):
               // draft 期历史存旧键,不迁则首条历史滞留旧键且污染该项目下一个 draft。取发起时闭包
               // selectedSession(sel 是当前选中,用户已切走时会错迁别的项目)。selIsOrigin=true 时旧键已删,此处幂等 no-op。
@@ -8313,7 +8343,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         if (isCurrentTurn()) setStreamRunId(null);
       }
     }
-  }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw, reportAttachmentSidecarResult]);
+  }, [selectedSession, selectedProject, streamingModel, isStreaming, sessionQueueKey, sendBtw, reportAttachmentSidecarResult, showImageAttachNotice]);
 
   // Ref to handleSend so the finally-block drain doesn't form a circular closure dep.
   const handleSendRef = useRef(null);

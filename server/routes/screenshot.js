@@ -3,8 +3,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { mkdir, stat, readFile, unlink, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
+import { UPLOAD_DIR } from '../utils/safe-path.js';
 
 const router = Router();
 const execFileP = promisify(execFile);
@@ -12,7 +12,7 @@ const execFileP = promisify(execFile);
 // F1 截图热键:落图到 cgui-attachments/(与 upload.js 同目录,复用其 7 天清理),
 // 返回和 /api/upload 一致的附件形状 { path, kind:'image', bytes, preview },前端直接进
 // ChatInput 的附件卡片链路。preview 是内联 base64 dataUrl,免前端再回读一次文件。
-const SHOT_DIR = join(tmpdir(), 'cgui-attachments');
+const SHOT_DIR = UPLOAD_DIR; // 上传目录只在 utils/safe-path.js 定义一处(r193)
 
 // mac 交互式截图:screencapture -i 弹十字选区/点窗口。用户按 Esc 取消 → 进程退出 0 但不写文件,
 // 据「文件是否存在」判取消(非报错)。

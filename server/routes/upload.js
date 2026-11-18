@@ -3,8 +3,8 @@ import { writeFile, mkdir, readdir, stat, unlink } from 'fs/promises';
 import { createWriteStream, existsSync } from 'fs';
 import { pipeline } from 'stream/promises';
 import { dirname, extname, join, resolve } from 'path';
-import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
+import { UPLOAD_DIR } from '../utils/safe-path.js';
 
 const router = Router();
 
@@ -13,7 +13,7 @@ const router = Router();
 const UPLOAD_TTL_MS = 7 * 24 * 3600 * 1000;
 async function sweepOldUploads() {
   try {
-    const dir = join(tmpdir(), 'cgui-attachments');
+    const dir = UPLOAD_DIR;
     const files = await readdir(dir);
     const now = Date.now();
     for (const f of files) {
@@ -83,7 +83,8 @@ function resolveUploadType(mime, name) {
 
 // Per-process upload root. tmpdir() is /tmp on macOS — Claude CLI can read it
 // (project cwd is unrelated; absolute paths in prompts work fine).
-const UPLOAD_DIR = join(tmpdir(), 'cgui-attachments');
+// UPLOAD_DIR 从 utils/safe-path.js 引用,只留那一处定义(r193):上传接口返回的路径要和
+// 发送时读图、/api/files/raw 判定用的上传目录逐字同一个写法。
 
 /**
  * POST /api/upload

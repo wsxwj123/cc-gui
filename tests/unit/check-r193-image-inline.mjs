@@ -1,0 +1,516 @@
+// r193 第 2 步:把上传目录里的图片读成图片块的改写模块 + 共用的上传目录判定。
+// 真实读写系统临时目录下自建的目录;Windows 那组用注入的 path.win32 与假的真实路径函数。
+// 运行:node tests/unit/check-r193-image-inline.mjs
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, writeFile, symlink, chmod, rm, rmdir, realpath, open as fsOpen } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path, { join } from 'node:path';
+import { deflateSync, crc32 as zlibCrc32 } from 'node:zlib';
+import { randomBytes } from 'node:crypto';
+import {
+  inlineImageAttachments, isImageCandidatePath, sniffImageMediaType, imageStructureOk,
+  promptHasImageCandidates, isSlashCommandPrompt,
+  IMAGE_INLINE_ERROR, IMAGE_INLINE_MAX_BYTES, IMAGE_INLINE_MAX_IMAGES, IMAGE_INLINE_MAX_TOTAL_BYTES,
+} from '../../server/utils/image-attach-inline.js';
+import { isInsideUploadDir, isPathInsideWith, UPLOAD_DIR } from '../../server/utils/safe-path.js';
+import { formatAttachmentPrompt } from '../../server/utils/attachment-prompt-format.js';
+
+let count = 0;
+const pending = [];
+const check = (name, fn) => pending.push([name, fn]);
+
+// ---- 夹具:自建临时目录(lexical 是 /var/...,真实路径是 /private/var/...)----
+const root = await mkdtemp(join(tmpdir(), 'cgui-r193-inline-'));
+const rootReal = await realpath(root);
+const up = join(root, 'cgui-attachments'); // 上传目录(字面写法)
+const upReal = join(rootReal, 'cgui-attachments'); // 上传目录(真实路径)
+const outsideDir = join(root, 'outside');
+const upLink = join(root, 'up-link'); // 指向上传目录的符号链接
+await mkdir(up);
+await mkdir(outsideDir);
+await symlink(upReal, upLink);
+
+function pngChunk(type, data) {
+  const head = Buffer.alloc(8);
+  head.writeUInt32BE(data.length, 0);
+  head.write(type, 4, 'latin1');
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(zlibCrc32(Buffer.concat([Buffer.from(type, 'latin1'), data])) >>> 0, 0);
+  return Buffer.concat([head, data, crc]);
+}
+function makePng(width = 1, height = 1, random = false) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 2; // 8 位 RGB
+  const rows = [];
+  for (let y = 0; y < height; y += 1) rows.push(Buffer.from([0]), random ? randomBytes(width * 3) : Buffer.alloc(width * 3, 0x7f));
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+    pngChunk('IHDR', ihdr), pngChunk('IDAT', deflateSync(Buffer.concat(rows))), pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+// GIF / WebP 用公开的 1×1 最小文件;JPEG 只造结构检查要走的段:SOI、APP0、SOS、扫描数据、EOI(不解码像素)。
+const GIF = Buffer.from('R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==', 'base64');
+const WEBP = Buffer.from('UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==', 'base64');
+const JPEG_HEAD = Buffer.concat([
+  Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]), Buffer.from('JFIF\0', 'latin1'),
+  Buffer.from([1, 1, 0, 0, 1, 0, 1, 0, 0]),
+]);
+const JPEG_SOS = Buffer.from([0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+const JPEG = Buffer.concat([JPEG_HEAD, JPEG_SOS, Buffer.alloc(40, 0x5A), Buffer.from([0xFF, 0xD9])]);
+const PNG = makePng(4, 3, true);
+
+async function put(dir, name, data) { const p = join(dir, name); await writeFile(p, data); return p; }
+const promptWith = (paths, text = '看图') => formatAttachmentPrompt(text, paths);
+const opts = (extra = {}) => ({ uploadDir: up, ...extra });
+const assertNoDir = (value) => {
+  const json = JSON.stringify(value);
+  for (const dir of [root, rootReal, up, upReal, outsideDir, upLink]) assert.ok(!json.includes(dir), `不含目录 ${dir}`);
+};
+
+// ---- 候选分类 ----
+check('候选分类:图片扩展名(不区分大小写)/ 文档类', () => {
+  for (const p of ['/a/x.png', '/a/x.PNG', '/a/x.jpeg', '/a/x.JPG', '/a/x.gif', '/a/x.webp', '/a/x.heic',
+    '/a/x.heif', '/a/x.bmp', '/a/x.tif', '/a/x.tiff', '/a/x.avif', 'C:\\a b\\x.Png']) {
+    assert.equal(isImageCandidatePath(p), true, p);
+  }
+  for (const p of ['/a/x.txt', '/a/x.pdf', '/a/x.md', '/a/png', '/a/.png', '/a/x.png.txt', '/a/x']) {
+    assert.equal(isImageCandidatePath(p), false, p);
+  }
+});
+
+check('常量:20MB / 20 张', () => {
+  assert.equal(IMAGE_INLINE_MAX_BYTES, 20 * 1024 * 1024);
+  assert.equal(IMAGE_INLINE_MAX_IMAGES, 20);
+});
+
+// ---- 不改写的几种 ----
+check('未启用:原样返回,imageAttach undefined', async () => {
+  const p = await put(up, 'off.png', PNG);
+  const prompt = promptWith([p]);
+  const r = await inlineImageAttachments(prompt, opts({ enabled: false }));
+  assert.equal(r.content, prompt);
+  assert.equal(r.imageAttach, undefined);
+  assert.ok(!('error' in r));
+});
+
+check('没有附件段 / 不是字符串:原样返回', async () => {
+  const r = await inlineImageAttachments('只是文字\n\n附件:\n普通行', opts());
+  assert.deepEqual(r, { content: '只是文字\n\n附件:\n普通行', imageAttach: undefined });
+  const arr = [{ type: 'text', text: 'x' }];
+  assert.equal((await inlineImageAttachments(arr, opts())).content, arr);
+});
+
+check('只有文档类附件:原样返回,imageAttach undefined,不读文件', async () => {
+  const txt = await put(up, 'note.txt', 'hello');
+  const prompt = promptWith([txt, '/elsewhere/report.pdf']);
+  let opened = 0;
+  const fsImpl = { open: (...a) => { opened += 1; return fsOpen(...a); } };
+  const r = await inlineImageAttachments(prompt, opts({ fsImpl }));
+  assert.deepEqual(r, { content: prompt, imageAttach: undefined });
+  assert.equal(opened, 0);
+});
+
+check('promptHasImageCandidates:同步判断有没有要读的图(不碰文件)', () => {
+  assert.equal(promptHasImageCandidates(promptWith(['/u/a.png'])), true);
+  assert.equal(promptHasImageCandidates(promptWith(['/u/a.txt', '/u/b.PDF'])), false, '只有文档类');
+  assert.equal(promptHasImageCandidates('普通消息 /u/a.png'), false, '没有附件段');
+  assert.equal(promptHasImageCandidates(promptWith(['/u/a.png'], '/skill 看图')), false, '斜杠命令');
+  assert.equal(promptHasImageCandidates(promptWith(['/u/a.png'], ' \n\t/cmd')), false, '开头空白后是斜杠命令');
+  assert.equal(promptHasImageCandidates(promptWith(['/u/a.png'], '看 a/b 这张')), true, '正文中间有 /');
+  assert.equal(promptHasImageCandidates([{ type: 'text', text: 'x' }]), false);
+  assert.equal(isSlashCommandPrompt('  /x'), true);
+  assert.equal(isSlashCommandPrompt('x /y'), false);
+});
+
+check('斜杠命令 + 附件段带大图:原字符串、没有 imageAttach、不读文件;正文中间有 / 照常改写', async () => {
+  const big = await put(up, 'slash-big.png', makePng(200, 200, true));
+  let opened = 0;
+  const fsImpl = { open: (...a) => { opened += 1; return fsOpen(...a); } };
+  for (const text of ['/skill 看这张', '  /skill 看这张', '\n\n/cmd']) {
+    const prompt = promptWith([big], text);
+    const r = await inlineImageAttachments(prompt, opts({ fsImpl }));
+    assert.deepEqual(r, { content: prompt, imageAttach: undefined }, JSON.stringify(text));
+  }
+  assert.equal(opened, 0, '斜杠命令不读文件');
+  const normal = await inlineImageAttachments(promptWith([big], '看 a/b 这张'), opts({ fsImpl }));
+  assert.equal(normal.imageAttach.inlined, 1);
+  assert.equal(opened, 1);
+});
+
+// ---- 四种格式 ----
+check('四种格式各一张:数组写法,文字块逐字相同,媒体类型与 base64 对上', async () => {
+  const files = [
+    [await put(up, 'p.png', PNG), 'image/png', PNG],
+    [await put(up, 'j.jpg', JPEG), 'image/jpeg', JPEG],
+    [await put(up, 'g.gif', GIF), 'image/gif', GIF],
+    [await put(up, 'w.webp', WEBP), 'image/webp', WEBP],
+  ];
+  const prompt = promptWith(files.map((f) => f[0]), '  四张 图 ');
+  const r = await inlineImageAttachments(prompt, opts());
+  assert.ok(Array.isArray(r.content));
+  assert.equal(r.content.length, 5);
+  assert.deepEqual(r.content[0], { type: 'text', text: prompt });
+  files.forEach(([, mediaType, bytes], i) => {
+    assert.deepEqual(r.content[i + 1], { type: 'image', source: { type: 'base64', media_type: mediaType, data: bytes.toString('base64') } });
+  });
+  assert.deepEqual(r.imageAttach, { inlined: 4, skipped: [] });
+  assertNoDir(r.imageAttach);
+});
+
+check('媒体类型以文件头为准(.png 里装的是 JPEG)', async () => {
+  const p = await put(up, 'fake.png', JPEG);
+  const r = await inlineImageAttachments(promptWith([p]), opts());
+  assert.equal(r.content[1].source.media_type, 'image/jpeg');
+});
+
+check('图与文档混合:文字块里文档的路径行还在,只有图片块', async () => {
+  const img = await put(up, 'mix.png', PNG);
+  const txt = await put(up, 'mix.txt', 'doc');
+  const prompt = promptWith([img, txt]);
+  const r = await inlineImageAttachments(prompt, opts());
+  assert.equal(r.content.length, 2);
+  assert.equal(r.content[0].text, prompt);
+  assert.ok(r.content[0].text.includes(`@${txt}`));
+  assert.deepEqual(r.imageAttach, { inlined: 1, skipped: [] });
+});
+
+// ---- 坏图与格式 ----
+check('损坏:PNG 文件头完好后面乱码 / 截断;JPEG 截断 / 段头改乱 / 段长越界;其他两种结构不对', async () => {
+  const big = makePng(64, 64, true);
+  const garbled = Buffer.concat([big.subarray(0, 64), randomBytes(big.length - 64)]);
+  const badSegHead = Buffer.from(JPEG); badSegHead[JPEG_HEAD.length] = 0x12; // SOS 段头的 FF 被改掉
+  const badSegLen = Buffer.from(JPEG); badSegLen.writeUInt16BE(0xFFF0, 4); // APP0 段长越过文件尾
+  const cases = [
+    ['garbled.png', garbled],
+    ['trunc.png', PNG.subarray(0, PNG.length - 5)],
+    ['trunc.jpg', JPEG.subarray(0, JPEG.length - 1)],
+    ['seghead.jpg', badSegHead],
+    ['seglen.jpg', badSegLen],
+    ['nosos.jpg', Buffer.concat([JPEG_HEAD, Buffer.from([0xFF, 0xD9])])],
+    ['trunc.gif', GIF.subarray(0, GIF.length - 1)],
+    ['bad.webp', Buffer.concat([WEBP, Buffer.from([0, 0])])],
+  ];
+  const paths = [];
+  for (const [name, data] of cases) paths.push(await put(up, name, data));
+  const prompt = promptWith(paths);
+  const r = await inlineImageAttachments(prompt, opts());
+  assert.equal(r.content, prompt, '没有能带的图 → 原字符串');
+  assert.deepEqual(r.imageAttach, { inlined: 0, skipped: cases.map(([name]) => ({ name, reason: 'damaged' })) });
+  // 模块自己的 CRC 与 zlib.crc32 交叉验证:好图过、改一个字节不过
+  assert.equal(imageStructureOk(PNG, 'image/png'), true);
+  const flipped = Buffer.from(PNG); flipped[20] ^= 1;
+  assert.equal(imageStructureOk(flipped, 'image/png'), false);
+});
+
+check('放宽:结束标记后带尾随数据的 JPEG / PNG、带填充字节的 WebP、段前填充 FF 的 JPEG 都通过', async () => {
+  const webpPadded = Buffer.from(WEBP);
+  webpPadded.writeUInt32LE(webpPadded.readUInt32LE(4) - 1, 4); // 记的长度比实际少 1 = 奇数长度的填充字节
+  const fillFf = Buffer.concat([JPEG.subarray(0, 2), Buffer.from([0xFF]), JPEG.subarray(2)]);
+  const cases = [
+    ['tail.png', Buffer.concat([PNG, Buffer.from('trailing-data')]), 'image/png'],
+    ['tail.jpg', Buffer.concat([JPEG, Buffer.from('Exif-like trailer \xff\xd8 more', 'latin1')]), 'image/jpeg'],
+    ['pad.webp', webpPadded, 'image/webp'],
+    ['fill.jpg', fillFf, 'image/jpeg'],
+  ];
+  const paths = [];
+  for (const [name, data] of cases) paths.push(await put(up, name, data));
+  const r = await inlineImageAttachments(promptWith(paths), opts());
+  assert.deepEqual(r.imageAttach, { inlined: cases.length, skipped: [] });
+  cases.forEach(([, data, mediaType], i) => {
+    assert.equal(r.content[i + 1].source.media_type, mediaType);
+    assert.equal(r.content[i + 1].source.data, data.toString('base64'));
+  });
+  // 少 2 个字节仍不行(只容一个填充字节)
+  const webpShort = Buffer.from(WEBP); webpShort.writeUInt32LE(webpShort.readUInt32LE(4) - 2, 4);
+  assert.equal(imageStructureOk(webpShort, 'image/webp'), false);
+});
+
+check('heic / 认不出的内容 / 空文件 → unsupported', async () => {
+  const heic = await put(up, 'photo.heic', Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypheic', 'latin1'), randomBytes(300)]));
+  const textAsPng = await put(up, 'text.png', 'not an image at all');
+  const empty = await put(up, 'empty.png', Buffer.alloc(0));
+  const r = await inlineImageAttachments(promptWith([heic, textAsPng, empty]), opts());
+  assert.deepEqual(r.imageAttach.skipped, [
+    { name: 'photo.heic', reason: 'unsupported' }, { name: 'text.png', reason: 'unsupported' }, { name: 'empty.png', reason: 'unsupported' },
+  ]);
+  assert.equal(sniffImageMediaType(Buffer.from('GIF89a;', 'latin1')), 'image/gif');
+});
+
+// ---- 上限 ----
+check('超过大小上限(注入小上限):读内容之前拒绝', async () => {
+  const p = await put(up, 'big.png', PNG);
+  let reads = 0;
+  const fsImpl = { open: async (...a) => { const h = await fsOpen(...a); const read = h.read.bind(h); h.read = (...x) => { reads += 1; return read(...x); }; return h; } };
+  const r = await inlineImageAttachments(promptWith([p]), opts({ fsImpl, maxBytes: PNG.length - 1 }));
+  assert.deepEqual(r.imageAttach, { inlined: 0, skipped: [{ name: 'big.png', reason: 'too-large' }] });
+  assert.equal(reads, 0, '超限不读内容');
+  const ok = await inlineImageAttachments(promptWith([p]), opts({ maxBytes: PNG.length }));
+  assert.equal(ok.imageAttach.inlined, 1, '等于上限照带');
+});
+
+check('合计大小上限(注入小上限):超出的那张 too-large 且不读内容,后面放得下的照带', async () => {
+  assert.equal(IMAGE_INLINE_MAX_TOTAL_BYTES, 20 * 1024 * 1024);
+  const small = makePng(1, 1);
+  const a = await put(up, 'sum-a.png', PNG);
+  const b = await put(up, 'sum-b.png', PNG); // a + b 超合计
+  const c = await put(up, 'sum-c.png', small); // a + c 放得下
+  const opened = [];
+  const fsImpl = {
+    open: async (file, flags) => {
+      const h = await fsOpen(file, flags); const read = h.read.bind(h);
+      h.read = (...x) => { opened.push(path.basename(file)); return read(...x); };
+      return h;
+    },
+  };
+  const limit = PNG.length + small.length;
+  const r = await inlineImageAttachments(promptWith([a, b, c]), opts({ fsImpl, maxTotalBytes: limit }));
+  assert.deepEqual(r.imageAttach, { inlined: 2, skipped: [{ name: 'sum-b.png', reason: 'too-large' }] });
+  assert.equal(r.content.length, 3);
+  assert.equal(r.content[2].source.data, small.toString('base64'));
+  assert.ok(!opened.includes('sum-b.png'), '超合计的那张不读内容');
+  // 恰好等于合计上限照带;前面带不上的不占合计
+  const exact = await inlineImageAttachments(promptWith([a, c]), opts({ maxTotalBytes: limit }));
+  assert.equal(exact.imageAttach.inlined, 2);
+  const gone = join(up, 'sum-gone.png');
+  const r2 = await inlineImageAttachments(promptWith([gone, a]), opts({ maxTotalBytes: PNG.length }));
+  assert.deepEqual(r2.imageAttach, { inlined: 1, skipped: [{ name: 'sum-gone.png', reason: 'missing' }] });
+});
+
+check('超过张数上限(注入小上限):前 N 张照带,其余 too-many', async () => {
+  const paths = [];
+  for (let i = 0; i < 4; i += 1) paths.push(await put(up, `n${i}.png`, PNG));
+  const r = await inlineImageAttachments(promptWith(paths), opts({ maxImages: 2 }));
+  assert.equal(r.content.length, 3);
+  assert.deepEqual(r.imageAttach, { inlined: 2, skipped: [{ name: 'n2.png', reason: 'too-many' }, { name: 'n3.png', reason: 'too-many' }] });
+});
+
+// ---- 缺文件、目录、读不了 ----
+check('缺文件 → missing;两张删一张时带 1 张', async () => {
+  const keep = await put(up, 'keep.png', PNG);
+  const gone = join(up, 'gone.png');
+  const r1 = await inlineImageAttachments(promptWith([gone]), opts());
+  assert.equal(typeof r1.content, 'string');
+  assert.deepEqual(r1.imageAttach, { inlined: 0, skipped: [{ name: 'gone.png', reason: 'missing' }] });
+  const r2 = await inlineImageAttachments(promptWith([keep, gone]), opts());
+  assert.equal(r2.content.length, 2);
+  assert.deepEqual(r2.imageAttach.skipped, [{ name: 'gone.png', reason: 'missing' }]);
+  assertNoDir(r2.imageAttach);
+});
+
+check('整个上传目录不存在时,目录内的路径 → missing,目录外 → outside', async () => {
+  const noDir = join(root, 'never-created');
+  const r = await inlineImageAttachments(promptWith([join(noDir, 'a.png'), join(outsideDir, 'b.png')]), { uploadDir: noDir });
+  assert.deepEqual(r.imageAttach.skipped, [{ name: 'a.png', reason: 'missing' }, { name: 'b.png', reason: 'outside' }]);
+});
+
+check('目录当文件 → unreadable;没有读权限 → unreadable', async () => {
+  const dirPng = join(up, 'folder.png');
+  await mkdir(dirPng);
+  const locked = await put(up, 'locked.png', PNG);
+  await chmod(locked, 0o000);
+  const r = await inlineImageAttachments(promptWith([dirPng, locked]), opts());
+  const expectLocked = process.getuid && process.getuid() === 0 ? [] : [{ name: 'locked.png', reason: 'unreadable' }];
+  assert.deepEqual(r.imageAttach.skipped, [{ name: 'folder.png', reason: 'unreadable' }, ...expectLocked]);
+  await chmod(locked, 0o600);
+});
+
+// ---- 路径判定 ----
+check('目录外、相对路径、.. 绕出去、符号链接指到外面 → outside,name 只是最后一段', async () => {
+  const outsidePng = await put(outsideDir, 'secret.png', PNG);
+  const link = join(up, 'evil-link.png');
+  await symlink(outsidePng, link);
+  const dotdot = join(up, '..', 'outside', 'secret.png');
+  const r = await inlineImageAttachments(promptWith([outsidePng, 'secret.png', `${up}/../outside/secret.png`, dotdot, link]), opts());
+  assert.equal(r.content.constructor, String);
+  assert.deepEqual(r.imageAttach.skipped.map((s) => s.reason), ['outside', 'outside', 'outside', 'outside', 'outside']);
+  assert.deepEqual(r.imageAttach.skipped.map((s) => s.name), ['secret.png', 'secret.png', 'secret.png', 'secret.png', 'evil-link.png']);
+  assertNoDir(r.imageAttach);
+  // 目录外不存在的文件也是 outside(不透露存在与否)
+  const r2 = await inlineImageAttachments(promptWith([join(outsideDir, 'nope.png')]), opts());
+  assert.deepEqual(r2.imageAttach.skipped, [{ name: 'nope.png', reason: 'outside' }]);
+});
+
+check('上传目录的两种写法:提交原写法或真实路径写法都认;第三种写法(另一条指向上传目录的符号链接)→ outside', async () => {
+  const p = await put(up, 'forms.png', PNG);
+  const viaReal = join(upReal, 'forms.png');
+  const viaLink = join(upLink, 'forms.png');
+  // S-1 先按字面判断:提交的写法要在「这次传入的上传目录」或「上传目录的真实路径 upReal」之内才认。
+  // uploadDir 传 upReal / upLink 时,/var 开头的 p 对它们是第三种写法;临时目录不经符号链接时 p 就是 viaReal,照认。
+  const viaVar = root === rootReal ? 1 : 'outside';
+  const expected = [
+    [up, [[p, 1], [viaReal, 1], [viaLink, 'outside']]],
+    [upReal, [[p, viaVar], [viaReal, 1], [viaLink, 'outside']]],
+    [upLink, [[p, viaVar], [viaReal, 1], [viaLink, 1]]],
+  ];
+  for (const [uploadDir, rows] of expected) {
+    for (const [submitted, want] of rows) {
+      const r = await inlineImageAttachments(promptWith([submitted]), { uploadDir });
+      const got = r.imageAttach?.inlined === 1 ? 1 : r.imageAttach?.skipped?.[0]?.reason;
+      assert.equal(got, want, `${uploadDir} ← ${submitted}`);
+    }
+  }
+  assert.equal(await isInsideUploadDir(viaReal, { uploadDir: up }), true);
+  assert.equal(await isInsideUploadDir(join(rootReal, 'cgui-attachments2', 'x.png'), { uploadDir: up }), false, '同前缀的兄弟目录不算');
+  assert.equal(await isInsideUploadDir(viaReal, { uploadDir: join(root, 'missing-dir') }), false);
+  assert.ok(UPLOAD_DIR.endsWith('cgui-attachments'));
+});
+
+check('只打开判定过的真实路径,带 O_NOFOLLOW;第三种写法不打开;判定后被换成符号链接 → outside', async () => {
+  const p = await put(up, 'flags.png', PNG);
+  const seen = [];
+  const fsImpl = { open: (file, flags) => { seen.push([file, flags]); return fsOpen(file, flags); } };
+  // 提交上传目录原写法下的路径(macOS 上是 /var 开头),打开的是判定过的真实路径(/private/var 开头)
+  await inlineImageAttachments(promptWith([p]), opts({ fsImpl }));
+  assert.deepEqual(seen, [[join(upReal, 'flags.png'), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW]]);
+  // 经另一条指向上传目录的符号链接提交(第三种写法):按字面就不在上传目录内 → outside,不打开
+  const third = await inlineImageAttachments(promptWith([join(upLink, 'flags.png')]), opts({ fsImpl }));
+  assert.deepEqual(third.imageAttach, { inlined: 0, skipped: [{ name: 'flags.png', reason: 'outside' }] });
+  assert.equal(seen.length, 1, '第三种写法不打开');
+  // 模拟「判定之后、打开之前被换成符号链接」:真实路径函数把它报成自己,打开时 O_NOFOLLOW 拒绝
+  const outsidePng = await put(outsideDir, 'swap-target.png', PNG);
+  const swapped = join(upReal, 'swapped.png');
+  await symlink(outsidePng, swapped);
+  const lyingRealpath = async (x) => (x === swapped ? swapped : realpath(x));
+  const r = await inlineImageAttachments(promptWith([swapped]), opts({ realpathFn: lyingRealpath }));
+  assert.deepEqual(r.imageAttach.skipped, [{ name: 'swapped.png', reason: 'outside' }]);
+});
+
+check('意外异常 → 原字符串、imageAttach undefined、只报不带路径的错误标记', async () => {
+  const p = await put(up, 'boom.png', PNG);
+  const prompt = promptWith([p]);
+  const pathModule = { ...path, isAbsolute: () => { throw new Error(`boom ${p}`); } };
+  const r = await inlineImageAttachments(prompt, opts({ pathModule }));
+  assert.deepEqual(r, { content: prompt, imageAttach: undefined, error: IMAGE_INLINE_ERROR });
+  assert.ok(!IMAGE_INLINE_ERROR.includes('/'));
+});
+
+// ---- Windows 模拟:path.win32 + 假的真实路径函数(展开短名)----
+const W = path.win32;
+const winShortUp = 'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\cgui-attachments';
+const winLongUp = 'C:\\Users\\runneradmin\\AppData\\Local\\Temp\\cgui-attachments';
+const winRealpath = async (p) => {
+  if (typeof p !== 'string' || !W.isAbsolute(p)) throw Object.assign(new Error('bad'), { code: 'EINVAL' });
+  return p.replace(/^C:\\Users\\RUNNER~1\\/i, 'C:\\Users\\runneradmin\\');
+};
+
+check('Windows 模拟:共用判定(短名、大小写不一致、另一个盘、兄弟目录)', async () => {
+  const o = { uploadDir: winShortUp, pathModule: W, realpathFn: winRealpath };
+  assert.equal(await isInsideUploadDir(`${winLongUp}\\a.png`, o), true, '短名上传目录 vs 长名文件');
+  assert.equal(await isInsideUploadDir('c:\\USERS\\RunnerAdmin\\appdata\\LOCAL\\temp\\CGUI-ATTACHMENTS\\a.png', o), true, '大小写不一致');
+  assert.equal(await isInsideUploadDir('D:\\Users\\runneradmin\\AppData\\Local\\Temp\\cgui-attachments\\a.png', o), false, '另一个盘');
+  assert.equal(await isInsideUploadDir(`${winLongUp}2\\a.png`, o), false, '兄弟目录');
+  assert.equal(isPathInsideWith(W, 'C:\\a\\b', 'c:\\A'), true);
+});
+
+check('J-1 Windows 模拟:上传目录是短名写法时,目标短名、长名都认;目录外的短名、长名都不认', async () => {
+  // files.js 的 safePath 用 fs/promises 的 realpath(Windows 上不展开短名)取目标的真实路径,目标可能仍是短名:
+  // 先和上传目录原写法比,不中再和真实路径函数展开后的长名比。
+  const o = { uploadDir: winShortUp, pathModule: W, realpathFn: winRealpath };
+  const winShortTemp = W.dirname(winShortUp);
+  const winLongTemp = W.dirname(winLongUp);
+  assert.equal(await isInsideUploadDir(`${winShortUp}\\a.png`, o), true, '目标短名');
+  assert.equal(await isInsideUploadDir(`${winLongUp}\\a.png`, o), true, '目标长名');
+  assert.equal(await isInsideUploadDir(`${winShortTemp}\\other\\a.png`, o), false, '目录外短名');
+  assert.equal(await isInsideUploadDir(`${winLongTemp}\\other\\a.png`, o), false, '目录外长名');
+  assert.equal(await isInsideUploadDir(`${winShortUp}2\\a.png`, o), false, '兄弟目录短名');
+  assert.equal(await isInsideUploadDir(`${winLongUp}2\\a.png`, o), false, '兄弟目录长名');
+  // 上传目录取不到真实路径时,原写法下的目标照认(第一步不依赖真实路径函数)
+  const failingRealpath = async () => { throw Object.assign(new Error('gone'), { code: 'ENOENT' }); };
+  assert.equal(await isInsideUploadDir(`${winShortUp}\\a.png`, { ...o, realpathFn: failingRealpath }), true, '取不到真实路径 + 原写法');
+  assert.equal(await isInsideUploadDir(`${winLongUp}\\a.png`, { ...o, realpathFn: failingRealpath }), false, '取不到真实路径 + 长名');
+});
+
+check('Windows 模拟:改写模块端到端(不加 O_NOFOLLOW,另一个盘不打开)', async () => {
+  const disk = await mkdtemp(join(tmpdir(), 'cgui-r193-win-'));
+  await writeFile(join(disk, 'shot one.png'), PNG);
+  const seen = [];
+  // 只把 Windows 路径的文件名映射到真实临时目录里的同名文件,读写仍是真实文件系统
+  const fsImpl = { open: (file, flags) => { seen.push([file, flags]); return fsOpen(join(disk, W.basename(file)), fsConstants.O_RDONLY); } };
+  const submitted = ['C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\CGUI-attachments\\shot one.png',
+    'D:\\Users\\runneradmin\\AppData\\Local\\Temp\\cgui-attachments\\shot one.png'];
+  const prompt = promptWith(submitted);
+  const r = await inlineImageAttachments(prompt, { uploadDir: winShortUp, pathModule: W, realpathFn: winRealpath, fsImpl, platform: 'win32' });
+  assert.equal(r.content[0].text, prompt);
+  assert.equal(r.content.length, 2);
+  assert.deepEqual(r.imageAttach, { inlined: 1, skipped: [{ name: 'shot one.png', reason: 'outside' }] });
+  assert.deepEqual(seen, [['C:\\Users\\runneradmin\\AppData\\Local\\Temp\\CGUI-attachments\\shot one.png', fsConstants.O_RDONLY]]);
+  assert.ok(!JSON.stringify(r.imageAttach).includes('\\'));
+  await rm(join(disk, 'shot one.png'));
+  await rmdir(disk);
+});
+
+// ---- S-1:先按字面判断在不在上传目录,不在就不碰文件系统(安全审计「重要 1」)----
+// 真实路径函数换成只记录调用的假函数:目录外的提交路径(及其上一级)一次都不能出现在记录里。
+check('S-1 Windows 模拟:网络共享、设备路径、.. 绕出去、另一个盘 → outside,不取真实路径、不打开;目录内照常', async () => {
+  const winUp = W.join('C:\\', 'Users', 'u', 'AppData', 'Local', 'Temp', 'cgui-attachments');
+  const realpathCalls = [];
+  const recordingRealpath = async (p) => { realpathCalls.push(p); return p; };
+  const ctlFile = await put(outsideDir, 's1-win-ctl.png', PNG);
+  const opened = [];
+  // 只记录;真要打开时一律映射到本测试自建目录里的同一张图
+  const fsImpl = { open: (file, flags) => { opened.push(file); return fsOpen(ctlFile, flags); } };
+  const o = { uploadDir: winUp, pathModule: W, realpathFn: recordingRealpath, fsImpl, platform: 'win32' };
+  const outsidePaths = [
+    '\\\\host\\share\\x.png',
+    '//host/share/x.png',
+    '\\\\?\\UNC\\host\\share\\x.png',
+    '\\\\.\\pipe\\x.png',
+    `${winUp}\\..\\..\\x.png`,
+    'D:\\x.png',
+  ];
+  const prompt = promptWith(outsidePaths);
+  const r = await inlineImageAttachments(prompt, o);
+  assert.equal(r.content, prompt);
+  assert.deepEqual(r.imageAttach, { inlined: 0, skipped: outsidePaths.map(() => ({ name: 'x.png', reason: 'outside' })) });
+  assert.deepEqual(realpathCalls, [winUp], '只对上传目录本身取过真实路径');
+  assert.deepEqual(opened, [], '不打开');
+  // 对照:上传目录内的路径照常取真实路径、打开、带上
+  const inside = `${winUp}\\ok.png`;
+  const ok = await inlineImageAttachments(promptWith([inside]), o);
+  assert.deepEqual(ok.imageAttach, { inlined: 1, skipped: [] });
+  assert.deepEqual(realpathCalls, [winUp, winUp, inside]);
+  assert.deepEqual(opened, [inside]);
+});
+
+check('S-1 POSIX:/etc 下、<上传目录>/../outside、目录外不存在的文件 → outside,不取真实路径、不打开;目录内两种写法照带', async () => {
+  const realpathCalls = [];
+  const recordingRealpath = (p) => { realpathCalls.push(p); return realpath(p); };
+  const opened = [];
+  const fsImpl = { open: (file, flags) => { opened.push(file); return fsOpen(file, flags); } };
+  const o = opts({ realpathFn: recordingRealpath, fsImpl });
+  await put(outsideDir, 'x.png', PNG); // 让 <上传目录>/../outside/x.png 真实存在
+  const outsidePaths = ['/etc/passwd.png', `${up}/../outside/x.png`, join(outsideDir, 's1-nope.png')];
+  // /etc/passwd 本身不是图片候选:按既有规则不读、不进 skipped;一起提交,确认它同样没被拿去取真实路径
+  const prompt = promptWith(['/etc/passwd', ...outsidePaths]);
+  const r = await inlineImageAttachments(prompt, o);
+  assert.equal(r.content, prompt);
+  assert.deepEqual(r.imageAttach, {
+    inlined: 0,
+    skipped: [{ name: 'passwd.png', reason: 'outside' }, { name: 'x.png', reason: 'outside' }, { name: 's1-nope.png', reason: 'outside' }],
+  });
+  assert.deepEqual(realpathCalls, [up], '只对上传目录本身取过真实路径');
+  assert.deepEqual(opened, [], '不打开');
+  // 对照:上传目录内的正常文件,原写法与真实路径写法各一,照常复核真实路径并带上
+  await put(up, 's1-ok.png', PNG);
+  const viaUp = join(up, 's1-ok.png');
+  const viaReal = join(upReal, 's1-ok.png');
+  const ok = await inlineImageAttachments(promptWith([viaUp, viaReal]), o);
+  assert.deepEqual(ok.imageAttach, { inlined: 2, skipped: [] });
+  assert.deepEqual(realpathCalls, [up, up, viaUp, viaReal]);
+  assert.deepEqual(opened, [viaReal, viaReal]);
+});
+
+// ---- 运行 ----
+let failed = 0;
+try {
+  for (const [name, fn] of pending) {
+    try { await fn(); count += 1; console.log(`ok ${count} ${name}`); }
+    catch (err) { failed += 1; console.log(`FAIL ${name}\n${err.stack}`); }
+  }
+} finally {
+  await rm(root, { recursive: true, force: true }); // 只删本测试自建的临时目录
+}
+console.log(`check-r193-image-inline: ${count} passed, ${failed} failed`);
+if (failed) process.exit(1);

@@ -241,6 +241,10 @@ export function useWebSocket() {
             case 'third-party-auto':
               useStore.getState().setThirdPartyAutoEnabled?.(data.enabled);
               break;
+            // r193:「发送时直接带上图片」开关被改了(可能是别的窗口)。设置页打开着就跟着变;没打开没人听,不做事。
+            case 'image-inline':
+              if (typeof data.enabled === 'boolean') window.dispatchEvent(new CustomEvent('cgui:image-inline', { detail: { enabled: data.enabled } }));
+              break;
             case 'provider-change':
               // ~/.claude/settings.json changed (e.g. `cc switch`). Tell any
               // component that cares to refetch — handled via a window event so
