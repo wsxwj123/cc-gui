@@ -1,12 +1,49 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '../stores/sessionStore.js';
-import { resolveSessionTitle } from '../utils/sessionTitle.js';
+import { resolveSessionTitle, findLoadedSession } from '../utils/sessionTitle.js';
 import { maybeNotify, permissionNotice } from '../utils/desktopNotify.js';
 import { dropStreamSnapshot } from '../utils/reattach.js';
 import { sessionWhitelistAllows } from '../utils/sessionAllow.js';
 import { getSkinState, deactivateSkin } from '../utils/skins.js';
 import { handleXsWsEvent } from '../utils/xsession.js';
 import { setCuGrantToken } from '../utils/cuGrantToken.js';
+
+// r194:回合完成浮条。会话名与侧栏同一口径:会话对象按编号到已加载的会话列表里找(所在工作区那一组优先,
+// 见 utils/sessionTitle.js 的 findLoadedSession)。原来只在当前选中工作区的旧槽 st.sessions 里找,
+// 会话在别的工作区就找不到、只剩偏好里的名字,浮条和侧栏显示两个名字。
+// 找不到(所在工作区在侧栏里收起、这次打开页面后没展开过,列表没加载)时先拉一次该工作区的列表,
+// 限时等它回来再找;仍找不到才退回偏好。等待期间不推浮条;等完重新判断是不是正在看的会话(正在看就不推)。
+const TOAST_LIST_WAIT_MS = 3000;
+function waitAtMost(promise, ms) {
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise).catch(() => {}),
+    new Promise((resolve) => { timer = setTimeout(resolve, ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+async function pushTurnCompleteToast(sid, data) {
+  try {
+    const projectHash = data.projectHash || null;
+    let sess = findLoadedSession(useStore.getState(), sid, projectHash);
+    if (!sess && projectHash) {
+      // fetchSessionsForPanel 失败时自己吞掉、保留旧缓存,不抛;同 hash 同刻的请求共用一次往返。
+      await waitAtMost(useStore.getState().fetchSessionsForPanel(projectHash), TOAST_LIST_WAIT_MS);
+      const after = useStore.getState();
+      if (after.paneSessions[after.activeTabIndex]?.sessionId === sid) return; // 等的这段时间切到了这个会话
+      sess = findLoadedSession(after, sid, projectHash);
+    }
+    const st = useStore.getState();
+    st.pushCompletionToast({
+      sessionId: sid,
+      projectHash: projectHash || sess?.projectHash || null,
+      // 带找到的列表项:点浮条跳过去后,会话面板手里是完整的会话对象。
+      session: sess || { sessionId: sid, projectHash, draft: false },
+      title: resolveSessionTitle(sess, st.customTitles?.[sid], st.autoTitles?.[sid]).slice(0, 24) || '会话',
+      summary: data.summary || '',
+      ts: Date.now(),
+    });
+  } catch { /* 浮条只是提醒,出错不影响别的消息处理 */ }
+}
 
 // G3:危险命令启发式 —— 删除类 + 网络/装包 + sudo。命中即强制弹窗,不被任何自动放行豁免。
 // 【权威判定在服务端 server/routes/chat.js 的 DANGEROUS_BASH】(canUseTool 内强拦,
@@ -393,15 +430,8 @@ export function useWebSocket() {
               window.dispatchEvent(new CustomEvent('cgui:sessions-changed', { detail: { projectHash: data.projectHash || null } }));
               const focused = st.paneSessions[st.activeTabIndex]?.sessionId;
               if (sid === focused) break; // 正在看的会话,回复就在眼前,不打扰
-              const sess = (Array.isArray(st.sessions) ? st.sessions : []).find((x) => x.sessionId === sid);
-              st.pushCompletionToast({
-                sessionId: sid,
-                projectHash: data.projectHash || sess?.projectHash || null,
-                session: sess || { sessionId: sid, projectHash: data.projectHash || null, draft: false },
-                title: resolveSessionTitle(sess, st.customTitles?.[sid], st.autoTitles?.[sid]).slice(0, 24) || '会话',
-                summary: data.summary || '',
-                ts: Date.now(),
-              });
+              // r194:会话对象按编号到已加载的会话列表里找,找不到先拉所在工作区的列表再找(见文件顶部)。
+              void pushTurnCompleteToast(sid, data);
               break;
             }
           }
