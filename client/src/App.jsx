@@ -5403,6 +5403,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     const text = autoMoveNoticeText(result);
     if (text && getLocalSession()?.sessionId === sid) setProviderSwitchNotice({ text, ownerKey: sid, plain: true, ttlMs: 8000 });
   }, [getLocalSession]);
+  // r198 回车(用户选定的方案甲):handleSend 忙碌分支把消息照旧放进排队栏(能改能撤,条数 / 顺序 / 状态都不因此改变)
+  // 之后调这里,同时请求把这个会话里正在前台跑的任务「全部」转到后台 —— 转走后这一轮不再被命令挡住,结束后排队消息
+  // 照现有规则发出。只在会话真在跑(本地流或后台进程)时请求:只是回退进行中、隐藏消息、还没有会话编号的草稿都不请求。
+  // Cmd/Ctrl+Enter 由并入被接受后的 steerCurrentTurn 请求,这里不重复发。单独成函数:忙碌分支的长度被
+  // tests/unit/check-scroll-clamp.mjs 的顺序守卫按字数卡着。streamingRef / backgroundPidRef 在调用时才读。
+  const autoMoveOnBusyEnter = useCallback((sendOpts, hidden) => {
+    if (sendOpts?.steer || hidden || !(streamingRef.current || backgroundPidRef.current)) return;
+    void autoMoveToBackground(getLocalSession()?.sessionId);
+  }, [autoMoveToBackground, getLocalSession]);
   const steerCurrentTurn = useCallback(async (text, { meta = null, steerId, sessionId } = {}) => {
     const body = String(text || '');
     if (!body.trim() || !sessionId || !steerId) return { outcome: 'explicit-reject' };
@@ -5545,13 +5554,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         return;
       }
       onQueued?.(queued);
-      // r198 回车(用户选定的方案甲):消息照旧进排队栏(能改能撤,条数 / 顺序 / 状态都不因此改变),同时请求把这个会话里
-      // 正在前台跑的任务「全部」转到后台 —— 转走后这一轮不再被命令挡住,结束后排队消息照现有规则发出。只在会话真在跑
-      // (本地流或后台进程)时请求:只是回退进行中、隐藏消息、还没有会话编号的草稿都不请求。Cmd/Ctrl+Enter 在下面并入
-      // 被接受后由 steerCurrentTurn 请求,这里不重复发。
-      if (!opts.steer && !hiddenUserMessage && (streamingRef.current || backgroundPidRef.current)) {
-        void autoMoveToBackground(getLocalSession()?.sessionId);
-      }
+      autoMoveOnBusyEnter(opts, hiddenUserMessage); // r198
       // Cmd/Ctrl+Enter:先入队保底，再调用 CLI/SDK 的实时输入队列。连接中、回合刚收尾或
       // provider 不支持时，明确拒绝才回 queued；任何模糊结果都成为持久 barrier。
       if (opts.steer && !hiddenUserMessage) {
