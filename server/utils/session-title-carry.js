@@ -33,6 +33,17 @@
 // 对象部分带这些键 / 值的行,解析后按顶层 type 排除。只记下标、不拷贝字符串,扫描只从截断
 // 下标起,不新增读盘与整份拆行(调用方已有行数组)。
 //
+// 为什么限长(MAX_TITLE_LINE_CHARS = 64KB,按字符串 length 计):标题类记录正常是几十到几百
+// 字节的小对象;应用的改名接口(prefs.js)只 trim、不限长度,命令行是否限长没有核实,但正常的
+// 名字远小于 64KB。会话记录里的大行是工具结果、读进来的文件内容之类,限长让它们在任何查找、
+// 解析之前直接跳过,既不扫描也不解析。2026-11-18 最坏情况实测(截掉段约 200MB、约 1555 行、
+// 平均每行约 130KB,applyHistoryOp('trim') 第 2、3 次的耗时):修前约 105–118 毫秒、内存峰值
+// 增量约 39MB;不限长时,每行都带结构化 "tag" 键的数据约 500 毫秒、峰值增量约 345MB;限长后
+// 约 148–162 毫秒、峰值增量约 43–46MB(只扫描 / 解析 64KB 以内的行,单独计时约 24–44 毫秒)。
+// 与 takeTitleLine 的差别:它不限长。超过 64KB 的标题行在这里当作不存在:回退时不补回它,
+// 同组里截掉段中更早的正常标题行照常补回;同组没有别的,就退回不补回的旧行为(回退后读到的
+// 是截断点之前的名字)。
+//
 // 不打日志:预览、提交各算一次会重复打;认不出时只是退回不补回的行为。命令行的标题记录
 // 写法若变了(type 名、字段名、是否带 sessionId / 锚点字段),靠升级命令行时的复核项发现。
 
@@ -42,10 +53,13 @@ const TITLE_FIELD = new Map([ // 用 Map 不用对象下标:防 "__proto__" / "t
   ['tag', 'tag'],
 ]);
 const ANCHOR_KEYS = ['uuid', 'parentUuid', 'leafUuid', 'afterUuid'];
+// 超过这个长度(按字符串 length 计,含行尾可能带的 '\r')的行在任何查找、解析之前直接跳过(理由见文件头)。
+const MAX_TITLE_LINE_CHARS = 64 * 1024;
 
 /**
  * 从截断下标起(0 基,含该行)挑出标题类记录的原行:每组(类型 + sessionId)只取最后一条,
- * 按原下标升序返回。没有可补回的行时返回空数组(调用方拼接后与不补回时逐字节相同)。
+ * 按原下标升序返回。超过 MAX_TITLE_LINE_CHARS 的行不查找、不解析,直接跳过。
+ * 没有可补回的行时返回空数组(调用方拼接后与不补回时逐字节相同)。
  * 纯函数:不读时间、不取随机数、不打日志,同一输入必得同一输出(预览与提交一致靠它)。
  * @param {string[]} lines 整份会话记录按 '\n' 拆开的行(行尾的 '\r' 原样保留在行里)
  * @param {number} fromIdx 截断下标;不是非负整数时视为没有截断,返回空数组
@@ -57,6 +71,7 @@ export function sessionTitleLinesAfter(lines, fromIdx) {
   for (let i = fromIdx; i < lines.length; i += 1) {
     const line = lines[i];
     if (typeof line !== 'string') continue;
+    if (line.length > MAX_TITLE_LINE_CHARS) continue;
     if (!line.includes('"custom-title"') && !line.includes('"ai-title"') && !line.includes('"tag"')) continue;
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }

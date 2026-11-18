@@ -368,6 +368,35 @@ try {
     assert.deepEqual(r.report, p.report, '与没有标题行的同形夹具相同');
     assert.deepEqual(r.affectedRange, p.affectedRange);
   });
+
+  // ── m / n:超过上限的行在任何查找、解析之前跳过。上限与 server/utils/session-title-carry.js
+  //    的 MAX_TITLE_LINE_CHARS 同值(按字符串 length 计);这里不 import 新模块,照抄数值 ──
+  const MAX_TITLE_LINE_CHARS = 64 * 1024;
+  const ctOfLength = (len) => ct('x'.repeat(len - ct('').length)); // 名字用 ASCII,长度一字符一单位
+
+  await check('m 普通改名在前、刚超上限的改名在后 → 只补回普通那条', async () => {
+    const long = ctOfLength(MAX_TITLE_LINE_CHARS + 1);
+    assert.equal(long.length, MAX_TITLE_LINE_CHARS + 1, '夹具:超长行比上限多 1 个字符');
+    // 超长那条排在普通那条之后:不限长时同组取最后一条会选中它,这组才有鉴别力
+    const M = [ct('旧名'), user('u1', null, '第一条', 1), asst('a1', 'u1', 2), user('u2', 'a1', '第二条', 3),
+      asst('a2', 'u2', 4), ct('新名'), long];
+    const r = applyHistoryOp('trim', toRaw(M), { uuid: 'u2' });
+    assert.equal(r.ok, true);
+    assertHeadTail(r.newContent, M.slice(0, 3), [M[5]], 'm');
+    assert.ok(!bodyOf(r.newContent).includes(long), '超长行不补回');
+  });
+
+  await check('n 长度刚好等于上限的改名照常补回', async () => {
+    const edge = ctOfLength(MAX_TITLE_LINE_CHARS);
+    assert.equal(edge.length, MAX_TITLE_LINE_CHARS, '夹具:行长刚好等于上限');
+    const Nn = [ct('旧名'), user('u1', null, '第一条', 1), asst('a1', 'u1', 2), user('u2', 'a1', '第二条', 3),
+      asst('a2', 'u2', 4), edge];
+    const raw = toRaw(Nn);
+    const r = applyHistoryOp('trim', raw, { uuid: 'u2' });
+    assert.equal(r.ok, true);
+    assertHeadTail(r.newContent, Nn.slice(0, 3), [edge], 'n');
+    assert.deepEqual(await titlesOf(r.newContent), await titlesOf(raw));
+  });
 } finally {
   rmdirSync(tmpRoot);
 }
