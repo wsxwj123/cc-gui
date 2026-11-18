@@ -227,24 +227,20 @@ test('C5 命令仍在前台时切到别的会话再切回、刷新页面后回�
   const me = await activeEntry(page, A.sid);
   expect(me && me.movedTasks && me.movedTasks.map((m) => m.taskId), 'movedTasks 仍含这条命令').toContain(fg.taskId);
 
-  // 在面板里停掉它:取面板里描述文字所在行最近的「停止…」按钮
-  const clicked = await page.evaluate((desc) => {
-    const label = (b) => ((b.innerText || '').trim()) || (b.getAttribute('aria-label') || '').trim() || (b.getAttribute('title') || '').trim();
-    const els = [...document.querySelectorAll('body *')].filter((e) => (e.textContent || '').includes(desc) && ![...e.children].some((c) => (c.textContent || '').includes(desc)));
-    for (const el of els.reverse()) {
-      let cur = el;
-      for (let i = 0; i < 8 && cur; i += 1) {
-        const b = [...cur.querySelectorAll('button')].find((x) => label(x).startsWith('停止') && x.offsetParent !== null);
-        if (b) { b.click(); return true; }
-        cur = cur.parentElement;
-      }
-    }
-    return false;
-  }, fg.description);
-  expect(clicked, '进程面板里被转走的命令那一行应有「停止」按钮').toBe(true);
-  await until(() => logOf(CTL, A.sid, 'stop-task').length >= 1, { timeout: 10_000, message: '点面板里的停止后,命令行应收到对这个任务的 stop_task' });
-  expect(logOf(CTL, A.sid, 'stop-task')[0].taskId, '被停的是这条后台任务').toBe(fg.taskId);
-  expect(taskStatus(CTL, A.sid, fg.taskId), '这条任务被单独停掉').toBe('stopped');
+  // 在面板里停掉它(主会话锁定前修订):进程面板里后台命令那一行的「停止」是 role="button" 的元素;现有产品按输出文件
+  // 定位系统进程去杀(页面发 POST /api/bgtask/kill,body {path}),不经命令行的 stop_task。假命令行没有真实的系统进程,
+  // 所以这里断言页面对这条被转走的命令发出了带正确输出文件路径的停止请求。
+  const outPath = (me.movedTasks.find((m) => m.taskId === fg.taskId) || {}).outputPath;
+  expect(typeof outPath === 'string' && outPath.length > 0, 'movedTasks 里这条命令带输出文件路径').toBe(true);
+  const row = page.locator('div', { has: page.getByText(fg.description) })
+    .filter({ has: page.locator('[role="button"]', { hasText: '停止' }) }).last();
+  const stopBtn = row.locator('[role="button"]', { hasText: '停止' }).first();
+  await expect(stopBtn, '进程面板里被转走的命令那一行应有「停止」').toBeVisible({ timeout: 10_000 });
+  const [killReq] = await Promise.all([
+    page.waitForRequest((r) => r.method() === 'POST' && new URL(r.url()).pathname === '/api/bgtask/kill', { timeout: 10_000 }),
+    stopBtn.click(),
+  ]);
+  expect(JSON.parse(killReq.postData() || '{}').path, '停止请求指向这条被转走的命令的输出文件').toBe(outPath);
 });
 
 // ============================================================ 6. 卡片底栏文案 + 回看历史 ============================================================
