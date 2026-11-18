@@ -8,7 +8,7 @@ import { TaskOwnerContext } from './TaskCard.jsx';
 import { useStore } from '../../stores/sessionStore.js';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
 import {
-  isMovedToBackground, parseBackgroundDeadline, buttonMoveDialogText, canMoveToBackground,
+  isMovedToBackground, parseBackgroundDeadline, buttonMoveDialogText, canMoveToBackground, ownedMovedEntry,
   MOVE_TO_BG_HINT, LONG_FG_TIMEOUT_MS, longTimeoutConfirmText,
 } from '../../utils/movedToBackground.js';
 
@@ -87,24 +87,28 @@ export function BashCard({ toolCall }) {
   const cmd = toolCall.input?.command || '';
   const desc = toolCall.input?.description || '';
   const result = toolCall.result;
-  // r198:被转到后台的前台命令(结构化字段判定,直播与回看历史同一口径):卡头写「已移到后台」,底栏写任务编号与
-  // 能从原句读到的后台时限,不出现「成功」;默认展开(底栏就是这张卡要交代的事),用户手动开合以手动为准。
-  const moved = isMovedToBackground(result);
+  const ownerSid = useContext(TaskOwnerContext);
+  // r198:被转到后台的前台命令:卡头写「已移到后台」,底栏写任务编号与能从原句读到的后台时限,不出现「成功」;
+  // 默认展开(底栏就是这张卡要交代的事),用户手动开合以手动为准。判定两个来源:工具结果上的结构化标记(直播与
+  // 回看历史同一口径),或状态库里按 tool_use_id 记的已转走记录 —— 两个窗格开同一会话时,没收到这条流里工具
+  // 结果的那个窗格靠它与另一窗格一致。
+  const movedEntry = ownedMovedEntry(useStore((s) => s.bgTasks[toolCall.id]), ownerSid);
+  const moved = isMovedToBackground(result) || !!movedEntry;
   const [expandedByUser, setExpanded] = useState(null);
   const expanded = expandedByUser ?? moved;
-  // 「移到后台」按钮:前台任务表里有这条、还没出结果、卡片属主与任务所属会话一致(分支复制出的卡片不显示)。
-  const ownerSid = useContext(TaskOwnerContext);
+  // 「移到后台」按钮:前台任务表里有这条、还没出结果、没被记为已转走、卡片属主与任务所属会话一致(分支复制出的卡片不显示)。
   const fgEntry = useStore((s) => s.fgTasks[toolCall.id]);
-  const showMoveBtn = canMoveToBackground(toolCall, fgEntry, ownerSid);
+  const showMoveBtn = !movedEntry && canMoveToBackground(toolCall, fgEntry, ownerSid);
   const isError = !!result?.isError;
   const output = typeof result?.content === 'string' ? result.content : '';
   const { exitCode, body } = splitExitCode(output, isError);
   const lineCount = countLines(body);
   const linesText = lineCount > 0 ? `输出 ${lineCount} 行` : '无输出';
   let footText = '';
-  if (result && moved) {
-    const deadline = parseBackgroundDeadline(output);
-    footText = `已移到后台运行${result.bgTaskId ? ` · 任务 ${result.bgTaskId}` : ''}${deadline ? ` · 后台最长 ${deadline},到点由命令行停止` : ''}`;
+  if (moved) {
+    const taskId = result?.bgTaskId || movedEntry?.shellId || null;
+    const deadline = parseBackgroundDeadline(output) || movedEntry?.deadline || null;
+    footText = `已移到后台运行${taskId ? ` · 任务 ${taskId}` : ''}${deadline ? ` · 后台最长 ${deadline},到点由命令行停止` : ''}`;
   } else if (result) {
     if (!isError) footText = lineCount > 0 ? `成功 · ${linesText}` : '无输出';
     else footText = `${exitCode != null ? `退出码 ${exitCode}` : '失败'} · ${linesText}`;
@@ -113,7 +117,7 @@ export function BashCard({ toolCall }) {
   return (
     <ToolCardShell
       toolName={toolCall.name || 'Bash'}
-      status={cardStatusOf(result)}
+      status={moved && !result ? 'ok' : cardStatusOf(result)}
       Icon={Terminal}
       title={desc || cmd || '(empty)'}
       titleMono={!desc}
@@ -138,7 +142,7 @@ export function BashCard({ toolCall }) {
             <Linkify text={body} />
           </pre>
         )}
-        {result && (
+        {(result || moved) && (
           <div className="tc-term-foot" data-term-foot="" data-ok={isError ? 'false' : 'true'}>
             {footText}
           </div>

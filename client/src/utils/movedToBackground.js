@@ -77,25 +77,43 @@ function rejectedWords(error) {
 
 // 「移到后台」按钮给不给这条调用:Bash、还没出结果、前台任务表里有它(fgEntry = store.fgTasks[toolCall.id]),
 // 且卡片属主(TaskOwnerContext)与任务所属会话一致 —— 分支复制出的卡片与源会话共用 tool_use_id,属主对不上不给。
-export function canMoveToBackground(toolCall, fgEntry, ownerSid) {
+// movedIds(可选):状态库里已记为"转到后台"的 tool_use_id 集合(见 ownedMovedEntry),在里面的不再给按钮。
+export function canMoveToBackground(toolCall, fgEntry, ownerSid, movedIds = null) {
   if (!toolCall || toolCall.name !== 'Bash' || toolCall.result || !fgEntry) return false;
+  if (movedIds && movedIds.has(toolCall.id)) return false;
   return !ownerSid || !fgEntry.sessionId || fgEntry.sessionId === ownerSid;
 }
 
+// 状态库里按 tool_use_id 记的"已转到后台"记录(bgTasks 条目带 moved:true;来源是任一窗格收到的直播工具结果,
+// 或 /agents/active 轮询对账的 movedTasks)。没收到这条流里工具结果的窗格(两个窗格开同一会话)据此与另一窗格一致。
+// 属主对不上(分支复制出的卡片与源会话共用 tool_use_id)不算。
+export function ownedMovedEntry(bgEntry, ownerSid) {
+  if (!bgEntry || bgEntry.moved !== true) return null;
+  return (!ownerSid || !bgEntry.sessionId || bgEntry.sessionId === ownerSid) ? bgEntry : null;
+}
+
+// 本轮这些调用里,状态库记为已转到后台的 tool_use_id,拼成字符串(给选择器用:返回基本类型,没变化不重渲染)。
+export function movedIdsKey(bgTasks, ids, ownerSid) {
+  if (!bgTasks) return '';
+  return (Array.isArray(ids) ? ids : []).filter((id) => ownedMovedEntry(bgTasks[id], ownerSid)).join(',');
+}
+
 // 工作组(收起时)头行上的按钮对着谁:组里最后一条可以转后台的调用;没有回 null。
-export function foregroundMoveTarget(items, fgTasks, ownerSid) {
+export function foregroundMoveTarget(items, fgTasks, ownerSid, movedIds = null) {
   const list = Array.isArray(items) ? items : [];
   for (let i = list.length - 1; i >= 0; i -= 1) {
     const tc = list[i] && list[i].type === 'tool_use' ? list[i].toolCall : null;
     const entry = tc && fgTasks ? fgTasks[tc.id] : null;
-    if (canMoveToBackground(tc, entry, ownerSid)) return { toolCall: tc, sessionId: entry.sessionId || ownerSid || null };
+    if (canMoveToBackground(tc, entry, ownerSid, movedIds)) return { toolCall: tc, sessionId: entry.sessionId || ownerSid || null };
   }
   return null;
 }
 
 // 组里有没有被转到后台的命令(这样的组默认展开,让「已移到后台运行 · 任务 …」那一行看得见)。
-export function hasMovedCommand(items) {
-  return (Array.isArray(items) ? items : []).some((b) => b && b.type === 'tool_use' && isMovedToBackground(b.toolCall && b.toolCall.result));
+// 认工具结果上的结构化标记,也认状态库的已转走记录(movedIds)。
+export function hasMovedCommand(items, movedIds = null) {
+  return (Array.isArray(items) ? items : []).some((b) => b && b.type === 'tool_use' && b.toolCall
+    && (isMovedToBackground(b.toolCall.result) || (movedIds ? movedIds.has(b.toolCall.id) : false)));
 }
 
 // 按钮的悬停说明与超长前台时限的确认文案。

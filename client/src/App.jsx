@@ -90,7 +90,7 @@ import { applyProgrammaticText } from './utils/inputUndo.js';
 import { repairMojibake, insertTextAtCaret } from './utils/mojibake.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
-import { isMovedToBackground, parseOutputPath, autoMoveNoticeText } from './utils/movedToBackground.js';
+import { isMovedToBackground, parseOutputPath, parseBackgroundDeadline, autoMoveNoticeText } from './utils/movedToBackground.js';
 import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
 import { runHistoryOp, runHistoryOpSettled, stopTurnAndWait, rollbackBusyFor, ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS, ROLLBACK_BUSY_NOTICE } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
@@ -7335,8 +7335,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                 if (movedBg) {
                   const _tc = currentToolCalls.find((tc) => tc.id === block.tool_use_id);
                   const _cur = store.bgTasks[block.tool_use_id];
-                  const _path = parseOutputPath(extractToolResultText(block.content));
+                  const _txt = extractToolResultText(block.content);
+                  const _path = parseOutputPath(_txt);
+                  const _deadline = parseBackgroundDeadline(_txt);
+                  // 这条记录按 tool_use_id 存在共享状态库里:没收到这条流的其他窗格据它显示同样的「已移到后台」(BashCard)
                   store.upsertBgTask(block.tool_use_id, {
+                    ...(_deadline ? { deadline: _deadline } : {}),
                     command: _cur?.command || _tc?.input?.command || '',
                     description: _cur?.description || _tc?.input?.description || '',
                     status: 'running',
