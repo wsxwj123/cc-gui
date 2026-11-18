@@ -39,7 +39,7 @@ async function sendHeldTurn(page, chat, t1, t2) {
 }
 
 /** 等 T1 收到初始化超时(约 15 秒),核对后端应答形态,再等页面上出现超时那句话。返回页面上第一次见到那句话的时刻。 */
-async function awaitStartTimeout(page, chat, t1, label) {
+async function awaitStartTimeout(page, chat, t1, label, want = 1) {
   const r = await until(() => chat.respWith(t1)[0], { timeout: 40_000, message: `${label}T1 应收到后端应答` });
   expect(r.status, `${label}T1 的应答状态码`).toBe(504);
   expect(r.body && r.body.code, `${label}应答 code`).toBe('CHAT_START_TIMEOUT');
@@ -50,7 +50,7 @@ async function awaitStartTimeout(page, chat, t1, label) {
   const waited = r.t - (r.sentAt || r.t);
   expect(waited, `${label}超时应在约 15 秒时到(实际 ${waited} 毫秒)`).toBeGreaterThanOrEqual(12_000);
   expect(waited, `${label}超时应在约 15 秒时到(实际 ${waited} 毫秒)`).toBeLessThanOrEqual(22_000);
-  await until(async () => (await phraseCount(page)) >= 1, { timeout: 6_000, message: `${label}页面上应出现「${PHRASE}」` });
+  await until(async () => (await phraseCount(page)) >= want, { timeout: 6_000, message: `${label}页面上应出现「${PHRASE}」` });
   return Date.now();
 }
 
@@ -64,24 +64,24 @@ async function sampleFor(page, ms, queued, every = 400) {
   }
 }
 
-/** G1 的观察窗口:超时之后 8 秒里,逐次采样核对。 */
-async function assertG1Window(page, chat, t2, label) {
+/** G1 的观察窗口:超时之后 8 秒里,逐次采样核对。want = 这一轮超时后页面上那句话应有的条数(同一会话前几轮留下的 + 这一轮的 1 条)。 */
+async function assertG1Window(page, chat, t2, label, want = 1) {
   const samples = await sampleFor(page, 8_000, t2);
   const bad = (f) => samples.filter((s) => !f(s));
-  expect(bad((s) => s.phrase === 1).map((s) => s.phrase), `${label}超时那句话应恒为恰好 1 次;全部采样 ${JSON.stringify(samples.map((s) => s.phrase))}`).toEqual([]);
+  expect(bad((s) => s.phrase === want).map((s) => s.phrase), `${label}超时那句话应恒为恰好 ${want} 次;全部采样 ${JSON.stringify(samples.map((s) => s.phrase))}`).toEqual([]);
   expect(bad((s) => s.queue === 1).length, `${label}T2 应一直在排队栏里;各次采样的排队条数 ${JSON.stringify(samples.map((s) => s.queue))}`).toBe(0);
   expect(bad((s) => s.stops >= 1).length, `${label}停止键应一直在;各次采样的停止键个数 ${JSON.stringify(samples.map((s) => s.stops))}`).toBe(0);
   expect(chat.postsWith(t2).map((p) => p.prompt.slice(0, 30)), `${label}超时后 8 秒内页面不该发出含 T2 的 POST /api/chat`).toEqual([]);
 }
 
 /** 放开被按住的命令行,让这一轮跑完,并核对:这一轮结束前不发 T2、结束后才发出 T2、回复显示在会话里、超时那句话不重复。 */
-async function releaseAndExpectDrain(page, chat, S1, t1, t2, label) {
+async function releaseAndExpectDrain(page, chat, S1, t1, t2, label, want = 1) {
   const { sid } = S1;
   releaseSession(CTL, sid);
   await waitForPhase(CTL, sid, 'chunk1');
   await page.waitForTimeout(2_000);   // 给"这一轮没结束就提前发出 T2"留出发生的时间
   const mid = await probe(page, t2);
-  expect(mid.phrase, `${label}这一轮进行中超时那句话应恰好 1 次`).toBe(1);
+  expect(mid.phrase, `${label}这一轮进行中超时那句话应恰好 ${want} 次`).toBe(want);
   expect(mid.stops, `${label}这一轮还没结束,停止键应在`).toBeGreaterThanOrEqual(1);
   expect(mid.queue, `${label}这一轮还没结束,T2 应仍在排队栏`).toBe(1);
   expect(chat.postsWith(t2).length, `${label}这一轮还没结束,不该已发出含 T2 的 POST`).toBe(0);
@@ -148,10 +148,12 @@ test('G3 [复现] 同一会话连做 3 轮(G1+G2):每一轮都满足 G1、G2,上
     resetTurnFiles(CTL, A.sid);
     holdOnce(CTL, A.sid);
     if (i > 0) expect(pidAlive(runPid(CTL, A.sid)), `${label}上一轮留下的命令行进程应还活着(用例前提)`).toBe(true);
+    // 主会话修订(2026-11-18):超时提示和其它报错一样留在对话里,同一会话前几轮的会留着;按「这一轮开始前的条数 + 1」核对。
+    const want = (await phraseCount(page)) + 1;
     await sendHeldTurn(page, chat, t1, t2);
-    await awaitStartTimeout(page, chat, t1, label);
-    await assertG1Window(page, chat, t2, label);
-    await releaseAndExpectDrain(page, chat, A, t1, t2, label);
+    await awaitStartTimeout(page, chat, t1, label, want);
+    await assertG1Window(page, chat, t2, label, want);
+    await releaseAndExpectDrain(page, chat, A, t1, t2, label, want);
     await finishQueuedTurn(page, A.sid);
     await expect(stopButton(page), `${label}两条都跑完后停止键应消失`).toHaveCount(0, { timeout: 15_000 });
   }
@@ -229,7 +231,7 @@ test('G6 [相邻回归] 命令行进程在吐出第一条事件前退出:显示�
   expect(rec.seen, 'G6:启动失败不是初始化超时,页面不该出现超时那句话').toBe(false);
 });
 
-test('G7 [相邻回归] 没有排队消息:T1 超时后放开命令行,回复显示在会话里,超时那句话恰好 1 次', async ({ page }) => {
+test('G7 [复现] 没有排队消息:T1 超时后放开命令行,回复显示在会话里,超时那句话恰好 1 次', async ({ page }) => {
   const A = S(6);
   const t1 = msg('G7', 'T1');
   await openSessionBySearch(page, A.mark);
