@@ -61,8 +61,9 @@ const SKIP_EXACT = new Set(['.DS_Store']);
 // 只能回退到 raw 原图入口,于是真实拖进来的图刷新后永久「图片不可用」(只剩 name/path)。
 // 这里只放行【这一个本服务自己写的目录】,不是整个 tmpdir;/tmp/cgui-r08-outside-* 之类
 // 仍然 403。匹配用 realpath 后的 real(见下),目录里预埋的 symlink 指向外面照样被拒。
-// r193:判定挪到 utils/safe-path.js 的 isInsideUploadDir(与发送时读图共用一套):
-// 上传目录也取真实路径(macOS /var → /private/var、Windows 短名),按 path.relative 比较。
+// r193:判定挪到 utils/safe-path.js 的 isInsideUploadDir:先和上传目录原写法比,不中再和它的
+// 真实路径比(macOS /var → /private/var、Windows 短名),按 path.relative 比较。发送时读图
+// (utils/image-attach-inline.js)另有一套先按字面判断的流程,不调用这个函数。
 
 /**
  * Resolve+validate a user-provided path. Must be ABSOLUTE and resolve
