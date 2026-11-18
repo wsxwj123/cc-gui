@@ -4131,6 +4131,7 @@ export function applyBackgroundSignals(slot, m, now = Date.now()) {
     const results = m.message.content.filter((b) => b?.type === 'tool_result' && typeof b.tool_use_id === 'string');
     for (const b of results) {
       slot.openCalls.delete(b.tool_use_id);
+      slot.pendingMove?.ids?.delete?.(b.tool_use_id); // 登记前就出了结果(3 秒内跑完的命令):待移作废
       if (live) for (const t of live.values()) if (t && t.toolUseId === b.tool_use_id) t.fg = false; // 出了结果 = 不再挡在前台
     }
     // tool_use_result 是整条消息的;只有一个工具结果时才能确定它属于谁
@@ -4155,6 +4156,12 @@ export function applyBackgroundSignals(slot, m, now = Date.now()) {
     t.parentTaskId = m.parent_task_id || null;
     if (typeof m.description === 'string') t.description = m.description;
     t.timeoutMs = timeoutOf(m.tool_use_id ? slot.openCalls.get(m.tool_use_id)?.timeoutMs : null);
+    // 登记前待移:「全部」请求到达时它还没登记,现在一登记就按 id 转走(本世代、没停止、不是跨会话回合才转)
+    const pm = slot.pendingMove;
+    if (t.fg && !t.parentTaskId && m.tool_use_id && pm && pm.epoch === epoch && pm.ids?.has(m.tool_use_id)) {
+      pm.ids.delete(m.tool_use_id);
+      if (!isTurnStopping(slot) && !isXsBoundTurn(slot)) fireBackgroundMove(slot, m.tool_use_id, t);
+    }
     return;
   }
   if (m.subtype === 'task_updated' && m.task_id && m.patch?.is_backgrounded === true) {
@@ -4165,6 +4172,15 @@ export function applyBackgroundSignals(slot, m, now = Date.now()) {
     // 存活集只含后台任务:在集内的前台条目 = 已经被转到后台
     for (const x of m.tasks) if (x && x.task_id) markBackgrounded(live.get(x.task_id), now);
   }
+}
+
+// 待移命中时调一次 backgroundTasks,不等待(消息泵里不加 await)。请求早已回过 200,失败静默,只记一行日志(工具 id 与命令行原话)。
+function fireBackgroundMove(slot, toolUseId, entry) {
+  const warn = (e) => console.warn(`[bg] 登记后转到后台失败 ${toolUseId}:${String(e?.message || e).slice(0, 200)}`);
+  try {
+    Promise.resolve(slot.query?.backgroundTasks?.(toolUseId))
+      .then((ok) => { if (ok === true) markBackgrounded(entry, Date.now()); }, warn);
+  } catch (e) { warn(e); }
 }
 
 // 回合收尾:没有挡在前台的调用了。
@@ -4214,6 +4230,12 @@ export async function handleBackgroundTasksPost(req, res, procs = activeProcesse
       targets = [request.toolUseId];   // 按钮那一路:只转这一条,不套长时限保护(页面已确认过),不产生待移
     } else {
       ({ targets, pending, skipped } = planBackgroundTargets(slot.liveTasks, slot.openCalls, slot.turnEpoch | 0));
+      if (pending.length) {
+        // 还没登记的记成待移(同一世代的合并):一登记就由消息泵转走,见 applyBackgroundSignals
+        const epoch = slot.turnEpoch | 0;
+        const prev = slot.pendingMove && slot.pendingMove.epoch === epoch ? slot.pendingMove.ids : null;
+        slot.pendingMove = { epoch, ids: new Set([...(prev || []), ...pending]) };
+      }
     }
     if (!targets.length) return res.json({ ok: true, pid, moved: [], pending, skipped });
     const outcomes = await moveTargetsToBackground(query, targets, BG_MOVE_TOTAL_TIMEOUT_MS);

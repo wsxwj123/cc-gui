@@ -282,6 +282,70 @@ await check('轮询字段:进程退出 / 泵结束不报;空闲不报 fgTasks;�
   assert.deepEqual(planBackgroundTargets(undefined, undefined, 0), { targets: [], pending: [], skipped: [] });
 });
 
+console.log('\n五b、登记前待移(T2)');
+const tick = () => new Promise((r) => setTimeout(r, 10));
+const registerFg = (s, taskId, toolUseId) => {
+  s.liveTasks.set(taskId, { toolUseId, kind: 'shell', epoch: s.turnEpoch | 0, createdAt: Date.now() });
+  applyBackgroundSignals(s, { type: 'system', subtype: 'task_started', task_id: taskId, tool_use_id: toolUseId, is_backgrounded: false, task_type: 'local_bash' });
+};
+const sendToolUse = (s, id, input = { command: 'make' }) => applyBackgroundSignals(s, { type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input }] } });
+await check('先请求后登记:「全部」回 pending=[id] 且不调 SDK;一登记就按 id 转走一次,条目记为后台', async () => {
+  const s = slotOf();
+  sendToolUse(s, 'toolu_PM1');
+  const r = await post({ sessionId: SID }, procsOf(s));
+  assert.equal(r.statusCode, 200);
+  assert.deepEqual(r.body, { ok: true, pid: 'sdk-1', moved: [], pending: ['toolu_PM1'], skipped: [] });
+  assert.equal(s.query.calls.length, 0);
+  registerFg(s, 'bbzP1', 'toolu_PM1');
+  assert.deepEqual(s.query.calls, ['toolu_PM1']);
+  await tick();
+  assert.equal(s.liveTasks.get('bbzP1').fg, false);
+  assert.ok(s.liveTasks.get('bbzP1').movedAt > 0);
+  assert.equal(s.pendingMove.ids.size, 0);
+  // 同一个 id 再登记一次(重复事件)不再调
+  registerFg(s, 'bbzP1', 'toolu_PM1');
+  assert.equal(s.query.calls.length, 1);
+});
+await check('3 秒内就出了结果:待移作废,之后不转;待移那次调用失败只记日志、不抛', async () => {
+  const s = slotOf({ query: stubQuery(async () => { throw new Error('disabled'); }) });
+  sendToolUse(s, 'toolu_PM2');
+  sendToolUse(s, 'toolu_PM3');
+  await post({ sessionId: SID }, procsOf(s));
+  applyBackgroundSignals(s, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_PM2', content: 'ok' }] } });
+  registerFg(s, 'bbzP2', 'toolu_PM2');
+  assert.equal(s.query.calls.length, 0, '出过结果的不再转');
+  registerFg(s, 'bbzP3', 'toolu_PM3');
+  assert.deepEqual(s.query.calls, ['toolu_PM3']);
+  await tick();
+  assert.equal(s.liveTasks.get('bbzP3').fg, true, '失败的待移不改簿记');
+});
+await check('回合结束 / 换了世代 / 已按停止 / 跨会话回合:待移不转', async () => {
+  const s = slotOf();
+  sendToolUse(s, 'toolu_PM4');
+  await post({ sessionId: SID }, procsOf(s));
+  resetBackgroundTurnState(s);
+  registerFg(s, 'bbzP4', 'toolu_PM4');
+  assert.equal(s.query.calls.length, 0, '回合收尾清掉了待移');
+  const s2 = slotOf();
+  sendToolUse(s2, 'toolu_PM5');
+  await post({ sessionId: SID }, procsOf(s2));
+  s2.turnEpoch = 1;
+  registerFg(s2, 'bbzP5', 'toolu_PM5');
+  assert.equal(s2.query.calls.length, 0, '世代变了不转');
+  const s3 = slotOf();
+  sendToolUse(s3, 'toolu_PM6');
+  await post({ sessionId: SID }, procsOf(s3));
+  s3.turnStopRequested = true;
+  registerFg(s3, 'bbzP6', 'toolu_PM6');
+  assert.equal(s3.query.calls.length, 0, '已按停止不转');
+  const s4 = slotOf();
+  sendToolUse(s4, 'toolu_PM7');
+  await post({ sessionId: SID }, procsOf(s4));
+  s4.runtimeTurn = { ended: false, tag: { xsMessageId: 'm', key: 'k' } };
+  registerFg(s4, 'bbzP7', 'toolu_PM7');
+  assert.equal(s4.query.calls.length, 0, '跨会话回合不转');
+});
+
 console.log('\n六、读历史:工具结果上的 movedToBackground');
 await check('会话文件里被转走那条(toolUseResult 带 backgroundedByUser / timedOutAfterMs)→ movedToBackground + bgTaskId;其余结果不多键', async () => {
   const HASH = '-tmp-r198-proj';
