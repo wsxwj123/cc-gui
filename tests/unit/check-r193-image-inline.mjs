@@ -332,14 +332,23 @@ check('目录外、相对路径、.. 绕出去、符号链接指到外面 → ou
   assert.deepEqual(r2.imageAttach.skipped, [{ name: 'nope.png', reason: 'outside' }]);
 });
 
-check('上传目录的两种写法(符号链接的临时目录 / 真实路径)互相都认', async () => {
+check('上传目录的两种写法:提交原写法或真实路径写法都认;第三种写法(另一条指向上传目录的符号链接)→ outside', async () => {
   const p = await put(up, 'forms.png', PNG);
   const viaReal = join(upReal, 'forms.png');
   const viaLink = join(upLink, 'forms.png');
-  for (const uploadDir of [up, upReal, upLink]) {
-    for (const submitted of [p, viaReal, viaLink]) {
+  // S-1 先按字面判断:提交的写法要在「这次传入的上传目录」或「上传目录的真实路径 upReal」之内才认。
+  // uploadDir 传 upReal / upLink 时,/var 开头的 p 对它们是第三种写法;临时目录不经符号链接时 p 就是 viaReal,照认。
+  const viaVar = root === rootReal ? 1 : 'outside';
+  const expected = [
+    [up, [[p, 1], [viaReal, 1], [viaLink, 'outside']]],
+    [upReal, [[p, viaVar], [viaReal, 1], [viaLink, 'outside']]],
+    [upLink, [[p, viaVar], [viaReal, 1], [viaLink, 1]]],
+  ];
+  for (const [uploadDir, rows] of expected) {
+    for (const [submitted, want] of rows) {
       const r = await inlineImageAttachments(promptWith([submitted]), { uploadDir });
-      assert.equal(r.imageAttach?.inlined, 1, `${uploadDir} ← ${submitted}`);
+      const got = r.imageAttach?.inlined === 1 ? 1 : r.imageAttach?.skipped?.[0]?.reason;
+      assert.equal(got, want, `${uploadDir} ← ${submitted}`);
     }
   }
   assert.equal(await isInsideUploadDir(viaReal, { uploadDir: up }), true);
@@ -348,12 +357,17 @@ check('上传目录的两种写法(符号链接的临时目录 / 真实路径)�
   assert.ok(UPLOAD_DIR.endsWith('cgui-attachments'));
 });
 
-check('只打开判定过的真实路径,带 O_NOFOLLOW;判定后被换成符号链接 → outside', async () => {
+check('只打开判定过的真实路径,带 O_NOFOLLOW;第三种写法不打开;判定后被换成符号链接 → outside', async () => {
   const p = await put(up, 'flags.png', PNG);
   const seen = [];
   const fsImpl = { open: (file, flags) => { seen.push([file, flags]); return fsOpen(file, flags); } };
-  await inlineImageAttachments(promptWith([join(upLink, 'flags.png')]), opts({ fsImpl }));
+  // 提交上传目录原写法下的路径(macOS 上是 /var 开头),打开的是判定过的真实路径(/private/var 开头)
+  await inlineImageAttachments(promptWith([p]), opts({ fsImpl }));
   assert.deepEqual(seen, [[join(upReal, 'flags.png'), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW]]);
+  // 经另一条指向上传目录的符号链接提交(第三种写法):按字面就不在上传目录内 → outside,不打开
+  const third = await inlineImageAttachments(promptWith([join(upLink, 'flags.png')]), opts({ fsImpl }));
+  assert.deepEqual(third.imageAttach, { inlined: 0, skipped: [{ name: 'flags.png', reason: 'outside' }] });
+  assert.equal(seen.length, 1, '第三种写法不打开');
   // 模拟「判定之后、打开之前被换成符号链接」:真实路径函数把它报成自己,打开时 O_NOFOLLOW 拒绝
   const outsidePng = await put(outsideDir, 'swap-target.png', PNG);
   const swapped = join(upReal, 'swapped.png');
@@ -361,7 +375,6 @@ check('只打开判定过的真实路径,带 O_NOFOLLOW;判定后被换成符号
   const lyingRealpath = async (x) => (x === swapped ? swapped : realpath(x));
   const r = await inlineImageAttachments(promptWith([swapped]), opts({ realpathFn: lyingRealpath }));
   assert.deepEqual(r.imageAttach.skipped, [{ name: 'swapped.png', reason: 'outside' }]);
-  assert.ok(p);
 });
 
 check('意外异常 → 原字符串、imageAttach undefined、只报不带路径的错误标记', async () => {
@@ -408,6 +421,67 @@ check('Windows 模拟:改写模块端到端(不加 O_NOFOLLOW,另一个盘不打
   assert.ok(!JSON.stringify(r.imageAttach).includes('\\'));
   await rm(join(disk, 'shot one.png'));
   await rmdir(disk);
+});
+
+// ---- S-1:先按字面判断在不在上传目录,不在就不碰文件系统(安全审计「重要 1」)----
+// 真实路径函数换成只记录调用的假函数:目录外的提交路径(及其上一级)一次都不能出现在记录里。
+check('S-1 Windows 模拟:网络共享、设备路径、.. 绕出去、另一个盘 → outside,不取真实路径、不打开;目录内照常', async () => {
+  const winUp = W.join('C:\\', 'Users', 'u', 'AppData', 'Local', 'Temp', 'cgui-attachments');
+  const realpathCalls = [];
+  const recordingRealpath = async (p) => { realpathCalls.push(p); return p; };
+  const ctlFile = await put(outsideDir, 's1-win-ctl.png', PNG);
+  const opened = [];
+  // 只记录;真要打开时一律映射到本测试自建目录里的同一张图
+  const fsImpl = { open: (file, flags) => { opened.push(file); return fsOpen(ctlFile, flags); } };
+  const o = { uploadDir: winUp, pathModule: W, realpathFn: recordingRealpath, fsImpl, platform: 'win32' };
+  const outsidePaths = [
+    '\\\\host\\share\\x.png',
+    '//host/share/x.png',
+    '\\\\?\\UNC\\host\\share\\x.png',
+    '\\\\.\\pipe\\x.png',
+    `${winUp}\\..\\..\\x.png`,
+    'D:\\x.png',
+  ];
+  const prompt = promptWith(outsidePaths);
+  const r = await inlineImageAttachments(prompt, o);
+  assert.equal(r.content, prompt);
+  assert.deepEqual(r.imageAttach, { inlined: 0, skipped: outsidePaths.map(() => ({ name: 'x.png', reason: 'outside' })) });
+  assert.deepEqual(realpathCalls, [winUp], '只对上传目录本身取过真实路径');
+  assert.deepEqual(opened, [], '不打开');
+  // 对照:上传目录内的路径照常取真实路径、打开、带上
+  const inside = `${winUp}\\ok.png`;
+  const ok = await inlineImageAttachments(promptWith([inside]), o);
+  assert.deepEqual(ok.imageAttach, { inlined: 1, skipped: [] });
+  assert.deepEqual(realpathCalls, [winUp, winUp, inside]);
+  assert.deepEqual(opened, [inside]);
+});
+
+check('S-1 POSIX:/etc 下、<上传目录>/../outside、目录外不存在的文件 → outside,不取真实路径、不打开;目录内两种写法照带', async () => {
+  const realpathCalls = [];
+  const recordingRealpath = (p) => { realpathCalls.push(p); return realpath(p); };
+  const opened = [];
+  const fsImpl = { open: (file, flags) => { opened.push(file); return fsOpen(file, flags); } };
+  const o = opts({ realpathFn: recordingRealpath, fsImpl });
+  await put(outsideDir, 'x.png', PNG); // 让 <上传目录>/../outside/x.png 真实存在
+  const outsidePaths = ['/etc/passwd.png', `${up}/../outside/x.png`, join(outsideDir, 's1-nope.png')];
+  // /etc/passwd 本身不是图片候选:按既有规则不读、不进 skipped;一起提交,确认它同样没被拿去取真实路径
+  const prompt = promptWith(['/etc/passwd', ...outsidePaths]);
+  const r = await inlineImageAttachments(prompt, o);
+  assert.equal(r.content, prompt);
+  assert.deepEqual(r.imageAttach, {
+    inlined: 0,
+    skipped: [{ name: 'passwd.png', reason: 'outside' }, { name: 'x.png', reason: 'outside' }, { name: 's1-nope.png', reason: 'outside' }],
+  });
+  assert.deepEqual(realpathCalls, [up], '只对上传目录本身取过真实路径');
+  assert.deepEqual(opened, [], '不打开');
+  // 对照:上传目录内的正常文件,原写法与真实路径写法各一,照常复核真实路径并带上
+  await put(up, 's1-ok.png', PNG);
+  const viaUp = join(up, 's1-ok.png');
+  const viaReal = join(upReal, 's1-ok.png');
+  const ok = await inlineImageAttachments(promptWith([viaUp, viaReal]), o);
+  assert.deepEqual(ok.imageAttach, { inlined: 2, skipped: [] });
+  assert.deepEqual(realpathCalls, [up, up, viaUp, viaReal]);
+  assert.deepEqual(opened, [viaReal, viaReal]);
 });
 
 // ---- 运行 ----

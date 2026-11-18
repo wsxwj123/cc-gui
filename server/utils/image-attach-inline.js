@@ -3,7 +3,11 @@
 // 改成「文字块 + 图片块」数组后每张图都到模型(S4、S8、S12)。本模块只做改写,不接入发送流程。
 //
 // 安全要点(路径来自请求):
-//   - 先取真实路径并判定在上传目录内,再打开;只打开判定过的真实路径(能用就加 O_NOFOLLOW);
+//   - 先只看字面:提交的路径按 pathModule.resolve 规范化后,必须在上传目录的原写法或它的真实路径之内;
+//     都不在就直接算目录外,不取真实路径、不打开、不取信息(Windows 上对 \\主机\共享、\\.\pipe\… 取真实路径
+//     会先去连那台主机 / 那个命名管道)。上传目录本身的真实路径在开头取一次(那是应用自己的目录);
+//   - 字面在内的,再取真实路径复核,必须仍在上传目录的真实路径内(防 .. 与符号链接绕出去),之后才打开;
+//     只打开判定过的真实路径(能用就加 O_NOFOLLOW);
 //   - 大小、是否普通文件、内容都从打开的句柄取,不按路径读第二次;超过上限在读内容之前拒绝;
 //   - skipped[].name 只取提交路径最后一段,返回值里不出现任何目录;
 //   - 任何未预期的异常都退回原字符串,只报一个不带路径的错误标记。
@@ -159,9 +163,15 @@ export function imageStructureOk(buf, mediaType) {
 
 const callAsync = (fn, ...args) => Promise.resolve().then(() => fn(...args));
 
+// 判定顺序:① 不是绝对路径 → outside;② 只看字面:规范化后既不在上传目录的原写法内、也不在它的真实路径内
+// → outside,到此为止不碰文件系统(经第三种写法,例如另一条指向上传目录的符号链接,提交的也算目录外);
+// ③ 取真实路径复核,必须在上传目录的真实路径内;取不到真实路径时按它的上一级分 missing / unreadable / outside。
 async function classifyPath(submitted, ctx) {
   const { pathModule, realpathFn, uploadDir, uploadReal } = ctx;
   if (!pathModule.isAbsolute(submitted)) return { reason: 'outside' };
+  const literallyInside = isPathInsideWith(pathModule, submitted, uploadDir)
+    || (!!uploadReal && isPathInsideWith(pathModule, submitted, uploadReal));
+  if (!literallyInside) return { reason: 'outside' };
   let real;
   try {
     real = await callAsync(realpathFn, submitted);
