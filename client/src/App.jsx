@@ -196,7 +196,7 @@ import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
 import { SCROLL_SAVED_AT_BOTTOM, advanceScrollTransaction, beginScrollTransaction, clampScrollTop, keyRequestsReading, parseSavedScroll, resizeScrollTop, scrollPersistAllowed, scrollValueToWrite, setIfChanged, shouldPauseAutoScroll, shouldShowReturnToBottom } from './utils/scroll.js';
-import { resolveSessionTitle, sessionRowTooltip } from './utils/sessionTitle.js';
+import { resolveSessionTitle, resolveLatestSessionTitle, findLoadedSession, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
 import { subscribeAgentsActive } from './utils/agentsActivePoller.js';
@@ -224,11 +224,12 @@ const snapshotDeps = {
 // Esc cancels). Empty value reverts to the auto firstPrompt. Drafts (no stable
 // sessionId yet) can't be renamed — the pencil is hidden until the first send.
 function EditableSessionTitle({ session }) {
-  const customTitles = useStore((s) => s.customTitles);
-  const autoTitles = useStore((s) => s.autoTitles);
   const setCustomTitle = useStore((s) => s.setCustomTitle);
   const sid = session?.sessionId;
-  const resolved = resolveSessionTitle(session, sid && customTitles[sid], sid && autoTitles[sid]);
+  // r194:手里的 session 是打开那一刻存下的对象 —— 从完成浮条 / 后台代理面板打开时只有编号,
+  // 从侧栏打开时是当时的列表项快照(之后改名,快照里旧的 customTitle 会压过新名字)。
+  // 改成按编号取已加载列表里最新的那一项再解析(与侧栏同口径);选择器返回字符串,列表刷新后跟着变。
+  const resolved = useStore((s) => resolveLatestSessionTitle(s, session));
   const display = resolved.slice(0, 80) || '会话详情';
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
@@ -2029,7 +2030,9 @@ export const FORK_RUNNING_CONFIRM =
 // 源会话显式 pin > 侧栏元数据 model > 全局兜底;effort/权限模式照搬。
 export function adoptFork(st, srcSession, newSessionId) {
   const srcId = srcSession.sessionId;
-  const baseTitle = (resolveSessionTitle(srcSession, st.customTitles[srcId], st.autoTitles?.[srcId]) || '会话')
+  // r194:源会话对象可能只有编号(从会话面板的消息上分叉,面板手里是从浮条打开的对象),
+  // 按编号取已加载列表里最新的那一项解析,与侧栏显示的名字一致。
+  const baseTitle = (resolveLatestSessionTitle(st, srcSession) || '会话')
     .slice(0, 60).trim().replace(/分支\d+$/, '').trim();
   const reBranch = new RegExp('^' + baseTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '分支(\\d+)$');
   let maxN = 0;
@@ -3805,11 +3808,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // r148 P1:本会话的标题改成订阅。原来在渲染时直接读 store(下面子代理视图的「母会话」标题、导出按钮的文件名),
   // 标题变了它自己不会重渲染,全靠上面那个整库订阅顺带刷新;整库订阅去掉后必须自己订。
   // 选择器返回字符串(基元),值没变不触发重渲染。
-  const sessionTitle = useStore((s) => resolveSessionTitle(
-    selectedSession,
-    s.customTitles[selectedSession?.sessionId],
-    s.autoTitles[selectedSession?.sessionId],
-  ));
+  // r194:按编号取已加载列表里最新的那一项解析(selectedSession 可能只有编号或是旧快照),列表刷新后跟着变。
+  const sessionTitle = useStore((s) => resolveLatestSessionTitle(s, selectedSession));
   // /goal 当前是否还挂着:取历史里【最后一条】goal 记录。达成与手动清除都写 met:true
   // (CLI 的写入函数只有这一种表达)。用户需求:目标条要像计划卡一样常驻输入框上方,
   // 不能只在消息流里出现、一滚动就消失。因此这里取最后一条 goal 作为常驻条数据,
@@ -12838,11 +12838,8 @@ function MobileMenu({ setRightPanel, onClose, updateNotice = null }) {
   const activeSession = (paneSessions && paneSessions[activeTabIndex]) || selectedSession;
   const permKey = queueKeyFor(activeSession);
   // r148 P1:导出文件名用的会话标题改成订阅(原来渲染时现读 store,见 SessionDetail 的 sessionTitle)。
-  const activeSessionTitle = useStore((s) => resolveSessionTitle(
-    activeSession,
-    s.customTitles[activeSession?.sessionId],
-    s.autoTitles[activeSession?.sessionId],
-  ));
+  // r194:按编号取已加载列表里最新的那一项解析(与侧栏同口径)。
+  const activeSessionTitle = useStore((s) => resolveLatestSessionTitle(s, activeSession));
 
   // r26-F2:手机菜单模型行走与桌面同一解析链 resolveSelectorModel(pin→元数据→全局,
   // 每环过 provider 白名单 + context1m 后缀)——裸 `pin || global` 会把 guard 拒掉的
@@ -13031,12 +13028,15 @@ function CompletionToasts() {
   const jump = (t) => {
     const st = useStore.getState();
     const idx = st.paneSessions.slice(0, st.paneCount).findIndex((p) => p?.sessionId === t.sessionId);
+    // r194:点击时按编号取已加载列表里最新的会话对象(浮条带的是推浮条那一刻的,可能只有编号),
+    // 找不到才用浮条带的。跳过去后会话面板手里是完整对象,标题与侧栏同口径。
+    const target = (t.sessionId && findLoadedSession(st, t.sessionId, t.projectHash || t.session?.projectHash)) || t.session;
     if (idx >= 0) {
       st.setActiveTabIndex(idx);
-    } else if (t.session?.sessionId) {
+    } else if (target?.sessionId) {
       // 不在任何窗格:替换当前聚焦窗格的会话
-      if (st.activeTabIndex === 0) st.setSelectedSession(t.session);
-      else st.setPaneSession(st.activeTabIndex, t.session);
+      if (st.activeTabIndex === 0) st.setSelectedSession(target);
+      else st.setPaneSession(st.activeTabIndex, target);
     }
     removeToast(t.id);
   };
@@ -13194,6 +13194,9 @@ export default function App() {
   // 修正批#1b:顶栏选择器(Provider/模型/力度/远程)作用于「活跃窗格」的会话——
   // 未分屏 = selectedSession;分屏 = 聚焦格。返回既有对象引用,选择器稳定。
   const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || s.selectedSession);
+  // r194:顶栏会话名按编号取已加载列表里最新的那一项解析(与侧栏同口径;headerPane 可能只有编号或是旧快照)。
+  // 选择器返回字符串,改名、自动标题生成、列表刷新后都跟着变(U6:顶栏也要跟随 AI 自动标题)。
+  const headerPaneTitle = useStore((s) => (headerPane ? resolveLatestSessionTitle(s, headerPane) : ''));
   const headerPermKey = headerPane ? queueKeyFor(headerPane) : null;
   // r80(A1):模型选择器在 Home(无会话)时改落 HOME_DRAFT_KEY —— null 分支的
   // setModelFor 只改内存全局、零落盘,重启必回全局默认(BUGREPORT 档 G)。
@@ -13876,10 +13879,9 @@ export default function App() {
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const paneSessions = useStore((s) => s.paneSessions);
   const paneCount = useStore((s) => s.paneCount);
-  const customTitles = useStore((s) => s.customTitles);
-  // U6:顶栏"项目/会话标题"也要跟随 AI 自动标题(custom > auto > firstPrompt),
-  // 之前只读 customTitles → 自动标题生成后顶栏仍显示首条消息。
-  const autoTitles = useStore((s) => s.autoTitles);
+  // r194:顶栏与手机顶栏的会话名改成各自订阅一个字符串(headerPaneTitle、mobileSelTitle,
+  // 都走 resolveLatestSessionTitle,已含 U6「跟随 AI 自动标题」),原来这里的 customTitles / autoTitles
+  // 两张整表订阅只给那两处用,已去掉 —— 任何一个会话改名不再让整个 App 重渲染。
   // (P2.1) 顶栏会话级选择器已迁 composer:App 根不再需要 activeSession/permKey
   // (各 pane 的 composer 用自己的 sessionQueueKey/sessionId)。
 
@@ -13982,8 +13984,10 @@ export default function App() {
     useStore.setState({ messages: [] });
     st.setPaneMessages(0, []);
   };
+  // r194:按编号取已加载列表里最新的那一项解析(与侧栏同口径),列表刷新后跟着变。
+  const mobileSelTitle = useStore((s) => (mobileSelSession ? resolveLatestSessionTitle(s, mobileSelSession) : ''));
   const mobileTitle = mobileSelSession
-    ? (resolveSessionTitle(mobileSelSession, customTitles[mobileSelSession.sessionId], autoTitles[mobileSelSession.sessionId]).slice(0, 24) || '新会话')
+    ? (mobileSelTitle.slice(0, 24) || '新会话')
     : 'Claude Code';
 
   const uiFontScale = useStore((s) => s.uiFontScale);
@@ -14254,7 +14258,7 @@ export default function App() {
             <>
               <span className="text-ink-ghost shrink-0">/</span>
               <span className="text-[11px] text-ink-muted font-body truncate min-w-0 max-w-[180px]">
-                {resolveSessionTitle(headerPane, customTitles[headerPane.sessionId], autoTitles[headerPane.sessionId]).slice(0, 36) || headerPane.sessionId?.slice(0, 8) || '新会话'}
+                {headerPaneTitle.slice(0, 36) || headerPane.sessionId?.slice(0, 8) || '新会话'}
               </span>
             </>
           )}

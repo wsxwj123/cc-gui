@@ -4,7 +4,7 @@ import { readFileSync, statSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { homedir } from 'os';
 import { renameSession } from '@anthropic-ai/claude-agent-sdk';
-import { broadcast } from '../broadcast.js';
+import { broadcast, broadcastSessionFileChange } from '../broadcast.js';
 import { findSessionFile, isSessionIdShape } from '../services/session-reader.js';
 import { applySessionSyncPut, normalizeSessionSync, SYNC_KINDS } from '../session-sync.js';
 import { ensureBackup } from '../utils/guarded-json.js';
@@ -625,17 +625,21 @@ router.get('/prefs/custom-titles', async (_req, res) => {
 // 表达清除 —— 同一文件后写胜出,读侧把空串当作"无自定义标题"(见 takeTitleLine),
 // 否则清空后 jsonl 里的旧标题会把它顶回来。
 // 任何一步失败(会话未落盘/文件已删/权限)都只记日志:prefs 已经写成功,改名请求不该失败。
+// r194:返回写进去的会话 jsonl 路径(调用方据此广播 file-change);没写成(会话不存在 / 写入失败)返回 null。
 export async function writeJsonlTitle(sessionId, title) {
   try {
     if (title) {
       await renameSession(sessionId, title);
-      return;
+      // 已经写成功;取路径只为广播,取不到就不广播,不算写入失败(不记"未能写入"日志)。
+      return (await findSessionFile(sessionId).catch(() => null)) || null;
     }
     const file = await findSessionFile(sessionId);
     if (!file) throw new Error('session file not found');
     await appendFile(file, JSON.stringify({ type: 'custom-title', customTitle: '', sessionId }) + '\n');
+    return file;
   } catch (e) {
     console.warn(`[prefs] 标题未能写入会话 jsonl(${sessionId}):${e.message}`);
+    return null;
   }
 }
 
@@ -662,8 +666,12 @@ router.put('/prefs/custom-titles', async (req, res) => {
       await savePrefs(prefs);
       return m;
     });
-    await writeJsonlTitle(sessionId, (title || '').trim());
+    const jsonlFile = await writeJsonlTitle(sessionId, (title || '').trim());
     broadcast({ type: 'custom-titles', titles: map });
+    // r194:会话 jsonl 改了 → 自己广播 file-change(同其它改写会话记录的接口,见 broadcast.js 的说明)。
+    // 打包版后端不监听会话目录,不广播的话页面的会话列表不刷新,列表项里旧的 custom-title
+    // 会一直压过偏好里的新名字(侧栏、会话标题都停在旧名)。没写成(草稿 / 文件已删 / 写入失败)不广播。
+    if (jsonlFile) broadcastSessionFileChange(jsonlFile);
     res.json({ ok: true, titles: map });
   } catch (e) {
     res.status(500).json({ error: '写入标题失败：' + e.message });
