@@ -19,6 +19,7 @@ import { homedir, tmpdir } from 'os';
 import { isLocalReq, requestHostname } from '../services/auth.js';
 import { findSessionFile } from '../services/session-reader.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
+import { sessionTitleLinesAfter } from '../utils/session-title-carry.js';
 import {
   claudeSpawn, cleanChildEnv, safeModelArg, closePersistentForSession, getActiveChatProcesses,
 } from './chat.js';
@@ -185,7 +186,9 @@ const OPS = {  trim: {
       if (cutIdx === -1) {
         return { ok: false, status: 404, code: SESSION_NOT_FOUND, error: '会话里找不到该锚点' };
       }
-      const kept = lines.slice(0, cutIdx);
+      // 截掉段(cutIdx 起、含该行)里的标题类记录按组取最新一条原样接回末尾(理由见
+      // session-title-carry.js);没有时补回空数组,结果与只截断逐字节相同。
+      const kept = lines.slice(0, cutIdx).concat(sessionTitleLinesAfter(lines, cutIdx));
       const newContent = normalized(kept.join('\n'));
       const requiresNewSession = !hasRealConversationLine(kept);
       return {
@@ -195,6 +198,8 @@ const OPS = {  trim: {
         requiresNewSession,
         compatibility: pairingIntact(kept) ? 'compatible' : 'unverified',
         affectedRange: { kind: 'lines', fromLine: cutIdx, toLine: lines.length },
+        // 这几项描述截断位置(按 cutIdx 与原文行数推算);截掉段里的标题类记录会被原样补回末尾,
+        // 不从这里扣,也不按补回后的 kept 长度算。
         report: {
           op: 'trim',
           anchor: params.uuid ? { kind: 'uuid', uuid: params.uuid } : { kind: 'fromTimestamp', fromTimestamp: params.fromTimestamp },
