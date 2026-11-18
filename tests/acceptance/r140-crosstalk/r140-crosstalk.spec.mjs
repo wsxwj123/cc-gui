@@ -368,8 +368,11 @@ test('C5 [契约§1.7] 排队消息的排空投递必须落在原会话 A(而不
       await expect.poll(() => runPid(CTL, A.sid), { message: 'A 的桩件进程应已起来', timeout: 25_000 }).not.toBeNull();
       await page.waitForTimeout(1_200);
       await sendPrompt(page, p2);                      // A 正在跑 ⇒ 这条必然入队
-      await expect.poll(async () => userBubbleCount(page, p2), {
-        message: '阳性对照:第二条消息应出现在 A 的排队里(排队条画出来)', timeout: 20_000, intervals: [250],
+      // 2026-11-18 重做(REL464-3):排队的消息显示在输入框下面的排队栏里,不画成对话区的用户气泡。原来数气泡,
+      // 要等第一条因桩件被按住而 15 秒初始化超时、页面当场把排队消息发出后才成立 —— 用例一直靠这条绕远的路通过;
+      // r197 起初始化超时这一轮当作还在跑、排队消息等它结束再发,那条路没了。改数排队栏里含这条消息的条目。
+      await expect.poll(async () => page.locator('[data-testid="queue-item"]').filter({ hasText: p2 }).count(), {
+        message: '阳性对照:第二条消息应出现在 A 的排队里(排队栏里有这一条)', timeout: 20_000, intervals: [250],
       }).toBeGreaterThan(0);
       expect(transcriptMentions(A.sid, p2), '阳性对照:还没收尾,这条排队消息不该已经投出去').toBe(0);
 
@@ -385,23 +388,32 @@ test('C5 [契约§1.7] 排队消息的排空投递必须落在原会话 A(而不
       const qKey = await paneKeyContaining(page, bOwnReply(Q.mark));
       expect(qKey, '机制自检:此刻显示的窗格应是 Q').toBe(Q.sid);
 
+      // 2026-11-18 重做(REL464-3):现行规则是「回合在用户不在 A 时收尾,排队的消息不在后台发出,等用户回到 A 时发出」
+      // (排空只在显示着这个会话的窗格里做)。用户已定改成后台也发(r196),届时把这一段改成「在 Q 期间就投进 A」。
+      // 不变的红线:A 的排队消息绝不能进 Q 的会话文件、Q 的窗格。
+      const tq = Date.now();
+      while (Date.now() - tq < 12_000) {
+        expect(transcriptMentions(Q.sid, p2), `A 的排队消息被投进了别的会话(${Q.mark})的会话文件 = 不可撤销的数据污染`).toBe(0);
+        await page.waitForTimeout(1_000);
+      }
+      expect(((await paneText(page, Q.sid)) || '').includes(p2), 'Q 窗格里出现/残留了 A 的排队消息').toBe(false);
+      expect(await userBubbleCount(page, p2), 'Q 里被画进了 A 的排队消息气泡').toBe(0);
+
+      await switchTo(page, A.mark);
       let landedA = 0; let landedQ = 0;
-      const deadline = Date.now() + 45_000;
+      const deadline = Date.now() + 30_000;
       do {
         landedA = transcriptMentions(A.sid, p2);
         landedQ = transcriptMentions(Q.sid, p2);
-        expect(landedQ, `排空把 A 的排队消息投进了别的会话(${Q.mark})的会话文件 = 不可撤销的数据污染`).toBe(0);
+        expect(landedQ, `A 的排队消息被投进了别的会话(${Q.mark})的会话文件 = 不可撤销的数据污染`).toBe(0);
         if (landedA) break;
         await page.waitForTimeout(1_000);
       } while (Date.now() < deadline);
 
-      expect(landedQ, `排空期间,Q 的会话文件里出现了 A 的排队消息(${landedQ} 次)`).toBe(0);
-      expect(landedA, 'A 的回合收尾后,排队的消息没有被投回 A(A 的会话文件里始终没有它)。'
+      expect(landedQ, `Q 的会话文件里出现了 A 的排队消息(${landedQ} 次)`).toBe(0);
+      expect(landedA, '回到 A 之后,排队的消息没有被投回 A(A 的会话文件里始终没有它)。'
         + `明细:A jsonl p1=${transcriptMentions(A.sid, p1)} p2=${landedA};Q jsonl p2=${landedQ};phase=${phaseOf(CTL, A.sid)}`).toBeGreaterThan(0);
       expect(phaseOf(CTL, A.sid), 'A 的桩件没有开第二回合(= 投递没到 A 的进程)').toBe('chunk1');
-      // 用户此刻停在 Q:Q 的窗格/气泡里都不该有它
-      expect(((await paneText(page, Q.sid)) || '').includes(p2), 'Q 窗格里出现/残留了 A 的排队消息').toBe(false);
-      expect(await userBubbleCount(page, p2), 'Q 里被画进了 A 的排队消息气泡').toBe(0);
       results.push(`第${i + 1}轮 PASS`);
     } catch (error) {
       results.push(`第${i + 1}轮 FAIL: ${String(error.message).split('\n')[0]}`);
