@@ -61,7 +61,10 @@ cleanup() {
   done
   while read -r name pid; do if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null || true; fi; done < "$PIDFILE"
 }
-trap cleanup EXIT INT TERM
+# INT / TERM 先退出,由 EXIT 触发清理(原来交给 cleanup,它不退出,「只起实例」的等待循环会接着转,脚本结束不掉)
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cd "$ROOT"
 env HOME="$ROOT/home" USERPROFILE="$ROOT/home" CU_TEST_HOME="$ROOT/home" PORT="$BPORT" \
