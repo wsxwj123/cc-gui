@@ -176,14 +176,18 @@ test.describe('r194 会话名四处一致', () => {
     await rowMenu(page, sessionRows(page).filter({ hasText: c.jia }).first(), '分支会话');
     await expect.poll(async () => await rowTexts(page), { timeout: 10_000, message: '10 秒内侧栏应出现「甲分支1」那一行' }).toContain(c.branch);
     await clickRowWith(page, c.branch);
+    // 分支会话会开成左右分屏(左边是原会话 S,标题仍是「甲」),页面上有两个会话标题:
+    // 读出每个窗格的会话标题,要求其中有一个是「甲分支1」(新会话那一格)。(主会话锁定前修订:原来只读页面上第一个标题,读到的是左边 S 的;期望值不变)
+    const paneTitles = () => page.getByTitle('重命名会话').evaluateAll((bs) => bs.map((b) => { const s = b.parentElement && b.parentElement.querySelector('span'); return s ? s.textContent.trim() : null; }));
     const end = Date.now() + 8_000;
     let snap;
     for (;;) {
-      snap = { title: await readTitle(page), top: await readTopbarName(page) };
+      const titles = await paneTitles();
+      snap = { title: titles.includes(c.branch) ? c.branch : (titles.join(' | ') || null), top: await readTopbarName(page) };
       if (snap.title === c.branch && snap.top === c.branch) break;
       if (Date.now() >= end) break;
       await page.waitForTimeout(150);
     }
-    expect(snap, '打开分支会话后,标题与顶栏会话名都应是「甲分支1」').toEqual({ title: c.branch, top: c.branch });
+    expect(snap, '打开分支会话后,新会话所在窗格的会话标题与顶栏会话名都应是「甲分支1」').toEqual({ title: c.branch, top: c.branch });
   });
 });
