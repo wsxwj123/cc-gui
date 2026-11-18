@@ -90,6 +90,7 @@ import { applyProgrammaticText } from './utils/inputUndo.js';
 import { repairMojibake, insertTextAtCaret } from './utils/mojibake.js';
 import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
+import { isMovedToBackground, parseOutputPath, autoMoveNoticeText } from './utils/movedToBackground.js';
 import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
 import { runHistoryOp, runHistoryOpSettled, stopTurnAndWait, rollbackBusyFor, ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS, ROLLBACK_BUSY_NOTICE } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
@@ -5394,6 +5395,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 引导消息自动落在真实的并入位置、AI 回应成独立新块,终态本来就是对的;而流式期间提前
   // 画的那个气泡贴在上一条用户消息之后、悬在流式块上方 = 错序。所以对话流里它只在回合
   // 结束 reconcile 时从 jsonl 出现;在此之前,它留在队列区换个状态显示。
+  // r198:回车 / 并入那一路(自动)请求把这个会话里正在前台跑的任务「全部」转到后台。结果按归一表决定要不要在窗格里
+  // 提示一行:await 之后核对本窗格还显示着发送时那个会话才提示(不读全局"当前选中");每次发送最多提示一次。
+  const autoMoveToBackground = useCallback(async (sid) => {
+    if (!sid) return;
+    const result = await useStore.getState().moveToBackground(sid);
+    const text = autoMoveNoticeText(result);
+    if (text && getLocalSession()?.sessionId === sid) setProviderSwitchNotice({ text, ownerKey: sid, plain: true, ttlMs: 8000 });
+  }, [getLocalSession]);
   const steerCurrentTurn = useCallback(async (text, { meta = null, steerId, sessionId } = {}) => {
     const body = String(text || '');
     if (!body.trim() || !sessionId || !steerId) return { outcome: 'explicit-reject' };
@@ -5416,6 +5425,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
         // r193:并入的这条有没能带上的图 → 提示给这条并入所在的会话(真会话的键就是 sessionId)。
         showImageAttachNotice(sessionId, response.imageAttach);
+        // r198:并入被接受(Cmd/Ctrl+Enter、排队栏「⚡ 并入」都走这里)→ 请求把前台任务转到后台,模型在同一轮里就能看到
+        // 这条消息。顺序由流程保证:并入的应答回来时消息已交给命令行,之后才发转后台。被拒 / 结果不明不走到这里。
+        void autoMoveToBackground(sessionId);
         return { outcome: 'accepted', pid: response.pid, duplicate: response.duplicate === true };
       }
       const explicit = (r.status === 400 && ['invalid-steer-request', 'malformed-json'].includes(response?.code))
@@ -5423,7 +5435,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         || (r.status === 413 && response?.code === 'request-too-large');
       return { outcome: explicit ? 'explicit-reject' : 'ambiguous', code: response?.code };
     } catch { return { outcome: 'ambiguous' }; }
-  }, [reportAttachmentSidecarResult, showImageAttachNotice]);
+  }, [reportAttachmentSidecarResult, showImageAttachNotice, autoMoveToBackground]);
   const steerCurrentTurnRef = useRef(null);
   useEffect(() => { steerCurrentTurnRef.current = steerCurrentTurn; }, [steerCurrentTurn]);
 
@@ -5533,6 +5545,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         return;
       }
       onQueued?.(queued);
+      // r198 回车(用户选定的方案甲):消息照旧进排队栏(能改能撤,条数 / 顺序 / 状态都不因此改变),同时请求把这个会话里
+      // 正在前台跑的任务「全部」转到后台 —— 转走后这一轮不再被命令挡住,结束后排队消息照现有规则发出。只在会话真在跑
+      // (本地流或后台进程)时请求:只是回退进行中、隐藏消息、还没有会话编号的草稿都不请求。Cmd/Ctrl+Enter 在下面并入
+      // 被接受后由 steerCurrentTurn 请求,这里不重复发。
+      if (!opts.steer && !hiddenUserMessage && (streamingRef.current || backgroundPidRef.current)) {
+        void autoMoveToBackground(getLocalSession()?.sessionId);
+      }
       // Cmd/Ctrl+Enter:先入队保底，再调用 CLI/SDK 的实时输入队列。连接中、回合刚收尾或
       // provider 不支持时，明确拒绝才回 queued；任何模糊结果都成为持久 barrier。
       if (opts.steer && !hiddenUserMessage) {
@@ -6743,6 +6762,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // task_started 建立 task_id↔tool_use_id 映射,供只带 task_id 的 task_updated 兜底。
           if (event.type === 'system' && event.subtype === 'task_started' && event.task_id && event.tool_use_id) {
             taskIdToToolUse[event.task_id] = event.tool_use_id;
+            // r198:主线程里登记为前台的任务(命令开始约 3 秒后命令行才登记)→ 卡片出现「移到后台」按钮。
+            if (event.is_backgrounded === false && !event.parent_task_id) {
+              useStore.getState().markFgTask(event.tool_use_id, { sessionId: streamOwnerSid(), taskId: event.task_id });
+            }
             // taskManaged:该 agent 有 task_notification 权威终态事件收尾,持久钉在条目上(跨回合/
             // reattach 存活,不像 per-stream Set 重连即丢)。顶层 result 兜底一律不碰它;finally 仅在
             // 【用户主动停止】时才收(进程被杀)。根治"后台化子代理(run_in_background,如深度调研)派发后
@@ -6826,6 +6849,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               const _fresh = rebuildWorkflowEntry({ toolUseId: event.tool_use_id, taskId: event.task_id || null, sessionId: streamOwnerSid() });
               if (_fresh) _st.upsertAgent(event.tool_use_id, { ..._fresh, wfProgress: event.workflow_progress, wfProgressAt: Date.now() });
             }
+          }
+          // r198:任务被转到后台(task_updated 的 is_backgrounded)或结束了 → 不再是前台任务,按钮收起。task_updated 不带
+          // tool_use_id:先查本流的映射,跨回合 / 重新接上后映射为空时按任务编号查前台任务表。
+          if (event.type === 'system' && event.task_id && (event.subtype === 'task_notification'
+              || (event.subtype === 'task_updated' && (event.patch?.is_backgrounded === true || ['completed', 'failed', 'killed'].includes(event.patch?.status))))) {
+            const _fg = useStore.getState().fgTasks;
+            const _fgId = event.tool_use_id || taskIdToToolUse[event.task_id]
+              || Object.keys(_fg).find((k) => _fg[k] && _fg[k].taskId === event.task_id);
+            if (_fgId) useStore.getState().clearFgTask(_fgId);
           }
           if (event.type === 'system' && event.subtype === 'task_notification') {
             const tuid = event.tool_use_id || (event.task_id ? taskIdToToolUse[event.task_id] : null);
@@ -7291,12 +7323,37 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     ...(pm ? { outputPath: pm[1] } : {}),
                   });
                 }
+                // r198:出了结果 = 不再挡在前台。被转到后台的前台命令按结构化字段认(tool_use_result 是整条消息的,只有一个
+                // 工具结果时才读):结果里带 movedToBackground / bgTaskId(卡片显示「已移到后台」),并按后台命令登记进程面板。
+                store.clearFgTask(block.tool_use_id);
+                const _turSingle = (Array.isArray(event.message.content) ? event.message.content : []).filter((b) => b && b.type === 'tool_result').length === 1;
+                const _tur = _turSingle ? event.tool_use_result : null;
+                const movedBg = isMovedToBackground(_tur);
+                const movedFields = movedBg
+                  ? { movedToBackground: true, bgTaskId: typeof _tur.backgroundTaskId === 'string' ? _tur.backgroundTaskId : null }
+                  : {};
+                if (movedBg) {
+                  const _tc = currentToolCalls.find((tc) => tc.id === block.tool_use_id);
+                  const _cur = store.bgTasks[block.tool_use_id];
+                  const _path = parseOutputPath(extractToolResultText(block.content));
+                  store.upsertBgTask(block.tool_use_id, {
+                    command: _cur?.command || _tc?.input?.command || '',
+                    description: _cur?.description || _tc?.input?.description || '',
+                    status: 'running',
+                    startedAt: _cur?.startedAt || Date.now(),
+                    sessionId: _cur?.sessionId || streamOwnerSid(),
+                    shellId: movedFields.bgTaskId || _cur?.shellId || null,
+                    ...(_path ? { outputPath: _path } : {}),
+                    moved: true,
+                  });
+                }
                 // Also patch the ordered blocks list so the in-place card shows result.
                 const resultPayload = {
                   toolUseId: block.tool_use_id,
                   content: extractToolResultText(block.content),
                   images: extractToolResultImages(block.content),
                   isError: block.is_error || false,
+                  ...movedFields,
                 };
                 orderedBlocks = orderedBlocks.map((b) =>
                   b.type === 'tool_use' && b.toolCall?.id === block.tool_use_id
@@ -7311,6 +7368,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
                     content: extractToolResultText(block.content),
                     images: extractToolResultImages(block.content),
                     isError: block.is_error || false,
+                    ...movedFields,
                   }};
                   scheduleStreamCommit(SC_TOOLS);
                   // r151w:发送类工具的回执在结果到达的这一刻就记下。CLI 的会话记录里不一定写 tool_result
@@ -10326,7 +10384,8 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
       {!(ctxOverflow && ctxOverflow.ownerKey === sessionQueueKey) && shownNotice && (
         <div className="shrink-0 mx-6 mt-2 px-3 py-2 rounded-md bg-amber-50 border border-amber-200 flex items-start gap-2 animate-fade-up">
           <span className="text-amber-700 text-[12px] font-body leading-snug flex-1">
-            🔄 {shownNotice.text}
+            {/* r198:plain 的提示(转到后台的结果)不带图标,整行就是提示原文 */}
+            {shownNotice.plain ? null : '🔄 '}{shownNotice.text}
           </span>
           {/* 三振出局(attach 连败 ATTACH_MAX_TRIES 次)后的手动重连入口。原文案让用户
               "切走再切回"才能重试 —— 那是把复位动作交给用户去猜。点这里等价:清该 pid
@@ -13856,6 +13915,8 @@ export default function App() {
           new Set(running.map((a) => a.cwd).filter(Boolean)),
         );
         setWaitingKeys(waitingSessionKeys(d.agents));
+        // r198:前台任务表与被转走命令的进程面板条目按轮询对账(切回 / 刷新 / 事件丢了之后以它为准;没变化不 set)
+        useStore.getState().reconcileLiveTurns(d.agents);
       } catch {}
     };
     const unsubscribe = subscribeAgentsActive(poll);
