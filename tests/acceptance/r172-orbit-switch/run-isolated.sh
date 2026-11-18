@@ -63,7 +63,10 @@ cleanup() {
   done
   while read -r name pid; do if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then kill -9 "$pid" 2>/dev/null || true; fi; done < "$PIDFILE"
 }
-trap cleanup EXIT INT TERM
+# INT / TERM 先退出,由 EXIT 触发清理(原来交给 cleanup,它不退出,「只起实例」的等待循环会接着转,脚本结束不掉)
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # 后端:端口一律由本脚本写死(不读继承来的 PORT);ANTHROPIC_* 全部剥掉;预加载只加在后端进程上。
 cd "$ROOT"
