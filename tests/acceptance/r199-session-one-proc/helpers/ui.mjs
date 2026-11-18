@@ -35,7 +35,8 @@ export async function sendPrompt(page, text) {
   await box.fill(text);
   await box.press('Enter');
 }
-export const stopButton = (page) => page.getByRole('button', { name: /^停止/ });
+// 锁定前主会话修订(2026-11-19):按名字「停止」开头会先命中对话里后台命令卡片的停止键(停掉一条后台命令、不打断这一轮,页面也不记「已停止」),U21 因此时红时绿。改按主停止键的固定挂点。
+export const stopButton = (page) => page.locator('[data-cgui="stop-btn"]');
 export const queueItems = (page) => page.locator('[data-testid="queue-item"]');
 export const bodyText = (page) => page.evaluate(() => document.body.innerText || '');
 /** 每 150 毫秒数一次,直到整页可见文字里出现 phrase(提示可能是限时的小提示);返回 { seen, ms }。 */
@@ -63,7 +64,16 @@ const isChatPost = (req) => { if (req.method() !== 'POST') return false; try { r
 const promptOf = (req) => { try { const j = req.postDataJSON(); if (j && j.prompt != null) return String(j.prompt); } catch { /* 不是 JSON */ } return String(req.postData() || ''); };
 export function trackChat(page) {
   const posts = []; const resps = [];
-  page.on('request', (req) => { if (isChatPost(req)) posts.push({ t: Date.now(), prompt: promptOf(req) }); });
+  // 锁定前主会话修订(2026-11-19):另记页面去拿回合流的请求(GET /api/chat/<进程号>/stream)。
+  // 「页面认出并接回了这一轮」以它为准 —— 有后台命令时主停止键一直亮着,停止键可见不能说明页面接住了这一轮。
+  const streams = [];
+  page.on('request', (req) => {
+    if (isChatPost(req)) posts.push({ t: Date.now(), prompt: promptOf(req) });
+    if (req.method() === 'GET') {
+      const m = /\/api\/chat\/([^/?#]+)\/stream/.exec(req.url());
+      if (m) streams.push({ t: Date.now(), pid: decodeURIComponent(m[1]) });
+    }
+  });
   page.on('response', async (res) => {
     const req = res.request();
     if (!isChatPost(req)) return;
@@ -71,7 +81,8 @@ export function trackChat(page) {
     try { body = await res.json(); } catch { /* 不是 JSON */ }
     resps.push({ t: Date.now(), status: res.status(), body, prompt: promptOf(req) });
   });
-  return { posts, resps, postsWith: (s) => posts.filter((p) => p.prompt.includes(s)), statusesOf: (s) => resps.filter((r) => r.prompt.includes(s)).map((r) => r.status), respWith: (s) => resps.filter((r) => r.prompt.includes(s)) };
+  return { posts, resps, streams, postsWith: (s) => posts.filter((p) => p.prompt.includes(s)), statusesOf: (s) => resps.filter((r) => r.prompt.includes(s)).map((r) => r.status), respWith: (s) => resps.filter((r) => r.prompt.includes(s)),
+    streamsOf: (pid, since = 0) => streams.filter((x) => x.pid === String(pid) && x.t >= since) };
 }
 /** 拦 /api/agents/active:state.hide 为真时把该会话的 chat-process 条目拿掉(页面看不到这一轮在跑)。 */
 export async function hideActive(page, sid) {

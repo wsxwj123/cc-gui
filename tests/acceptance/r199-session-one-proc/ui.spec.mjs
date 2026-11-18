@@ -55,12 +55,18 @@ test('U2 [第8条] 页面没认出这一轮在跑、消息已排队后点停止:
     const msg = `U2MSG${uniq()}`;
     await sendPrompt(page, msg);
     expect((await waitPhrase(page, HINT_NEW, 15_000)).seen, '前置:出现排队提示').toBe(true);
-    await expect(stopButton(page).first(), '页面接回这一轮、出现停止键').toBeVisible({ timeout: 10_000 });
+    // 锁定前主会话修订(2026-11-19):被 409 退回之后放开轮询,等页面真的接回这一轮(发出该进程的回合流请求)再点停止。
+    // 一直拦着轮询的话页面手上没有可停的进程,点停止什么也不做,那一轮会自己跑完,本条测不到「停止」;
+    // 有后台命令时主停止键一直亮着,停止键可见不能当「接回」的判据。
+    const tUnhide = Date.now();
+    ctx.hide.hide = false;
+    const reattached = await waitFor(() => ctx.tr.streamsOf(ctx.prime.pid1, tUnhide)[0] || null, 10_000, 100);
+    expect(Boolean(reattached), '前置:放开轮询后页面接回这一轮(发出该进程的回合流请求)').toBe(true);
     await stopButton(page).first().click();
     const ended = await waitFor(() => autoRecs(T.sid, 'end')[0] || null, 45_000, 100);
     await expect(replyOf(page, msg), '那一轮停下后排队的这条自动发出、回复正常显示').toBeVisible({ timeout: 40_000 });
     const posts = ctx.tr.postsWith(msg);
-    expect({ turnStopped: Boolean(ended), statuses: ctx.tr.statusesOf(msg), lastPostAfterTurnEnded: Boolean(ended) && posts.length >= 2 && posts[posts.length - 1].t >= ended.t - 300, processCount: osProcs(T.sid).length })
+    expect({ turnStopped: Boolean(ended) && ended.interrupted === true, statuses: ctx.tr.statusesOf(msg), lastPostAfterTurnEnded: Boolean(ended) && posts.length >= 2 && posts[posts.length - 1].t >= ended.t - 300, processCount: osProcs(T.sid).length })
       .toEqual({ turnStopped: true, statuses: [409, 200], lastPostAfterTurnEnded: true, processCount: 1 });
   } finally { if (T) await cleanupSession(T); }
 });
@@ -152,12 +158,16 @@ async function stoppedProcess(page, name) {
   await sleep(8_000);
   const goFile = `${T.tag}-go`;
   writeScript(`${T.tag}-slow`, [{ say: `R199 ${name} 慢的一轮` }, { waitFile: goFile }]);
-  await sendPrompt(page, `${name.toUpperCase()}SLOW${uniq()} R199S:${T.tag}-slow`);
-  await expect(stopButton(page).first(), '前置:慢的一轮在跑,出现停止键').toBeVisible({ timeout: 20_000 });
+  const slowMark = `${name.toUpperCase()}SLOW`;
+  await sendPrompt(page, `${slowMark}${uniq()} R199S:${T.tag}-slow`);
+  // 锁定前主会话修订(2026-11-19):等这条慢消息的发送应答(200)回来、页面记下这一轮的进程号之后再点停止。
+  // 原写法只等停止键可见:有后台命令时停止键一直亮着,会在发送请求发出之前就点下去,停止什么也没做
+  // (不发停止请求、也不记「已停止」),第 21 条的前置根本没成立。改后停止必须真的送到命令行,否则前置失败。
+  expect(await waitFor(() => tr.respWith(slowMark).find((r) => r.status === 200) || null, 20_000, 100), '前置:慢的一轮已发出(应答 200)').toBeTruthy();
+  await sleep(500);
   await stopButton(page).first().click();
-  const interrupted = await waitFor(() => turnEnds(T.sid, `${name.toUpperCase()}SLOW`).find((x) => x.interrupted) || null, 6_000, 100);
-  if (!interrupted) touchFile(goFile);
-  expect(await waitFor(() => turnEnds(T.sid, `${name.toUpperCase()}SLOW`).length > 0, 20_000, 100), '前置:被停的这一轮在命令行里收尾').toBeTruthy();
+  const interrupted = await waitFor(() => turnEnds(T.sid, slowMark).find((x) => x.interrupted) || null, 8_000, 100);
+  expect(Boolean(interrupted), '前置:停止送到了命令行(被停的这一轮以打断收尾)').toBe(true);
   await sleep(3_000);
   const firstResp = tr.resps.find((r) => r.status === 200);
   return { T, tr, hide, goFile, taskIds, firstPid: firstResp && firstResp.body && firstResp.body.pid };
@@ -169,8 +179,9 @@ test('U21 [第21条] 对某进程点过停止;之后后台命令结束、命令�
     const ctx = await stoppedProcess(page, 'u21');
     T = ctx.T; goFile = ctx.goFile;
     const t0 = await startAutoTurn(T, { taskId: ctx.taskIds[1], sleepMs: 16_000 });
-    await expect(stopButton(page).first(), '续跑后页面接回这一轮、出现停止键').toBeVisible({ timeout: 6_000 });
-    const reattachMs = Date.now() - t0;
+    // 锁定前主会话修订(2026-11-19):「页面接回这一轮」以页面发出该进程的回合流请求为准(有后台命令时停止键一直亮着,不能当判据)。
+    const re = await waitFor(() => ctx.tr.streamsOf(ctx.firstPid, t0)[0] || null, 6_000, 100);
+    const reattachMs = re ? re.t - t0 : Infinity;
     const msg = `U21MSG${uniq()}`;
     await sendPrompt(page, msg);
     await sleep(3_000);
@@ -194,7 +205,12 @@ test('U22 [第22条] 同第 21 条,但页面没来得及认出续跑就发了一
     const msg = `U22MSG${uniq()}`;
     await sendPrompt(page, msg);
     expect((await waitPhrase(page, HINT_NEW, 15_000)).seen, '前置:被 409 退回后出现排队提示').toBe(true);
-    await expect(stopButton(page).first(), '409 之后页面接回这一轮、出现停止键').toBeVisible({ timeout: 6_000 });
+    // 锁定前主会话修订(2026-11-19):被 409 退回之后放开轮询(页面下一次轮询就能看到这一轮);
+    // 「接回」以页面发出该进程的回合流请求为准(有后台命令时停止键一直亮着,不能当判据)。
+    const tUnhide = Date.now();
+    ctx.hide.hide = false;
+    const re = await waitFor(() => ctx.tr.streamsOf(ctx.firstPid, tUnhide)[0] || null, 6_000, 100);
+    expect(Boolean(re), '409 之后页面接回这一轮(发出该进程的回合流请求)').toBe(true);
     // 采样 8 秒:排队项一旦出现就不应再消失;这条的发送请求不应再多发
     let seenQueued = false; let flicker = 0;
     const t1 = Date.now();
