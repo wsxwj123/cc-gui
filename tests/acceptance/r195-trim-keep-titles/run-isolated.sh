@@ -5,7 +5,7 @@
 #   bash .../run-isolated.sh -g '^1 '                                                   # 额外参数原样转给 playwright
 #   PLAYWRIGHT_JSON_OUTPUT_NAME=/x/y.json bash .../run-isolated.sh --reporter=line,json  # 调用方自己指定 json 结果文件
 #
-# 端口:后端 6951(写死);启动前用 lsof 确认空闲,被占就退出。硬拒 6677 / 6689 / 6710 / 8788 / 8789 / 8798 / 8799。
+# 端口:后端 6965(写死;6951–6954 是 r194 套件的,6961 / 6962 是 r197 的);启动前用 lsof 确认空闲,被占就退出。硬拒 6677 / 6689 / 6710 / 8788 / 8789 / 8798 / 8799。
 # 隔离:HOME / USERPROFILE / CU_TEST_HOME 都指到 .artifacts/runtime-data/home;后端带 tests/unit/q8-helpers/cu-preload.mjs;
 #       CGUI_DISABLE_FILE_WATCHER=1;PATH 最前面挂假 claude;ANTHROPIC_* / CLAUDE_CODE_OAUTH_TOKEN 剥掉;CU_ALLOW_* 一律 unset。
 # 收尾:kill 只按 .artifacts/pids 里记录的 pid(先温和、再对仍存活的强制),不 pkill、不按端口或进程名杀。收到 INT/TERM 清理并退出。
@@ -18,7 +18,7 @@ WORKTREE="$(cd "$SUITE/../../.." && pwd)"
 ART="$SUITE/.artifacts"
 ROOT="$ART/runtime-data"
 PIDFILE="$ART/pids"
-BPORT=6951
+BPORT=6965
 case " 6677 6689 6710 8788 8789 8798 8799 " in *" $BPORT "*) echo "拒绝端口 $BPORT" >&2; exit 1;; esac
 [ -z "$(lsof -nP -iTCP:"$BPORT" -sTCP:LISTEN -t 2>/dev/null || true)" ] || { echo "端口 $BPORT 已被占用,不抢,退出" >&2; exit 1; }
 
