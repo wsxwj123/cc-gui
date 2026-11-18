@@ -49,10 +49,13 @@ export function realpathNative(p) {
 }
 
 /**
- * r193:真实路径 realTarget 是否在上传目录内。上传目录本身也取真实路径再比
- * (macOS 的 /var 是 /private/var 的符号链接;Windows 的 tmpdir 可能是短名),
- * 比较走 path.relative 而不是字符串前缀。上传目录取不到真实路径(还不存在等)→ false。
- * realTarget 必须是调用方已经用同一个 realpathFn 取过的真实路径。
+ * r193:真实路径 realTarget 是否在上传目录内。上传目录的两种写法都认,按顺序比:
+ *   1. 先和上传目录的原写法比,中了就算在内。调用方取目标真实路径的函数不一定和这里相同:
+ *      files.js 的 safePath 用 fs/promises 的 realpath(JS 实现,Windows 上不展开 8.3 短名),
+ *      临时目录是短名时目标仍是短名,只能和原写法对上(R08 修过的「刷新后图片不可用」)。
+ *   2. 不中再和上传目录的真实路径(realpathFn 取)比:macOS 的 /var 是 /private/var 的符号链接,
+ *      Windows 上 realpath.native 会把短名展开成长名。上传目录取不到真实路径(还不存在等)时只认第 1 步。
+ * 比较走 path.relative 而不是字符串前缀(win32 不区分大小写)。
  */
 export async function isInsideUploadDir(realTarget, {
   uploadDir = UPLOAD_DIR,
@@ -60,6 +63,7 @@ export async function isInsideUploadDir(realTarget, {
   realpathFn = realpathNative,
 } = {}) {
   if (typeof realTarget !== 'string' || !realTarget) return false;
+  if (isPathInsideWith(pathModule, realTarget, uploadDir)) return true;
   const uploadReal = await Promise.resolve().then(() => realpathFn(uploadDir)).catch(() => null);
   return !!uploadReal && isPathInsideWith(pathModule, realTarget, uploadReal);
 }

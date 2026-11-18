@@ -404,6 +404,24 @@ check('Windows 模拟:共用判定(短名、大小写不一致、另一个盘、
   assert.equal(isPathInsideWith(W, 'C:\\a\\b', 'c:\\A'), true);
 });
 
+check('J-1 Windows 模拟:上传目录是短名写法时,目标短名、长名都认;目录外的短名、长名都不认', async () => {
+  // files.js 的 safePath 用 fs/promises 的 realpath(Windows 上不展开短名)取目标的真实路径,目标可能仍是短名:
+  // 先和上传目录原写法比,不中再和真实路径函数展开后的长名比。
+  const o = { uploadDir: winShortUp, pathModule: W, realpathFn: winRealpath };
+  const winShortTemp = W.dirname(winShortUp);
+  const winLongTemp = W.dirname(winLongUp);
+  assert.equal(await isInsideUploadDir(`${winShortUp}\\a.png`, o), true, '目标短名');
+  assert.equal(await isInsideUploadDir(`${winLongUp}\\a.png`, o), true, '目标长名');
+  assert.equal(await isInsideUploadDir(`${winShortTemp}\\other\\a.png`, o), false, '目录外短名');
+  assert.equal(await isInsideUploadDir(`${winLongTemp}\\other\\a.png`, o), false, '目录外长名');
+  assert.equal(await isInsideUploadDir(`${winShortUp}2\\a.png`, o), false, '兄弟目录短名');
+  assert.equal(await isInsideUploadDir(`${winLongUp}2\\a.png`, o), false, '兄弟目录长名');
+  // 上传目录取不到真实路径时,原写法下的目标照认(第一步不依赖真实路径函数)
+  const failingRealpath = async () => { throw Object.assign(new Error('gone'), { code: 'ENOENT' }); };
+  assert.equal(await isInsideUploadDir(`${winShortUp}\\a.png`, { ...o, realpathFn: failingRealpath }), true, '取不到真实路径 + 原写法');
+  assert.equal(await isInsideUploadDir(`${winLongUp}\\a.png`, { ...o, realpathFn: failingRealpath }), false, '取不到真实路径 + 长名');
+});
+
 check('Windows 模拟:改写模块端到端(不加 O_NOFOLLOW,另一个盘不打开)', async () => {
   const disk = await mkdtemp(join(tmpdir(), 'cgui-r193-win-'));
   await writeFile(join(disk, 'shot one.png'), PNG);
