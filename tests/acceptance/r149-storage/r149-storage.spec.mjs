@@ -116,6 +116,10 @@ test('S-C 新会话第一次发消息:它的会话键里只有这一条;上键�
   await expect(box, '第一下上键:本会话自己的').toHaveValue(prompt);
   await box.press('ArrowUp');
   await expect(box, '第二下上键:旧全局最新的一条(升级前的历史仍翻得出来)').toHaveValue(legacyEntry(0));
+  // 0.2.464 起上键只在光标位于第一行时才翻到更早的一条。旧全局的条目很长,在输入框里折成几行,翻出后光标在末尾:
+  // 等光标落到末尾(翻出后稍后一拍才放过去),再把光标放到最开头(等同于用户点到开头),然后按上键。
+  await expect.poll(() => box.evaluate((el) => el.selectionStart === el.value.length), { message: '翻出旧全局那条之后光标应落在末尾', timeout: 5_000 }).toBe(true);
+  await box.evaluate((el) => el.setSelectionRange(0, 0));
   await box.press('ArrowUp');
   await expect(box, '第三下上键:旧全局第二条').toHaveValue(legacyEntry(1));
   await box.press('ArrowDown'); await box.press('ArrowDown'); await box.press('ArrowDown');
