@@ -198,7 +198,8 @@ assert.equal(D, 300, '去抖窗口是契约里写死的 300ms(INTERFACE §3.1)')
   assert.notEqual(iProvider, -1, 'App.jsx 要挂 Provider');
   assert.ok(iProvider < app.indexOf('data-cgui="message-list"'), 'Provider 必须在消息滚动容器**外层**');
   assert.ok(iProvider < app.indexOf('<MessageList'), 'Provider 必须包住 MessageList');
-  assert.ok(iProvider < app.indexOf('liveTurnVisible &&'), 'Provider 必须同时包住流式气泡(兄弟节点)');
+  // 锚点取画流式气泡那段 JSX 的原文:组件逻辑里也有 `!liveTurnVisible && …`(r201 的重接判定),只找 'liveTurnVisible &&' 会先命中它
+  assert.ok(iProvider < app.indexOf('{liveTurnVisible && ('), 'Provider 必须同时包住流式气泡(兄弟节点)');
   // B4:只读退出是显式白名单,能 grep
   for (const f of ['TurnBubble.jsx', 'SubagentView.jsx', 'PermissionPrompt.jsx', 'TodoPanel.jsx',
     'BtwWindow.jsx', 'FileExplorerPanel.jsx', 'ReleaseNotesModal.jsx']) {
