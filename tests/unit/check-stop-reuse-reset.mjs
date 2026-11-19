@@ -72,38 +72,49 @@ function makeStopCallback(slot) {
   assert.strictEqual(slot.stopTimer, null, '执行后 stopTimer 置空');
 }
 
-// ---- 场景 4:冷启前 lingering 收尾循环 —— 有活 shell 立即跳出(不白等不 abort) ----
-// 复刻 chat.js 冷启前的等待循环结构:shell 检查在循环【内】,遇活 shell 立即 break、放弃等待
-// 和 abort(abort 杀整个 CLI = 连坐杀后台训练 shell,不可恢复);无 shell 才等满超时后强制 abort。
+// ---- 场景 4:冷启前 lingering 收尾循环(r199 起的规则) ----
+// 复刻 chat.js settleSessionSlots 第一遍的结构:不再接消息(关闭中或输入已关)、带活 shell、没被中止的旧进程直接跳过
+// (不白等、不 abort —— abort 杀整个 CLI = 连坐杀后台训练 shell,不可恢复);还能接消息的在忙进程照常等满上限:
+// 带活 shell 的到点也不中止(交给建进程前的硬闸回 409,不另起第二个进程),不带的到点强制 abort 兜底;
+// 已发起中止、带活 shell 的不放行,照旧等满再强制兜底。
 const slotHasLiveShell = (s) => [...(s?.liveTasks?.values() ?? [])].some(t => t && t.kind === 'shell');
-// 复刻循环:返回 {waited(轮次), aborted}。tearing 恒真(pumpEnded 永假)模拟未收尾。
+const sparedLiveShell = (s) => !s.usable && slotHasLiveShell(s) && !s.abortSignaled;
+// 复刻循环:返回 {waited(轮次), aborted}。slot 一直没收尾(pumpEnded 永假);usable = 能接新消息,abortSignaled = 已发起中止。
 function lingeringLoop(slot) {
   let waited = 0, aborted = false;
-  let lingering = slot; // tearingDown() 恒返回该 slot
+  const tearingDown = () => (sparedLiveShell(slot) ? null : slot); // 放行的旧进程 tearingDown 直接跳过
+  let lingering;
   const MAX = 3;        // 代表 4s 上限(缩短为 3 轮,只验行为)
-  while (lingering && waited < MAX) {
-    if (slotHasLiveShell(lingering)) { lingering = null; break; } // 保活:立即跳出
-    waited++;
-  }
+  while ((lingering = tearingDown()) && waited < MAX) waited++;
+  if (lingering && slotHasLiveShell(lingering) && !lingering.abortSignaled) lingering = null; // 到点:活 shell 且未中止 → 不杀
   if (lingering) { aborted = true; } // 代表 lingering.abort.abort()
   return { waited, aborted };
 }
 {
-  // 有活 shell:第 0 轮就 break → 不白等(waited===0)、不 abort
-  const withShell = { liveTasks: new Map([['t-shell', { kind: 'shell' }], ['t-sub', { kind: 'subagent' }]]) };
-  const r1 = lingeringLoop(withShell);
-  assert.strictEqual(r1.waited, 0, '有活 shell 应立即跳出,绝不白等');
-  assert.strictEqual(r1.aborted, false, '有活 shell 时绝不强制 abort(否则连坐杀后台训练)');
+  const shells = () => new Map([['t-shell', { kind: 'shell' }], ['t-sub', { kind: 'subagent' }]]);
+  // 关闭中 + 活 shell + 没被中止:直接放行 → 不白等(waited===0)、不 abort
+  const r1 = lingeringLoop({ usable: false, liveTasks: shells() });
+  assert.strictEqual(r1.waited, 0, '关闭中、为活 shell 挂着的旧进程应直接放行,绝不白等');
+  assert.strictEqual(r1.aborted, false, '为活 shell 挂着的旧进程绝不强制 abort(否则连坐杀后台训练)');
 
-  // 无 shell:等满上限后强制 abort 兜底
-  const noShell = { liveTasks: new Map([['t-sub', { kind: 'subagent' }]]) };
-  const r2 = lingeringLoop(noShell);
-  assert.strictEqual(r2.waited, 3, '无 shell 时行为不变:等满超时');
-  assert.strictEqual(r2.aborted, true, '无 shell 时保留强制 abort 兜底(避免同 sid 双进程)');
+  // 能接消息 + 活 shell(这一轮在跑):等满上限,到点也不 abort
+  const r2 = lingeringLoop({ usable: true, liveTasks: shells() });
+  assert.strictEqual(r2.waited, 3, '能接消息、在忙、带活 shell:照常等满上限(4 秒内收尾就交给它)');
+  assert.strictEqual(r2.aborted, false, '到点仍在忙也不 abort(交给硬闸回 409)');
+
+  // 无 shell:等满上限后强制 abort 兜底(能接消息的在忙进程、关闭中的旧进程都一样)
+  const r3 = lingeringLoop({ usable: true, liveTasks: new Map([['t-sub', { kind: 'subagent' }]]) });
+  assert.strictEqual(r3.waited, 3, '无 shell 时行为不变:等满超时');
+  assert.strictEqual(r3.aborted, true, '无 shell 时保留强制 abort 兜底(避免同 sid 双进程)');
+  assert.strictEqual(lingeringLoop({ usable: false, liveTasks: new Map() }).aborted, true, '关闭中、无 shell:等满后强制兜底');
+
+  // 已发起中止 + 活 shell:不放行,等满后照旧强制兜底(r151g 项5)
+  const r5 = lingeringLoop({ usable: false, abortSignaled: true, liveTasks: shells() });
+  assert.strictEqual(r5.waited, 3, '已发起中止的带 shell 槽照常等它退出');
+  assert.strictEqual(r5.aborted, true, '到点仍在就强制兜底');
 
   // liveTasks 缺失:视作无 shell,正常等待+abort
-  const empty = {};
-  assert.strictEqual(lingeringLoop(empty).aborted, true, 'liveTasks 缺失时按无 shell 处理');
+  assert.strictEqual(lingeringLoop({ usable: true }).aborted, true, 'liveTasks 缺失时按无 shell 处理');
 }
 
 console.log('check-stop-reuse-reset: all assertions passed');

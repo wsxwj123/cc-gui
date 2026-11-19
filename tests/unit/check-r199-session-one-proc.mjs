@@ -57,7 +57,8 @@ async function fast(fn) {
 const snap = (pid) => getActiveChatProcesses().find((p) => p.pid === pid);
 const alive = (sid) => getActiveChatProcesses().filter((p) => p.sessionId === sid && p.exitCode === null).map((p) => p.pid);
 const uuid = (n) => `d1d1d1d1-0000-4000-8000-${String(n).padStart(12, '0')}`;
-const BODY = (extra) => ({ prompt: 'x', cwd: WORK, model: 'r199-model', permissionMode: 'default', keepAlive: true, ...extra });
+// 输入预测默认关(没带这个字段时按官方供应商默认开:结果之后还有约 4 秒收尾窗,会把"上一轮 4 秒内结束"拖过 4 秒);第 19 条单独开。
+const BODY = (extra) => ({ prompt: 'x', cwd: WORK, model: 'r199-model', permissionMode: 'default', keepAlive: true, promptSuggestions: false, ...extra });
 const OLD_409 = { ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' };
 let checks = 0;
 const ok = (c, m) => { assert.ok(c, m); checks++; };
