@@ -2472,11 +2472,17 @@ async function handleChatPost(req, res) {
   const internal = req[INTERNAL_TURN] ?? null;
   // r151q 第 9 项:本请求所有 409 CHAT_SESSION_BUSY 的统一出口。用户请求(非内部回合)被拒时给该会话记"用户在等",
   // 期间跨会话调度不在它上面起新的自动回合(见 noteUserWaiting);内部回合的冷启占位(若已登记)一并撤掉。
-  const rejectSessionBusy = () => {
+  // r199:turnRunning 只由建进程前的硬闸传({ reason, pid }:同会话能接消息的进程这一轮还在运行)→ 应答多带 reason 与
+  // 字符串 pid,页面据 reason 选提示;不传 = 原来的应答体逐字不变。发完应答返回 'handled'(复用 / 等待两个闭包据此判
+  // "已回过应答";handleChatPost 自己的返回值没人用)。
+  const rejectSessionBusy = (turnRunning = null) => {
     releaseInternalColdStart(req);
     if (!internal && sessionId) noteUserWaiting(sessionId);
     dropTurnRecord(turnRecord);
-    return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+    res.status(409).json(turnRunning
+      ? { ok: false, code: 'CHAT_SESSION_BUSY', reason: turnRunning.reason, pid: String(turnRunning.pid), error: '会话这一轮还在运行' }
+      : { ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+    return 'handled';
   };
   if (sessionId && sessionSlotReserved(sessionId)) {
     return rejectSessionBusy();
@@ -2601,7 +2607,9 @@ async function handleChatPost(req, res) {
     amm: childEnv.CLAUDE_CODE_AUTO_MODE_MODEL ?? null,
     genui,
   });
-  if (sessionId) {
+  // r199:复用块包成闭包(块体原样不动,只此一份),由冷启前等待段之后的主流程调用,最多调两遍。返回 'handled' = 已回过应答
+  // (复用成功回 200,或入口复核拒绝回了钩子给的应答);'stale' = 选中的进程这次用不成(已放锁、清占位);'none' = 没有可复用的空闲进程。
+  const tryReuseIdleSlot = async () => {
     for (const [alivePid, s] of activeProcesses) {
       if (s.reservedBy) continue; // r151g 项3:已被别的请求选中、正在派发 —— 占位期间既不算空闲,也不许再选
       if (!s.idle || s.closing || s.pumpEnded || s.exitCode !== null || s.sessionId !== sessionId) continue;
@@ -2784,10 +2792,11 @@ async function handleChatPost(req, res) {
         }
         if (s.reservedBy === reserveToken) s.reservedBy = null;
       }
-      if (reuseOutcome === 'handled') return;
-      break; // 复用失败(热切失败 / 排队期间被切档中止):放锁后走冷启
+      if (reuseOutcome === 'handled') return 'handled';
+      return 'stale'; // 复用失败(热切失败 / 排队期间被切档中止):放锁后走等待段 / 冷启
     }
-  }
+    return 'none';
+  };
 
   // #26 一会话一进程(H1 双 resume 根治):走到这里=没复用到 idle 进程,要冷启新
   // `claude --resume <sid>`。但同一 sid 的上一回合进程可能正在收尾——用户点"停止"后
@@ -2796,7 +2805,8 @@ async function handleChatPost(req, res) {
   // jsonl / 会话锁 → 新回合读到半写状态、拿不到干净 init/result → 几秒空产出。先等它
   // pumpEnded 或被 delete 再冷启;非阻塞短轮询到上限,超时才强制 abort 兜底(interrupt
   // 已在飞,极少走到)。idle 可复用 slot 不在此列(上面复用块已 return),不误伤 shell 保活。
-  if (sessionId) {
+  // r199:等待段包成闭包(块体缩进不变),由下面的主流程调用;回过应答(409)返回 'handled',正常走完返回 undefined。
+  const settleSessionSlots = async (waitBusy) => {
     // r151c 旁路 (a):内部起的回合(跨会话自动处理)遇到同会话正在跑的回合 → 立即 409,不等待、不中止它(自动处理永远不打断用户的回合)。
     // 带了 clientTurnId 的话撤掉本回合记录(同 id 可重试,与入口钩子拒绝同一处理)。
     // r151q 第 9 项:反过来,用户请求遇到同会话正被内部回合占着 → 同样立即 409(不进下面的等待、更不中止它)。
@@ -2806,34 +2816,38 @@ async function handleChatPost(req, res) {
     // r151q 第 9 项:内部回合从这里起算占住会话 —— 等旧进程退出的这几秒还没有自己的槽,用冷启占位顶上
     // (槽登记之后由槽上的 internalTurn 接替,见下方 activeProcesses.set 之后)。
     if (internal) holdInternalColdStart(req, sessionId);
+    // 后台 shell 保活的 slot:配置变更(改 settings.json/换 model/effort)会把它置 closing 关流,
+    // 但 CLI 为后台任务保活、generator 不结束 → pumpEnded 永假。若等它会稳定白等满 4s,超时后 abort() 又会
+    // 杀掉整个 CLI = 连坐杀后台训练 shell(不可恢复)。铁律:误杀不可恢复 > 双 resume 竞争。判据与选择性
+    // 停止路径一致:t.kind === 'shell'。
+    // r199:只放行"不再接消息(关闭中或输入已关)、带活后台命令、没被中止"的旧进程(sparedLiveShell):tearingDown 直接
+    // 跳过它 —— 不等、不杀,也不再因为碰到它就整段跳出、不看同会话别的进程(改配置关旧开新后、新进程在忙时再发一条,
+    // 原先会另起第三个)。还能接消息、在忙、带活后台命令的进程照常等满 4 秒:4 秒内收尾 → 主流程第二遍复用它;到点仍在忙
+    // → 不中止(下面"活 shell 且未发起中止 → 不杀"那行),交给建进程前的硬闸回 409,不另起第二个能接消息的进程。
+    // waitBusy 为假(第二遍)时能接消息的进程一律不等,只等这一遍里被关掉的进程退出。
+    // r151g 项5 例外:槽已经发起中止(复用热切超时 / 切档超时 → abort 信号已拉响)时,上面的前提
+    // 不成立 —— 它本来就要死了,不应该再把它当"一直活着、误杀不可恢复"。这时照常等它退出,新进程
+    // 才不会在它约 2 秒的收尾期里对同一会话 --resume(双 resume 抢同一 jsonl)。仍受下面原有 4 秒
+    // deadline 与之后的强制兜底约束。
+    const slotHasLiveShell = (s) => [...(s?.liveTasks?.values() ?? [])].some(t => t && t.kind === 'shell');
+    const sparedLiveShell = (s) => !slotUsable(s) && slotHasLiveShell(s) && !s?.abort?.signal?.aborted;
     const tearingDown = () => {
       for (const s of activeProcesses.values()) {
         if (s.sessionId !== sessionId) continue;
+        if (sparedLiveShell(s)) continue;
+        if (!waitBusy && slotUsable(s)) continue;
         if (!s.pumpEnded && s.exitCode === null && (s.closing || !s.idle)) return s;
       }
       return null;
     };
     const deadline = Date.now() + 4000;
     let lingering;
-    // 后台 shell 保活的 slot:配置变更(改 settings.json/换 model/effort)会把它置 closing 关流,
-    // 但 CLI 为后台任务保活、generator 不结束 → pumpEnded 永假 → tearingDown() 每轮都返回它。若
-    // 留在等待循环里会稳定白等满 4s,超时后 abort() 又会杀掉整个 CLI = 连坐杀后台训练 shell(不
-    // 可恢复)。铁律:误杀不可恢复 > 双 resume 竞争 —— 一旦发现活 shell 立即跳出,既不白等也不
-    // abort,退回改动前"旧进程为 shell 保活、与新 --resume 并存"的孤儿存活行为。判据与选择性
-    // 停止路径一致:t.kind === 'shell'。
-    // r151g 项5 例外:槽已经发起中止(复用热切超时 / 切档超时 → abort 信号已拉响)时,上面的前提
-    // 不成立 —— 它本来就要死了,不应该再把它当"一直活着、误杀不可恢复"。这时照常等它退出,新进程
-    // 才不会在它约 2 秒的收尾期里对同一会话 --resume(双 resume 抢同一 jsonl)。仍受下面原有 4 秒
-    // deadline 与之后的强制兜底约束;没被中止、带活后台命令的槽保持原样(不等、不杀)。
-    const slotHasLiveShell = (s) => [...(s?.liveTasks?.values() ?? [])].some(t => t && t.kind === 'shell');
-    const keepWaitingLiveShell = (s) => slotHasLiveShell(s) && !s?.abort?.signal?.aborted;
     // r151g 项5:已发起中止、带着活后台命令的槽,进程可能比流晚退 —— SDK 中止后先结束生成器(pumpEnded),
     // CLI 进程还被后台命令吊着(实测 SIGTERM 后再拖 2 秒)。这种槽要等它退出(仍受原有 4 秒上限),别在
     // 它还没退出时就起新进程抢同一 jsonl;到点仍有它就照旧走下面的强制兜底(再 abort / 关输入都是幂等的)。
     let abortedLiveShell = null;
     while ((lingering = tearingDown()) && Date.now() < deadline) {
       if (heldByOther()) return rejectSessionBusy(); // r151q 第 9 项:等待期间对方占住了会话 → 让出,不中止它
-      if (keepWaitingLiveShell(lingering)) { lingering = null; break; } // 保活且没被中止:不等不杀,容忍双 resume
       if (slotHasLiveShell(lingering) && lingering.abort?.signal?.aborted) abortedLiveShell = lingering;
       await new Promise((r) => setTimeout(r, 50));
     }
@@ -2852,8 +2866,9 @@ async function handleChatPost(req, res) {
         if (!settled() && !lingering) lingering = abortedLiveShell;
       }
     }
-    // r151g 安全复审(建议 5):deadline 边界上 lingering 仍可能"带活 shell 且未发起中止"(第一段循环恰好
-    // 超时)。铁律不变:误杀不可恢复 > 双 resume 竞争 —— 不杀它,按"被后台命令吊着、与新进程并存"处理。
+    // r151g 安全复审(建议 5):deadline 边界上 lingering 仍可能"带活 shell 且未发起中止"。铁律不变:误杀不可恢复 >
+    // 双 resume 竞争 —— 不杀它。r199:走到这里的只会是还能接消息、到点仍在忙的进程(不再接消息的已被 tearingDown 跳过),
+    // 不中止它,由建进程前的硬闸回 409(这一轮还在运行),不另起第二个进程与它并存。
     if (lingering && slotHasLiveShell(lingering) && !lingering.abort?.signal?.aborted) lingering = null;
     // r151q 第 9 项:强制中止之前最后核对一次 —— 绝不中止对方(用户请求不中止内部回合,含它只差输入预测的收尾窗;
     // 内部回合不中止用户回合)。要中止的正是内部回合自己的槽、又还没进入关闭 → 让出(409),不中止。
@@ -2875,6 +2890,17 @@ async function handleChatPost(req, res) {
         await new Promise((r) => setTimeout(r, 50));
       }
     }
+  };
+  if (sessionId) {
+    // r199:先试复用空闲进程;不成就等同会话的旧进程收尾(在忙的最多 4 秒)。等到它空闲、还能接消息(没被别的请求选中)
+    // → 再走一遍复用,把这条交给它(不另起进程);第二遍只等这一遍里被关掉的进程退出,在忙的不再等,交给下面的硬闸。
+    if (await tryReuseIdleSlot() === 'handled') return;
+    if (await settleSessionSlots(true) === 'handled') return;
+    const keeperNow = findUsableSessionSlot(sessionId);
+    if (keeperNow && keeperNow.slot.idle && !keeperNow.slot.reservedBy) {
+      if (await tryReuseIdleSlot() === 'handled') return;
+      if (await settleSessionSlots(false) === 'handled') return;
+    }
   }
   // r151d:等旧进程退出的这几秒让出过事件循环,入口钩子要求的话在建进程之前再核对一次(跨会话自动处理:这期间切了档就
   // 不起回合、退回排队重判)。从这里到下面回合开始通知之间没有 await:通过了,回合就按此刻的档位开始。
@@ -2889,6 +2915,15 @@ async function handleChatPost(req, res) {
   if (sessionId && (sessionSlotReserved(sessionId)
     || (internal ? findBusySlot(activeProcesses, sessionId) : sessionHeldByInternalTurn(sessionId)))) {
     return rejectSessionBusy();
+  }
+  // r199 硬闸:同会话还有能接新消息的进程 → 不另起第二个(一个会话同一时间只有一个能接新消息的进程,否则后面的消息
+  // 落到哪个进程,模型就只看到那个进程自己的那份上下文)。它在忙(前面已等过约 4 秒,手上的 Bash 命令不能中止)→ 用户
+  // 请求回新形态 409(reason + pid;页面排队,这一轮结束后自动发给同一个进程);它空闲(被别的请求先选中,或第二遍
+  // 之后才空闲)→ 旧形态 409。内部回合一律旧形态。从这里到 activeProcesses.set 之间没有 await。
+  const keeper = sessionId ? findUsableSessionSlot(sessionId) : null;
+  if (keeper) {
+    const running = !keeper.slot.idle;
+    return rejectSessionBusy(!internal && running ? { reason: 'session-turn-running', pid: keeper.pid } : null);
   }
   // r151g 项2:等旧进程退出的这几秒让出过事件循环 —— 建 slot 之前按会话的切档代数再比对一次(从这里到
   // activeProcesses.set 之间没有 await)。代数变了且拿到确认档位 → 用"那次切档之后界面所示的档位"起
@@ -3725,6 +3760,19 @@ function sessionSlotReserved(sessionId) {
     if (String(s.sessionId || '').toLowerCase() === key && s.reservedBy) return true;
   }
   return false;
+}
+
+/**
+ * r199:该会话第一个能接新消息的进程(slotUsable:没退出、泵没结束、不在关闭中、输入没关)→ { pid, slot },没有回 null。
+ * 按进程表登记顺序;会话 id 精确比较(与复用块、冷启前等待段同口径)。建进程前的硬闸据此守住"一个会话同一时间只有
+ * 一个能接新消息的进程":有它就不另起第二个。
+ */
+function findUsableSessionSlot(sessionId) {
+  if (!sessionId) return null;
+  for (const [pid, s] of activeProcesses) {
+    if (s && s.sessionId === sessionId && slotUsable(s)) return { pid, slot: s };
+  }
+  return null;
 }
 
 // ── r151q 第 9 项:跨会话内部回合占住会话 / "用户在等" ─────────────────────────────────────────
