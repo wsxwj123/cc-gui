@@ -28,7 +28,14 @@ test('子代理完成后金额立刻出现在卡片上,且回合仍在进行中'
     await box.fill('E2E:直播子代理金额');
     await box.press('Enter');
 
-    // ── 前置:卡片已出现、子代理还在跑 ──────────────────────────────────────
+    // ── 前置:点开这一轮正在运行的那一行 → 卡片出现、子代理还在跑 ───────────
+    // r157 起回复进行中,子代理调用收进一行折起来的「正在运行」行(无障碍名形如
+    // "7s LIVE-E2E 子代理":已用秒数 + 实时状态 + 「子代理」),卡片要点开才出现。
+    // 秒数每秒变,所以按「子代理」字样 + 消息列表范围定位;只点这一次,之后不再点任何东西。
+    const runningRow = page.locator('[data-cgui="message-list"]')
+      .getByRole('button', { name: /子代理/ });
+    await runningRow.first().waitFor({ timeout: 25_000 });
+    await runningRow.first().click();
     await page.getByText('fixer', { exact: true }).first().waitFor({ timeout: 25_000 });
     expect(await stopBtn.count(), '前置:回合应当在跑(界面上有"停止")').toBeGreaterThan(0);
     expect(await tag.count(), '前置:子代理还在跑时卡片上不该有任何金额').toBe(0);
@@ -46,6 +53,12 @@ test('子代理完成后金额立刻出现在卡片上,且回合仍在进行中'
     // ── 回合结束 → 历史接管:金额不变、不出现第二份 ───────────────────────
     app.ctl.finish();
     await expect.poll(async () => stopBtn.count(), { timeout: 25_000 }).toBe(0);
+    // 回合结束后历史接管,这一轮收成一行已完成的折叠行(无障碍名形如
+    // "LIVE-E2E 子代理 · 1 次工具调用"),卡片与金额在点开后才在页面上。点开它再数金额。
+    const doneRow = page.locator('[data-cgui="message-list"]')
+      .getByRole('button', { name: /次工具调用/ });
+    await doneRow.first().waitFor({ timeout: 25_000 });
+    await doneRow.first().click();
     await expect.poll(async () => tag.count(), { timeout: 25_000 }).toBe(1);
     await expect.poll(async () => (await tag.first().textContent()).trim(), { timeout: 25_000 })
       .toBe(money);

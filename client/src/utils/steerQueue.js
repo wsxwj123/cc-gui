@@ -25,6 +25,15 @@ export function queueKeyFor(sel) {
 // 它永远不进 messageQueue,故不参与孤儿队列回收。
 export const HOME_DRAFT_KEY = 'draft-home-pending';
 
+// r203:「往输入框塞内容」的入口(截图快捷键、文件浏览器「添加到上下文」、预览报错「发给 AI」)
+// 共用的目标键,入参是状态库状态。只看聚焦窗格:有会话(含草稿)→ 该会话的键;聚焦窗格为空
+// (新会话首页)→ HOME_DRAFT_KEY,由首页输入框接收。不退回 selectedSession:它是最左一格的
+// 镜像,分屏聚焦空窗格时退回会把内容塞进最左一格(与 r202 顶栏同一口径)。
+export function focusedComposerKey(state) {
+  const pane = state?.paneSessions?.[state?.activeTabIndex || 0];
+  return pane ? queueKeyFor(pane) : HOME_DRAFT_KEY;
+}
+
 // draft 队列键判定与 projectHash 段解析(孤儿回收按项目过滤用)。
 // draftId 形态恒为 `d<ts>-<seq>`(App.jsx newDraftId),据此从新形态键里剥出 hash;
 // 剥不掉的按旧形态 `draft-<hash>` 整段当 hash(旧键只会进孤儿表,归属不再猜测)。
