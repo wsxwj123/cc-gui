@@ -10,7 +10,7 @@ import { liveStatusLabel } from '../utils/liveStatus.js';
 import { tailBlockInfo, latestToolTitles } from '../utils/streamStatus.js';
 import { stopNoOwnerNotice } from './tools/TaskCard.jsx';
 import { resolveOwnedAgent } from '../utils/agentOwner.js';
-import { AGENT_TERMINAL_STATUSES, agentSourceState, taskRunEvidence } from '../utils/agentView.js';
+import { AGENT_TERMINAL_STATUSES, agentSourceState, taskRunEvidence, agentModelLabel } from '../utils/agentView.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, shouldPauseAutoScroll } from '../utils/scroll.js';
 
@@ -62,7 +62,7 @@ export function SubagentView({ agentId, paneId, tabIndex = 0, active = false, pa
   const rawName = agent?.teammateName || agent?.name || null;
   const isGeneric = !rawName || rawName === 'Task' || rawName === 'Agent';
   const name = (isGeneric && metaAgent?.agentType) ? metaAgent.agentType : (rawName || '子代理');
-  const agentModel = agent?.model || metaAgent?.model || null;
+  const agentModel = agentModelLabel(agent, metaAgent); // r200:换过模型时「原 → 新」
   const description = agent?.description || '';
   const prompt = agent?.prompt || '';
   const blocks = agent?.blocks || [];

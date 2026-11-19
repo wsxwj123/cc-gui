@@ -260,6 +260,7 @@ export function buildAgentRows({ sessionsByProject, panes, liveAgents, openSessi
           agentProjectHash: sess.projectHash || hash,
           agentType: sub.agentType || null,
           model: sub.model || null,
+          models: Array.isArray(sub.models) ? sub.models : null,
           prompt: sub.firstPrompt || '',
           lastActivity: sub.lastActivity || sess.lastActivity || null,
           hasTranscript: true,
@@ -282,6 +283,7 @@ export function buildAgentRows({ sessionsByProject, panes, liveAgents, openSessi
       toolUseId: agent.id,
       agentType: rows.get(key)?.agentType || agent.teammateName || agent.name || null,
       model: agent.model || rows.get(key)?.model || null,
+      models: agent.models || rows.get(key)?.models || null,
       description: agent.description || rows.get(key)?.description || '',
       running,
       live: true,
@@ -349,4 +351,38 @@ export function buildAgentRows({ sessionsByProject, panes, liveAgents, openSessi
   return [...byTool.values()]
     .sort((a, b) => (Number(b.running) - Number(a.running)) || (ts(b.lastActivity) - ts(a.lastActivity)))
     .slice(0, limit);
+}
+
+// ── r200:子代理的模型(命令行中途换了模型时显示「原 → 新」)──────────────────────
+// 命令行在子代理回复被安全检查拦下时会不问直接换模型重来;页面按先后把用过的模型都记下,
+// 只有一个模型时照旧显示一个名字。
+
+/** 尖括号开头的伪模型名(`<synthetic>` 等,报错占位 / 压缩摘要)不算一个模型。 */
+export function isRealModelName(model) {
+  return typeof model === 'string' && model !== '' && !model.startsWith('<');
+}
+
+/**
+ * 往「按先后用过的模型」列表里记一个:与上一个相同(同一模型连续多次调用)或是伪模型名就不记。
+ * 返回新数组;没有变化时原样返回传入的数组(调用方据此跳过写入)。
+ */
+export function appendAgentModel(models, model) {
+  const list = Array.isArray(models) ? models : [];
+  if (!isRealModelName(model) || list[list.length - 1] === model) return list;
+  return [...list, model];
+}
+
+/** 模型列表 → 显示文字:多个按先后用「 → 」连起来;一个就是它;没有给 null。 */
+export function formatModelChain(models) {
+  const list = (Array.isArray(models) ? models : []).filter(isRealModelName);
+  return list.length ? list.join(' → ') : null;
+}
+
+/**
+ * 子代理的模型显示文字。先看子代理记录(直播按先后记的 / 打开历史时读回的完整顺序),
+ * 再看历史列表给的(转写首尾两个模型),最后退回单个模型名。
+ */
+export function agentModelLabel(agent, metaAgent = null) {
+  return formatModelChain(agent?.models) || formatModelChain(metaAgent?.models)
+    || [agent?.model, metaAgent?.model].find(isRealModelName) || null;
 }

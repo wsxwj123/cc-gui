@@ -7,6 +7,7 @@ import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, r
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList, mergeHiddenOrder } from '../utils/projectPanel.js';
 import { mergeProviderLists } from '../utils/providerList.js';
+import { appendAgentModel, isRealModelName } from '../utils/agentView.js';
 import { fetchProviderList } from '../utils/providerListFetch.js';
 import { attachmentSidecarNotice, draftSidecarBindingsForSessions, recoverAttachmentSidecarBindings } from '../utils/attachments.js';
 import { rotatedPaneGenerations } from '../utils/sessionFlowIdentity.js';
@@ -2079,6 +2080,16 @@ export const useStore = create((set, get) => ({
         [id]: { ...(s.activeAgents[id] || { id, text: [], thinking: [], toolCalls: [], blocks: [] }), ...patch },
       }, s),
     }));
+  },
+  // r200:子代理每次调用都报一次模型(message_start / 整条 assistant)。按先后记下用过的模型(models,
+  // 命令行中途换了模型时卡片等处显示「原 → 新」);model 仍是最近一次的。伪模型名(`<synthetic>` 等)不算。
+  // 记录还不存在时照旧由这一步建出来(task_started 那刻还没有);没有变化就不写,省一次重绘。
+  noteAgentModel: (id, model) => {
+    if (!isRealModelName(model)) return;
+    const cur = get().activeAgents[id];
+    const models = appendAgentModel(cur?.models, model);
+    if (cur && cur.model === model && models === cur.models) return;
+    get().upsertAgent(id, { model, models });
   },
   appendAgentText: (id, delta) => { agentDeltaQueue.push({ id, kind: 'text', delta }); agentDeltaCommit.schedule(); },
   // r183b:子代理的报错原文(合成报错消息的文字)。与 appendAgentText 同进一个队列保序,只是单独成块并打 errorText。

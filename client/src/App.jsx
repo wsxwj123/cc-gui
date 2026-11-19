@@ -6946,9 +6946,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 子代理被 SendMessage 唤醒后新流式活动到达,若已是终态则复活为 working(监控重显运行中)。
               if (ev.type === 'message_start') reviveAgentIfTerminal(store, parentToolUseId);
               // M2(Q6): 子代理回合的 message_start 携带其实际模型 id,记到卡片上显示。
-              if (ev.type === 'message_start' && ev.message?.model) {
-                store.upsertAgent(parentToolUseId, { model: ev.message.model });
-              }
+              // r200:按先后记(命令行中途换模型时显示「原 → 新」),不再让后到的覆盖先到的。
+              if (ev.type === 'message_start' && ev.message?.model) store.noteAgentModel(parentToolUseId, ev.message.model);
               if (ev.type === 'content_block_start') {
                 const cb = ev.content_block || {};
                 if (cb.type === 'tool_use') {
@@ -7121,7 +7120,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               reviveAgentIfTerminal(aStore, aid); // 唤醒后整条 assistant 消息到达,终态则复活为运行中
               // r183b:合成报错消息的 `<synthetic>` 等伪模型名不记成子代理的模型;它的文字是上游报错原文,单独成块打标。
               const isAgentApiError = event.is_api_error_message === true;
-              if (event.message.model && !/^</.test(event.message.model)) aStore.upsertAgent(aid, { model: event.message.model });
+              aStore.noteAgentModel(aid, event.message.model); // r200:按先后记用过的模型;伪模型名在里面滤掉
               for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
                 if (block.type === 'text' && block.text) (isAgentApiError ? aStore.appendAgentErrorText : aStore.appendAgentText)(aid, block.text);
                 else if (block.type === 'thinking' && block.thinking) aStore.appendAgentThinking(aid, block.thinking);

@@ -8,7 +8,7 @@ import { buildSubagentCostIndex } from '../utils/subagentCost.js';
 import { subscribeAgentsActive, fetchAgentsActiveFresh } from '../utils/agentsActivePoller.js';
 import {
   AGENT_TERMINAL_STATUSES, agentHydrationStatus, agentOpenFailureAction, buildAgentRows, fetchAgentHistory,
-  locateParentPane, shouldApplyHistory, splitAgentReply, splitHistoryBlocks,
+  locateParentPane, shouldApplyHistory, splitAgentReply, splitHistoryBlocks, agentModelLabel,
 } from '../utils/agentView.js';
 import ErrorPlainText from './ErrorPlainText.jsx';
 
@@ -307,7 +307,7 @@ function RemoteAgentCard({ agent, stoppingPid, onStop }) {
       )}
       <div className="flex items-center gap-3 mt-1.5 text-[10px] text-ink-faint font-mono">
         {agent.startedAt && <span className="flex items-center gap-1"><Clock size={9} />{fmtElapsed(agent.elapsedMs ?? (Date.now() - agent.startedAt))}</span>}
-        {agent.model && <span className="truncate">{agent.model}</span>}
+        {agentModelLabel(agent) && <span className="truncate">{agentModelLabel(agent)}</span>}
         {agent.cwd && <span className="truncate opacity-70" title={agent.cwd}>{agent.cwd.split(/[/\\]+/).pop()}</span>}
         {agent.cronHold && (
           <span className="font-body shrink-0" title="本会话创建过定时任务（/loop），进程暂缓闲置回收，最长 2 小时">
@@ -425,7 +425,7 @@ function AgentCard({ agent }) {
   // 起的真名,SendMessage({to}) 寻址用的那个)> agent.name(已被 subagent_type 抢占)>
   // 兜底的 agentType。缺这条时会话里显示 xiaoming、监控面板却显示 GENERAL-PURPOSE。
   const displayName = agent.teammateName || agent.name || metaAgent?.agentType || '子代理';
-  const displayModel = agent.model || metaAgent?.model || null;
+  const displayModel = agentModelLabel(agent, metaAgent); // r200:换过模型时「原 → 新」
   // A 项:该子代理自己的费用(来自已打开窗格消息里的 subUsage.agents[])。桶内条目都是
   // 本机正在跑的/刚水合的,还没配对到金额是常态(跑动中的子代理本来就没有)—— 故只在
   // 拿到金额时画金额,不画「未能计价」(那份数据要等这一轮落盘 + 历史刷新才有)。
@@ -929,6 +929,7 @@ export function AgentMonitorPanel() {
         patch.name = row.agentType || cur?.name || '子代理';
         patch.description = row.description || cur?.description || '';
         patch.model = row.model || cur?.model || null;
+        patch.models = row.models || cur?.models || null;
         if (row.prompt && !cur?.prompt) patch.prompt = row.prompt;
         if (row.result && !cur?.result) patch.result = row.result;
         const keepStatus = cur?.hydrated && !AGENT_TERMINAL_STATUSES.has(cur.status || '');
@@ -1174,8 +1175,8 @@ export function AgentMonitorPanel() {
                     <span className="text-[11px] font-mono text-ink truncate min-w-0 flex-1" title={row.agentType || '子代理'}>
                       {row.agentType || '子代理'}
                     </span>
-                    {row.model && (
-                      <span className="text-[9px] px-1 py-px bg-violet-100 text-violet-700 rounded font-mono shrink-0">{row.model}</span>
+                    {agentModelLabel(row) && (
+                      <span className="text-[9px] px-1 py-px bg-violet-100 text-violet-700 rounded font-mono shrink-0">{agentModelLabel(row)}</span>
                     )}
                     {/* A 项:该子代理自己的费用。母会话没打开 = 根本没加载过它的消息 →
                         连小标都不画(costReadyFor 判的就是这个)。 */}
