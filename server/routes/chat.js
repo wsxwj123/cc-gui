@@ -3522,7 +3522,12 @@ async function handleChatPost(req, res) {
           // 生成,官方缓存命中约 1-2s,第三方中转/大上下文经常超 3s → 到点关流后建议才到,
           // 无监听落 earlyLines 再被下条消息清掉 = 用户报的"时有时无"。统一 4s 消除两套时限
           // (窗内没等到的仍有 deliverLine 的 WS 兜底)。
-          const delay = (slot.turnSubagentSeen || suggestOn) ? 4000 : 0;
+          // r199-1:被停的那一段(停止请求之后、活动段号仍是停止时那一段)出的结果已被打断,就是这一轮的最终结果 → 延迟 0、立即收尾。
+          // 收尾窗只为子代理去抖与等输入预测,对它没用,却会让命令行随后自己的续跑(后台命令跑完的通知回合)落进窗里、被当成这一轮
+          // 的尾巴,续跑静默满 4 秒就提前收尾(流收到 done、会话报空闲,续跑其实还在跑)。立即收尾后续跑走上面的复活守卫:记新段、
+          // 等它自己的结果才收尾。要比段号、不能只看停止请求:停止标记到下一个用户回合才清,只看它会让续跑自己的结果也不等输入预测。
+          const resultOfStoppedSegment = slot.turnStopRequested && slot.stoppedSegment === activitySegment(slot);
+          const delay = resultOfStoppedSegment ? 0 : (slot.turnSubagentSeen || suggestOn) ? 4000 : 0;
           closeDelayMs = delay;
           if (delay) { cancelClose(); closeTimer = setTimeout(() => finalize(), delay); }
           else finalize();
@@ -3554,10 +3559,11 @@ async function handleChatPost(req, res) {
           // 由 result 分支单点决定);closeDelayMs 为 0(无子代理无 suggest 本不挂窗)
           // 防御性兜底 4s。未列入白名单的事件类型不再推迟收摊。
           cancelClose();
-          // r198:被用户停止的那一轮已经出了最终结果(停止后命令行回的中断结果),收尾等待窗里又来的主回合活动是命令行
-          // 自己续跑的下一段(如后台命令跑完的通知回合),不是被停那一轮的延续 —— 记成新的一段活动(与上面复活守卫同一个
-          // 计数,每次停止只记一次),页面据此解除停止闩锁、照常接流。没停止过的回合不受影响。
-          if (slot.turnStopRequested && slot.stoppedSegment === activitySegment(slot)) slot.reviveSeq = (slot.reviveSeq | 0) + 1;
+          // r199-1:这里原有 r198 给停止过的回合记新段的一行(停止请求在、段号仍是被停那一段 → 复活次数加一),已删。
+          // 现在停止之后不再留收尾窗:被停那一段的结果到了就立即收尾(上面 result 分支),等输入预测时点停止也立即收尾(applyStop),
+          // 命令行之后的续跑一律从空闲经上面的复活守卫记段。那一行还能命中的只剩「停止之后、中断结果之前」命令行吐的残片(被打断时
+          // 总会先吐 assistant 残片与 user:[Request interrupted by user]):记了段,页面就解除停止闩锁、把正在停止的这一段当成后台
+          // 在跑重新接流,半截正文再显示一遍(R198-1)。
           slot.suggestWaitSince = 0; // r151c:续跑了,那个结果不是最终的
           // r151u:command_lifecycle started = 命令行开始处理排队的消息(引导排成的回合),是一个新回合,必以它自己的 result
           // 结束,由 result 分支照常决定收尾(立即 / 4 秒窗)。所以只取消、不重新计时:按"静默满窗即收摊"计时的话,新回合等首字、

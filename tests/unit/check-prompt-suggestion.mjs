@@ -19,8 +19,9 @@ const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
 {
   const m = chat.match(/const delay = ([^;]+);/);
   assert.ok(m, 'chat.js 必须仍有 result 分支的 const delay = ...');
-  assert.equal(m[1].trim(), '(slot.turnSubagentSeen || suggestOn) ? 4000 : 0',
-    '建议窗必须与子代理窗同为 4000(3000 太短,建议要另起一次模型调用才生成)');
+  // r199-1:被停的那一段出的结果(已被打断,就是最终结果)延迟 0、立即收尾;其余照旧 —— 建议窗与子代理窗同为 4000
+  assert.equal(m[1].trim(), 'resultOfStoppedSegment ? 0 : (slot.turnSubagentSeen || suggestOn) ? 4000 : 0',
+    '建议窗必须与子代理窗同为 4000(3000 太短,建议要另起一次模型调用才生成);只有被停那一段的结果立即收尾(r199-1)');
   // finalize 本体是停止链路红线,只许改 delay 数值表达式
   assert.ok(/closeTimer = setTimeout\(\(\) => finalize\(\), delay\)/.test(chat),
     'result 分支仍须是 setTimeout(finalize, delay),不得改写 finalize 时序');
