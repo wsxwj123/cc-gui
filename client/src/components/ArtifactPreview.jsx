@@ -4,6 +4,7 @@ import { Copy, Check, Code2, Eye, AlertTriangle, Maximize2, X, PanelRight, Refre
 import { copyText } from '../utils/clipboard.js';
 import { ThemedCopyButton } from './ThemedCopyButton.jsx';
 import { useStore } from '../stores/sessionStore.js';
+import { focusedComposerKey } from '../utils/steerQueue.js';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
 import {
   ERROR_COLLECTOR, PREVIEW_ERR_KEY, PREVIEW_ERR_LABEL, MAX_PREVIEW_ERRORS,
@@ -127,9 +128,9 @@ export function PreviewErrorBadge({ errors, source }) {
   const sendToAI = () => {
     const text = formatPreviewErrors(errors, source);
     if (!text) return;
-    const s = useStore.getState();
-    const pane = (s.paneSessions || [])[s.activeTabIndex] || s.selectedSession;
-    const targetKey = pane?.sessionId || `draft-${pane?.projectHash || 'none'}`;
+    // r203:原来退回 selectedSession(最左一格)、草稿键缺 draftId 段(与输入框的键对不上,点了没反应);
+    // 改用统一的聚焦窗格键,聚焦窗格为空(新会话首页)时落 HOME_DRAFT_KEY 由首页输入框接收。
+    const targetKey = focusedComposerKey(useStore.getState());
     window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text, append: true, targetKey } }));
     setOpen(false);
   };

@@ -145,7 +145,7 @@ import { quotaValueText } from './utils/quotaFormat.js';
 import { aggregateHistoryCost, computeCostForMessage, displayUsd, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, createQueueId } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, focusedComposerKey, createQueueId } from './utils/steerQueue.js';
 import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';
 import { imageAttachNoticeText } from './utils/imageAttachNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
@@ -190,6 +190,8 @@ import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/X
 import ApiErrorActions from './components/ApiErrorActions.jsx';
 import { deriveApiErrorUi, deriveHistoryApiErrorUi, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
 import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
+import { modelFallbackNoticeOf } from './utils/modelFallback.js';
+import { ModelFallbackNotice } from './components/ModelFallbackNotice.jsx';
 import { isChatStartTimeoutResponse, isChatStartTimeoutEvent, makeChatStartTimeoutNotice, appendChatStartTimeoutNotice } from './utils/chatStartTimeout.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, isStoppedSegment, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
@@ -2164,6 +2166,34 @@ function HomeState({ tabIndex = 0 }) {
   const [restoredOrphan, setRestoredOrphan] = useState(null);
   const homeFileInputRef = useRef(null);
   const homeInputRef = useRef(null);
+  // r203:截图快捷键、文件浏览器「添加到上下文」、预览报错「发给 AI」在聚焦窗格是首页时发 HOME_DRAFT_KEY
+  // (steerQueue.focusedComposerKey)。原来只有会话输入框(ChatInput)接 composer-fill,首页没人接,内容丢失。
+  // 文字、附件的合并口径与 ChatInput 的 onFill 一致;首页附件按 id 作键、按 id 重试,没有 id 的补一个。
+  useEffect(() => {
+    const onFill = (e) => {
+      const detail = e?.detail || {};
+      if (detail.targetKey !== HOME_DRAFT_KEY) return;
+      const fillText = detail.text || '';
+      const fillAttach = Array.isArray(detail.attachments) ? detail.attachments : null;
+      if (!fillText && !fillAttach) return;
+      if (detail.append) setText((prev) => (prev && !/\s$/.test(prev) ? prev + ' ' : prev) + fillText);
+      else if (fillText) setText(fillText);
+      if (fillAttach) {
+        const withIds = fillAttach.map((a) => (a?.id ? a : { ...a, id: createQueueId('attachment') }));
+        if (detail.appendAttachments) {
+          setAttachments((prev) => {
+            const seen = new Set(prev.map((a) => a.path));
+            return [...prev, ...withIds.filter((a) => !seen.has(a.path))];
+          });
+        } else {
+          setAttachments(withIds);
+        }
+      }
+      requestAnimationFrame(() => homeInputRef.current?.focus());
+    };
+    window.addEventListener('cgui:composer-fill', onFill);
+    return () => window.removeEventListener('cgui:composer-fill', onFill);
+  }, []);
   // 斜杠命令(与会话内同一套:utils/slashCommands.js + SlashCommandMenu.jsx)
   const [slash, setSlash] = useState({ commands: [], provider: 'Anthropic', isAnthropic: true });
   const [showCmds, setShowCmds] = useState(false);
@@ -3356,6 +3386,8 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
         ? <PeerMessageBubble message={msg} />
         : msg.type === 'denial'
         ? <DenialNotice denial={msg} />
+        : msg.type === 'model-fallback'
+        ? <ModelFallbackNotice notice={msg} />
         : msg.type === 'turn'
         // Provider 恒在(值平时为 null = 与默认值相同):承载开始 / 结束时只是值变,TurnBubble 不重挂。
         ? (
@@ -6762,6 +6794,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               ...(typeof event.reason === 'string' ? { reason: event.reason } : {}),
             }]));
           }
+          // r200:命令行中途换了模型(原模型的回复被安全检查拦下,设置里允许不问直接换)。在这一轮里加一行说明;
+          // 命令行也把这条写进会话记录 —— 它不是本地提示,回合落盘后随本地副本清掉,由读历史那份接手(同一 uuid),
+          // 所以同一条只画一次。不弹框、不打断这一轮,也不动模型菜单的选择(下一轮照样先按用户选的模型发)。
+          if (event.type === 'system' && event.subtype === 'model_refusal_fallback') {
+            const fbNotice = modelFallbackNoticeOf(event);
+            setChatMessages((prev) => (prev.some((m) => m.uuid === fbNotice.uuid) ? prev : [...prev, { ...fbNotice, ownerKey: streamOwnerSid() }]));
+          }
           // 等待状态(G):API 可重试错误(限流/5xx/超时),SDK 自动退避重试 ——
           // { type:'system', subtype:'api_retry', attempt, max_retries, retry_delay_ms,
           //   error_status: number|null }(null=无 HTTP 响应的连接错误)。
@@ -6946,9 +6985,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // 子代理被 SendMessage 唤醒后新流式活动到达,若已是终态则复活为 working(监控重显运行中)。
               if (ev.type === 'message_start') reviveAgentIfTerminal(store, parentToolUseId);
               // M2(Q6): 子代理回合的 message_start 携带其实际模型 id,记到卡片上显示。
-              if (ev.type === 'message_start' && ev.message?.model) {
-                store.upsertAgent(parentToolUseId, { model: ev.message.model });
-              }
+              // r200:按先后记(命令行中途换模型时显示「原 → 新」),不再让后到的覆盖先到的。
+              if (ev.type === 'message_start' && ev.message?.model) store.noteAgentModel(parentToolUseId, ev.message.model);
               if (ev.type === 'content_block_start') {
                 const cb = ev.content_block || {};
                 if (cb.type === 'tool_use') {
@@ -7121,7 +7159,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               reviveAgentIfTerminal(aStore, aid); // 唤醒后整条 assistant 消息到达,终态则复活为运行中
               // r183b:合成报错消息的 `<synthetic>` 等伪模型名不记成子代理的模型;它的文字是上游报错原文,单独成块打标。
               const isAgentApiError = event.is_api_error_message === true;
-              if (event.message.model && !/^</.test(event.message.model)) aStore.upsertAgent(aid, { model: event.message.model });
+              aStore.noteAgentModel(aid, event.message.model); // r200:按先后记用过的模型;伪模型名在里面滤掉
               for (const block of (Array.isArray(event.message.content) ? event.message.content : [])) {
                 if (block.type === 'text' && block.text) (isAgentApiError ? aStore.appendAgentErrorText : aStore.appendAgentText)(aid, block.text);
                 else if (block.type === 'thinking' && block.thinking) aStore.appendAgentThinking(aid, block.thinking);
@@ -10580,6 +10618,8 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                     ? <PeerMessageBubble message={msg} />
                     : msg.type === 'denial'
                     ? <DenialNotice denial={msg} />
+                    : msg.type === 'model-fallback'
+                    ? <ModelFallbackNotice notice={msg} />
                     : msg.type === 'mode-mismatch'
                     ? <ModeMismatchNotice notice={msg} permKey={sessionQueueKey} />
                     : msg.type === 'turn'
@@ -13368,10 +13408,8 @@ export default function App() {
         }
         if (d.canceled) { setShotStatus(null); return; }
         // 目标窗格 = 当前活动窗格,key 与 SessionDetail 的 sessionQueueKey 同构。
-        const st = useStore.getState();
-        const idx = st.activeTabIndex || 0;
-        const sel = (st.paneSessions && st.paneSessions[idx]) || st.selectedSession;
-        const targetKey = queueKeyFor(sel);
+        // r203:聚焦窗格为空(新会话首页)时落 HOME_DRAFT_KEY 由首页接收,不再退回 selectedSession(最左一格)。
+        const targetKey = focusedComposerKey(useStore.getState());
         const name = String(d.path || 'screenshot.png').split(/[/\\]+/).pop();
         window.dispatchEvent(new CustomEvent('cgui:composer-fill', {
           detail: {

@@ -914,7 +914,8 @@ export async function listSessions(projectHash) {
           firstPrompt: agent.prompt100 || base.replace('agent-', 'Agent '),
           messageCount: agentProfile.totalLines,
           lastActivity: agent.lastTs || new Date(as.mtimeMs).toISOString(),
-          model: agent.assistantModel || null,
+          // r200:首尾两个模型(见 agentModelFields),不再只看前 5 条。
+          ...agentModelFields(agentProfile, agent),
           toolUseId: agentMeta.toolUseId || null,
           agentType: agentMeta.agentType || null,
           contextTokens: agent.ctxTokens,
@@ -1560,7 +1561,7 @@ async function readAgentUsage(filePath) {
       const nonZero = (usage.input_tokens || 0) + (usage.output_tokens || 0)
         + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0) > 0;
       if (!nonZero) return;
-      calls.set(mid, { at: rec.timestamp || null, usage });
+      calls.set(mid, { at: rec.timestamp || null, usage, model: realModelName(message.model) }); // r200:每次调用记下自己的模型
     });
   } catch { return null; }
   if (!model && calls.size === 0) return null;   // model 与 usage 都读不到 → 不值得进 agents[]
@@ -1578,7 +1579,7 @@ async function readAgentUsage(filePath) {
     const w1 = u.cache_creation?.ephemeral_1h_input_tokens || 0;
     sum5m += w5;
     sum1h += w1;
-    usageCalls.push({ at: entry.at, usage: u });
+    usageCalls.push(entry.model ? { at: entry.at, usage: u, model: entry.model } : { at: entry.at, usage: u }); // r200:前端按实际模型分段计价
   }
   if (sum5m + sum1h > 0) agg.cache_creation = { ephemeral_5m_input_tokens: sum5m, ephemeral_1h_input_tokens: sum1h };
   return { model, timestamp, usage: agg, usageCalls };
@@ -1764,6 +1765,73 @@ function attachSubagentUsage(messages, agents, workflowCalls) {
   }
 }
 
+
+// r200:尖括号开头的伪模型名(<synthetic> 等,报错占位 / 压缩摘要)不算一个模型。
+function realModelName(model) {
+  return typeof model === 'string' && model !== '' && !model.startsWith('<') ? model : null;
+}
+
+// r200:子代理在历史列表里的模型。首 = 画像前 40 条里第一条助手记录的模型(新版命令行的子代理转写第 17 条
+// 才是第一条助手记录,原来只看前 5 条会是空的;前 40 条里那条是伪模型名时退回前 5 条那份),
+// 尾 = 后 40 条里最后一条真模型。model 仍给首个(与原来同义);首尾不同再给 models = [首, 尾],页面显示「首 → 尾」。
+// 不改画像格式(PROFILE_VERSION 不动),所以中间换过又换回(甲 → 乙 → 甲)的这里只看得到「甲」,完整顺序在子代理页。
+function agentModelFields(profile, agent) {
+  const first = realModelName(profile?.headAssistantModel) || realModelName(agent?.assistantModel);
+  const last = realModelName(profile?.tailAssistantModel);
+  return { model: first || last || null, ...(first && last && first !== last ? { models: [first, last] } : {}) };
+}
+
+// r200:子代理页要的模型轨迹 —— 按先后用过的模型(相邻相同只记一次,伪模型名不算),以及「原模型的回复被
+// 安全检查拦下、命令行换了模型」的那一次(没有给 null)。被拦的两种认法都认:助手记录 message.stop_reason 为
+// 'refusal';命令行紧跟着插的 isMeta 用户记录带 refusedMessageId(= 被拦那条的 message.id)。类别取被拦那条的
+// message.stop_details.category,没有给 null(页面写「未知」)。只认之后确实换了模型的那次(被拦后没换模型的不在本项范围)。
+function agentModelTrail(records) {
+  const models = [];
+  const byId = new Map();   // message.id → 这条助手消息的 { model, category, index }
+  const refused = [];
+  const mark = (info) => { if (info && !refused.includes(info)) refused.push(info); };
+  for (const rec of records || []) {
+    if (rec?.type === 'assistant') {
+      const msg = rec.message || {};
+      const model = realModelName(msg.model);
+      if (!model) continue;
+      if (models[models.length - 1] !== model) models.push(model);
+      // index = 记到这条时列表的长度:列表里排在它后面的第一个模型就是换上来的新模型。
+      // 同一条消息按内容块拆成几条记录落盘(message.id 相同),只建一份,类别以带着 stop_details 的那条为准。
+      let info = typeof msg.id === 'string' ? byId.get(msg.id) : null;
+      if (!info) {
+        info = { model, category: null, index: models.length };
+        if (typeof msg.id === 'string') byId.set(msg.id, info);
+      }
+      const category = msg.stop_details?.category;
+      if (typeof category === 'string' && category) info.category = category;
+      if (msg.stop_reason === 'refusal') mark(info);
+    } else if (rec?.type === 'user' && typeof rec.refusedMessageId === 'string') {
+      mark(byId.get(rec.refusedMessageId));
+    }
+  }
+  for (const r of refused) {
+    const fallbackModel = models[r.index] || null;
+    if (fallbackModel) return { models, modelRefusal: { originalModel: r.model, fallbackModel, category: r.category } };
+  }
+  return { models, modelRefusal: null };
+}
+
+// r200:命令行的换模型通知(system/model_refusal_fallback:原模型的回复被安全检查拦下,命令行换了模型接着答)
+// → 对话里一条 'model-fallback' 条目,与页面直播时画的同形(client/src/utils/modelFallback.js 的 modelFallbackNoticeOf)。
+// 落盘记录的字段是 originalModel / fallbackModel / apiRefusalCategory,下划线写法也认;没有类别给 null,页面写「未知」。
+function modelFallbackNotice(record) {
+  const text = (v) => (typeof v === 'string' && v ? v : null);
+  return {
+    type: 'model-fallback',
+    uuid: text(record.uuid) || 'model-fallback-' + (text(record.requestId) || text(record.request_id) || text(record.timestamp) || ''),
+    timestamp: text(record.timestamp),
+    originalModel: text(record.originalModel) || text(record.original_model),
+    fallbackModel: text(record.fallbackModel) || text(record.fallback_model),
+    category: text(record.apiRefusalCategory) || text(record.api_refusal_category),
+    content: typeof record.content === 'string' ? record.content : '',
+  };
+}
 
 export async function getSessionMessages(sessionId, projectHash, paging = {}) {
   const loc = await locateSessionFile(sessionId, projectHash);
@@ -2042,6 +2110,10 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
         }
       }
       if (record.timestamp) currentTurn.timestamp = record.timestamp;
+    } else if (record.type === 'system' && record.subtype === 'model_refusal_fallback') {
+      // r200:命令行中途换了模型的通知。在换模型的位置切开这一轮、放一行说明(与 task-notice 同口径:切段保住位置)。
+      flushTurn();
+      messages.push(modelFallbackNotice(record));
     } else if (record.type === 'attachment' && record.attachment?.type === 'goal_status') {
       // /goal(会话级 Stop 钩子)的唯一可见信号。实测 CLI 2.1.220:goal_status 只写进
       // transcript,stream-json 一条都不发,所以历史侧不放行 = 目标在 GUI 里完全不可见
@@ -2156,7 +2228,7 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
     toolUseId: loc.toolUseId || null,
   };
   const view = loc.parentSessionId
-    ? { kind: 'agent', blocks: agentViewBlocks(finalMessages) }
+    ? { kind: 'agent', blocks: agentViewBlocks(finalMessages), ...agentModelTrail(records) } // r200:子代理页的模型先后与被拦信息
     : { kind: 'session', blocks: [] };
   // r151l:分页窗口在**完整 messages 与 usageTotals 都算完之后**才切 —— usageTotals
   // 始终按全文件口径,与是否分页无关;不传 paging(旧调用)时返回全量,新增字段按全量语义

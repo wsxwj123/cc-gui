@@ -8,7 +8,7 @@ import { ArtifactPreview } from './ArtifactPreview.jsx';
 import { useResizable, Splitter } from '../hooks/useResizable.jsx';
 import { copyText } from '../utils/clipboard.js';
 import { copyButtonKind, pickCopySource, canCopyImageBitmap, copyImageBitmap, COPY_TEXT_MAX_BYTES } from '../utils/fileCopy.js';
-import { queueKeyFor } from '../utils/steerQueue.js';
+import { queueKeyFor, HOME_DRAFT_KEY } from '../utils/steerQueue.js';
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico']);
 const VIDEO_EXT = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv']);
@@ -120,14 +120,14 @@ window.addEventListener('beforeunload', flushPendingDeletesOnExit);
  */
 export function FileExplorerPanel() {
   // Follow the active pane in split mode so the tree reflects whichever
-  // session has focus. Falls back to selectedSession / selectedProject in
-  // single-pane mode.
-  const selectedSession = useStore((s) => s.selectedSession);
+  // session has focus. Falls back to selectedProject when the focused pane
+  // is empty (new-session home).
   const paneSessions = useStore((s) => s.paneSessions);
   const activeTabIndex = useStore((s) => s.activeTabIndex);
   const selectedProject = useStore((s) => s.selectedProject);
-  // Follow whichever pane has focus (multi-pane: 0..5), falling back to pane 0.
-  const activeSession = paneSessions?.[activeTabIndex] || selectedSession;
+  // r203:只取聚焦窗格的会话,不退回 selectedSession(最左一格的镜像)——分屏聚焦空窗格时退回会让
+  // 「添加到上下文」塞进最左一格。聚焦窗格为空时根目录落到侧栏选中的工作区,与单栏首页一致。
+  const activeSession = paneSessions?.[activeTabIndex || 0] || null;
   const rootPath = activeSession?.projectPath || selectedProject?.path || '';
 
   // Map<absPath, { entries, loading, error }> — cached so re-expand is instant.
@@ -328,7 +328,8 @@ export function FileExplorerPanel() {
     // 且与该 pane 的 permKey(draft-<hash>-<draftId>)不相等 → ChatInput onFill 的
     // `targetKey !== permKey` 守门把它挡掉,draft 窗格「添加到上下文」点了没反应。
     // queueKeyFor 对真会话返回 sessionId,行为不变。
-    const targetKey = queueKeyFor(activeSession);
+    // r203:聚焦窗格为空(新会话首页)时落 HOME_DRAFT_KEY 由首页输入框接收(同 steerQueue.focusedComposerKey)。
+    const targetKey = activeSession ? queueKeyFor(activeSession) : HOME_DRAFT_KEY;
     window.dispatchEvent(new CustomEvent('cgui:composer-fill', { detail: { text: `@${rel} `, append: true, targetKey } }));
     setCtxMenu(null);
   }, [rootPath, activeSession?.sessionId, activeSession?.projectHash, activeSession?.draftId]);

@@ -4,7 +4,7 @@ import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
 import { resolveOwnedAgent } from '../../utils/agentOwner.js';
-import { fetchAgentHistory, historyLegacyArrays, shouldApplyHistory, splitAgentReply, splitHistoryBlocks } from '../../utils/agentView.js';
+import { fetchAgentHistory, historyLegacyArrays, shouldApplyHistory, splitAgentReply, splitHistoryBlocks, agentModelLabel, historyModelFields } from '../../utils/agentView.js';
 import ErrorPlainText from '../ErrorPlainText.jsx';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
 import { SubagentCostContext, SubagentCostTag } from './SubagentCost.jsx';
@@ -74,7 +74,8 @@ export function TaskCard({ toolCall }) {
     metaAgent = sess?.subagents?.find?.((a) => a.toolUseId === toolCall.id);
     if (metaAgent) break;
   }
-  const agentModel = agent?.model || metaAgent?.model || null;
+  // r200:换过模型时显示「原 → 新」(直播按先后记的列表 / 历史列表给的首尾);只有一个模型时照旧。
+  const agentModel = agentModelLabel(agent, metaAgent);
 
   // 名称优先级:命名实例名(teammateName / input.name,SendMessage({to}) 寻址用的真名)
   // → input.subagent_type(web-search-agent 等具体类型名)→ store 里的 agent.name →
@@ -141,7 +142,8 @@ export function TaskCard({ toolCall }) {
         name: subagentType,
         description,
         prompt,
-        model: agentModel,
+        model: agent?.model || metaAgent?.model || null,
+        models: Array.isArray(metaAgent?.models) ? metaAgent.models : null,
         // 中断残骸注册为 stopped 而非 working:否则放大视图对早已死掉的 Task 永远转圈
         status: isError ? 'error' : (isStopped ? 'stopped' : (toolCall.result ? 'done' : 'working')),
         startedAt: Date.now(),
@@ -171,6 +173,7 @@ export function TaskCard({ toolCall }) {
               agentSessionId: agentSid,
               agentProjectHash: hash,
               ...(histPrompt ? { prompt: histPrompt } : null),
+              ...historyModelFields(res), // r200:完整的模型先后与被拦信息(子代理页的「原 → 新」与说明行)
             });
           })
           .catch(() => {});
