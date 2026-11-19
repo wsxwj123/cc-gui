@@ -1309,7 +1309,14 @@ export function computeCostForAgents(agents, provider) {
       agentType: typeof agent.agentType === 'string' ? agent.agentType : null,
       model: agent.model ?? null,
     };
-    const cost = computeCostForMessage(
+    // r200:换过模型的子代理按每次调用的实际模型分段计价(见 costForAgentByModel);只用过一个模型照旧整条算。
+    const split = costForAgentByModel(agent, model, provider);
+    if (split?.unpricedCalls) {
+      partial = true;
+      const why = split.unpricedReason?.reason;
+      if (why && !unknownDimensions.includes(why)) unknownDimensions.push(why);
+    }
+    const cost = split ? split.cost : computeCostForMessage(
       { model, usage: agent.usage, timestamp: agent.timestamp, usageCalls: agent.usageCalls }, provider,
     );
     if (!cost) {
@@ -1328,6 +1335,7 @@ export function computeCostForAgents(agents, provider) {
     if (cost.currency) currencies.add(cost.currency);
     priced.push({
       ...metadata, costUsd: cost.totalUsd, tier: cost.tier ?? null,
+      ...(split?.unpricedCalls ? { unpricedCalls: split.unpricedCalls, unpricedModel: split.unpricedModel } : {}),
       matchedExactly: cost.matchedExactly ?? null, retired: cost.retired === true,
       currency: cost.currency ?? null,
     });
@@ -1575,4 +1583,75 @@ export function formatCost(usd) {
   if (cny < 0.01)  return `¥${cny.toFixed(4)}`;
   if (cny < 1)     return `¥${cny.toFixed(3)}`;
   return `¥${cny.toFixed(2)}`;
+}
+
+// ── r200:子代理换过模型时按每次调用的实际模型分段计价 ──────────────────────
+// 服务端读转写时给每次调用记下它自己的模型(usageCalls[].model)。用过不止一个模型 → 按模型分段,
+// 每段走 computeCostForMessage(该段自己的调用与合计用量),再相加;不再拿第一个模型给全部调用计价。
+// 返回 null = 不用分段(没有逐调用模型 / 只用过一个模型),调用方照旧整条算。
+// 某段查不到价:那几次调用不计入金额,记 unpricedCalls / unpricedModel / unpricedReason(展示层据此标「未能计价」);
+// 全部段都查不到价 → cost 为 null(与原来「整条算不出」同口径)。
+function costForAgentByModel(agent, fallbackModel, provider) {
+  const calls = Array.isArray(agent?.usageCalls) ? agent.usageCalls : [];
+  const groups = new Map();   // 模型 → 该模型的调用(保持先后)
+  for (const call of calls) {
+    const model = typeof call?.model === 'string' && call.model ? call.model : fallbackModel;
+    if (!model) return null;
+    if (!groups.has(model)) groups.set(model, []);
+    groups.get(model).push(call);
+  }
+  if (groups.size < 2) return null;
+  const parts = [];
+  let unpricedCalls = 0;
+  let unpricedModel = null;
+  let unpricedReason = null;
+  for (const [model, list] of groups) {
+    const usage = sumCallUsage(list);
+    const cost = computeCostForMessage({ model, usage, timestamp: agent.timestamp, usageCalls: list }, provider);
+    if (cost) { parts.push(cost); continue; }
+    unpricedCalls += list.length;
+    if (!unpricedModel) {
+      unpricedModel = model;
+      unpricedReason = costUnavailableReason(model, usage, provider, { at: agent.timestamp }) || null;
+    }
+  }
+  if (!parts.length) return { cost: null, unpricedCalls, unpricedModel, unpricedReason };
+  // 各段币种不同时给不出一个原币金额:折成美元再相加(与展示层 displayUsd 同一汇率)。
+  const sameCurrency = new Set(parts.map((c) => c.currency || 'USD')).size === 1;
+  const amount = (c, v) => (sameCurrency ? (v || 0) : displayUsd(v || 0, c.currency));
+  const breakdown = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const unknownDimensions = [];
+  let totalUsd = 0;
+  for (const c of parts) {
+    totalUsd += amount(c, c.totalUsd);
+    for (const key of Object.keys(breakdown)) breakdown[key] += amount(c, c.breakdown?.[key]);
+    for (const dim of c.unknownDimensions || []) if (!unknownDimensions.includes(dim)) unknownDimensions.push(dim);
+  }
+  const head = parts[0];
+  return {
+    cost: {
+      totalUsd, breakdown, currency: sameCurrency ? head.currency : 'USD', tier: head.tier,
+      matchedExactly: parts.every((c) => c.matchedExactly), retired: parts.some((c) => c.retired === true),
+      ...(unknownDimensions.length ? { unknownDimensions } : {}),
+    },
+    unpricedCalls, unpricedModel, unpricedReason,
+  };
+}
+
+/** 一组调用的合计用量(与服务端 readAgentUsage 的合计同口径:顶层四项相加,缓存写两档分项另计)。 */
+function sumCallUsage(calls) {
+  const agg = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  let w5 = 0;
+  let w1 = 0;
+  for (const call of calls) {
+    const u = call?.usage || {};
+    agg.input_tokens += u.input_tokens || 0;
+    agg.output_tokens += u.output_tokens || 0;
+    agg.cache_read_input_tokens += u.cache_read_input_tokens || 0;
+    agg.cache_creation_input_tokens += u.cache_creation_input_tokens || 0;
+    w5 += u.cache_creation?.ephemeral_5m_input_tokens || 0;
+    w1 += u.cache_creation?.ephemeral_1h_input_tokens || 0;
+  }
+  if (w5 + w1 > 0) agg.cache_creation = { ephemeral_5m_input_tokens: w5, ephemeral_1h_input_tokens: w1 };
+  return agg;
 }

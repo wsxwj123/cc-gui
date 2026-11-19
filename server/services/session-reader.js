@@ -1561,7 +1561,7 @@ async function readAgentUsage(filePath) {
       const nonZero = (usage.input_tokens || 0) + (usage.output_tokens || 0)
         + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0) > 0;
       if (!nonZero) return;
-      calls.set(mid, { at: rec.timestamp || null, usage });
+      calls.set(mid, { at: rec.timestamp || null, usage, model: realModelName(message.model) }); // r200:每次调用记下自己的模型
     });
   } catch { return null; }
   if (!model && calls.size === 0) return null;   // model 与 usage 都读不到 → 不值得进 agents[]
@@ -1579,7 +1579,7 @@ async function readAgentUsage(filePath) {
     const w1 = u.cache_creation?.ephemeral_1h_input_tokens || 0;
     sum5m += w5;
     sum1h += w1;
-    usageCalls.push({ at: entry.at, usage: u });
+    usageCalls.push(entry.model ? { at: entry.at, usage: u, model: entry.model } : { at: entry.at, usage: u }); // r200:前端按实际模型分段计价
   }
   if (sum5m + sum1h > 0) agg.cache_creation = { ephemeral_5m_input_tokens: sum5m, ephemeral_1h_input_tokens: sum1h };
   return { model, timestamp, usage: agg, usageCalls };
