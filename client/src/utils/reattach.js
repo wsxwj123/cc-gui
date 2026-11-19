@@ -227,6 +227,29 @@ export function nextReattachGuard({ guard = null, backgroundPid = null, backgrou
 }
 
 /**
+ * r198 停止闩锁:这个 chat-process 条目是不是"被用户停止的那一段活动"(轮询据此跳过它,不当成后台在跑)。
+ * stoppedPids 是用户点停止时记下进程号的集合(App.jsx stoppedChatPids,分屏共用)。常驻进程停止之后照样
+ * 复用同一个进程号:被停的那一轮收尾以后,命令行自己续跑的下一段(后台命令跑完的通知回合)服务端会给新的
+ * 活动段编号(segment ≠ stoppedSegment,见 chat.js activitySegment)—— 这时从集合里删掉这个进程号、
+ * 返回 false,照常接流。服务端还没处理到停止(条目没有 stoppedSegment)、旧服务端(两个字段都没有)、
+ * 或编号相同(还是被停的那一段),都照旧返回 true 跳过。
+ * @param {{pid?: string|number, segment?: string, stoppedSegment?: string}} entry
+ * @param {Set<string>} stoppedPids 会被就地删除已解除的进程号
+ * @returns {boolean}
+ */
+export function isStoppedSegment(entry, stoppedPids) {
+  const pid = String(entry?.pid);
+  if (!stoppedPids || !stoppedPids.has(pid)) return false;
+  const seg = entry.segment;
+  const stopped = entry.stoppedSegment;
+  if (typeof seg === 'string' && typeof stopped === 'string' && seg !== stopped) {
+    stoppedPids.delete(pid);
+    return false;
+  }
+  return true;
+}
+
+/**
  * 回合身份:/api/agents/active 的 chat-process 条目 → "pid#turnEpoch"。turnEpoch 是服务端常驻进程
  * 每开一个新回合就加一的回合代数(chat.js 复用块),同一进程上的新回合身份必然不同。
  * 条目没带 turnEpoch(旧服务端)→ null,调用方退回只按 pid 判。不会等于裸 pid(带 # 分隔),
