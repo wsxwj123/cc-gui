@@ -2595,7 +2595,9 @@ async function handleChatPost(req, res) {
     amm: childEnv.CLAUDE_CODE_AUTO_MODE_MODEL ?? null,
     genui,
   });
-  if (sessionId) {
+  // r199:复用块包成闭包(块体原样不动,只此一份),由冷启前等待段之后的主流程调用,最多调两遍。返回 'handled' = 已回过应答
+  // (复用成功回 200,或入口复核拒绝回了钩子给的应答);'stale' = 选中的进程这次用不成(已放锁、清占位);'none' = 没有可复用的空闲进程。
+  const tryReuseIdleSlot = async () => {
     for (const [alivePid, s] of activeProcesses) {
       if (s.reservedBy) continue; // r151g 项3:已被别的请求选中、正在派发 —— 占位期间既不算空闲,也不许再选
       if (!s.idle || s.closing || s.pumpEnded || s.exitCode !== null || s.sessionId !== sessionId) continue;
@@ -2778,10 +2780,11 @@ async function handleChatPost(req, res) {
         }
         if (s.reservedBy === reserveToken) s.reservedBy = null;
       }
-      if (reuseOutcome === 'handled') return;
-      break; // 复用失败(热切失败 / 排队期间被切档中止):放锁后走冷启
+      if (reuseOutcome === 'handled') return 'handled';
+      return 'stale'; // 复用失败(热切失败 / 排队期间被切档中止):放锁后走等待段 / 冷启
     }
-  }
+    return 'none';
+  };
 
   // #26 一会话一进程(H1 双 resume 根治):走到这里=没复用到 idle 进程,要冷启新
   // `claude --resume <sid>`。但同一 sid 的上一回合进程可能正在收尾——用户点"停止"后
@@ -2790,7 +2793,8 @@ async function handleChatPost(req, res) {
   // jsonl / 会话锁 → 新回合读到半写状态、拿不到干净 init/result → 几秒空产出。先等它
   // pumpEnded 或被 delete 再冷启;非阻塞短轮询到上限,超时才强制 abort 兜底(interrupt
   // 已在飞,极少走到)。idle 可复用 slot 不在此列(上面复用块已 return),不误伤 shell 保活。
-  if (sessionId) {
+  // r199:等待段包成闭包(块体缩进不变),由下面的主流程调用;回过应答(409)返回 'handled',正常走完返回 undefined。
+  const settleSessionSlots = async (waitBusy) => {
     // r151c 旁路 (a):内部起的回合(跨会话自动处理)遇到同会话正在跑的回合 → 立即 409,不等待、不中止它(自动处理永远不打断用户的回合)。
     // 带了 clientTurnId 的话撤掉本回合记录(同 id 可重试,与入口钩子拒绝同一处理)。
     // r151q 第 9 项:反过来,用户请求遇到同会话正被内部回合占着 → 同样立即 409(不进下面的等待、更不中止它)。
@@ -2869,6 +2873,11 @@ async function handleChatPost(req, res) {
         await new Promise((r) => setTimeout(r, 50));
       }
     }
+  };
+  if (sessionId) {
+    // r199:先试复用空闲进程;不成就等同会话的旧进程收尾(在忙的最多 4 秒)。
+    if (await tryReuseIdleSlot() === 'handled') return;
+    if (await settleSessionSlots(true) === 'handled') return;
   }
   // r151d:等旧进程退出的这几秒让出过事件循环,入口钩子要求的话在建进程之前再核对一次(跨会话自动处理:这期间切了档就
   // 不起回合、退回排队重判)。从这里到下面回合开始通知之间没有 await:通过了,回合就按此刻的档位开始。

@@ -128,9 +128,142 @@ try {
     await waitFor(() => snap(auto.body.pid)?.idle, '跨会话回合收尾');
   }
 
-  // @@T2@@
+  // ── T2 复用途中入口复核拒绝:只回一次应答、不起进程 ─────────────────────────────────────────
+  // 早期核对(锁外)与锁内核对拒绝时都已回过应答,复用闭包必须交回 'handled'。交回别的会接着走等待段与冷启:
+  // 冷启前那次核对会被再调一次(再回一次应答,或起进程)—— 核对次数与 SDK query() 次数据此能看出来。
+  {
+    const REJECT = { ok: false, code: 'R199_RECHECK_REJECT', error: '核对不通过' };
+    let rejectFrom = Infinity; // 第几次核对起拒绝(Infinity = 一直放行)
+    let recheckCalls = 0;
+    const unhookEntry = registerSessionRuntimeHooks({
+      chatEntry: (ctx) => ({
+        prompt: String(ctx.body.prompt),
+        recheck: () => (++recheckCalls >= rejectFrom ? { reject: { status: 409, body: REJECT } } : null),
+      }),
+    });
+    try {
+      for (const [label, from, n] of [['早期核对', 1, 21], ['锁内核对', 2, 22]]) {
+        const S = uuid(n);
+        rejectFrom = Infinity;
+        const first = await api('/chat', BODY({ sessionId: S, prompt: `t2 ${n} first` }));
+        eq(first.status, 200, `${label} 前置:起一个常驻进程`);
+        await waitFor(() => snap(first.body.pid)?.idle, `${label} 前置:进程空闲`);
+        recheckCalls = 0; rejectFrom = from;
+        const queriesBefore = sdkCalls.length;
+        const r = await api('/chat', BODY({ sessionId: S, prompt: `t2 ${n} reuse` }));
+        eq([r.status, r.body], [409, REJECT], `${label}拒绝:回入口钩子给的应答`);
+        await sleep(300);
+        eq(recheckCalls, from, `${label}拒绝后不再往下走(核对只被调 ${from} 次,冷启前那次没被调)`);
+        eq(sdkCalls.length, queriesBefore, `${label}拒绝:不起新进程`);
+      }
+    } finally { unhookEntry(); }
+  }
 
-  // @@T3@@
+  // ── T3 第 1、2、3、15 条:手上有一条还在跑的后台命令,命令行续跑(这一轮在运行)时发 /compact ──────────────
+  {
+    const S = uuid(1);
+    const first = await api('/chat', BODY({ sessionId: S, prompt: 'p1 first [BG:b1]' }));
+    eq(first.status, 200, '前置:起一个常驻进程');
+    const P = first.body.pid;
+    await waitFor(() => snap(P)?.idle && snap(P)?.liveTasks === 1, '前置:回合收尾、手上有一条后台命令');
+    openGate('b1-revive');
+    await waitFor(() => snap(P)?.busy, '前置:命令行续跑(这一轮在运行)');
+    const COMPACT = BODY({ sessionId: S, prompt: '/compact', clientTurnId: 'r199-ct-1' });
+    const c1 = await api('/chat', COMPACT);
+    eq([c1.status, c1.body], [409, { ok: false, code: 'CHAT_SESSION_BUSY', reason: 'session-turn-running', pid: P, error: '会话这一轮还在运行' }],
+      '第 1 条:新形态 409,应答体逐字');
+    eq(typeof c1.body.pid, 'string', 'pid 是字符串');
+    ok(c1.ms >= 3500 && c1.ms <= 5500, `第 1 条:先等约 4 秒再回(${c1.ms}ms)`);
+    eq([snap(P)?.busy, alive(S)], [true, [P]], '第 1 条:那一轮没被中止,没另起进程(进程数 1)');
+    openGate('b1-finish');
+    await waitFor(() => snap(P)?.idle, '那一轮结束');
+    const c2 = await api('/chat', COMPACT);
+    eq([c2.status, c2.body.reused, c2.body.pid], [200, true, P], '第 2、15 条:同一 clientTurnId 原样重发 → 200,交给原进程');
+    await waitFor(() => snap(P)?.idle, '压缩那一轮收尾');
+    const c3 = await api('/chat', BODY({ sessionId: S, prompt: 'p1 after compact' }));
+    eq([c3.status, c3.body.reused, c3.body.pid], [200, true, P], '第 3 条:之后的消息仍交给原进程');
+    await waitFor(() => snap(P)?.idle, '收尾');
+    eq(alive(S), [P], '第 1–3 条:进程数始终 1');
+  }
+  // 第 4、5 条:上一轮还在跑(上游慢、不跑命令)、4 秒内结束时发下一条 → 等到它结束,交给原进程
+  {
+    const S = uuid(4);
+    const first = await api('/chat', BODY({ sessionId: S, prompt: 'p4 first' }));
+    const P = first.body.pid;
+    await waitFor(() => snap(P)?.idle, '前置:进程空闲');
+    const a = await api('/chat', BODY({ sessionId: S, prompt: 'p4 a [W:g4]' }));
+    eq([a.status, a.body.pid], [200, P], '前置:上一轮在原进程上跑');
+    await waitFor(() => snap(P)?.busy, '前置:上一轮在跑');
+    const pendingB = api('/chat', BODY({ sessionId: S, prompt: 'p4 b' }));
+    await sleep(800);
+    openGate('g4');
+    const b = await pendingB;
+    eq([b.status, b.body.reused, b.body.pid], [200, true, P], '第 4 条:上一轮 4 秒内结束 → 交给原进程');
+    ok(b.ms < 3500, `等到上一轮结束就交,不等满 4 秒(${b.ms}ms)`);
+    await waitFor(() => snap(P)?.idle, 'B 收尾');
+    const c = await api('/chat', BODY({ sessionId: S, prompt: 'p4 c' }));
+    eq([c.status, c.body.reused, c.body.pid], [200, true, P], '第 5 条:再发仍是原进程');
+    await waitFor(() => snap(P)?.idle, 'C 收尾');
+    eq(alive(S), [P], '第 4、5 条:进程数 1');
+  }
+  // 第 19 条:结果已出、还在等输入预测(收尾窗 4 秒,真定时器)时发下一条 → 等它收尾后交给原进程
+  {
+    const S = uuid(19);
+    const a = await api('/chat', BODY({ sessionId: S, prompt: 'p19 a', promptSuggestions: true }));
+    const P = a.body.pid;
+    await waitFor(() => snap(P)?.awaitingSuggestion, '前置:结果已出、在等输入预测');
+    const b = await api('/chat', BODY({ sessionId: S, prompt: 'p19 b', promptSuggestions: true }));
+    eq([b.status, b.body.reused, b.body.pid], [200, true, P], '第 19 条:收尾后交给原进程');
+    eq(alive(S), [P], '第 19 条:进程数 1');
+  }
+  // 第 12 条(回归):上一轮还在跑、手上没有命令、4 秒内没结束 → 照旧中止它,新进程处理这一条
+  {
+    const S = uuid(12);
+    const a = await api('/chat', BODY({ sessionId: S, prompt: 'p12 a [W:g12]' }));
+    const P = a.body.pid;
+    await waitFor(() => snap(P)?.busy, '前置:上一轮在跑');
+    const b = await fast(() => api('/chat', BODY({ sessionId: S, prompt: 'p12 b' })));
+    eq(b.status, 200, '第 12 条:200');
+    ok(b.body.pid !== P, `第 12 条:进程号变了(${P} → ${b.body.pid})`);
+    await waitFor(() => alive(S).length === 1, '旧进程退出');
+    eq(alive(S), [b.body.pid], '第 12 条:进程数 1');
+    await waitFor(() => snap(b.body.pid)?.idle, '新进程这一轮收尾');
+  }
+  // 第 14 条(回归):普通连续对话,每一轮结束后再发 → 每条都 reused,进程号不变
+  {
+    const S = uuid(14);
+    const first = await api('/chat', BODY({ sessionId: S, prompt: 'p14 first' }));
+    const P = first.body.pid;
+    for (const n of [1, 2, 3]) {
+      await waitFor(() => snap(P)?.idle, `第 ${n} 条之前上一轮收尾`);
+      const r = await api('/chat', BODY({ sessionId: S, prompt: `p14 ${n}` }));
+      eq([r.status, r.body.reused, r.body.pid], [200, true, P], `第 14 条:第 ${n} 条复用原进程`);
+    }
+    eq(alive(S), [P], '第 14 条:进程数 1');
+  }
+  // 第 13、16 条:进程空闲、手上有后台命令,换工作目录 → 关旧开新(旧进程为后台命令挂着);新进程这一轮在跑(不跑命令)、
+  // 4 秒内没结束时再发 → 挂着的旧进程不挡判断:照第 12 条中止新进程另起;再发 → 交给最新的那个。
+  {
+    const S = uuid(16);
+    const first = await api('/chat', BODY({ sessionId: S, prompt: 'p16 first [BG:b16]' }));
+    const P1 = first.body.pid;
+    await waitFor(() => snap(P1)?.idle && snap(P1)?.liveTasks === 1, '前置:空闲、手上有后台命令');
+    const a = await api('/chat', BODY({ sessionId: S, prompt: 'p16 a [W:g16]', cwd: WORK2 }));
+    eq(a.status, 200, '换工作目录后发一条:200');
+    const P2 = a.body.pid;
+    ok(P2 !== P1, `第 13 条:关旧开新(${P1} → ${P2})`);
+    eq([snap(P1)?.exitCode, snap(P1)?.usable], [null, false], '旧进程为后台命令挂着(活着、不再接消息)');
+    await waitFor(() => snap(P2)?.busy, '前置:新进程这一轮在跑');
+    const b = await fast(() => api('/chat', BODY({ sessionId: S, prompt: 'p16 b', cwd: WORK2 })));
+    eq(b.status, 200, '第 16 条:200');
+    const P3 = b.body.pid;
+    ok(P3 !== P1 && P3 !== P2, `第 16 条:进程号与前两个都不同(${P1} / ${P2} / ${P3})`);
+    await waitFor(() => snap(P3)?.idle, '最新进程这一轮收尾');
+    const c = await api('/chat', BODY({ sessionId: S, prompt: 'p16 c', cwd: WORK2 }));
+    eq([c.status, c.body.pid], [200, P3], '第 16 条:再发一条 → 交给最新的那个');
+    await waitFor(() => !alive(S).includes(P2), '被中止的新进程退出');
+    eq(alive(S).sort(), [P1, P3].sort(), '第 16 条:进程数 2(含为后台命令挂着的旧进程)');
+  }
 
   console.log(`✓ check-r199-session-one-proc:${checks} 项断言全部通过`);
 } finally {
