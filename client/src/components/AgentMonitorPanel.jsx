@@ -8,7 +8,7 @@ import { buildSubagentCostIndex } from '../utils/subagentCost.js';
 import { subscribeAgentsActive, fetchAgentsActiveFresh } from '../utils/agentsActivePoller.js';
 import {
   AGENT_TERMINAL_STATUSES, agentHydrationStatus, agentOpenFailureAction, buildAgentRows, fetchAgentHistory,
-  locateParentPane, shouldApplyHistory, splitAgentReply, splitHistoryBlocks, agentModelLabel,
+  locateParentPane, shouldApplyHistory, splitAgentReply, splitHistoryBlocks, agentModelLabel, historyModelFields,
 } from '../utils/agentView.js';
 import ErrorPlainText from './ErrorPlainText.jsx';
 
@@ -986,6 +986,7 @@ export function AgentMonitorPanel() {
         agentProjectHash: row.agentProjectHash,
         hasTranscript: true,
         ...(parts.prompt ? { prompt: parts.prompt } : null),
+        ...historyModelFields(res), // r200:完整的模型先后与被拦信息
       });
     } finally {
       setOpeningKey(null);

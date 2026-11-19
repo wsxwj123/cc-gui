@@ -11,6 +11,7 @@ import { tailBlockInfo, latestToolTitles } from '../utils/streamStatus.js';
 import { stopNoOwnerNotice } from './tools/TaskCard.jsx';
 import { resolveOwnedAgent } from '../utils/agentOwner.js';
 import { AGENT_TERMINAL_STATUSES, agentSourceState, taskRunEvidence, agentModelLabel } from '../utils/agentView.js';
+import { modelRefusalText } from '../utils/modelFallback.js';
 import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { advanceScrollTransaction, beginScrollTransaction, keyRequestsReading, shouldPauseAutoScroll } from '../utils/scroll.js';
 
@@ -202,6 +203,12 @@ export function SubagentView({ agentId, paneId, tabIndex = 0, active = false, pa
             {agentModel && (
               <span className="px-1.5 py-px bg-violet-100 text-violet-700 rounded" title="该子代理实际使用的模型">
                 {agentModel}
+              </span>
+            )}
+            {/* r200:原模型的回复被安全检查拦下、命令行换了模型 → 单独一行说明(读历史时从转写里认出) */}
+            {agent?.modelRefusal && (
+              <span data-cgui="subagent-model-refusal" className="basis-full font-body text-ink-muted">
+                {modelRefusalText(agent.modelRefusal)}
               </span>
             )}
             {/* #2 上下文占用徽章(与主会话同口径:最后一次调用的 input+cache 之和,服务端

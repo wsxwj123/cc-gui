@@ -4,7 +4,7 @@ import { useStore } from '../../stores/sessionStore.js';
 import { MarkdownRenderer } from '../MarkdownRenderer.jsx';
 import { extractToolResultText } from '../../utils/toolResult.js';
 import { resolveOwnedAgent } from '../../utils/agentOwner.js';
-import { fetchAgentHistory, historyLegacyArrays, shouldApplyHistory, splitAgentReply, splitHistoryBlocks, agentModelLabel } from '../../utils/agentView.js';
+import { fetchAgentHistory, historyLegacyArrays, shouldApplyHistory, splitAgentReply, splitHistoryBlocks, agentModelLabel, historyModelFields } from '../../utils/agentView.js';
 import ErrorPlainText from '../ErrorPlainText.jsx';
 import { confirmDialog } from '../../utils/confirmDialog.jsx';
 import { SubagentCostContext, SubagentCostTag } from './SubagentCost.jsx';
@@ -173,6 +173,7 @@ export function TaskCard({ toolCall }) {
               agentSessionId: agentSid,
               agentProjectHash: hash,
               ...(histPrompt ? { prompt: histPrompt } : null),
+              ...historyModelFields(res), // r200:完整的模型先后与被拦信息(子代理页的「原 → 新」与说明行)
             });
           })
           .catch(() => {});

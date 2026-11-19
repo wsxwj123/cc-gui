@@ -1781,6 +1781,42 @@ function agentModelFields(profile, agent) {
   return { model: first || last || null, ...(first && last && first !== last ? { models: [first, last] } : {}) };
 }
 
+// r200:子代理页要的模型轨迹 —— 按先后用过的模型(相邻相同只记一次,伪模型名不算),以及「原模型的回复被
+// 安全检查拦下、命令行换了模型」的那一次(没有给 null)。被拦的两种认法都认:助手记录 message.stop_reason 为
+// 'refusal';命令行紧跟着插的 isMeta 用户记录带 refusedMessageId(= 被拦那条的 message.id)。类别取被拦那条的
+// message.stop_details.category,没有给 null(页面写「未知」)。只认之后确实换了模型的那次(被拦后没换模型的不在本项范围)。
+function agentModelTrail(records) {
+  const models = [];
+  const byId = new Map();   // message.id → 这条助手消息的 { model, category, index }
+  const refused = [];
+  const mark = (info) => { if (info && !refused.includes(info)) refused.push(info); };
+  for (const rec of records || []) {
+    if (rec?.type === 'assistant') {
+      const msg = rec.message || {};
+      const model = realModelName(msg.model);
+      if (!model) continue;
+      if (models[models.length - 1] !== model) models.push(model);
+      // index = 记到这条时列表的长度:列表里排在它后面的第一个模型就是换上来的新模型。
+      // 同一条消息按内容块拆成几条记录落盘(message.id 相同),只建一份,类别以带着 stop_details 的那条为准。
+      let info = typeof msg.id === 'string' ? byId.get(msg.id) : null;
+      if (!info) {
+        info = { model, category: null, index: models.length };
+        if (typeof msg.id === 'string') byId.set(msg.id, info);
+      }
+      const category = msg.stop_details?.category;
+      if (typeof category === 'string' && category) info.category = category;
+      if (msg.stop_reason === 'refusal') mark(info);
+    } else if (rec?.type === 'user' && typeof rec.refusedMessageId === 'string') {
+      mark(byId.get(rec.refusedMessageId));
+    }
+  }
+  for (const r of refused) {
+    const fallbackModel = models[r.index] || null;
+    if (fallbackModel) return { models, modelRefusal: { originalModel: r.model, fallbackModel, category: r.category } };
+  }
+  return { models, modelRefusal: null };
+}
+
 export async function getSessionMessages(sessionId, projectHash, paging = {}) {
   const loc = await locateSessionFile(sessionId, projectHash);
   if (!loc) return { notFound: true };
@@ -2172,7 +2208,7 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
     toolUseId: loc.toolUseId || null,
   };
   const view = loc.parentSessionId
-    ? { kind: 'agent', blocks: agentViewBlocks(finalMessages) }
+    ? { kind: 'agent', blocks: agentViewBlocks(finalMessages), ...agentModelTrail(records) } // r200:子代理页的模型先后与被拦信息
     : { kind: 'session', blocks: [] };
   // r151l:分页窗口在**完整 messages 与 usageTotals 都算完之后**才切 —— usageTotals
   // 始终按全文件口径,与是否分页无关;不传 paging(旧调用)时返回全量,新增字段按全量语义

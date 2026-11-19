@@ -174,7 +174,12 @@ export async function fetchAgentHistory({ agentSessionId, projectHash, signal = 
     const body = await r.json().catch(() => null);
     if (!r.ok) return { ok: false, status: r.status, code: body?.code || null, message: historyReadFailureText(r.status, body?.code) };
     const blocks = Array.isArray(body?.view?.blocks) ? body.view.blocks : [];
-    return { ok: true, owner: body?.owner || null, blocks };
+    // r200:子代理按先后用过的模型与被拦信息(服务端从转写里认出,见 session-reader 的 agentModelTrail)
+    return {
+      ok: true, owner: body?.owner || null, blocks,
+      models: Array.isArray(body?.view?.models) ? body.view.models : null,
+      modelRefusal: body?.view?.modelRefusal || null,
+    };
   } catch (err) {
     if (signal?.aborted) return { ok: false, aborted: true };                  // 目标已取消:静默丢弃
     if (timedOut || err?.name === 'AbortError') {
@@ -385,4 +390,16 @@ export function formatModelChain(models) {
 export function agentModelLabel(agent, metaAgent = null) {
   return formatModelChain(agent?.models) || formatModelChain(metaAgent?.models)
     || [agent?.model, metaAgent?.model].find(isRealModelName) || null;
+}
+
+/**
+ * r200:读历史应答里的模型先后与被拦信息 → 子代理记录的字段(子代理页显示完整的「原 → 新」与说明行)。
+ * 没有就不给这个键,不覆盖已有的。
+ */
+export function historyModelFields(res) {
+  const models = Array.isArray(res?.models) ? res.models.filter(isRealModelName) : [];
+  return {
+    ...(models.length ? { models } : {}),
+    ...(res?.modelRefusal && typeof res.modelRefusal === 'object' ? { modelRefusal: res.modelRefusal } : {}),
+  };
 }

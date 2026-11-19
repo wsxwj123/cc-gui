@@ -88,6 +88,7 @@ export const SKIN_ANCHORS = [
   // R11/R12:子代理会话视图(在母会话之上展开的只读面)根容器 —— 同一个容器上还挂着
   // 合同身份 data-parent-session-id / data-tool-use-id。
   { id: 'subagent-view', desc: '子代理会话视图根(覆盖在母会话之上的只读面)' },
+  { id: 'subagent-model-refusal', desc: '子代理页里「回复被安全检查拦下、命令行已换模型」的说明行(r200)' },
   { id: 'permission-card', desc: '权限确认卡片' },
   // r151b:跨会话消息的卡片区(目标会话输入框上方,与权限卡同区;总开关开且有待处理 / 处理中的消息时才出现)。
   { id: 'xs-inbox', desc: '跨会话消息卡片区(目标会话输入框上方)' },
