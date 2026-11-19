@@ -172,7 +172,8 @@ test('A7 [第16条] 换工作目录关旧开新(旧进程为后台命令挂着)�
   } finally { await cleanupSession(T, [goFile]); }
 });
 
-test('A8 [第17条] 进程空闲时两条消息几乎同时发到同一会话:恰一条 200 reused:true,另一条 409 CHAT_SESSION_BUSY(旧形态:没有 reason、没有 pid),进程数 1', async () => {
+// 用例修订(2026-11-19,test-r199-fix):按改后的第 17 条,另一条有三种都算对(旧形态 409 / 新形态 409 session-turn-running / 200 reused:true),原来只认旧形态 409。
+test('A8 [第17条] 进程空闲时两条消息几乎同时发到同一会话:一条 200 reused:true、进程号等于先前的;另一条是三种之一(旧形态 409 无 reason 无 pid / 新形态 409 session-turn-running 带原进程号 / 200 reused:true 同进程号);都不落到别的进程,进程数 1', async () => {
   const T = newSession('a8');
   try {
     const { pid1 } = await primeProcess(T, { bgTasks: 0 });
@@ -180,15 +181,18 @@ test('A8 [第17条] 进程空闲时两条消息几乎同时发到同一会话:�
       chat(T, `R199 ${T.tag} 并发甲 ${uniq()}`, {}, 40_000),
       chat(T, `R199 ${T.tag} 并发乙 ${uniq()}`, {}, 40_000),
     ]);
-    const ok = [x, y].filter((r) => r.status === 200);
-    const busy = [x, y].filter((r) => r.status === 409);
-    expect({
-      statuses: [x.status, y.status].sort(),
-      okReusedSamePid: ok.length === 1 && ok[0].body.reused === true && ok[0].body.pid === pid1,
-      busyBody: busy.length === 1 ? { ok: busy[0].body.ok, code: busy[0].body.code, error: busy[0].body.error, keys: Object.keys(busy[0].body).sort() } : null,
-    }, `甲:${raw(x)};乙:${raw(y)}`).toEqual({
-      statuses: [200, 409], okReusedSamePid: true, busyBody: { ok: false, code: BUSY_NEW, error: '会话正在运行', keys: ['code', 'error', 'ok'] },
-    });
+    const keysOf = (b) => JSON.stringify(Object.keys(b || {}).sort());
+    // 逐种写具体断言:每条应答必须精确落进下面三种之一,否则标成 unexpected 并带上原文
+    const classify = (r) => {
+      const b = r.body || {};
+      if (r.status === 200 && b.reused === true && b.pid === pid1) return 'reused200';
+      if (r.status === 409 && keysOf(b) === JSON.stringify(['code', 'error', 'ok']) && b.ok === false && b.code === BUSY_NEW && b.error === '会话正在运行') return 'old409';
+      if (r.status === 409 && keysOf(b) === JSON.stringify(['code', 'error', 'ok', 'pid', 'reason']) && b.ok === false && b.code === BUSY_NEW && b.reason === 'session-turn-running' && b.pid === pid1 && b.error === '会话这一轮还在运行') return 'new409';
+      return `unexpected(${r.status})`;
+    };
+    const kinds = [classify(x), classify(y)].sort();
+    const allowed = [['old409', 'reused200'], ['new409', 'reused200'], ['reused200', 'reused200']];
+    expect(allowed, `甲:${raw(x)};乙:${raw(y)};实际归类 ${JSON.stringify(kinds)}`).toContainEqual(kinds);
     expect((await procsSettled(T.sid, 1, 10_000)).length, '进程数').toBe(1);
   } finally { await cleanupSession(T); }
 });

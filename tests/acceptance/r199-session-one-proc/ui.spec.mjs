@@ -26,14 +26,39 @@ async function setupTail(page, name, autoMs) {
   return { T, prime, hide, tr };
 }
 
+// 用例修订(2026-11-19,test-r199-fix):U1 / U3 原来用接口 primeProcess 预先起进程,请求体不带页面会带的 globalRead:true 等字段,
+// 页面后来发的消息按第 3 条「改配置后关旧开新」另起了新进程,进程号对不上。改成让页面自己发第一回合(做法同 stoppedProcess),进程配置与页面一致。
+/** 同 setupTail,但预先起进程的那一回合由页面自己发(放出 2 条没结束的后台命令),之后才拦截轮询、命令行自己接着回复 autoMs 毫秒。prime.pid1 = 页面第一回合应答里的进程号。 */
+async function setupTailByPage(page, name, autoMs) {
+  const T = newSession(name);
+  const hide = await hideActive(page, T.sid);
+  const tr = trackChat(page);
+  await boot(page);
+  await openSessionBySearch(page, T.title, T.reply);
+  const taskIds = [0, 1].map((i) => `${T.tag}-bg${i}`);
+  writeScript(`${T.tag}-prime`, [...taskIds.map((taskId) => ({ bgStart: { taskId, description: 'sleep 120' } })), { say: `R199 ${name} 第一回合完` }]);
+  const primeMark = `${name.toUpperCase()}PRIME`;
+  await sendPrompt(page, `${primeMark}${uniq()} R199S:${T.tag}-prime`);
+  expect(await waitFor(() => turnEnds(T.sid, primeMark).length > 0, 25_000, 100), '前置:页面发出的第一回合在命令行里结束').toBeTruthy();
+  const primeResp = await waitFor(() => tr.respWith(primeMark).find((r) => r.status === 200) || null, 10_000, 100);
+  expect(Boolean(primeResp && primeResp.body && primeResp.body.pid), '前置:页面第一回合应答 200 且带进程号').toBe(true);
+  await sleep(8_000);
+  hide.hide = true;
+  await startAutoTurn(T, { taskId: taskIds[1], sleepMs: autoMs });
+  await sleep(1_000);
+  return { T, prime: { pid1: primeResp.body.pid, taskIds }, hide, tr, primeMark };
+}
+
 test('U1 [第6、7条] 页面没认出这一轮在跑时在输入框发消息:不出错误块,这条进待发队列并给提示;那一轮结束后自动发出、回复正常显示,交给同一个进程,进程数 1', async ({ page }) => {
   let T = null;
   try {
-    const ctx = await setupTail(page, 'u1', 16_000);
+    const ctx = await setupTailByPage(page, 'u1', 16_000);
     T = ctx.T;
     const msg = `U1MSG${uniq()}`;
     await sendPrompt(page, msg);
     const hint = await waitPhrase(page, HINT_NEW, 15_000);
+    // 用例修订(2026-11-19,test-r199-fix):拦截轮询只用来制造「发送那一刻页面还没认出」;收到 409(看到排队提示)后放开,否则页面一直认不出这一轮、会重发多收 409。
+    ctx.hide.hide = false;
     const p6 = await probe(page, msg);
     expect({ hintShown: hint.seen, queuedCount: p6.queued, errorText: p6.errorText, statuses: ctx.tr.statusesOf(msg) }, `提示等了 ${hint.ms}ms;排队栏:${JSON.stringify(p6.queueTexts)}`)
       .toEqual({ hintShown: true, queuedCount: 1, errorText: false, statuses: [409] });
@@ -74,7 +99,7 @@ test('U2 [第8条] 页面没认出这一轮在跑、消息已排队后点停止:
 test('U3 [第18条] 第一条发出后、应答回来之前再手打一条;第一条被 409 退回:待发队列里第一条在前第二条在后,那一轮结束后按这个顺序发出,两条回复都正常显示', async ({ page }) => {
   let T = null;
   try {
-    const ctx = await setupTail(page, 'u3', 22_000);
+    const ctx = await setupTailByPage(page, 'u3', 22_000);
     T = ctx.T;
     const first = `U3A${uniq()}`;
     const second = `U3B${uniq()}`;
@@ -82,15 +107,21 @@ test('U3 [第18条] 第一条发出后、应答回来之前再手打一条;第�
     await sleep(700);
     await sendPrompt(page, second);
     expect((await waitPhrase(page, HINT_NEW, 15_000)).seen, '前置:第一条被退回后出现排队提示').toBe(true);
+    // 用例修订(2026-11-19,test-r199-fix):收到第一个 409 后放开对 /api/agents/active 的拦截(同 U2 / U22)。
+    ctx.hide.hide = false;
     await sleep(500);
     const q = await probe(page, '');
     const order = q.queueTexts.map((t) => (t.includes(first) ? 'first' : t.includes(second) ? 'second' : 'other'));
     expect(order, `排队栏:${JSON.stringify(q.queueTexts)}`).toEqual(['first', 'second']);
 
     expect(await waitAutoEnd(T, 1, 40_000), '前置:那一轮结束').toBeTruthy();
-    await expect(replyOf(page, first), '第一条回复显示').toBeVisible({ timeout: 40_000 });
-    await expect(replyOf(page, second), '第二条回复显示').toBeVisible({ timeout: 40_000 });
-    const okOrder = ctx.tr.resps.filter((r) => r.status === 200).map((r) => (r.prompt.includes(first) ? 'first' : r.prompt.includes(second) ? 'second' : 'other'));
+    // 用例修订(2026-11-19,test-r199-fix):replyOf 用 getByText 正则,Playwright 会把整块文字折成一行,「第一条回复 + 排队栏里还没发的第二条」同在一个容器里也能匹配(假通过:第二条还在排队就判成回复已显示)。
+    // 本条改成只认回复段落(p)里的文字,第二条没真发出去就等不到。
+    const replyPara = (marker) => page.locator('p').filter({ hasText: `R199-REPLY ${marker}` }).first();
+    await expect(replyPara(first), '第一条回复显示').toBeVisible({ timeout: 40_000 });
+    await expect(replyPara(second), '第二条回复显示').toBeVisible({ timeout: 40_000 });
+    // 用例修订(2026-11-19,test-r199-fix):页面自己发的第一回合(预先起进程那条)也在录制里,顺序只看 first / second 两条。
+    const okOrder = ctx.tr.resps.filter((r) => r.status === 200 && !r.prompt.includes(ctx.primeMark)).map((r) => (r.prompt.includes(first) ? 'first' : r.prompt.includes(second) ? 'second' : 'other'));
     const startOrder = turnStarts(T.sid).map((t) => (String(t.text).includes(first) ? 'first' : String(t.text).includes(second) ? 'second' : null)).filter(Boolean);
     expect({ okOrder, startOrder, processCount: osProcs(T.sid).length }).toEqual({ okOrder: ['first', 'second'], startOrder: ['first', 'second'], processCount: 1 });
   } finally { if (T) await cleanupSession(T); }
@@ -168,7 +199,9 @@ async function stoppedProcess(page, name) {
   await stopButton(page).first().click();
   const interrupted = await waitFor(() => turnEnds(T.sid, slowMark).find((x) => x.interrupted) || null, 8_000, 100);
   expect(Boolean(interrupted), '前置:停止送到了命令行(被停的这一轮以打断收尾)').toBe(true);
-  await sleep(3_000);
+  // 用例修订(2026-11-19,test-r199-fix):原来在命令行收到停止后只等约 3 秒就开始续跑,落在被停那一轮停稳之前(开着输入预测时约 4 秒才停稳,页面默认开着)。
+  // 选「从命令行收到停止起至少等 5 秒」而不是轮询 /api/agents/active:该条目的在跑状态字段属于内部形态,接口文件没有约定;5.5 秒 > 约 4 秒,留有余量。
+  await sleep(5_500);
   const firstResp = tr.resps.find((r) => r.status === 200);
   return { T, tr, hide, goFile, taskIds, firstPid: firstResp && firstResp.body && firstResp.body.pid };
 }
