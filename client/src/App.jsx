@@ -12,6 +12,9 @@ const SESSION_BUSY_QUEUED_NOTICE = '会话正在处理跨会话消息，这条�
 const CONFIG_DEFERRED_NOTICE = '这个会话还有后台任务在运行，本条消息沿用已有进程：思考强度、配置文件（含供应商）等改动要等后台任务结束后才生效。';
 const CONFIG_DEFERRED_NOTICE_MS = 15000;
 const BUSY_RETRY_GAP_MS = 2000;
+// r199:409 CHAT_SESSION_BUSY 带 reason 'session-turn-running'(会话的命令行进程这一轮还在运行、手上有没跑完的 Bash 命令,
+// 服务端不另起第二个进程)时的提示;没有 reason 的(跨会话回合占着等)仍用上面的 SESSION_BUSY_QUEUED_NOTICE。
+const SESSION_TURN_RUNNING_QUEUED_NOTICE = '会话这一轮还在运行，这条已排队，这一轮结束后自动发送；要立刻发送，先点停止。';
 // 已尝试过自动生成标题的 sessionId(无论成功失败),防止失败时每轮重复 spawn 标题进程。
 const titleAttempted = new Set();
 // R8-5 / r163:MCP 状态提示的跨进程去重账本。同一个 server 同一种状态这次运行里只提示一次:
@@ -6135,8 +6138,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           setChatMessages((prev) => prev.filter((m) => m.uuid !== userMsgUuid));
           dropStashedUserBubble(sessionQueueKey, userMsgUuid); // 切走时被暂存的那份也撤掉,切回时不补回
         }
-        if (paneStillOn(sessionQueueKey)) setProviderSwitchNotice({ text: SESSION_BUSY_QUEUED_NOTICE, ownerKey: sessionQueueKey });
-        else leaveSessionNotice(sessionQueueKey, SESSION_BUSY_QUEUED_NOTICE);
+        // r199:提示按 reason 选 —— 'session-turn-running' = 这个会话的进程这一轮还在运行(服务端等过约 4 秒、不另起进程),
+        // 这一轮结束后自动发;没有 reason = 跨会话回合占着等原有情形,文案不变。
+        const busyNotice = respJson.reason === 'session-turn-running' ? SESSION_TURN_RUNNING_QUEUED_NOTICE : SESSION_BUSY_QUEUED_NOTICE;
+        if (paneStillOn(sessionQueueKey)) setProviderSwitchNotice({ text: busyNotice, ownerKey: sessionQueueKey });
+        else leaveSessionNotice(sessionQueueKey, busyNotice);
         return;
       }
       // R13 身份冲突(409):本条请求不属于当前服务实例/与既有回合参数不符/已过期 ——
