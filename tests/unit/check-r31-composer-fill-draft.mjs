@@ -22,12 +22,13 @@ assert.doesNotMatch(addPath, /`draft-\$\{activeSession\?\.projectHash/,
 assert.doesNotMatch(addPath, /\|\| `draft-\$\{/,
   '不得再用 `|| `draft-...` 兜底裸模板');
 // ② 改调 queueKeyFor(activeSession)
-assert.match(addPath, /const targetKey = queueKeyFor\(activeSession\);?/,
-  'targetKey 必须走 queueKeyFor(activeSession) 统一构造点');
+// r203:聚焦窗格为空(新会话首页)时落 HOME_DRAFT_KEY,由首页输入框接收;有会话仍走 queueKeyFor。
+assert.match(addPath, /const targetKey = activeSession \? queueKeyFor\(activeSession\) : HOME_DRAFT_KEY;?/,
+  'targetKey 必须走 queueKeyFor(activeSession) 统一构造点,聚焦窗格为空时落 HOME_DRAFT_KEY(r203)');
 // deps 覆盖 draftId
 assert.match(addPath, /activeSession\?\.draftId/, 'useCallback deps 须包含 draftId(targetKey 依赖它)');
 // import 到位
-assert.match(src, /import \{ queueKeyFor \} from '\.\.\/utils\/steerQueue\.js';?/, '导入 queueKeyFor');
+assert.match(src, /import \{ queueKeyFor, HOME_DRAFT_KEY \} from '\.\.\/utils\/steerQueue\.js';?/, '导入 queueKeyFor 与 HOME_DRAFT_KEY(r203)');
 
 // ③ 键同构:draft 产出 draft-<hash>-<draftId>,与 ChatInput permKey 同构(单一构造点保证)
 assert.equal(queueKeyFor({ projectHash: 'abc', draftId: 'd1' }), 'draft-abc-d1', 'draft 键带 draftId 段');
