@@ -145,7 +145,7 @@ import { quotaValueText } from './utils/quotaFormat.js';
 import { aggregateHistoryCost, computeCostForMessage, displayUsd, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, createQueueId } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, focusedComposerKey, createQueueId } from './utils/steerQueue.js';
 import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';
 import { imageAttachNoticeText } from './utils/imageAttachNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
@@ -2164,6 +2164,34 @@ function HomeState({ tabIndex = 0 }) {
   const [restoredOrphan, setRestoredOrphan] = useState(null);
   const homeFileInputRef = useRef(null);
   const homeInputRef = useRef(null);
+  // r203:截图快捷键、文件浏览器「添加到上下文」、预览报错「发给 AI」在聚焦窗格是首页时发 HOME_DRAFT_KEY
+  // (steerQueue.focusedComposerKey)。原来只有会话输入框(ChatInput)接 composer-fill,首页没人接,内容丢失。
+  // 文字、附件的合并口径与 ChatInput 的 onFill 一致;首页附件按 id 作键、按 id 重试,没有 id 的补一个。
+  useEffect(() => {
+    const onFill = (e) => {
+      const detail = e?.detail || {};
+      if (detail.targetKey !== HOME_DRAFT_KEY) return;
+      const fillText = detail.text || '';
+      const fillAttach = Array.isArray(detail.attachments) ? detail.attachments : null;
+      if (!fillText && !fillAttach) return;
+      if (detail.append) setText((prev) => (prev && !/\s$/.test(prev) ? prev + ' ' : prev) + fillText);
+      else if (fillText) setText(fillText);
+      if (fillAttach) {
+        const withIds = fillAttach.map((a) => (a?.id ? a : { ...a, id: createQueueId('attachment') }));
+        if (detail.appendAttachments) {
+          setAttachments((prev) => {
+            const seen = new Set(prev.map((a) => a.path));
+            return [...prev, ...withIds.filter((a) => !seen.has(a.path))];
+          });
+        } else {
+          setAttachments(withIds);
+        }
+      }
+      requestAnimationFrame(() => homeInputRef.current?.focus());
+    };
+    window.addEventListener('cgui:composer-fill', onFill);
+    return () => window.removeEventListener('cgui:composer-fill', onFill);
+  }, []);
   // 斜杠命令(与会话内同一套:utils/slashCommands.js + SlashCommandMenu.jsx)
   const [slash, setSlash] = useState({ commands: [], provider: 'Anthropic', isAnthropic: true });
   const [showCmds, setShowCmds] = useState(false);
@@ -13361,10 +13389,8 @@ export default function App() {
         }
         if (d.canceled) { setShotStatus(null); return; }
         // 目标窗格 = 当前活动窗格,key 与 SessionDetail 的 sessionQueueKey 同构。
-        const st = useStore.getState();
-        const idx = st.activeTabIndex || 0;
-        const sel = (st.paneSessions && st.paneSessions[idx]) || st.selectedSession;
-        const targetKey = queueKeyFor(sel);
+        // r203:聚焦窗格为空(新会话首页)时落 HOME_DRAFT_KEY 由首页接收,不再退回 selectedSession(最左一格)。
+        const targetKey = focusedComposerKey(useStore.getState());
         const name = String(d.path || 'screenshot.png').split(/[/\\]+/).pop();
         window.dispatchEvent(new CustomEvent('cgui:composer-fill', {
           detail: {
