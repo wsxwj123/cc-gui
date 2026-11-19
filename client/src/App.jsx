@@ -83,7 +83,7 @@ import TurnScrubber from './components/TurnScrubber.jsx';
 import { LoadingMark } from './components/LoadingBits.jsx';
 import { LiveStatusLine } from './components/LiveStatusLine.jsx';
 import { liveStatusLabel, isLiveLineHostedByGroup } from './utils/liveStatus.js';
-import { pickReattachHostTurn } from './utils/reattachLiveHost.js';
+import { pickReattachHostTurn, REATTACH_TAIL_ENTRY_TYPE } from './utils/reattachLiveHost.js';
 import { DEFAULT_LOADING_STYLE, DEFAULT_LOADING_SPEED } from './utils/loadingPrefs.js';
 import { ORBIT_VARIANTS, RANDOM_POOL } from './utils/orbitVariants.js';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
@@ -9849,14 +9849,21 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // r186:重接(reattachStream:历史回合画在跑的那一轮)时,找出那一轮在历史里的回合,由它最后一个工作组的头行
   // 承载实时状态行(判定见 utils/reattachLiveHost.js,认不准返回 null = 退回底部独立状态行)。
   // 条目顺序与页面一致:MessageList 的历史在前,下面 renderChat 里实际画出来的本地条目在后。
+  // r201:再往后是页面画在它们之后的两样 —— 还没写进会话文件的「已并入」兜底气泡({!liveTurnVisible && liveSteerItems.map(renderSteerBubble)})
+  // 与重接尾巴({!liveTurnVisible && reattachTailView}),同样按页面顺序补进条目:兜底气泡记成用户消息条目,尾巴记成尾巴条目。
+  // 判定遇到它们返回 null,实时行退回底部独立状态行(画在两者之后),不再挂在它们上面那个历史回合的头行上、落到页面中间。
+  // 尾巴元素每个流式片段都换身份,依赖里只放「尾巴画没画」的布尔值,免得这个记忆化每帧重算。
+  const reattachTailShown = !liveTurnVisible && reattachTailView != null;
   const reattachHostUuid = useMemo(() => {
     if (!(liveVisible && isStreaming && reattachStream)) return null;
     const shownLocal = renderChat.filter((m) => m.type !== 'btw' && !peerPlacement.placed.has(m.uuid) && !peerMerge.taken?.has(m.uuid));
-    return pickReattachHostTurn([...peerPlacement.list, ...shownLocal], {
+    const shownSteer = liveTurnVisible ? [] : liveSteerItems.map((item) => ({ type: 'user', uuid: item.steerId }));
+    const shownTail = reattachTailShown ? [{ type: REATTACH_TAIL_ENTRY_TYPE, uuid: 'reattach-tail' }] : [];
+    return pickReattachHostTurn([...peerPlacement.list, ...shownLocal, ...shownSteer, ...shownTail], {
       streamToolIds: streamingToolCalls.map((tc) => tc?.id),
       stopping, compacting: liveCompacting, chatMode: liveChatMode,
     });
-  }, [liveVisible, isStreaming, reattachStream, renderChat, peerPlacement, peerMerge, streamingToolCalls, stopping, liveCompacting, liveChatMode]);
+  }, [liveVisible, isStreaming, reattachStream, renderChat, peerPlacement, peerMerge, liveTurnVisible, liveSteerItems, reattachTailShown, streamingToolCalls, stopping, liveCompacting, liveChatMode]);
   // 词取自重新接上的流(与原来底部那行同源同函数);流里还什么都没有(「连接中」)时不给词,
   // 由头行按历史里这一组的 blocks 取词 —— 历史已经证明这一轮有产出,头行写「连接中」不对。
   const reattachLabel = reattachHostUuid ? streamingLineLabel({
