@@ -914,7 +914,8 @@ export async function listSessions(projectHash) {
           firstPrompt: agent.prompt100 || base.replace('agent-', 'Agent '),
           messageCount: agentProfile.totalLines,
           lastActivity: agent.lastTs || new Date(as.mtimeMs).toISOString(),
-          model: agent.assistantModel || null,
+          // r200:首尾两个模型(见 agentModelFields),不再只看前 5 条。
+          ...agentModelFields(agentProfile, agent),
           toolUseId: agentMeta.toolUseId || null,
           agentType: agentMeta.agentType || null,
           contextTokens: agent.ctxTokens,
@@ -1764,6 +1765,21 @@ function attachSubagentUsage(messages, agents, workflowCalls) {
   }
 }
 
+
+// r200:尖括号开头的伪模型名(<synthetic> 等,报错占位 / 压缩摘要)不算一个模型。
+function realModelName(model) {
+  return typeof model === 'string' && model !== '' && !model.startsWith('<') ? model : null;
+}
+
+// r200:子代理在历史列表里的模型。首 = 画像前 40 条里第一条助手记录的模型(新版命令行的子代理转写第 17 条
+// 才是第一条助手记录,原来只看前 5 条会是空的;前 40 条里那条是伪模型名时退回前 5 条那份),
+// 尾 = 后 40 条里最后一条真模型。model 仍给首个(与原来同义);首尾不同再给 models = [首, 尾],页面显示「首 → 尾」。
+// 不改画像格式(PROFILE_VERSION 不动),所以中间换过又换回(甲 → 乙 → 甲)的这里只看得到「甲」,完整顺序在子代理页。
+function agentModelFields(profile, agent) {
+  const first = realModelName(profile?.headAssistantModel) || realModelName(agent?.assistantModel);
+  const last = realModelName(profile?.tailAssistantModel);
+  return { model: first || last || null, ...(first && last && first !== last ? { models: [first, last] } : {}) };
+}
 
 export async function getSessionMessages(sessionId, projectHash, paging = {}) {
   const loc = await locateSessionFile(sessionId, projectHash);
