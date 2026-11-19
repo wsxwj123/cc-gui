@@ -1817,6 +1817,22 @@ function agentModelTrail(records) {
   return { models, modelRefusal: null };
 }
 
+// r200:命令行的换模型通知(system/model_refusal_fallback:原模型的回复被安全检查拦下,命令行换了模型接着答)
+// → 对话里一条 'model-fallback' 条目,与页面直播时画的同形(client/src/utils/modelFallback.js 的 modelFallbackNoticeOf)。
+// 落盘记录的字段是 originalModel / fallbackModel / apiRefusalCategory,下划线写法也认;没有类别给 null,页面写「未知」。
+function modelFallbackNotice(record) {
+  const text = (v) => (typeof v === 'string' && v ? v : null);
+  return {
+    type: 'model-fallback',
+    uuid: text(record.uuid) || 'model-fallback-' + (text(record.requestId) || text(record.request_id) || text(record.timestamp) || ''),
+    timestamp: text(record.timestamp),
+    originalModel: text(record.originalModel) || text(record.original_model),
+    fallbackModel: text(record.fallbackModel) || text(record.fallback_model),
+    category: text(record.apiRefusalCategory) || text(record.api_refusal_category),
+    content: typeof record.content === 'string' ? record.content : '',
+  };
+}
+
 export async function getSessionMessages(sessionId, projectHash, paging = {}) {
   const loc = await locateSessionFile(sessionId, projectHash);
   if (!loc) return { notFound: true };
@@ -2094,6 +2110,10 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
         }
       }
       if (record.timestamp) currentTurn.timestamp = record.timestamp;
+    } else if (record.type === 'system' && record.subtype === 'model_refusal_fallback') {
+      // r200:命令行中途换了模型的通知。在换模型的位置切开这一轮、放一行说明(与 task-notice 同口径:切段保住位置)。
+      flushTurn();
+      messages.push(modelFallbackNotice(record));
     } else if (record.type === 'attachment' && record.attachment?.type === 'goal_status') {
       // /goal(会话级 Stop 钩子)的唯一可见信号。实测 CLI 2.1.220:goal_status 只写进
       // transcript,stream-json 一条都不发,所以历史侧不放行 = 目标在 GUI 里完全不可见

@@ -190,6 +190,8 @@ import { XsInboundSelect, XsInboundNotice, XsPausedBanner } from './components/X
 import ApiErrorActions from './components/ApiErrorActions.jsx';
 import { deriveApiErrorUi, deriveHistoryApiErrorUi, shouldSkipLocalErrorBlock } from './utils/apiErrorActions.js';
 import { isLocalOnlyEntry, dropLocalNoticesOf } from './utils/localNotice.js';
+import { modelFallbackNoticeOf } from './utils/modelFallback.js';
+import { ModelFallbackNotice } from './components/ModelFallbackNotice.jsx';
 import { isChatStartTimeoutResponse, isChatStartTimeoutEvent, makeChatStartTimeoutNotice, appendChatStartTimeoutNotice } from './utils/chatStartTimeout.js';
 import { notifyWaiting } from './utils/desktopNotify.js';
 import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isCurrentStreamTurn, isStoppedSegment, nextAttachTry, nextReattachGuard, putStreamSnapshot, resolveStreamHistCutoff, shouldRefreshHist, shouldUpgradeReattachOnReplayComplete, shouldYieldOrphanSend, takeStreamSnapshot } from './utils/reattach.js';
@@ -3356,6 +3358,8 @@ const MessageList = React.memo(function MessageList({ messages, onRetryTurn, onR
         ? <PeerMessageBubble message={msg} />
         : msg.type === 'denial'
         ? <DenialNotice denial={msg} />
+        : msg.type === 'model-fallback'
+        ? <ModelFallbackNotice notice={msg} />
         : msg.type === 'turn'
         // Provider 恒在(值平时为 null = 与默认值相同):承载开始 / 结束时只是值变,TurnBubble 不重挂。
         ? (
@@ -6761,6 +6765,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
               // r151a:服务端门控降级(第三方 auto 未开启)时带 reason,提示行换说法。
               ...(typeof event.reason === 'string' ? { reason: event.reason } : {}),
             }]));
+          }
+          // r200:命令行中途换了模型(原模型的回复被安全检查拦下,设置里允许不问直接换)。在这一轮里加一行说明;
+          // 命令行也把这条写进会话记录 —— 它不是本地提示,回合落盘后随本地副本清掉,由读历史那份接手(同一 uuid),
+          // 所以同一条只画一次。不弹框、不打断这一轮,也不动模型菜单的选择(下一轮照样先按用户选的模型发)。
+          if (event.type === 'system' && event.subtype === 'model_refusal_fallback') {
+            const fbNotice = modelFallbackNoticeOf(event);
+            setChatMessages((prev) => (prev.some((m) => m.uuid === fbNotice.uuid) ? prev : [...prev, { ...fbNotice, ownerKey: streamOwnerSid() }]));
           }
           // 等待状态(G):API 可重试错误(限流/5xx/超时),SDK 自动退避重试 ——
           // { type:'system', subtype:'api_retry', attempt, max_retries, retry_delay_ms,
@@ -10572,6 +10583,8 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
                     ? <PeerMessageBubble message={msg} />
                     : msg.type === 'denial'
                     ? <DenialNotice denial={msg} />
+                    : msg.type === 'model-fallback'
+                    ? <ModelFallbackNotice notice={msg} />
                     : msg.type === 'mode-mismatch'
                     ? <ModeMismatchNotice notice={msg} permKey={sessionQueueKey} />
                     : msg.type === 'turn'
