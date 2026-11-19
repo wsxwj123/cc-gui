@@ -4,7 +4,9 @@
 //   ② 当前回合是另一条用户回合(有自己的记录):带旧回合身份停止仍 409 RUN_STALE、不停。
 //   ③ 当前回合是用户回合但没带 clientTurnId(没有自己的记录):原有核对不变 —— 旧记录已结束,回终态、不停(收紧版的范围)。
 //   ④ 跨会话回合复用进程后复活续跑:上一条用户回合的记录不被翻回"在跑";此时停止照样停下跨会话回合。
-//   ⑤ 被要求停止过的跨会话回合续跑(shell 后台任务完成通知唤醒命令行):不写回"本回合是跨会话自动处理",用户消息不再 409。
+//   ⑤ 被要求停止过的跨会话回合续跑(shell 后台任务完成通知唤醒命令行):不写回"本回合是跨会话自动处理",用户消息不按
+//      跨会话回合挡(不回不带 reason 的旧形态 409)。r199 起:这段续跑在跑、进程手上有命令 → 等约 4 秒回新形态 409
+//      (reason session-turn-running,pid 为这个进程),不中止续跑、不另起第二个进程;续跑结束后再发 → 200 reused:true、同一进程号。
 // node tests/unit/check-r151q-stop-internal-reuse.mjs
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, realpathSync } from 'node:fs';
@@ -49,6 +51,8 @@ const api = async (path, body) => {
   return { status: r.status, body: await r.json() };
 };
 const snap = (pid) => getActiveChatProcesses().find((p) => p.pid === pid);
+// 这个会话还活着的命令行进程(进程数)
+const alive = (sid) => getActiveChatProcesses().filter((p) => p.sessionId === sid && p.exitCode === null).map((p) => p.pid);
 const uuid = (n) => `d7d7d7d7-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const BODY = (extra) => ({ prompt: 'x', cwd: WORK, model: 'r151q-model', permissionMode: 'default', keepAlive: true, ...extra });
 const INTERNAL = { kind: 'xs-auto-test' };
@@ -151,7 +155,9 @@ try {
   eq(turnRec('r151q-stop-d1')?.status, 'completed', '旧记录仍是 completed');
 
   // ── ⑤ 被要求停止过的跨会话回合续跑:不写回"本回合是跨会话自动处理" ───────────────────────────────
-  // interrupt 不杀 shell 后台任务,任务完成通知会唤醒命令行接着跑 —— 这段不该再按跨会话回合挡住用户。
+  // interrupt 不杀 shell 后台任务,任务完成通知会唤醒命令行接着跑 —— 这段不该再按跨会话回合挡住用户(旧形态 409)。
+  // r199:这段续跑在跑、进程手上有命令(替身里 shell 后台任务一直活着)→ 用户消息等约 4 秒后回新形态 409,
+  // 不中止续跑、不另起第二个进程;续跑结束后再发 → 交给同一个进程。
   const S5 = uuid(5);
   const u5 = await api('/chat', BODY({ sessionId: S5, clientTurnId: 'r151q-stop-e1', prompt: 'user SHELL' }));
   eq(u5.status, 200, '前置:用户回合起来了(留下一个 shell 后台任务)');
@@ -167,10 +173,19 @@ try {
   await waitFor(() => snap(p5)?.idle && conts.has('auto STOPPED CONT'), '被停的跨会话回合收尾、转空闲');
   conts.get('auto STOPPED CONT').wake.open(); // shell 任务完成通知唤醒命令行接着跑
   await waitFor(() => snap(p5)?.busy, '主 agent 续跑');
+  const t5 = Date.now();
   const u5b = await api('/chat', BODY({ sessionId: S5, prompt: 'user after stopped auto' }));
-  eq([u5b.status, u5b.body.code], [200, undefined], `续跑不再按跨会话回合挡住用户(${JSON.stringify(u5b.body).slice(0, 160)})`);
+  const waited5 = Date.now() - t5;
+  eq([u5b.status, u5b.body.code, u5b.body.reason, u5b.body.pid], [409, 'CHAT_SESSION_BUSY', 'session-turn-running', p5],
+    `续跑没按跨会话回合挡用户(不是不带 reason 的旧形态 409),按"这一轮还在运行"回新形态 409(${JSON.stringify(u5b.body).slice(0, 160)})`);
+  ok(waited5 >= 3500, `先等约 4 秒才回 409(实际 ${waited5} ms;真实时钟,只查下限)`);
+  eq([snap(p5)?.busy, alive(S5)], [true, [p5]], '续跑没被中止,没另起第二个进程(进程数 1)');
   conts.get('auto STOPPED CONT').finish.open();
-  await waitFor(() => snap(u5b.body.pid)?.idle, '用户回合收尾', 15000);
+  await waitFor(() => snap(p5)?.idle, '续跑收尾、转空闲', 15000);
+  const u5c = await api('/chat', BODY({ sessionId: S5, prompt: 'user after revive finished' }));
+  eq([u5c.status, u5c.body.reused, u5c.body.pid], [200, true, p5], `续跑结束后再发 → 交给同一个进程(${JSON.stringify(u5c.body).slice(0, 160)})`);
+  eq(alive(S5), [p5], '进程数仍是 1');
+  await waitFor(() => snap(p5)?.idle, '用户回合收尾', 15000);
 
   console.log(`PASS check-r151q-stop-internal-reuse(${checks} 项)`);
 } finally {
