@@ -662,6 +662,44 @@ export function roundStripEnd(rec, sessionId, timestamp) {
   return ts >= rec.since && ts <= rec.until ? rec.end : null;
 }
 
+// r198:直播事件刚标的前台任务,在这段时间内不被轮询对账抹掉(在途的旧轮询结果可能早于这条事件生成)。
+export const FG_LIVE_GRACE_MS = 3000;
+const BG_EMPTY = Object.freeze({ moved: [], pending: [], skipped: [] });
+const idList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x) : []);
+// r198:POST /api/chat/background-tasks,把各种结局归一成 { ok, code, error, moved, pending, skipped }:
+//   200 → ok;后端的 4xx / 5xx 照带 code 与 error;401 / 403(全局鉴权或来源校验)→ BG_FORBIDDEN;
+//   10 秒没应答、网络失败、应答不是 JSON → BG_NETWORK。export 仅为可单测。
+export async function requestMoveToBackground(sessionId, toolUseId = null) {
+  const network = { ok: false, code: 'BG_NETWORK', error: '没连上后台服务,结果未知', ...BG_EMPTY };
+  let r;
+  try {
+    r = await fetch('/api/chat/background-tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(toolUseId ? { sessionId, toolUseId } : { sessionId }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch { return network; }
+  if (r.status === 401 || r.status === 403) {
+    return { ok: false, code: 'BG_FORBIDDEN', error: '请求被拒绝(登录或来源校验未通过)', ...BG_EMPTY };
+  }
+  let d = null;
+  try { d = await r.json(); } catch { d = null; }
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return network;
+  const lists = {
+    moved: idList(d.moved),
+    pending: idList(d.pending),
+    skipped: Array.isArray(d.skipped) ? d.skipped.filter((x) => x && typeof x.toolUseId === 'string') : [],
+  };
+  if (r.ok && d.ok === true) return { ok: true, code: null, error: '', ...lists };
+  return {
+    ok: false,
+    code: typeof d.code === 'string' && d.code ? d.code : 'BG_INTERNAL',
+    error: typeof d.error === 'string' && d.error ? d.error : `HTTP ${r.status}`,
+    ...lists,
+  };
+}
+
 export const useStore = create((set, get) => ({
   // Data
   projects: [],
@@ -2074,6 +2112,77 @@ export const useStore = create((set, get) => ({
   upsertBgTask: (id, patch) => set((s) => ({
     bgTasks: { ...s.bgTasks, [id]: { ...(s.bgTasks[id] || { id }), ...patch } },
   })),
+
+  // ── r198 转到后台 ──────────────────────────
+  // 主线程里仍在前台运行的任务 { [tool_use_id]: { sessionId, taskId, at } }。命令卡片据此显示「移到后台」按钮。
+  // 两个来源:直播事件即时增删(markFgTask / clearFgTask,at = 标记时刻);/agents/active 轮询按会话整份对账
+  // (reconcileLiveTurns,切走再切回、刷新、事件丢了之后以它为准)。
+  fgTasks: {},
+  markFgTask: (toolUseId, { sessionId = null, taskId = null } = {}) => {
+    if (!toolUseId) return;
+    set((s) => ({ fgTasks: { ...s.fgTasks, [toolUseId]: { sessionId, taskId, at: Date.now() } } }));
+  },
+  clearFgTask: (toolUseId) => set((s) => {
+    if (!toolUseId || !s.fgTasks[toolUseId]) return s;
+    const next = { ...s.fgTasks };
+    delete next[toolUseId];
+    return { fgTasks: next };
+  }),
+  // 轮询对账(根组件那份全局订阅每 1.5 秒调一次)。没有变化就不 set —— 否则每次轮询都白渲染一遍(#185 同族)。
+  //   fgTasks:轮询里出现的会话以它报的为准,没出现的会话(没有活进程)清掉;直播刚标的(FG_LIVE_GRACE_MS 内)
+  //     先留着,防在途的旧轮询把它抹掉一拍。
+  //   movedTasks:被转到后台、还活着的命令,bgTasks 里没有(或还没有输出路径)的补登记,进程面板据此列出。
+  reconcileLiveTurns: (agents) => {
+    const list = Array.isArray(agents) ? agents.filter((a) => a && a.kind === 'chat-process' && a.sessionId) : [];
+    const st = get();
+    const now = Date.now();
+    const reported = new Map();
+    for (const a of list) {
+      const ids = reported.get(a.sessionId) || new Set();
+      for (const id of (Array.isArray(a.fgTasks) ? a.fgTasks : [])) if (typeof id === 'string' && id) ids.add(id);
+      reported.set(a.sessionId, ids);
+    }
+    let fgChanged = false;
+    const nextFg = {};
+    for (const [id, e] of Object.entries(st.fgTasks || {})) {
+      const ids = e && e.sessionId ? reported.get(e.sessionId) : null;
+      if ((ids && ids.has(id)) || now - ((e && e.at) || 0) < FG_LIVE_GRACE_MS) nextFg[id] = e;
+      else fgChanged = true;
+    }
+    for (const [sessionId, ids] of reported) {
+      for (const id of ids) if (!nextFg[id]) { nextFg[id] = { sessionId, taskId: null, at: 0 }; fgChanged = true; }
+    }
+    let nextBg = null;
+    for (const a of list) {
+      for (const mt of (Array.isArray(a.movedTasks) ? a.movedTasks : [])) {
+        if (!mt || typeof mt.toolUseId !== 'string' || !mt.toolUseId || typeof mt.outputPath !== 'string' || !mt.outputPath) continue;
+        const cur = (nextBg || st.bgTasks || {})[mt.toolUseId];
+        if (cur && cur.outputPath) continue;
+        nextBg = nextBg || { ...(st.bgTasks || {}) };
+        nextBg[mt.toolUseId] = {
+          id: mt.toolUseId, status: 'running', startedAt: now, command: '',
+          ...(cur || {}),
+          description: (cur && cur.description) || mt.description || '',
+          shellId: (cur && cur.shellId) || mt.taskId || null,
+          outputPath: mt.outputPath,
+          sessionId: (cur && cur.sessionId) || a.sessionId,
+          moved: true,
+        };
+      }
+    }
+    if (fgChanged || nextBg) set({ ...(fgChanged ? { fgTasks: nextFg } : {}), ...(nextBg ? { bgTasks: nextBg } : {}) });
+  },
+  // 请求把前台任务转到后台:不带 toolUseId =「全部」(回车 / 并入那一路),带 = 只转这一条(按钮那一路)。
+  // 页面 10 秒超时(大于后端 5 秒总时限)。结果归一成 { ok, code, error, moved, pending, skipped },不弹窗,提示由调用方按场景给。
+  // 转成的、以及按钮那一条回了"没有移动"的,清掉本地前台标记(它们都已不在前台)。
+  moveToBackground: async (sessionId, toolUseId = null) => {
+    const result = await requestMoveToBackground(sessionId, toolUseId);
+    if (result.ok) {
+      const gone = toolUseId && !result.moved.length ? [...result.moved, toolUseId] : result.moved;
+      for (const id of gone) get().clearFgTask(id);
+    }
+    return result;
+  },
   clearAgents: () => { agentDeltaQueue = []; agentDeltaCommit.cancel(); set({ activeAgents: {} }); },
   // 部件①单卡精确停止:停某一个子代理/teammate。做成 store action 而非 App handler+props——
   // TaskCard 深嵌在 TurnBubble(3 处渲染)下,透传要改 TurnBubble(不在方案文件清单里),

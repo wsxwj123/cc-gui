@@ -27,6 +27,15 @@ import { getEntry, getRawEntry, putEntry, ensureProjectLoaded, noteScan } from '
 // 两条都不成 → 返回 null,调用方不加这个键(其余 tool_result 形状一字不变)。
 // 【绝不】把 transcriptDir / 脚本路径这类本机绝对路径透给前端:只回从中解析出的
 // projectHash / sid(解析不出就是 null,其余字段照给)。
+// r198:这条工具结果是不是「前台命令被转到后台」。只看结构化字段(直播事件的 tool_use_result 与会话文件的
+// toolUseResult 同形):用户转的 backgroundedByUser、为送达消息转的 backgroundedToDeliverMessage、前台超时自动转的
+// timedOutAfterMs。只有 backgroundTaskId 而三者都没有的,是模型自己用后台方式起的命令,不算。chat.js 共用。
+export function isMovedToBackgroundResult(toolUseResult) {
+  const tur = toolUseResult && typeof toolUseResult === 'object' ? toolUseResult : null;
+  if (!tur) return false;
+  return tur.backgroundedByUser === true || tur.backgroundedToDeliverMessage === true || typeof tur.timedOutAfterMs === 'number';
+}
+
 function workflowRunOf(toolUseResult, content) {
   const tur = toolUseResult && typeof toolUseResult === 'object' ? toolUseResult : null;
   const isWorkflow = tur?.taskType === 'local_workflow';
@@ -1789,6 +1798,12 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
             ...toolResultBody(item.content),
             isError: item.is_error || false,
           };
+          // r198:命令行把这条前台命令转到了后台(用户转的 / 为送达消息转的 / 前台超时自动转的)→ 附
+          // movedToBackground + bgTaskId,卡片据此显示「已移到后台」。其余 tool_result 不多这两个键。
+          if (isMovedToBackgroundResult(record.toolUseResult)) {
+            entry.movedToBackground = true;
+            entry.bgTaskId = typeof record.toolUseResult.backgroundTaskId === 'string' ? record.toolUseResult.backgroundTaskId : null;
+          }
           // 工作流的结果才附 workflowRun;其余 tool_result 一个键都不多出来。
           const workflowRun = workflowRunOf(record.toolUseResult, entry.content);
           if (workflowRun) {
