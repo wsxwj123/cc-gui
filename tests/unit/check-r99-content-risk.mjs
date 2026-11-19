@@ -493,8 +493,9 @@ check('§4.3 App.jsx confirmDialog 计数锁定为 67(r120 对齐真实值 65;20
   assert.equal(n, 67, `实得 ${n} 次,应恰为 67`);
 });
 // r146b:5 → 6(+1:回退中途切走,把本来要重发的内容留回原会话输入框,原会话正显示在别的窗格时立刻填入)。
-check('§4.3 App.jsx cgui:composer-fill 恰 6 次(改前 4:新开会话预填 +1;r146b 回退切走留回输入框 +1)', () => {
-  assert.strictEqual(countF(A, 'cgui:composer-fill'), 6);
+// r203:+2 首页接收 composer-fill(注册 + 注销)
+check('§4.3 App.jsx cgui:composer-fill 恰 8 次(改前 4:新开会话预填 +1;r146b 回退切走留回输入框 +1;r203 首页接收 +2)', () => {
+  assert.strictEqual(countF(A, 'cgui:composer-fill'), 8);
 });
 // r146b:9 → 10(+1:回退中途切走且会话被裁空,按它转成的 draft 身份记一条孤儿消息)。
 check('§4.3 App.jsx newDraftId() 恰 10 次(改前 8:新开会话转 draft +1;r146b 裁空会话记孤儿 +1)', () => {

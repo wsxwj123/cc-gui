@@ -185,7 +185,8 @@ t('4.3 计数锁 errorAction:打标 3 + 渲染 3 恰 6 处,App.jsx 接线恰 4 �
 const COUNTS = [
   ['trim-before-tool', 1], ['compact-segment', 2],
   // r146b:composer-fill 5→6、newDraftId() 9→10(回退中途切走:留回原会话输入框 / 裁空会话记孤儿),其余不变。
-  ['cgui:composer-fill', 6], ['newDraftId()', 10], ['handleRetryTool', 8],
+  // r203:+2 首页接收 composer-fill(注册 + 注销)
+  ['cgui:composer-fill', 8], ['newDraftId()', 10], ['handleRetryTool', 8],
 ];
 for (const [tok, want] of COUNTS) {
   t(`4.3 计数锁 ${tok} === ${want}`, () => {
