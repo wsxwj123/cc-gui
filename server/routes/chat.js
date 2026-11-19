@@ -3210,7 +3210,7 @@ async function handleChatPost(req, res) {
   let lastResultLine = null;
   // r151c:slot.suggestWaitSince = 本回合结果已出、收尾窗只为等输入预测时的结果时刻(result 分支置上);续跑或收尾报完回合结束即清
   const cancelClose = () => { if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } };
-  const finalize = () => {
+  const finalize = (opts) => {
     cancelClose();
     // r185:这一轮结束了,回合结束广播(下面 maybeBroadcastTurnComplete)接手刷新侧栏,不再盯新会话文件。
     slot.newSessionFileWatch?.stop();
@@ -3221,7 +3221,10 @@ async function handleChatPost(req, res) {
     resetBackgroundTurnState(slot); // r198:这一轮结束 = 没有挡在前台的调用了:清未出结果的调用、待移,前台标记归零
     slot.suggestWaitSince = 0; // r151c:回合结束通知已带着它报出(结束时刻按结果时刻算),此后不再是"只差输入预测"
     // 回合优雅收尾:上一个 stop 武装的 abort 兜底不再需要,清掉防其误伤后续复用回合。
-    if (slot.stopTimer) { clearTimeout(slot.stopTimer); slot.stopTimer = null; }
+    // r199-1:被停那一段的结果到了立即收尾(result 分支传 keepStopTimer)时不清。改前这类结果要等 4 秒收尾窗,2–3 秒的兜底先到点:
+    // 停止后已有结果、本回合可停任务清零就直接返回,本回合子代理不听停止才强杀(hard 停止同理)。立即收尾若顺手清掉它,不听停止的
+    // 子代理就没人管了。兜底自带回合代数守卫,复用开新回合时也先清它,不会误伤下一个回合。其余调用 finalize 的地方照旧清。
+    if (slot.stopTimer && opts?.keepStopTimer !== true) { clearTimeout(slot.stopTimer); slot.stopTimer = null; }
     if (lastResultLine) { maybeBroadcastTurnComplete(slot, lastResultLine); lastResultLine = null; } // 回合完成 WS 只在最终 result 播
     // #26 会话常驻:回合收尾但进程不关。客户端照常收 done 结束本回合 SSE;slot 转 idle
     // 等同会话下一条消息复用(POST /chat 的复用块)。空闲超时回收防进程堆积。
@@ -3538,7 +3541,7 @@ async function handleChatPost(req, res) {
           const delay = resultOfStoppedSegment ? 0 : (slot.turnSubagentSeen || suggestOn) ? 4000 : 0;
           closeDelayMs = delay;
           if (delay) { cancelClose(); closeTimer = setTimeout(() => finalize(), delay); }
-          else finalize();
+          else finalize({ keepStopTimer: resultOfStoppedSegment }); // r199-1:被停那一段立即收尾时保留停止兜底(见 finalize 清兜底处)
           // r151c:收尾窗只为等输入预测(不是子代理去抖窗)→ 跨会话判定把本会话当空闲(只读标记,不改收尾时序)
           slot.suggestWaitSince = delay && suggestOn && !slot.turnSubagentSeen ? Date.now() : 0;
         } else if (m.type === 'prompt_suggestion') {
@@ -4835,9 +4838,11 @@ export function applyStop(slot, pid, flags) { // export 仅为可单测(check-st
   try { slot.query?.interrupt?.()?.catch?.(() => {}); } catch {}
   // r199-1:停止时这一轮结果已出、收尾窗只在等输入预测(suggestWaitSince 非 0),进程又为被保留的后台任务留着:interrupt 掐掉
   // 正在生成的预测后命令行不再出结果,下面的兜底 2–3 秒后见「停止后没有结果」、后台命令若已结束就强杀进程,截断命令行随后的续跑。
-  // 改为经消息泵挂在槽上的收尾入口立即收尾(入口自己再核一次窗),不武装兜底;之后的续跑走消息泵的复活守卫。没有被保留的任务时
-  // 不改(进程本来就要关,不会有续跑);入口不在(单测伪造的槽)或核对不过 → 照原路径武装兜底。
-  if (!slot.idle && slot.suggestWaitSince && keptCount > 0 && slot.finalizeSuggestionWait?.()) {
+  // 改为经消息泵挂在槽上的收尾入口立即收尾(入口自己再核一次窗),不武装兜底;之后的续跑走消息泵的复活守卫。只在这几条都成立时这样做:
+  // 保活(有 sessionId、没在关闭;否则 finalize 会紧跟 interrupt 关输入,可能截断刚发出的 interrupt)、有被保留的任务(没有时进程
+  // 本来就要关,不会有续跑)、这一轮没有可停任务(有的话要靠兜底到点确认它们停净,照原路径挂兜底)。入口不在(单测伪造的槽)或核对
+  // 不过 → 照原路径武装兜底。
+  if (!slot.idle && slot.keepAlive && slot.sessionId && !slot.closing && slot.suggestWaitSince && keptCount > 0 && stoppableTasks.length === 0 && slot.finalizeSuggestionWait?.()) {
     return { ok: true, kept: keptCount, keptToolUseIds: keptTasks };
   }
   const selEpoch = slot.turnEpoch | 0;
