@@ -13264,9 +13264,9 @@ export default function App() {
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const selectedProject = useStore((s) => s.selectedProject);
   const selectedSession = useStore((s) => s.selectedSession);
-  // 修正批#1b:顶栏选择器(Provider/模型/力度/远程)作用于「活跃窗格」的会话——
-  // 未分屏 = selectedSession;分屏 = 聚焦格。返回既有对象引用,选择器稳定。
-  const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || s.selectedSession);
+  // r202:顶栏选择器(Provider/模型/力度/远程)只作用于聚焦窗格的会话,聚焦窗格为空时取 null,不退回 selectedSession——
+  // 分屏时聚焦的空窗格就是新会话首页,而 selectedSession 是最左一格的镜像,退回会让顶栏作用于最左一格的会话。
+  const headerPane = useStore((s) => (s.paneSessions && s.paneSessions[s.activeTabIndex || 0]) || null);
   // r194:顶栏会话名按编号取已加载列表里最新的那一项解析(与侧栏同口径;headerPane 可能只有编号或是旧快照)。
   // 选择器返回字符串,改名、自动标题生成、列表刷新后都跟着变(U6:顶栏也要跟随 AI 自动标题)。
   const headerPaneTitle = useStore((s) => (headerPane ? resolveLatestSessionTitle(s, headerPane) : ''));
