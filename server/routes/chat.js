@@ -3264,6 +3264,14 @@ async function handleChatPost(req, res) {
       try { input.close(); } catch {}
     }
   };
+  // r199-1:收尾入口,给停止入口(applyStop 选择性路径)用:这一轮结果已出、收尾窗只在等输入预测时点停止,进程手上又有被保留的
+  // 后台任务 → 立即收尾,不武装停止兜底(兜底到点见「停止后没有结果、后台命令已结束」会强杀进程,截断命令行随后的续跑)。
+  // 进来再核一次:窗还挂着、还只在等预测(结果分支挂上、没被续跑重新计时过)才收尾;迟到的调用什么都不做。返回是否收了尾。
+  slot.finalizeSuggestionWait = () => {
+    if (!closeTimer || !slot.suggestWaitSince) return false;
+    finalize();
+    return true;
+  };
   // #13 静默看门狗:部分第三方主控模型拿到子代理 tool_result 后,上游既不续写也不发
   // 终态 result → 生成器永久阻塞、回合永不收尾、输入框恒灰(官方无此病)。条件极窄:
   // 静默超过设定时长且【本回合起过子代理/续跑 + 当前没有任何新鲜活任务 + 尚未收尾】才
@@ -4825,6 +4833,13 @@ export function applyStop(slot, pid, flags) { // export 仅为可单测(check-st
     // idle 仅 stoppable(无 shell):closing 已置、stopTask 已发,落到下方 interrupt+窗+abort(=hard)。
   }
   try { slot.query?.interrupt?.()?.catch?.(() => {}); } catch {}
+  // r199-1:停止时这一轮结果已出、收尾窗只在等输入预测(suggestWaitSince 非 0),进程又为被保留的后台任务留着:interrupt 掐掉
+  // 正在生成的预测后命令行不再出结果,下面的兜底 2–3 秒后见「停止后没有结果」、后台命令若已结束就强杀进程,截断命令行随后的续跑。
+  // 改为经消息泵挂在槽上的收尾入口立即收尾(入口自己再核一次窗),不武装兜底;之后的续跑走消息泵的复活守卫。没有被保留的任务时
+  // 不改(进程本来就要关,不会有续跑);入口不在(单测伪造的槽)或核对不过 → 照原路径武装兜底。
+  if (!slot.idle && slot.suggestWaitSince && keptCount > 0 && slot.finalizeSuggestionWait?.()) {
+    return { ok: true, kept: keptCount, keptToolUseIds: keptTasks };
+  }
   const selEpoch = slot.turnEpoch | 0;
   slot.stopTimer = setTimeout(() => {
     // H2:回合已被复用推进(turnEpoch 变了)→ 兜底属于上一回合,no-op,绝不 abort 新回合。

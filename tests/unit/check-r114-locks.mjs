@@ -187,7 +187,12 @@ green('E1-8 chat.js 停止链路两段计时器逐字未改(按 /stop、/stop-ta
     ...ABORT, WINDOW,
   ]);
   const SELECTIVE = timer([
-    INTERRUPT, 'const selEpoch = slot.turnEpoch | 0;', 'slot.stopTimer = setTimeout(() => {',
+    INTERRUPT,
+    // r199-1:这一轮结果已出、收尾窗只在等输入预测、手上有被保留的后台任务时,发打断后经消息泵的收尾入口立即收尾、
+    // 不武装兜底(任务文件修法 3)。这个早退是有意加的,条件同样逐字锁:放宽任何一项都会让兜底在不该跳过时被跳过。
+    'if (!slot.idle && slot.suggestWaitSince && keptCount > 0 && slot.finalizeSuggestionWait?.()) {',
+    'return { ok: true, kept: keptCount, keptToolUseIds: keptTasks };', '}',
+    'const selEpoch = slot.turnEpoch | 0;', 'slot.stopTimer = setTimeout(() => {',
     'if ((slot.turnEpoch | 0) !== selEpoch) return;', 'slot.stopTimer = null;',
     SETTLED, 'let liveStoppable = 0;', 'let liveShell = 0;', 'let liveCrossEpoch = 0;',
     'for (const t of (slot.liveTasks?.values() ?? [])) {', "if (t && t.kind === 'shell') { liveShell++; continue; }",
