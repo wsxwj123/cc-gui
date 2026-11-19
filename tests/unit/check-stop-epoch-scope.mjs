@@ -135,10 +135,11 @@ const T = (kind, epoch) => ({ kind, epoch, createdAt: Date.now() });
   // 停止链路核心时序不得被动:interrupt 不 await、优雅窗 3000/2000、abort+input.close 兜底
   assert.ok(/slot\.query\?\.interrupt\?\.\(\)\?\.catch\?\.\(\(\) => \{\}\)/.test(stopRoute), 'interrupt 必须 fire-and-forget');
   assert.ok((stopRoute.match(/hadTasks \? 3000 : 2000/g) || []).length === 2, 'hard/选择性两条优雅窗时长不得改');
-  // 保留项必须回给客户端:选择性路径带 kept 的三处响应都要带 keptToolUseIds,否则前端停止
+  // 保留项必须回给客户端:选择性路径带 kept 的四处响应都要带 keptToolUseIds,否则前端停止
   // 收尾会把服务端刚保留的跨回合后台子代理也乐观标 stopped(进程活着却显示已停止)。
-  assert.equal((stopRoute.match(/kept: keptCount, keptToolUseIds: keptTasks/g) || []).length, 3,
-    '选择性 /stop 的三处 kept 响应必须回 keptToolUseIds');
+  // r199-1 新增第四处:等输入预测时点停止、经收尾入口立即收尾的那个提前返回(applyStop 选择性路径,interrupt 之后)。
+  assert.equal((stopRoute.match(/kept: keptCount, keptToolUseIds: keptTasks/g) || []).length, 4,
+    '选择性 /stop 的四处 kept 响应必须回 keptToolUseIds');
   // keptTasks 的元素口径守卫:必须 push toolUseId(回落 tid),不得改回裸 push(tid)
   assert.ok(/keptTasks\.push\(t\.toolUseId \|\| tid\)/.test(src),
     'keptTasks 必须收 t.toolUseId(缺失回落 tid),推裸 tid 会让前端排除永不命中');

@@ -4,7 +4,7 @@
 import { test, expect } from '@playwright/test';
 import {
   sleep, uniq, newSession, http, openStream, isDone, waitFor, osProcs, turnStarts, turnEnds, autoRecs, writeScript, cleanupSession,
-  primeProcess, startAutoTurn, waitAutoEnd, touchFile,
+  primeProcess, startAutoTurn, waitAutoEnd, touchFile, rec,
 } from './helpers/lib.mjs';
 import {
   HINT_NEW, HINT_CARD, boot, openSessionBySearch, sendPrompt, stopButton, queueItems, bodyText, waitPhrase, probe, trackChat, hideActive, replyOf,
@@ -175,7 +175,7 @@ test('U20 [第20条] 点跨会话卡片「处理」时遇到「这一轮还在�
  * 页面发第一回合(放出 2 条没结束的后台命令)→ 空闲 8 秒 → 页面发一条慢消息 → 点停止 → 被停的这一轮收尾。返回 { T, tr, hide, goFile, taskIds, firstPid }。
  * 假命令行收到 interrupt 就提前收尾;若 6 秒内没收到(停止没落到命令行),放行慢回合让它自己结束,继续往下走。
  */
-async function stoppedProcess(page, name) {
+async function stoppedProcess(page, name, { afterStopMs = 5_500 } = {}) {
   const T = newSession(name);
   const hide = await hideActive(page, T.sid);
   const tr = trackChat(page);
@@ -201,7 +201,8 @@ async function stoppedProcess(page, name) {
   expect(Boolean(interrupted), '前置:停止送到了命令行(被停的这一轮以打断收尾)').toBe(true);
   // 用例修订(2026-11-19,test-r199-fix):原来在命令行收到停止后只等约 3 秒就开始续跑,落在被停那一轮停稳之前(开着输入预测时约 4 秒才停稳,页面默认开着)。
   // 选「从命令行收到停止起至少等 5 秒」而不是轮询 /api/agents/active:该条目的在跑状态字段属于内部形态,接口文件没有约定;5.5 秒 > 约 4 秒,留有余量。
-  await sleep(5_500);
+  // r199-1 第1条用 afterStopMs 缩短这段等待(命令行收到停止后不到 4 秒就续跑);默认 5.5 秒不变,U21 / U22 行为不变。
+  await sleep(afterStopMs);
   const firstResp = tr.resps.find((r) => r.status === 200);
   return { T, tr, hide, goFile, taskIds, firstPid: firstResp && firstResp.body && firstResp.body.pid };
 }
@@ -257,5 +258,42 @@ test('U22 [第22条] 同第 21 条,但页面没来得及认出续跑就发了一
     expect(await waitAutoEnd(T, 1, 40_000), '前置:这一轮结束').toBeTruthy();
     await expect(replyOf(page, msg), '这一轮结束后排队的这条自动发出、回复显示').toBeVisible({ timeout: 40_000 });
     expect({ statuses: ctx.tr.statusesOf(msg), processCount: osProcs(T.sid).length }).toEqual({ statuses: [409, 200], processCount: 1 });
+  } finally { if (T) await cleanupSession(T, goFile ? [goFile] : []); }
+});
+
+test('U23 [r199-1 第1条] 点停止后不到 4 秒命令行就续跑(先出一句、之后约 20 秒没输出),页面没来得及认出续跑就发了一条:第一次应答是 409(reason=session-turn-running、pid=被停那一轮的进程),只退回一次,这一轮结束后自动发出、回复显示,进程数 1', async ({ page }) => {
+  let T = null; let goFile = null;
+  try {
+    // 命令行收到停止后只等 2.8 秒就续跑(加上轮询误差约 3 秒,不到 4 秒)
+    const ctx = await stoppedProcess(page, 'u23', { afterStopMs: 2_800 });
+    T = ctx.T; goFile = ctx.goFile;
+    const slowResp = ctx.tr.respWith('U23SLOW').find((r) => r.status === 200);
+    expect(Boolean(slowResp && slowResp.body && slowResp.body.pid) && String(slowResp.body.pid) === String(ctx.firstPid), '前置:被停那一轮的进程号 = 第一回合的进程号').toBe(true);
+    const stoppedPid = String(slowResp.body.pid);
+    ctx.hide.hide = true;
+    await startAutoTurn(T, { taskId: ctx.taskIds[1], sleepMs: 20_000 });
+    // 前置:时序钉住。时间都取自假命令行自己的记录(收到停止 = control.jsonl 里第一条 interrupt;续跑开始 = auto.jsonl 的 start),不取页面渲染时刻。
+    const interruptRec = rec('control.jsonl', T.sid).filter((x) => x.subtype === 'interrupt').sort((a, b) => a.t - b.t)[0];
+    const autoStart = autoRecs(T.sid, 'start')[0];
+    expect(Boolean(interruptRec && autoStart), '前置:假命令行记下了收到停止和续跑开始').toBe(true);
+    const gapMs = autoStart.t - interruptRec.t;
+    expect(gapMs > 0 && gapMs < 4_000, `前置:续跑从命令行收到停止起不到 4 秒才开始(实际 ${gapMs}ms)`).toBe(true);
+
+    const msg = `U23MSG${uniq()}`;
+    await sendPrompt(page, msg);
+    const first = await waitFor(() => ctx.tr.respWith(msg)[0] || null, 15_000, 50);
+    // 收到第一次应答后放开拦截(同 U22),否则页面一直认不出续跑、会重发多收 409
+    ctx.hide.hide = false;
+    expect(Boolean(first), '前置:这条消息收到了发送应答').toBe(true);
+    expect({ status: first.status, code: first.body && first.body.code, reason: first.body && first.body.reason, pid: first.body && String(first.body.pid) },
+      `第一次应答原文:${first.status} ${JSON.stringify(first.body).slice(0, 200)};续跑距收到停止 ${gapMs}ms`)
+      .toEqual({ status: 409, code: 'CHAT_SESSION_BUSY', reason: 'session-turn-running', pid: stoppedPid });
+
+    expect(await waitAutoEnd(T, 1, 40_000), '前置:续跑这一轮结束').toBeTruthy();
+    const endRec = autoRecs(T.sid, 'end')[0];
+    await expect(replyOf(page, msg), '这一轮结束后排队的这条自动发出、回复显示').toBeVisible({ timeout: 40_000 });
+    const postsBeforeEnd = ctx.tr.postsWith(msg).filter((p) => p.t < endRec.t).length;
+    expect({ postsBeforeTurnEnd: postsBeforeEnd, statuses: ctx.tr.statusesOf(msg), processCount: osProcs(T.sid).length })
+      .toEqual({ postsBeforeTurnEnd: 1, statuses: [409, 200], processCount: 1 });
   } finally { if (T) await cleanupSession(T, goFile ? [goFile] : []); }
 });
