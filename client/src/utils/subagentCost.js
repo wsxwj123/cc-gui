@@ -30,11 +30,14 @@ export function buildSubagentCostIndex(agents, provider) {
   result.agents.forEach((priced, i) => {
     const raw = list[i] || {};
     const failed = priced.costUsd == null;
-    const reason = failed ? costReasonOf(raw, provider) : '';
+    // r200:换过模型、其中一段查不到价 → 金额只含查得到价的那几次调用,同时按「未能计价」标出来。
+    const incomplete = !failed && priced.unpricedCalls > 0;
+    const reason = failed ? costReasonOf(raw, provider)
+      : (incomplete ? costReasonOf({ ...raw, model: priced.unpricedModel }, provider) : '');
     if (priced.agentSessionId) {
       byAgentId.set(String(priced.agentSessionId).replace(/^agent-/, ''), {
         usd: failed ? 0 : priced.costUsd, currency: priced.currency ?? null,
-        priced: failed ? 0 : 1, failed: failed ? 1 : 0, reason,
+        priced: failed ? 0 : 1, failed: failed || incomplete ? 1 : 0, reason,
       });
     }
     if (!priced.toolUseId) return;
@@ -42,7 +45,7 @@ export function buildSubagentCostIndex(agents, provider) {
     const entry = byToolUseId.get(priced.toolUseId);
     entry.usd += failed ? 0 : priced.costUsd;
     entry.priced += failed ? 0 : 1;
-    entry.failed += failed ? 1 : 0;
+    entry.failed += failed || incomplete ? 1 : 0;
     if (!entry.reason && reason) entry.reason = reason;
     // 币种:先到先得;一旦出现第二种就记空串(按原数显示、不折算)—— null 表示"还没有"。
     if (priced.currency) {
