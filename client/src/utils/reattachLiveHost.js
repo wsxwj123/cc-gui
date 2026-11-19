@@ -5,10 +5,16 @@
 // 归属核对分两种:流里已经见过工具调用 id → 回合至少要含其中一个;流里还没见过 → 回合里必须还有
 // 没返回的工具调用(已经正常结束的回合不会留下没返回的工具调用;例如后台任务完成后自动接上续跑、
 // 历史还没刷新时,列表末尾是已结束的上一轮,不能认成正在跑的那一轮)。
+// r201:条目要包括页面画在历史之后的东西(调用处按页面顺序补在末尾):还没写进会话文件的「已并入」兜底气泡
+// 记成用户消息条目,r191 的重新接上尾巴(正在写、还没写进会话文件的那一段)记成尾巴条目。它们画在历史回合
+// 下面,这时再让历史回合的头行承载实时状态行,实时行就落到了页面中间,所以这两种情形都返回 null。
 import { isLiveLineHostedByGroup } from './liveStatus.js';
 
 // 一轮的起点:用户消息、后台任务通知、跨会话消息;压缩分隔线之后也不可能还是上一轮的助手内容。
 const ROUND_START_TYPES = new Set(['user', 'task-notice', 'peer-message', 'compact']);
+
+// r201:重新接上尾巴的条目类型(调用处在尾巴画出来时补在条目末尾)。
+export const REATTACH_TAIL_ENTRY_TYPE = 'reattach-tail';
 
 function turnToolIds(turn) {
   const ids = new Set();
@@ -30,7 +36,8 @@ function hasPendingToolCall(turn) {
 }
 
 /**
- * @param {Array<object>} entries 页面上按显示顺序排好的条目(历史 + 本地),每条有 type / uuid
+ * @param {Array<object>} entries 页面上按显示顺序排好的条目(历史 + 本地 + 画在它们之后的兜底并入气泡与尾巴),
+ *   每条有 type / uuid
  * @param {{streamToolIds?: string[], stopping?: boolean, compacting?: boolean, chatMode?: boolean}} o
  *   streamToolIds:重新接上的流里已经见过的工具调用 id。
  *     有:回合至少要含其中一个才算这条流的那一轮;
@@ -40,11 +47,14 @@ function hasPendingToolCall(turn) {
 export function pickReattachHostTurn(entries, { streamToolIds = [], stopping = false, compacting = false, chatMode = false } = {}) {
   const list = Array.isArray(entries) ? entries : [];
   // ① 最后一个助手回合;它之后若出现了一轮的起点 = 这一轮还没有助手内容写进会话文件
+  //   (兜底画出的「已并入」气泡是用户消息条目,也落在这一条);它之后若出现尾巴条目 = 这一轮还有一段画在它下面,
+  //   实时行要画在那一段之后(底部独立状态行),不能由它的头行承载。
   let at = -1;
   for (let i = list.length - 1; i >= 0; i -= 1) {
     const type = list[i]?.type;
     if (type === 'turn') { at = i; break; }
     if (ROUND_START_TYPES.has(type)) return null;
+    if (type === REATTACH_TAIL_ENTRY_TYPE) return null;
   }
   if (at < 0) return null;
   const turn = list[at];
