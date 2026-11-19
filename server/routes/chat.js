@@ -2460,11 +2460,17 @@ async function handleChatPost(req, res) {
   const internal = req[INTERNAL_TURN] ?? null;
   // r151q 第 9 项:本请求所有 409 CHAT_SESSION_BUSY 的统一出口。用户请求(非内部回合)被拒时给该会话记"用户在等",
   // 期间跨会话调度不在它上面起新的自动回合(见 noteUserWaiting);内部回合的冷启占位(若已登记)一并撤掉。
-  const rejectSessionBusy = () => {
+  // r199:turnRunning 只由建进程前的硬闸传({ reason, pid }:同会话能接消息的进程这一轮还在运行)→ 应答多带 reason 与
+  // 字符串 pid,页面据 reason 选提示;不传 = 原来的应答体逐字不变。发完应答返回 'handled'(复用 / 等待两个闭包据此判
+  // "已回过应答";handleChatPost 自己的返回值没人用)。
+  const rejectSessionBusy = (turnRunning = null) => {
     releaseInternalColdStart(req);
     if (!internal && sessionId) noteUserWaiting(sessionId);
     dropTurnRecord(turnRecord);
-    return res.status(409).json({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+    res.status(409).json(turnRunning
+      ? { ok: false, code: 'CHAT_SESSION_BUSY', reason: turnRunning.reason, pid: String(turnRunning.pid), error: '会话这一轮还在运行' }
+      : { ok: false, code: 'CHAT_SESSION_BUSY', error: '会话正在运行' });
+    return 'handled';
   };
   if (sessionId && sessionSlotReserved(sessionId)) {
     return rejectSessionBusy();
@@ -3702,6 +3708,19 @@ function sessionSlotReserved(sessionId) {
     if (String(s.sessionId || '').toLowerCase() === key && s.reservedBy) return true;
   }
   return false;
+}
+
+/**
+ * r199:该会话第一个能接新消息的进程(slotUsable:没退出、泵没结束、不在关闭中、输入没关)→ { pid, slot },没有回 null。
+ * 按进程表登记顺序;会话 id 精确比较(与复用块、冷启前等待段同口径)。建进程前的硬闸据此守住"一个会话同一时间只有
+ * 一个能接新消息的进程":有它就不另起第二个。
+ */
+function findUsableSessionSlot(sessionId) {
+  if (!sessionId) return null;
+  for (const [pid, s] of activeProcesses) {
+    if (s && s.sessionId === sessionId && slotUsable(s)) return { pid, slot: s };
+  }
+  return null;
 }
 
 // ── r151q 第 9 项:跨会话内部回合占住会话 / "用户在等" ─────────────────────────────────────────
