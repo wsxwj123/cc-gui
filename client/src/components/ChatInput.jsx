@@ -903,6 +903,8 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
         onEditFromQueue(queueItems[lastIdx].queueId); // r196:按条目的 queueId 取出(下标在队列变动后会指错)
         return;
       }
+      // r196:队列里有正在自动发出的条目时,↑ 也不翻输入历史 —— 历史里多半就是那一条的原文,取回来再发就是两次。
+      if (queueItems.some((q) => q?.steerState === 'bg-sending')) { e.preventDefault(); return; }
     }
 
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {

@@ -409,13 +409,18 @@ export function createBackgroundDrainer(deps = {}) {
     }
     try { onTurnStarted?.(key, { sessionId: key }); } catch {}
     const meta = marked.opts?.meta;
+    // 附件旁注:后台发出的这条没有本地气泡,卡片只能从旁注读回 —— 先写旁注(最多等 5 秒)再发,这条一出现在会话记录里
+    // 就带着卡片;写不成不挡发送(发件箱自己会重试)。
     if (persistAttachmentSidecar && Array.isArray(meta?.attachments) && meta.attachments.length) {
+      let written = null;
       try {
-        Promise.resolve(persistAttachmentSidecar({
+        written = Promise.resolve(persistAttachmentSidecar({
           ownerKey: null, sessionId: key,
           payload: { messageId: bgTurnId, text: marked.text, attachments: meta.attachments, displayText: meta.displayText || '' },
         })).catch(() => {});
       } catch {}
+      if (written) await Promise.race([written, sleep(5000)]);
+      if (!live(g)) return;
     }
     let serverEpoch = null;
     try { serverEpoch = await getServerEpoch(); } catch {}
