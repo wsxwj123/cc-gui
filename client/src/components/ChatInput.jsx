@@ -10,6 +10,7 @@ import { GoalBar } from './GoalBar.jsx';
 import { ImageLightbox } from './ImageLightbox.jsx';
 import { AnchoredPopover } from './SessionSelectors.jsx';
 import { isSteered, firstSteerableIndex, isSteerBarrier, steerBlockReason } from '../utils/steerQueue.js';
+import { holdReasonText } from '../utils/backgroundDrain.js';
 import { ElapsedTime } from './LoadingBits.jsx';
 import { resolveSelectorModel } from '../utils/routing.js';
 import { effortCapsFor, effortAllowed, effortMemoryKey, effortSourceNote, useEffortFallback } from '../utils/effortCaps.js';
@@ -350,6 +351,7 @@ function steerBlockTitle(canSteer, queueItems) {
     case 'review': return '队列最前面有一条并入结果无法确认的消息：先「取回为新消息」「保留不发」或删除它，后面的消息才能并入。';
     case 'claiming': return '队列最前面有一条消息正在安全取回，完成后才能并入下一条。';
     case 'unknown': return '队列最前面有一条消息的并入结果正在确认中，确认完成后才能并入下一条。';
+    case 'bg-sending': return '队列最前面的消息正在自动发出，发出之前不能并入下一条。'; // r196
     case 'hidden': return '队列最前面还有一条系统消息（如计划续跑）尚未处理，处理完成后才能并入。';
     default: return '队列最前面没有可并入的消息。消息留在队列中，回合结束后自动发出。';
   }
@@ -1253,7 +1255,10 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
             <div className="px-3 py-1.5 flex items-center gap-2 border-b border-accent/15">
               <Send size={11} className="text-accent shrink-0" />
               <span className="text-ink-soft flex-1">
-                {queueItems.some((q) => q.steerState === 'needs-review' || q.steerState === 'claiming')
+                {/* r196:后台自动发送没有完成(复核条目带 holdReason)与 ⚡ 并入结果无法确认分开说 */}
+                {queueItems.some((q) => q.steerState === 'needs-review' && q.holdReason)
+                  ? '自动发送没有完成，已暂停后续队列'
+                  : queueItems.some((q) => q.steerState === 'needs-review' || q.steerState === 'claiming')
                   ? '并入结果无法确认，已暂停后续队列'
                   : <><b data-testid="queue-count">{queueItems.filter((q) => !q.hidden && !isSteered(q)).length}</b> 条消息已排队 · 当前回复完成后自动发出</>}
               </span>
@@ -1296,6 +1301,11 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
                     {q.steerState === 'unknown' && <span className="text-[10px] text-amber-700">正在确认并入结果…</span>}
                     {q.steerState === 'claiming' && <span className="text-[10px] text-amber-700">正在安全取回…</span>}
                     {q.steerState === 'kept' && <span className="text-[10px] text-ink-faint">已保留，不会自动发送</span>}
+                    {/* r196:后台排空正在发这一条(没有编辑 / 删除按钮、不参与 ⚡ 与 ↑ 召回,由 barrier 判据挡住);复核条目写明原因 */}
+                    {q.steerState === 'bg-sending' && <span className="text-[10px] text-amber-700">正在自动发出…</span>}
+                    {q.steerState === 'needs-review' && q.holdReason && (
+                      <span className="block text-[10px] text-amber-700 whitespace-normal">{holdReasonText(q.holdReason.code, q.holdReason.detail)}</span>
+                    )}
                   </div>
                   <div className="shrink-0 flex items-center gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
                     {q.steerState === 'needs-review' && (
