@@ -4,7 +4,7 @@
 // 依赖全部经 createBackgroundDrainer(deps) 注入(写法照 agentsActivePoller.js),不读任何窗格状态:会话编号恒为队列键,
 // 工作区路径取入队快照 owner.cwd,模型 / 权限 / 强度按会话从状态库取(见 buildBgChatRequest)。
 import { createQueueId, firstDrainableIndex, isDraftQueueKey, withoutBgSendFields } from './steerQueue.js';
-import { buildChatRequestBody } from './chatRequest.js';
+import { AUTO_DOWNGRADE_NOTICE, buildChatRequestBody } from './chatRequest.js';
 import { gateHistModel } from './routing.js';
 
 // ── 共享登记:窗格 / 流收尾 / 回退写,BD 读。登记一律返回幂等的注销函数(放 finally / 副作用清理)。─────────────
@@ -199,7 +199,7 @@ export function buildBgChatRequest({ key, item, state, items, serverEpoch, clien
   return { body: { ...built.body, queuedDrain: true }, autoDowngraded: built.autoDowngraded, model: built.model };
 }
 
-export const AUTO_DOWNGRADE_NOTICE = '「自动」权限档在第三方 provider 下默认关闭，本会话已切回「逐步确认」。可在 设置 → 权限 中开启。';
+export { AUTO_DOWNGRADE_NOTICE }; // 降档提示与窗格共用 chatRequest.js 里那一份
 const DRAFT_ID_RE = /-(d\d+-\d+)$/;
 
 // ── 控制器 ───────────────────────────────────────────────────────────────────────────

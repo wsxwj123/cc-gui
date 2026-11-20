@@ -2602,6 +2602,21 @@ export const useStore = create((set, get) => ({
     });
     return removed;
   },
+  // r196:给刚入队的条目补写入队快照 owner(按 queueId,先落盘核验;返回写没写成)。窗格入队那句的写法被源码守卫锁着,
+  // 快照在同一个同步段里另写一次。
+  setQueueItemOwner: (sessionKey, queueId, owner) => {
+    let ok = false;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const index = queueId && owner ? list.findIndex((item) => item?.queueId === queueId) : -1;
+      if (index < 0) return s;
+      const nextQueue = { ...s.messageQueue, [sessionKey]: list.map((it, i) => (i === index ? { ...it, owner } : it)) };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      ok = true;
+      return { messageQueue: nextQueue };
+    });
+    return ok;
+  },
   // r196:后台排空选中队首。只标「此刻可排空的队首」(与窗格排空同一判据 firstDrainableIndex,同一次 setState 里判与改,
   // 与 shiftMessage 互斥);隐藏项、不是本次运行排的不标。先落盘核验,写不进返回 null(这一拍放弃)。返回标好的条目。
   markBgSending: (sessionKey, queueId, { bgTurnId, bgStartedAt } = {}) => {

@@ -15,6 +15,9 @@ export function chatCwdFor(session, project) {
     : (session?.projectPath || project?.path);
 }
 
+/** 第三方 provider 下「自动」档被降为逐步确认时给的提示(窗格与后台排空共用这一份文字)。 */
+export const AUTO_DOWNGRADE_NOTICE = '「自动」权限档在第三方 provider 下默认关闭，本会话已切回「逐步确认」。可在 设置 → 权限 中开启。';
+
 /**
  * 第三方 provider 下「自动」档的门控(修正批#5 / r151a):第三方(判据读审核状态的 official,与服务端同判据)且第三方
  * auto 总开关没开 → 降为逐步确认。只判定,不写回 —— 写回档位与提示是调用方的副作用。
