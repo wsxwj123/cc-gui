@@ -698,41 +698,55 @@ function resolveOp(name) {
   return Object.prototype.hasOwnProperty.call(OPS, name) ? OPS[name] : null;
 }
 
+// r205:历史操作失败时往标准错误输出记一行,事后能查出是哪种失败(回给页面的内容不变)。只记操作名、
+// 会话号前 8 位、阶段、失败代码、状态码,不记会话内容、锚点、路径与密钥。会话号取自 URL,safeId 不拦
+// 换行这类字符,所以前 8 位里标识字符以外的一律换成「?」,免得混进日志。阶段按请求里的 dryRun 认:
+// 只有 dryRun:true 算预览;缺省 / 非布尔这类在分阶段之前就被拒的按提交记(格式只有这两个值)。
+function logHistoryOpFailure(req, opName, status, code) {
+  const sid8 = String(req.params?.sessionId ?? '').slice(0, 8).replace(/[^A-Za-z0-9_-]/g, '?') || '-';
+  const stage = req.body?.dryRun === true ? 'preview' : 'submit';
+  console.warn(`[history-op] ${opName} sid=${sid8} stage=${stage} code=${code || '-'} status=${status}`);
+}
+
 async function handleHistoryOp(req, res, opName, dryRunFlag) {
+  const failOp = (status, code, error) => {
+    logHistoryOpFailure(req, opName, status, code);
+    return fail(res, status, code, error);
+  };
   const def = resolveOp(opName);
-  if (!def) return fail(res, 404, SESSION_NOT_FOUND, '未知的历史操作');
+  if (!def) return failOp(404, SESSION_NOT_FOUND, '未知的历史操作');
   const body = req.body || {};
   const sid = req.params.sessionId;
   const projectHash = typeof body.projectHash === 'string' ? body.projectHash.trim() : '';
   // 非法身份/参数一律 400(先验身份,再验 dryRun 与业务参数 —— 缺 dryRun 绝不落进执行分支)。
   if (!safeId(sid) || !safeId(projectHash) || !projectHash) {
-    return fail(res, 400, SESSION_INVALID_INPUT, 'projectHash 与 sessionId 必填且必须是合法标识');
+    return failOp(400, SESSION_INVALID_INPUT, 'projectHash 与 sessionId 必填且必须是合法标识');
   }
   const dryRun = body.dryRun;
   if (typeof dryRun !== 'boolean') {
-    return fail(res, 400, SESSION_INVALID_INPUT, 'dryRun 必须是布尔值(true=只预览,false=提交)');
+    return failOp(400, SESSION_INVALID_INPUT, 'dryRun 必须是布尔值(true=只预览,false=提交)');
   }
   const parsed = parseHistoryParams(opName, body);
-  if (!parsed.ok) return fail(res, 400, SESSION_INVALID_INPUT, parsed.error);
+  if (!parsed.ok) return failOp(400, SESSION_INVALID_INPUT, parsed.error);
   const principal = principalOf(req);
 
   if (dryRun) {
-    if (dryRunFlag === 'get') return fail(res, 400, SESSION_INVALID_INPUT, 'dryRun 预览必须用 POST 提交参数');
+    if (dryRunFlag === 'get') return failOp(400, SESSION_INVALID_INPUT, 'dryRun 预览必须用 POST 提交参数');
     const out = await createPreview({ op: opName, sid, projectHash, principal, params: parsed.params });
-    if (!out.ok) return fail(res, out.status, out.code, out.error);
+    if (!out.ok) return failOp(out.status, out.code, out.error);
     return res.json(out.payload);
   }
   if (typeof body.previewToken !== 'string' || !body.previewToken) {
-    return fail(res, 400, SESSION_INVALID_INPUT, '提交需要 previewToken(先用 dryRun:true 预览)');
+    return failOp(400, SESSION_INVALID_INPUT, '提交需要 previewToken(先用 dryRun:true 预览)');
   }
   if (body.baseVersion === undefined || body.baseVersion === null || body.baseVersion === '') {
-    return fail(res, 400, SESSION_INVALID_INPUT, '提交需要 baseVersion(取预览响应里的值)');
+    return failOp(400, SESSION_INVALID_INPUT, '提交需要 baseVersion(取预览响应里的值)');
   }
   const out = await submitPreview({
     op: opName, sid, projectHash, principal, params: parsed.params,
     previewToken: body.previewToken, baseVersion: body.baseVersion,
   });
-  if (!out.ok) return fail(res, out.status, out.code, out.error);
+  if (!out.ok) return failOp(out.status, out.code, out.error);
   return res.json(out.result);
 }
 
@@ -742,6 +756,7 @@ for (const opName of HISTORY_OP_NAMES) {
     try {
       await handleHistoryOp(req, res, opName, 'post');
     } catch (err) {
+      logHistoryOpFailure(req, opName, 500, 'SESSION_OPERATION_FAILED');
       fail(res, 500, 'SESSION_OPERATION_FAILED', `历史操作失败:${err.message}`);
     }
   });
