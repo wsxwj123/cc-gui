@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Shield } from 'lucide-react';
+import { Shield } from './Icon.jsx';
 import { modelRefusalText } from '../utils/modelFallback.js';
 
 // r200:主对话里「命令行中途换了模型」的说明行(原模型的回复被安全检查拦下,设置里允许不问直接换)。
