@@ -123,6 +123,29 @@ export async function runHistoryOpSettled(sessionId, op, params = {}, {
   }
 }
 
+// r205:回滚的裁剪失败时,能认出的失败代码对应的原因(写成用户看得懂的话,能做的下一步一并写上)。
+// SESSION_COMPATIBILITY_UNVERIFIED 对裁剪只有一个来源:裁开后保留段里有 tool_use 等不到它的 tool_result。
+const TRIM_FAILURE_REASONS = Object.freeze({
+  SESSION_RUNNING: '原因：这一轮还没停下来（会话里可能有后台任务在跑）。稍等几秒再点一次回滚。',
+  SESSION_NOT_FOUND: '原因：会话记录里找不到这条消息。',
+  SESSION_COMPATIBILITY_UNVERIFIED: '原因：从这条消息处裁开会拆散一次工具调用和它的结果，为了不损坏会话没有裁。可以回滚到更早的一条消息。',
+  SESSION_CHANGED: '原因：裁剪时会话记录还在写入新内容。稍等几秒再点一次回滚。',
+});
+
+/**
+ * 回滚的裁剪最终失败时,黄字里接在「会话记录裁剪失败…」那一句之后的原因。
+ * failure:runHistoryOpSettled 的失败结果({code, error});请求抛了异常(没发出去)时调用点传 {thrown:true},
+ * 拿不到失败结果(null / undefined)也按没发出去写。认不出的代码写后端给的原因原文并带上「（代码 XXX）」;
+ * 没有代码时只写原文(runHistoryOp 兜底的原文里已带 HTTP 状态码)。
+ */
+export function trimFailureReason(failure) {
+  if (!failure || failure.thrown) return '原因：请求没有发出去。';
+  const code = typeof failure.code === 'string' ? failure.code : '';
+  if (code && Object.prototype.hasOwnProperty.call(TRIM_FAILURE_REASONS, code)) return TRIM_FAILURE_REASONS[code];
+  const error = typeof failure.error === 'string' ? failure.error.trim() : '';
+  return `原因：${error}${code ? `（代码 ${code}）` : ''}`;
+}
+
 /**
  * 在系统文件管理器中定位备份副本(只读,无副作用)。
  * 路径由服务端按 backupRef 取,客户端不传路径;失败返回 {status, body},由调用点显示。
