@@ -67,7 +67,8 @@ function fetchServerEpoch() {
   return serverEpochInFlight;
 }
 // r196:后台排空(utils/backgroundDrain.js)发出时的会话级处理。窗格自己的发送路径里有同样的几步(作废上一轮的直播快照、
-// 清输入预测;受理后的延后生效 / 图没带上提示),后台发出时会话不在任何窗格里,提示一律留言,切回时显示。
+// 清输入预测;受理后图没带上的提示),后台发出时会话不在任何窗格里,提示一律留言,切回时显示。「配置改动延后生效」那句
+// 只在窗格发送的应答处理里给(有单测守着 App.jsx 里只有那一处读 configDeferred),后台发出的这一轮不给。
 function bgTurnStarted(key, { sessionId } = {}) {
   try { dropStreamSnapshot(sessionId || key); } catch { /* 快照本来就没有 */ }
   try { useStore.getState().clearPromptSuggestion(key, sessionId || key); } catch { /* 同上 */ }
@@ -76,13 +77,26 @@ function bgTurnAccepted(key, resp, notify) {
   // 新回合开始 = 会话复活:清「已停」标记(同窗格发送时那一句)
   try { useStore.getState().clearSessionStopped?.(key); } catch { /* 没有这个动作也不影响发送 */ }
   const texts = [];
-  if (resp?.configDeferred === true) texts.push(CONFIG_DEFERRED_NOTICE);
   const img = resp?.imageAttach ? imageAttachNoticeText(resp.imageAttach) : '';
   if (img) texts.push(img);
   if (texts.length) notify(texts.join(' '));
 }
 // r196:排队条目的入队快照 owner —— 后台排空发它时只用这里的工作区路径(与窗格请求体同一个表达式 chatCwdFor)、所属工作区
 // (会话文件不在时移进首页要用)与窗格里最后一条真实模型消息(发送时再按当时的 providerEpoch 门控)。
+// r196:回退标记的 ref —— 写 .current 时同步一份按会话键的共享令牌(后台排空读,见 backgroundDrain.setRollbackBusy)。
+// 回退流程各出口照旧只写 .current;换键(会话被裁空转草稿)时令牌留在原键上,清标记时按原键清;漏清靠令牌 2 分钟过期兜底。
+function createRollbackBusyRef() {
+  let cur = null;
+  let tokenKey = null;
+  return {
+    get current() { return cur; },
+    set current(v) {
+      cur = v || null;
+      if (tokenKey && (!cur || cur.key !== tokenKey)) { clearRollbackBusy(tokenKey); tokenKey = null; }
+      if (cur?.key && !tokenKey) { setRollbackBusy(cur.key); tokenKey = cur.key; }
+    },
+  };
+}
 function queueOwnerSnapshot(cwd, projectHash, messages) {
   const m = lastRealModelMsg(messages);
   return { cwd: cwd || null, projectHash: projectHash || null, histMsg: m ? { model: m.model, timestamp: m.timestamp || null } : null };
@@ -4349,7 +4363,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 等待期间窗格切到别的会话时,那个会话的发送与排空不受影响。期间流收尾与后台轮询的排空不弹不发,普通发送进排队 —— 否则等停止、等裁剪的
   // 几秒里,被中止那条流的收尾会把排队消息发出去,或用户新发的一条直接起一轮,抢在裁剪与重发之前。
   // 清它的地方:resendReplacing 真正发出或放弃时;发起方没交给 resendReplacing 的所有出口(finally)。
-  const rollbackBusyRef = useRef(null);
+  const [rollbackBusyRef] = useState(createRollbackBusyRef); // r196:写 .current 时同步后台排空读的回退令牌
   // 引导消息的流式切口必须在所有发送入口之前声明：队列按钮与 Cmd/Ctrl+Enter 共用。
   const steerAnchorRef = useRef({});
   const streamingBlocksRef = useRef(EMPTY_ARRAY);
@@ -5612,9 +5626,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 队列条目上的「⚡ 并入」按钮(handleAccelerate)。
     // forceSend(回滚/重做的重发 = 有意打断替换)照旧连这道门都不进。
     // r188:回退进行中(停回合、等裁剪的那几秒)普通发送同样进排队,由重发那一轮的收尾排空。
-    // r196:这个会话的队首正在自动发出(后台排空)→ 手打的也进排队、排在它后面,不直接发。
-    if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current || rollbackBusyFor(rollbackBusyRef.current, sessionQueueKey)
-      || (useStore.getState().messageQueue[sessionQueueKey] || []).some((q) => q?.steerState === 'bg-sending'))) {
+    // r196:这个会话的队首正在自动发出(后台排空)→ 手打的也进排队、排在它后面,不直接发。入队后补写入队快照 owner(入队那句的
+    // 写法有源码守卫锁着,另写一次;同一个同步段里,后台排空插不进来;写不进就没有快照,后台不发它,等用户回来由窗格发)。
+    const bgSendAhead = (useStore.getState().messageQueue[sessionQueueKey] || []).some((q) => q?.steerState === 'bg-sending');
+    const stampQueueOwner = (q) => useStore.getState().setQueueItemOwner(sessionQueueKey, q.queueId, queueOwnerSnapshot(chatCwdFor(selectedSession, selectedProject), selectedSession?.projectHash, getLocalMessages()));
+    if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current || rollbackBusyFor(rollbackBusyRef.current, sessionQueueKey) || bgSendAhead)) {
       const queuedAt = Date.now();
       const queueOpts = { ...opts };
       delete queueOpts.onEnqueueFailure; delete queueOpts.onQueued; delete queueOpts.fromComposer;
@@ -5628,9 +5644,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setProviderSwitchNotice({ text: message });
         return;
       }
-      // r196:补写入队快照(入队那句的写法有源码守卫锁着,另写一次;同一个同步段里,后台排空插不进来)。写不进就没有快照,
-      // 后台排空不发它,等用户回到会话由窗格发。
-      useStore.getState().setQueueItemOwner(sessionQueueKey, queued.queueId, queueOwnerSnapshot(chatCwdFor(selectedSession, selectedProject), selectedSession?.projectHash, getLocalMessages()));
+      stampQueueOwner(queued); // r196
       onQueued?.(queued);
       autoMoveOnBusyEnter(opts, hiddenUserMessage); // r198
       // Cmd/Ctrl+Enter:先入队保底，再调用 CLI/SDK 的实时输入队列。连接中、回合刚收尾或
@@ -8548,7 +8562,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     resendAbandonRef.current = null;
     // r188:调用方交过来的「回退进行中」标记 —— 重发真正发出或放弃时清掉(只清自己接手的那一个)。
     // r188b:标记由调用方作为第三个参数传入(不再在被调用时读窗格上的槽:槽可能已被同会话的另一次回退覆盖)。
-    const releaseBusy = () => { if (busy && rollbackBusyRef.current === busy) { rollbackBusyRef.current = null; clearRollbackBusy(busy.key); } };
+    const releaseBusy = () => { if (busy && rollbackBusyRef.current === busy) rollbackBusyRef.current = null; };
     const deadline = Date.now() + 4000;
     const tick = () => {
       if (!paneStillOn(ownerKey)) { releaseBusy(); onAbandon?.(); return; }
@@ -9271,7 +9285,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 出口都在下面的 finally 里清掉。(为了局部改动,try 块内的原有代码沿用原缩进。)
     const rbBusy = { key: rbKey }; // 只对发起回退的会话生效(会话被裁空转草稿时下面同步换键)
     rollbackBusyRef.current = rbBusy;
-    setRollbackBusy(rbBusy.key); // r196:后台排空也认这个会话在回退中(2 分钟过期兜底)
     let rbHandedOff = false;
     try {
     // ① 中止本地流、记进「已停进程」、清后台标记(原来在裁剪之后做的那几件,提前到这里),发带身份的硬停并等回话。
@@ -9386,7 +9399,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             draftId: _nd,
           });
           rbKey = draftKey; // 窗格现在是这条新 draft,后续复查认它
-          clearRollbackBusy(rbBusy.key); setRollbackBusy(draftKey); // r196
           rbBusy.key = draftKey; // r188:「回退进行中」标记跟着换到新草稿键(同一个对象,清标记的身份比较不变)
         }
       } catch { trimFollowupFailed = true; }
@@ -9491,7 +9503,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     }
     } finally {
       // r188:没交给 resendReplacing 的所有出口(切走放弃、裁剪失败、edit 模式、没有可重发的内容、抛错)清标记。
-      if (!rbHandedOff && rollbackBusyRef.current === rbBusy) { rollbackBusyRef.current = null; clearRollbackBusy(rbBusy.key); }
+      if (!rbHandedOff && rollbackBusyRef.current === rbBusy) rollbackBusyRef.current = null;
     }
   }, [chatMessages, messages, fetchMessagesForTab, setLocalMessages, setSelectedSession, getLocalSession, resendReplacing, paneStillOn]);
   useEffect(() => { handleRollbackRef.current = handleRollback; }, [handleRollback]);
@@ -9613,7 +9625,6 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // r188:「回退进行中」标记(见 rollbackBusyRef 定义处):交给 resendReplacing 之前的所有出口在 finally 里清。
       const rtBusy = { key: rtKey }; // 只对发起重做的会话生效
       rollbackBusyRef.current = rtBusy;
-      setRollbackBusy(rtBusy.key); // r196
       let rtHandedOff = false;
       try {
         // 顺序红线(r99-③):**先停在飞回合,再改会话文件**。反过来的话,被截断的 jsonl
@@ -9687,7 +9698,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 乐观截断已改了显示;失败则刷新回真实状态,避免停在半截视图。
         try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
       } finally {
-        if (!rtHandedOff && rollbackBusyRef.current === rtBusy) { rollbackBusyRef.current = null; clearRollbackBusy(rtBusy.key); }
+        if (!rtHandedOff && rollbackBusyRef.current === rtBusy) rollbackBusyRef.current = null;
       }
     })();
   }, [getLocalSession, fetchMessagesForTab, getLocalMessages, setLocalMessages, resendReplacing, paneStillOn]);
