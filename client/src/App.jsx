@@ -73,6 +73,8 @@ function bgTurnStarted(key, { sessionId } = {}) {
   try { useStore.getState().clearPromptSuggestion(key, sessionId || key); } catch { /* 同上 */ }
 }
 function bgTurnAccepted(key, resp, notify) {
+  // 新回合开始 = 会话复活:清「已停」标记(同窗格发送时那一句)
+  try { useStore.getState().clearSessionStopped?.(key); } catch { /* 没有这个动作也不影响发送 */ }
   const texts = [];
   if (resp?.configDeferred === true) texts.push(CONFIG_DEFERRED_NOTICE);
   const img = resp?.imageAttach ? imageAttachNoticeText(resp.imageAttach) : '';
