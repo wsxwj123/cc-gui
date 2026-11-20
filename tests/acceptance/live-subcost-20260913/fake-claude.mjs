@@ -105,6 +105,23 @@ async function turn(userText) {
 }
 
 if (!fs.existsSync(CTL)) { try { fs.mkdirSync(CTL, { recursive: true }); } catch { /* 忽略 */ } }
+
+// 后台起标题的调用(带 -p,工作目录或参数里有 cgui-title):回一句标题就退出,
+// 不读放行文件(go / finish)、不写会话文件、不当普通一轮停住。
+const TITLE_GEN = (argv.includes('-p') || argv.includes('--print'))
+  && (/cgui-title/.test(cwd) || argv.some((a) => /cgui-title/.test(a)));
+if (TITLE_GEN) {
+  if (/stream-json/.test(argv.join(' '))) {
+    out({ type: 'system', subtype: 'init', session_id: sid, cwd, model: MODEL, tools: [], mcp_servers: [], permissionMode: 'default', uuid: crypto.randomUUID() });
+    out({ type: 'assistant', session_id: sid, uuid: crypto.randomUUID(), parent_tool_use_id: null, message: { id: 'msg_' + crypto.randomBytes(4).toString('hex'), role: 'assistant', model: MODEL, type: 'message', content: [{ type: 'text', text: '短标题' }], stop_reason: 'end_turn', usage: MAIN_USAGE } });
+    out({ type: 'result', subtype: 'success', is_error: false, session_id: sid, uuid: crypto.randomUUID(), result: '短标题', duration_ms: 100, num_turns: 1, total_cost_usd: 0, usage: MAIN_USAGE });
+  } else {
+    process.stdout.write('短标题\n');
+  }
+  setTimeout(() => process.exit(0), 150);
+  await new Promise(() => {});
+}
+
 const printArg = argv.includes('-p') ? argv[argv.indexOf('-p') + 1] : undefined;
 if (printArg && !argv.includes('--input-format')) { await turn(printArg); process.exit(0); }
 

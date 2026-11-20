@@ -95,7 +95,7 @@ import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { isMovedToBackground, parseOutputPath, parseBackgroundDeadline, autoMoveNoticeText } from './utils/movedToBackground.js';
 import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
-import { runHistoryOp, runHistoryOpSettled, trimFailureReason, stopTurnAndWait, rollbackBusyFor, ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS, ROLLBACK_BUSY_NOTICE } from './utils/historyOps.js';
+import { runHistoryOp, runHistoryOpSettled, trimFailureReason, rollbackFollowupFailedText, ROLLBACK_REFRESH_HINT, stopTurnAndWait, rollbackBusyFor, ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS, ROLLBACK_BUSY_NOTICE } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
 import { isThirdPartyProvider } from './utils/autoAudit.js';
 import { saveOutcome } from './utils/saveOutcome.js';
@@ -6797,7 +6797,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // r200:命令行中途换了模型(原模型的回复被安全检查拦下,设置里允许不问直接换)。在这一轮里加一行说明;
           // 命令行也把这条写进会话记录 —— 它不是本地提示,回合落盘后随本地副本清掉,由读历史那份接手(同一 uuid),
           // 所以同一条只画一次。不弹框、不打断这一轮,也不动模型菜单的选择(下一轮照样先按用户选的模型发)。
-          if (event.type === 'system' && event.subtype === 'model_refusal_fallback') {
+          // r206:scope 为 'local' 的是子代理 / 旁问 / 后台分支那一次回复换了模型,会话的模型没变,不画进主对话;
+          // 'session' 或没有 scope(老版本命令行)的照旧画。读历史那边(session-reader.js)同样按 scope 过滤。
+          if (event.type === 'system' && event.subtype === 'model_refusal_fallback' && event.scope !== 'local') {
             const fbNotice = modelFallbackNoticeOf(event);
             setChatMessages((prev) => (prev.some((m) => m.uuid === fbNotice.uuid) ? prev : [...prev, { ...fbNotice, ownerKey: streamOwnerSid() }]));
           }
@@ -9309,21 +9311,28 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     let trimFailed = false;
     let trimFailure = null; // r205:裁剪失败的结果({code, error};请求抛了异常时是 {thrown:true}),黄字据此写原因
     let wipedAway = false; // r146b:会话被裁空(sessionReset)时窗格已切走 —— 见下方切走分支
+    // r206:裁剪请求已成功、之后「会话被裁空 → 转成新草稿」那几步出错(磁盘已经裁好,不算裁剪失败)。
+    let trimFollowupFailed = false;
     if (sel?.sessionId && projectHash) {
       const body = msg.uuid && !msg.uuid.startsWith('chat-')
         ? { projectHash, uuid: msg.uuid }
         : { projectHash, fromTimestamp: msg.timestamp };
+      // r206:只有裁剪请求本身抛异常才算裁剪失败。请求回来之后的页面处理放在下面另一个 try 里 —— 原来两段
+      // 包在同一个 try 里,转草稿那几步抛错也被说成「裁剪失败、会话记录没有改动」,和磁盘上已裁好的事实相反。
+      let tr = null;
       try {
         // r188:遇 SESSION_RUNNING / SESSION_CHANGED 重新预览再提交(最多约 6 秒)—— 刚停下的回合还在收尾窗里、
         // 或进程退出时又追加了一笔收尾记录。不以「本窗格发过停止」为前提。
-        const tr = await runHistoryOpSettled(sel.sessionId, 'trim', body);
+        tr = await runHistoryOpSettled(sel.sessionId, 'trim', body);
         if (!tr.ok) { trimFailed = true; trimFailure = tr; }
+      } catch { trimFailed = true; if (!trimFailure) trimFailure = { thrown: true }; }
+      try {
         // If trim wiped the session (no real messages would remain), we must
         // drop the sessionId locally — otherwise the next /api/chat would
         // try --resume on a deleted jsonl and CLI silently exits with
         // "No conversation found".
-        if (tr.sessionReset && !stillHere()) wipedAway = true;
-        if (tr.sessionReset && stillHere()) { // r146 R3:转 draft 是窗格动作,切走了就不做
+        if (tr?.sessionReset && !stillHere()) wipedAway = true;
+        if (tr?.sessionReset && stillHere()) { // r146 R3:转 draft 是窗格动作,切走了就不做
           sessionWasReset = true;
           // sessionId 失效 → 切到 draft 态。但 permissionMode / model 的 per-session
           // pin 还在 modelBySession[oldSid] / permissionModeBySession[oldSid] 下,
@@ -9345,7 +9354,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           rbKey = draftKey; // 窗格现在是这条新 draft,后续复查认它
           rbBusy.key = draftKey; // r188:「回退进行中」标记跟着换到新草稿键(同一个对象,清标记的身份比较不变)
         }
-      } catch { trimFailed = true; if (!trimFailure) trimFailure = { thrown: true }; }
+      } catch { trimFollowupFailed = true; }
     }
     // r146 R3:裁剪期间切走 —— 磁盘已裁,窗格动作与重发全部放弃,本来要重发的内容留给本会话。
     if (!stillHere()) {
@@ -9355,6 +9364,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 会话被裁空(wipedAway)→ 侧栏不再列出它、回不去:内容进首页「未发出的消息」(见 leaveForOwner)。
       // r188:「正在停止」提示挂在窗格上,窗格已换了会话 —— 仍是它时撤掉,别让它留在别的会话上。
       setProviderSwitchNotice((cur) => (cur?.text === ROLLBACK_STOPPING_NOTICE ? null : cur));
+      // r206:转草稿那几步出错后窗格已不在本会话(只可能是出错前窗格已部分换走)。出错的那几步只在会话被裁空时
+      // 才走,侧栏不再列出它 → 按「已裁空」留(内容进首页「未发出的消息」),不说裁剪失败,并提示刷新;
+      // 窗格已不在本会话,不替它拉历史(拉取写的是当前窗格,回到本会话时会重新读)。
+      if (trimFollowupFailed) { leaveForOwner({ notes: [...diskNotes, ROLLBACK_REFRESH_HINT], wiped: true }); return; }
       leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, trimReason: trimFailed ? trimFailureReason(trimFailure) : '', wiped: wipedAway });
       return;
     }
@@ -9363,14 +9376,25 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // r188:裁剪最终失败(仍在本会话)→ 不重发(重发会接在没裁掉的旧消息后面)、不截界面(被停下的那一轮
     // 留在屏幕上的内容不清);本来要发的内容放回本会话输入框,提示按文件侧与记录侧的实际结果措辞。
     // (原来是照样重发并提示「建议新建会话继续」;2026-11-15 用户确认改成这样。)
+    // 工作区文件那一步的实际结果(下面两种「不重发」的黄字共用)。
+    const fileNote = {
+      restored: '工作区文件已还原到这条消息发送前的状态。',
+      partial: '文件还原过程出错，工作区可能已部分还原，请检查改动。',
+      untouched: '工作区文件未改动。',
+    }[rbFileOutcome] || '';
     if (trimFailed) {
       const where = placeBackForOwner();
-      const fileNote = {
-        restored: '工作区文件已还原到这条消息发送前的状态。',
-        partial: '文件还原过程出错，工作区可能已部分还原，请检查改动。',
-        untouched: '工作区文件未改动。',
-      }[rbFileOutcome] || '';
       setProviderSwitchNotice({ text: ['会话记录裁剪失败，会话记录没有改动，原定的重发没有发出。', trimFailureReason(trimFailure), where, fileNote].filter(Boolean).join('') });
+      return;
+    }
+    // r206:裁剪已成功、页面接着处理(转草稿)时出错 —— 磁盘已裁好,不说裁剪失败。不截界面、不重发,要发的内容
+    // 放回输入框;留存副本按截断点删(磁盘已裁,truncateUi 不会再执行,同切走分支);照「重做此工具」失败的做法
+    // 静默重新拉一次本会话的消息,让页面回到磁盘上的真实状态(会话文件已删时拉取 404,窗格保持原样不清空)。
+    if (trimFollowupFailed) {
+      for (const k of new Set([queueKeyFor(sel), sel?.sessionId].filter(Boolean))) dropRetainedSince(k, rbCutTs);
+      const where = placeBackForOwner();
+      setProviderSwitchNotice({ text: rollbackFollowupFailedText({ where, fileNote }) });
+      try { await fetchMessagesForTab(sel.sessionId, projectHash, { silent: true }); } catch {}
       return;
     }
 

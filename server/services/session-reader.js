@@ -1784,10 +1784,14 @@ function agentModelFields(profile, agent) {
 // r200:子代理页要的模型轨迹 —— 按先后用过的模型(相邻相同只记一次,伪模型名不算),以及「原模型的回复被
 // 安全检查拦下、命令行换了模型」的那一次(没有给 null)。被拦的两种认法都认:助手记录 message.stop_reason 为
 // 'refusal';命令行紧跟着插的 isMeta 用户记录带 refusedMessageId(= 被拦那条的 message.id)。类别取被拦那条的
-// message.stop_details.category,没有给 null(页面写「未知」)。只认之后确实换了模型的那次(被拦后没换模型的不在本项范围)。
+// message.stop_details.category,没有给 null(页面写「未知」)。
+// r206:换上来的模型 = 被拦那次调用之后紧跟的那一次调用(按 message.id 去重后的下一次,伪模型名的记录不算调用)
+// 的模型,且与被拦那次不同;紧跟的那次还是原模型(没换)就不认这次被拦。原来取的是模型列表里排在后面的第一个
+// 不同模型,隔了很久才换的也被认成「被拦后换的模型」。模型先后列表(models)不受影响。
 function agentModelTrail(records) {
   const models = [];
-  const byId = new Map();   // message.id → 这条助手消息的 { model, category, index }
+  const calls = [];         // 按 message.id 去重后的助手调用,按先后:{ model, category, index }
+  const byId = new Map();   // message.id → calls 里的那一项
   const refused = [];
   const mark = (info) => { if (info && !refused.includes(info)) refused.push(info); };
   for (const rec of records || []) {
@@ -1796,11 +1800,12 @@ function agentModelTrail(records) {
       const model = realModelName(msg.model);
       if (!model) continue;
       if (models[models.length - 1] !== model) models.push(model);
-      // index = 记到这条时列表的长度:列表里排在它后面的第一个模型就是换上来的新模型。
-      // 同一条消息按内容块拆成几条记录落盘(message.id 相同),只建一份,类别以带着 stop_details 的那条为准。
+      // 同一条消息按内容块拆成几条记录落盘(message.id 相同),只算一次调用,类别以带着 stop_details 的那条为准;
+      // 没有 message.id 的记录各算一次。index = 这次调用在 calls 里的位置,calls[index + 1] 就是紧跟的那次。
       let info = typeof msg.id === 'string' ? byId.get(msg.id) : null;
       if (!info) {
-        info = { model, category: null, index: models.length };
+        info = { model, category: null, index: calls.length };
+        calls.push(info);
         if (typeof msg.id === 'string') byId.set(msg.id, info);
       }
       const category = msg.stop_details?.category;
@@ -1811,8 +1816,8 @@ function agentModelTrail(records) {
     }
   }
   for (const r of refused) {
-    const fallbackModel = models[r.index] || null;
-    if (fallbackModel) return { models, modelRefusal: { originalModel: r.model, fallbackModel, category: r.category } };
+    const next = calls[r.index + 1];
+    if (next && next.model !== r.model) return { models, modelRefusal: { originalModel: r.model, fallbackModel: next.model, category: r.category } };
   }
   return { models, modelRefusal: null };
 }
@@ -2112,8 +2117,13 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
       if (record.timestamp) currentTurn.timestamp = record.timestamp;
     } else if (record.type === 'system' && record.subtype === 'model_refusal_fallback') {
       // r200:命令行中途换了模型的通知。在换模型的位置切开这一轮、放一行说明(与 task-notice 同口径:切段保住位置)。
-      flushTurn();
-      messages.push(modelFallbackNotice(record));
+      // r206:scope 为 'local' 的是子代理 / 旁问 / 后台分支那一次回复换了模型,会话的模型没变 —— 不画进主对话,
+      // 也不切开这一轮。判断放在分支里面、不写进条件:这类记录在这里吃掉,不落进后面的分支。'session' 或没有
+      // scope(老版本命令行)的照旧。
+      if (record.scope !== 'local') {
+        flushTurn();
+        messages.push(modelFallbackNotice(record));
+      }
     } else if (record.type === 'attachment' && record.attachment?.type === 'goal_status') {
       // /goal(会话级 Stop 钩子)的唯一可见信号。实测 CLI 2.1.220:goal_status 只写进
       // transcript,stream-json 一条都不发,所以历史侧不放行 = 目标在 GUI 里完全不可见

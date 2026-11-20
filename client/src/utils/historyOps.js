@@ -148,6 +148,19 @@ export function trimFailureReason(failure) {
   return `原因：${error}${/[。？！.?!]$/.test(error) ? '' : '。'}`;
 }
 
+// r206:回滚时裁剪请求已成功(会话记录已经裁好),是请求回来之后页面接着处理(会话被裁空 → 转成新草稿)时出错。
+// 这不是裁剪失败,黄字不说「裁剪失败」「会话记录没有改动」;原定的重发不发,并提示刷新(页面可能和磁盘对不上)。
+export const ROLLBACK_FOLLOWUP_FAILED_NOTICE = '会话记录已回退，但页面接着处理时出错，原定的重发没有发出。';
+export const ROLLBACK_REFRESH_HINT = '刷新后可看到最新的会话记录。';
+
+/**
+ * 上面那种情况留在本会话时的黄字:第一句 → 要重发的内容放回输入框的说明(where)→ 工作区文件的结果(fileNote)
+ * → 提示刷新。空的段落跳过。
+ */
+export function rollbackFollowupFailedText({ where = '', fileNote = '' } = {}) {
+  return [ROLLBACK_FOLLOWUP_FAILED_NOTICE, where, fileNote, ROLLBACK_REFRESH_HINT].filter(Boolean).join('');
+}
+
 /**
  * 在系统文件管理器中定位备份副本(只读,无副作用)。
  * 路径由服务端按 backupRef 取,客户端不传路径;失败返回 {status, body},由调用点显示。
