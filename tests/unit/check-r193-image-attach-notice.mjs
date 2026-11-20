@@ -1,7 +1,7 @@
 // r193:发送 / 并入应答里的 imageAttach → 页面提示句(client/src/utils/imageAttachNotice.js)。
 // 纯函数真 import 跑;另查 App.jsx 两处接入(发送应答、并入应答)与提示所用的机制。
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { imageAttachNoticeText, IMAGE_ATTACH_REASON_TEXT } from '../../client/src/utils/imageAttachNotice.js';
@@ -116,21 +116,45 @@ check('F1 migrateSessionNotice:留言从草稿键搬到正式键,旧键清空;�
   assert.equal(takeSessionNotice('k-same'), '自');
 });
 
-check('F1 App.jsx:流开头草稿键改挂本地条目处同批改挂提示条;startedAsDraft 兜底处改挂留言', () => {
+// r196:startedAsDraft 兜底处的「排队 + 留言 + 输入历史」迁移抽成 utils/draftPromotion.promoteDraftArtifacts(后台排空共用),
+// 本条跟着代码走,原来守的四件事照旧守:①兜底处用发起时闭包里的草稿键(queueKeyFor(selectedSession))与事件里的正式编号调迁移;
+// ②迁移函数里先迁排队、再迁留言;③「已切走时提示条也改挂」留在窗格,migrateNoticeOwner(prev 的调用处仍是两处;
+// ④全仓(client/src)只有迁移函数里一处调用 migrateSessionNotice,App.jsx 里没有。
+check('F1 App.jsx:流开头草稿键改挂本地条目处同批改挂提示条;startedAsDraft 兜底处经迁移函数改挂留言', () => {
   const app = readFileSync(join(root, 'client/src/App.jsx'), 'utf8');
-  assert.ok(app.includes("import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';"));
+  assert.ok(app.includes("import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';"));
+  assert.ok(app.includes("import { promoteDraftArtifacts } from './utils/draftPromotion.js';"), 'App.jsx 引入迁移函数');
   const relabel = app.indexOf('prev.map((m) => (m.ownerKey === _dk0 ? { ...m, ownerKey: event.session_id } : m))');
   assert.ok(relabel > 0, '找不到本地条目改挂那一段');
   const near = app.slice(relabel, relabel + 600);
   assert.ok(near.includes('setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _dk0, event.session_id));'), '提示条与本地条目同批改挂');
-  const q = app.indexOf('migrateDraftQueue(useStore.getState().messageQueue, _dk, event.session_id);');
-  assert.ok(q > relabel, '找不到 startedAsDraft 里的队列迁移');
-  const after = app.slice(q, q + 900);
-  assert.ok(after.includes('const _nk = queueKeyFor(selectedSession);'), '用发起时闭包里的草稿键');
-  assert.ok(after.includes('migrateSessionNotice(_nk, event.session_id);'), '留言改挂');
-  assert.ok(after.includes('if (!selIsOrigin) setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _nk, event.session_id));'), '已切走时提示条也改挂');
-  assert.equal(app.split('migrateSessionNotice(').length - 1, 1, 'App.jsx 只有一处调用 migrateSessionNotice');
+  // ① 兜底处:紧挨着的上一句取发起时闭包里的草稿键,调用传事件里的正式编号
+  const q = app.indexOf('promoteDraftArtifacts(_dk, event.session_id);');
+  assert.ok(q > relabel, '找不到 startedAsDraft 里的迁移调用');
+  assert.equal(app.split('promoteDraftArtifacts(').length - 1, 1, 'App.jsx 只有一处调用迁移函数');
+  const block = app.lastIndexOf('if (startedAsDraft) {', q);
+  assert.ok(block > relabel && q - block < 900, '迁移调用在 startedAsDraft 兜底块里');
+  assert.match(app.slice(block, q), /const _dk = queueKeyFor\(selectedSession\);\s*$/, '用发起时闭包里的草稿键(紧挨在调用之前)');
+  // ③ 已切走时提示条也改挂:留在窗格、紧跟迁移调用;改挂提示条的调用处数目不变
+  const after = app.slice(q, q + 400);
+  assert.ok(after.includes('if (!selIsOrigin) setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _dk, event.session_id));'), '已切走时提示条也改挂');
   assert.equal(app.split('migrateNoticeOwner(prev').length - 1, 2, 'App.jsx 只有两处改挂提示条');
+  // ② 迁移函数里先迁排队、再迁留言(参数就是传进来的草稿键与正式编号)
+  const dp = readFileSync(join(root, 'client/src/utils/draftPromotion.js'), 'utf8');
+  const fnAt = dp.indexOf('export function promoteDraftArtifacts(draftKey, sid) {');
+  const queueAt = dp.indexOf('migrateDraftQueue(useStore.getState().messageQueue, draftKey, sid);', fnAt);
+  const noticeAt = dp.indexOf('migrateSessionNotice(draftKey, sid);', fnAt);
+  assert.ok(fnAt >= 0 && queueAt > fnAt && noticeAt > queueAt, '迁移函数里先迁排队、再迁留言');
+  // ④ 全仓只有迁移函数里一处调用 migrateSessionNotice(定义本身不算),App.jsx 里没有
+  const callers = [];
+  for (const f of readdirSync(join(root, 'client/src'), { recursive: true })) {
+    if (!/\.(js|jsx|mjs)$/.test(String(f))) continue;
+    const src = readFileSync(join(root, 'client/src', String(f)), 'utf8');
+    const n = (src.split('migrateSessionNotice(').length - 1) - (src.split('function migrateSessionNotice(').length - 1);
+    for (let i = 0; i < n; i += 1) callers.push(String(f).replace(/\\/g, '/'));
+  }
+  assert.deepEqual(callers, ['utils/draftPromotion.js'], `全仓只有迁移函数里一处调用 migrateSessionNotice(实际:${callers.join('、')})`);
+  assert.equal(app.split('migrateSessionNotice(').length - 1, 0, 'App.jsx 里没有 migrateSessionNotice 调用');
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

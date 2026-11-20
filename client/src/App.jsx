@@ -146,12 +146,13 @@ import { aggregateHistoryCost, computeCostForMessage, displayUsd, formatCost, se
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, focusedComposerKey, createQueueId } from './utils/steerQueue.js';
-import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';
+import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';
 import { imageAttachNoticeText } from './utils/imageAttachNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
 import { localTurnTakenOver, makeTurnIdentityIndex } from './utils/turnIdentity.js';   // r141 渲染期身份闸门
-import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
+import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
 import { buildChatRequestBody, chatCwdFor, gateThirdPartyAuto } from './utils/chatRequest.js';
+import { promoteDraftArtifacts } from './utils/draftPromotion.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow, reconcileBadgeWindow, resolveTurnUsage } from './utils/contextWindow.js';
@@ -6605,29 +6606,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // (selIsOrigin=false)时也照做:标题该生成、列表该出现 A。数据全取发起时闭包
             // (prompt/cwd/selectedSession),不碰 getLocalSession()。
             if (startedAsDraft) {
-              // 队列迁移(fable 审计,逻辑在 utils/routing.js):selIsOrigin=false 时
-              // migrateSessionKey 不执行,残留队列会被下一个同项目 draft 继承串发;
-              // selIsOrigin=true 时已迁空,此处 no-op。pin 不迁(见 routing.js 注释)。
-              try {
-                const _dk = queueKeyFor(selectedSession);
-                const _next = migrateDraftQueue(useStore.getState().messageQueue, _dk, event.session_id);
-                if (_next) useStore.setState({ messageQueue: _next });
-              } catch {}
-              // r193 F1:窗格已切走时留给草稿键的留言(leaveSessionNotice)改挂到真 sid,切回这个会话时取得到;
-              // 切走前挂在本窗格、所属草稿键的提示条同样改挂(selIsOrigin=true 时上面已改挂,这里 no-op)。
-              {
-                const _nk = queueKeyFor(selectedSession);
-                migrateSessionNotice(_nk, event.session_id);
-                if (!selIsOrigin) setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _nk, event.session_id));
-              }
-              // 输入历史同迁(用户已切走时 selIsOrigin=false,上面 origin 块不执行,在此兜底):
-              // draft 期历史存旧键,不迁则首条历史滞留旧键且污染该项目下一个 draft。取发起时闭包
-              // selectedSession(sel 是当前选中,用户已切走时会错迁别的项目)。selIsOrigin=true 时旧键已删,此处幂等 no-op。
-              try {
-                const _hk = queueKeyFor(selectedSession);
-                const _hv = localStorage.getItem(`cgui-input-history:${_hk}`);
-                if (_hv && _hv !== '[]') { localStorage.setItem(`cgui-input-history:${event.session_id}`, _hv); localStorage.removeItem(`cgui-input-history:${_hk}`); }
-              } catch {}
+              // 草稿键下属于这个会话的排队、留言、输入历史转到正式编号(r196:抽成 utils/draftPromotion.promoteDraftArtifacts,
+              // 后台排空在没有窗格负责这个草稿时调同一个函数)。用发起时闭包里的草稿键(selectedSession;sel 是当前选中,
+              // 用户已切走时会错迁别的会话)。selIsOrigin=false(已切走)时上面的 origin 块不执行,这里兜底;
+              // selIsOrigin=true 时上面已迁空,这里幂等 no-op。
+              const _dk = queueKeyFor(selectedSession);
+              promoteDraftArtifacts(_dk, event.session_id);
+              // r193 F1:切走前挂在本窗格、所属草稿键的提示条同样改挂(selIsOrigin=true 时上面已改挂,这里 no-op)。窗格级状态,留在窗格。
+              if (!selIsOrigin) setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _dk, event.session_id));
               // Q3 标题提速:新会话拿到真 sid 就立刻并行生成标题(只用首条用户消息,
               // 不等回复完成)。失败时 result 后的兜底逻辑(带 firstAssistant)会重试。
               try {
