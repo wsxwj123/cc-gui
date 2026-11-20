@@ -601,10 +601,13 @@ export function UnifiedSidebar() {
     } catch (err) {
       confirmDialog('删除失败：' + err.message);
     }
+    // r196:删成了(队列已清)或删失败(会话还在),都撤掉「正在删除」标记
+    finally { useStore.getState().unmarkSessionDeleting?.(session.sessionId); }
   };
   const handleDelete = (session) => {
     const sid = session.sessionId;
     if (pendingDeletesRef.current.some((p) => p.session.sessionId === sid)) return;
+    useStore.getState().markSessionDeleting?.(sid); // r196:撤销窗口里后台排空不发这个会话的排队
     completionTracker.forget(sid); // r11-p2-3b:会话移除即清"完成未读"边沿态(不留孤儿)
     const st = useStore.getState();
     const panes2 = [];
@@ -635,6 +638,7 @@ export function UnifiedSidebar() {
     if (!p) return;
     clearInterval(p.timer);
     setPendingDeletes((arr) => arr.filter((x) => x.session.sessionId !== sid));
+    useStore.getState().unmarkSessionDeleting?.(sid); // r196
     const st = useStore.getState();
     // r26-I10:删除时记下的 pane 下标在撤销时可能已不可见(期间关了窗格,paneCount
     // 变小)——setPaneSession 只夹到硬上限 5,不夹 paneCount,会写进不可见槽(孤儿
@@ -667,6 +671,7 @@ export function UnifiedSidebar() {
     pendingDeletesRef.current = [];
     all.forEach((p) => {
       clearInterval(p.timer);
+      useStore.getState().markSessionDeleting?.(p.session.sessionId); // r196
       useStore.getState().clearQueue?.(p.session.sessionId);
       removeInputHistory(localStorage, p.session.sessionId); // r149 S5:同 reallyDelete
       dropRetained(p.session.sessionId); // r182:同 reallyDelete
