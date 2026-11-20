@@ -47,7 +47,11 @@ const textOf = (c) => (typeof c === 'string' ? c : (Array.isArray(c) ? c.map((b)
 // ---------------- 后台起标题的调用:回一句标题就退出
 const joined = argv.join(' ');
 if ((argv.includes('-p') && argv.includes('--no-session-persistence')) || /cgui-title/.test(joined) || /cgui-title/.test(cwd)) {
-  const mark = (/R196[A-Za-z0-9]*MARK|R196V\d+[A-Za-z0-9]*/.exec(joined) || [''])[0];
+  // 主会话修订(锁定后):服务端起标题时提示经标准输入喂入、写完即关(不在参数里),
+  // 只在参数里找标记会回「短标题」,侧栏那一行就不再带标记、按标记找不回会话。参数与标准输入都找。
+  let stdinText = '';
+  try { stdinText = fs.readFileSync(0, 'utf8'); } catch { /* 没有标准输入 */ }
+  const mark = (/R196[A-Za-z0-9]*MARK|R196V\d+[A-Za-z0-9]*/.exec(`${joined}\n${stdinText}`) || [''])[0];
   const title = mark ? `${mark} 标题` : '短标题';
   if (/stream-json/.test(joined)) {
     out({ type: 'system', subtype: 'init', cwd, model: MODEL, tools: [], mcp_servers: [], permissionMode: 'default' });
