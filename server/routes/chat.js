@@ -2892,10 +2892,10 @@ async function handleChatPost(req, res) {
     // r151g 安全复审(建议 5):deadline 边界上 lingering 仍可能"带活 shell 且未发起中止"。铁律不变:误杀不可恢复 >
     // 双 resume 竞争 —— 不杀它。r199:走到这里的只会是还能接消息、到点仍在忙的进程(不再接消息的已被 tearingDown 跳过),
     // 不中止它,由建进程前的硬闸回 409(这一轮还在运行),不另起第二个进程与它并存。
+    if (lingering && slotHasLiveShell(lingering) && !lingering.abort?.signal?.aborted) lingering = null;
     // r196:后台排空(queuedDrain)同样不中止还能接消息、到点仍在忙的进程 —— 页面依据的是轮询结果,判断不了请求到达那一刻
     // 这一轮是不是刚开始(命令行自己续跑、别的页面刚发);交给硬闸回新形态 409,页面留队稍后再发。
-    if (lingering && ((slotHasLiveShell(lingering) && !lingering.abort?.signal?.aborted)
-      || (queuedDrain && slotUsable(lingering)))) lingering = null;
+    if (lingering && queuedDrain && slotUsable(lingering)) lingering = null;
     // r151q 第 9 项:强制中止之前最后核对一次 —— 绝不中止对方(用户请求不中止内部回合,含它只差输入预测的收尾窗;
     // 内部回合不中止用户回合)。要中止的正是内部回合自己的槽、又还没进入关闭 → 让出(409),不中止。
     const abortForbidden = heldByOther() || (!internal && !!lingering?.internalTurn && !lingering.closing);
