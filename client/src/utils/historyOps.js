@@ -135,15 +135,17 @@ const TRIM_FAILURE_REASONS = Object.freeze({
 /**
  * 回滚的裁剪最终失败时,黄字里接在「会话记录裁剪失败…」那一句之后的原因。
  * failure:runHistoryOpSettled 的失败结果({code, error});请求抛了异常(没发出去)时调用点传 {thrown:true},
- * 拿不到失败结果(null / undefined)也按没发出去写。认不出的代码写后端给的原因原文并带上「（代码 XXX）」;
- * 没有代码时只写原文(runHistoryOp 兜底的原文里已带 HTTP 状态码)。
+ * 拿不到失败结果(null / undefined)也按没发出去写。认不出的代码写后端给的原因原文并带上「（代码 XXX）」,
+ * 末尾加句号;没有代码时只写原文(runHistoryOp 兜底的原文里已带 HTTP 状态码),原文已以句号、问号、叹号
+ * (全角或半角)结尾的不再加,否则同样补句号 —— 黄字里后面紧接「要重发的内容…」,不收尾会连成一句。
  */
 export function trimFailureReason(failure) {
   if (!failure || failure.thrown) return '原因：请求没有发出去。';
   const code = typeof failure.code === 'string' ? failure.code : '';
   if (code && Object.prototype.hasOwnProperty.call(TRIM_FAILURE_REASONS, code)) return TRIM_FAILURE_REASONS[code];
   const error = typeof failure.error === 'string' ? failure.error.trim() : '';
-  return `原因：${error}${code ? `（代码 ${code}）` : ''}`;
+  if (code) return `原因：${error}（代码 ${code}）。`;
+  return `原因：${error}${/[。？！.?!]$/.test(error) ? '' : '。'}`;
 }
 
 /**

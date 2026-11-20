@@ -40,24 +40,30 @@ await t('1e 认得出的代码不夹后端原文', () => {
   assert.ok(!out.includes('请先停止再做历史操作'), out);
 });
 
-// ── 2. 其他代码:「原因：」+ 后端原文 +「（代码 XXX）」 ───────────────────────────
-await t('2a SESSION_WRITE_FAILED 带原文与代码', () => {
+// ── 2. 其他代码:「原因：」+ 后端原文 +「（代码 XXX）。」;没有代码只写原文,以句号收尾 ─────────
+await t('2a SESSION_WRITE_FAILED 带原文与代码,末尾句号', () => {
   assert.equal(
     trimFailureReason(failed('SESSION_WRITE_FAILED', '改写失败,原会话可能未改动:磁盘已满', { status: 500 })),
-    '原因：改写失败,原会话可能未改动:磁盘已满（代码 SESSION_WRITE_FAILED）',
+    '原因：改写失败,原会话可能未改动:磁盘已满（代码 SESSION_WRITE_FAILED）。',
   );
 });
-await t('2b SESSION_PREVIEW_EXPIRED 带原文与代码', () => {
+await t('2b SESSION_PREVIEW_EXPIRED 带原文与代码,末尾句号', () => {
   assert.equal(
     trimFailureReason(failed('SESSION_PREVIEW_EXPIRED', '预览已失效(过期或服务已重启),请重新预览')),
-    '原因：预览已失效(过期或服务已重启),请重新预览（代码 SESSION_PREVIEW_EXPIRED）',
+    '原因：预览已失效(过期或服务已重启),请重新预览（代码 SESSION_PREVIEW_EXPIRED）。',
   );
 });
 await t('2c 原型链上的名字不算认得出的代码', () => {
-  assert.equal(trimFailureReason(failed('toString', 'x')), '原因：x（代码 toString）');
+  assert.equal(trimFailureReason(failed('toString', 'x')), '原因：x（代码 toString）。');
 });
-await t('2d 没有代码(后端没回 JSON)时只写原文,不加代码括注', () => {
-  assert.equal(trimFailureReason(failed(null, '预览失败（HTTP 502）', { stage: 'preview', status: 502 })), '原因：预览失败（HTTP 502）');
+await t('2d 没有代码(后端没回 JSON)时只写原文,不加代码括注,补句号', () => {
+  assert.equal(trimFailureReason(failed(null, '预览失败（HTTP 502）', { stage: 'preview', status: 502 })), '原因：预览失败（HTTP 502）。');
+});
+await t('2e 没有代码、原文已以句号 / 问号 / 叹号结尾(全角或半角):不重复加', () => {
+  assert.equal(trimFailureReason(failed(null, '服务暂时不可用。')), '原因：服务暂时不可用。');
+  assert.equal(trimFailureReason(failed(null, '会话还在吗？')), '原因：会话还在吗？');
+  assert.equal(trimFailureReason(failed(null, '写入失败！')), '原因：写入失败！');
+  assert.equal(trimFailureReason(failed(null, 'ENOSPC: no space left on device.')), '原因：ENOSPC: no space left on device.');
 });
 
 // ── 3. 请求没发出去 ────────────────────────────────────────────────────────────
