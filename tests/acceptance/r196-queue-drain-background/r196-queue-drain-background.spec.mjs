@@ -244,14 +244,9 @@ test('V6 第一次后台请求发出后、服务端还没答完时页面这边�
   await switchTo(page, Q.mark);
   const reached = await waitUntil(() => receivedOf(A.sid).some((r) => r.text.includes(p2)), { timeout: 15_000 });
   expect(reached, `V6:第一次后台请求应已送到服务端、A 的命令行收到这条(后台请求 ${rec.drains().length} 个)`).toBeTruthy();
-  let retried = await waitUntil(() => rec.drains().length >= 2, { timeout: 25_000 });
-  let replayedByTest = false;
-  if (!retried) {                                  // 页面没自己重发:由测试用同一个回合编号重发一次(页面 fetch,走同一个拦截器)
-    replayedByTest = true;
-    await page.evaluate((b) => fetch('/api/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) }).then((r) => r.status).catch(() => 0), firstBody);
-    retried = await waitUntil(() => rec.drains().length >= 2, { timeout: 5_000 });
-  }
-  test.info().annotations.push({ type: 'V6 重发方', description: replayedByTest ? '页面 25 秒内没有自己重发,由测试用同一个请求体重发' : '页面自己重发了' });
+  // 主会话修订(锁定前):重发必须是页面自己发的(结果不明后同号再发),测试不代发。
+  const retried = await waitUntil(() => rec.drains().length >= 2, { timeout: 25_000 });
+  expect(retried, `V6:页面这边断开后,应由页面自己用同一个回合编号重发(25 秒内;现在后台请求 ${rec.drains().length} 个)`).toBeTruthy();
   releaseStart(A.sid);
   const drains = rec.drains();
   expect(drains.length, 'V6:应有两次带 queuedDrain 的请求(断开的一次 + 重发的一次)').toBeGreaterThanOrEqual(2);
