@@ -9,7 +9,7 @@ import path from 'node:path';
 import { test, expect } from '@playwright/test';
 import { NAV, POOL, homeDir, transcriptMentions, userLineCount, readTranscript } from './helpers/fixtures.mjs';
 import {
-  CTL, activeEntry, addImage, attachmentCards, boot, chooseMode, clearGlobal, composer, endOfRound, finishBgTasks, finishTurn, focusPane,
+  CTL, activeEntry, addImage, attachmentCards, bubbleAttachmentImages, boot, chooseMode, clearGlobal, composer, endOfRound, finishBgTasks, finishTurn, focusPane,
   isBusyStatus, openSessionBySearch, paneKeys, paneText, panes, phaseOf, queueItemOf, queueItems, queueMessage, receivedAll, receivedOf,
   recordChat, releaseAllRuns, releaseStart, reloadApp, roundsOf, routeChat, runPid, selectModel, sendPrompt, sessionRow, setAuto, setGlobal,
   setScenario, holdStart, sleep, spawnsOf, startRunning, stopBtn, switchTo, topModel, turnIdOf, userBubbleCount, waitForPhase, waitUntil,
@@ -61,7 +61,7 @@ test('V1 A 回复中排一条(带一张图)→ 结果出来后立刻切到 Q 不
 
   await switchTo(page, A.mark);
   await expect.poll(() => userBubbleCount(page, p2), { message: 'V1:切回 A,这条用户消息应恰好显示 1 个', timeout: 20_000 }).toBe(1);
-  expect(await attachmentCards(page), 'V1:切回 A,消息里应带附件卡片').toBeGreaterThanOrEqual(1);
+  await expect.poll(() => bubbleAttachmentImages(page, p2, 'r196-v1.png'), { message: 'V1:切回 A,这条用户消息上应带附件图片卡片(r196-v1.png)', timeout: 15_000 }).toBeGreaterThanOrEqual(1);
   await expect(page.getByText(`R196-CHUNK1 ${A.sid.slice(0, 8)} 收到:${p2}`, { exact: false }).first(), 'V1:这条的回复应可见').toBeVisible({ timeout: 20_000 });
   expect(await queueItemOf(page, p2).count(), 'V1:排队栏里不应再有这条').toBe(0);
   expect(userLineCount(A.sid, p2), 'V1:A 的会话文件里这条恰好 1 次').toBe(1);

@@ -87,6 +87,10 @@ export const stopBtn = (page) => page.getByRole('button', { name: /^停止/ });
 export const userBubbleCount = (page, text) => page.locator('.chat-user-bubble').filter({ hasText: text }).count();
 /** 消息区里的附件卡片数(排除排队栏里的)。 */
 export const attachmentCards = (page) => page.locator('[data-testid="attachment-item"]:not([data-testid="queue-item"] [data-testid="attachment-item"])').count();
+/** 主会话修订(锁定后):已发消息上的附件图片 —— 消息区里含 text 的用户消息卡上,alt 为附件文件名的图片个数。
+ *  (`attachment-item` 只标在输入框上方待发的附件上,已发消息的卡片不带它;卡头还有头像图片,所以按文件名认。) */
+export const bubbleAttachmentImages = (page, text, name) => page.locator('[data-cgui="message-list"] [data-cgui="message-user"]')
+  .filter({ hasText: text }).locator(`img[alt="${name}"]`).count();
 
 // ───────────────────────── 图片附件 ─────────────────────────
 function crc32(buf) { let c = 0xFFFFFFFF; for (const b of buf) { c ^= b; for (let k = 0; k < 8; k += 1) c = (c & 1) ? (c >>> 1) ^ 0xEDB88320 : c >>> 1; } return (c ^ 0xFFFFFFFF) >>> 0; }
