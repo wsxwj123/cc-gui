@@ -81,7 +81,7 @@ export function isSessionBusy(items, key) {
 /**
  * 会话 key 此刻能不能由 BD 发出队首;能 → null,不能 → 原因码。input:
  * { queues, items, runId, now, inFlight(Map), nextTryAt(Map key→{at,epoch}), pendingDelete(Set), remoteControlled,
- *   lastProviderBySession, currentProviderHint, willAskLargeSnapshot(key) }
+ *   lastProviderBySession, currentProviderHint, largeAsk(Map key→{epoch}:拍快照时目录太大、要先问用户的会话) }
  */
 export function bgDrainBlockReason(key, input = {}) {
   if (isDraftQueueKey(key)) return 'draft';
@@ -99,7 +99,8 @@ export function bgDrainBlockReason(key, input = {}) {
   if (input.remoteControlled?.[key]) return 'remote';
   const lastProv = input.lastProviderBySession?.[key];
   if (lastProv && lastProv !== (input.currentProviderHint || 'anthropic')) return 'provider-changed'; // 要先剥思考块:交给窗格
-  if (input.willAskLargeSnapshot?.(key)) return 'large-snapshot';                                   // 要弹大目录询问:交给窗格
+  const la = input.largeAsk?.get?.(key);
+  if (la && la.epoch === paneEpochOf(key)) return 'large-snapshot'; // 目录太大、要先问用户:交给窗格(窗格接管时作废)
   if (input.inFlight?.has?.(key)) return 'in-flight';
   const nt = input.nextTryAt?.get?.(key);
   if (nt && nt.epoch === paneEpochOf(key) && nt.at > input.now) return 'backoff';
@@ -206,8 +207,8 @@ const DRAFT_ID_RE = /-(d\d+-\d+)$/;
 /**
  * deps:subscribe(cb)→退订函数(共用轮询)、fetchFresh()→Promise<data>、store(getState)、runId、
  * postChat(body, {signal})→Promise<{status, body}>(网络错误时 reject;body 不是 JSON 给 null)、
- * getServerEpoch()、clearServerEpoch()、now、setTimer / clearTimer、newTurnId、willAskLargeSnapshot(key)、
- * preflightLargeSnapshot(key)、persistAttachmentSidecar(args)、leaveNotice(key, text)、onTurnStarted(key, info)、
+ * getServerEpoch()、clearServerEpoch()、now、setTimer / clearTimer、newTurnId、
+ * preflightSnapshot(payload)→{send, sha}(largeSnapshot.bgPreflightLargeSnapshot)、persistAttachmentSidecar(args)、leaveNotice(key, text)、onTurnStarted(key, info)、
  * onTurnAccepted(key, 应答, notify)、promoteDraftArtifacts(草稿键, sid);requestTimeoutMs、fallbackTimeoutMs、queryGapMs。
  */
 export function createBackgroundDrainer(deps = {}) {
@@ -216,7 +217,7 @@ export function createBackgroundDrainer(deps = {}) {
     getServerEpoch = async () => null, clearServerEpoch = () => {},
     now = () => Date.now(), setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (t) => clearTimeout(t),
     newTurnId = () => `bg-${createQueueId('t')}`,
-    willAskLargeSnapshot = () => false, preflightLargeSnapshot = null, persistAttachmentSidecar = null,
+    preflightSnapshot = null, persistAttachmentSidecar = null,
     leaveNotice = () => {}, onTurnStarted = null, onTurnAccepted = null, promoteDraftArtifacts = null,
     requestTimeoutMs = 45_000, fallbackTimeoutMs = 120_000, queryGapMs = 5_000,
   } = deps;
@@ -226,6 +227,7 @@ export function createBackgroundDrainer(deps = {}) {
   const attempts = new Map();    // `键\0queueId\0类别` → { n, epoch }
   const bodies = new Map();      // queueId → 请求体(同号同体重发、504 后的查询)
   const lastQueryAt = new Map(); // queueId → 上次 504 查询时刻
+  const largeAsk = new Map();    // 会话键 → { epoch }:拍快照时目录太大、这个会话还没就大目录做过选择(等窗格接管后弹窗)
   const timers = new Set();
   const sleepers = new Set();
   const pending = new Set();
@@ -271,7 +273,7 @@ export function createBackgroundDrainer(deps = {}) {
     return {
       queues: s.messageQueue || {}, items, runId, now: t, inFlight, nextTryAt,
       pendingDelete: s.pendingDeleteSessions, remoteControlled: s.remoteControlled,
-      lastProviderBySession: s.lastProviderBySession, currentProviderHint: s.currentProvider?.providerHint, willAskLargeSnapshot,
+      lastProviderBySession: s.lastProviderBySession, currentProviderHint: s.currentProvider?.providerHint, largeAsk,
     };
   };
 
@@ -388,17 +390,33 @@ export function createBackgroundDrainer(deps = {}) {
     const bgTurnId = newTurnId();
     const marked = st().markBgSending(key, queueId, { bgTurnId, bgStartedAt: t });
     if (!marked) return; // 写不进 / 已不是可发的队首:这一拍放弃
+    // 文件快照(与窗格同一个 POST /api/checkpoints,不弹窗):目录太大、这个会话还没做过选择 → 先不在后台发,条目退回原位
+    // (不记退避),记下原因;用户回到会话时由窗格按现有流程弹窗。拍到与否都不挡发送(请求失败静默)。
+    if (preflightSnapshot) {
+      let snap = null;
+      try {
+        snap = await preflightSnapshot({
+          sessionId: key, cwd: marked.owner?.cwd, label: `before: ${String(marked.text).slice(0, 60)}`,
+          clientMessageId: bgTurnId, messageTimestamp: new Date(t).toISOString(), promptPreview: marked.text,
+        });
+      } catch { snap = null; }
+      if (!live(g)) return;
+      if (snap && snap.send === false) {
+        st().settleBgSend(key, queueId, { kind: 'release' });
+        largeAsk.set(key, { epoch: paneEpochOf(key) });
+        return;
+      }
+    }
     try { onTurnStarted?.(key, { sessionId: key }); } catch {}
     const meta = marked.opts?.meta;
     if (persistAttachmentSidecar && Array.isArray(meta?.attachments) && meta.attachments.length) {
       try {
         Promise.resolve(persistAttachmentSidecar({
           ownerKey: null, sessionId: key,
-          payload: { messageId: `bg-${bgTurnId}`, text: marked.text, attachments: meta.attachments, displayText: meta.displayText || '' },
+          payload: { messageId: bgTurnId, text: marked.text, attachments: meta.attachments, displayText: meta.displayText || '' },
         })).catch(() => {});
       } catch {}
     }
-    if (preflightLargeSnapshot) { try { await preflightLargeSnapshot(key); } catch {} }
     let serverEpoch = null;
     try { serverEpoch = await getServerEpoch(); } catch {}
     if (!live(g)) return;

@@ -244,7 +244,7 @@ import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
 import { subscribeAgentsActive, fetchAgentsActiveFresh } from './utils/agentsActivePoller.js';
 import { startBackgroundDrainer, registerPaneDrain, beginFinalizing, setRollbackBusy, clearRollbackBusy, bgAcceptedPids } from './utils/backgroundDrain.js';
-import { askSaveLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot, willAskLargeSnapshot } from './utils/largeSnapshot.js';
+import { askSaveLargeSnapshot, bgPreflightLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot, willAskLargeSnapshot } from './utils/largeSnapshot.js';
 import { createLatestGate } from './utils/latestRequest.js';
 
 // r146b/r146c:没有任何窗格承载、也回不去的内容,按"它转成的 draft 身份"记成孤儿 draft 排队消息
@@ -13350,7 +13350,8 @@ export default function App() {
       },
       getServerEpoch: () => serverEpochCache || fetchServerEpoch(),
       clearServerEpoch: () => { serverEpochCache = null; },
-      // 不注入 willAskLargeSnapshot:它只表示「这个会话的大目录询问还没答过」(几乎总为真);后台排空不做文件快照,不会触发那一问。
+      // 文件快照:与窗格同一个模块、同一个请求函数,走不弹窗的分支(目录太大且这个会话没做过选择 → 先不在后台发)。
+      preflightSnapshot: (payload) => bgPreflightLargeSnapshot(payload, snapshotDeps),
       persistAttachmentSidecar,
       leaveNotice: leaveSessionNotice,
       onTurnStarted: bgTurnStarted,

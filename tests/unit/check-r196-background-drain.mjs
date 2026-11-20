@@ -53,7 +53,7 @@ const proc = (sessionId, extra = {}) => ({ kind: 'chat-process', pid: 'p-' + ses
 
   const head = (extra) => ({ queueId: 'h', text: 'hi', runId: RUN_ID, owner: { cwd: '/w' }, ...extra });
   const base = (extra = {}) => ({ queues: { [K]: [head()] }, items: [], runId: RUN_ID, now: 5_000_000, inFlight: new Map(), nextTryAt: new Map(),
-    pendingDelete: new Set(), remoteControlled: {}, lastProviderBySession: {}, currentProviderHint: 'anthropic', willAskLargeSnapshot: () => false, ...extra });
+    pendingDelete: new Set(), remoteControlled: {}, lastProviderBySession: {}, currentProviderHint: 'anthropic', largeAsk: new Map(), ...extra });
   eq(bgDrainBlockReason(K, base()), null, 'P 判据:全部满足 → 可发');
   eq(pickBgDrainTargets(base()).map((x) => [x.key, x.index, x.item.queueId]), [[K, 0, 'h']], 'P pick:选出队首');
   const R = (extra, m) => bgDrainBlockReason(K, base(extra));
@@ -68,13 +68,14 @@ const proc = (sessionId, extra = {}) => ({ kind: 'chat-process', pid: 'p-' + ses
   eq(R({ remoteControlled: { [K]: true } }), 'remote', 'P 判据:远程控制中');
   eq(R({ lastProviderBySession: { [K]: 'deepseek' } }), 'provider-changed', 'P 判据:Provider 与上次不同');
   eq(R({ lastProviderBySession: { [K]: 'anthropic' } }), null, 'P 判据:Provider 相同照发');
-  eq(R({ willAskLargeSnapshot: (k) => k === K }), 'large-snapshot', 'P 判据:要弹大目录询问');
+  eq(R({ largeAsk: new Map([[K, { epoch: 0 }]]) }), 'large-snapshot', 'P 判据:拍快照时目录太大、要先问用户');
   eq(R({ inFlight: new Map([[K, {}]]) }), 'in-flight', 'P 判据:本会话已有一条在途');
   eq(R({ items: [proc(K, { status: 'streaming' })] }), 'busy', 'P 判据:这一轮还在跑');
   eq(R({ queues: { 'draft-h-d1-1': [head()] } }) && bgDrainBlockReason('draft-h-d1-1', base({ queues: { 'draft-h-d1-1': [head()] } })), 'draft', 'P 判据:草稿键不直接发');
   const unreg = registerPaneDrain(K);
   eq(R(), 'pane', 'P 判据:有窗格登记');
   unreg(); unreg();
+  eq(R({ largeAsk: new Map([[K, { epoch: 0 }]]) }), null, 'P 判据:窗格登记过 → 大目录询问的记录作废(交给窗格)');
   eq(R(), null, 'P 判据:注销(重复注销无副作用)后恢复');
   const end = beginFinalizing([K]);
   try { throw new Error('收尾途中抛错'); } catch { /* 模拟 */ } finally { end(); }
@@ -133,7 +134,7 @@ async function advance(ms) {
   clock = end;
   await flush();
 }
-function makeEnv({ responder, fresh, items } = {}) {
+function makeEnv({ responder, fresh, items, snapshot } = {}) {
   const env = { posts: [], notices: [], promoted: [], epoch: 'ep-1', epochCleared: 0, fresh: fresh || { agents: [] } };
   env.drainer = createBackgroundDrainer({
     subscribe: (cb) => { env.cb = cb; return () => { env.cb = null; }; },
@@ -152,6 +153,7 @@ function makeEnv({ responder, fresh, items } = {}) {
     newTurnId: (() => { let n = 0; return () => `bg-t${++n}`; })(),
     leaveNotice: (k, text) => env.notices.push([k, text]),
     promoteDraftArtifacts: (d, s) => env.promoted.push([d, s]),
+    preflightSnapshot: snapshot || null,
   });
   env.drainer.start();
   env.poll = async (agents = items || []) => { env.cb({ agents }); await flush(); };
@@ -325,6 +327,23 @@ for (const [label, final, expect] of [['completed', { status: 200, body: { ok: t
   eq([q('C14')[0].steerState, env.cb], ['bg-sending', null], 'C14:停下后条目保持在途、退订轮询');
   env.drainer.start(); clock += 120_001; await env.poll();
   eq([q('C14')[0].holdReason?.code, env.posts.length], ['interrupted', 1], 'C14:再 start 后由兜底超时收尾(没有被旧占位卡住、不重发)');
+  env.drainer.stop();
+}
+
+{ // C15 文件快照:目录太大、没做过选择 → 不发、条目原位、没人接管前不重试;窗格接管过 → 作废;拍到 → 照常发
+  seed({ C15: [item('a'), item('b')] });
+  const snaps = [];
+  let answer = { send: false, reason: 'large-snapshot-ask' };
+  const env = makeEnv({ responder: () => OK200('p15'), snapshot: async (p) => { snaps.push(p); return answer; } });
+  await env.poll();
+  eq([env.posts.length, snaps.length, q('C15').map((x) => [x.queueId, x.steerState])], [0, 1, [['a', undefined], ['b', undefined]]], 'C15:目录要询问 → 不发,条目退回原位');
+  eq([snaps[0].sessionId, snaps[0].cwd, snaps[0].clientMessageId, snaps[0].promptPreview], ['C15', '/w/a', 'bg-t1', 'msg a'], 'C15:快照请求带会话、入队快照的工作区、后台回合编号、提示');
+  await env.poll();
+  eq([snaps.length, env.posts.length], [1, 0], 'C15:没人接管之前不再试');
+  registerPaneDrain('C15')();
+  answer = { send: true, sha: 'sha-1' };
+  await env.poll();
+  eq([snaps.length, env.posts.length, q('C15').map((x) => x.queueId)], [2, 1, ['b']], 'C15:窗格接管过 → 作废;再试时拍到就照常发');
   env.drainer.stop();
 }
 

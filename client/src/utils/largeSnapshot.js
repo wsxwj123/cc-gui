@@ -129,6 +129,25 @@ export async function askSaveLargeSnapshot(payload, data, deps) {
  * 会等用户回答的只有"超阈值的首次"这一条分支 —— 小目录、本会话已问过的会话直接返回
  * (已确认过"保存"的会话由调用方带 allowOversize,同样不弹窗、不等)。
  */
+/**
+ * r196:后台排空用的拍快照(不弹窗;窗格的 preflightLargeSnapshot 与它的行为不动)。同一个 POST /api/checkpoints,返回:
+ *  - { send: true, sha }:拍到了(sha),或不必拍 / 没拍成(sha 为 null)—— 照常发;
+ *  - { send: false, reason: 'large-snapshot-ask' }:被体积安全阀跳过、而这个会话还没就大目录做过选择(或正在问)——
+ *    先不在后台发,用户回到会话时由窗格按现有流程弹窗。
+ * 这个会话选过「保存」→ 带 allowOversize 拍;选过「不保存」→ 不拍、照常发;请求本身失败(网络等)静默,照常发。
+ */
+export async function bgPreflightLargeSnapshot(payload, deps) {
+  const sid = payload?.sessionId;
+  if (largeSnapshotDecided(sid) && !oversizeAllowedFor(sid)) return { send: true, sha: null };
+  try {
+    const r = await postCheckpoint(deps, oversizeAllowedFor(sid) ? { ...payload, allowOversize: true } : payload);
+    if (!r.ok) return { send: true, sha: null };
+    if (r.data?.sha) return { send: true, sha: r.data.sha };
+    if (r.data?.skipped === true && !largeSnapshotDecided(sid)) return { send: false, reason: 'large-snapshot-ask' };
+    return { send: true, sha: null };
+  } catch { return { send: true, sha: null }; }
+}
+
 export async function preflightLargeSnapshot(payload, deps) {
   try {
     const r = await postCheckpoint(deps, payload);
