@@ -2377,6 +2377,21 @@ async function readTurnImages(text) {
   }
 }
 
+// r196:后台排空请求(queuedDrain)的会话文件检查。与 --resume 同口径,按工作目录编码找 projects/<编码>/<sid>.jsonl:
+// 规范路径(canonicalCwd,与 liveSubagentUsage 同一写法)与请求原样路径各编码一次 —— 软链接路径时两者不同,任一存在即通过,
+// 避免把还在的会话误判成没了。sessionId 不是会话编号格式 → 当作不存在(不拿它拼路径)。
+function queuedDrainSessionFileExists(sessionId, cwd) {
+  if (!isSessionIdShape(sessionId)) return false;
+  const projectsDir = pathJoin(homedir(), '.claude', 'projects');
+  const encode = (p) => String(p).replace(/[^A-Za-z0-9]/g, '-');
+  for (const dirName of new Set([encode(canonicalCwd(cwd)), encode(cwd)])) {
+    try {
+      if (statSync(pathJoin(projectsDir, dirName, `${sessionId}.jsonl`)).isFile()) return true;
+    } catch { /* 不存在 / 无权限 → 看下一个编码 */ }
+  }
+  return false;
+}
+
 // POST /api/chat 主流程(原 handler 原样下移;所有锁定行为的时序不变)。
 async function handleChatPost(req, res) {
   // R13 输入闸门:非法输入一律 {ok:false,code,error} 且【不起任何 CLI、不回 pid】。
@@ -2437,6 +2452,14 @@ async function handleChatPost(req, res) {
       code: 'CHAT_INVALID_CWD',
       error: '工作目录不存在或无法访问，请在左侧选择一个有效的工作区后重试。',
     });
+  }
+
+  // r196:页面的后台排空(不在任何窗格里的会话,这一轮结束后自动发出排队消息)才带 queuedDrain:true;不带时下面两处行为不变。
+  // 带它时:①会话文件不在 → 404,不起进程、不留回合记录(放在回合记录之前),免得命令行对不存在的会话另起一个新会话;
+  // ②冷启前等满约 4 秒仍在跑的那一轮不中止,交给建进程前的硬闸回新形态 409(见 settleSessionSlots)。内部回合不认这个字段。
+  const queuedDrain = req.body?.queuedDrain === true && !req[INTERNAL_TURN];
+  if (queuedDrain && !queuedDrainSessionFileExists(sessionId, workingDir)) {
+    return res.status(404).json({ ok: false, code: 'CHAT_SESSION_GONE', error: '会话记录不存在' });
   }
 
   // ── R13 canonical turn:同 (鉴权主体, serverEpoch, clientTurnId) 只准有一个 run ──
@@ -2869,7 +2892,10 @@ async function handleChatPost(req, res) {
     // r151g 安全复审(建议 5):deadline 边界上 lingering 仍可能"带活 shell 且未发起中止"。铁律不变:误杀不可恢复 >
     // 双 resume 竞争 —— 不杀它。r199:走到这里的只会是还能接消息、到点仍在忙的进程(不再接消息的已被 tearingDown 跳过),
     // 不中止它,由建进程前的硬闸回 409(这一轮还在运行),不另起第二个进程与它并存。
-    if (lingering && slotHasLiveShell(lingering) && !lingering.abort?.signal?.aborted) lingering = null;
+    // r196:后台排空(queuedDrain)同样不中止还能接消息、到点仍在忙的进程 —— 页面依据的是轮询结果,判断不了请求到达那一刻
+    // 这一轮是不是刚开始(命令行自己续跑、别的页面刚发);交给硬闸回新形态 409,页面留队稍后再发。
+    if (lingering && ((slotHasLiveShell(lingering) && !lingering.abort?.signal?.aborted)
+      || (queuedDrain && slotUsable(lingering)))) lingering = null;
     // r151q 第 9 项:强制中止之前最后核对一次 —— 绝不中止对方(用户请求不中止内部回合,含它只差输入预测的收尾窗;
     // 内部回合不中止用户回合)。要中止的正是内部回合自己的槽、又还没进入关闭 → 让出(409),不中止。
     const abortForbidden = heldByOther() || (!internal && !!lingering?.internalTurn && !lingering.closing);
