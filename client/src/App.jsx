@@ -9986,11 +9986,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     () => useStore.getState().clearPromptSuggestion(sessionQueueKey, selectedSession?.sessionId),
     [sessionQueueKey, selectedSession?.sessionId],
   );
-  const removeFromQueueAt = useCallback((i) => useStore.getState().removeFromQueue(sessionQueueKey, i), [sessionQueueKey]);
-  const editFromQueueAt = useCallback((i) => {
-    const item = messageQueue[i];
+  // r196(F2):编辑 / 删除按条目自身的 queueId 操作 —— 渲染时的下标在排空弹走队首、后台排空标记 / 移除之后会指错条目。
+  const removeFromQueueAt = useCallback((queueId) => {
+    useStore.getState().removeFromQueueById(sessionQueueKey, queueId);
+  }, [sessionQueueKey]);
+  const editFromQueueAt = useCallback((queueId) => {
+    const item = (useStore.getState().messageQueue[sessionQueueKey] || []).find((q) => q?.queueId === queueId);
     if (!item) return;
-    useStore.getState().removeFromQueue(sessionQueueKey, i);
+    // 先删,删成了才往输入框里填:删不掉(那一条正在自动发出 / 已是未定态 / 落盘失败)就不填,免得同一条发两次。
+    if (!useStore.getState().removeFromQueueById(sessionQueueKey, queueId)) return;
     // r192:附件还原成卡片(不再是文字里的「@路径」),追加在输入框已挂的附件后面。
     const restored = homeDraftFromOrphan(item);
     const detail = { text: restored.text, targetKey: sessionQueueKey };

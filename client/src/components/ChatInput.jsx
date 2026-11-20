@@ -898,7 +898,7 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
       }
       if (lastIdx >= 0 && onEditFromQueue) {
         e.preventDefault();
-        onEditFromQueue(lastIdx);
+        onEditFromQueue(queueItems[lastIdx].queueId); // r196:按条目的 queueId 取出(下标在队列变动后会指错)
         return;
       }
     }
@@ -1321,7 +1321,7 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
                     )}
                     {onEditFromQueue && !isSteerBarrier(q) && (
                       <button
-                        onClick={() => onEditFromQueue(i)}
+                        onClick={() => onEditFromQueue(q.queueId)}
                         className="p-1 hover:bg-accent/15 rounded"
                         title="取出到输入框重新编辑"
                       >
@@ -1342,7 +1342,7 @@ export const ChatInput = React.memo(function ChatInput({ onSend, onStop, onStopB
                             );
                             if (!ok) return;
                           }
-                          onRemoveFromQueue(i);
+                          onRemoveFromQueue(q.queueId);
                         }}
                         className="p-1 hover:bg-red-100 rounded"
                         title="从队列删除"
