@@ -1638,6 +1638,7 @@ function costForAgentByModel(agent, fallbackModel, provider) {
   };
 }
 
+// r206:改这里要同步 server/services/session-reader.js 的 readAgentUsage(两边各算一份合计,口径不一致页面与后端就对不上)。
 /** 一组调用的合计用量(与服务端 readAgentUsage 的合计同口径:顶层四项相加,缓存写两档分项另计)。 */
 function sumCallUsage(calls) {
   const agg = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };

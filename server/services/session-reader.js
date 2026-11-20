@@ -2117,8 +2117,13 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
       if (record.timestamp) currentTurn.timestamp = record.timestamp;
     } else if (record.type === 'system' && record.subtype === 'model_refusal_fallback') {
       // r200:命令行中途换了模型的通知。在换模型的位置切开这一轮、放一行说明(与 task-notice 同口径:切段保住位置)。
-      flushTurn();
-      messages.push(modelFallbackNotice(record));
+      // r206:scope 为 'local' 的是子代理 / 旁问 / 后台分支那一次回复换了模型,会话的模型没变 —— 不画进主对话,
+      // 也不切开这一轮。判断放在分支里面、不写进条件:这类记录在这里吃掉,不落进后面的分支。'session' 或没有
+      // scope(老版本命令行)的照旧。
+      if (record.scope !== 'local') {
+        flushTurn();
+        messages.push(modelFallbackNotice(record));
+      }
     } else if (record.type === 'attachment' && record.attachment?.type === 'goal_status') {
       // /goal(会话级 Stop 钩子)的唯一可见信号。实测 CLI 2.1.220:goal_status 只写进
       // transcript,stream-json 一条都不发,所以历史侧不放行 = 目标在 GUI 里完全不可见

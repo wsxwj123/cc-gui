@@ -6797,7 +6797,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // r200:命令行中途换了模型(原模型的回复被安全检查拦下,设置里允许不问直接换)。在这一轮里加一行说明;
           // 命令行也把这条写进会话记录 —— 它不是本地提示,回合落盘后随本地副本清掉,由读历史那份接手(同一 uuid),
           // 所以同一条只画一次。不弹框、不打断这一轮,也不动模型菜单的选择(下一轮照样先按用户选的模型发)。
-          if (event.type === 'system' && event.subtype === 'model_refusal_fallback') {
+          // r206:scope 为 'local' 的是子代理 / 旁问 / 后台分支那一次回复换了模型,会话的模型没变,不画进主对话;
+          // 'session' 或没有 scope(老版本命令行)的照旧画。读历史那边(session-reader.js)同样按 scope 过滤。
+          if (event.type === 'system' && event.subtype === 'model_refusal_fallback' && event.scope !== 'local') {
             const fbNotice = modelFallbackNoticeOf(event);
             setChatMessages((prev) => (prev.some((m) => m.uuid === fbNotice.uuid) ? prev : [...prev, { ...fbNotice, ownerKey: streamOwnerSid() }]));
           }
