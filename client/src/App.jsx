@@ -151,6 +151,7 @@ import { imageAttachNoticeText } from './utils/imageAttachNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
 import { localTurnTakenOver, makeTurnIdentityIndex } from './utils/turnIdentity.js';   // r141 渲染期身份闸门
 import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
+import { buildChatRequestBody, chatCwdFor, gateThirdPartyAuto } from './utils/chatRequest.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow, reconcileBadgeWindow, resolveTurnUsage } from './utils/contextWindow.js';
@@ -6036,13 +6037,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 修正批#5/判官①:切到第三方后静态过滤只是藏选项、不清已 pin 的 auto → 会原样发出。
       // 发送前就地降为 default 并回写 pin 闭环,附切换通知横幅。
       // r151a:第三方判据读审核状态的 official(与服务端同判据);第三方 auto 总开关开着就原样发 auto。
-      if (permissionMode === 'auto') {
-        const _stAuto = useStore.getState();
-        if (isThirdPartyProvider(_stAuto.autoAuditStatus, _stAuto.currentProvider?.providerHint) && _stAuto.autoAuditStatus?.enabled !== true) {
-          permissionMode = 'default';
-          _stAuto.setPermissionMode('default', sessionQueueKey);
-          setProviderSwitchNotice({ text: '「自动」权限档在第三方 provider 下默认关闭，本会话已切回「逐步确认」。可在 设置 → 权限 中开启。' });
-        }
+      // r196:判据抽到 chatRequest.gateThirdPartyAuto(后台排空经 buildChatRequestBody 用同一判据)。写回档位与提示仍在这里
+      // (下面的等待之前,时序不变);组请求体时传进去的已是门控后的档位,那里同一组输入再判一次是空操作。
+      const _stAuto = useStore.getState();
+      if (gateThirdPartyAuto(permissionMode, _stAuto.autoAuditStatus, _stAuto.currentProvider?.providerHint).downgraded) {
+        permissionMode = 'default';
+        _stAuto.setPermissionMode('default', sessionQueueKey);
+        setProviderSwitchNotice({ text: '「自动」权限档在第三方 provider 下默认关闭，本会话已切回「逐步确认」。可在 设置 → 权限 中开启。' });
       }
       // 模型解析与徽章一致(#8):pin → 历史模型 → 全局默认。否则发送时只读 pin||全局,
       // 全局被 WS 重置成默认后,没 pin 的会话(尤其回滚后)会用默认模型发出,与徽章不符。
@@ -6054,24 +6055,16 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const _officialM = (_stM.currentProvider?.providerHint || 'anthropic') === 'anthropic';
       const _pin = _stM.modelBySession[sessionQueueKey];
       const _hist = resolveHistModel(getLocalMessages(), _stM.providerEpoch || 0, _officialM);
-      let currentModel = resolveSendModel({
-        pin: _pin,
-        hist: _hist,
-        globalModel: _stM.currentModel,
-        availableModels: _stM.availableModels,
-        customModels: _stM.customModels,
-        officialAnthropic: _officialM,
-      });
+      // r196:pin → 历史模型 → 全局默认的解析(resolveSendModel)、1M 补位、思考强度的能力门控都在 buildChatRequestBody 里做
+      // (后台排空共用);这里只按改前的时刻取输入。
       // 1M 标记兜底(与徽章显示解析同一规则):重装丢 pin 后,发送也要带回 [1m],
       // 否则显示 1M 而实际按 200K 发。用 selectedSession?.sessionId(勿用下方 const sid,
       // TDZ)。pin 显式关 1m 时 syncContext1m 已清标记,不会误补。
       const _c1m = selectedSession?.sessionId && _stM.context1mBySession?.[selectedSession.sessionId];
-      if (_c1m && currentModel && !/\[1m\]/i.test(currentModel)) currentModel = currentModel + '[1m]';
-      sentModel = currentModel; // r146 R6:见声明处
-      let effort = useStore.getState().getEffortFor(sessionQueueKey);
       // r10-9:模型能力门控——模型声明不支持思考或该档不支持时不传 effort(不写 env,
       // CLI 端零痕迹)。UI 已回落兜底,这里是发送侧防御(pin 残留/竞态)。
-      if (effort && !effortAllowed(effortCapsFor(useStore.getState().modelEffortMeta, currentModel), effort)) effort = '';
+      const _effortRaw = useStore.getState().getEffortFor(sessionQueueKey);
+      const _effortMeta = useStore.getState().modelEffortMeta;
       // When resuming an existing session, cwd MUST be the EXACT string the
       // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).
       // Reconstructing from the hash dir name is lossy: CLI maps every non-
@@ -6083,9 +6076,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 必须放在 `sid` 声明之后:之前放在前面引用了 TDZ 中的 const sid → WebKit 报
       // "Cannot access uninitialized variable.",每次发送都炸(普通/agent 模式皆然)。
       const activeAgent = !sid ? useStore.getState().getActiveAgentFor(sessionQueueKey) : '';
-      const chatCwd = (sid && selectedSession?.projectPath)
-        ? selectedSession.projectPath
-        : (selectedSession?.projectPath || selectedProject?.path);
+      const chatCwd = chatCwdFor(selectedSession, selectedProject);
       // R13 回合身份:clientTurnId 在本次发送内恒定(不重试不换 id);serverEpoch 取缓存,
       // 缓存空(首次发送 / 刚被判 TURN_SERVER_CHANGED)才现取一次。
       const clientTurnId = opts.clientTurnId || newClientTurnId();
@@ -6102,38 +6093,49 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
         xsFields = xsClaimed.fields;
       }
+      // r196:请求体由 chatRequest.buildChatRequestBody 组(后台排空共用同一函数,单测锁定同一组输入两边逐字相同;字段含义、
+      // 取舍的注释在那里)。各输入取值的时刻与改前相同:档位、模型、思考强度在上面的等待之前取好;常驻、花费上限、genui
+      // 开关在这里现读(改前就在请求体字面量里现读)。
+      const _chatReq = buildChatRequestBody({
+        prompt,
+        clientTurnId,
+        serverEpoch: turnEpoch,
+        sessionId: sid,
+        draftId: selectedSession?.draftId,
+        cwd: chatCwd,
+        isCompact,
+        appendSystemPrompt,
+        agent: activeAgent,
+        permissionMode,
+        autoAuditStatus: _stAuto.autoAuditStatus,
+        providerHint: _stAuto.currentProvider?.providerHint,
+        modelPin: _pin,
+        histModel: _hist,
+        globalModel: _stM.currentModel,
+        availableModels: _stM.availableModels,
+        customModels: _stM.customModels,
+        officialAnthropic: _officialM,
+        context1m: _c1m,
+        effort: _effortRaw,
+        modelEffortMeta: _effortMeta,
+        addDirs,
+        globalRead,
+        // #26 会话常驻:false 时 server 回合结束即关进程(逐回合冷启,旧行为)
+        keepAlive: useStore.getState().persistentChat !== false,
+        // 花费上限(美元):>0 时透传 SDK maxBudgetUsd,进程累计花费达到上限即停。
+        maxBudgetUsd: useStore.getState().maxBudgetUsd || undefined,
+        // 输入预测(A):server 据此启用 SDK promptSuggestions 并在 result 后留等待窗。
+        promptSuggestions: _suggestPref,
+        // r66:genui 渲染开关同时门控"教不教模型这套围栏语法"。关掉时 server 不把
+        // 教学段注入系统提示(开关也计入常驻进程复用键,翻完开关不会复用旧系统提示)。
+        genui: useStore.getState().genuiRender !== false,
+      });
+      sentModel = _chatReq.model; // r146 R6:见声明处
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt,
-          clientTurnId,
-          serverEpoch: turnEpoch || undefined,
-          // Omit sessionId for a draft so the CLI creates a fresh session.
-          sessionId: sid || undefined,
-          // draft 流带 draftId(存进 server slot):init 前切走再切回时轮询按它找回
-          // 本进程 reattach,earlyLines 回放的 init 经归属校验正确绑定(僵尸 draft 修复)。
-          draftId: (!sid && selectedSession?.draftId) ? selectedSession.draftId : undefined,
-          cwd: chatCwd,
-          // /compact 用标准上下文压缩:剥掉 [1m]。否则 Anthropic 上压缩会用 1M 上下文,
-          // 触发 "Usage credits required for 1M context" 报错(用户报告)。压缩只是摘要,
-          // 不需要 1M 窗口;对原生 1M 的 provider 去掉也无害。
-          model: isCompact ? String(currentModel || '').replace(/\[1m\]/i, '') : currentModel,
-          effort: effort || undefined,
-          appendSystemPrompt: appendSystemPrompt || undefined,
-          addDirs: addDirs && addDirs.length ? addDirs : undefined,
-          permissionMode: permissionMode || 'default',
-          globalRead: globalRead !== false,
-          agent: activeAgent || undefined,
-          // #26 会话常驻:false 时 server 回合结束即关进程(逐回合冷启,旧行为)
-          keepAlive: useStore.getState().persistentChat !== false,
-          // 花费上限(美元):>0 时透传 SDK maxBudgetUsd,进程累计花费达到上限即停。
-          maxBudgetUsd: useStore.getState().maxBudgetUsd || undefined,
-          // 输入预测(A):server 据此启用 SDK promptSuggestions 并在 result 后留等待窗。
-          promptSuggestions: _suggestPref,
-          // r66:genui 渲染开关同时门控"教不教模型这套围栏语法"。关掉时 server 不把
-          // 教学段注入系统提示(开关也计入常驻进程复用键,翻完开关不会复用旧系统提示)。
-          genui: useStore.getState().genuiRender !== false,
+          ..._chatReq.body,
           // r151b:点卡片【处理】发出的这条带跨会话消息 id 与一次性凭据(服务端兑换后把 prompt 换成信封);
           // 其它发送 xsFields 为 null,请求体与改动前逐字相同。
           ...(xsFields || {}),
