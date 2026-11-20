@@ -1,8 +1,8 @@
 // r196 POST /api/chat 可选字段 queuedDrain(页面后台排空才带;服务端白盒单测,驱动真实 chatRoute + SDK 桩)。
 //   Q1 不带这个字段(或不是布尔 true)时三条路径与改前相同:会话文件不在照常起进程;在跑、手上没有命令、到点没结束 → 中止另起;
 //      在跑、手上有后台命令 → 等约 4 秒回新形态 409。
-//   Q2 带它、会话文件不在 → 404 CHAT_SESSION_GONE,不起进程、不留回合记录;按工作目录编码查(另一个工作区的同名文件不算);
-//      软链接路径两种编码任一存在即通过;sessionId 缺失或不是会话编号格式 → 404。
+//   Q2 带它、会话文件不在 → 404 CHAT_SESSION_GONE,不起进程、不留回合记录;查法与 session-reader.findSessionFile 同口径
+//      (任一项目目录下有 <sid>.jsonl 即算存在,软链接路径不误判);sessionId 缺失或不是会话编号格式 → 404。
 //   Q3 带它、这一轮在跑且手上没有命令 → 照旧先等约 4 秒,等满仍在跑回新形态 409(reason + 字符串 pid),那一轮不被中止;
 //      4 秒内结束 → 交给原进程。
 // 契约值一律写字面量,不 import 产品常量。node tests/unit/check-r196-queued-drain-server.mjs
@@ -149,13 +149,11 @@ try {
     const r = await api('/chat', DRAIN);
     eq([r.status, r.body], [404, GONE_404], 'Q2:会话文件不在 → 404,应答体逐字');
     eq([sdkCalls.length, alive(S)], [before, []], 'Q2:不起进程');
-    // 只有另一个工作区里有同名会话文件 → 仍是 404(按本请求工作目录的编码查,与 --resume 同口径)
-    touchSession(WORK2, S);
     const r2 = await api('/chat', DRAIN);
-    eq([r2.status, r2.body], [404, GONE_404], 'Q2:别的工作区里的同名文件不算');
-    eq(sdkCalls.length, before, 'Q2:仍不起进程');
-    // 不留回合记录:文件补上之后同一 clientTurnId 原样重发 → 当新回合受理(不是命中旧记录的 duplicated)
-    touchSession(WORK, S);
+    eq([r2.status, r2.body, sdkCalls.length], [404, GONE_404, before], 'Q2:再发一次仍是 404、仍不起进程');
+    // 不留回合记录:文件补上之后同一 clientTurnId 原样重发 → 当新回合受理(不是命中旧记录的 duplicated)。
+    // 文件放在另一个工作区的项目目录下:与 findSessionFile 同口径,任一项目目录下有就算存在。
+    touchSession(WORK2, S);
     const r3 = await api('/chat', DRAIN);
     eq([r3.status, r3.body.ok, r3.body.duplicated], [200, true, undefined], 'Q2:同号重发当新回合受理(之前没留回合记录)');
     eq(sdkCalls.length, before + 1, 'Q2:这一次才起进程');

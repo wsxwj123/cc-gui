@@ -2377,21 +2377,6 @@ async function readTurnImages(text) {
   }
 }
 
-// r196:后台排空请求(queuedDrain)的会话文件检查。与 --resume 同口径,按工作目录编码找 projects/<编码>/<sid>.jsonl:
-// 规范路径(canonicalCwd,与 liveSubagentUsage 同一写法)与请求原样路径各编码一次 —— 软链接路径时两者不同,任一存在即通过,
-// 避免把还在的会话误判成没了。sessionId 不是会话编号格式 → 当作不存在(不拿它拼路径)。
-function queuedDrainSessionFileExists(sessionId, cwd) {
-  if (!isSessionIdShape(sessionId)) return false;
-  const projectsDir = pathJoin(homedir(), '.claude', 'projects');
-  const encode = (p) => String(p).replace(/[^A-Za-z0-9]/g, '-');
-  for (const dirName of new Set([encode(canonicalCwd(cwd)), encode(cwd)])) {
-    try {
-      if (statSync(pathJoin(projectsDir, dirName, `${sessionId}.jsonl`)).isFile()) return true;
-    } catch { /* 不存在 / 无权限 → 看下一个编码 */ }
-  }
-  return false;
-}
-
 // POST /api/chat 主流程(原 handler 原样下移;所有锁定行为的时序不变)。
 async function handleChatPost(req, res) {
   // R13 输入闸门:非法输入一律 {ok:false,code,error} 且【不起任何 CLI、不回 pid】。
@@ -2455,10 +2440,13 @@ async function handleChatPost(req, res) {
   }
 
   // r196:页面的后台排空(不在任何窗格里的会话,这一轮结束后自动发出排队消息)才带 queuedDrain:true;不带时下面两处行为不变。
-  // 带它时:①会话文件不在 → 404,不起进程、不留回合记录(放在回合记录之前),免得命令行对不存在的会话另起一个新会话;
+  // 带它时:①会话文件不在 → 404,不起进程、不留回合记录(放在回合记录之前),免得命令行对不存在的会话另起一个新会话。
+  // 查法用 session-reader.findSessionFile(唯一的路径拼接闸门:先校验会话编号格式,再逐个项目目录找 <sid>.jsonl),
+  // 不按工作目录自己拼编码 —— 软链接路径、命令行截短的长目录名都不会误判;sessionId 缺失或格式不对 → 找不到 → 404。
   // ②冷启前等满约 4 秒仍在跑的那一轮不中止,交给建进程前的硬闸回新形态 409(见 settleSessionSlots)。内部回合不认这个字段。
+  // 只在带这个字段时多这一次 await,不带时执行顺序与改前相同。
   const queuedDrain = req.body?.queuedDrain === true && !req[INTERNAL_TURN];
-  if (queuedDrain && !queuedDrainSessionFileExists(sessionId, workingDir)) {
+  if (queuedDrain && !(await findSessionFile(sessionId))) {
     return res.status(404).json({ ok: false, code: 'CHAT_SESSION_GONE', error: '会话记录不存在' });
   }
 
