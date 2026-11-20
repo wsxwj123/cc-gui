@@ -95,7 +95,7 @@ import ChatSearch from './components/ChatSearch.jsx';
 import { confirmDialog } from './utils/confirmDialog.jsx';
 import { isMovedToBackground, parseOutputPath, parseBackgroundDeadline, autoMoveNoticeText } from './utils/movedToBackground.js';
 import { HistoryBackupNotice } from './components/HistoryBackupNotice.jsx';
-import { runHistoryOp, runHistoryOpSettled, stopTurnAndWait, rollbackBusyFor, ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS, ROLLBACK_BUSY_NOTICE } from './utils/historyOps.js';
+import { runHistoryOp, runHistoryOpSettled, trimFailureReason, stopTurnAndWait, rollbackBusyFor, ROLLBACK_STOPPING_NOTICE, ROLLBACK_STOPPING_NOTICE_MS, ROLLBACK_BUSY_NOTICE } from './utils/historyOps.js';
 import { ChatInput, EffortSelector, EFFORT_LEVELS, markAutoUnavailable, MODE_META, PermissionModeSelector } from './components/ChatInput.jsx';
 import { isThirdPartyProvider } from './utils/autoAudit.js';
 import { saveOutcome } from './utils/saveOutcome.js';
@@ -9057,7 +9057,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         failed: `要重发的内容没能放回输入框（本地存储写入失败），原文：${left.slice(0, 200)}${left.length > 200 ? '…' : ''}`,
       }[outcome] || '';
     };
-    const leaveForOwner = ({ notes = [], trimOk = true, wiped = false } = {}) => {
+    const leaveForOwner = ({ notes = [], trimOk = true, trimReason = '', wiped = false } = {}) => {
       const { prompt: left, meta: leftMeta } = pendingResend();
       if (wiped) {
         const saved = !!left && !!sel?.projectHash && useStore.getState().addOrphanDraftMessage(
@@ -9074,6 +9074,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       leaveSessionNotice(rbKey, [
         trimOk ? '回退过程中切换了会话：会话记录已回退，原定的重发没有发出。'
           : '回退过程中切换了会话：会话记录裁剪失败（磁盘历史未改动），原定的重发没有发出。',
+        trimOk ? '' : trimReason, // r205:裁剪失败的原因,接在第一句之后
         where,
         ...notes,
       ].filter(Boolean).join(''));
@@ -9306,6 +9307,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     //    landed in the jsonl (the CLI persists its own uuid but keeps the ts).
     let sessionWasReset = false;
     let trimFailed = false;
+    let trimFailure = null; // r205:裁剪失败的结果({code, error};请求抛了异常时是 {thrown:true}),黄字据此写原因
     let wipedAway = false; // r146b:会话被裁空(sessionReset)时窗格已切走 —— 见下方切走分支
     if (sel?.sessionId && projectHash) {
       const body = msg.uuid && !msg.uuid.startsWith('chat-')
@@ -9315,7 +9317,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // r188:遇 SESSION_RUNNING / SESSION_CHANGED 重新预览再提交(最多约 6 秒)—— 刚停下的回合还在收尾窗里、
         // 或进程退出时又追加了一笔收尾记录。不以「本窗格发过停止」为前提。
         const tr = await runHistoryOpSettled(sel.sessionId, 'trim', body);
-        if (!tr.ok) trimFailed = true;
+        if (!tr.ok) { trimFailed = true; trimFailure = tr; }
         // If trim wiped the session (no real messages would remain), we must
         // drop the sessionId locally — otherwise the next /api/chat would
         // try --resume on a deleted jsonl and CLI silently exits with
@@ -9343,7 +9345,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           rbKey = draftKey; // 窗格现在是这条新 draft,后续复查认它
           rbBusy.key = draftKey; // r188:「回退进行中」标记跟着换到新草稿键(同一个对象,清标记的身份比较不变)
         }
-      } catch { trimFailed = true; }
+      } catch { trimFailed = true; if (!trimFailure) trimFailure = { thrown: true }; }
     }
     // r146 R3:裁剪期间切走 —— 磁盘已裁,窗格动作与重发全部放弃,本来要重发的内容留给本会话。
     if (!stillHere()) {
@@ -9353,7 +9355,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 会话被裁空(wipedAway)→ 侧栏不再列出它、回不去:内容进首页「未发出的消息」(见 leaveForOwner)。
       // r188:「正在停止」提示挂在窗格上,窗格已换了会话 —— 仍是它时撤掉,别让它留在别的会话上。
       setProviderSwitchNotice((cur) => (cur?.text === ROLLBACK_STOPPING_NOTICE ? null : cur));
-      leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, wiped: wipedAway });
+      leaveForOwner({ notes: diskNotes, trimOk: !trimFailed, trimReason: trimFailed ? trimFailureReason(trimFailure) : '', wiped: wipedAway });
       return;
     }
     // trim 失败(磁盘 jsonl 没裁)但 UI 已裁+即将重发 → 重发会落在未裁历史上、且
@@ -9368,7 +9370,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         partial: '文件还原过程出错，工作区可能已部分还原，请检查改动。',
         untouched: '工作区文件未改动。',
       }[rbFileOutcome] || '';
-      setProviderSwitchNotice({ text: ['会话记录裁剪失败，会话记录没有改动，原定的重发没有发出。', where, fileNote].filter(Boolean).join('') });
+      setProviderSwitchNotice({ text: ['会话记录裁剪失败，会话记录没有改动，原定的重发没有发出。', trimFailureReason(trimFailure), where, fileNote].filter(Boolean).join('') });
       return;
     }
 
