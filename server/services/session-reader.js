@@ -1784,10 +1784,14 @@ function agentModelFields(profile, agent) {
 // r200:子代理页要的模型轨迹 —— 按先后用过的模型(相邻相同只记一次,伪模型名不算),以及「原模型的回复被
 // 安全检查拦下、命令行换了模型」的那一次(没有给 null)。被拦的两种认法都认:助手记录 message.stop_reason 为
 // 'refusal';命令行紧跟着插的 isMeta 用户记录带 refusedMessageId(= 被拦那条的 message.id)。类别取被拦那条的
-// message.stop_details.category,没有给 null(页面写「未知」)。只认之后确实换了模型的那次(被拦后没换模型的不在本项范围)。
+// message.stop_details.category,没有给 null(页面写「未知」)。
+// r206:换上来的模型 = 被拦那次调用之后紧跟的那一次调用(按 message.id 去重后的下一次,伪模型名的记录不算调用)
+// 的模型,且与被拦那次不同;紧跟的那次还是原模型(没换)就不认这次被拦。原来取的是模型列表里排在后面的第一个
+// 不同模型,隔了很久才换的也被认成「被拦后换的模型」。模型先后列表(models)不受影响。
 function agentModelTrail(records) {
   const models = [];
-  const byId = new Map();   // message.id → 这条助手消息的 { model, category, index }
+  const calls = [];         // 按 message.id 去重后的助手调用,按先后:{ model, category, index }
+  const byId = new Map();   // message.id → calls 里的那一项
   const refused = [];
   const mark = (info) => { if (info && !refused.includes(info)) refused.push(info); };
   for (const rec of records || []) {
@@ -1796,11 +1800,12 @@ function agentModelTrail(records) {
       const model = realModelName(msg.model);
       if (!model) continue;
       if (models[models.length - 1] !== model) models.push(model);
-      // index = 记到这条时列表的长度:列表里排在它后面的第一个模型就是换上来的新模型。
-      // 同一条消息按内容块拆成几条记录落盘(message.id 相同),只建一份,类别以带着 stop_details 的那条为准。
+      // 同一条消息按内容块拆成几条记录落盘(message.id 相同),只算一次调用,类别以带着 stop_details 的那条为准;
+      // 没有 message.id 的记录各算一次。index = 这次调用在 calls 里的位置,calls[index + 1] 就是紧跟的那次。
       let info = typeof msg.id === 'string' ? byId.get(msg.id) : null;
       if (!info) {
-        info = { model, category: null, index: models.length };
+        info = { model, category: null, index: calls.length };
+        calls.push(info);
         if (typeof msg.id === 'string') byId.set(msg.id, info);
       }
       const category = msg.stop_details?.category;
@@ -1811,8 +1816,8 @@ function agentModelTrail(records) {
     }
   }
   for (const r of refused) {
-    const fallbackModel = models[r.index] || null;
-    if (fallbackModel) return { models, modelRefusal: { originalModel: r.model, fallbackModel, category: r.category } };
+    const next = calls[r.index + 1];
+    if (next && next.model !== r.model) return { models, modelRefusal: { originalModel: r.model, fallbackModel: next.model, category: r.category } };
   }
   return { models, modelRefusal: null };
 }
