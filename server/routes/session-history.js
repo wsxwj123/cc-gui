@@ -702,10 +702,22 @@ function resolveOp(name) {
 // 会话号前 8 位、阶段、失败代码、状态码,不记会话内容、锚点、路径与密钥。会话号取自 URL,safeId 不拦
 // 换行这类字符,所以前 8 位里标识字符以外的一律换成「?」,免得混进日志。阶段按请求里的 dryRun 认:
 // 只有 dryRun:true 算预览;缺省 / 非布尔这类在分阶段之前就被拒的按提交记(格式只有这两个值)。
+function historyOpSid8(req) {
+  return String(req.params?.sessionId ?? '').slice(0, 8).replace(/[^A-Za-z0-9_-]/g, '?') || '-';
+}
+
 function logHistoryOpFailure(req, opName, status, code) {
-  const sid8 = String(req.params?.sessionId ?? '').slice(0, 8).replace(/[^A-Za-z0-9_-]/g, '?') || '-';
+  const sid8 = historyOpSid8(req);
   const stage = req.body?.dryRun === true ? 'preview' : 'submit';
   console.warn(`[history-op] ${opName} sid=${sid8} stage=${stage} code=${code || '-'} status=${status}`);
+}
+
+// r206:已经回过页面之后才抛错 —— 页面已拿到这次的结果(成功或失败已记过),不再回 500(响应头已发,再发会抛错),
+// 也不记 [history-op] 失败行(否则多记一次并不存在的失败)。只留一行诊断:操作名、会话号前 8 位、错误代码或类名
+// (只留标识字符;不记错误原文,原文里可能有路径)。
+function logHistoryOpAfterResponse(req, opName, err) {
+  const kind = String(err?.code || err?.name || '-').slice(0, 40).replace(/[^A-Za-z0-9_-]/g, '?');
+  console.warn(`历史操作已回过页面之后出错 op=${opName} sid=${historyOpSid8(req)} err=${kind}`);
 }
 
 async function handleHistoryOp(req, res, opName, dryRunFlag) {
@@ -756,6 +768,7 @@ for (const opName of HISTORY_OP_NAMES) {
     try {
       await handleHistoryOp(req, res, opName, 'post');
     } catch (err) {
+      if (res.headersSent) { logHistoryOpAfterResponse(req, opName, err); return; }
       logHistoryOpFailure(req, opName, 500, 'SESSION_OPERATION_FAILED');
       fail(res, 500, 'SESSION_OPERATION_FAILED', `历史操作失败:${err.message}`);
     }
