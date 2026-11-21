@@ -110,7 +110,7 @@ import { TurnBubble, StripRoundContext, LiveHostContext } from './components/Tur
 import { makeReattachTail, tailMarkBlockDone, tailAssignUuid, tailMarkSnapshot, tailMarkEnded, tailMarkSettled, tailReadBack, visibleTailBlocks, lastPromptTs } from './utils/reattachTail.js';
 import { stripSummary, tailBlockInfo, latestToolTitles } from './utils/streamStatus.js';
 import { initialSpan, extendUp, needsExtend, sliceRows, resolveAutoFrom } from './utils/mountWindow.js';
-import { historyMessageKey } from './utils/historyPaging.js';
+import { historyMessageKey, HISTORY_PAGE_SIZE, pagingHasOlder, persistedTurnCount } from './utils/historyPaging.js';
 import { HISTORY_COST_ESTIMATE_NOTE, hasFullHistoryStats, historyStatsScopeLabel } from './utils/historyStatsScope.js';
 import { ReleaseNotesModal } from './components/ReleaseNotesModal.jsx';
 import { shouldShow as shouldShowReleaseNotes, hasReleaseNotes, loadVersionNotes, fetchLastSeen, markSeen } from './utils/releaseNotes.js';
@@ -180,7 +180,7 @@ import { quotaValueText } from './utils/quotaFormat.js';
 import { aggregateHistoryCost, computeCostForMessage, displayUsd, formatCost, setUserPrices, observeOfficialBilling } from './utils/pricing.js';
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
-import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, focusedComposerKey, createQueueId } from './utils/steerQueue.js';
+import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, steerWindowJudge, queueKeyFor, HOME_DRAFT_KEY, focusedComposerKey, createQueueId } from './utils/steerQueue.js';
 import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';
 import { imageAttachNoticeText } from './utils/imageAttachNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
@@ -5549,6 +5549,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // (turnsBefore)、历史模型(_hist)、入队快照(_queueOwner)都从它取:它们在剥思考块 / 拍文件快照的等待之后,那时用户可能
     // 已把窗格切到别的会话,现读窗格会拿到那个会话的消息。剥思考块只去掉思考内容、不改轮数与模型,用等待前的这份结果相同。
     const originMessagesAtStart = getLocalMessages();
+    // r207:发送开头那份消息左边还有没有更早的页(回合结束 peek 只取最后一页,据此把页里的回合数换回整份的口径)。
+    const originHasOlderAtStart = pagingHasOlder(useStore.getState().historyPagingByTab?.[paneIndexNow()], getLocalSession()?.sessionId);
     // 自动标题的素材(下面每一处 POST /api/chat/title 的触发条件与 firstUser 都用它,不直接用 prompt):
     // 隐藏发送(点卡片处理跨会话消息、工具重做、队列隐藏条目及它们的自动重发)不是用户写的话,不拿去起标题;用户手打的它就是 prompt。
     const autoTitlePrompt = xsAutoTitlePrompt(prompt, opts);
@@ -8233,15 +8235,26 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           const list = st.messageQueue[finalizeSid];
           if (!list?.length || !list.some((item) => isSteerBarrier(item) || item?.steerId)) return;
           const keys = persistedSteerKeys(persisted);
+          // r207:窗口证据 —— persisted 只是最后一页(peek 带 limit,或 store 里已加载的那段)。覆盖不到某条入队时刻的,
+          // 没命中不等于没落盘,这次不判失败、留到下次刷新(steerWindowJudge)。lastPeeked 那页用 peek 应答的 hasMore,
+          // store 那段用本窗格分页账。
+          const windowHasMore = persisted === lastPeeked ? lastPeekedHasMore
+            : pagingHasOlder(useStore.getState().historyPagingByTab?.[paneIndexNow()], finalizeSid);
+          const canJudge = steerWindowJudge(persisted, windowHasMore);
           // R46:只统计【确实超宽限仍未落盘】的条目。原来不看状态、不看宽限 —— 在途的
           // 并入(accepted、UUID 还没进 jsonl)也被算进去,于是成功的并入照样弹失败横幅。
           // 判据与对账翻案共用 steerStillInFlight,口径不允许再裂。
           const reviewCount = list.filter((item) => item?.steerId
             && !keys.has(String(item.steerId).toLowerCase())
+            && canJudge(item)
             && !steerStillInFlight(item)).length;
           // R46:这里是【终局对账】—— 本流的 finally,回合确实结束了(updateStreaming(false)
           // 在上面已执行)。回合已结束还缺席就是真失败,缺席即翻,不再等 20s 宽限。
-          st.reconcileSteerQueue(finalizeSid, keys, { turnActive: false });
+          // r207:有覆盖不到的并入条目时带上 canJudge,把它们留到下次刷新;都覆盖得到(常见情况)时就是原来的终局对账。
+          const someOutsideWindow = list.some((item) => item?.steerId
+            && !keys.has(String(item.steerId).toLowerCase()) && !canJudge(item));
+          if (someOutsideWindow) st.reconcileSteerQueue(finalizeSid, keys, { turnActive: false, canJudge });
+          else st.reconcileSteerQueue(finalizeSid, keys, { turnActive: false });
           if (reviewCount > 0) {
             setProviderSwitchNotice({ text: '并入结果无法确认，已暂停后续队列。' });
           }
@@ -8260,7 +8273,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // 切回时历史重拉已把在途回合计入(或残留上一会话的列表),持久化计数永远
           // ≤ 基准 → 本地副本永不清 → 持久化版+本地版双渲染。回放内容来自同一进程,
           // done 到达即意味着该回合 jsonl 已写;保留 tail 匹配确认整轮(含尾部)落盘。
-          if (!reattachPid && persisted.filter((m) => m.type === 'turn').length <= turnsBefore) return false;
+          // r207:peek 只取最后一页,回合数按 persistedTurnCount 换回整份的口径再比(判据与原来拉整份时相同)。
+          if (!reattachPid && persistedTurnCount({
+            page: persisted, pageHasMore: peekedHasMore, origin: originMessagesAtStart, originHasOlder: originHasOlderAtStart,
+          }) <= turnsBefore) return false;
           if (!tail || attempt >= 9) return true; // 纯工具轮 / 已等够久 → count 足矣
           const lastTurn = [...persisted].reverse().find((m) => m.type === 'turn');
           const ptext = lastTurn
@@ -8269,6 +8285,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           return ptext.includes(tail);
         };
         let lastPeeked = null; // 最后一次 peek 到的持久化(循环耗尽时的兜底判定用它,比 store 副本新)
+        let peekedHasMore = false;     // r207:这一次 peek 的页左边还有没有更早的(roundLanded 换算回合数用)
+        let lastPeekedHasMore = false; // r207:lastPeeked 那一页的同一标记(reconcileSteeredQueue 的窗口证据用)
         for (let i = 0; i < 12; i++) {
           // Bail if the user navigated THIS pane to another session mid-finalize:
           // otherwise we'd fetch the old session into the now-current tab and clear
@@ -8282,12 +8300,20 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // the trailing message C vanishes. So we only commit once the FULL round
           // (incl trailing text) has landed.
           let peeked = [];
+          peekedHasMore = false;
           try {
-            const r = await fetch(`/api/sessions/${finalizeSid}/messages?projectHash=${encodeURIComponent(finalizePh)}`);
+            // r207:带 limit 只取最后一页 —— 核对只看最后一个回合与本回合的并入条目;超大会话每轮结束不再整份拉回。
+            const r = await fetch(`/api/sessions/${finalizeSid}/messages?projectHash=${encodeURIComponent(finalizePh)}&limit=${HISTORY_PAGE_SIZE}`);
             // 该端点直接返回数组(res.json(messages)),不是 {messages:[]}。原来取 .messages
             // 永远是 undefined→peeked 恒为 []→roundLanded 恒 false→每轮空跑满 12 次(~2.4s)
             // 才回退,尾部落盘检测形同虚设。兼容两种形态。
-            if (r.ok) { const d = await r.json(); peeked = Array.isArray(d) ? d : (d?.messages || []); lastPeeked = peeked; }
+            if (r.ok) {
+              const d = await r.json();
+              peeked = Array.isArray(d) ? d : (d?.messages || []);
+              peekedHasMore = !Array.isArray(d) && d?.hasMore === true;
+              lastPeeked = peeked;
+              lastPeekedHasMore = peekedHasMore;
+            }
           } catch {}
           if (getLocalSession()?.sessionId !== finalizeSid || !isCurrentTurn()) break;
           if (!producedReply) {
