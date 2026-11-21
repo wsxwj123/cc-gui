@@ -2,7 +2,7 @@ import { readdir, stat, readFile } from 'fs/promises';
 import { accumulateUsage } from '../utils/usage-normalize.js';
 import { attachUsageIssues } from './usage-issue-log.js';
 import { existsSync } from 'fs';
-import { join, basename } from 'path';
+import { join } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
 import {
@@ -12,7 +12,10 @@ import {
 } from '../utils/plan.js';
 
 export { isApprovedPlanToolCall };
-import { parseJsonl, readJsonlEdges, streamJsonl, scanJsonlRange } from '../utils/jsonl-parser.js';
+import { parseJsonl, readJsonlEdges, scanJsonlRange } from '../utils/jsonl-parser.js';
+// r207:子代理用量搬到 subagent-usage.js(逐转写缓存);readSubagentUsageForToolUse 原名从这里转出,已有调用方不改 import。
+import { readSessionSubagentUsage, attachSubagentUsage, readAgentToolUseId, realModelName } from './subagent-usage.js';
+export { readSubagentUsageForToolUse } from './subagent-usage.js';
 import { sliceMessagesForPage } from '../utils/history-pagination.js';
 import { buildHistoryStats } from '../utils/history-stats.js';
 import { parseWorkflowLaunchText, parseWorkflowTranscriptDir } from '../utils/workflow-progress.js';
@@ -1422,27 +1425,6 @@ export function foldRepeatedGoalNotices(messages) {
   return out;
 }
 
-/**
- * R12:子代理转写里 toolUseId 的来源 —— 与转写同目录的 `<agentSessionId>.meta.json`
- * (CLI 起子代理时写,带 toolUseId = 母会话里那次 Task/Agent 调用的 id)。
- * 读不到/没有该键都返回 null(workflow 起的 agent 的 meta 就没有 toolUseId)。
- * A 项起 agentType 也取自同一个文件,故读一次拿两个字段(见 readAgentMeta)。
- */
-async function readAgentToolUseId(metaPath) {
-  return (await readAgentMeta(metaPath)).toolUseId;
-}
-
-/** 读子代理 meta.json 的两个字段(读不到/类型不对一律 null,不抛)。 */
-async function readAgentMeta(metaPath) {
-  try {
-    const meta = JSON.parse(await readFile(metaPath, 'utf-8'));
-    return {
-      toolUseId: typeof meta?.toolUseId === 'string' && meta.toolUseId ? meta.toolUseId : null,
-      agentType: typeof meta?.agentType === 'string' && meta.agentType ? meta.agentType : null,
-    };
-  } catch { return { toolUseId: null, agentType: null }; }
-}
-
 /** 在某个 projectHash 下按"父会话目录/subagents[/workflows/wf_*]/<sid>.jsonl"找子代理转写。 */
 async function findAgentTranscript(projectHash, sessionId) {
   let entries;
@@ -1506,278 +1488,6 @@ function agentViewBlocks(messages) {
     }
   }
   return blocks;
-}
-
-// ── A 项(2026-09-11):子代理逐条用量与归属 ────────────────────────────────
-// 契约:`.devflow/INTERFACE-20260911-pricing.md` §10.1。子代理的【真】model 与 usage 只在
-// 自己的转写里(meta.json 的 model 是别名如 "opus",不可用于计价),故逐转写只取
-// message.model / message.usage / timestamp 三样,不把整条消息留在内存。
-// 结果只读、不改任何既有字段;读不到就少一条,绝不摊派、绝不猜。
-const SUBAGENT_USAGE_CACHE_MAX = 24;
-const subagentUsageCache = new Map();   // `<projectHash>/<sid>` → { sig, agents }
-
-/** 列出 `subagents/`(含 workflows/wf_*)下的子代理转写;同时算出目录的 stat 签名。 */
-async function listSubagentTranscripts(dir) {
-  const files = [];      // { filePath, metaPath, runId }
-  let count = 0;
-  let mtimeSum = 0;
-  const pushDir = async (d, runId) => {
-    let entries;
-    try { entries = await readdir(d, { withFileTypes: true }); } catch { return; }
-    for (const e of entries.slice().sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      if (!e.isFile() || !e.name.startsWith('agent-') || !e.name.endsWith('.jsonl')) continue;
-      const filePath = join(d, e.name);
-      try {
-        const s = await stat(filePath);
-        count += 1;
-        mtimeSum += s.mtimeMs;
-      } catch { continue; }
-      files.push({ filePath, metaPath: join(d, `${e.name.slice(0, -'.jsonl'.length)}.meta.json`), runId });
-    }
-  };
-  await pushDir(dir, null);
-  let wfEntries;
-  try { wfEntries = await readdir(join(dir, 'workflows'), { withFileTypes: true }); } catch { wfEntries = []; }
-  for (const wf of wfEntries.slice().sort((a, b) => (a.name < b.name ? -1 : 1))) {
-    if (!wf.isDirectory() || !wf.name.startsWith('wf_')) continue;
-    await pushDir(join(dir, 'workflows', wf.name), wf.name);
-  }
-  return { files, sig: `${count}:${Math.round(mtimeSum)}` };
-}
-
-/**
- * 读一条子代理转写里计价需要的三样东西。
- * usage 的去重口径与回合 usageCalls **逐字相同**(§3.4):按 message.id 去重、首次出现为准、
- * 全零 usage 不计;两档 TTL 分项按同一口径各自汇总,顶层量与分项互不相加。
- * 返回 null = 这条读不出来(调用方跳过)。
- */
-async function readAgentUsage(filePath) {
-  const calls = new Map();     // message.id → { at, usage }
-  let model = null;
-  let timestamp = null;
-  try {
-    await streamJsonl(filePath, (rec) => {
-      if (rec?.type !== 'assistant') return;
-      if (!timestamp && typeof rec.timestamp === 'string' && rec.timestamp) timestamp = rec.timestamp;
-      const message = rec.message;
-      if (!message || typeof message !== 'object') return;
-      // 真 model:跳过 `<synthetic>` 伪模型(compact 摘要/错误占位,同 turn.model 的过滤口径)。
-      if (!model && message.model && !/^</.test(message.model)) model = message.model;
-      const usage = message.usage;
-      if (!usage || typeof usage !== 'object') return;
-      const mid = message.id || rec.uuid;
-      if (!mid || calls.has(mid)) return;
-      const nonZero = (usage.input_tokens || 0) + (usage.output_tokens || 0)
-        + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0) > 0;
-      if (!nonZero) return;
-      calls.set(mid, { at: rec.timestamp || null, usage, model: realModelName(message.model) }); // r200:每次调用记下自己的模型
-    });
-  } catch { return null; }
-  if (!model && calls.size === 0) return null;   // model 与 usage 都读不到 → 不值得进 agents[]
-  const agg = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
-  const usageCalls = [];
-  let sum5m = 0;
-  let sum1h = 0;
-  for (const entry of calls.values()) {
-    const u = entry.usage;
-    agg.input_tokens += u.input_tokens || 0;
-    agg.output_tokens += u.output_tokens || 0;
-    agg.cache_read_input_tokens += u.cache_read_input_tokens || 0;
-    agg.cache_creation_input_tokens += u.cache_creation_input_tokens || 0;
-    const w5 = u.cache_creation?.ephemeral_5m_input_tokens || 0;
-    const w1 = u.cache_creation?.ephemeral_1h_input_tokens || 0;
-    sum5m += w5;
-    sum1h += w1;
-    usageCalls.push(entry.model ? { at: entry.at, usage: u, model: entry.model } : { at: entry.at, usage: u }); // r200:前端按实际模型分段计价
-  }
-  if (sum5m + sum1h > 0) agg.cache_creation = { ephemeral_5m_input_tokens: sum5m, ephemeral_1h_input_tokens: sum1h };
-  return { model, timestamp, usage: agg, usageCalls };
-}
-
-/**
- * 读某个会话的全部子代理用量(逐条:身份 + 真 model + 聚合 usage + 逐调用 usageCalls)。
- * 只是"读到什么",不做归属 —— 归属要配对母 jsonl 的 tool_use.id,在 getSessionMessages
- * 内做(见 attachSubagentUsage)。进程内按 subagents 目录的 stat 签名缓存(文件数 + mtimeMs
- * 之和,递归含 workflows/wf_*),不写磁盘。
- *
- * ⚠️ 安全边界(2026-09-12 后台扫描告警核查为误报,此处显式写明依赖):
- * 本函数**直接拼接** projectHash / sid 进文件路径、**自身不做任何校验** —— 安全性依赖
- * 调用链上游的 safeId(拒含 `/`、`\`、`..`、`\0` 的串,见 routes/sessions.js:17)。
- * 当前唯一调用点就是本文件的 getSessionMessages,而它仅有的两个 HTTP 入口
- * (routes/sessions.js:457-460 与 :893)都在进入前校验过 projectHash 与 sessionId。
- * **若将来新增调用点,必须自行先过 safeId**,否则会打开任意文件读取。
- */
-async function readSessionSubagentUsage(projectHash, sid) {
-  const dir = join(PROJECTS_DIR, projectHash, sid, 'subagents');
-  const listed = await listSubagentTranscripts(dir);
-  if (!listed.files.length) return [];
-  const key = `${projectHash}/${sid}`;
-  const cached = subagentUsageCache.get(key);
-  if (cached && cached.sig === listed.sig) return cached.agents;
-  const agents = [];
-  for (const file of listed.files) {
-    try {
-      const usage = await readAgentUsage(file.filePath);
-      if (!usage) continue;
-      const meta = await readAgentMeta(file.metaPath);
-      agents.push({
-        agentSessionId: basename(file.filePath).replace('.jsonl', ''),
-        agentType: meta.agentType,
-        toolUseId: meta.toolUseId,
-        runId: file.runId,
-        ...usage,
-      });
-    } catch { /* 单条读失败只跳过它(契约:无错误码、其余照常) */ }
-  }
-  subagentUsageCache.set(key, { sig: listed.sig, agents });
-  // 上限保护:历史会话 + 面板轮询会各自累积 —— 只留最近用到的若干个会话。
-  while (subagentUsageCache.size > SUBAGENT_USAGE_CACHE_MAX) {
-    subagentUsageCache.delete(subagentUsageCache.keys().next().value);
-  }
-  return agents;
-}
-
-/** 路径段安全(与 routes/sessions.js 的 safeId 同款判据;那份在 routes 层,本模块不能反向 import)。 */
-function pathSegSafe(s) {
-  return typeof s === 'string' && !!s
-    && !s.includes('/') && !s.includes('\\') && !s.includes('..') && !s.includes('\0');
-}
-
-/**
- * 一条转写 → agents[] 同形状条目(读不到用量就 null)。
- * 比历史路径多一道闸:连一条非零 usage 都没有(文件刚建/正在 flush)也不发 —— 历史那边
- * 是"回合已结束、账就该齐了",这里发早了在卡片上画一个 $0.00 比不画更坏(宁缺勿假)。
- */
-async function agentEntryFromTranscript(filePath, metaPath, fallbackToolUseId) {
-  const usage = await readAgentUsage(filePath);
-  if (!usage || !usage.usageCalls?.length) return null;
-  const meta = await readAgentMeta(metaPath);
-  return {
-    agentSessionId: basename(filePath).replace('.jsonl', ''),
-    agentType: meta.agentType,
-    // 归属键取调用方给的(它才是卡片键);meta 只是兜底。
-    toolUseId: fallbackToolUseId || meta.toolUseId,
-    ...usage,
-  };
-}
-
-/**
- * 直播补齐(2026-09-13):子代理【完成那一刻】只读它那一条转写,给完成事件附金额用。
- * 与 readSessionSubagentUsage 的区别是**不扫全盘**:先按 taskId 直连 `agent-<task-id>.jsonl`
- * (CLI 的 task_id 与转写文件名同名,实测同名率 ~100%),命不中才扫 subagents/*.meta.json
- * (+ workflows/wf_*)按 toolUseId 找(88 条实测 6 ms;转写读取最坏样本 3.86 MB / 13 ms)。
- * 返回形状与 attachSubagentUsage 产出的 agents[] 逐字段相同 —— 同一形状 = 同一计价口径。
- * 读不到 usage(文件刚建/正在 flush)→ null,调用方据此不下发(宁缺勿假)。
- *
- * ⚠️ 安全边界:与 readSessionSubagentUsage 同款,自行过 pathSegSafe —— 调用方是
- * routes/chat.js 的消息泵(入参来自 slot.cwd 派生 + CLI 事件),不是 HTTP 查询串。
- */
-export async function readSubagentUsageForToolUse(projectHash, sid, { toolUseId, taskId } = {}) {
-  if (!pathSegSafe(projectHash) || !pathSegSafe(sid)) return null;
-  if (!toolUseId && !taskId) return null;
-  const dir = join(PROJECTS_DIR, projectHash, sid, 'subagents');
-  if (typeof taskId === 'string' && /^[A-Za-z0-9_-]+$/.test(taskId)) {
-    const filePath = join(dir, `agent-${taskId}.jsonl`);
-    if (existsSync(filePath)) {
-      return await agentEntryFromTranscript(filePath, join(dir, `agent-${taskId}.meta.json`), toolUseId);
-    }
-  }
-  const listed = await listSubagentTranscripts(dir);
-  if (!listed.files.length) return null;
-  for (const file of listed.files) {
-    const meta = await readAgentMeta(file.metaPath);
-    if (meta.toolUseId && meta.toolUseId === toolUseId) {
-      return await agentEntryFromTranscript(file.filePath, file.metaPath, toolUseId);
-    }
-  }
-  return null;
-}
-
-function parseStamp(value) {
-  if (typeof value !== 'string' && typeof value !== 'number') return null;
-  const t = typeof value === 'number' ? value : Date.parse(value);
-  return Number.isFinite(t) ? t : null;
-}
-
-/**
- * workflow 子代理的归属:runId → 母 jsonl 里那次 Workflow 调用的 tool_use.id。
- * 同一 runId 可能出现在多条 tool_result 上(resume/续跑)—— 唯一命中直接归属;多命中按
- * 时间戳就近:取「承载记录时刻 ≤ 该 agent 首条记录时刻」的最后一次调用,agent 早于全部
- * 调用则取最早一次。分不开(agent 无时间戳 / 承载记录无时间戳 / 选中的那次与别的调用
- * **时间戳相同**,契约 §10.1「多命中且时间戳分不开」)→ null,宁缺勿猜。
- */
-function pickWorkflowCall(calls, agentTimestamp) {
-  if (!calls || !calls.length) return null;
-  if (calls.length === 1) return calls[0];
-  const at = parseStamp(agentTimestamp);
-  if (at == null) return null;
-  let chosen = null;
-  for (const call of calls) {
-    const callAt = parseStamp(call.at);
-    if (callAt == null) return null;
-    if (callAt <= at) chosen = call;
-  }
-  const pick = chosen || calls[0];
-  // 选中的那次时刻与别的调用完全相同 → 先后无从区分(再往下比只是文件记录顺序的产物,
-  // 不是时间证据)→ 不可归属。金额宁可空着,也不能挂到猜出来的那一次上。
-  const pickAt = parseStamp(pick.at);
-  if (calls.filter((call) => parseStamp(call.at) === pickAt).length > 1) return null;
-  return pick;
-}
-
-/**
- * 把子代理用量挂到各自回合的 `subUsage.agents[]` 上(契约 §10.1)。
- * 归属键两条:普通子代理 = meta.json 的 toolUseId;workflow 子代理 = runId → 那次
- * Workflow 调用的 tool_use.id。都归不到 → 不进任何 agents[](不摊派、不猜)。
- * 顺序 = 该轮内 toolUseId 首次出现顺序;同一 toolUseId 多个 agent 按转写文件名升序
- * (扫描顺序已保证)。本轮一条都没有 → subUsage 键不出现。
- */
-function attachSubagentUsage(messages, agents, workflowCalls) {
-  if (!agents.length) return;
-  const turnOf = new Map();      // toolUseId → 该 tool_use 所属的 turn
-  for (const m of messages) {
-    if (m.type !== 'turn' || !Array.isArray(m.toolCalls)) continue;
-    for (const tc of m.toolCalls) if (tc?.id && !turnOf.has(tc.id)) turnOf.set(tc.id, m);
-  }
-  const byTurn = new Map();      // turn → Map(toolUseId → agent[])
-  for (const agent of agents) {
-    const call = agent.runId
-      ? pickWorkflowCall(workflowCalls.get(agent.runId), agent.timestamp)
-      : (agent.toolUseId ? { toolUseId: agent.toolUseId } : null);
-    if (!call) continue;
-    const turn = turnOf.get(call.toolUseId);
-    if (!turn) continue;
-    let grouped = byTurn.get(turn);
-    if (!grouped) { grouped = new Map(); byTurn.set(turn, grouped); }
-    if (!grouped.has(call.toolUseId)) grouped.set(call.toolUseId, []);
-    grouped.get(call.toolUseId).push(agent);
-  }
-  for (const [turn, grouped] of byTurn) {
-    const order = new Map();
-    (turn.toolCalls || []).forEach((tc, i) => { if (tc?.id && !order.has(tc.id)) order.set(tc.id, i); });
-    const ids = [...grouped.keys()].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
-    const list = [];
-    for (const id of ids) {
-      for (const agent of grouped.get(id)) {
-        list.push({
-          agentSessionId: agent.agentSessionId,
-          toolUseId: id,
-          agentType: agent.agentType,
-          model: agent.model,
-          timestamp: agent.timestamp,
-          usage: agent.usage,
-          usageCalls: agent.usageCalls,
-        });
-      }
-    }
-    if (list.length) turn.subUsage = { agents: list };
-  }
-}
-
-
-// r200:尖括号开头的伪模型名(<synthetic> 等,报错占位 / 压缩摘要)不算一个模型。
-function realModelName(model) {
-  return typeof model === 'string' && model !== '' && !model.startsWith('<') ? model : null;
 }
 
 // r200:子代理在历史列表里的模型。首 = 画像前 40 条里第一条助手记录的模型(新版命令行的子代理转写第 17 条
