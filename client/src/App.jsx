@@ -235,6 +235,7 @@ import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isC
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
 import { addRetained, applyRetained, cutTsOf, dropRetained, dropRetainedSince, listRetainedFor, makeRetainedEntry, migrateRetained, removeRetained, retainKindOf, retainedVersion, subscribeRetained } from './utils/retainedCopies.js';
 import { dropStaleUserEchoes } from './utils/userEcho.js';
+import { dropLiveCompactCoveredByHistory } from './utils/liveCompactDivider.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
@@ -4669,7 +4670,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // r182:这是叠加留存副本之前的本地段;叠加后的 renderChat 定义在 mountedMessages 旁边。
   const renderChatBase = useMemo(() => {
     const kept = visibleChat.filter((m) => !localTurnTakenOver(m, renderedTurnIdentity));
-    return dropStaleUserEchoes(kept, finalizedMessages, msgTextOf);
+    // r208:已显示的历史里已有本轮那次压缩的分隔线(没有快照的重接 / 截断作废时历史是展示来源,重读会带进来),
+    // 本地直播那条不再画;历史还没有时照画。判据见 utils/liveCompactDivider.js。
+    return dropStaleUserEchoes(dropLiveCompactCoveredByHistory(kept, finalizedMessages), finalizedMessages, msgTextOf);
   }, [visibleChat, renderedTurnIdentity, finalizedMessages]);
   // Transient toast for "auto-stripped thinking blocks after provider switch".
   // { text, expires } — set by handleSend's pre-flight check, auto-cleared.
@@ -5540,6 +5543,10 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 靠 isStreaming 猜忙不忙 —— isStreaming 说的是"本条 turn 还在产出",而入队判据是
     // "会话忙不忙"(下面那道门读 streamingRef/backgroundPidRef),两者并不等价。
     const { reattachPid, appendSystemPrompt, hiddenUserMessage = false, meta, onEnqueueFailure, onQueued } = opts;
+    // r208:发起这条消息的会话此刻显示的消息(数组引用),函数一进来、任何等待之前同步取。下面「这一轮开始前已有几轮回复」
+    // (turnsBefore)、历史模型(_hist)、入队快照(_queueOwner)都从它取:它们在剥思考块 / 拍文件快照的等待之后,那时用户可能
+    // 已把窗格切到别的会话,现读窗格会拿到那个会话的消息。剥思考块只去掉思考内容、不改轮数与模型,用等待前的这份结果相同。
+    const originMessagesAtStart = getLocalMessages();
     // 自动标题的素材(下面每一处 POST /api/chat/title 的触发条件与 firstUser 都用它,不直接用 prompt):
     // 隐藏发送(点卡片处理跨会话消息、工具重做、队列隐藏条目及它们的自动重发)不是用户写的话,不拿去起标题;用户手打的它就是 prompt。
     const autoTitlePrompt = xsAutoTitlePrompt(prompt, opts);
@@ -5949,8 +5956,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // The finally uses this (not a text match on the prompt) to detect when THIS
     // round's reply has landed: a repeated prompt (e.g. "继续") would make a
     // text-based check match a PRIOR round's turn and clear the new reply early.
+    // r208:按发送开头那份快照数(originMessagesAtStart,见 handleSend 开头),不在上面剥思考块的等待之后现读窗格。
     let turnsBefore = 0;
-    try { turnsBefore = (getLocalMessages() || []).filter((m) => m.type === 'turn').length; } catch {}
+    try { turnsBefore = (originMessagesAtStart || []).filter((m) => m.type === 'turn').length; } catch {}
     // 提升到 try 外:用户中途按停止(AbortError)时,catch 需要读到已流式累积的内容
     // 才能把它保留成气泡,而不是连同用户消息一起丢弃(#6)。
     let accumulatedText = '';
@@ -6111,10 +6119,12 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 仍被 epoch 判死(徽章显示 sonnet 实际发全局默认)。
       const _officialM = (_stM.currentProvider?.providerHint || 'anthropic') === 'anthropic';
       const _pin = _stM.modelBySession[sessionQueueKey];
-      const _hist = resolveHistModel(getLocalMessages(), _stM.providerEpoch || 0, _officialM);
+      // r208:按发送开头那份消息快照算(originMessagesAtStart,见 handleSend 开头)——上面拍文件快照的等待(含大目录询问)期间
+      // 用户可能已把窗格切到别的会话,现读窗格会按那个会话的历史模型发出。下面的 _queueOwner 同理。
+      const _hist = resolveHistModel(originMessagesAtStart, _stM.providerEpoch || 0, _officialM);
       // r196 F1:入队快照在这里就取好(与 _hist 同一时刻、下面几段等待之前);409 退回排队时用它。等待期间用户可能已切到
       // 别的会话,那时窗格显示的消息不属于发起的会话,不能拿来当它的快照(后台发出会用错模型)。
-      const _queueOwner = queueOwnerSnapshot(chatCwdFor(selectedSession, selectedProject), selectedSession?.projectHash, getLocalMessages());
+      const _queueOwner = queueOwnerSnapshot(chatCwdFor(selectedSession, selectedProject), selectedSession?.projectHash, originMessagesAtStart);
       // r196:pin → 历史模型 → 全局默认的解析(resolveSendModel)、1M 补位、思考强度的能力门控都在 buildChatRequestBody 里做
       // (后台排空共用);这里只按改前的时刻取输入。
       // 1M 标记兜底(与徽章显示解析同一规则):重装丢 pin 后,发送也要带回 [1m],
@@ -6743,9 +6753,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // 用户当场看到上下文被压缩,不必等回合结束 refetch。回合结束 chatMessages 被清空,
           // 换成 jsonl 里的 isCompactSummary divider(同一条),不会重复。(#5)
           if (event.type === 'system' && event.subtype === 'compact_boundary') {
+            // r208:记下这一轮的起点(roundStartTs)。渲染时已显示的历史里有不早于它的压缩分隔线(同一次压缩被重读进来)就不画这条
+            // (renderChatBase / utils/liveCompactDivider.js)。正常发送 / 带快照的重接:起流时刻。没有快照的重接以历史为展示来源,
+            // 起点取历史里这一轮提示词的时间 —— 重放可能把重接之前那次压缩再送一遍,重接那一刻晚于它;取不到再用起流时刻。
+            const liveCompactPromptTs = unseededReattach() && paneStillOn(sessionQueueKey, streamSid) ? lastPromptTs(getLocalMessages()) : 0;
+            const liveCompactRoundStartTs = liveCompactPromptTs || turnStreamStart;
             setChatMessages((prev) => {
               if (prev.some((m) => m.type === 'compact' && m._live)) return prev;
-              return [...prev, { type: 'compact', uuid: 'live-compact', _live: true, ownerKey: streamSid || sessionQueueKey }];
+              return [...prev, { type: 'compact', uuid: 'live-compact', _live: true, ownerKey: streamSid || sessionQueueKey, roundStartTs: liveCompactRoundStartTs }];
             });
             // U8:压缩边界后,压缩前写入的即时 usage 已是旧值,清掉 —— 否则它优先级
             // 高于 jsonl 的 lastUsage,徽章在压缩后纹丝不动(用户报告)。

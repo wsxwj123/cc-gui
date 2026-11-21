@@ -410,3 +410,218 @@ test('V10 新会话第一条初始化慢(少于 15 秒)时排第二条 → 立�
 async function queueMessageCountOrSent(page, text) {
   return receivedAll().some((r) => r.text.includes(text));
 }
+
+// ============================================================ r208:W1–W4(发出时切走用谁的模型) / C1–C4(压缩分隔线只一条) ============================================================
+// 会话分配(下标取自 POOL):W1 A=22 Q=23;W2 A=24 Q=25;W3 A=26 Q=27;W4 A=28;C1 A=30;C2 A=32 Q=33;C3 A=34;C4 A=36(带 2 次更早的压缩)。
+// 下标 >= 22 的奇数下标(Q 类)历史回复里的模型是「乙」,其余是「甲」(见 fixtures.mjs)。
+import { MODEL_JIA, MODEL_YI } from './helpers/fixtures.mjs';
+import { compactNow } from './helpers/ui.mjs';
+
+/** 前提自证:A 与 Q 都没钉模型,A 的徽章显示甲、Q 的显示乙,甲 ≠ 乙。返回 [甲, 乙] 的徽章文字。 */
+async function proveBadges(page, A, Q, tag) {
+  await switchTo(page, A.mark); await page.waitForTimeout(700);
+  const jia = await topModel(page);
+  await switchTo(page, Q.mark); await page.waitForTimeout(700);
+  const yi = await topModel(page);
+  expect(jia.length, `${tag}:前提:A 的模型徽章应有内容`).toBeGreaterThan(0);
+  expect(yi, `${tag}:前提:A 的徽章(甲=${jia})与 Q 的徽章(乙=${yi})应不同,做不到请上报,不要改判据`).not.toBe(jia);
+  return [jia, yi];
+}
+/** 把第一次 POST /api/checkpoints 拖住 ms 毫秒再放行;返回计数对象(hit = 已到达的快照请求数)。 */
+async function holdFirstCheckpoint(page, ms = 3_000) {
+  const st = { hit: 0 };
+  await page.route((url) => url.pathname === '/api/checkpoints', async (route) => {
+    if (route.request().method() !== 'POST') return route.continue();
+    st.hit += 1;
+    if (st.hit === 1) await sleep(ms);
+    return route.continue();
+  });
+  return st;
+}
+/** 在 A 里发 text,等快照请求被拖住,然后立刻把窗格切到 Q。 */
+async function sendThenSwitchAway(page, A, Q, text, st) {
+  await switchTo(page, A.mark);
+  await sendPrompt(page, text);
+  expect(await waitUntil(() => st.hit >= 1, { timeout: 10_000, every: 50 }), `${A.mark} 发出后页面应先发 POST /api/checkpoints(拍文件快照)`).toBeTruthy();
+  await switchTo(page, Q.mark);
+}
+const bodyOf = (rec, text) => (rec.withText(text)[0] || {}).body || null;
+
+test('W1 [复现] A 发出后快照被拖住 3 秒、期间切到 Q:A 这条的请求体 sessionId=A、model=甲;A 会话文件里 1 次,Q 里 0 次', async ({ page }) => {
+  const A = POOL[22]; const Q = POOL[23];
+  const p = msg('W1', 'A 发出后切走', A.mark);
+  await open(page);
+  const rec = recordChat(page);
+  await proveBadges(page, A, Q, 'W1');
+  const st = await holdFirstCheckpoint(page);
+  setAuto(A.sid, 800);
+  await sendThenSwitchAway(page, A, Q, p, st);
+  expect(await waitUntil(() => rec.withText(p).length >= 1, { timeout: 20_000 }), 'W1:快照放行后,这条应发出 POST /api/chat').toBeTruthy();
+  const b = bodyOf(rec, p);
+  expect(b.sessionId, 'W1:请求体 sessionId 应是 A').toBe(A.sid);
+  expect(b.model, `W1:请求体 model 应是 A 历史回复里的模型(甲=${MODEL_JIA}),不是 Q 的(乙=${MODEL_YI})`).toBe(MODEL_JIA);
+  await waitUntil(() => userLineCount(A.sid, p) >= 1, { timeout: 20_000 });
+  await sleep(2_000);
+  expect(userLineCount(A.sid, p), 'W1:A 的会话文件里这条恰好 1 次').toBe(1);
+  expect(userLineCount(Q.sid, p) + transcriptMentions(Q.sid, p), 'W1:Q 的会话文件里不应有这条').toBe(0);
+});
+
+test('W2 [复现] 同 W1 但第一次请求被回 409(会话正忙)、窗格一直停在 Q:自动发出(queuedDrain)的请求体 sessionId=A、model=甲;A 会话文件里最终 1 次,Q 里 0 次', async ({ page }) => {
+  const A = POOL[24]; const Q = POOL[25];
+  const p = msg('W2', '被 409 退回排队栏', A.mark);
+  await open(page);
+  const rec = recordChat(page);
+  await proveBadges(page, A, Q, 'W2');
+  const st = await holdFirstCheckpoint(page);
+  let busyAnswered = 0;
+  await routeChat(page, async (route) => {
+    const b = route.request().postDataJSON();
+    if (b && !b.queuedDrain && String(b.prompt || '').includes(p) && busyAnswered === 0) {
+      busyAnswered += 1;
+      await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ ok: false, code: 'CHAT_SESSION_BUSY', error: '会话忙', reason: 'session-turn-running', pid: process.pid }) });
+      return;
+    }
+    await route.continue();
+  });
+  setAuto(A.sid, 800);
+  await sendThenSwitchAway(page, A, Q, p, st);
+  expect(await waitUntil(() => rec.withText(p).some((x) => x.status === 409), { timeout: 20_000 }), 'W2:第一次请求应被回 409').toBeTruthy();
+  const drains = await waitDrains(rec, 1, 25_000);
+  expect(drains.length, `W2:被退回排队栏后应自动发出(带 queuedDrain 的请求 ${drains.length} 个)`).toBeGreaterThanOrEqual(1);
+  expect(await paneKeys(page), 'W2:窗格应一直停在 Q').toEqual([Q.sid]);
+  expect(drains[0].body.sessionId, 'W2:自动发出请求体 sessionId 应是 A').toBe(A.sid);
+  expect(drains[0].body.model, `W2:自动发出请求体 model 应是 A 的(甲=${MODEL_JIA}),不是 Q 的(乙=${MODEL_YI})`).toBe(MODEL_JIA);
+  await waitUntil(() => userLineCount(A.sid, p) >= 1, { timeout: 20_000 });
+  await sleep(2_000);
+  expect(userLineCount(A.sid, p), 'W2:A 的会话文件里这条最终恰好 1 次').toBe(1);
+  expect(userLineCount(Q.sid, p) + transcriptMentions(Q.sid, p), 'W2:Q 的会话文件里不应有这条').toBe(0);
+});
+
+test('W3 [回归] A 钉了模型丙(haiku)、发出后快照被拖住期间切到 Q:请求体 model 是丙,不是甲也不是乙', async ({ page }) => {
+  const A = POOL[26]; const Q = POOL[27];
+  const p = msg('W3', 'A 钉了模型', A.mark);
+  await open(page);
+  const rec = recordChat(page);
+  const [jia, yi] = await proveBadges(page, A, Q, 'W3');
+  await switchTo(page, A.mark);
+  await selectModel(page, 'haiku');
+  const bing = await topModel(page);
+  expect(bing, `W3:前提:钉模型后 A 的徽章(丙=${bing})应与甲(${jia})、乙(${yi})都不同`).not.toBe(jia);
+  expect(bing, 'W3:前提:丙应不同于乙').not.toBe(yi);
+  const st = await holdFirstCheckpoint(page);
+  setAuto(A.sid, 800);
+  await sendThenSwitchAway(page, A, Q, p, st);
+  expect(await waitUntil(() => rec.withText(p).length >= 1, { timeout: 20_000 }), 'W3:快照放行后这条应发出').toBeTruthy();
+  const b = bodyOf(rec, p);
+  expect(b.sessionId, 'W3:请求体 sessionId 应是 A').toBe(A.sid);
+  expect(b.model, 'W3:请求体 model 应是钉的模型丙(haiku)').toMatch(/haiku/i);
+  expect([MODEL_JIA, MODEL_YI], 'W3:请求体 model 不应是甲或乙').not.toContain(b.model);
+  await waitUntil(() => userLineCount(A.sid, p) >= 1, { timeout: 20_000 });
+  expect(userLineCount(Q.sid, p) + transcriptMentions(Q.sid, p), 'W3:Q 里不应有这条').toBe(0);
+});
+
+test('W4 [回归] A 没钉模型、不切走:请求体 model=甲;这一轮结束后 A 里这条用户消息 1 个、回复 1 个,排队栏为空', async ({ page }) => {
+  const A = POOL[28];
+  const p = msg('W4', '不切走', A.mark);
+  await open(page);
+  const rec = recordChat(page);
+  const st = await holdFirstCheckpoint(page, 500);
+  setAuto(A.sid, 800);
+  await switchTo(page, A.mark);
+  await sendPrompt(page, p);
+  expect(await waitUntil(() => st.hit >= 1, { timeout: 10_000, every: 50 }), 'W4:发出后页面应先发 POST /api/checkpoints').toBeTruthy();
+  expect(await waitUntil(() => rec.withText(p).length >= 1, { timeout: 20_000 }), 'W4:这条应发出').toBeTruthy();
+  const b = bodyOf(rec, p);
+  expect(b.sessionId, 'W4:请求体 sessionId 应是 A').toBe(A.sid);
+  expect(b.model, `W4:A 没钉模型,请求体 model 应是 A 历史回复里的模型(甲=${MODEL_JIA})`).toBe(MODEL_JIA);
+  expect(await waitUntil(() => endOfRound(A.sid, p), { timeout: 30_000 }), 'W4:这一轮应结束').toBeTruthy();
+  const reply = `R196-FINAL ${A.sid.slice(0, 8)}`;
+  await expect.poll(() => leafCount(page, reply), { message: 'W4:这一轮的回复(收尾那块)应恰好显示 1 个', timeout: 20_000 }).toBe(1);
+  await expect.poll(() => userBubbleCount(page, p), { message: 'W4:这条用户消息应恰好显示 1 个', timeout: 15_000 }).toBe(1);
+  await sleep(2_000);
+  expect(await userBubbleCount(page, p), 'W4:隔 2 秒后用户消息仍恰好 1 个').toBe(1);
+  expect(await leafCount(page, reply), 'W4:隔 2 秒后回复仍恰好 1 个').toBe(1);
+  expect(await queueItems(page).count(), 'W4:排队栏应为空').toBe(0);
+  expect(userLineCount(A.sid, p), 'W4:A 的会话文件里这条恰好 1 次').toBe(1);
+});
+
+/** 消息区里「文字含 needle 且没有更内层的元素也含它」的元素个数(避免嵌套元素重复计数)。 */
+const leafCount = (page, needle) => page.evaluate((n) => {
+  const list = document.querySelector('[data-cgui="message-list"]');
+  if (!list) return -1;
+  return [...list.querySelectorAll('*')].filter((e) => (e.textContent || '').includes(n) && ![...e.children].some((c) => (c.textContent || '').includes(n))).length;
+}, needle);
+
+/** 消息区里整段文字恰好是「上下文已压缩」的分隔线条数;userText 给了就只数该用户消息之后的,null 数整页。-2 = 找不到那条用户消息。 */
+const dividers = (page, userText) => page.evaluate(({ userText: ut }) => {
+  const norm = (e) => (e.textContent || '').replace(/\s+/g, ' ').trim();
+  const list = document.querySelector('[data-cgui="message-list"]');
+  if (!list) return -1;
+  const divs = [...list.querySelectorAll('*')].filter((e) => norm(e) === '上下文已压缩' && ![...e.children].some((c) => norm(c) === '上下文已压缩'));
+  if (ut === null) return divs.length;
+  const us = [...list.querySelectorAll('[data-cgui="message-user"]')].filter((b) => (b.textContent || '').includes(ut));
+  if (!us.length) return -2;
+  const u = us[us.length - 1];
+  return divs.filter((d) => !u.contains(d) && (u.compareDocumentPosition(d) & Node.DOCUMENT_POSITION_FOLLOWING)).length;
+}, { userText });
+/** 分隔线条数先等到 n,再保持 3 秒每 0.4 秒复查一次都仍是 n(抓「后来又多出一条 / 少一条」)。 */
+async function expectDividers(page, userText, n, label) {
+  await expect.poll(() => dividers(page, userText), { message: `${label}:这一轮用户消息之后的压缩分隔线应恰好 ${n} 条`, timeout: 15_000, intervals: [250] }).toBe(n);
+  for (let i = 0; i < 8; i += 1) { await sleep(400); expect(await dividers(page, userText), `${label}:保持 3 秒内分隔线应一直是 ${n} 条(第 ${i + 1} 次复查)`).toBe(n); }
+}
+/** 回合在跑且页面已显示它(第一块文字 + 可用的停止键)。 */
+async function expectRunningShown(page, A, p1, label) {
+  await expect(page.getByText(`R196-CHUNK1 ${A.sid.slice(0, 8)} 收到:${p1}`, { exact: false }).first(), `${label}:页面应显示这一轮正在进行`).toBeVisible({ timeout: 30_000 });
+  await expect(stopBtn(page).first(), `${label}:这一轮还在跑,停止键应可用`).toBeEnabled({ timeout: 15_000 });
+}
+
+test('C1 [复现] A 有一轮在跑、刷新页面后进入 A(重新接上),命令行此时压缩一次:在跑时分隔线恰好 1 条,结束后仍恰好 1 条', async ({ page }) => {
+  const A = POOL[30];
+  const p1 = msg('C1', '一轮进行中(刷新)', A.mark);
+  await open(page);
+  await startRunning(page, A, p1);
+  await reloadApp(page);
+  await openSessionBySearch(page, A.mark);
+  await expectRunningShown(page, A, p1, 'C1');
+  compactNow(A.sid);
+  await expectDividers(page, p1, 1, 'C1(这一轮还在跑)');
+  await finishTurn(A.sid);
+  await expect.poll(() => phaseOf(A.sid), { message: 'C1:这一轮应结束' }).toBe('final');
+  await expectDividers(page, p1, 1, 'C1(这一轮结束后)');
+});
+
+test('C2 [回归] A 有一轮在跑、切到 Q 期间命令行压缩一次、再切回 A:在跑时分隔线恰好 1 条,结束后仍恰好 1 条', async ({ page }) => {
+  const A = POOL[32]; const Q = POOL[33];
+  const p1 = msg('C2', '一轮进行中(切走再切回)', A.mark);
+  await open(page);
+  await startRunning(page, A, p1);
+  await switchTo(page, Q.mark);
+  compactNow(A.sid);                        // 切走期间压缩
+  await sleep(1_500);
+  await switchTo(page, A.mark);
+  await expectRunningShown(page, A, p1, 'C2');
+  await expectDividers(page, p1, 1, 'C2(这一轮还在跑)');
+  await finishTurn(A.sid);
+  await expect.poll(() => phaseOf(A.sid), { message: 'C2:这一轮应结束' }).toBe('final');
+  await expectDividers(page, p1, 1, 'C2(这一轮结束后)');
+});
+
+test('C3 [回归] 一直看着 A,这一轮中途压缩一次:在跑时分隔线已出现且恰好 1 条,结束后仍恰好 1 条', async ({ page }) => {
+  const A = POOL[34];
+  const p1 = msg('C3', '一直看着', A.mark);
+  await open(page);
+  await startRunning(page, A, p1);
+  compactNow(A.sid);
+  await expectDividers(page, p1, 1, 'C3(这一轮还在跑)');
+  await finishTurn(A.sid);
+  await expect.poll(() => phaseOf(A.sid), { message: 'C3:这一轮应结束' }).toBe('final');
+  await expectDividers(page, p1, 1, 'C3(这一轮结束后)');
+});
+
+test('C4 [回归] A 的会话记录里有 2 次更早的压缩:打开 A,整页压缩分隔线恰好 2 条', async ({ page }) => {
+  const A = POOL[36];
+  await open(page);
+  await switchTo(page, A.mark);
+  await expect(page.locator('[data-cgui="message-list"]').getByText(`${A.mark} 压缩后的第2条回复。`).first(), 'C4:A 的历史应已显示出来').toBeVisible({ timeout: 20_000 });
+  await expectDividers(page, null, 2, 'C4(打开 A)');
+});

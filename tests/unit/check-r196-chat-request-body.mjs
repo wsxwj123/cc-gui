@@ -282,7 +282,7 @@ for (const c of CASES) {
     'let permissionMode = useStore.getState().getPermissionModeFor(sessionQueueKey);',
     'if (gateThirdPartyAuto(permissionMode, _stAuto.autoAuditStatus, _stAuto.currentProvider?.providerHint).downgraded) {',
     'const _pin = _stM.modelBySession[sessionQueueKey];',
-    'const _hist = resolveHistModel(getLocalMessages(), _stM.providerEpoch || 0, _officialM);',
+    'const _hist = resolveHistModel(originMessagesAtStart, _stM.providerEpoch || 0, _officialM);', // r208:按发送开头那份消息快照算
     'const _c1m = selectedSession?.sessionId && _stM.context1mBySession?.[selectedSession.sessionId];',
     'const _effortRaw = useStore.getState().getEffortFor(sessionQueueKey);',
     'const _effortMeta = useStore.getState().modelEffortMeta;',

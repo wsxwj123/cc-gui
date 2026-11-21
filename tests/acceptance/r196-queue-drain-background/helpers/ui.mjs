@@ -171,6 +171,7 @@ export const clearGlobal = (name) => { try { fs.unlinkSync(path.join(CTL, name))
 export const releaseChunk = (sid) => fs.writeFileSync(rel(sid, '.chunk'), String(Date.now()));
 export const releaseDone = (sid) => fs.writeFileSync(rel(sid, '.done'), String(Date.now()));
 export const setScenario = (sid, steps) => fs.writeFileSync(rel(sid, '.scenario.json'), JSON.stringify({ steps }));
+export const compactNow = (sid) => fs.writeFileSync(rel(sid, '.compact'), String(Date.now()));
 export const finishBgTasks = (sid) => fs.writeFileSync(rel(sid, '.taskdone'), String(Date.now()));
 export const phaseOf = (sid) => { try { return fs.readFileSync(rel(sid, '.phase'), 'utf8').trim(); } catch { return null; } };
 export async function waitForPhase(sid, want, timeoutMs = 40_000) {

@@ -77,7 +77,7 @@ check('T1h 残余风险防线:官方下旧 provider 的模型仍由白名单挡�
   }), 's1'), 'fable');
 });
 check('T1i 发送链必须同口径:resolveHistModel 调用点要传官方标志', () => {
-  assert.match(app, /resolveHistModel\(\s*getLocalMessages\(\)[^;]*official/i,
+  assert.match(app, /resolveHistModel\(\s*originMessagesAtStart[^;]*official/i,
     'App.jsx 的发送侧 resolveHistModel 未传官方标志 → 显示放行、发送仍判死');
 });
 
