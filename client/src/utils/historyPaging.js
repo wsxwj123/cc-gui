@@ -154,3 +154,28 @@ export function isHistoryRequestCurrent(seqs, tab, sessionId, lane, seq) {
   const key = lane === 'older' ? 'older' : 'refresh';
   return rec[key] === seq;
 }
+
+// r207:本窗格分页账说「左边还有更早的页」(账不属于这个会话时按没有算 —— 不知道窗口时照原来的判法)。
+export function pagingHasOlder(paging, sessionId) {
+  return !!(sessionId && paging && paging.sessionId === sessionId && paging.hasMore);
+}
+
+/**
+ * r207:回合结束 peek 只取最后一页(带 limit)时,把页里的回合数换回「整份历史」的口径,与原来拉整份时同一判据
+ * (原判据:整份回合数 > 发送开头那份消息里的回合数)。
+ *   page / pageHasMore:这一页、它左边还有没有更早的;origin / originHasOlder:发送开头那份消息、它左边还有没有更早的页。
+ *   - 页左边没有更早的 = 页就是整份:原样数。
+ *   - 发送开头那份左边还有更早的页:整份里早于它的回合让原判据恒成立 → Infinity。
+ *   - 发送开头那份就是整份:页的第一条在它里面 → 它前面那段 + 页(= 整份);不在(这一轮新增的超过一页)
+ *     → 页里全是新内容,整份至少是「原有回合 + 页里的回合」。
+ */
+export function persistedTurnCount({ page, pageHasMore, origin, originHasOlder }) {
+  const turns = (list) => list.filter((m) => m?.type === 'turn').length;
+  const list = Array.isArray(page) ? page : [];
+  if (!pageHasMore) return turns(list);
+  if (originHasOlder) return Infinity;
+  const base = Array.isArray(origin) ? origin : [];
+  const firstKey = list.length ? historyMessageKey(list[0]) : null;
+  const at = firstKey ? base.findIndex((m) => historyMessageKey(m) === firstKey) : -1;
+  return (at >= 0 ? turns(base.slice(0, at)) : turns(base)) + turns(list);
+}

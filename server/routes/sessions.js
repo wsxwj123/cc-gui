@@ -33,6 +33,7 @@ import { claudeSpawn, cleanChildEnv, getActiveChatProcesses } from './chat.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { sessionTitleLinesAfter } from '../utils/session-title-carry.js';
 import { parseHistoryPaging } from '../utils/history-pagination.js';
+import { startHistoryReadDeadline } from '../utils/history-read-deadline.js';
 import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 import { broadcastSessionFileChange } from '../broadcast.js';
 import { mergeDraftBindingsBestEffort } from '../services/draft-session-bindings.js';
@@ -459,9 +460,8 @@ router.get('/sessions/:sessionId', async (req, res) => {
 // 响应追加 hasMore/beforeCursor/total,usageTotals 仍按全文件计算。
 // r151l 判官修正:响应再追加 historyStats(全量工具调用数/模型/按模型分时段用量),
 // 与分页窗口无关 —— 客户端会话徽章的费用/工具数/曾用模型据此按全量显示。
-const HISTORY_READ_TIMEOUT_MS = 15_000;
 router.get('/sessions/:sessionId/messages', async (req, res) => {
-  let timer;
+  let deadline = null;
   // r168:请求方断开(前端取消了被顶替的历史请求)就停手:不再读取解析、不再序列化写回,
   // 否则用户连切时每次点击留下的请求在后端排成长队,最新那次排在最后。用 res 的 'close'
   // 判断:正常写完也会触发,靠 writableFinished 区分;req 的 'close' 在请求读完时就会触发,
@@ -495,18 +495,21 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
     if (!paging.ok) {
       return res.status(400).json({ ok: false, code: 'HISTORY_INVALID_INPUT', error: paging.error });
     }
+    // r207:超时按进展算(规则见 utils/history-read-deadline.js):普通文件连续 15 秒没有进展才 504、
+    // 总时长 120 秒兜底;非普通文件维持 15 秒硬超时。504 的内容与时机之外的行为(停读、不写第二次)照旧。
     const timeout = new Promise((resolve) => {
-      timer = setTimeout(() => {
+      deadline = startHistoryReadDeadline(() => {
         timedOut = true;
         resolve({ timedOut: true });
         stopReading.abort();
-      }, HISTORY_READ_TIMEOUT_MS);
+      });
     });
     const result = await Promise.race([
       getSessionMessages(req.params.sessionId, projectHash, {
         limit: paging.limit,
         before: paging.before,
         signal: stopReading.signal,
+        onProgress: (event) => deadline?.progress(event),
       }),
       timeout,
     ]);
@@ -534,7 +537,7 @@ router.get('/sessions/:sessionId/messages', async (req, res) => {
     // 失败信封只给稳定 code 与短句:ENOENT 这类异常曾把服务器绝对路径回给调用方。
     res.status(500).json({ ok: false, code: 'HISTORY_READ_FAILED', error: '读取会话历史失败' });
   } finally {
-    clearTimeout(timer);
+    deadline?.clear();
   }
 });
 

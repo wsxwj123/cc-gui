@@ -1,4 +1,4 @@
-import { createReadStream } from 'fs';
+import { createReadStream, constants } from 'fs';
 import { open } from 'fs/promises';
 import { createInterface } from 'readline';
 
@@ -267,4 +267,203 @@ export async function readTailWindow(filePath, size, { minLines = 40, blockBytes
   }
   const tail = lines.slice(-minLines);
   return { lines: tail.map((l) => l.text), startOffset: tail.length ? tail[0].off : total };
+}
+
+// ── r207:快速扫描(按字节范围逐行读,行首就看得出类型的元数据行不解析)────────────────
+export const SCAN_CHUNK_BYTES = 4 * 1024 * 1024;   // 每读一块(≤4MB)回报一次进展;块与块之间的 await 即让出
+const SCAN_HEAD_LIMIT = 8192;                       // 行首找顶层 type 最多看这么多字节,超了按「看不出」照常解析
+// 读块用的缓冲复用(每次扫描借一块、用完还回,最多留 2 块):一次打开 150 个转写时不再每个文件新开几 MB,
+// 省掉随之而来的缺页与垃圾回收(实测首次读 150 个转写的 CPU 大半花在这上面)。同时进行的扫描各借各的。
+const scanBufferPool = [];
+function borrowScanBuffer() {
+  return scanBufferPool.pop() || Buffer.allocUnsafe(SCAN_CHUNK_BYTES + 2);
+}
+function returnScanBuffer(buf) {
+  if (scanBufferPool.length < 2) scanBufferPool.push(buf);
+}
+
+function scanRangeError(message) {
+  return new RangeError(`scanJsonlRange: ${message}`);
+}
+function isOffset(v) {
+  return Number.isSafeInteger(v) && v >= 0;
+}
+
+/**
+ * 只按 JSON.stringify 的写法(无空白)读行首的顶层 `type`:`{"k":标量,…,"type":"X"`。
+ * 键带转义、type 之前有对象 / 数组值、有空白、type 不是不带转义的字符串、看到头还没碰到 type → null
+ * (调用方照常解析)。重复键(JSON.parse 取最后一个)这里认第一个 —— JSON.stringify 写不出重复键。
+ */
+export function leadingRecordType(buf, limit = SCAN_HEAD_LIMIT) {
+  const n = Math.min(buf.length, limit);
+  if (n < 2 || buf[0] !== 0x7B) return null;                   // {
+  let i = 1;
+  for (;;) {
+    if (buf[i] !== 0x22) return null;                         // 键以 " 开头
+    const keyStart = i + 1;
+    let j = keyStart;
+    while (j < n && buf[j] !== 0x22 && buf[j] !== 0x5C) j++;
+    if (j >= n || buf[j] !== 0x22) return null;               // 键里有转义 / 看到头
+    const isType = j - keyStart === 4 && buf[keyStart] === 0x74 && buf[keyStart + 1] === 0x79
+      && buf[keyStart + 2] === 0x70 && buf[keyStart + 3] === 0x65;
+    i = j + 1;
+    if (buf[i] !== 0x3A) return null;                         // :
+    i += 1;
+    if (isType) {
+      if (buf[i] !== 0x22) return null;
+      const vs = i + 1;
+      let k = vs;
+      while (k < n && buf[k] !== 0x22 && buf[k] !== 0x5C) k++;
+      if (k >= n || buf[k] !== 0x22) return null;
+      return buf.toString('utf-8', vs, k);
+    }
+    const c = buf[i];
+    if (c === 0x22) {                                         // 字符串值:跳过转义
+      i += 1;
+      while (i < n && buf[i] !== 0x22) i += buf[i] === 0x5C ? 2 : 1;
+      if (i >= n) return null;
+      i += 1;
+    } else if (c === 0x7B || c === 0x5B || c === undefined) {
+      return null;                                            // 对象 / 数组值:不往里看
+    } else {
+      while (i < n && buf[i] !== 0x2C && buf[i] !== 0x7D) i++; // true / false / null / 数字
+      if (i >= n) return null;
+    }
+    if (buf[i] !== 0x2C) return null;                         // 遇到 } = 没有顶层 type
+    i += 1;
+  }
+}
+
+/**
+ * r207:按字节范围逐行扫描 JSONL,解析出的每条记录交给 onRecord(record, 行首偏移)。
+ * 断行与 readline(crlfDelay: Infinity)逐字同口径(\n、\r\n、单独的 \r、U+2028、U+2029,见 newLineBreaker,
+ * 跨块的 \r\n 与被块边界切开的 U+2028/U+2029 也一样);只有空白的行跳过;坏行丢弃。
+ * 长行跨块时只把各块里属于它的那段记下来,换行到了才拼一次,不重扫、不每块整段拷贝。
+ *
+ * - start / end:非负安全整数且 start ≤ end,否则 RangeError。end 缺省或超过打开时的大小 = 打开时大小
+ *   (之后追加的不读)。start 不在行首 → 从下一个行首开始(第一行残片丢掉);end 应落在行首。
+ * - requireNewline:true(缺省)= 没写完换行的末段不算;false = 同 readline,末段非空也算一行。
+ * - skipTypes(type, rawLine):行首能确定顶层 type(leadingRecordType)且它返回 true → 不解析直接跳过;
+ *   看不出就照常解析。rawLine 是读块缓冲上的视图,只在回调里有效(缓冲会被下一块复用)。
+ * - 打开时文件不存在 / 不是普通文件 → 抛错(ENOENT / EISDIR / EINVAL);不对命名管道等阻塞。
+ * - 读的时候文件变短 → 停在实际文件尾,返回 shortRead:true(调用方按「文件变了」处理)。
+ * - 每读一块(≤4MB)回调 onProgress(累计读到的字节数);signal 中止 → 关文件,以 AbortError 拒绝。
+ * @returns {Promise<{ endOffset: number, shortRead: boolean }>} endOffset = 已按行处理到哪(最后一个断行之后;
+ *   requireNewline:false 且末段已算一行时为读到的末尾)
+ */
+export async function scanJsonlRange(filePath, {
+  start = 0, end, skipTypes, requireNewline = true, signal, onRecord, onProgress,
+} = {}) {
+  if (!isOffset(start)) throw scanRangeError('start must be a non-negative safe integer');
+  if (end !== undefined && (!isOffset(end) || end < start)) throw scanRangeError('end must be a safe integer ≥ start');
+  if (signal?.aborted) throw readAbortedError();
+  const fh = await open(filePath, constants.O_RDONLY | (constants.O_NONBLOCK || 0));
+  let chunk = null;
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) {
+      throw Object.assign(new Error('scanJsonlRange: not a regular file'), { code: st.isDirectory() ? 'EISDIR' : 'EINVAL' });
+    }
+    const stop = end === undefined ? st.size : Math.min(end, st.size);
+    let pos = start;          // 下一次从文件哪里读
+    let bytesRead = 0;
+    let shortRead = false;
+    let endOffset = Math.min(start, stop);
+    let pieces = [];          // 当前这一行在之前各块里的部分(各自拷出来的,读块缓冲会被复用)
+    let lineAt = start;       // 当前这一行的行首偏移
+    let discardFirst = false; // start 落在行中间:第一行是残片,不算
+    let carry = null;         // 上一块末尾判不了的 ≤2 字节(可能是 \r\n 的 \r、U+2028 的前半),接到下一块开头
+
+    if (start > 0 && start < stop) {
+      // 看 start 前面是不是断行:\n / U+2028 / U+2029 → 行首;\r → 行首(若 start 处是 \n,它属于同一个 \r\n,跳过)。
+      const back = Math.min(3, start);
+      const head = Buffer.alloc(back + 1);
+      const { bytesRead: got } = await fh.read(head, 0, back + 1, start - back);
+      const prev = head[back - 1];
+      const isSep = got >= back && (prev === 0x0A || prev === 0x0D || (back === 3 && head[0] === 0xE2 && head[1] === 0x80
+        && (head[2] === 0xA8 || head[2] === 0xA9)));
+      if (!isSep) discardFirst = true;
+      else if (prev === 0x0D && got > back && head[back] === 0x0A) { pos = start + 1; lineAt = pos; }
+    }
+
+    const emit = (lineBuf, offset) => {
+      if (discardFirst) { discardFirst = false; return; }
+      if (!lineBuf.length) return;
+      if (skipTypes) {
+        const type = leadingRecordType(lineBuf);
+        if (type !== null && skipTypes(type, lineBuf)) return;
+      }
+      const text = lineBuf.toString('utf-8');
+      if (!text.trim()) return;
+      let record;
+      try { record = JSON.parse(text); } catch { return; }
+      onRecord?.(record, offset);
+    };
+    const takeLine = (buf, from, to) => {
+      if (!pieces.length) return buf.subarray(from, to);
+      pieces.push(buf.subarray(from, to));
+      const whole = Buffer.concat(pieces);
+      pieces = [];
+      return whole;
+    };
+
+    chunk = borrowScanBuffer();
+    for (;;) {
+      const want = Math.min(SCAN_CHUNK_BYTES, stop - pos);
+      const lead = carry ? carry.length : 0;
+      let n = lead;
+      const buf = chunk;
+      if (carry) carry.copy(buf, 0);
+      if (want > 0) {
+        const r = await fh.read(buf, lead, want, pos);
+        n = lead + r.bytesRead;
+        pos += r.bytesRead;
+        bytesRead += r.bytesRead;
+        if (r.bytesRead < want) shortRead = true;
+        if (signal?.aborted) throw readAbortedError();
+      }
+      carry = null;
+      const final = shortRead || pos >= stop;
+      const region = buf.subarray(0, n);
+      const base = pos - n;   // region[0] 的文件偏移
+      const breaker = newLineBreaker(region);
+      let p = 0;
+      let search = 0;
+      let hold = n;           // region[hold, n) 留给下一块
+      for (;;) {
+        const br = breaker.next(search);
+        if (!br) break;
+        if (br.maybeAt !== undefined) {
+          if (!final) { hold = br.maybeAt; break; }
+          search = br.maybeAt + 1;   // 到头了:不完整的 E2 序列只是正文
+          continue;
+        }
+        if (!final && br.next === n && region[br.at] === 0x0D) { hold = br.at; break; }  // 块尾的 \r:可能连着下一块的 \n
+        emit(takeLine(region, p, br.at), lineAt);
+        if (signal?.aborted) throw readAbortedError();
+        p = br.next;
+        search = p;
+        lineAt = base + p;
+        endOffset = lineAt;
+      }
+      if (!final) {
+        if (hold > p) pieces.push(Buffer.from(region.subarray(p, hold)));   // 每段只拷一次;换行到了才拼整行
+        if (hold < n) carry = Buffer.from(region.subarray(hold, n));
+        onProgress?.(bytesRead);
+        continue;
+      }
+      // 末段(没有断行结尾):requireNewline:false 时同 readline 算一行
+      if (!requireNewline && (p < n || pieces.length)) {
+        emit(takeLine(region, p, n), lineAt);
+        endOffset = base + n;
+      }
+      pieces = [];
+      onProgress?.(bytesRead);
+      if (signal?.aborted) throw readAbortedError();
+      return { endOffset, shortRead };
+    }
+  } finally {
+    if (chunk) returnScanBuffer(chunk);
+    await fh.close().catch(() => {});
+  }
 }

@@ -149,7 +149,7 @@ export function steerStillInFlight(item, now = Date.now()) {
 //     true  → 一律先保留 accepted(不管多久,记 missCount 供观测);
 //     false → 这是一次终局对账(回合已结束),缺席即翻 → 真失败不漏判;
 //     未传  → 客户端状态不明,吃 RECONCILE_GRACE_MS 兜底宽限(旧调用点口径不变)。
-export function reconcileSteered(list, _unusedSigs, steerKeys, { turnActive } = {}) {
+export function reconcileSteered(list, _unusedSigs, steerKeys, { turnActive, canJudge } = {}) {
   if (!Array.isArray(list) || !list.length) return list;
   if (!list.some((item) => isSteerBarrier(item) || item?.steerId)) return list;
   let changed = false;
@@ -157,6 +157,8 @@ export function reconcileSteered(list, _unusedSigs, steerKeys, { turnActive } = 
   for (const item of list) {
     if (!isSteerBarrier(item) && !item?.steerId) { out.push(item); continue; }
     if (steerLanded(item, null, steerKeys)) { changed = true; continue; }
+    // r207:证据窗口覆盖不到这条入队的时刻(canJudge 见 steerWindowJudge)→ 没命中不等于没落盘,这次不下结论,原样留到下次刷新。
+    if (item.steerId && typeof canJudge === 'function' && !canJudge(item)) { out.push(item); continue; }
     // ①用户已决定"保留不发"：除 UUID 正向命中（上一行，说明其实已送达，条目清掉）外，
     // 对账不得把它翻回 needs-review barrier——那会复活刚被用户解开的死锁。
     if (item.steerState === 'kept') { out.push(item); continue; }
@@ -180,6 +182,18 @@ export function reconcileSteered(list, _unusedSigs, steerKeys, { turnActive } = 
     out.push({ ...rest, steerState: 'needs-review', attemptWasAmbiguous: true });
   }
   return changed ? out : list;
+}
+
+// r207:证据窗口能不能判某条并入「没落盘」。回合结束核对拿到的历史只是最后一页(peek 带 limit,或 store 里已加载的那段):
+// 这一页从头开始(hasMore 为假),或这一页第一条早于这条入队的时刻,才覆盖得到它;否则(例如最后一个回合超过 8MB、
+// 一页只有它)没命中不等于没落盘,留到下次刷新(r189 同思路)。入队时刻取 queuedAt,没有则 acceptedAt;都取不到时只有整份才判。
+export function steerWindowJudge(persisted, hasMore) {
+  if (!hasMore) return () => true;
+  const first = Array.isArray(persisted) && persisted.length ? Date.parse(persisted[0]?.timestamp) : NaN;
+  return (item) => {
+    const at = Number.isFinite(item?.queuedAt) ? item.queuedAt : item?.acceptedAt;
+    return Number.isFinite(first) && Number.isFinite(at) && first < at;
+  };
 }
 
 // ②claim 残留（claiming 中间态 / hidden sendable 槽）复位为可见 needs-review 原条目。
