@@ -272,6 +272,15 @@ export async function readTailWindow(filePath, size, { minLines = 40, blockBytes
 // ── r207:快速扫描(按字节范围逐行读,行首就看得出类型的元数据行不解析)────────────────
 export const SCAN_CHUNK_BYTES = 4 * 1024 * 1024;   // 每读一块(≤4MB)回报一次进展;块与块之间的 await 即让出
 const SCAN_HEAD_LIMIT = 8192;                       // 行首找顶层 type 最多看这么多字节,超了按「看不出」照常解析
+// 读块用的缓冲复用(每次扫描借一块、用完还回,最多留 2 块):一次打开 150 个转写时不再每个文件新开几 MB,
+// 省掉随之而来的缺页与垃圾回收(实测首次读 150 个转写的 CPU 大半花在这上面)。同时进行的扫描各借各的。
+const scanBufferPool = [];
+function borrowScanBuffer() {
+  return scanBufferPool.pop() || Buffer.allocUnsafe(SCAN_CHUNK_BYTES + 2);
+}
+function returnScanBuffer(buf) {
+  if (scanBufferPool.length < 2) scanBufferPool.push(buf);
+}
 
 function scanRangeError(message) {
   return new RangeError(`scanJsonlRange: ${message}`);
@@ -335,7 +344,7 @@ export function leadingRecordType(buf, limit = SCAN_HEAD_LIMIT) {
  *   (之后追加的不读)。start 不在行首 → 从下一个行首开始(第一行残片丢掉);end 应落在行首。
  * - requireNewline:true(缺省)= 没写完换行的末段不算;false = 同 readline,末段非空也算一行。
  * - skipTypes(type, rawLine):行首能确定顶层 type(leadingRecordType)且它返回 true → 不解析直接跳过;
- *   看不出就照常解析。
+ *   看不出就照常解析。rawLine 是读块缓冲上的视图,只在回调里有效(缓冲会被下一块复用)。
  * - 打开时文件不存在 / 不是普通文件 → 抛错(ENOENT / EISDIR / EINVAL);不对命名管道等阻塞。
  * - 读的时候文件变短 → 停在实际文件尾,返回 shortRead:true(调用方按「文件变了」处理)。
  * - 每读一块(≤4MB)回调 onProgress(累计读到的字节数);signal 中止 → 关文件,以 AbortError 拒绝。
@@ -349,6 +358,7 @@ export async function scanJsonlRange(filePath, {
   if (end !== undefined && (!isOffset(end) || end < start)) throw scanRangeError('end must be a safe integer ≥ start');
   if (signal?.aborted) throw readAbortedError();
   const fh = await open(filePath, constants.O_RDONLY | (constants.O_NONBLOCK || 0));
+  let chunk = null;
   try {
     const st = await fh.stat();
     if (!st.isFile()) {
@@ -359,7 +369,7 @@ export async function scanJsonlRange(filePath, {
     let bytesRead = 0;
     let shortRead = false;
     let endOffset = Math.min(start, stop);
-    let pieces = [];          // 当前这一行在之前各块里的部分(视图,按序)
+    let pieces = [];          // 当前这一行在之前各块里的部分(各自拷出来的,读块缓冲会被复用)
     let lineAt = start;       // 当前这一行的行首偏移
     let discardFirst = false; // start 落在行中间:第一行是残片,不算
     let carry = null;         // 上一块末尾判不了的 ≤2 字节(可能是 \r\n 的 \r、U+2028 的前半),接到下一块开头
@@ -397,14 +407,14 @@ export async function scanJsonlRange(filePath, {
       return whole;
     };
 
+    chunk = borrowScanBuffer();
     for (;;) {
       const want = Math.min(SCAN_CHUNK_BYTES, stop - pos);
       const lead = carry ? carry.length : 0;
       let n = lead;
-      let buf = carry || Buffer.alloc(0);
+      const buf = chunk;
+      if (carry) carry.copy(buf, 0);
       if (want > 0) {
-        buf = Buffer.allocUnsafe(lead + want);
-        if (carry) carry.copy(buf, 0);
         const r = await fh.read(buf, lead, want, pos);
         n = lead + r.bytesRead;
         pos += r.bytesRead;
@@ -414,7 +424,7 @@ export async function scanJsonlRange(filePath, {
       }
       carry = null;
       const final = shortRead || pos >= stop;
-      const region = n === buf.length ? buf : buf.subarray(0, n);
+      const region = buf.subarray(0, n);
       const base = pos - n;   // region[0] 的文件偏移
       const breaker = newLineBreaker(region);
       let p = 0;
@@ -437,7 +447,7 @@ export async function scanJsonlRange(filePath, {
         endOffset = lineAt;
       }
       if (!final) {
-        if (hold > p) pieces.push(region.subarray(p, hold));
+        if (hold > p) pieces.push(Buffer.from(region.subarray(p, hold)));   // 每段只拷一次;换行到了才拼整行
         if (hold < n) carry = Buffer.from(region.subarray(hold, n));
         onProgress?.(bytesRead);
         continue;
@@ -453,6 +463,7 @@ export async function scanJsonlRange(filePath, {
       return { endOffset, shortRead };
     }
   } finally {
+    if (chunk) returnScanBuffer(chunk);
     await fh.close().catch(() => {});
   }
 }
