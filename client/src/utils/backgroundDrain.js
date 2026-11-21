@@ -103,6 +103,9 @@ export function bgDrainBlockReason(key, input = {}) {
   const head = list[i];
   if (head.runId !== input.runId) return 'other-run';      // 刷新 / 重启之前遗留的:不在后台发
   if (head.hidden) return 'hidden';                        // 计划续跑 / 跨会话卡片「处理」:等用户回到会话
+  // /clear 在窗格有本地收尾(init 时认出会话编号轮换,换绑窗格、队列与流归属),后台没有:留给用户回到会话时由窗格发。
+  // 判法与窗格 handleSend 的 isClear 相同。/compact、/goal 在窗格只有显示上的差别,后台照发。
+  if (/^\/clear\b/.test(String(head.text || '').trim())) return 'slash-clear';
   if (!head.owner?.cwd) return 'no-owner';                 // 没有入队快照(取不到工作区路径)
   if (paneDrainRegistered(key)) return 'pane';
   if (isFinalizing(key)) return 'finalizing';

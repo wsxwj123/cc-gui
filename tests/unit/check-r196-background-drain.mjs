@@ -62,6 +62,10 @@ const proc = (sessionId, extra = {}) => ({ kind: 'chat-process', pid: 'p-' + ses
   eq(R({ queues: { [K]: [head({ runId: undefined })] } }), 'other-run', 'P 判据:没有运行号的不发');
   eq(R({ queues: { [K]: [head({ hidden: true }), head({ queueId: 'h2' })] } }), 'hidden', 'P 判据:隐藏项不发,也挡住后面的');
   eq(R({ queues: { [K]: [head({ owner: null })] } }), 'no-owner', 'P 判据:没有入队快照不发');
+  eq([R({ queues: { [K]: [head({ text: '/clear' })] } }), R({ queues: { [K]: [head({ text: '  /clear 重新开始 ' }), head({ queueId: 'h2' })] } })], ['slash-clear', 'slash-clear'],
+    'P 判据:/clear 开头的不在后台发(也挡住后面的,等窗格)');
+  eq([R({ queues: { [K]: [head({ text: '/compact' })] } }), R({ queues: { [K]: [head({ text: '/goal 写完测试' })] } }), R({ queues: { [K]: [head({ text: '/clearance 说明' })] } })], [null, null, null],
+    'P 判据:/compact、/goal 照常发;/clearance 不是 /clear');
   eq(R({ queues: { [K]: [head({ steerState: 'bg-sending' })] } }), 'no-head', 'P 判据:在途条目不是可发队首');
   eq(R({ queues: { [K]: [head({ busyRetryAt: 5_000_001 })] } }), 'no-head', 'P 判据:窗格 409 的间隔没到不发');
   eq(R({ pendingDelete: new Set([K]) }), 'deleting', 'P 判据:待删');
