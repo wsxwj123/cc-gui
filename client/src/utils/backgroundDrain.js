@@ -176,7 +176,10 @@ export function holdReasonText(code, detail) {
   }
 }
 
-/** 后台发出时的权限档:这个会话单独设过就用它;没设过按「逐步确认」(不回落全局默认,无人在场时不放大宽档)。 */
+/**
+ * 后台发出时的权限档:用这个会话记下的权限档(permissionModeBySession[key] —— 用户在这个会话上选过的,或从首页新建、从别的
+ * 会话分支出来时记下的当时全局档,也就是这个会话的权限菜单里显示的那一档);完全没有记录才按「逐步确认」(default),不回落全局默认。
+ */
 export function resolveBgPermissionMode(permissionModeBySession, key) {
   const m = permissionModeBySession?.[key];
   return typeof m === 'string' && m ? m : 'default';
@@ -306,7 +309,8 @@ export function createBackgroundDrainer(deps = {}) {
     nextTryAt.delete(key);
     noteBgAcceptedPid(key, pid);
   }
-  // 会话文件不在(404)或草稿第一条失败:这个键的排队(隐藏项除外)移进首页「未发出的消息」;存不进就把已移的取回、原样留着。
+  // 会话文件不在(404)或草稿第一条失败:这个键里可见的排队移进首页「未发出的消息」;隐藏项不移,随队列一起清掉(会话记录
+  // 已经不在,它们没处可去)。存不进就把已移的取回、整条队列原样留着。
   function moveQueueToOrphans(key) {
     const s = st();
     const list = Array.isArray(s.messageQueue?.[key]) ? s.messageQueue[key] : [];

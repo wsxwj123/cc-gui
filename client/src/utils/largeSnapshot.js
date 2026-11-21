@@ -119,17 +119,6 @@ export async function askSaveLargeSnapshot(payload, data, deps) {
 }
 
 /**
- * R7(D 修订:阻塞式)拍快照 + 大目录首次询问,【在消息发出之前】调,并由发送方 await。
- * 一次 POST 兼作探测:小目录照常拍完带 sha 回来;被安全阀跳过时(每会话第一次)弹窗
- * 让用户选"保存/不保存"。
- *  - 选"保存" → 立刻带 allowOversize 再拍,返回的 sha 就是本条消息的锚点(D3 补强:
- *    快照先于消息生效,内容是 AI 动手前的状态)。
- *  - 选"不保存" → null,本会话不再拍、也不再问(R7-4/5)。
- * 返回:快照 sha / null(用户没选保存、或没超阈值但拍失败)。
- * 会等用户回答的只有"超阈值的首次"这一条分支 —— 小目录、本会话已问过的会话直接返回
- * (已确认过"保存"的会话由调用方带 allowOversize,同样不弹窗、不等)。
- */
-/**
  * r196:后台排空用的拍快照(不弹窗;窗格的 preflightLargeSnapshot 与它的行为不动)。同一个 POST /api/checkpoints,返回:
  *  - { send: true, sha }:拍到了(sha),或不必拍 / 没拍成(sha 为 null)—— 照常发;
  *  - { send: false, reason: 'large-snapshot-ask' }:被体积安全阀跳过、而这个会话还没就大目录做过选择(或正在问)——
@@ -148,6 +137,17 @@ export async function bgPreflightLargeSnapshot(payload, deps) {
   } catch { return { send: true, sha: null }; }
 }
 
+/**
+ * R7(D 修订:阻塞式)拍快照 + 大目录首次询问,【在消息发出之前】调,并由发送方 await。
+ * 一次 POST 兼作探测:小目录照常拍完带 sha 回来;被安全阀跳过时(每会话第一次)弹窗
+ * 让用户选"保存/不保存"。
+ *  - 选"保存" → 立刻带 allowOversize 再拍,返回的 sha 就是本条消息的锚点(D3 补强:
+ *    快照先于消息生效,内容是 AI 动手前的状态)。
+ *  - 选"不保存" → null,本会话不再拍、也不再问(R7-4/5)。
+ * 返回:快照 sha / null(用户没选保存、或没超阈值但拍失败)。
+ * 会等用户回答的只有"超阈值的首次"这一条分支 —— 小目录、本会话已问过的会话直接返回
+ * (已确认过"保存"的会话由调用方带 allowOversize,同样不弹窗、不等)。
+ */
 export async function preflightLargeSnapshot(payload, deps) {
   try {
     const r = await postCheckpoint(deps, payload);
