@@ -4041,6 +4041,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   const serverHistoryStats = useStore((s) => (selectedSession?.sessionId && s.historyStatsBySession?.[selectedSession.sessionId]) || null);
   // r151l:本窗格的历史分页账。账必须属于当前会话才可信(setPaneSession 换会话会清空)。
   const tabHistoryPaging = useStore((s) => s.historyPagingByTab?.[tabIndex] || null);
+  // r207:本窗格第一次加载历史的结果。失败(且窗格里还没有这个会话的消息)时,空列表那一处显示原因与「重试」。
+  const historyLoad = useStore((s) => s.historyLoadByTab?.[tabIndex] || null);
   const pagingForHere = tabHistoryPaging && tabHistoryPaging.sessionId === selectedSession?.sessionId
     ? tabHistoryPaging : null;
   const canLoadOlder = !!pagingForHere?.hasMore && !pagingForHere?.capped;
@@ -10649,7 +10651,20 @@ ${HISTORY_COST_ESTIMATE_NOTE}`}>· {formatCost(totalCostUsd)}</span>
       >
           {visibleMessages.length === 0 && renderChat.filter((m) => m.type !== 'btw').length === 0 ? (
             <div className="mobile-draft-empty flex items-center justify-center h-full text-ink-muted text-sm font-body">
-              {selectedSession?.draft ? '开始你的第一条消息 ↓' : '该会话没有可显示的消息'}
+              {selectedSession?.draft ? '开始你的第一条消息 ↓'
+                : (historyLoad?.failed && historyLoad.sessionId === selectedSession?.sessionId) ? (
+                  <div className="flex flex-col items-center gap-2">
+                    <span>{historyLoad.failed === 'timeout' ? '读取会话历史超时，可重试' : '读取会话历史失败，可重试'}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const s = getLocalSession();
+                        if (s?.sessionId && s?.projectHash) fetchMessagesForTab(s.sessionId, s.projectHash);
+                      }}
+                      className="px-3 py-1.5 rounded-lg border border-canvas-deep bg-canvas-warm text-[12px] font-body text-ink-muted hover:text-ink"
+                    >重试</button>
+                  </div>
+                ) : '该会话没有可显示的消息'}
             </div>
           ) : (
             <>

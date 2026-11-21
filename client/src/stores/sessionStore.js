@@ -68,6 +68,23 @@ function hasLiveHistoryRefresh(state, tab) {
 }
 
 // 代号整格作废(resetHistoryRequestSeq)的同时取消该窗格两条线的在飞请求;下标口径与它一致。
+// r207:改写某窗格的第一次加载结果(返回新数组,不改原数组)。
+function withHistoryLoad(state, tab, value) {
+  const arr = [...(state.historyLoadByTab || [null, null, null, null, null, null])];
+  arr[tab] = value;
+  return arr;
+}
+// r207:记一次第一次加载失败。只在「这次打开后还没成功加载过」且「窗格里还没有这个会话的消息」时记 ——
+// 已经显示着消息(或已成功加载过、会话本来就是空的)时后台刷新失败,照旧保留现状、不出提示。
+function noteHistoryLoadFailure(get, set, tab, sessionId, kind) {
+  const st = get();
+  const cur = st.historyLoadByTab?.[tab] || null;
+  if (cur && cur.sessionId === sessionId && cur.ok) return;
+  const shown = st.paneMessagesSid?.[tab] === sessionId && Array.isArray(st.paneMessages?.[tab]) && st.paneMessages[tab].length > 0;
+  if (shown) return;
+  set({ historyLoadByTab: withHistoryLoad(st, tab, { sessionId, failed: kind }) });
+}
+
 function invalidateHistoryRequests(seqs, tab) {
   const slot = historyInFlight[historyTabIndex(tab)];
   for (const lane of ['refresh', 'older']) {
@@ -831,6 +848,9 @@ export const useStore = create((set, get) => ({
   // r151l:每个窗格的历史分页账 { sessionId, hasMore, beforeCursor, loaded, total, loading, capped }。
   // 只在 sessionId 与窗格当前会话一致时可信;切会话/关窗格时清空(setPaneSession / closePane)。
   historyPagingByTab: [null, null, null, null, null, null],
+  // r207:各窗格本次打开的会话第一次加载历史的结果:{ sessionId, ok:true } | { sessionId, failed:'timeout'|'failed' } | null。
+  // 失败且窗格里还没有这个会话的消息时,对话区显示失败原因与「重试」;切会话 / 重新请求成功时清掉。
+  historyLoadByTab: [null, null, null, null, null, null],
   // r151l 判官修正(窄复审①细化为按 (sessionId, tab, lane) 分账):每窗格一条 refresh
   // (fetchMessages)+ 一条 older(loadOlderMessages)请求代号,互不作废;切会话/换 pane
   // 会话时 resetHistoryRequestSeq 统一作废。见 utils/historyPaging.js 的 nextHistoryRequestSeq。
@@ -1546,6 +1566,7 @@ export const useStore = create((set, get) => ({
     // r151l 窄复审①:换会话 → tab0 正在飞的历史请求全部作废(与 setPaneSession 同款)。
     if (prevSid !== (session?.sessionId || null)) {
       patch.historyReqSeqByTab = invalidateHistoryRequests(cur.historyReqSeqByTab, 0);
+      patch.historyLoadByTab = withHistoryLoad(cur, 0, null);   // r207:换了会话,上一个的加载结果作废
     }
     set(patch);
     writeLs('cgui-selected-session', session);
@@ -1826,6 +1847,7 @@ export const useStore = create((set, get) => ({
       patch.historyPagingByTab = paging;
       // 窄复审①:换 pane 会话 → 该窗格 refresh/older 两条请求线一起作废(计数器保留)。
       patch.historyReqSeqByTab = invalidateHistoryRequests(cur.historyReqSeqByTab, idx);
+      patch.historyLoadByTab = withHistoryLoad(cur, idx, null);   // r207
     }
     if (idx === 0) {
       patch.selectedSession = session;
@@ -2926,6 +2948,9 @@ export const useStore = create((set, get) => ({
       // whatever is there — a genuinely empty session still returns 200 + [].
       if (!res.ok) {
         discardHistoryResponse(res, ctrl);
+        // r207:服务端读失败(504 超时 / 其余 5xx)且窗格里还没有这个会话的消息 → 记下,对话区显示原因与「重试」。
+        // 404(文件还没写 / 刚被截掉)等 4xx 不算读取失败,照旧。
+        if (res.status >= 500) noteHistoryLoadFailure(get, set, tab, sessionId, res.status === 504 ? 'timeout' : 'failed');
         // 最新请求即使是静默刷新,也要收掉可能由它顶替掉的首屏 loading。
         if (!silent) set({ loading: false });
         else if (tab === 0 && get().loading) set({ loading: false });
@@ -2974,6 +2999,7 @@ export const useStore = create((set, get) => ({
         capped: trimmed.dropped > 0 || trimmed.messages.length >= HISTORY_LOADED_MAX,
       });
       get().setPaneMessages(tab, trimmed.messages, sessionId);
+      set({ historyLoadByTab: withHistoryLoad(get(), tab, { sessionId, ok: true }) });   // r207:成功即清掉失败记录
       get().setHistoryPaging(tab, {
         sessionId,
         // start>0 = 全量数组里这份列表左侧还有消息;达到 2000 上限后 capped 让入口消失。
@@ -3006,6 +3032,7 @@ export const useStore = create((set, get) => ({
       // 过期响应(期间已有更新请求 / 切了会话)连错误态都不写,交给最新那条。
       // r168:被取消(AbortError)只会发生在被顶替 / 切会话时,同样按过期收尾,不向用户报错。
       if (ctrl.signal.aborted || !stillCurrent()) return abandon();
+      noteHistoryLoadFailure(get, set, tab, sessionId, 'failed');   // r207:网络出错 / 响应体读不出来
       if (!silent) set({ error: err.message, loading: false });
       else if (tab === 0 && get().loading) set({ loading: false });
       return false;
