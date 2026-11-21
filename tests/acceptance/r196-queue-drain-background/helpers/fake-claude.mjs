@@ -6,6 +6,7 @@
 //   <sid>.chunk / .done   默认回合的两道闸:第一块文字之后等 .chunk,第二块之后等 .done;放行后桩件删掉文件(每轮要放一次)
 //   <sid>.scenario.json   下一个回合的前置步骤(读到就删):{steps:[{t:'bash-fg',toolId,taskId,command,description,registerMs}]}
 //   <sid>.taskdone     让这个进程里在后台跑的任务"跑完":发完成通知并自动起一轮通知回合
+//   <sid>.compact      让本进程当场压缩一次上下文(读到就删):输出流里发 system/compact_boundary 事件,会话文件追加 system/compact_boundary + user(isCompactSummary:true)
 //   <sid>.kill         让本进程退出
 // 桩件写出的观察文件:
 //   <CTL>/spawns.jsonl    每个交互式进程一行 {t,pid,sid,resume,model,permissionMode}
@@ -199,6 +200,12 @@ async function notifyTurn(t) {
   jl(f('rounds.jsonl'), { ev: 'end', n: turnNo, text: body, notify: true, why: 'result' });
   busy = false;
 }
+function doCompact() {
+  sysEvent('compact_boundary', {});
+  const bid = crypto.randomUUID();
+  append({ ...base(), type: 'system', subtype: 'compact_boundary', uuid: bid, parentUuid: null, content: 'Conversation compacted', isMeta: false, level: 'info', compactMetadata: { trigger: 'manual', preTokens: 1000 } });
+  append({ ...base(), type: 'user', uuid: crypto.randomUUID(), parentUuid: bid, isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: 'user', content: 'This session is being continued from a previous conversation. Summary: R196-COMPACT-SUMMARY' } });
+}
 function completeTask(t) {
   t.status = 'completed';
   sysEvent('task_updated', { task_id: t.taskId, patch: { status: 'completed' } });
@@ -211,6 +218,7 @@ if (oneShot) { say(`R196-FINAL one-shot ${oneShotArg}`); out({ type: 'result', s
 
 setInterval(() => {
   if (fs.existsSync(f('kill'))) process.exit(0);
+  if (fs.existsSync(f('compact'))) { rmQuiet(f('compact')); doCompact(); }
   if (fs.existsSync(f('taskdone'))) { rmQuiet(f('taskdone')); for (const t of tasks.values()) if (t.status === 'running') completeTask(t); }
   if (stdinClosed && !busy && ![...tasks.values()].some((t) => t.status === 'running')) process.exit(0);
 }, 100);
