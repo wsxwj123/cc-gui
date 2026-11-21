@@ -347,5 +347,19 @@ for (const [label, final, expect] of [['completed', { status: 200, body: { ok: t
   env.drainer.stop();
 }
 
+for (const [label, flip] of [
+  ['远程控制', () => useStore.setState((s) => ({ remoteControlled: { ...s.remoteControlled, C16: true } }))],
+  ['正在删除', () => useStore.getState().markSessionDeleting('C16')],
+  ['Provider 变了', () => useStore.setState((s) => ({ lastProviderBySession: { ...s.lastProviderBySession, C16: 'deepseek' } }))],
+]) { // C16 发出前复核之后的等待里状态变了:POST 之前再判一次,不通过 → 不发、退回普通排队、不写原因
+  seed({ C16: [item('a')] });
+  const env = makeEnv({ responder: () => OK200('p16'), snapshot: async () => { flip(); return { send: true, sha: null }; } });
+  await env.poll();
+  const it = q('C16')[0];
+  eq([env.posts.length, it?.queueId, it?.steerState, it?.holdReason], [0, 'a', undefined, undefined], `C16 ${label}:不发,条目退回普通排队、不写原因`);
+  env.drainer.stop();
+  useStore.getState().unmarkSessionDeleting('C16');
+}
+
 console.log(`✓ check-r196-background-drain:${checks} 项断言全部通过`);
 setTimeout(() => process.exit(process.exitCode || 0), 50).unref();

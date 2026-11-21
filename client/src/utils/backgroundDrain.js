@@ -79,6 +79,18 @@ export function isSessionBusy(items, key) {
 }
 
 /**
+ * 会话本身此刻不许后台发的三种情形(发出前复核与 POST 之前各判一次,同一判据):正在删除、交给手机远程控制、
+ * Provider 与这个会话上次发送时不同(要先剥思考块,交给窗格)。能发 → null。
+ */
+export function bgSessionBlockReason(key, input = {}) {
+  if (input.pendingDelete?.has?.(key)) return 'deleting';
+  if (input.remoteControlled?.[key]) return 'remote';
+  const lastProv = input.lastProviderBySession?.[key];
+  if (lastProv && lastProv !== (input.currentProviderHint || 'anthropic')) return 'provider-changed';
+  return null;
+}
+
+/**
  * 会话 key 此刻能不能由 BD 发出队首;能 → null,不能 → 原因码。input:
  * { queues, items, runId, now, inFlight(Map), nextTryAt(Map key→{at,epoch}), pendingDelete(Set), remoteControlled,
  *   lastProviderBySession, currentProviderHint, largeAsk(Map key→{epoch}:拍快照时目录太大、要先问用户的会话) }
@@ -95,10 +107,8 @@ export function bgDrainBlockReason(key, input = {}) {
   if (paneDrainRegistered(key)) return 'pane';
   if (isFinalizing(key)) return 'finalizing';
   if (isRollbackBusy(key, input.now)) return 'rollback';
-  if (input.pendingDelete?.has?.(key)) return 'deleting';
-  if (input.remoteControlled?.[key]) return 'remote';
-  const lastProv = input.lastProviderBySession?.[key];
-  if (lastProv && lastProv !== (input.currentProviderHint || 'anthropic')) return 'provider-changed'; // 要先剥思考块:交给窗格
+  const sessionBlock = bgSessionBlockReason(key, input);
+  if (sessionBlock) return sessionBlock;
   const la = input.largeAsk?.get?.(key);
   if (la && la.epoch === paneEpochOf(key)) return 'large-snapshot'; // 目录太大、要先问用户:交给窗格(窗格接管时作废)
   if (input.inFlight?.has?.(key)) return 'in-flight';
@@ -425,6 +435,12 @@ export function createBackgroundDrainer(deps = {}) {
     let serverEpoch = null;
     try { serverEpoch = await getServerEpoch(); } catch {}
     if (!live(g)) return;
+    // F2:拍快照、写附件旁注、取实例号这几段等待之后,POST 之前再判一次远程控制 / 正在删除 / Provider(同一判据);
+    // 不通过就退回普通排队(不算失败、不写原因),与发出前复核不通过时一样。
+    if (bgSessionBlockReason(key, inputFor(items, now())) !== null) {
+      st().settleBgSend(key, queueId, { kind: 'release' });
+      return;
+    }
     const req = buildBgChatRequest({ key, item: marked, state: st(), items, serverEpoch, clientTurnId: bgTurnId });
     if (req.autoDowngraded) {
       try { st().setPermissionMode('default', key); } catch {}
