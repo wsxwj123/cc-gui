@@ -6112,6 +6112,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const _officialM = (_stM.currentProvider?.providerHint || 'anthropic') === 'anthropic';
       const _pin = _stM.modelBySession[sessionQueueKey];
       const _hist = resolveHistModel(getLocalMessages(), _stM.providerEpoch || 0, _officialM);
+      // r196 F1:入队快照在这里就取好(与 _hist 同一时刻、下面几段等待之前);409 退回排队时用它。等待期间用户可能已切到
+      // 别的会话,那时窗格显示的消息不属于发起的会话,不能拿来当它的快照(后台发出会用错模型)。
+      const _queueOwner = queueOwnerSnapshot(chatCwdFor(selectedSession, selectedProject), selectedSession?.projectHash, getLocalMessages());
       // r196:pin → 历史模型 → 全局默认的解析(resolveSendModel)、1M 补位、思考强度的能力门控都在 buildChatRequestBody 里做
       // (后台排空共用);这里只按改前的时刻取输入。
       // 1M 标记兜底(与徽章显示解析同一规则):重装丢 pin 后,发送也要带回 [1m],
@@ -6220,7 +6223,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 出队重试的那条回到最前;新发的这条若队首已有被退回、等着重发的消息,排在它们后面(不越过先被退回的)。
         const requeued = useStore.getState().requeueMessageFront(sessionQueueKey, {
           text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts: retryOpts, busyRetryAt: Date.now() + BUSY_RETRY_GAP_MS,
-          owner: queueOwnerSnapshot(chatCwd, selectedSession?.projectHash, getLocalMessages()), // r196:入队快照
+          owner: _queueOwner, // r196:入队快照(在等待之前取好,见 _queueOwner)
         }, { afterBusy: !opts.busyRequeued });
         if (!requeued) {
           // 存不进队列(本地存储满):乐观气泡留着(原文还在屏上),明说没发出、要手动重发 —— 不静默丢。
