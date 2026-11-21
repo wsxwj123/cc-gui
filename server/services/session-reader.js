@@ -12,7 +12,7 @@ import {
 } from '../utils/plan.js';
 
 export { isApprovedPlanToolCall };
-import { parseJsonl, readJsonlEdges, streamJsonl } from '../utils/jsonl-parser.js';
+import { parseJsonl, readJsonlEdges, streamJsonl, scanJsonlRange } from '../utils/jsonl-parser.js';
 import { sliceMessagesForPage } from '../utils/history-pagination.js';
 import { buildHistoryStats } from '../utils/history-stats.js';
 import { parseWorkflowLaunchText, parseWorkflowTranscriptDir } from '../utils/workflow-progress.js';
@@ -1269,6 +1269,15 @@ function reconstructCommandPrompt(text, { bareToName = false } = {}) {
  * 同一 message.id 下的不同块、又能认出重放的同一个块。实测 8 个真实会话此键零误删。
  * user 记录不参与 message.id 去重(可能无/共享 message.id,按 uuid 已足够)。
  */
+// r207:主会话文件里行首 type 不是这四类的(元数据行:api-request、queue-operation、last-prompt……)整理时用不到,
+// 快速扫描直接跳过、不解析。唯一的例外照常解析:行里出现 "uuid" 键 —— dedupReplayedRecords 按顶层 uuid 认重复、
+// 不看类型,跳过带 uuid 的行可能改变哪一条算首见;照常解析就与原来逐条全解析的结果相同。
+const MAIN_RECORD_TYPES = new Set(['user', 'assistant', 'system', 'attachment']);
+const UUID_KEY_BYTES = Buffer.from('"uuid"');
+function skipMainFileLine(type, rawLine) {
+  return !MAIN_RECORD_TYPES.has(type) && rawLine.indexOf(UUID_KEY_BYTES) === -1;
+}
+
 export function dedupReplayedRecords(rawRecords) {
   const seenRecordUuids = new Set();
   const seenAssistantBlocks = new Set();
@@ -1847,14 +1856,37 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
   // 拒绝);刚好读完才断开的,也不再往下组装 —— 大会话的组装与全量统计同样要几百毫秒。
   // 不传 signal(/api/session-ref 等)= 旧行为。
   const signal = paging?.signal;
-  const rawRecords = await parseJsonl(filePath, { signal });
+  // r207:paging.onProgress(可选,只有历史路由传)= 读取进展回报,路由据此按进展算超时:
+  // { step:'open', regularFile } 先报一次;之后 { step, bytes }(bytes = 本次累计读到的字节,主文件 + 子代理转写)。
+  const onProgress = typeof paging?.onProgress === 'function' ? paging.onProgress : null;
+  const fileStat = await stat(filePath);   // 定位后文件又没了 → 抛,路由回 500(与读到一半消失同)
+  const regularFile = fileStat.isFile();
+  onProgress?.({ step: 'open', regularFile, bytes: 0 });
+  let bytesRead = 0;
+  let rawRecords;
+  if (regularFile) {
+    // r207:快速扫描(元数据行不解析,见 skipMainFileLine);末行与断行口径同原来的 readline(requireNewline:false)。
+    rawRecords = [];
+    await scanJsonlRange(filePath, {
+      requireNewline: false,
+      skipTypes: skipMainFileLine,
+      signal,
+      onRecord: (record) => { rawRecords.push(record); },
+      onProgress: (bytes) => { bytesRead = bytes; onProgress?.({ step: 'read', bytes }); },
+    });
+  } else {
+    // 命名管道等非普通文件:没有大小、不能按位置读,照原来流式读(r171:路由对它们维持 15 秒硬超时)。
+    rawRecords = await parseJsonl(filePath, { signal });
+  }
   signal?.throwIfAborted();
+  onProgress?.({ step: 'sidecar', bytes: bytesRead });
   const records = dedupReplayedRecords(rawRecords);
   // L4/R07: 加载附件 sidecar,在 user 消息 push 时注入 attachments/displayText
   // (身份索引 messageId 优先,旧 textHash 兜底)。
   const attachmentsSidecar = await readAttachmentsSidecar(sessionId);
   // r171:上面让出过执行权,期间断开或超时的,不再往下组装。
   signal?.throwIfAborted();
+  onProgress?.({ step: 'assemble', bytes: bytesRead });
 
   // Collect all tool results first, keyed by tool_use_id
   const toolResultMap = new Map();
@@ -2216,13 +2248,17 @@ export async function getSessionMessages(sessionId, projectHash, paging = {}) {
   const finalMessages = foldRepeatedGoalNotices(foldedMessages);
   // A 项:子代理用量按归属挂到各自回合(契约 §10.1)。只读、失败静默 —— 读不到就不挂,
   // 绝不影响既有字段与错误契约(轮末 usage/costUsd/命中率口径一个字不动)。
+  onProgress?.({ step: 'subagents', bytes: bytesRead });
   try {
-    const agents = await readSessionSubagentUsage(projectHash, sessionId);
+    const agents = await readSessionSubagentUsage(projectHash, sessionId, {
+      onProgress: onProgress && ((bytes) => onProgress({ step: 'subagents', bytes: bytesRead + bytes })),
+    });
     attachSubagentUsage(finalMessages, agents, workflowCalls);
   } catch { /* 子代理用量读不出来 = 这条会话没有金额可显示,历史照常返回 */ }
   // r171:必须在上面吞异常的 try/catch 之外检查,否则中止会被吞掉;读子代理用量让出过执行权,
   // 期间断开或超时的,不再做后面的切页(逐条算字节)与全量统计。
   signal?.throwIfAborted();
+  onProgress?.({ step: 'page' });
   // 聚合用量(R22/R23):五类量 + 缓存写 TTL 分项 + 无效/冲突 code,归一规则只在
   // utils/usage-normalize.js 一处(顶层 creation 与 5m/1h 分项不重复相加)。
   // apiCalls = 去重后的底层 API 调用次数,供前端明细展示/排查。
