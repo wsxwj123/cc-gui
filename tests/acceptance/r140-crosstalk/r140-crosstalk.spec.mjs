@@ -348,10 +348,10 @@ test('H4 [契约§1.7] 排队消息不得投错会话:Q 的窗格/界面/jsonl �
  * H4 覆盖的是"消息刚发出就切走"的短窗口(那时 POST 还在飞、A 的回合被憋住,排空路径压根没走到);
  * 这一条把 A 的回合**真正跑完**,再让排空发生 —— 这是数据污染唯一能真正发生的地方。
  */
-// 分类(2026-10-02 实测):**防回归**(修前绿、修后绿)。
-// 实测前提(探针,已删):A 的回合收尾时用户**不在** A 上,排空根本不会发生(30 秒内 A/Q 的 jsonl 都没有它);
-// 用户在原会话上看着回合收尾时,排空在收尾后约 3 秒发生,投递目标在修前/修后都正确。
-// 所以断言的形态是"可观测的投递目标"(A 的 jsonl 收到它、Q 的 jsonl 绝不含它、A 的进程开了第二回合),
+// 分类:2026-10-02 起是**防回归**;r196 起判据改为「后台自动发出」:A 的回合收尾时用户不在 A 上(在 Q),
+// 这条排队消息应在 10 秒内自动发进 A(接口文件「对外行为变化」第 1 条);改前(r196 之前)这条会红在「始终没有落进 A」。
+// 不变的红线:A 的排队消息绝不进 Q 的会话文件、Q 的窗格。
+// 断言的形态是"可观测的投递目标"(A 的 jsonl 收到它、Q 的 jsonl 绝不含它、A 的进程开了第二回合),
 // 而不是去赌投递那一瞬间的几十毫秒。
 test('C5 [契约§1.7] 排队消息的排空投递必须落在原会话 A(而不是排空发生时在看的 Q)(2 轮)', async ({ page }) => {
   const results = [];
@@ -388,32 +388,24 @@ test('C5 [契约§1.7] 排队消息的排空投递必须落在原会话 A(而不
       const qKey = await paneKeyContaining(page, bOwnReply(Q.mark));
       expect(qKey, '机制自检:此刻显示的窗格应是 Q').toBe(Q.sid);
 
-      // 2026-11-18 重做(REL464-3):现行规则是「回合在用户不在 A 时收尾,排队的消息不在后台发出,等用户回到 A 时发出」
-      // (排空只在显示着这个会话的窗格里做)。用户已定改成后台也发(r196),届时把这一段改成「在 Q 期间就投进 A」。
-      // 不变的红线:A 的排队消息绝不能进 Q 的会话文件、Q 的窗格。
+      // r196 起:排队消息在 A 这一轮真正结束后自动发进 A,不管用户此刻在看哪个会话(也不要求回到 A)。
+      // 新判据:在 Q 期间(不切回 A)10 秒内这条已落进 A 的会话文件、A 的桩件开了第二回合。
+      // 不变的红线:A 的排队消息绝不能进 Q 的会话文件、Q 的窗格(每秒查一次,到落进 A 为止)。
+      let landedA = 0;
       const tq = Date.now();
-      while (Date.now() - tq < 12_000) {
+      while (Date.now() - tq < 10_000) {
         expect(transcriptMentions(Q.sid, p2), `A 的排队消息被投进了别的会话(${Q.mark})的会话文件 = 不可撤销的数据污染`).toBe(0);
-        await page.waitForTimeout(1_000);
+        landedA = transcriptMentions(A.sid, p2);
+        if (landedA) break;
+        await page.waitForTimeout(500);
       }
+      const landedQ = transcriptMentions(Q.sid, p2);
+      expect(landedQ, `Q 的会话文件里出现了 A 的排队消息(${landedQ} 次)`).toBe(0);
       expect(((await paneText(page, Q.sid)) || '').includes(p2), 'Q 窗格里出现/残留了 A 的排队消息').toBe(false);
       expect(await userBubbleCount(page, p2), 'Q 里被画进了 A 的排队消息气泡').toBe(0);
-
-      await switchTo(page, A.mark);
-      let landedA = 0; let landedQ = 0;
-      const deadline = Date.now() + 30_000;
-      do {
-        landedA = transcriptMentions(A.sid, p2);
-        landedQ = transcriptMentions(Q.sid, p2);
-        expect(landedQ, `A 的排队消息被投进了别的会话(${Q.mark})的会话文件 = 不可撤销的数据污染`).toBe(0);
-        if (landedA) break;
-        await page.waitForTimeout(1_000);
-      } while (Date.now() < deadline);
-
-      expect(landedQ, `Q 的会话文件里出现了 A 的排队消息(${landedQ} 次)`).toBe(0);
-      expect(landedA, '回到 A 之后,排队的消息没有被投回 A(A 的会话文件里始终没有它)。'
+      expect(landedA, '用户一直停在 Q,这条排队消息应在 10 秒内自动发进 A(A 的会话文件里始终没有它)。'
         + `明细:A jsonl p1=${transcriptMentions(A.sid, p1)} p2=${landedA};Q jsonl p2=${landedQ};phase=${phaseOf(CTL, A.sid)}`).toBeGreaterThan(0);
-      expect(phaseOf(CTL, A.sid), 'A 的桩件没有开第二回合(= 投递没到 A 的进程)').toBe('chunk1');
+      await expect.poll(() => phaseOf(CTL, A.sid), { message: 'A 的桩件没有开第二回合(= 投递没到 A 的进程)', timeout: 10_000 }).toBe('chunk1');
       results.push(`第${i + 1}轮 PASS`);
     } catch (error) {
       results.push(`第${i + 1}轮 FAIL: ${String(error.message).split('\n')[0]}`);

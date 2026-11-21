@@ -78,17 +78,33 @@ export function migrateDraftQueue(messageQueue, draftKey, sid) {
  * @param {boolean} officialAnthropic 当前 provider 是否官方(口径同
  *   makeProviderModelGuard:`(currentProvider?.providerHint || 'anthropic') === 'anthropic'`)。
  *   默认 false = 保守(既有调用点不传时行为一字不变)。
+ * r196:拆成「找最后一条」(lastRealModelMsg)+「门控」(gateHistModel)两步,本函数是二者的组合、结果不变。
+ *   后台排空在入队那一刻只记下找到的那条消息({model, timestamp}),到发送时再按当时的 providerEpoch 门控。
  */
 export function resolveHistModel(messages, providerEpoch = 0, officialAnthropic = false) {
+  return gateHistModel(lastRealModelMsg(messages), providerEpoch, officialAnthropic);
+}
+
+/** 最近一条带真实模型 id 的消息(跳过没有 model 的与 `<synthetic>` 等伪 id),原对象返回;没有 → null。不做门控。 */
+export function lastRealModelMsg(messages) {
   const ms = messages || [];
   for (let i = ms.length - 1; i >= 0; i--) {
     if (!ms[i]?.model) continue;
     if (/^</.test(ms[i].model)) continue;
-    if (providerEpoch && !officialAnthropic
-      && (!ms[i].timestamp || Date.parse(ms[i].timestamp) <= providerEpoch)) return null;
-    return ms[i].model;
+    return ms[i];
   }
   return null;
+}
+
+/**
+ * 历史模型的 providerEpoch 门控(规则见 resolveHistModel):非官方 provider 下,切换 provider 之前(或没有时间戳)的消息
+ * 不可信 → null;否则回这条消息的 model。msg 为空或是伪 id → null。
+ */
+export function gateHistModel(msg, providerEpoch = 0, officialAnthropic = false) {
+  if (!msg?.model || /^</.test(msg.model)) return null;
+  if (providerEpoch && !officialAnthropic
+    && (!msg.timestamp || Date.parse(msg.timestamp) <= providerEpoch)) return null;
+  return msg.model;
 }
 
 /**

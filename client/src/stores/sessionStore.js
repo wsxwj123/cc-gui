@@ -3,7 +3,7 @@ import { nextDockCode } from '../utils/artifactDock.js';
 import { mergeSyncedMap, syncableKey, pushLocalOnlyKeys, createInFlightCounter, shouldMarkMigrated } from '../utils/sessionSync.js';
 import { FONT_OPTIONS, readingFontCss } from '../utils/systemFonts.js';
 import { resolveLoadingStyle, readLoadingSpeed, normalizeLoadingSpeed } from '../utils/loadingPrefs.js';
-import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState, queueKeyFor, isDraftQueueKey, draftQueueProjectHash } from '../utils/steerQueue.js';
+import { createQueueId, firstDrainableIndex, isSteerBarrier, reclaimClaimItem, reconcileSteered, stripSteerState, queueKeyFor, isDraftQueueKey, draftQueueProjectHash, withoutBgSendFields } from '../utils/steerQueue.js';
 import { isValidContextResponse, shouldReplaceContextCache } from '../utils/contextCache.js';
 import { reducePinned, initialExpandedProjects, toggleExpanded, mergeSessionList, mergeHiddenOrder } from '../utils/projectPanel.js';
 import { mergeProviderLists } from '../utils/providerList.js';
@@ -574,6 +574,9 @@ function recycleAgentRecords(agents, s) {
 }
 
 const QUEUE_STORAGE_KEY = 'cgui-message-queue';
+// r196:本次运行(本页面这次加载)的运行号,只在状态库加载时生成、只在入队 / 放回时写进条目(runId)。后台排空只发
+// runId 等于它的条目 —— 刷新或重启之后遗留的排队不在后台自动发(等用户进入那个会话再由窗格发)。
+export const RUN_ID = createQueueId('run');
 const rawQueueSnapshot = readLs(QUEUE_STORAGE_KEY, {});
 const initialQueueMap = {};
 if (rawQueueSnapshot && typeof rawQueueSnapshot === 'object' && !Array.isArray(rawQueueSnapshot)) {
@@ -922,6 +925,20 @@ export const useStore = create((set, get) => ({
   // 读回,每次变更由文件尾 subscribe 镜像写入。崩溃后恢复 = 消息留在队列里等重发,
   // 不自动发送(自动发可能撞正在进行的回合)。
   messageQueue: recoveredQueueMap,
+  // r196:正在删除(含撤销窗口)的会话键。后台排空不发这些会话的排队;不落盘(刷新后遗留排队本来就不在后台发)。
+  pendingDeleteSessions: new Set(),
+  markSessionDeleting: (keys) => set((s) => {
+    const list = (Array.isArray(keys) ? keys : [keys]).filter((k) => typeof k === 'string' && k);
+    if (!list.length || list.every((k) => s.pendingDeleteSessions.has(k))) return s;
+    return { pendingDeleteSessions: new Set([...s.pendingDeleteSessions, ...list]) };
+  }),
+  unmarkSessionDeleting: (keys) => set((s) => {
+    const list = (Array.isArray(keys) ? keys : [keys]).filter((k) => typeof k === 'string' && k);
+    if (!list.some((k) => s.pendingDeleteSessions.has(k))) return s;
+    const next = new Set(s.pendingDeleteSessions);
+    for (const k of list) next.delete(k);
+    return { pendingDeleteSessions: next };
+  }),
 
   // r26-B1:孤儿 draft 队列 { [queueKey]: { projectHash, items[] } }。
   // 启动时从 messageQueue 里摘出的无主 draft 排队消息(见模块顶部回收段)。
@@ -2305,7 +2322,8 @@ export const useStore = create((set, get) => ({
 
   // ── Message queue helpers (#3) ──────────────────────────────
   enqueueMessage: (sessionKey, msg) => {
-    const queued = { ...msg, queueId: msg?.queueId || createQueueId('queue') };
+    // r196:runId = 本次运行(后台排空只发本次运行排进来的)
+    const queued = { ...msg, queueId: msg?.queueId || createQueueId('queue'), runId: RUN_ID };
     let persisted = false;
     set((s) => {
       const list = s.messageQueue[sessionKey] || [];
@@ -2514,7 +2532,8 @@ export const useStore = create((set, get) => ({
   // afterBusy:排在队首那一串同样被退回、等着重发的条目(带 busyRetryAt)之后 —— 新发的消息不越过先被退回的;
   // 不给(出队重试又被退回的那条)= 放回最前。返回入队的条目;存不进(配额满 / 禁写)返回 null,调用方不得当成已排队。
   requeueMessageFront: (sessionKey, msg, { afterBusy = false } = {}) => {
-    const queued = { ...msg, queueId: msg?.queueId || createQueueId('queue') };
+    // r196:放回的一律记成本次运行(被退回的是本次运行发过的)
+    const queued = { ...msg, queueId: msg?.queueId || createQueueId('queue'), runId: RUN_ID };
     let persisted = false;
     set((s) => {
       const list = s.messageQueue[sessionKey] || [];
@@ -2564,6 +2583,94 @@ export const useStore = create((set, get) => ({
     const next = [...list.slice(0, index), ...list.slice(index + 1)];
     return { messageQueue: { ...s.messageQueue, [sessionKey]: next } };
   }),
+  // r196(F2):按条目自身的 queueId 删除,返回删没删(先落盘核验再提交)。渲染时的下标在排空弹走队首、后台排空标记 / 移除
+  // 之后会指错条目,编辑 / 删除一律改走这里。拒删规则与 removeFromQueue 相同(取回中的、在途未定的不删;needs-review 可删)。
+  // expectBgSending:后台排空移除自己在途的那条 —— 只删 'bg-sending' 的条目,别的状态一律不删。
+  removeFromQueueById: (sessionKey, queueId, { expectBgSending = false } = {}) => {
+    let removed = false;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const index = queueId ? list.findIndex((item) => item?.queueId === queueId) : -1;
+      if (index < 0 || list[index]?.claimDraft) return s;
+      const item = list[index];
+      if (expectBgSending ? item.steerState !== 'bg-sending'
+        : (isSteerBarrier(item) && item.steerState !== 'needs-review')) return s;
+      const nextQueue = { ...s.messageQueue, [sessionKey]: [...list.slice(0, index), ...list.slice(index + 1)] };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      removed = true;
+      return { messageQueue: nextQueue };
+    });
+    return removed;
+  },
+  // r196:给刚入队的条目补写入队快照 owner(按 queueId,先落盘核验;返回写没写成)。窗格入队那句的写法被源码守卫锁着,
+  // 快照在同一个同步段里另写一次。
+  setQueueItemOwner: (sessionKey, queueId, owner) => {
+    let ok = false;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const index = queueId && owner ? list.findIndex((item) => item?.queueId === queueId) : -1;
+      if (index < 0) return s;
+      const nextQueue = { ...s.messageQueue, [sessionKey]: list.map((it, i) => (i === index ? { ...it, owner } : it)) };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      ok = true;
+      return { messageQueue: nextQueue };
+    });
+    return ok;
+  },
+  // r196:后台排空选中队首。只标「此刻可排空的队首」(与窗格排空同一判据 firstDrainableIndex,同一次 setState 里判与改,
+  // 与 shiftMessage 互斥);隐藏项、不是本次运行排的不标。先落盘核验,写不进返回 null(这一拍放弃)。返回标好的条目。
+  markBgSending: (sessionKey, queueId, { bgTurnId, bgStartedAt } = {}) => {
+    let marked = null;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const index = queueId ? list.findIndex((item) => item?.queueId === queueId) : -1;
+      if (index < 0 || index !== firstDrainableIndex(list)) return s;
+      const item = list[index];
+      if (item.hidden || item.runId !== RUN_ID) return s;
+      const next = { ...item, steerState: 'bg-sending', bgTurnId, bgStartedAt };
+      const nextQueue = { ...s.messageQueue, [sessionKey]: list.map((it, i) => (i === index ? next : it)) };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      marked = next;
+      return { messageQueue: nextQueue };
+    });
+    return marked;
+  },
+  // r196:后台排空的结果写回在途条目(按 queueId;找不到或已不是 'bg-sending' → 什么也不做,返回 false)。先落盘核验。
+  //   { kind: 'accepted', pid, startTimedOut }:服务端收下(200)或初始化超时(504 带 pid)→ 记 bgAcceptedPid(504 另记
+  //     bgStartTimedOut),条目保持 'bg-sending',等确认 / 等这一轮终态后由 removeFromQueueById(…, { expectBgSending:true }) 移除;
+  //   { kind: 'release' }:确定没被收下(如 409 会话忙)→ 退回普通排队态;
+  //   { kind: 'review', code, detail }:转复核(needs-review + holdReason {code, detail, at}),不再自动发出。
+  settleBgSend: (sessionKey, queueId, outcome = {}) => {
+    let settled = false;
+    set((s) => {
+      const list = s.messageQueue[sessionKey] || [];
+      const index = queueId ? list.findIndex((item) => item?.queueId === queueId) : -1;
+      if (index < 0 || list[index].steerState !== 'bg-sending') return s;
+      const current = list[index];
+      let nextItem = null;
+      if (outcome.kind === 'accepted' && outcome.pid != null && outcome.pid !== '') {
+        nextItem = { ...current, bgAcceptedPid: String(outcome.pid) };
+        if (outcome.startTimedOut) nextItem.bgStartTimedOut = true;
+      } else if (outcome.kind === 'release') {
+        const { steerState, ...rest } = withoutBgSendFields(current);
+        void steerState;
+        nextItem = rest;
+      } else if (outcome.kind === 'review' && outcome.code) {
+        nextItem = {
+          ...withoutBgSendFields(current),
+          steerState: 'needs-review',
+          attemptWasAmbiguous: true,
+          holdReason: { code: String(outcome.code), ...(outcome.detail ? { detail: String(outcome.detail) } : {}), at: Date.now() },
+        };
+      }
+      if (!nextItem) return s;
+      const nextQueue = { ...s.messageQueue, [sessionKey]: list.map((it, i) => (i === index ? nextItem : it)) };
+      if (!persistQueueSnapshot(nextQueue, true)) return s;
+      settled = true;
+      return { messageQueue: nextQueue };
+    });
+    return settled;
+  },
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   setSearchQuery: (query) => set({ searchQuery: query }),

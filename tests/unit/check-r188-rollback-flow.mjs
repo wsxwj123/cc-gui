@@ -156,7 +156,8 @@ await t('3 回滚裁剪最终失败:不重发、不截界面,内容放回输入�
   assert.ok(!A.includes("text: '会话记录裁剪失败,回退可能不完整"), '旧的「照样重发」提示已去掉');
 });
 await t('3 「回退进行中」标记:入队门、流收尾排空、后台轮询排空三处都看它;回滚各出口清', async () => {
-  assert.match(A, /!opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current \|\| rollbackBusyFor\(rollbackBusyRef\.current, sessionQueueKey\)\)/);
+  // r196:门里多了 bgSendAhead(本会话队首正在自动发出),仍在 !opts.forceSend && ( … ) 这一个括号里 —— 回退重发照旧豁免。
+  assert.match(A, /!opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current \|\| rollbackBusyFor\(rollbackBusyRef\.current, sessionQueueKey\) \|\| bgSendAhead\)\)/);
   assert.ok(!/if \(rollbackBusyRef\.current\) return;/.test(A), '排空不许只看标记在不在(要按会话键)');
   assert.match(RB, /const rbBusy = \{ key: rbKey \};/);
   assert.match(RB, /rbKey = draftKey;[^\n]*\n\s*rbBusy\.key = draftKey;/, '会话被裁空转草稿时标记跟着换键');

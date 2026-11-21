@@ -162,11 +162,20 @@ assert.equal(keyRequestsReading('End'), false, 'End 应由到达底部的几何�
   assert.ok(/ownSaved \?\? \(legacyKey \? localStorage\.getItem\(legacyKey\)/.test(src)
       && !/localStorage\.setItem\(legacyKey/.test(src),
     '旧 session-only 键只允许兼容读取，不得继续写入');
-  // 两个 {0,N} 是"隔多远都行"的分隔符,不是长度上限 —— 断言的是**顺序**(入队门的 return
-  // 必须在恢复 following 之前)。r64 M6 往这段里加了 onQueued 三态回报,原来的 1800 只剩
-  // 个位数余量,放宽到 2200 保留同一条语义、免得下一次改动踩空。
-  assert.ok(/if \(!reattachPid && !opts\.forceSend[\s\S]{0,2200}return;[\s\S]{0,500}真正开始新的空闲回合/.test(src),
-    '忙碌 Enter/steer 必须在恢复 following 之前返回');
+  // 断言的是**顺序**(入队门的 return 必须在恢复 following 之前),不看距离。r196 起改为锚点(原来是两个字数窗口
+  // {0,2200} / {0,500},门里每多一项就要放宽一次):①入队门恰好一处;②门后第一个与 if 同缩进(4 格)的右大括号就是
+  // 门的结尾,门内整块以 return; 结尾(忙时 Enter / 引导在门里返回);③「真正开始新的空闲回合」(恢复 following 那段)
+  // 在这个右大括号之后。
+  {
+    const gateHead = '\n    if (!reattachPid && !opts.forceSend && (';
+    const gateAt = src.indexOf(gateHead);
+    assert.ok(gateAt > 0 && src.indexOf(gateHead, gateAt + 1) < 0, '入队门恰好一处');
+    const closeAt = src.indexOf('\n    }\n', gateAt + gateHead.length);
+    assert.ok(closeAt > gateAt, '找不到入队门的结尾');
+    assert.ok(/\n      return;$/.test(src.slice(gateAt, closeAt)), '忙碌 Enter/steer 必须在入队门里 return(门内整块以 return; 结尾)');
+    const idleAt = src.indexOf('真正开始新的空闲回合');
+    assert.ok(idleAt > closeAt, '忙碌 Enter/steer 必须在恢复 following 之前返回');
+  }
 
   const subagent = readFileSync(join(root, 'client/src/components/SubagentView.jsx'), 'utf8');
   assert.ok(/`\$\{paneId\}:\$\{parentSessionId\}:\$\{agentId\}`/.test(subagent),

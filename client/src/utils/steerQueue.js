@@ -1,4 +1,6 @@
-const BARRIER_STATES = new Set(['unknown', 'accepted', 'needs-review', 'claiming']);
+// r196:'bg-sending' = 后台排空已选中这条、请求在途(或已被服务端收下、等这一轮定论);与 ⚡ 的未定态一样挡住整条队列,
+// 编辑、删除、⚡ 并入、↑ 召回、窗格排空都不碰它(见 backgroundDrain 方案 v2 第 2.6 节)。
+const BARRIER_STATES = new Set(['unknown', 'accepted', 'needs-review', 'claiming', 'bg-sending']);
 
 // r26-B5:队列/pin/owner 键的单一构造点。draft 键必须带 draftId——旧形态
 // `draft-<projectHash>` 让同项目两个 draft 窗格共用一个队列(A 排队、B 的 drain 发出),
@@ -101,6 +103,7 @@ export function steerBlockReason(list) {
   if (head?.steerState === 'accepted') return 'accepted';
   if (head?.steerState === 'claiming') return 'claiming';
   if (head?.steerState === 'unknown') return 'unknown';
+  if (head?.steerState === 'bg-sending') return 'bg-sending'; // r196:正在自动发出
   if (head?.steerState === 'needs-review' || head?.attemptWasAmbiguous) return 'review';
   if (head?.hidden) return 'hidden';
   return 'none';
@@ -158,6 +161,8 @@ export function reconcileSteered(list, _unusedSigs, steerKeys, { turnActive } = 
     // 对账不得把它翻回 needs-review barrier——那会复活刚被用户解开的死锁。
     if (item.steerState === 'kept') { out.push(item); continue; }
     if (item.steerState === 'needs-review') { out.push(item); continue; }
+    // r196:后台排空在途的条目不归 ⚡ 对账管(它不是并入),原样保留 —— 否则切走时被断开那条流收尾的对账会把在途条目翻成复核。
+    if (item.steerState === 'bg-sending') { out.push(item); continue; }
     // r26-B3:accepted 且仍在落盘宽限期内 → 本轮未命中不翻(下一次刷新仍缺席才翻)。
     // R46:回合还活着(turnActive === true)→ 一直等,与宽限无关;回合已结束
     // (=== false)→ 终局对账,连宽限也不等(再挂 20s 只会让它卡在不可见的 accepted 态,
@@ -217,30 +222,49 @@ export function reclaimClaimItem(item, opts = {}) {
   return restored;
 }
 
+// r196:后台排空在途条目上的字段;转复核 / 退回普通态时一并去掉。
+export const BG_SEND_FIELDS = ['bgTurnId', 'bgStartedAt', 'bgAcceptedPid', 'bgStartTimedOut'];
+export function withoutBgSendFields(item) {
+  const out = { ...item };
+  for (const k of BG_SEND_FIELDS) delete out[k];
+  return out;
+}
+
 // 页面恢复后没有原 slot receipt；任何 unresolved 都先成为人工复核 barrier。
 // ②claim 残留（不论目标 pane 是否还在——pane id 计数器重启后重置，跨重启一律悬空）
 // 全部复位为可见 needs-review，绝不留 hidden 阻塞槽。
-export function stripSteerState(queueMap) {
+// r196:后台排空在途('bg-sending')的条目 —— 服务端已收下(有 bgAcceptedPid)且不是初始化超时 → 这一轮已在会话里,移除;
+// 其余(请求没等到回音、或初始化超时还没等到这一轮的终态)→ 复核(holdReason 'interrupted'),不再自动发出。
+export function stripSteerState(queueMap, now = Date.now()) {
   if (!queueMap || typeof queueMap !== 'object') return {};
   const out = {};
   for (const [sessionKey, list] of Object.entries(queueMap)) {
     if (!Array.isArray(list)) continue;
-    out[sessionKey] = list.map((item) => {
-      if (item?.claimDraft || item?.steerState === 'claiming') return reclaimClaimItem(item);
-      if (!isSteerBarrier(item) && !item?.steerId) return item;
-      // ①"保留不发"是用户决定，跨重启保持，不翻回 needs-review。
-      if (item?.steerState === 'kept') return item;
-      // R46 ③:accepted 是「已送达、只等 UUID 落盘」的在途态，不是未决残留 —— 页面重载
-      // 不改变它。原来无条件翻 needs-review 等于每次重载都把在途并入判死（落盘要等下一个
-      // tool_result 边界，重载几乎必然落在窗口内 = 用户命中的入口 1）。原样保留
-      // steerId/acceptedAt，交给宽限/回合存活判据；真失败仍会被终局对账翻掉。
-      if (item?.steerState === 'accepted') return item;
-      const { claimId, targetPaneId, claimDraft, ...rest } = item;
-      void claimId; void targetPaneId; void claimDraft;
-      return { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };
+    out[sessionKey] = list.flatMap((item) => {
+      if (item?.steerState === 'bg-sending') {
+        if (item.bgAcceptedPid && !item.bgStartTimedOut) return [];
+        return [{ ...withoutBgSendFields(item), steerState: 'needs-review', attemptWasAmbiguous: true, holdReason: { code: 'interrupted', at: now } }];
+      }
+      return [stripOne(item)];
     });
   }
   return out;
+}
+
+// stripSteerState 对单个条目的原处理(r196 之前的 map 回调原样搬出)。
+function stripOne(item) {
+  if (item?.claimDraft || item?.steerState === 'claiming') return reclaimClaimItem(item);
+  if (!isSteerBarrier(item) && !item?.steerId) return item;
+  // ①"保留不发"是用户决定，跨重启保持，不翻回 needs-review。
+  if (item?.steerState === 'kept') return item;
+  // R46 ③:accepted 是「已送达、只等 UUID 落盘」的在途态，不是未决残留 —— 页面重载
+  // 不改变它。原来无条件翻 needs-review 等于每次重载都把在途并入判死（落盘要等下一个
+  // tool_result 边界，重载几乎必然落在窗口内 = 用户命中的入口 1）。原样保留
+  // steerId/acceptedAt，交给宽限/回合存活判据；真失败仍会被终局对账翻掉。
+  if (item?.steerState === 'accepted') return item;
+  const { claimId, targetPaneId, claimDraft, ...rest } = item;
+  void claimId; void targetPaneId; void claimDraft;
+  return { ...rest, steerState: 'needs-review', attemptWasAmbiguous: true };
 }
 
 // 旧测试/调用点只需要一个不可用于自动删除的签名容器；保留导出避免扩大改动面。

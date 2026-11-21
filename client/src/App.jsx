@@ -66,7 +66,42 @@ function fetchServerEpoch() {
     .then(() => { serverEpochInFlight = null; return serverEpochCache; });
   return serverEpochInFlight;
 }
-import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, flushAgentDeltas } from './stores/sessionStore.js';
+// r196:后台排空(utils/backgroundDrain.js)发出时的会话级处理。窗格自己的发送路径里有同样的几步(作废上一轮的直播快照、
+// 清输入预测;受理后图没带上的提示),后台发出时会话不在任何窗格里,提示一律留言,切回时显示。「配置改动延后生效」那句
+// 只在窗格发送的应答处理里给(有单测守着 App.jsx 里只有那一处读 configDeferred),后台发出的这一轮不给。
+function bgTurnStarted(key, { sessionId } = {}) {
+  try { dropStreamSnapshot(sessionId || key); } catch { /* 快照本来就没有 */ }
+  try { useStore.getState().clearPromptSuggestion(key, sessionId || key); } catch { /* 同上 */ }
+}
+function bgTurnAccepted(key, resp, notify) {
+  // 新回合开始 = 会话复活:清「已停」标记(同窗格发送时那一句)
+  try { useStore.getState().clearSessionStopped?.(key); } catch { /* 没有这个动作也不影响发送 */ }
+  const texts = [];
+  const img = resp?.imageAttach ? imageAttachNoticeText(resp.imageAttach) : '';
+  if (img) texts.push(img);
+  if (texts.length) notify(texts.join(' '));
+}
+// r196:排队条目的入队快照 owner —— 后台排空发它时只用这里的工作区路径(与窗格请求体同一个表达式 chatCwdFor)、所属工作区
+// (会话文件不在时移进首页要用)与窗格里最后一条真实模型消息(发送时再按当时的 providerEpoch 门控)。
+// r196:回退标记的 ref —— 写 .current 时同步一份按会话键的共享令牌(后台排空读,见 backgroundDrain.setRollbackBusy)。
+// 回退流程各出口照旧只写 .current;换键(会话被裁空转草稿)时令牌留在原键上,清标记时按原键清;漏清靠令牌 2 分钟过期兜底。
+function createRollbackBusyRef() {
+  let cur = null;
+  let tokenKey = null;
+  return {
+    get current() { return cur; },
+    set current(v) {
+      cur = v || null;
+      if (tokenKey && (!cur || cur.key !== tokenKey)) { clearRollbackBusy(tokenKey); tokenKey = null; }
+      if (cur?.key && !tokenKey) { setRollbackBusy(cur.key); tokenKey = cur.key; }
+    },
+  };
+}
+function queueOwnerSnapshot(cwd, projectHash, messages) {
+  const m = lastRealModelMsg(messages);
+  return { cwd: cwd || null, projectHash: projectHash || null, histMsg: m ? { model: m.model, timestamp: m.timestamp || null } : null };
+}
+import { useStore, THEME_FAMILIES, FONT_OPTIONS, systemPrefersDark, flushAgentDeltas, RUN_ID } from './stores/sessionStore.js';
 import { useWebSocket } from './hooks/useWebSocket.js';
 import { MessageBubble } from './components/MessageBubble.jsx';
 import { MarkdownRenderer } from './components/MarkdownRenderer.jsx';
@@ -146,11 +181,13 @@ import { aggregateHistoryCost, computeCostForMessage, displayUsd, formatCost, se
 import { extractToolResultText, extractToolResultImages, finalizePendingToolCalls, applyFinalizedToBlocks } from './utils/toolResult.js';
 import { rebuildTodosFromTaskCalls } from './utils/todos.js';
 import { isSteered, firstSteerableIndex, isSteerBarrier, persistedSteerKeys, steerStillInFlight, queueKeyFor, HOME_DRAFT_KEY, focusedComposerKey, createQueueId } from './utils/steerQueue.js';
-import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';
+import { leaveSessionNotice, mergeDraftText, takeSessionNotice, migrateNoticeOwner } from './utils/sessionNotice.js';
 import { imageAttachNoticeText } from './utils/imageAttachNotice.js';
 import { localEntryVisible, makeClientTurnId, resolveStopOwner } from './utils/sessionFlowIdentity.js';
 import { localTurnTakenOver, makeTurnIdentityIndex } from './utils/turnIdentity.js';   // r141 渲染期身份闸门
-import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, migrateDraftQueue, paneMessagesOwned, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
+import { isInitBindingOrigin, isResetBindingOrigin, isCliNoContentPlaceholder, makeProviderModelGuard, paneMessagesOwned, lastRealModelMsg, resolveHistModel, resolveSelectorModel, resolveSendModel } from './utils/routing.js';
+import { AUTO_DOWNGRADE_NOTICE, buildChatRequestBody, chatCwdFor, gateThirdPartyAuto } from './utils/chatRequest.js';
+import { promoteDraftArtifacts } from './utils/draftPromotion.js';
 import { migrateOptimisticGoalOwner, optimisticGoalForOwner, parseGoalCommand } from './utils/goal.js';
 import { approvedPlanItems, migrateSessionVisibilityOwner } from './utils/plan.js';
 import { nativeContextWindow, isBareClaudeAlias, pickCliContextWindow, reconcileBadgeWindow, resolveTurnUsage } from './utils/contextWindow.js';
@@ -205,8 +242,9 @@ import { SCROLL_SAVED_AT_BOTTOM, advanceScrollTransaction, beginScrollTransactio
 import { resolveSessionTitle, resolveLatestSessionTitle, findLoadedSession, sessionRowTooltip } from './utils/sessionTitle.js';
 import { listboxKeyAction, listboxOpenIndex } from './utils/listboxKeyboard.js';
 import { createStreamCommit } from './utils/streamCommit.js';
-import { subscribeAgentsActive } from './utils/agentsActivePoller.js';
-import { askSaveLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot, willAskLargeSnapshot } from './utils/largeSnapshot.js';
+import { subscribeAgentsActive, fetchAgentsActiveFresh } from './utils/agentsActivePoller.js';
+import { startBackgroundDrainer, registerPaneDrain, beginFinalizing, setRollbackBusy, clearRollbackBusy, bgAcceptedPids } from './utils/backgroundDrain.js';
+import { askSaveLargeSnapshot, bgPreflightLargeSnapshot, oversizeAllowedFor, preflightLargeSnapshot, willAskLargeSnapshot } from './utils/largeSnapshot.js';
 import { createLatestGate } from './utils/latestRequest.js';
 
 // r146b/r146c:没有任何窗格承载、也回不去的内容,按"它转成的 draft 身份"记成孤儿 draft 排队消息
@@ -4325,7 +4363,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // 等待期间窗格切到别的会话时,那个会话的发送与排空不受影响。期间流收尾与后台轮询的排空不弹不发,普通发送进排队 —— 否则等停止、等裁剪的
   // 几秒里,被中止那条流的收尾会把排队消息发出去,或用户新发的一条直接起一轮,抢在裁剪与重发之前。
   // 清它的地方:resendReplacing 真正发出或放弃时;发起方没交给 resendReplacing 的所有出口(finally)。
-  const rollbackBusyRef = useRef(null);
+  const [rollbackBusyRef] = useState(createRollbackBusyRef); // r196:写 .current 时同步后台排空读的回退令牌
   // 引导消息的流式切口必须在所有发送入口之前声明：队列按钮与 Cmd/Ctrl+Enter 共用。
   const steerAnchorRef = useRef({});
   const streamingBlocksRef = useRef(EMPTY_ARRAY);
@@ -4735,6 +4773,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     lastSeenPidRef.current = null;
     let cancelled = false;
     let drainScheduled = false; // 排队消息排空的在途标记(见下方 drain 分支)
+    // r196:本窗格的排空者登记这个会话(后台排空不碰有窗格在排空的会话);副作用清理时注销。
+    const unregPaneDrain = registerPaneDrain(queueKeyFor(selectedSession));
     // r148 P2:数据来源换成全应用共用的那一份轮询(utils/agentsActivePoller.js)—— 原来是本窗格自己
     // 每 1.5 秒 fetch 一次,6 个分屏就是 6 份一样的请求。**下面的判定体一字未动、先后顺序不变**,
     // 只是 d 由「自己取」变成「共用轮询交过来」。订阅当下会立刻取一份新的(等价于原来的首轮 poll()),
@@ -4762,6 +4802,17 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 打包版没有文件 watcher,缺这步要等用户切走切回才看得到结果。
         if (!next && lastSeenPidRef.current && !streamingRef.current && pollSid && selectedSession?.projectHash) {
           fetchMessagesForTab(pollSid, selectedSession.projectHash, { silent: true });
+        }
+        // r196:后台排空替这个会话发出的那一轮已不在跑(切回那一刻恰好结束、打包版没有文件监视)→ 静默拉一次历史,拉过即删。
+        const _bgPids = pollSid ? bgAcceptedPids.get(pollSid) : null;
+        if (_bgPids?.size && !streamingRef.current && selectedSession?.projectHash) {
+          const _running = new Set((d.agents || []).filter((a) => a.kind === 'chat-process' && a.stoppable && a.status !== 'idle').map((a) => String(a.pid)));
+          const _settled = [..._bgPids].filter((p) => !_running.has(p));
+          if (_settled.length) {
+            for (const p of _settled) _bgPids.delete(p);
+            if (!_bgPids.size) bgAcceptedPids.delete(pollSid);
+            fetchMessagesForTab(pollSid, selectedSession.projectHash, { silent: true });
+          }
         }
         // 排队消息自动排空(原「pid 有→无」分支的推广)。原分支要求本 pane 亲眼看到 pid
         // 从有变无,于是用户实报的场景漏网:A 生成中排队 → 切到 B → A 在后台跑完 → 回到 A
@@ -4809,7 +4860,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       } catch {}
     };
     const unsubscribe = subscribeAgentsActive(poll);
-    return () => { cancelled = true; unsubscribe(); };
+    return () => { cancelled = true; unsubscribe(); unregPaneDrain(); };
   }, [selectedSession?.sessionId, selectedSession?.draftId]);
 
   // B「后台工作中」横幅的存在门槛(理由见 utils/reattach.js BG_BANNER_DELAY_MS):
@@ -5575,7 +5626,11 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 队列条目上的「⚡ 并入」按钮(handleAccelerate)。
     // forceSend(回滚/重做的重发 = 有意打断替换)照旧连这道门都不进。
     // r188:回退进行中(停回合、等裁剪的那几秒)普通发送同样进排队,由重发那一轮的收尾排空。
-    if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current || rollbackBusyFor(rollbackBusyRef.current, sessionQueueKey))) {
+    // r196:这个会话的队首正在自动发出(后台排空)→ 手打的也进排队、排在它后面,不直接发。入队后补写入队快照 owner(入队那句的
+    // 写法有源码守卫锁着,另写一次;同一个同步段里,后台排空插不进来;写不进就没有快照,后台不发它,等用户回来由窗格发)。
+    const bgSendAhead = (useStore.getState().messageQueue[sessionQueueKey] || []).some((q) => q?.steerState === 'bg-sending');
+    const stampQueueOwner = (q) => useStore.getState().setQueueItemOwner(sessionQueueKey, q.queueId, queueOwnerSnapshot(chatCwdFor(selectedSession, selectedProject), selectedSession?.projectHash, getLocalMessages()));
+    if (!reattachPid && !opts.forceSend && (streamingRef.current || backgroundPidRef.current || rollbackBusyFor(rollbackBusyRef.current, sessionQueueKey) || bgSendAhead)) {
       const queuedAt = Date.now();
       const queueOpts = { ...opts };
       delete queueOpts.onEnqueueFailure; delete queueOpts.onQueued; delete queueOpts.fromComposer;
@@ -5589,6 +5644,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         setProviderSwitchNotice({ text: message });
         return;
       }
+      stampQueueOwner(queued); // r196
       onQueued?.(queued);
       autoMoveOnBusyEnter(opts, hiddenUserMessage); // r198
       // Cmd/Ctrl+Enter:先入队保底，再调用 CLI/SDK 的实时输入队列。连接中、回合刚收尾或
@@ -6011,6 +6067,8 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     // 的 -1 严格配对 —— try 之前抛错就根本没加过,不会把 poll 排空永久压死。
     // 正常/reattach 两条起流路径共用这同一个 try/finally,一处覆盖两条。
     finalizeInFlightRef.current += 1;
+    // r196:按会话键的共享收尾登记(后台排空遇到收尾中的会话不发);注销在同一个 finally 里,抛错也注销。
+    const endFinalizing = beginFinalizing([sessionQueueKey]);
     try {
       let pid;
       if (reattachPid) {
@@ -6036,13 +6094,13 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 修正批#5/判官①:切到第三方后静态过滤只是藏选项、不清已 pin 的 auto → 会原样发出。
       // 发送前就地降为 default 并回写 pin 闭环,附切换通知横幅。
       // r151a:第三方判据读审核状态的 official(与服务端同判据);第三方 auto 总开关开着就原样发 auto。
-      if (permissionMode === 'auto') {
-        const _stAuto = useStore.getState();
-        if (isThirdPartyProvider(_stAuto.autoAuditStatus, _stAuto.currentProvider?.providerHint) && _stAuto.autoAuditStatus?.enabled !== true) {
-          permissionMode = 'default';
-          _stAuto.setPermissionMode('default', sessionQueueKey);
-          setProviderSwitchNotice({ text: '「自动」权限档在第三方 provider 下默认关闭，本会话已切回「逐步确认」。可在 设置 → 权限 中开启。' });
-        }
+      // r196:判据抽到 chatRequest.gateThirdPartyAuto(后台排空经 buildChatRequestBody 用同一判据)。写回档位与提示仍在这里
+      // (下面的等待之前,时序不变);组请求体时传进去的已是门控后的档位,那里同一组输入再判一次是空操作。
+      const _stAuto = useStore.getState();
+      if (gateThirdPartyAuto(permissionMode, _stAuto.autoAuditStatus, _stAuto.currentProvider?.providerHint).downgraded) {
+        permissionMode = 'default';
+        _stAuto.setPermissionMode('default', sessionQueueKey);
+        setProviderSwitchNotice({ text: AUTO_DOWNGRADE_NOTICE });
       }
       // 模型解析与徽章一致(#8):pin → 历史模型 → 全局默认。否则发送时只读 pin||全局,
       // 全局被 WS 重置成默认后,没 pin 的会话(尤其回滚后)会用默认模型发出,与徽章不符。
@@ -6054,24 +6112,19 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       const _officialM = (_stM.currentProvider?.providerHint || 'anthropic') === 'anthropic';
       const _pin = _stM.modelBySession[sessionQueueKey];
       const _hist = resolveHistModel(getLocalMessages(), _stM.providerEpoch || 0, _officialM);
-      let currentModel = resolveSendModel({
-        pin: _pin,
-        hist: _hist,
-        globalModel: _stM.currentModel,
-        availableModels: _stM.availableModels,
-        customModels: _stM.customModels,
-        officialAnthropic: _officialM,
-      });
+      // r196 F1:入队快照在这里就取好(与 _hist 同一时刻、下面几段等待之前);409 退回排队时用它。等待期间用户可能已切到
+      // 别的会话,那时窗格显示的消息不属于发起的会话,不能拿来当它的快照(后台发出会用错模型)。
+      const _queueOwner = queueOwnerSnapshot(chatCwdFor(selectedSession, selectedProject), selectedSession?.projectHash, getLocalMessages());
+      // r196:pin → 历史模型 → 全局默认的解析(resolveSendModel)、1M 补位、思考强度的能力门控都在 buildChatRequestBody 里做
+      // (后台排空共用);这里只按改前的时刻取输入。
       // 1M 标记兜底(与徽章显示解析同一规则):重装丢 pin 后,发送也要带回 [1m],
       // 否则显示 1M 而实际按 200K 发。用 selectedSession?.sessionId(勿用下方 const sid,
       // TDZ)。pin 显式关 1m 时 syncContext1m 已清标记,不会误补。
       const _c1m = selectedSession?.sessionId && _stM.context1mBySession?.[selectedSession.sessionId];
-      if (_c1m && currentModel && !/\[1m\]/i.test(currentModel)) currentModel = currentModel + '[1m]';
-      sentModel = currentModel; // r146 R6:见声明处
-      let effort = useStore.getState().getEffortFor(sessionQueueKey);
       // r10-9:模型能力门控——模型声明不支持思考或该档不支持时不传 effort(不写 env,
       // CLI 端零痕迹)。UI 已回落兜底,这里是发送侧防御(pin 残留/竞态)。
-      if (effort && !effortAllowed(effortCapsFor(useStore.getState().modelEffortMeta, currentModel), effort)) effort = '';
+      const _effortRaw = useStore.getState().getEffortFor(sessionQueueKey);
+      const _effortMeta = useStore.getState().modelEffortMeta;
       // When resuming an existing session, cwd MUST be the EXACT string the
       // CLI was launched with — including Unicode chars (e.g. `/foo/肠骨轴`).
       // Reconstructing from the hash dir name is lossy: CLI maps every non-
@@ -6083,9 +6136,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       // 必须放在 `sid` 声明之后:之前放在前面引用了 TDZ 中的 const sid → WebKit 报
       // "Cannot access uninitialized variable.",每次发送都炸(普通/agent 模式皆然)。
       const activeAgent = !sid ? useStore.getState().getActiveAgentFor(sessionQueueKey) : '';
-      const chatCwd = (sid && selectedSession?.projectPath)
-        ? selectedSession.projectPath
-        : (selectedSession?.projectPath || selectedProject?.path);
+      const chatCwd = chatCwdFor(selectedSession, selectedProject);
       // R13 回合身份:clientTurnId 在本次发送内恒定(不重试不换 id);serverEpoch 取缓存,
       // 缓存空(首次发送 / 刚被判 TURN_SERVER_CHANGED)才现取一次。
       const clientTurnId = opts.clientTurnId || newClientTurnId();
@@ -6102,38 +6153,49 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         }
         xsFields = xsClaimed.fields;
       }
+      // r196:请求体由 chatRequest.buildChatRequestBody 组(后台排空共用同一函数,单测锁定同一组输入两边逐字相同;字段含义、
+      // 取舍的注释在那里)。各输入取值的时刻与改前相同:档位、模型、思考强度在上面的等待之前取好;常驻、花费上限、genui
+      // 开关在这里现读(改前就在请求体字面量里现读)。
+      const _chatReq = buildChatRequestBody({
+        prompt,
+        clientTurnId,
+        serverEpoch: turnEpoch,
+        sessionId: sid,
+        draftId: selectedSession?.draftId,
+        cwd: chatCwd,
+        isCompact,
+        appendSystemPrompt,
+        agent: activeAgent,
+        permissionMode,
+        autoAuditStatus: _stAuto.autoAuditStatus,
+        providerHint: _stAuto.currentProvider?.providerHint,
+        modelPin: _pin,
+        histModel: _hist,
+        globalModel: _stM.currentModel,
+        availableModels: _stM.availableModels,
+        customModels: _stM.customModels,
+        officialAnthropic: _officialM,
+        context1m: _c1m,
+        effort: _effortRaw,
+        modelEffortMeta: _effortMeta,
+        addDirs,
+        globalRead,
+        // #26 会话常驻:false 时 server 回合结束即关进程(逐回合冷启,旧行为)
+        keepAlive: useStore.getState().persistentChat !== false,
+        // 花费上限(美元):>0 时透传 SDK maxBudgetUsd,进程累计花费达到上限即停。
+        maxBudgetUsd: useStore.getState().maxBudgetUsd || undefined,
+        // 输入预测(A):server 据此启用 SDK promptSuggestions 并在 result 后留等待窗。
+        promptSuggestions: _suggestPref,
+        // r66:genui 渲染开关同时门控"教不教模型这套围栏语法"。关掉时 server 不把
+        // 教学段注入系统提示(开关也计入常驻进程复用键,翻完开关不会复用旧系统提示)。
+        genui: useStore.getState().genuiRender !== false,
+      });
+      sentModel = _chatReq.model; // r146 R6:见声明处
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt,
-          clientTurnId,
-          serverEpoch: turnEpoch || undefined,
-          // Omit sessionId for a draft so the CLI creates a fresh session.
-          sessionId: sid || undefined,
-          // draft 流带 draftId(存进 server slot):init 前切走再切回时轮询按它找回
-          // 本进程 reattach,earlyLines 回放的 init 经归属校验正确绑定(僵尸 draft 修复)。
-          draftId: (!sid && selectedSession?.draftId) ? selectedSession.draftId : undefined,
-          cwd: chatCwd,
-          // /compact 用标准上下文压缩:剥掉 [1m]。否则 Anthropic 上压缩会用 1M 上下文,
-          // 触发 "Usage credits required for 1M context" 报错(用户报告)。压缩只是摘要,
-          // 不需要 1M 窗口;对原生 1M 的 provider 去掉也无害。
-          model: isCompact ? String(currentModel || '').replace(/\[1m\]/i, '') : currentModel,
-          effort: effort || undefined,
-          appendSystemPrompt: appendSystemPrompt || undefined,
-          addDirs: addDirs && addDirs.length ? addDirs : undefined,
-          permissionMode: permissionMode || 'default',
-          globalRead: globalRead !== false,
-          agent: activeAgent || undefined,
-          // #26 会话常驻:false 时 server 回合结束即关进程(逐回合冷启,旧行为)
-          keepAlive: useStore.getState().persistentChat !== false,
-          // 花费上限(美元):>0 时透传 SDK maxBudgetUsd,进程累计花费达到上限即停。
-          maxBudgetUsd: useStore.getState().maxBudgetUsd || undefined,
-          // 输入预测(A):server 据此启用 SDK promptSuggestions 并在 result 后留等待窗。
-          promptSuggestions: _suggestPref,
-          // r66:genui 渲染开关同时门控"教不教模型这套围栏语法"。关掉时 server 不把
-          // 教学段注入系统提示(开关也计入常驻进程复用键,翻完开关不会复用旧系统提示)。
-          genui: useStore.getState().genuiRender !== false,
+          ..._chatReq.body,
           // r151b:点卡片【处理】发出的这条带跨会话消息 id 与一次性凭据(服务端兑换后把 prompt 换成信封);
           // 其它发送 xsFields 为 null,请求体与改动前逐字相同。
           ...(xsFields || {}),
@@ -6161,6 +6223,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
         // 出队重试的那条回到最前;新发的这条若队首已有被退回、等着重发的消息,排在它们后面(不越过先被退回的)。
         const requeued = useStore.getState().requeueMessageFront(sessionQueueKey, {
           text: prompt, queuedAt: Date.now(), hidden: !!hiddenUserMessage, opts: retryOpts, busyRetryAt: Date.now() + BUSY_RETRY_GAP_MS,
+          owner: _queueOwner, // r196:入队快照(在等待之前取好,见 _queueOwner)
         }, { afterBusy: !opts.busyRequeued });
         if (!requeued) {
           // 存不进队列(本地存储满):乐观气泡留着(原文还在屏上),明说没发出、要手动重发 —— 不静默丢。
@@ -6603,29 +6666,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
             // (selIsOrigin=false)时也照做:标题该生成、列表该出现 A。数据全取发起时闭包
             // (prompt/cwd/selectedSession),不碰 getLocalSession()。
             if (startedAsDraft) {
-              // 队列迁移(fable 审计,逻辑在 utils/routing.js):selIsOrigin=false 时
-              // migrateSessionKey 不执行,残留队列会被下一个同项目 draft 继承串发;
-              // selIsOrigin=true 时已迁空,此处 no-op。pin 不迁(见 routing.js 注释)。
-              try {
-                const _dk = queueKeyFor(selectedSession);
-                const _next = migrateDraftQueue(useStore.getState().messageQueue, _dk, event.session_id);
-                if (_next) useStore.setState({ messageQueue: _next });
-              } catch {}
-              // r193 F1:窗格已切走时留给草稿键的留言(leaveSessionNotice)改挂到真 sid,切回这个会话时取得到;
-              // 切走前挂在本窗格、所属草稿键的提示条同样改挂(selIsOrigin=true 时上面已改挂,这里 no-op)。
-              {
-                const _nk = queueKeyFor(selectedSession);
-                migrateSessionNotice(_nk, event.session_id);
-                if (!selIsOrigin) setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _nk, event.session_id));
-              }
-              // 输入历史同迁(用户已切走时 selIsOrigin=false,上面 origin 块不执行,在此兜底):
-              // draft 期历史存旧键,不迁则首条历史滞留旧键且污染该项目下一个 draft。取发起时闭包
-              // selectedSession(sel 是当前选中,用户已切走时会错迁别的项目)。selIsOrigin=true 时旧键已删,此处幂等 no-op。
-              try {
-                const _hk = queueKeyFor(selectedSession);
-                const _hv = localStorage.getItem(`cgui-input-history:${_hk}`);
-                if (_hv && _hv !== '[]') { localStorage.setItem(`cgui-input-history:${event.session_id}`, _hv); localStorage.removeItem(`cgui-input-history:${_hk}`); }
-              } catch {}
+              // 草稿键下属于这个会话的排队、留言、输入历史转到正式编号(r196:抽成 utils/draftPromotion.promoteDraftArtifacts,
+              // 后台排空在没有窗格负责这个草稿时调同一个函数)。用发起时闭包里的草稿键(selectedSession;sel 是当前选中,
+              // 用户已切走时会错迁别的会话)。selIsOrigin=false(已切走)时上面的 origin 块不执行,这里兜底;
+              // selIsOrigin=true 时上面已迁空,这里幂等 no-op。
+              const _dk = queueKeyFor(selectedSession);
+              promoteDraftArtifacts(_dk, event.session_id);
+              // r193 F1:切走前挂在本窗格、所属草稿键的提示条同样改挂(selIsOrigin=true 时上面已改挂,这里 no-op)。窗格级状态,留在窗格。
+              if (!selIsOrigin) setProviderSwitchNotice((prev) => migrateNoticeOwner(prev, _dk, event.session_id));
+              endFinalizing.add(event.session_id); // r196:收尾登记追加正式编号
               // Q3 标题提速:新会话拿到真 sid 就立刻并行生成标题(只用首条用户消息,
               // 不等回复完成)。失败时 result 后的兜底逻辑(带 firstAssistant)会重试。
               try {
@@ -8474,6 +8523,7 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
       } finally {
         // C1:收尾结束(含中途抛错)一律解锁;归零后 poll 的排队排空恢复接管。
         finalizeInFlightRef.current = Math.max(0, finalizeInFlightRef.current - 1);
+        endFinalizing(); // r196
         // R13:本端已不再消费任何运行 —— data-run-id 收回(迟到的本流事件不会再写它:
         // 循环已退出)。
         if (isCurrentTurn()) setStreamRunId(null);
@@ -9984,11 +10034,15 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
     () => useStore.getState().clearPromptSuggestion(sessionQueueKey, selectedSession?.sessionId),
     [sessionQueueKey, selectedSession?.sessionId],
   );
-  const removeFromQueueAt = useCallback((i) => useStore.getState().removeFromQueue(sessionQueueKey, i), [sessionQueueKey]);
-  const editFromQueueAt = useCallback((i) => {
-    const item = messageQueue[i];
+  // r196(F2):编辑 / 删除按条目自身的 queueId 操作 —— 渲染时的下标在排空弹走队首、后台排空标记 / 移除之后会指错条目。
+  const removeFromQueueAt = useCallback((queueId) => {
+    useStore.getState().removeFromQueueById(sessionQueueKey, queueId);
+  }, [sessionQueueKey]);
+  const editFromQueueAt = useCallback((queueId) => {
+    const item = (useStore.getState().messageQueue[sessionQueueKey] || []).find((q) => q?.queueId === queueId);
     if (!item) return;
-    useStore.getState().removeFromQueue(sessionQueueKey, i);
+    // 先删,删成了才往输入框里填:删不掉(那一条正在自动发出 / 已是未定态 / 落盘失败)就不填,免得同一条发两次。
+    if (!useStore.getState().removeFromQueueById(sessionQueueKey, queueId)) return;
     // r192:附件还原成卡片(不再是文字里的「@路径」),追加在输入框已挂的附件后面。
     const restored = homeDraftFromOrphan(item);
     const detail = { text: restored.text, targetKey: sessionQueueKey };
@@ -13283,6 +13337,32 @@ function ShortcutsPanel({ open, onClose }) {
 
 // ─── Main App ──────────────────────────────────────────────────
 export default function App() {
+  // r196:后台排空(全应用一份,见 utils/backgroundDrain.js)。只管当前没有任何窗格在排空的会话,不读任何窗格状态;
+  // 请求经页面自己的 fetch 发出(与窗格同一个 /api/chat),卸载时停下(不改条目,在途的由兜底超时 / 刷新恢复收尾)。
+  useEffect(() => {
+    const drainer = startBackgroundDrainer({
+      subscribe: subscribeAgentsActive,
+      fetchFresh: fetchAgentsActiveFresh,
+      store: useStore,
+      runId: RUN_ID,
+      postChat: async (body, { signal } = {}) => {
+        const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
+        let json = null;
+        try { json = await r.json(); } catch { /* 不是 JSON:按结果不明处理 */ }
+        return { status: r.status, body: json };
+      },
+      getServerEpoch: () => serverEpochCache || fetchServerEpoch(),
+      clearServerEpoch: () => { serverEpochCache = null; },
+      // 文件快照:与窗格同一个模块、同一个请求函数,走不弹窗的分支(目录太大且这个会话没做过选择 → 先不在后台发)。
+      preflightSnapshot: (payload) => bgPreflightLargeSnapshot(payload, snapshotDeps),
+      persistAttachmentSidecar,
+      leaveNotice: leaveSessionNotice,
+      onTurnStarted: bgTurnStarted,
+      onTurnAccepted: bgTurnAccepted,
+      promoteDraftArtifacts,
+    });
+    return () => drainer.stop();
+  }, []);
   useWebSocket();
   // 应用重启后恢复所有已绑定真实 session 的附件 sidecar。失败项仍在持久 outbox，
   // SessionDetail 挂载和后续发送还会按 session 重试。

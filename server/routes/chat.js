@@ -2439,6 +2439,17 @@ async function handleChatPost(req, res) {
     });
   }
 
+  // r196:页面的后台排空(不在任何窗格里的会话,这一轮结束后自动发出排队消息)才带 queuedDrain:true;不带时下面两处行为不变。
+  // 带它时:①会话文件不在 → 404,不起进程、不留回合记录(放在回合记录之前),免得命令行对不存在的会话另起一个新会话。
+  // 查法用 session-reader.findSessionFile(唯一的路径拼接闸门:先校验会话编号格式,再逐个项目目录找 <sid>.jsonl),
+  // 不按工作目录自己拼编码 —— 软链接路径、命令行截短的长目录名都不会误判;sessionId 缺失或格式不对 → 找不到 → 404。
+  // ②冷启前等满约 4 秒仍在跑的那一轮不中止,交给建进程前的硬闸回新形态 409(见 settleSessionSlots)。内部回合不认这个字段。
+  // 只在带这个字段时多这一次 await,不带时执行顺序与改前相同。
+  const queuedDrain = req.body?.queuedDrain === true && !req[INTERNAL_TURN];
+  if (queuedDrain && !(await findSessionFile(sessionId))) {
+    return res.status(404).json({ ok: false, code: 'CHAT_SESSION_GONE', error: '会话记录不存在' });
+  }
+
   // ── R13 canonical turn:同 (鉴权主体, serverEpoch, clientTurnId) 只准有一个 run ──
   // 命中 → 回同一个 pid(不重复送 prompt、不新起 run);异参 → 409;并发同参由上面的
   // withTurnLock 串行化,后者在这里命中前者刚登记的记录。
@@ -2870,6 +2881,9 @@ async function handleChatPost(req, res) {
     // 双 resume 竞争 —— 不杀它。r199:走到这里的只会是还能接消息、到点仍在忙的进程(不再接消息的已被 tearingDown 跳过),
     // 不中止它,由建进程前的硬闸回 409(这一轮还在运行),不另起第二个进程与它并存。
     if (lingering && slotHasLiveShell(lingering) && !lingering.abort?.signal?.aborted) lingering = null;
+    // r196:后台排空(queuedDrain)同样不中止还能接消息、到点仍在忙的进程 —— 页面依据的是轮询结果,判断不了请求到达那一刻
+    // 这一轮是不是刚开始(命令行自己续跑、别的页面刚发);交给硬闸回新形态 409,页面留队稍后再发。
+    if (lingering && queuedDrain && slotUsable(lingering)) lingering = null;
     // r151q 第 9 项:强制中止之前最后核对一次 —— 绝不中止对方(用户请求不中止内部回合,含它只差输入预测的收尾窗;
     // 内部回合不中止用户回合)。要中止的正是内部回合自己的槽、又还没进入关闭 → 让出(409),不中止。
     const abortForbidden = heldByOther() || (!internal && !!lingering?.internalTurn && !lingering.closing);

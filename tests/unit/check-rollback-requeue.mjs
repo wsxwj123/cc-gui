@@ -64,7 +64,10 @@ assert.match(app, /const homeDraftArgs = \{[\s\S]*?sessionKey: queueKeyFor\(_hom
 assert.match(app, /enqueueHomeDraft\(homeDraftArgs\)/,
   '普通 Home 发送必须走原子编排入口');
 // r188:门里多了「回退进行中」标记(等停止、等裁剪期间普通发送进排队);forceSend 豁免不变。
-assert.match(app, /if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current \|\| rollbackBusyFor\(rollbackBusyRef\.current, sessionQueueKey\)\)\) \{/,
+// r196:门里又多了「本会话队首正在自动发出」(bgSendAhead);forceSend 豁免仍包住整个判断(含 bgSendAhead):强制重发绝不入队。
+assert.match(app, /const bgSendAhead = \(useStore\.getState\(\)\.messageQueue\[sessionQueueKey\] \|\| \[\]\)\.some\(\(q\) => q\?\.steerState === 'bg-sending'\);/,
+  'bgSendAhead 只看【本会话】队列里有没有正在自动发出的条目');
+assert.match(app, /if \(!reattachPid && !opts\.forceSend && \(streamingRef\.current \|\| backgroundPidRef\.current \|\| rollbackBusyFor\(rollbackBusyRef\.current, sessionQueueKey\) \|\| bgSendAhead\)\) \{/,
   '入队门必须豁免 forceSend(回滚/重做重发绝不入队),并在【本会话】回退进行中让普通发送进排队');
 // 守卫2:重发通道恒 forceSend
 const resendBlock = app.slice(app.indexOf('const resendReplacing = useCallback'), app.indexOf('// Auto-reattach:'));
