@@ -590,7 +590,7 @@ test('C1 [复现] A 有一轮在跑、刷新页面后进入 A(重新接上),命�
   await expectDividers(page, p1, 1, 'C1(这一轮结束后)');
 });
 
-test('C2 [复现] A 有一轮在跑、切到 Q 期间命令行压缩一次、再切回 A:在跑时分隔线恰好 1 条,结束后仍恰好 1 条', async ({ page }) => {
+test('C2 [回归] A 有一轮在跑、切到 Q 期间命令行压缩一次、再切回 A:在跑时分隔线恰好 1 条,结束后仍恰好 1 条', async ({ page }) => {
   const A = POOL[32]; const Q = POOL[33];
   const p1 = msg('C2', '一轮进行中(切走再切回)', A.mark);
   await open(page);
