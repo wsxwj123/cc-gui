@@ -235,6 +235,7 @@ import { BG_BANNER_DELAY_MS, backgroundTurnKey, dropStreamSnapshot, histSig, isC
 import { dropStashedUserBubble, dropUserStash, migrateUserStash, pickStashableUserBubbles, stashUserBubbles, takePendingUserBubbles } from './utils/localUserStash.js';
 import { addRetained, applyRetained, cutTsOf, dropRetained, dropRetainedSince, listRetainedFor, makeRetainedEntry, migrateRetained, removeRetained, retainKindOf, retainedVersion, subscribeRetained } from './utils/retainedCopies.js';
 import { dropStaleUserEchoes } from './utils/userEcho.js';
+import { dropLiveCompactCoveredByHistory } from './utils/liveCompactDivider.js';
 import { pruneByLiveSet } from './utils/levelPrune.js';
 import { rebuildWorkflowEntry } from './utils/workflowEntry.js';
 import { classifyStopTargets } from './utils/stopTargets.js';
@@ -4669,7 +4670,9 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
   // r182:这是叠加留存副本之前的本地段;叠加后的 renderChat 定义在 mountedMessages 旁边。
   const renderChatBase = useMemo(() => {
     const kept = visibleChat.filter((m) => !localTurnTakenOver(m, renderedTurnIdentity));
-    return dropStaleUserEchoes(kept, finalizedMessages, msgTextOf);
+    // r208:已显示的历史里已有本轮那次压缩的分隔线(没有快照的重接 / 截断作废时历史是展示来源,重读会带进来),
+    // 本地直播那条不再画;历史还没有时照画。判据见 utils/liveCompactDivider.js。
+    return dropStaleUserEchoes(dropLiveCompactCoveredByHistory(kept, finalizedMessages), finalizedMessages, msgTextOf);
   }, [visibleChat, renderedTurnIdentity, finalizedMessages]);
   // Transient toast for "auto-stripped thinking blocks after provider switch".
   // { text, expires } — set by handleSend's pre-flight check, auto-cleared.
@@ -6750,9 +6753,14 @@ const SessionDetail = React.memo(function SessionDetail({ tabIndex = 0, mobileCh
           // 用户当场看到上下文被压缩,不必等回合结束 refetch。回合结束 chatMessages 被清空,
           // 换成 jsonl 里的 isCompactSummary divider(同一条),不会重复。(#5)
           if (event.type === 'system' && event.subtype === 'compact_boundary') {
+            // r208:记下这一轮的起点(roundStartTs)。渲染时已显示的历史里有不早于它的压缩分隔线(同一次压缩被重读进来)就不画这条
+            // (renderChatBase / utils/liveCompactDivider.js)。正常发送 / 带快照的重接:起流时刻。没有快照的重接以历史为展示来源,
+            // 起点取历史里这一轮提示词的时间 —— 重放可能把重接之前那次压缩再送一遍,重接那一刻晚于它;取不到再用起流时刻。
+            const liveCompactPromptTs = unseededReattach() && paneStillOn(sessionQueueKey, streamSid) ? lastPromptTs(getLocalMessages()) : 0;
+            const liveCompactRoundStartTs = liveCompactPromptTs || turnStreamStart;
             setChatMessages((prev) => {
               if (prev.some((m) => m.type === 'compact' && m._live)) return prev;
-              return [...prev, { type: 'compact', uuid: 'live-compact', _live: true, ownerKey: streamSid || sessionQueueKey }];
+              return [...prev, { type: 'compact', uuid: 'live-compact', _live: true, ownerKey: streamSid || sessionQueueKey, roundStartTs: liveCompactRoundStartTs }];
             });
             // U8:压缩边界后,压缩前写入的即时 usage 已是旧值,清掉 —— 否则它优先级
             // 高于 jsonl 的 lastUsage,徽章在压缩后纹丝不动(用户报告)。
