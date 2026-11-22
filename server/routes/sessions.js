@@ -677,13 +677,22 @@ router.post('/sessions/:sessionId/attachments', async (req, res) => {
  * 刚写的 `.histbak-<时刻>-<令牌>` 内容相同、纯属冗余(卡点 1 用户选 B),已删。备份由调用方先写好:
  * 产品代码只允许在 session-history.js 交给 runWithHistoryBackup 的改写回调里调用它(守卫单测
  * check-r209-histbak-wrapper.mjs 钉住);会话目录里早先留下的 `.bak-<时刻>` 按 r209 的保留规则清理。
+ * 【r209 改写的内容必须与本次备份是同一份】调用方先写好备份再调它时,必须传 base = { stat, raw }:raw 是写进
+ *   备份的原文,stat 是调用方与 raw 对应的基准(读出 raw 之前拍的快照,或与之 mtime+size 相同的一次)。传了 base:
+ *   ①读到的原文与 base.raw 逐字对不上 → 判 stale、不改写(写备份那几秒里有第三方写入:按读到的内容改写,
+ *     备份里就缺这些新行);内容逐字比对,读之前的任何改动都漏不过去;
+ *   ②改写前的 mtime+size 复查以 base.stat 为基准,与 runSubmitLocked 非 repair 分支的「双闸之二」同一口径。
+ *   残余窗口与双闸之二相同:读完到复查之间 mtime 粒度内的同尺寸写入,以及复查到 rename 之间。
+ *   不传 base:自拍基准(先 stat 后 read),只保证读到的内容到改写前没被动过,不涉及任何备份。
  * 抽出为可测函数:file 任意路径(单测 /tmp 自建 jsonl,严禁碰真实 ~/.claude/projects),
  * checkRunning 注入。返回:
- *   { status:'ok', report, changed } | { status:'running' } | { status:'stale', report }
+ *   { status:'ok', report, changed } | { status:'running' } | { status:'stale', report }(①对不上时 report 为 null)
  */
-export async function repairSessionFileGuarded(file, checkRunning) {
-  const before = await stat(file);           // r31:先拍基准(读前快照),再读,防读期间写入漏检
+export async function repairSessionFileGuarded(file, checkRunning, base = null) {
+  // r31:基准必须是读前快照(先 stat 再读,防读期间写入漏检);传了 base 就用调用方写备份时的那一个。
+  const before = base ? base.stat : await stat(file);
   const raw = await readFile(file, 'utf-8');
+  if (base && raw !== base.raw) return { status: 'stale', report: null }; // 原文件逐字未动
   const { lines, report } = repairOfficialCompat(raw.split('\n'));
   const changed = !!(report.emptyText || report.emptyThinking || report.droppedLines || report.relinked);
   if (!changed) return { status: 'ok', report, changed: false };

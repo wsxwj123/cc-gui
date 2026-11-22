@@ -7,6 +7,7 @@
 // Run: node tests/unit/check-r209-histbak-wrapper.mjs
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -159,6 +160,84 @@ for (const [n, code] of [[2, 'SESSION_CHANGED'], [3, 'SESSION_RUNNING']]) {
     assert.deepEqual(names.filter((n) => /\.jsonl\.bak-\d+$/.test(n) && Number(n.split('.bak-')[1]) >= t0), [], '体检与清理不再另写 .bak-<时刻>');
     assert.equal(names.filter((n) => n !== `${sid}.jsonl.bak`).length, 3, '合计仍是 3 份');
   } finally {
+    server.closeAllConnections?.();
+    await new Promise((r) => { server.close(() => r()); });
+  }
+}
+
+// ── 体检与清理:改写的内容必须与本次备份是同一份(真实路由)──
+// ① 包装写完备份、体检读文件之前,会话记录被追加一行 → 409 SESSION_CHANGED,会话记录与追加后逐字相同,本次 .histbak 已删,
+//   同组别的不动;② 没有第三方写入 → 照常改写,本次 .histbak 与改写前的会话记录逐字相同。
+// 「中间写入」的注入点:拦 fs/promises 的 writeFile,只在写本会话 .histbak 的那一次、写完之后追加,不靠计时。
+{
+  const L = (o) => JSON.stringify(o);
+  const repairable = `${[
+    L({ type: 'user', uuid: 'u1', parentUuid: null, message: { role: 'user', content: [{ type: 'text', text: 'q' }] } }),
+    L({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', message: { role: 'assistant', content: [{ type: 'text', text: 'ans' }] } }),
+    L({ type: 'assistant', uuid: 'a2', parentUuid: 'a1', message: { role: 'assistant', content: [{ type: 'text', text: '' }] } }),
+  ].join('\n')}\n`;
+  const extra = `${L({ type: 'user', uuid: 'u9', parentUuid: 'a2', message: { role: 'user', content: [{ type: 'text', text: '写备份时追加的新行' }] } })}\n`;
+  const fsp = createRequire(import.meta.url)('fs/promises');
+  const origWrite = fsp.writeFile;
+  let inject = null; // { sid, file, wrote: 本次 .histbak 的路径 }
+  fsp.writeFile = async (p, ...rest) => {
+    const r = await origWrite(p, ...rest);
+    if (inject && !inject.wrote && typeof p === 'string' && path.basename(p).startsWith(`${inject.sid}.jsonl.histbak-`)) {
+      inject.wrote = p;
+      fs.appendFileSync(inject.file, extra);
+    }
+    return r;
+  };
+  syncBuiltinESMExports();
+  const app = express();
+  app.use(express.json());
+  app.use('/api', SH.default);
+  const server = await new Promise((resolve) => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+  const post = async (sid, body) => {
+    const r = await fetch(`http://127.0.0.1:${server.address().port}/api/sessions/${sid}/repair-official-compat`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectHash: HASH, ...body }),
+    });
+    return { status: r.status, json: await r.json() };
+  };
+  const submitRepair = async (sid) => {
+    const pv = await post(sid, { dryRun: true });
+    assert.equal(pv.status, 200, JSON.stringify(pv.json));
+    return (await quiet(() => post(sid, { dryRun: false, previewToken: pv.json.previewToken, baseVersion: pv.json.baseVersion }))).v;
+  };
+  try {
+    {
+      const sid = sidOf(7);
+      const file = path.join(DIR, `${sid}.jsonl`);
+      fs.writeFileSync(file, repairable);
+      const now = Date.now();
+      const others = [hb(sid, now - H, '1'), hb(sid, now - 2 * H, '2'), `${sid}.jsonl.bak`];
+      for (const n of others) put(n);
+      inject = { sid, file, wrote: null };
+      const sb = await submitRepair(sid);
+      const own = inject.wrote;
+      inject = null;
+      assert.ok(own, '注入点确实触发:本次 .histbak 写过,写完之后追加了一行');
+      assert.equal(sb.status, 409, JSON.stringify(sb.json));
+      assert.equal(sb.json.code, 'SESSION_CHANGED');
+      assert.equal(sb.json.error, '会话刚有新活动,请重新预览再提交');
+      assert.equal(fs.readFileSync(file, 'utf8'), repairable + extra, '会话记录与追加后逐字相同');
+      assert.equal(fs.existsSync(own), false, '本次 .histbak 已删');
+      assert.deepEqual(backupsOf(sid), [...others].sort(), '同组别的不动');
+    }
+    {
+      const sid = sidOf(8);
+      const file = path.join(DIR, `${sid}.jsonl`);
+      fs.writeFileSync(file, repairable);
+      const sb = await submitRepair(sid);
+      assert.equal(sb.status, 200, JSON.stringify(sb.json));
+      assert.equal(sb.json.changed, true, '夹具确实有要修的');
+      assert.equal(fs.readFileSync(path.join(DIR, ownOf(sb.json.backupRef, sid)), 'utf8'), repairable, '本次 .histbak 与改写前的会话记录逐字相同');
+      assert.notEqual(fs.readFileSync(file, 'utf8'), repairable, '会话记录确实改写了');
+    }
+  } finally {
+    inject = null;
+    fsp.writeFile = origWrite;
+    syncBuiltinESMExports();
     server.closeAllConnections?.();
     await new Promise((r) => { server.close(() => r()); });
   }

@@ -649,7 +649,7 @@ async function runSubmitLocked(entry) {
     }
     raw = fresh;   // 基准内容换成关闭之后的内容:变换与备份都按它算
   }
-  before = closedStat; // 双闸之二(以及 repair 分支的判据)以"关闭之后"那一刻为准
+  before = closedStat; // 双闸之二以"关闭之后"那一刻为准;repair 分支把它连同 raw 交给 repairSessionFileGuarded 作基准
 
   const applied = applyHistoryOp(op, raw, params, entry.extra);
   if (!applied.ok) return applied;
@@ -661,7 +661,9 @@ async function runSubmitLocked(entry) {
     if (op === 'repair-official-compat') {
       // repair 沿用 repairSessionFileGuarded 的双闸语义(写前复查在跑进程 + mtime/size 判变)。r209 起它不再另写
       // .bak-<时刻>(卡点 1 选 B):这次的备份就是包装刚写的 .histbak,backupRef 指向它。
-      const outcome = await repairSessionFileGuarded(file, () => isSessionRunning(sid));
+      // 基准交给它(before + 写进备份的 raw):它读到的原文与 raw 逐字对不上(写备份那几秒里有第三方写入)→ stale、
+      // 不改写;改写前复查也以 before 为准。改写的内容因此与本次备份是同一份,口径与下面的双闸之二一致。
+      const outcome = await repairSessionFileGuarded(file, () => isSessionRunning(sid), { stat: before, raw });
       if (outcome.status === 'running') {
         return { sessionUntouched: true, outcome: { ok: false, status: 409, code: SESSION_RUNNING, error: '该会话有回合正在运行,请先停止再做历史操作' } };
       }
