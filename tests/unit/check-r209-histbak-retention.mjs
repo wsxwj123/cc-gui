@@ -479,5 +479,25 @@ if (POSIX_PERMS) {
   ok();
 }
 
+// ── t17 工作区目录核验自己把关:名字含 /、\、NUL,或是空串、'.'、'..',一律不是工作区目录(不靠调用方先校验)──
+{
+  const R = freshRoot();
+  const now = Date.now();
+  const S = sidOf(97);
+  const own = hb(S, now - H);
+  const nested = path.join(R, 'a', 'b'); // 'a/b' 的 realpath 恰好等于 realpath(R) 拼上它:修前会落到这层
+  session(nested, S); put(nested, own); put(nested, hb(S, now - 2 * H, tok('c')));
+  const backslashDir = process.platform === 'win32' ? null : path.join(R, 'a\\b'); // POSIX 上是一段名为 a\b 的目录
+  if (backslashDir) { session(backslashDir, S); put(backslashDir, own); }
+  const names = ['a/b', 'a/../a/b', 'a\\b', `a${String.fromCharCode(0)}b`, '', '.', '..'];
+  for (const name of names) {
+    await capture(() => M.dropSessionBackups(R, name, S));
+    await capture(() => M.cleanupAfterHistoryOp(R, { projectHash: name, sid: S, ownName: own, dropOwn: true }));
+  }
+  assert.equal(ls(nested).length, 3, '第二层目录一份不动');
+  if (backslashDir) assert.equal(ls(backslashDir).length, 2, '名字带反斜杠的不当工作区目录');
+  ok();
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`PASS check-r209-histbak-retention (${cases} 组)`);

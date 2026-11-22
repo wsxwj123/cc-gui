@@ -171,9 +171,12 @@ async function readRoot(root) {
  * 3.0 工作区目录三条:名字不以点开头;lstat 是目录(不是软链接);realpath 逐字等于 realpath(R) 拼上名字。
  * 第三条挡住 Windows 目录联接、挂载点等任何重定向,不依赖 Dirent 怎么报联接;大小写不敏感的文件系统上
  * 大小写写法不同的名字也过不了(realpath 给的是磁盘上的写法)。
+ * 名字必须是单独一段,由本函数自己把关、不靠调用方先校验:含分隔符(/ 或 \)或 NUL 的直接判否 —— 'a/b' 的
+ * realpath 恰好等于 realpath(R) 拼上它,后两条都能过,会落到第二层目录。空串、'.'、'..' 由「以点开头」一并挡下。
  */
 async function isWorkspaceDir(root, realRoot, name) {
-  if (typeof name !== 'string' || name === '' || name.startsWith('.')) return false;
+  if (typeof name !== 'string' || name === '' || name.startsWith('.')
+    || name.includes('/') || name.includes('\\') || name.includes(NUL)) return false;
   const p = join(root, name);
   try {
     if (!(await lstat(p)).isDirectory()) return false;
