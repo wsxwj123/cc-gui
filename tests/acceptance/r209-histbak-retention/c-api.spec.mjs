@@ -121,16 +121,22 @@ test('E2 设置页单个删除_找不到工作区目录(404):不存在 / 是普�
 
 test('X1 设置页单个删除:删该组全部(含古早.bak,不受14天/3份限制),留未来文件与名字对不上的,别的会话不动,响应数字准确,重复删除再得全 0', async () => {
   wipeMainBackups();
-  const b = base(); const d = dynDir('x1'); const S = sidOf(61); const O = sidOf(62);
-  putSession(d, S);
+  const b = base(); const d = dynDir('x1'); const S = sidOf(61); const O = sidOf(62); const Z = sidOf(63);
+  putSession(d, S); putSession(d, Z);
   const mine = [[hb(S, b - H, tok('a')), 101], [hb(S, b - 2 * H, tok('b')), 102], [hbOld(S, b - 3 * H), 103], [bakTs(S, b - 4 * H), 104], [hb(S, b - 20 * DAY, tok('c')), 105], [bakPlain(S), 106]];
   for (const [n, size] of mine) put(d, n, size, n === bakPlain(S) ? b - 30 * DAY : b);
-  const keep = [hb(S, b + 10 * DAY, tok('d')), `${S}.jsonl.archived`, hb(S, b - H, 'a'.repeat(25)), `${S}.jsonl.BAK`, hb(O, b - H, tok('a'))];
+  const keep = [hb(S, b + 10 * DAY, tok('d')), `${S}.jsonl.archived`, hb(S, b - H, 'a'.repeat(25)), hb(O, b - H, tok('a'))];
+  // 大写 .BAK 放在另一个会话 Z 上:macOS 默认文件系统不分大小写,与 S 的小写 .jsonl.bak 会是同一个文件
+  const upper = `${Z}.jsonl.BAK`; put(d, upper, 50, b);
   for (const n of keep) put(d, n, 50, b);
   const r = await delSingle('r209-dyn-x1', S);
   expect(r.status, r.text.slice(0, 300)).toBe(200);
   expect(r.json).toEqual({ ...OK0, deleted: 6, freedBytes: 101 + 102 + 103 + 104 + 105 + 106 });
-  expect(names(d).sort(), '只剩会话记录 + 不该删的').toEqual([`${S}.jsonl`, ...keep].sort());
+  expect(names(d).sort(), '只剩会话记录 + 不该删的').toEqual([`${S}.jsonl`, `${Z}.jsonl`, upper, ...keep].sort());
+  const zr = await delSingle('r209-dyn-x1', Z);
+  expect(zr.status).toBe(200);
+  expect(zr.json, '大写 .BAK 不算备份:删 Z 也是全 0').toEqual(OK0);
+  expect(exists(path.join(d, upper)), '大写 .BAK 还在').toBe(true);
   const again = await delSingle('r209-dyn-x1', S);
   expect(again.status).toBe(200);
   expect(again.json, '没有备份可删:计数全 0').toEqual(OK0);
@@ -199,7 +205,7 @@ test('X3 请求体一律忽略:带 {files:[...],path:"../x"} 只按路径参数�
   const ok = await api('DELETE', `/api/history-backups/r209-dyn-x3/${S}`, { files: [`${S}.jsonl`, 'keep.txt'], path: '../x', projectHash: '..', sessionId: 'x' });
   expect(ok.status).toBe(200);
   expect(ok.json).toEqual({ ...OK0, deleted: 2, freedBytes: 60 });
-  expect(names(d).sort(), '请求体里点名的会话记录与别的文件都还在').toEqual(['keep.txt', `${S}.jsonl`]);
+  expect(names(d).sort(), '请求体里点名的会话记录与别的文件都还在').toEqual(['keep.txt', `${S}.jsonl`].sort());
 });
 
 test('X6 没有对应路由的请求不删文件:DELETE /api/history-backups、POST /api/history-backups/all、已删除的 GET/DELETE /api/bak-files(也不再返回 items)', async () => {

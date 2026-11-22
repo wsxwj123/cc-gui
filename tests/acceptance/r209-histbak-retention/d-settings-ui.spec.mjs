@@ -5,7 +5,7 @@ import path from 'node:path';
 import { test, expect } from '@playwright/test';
 import { STATIC } from './helpers/fixtures.mjs';
 import { wipeMainBackups, dynDir, mainHome, putFile, putSession, userLine, hb, sidOf, tok, names, exists, backupNamesOf } from './helpers/common.mjs';
-import { openApp, openSettings, settingsSearch, openStorageSection, tid, confirmHost, confirmButtons } from './helpers/ui.mjs';
+import { openApp, openWorkspaceGroup, openSettings, settingsSearch, openStorageSection, tid, confirmHost, confirmButtons } from './helpers/ui.mjs';
 
 const H = 3_600_000;
 const base = () => Math.floor(Date.now() / 1000) * 1000;
@@ -35,6 +35,7 @@ function seed({ u1Files, gone, elsewhere, unknown }) {
 test('U1 页面显示:说明三段、汇总行、遗漏提示、按占用排序的会话行(标签/标题/时间范围/份数与大小),字节格式', async ({ page }) => {
   const s = seed({ u1Files: [[1, 1024], [2, 512], [3, 512]], gone: 2 * 1024 * 1024, elsewhere: 1024, unknown: 50 });
   await openApp(page);
+  await openWorkspaceGroup(page, u1); // 先展开 u1 所在工作区,让页面加载到这个会话,标题才会取侧栏会话名
   const sec = await openStorageSection(page);
   await expect(sec.getByText('存储清理').first()).toBeVisible();
   const rules = await tid(page, 'histbak-rules').innerText();
