@@ -20,11 +20,12 @@ import { isLocalReq, requestHostname } from '../services/auth.js';
 import { findSessionFile } from '../services/session-reader.js';
 import { repairOfficialCompat } from '../utils/session-repair.js';
 import { sessionTitleLinesAfter } from '../utils/session-title-carry.js';
+import { markSessionBusy, cleanupAfterHistoryOp, discardPartialBackup } from '../services/history-backup-retention.js';
 import {
   claudeSpawn, cleanChildEnv, safeModelArg, closePersistentForSession, getActiveChatProcesses,
 } from './chat.js';
 import {
-  safeId, sessionFile, hasRealConversationLine, writeJsonlAtomic,
+  safeId, sessionFile, projectsRoot, hasRealConversationLine, writeJsonlAtomic,
   broadcastSessionFileChange, trimJsonlBeforeTool, compactSegmentJsonl,
   renderSegmentTranscript, repairSessionFileGuarded,
 } from './sessions.js';
@@ -377,7 +378,8 @@ export function anchorKindOf(op, params) {
 
 // ── 备份:不透明引用 + 在文件管理器中定位 ───────────────────────────────────
 // backupRef 与原会话同权限,不是可跨项目读取的路径;副本正文不回传浏览器(见 GET 备份注释),
-// 结果入口只在系统文件管理器里定位这份文件。备份文件不在本批清理。
+// 结果入口只在系统文件管理器里定位这份文件。备份按 r209 的保留规则清理(services/history-backup-retention.js:
+// 14 天内、每会话最多 3 份,刚写的那份在收尾时无条件保留);被删之后「在访达中显示」走现有的 404 文案。
 const backups = new Map(); // ref -> { path, sid, projectHash, principal, at }
 
 // ref 形态:`bk-<创建时刻 base36>-<随机令牌 96bit>`。时刻与令牌跟**文件名**同源(见
@@ -392,10 +394,55 @@ async function writeHistoryBackup(file, raw, meta) {
   const ts = Date.now();
   const token = randomBytes(12).toString('hex');
   const path = `${file}.histbak-${ts}-${token}`;
-  await writeFile(path, raw, 'utf-8'); // 备份失败 → 调用方 500,原文件一个字都不动
+  try {
+    await writeFile(path, raw, 'utf-8'); // 备份失败 → 调用方 500,原文件一个字都不动
+  } catch (e) {
+    // r209:写到一半失败(磁盘满等)会留下名字合法、内容截断的一份,会被当成备份占名额。尽力删掉再抛;
+    // 名字里带这次新生成的随机令牌,删到的只可能是这次自己建的文件。
+    await discardPartialBackup(path, meta?.sid);
+    throw e;
+  }
   const ref = `bk-${ts.toString(36)}-${token}`;
   backups.set(ref, { path, at: ts, ...meta });
   return ref;
+}
+
+/**
+ * r209:写历史操作备份的唯一入口(守卫单测钉住:产品代码里 writeHistoryBackup( 只出现在这里)。
+ * 三件事绑在一起,以后另开写备份的路也自动得到保护:
+ *   登记会话忙(自动清理、设置页删除、删除会话连带遇到它就跳过)→ 写备份 → rewrite(backupRef) →
+ *   按结果收尾(INTERFACE 3.2)→ finally 解除会话忙(抛错也解除,否则该会话的备份永远被跳过)。
+ * rewrite 返回 { outcome, sessionUntouched }:只有失败且显式标明 sessionUntouched:true(改写前就拦下、
+ * 会话记录确定没被改写)才删掉本次那份、同组别的不动;没标明的失败与 rewrite 抛错(500 SESSION_WRITE_FAILED)
+ * 一律当「可能已改写」,保留本次并按规则清理。成功(含 changed:false)保留本次:backupRef 已经回给页面,
+ * 「在访达中显示」要能定位到它。收尾吞掉一切错误,不改变 outcome;收尾仍在该会话的提交队列内,返回响应前做完。
+ */
+async function runWithHistoryBackup({ file, raw, sid, projectHash, principal }, rewrite) {
+  const release = markSessionBusy(sid);
+  try {
+    let backupRef;
+    try {
+      backupRef = await writeHistoryBackup(file, raw, { sid, projectHash, principal });
+    } catch (e) {
+      return { ok: false, status: 500, code: SESSION_BACKUP_FAILED, error: `备份失败,会话未改动:${e.message}` };
+    }
+    let ret;
+    try {
+      ret = await rewrite(backupRef);
+    } catch (e) {
+      ret = { outcome: { ok: false, status: 500, code: 'SESSION_WRITE_FAILED', error: `改写失败,原会话可能未改动:${e.message}` } };
+    }
+    const outcome = ret.outcome;
+    await cleanupAfterHistoryOp(projectsRoot(), {
+      projectHash,
+      sid,
+      ownName: basename(backups.get(backupRef)?.path || ''),
+      dropOwn: !outcome.ok && ret.sessionUntouched === true,
+    });
+    return outcome;
+  } finally {
+    release();
+  }
 }
 
 const BACKUP_REF_SHAPE = /^bk-([0-9a-z]+)-([0-9a-f]{24})$/;
@@ -607,37 +654,35 @@ async function runSubmitLocked(entry) {
   const applied = applyHistoryOp(op, raw, params, entry.extra);
   if (!applied.ok) return applied;
 
-  let backupRef;
-  try {
-    backupRef = await writeHistoryBackup(file, raw, { sid, projectHash, principal: entry.principal });
-  } catch (e) {
-    return { ok: false, status: 500, code: SESSION_BACKUP_FAILED, error: `备份失败,会话未改动:${e.message}` };
-  }
-
-  try {
+  // r209:写备份 → 改写 → 收尾 → 解除会话忙,全部经 runWithHistoryBackup(五个操作与两条自动去思考块路径都走这里)。
+  // 改写前就拦下的失败必须显式标 sessionUntouched:true,收尾才会删掉本次那份;rewrite 里抛出的一律算
+  // 「可能已改写」(500 SESSION_WRITE_FAILED),保留本次。
+  return runWithHistoryBackup({ file, raw, sid, projectHash, principal: entry.principal }, async (backupRef) => {
     if (op === 'repair-official-compat') {
-      // repair 沿用既有 repairSessionFileGuarded 的双闸语义(写前复查在跑进程 + mtime/size 判变);
-      // 它的备份是 .bak-<ts>,这里把 backupRef 指到那份文件。
+      // repair 沿用 repairSessionFileGuarded 的双闸语义(写前复查在跑进程 + mtime/size 判变)。r209 起它不再另写
+      // .bak-<时刻>(卡点 1 选 B):这次的备份就是包装刚写的 .histbak,backupRef 指向它。
       const outcome = await repairSessionFileGuarded(file, () => isSessionRunning(sid));
       if (outcome.status === 'running') {
-        return { ok: false, status: 409, code: SESSION_RUNNING, error: '该会话有回合正在运行,请先停止再做历史操作' };
+        return { sessionUntouched: true, outcome: { ok: false, status: 409, code: SESSION_RUNNING, error: '该会话有回合正在运行,请先停止再做历史操作' } };
       }
       if (outcome.status === 'stale') {
-        return { ok: false, status: 409, code: SESSION_CHANGED, error: '会话刚有新活动,请重新预览再提交' };
+        return { sessionUntouched: true, outcome: { ok: false, status: 409, code: SESSION_CHANGED, error: '会话刚有新活动,请重新预览再提交' } };
       }
       const fresh = await readFile(file, 'utf-8');
       if (outcome.changed) broadcastSessionFileChange(file);
       return {
-        ok: true,
-        result: {
+        outcome: {
           ok: true,
-          changed: outcome.changed,
-          baseVersion: entry.baseVersion,
-          resultVersion: versionOf(fresh),
-          backupRef,
-          resultSessionId: sid,
-          report: outcome.report,
-          compatibility: entry.compatibility,
+          result: {
+            ok: true,
+            changed: outcome.changed,
+            baseVersion: entry.baseVersion,
+            resultVersion: versionOf(fresh),
+            backupRef,
+            resultSessionId: sid,
+            report: outcome.report,
+            compatibility: entry.compatibility,
+          },
         },
       };
     }
@@ -645,26 +690,26 @@ async function runSubmitLocked(entry) {
     // `before` 是"关闭常驻进程之后"那一刻拍的,所以这条闸只反映第三方写入。
     const now = await stat(file);
     if (now.mtimeMs !== before.mtimeMs || now.size !== before.size) {
-      return { ok: false, status: 409, code: SESSION_CHANGED, error: '会话刚有新活动,请重新预览再提交' };
+      return { sessionUntouched: true, outcome: { ok: false, status: 409, code: SESSION_CHANGED, error: '会话刚有新活动,请重新预览再提交' } };
     }
     await writeJsonlAtomic(file, applied.newContent);
     broadcastSessionFileChange(file);
     return {
-      ok: true,
-      result: {
+      outcome: {
         ok: true,
-        changed: applied.changed,
-        baseVersion: entry.baseVersion,
-        resultVersion: versionOf(applied.newContent),
-        backupRef,
-        resultSessionId: applied.requiresNewSession ? null : sid,
-        report: applied.report,
-        compatibility: entry.compatibility,
+        result: {
+          ok: true,
+          changed: applied.changed,
+          baseVersion: entry.baseVersion,
+          resultVersion: versionOf(applied.newContent),
+          backupRef,
+          resultSessionId: applied.requiresNewSession ? null : sid,
+          report: applied.report,
+          compatibility: entry.compatibility,
+        },
       },
     };
-  } catch (e) {
-    return { ok: false, status: 500, code: 'SESSION_WRITE_FAILED', error: `改写失败,原会话可能未改动:${e.message}` };
-  }
+  });
 }
 
 /** 提交入口:令牌/参数/版本/兼容性四道检查,同预览并发共用一次执行。 */
@@ -889,6 +934,7 @@ router.post('/sessions/:sessionId/backups/:backupRef/reveal', async (req, res) =
 // 单测用:备份写入 + 重启后的登记恢复 + 404 文案。三者的耦合点就是 ref 形态(时刻+令牌),
 // 拆开测不出「ref 与文件名同源」这条不变量 —— 它一旦走散,重启后就再也找不回备份。
 export { writeHistoryBackup as __writeHistoryBackup, recoverBackup as __recoverBackup, backupMissingText as __backupMissingText };
+export { runWithHistoryBackup as __runWithHistoryBackup };
 
 // 单测用:清空预览/备份登记表(不导出给产品路径)。
 export function __resetHistoryStores() {

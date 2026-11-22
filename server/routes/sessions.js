@@ -52,6 +52,12 @@ export function sessionFile(projectHash, sessionId) {
   return join(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`);
 }
 
+// r209:会话记录根目录,与 sessionFile() 同口径、调用时才算(不在 import 时固定家目录)。
+// history-backup-retention.js 的入口一律要求显式传根目录,产品代码从这里取。
+export function projectsRoot() {
+  return join(homedir(), '.claude', 'projects');
+}
+
 // 合成 file-change 广播(说明见 ../broadcast.js)。r185 起本体在 broadcast.js(chat.js 也要用,
 // 从本文件引会和本文件对 chat.js 的 import 成环),这里原样转出,checkpoints / session-history 照旧从本文件引。
 export { broadcastSessionFileChange };
