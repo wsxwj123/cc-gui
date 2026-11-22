@@ -6,6 +6,7 @@ import { confirmDialog } from '../utils/confirmDialog.jsx';
 import { desktopNotifyEnabled, NOTIFY_PREF_KEY } from '../utils/desktopNotify.js';
 import { copyText } from '../utils/clipboard.js';
 import { useStore } from '../stores/sessionStore.js';
+import { findLoadedSession, resolveLatestSessionTitle } from '../utils/sessionTitle.js';
 import { useXsEnabled, useXsGuardFailureAt, useXsStoredUnfinished, useXsAutoPaused, useXsAutoUsed, useXsAutoLimit, loadXsConfig, setXsEnabled, clearXsStored, resumeXsAuto } from '../utils/xsession.js';
 import EnvCheckPanel from './EnvCheckPanel.jsx';
 import { isImeReactKeydown } from '../utils/imeGuard.js';
@@ -70,7 +71,7 @@ const SETTINGS_INDEX = [
   { id: 'set-third-party-auto', tab: 'permissions', title: '第三方 provider 的自动档', keys: 'auto 自动 审核 审核模型 第三方 provider 分类器 classifier sonnet 不可用' },
   { id: 'set-hooks', tab: 'hooks', title: 'Hooks 钩子脚本', keys: 'hooks 钩子 脚本 事件' },
   { id: 'set-json', tab: 'advanced', title: '原始配置 settings.json', keys: 'json 原始 配置 settings' },
-  { id: 'set-storage', tab: 'advanced', title: '.bak 备份清理', keys: '存储 备份 bak 清理 磁盘 空间' },
+  { id: 'set-storage', tab: 'advanced', title: '会话记录备份清理', keys: '存储 备份 bak histbak 会话记录 清理 磁盘 空间' },
   // R44:进程管理收进设置(坞 rail 里不再有它那枚按钮)。进索引 → 搜索框输入「进程」可直达。
   { id: 'set-processes', tab: 'advanced', title: '进程管理 / 停止', keys: '进程 process 停止 kill pid cpu 内存 命令行 后台 claude' },
   { id: 'set-network', tab: 'network', title: '局域网访问与端口', keys: '网络 局域网 lan 密码 端口 手机 tailscale 远程' },
@@ -496,119 +497,224 @@ function NetworkTab() {
   );
 }
 
-// Lists .jsonl.bak backups created by /trim and /strip-thinking. Each row
-// pairs a backup file with the session's first user prompt so the user can
-// recognize what they're about to delete. Total size is shown up top.
+// r209:设置 → 高级 →「存储清理」管会话记录备份(.histbak-* / .bak-<时刻> / .jsonl.bak)。
+// 回退、压缩片段、体检与清理、去掉思考块改写会话记录前,服务端把整份记录复制一份放在同目录;
+// 服务端按 14 天 / 每会话 3 份自动清理,这里按会话汇总列出,可删一个会话的或全部删(直接删除,不进废纸篓)。
+// 接口与界面文字见 r209 接口文件 3.4 / 3.5 / 3.7。标题:会话还在时优先用侧栏同口径的会话名,
+// 只读页面已加载的会话列表(不为此多发请求)。设置面板没有错误边界:接口返回形状不对一律按读取失败处理。
+const HISTBAK_DELETE_NOTE = '直接删除,不进废纸篓,删了找不回;不影响会话记录本身。';
+const HISTBAK_TAG = 'text-[10px] leading-4 px-1.5 rounded border font-body shrink-0';
 function StorageTab() {
-  const [data, setData] = useState({ items: [], totalBytes: 0 });
+  const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState(null);
+  // 正在删哪一项:null = 没在删;'all' = 全部清理;否则为该行的 `${projectHash}/${sessionId}`。
+  const [deleting, setDeleting] = useState(null);
+  const [notice, setNotice] = useState(null); // { text, isError };下一次删除或刷新时替换
+  const loadSeqRef = useRef(0);
+  // 侧栏同口径会话名的数据:四个选择器都直接返回状态库里的现有引用,不新建对象(防无限重渲染)。
+  const sessionsByProject = useStore((s) => s.sessionsByProject);
+  const loadedSessions = useStore((s) => s.sessions);
+  const customTitles = useStore((s) => s.customTitles);
+  const autoTitles = useStore((s) => s.autoTitles);
 
   const fmtBytes = (n) => {
+    if (!n) return '0 B';
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / 1024 / 1024).toFixed(2)} MB`;
+    if (n < 1024 ** 3) return `${(n / 1024 / 1024).toFixed(2)} MB`;
+    return `${(n / 1024 ** 3).toFixed(2)} GB`;
   };
   const fmtTime = (ms) => {
     try { return new Date(ms).toLocaleString('zh-CN', { hour12: false }); }
     catch { return ''; }
   };
+  // 计数字段的防御:不是非负有限数一律按 0。
+  const num = (v) => (Number.isFinite(v) && v > 0 ? v : 0);
+  const errorOf = (body, status) => (typeof body?.error === 'string' && body.error ? body.error : String(status));
 
   const fetchList = async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
+    let next = null;
+    let failure = null;
     try {
-      const r = await fetch('/api/bak-files');
-      const d = await r.json();
-      // 形状防御:端点 500 时返回 {error},直收会让下方 data.items.length 抛 TypeError
-      // → 设置面板无错误边界,整 app 白屏(判官重要项)。
-      if (!r.ok || !Array.isArray(d?.items)) { setData({ items: [], totalBytes: 0 }); return; }
-      setData(d);
-    } catch {}
-    // finally 而非落在 try 之后:上面的形状防御 early return 会跳过它,loading 初值 true
-    // → 端点 500 时 spinner 永转、无重试入口(判官重要项)。
-    finally { setLoading(false); }
+      const r = await fetch('/api/history-backups');
+      const d = await r.json().catch(() => null);
+      if (r.status === 200 && Array.isArray(d?.sessions)) next = d;
+      else failure = errorOf(d, r.status);
+    } catch {
+      failure = '网络错误';
+    }
+    // 刷新与删除后的重新读取可能交错:只认最后发出的那一次。
+    if (seq !== loadSeqRef.current) return;
+    setData(next);
+    setLoadError(failure === null ? null : `读取备份列表失败:${failure}`);
+    setLoading(false);
   };
   useEffect(() => { fetchList(); }, []);
 
-  const deleteOne = async (item) => {
-    // 全项目其余删除均有确认,这里补齐:删了不可恢复(只影响对应那一次回滚/去思考块的撤销)。
-    if (!(await confirmDialog(`删除备份「${item.title || item.sessionId.slice(0, 8)}」(${fmtBytes(item.size)})？\n删除后将无法撤销对应的那一次回滚 / 去思考块操作，不影响当前对话。`, { danger: true }))) return;
-    setBusy(true);
+  const refresh = () => { setNotice(null); fetchList(); };
+
+  const runDelete = async (key, url) => {
+    setDeleting(key);
+    setNotice(null);
+    let result;
     try {
-      await fetch('/api/bak-files', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: [{ projectHash: item.projectHash, sessionId: item.sessionId }] }),
-      });
-      await fetchList();
-    } catch {}
-    setBusy(false);
+      const r = await fetch(url, { method: 'DELETE' });
+      const d = await r.json().catch(() => null);
+      if (r.status === 200) {
+        let text = `已删除 ${num(d?.deleted)} 份,释放 ${fmtBytes(num(d?.freedBytes))}`;
+        if (num(d?.failed)) text += `;有 ${num(d.failed)} 份没删掉(文件被占用或没有权限),已跳过`;
+        if (num(d?.skippedBusy)) text += `;有 ${num(d.skippedBusy)} 份所属会话正在做历史操作,已跳过`;
+        if (num(d?.skippedUnknown)) text += `;有 ${num(d.skippedUnknown)} 份无法确认所属会话,未删除`;
+        if (num(d?.skippedDirs)) text += `;有 ${num(d.skippedDirs)} 个工作区目录读不了,已跳过`;
+        result = { text, isError: false };
+      } else {
+        result = { text: `清理失败:${errorOf(d, r.status)}`, isError: true };
+      }
+    } catch {
+      result = { text: '清理失败:网络错误', isError: true };
+    }
+    setNotice(result);
+    await fetchList();
+    setDeleting(null);
+  };
+
+  const deleteOne = async (projectHash, sessionId, count, bytes) => {
+    if (!(await confirmDialog(`删除这个会话的 ${count} 份备份(共 ${fmtBytes(bytes)})？\n${HISTBAK_DELETE_NOTE}`, { danger: true, confirmText: '删除' }))) return;
+    await runDelete(`${projectHash}/${sessionId}`, `/api/history-backups/${encodeURIComponent(projectHash)}/${encodeURIComponent(sessionId)}`);
   };
 
   const deleteAll = async () => {
-    if (!(await confirmDialog(`确定清理全部 ${data.items.length} 个 .bak 备份？将释放 ${fmtBytes(data.totalBytes)}。`, { danger: true }))) return;
-    setBusy(true);
-    try {
-      await fetch('/api/bak-files', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ all: true }),
-      });
-      await fetchList();
-    } catch {}
-    setBusy(false);
+    if (!data) return;
+    if (!(await confirmDialog(`删除全部 ${num(data.totalCount)} 份会话记录备份(共 ${fmtBytes(num(data.totalBytes))})？\n${HISTBAK_DELETE_NOTE}`, { danger: true, confirmText: '删除' }))) return;
+    await runDelete('all', '/api/history-backups/all');
   };
 
-  if (loading) {
-    return <div className="flex items-center justify-center py-12"><RefreshCw size={16} className="text-ink-faint animate-spin" /></div>;
+  if (loading && !data) {
+    return (
+      <div className="flex items-center justify-center py-8" role="status" aria-label="正在读取备份列表">
+        <RefreshCw size={16} className="text-ink-faint animate-spin" />
+      </div>
+    );
   }
+
+  const noticeEl = notice && (
+    <div data-testid="histbak-notice" role="status"
+      className={`text-[11px] font-body leading-relaxed rounded-md border px-2.5 py-1.5 ${notice.isError ? 'bg-error/10 border-error/20 text-error' : 'bg-canvas-warm border-canvas-deep text-ink-muted'}`}>
+      {notice.text}
+    </div>
+  );
+
+  if (!data) {
+    return (
+      <div className="space-y-3">
+        {noticeEl}
+        <div className="flex items-center gap-2 rounded-lg border border-error/20 bg-error/10 px-3 py-2.5">
+          <AlertCircle size={13} className="text-error shrink-0" />
+          <div data-testid="histbak-error" className="flex-1 min-w-0 text-[12px] text-error font-body break-all">
+            {loadError || '读取备份列表失败'}
+          </div>
+          <button onClick={refresh}
+            className="text-[11px] px-2 py-1 rounded text-ink-muted hover:text-ink hover:bg-canvas-warm font-body inline-flex items-center gap-1 shrink-0">
+            <RefreshCw size={11} /> 重试
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const rules = data.rules && typeof data.rules === 'object' ? data.rules : {};
+  const maxAgeDays = Number.isFinite(rules.maxAgeDays) ? rules.maxAgeDays : 14;
+  const maxPerSession = Number.isFinite(rules.maxPerSession) ? rules.maxPerSession : 3;
+  const totalCount = num(data.totalCount);
+  const skippedParts = [];
+  if (num(data.skippedDirs)) skippedParts.push(`有 ${num(data.skippedDirs)} 个工作区目录读不了`);
+  if (num(data.skippedUnknown)) skippedParts.push(`有 ${num(data.skippedUnknown)} 份备份无法确认所属会话`);
+  const rows = data.sessions.filter((s) => s && typeof s === 'object');
+  const titleSource = { sessionsByProject, sessions: loadedSessions, customTitles, autoTitles };
+  // 会话还在、且页面已加载的会话列表里有它:用侧栏同口径的会话名;否则用接口取的第一条用户消息。
+  const titleOf = (s, sessionId, projectHash) => {
+    if (s.state === 'present' && sessionId) {
+      const loaded = findLoadedSession(titleSource, sessionId, projectHash);
+      const name = loaded ? resolveLatestSessionTitle(titleSource, loaded) : '';
+      if (typeof name === 'string' && name) return name;
+    }
+    return typeof s.title === 'string' && s.title ? s.title : '(无标题)';
+  };
 
   return (
     <div className="space-y-3">
-      <div className="text-[11px] text-ink-faint font-body leading-relaxed bg-canvas-warm border border-canvas-deep rounded-lg p-2.5">
-        <b>这是什么：</b>当你"回滚一条对话"、或"切换模型时去掉历史里的思考块"时，系统会先把这条会话的原始记录存一份备份（<code className="font-mono">.jsonl.bak</code>），万一改坏了能恢复。
-        <br /><b>删了有什么影响：</b>只会让你<b>没法再撤销那一次回滚/去思考块</b>，<b>不影响正常聊天</b>，也不会丢当前对话——纯粹是清磁盘空间。删了不可恢复，但绝大多数情况用不上，可放心清理。
+      <div data-testid="histbak-rules" className="text-[11px] text-ink-faint font-body leading-relaxed bg-canvas-warm border border-canvas-deep rounded-lg p-2.5 space-y-1">
+        <p><b>这是什么:</b>回退、压缩片段、体检与清理、去掉思考块等操作改写会话记录之前,会把整份会话记录复制一份,放在会话记录所在的目录里(文件名含 <code className="font-mono">.histbak-</code> 或 <code className="font-mono">.bak</code>)。</p>
+        <p><b>自动清理:</b>{`只保留 ${maxAgeDays} 天内的,每个会话最多保留最近 ${maxPerSession} 份;会话记录已不在的,它的备份也会删除;删除会话时,它的备份一并删除。应用启动后清理一次,运行期间定时检查。文件名以 `}<code className="font-mono">.jsonl.bak</code> 结尾的不自动清理,只能在这里手动删除。</p>
+        <p><b>这里的删除是直接删除,不进废纸篓,删了找不回;</b>不影响会话记录本身。</p>
       </div>
 
-      <div className="flex items-center justify-between">
-        <div className="text-xs text-ink-muted font-body">
-          共 <span className="font-mono text-ink">{data.items.length}</span> 个备份 · 占用 <span className="font-mono text-ink">{fmtBytes(data.totalBytes)}</span>
+      <div className="flex items-center justify-between gap-3">
+        <div data-testid="histbak-summary" className="text-xs text-ink-muted font-body">
+          共 <span className="font-mono text-ink">{totalCount}</span> 份备份 · 占用 <span className="font-mono text-ink">{fmtBytes(num(data.totalBytes))}</span>
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={fetchList} disabled={busy}
-            className="text-[11px] px-2 py-1 rounded text-ink-muted hover:text-ink hover:bg-canvas-warm font-body inline-flex items-center gap-1">
-            <RefreshCw size={11} /> 刷新
+        <div className="flex items-center gap-2 shrink-0">
+          <button onClick={refresh} disabled={!!deleting || loading}
+            className="text-[11px] px-2 py-1 rounded text-ink-muted hover:text-ink hover:bg-canvas-warm font-body inline-flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
+            <RefreshCw size={11} className={loading ? 'animate-spin' : ''} /> 刷新
           </button>
-          <button onClick={deleteAll} disabled={busy || data.items.length === 0}
+          <button data-testid="histbak-delete-all" onClick={deleteAll} disabled={!!deleting || totalCount === 0}
             className="text-[11px] px-2.5 py-1 rounded bg-error/10 text-error hover:bg-error/15 font-body inline-flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed">
-            <Trash2 size={11} /> 全部清理
+            {deleting === 'all' ? <RefreshCw size={11} className="animate-spin" /> : <Trash2 size={11} />} 全部清理
           </button>
         </div>
       </div>
 
-      {data.items.length === 0 ? (
-        <p className="text-xs text-ink-faint font-body py-6 text-center">没有 .bak 备份文件</p>
+      {skippedParts.length > 0 && (
+        <div className="flex items-start gap-1.5 text-[11px] text-ink-muted font-body">
+          <AlertCircle size={12} className="shrink-0 mt-px text-ink-faint" />
+          <span data-testid="histbak-skipped">{`${skippedParts.join(';')},未列出`}</span>
+        </div>
+      )}
+
+      {noticeEl}
+
+      {rows.length === 0 ? (
+        <p data-testid="histbak-empty" className="text-xs text-ink-faint font-body py-6 text-center">没有会话记录备份</p>
       ) : (
         <div className="bg-canvas-warm border border-canvas-deep rounded-lg divide-y divide-canvas-deep">
-          {data.items.map((it) => (
-            <div key={`${it.projectHash}/${it.sessionId}`} className="flex items-center gap-3 px-3 py-2.5">
-              <div className="flex-1 min-w-0">
-                <div className="text-[12px] text-ink font-body truncate flex items-center gap-1.5">
-                  {it.orphan && <span className="text-[9px] px-1 rounded bg-amber-100 text-amber-700 border border-amber-200 font-mono shrink-0">孤儿</span>}
-                  <span className="truncate">{it.title}</span>
+          {rows.map((s) => {
+            const sessionId = typeof s.sessionId === 'string' ? s.sessionId : '';
+            const projectHash = typeof s.projectHash === 'string' ? s.projectHash : '';
+            const key = `${projectHash}/${sessionId}`;
+            const count = num(s.count);
+            const bytes = num(s.bytes);
+            const title = titleOf(s, sessionId, projectHash);
+            const when = count === 1 ? fmtTime(s.newestAt) : `${fmtTime(s.oldestAt)} – ${fmtTime(s.newestAt)}`;
+            return (
+              <div key={key} data-testid="histbak-row" data-session-id={sessionId} data-project-hash={projectHash}
+                className="flex items-center gap-3 px-3 py-2.5">
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12px] text-ink font-body flex items-center gap-1.5 min-w-0">
+                    {s.state === 'gone' && (
+                      <span data-testid="histbak-gone" className={`${HISTBAK_TAG} bg-amber-100 text-amber-700 border-amber-200`}>会话已删除</span>
+                    )}
+                    {s.state === 'elsewhere' && (
+                      <span data-testid="histbak-elsewhere" className={`${HISTBAK_TAG} bg-canvas text-ink-muted border-canvas-deep`}>会话记录在别的工作区目录</span>
+                    )}
+                    <span data-testid="histbak-title" className="truncate" title={title}>{title}</span>
+                  </div>
+                  <div data-testid="histbak-meta" className="text-[10px] text-ink-faint font-mono mt-0.5 truncate">
+                    {`${sessionId.slice(0, 8)} · ${when}`}
+                  </div>
                 </div>
-                <div className="text-[10px] text-ink-faint font-mono mt-0.5">
-                  {it.sessionId.slice(0, 8)} · {fmtTime(it.mtimeMs)}
-                </div>
+                <div data-testid="histbak-size" className="text-[11px] text-ink-muted font-mono shrink-0">{`${count} 份 · ${fmtBytes(bytes)}`}</div>
+                <button data-testid="histbak-delete-one" onClick={() => deleteOne(projectHash, sessionId, count, bytes)} disabled={!!deleting}
+                  className="p-1 rounded hover:bg-error/10 text-ink-faint hover:text-error shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="删除这个会话的全部备份">
+                  {deleting === key ? <RefreshCw size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                </button>
               </div>
-              <div className="text-[11px] text-ink-muted font-mono shrink-0">{fmtBytes(it.size)}</div>
-              <button onClick={() => deleteOne(it)} disabled={busy}
-                className="p-1 rounded hover:bg-error/10 text-ink-faint hover:text-error shrink-0"
-                title="删除此备份">
-                <Trash2 size={12} />
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
