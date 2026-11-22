@@ -2031,7 +2031,8 @@ export const SessionItem = React.memo(function SessionItem({ session, isSelected
             onClick={async (e) => {
               e.stopPropagation();
               setMenuOpen(false);
-              const ok = await confirmDialog('删除该会话的本地历史记录？操作不可恢复。', { danger: true, confirmText: '删除' });
+              // r209:删除会话时服务端连带删掉它的会话记录备份(.histbak 等),确认框另起一行写明;原句不动。
+              const ok = await confirmDialog('删除该会话的本地历史记录？操作不可恢复。', { danger: true, confirmText: '删除', detail: '该会话的会话记录备份(.histbak 等)也会一并删除,删了找不回。' });
               if (ok) onDelete(session);
             }}
             className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-error font-body hover:bg-error-subtle/60 border-t border-canvas-deep/40 mt-1 pt-1.5 transition-colors"

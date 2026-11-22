@@ -8,7 +8,9 @@ import { createRoot } from 'react-dom/client';
 // testId(可选,INTERFACE §10.11⑥):给验收用例一个稳定的定位钩子 —— 根节点 + 两键。
 // 不传 = DOM 与今天逐字相同(现有调用方零影响);传了只多三个 data-testid 属性,不改行为。
 // okTestId(可选,r151c):确认键另用这个标识(接口文件写死了确认键的标识时用);不传照旧为 `${testId}-confirm`。
-function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, testId, okTestId, onResolve }) {
+// detail(可选,r209):在正文之后另起一行追加一段,同样式。给已有确认框加一句说明而不动原句时用
+// (删除会话确认框的原句与调用形态有单测逐字核对)。不传 = DOM 与今天逐字相同。
+function ConfirmModal({ message, detail, danger, confirmText, cancelText, checkbox, testId, okTestId, onResolve }) {
   const [checked, setChecked] = useState(false);
   // 有 checkbox 时把勾选状态一并回传 → { confirmed, checked };否则保持布尔(向后兼容)。
   const resolve = (confirmed) => onResolve(checkbox ? { confirmed, checked } : confirmed);
@@ -40,6 +42,7 @@ function ConfirmModal({ message, danger, confirmText, cancelText, checkbox, test
             不撑破弹窗、也不截断内容。 */}
         <div className="text-[13px] text-ink font-body whitespace-pre-wrap leading-relaxed mb-4 max-h-[40vh] overflow-y-auto">
           {message}
+          {detail ? `\n${detail}` : null}
         </div>
         {checkbox && (
           <label className="flex items-start gap-2 mb-4 cursor-pointer text-[12px] text-ink-soft font-body select-none">
@@ -87,7 +90,7 @@ export function confirmDialog(message, opts) {
   return p;
 }
 
-function showConfirmDialog(message, { danger = false, confirmText = '确定', cancelText = '取消', checkbox = null, testId = null, okTestId = null } = {}) {
+function showConfirmDialog(message, { detail = null, danger = false, confirmText = '确定', cancelText = '取消', checkbox = null, testId = null, okTestId = null } = {}) {
   return new Promise((resolve) => {
     const host = document.createElement('div');
     // 标记供别处避让:确认框的 Esc 监听在 document 冒泡阶段,更早相位的监听(如面板页
@@ -106,6 +109,7 @@ function showConfirmDialog(message, { danger = false, confirmText = '确定', ca
     root.render(
       <ConfirmModal
         message={message}
+        detail={detail}
         danger={danger}
         confirmText={confirmText}
         cancelText={cancelText}
