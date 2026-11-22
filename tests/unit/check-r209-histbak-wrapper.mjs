@@ -156,6 +156,7 @@ for (const [n, code] of [[2, 'SESSION_CHANGED'], [3, 'SESSION_RUNNING']]) {
     const repairRef = (await quiet(() => submit('repair-official-compat'))).v;
     const names = backupsOf(sid);
     assert.ok(names.includes(ownOf(repairRef, sid)), '体检与清理:本次的 .histbak 在');
+    assert.deepEqual(names.filter((n) => /\.jsonl\.bak-\d+$/.test(n) && Number(n.split('.bak-')[1]) >= t0), [], '体检与清理不再另写 .bak-<时刻>');
     assert.equal(names.filter((n) => n !== `${sid}.jsonl.bak`).length, 3, '合计仍是 3 份');
   } finally {
     server.closeAllConnections?.();
