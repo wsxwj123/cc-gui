@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { readdir, stat, readFile, writeFile, rename, open, mkdir, unlink } from 'fs/promises';
-import { join, dirname, basename, isAbsolute, resolve } from 'path';
+import { readdir, stat, readFile, writeFile, rename, mkdir, unlink } from 'fs/promises';
+import { join, dirname, isAbsolute, resolve } from 'path';
 import { isLocalReq } from '../services/auth.js';
 import { homedir } from 'os';
 import { randomUUID } from 'crypto';
@@ -38,6 +38,9 @@ import { resolveUnderHome, resolveWorkspacePath } from '../utils/safe-path.js';
 import { broadcastSessionFileChange } from '../broadcast.js';
 import { mergeDraftBindingsBestEffort } from '../services/draft-session-bindings.js';
 import { createAttachmentSidecarStore } from '../services/attachment-sidecar-store.js';
+import {
+  dropSessionBackups, listHistoryBackups, deleteAllHistoryBackups, deleteSessionHistoryBackups,
+} from '../services/history-backup-retention.js';
 
 // L4: 附件元数据 sidecar — 写入位置与 session-reader 一致。
 const ATTACHMENTS_DIR = join(homedir(), '.claude-gui', 'attachments');
@@ -50,6 +53,12 @@ const router = Router();
 
 export function sessionFile(projectHash, sessionId) {
   return join(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`);
+}
+
+// r209:会话记录根目录,与 sessionFile() 同口径、调用时才算(不在 import 时固定家目录)。
+// history-backup-retention.js 的入口一律要求显式传根目录,产品代码从这里取。
+export function projectsRoot() {
+  return join(homedir(), '.claude', 'projects');
 }
 
 // 合成 file-change 广播(说明见 ../broadcast.js)。r185 起本体在 broadcast.js(chat.js 也要用,
@@ -654,56 +663,45 @@ router.post('/sessions/:sessionId/attachments', async (req, res) => {
 /**
  * r26-G1:repair 写盘的 TOCTOU 双闸。根因:入口 409 检查到 rename 落盘之间有窗口,
  * 期间 CLI 追加的新行会被 repair 后的文件覆盖丢失。
- *   闸一(写前复查):备份写完、原子改写前,再次确认会话无在跑进程(与入口 409 同判据,
+ *   闸一(写前复查):原子改写前,再次确认会话无在跑进程(与入口 409 同判据,
  *     由调用方注入 checkRunning);
  *   闸二(mtime+size 双判):【r31 修正】stat 必须先于 readFile 拍基准 —— 旧实现先 read 再
  *     stat,「读文件期间 CLI 追加的新行」会同时抬高 read 之后的 stat 基准,而 raw 里没有它,
  *     改写前比对必通过 → 用旧内容覆盖 → 丢新行(备份也是旧内容,救不回)。先 stat 后 read,
  *     基准才是「读前快照」:读期间有写入则 now 尺寸/时间变大 → 判 stale → 放弃 repair
- *     (.bak 留着、原文件逐字不动)。
+ *     (原文件逐字不动)。
  *   不选应用层锁:CLI 直写文件不经过 JS 层锁,锁不住真正的写入方;mtime+size 双判才是
  *   对文件系统事实的判定。残余窗口(mtime 秒级粒度下同秒同尺寸写入)理论存在,判为
  *   可接受;409 语义让用户可重试。
+ * 【r209 起不自带备份】以前这里另写一份 `<file>.bak-<时刻>`(并由 gcRepairBackups 留 5 份),与调用方
+ * 刚写的 `.histbak-<时刻>-<令牌>` 内容相同、纯属冗余(卡点 1 用户选 B),已删。备份由调用方先写好:
+ * 产品代码只允许在 session-history.js 交给 runWithHistoryBackup 的改写回调里调用它(守卫单测
+ * check-r209-histbak-wrapper.mjs 钉住);会话目录里早先留下的 `.bak-<时刻>` 按 r209 的保留规则清理。
+ * 【r209 改写的内容必须与本次备份是同一份】调用方先写好备份再调它时,必须传 base = { stat, raw }:raw 是写进
+ *   备份的原文,stat 是调用方与 raw 对应的基准(读出 raw 之前拍的快照,或与之 mtime+size 相同的一次)。传了 base:
+ *   ①读到的原文与 base.raw 逐字对不上 → 判 stale、不改写(写备份那几秒里有第三方写入:按读到的内容改写,
+ *     备份里就缺这些新行);内容逐字比对,读之前的任何改动都漏不过去;
+ *   ②改写前的 mtime+size 复查以 base.stat 为基准,与 runSubmitLocked 非 repair 分支的「双闸之二」同一口径。
+ *   残余窗口与双闸之二相同:读完到复查之间 mtime 粒度内的同尺寸写入,以及复查到 rename 之间。
+ *   不传 base:自拍基准(先 stat 后 read),只保证读到的内容到改写前没被动过,不涉及任何备份。
  * 抽出为可测函数:file 任意路径(单测 /tmp 自建 jsonl,严禁碰真实 ~/.claude/projects),
  * checkRunning 注入。返回:
- *   { status:'ok', report, changed } | { status:'running' } | { status:'stale', report }
+ *   { status:'ok', report, changed } | { status:'running' } | { status:'stale', report }(①对不上时 report 为 null)
  */
-/**
- * r26-G10:repair 备份 GC。每次 repair 产 `<file>.bak-<ts>`,只增不减;成功修复后
- * 同会话的 .bak-<ts> 按名内时间戳降序保留最新 BAK_KEEP 份,其余 unlink(失败静默
- * ——GC 失败不值得让修复本身报错)。只认 `<basename>.bak-<数字>` 形态:
- * trim/strip-thinking 的 `<sid>.jsonl.bak`(无时间戳,有独立清理通道)与他会话的
- * 备份一概不碰。
- */
-export const BAK_KEEP = 5;
-export async function gcRepairBackups(file) {
-  try {
-    const dir = dirname(file);
-    const prefix = basename(file) + '.bak-';
-    const baks = (await readdir(dir))
-      .filter((n) => n.startsWith(prefix) && /^\d+$/.test(n.slice(prefix.length)))
-      .map((n) => ({ n, ts: Number(n.slice(prefix.length)) }))
-      .sort((a, b) => b.ts - a.ts);
-    for (const { n } of baks.slice(BAK_KEEP)) {
-      try { await unlink(join(dir, n)); } catch {}
-    }
-  } catch {}
-}
-
-export async function repairSessionFileGuarded(file, checkRunning) {
-  const before = await stat(file);           // r31:先拍基准(读前快照),再读,防读期间写入漏检
+export async function repairSessionFileGuarded(file, checkRunning, base = null) {
+  // r31:基准必须是读前快照(先 stat 再读,防读期间写入漏检);传了 base 就用调用方写备份时的那一个。
+  const before = base ? base.stat : await stat(file);
   const raw = await readFile(file, 'utf-8');
+  if (base && raw !== base.raw) return { status: 'stale', report: null }; // 原文件逐字未动
   const { lines, report } = repairOfficialCompat(raw.split('\n'));
   const changed = !!(report.emptyText || report.emptyThinking || report.droppedLines || report.relinked);
   if (!changed) return { status: 'ok', report, changed: false };
   if (checkRunning()) return { status: 'running' };
-  await writeFile(`${file}.bak-${Date.now()}`, raw, 'utf-8'); // 备份必须成功才动原文件
   const now = await stat(file);
   if (now.mtimeMs !== before.mtimeMs || now.size !== before.size) {
-    return { status: 'stale', report }; // .bak 留着,原文件逐字未动
+    return { status: 'stale', report }; // 原文件逐字未动
   }
   await writeJsonlAtomic(file, lines.join('\n'));
-  await gcRepairBackups(file); // r26-G10:修复成功后收敛历史 .bak-<ts>
   return { status: 'ok', report, changed: true };
 }
 
@@ -751,6 +749,9 @@ router.delete('/sessions/:sessionId', async (req, res) => {
     // R4:回滚检查点连带清理 —— 会话没了,它的快照目录(可能几十 G)必须一并清掉,
     // 否则空间永远只涨不跌。best-effort:清理失败只记日志,绝不阻断会话删除。
     await dropSessionCheckpoints(req.params.sessionId);
+    // r209:连带删掉这个会话在本目录的三种备份(.histbak-<时刻>-<令牌>、.histbak-<时刻>、.bak-<时刻>,不论新旧;
+    // .jsonl.bak 不删,会话忙的跳过)。内部吞掉一切错误、只记日志,不改变删除会话的结果与响应。
+    await dropSessionBackups(projectsRoot(), projectHash, req.params.sessionId);
     broadcastSessionFileChange(file, 'unlink'); // 文件已删,path 仍发原 jsonl 路径(客户端判据纯字符串)
     res.json({ deleted: deletedJsonl });
   } catch (err) {
@@ -794,129 +795,37 @@ router.post('/sessions/:sessionId/archive', async (req, res) => {
 });
 
 /**
- * GET /api/bak-files
- * Scan ~/.claude/projects for *.jsonl.bak (created by trim & strip-thinking),
- * pair each with its session title (first user prompt) and stats so the UI
- * can show a manual cleanup table. Orphan .bak (parent .jsonl missing) get
- * marked so the user knows they're safe to clean.
+ * r209:设置 → 高级 →「存储清理」用的三条路由,替换旧的 GET / DELETE /api/bak-files(响应从「逐个 .bak 文件」
+ * 变成「按会话汇总」,形态完全不同,沿用旧路径会让人误以为兼容)。这里只转交与回状态码;参数校验、列举、
+ * 归属判定与删除都在 services/history-backup-retention.js。与删除会话接口同一个 router,受同一套访问密码与
+ * 来源校验。全部清理与单个会话分成两条路由:客户端某处出错拼不出「全删」,必须明确请求 /all;不收请求体。
+ *   GET    /api/history-backups                          → 列表
+ *   DELETE /api/history-backups/all                      → 全部清理
+ *   DELETE /api/history-backups/:projectHash/:sessionId  → 删一个会话的(两个参数由路由按 URL 解码)
  */
-router.get('/bak-files', async (req, res) => {
-  try {
-    const projectsDir = join(homedir(), '.claude', 'projects');
-    let projectDirs;
-    try {
-      projectDirs = (await readdir(projectsDir, { withFileTypes: true }))
-        .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
-        .map((e) => e.name);
-    } catch { return res.json({ items: [], totalBytes: 0 }); }
-
-    const items = [];
-    let totalBytes = 0;
-    for (const hash of projectDirs) {
-      const dir = join(projectsDir, hash);
-      let files;
-      try { files = await readdir(dir); } catch { continue; }
-      for (const f of files) {
-        if (!f.endsWith('.jsonl.bak')) continue;
-        const sessionId = f.replace(/\.jsonl\.bak$/, '');
-        const full = join(dir, f);
-        let st;
-        try { st = await stat(full); } catch { continue; }
-        // Orphan check + title lookup (read first ~50 lines of the .bak;
-        // first record with type === 'user' carries the human prompt).
-        const jsonlPath = join(dir, `${sessionId}.jsonl`);
-        let orphan = false;
-        try { await stat(jsonlPath); } catch { orphan = true; }
-        let title = '';
-        try {
-          // Read only the head (8KB) — enough for system + first user line.
-          // Avoids loading multi-MB backups in full just to extract a title.
-          const fd = await open(full, 'r');
-          const buf = Buffer.alloc(8192);
-          const { bytesRead } = await fd.read(buf, 0, 8192, 0);
-          await fd.close();
-          const lines = buf.subarray(0, bytesRead).toString('utf-8').split('\n').slice(0, 50);
-          for (const ln of lines) {
-            if (!ln.trim()) continue;
-            try {
-              const obj = JSON.parse(ln);
-              if (obj.type === 'user' && obj.message?.content) {
-                const c = obj.message.content;
-                const text = typeof c === 'string'
-                  ? c
-                  : Array.isArray(c) ? c.find((x) => x.type === 'text')?.text || '' : '';
-                if (text) { title = text.slice(0, 80); break; }
-              }
-            } catch {}
-          }
-        } catch {}
-        totalBytes += st.size;
-        items.push({
-          projectHash: hash,
-          sessionId,
-          size: st.size,
-          mtimeMs: st.mtimeMs,
-          orphan,
-          title: title || '(无标题)',
-        });
-      }
-    }
-    items.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    res.json({ items, totalBytes });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+const histbakUnexpected = (res, code, e) => res.status(500).json({
+  ok: false, code, error: `${code === 'HISTBAK_LIST_FAILED' ? '读取会话记录目录失败' : '清理失败'}(${String(e?.code || e?.name || 'Error').replace(/[^A-Za-z0-9_-]/g, '?')})`,
 });
 
-/**
- * DELETE /api/bak-files
- * Body: { items: [{ projectHash, sessionId }, ...] } OR { all: true }
- * Removes the matching `<sid>.jsonl.bak` files. Returns count + freed bytes.
- */
-router.delete('/bak-files', async (req, res) => {
+router.get('/history-backups', async (req, res) => {
   try {
-    const { items, all } = req.body || {};
-    const { unlink } = await import('fs/promises');
-    let targets = [];
-    if (all) {
-      const projectsDir = join(homedir(), '.claude', 'projects');
-      let dirs;
-      try {
-        dirs = (await readdir(projectsDir, { withFileTypes: true }))
-          .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
-          .map((e) => e.name);
-      } catch { dirs = []; }
-      for (const hash of dirs) {
-        const dir = join(projectsDir, hash);
-        let files;
-        try { files = await readdir(dir); } catch { continue; }
-        for (const f of files) {
-          if (f.endsWith('.jsonl.bak')) {
-            targets.push({ projectHash: hash, sessionId: f.replace(/\.jsonl\.bak$/, '') });
-          }
-        }
-      }
-    } else if (Array.isArray(items)) {
-      targets = items.filter((x) => safeId(x?.projectHash) && safeId(x?.sessionId));
-    } else {
-      return res.status(400).json({ error: 'items[] or all required' });
-    }
+    const out = await listHistoryBackups(projectsRoot());
+    res.status(out.status).json(out.body);
+  } catch (e) { histbakUnexpected(res, 'HISTBAK_LIST_FAILED', e); }
+});
 
-    let deleted = 0;
-    let freedBytes = 0;
-    for (const t of targets) {
-      const file = join(homedir(), '.claude', 'projects', t.projectHash, `${t.sessionId}.jsonl.bak`);
-      try {
-        const st = await stat(file);
-        await unlink(file);
-        deleted += 1;
-        freedBytes += st.size;
-      } catch {}
-    }
-    res.json({ deleted, freedBytes });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+router.delete('/history-backups/all', async (req, res) => {
+  try {
+    const out = await deleteAllHistoryBackups(projectsRoot());
+    res.status(out.status).json(out.body);
+  } catch (e) { histbakUnexpected(res, 'HISTBAK_DELETE_FAILED', e); }
+});
+
+router.delete('/history-backups/:projectHash/:sessionId', async (req, res) => {
+  try {
+    const out = await deleteSessionHistoryBackups(projectsRoot(), req.params.projectHash, req.params.sessionId);
+    res.status(out.status).json(out.body);
+  } catch (e) { histbakUnexpected(res, 'HISTBAK_DELETE_FAILED', e); }
 });
 
 // POST /api/project/purge { cwd } — 彻底清理某项目的 Claude 本地状态。

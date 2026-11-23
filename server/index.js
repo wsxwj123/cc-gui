@@ -7,7 +7,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, mkdirSync, watch as fsWatch } from 'fs';
 import { createHash } from 'crypto';
-import sessionRoutes from './routes/sessions.js';
+import sessionRoutes, { projectsRoot } from './routes/sessions.js';
 import sessionHistoryRoutes from './routes/session-history.js';
 import chatRoutes, { getInitCommands, mergeInitCommands } from './routes/chat.js';
 import processRoutes from './routes/processes.js';
@@ -27,6 +27,7 @@ import forkRoutes from './routes/fork.js';
 import fileChangesRoutes from './routes/file-changes.js';
 import searchRoutes from './routes/search.js';
 import checkpointsRoutes, { checkpointSweepPlan, runStartupSweep } from './routes/checkpoints.js';
+import { historyBackupSweepPlan, scheduleHistoryBackupSweeps } from './services/history-backup-retention.js';
 import agentsRoutes from './routes/agents.js';
 import worktreeRoutes from './routes/worktree.js';
 import gitRoutes from './routes/git.js';
@@ -1187,6 +1188,13 @@ server.listen(PORT, HOST, () => {
     const sweep = checkpointSweepPlan(process.env);
     if (sweep.enabled) setTimeout(() => { runStartupSweep(); }, sweep.delayMs).unref();
   } catch (e) { console.error('[checkpoints] sweep 排程失败(已忽略):', e?.message || e); }
+  // r209:会话记录备份(.histbak 等)按保留规则(14 天、每会话 3 份、会话已删的连续两轮后全删)自动清理。
+  // 开始监听后过首轮延迟(默认 60 秒)跑首轮,首轮结束再过同样的延迟跑第二轮,之后每隔定时间隔(默认 1 小时)一轮。
+  // 两个环境变量只在这里读一次,之后改 process.env 不生效、也没有接口能改;定时器全部 unref,不推迟就绪、不拖住退出;
+  // 每轮内部整轮 try/catch,失败只打日志。
+  try {
+    scheduleHistoryBackupSweeps(projectsRoot(), historyBackupSweepPlan(process.env));
+  } catch (e) { console.error('[histbak] 清理排程失败(已忽略):', e?.code || e?.name || 'Error'); }
   const exposure = HOST === '127.0.0.1'
     ? ' (loopback only)'
     : hasPassword()
